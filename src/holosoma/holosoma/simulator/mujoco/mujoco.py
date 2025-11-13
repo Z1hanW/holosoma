@@ -338,17 +338,8 @@ class MuJoCo(BaseSimulator):
             cfg=gantry_cfg,
         )
 
-        # Initialize bridge system
-        if self.simulator_config.bridge.enabled:
-            try:
-                # deferred import only when required, avoids SDK dependencies
-                from holosoma.simulator.shared.simulator_bridge import SimulatorBridge  # noqa: PLC0415
-
-                self.bridge = SimulatorBridge(self, self.simulator_config.bridge)
-                logger.info("Bridge system initialized successfully")
-            except Exception as e:
-                logger.error(f"Failed to initialize bridge system: {e}")
-                raise
+        # Initialize bridge system using base class helper
+        self._init_bridge()
 
         if self.video_config.enabled:
             self.video_recorder = MuJoCoVideoRecorder(self.video_config, self)
@@ -860,9 +851,8 @@ class MuJoCo(BaseSimulator):
             # Apply virtual gantry forces before mj_step
             self.virtual_gantry.step()
 
-        if self.bridge:
-            # Step bridge for updated torques before mj_step
-            self.bridge.step()
+        # Step bridge for updated torques before mj_step using base class helper
+        self._step_bridge()
 
         mujoco.mj_step(self.root_model, self.root_data)
 
@@ -1360,6 +1350,33 @@ class MuJoCo(BaseSimulator):
         assert self.root_data is not None
         return self.root_data.time
 
+    def get_dof_forces(self, env_id: int = 0) -> torch.Tensor:
+        """Get DOF forces for a specific environment.
+
+        Returns actuator forces from MuJoCo's force sensors, providing
+        measured joint forces for bridge system sim2sim force feedback.
+
+        Parameters
+        ----------
+        env_id : int, default=0
+            Environment index (currently only supports env 0).
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor of shape [num_dof] with measured joint forces, dtype torch.float32.
+
+        Raises
+        ------
+        RuntimeError
+            If multiple environments requested (not yet supported).
+        """
+        if env_id != 0:
+            raise RuntimeError(f"MuJoCo simulator currently only supports single environment (env_id=0), got {env_id}")
+
+        assert self.root_data is not None
+        return torch.from_numpy(self.root_data.actuator_force[: self.num_dof]).float().to(self.sim_device)
+
     def _key_callback(self, keycode: int) -> None:
         """Handle keyboard input with unified command registry.
 
@@ -1458,9 +1475,13 @@ class MuJoCo(BaseSimulator):
             # Apply Newton's 3rd law: mj_contactForce() result is geom1 exerts on geom2, so geom2's
             # body gets +force, geom1's body gets -force. Note: skips bodies not in our map
             if holosoma_body1_idx is not None:
-                self.contact_forces[0, holosoma_body1_idx] -= torch.from_numpy(contact_force).float().to(self.sim_device)
+                self.contact_forces[0, holosoma_body1_idx] -= (
+                    torch.from_numpy(contact_force).float().to(self.sim_device)
+                )
             if holosoma_body2_idx is not None:
-                self.contact_forces[0, holosoma_body2_idx] += torch.from_numpy(contact_force).float().to(self.sim_device)
+                self.contact_forces[0, holosoma_body2_idx] += (
+                    torch.from_numpy(contact_force).float().to(self.sim_device)
+                )
 
     def print_mujoco_model_tree(self) -> None:
         """Print comprehensive MuJoCo model structure for debugging."""

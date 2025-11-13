@@ -790,12 +790,25 @@ class IsaacSim(BaseSimulator):
             cfg=gantry_cfg,
         )
 
+        # Initialize bridge system using base class helper
+        self._init_bridge()
+
         # Setup video recording after scene is ready
         if self.video_recorder:
             self.video_recorder.setup_recording()
 
         # Initialize robot tensors
         self.refresh_sim_tensors()
+
+        # Initialize acceleration tensors ONLY if bridge is enabled
+        if self.simulator_config.bridge.enabled:
+            logger.info("Bridge enabled: initializing acceleration computation tensors")
+            self.dof_acc = torch.zeros(self.num_envs, self.num_dof, device=self.device)
+            self.prev_dof_vel = torch.zeros(self.num_envs, self.num_dof, device=self.device)
+            self.base_linear_acc = torch.zeros(self.num_envs, 3, device=self.device)
+            self.prev_base_lin_vel = torch.zeros(self.num_envs, 3, device=self.device)
+        else:
+            logger.debug("Bridge disabled: skipping acceleration computation tensors")
 
     @property
     def dof_state(self):
@@ -851,21 +864,37 @@ class IsaacSim(BaseSimulator):
         if self.virtual_gantry:
             self.virtual_gantry.step()
 
+        # Step bridge for updated torques before physics step using base class helper
+        self._step_bridge()
+
         self.scene.write_data_to_sim()
 
         # simulate
         self.sim.step(render=False)
-        # render between steps only if the GUI or an RTX sensor needs it
+
+        # Render between steps only IF the GUI or sensor need it
         # note: we assume the render interval to be the shortest accepted rendering interval.
         #    If a camera needs rendering at a faster frequency, this will lead to unexpected behavior.
         if self._sim_step_counter % self.simulator_config.sim.render_interval == 0 and is_rendering:
-            self.sim.render()
+            self.render()
+
         # update buffers at sim
         self.scene.update(dt=1.0 / self.simulator_config.sim.fps)
 
         # Need to update these tensors after each step, since they are used in `_apply_force_in_physics_step`
         self.dof_pos = self._robot.data.joint_pos[:, self.dof_ids]  # (num_envs, num_dof)
         self.dof_vel = self._robot.data.joint_vel[:, self.dof_ids]
+
+        # Update accelerations ONLY if bridge is enabled
+        if self.simulator_config.bridge.enabled:
+            # Update DOF acceleration using numerical differentiation
+            self.dof_acc = (self.dof_vel - self.prev_dof_vel) / self.sim_dt
+            self.prev_dof_vel = self.dof_vel.clone()
+
+            # Update base linear acceleration using numerical differentiation
+            current_base_vel = self.robot_root_states[:, 7:10]
+            self.base_linear_acc = (current_base_vel - self.prev_base_lin_vel) / self.sim_dt
+            self.prev_base_lin_vel = current_base_vel.clone()
 
         # Call video recorder capture frame if recording is active
         if self.video_recorder:
@@ -997,6 +1026,7 @@ class IsaacSim(BaseSimulator):
             logger.warning(f"Could not initialize keyboard controls: {e}")
 
     def render(self, sync_frame_time=True):
+        self.sim.render()
         if self.debug_viz_enabled:
             self.clear_lines()
             self.draw_debug_viz()
@@ -1244,6 +1274,46 @@ class IsaacSim(BaseSimulator):
     def _write_object_state_unified(self, object_name: str, states: torch.Tensor, env_ids: torch.Tensor):
         """Write object states for any object type - delegates to state adapter."""
         self._state_adapter.write_object_states(object_name, states, env_ids)
+
+    def time(self) -> float:
+        """Get current simulation time.
+
+        Returns:
+            float: Current simulation time in seconds
+        """
+        return self.sim.current_time
+
+    def get_dof_forces(self, env_id: int = 0):
+        """Get DOF forces for a specific environment.
+
+        This method provides access to measured joint forces. For IsaacSim,
+        joint forces are computed from applied torques since direct force
+        sensing is not available in the same way as IsaacGym.
+
+        Args:
+            env_id: Environment index (default: 0)
+
+        Returns:
+            torch.Tensor: Tensor of shape [num_dof] with computed joint forces
+
+        Note:
+            IsaacSim doesn't have the same DOF force sensor infrastructure as IsaacGym.
+            This implementation returns the applied torques as an approximation.
+            For actual force sensing, consider using contact sensors or force/torque sensors.
+        """
+        # IsaacSim doesn't have direct DOF force sensors like IsaacGym
+        # Return the applied torques (which are the commanded forces)
+        # This matches the bridge's usage pattern where forces are used for feedback
+        if not hasattr(self._robot, "data") or not hasattr(self._robot.data, "applied_torque"):
+            logger.warning(
+                "DOF forces not directly available in IsaacSim. "
+                "Returning zeros. For force feedback, the bridge will use commanded torques."
+            )
+            return torch.zeros(self.num_dof, device=self.device)
+
+        # Get applied torques which represent the forces being applied to joints
+        applied_torques = self._robot.data.applied_torque[env_id, self.dof_ids]
+        return applied_torques
 
     def write_state_updates(self):
         """See base class.

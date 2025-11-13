@@ -118,6 +118,10 @@ class IsaacGym(BaseSimulator):
         self.gym = gymapi.acquire_gym()
 
         sim_device_type, self.sim_device_id = gymutil.parse_device_str(str(self.sim_device))
+        if sim_device_type == "cpu":
+            # Force CPU
+            self.sim_params.use_gpu_pipeline = False
+            self.sim_params.physx.use_gpu = False
 
         # env device is GPU only if sim is on GPU and use_gpu_pipeline=True,
         # otherwise returned tensors are copied to CPU by physX.
@@ -352,6 +356,9 @@ class IsaacGym(BaseSimulator):
             attachment_body_names=gantry_cfg.attachment_body_names,
             cfg=gantry_cfg,
         )
+
+        # Initialize bridge system using base class helper
+        self._init_bridge()
 
         if self.video_recorder:
             self.video_recorder.setup_recording()
@@ -618,7 +625,7 @@ class IsaacGym(BaseSimulator):
             ..., 0, :
         ]
 
-        self.base_quat = self.robot_root_states[..., 3:7]  # isaacgym uses xyzws
+        self.base_quat = self.robot_root_states[..., 3:7]  # isaacgym uses xyzw
 
         self.dof_state = gymtorch.wrap_tensor(dof_state_tensor)
         self.dof_pos = self.dof_state.view(self.num_envs, -1, 2)[..., 0]
@@ -632,6 +639,13 @@ class IsaacGym(BaseSimulator):
         )
         # (num_envs, history_length, num_bodies, xyz axis), the first index is the most recent
         self.contact_forces_history[:, 0, :, :] = self.contact_forces.clone()  # deep copy
+
+        # Initialize acceleration tensors ONLY if bridge is enabled
+        if self.simulator_config.bridge.enabled:
+            self.dof_acc = torch.zeros(self.num_envs, self.num_dof, device=self.device)
+            self.prev_dof_vel = torch.zeros(self.num_envs, self.num_dof, device=self.device)
+            self.base_linear_acc = torch.zeros(self.num_envs, 3, device=self.device)
+            self.prev_base_lin_vel = torch.zeros(self.num_envs, 3, device=self.device)
 
     def refresh_sim_tensors(self):
         self.gym.refresh_dof_state_tensor(self.sim)
@@ -678,6 +692,9 @@ class IsaacGym(BaseSimulator):
         if self.virtual_gantry:
             self.virtual_gantry.step()
 
+        # Step bridge for updated torques before physics step using base class helper
+        self._step_bridge()
+
         self.gym.simulate(self.sim)
 
         if self.sim_device == "cpu":
@@ -688,6 +705,17 @@ class IsaacGym(BaseSimulator):
             self.capture_video_frame()
 
         self.gym.refresh_dof_state_tensor(self.sim)
+
+        # Update accelerations ONLY if bridge is enabled
+        if self.simulator_config.bridge.enabled:
+            # Update DOF acceleration using numerical differentiation
+            self.dof_acc = (self.dof_vel - self.prev_dof_vel) / self.sim_dt
+            self.prev_dof_vel = self.dof_vel.clone()
+
+            # Update base linear acceleration using numerical differentiation
+            current_base_vel = self.robot_root_states[..., 7:10]
+            self.base_linear_acc = (current_base_vel - self.prev_base_lin_vel) / self.sim_dt
+            self.prev_base_lin_vel = current_base_vel.clone()
 
         # refresh force sensor tensor at each physics step (0.005s)
         self.gym.refresh_force_sensor_tensor(self.sim)
@@ -849,6 +877,37 @@ class IsaacGym(BaseSimulator):
         if self.debug_viz_enabled:
             self.clear_lines()
             self.draw_debug_viz()
+
+    def time(self) -> float:
+        """Get current simulation time.
+
+        Returns:
+            float: Current simulation time in seconds
+        """
+        return self.gym.get_sim_time(self.sim)
+
+    def get_dof_forces(self, env_id: int = 0):
+        """Get DOF forces for a specific environment.
+
+        This method provides access to measured joint forces from DOF force sensors.
+        The sensors must be enabled via `enable_dof_force_sensors` in the configuration.
+
+        Args:
+            env_id: Environment index (default: 0)
+
+        Returns:
+            torch.Tensor: Tensor of shape [num_dof] with measured joint forces
+
+        Raises:
+            RuntimeError: If DOF force sensors are not enabled or forces not available
+        """
+        if not hasattr(self, "dof_forces"):
+            raise RuntimeError(
+                "DOF forces not available. Ensure 'enable_dof_force_sensors' is set to True "
+                "in simulator.sim.physx configuration"
+            )
+
+        return self.dof_forces[env_id]
 
     def next_task(self):
         pass

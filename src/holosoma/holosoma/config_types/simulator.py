@@ -428,6 +428,9 @@ class SimulatorInitConfig:
     sim: SimEngineConfig
     """Simulation engine configuration settings."""
 
+    debug_viz: bool = True
+    """Enable debug visualization (gantry lines, etc.)."""
+
     scene: SceneConfig = field(default_factory=SceneConfig)
     """Scene composition and asset configuration."""
 

@@ -4,6 +4,8 @@ import dataclasses
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from loguru import logger
+
 from holosoma.config_types.experiment import TrainingConfig
 from holosoma.config_types.full_sim import FullSimConfig
 from holosoma.config_types.robot import RobotConfig
@@ -146,6 +148,7 @@ class BaseSimulator:
         self.video_config = tyro_config.logger.video
         self.sim_device = device
         self.headless = False
+        self.debug_viz_enabled = self.simulator_config.debug_viz
         self.object_registry = ObjectRegistry(device)
         self.bridge: SimulatorBridge | None = None
 
@@ -154,6 +157,9 @@ class BaseSimulator:
 
         # Video recording system
         self.video_recorder: VideoRecorderInterface | None = None
+
+        # Bridge system
+        self.bridge: SimulatorBridge | None = None
 
         # To be overridden by subclasses
         self.height_samples = None
@@ -364,8 +370,75 @@ class BaseSimulator:
         """
         raise NotImplementedError("The 'time' method must be implemented in subclasses.")
 
+    def get_dof_forces(self, env_id: int = 0) -> torch.Tensor:
+        """Get DOF forces for a specific environment (simulator-agnostic interface).
+
+        This method provides a unified interface for accessing joint forces across
+        all simulators. Used by the bridge system for sim2sim force feedback.
+
+        Parameters
+        ----------
+        env_id : int, default=0
+            Environment index to query forces for.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor of shape [num_dof] with measured joint forces, dtype torch.float32.
+
+        Raises
+        ------
+        NotImplementedError
+            If not implemented by subclass.
+        RuntimeError
+            If DOF force sensors are not enabled or forces not available.
+
+        See Also
+        --------
+        BasicSdk2Bridge._get_actuator_forces : Uses this method for bridge force feedback
+        """
+        raise NotImplementedError("The 'get_dof_forces' method must be implemented in subclasses.")
+
     def draw_debug_viz(self):
         pass
+
+    # ----- Bridge System Helper Methods -----
+
+    def _init_bridge(self) -> None:
+        """Initialize bridge system if enabled.
+
+        Should be called by subclasses after robot assets are loaded
+        and before simulation starts. Uses conditional import to avoid
+        SDK dependencies when bridge is disabled.
+
+        Raises
+        ------
+        Exception
+            If bridge initialization fails
+        """
+        if not self.simulator_config.bridge.enabled:
+            logger.info("Robot bridge disabled")
+            return
+
+        try:
+            # Conditional import to avoid SDK dependencies
+            from holosoma.simulator.shared.simulator_bridge import SimulatorBridge  # noqa: PLC0415 -- deferred
+
+            self.bridge = SimulatorBridge(self, self.simulator_config.bridge)
+            logger.info("Bridge system initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize bridge system: {e}")
+            raise
+
+    def _step_bridge(self) -> None:
+        """Step bridge system if enabled.
+
+        Should be called by subclasses during each physics step,
+        typically before physics simulation. Handles bridge state
+        publishing and command processing.
+        """
+        if self.bridge is not None:
+            self.bridge.step()
 
     # ----- Video Recording Interface -----
     def on_episode_start(self, env_id: int = 0) -> None:

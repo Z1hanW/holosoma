@@ -8,19 +8,18 @@ development and running sim2sim inference.
 
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import dataclass, field
 
 import tyro
 from typing_extensions import Annotated
 
 import holosoma.config_values.robot
-import holosoma.config_values.simulator
+import holosoma.config_values.run_sim
 import holosoma.config_values.terrain
 from holosoma.config_types.experiment import TrainingConfig
 from holosoma.config_types.logger import DisabledLoggerConfig, LoggerConfig
 from holosoma.config_types.robot import RobotConfig
-from holosoma.config_types.simulator import BridgeConfig, SimulatorConfig, VirtualGantryCfg
+from holosoma.config_types.simulator import SimulatorConfig
 from holosoma.config_types.terrain import TerrainManagerCfg
 from holosoma.config_types.video import VideoConfig
 
@@ -35,26 +34,8 @@ def default_logger_config() -> LoggerConfig:
     return DisabledLoggerConfig(video=VideoConfig(enabled=False), base_dir="logs")
 
 
-def sim2sim_defaults(config: SimulatorConfig) -> SimulatorConfig:
-    """Enable bridge and virtual gantry for run_sim.py usage."""
-    return dataclasses.replace(
-        config,
-        config=dataclasses.replace(
-            config.config,
-            bridge=BridgeConfig(enabled=True),
-            virtual_gantry=VirtualGantryCfg(enabled=True),
-            sim=dataclasses.replace(
-                config.config.sim,
-                fps=1000,  # High FPS for sim2sim
-            ),
-        ),
-    )
-
-
-# Create local bridge-enabled configs for subcommand system
-SIMULATOR_DEFAULTS = {
-    name: sim2sim_defaults(config) for name, config in holosoma.config_values.simulator.DEFAULTS.items()
-}
+# Use sim2sim-optimized configs from config_values.run_sim
+SIMULATOR_DEFAULTS = holosoma.config_values.run_sim.DEFAULTS
 
 
 @dataclass(frozen=True)
@@ -71,7 +52,7 @@ class RunSimConfig:
     simulator: Annotated[
         SimulatorConfig,
         tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(SIMULATOR_DEFAULTS)),
-    ] = sim2sim_defaults(holosoma.config_values.simulator.mujoco)  # noqa: RUF009
+    ] = holosoma.config_values.run_sim.mujoco
 
     robot: Annotated[
         RobotConfig,
@@ -98,9 +79,5 @@ class RunSimConfig:
     """
 
     device: str | None = "cpu"
-    """Device to use for simulation. If None, auto-detects CUDA availability.
-
-    - None: Auto-detect (uses cuda:0 if available, otherwise cpu)
-    - "cpu": Force CPU usage
-    - "cuda:0", "cuda:1", etc.: Use specific GPU
+    """Device to use for simulation. None auto-detects based on the simulator type.
     """

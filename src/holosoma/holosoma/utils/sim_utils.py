@@ -18,12 +18,12 @@ from loguru import logger
 from typing_extensions import Self
 
 from holosoma.config_types.env import get_tyro_env_config
-from holosoma.utils.helpers import get_class
 from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.config_types.full_sim import FullSimConfig
 from holosoma.config_types.run_sim import RunSimConfig
 from holosoma.managers.terrain.manager import TerrainManager
 from holosoma.utils.common import seeding
+from holosoma.utils.helpers import get_class
 from holosoma.utils.rate import RateLimiter
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.simulator_config import SimulatorType, get_simulator_type, set_simulator_type
@@ -54,13 +54,15 @@ def setup_simulator_imports(config: ExperimentConfig | RunSimConfig) -> None:
     # IsaacSim imports handled in setup_isaaclab_launcher
 
 
-def setup_isaaclab_launcher(config: ExperimentConfig | RunSimConfig) -> Any | None:
+def setup_isaaclab_launcher(config: ExperimentConfig | RunSimConfig, device: str | None = None) -> Any | None:
     """Handle IsaacSim-specific launcher setup.
 
     Parameters
     ----------
-    config : ExperimentConfig
+    config : ExperimentConfig | RunSimConfig
         Configuration containing simulator and training settings.
+    device : str
+        Resolved device string (e.g., 'cuda:0', 'cpu').
 
     Returns
     -------
@@ -88,6 +90,11 @@ def setup_isaaclab_launcher(config: ExperimentConfig | RunSimConfig) -> Any | No
     if int(os.environ.get("WORLD_SIZE", "1")) > 1:
         # Distribute simulator across GPUs when using multi-gpu training
         args_cli.device = f"cuda:{int(os.environ.get('LOCAL_RANK', '0'))}"
+    elif device is not None:
+        # Use the resolved device
+        args_cli.device = device
+    else:  # AppLauncher auto-detects
+        pass
 
     # Check if video recording is enabled and add --enable_cameras flag
     video_enabled = config.logger.video.enabled or config.logger.headless_recording
@@ -193,15 +200,15 @@ def setup_simulation_environment(
     # Setup simulator imports
     setup_simulator_imports(config)
 
-    # Handle IsaacSim launcher if needed (for both ExperimentConfig and RunSimConfig)
-    simulation_app = None
-    if get_simulator_type() == SimulatorType.ISAACSIM:
-        simulation_app = setup_isaaclab_launcher(config)
-
-    # Device selection
+    # Device selection - must happen before IsaacSim launcher setup
     if device is None:
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
     logger.info(f"Device: {device}")
+
+    # Handle IsaacSim launcher if needed (for both ExperimentConfig and RunSimConfig)
+    simulation_app = None
+    if get_simulator_type() == SimulatorType.ISAACSIM:
+        simulation_app = setup_isaaclab_launcher(config, device)
 
     # Set random seed if specified (only for ExperimentConfig)
     if isinstance(config, ExperimentConfig) and config.training.seed is not None:
@@ -385,9 +392,6 @@ class DirectSimulation:
         self.simulator.setup()
         logger.debug("simulator.setup() completed")
 
-        # For now, always render debug for the gantry (not a config param yet)
-        self.simulator.debug_viz_enabled = True
-
         # Step 2: Setup terrain
         self.simulator.setup_terrain()
         logger.debug("simulator.setup_terrain() completed")
@@ -446,8 +450,9 @@ class DirectSimulation:
         logger.info("Press Ctrl+C to stop simulation")
 
         # Determine refresh strategy based on simulator type
-        # IsaacGym/IsaacSim: need pre-step refresh (read sim → tensors)
-        # MuJoCo: no pre-step refresh needed because we are not running an env/task that require tensor access
+        # IsaacGym/IsaacSim: need pre-step to refresh tensors to sync simulator state
+        # MuJoCo: no pre-step refresh needed because we are NOT running an envs/tasks requiring
+        #         those tensors e.g, _rigid_body_rot, _rigid_body_vel, etc.
         simulator_type = get_simulator_type()
         if simulator_type in [SimulatorType.ISAACGYM, SimulatorType.ISAACSIM]:
             pre_step_refresh = self.simulator.refresh_sim_tensors

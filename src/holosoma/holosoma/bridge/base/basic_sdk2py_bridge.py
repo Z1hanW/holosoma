@@ -67,20 +67,32 @@ class BasicSdk2Bridge(ABC):
         if hasattr(self, "low_cmd") and self.low_cmd:
             motor_cmd = list(self.low_cmd.motor_cmd)
             try:
-                for i in range(self.num_motor):
-                    # Use ground truth data
-                    # FIXME: assumes DOF joint ordering and indexing
-                    q_actual = self.simulator.root_data.qpos[7 + i]  # Skip 7 DOF for floating base
-                    dq_actual = self.simulator.root_data.qvel[6 + i]  # Skip 6 DOF for floating base
+                # Keep as torch tensors (no early conversion)
+                q_actual = self.simulator.dof_pos[0]
+                dq_actual = self.simulator.dof_vel[0]
 
-                    # PD control calculation
-                    torque_feedforward = motor_cmd[i].tau
-                    torque_position = motor_cmd[i].kp * (motor_cmd[i].q - q_actual)
-                    torque_velocity = motor_cmd[i].kd * (motor_cmd[i].dq - dq_actual)
+                # Extract motor parameters into torch tensors
+                device = q_actual.device
+                tau = torch.tensor(
+                    [motor_cmd[i].tau for i in range(self.num_motor)], device=device, dtype=q_actual.dtype
+                )
+                kp = torch.tensor([motor_cmd[i].kp for i in range(self.num_motor)], device=device, dtype=q_actual.dtype)
+                kd = torch.tensor([motor_cmd[i].kd for i in range(self.num_motor)], device=device, dtype=q_actual.dtype)
+                q_desired = torch.tensor(
+                    [motor_cmd[i].q for i in range(self.num_motor)], device=device, dtype=q_actual.dtype
+                )
+                dq_desired = torch.tensor(
+                    [motor_cmd[i].dq for i in range(self.num_motor)], device=device, dtype=q_actual.dtype
+                )
 
-                    self.torques[i] = torque_feedforward + torque_position + torque_velocity
+                # Vectorized PD control in torch
+                torques = tau + kp * (q_desired - q_actual) + kd * (dq_desired - dq_actual)
+
+                # Convert to numpy only at the end
+                self.torques = torques.detach().cpu().numpy()
+
             except Exception as e:
-                logger.error(f"Joint {i} not found in motor_cmd: {e}")
+                logger.error(f"Error computing torques: {e}")
                 raise
 
         # Apply torque limits
@@ -237,18 +249,17 @@ class BasicSdk2Bridge(ABC):
         positions = self.simulator.dof_pos[0].detach().cpu().numpy()
         velocities = self.simulator.dof_vel[0].detach().cpu().numpy()
 
-        if not hasattr(self.simulator, "dof_acc"):  # Mujoco-only
-            raise NotImplementedError(f"dof_acc not implemented for {type(self.simulator).__name__}")
+        if not hasattr(self.simulator, "dof_acc"):
+            raise RuntimeError("DOF acceleration not available (is the bridge enabled?)")
 
         accelerations = self.simulator.dof_acc[0].detach().cpu().numpy()
+
         return positions, velocities, accelerations
 
     @property
     def sim_time(self):
         """Get the simulation time."""
-        if not hasattr(self.simulator, "root_data"):
-            raise NotImplementedError(f"Time access not implemented for {type(self.simulator).__name__}")
-        return self.simulator.root_data.time
+        return self.simulator.time()
 
     def _get_actuator_forces(self):
         """Get actuator forces (simulator-agnostic).
@@ -256,10 +267,10 @@ class BasicSdk2Bridge(ABC):
         Returns:
             numpy.ndarray: Actuator forces
         """
-        if not hasattr(self.simulator, "root_data"):
-            raise NotImplementedError(f"Actuator force access not implemented for {type(self.simulator).__name__}")
-
-        return self.simulator.root_data.actuator_force[: self.num_motor]
+        # Bridge operates on env 0 by default
+        env_id = getattr(self, "env_id", 0)
+        forces = self.simulator.get_dof_forces(env_id)
+        return forces[: self.num_motor].detach().cpu().numpy()
 
     def _get_base_imu_data(self):
         """Get base IMU data: quaternion, angular velocity, linear acceleration (simulator-agnostic).
@@ -270,20 +281,17 @@ class BasicSdk2Bridge(ABC):
                 - gyro: angular velocity [wx, wy, wz] (3 elements)
                 - acceleration: linear acceleration [ax, ay, az] (3 elements)
         """
+        quat_holosoma = self.simulator.robot_root_states[0, 3:7]  # [x, y, z, w]
+        gyro = self.simulator.robot_root_states[0, 10:13]  # Angular velocity
 
-        # Check simulator support, could move to init() for performance if need be.
-        supported = (
-            hasattr(self.simulator, "base_quat")
-            or hasattr(self.simulator, "base_angular_vel")
-            or hasattr(self.simulator, "base_linear_acc")
-        )
-
-        if not supported:
-            raise NotImplementedError(f"'IMU data not implemented for {type(self.simulator).__name__}")
-
-        quat_holosoma = self.simulator.base_quat[0]  # [x, y, z, w]
-        gyro = self.simulator.base_angular_vel[0]
-        acceleration = self.simulator.base_linear_acc[0]
+        if not hasattr(self.simulator, "base_linear_acc"):
+            logger.warning(
+                "Base linear acceleration not available (bridge may be disabled in config). "
+                "Returning zero acceleration."
+            )
+            acceleration = torch.zeros(3, device=quat_holosoma.device)
+        else:
+            acceleration = self.simulator.base_linear_acc[0]
 
         # Convert quaternion: holosoma [x, y, z, w] -> bridge SDK [w, x, y, z]
         quaternion = torch.stack([quat_holosoma[3], quat_holosoma[0], quat_holosoma[1], quat_holosoma[2]])
@@ -291,7 +299,7 @@ class BasicSdk2Bridge(ABC):
         return quaternion, gyro, acceleration
 
     def _get_sensor_data(self):
-        """Get sensor data (simulator-agnostic).
+        """Get sensor data (Mujoco-only).
 
         Returns:
             numpy.ndarray: Raw sensor data array

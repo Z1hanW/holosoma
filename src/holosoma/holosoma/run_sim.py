@@ -6,6 +6,7 @@ This script provides a direct simulation runner for holosoma with bridge support
 or evaluation environments.
 """
 
+import dataclasses
 import sys
 import traceback
 
@@ -29,6 +30,8 @@ def run_simulation(config: RunSimConfig):
     config : RunSimConfig
         Configuration containing all simulation settings.
     """
+    config = dataclasses.replace(config, device=config.device)
+
     logger.info("Starting Holosoma Direct Simulation...")
     logger.info(f"Robot: {config.robot.asset.robot_type}")
     logger.info(f"Simulator: {config.simulator._target_}")

@@ -134,8 +134,6 @@ class VirtualGantry:
         else:
             raise ValueError(f"Unsupported simulator type: {simtype}")
 
-        logger.info(f"Virtual gantry configured for {simtype} simulator")
-
     @property
     def enabled(self) -> bool:
         """Whether the virtual gantry is currently enabled.
@@ -160,6 +158,8 @@ class VirtualGantry:
         RuntimeError
             If trying to enable gantry with multiple environments (not supported).
         """
+        # Store previous state to detect transitions
+        was_enabled = self._enabled
 
         self._enabled = enable if enable is not None else not self._enabled
 
@@ -167,6 +167,11 @@ class VirtualGantry:
         if self.enabled and self.sim.num_envs != 1:
             # ...supporting only the sim2sim use case for now
             raise RuntimeError("Virtual gantry supports num_envs=1 only")
+
+        # Clear forces only when DISABLING (transitioning from enabled to disabled)
+        # Don't clear during initialization when starting disabled
+        if was_enabled and not self._enabled and get_simulator_type() is SimulatorType.ISAACSIM:
+            self._clear_forces_isaacsim()
 
     def set_position_to_robot(self) -> None:
         """Reset gantry anchor point to current robot position.
@@ -322,68 +327,99 @@ class VirtualGantry:
     def _apply_force_isaacgym(self, link_id: int, force: npt.NDArray[np.float64]) -> None:
         """Apply force to rigid body in IsaacGym simulator.
 
+        Applies force directly to the body's center of mass (similar to MuJoCo's approach).
+        This provides simpler, more consistent behavior across simulators.
+
         Parameters
         ----------
         link_id : int
             Index of the rigid body to apply force to.
         force : npt.NDArray[np.float64]
             3D force vector [fx, fy, fz] to apply.
-
-        Raises
-        ------
-        RuntimeError
-            If rigid body position data is not available.
         """
-        force_tensor = torch.zeros(self.sim.num_envs, self.sim.num_bodies, 3, device=self.sim.device)
-        pos_tensor = torch.zeros(self.sim.num_envs, self.sim.num_bodies, 3, device=self.sim.device)
+        from isaacgym import gymapi, gymtorch  # noqa: PLC0415
 
+        force_tensor = torch.zeros(self.sim.num_envs, self.sim.num_bodies, 3, device=self.sim.device)
         force_tensor[:, link_id, :] = torch.tensor(force, device=self.sim.device, dtype=torch.float32)
 
-        # Get body position for force application point
-        if hasattr(self.sim, "_rigid_body_pos") and self.sim._rigid_body_pos is not None:
-            pos_tensor[:, link_id, :] = self.sim._rigid_body_pos[:, link_id, :]
-        else:
-            raise RuntimeError("Cannot get rigid body position for IsaacGym force application")
-
-        self.sim.apply_rigid_body_force_at_pos_tensor(force_tensor, pos_tensor)
+        # Apply force directly at center of mass (matches MuJoCo behavior)
+        # No torques applied (None), using ENV_SPACE coordinate frame
+        self.sim.gym.apply_rigid_body_force_tensors(
+            self.sim.sim, gymtorch.unwrap_tensor(force_tensor), None, gymapi.ENV_SPACE
+        )
 
     def _apply_force_isaacsim(self, link_id: int, force: npt.NDArray[np.float64]) -> None:
         """Apply force to rigid body in IsaacSim simulator using IsaacLab API.
 
+        Transforms forces from world frame to body-local frame since IsaacLab 2.1
+        applies forces in local frame (is_global=False is hardcoded). This ensures
+        the gantry forces are applied correctly regardless of body orientation.
+
         Parameters
         ----------
         link_id : int
             Index of the rigid body to apply force to.
         force : npt.NDArray[np.float64]
-            3D force vector [fx, fy, fz] to apply.
+            3D force vector [fx, fy, fz] in world frame to apply.
 
         Raises
         ------
         RuntimeError
             If link_id is invalid or body mapping fails.
         """
-        # Convert force to tensor
-        if hasattr(force, "shape"):  # numpy array
-            force_tensor = torch.from_numpy(force).float().to(self.sim.sim_device)
-        else:  # list or other iterable
-            force_tensor = torch.tensor(force, device=self.sim.sim_device, dtype=torch.float32)
-
-        # Validate and map body index
+        # Validate body index
         if link_id >= len(self.sim.body_ids):
             raise RuntimeError(f"Invalid link_id {link_id}, must be < {len(self.sim.body_ids)}")
 
+        # Map body index
         isaac_body_id = self.sim.body_ids[link_id]
 
-        # Create proper tensor shapes for IsaacLab: [num_envs, num_selected_bodies, 3]
-        forces = force_tensor.unsqueeze(0).unsqueeze(0)  # [1, 1, 3]
+        # Get body orientation to transform force from world to body frame
+        # IsaacLab applies forces in local frame (is_global=False hardcoded in 2.1)
+        body_quat_w = self.sim._robot.data.body_quat_w[0, isaac_body_id]  # [w,x,y,z] format
+
+        # Transform force from world frame to body frame
+        from isaaclab.utils.math import quat_rotate_inverse  # noqa: PLC0415
+
+        force_world = torch.from_numpy(force).float().to(self.sim.sim_device)
+        force_body = quat_rotate_inverse(body_quat_w, force_world)
+
+        # Create force tensor for this body only
+        forces = force_body.unsqueeze(0).unsqueeze(0)  # [1, 1, 3]
         torques = torch.zeros_like(forces)  # [1, 1, 3] - no torques
 
-        # TODO: Check if this is working as we expect, body_ids might be buggy?
         self.sim._robot.set_external_force_and_torque(
             forces=forces,
             torques=torques,
-            env_ids=torch.tensor([0], device=self.sim.sim_device),  # Only env 0
-            body_ids=torch.tensor([isaac_body_id], device=self.sim.sim_device),  # Target body
+            env_ids=torch.tensor([0], device=self.sim.sim_device),
+            body_ids=torch.tensor([isaac_body_id], device=self.sim.sim_device),
+            # FIXME: use is_global=True when upgrading IsaacSim/Lab
+        )
+
+    def _clear_forces_isaacsim(self) -> None:
+        """Clear external forces in IsaacSim by setting zero forces.
+
+        Sets zero force/torque values for the specific body that had forces applied.
+        This properly clears the forces without causing shape mismatch errors that
+        occur when using empty tensors.
+        """
+        # Validate body index
+        if self.body_link_id >= len(self.sim.body_ids):
+            return  # Body no longer exists, nothing to clear
+
+        # Map body index
+        isaac_body_id = self.sim.body_ids[self.body_link_id]
+
+        # Create zero force/torque tensors with proper shape [1, 1, 3]
+        zero_forces = torch.zeros(1, 1, 3, device=self.sim.sim_device)
+        zero_torques = torch.zeros(1, 1, 3, device=self.sim.sim_device)
+
+        # Clear forces by setting them to zero for this specific body
+        self.sim._robot.set_external_force_and_torque(
+            forces=zero_forces,
+            torques=zero_torques,
+            env_ids=torch.tensor([0], device=self.sim.sim_device),
+            body_ids=torch.tensor([isaac_body_id], device=self.sim.sim_device),
         )
 
 

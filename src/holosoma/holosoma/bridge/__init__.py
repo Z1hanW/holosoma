@@ -1,6 +1,4 @@
 from .base import BasicSdk2Bridge
-from .booster import BoosterSdk2Bridge
-from .unitree import UnitreeSdk2Bridge
 
 
 def create_sdk2py_bridge(simulator, robot_config, bridge_config, lcm=None):
@@ -24,11 +22,15 @@ def create_sdk2py_bridge(simulator, robot_config, bridge_config, lcm=None):
     sdk_type = robot_config.bridge.sdk_type
 
     if sdk_type == "unitree":
+        from .unitree import UnitreeSdk2Bridge  # noqa: PLC0415 -- deferred
+
         return UnitreeSdk2Bridge(simulator, robot_config, bridge_config, lcm)
     if sdk_type == "booster":
+        from .booster import BoosterSdk2Bridge  # noqa: PLC0415 -- deferred
+
         return BoosterSdk2Bridge(simulator, robot_config, bridge_config, lcm)
     if sdk_type == "ros2":
-        from .ros2 import ROS2Bridge  # noqa: PLC0415
+        from .ros2 import ROS2Bridge  # noqa: PLC0415 -- deferred
 
         return ROS2Bridge(simulator, robot_config, bridge_config, lcm)
     raise ValueError(f"Unsupported SDK type: {sdk_type}")

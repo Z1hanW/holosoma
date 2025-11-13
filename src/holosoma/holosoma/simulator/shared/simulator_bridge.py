@@ -15,6 +15,7 @@ from loguru import logger
 from holosoma.bridge import BasicSdk2Bridge, create_sdk2py_bridge
 from holosoma.config_types.simulator import BridgeConfig
 from holosoma.utils.clock import ClockPub
+from holosoma.utils.safe_torch_import import torch
 
 if TYPE_CHECKING:
     from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
@@ -130,12 +131,16 @@ class SimulatorBridge:
         # Compute torques based on received commands
         self.robot_bridge.compute_torques()
 
-        # Apply torques to simulator -- Mujoco-specific for now
-        if hasattr(self.simulator, "root_data") and hasattr(self.robot_bridge, "torques"):
-            self.simulator.root_data.ctrl = self.robot_bridge.torques
+        # Apply torques to simulator
+        # (for now: convert to/from tensor for unified interface, which is unnecessary for mujoco...)
+        torques_tensor = torch.from_numpy(self.robot_bridge.torques).to(
+            device=self.simulator.device, dtype=torch.float32
+        )
+        self.simulator.apply_torques_at_dof(torques_tensor)
 
         # Publish simulation clock for e.g, WBT policies
-        self.clock_pub.publish(self.simulator.time())
+        sim_time = self.simulator.time()
+        self.clock_pub.publish(sim_time)
 
     def is_enabled(self) -> bool:
         """Check if the bridge is enabled and functional.
