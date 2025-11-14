@@ -35,6 +35,7 @@ setup(
     packages=find_packages(),
     python_requires=">=3.8",
     install_requires=[
+        "pydantic",
         "loguru",
         "netifaces",
         "onnxruntime",
@@ -43,6 +44,7 @@ setup(
         "termcolor",
         "pyyaml",
         "tyro>=0.10.0a4",
+        "wandb",
         "zmq",
     ],
     extras_require={

@@ -1,13 +1,13 @@
 #!/bin/bash
 
-# Build the Docker image using the FAR-FALCON directory as context
+# Build the Docker image using the FAR-Holosoma directory as context
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )" # FAR-FALCON/holosoma_inference/docker
-ROOT_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")" # FAR-FALCON
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )" # FAR-Holosoma/src/holosoma_inference/docker
+SRC_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")" # FAR-Holosoma/src
 
 ECR_REPO="241533154612.dkr.ecr.us-east-1.amazonaws.com"
 
-cmd="docker build "$ROOT_DIR" -f "$SCRIPT_DIR/Dockerfile" -t "$ECR_REPO/humanoid-onboard""
+cmd="docker build "$SRC_DIR" -f "$SCRIPT_DIR/Dockerfile" -t "$ECR_REPO/humanoid-onboard""
 echo $cmd
 eval $cmd
 
