@@ -110,7 +110,7 @@ python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29d
 3. Control the robot:
 
 - **Step 1**: In policy terminal, press `Enter` when prompted. The robot enters a stiff control mode.
-- **Step 2**: In MuJoCo window, press `7` to lower the gantry, let the robot touch the ground
+- **Step 2**: In MuJoCo window, press `8` to lower the gantry, let the robot touch the ground
 - **Step 3**: In MuJoCo window, press `9` to remove the gantry and let the stiff controller stabilize the robot
 - **Step 4**: In policy terminal, press `] (A in joystick)` to start the policy
 - **Step 5**: In policy terminal, press `s (Start in joystick)` to start the motion clip

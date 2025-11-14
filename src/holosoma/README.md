@@ -69,8 +69,8 @@ python src/holosoma/holosoma/run_sim.py robot:t1-29dof-waist-wrist
 ### Mujoco Controls
 
 **Gantry:**
-- `7`: Lower the gantry
-- `8`: Lift the gantry
+- `7`: Lift the gantry
+- `8`: Lower the gantry
 - `9`: Disable/remove the gantry
 
 **General:**
