@@ -2,19 +2,9 @@
 set -ex
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+ROOT_DIR=$(dirname "$SCRIPT_DIR")
 
-# Parse optional conda environment name argument
-ENV_NAME=${1:-fcreal}
-
-# Validate environment name (basic validation for conda environment naming)
-if [[ ! "$ENV_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-  echo "Error: Invalid environment name '$ENV_NAME'. Environment names must contain only letters, numbers, underscores, and hyphens."
-  echo "Usage: $0 [ENV_NAME]"
-  echo "  ENV_NAME: Optional name for the conda environment (default: fcreal)"
-  exit 1
-fi
-
-echo "Setting up sim2real environment: $ENV_NAME"
+echo "Setting up inference environment"
 
 OS=$(uname -s)
 ARCH=$(uname -m)
@@ -41,9 +31,9 @@ esac
 
 # Create overall workspace
 source ${SCRIPT_DIR}/source_common.sh
-ENV_ROOT=$CONDA_ROOT/envs/$ENV_NAME
+ENV_ROOT=$CONDA_ROOT/envs/hsinference
 
-SENTINEL_FILE=${WORKSPACE_DIR}/.env_setup_finished_sim2real_v2_$ENV_NAME
+SENTINEL_FILE=${WORKSPACE_DIR}/.env_setup_finished_inference
 
 mkdir -p $WORKSPACE_DIR
 
@@ -75,19 +65,17 @@ if [[ ! -f $SENTINEL_FILE ]]; then
     $CONDA_ROOT/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
     $CONDA_ROOT/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
     $CONDA_ROOT/bin/conda install -y mamba -c conda-forge -n base
-    MAMBA_ROOT_PREFIX=$CONDA_ROOT $CONDA_ROOT/bin/mamba create -y -n $ENV_NAME python=3.10 -c conda-forge --override-channels
+    MAMBA_ROOT_PREFIX=$CONDA_ROOT $CONDA_ROOT/bin/mamba create -y -n hsinference python=3.10 -c conda-forge --override-channels
   fi
 
-  source $CONDA_ROOT/bin/activate $ENV_NAME
+  source $CONDA_ROOT/bin/activate hsinference
 
   # Install libstdcxx-ng to fix the error: `version `GLIBCXX_3.4.32' not found` on Ubuntu 24.04
   conda install -c conda-forge -y libstdcxx-ng
 
   # Install holosoma & holosoma_inference
-  pip install -e $SCRIPT_DIR/holosoma
-  pip install -e $SCRIPT_DIR/holosoma_ext
-  pip install -e $SCRIPT_DIR/holosoma_inference[unitree]
-  pip install -e $SCRIPT_DIR/holosoma_inference[booster]
+  pip install -e $ROOT_DIR/src/holosoma
+  pip install -e $ROOT_DIR/src/holosoma_inference[unitree,booster]
 
   # Setup a few things for ARM64 Linux (G1 Jetson)
   # Otherwise we get this error:
@@ -103,6 +91,6 @@ if [[ ! -f $SENTINEL_FILE ]]; then
     $CONDA_ROOT/bin/conda install pinocchio -y -c conda-forge --override-channels
   fi
   
-  cd $SCRIPT_DIR
+  cd $ROOT_DIR
   touch $SENTINEL_FILE
 fi

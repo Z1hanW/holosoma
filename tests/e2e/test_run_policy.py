@@ -25,7 +25,7 @@ def run_mini_training(workflow_name: str) -> str:
     result = subprocess.run(
         [
             "python",
-            f"{REPO_ROOT}/holosoma/holosoma/train_agent.py",
+            f"{REPO_ROOT}/src/holosoma/holosoma/train_agent.py",
             f"exp:{workflow_name}",
             "--algo.config.num-learning-iterations=2",
             "--training.num-envs=4",
@@ -51,8 +51,8 @@ def run_mini_training(workflow_name: str) -> str:
     raise FileNotFoundError("No ONNX checkpoint path found in training output")
 
 
-def assert_run_policy_with_fcreal(config_name: str, model_path: str, timeout: int = 15) -> None:
-    """Run policy in fcreal environment with local checkpoint.
+def assert_run_policy_with_hsinference(config_name: str, model_path: str, timeout: int = 15) -> None:
+    """Run policy in hsinference environment with local checkpoint.
 
     Parameters
     ----------
@@ -67,9 +67,9 @@ def assert_run_policy_with_fcreal(config_name: str, model_path: str, timeout: in
         [
             "/bin/bash",
             "-c",
-            f"source {REPO_ROOT}/source_sim2real_setup.sh && "
-            f"pip install -e holosoma_inference[unitree] && "
-            f"python {REPO_ROOT}/holosoma_inference/holosoma_inference/run_policy.py "
+            f"source {REPO_ROOT}/scripts/source_inference_setup.sh && "
+            f"pip install -e {REPO_ROOT}/src/holosoma_inference[unitree,booster] && "
+            f"python {REPO_ROOT}/src/holosoma_inference/holosoma_inference/run_policy.py "
             f"inference:{config_name} "
             f"--task.model-path={model_path}",
         ],
@@ -106,7 +106,7 @@ def assert_run_policy_with_fcreal(config_name: str, model_path: str, timeout: in
     ],
 )
 def test_run_policy_with_trained_checkpoint(workflow_name: str, config_name: str):
-    """Train a mini model and test running it in fcreal environment.
+    """Train a mini model and test running it in hsinference environment.
 
     Parameters
     ----------
@@ -116,4 +116,4 @@ def test_run_policy_with_trained_checkpoint(workflow_name: str, config_name: str
         Tyro subcommand name for run_policy (e.g., 'g1-29dof-loco')
     """
     checkpoint_path = run_mini_training(workflow_name)
-    assert_run_policy_with_fcreal(config_name, checkpoint_path)
+    assert_run_policy_with_hsinference(config_name, checkpoint_path)

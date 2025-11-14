@@ -87,7 +87,7 @@ def assert_training_and_eval_workflow(
 
     train_cmd = [
         *executable,
-        f"{REPO_ROOT}/holosoma/holosoma/train_agent.py",
+        f"{REPO_ROOT}/src/holosoma/holosoma/train_agent.py",
         f"exp:{workflow_name}",
         "terrain:terrain-locomotion-plane",
         "--algo.config.num-learning-iterations=2",
@@ -114,7 +114,7 @@ def assert_training_and_eval_workflow(
     # For now, skip wandb_run_path since we're using local checkpoints
     eval_cmd = [
         "python",
-        f"{REPO_ROOT}/holosoma/holosoma/eval_agent.py",
+        f"{REPO_ROOT}/src/holosoma/holosoma/eval_agent.py",
         f"--checkpoint={checkpoint_path}",
         "--training.headless=True",
         "--training.max-eval-steps=4",

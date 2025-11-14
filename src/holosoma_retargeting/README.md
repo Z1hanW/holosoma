@@ -1,10 +1,3 @@
-## Environment set-up 
-```
-conda create -n rt_env python=3.11
-conda activate rt_env 
-pip install -e . 
-``` 
-
 ## Single sequence motion retargeting 
 ```
 # Robot-only (LAFAN)

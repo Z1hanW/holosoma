@@ -1,2 +1,2 @@
-WORKSPACE_DIR=$HOME/.falcon_deps
+WORKSPACE_DIR=$HOME/.holosoma_deps
 CONDA_ROOT=$WORKSPACE_DIR/miniconda3

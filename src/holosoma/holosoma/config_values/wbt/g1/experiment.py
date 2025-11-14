@@ -188,12 +188,12 @@ __all__ = [
 
 Example 1: Robot only:
 
-python holosoma/holosoma/train_agent.py \
+python src/holosoma/holosoma/train_agent.py \
     exp:g1-29dof-wbt
 
 Example 2: Robot+Terrain:
 
-python holosoma/holosoma/train_agent.py \
+python src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt \
   terrain:terrain-load-obj \
   command:g1-29dof-wbt \
@@ -207,7 +207,7 @@ python holosoma/holosoma/train_agent.py \
 
 Example 3: Robot+Object:
 
-python holosoma/holosoma/train_agent.py \
+python src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt \
   robot:g1-29dof-w-object \
   terrain:terrain-locomotion-plane \
@@ -226,7 +226,7 @@ python holosoma/holosoma/train_agent.py \
 #TODO(jchen): Replace motion file paths to new file
 Example 4: Robot+Terrain+Object:
 
-python holosoma/holosoma/train_agent.py \
+python src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt \
   robot:g1-29dof-w-object \
   terrain:terrain-load-obj \

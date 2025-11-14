@@ -1,10 +1,10 @@
 #!/bin/bash
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 source ${SCRIPT_DIR}/source_common.sh
-source ${CONDA_ROOT}/bin/activate fcmujoco
+source ${CONDA_ROOT}/bin/activate hsmujoco
 
 # Set MuJoCo-specific environment variables
-export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:${CONDA_ROOT}/envs/fcmujoco/lib
+export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:${CONDA_ROOT}/envs/hsmujoco/lib
 
 # MuJoCo-specific environment variables (if needed)
 # export MUJOCO_GL=egl  # For headless rendering

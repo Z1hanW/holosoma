@@ -2,11 +2,12 @@
 set -ex
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+ROOT_DIR=$(dirname "$SCRIPT_DIR")
 
 # Create overall workspace
 source ${SCRIPT_DIR}/source_common.sh
-ENV_ROOT=$CONDA_ROOT/envs/fclab
-SENTINEL_FILE=${WORKSPACE_DIR}/.env_setup_finished_isaaclab
+ENV_ROOT=$CONDA_ROOT/envs/hssim
+SENTINEL_FILE=${WORKSPACE_DIR}/.env_setup_finished_isaacsim
 
 mkdir -p $WORKSPACE_DIR
 
@@ -24,10 +25,10 @@ if [[ ! -f $SENTINEL_FILE ]]; then
     $CONDA_ROOT/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
     $CONDA_ROOT/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
     $CONDA_ROOT/bin/conda install -y mamba -c conda-forge -n base
-    MAMBA_ROOT_PREFIX=$CONDA_ROOT $CONDA_ROOT/bin/mamba create -y -n fclab python=3.10 -c conda-forge --override-channels
+    MAMBA_ROOT_PREFIX=$CONDA_ROOT $CONDA_ROOT/bin/mamba create -y -n hssim python=3.10 -c conda-forge --override-channels
   fi
 
-  source $CONDA_ROOT/bin/activate fclab
+  source $CONDA_ROOT/bin/activate hssim
 
   # Install ffmpeg for video encoding
   conda install -c conda-forge -y ffmpeg
@@ -54,13 +55,9 @@ if [[ ! -f $SENTINEL_FILE ]]; then
   export CMAKE_POLICY_VERSION_MINIMUM=3.5
   ./isaaclab.sh --install 
 
- # Install FALCON
-  cd $SCRIPT_DIR
+ # Install Holosoma
   pip install -U pip
-  pip install -e .
-  pip install -e holosoma[unitree]
-  pip install -e holosoma[booster]
-  pip install -e holosoma_ext
+  pip install -e $ROOT_DIR/src/holosoma[unitree,booster]
 
   # Force upgrade wandb to override rl-games constraint
   pip install --upgrade 'wandb>=0.21.1'

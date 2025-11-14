@@ -3,10 +3,11 @@
 set -ex
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+ROOT_DIR=$(dirname "$SCRIPT_DIR")
 
 # Create overall workspace
 source ${SCRIPT_DIR}/source_common.sh
-ENV_ROOT=$CONDA_ROOT/envs/fcmujoco
+ENV_ROOT=$CONDA_ROOT/envs/hsmujoco
 SENTINEL_FILE=${WORKSPACE_DIR}/.env_setup_finished_mujoco
 
 mkdir -p $WORKSPACE_DIR
@@ -25,10 +26,10 @@ if [[ ! -f $SENTINEL_FILE ]]; then
     $CONDA_ROOT/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
     $CONDA_ROOT/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
     $CONDA_ROOT/bin/conda install -y mamba -c conda-forge -n base
-    MAMBA_ROOT_PREFIX=$CONDA_ROOT $CONDA_ROOT/bin/mamba create -y -n fcmujoco python=3.10 -c conda-forge --override-channels
+    MAMBA_ROOT_PREFIX=$CONDA_ROOT $CONDA_ROOT/bin/mamba create -y -n hsmujoco python=3.10 -c conda-forge --override-channels
   fi
 
-  source $CONDA_ROOT/bin/activate fcmujoco
+  source $CONDA_ROOT/bin/activate hsmujoco
 
   # Install system dependencies for MuJoCo
   # Note: These may require sudo access - document this requirement
@@ -64,13 +65,9 @@ if [[ ! -f $SENTINEL_FILE ]]; then
   pip install -e $WORKSPACE_DIR/unitree_sdk2_python/
 
   
-  # Install FALCON packages
-  cd $SCRIPT_DIR
+  # Install Holosoma packages
   pip install -U pip
-  pip install -e .
-  pip install -e holosoma[unitree]
-  pip install -e holosoma[booster]
-  pip install -e holosoma_ext
+  pip install -e $ROOT_DIR/src/holosoma[unitree,booster]
 
   # Validate MuJoCo installation
   echo "Validating MuJoCo installation..."

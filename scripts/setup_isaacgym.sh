@@ -2,11 +2,12 @@
 set -ex
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+ROOT_DIR=$(dirname "$SCRIPT_DIR")
 
 # Create overall workspace
 source ${SCRIPT_DIR}/source_common.sh
-ENV_ROOT=$CONDA_ROOT/envs/fcgym
-SENTINEL_FILE=${WORKSPACE_DIR}/.env_setup_finished_dev
+ENV_ROOT=$CONDA_ROOT/envs/hsgym
+SENTINEL_FILE=${WORKSPACE_DIR}/.env_setup_finished_isaacgym
 
 mkdir -p $WORKSPACE_DIR
 
@@ -24,10 +25,10 @@ if [[ ! -f $SENTINEL_FILE ]]; then
     $CONDA_ROOT/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
     $CONDA_ROOT/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
     $CONDA_ROOT/bin/conda install -y mamba -c conda-forge -n base
-    MAMBA_ROOT_PREFIX=$CONDA_ROOT $CONDA_ROOT/bin/mamba create -y -n fcgym python=3.8 -c conda-forge --override-channels
+    MAMBA_ROOT_PREFIX=$CONDA_ROOT $CONDA_ROOT/bin/mamba create -y -n hsgym python=3.8 -c conda-forge --override-channels
   fi
 
-  source $CONDA_ROOT/bin/activate fcgym
+  source $CONDA_ROOT/bin/activate hsgym
 
   # Install libstdcxx-ng to fix the error: `version `GLIBCXX_3.4.32' not found` on Ubuntu 24.04
   conda install -c conda-forge -y libstdcxx-ng
@@ -44,13 +45,8 @@ if [[ ! -f $SENTINEL_FILE ]]; then
   cd $WORKSPACE_DIR/isaacgym/python
   $ENV_ROOT/bin/pip install -e .
 
-  # Install FALCON
-  cd $SCRIPT_DIR
+  # Install Holosoma
   pip install -U pip
-  pip install -e .
-  pip install -e holosoma[unitree]
-  pip install -e holosoma[booster]
-  pip install -e holosoma_ext
-  pip install -e holosoma_inference
+  pip install -e $ROOT_DIR/src/holosoma[unitree,booster]
   touch $SENTINEL_FILE
 fi
