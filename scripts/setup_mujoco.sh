@@ -48,7 +48,7 @@ if [[ ! -f $SENTINEL_FILE ]]; then
   pip install --upgrade pip
   
   # Core MuJoCo packages
-  pip install mujoco>=3.0.0
+  pip install 'mujoco>=3.0.0'
   pip install mujoco-python-viewer
   
   # Optional: Gymnasium MuJoCo environments (if needed for compatibility)

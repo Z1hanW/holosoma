@@ -16,6 +16,9 @@ Thumbs.db
 logs
 logs_eval
 
+# Isaacsim Converted Files
+src/holosoma/holosoma/data/robots/converted/
+
 # other
 *.egg-info
 __pycache__
