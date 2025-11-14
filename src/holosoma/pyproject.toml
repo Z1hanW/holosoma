@@ -55,3 +55,8 @@ dynamic = ["optional-dependencies"]
 
 [tool.setuptools.packages.find]
 where = ["."]
+
+[tool.pytest.ini_options]
+markers = [
+    "isaacsim: marks tests as requiring Isaac Sim (deselect with '-m \"not isaacsim\"')",
+]
