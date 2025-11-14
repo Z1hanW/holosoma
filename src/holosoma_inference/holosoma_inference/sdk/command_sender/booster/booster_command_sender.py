@@ -90,9 +90,10 @@ class BoosterCommandSender(BasicCommandSender):
         """Create prepare command for T1."""
         self.init_cmd_t1(low_cmd)
         # Use motor_kp, motor_kd, and default_motor_angles from RobotConfig
+        # Note: motor_kp and motor_kd may be None during initialization (loaded from ONNX later)
         num_motors = min(len(low_cmd.motor_cmd), cfg.num_motors)
         for i in range(num_motors):
-            low_cmd.motor_cmd[i].kp = cfg.motor_kp[i]
-            low_cmd.motor_cmd[i].kd = cfg.motor_kd[i]
+            low_cmd.motor_cmd[i].kp = cfg.motor_kp[i] if cfg.motor_kp is not None else 0.0
+            low_cmd.motor_cmd[i].kd = cfg.motor_kd[i] if cfg.motor_kd is not None else 0.0
             low_cmd.motor_cmd[i].q = cfg.default_motor_angles[i]
         return low_cmd

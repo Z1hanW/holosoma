@@ -391,6 +391,10 @@ class BasePolicy:
             )
             # Update InterfaceWrapper's robot_config reference since replace() creates a new object
             self.interface.robot_config = self.robot_config
+            # Update sdk2py backend components (booster SDK only)
+            if self.interface.backend == "sdk2py":
+                self.interface.command_sender.config = self.robot_config
+                self.interface.state_processor.config = self.robot_config
         else:
             # No values available - error
             raise ValueError(
