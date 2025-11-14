@@ -216,6 +216,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         policy_action = np.clip(policy_action, -100, 100)
         # store last policy action
         self.last_policy_action = policy_action.copy()
+        # scale policy action
+        self.scaled_policy_action = policy_action * self.policy_action_scale
 
         # update motion timestep
         if self.motion_clip_progressing:
@@ -223,7 +225,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 self._update_clock()
             else:
                 self.motion_timestep += 1
-        return policy_action
+        return self.scaled_policy_action
 
     def _update_clock(self):
         # Use synchronized clock with motion-relative timing
