@@ -7,8 +7,8 @@ from loguru import logger
 import pinocchio as pin
 from termcolor import colored
 
-from holosoma_inference.config2.config_types.inference import InferenceConfig
-from holosoma_inference.config2.config_types.robot import RobotConfig
+from holosoma_inference.config.config_types.inference import InferenceConfig
+from holosoma_inference.config.config_types.robot import RobotConfig
 from holosoma_inference.policies import BasePolicy
 from holosoma_inference.utils.clock import ClockSub
 from holosoma_inference.utils.math.misc import get_index_of_a_in_b

@@ -35,9 +35,7 @@ setup(
     packages=find_packages(),
     python_requires=">=3.8",
     install_requires=[
-        "hydra-core>=1.2.0",
         "loguru",
-        "mujoco",
         "netifaces",
         "onnxruntime",
         "scipy",

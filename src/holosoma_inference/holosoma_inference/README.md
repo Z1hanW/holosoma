@@ -20,6 +20,7 @@ Policy inference for humanoid robot policies.
 1. Launch the policy:
 
 ```bash
+source scripts/source_inference_setup.sh
 python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-loco \
     --task.model-path wandb://far-wandb/nightly-g1_29dof_manager-multigpu/3vbl6vnz/model_04999.onnx \
     --task.use-joystick \
@@ -31,17 +32,14 @@ python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29d
 1. Start MuJoCo environment:
 
 ```bash
-python3 src/holosoma_inference/holosoma_inference/run_sim.py \
-    task=loco/loco \
-    robot=g1/g1_29dof \
-    obs=loco/g1_29dof \
-    task.USE_JOYSTICK=false \
-    task.INTERFACE="lo"
+source scripts/source_mujoco_setup.sh
+python src/holosoma/holosoma/run_sim.py robot:g1-29dof --simulator.config.bridge.enabled=True
 ```
 
 2. Launch the policy:
 
 ```bash
+source scripts/source_inference_setup.sh
 python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-loco \
     --task.model-path wandb://far-wandb/nightly-g1_29dof_manager-multigpu/3vbl6vnz/model_04999.onnx
 ```
@@ -51,6 +49,7 @@ python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29d
 1. Launch the policy:
 
 ```bash
+source scripts/source_inference_setup.sh
 python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:t1-29dof-loco \
     --task.model-path https://far.wandb.io/far-wandb/nightly-t1_29dof_manager/runs/taks33kw/files/model_04999.onnx \
     --task.use-joystick \
@@ -62,15 +61,14 @@ python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:t1-29d
 1. Launch the simulation:
 
 ```bash
-python3 src/holosoma_inference/holosoma_inference/run_sim.py \
-    task=loco/loco \
-    robot=t1/t1_29dof \
-    obs=loco/t1_29dof
+source scripts/source_mujoco_setup.sh
+python src/holosoma/holosoma/run_sim.py robot:t1-29dof-waist-wrist
 ```
 
 2. Launch the policy:
 
 ```bash
+source scripts/source_inference_setup.sh
 python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:t1-29dof-loco \
     --task.model-path https://far.wandb.io/far-wandb/nightly-t1_29dof_manager/runs/taks33kw/files/model_04999.onnx \
     --task.no-use-joystick \
@@ -82,14 +80,11 @@ python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:t1-29d
 ## Whole Body Tracking Unitree G1 (real robot)
 
 ```bash
-python3 src/holosoma_inference/holosoma_inference/run_policy.py \
-    task=wbt/wbt \
-    robot=g1/g1_29dof \
-    obs=wbt/wbt \
-    task.USE_JOYSTICK=true \
-    task.INTERFACE="enp0s31f6" \
-    task.policy.rl_rate=50 \
-    model_path=src/holosoma_inference/holosoma_inference/models/wbt/fastsac_g1_29dof_dancing.onnx
+source scripts/source_inference_setup.sh
+python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-wbt \
+    --task.model-path src/holosoma_inference/holosoma_inference/models/wbt/fastsac_g1_29dof_dancing.onnx \
+    --task.no-use-joystick 
+    --task.interface=eth0
 ```
 
 
@@ -98,43 +93,29 @@ python3 src/holosoma_inference/holosoma_inference/run_policy.py \
 1. Start MuJoCo environment:
 
 ```bash
-python3 src/holosoma_inference/holosoma_inference/run_sim.py \
-    task=wbt/wbt \
-    robot=g1/g1_29dof \
-    obs=wbt/wbt \
-    task.USE_JOYSTICK=false
+source scripts/source_mujoco_setup.sh
+python src/holosoma/holosoma/run_sim.py robot:g1-29dof
 ```
 
 2. Launch the policy:
 
 ```bash
+source scripts/source_inference_setup.sh
 python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-wbt \
     --task.model-path src/holosoma_inference/holosoma_inference/models/wbt/fastsac_g1_29dof_dancing.onnx \
     --task.no-use-joystick \
     --task.rl-rate 50
 ```
 
-```bash
-python3 src/holosoma_inference/holosoma_inference/run_policy.py \
-    task=wbt/wbt \
-    robot=g1/g1_29dof \
-    obs=wbt/wbt \
-    task.USE_JOYSTICK=true \
-    task.INTERFACE="enp0s31f6" \ # NOTE: set to apropriate interface
-    task.policy.rl_rate=50 \
-    model_path='[stand_policy.onnx,dance.onnx]' # to cycle through multiple policies
-```
-
-
 3. Control the robot:
 
-   - **Step 1**: In policy terminal, press `i` to gradually move the robot to the first movement of the motion clip
-   - **Step 2**: In MuJoCo window, press `7` to lower the gantry, let the robot touch the ground
-   - **Step 3**: In policy terminal, press `]` to start the policy
-   - **Step 4**: In MuJoCo window, press `9` to remove the gantry and let the policy stabilize the robot
-   - **Step 5**: In policy terminal, press `s` to start the motion clip
+- **Step 1**: In policy terminal, press `i` to gradually move the robot to the first movement of the motion clip
+- **Step 2**: In MuJoCo window, press `7` to lower the gantry, let the robot touch the ground
+- **Step 3**: In policy terminal, press `]` to start the policy
+- **Step 4**: In MuJoCo window, press `9` to remove the gantry and let the policy stabilize the robot
+- **Step 5**: In policy terminal, press `s` to start the motion clip
 
-> **TODO**: Replace the policy and commit a working policy
+
 # Configuration Overrides
 
 ## Overriding Control Gains

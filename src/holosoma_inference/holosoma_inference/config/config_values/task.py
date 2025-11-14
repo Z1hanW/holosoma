@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from holosoma_inference.config2.config_types.task import TaskConfig
+from holosoma_inference.config.config_types.task import TaskConfig
 
 # Locomotion task
 locomotion = TaskConfig(

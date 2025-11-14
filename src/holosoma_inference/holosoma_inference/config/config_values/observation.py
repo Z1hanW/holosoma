@@ -6,7 +6,7 @@ robot types and tasks, converted from the original YAML configurations.
 
 from __future__ import annotations
 
-from holosoma_inference.config2.config_types.observation import ObservationConfig
+from holosoma_inference.config.config_types.observation import ObservationConfig
 
 # =============================================================================
 # Locomotion Observation Configurations

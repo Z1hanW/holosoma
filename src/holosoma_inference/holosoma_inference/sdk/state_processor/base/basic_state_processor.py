@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 
-from holosoma_inference.config2.config_types.robot import RobotConfig
+from holosoma_inference.config.config_types.robot import RobotConfig
 
 
 class BasicStateProcessor(ABC):

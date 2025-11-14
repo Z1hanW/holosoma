@@ -5,8 +5,8 @@ from __future__ import annotations
 import tyro
 from typing_extensions import Annotated
 
-from holosoma_inference.config2.config_types.inference import InferenceConfig
-from holosoma_inference.config2.config_values import observation, robot, task
+from holosoma_inference.config.config_types.inference import InferenceConfig
+from holosoma_inference.config.config_values import observation, robot, task
 
 # G1 Locomotion
 g1_29dof_loco = InferenceConfig(

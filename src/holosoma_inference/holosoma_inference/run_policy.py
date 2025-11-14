@@ -16,9 +16,9 @@ import traceback
 import tyro
 from loguru import logger
 
-from holosoma_inference.config2.config_types.inference import InferenceConfig
-from holosoma_inference.config2.config_values.inference import AnnotatedInferenceConfig
-from holosoma_inference.config2.utils import TYRO_CONFIG
+from holosoma_inference.config.config_types.inference import InferenceConfig
+from holosoma_inference.config.config_values.inference import AnnotatedInferenceConfig
+from holosoma_inference.config.utils import TYRO_CONFIG
 from holosoma_inference.policies.locomotion import LocomotionPolicy
 from holosoma_inference.policies.wbt import WholeBodyTrackingPolicy
 from holosoma_inference.utils.misc import restore_terminal_settings

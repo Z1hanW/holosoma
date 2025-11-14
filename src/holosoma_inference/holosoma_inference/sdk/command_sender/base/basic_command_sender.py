@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from holosoma_inference.config2.config_types.robot import RobotConfig
+from holosoma_inference.config.config_types.robot import RobotConfig
 
 
 def _get_config_value(config: RobotConfig | dict, key: str, default=None):

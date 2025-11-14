@@ -15,8 +15,8 @@ from omegaconf import ListConfig
 from sshkeyboard import listen_keyboard
 from termcolor import colored
 
-from holosoma_inference.config2.config_types.inference import InferenceConfig
-from holosoma_inference.config2.config_types.robot import RobotConfig
+from holosoma_inference.config.config_types.inference import InferenceConfig
+from holosoma_inference.config.config_types.robot import RobotConfig
 from holosoma_inference.sdk.interface_wrapper import InterfaceWrapper
 from holosoma_inference.utils.latency import LatencyTracker
 from holosoma_inference.utils.math.quat import quat_rotate_inverse

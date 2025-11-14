@@ -6,7 +6,7 @@ for different robot types.
 
 from __future__ import annotations
 
-from holosoma_inference.config2.config_types.robot import RobotConfig
+from holosoma_inference.config.config_types.robot import RobotConfig
 
 # =============================================================================
 # G1 Robot Config

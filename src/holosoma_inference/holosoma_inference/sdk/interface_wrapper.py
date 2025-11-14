@@ -2,7 +2,7 @@ import numpy as np
 from loguru import logger
 from termcolor import colored
 
-from holosoma_inference.config2.config_types import RobotConfig
+from holosoma_inference.config.config_types import RobotConfig
 from holosoma_inference.sdk.command_sender import create_command_sender
 from holosoma_inference.sdk.state_processor import create_state_processor
 
