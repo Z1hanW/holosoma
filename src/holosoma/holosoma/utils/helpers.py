@@ -1,13 +1,87 @@
 from __future__ import annotations
 
 import copy
+import importlib
 import os
-from typing import Any
+from typing import Any, Type
 
 from loguru import logger
-from omegaconf import DictConfig, OmegaConf
 
 from holosoma.utils.safe_torch_import import torch
+
+
+def get_class(path: str) -> Type[Any]:
+    """Dynamically import and return a class from a module path.
+
+    This is a replacement for hydra.utils.get_class that doesn't require Hydra.
+
+    Parameters
+    ----------
+    path : str
+        The fully qualified path to the class (e.g., "holosoma.envs.MyEnv")
+
+    Returns
+    -------
+    Type[Any]
+        The imported class
+
+    Examples
+    --------
+    >>> MyClass = get_class("holosoma.envs.MyEnv")
+    >>> instance = MyClass(config)
+    """
+    module_path, class_name = path.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    return getattr(module, class_name)
+
+
+def instantiate(config: Any, **kwargs: Any) -> Any:
+    """Instantiate an object from a config with a _target_ field.
+
+    This is a replacement for hydra.utils.instantiate that doesn't require Hydra.
+    It expects the config to have a _target_ attribute specifying the class path,
+    and uses any other attributes as constructor arguments, merged with kwargs.
+
+    Parameters
+    ----------
+    config : Any
+        Configuration object with _target_ field and optional constructor args
+    **kwargs : Any
+        Additional keyword arguments to pass to the constructor (override config)
+
+    Returns
+    -------
+    Any
+        Instantiated object
+
+    Examples
+    --------
+    >>> config = OptimizerConfig(_target_="torch.optim.AdamW", weight_decay=0.001)
+    >>> optimizer = instantiate(config, params=model.parameters(), lr=0.001)
+    """
+    if not hasattr(config, "_target_"):
+        raise ValueError(f"Config must have a '_target_' attribute, got: {config}")
+
+    target_class = get_class(config._target_)
+
+    # Extract all config attributes except _target_
+    config_dict = {}
+    if hasattr(config, "__dict__"):
+        config_dict = {k: v for k, v in config.__dict__.items() if not k.startswith("_")}
+    elif hasattr(config, "__dataclass_fields__"):
+        # For dataclasses
+        import dataclasses
+
+        config_dict = {
+            field.name: getattr(config, field.name)
+            for field in dataclasses.fields(config)
+            if not field.name.startswith("_")
+        }
+
+    # Merge config args with kwargs (kwargs take precedence)
+    merged_kwargs = {**config_dict, **kwargs}
+
+    return target_class(**merged_kwargs)
 
 
 def class_to_dict(obj) -> dict:
@@ -26,73 +100,6 @@ def class_to_dict(obj) -> dict:
             element = class_to_dict(val)
         result[key] = element
     return result
-
-
-def pre_process_config(config) -> None:
-    # compute observation_dim
-
-    obs_dim_dict = {}
-    _obs_key_list = config.env.config.obs.obs_dict
-
-    assert set(config.env.config.obs.noise_scales.keys()) == set(config.env.config.obs.obs_scales.keys())
-
-    # Handle multiple formats for obs_dims, allows for local checkpoint loading vs. only from wandb URIs:
-    if isinstance(config.env.config.obs.obs_dims, (dict, DictConfig)):
-        # Loading from saved config, already in the correct format
-        each_dict_obs_dims = dict(config.env.config.obs.obs_dims)
-    else:
-        # Loading directly from wandb://
-        each_dict_obs_dims = {k: v for d in config.env.config.obs.obs_dims for k, v in d.items()}
-
-    config.env.config.obs.obs_dims = each_dict_obs_dims
-    logger.info(f"obs_dims: {each_dict_obs_dims}")
-    auxiliary_obs_dims: dict[str, int] = {}
-    if hasattr(config.env.config.obs, "obs_auxiliary"):
-        _aux_obs_key_list = config.env.config.obs.obs_auxiliary
-        auxiliary_obs_dims = {}
-        for aux_obs_key, aux_config in _aux_obs_key_list.items():
-            auxiliary_obs_dims[aux_obs_key] = 0
-            for _key, _num in aux_config.items():
-                assert _key in config.env.config.obs.obs_dims
-                auxiliary_obs_dims[aux_obs_key] += config.env.config.obs.obs_dims[_key] * _num
-        logger.info(f"auxiliary_obs_dims: {auxiliary_obs_dims}")
-    for obs_key, obs_config in _obs_key_list.items():
-        obs_dim_dict[obs_key] = 0
-        for key in obs_config:
-            if key.endswith("_raw"):
-                processed_key = key[:-4]
-            else:
-                processed_key = key
-            if processed_key in config.env.config.obs.obs_dims:
-                obs_dim_dict[obs_key] += config.env.config.obs.obs_dims[processed_key]
-                logger.info(f"{obs_key}: {processed_key} has dim: {config.env.config.obs.obs_dims[processed_key]}")
-            elif processed_key in auxiliary_obs_dims:
-                obs_dim_dict[obs_key] += auxiliary_obs_dims[processed_key]
-                logger.info(f"{obs_key}: {processed_key} has dim: {auxiliary_obs_dims[processed_key]}")
-            else:
-                logger.error(f"{obs_key}: {processed_key} not found in obs_dims")
-                raise ValueError(f"{obs_key}: {processed_key} not found in obs_dims")
-
-    OmegaConf.set_struct(config, False)
-    if "robot" not in config:
-        # `robot` may be missing in the config due to the hydra->tyro migration
-        config.robot = {}
-    config.robot.algo_obs_dim_dict = obs_dim_dict
-    OmegaConf.set_struct(config, True)
-    logger.info(f"algo_obs_dim_dict: {config.robot.algo_obs_dim_dict}")
-
-    # compute action_dim for ppo
-    # for agent in config.algo.config.network_dict.keys():
-    #     for network in config.algo.config.network_dict[agent].keys():
-    #         output_dim = config.algo.config.network_dict[agent][network].output_dim
-    #         if output_dim == "action_dim":
-    #             config.algo.config.network_dict[agent][network].output_dim = config.env.config.robot.actions_dim
-
-    # print the config
-    if hasattr(config, "algo") and hasattr(config.algo, "config") and hasattr(config.algo.config, "module_dict"):
-        logger.debug("PPO CONFIG")
-        logger.debug(f"{config.algo.config.module_dict}")
-    # logger.debug(f"{config.algo.config.network_dict}")
 
 
 def parse_observation(

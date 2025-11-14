@@ -1,4 +1,5 @@
 import json
+import sys
 
 import numpy as np
 import onnx
@@ -97,11 +98,14 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if self._stiff_hold_q.shape[1] != self.num_dofs:
             raise ValueError("Stiff startup pose dimension mismatch with robot DOFs")
 
-        # Prompt user before entering stiff mode
-        logger.info(colored("\n⚠️  Ready to enter stiff hold mode", "yellow", attrs=["bold"]))
-        logger.info(colored("Press Enter to continue...", "yellow"))
-        input()
-        logger.info(colored("✓ Entering stiff hold mode", "green"))
+        # Prompt user before entering stiff mode (only if stdin is available)
+        if sys.stdin.isatty():
+            logger.info(colored("\n⚠️  Ready to enter stiff hold mode", "yellow", attrs=["bold"]))
+            logger.info(colored("Press Enter to continue...", "yellow"))
+            input()
+            logger.info(colored("✓ Entering stiff hold mode", "green"))
+        else:
+            logger.warning(colored("⚠️  Non-interactive mode detected - cannot prompt for stiff mode confirmation!", "red", attrs=["bold"]))
 
     def _get_ref_body_orientation_in_world(self, robot_state_data):
         # Create configuration for pinocchio robot
@@ -267,6 +271,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         return self.scaled_policy_action
 
     def _get_manual_command(self, robot_state_data):
+        # TODO: instead of adding kp/kd_override in def _set_motor_command, 
+        # just use the motor_kp/motor_kd when calling it in _fill_motor_commands
         if not self._stiff_hold_active:
             return None
         return {

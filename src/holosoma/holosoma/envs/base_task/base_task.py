@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import numpy as np
-from hydra.utils import get_class
 
 from holosoma.config_types.env import EnvConfig
+from holosoma.utils.helpers import get_class
 from holosoma.config_types.full_sim import FullSimConfig
 from holosoma.managers.action import ActionManager
 from holosoma.managers.command import CommandManager

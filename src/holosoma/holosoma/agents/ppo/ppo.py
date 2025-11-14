@@ -6,7 +6,6 @@ from typing import TypedDict
 
 import torch
 import torch.nn.functional as F
-from hydra.utils import instantiate
 from loguru import logger
 from rich.console import Console
 from torch import nn
@@ -14,6 +13,7 @@ from torch.distributions import Normal, kl_divergence
 from torch.utils.tensorboard import SummaryWriter as TensorboardSummaryWriter
 
 from holosoma.agents.base_algo.base_algo import BaseAlgo
+from holosoma.utils.helpers import instantiate
 from holosoma.agents.callbacks.base_callback import RLEvalCallback
 from holosoma.agents.modules.augmentation_utils import SymmetryUtils
 from holosoma.agents.modules.data_utils import RolloutStorage

@@ -11,9 +11,9 @@ Isaac Gym re-initialization issues.
 import dataclasses
 
 import pytest
-from hydra.utils import get_class
 
 from holosoma.config_values import experiment
+from holosoma.utils.helpers import get_class
 from holosoma.train_agent import get_tyro_env_config, training_context
 from holosoma.utils.common import seeding
 from holosoma.utils.safe_torch_import import torch

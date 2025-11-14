@@ -9,7 +9,6 @@ requires-python = ">=3.8"
 dependencies = [
     "astor",
     "easydict",
-    "hydra-core>=1.2.0",
     "ipdb",
     "joblib",
     "loguru",
@@ -21,6 +20,7 @@ dependencies = [
     "notebook",
     "numpy-stl",
     "numpy==1.23.5",
+    "omegaconf",  # Used for config resolvers and DictConfig type hints
     "onnx",
     "onnxruntime",
     "open3d",

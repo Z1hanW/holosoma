@@ -3,10 +3,10 @@ from __future__ import annotations
 import os
 
 import tyro
-from hydra.utils import get_class
 from loguru import logger
 
 from holosoma.agents.base_algo.base_algo import BaseAlgo
+from holosoma.utils.helpers import get_class
 from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.utils.config_utils import CONFIG_NAME
 from holosoma.utils.eval_utils import (

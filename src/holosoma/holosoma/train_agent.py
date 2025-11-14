@@ -10,8 +10,6 @@ from pathlib import Path
 from typing import Any, TypedDict, cast
 
 import tyro
-from hydra.core.hydra_config import HydraConfig
-from hydra.utils import get_class
 from loguru import logger
 
 from holosoma.config_types.env import get_tyro_env_config
@@ -22,6 +20,7 @@ from holosoma.utils.eval_utils import (
     init_sim_imports,
     load_checkpoint,
 )
+from holosoma.utils.helpers import get_class
 from holosoma.utils.sim_utils import close_simulation_app
 from holosoma.utils.tyro_utils import TYRO_CONIFG
 
@@ -113,19 +112,18 @@ def get_device(config, distributed_conf: MultGPUConfig | None) -> str:
     return device
 
 
-def configure_logging(distributed_conf: MultGPUConfig | None = None):
+def configure_logging(distributed_conf: MultGPUConfig | None = None, log_dir: Path | None = None):
     # Configure logging.
-    from holosoma.utils.logging import HydraLoggerBridge
+    from holosoma.utils.logging import LoguruLoggingBridge
 
     logger.remove()
     is_main_process = distributed_conf is None or distributed_conf["global_rank"] == 0
 
-    # logging to hydra log file (from all ranks)
-    fname = f"train_rank_{distributed_conf['global_rank']:02d}" if distributed_conf is not None else "train.log"
-
-    if HydraConfig.initialized():
-        hydra_log_path = os.path.join(HydraConfig.get().runtime.output_dir, fname)
-        logger.add(hydra_log_path, level="DEBUG")
+    # logging to file (from all ranks)
+    if log_dir is not None:
+        fname = f"train_rank_{distributed_conf['global_rank']:02d}.log" if distributed_conf is not None else "train.log"
+        log_path = log_dir / fname
+        logger.add(str(log_path), level="DEBUG")
 
     # Get log level from LOGURU_LEVEL environment variable or use INFO as default in rank0
     if is_main_process:
@@ -134,7 +132,7 @@ def configure_logging(distributed_conf: MultGPUConfig | None = None):
         console_log_level = "ERROR"
     logger.add(sys.stdout, level=console_log_level, colorize=True)
     logging.basicConfig(level=logging.DEBUG if is_main_process else logging.ERROR)
-    logging.getLogger().addHandler(HydraLoggerBridge())
+    logging.getLogger().addHandler(LoguruLoggingBridge())
 
 
 def train(tyro_config: ExperimentConfig, training_context: TrainingContext | None = None) -> None:
@@ -173,13 +171,6 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
         device: str = get_device(tyro_config, distributed_conf)
         is_distributed = distributed_conf is not None
         is_main_process = distributed_conf is None or distributed_conf["local_rank"] == 0
-        configure_logging(distributed_conf=distributed_conf)
-
-        # Random seed
-        seed = tyro_config.training.seed
-        if distributed_conf is not None:
-            seed += distributed_conf["global_rank"]
-        seeding(seed, torch_deterministic=tyro_config.training.torch_deterministic)
 
         # Configure logger
         logger_cfg = tyro_config.logger
@@ -190,6 +181,15 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
 
         timestamp = get_timestamp()
         experiment_dir = get_experiment_dir(logger_cfg, tyro_config.training, timestamp, task_name="locomotion")
+
+        # Configure logging with experiment directory
+        configure_logging(distributed_conf=distributed_conf, log_dir=experiment_dir)
+
+        # Random seed
+        seed = tyro_config.training.seed
+        if distributed_conf is not None:
+            seed += distributed_conf["global_rank"]
+        seeding(seed, torch_deterministic=tyro_config.training.torch_deterministic)
 
         # Configure wandb in rank 0
         if wandb_enabled and is_main_process:
@@ -241,11 +241,6 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
                 f"Distributed training: GPU {distributed_conf['global_rank']} will run {tyro_config.training.num_envs} "
                 f"environments (total across all GPUs: {original_num_envs})"
             )
-
-        # Check if environment uses manager-based system by class name convention
-        # Manager classes end with "Manager" (e.g., LeggedRobotLocomotionManager)
-        # TODO (Carlo): ideally we want to have a single entry point for the environment,
-        # but we'll do it after reducing direct envs and dropping hydra support
 
         env_target = tyro_config.env_class
 

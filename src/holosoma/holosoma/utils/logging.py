@@ -6,7 +6,13 @@ from contextlib import contextmanager
 from loguru import logger
 
 
-class HydraLoggerBridge(logging.Handler):
+class LoguruLoggingBridge(logging.Handler):
+    """Bridge Python's standard logging to loguru.
+
+    This handler redirects all standard logging calls to loguru,
+    providing unified logging output.
+    """
+
     def emit(self, record):
         # Get corresponding loguru level
         try:

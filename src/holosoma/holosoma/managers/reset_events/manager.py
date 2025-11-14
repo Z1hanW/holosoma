@@ -6,9 +6,8 @@ reset events in a simulation environment.
 
 from __future__ import annotations
 
-import hydra
-
 from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
+from holosoma.utils.helpers import instantiate
 from holosoma.simulator.types import EnvIds
 
 from . import ResetManagerConfig
@@ -20,7 +19,7 @@ class ResetEventManager:
 
     Manages a collection of reset events and executes them in sequence when
     a scene reset is requested. Events are instantiated from configuration
-    using Hydra's instantiate mechanism.
+    using our custom instantiate mechanism.
 
     Parameters
     ----------
@@ -41,9 +40,9 @@ class ResetEventManager:
         """Initialize the reset event manager."""
         self.events: list[ResetEvent] = []
 
-        # Instantiate events from config using Hydra's instantiate
+        # Instantiate events from config using our custom instantiate
         for event_config in config.events:
-            event = hydra.utils.instantiate(event_config, simulator=simulator, device=device)
+            event = instantiate(event_config, simulator=simulator, device=device)
             if not isinstance(event, ResetEvent):
                 raise TypeError(f"Event {event} does not implement ResetEvent protocol")
             self.events.append(event)

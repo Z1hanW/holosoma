@@ -14,11 +14,11 @@ import time
 import traceback
 from typing import Any
 
-from hydra.utils import get_class
 from loguru import logger
 from typing_extensions import Self
 
 from holosoma.config_types.env import get_tyro_env_config
+from holosoma.utils.helpers import get_class
 from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.config_types.full_sim import FullSimConfig
 from holosoma.config_types.run_sim import RunSimConfig
@@ -77,7 +77,7 @@ def setup_isaaclab_launcher(config: ExperimentConfig | RunSimConfig) -> Any | No
     AppLauncher.add_app_launcher_args(parser)
 
     # Parse known arguments to get argparse params
-    args_cli, hydra_args = parser.parse_known_args()
+    args_cli, unknown_args = parser.parse_known_args()
 
     # Set values from config
     args_cli.num_envs = config.training.num_envs
@@ -98,8 +98,8 @@ def setup_isaaclab_launcher(config: ExperimentConfig | RunSimConfig) -> Any | No
     simulation_app = app_launcher.app
 
     logger.info(f"IsaacSim args_cli: {args_cli}")
-    logger.info(f"IsaacSim hydra_args: {hydra_args}")
-    sys.argv = [sys.argv[0]] + hydra_args
+    logger.info(f"IsaacSim unknown_args: {unknown_args}")
+    sys.argv = [sys.argv[0]] + unknown_args
 
     return simulation_app
 

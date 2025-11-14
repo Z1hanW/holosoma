@@ -450,13 +450,13 @@ class SimulatorInitConfig:
 
 @dataclass(frozen=True)
 class SimulatorConfig:
-    """Hydra wrapper for simulator instantiation."""
+    """Wrapper for simulator instantiation."""
 
     _target_: str
     """Fully-qualified simulator factory target."""
 
     _recursive_: bool
-    """Hydra recursive instantiation flag."""
+    """Recursive instantiation flag."""
 
     config: SimulatorInitConfig
     """Structured simulator configuration passed to the factory."""

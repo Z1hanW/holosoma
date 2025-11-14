@@ -18,7 +18,7 @@ from tqdm import tqdm
 # This file contains all settings for training and evaluation of models
 from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.utils.config_utils import CONFIG_NAME
-from holosoma.utils.logging import HydraLoggerBridge
+from holosoma.utils.logging import LoguruLoggingBridge
 from holosoma.utils.simulator_config import SimulatorType, get_simulator_type
 
 _WANDB_PREFIX = "wandb://"
@@ -32,7 +32,7 @@ def init_eval_logging() -> None:
     logger.add(sys.stdout, level=console_log_level, colorize=True)
 
     logging.basicConfig(level=logging.DEBUG)
-    logging.getLogger().addHandler(HydraLoggerBridge())
+    logging.getLogger().addHandler(LoguruLoggingBridge())
 
 
 @dataclass(frozen=True)
