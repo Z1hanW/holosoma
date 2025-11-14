@@ -502,6 +502,9 @@ class BasePolicy:
     def policy_action(self):
         """Execute policy action and send commands to robot."""
 
+        kp_override = None
+        kd_override = None
+
         # Stage 1: Read State
         with self.latency_tracker.measure("read_state"):
             robot_state_data = self.interface.get_low_state()
@@ -513,7 +516,13 @@ class BasePolicy:
                 q_target = self.get_init_target(robot_state_data)
                 self.init_count = min(self.init_count, 500)
             elif not self.use_policy_action:
-                q_target = robot_state_data[:, 7 : 7 + self.num_dofs]
+                manual_cmd = self._get_manual_command(robot_state_data)
+                if manual_cmd is not None:
+                    q_target = manual_cmd["q"]
+                    kp_override = manual_cmd.get("kp")
+                    kd_override = manual_cmd.get("kd")
+                else:
+                    q_target = robot_state_data[:, 7 : 7 + self.num_dofs]
             else:
                 # Prepare for inference - any preprocessing before RL inference
                 pass
@@ -545,8 +554,17 @@ class BasePolicy:
         # Stage 5: Action Pub
         with self.latency_tracker.measure("action_pub"):
             self.interface.send_low_command(
-                self.cmd_q, self.cmd_dq, self.cmd_tau, robot_state_data[0, 7 : 7 + self.num_dofs]
+                self.cmd_q,
+                self.cmd_dq,
+                self.cmd_tau,
+                robot_state_data[0, 7 : 7 + self.num_dofs],
+                kp_override=kp_override,
+                kd_override=kd_override,
             )
+
+    def _get_manual_command(self, robot_state_data):
+        """Optional manual command when policy control is disabled."""
+        return
 
     def _get_obs_phase_time(self):
         """Calculate phase time for gait."""

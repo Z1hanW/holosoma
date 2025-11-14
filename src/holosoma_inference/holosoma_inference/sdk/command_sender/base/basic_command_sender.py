@@ -52,14 +52,26 @@ class BasicCommandSender(ABC):
         """Initialize SDK-specific components. Must be implemented by subclasses."""
 
     @abstractmethod
-    def send_command(self, cmd_q, cmd_dq, cmd_tau, dof_pos_latest=None):
+    def send_command(self, cmd_q, cmd_dq, cmd_tau, dof_pos_latest=None, kp_override=None, kd_override=None):
         """Send command to robot. Must be implemented by subclasses."""
 
     def is_weak_motor(self, motor_index):
         """Check if a motor is a weak motor."""
         return motor_index in self.weak_motor_joint_index
 
-    def _set_motor_command(self, motor_cmd, motor_id, joint_id, cmd_q, cmd_dq, cmd_tau):
+    def _set_motor_command(
+        self,
+        motor_cmd,
+        motor_id,
+        joint_id,
+        cmd_q,
+        cmd_dq,
+        cmd_tau,
+        motor_kp,
+        motor_kd,
+        kp_override=None,
+        kd_override=None,
+    ):
         """Set motor command for a specific motor."""
         default_q = _get_config_value(self.config, "default_motor_angles")
 
@@ -73,18 +85,37 @@ class BasicCommandSender(ABC):
             motor_cmd.q = cmd_q[joint_id]
             motor_cmd.dq = cmd_dq[joint_id]
             motor_cmd.tau = cmd_tau[joint_id]
-            motor_kp = _get_config_value(self.config, "motor_kp")
-            motor_kd = _get_config_value(self.config, "motor_kd")
-            motor_cmd.kp = motor_kp[motor_id] * self.kp_level
-            motor_cmd.kd = motor_kd[motor_id] * self.kd_level
 
-    def _fill_motor_commands(self, motor_cmd, cmd_q, cmd_dq, cmd_tau):
+            kp_value = motor_kp[motor_id]
+            kd_value = motor_kd[motor_id]
+            if kp_override is not None and joint_id != -1:
+                kp_value = kp_override[joint_id]
+            if kd_override is not None and joint_id != -1:
+                kd_value = kd_override[joint_id]
+
+            motor_cmd.kp = kp_value * self.kp_level
+            motor_cmd.kd = kd_value * self.kd_level
+
+    def _fill_motor_commands(self, motor_cmd, cmd_q, cmd_dq, cmd_tau, kp_override=None, kd_override=None):
         """Fill motor commands for all motors."""
         motor2joint = _get_config_value(self.config, "motor2joint")
         num_motors = _get_config_value(self.config, "num_motors")
+        motor_kp = _get_config_value(self.config, "motor_kp")
+        motor_kd = _get_config_value(self.config, "motor_kd")
 
         for i in range(num_motors):
             m_id = i
             j_id = motor2joint[i]
             cmd = motor_cmd[m_id]
-            self._set_motor_command(cmd, m_id, j_id, cmd_q, cmd_dq, cmd_tau)
+            self._set_motor_command(
+                cmd,
+                m_id,
+                j_id,
+                cmd_q,
+                cmd_dq,
+                cmd_tau,
+                motor_kp,
+                motor_kd,
+                kp_override=kp_override,
+                kd_override=kd_override,
+            )

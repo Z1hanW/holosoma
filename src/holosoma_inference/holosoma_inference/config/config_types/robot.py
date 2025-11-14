@@ -159,6 +159,31 @@ class RobotConfig:
     """
 
     # =========================================================================
+    # WBT Stiff Startup Configuration (OPTIONAL - for WBT policies)
+    # =========================================================================
+
+    stiff_startup_pos: tuple[float, ...] | None = None
+    """Stiff startup joint positions for WBT policy (length: num_joints).
+
+    Target positions used during stiff hold mode before policy activation.
+    Only used by WholeBodyTracking policy.
+    """
+
+    stiff_startup_kp: tuple[float, ...] | None = None
+    """Stiff startup position gains for WBT policy (length: num_joints).
+
+    Proportional gains used during stiff hold mode before policy activation.
+    Only used by WholeBodyTracking policy.
+    """
+
+    stiff_startup_kd: tuple[float, ...] | None = None
+    """Stiff startup velocity gains for WBT policy (length: num_joints).
+
+    Derivative gains used during stiff hold mode before policy activation.
+    Only used by WholeBodyTracking policy.
+    """
+
+    # =========================================================================
     # SDK Configuration (OPTIONAL - with defaults)
     # =========================================================================
 

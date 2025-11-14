@@ -59,10 +59,17 @@ class UnitreeCommandSender(BasicCommandSender):
                 self.low_cmd.mode_machine = self.config.unitree_legged_const.get("MODE_MACHINE")
                 self.low_cmd.mode_pr = self.config.unitree_legged_const.get("MODE_PR")
 
-    def send_command(self, cmd_q, cmd_dq, cmd_tau, dof_pos_latest=None):
+    def send_command(self, cmd_q, cmd_dq, cmd_tau, dof_pos_latest=None, kp_override=None, kd_override=None):
         """Send command to Unitree robot."""
         motor_cmd = self.low_cmd.motor_cmd
-        self._fill_motor_commands(motor_cmd, cmd_q, cmd_dq, cmd_tau)
+        self._fill_motor_commands(
+            motor_cmd,
+            cmd_q,
+            cmd_dq,
+            cmd_tau,
+            kp_override=kp_override,
+            kd_override=kd_override,
+        )
 
         # Add CRC and send
         self.low_cmd.crc = self.crc.Crc(self.low_cmd)

@@ -117,32 +117,61 @@ class InterfaceWrapper:
             ]
         ).reshape(1, -1)
 
-    def send_low_command(self, cmd_q, cmd_dq, cmd_tau, dof_pos_latest=None):
+    def send_low_command(
+        self,
+        cmd_q,
+        cmd_dq,
+        cmd_tau,
+        dof_pos_latest=None,
+        kp_override=None,
+        kd_override=None,
+    ):
         """Send low-level command to the robot using the selected backend."""
         if self.backend == "sdk2py":
-            self.command_sender.send_command(cmd_q, cmd_dq, cmd_tau, dof_pos_latest)
+            self.command_sender.send_command(
+                cmd_q,
+                cmd_dq,
+                cmd_tau,
+                dof_pos_latest,
+                kp_override=kp_override,
+                kd_override=kd_override,
+            )
         elif self.backend == "binding":
             # print(f"cmd_q: {type(cmd_q)}, {len(cmd_q)}, {cmd_q}")
             cmd_q_target = np.zeros(self.robot_config.num_motors)
             cmd_dq_target = np.zeros(self.robot_config.num_motors)
             cmd_tau_target = np.zeros(self.robot_config.num_motors)
+            cmd_kp_override = np.zeros(self.robot_config.num_motors) if kp_override is not None else None
+            cmd_kd_override = np.zeros(self.robot_config.num_motors) if kd_override is not None else None
             for j_id in range(self.robot_config.num_joints):
                 m_id = self.robot_config.joint2motor[j_id]
                 cmd_q_target[m_id] = float(cmd_q[j_id])
                 cmd_dq_target[m_id] = float(cmd_dq[j_id])
                 cmd_tau_target[m_id] = float(cmd_tau[j_id])
-            self._send_binding_command(cmd_q_target, cmd_dq_target, cmd_tau_target)
+                if cmd_kp_override is not None:
+                    cmd_kp_override[m_id] = float(kp_override[j_id])
+                if cmd_kd_override is not None:
+                    cmd_kd_override[m_id] = float(kd_override[j_id])
+            self._send_binding_command(
+                cmd_q_target,
+                cmd_dq_target,
+                cmd_tau_target,
+                kp_override=cmd_kp_override,
+                kd_override=cmd_kd_override,
+            )
         else:
             raise RuntimeError("InterfaceWrapper not initialized correctly.")
 
-    def _send_binding_command(self, cmd_q, cmd_dq, cmd_tau):
+    def _send_binding_command(self, cmd_q, cmd_dq, cmd_tau, kp_override=None, kd_override=None):
         """Send command using the C++/pybind11 binding."""
         cmd = self.unitree_interface.create_zero_command()
         cmd.q_target = list(cmd_q)
         cmd.dq_target = list(cmd_dq)
         cmd.tau_ff = list(cmd_tau)
-        cmd.kp = list(np.array(self.robot_config.motor_kp) * self._kp_level)
-        cmd.kd = list(np.array(self.robot_config.motor_kd) * self._kd_level)
+        motor_kp = np.array(kp_override if kp_override is not None else self.robot_config.motor_kp)
+        motor_kd = np.array(kd_override if kd_override is not None else self.robot_config.motor_kd)
+        cmd.kp = list(motor_kp * self._kp_level)
+        cmd.kd = list(motor_kd * self._kd_level)
         self.unitree_interface.write_low_command(cmd)
 
     # ============================================================================

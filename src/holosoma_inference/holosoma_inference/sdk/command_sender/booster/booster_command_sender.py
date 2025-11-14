@@ -48,7 +48,7 @@ class BoosterCommandSender(BasicCommandSender):
         self.motor_cmds = [self.MotorCmd() for _ in range(self.config.num_motors)]
         self.low_cmd.motor_cmd = self.motor_cmds
 
-    def send_command(self, cmd_q, cmd_dq, cmd_tau, dof_pos_latest=None):
+    def send_command(self, cmd_q, cmd_dq, cmd_tau, dof_pos_latest=None, kp_override=None, kd_override=None):
         """Send command to Booster robot."""
         # In booster, we need to fill the motor_cmds first
         self.low_cmd = self.LowCmd()
@@ -61,7 +61,14 @@ class BoosterCommandSender(BasicCommandSender):
         self.low_cmd.motor_cmd = self.motor_cmds
 
         motor_cmd = self.low_cmd.motor_cmd
-        self._fill_motor_commands(motor_cmd, cmd_q, cmd_dq, cmd_tau)
+        self._fill_motor_commands(
+            motor_cmd,
+            cmd_q,
+            cmd_dq,
+            cmd_tau,
+            kp_override=kp_override,
+            kd_override=kd_override,
+        )
 
         # Send command
         self.lowcmd_publisher_.Write(self.low_cmd)
@@ -93,7 +100,7 @@ class BoosterCommandSender(BasicCommandSender):
         # Note: motor_kp and motor_kd may be None during initialization (loaded from ONNX later)
         num_motors = min(len(low_cmd.motor_cmd), cfg.num_motors)
         for i in range(num_motors):
-            low_cmd.motor_cmd[i].kp = cfg.motor_kp[i] if cfg.motor_kp is not None else 0.0
-            low_cmd.motor_cmd[i].kd = cfg.motor_kd[i] if cfg.motor_kd is not None else 0.0
+            low_cmd.motor_cmd[i].kp = cfg.motor_kp[i]
+            low_cmd.motor_cmd[i].kd = cfg.motor_kd[i]
             low_cmd.motor_cmd[i].q = cfg.default_motor_angles[i]
         return low_cmd

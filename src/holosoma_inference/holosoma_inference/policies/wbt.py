@@ -12,7 +12,7 @@ from holosoma_inference.config.config_types.robot import RobotConfig
 from holosoma_inference.policies import BasePolicy
 from holosoma_inference.utils.clock import ClockSub
 from holosoma_inference.utils.math.misc import get_index_of_a_in_b
-from holosoma_inference.utils.math.quat import matrix_from_quat, subtract_frame_transforms, wxyz_to_xyzw, xyzw_to_wxyz
+from holosoma_inference.utils.math.quat import matrix_from_quat, subtract_frame_transforms, wxyz_to_xyzw, xyzw_to_wxyz, quat_to_rpy, rpy_to_quat, quat_mul
 from holosoma_inference.utils.misc import resolve_holosoma_inference_path
 
 
@@ -72,7 +72,36 @@ class WholeBodyTrackingPolicy(BasePolicy):
         # Read use_sim_time from config
         self.use_sim_time = config.task.use_sim_time
 
+        self._stiff_hold_active = True
+        self.robot_yaw_offset = 0.0
+
         super().__init__(config)
+
+        # Load stiff startup parameters from robot config
+        if config.robot.stiff_startup_pos is not None:
+            self._stiff_hold_q = np.array(config.robot.stiff_startup_pos, dtype=np.float32).reshape(1, -1)
+        else:
+            # Fallback to default_dof_angles if not specified
+            self._stiff_hold_q = np.array(config.robot.default_dof_angles, dtype=np.float32).reshape(1, -1)
+
+        if config.robot.stiff_startup_kp is not None:
+            self._stiff_hold_kp = np.array(config.robot.stiff_startup_kp, dtype=np.float32)
+        else:
+            raise ValueError("Robot config must specify stiff_startup_kp for WBT policy")
+
+        if config.robot.stiff_startup_kd is not None:
+            self._stiff_hold_kd = np.array(config.robot.stiff_startup_kd, dtype=np.float32)
+        else:
+            raise ValueError("Robot config must specify stiff_startup_kd for WBT policy")
+
+        if self._stiff_hold_q.shape[1] != self.num_dofs:
+            raise ValueError("Stiff startup pose dimension mismatch with robot DOFs")
+
+        # Prompt user before entering stiff mode
+        logger.info(colored("\n⚠️  Ready to enter stiff hold mode", "yellow", attrs=["bold"]))
+        logger.info(colored("Press Enter to continue...", "yellow"))
+        input()
+        logger.info(colored("✓ Entering stiff hold mode", "green"))
 
     def _get_ref_body_orientation_in_world(self, robot_state_data):
         # Create configuration for pinocchio robot
@@ -155,6 +184,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_timestep = 0
         self.motion_start_timestep = None
         self._last_clock_reading = None
+        self.robot_yaw_offset = 0.0
 
     def _on_policy_switched(self, model_path: str):
         super()._on_policy_switched(model_path)
@@ -164,6 +194,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_timestep = 0
         self.motion_start_timestep = None
         self._last_clock_reading = None
+        self._stiff_hold_active = True
+        self.robot_yaw_offset = 0.0
 
     def get_init_target(self, robot_state_data):
         """Get initialization target joint positions."""
@@ -186,6 +218,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         # motion_ref_ori_b
         motion_ref_ori = xyzw_to_wxyz(self.ref_quat_xyzw_t)  # wxyz
         robot_ref_ori = self._get_ref_body_orientation_in_world(robot_state_data)  #  wxyz
+        robot_ref_ori = self._remove_robot_yaw_offset(robot_ref_ori)
 
         motion_ref_ori_b = matrix_from_quat(subtract_frame_transforms(robot_ref_ori, motion_ref_ori))
         current_obs_buffer_dict["motion_ref_ori_b"] = motion_ref_ori_b[..., :2].reshape(1, -1)
@@ -208,6 +241,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
     def rl_inference(self, robot_state_data):
         # prepare obs, run policy inference
+        if not self.motion_clip_progressing:
+            # Keep motion index pinned at the start while waiting to trigger the clip.
+            self.motion_timestep = 0
+            self.motion_start_timestep = None
+            self._last_clock_reading = None
+
         obs = self.prepare_obs_for_rl(robot_state_data)
         input_feed = {"time_step": np.array([[self.motion_timestep]], dtype=np.float32), "obs": obs["actor_obs"]}
         policy_action, self.motion_command_t, self.ref_quat_xyzw_t = self.policy(input_feed)
@@ -227,6 +266,20 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 self.motion_timestep += 1
         return self.scaled_policy_action
 
+    def _get_manual_command(self, robot_state_data):
+        if not self._stiff_hold_active:
+            return None
+        return {
+            "q": self._stiff_hold_q.copy(),
+            "kp": self._stiff_hold_kp,
+            "kd": self._stiff_hold_kd,
+        }
+
+    def _handle_start_policy(self):
+        super()._handle_start_policy()
+        self._stiff_hold_active = False
+        self._capture_robot_yaw_offset()
+
     def _update_clock(self):
         # Use synchronized clock with motion-relative timing
         current_clock = self.clock_sub.get_clock()
@@ -240,17 +293,31 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self.motion_start_timestep = current_clock - offset_ms
         self._last_clock_reading = current_clock
         elapsed_ms = current_clock - self.motion_start_timestep
+        if self.motion_timestep == 0 and elapsed_ms > self.timestep_interval_ms:
+            # Still at the beginning but the clock jumped ahead (e.g., due to waiting before start).
+            # Re-anchor to the current timestamp so the motion always starts from frame 0.
+            self.motion_start_timestep = current_clock
+            self._last_clock_reading = current_clock
+            self.motion_timestep = 0
+            return
         self.motion_timestep = int(elapsed_ms // self.timestep_interval_ms)
 
     def _handle_stop_policy(self):
         """Handle stop policy action."""
-        super()._handle_stop_policy()
+        self.use_policy_action = False
+        self.get_ready_state = False
+        self._stiff_hold_active = True
+        self.logger.info("Actions set to stiff startup command")
+        if hasattr(self.interface, "no_action"):
+            self.interface.no_action = 0
+
         self.motion_clip_progressing = False
         self.motion_timestep = 0
         self.motion_start_timestep = None  # Reset motion start time
         self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
         self.motion_command_t = self.motion_command_0.copy()
         self._last_clock_reading = None
+        self.robot_yaw_offset = 0.0
 
     def _handle_start_motion_clip(self):
         """Handle start motion clip action."""
@@ -265,6 +332,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
     def handle_keyboard_button(self, keycode):
         """Add new keyboard button to start and end the motion clips"""
         if keycode == "s":
+            self.clock_sub.reset_origin()
             self._handle_start_motion_clip()
         else:
             super().handle_keyboard_button(keycode)
@@ -278,3 +346,31 @@ class WholeBodyTrackingPolicy(BasePolicy):
             # Delegate all other buttons to base class
             super().handle_joystick_button(cur_key)
         super()._print_control_status()
+
+    def _capture_robot_yaw_offset(self):
+        """Capture robot yaw when policy starts to use as reference offset."""
+        robot_state_data = self.interface.get_low_state()
+        if robot_state_data is None:
+            self.robot_yaw_offset = 0.0
+            self.logger.warning("Unable to capture robot yaw offset - missing robot state.")
+            return
+
+        robot_ref_ori = self._get_ref_body_orientation_in_world(robot_state_data)
+        yaw = self._quat_yaw(robot_ref_ori)
+        self.robot_yaw_offset = yaw
+        self.logger.info(colored(f"Robot yaw offset captured at {np.degrees(yaw):.1f} deg", "blue"))
+
+    def _remove_robot_yaw_offset(self, quat_wxyz: np.ndarray) -> np.ndarray:
+        """Remove stored yaw offset from robot orientation quaternion."""
+        if abs(self.robot_yaw_offset) < 1e-6:
+            return quat_wxyz
+        yaw_quat = rpy_to_quat((0.0, 0.0, -self.robot_yaw_offset)).reshape(1, 4)
+        yaw_quat = np.broadcast_to(yaw_quat, quat_wxyz.shape)
+        return quat_mul(yaw_quat, quat_wxyz)
+
+    @staticmethod
+    def _quat_yaw(quat_wxyz: np.ndarray) -> float:
+        """Extract yaw angle from quaternion array of shape (1, 4)."""
+        quat_flat = quat_wxyz.reshape(-1, 4)[0]
+        _, _, yaw = quat_to_rpy(quat_flat)
+        return float(yaw)
