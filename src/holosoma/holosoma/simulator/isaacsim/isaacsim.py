@@ -268,8 +268,12 @@ class IsaacSim(BaseSimulator):
 
                 logger.info(f"No dont_collapse attributes found - using config setting: {merge_fixed_joints_setting}")
 
+            # Get local rank to avoid race conditions in multi-GPU setups
+            local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            usd_conversion_dir = os.path.abspath(os.path.join(asset_root, f"converted_rank{local_rank}"))
+
             spawn = sim_utils.UrdfFileCfg(
-                usd_dir=os.path.abspath(os.path.join(asset_root, "converted")),
+                usd_dir=usd_conversion_dir,
                 asset_path=full_urdf_path,
                 fix_base=robot_asset_cfg.fix_base_link,
                 merge_fixed_joints=merge_fixed_joints_setting,

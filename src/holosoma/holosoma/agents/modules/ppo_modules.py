@@ -189,23 +189,3 @@ class PPOCriticEncoder(PPOCritic):
         input_critic = self._get_input(critic_obs)
         return super().evaluate({"critic_obs": input_critic})
 
-
-# TODO: Deprecated
-class PPOActorFixSigma(PPOActor):
-    def __init__(self, obs_dim_dict, module_config_dict, num_actions):
-        super().__init__(obs_dim_dict, module_config_dict, num_actions, 0.0)
-
-    def update_distribution(self, obs_dict):
-        mean = self.actor(obs_dict)["head"]
-        self.distribution = mean
-
-    @property
-    def action_mean(self):
-        return self.distribution
-
-    def get_actions_log_prob(self, actions):
-        raise NotImplementedError
-
-    def act(self, obs_dict, **kwargs):
-        self.update_distribution(obs_dict)
-        return self.distribution

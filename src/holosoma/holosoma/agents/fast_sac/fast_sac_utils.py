@@ -112,8 +112,6 @@ class SimpleReplayBuffer(nn.Module):
             if self.ptr >= self.buffer_size:
                 # When the buffer is full, there is no protection against sampling across different episodes
                 # We avoid this by temporarily setting self.pos - 1 to truncated = True if not done
-                # https://github.com/DLR-RM/stable-baselines3/blob/b91050ca94f8bce7a0285c91f85da518d5a26223/stable_baselines3/common/buffers.py#L857-L860
-                # TODO (Younggyo): Change the reference when this SB3 branch is merged
                 current_pos = self.ptr % self.buffer_size
                 curr_truncations = self.truncations[:, current_pos - 1].clone()
                 self.truncations[:, current_pos - 1] = torch.logical_not(self.dones[:, current_pos - 1])
