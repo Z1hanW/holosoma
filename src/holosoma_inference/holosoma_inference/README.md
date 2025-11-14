@@ -89,7 +89,7 @@ python3 src/holosoma_inference/holosoma_inference/run_policy.py \
     task.USE_JOYSTICK=true \
     task.INTERFACE="enp0s31f6" \
     task.policy.rl_rate=50 \
-    model_path=src/holosoma_inference/holosoma_inference/models/wbt/model_19999.onnx
+    model_path=src/holosoma_inference/holosoma_inference/models/wbt/fastsac_g1_29dof_dancing.onnx
 ```
 
 
@@ -109,7 +109,7 @@ python3 src/holosoma_inference/holosoma_inference/run_sim.py \
 
 ```bash
 python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-wbt \
-    --task.model-path src/holosoma_inference/holosoma_inference/models/wbt/model_19999.onnx \
+    --task.model-path src/holosoma_inference/holosoma_inference/models/wbt/fastsac_g1_29dof_dancing.onnx \
     --task.no-use-joystick \
     --task.rl-rate 50
 ```

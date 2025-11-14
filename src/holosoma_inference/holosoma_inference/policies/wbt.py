@@ -1,5 +1,9 @@
+import json
+
 import numpy as np
+import onnx
 import onnxruntime
+from loguru import logger
 import pinocchio as pin
 from termcolor import colored
 
@@ -96,6 +100,20 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.onnx_policy_session = onnxruntime.InferenceSession(model_path)
         self.onnx_input_names = [inp.name for inp in self.onnx_policy_session.get_inputs()]
         self.onnx_output_names = [out.name for out in self.onnx_policy_session.get_outputs()]
+
+        # Extract KP/KD from ONNX metadata (same as base class)
+        onnx_model = onnx.load(model_path)
+        metadata = {}
+        for prop in onnx_model.metadata_props:
+            metadata[prop.key] = json.loads(prop.value)
+
+        self.onnx_kp = np.array(metadata["kp"]) if "kp" in metadata else None
+        self.onnx_kd = np.array(metadata["kd"]) if "kd" in metadata else None
+
+        if self.onnx_kp is not None:
+            from pathlib import Path
+
+            logger.info(f"Loaded KP/KD from ONNX metadata: {Path(model_path).name}")
 
         # get initial command and ref quat xyzw
         time_step = np.zeros((1, 1), dtype=np.float32)
