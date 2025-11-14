@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+
+from holosoma_inference.config2.config_types.robot import RobotConfig
+
+
+def _get_config_value(config: RobotConfig | dict, key: str, default=None):
+    """
+    Util function to temporarily support getting valeus from both `RobotConfig` and old dict-based configs.
+
+    TODO: Force dataclasses-based access once `run_sim.py` is moved to `holosoma`.
+    """
+
+    # Try dataclass attribute access first
+    if hasattr(config, key):
+        return getattr(config, key)
+    # Fall back to hydra
+    if isinstance(config, dict):
+        return config.get(key, default)
+    raise RuntimeError(f"Unsupported type {type(config)}")
+
+
+class BasicCommandSender(ABC):
+    """Abstract base class for command sender implementations."""
+
+    def __init__(self, config: RobotConfig | dict, lcm=None):
+        self.lcm = lcm
+        self.config = config
+        self.sdk_type = _get_config_value(config, "sdk_type", "unitree")
+        self.motor_type = _get_config_value(config, "motor_type", "serial")
+
+        # Initialize control gains
+        self.kp_level = 1.0
+        self.kd_level = 1.0
+        self.waist_kp_level = 1.0
+
+        # Initialize weak motor joint index
+        self.weak_motor_joint_index = []
+        weak_motor_cfg = _get_config_value(self.config, "weak_motor_joint_index")
+        if weak_motor_cfg:
+            for value in self.robot.WeakMotorJointIndex.values():
+                self.weak_motor_joint_index.append(value)
+
+        self.no_action = 0
+
+        # Initialize SDK-specific components
+        self._init_sdk_components()
+
+    @abstractmethod
+    def _init_sdk_components(self):
+        """Initialize SDK-specific components. Must be implemented by subclasses."""
+
+    @abstractmethod
+    def send_command(self, cmd_q, cmd_dq, cmd_tau, dof_pos_latest=None):
+        """Send command to robot. Must be implemented by subclasses."""
+
+    def is_weak_motor(self, motor_index):
+        """Check if a motor is a weak motor."""
+        return motor_index in self.weak_motor_joint_index
+
+    def _set_motor_command(self, motor_cmd, motor_id, joint_id, cmd_q, cmd_dq, cmd_tau):
+        """Set motor command for a specific motor."""
+        default_q = _get_config_value(self.config, "default_motor_angles")
+
+        if joint_id == -1 or self.no_action:
+            motor_cmd.q = default_q[motor_id]
+            motor_cmd.dq = 0.0
+            motor_cmd.tau = 0.0
+            motor_cmd.kp = 0.0
+            motor_cmd.kd = 0.0
+        else:
+            motor_cmd.q = cmd_q[joint_id]
+            motor_cmd.dq = cmd_dq[joint_id]
+            motor_cmd.tau = cmd_tau[joint_id]
+            motor_kp = _get_config_value(self.config, "motor_kp")
+            motor_kd = _get_config_value(self.config, "motor_kd")
+            motor_cmd.kp = motor_kp[motor_id] * self.kp_level
+            motor_cmd.kd = motor_kd[motor_id] * self.kd_level
+
+    def _fill_motor_commands(self, motor_cmd, cmd_q, cmd_dq, cmd_tau):
+        """Fill motor commands for all motors."""
+        motor2joint = _get_config_value(self.config, "motor2joint")
+        num_motors = _get_config_value(self.config, "num_motors")
+
+        for i in range(num_motors):
+            m_id = i
+            j_id = motor2joint[i]
+            cmd = motor_cmd[m_id]
+            self._set_motor_command(cmd, m_id, j_id, cmd_q, cmd_dq, cmd_tau)

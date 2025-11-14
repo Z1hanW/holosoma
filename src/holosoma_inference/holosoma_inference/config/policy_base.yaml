@@ -1,0 +1,14 @@
+# @package _global_
+
+defaults:
+  - _self_
+  - base/hydra
+  - robot: ???
+  - task: ???
+  - obs: ???
+
+# Output directory
+output_dir: outputs/${now:%Y%m%d_%H%M%S} 
+
+# Model path
+model_path: ???

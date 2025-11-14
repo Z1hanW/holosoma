@@ -1,0 +1,50 @@
+<mxfile host="drawio.corp.amazon.com" modified="2025-08-19T14:32:20.782Z" agent="Mozilla/5.0 (X11; Linux x86_64; rv:141.0) Gecko/20100101 Firefox/141.0" etag="QNTyFvVyAUH4bPdl5JhU" version="21.7.4" type="device">
+  <diagram name="Page-1" id="3hM4uO8LFgS4Px5oRi6F">
+    <mxGraphModel dx="2394" dy="2483" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="znscOLheDxpv6a0WDjlA-1" value="Mujoco Process" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="210" y="505" width="460" height="405" as="geometry" />
+        </mxCell>
+        <mxCell id="znscOLheDxpv6a0WDjlA-2" value="Policy Inference&amp;nbsp;&lt;br&gt;(base_policy.py)" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="245" y="120" width="360" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="bU5pd0fLelMjLMHZD6re-8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="znscOLheDxpv6a0WDjlA-9" target="bU5pd0fLelMjLMHZD6re-5">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="130" y="830" />
+              <mxPoint x="130" y="210" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="znscOLheDxpv6a0WDjlA-9" value="RobotBridge&lt;br&gt;&lt;br&gt;BaseSim.compute_torques(self.robot_bridge.low_cmd)" style="rounded=0;whiteSpace=wrap;html=1;" parent="1" vertex="1">
+          <mxGeometry x="285" y="780" width="320" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="bU5pd0fLelMjLMHZD6re-1" value="Inference Pipeline" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="245" y="-110" width="360" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="bU5pd0fLelMjLMHZD6re-3" value="RobotState.msg" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="245" y="-60" width="105" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="bU5pd0fLelMjLMHZD6re-4" value="PolicyAction.msg" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="500" y="-60" width="105" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="bU5pd0fLelMjLMHZD6re-5" value="StateProcessor" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="245" y="185" width="105" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="bU5pd0fLelMjLMHZD6re-7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="bU5pd0fLelMjLMHZD6re-6" target="znscOLheDxpv6a0WDjlA-9">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="740" y="210" />
+              <mxPoint x="740" y="830" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="bU5pd0fLelMjLMHZD6re-6" value="CommandSender" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+          <mxGeometry x="500" y="185" width="105" height="50" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

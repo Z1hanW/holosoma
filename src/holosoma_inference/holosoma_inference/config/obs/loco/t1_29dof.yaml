@@ -1,0 +1,44 @@
+# @package _global_
+
+defaults:
+  - obs_base
+
+obs:
+  obs_dict:
+    actor_obs:
+      - base_ang_vel
+      - projected_gravity
+      - command_lin_vel
+      - command_ang_vel
+      - dof_pos
+      - dof_vel
+      - actions
+      - sin_phase
+      - cos_phase
+
+  history_length_dict:
+    actor_obs: 1
+
+  obs_dims:
+    base_lin_vel: 3
+    base_ang_vel: 3
+    projected_gravity: 3
+    command_lin_vel: 2
+    command_ang_vel: 1
+    dof_pos: 29
+    dof_vel: 29
+    actions: 29
+    sin_phase: 2
+    cos_phase: 2
+
+  obs_scales:
+    base_lin_vel: 1.0
+    base_ang_vel: 1.0
+    projected_gravity: 1.0
+    command_lin_vel: 1.0
+    command_ang_vel: 1.0
+    dof_pos: 1.0
+    dof_vel: 0.1
+    actions: 1.0
+    sin_phase: 1.0
+    cos_phase: 1.0

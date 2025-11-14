@@ -1,0 +1,193 @@
+"""Terrain hooks for locomotion tasks."""
+
+from __future__ import annotations
+
+from typing import Any, Tuple
+
+from holosoma.managers.terrain.base import TerrainTermBase
+from holosoma.simulator.shared.terrain import Terrain
+from holosoma.utils import draw, warp_utils
+from holosoma.utils.rotations import quat_apply_yaw
+from holosoma.utils.safe_torch_import import torch
+
+ATTACHMENT_POS = (0.0, 0.0, 0.25)
+
+
+def interquartile_mean(x, dim=-1):
+    """Compute interquartile mean (mean of values between 25th and 75th percentile)"""
+    sorted_x, _ = torch.sort(x, dim=dim)
+    n = sorted_x.shape[dim]
+
+    # Calculate quartile indices
+    q1_idx = max(1, n // 4)  # 25th percentile index
+    q3_idx = min(n - 1, 3 * n // 4)  # 75th percentile index
+
+    # Extract interquartile range and compute mean
+    if dim == -1 or dim == sorted_x.dim() - 1:
+        iqr_values = sorted_x[..., q1_idx : q3_idx + 1]
+    else:
+        # Handle arbitrary dimension
+        indices = [slice(None)] * sorted_x.dim()
+        indices[dim] = slice(q1_idx, q3_idx + 1)
+        iqr_values = sorted_x[tuple(indices)]
+
+    return torch.mean(iqr_values, dim=dim)
+
+
+class TerrainLocomotion(TerrainTermBase):
+    """Stateful terrain term that owns terrain buffers and updates them each step."""
+
+    def __init__(self, cfg: Any, env: Any):
+        super().__init__(cfg, env)
+        self._terrain = Terrain(self._cfg, self.num_envs)
+        assert hasattr(self._terrain, "mesh")
+        self._warp_mesh = warp_utils.convert_to_wp_mesh(
+            self._terrain.mesh.vertices, self._terrain.mesh.faces, self.device
+        )
+        self._env_origins = torch.zeros(self.num_envs, 3, device=self.device, requires_grad=False)
+        self._get_env_origins()
+
+    @property
+    def terrain(self):
+        return self._terrain
+
+    @property
+    def mesh(self):
+        return self._terrain.mesh
+
+    @property
+    def warp_mesh(self):
+        return self._warp_mesh
+
+    def setup(self) -> None:
+        self._base_heights = torch.zeros(self.num_envs, device=self.device, requires_grad=False)
+        self._base_height_points, self._ray_directions, self._num_base_height_points = self._init_base_height_points()
+        self._ray_hits_world_base = torch.zeros(
+            self.num_envs, self._num_base_height_points, 3, device=self.device, requires_grad=False
+        )
+        self._offset_pos = torch.tensor(list(ATTACHMENT_POS), device=self.device)
+
+        if hasattr(self.env, "feet_height_indices"):
+            # Environment requires feet heights
+            self._compute_feet_heights = True
+            self._feet_heights = torch.zeros(
+                self.num_envs, len(self.env.feet_height_indices), device=self.device, requires_grad=False
+            )
+            self._ray_directions_feet = torch.zeros(
+                self.num_envs, len(self.env.feet_height_indices), 3, device=self.device, requires_grad=False
+            )
+            self._ray_directions_feet[..., :] = torch.tensor([0.0, 0.0, -1.0], device=self.device)
+            self._ray_hits_world_feet = torch.zeros(
+                self.num_envs, len(self.env.feet_height_indices), 3, device=self.device, requires_grad=False
+            )
+        else:
+            # Initialize not-used feet heights tensors with empty tensors
+            self._compute_feet_heights = False
+            self._feet_heights = torch.zeros(0, device=self.device, requires_grad=False)
+            self._ray_directions_feet = torch.zeros(0, 0, 3, device=self.device, requires_grad=False)
+            self._ray_hits_world_feet = torch.zeros(0, 0, 3, device=self.device, requires_grad=False)
+
+    @property
+    def env_origins(self) -> torch.Tensor:
+        return self._env_origins
+
+    @property
+    def custom_origins(self) -> bool:
+        return self._custom_origins
+
+    @property
+    def base_heights(self) -> torch.Tensor:
+        return self._base_heights
+
+    @property
+    def feet_heights(self) -> torch.Tensor:
+        return self._feet_heights
+
+    def update_heights(self, env_ids=None):
+        idx = env_ids if env_ids is not None else slice(None)
+        self._base_heights[idx], self._ray_hits_world_base[idx] = self._get_base_heights(env_ids)
+        if self._compute_feet_heights:
+            self._feet_heights[idx], self._ray_hits_world_feet[idx] = self._get_feet_heights(env_ids)
+
+    def _get_env_origins(self):
+        """Sets environment origins. On rough terrain the origins are defined by the terrain platforms.
+        Otherwise create a grid.
+        """
+        self._custom_origins = True
+        self._env_origins[:] = torch.from_numpy(self.terrain.sample_env_origins()).to(self.device).to(torch.float)
+
+    def _init_base_height_points(self):
+        """Returns points at which the height measurments are sampled (in base frame)
+
+        Returns:
+            [torch.Tensor]: Tensor of shape (num_envs, self.num_base_height_points, 3)
+        """
+        # Sampling spacing should match terrain resolution for meaningful measurements
+        terrain_res = self._cfg.horizontal_scale
+        base_spacing = terrain_res  # Match terrain grid resolution
+
+        # Create sampling range: use terrain resolution as spacing
+        # For 0.05m terrain: sample at [..., -0.10, -0.05, 0.0, 0.05, 0.10, ...]
+        # For 0.10m terrain: sample at [..., -0.10, 0.0, 0.10, ...]
+        max_range = 0.15  # 15cm radius around robot
+        num_points = int(2 * max_range / base_spacing) + 1
+
+        # Ensure odd number for symmetric sampling around center
+        if num_points % 2 == 0:
+            num_points += 1
+
+        # Create symmetric range aligned with terrain grid
+        half_range = (num_points - 1) * base_spacing / 2
+        points_1d = torch.linspace(-half_range, half_range, num_points, device=self.device, requires_grad=False)
+
+        y = points_1d
+        x = points_1d
+
+        grid_x, grid_y = torch.meshgrid(x, y)
+
+        num_base_height_points = grid_x.numel()
+        points = torch.zeros(
+            self.num_envs,
+            num_base_height_points,
+            3,
+            device=self.device,
+            requires_grad=False,
+        )
+        points[:, :, 0] = grid_x.flatten()
+        points[:, :, 1] = grid_y.flatten()
+        ray_directions = torch.zeros((self.num_envs, num_base_height_points, 3), device=self.device)
+        ray_directions[..., :] = torch.tensor([0.0, 0.0, -1.0], device=self.device)
+        return points, ray_directions, num_base_height_points
+
+    def _get_base_heights(self, env_ids=None) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Get base heights from the terrain."""
+        idx = env_ids if env_ids is not None else slice(None)
+        base_positions = quat_apply_yaw(
+            self.env.base_quat[idx].repeat(1, self._num_base_height_points),
+            self._base_height_points[idx],
+            True,
+        ) + (self.env.simulator.robot_root_states[idx, :3]).unsqueeze(1)
+        ray_starts_world = base_positions + self._offset_pos[None, None, ...]
+        ray_directions_world = self._ray_directions[idx]
+        ray_hits_world = warp_utils.ray_cast(ray_starts_world, ray_directions_world, self.warp_mesh)
+        base_heights = (base_positions - ray_hits_world)[..., 2]
+        return interquartile_mean(base_heights, dim=1), ray_hits_world
+
+    def _get_feet_heights(self, env_ids=None) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Get feet heights from the terrain."""
+        idx = env_ids if env_ids is not None else slice(None)
+        foot_positions = self.env.simulator._rigid_body_pos[idx, self.env.feet_height_indices, :].clone()
+        ray_starts_world = foot_positions + self._offset_pos[None, None, ...]
+        ray_directions_world = self._ray_directions_feet[idx]
+        ray_hits_world = warp_utils.ray_cast(ray_starts_world, ray_directions_world, self.warp_mesh)
+        return (foot_positions - ray_hits_world)[..., 2], ray_hits_world
+
+    def draw_debug_viz(self):
+        env_id = 0
+        for j in range(self._num_base_height_points):
+            position = self._ray_hits_world_base[env_id, j].detach().cpu().numpy()
+            draw.draw_sphere(self.env.simulator, position, 0.02, (1, 0, 0), env_id)
+        if self._compute_feet_heights:
+            for j in range(len(self.env.feet_height_indices)):
+                position = self._ray_hits_world_feet[env_id, j].detach().cpu().numpy()
+                draw.draw_sphere(self.env.simulator, position, 0.02, (0, 1, 0), env_id)

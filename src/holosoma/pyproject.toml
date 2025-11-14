@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "holosoma"
+version = "0.0.1"
+requires-python = ">=3.8"
+dependencies = [
+    "hydra-core>=1.2.0",
+    "ipdb",
+    "loguru",
+    "numpy==1.23.5",
+    "onnx",
+    "opencv-python",
+    "pydantic",
+    "pygame",
+    "pynput",
+    "rich",
+    "scipy",
+    "tensorboard",
+    "tensordict",
+    "termcolor",
+    "tqdm",
+    "wandb==0.22.0", # pin version until https://github.com/wandb/wandb/issues/10647 is fixed
+    "pytest",
+    "types-pynput",
+    "types-tqdm",
+    "types-requests",
+    "types-python-dateutil",
+    "mypy==1.14.1",
+    "yourdfpy>=0.0.58",
+]
+
+# Mark optional-dependencies as dynamic since it needs runtime computation
+dynamic = ["optional-dependencies"]
+
+[tool.setuptools.packages.find]
+where = ["."]

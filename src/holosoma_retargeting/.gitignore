@@ -1,0 +1,17 @@
+*.swp
+__pycache__
+*.zip
+.vscode
+*.pt
+*.pkl
+*.egg-info
+data/
+.DS_Store
+rt_all_data/
+rt_results/
+results_single/
+experiments/
+*scaled*.urdf
+*scaled*.xml
+nightly_data/
+examples/data_conversion/objects/

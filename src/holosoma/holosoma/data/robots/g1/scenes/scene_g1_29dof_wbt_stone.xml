@@ -1,0 +1,697 @@
+<mujoco model="g1_29dof scene">
+    <include file="../g1_29dof.xml"/>
+    <option timestep="0.002" iterations="50" solver="Newton"/>
+    <compiler angle="radian" meshdir="../meshes/"/>
+
+    <visual>
+        <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+        <rgba haze="0.15 0.25 0.35 1"/>
+        <global azimuth="120" elevation="-20"/>
+    </visual>
+
+    <statistic center="0 0 0.5" extent="2.0"/>
+
+    <asset>
+        <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+        <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
+                markrgb="0.8 0.8 0.8" width="300" height="300"/>
+        <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+    </asset>
+
+    <worldbody>
+        <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+
+        <!-- Center Lower Platform -->
+        <geom name="floor" pos="0.0 0.0 -1.1" type="box" size="100.0 100.0 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1" material="groundplane"/>
+
+        <!-- Center Upper Platform -->
+        <geom pos="0.0 0.0 -0.1" type="box" size="1.5 1.5 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <!-- Rightward stepping stone-->
+        <geom pos="1.8 6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 0.0 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <geom pos="2.25 6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 0.0 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <geom pos="2.7 6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 0.0 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <geom pos="3.15 6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 0.0 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <geom pos="3.6 6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 0.0 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <!-- Right Upper Platform -->
+        <geom pos="5.4 0.0 -0.1" type="box" size="1.5 1.5 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <!-- Leftward stepping stone-->
+        <geom pos="-1.8 6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 0.0 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <geom pos="-2.25 6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 0.0 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <geom pos="-2.7 6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 0.0 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <geom pos="-3.15 6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 0.0 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <geom pos="-3.6 6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 0.0 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -0.45 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -0.9 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -1.35 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -4.05 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -4.5 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -4.95 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -5.4 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -5.85 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -6.3 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -6.75 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <!-- Left Upper Platform -->
+        <geom pos="-5.4 0.0 -0.1" type="box" size="1.5 1.5 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <!-- Downward stepping stone-->
+        <geom pos="6.75 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="6.3 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.85 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.4 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.95 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.5 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.05 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.35 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.9 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.45 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.0 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.45 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.9 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.35 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.05 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.5 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.95 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.4 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.85 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.3 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.75 -1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <geom pos="6.75 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="6.3 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.85 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.4 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.95 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.5 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.05 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.35 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.9 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.45 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.0 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.45 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.9 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.35 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.05 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.5 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.95 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.4 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.85 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.3 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.75 -2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <geom pos="6.75 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="6.3 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.85 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.4 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.95 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.5 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.05 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.35 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.9 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.45 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.0 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.45 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.9 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.35 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.05 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.5 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.95 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.4 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.85 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.3 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.75 -2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <geom pos="6.75 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="6.3 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.85 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.4 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.95 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.5 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.05 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.35 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.9 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.45 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.0 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.45 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.9 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.35 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.05 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.5 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.95 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.4 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.85 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.3 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.75 -3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <geom pos="6.75 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="6.3 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.85 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.4 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.95 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.5 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.05 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.35 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.9 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.45 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.0 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.45 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.9 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.35 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.05 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.5 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.95 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.4 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.85 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.3 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.75 -3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <!-- Down Upper Platform -->
+        <geom pos="0.0 -5.4 -0.1" type="box" size="1.5 1.5 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <!-- Upward stepping stone-->
+        <geom pos="6.75 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="6.3 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.85 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.4 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.95 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.5 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.05 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.35 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.9 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.45 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.0 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.45 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.9 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.35 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.05 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.5 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.95 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.4 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.85 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.3 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.75 1.8 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <geom pos="6.75 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="6.3 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.85 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.4 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.95 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.5 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.05 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.35 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.9 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.45 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.0 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.45 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.9 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.35 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.05 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.5 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.95 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.4 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.85 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.3 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.75 2.25 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <geom pos="6.75 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="6.3 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.85 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.4 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.95 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.5 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.05 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.35 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.9 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.45 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.0 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.45 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.9 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.35 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.05 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.5 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.95 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.4 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.85 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.3 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.75 2.7 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <geom pos="6.75 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="6.3 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.85 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.4 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.95 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.5 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.05 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.35 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.9 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.45 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.0 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.45 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.9 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.35 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.05 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.5 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.95 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.4 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.85 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.3 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.75 3.15 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <geom pos="6.75 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="6.3 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.85 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="5.4 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.95 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.5 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="4.05 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.6 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="3.15 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.7 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="2.25 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.8 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="1.35 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.9 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.45 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="0.0 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.45 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-0.9 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.35 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-1.8 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.25 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-2.7 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.15 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-3.6 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.05 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.5 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-4.95 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.4 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-5.85 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.3 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <geom pos="-6.75 3.6 -0.1" type="box" size="0.15 0.15 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <!-- Up Upper Platform -->
+        <geom pos="0.0 5.4 -0.1" type="box" size="1.5 1.5 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+
+        <!-- Left Upper Platform -->
+        <geom pos="-5.4 5.4 -0.1" type="box" size="1.5 1.5 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <!-- Right Upper Platform -->
+        <geom pos="5.4 5.4 -0.1" type="box" size="1.5 1.5 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <!-- Right Lower Platform -->
+        <geom pos="5.4 -5.4 -0.1" type="box" size="1.5 1.5 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        <!-- Left Lower Platform -->
+        <geom pos="-5.4 -5.4 -0.1" type="box" size="1.5 1.5 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
+        
+    </worldbody>
+
+</mujoco>

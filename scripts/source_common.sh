@@ -1,0 +1,2 @@
+WORKSPACE_DIR=$HOME/.falcon_deps
+CONDA_ROOT=$WORKSPACE_DIR/miniconda3

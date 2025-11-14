@@ -1,0 +1,36 @@
+# @package _global_
+
+robot:
+  ROBOT: ???
+  ROBOT_TYPE: ???
+  ASSET_FILE: ???
+  SDK_TYPE: ??? # "unitree", "booster"
+  MOTOR_TYPE: ??? # "serial", "parallel"
+  USE_SENSOR: ???
+
+  # Number of motors and joints
+  NUM_MOTORS: ???
+  NUM_JOINTS: ???
+  NUM_UPPER_BODY_JOINTS: ???
+
+  # Control gains
+  MOTOR_KP: ???
+  MOTOR_KD: ???
+
+  # Default DOF and motor angles
+  DEFAULT_DOF_ANGLES: ???
+  DEFAULT_MOTOR_ANGLES: ???
+
+  # Motor limits
+  joint_pos_lower_limit_list: ???
+  joint_pos_upper_limit_list: ???
+  joint_vel_limit_list: ???
+  motor_effort_limit_list: ???
+
+  # Motor to joint mapping
+  MOTOR2JOINT: ???
+  JOINT2MOTOR: ???
+
+  # Unitree specific constants
+  UNITREE_LEGGED_CONST: ???
+  WEAK_MOTOR_JOINT_INDEX: ???

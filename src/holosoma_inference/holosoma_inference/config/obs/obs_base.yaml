@@ -1,0 +1,7 @@
+# @package _global_
+
+obs:
+  obs_dict: ???
+  history_length_dict: ???
+  obs_dims: ???
+  obs_scales: ???
