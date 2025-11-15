@@ -336,8 +336,11 @@ class InteractionMeshRetargeter:
         with tqdm(range(num_frames)) as pbar:
             for i in pbar:
                 # Get object poses and transform points
-                object_quat_demo = object_poses[i, :4]
-                object_trans_demo = object_poses[i, 4:]
+                # object_quat_demo = object_poses[i, :4]
+                # object_trans_demo = object_poses[i, 4:]
+                object_quat_demo = object_poses[i, 3:]
+                object_trans_demo = object_poses[i, :3]
+
 
                 # Get human joint positions and create interaction mesh in object frame
                 human_mapped_joints = human_joint_motions[i, self.smplh_mapped_joint_indices]
@@ -356,8 +359,10 @@ class InteractionMeshRetargeter:
 
                 if self.debug:
                     # Only for visualization
-                    object_quat = object_poses_augmented[i, :4]
-                    object_trans = object_poses_augmented[i, 4:]
+                    # object_quat = object_poses_augmented[i, :4]
+                    # object_trans = object_poses_augmented[i, 4:]
+                    object_quat = object_poses_augmented[i, 3:]
+                    object_trans = object_poses_augmented[i, :3]
                     obj_pts_demo = transform_points_local_to_world(
                         object_quat_demo, object_trans_demo, object_points_local_demo
                     )
@@ -634,9 +639,13 @@ class InteractionMeshRetargeter:
         dqa_star = dqa.value
         cost = problem.value
 
+        # q_star = np.copy(q)
+        # q_star[self.q_a_indices] = dqa_star + q_a_n_last
+        # q_star[:4] /= np.linalg.norm(q_star[:4]) + 1e-12
+
         q_star = np.copy(q)
         q_star[self.q_a_indices] = dqa_star + q_a_n_last
-        q_star[:4] /= np.linalg.norm(q_star[:4]) + 1e-12
+        q_star[3:7] /= np.linalg.norm(q_star[3:7]) + 1e-12
 
         return q_star, cost
 
@@ -682,8 +691,10 @@ class InteractionMeshRetargeter:
         self.viser_robot.update_cfg(robot_joint_positions)
 
         # Update robot base pose using set_transform
-        robot_quat = q[:4]  # Base orientation
-        robot_pos = q[4:7]  # Base position
+        # robot_quat = q[:4]  # Base orientation
+        # robot_pos = q[4:7]  # Base position
+        robot_quat = q[3:7]  # Base orientation
+        robot_pos = q[:3]  # Base position
 
         # Update robot base frame
         self.robot_base.position = robot_pos
@@ -692,8 +703,10 @@ class InteractionMeshRetargeter:
         # Update object pose if it exists
         if hasattr(self, "viser_object") and self.viser_object is not None:
             if self.has_dynamic_object:
-                object_quat = q[-7:-3]
-                object_pos = q[-3:]
+                # object_quat = q[-7:-3]
+                # object_pos = q[-3:]
+                object_quat = q[-4:]
+                object_pos = q[-7:-4]
             else:
                 object_quat = np.asarray([1, 0, 0, 0])
                 object_pos = np.zeros(3)
@@ -872,11 +885,14 @@ class InteractionMeshRetargeter:
 
     def _update_jacobians_and_phis_from_q(self, q: np.ndarray):
         # --- set state (match your layout) ---
-        if self.has_dynamic_object:
-            q_mj = np.concatenate([q[4:7], q[:4], q[7:-7], q[-3:], q[-7:-3]])
-        else:
-            q_mj = np.concatenate([q[4:7], q[:4], q[7:]])
-        self.robot_data.qpos[:] = q_mj
+        # if self.has_dynamic_object:
+        #     q_mj = np.concatenate([q[4:7], q[:4], q[7:-7], q[-3:], q[-7:-3]])
+        # else:
+        #     q_mj = np.concatenate([q[4:7], q[:4], q[7:]])
+        # self.robot_data.qpos[:] = q_mj
+        # q is in MuJoCo order: [x, y, z, qw, qx, qy, qz]
+        self.robot_data.qpos[:] = q
+
         mujoco.mj_forward(self.robot_model, self.robot_data)  # kinematics & AABBs valid
 
         m, d = self.robot_model, self.robot_data
@@ -1055,11 +1071,13 @@ class InteractionMeshRetargeter:
         J_qdot = Jp @ T  # (3 x nq)
 
         # 6) (Optional) reorder first 7 cols to Drake's [qw,qx,qy,qz,x,y,z] if needed
-        if self.has_dynamic_object:
-            perm = [3, 4, 5, 6, 0, 1, 2] + list(range(7, self.robot_model.nq - 7)) + [-4, -3, -2, -1, -7, -6, -5]
-        else:
-            perm = [3, 4, 5, 6, 0, 1, 2] + list(range(7, self.robot_model.nq))
-        return J_qdot[:, perm]
+        # if self.has_dynamic_object:
+        #     perm = [3, 4, 5, 6, 0, 1, 2] + list(range(7, self.robot_model.nq - 7)) + [-4, -3, -2, -1, -7, -6, -5]
+        # else:
+        #     perm = [3, 4, 5, 6, 0, 1, 2] + list(range(7, self.robot_model.nq))
+        # return J_qdot[:, perm]
+
+        return J_qdot 
 
     def _calc_manipulator_jacobians(
         self,
@@ -1074,8 +1092,10 @@ class InteractionMeshRetargeter:
 
         if obj_frame:
             if self.has_dynamic_object:
-                obj_quat = q[-7:-3]
-                obj_pos = q[-3:]
+                # obj_quat = q[-7:-3]
+                # obj_pos = q[-3:]
+                obj_quat = q[-4:]
+                obj_pos = q[-7:-4]
                 obj_rot = Rotation.from_quat([obj_quat[1], obj_quat[2], obj_quat[3], obj_quat[0]]).as_matrix()
                 obj_rot_inv = obj_rot.T
             else:
@@ -1084,9 +1104,11 @@ class InteractionMeshRetargeter:
                 obj_pos = np.zeros(3)
 
         if self.has_dynamic_object:
-            q_mujoco = np.concatenate([q[4:7], q[:4], q[7:-7], q[-3:], q[-7:-3]])
+            # q_mujoco = np.concatenate([q[4:7], q[:4], q[7:-7], q[-3:], q[-7:-3]])
+        
+            q_mujoco = q.copy()
         else:
-            q_mujoco = np.concatenate([q[4:7], q[:4], q[7:]])
+            q_mujoco = q.copy()
         self.robot_data.qpos[:] = q_mujoco
 
         mujoco.mj_forward(self.robot_model, self.robot_data)
@@ -1120,8 +1142,11 @@ class InteractionMeshRetargeter:
     def _get_robot_link_positions(self, q, link_names):
         """Get robot link positions for given configuration using Mujoco."""
         # Reorder base pose for Mujoco
-        quat = q[:4]  # [w,x,y,z]
-        pos = q[4:7]  # [x,y,z]
+        # quat = q[:4]  # [w,x,y,z]
+        # pos = q[4:7]  # [x,y,z]
+
+        quat = q[3:7]  # [w,x,y,z]
+        pos = q[:3]  # [x,y,z]
 
         # Construct Mujoco configuration
         if self.has_dynamic_object:

@@ -14,4 +14,7 @@ experiments/
 *scaled*.urdf
 *scaled*.xml
 nightly_data/
-examples/data_conversion/objects/
+nightly_results/
+demo_results/
+demo_results_parallel/
+*.pyc

@@ -1,9 +1,4 @@
-"""
-Unified tyro-based configuration for all robot constants (G1, T1).
-This single config class handles all robots with robot_type-based defaults.
-
-Uses properties instead of __post_init__ - much simpler!
-"""
+"""Configuration types for robot retargeting."""
 
 from __future__ import annotations
 
@@ -11,7 +6,6 @@ from dataclasses import dataclass
 from typing import Literal, TypedDict
 
 import numpy as np
-import tyro
 
 
 # Default values per robot type
@@ -19,6 +13,7 @@ class RobotDefaults(TypedDict):
     robot_dof: int
     robot_height: float
     object_name: str
+
 
 _ROBOT_DEFAULTS: dict[str, RobotDefaults] = {
     "g1": {"robot_dof": 29, "robot_height": 1.32, "object_name": "ground"},
@@ -28,7 +23,7 @@ _ROBOT_DEFAULTS: dict[str, RobotDefaults] = {
 
 @dataclass(frozen=True)
 class RobotConfig:
-    """Unified configuration for all robot constants (G1, H1, T1) using tyro.
+    """Unified configuration for all robot constants (G1, T1) using tyro.
     
     Uses properties instead of __post_init__ - much simpler!
     
@@ -141,6 +136,8 @@ class RobotConfig:
                 "left_foot_sphere_4_link", "right_foot_sphere_4_link",
                 "left_foot_sphere_5_link", "right_foot_sphere_5_link",
             ]
+        else:
+            raise ValueError(f"Invalid robot type: {self.robot_type}")
 
     @property
     def Q_A_STANDING(self) -> np.ndarray | None:
@@ -162,7 +159,8 @@ class RobotConfig:
         if self.manual_lb is not None:
             return self.manual_lb
         
-        base: dict[str, float] = {"0": -1.0, "1": -1.0, "2": -1.0, "3": -1.0}  # quaternion bounds
+        # base: dict[str, float] = {"0": -1.0, "1": -1.0, "2": -1.0, "3": -1.0}  # quaternion bounds
+        base: dict[str, float] = {"3": -1.0, "4": -1.0, "5": -1.0, "6": -1.0}  # quaternion bounds
         
         if self.robot_type == "g1":
             base.update({
@@ -184,7 +182,8 @@ class RobotConfig:
         if self.manual_ub is not None:
             return self.manual_ub
         
-        base: dict[str, float] = {"0": 1.0, "1": 1.0, "2": 1.0, "3": 1.0}  # quaternion bounds
+        # base: dict[str, float] = {"0": 1.0, "1": 1.0, "2": 1.0, "3": 1.0}  # quaternion bounds
+        base: dict[str, float] = {"3": 1.0, "4": 1.0, "5": 1.0, "6": 1.0}  # quaternion bounds
         
         if self.robot_type == "g1":
             base.update({
@@ -223,24 +222,3 @@ class RobotConfig:
             return np.concatenate([np.arange(7), np.arange(11, 23)])
         else:
             raise ValueError(f"Invalid robot type: {self.robot_type}")
-
-
-def get_default_robot_config(robot_type: Literal["g1", "t1"] = "g1") -> RobotConfig:
-    """Get default robot configuration.
-    
-    Args:
-        robot_type: Robot type identifier.
-    
-    Returns:
-        RobotConfig: Default configuration instance.
-    """
-    return RobotConfig(robot_type=robot_type)
-
-
-def get_robot_config_from_cli() -> RobotConfig:
-    """Get robot configuration from tyro CLI.
-    
-    Returns:
-        RobotConfig: Configuration instance from CLI arguments.
-    """
-    return tyro.cli(RobotConfig)

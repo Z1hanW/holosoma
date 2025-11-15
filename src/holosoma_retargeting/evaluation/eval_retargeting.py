@@ -17,16 +17,19 @@ import glob
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, cast
 from types import SimpleNamespace
 
 import tyro
 
-import mujoco 
+import mujoco  # type: ignore[import-not-found] 
 
 # Add src to path for direct execution
 src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))
+# Also add src root to path for holosoma_retargeting package imports
+src_root = Path(__file__).parent.parent.parent  # goes to src/
+sys.path.insert(0, str(src_root))
 
 from utils import (  # type: ignore[import-not-found]
     calculate_scale_factor,
@@ -40,13 +43,13 @@ from utils import (  # type: ignore[import-not-found]
 )
 
 from mujoco_utils import _world_mesh_from_geom  # type: ignore[import-not-found] 
-import igl  # type: ignore[import-untyped] 
+import igl  # type: ignore[import-not-found] 
 
-from constants.motion_data_config_simple import (  # type: ignore[import-not-found]
+from holosoma_retargeting.config_types.data_type import (
     MotionDataConfig,
     SMPLH_DEMO_JOINTS,
 )
-from constants.robot.unified_robot_config import RobotConfig  # type: ignore[import-not-found]
+from holosoma_retargeting.config_types.robot import RobotConfig
 
 
 def create_task_constants(
@@ -201,36 +204,22 @@ class RetargetingEvaluator:
         self._obj_FW = np.vstack(obj_Fs) if obj_Fs else np.zeros((0, 3), np.int32)
 
     def _get_robot_link_positions(self, q, link_names):
-        """Get robot link positions for given configuration using Mujoco."""
-        # Reorder base pose for Mujoco
-        quat = q[:4]  # [w,x,y,z]
-        pos = q[4:7]  # [x,y,z]
-
-        # Construct Mujoco configuration
+        """Get robot link positions for given configuration using Mujoco.
+        
+        Assumes q is in MuJoCo order:
+        - [0:3] robot base position (xyz)
+        - [3:7] robot base quaternion (wxyz)
+        - [7:7+R] robot joints
+        - [-7:-4] object position (xyz) if has_dynamic_object
+        - [-4:] object quaternion (wxyz) if has_dynamic_object
+        """
+        # q is already in MuJoCo order, use directly
         if self.has_dynamic_object:
-            mujoco_q = np.concatenate(
-                [
-                    pos,  # First 3: position
-                    quat,  # Next 4: quaternion
-                    q[7:-7],  # Rest: joint angles (excluding object pose)
-                    q[-3:],
-                    q[-7:-3],
-                ]
-            )
+            # Set full qpos including object
+            self.robot_data.qpos[:] = q
         else:
-            mujoco_q = np.concatenate(
-                [
-                    pos,  # First 3: position
-                    quat,  # Next 4: quaternion
-                    q[7:],  # Rest: joint angles (excluding object pose)
-                ]
-            )
-
-        # Set the configuration
-        if mujoco_q.shape != self.robot_data.qpos.shape:
-            self.robot_data.qpos = mujoco_q[:-7]  # Exclude object information from q
-        else:
-            self.robot_data.qpos = mujoco_q
+            # Set only robot qpos (exclude object)
+            self.robot_data.qpos[:] = q
         # Forward kinematics to update all positions
         mujoco.mj_forward(self.robot_model, self.robot_data)
 
@@ -307,12 +296,8 @@ class RetargetingEvaluator:
         fromto = np.zeros(6, dtype=float)
 
         for i, q in enumerate(q_retarget):
-            # --- set state (your layout) ---
-            if self.has_dynamic_object:
-                q_mj = np.concatenate([q[4:7], q[:4], q[7:-7], q[-3:], q[-7:-3]])
-            else:
-                q_mj = np.concatenate([q[4:7], q[:4], q[7:]])
-            d.qpos[:] = q_mj
+            # q is already in MuJoCo order: [0:3] pos, [3:7] quat, [7:] joints, [-7:-4] obj_pos, [-4:] obj_quat
+            d.qpos[:] = q
             mujoco.mj_forward(m, d)  # compute kinematics, aabbs, etc.
 
             # 1) collect near pairs with temporary margins (also populates _geom_names)
@@ -403,8 +388,9 @@ class RetargetingEvaluator:
                 )
             )
             robot_joint_pos = self._get_robot_link_positions(q, robot_joint_names)
+            # Object pose in MuJoCo order: [-7:-4] pos, [-4:] quat
             robot_local_points.append(
-                transform_points_world_to_local(q[-7:-3], q[-3:], robot_joint_pos)
+                transform_points_world_to_local(q[-4:], q[-7:-4], robot_joint_pos)
             )
         demo_local_points = np.array(demo_local_points)
         robot_local_points = np.array(robot_local_points)
@@ -847,7 +833,7 @@ def main(cfg: Args) -> None:
         or cfg.motion_data_config.data_format != data_format
     ):
         cfg.motion_data_config = MotionDataConfig(
-            data_format=data_format,
+            data_format=cast(Literal["lafan", "smplh", "mocap"], data_format),
             robot_type=cfg.robot,
         )
 

@@ -1,13 +1,3 @@
-"""This script replay a motion from a csv file and output it to a npz file
-
-.. code-block:: bash
-
-    # Usage
-    python csv_to_npz.py --input_file LAFAN/dance1_subject2.csv --input_fps 30 --line_range 122 722 \
-    --output_file ./motions/dance1_subject2.npz --output_fps 50
-"""
-
-from dataclasses import dataclass
 from pathlib import Path
 import sys
 from typing import Tuple, List, Union, Optional, cast, Any, Literal, Dict
@@ -18,58 +8,27 @@ import os
 import torch
 import torch.nn.functional as F
 
-import mujoco 
-import mujoco.viewer as mjv
+import mujoco  # type: ignore[import-not-found]
+import mujoco.viewer as mjv  # type: ignore[import-not-found]
 from mujoco import mj_kinematics 
 import tyro
 
 # Add src to path for direct execution
 src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))
+# Also add src root to path for holosoma_retargeting package imports
+src_root = Path(__file__).parent.parent.parent  # goes to src/
+sys.path.insert(0, str(src_root))
 
 from types import SimpleNamespace
 
-from constants.motion_data_config_simple import MotionDataConfig  # type: ignore[import-not-found]
-from constants.robot.unified_robot_config import RobotConfig  # type: ignore[import-not-found]
+from holosoma_retargeting.config_types.data_conversion import DataConversionConfig
+from holosoma_retargeting.config_types.data_type import MotionDataConfig
+from holosoma_retargeting.config_types.robot import RobotConfig
 
 
-@dataclass
-class Args:
-    """Replay motion from file (csv or npz), interpolate to correct frequency, then output to npz file."""
-    
-    input_file: str
-    """The path to the input motion file."""
-    
-    input_fps: int = 30
-    """The fps of the input motion."""
-    
-    line_range: Optional[Tuple[int, int]] = None
-    """Line range: START END (both inclusive). The line index starts from 1. If not provided, all lines will be loaded."""
-    
-    output_name: Optional[str] = None
-    """The name of the motion npz file."""
-    
-    output_fps: int = 50
-    """The fps of the output motion."""
-    
-    once: bool = False
-    """Run the motion once and exit."""
-    
-    has_dynamic_object: bool = False
-    """Whether the motion has a dynamic object."""
-    
-    robot: Literal["g1", "t1"] = "g1"
-    """Robot model to use."""
-    
-    data_format: Literal["lafan", "smplh", "mocap"] = "smplh"
-    """Motion data format."""
-    
-    object_name: Optional[str] = None
-    """Override object name (default depends on robot and data type)."""
-
-
-# parse the arguments
-args_cli = tyro.cli(Args)
+# Parse the arguments using the config structure
+args_cli = tyro.cli(DataConversionConfig)
 
 
 """Rest everything follows."""
@@ -187,9 +146,9 @@ class MotionLoader:
             self.input_fps = round(1 / data.get("fps", 1 / self.input_fps))
             motion = torch.from_numpy(data['qpos']).to(torch.float32)
             # Assume drake convention for the motion file
-            motion[:, :7] = drake_convention_to_mujoco_convention(motion[:, :7])
-            if self.has_dynamic_object:
-                motion[:, -7:] = drake_convention_to_mujoco_convention(motion[:, -7:])
+            # motion[:, :7] = drake_convention_to_mujoco_convention(motion[:, :7])
+            # if self.has_dynamic_object:
+            #     motion[:, -7:] = drake_convention_to_mujoco_convention(motion[:, -7:])
         else:
             raise ValueError("Unsupported motion file format. Use .csv or .npz.")
 

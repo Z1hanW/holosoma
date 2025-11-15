@@ -15,7 +15,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal, Optional
+from typing import Literal, Optional, cast
 
 import numpy as np
 import tyro
@@ -35,10 +35,15 @@ import sys
 
 src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))
+# Also add src root to path for holosoma_retargeting package imports
+src_root = Path(__file__).parent.parent.parent  # goes to src/
+sys.path.insert(0, str(src_root))
 
 # Import after path modification
-from constants.motion_data_config_simple import MotionDataConfig  # type: ignore[import-not-found]
-from constants.robot.unified_robot_config import RobotConfig  # type: ignore[import-not-found]
+from holosoma_retargeting.config_types.data_type import MotionDataConfig
+from holosoma_retargeting.config_types.retargeting import RetargetingConfig
+from holosoma_retargeting.config_types.robot import RobotConfig
+from holosoma_retargeting.config_types.task import TaskConfig
 from interaction_mesh_retargeter import InteractionMeshRetargeter  # type: ignore[import-not-found]
 from utils import (  # type: ignore[import-not-found]
     augment_object_poses,
@@ -92,7 +97,7 @@ def create_task_constants(
     elif task_type == "climbing":
         obj_name = task_config.object_name or "multi_boxes"
         task_constants.OBJECT_NAME = obj_name
-        object_dir = task_config.object_dir
+        object_dir = str(task_config.object_dir) if task_config.object_dir else None
         task_constants.OBJECT_DIR = object_dir or ""
         task_constants.OBJECT_URDF_FILE = (
             f"{object_dir}/{obj_name}.urdf" if object_dir else f"{obj_name}.urdf"
@@ -206,7 +211,7 @@ def process_single_task(args):
     # Setup object directory for climbing: set default if not provided
     if task_type == "climbing" and task_config.object_dir is None:
         from dataclasses import replace
-        task_config = replace(task_config, object_dir=str(Path(file_path).parent))
+        task_config = replace(task_config, object_dir=Path(file_path).parent)
 
     # Create task constants
     constants = create_task_constants(
@@ -513,6 +518,14 @@ def process_single_task(args):
         if Path.exists(Path(file_name)):
             continue
 
+        # Convert to mujoco order 
+        object_poses = object_poses[:, [4, 5, 6, 0, 1, 2, 3]]
+        object_poses_augmented = object_poses_augmented[:, [4, 5, 6, 0, 1, 2, 3]]
+        if q_init is not None:
+            q_init[:7] = q_init[:7][[4, 5, 6, 0, 1, 2, 3]]
+        if q_nominal is not None:
+            q_nominal[:, :7] = q_nominal[:, :7][[4, 5, 6, 0, 1, 2, 3]]
+
         # Retarget motion
         retargeted_motions, _, _, _ = retargeter.retarget_motion(
             human_joint_motions=human_joints,
@@ -540,69 +553,24 @@ _OBJECT_SCALE_NORMAL = np.array([1.0, 1.0, 1.0])
 _AUGMENTATION_TRANSLATION = np.array([0.0, -0.2, 0.0])
 
 
-@dataclass(frozen=True)
-class TaskConfig:
-    """Task-specific configuration parameters.
-    
-    These parameters control task-specific behavior like ground meshgrid generation,
-    object sampling, augmentation, and scaling. Can be overridden via CLI.
-    """
-
-    # Object name 
-    # Auto-determined based on task_type if None: "largebox" for object_interaction, 
-    # "multi_boxes" for climbing, "ground" for robot_only
-    object_name: Optional[str] = None
-    
-    # Ground meshgrid (robot_only task)
-    ground_size: int = 15
-    ground_range: tuple[float, float] = (-1.0, 1.0)
-    
-    # Climbing ground meshgrid (climbing task)
-    climbing_ground_size: int = 8
-    climbing_ground_range: tuple[float, float] = (-2.0, 2.0)
-    
-    # Surface weight parameters for climbing object sampling (climbing task)
-    # Used in weighted_surface_sampling: points with z-coordinate > threshold get high weight
-    # This biases sampling toward top surfaces (important for climbing contact points)
-    surface_weight_threshold: float = 0.9  # z-coordinate threshold for high-weight points
-    surface_weight_high: int = 20  # Weight for top surface points (z > threshold)
-    surface_weight_low: int = 1  # Weight for other points
-    
-    # Object directory (for climbing tasks)
-    # Auto-determined from file_path.parent if None (in parallel processing)
-    object_dir: Optional[str] = None
-    
-    # Augmentation parameters (object_interaction task)
-    augmentation_frame_count: int = 70
-    augmentation_trim_frames: int = 400
-
+# TaskConfig and RetargetingConfig are now imported from config_types
 
 @dataclass
-class Args:
-    """Unified Parallel Robot Retargeting for all task types"""
-
-    # --- Task type selection ---
-    task_type: Literal["robot_only", "object_interaction", "climbing"] = "object_interaction"
-
-    # --- top-level run knobs ---
-    robot: Literal["g1", "t1", "h1"] = "g1"
-    data_format: Optional[Literal["lafan", "smplh", "mocap"]] = None  # Auto-determined by task_type if None
+class ParallelRetargetingConfig(RetargetingConfig):
+    """Extended retargeting config for parallel processing.
+    
+    Adds parallel-specific fields while inheriting all retargeting config fields.
+    """
+    
+    # Parallel processing specific fields
     data_dir: Path = Path("demo_data/OMOMO_new")
-    save_dir: Path = Path("demo_results_parallel/g1/object_interaction/omomo")
-    augmentation: bool = True
-    max_workers: Optional[int] = None  # Auto-determined if None
-
-    # --- robot config (nested - can override robot_urdf_file, robot_dof, etc. via --robot-config.robot-urdf-file) ---
-    robot_config: RobotConfig = RobotConfig(robot_type="g1")
-
-    # --- motion data config (nested - can override demo_joints, joints_mapping, etc. via --motion-data-config.demo-joints) ---
-    motion_data_config: MotionDataConfig = MotionDataConfig(data_format="lafan", robot_type="g1")
-
-    # --- task config (nested - can override ground_size, surface_weight_threshold, object_name, etc. via --task-config.object-name) ---
-    task_config: TaskConfig = TaskConfig()
+    """Directory containing input data files."""
+    
+    max_workers: Optional[int] = None
+    """Maximum number of parallel workers. Auto-determined if None."""
 
 
-def main(cfg: Args) -> None:
+def main(cfg: ParallelRetargetingConfig) -> None:
     # Set defaults based on task type
     default_data_formats = {
         "robot_only": "lafan",
@@ -619,7 +587,7 @@ def main(cfg: Args) -> None:
     if str(cfg.save_dir) == "rt_demo_results/lafan/robot_only_parallel" and cfg.task_type != "robot_only":
         save_dir = Path(default_save_dirs[cfg.task_type])
     else:
-        save_dir = cfg.save_dir
+        save_dir = cfg.save_dir or Path(default_save_dirs[cfg.task_type])
     
     # Set default object_name in task_config if not provided
     if cfg.task_config.object_name is None:
@@ -642,9 +610,13 @@ def main(cfg: Args) -> None:
         cfg.robot_config = RobotConfig(robot_type=cfg.robot)
 
     if cfg.motion_data_config.robot_type != cfg.robot or cfg.motion_data_config.data_format != data_format:
-        cfg.motion_data_config = MotionDataConfig(data_format=data_format, robot_type=cfg.robot)
+        cfg.motion_data_config = MotionDataConfig(
+            data_format=cast(Literal["lafan", "smplh", "mocap"], data_format),
+            robot_type=cfg.robot
+        )
 
     # Find files based on data format (use object_name from task_config)
+    # Use data_dir for parallel processing (overrides data_path from RetargetingConfig)
     files = find_files(cfg.data_dir, data_format, cfg.task_config.object_name)
     print(f"Found {len(files)} files for task type: {cfg.task_type}")
 
@@ -702,6 +674,5 @@ def main(cfg: Args) -> None:
 
 
 if __name__ == "__main__":
-    cfg = tyro.cli(Args)
+    cfg = tyro.cli(ParallelRetargetingConfig)
     main(cfg)
-

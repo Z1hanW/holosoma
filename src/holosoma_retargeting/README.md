@@ -1,8 +1,5 @@
 ## Single sequence motion retargeting 
 ```
-# Robot-only (LAFAN)
-python examples/robot_retarget.py --data_path demo_data/lafan --task-type robot_only --task-name walk1_subject5 --data_format lafan 
-
 # Robot-only (OMOMO)
 python examples/robot_retarget.py --data_path demo_data/OMOMO_new --task-type robot_only --task_name sub3_largebox_003 --data_format smplh
 
@@ -17,9 +14,6 @@ Add --augmentation for running sequence with augmentation (need to first run the
 
 ## Batch processing for motion retargeting 
 ```
-# Robot-only (LAFAN)
-python examples/parallel_robot_retarget.py --data-dir demo_data/lafan --task-type robot_only  --data_format lafan --save_dir demo_results_parallel/g1/robot_only/lafan --robot-config.object-name ground
-
 # Robot-only (OMOMO)
 python examples/parallel_robot_retarget.py --data-dir demo_data/OMOMO_new --task-type robot_only  --data_format smplh --save_dir demo_results_parallel/g1/robot_only/omomo --robot-config.object-name ground
 
@@ -30,16 +24,11 @@ python examples/parallel_robot_retarget.py --data-dir demo_data/OMOMO_new --task
 python examples/parallel_robot_retarget.py --data-dir demo_data/climb --task-type climbing --data_format mocap --robot-config.robot-urdf-file models/g1/g1_29dof_spherehand.urdf --save_dir demo_results_parallel/g1/climbing/mocap_climb --robot-config.object-name multi_boxes
 ```
 
-
 ## Data Preparation 
-We provide demo_data/ for fast testing. To test on more motion sequences in OMOMO or LAFAN, please follow the instructions to download the data. 
+We provide demo_data/ for fast testing. To test on more motion sequences in OMOMO, please follow the instructions to download the data. 
 
 ### OMOMO 
 Our pipeline used the processed dataset by InterMimic. The data format differs from the original OMOMO dataset. Please download the processed OMOMO data here https://drive.google.com/file/d/141YoPOd2DlJ4jhU2cpZO5VU5GzV_lm5j/view. 
-
-### LAFAN
-Please follow the instructions https://github.com/ubisoft/ubisoft-laforge-animation-dataset to download the original LAFAN dataset. If you met issues with git clone, try to fork the github repo, and git clone your forked one. 
-
 
 ## Check visualizations of saved retargeting results  
 ```
@@ -67,9 +56,6 @@ python viser_player.py --robot_urdf models/g1/g1_29dof_spherehand.urdf \
 
 # Visualize robot only results 
 python viser_player.py --robot_urdf models/g1/g1_29dof.urdf \
-    --qpos_npz demo_results_parallel/g1/robot_only/lafan/walk1_subject5_original.npz
-
-python viser_player.py --robot_urdf models/g1/g1_29dof.urdf \
     --qpos_npz demo_results_parallel/g1/robot_only/omomo/sub3_largebox_003_original.npz
 ```
 
@@ -83,9 +69,6 @@ python evaluation/eval_retargeting.py --res_dir demo_results_parallel/g1/climbin
 
 # Evaluate robot only (OMOMO)
 python evaluation/eval_retargeting.py --res_dir demo_results_parallel/g1/robot_only/omomo --data_dir demo_data/OMOMO_new --data_type "robot_only"
-
-# Evaluate robot only (LAFAN)
-python evaluation/eval_retargeting.py --res_dir demo_results_parallel/g1/robot_only/lafan --data_dir demo_data/lafan --data_type "robot_only"
 ```
 
 ## Prepare data for training RL whole-body tracking policy

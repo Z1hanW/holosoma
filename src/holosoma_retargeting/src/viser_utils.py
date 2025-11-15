@@ -27,12 +27,12 @@ def create_motion_control_sliders(
     """
     Create a slider + play/pause controls and a background player thread with smooth, slerp-based interpolation.
 
-    Assumed qpos layout per frame:
-        [0:4]   robot base quaternion (wxyz)
-        [4:7]   robot base position   (xyz)
+    Assumed qpos layout per frame (MuJoCo order):
+        [0:3]   robot base position   (xyz)
+        [3:7]   robot base quaternion (wxyz)
         [7:7+R] robot joints          (R = robot_dof)
-        [-7:-3] object quaternion (wxyz)          # only if contains_object_in_qpos and viser_object provided
-        [-3:]   object position  (xyz)            # only if contains_object_in_qpos and viser_object provided
+        [-7:-4] object position  (xyz)            # only if contains_object_in_qpos and viser_object provided
+        [-4:]   object quaternion (wxyz)          # only if contains_object_in_qpos and viser_object provided
 
     Args:
         server: Viser server.
@@ -104,19 +104,19 @@ def create_motion_control_sliders(
         q1 = qpos_arr[i1]
         out = q0.copy()
 
-        # Robot base
-        out[:4] = _slerp(q0[:4], q1[:4], u)                      # quat (wxyz)
-        out[4:7] = (1.0 - u) * q0[4:7] + u * q1[4:7]             # pos
+        # Robot base (MuJoCo order: pos first, then quat)
+        out[0:3] = (1.0 - u) * q0[0:3] + u * q1[0:3]             # pos (xyz)
+        out[3:7] = _slerp(q0[3:7], q1[3:7], u)                   # quat (wxyz)
 
         # Joints
         j0 = q0[7 : 7 + robot_dof]
         j1 = q1[7 : 7 + robot_dof]
         out[7 : 7 + robot_dof] = (1.0 - u) * j0 + u * j1
 
-        # Object (optional)
+        # Object (optional) (MuJoCo order: pos first, then quat)
         if has_object_input:
-            out[-7:-3] = _slerp(q0[-7:-3], q1[-7:-3], u)         # obj quat (wxyz)
-            out[-3:]   = (1.0 - u) * q0[-3:] + u * q1[-3:]       # obj pos
+            out[-7:-4] = (1.0 - u) * q0[-7:-4] + u * q1[-7:-4]   # obj pos (xyz)
+            out[-4:]   = _slerp(q0[-4:], q1[-4:], u)             # obj quat (wxyz)
         return out
 
     # ---------------- state ----------------
@@ -133,20 +133,20 @@ def create_motion_control_sliders(
             joints = joints[:robot_dof] if joints.shape[0] > robot_dof else np.pad(joints, (0, robot_dof - joints.shape[0]))
         viser_robot.update_cfg(joints)
 
-        # robot base
-        r_q = _quat_continuous(prev["robot_q"], q[:4]); prev["robot_q"] = r_q
+        # robot base (MuJoCo order: pos first, then quat)
+        robot_base_frame.position = q[0:3]                      # pos (xyz)
+        r_q = _quat_continuous(prev["robot_q"], q[3:7]); prev["robot_q"] = r_q
         robot_base_frame.wxyz = r_q
-        robot_base_frame.position = q[4:7]
 
-        # object (optional)
+        # object (optional) (MuJoCo order: pos first, then quat)
         if has_object_input and object_base_frame is not None:
-            o_q = _quat_continuous(prev["obj_q"], q[-7:-3]); prev["obj_q"] = o_q
+            object_base_frame.position = q[-7:-4]                 # obj pos (xyz)
+            o_q = _quat_continuous(prev["obj_q"], q[-4:]); prev["obj_q"] = o_q
             object_base_frame.wxyz = o_q
-            object_base_frame.position = q[-3:]
         elif object_base_frame is not None and viser_object is not None:
             # fallback static pose
-            object_base_frame.wxyz = np.array([1.0, 0.0, 0.0, 0.0])
             object_base_frame.position = np.zeros(3)
+            object_base_frame.wxyz = np.array([1.0, 0.0, 0.0, 0.0])
 
     def _apply_discrete_frame(i: int) -> None:
         i = int(np.clip(i, 0, n_frames - 1))

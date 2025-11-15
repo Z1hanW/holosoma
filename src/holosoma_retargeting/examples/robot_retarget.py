@@ -21,10 +21,15 @@ import tyro
 # Add src to path for direct execution
 src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))
+# Also add src root to path for holosoma_retargeting package imports
+src_root = Path(__file__).parent.parent.parent  # goes to src/
+sys.path.insert(0, str(src_root))
 
-# Import new tyro configs
-from constants.motion_data_config_simple import MotionDataConfig  # type: ignore[import-not-found]
-from constants.robot.unified_robot_config import RobotConfig  # type: ignore[import-not-found]
+# Import configs from new structure
+from holosoma_retargeting.config_types.data_type import MotionDataConfig
+from holosoma_retargeting.config_types.retargeting import RetargetingConfig
+from holosoma_retargeting.config_types.robot import RobotConfig
+from holosoma_retargeting.config_types.task import TaskConfig
 from interaction_mesh_retargeter import InteractionMeshRetargeter  # type: ignore[import-not-found]
 from utils import (  # type: ignore[import-not-found]
     augment_object_poses,
@@ -67,82 +72,10 @@ DEFAULT_SAVE_DIRS = {
 # Constants for numpy arrays (not in dataclass to avoid tyro parsing issues)
 _OBJECT_SCALE_AUGMENTED = np.array([1.0, 1.0, 1.2])
 _OBJECT_SCALE_NORMAL = np.array([1.0, 1.0, 1.0])
-_AUGMENTATION_TRANSLATION = np.array([0.0, -0.2, 0.0])
+_AUGMENTATION_TRANSLATION = np.array([0.2, 0.0, 0.0])
 
 
-@dataclass(frozen=True)
-class TaskConfig:
-    """Task-specific configuration parameters.
-    
-    These parameters control task-specific behavior like ground meshgrid generation,
-    object sampling, augmentation, and scaling. Can be overridden via CLI.
-    """
-
-    # Object name 
-    # Auto-determined based on task_type if None: "largebox" for object_interaction, 
-    # "multi_boxes" for climbing, "ground" for robot_only
-    object_name: Optional[str] = None
-    
-    # Ground meshgrid (robot_only task)
-    ground_size: int = 15
-    ground_range: tuple[float, float] = (-1.0, 1.0)
-    
-    # Climbing ground meshgrid (climbing task)
-    climbing_ground_size: int = 8
-    climbing_ground_range: tuple[float, float] = (-2.0, 2.0)
-    
-    # Surface weight parameters for climbing object sampling (climbing task)
-    # Used in weighted_surface_sampling: points with z-coordinate > threshold get high weight
-    # This biases sampling toward top surfaces (important for climbing contact points)
-    surface_weight_threshold: float = 0.9  # z-coordinate threshold for high-weight points
-    surface_weight_high: int = 20  # Weight for top surface points (z > threshold)
-    surface_weight_low: int = 1  # Weight for other points
-    
-    # Object directory (for climbing tasks)
-    # Auto-determined from data_path / task_name if None
-    object_dir: Optional[Path] = None
-    
-    # Augmentation parameters (object_interaction task)
-    augmentation_frame_count: int = 70
-    augmentation_trim_frames: int = 400
-
-
-@dataclass
-class Args:
-    """Unified Robot Retargeting for all task types"""
-
-    # --- Task type selection ---
-    task_type: Literal["robot_only", "object_interaction", "climbing"] = "object_interaction"
-
-    # --- top-level run knobs ---
-    robot: Literal["g1", "t1"] = "g1"
-    data_format: Optional[Literal["lafan", "smplh", "mocap"]] = None  # Auto-determined by task_type if None
-    task_name: str = "sub3_largebox_003"
-    data_path: Path = Path("demo_data/OMOMO_new")
-    save_dir: Optional[Path] = None
-    augmentation: bool = False
-
-    # --- robot config (nested - can override robot_urdf_file, robot_dof, etc. via --robot-config.robot-urdf-file) ---
-    robot_config: RobotConfig = RobotConfig(robot_type="g1")
-
-    # --- motion data config (nested - can override demo_joints, joints_mapping, etc. via --motion-data-config.demo-joints) ---
-    # Note: data_format default will be set based on task_type in main()
-    motion_data_config: MotionDataConfig = MotionDataConfig(data_format="smplh", robot_type="g1")
-
-    # --- task config (nested - can override ground_size, surface_weight_threshold, etc. via --task-config.ground-size) ---
-    task_config: TaskConfig = TaskConfig()
-
-    # --- retargeter knobs ---
-    q_a_init_idx: int = -7
-    activate_joint_limits: bool = True
-    activate_obj_non_penetration: bool = True
-    activate_foot_sticking: bool = True
-    penetration_tolerance: float = 0.001
-    step_size: float = 0.2
-    visualize: bool = True
-    debug: bool = True
-    w_nominal_tracking_init: float = 5.0
-    nominal_tracking_tau: float = 1e6
+# TaskConfig and RetargetingConfig are now imported from config_types
 
 
 # ----------------------------- Helper Functions -----------------------------
@@ -205,7 +138,7 @@ def create_task_constants(
     return task_constants
 
 
-def validate_config(cfg: Args) -> None:
+def validate_config(cfg: RetargetingConfig) -> None:
     """Validate configuration consistency.
     
     Args:
@@ -410,7 +343,7 @@ def setup_object_data(
 
 
 def build_retargeter_kwargs(
-    cfg: Args, constants: SimpleNamespace, object_urdf_path: Optional[str], task_type: str
+    cfg: RetargetingConfig, constants: SimpleNamespace, object_urdf_path: Optional[str], task_type: str
 ) -> dict:
     """Build kwargs for InteractionMeshRetargeter.
     
@@ -426,18 +359,18 @@ def build_retargeter_kwargs(
     kwargs = {
         "task_constants": constants,
         "object_urdf_path": object_urdf_path,
-        "q_a_init_idx": cfg.q_a_init_idx,
-        "activate_joint_limits": cfg.activate_joint_limits,
-        "activate_obj_non_penetration": cfg.activate_obj_non_penetration,
-        "activate_foot_sticking": cfg.activate_foot_sticking,
-        "penetration_tolerance": cfg.penetration_tolerance,
-        "step_size": cfg.step_size,
-        "visualize": cfg.visualize,
-        "debug": cfg.debug,
-        "w_nominal_tracking_init": cfg.w_nominal_tracking_init,
+        "q_a_init_idx": cfg.retargeter.q_a_init_idx,
+        "activate_joint_limits": cfg.retargeter.activate_joint_limits,
+        "activate_obj_non_penetration": cfg.retargeter.activate_obj_non_penetration,
+        "activate_foot_sticking": cfg.retargeter.activate_foot_sticking,
+        "penetration_tolerance": cfg.retargeter.penetration_tolerance,
+        "step_size": cfg.retargeter.step_size,
+        "visualize": cfg.retargeter.visualize,
+        "debug": cfg.retargeter.debug,
+        "w_nominal_tracking_init": cfg.retargeter.w_nominal_tracking_init,
     }
     if task_type == "climbing":
-        kwargs["nominal_tracking_tau"] = cfg.nominal_tracking_tau
+        kwargs["nominal_tracking_tau"] = cfg.retargeter.nominal_tracking_tau
     return kwargs
 
 
@@ -455,11 +388,14 @@ def initialize_robot_pose(
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], np.ndarray, np.ndarray, np.ndarray]:
     """Initialize robot pose (q_init, q_nominal) based on task.
     
+    Returns qpos in MuJoCo order: [0:3] position, [3:7] quaternion, [7:] joints.
+    Object poses are returned in MuJoCo order: [0:3] position, [3:7] quaternion.
+    
     Args:
         task_type: Type of task
         data_format: Data format
         human_joints: Human joint positions
-        object_poses: Object poses
+        object_poses: Object poses (assumed to be in format: [quat, pos] or [pos, quat])
         constants: Task constants
         retargeter: Retargeter instance
         task_config: Task configuration
@@ -469,7 +405,7 @@ def initialize_robot_pose(
     
     Returns:
         Tuple of (q_init, q_nominal, object_poses_augmented, human_joints_modified, object_poses_modified)
-        where the last two may be trimmed/modified versions of the input arrays
+        where qpos is in MuJoCo order and object_poses are in MuJoCo order
     """
     logger.info("Initializing robot pose")
 
@@ -477,16 +413,19 @@ def initialize_robot_pose(
         if data_format == "lafan":
             human_quat_init = estimate_human_orientation(human_joints, constants.DEMO_JOINTS)
             spine_joint_idx = constants.DEMO_JOINTS.index("Spine1")
+            # MuJoCo order: pos first, then quat
             q_init = np.concatenate(
-                [human_quat_init, human_joints[0, spine_joint_idx, :3], np.zeros(constants.ROBOT_DOF)]
+                [human_joints[0, spine_joint_idx, :3], human_quat_init, np.zeros(constants.ROBOT_DOF)]
             )
         elif data_format == "smplh":  # smplh
             _, human_quat_init = transform_from_human_to_world(
                 human_joints[0, 0, :], object_poses[0], np.array([0.0, 0.0, 0.0])
             )
+            # MuJoCo order: pos first, then quat
             q_init = np.concatenate(
-                [human_quat_init, human_joints[0, 0, :3], np.zeros(constants.ROBOT_DOF)]
+                [human_joints[0, 0, :3], human_quat_init, np.zeros(constants.ROBOT_DOF)]
             )
+        object_poses = object_poses[:, [4, 5, 6, 0, 1, 2, 3]] 
         return q_init, None, object_poses, human_joints, object_poses
 
     elif task_type == "object_interaction":
@@ -502,6 +441,9 @@ def initialize_robot_pose(
                 human_joints_trimmed[0, 0, :],
                 _AUGMENTATION_TRANSLATION,
             )
+            # Convert object_poses_augmented to MuJoCo order if needed (assuming input is [quat, pos])
+            object_poses_augmented = object_poses_augmented[:, [4, 5, 6, 0, 1, 2, 3]]
+            object_poses_trimmed = object_poses_trimmed[:, [4, 5, 6, 0, 1, 2, 3]] 
             
             original_path = save_dir / f"{task_name}_original.npz"
             if not original_path.exists():
@@ -518,9 +460,13 @@ def initialize_robot_pose(
             _, human_quat_init = transform_from_human_to_world(
                 human_joints[0, 0, :], object_poses[0], np.array([0.0, 0.0, 0.0])
             )
+            # MuJoCo order: pos first, then quat
             q_init = np.concatenate(
-                [human_quat_init, human_joints[0, 0, :3], np.zeros(constants.ROBOT_DOF)]
+                [human_joints[0, 0, :3], human_quat_init, np.zeros(constants.ROBOT_DOF)]
             )
+            # Convert object_poses to MuJoCo order
+            object_poses = object_poses[:, [4, 5, 6, 0, 1, 2, 3]]
+            object_poses_augmented = object_poses_augmented[:, [4, 5, 6, 0, 1, 2, 3]]
             return q_init, None, object_poses_augmented, human_joints, object_poses
 
     elif task_type == "climbing":
@@ -534,19 +480,24 @@ def initialize_robot_pose(
             
             data = np.load(str(original_path))
             q_nominal = data["qpos"]
+            # Convert object_poses to MuJoCo order if needed (assuming input is [quat, pos])
+            object_poses = object_poses[:, [4, 5, 6, 0, 1, 2, 3]]
             return q_nominal[0], q_nominal, object_poses, human_joints, object_poses
         else:
             _, human_quat_init = transform_from_human_to_world(
                 human_joints[0, 0, :], object_poses[0], np.array([0.0, 0.0, 0.0])
             )
             spine_joint_idx = retargeter.demo_joints.index("Spine1")
+            # MuJoCo order: pos first, then quat
             q_init = np.concatenate(
                 [
-                    human_quat_init,
                     human_joints[0, spine_joint_idx],
+                    human_quat_init,
                     np.zeros(constants.ROBOT_DOF),
                 ]
             )
+            # Convert object_poses to MuJoCo order if needed (assuming input is [quat, pos])
+            object_poses = object_poses[:, [4, 5, 6, 0, 1, 2, 3]]
             return q_init, None, object_poses, human_joints, object_poses
 
    
@@ -579,7 +530,7 @@ def determine_output_path(
 # ----------------------------- Main -----------------------------
 
 
-def main(cfg: Args) -> None:
+def main(cfg: RetargetingConfig) -> None:
     """Main retargeting pipeline.
     
     Args:
@@ -695,10 +646,10 @@ def main(cfg: Args) -> None:
     )
     logger.info(f"Retargeting complete. Results saved to: {dest_res_path}")
 
-    if cfg.debug:
+    if cfg.retargeter.debug:
         input("Press Enter to exit ...")
 
 
 if __name__ == "__main__":
-    cfg = tyro.cli(Args)
+    cfg = tyro.cli(RetargetingConfig)
     main(cfg)

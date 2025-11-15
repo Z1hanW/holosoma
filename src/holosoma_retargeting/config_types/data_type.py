@@ -1,15 +1,9 @@
-"""
-Simplified motion data format configuration.
-This version uses properties instead of __post_init__ and _get_* methods.
-"""
+"""Configuration types for motion data format."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal, TypedDict
-
-import numpy as np
-import tyro
 
 
 # Pre-defined constants for each data format
@@ -184,6 +178,7 @@ class FormatConstants(TypedDict, total=False):
     default_scale_factor: float | None
     default_human_height: float | None
 
+
 DATA_FORMAT_CONSTANTS: dict[str, FormatConstants] = {
     "lafan": {
         "default_scale_factor": 1.27 / 1.7,
@@ -262,15 +257,11 @@ class MotionDataConfig:
         return format_constants.get("default_human_height")
 
 
-def get_default_motion_data_config(
-    data_format: Literal["lafan", "smplh", "mocap"] = "smplh",
-    robot_type: Literal["g1", "t1"] = "g1",
-) -> MotionDataConfig:
-    """Get default motion data configuration."""
-    return MotionDataConfig(data_format=data_format, robot_type=robot_type)
-
-
-def get_motion_data_config_from_cli() -> MotionDataConfig:
-    """Get motion data configuration from tyro CLI."""
-    return tyro.cli(MotionDataConfig)
-
+# Export constants for backward compatibility
+__all__ = [
+    "MotionDataConfig",
+    "LAFAN_DEMO_JOINTS",
+    "SMPLH_DEMO_JOINTS",
+    "MOCAP_DEMO_JOINTS",
+    "SMPL_JOINTS",
+]
