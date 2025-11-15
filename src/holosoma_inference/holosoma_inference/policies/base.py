@@ -11,7 +11,6 @@ import numpy as np
 import onnx
 import onnxruntime
 from loguru import logger
-from omegaconf import ListConfig
 from sshkeyboard import listen_keyboard
 from termcolor import colored
 
@@ -158,7 +157,7 @@ class BasePolicy:
 
     def _collect_model_paths(self, model_path):
         """Normalize model_path into a list of up to nine entries."""
-        if isinstance(model_path, (ListConfig, list, tuple)):
+        if isinstance(model_path, (list, tuple)):
             paths = list(model_path)
         elif model_path is not None:
             paths = [model_path]

@@ -38,6 +38,7 @@ setup(
         "pydantic",
         "loguru",
         "netifaces",
+        "onnx",
         "onnxruntime",
         "scipy",
         "sshkeyboard",
