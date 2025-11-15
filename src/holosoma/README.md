@@ -94,6 +94,25 @@ python src/holosoma/holosoma/train_agent.py \
     --logger.name ppo-without-symmetry-seed1
 ```
 
+### Video Logging
+
+Enable video recording during training. Videos are saved locally and uploaded to WandB if enabled.
+
+```bash
+source scripts/source_isaacgym_setup.sh
+python src/holosoma/holosoma/train_agent.py \
+    exp:g1-29dof-fast-sac \
+    simulator:isaacgym \
+    logger:wandb \
+    --logger.video.enabled=True \
+    --logger.video.interval=5
+```
+
+**Video logging parameters:**
+- `--logger.video.enabled=True` - Enable video recording
+- `--logger.video.interval=5` - Record video every 5 episodes
+- Videos are automatically uploaded to WandB when `logger:wandb` is used
+
 ### Terrain
 
 ```bash

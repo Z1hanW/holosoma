@@ -10,6 +10,7 @@ Holosoma (Greek: "whole-body") is a comprehensive humanoid robotics framework fo
 - **Task types**: Locomotion (velocity tracking) and whole-body tracking
 - **Sim-to-sim and sim-to-real deployment**: Shared inference pipeline across simulation and real robot control
 - **Motion retargeting**: Convert human motion capture data to robot motions while preserving interactions with objects and terrain
+- **Wandb integration**: Video logging, automatic ONNX checkpoint uploads, and direct checkpoint loading from Wandb
 
 ## Repository Structure
 

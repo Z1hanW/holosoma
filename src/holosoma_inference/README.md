@@ -181,6 +181,50 @@ Commands for controlling policies during execution:
 
 # Configuration Overrides
 
+## Loading ONNX Checkpoints from WandB
+
+You can load ONNX checkpoints directly from WandB without manually downloading them first. This is useful for quickly testing models from training runs.
+
+**Syntax:**
+```bash
+--task.model-path wandb://entity/project_name/run_id/model.onnx
+```
+
+**Example with G1 locomotion:**
+```bash
+source scripts/source_inference_setup.sh
+python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-loco \
+    --task.model-path wandb://my-username/my-project/run-abc123/fastsac_g1_29dof.onnx \
+    --task.use-joystick \
+    --task.interface eth0
+```
+
+**Example with WandB HTTPS URL:**
+```bash
+python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-loco \
+    --task.model-path https://wandb.ai/username/project/runs/abc123/files/model.onnx \
+    --task.use-joystick \
+    --task.interface eth0
+```
+
+The model will be automatically downloaded and cached locally. The entity is your WandB username or organization name.
+
+## Finding Your Network Interface
+
+The `--task.interface` parameter specifies which network interface to use for communicating with the robot. The correct interface name varies by computer and network card.
+
+**Common interface names:**
+- `eth0` - Common Ethernet interface name
+- `enp0s31f6` - Modern Linux Ethernet naming
+- `lo` - Loopback interface (for sim2sim)
+
+**To find your interface name:**
+```bash
+ifconfig
+```
+
+Look for the interface connected to your robot's network. For real robot deployments, use the interface with an IP address on the same subnet as your robot. For sim2sim deployments, use `lo` (loopback).
+
 ## Overriding Control Gains
 
 By default, control gains (kp/kd) are loaded from ONNX model metadata. You can override these values in your configuration:
