@@ -9,6 +9,13 @@ Policy inference for humanoid robot policies.
 | Unitree G1 | ✅         | ✅  |
 | Booster T1 | ✅         | ❌  |
 
+| Simulator               | Locomotion | WBT |
+|:-----------------------:|:----------:|:---:|
+| IsaacGym                | ✅         | ❌  |
+| IsaacSim                | ✅         | ✅  |
+| MuJoCo (inference only) | ✅         | ✅  |
+
+
 - ✅ (full support)
 - 🚧 (in progress/partial support)
 - ❌ (no support)
@@ -115,6 +122,25 @@ python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29d
 - **Step 4**: In policy terminal, press `] (A in joystick)` to start the policy
 - **Step 5**: In policy terminal, press `s (Start in joystick)` to start the motion clip
 
+## Whole Body Tracking Unitree G1 (sim2real)
+
+1. Launch the policy:
+
+```bash
+source scripts/source_inference_setup.sh
+python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-wbt \
+    --task.model-path src/holosoma_inference/holosoma_inference/models/wbt/fastsac_g1_29dof_dancing.onnx \
+    --task.use-joystick \
+    --task.no-use-sim-time \
+    --task.rl-rate 50
+    --task.interface eth0
+```
+
+2. Control the robot:
+
+- **Step 1**: In policy terminal, press `Enter` when prompted. The robot enters a stiff control mode.
+- **Step 4**: In policy terminal, press `] (A in joystick)` to start the policy
+- **Step 5**: In policy terminal, press `s (Start in joystick)` to start the motion clip
 
 # Policy Controls
 
