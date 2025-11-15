@@ -143,7 +143,7 @@ g1_29dof_wbt_w_object = replace(
         ),
         object=replace(
             robot.g1_29dof_w_object.object,
-            object_urdf_path="holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf",
+            object_urdf_path="src/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf",
         ),
     ),
     randomization=randomization.g1_29dof_wbt_randomization_w_object,
@@ -163,7 +163,7 @@ g1_29dof_wbt_fast_sac_w_object = replace(
         asset=replace(robot.g1_29dof_w_object.asset, self_collisions=0),
         object=replace(
             robot.g1_29dof_w_object.object,
-            object_urdf_path="holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf",
+            object_urdf_path="src/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf",
         ),
     ),
     randomization=randomization.g1_29dof_wbt_randomization_w_object,
@@ -182,63 +182,21 @@ __all__ = [
     "g1_29dof_wbt_w_object",
 ]
 
-# In stead of having a seperate config for box/slope/parkour, I want to make it into command line,
 """
-#TODO(jchen): Replace motion file paths to new file once we have them in holosoma
-
 Example 1: Robot only:
-
 python src/holosoma/holosoma/train_agent.py \
     exp:g1-29dof-wbt
 
-Example 2: Robot+Terrain:
+Example 2: Robot+Object:
+python src/holosoma/holosoma/train_agent.py \
+  exp:g1-29dof-wbt-w-object
 
+Example 3: Robot+Terrain:
 python src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt \
   terrain:terrain-load-obj \
-  command:g1-29dof-wbt \
-  --terrain.terrain-term.obj-file-path="holosoma/data/motions/g1_29dof/whole_body_tracking/terrain_slope.obj" \
+  --terrain.terrain-term.obj-file-path="src/holosoma/data/motions/g1_29dof/whole_body_tracking/terrain_slope.obj" \
   --command.setup_terms.motion_command.params.motion_config.motion_file\
-="holosoma/data/motions/g1_29dof/whole_body_tracking/motion_crawl_slope_v2.npz" \
-  --simulator.config.scene.env_spacing=0.0 \
-  --training.num-envs=3 \
-  --training.headless=False
-
-
-Example 3: Robot+Object:
-
-python src/holosoma/holosoma/train_agent.py \
-  exp:g1-29dof-wbt \
-  robot:g1-29dof-w-object \
-  terrain:terrain-locomotion-plane \
-  randomization:g1-29dof-wbt-w-object \
-  observation:g1-29dof-wbt-w-object \
-  reward:g1-29dof-wbt-w-object \
-  --robot.asset.self-collisions=0 \
-  --robot.object.object-urdf-path="holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf" \
-  --command.setup_terms.motion_command.params.motion_config.motion_file\
-="holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz" \
-  --command.setup_terms.motion_command.params.motion_config.use_adaptive_timesteps_sampler=True \
-  --simulator.config.scene.env_spacing=0.0 \
-  --training.num-envs=3
-
-
-#TODO(jchen): Replace motion file paths to new file
-Example 4: Robot+Terrain+Object:
-
-python src/holosoma/holosoma/train_agent.py \
-  exp:g1-29dof-wbt \
-  robot:g1-29dof-w-object \
-  terrain:terrain-load-obj \
-  randomization:g1-29dof-wbt-w-object \
-  observation:g1-29dof-wbt-w-object \
-  reward:g1-29dof-wbt-w-object \
-  --robot.asset.self-collisions=0 \
-  --robot.object.object-urdf-path="holosoma/data/motions/g1_29dof/whole_body_tracking/objects_flagshipchair.urdf" \
-  --terrain.terrain-term.obj-file-path="holosoma/data/motions/g1_29dof/whole_body_tracking/terrain_parkour.obj" \
-  --command.setup_terms.motion_command.params.motion_config.motion_file\
-="holosoma/data/motions/g1_29dof/whole_body_tracking/motion_parkour_v2.npz" \
-  --command.setup_terms.motion_command.params.motion_config.use_adaptive_timesteps_sampler=True \
-  --simulator.config.scene.env_spacing=0.0 \
-  --training.num-envs=3
+="src/holosoma/data/motions/g1_29dof/whole_body_tracking/motion_crawl_slope.npz" \
+  --simulator.config.scene.env_spacing=0.0
 """

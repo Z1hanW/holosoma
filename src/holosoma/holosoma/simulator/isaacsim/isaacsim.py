@@ -30,6 +30,7 @@ from loguru import logger
 from omegaconf import DictConfig
 
 from holosoma.utils.module_utils import get_holosoma_root
+from holosoma.utils.path import resolve_data_file_path
 from holosoma.config_types.simulator import SimulatorInitConfig, SceneConfig
 from holosoma.managers.terrain import TerrainManager
 from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
@@ -440,8 +441,9 @@ class IsaacSim(BaseSimulator):
         self.scene.filter_collisions(global_prim_paths=global_collision_prims)
 
         # add objects if object is provided
-        if self.robot_config.object.object_urdf_path:
-            object_asset_urdf_path = self.robot_config.object.object_urdf_path
+        if self.robot_config.object.object_urdf_path: 
+            # Resolve the object asset urdf path using importlib.resources
+            object_asset_urdf_path = resolve_data_file_path(self.robot_config.object.object_urdf_path)
             object_name = "object"  # hardcoded object name
             object_cfg = RigidObjectCfg(
                 prim_path=f"/World/envs/env_.*/Object",

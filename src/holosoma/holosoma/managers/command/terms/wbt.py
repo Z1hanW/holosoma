@@ -12,6 +12,7 @@ from loguru import logger
 from holosoma.config_types.command import MotionConfig, NoiseToInitialPoseConfig
 from holosoma.envs.wbt.wbt_manager import WholeBodyTrackingManager
 from holosoma.managers.command.base import CommandTermBase
+from holosoma.utils.path import resolve_data_file_path
 from holosoma.utils.rotations import (
     quat_apply,
     quat_error_magnitude,
@@ -34,7 +35,8 @@ class MotionLoader:
         robot_joint_names: list[str],
         device: str = "cpu",
     ):
-        motion_file = self._resolve_motion_file_path(motion_file)
+        # Resolve the motion file path using importlib.resources
+        motion_file = resolve_data_file_path(motion_file)
         assert Path(motion_file).is_file(), f"Invalid file path: {motion_file}"
 
         logger.info(f"Loading motion file: {motion_file}")
@@ -45,22 +47,6 @@ class MotionLoader:
         self._joint_indexes = joint_indexes
         self._body_indexes = body_indexes
         self.time_step_total = self._joint_pos.shape[0]
-
-    def _resolve_motion_file_path(self, motion_file: str) -> str:
-        # Resolve the motion_file path relative to the project root if it's a relative path
-        motion_file_path = Path(motion_file)
-        if not motion_file_path.is_absolute():
-            # TODO(jchen): Update this once we moved to a new repo.
-            # Get the directory of this file (wbt.py) and navigate to project root
-            # wbt.py is at: FAR-FALCON/hvcore/hvcore/managers/command/terms/wbt.py
-            # Project root is 5 levels up
-            current_file_dir = Path(__file__).resolve().parent
-            project_root = current_file_dir.parent.parent.parent.parent.parent
-            motion_file_path = project_root / motion_file_path
-
-        motion_file = str(motion_file_path.resolve())
-        logger.info(f"Resolved motion file path: {motion_file}")
-        return motion_file
 
     def _get_index_of_a_in_b(self, a_names: List[str], b_names: List[str], device: str = "cpu") -> torch.Tensor:
         indexes = []

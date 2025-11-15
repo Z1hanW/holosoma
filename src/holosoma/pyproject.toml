@@ -9,6 +9,7 @@ requires-python = ">=3.8"
 dependencies = [
     "astor",
     "easydict",
+    "importlib_resources; python_version < '3.9'",
     "ipdb",
     "joblib",
     "loguru",

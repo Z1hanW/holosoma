@@ -131,11 +131,10 @@ WORKFLOWS = [
 ]
 
 ISAACSIM_ONLY_WORKFLOWS = [
-    # TODO(jchen): Add back once we have the new example motion files in holosoma
-    # "g1-29dof-wbt",
-    # "g1-29dof-wbt-fast-sac",
-    # "g1-29dof-wbt-w-object",
-    # "g1-29dof-wbt-fast-sac-w-object",
+    "g1-29dof-wbt",
+    "g1-29dof-wbt-fast-sac",
+    "g1-29dof-wbt-w-object",
+    "g1-29dof-wbt-fast-sac-w-object",
 ]
 
 
