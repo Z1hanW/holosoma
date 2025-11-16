@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# Build the Docker image using the FAR-Holosoma directory as context
+# Build the Docker image using the holosoma directory as context
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )" # FAR-Holosoma/src/holosoma_inference/docker
-SRC_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")" # FAR-Holosoma/src
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )" # holosoma/src/holosoma_inference/docker
+SRC_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")" # holosoma/src
 
 ECR_REPO="241533154612.dkr.ecr.us-east-1.amazonaws.com"
 

@@ -7,8 +7,8 @@ if [ "$1" == "--new" ]; then
 fi
 
 # Get the project root directory dynamically
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )" # FAR-Holosoma/holosoma_inference/docker
-PROJECT_ROOT="$( cd "$SCRIPT_DIR/../../.." && pwd )" # FAR-Holosoma
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )" # holosoma/holosoma_inference/docker
+PROJECT_ROOT="$( cd "$SCRIPT_DIR/../../.." && pwd )" # holosoma/
 
 CONTAINER_NAME="far-jetson-container"
 IMAGE_NAME="241533154612.dkr.ecr.us-east-1.amazonaws.com/humanoid-onboard"
@@ -24,8 +24,8 @@ create_container() {
         -v /tmp/.X11-unix:/tmp/.X11-unix \
         -v ~/cyclonedds_ws/:/workspace/cyclonedds_ws \
         -v $HOME/.Xauthority:/root/.Xauthority:ro \
-        -v "$PROJECT_ROOT":/workspace/FAR-Holosoma \
-        -w /workspace/FAR-Holosoma \
+        -v "$PROJECT_ROOT":/workspace/holosoma \
+        -w /workspace/holosoma \
         "$IMAGE_NAME"
 }
 
@@ -51,12 +51,12 @@ else
         # Check if container is running
         if docker ps --format "table {{.Names}}" | grep -q "^${CONTAINER_NAME}$"; then
             echo "Container is running. Attaching to it..."
-            docker exec -it -w /workspace/FAR-Holosoma ${CONTAINER_NAME} /bin/bash
+            docker exec -it -w /workspace/holosoma ${CONTAINER_NAME} /bin/bash
 
         else
             echo "Container is stopped. Starting and attaching to it..."
             docker start ${CONTAINER_NAME}
-            docker exec -it -w /workspace/FAR-Holosoma ${CONTAINER_NAME} /bin/bash
+            docker exec -it -w /workspace/holosoma ${CONTAINER_NAME} /bin/bash
         fi
     else
         echo "Container ${CONTAINER_NAME} does not exist. Creating new container..."

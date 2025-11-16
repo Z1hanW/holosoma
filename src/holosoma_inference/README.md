@@ -22,63 +22,70 @@ Policy inference for humanoid robot policies.
 
 ## Getting Started
 
-1. Setup the robot
+### 1. Setup the Robot
+
 - Hang the robot on the gantry, turn on the robot and the controller.
-- Connect the robot with an Ethernet cable to your laptop.
-- Configure your laptop network interface to a static IP address `192.168.123.224` with netmask `255.255.255.0`.
+- Connect the robot to your laptop with an Ethernet cable.
+- Configure your laptop's network interface to a static IP address `192.168.123.224` with netmask `255.255.255.0`.
 - Put the robot in damping mode, then press `L2+R2` on the controller to enter development mode.
 
-For more detailed instructions, please refer to [Unitree Quick Start page](https://support.unitree.com/home/en/G1_developer/quick_start)
+For more detailed instructions, refer to the [Unitree Quick Start page](https://support.unitree.com/home/en/G1_developer/quick_start).
 
-2. Setup the environment
+### 2. Setup the Environment
 
-On your laptop, run the following commands to setup the environment:
+On your laptop, run the following commands to set up the environment:
+
 ```bash
-cd ~/FAR-Holosoma
+cd ~/holosoma
 bash scripts/setup_inference.sh             # Create a virtual environment with all dependencies
-source scripts/source_inference_setup.sh    # Enter the virtual environment
+source scripts/source_inference_setup.sh    # Activate the virtual environment
 sudo ufw disable                            # Disable the firewall
 ```
 
-3. Run a locomotion policy
-Within the `(hsinference)` virtualenv run the following command. Be sure to set your `interface` to the network interface name where your robot is connected (you can use `ifconfig` to list available interface names).
+### 3. Run a Locomotion Policy
+
+Within the `(hsinference)` virtualenv, run the following command. Be sure to set `--task.interface` to your network interface name where the robot is connected (use `ifconfig` to list available interfaces).
+
 ```bash
-python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-loco --task.model-path src/holosoma_inference/holosoma_inference/models/loco/g1_29dof/fastsac_g1_29dof.onnx --task.interface eth0
+python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-loco \
+    --task.model-path src/holosoma_inference/holosoma_inference/models/loco/g1_29dof/fastsac_g1_29dof.onnx \
+    --task.interface eth0
 ```
 
-4. Control the robot
+### 4. Control the Robot
 
-- Press `A` on the controller to start the policy
-- Press `start` to go onto walking mode
-- Use left joystick to go forward/backward/left/right
-- Use right joystick to turn
+- Press `A` on the controller to start the policy.
+- Press `Start` to enter walking mode.
+- Use the left joystick to move forward/backward/left/right.
+- Use the right joystick to turn.
 
-For detailed controls, refer to the `Policy Controls` section below.
+For detailed controls, refer to the [Policy Controls](#policy-controls) section below.
 
 
-### (Optional) Run onboard
+### (Optional) Run Onboard
 
-To run the policy onboard:
-- Follow `Step 1`
-- Ssh to the onboard Jetson:
+To run the policy onboard the robot's Jetson:
+
+1. Follow **Step 1** above.
+2. SSH to the onboard Jetson:
     ```bash
     ssh unitree@192.168.123.164     # Default password is '123'
-    sudo jetson_clocks              # Set Jetson to maximum performance.
+    sudo jetson_clocks              # Set Jetson to maximum performance
     ```
-- Follow steps `2,3,4`. The interface in `Step 3` is `--task.interface eth0`.
+3. Follow **Steps 2, 3, 4** above. Use `--task.interface eth0` in Step 3.
 
-### (Optional) Run inside docker
+### (Optional) Run Inside Docker
 
-To run inside docker (onboard or offboard):
+To run inside Docker (onboard or offboard):
 
-- Follow `Step 1`
-- Create the docker container by:
+1. Follow **Step 1** above.
+2. Create the Docker container:
     ```bash
-    bash FAR-Holosoma/src/holosoma_inference/docker/build.sh   # Build the docker image
-    bash FAR-Holosoma/src/holosoma_inference/docker/run.sh     # Create & enter the docker container
+    bash holosoma/src/holosoma_inference/docker/build.sh   # Build the Docker image
+    bash holosoma/src/holosoma_inference/docker/run.sh     # Create and enter the Docker container
     ```
-- Follow steps `3,4` inside the docker container. There's no need to perform `Step 2`, as the environment is pre-built inside the image.
-- The interface in `Step 3` is the same as on your host (`eth0` on Jetson, and on your own laptop determined by `ifconfig`)
+3. Follow **Steps 3 and 4** inside the Docker container. Skip Step 2, as the environment is pre-built in the image.
+4. Use the same interface as your host system in Step 3 (`eth0` on Jetson, or check with `ifconfig` on your laptop).
 
 
 
