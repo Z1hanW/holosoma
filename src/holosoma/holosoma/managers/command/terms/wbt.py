@@ -335,6 +335,11 @@ class MotionCommand(CommandTermBase):
             rand_vals = torch.rand_like(subset, dtype=torch.float32)
             subset = torch.where(rand_vals < prob, torch.zeros_like(subset), subset)
             self.time_steps[env_ids] = subset
+        
+        # If the motion is at the last timestep, set it to the second last timestep;
+        # Otherwise, update_tasks_callback will advance the timestep to the next timestep -> out of bounds error.
+        already_last_timestep_mask = self.time_steps[env_ids] == self.motion.time_step_total - 1
+        self.time_steps[env_ids] = torch.where(already_last_timestep_mask, self.motion.time_step_total - 2, self.time_steps[env_ids])
 
         if self.require_policy_to_reach_target_at_zero:
             self._proximity_ready_mask[env_ids] = False
