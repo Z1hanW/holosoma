@@ -15,7 +15,7 @@ init_pose_config = NoiseToInitialPoseConfig(
 )
 
 motion_config = MotionConfig(
-    motion_file="src/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj.npz",
+    motion_file="holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj.npz",
     body_names_to_track=[
         "pelvis",
         "left_hip_roll_link",
@@ -39,7 +39,7 @@ motion_config = MotionConfig(
 
 motion_config_w_object = replace(
     motion_config,
-    motion_file="src/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz",
+    motion_file="holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz",
 )
 
 g1_29dof_wbt_command = CommandManagerCfg(

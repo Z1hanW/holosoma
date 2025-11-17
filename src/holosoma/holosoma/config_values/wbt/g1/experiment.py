@@ -143,7 +143,7 @@ g1_29dof_wbt_w_object = replace(
         ),
         object=replace(
             robot.g1_29dof_w_object.object,
-            object_urdf_path="src/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf",
+            object_urdf_path="holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf",
         ),
     ),
     randomization=randomization.g1_29dof_wbt_randomization_w_object,
@@ -163,7 +163,7 @@ g1_29dof_wbt_fast_sac_w_object = replace(
         asset=replace(robot.g1_29dof_w_object.asset, self_collisions=0),
         object=replace(
             robot.g1_29dof_w_object.object,
-            object_urdf_path="src/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf",
+            object_urdf_path="holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf",
         ),
     ),
     randomization=randomization.g1_29dof_wbt_randomization_w_object,
@@ -195,8 +195,8 @@ Example 3: Robot+Terrain:
 python src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt \
   terrain:terrain-load-obj \
-  --terrain.terrain-term.obj-file-path="src/holosoma/data/motions/g1_29dof/whole_body_tracking/terrain_slope.obj" \
+  --terrain.terrain-term.obj-file-path="holosoma/data/motions/g1_29dof/whole_body_tracking/terrain_slope.obj" \
   --command.setup_terms.motion_command.params.motion_config.motion_file\
-="src/holosoma/data/motions/g1_29dof/whole_body_tracking/motion_crawl_slope.npz" \
+="holosoma/data/motions/g1_29dof/whole_body_tracking/motion_crawl_slope.npz" \
   --simulator.config.scene.env_spacing=0.0
 """
