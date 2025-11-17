@@ -2,62 +2,71 @@
 Evaluation script for retargeting trajectories.
 Evaluates:
 1) Penetration depth & time duration
-2) Contact precision (keypoints <=2cm from object/terrain surface)  
+2) Contact precision (keypoints <=2cm from object/terrain surface)
 3) Foot sliding
 """
 
-import os
-import pickle
+from __future__ import annotations
+
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Dict, List, Literal, Sequence, cast
+
+import igl  # type: ignore[import-not-found]
+import mujoco  # type: ignore[import-not-found]
 import numpy as np
 import trimesh
-from scipy.spatial.distance import cdist  # type: ignore[import-untyped]
-from scipy.spatial.transform import Rotation as R  # type: ignore[import-untyped]
-from concurrent.futures import ProcessPoolExecutor, as_completed
-import glob
-import sys
-from dataclasses import asdict, dataclass
-from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, cast
-from types import SimpleNamespace
-
 import tyro
 
-import mujoco  # type: ignore[import-not-found] 
+try:
+    from holosoma_retargeting.config_types.data_type import (
+        SMPLH_DEMO_JOINTS,
+        MotionDataConfig,
+    )
+    from holosoma_retargeting.config_types.robot import RobotConfig
+    from holosoma_retargeting.src.mujoco_utils import _world_mesh_from_geom  # type: ignore[import-not-found]
+    from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
+        calculate_scale_factor,
+        create_new_scene_xml_file,
+        create_scaled_multi_boxes_xml,
+        extract_foot_sticking_sequence_velocity,
+        load_intermimic_data,
+        preprocess_motion_data,
+        transform_points_world_to_local,
+        transform_y_up_to_z_up,
+    )
+except ModuleNotFoundError:
+    import sys
 
-# Add src to path for direct execution
-src_path = Path(__file__).parent.parent / "src"
-sys.path.insert(0, str(src_path))
-# Also add src root to path for holosoma_retargeting package imports
-src_root = Path(__file__).parent.parent.parent  # goes to src/
-sys.path.insert(0, str(src_root))
-
-from utils import (  # type: ignore[import-not-found]
-    calculate_scale_factor,
-    load_intermimic_data,
-    transform_points_world_to_local,
-    extract_foot_sticking_sequence_velocity,
-    transform_y_up_to_z_up,
-    preprocess_motion_data,
-    create_new_scene_xml_file,
-    create_scaled_multi_boxes_xml,
-)
-
-from mujoco_utils import _world_mesh_from_geom  # type: ignore[import-not-found] 
-import igl  # type: ignore[import-not-found] 
-
-from holosoma_retargeting.config_types.data_type import (
-    MotionDataConfig,
-    SMPLH_DEMO_JOINTS,
-)
-from holosoma_retargeting.config_types.robot import RobotConfig
+    src_root = Path(__file__).resolve().parents[2]
+    if str(src_root) not in sys.path:
+        sys.path.insert(0, str(src_root))
+    from holosoma_retargeting.config_types.data_type import (
+        SMPLH_DEMO_JOINTS,
+        MotionDataConfig,
+    )
+    from holosoma_retargeting.config_types.robot import RobotConfig
+    from holosoma_retargeting.src.mujoco_utils import _world_mesh_from_geom  # type: ignore[import-not-found]
+    from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
+        calculate_scale_factor,
+        create_new_scene_xml_file,
+        create_scaled_multi_boxes_xml,
+        extract_foot_sticking_sequence_velocity,
+        load_intermimic_data,
+        preprocess_motion_data,
+        transform_points_world_to_local,
+        transform_y_up_to_z_up,
+    )
 
 
 def create_task_constants(
     robot_config: RobotConfig,
     motion_data_config: MotionDataConfig,
     *,
-    object_name: Optional[str] = None,
-    object_dir: Optional[str] = None,
+    object_name: str | None = None,
+    object_dir: str | None = None,
 ) -> SimpleNamespace:
     """Create a mutable namespace that mimics the old constants modules."""
     namespace = SimpleNamespace()
@@ -67,18 +76,9 @@ def create_task_constants(
         if attr.isupper() and not attr.startswith("_"):
             setattr(namespace, attr, getattr(robot_config, attr))
 
-    # Copy UPPER_CASE attributes from motion data config (including properties)
-    for attr in dir(motion_data_config):
-        if attr.isupper() and not attr.startswith("_"):
-            try:
-                setattr(namespace, attr, getattr(motion_data_config, attr))
-            except AttributeError:
-                # Skip if attribute can't be accessed
-                pass
-    
-    # Explicitly copy TOE_NAMES property if it exists
-    if hasattr(motion_data_config, "TOE_NAMES"):
-        namespace.TOE_NAMES = motion_data_config.TOE_NAMES
+    # Copy legacy constants from motion data config
+    for attr, value in motion_data_config.legacy_constants().items():
+        setattr(namespace, attr, value)
 
     # Override or supplement object information if requested
     if object_name is not None:
@@ -110,17 +110,17 @@ class RetargetingEvaluator:
     def __init__(
         self,
         robot_model_path: str,
-        object_model_path: Optional[str], 
+        object_model_path: str | None,
         object_name: str,
         demo_joints: List[str],
         joints_mapping: Dict[str, str],
         visualize: bool = True,
-        constants: Optional[SimpleNamespace] = None,
+        constants: SimpleNamespace | None = None,
     ):
         """Initialize evaluator with robot and object models."""
         if constants is None:
             raise ValueError("constants must be provided")
-        
+
         self.object_name = object_name
         self.demo_joints = demo_joints
         self.joints_mapping = joints_mapping
@@ -156,13 +156,12 @@ class RetargetingEvaluator:
             self.has_dynamic_object = False
 
         # For climbing task, we need to load the terrain
-                # ===== libigl object mesh in WORLD frame (static) =====
+        # ===== libigl object mesh in WORLD frame (static) =====
         self._have_terrain_mesh = False
-        self._ground_z = 0.0 # ground z is always 0.0
-       
-        if hasattr(constants, "OBJECT_MESH_FILE") and \
-            constants.OBJECT_MESH_FILE and (not self.has_dynamic_object):
-            mesh = trimesh.load(constants.OBJECT_MESH_FILE, force='mesh')
+        self._ground_z = 0.0  # ground z is always 0.0
+
+        if hasattr(constants, "OBJECT_MESH_FILE") and constants.OBJECT_MESH_FILE and (not self.has_dynamic_object):
+            mesh = trimesh.load(constants.OBJECT_MESH_FILE, force="mesh")
             if not isinstance(mesh, trimesh.Trimesh):
                 mesh = trimesh.util.concatenate(tuple(g for g in mesh.geometry.values()))  # type: ignore[attr-defined]
             V = np.asarray(mesh.vertices, dtype=np.float64)  # type: ignore[attr-defined]
@@ -170,16 +169,16 @@ class RetargetingEvaluator:
             if V.size == 0 or F.size == 0:
                 raise ValueError("Empty object mesh")
 
-            self._obj_VW = V          # WORLD-frame vertices
+            self._obj_VW = V  # WORLD-frame vertices
             self._obj_FW = F
             self._have_terrain_mesh = True
         else:
-            self._have_terrain_mesh = False 
+            self._have_terrain_mesh = False
 
         if self._have_terrain_mesh:
-            self._bake_object_mesh_from_xml() 
+            self._bake_object_mesh_from_xml()
 
-        self.constants = constants 
+        self.constants = constants
 
     def _bake_object_mesh_from_xml(self):
         """Bake world-frame triangle soup for geoms whose name contains self.object_name (mesh geoms only)."""
@@ -205,7 +204,7 @@ class RetargetingEvaluator:
 
     def _get_robot_link_positions(self, q, link_names):
         """Get robot link positions for given configuration using Mujoco.
-        
+
         Assumes q is in MuJoCo order:
         - [0:3] robot base position (xyz)
         - [3:7] robot base quaternion (wxyz)
@@ -243,12 +242,12 @@ class RetargetingEvaluator:
         ngeom = m.ngeom
 
         self._geom_names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or "" for g in range(ngeom)]
-          
+
         if not hasattr(self, "_saved_margins"):
             self._saved_margins = np.empty_like(m.geom_margin)
         self._saved_margins[:] = m.geom_margin
 
-        m.geom_margin[:] = threshold 
+        m.geom_margin[:] = threshold
         mujoco.mj_collision(m, d)
 
         candidates = set()
@@ -279,15 +278,20 @@ class RetargetingEvaluator:
         penetration_frames = []
 
         # helper for name checks (populated by _prefilter_pairs_with_mj_collision)
-        def _is_obj(g):    return (self.object_name in self._geom_names[g])
-        def _is_ground(g): return ("ground" in self._geom_names[g])
+        def _is_obj(g):
+            return self.object_name in self._geom_names[g]
+
+        def _is_ground(g):
+            return "ground" in self._geom_names[g]
 
         # matches your Drake filter:
         def masks_ok(g1, g2):
             # skip geoms with both masks off
-            if m.geom_contype[g1] == 0 and m.geom_conaffinity[g1] == 0: return False
-            if m.geom_contype[g2] == 0 and m.geom_conaffinity[g2] == 0: return False
-            # exclude object–ground specifically (either order)
+            if m.geom_contype[g1] == 0 and m.geom_conaffinity[g1] == 0:
+                return False
+            if m.geom_contype[g2] == 0 and m.geom_conaffinity[g2] == 0:
+                return False
+            # exclude object-ground specifically (either order)
             if (_is_obj(g1) and _is_ground(g2)) or (_is_obj(g2) and _is_ground(g1)):
                 return False
             # keep only pairs that involve ground or object
@@ -324,19 +328,22 @@ class RetargetingEvaluator:
     def detect_demo_contact(
         self,
         human_joints,
-        joint_names=[
-            "LeftHandMiddle3",
-            "RightHandMiddle3",
-            "LeftFoot",
-            "RightFoot",
-            "LeftToeBase",
-            "RightToeBase",
-        ],
+        joint_names: Sequence[str] | None = None,
     ):
-        contact = {}
+        contact: dict[str, np.ndarray] = {}
         have_obj = self._obj_VW.shape[0] > 0
         if not have_obj:
             return contact  # no object mesh baked
+
+        if joint_names is None:
+            joint_names = (
+                "LeftHandMiddle3",
+                "RightHandMiddle3",
+                "LeftFoot",
+                "RightFoot",
+                "LeftToeBase",
+                "RightToeBase",
+            )
 
         for jn in joint_names:
             if jn not in self.demo_joints:
@@ -353,7 +360,7 @@ class RetargetingEvaluator:
         human_joints_motion,
         object_poses,
         q_trajectory,
-        joint_names=["L_Wrist", "R_Wrist"],
+        joint_names: Sequence[str] | None = None,
     ):
         """
         Evaluate contact precision for keypoints within 2cm of surfaces.
@@ -366,34 +373,24 @@ class RetargetingEvaluator:
         Returns:
             dict: Contact precision metrics
         """
-        demo_local_points = []
-        robot_local_points = []
+        if joint_names is None:
+            joint_names = ("L_Wrist", "R_Wrist")
 
-        robot_joint_names = [
-            self.joints_mapping[joint_name] for joint_name in joint_names
-        ]
+        demo_local_points_list: list[np.ndarray] = []
+        robot_local_points_list: list[np.ndarray] = []
 
-        for i, (q, human_joints, object_pose) in enumerate(
-            zip(q_trajectory, human_joints_motion, object_poses)
-        ):
-            demo_points = np.array(
-                [
-                    human_joints[self.demo_joints.index(joint_name)]
-                    for joint_name in joint_names
-                ]
-            )
-            demo_local_points.append(
-                transform_points_world_to_local(
-                    object_pose[:4], object_pose[4:], demo_points
-                )
+        robot_joint_names = [self.joints_mapping[joint_name] for joint_name in joint_names]
+
+        for q, human_joints, object_pose in zip(q_trajectory, human_joints_motion, object_poses):
+            demo_points = np.array([human_joints[self.demo_joints.index(joint_name)] for joint_name in joint_names])
+            demo_local_points_list.append(
+                transform_points_world_to_local(object_pose[:4], object_pose[4:], demo_points)
             )
             robot_joint_pos = self._get_robot_link_positions(q, robot_joint_names)
             # Object pose in MuJoCo order: [-7:-4] pos, [-4:] quat
-            robot_local_points.append(
-                transform_points_world_to_local(q[-4:], q[-7:-4], robot_joint_pos)
-            )
-        demo_local_points = np.array(demo_local_points)
-        robot_local_points = np.array(robot_local_points)
+            robot_local_points_list.append(transform_points_world_to_local(q[-4:], q[-7:-4], robot_joint_pos))
+        demo_local_points = np.array(demo_local_points_list)
+        robot_local_points = np.array(robot_local_points_list)
 
         demo_contact = np.linalg.norm(demo_local_points, axis=-1) <= 0.28
         robot_contact = np.linalg.norm(robot_local_points, axis=-1) <= 0.28
@@ -427,32 +424,18 @@ class RetargetingEvaluator:
         left_toe_positions = np.array(left_toe_positions)
         right_toe_positions = np.array(right_toe_positions)
 
-        left_toe_xy_velocities = np.linalg.norm(
-            np.diff(left_toe_positions[:, :2], axis=0), axis=1
-        )
-        right_toe_xy_velocities = np.linalg.norm(
-            np.diff(right_toe_positions[:, :2], axis=0), axis=1
-        )
+        left_toe_xy_velocities = np.linalg.norm(np.diff(left_toe_positions[:, :2], axis=0), axis=1)
+        right_toe_xy_velocities = np.linalg.norm(np.diff(right_toe_positions[:, :2], axis=0), axis=1)
         left_toe_xy_velocities = np.concatenate([[0], left_toe_xy_velocities])
         right_toe_xy_velocities = np.concatenate([[0], right_toe_xy_velocities])
 
-        left_foot_sticking_sequence = np.array(
-            [contact_sequence["L_Toe"] for contact_sequence in contact_sequences]
-        )
-        right_foot_sticking_sequence = np.array(
-            [contact_sequence["R_Toe"] for contact_sequence in contact_sequences]
-        )
+        left_foot_sticking_sequence = np.array([contact_sequence["L_Toe"] for contact_sequence in contact_sequences])
+        right_foot_sticking_sequence = np.array([contact_sequence["R_Toe"] for contact_sequence in contact_sequences])
 
-        left_foot_sliding_sequence = left_foot_sticking_sequence & (
-            left_toe_xy_velocities > self.sliding_threshold
-        )
-        right_foot_sliding_sequence = right_foot_sticking_sequence & (
-            right_toe_xy_velocities > self.sliding_threshold
-        )
+        left_foot_sliding_sequence = left_foot_sticking_sequence & (left_toe_xy_velocities > self.sliding_threshold)
+        right_foot_sliding_sequence = right_foot_sticking_sequence & (right_toe_xy_velocities > self.sliding_threshold)
 
-        num_foot_sticking_frames = np.sum(
-            left_foot_sticking_sequence | right_foot_sticking_sequence
-        )
+        num_foot_sticking_frames = np.sum(left_foot_sticking_sequence | right_foot_sticking_sequence)
         max_toe_sliding_velocities = np.max(
             np.array(
                 [
@@ -462,9 +445,7 @@ class RetargetingEvaluator:
             ),
             axis=0,
         )
-        max_toe_sliding_velocities = max_toe_sliding_velocities[
-            max_toe_sliding_velocities > 0
-        ]
+        max_toe_sliding_velocities = max_toe_sliding_velocities[max_toe_sliding_velocities > 0]
 
         return (
             len(max_toe_sliding_velocities) / num_foot_sticking_frames,
@@ -485,44 +466,40 @@ class RetargetingEvaluator:
         try:
             rt_res_data = np.load(f"{data_dir}", allow_pickle=True)
             q_retarget = rt_res_data["qpos"]
-        except:
-            return None 
-        penetration_duration, penetration_max_depths = self.evaluate_penetration(
-            q_retarget
-        )
+        except (OSError, KeyError, ValueError):
+            return None
+        penetration_duration, penetration_max_depths = self.evaluate_penetration(q_retarget)
 
-        human_joints, object_poses = load_intermimic_data(
-            f"{input_data_dir}/{task_name}.pt"
-        )
-        contact_sequences = extract_foot_sticking_sequence_velocity(
-            human_joints, self.demo_joints, ["L_Toe", "R_Toe"]
-        )
+        human_joints, object_poses = load_intermimic_data(f"{input_data_dir}/{task_name}.pt")
+        contact_sequences = extract_foot_sticking_sequence_velocity(human_joints, self.demo_joints, ["L_Toe", "R_Toe"])
         sliding_duration, max_toe_sliding_velocities = self.detect_foot_sliding(
             q_retarget, contact_sequences[: q_retarget.shape[0]]
         )
 
-        contact_results = self.evaluate_contact_precision(
-            human_joints, object_poses, q_retarget
-        )
+        contact_results = self.evaluate_contact_precision(human_joints, object_poses, q_retarget)
 
-        opt_cost = rt_res_data["cost"] 
-        
+        opt_cost = rt_res_data["cost"]
+
         return {
             "penetration_duration": penetration_duration,
             "penetration_max_depths": penetration_max_depths,
             "sliding_duration": sliding_duration,
             "max_toe_sliding_velocities": max_toe_sliding_velocities,
             "contact_preservation": contact_results,
-            "opt_cost": opt_cost, 
+            "opt_cost": opt_cost,
         }
 
     def evaluate_terrain_contact_precision(
         self,
-        human_joints_motion: np.ndarray,   # [T, J, 3] world
-        q_trajectory: np.ndarray,          # [T, nq]
-        joint_names = (
-            "LeftHandMiddle3","RightHandMiddle3",
-            "LeftFoot","RightFoot","LeftToeBase","RightToeBase",
+        human_joints_motion: np.ndarray,  # [T, J, 3] world
+        q_trajectory: np.ndarray,  # [T, nq]
+        joint_names=(
+            "LeftHandMiddle3",
+            "RightHandMiddle3",
+            "LeftFoot",
+            "RightFoot",
+            "LeftToeBase",
+            "RightToeBase",
         ),
     ) -> float:
         """
@@ -536,28 +513,21 @@ class RetargetingEvaluator:
             return 1.0  # nothing to check against
 
         preserved = []
-        # unique mapped robot body names
-        mapped = [self.joints_mapping.get(nm, "") for nm in joint_names]
-        unique_names = [n for n in sorted(set(mapped)) if n]
 
-        obj_gids = [g for g in range(self.robot_model.ngeom)
-                if self.object_name in (mujoco.mj_id2name(self.robot_model, mujoco.mjtObj.mjOBJ_GEOM, g) or "")]
+        obj_gids = [
+            g
+            for g in range(self.robot_model.ngeom)
+            if self.object_name in (mujoco.mj_id2name(self.robot_model, mujoco.mjtObj.mjOBJ_GEOM, g) or "")
+        ]
 
-        for q, demo_joints in zip(q_trajectory, human_joints_motion):
+        for _q, demo_joints in zip(q_trajectory, human_joints_motion):
             # demo contacts (object only)
             dc = self.detect_demo_contact(demo_joints, joint_names)
             if not dc:
                 continue
 
-            # robot body positions
-            name2pos = {}
-            if unique_names:
-                pos_arr = self._get_robot_link_positions(q, unique_names)
-                for nm, pw in zip(unique_names, pos_arr):
-                    name2pos[nm] = pw
-
             ok = True
-            for jn in dc.keys():
+            for jn in dc:
                 rb = self.joints_mapping.get(jn, "")
                 if not rb:
                     continue
@@ -570,8 +540,9 @@ class RetargetingEvaluator:
                     if self.robot_model.geom_bodyid[g1] != bid:
                         continue
                     for g2 in obj_gids:
-                        dist = mujoco.mj_geomDistance(self.robot_model, self.robot_data, g1, g2,
-                                                    self.collision_detection_threshold, fromto)
+                        dist = mujoco.mj_geomDistance(
+                            self.robot_model, self.robot_data, g1, g2, self.collision_detection_threshold, fromto
+                        )
                         dist_min = min(dist_min, dist)
 
                 if dist_min > self.contact_threshold:
@@ -579,7 +550,6 @@ class RetargetingEvaluator:
                     break
             preserved.append(ok)
         return 1.0 if not preserved else float(np.mean(preserved))
-
 
     def evaluate_robot_terrain_trajectory(self, task_name, data_dir, input_data_dir):
         """
@@ -595,19 +565,15 @@ class RetargetingEvaluator:
         try:
             rt_res_data = np.load(f"{data_dir}", allow_pickle=True)
             q_retarget = rt_res_data["qpos"]
-        except:
-            return None 
-        penetration_duration, penetration_max_depths = self.evaluate_penetration(
-            q_retarget
-        )
+        except (OSError, KeyError, ValueError):
+            return None
+        penetration_duration, penetration_max_depths = self.evaluate_penetration(q_retarget)
 
         input_data_path = f"{input_data_dir}/{task_name}"
         npy_file = next(iter(Path(input_data_path).glob("*.npy")))
         smpl_scale = self.constants.ROBOT_HEIGHT / 1.78
-        human_joints = np.load(npy_file)[::4] * smpl_scale 
+        human_joints = np.load(npy_file)[::4] * smpl_scale
 
-        object_poses = np.tile(np.array([[1, 0, 0, 0, 0, 0, 0]]), (human_joints.shape[0], 1))
-       
         contact_sequences = extract_foot_sticking_sequence_velocity(
             human_joints, self.demo_joints, ["LeftToeBase", "RightToeBase"]
         )
@@ -615,19 +581,17 @@ class RetargetingEvaluator:
             q_retarget, contact_sequences[: q_retarget.shape[0]]
         )
 
-        contact_results = self.evaluate_terrain_contact_precision(
-            human_joints, q_retarget
-        )
+        contact_results = self.evaluate_terrain_contact_precision(human_joints, q_retarget)
 
-        opt_cost = rt_res_data["cost"] 
-        
+        opt_cost = rt_res_data["cost"]
+
         return {
             "penetration_duration": penetration_duration,
             "penetration_max_depths": penetration_max_depths,
             "sliding_duration": sliding_duration,
             "max_toe_sliding_velocities": max_toe_sliding_velocities,
             "contact_preservation": contact_results,
-            "opt_cost": opt_cost, 
+            "opt_cost": opt_cost,
         }
 
     def evaluate_robot_only_trajectory(self, task_name, data_dir, input_data_dir):
@@ -645,33 +609,28 @@ class RetargetingEvaluator:
         try:
             rt_res_data = np.load(f"{data_dir}", allow_pickle=True)
             q_retarget = rt_res_data["qpos"]
-        except:
-            return None 
-        penetration_duration, penetration_max_depths = self.evaluate_penetration(
-            q_retarget
-        )
+        except (OSError, KeyError, ValueError):
+            return None
+        penetration_duration, penetration_max_depths = self.evaluate_penetration(q_retarget)
 
         # Determine data format by checking file existence
         data_name = task_name.split("_original")[0]
         npy_path = Path(input_data_dir) / f"{data_name}.npy"
         pt_path = Path(input_data_dir) / f"{data_name}.pt"
-        
+
         # Determine data format and toe names based on file extension
         if pt_path.exists():
             # OMOMO (smplh) data format
-            data_format = "smplh"
             toe_names = ["L_Toe", "R_Toe"]
             human_joints, _ = load_intermimic_data(str(pt_path))
             smpl_scale = calculate_scale_factor(data_name, self.constants.ROBOT_HEIGHT)
-            
+
             # For smplh data, we need to use smplh demo_joints for contact extraction
             # Check if toe names are in current demo_joints
             if all(toe in self.demo_joints for toe in toe_names):
                 # Use current demo_joints
                 demo_joints_for_contact = self.demo_joints
-                human_joints = preprocess_motion_data(
-                    human_joints, self, toe_names, smpl_scale
-                )
+                human_joints = preprocess_motion_data(human_joints, self, toe_names, smpl_scale)
             else:
                 # Use smplh demo_joints for contact extraction
                 demo_joints_for_contact = SMPLH_DEMO_JOINTS
@@ -679,7 +638,6 @@ class RetargetingEvaluator:
                 human_joints = human_joints * smpl_scale
         elif npy_path.exists():
             # LAFAN data format
-            data_format = "lafan"
             toe_names = ["LeftToeBase", "RightToeBase"]
             human_joints = np.load(str(npy_path))
             human_joints = transform_y_up_to_z_up(human_joints)
@@ -687,31 +645,29 @@ class RetargetingEvaluator:
             # LAFAN-specific spine adjustment
             human_joints[:, spine_joint_idx, -1] -= 0.06
             smpl_scale = getattr(self.constants, "DEFAULT_SCALE_FACTOR", None) or 1.0
-            
-            human_joints = preprocess_motion_data(
-                human_joints, self, toe_names, smpl_scale
-            )
+
+            human_joints = preprocess_motion_data(human_joints, self, toe_names, smpl_scale)
             demo_joints_for_contact = self.demo_joints
         else:
-            raise FileNotFoundError(
-                f"Neither {npy_path} nor {pt_path} found for task {data_name}"
-            )
+            raise FileNotFoundError(f"Neither {npy_path} nor {pt_path} found for task {data_name}")
 
         contact_sequences = extract_foot_sticking_sequence_velocity(
-            human_joints, demo_joints_for_contact, toe_names,
+            human_joints,
+            demo_joints_for_contact,
+            toe_names,
         )
         sliding_duration, max_toe_sliding_velocities = self.detect_foot_sliding(
             q_retarget, contact_sequences[: q_retarget.shape[0]]
         )
 
-        opt_cost = rt_res_data["cost"] 
-        
+        opt_cost = rt_res_data["cost"]
+
         return {
             "penetration_duration": penetration_duration,
             "penetration_max_depths": penetration_max_depths,
             "sliding_duration": sliding_duration,
             "max_toe_sliding_velocities": max_toe_sliding_velocities,
-            "opt_cost": opt_cost, 
+            "opt_cost": opt_cost,
         }
 
 
@@ -721,7 +677,7 @@ def _evaluate_single_task(
     input_data_dir: str,
     robot_config_kwargs: Dict[str, Any],
     motion_data_config_kwargs: Dict[str, Any],
-    object_name: Optional[str],
+    object_name: str | None,
     data_type: str,
 ):
     robot_config = RobotConfig(**robot_config_kwargs)
@@ -740,10 +696,7 @@ def _evaluate_single_task(
         constants.OBJECT_MESH_FILE = f"{constants.OBJECT_DIR}/{constants.OBJECT_NAME}.obj"
 
         box_asset_xml = f"{constants.OBJECT_DIR}/box_assets.xml"
-        scene_xml_name = (
-            constants.ROBOT_URDF_FILE.split("/")[-1]
-            .replace(".urdf", f"_w_{constants.OBJECT_NAME}.xml")
-        )
+        scene_xml_name = constants.ROBOT_URDF_FILE.split("/")[-1].replace(".urdf", f"_w_{constants.OBJECT_NAME}.xml")
         scene_xml_path = f"{constants.OBJECT_DIR}/{scene_xml_name}"
 
         object_scale = np.array([1, 1, 1])
@@ -761,7 +714,7 @@ def _evaluate_single_task(
         )
         constants.SCENE_XML_FILE = new_scene_xml_path
 
-    object_model_path: Optional[str] = getattr(constants, "OBJECT_URDF_FILE", None)
+    object_model_path: str | None = getattr(constants, "OBJECT_URDF_FILE", None)
 
     evaluator = RetargetingEvaluator(
         robot_model_path=constants.ROBOT_URDF_FILE,
@@ -774,28 +727,28 @@ def _evaluate_single_task(
     )
     if data_type == "robot_object":
         return task_name, evaluator.evaluate_trajectory(task_name, data_path, input_data_dir)
-    elif data_type == "robot_only":
+    if data_type == "robot_only":
         return task_name, evaluator.evaluate_robot_only_trajectory(task_name, data_path, input_data_dir)
-    elif data_type == "robot_terrain":
+    if data_type == "robot_terrain":
         return task_name, evaluator.evaluate_robot_terrain_trajectory(task_name, data_path, input_data_dir)
-    else:
-        raise ValueError(f"Invalid data type: {data_type}")
+    raise ValueError(f"Invalid data type: {data_type}")
 
 
 def get_task_names(data_dir, data_type):
+    data_path = Path(data_dir)
     if data_type == "robot_object":
-        files = sorted(glob.glob(os.path.join(data_dir, "*_original.npz")))
-        task_names = [os.path.basename(p).replace("_original.npz", "") for p in files]
+        files = sorted(data_path.glob("*_original.npz"))
+        task_names = [p.name.replace("_original.npz", "") for p in files]
     elif data_type == "robot_only":
-        files = sorted(glob.glob(os.path.join(data_dir, "*.npz")))
-        task_names = [os.path.basename(p).replace(".npz", "") for p in files]
+        files = sorted(data_path.glob("*.npz"))
+        task_names = [p.name.replace(".npz", "") for p in files]
     elif data_type == "robot_terrain":
-        files = sorted(glob.glob(os.path.join(data_dir, "*_original.npz")))
-        task_names = [os.path.basename(p).replace("_original.npz", "").split("_joint_positions")[0] for p in files]
+        files = sorted(data_path.glob("*_original.npz"))
+        task_names = [p.name.replace("_original.npz", "").split("_joint_positions")[0] for p in files]
     else:
         raise ValueError(f"Invalid data type: {data_type}")
 
-    return task_names, files
+    return task_names, [str(p) for p in files]
 
 
 @dataclass
@@ -806,19 +759,21 @@ class Args:
     data_dir: Path
     data_type: Literal["robot_object", "robot_only", "robot_terrain"] = "robot_object"
     robot: Literal["g1", "t1"] = "g1"
-    data_format: Optional[Literal["lafan", "smplh", "mocap"]] = None
-    object_name: Optional[str] = None
+    data_format: Literal["lafan", "smplh", "mocap"] | None = None
+    object_name: str | None = None
     max_workers: int = 1
 
     # Nested configs for overrides
-    robot_config: RobotConfig = RobotConfig(robot_type="g1")
-    motion_data_config: MotionDataConfig = MotionDataConfig(data_format="smplh", robot_type="g1")
+    robot_config: RobotConfig = field(default_factory=lambda: RobotConfig(robot_type="g1"))
+    motion_data_config: MotionDataConfig = field(
+        default_factory=lambda: MotionDataConfig(data_format="smplh", robot_type="g1")
+    )
 
 
 def main(cfg: Args) -> None:
     default_data_formats = {
         "robot_object": "smplh",
-        "robot_only": "lafan",
+        "robot_only": "smplh",
         "robot_terrain": "mocap",
     }
 
@@ -828,25 +783,21 @@ def main(cfg: Args) -> None:
     if cfg.robot_config.robot_type != cfg.robot:
         cfg.robot_config = RobotConfig(robot_type=cfg.robot)
 
-    if (
-        cfg.motion_data_config.robot_type != cfg.robot
-        or cfg.motion_data_config.data_format != data_format
-    ):
+    if cfg.motion_data_config.robot_type != cfg.robot or cfg.motion_data_config.data_format != data_format:
         cfg.motion_data_config = MotionDataConfig(
-            data_format=cast(Literal["lafan", "smplh", "mocap"], data_format),
+            data_format=cast("Literal['lafan', 'smplh', 'mocap']", data_format),
             robot_type=cfg.robot,
         )
 
     # Determine default object name when none provided
     if cfg.object_name is not None:
         object_name = cfg.object_name
+    elif cfg.data_type == "robot_object":
+        object_name = "largebox"
+    elif cfg.data_type == "robot_terrain":
+        object_name = "multi_boxes"
     else:
-        if cfg.data_type == "robot_object":
-            object_name = "largebox"
-        elif cfg.data_type == "robot_terrain":
-            object_name = "multi_boxes"
-        else:
-            object_name = cfg.robot_config.OBJECT_NAME
+        object_name = cfg.robot_config.OBJECT_NAME
 
     task_names, files = get_task_names(str(cfg.res_dir), cfg.data_type)
     print(f"Found {len(task_names)} tasks")
@@ -883,18 +834,18 @@ def main(cfg: Args) -> None:
     # Aggregate metrics
     metrics: Dict[str, Any] = {}
     res_k_name = next(iter(results))
-    for metric_k in results[res_k_name].keys():
+    for metric_k in results[res_k_name]:
         if "max" in metric_k:
             metrics[metric_k] = np.empty(0)
         else:
             metrics[metric_k] = []
 
     for res in results.values():
-        for k in metrics.keys():
+        for k, metric_vals in metrics.items():
             if "max" in k:
-                metrics[k] = np.concatenate([metrics[k], res[k]])
+                metrics[k] = np.concatenate([metric_vals, res[k]])
             else:
-                metrics[k].append(float(res[k]))
+                metric_vals.append(float(res[k]))
 
     for k, vals in metrics.items():
         if len(vals) == 0:

@@ -20,7 +20,7 @@ def get_default_data_conversion_config(
     once: bool = False,
 ) -> DataConversionConfig:
     """Get default data conversion configuration.
-    
+
     Args:
         input_file: Path to input motion file.
         robot: Robot model to use.
@@ -32,7 +32,7 @@ def get_default_data_conversion_config(
         has_dynamic_object: Whether the motion has a dynamic object.
         output_name: Name of the output motion npz file.
         once: Run the motion once and exit.
-    
+
     Returns:
         DataConversionConfig: Default configuration instance.
     """
@@ -51,4 +51,3 @@ def get_default_data_conversion_config(
 
 
 __all__ = ["get_default_data_conversion_config"]
-

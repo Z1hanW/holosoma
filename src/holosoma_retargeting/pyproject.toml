@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "holosoma-retargeting"
+version = "0.1.0"
+description = "Retargeting utilities for converting human motions to robot motions."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Amazon FAR Team" },
+]
+dependencies = [
+    "numpy",
+    "torch",
+    "tqdm",
+    "scipy",
+    "matplotlib",
+    "trimesh",
+    "smplx",
+    "jinja2",
+    "mujoco",
+    "viser",
+    "robot_descriptions",
+    "yourdfpy",
+    "cvxpy",
+    "libigl",
+    "tyro",
+]
+
+[project.optional-dependencies]
+dev = ["mypy", "ruff", "pytest"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["holosoma_retargeting*"]
+

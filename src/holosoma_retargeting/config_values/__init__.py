@@ -15,4 +15,3 @@ __all__ = [
     "get_default_robot_config",
     "get_default_viser_config",
 ]
-

@@ -636,7 +636,7 @@ def create_scaled_multi_boxes_urdf(
 def create_scaled_multi_boxes_xml(
     xml_path: str,
     new_scale: tuple,
-    output_path: str | None = None, 
+    output_path: str | None = None,
 ):
     """Read multi_boxes.urdf and generate scaled version."""
     if output_path is None:
@@ -655,6 +655,7 @@ def create_scaled_multi_boxes_xml(
 
     return output_path
 
+
 def create_new_scene_xml_file(
     ori_scene_xml_path: str,
     new_scale: tuple,
@@ -668,7 +669,7 @@ def create_new_scene_xml_file(
     with open(ori_scene_xml_path) as f:
         content = f.read()
 
-    new_asset = new_object_asset_xml_path.split("/")[-1] 
+    new_asset = new_object_asset_xml_path.split("/")[-1]
     pattern = r'file="box_assets\.xml"'
     replacement = f'file="{new_asset}"'
     content = re.sub(pattern, replacement, content)
@@ -677,6 +678,7 @@ def create_new_scene_xml_file(
         f.write(content)
 
     return output_path
+
 
 def extract_foot_sticking_sequence_velocity(smpl_joints, demo_joints, foot_names, velocity_threshold=0.01):
     """
@@ -758,7 +760,7 @@ def estimate_human_orientation(human_joints, joint_names, frame_idx=0):
     Returns:
         np.ndarray: Quaternion [w, x, y, z] representing the human's global orientation
     """
-    # For LAFAN 
+    # For LAFAN
     if "Hips" in joint_names:
         hips_idx = joint_names.index("Hips")
         spine_idx = joint_names.index("Spine")

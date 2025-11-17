@@ -8,7 +8,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class ViserConfig:
     """Configuration for viser player visualization.
-    
+
     This follows the pattern from holosoma's config_types.
     Uses a flat structure with default values.
     """
@@ -54,4 +54,3 @@ class ViserConfig:
 
     max_interp_mult: int = 8
     """Maximum interpolation multiplier."""
-

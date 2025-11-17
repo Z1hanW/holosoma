@@ -1,13 +1,13 @@
 ## Single sequence motion retargeting 
 ```
 # Robot-only (OMOMO)
-python examples/robot_retarget.py --data_path demo_data/OMOMO_new --task-type robot_only --task_name sub3_largebox_003 --data_format smplh
+python examples/robot_retarget.py --data_path demo_data/OMOMO_new --task-type robot_only --task_name sub3_largebox_003 --data_format smplh --retargeter.debug --retargeter.visualize 
 
 # Object interaction (OMOMO)
-python examples/robot_retarget.py --data_path demo_data/OMOMO_new --task-type object_interaction --task-name sub3_largebox_003 --data_format smplh  
+python examples/robot_retarget.py --data_path demo_data/OMOMO_new --task-type object_interaction --task-name sub3_largebox_003 --data_format smplh --retargeter.debug --retargeter.visualize   
 
 # Climbing
-python examples/robot_retarget.py --data_path demo_data/climb --task-type climbing --task-name mocap_climb_seq_0 --data_format mocap --robot-config.robot-urdf-file models/g1/g1_29dof_spherehand.urdf 
+python examples/robot_retarget.py --data_path demo_data/climb --task-type climbing --task-name mocap_climb_seq_0 --data_format mocap --robot-config.robot-urdf-file models/g1/g1_29dof_spherehand.urdf --retargeter.debug --retargeter.visualize 
 ```
 
 Add --augmentation for running sequence with augmentation (need to first run the original sequence before adding augmentation)
@@ -23,6 +23,8 @@ python examples/parallel_robot_retarget.py --data-dir demo_data/OMOMO_new --task
 # Climbing
 python examples/parallel_robot_retarget.py --data-dir demo_data/climb --task-type climbing --data_format mocap --robot-config.robot-urdf-file models/g1/g1_29dof_spherehand.urdf --save_dir demo_results_parallel/g1/climbing/mocap_climb --robot-config.object-name multi_boxes
 ```
+
+Add --augmentation for running sequence with augmentation (for object interaction and climbing task) 
 
 ## Data Preparation 
 We provide demo_data/ for fast testing. To test on more motion sequences in OMOMO, please follow the instructions to download the data. 
@@ -40,19 +42,11 @@ python viser_player.py --robot_urdf models/g1/g1_29dof.urdf \
 # Visualize climbing results
 python viser_player.py --robot_urdf models/g1/g1_29dof_spherehand.urdf \
     --object_urdf demo_data/climb/mocap_climb_seq_0/multi_boxes.urdf \
-    --qpos_npz demo_results_parallel/g1/climbing/mocap_climb/mocap_climb_seq_0_joint_positions_f900-3700_original.npz
+    --qpos_npz demo_results_parallel/g1/climbing/mocap_climb/mocap_climb_seq_0_original.npz
 
 python viser_player.py --robot_urdf models/g1/g1_29dof_spherehand.urdf \
-    --object_urdf demo_data/climb/mocap_climb_seq_1/multi_boxes.urdf \
-    --qpos_npz demo_results_parallel/g1/climbing/mocap_climb/mocap_climb_seq_1_joint_positions_f0-2422_original.npz
-
-python viser_player.py --robot_urdf models/g1/g1_29dof_spherehand.urdf \
-    --object_urdf demo_data/climb/mocap_climb_seq_2/multi_boxes.urdf \
-    --qpos_npz demo_results_parallel/g1/climbing/mocap_climb/mocap_climb_seq_2_joint_positions_f100-3110_original.npz
-
-python viser_player.py --robot_urdf models/g1/g1_29dof_spherehand.urdf \
-    --object_urdf demo_data/climb/mocap_climb_seq_3/multi_boxes.urdf \
-    --qpos_npz demo_results_parallel/g1/climbing/mocap_climb/mocap_climb_seq_3_joint_positions_f200-2600_original.npz
+    --object_urdf demo_data/climb/mocap_climb_seq_0/multi_boxes_scaled_0.74_0.74_0.89.urdf \
+    --qpos_npz demo_results_parallel/g1/climbing/mocap_climb/mocap_climb_seq_0_z_scale_1.2.npz
 
 # Visualize robot only results 
 python viser_player.py --robot_urdf models/g1/g1_29dof.urdf \

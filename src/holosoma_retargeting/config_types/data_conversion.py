@@ -9,7 +9,7 @@ from typing import Literal
 @dataclass(frozen=True)
 class DataConversionConfig:
     """Configuration for data conversion.
-    
+
     This follows the pattern from holosoma's config_types.
     Uses a flat structure with all conversion parameters.
     """
@@ -43,4 +43,3 @@ class DataConversionConfig:
 
     once: bool = False
     """Run the motion once and exit."""
-

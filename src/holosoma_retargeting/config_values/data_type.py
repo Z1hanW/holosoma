@@ -14,11 +14,11 @@ def get_default_motion_data_config(
     robot_type: Literal["g1", "t1"] = "g1",
 ) -> MotionDataConfig:
     """Get default motion data configuration.
-    
+
     Args:
         data_format: Motion data format type.
         robot_type: Robot type for joint mapping.
-    
+
     Returns:
         MotionDataConfig: Default configuration instance.
     """
@@ -34,4 +34,3 @@ __all__ = [
     "get_default_motion_data_config",
     "get_motion_data_config_from_cli",
 ]
-

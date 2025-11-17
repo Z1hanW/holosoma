@@ -8,7 +8,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class RetargeterConfig:
     """Configuration for retargeter parameters.
-    
+
     These parameters control the retargeting optimization process.
     """
 
@@ -32,10 +32,10 @@ class RetargeterConfig:
     step_size: float = 0.2
     """Trust region for each SQP iteration."""
 
-    visualize: bool = True
+    visualize: bool = False
     """Whether to visualize the retargeting process."""
 
-    debug: bool = True
+    debug: bool = False
     """Whether to enable debug mode."""
 
     w_nominal_tracking_init: float = 5.0
@@ -43,4 +43,3 @@ class RetargeterConfig:
 
     nominal_tracking_tau: float = 1e6
     """Time constant for the nominal tracking cost."""
-

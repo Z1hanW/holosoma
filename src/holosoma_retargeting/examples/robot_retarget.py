@@ -9,43 +9,67 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
-from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal, Optional, Tuple, cast
+from typing import Literal, cast
 
 import numpy as np
 import tyro
 
-# Add src to path for direct execution
-src_path = Path(__file__).parent.parent / "src"
-sys.path.insert(0, str(src_path))
-# Also add src root to path for holosoma_retargeting package imports
-src_root = Path(__file__).parent.parent.parent  # goes to src/
-sys.path.insert(0, str(src_root))
+try:
+    from holosoma_retargeting.config_types.data_type import MotionDataConfig
+    from holosoma_retargeting.config_types.retargeter import RetargeterConfig
+    from holosoma_retargeting.config_types.retargeting import RetargetingConfig
+    from holosoma_retargeting.config_types.robot import RobotConfig
+    from holosoma_retargeting.config_types.task import TaskConfig
+    from holosoma_retargeting.src.interaction_mesh_retargeter import (
+        InteractionMeshRetargeter,  # type: ignore[import-not-found]
+    )
+    from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
+        augment_object_poses,
+        calculate_scale_factor,
+        create_new_scene_xml_file,
+        create_scaled_multi_boxes_urdf,
+        create_scaled_multi_boxes_xml,
+        estimate_human_orientation,
+        extract_foot_sticking_sequence_velocity,
+        extract_object_first_moving_frame,
+        load_intermimic_data,
+        load_object_data,
+        preprocess_motion_data,
+        transform_from_human_to_world,
+        transform_y_up_to_z_up,
+    )
+except ModuleNotFoundError:  # pragma: no cover - script entry convenience
+    import sys
 
-# Import configs from new structure
-from holosoma_retargeting.config_types.data_type import MotionDataConfig
-from holosoma_retargeting.config_types.retargeting import RetargetingConfig
-from holosoma_retargeting.config_types.robot import RobotConfig
-from holosoma_retargeting.config_types.task import TaskConfig
-from interaction_mesh_retargeter import InteractionMeshRetargeter  # type: ignore[import-not-found]
-from utils import (  # type: ignore[import-not-found]
-    augment_object_poses,
-    calculate_scale_factor,
-    create_new_scene_xml_file,
-    create_scaled_multi_boxes_urdf,
-    create_scaled_multi_boxes_xml,
-    estimate_human_orientation,
-    extract_foot_sticking_sequence,
-    extract_object_first_moving_frame,
-    load_intermimic_data,
-    load_object_data,
-    preprocess_motion_data,
-    transform_from_human_to_world,
-    transform_y_up_to_z_up,
-)
+    src_root = Path(__file__).resolve().parents[2]
+    if str(src_root) not in sys.path:
+        sys.path.insert(0, str(src_root))
+
+    from holosoma_retargeting.config_types.data_type import MotionDataConfig
+    from holosoma_retargeting.config_types.retargeter import RetargeterConfig
+    from holosoma_retargeting.config_types.retargeting import RetargetingConfig
+    from holosoma_retargeting.config_types.robot import RobotConfig
+    from holosoma_retargeting.config_types.task import TaskConfig
+    from holosoma_retargeting.src.interaction_mesh_retargeter import (
+        InteractionMeshRetargeter,  # type: ignore[import-not-found]
+    )
+    from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
+        augment_object_poses,
+        calculate_scale_factor,
+        create_new_scene_xml_file,
+        create_scaled_multi_boxes_urdf,
+        create_scaled_multi_boxes_xml,
+        estimate_human_orientation,
+        extract_foot_sticking_sequence_velocity,
+        extract_object_first_moving_frame,
+        load_intermimic_data,
+        load_object_data,
+        preprocess_motion_data,
+        transform_from_human_to_world,
+        transform_y_up_to_z_up,
+    )
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -66,8 +90,6 @@ DEFAULT_SAVE_DIRS = {
     "climbing": "demo_results/{robot}/climbing/mocap_climb",
 }
 
-# ----------------------------- Tyro config -----------------------------
-
 
 # Constants for numpy arrays (not in dataclass to avoid tyro parsing issues)
 _OBJECT_SCALE_AUGMENTED = np.array([1.0, 1.0, 1.2])
@@ -75,7 +97,9 @@ _OBJECT_SCALE_NORMAL = np.array([1.0, 1.0, 1.0])
 _AUGMENTATION_TRANSLATION = np.array([0.2, 0.0, 0.0])
 
 
-# TaskConfig and RetargetingConfig are now imported from config_types
+# Type aliases
+TaskType = Literal["robot_only", "object_interaction", "climbing"]
+DataFormat = Literal["lafan", "smplh", "mocap"]
 
 
 # ----------------------------- Helper Functions -----------------------------
@@ -88,13 +112,13 @@ def create_task_constants(
     task_type: str,
 ) -> SimpleNamespace:
     """Create combined task constants from robot and motion data configs.
-    
+
     Args:
         robot_config: Robot configuration
         motion_data_config: Motion data format configuration
         task_config: Task-specific configuration
         task_type: Type of task ("robot_only", "object_interaction", "climbing")
-    
+
     Returns:
         SimpleNamespace with all task constants
     """
@@ -105,10 +129,9 @@ def create_task_constants(
         if attr.isupper() and not attr.startswith("_"):
             setattr(task_constants, attr, getattr(robot_config, attr))
 
-    # Copy all attributes from motion_data_config
-    for attr in dir(motion_data_config):
-        if attr.isupper() and not attr.startswith("_"):
-            setattr(task_constants, attr, getattr(motion_data_config, attr))
+    # Copy legacy motion data constants (upper-case for compatibility)
+    for attr, value in motion_data_config.legacy_constants().items():
+        setattr(task_constants, attr, value)
 
     # Task-specific object setup
     if task_type == "robot_only":
@@ -127,12 +150,8 @@ def create_task_constants(
         task_constants.OBJECT_NAME = obj_name
         object_dir = task_config.object_dir
         task_constants.OBJECT_DIR = str(object_dir) if object_dir else ""
-        task_constants.OBJECT_URDF_FILE = (
-            str(object_dir / f"{obj_name}.urdf") if object_dir else f"{obj_name}.urdf"
-        )
-        task_constants.OBJECT_MESH_FILE = (
-            str(object_dir / f"{obj_name}.obj") if object_dir else f"{obj_name}.obj"
-        )
+        task_constants.OBJECT_URDF_FILE = str(object_dir / f"{obj_name}.urdf") if object_dir else f"{obj_name}.urdf"
+        task_constants.OBJECT_MESH_FILE = str(object_dir / f"{obj_name}.obj") if object_dir else f"{obj_name}.obj"
         task_constants.SCENE_XML_FILE = ""  # Will be set later
 
     return task_constants
@@ -140,10 +159,10 @@ def create_task_constants(
 
 def validate_config(cfg: RetargetingConfig) -> None:
     """Validate configuration consistency.
-    
+
     Args:
         cfg: Configuration arguments
-    
+
     Raises:
         ValueError: If configuration is invalid
     """
@@ -155,16 +174,14 @@ def validate_config(cfg: RetargetingConfig) -> None:
         raise ValueError("Robot-only task requires 'lafan' or 'smplh' data format")
 
 
-def create_ground_points(
-    x_range: tuple[float, float], y_range: tuple[float, float], size: int
-) -> np.ndarray:
+def create_ground_points(x_range: tuple[float, float], y_range: tuple[float, float], size: int) -> np.ndarray:
     """Create ground point meshgrid.
-    
+
     Args:
         x_range: (min, max) x-coordinate range
         y_range: (min, max) y-coordinate range
         size: Number of points per dimension
-    
+
     Returns:
         (N, 3) array of ground points
     """
@@ -175,15 +192,15 @@ def create_ground_points(
 
 
 def load_motion_data(
-    task_type: Literal["robot_only", "object_interaction", "climbing"],
-    data_format: Literal["lafan", "smplh", "mocap"],
+    task_type: TaskType,
+    data_format: DataFormat,
     data_path: Path,
     task_name: str,
     constants: SimpleNamespace,
     motion_data_config: MotionDataConfig,
-) -> Tuple[np.ndarray, np.ndarray, float]:
+) -> tuple[np.ndarray, np.ndarray, float]:
     """Load motion data based on task type and format.
-    
+
     Args:
         task_type: Type of task
         data_format: Data format ("lafan", "smplh", "mocap")
@@ -191,38 +208,38 @@ def load_motion_data(
         task_name: Name of the task/sequence
         constants: Task constants
         motion_data_config: Motion data configuration
-    
+
     Returns:
         Tuple of (human_joints, object_poses, smpl_scale)
         - human_joints: (T, J, 3) array of joint positions
         - object_poses: (T, 7) array of object poses [qw, qx, qy, qz, x, y, z]
         - smpl_scale: Scaling factor for SMPL compatibility
-    
+
     Raises:
         FileNotFoundError: If required data files are not found
     """
-    logger.info(f"Loading motion data for task: {task_name}, format: {data_format}")
+    logger.info("Loading motion data for task: %s, format: %s", task_name, data_format)
 
     if task_type == "robot_only":
         if data_format == "lafan":
             npy_path = data_path / f"{task_name}.npy"
             if not npy_path.exists():
                 raise FileNotFoundError(f"LAFAN data file not found: {npy_path}")
-            
+
             human_joints = np.load(str(npy_path))
             human_joints = transform_y_up_to_z_up(human_joints)
             spine_joint_idx = constants.DEMO_JOINTS.index("Spine1")
             # LAFAN-specific spine adjustment
             human_joints[:, spine_joint_idx, -1] -= 0.06
-            smpl_scale = motion_data_config.DEFAULT_SCALE_FACTOR or 1.0
+            smpl_scale = motion_data_config.default_scale_factor or 1.0
         else:  # smplh
             pt_path = data_path / f"{task_name}.pt"
             if not pt_path.exists():
                 raise FileNotFoundError(f"InterMimic data file not found: {pt_path}")
-            
+
             human_joints, object_poses = load_intermimic_data(str(pt_path))
             smpl_scale = calculate_scale_factor(task_name, constants.ROBOT_HEIGHT)
-        
+
         # Create dummy object poses for robot_only
         num_frames = human_joints.shape[0]
         object_poses = np.tile(np.array([[1, 0, 0, 0, 0, 0, 0]]), (num_frames, 1))
@@ -231,7 +248,7 @@ def load_motion_data(
         pt_path = data_path / f"{task_name}.pt"
         if not pt_path.exists():
             raise FileNotFoundError(f"InterMimic data file not found: {pt_path}")
-        
+
         human_joints, object_poses = load_intermimic_data(str(pt_path))
         smpl_scale = calculate_scale_factor(task_name, constants.ROBOT_HEIGHT)
 
@@ -240,30 +257,34 @@ def load_motion_data(
         npy_files = list(task_dir.glob("*.npy"))
         if not npy_files:
             raise FileNotFoundError(f"No .npy file found in {task_dir}")
-        
+
         npy_file = npy_files[0]
         # MOCAP-specific downsample factor
         downsample = 4
         human_joints = np.load(str(npy_file))[::downsample]
         num_frames = human_joints.shape[0]
         object_poses = np.tile(np.array([[1, 0, 0, 0, 0, 0, 0]]), (num_frames, 1))
-        default_human_height = motion_data_config.DEFAULT_HUMAN_HEIGHT or 1.78
+        default_human_height = motion_data_config.default_human_height or 1.78
         smpl_scale = constants.ROBOT_HEIGHT / default_human_height
 
-    logger.debug(f"Loaded {human_joints.shape[0]} frames, scale factor: {smpl_scale:.4f}")
+    logger.debug(
+        "Loaded %d frames, scale factor: %.4f",
+        human_joints.shape[0],
+        smpl_scale,
+    )
     return human_joints, object_poses, smpl_scale
 
 
 def setup_object_data(
-    task_type: Literal["robot_only", "object_interaction", "climbing"],
+    task_type: TaskType,
     constants: SimpleNamespace,
-    object_dir: Optional[Path],
+    object_dir: Path | None,
     smpl_scale: float,
     task_config: TaskConfig,
     augmentation: bool,
-) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[str]]:
+    object_scale_augmented: np.ndarray | None = None,
+) -> tuple[np.ndarray | None, np.ndarray | None, str | None]:
     """Setup object-specific data (ground, object mesh, climbing terrain).
-    
     Args:
         task_type: Type of task
         constants: Task constants
@@ -271,47 +292,52 @@ def setup_object_data(
         smpl_scale: SMPL scaling factor
         task_config: Task configuration
         augmentation: Whether augmentation is enabled
-    
+        object_scale_augmented: Scale factor for augmented objects (default: [1.0, 1.0, 1.2])
+        object_scale_normal: Scale factor for normal objects (default: [1.0, 1.0, 1.0])
     Returns:
         Tuple of (object_local_pts, object_local_pts_demo, object_urdf_path)
     """
-    logger.info(f"Setting up object data for task: {task_type}")
+    object_scale_normal = np.array([1.0, 1.0, 1.0])
+    if object_scale_augmented is None:
+        object_scale_augmented = np.array([1.0, 1.0, 1.2])
+    logger.info("Setting up object data for task: %s", task_type)
 
     if task_type == "robot_only":
         # Create ground points meshgrid
-        ground_pts = create_ground_points(
-            task_config.ground_range, task_config.ground_range, task_config.ground_size
-        )
+        ground_pts = create_ground_points(task_config.ground_range, task_config.ground_range, task_config.ground_size)
         return ground_pts, ground_pts, None
 
-    elif task_type == "object_interaction":
+    if task_type == "object_interaction":
         # Load object data
         if constants.OBJECT_MESH_FILE is None:
             raise ValueError("OBJECT_MESH_FILE not set for object_interaction task")
-        
+
         object_local_pts, object_local_pts_demo = load_object_data(
             constants.OBJECT_MESH_FILE, smpl_scale=smpl_scale, sample_count=100
         )
         return object_local_pts, object_local_pts_demo, constants.OBJECT_URDF_FILE
 
-    elif task_type == "climbing":
+    if task_type == "climbing":
         if object_dir is None:
             raise ValueError("object_dir must be provided for climbing task")
-        
+
         # Setup climbing-specific object
         box_asset_xml = object_dir / "box_assets.xml"
-        scene_xml_name = Path(constants.ROBOT_URDF_FILE).name.replace(
-            ".urdf", f"_w_{constants.OBJECT_NAME}.xml"
-        )
+        scene_xml_name = Path(constants.ROBOT_URDF_FILE).name.replace(".urdf", f"_w_{constants.OBJECT_NAME}.xml")
         scene_xml_file = object_dir / scene_xml_name
         # Set SCENE_XML_FILE in constants BEFORE creating retargeter (needed for temp_retargeter)
         constants.SCENE_XML_FILE = str(scene_xml_file)
 
         np.random.seed(0)
+        print("object mesh file: ", constants.OBJECT_MESH_FILE)
         object_local_pts, object_local_pts_demo_original = load_object_data(
             constants.OBJECT_MESH_FILE,
             smpl_scale=smpl_scale,
-            surface_weights=lambda p: task_config.surface_weight_high if p[2] > task_config.surface_weight_threshold else task_config.surface_weight_low,
+            surface_weights=lambda p: (
+                task_config.surface_weight_high
+                if p[2] > task_config.surface_weight_threshold
+                else task_config.surface_weight_low
+            ),
             sample_count=100,
         )
 
@@ -320,63 +346,134 @@ def setup_object_data(
                 task_config.climbing_ground_range, task_config.climbing_ground_range, task_config.climbing_ground_size
             )
             object_local_pts_demo = np.concatenate([object_local_pts_demo_original, ground_pts], axis=0)
-            object_scale = _OBJECT_SCALE_AUGMENTED
+            object_scale = object_scale_augmented
             object_local_pts = object_scale * object_local_pts_demo
         else:
-            object_scale = _OBJECT_SCALE_NORMAL
+            object_scale = object_scale_normal
             object_local_pts_demo = object_local_pts_demo_original
             object_local_pts = object_local_pts_demo
 
         # Create scaled URDF and XML files
-        object_urdf_file = create_scaled_multi_boxes_urdf(
-            constants.OBJECT_URDF_FILE, object_scale * smpl_scale
-        )
-        object_asset_xml_path = create_scaled_multi_boxes_xml(
-            str(box_asset_xml), object_scale * smpl_scale
-        )
-        new_scene_xml_path = create_new_scene_xml_file(
-            str(scene_xml_file), object_scale * smpl_scale, object_asset_xml_path
-        )
+        scale_factors = tuple(float(value) for value in (object_scale * smpl_scale))
+        object_urdf_file = create_scaled_multi_boxes_urdf(constants.OBJECT_URDF_FILE, scale_factors)
+        object_asset_xml_path = create_scaled_multi_boxes_xml(str(box_asset_xml), scale_factors)
+        new_scene_xml_path = create_new_scene_xml_file(str(scene_xml_file), scale_factors, object_asset_xml_path)
         constants.SCENE_XML_FILE = new_scene_xml_path
 
         return object_local_pts, object_local_pts_demo, object_urdf_file
 
+    raise ValueError(f"Unknown task type: {task_type}")
 
-def build_retargeter_kwargs(
-    cfg: RetargetingConfig, constants: SimpleNamespace, object_urdf_path: Optional[str], task_type: str
-) -> dict:
-    """Build kwargs for InteractionMeshRetargeter.
-    
+
+def _compute_q_init_base(
+    task_type: TaskType,
+    data_format: DataFormat,
+    human_joints: np.ndarray,
+    object_poses: np.ndarray,
+    constants: SimpleNamespace,
+    retargeter: InteractionMeshRetargeter | None = None,
+) -> np.ndarray:
+    """Compute base robot pose initialization (q_init_base).
+    This is a shared helper function used by both single and parallel processing.
     Args:
-        cfg: Configuration arguments
+        task_type: Type of task
+        data_format: Data format
+        human_joints: Human joint positions
+        object_poses: Object poses in format [qw, qx, qy, qz, x, y, z]
+        constants: Task constants
+        retargeter: Optional retargeter instance (needed for climbing)
+    Returns:
+        q_init_base in MuJoCo order: [0:3] position, [3:7] quaternion, [7:] joints
+    """
+    if task_type == "robot_only":
+        if data_format == "lafan":
+            spine_joint_idx = constants.DEMO_JOINTS.index("Spine1")
+            human_quat_init = estimate_human_orientation(human_joints, constants.DEMO_JOINTS)
+            # MuJoCo order: pos first, then quat
+            q_init_base = np.concatenate(
+                [human_joints[0, spine_joint_idx, :3], human_quat_init, np.zeros(constants.ROBOT_DOF)]
+            )
+        else:  # smplh
+            _, human_quat_init = transform_from_human_to_world(
+                human_joints[0, 0, :], object_poses[0], np.array([0.0, 0.0, 0.0])
+            )
+            # MuJoCo order: pos first, then quat
+            q_init_base = np.concatenate([human_joints[0, 0, :3], human_quat_init, np.zeros(constants.ROBOT_DOF)])
+    elif task_type == "object_interaction":
+        _, human_quat_init = transform_from_human_to_world(
+            human_joints[0, 0, :], object_poses[0], np.array([0.0, 0.0, 0.0])
+        )
+        # MuJoCo order: pos first, then quat
+        q_init_base = np.concatenate([human_joints[0, 0, :3], human_quat_init, np.zeros(constants.ROBOT_DOF)])
+    elif task_type == "climbing":
+        if retargeter is None:
+            raise ValueError("retargeter is required for climbing task")
+        _, human_quat_init = transform_from_human_to_world(
+            human_joints[0, 0, :], object_poses[0], np.array([0.0, 0.0, 0.0])
+        )
+        spine_joint_idx = retargeter.demo_joints.index("Spine1")
+        # MuJoCo order: pos first, then quat
+        q_init_base = np.concatenate(
+            [
+                human_joints[0, spine_joint_idx],
+                human_quat_init,
+                np.zeros(constants.ROBOT_DOF),
+            ]
+        )
+    else:
+        raise ValueError(f"Invalid task type: {task_type}")
+
+    return q_init_base
+
+
+def convert_object_poses_to_mujoco_order(object_poses: np.ndarray) -> np.ndarray:
+    """Convert object poses from [qw, qx, qy, qz, x, y, z] to MuJoCo order [x, y, z, qw, qx, qy, qz].
+    Args:
+        object_poses: Object poses array of shape (T, 7) in format [qw, qx, qy, qz, x, y, z]
+    Returns:
+        Object poses array in MuJoCo order [x, y, z, qw, qx, qy, qz]
+    """
+    return object_poses[:, [4, 5, 6, 0, 1, 2, 3]]
+
+
+def build_retargeter_kwargs_from_config(
+    retargeter_config: RetargeterConfig,
+    constants: SimpleNamespace,
+    object_urdf_path: str | None,
+    task_type: str,
+) -> dict:
+    """Build kwargs for InteractionMeshRetargeter from a RetargeterConfig.
+    This is a convenience function that allows building kwargs directly from
+    a RetargeterConfig without needing a full RetargetingConfig.
+    Args:
+        retargeter_config: Retargeter configuration
         constants: Task constants
         object_urdf_path: Path to object URDF file
         task_type: Type of task
-    
     Returns:
         Dictionary of kwargs for InteractionMeshRetargeter
     """
     kwargs = {
         "task_constants": constants,
         "object_urdf_path": object_urdf_path,
-        "q_a_init_idx": cfg.retargeter.q_a_init_idx,
-        "activate_joint_limits": cfg.retargeter.activate_joint_limits,
-        "activate_obj_non_penetration": cfg.retargeter.activate_obj_non_penetration,
-        "activate_foot_sticking": cfg.retargeter.activate_foot_sticking,
-        "penetration_tolerance": cfg.retargeter.penetration_tolerance,
-        "step_size": cfg.retargeter.step_size,
-        "visualize": cfg.retargeter.visualize,
-        "debug": cfg.retargeter.debug,
-        "w_nominal_tracking_init": cfg.retargeter.w_nominal_tracking_init,
+        "q_a_init_idx": retargeter_config.q_a_init_idx,
+        "activate_joint_limits": retargeter_config.activate_joint_limits,
+        "activate_obj_non_penetration": retargeter_config.activate_obj_non_penetration,
+        "activate_foot_sticking": retargeter_config.activate_foot_sticking,
+        "penetration_tolerance": retargeter_config.penetration_tolerance,
+        "step_size": retargeter_config.step_size,
+        "visualize": retargeter_config.visualize,
+        "debug": retargeter_config.debug,
+        "w_nominal_tracking_init": retargeter_config.w_nominal_tracking_init,
     }
     if task_type == "climbing":
-        kwargs["nominal_tracking_tau"] = cfg.retargeter.nominal_tracking_tau
+        kwargs["nominal_tracking_tau"] = retargeter_config.nominal_tracking_tau
     return kwargs
 
 
 def initialize_robot_pose(
-    task_type: Literal["robot_only", "object_interaction", "climbing"],
-    data_format: Literal["lafan", "smplh", "mocap"],
+    task_type: TaskType,
+    data_format: DataFormat,
     human_joints: np.ndarray,
     object_poses: np.ndarray,
     constants: SimpleNamespace,
@@ -385,12 +482,12 @@ def initialize_robot_pose(
     augmentation: bool,
     save_dir: Path,
     task_name: str,
-) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], np.ndarray, np.ndarray, np.ndarray]:
+    augmentation_translation: np.ndarray | None = None,
+    augmentation_rotation: float | None = 0.0,
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray, np.ndarray, np.ndarray]:
     """Initialize robot pose (q_init, q_nominal) based on task.
-    
     Returns qpos in MuJoCo order: [0:3] position, [3:7] quaternion, [7:] joints.
     Object poses are returned in MuJoCo order: [0:3] position, [3:7] quaternion.
-    
     Args:
         task_type: Type of task
         data_format: Data format
@@ -402,129 +499,89 @@ def initialize_robot_pose(
         augmentation: Whether augmentation is enabled
         save_dir: Save directory path
         task_name: Task name
-    
+        augmentation_translation: Translation vector for augmentation (default: [0.2, 0.0, 0.0])
     Returns:
         Tuple of (q_init, q_nominal, object_poses_augmented, human_joints_modified, object_poses_modified)
         where qpos is in MuJoCo order and object_poses are in MuJoCo order
     """
+    # Use default if not provided
+    if augmentation_translation is None:
+        augmentation_translation = _AUGMENTATION_TRANSLATION
     logger.info("Initializing robot pose")
 
     if task_type == "robot_only":
-        if data_format == "lafan":
-            human_quat_init = estimate_human_orientation(human_joints, constants.DEMO_JOINTS)
-            spine_joint_idx = constants.DEMO_JOINTS.index("Spine1")
-            # MuJoCo order: pos first, then quat
-            q_init = np.concatenate(
-                [human_joints[0, spine_joint_idx, :3], human_quat_init, np.zeros(constants.ROBOT_DOF)]
-            )
-        elif data_format == "smplh":  # smplh
-            _, human_quat_init = transform_from_human_to_world(
-                human_joints[0, 0, :], object_poses[0], np.array([0.0, 0.0, 0.0])
-            )
-            # MuJoCo order: pos first, then quat
-            q_init = np.concatenate(
-                [human_joints[0, 0, :3], human_quat_init, np.zeros(constants.ROBOT_DOF)]
-            )
-        object_poses = object_poses[:, [4, 5, 6, 0, 1, 2, 3]] 
+        q_init = _compute_q_init_base(task_type, data_format, human_joints, object_poses, constants)
+        object_poses = convert_object_poses_to_mujoco_order(object_poses)
         return q_init, None, object_poses, human_joints, object_poses
 
-    elif task_type == "object_interaction":
+    if task_type == "object_interaction":
         if augmentation:
             object_moving_frame_idx = extract_object_first_moving_frame(object_poses)
-            trim_end = object_moving_frame_idx + task_config.augmentation_frame_count
-            human_joints_trimmed = human_joints[:trim_end]
-            object_poses_trimmed = object_poses[:trim_end]
-            
             object_poses_augmented = augment_object_poses(
-                object_poses_trimmed,
+                object_poses,
                 object_moving_frame_idx,
-                human_joints_trimmed[0, 0, :],
-                _AUGMENTATION_TRANSLATION,
-            )
-            # Convert object_poses_augmented to MuJoCo order if needed (assuming input is [quat, pos])
-            object_poses_augmented = object_poses_augmented[:, [4, 5, 6, 0, 1, 2, 3]]
-            object_poses_trimmed = object_poses_trimmed[:, [4, 5, 6, 0, 1, 2, 3]] 
-            
-            original_path = save_dir / f"{task_name}_original.npz"
-            if not original_path.exists():
-                raise FileNotFoundError(
-                    f"Original file not found: {original_path}. "
-                    "Run without --augmentation first."
-                )
-            
-            data = np.load(str(original_path))
-            q_nominal = data["qpos"][:trim_end]
-            return None, q_nominal, object_poses_augmented, human_joints_trimmed, object_poses_trimmed
-        else:
-            object_poses_augmented = object_poses.copy()
-            _, human_quat_init = transform_from_human_to_world(
-                human_joints[0, 0, :], object_poses[0], np.array([0.0, 0.0, 0.0])
-            )
-            # MuJoCo order: pos first, then quat
-            q_init = np.concatenate(
-                [human_joints[0, 0, :3], human_quat_init, np.zeros(constants.ROBOT_DOF)]
+                human_joints[0, 0, :],
+                augmentation_translation,
+                augmentation_rotation,
             )
             # Convert object_poses to MuJoCo order
-            object_poses = object_poses[:, [4, 5, 6, 0, 1, 2, 3]]
-            object_poses_augmented = object_poses_augmented[:, [4, 5, 6, 0, 1, 2, 3]]
-            return q_init, None, object_poses_augmented, human_joints, object_poses
+            object_poses_augmented = convert_object_poses_to_mujoco_order(object_poses_augmented)
+            object_poses = convert_object_poses_to_mujoco_order(object_poses)
 
-    elif task_type == "climbing":
+            original_path = save_dir / f"{task_name}_original.npz"
+            if not original_path.exists():
+                raise FileNotFoundError(f"Original file not found: {original_path}. Run without --augmentation first.")
+
+            data = np.load(str(original_path))
+            q_nominal = data["qpos"]
+            return None, q_nominal, object_poses_augmented, human_joints, object_poses
+        object_poses_augmented = object_poses.copy()
+        q_init = _compute_q_init_base(task_type, data_format, human_joints, object_poses, constants)
+        # Convert object_poses to MuJoCo order
+        object_poses = convert_object_poses_to_mujoco_order(object_poses)
+        object_poses_augmented = convert_object_poses_to_mujoco_order(object_poses_augmented)
+        return q_init, None, object_poses_augmented, human_joints, object_poses
+
+    if task_type == "climbing":
         if augmentation:
             original_path = save_dir / f"{task_name}_original.npz"
             if not original_path.exists():
-                raise FileNotFoundError(
-                    f"Original file not found: {original_path}. "
-                    "Run without --augmentation first."
-                )
-            
+                raise FileNotFoundError(f"Original file not found: {original_path}. Run without --augmentation first.")
+
             data = np.load(str(original_path))
             q_nominal = data["qpos"]
-            # Convert object_poses to MuJoCo order if needed (assuming input is [quat, pos])
-            object_poses = object_poses[:, [4, 5, 6, 0, 1, 2, 3]]
+            # Convert object_poses to MuJoCo order
+            object_poses = convert_object_poses_to_mujoco_order(object_poses)
             return q_nominal[0], q_nominal, object_poses, human_joints, object_poses
-        else:
-            _, human_quat_init = transform_from_human_to_world(
-                human_joints[0, 0, :], object_poses[0], np.array([0.0, 0.0, 0.0])
-            )
-            spine_joint_idx = retargeter.demo_joints.index("Spine1")
-            # MuJoCo order: pos first, then quat
-            q_init = np.concatenate(
-                [
-                    human_joints[0, spine_joint_idx],
-                    human_quat_init,
-                    np.zeros(constants.ROBOT_DOF),
-                ]
-            )
-            # Convert object_poses to MuJoCo order if needed (assuming input is [quat, pos])
-            object_poses = object_poses[:, [4, 5, 6, 0, 1, 2, 3]]
-            return q_init, None, object_poses, human_joints, object_poses
+        q_init = _compute_q_init_base(task_type, data_format, human_joints, object_poses, constants, retargeter)
+        # Convert object_poses to MuJoCo order
+        object_poses = convert_object_poses_to_mujoco_order(object_poses)
+        return q_init, None, object_poses, human_joints, object_poses
 
-   
+    raise ValueError(f"Unknown task type: {task_type}")
+
+
 def determine_output_path(
-    task_type: Literal["robot_only", "object_interaction", "climbing"],
+    task_type: TaskType,
     save_dir: Path,
     task_name: str,
     augmentation: bool,
 ) -> str:
     """Determine output file path based on task and augmentation.
-    
     Args:
         task_type: Type of task
         save_dir: Save directory path
         task_name: Task name
         augmentation: Whether this is an augmentation run
-    
     Returns:
         Output file path
     """
     if task_type == "robot_only":
         return str(save_dir / f"{task_name}.npz")
-    elif task_type in ("object_interaction", "climbing"):
+    if task_type in ("object_interaction", "climbing"):
         suffix = "_augmented" if augmentation else "_original"
         return str(save_dir / f"{task_name}{suffix}.npz")
-    else:
-        raise ValueError(f"Unknown task type: {task_type}")
+    raise ValueError(f"Unknown task type: {task_type}")
 
 
 # ----------------------------- Main -----------------------------
@@ -532,7 +589,6 @@ def determine_output_path(
 
 def main(cfg: RetargetingConfig) -> None:
     """Main retargeting pipeline.
-    
     Args:
         cfg: Configuration arguments
     """
@@ -544,15 +600,13 @@ def main(cfg: RetargetingConfig) -> None:
     task_type = cfg.task_type
 
     # Set defaults based on task type
-    data_format: Literal["lafan", "smplh", "mocap"] = cfg.data_format or cast(Literal["lafan", "smplh", "mocap"], DEFAULT_DATA_FORMATS[task_type])
-    save_dir = cfg.save_dir if cfg.save_dir is not None else Path(
-        DEFAULT_SAVE_DIRS[task_type].format(robot=robot)
-    )
+    data_format: DataFormat = cfg.data_format or cast("DataFormat", DEFAULT_DATA_FORMATS[task_type])
+    save_dir = cfg.save_dir if cfg.save_dir is not None else Path(DEFAULT_SAVE_DIRS[task_type].format(robot=robot))
     data_path = cfg.data_path
 
     os.makedirs(save_dir, exist_ok=True)
-    logger.info(f"Task: {task_name}, Type: {task_type}, Format: {data_format}")
-    logger.info(f"Data path: {data_path}, Save dir: {save_dir}")
+    logger.info("Task: %s, Type: %s, Format: %s", task_name, task_type, data_format)
+    logger.info("Data path: %s, Save dir: %s", data_path, save_dir)
 
     # Ensure configs match top-level selections
     if cfg.robot_config.robot_type != robot:
@@ -564,6 +618,7 @@ def main(cfg: RetargetingConfig) -> None:
     # Task-specific object setup: set default object_dir for climbing if not provided
     if task_type == "climbing" and cfg.task_config.object_dir is None:
         from dataclasses import replace
+
         cfg.task_config = replace(cfg.task_config, object_dir=data_path / task_name)
 
     constants = create_task_constants(
@@ -577,26 +632,29 @@ def main(cfg: RetargetingConfig) -> None:
     human_joints, object_poses, smpl_scale = load_motion_data(
         task_type, data_format, data_path, task_name, constants, cfg.motion_data_config
     )
-    
+
     # Get toe names from motion data config (depends only on data_format)
-    toe_names = cfg.motion_data_config.TOE_NAMES
+    toe_names = cfg.motion_data_config.toe_names
 
     # Setup object data
     object_local_pts, object_local_pts_demo, object_urdf_path = setup_object_data(
-        task_type, constants, cfg.task_config.object_dir, smpl_scale, cfg.task_config, cfg.augmentation
+        task_type,
+        constants,
+        cfg.task_config.object_dir,
+        smpl_scale,
+        cfg.task_config,
+        cfg.augmentation,
+        object_scale_augmented=_OBJECT_SCALE_AUGMENTED,
     )
 
     # Create retargeter
-    retargeter_kwargs = build_retargeter_kwargs(cfg, constants, object_urdf_path, task_type)
+    retargeter_kwargs = build_retargeter_kwargs_from_config(cfg.retargeter, constants, object_urdf_path, task_type)
     retargeter = InteractionMeshRetargeter(**retargeter_kwargs)
     logger.info("Retargeter created")
 
     # Preprocess motion data
     if task_type == "robot_only":
-        human_joints = preprocess_motion_data(
-            human_joints, retargeter, toe_names, smpl_scale
-        )[:cfg.task_config.augmentation_trim_frames]
-        object_poses = object_poses[:cfg.task_config.augmentation_trim_frames]
+        human_joints = preprocess_motion_data(human_joints, retargeter, toe_names, smpl_scale)
     elif task_type == "object_interaction":
         human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
             human_joints, retargeter, toe_names, scale=smpl_scale, object_poses=object_poses
@@ -606,23 +664,31 @@ def main(cfg: RetargetingConfig) -> None:
             human_joints,
             retargeter,
             toe_names,
-            smpl_scale,
+            scale=smpl_scale,
             object_poses=object_poses,
             normalize_height=False,
         )
 
     # Initialize robot pose
     q_init, q_nominal, object_poses_augmented, human_joints, object_poses = initialize_robot_pose(
-        task_type, data_format, human_joints, object_poses, constants, retargeter, cfg.task_config, cfg.augmentation, save_dir, task_name
+        task_type,
+        data_format,
+        human_joints,
+        object_poses,
+        constants,
+        retargeter,
+        cfg.task_config,
+        cfg.augmentation,
+        save_dir,
+        task_name,
+        augmentation_translation=_AUGMENTATION_TRANSLATION,
     )
 
     # Extract foot sticking sequences
-    foot_sticking_sequences = extract_foot_sticking_sequence(
-        human_joints, retargeter.demo_joints, toe_names
-    )
+    foot_sticking_sequences = extract_foot_sticking_sequence_velocity(human_joints, retargeter.demo_joints, toe_names)
 
     # Task-specific foot sticking adjustments
-    if task_type == "object_interaction" and not cfg.augmentation:
+    if task_type == "object_interaction":
         # Disable initial sticking
         foot_sticking_sequences[0][toe_names[0]] = False
         foot_sticking_sequences[0][toe_names[1]] = False
@@ -641,10 +707,10 @@ def main(cfg: RetargetingConfig) -> None:
         foot_sticking_sequences=foot_sticking_sequences,
         q_a_init=q_init,
         q_nominal_list=q_nominal,
-        original=not cfg.augmentation if task_type != "robot_only" else True,
+        original=not cfg.augmentation,
         dest_res_path=dest_res_path,
     )
-    logger.info(f"Retargeting complete. Results saved to: {dest_res_path}")
+    logger.info("Retargeting complete. Results saved to: %s", dest_res_path)
 
     if cfg.retargeter.debug:
         input("Press Enter to exit ...")

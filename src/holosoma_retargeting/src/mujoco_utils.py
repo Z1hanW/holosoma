@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-from collections import defaultdict
-from typing import Dict, Iterable, List, Set, Tuple
+from typing import Tuple
 
-import igl  # type: ignore[import-not-found]
-import mujoco  # type: ignore[import-not-found]
 import numpy as np
 
 Pair = Tuple[str, str]
@@ -12,7 +9,7 @@ Pair = Tuple[str, str]
 
 def _mesh_local_vf(model, geom_id):
     """Return local vertices and faces for a MuJoCo mesh geom."""
-    mesh_id = int(model.geom_dataid[geom_id]) # Note: sometime geom does not have mesh, mesh_id will be -1 
+    mesh_id = int(model.geom_dataid[geom_id])  # Note: sometime geom does not have mesh, mesh_id will be -1
 
     v0, nv = int(model.mesh_vertadr[mesh_id]), int(model.mesh_vertnum[mesh_id])
     f0, nf = int(model.mesh_faceadr[mesh_id]), int(model.mesh_facenum[mesh_id])

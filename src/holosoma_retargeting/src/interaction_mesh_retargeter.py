@@ -341,7 +341,6 @@ class InteractionMeshRetargeter:
                 object_quat_demo = object_poses[i, 3:]
                 object_trans_demo = object_poses[i, :3]
 
-
                 # Get human joint positions and create interaction mesh in object frame
                 human_mapped_joints = human_joint_motions[i, self.smplh_mapped_joint_indices]
 
@@ -859,12 +858,12 @@ class InteractionMeshRetargeter:
         ngeom = m.ngeom
 
         self._geom_names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or "" for g in range(ngeom)]
-          
+
         if not hasattr(self, "_saved_margins"):
             self._saved_margins = np.empty_like(m.geom_margin)
         self._saved_margins[:] = m.geom_margin
 
-        m.geom_margin[:] = threshold 
+        m.geom_margin[:] = threshold
 
         # Run collision. This runs broad→narrow and fills d.contact.
         mujoco.mj_collision(m, d)
@@ -937,7 +936,7 @@ class InteractionMeshRetargeter:
                 Js[(g1, g2)] = J_rel
                 phis[(g1, g2)] = float(dist)
 
-                # For debug 
+                # For debug
                 # self.draw_mesh_pair_with_contact(self.robot_model, self.robot_data, g1, g2,   \
                 #     self._geom_names[g1], self._geom_names[g2], fromto=fromto)
 
@@ -1068,8 +1067,6 @@ class InteractionMeshRetargeter:
         T = self._build_transform_qdot_to_qvel_fast()
 
         # 5) Map to Drake kQDot
-        J_qdot = Jp @ T  # (3 x nq)
-
         # 6) (Optional) reorder first 7 cols to Drake's [qw,qx,qy,qz,x,y,z] if needed
         # if self.has_dynamic_object:
         #     perm = [3, 4, 5, 6, 0, 1, 2] + list(range(7, self.robot_model.nq - 7)) + [-4, -3, -2, -1, -7, -6, -5]
@@ -1077,7 +1074,7 @@ class InteractionMeshRetargeter:
         #     perm = [3, 4, 5, 6, 0, 1, 2] + list(range(7, self.robot_model.nq))
         # return J_qdot[:, perm]
 
-        return J_qdot 
+        return Jp @ T
 
     def _calc_manipulator_jacobians(
         self,
@@ -1105,7 +1102,7 @@ class InteractionMeshRetargeter:
 
         if self.has_dynamic_object:
             # q_mujoco = np.concatenate([q[4:7], q[:4], q[7:-7], q[-3:], q[-7:-3]])
-        
+
             q_mujoco = q.copy()
         else:
             q_mujoco = q.copy()

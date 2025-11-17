@@ -1,9 +1,9 @@
 # viser_utils.py
 from __future__ import annotations
 
-import time
 import threading
-from typing import Optional, Tuple, List
+import time
+from typing import List, Tuple
 
 import numpy as np
 import viser  # type: ignore[import-not-found]
@@ -17,8 +17,8 @@ def create_motion_control_sliders(
     motion_sequence: np.ndarray,
     *,
     robot_dof: int,
-    viser_object: Optional[ViserUrdf] = None,
-    object_base_frame: Optional[viser.FrameHandle] = None,
+    viser_object: ViserUrdf | None = None,
+    object_base_frame: viser.FrameHandle | None = None,
     contains_object_in_qpos: bool = True,
     initial_fps: int = 30,
     initial_interp_mult: int = 2,
@@ -78,7 +78,7 @@ def create_motion_control_sliders(
         n = float(np.linalg.norm(q))
         return q if n == 0.0 else q / n
 
-    def _quat_continuous(prev_q: Optional[np.ndarray], curr_q: np.ndarray) -> np.ndarray:
+    def _quat_continuous(prev_q: np.ndarray | None, curr_q: np.ndarray) -> np.ndarray:
         q = _quat_normalize(curr_q)
         if prev_q is None:
             return q
@@ -105,8 +105,8 @@ def create_motion_control_sliders(
         out = q0.copy()
 
         # Robot base (MuJoCo order: pos first, then quat)
-        out[0:3] = (1.0 - u) * q0[0:3] + u * q1[0:3]             # pos (xyz)
-        out[3:7] = _slerp(q0[3:7], q1[3:7], u)                   # quat (wxyz)
+        out[0:3] = (1.0 - u) * q0[0:3] + u * q1[0:3]  # pos (xyz)
+        out[3:7] = _slerp(q0[3:7], q1[3:7], u)  # quat (wxyz)
 
         # Joints
         j0 = q0[7 : 7 + robot_dof]
@@ -115,33 +115,37 @@ def create_motion_control_sliders(
 
         # Object (optional) (MuJoCo order: pos first, then quat)
         if has_object_input:
-            out[-7:-4] = (1.0 - u) * q0[-7:-4] + u * q1[-7:-4]   # obj pos (xyz)
-            out[-4:]   = _slerp(q0[-4:], q1[-4:], u)             # obj quat (wxyz)
+            out[-7:-4] = (1.0 - u) * q0[-7:-4] + u * q1[-7:-4]  # obj pos (xyz)
+            out[-4:] = _slerp(q0[-4:], q1[-4:], u)  # obj quat (wxyz)
         return out
 
     # ---------------- state ----------------
     playing = {"flag": False}
-    tick = {"next": time.perf_counter()}              # absolute time for next draw
-    prev: dict[str, Optional[np.ndarray]] = {"robot_q": None, "obj_q": None}           # for continuity
-    nonlocal_f = {"f": float(frame_slider.value)}     # fractional frame cursor
+    tick = {"next": time.perf_counter()}  # absolute time for next draw
+    prev: dict[str, np.ndarray | None] = {"robot_q": None, "obj_q": None}  # for continuity
+    nonlocal_f = {"f": float(frame_slider.value)}  # fractional frame cursor
 
     # ---------------- draw ----------------
     def _apply_frame_from_q(q: np.ndarray) -> None:
         # joints -> ensure length
         joints = q[7 : 7 + robot_dof]
         if joints.shape[0] != robot_dof:
-            joints = joints[:robot_dof] if joints.shape[0] > robot_dof else np.pad(joints, (0, robot_dof - joints.shape[0]))
+            joints = (
+                joints[:robot_dof] if joints.shape[0] > robot_dof else np.pad(joints, (0, robot_dof - joints.shape[0]))
+            )
         viser_robot.update_cfg(joints)
 
         # robot base (MuJoCo order: pos first, then quat)
-        robot_base_frame.position = q[0:3]                      # pos (xyz)
-        r_q = _quat_continuous(prev["robot_q"], q[3:7]); prev["robot_q"] = r_q
+        robot_base_frame.position = q[0:3]  # pos (xyz)
+        r_q = _quat_continuous(prev["robot_q"], q[3:7])
+        prev["robot_q"] = r_q
         robot_base_frame.wxyz = r_q
 
         # object (optional) (MuJoCo order: pos first, then quat)
         if has_object_input and object_base_frame is not None:
-            object_base_frame.position = q[-7:-4]                 # obj pos (xyz)
-            o_q = _quat_continuous(prev["obj_q"], q[-4:]); prev["obj_q"] = o_q
+            object_base_frame.position = q[-7:-4]  # obj pos (xyz)
+            o_q = _quat_continuous(prev["obj_q"], q[-4:])
+            prev["obj_q"] = o_q
             object_base_frame.wxyz = o_q
         elif object_base_frame is not None and viser_object is not None:
             # fallback static pose

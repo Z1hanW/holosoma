@@ -11,10 +11,10 @@ from holosoma_retargeting.config_types.robot import RobotConfig
 
 def get_default_robot_config(robot_type: Literal["g1", "t1"] = "g1") -> RobotConfig:
     """Get default robot configuration.
-    
+
     Args:
         robot_type: Robot type identifier.
-    
+
     Returns:
         RobotConfig: Default configuration instance.
     """
@@ -23,7 +23,7 @@ def get_default_robot_config(robot_type: Literal["g1", "t1"] = "g1") -> RobotCon
 
 def get_robot_config_from_cli() -> RobotConfig:
     """Get robot configuration from tyro CLI.
-    
+
     Returns:
         RobotConfig: Configuration instance from CLI arguments.
     """
@@ -31,4 +31,3 @@ def get_robot_config_from_cli() -> RobotConfig:
 
 
 __all__ = ["get_default_robot_config", "get_robot_config_from_cli"]
-

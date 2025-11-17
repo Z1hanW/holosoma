@@ -1,12 +1,11 @@
 from setuptools import find_packages, setup  # type: ignore[import-untyped]
 
 setup(
-    name="retargeting",
+    name="holosoma-retargeting",
     version="0.1.0",
-    description="FAR Interaction Mesh Kinematic Retargeting",
-    author="Lujie Yang",
-    packages=find_packages(),  # Changed this
-    package_dir={"retargeting": "src"},  # Added this
+    description="holosoma-retargeting: retargeting components for converting human motions to robot motions",
+    author="Amazon FAR Team",
+    packages=find_packages(),
     python_requires=">=3.10",
     install_requires=[
         "numpy",
@@ -23,6 +22,6 @@ setup(
         "yourdfpy",
         "cvxpy",
         "libigl",
-        "tyro", 
+        "tyro",
     ],
 )
