@@ -7,6 +7,14 @@ Please read through this document before submitting any issues or pull requests 
 information to effectively respond to your bug report or contribution.
 
 
+## Development Environment Setup
+
+We use pre-commit hooks to ensure that the code is formatted correctly and that the tests pass. To install the pre-commit hooks, run the following command from the root of the repository:
+
+```bash
+pre-commit install
+```
+
 ## Reporting Bugs/Feature Requests
 
 We welcome you to use the GitHub issue tracker to report bugs or suggest features.
