@@ -323,12 +323,8 @@ class MotionLoader:
 
 
 def world_body_velocities(model, data):
-    # body-frame spatial velocity (ang, lin) per body
-    ang_b = data.cvel[:, :3]
-    lin_b = data.cvel[:, 3:]
-    R_bw = data.xmat.reshape(model.nbody, 3, 3)  # body->world
-    ang_w = np.einsum("bij,bj->bi", R_bw, ang_b)
-    lin_w = np.einsum("bij,bj->bi", R_bw, lin_b)
+    lin_w = np.asarray(data.xvelp).reshape(model.nbody, 3)  # linear vel in world
+    ang_w = np.asarray(data.xvelr).reshape(model.nbody, 3)  # angular vel in world
     return lin_w, ang_w
 
 
