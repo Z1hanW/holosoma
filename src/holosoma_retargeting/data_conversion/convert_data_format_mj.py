@@ -323,8 +323,26 @@ class MotionLoader:
 
 
 def world_body_velocities(model, data):
-    lin_w = np.asarray(data.xvelp).reshape(model.nbody, 3)  # linear vel in world
-    ang_w = np.asarray(data.xvelr).reshape(model.nbody, 3)  # angular vel in world
+    """
+    Per-body COM velocities in the world frame.
+
+    Returns:
+        lin_w: (nbody, 3) linear velocities in world coords
+        ang_w: (nbody, 3) angular velocities in world coords
+    """
+    v = np.zeros((model.nbody, 6))
+    for b in range(model.nbody):
+        mujoco.mj_objectVelocity(
+            model,
+            data,
+            mujoco.mjtObj.mjOBJ_BODY,  # object type = body
+            b,                          # body id
+            v[b],
+            0,                          # flg_local = 0 -> world orientation
+        )
+
+    lin_w = v[:, 0:3]   # [vx, vy, vz] in world frame
+    ang_w = v[:, 3:6]   # [wx, wy, wz] in world frame
     return lin_w, ang_w
 
 
