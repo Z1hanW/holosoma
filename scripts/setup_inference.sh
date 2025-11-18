@@ -73,8 +73,7 @@ if [[ ! -f $SENTINEL_FILE ]]; then
   # Install libstdcxx-ng to fix the error: `version `GLIBCXX_3.4.32' not found` on Ubuntu 24.04
   conda install -c conda-forge -y libstdcxx-ng
 
-  # Install holosoma & holosoma_inference
-  pip install -e $ROOT_DIR/src/holosoma
+  # Install holosoma_inference
   pip install -e $ROOT_DIR/src/holosoma_inference[unitree,booster]
 
   # Setup a few things for ARM64 Linux (G1 Jetson)

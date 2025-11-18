@@ -39,7 +39,6 @@ On your laptop, run the following commands to set up the environment:
 cd ~/holosoma
 bash scripts/setup_inference.sh             # Create a virtual environment with all dependencies
 source scripts/source_inference_setup.sh    # Activate the virtual environment
-sudo ufw disable                            # Disable the firewall
 ```
 
 ### 3. Run a Locomotion Policy
@@ -49,7 +48,8 @@ Within the `(hsinference)` virtualenv, run the following command. Be sure to set
 ```bash
 python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-loco \
     --task.model-path src/holosoma_inference/holosoma_inference/models/loco/g1_29dof/fastsac_g1_29dof.onnx \
-    --task.interface eth0
+    --task.interface eth0 \
+    --task.use-joystick
 ```
 
 ### 4. Control the Robot
@@ -110,7 +110,7 @@ python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29d
 
 ```bash
 source scripts/source_mujoco_setup.sh
-python src/holosoma/holosoma/run_sim.py robot:g1-29dof --simulator.config.bridge.enabled=True
+python src/holosoma/holosoma/run_sim.py robot:g1-29dof
 ```
 
 2. Launch the policy:
@@ -181,6 +181,7 @@ source scripts/source_inference_setup.sh
 python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-wbt \
     --task.model-path src/holosoma_inference/holosoma_inference/models/wbt/fastsac_g1_29dof_dancing.onnx \
     --task.no-use-joystick \
+    --task.use-sim-time \
     --task.rl-rate 50
 ```
 
@@ -201,8 +202,7 @@ source scripts/source_inference_setup.sh
 python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-wbt \
     --task.model-path src/holosoma_inference/holosoma_inference/models/wbt/fastsac_g1_29dof_dancing.onnx \
     --task.use-joystick \
-    --task.no-use-sim-time \
-    --task.rl-rate 50
+    --task.rl-rate 50 \
     --task.interface eth0
 ```
 

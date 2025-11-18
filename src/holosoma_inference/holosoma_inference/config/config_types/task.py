@@ -39,7 +39,7 @@ class TaskConfig:
     joystick_device: int = 0
     """Joystick device index."""
 
-    use_sim_time: bool = True
+    use_sim_time: bool = False
     """Use synchronized simulation time for WBT policies."""
 
     wandb_download_dir: str = "/tmp"
