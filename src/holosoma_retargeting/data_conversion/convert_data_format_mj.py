@@ -346,41 +346,59 @@ def world_body_velocities(model, data):
     return lin_w, ang_w
 
 
-def draw_velocity_markers(model, data, viewer, scale: float = 0.3, min_norm: float = 1e-3):
+def draw_velocity_markers(model, data, viewer, scale: float = 0.3, min_norm: float = 1e-3, width: float = 2.0):
     """
-    Draw velocity arrows at each body's COM in the world frame.
+    Draw velocity line segments at each body's COM in the world frame using viewer.user_scn.
 
     Args:
         model: mjModel
         data:  mjData
-        viewer: mujoco.viewer (launch_passive handle)
-        scale: visual scale factor for arrow length
+        viewer: mujoco.viewer handle from launch_passive
+        scale: visual scale factor for line length
         min_norm: threshold below which we skip drawing (to reduce clutter)
+        width: line width in pixels (for mjGEOM_LINE)
     """
-    # World-frame linear & angular velocities at each body COM
     lin_w, _ = world_body_velocities(model, data)
 
-    # Clear previous frame's markers
+    # Clear previous custom geoms
     viewer.user_scn.ngeom = 0
+    maxgeom = viewer.user_scn.maxgeom  # maximum number of custom geoms allowed
+    i = 0
 
     for b in range(model.nbody):
-        com = data.xipos[b]          # COM position in world frame (3,)
-        v = lin_w[b]                 # linear velocity in world frame (3,)
+        if i >= maxgeom:
+            break  # avoid overflowing the scene's geom buffer
 
-        if np.linalg.norm(v) < min_norm:
+        v = lin_w[b]
+        norm = np.linalg.norm(v)
+        if norm < min_norm:
             continue
 
-        # Arrow direction (scaled)
-        dir_vec = scale * v
+        com = np.asarray(data.xipos[b], dtype=np.float64)
+        to = com + scale * v  # endpoint of velocity vector
 
-        viewer.add_marker(
-            pos=com,
-            xaxis=dir_vec,
-            yaxis=np.array([0.0, 0.0, 0.0]),  # let MuJoCo infer orthogonal axis
-            size=np.array([0.01, 0.01, 0.01]),
-            rgba=np.array([1.0, 0.0, 0.0, 1.0]),  # red arrows
-            type=mujoco.mjtGeom.mjGEOM_ARROW,
+        # Initialize this geom slot as a line (only once per frame)
+        mujoco.mjv_initGeom(
+            viewer.user_scn.geoms[i],
+            type=mujoco.mjtGeom.mjGEOM_LINE,
+            size=np.zeros(3, dtype=np.float64),
+            pos=np.zeros(3, dtype=np.float64),
+            mat=np.eye(3, dtype=np.float64).reshape(-1),
+            rgba=np.array([1.0, 0.0, 0.0, 1.0], dtype=np.float32),
         )
+
+        # Turn it into a connector from COM -> COM + v
+        mujoco.mjv_connector(
+            viewer.user_scn.geoms[i],
+            mujoco.mjtGeom.mjGEOM_LINE,
+            width,
+            com,
+            to,
+        )
+
+        i += 1
+
+    viewer.user_scn.ngeom = i
 
 
 def run_simulator(joint_names: list[str]):
