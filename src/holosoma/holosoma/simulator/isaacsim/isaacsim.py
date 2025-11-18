@@ -441,7 +441,7 @@ class IsaacSim(BaseSimulator):
         self.scene.filter_collisions(global_prim_paths=global_collision_prims)
 
         # add objects if object is provided
-        if self.robot_config.object.object_urdf_path: 
+        if self.robot_config.object.object_urdf_path:
             # Resolve the object asset urdf path using importlib.resources
             object_asset_urdf_path = resolve_data_file_path(self.robot_config.object.object_urdf_path)
             object_name = "object"  # hardcoded object name
@@ -843,7 +843,8 @@ class IsaacSim(BaseSimulator):
 
     def simulate_at_each_physics_step(self):
         self._sim_step_counter += 1
-        has_video_recording = self.video_recorder is not None
+        # Only render if actively recording (not just if video recorder exists)
+        has_video_recording = self.video_recorder is not None and self.video_recorder.is_recording
         is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors() or has_video_recording
 
         # Apply virtual gantry forces before physics step

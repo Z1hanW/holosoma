@@ -9,6 +9,7 @@ simulator-specific optimizations.
 from __future__ import annotations
 
 import threading
+import time
 import traceback
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -89,6 +90,9 @@ class VideoRecorderInterface(ABC):
 
         # Frame decimation counter for capturing at control frequency
         self._frame_counter: int = 0
+
+        # Performance timing statistics
+        self._frame_times: list[float] = []
 
         # Threading components (shared across all simulators)
         self.recording_thread: Thread | None = None
@@ -236,8 +240,11 @@ class VideoRecorderInterface(ABC):
             if hasattr(self, "render_signal_event"):
                 self.render_signal_event.set()
         else:
-            # Capture frame directly on main thread
+            # Capture frame directly on main thread with timing
+            start_time = time.perf_counter()
             self._capture_frame_impl()
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            self._frame_times.append(elapsed_ms)
 
     @abstractmethod
     def _capture_frame_impl(self) -> None:
@@ -274,9 +281,12 @@ class VideoRecorderInterface(ABC):
                 if self.render_signal_event.wait(timeout=1.0):
                     self.render_signal_event.clear()
 
-                    # Only capture if still recording
+                    # Only capture if still recording, with timing
                     if self._is_recording:
+                        start_time = time.perf_counter()
                         self._capture_frame_impl()
+                        elapsed_ms = (time.perf_counter() - start_time) * 1000
+                        self._frame_times.append(elapsed_ms)
 
         except Exception as e:
             # Log exceptions from the threads, don't break main thread though
@@ -760,11 +770,25 @@ class VideoRecorderInterface(ABC):
         # Reset camera tracking to start from current robot position
         self._reset_camera_smoothing()
 
+        # Reset frame timing statistics
+        self._frame_times.clear()
+
     def _stop_recording(self) -> None:
         """Shared logic for stopping recording."""
         if self.config.use_recording_thread:
             # Wait for thread to finish processing current frames
             self._wait_for_recording_thread_idle()
+
+        # Print frame capture statistics if we captured any frames
+        if self._frame_times:
+            frame_times_array = np.array(self._frame_times)
+            logger.debug(
+                f"Frame capture stats: n={len(self._frame_times)} "
+                f"mean={frame_times_array.mean():.2f}ms "
+                f"std={frame_times_array.std():.2f}ms "
+                f"min={frame_times_array.min():.2f}ms "
+                f"max={frame_times_array.max():.2f}ms"
+            )
 
         # Use shared encoding logic
         self._encode_and_save_video()

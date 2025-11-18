@@ -106,7 +106,7 @@ class VideoConfig:
     upload_to_wandb: bool = True
     """Whether to upload videos to wandb for logging if wandb is enabled."""
 
-    show_command_overlay: bool = False
+    show_command_overlay: bool = True
     """Whether to overlay robot command information on video frames."""
 
     record_env_id: int = 0

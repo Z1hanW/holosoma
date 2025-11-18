@@ -129,7 +129,9 @@ class IsaacSimVideoRecorder(VideoRecorderInterface):
         self._render_product = rep.create.render_product(self._camera_prim_path, resolution)
 
         # Create RGB annotator
-        self._rgb_annotator = rep.AnnotatorRegistry.get_annotator("rgb")
+        self._rgb_annotator = rep.AnnotatorRegistry.get_annotator(
+            "rgb", device=self.simulator.device, do_array_copy=False
+        )
         self._rgb_annotator.attach([self._render_product])
 
         logger.debug(f"Created replicator camera at: {self._camera_prim_path}")
@@ -160,8 +162,16 @@ class IsaacSimVideoRecorder(VideoRecorderInterface):
             # Get RGB data from replicator annotator
             rgb_data = self._rgb_annotator.get_data()
 
-            # Convert to numpy array
-            rgb_data = np.frombuffer(rgb_data, dtype=np.uint8).reshape(*rgb_data.shape)
+            # Convert to numpy array (handle bytes, numpy arrays, and warp arrays)
+            if isinstance(rgb_data, np.ndarray):
+                # Already a numpy array
+                pass  # rgb_data is already in the correct format
+            elif hasattr(rgb_data, "numpy"):
+                # Warp array (when do_array_copy=False) - convert to numpy
+                rgb_data = rgb_data.numpy()
+            else:
+                # Bytes data (default behavior) - convert to array
+                rgb_data = np.frombuffer(rgb_data, dtype=np.uint8).reshape(*rgb_data.shape)
 
             # note: initially the renderer is warming up and returns empty data
             if rgb_data.size == 0:
