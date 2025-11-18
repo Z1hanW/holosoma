@@ -1066,14 +1066,6 @@ class InteractionMeshRetargeter:
 
         T = self._build_transform_qdot_to_qvel_fast()
 
-        # 5) Map to Drake kQDot
-        # 6) (Optional) reorder first 7 cols to Drake's [qw,qx,qy,qz,x,y,z] if needed
-        # if self.has_dynamic_object:
-        #     perm = [3, 4, 5, 6, 0, 1, 2] + list(range(7, self.robot_model.nq - 7)) + [-4, -3, -2, -1, -7, -6, -5]
-        # else:
-        #     perm = [3, 4, 5, 6, 0, 1, 2] + list(range(7, self.robot_model.nq))
-        # return J_qdot[:, perm]
-
         return Jp @ T
 
     def _calc_manipulator_jacobians(

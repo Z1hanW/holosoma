@@ -293,13 +293,12 @@ def setup_object_data(
         task_config: Task configuration
         augmentation: Whether augmentation is enabled
         object_scale_augmented: Scale factor for augmented objects (default: [1.0, 1.0, 1.2])
-        object_scale_normal: Scale factor for normal objects (default: [1.0, 1.0, 1.0])
     Returns:
         Tuple of (object_local_pts, object_local_pts_demo, object_urdf_path)
     """
     object_scale_normal = np.array([1.0, 1.0, 1.0])
     if object_scale_augmented is None:
-        object_scale_augmented = np.array([1.0, 1.0, 1.2])
+        object_scale_augmented = np.array([1.0, 1.0, 1.2]) # For climbing task augmentation
     logger.info("Setting up object data for task: %s", task_type)
 
     if task_type == "robot_only":
@@ -506,7 +505,7 @@ def initialize_robot_pose(
     """
     # Use default if not provided
     if augmentation_translation is None:
-        augmentation_translation = _AUGMENTATION_TRANSLATION
+        augmentation_translation = _AUGMENTATION_TRANSLATION 
     logger.info("Initializing robot pose")
 
     if task_type == "robot_only":
@@ -534,7 +533,7 @@ def initialize_robot_pose(
 
             data = np.load(str(original_path))
             q_nominal = data["qpos"]
-            return None, q_nominal, object_poses_augmented, human_joints, object_poses
+            return q_nominal[0], q_nominal, object_poses_augmented, human_joints, object_poses
         object_poses_augmented = object_poses.copy()
         q_init = _compute_q_init_base(task_type, data_format, human_joints, object_poses, constants)
         # Convert object_poses to MuJoCo order
@@ -657,16 +656,11 @@ def main(cfg: RetargetingConfig) -> None:
         human_joints = preprocess_motion_data(human_joints, retargeter, toe_names, smpl_scale)
     elif task_type == "object_interaction":
         human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
-            human_joints, retargeter, toe_names, scale=smpl_scale, object_poses=object_poses
+            human_joints, retargeter, toe_names, scale=smpl_scale, object_poses=object_poses,
         )
     elif task_type == "climbing":
         human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
-            human_joints,
-            retargeter,
-            toe_names,
-            scale=smpl_scale,
-            object_poses=object_poses,
-            normalize_height=False,
+            human_joints, retargeter, toe_names, scale=smpl_scale, object_poses=object_poses,
         )
 
     # Initialize robot pose

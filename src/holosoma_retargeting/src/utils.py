@@ -206,7 +206,7 @@ def weighted_surface_sampling_by_face_normal(mesh, sample_count, weight_func, se
 
 
 def preprocess_motion_data(
-    human_joints, retargeter, foot_names, scale=0.714, mat_height=0.1, object_poses=None, normalize_height=True
+    human_joints, retargeter, foot_names, scale=0.714, mat_height=0.1, object_poses=None,
 ):
     """
     Preprocess human joints and object poses for retargeting.
@@ -221,18 +221,16 @@ def preprocess_motion_data(
     Returns:
         tuple: (human_joints_scaled, object_poses_scaled, object_moving_frame_idx).
     """
-
-    if normalize_height:
-        # Normalize human joint heights
-        toe_indices = [
-            retargeter.demo_joints.index(foot_names[0]),
-            retargeter.demo_joints.index(foot_names[1]),
-        ]
-        z_min = human_joints[:, toe_indices, 2].min()
-        if z_min >= mat_height:
-            # On a mat.
-            z_min -= mat_height
-        human_joints[:, :, 2] -= z_min
+    # Normalize human joint heights
+    toe_indices = [
+        retargeter.demo_joints.index(foot_names[0]),
+        retargeter.demo_joints.index(foot_names[1]),
+    ]
+    z_min = human_joints[:, toe_indices, 2].min()
+    if z_min >= mat_height:
+        # On a mat.
+        z_min -= mat_height
+    human_joints[:, :, 2] -= z_min
 
     # Scale human joints
     human_joints = human_joints * scale
