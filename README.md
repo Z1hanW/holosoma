@@ -35,19 +35,19 @@ Choose the appropriate setup script based on your use case:
 
 ```bash
 # For IsaacGym training
-source scripts/setup_isaacgym.sh
+bash scripts/setup_isaacgym.sh
 
 # For IsaacSim training
-source scripts/setup_isaacsim.sh
+bash scripts/setup_isaacsim.sh
 
 # For Mujoco simulation
-source scripts/setup_mujoco.sh
+bash scripts/setup_mujoco.sh
 
 # For inference/deployment
-source scripts/setup_inference.sh
+bash scripts/setup_inference.sh
 
 # For motion retargeting
-source scripts/setup_retargeting.sh
+bash scripts/setup_retargeting.sh
 ```
 
 ### Training Example (Locomotion)
