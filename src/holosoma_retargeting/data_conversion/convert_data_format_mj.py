@@ -346,6 +346,43 @@ def world_body_velocities(model, data):
     return lin_w, ang_w
 
 
+def draw_velocity_markers(model, data, viewer, scale: float = 0.3, min_norm: float = 1e-3):
+    """
+    Draw velocity arrows at each body's COM in the world frame.
+
+    Args:
+        model: mjModel
+        data:  mjData
+        viewer: mujoco.viewer (launch_passive handle)
+        scale: visual scale factor for arrow length
+        min_norm: threshold below which we skip drawing (to reduce clutter)
+    """
+    # World-frame linear & angular velocities at each body COM
+    lin_w, _ = world_body_velocities(model, data)
+
+    # Clear previous frame's markers
+    viewer.user_scn.ngeom = 0
+
+    for b in range(model.nbody):
+        com = data.xipos[b]          # COM position in world frame (3,)
+        v = lin_w[b]                 # linear velocity in world frame (3,)
+
+        if np.linalg.norm(v) < min_norm:
+            continue
+
+        # Arrow direction (scaled)
+        dir_vec = scale * v
+
+        viewer.add_marker(
+            pos=com,
+            xaxis=dir_vec,
+            yaxis=np.array([0.0, 0.0, 0.0]),  # let MuJoCo infer orthogonal axis
+            size=np.array([0.01, 0.01, 0.01]),
+            rgba=np.array([1.0, 0.0, 0.0, 1.0]),  # red arrows
+            type=mujoco.mjtGeom.mjGEOM_ARROW,
+        )
+
+
 def run_simulator(joint_names: list[str]):
     """Runs the simulation loop."""
     # Load motion
@@ -510,6 +547,8 @@ def run_simulator(joint_names: list[str]):
             )
 
         mujoco.mj_forward(robot, robot_data)
+        # Draw world-frame linear velocity arrows at each body's COM
+        draw_velocity_markers(robot, robot_data, viewer, scale=0.3)
         viewer.sync()
 
         end_time = time.perf_counter()
