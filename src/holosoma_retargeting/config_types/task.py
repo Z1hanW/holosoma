@@ -37,7 +37,3 @@ class TaskConfig:
     # Object directory (for climbing tasks)
     # Auto-determined from data_path / task_name if None
     object_dir: Path | None = None
-
-    # Augmentation parameters (object_interaction task)
-    augmentation_frame_count: int = 70
-    augmentation_trim_frames: int = 400

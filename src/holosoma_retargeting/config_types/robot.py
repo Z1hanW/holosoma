@@ -48,11 +48,7 @@ class RobotConfig:
     robot_name: str | None = None
     robot_urdf_file: str | None = None
 
-    # Object configuration
-    object_name: str | None = None
-
     # Joint definitions (optional overrides)
-    smpl_joints: list[str] | None = None
     foot_sticking_links: list[str] | None = None
 
     # Robot-specific optional fields
@@ -107,50 +103,6 @@ class RobotConfig:
         return f"models/{self.robot_type}/{self.robot_type}_{self.ROBOT_DOF}dof.urdf"
 
     ROBOT_URDF_FILE = property(_robot_urdf_file, doc="Get robot URDF file path.")
-
-    def _object_name(self) -> str:
-        """Get object name - use override if provided, else use robot_type default."""
-        if self.object_name is not None:
-            return self.object_name
-        return _ROBOT_DEFAULTS[self.robot_type]["object_name"]
-
-    OBJECT_NAME = property(
-        _object_name,
-        doc="Get object name - use override if provided, else use robot_type default.",
-    )
-
-    def _smpl_joints(self) -> list[str]:
-        """Get SMPL joints - common across all robots."""
-        if self.smpl_joints is not None:
-            return self.smpl_joints
-        return [
-            "Pelvis",
-            "L_Hip",
-            "R_Hip",
-            "Torso",
-            "L_Knee",
-            "R_Knee",
-            "Spine",
-            "L_Ankle",
-            "R_Ankle",
-            "Chest",
-            "L_Toe",
-            "R_Toe",
-            "Neck",
-            "L_Thorax",
-            "R_Thorax",
-            "Head",
-            "L_Shoulder",
-            "R_Shoulder",
-            "L_Elbow",
-            "R_Elbow",
-            "L_Wrist",
-            "R_Wrist",
-            "L_Hand",
-            "R_Hand",
-        ]
-
-    SMPL_JOINTS = property(_smpl_joints, doc="Get SMPL joints - common across all robots.")
 
     def _foot_sticking_links(self) -> list[str]:
         """Get foot sticking links - use override if provided, else use robot_type default."""
@@ -235,7 +187,6 @@ class RobotConfig:
         if self.manual_lb is not None:
             return self.manual_lb
 
-        # base: dict[str, float] = {"0": -1.0, "1": -1.0, "2": -1.0, "3": -1.0}  # quaternion bounds
         base: dict[str, float] = {"3": -1.0, "4": -1.0, "5": -1.0, "6": -1.0}  # quaternion bounds
 
         if self.robot_type == "g1":
@@ -261,7 +212,6 @@ class RobotConfig:
         if self.manual_ub is not None:
             return self.manual_ub
 
-        # base: dict[str, float] = {"0": 1.0, "1": 1.0, "2": 1.0, "3": 1.0}  # quaternion bounds
         base: dict[str, float] = {"3": 1.0, "4": 1.0, "5": 1.0, "6": 1.0}  # quaternion bounds
 
         if self.robot_type == "g1":

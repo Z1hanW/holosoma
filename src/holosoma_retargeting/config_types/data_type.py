@@ -142,33 +142,6 @@ MOCAP_DEMO_JOINTS = [
     "RightFootMod",
 ]
 
-SMPL_JOINTS = [
-    "Pelvis",
-    "L_Hip",
-    "R_Hip",
-    "Torso",
-    "L_Knee",
-    "R_Knee",
-    "Spine",
-    "L_Ankle",
-    "R_Ankle",
-    "Chest",
-    "L_Toe",
-    "R_Toe",
-    "Neck",
-    "L_Thorax",
-    "R_Thorax",
-    "Head",
-    "L_Shoulder",
-    "R_Shoulder",
-    "L_Elbow",
-    "R_Elbow",
-    "L_Wrist",
-    "R_Wrist",
-    "L_Hand",
-    "R_Hand",
-]
-
 # Joint mappings - organized by (data_format, robot_type)
 JOINTS_MAPPINGS = {
     ("lafan", "g1"): {
@@ -309,13 +282,12 @@ class MotionDataConfig:
     Uses properties instead of __post_init__ - much simpler!
     """
 
-    data_format: Literal["lafan", "smplh", "mocap"] = "lafan"
+    data_format: Literal["lafan", "smplh", "mocap"] = "smplh"
     robot_type: Literal["g1", "t1"] = "g1"
 
     # Optional overrides - if None, will use defaults from data_format
     demo_joints: list[str] | None = None
     joints_mapping: dict[str, str] | None = None
-    smpl_joints: list[str] | None = None
 
     @property
     def resolved_demo_joints(self) -> list[str]:
@@ -343,13 +315,6 @@ class MotionDataConfig:
         raise ValueError(f"No joint mapping found for data_format={self.data_format}, robot_type={self.robot_type}")
 
     @property
-    def resolved_smpl_joints(self) -> list[str]:
-        """Get SMPL joints - common across all formats."""
-        if self.smpl_joints is not None:
-            return self.smpl_joints
-        return SMPL_JOINTS
-
-    @property
     def toe_names(self) -> list[str]:
         """Get toe joint names for this data format."""
         return TOE_NAMES_BY_FORMAT[self.data_format]
@@ -371,7 +336,6 @@ class MotionDataConfig:
         return {
             "DEMO_JOINTS": self.resolved_demo_joints,
             "JOINTS_MAPPING": self.resolved_joints_mapping,
-            "SMPL_JOINTS": self.resolved_smpl_joints,
             "TOE_NAMES": self.toe_names,
             "DEFAULT_SCALE_FACTOR": self.default_scale_factor,
             "DEFAULT_HUMAN_HEIGHT": self.default_human_height,
@@ -383,6 +347,5 @@ __all__ = [
     "LAFAN_DEMO_JOINTS",
     "MOCAP_DEMO_JOINTS",
     "SMPLH_DEMO_JOINTS",
-    "SMPL_JOINTS",
     "MotionDataConfig",
 ]
