@@ -212,18 +212,11 @@ class RetargetingEvaluator:
         - [-7:-4] object position (xyz) if has_dynamic_object
         - [-4:] object quaternion (wxyz) if has_dynamic_object
         """
-        # q is already in MuJoCo order, use directly
-        if self.has_dynamic_object:
-            # Set full qpos including object
-            self.robot_data.qpos[:] = q
-        else:
-            # Set only robot qpos (exclude object)
-            self.robot_data.qpos[:] = q
+        self.robot_data.qpos[:] = q
         # Forward kinematics to update all positions
         mujoco.mj_forward(self.robot_model, self.robot_data)
 
         robot_link_positions = []
-
         for link_name in link_names:
             # Get body ID from name
             body_id = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, link_name)
@@ -300,7 +293,6 @@ class RetargetingEvaluator:
         fromto = np.zeros(6, dtype=float)
 
         for i, q in enumerate(q_retarget):
-            # q is already in MuJoCo order: [0:3] pos, [3:7] quat, [7:] joints, [-7:-4] obj_pos, [-4:] obj_quat
             d.qpos[:] = q
             mujoco.mj_forward(m, d)  # compute kinematics, aabbs, etc.
 

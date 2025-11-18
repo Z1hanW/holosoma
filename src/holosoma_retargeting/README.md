@@ -15,13 +15,13 @@ Add --augmentation for running sequence with augmentation (need to first run the
 ## Batch processing for motion retargeting 
 ```
 # Robot-only (OMOMO)
-python examples/parallel_robot_retarget.py --data-dir demo_data/OMOMO_new --task-type robot_only  --data_format smplh --save_dir demo_results_parallel/g1/robot_only/omomo --robot-config.object-name ground
+python examples/parallel_robot_retarget.py --data-dir demo_data/OMOMO_new --task-type robot_only  --data_format smplh --save_dir demo_results_parallel/g1/robot_only/omomo --task-config.object-name ground
 
 # Object interaction (OMOMO)
-python examples/parallel_robot_retarget.py --data-dir demo_data/OMOMO_new --task-type object_interaction  --data_format smplh --save_dir demo_results_parallel/g1/object_interaction/omomo --robot-config.object-name largebox
+python examples/parallel_robot_retarget.py --data-dir demo_data/OMOMO_new --task-type object_interaction  --data_format smplh --save_dir demo_results_parallel/g1/object_interaction/omomo --task-config.object-name largebox
 
 # Climbing
-python examples/parallel_robot_retarget.py --data-dir demo_data/climb --task-type climbing --data_format mocap --robot-config.robot-urdf-file models/g1/g1_29dof_spherehand.urdf --save_dir demo_results_parallel/g1/climbing/mocap_climb --robot-config.object-name multi_boxes
+python examples/parallel_robot_retarget.py --data-dir demo_data/climb --task-type climbing --data_format mocap --robot-config.robot-urdf-file models/g1/g1_29dof_spherehand.urdf --task-config.object-name multi_boxes --save_dir demo_results_parallel/g1/climbing/mocap_climb 
 ```
 
 Add --augmentation for running sequence with augmentation (for object interaction and climbing task) 
@@ -37,7 +37,11 @@ Our pipeline used the processed dataset by InterMimic. The data format differs f
 # Visualize object-interaction results
 python viser_player.py --robot_urdf models/g1/g1_29dof.urdf \
     --object_urdf models/largebox/largebox.urdf \
-    --qpos_npz demo_results_parallel/g1/object_interaction/omomo/sub10_largebox_049_original.npz
+    --qpos_npz demo_results_parallel/g1/object_interaction/omomo/sub3_largebox_003_original.npz
+
+python viser_player.py --robot_urdf models/g1/g1_29dof.urdf \
+    --object_urdf models/largebox/largebox.urdf \
+    --qpos_npz demo_results_parallel/g1/object_interaction/omomo/sub3_largebox_003_trans_1.npz
 
 # Visualize climbing results
 python viser_player.py --robot_urdf models/g1/g1_29dof_spherehand.urdf \

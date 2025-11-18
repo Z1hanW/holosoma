@@ -259,12 +259,7 @@ def process_single_task(args):
             )
         elif task_type == "climbing":
             human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
-                human_joints,
-                retargeter,
-                toe_names,
-                scale=smpl_scale,
-                object_poses=object_poses,
-                normalize_height=False,
+                human_joints, retargeter, toe_names, scale=smpl_scale, object_poses=object_poses
             )
 
         # Extract foot sticking sequences
@@ -360,7 +355,10 @@ def main(cfg: ParallelRetargetingConfig) -> None:
             data_format=cast("Literal['lafan', 'smplh', 'mocap']", data_format), robot_type=robot
         )
 
-    files = find_files(data_dir, data_format, cfg.task_config.object_name)
+    if task_type == "robot_only":
+        files = find_files(data_dir, data_format)
+    else:
+        files = find_files(data_dir, data_format, cfg.task_config.object_name)
     print(f"Found {len(files)} files for task type: {task_type}")
 
     # Pass configs to worker processes
