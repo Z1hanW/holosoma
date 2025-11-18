@@ -19,7 +19,6 @@ REPO_ROOT = Path(__file__).parent.parent.parent.absolute()
 def run_mini_training(workflow_name: str) -> str:
     """Run a mini training and return the checkpoint path."""
     env = os.environ.copy()
-    env["HYDRA_FULL_ERROR"] = "1"
     env["EXPORT_ONNX"] = "1"
 
     result = subprocess.run(

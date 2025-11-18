@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import itertools
 import json
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import replace
 from pathlib import Path
 
@@ -109,7 +112,7 @@ class BasePolicy:
             raise NotImplementedError(f"SDK type {self.sdk_type} is not supported yet")
 
     def _init_obs_config(self):
-        """Initialize observation configuration and buffers."""
+        """Initialize observation metadata and history buffers."""
         self.obs_config = self.config.observation
         self.obs_scales = self.obs_config.obs_scales
         self.obs_dims = self.obs_config.obs_dims
@@ -117,10 +120,27 @@ class BasePolicy:
         self.obs_dim_dict = self._calculate_obs_dim_dict()
         self.history_length_dict = self.obs_config.history_length_dict
 
-        # Initialize observation buffers
-        self.obs_buf_dict = {
-            key: np.zeros((1, self.obs_dim_dict[key] * self.history_length_dict[key])) for key in self.obs_dim_dict
-        }
+        # Initialize per-term history buffers using deques
+        self._initialize_history_state()
+
+    def _initialize_history_state(self):
+        """Create per-term history deques and zero-initialized flattened buffers."""
+        self.obs_history_buffers: dict[str, dict[str, deque[np.ndarray]]] = {}
+        self.obs_terms_sorted: dict[str, list[str]] = {}
+        self.obs_buf_dict: dict[str, np.ndarray] = {}
+
+        for group, term_names in self.obs_dict.items():
+            self.obs_terms_sorted[group] = sorted(term_names)
+            history_len = self.history_length_dict.get(group, 1)
+            self.obs_history_buffers[group] = {}
+            flattened_terms: list[np.ndarray] = []
+
+            for term in self.obs_terms_sorted[group]:
+                term_dim = self.obs_dims[term]
+                self.obs_history_buffers[group][term] = deque(maxlen=history_len)
+                flattened_terms.append(np.zeros((1, term_dim * history_len), dtype=np.float32))
+
+            self.obs_buf_dict[group] = np.concatenate(flattened_terms, axis=1) if flattened_terms else np.zeros((1, 0))
 
     def _init_communication_components(self):
         """Initialize state processor and command sender using the wrapper."""
@@ -454,35 +474,67 @@ class BasePolicy:
         return current_obs_buffer_dict
 
     def parse_current_obs_dict(self, current_obs_buffer_dict):
-        """Parse observation buffer into observation dictionary."""
-        current_obs_dict = {}
-        for key in self.obs_dict:
-            obs_list = sorted(self.obs_dict[key])
-            current_obs_dict[key] = np.concatenate(
-                [current_obs_buffer_dict[obs_name] * self.obs_scales[obs_name] for obs_name in obs_list], axis=1
-            )
+        """Parse observation buffer into observation dictionary with per-term scaling."""
+        current_obs_dict: dict[str, dict[str, np.ndarray]] = {}
+        for group, term_names in self.obs_terms_sorted.items():
+            grouped_terms: dict[str, np.ndarray] = {}
+            for term in term_names:
+                if term not in current_obs_buffer_dict:
+                    raise KeyError(f"Observation term '{term}' missing from current observation buffer.")
+                term_obs = current_obs_buffer_dict[term]
+                if term_obs.ndim == 1:
+                    term_obs = term_obs.reshape(1, -1)
+                scale = self.obs_scales[term]
+                grouped_terms[term] = (term_obs * scale).astype(np.float32, copy=False)
+            current_obs_dict[group] = grouped_terms
         return current_obs_dict
+
+    def _prepare_group_observations(self, robot_state_data):
+        """Return flattened observations per group with history applied per term."""
+        current_obs_buffer_dict = self.get_current_obs_buffer_dict(robot_state_data)
+        current_obs_dict = self.parse_current_obs_dict(current_obs_buffer_dict)
+        return self._update_obs_history(current_obs_dict)
+
+    def _update_obs_history(self, current_obs_dict: dict[str, dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
+        """Update observation history buffers and return flattened observations per group."""
+        group_outputs: dict[str, np.ndarray] = {}
+
+        for group, term_dict in current_obs_dict.items():
+            history_len = self.history_length_dict.get(group, 1)
+            flattened_terms: list[np.ndarray] = []
+
+            for term in self.obs_terms_sorted[group]:
+                obs = np.asarray(term_dict[term], dtype=np.float32, order="C")
+                if obs.ndim == 1:
+                    obs = obs.reshape(1, -1)
+
+                buffer = self.obs_history_buffers[group][term]
+                buffer.append(obs.copy())
+
+                history = list(buffer)
+                if len(history) < history_len:
+                    missing = history_len - len(history)
+                    history = [np.zeros_like(obs)] * missing + history
+
+                # Match training order: time dimension first, then flatten into [history_len * term_dim].
+                stacked = np.stack(history[-history_len:], axis=1)
+                flattened_terms.append(stacked.reshape(obs.shape[0], -1))
+
+            group_outputs[group] = (
+                np.concatenate(flattened_terms, axis=1).astype(np.float32, copy=False)
+                if flattened_terms
+                else np.zeros((1, 0), dtype=np.float32)
+            )
+
+        self.obs_buf_dict = {group: value.copy() for group, value in group_outputs.items()}
+        return group_outputs
 
     def prepare_obs_for_rl(self, robot_state_data):
         """Prepare observations for RL inference."""
-        current_obs_buffer_dict = self.get_current_obs_buffer_dict(robot_state_data)
-        current_obs_dict = self.parse_current_obs_dict(current_obs_buffer_dict)
-
-        # Update observation buffers
-        self.obs_buf_dict = {
-            key: np.concatenate(
-                (
-                    self.obs_buf_dict[key][
-                        :, self.obs_dim_dict[key] : (self.obs_dim_dict[key] * self.history_length_dict[key])
-                    ],
-                    current_obs_dict[key],
-                ),
-                axis=1,
-            )
-            for key in self.obs_buf_dict
-        }
-
-        return {"actor_obs": self.obs_buf_dict["actor_obs"].astype(np.float32)}
+        group_outputs = self._prepare_group_observations(robot_state_data)
+        if "actor_obs" not in group_outputs:
+            raise KeyError("Observation group 'actor_obs' is not configured for this policy.")
+        return {"actor_obs": group_outputs["actor_obs"].astype(np.float32, copy=False)}
 
     # ============================================================================
     # Control/Command Methods
