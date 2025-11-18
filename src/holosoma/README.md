@@ -25,7 +25,7 @@ python src/holosoma/holosoma/train_agent.py \
 # T1 with PPO on IsaacSim
 source scripts/source_isaacsim_setup.sh
 python src/holosoma/holosoma/train_agent.py \
-    exp:g1-29dof \
+    exp:t1-29dof \
     simulator:isaacsim \
     --training.seed 1
 ```
