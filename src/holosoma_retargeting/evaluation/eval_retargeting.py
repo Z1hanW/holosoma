@@ -26,6 +26,7 @@ try:
         MotionDataConfig,
     )
     from holosoma_retargeting.config_types.robot import RobotConfig
+    from holosoma_retargeting.config_types.task import TaskConfig 
     from holosoma_retargeting.src.mujoco_utils import _world_mesh_from_geom  # type: ignore[import-not-found]
     from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
         calculate_scale_factor,
@@ -48,6 +49,7 @@ except ModuleNotFoundError:
         MotionDataConfig,
     )
     from holosoma_retargeting.config_types.robot import RobotConfig
+    from holosoma_retargeting.config_types.task import TaskConfig 
     from holosoma_retargeting.src.mujoco_utils import _world_mesh_from_geom  # type: ignore[import-not-found]
     from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
         calculate_scale_factor,
