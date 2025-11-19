@@ -104,7 +104,9 @@ python evaluation/eval_retargeting.py --res_dir demo_results_parallel/g1/robot_o
 
 Robot-only setting 
 ```
-python data_conversion/convert_data_format_mj.py --input_file ./demo_results/g1/robot_only/omomo/sub3_largebox_003.npz --output_fps 30 --output_name converted_res/robot_only/sub3_largebox_003_mj.npz --data_format smplh --object_name "ground"
+python data_conversion/convert_data_format_mj.py --input_file ./demo_results/g1/robot_only/omomo/sub3_largebox_003.npz --output_fps 50 --output_name converted_res/robot_only/sub3_largebox_003_mj_fps50.npz --data_format smplh --object_name "ground" --once 
+
+python data_conversion/convert_data_format_mj.py --input_file ./demo_results/g1/robot_only/lafan/dance2_subject1.npz --output_fps 50 --output_name converted_res/robot_only/dance2_subject1_mj_fps50.npz  --data_format lafan --object_name "ground" --once 
 ```
 
 Robot-object setting 
