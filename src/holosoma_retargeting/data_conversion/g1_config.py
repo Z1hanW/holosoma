@@ -20,13 +20,14 @@ DAMPING_7520_14 = 2.0 * DAMPING_RATIO * ARMATURE_7520_14 * NATURAL_FREQ
 DAMPING_7520_22 = 2.0 * DAMPING_RATIO * ARMATURE_7520_22 * NATURAL_FREQ
 DAMPING_4010 = 2.0 * DAMPING_RATIO * ARMATURE_4010 * NATURAL_FREQ
 
-ASSET_DIR = "/home/ubuntu/code/tmp_check_rt_conversion/data_conversion"
+ASSET_DIR = "/home/ANT.AMAZON.COM/jiamanli/for_CR/FAR-Holosoma/src/holosoma_retargeting"
 G1_CYLINDER_CFG = ArticulationCfg(
     spawn=sim_utils.UrdfFileCfg(
         fix_base=False,
         replace_cylinders_with_capsules=True,
         merge_fixed_joints=False,
-        asset_path=f"{ASSET_DIR}/unitree_description/urdf/g1/main.urdf",
+        # asset_path=f"{ASSET_DIR}/unitree_description/urdf/g1/main.urdf",
+        asset_path=f"{ASSET_DIR}/models/g1/g1_29dof.urdf",
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
