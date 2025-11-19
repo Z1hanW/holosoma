@@ -40,6 +40,7 @@ try:
     )
     from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
         extract_foot_sticking_sequence_velocity,
+        extract_foot_sticking_sequence,
         preprocess_motion_data,
     )
 except ModuleNotFoundError:  # pragma: no cover - script entry convenience
@@ -69,6 +70,7 @@ except ModuleNotFoundError:  # pragma: no cover - script entry convenience
     )
     from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
         extract_foot_sticking_sequence_velocity,
+        extract_foot_sticking_sequence, 
         preprocess_motion_data,
     )
 

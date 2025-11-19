@@ -78,5 +78,5 @@ python data_conversion/convert_data_format_mj.py --input_file ./demo_results/g1/
 
 Robot-object setting 
 ```
-python data_conversion/convert_data_format_mj.py --input_file ./demo_results/g1/object_interaction/omomo/sub3_largebox_003_original.npz --output_fps 30 --output_name converted_res/object_interaction/sub3_largebox_003_mj_w_obj.npz --has_dynamic_object --data_format smplh --object_name "largebox"
+python data_conversion/convert_data_format_mj.py --input_file ./demo_results/g1/object_interaction/omomo/sub3_largebox_003_original.npz --output_fps 30 --output_name converted_res/object_interaction/sub3_largebox_003_mj_w_obj.npz --data_format smplh --object_name "largebox"  --has_dynamic_object 
 ```

@@ -279,7 +279,6 @@ class RetargetingEvaluator:
         def _is_ground(g):
             return "ground" in self._geom_names[g]
 
-        # matches your Drake filter:
         def masks_ok(g1, g2):
             # skip geoms with both masks off
             if m.geom_contype[g1] == 0 and m.geom_conaffinity[g1] == 0:
