@@ -11,6 +11,7 @@ import torch
 
 from holosoma.config_types.robot import RobotConfig
 from holosoma.envs.base_task.base_task import BaseTask
+from holosoma.utils.module_utils import get_holosoma_root
 
 
 def _find_input_dim_from_module(module: torch.nn.Module) -> int:
@@ -280,3 +281,15 @@ def get_command_ranges_from_env(env: BaseTask) -> dict | None:
         if locomotion_cmd is not None and hasattr(locomotion_cmd, "command_ranges"):
             return locomotion_cmd.command_ranges
     return None
+
+
+def get_urdf_text_from_robot_config(robot_config: RobotConfig) -> str:
+    """Extract URDF text from the robot config."""
+    asset_root = robot_config.asset.asset_root
+    if asset_root.startswith("@holosoma/"):
+        asset_root = asset_root.replace("@holosoma", get_holosoma_root())
+
+    asset_file = robot_config.asset.urdf_file
+    urdf_file_path = os.path.join(asset_root, asset_file)
+    urdf_str = Path(urdf_file_path).read_text(encoding="utf-8")
+    return urdf_file_path, urdf_str

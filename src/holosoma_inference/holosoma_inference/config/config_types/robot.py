@@ -95,31 +95,6 @@ class RobotConfig:
     """
 
     # =========================================================================
-    # Asset Paths (REQUIRED - no defaults)
-    # =========================================================================
-
-    asset_root: str
-    """Root directory for robot assets.
-
-    Can use @holosoma_inference prefix for package-relative paths.
-    Example: '@holosoma_inference/data/robots/g1'
-    """
-
-    asset_file: str
-    """Path to URDF file.
-
-    Can use @holosoma_inference prefix for package-relative paths.
-    Example: '@holosoma_inference/data/robots/g1/g1_29dof.urdf'
-    """
-
-    robot_scene_xml: str
-    """Path to MuJoCo scene XML file.
-
-    Can use @holosoma_inference prefix for package-relative paths.
-    Example: '@holosoma_inference/data/robots/g1/g1_29dof.xml'
-    """
-
-    # =========================================================================
     # Deprecation candidates with no defaults
     # =========================================================================
 

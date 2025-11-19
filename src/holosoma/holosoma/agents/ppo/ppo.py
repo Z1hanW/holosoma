@@ -13,7 +13,6 @@ from torch.distributions import Normal, kl_divergence
 from torch.utils.tensorboard import SummaryWriter as TensorboardSummaryWriter
 
 from holosoma.agents.base_algo.base_algo import BaseAlgo
-from holosoma.utils.helpers import instantiate
 from holosoma.agents.callbacks.base_callback import RLEvalCallback
 from holosoma.agents.modules.augmentation_utils import SymmetryUtils
 from holosoma.agents.modules.data_utils import RolloutStorage
@@ -24,12 +23,14 @@ from holosoma.agents.modules.module_utils import (
 )
 from holosoma.config_types.algo import PPOConfig
 from holosoma.envs.base_task.base_task import BaseTask
+from holosoma.utils.helpers import instantiate
 from holosoma.utils.inference_helpers import (
     attach_onnx_metadata,
     export_motion_and_policy_as_onnx,
     export_policy_as_onnx,
     get_command_ranges_from_env,
     get_control_gains_from_config,
+    get_urdf_text_from_robot_config,
 )
 
 console = Console()
@@ -615,17 +616,21 @@ class PPO(BaseAlgo):
         # Extract control gains and velocity limits & attach to onnx as metadata
         kp_list, kd_list = get_control_gains_from_config(self.env.robot_config)
         cmd_ranges = get_command_ranges_from_env(self.env)
+        # Extract URDF text from the robot config
+        urdf_file_path, urdf_str = get_urdf_text_from_robot_config(self.env.robot_config)
 
-        control_metadata = {
+        metadata = {
             "dof_names": self.env.robot_config.dof_names,
             "kp": kp_list,
             "kd": kd_list,
             "command_ranges": cmd_ranges,
+            "robot_urdf": urdf_str,
+            "robot_urdf_path": urdf_file_path,
         }
 
         attach_onnx_metadata(
             onnx_path=onnx_file_path,
-            metadata=control_metadata,
+            metadata=metadata,
         )
 
         # Upload the .onnx file to wandb

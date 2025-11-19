@@ -28,6 +28,7 @@ from holosoma.utils.inference_helpers import (
     export_policy_as_onnx,
     get_command_ranges_from_env,
     get_control_gains_from_config,
+    get_urdf_text_from_robot_config,
 )
 from holosoma.utils.safe_torch_import import (
     F,
@@ -970,17 +971,21 @@ class FastSACAgent(BaseAlgo):
         # Extract control gains and velocity limits & attach to onnx as metadata
         kp_list, kd_list = get_control_gains_from_config(self.env.robot_config)
         cmd_ranges = get_command_ranges_from_env(self.unwrapped_env)
+        # Extract URDF text from the robot config
+        urdf_file_path, urdf_str = get_urdf_text_from_robot_config(self.env.robot_config)
 
-        control_metadata = {
+        metadata = {
             "dof_names": self.env.robot_config.dof_names,
             "kp": kp_list,
             "kd": kd_list,
             "command_ranges": cmd_ranges,
+            "robot_urdf": urdf_str,
+            "robot_urdf_path": urdf_file_path,
         }
 
         attach_onnx_metadata(
             onnx_path=onnx_file_path,
-            metadata=control_metadata,
+            metadata=metadata,
         )
 
         self.logging_helper.save_to_wandb(onnx_file_path)
@@ -1003,3 +1008,4 @@ class FastSACAgent(BaseAlgo):
             # Actions are already scaled by the actor
             actions = self.actor(normalized_obs)[0]
             obs, _, _, _ = self.env.step(actions)
+

@@ -104,11 +104,6 @@ g1_29dof = RobotConfig(
         "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
     ),
 
-    # Asset Paths
-    asset_root="@holosoma_inference/data/robots/g1",
-    asset_file="@holosoma_inference/data/robots/g1/g1_29dof.urdf",
-    robot_scene_xml="@holosoma_inference/data/robots/g1/g1_29dof.xml",
-
     # Link Names
     torso_link_name="torso_link",
     left_hand_link_name="left_rubber_hand",
@@ -242,11 +237,6 @@ t1_29dof = RobotConfig(
         "Right_Hip_Pitch", "Right_Hip_Roll", "Right_Hip_Yaw",
         "Right_Knee_Pitch", "Right_Ankle_Pitch", "Right_Ankle_Roll",
     ),
-
-    # Asset Paths
-    asset_root="@holosoma_inference/data/robots/t1",
-    asset_file="@holosoma_inference/data/robots/t1/t1_29dof.urdf",
-    robot_scene_xml="@holosoma_inference/data/robots/t1/t1_29dof.xml",
 
     # Link Names
     torso_link_name="Trunk",

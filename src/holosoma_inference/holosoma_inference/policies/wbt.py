@@ -4,8 +4,9 @@ import sys
 import numpy as np
 import onnx
 import onnxruntime
-from loguru import logger
 import pinocchio as pin
+from defusedxml import ElementTree
+from loguru import logger
 from termcolor import colored
 
 from holosoma_inference.config.config_types.inference import InferenceConfig
@@ -13,23 +14,28 @@ from holosoma_inference.config.config_types.robot import RobotConfig
 from holosoma_inference.policies import BasePolicy
 from holosoma_inference.utils.clock import ClockSub
 from holosoma_inference.utils.math.misc import get_index_of_a_in_b
-from holosoma_inference.utils.math.quat import matrix_from_quat, subtract_frame_transforms, wxyz_to_xyzw, xyzw_to_wxyz, quat_to_rpy, rpy_to_quat, quat_mul
-from holosoma_inference.utils.misc import resolve_holosoma_inference_path
+from holosoma_inference.utils.math.quat import (
+    matrix_from_quat,
+    quat_mul,
+    quat_to_rpy,
+    rpy_to_quat,
+    subtract_frame_transforms,
+    wxyz_to_xyzw,
+    xyzw_to_wxyz,
+)
 
 
 class PinocchioRobot:
-    def __init__(self, robot_cfg: RobotConfig):
+    def __init__(self, robot_cfg: RobotConfig, urdf_text: str):
         # create pinocchio robot
-        self.robot = pin.RobotWrapper.BuildFromURDF(
-            resolve_holosoma_inference_path(robot_cfg.asset_file),
-            resolve_holosoma_inference_path(robot_cfg.asset_root),
-            pin.JointModelFreeFlyer(),
-        )
+        xml_text = self._create_xml_from_urdf(urdf_text)
+        self.robot_model = pin.buildModelFromXML(xml_text, pin.JointModelFreeFlyer())
+        self.robot_data = self.robot_model.createData()
 
         # get joint names in pinocchio robot and real robot
         joint_names_in_real_robot = robot_cfg.dof_names
         joint_names_in_pinocchio_robot = [
-            name for name in self.robot.model.names if name not in ["universe", "root_joint"]
+            name for name in self.robot_model.names if name not in ["universe", "root_joint"]
         ]
         assert len(joint_names_in_pinocchio_robot) == len(joint_names_in_real_robot), (
             "The number of joints in the pinocchio robot and the real robot are not the same"
@@ -37,17 +43,36 @@ class PinocchioRobot:
         self.real2pinocchio_index = get_index_of_a_in_b(joint_names_in_pinocchio_robot, joint_names_in_real_robot)
 
         # get ref body frame id in pinocchio robot
-        self.ref_body_frame_id = self.robot.model.getFrameId(robot_cfg.motion["body_name_ref"][0])
+        self.ref_body_frame_id = self.robot_model.getFrameId(robot_cfg.motion["body_name_ref"][0])
 
     def fk_and_get_ref_body_orientation_in_world(self, configuration: np.ndarray) -> np.ndarray:
         # forward kinematics
-        self.robot.framesForwardKinematics(configuration)
+        pin.framesForwardKinematics(self.robot_model, self.robot_data, configuration)
 
         # get ref body pose in world
-        ref_body_pose_in_world = self.robot.data.oMf[self.ref_body_frame_id]
+        ref_body_pose_in_world = self.robot_data.oMf[self.ref_body_frame_id]
         quaternion = pin.Quaternion(ref_body_pose_in_world.rotation)  # (4, )
 
         return np.expand_dims(quaternion.coeffs(), axis=0)  # xyzw, (1, 4)
+
+    @staticmethod
+    def _create_xml_from_urdf(urdf_text: str) -> str:
+        """Strip visuals/collisions from URDF text and return XML text."""
+        root = ElementTree.fromstring(urdf_text)
+
+        def _is_visual_or_collision(tag: str) -> bool:
+            # Handle optional XML namespaces by only checking the suffix after '}'.
+            return tag.split("}")[-1] in {"visual", "collision"}
+
+        for parent in root.iter():
+            for child in list(parent):
+                if _is_visual_or_collision(child.tag):
+                    parent.remove(child)
+
+        xml_text = ElementTree.tostring(root, encoding="unicode")
+        if not xml_text.lstrip().startswith("<?xml"):
+            xml_text = '<?xml version="1.0"?>\n' + xml_text
+        return xml_text
 
 
 class WholeBodyTrackingPolicy(BasePolicy):
@@ -60,7 +85,6 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.ref_quat_xyzw_t = None
         self.motion_command_0 = None
         self.ref_quat_xyzw_0 = None
-        self.pinocchio_robot = PinocchioRobot(config.robot)
 
         # Calculate timestep interval from rl_rate (e.g., 50Hz = 20ms intervals)
         self.timestep_interval_ms = 1000.0 / config.task.rl_rate
@@ -105,7 +129,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
             input()
             logger.info(colored("✓ Entering stiff hold mode", "green"))
         else:
-            logger.warning(colored("⚠️  Non-interactive mode detected - cannot prompt for stiff mode confirmation!", "red", attrs=["bold"]))
+            logger.warning(
+                colored(
+                    "⚠️  Non-interactive mode detected - cannot prompt for stiff mode confirmation!",
+                    "red",
+                    attrs=["bold"],
+                )
+            )
 
     def _get_ref_body_orientation_in_world(self, robot_state_data):
         # Create configuration for pinocchio robot
@@ -139,6 +169,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
         metadata = {}
         for prop in onnx_model.metadata_props:
             metadata[prop.key] = json.loads(prop.value)
+
+        # Extract URDF text from ONNX metadata
+        assert "robot_urdf" in metadata, "Robot urdf text not found in ONNX metadata"
+        self.pinocchio_robot = PinocchioRobot(self.config.robot, metadata["robot_urdf"])
 
         self.onnx_kp = np.array(metadata["kp"]) if "kp" in metadata else None
         self.onnx_kd = np.array(metadata["kd"]) if "kd" in metadata else None
@@ -271,7 +305,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         return self.scaled_policy_action
 
     def _get_manual_command(self, robot_state_data):
-        # TODO: instead of adding kp/kd_override in def _set_motor_command, 
+        # TODO: instead of adding kp/kd_override in def _set_motor_command,
         # just use the motor_kp/motor_kd when calling it in _fill_motor_commands
         if not self._stiff_hold_active:
             return None
