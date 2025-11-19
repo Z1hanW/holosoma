@@ -134,7 +134,7 @@ class MotionLoader:
             else:
                 motion = torch.from_numpy(data['qpos']).to(torch.float32)
             # Assume drake convention for the motion file
-            motion[:, :7] = drake_convention_to_isaaclab_convention(motion[:, :7])
+            # motion[:, :7] = drake_convention_to_isaaclab_convention(motion[:, :7])
         else:
             raise ValueError("Unsupported motion file format. Use .csv or .npz.")
 
