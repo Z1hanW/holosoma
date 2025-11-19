@@ -285,7 +285,17 @@ def main(cfg: Config) -> None:
 
         # 4) Update velocity line segments
         pos = body_pos_w[idx]  # (nbody, 3)
-        vel = body_lin_vel_w[idx] * float(vel_scale_slider.value)  # (nbody, 3)
+        # vel = body_lin_vel_w[idx] * float(vel_scale_slider.value)  # (nbody, 3)
+
+        vel_raw = body_lin_vel_w[idx]  # (nbody, 3)
+        norms = np.linalg.norm(vel_raw, axis=-1, keepdims=True)  # (nbody, 1)
+        eps = 1e-8
+
+        # Unit directions; zero out near-zero velocities to avoid NaNs
+        dirs = np.where(norms > eps, vel_raw / norms, 0.0)
+
+        # Now every non-zero velocity has the same length = vel_scale_slider.value
+        vel = dirs * float(vel_scale_slider.value)  # (nbody, 3)
 
         # Hide small velocities (optional)
         norms = np.linalg.norm(vel, axis=-1, keepdims=True)
