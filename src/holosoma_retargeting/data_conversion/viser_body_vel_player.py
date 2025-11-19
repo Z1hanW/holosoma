@@ -33,7 +33,7 @@ class Config:
     # Playback / visualization
     fps_override: Optional[float] = None  # if None, use fps from npz
     vel_scale: float = 0.1               # length scale for velocity arrows
-    vel_min_norm: float = 1e-3           # threshold below which we hide arrows
+    vel_min_norm: float = 1e-2           # threshold below which we hide arrows
 
 
 # ---------------------------------------------------------------------
@@ -41,33 +41,7 @@ class Config:
 # ---------------------------------------------------------------------
 def load_npz_motion(npz_path: str):
     """
-    Expected npz format (from your logging code):
-
-        if not file_saved:
-            lin_vel_w, ang_vel_w = world_body_velocities(robot, robot_data)
-            if has_dynamic_object:
-                log["object_pos_w"].append(robot_data.qpos[-7:-4].copy())
-                log["object_quat_w"].append(robot_data.qpos[-4:].copy())
-                log["object_lin_vel_w"].append(robot_data.qvel[-6:-3].copy())
-                log["object_ang_vel_w"].append(robot_data.qvel[-3:].copy())
-
-                # Remove object field from qpos and qvel
-                log["joint_pos"].append(robot_data.qpos[:-7].copy())
-                log["joint_vel"].append(robot_data.qvel[:-6].copy())
-            else:
-                log["joint_pos"].append(robot_data.qpos[:].copy())
-                log["joint_vel"].append(robot_data.qvel[:].copy())
-
-            log["body_pos_w"].append(robot_data.xpos[:].copy())
-            log["body_quat_w"].append(robot_data.xquat[:].copy())
-            log["body_lin_vel_w"].append(lin_vel_w[:].copy())
-            log["body_ang_vel_w"].append(ang_vel_w[:].copy())
-
-    and later:
-
-        log["joint_names"], log["body_names"], log["fps"]
-
-    So we expect:
+    Expected npz format:
         joint_pos      (T, 7 + ndof)  # [root_xyz(3), root_quat(4), ndof]
         joint_vel      (T, 6 + ndof)  # [root_lin(3), root_ang(3), ndof]
         body_pos_w     (T, nbody, 3)
@@ -98,12 +72,6 @@ def load_npz_motion(npz_path: str):
     else:
         fps = 30.0
 
-    # Optional object fields (ignored for this visualizer)
-    object_pos_w = data.get("object_pos_w", None)
-    object_quat_w = data.get("object_quat_w", None)
-    object_lin_vel_w = data.get("object_lin_vel_w", None)
-    object_ang_vel_w = data.get("object_ang_vel_w", None)
-
     return {
         "joint_pos": joint_pos,
         "joint_vel": joint_vel,
@@ -114,10 +82,6 @@ def load_npz_motion(npz_path: str):
         "joint_names": joint_names,
         "body_names": body_names,
         "fps": fps,
-        "object_pos_w": object_pos_w,
-        "object_quat_w": object_quat_w,
-        "object_lin_vel_w": object_lin_vel_w,
-        "object_ang_vel_w": object_ang_vel_w,
     }
 
 
@@ -147,8 +111,8 @@ def main(cfg: Config) -> None:
     print(f"[viser_body_vel_player] Loaded npz: {cfg.npz_path}")
     print(f"  frames: {T}, total joint_pos dim: {nq_total} (root 7 + ndof {ndof})")
     print(f"  bodies: {nbody}, fps (npz): {fps_npz}")
-    print(f"  joint names (npz): {joint_names}")
-    print(f"  body names (npz):  {body_names}")
+    # print(f"  joint names (npz): {joint_names}")
+    # print(f"  body names (npz):  {body_names}")
 
     fps = cfg.fps_override if cfg.fps_override is not None else fps_npz
     print(f"  using fps: {fps}")
@@ -199,8 +163,7 @@ def main(cfg: Config) -> None:
                 f"npz joint_names: {joint_names}"
             )
         idx_npz = name_to_npz_joint_idx[jname]  # index in [0..ndof-1] for joint_angles_seq
-        # col_in_joint_pos = 7 + idx_npz          # shift by 7 to get into joint_pos columns
-        col_in_joint_pos = idx_npz 
+        col_in_joint_pos = 7 + idx_npz          # shift by 7 to get into joint_pos columns
         urdf_to_jointpos_cols.append(col_in_joint_pos)
     urdf_to_jointpos_cols = np.array(urdf_to_jointpos_cols, dtype=int)
 
@@ -286,22 +249,22 @@ def main(cfg: Config) -> None:
 
         # 4) Update velocity line segments
         pos = body_pos_w[idx]  # (nbody, 3)
-        # vel = body_lin_vel_w[idx] * float(vel_scale_slider.value)  # (nbody, 3)
+        vel = body_lin_vel_w[idx] * float(vel_scale_slider.value)  # (nbody, 3)
 
-        vel_raw = body_lin_vel_w[idx]  # (nbody, 3)
-        norms = np.linalg.norm(vel_raw, axis=-1, keepdims=True)  # (nbody, 1)
-        eps = 1e-8
+        # vel_raw = body_lin_vel_w[idx]  # (nbody, 3)
+        # norms = np.linalg.norm(vel_raw, axis=-1, keepdims=True)  # (nbody, 1)
+        # norms_xy = np.linalg.norm(vel_raw[:, :2], axis=-1, keepdims=True)  # (nbody, 1) 
+        # eps = 1e-8
 
-        # Unit directions; zero out near-zero velocities to avoid NaNs
-        dirs = np.where(norms > eps, vel_raw / norms, 0.0)
+        # # Unit directions; zero out near-zero velocities to avoid NaNs
+        # dirs = np.where(norms > eps, vel_raw / norms, 0.0)
 
         # Now every non-zero velocity has the same length = vel_scale_slider.value
-        vel = dirs * float(vel_scale_slider.value)  # (nbody, 3)
+        # vel = dirs * float(vel_scale_slider.value)  # (nbody, 3)
 
         # Hide small velocities (optional)
-        norms = np.linalg.norm(vel, axis=-1, keepdims=True)
-        mask = norms < cfg.vel_min_norm
-        vel = np.where(mask, 0.0, vel)
+        # mask = norms_xy < cfg.vel_min_norm
+        # vel = np.where(mask, 0.0, vel)
 
         pts = np.stack([pos, pos + vel], axis=1)  # (nbody, 2, 3)
         vel_lines.points = pts
@@ -343,6 +306,7 @@ if __name__ == "__main__":
     main(cfg)
 
 '''
-python viser_body_vel_player.py --npz_path ../converted_res/robot_only/sub3_largebox_003_mj.npz --robot_urdf ../models/g1/g1_29dof.urdf
-python viser_body_vel_player.py --npz_path ../converted_res/robot_only/motion.npz --robot_urdf ../models/g1/g1_29dof.urdf
+python viser_body_vel_player.py \
+--npz_path ../converted_res/robot_only/sub3_largebox_003_mj.npz \
+--robot_urdf ../models/g1/g1_29dof.urdf
 '''
