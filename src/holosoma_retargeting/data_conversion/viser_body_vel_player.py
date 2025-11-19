@@ -199,7 +199,8 @@ def main(cfg: Config) -> None:
                 f"npz joint_names: {joint_names}"
             )
         idx_npz = name_to_npz_joint_idx[jname]  # index in [0..ndof-1] for joint_angles_seq
-        col_in_joint_pos = 7 + idx_npz          # shift by 7 to get into joint_pos columns
+        # col_in_joint_pos = 7 + idx_npz          # shift by 7 to get into joint_pos columns
+        col_in_joint_pos = idx_npz 
         urdf_to_jointpos_cols.append(col_in_joint_pos)
     urdf_to_jointpos_cols = np.array(urdf_to_jointpos_cols, dtype=int)
 
@@ -342,6 +343,6 @@ if __name__ == "__main__":
     main(cfg)
 
 '''
-python viser_body_vel_player.py --npz_path ../converted_res/robot_only/sub3_largebox_003_mj.npz --robot_urdf models/g1/g1_29dof.urdf
-python viser_body_vel_player.py --npz_path ../converted_res/robot_only/motion.npz --robot_urdf models/g1/g1_29dof.urdf
+python viser_body_vel_player.py --npz_path ../converted_res/robot_only/sub3_largebox_003_mj.npz --robot_urdf ../models/g1/g1_29dof.urdf
+python viser_body_vel_player.py --npz_path ../converted_res/robot_only/motion.npz --robot_urdf ../models/g1/g1_29dof.urdf
 '''
