@@ -32,6 +32,33 @@ We provide demo_data/ for fast testing. To test on more motion sequences in OMOM
 ### OMOMO 
 Our pipeline used the processed dataset by InterMimic. The data format differs from the original OMOMO dataset. Please download the processed OMOMO data here https://drive.google.com/file/d/141YoPOd2DlJ4jhU2cpZO5VU5GzV_lm5j/view. 
 
+### LAFAN 
+#### Download the original LAFAN data.
+
+Step 1: Fork the official [LAFAN repo](https://github.com/ubisoft/ubisoft-laforge-animation-dataset) using your github account. 
+
+Step 2: In your forked repo, open settings. Search for "Archives". Check in the box "Include Git LFS objects in archives". 
+
+Step 3: In your forked repo, download the repo as a .zip file. 
+
+#### Convert the original LAFAN data format for motion retargeting. 
+Copy the folder lafan1/ from your downloaded LAFAN repo to data_utils/. 
+
+```
+cd data_utils/
+python extract_global_positions.py --input_dir ./lafan1/lafan --output_dir ../demo_data/lafan 
+```
+
+Single sequence retargeting on LAFAN. 
+```
+python examples/robot_retarget.py --data_path demo_data/lafan --task-type robot_only --task_name dance2_subject1 --data_format lafan --task-config.ground-range -10 10 --retargeter.debug --retargeter.visualize 
+```
+
+Batch processing for motion retargeting on LAFAN. 
+```
+python examples/parallel_robot_retarget.py --data-dir demo_data/lafan --task-type robot_only  --data_format lafan --save_dir demo_results_parallel/g1/robot_only/lafan --task-config.object-name ground
+```
+
 ## Check visualizations of saved retargeting results  
 ```
 # Visualize object-interaction results
@@ -55,6 +82,10 @@ python viser_player.py --robot_urdf models/g1/g1_29dof_spherehand.urdf \
 # Visualize robot only results 
 python viser_player.py --robot_urdf models/g1/g1_29dof.urdf \
     --qpos_npz demo_results_parallel/g1/robot_only/omomo/sub3_largebox_003_original.npz
+
+# Visualize LAFAN robot only results 
+python viser_player.py --robot_urdf models/g1/g1_29dof.urdf \
+    --qpos_npz demo_results/g1/robot_only/lafan/dance2_subject1.npz
 ```
 
 ## Quantitative Evaluation
