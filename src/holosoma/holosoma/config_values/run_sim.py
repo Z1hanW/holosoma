@@ -59,8 +59,23 @@ mujoco = dataclasses.replace(
     ),
 )
 
+# MuJoCo Warp with sim2sim optimizations
+mjwarp = dataclasses.replace(
+    holosoma.config_values.simulator.mjwarp,
+    config=dataclasses.replace(
+        holosoma.config_values.simulator.mjwarp.config,
+        bridge=BridgeConfig(enabled=True),
+        virtual_gantry=VirtualGantryCfg(enabled=True),
+        sim=dataclasses.replace(
+            holosoma.config_values.simulator.mjwarp.config.sim,
+            fps=1000,  # GPU-accelerated, can run fast
+        ),
+    ),
+)
+
 DEFAULTS = {
     "isaacgym": isaacgym,
     "isaacsim": isaacsim,
     "mujoco": mujoco,
+    "mjwarp": mjwarp,
 }

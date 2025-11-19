@@ -1,9 +1,38 @@
 #!/bin/bash
 # Exit on error, and print commands
-set -ex
+set -e
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 ROOT_DIR=$(dirname "$SCRIPT_DIR")
+
+# Parse command-line arguments
+INSTALL_WARP=false  # Default: skip warp (CPU-only install)
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --with-warp)
+      INSTALL_WARP=true
+      echo "MuJoCo Warp (GPU) installation enabled"
+      shift
+      ;;
+    --help|-h)
+      echo "Usage: $0 [--with-warp]"
+      echo ""
+      echo "Options:"
+      echo "  --with-warp    Install MuJoCo Warp for GPU-accelerated simulation"
+      echo "  --help, -h     Show this help message"
+      echo ""
+      echo "Default: CPU-only installation (ClassicBackend)"
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1"
+      echo "Usage: $0 [--with-warp]"
+      echo "Use --help for more information"
+      exit 1
+      ;;
+  esac
+done
 
 # Create overall workspace
 source ${SCRIPT_DIR}/source_common.sh
@@ -50,6 +79,19 @@ if [[ ! -f $SENTINEL_FILE ]]; then
   # Core MuJoCo packages
   pip install 'mujoco>=3.0.0'
   pip install mujoco-python-viewer
+
+  # Conditionally install MuJoCo Warp (GPU acceleration)
+  if [[ "$INSTALL_WARP" == "true" ]]; then
+    echo "Installing MuJoCo Warp (GPU acceleration)..."
+    if [[ ! -d $WORKSPACE_DIR/mujoco_warp ]]; then
+      git clone https://github.com/google-deepmind/mujoco_warp.git $WORKSPACE_DIR/mujoco_warp
+    fi
+    pip install uv
+    uv pip install -e $WORKSPACE_DIR/mujoco_warp[dev,cuda]
+    echo "✓ MuJoCo Warp installed successfully"
+  else
+    echo "Skipping MuJoCo Warp installation (use --with-warp to enable GPU acceleration)"
+  fi
   
   # Optional: Gymnasium MuJoCo environments (if needed for compatibility)
  # pip install "gymnasium[mujoco]"
@@ -123,7 +165,28 @@ EOF
   python $WORKSPACE_DIR/validate_mujoco.py
   
   touch $SENTINEL_FILE
-  echo "MuJoCo environment setup completed successfully!"
+  
+  # Print installation summary
+  echo ""
+  echo "=========================================="
+  echo "MuJoCo environment setup completed!"
+  echo "=========================================="
+  echo ""
+  if [[ "$INSTALL_WARP" == "true" ]]; then
+    echo "✓ Installation type: CPU + GPU (ClassicBackend + WarpBackend)"
+    echo "✓ GPU acceleration enabled via MuJoCo Warp"
+  else
+    echo "✓ Installation type: CPU-only (ClassicBackend)"
+    echo ""
+    echo "To enable GPU acceleration (WarpBackend):"
+    echo "  rm $SENTINEL_FILE"
+    echo "  bash scripts/setup_mujoco.sh --with-warp"
+  fi
+  echo ""
+  echo "Activate with: source scripts/source_mujoco_setup.sh"
+  echo "=========================================="
 fi
 
-echo "MuJoCo environment is ready. Use 'source source_mujoco_setup.sh' to activate."
+echo ""
+echo "MuJoCo environment is ready."
+echo "Use 'source scripts/source_mujoco_setup.sh' to activate."

@@ -1,11 +1,59 @@
 from __future__ import annotations
 
 from dataclasses import field
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from pydantic import model_validator
 from pydantic.dataclasses import dataclass
+
+
+class MujocoBackend(str, Enum):
+    """MuJoCo physics backend selection.
+
+    Determines which MuJoCo backend to use for physics simulation.
+    """
+
+    CLASSIC = "classic"
+    """CPU-based single environment backend."""
+
+    WARP = "warp"
+    """GPU-accelerated multi-environment backend."""
+
+
+@dataclass(frozen=True)
+class MujocoWarpConfig:
+    """Configuration for MuJoCo Warp backend memory allocation.
+
+    Controls GPU memory allocation for batched parallel simulation.
+    Increase these values if you encounter overflow warnings during training.
+    """
+
+    nconmax_per_env: int = 64
+    """Maximum contacts per environment (default: 64).
+
+    Increase for:
+    - Complex terrains with many contact points
+    - Robots with numerous collision geometries
+    - Multi-contact scenarios (manipulation, climbing)
+
+    Memory scales as: num_envs x nconmax_per_env
+    """
+
+    njmax_per_env: int | None = None
+    """Maximum constraints per environment (default: auto-calculated).
+
+    If None (default), automatically calculated as: max(nconmax * 6, nv * 4)
+    where nv is the model's velocity dimension.
+
+    Constraints include:
+    - Contact constraints (friction cones: ~6 per contact)
+    - Joint limits
+    - Equality constraints
+
+    Only override if you know you need more constraint capacity.
+    """
 
 
 @dataclass(frozen=True)
@@ -441,7 +489,37 @@ class SimulatorInitConfig:
     """Number of frames of contact data retained for sensors."""
 
     robot_mjcf_filter: MujocoXMLFilterCfg = field(default_factory=MujocoXMLFilterCfg)
-    """MuJoCo-specific XML filtering configuration for robot MJCF files.
+    """MuJoCo-specific XML filtering configuration for robot MJCF files."""
+
+    mujoco_backend: MujocoBackend = MujocoBackend.CLASSIC
+    """MuJoCo physics backend selection.
+
+    Determines which MuJoCo backend to use for physics simulation:
+    - 'classic': CPU-based single environment (backward compatible, default)
+    - 'warp': GPU-accelerated multi-environment with mujoco_warp
+
+    This setting only applies when using the MuJoCo simulator (name='mujoco').
+    For other simulators (isaacgym, isaacsim), this field is ignored.
+
+    Command line usage:
+        --simulator.config.mujoco-backend=warp
+        --simulator.config.mujoco-backend=classic
+
+    Or use the syntactic sugar configs:
+        simulator:mujoco   (uses classic backend)
+        simulator:mjwarp   (uses warp backend)
+    """
+
+    mujoco_warp: MujocoWarpConfig = field(default_factory=MujocoWarpConfig)
+    """MuJoCo Warp backend memory allocation configuration.
+
+    Controls GPU memory allocation for the Warp backend. Only used when
+    mujoco_backend='warp'. Allows tuning contact and constraint capacity
+    for different scenarios.
+
+    Command line usage:
+        --simulator.config.mujoco-warp.nconmax-per-env=128
+        --simulator.config.mujoco-warp.njmax-per-env=1024
     """
 
     bridge: BridgeConfig = field(default_factory=BridgeConfig)

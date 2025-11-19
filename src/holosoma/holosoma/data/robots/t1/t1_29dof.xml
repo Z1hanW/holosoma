@@ -254,10 +254,13 @@
         <motor name="Right_Ankle_Roll" joint="Right_Ankle_Roll" ctrlrange="-15.0 15.0" ctrllimited="true" />
     </actuator>
     <sensor>
-        <framequat name="orientation" objtype="site" objname="imu" />
+        <framequat name="base_quat" objtype="site" objname="imu"/>
         <gyro name="angular-velocity" site="imu" />
-    </sensor>
+        <accelerometer name="base_accel" site="imu"/>
 
+        <framequat name="mid360_quat" objtype="site" objname="mid360"/>
+        <framepos name="mid360_pos" objtype="site" objname="mid360"/>
+    </sensor>
 
     <keyframe>
         <key

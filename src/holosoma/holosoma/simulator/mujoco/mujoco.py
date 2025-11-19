@@ -13,18 +13,15 @@ from loguru import logger
 import mujoco
 import mujoco.viewer
 from holosoma.config_types.full_sim import FullSimConfig
+from holosoma.config_types.simulator import MujocoBackend
 from holosoma.managers.terrain.manager import TerrainManager
 from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
+from holosoma.simulator.mujoco.backends import WARP_AVAILABLE, ClassicBackend, WarpBackend
 from holosoma.simulator.mujoco.command_registry import CommandRegistry
 from holosoma.simulator.mujoco.scene_manager import MujocoSceneManager
 from holosoma.simulator.mujoco.tensor_views import (
-    MujocoDofStateView,
-    MujocoRootStateView,
     create_base_angular_velocity_view,
     create_base_linear_acceleration_view,
-    create_dof_acceleration_view,
-    create_dof_position_view,
-    create_dof_velocity_view,
     create_quaternion_view,
 )
 from holosoma.simulator.mujoco.video_recorder import MuJoCoVideoRecorder
@@ -119,6 +116,8 @@ class MuJoCo(BaseSimulator):
         if not hasattr(tyro_config, "robot"):
             raise ValueError("Robot configuration is required but missing from tyro_config")
 
+        # Store full config for backend access
+        self.tyro_config = tyro_config
         self.device = device
         self.robot_config = tyro_config.robot
 
@@ -141,6 +140,9 @@ class MuJoCo(BaseSimulator):
 
         # Viewer
         self.viewer: mujoco.viewer.Handle | None = None
+
+        # World ID for multi-environment visualization (which environment to view)
+        self.current_world_id: int = 0
 
         # Command system for keyboard/joystick controls
         # Initialize commands tensor matching IsaacGym format:
@@ -323,6 +325,25 @@ class MuJoCo(BaseSimulator):
 
         # Apply post-compilation settings
         self.root_model.opt.timestep = self.sim_dt
+
+        # Backend selection based on configuration
+        if self.simulator_config.mujoco_backend == MujocoBackend.WARP:
+            if not WARP_AVAILABLE:
+                raise RuntimeError(
+                    "WarpBackend requested (mujoco_backend='warp') but dependencies not available.\n\n"
+                    "To enable GPU acceleration, reinstall with warp support:\n"
+                    "  bash scripts/setup_mujoco.sh --with-warp\n\n"
+                    "Or install dependencies manually:\n"
+                    "  pip install warp-lang mujoco-warp\n\n"
+                    "System requirements: CUDA-capable GPU required"
+                )
+            logger.info("Initializing WarpBackend (GPU multi-environment)")
+            self.backend = WarpBackend(self.root_model, self.root_data, self.tyro_config, self.device)
+            # Sync CPU initial state (set by _set_initial_joint_angles) to GPU
+            self.backend.initialize_state(self.root_model, self.root_data)
+        else:
+            logger.info("Initializing ClassicBackend (CPU single-environment)")
+            self.backend = ClassicBackend(self.root_model, self.root_data, self.tyro_config, self.device)
 
         # Setup robot indexes, etc
         self._set_robot_properties()
@@ -558,8 +579,11 @@ class MuJoCo(BaseSimulator):
         ValueError
             If num_envs > 1 (multiple environments not yet supported).
         """
-        if num_envs > 1:
-            raise ValueError(f"MuJoCo simulator currently only supports single environment, got {num_envs}")
+        if num_envs > 1 and self.simulator_config.mujoco_backend != MujocoBackend.WARP:
+            raise ValueError(
+                f"MuJoCo ClassicBackend only supports single environment, got {num_envs}. "
+                f"Use --simulator.config.mujoco-backend=warp for multi-environment support."
+            )
 
         self.num_envs = num_envs
         self.env_origins = env_origins
@@ -648,17 +672,14 @@ class MuJoCo(BaseSimulator):
         vel_indices = slice(self.robot_qvel_addr, self.robot_qvel_addr + 3)
         ang_vel_indices = slice(self.robot_qvel_addr + 3, self.robot_qvel_addr + 6)
 
-        # Create robot root states proxy using simplified system
-        self.robot_root_states = MujocoRootStateView(  # type: ignore[assignment]
-            qpos_array=self.root_data.qpos,
-            qvel_array=self.root_data.qvel,
-            pos_indices=pos_indices,
-            quat_indices=quat_indices,
-            vel_indices=vel_indices,
-            ang_vel_indices=ang_vel_indices,
-            num_envs=self.num_envs,
-            device=self.sim_device,
-        )
+        # Create robot root states proxy via backend factory
+        root_addrs = {
+            "pos_indices": pos_indices,
+            "quat_indices": quat_indices,
+            "vel_indices": vel_indices,
+            "ang_vel_indices": ang_vel_indices,
+        }
+        self.robot_root_states = self.backend.create_root_view(root_addrs)  # type: ignore[assignment]
 
         # Create all_root_states as a view of robot_root_states (single robot case)
         self.all_root_states = self.robot_root_states
@@ -670,67 +691,57 @@ class MuJoCo(BaseSimulator):
         dof_vel_indices = (
             slice(min(self.dof_qvel_addrs), max(self.dof_qvel_addrs) + 1) if self.dof_qvel_addrs else slice(0, 0)
         )
-
-        # Create DOF state proxy using simplified system
-        self.dof_state = MujocoDofStateView(  # type: ignore[assignment]
-            qpos_array=self.root_data.qpos,
-            qvel_array=self.root_data.qvel,
-            dof_pos_indices=dof_pos_indices,
-            dof_vel_indices=dof_vel_indices,
-            num_envs=self.num_envs,
-            num_dof=self.num_dof,
-            device=self.sim_device,
-        )
-
-        # Create individual DOF position and velocity proxies for compatibility
-        self.dof_pos = create_dof_position_view(  # type: ignore[assignment]
-            qpos_array=self.root_data.qpos,
-            indices=dof_pos_indices,
-            num_envs=self.num_envs,
-            num_dof=self.num_dof,
-            device=self.sim_device,
-        )
-        self.dof_vel = create_dof_velocity_view(  # type: ignore[assignment]
-            qvel_array=self.root_data.qvel,
-            indices=dof_vel_indices,
-            num_envs=self.num_envs,
-            num_dof=self.num_dof,
-            device=self.sim_device,
-        )
-
-        # Create DOF acceleration proxy for bridge support -- Mujoco provides qacc directly, so we create a view
         dof_acc_indices = (
             slice(min(self.dof_qvel_addrs), max(self.dof_qvel_addrs) + 1) if self.dof_qvel_addrs else slice(0, 0)
         )
-        self.dof_acc = create_dof_acceleration_view(  # type: ignore[assignment]
-            qacc_array=self.root_data.qacc,
-            indices=dof_acc_indices,
-            num_envs=self.num_envs,
-            num_dof=self.num_dof,
-            device=self.sim_device,
-        )
 
-        # Create base_quat proxy that handles slice assignments from legged_robot_base
-        self.base_quat = create_quaternion_view(  # type: ignore[assignment]
-            qpos_array=self.root_data.qpos, indices=quat_indices, num_envs=self.num_envs, device=self.sim_device
-        )
+        # Create DOF state proxy via backend factory
+        dof_addrs = {"dof_pos_indices": dof_pos_indices, "dof_vel_indices": dof_vel_indices}
+        self.dof_state = self.backend.create_dof_state_view(dof_addrs, self.num_dof)  # type: ignore[assignment]
 
-        # Create base angular velocity view for IMU bridge support
-        self.base_angular_vel = create_base_angular_velocity_view(  # type: ignore[assignment]
-            qvel_array=self.root_data.qvel,
-            indices=ang_vel_indices,
-            num_envs=self.num_envs,
-            device=self.sim_device,
-        )
+        # Create individual DOF views via backend factories
+        self.dof_pos = self.backend.create_dof_pos_view(dof_pos_indices, self.num_dof)  # type: ignore[assignment]
+        self.dof_vel = self.backend.create_dof_vel_view(dof_vel_indices, self.num_dof)  # type: ignore[assignment]
+        self.dof_acc = self.backend.create_dof_acc_view(dof_acc_indices, self.num_dof)  # type: ignore[assignment]
 
-        # Create base linear acceleration view for IMU bridge support
-        base_lin_acc_indices = slice(0, 3)
-        self.base_linear_acc = create_base_linear_acceleration_view(  # type: ignore[assignment]
-            qacc_array=self.root_data.qacc,
-            indices=base_lin_acc_indices,
-            num_envs=self.num_envs,
-            device=self.sim_device,
-        )
+        # Create contact forces via backend factory
+        self.contact_forces = self.backend.create_force_view(self.num_bodies)  # type: ignore[assignment]
+
+        # Create unified applied forces accessor for external force application (e.g., virtual gantry)
+        self.applied_forces = self.backend.get_applied_forces_view()
+
+        # Create base_quat, base_angular_vel, base_linear_acc views
+        # For WarpBackend: use native GPU tensors directly
+        # For ClassicBackend: use legacy view system with root_data
+        if isinstance(self.backend, WarpBackend):
+            # WarpBackend: use native zero-copy tensors directly
+            # qpos_t is [num_envs, nq], qvel_t is [num_envs, nv], qacc_t is [num_envs, nv]
+            self.base_quat = self.backend.qpos_t[:, quat_indices]  # type: ignore[assignment]
+            self.base_angular_vel = self.backend.qvel_t[:, ang_vel_indices]  # type: ignore[assignment]
+
+            # Base linear acceleration is first 3 elements of qacc
+            base_lin_acc_indices = slice(0, 3)
+            self.base_linear_acc = self.backend.qacc_t[:, base_lin_acc_indices]  # type: ignore[assignment]
+        else:
+            # ClassicBackend: use legacy view system with root_data
+            self.base_quat = create_quaternion_view(  # type: ignore[assignment]
+                qpos_array=self.root_data.qpos, indices=quat_indices, num_envs=self.num_envs, device=self.sim_device
+            )
+
+            self.base_angular_vel = create_base_angular_velocity_view(  # type: ignore[assignment]
+                qvel_array=self.root_data.qvel,
+                indices=ang_vel_indices,
+                num_envs=self.num_envs,
+                device=self.sim_device,
+            )
+
+            base_lin_acc_indices = slice(0, 3)
+            self.base_linear_acc = create_base_linear_acceleration_view(  # type: ignore[assignment]
+                qacc_array=self.root_data.qacc,
+                indices=base_lin_acc_indices,
+                num_envs=self.num_envs,
+                device=self.sim_device,
+            )
 
         # Initialize rigid body state tensors (required by BaseTask)
         self._rigid_body_pos = torch.zeros(
@@ -760,38 +771,51 @@ class MuJoCo(BaseSimulator):
         # NOTE: With the proxy system, most state tensors (dof_pos, dof_vel, dof_state, robot_root_states)
         # automatically reflect the current MuJoCo state, so we only need to update the non-proxy tensors.
 
-        # Update rigid body state tensors for all bodies (these are still regular tensors)
-        assert self.root_model
-        assert self.root_data
-        for body_id in range(self.num_bodies):
-            assert body_id < self.root_model.nbody, f"Body ID {body_id} exceeds model bodies {self.root_model.nbody}"
+        # Try to get rigid body states via backend (zero-copy for WarpBackend)
+        rigid_body_views = self.backend.get_rigid_body_state_views()
 
-            # Positions (direct access to global coordinates)
-            self._rigid_body_pos[0, body_id] = (
-                torch.from_numpy(self.root_data.xpos[body_id]).float().to(self.sim_device)
-            )
+        if rigid_body_views is not None:
+            # Fast path: zero-copy GPU tensors (WarpBackend)
+            # Eliminates 132 tensor allocations per frame for G1 robot (33 bodies x 4 tensors)
+            positions, orientations, linear_vel, angular_vel = rigid_body_views
+            self._rigid_body_pos[:] = positions
+            self._rigid_body_rot[:] = orientations
+            self._rigid_body_vel[:] = linear_vel
+            self._rigid_body_ang_vel[:] = angular_vel
+        else:
+            # Slow path: CPU loop with tensor allocation (ClassicBackend)
+            assert self.root_model
+            assert self.root_data
+            for body_id in range(self.num_bodies):
+                assert body_id < self.root_model.nbody, (
+                    f"Body ID {body_id} exceeds model bodies {self.root_model.nbody}"
+                )
 
-            # Quaternions (convert MuJoCo w,x,y,z to holosoma x,y,z,w)
-            mj_quat = self.root_data.xquat[body_id]  # [w, x, y, z]
-            holosoma_quat = [mj_quat[1], mj_quat[2], mj_quat[3], mj_quat[0]]  # [x, y, z, w]
-            self._rigid_body_rot[0, body_id] = torch.tensor(holosoma_quat, device=self.sim_device, dtype=torch.float32)
+                # Positions (direct access to global coordinates)
+                self._rigid_body_pos[0, body_id] = (
+                    torch.from_numpy(self.root_data.xpos[body_id]).float().to(self.sim_device)
+                )
 
-            # Velocities using mj_objectVelocity (recommended approach)
-            body_vel = np.zeros(6)  # [angular_vel, linear_vel]
-            mujoco.mj_objectVelocity(self.root_model, self.root_data, mujoco.mjtObj.mjOBJ_BODY, body_id, body_vel, 0)
+                # Quaternions (convert MuJoCo w,x,y,z to holosoma x,y,z,w)
+                mj_quat = self.root_data.xquat[body_id]  # [w, x, y, z]
+                holosoma_quat = [mj_quat[1], mj_quat[2], mj_quat[3], mj_quat[0]]  # [x, y, z, w]
+                self._rigid_body_rot[0, body_id] = torch.tensor(
+                    holosoma_quat, device=self.sim_device, dtype=torch.float32
+                )
 
-            # Extract angular and linear velocities
-            self._rigid_body_ang_vel[0, body_id] = torch.from_numpy(body_vel[:3]).float().to(self.sim_device)
-            self._rigid_body_vel[0, body_id] = torch.from_numpy(body_vel[3:]).float().to(self.sim_device)
+                # Velocities using mj_objectVelocity (recommended approach)
+                body_vel = np.zeros(6)  # [angular_vel, linear_vel]
+                mujoco.mj_objectVelocity(
+                    self.root_model, self.root_data, mujoco.mjtObj.mjOBJ_BODY, body_id, body_vel, 0
+                )
 
-        # Update contact forces and history (following IsaacGym/IsaacSim pattern)
+                # Extract angular and linear velocities
+                self._rigid_body_ang_vel[0, body_id] = torch.from_numpy(body_vel[:3]).float().to(self.sim_device)
+                self._rigid_body_vel[0, body_id] = torch.from_numpy(body_vel[3:]).float().to(self.sim_device)
+
+        # Update contact forces and history via backend delegation
         if hasattr(self, "contact_forces_history") and hasattr(self, "contact_forces"):
-            self._update_contact_forces()
-            # Update contact forces history by shifting and adding current forces
-            # Pattern: [current, previous, ...] where index 0 is most recent
-            self.contact_forces_history = torch.cat(
-                [self.contact_forces.clone().unsqueeze(1), self.contact_forces_history[:, :-1, :, :]], dim=1
-            )
+            self.backend.refresh_sim_tensors(self.contact_forces_history)
 
     def clear_contact_forces_history(self, env_ids: torch.Tensor) -> None:
         """Clear contact forces history for specified environments.
@@ -805,7 +829,7 @@ class MuJoCo(BaseSimulator):
             self.contact_forces_history[env_ids, :, :, :] = 0.0
 
     def apply_torques_at_dof(self, torques: torch.Tensor) -> None:
-        """Apply torques with proper DOF-to-actuator mapping.
+        """Apply torques with backend-specific optimization.
 
         Parameters
         ----------
@@ -824,21 +848,28 @@ class MuJoCo(BaseSimulator):
             logger.warning("No actuators found in MuJoCo model")
             return
 
-        torques_np = torques.detach().cpu().numpy().flatten()
+        # Check if backend supports direct tensor writes
+        ctrl_tensor = self.backend.get_ctrl_tensor()
 
-        # Verify we have the expected number of actuators
-        if len(torques_np) != self.root_model.nu:
-            raise ValueError(f"Torque count mismatch: got {len(torques_np)}, expected {self.root_model.nu}")
+        if ctrl_tensor is not None:
+            # Fast path: Direct zero-copy write (WarpBackend)
+            ctrl_tensor[:] = torques
+        else:
+            # Slow path: Loop-based write (ClassicBackend)
+            torques_np = torques.detach().cpu().numpy().flatten()
 
-        # Map holosoma DOF indices to MuJoCo actuator indices
-        # This assumes 1:1 mapping but adds verification
-        for i, dof_name in enumerate(self.dof_names):
-            # Add prefix for MuJoCo actuator lookup (dof_names are clean, need prefixed version)
-            actuator_name = self._get_prefixed_name(dof_name)
-            actuator_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name)
-            if actuator_id == -1:
-                raise ValueError(f"Actuator for DOF '{dof_name}' (MuJoCo name: '{actuator_name}') not found")
-            self.root_data.ctrl[actuator_id] = torques_np[i]
+            # Verify we have the expected number of actuators
+            if len(torques_np) != self.root_model.nu:
+                raise ValueError(f"Torque count mismatch: got {len(torques_np)}, expected {self.root_model.nu}")
+
+            # Map holosoma DOF indices to MuJoCo actuator indices
+            for i, dof_name in enumerate(self.dof_names):
+                # Add prefix for MuJoCo actuator lookup (dof_names are clean, need prefixed version)
+                actuator_name = self._get_prefixed_name(dof_name)
+                actuator_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name)
+                if actuator_id == -1:
+                    raise ValueError(f"Actuator for DOF '{dof_name}' (MuJoCo name: '{actuator_name}') not found")
+                self.root_data.ctrl[actuator_id] = torques_np[i]
 
     def draw_debug_viz(self):
         if self.virtual_gantry:
@@ -848,13 +879,14 @@ class MuJoCo(BaseSimulator):
         """Advance simulation by one step."""
 
         if self.virtual_gantry:
-            # Apply virtual gantry forces before mj_step
+            # Apply virtual gantry forces before step
             self.virtual_gantry.step()
 
-        # Step bridge for updated torques before mj_step using base class helper
+        # Step bridge for updated torques before step using base class helper
         self._step_bridge()
 
-        mujoco.mj_step(self.root_model, self.root_data)
+        # Delegate simulation step to backend
+        self.backend.step()
 
         # Call video recorder capture frame if recording is active
         if self.video_recorder:
@@ -1113,15 +1145,17 @@ class MuJoCo(BaseSimulator):
     def set_actor_root_state_tensor_robots(
         self, env_ids: EnvIds | None = None, root_states: torch.Tensor | None = None
     ) -> None:
-        """Set robot root states using MuJoCo best practices.
+        """Set robot root states via backend delegation.
 
         Parameters
         ----------
         env_ids : Optional[EnvIds]
             Which environments to update (None = all).
         root_states : Optional[torch.Tensor]
-            Robot states to set with shape [num_envs, 13] format:
-            [x, y, z, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz].
+            Robot states to set. Can be either:
+            - Pre-sliced tensor [len(env_ids), 13] matching env_ids
+            - Full global tensor [num_envs, 13] (will be sliced automatically)
+            Format: [x, y, z, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz].
             If None, uses current robot_root_states.
         """
         if env_ids is None:
@@ -1129,6 +1163,17 @@ class MuJoCo(BaseSimulator):
 
         if root_states is None:
             root_states = self.robot_root_states[env_ids]
+        # CRITICAL: Normalize calling convention - if caller passes full global tensor
+        # but only updating subset of envs, slice it to match env_ids dimension
+        elif len(root_states) != len(env_ids):
+            if len(root_states) == self.num_envs:
+                # Full global tensor provided, slice to match env_ids
+                root_states = root_states[env_ids]
+            else:
+                raise ValueError(
+                    f"root_states dimension mismatch: got {len(root_states)}, "
+                    f"expected either {len(env_ids)} (pre-sliced) or {self.num_envs} (global)"
+                )
 
         # Validate inputs
         if len(env_ids) == 0:
@@ -1139,53 +1184,14 @@ class MuJoCo(BaseSimulator):
             logger.info("No robot DOFs available - skipping root state update")
             return
 
-        # For each environment (currently only supporting single environment)
-        assert self.root_data is not None
-        assert self.robot_qvel_addr is not None
-        assert len(env_ids) <= 1, "Multiple environments not yet supported"
-
-        for i, _ in enumerate(env_ids):
-            state = root_states[i]
-
-            # Extract components from holosoma format [x,y,z,qx,qy,qz,qw,vx,vy,vz,wx,wy,wz]
-            pos = state[:3].detach().cpu().numpy()  # [x, y, z]
-            quat_holosoma = state[3:7].detach().cpu().numpy()  # [qx, qy, qz, qw]
-            lin_vel = state[7:10].detach().cpu().numpy()  # [vx, vy, vz]
-            ang_vel = state[10:13].detach().cpu().numpy()  # [wx, wy, wz]
-
-            # Convert quaternion: holosoma [qx,qy,qz,qw] → MuJoCo [qw,qx,qy,qz]
-            quat_mj = np.array([quat_holosoma[3], quat_holosoma[0], quat_holosoma[1], quat_holosoma[2]])
-
-            # Update MuJoCo state via named freejoint using proper addressing
-            # Use the pre-computed freejoint addresses from _set_robot_joint_addressing()
-            # Set freejoint position: [x, y, z, qw, qx, qy, qz] (7 elements)
-            if self.robot_qpos_addr + 7 <= len(self.root_data.qpos):
-                self.root_data.qpos[self.robot_qpos_addr : self.robot_qpos_addr + 3] = pos  # Position
-                self.root_data.qpos[self.robot_qpos_addr + 3 : self.robot_qpos_addr + 7] = (
-                    quat_mj  # Quaternion [qw,qx,qy,qz]
-                )
-            else:
-                raise ValueError(
-                    f"Insufficient qpos elements for freejoint: need {self.robot_qpos_addr + 7}, "
-                    f"have {len(self.root_data.qpos)}"
-                )
-
-            # Set freejoint velocity: [vx, vy, vz, wx, wy, wz] (6 elements)
-            if self.robot_qvel_addr + 6 <= len(self.root_data.qvel):
-                self.root_data.qvel[self.robot_qvel_addr : self.robot_qvel_addr + 3] = lin_vel  # Linear velocity
-                self.root_data.qvel[self.robot_qvel_addr + 3 : self.robot_qvel_addr + 6] = ang_vel  # Angular velocity
-            else:
-                raise ValueError(
-                    f"Insufficient qvel elements for freejoint: need {self.robot_qvel_addr + 6}, "
-                    f"have {len(self.root_data.qvel)}"
-                )
-
-        mujoco.mj_forward(self.root_model, self.root_data)
+        # Delegate to backend
+        root_addrs = {"robot_qpos_addr": self.robot_qpos_addr, "robot_qvel_addr": self.robot_qvel_addr}
+        self.backend.set_root_state(env_ids, root_states, root_addrs)
 
     def set_dof_state_tensor_robots(
         self, env_ids: EnvIds | None = None, dof_states: torch.Tensor | None = None
     ) -> None:
-        """Set robot DOF states using MuJoCo best practices.
+        """Set robot DOF states via backend delegation.
 
         Parameters
         ----------
@@ -1219,31 +1225,9 @@ class MuJoCo(BaseSimulator):
                 f"Expected [num_envs, num_dofs, 2] or [num_envs * num_dofs, 2]"
             )
 
-        # Flattened format: [num_selected_envs * num_dofs, 2]
-        dof_positions = dof_states[:, 0].view(len(env_ids), self.num_dof)  # [num_selected_envs, num_dofs]
-        dof_velocities = dof_states[:, 1].view(len(env_ids), self.num_dof)  # [num_selected_envs, num_dofs]
-
-        # Apply DOF states for each environment
-        assert self.root_data is not None
-        assert len(env_ids) <= 1, "Multiple environments not yet supported"
-        for i, _ in enumerate(env_ids):
-            env_dof_pos = dof_positions[i].detach().cpu().numpy()  # [num_dofs]
-            env_dof_vel = dof_velocities[i].detach().cpu().numpy()  # [num_dofs]
-
-            for dof_idx in range(self.num_dof):
-                qpos_idx = self.dof_qpos_addrs[dof_idx]
-                qvel_idx = self.dof_qvel_addrs[dof_idx]
-
-                assert qpos_idx < len(self.root_data.qpos), (
-                    f"DOF {dof_idx} qpos index {qpos_idx} exceeds qpos length {len(self.root_data.qpos)}"
-                )
-
-                assert qvel_idx < len(self.root_data.qvel), (
-                    f"DOF {dof_idx} qvel index {qvel_idx} exceeds qvel length {len(self.root_data.qvel)}"
-                )
-
-                self.root_data.qpos[qpos_idx] = env_dof_pos[dof_idx]
-                self.root_data.qvel[qvel_idx] = env_dof_vel[dof_idx]
+        # Delegate to backend
+        dof_addrs = {"dof_qpos_addrs": self.dof_qpos_addrs, "dof_qvel_addrs": self.dof_qvel_addrs}
+        self.backend.set_dof_state(env_ids, dof_states, dof_addrs)
 
     def get_dof_limits_properties(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Get DOF limits properties - simplified IsaacSim pattern.
@@ -1330,6 +1314,10 @@ class MuJoCo(BaseSimulator):
             logger.warning("Cannot render, no viewer")
             return
 
+        # Sync GPU -> CPU for WarpBackend with current world_id
+        # (no-op for ClassicBackend which returns same data)
+        self.root_data = self.backend.get_render_data(world_id=self.current_world_id)
+
         self.viewer.sync()
         if self.debug_viz_enabled:
             self.clear_lines()
@@ -1372,13 +1360,13 @@ class MuJoCo(BaseSimulator):
             If multiple environments requested (not yet supported).
         """
         if env_id != 0:
-            raise RuntimeError(f"MuJoCo simulator currently only supports single environment (env_id=0), got {env_id}")
+            raise RuntimeError(f"MuJoCo classic currently only supports single environment (env_id=0), got {env_id}")
 
         assert self.root_data is not None
         return torch.from_numpy(self.root_data.actuator_force[: self.num_dof]).float().to(self.sim_device)
 
     def _key_callback(self, keycode: int) -> None:
-        """Handle keyboard input with unified command registry.
+        """Handle keyboard input with unified command registry and world_id toggling.
 
         Parameters
         ----------
@@ -1387,6 +1375,28 @@ class MuJoCo(BaseSimulator):
         """
         if self.commands is None:
             return
+
+        # Handle world_id toggling for multi-environment visualization (WarpBackend only)
+        # LEFT ARROW (263): Previous environment
+        # RIGHT ARROW (262): Next environment
+        # Numbers 0-9 (48-57): Jump to specific environment
+        if self.num_envs > 1:
+            if keycode == 263:  # LEFT ARROW - Previous environment
+                self.current_world_id = (self.current_world_id - 1) % self.num_envs
+                logger.info(f"Viewing environment: {self.current_world_id + 1}/{self.num_envs}")
+                return
+            if keycode == 262:  # RIGHT ARROW - Next environment
+                self.current_world_id = (self.current_world_id + 1) % self.num_envs
+                logger.info(f"Viewing environment: {self.current_world_id + 1}/{self.num_envs}")
+                return
+            if 48 <= keycode <= 57:  # Number keys 0-9
+                requested_id = keycode - 48  # Convert keycode to number (0-9)
+                if requested_id < self.num_envs:
+                    self.current_world_id = requested_id
+                    logger.info(f"Viewing environment: {self.current_world_id + 1}/{self.num_envs}")
+                else:
+                    logger.warning(f"Environment {requested_id} does not exist (max: {self.num_envs - 1})")
+                return
 
         # Use unified command registry
         if not hasattr(self, "_command_registry"):

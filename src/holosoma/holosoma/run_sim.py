@@ -30,6 +30,16 @@ def run_simulation(config: RunSimConfig):
     config : RunSimConfig
         Configuration containing all simulation settings.
     """
+    # Auto-set device for GPU-accelerated backends if still on default CPU
+    if config.device == "cpu":
+        # Check if using Warp backend (requires CUDA)
+        if hasattr(config.simulator.config, "mujoco_backend"):
+            from holosoma.config_types.simulator import MujocoBackend  # noqa: PLC0415 -- deferred
+
+            if config.simulator.config.mujoco_backend == MujocoBackend.WARP:
+                logger.info("Auto-detected MuJoCo Warp backend - setting device to cuda:0")
+                config = dataclasses.replace(config, device="cuda:0")
+
     config = dataclasses.replace(config, device=config.device)
 
     logger.info("Starting Holosoma Direct Simulation...")
