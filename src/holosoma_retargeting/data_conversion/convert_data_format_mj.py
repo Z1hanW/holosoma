@@ -341,64 +341,9 @@ def world_body_velocities(model, data):
             0,                          # flg_local = 0 -> world orientation
         )
 
-    lin_w = v[:, 0:3]   # [vx, vy, vz] in world frame
-    ang_w = v[:, 3:6]   # [wx, wy, wz] in world frame
+    lin_w = v[:, 3:6]   # [vx, vy, vz] in world frame
+    ang_w = v[:, 0:3]   # [wx, wy, wz] in world frame
     return lin_w, ang_w
-
-
-def draw_velocity_markers(model, data, viewer, scale: float = 0.3, min_norm: float = 1e-3, width: float = 2.0):
-    """
-    Draw velocity line segments at each body's COM in the world frame using viewer.user_scn.
-
-    Args:
-        model: mjModel
-        data:  mjData
-        viewer: mujoco.viewer handle from launch_passive
-        scale: visual scale factor for line length
-        min_norm: threshold below which we skip drawing (to reduce clutter)
-        width: line width in pixels (for mjGEOM_LINE)
-    """
-    lin_w, _ = world_body_velocities(model, data)
-
-    # Clear previous custom geoms
-    viewer.user_scn.ngeom = 0
-    maxgeom = viewer.user_scn.maxgeom  # maximum number of custom geoms allowed
-    i = 0
-
-    for b in range(model.nbody):
-        if i >= maxgeom:
-            break  # avoid overflowing the scene's geom buffer
-
-        v = lin_w[b]
-        norm = np.linalg.norm(v)
-        if norm < min_norm:
-            continue
-
-        com = np.asarray(data.xipos[b], dtype=np.float64)
-        to = com + scale * v  # endpoint of velocity vector
-
-        # Initialize this geom slot as a line (only once per frame)
-        mujoco.mjv_initGeom(
-            viewer.user_scn.geoms[i],
-            type=mujoco.mjtGeom.mjGEOM_LINE,
-            size=np.zeros(3, dtype=np.float64),
-            pos=np.zeros(3, dtype=np.float64),
-            mat=np.eye(3, dtype=np.float64).reshape(-1),
-            rgba=np.array([1.0, 0.0, 0.0, 1.0], dtype=np.float32),
-        )
-
-        # Turn it into a connector from COM -> COM + v
-        mujoco.mjv_connector(
-            viewer.user_scn.geoms[i],
-            mujoco.mjtGeom.mjGEOM_LINE,
-            width,
-            com,
-            to,
-        )
-
-        i += 1
-
-    viewer.user_scn.ngeom = i
 
 
 def run_simulator(joint_names: list[str]):
@@ -565,8 +510,6 @@ def run_simulator(joint_names: list[str]):
             )
 
         mujoco.mj_forward(robot, robot_data)
-        # Draw world-frame linear velocity arrows at each body's COM
-        draw_velocity_markers(robot, robot_data, viewer, scale=0.3)
         viewer.sync()
 
         end_time = time.perf_counter()
