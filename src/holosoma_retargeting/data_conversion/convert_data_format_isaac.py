@@ -345,6 +345,9 @@ def run_simulator(
             ):
                 log[k] = np.stack(log[k], axis=0)[:]
 
+            log["joint_names"] = joint_names
+            log["body_names"] = joint_names 
+
             os.makedirs("./tmp", exist_ok=True)
             np.savez("./tmp/motion.npz", **log)
 

@@ -340,3 +340,8 @@ def main(cfg: Config) -> None:
 if __name__ == "__main__":
     cfg = tyro.cli(Config)
     main(cfg)
+
+'''
+python viser_body_vel_player.py --npz_path ../converted_res/robot_only/sub3_largebox_003_mj.npz --robot_urdf models/g1/g1_29dof.urdf
+python viser_body_vel_player.py --npz_path ../converted_res/robot_only/motion.npz --robot_urdf models/g1/g1_29dof.urdf
+'''
