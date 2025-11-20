@@ -576,7 +576,8 @@ def run_simulator(joint_names: list[str]):
 
         if args_cli.once and file_saved:
             print("[INFO]: Motion replay completed, exiting...")
-            sys.exit(0)
+            viewer.close() 
+            break 
 
 
 def main():

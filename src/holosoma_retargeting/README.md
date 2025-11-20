@@ -59,7 +59,7 @@ python examples/robot_retarget.py --data_path demo_data/lafan --task-type robot_
 
 Batch processing for motion retargeting on LAFAN. 
 ```
-python examples/parallel_robot_retarget.py --data-dir demo_data/lafan --task-type robot_only  --data_format lafan --save_dir demo_results_parallel/g1/robot_only/lafan --task-config.object-name ground
+python examples/parallel_robot_retarget.py --data-dir demo_data/lafan --task-type robot_only  --data_format lafan --save_dir demo_results_parallel/g1/robot_only/lafan --task-config.object-name ground --task-config.ground-range -10 10
 ```
 
 ## Check visualizations of saved retargeting results  
