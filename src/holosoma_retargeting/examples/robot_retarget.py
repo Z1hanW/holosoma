@@ -16,60 +16,36 @@ from typing import Literal, cast
 import numpy as np
 import tyro
 
-try:
-    from holosoma_retargeting.config_types.data_type import MotionDataConfig
-    from holosoma_retargeting.config_types.retargeter import RetargeterConfig
-    from holosoma_retargeting.config_types.retargeting import RetargetingConfig
-    from holosoma_retargeting.config_types.robot import RobotConfig
-    from holosoma_retargeting.config_types.task import TaskConfig
-    from holosoma_retargeting.src.interaction_mesh_retargeter import (
-        InteractionMeshRetargeter,  # type: ignore[import-not-found]
-    )
-    from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
-        augment_object_poses,
-        calculate_scale_factor,
-        create_new_scene_xml_file,
-        create_scaled_multi_boxes_urdf,
-        create_scaled_multi_boxes_xml,
-        estimate_human_orientation,
-        extract_foot_sticking_sequence_velocity,
-        extract_object_first_moving_frame,
-        load_intermimic_data,
-        load_object_data,
-        preprocess_motion_data,
-        transform_from_human_to_world,
-        transform_y_up_to_z_up,
-    )
-except ModuleNotFoundError:  # pragma: no cover - script entry convenience
-    import sys
 
-    src_root = Path(__file__).resolve().parents[2]
-    if str(src_root) not in sys.path:
-        sys.path.insert(0, str(src_root))
+import sys
 
-    from holosoma_retargeting.config_types.data_type import MotionDataConfig
-    from holosoma_retargeting.config_types.retargeter import RetargeterConfig
-    from holosoma_retargeting.config_types.retargeting import RetargetingConfig
-    from holosoma_retargeting.config_types.robot import RobotConfig
-    from holosoma_retargeting.config_types.task import TaskConfig
-    from holosoma_retargeting.src.interaction_mesh_retargeter import (
-        InteractionMeshRetargeter,  # type: ignore[import-not-found]
-    )
-    from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
-        augment_object_poses,
-        calculate_scale_factor,
-        create_new_scene_xml_file,
-        create_scaled_multi_boxes_urdf,
-        create_scaled_multi_boxes_xml,
-        estimate_human_orientation,
-        extract_foot_sticking_sequence_velocity,
-        extract_object_first_moving_frame,
-        load_intermimic_data,
-        load_object_data,
-        preprocess_motion_data,
-        transform_from_human_to_world,
-        transform_y_up_to_z_up,
-    )
+src_root = Path(__file__).resolve().parents[2]
+if str(src_root) not in sys.path:
+    sys.path.insert(0, str(src_root))
+
+from holosoma_retargeting.config_types.data_type import MotionDataConfig
+from holosoma_retargeting.config_types.retargeter import RetargeterConfig
+from holosoma_retargeting.config_types.retargeting import RetargetingConfig
+from holosoma_retargeting.config_types.robot import RobotConfig
+from holosoma_retargeting.config_types.task import TaskConfig
+from holosoma_retargeting.src.interaction_mesh_retargeter import (
+    InteractionMeshRetargeter,  # type: ignore[import-not-found]
+)
+from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
+    augment_object_poses,
+    calculate_scale_factor,
+    create_new_scene_xml_file,
+    create_scaled_multi_boxes_urdf,
+    create_scaled_multi_boxes_xml,
+    estimate_human_orientation,
+    extract_foot_sticking_sequence_velocity,
+    extract_object_first_moving_frame,
+    load_intermimic_data,
+    load_object_data,
+    preprocess_motion_data,
+    transform_from_human_to_world,
+    transform_y_up_to_z_up,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")

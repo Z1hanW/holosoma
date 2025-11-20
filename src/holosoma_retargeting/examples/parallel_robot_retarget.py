@@ -19,60 +19,36 @@ from typing import Literal, cast
 import numpy as np
 import tyro
 
-try:
-    from holosoma_retargeting.config_types.data_type import MotionDataConfig
-    from holosoma_retargeting.config_types.retargeting import ParallelRetargetingConfig
-    from holosoma_retargeting.config_types.robot import RobotConfig
 
-    # Import reusable functions from robot_retarget.py
-    from holosoma_retargeting.examples.robot_retarget import (  # type: ignore[import-not-found]
-        DEFAULT_DATA_FORMATS,
-        build_retargeter_kwargs_from_config,
-        create_task_constants,
-        initialize_robot_pose,
-        load_motion_data,
-        setup_object_data,
-    )
+import sys
 
-    # Import after path modification
-    from holosoma_retargeting.src.interaction_mesh_retargeter import (
-        InteractionMeshRetargeter,  # type: ignore[import-not-found]
-    )
-    from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
-        extract_foot_sticking_sequence_velocity,
-        extract_foot_sticking_sequence,
-        preprocess_motion_data,
-    )
-except ModuleNotFoundError:  # pragma: no cover - script entry convenience
-    import sys
+src_root = Path(__file__).resolve().parents[2]
+if str(src_root) not in sys.path:
+    sys.path.insert(0, str(src_root))
 
-    src_root = Path(__file__).resolve().parents[2]
-    if str(src_root) not in sys.path:
-        sys.path.insert(0, str(src_root))
+from holosoma_retargeting.config_types.data_type import MotionDataConfig
+from holosoma_retargeting.config_types.retargeting import ParallelRetargetingConfig
+from holosoma_retargeting.config_types.robot import RobotConfig
 
-    from holosoma_retargeting.config_types.data_type import MotionDataConfig
-    from holosoma_retargeting.config_types.retargeting import ParallelRetargetingConfig
-    from holosoma_retargeting.config_types.robot import RobotConfig
+# Import reusable functions from robot_retarget.py
+from holosoma_retargeting.examples.robot_retarget import (  # type: ignore[import-not-found]
+    DEFAULT_DATA_FORMATS,
+    build_retargeter_kwargs_from_config,
+    create_task_constants,
+    initialize_robot_pose,
+    load_motion_data,
+    setup_object_data,
+)
 
-    # Import reusable functions from robot_retarget.py
-    from holosoma_retargeting.examples.robot_retarget import (  # type: ignore[import-not-found]
-        DEFAULT_DATA_FORMATS,
-        build_retargeter_kwargs_from_config,
-        create_task_constants,
-        initialize_robot_pose,
-        load_motion_data,
-        setup_object_data,
-    )
-
-    # Import after path modification
-    from holosoma_retargeting.src.interaction_mesh_retargeter import (
-        InteractionMeshRetargeter,  # type: ignore[import-not-found]
-    )
-    from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
-        extract_foot_sticking_sequence_velocity,
-        extract_foot_sticking_sequence, 
-        preprocess_motion_data,
-    )
+# Import after path modification
+from holosoma_retargeting.src.interaction_mesh_retargeter import (
+    InteractionMeshRetargeter,  # type: ignore[import-not-found]
+)
+from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
+    extract_foot_sticking_sequence_velocity,
+    extract_foot_sticking_sequence, 
+    preprocess_motion_data,
+)
 
 
 # ----------------------------- Constants -----------------------------

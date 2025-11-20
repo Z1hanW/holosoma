@@ -20,47 +20,29 @@ import numpy as np
 import trimesh
 import tyro
 
-try:
-    from holosoma_retargeting.config_types.data_type import (
-        SMPLH_DEMO_JOINTS,
-        MotionDataConfig,
-    )
-    from holosoma_retargeting.config_types.robot import RobotConfig
-    from holosoma_retargeting.config_types.task import TaskConfig 
-    from holosoma_retargeting.src.mujoco_utils import _world_mesh_from_geom  # type: ignore[import-not-found]
-    from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
-        calculate_scale_factor,
-        create_new_scene_xml_file,
-        create_scaled_multi_boxes_xml,
-        extract_foot_sticking_sequence_velocity,
-        load_intermimic_data,
-        preprocess_motion_data,
-        transform_points_world_to_local,
-        transform_y_up_to_z_up,
-    )
-except ModuleNotFoundError:
-    import sys
 
-    src_root = Path(__file__).resolve().parents[2]
-    if str(src_root) not in sys.path:
-        sys.path.insert(0, str(src_root))
-    from holosoma_retargeting.config_types.data_type import (
-        SMPLH_DEMO_JOINTS,
-        MotionDataConfig,
-    )
-    from holosoma_retargeting.config_types.robot import RobotConfig
-    from holosoma_retargeting.config_types.task import TaskConfig 
-    from holosoma_retargeting.src.mujoco_utils import _world_mesh_from_geom  # type: ignore[import-not-found]
-    from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
-        calculate_scale_factor,
-        create_new_scene_xml_file,
-        create_scaled_multi_boxes_xml,
-        extract_foot_sticking_sequence_velocity,
-        load_intermimic_data,
-        preprocess_motion_data,
-        transform_points_world_to_local,
-        transform_y_up_to_z_up,
-    )
+import sys
+
+src_root = Path(__file__).resolve().parents[2]
+if str(src_root) not in sys.path:
+    sys.path.insert(0, str(src_root))
+from holosoma_retargeting.config_types.data_type import (
+    SMPLH_DEMO_JOINTS,
+    MotionDataConfig,
+)
+from holosoma_retargeting.config_types.robot import RobotConfig
+from holosoma_retargeting.config_types.task import TaskConfig 
+from holosoma_retargeting.src.mujoco_utils import _world_mesh_from_geom  # type: ignore[import-not-found]
+from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
+    calculate_scale_factor,
+    create_new_scene_xml_file,
+    create_scaled_multi_boxes_xml,
+    extract_foot_sticking_sequence_velocity,
+    load_intermimic_data,
+    preprocess_motion_data,
+    transform_points_world_to_local,
+    transform_y_up_to_z_up,
+)
 
 
 def create_task_constants(
