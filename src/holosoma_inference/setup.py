@@ -47,6 +47,7 @@ setup(
         "tyro>=0.10.0a4",
         "wandb",
         "zmq",
+        "defusedxml",
     ],
     extras_require={
         "dev": [
