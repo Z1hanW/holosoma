@@ -242,7 +242,7 @@ class IsaacSim(BaseSimulator):
         )
 
         robot_articulation_props = sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=(robot_asset_cfg.self_collisions == 0),
+            enabled_self_collisions=robot_asset_cfg.enable_self_collisions,
             # NOTE: (4, 0) -> (8, 4) necessary for reproducing FAR-tracking-implementation
             solver_position_iteration_count=8,
             solver_velocity_iteration_count=4,

@@ -239,7 +239,7 @@ class MujocoSceneManager:
         terrain_state: TerrainTermBase,
         robot_config: RobotConfig,
         xml_filter: MujocoXMLFilterCfg | None = None,
-        prefix: str = "robot_"
+        prefix: str = "robot_",
     ) -> None:
         """Add robot from XML file with namespace prefix and optional filtering.
 
@@ -298,15 +298,7 @@ class MujocoSceneManager:
         robot_config : RobotConfig
             Robot configuration containing self_collisions setting.
         """
-        # Existing config convention: 1=disable, 0=enable
-        if robot_config.asset.self_collisions == 1:
-            enable_self_collisions = False
-            logger.info("Disabling robot self-collisions via contype/conaffinity (matching IsaacGym/IsaacSim)")
-        else:
-            enable_self_collisions = True
-            logger.info("Enabling robot self-collisions + environment collisions")
-
-        self._configure_robot_collisions(robot_spec, enable_self_collisions)
+        self._configure_robot_collisions(robot_spec, robot_config.asset.enable_self_collisions)
 
     def _configure_robot_collisions(self, robot_spec: mujoco.MjSpec, enable_self_collisions: bool) -> None:
         """Configure robot collision behavior using MuJoCo collision classes.

@@ -56,7 +56,7 @@ class RobotAssetConfig:
     usd_file: str | None
     xml_file: str
     robot_type: str
-    self_collisions: int
+    enable_self_collisions: bool
     default_dof_drive_mode: int
     fix_base_link: bool
     mesh_root: str | None = None

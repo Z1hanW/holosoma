@@ -541,7 +541,7 @@ g1_29dof = RobotConfig(
         usd_file=None,
         xml_file="g1/g1_29dof.xml",
         robot_type="g1_29dof",
-        self_collisions=1,  # NOTE: Make sure to enable self collisions (set to 0 to enable) for whole body tracking
+        enable_self_collisions=False,
         default_dof_drive_mode=3,
         fix_base_link=False,
     ),
@@ -1079,7 +1079,7 @@ t1_29dof_waist_wrist = RobotConfig(
         usd_file=None,
         xml_file="t1/t1_29dof.xml",
         robot_type="t1_29dof",
-        self_collisions=1,
+        enable_self_collisions=False,
         default_dof_drive_mode=3,
         density=0.001,
         fix_base_link=False,

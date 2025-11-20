@@ -49,7 +49,7 @@ g1_29dof_wbt = ExperimentConfig(
     robot=replace(
         robot.g1_29dof,
         control=replace(robot.g1_29dof.control, action_scale=1.0),
-        asset=replace(robot.g1_29dof.asset, self_collisions=0),
+        asset=replace(robot.g1_29dof.asset, enable_self_collisions=True),
     ),
     terrain=terrain.terrain_locomotion_plane,
     observation=observation.g1_29dof_wbt_observation,
@@ -109,7 +109,7 @@ g1_29dof_wbt_fast_sac = ExperimentConfig(
     robot=replace(
         robot.g1_29dof,
         control=replace(robot.g1_29dof.control, action_scale=1.0),
-        asset=replace(robot.g1_29dof.asset, self_collisions=0),
+        asset=replace(robot.g1_29dof.asset, enable_self_collisions=True),
     ),
     terrain=terrain.terrain_locomotion_plane,
     observation=observation.g1_29dof_wbt_observation,
@@ -139,7 +139,7 @@ g1_29dof_wbt_w_object = replace(
         robot.g1_29dof_w_object,
         asset=replace(
             robot.g1_29dof_w_object.asset,
-            self_collisions=0,
+            enable_self_collisions=True,
         ),
         object=replace(
             robot.g1_29dof_w_object.object,
@@ -160,7 +160,7 @@ g1_29dof_wbt_fast_sac_w_object = replace(
     command=command.g1_29dof_wbt_command_w_object,
     robot=replace(
         robot.g1_29dof_w_object,
-        asset=replace(robot.g1_29dof_w_object.asset, self_collisions=0),
+        asset=replace(robot.g1_29dof_w_object.asset, enable_self_collisions=True),
         object=replace(
             robot.g1_29dof_w_object.object,
             object_urdf_path="holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf",

@@ -414,7 +414,7 @@ class IsaacGym(BaseSimulator):
             start_pose,
             self.robot_config.asset.robot_type,
             env_id,
-            self.robot_config.asset.self_collisions,
+            1 - int(self.robot_config.asset.enable_self_collisions),
             0,
         )
         if self.simulator_config.sim.physx.enable_dof_force_sensors:
