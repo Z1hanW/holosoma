@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import tyro
-from lafan1 import extract, utils
+from lafan1 import extract, utils  # type: ignore[import-not-found]
 
 def forward_kinematics(offsets, parents):
     """Compute global positions in rest pose (joint_angles=0)."""

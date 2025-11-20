@@ -790,7 +790,8 @@ def main(cfg: Args) -> None:
     elif cfg.data_type == "robot_terrain":
         object_name = "multi_boxes"
     else:
-        object_name = cfg.robot_config.OBJECT_NAME
+        # Default to "ground" for robot-only scenarios (matches robot defaults)
+        object_name = "ground"
 
     task_names, files = get_task_names(str(cfg.res_dir), cfg.data_type)
     print(f"Found {len(task_names)} tasks")

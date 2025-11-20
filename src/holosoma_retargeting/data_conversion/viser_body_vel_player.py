@@ -8,8 +8,8 @@ from typing import Optional
 
 import numpy as np
 import tyro
-import viser  # pip install viser
-import yourdfpy  # pip install yourdfpy
+import viser  # type: ignore[import-not-found]  # pip install viser
+import yourdfpy  # type: ignore[import-untyped]  # pip install yourdfpy
 from viser.extras import ViserUrdf  # type: ignore[import-not-found]
 
 
@@ -155,7 +155,7 @@ def main(cfg: Config) -> None:
     #
     # Build: URDF joint -> column index in joint_pos
     name_to_npz_joint_idx = {name: i for i, name in enumerate(joint_names)}
-    urdf_to_jointpos_cols: list[int] = []
+    urdf_to_jointpos_cols_list: list[int] = []
     for jname in urdf_joint_order:
         if jname not in name_to_npz_joint_idx:
             raise KeyError(
@@ -164,8 +164,8 @@ def main(cfg: Config) -> None:
             )
         idx_npz = name_to_npz_joint_idx[jname]  # index in [0..ndof-1] for joint_angles_seq
         col_in_joint_pos = 7 + idx_npz          # shift by 7 to get into joint_pos columns
-        urdf_to_jointpos_cols.append(col_in_joint_pos)
-    urdf_to_jointpos_cols = np.array(urdf_to_jointpos_cols, dtype=int)
+        urdf_to_jointpos_cols_list.append(col_in_joint_pos)
+    urdf_to_jointpos_cols = np.array(urdf_to_jointpos_cols_list, dtype=int)
 
     # Initial URDF configuration & base pose
     root_pos0 = root_pos_seq[0]
@@ -199,7 +199,7 @@ def main(cfg: Config) -> None:
         )
 
     @show_meshes_cb.on_update
-    def _(_event) -> None:
+    def _on_meshes_update(_event) -> None:
         vr.show_visual = bool(show_meshes_cb.value)
 
     # -------------------- Body COM positions ------------------
@@ -270,7 +270,7 @@ def main(cfg: Config) -> None:
         vel_lines.points = pts
 
     @t_slider.on_update
-    def _(_event) -> None:
+    def _on_slider_update(_event) -> None:
         update_frame(t_slider.value)
 
     # Initialize frame 0
