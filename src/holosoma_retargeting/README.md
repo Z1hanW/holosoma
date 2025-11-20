@@ -35,11 +35,14 @@ Our pipeline used the processed dataset by InterMimic. The data format differs f
 ### LAFAN 
 #### Download the original LAFAN data.
 
-Step 1: Fork the official [LAFAN repo](https://github.com/ubisoft/ubisoft-laforge-animation-dataset) using your github account. 
+Dowoloading the [lafan1.zip](https://github.com/ubisoft/ubisoft-laforge-animation-dataset/blob/master/lafan1/lafan1.zip) by clicking View Raw. 
 
-Step 2: In your forked repo, open settings. Search for "Archives". Check in the box "Include Git LFS objects in archives". 
+Put lafan1.zip to your designed data folder (demo_data/lafan) and uncompress it. 
 
-Step 3: In your forked repo, download the repo as a .zip file. 
+We need some data processing files from the [LAFAN github repo](https://github.com/ubisoft/ubisoft-laforge-animation-dataset).  
+```
+git clone https://github.com/ubisoft/ubisoft-laforge-animation-dataset.git
+```
 
 #### Convert the original LAFAN data format for motion retargeting. 
 Copy the folder lafan1/ from your downloaded LAFAN repo to data_utils/. 
