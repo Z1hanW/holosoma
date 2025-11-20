@@ -60,7 +60,7 @@ g1_29dof_wbt = ExperimentConfig(
     curriculum=curriculum.g1_29dof_wbt_curriculum,
     reward=reward.g1_29dof_wbt_reward,
     nightly=NightlyConfig(
-        iterations=40000,
+        iterations=8000,
         metrics={
             "Episode/rew_motion_global_ref_position_error_exp": [0.20, "inf"],
             "Episode/rew_motion_global_ref_orientation_error_exp": [0.30, "inf"],
