@@ -294,8 +294,8 @@ class WarpBackend(IMujocoBackend):
 
         Returns
         -------
-        BaseMujocoView
-            MjwRootStateView with quaternion conversion and zero-copy access
+        MjwRootStateView
+            Root state view with quaternion conversion and zero-copy access
         """
         from holosoma.simulator.mujoco.mjw_views import MjwRootStateView  # noqa: PLC0415 -- deferred
 
@@ -408,8 +408,8 @@ class WarpBackend(IMujocoBackend):
 
         Returns
         -------
-        BaseMujocoView
-            MjwDofStateView with IsaacGym flattened format [num_envs * num_dof, 2]
+        MjwDofStateView
+            DOF state view with IsaacGym flattened format [num_envs * num_dof, 2]
         """
         from holosoma.simulator.mujoco.mjw_views import MjwDofStateView  # noqa: PLC0415 -- deferred
 

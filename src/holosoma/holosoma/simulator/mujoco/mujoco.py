@@ -713,15 +713,15 @@ class MuJoCo(BaseSimulator):
         # Create base_quat, base_angular_vel, base_linear_acc views
         # For WarpBackend: use native GPU tensors directly
         # For ClassicBackend: use legacy view system with root_data
-        if isinstance(self.backend, WarpBackend):
+        if WarpBackend is not None and isinstance(self.backend, WarpBackend):
             # WarpBackend: use native zero-copy tensors directly
             # qpos_t is [num_envs, nq], qvel_t is [num_envs, nv], qacc_t is [num_envs, nv]
-            self.base_quat = self.backend.qpos_t[:, quat_indices]  # type: ignore[assignment]
-            self.base_angular_vel = self.backend.qvel_t[:, ang_vel_indices]  # type: ignore[assignment]
+            self.base_quat = self.backend.qpos_t[:, quat_indices]  # type: ignore[assignment,attr-defined]
+            self.base_angular_vel = self.backend.qvel_t[:, ang_vel_indices]  # type: ignore[assignment,attr-defined]
 
             # Base linear acceleration is first 3 elements of qacc
             base_lin_acc_indices = slice(0, 3)
-            self.base_linear_acc = self.backend.qacc_t[:, base_lin_acc_indices]  # type: ignore[assignment]
+            self.base_linear_acc = self.backend.qacc_t[:, base_lin_acc_indices]  # type: ignore[assignment,attr-defined]
         else:
             # ClassicBackend: use legacy view system with root_data
             self.base_quat = create_quaternion_view(  # type: ignore[assignment]

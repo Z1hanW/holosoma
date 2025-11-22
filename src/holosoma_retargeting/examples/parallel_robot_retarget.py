@@ -153,13 +153,16 @@ def process_single_task(args):
         file_path,
         save_dir,
         task_type,
-        data_format,
+        data_format_str,
         robot_config,
         motion_data_config,
         task_config,
         retargeter,
         augmentation,
     ) = args
+    
+    # Cast to proper Literal type
+    data_format = cast(Literal["lafan", "smplh", "mocap"], data_format_str)
 
     os.makedirs(save_dir, exist_ok=True)
     if task_type == "climbing":
@@ -314,9 +317,7 @@ def main(cfg: ParallelRetargetingConfig) -> None:
     task_type = cfg.task_type
 
     # Set defaults based on task type
-    data_format: Literal["lafan", "smplh", "mocap"] = cfg.data_format or cast(
-        "Literal['lafan', 'smplh', 'mocap']", DEFAULT_DATA_FORMATS[task_type]
-    )
+    data_format = cfg.data_format if cfg.data_format is not None else DEFAULT_DATA_FORMATS[task_type]
     save_dir = cfg.save_dir if cfg.save_dir is not None else Path(PARALLEL_SAVE_DIRS[task_type].format(robot=robot))
     data_dir = cfg.data_dir
 
@@ -330,7 +331,7 @@ def main(cfg: ParallelRetargetingConfig) -> None:
 
     if cfg.motion_data_config.robot_type != robot or cfg.motion_data_config.data_format != data_format:
         cfg.motion_data_config = MotionDataConfig(
-            data_format=cast("Literal['lafan', 'smplh', 'mocap']", data_format), robot_type=robot
+            data_format=cast(Literal["lafan", "smplh", "mocap"], data_format), robot_type=robot
         )
 
     if task_type == "robot_only":

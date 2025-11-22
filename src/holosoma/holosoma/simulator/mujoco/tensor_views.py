@@ -10,8 +10,7 @@ for training many parallel environments and requires profiling.
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from typing import Any, Callable, Tuple
+from typing import Any, Callable, Protocol, Tuple
 
 import numpy as np
 import torch
@@ -31,24 +30,63 @@ def quat_holosoma_to_mujoco(quat_holosoma: np.ndarray) -> np.ndarray:
     return quat_holosoma[..., [3, 0, 1, 2]]
 
 
-class BaseMujocoView(ABC):
+class BaseMujocoView(Protocol):
     """
-    Abstract base class for MuJoCo views providing common functionality.
+    Protocol defining the interface for MuJoCo view objects.
+    
+    This uses structural subtyping (Protocol) rather than inheritance,
+    allowing different backend implementations to satisfy the interface
+    without coupling them together.
     """
 
     device: str
+    _is_tensor_proxy: bool
 
-    # This flag allows __torch_function__ and @torch_jit_script to identify all tensor-like proxy objects
+    @property
+    def shape(self) -> Tuple[int, ...]:
+        """Return the shape of the view."""
+        ...
+
+    def __getitem__(self, key) -> torch.Tensor:
+        """Get data from the view, returning a PyTorch tensor."""
+        ...
+
+    def __setitem__(self, key, value) -> None:
+        """Set data in the view from a PyTorch tensor or array."""
+        ...
+
+    def __len__(self) -> int:
+        """Return the length of the first dimension."""
+        ...
+
+    def dim(self) -> int:
+        """Return the number of dimensions."""
+        ...
+
+    def clone(self) -> torch.Tensor:
+        """Return a cloned tensor of the view data."""
+        ...
+
+
+class BaseMujocoViewMixin:
+    """
+    Mixin providing common functionality for MuJoCo views.
+    
+    This class provides default implementations of common methods
+    that views can inherit if desired. Views don't need to inherit
+    from this - they just need to satisfy the BaseMujocoView Protocol.
+    """
+
+    device: str
     _is_tensor_proxy: bool = True
 
     @property
-    @abstractmethod
     def shape(self) -> Tuple[int, ...]:
+        """Return the shape of the view. Must be implemented by subclass."""
         raise NotImplementedError("Subclasses must implement shape")
 
-    @abstractmethod
     def __getitem__(self, key) -> torch.Tensor:
-        """Get data from the view, returning a PyTorch tensor."""
+        """Get data from the view. Must be implemented by subclass."""
         raise NotImplementedError("Subclasses must implement __getitem__")
 
     def __len__(self) -> int:
@@ -105,7 +143,7 @@ class BaseMujocoView(ABC):
         return func(*new_args, **new_kwargs)
 
 
-class MujocoView(BaseMujocoView):
+class MujocoView(BaseMujocoViewMixin):
     """
     View into MuJoCo arrays with tensor-like interface.
 
@@ -203,12 +241,16 @@ class MujocoView(BaseMujocoView):
         return self.base_array[self.indices].shape
 
 
-class MujocoRootStateView(BaseMujocoView):
+class MujocoRootStateView:
     """
     Specialized view for robot root states with quaternion format conversion.
 
     Handles the 13-element root state: [pos(3), quat(4), lin_vel(3), ang_vel(3)]
+    
+    Note: This class satisfies the BaseMujocoView Protocol through structural subtyping.
     """
+
+    _is_tensor_proxy: bool = True
 
     def __init__(
         self,
@@ -276,13 +318,29 @@ class MujocoRootStateView(BaseMujocoView):
             current_root_state[key] = torch.as_tensor(value, device=self.device)
             self[:] = current_root_state  # Write back the full state
 
+    def __len__(self) -> int:
+        """Return the length of the first dimension."""
+        return self.num_envs
 
-class MujocoDofStateView(BaseMujocoView):
+    def dim(self) -> int:
+        """Return the number of dimensions."""
+        return 2
+
+    def clone(self) -> torch.Tensor:
+        """Return a cloned tensor of the root state."""
+        return self[:].clone()
+
+
+class MujocoDofStateView:
     """
     Specialized view for DOF states compatible with IsaacGym's flattened format.
 
     Provides access to joint positions and velocities as a (num_envs * num_dof, 2) array.
+    
+    Note: This class satisfies the BaseMujocoView Protocol through structural subtyping.
     """
+
+    _is_tensor_proxy: bool = True
 
     def __init__(
         self,
@@ -334,6 +392,18 @@ class MujocoDofStateView(BaseMujocoView):
 
         self.qpos_array[self.dof_pos_indices] = dof_pos.flatten()
         self.qvel_array[self.dof_vel_indices] = dof_vel.flatten()
+
+    def __len__(self) -> int:
+        """Return the length of the first dimension."""
+        return self.num_envs * self.num_dof
+
+    def dim(self) -> int:
+        """Return the number of dimensions."""
+        return 2
+
+    def clone(self) -> torch.Tensor:
+        """Return a cloned tensor of the DOF state."""
+        return self[:].clone()
 
 
 # --- Factory functions for common view types ---

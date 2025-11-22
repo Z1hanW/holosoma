@@ -150,7 +150,6 @@ class BaseSimulator:
         self.headless = False
         self.debug_viz_enabled = self.simulator_config.debug_viz
         self.object_registry = ObjectRegistry(device)
-        self.bridge: SimulatorBridge | None = None
 
         # Virtual gantry system
         self.virtual_gantry: VirtualGantry | None = None

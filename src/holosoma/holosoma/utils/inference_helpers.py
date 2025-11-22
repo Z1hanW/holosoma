@@ -283,8 +283,14 @@ def get_command_ranges_from_env(env: BaseTask) -> dict | None:
     return None
 
 
-def get_urdf_text_from_robot_config(robot_config: RobotConfig) -> str:
-    """Extract URDF text from the robot config."""
+def get_urdf_text_from_robot_config(robot_config: RobotConfig) -> tuple[str, str]:
+    """Extract URDF text from the robot config.
+    
+    Returns
+    -------
+    tuple[str, str]
+        (urdf_file_path, urdf_str) - Path to URDF file and its contents
+    """
     asset_root = robot_config.asset.asset_root
     if asset_root.startswith("@holosoma/"):
         asset_root = asset_root.replace("@holosoma", get_holosoma_root())
