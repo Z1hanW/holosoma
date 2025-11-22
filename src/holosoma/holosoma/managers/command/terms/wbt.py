@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import math
 import re
-from pathlib import Path
 from typing import Any, List
 
 import numpy as np
+import smart_open
 import torch
 from loguru import logger
 
@@ -37,7 +37,6 @@ class MotionLoader:
     ):
         # Resolve the motion file path using importlib.resources
         motion_file = resolve_data_file_path(motion_file)
-        assert Path(motion_file).is_file(), f"Invalid file path: {motion_file}"
 
         logger.info(f"Loading motion file: {motion_file}")
         body_names_in_motion_data, joint_names_in_motion_data = self._load_data_from_motion_npz(motion_file, device)
@@ -56,7 +55,7 @@ class MotionLoader:
         return torch.tensor(indexes, dtype=torch.long, device=device)
 
     def _load_data_from_motion_npz(self, motion_file: str, device: str) -> tuple[list[str], list[str]]:
-        with np.load(motion_file) as data:
+        with smart_open.open(motion_file, "rb") as f, np.load(f) as data:
             self.fps = data["fps"]
 
             body_names = data["body_names"].tolist()
@@ -335,11 +334,13 @@ class MotionCommand(CommandTermBase):
             rand_vals = torch.rand_like(subset, dtype=torch.float32)
             subset = torch.where(rand_vals < prob, torch.zeros_like(subset), subset)
             self.time_steps[env_ids] = subset
-        
+
         # If the motion is at the last timestep, set it to the second last timestep;
         # Otherwise, update_tasks_callback will advance the timestep to the next timestep -> out of bounds error.
         already_last_timestep_mask = self.time_steps[env_ids] == self.motion.time_step_total - 1
-        self.time_steps[env_ids] = torch.where(already_last_timestep_mask, self.motion.time_step_total - 2, self.time_steps[env_ids])
+        self.time_steps[env_ids] = torch.where(
+            already_last_timestep_mask, self.motion.time_step_total - 2, self.time_steps[env_ids]
+        )
 
         if self.require_policy_to_reach_target_at_zero:
             self._proximity_ready_mask[env_ids] = False
