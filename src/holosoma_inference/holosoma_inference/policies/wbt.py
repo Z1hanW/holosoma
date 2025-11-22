@@ -123,12 +123,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             raise ValueError("Stiff startup pose dimension mismatch with robot DOFs")
 
         # Prompt user before entering stiff mode (only if stdin is available)
-        if sys.stdin.isatty():
-            logger.info(colored("\n⚠️  Ready to enter stiff hold mode", "yellow", attrs=["bold"]))
-            logger.info(colored("Press Enter to continue...", "yellow"))
-            input()
-            logger.info(colored("✓ Entering stiff hold mode", "green"))
-        else:
+        def _show_warning():
             logger.warning(
                 colored(
                     "⚠️  Non-interactive mode detected - cannot prompt for stiff mode confirmation!",
@@ -136,6 +131,18 @@ class WholeBodyTrackingPolicy(BasePolicy):
                     attrs=["bold"],
                 )
             )
+
+        if sys.stdin.isatty():
+            logger.info(colored("\n⚠️  Ready to enter stiff hold mode", "yellow", attrs=["bold"]))
+            logger.info(colored("Press Enter to continue...", "yellow"))
+            try:
+                input()
+                logger.info(colored("✓ Entering stiff hold mode", "green"))
+            except EOFError:
+                # [drockyd] seems like in some cases, input() will raise EOFError even in interactive mode.
+                _show_warning()
+        else:
+            _show_warning()
 
     def _get_ref_body_orientation_in_world(self, robot_state_data):
         # Create configuration for pinocchio robot
@@ -333,14 +340,29 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self.motion_start_timestep = current_clock - offset_ms
         self._last_clock_reading = current_clock
         elapsed_ms = current_clock - self.motion_start_timestep
-        if self.motion_timestep == 0 and elapsed_ms > self.timestep_interval_ms:
+        if self.motion_timestep == 0 and int(elapsed_ms // self.timestep_interval_ms) > 1:
+            self.logger.warning(
+                "Still at the beginning but the clock jumped ahead: elapsed_ms={elapsed_ms}, self.timestep_interval_ms="
+                "{timestep_interval_ms}, self.motion_timestep={motion_timestep}. "
+                "Re-anchoring to the current timestamp so the motion always starts from frame 0.",
+                elapsed_ms=elapsed_ms,
+                timestep_interval_ms=self.timestep_interval_ms,
+                motion_timestep=self.motion_timestep,
+            )
             # Still at the beginning but the clock jumped ahead (e.g., due to waiting before start).
             # Re-anchor to the current timestamp so the motion always starts from frame 0.
             self.motion_start_timestep = current_clock
             self._last_clock_reading = current_clock
             self.motion_timestep = 0
             return
+        previous_motion_timestep = self.motion_timestep
         self.motion_timestep = int(elapsed_ms // self.timestep_interval_ms)
+        if self.motion_timestep != previous_motion_timestep:
+            self.logger.info(
+                "Motion timestep advanced from {previous_motion_timestep} to {motion_timestep}",
+                previous_motion_timestep=previous_motion_timestep,
+                motion_timestep=self.motion_timestep,
+            )
 
     def _handle_stop_policy(self):
         """Handle stop policy action."""
