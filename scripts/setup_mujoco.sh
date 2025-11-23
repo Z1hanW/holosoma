@@ -23,6 +23,18 @@ while [[ $# -gt 0 ]]; do
       echo "  --help, -h     Show this help message"
       echo ""
       echo "Default: CPU-only installation (ClassicBackend)"
+      echo ""
+      echo "Examples:"
+      echo "  # Initial setup (CPU-only)"
+      echo "  $0"
+      echo ""
+      echo "  # Setup with GPU acceleration"
+      echo "  $0 --with-warp"
+      echo ""
+      echo "  # Add GPU acceleration to existing CPU-only installation"
+      echo "  $0 --with-warp  # (incremental - skips base installation)"
+      echo ""
+      echo "Note: GPU acceleration requires NVIDIA driver >= 550.54.14"
       exit 0
       ;;
     *)
@@ -38,6 +50,7 @@ done
 source ${SCRIPT_DIR}/source_common.sh
 ENV_ROOT=$CONDA_ROOT/envs/hsmujoco
 SENTINEL_FILE=${WORKSPACE_DIR}/.env_setup_finished_mujoco
+WARP_SENTINEL_FILE=${WORKSPACE_DIR}/.env_setup_finished_mujoco_warp
 
 mkdir -p $WORKSPACE_DIR
 
@@ -79,20 +92,6 @@ if [[ ! -f $SENTINEL_FILE ]]; then
   # Core MuJoCo packages
   pip install 'mujoco>=3.0.0'
   pip install mujoco-python-viewer
-
-  # Conditionally install MuJoCo Warp (GPU acceleration)
-  if [[ "$INSTALL_WARP" == "true" ]]; then
-    echo "Installing MuJoCo Warp (GPU acceleration)..."
-    if [[ ! -d $WORKSPACE_DIR/mujoco_warp ]]; then
-      git clone https://github.com/google-deepmind/mujoco_warp.git $WORKSPACE_DIR/mujoco_warp
-    fi
-    pip install uv
-    uv pip install -e $WORKSPACE_DIR/mujoco_warp[dev,cuda]
-    echo "✓ MuJoCo Warp installed successfully"
-  else
-    echo "Skipping MuJoCo Warp installation (use --with-warp to enable GPU acceleration)"
-  fi
-
   # Optional: Gymnasium MuJoCo environments (if needed for compatibility)
  # pip install "gymnasium[mujoco]"
 
@@ -165,28 +164,88 @@ EOF
   python $WORKSPACE_DIR/validate_mujoco.py
 
   touch $SENTINEL_FILE
+  echo ""
+  echo "=========================================="
+  echo "Base MuJoCo environment setup completed!"
+  echo "=========================================="
+  echo ""
+  echo "✓ MuJoCo CPU backend (ClassicBackend) installed"
+  echo ""
+  echo "Activate with: source scripts/source_mujoco_setup.sh"
+  echo "=========================================="
+fi
 
-  # Print installation summary
+# Separate Warp installation (can be run independently after base install)
+if [[ "$INSTALL_WARP" == "true" ]] && [[ ! -f $WARP_SENTINEL_FILE ]]; then
   echo ""
-  echo "=========================================="
-  echo "MuJoCo environment setup completed!"
-  echo "=========================================="
-  echo ""
-  if [[ "$INSTALL_WARP" == "true" ]]; then
-    echo "✓ Installation type: CPU + GPU (ClassicBackend + WarpBackend)"
-    echo "✓ GPU acceleration enabled via MuJoCo Warp"
-  else
-    echo "✓ Installation type: CPU-only (ClassicBackend)"
+  echo "Installing MuJoCo Warp (GPU acceleration)..."
+  
+  # Ensure conda environment is activated
+  source $CONDA_ROOT/bin/activate hsmujoco
+  
+  # Check NVIDIA driver version (required for CUDA 12.4+)
+  MIN_DRIVER_VERSION="550.54.14"
+  DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1)
+  
+  # Check if driver exists and meets minimum version
+  if [ -z "$DRIVER_VERSION" ] || [[ "$DRIVER_VERSION" < "$MIN_DRIVER_VERSION" ]]; then
     echo ""
-    echo "To enable GPU acceleration (WarpBackend):"
-    echo "  rm $SENTINEL_FILE"
-    echo "  bash scripts/setup_mujoco.sh --with-warp"
+    echo "❌ ERROR: NVIDIA driver not found or too old!"
+    echo ""
+    if [ -z "$DRIVER_VERSION" ]; then
+      echo "Status: No NVIDIA driver detected"
+    else
+      echo "Current driver:  $DRIVER_VERSION"
+    fi
+    echo "Minimum required: $MIN_DRIVER_VERSION (for CUDA 12.4+ support)"
+    echo ""
+    echo "MuJoCo Warp requires:"
+    echo "  - NVIDIA GPU (CUDA-capable)"
+    echo "  - NVIDIA driver >= $MIN_DRIVER_VERSION (for CUDA 12.4+)"
+    echo ""
+    echo "Install/Upgrade NVIDIA driver:"
+    echo "  1. Check available drivers: ubuntu-drivers devices"
+    echo "  2. Install recommended:    sudo ubuntu-drivers install"
+    echo "  3. Or install specific:    sudo ubuntu-drivers install nvidia:550"
+    echo "  4. Reboot:                 sudo reboot"
+    echo ""
+    echo "Reference: https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/"
+    echo ""
+    echo "After driver installation, re-run this script with --with-warp"
+    exit 1
   fi
+  
+  echo "✓ NVIDIA driver version: $DRIVER_VERSION (meets minimum $MIN_DRIVER_VERSION)"
+  
+  if [[ ! -d $WORKSPACE_DIR/mujoco_warp ]]; then
+    git clone https://github.com/google-deepmind/mujoco_warp.git $WORKSPACE_DIR/mujoco_warp
+  fi
+  pip install uv
+  uv pip install -e $WORKSPACE_DIR/mujoco_warp[dev,cuda]
+  
+  touch $WARP_SENTINEL_FILE
+  
+  echo ""
+  echo "=========================================="
+  echo "MuJoCo Warp installation completed!"
+  echo "=========================================="
+  echo ""
+  echo "✓ GPU acceleration enabled (WarpBackend)"
+  echo "✓ Both backends now available: ClassicBackend (CPU) + WarpBackend (GPU)"
   echo ""
   echo "Activate with: source scripts/source_mujoco_setup.sh"
   echo "=========================================="
 fi
 
 echo ""
-echo "MuJoCo environment is ready."
+if [[ -f $WARP_SENTINEL_FILE ]]; then
+  echo "MuJoCo environment ready with GPU acceleration (ClassicBackend + WarpBackend)"
+elif [[ "$INSTALL_WARP" == "false" ]] && [[ -f $SENTINEL_FILE ]]; then
+  echo "MuJoCo environment ready (CPU-only ClassicBackend)"
+  echo ""
+  echo "To add GPU acceleration later, run:"
+  echo "  bash scripts/setup_mujoco.sh --with-warp"
+else
+  echo "MuJoCo environment ready."
+fi
 echo "Use 'source scripts/source_mujoco_setup.sh' to activate."
