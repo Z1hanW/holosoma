@@ -691,7 +691,7 @@
         <geom pos="5.4 -5.4 -0.1" type="box" size="1.5 1.5 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
         <!-- Left Lower Platform -->
         <geom pos="-5.4 -5.4 -0.1" type="box" size="1.5 1.5 0.1" quat="1 0 0 0" group="2" margin="0.01" solimp="0.99 0.99 0.01" solref="0.005 1"/>
-        
+
     </worldbody>
 
 </mujoco>

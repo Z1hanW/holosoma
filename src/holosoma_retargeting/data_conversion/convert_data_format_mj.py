@@ -121,7 +121,7 @@ class MotionLoader:
         device: torch.device,
         line_range: tuple[int, int] | None,
         has_dynamic_object: bool,
-        use_omniretarget_data: bool, 
+        use_omniretarget_data: bool,
     ):
         self.motion_file = motion_file
         self.input_fps = input_fps
@@ -132,7 +132,7 @@ class MotionLoader:
         self.device = device
         self.line_range = line_range
         self.has_dynamic_object = has_dynamic_object
-        self.use_omniretarget_data = use_omniretarget_data 
+        self.use_omniretarget_data = use_omniretarget_data
         self._load_motion()
         self._interpolate_motion()
         self._compute_velocities()
@@ -153,7 +153,7 @@ class MotionLoader:
         else:
             self.motion_base_poss_input = motion[:, :3]
             self.motion_base_rots_input = motion[:, 3:7]
-        
+
         self.motion_dof_poss_input = motion[:, 7:36]
 
         if self.has_dynamic_object:
@@ -577,8 +577,8 @@ def run_simulator(joint_names: list[str]):
 
         if args_cli.once and file_saved:
             print("[INFO]: Motion replay completed, exiting...")
-            viewer.close() 
-            break 
+            viewer.close()
+            break
 
 
 def main():

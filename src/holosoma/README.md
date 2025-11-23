@@ -186,4 +186,3 @@ python src/holosoma/holosoma/train_agent.py \
     --randomization.setup-terms.randomize-base-com-startup.params.enabled=True \
     --randomization.setup-terms.mass-randomizer.params.added-mass-range=[-1.0,3.0]
 ```
-

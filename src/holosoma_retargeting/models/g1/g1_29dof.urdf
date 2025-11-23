@@ -202,7 +202,7 @@
     <origin xyz="0 0 -0.28" rpy="0 0 0"/>
     <parent link="left_knee_link"/>
     <child link="left_ankle_intermediate_1_link"/>
-  </joint> 
+  </joint>
   <link name="left_ankle_pitch_link">
     <inertial>
       <origin xyz="-0.007269 0 0.011137" rpy="0 0 0"/>
@@ -538,7 +538,7 @@
     <origin xyz="0 0 -0.28" rpy="0 0 0"/>
     <parent link="right_knee_link"/>
     <child link="right_ankle_intermediate_1_link"/>
-  </joint> 
+  </joint>
   <link name="right_ankle_pitch_link">
     <inertial>
       <origin xyz="-0.007269 0 0.011137" rpy="0 0 0"/>
@@ -639,7 +639,7 @@
         <color rgba="0.2 0.2 0.2 1"/>
       </material>
     </visual>
-    <collision name="right_ankle_roll_sphere_4_link"> 
+    <collision name="right_ankle_roll_sphere_4_link">
       <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
       <geometry>
         <sphere radius="0.005"/>

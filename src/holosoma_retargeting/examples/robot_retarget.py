@@ -481,7 +481,7 @@ def initialize_robot_pose(
     """
     # Use default if not provided
     if augmentation_translation is None:
-        augmentation_translation = _AUGMENTATION_TRANSLATION 
+        augmentation_translation = _AUGMENTATION_TRANSLATION
     logger.info("Initializing robot pose")
 
     if task_type == "robot_only":

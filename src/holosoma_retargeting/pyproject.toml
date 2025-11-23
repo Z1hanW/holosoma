@@ -35,4 +35,3 @@ dev = ["mypy", "ruff", "pytest"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["holosoma_retargeting*"]
-

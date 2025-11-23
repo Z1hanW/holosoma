@@ -45,4 +45,4 @@ class DataConversionConfig:
     """Run the motion once and exit."""
 
     use_omniretarget_data: bool = False
-    """Use OmniRetarget data format.""" 
+    """Use OmniRetarget data format."""

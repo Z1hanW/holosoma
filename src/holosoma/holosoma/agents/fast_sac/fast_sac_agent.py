@@ -1008,4 +1008,3 @@ class FastSACAgent(BaseAlgo):
             # Actions are already scaled by the actor
             actions = self.actor(normalized_obs)[0]
             obs, _, _, _ = self.env.step(actions)
-

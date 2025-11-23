@@ -46,7 +46,7 @@ from holosoma_retargeting.src.interaction_mesh_retargeter import (
 )
 from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
     extract_foot_sticking_sequence_velocity,
-    extract_foot_sticking_sequence, 
+    extract_foot_sticking_sequence,
     preprocess_motion_data,
 )
 

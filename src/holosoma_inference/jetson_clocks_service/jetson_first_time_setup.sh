@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install and enable jetson_clocks.service systemd serivce & set other perfomance 
+# Install and enable jetson_clocks.service systemd serivce & set other perfomance
 
 # Show commands
 set -e
@@ -31,10 +31,9 @@ systemctl start jetson_clocks.service
 echo "🧠 Checking status of the serivce"
 systemctl status jetson_clocks.service --no-pager
 
-# Use all cores 
+# Use all cores
 nvpmodel -m 0
 
 echo "🎉 Done! The device will restart now to apply changes"
 sleep 3
 reboot
-

@@ -351,7 +351,7 @@ class InteractionMeshRetargeter:
 
                 source_vertices, source_tetrahedra = create_interaction_mesh(
                     np.vstack([human_mapped_joints_in_object, object_points_local_demo])
-                ) 
+                )
                 tetrahedra.append(source_tetrahedra)
 
                 if self.debug:
@@ -1104,7 +1104,7 @@ class InteractionMeshRetargeter:
 
     def _get_robot_link_positions(self, q, link_names):
         """Get robot link positions for given configuration using Mujoco."""
-        mujoco_q = q.copy() 
+        mujoco_q = q.copy()
 
         # Set the configuration
         if mujoco_q.shape != self.robot_data.qpos.shape:

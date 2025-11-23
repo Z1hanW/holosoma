@@ -6,4 +6,4 @@
     <body name="multi_boxes_box2_link" pos="0 0 0" quat="1 0 0 0">
         <geom name="multi_boxes_link_2" type="mesh" mesh="box2" pos="0 0 0" quat="1 0 0 0" material="box2_material" contype="1" conaffinity="1"/>
     </body>
-</mujocoinclude> 
+</mujocoinclude>

@@ -1,9 +1,9 @@
-<!-- Juyue Chen: 
+<!-- Juyue Chen:
 The source file is from:
     Docker image:qiayuanl/unitree, /opt/ros/humble/share/unitree_description/mjcf/g1.xml
     (No public url available)
 
-Juyue Chen added <actuator> on top of the source file --> 
+Juyue Chen added <actuator> on top of the source file -->
 
 <!-- Younggyo Seo:
 Changed group of some visual geoms to support ray-tracing that passes through robots
@@ -193,7 +193,7 @@ Changed group of some visual geoms to support ray-tracing that passes through ro
                                     <geom name="left_foot5_collision" type="capsule" size="0.01" class="collision" fromto="-0.052 0.01 -0.025 0.13 0.01 -0.025"/>
                                     <geom name="left_foot6_collision" type="capsule" size="0.01" class="collision" fromto="-0.044 0.018 -0.025 0.123 0.018 -0.025"/>
                                     <geom name="left_foot7_collision" type="capsule" size="0.01" class="collision" fromto="0.1 0.026 -0.025 0.05 0.026 -0.025"/>
-                                    
+
                                     <!-- Auxiliary foot contact point for height sampling -->
                                     <body name="left_foot_contact_point" pos="0 0 -0.037">
                                         <inertial pos="0 0 0" mass="0.001" diaginertia="0.000001 0.000001 0.000001"/>
@@ -244,7 +244,7 @@ Changed group of some visual geoms to support ray-tracing that passes through ro
                                     <geom name="right_foot5_collision" type="capsule" size="0.01" class="collision" fromto="-0.052 0.01 -0.025 0.13 0.01 -0.025"/>
                                     <geom name="right_foot6_collision" type="capsule" size="0.008" class="collision" fromto="-0.044 0.018 -0.025 0.123 0.018 -0.025"/>
                                     <geom name="right_foot7_collision" type="capsule" size="0.01" class="collision" fromto="0.1 0.026 -0.025 0.05 0.026 -0.025"/>
-                                    
+
                                     <!-- Auxiliary foot contact point for height sampling -->
                                     <body name="right_foot_contact_point" pos="0 0 -0.037">
                                         <inertial pos="0 0 0" mass="0.001" diaginertia="0.000001 0.000001 0.000001"/>

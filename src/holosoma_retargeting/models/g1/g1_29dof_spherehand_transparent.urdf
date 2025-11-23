@@ -196,7 +196,7 @@
     <origin xyz="0 0 -0.28" rpy="0 0 0"/>
     <parent link="left_knee_link"/>
     <child link="left_ankle_intermediate_1_link"/>
-  </joint> 
+  </joint>
   <link name="left_ankle_pitch_link">
     <inertial>
       <origin xyz="-0.007269 0 0.011137" rpy="0 0 0"/>
@@ -532,7 +532,7 @@
     <origin xyz="0 0 -0.28" rpy="0 0 0"/>
     <parent link="right_knee_link"/>
     <child link="right_ankle_intermediate_1_link"/>
-  </joint> 
+  </joint>
   <link name="right_ankle_pitch_link">
     <inertial>
       <origin xyz="-0.007269 0 0.011137" rpy="0 0 0"/>
@@ -1140,7 +1140,7 @@
     <inertial>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <mass value="0.124"/>
-      <inertia ixx="0.0000446" ixy="0" ixz="0" 
+      <inertia ixx="0.0000446" ixy="0" ixz="0"
               iyy="0.0000446" iyz="0" izz="0.0000446"/>
     </inertial>
     <visual>
@@ -1393,7 +1393,7 @@
     <inertial>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <mass value="0.124"/>
-      <inertia ixx="0.0000446" ixy="0" ixz="0" 
+      <inertia ixx="0.0000446" ixy="0" ixz="0"
               iyy="0.0000446" iyz="0" izz="0.0000446"/>
     </inertial>
     <visual>

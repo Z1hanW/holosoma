@@ -741,5 +741,3 @@ def quat_rotate_batched(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     c = q_vec * dot * 2.0
 
     return a + b + c
-
-

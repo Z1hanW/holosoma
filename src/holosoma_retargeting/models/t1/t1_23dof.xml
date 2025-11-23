@@ -19,7 +19,7 @@
     <default class="head_motor">
       <joint damping="0.15" armature="0.3" frictionloss="0.2"/>
     </default>
-    
+
   </default>
 
   <asset>
@@ -94,7 +94,7 @@
       <body name="AL1" pos="0.0575 0.1063 0.219" quat="1 0 0.000440565 0">
         <inertial pos="-0.000677 0.044974 0" quat="0.50423 0.495734 -0.50423 0.495734" mass="0.53"
           diaginertia="0.001367 0.00129329 0.000292711"/>
-        <joint name="Left_Shoulder_Pitch" axis="0 1 0" range="-3.31 1.22" actuatorfrcrange="-18 18" class="arm_motor"/> 
+        <joint name="Left_Shoulder_Pitch" axis="0 1 0" range="-3.31 1.22" actuatorfrcrange="-18 18" class="arm_motor"/>
         <geom class="visual" material="light_gray" mesh="AL1"/>
         <geom name="AL1" class="collision" type="mesh" mesh="AL1" contype="1" conaffinity="1"/>
         <body name="AL2" pos="0 0.047 0">
@@ -117,8 +117,8 @@
               <geom name="left_hand_link" class="collision" type="mesh" mesh="left_hand_link" contype="1" conaffinity="1"/>
               <body name="left_hand_sphere_link" pos="0.0 0.2 0.0" quat="1 0 0 0">
                 <inertial pos="0 0 0" mass="0.001" diaginertia="1e-7 1e-7 1e-7"/>
-                <geom name="left_hand_sphere_link" 
-                      type="sphere" 
+                <geom name="left_hand_sphere_link"
+                      type="sphere"
                       size="0.005"
                       pos="0.0 0.0 0.0"
                       rgba="0.2 0.2 0.2 1"
@@ -126,7 +126,7 @@
                       conaffinity="1"
                 />
               </body>
-            
+
             </body>
           </body>
         </body>
@@ -157,8 +157,8 @@
               <geom name="right_hand_link" class="collision" type="mesh" mesh="right_hand_link" contype="1" conaffinity="1"/>
               <body name="right_hand_sphere_link" pos="0.0 -0.2 0.0" quat="1 0 0 0">
                 <inertial pos="0 0 0" mass="0.001" diaginertia="1e-7 1e-7 1e-7"/>
-                <geom name="right_hand_sphere_link" 
-                      type="sphere" 
+                <geom name="right_hand_sphere_link"
+                      type="sphere"
                       size="0.005"
                       pos="0.0 0.0 0.0"
                       rgba="0.2 0.2 0.2 1"
@@ -215,8 +215,8 @@
                     <geom name="left_foot_link" class="collision" type="mesh" mesh="left_foot_link" contype="1" conaffinity="1"/>
                     <body name="left_foot_sphere_3_link" pos="0.11 0.03 -0.03" quat="1 0 0 0">
                       <inertial pos="0 0 0" mass="0.001" diaginertia="1e-7 1e-7 1e-7"/>
-                      <geom name="left_foot_sphere_3_link" 
-                            type="sphere" 
+                      <geom name="left_foot_sphere_3_link"
+                            type="sphere"
                             size="0.005"
                             pos="0.0 0.0 0.0"
                             rgba="0.2 0.2 0.2 1"
@@ -226,8 +226,8 @@
                     </body>
                     <body name="left_foot_sphere_4_link" pos="0.11 -0.03 -0.03" quat="1 0 0 0">
                       <inertial pos="0 0 0" mass="0.001" diaginertia="1e-7 1e-7 1e-7"/>
-                      <geom name="left_foot_sphere_4_link" 
-                            type="sphere" 
+                      <geom name="left_foot_sphere_4_link"
+                            type="sphere"
                             size="0.005"
                             pos="0.0 0.0 0.0"
                             rgba="0.2 0.2 0.2 1"
@@ -237,8 +237,8 @@
                     </body>
                     <body name="left_foot_sphere_5_link" pos="0.12 0 -0.03" quat="1 0 0 0">
                       <inertial pos="0 0 0" mass="0.001" diaginertia="1e-7 1e-7 1e-7"/>
-                      <geom name="left_foot_sphere_5_link" 
-                            type="sphere" 
+                      <geom name="left_foot_sphere_5_link"
+                            type="sphere"
                             size="0.005"
                             pos="0.0 0.0 0.0"
                             rgba="0.2 0.2 0.2 1"
@@ -248,8 +248,8 @@
                     </body>
                     <body name="left_foot_sphere_1_link" pos="-0.1 0.025 -0.03" quat="1 0 0 0">
                       <inertial pos="0 0 0" mass="0.001" diaginertia="1e-7 1e-7 1e-7"/>
-                      <geom name="left_foot_sphere_1_link" 
-                            type="sphere" 
+                      <geom name="left_foot_sphere_1_link"
+                            type="sphere"
                             size="0.005"
                             pos="0.0 0.0 0.0"
                             rgba="0.2 0.2 0.2 1"
@@ -259,8 +259,8 @@
                     </body>
                     <body name="left_foot_sphere_2_link" pos="-0.1 -0.025 -0.03" quat="1 0 0 0">
                       <inertial pos="0 0 0" mass="0.001" diaginertia="1e-7 1e-7 1e-7"/>
-                      <geom name="left_foot_sphere_2_link" 
-                            type="sphere" 
+                      <geom name="left_foot_sphere_2_link"
+                            type="sphere"
                             size="0.005"
                             pos="0.0 0.0 0.0"
                             rgba="0.2 0.2 0.2 1"
@@ -268,7 +268,7 @@
                             conaffinity="1"
                       />
                     </body>
-                  
+
                   </body>
                 </body>
               </body>
@@ -313,8 +313,8 @@
                     <geom name="right_foot_link" class="collision" type="mesh" mesh="right_foot_link" contype="1" conaffinity="1"/>
                     <body name="right_foot_sphere_3_link" pos="0.11 0.03 -0.03" quat="1 0 0 0">
                       <inertial pos="0 0 0" mass="0.001" diaginertia="1e-7 1e-7 1e-7"/>
-                      <geom name="right_foot_sphere_3_link" 
-                            type="sphere" 
+                      <geom name="right_foot_sphere_3_link"
+                            type="sphere"
                             size="0.005"
                             pos="0.0 0.0 0.0"
                             rgba="0.2 0.2 0.2 1"
@@ -324,8 +324,8 @@
                     </body>
                     <body name="right_foot_sphere_4_link" pos="0.11 -0.03 -0.03" quat="1 0 0 0">
                       <inertial pos="0 0 0" mass="0.001" diaginertia="1e-7 1e-7 1e-7"/>
-                      <geom name="right_foot_sphere_4_link" 
-                            type="sphere" 
+                      <geom name="right_foot_sphere_4_link"
+                            type="sphere"
                             size="0.005"
                             pos="0.0 0.0 0.0"
                             rgba="0.2 0.2 0.2 1"
@@ -335,8 +335,8 @@
                     </body>
                     <body name="right_foot_sphere_5_link" pos="0.12 0 -0.03" quat="1 0 0 0">
                       <inertial pos="0 0 0" mass="0.001" diaginertia="1e-7 1e-7 1e-7"/>
-                      <geom name="right_foot_sphere_5_link" 
-                            type="sphere" 
+                      <geom name="right_foot_sphere_5_link"
+                            type="sphere"
                             size="0.005"
                             pos="0.0 0.0 0.0"
                             rgba="0.2 0.2 0.2 1"
@@ -346,8 +346,8 @@
                     </body>
                     <body name="right_foot_sphere_1_link" pos="-0.1 0.025 -0.03" quat="1 0 0 0">
                       <inertial pos="0 0 0" mass="0.001" diaginertia="1e-7 1e-7 1e-7"/>
-                      <geom name="right_foot_sphere_1_link" 
-                            type="sphere" 
+                      <geom name="right_foot_sphere_1_link"
+                            type="sphere"
                             size="0.005"
                             pos="0.0 0.0 0.0"
                             rgba="0.2 0.2 0.2 1"
@@ -357,8 +357,8 @@
                     </body>
                     <body name="right_foot_sphere_2_link" pos="-0.1 -0.025 -0.03" quat="1 0 0 0">
                       <inertial pos="0 0 0" mass="0.001" diaginertia="1e-7 1e-7 1e-7"/>
-                      <geom name="right_foot_sphere_2_link" 
-                            type="sphere" 
+                      <geom name="right_foot_sphere_2_link"
+                            type="sphere"
                             size="0.005"
                             pos="0.0 0.0 0.0"
                             rgba="0.2 0.2 0.2 1"
@@ -443,7 +443,7 @@
     <jointactuatorfrc name="Left_Ankle_Pitch_acc" joint="Left_Ankle_Pitch"/>
     <jointactuatorfrc name="Left_Ankle_Roll_acc" joint="Left_Ankle_Roll"/>
     <jointactuatorfrc name="Right_Hip_Pitch_acc" joint="Right_Hip_Pitch"/>
-    <jointactuatorfrc name="Right_Hip_Roll_acc" joint="Right_Hip_Roll"/>  
+    <jointactuatorfrc name="Right_Hip_Roll_acc" joint="Right_Hip_Roll"/>
     <jointactuatorfrc name="Right_Hip_Yaw_acc" joint="Right_Hip_Yaw"/>
     <jointactuatorfrc name="Right_Knee_Pitch_acc" joint="Right_Knee_Pitch"/>
     <jointactuatorfrc name="Right_Ankle_Pitch_acc" joint="Right_Ankle_Pitch"/>

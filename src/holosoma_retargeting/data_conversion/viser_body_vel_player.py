@@ -253,7 +253,7 @@ def main(cfg: Config) -> None:
 
         # vel_raw = body_lin_vel_w[idx]  # (nbody, 3)
         # norms = np.linalg.norm(vel_raw, axis=-1, keepdims=True)  # (nbody, 1)
-        # norms_xy = np.linalg.norm(vel_raw[:, :2], axis=-1, keepdims=True)  # (nbody, 1) 
+        # norms_xy = np.linalg.norm(vel_raw[:, :2], axis=-1, keepdims=True)  # (nbody, 1)
         # eps = 1e-8
 
         # # Unit directions; zero out near-zero velocities to avoid NaNs

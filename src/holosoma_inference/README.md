@@ -160,7 +160,7 @@ python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:t1-29d
 source scripts/source_inference_setup.sh
 python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-wbt \
     --task.model-path src/holosoma_inference/holosoma_inference/models/wbt/fastsac_g1_29dof_dancing.onnx \
-    --task.no-use-joystick 
+    --task.no-use-joystick
     --task.interface=eth0
 ```
 
@@ -326,5 +326,3 @@ python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:t1-29d
 ## History Length > 1 Not Supported
 
 **Warning**: Policies trained with `history_length > 1` are currently not supported for inference. This is a known limitation and will be fixed soon.
-
-

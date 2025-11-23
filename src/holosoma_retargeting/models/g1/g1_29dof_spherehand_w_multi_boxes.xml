@@ -40,14 +40,14 @@
     <mesh name="left_hand_palm_link" file="left_hand_palm_link.STL"/>
 
     <mesh name="left_rubber_hand_link" file="left_rubber_hand.STL"/>
-   
+
     <mesh name="right_hand_palm_link" file="right_hand_palm_link.STL"/>
     <mesh name="right_rubber_hand_link" file="right_rubber_hand.STL"/>
 
     <mesh name="half_sphere" file="../assets/half_sphere.obj"/>
 
 
-    <include file="box_assets.xml"/> 
+    <include file="box_assets.xml"/>
   </asset>
 
 
@@ -83,7 +83,7 @@
               <joint name="left_knee_joint" pos="0 0 0" axis="0 1 0" range="-0.087267 2.8798" actuatorfrcrange="-139 139" armature="0.0251"/>
               <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.7 0.7 0.7 1" mesh="left_knee_link"/>
               <geom name="left_knee_link" contype="1" conaffinity="1" type="mesh" rgba="0.7 0.7 0.7 1" mesh="left_knee_link"/>
-              
+
               <!-- ===== left_ankle_intermediate_1_link (fixed) ===== -->
               <body name="left_ankle_intermediate_1_link" pos="0 0 -0.28" quat="1 0 0 0">
                 <inertial pos="0 0 0" quat="1 0 0 0"
@@ -161,9 +161,9 @@
                                 rgba="0.2 0.2 0.2 1"
                                 contype="1" conaffinity="1"/>
                     </body>
-                
+
                 </body>
-            
+
               </body>
 
             </body>
@@ -171,7 +171,7 @@
           </body>
         </body>
       </body>
-      
+
       <body name="right_hip_pitch_link" pos="0 -0.064452 -0.1027">
         <inertial pos="0.002741 -0.047791 -0.02606" quat="0.954862 -0.293964 0.0302556 -0.030122" mass="1.35" diaginertia="0.00181517 0.00153422 0.00116212"/>
         <joint name="right_hip_pitch_joint" pos="0 0 0" axis="0 1 0" range="-2.5307 2.8798" actuatorfrcrange="-88 88" armature="0.0103"/>
@@ -192,7 +192,7 @@
               <joint name="right_knee_joint" pos="0 0 0" axis="0 1 0" range="-0.087267 2.8798" actuatorfrcrange="-139 139" armature="0.0251"/>
               <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.7 0.7 0.7 1" mesh="right_knee_link"/>
               <geom name="right_knee_link" contype="1" conaffinity="1" type="mesh" rgba="0.7 0.7 0.7 1" mesh="right_knee_link"/>
-              
+
                  <!-- ===== right_ankle_intermediate_1_link (fixed) ===== -->
               <body name="right_ankle_intermediate_1_link" pos="0 0 -0.28" quat="1 0 0 0">
                 <inertial pos="0 0 0" quat="1 0 0 0"
@@ -243,7 +243,7 @@
                          <geom name="right_ankle_roll_sphere_4_link" type="sphere" size="0.005"
                             pos="0 0 0" rgba="0.2 0.2 0.2 1" density="0"
                             contype="1" conaffinity="1"/>
-                   
+
                     </body>
 
                     <body name="right_ankle_roll_sphere_5_link" pos="0.14 0 -0.03" quat="1 0 0 0">
@@ -267,7 +267,7 @@
                             contype="1" conaffinity="1"/>
                     </body>
 
-                   
+
                 </body>
 
               </body>
@@ -337,7 +337,7 @@
                           <joint name="left_wrist_yaw_joint" pos="0 0 0" axis="0 0 1" range="-1.61443 1.61443" actuatorfrcrange="-5 5"/>
                           <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.7 0.7 0.7 1" mesh="left_wrist_yaw_link"/>
                           <geom name="left_wrist_yaw_link" contype="1" conaffinity="1" type="mesh" rgba="0.7 0.7 0.7 1" mesh="left_wrist_yaw_link"/>
-                        
+
 
 
                           <!-- left_sphere_hand_link -->
@@ -409,9 +409,9 @@
                           <joint name="right_wrist_yaw_joint" pos="0 0 0" axis="0 0 1" range="-1.61443 1.61443" actuatorfrcrange="-5 5"/>
                           <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" rgba="0.7 0.7 0.7 1" mesh="right_wrist_yaw_link"/>
                           <geom name="right_wrist_yaw_link" contype="1" conaffinity="1" type="mesh" rgba="0.7 0.7 0.7 1" mesh="right_wrist_yaw_link"/>
-                         
 
-                          
+
+
                           <body name="right_sphere_hand_link" pos="0.029 -0.003 0" quat="0.70710678 0 0.70710678 0">
                             <!-- inertial -->
                             <inertial
@@ -435,7 +435,7 @@
                             </body>
 
                           </body>
-                        
+
                         </body>
                       </body>
                     </body>
@@ -510,7 +510,7 @@
   </visual>
 
 
-  
+
 
   <keyframe>
     <key name="home"

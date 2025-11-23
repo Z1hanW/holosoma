@@ -89,7 +89,7 @@ if [[ ! -f $SENTINEL_FILE ]]; then
     pip install -e $WORKSPACE_DIR/unitree_sdk2_python/
     $CONDA_ROOT/bin/conda install pinocchio -y -c conda-forge --override-channels
   fi
-  
+
   cd $ROOT_DIR
   touch $SENTINEL_FILE
 fi

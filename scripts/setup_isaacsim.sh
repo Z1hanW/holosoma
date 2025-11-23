@@ -59,7 +59,7 @@ if [[ ! -f $SENTINEL_FILE ]]; then
   cd $WORKSPACE_DIR/IsaacLab
   # work-around for egl_probe cmake max version issue
   export CMAKE_POLICY_VERSION_MINIMUM=3.5
-  ./isaaclab.sh --install 
+  ./isaaclab.sh --install
 
  # Install Holosoma
   pip install -U pip

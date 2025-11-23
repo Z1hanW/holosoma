@@ -188,4 +188,3 @@ class PPOCriticEncoder(PPOCritic):
         critic_obs = policy_state_dict["critic_obs"]
         input_critic = self._get_input(critic_obs)
         return super().evaluate({"critic_obs": input_critic})
-

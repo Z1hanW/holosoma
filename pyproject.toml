@@ -45,5 +45,3 @@ lint.ignore=[
 "src/holosoma/holosoma/train_agent.py" = ["PLC0415"]  # Disable since imports after SimApp are inherent to IsaacSim
 "src/holosoma/holosoma/utils/draw.py" = ["F401"]  # Disable since unused imports are required for the adapters
 "src/holosoma/holosoma/utils/eval_utils.py" = ["PLC0415"]  # Disable since imports after SimApp are inherent to IsaacSim
-
-

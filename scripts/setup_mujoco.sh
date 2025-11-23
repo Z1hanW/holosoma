@@ -75,7 +75,7 @@ if [[ ! -f $SENTINEL_FILE ]]; then
   # Install MuJoCo and related packages
   echo "Installing MuJoCo Python bindings..."
   pip install --upgrade pip
-  
+
   # Core MuJoCo packages
   pip install 'mujoco>=3.0.0'
   pip install mujoco-python-viewer
@@ -92,10 +92,10 @@ if [[ ! -f $SENTINEL_FILE ]]; then
   else
     echo "Skipping MuJoCo Warp installation (use --with-warp to enable GPU acceleration)"
   fi
-  
+
   # Optional: Gymnasium MuJoCo environments (if needed for compatibility)
  # pip install "gymnasium[mujoco]"
-  
+
   # Scientific computing stack (ensure compatibility)
   #pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
   #pip install numpy scipy matplotlib
@@ -106,7 +106,7 @@ if [[ ! -f $SENTINEL_FILE ]]; then
   fi
   pip install -e $WORKSPACE_DIR/unitree_sdk2_python/
 
-  
+
   # Install Holosoma packages
   pip install -U pip
   pip install -e $ROOT_DIR/src/holosoma[unitree,booster]
@@ -115,7 +115,7 @@ if [[ ! -f $SENTINEL_FILE ]]; then
   echo "Validating MuJoCo installation..."
   python -c "import mujoco; print(f'MuJoCo version: {mujoco.__version__}')"
   python -c "import mujoco_viewer; print('MuJoCo viewer imported successfully')"
-  
+
   # Create validation script for later testing
   cat > $WORKSPACE_DIR/validate_mujoco.py << 'EOF'
 #!/usr/bin/env python3
@@ -128,7 +128,7 @@ import numpy as np
 def validate_mujoco():
     """Validate MuJoCo installation with basic functionality test."""
     print(f"MuJoCo version: {mujoco.__version__}")
-    
+
     # Test basic model creation
     xml_string = """
     <mujoco>
@@ -140,18 +140,18 @@ def validate_mujoco():
       </worldbody>
     </mujoco>
     """
-    
+
     try:
         model = mujoco.MjModel.from_xml_string(xml_string)
         data = mujoco.MjData(model)
-        
+
         # Test simulation step
         mujoco.mj_step(model, data)
-        
+
         print("✓ Basic MuJoCo functionality validated")
         print(f"✓ Model has {model.nbody} bodies, {model.nq} DOFs")
         return True
-        
+
     except Exception as e:
         print(f"✗ MuJoCo validation failed: {e}")
         return False
@@ -163,9 +163,9 @@ EOF
 
   # Run validation
   python $WORKSPACE_DIR/validate_mujoco.py
-  
+
   touch $SENTINEL_FILE
-  
+
   # Print installation summary
   echo ""
   echo "=========================================="
