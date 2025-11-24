@@ -16,11 +16,6 @@ from holosoma.utils.eval_utils import (
     load_saved_experiment_config,
 )
 from holosoma.utils.experiment_paths import get_experiment_dir, get_timestamp
-from holosoma.utils.inference_helpers import (
-    export_motion_and_policy_as_onnx,
-    export_policy_as_jit,
-    export_policy_as_onnx,
-)
 from holosoma.utils.sim_utils import (
     close_simulation_app,
     setup_simulation_environment,
@@ -60,32 +55,15 @@ def run_eval_with_tyro(tyro_config: ExperimentConfig, checkpoint_cfg: Checkpoint
     exported_policy_name = checkpoint_path.split("/")[-1]  # example: model_5000.pt
     exported_onnx_name = exported_policy_name.replace(".pt", ".onnx")  # example: model_5000.onnx
 
-    if tyro_config.training.export_policy:
-        export_policy_as_jit(algo.alg.actor_critic, exported_policy_dir_path, exported_policy_name)  # type: ignore[attr-defined]
-        logger.info("Exported policy as jit script to: ", os.path.join(exported_policy_dir_path, exported_policy_name))
     if tyro_config.training.export_onnx:
-        example_obs_dict = algo.get_example_obs()  # type: ignore[attr-defined]
+        exported_onnx_path = os.path.join(exported_policy_dir_path, exported_onnx_name)
+        if not hasattr(algo, "export"):
+            raise AttributeError(
+                f"{algo_class.__name__} is missing an `export` method required for ONNX export during evaluation."
+            )
 
-        # Automatically export motion if available (following fast_sac_agent pattern)
-        motion_command = env.command_manager.get_state("motion_command")
-        if motion_command is not None:
-            export_motion_and_policy_as_onnx(
-                algo.actor_onnx_wrapper,
-                motion_command,
-                os.path.join(exported_policy_dir_path, "motion_command.onnx"),
-                device,
-            )
-            logger.info(
-                "Exported policy and motion as onnx to: "
-                + os.path.join(exported_policy_dir_path, "motion_command.onnx")
-            )
-        else:
-            export_policy_as_onnx(
-                wrapper=algo.actor_onnx_wrapper,
-                onnx_file_path=os.path.join(exported_policy_dir_path, exported_onnx_name),
-                example_obs_dict=example_obs_dict,
-            )
-            logger.info(f"Exported policy as onnx to: {os.path.join(exported_policy_dir_path, exported_onnx_name)}")
+        algo.export(onnx_file_path=exported_onnx_path)  # type: ignore[attr-defined]
+        logger.info(f"Exported policy as onnx to: {exported_onnx_path}")
 
     algo.evaluate_policy(
         max_eval_steps=tyro_config.training.max_eval_steps,

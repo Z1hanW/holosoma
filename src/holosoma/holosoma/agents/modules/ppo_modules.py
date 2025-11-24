@@ -12,8 +12,6 @@ from .modules import BaseModule
 
 
 class PPOActor(nn.Module):
-    is_recurrent = False
-
     def __init__(
         self,
         obs_dim_dict,
@@ -104,8 +102,6 @@ class PPOActor(nn.Module):
 
 
 class PPOCritic(nn.Module):
-    is_recurrent = False
-
     def __init__(self, obs_dim_dict, module_config_dict, history_length: dict[str, int]):
         super().__init__()
         self.critic_module = BaseModule(obs_dim_dict, module_config_dict, history_length)

@@ -82,9 +82,6 @@ class TrainingConfig:
     max_eval_steps: int | None = None
     """Maximum number of evaluation steps (None for unlimited)."""
 
-    export_policy: bool = False
-    """Export policy as JIT script."""
-
     export_onnx: bool = True
     """Export policy as ONNX model."""
 

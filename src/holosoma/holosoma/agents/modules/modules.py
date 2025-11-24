@@ -5,7 +5,6 @@ import inspect
 import torch
 from torch import nn
 
-from holosoma.agents.modules.memory import Memory
 from holosoma.config_types.algo import LayerConfig, ModuleConfig
 
 
@@ -357,43 +356,6 @@ class BaseModule(nn.Module):
         if layer_type == "MLP":
             self.module = build_mlp_layer(
                 self.input_dim,
-                layer_config.hidden_dims,
-                self.output_dim,
-                layer_config,
-            )
-        elif layer_type == "Recurrent":
-            self.memory = Memory(
-                self.input_dim,
-                layer_config.rnn_type,
-                layer_config.rnn_num_layers,
-                layer_config.rnn_hidden_dim,
-            )
-            self.module = build_mlp_layer(
-                layer_config.rnn_hidden_dim,
-                layer_config.hidden_dims,
-                self.output_dim,
-                layer_config,
-            )
-        elif layer_type == "RecurrentEncoder":
-            encoder_output_dim = (
-                layer_config.encoder_output_dim
-                if layer_config.encoder_hidden_dims is not None
-                else self.input_dim_dict[layer_config.encoder_input_name]
-            )
-            self.encoder = build_mlp_layer(
-                self.input_dim_dict[layer_config.encoder_input_name],
-                layer_config.encoder_hidden_dims,
-                encoder_output_dim,
-                layer_config,
-            )
-            self.memory = Memory(
-                self.input_dim_dict[layer_config.rnn_input_name],
-                layer_config.rnn_type,
-                layer_config.rnn_num_layers,
-                layer_config.rnn_hidden_dim,
-            )
-            self.module = build_mlp_layer(
-                layer_config.rnn_hidden_dim + self.obs_dim_dict[layer_config.rnn_input_name] + encoder_output_dim,
                 layer_config.hidden_dims,
                 self.output_dim,
                 layer_config,

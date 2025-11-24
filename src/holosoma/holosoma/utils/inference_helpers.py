@@ -88,14 +88,6 @@ def _extract_actor_model_and_input_dim(actor_wrapper) -> Tuple[torch.nn.Module, 
     return inner_actor, input_dim
 
 
-def export_policy_as_jit(actor_critic, path, exported_policy_name):
-    os.makedirs(path, exist_ok=True)
-    path = os.path.join(path, exported_policy_name)
-    model = copy.deepcopy(actor_critic.actor).to("cpu")
-    traced_script_module = torch.jit.script(model)
-    traced_script_module.save(path)
-
-
 def export_policy_as_onnx(wrapper, onnx_file_path: str, example_obs_dict):
     # Ensure parent directory exists
     os.makedirs(Path(onnx_file_path).parent, exist_ok=True)

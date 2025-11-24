@@ -76,6 +76,28 @@ python src/holosoma/holosoma/run_sim.py robot:t1-29dof-waist-wrist
 **General:**
 - `Backspace`: Reset simulation
 
+## In-Training Evaluation
+
+For evaluating policies with the exact same configuration used during training (same simulator, environment settings, etc.):
+
+```bash
+# Evaluate checkpoint from Wandb
+python src/holosoma/holosoma/eval_agent.py \
+    --wandb_run_path=<ENTITY>/<PROJECT_NAME>/<RUN_NAME> \
+    --checkpoint=<CHECKPOINT_NAME>
+
+# Evaluate local checkpoint
+python src/holosoma/holosoma/eval_agent.py \
+    --checkpoint=<CHECKPOINT_PATH>
+```
+
+This evaluation mode:
+- Automatically loads the training configuration from the checkpoint
+- Runs evaluation in the same simulator and environment as training
+- Can export policies to ONNX format (via `--training.export_onnx=True`)
+
+**Note**: For sim-to-sim evaluation (testing policies across simulators), use the workflow described in the "Sim-to-Sim Evaluation" section above. ONNX policies are typically exported alongside `.pt` checkpoints during training, but can also be generated using this script.
+
 ## Advanced Configuration
 
 The training system uses a hierarchical configuration system. The `exp` config serves as the main entry point with default configurations tuned for each algorithm and robot. You can customize training by overriding parameters on the command line.
@@ -96,7 +118,7 @@ python src/holosoma/holosoma/train_agent.py \
 
 ### Video Logging
 
-Enable video recording during training. Videos are saved locally and uploaded to WandB if enabled.
+Enable video recording during training. Videos are saved locally and uploaded to Wandb if enabled.
 
 ```bash
 source scripts/source_isaacgym_setup.sh
@@ -111,7 +133,7 @@ python src/holosoma/holosoma/train_agent.py \
 **Video logging parameters:**
 - `--logger.video.enabled=True` - Enable video recording
 - `--logger.video.interval=5` - Record video every 5 episodes
-- Videos are automatically uploaded to WandB when `logger:wandb` is used
+- Videos are automatically uploaded to Wandb when `logger:wandb` is used
 
 ### Terrain
 

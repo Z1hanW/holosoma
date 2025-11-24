@@ -5,10 +5,8 @@ import torch
 from holosoma.utils.torch_utils import (
     get_axis_params,
     normalize,
-    split_and_pad_trajectories,
     to_torch,
     torch_rand_float,
-    unpad_trajectories,
 )
 
 
@@ -42,50 +40,6 @@ def tensors_and_dones():
     )
 
     return tensors, dones
-
-
-def test_split_and_pad_trajectories(tensors_and_dones):
-    tensors, dones = tensors_and_dones
-
-    padded, masks = split_and_pad_trajectories(tensors, dones)
-
-    assert torch.allclose(
-        padded.squeeze(-1),
-        torch.tensor(
-            [
-                [1.0, 17.0, 10.0, 22.0, 30.0],
-                [5.0, 21.0, 14.0, 26.0, 0.0],
-                [9.0, 0.0, 18.0, 0.0, 0.0],
-                [13.0, 0.0, 0.0, 0.0, 0.0],
-                [0.0, 0.0, 0.0, 0.0, 0.0],
-                [0.0, 0.0, 0.0, 0.0, 0.0],
-            ]
-        ),
-    )
-    assert torch.allclose(
-        masks,
-        torch.tensor(
-            [
-                [True, True, True, True, True],
-                [True, True, True, True, False],
-                [True, False, True, False, False],
-                [True, False, False, False, False],
-                [False, False, False, False, False],
-                [False, False, False, False, False],
-            ]
-        ),
-    )
-
-    # Check dimensions
-    assert padded.dim() == 3  # [T_padded, N_trajectories, D]
-    assert masks.shape == padded[..., 0].shape
-
-
-def test_unpad_matches_original(tensors_and_dones):
-    tensors, dones = tensors_and_dones
-    padded, masks = split_and_pad_trajectories(tensors, dones)
-    unpadded = unpad_trajectories(padded, masks)
-    assert torch.allclose(unpadded, tensors)
 
 
 def test_normalize():

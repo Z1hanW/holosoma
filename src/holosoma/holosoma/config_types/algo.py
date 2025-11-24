@@ -27,15 +27,6 @@ class LayerConfig:
     activation: str = "ELU"
     """Activation function name."""
 
-    rnn_type: str = "lstm"
-    """RNN type (lstm, gru, etc.). Only used for recurrent modules."""
-
-    rnn_hidden_dim: int = 64
-    """RNN hidden dimension. Only used for recurrent modules."""
-
-    rnn_num_layers: int = 1
-    """Number of RNN layers. Only used for recurrent modules."""
-
     dropout_prob: float = 0.0
     """Dropout probability."""
 
@@ -53,9 +44,6 @@ class LayerConfig:
 
     encoder_input_name: str = ""
     """Input name for encoder. Only used for encoder modules."""
-
-    rnn_input_name: str = ""
-    """Input name for RNN. Only used for recurrent encoder modules."""
 
     input_channels: int = 1
     """Number of input channels. Only used for CNN modules."""
