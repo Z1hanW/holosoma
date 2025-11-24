@@ -9,7 +9,7 @@ from holosoma.bridge.base.basic_sdk2py_bridge import BasicSdk2Bridge
 class UnitreeSdk2Bridge(BasicSdk2Bridge):
     """Unitree SDK2Py bridge implementation."""
 
-    SUPPORTED_ROBOT_TYPES = {"g1_29dof", "h1", "h1-2", "go2"}
+    SUPPORTED_ROBOT_TYPES = {"g1_29dof", "h1", "h1-2", "go2_12dof"}
 
     def _init_sdk_components(self):
         """Initialize Unitree SDK-specific components."""
@@ -39,7 +39,7 @@ class UnitreeSdk2Bridge(BasicSdk2Bridge):
             from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_  # noqa: PLC0415
 
             self.low_cmd = unitree_hg_msg_dds__LowCmd_()
-        elif robot_type in {"h1", "go2"}:
+        elif robot_type in {"h1", "go2_12dof"}:
             from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowCmd_  # noqa: PLC0415
             from unitree_sdk2py.idl.default import unitree_go_msg_dds__LowState_ as LowState_default  # noqa: PLC0415
             from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_, LowState_  # noqa: PLC0415

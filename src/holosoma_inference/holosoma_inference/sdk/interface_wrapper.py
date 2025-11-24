@@ -58,6 +58,7 @@ class InterfaceWrapper:
                 "G1": unitree_interface.RobotType.G1,
                 "H1": unitree_interface.RobotType.H1,
                 "H1_2": unitree_interface.RobotType.H1_2,
+                "GO2": unitree_interface.RobotType.GO2,
             }
             # Parse message type
             message_type_map = {"HG": unitree_interface.MessageType.HG, "GO2": unitree_interface.MessageType.GO2}

@@ -514,7 +514,7 @@ def create_virtual_gantry(
     """
     if attachment_body_names is None:
         # Default names from holosoma_inference, likely needs updating or removing to force users to specify
-        attachment_body_names = ["torso_link", "torso", "base_link", "pelvis", "Trunk", "Waist"]
+        attachment_body_names = ["torso_link", "torso", "base_link", "pelvis", "Trunk", "Waist", "base"]
 
     logger.info("=== Setting up virtual gantry system ===")
 
