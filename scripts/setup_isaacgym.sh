@@ -45,12 +45,6 @@ if [[ ! -f $SENTINEL_FILE ]]; then
   cd $WORKSPACE_DIR/isaacgym/python
   $ENV_ROOT/bin/pip install -e .
 
-  # Install Unitree Python SDK for sim2sim
-  if [[ ! -d $WORKSPACE_DIR/unitree_sdk2_python ]]; then
-    git clone https://github.com/unitreerobotics/unitree_sdk2_python.git $WORKSPACE_DIR/unitree_sdk2_python
-  fi
-  pip install -e $WORKSPACE_DIR/unitree_sdk2_python/
-
   # Install Holosoma
   pip install -U pip
   pip install -e $ROOT_DIR/src/holosoma[unitree,booster]

@@ -65,7 +65,7 @@ class BasicSdk2Bridge(ABC):
     def compute_torques(self):
         """Compute motor torques using PD control with sensor or ground truth data."""
         if hasattr(self, "low_cmd") and self.low_cmd:
-            motor_cmd = list(self.low_cmd.motor_cmd)
+            motor_cmd = self.low_cmd
             try:
                 # Keep as torch tensors (no early conversion)
                 q_actual = self.simulator.dof_pos[0]
@@ -73,17 +73,11 @@ class BasicSdk2Bridge(ABC):
 
                 # Extract motor parameters into torch tensors
                 device = q_actual.device
-                tau = torch.tensor(
-                    [motor_cmd[i].tau for i in range(self.num_motor)], device=device, dtype=q_actual.dtype
-                )
-                kp = torch.tensor([motor_cmd[i].kp for i in range(self.num_motor)], device=device, dtype=q_actual.dtype)
-                kd = torch.tensor([motor_cmd[i].kd for i in range(self.num_motor)], device=device, dtype=q_actual.dtype)
-                q_desired = torch.tensor(
-                    [motor_cmd[i].q for i in range(self.num_motor)], device=device, dtype=q_actual.dtype
-                )
-                dq_desired = torch.tensor(
-                    [motor_cmd[i].dq for i in range(self.num_motor)], device=device, dtype=q_actual.dtype
-                )
+                tau = torch.tensor(motor_cmd.tau_ff, device=device, dtype=q_actual.dtype)
+                kp = torch.tensor(motor_cmd.kp, device=device, dtype=q_actual.dtype)
+                kd = torch.tensor(motor_cmd.kd, device=device, dtype=q_actual.dtype)
+                q_desired = torch.tensor(motor_cmd.q_target, device=device, dtype=q_actual.dtype)
+                dq_desired = torch.tensor(motor_cmd.dq_target, device=device, dtype=q_actual.dtype)
 
                 # Vectorized PD control in torch
                 torques = tau + kp * (q_desired - q_actual) + kd * (dq_desired - dq_actual)
@@ -141,7 +135,9 @@ class BasicSdk2Bridge(ABC):
                     f"keys: 0x{key_value:04x}"
                 )
 
-                self.wireless_controller_puber.Write(self.wireless_controller)
+                # Only publish if the subclass has a publisher (C++ bindings handle this differently)
+                if hasattr(self, "wireless_controller_puber"):
+                    self.wireless_controller_puber.Write(self.wireless_controller)
 
     def setup_joystick(self, device_id=0, js_type="xbox"):
         """Setup joystick/gamepad."""

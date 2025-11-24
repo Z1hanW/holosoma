@@ -128,6 +128,9 @@ class SimulatorBridge:
             self.robot_bridge.publish_wireless_controller()
             logger.debug("Wireless controller input published")
 
+        # Read incoming commands from DDS
+        self.robot_bridge.low_cmd_handler()
+
         # Compute torques based on received commands
         self.robot_bridge.compute_torques()
 

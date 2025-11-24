@@ -49,12 +49,6 @@ if [[ ! -f $SENTINEL_FILE ]]; then
     git clone https://github.com/isaac-sim/IsaacLab.git --branch v2.1.0 $WORKSPACE_DIR/IsaacLab
   fi
 
-  # Install Unitree Python SDK for sim2sim
-  if [[ ! -d $WORKSPACE_DIR/unitree_sdk2_python ]]; then
-    git clone https://github.com/unitreerobotics/unitree_sdk2_python.git $WORKSPACE_DIR/unitree_sdk2_python
-  fi
-  pip install -e $WORKSPACE_DIR/unitree_sdk2_python/
-
   sudo apt install -y cmake build-essential
   cd $WORKSPACE_DIR/IsaacLab
   # work-around for egl_probe cmake max version issue

@@ -100,13 +100,6 @@ if [[ ! -f $SENTINEL_FILE ]]; then
   #pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
   #pip install numpy scipy matplotlib
 
-  # Install Unitree Python SDK for sim2sim
-  if [[ ! -d $WORKSPACE_DIR/unitree_sdk2_python ]]; then
-    git clone https://github.com/unitreerobotics/unitree_sdk2_python.git $WORKSPACE_DIR/unitree_sdk2_python
-  fi
-  pip install -e $WORKSPACE_DIR/unitree_sdk2_python/
-
-
   # Install Holosoma packages
   pip install -U pip
   pip install -e $ROOT_DIR/src/holosoma[unitree,booster]

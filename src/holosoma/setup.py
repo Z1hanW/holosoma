@@ -3,7 +3,7 @@ import sys
 
 from setuptools import setup
 
-UNITREE_VERSION = "0.1.1"
+UNITREE_VERSION = "0.1.2"
 UNITREE_REPO = "https://github.com/amazon-far/unitree_sdk2"
 BOOSTER_VERSION = "0.1.0"
 BOOSTER_REPO = "https://github.com/amazon-far/booster_robotics_sdk"

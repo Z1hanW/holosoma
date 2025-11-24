@@ -54,7 +54,7 @@ mujoco = dataclasses.replace(
         virtual_gantry=VirtualGantryCfg(enabled=True),
         sim=dataclasses.replace(
             holosoma.config_values.simulator.mujoco.config.sim,
-            fps=1000,  # mujoco can run faster
+            fps=2000,  # mujoco can run faster
         ),
     ),
 )
@@ -68,7 +68,7 @@ mjwarp = dataclasses.replace(
         virtual_gantry=VirtualGantryCfg(enabled=True),
         sim=dataclasses.replace(
             holosoma.config_values.simulator.mjwarp.config.sim,
-            fps=1000,  # GPU-accelerated, can run fast
+            fps=400,
         ),
     ),
 )
