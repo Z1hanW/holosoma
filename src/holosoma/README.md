@@ -10,6 +10,8 @@ Core training framework for humanoid robot reinforcement learning with support f
 
 ## Training
 
+All training/eval scripts support `--help` for discovering available flags, e.g. `python src/holosoma/holosoma/train_agent.py --help`.
+
 ### Locomotion (Velocity Tracking)
 
 Train robots to track velocity commands.
@@ -20,6 +22,7 @@ source scripts/source_isaacgym_setup.sh
 python src/holosoma/holosoma/train_agent.py \
     exp:g1-29dof-fast-sac \
     simulator:isaacgym \
+    logger:wandb \
     --training.seed 1
 
 # T1 with PPO on IsaacSim
@@ -27,8 +30,11 @@ source scripts/source_isaacsim_setup.sh
 python src/holosoma/holosoma/train_agent.py \
     exp:t1-29dof \
     simulator:isaacsim \
+    logger:wandb \
     --training.seed 1
 ```
+
+Once checkpoints are saved to Wandb or locally, you can evaluate these locomotion policies using either the [Sim-to-Sim Evaluation](#sim-to-sim-evaluation) workflow or the [In-Training Evaluation](#in-training-evaluation) flow described below.
 
 ### Whole-Body Tracking
 
@@ -40,19 +46,24 @@ Train robots to track full-body motion sequences.
 # G1 with PPO (default)
 source scripts/source_isaacsim_setup.sh
 python src/holosoma/holosoma/train_agent.py \
+    logger:wandb \
     exp:g1-29dof-wbt
 
 # G1 with FastSAC
 source scripts/source_isaacsim_setup.sh
 python src/holosoma/holosoma/train_agent.py \
+    logger:wandb \
     exp:g1-29dof-wbt-fast-sac
 
 # Custom motion file
 source scripts/source_isaacsim_setup.sh
 python src/holosoma/holosoma/train_agent.py \
     exp:g1-29dof-wbt \
+    logger:wandb \
     --command.setup_terms.motion_command.params.motion_config.motion_file="holosoma/data/motions/g1_29dof/whole_body_tracking/<your file>.npz"
 ```
+
+Just like locomotion checkpoints, whole-body tracking checkpoints saved in Wandb or on disk can be evaluated via [Sim-to-Sim Evaluation](#sim-to-sim-evaluation) (Mujoco-only) or [In-Training Evaluation](#in-training-evaluation) (IsaacSim-only), depending on whether you need cross-simulator testing or same-simulator validation.
 
 ## Sim-to-Sim Evaluation
 

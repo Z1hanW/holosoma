@@ -38,6 +38,7 @@ Choose the appropriate setup script based on your use case:
 bash scripts/setup_isaacgym.sh
 
 # For IsaacSim training
+# Requires Ubuntu 22.04 or later due to IsaacSim dependencies
 bash scripts/setup_isaacsim.sh
 
 # For Mujoco simulation
@@ -59,6 +60,7 @@ source scripts/source_isaacgym_setup.sh
 python src/holosoma/holosoma/train_agent.py \
     exp:g1-29dof-fast-sac \
     simulator:isaacgym \
+    logger:wandb \
     --training.seed 1
 ```
 

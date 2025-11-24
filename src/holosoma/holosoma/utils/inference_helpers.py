@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import json
 import os
 from pathlib import Path
@@ -122,7 +121,7 @@ def export_multi_agent_decouple_policy_as_onnx(wrapper, path, exported_policy_na
         wrapper,
         example_input_list,
         path,
-        verbose=True,
+        verbose=False,
         input_names=[f"actor_obs_{body_key}" for body_key in body_keys],
         output_names=["action"],
         opset_version=13,
@@ -199,7 +198,7 @@ class _OnnxMotionPolicyExporter(torch.nn.Module):
             onnx_file_path,
             export_params=True,
             opset_version=13,
-            verbose=True,
+            verbose=False,
             input_names=["obs", "time_step"],
             output_names=["actions", "joint_pos", "joint_vel", "ref_pos_xyz", "ref_quat_xyzw"],
         )
@@ -277,7 +276,7 @@ def get_command_ranges_from_env(env: BaseTask) -> dict | None:
 
 def get_urdf_text_from_robot_config(robot_config: RobotConfig) -> tuple[str, str]:
     """Extract URDF text from the robot config.
-    
+
     Returns
     -------
     tuple[str, str]
