@@ -40,7 +40,6 @@ g1_29dof_wbt_reward = RewardManagerCfg(
         # Regularization rewards
         "action_rate_l2": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:penalty_action_rate",
-            params={"warmup_multiplier": 10.0},
             weight=-0.1,
         ),
         "limits_dof_pos": RewardTermCfg(
@@ -68,7 +67,6 @@ g1_29dof_wbt_fast_sac_reward = RewardManagerCfg(
         **g1_29dof_wbt_reward.terms,
         "action_rate_l2": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:penalty_action_rate",
-            params={"warmup_multiplier": 10.0},
             weight=-1.0,
         ),
         "motion_global_ref_position_error_exp": RewardTermCfg(

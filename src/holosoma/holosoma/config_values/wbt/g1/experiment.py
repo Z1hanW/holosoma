@@ -19,7 +19,7 @@ g1_29dof_wbt = ExperimentConfig(
     training=TrainingConfig(
         project="WholeBodyTracking",
         name="g1_29dof_wbt_manager",
-        num_envs=4096,
+        num_envs=8192,
     ),
     env_class="holosoma.envs.wbt.wbt_manager.WholeBodyTrackingManager",
     algo=replace(
@@ -76,7 +76,7 @@ g1_29dof_wbt_fast_sac = ExperimentConfig(
     training=TrainingConfig(
         project="WholeBodyTracking",
         name="g1_29dof_wbt_fast_sac_manager",
-        num_envs=4096,
+        num_envs=8192,
     ),
     env_class="holosoma.envs.wbt.wbt_manager.WholeBodyTrackingManager",
     algo=replace(

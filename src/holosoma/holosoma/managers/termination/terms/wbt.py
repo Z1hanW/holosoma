@@ -64,21 +64,15 @@ class BadTracking(TerminationTermBase):
             f"termination.params['body_names_to_track']: {self.body_names_to_track}"
         )
 
-        if motion_command.require_policy_to_reach_target_at_zero:
-            warm_up_mask = motion_command.time_steps == 0
-        else:
-            warm_up_mask = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-        tracking_mask = ~warm_up_mask
-
         # return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-        bad_ref_pos = self.bad_ref_pos(motion_command) & tracking_mask
-        bad_ref_ori = self.bad_ref_ori(motion_command) & tracking_mask
-        bad_motion_body_pos = self.bad_motion_body_pos(motion_command) & tracking_mask
+        bad_ref_pos = self.bad_ref_pos(motion_command)
+        bad_ref_ori = self.bad_ref_ori(motion_command)
+        bad_motion_body_pos = self.bad_motion_body_pos(motion_command)
         bad_tracking = bad_ref_pos | bad_ref_ori | bad_motion_body_pos
 
         if motion_command.motion.has_object:
-            bad_object_pos = self.bad_object_pos(motion_command) & tracking_mask
-            bad_object_ori = self.bad_object_ori(motion_command) & tracking_mask
+            bad_object_pos = self.bad_object_pos(motion_command)
+            bad_object_ori = self.bad_object_ori(motion_command)
             bad_tracking |= bad_object_pos | bad_object_ori
 
         if motion_command.motion_cfg.use_adaptive_timesteps_sampler and torch.any(bad_tracking):

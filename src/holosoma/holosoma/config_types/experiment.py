@@ -57,9 +57,6 @@ class TrainingConfig:
     torch_deterministic: bool = False
     """Enable PyTorch deterministic mode."""
 
-    multigpu: bool = False
-    """Enable multi-GPU training."""
-
     # Environment settings
     num_envs: int = 4096
     """Number of parallel environments."""

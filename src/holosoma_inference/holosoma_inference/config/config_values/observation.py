@@ -115,7 +115,7 @@ wbt = ObservationConfig(
         ]
     },
     obs_dims={
-        "motion_command": 29,
+        "motion_command": 58,
         "motion_ref_pos_b": 3,
         "motion_ref_ori_b": 6,
         "base_lin_vel": 3,

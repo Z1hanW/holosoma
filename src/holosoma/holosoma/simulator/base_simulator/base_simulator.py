@@ -266,7 +266,7 @@ class BaseSimulator:
         """Get the simulator type for this simulator instance.
 
         Returns:
-            SimulatorType: The type of simulator (ISAACGYM, ISAACSIM, GENESIS)
+            SimulatorType: The type of simulator (ISAACGYM, ISAACSIM, MUJOCO)
         """
         return get_simulator_type()
 

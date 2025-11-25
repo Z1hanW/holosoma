@@ -102,18 +102,26 @@ class MotionConfig:
     start_at_timestep_zero_prob: float = 0.2
     """Probability of starting at timestep zero."""
 
-    require_policy_to_reach_target_at_zero: bool = True
-    """Warm-up mode: if True, when starting at timestep 0, freeze motion counter until policy reaches target pose.
-    Robot spawns in default standing configuration and must drive itself to the motion's first frame.
-    Only applies at timestep 0; once counter advances past 0, normal playback resumes."""
+    freeze_at_timestep_zero_prob: float = 0.95
+    """When starting at timestep 0, probability of freezing motion counter at 0 (not advancing).
+    This makes the robot practice holding the initial pose. Only applies when episode starts at timestep 0.
+    Sampled independently each policy step; expected wait is roughly 1 / (1 - p) steps before unfreezing."""
 
-    reach_target_joint_pos_tolerance: float = 0.5
-    """Joint position norm tolerance (radians) for warm-up: policy must get within"""
-    """this distance to advance from timestep 0."""
+    enable_default_pose_prepend: bool = True
+    """If True, pre-append interpolated frames from default pose to the motion's first pose.
+    This provides a smooth transition trajectory that the policy can track."""
 
-    reach_target_root_orientation_tolerance: float = 0.05
-    """Root orientation tolerance (radians) for warm-up: policy must get within"""
-    """this orientation error to advance from timestep 0."""
+    default_pose_prepend_duration_s: float = 2.0
+    """Duration in seconds of the pre-appended interpolation phase.
+    Only used if enable_default_pose_prepend is True."""
+
+    enable_default_pose_append: bool = True
+    """If True, post-append interpolated frames from the motion's last pose back to default pose.
+    This provides a smooth return trajectory that the policy can track."""
+
+    default_pose_append_duration_s: float = 2.0
+    """Duration in seconds of the post-appended interpolation phase.
+    Only used if enable_default_pose_append is True."""
 
     # noise related
     noise_to_initial_pose: NoiseToInitialPoseConfig = field(default_factory=NoiseToInitialPoseConfig)

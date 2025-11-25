@@ -14,11 +14,13 @@ from holosoma.envs.wbt.wbt_manager import WholeBodyTrackingManager
 from holosoma.managers.command.base import CommandTermBase
 from holosoma.utils.path import resolve_data_file_path
 from holosoma.utils.rotations import (
+    get_euler_xyz,
     quat_apply,
     quat_error_magnitude,
     quat_from_euler_xyz,
     quat_inverse,
     quat_mul,
+    slerp,
     yaw_quat,
 )
 from holosoma.utils.simulator_config import SimulatorType
@@ -126,6 +128,33 @@ class MotionLoader:
     @property
     def object_lin_vel_w(self) -> torch.Tensor:
         return self._object_lin_vel_w[:]
+
+    def extend_with_segments(self, segments: dict[str, torch.Tensor], prepend: bool) -> "MotionLoader":
+        """Merge interpolated segments with motion data, mutating this MotionLoader."""
+        concat_targets = [
+            ("joint_pos", "_joint_pos"),
+            ("joint_vel", "_joint_vel"),
+            ("body_pos", "_body_pos_w"),
+            ("body_quat", "_body_quat_w"),
+            ("body_lin_vel", "_body_lin_vel_w"),
+            ("body_ang_vel", "_body_ang_vel_w"),
+        ]
+        if self.has_object:
+            concat_targets.extend(
+                [
+                    ("object_pos", "_object_pos_w"),
+                    ("object_quat", "_object_quat_w"),
+                    ("object_lin_vel", "_object_lin_vel_w"),
+                ]
+            )
+
+        for seg_key, attr_name in concat_targets:
+            existing = getattr(self, attr_name)
+            tensors = (segments[seg_key], existing) if prepend else (existing, segments[seg_key])
+            setattr(self, attr_name, torch.cat(tensors, dim=0))
+
+        self.time_step_total = self._joint_pos.shape[0]
+        return self
 
 
 class AdaptiveTimestepsSampler:
@@ -235,10 +264,6 @@ def get_filtered_body_names(body_list: List[str], pattern: str) -> List[str]:
 
 
 class MotionCommand(CommandTermBase):
-    _proximity_ready_mask: torch.Tensor
-    _last_proximity_joint_pos_error: torch.Tensor
-    _last_proximity_root_rot_error: torch.Tensor
-
     def __init__(self, cfg: Any, env: WholeBodyTrackingManager):
         super().__init__(cfg, env)
 
@@ -267,6 +292,16 @@ class MotionCommand(CommandTermBase):
             robot_joint_names,
             device=self.device,
         )
+
+        # Store body and joint indexes for interpolation
+        self._body_indexes_in_motion = self.motion._body_indexes
+        self._joint_indexes_in_motion = self.motion._joint_indexes
+
+        # Maybe prepend interpolated transition from default pose
+        self._maybe_prepend_default_pose_transition()
+
+        # Maybe append interpolated transition back to default pose
+        self._maybe_append_default_pose_transition()
 
         # 2. get the indexes of the root link and the tracked links
         self.ref_body_index = robot_body_names.index(self.motion_cfg.body_name_ref[0])  # int
@@ -305,15 +340,6 @@ class MotionCommand(CommandTermBase):
         if env_ids.numel() == 0:
             return
 
-        # Compute warm-up readiness success rate before resampling
-        if self.require_policy_to_reach_target_at_zero:
-            started_at_zero = self._starting_timestep[env_ids] == 0
-            if started_at_zero.any():
-                current_timestep = self.time_steps[env_ids][started_at_zero]
-                success_mask = current_timestep > 0
-                success_rate = success_mask.float().mean()
-                self.metrics["motion/warmup_success_rate"] = success_rate
-
         # 0. Sample the time steps
         if self.motion_cfg.use_adaptive_timesteps_sampler:
             phase = self.adaptive_timesteps_sampler.sample(env_ids.numel())
@@ -342,18 +368,6 @@ class MotionCommand(CommandTermBase):
             already_last_timestep_mask, self.motion.time_step_total - 2, self.time_steps[env_ids]
         )
 
-        if self.require_policy_to_reach_target_at_zero:
-            self._proximity_ready_mask[env_ids] = False
-            self._last_proximity_joint_pos_error[env_ids] = torch.full(
-                (len(env_ids),), float("inf"), device=self.device
-            )
-            self._last_proximity_root_rot_error[env_ids] = torch.full((len(env_ids),), float("inf"), device=self.device)
-
-            # Update starting timestep for the new episodes
-            self._starting_timestep[env_ids] = self.time_steps[env_ids]
-        else:
-            self._starting_timestep[env_ids] = -1
-
         # 1. Get the reference root/body poses
         root_pos = self.body_pos_w[env_ids, 0].clone()
         root_rot = self.body_quat_w[env_ids, 0].clone()  # xyzw
@@ -362,18 +376,6 @@ class MotionCommand(CommandTermBase):
 
         dof_pos = self.joint_pos[env_ids].clone()
         dof_vel = self.joint_vel[env_ids].clone()
-
-        warm_up_mask: torch.Tensor | None = None
-        if self.require_policy_to_reach_target_at_zero:
-            warm_up_mask = self.time_steps[env_ids] == 0
-            if warm_up_mask is not None and warm_up_mask.any():
-                warm_up_env_ids = env_ids[warm_up_mask]
-                dof_pos[warm_up_mask] = self._env.default_dof_pos[warm_up_env_ids]
-                dof_vel[warm_up_mask] = 0.0
-                root_lin_vel[warm_up_mask] = 0.0
-                root_ang_vel[warm_up_mask] = 0.0
-                standing_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
-                root_rot[warm_up_mask] = standing_quat
 
         # 2. Adding noise
         # 2.1 prepare the noise scale
@@ -474,13 +476,14 @@ class MotionCommand(CommandTermBase):
         # 0. update time steps, all motion joint/body poses are updated automatically with the time steps.
         advance_mask = torch.ones_like(self.time_steps, dtype=torch.bool)
 
-        if self.require_policy_to_reach_target_at_zero:
+        # Handle freeze_at_timestep_zero_prob: for envs at timestep 0, randomly decide whether to advance
+        freeze_prob = self.motion_cfg.freeze_at_timestep_zero_prob
+        if freeze_prob > 0.0:
             zero_mask = self.time_steps == 0
-            readiness_mask = self._compute_proximity_ready_mask()
-            advance_mask = torch.where(zero_mask, readiness_mask, advance_mask)
-            self._proximity_ready_mask = readiness_mask
-        else:
-            self._proximity_ready_mask = torch.ones_like(self.time_steps, dtype=torch.bool)
+            if zero_mask.any():
+                rand_vals = torch.rand(self.num_envs, device=self.device)
+                freeze_mask = (rand_vals < freeze_prob) & zero_mask
+                advance_mask = advance_mask & ~freeze_mask
 
         self.time_steps += advance_mask.long()
 
@@ -684,17 +687,6 @@ class MotionCommand(CommandTermBase):
     def simulator_object_lin_vel_w(self) -> torch.Tensor:
         return self._env.simulator.all_root_states[self.object_indices_in_simulator][:, 7:10]
 
-    def _compute_proximity_ready_mask(self) -> torch.Tensor:
-        joint_pos_error = torch.norm(self.joint_pos - self.robot_joint_pos, dim=-1)
-        root_rot_error = quat_error_magnitude(self.root_quat_w, self.robot_root_quat_w)
-
-        self._last_proximity_joint_pos_error = joint_pos_error
-        self._last_proximity_root_rot_error = root_rot_error
-
-        ready = joint_pos_error <= self.reach_target_joint_pos_tolerance
-        ready &= root_rot_error <= self.reach_target_root_orientation_tolerance
-        return ready
-
     #########################################################################################
     ## Methods that does not fit into setup/step/reset pattern
     #########################################################################################
@@ -709,17 +701,6 @@ class MotionCommand(CommandTermBase):
         )  # type: ignore[arg-type]
         self.body_quat_relative_w[:, :, 0] = 1.0
 
-        # Warm-up configuration: only applies at timestep zero
-        self.require_policy_to_reach_target_at_zero = self.motion_cfg.require_policy_to_reach_target_at_zero
-        self.reach_target_joint_pos_tolerance = self.motion_cfg.reach_target_joint_pos_tolerance
-        self.reach_target_root_orientation_tolerance = self.motion_cfg.reach_target_root_orientation_tolerance
-
-        self._proximity_ready_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self._last_proximity_joint_pos_error = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-        self._last_proximity_root_rot_error = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
-
-        self._starting_timestep = torch.full((self.num_envs,), -1, dtype=torch.long, device=self.device)
-
         if self.motion_cfg.use_adaptive_timesteps_sampler:
             self.adaptive_timesteps_sampler.init_buffers()
 
@@ -733,11 +714,6 @@ class MotionCommand(CommandTermBase):
         self.metrics["motion/error_body_pos"] = torch.norm(
             self.body_pos_relative_w - self.robot_body_pos_w, dim=-1
         ).mean(dim=-1)
-
-        if self.require_policy_to_reach_target_at_zero:
-            self.metrics["motion/proximity_ready"] = self._proximity_ready_mask.float()
-            self.metrics["motion/proximity_joint_pos_error"] = self._last_proximity_joint_pos_error
-            self.metrics["motion/proximity_root_rot_error"] = self._last_proximity_root_rot_error
 
         self.metrics["motion/error_body_rot"] = quat_error_magnitude(
             self.body_quat_relative_w, self.robot_body_quat_w
@@ -768,6 +744,355 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     ## Internal helpers
     #########################################################################################
+    def _maybe_prepend_default_pose_transition(self) -> None:
+        """Prepend interpolated transition from default pose to motion's first frame if enabled."""
+        if not self.motion_cfg.enable_default_pose_prepend:
+            return
+
+        duration = self.motion_cfg.default_pose_prepend_duration_s
+        if duration <= 0.0:
+            return
+
+        num_steps = round(duration / self._env.dt)
+        if num_steps <= 1:
+            logger.warning(
+                "Default pose interpolation duration {}s is too short for dt {}; skipping augmentation.",
+                duration,
+                self._env.dt,
+            )
+            return
+
+        default_state = self._build_default_pose_state()
+
+        try:
+            self._add_transition_to_motion(default_state, num_steps, prepend=True)
+            logger.info(f"Prepended {num_steps} interpolated frames ({duration}s) from default pose to motion")
+        except Exception as exc:
+            logger.error(f"Failed to prepend default pose transition: {exc}")
+            raise RuntimeError(
+                f"Critical error during motion interpolation setup: {exc}\n"
+                "This indicates a mismatch in tensor dimensions during interpolation. "
+                "Please check that the motion file and robot configuration are compatible."
+            ) from exc
+
+    def _maybe_append_default_pose_transition(self) -> None:
+        """append interpolated transition from motion's last frame back to default pose if enabled."""
+        if not self.motion_cfg.enable_default_pose_append:
+            return
+
+        duration = self.motion_cfg.default_pose_append_duration_s
+        if duration <= 0.0:
+            return
+
+        num_steps = round(duration / self._env.dt)
+        if num_steps <= 1:
+            logger.warning(
+                "Default pose append duration {}s is too short for dt {}; skipping augmentation.",
+                duration,
+                self._env.dt,
+            )
+            return
+
+        default_state = self._build_default_pose_state(use_motion_end=True)
+
+        try:
+            self._add_transition_to_motion(default_state, num_steps, prepend=False)
+            logger.info(f"appended {num_steps} interpolated frames ({duration}s) \
+                from last motion frame to default pose")
+        except Exception as exc:
+            logger.error(f"Failed to append default pose transition: {exc}")
+            raise RuntimeError(
+                f"Critical error during motion interpolation setup: {exc}\n"
+                "This indicates a mismatch in tensor dimensions during interpolation. "
+                "Please check that the motion file and robot configuration are compatible."
+            ) from exc
+
+    def _build_default_pose_state(self, use_motion_end: bool = False) -> dict[str, torch.Tensor]:
+        """Build the state dict representing the robot's default standing pose.
+
+        By default, anchor root pos/yaw to the motion start; when use_motion_end is True, anchor to motion end.
+        """
+        init_state = self._env.robot_config.init_state
+        joint_pos = self._env.default_dof_pos_base.squeeze(0).to(self.device)
+        joint_vel = torch.zeros_like(joint_pos)
+
+        init_root_quat = torch.tensor(init_state.rot, dtype=torch.float32, device=self.device).unsqueeze(0)
+        init_roll, init_pitch, _ = get_euler_xyz(init_root_quat, w_last=True)
+
+        motion_idx = -1 if use_motion_end else 0
+        motion_root_pos = self.motion._body_pos_w[motion_idx, 0].to(self.device)
+        motion_root_quat = self.motion._body_quat_w[motion_idx, 0].to(self.device).unsqueeze(0)
+        _, _, motion_yaw = get_euler_xyz(motion_root_quat, w_last=True)
+
+        default_root_pos = motion_root_pos
+        # Keep roll/pitch from init config but adopt the clip's yaw at the chosen anchor frame.
+        default_root_quat = quat_from_euler_xyz(
+            init_roll.squeeze(0),
+            init_pitch.squeeze(0),
+            motion_yaw.squeeze(0),
+        )
+        default_root_lin_vel = torch.tensor(init_state.lin_vel, dtype=torch.float32, device=self.device)
+        default_root_ang_vel = torch.tensor(init_state.ang_vel, dtype=torch.float32, device=self.device)
+
+        body_states = self._capture_body_states(
+            joint_pos,
+            joint_vel,
+            default_root_pos,
+            default_root_quat,
+            default_root_lin_vel,
+            default_root_ang_vel,
+        )
+
+        default_body_pos = self._map_robot_bodies_to_motion_order(body_states["pos"])
+        default_body_quat = self._map_robot_bodies_to_motion_order(body_states["quat"])
+        default_body_lin_vel = self._map_robot_bodies_to_motion_order(body_states["lin_vel"])
+        default_body_ang_vel = self._map_robot_bodies_to_motion_order(body_states["ang_vel"])
+
+        if self.motion.has_object:
+            object_pos = self.motion._object_pos_w[0].to(self.device)
+            object_quat = self.motion._object_quat_w[0].to(self.device)
+            object_lin_vel = self.motion._object_lin_vel_w[0].to(self.device)
+        else:
+            object_pos = torch.zeros(0, 3, device=self.device, dtype=torch.float32)
+            object_quat = torch.zeros(0, 4, device=self.device, dtype=torch.float32)
+            object_lin_vel = torch.zeros(0, 3, device=self.device, dtype=torch.float32)
+
+        return {
+            "joint_pos": joint_pos.clone(),
+            "joint_vel": joint_vel,
+            "root_pos": default_root_pos,
+            "root_quat": default_root_quat,
+            "root_lin_vel": default_root_lin_vel,
+            "root_ang_vel": default_root_ang_vel,
+            "body_pos": default_body_pos,
+            "body_quat": default_body_quat,
+            "body_lin_vel": default_body_lin_vel,
+            "body_ang_vel": default_body_ang_vel,
+            "object_pos": object_pos,
+            "object_quat": object_quat,
+            "object_lin_vel": object_lin_vel,
+        }
+
+    def _add_transition_to_motion(self, default_state: dict[str, torch.Tensor], num_steps: int, prepend: bool) -> None:
+        """Add interpolated frames either before or after the motion data."""
+        assert self._body_indexes_in_motion is not None
+        assert self._joint_indexes_in_motion is not None
+
+        if num_steps <= 0:
+            return
+
+        device = self.device
+        dtype = self.motion._joint_pos.dtype
+
+        default_motion_state = self._default_motion_state(default_state, dtype=dtype, device=device)
+        motion_state = self._motion_state(0 if prepend else -1, dtype=dtype, device=device)
+
+        start_state = default_motion_state if prepend else motion_state
+        target_state = motion_state if prepend else default_motion_state
+        drop_first, drop_last = (False, True) if prepend else (True, False)
+
+        self._build_and_apply_transition(
+            start_state=start_state,
+            target_state=target_state,
+            num_steps=num_steps,
+            prepend=prepend,
+            drop_first=drop_first,
+            drop_last=drop_last,
+            dtype=dtype,
+            device=device,
+        )
+
+    def _slerp_quat_sequence(self, start: torch.Tensor, end: torch.Tensor, alphas: torch.Tensor) -> torch.Tensor:
+        """Spherically interpolate quaternions across multiple time steps."""
+        if alphas.numel() == 0:
+            return start.new_zeros((0,) + start.shape)
+
+        num_steps = alphas.shape[0]
+        start_expand = start.unsqueeze(0).expand(num_steps, -1, -1)
+        end_expand = end.unsqueeze(0).expand(num_steps, -1, -1)
+        alpha_flat = alphas.repeat_interleave(start.shape[0]).unsqueeze(-1)
+        blended = slerp(
+            start_expand.reshape(-1, 4),
+            end_expand.reshape(-1, 4),
+            alpha_flat,
+        )
+        return blended.view(num_steps, start.shape[0], 4)
+
+    def _capture_body_states(
+        self,
+        joint_pos: torch.Tensor,
+        joint_vel: torch.Tensor,
+        root_pos: torch.Tensor,
+        root_quat: torch.Tensor,
+        root_lin_vel: torch.Tensor,
+        root_ang_vel: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Capture body states by temporarily setting the robot state in the simulator."""
+        simulator = self._env.simulator
+        assert simulator.get_simulator_type() == SimulatorType.ISAACSIM, (
+            "Default-pose interpolation only supports IsaacSim; IsaacGym write_state_updates does not run FK."
+        )
+        env_id = 0
+        env_origin = simulator.scene.env_origins[env_id].to(self.device)
+
+        root_backup = simulator.robot_root_states[env_id].clone()
+        dof_pos_backup = simulator.dof_pos[env_id].clone()
+        dof_vel_backup = simulator.dof_vel[env_id].clone()
+
+        try:
+            simulator.robot_root_states[env_id, :3] = root_pos + env_origin
+            simulator.robot_root_states[env_id, 3:7] = root_quat
+            simulator.robot_root_states[env_id, 7:10] = root_lin_vel
+            simulator.robot_root_states[env_id, 10:13] = root_ang_vel
+            simulator.dof_pos[env_id] = joint_pos
+            simulator.dof_vel[env_id] = joint_vel
+
+            simulator.write_state_updates()
+            simulator.refresh_sim_tensors()
+
+            body_pos = (simulator._rigid_body_pos[env_id] - env_origin).clone()
+            body_quat = simulator._rigid_body_rot[env_id].clone()
+            body_lin_vel = simulator._rigid_body_vel[env_id].clone()
+            body_ang_vel = simulator._rigid_body_ang_vel[env_id].clone()
+        finally:
+            simulator.robot_root_states[env_id] = root_backup
+            simulator.dof_pos[env_id] = dof_pos_backup
+            simulator.dof_vel[env_id] = dof_vel_backup
+            simulator.write_state_updates()
+            simulator.refresh_sim_tensors()
+
+        return {
+            "pos": body_pos,
+            "quat": body_quat,
+            "lin_vel": body_lin_vel,
+            "ang_vel": body_ang_vel,
+        }
+
+    def _map_robot_bodies_to_motion_order(self, robot_tensor: torch.Tensor) -> torch.Tensor:
+        """Map robot body tensor to motion data order using body indexes."""
+        assert self._body_indexes_in_motion is not None
+        num_motion_bodies = self.motion._body_pos_w.shape[1]
+        motion_shape = (num_motion_bodies,) + robot_tensor.shape[1:]
+        motion_tensor = torch.zeros(motion_shape, device=robot_tensor.device, dtype=robot_tensor.dtype)
+        motion_tensor[self._body_indexes_in_motion] = robot_tensor
+        return motion_tensor
+
+    def _map_robot_joints_to_motion_order(
+        self, robot_tensor: torch.Tensor, num_motion_joints: int | None = None
+    ) -> torch.Tensor:
+        """Map robot joint tensor to motion data order using joint indexes."""
+        assert self._joint_indexes_in_motion is not None
+        if num_motion_joints is None:
+            num_motion_joints = self.motion._joint_pos.shape[1]
+        motion_shape = robot_tensor.shape[:-1] + (num_motion_joints,)
+        motion_tensor = torch.zeros(motion_shape, device=robot_tensor.device, dtype=robot_tensor.dtype)
+        motion_tensor[..., self._joint_indexes_in_motion] = robot_tensor
+        return motion_tensor
+
+    def _motion_state(self, idx: int, dtype: torch.dtype, device: torch.device) -> dict[str, torch.Tensor]:
+        """Slice motion tensors at a given index into a state dict."""
+        state = {
+            "joint_pos": self.motion._joint_pos[idx].to(device=device, dtype=dtype),
+            "joint_vel": self.motion._joint_vel[idx].to(device=device, dtype=dtype),
+            "body_pos": self.motion._body_pos_w[idx].to(device=device, dtype=dtype),
+            "body_quat": self.motion._body_quat_w[idx].to(device=device, dtype=dtype),
+            "body_lin_vel": self.motion._body_lin_vel_w[idx].to(device=device, dtype=dtype),
+            "body_ang_vel": self.motion._body_ang_vel_w[idx].to(device=device, dtype=dtype),
+        }
+        if self.motion.has_object:
+            state["object_pos"] = self.motion._object_pos_w[idx].to(device=device, dtype=dtype)
+            state["object_quat"] = self.motion._object_quat_w[idx].to(device=device, dtype=dtype)
+            state["object_lin_vel"] = self.motion._object_lin_vel_w[idx].to(device=device, dtype=dtype)
+        return state
+
+    def _default_motion_state(
+        self, default_state: dict[str, torch.Tensor], dtype: torch.dtype, device: torch.device
+    ) -> dict[str, torch.Tensor]:
+        """Map default robot-state tensors into motion order for interpolation."""
+        state = {
+            "joint_pos": self._map_robot_joints_to_motion_order(
+                default_state["joint_pos"].to(device=device, dtype=dtype), 
+                num_motion_joints=self.motion._joint_pos.shape[1]
+            ),
+            "joint_vel": self._map_robot_joints_to_motion_order(
+                default_state["joint_vel"].to(device=device, dtype=dtype), 
+                num_motion_joints=self.motion._joint_vel.shape[1]
+            ),
+            "body_pos": default_state["body_pos"].to(device=device, dtype=dtype),
+            "body_quat": default_state["body_quat"].to(device=device, dtype=dtype),
+            "body_lin_vel": default_state["body_lin_vel"].to(device=device, dtype=dtype),
+            "body_ang_vel": default_state["body_ang_vel"].to(device=device, dtype=dtype),
+        }
+        if self.motion.has_object:
+            state["object_pos"] = default_state["object_pos"].to(device=device, dtype=dtype)
+            state["object_quat"] = default_state["object_quat"].to(device=device, dtype=dtype)
+            state["object_lin_vel"] = default_state["object_lin_vel"].to(device=device, dtype=dtype)
+        return state
+
+    def _build_transition_segments(
+        self,
+        start: dict[str, torch.Tensor],
+        target: dict[str, torch.Tensor],
+        alphas: torch.Tensor,
+        alphas_joint: torch.Tensor,
+        alphas_body: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Linearly/spherically interpolate between start and target states."""
+
+        def _lerp(a: torch.Tensor, b: torch.Tensor, view: torch.Tensor) -> torch.Tensor:
+            return a.unsqueeze(0) + view * (b - a).unsqueeze(0)
+
+        segments = {
+            "joint_pos": _lerp(start["joint_pos"], target["joint_pos"], alphas_joint),
+            "joint_vel": _lerp(start["joint_vel"], target["joint_vel"], alphas_joint),
+            "body_pos": _lerp(start["body_pos"], target["body_pos"], alphas_body),
+            "body_lin_vel": _lerp(start["body_lin_vel"], target["body_lin_vel"], alphas_body),
+            "body_ang_vel": _lerp(start["body_ang_vel"], target["body_ang_vel"], alphas_body),
+            "body_quat": self._slerp_quat_sequence(start["body_quat"], target["body_quat"], alphas),
+        }
+
+        if self.motion.has_object:
+            segments["object_pos"] = _lerp(start["object_pos"], target["object_pos"], alphas_joint)
+            segments["object_lin_vel"] = _lerp(start["object_lin_vel"], target["object_lin_vel"], alphas_joint)
+            segments["object_quat"] = self._slerp_quat_sequence(
+                start["object_quat"].unsqueeze(0), target["object_quat"].unsqueeze(0), alphas
+            ).squeeze(1)
+
+        return segments
+
+    def _apply_transition_segments(self, segments: dict[str, torch.Tensor], prepend: bool) -> None:
+        """Splice interpolated segments into motion data, either prepending or appending."""
+        self.motion = self.motion.extend_with_segments(segments, prepend=prepend)
+
+    def _build_and_apply_transition(
+        self,
+        start_state: dict[str, torch.Tensor],
+        target_state: dict[str, torch.Tensor],
+        num_steps: int,
+        prepend: bool,
+        drop_first: bool,
+        drop_last: bool,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        """Shared interpolation path for prepend/append transitions."""
+        if num_steps <= 0:
+            return
+
+        alphas = torch.linspace(0.0, 1.0, steps=num_steps + 1, device=device, dtype=dtype)
+        if drop_first:
+            alphas = alphas[1:]
+        if drop_last:
+            alphas = alphas[:-1]
+        if alphas.numel() == 0:
+            return
+
+        alphas_joint = alphas.view(num_steps, 1)
+        alphas_body = alphas.view(num_steps, 1, 1)
+
+        segments = self._build_transition_segments(start_state, target_state, alphas, alphas_joint, alphas_body)
+        self._apply_transition_segments(segments, prepend=prepend)
+
     def _setup_visualization_markers_for_isaacsim(self):
         from isaaclab.markers import VisualizationMarkers
         from isaaclab.markers.config import FRAME_MARKER_CFG

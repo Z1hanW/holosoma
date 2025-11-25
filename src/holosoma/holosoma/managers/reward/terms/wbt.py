@@ -28,7 +28,7 @@ def _get_motion_command_and_assert_type(env: WholeBodyTrackingManager) -> Motion
 #########################################################################################################
 
 
-def penalty_action_rate(env: WholeBodyTrackingManager, warmup_multiplier: float = 1.0) -> torch.Tensor:
+def penalty_action_rate(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Penalize changes in actions between steps.
 
     Args:
@@ -39,12 +39,8 @@ def penalty_action_rate(env: WholeBodyTrackingManager, warmup_multiplier: float 
     """
     actions = env.action_manager.action
     prev_actions = env.action_manager.prev_action
-    penalty = torch.sum(torch.square(prev_actions - actions), dim=1)
-    motion_command = _get_motion_command_and_assert_type(env)
-    warmup_mask = motion_command.time_steps == 0
-    penalty[warmup_mask] *= warmup_multiplier
-    return penalty
-
+    return torch.sum(torch.square(prev_actions - actions), dim=1)
+    
 
 def limits_dof_pos(env: WholeBodyTrackingManager, soft_dof_pos_limit: float = 0.95) -> torch.Tensor:
     """Penalize joint positions too close to limits.
