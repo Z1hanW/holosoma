@@ -6,40 +6,37 @@ SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 ROOT_DIR=$(dirname "$SCRIPT_DIR")
 
 # Parse command-line arguments
-INSTALL_WARP=false  # Default: skip warp (CPU-only install)
+INSTALL_WARP=true  # Default: install warp (GPU-accelerated)
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --with-warp)
-      INSTALL_WARP=true
-      echo "MuJoCo Warp (GPU) installation enabled"
+    --no-warp)
+      INSTALL_WARP=false
+      echo "MuJoCo Warp (GPU) installation disabled - CPU-only mode"
       shift
       ;;
     --help|-h)
-      echo "Usage: $0 [--with-warp]"
+      echo "Usage: $0 [--no-warp]"
       echo ""
       echo "Options:"
-      echo "  --with-warp    Install MuJoCo Warp for GPU-accelerated simulation"
+      echo "  --no-warp      Skip MuJoCo Warp installation (CPU-only)"
       echo "  --help, -h     Show this help message"
       echo ""
-      echo "Default: CPU-only installation (ClassicBackend)"
+      echo "Default: GPU-accelerated installation (WarpBackend + ClassicBackend)"
       echo ""
       echo "Examples:"
-      echo "  # Initial setup (CPU-only)"
+      echo "  # Initial setup (default: with GPU acceleration)"
       echo "  $0"
       echo ""
-      echo "  # Setup with GPU acceleration"
-      echo "  $0 --with-warp"
-      echo ""
-      echo "  # Add GPU acceleration to existing CPU-only installation"
-      echo "  $0 --with-warp  # (incremental - skips base installation)"
+      echo "  # Setup without GPU acceleration (CPU-only)"
+      echo "  $0 --no-warp"
       echo ""
       echo "Note: GPU acceleration requires NVIDIA driver >= 550.54.14"
       exit 0
       ;;
     *)
       echo "Unknown option: $1"
-      echo "Usage: $0 [--with-warp]"
+      echo "Usage: $0 [--no-warp]"
       echo "Use --help for more information"
       exit 1
       ;;
@@ -211,7 +208,8 @@ if [[ "$INSTALL_WARP" == "true" ]] && [[ ! -f $WARP_SENTINEL_FILE ]]; then
     echo ""
     echo "Reference: https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/"
     echo ""
-    echo "After driver installation, re-run this script with --with-warp"
+    echo "After driver installation, re-run this script"
+    echo "(or use --no-warp for CPU-only installation)"
     exit 1
   fi
   
@@ -244,7 +242,7 @@ elif [[ "$INSTALL_WARP" == "false" ]] && [[ -f $SENTINEL_FILE ]]; then
   echo "MuJoCo environment ready (CPU-only ClassicBackend)"
   echo ""
   echo "To add GPU acceleration later, run:"
-  echo "  bash scripts/setup_mujoco.sh --with-warp"
+  echo "  bash scripts/setup_mujoco.sh"
 else
   echo "MuJoCo environment ready."
 fi
