@@ -206,7 +206,12 @@ def weighted_surface_sampling_by_face_normal(mesh, sample_count, weight_func, se
 
 
 def preprocess_motion_data(
-    human_joints, retargeter, foot_names, scale=0.714, mat_height=0.1, object_poses=None,
+    human_joints,
+    retargeter,
+    foot_names,
+    scale=0.714,
+    mat_height=0.1,
+    object_poses=None,
 ):
     """
     Preprocess human joints and object poses for retargeting.

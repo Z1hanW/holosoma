@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import tyro
@@ -31,9 +29,9 @@ class Config:
     loop: bool = True
 
     # Playback / visualization
-    fps_override: Optional[float] = None  # if None, use fps from npz
-    vel_scale: float = 0.1               # length scale for velocity arrows
-    vel_min_norm: float = 1e-2           # threshold below which we hide arrows
+    fps_override: float | None = None  # if None, use fps from npz
+    vel_scale: float = 0.1  # length scale for velocity arrows
+    vel_min_norm: float = 1e-2  # threshold below which we hide arrows
 
 
 # ---------------------------------------------------------------------
@@ -55,15 +53,15 @@ def load_npz_motion(npz_path: str):
     """
     data = np.load(npz_path, allow_pickle=True)
 
-    joint_pos = data["joint_pos"]          # (T, 7 + ndof)
-    joint_vel = data["joint_vel"]          # (T, 6 + ndof)  # not used here
-    body_pos_w = data["body_pos_w"]        # (T, nbody, 3)
-    body_quat_w = data["body_quat_w"]      # (T, nbody, 4)  # not used here
+    joint_pos = data["joint_pos"]  # (T, 7 + ndof)
+    joint_vel = data["joint_vel"]  # (T, 6 + ndof)  # not used here
+    body_pos_w = data["body_pos_w"]  # (T, nbody, 3)
+    body_quat_w = data["body_quat_w"]  # (T, nbody, 4)  # not used here
     body_lin_vel_w = data["body_lin_vel_w"]  # (T, nbody, 3)
     body_ang_vel_w = data["body_ang_vel_w"]  # (T, nbody, 3)  # not used here
 
-    joint_names = data["joint_names"]      # (ndof,)
-    body_names = data["body_names"]        # (nbody,)
+    joint_names = data["joint_names"]  # (ndof,)
+    body_names = data["body_names"]  # (nbody,)
 
     # fps saved as [fps]
     if "fps" in data:
@@ -91,11 +89,10 @@ def load_npz_motion(npz_path: str):
 def main(cfg: Config) -> None:
     data = load_npz_motion(cfg.npz_path)
 
-    joint_pos = data["joint_pos"]            # (T, 7 + ndof)
+    joint_pos = data["joint_pos"]  # (T, 7 + ndof)
     joint_names = list(data["joint_names"])  # names for ndof robot joints
-    body_pos_w = data["body_pos_w"]          # (T, nbody, 3)
+    body_pos_w = data["body_pos_w"]  # (T, nbody, 3)
     body_lin_vel_w = data["body_lin_vel_w"]  # (T, nbody, 3)
-    body_names = list(data["body_names"])
     fps_npz = data["fps"]
 
     T, nq_total = joint_pos.shape
@@ -103,9 +100,9 @@ def main(cfg: Config) -> None:
 
     # Split joint_pos into root + joints.
     # Layout: [0:3] root pos, [3:7] root quat (wxyz), [7:] robot joints
-    root_pos_seq = joint_pos[:, 0:3]    # (T, 3)
-    root_quat_seq = joint_pos[:, 3:7]   # (T, 4)
-    joint_angles_seq = joint_pos[:, 7:] # (T, ndof)
+    root_pos_seq = joint_pos[:, 0:3]  # (T, 3)
+    root_quat_seq = joint_pos[:, 3:7]  # (T, 4)
+    joint_angles_seq = joint_pos[:, 7:]  # (T, ndof)
     ndof = joint_angles_seq.shape[1]
 
     print(f"[viser_body_vel_player] Loaded npz: {cfg.npz_path}")
@@ -158,12 +155,9 @@ def main(cfg: Config) -> None:
     urdf_to_jointpos_cols_list: list[int] = []
     for jname in urdf_joint_order:
         if jname not in name_to_npz_joint_idx:
-            raise KeyError(
-                f"URDF joint '{jname}' not found in npz joint_names. "
-                f"npz joint_names: {joint_names}"
-            )
+            raise KeyError(f"URDF joint '{jname}' not found in npz joint_names. npz joint_names: {joint_names}")
         idx_npz = name_to_npz_joint_idx[jname]  # index in [0..ndof-1] for joint_angles_seq
-        col_in_joint_pos = 7 + idx_npz          # shift by 7 to get into joint_pos columns
+        col_in_joint_pos = 7 + idx_npz  # shift by 7 to get into joint_pos columns
         urdf_to_jointpos_cols_list.append(col_in_joint_pos)
     urdf_to_jointpos_cols = np.array(urdf_to_jointpos_cols_list, dtype=int)
 
@@ -234,8 +228,8 @@ def main(cfg: Config) -> None:
         idx = int(np.clip(frame_idx, 0, T - 1))
 
         # 1) Update robot root pose
-        root_pos = root_pos_seq[idx]       # (3,)
-        root_quat = root_quat_seq[idx]     # (4,) wxyz
+        root_pos = root_pos_seq[idx]  # (3,)
+        root_quat = root_quat_seq[idx]  # (4,) wxyz
 
         robot_root.position = root_pos
         robot_root.wxyz = root_quat
@@ -305,8 +299,8 @@ if __name__ == "__main__":
     cfg = tyro.cli(Config)
     main(cfg)
 
-'''
+"""
 python viser_body_vel_player.py \
 --npz_path ../converted_res/robot_only/sub3_largebox_003_mj.npz \
 --robot_urdf ../models/g1/g1_29dof.urdf
-'''
+"""

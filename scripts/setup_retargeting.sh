@@ -15,7 +15,28 @@ if [[ ! -f $SENTINEL_FILE ]]; then
   # Install miniconda
   if [[ ! -d $CONDA_ROOT ]]; then
     mkdir -p $CONDA_ROOT
-    curl https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -o $CONDA_ROOT/miniconda.sh
+
+    # Detect OS and arch
+    OS_NAME="$(uname -s)"
+    ARCH_NAME="$(uname -m)"
+
+    # Decide installer name based on OS/arch
+    if [[ "$OS_NAME" == "Linux" ]]; then
+      MINICONDA_INSTALLER="Miniconda3-latest-Linux-x86_64.sh"
+    elif [[ "$OS_NAME" == "Darwin" ]]; then
+      if [[ "$ARCH_NAME" == "arm64" ]]; then
+        # Apple Silicon
+        MINICONDA_INSTALLER="Miniconda3-latest-MacOSX-arm64.sh"
+      else
+        # Intel Mac
+        MINICONDA_INSTALLER="Miniconda3-latest-MacOSX-x86_64.sh"
+      fi
+    else
+      echo "Unsupported OS: $OS_NAME"
+      exit 1
+    fi
+
+    curl "https://repo.anaconda.com/miniconda/${MINICONDA_INSTALLER}" -o "$CONDA_ROOT/miniconda.sh"
     bash $CONDA_ROOT/miniconda.sh -b -u -p $CONDA_ROOT
     rm $CONDA_ROOT/miniconda.sh
   fi

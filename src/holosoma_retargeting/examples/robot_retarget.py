@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal, cast
@@ -16,22 +17,19 @@ from typing import Literal, cast
 import numpy as np
 import tyro
 
-
-import sys
-
 src_root = Path(__file__).resolve().parents[2]
 if str(src_root) not in sys.path:
     sys.path.insert(0, str(src_root))
 
-from holosoma_retargeting.config_types.data_type import MotionDataConfig
-from holosoma_retargeting.config_types.retargeter import RetargeterConfig
-from holosoma_retargeting.config_types.retargeting import RetargetingConfig
-from holosoma_retargeting.config_types.robot import RobotConfig
-from holosoma_retargeting.config_types.task import TaskConfig
-from holosoma_retargeting.src.interaction_mesh_retargeter import (
+from holosoma_retargeting.config_types.data_type import MotionDataConfig  # noqa: E402
+from holosoma_retargeting.config_types.retargeter import RetargeterConfig  # noqa: E402
+from holosoma_retargeting.config_types.retargeting import RetargetingConfig  # noqa: E402
+from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
+from holosoma_retargeting.config_types.task import TaskConfig  # noqa: E402
+from holosoma_retargeting.src.interaction_mesh_retargeter import (  # noqa: E402
     InteractionMeshRetargeter,  # type: ignore[import-not-found]
 )
-from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
+from holosoma_retargeting.src.utils import (  # noqa: E402
     augment_object_poses,
     calculate_scale_factor,
     create_new_scene_xml_file,
@@ -274,7 +272,7 @@ def setup_object_data(
     """
     object_scale_normal = np.array([1.0, 1.0, 1.0])
     if object_scale_augmented is None:
-        object_scale_augmented = np.array([1.0, 1.0, 1.2]) # For climbing task augmentation
+        object_scale_augmented = np.array([1.0, 1.0, 1.2])  # For climbing task augmentation
     logger.info("Setting up object data for task: %s", task_type)
 
     if task_type == "robot_only":
@@ -630,13 +628,13 @@ def main(cfg: RetargetingConfig) -> None:
     # Preprocess motion data
     if task_type == "robot_only":
         human_joints = preprocess_motion_data(human_joints, retargeter, toe_names, smpl_scale)
-    elif task_type == "object_interaction":
+    elif task_type in {"object_interaction", "climbing"}:
         human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
-            human_joints, retargeter, toe_names, scale=smpl_scale, object_poses=object_poses,
-        )
-    elif task_type == "climbing":
-        human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
-            human_joints, retargeter, toe_names, scale=smpl_scale, object_poses=object_poses,
+            human_joints,
+            retargeter,
+            toe_names,
+            scale=smpl_scale,
+            object_poses=object_poses,
         )
 
     # Initialize robot pose

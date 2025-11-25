@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+import sys
 
 # Add src to path for direct execution
 import time
@@ -19,19 +20,16 @@ from typing import Literal, cast
 import numpy as np
 import tyro
 
-
-import sys
-
 src_root = Path(__file__).resolve().parents[2]
 if str(src_root) not in sys.path:
     sys.path.insert(0, str(src_root))
 
-from holosoma_retargeting.config_types.data_type import MotionDataConfig
-from holosoma_retargeting.config_types.retargeting import ParallelRetargetingConfig
-from holosoma_retargeting.config_types.robot import RobotConfig
+from holosoma_retargeting.config_types.data_type import MotionDataConfig  # noqa: E402
+from holosoma_retargeting.config_types.retargeting import ParallelRetargetingConfig  # noqa: E402
+from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
 
 # Import reusable functions from robot_retarget.py
-from holosoma_retargeting.examples.robot_retarget import (  # type: ignore[import-not-found]
+from holosoma_retargeting.examples.robot_retarget import (  # type: ignore[import-not-found]  # noqa: E402
     DEFAULT_DATA_FORMATS,
     build_retargeter_kwargs_from_config,
     create_task_constants,
@@ -41,15 +39,13 @@ from holosoma_retargeting.examples.robot_retarget import (  # type: ignore[impor
 )
 
 # Import after path modification
-from holosoma_retargeting.src.interaction_mesh_retargeter import (
+from holosoma_retargeting.src.interaction_mesh_retargeter import (  # noqa: E402
     InteractionMeshRetargeter,  # type: ignore[import-not-found]
 )
-from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]
+from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]  # noqa: E402
     extract_foot_sticking_sequence_velocity,
-    extract_foot_sticking_sequence,
     preprocess_motion_data,
 )
-
 
 # ----------------------------- Constants -----------------------------
 
@@ -153,16 +149,13 @@ def process_single_task(args):
         file_path,
         save_dir,
         task_type,
-        data_format_str,
+        data_format,
         robot_config,
         motion_data_config,
         task_config,
         retargeter,
         augmentation,
     ) = args
-    
-    # Cast to proper Literal type
-    data_format = cast(Literal["lafan", "smplh", "mocap"], data_format_str)
 
     os.makedirs(save_dir, exist_ok=True)
     if task_type == "climbing":
@@ -234,11 +227,7 @@ def process_single_task(args):
         # Preprocess motion data
         if task_type == "robot_only":
             human_joints = preprocess_motion_data(human_joints, retargeter, toe_names, smpl_scale)
-        elif task_type == "object_interaction":
-            human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
-                human_joints, retargeter, toe_names, scale=smpl_scale, object_poses=object_poses
-            )
-        elif task_type == "climbing":
+        elif task_type in {"object_interaction", "climbing"}:
             human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
                 human_joints, retargeter, toe_names, scale=smpl_scale, object_poses=object_poses
             )
@@ -317,7 +306,9 @@ def main(cfg: ParallelRetargetingConfig) -> None:
     task_type = cfg.task_type
 
     # Set defaults based on task type
-    data_format = cfg.data_format if cfg.data_format is not None else DEFAULT_DATA_FORMATS[task_type]
+    data_format: Literal["lafan", "smplh", "mocap"] = cfg.data_format or cast(
+        "Literal['lafan', 'smplh', 'mocap']", DEFAULT_DATA_FORMATS[task_type]
+    )
     save_dir = cfg.save_dir if cfg.save_dir is not None else Path(PARALLEL_SAVE_DIRS[task_type].format(robot=robot))
     data_dir = cfg.data_dir
 
@@ -330,9 +321,7 @@ def main(cfg: ParallelRetargetingConfig) -> None:
         cfg.robot_config = RobotConfig(robot_type=robot)
 
     if cfg.motion_data_config.robot_type != robot or cfg.motion_data_config.data_format != data_format:
-        cfg.motion_data_config = MotionDataConfig(
-            data_format=cast(Literal["lafan", "smplh", "mocap"], data_format), robot_type=robot
-        )
+        cfg.motion_data_config = MotionDataConfig(data_format=data_format, robot_type=robot)
 
     if task_type == "robot_only":
         files = find_files(data_dir, data_format)

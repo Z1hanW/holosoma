@@ -14,15 +14,12 @@ import torch
 import torch.nn.functional as F
 import tyro
 
-
-import sys
-
 src_root = Path(__file__).resolve().parents[2]
 if str(src_root) not in sys.path:
     sys.path.insert(0, str(src_root))
-from holosoma_retargeting.config_types.data_conversion import DataConversionConfig
-from holosoma_retargeting.config_types.data_type import MotionDataConfig
-from holosoma_retargeting.config_types.robot import RobotConfig
+from holosoma_retargeting.config_types.data_conversion import DataConversionConfig  # noqa: E402
+from holosoma_retargeting.config_types.data_type import MotionDataConfig  # noqa: E402
+from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
 
 DynamicState = Tuple[
     torch.Tensor,
@@ -335,13 +332,13 @@ def world_body_velocities(model, data):
             model,
             data,
             mujoco.mjtObj.mjOBJ_BODY,  # object type = body
-            b,                          # body id
+            b,  # body id
             v[b],
-            0,                          # flg_local = 0 -> world orientation
+            0,  # flg_local = 0 -> world orientation
         )
 
-    lin_w = v[:, 3:6]   # [vx, vy, vz] in world frame
-    ang_w = v[:, 0:3]   # [wx, wy, wz] in world frame
+    lin_w = v[:, 3:6]  # [vx, vy, vz] in world frame
+    ang_w = v[:, 0:3]  # [wx, wy, wz] in world frame
     return lin_w, ang_w
 
 
