@@ -251,9 +251,9 @@ Commands for controlling policies during execution:
 
 # Configuration Overrides
 
-## Loading ONNX Checkpoints from WandB
+## Loading ONNX Checkpoints from Wandb
 
-You can load ONNX checkpoints directly from WandB without manually downloading them first. This is useful for quickly testing models from training runs.
+You can load ONNX checkpoints directly from Wandb without manually downloading them first. This is useful for quickly testing models from training runs.
 
 **Syntax:**
 ```bash
@@ -269,7 +269,7 @@ python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29d
     --task.interface eth0
 ```
 
-**Example with WandB HTTPS URL:**
+**Example with Wandb HTTPS URL:**
 ```bash
 python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-loco \
     --task.model-path https://wandb.ai/username/project/runs/abc123/files/model.onnx \
@@ -277,7 +277,7 @@ python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29d
     --task.interface eth0
 ```
 
-The model will be automatically downloaded and cached locally. The entity is your WandB username or organization name.
+The model will be automatically downloaded and cached locally. The entity is your Wandb username or organization name.
 
 ## Finding Your Network Interface
 
@@ -319,10 +319,17 @@ python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:t1-29d
 
 **Note**: When control gains are not specified, they will be automatically loaded from the ONNX model metadata. This is the recommended approach as it ensures the gains match those used during training.
 
+## Observation History Length (> 1)
 
+If a policy was trained with stacked observations (e.g., history length 4), you must pass the same history length at inference time so the observation tensor matches the model's expected input size.
 
-# Known Issues
+Example:
 
-## History Length > 1 Not Supported
+```bash
+python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-wbt \
+    --task.model-path <path-to-model>.onnx \
+    --task.interface eth0 \
+    --observation.history_length_dict.actor_obs=4
+```
 
-**Warning**: Policies trained with `history_length > 1` are currently not supported for inference. This is a known limitation and will be fixed soon.
+The override updates the `actor_obs` buffer before the ONNX session is initialized, so any policy (locomotion or WBT) can run with longer observation histories as long as the underlying model was trained that way.

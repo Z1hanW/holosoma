@@ -189,6 +189,20 @@ python src/holosoma/holosoma/train_agent.py \
     --observation.groups.actor-obs.enable-noise=False
 ```
 
+### Observation History Length
+
+Some policies benefit from stacking multiple timesteps of observations. You can increase the history length used during training with:
+
+```bash
+source scripts/source_isaacgym_setup.sh
+python src/holosoma/holosoma/train_agent.py \
+    exp:g1-29dof-fast-sac \
+    simulator:isaacgym \
+    --observation.groups.actor_obs.history-length 4
+```
+
+Make sure to pass the same history length when running inference so the exported ONNX policy receives inputs with the correct shape.
+
 ### Curriculum Learning
 
 ```bash

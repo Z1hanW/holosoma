@@ -28,7 +28,7 @@ from holosoma_inference.utils.wandb import load_checkpoint
 
 class BasePolicy:
     """
-    Base policy class for HumanoidLab deployment on humanoid robots.
+    Base policy class for Holosoma deployment on humanoid robots.
 
     Supports both simulation and real robot deployment with keyboard/joystick controls.
     """

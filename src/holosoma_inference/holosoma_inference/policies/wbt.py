@@ -191,7 +191,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         # get initial command and ref quat xyzw
         time_step = np.zeros((1, 1), dtype=np.float32)
-        obs = np.zeros((1, 154), dtype=np.float32)
+
+        # Use configured observation dimensions (including history) instead of a hard-coded value.
+        actor_obs_template = self.obs_buf_dict.get("actor_obs")
+        if actor_obs_template is None:
+            raise ValueError("Observation group 'actor_obs' must be configured for WBT policy.")
+        obs = actor_obs_template.copy()
         input_feed = {"obs": obs, "time_step": time_step}
         outputs = self.onnx_policy_session.run(["joint_pos", "joint_vel", "ref_quat_xyzw"], input_feed)
 
