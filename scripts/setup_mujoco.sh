@@ -180,6 +180,9 @@ if [[ "$INSTALL_WARP" == "true" ]] && [[ ! -f $WARP_SENTINEL_FILE ]]; then
   # Ensure conda environment is activated
   source $CONDA_ROOT/bin/activate hsmujoco
   
+  # Hack, install onnxscript into env here until we have time to test at pyproject.toml dep
+  pip install onnxscript
+
   # Check NVIDIA driver version (required for CUDA 12.4+)
   MIN_DRIVER_VERSION="550.54.14"
   DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1)
