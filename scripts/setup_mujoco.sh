@@ -5,6 +5,10 @@ set -e
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 ROOT_DIR=$(dirname "$SCRIPT_DIR")
 
+# MuJoCo Warp version to install -- the repo is missing version tags and branches
+# Arbitrarily chosen from mainline at the time we've ~tested against
+MUJOCO_WARP_COMMIT="09ec1da"
+
 # Parse command-line arguments
 INSTALL_WARP=true  # Default: install warp (GPU-accelerated)
 
@@ -176,17 +180,17 @@ fi
 if [[ "$INSTALL_WARP" == "true" ]] && [[ ! -f $WARP_SENTINEL_FILE ]]; then
   echo ""
   echo "Installing MuJoCo Warp (GPU acceleration)..."
-  
+
   # Ensure conda environment is activated
   source $CONDA_ROOT/bin/activate hsmujoco
-  
+
   # Hack, install onnxscript into env here until we have time to test at pyproject.toml dep
   pip install onnxscript
 
   # Check NVIDIA driver version (required for CUDA 12.4+)
   MIN_DRIVER_VERSION="550.54.14"
   DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1)
-  
+
   # Check if driver exists and meets minimum version
   if [ -z "$DRIVER_VERSION" ] || [[ "$DRIVER_VERSION" < "$MIN_DRIVER_VERSION" ]]; then
     echo ""
@@ -215,17 +219,18 @@ if [[ "$INSTALL_WARP" == "true" ]] && [[ ! -f $WARP_SENTINEL_FILE ]]; then
     echo "(or use --no-warp for CPU-only installation)"
     exit 1
   fi
-  
+
   echo "✓ NVIDIA driver version: $DRIVER_VERSION (meets minimum $MIN_DRIVER_VERSION)"
-  
+
   if [[ ! -d $WORKSPACE_DIR/mujoco_warp ]]; then
-    git clone https://github.com/google-deepmind/mujoco_warp.git $WORKSPACE_DIR/mujoco_warp
+    git clone https://github.com/google-deepmind/mujoco_warp.git $WORKSPACE_DIR/mujoco_warp && \
+      git -C $WORKSPACE_DIR/mujoco_warp checkout ${MUJOCO_WARP_COMMIT}
   fi
   pip install uv
   uv pip install -e $WORKSPACE_DIR/mujoco_warp[dev,cuda]
-  
+
   touch $WARP_SENTINEL_FILE
-  
+
   echo ""
   echo "=========================================="
   echo "MuJoCo Warp installation completed!"

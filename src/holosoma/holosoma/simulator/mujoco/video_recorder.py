@@ -85,6 +85,25 @@ class MuJoCoVideoRecorder(VideoRecorderInterface):
         else:
             raise RuntimeError(f"Failed to setup video recording camera FOV: {self.config}")
 
+        # Set near clipping plane to prevent robot clipping with large terrains
+        # The actual near distance = znear * model.stat.extent
+        # For camera_near_plane=0.01m and typical extent, this gives good results
+        if hasattr(self.simulator.root_model, "vis") and hasattr(self.simulator.root_model.vis, "map"):
+            # Store original value for reference
+            znear = 0.01
+            original_znear = self.simulator.root_model.vis.map.znear
+
+            # Calculate znear multiplier: we want actual_near = camera_near_plane
+            # actual_near = znear * extent, so znear = camera_near_plane / extent
+            extent = self.simulator.root_model.stat.extent
+            self.simulator.root_model.vis.map.znear = znear / extent
+
+            logger.info(
+                f"Video camera near plane: {znear}m "
+                f"(znear: {original_znear:.4f} -> {self.simulator.root_model.vis.map.znear:.4f}, "
+                f"extent: {extent:.2f}m)"
+            )
+
     def _resolve_tracking_body(self) -> None:
         """MuJoCo-specific tracking body resolution.
 

@@ -11,6 +11,27 @@ import torch
 from holosoma.config_types.robot import RobotConfig
 from holosoma.envs.base_task.base_task import BaseTask
 from holosoma.utils.module_utils import get_holosoma_root
+from holosoma.utils.simulator_config import SimulatorType, get_simulator_type
+
+
+def get_opset_version() -> int:
+    """Get appropriate ONNX opset version based on the current simulator.
+
+    Returns 18 for mujoco-warp due to more recent torch versions, 13 for all other simulators (default).
+
+    Returns
+    -------
+    int
+        ONNX opset version: 18 if running MuJoCo, 13 otherwise
+    """
+    try:
+        simulator_type = get_simulator_type()
+        if simulator_type == SimulatorType.MUJOCO:
+            return 18
+        return 13
+    except RuntimeError:
+        # Simulator type not set yet, return default
+        return 13
 
 
 def _find_input_dim_from_module(module: torch.nn.Module) -> int:
@@ -91,6 +112,15 @@ def export_policy_as_onnx(wrapper, onnx_file_path: str, example_obs_dict):
     # Ensure parent directory exists
     os.makedirs(Path(onnx_file_path).parent, exist_ok=True)
     example_input_list = example_obs_dict["actor_obs"]
+
+    # --- SUPPRESS LOGS START ---
+    # Silence onnxscript and onnx_ir debug/info noise
+    import logging
+
+    for logger_name in ["onnxscript", "onnx_ir", "torch.onnx"]:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+    # --- SUPPRESS LOGS END ---
+
     torch.onnx.export(
         wrapper,
         example_input_list,  # Pass x1 and x2 as separate inputs
@@ -98,7 +128,7 @@ def export_policy_as_onnx(wrapper, onnx_file_path: str, example_obs_dict):
         verbose=False,
         input_names=["actor_obs"],  # Specify the input names
         output_names=["action"],  # Name the output
-        opset_version=13,  # Specify the opset version, if needed
+        opset_version=get_opset_version(),  # 18 for MuJoCo, 13 otherwise
     )
 
 
@@ -124,7 +154,7 @@ def export_multi_agent_decouple_policy_as_onnx(wrapper, path, exported_policy_na
         verbose=False,
         input_names=[f"actor_obs_{body_key}" for body_key in body_keys],
         output_names=["action"],
-        opset_version=13,
+        opset_version=get_opset_version(),  # 18 for MuJoCo, 13 otherwise
     )
 
 
@@ -197,7 +227,7 @@ class _OnnxMotionPolicyExporter(torch.nn.Module):
             (obs, time_step),
             onnx_file_path,
             export_params=True,
-            opset_version=13,
+            opset_version=get_opset_version(),  # 18 for MuJoCo, 13 otherwise
             verbose=False,
             input_names=["obs", "time_step"],
             output_names=["actions", "joint_pos", "joint_vel", "ref_pos_xyz", "ref_quat_xyzw"],

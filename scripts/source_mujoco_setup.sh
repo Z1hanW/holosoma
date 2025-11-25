@@ -19,6 +19,13 @@ export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:${CONDA_ROOT}/envs/hsmujoco/lib
 if python -c "import mujoco" 2>/dev/null; then
     echo "MuJoCo environment activated successfully"
     echo "MuJoCo version: $(python -c 'import mujoco; print(mujoco.__version__)')"
+    echo "PyTorch version: $(python -c 'import torch; print(torch.__version__)')"
+
+    # Print mujoco-warp commit if installed
+    if python -c "import mujoco_warp" 2>/dev/null; then
+        MUJOCO_WARP_COMMIT=$(git -C ${WORKSPACE_DIR}/mujoco_warp rev-parse --short HEAD 2>/dev/null || echo "unknown")
+        echo "MuJoCo Warp commit: ${MUJOCO_WARP_COMMIT}"
+    fi
 else
     echo "Warning: MuJoCo environment activation may have issues"
 fi

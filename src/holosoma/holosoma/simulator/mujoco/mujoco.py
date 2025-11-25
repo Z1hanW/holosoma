@@ -889,7 +889,7 @@ class MuJoCo(BaseSimulator):
         self.backend.step()
 
         # Call video recorder capture frame if recording is active
-        if self.video_recorder:
+        if self.video_recorder and self.video_recorder.is_recording:
             self.capture_video_frame()
 
     def get_actor_states_by_index(self, indices: ActorIndices) -> ActorStates:
