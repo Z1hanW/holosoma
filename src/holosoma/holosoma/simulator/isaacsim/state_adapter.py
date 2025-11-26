@@ -122,7 +122,9 @@ class IsaacSimStateAdapter:
             # Individual rigid objects - convert to wxyz and apply env origins
             rigid_object = self._scene.rigid_objects[obj_name]
             converted_states = fullstate_xyzw_to_wxyz(states)
-            converted_states[:, 0:3] += self._scene.env_origins[env_ids]  # Apply environment origins
+            # For now, do NOT apply env origins as WBT does this itself. We need to update WBT first
+            # before uncommenting this.
+            # converted_states[:, 0:3] += self._scene.env_origins[env_ids]  # Apply environment origins
             rigid_object.write_root_pose_to_sim(converted_states[:, :7], env_ids)
             rigid_object.write_root_velocity_to_sim(converted_states[:, 7:], env_ids)
 

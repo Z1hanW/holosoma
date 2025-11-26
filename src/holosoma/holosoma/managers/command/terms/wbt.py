@@ -662,6 +662,7 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     @property
     def object_pos_w(self) -> torch.Tensor:
+        # Applies env origins, but ideally we should rely on the simulator
         return self.motion.object_pos_w[self.time_steps] + self._env.simulator.scene.env_origins
 
     @property
