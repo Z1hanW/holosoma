@@ -23,9 +23,9 @@ src/
 
 ## Documentation
 
-- [Training Guide](src/holosoma/README.md) - Detailed training instructions and configurations
-- [Inference Guide](src/holosoma_inference/holosoma_inference/README.md) - Deployment and inference instructions
-- [Retargeting Guide](src/holosoma_retargeting/README.md) - Motion retargeting workflow
+- **[Training Guide](src/holosoma/README.md)** - Train locomotion and whole-body tracking policies in IsaacGym/IsaacSim
+- **[Inference & Deployment Guide](src/holosoma_inference/README.md)** - Deploy policies to real robots or evaluate in MuJoCo simulation
+- **[Retargeting Guide](src/holosoma_retargeting/README.md)** - Convert human motion capture data to robot motions
 
 ## Quick Start
 
@@ -51,7 +51,7 @@ bash scripts/setup_inference.sh
 bash scripts/setup_retargeting.sh
 ```
 
-### Training Example (Locomotion)
+### Training
 
 Train a G1 robot with FastSAC on IsaacGym:
 
@@ -64,28 +64,16 @@ python src/holosoma/holosoma/train_agent.py \
     --training.seed 1
 ```
 
-### Sim-to-Sim Evaluation
+See the [Training Guide](src/holosoma/README.md) for more examples and configuration options.
 
-Run trained policy in Mujoco with joystick control:
+### Deployment & Evaluation
 
-```bash
-# Terminal 1: Start simulation
-source scripts/source_mujoco_setup.sh
-python src/holosoma/holosoma/run_sim.py \
-    robot:g1-29dof \
-    --simulator.config.bridge.enabled=True \
-    --simulator.config.bridge.use-joystick=True
+After training, deploy your policies:
 
-# Terminal 2: This is handled by holosoma_inference - see [inference README](src/holosoma_inference/holosoma_inference/README.md)
-source scripts/source_inference_setup.sh
-python src/holosoma_inference/holosoma_inference/run_policy.py \
-    inference:g1-29dof-loco \
-    --task.model-path=src/holosoma_inference/holosoma_inference/models/loco/g1_29dof/fastsac_g1_29dof.onnx \
-    --task.use-joystick \
-    --task.interface=lo
-```
+- **Real Robot**: See [Real Robot Locomotion](src/holosoma_inference/docs/workflows/real-robot-locomotion.md) or [Real Robot WBT](src/holosoma_inference/docs/workflows/real-robot-wbt.md)
+- **MuJoCo Simulation**: See [Sim-to-Sim Locomotion](src/holosoma_inference/docs/workflows/sim-to-sim-locomotion.md) or [Sim-to-Sim WBT](src/holosoma_inference/docs/workflows/sim-to-sim-wbt.md)
 
-See [Policy Controls](src/holosoma_inference/README.md#policy-controls) for keyboard and joystick commands.
+Or browse all deployment options in the [Inference & Deployment Guide](src/holosoma_inference/README.md).
 
 ## Security
 

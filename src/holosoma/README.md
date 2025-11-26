@@ -34,7 +34,7 @@ python src/holosoma/holosoma/train_agent.py \
     --training.seed 1
 ```
 
-Once checkpoints are saved to Wandb or locally, you can evaluate these locomotion policies using either the [Sim-to-Sim Evaluation](#sim-to-sim-evaluation) workflow or the [In-Training Evaluation](#in-training-evaluation) flow described below.
+Once checkpoints are saved, you can evaluate policies using [In-Training Evaluation](#in-training-evaluation) (same simulator as training) or cross-simulator evaluation in MuJoCo (see [holosoma_inference](../holosoma_inference/README.md)).
 
 ### Whole-Body Tracking
 
@@ -63,43 +63,27 @@ python src/holosoma/holosoma/train_agent.py \
     --command.setup_terms.motion_command.params.motion_config.motion_file="holosoma/data/motions/g1_29dof/whole_body_tracking/<your file>.npz"
 ```
 
-Just like locomotion checkpoints, whole-body tracking checkpoints saved in Wandb or on disk can be evaluated via [Sim-to-Sim Evaluation](#sim-to-sim-evaluation) (Mujoco-only) or [In-Training Evaluation](#in-training-evaluation) (IsaacSim-only), depending on whether you need cross-simulator testing or same-simulator validation.
+Once checkpoints are saved, you can evaluate policies using [In-Training Evaluation](#in-training-evaluation) (same simulator as training) or cross-simulator evaluation in MuJoCo (see [holosoma_inference](../holosoma_inference/README.md)).
 
-## Sim-to-Sim Evaluation
+---
 
-Run trained policies in Mujoco simulation:
+## Evaluation
 
-```bash
-# Terminal 1: Start Mujoco simulation
-source scripts/source_mujoco_setup.sh
-python src/holosoma/holosoma/run_sim.py robot:t1-29dof-waist-wrist
-
-# Terminal 2: This is handled by holosoma_inference - see inference README
-```
-
-### Mujoco Controls
-
-**Gantry:**
-- `7`: Lift the gantry
-- `8`: Lower the gantry
-- `9`: Disable/remove the gantry
-
-**General:**
-- `Backspace`: Reset simulation
-
-## In-Training Evaluation
+### In-Training Evaluation
 
 For evaluating policies with the exact same configuration used during training (same simulator, environment settings, etc.):
 
 ```bash
 # Evaluate checkpoint from Wandb
 python src/holosoma/holosoma/eval_agent.py \
-    --wandb_run_path=<ENTITY>/<PROJECT_NAME>/<RUN_NAME> \
+    --wandb_run_path=<ENTITY>/<PROJECT>/<RUN_ID> \
     --checkpoint=<CHECKPOINT_NAME>
+# e.g., --wandb_run_path=username/fastsac-t1-locomotion/abcdefgh --checkpoint=model_0010000.pt
 
 # Evaluate local checkpoint
 python src/holosoma/holosoma/eval_agent.py \
     --checkpoint=<CHECKPOINT_PATH>
+# e.g., --checkpoint=/home/username/checkpoints/fastsac-t1-locomotion/model_0010000.pt
 ```
 
 This evaluation mode:
@@ -107,7 +91,13 @@ This evaluation mode:
 - Runs evaluation in the same simulator and environment as training
 - Can export policies to ONNX format (via `--training.export_onnx=True`)
 
-**Note**: For sim-to-sim evaluation (testing policies across simulators), use the workflow described in the "Sim-to-Sim Evaluation" section above. ONNX policies are typically exported alongside `.pt` checkpoints during training, but can also be generated using this script.
+### Cross-Simulator Evaluation (MuJoCo)
+
+For testing trained policies in MuJoCo simulation or deploying to real robots, see the [holosoma_inference documentation](../holosoma_inference/README.md). This covers:
+- Sim-to-sim evaluation (IsaacGym/IsaacSim → MuJoCo)
+- Real robot deployment (both locomotion and WBT)
+
+**Note**: ONNX policies are typically exported alongside `.pt` checkpoints during training, but can also be generated using the in-training evaluation script above.
 
 ## Advanced Configuration
 
