@@ -144,6 +144,9 @@ class MuJoCo(BaseSimulator):
         # World ID for multi-environment visualization (which environment to view)
         self.current_world_id: int = 0
 
+        # Text overlay visibility toggle
+        self.show_text_overlay: bool = True
+
         # Command system for keyboard/joystick controls
         # Initialize commands tensor matching IsaacGym format:
         #    [vx, vy, vz, yaw_rate, walk_stand, waist_yaw, ..., height, ...]
@@ -1302,6 +1305,38 @@ class MuJoCo(BaseSimulator):
         self.viewer = mujoco.viewer.launch_passive(self.root_model, self.root_data, key_callback=self._key_callback)
         logger.info("=== Viewer setup completed with keyboard callback ===")
 
+    def _add_text_overlay(
+        self,
+        text: str,
+        font: int | None = None,
+        gridpos: int | None = None,
+        text2: str = "",
+    ) -> None:
+        """Add screen-space text overlay (HUD) to the MuJoCo viewer.
+
+        This creates a fixed screen-space overlay that doesn't move with the camera,
+        similar to a heads-up display (HUD).
+
+        Parameters
+        ----------
+        text : str
+            Primary text to display (left column).
+        font : Optional[int]
+            Font scale from mujoco.mjtFontScale enum. If None, uses default (150% scale).
+            Options: mjFONTSCALE_50, mjFONTSCALE_100, mjFONTSCALE_150, etc.
+        gridpos : Optional[int]
+            Grid position from mujoco.mjtGridPos enum. If None, uses TOPLEFT.
+            Options: mjGRID_TOPLEFT, mjGRID_TOPRIGHT, mjGRID_BOTTOMLEFT, mjGRID_BOTTOMRIGHT.
+        text2 : str
+            Secondary text to display (right column), defaults to empty string.
+        """
+        if self.viewer is None:
+            return
+
+        # Use the passive viewer's set_texts method for screen-space HUD overlay
+        # Format: (font, gridpos, text1, text2)
+        self.viewer.set_texts((font, gridpos, text, text2))
+
     def render(self, sync_frame_time: bool = True) -> None:
         """Render simulation to the viewer
 
@@ -1317,6 +1352,24 @@ class MuJoCo(BaseSimulator):
         # Sync GPU -> CPU for WarpBackend with current world_id
         # (no-op for ClassicBackend which returns same data)
         self.root_data = self.backend.get_render_data(world_id=self.current_world_id)
+
+        # Add text overlay before syncing (if enabled)
+        if self.show_text_overlay:
+            # Determine virtual gantry status
+            if self.virtual_gantry and self.virtual_gantry.enabled:
+                gantry_status = "active"
+            else:
+                gantry_status = "inactive"
+
+            self._add_text_overlay(f"Virtual gantry is {gantry_status} \n \
+            Press '7' to raise it \n \
+            Press '8' to lower it \n \
+            Press '9' to toggle it \n \
+            Press backspace to reset the environment \n \
+            Press 'g' to hide this menu")
+        else:
+            # Clear text overlays when disabled
+            self.viewer.set_texts([])
 
         self.viewer.sync()
         if self.debug_viz_enabled:
@@ -1374,6 +1427,14 @@ class MuJoCo(BaseSimulator):
             GLFW keycode for the pressed key.
         """
         if self.commands is None:
+            return
+
+        # Handle text overlay toggle
+        # G key (71): Toggle text overlay visibility
+        if keycode == 71:  # 'G' key
+            self.show_text_overlay = not self.show_text_overlay
+            status = "ON" if self.show_text_overlay else "OFF"
+            logger.info(f"Text overlay: {status}")
             return
 
         # Handle world_id toggling for multi-environment visualization (WarpBackend only)
