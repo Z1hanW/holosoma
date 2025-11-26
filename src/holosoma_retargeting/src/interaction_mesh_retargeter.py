@@ -52,6 +52,7 @@ class InteractionMeshRetargeter:
         step_size: float = 0.2,
         collision_detection_threshold: float = 0.1,
         penetration_tolerance: float = 1e-3,
+        foot_sticking_tolerance: float = 1e-3,
         visualize: bool = False,
         debug: bool = False,
         w_nominal_tracking_init: float = 5.0,
@@ -74,6 +75,7 @@ class InteractionMeshRetargeter:
             collision_detection_threshold: only start to detect collision
             when the distance is smaller than this threshold.
             penetration_tolerance: tolerance for penetration when enforcing non-penetration constraints.
+            foot_sticking_tolerance: tolerance for foot sticking constraints in x, y.
             nominal_tracking_tau: the time constant for the nominal tracking cost.
         """
 
@@ -99,9 +101,7 @@ class InteractionMeshRetargeter:
         self.laplacian_weights = 10
         self.smooth_weight = 0.2
         # Tolerance for foot sticking constraints in x, y.
-        self.foot_sticking_tolerance = 1e-3
-        # The foot is in the air if z is larger than z_min + smpl_contact_threshold_relative
-        self.smpl_contact_threshold_relative = 0.01
+        self.foot_sticking_tolerance = foot_sticking_tolerance
 
         # Setup visualization if requested
         if self.visualize:
@@ -731,17 +731,16 @@ class InteractionMeshRetargeter:
             kpts_handle_list.append(kpts_handle)
         elif len(p.shape) == 2:
             # Multiple points
-            for i in range(p.shape[0]):
-                kpts_handle = self.server.scene.add_mesh_simple(
-                    f"/{name}/{i}",
-                    vertices=vertices,
-                    faces=faces,
-                    position=p[i],
-                    color=color,
-                    opacity=opacity,
-                )
-
-                kpts_handle_list.append(kpts_handle)
+            kpts_handle = self.server.scene.add_batched_meshes_simple(
+                f"/{name}",
+                vertices=vertices,
+                faces=faces,
+                batched_positions=p,
+                batched_wxyzs=np.tile(np.array([1, 0, 0, 0]), (p.shape[0], 1)),
+                batched_colors=color,
+                opacity=opacity,
+            )
+            kpts_handle_list.append(kpts_handle)
 
         return kpts_handle_list
 

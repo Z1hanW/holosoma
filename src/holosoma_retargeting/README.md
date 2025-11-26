@@ -55,12 +55,12 @@ python extract_global_positions.py --input_dir DATA_FOLDER_PATH/lafan1 --output_
 
 #### Single sequence retargeting on LAFAN.
 ```
-python examples/robot_retarget.py --data_path demo_data/lafan --task-type robot_only --task_name dance2_subject1 --data_format lafan --task-config.ground-range -10 10 --save_dir demo_results/g1/robot_only/lafan --retargeter.debug --retargeter.visualize
+python examples/robot_retarget.py --data_path demo_data/lafan --task-type robot_only --task_name dance2_subject1 --data_format lafan --task-config.ground-range -10 10 --save_dir demo_results/g1/robot_only/lafan --retargeter.debug --retargeter.visualize --retargeter.foot-sticking-tolerance 0.02
 ```
 
 #### Batch processing for motion retargeting on LAFAN.
 ```
-python examples/parallel_robot_retarget.py --data-dir demo_data/lafan --task-type robot_only  --data_format lafan --save_dir demo_results_parallel/g1/robot_only/lafan --task-config.object-name ground --task-config.ground-range -10 10
+python examples/parallel_robot_retarget.py --data-dir demo_data/lafan --task-type robot_only  --data_format lafan --save_dir demo_results_parallel/g1/robot_only/lafan --task-config.object-name ground --task-config.ground-range -10 10 --retargeter.foot-sticking-tolerance 0.02
 ```
 
 ## Check visualizations of saved retargeting results

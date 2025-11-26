@@ -29,6 +29,9 @@ class RetargeterConfig:
     penetration_tolerance: float = 0.001
     """Tolerance for penetration when enforcing non-penetration constraints."""
 
+    foot_sticking_tolerance: float = 1e-3
+    """Tolerance for foot sticking constraints in x, y."""
+
     step_size: float = 0.2
     """Trust region for each SQP iteration."""
 

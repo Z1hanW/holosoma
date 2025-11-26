@@ -434,6 +434,7 @@ def build_retargeter_kwargs_from_config(
         "activate_obj_non_penetration": retargeter_config.activate_obj_non_penetration,
         "activate_foot_sticking": retargeter_config.activate_foot_sticking,
         "penetration_tolerance": retargeter_config.penetration_tolerance,
+        "foot_sticking_tolerance": retargeter_config.foot_sticking_tolerance,
         "step_size": retargeter_config.step_size,
         "visualize": retargeter_config.visualize,
         "debug": retargeter_config.debug,
