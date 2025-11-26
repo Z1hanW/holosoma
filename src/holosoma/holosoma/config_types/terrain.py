@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import field
+from enum import Enum
 
 from pydantic.dataclasses import dataclass
-from enum import Enum
 
 
 class MeshType(str, Enum):
@@ -112,6 +112,11 @@ class TerrainTermCfg:
 
     num_cols: int = 20
     """Number of terrain columns (terrain types)."""
+
+    randomize_spawn: bool = True
+    """Whether to randomize spawn difficulty level (row) during env origin sampling.
+    When True (default), robots are placed at random rows for curriculum learning during training.
+    When False, all robots are placed at row 0 (easiest terrain) for deterministic evaluation."""
 
     # Dictionary keys must match terrain generation function names (without '_terrain_func' suffix)
     # See terrain.py for available terrain types and their corresponding functions

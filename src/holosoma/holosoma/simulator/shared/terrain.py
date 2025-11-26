@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 import trimesh
+
 from holosoma.config_types.terrain import TerrainTermCfg
 from holosoma.simulator.shared.terrain_types import TerrainInterface
 from holosoma.utils import terrain_utils
@@ -183,9 +184,11 @@ class Terrain(TerrainInterface):
         vertices = self._mesh.vertices
         if vertices.size > 0:
             row_indices = np.clip(
-                ((vertices[:, 0] - min_corner[0]) / tile_length).astype(np.int64), 0, self._num_rows - 1)
+                ((vertices[:, 0] - min_corner[0]) / tile_length).astype(np.int64), 0, self._num_rows - 1
+            )
             col_indices = np.clip(
-                ((vertices[:, 1] - min_corner[1]) / tile_width).astype(np.int64), 0, self._num_cols - 1)
+                ((vertices[:, 1] - min_corner[1]) / tile_width).astype(np.int64), 0, self._num_cols - 1
+            )
             np.maximum.at(heights, (row_indices, col_indices), vertices[:, 2])
 
         return np.stack(
@@ -267,15 +270,16 @@ class Terrain(TerrainInterface):
         end_y = self._border + (j + 1) * self._width_per_env_pixels
         self._height_field_raw[start_x:end_x, start_y:end_y] = terrain.height_field_raw
 
+        # Origin is center of the tile, not the corner.
         env_origin_x = (i + 0.5) * self._env_length
         env_origin_y = (j + 0.5) * self._env_width
+
         x1 = int((self._env_length / 2.0 - 0.5) / terrain.horizontal_scale)
         x2 = int((self._env_length / 2.0 + 0.5) / terrain.horizontal_scale)
         y1 = int((self._env_width / 2.0 - 0.5) / terrain.horizontal_scale)
         y2 = int((self._env_width / 2.0 + 0.5) / terrain.horizontal_scale)
         env_origin_z = np.max(terrain.height_field_raw[x1:x2, y1:y2]) * terrain.vertical_scale
         self._env_origins[i, j] = [env_origin_x, env_origin_y, env_origin_z]
-
 
     def _flat_terrain_func(self, terrain: Any, difficulty: float) -> None:
         """Create a completely flat terrain with zero height everywhere.

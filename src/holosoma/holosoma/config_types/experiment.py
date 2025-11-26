@@ -92,6 +92,8 @@ class EvalOverridesConfig:
     num_envs: int = 1
     disable_logger: bool = True
     max_episode_length_s: float = 100000.0
+    randomize_spawn: bool = False
+    """Use deterministic spawn at tile (0,0) for reproducible evaluation."""
 
 
 @dataclass(frozen=True)
@@ -115,7 +117,9 @@ class ExperimentConfig:
     ] = holosoma.config_values.terrain.terrain_locomotion_plane
     observation: Annotated[
         ObservationManagerCfg | None,
-        tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.observation.DEFAULTS)),
+        tyro.conf.arg(
+            constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.observation.DEFAULTS)
+        ),
     ] = holosoma.config_values.observation.none
     action: Annotated[
         ActionManagerCfg | None,
@@ -127,7 +131,9 @@ class ExperimentConfig:
     ] = holosoma.config_values.reward.none
     termination: Annotated[
         TerminationManagerCfg | None,
-        tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.termination.DEFAULTS)),
+        tyro.conf.arg(
+            constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.termination.DEFAULTS)
+        ),
     ] = holosoma.config_values.termination.none
     randomization: Annotated[
         RandomizationManagerCfg | None,
@@ -141,7 +147,9 @@ class ExperimentConfig:
     ] = holosoma.config_values.command.none
     curriculum: Annotated[
         CurriculumManagerCfg | None,
-        tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.curriculum.DEFAULTS)),
+        tyro.conf.arg(
+            constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.curriculum.DEFAULTS)
+        ),
     ] = holosoma.config_values.curriculum.none
     robot: Annotated[
         RobotConfig,
@@ -173,6 +181,13 @@ class ExperimentConfig:
     def get_eval_config(self) -> ExperimentConfig:
         return dataclasses.replace(
             self,
+            terrain=dataclasses.replace(
+                self.terrain,
+                terrain_term=dataclasses.replace(
+                    self.terrain.terrain_term,
+                    randomize_spawn=self.eval_overrides.randomize_spawn,
+                ),
+            ),
             simulator=dataclasses.replace(
                 self.simulator,
                 config=dataclasses.replace(
