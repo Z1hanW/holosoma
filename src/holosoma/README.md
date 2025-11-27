@@ -43,17 +43,17 @@ Train robots to track full-body motion sequences.
 **Note**: Currently only supported for Unitree G1 / IsaacSim.
 
 ```bash
-# G1 with PPO (default)
-source scripts/source_isaacsim_setup.sh
-python src/holosoma/holosoma/train_agent.py \
-    logger:wandb \
-    exp:g1-29dof-wbt
-
 # G1 with FastSAC
 source scripts/source_isaacsim_setup.sh
 python src/holosoma/holosoma/train_agent.py \
-    logger:wandb \
-    exp:g1-29dof-wbt-fast-sac
+    exp:g1-29dof-wbt-fast-sac \
+    logger:wandb
+
+# G1 with PPO
+source scripts/source_isaacsim_setup.sh
+python src/holosoma/holosoma/train_agent.py \
+    exp:g1-29dof-wbt \
+    logger:wandb
 
 # Custom motion file
 source scripts/source_isaacsim_setup.sh
@@ -102,6 +102,8 @@ For testing trained policies in MuJoCo simulation or deploying to real robots, s
 ## Advanced Configuration
 
 The training system uses a hierarchical configuration system. The `exp` config serves as the main entry point with default configurations tuned for each algorithm and robot. You can customize training by overriding parameters on the command line.
+
+> **Tip**: When composing Tyro configs, pass the `exp:<name>` preset before any other config fragments (e.g., `logger:wandb`). Tyro expects the base experiment to be declared first, and reversing the order can lead to confusing resolution errors.
 
 ### Logging with Weights & Biases
 
