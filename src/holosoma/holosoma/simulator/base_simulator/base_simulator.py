@@ -206,6 +206,16 @@ class BaseSimulator:
         """
         raise NotImplementedError("The 'setup' method must be implemented in subclasses.")
 
+    def prepare_manager_fields(self, **managers) -> None:
+        """Scan managers for field requirements and prepare them.
+
+        Parameters
+        ----------
+        **managers : Any
+            Manager instances to scan for field requirements.
+        """
+        # default is no-op
+
     # ----- Terrain Setup Methods -----
 
     def setup_terrain(self):
@@ -421,7 +431,7 @@ class BaseSimulator:
 
         try:
             # Conditional import to avoid SDK dependencies
-            from holosoma.simulator.shared.simulator_bridge import SimulatorBridge  # noqa: PLC0415 -- deferred
+            from holosoma.simulator.shared.simulator_bridge import SimulatorBridge
 
             self.bridge = SimulatorBridge(self, self.simulator_config.bridge)
             logger.info("Bridge system initialized successfully")

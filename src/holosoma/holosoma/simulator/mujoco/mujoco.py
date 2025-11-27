@@ -6,18 +6,19 @@ implementations for terrain rendering, contact detection, and physics simulation
 
 from __future__ import annotations
 
+import mujoco
+import mujoco.viewer
 import numpy as np
 import torch
 from loguru import logger
 
-import mujoco
-import mujoco.viewer
 from holosoma.config_types.full_sim import FullSimConfig
 from holosoma.config_types.simulator import MujocoBackend
 from holosoma.managers.terrain.manager import TerrainManager
 from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
 from holosoma.simulator.mujoco.backends import WARP_AVAILABLE, ClassicBackend, WarpBackend
 from holosoma.simulator.mujoco.command_registry import CommandRegistry
+from holosoma.simulator.mujoco.fields import prepare_fields, prepare_manager_fields
 from holosoma.simulator.mujoco.scene_manager import MujocoSceneManager
 from holosoma.simulator.mujoco.tensor_views import (
     create_base_linear_acceleration_view,
@@ -742,6 +743,30 @@ class MuJoCo(BaseSimulator):
         self._rigid_body_ang_vel = torch.zeros(
             self.num_envs, self.num_bodies, 3, device=self.sim_device, dtype=torch.float32
         )
+
+    def prepare_randomization_fields(self, field_names: list[str]) -> None:
+        """Prepare model fields for per-environment randomization.
+
+        Delegates to field_preparation.prepare_fields().
+
+        Parameters
+        ----------
+        field_names : list[str]
+            List of MuJoCo field names to expand for per-environment use.
+        """
+        prepare_fields(self, field_names)
+
+    def prepare_manager_fields(self, **managers) -> None:
+        """Scan managers for field requirements and prepare them.
+
+        Delegates to field_preparation.prepare_manager_fields().
+
+        Parameters
+        ----------
+        **managers : Any
+            Manager instances to scan for field requirements.
+        """
+        prepare_manager_fields(self, **managers)
 
     def refresh_sim_tensors(self) -> None:
         """Refresh simulation tensors with actual robot data.

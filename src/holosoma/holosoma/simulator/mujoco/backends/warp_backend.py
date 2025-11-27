@@ -34,12 +34,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import mujoco
 import torch
 from loguru import logger
 
-import mujoco
-
 from .base import IMujocoBackend
+from .warp_bridge import WarpBridge
 
 if TYPE_CHECKING:
     from holosoma.config_types.full_sim import FullSimConfig
@@ -120,6 +120,9 @@ class WarpBackend(IMujocoBackend):
         with wp.ScopedDevice(self.mjw_device):
             # Upload model to GPU
             self.mjw_model = mjw.put_model(model)
+
+            # Create bridge for tensor-like access to model fields (for randomization)
+            self.warp_model_bridge = WarpBridge(self.mjw_model, nworld=self.num_envs)
 
             # Allocate batched data for parallel environments
             # Memory allocation strategy (following mujoco_warp API):

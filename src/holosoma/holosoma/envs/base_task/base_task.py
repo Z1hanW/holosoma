@@ -3,7 +3,6 @@ from __future__ import annotations
 import numpy as np
 
 from holosoma.config_types.env import EnvConfig
-from holosoma.utils.helpers import get_class
 from holosoma.config_types.full_sim import FullSimConfig
 from holosoma.managers.action import ActionManager
 from holosoma.managers.command import CommandManager
@@ -15,6 +14,7 @@ from holosoma.managers.reward import RewardManager
 from holosoma.managers.termination import TerminationManager
 from holosoma.managers.terrain import TerrainManager
 from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
+from holosoma.utils.helpers import get_class
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.torch_utils import to_torch
 
@@ -150,6 +150,14 @@ class BaseTask:
         self.curriculum_manager = CurriculumManager(curriculum_config, self, self.device)
 
         self._init_buffers()
+
+        # Prepare fields required by managers (BEFORE setup calls)
+        # This scans decorator metadata and expands model fields for per-environment randomization
+        self.simulator.prepare_manager_fields(
+            randomization_manager=self.randomization_manager,
+            observation_manager=self.observation_manager,
+            reward_manager=self.reward_manager,
+        )
 
         # Call setup for managers that need it
         if self.randomization_manager is not None and not is_isaacgym_manager:

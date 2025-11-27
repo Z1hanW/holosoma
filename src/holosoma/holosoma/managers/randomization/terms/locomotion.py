@@ -8,9 +8,12 @@ import numpy as np
 import torch
 from loguru import logger
 
+from holosoma.config_types.simulator import MujocoBackend
 from holosoma.managers.action.terms.joint_control import JointPositionActionTerm
 from holosoma.managers.randomization.base import RandomizationTermBase
 from holosoma.managers.randomization.exceptions import RandomizerNotSupportedError
+from holosoma.simulator import mujoco_required_field
+from holosoma.simulator.shared.field_decorators import MUJOCO_FIELD_ATTR
 from holosoma.utils.torch_utils import torch_rand_float
 
 
@@ -497,6 +500,7 @@ def randomize_dof_state(
     )
 
 
+@mujoco_required_field("body_ipos")
 def randomize_base_com_startup(
     env,
     env_ids: Sequence[int] | torch.Tensor | None = None,
@@ -505,11 +509,21 @@ def randomize_base_com_startup(
     enabled: bool = True,
     **_,
 ) -> None:
-    """Randomize base (torso) center of mass."""
+    """Randomize base (torso) center of mass.
+
+    Note: Uses ADDITION operation to offset CoM position (e.g., x: [-0.01, 0.01] m).
+    """
     env._randomize_base_com = bool(enabled)
     env._base_com_range = base_com_range
     if not enabled:
         return
+
+    logger.info(
+        f"[Randomization] Base CoM: "
+        f"x={base_com_range.get('x', [0, 0])}, "
+        f"y={base_com_range.get('y', [0, 0])}, "
+        f"z={base_com_range.get('z', [0, 0])} (operation=add)"
+    )
 
     simulator = env.simulator
 
@@ -553,10 +567,10 @@ def randomize_base_com_startup(
             gym.set_actor_rigid_body_properties(env_ptr, actor, body_props, recomputeInertia=True)
     elif simulator.__class__.__name__ == "IsaacSim":
         try:
-            from isaaclab.managers import SceneEntityCfg  # noqa: PLC0415 -- deferred
+            from isaaclab.managers import SceneEntityCfg
         except ImportError as exc:  # pragma: no cover - dependency optional
             raise RuntimeError("IsaacSim base COM randomization requires isaaclab.") from exc
-        from holosoma.simulator.isaacsim.events import randomize_body_com  # noqa: PLC0415 -- deferred
+        from holosoma.simulator.isaacsim.events import randomize_body_com
 
         torso_name = env.robot_config.torso_name
         env_ids_cpu = idx.to(device="cpu", dtype=torch.long)
@@ -584,12 +598,32 @@ def randomize_base_com_startup(
             distribution="uniform",
             num_envs=simulator.training_config.num_envs,
         )
+    elif simulator.simulator_config.mujoco_backend == MujocoBackend.WARP:
+        from holosoma.simulator.mujoco.backends.warp_randomization import randomize_field
+
+        # convert xyz to 012
+        base_com_range_remapped = {}
+        for key, value in base_com_range.items():
+            assert len(value) == 2, f"Range for '{key}' must have exactly 2 elements, got {len(value)}"
+            base_com_range_remapped["xyz".index(key)] = (value[0], value[1])
+        randomize_field(
+            simulator,
+            field=getattr(randomize_base_com_startup, MUJOCO_FIELD_ATTR),
+            ranges=base_com_range_remapped,
+            env_ids=idx,
+            entity_names=[env.robot_config.torso_name],
+            entity_type="body",
+            operation="add",
+            distribution="uniform",
+        )
+
     else:  # pragma: no cover - defensive
         raise RandomizerNotSupportedError(
             f"Unsupported simulator type '{type(simulator).__name__}' for base COM randomization."
         )
 
 
+@mujoco_required_field("body_mass")
 def randomize_mass_startup(
     env,
     env_ids: Sequence[int] | torch.Tensor | None = None,
@@ -601,9 +635,19 @@ def randomize_mass_startup(
     enabled: bool = True,
     **_,
 ) -> None:
-    """Randomize link and base masses at startup."""
+    """Randomize link and base masses at startup.
+
+    Note: link_mass_range uses SCALING (e.g., 0.9-1.2 = 90-120% of original),
+          added_mass_range uses ADDITION (e.g., -1.0 to 3.0 kg offset).
+    """
     if not enabled:
         return
+
+    logger.info(
+        f"[Randomization] Mass: "
+        f"link_mass={link_mass_range} (operation=scale, enabled={enable_link_mass}), "
+        f"base_mass={added_mass_range} (operation=add, enabled={enable_base_mass})"
+    )
 
     simulator = env.simulator
     idx = _ensure_env_ids_tensor(env, env_ids)
@@ -646,16 +690,16 @@ def randomize_mass_startup(
                         continue
                     body_index = simulator._body_list.index(body_name)
                     scale = np.random.uniform(link_mass_range[0], link_mass_range[1])
-                    body_props[body_index].mass *= scale
+                    body_props[body_index].mass *= scale  # Scale operation: multiply by factor
             if enable_base_mass and torso_name in simulator._body_list:
                 base_index = simulator._body_list.index(torso_name)
                 delta = np.random.uniform(added_mass_range[0], added_mass_range[1])
-                body_props[base_index].mass += delta
+                body_props[base_index].mass += delta  # Add operation: offset by delta
             gym.set_actor_rigid_body_properties(env_ptr, actor, body_props, recomputeInertia=True)
     elif simulator.__class__.__name__ == "IsaacSim":
         try:
-            from isaaclab.envs import mdp  # noqa: PLC0415 -- deferred
-            from isaaclab.managers import SceneEntityCfg  # noqa: PLC0415 -- deferred
+            from isaaclab.envs import mdp
+            from isaaclab.managers import SceneEntityCfg
         except ImportError as exc:  # pragma: no cover - defensive
             raise RuntimeError("IsaacSim mass randomization requires isaaclab.") from exc
 
@@ -684,12 +728,48 @@ def randomize_mass_startup(
                 tuple(added_mass_range),
                 operation="add",
             )
+    elif simulator.simulator_config.mujoco_backend == MujocoBackend.WARP:
+        from holosoma.simulator.mujoco.backends.warp_randomization import randomize_field
+
+        # randomize over the range (scale and/or shift)
+        if idx.numel() == 0:
+            return
+
+        if enable_link_mass:
+            assert len(link_mass_range) == 2, (
+                f"link_mass_range must have exactly 2 elements, got {len(link_mass_range)}"
+            )
+            randomize_field(
+                simulator,
+                field=getattr(randomize_mass_startup, MUJOCO_FIELD_ATTR),
+                ranges=(link_mass_range[0], link_mass_range[1]),
+                env_ids=idx,
+                entity_names=env.robot_config.randomize_link_body_names,
+                entity_type="body",
+                operation="scale",
+            )
+
+        if enable_base_mass:
+            assert len(added_mass_range) == 2, (
+                f"added_mass_range must have exactly 2 elements, got {len(added_mass_range)}"
+            )
+            randomize_field(
+                simulator,
+                field=getattr(randomize_mass_startup, MUJOCO_FIELD_ATTR),
+                ranges=(added_mass_range[0], added_mass_range[1]),
+                env_ids=idx,
+                entity_names=[env.robot_config.torso_name],
+                entity_type="body",
+                operation="add",
+            )
+
     else:  # pragma: no cover - defensive
         raise RandomizerNotSupportedError(
             f"Mass randomization not supported for simulator type '{type(simulator).__name__}'."
         )
 
 
+@mujoco_required_field("geom_friction")
 def randomize_friction_startup(
     env,
     env_ids: Sequence[int] | torch.Tensor | None = None,
@@ -698,11 +778,16 @@ def randomize_friction_startup(
     enabled: bool = True,
     **_,
 ) -> None:
-    """Randomize contact friction coefficients for robot rigid shapes."""
+    """Randomize contact friction coefficients for robot rigid shapes.
+
+    Note: Uses ABSOLUTE operation to set friction values (e.g., [0.5, 1.5]).
+    """
     env._randomize_friction = bool(enabled)
     env._friction_range = list(friction_range)
     if not enabled:
         return
+
+    logger.info(f"[Randomization] Friction: range={friction_range} (operation=abs)")
 
     idx = _ensure_env_ids_tensor(env, env_ids)
     if idx.numel() == 0:
@@ -734,8 +819,8 @@ def randomize_friction_startup(
             gym.set_actor_rigid_shape_properties(env_ptr, actor, shape_props)
     elif simulator.__class__.__name__ == "IsaacSim":
         try:
-            from isaaclab.envs import mdp  # noqa: PLC0415 -- deferred
-            from isaaclab.managers import EventTermCfg, SceneEntityCfg  # noqa: PLC0415 -- deferred
+            from isaaclab.envs import mdp
+            from isaaclab.managers import EventTermCfg, SceneEntityCfg
 
         except ImportError as exc:  # pragma: no cover - defensive
             raise RuntimeError("IsaacSim friction randomization requires isaaclab.") from exc
@@ -782,6 +867,18 @@ def randomize_friction_startup(
                 num_buckets=num_buckets,
             )
 
+    elif simulator.simulator_config.mujoco_backend == MujocoBackend.WARP:
+        from holosoma.simulator.mujoco.backends.warp_randomization import randomize_field
+
+        assert len(friction_range) == 2, f"friction_range must have exactly 2 elements, got {len(friction_range)}"
+        randomize_field(
+            simulator,
+            field=getattr(randomize_friction_startup, MUJOCO_FIELD_ATTR),
+            ranges={0: (friction_range[0], friction_range[1])},
+            env_ids=idx,
+            operation="abs",
+        )
+
     else:  # pragma: no cover - defensive
         raise RandomizerNotSupportedError(
             f"Unsupported simulator type '{type(simulator).__name__}' for friction randomization."
@@ -813,8 +910,8 @@ def randomize_robot_rigid_body_material_startup(
         )
 
     try:
-        from isaaclab.envs import mdp  # noqa: PLC0415 -- deferred
-        from isaaclab.managers import EventTermCfg, SceneEntityCfg  # noqa: PLC0415 -- deferred
+        from isaaclab.envs import mdp
+        from isaaclab.managers import EventTermCfg, SceneEntityCfg
 
     except ImportError as exc:  # pragma: no cover - defensive
         raise RuntimeError("IsaacSim material randomization requires isaaclab.") from exc
@@ -890,8 +987,8 @@ def randomize_object_rigid_body_material_startup(
         )
 
     try:
-        from isaaclab.envs import mdp  # noqa: PLC0415 -- deferred
-        from isaaclab.managers import EventTermCfg, SceneEntityCfg  # noqa: PLC0415 -- deferred
+        from isaaclab.envs import mdp
+        from isaaclab.managers import EventTermCfg, SceneEntityCfg
 
     except ImportError as exc:  # pragma: no cover - defensive
         raise RuntimeError("IsaacSim material randomization requires isaaclab.") from exc
@@ -965,8 +1062,8 @@ def randomize_object_rigid_body_mass_startup(
         )
 
     try:
-        from isaaclab.envs import mdp  # noqa: PLC0415 -- deferred
-        from isaaclab.managers import SceneEntityCfg  # noqa: PLC0415 -- deferred
+        from isaaclab.envs import mdp
+        from isaaclab.managers import SceneEntityCfg
 
     except ImportError as exc:  # pragma: no cover - defensive
         raise RuntimeError("IsaacSim mass randomization requires isaaclab.") from exc
@@ -1010,11 +1107,11 @@ def randomize_object_rigid_body_inertia_startup(
         )
 
     try:
-        from isaaclab.managers import SceneEntityCfg  # noqa: PLC0415 -- deferred
+        from isaaclab.managers import SceneEntityCfg
     except ImportError as exc:  # pragma: no cover - defensive
         raise RuntimeError("IsaacSim inertia randomization requires isaaclab.") from exc
 
-    from holosoma.simulator.isaacsim.events import randomize_rigid_body_inertia  # noqa: PLC0415 -- deferred
+    from holosoma.simulator.isaacsim.events import randomize_rigid_body_inertia
 
     env_ids_cpu = idx.to(device="cpu", dtype=torch.long)
     if env_ids_cpu.numel() == 0:
