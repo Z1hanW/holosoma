@@ -38,19 +38,15 @@ Our pipeline used the processed dataset by InterMimic. The data format differs f
 
 Dowoloading the [lafan1.zip](https://github.com/ubisoft/ubisoft-laforge-animation-dataset/blob/master/lafan1/lafan1.zip) by clicking View Raw.
 
-Put lafan1.zip to your designed data folder and uncompress it (DATA_FOLDER_PATH/lafan1).
-
-We need some data processing files from the [LAFAN github repo](https://github.com/ubisoft/ubisoft-laforge-animation-dataset).
-```
-git clone https://github.com/ubisoft/ubisoft-laforge-animation-dataset.git
-```
+Put lafan1.zip to your designed data folder and uncompress it to DATA_FOLDER_PATH/lafan, the file structure should be demo_data/lafan/*.bvh.
 
 #### Convert the original LAFAN data format for motion retargeting.
-Copy the folder lafan1/ from your downloaded LAFAN repo to data_utils/.
-
+We need some data processing files from the [LAFAN github repo](https://github.com/ubisoft/ubisoft-laforge-animation-dataset).
 ```
 cd data_utils/
-python extract_global_positions.py --input_dir DATA_FOLDER_PATH/lafan1 --output_dir ../demo_data/lafan
+git clone https://github.com/ubisoft/ubisoft-laforge-animation-dataset.git
+mv ubisoft-laforge-animation-dataset/lafan1 .
+python extract_global_positions.py --input_dir DATA_FOLDER_PATH/lafan --output_dir ../demo_data/lafan
 ```
 
 #### Single sequence retargeting on LAFAN.
