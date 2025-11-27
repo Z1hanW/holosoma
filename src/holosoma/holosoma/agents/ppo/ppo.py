@@ -580,6 +580,7 @@ class PPO(BaseAlgo):
             "iter": self.current_learning_iteration,
             "infos": infos,
         }
+        checkpoint_dict.update(self._checkpoint_metadata(iteration=self.current_learning_iteration))
         env_state = self._collect_env_state()
         if env_state:
             checkpoint_dict["env_state"] = env_state
@@ -627,6 +628,7 @@ class PPO(BaseAlgo):
             "robot_urdf": urdf_str,
             "robot_urdf_path": urdf_file_path,
         }
+        metadata.update(self._checkpoint_metadata(iteration=self.current_learning_iteration))
 
         attach_onnx_metadata(
             onnx_path=onnx_file_path,

@@ -6,7 +6,6 @@ import tyro
 from loguru import logger
 
 from holosoma.agents.base_algo.base_algo import BaseAlgo
-from holosoma.utils.helpers import get_class
 from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.utils.config_utils import CONFIG_NAME
 from holosoma.utils.eval_utils import (
@@ -16,6 +15,7 @@ from holosoma.utils.eval_utils import (
     load_saved_experiment_config,
 )
 from holosoma.utils.experiment_paths import get_experiment_dir, get_timestamp
+from holosoma.utils.helpers import get_class
 from holosoma.utils.sim_utils import (
     close_simulation_app,
     setup_simulation_environment,
@@ -23,7 +23,12 @@ from holosoma.utils.sim_utils import (
 from holosoma.utils.tyro_utils import TYRO_CONIFG
 
 
-def run_eval_with_tyro(tyro_config: ExperimentConfig, checkpoint_cfg: CheckpointConfig):
+def run_eval_with_tyro(
+    tyro_config: ExperimentConfig,
+    checkpoint_cfg: CheckpointConfig,
+    saved_config: ExperimentConfig,
+    saved_wandb_path: str | None,
+):
     # Use shared simulation environment setup
     env, device, simulation_app = setup_simulation_environment(tyro_config)
 
@@ -46,6 +51,7 @@ def run_eval_with_tyro(tyro_config: ExperimentConfig, checkpoint_cfg: Checkpoint
         multi_gpu_cfg=None,
     )
     algo.setup()
+    algo.attach_checkpoint_metadata(saved_config, saved_wandb_path or checkpoint_cfg.wandb_run_path)
     algo.load(checkpoint_path)
 
     checkpoint_dir = os.path.dirname(checkpoint_path)
@@ -77,8 +83,8 @@ def run_eval_with_tyro(tyro_config: ExperimentConfig, checkpoint_cfg: Checkpoint
 def main() -> None:
     init_eval_logging()
     checkpoint_cfg, remaining_args = tyro.cli(CheckpointConfig, return_unknown_args=True, add_help=False)
-    saved_cfg = load_saved_experiment_config(checkpoint_cfg)
-    eval_cfg = saved_cfg.get_eval_config() if saved_cfg is not None else tyro._singleton.MISSING_NONPROP
+    saved_cfg, saved_wandb_path = load_saved_experiment_config(checkpoint_cfg)
+    eval_cfg = saved_cfg.get_eval_config()
     overwritten_tyro_config = tyro.cli(
         ExperimentConfig,
         default=eval_cfg,
@@ -87,7 +93,7 @@ def main() -> None:
         config=TYRO_CONIFG,
     )
     print("overwritten_tyro_config: ", overwritten_tyro_config)
-    run_eval_with_tyro(overwritten_tyro_config, checkpoint_cfg)
+    run_eval_with_tyro(overwritten_tyro_config, checkpoint_cfg, saved_cfg, saved_wandb_path)
 
 
 if __name__ == "__main__":

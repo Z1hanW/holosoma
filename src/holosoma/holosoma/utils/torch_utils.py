@@ -179,5 +179,3 @@ def get_axis_params(value: float, axis_idx: int, dtype: npt.DTypeLike = np.float
     zs[axis_idx] = 1.0
     params = np.where(zs == 1.0, value, zs)
     return list(params.astype(dtype))
-
-

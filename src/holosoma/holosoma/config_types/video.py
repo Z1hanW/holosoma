@@ -77,10 +77,10 @@ class VideoConfig:
     IsaacGym, MuJoCo, and IsaacSim simulators.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     """Whether video recording is enabled."""
 
-    interval: int = 50
+    interval: int = 10
     """Record video every N episodes. Set to 1 to record every episode."""
 
     width: int = 640
@@ -137,7 +137,7 @@ class VideoConfig:
     def get_horizontal_fov(self) -> float:
         """Convert vertical FOV to horizontal FOV for simulators that need it."""
         # lazy imports since this is a config type file
-        import math  # noqa: PLC0415
+        import math
 
         aspect_ratio = self.get_aspect_ratio()
         v_fov_rad = math.radians(self.vertical_fov)

@@ -40,7 +40,7 @@ def penalty_action_rate(env: WholeBodyTrackingManager) -> torch.Tensor:
     actions = env.action_manager.action
     prev_actions = env.action_manager.prev_action
     return torch.sum(torch.square(prev_actions - actions), dim=1)
-    
+
 
 def limits_dof_pos(env: WholeBodyTrackingManager, soft_dof_pos_limit: float = 0.95) -> torch.Tensor:
     """Penalize joint positions too close to limits.

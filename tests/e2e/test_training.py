@@ -92,6 +92,7 @@ def assert_training_and_eval_workflow(
         "terrain:terrain-locomotion-plane",
         "--algo.config.num-learning-iterations=2",
         "--training.num-envs=128",
+        "--logger.video.enabled=False",
     ]
     train_cmd.extend(extra_config or [])
 

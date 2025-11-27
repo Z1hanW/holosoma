@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from holosoma.config_types.algo import AlgoInitConfig
 from holosoma.envs.base_task.base_task import BaseTask
 from holosoma.utils.safe_torch_import import torch
+
+if TYPE_CHECKING:
+    from holosoma.config_types.experiment import ExperimentConfig
 
 
 class BaseAlgo:
@@ -23,6 +26,8 @@ class BaseAlgo:
             self.gpu_local_rank = 0
             self.gpu_world_size = 1
         self.is_main_process = self.gpu_global_rank == 0
+        self._experiment_config: ExperimentConfig | None = None
+        self._wandb_run_path: str | None = None
 
     def setup(self):
         return NotImplementedError
@@ -45,6 +50,27 @@ class BaseAlgo:
         obs_dict, rewards, dones, extras = self.env.step(actions, extra_info)
         return obs_dict, rewards, dones, extras
 
+    def attach_checkpoint_metadata(
+        self,
+        experiment_config: ExperimentConfig,
+        wandb_run_path: str | None = None,
+    ) -> None:
+        """Attach metadata that should be saved with checkpoints."""
+
+        self._experiment_config = experiment_config
+        self._wandb_run_path = wandb_run_path
+
+    def _checkpoint_metadata(self, iteration: int | None = None) -> dict[str, Any]:
+        if self._experiment_config is None:
+            raise RuntimeError("Experiment config metadata missing. Call attach_checkpoint_metadata() before saving.")
+
+        metadata: dict[str, Any] = {"experiment_config": self._experiment_config.to_serializable_dict()}
+        if self._wandb_run_path:
+            metadata["wandb_run_path"] = self._wandb_run_path
+        if iteration is not None:
+            metadata["iteration"] = int(iteration)
+        return metadata
+
     def has_curricula_enabled(self) -> bool:
         """Check if any curricula are enabled in the environment.
 
@@ -57,9 +83,8 @@ class BaseAlgo:
         bool
             True if any curriculum is enabled, False otherwise.
         """
-        return (
-            getattr(self.env, "use_reward_penalty_curriculum", False)
-            or getattr(self.env, "use_domain_rand_scale_curriculum", False)
+        return getattr(self.env, "use_reward_penalty_curriculum", False) or getattr(
+            self.env, "use_domain_rand_scale_curriculum", False
         )
 
     def _synchronize_curriculum_metrics(self):

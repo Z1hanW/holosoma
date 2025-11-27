@@ -119,7 +119,7 @@ python src/holosoma/holosoma/train_agent.py \
 
 ### Video Logging
 
-Enable video recording during training. Videos are saved locally and uploaded to Wandb if enabled.
+Video recording is enabled by default. Videos are saved locally and uploaded to Wandb if enabled. For maximum performance, video logging can be disabled with `--logger.video.enabled=False`.
 
 ```bash
 source scripts/source_isaacgym_setup.sh

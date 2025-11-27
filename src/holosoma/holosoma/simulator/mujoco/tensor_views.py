@@ -33,7 +33,7 @@ def quat_holosoma_to_mujoco(quat_holosoma: np.ndarray) -> np.ndarray:
 class BaseMujocoView(Protocol):
     """
     Protocol defining the interface for MuJoCo view objects.
-    
+
     This uses structural subtyping (Protocol) rather than inheritance,
     allowing different backend implementations to satisfy the interface
     without coupling them together.
@@ -71,7 +71,7 @@ class BaseMujocoView(Protocol):
 class BaseMujocoViewMixin:
     """
     Mixin providing common functionality for MuJoCo views.
-    
+
     This class provides default implementations of common methods
     that views can inherit if desired. Views don't need to inherit
     from this - they just need to satisfy the BaseMujocoView Protocol.
@@ -246,7 +246,7 @@ class MujocoRootStateView:
     Specialized view for robot root states with quaternion format conversion.
 
     Handles the 13-element root state: [pos(3), quat(4), lin_vel(3), ang_vel(3)]
-    
+
     Note: This class satisfies the BaseMujocoView Protocol through structural subtyping.
     """
 
@@ -336,7 +336,7 @@ class MujocoDofStateView:
     Specialized view for DOF states compatible with IsaacGym's flattened format.
 
     Provides access to joint positions and velocities as a (num_envs * num_dof, 2) array.
-    
+
     Note: This class satisfies the BaseMujocoView Protocol through structural subtyping.
     """
 

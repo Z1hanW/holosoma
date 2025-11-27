@@ -129,7 +129,7 @@ class MotionLoader:
     def object_lin_vel_w(self) -> torch.Tensor:
         return self._object_lin_vel_w[:]
 
-    def extend_with_segments(self, segments: dict[str, torch.Tensor], prepend: bool) -> "MotionLoader":
+    def extend_with_segments(self, segments: dict[str, torch.Tensor], prepend: bool) -> MotionLoader:
         """Merge interpolated segments with motion data, mutating this MotionLoader."""
         concat_targets = [
             ("joint_pos", "_joint_pos"),
@@ -797,8 +797,10 @@ class MotionCommand(CommandTermBase):
 
         try:
             self._add_transition_to_motion(default_state, num_steps, prepend=False)
-            logger.info(f"appended {num_steps} interpolated frames ({duration}s) \
-                from last motion frame to default pose")
+            logger.info(
+                f"appended {num_steps} interpolated frames ({duration}s) \
+                from last motion frame to default pose"
+            )
         except Exception as exc:
             logger.error(f"Failed to append default pose transition: {exc}")
             raise RuntimeError(
@@ -1011,12 +1013,12 @@ class MotionCommand(CommandTermBase):
         """Map default robot-state tensors into motion order for interpolation."""
         state = {
             "joint_pos": self._map_robot_joints_to_motion_order(
-                default_state["joint_pos"].to(device=device, dtype=dtype), 
-                num_motion_joints=self.motion._joint_pos.shape[1]
+                default_state["joint_pos"].to(device=device, dtype=dtype),
+                num_motion_joints=self.motion._joint_pos.shape[1],
             ),
             "joint_vel": self._map_robot_joints_to_motion_order(
-                default_state["joint_vel"].to(device=device, dtype=dtype), 
-                num_motion_joints=self.motion._joint_vel.shape[1]
+                default_state["joint_vel"].to(device=device, dtype=dtype),
+                num_motion_joints=self.motion._joint_vel.shape[1],
             ),
             "body_pos": default_state["body_pos"].to(device=device, dtype=dtype),
             "body_quat": default_state["body_quat"].to(device=device, dtype=dtype),

@@ -14,11 +14,12 @@ from omegaconf import DictConfig
 from pydantic.dataclasses import dataclass
 from tqdm import tqdm
 
-# CONFIG_NAME is "hv_config.yaml" - the primary configuration file for HumanoidVerse
+# CONFIG_NAME is "holosoma_config.yaml" - the primary configuration file for Holosoma
 # This file contains all settings for training and evaluation of models
 from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.utils.config_utils import CONFIG_NAME
 from holosoma.utils.logging import LoguruLoggingBridge
+from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.simulator_config import SimulatorType, get_simulator_type
 
 _WANDB_PREFIX = "wandb://"
@@ -44,13 +45,13 @@ class CheckpointConfig:
     """Path to local checkpoint file, or W&B checkpoint path in the format of `wandb://<entity>/<project>/<run_id>/<checkpoint_name>`."""
 
 
-def load_saved_experiment_config(checkpoint_cfg: CheckpointConfig) -> ExperimentConfig | None:
+def load_saved_experiment_config(checkpoint_cfg: CheckpointConfig) -> tuple[ExperimentConfig, str | None]:
     """Load checkpoint configuration from either W&B run or local checkpoint.
 
-    Raises
-    ------
-    ValueError
-        If neither wandb_run_path nor checkpoint is provided.
+    Returns
+    -------
+    (ExperimentConfig, str | None)
+        Loaded experiment config and the originating wandb run path, if available.
     """
 
     # lazy import wandb to avoid conflicts with site-packages python and Isaac
@@ -59,30 +60,36 @@ def load_saved_experiment_config(checkpoint_cfg: CheckpointConfig) -> Experiment
     checkpoint = checkpoint_cfg.checkpoint
     wandb_run_path = checkpoint_cfg.wandb_run_path
 
-    if checkpoint is not None:
-        if checkpoint.startswith(_WANDB_PREFIX):
-            wandb_entity, wandb_project, wandb_run_id, checkpoint = checkpoint[len(_WANDB_PREFIX) :].split("/", 3)
-            wandb_run_path = f"{wandb_entity}/{wandb_project}/{wandb_run_id}"
-            checkpoint = None
+    if checkpoint is not None and not checkpoint.startswith(_WANDB_PREFIX):
+        checkpoint_path = Path(checkpoint).expanduser()
+        config, stored_wandb_path = _load_config_from_checkpoint(checkpoint_path)
+        if stored_wandb_path:
+            wandb_run_path = wandb_run_path or stored_wandb_path
+        logger.info(f"Loaded experiment config from checkpoint: {checkpoint_path}")
+        if stored_wandb_path:
+            logger.info(f"Checkpoint originated from W&B run: {stored_wandb_path}")
+        return config, wandb_run_path
 
-    if wandb_run_path is not None:
-        api = wandb.Api()
-        run = api.run(wandb_run_path)
-        # Get the config file (hv_config.yaml) which contains all model and environment settings
-        config_file = run.file(CONFIG_NAME)  # Get the config file by CONFIG_NAME (hv_config.yaml)
-        with tempfile.TemporaryDirectory() as temp_dir, config_file.download(root=temp_dir) as file:
-            config = ExperimentConfig(**yaml.safe_load(file))
-    elif checkpoint is not None:
-        config_path = Path(checkpoint).parent / CONFIG_NAME
-        if config_path.exists():
-            with open(config_path) as file:
-                config = ExperimentConfig(**yaml.safe_load(file))
-        else:
-            config = None
-    else:
+    if checkpoint is not None and checkpoint.startswith(_WANDB_PREFIX):
+        wandb_entity, wandb_project, wandb_run_id, _ = checkpoint[len(_WANDB_PREFIX) :].split("/", 3)
+        wandb_run_path = f"{wandb_entity}/{wandb_project}/{wandb_run_id}"
+
+    if wandb_run_path is None:
         raise ValueError("No checkpoint or wandb run path provided")
 
-    return config
+    api = wandb.Api()
+    run = api.run(wandb_run_path)
+    config_file = run.file(CONFIG_NAME)
+    with tempfile.TemporaryDirectory() as temp_dir, config_file.download(root=temp_dir) as file:
+        return ExperimentConfig(**yaml.safe_load(file)), wandb_run_path
+
+
+def _load_config_from_checkpoint(checkpoint_path: Path) -> tuple[ExperimentConfig, str | None]:
+    """Attempt to load the serialized ExperimentConfig from a checkpoint file."""
+
+    checkpoint_contents = torch.load(checkpoint_path, map_location="cpu")
+    config_data = checkpoint_contents["experiment_config"]
+    return ExperimentConfig(**config_data), checkpoint_contents.get("wandb_run_path")
 
 
 class CheckpointMetadata(TypedDict):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -352,6 +353,7 @@ def save_params(
     args: FastSACConfig,
     save_path: str,
     save_fn=torch.save,
+    metadata: dict[str, Any] | None = None,
     env_state: dict[str, torch.Tensor | float] | None = None,
 ):
     """Save model parameters and training configuration to disk."""
@@ -376,5 +378,8 @@ def save_params(
     }
     if env_state:
         save_dict["env_state"] = env_state
+    if metadata is None:
+        raise ValueError("Checkpoint metadata is required when saving FastSAC parameters.")
+    save_dict.update(metadata)
     save_fn(save_dict, save_path)
     print(f"Saved parameters and configuration to {save_path}")

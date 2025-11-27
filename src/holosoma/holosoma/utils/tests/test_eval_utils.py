@@ -5,8 +5,10 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+import torch
 from omegaconf import OmegaConf
 
+from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.utils.config_utils import CONFIG_NAME
 from holosoma.utils.eval_utils import (
     CheckpointConfig,
@@ -157,7 +159,9 @@ def test_load_saved_experiment_config_from_wandb(mock_wandb_api: mock.MagicMock,
         checkpoint=None,
     )
     with mock.patch("wandb.Api", return_value=mock_wandb_api):
-        assert load_saved_experiment_config(checkpoint_cfg) is not None
+        loaded_cfg, run_path = load_saved_experiment_config(checkpoint_cfg)
+    assert loaded_cfg is not None
+    assert run_path == "test_user/test_project/test_run"
     mock_wandb_api.run.assert_called_once_with("test_user/test_project/test_run")
     mock_wandb_api.run.return_value.file.assert_called_once_with(CONFIG_NAME)
 
@@ -169,37 +173,30 @@ def test_load_saved_experiment_config_with_wandb_prefix(mock_wandb_api: mock.Mag
         checkpoint="wandb://test_entity/test_project/test_run_id/model_100.pt",
     )
     with mock.patch("wandb.Api", return_value=mock_wandb_api):
-        assert load_saved_experiment_config(checkpoint_cfg) is not None
+        loaded_cfg, run_path = load_saved_experiment_config(checkpoint_cfg)
+    assert loaded_cfg is not None
+    assert run_path == "test_entity/test_project/test_run_id"
     mock_wandb_api.run.assert_called_once_with("test_entity/test_project/test_run_id")
     mock_wandb_api.run.return_value.file.assert_called_once_with(CONFIG_NAME)
 
 
 def test_load_saved_experiment_config_from_checkpoint(tmp_path: Path) -> None:
-    checkpoint_dir = tmp_path / "checkpoints"
-    checkpoint_dir.mkdir()
-    checkpoint_path = checkpoint_dir / "model.pt"
-    checkpoint_path.touch()
-    _create_yaml_config(checkpoint_dir)
-    checkpoint_cfg = CheckpointConfig(
-        checkpoint=str(checkpoint_path),
-    )
-    assert load_saved_experiment_config(checkpoint_cfg) is not None
-
-
-def test_load_saved_experiment_config_no_config_file(tmp_path: Path) -> None:
-    """Test getting eval config when no config file is found."""
-    # Create checkpoint file without config
     checkpoint_path = tmp_path / "model.pt"
-    checkpoint_path.touch()
-
-    # Create override config
+    cfg = ExperimentConfig()
+    torch.save(
+        {
+            "actor_model_state_dict": {},
+            "experiment_config": cfg.to_serializable_dict(),
+            "wandb_run_path": "entity/project/run",
+        },
+        checkpoint_path,
+    )
     checkpoint_cfg = CheckpointConfig(
         checkpoint=str(checkpoint_path),
     )
-
-    # Test loading from checkpoint
-    config = load_saved_experiment_config(checkpoint_cfg)
-    assert config is None
+    loaded_cfg, run_path = load_saved_experiment_config(checkpoint_cfg)
+    assert loaded_cfg == cfg
+    assert run_path == "entity/project/run"
 
 
 def test_load_saved_experiment_config_no_inputs() -> None:

@@ -28,6 +28,7 @@ def run_mini_training(workflow_name: str) -> str:
             f"exp:{workflow_name}",
             "--algo.config.num-learning-iterations=2",
             "--training.num-envs=4",
+            "--logger.video.enabled=False",
         ],
         env=env,
         capture_output=True,

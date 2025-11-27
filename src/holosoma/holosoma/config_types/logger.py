@@ -20,9 +20,9 @@ class DisabledLoggerConfig:
     type: Literal["disabled"] = "disabled"
     """Logger type identifier."""
 
-    # Video recording configuration
-    video: VideoConfig = field(default_factory=VideoConfig)
-    """Comprehensive video recording configuration."""
+    # Video recording configuration. Set to disabled by default when logger is disabled.
+    video: VideoConfig = field(default_factory=lambda: VideoConfig(enabled=False))
+    """Comprehensive video recording configuration; disabled by default when logger is disabled."""
 
     headless_recording: bool = False
     """Enable video recording in headless mode (saves to local directory)."""

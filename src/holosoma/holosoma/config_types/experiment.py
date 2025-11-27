@@ -208,5 +208,10 @@ class ExperimentConfig:
 
     def save_config(self, path: str) -> None:
         with open(path, "w") as file:
-            # Directly using yaml.safe_dump does not handle string enums properly
-            yaml.safe_dump(json.loads(json.dumps(dataclasses.asdict(self))), file)
+            yaml.safe_dump(self.to_serializable_dict(), file)
+
+    def to_serializable_dict(self) -> dict:
+        """Return a JSON-friendly representation of the config."""
+        # Directly using yaml.safe_dump does not handle string enums properly,
+        # so round-trip through JSON to coerce typing objects into primitives.
+        return json.loads(json.dumps(dataclasses.asdict(self)))

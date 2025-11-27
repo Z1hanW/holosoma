@@ -13,7 +13,7 @@ class SimulatorType(Enum):
     ISAACGYM = "isaacgym"
     ISAACSIM = "isaacsim"
     MUJOCO = "mujoco"
-    
+
     def __str__(self) -> str:
         """Return the string value of the enum."""
         return self.value

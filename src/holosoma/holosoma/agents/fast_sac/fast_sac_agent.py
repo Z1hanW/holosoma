@@ -144,10 +144,10 @@ class FastSACEnv:
 
 class FastSACAgent(BaseAlgo):
     """
-    FastSAC is a variant of FastTD3 that uses SAC instead of TD3.
-    See https://arxiv.org/abs/2505.22642 for more details about FastTD3 and FastSAC.
-    A major difference to the reported implementation is that the actor uses
-    the full action space, instead of the tanh action space.
+    FastSAC is an efficient variant of Soft Actor-Critic (SAC) tuned for
+    large-scale training with massively parallel simulation.
+    See https://arxiv.org/abs/2505.22642 for more details about FastTD3.
+    Detailed technical report for FastSAC will be available soon.
     """
 
     config: FastSACConfig
@@ -825,6 +825,7 @@ class FastSACAgent(BaseAlgo):
             path,
             save_fn=self.logging_helper.save_checkpoint_artifact,
             env_state=env_state or None,
+            metadata=self._checkpoint_metadata(iteration=self.global_step),
         )
 
     @torch.no_grad()
@@ -982,6 +983,7 @@ class FastSACAgent(BaseAlgo):
             "robot_urdf": urdf_str,
             "robot_urdf_path": urdf_file_path,
         }
+        metadata.update(self._checkpoint_metadata(iteration=self.global_step))
 
         attach_onnx_metadata(
             onnx_path=onnx_file_path,

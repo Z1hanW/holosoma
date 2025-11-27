@@ -191,6 +191,8 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
             seed += distributed_conf["global_rank"]
         seeding(seed, torch_deterministic=tyro_config.training.torch_deterministic)
 
+        wandb_run_path: str | None = None
+
         # Configure wandb in rank 0
         if wandb_enabled and is_main_process:
             from holosoma.config_types.logger import WandbLoggerConfig
@@ -229,6 +231,8 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
                 wandb_kwargs["resume"] = wandb_cfg.resume
 
             wandb.init(**wandb_kwargs)
+            if wandb.run is not None:
+                wandb_run_path = f"{wandb.run.entity}/{wandb.run.project}/{wandb.run.id}"
 
         # Distribute environments across GPUs for proper multi-GPU training
         if distributed_conf is not None:
@@ -275,6 +279,7 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
             multi_gpu_cfg=distributed_conf,
         )
         algo.setup()
+        algo.attach_checkpoint_metadata(tyro_config, wandb_run_path)
         if tyro_config.training.checkpoint is not None:
             loaded_checkpoint = load_checkpoint(
                 wandb_run_path=None, checkpoint=tyro_config.training.checkpoint, log_dir=str(experiment_save_dir)
