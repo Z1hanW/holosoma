@@ -153,7 +153,7 @@ class ClassicBackend(IMujocoBackend):
         BaseMujocoView
             MujocoRootStateView with quaternion conversion
         """
-        from holosoma.simulator.mujoco.tensor_views import MujocoRootStateView  # noqa: PLC0415 -- deferred
+        from holosoma.simulator.mujoco.tensor_views import MujocoRootStateView
 
         return MujocoRootStateView(
             qpos_array=self.data.qpos,
@@ -181,7 +181,7 @@ class ClassicBackend(IMujocoBackend):
         BaseMujocoView
             View for DOF positions [1, num_dof]
         """
-        from holosoma.simulator.mujoco.tensor_views import create_dof_position_view  # noqa: PLC0415 -- deferred
+        from holosoma.simulator.mujoco.tensor_views import create_dof_position_view
 
         return create_dof_position_view(self.data.qpos, indices, 1, num_dof, self.device)
 
@@ -200,7 +200,7 @@ class ClassicBackend(IMujocoBackend):
         BaseMujocoView
             View for DOF velocities [1, num_dof]
         """
-        from holosoma.simulator.mujoco.tensor_views import create_dof_velocity_view  # noqa: PLC0415 -- deferred
+        from holosoma.simulator.mujoco.tensor_views import create_dof_velocity_view
 
         return create_dof_velocity_view(self.data.qvel, indices, 1, num_dof, self.device)
 
@@ -219,7 +219,7 @@ class ClassicBackend(IMujocoBackend):
         BaseMujocoView
             View for DOF accelerations [1, num_dof]
         """
-        from holosoma.simulator.mujoco.tensor_views import create_dof_acceleration_view  # noqa: PLC0415 -- deferred
+        from holosoma.simulator.mujoco.tensor_views import create_dof_acceleration_view
 
         return create_dof_acceleration_view(self.data.qacc, indices, 1, num_dof, self.device)
 
@@ -253,7 +253,7 @@ class ClassicBackend(IMujocoBackend):
         BaseMujocoView
             MujocoDofStateView with IsaacGym flattened format [1 * num_dof, 2]
         """
-        from holosoma.simulator.mujoco.tensor_views import MujocoDofStateView  # noqa: PLC0415 -- deferred
+        from holosoma.simulator.mujoco.tensor_views import MujocoDofStateView
 
         return MujocoDofStateView(
             qpos_array=self.data.qpos,
@@ -277,6 +277,48 @@ class ClassicBackend(IMujocoBackend):
             Writable numpy array view [num_bodies, 6]
         """
         return self.data.xfrc_applied
+
+    def create_quaternion_view(self, quat_slice: slice) -> BaseMujocoView:
+        """Create quaternion view with format conversion.
+
+        Delegates to tensor_views factory function for CPU numpy array views.
+
+        Parameters
+        ----------
+        quat_slice : slice
+            Slice for extracting quaternion from qpos
+
+        Returns
+        -------
+        BaseMujocoView
+            View for quaternion [1, 4] with [w,x,y,z] -> [x,y,z,w] conversion
+        """
+        from holosoma.simulator.mujoco.tensor_views import create_quaternion_view
+
+        return create_quaternion_view(qpos_array=self.data.qpos, indices=quat_slice, num_envs=1, device=self.device)
+
+    def create_angular_velocity_view(self, ang_vel_slice: slice) -> BaseMujocoView:
+        """Create angular velocity view with proper reshaping.
+
+        Delegates to tensor_views factory function for CPU numpy array views.
+
+        Parameters
+        ----------
+        ang_vel_slice : slice
+            Slice for extracting angular velocity from qvel
+
+        Returns
+        -------
+        BaseMujocoView
+            View for angular velocity [1, 3]
+        """
+        from holosoma.simulator.mujoco.tensor_views import (
+            create_base_angular_velocity_view,
+        )
+
+        return create_base_angular_velocity_view(
+            qvel_array=self.data.qvel, indices=ang_vel_slice, num_envs=1, device=self.device
+        )
 
     def set_root_state(self, env_ids: torch.Tensor, root_states: torch.Tensor, root_addrs: dict) -> None:
         """Set robot root states using CPU numpy arrays.

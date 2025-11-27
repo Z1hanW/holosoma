@@ -272,3 +272,37 @@ class IMujocoBackend(abc.ABC):
             If not supported (e.g., ClassicBackend), returns None.
         """
         return None  # Default implementation - backends can override
+
+    @abc.abstractmethod
+    def create_quaternion_view(self, quat_slice: slice):
+        """Create quaternion view with format conversion.
+
+        Converts between MuJoCo [w,x,y,z] and holosoma [x,y,z,w] quaternion formats.
+
+        Parameters
+        ----------
+        quat_slice : slice
+            Slice for extracting quaternion from qpos
+
+        Returns
+        -------
+        BaseMujocoView
+            View for quaternion [num_envs, 4] with format conversion
+        """
+        ...
+
+    @abc.abstractmethod
+    def create_angular_velocity_view(self, ang_vel_slice: slice):
+        """Create angular velocity view with proper reshaping.
+
+        Parameters
+        ----------
+        ang_vel_slice : slice
+            Slice for extracting angular velocity from qvel
+
+        Returns
+        -------
+        BaseMujocoView
+            View for angular velocity [num_envs, 3]
+        """
+        ...

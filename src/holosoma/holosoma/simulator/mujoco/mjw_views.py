@@ -252,6 +252,210 @@ class MjwDofStateView:
         return func(*args, **kwargs)
 
 
+class MjwQuaternionView:
+    """Zero-copy view for quaternions with format conversion.
+
+    Why this view is necessary
+    --------------------------
+    Raw PyTorch tensor slices cannot handle the quaternion convention mismatch:
+
+    - **MuJoCo format**: [w, x, y, z] (scalar-first)
+    - **holosoma expects**: [x, y, z, w] (scalar-last, matching IsaacGym/IsaacSim)
+
+    Without this view:
+    - Robot orientations would be incorrectly interpreted
+    - Physics would become unstable due to wrong quaternion interpretation
+    - Training would fail due to incorrect state observations
+
+    What it does:
+    - Reads: Reorders quaternion [w,x,y,z] -> [x,y,z,w]
+    - Writes: Reorders quaternion [x,y,z,w] -> [w,x,y,z]
+    - Zero-copy: Direct GPU memory access to underlying Warp array slice
+    """
+
+    # Flag for PyTorch compatibility
+    _is_tensor_proxy: bool = True
+
+    def __init__(self, qpos: torch.Tensor, quat_slice: slice, num_envs: int):
+        """Initialize quaternion view.
+
+        Parameters
+        ----------
+        qpos : torch.Tensor
+            Position state tensor [num_envs, nq] (tethered to Warp)
+        quat_slice : slice
+            Slice for extracting quaternion [w, x, y, z]
+        num_envs : int
+            Number of parallel environments
+        """
+        self.qpos = qpos
+        self.quat_slice = quat_slice
+        self.num_envs = num_envs
+        self.device = str(qpos.device)
+
+    @property
+    def shape(self) -> Tuple[int, ...]:
+        """Return shape [num_envs, 4]."""
+        return (self.num_envs, 4)
+
+    def __getitem__(self, key) -> torch.Tensor:
+        """Read quaternion with format conversion [w,x,y,z] -> [x,y,z,w].
+
+        Parameters
+        ----------
+        key : int, slice, tuple, or tensor
+            Index or slice specification
+
+        Returns
+        -------
+        torch.Tensor
+            Quaternion in holosoma format [x, y, z, w]
+        """
+        quat_mj = self.qpos[:, self.quat_slice]  # [N, 4] - [w, x, y, z]
+        quat_holo = quat_mj[:, [1, 2, 3, 0]]  # [x, y, z, w]
+        return quat_holo[key]
+
+    def __setitem__(self, key, value):
+        """Write quaternion with format conversion [x,y,z,w] -> [w,x,y,z].
+
+        Parameters
+        ----------
+        key : int, slice, tuple, or tensor
+            Index or slice specification
+        value : torch.Tensor, np.ndarray, or sequence
+            Quaternion data in holosoma format [x, y, z, w]
+        """
+        if isinstance(value, torch.Tensor):
+            val = value.to(self.device)
+        else:
+            val = torch.tensor(value, device=self.device)
+
+        # Optimized path for full slice [:] (most common case)
+        if key == slice(None):
+            # Input: [N, 4] in [x, y, z, w] format
+            # Convert to MuJoCo [w, x, y, z]
+            quat_mj = val[:, [3, 0, 1, 2]]
+            self.qpos[:, self.quat_slice] = quat_mj
+        else:
+            # Partial indexing requires read-modify-write
+            current = self[:]
+            current[key] = val
+            self[:] = current
+
+    def __len__(self) -> int:
+        """Return the number of environments."""
+        return self.num_envs
+
+    def dim(self) -> int:
+        """Return the number of dimensions (always 2)."""
+        return 2
+
+    def clone(self) -> torch.Tensor:
+        """Return a cloned tensor of the quaternion."""
+        return self[:].clone()
+
+    def __repr__(self) -> str:
+        return f"<MjwQuaternionView shape={self.shape} device={self.device}>"
+
+
+class MjwAngularVelocityView:
+    """Zero-copy view for angular velocity with proper multi-env reshaping.
+
+    Why this view is necessary
+    --------------------------
+    While angular velocity doesn't require format conversion like quaternions,
+    it needs proper reshaping for multi-environment access:
+
+    - **Raw access**: qvel[:, slice] gives [num_envs, 3] but in flattened form
+    - **holosoma expects**: Clean [num_envs, 3] tensor with proper indexing
+
+    What it does:
+    - Reads: Extracts and reshapes angular velocity to [num_envs, 3]
+    - Writes: Writes angular velocity back with proper shape handling
+    - Zero-copy: Direct GPU memory access to underlying Warp array slice
+    """
+
+    # Flag for PyTorch compatibility
+    _is_tensor_proxy: bool = True
+
+    def __init__(self, qvel: torch.Tensor, ang_vel_slice: slice, num_envs: int):
+        """Initialize angular velocity view.
+
+        Parameters
+        ----------
+        qvel : torch.Tensor
+            Velocity state tensor [num_envs, nv] (tethered to Warp)
+        ang_vel_slice : slice
+            Slice for extracting angular velocity
+        num_envs : int
+            Number of parallel environments
+        """
+        self.qvel = qvel
+        self.ang_vel_slice = ang_vel_slice
+        self.num_envs = num_envs
+        self.device = str(qvel.device)
+
+    @property
+    def shape(self) -> Tuple[int, ...]:
+        """Return shape [num_envs, 3]."""
+        return (self.num_envs, 3)
+
+    def __getitem__(self, key) -> torch.Tensor:
+        """Read angular velocity.
+
+        Parameters
+        ----------
+        key : int, slice, tuple, or tensor
+            Index or slice specification
+
+        Returns
+        -------
+        torch.Tensor
+            Angular velocity [num_envs, 3]
+        """
+        ang_vel = self.qvel[:, self.ang_vel_slice]  # [N, 3]
+        return ang_vel[key]
+
+    def __setitem__(self, key, value):
+        """Write angular velocity.
+
+        Parameters
+        ----------
+        key : int, slice, tuple, or tensor
+            Index or slice specification
+        value : torch.Tensor, np.ndarray, or sequence
+            Angular velocity data
+        """
+        if isinstance(value, torch.Tensor):
+            val = value.to(self.device)
+        else:
+            val = torch.tensor(value, device=self.device)
+
+        # Optimized path for full slice [:] (most common case)
+        if key == slice(None):
+            self.qvel[:, self.ang_vel_slice] = val
+        else:
+            # Partial indexing requires read-modify-write
+            current = self[:]
+            current[key] = val
+            self[:] = current
+
+    def __len__(self) -> int:
+        """Return the number of environments."""
+        return self.num_envs
+
+    def dim(self) -> int:
+        """Return the number of dimensions (always 2)."""
+        return 2
+
+    def clone(self) -> torch.Tensor:
+        """Return a cloned tensor of the angular velocity."""
+        return self[:].clone()
+
+    def __repr__(self) -> str:
+        return f"<MjwAngularVelocityView shape={self.shape} device={self.device}>"
+
+
 class MjwRootStateView:
     """Composite view for robot root state with quaternion conversion.
 

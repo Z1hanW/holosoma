@@ -20,9 +20,7 @@ from holosoma.simulator.mujoco.backends import WARP_AVAILABLE, ClassicBackend, W
 from holosoma.simulator.mujoco.command_registry import CommandRegistry
 from holosoma.simulator.mujoco.scene_manager import MujocoSceneManager
 from holosoma.simulator.mujoco.tensor_views import (
-    create_base_angular_velocity_view,
     create_base_linear_acceleration_view,
-    create_quaternion_view,
 )
 from holosoma.simulator.mujoco.video_recorder import MuJoCoVideoRecorder
 from holosoma.simulator.shared.object_registry import ObjectType
@@ -713,32 +711,17 @@ class MuJoCo(BaseSimulator):
         # Create unified applied forces accessor for external force application (e.g., virtual gantry)
         self.applied_forces = self.backend.get_applied_forces_view()
 
-        # Create base_quat, base_angular_vel, base_linear_acc views
-        # For WarpBackend: use native GPU tensors directly
-        # For ClassicBackend: use legacy view system with root_data
-        if WarpBackend is not None and isinstance(self.backend, WarpBackend):
-            # WarpBackend: use native zero-copy tensors directly
-            # qpos_t is [num_envs, nq], qvel_t is [num_envs, nv], qacc_t is [num_envs, nv]
-            self.base_quat = self.backend.qpos_t[:, quat_indices]  # type: ignore[assignment,attr-defined]
-            self.base_angular_vel = self.backend.qvel_t[:, ang_vel_indices]  # type: ignore[assignment,attr-defined]
+        # Create base_quat, base_angular_vel, base_linear_acc views via backend
+        self.base_quat = self.backend.create_quaternion_view(quat_indices)  # type: ignore[assignment]
+        self.base_angular_vel = self.backend.create_angular_velocity_view(ang_vel_indices)  # type: ignore[assignment]
 
-            # Base linear acceleration is first 3 elements of qacc
-            base_lin_acc_indices = slice(0, 3)
+        # Base linear acceleration: backend-specific handling
+        base_lin_acc_indices = slice(0, 3)
+        if WarpBackend is not None and isinstance(self.backend, WarpBackend):
+            # WarpBackend: direct GPU tensor access
             self.base_linear_acc = self.backend.qacc_t[:, base_lin_acc_indices]  # type: ignore[assignment,attr-defined]
         else:
-            # ClassicBackend: use legacy view system with root_data
-            self.base_quat = create_quaternion_view(  # type: ignore[assignment]
-                qpos_array=self.root_data.qpos, indices=quat_indices, num_envs=self.num_envs, device=self.sim_device
-            )
-
-            self.base_angular_vel = create_base_angular_velocity_view(  # type: ignore[assignment]
-                qvel_array=self.root_data.qvel,
-                indices=ang_vel_indices,
-                num_envs=self.num_envs,
-                device=self.sim_device,
-            )
-
-            base_lin_acc_indices = slice(0, 3)
+            # ClassicBackend: use view system
             self.base_linear_acc = create_base_linear_acceleration_view(  # type: ignore[assignment]
                 qacc_array=self.root_data.qacc,
                 indices=base_lin_acc_indices,
@@ -1361,12 +1344,14 @@ class MuJoCo(BaseSimulator):
             else:
                 gantry_status = "inactive"
 
-            self._add_text_overlay(f"Virtual gantry is {gantry_status} \n \
+            self._add_text_overlay(
+                f"Virtual gantry is {gantry_status} \n \
             Press '7' to raise it \n \
             Press '8' to lower it \n \
             Press '9' to toggle it \n \
             Press backspace to reset the environment \n \
-            Press 'g' to hide this menu")
+            Press 'g' to hide this menu"
+            )
         else:
             # Clear text overlays when disabled
             self.viewer.set_texts([])

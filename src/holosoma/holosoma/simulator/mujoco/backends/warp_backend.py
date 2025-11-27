@@ -91,8 +91,8 @@ class WarpBackend(IMujocoBackend):
 
         # Import warp packages (fail fast if not available)
         try:
-            import mujoco_warp as mjw  # noqa: PLC0415 -- deferred
-            import warp as wp  # noqa: PLC0415 -- deferred
+            import mujoco_warp as mjw
+            import warp as wp
         except ImportError as e:
             raise ImportError(
                 "WarpBackend requires 'warp-lang' and 'mujoco_warp' packages. "
@@ -178,9 +178,9 @@ class WarpBackend(IMujocoBackend):
         data : mujoco.MjData
             CPU MjData with initial state to copy to GPU
         """
-        import mujoco_warp as mjw  # noqa: PLC0415 -- deferred
-        import numpy as np  # noqa: PLC0415 -- deferred
-        import warp as wp  # noqa: PLC0415 -- deferred
+        import mujoco_warp as mjw
+        import numpy as np
+        import warp as wp
 
         logger.info("Syncing initial state from CPU to GPU...")
 
@@ -210,7 +210,7 @@ class WarpBackend(IMujocoBackend):
         GPU work completes asynchronously while CPU prepares next frame.
         Synchronization happens only when needed (e.g., in get_render_data()).
         """
-        import warp as wp  # noqa: PLC0415 -- deferred
+        import warp as wp
 
         with wp.ScopedDevice(self.mjw_device):
             wp.capture_launch(self.step_graph)
@@ -237,8 +237,8 @@ class WarpBackend(IMujocoBackend):
         mujoco.MjData
             CPU MjData with state from the specified environment
         """
-        import mujoco_warp as mjw  # noqa: PLC0415 -- deferred
-        import warp as wp  # noqa: PLC0415 -- deferred
+        import mujoco_warp as mjw
+        import warp as wp
 
         # Validate world_id
         if world_id < 0 or world_id >= self.num_envs:
@@ -297,7 +297,7 @@ class WarpBackend(IMujocoBackend):
         MjwRootStateView
             Root state view with quaternion conversion and zero-copy access
         """
-        from holosoma.simulator.mujoco.mjw_views import MjwRootStateView  # noqa: PLC0415 -- deferred
+        from holosoma.simulator.mujoco.mjw_views import MjwRootStateView
 
         return MjwRootStateView(
             qpos=self.qpos_t,
@@ -411,7 +411,7 @@ class WarpBackend(IMujocoBackend):
         MjwDofStateView
             DOF state view with IsaacGym flattened format [num_envs * num_dof, 2]
         """
-        from holosoma.simulator.mujoco.mjw_views import MjwDofStateView  # noqa: PLC0415 -- deferred
+        from holosoma.simulator.mujoco.mjw_views import MjwDofStateView
 
         return MjwDofStateView(
             qpos=self.qpos_t,
@@ -436,6 +436,40 @@ class WarpBackend(IMujocoBackend):
             - [:, :, 3:6] = torques [tx, ty, tz]
         """
         return self.xfrc_applied_t
+
+    def create_quaternion_view(self, quat_slice: slice):
+        """Create quaternion view with format conversion.
+
+        Parameters
+        ----------
+        quat_slice : slice
+            Slice for extracting quaternion from qpos
+
+        Returns
+        -------
+        MjwQuaternionView
+            Quaternion view with [w,x,y,z] -> [x,y,z,w] conversion
+        """
+        from holosoma.simulator.mujoco.mjw_views import MjwQuaternionView
+
+        return MjwQuaternionView(qpos=self.qpos_t, quat_slice=quat_slice, num_envs=self.num_envs)
+
+    def create_angular_velocity_view(self, ang_vel_slice: slice):
+        """Create angular velocity view with proper reshaping.
+
+        Parameters
+        ----------
+        ang_vel_slice : slice
+            Slice for extracting angular velocity from qvel
+
+        Returns
+        -------
+        MjwAngularVelocityView
+            Angular velocity view with proper multi-env access
+        """
+        from holosoma.simulator.mujoco.mjw_views import MjwAngularVelocityView
+
+        return MjwAngularVelocityView(qvel=self.qvel_t, ang_vel_slice=ang_vel_slice, num_envs=self.num_envs)
 
     def get_rigid_body_state_views(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Get zero-copy views of rigid body states from GPU.
