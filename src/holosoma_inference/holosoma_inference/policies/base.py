@@ -342,6 +342,13 @@ class BasePolicy:
         """Initialize keyboard handler."""
         self.logger.info("Using keyboard")
         self.use_joystick = False
+        # Check if running in a TTY environment
+        if not sys.stdin.isatty():
+            self.logger.warning("Not running in a TTY environment - keyboard input disabled")
+            self.logger.warning("This is normal for automated tests or non-interactive environments")
+            self.logger.info("Auto-starting policy in non-interactive mode")
+            self.use_policy_action = True
+            return
         # Start keyboard listener in a daemon thread
         threading.Thread(target=self.start_key_listener, daemon=True).start()
         self.logger.info("Keyboard Listener Initialized")
@@ -642,9 +649,14 @@ class BasePolicy:
             except AttributeError:
                 pass  # Handle special keys if needed
 
-        listener = listen_keyboard(on_press=on_press)
-        listener.start()
-        listener.join()
+        try:
+            listener = listen_keyboard(on_press=on_press)
+            listener.start()
+            listener.join()
+        except OSError as e:
+            # Handle termios errors in non-TTY environments
+            self.logger.warning("Could not start keyboard listener: %s", e)
+            self.logger.warning("Keyboard input will not be available")
 
     def process_joystick_input(self):
         """Process joystick input and update commands using InterfaceWrapper."""
@@ -790,8 +802,7 @@ class BasePolicy:
 
                 self.latency_tracker.end_cycle()
 
-                # Print latency stats every 5th iteration.
-                if it % 5 == 0:
+                if it % 50 == 0 and self.use_policy_action:
                     debug_str = f"RL FPS: {self.latency_tracker.get_fps():.2f} | {self.latency_tracker.get_stats_str()}"
                     self.logger.info(debug_str, flush=True)
 

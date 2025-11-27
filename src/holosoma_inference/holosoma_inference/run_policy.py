@@ -24,6 +24,71 @@ from holosoma_inference.policies.wbt import WholeBodyTrackingPolicy
 from holosoma_inference.utils.misc import restore_terminal_settings
 
 
+def _print_control_guide(policy_class, use_joystick: bool):
+    """Print control guide for users."""
+    is_wbt = policy_class.__name__ == "WholeBodyTrackingPolicy"
+
+    logger.info("=" * 80)
+    logger.info("🎮 POLICY CONTROLS")
+    logger.info("=" * 80)
+    logger.info("")
+
+    if use_joystick:
+        logger.info("📝 Using JOYSTICK control mode")
+        logger.info("")
+        logger.info("General Controls:")
+        logger.info("  A button       - Start the policy")
+        logger.info("  B button       - Stop the policy")
+        logger.info("  Y button       - Set robot to default pose")
+        logger.info("  L1+R1 (LB+RB)  - Kill controller program")
+
+        if is_wbt:
+            logger.info("")
+            logger.info("Whole-Body Tracking Controls:")
+            logger.info("  Start button   - Start motion clip")
+        else:
+            logger.info("")
+            logger.info("Locomotion Controls:")
+            logger.info("  Start button   - Switch walking/standing mode")
+            logger.info("  Left stick     - Adjust linear velocity (forward/backward/left/right)")
+            logger.info("  Right stick    - Adjust angular velocity (turn left/right)")
+    else:
+        logger.info("⌨️  Using KEYBOARD control mode")
+        logger.info("")
+        logger.info("⚠️  IMPORTANT: Make sure THIS TERMINAL is active to receive keyboard input!")
+        logger.info("⚠️  All commands below must be entered in THIS terminal window.")
+        logger.info("")
+        logger.info("General Controls:")
+        logger.info("  ]  - Start the policy")
+        logger.info("  o  - Stop the policy")
+        logger.info("  i  - Set robot to default pose")
+
+        if is_wbt:
+            logger.info("")
+            logger.info("Whole-Body Tracking Controls:")
+            logger.info("  s  - Start motion clip")
+        else:
+            logger.info("")
+            logger.info("Locomotion Controls:")
+            logger.info("  =          - Switch walking/standing mode")
+            logger.info("  w/s        - Increase/decrease forward velocity")
+            logger.info("  a/d        - Increase/decrease lateral velocity")
+            logger.info("  q/e        - Increase/decrease angular velocity (turn left/right)")
+            logger.info("  z          - Set all velocities to zero")
+
+    logger.info("")
+    logger.info("🎬 MuJoCo Simulator Controls (⚠️  ONLY in MuJoCo window, NOT this terminal!):")
+    logger.info("  7/8        - Decrease/increase elastic band length")
+    logger.info("  9          - Toggle elastic band enable/disable")
+    logger.info("  BACKSPACE  - Reset simulation")
+
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("👆 Press the appropriate button/key to begin!")
+    logger.info("=" * 80)
+    logger.info("")
+
+
 def run_policy(config: InferenceConfig):
     """Run policy with Tyro configuration."""
     logger.info("🚀 Starting Policy with Tyro configuration...")
@@ -40,6 +105,7 @@ def run_policy(config: InferenceConfig):
         policy: LocomotionPolicy | WholeBodyTrackingPolicy = policy_class(config=config)
 
         logger.info("✅ Policy initialized successfully!")
+        _print_control_guide(policy_class, config.task.use_joystick)
         policy.run()
         logger.info("✅ Policy execution completed!")
 

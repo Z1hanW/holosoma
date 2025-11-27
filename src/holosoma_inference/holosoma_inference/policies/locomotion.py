@@ -116,6 +116,18 @@ class LocomotionPolicy(BasePolicy):
     def _print_control_status(self):
         """Print current control status."""
         super()._print_control_status()
-        print(f"Linear velocity command: {self.lin_vel_command}")
-        print(f"Angular velocity command: {self.ang_vel_command}")
-        print(f"Stand command: {self.stand_command}")
+
+        # Extract values for better formatting
+        lin_vel_x = self.lin_vel_command[0, 0]
+        lin_vel_y = self.lin_vel_command[0, 1]
+        ang_vel_z = self.ang_vel_command[0, 0]
+        is_walking = self.stand_command[0, 0] == 1
+
+        # Print with clear labels and units
+        mode = "Walking" if is_walking else "Standing"
+        status = "✓ applied" if is_walking else "✗ not applied"
+        print(f"Linear velocity: x={lin_vel_x:+.2f} m/s, y={lin_vel_y:+.2f} m/s")
+        print(f"Angular velocity: {ang_vel_z:+.2f} rad/s")
+        print(f"Mode: {mode} ({status})")
+        print("💡 Terminal keys: W/A/S/D (lin) | Q/E (ang) | = (toggle mode)")
+        print("🎬 MuJoCo keys (in simulator only): 7/8 (band) | 9 (toggle) | BACKSPACE (reset)")
