@@ -5,11 +5,11 @@ from __future__ import annotations
 import os
 from typing import Any, List
 
+import mujoco
+import mujoco.viewer
 import numpy as np
 from loguru import logger
 
-import mujoco
-import mujoco.viewer
 from holosoma.config_types.robot import RobotConfig
 from holosoma.config_types.simulator import MujocoXMLFilterCfg, SimulatorConfig
 from holosoma.managers.terrain.base import TerrainTermBase
@@ -158,7 +158,10 @@ class MujocoSceneManager:
         geom: mujoco.MjSpec.Geom | None = None
         if terrain_state.mesh_type == "plane":
             geom = self._create_ground_plane(terrain_state)
-        elif terrain_state.mesh_type in ["trimesh", "load_obj"]:
+        elif terrain_state.mesh_type in ["trimesh"]:
+            # Use heightfield to reduce penetrations (vs. trimesh/geom mesh)
+            geom = self._create_hfield(terrain_state)
+        elif terrain_state.mesh_type in ["load_obj"]:
             geom = self._create_trimesh(terrain_state)
         elif terrain_state.mesh_type is None:
             logger.info("Terrain is none")
@@ -194,9 +197,10 @@ class MujocoSceneManager:
             pos=[0, 0, 0],
             material="grid",
             friction=[
-                terrain_state.static_friction,
-                terrain_state.dynamic_friction,
-                0.005,
+                # Ignore terrain config until we expose Mujoco-specific parameters
+                0.7,  # reasonable default
+                0.005,  # reasonable default
+                0.001,  # reasonable default
             ],  # [sliding, torsional, rolling]
             solimp=[0.99, 0.99, 0.01, 0.5, 2],  # 5 elements: [dmin, dmax, width, midpoint, power]
             solref=[0.001, 1],  # 2 elements: [timeconst, dampratio]
@@ -226,9 +230,85 @@ class MujocoSceneManager:
             pos=[0.0, 0.0, 0.0],
             material="solid_gray",
             friction=[
-                terrain_state.static_friction,
-                terrain_state.dynamic_friction,
-                0.005,
+                # Ignore terrain config until we expose Mujoco-specific parameters
+                0.7,  # reasonable default
+                0.005,  # reasonable default
+                0.001,  # reasonable default
+            ],  # [sliding, torsional, rolling]
+            solimp=[0.99, 0.99, 0.01, 0.5, 2],
+            solref=[0.001, 1],
+        )
+
+    def _create_hfield(self, terrain_state: TerrainTermBase) -> mujoco.MjSpec.Geom:
+        """Create MuJoCo heightfield terrain from procedural terrain data.
+
+        Converts the heightfield data from the terrain generator into a MuJoCo
+        heightfield asset and geom. This avoids the convex hull simplification
+        that occurs with trimesh terrain.
+
+        Returns
+        -------
+        mujoco.MjSpec.Geom
+            Heightfield geometry with configured physics properties.
+        """
+        terrain = terrain_state.terrain
+        if not hasattr(terrain, "_height_field_raw"):
+            raise ValueError("Terrain does not have heightfield data")
+
+        # Get heightfield parameters from terrain
+        height_data = np.asarray(terrain._height_field_raw, dtype=np.float32)
+        vertical_scale = terrain._vertical_scale
+        border_size = terrain._border_size
+        total_length = terrain._total_length
+        total_width = terrain._total_width
+
+        # Apply vertical scaling to height data (convert from int16 indices to meters)
+        height_data_scaled = height_data * vertical_scale
+
+        # Handle negative heights: shift to make non-negative (MuJoCo requirement)
+        min_height = height_data_scaled.min()
+        z_offset = 0.0
+        if min_height < 0:
+            height_data_scaled = height_data_scaled - min_height + 1e-9
+            z_offset = min_height
+            logger.info(f"Shifted heightfield by {-min_height:.3f}m to ensure non-negative heights")
+
+        max_height = height_data_scaled.max()
+        min_height_final = height_data_scaled.min()
+
+        # Calculate size parameters for MuJoCo hfield
+        # size = [x_half, y_half, HEIGHT_RANGE, z_baseline]
+        # Note: nrow/ncol are swapped for correct orientation
+        height_range = max_height - min_height_final
+
+        # Create heightfield asset
+        hfield_spec = self.world_spec.add_hfield(name="terrain")
+        hfield_spec.nrow = height_data.shape[1]  # swap: cols become rows
+        hfield_spec.ncol = height_data.shape[0]  # swap: rows become cols
+        hfield_spec.size = [0.5 * total_length, 0.5 * total_width, height_range, min_height_final]
+        # MuJoCo expects raw elevation data in column-major (Fortran) order
+        hfield_spec.userdata = height_data_scaled.flatten(order="F").tolist()
+
+        logger.info(
+            f"Created heightfield: {hfield_spec.nrow}x{hfield_spec.ncol},"
+            " size=[{0.5 * total_length:.2f}, {0.5 * total_width:.2f}, {height_range:.3f}, {min_height_final:.3f}]"
+        )
+
+        # Create heightfield geom, positioned to match terrain coordinate system
+        return self.world_spec.worldbody.add_geom(
+            name=terrain_state.name,
+            type=mujoco.mjtGeom.mjGEOM_HFIELD,
+            hfieldname=hfield_spec.name,
+            pos=[
+                0.5 * total_length - border_size,
+                0.5 * total_width - border_size,
+                z_offset if z_offset < 0 else 0.0,
+            ],
+            friction=[
+                # Ignore terrain config until we expose Mujoco-specific parameters
+                0.7,  # reasonable default
+                0.005,  # reasonable default
+                0.001,  # reasonable default
             ],  # [sliding, torsional, rolling]
             solimp=[0.99, 0.99, 0.01, 0.5, 2],
             solref=[0.001, 1],
