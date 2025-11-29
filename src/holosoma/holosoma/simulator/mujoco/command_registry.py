@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 import glfw
 from loguru import logger
 
@@ -20,6 +22,7 @@ class CommandRegistry:
             MuJoCo simulator instance
         """
         self.simulator = simulator
+        self.on_command_executed: Callable | None = None  # Callback for UI updates
 
         # Robot commands
         self.robot_commands = {
@@ -65,6 +68,9 @@ class CommandRegistry:
         if keycode in self.gantry_commands and self.simulator.virtual_gantry:
             command_data = self.gantry_commands[keycode]
             if self.simulator.virtual_gantry.handle_command(command_data):
+                # Notify callback after gantry command
+                if self.on_command_executed:
+                    self.on_command_executed()
                 return True
 
         # Try robot commands
@@ -72,6 +78,9 @@ class CommandRegistry:
             name, action = self.robot_commands[keycode]
             action()
             logger.info(f"Current Command: {self.simulator.commands[0]}")
+            # Notify callback after robot command
+            if self.on_command_executed:
+                self.on_command_executed()
             return True
 
         return False

@@ -1361,26 +1361,6 @@ class MuJoCo(BaseSimulator):
         # (no-op for ClassicBackend which returns same data)
         self.root_data = self.backend.get_render_data(world_id=self.current_world_id)
 
-        # Add text overlay before syncing (if enabled)
-        if self.show_text_overlay:
-            # Determine virtual gantry status
-            if self.virtual_gantry and self.virtual_gantry.enabled:
-                gantry_status = "active"
-            else:
-                gantry_status = "inactive"
-
-            self._add_text_overlay(
-                f"Virtual gantry is {gantry_status} \n \
-            Press '7' to raise it \n \
-            Press '8' to lower it \n \
-            Press '9' to toggle it \n \
-            Press backspace to reset the environment \n \
-            Press 'g' to hide this menu"
-            )
-        else:
-            # Clear text overlays when disabled
-            self.viewer.set_texts([])
-
         self.viewer.sync()
         if self.debug_viz_enabled:
             self.clear_lines()
@@ -1428,6 +1408,40 @@ class MuJoCo(BaseSimulator):
         assert self.root_data is not None
         return torch.from_numpy(self.root_data.actuator_force[: self.num_dof]).float().to(self.sim_device)
 
+    def _update_text_overlay(self) -> None:
+        """Update text overlay based on current state (event-driven).
+
+        This method is called only when state changes occur (e.g., key presses),
+        not on every render frame. This prevents the viewer's keyboard input
+        system from being disrupted by frequent set_texts() calls.
+        """
+        if self.viewer is None:
+            return
+
+        if not self.show_text_overlay:
+            # Clear text overlays when disabled
+            self.viewer.set_texts([])
+            return
+
+        # Determine virtual gantry status
+        if self.virtual_gantry and self.virtual_gantry.enabled:
+            gantry_status = "active"
+        else:
+            gantry_status = "inactive"
+
+        # Build text overlay content
+        text = (
+            f"Virtual gantry is {gantry_status} \n"
+            "Press '7' to raise it \n"
+            "Press '8' to lower it \n"
+            "Press '9' to toggle it \n"
+            "Press backspace to reset the environment \n"
+            "Press 'g' to hide this menu"
+        )
+
+        # Use default font and position (None values will use MuJoCo defaults)
+        self._add_text_overlay(text)
+
     def _key_callback(self, keycode: int) -> None:
         """Handle keyboard input with unified command registry and world_id toggling.
 
@@ -1445,6 +1459,8 @@ class MuJoCo(BaseSimulator):
             self.show_text_overlay = not self.show_text_overlay
             status = "ON" if self.show_text_overlay else "OFF"
             logger.info(f"Text overlay: {status}")
+            # Update overlay immediately when toggled
+            self._update_text_overlay()
             return
 
         # Handle world_id toggling for multi-environment visualization (WarpBackend only)
@@ -1472,6 +1488,8 @@ class MuJoCo(BaseSimulator):
         # Use unified command registry
         if not hasattr(self, "_command_registry"):
             self._command_registry = CommandRegistry(self)
+            # Register callback for UI updates on command execution
+            self._command_registry.on_command_executed = self._update_text_overlay
 
         # Single call handles both gantry and robot commands
         if self._command_registry.execute_command(keycode):
