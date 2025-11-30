@@ -23,6 +23,27 @@ from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.simulator_config import SimulatorType, get_simulator_type
 
 _WANDB_PREFIX = "wandb://"
+_WANDB_REFERENCE_FORMAT = f"{_WANDB_PREFIX}<entity>/<project>/<run_id>/[<artifact_name>]"
+
+
+def _parse_wandb_reference(reference: str) -> tuple[str, str | None]:
+    """Split a wandb:// URI into run path and optional artifact/checkpoint name."""
+
+    remainder = reference[len(_WANDB_PREFIX) :]
+    parts = remainder.split("/")
+    if len(parts) < 3:
+        raise ValueError(f"Invalid wandb URI: {reference}. Expected format {_WANDB_REFERENCE_FORMAT}")
+    entity, project = parts[0], parts[1]
+    run_id_index = 2
+    if len(parts) > 3 and parts[2] == "runs":
+        run_id_index = 3
+    if run_id_index >= len(parts):
+        raise ValueError(f"Invalid wandb URI: {reference}. Expected format {_WANDB_REFERENCE_FORMAT}")
+    run_id = parts[run_id_index]
+    artifact_start = run_id_index + 1
+    wandb_run_path = f"{entity}/{project}/{run_id}"
+    artifact_path = "/".join(parts[artifact_start:]) or None
+    return wandb_run_path, artifact_path
 
 
 def init_eval_logging() -> None:
@@ -38,11 +59,8 @@ def init_eval_logging() -> None:
 
 @dataclass(frozen=True)
 class CheckpointConfig:
-    wandb_run_path: str | None = None
-    """Path to the W&B run (e.g., 'username/project/run_id'). If None, checkpoint must be provided."""
-
     checkpoint: str | None = None
-    """Path to local checkpoint file, or W&B checkpoint path in the format of `wandb://<entity>/<project>/<run_id>/<checkpoint_name>`."""
+    """Path to a local checkpoint file, or W&B URI in the format `wandb://<entity>/<project>/<run_id>[/<checkpoint_name>]`."""
 
 
 def load_saved_experiment_config(checkpoint_cfg: CheckpointConfig) -> tuple[ExperimentConfig, str | None]:
@@ -58,24 +76,20 @@ def load_saved_experiment_config(checkpoint_cfg: CheckpointConfig) -> tuple[Expe
     import wandb
 
     checkpoint = checkpoint_cfg.checkpoint
-    wandb_run_path = checkpoint_cfg.wandb_run_path
 
-    if checkpoint is not None and not checkpoint.startswith(_WANDB_PREFIX):
-        checkpoint_path = Path(checkpoint).expanduser()
+    if checkpoint is None:
+        raise ValueError("No checkpoint provided")
+
+    checkpoint_str = str(checkpoint)
+    if not checkpoint_str.startswith(_WANDB_PREFIX):
+        checkpoint_path = Path(checkpoint_str).expanduser()
         config, stored_wandb_path = _load_config_from_checkpoint(checkpoint_path)
         if stored_wandb_path:
-            wandb_run_path = wandb_run_path or stored_wandb_path
-        logger.info(f"Loaded experiment config from checkpoint: {checkpoint_path}")
-        if stored_wandb_path:
             logger.info(f"Checkpoint originated from W&B run: {stored_wandb_path}")
-        return config, wandb_run_path
+        logger.info(f"Loaded experiment config from checkpoint: {checkpoint_path}")
+        return config, stored_wandb_path
 
-    if checkpoint is not None and checkpoint.startswith(_WANDB_PREFIX):
-        wandb_entity, wandb_project, wandb_run_id, _ = checkpoint[len(_WANDB_PREFIX) :].split("/", 3)
-        wandb_run_path = f"{wandb_entity}/{wandb_project}/{wandb_run_id}"
-
-    if wandb_run_path is None:
-        raise ValueError("No checkpoint or wandb run path provided")
+    wandb_run_path, _ = _parse_wandb_reference(checkpoint_str)
 
     api = wandb.Api()
     run = api.run(wandb_run_path)
@@ -204,19 +218,13 @@ def get_all_checkpoint_metadata(override_config: DictConfig) -> list[CheckpointM
     return sorted(checkpoint_metadata, key=lambda x: x["global_step"])
 
 
-def load_checkpoint(
-    wandb_run_path: str | None,
-    checkpoint: str,
-    log_dir: str,
-) -> Path:
+def load_checkpoint(checkpoint: str, log_dir: str) -> Path:
     """Download checkpoint from W&B or use local checkpoint.
 
     Parameters
     ----------
-    wandb_run_path : str | None
-        Path to the W&B run (e.g., 'username/project/run_id'). If None, checkpoint must be provided.
     checkpoint : str
-        Name of checkpoint file in W&B run or path to local checkpoint file.
+        W&B checkpoint URI or path to local checkpoint file.
     log_dir : str
         Directory to save downloaded checkpoint.
 
@@ -228,15 +236,16 @@ def load_checkpoint(
 
     import wandb
 
+    wandb_run_path: str | None = None
     if checkpoint.startswith(_WANDB_PREFIX):
-        try:
-            wandb_entity, wandb_project, wandb_run_id, checkpoint = checkpoint[len(_WANDB_PREFIX) :].split("/", 3)
-        except ValueError:
+        wandb_run_path_from_uri, wandb_checkpoint_name = _parse_wandb_reference(checkpoint)
+        if wandb_checkpoint_name is None:
             raise ValueError(
                 f"Invalid wandb checkpoint path: {checkpoint}. "
                 f"Expected format: {_WANDB_PREFIX}<entity>/<project>/<run_id>/<checkpoint_name>"
             )
-        wandb_run_path = f"{wandb_entity}/{wandb_project}/{wandb_run_id}"
+        wandb_run_path = wandb_run_path_from_uri
+        checkpoint = wandb_checkpoint_name
 
     if wandb_run_path is not None:
         api = wandb.Api()

@@ -281,9 +281,7 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
         algo.setup()
         algo.attach_checkpoint_metadata(tyro_config, wandb_run_path)
         if tyro_config.training.checkpoint is not None:
-            loaded_checkpoint = load_checkpoint(
-                wandb_run_path=None, checkpoint=tyro_config.training.checkpoint, log_dir=str(experiment_save_dir)
-            )
+            loaded_checkpoint = load_checkpoint(tyro_config.training.checkpoint, str(experiment_save_dir))
             tyro_config = dataclasses.replace(
                 tyro_config, training=dataclasses.replace(tyro_config.training, checkpoint=str(loaded_checkpoint))
             )

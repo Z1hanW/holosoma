@@ -155,8 +155,7 @@ def test_load_saved_experiment_config_from_wandb(mock_wandb_api: mock.MagicMock,
     config_path = _create_yaml_config(tmp_path)
     _mock_wandb_config_download(mock_wandb_api, config_path)
     checkpoint_cfg = CheckpointConfig(
-        wandb_run_path="test_user/test_project/test_run",
-        checkpoint=None,
+        checkpoint="wandb://test_user/test_project/test_run",
     )
     with mock.patch("wandb.Api", return_value=mock_wandb_api):
         loaded_cfg, run_path = load_saved_experiment_config(checkpoint_cfg)
@@ -171,6 +170,35 @@ def test_load_saved_experiment_config_with_wandb_prefix(mock_wandb_api: mock.Mag
     _mock_wandb_config_download(mock_wandb_api, config_path)
     checkpoint_cfg = CheckpointConfig(
         checkpoint="wandb://test_entity/test_project/test_run_id/model_100.pt",
+    )
+    with mock.patch("wandb.Api", return_value=mock_wandb_api):
+        loaded_cfg, run_path = load_saved_experiment_config(checkpoint_cfg)
+    assert loaded_cfg is not None
+    assert run_path == "test_entity/test_project/test_run_id"
+    mock_wandb_api.run.assert_called_once_with("test_entity/test_project/test_run_id")
+    mock_wandb_api.run.return_value.file.assert_called_once_with(CONFIG_NAME)
+
+
+def test_load_saved_experiment_config_with_wandb_runs_segment(mock_wandb_api: mock.MagicMock, tmp_path: Path) -> None:
+    config_path = _create_yaml_config(tmp_path)
+    _mock_wandb_config_download(mock_wandb_api, config_path)
+    checkpoint_cfg = CheckpointConfig(
+        checkpoint="wandb://test_entity/test_project/runs/test_run_id/model_100.pt",
+    )
+    with mock.patch("wandb.Api", return_value=mock_wandb_api):
+        loaded_cfg, run_path = load_saved_experiment_config(checkpoint_cfg)
+    assert loaded_cfg is not None
+    assert run_path == "test_entity/test_project/test_run_id"
+    mock_wandb_api.run.assert_called_once_with("test_entity/test_project/test_run_id")
+    mock_wandb_api.run.return_value.file.assert_called_once_with(CONFIG_NAME)
+
+
+def test_load_saved_experiment_config_with_wandb_run_only(mock_wandb_api: mock.MagicMock, tmp_path: Path) -> None:
+    """Ensure wandb:// URIs without explicit checkpoint names can load configs."""
+    config_path = _create_yaml_config(tmp_path)
+    _mock_wandb_config_download(mock_wandb_api, config_path)
+    checkpoint_cfg = CheckpointConfig(
+        checkpoint="wandb://test_entity/test_project/test_run_id",
     )
     with mock.patch("wandb.Api", return_value=mock_wandb_api):
         loaded_cfg, run_path = load_saved_experiment_config(checkpoint_cfg)
@@ -205,7 +233,7 @@ def test_load_saved_experiment_config_no_inputs() -> None:
         checkpoint=None,
     )
 
-    with pytest.raises(ValueError, match="No checkpoint or wandb run path provided"):
+    with pytest.raises(ValueError, match="No checkpoint provided"):
         load_saved_experiment_config(checkpoint_cfg)
 
 
@@ -227,8 +255,7 @@ def test_load_checkpoint(mock_wandb_api: mock.MagicMock, tmp_path: Path) -> None
 
     with mock.patch("wandb.Api", return_value=mock_wandb_api):
         checkpoint_path = load_checkpoint(
-            wandb_run_path="test_user/test_project/test_run",
-            checkpoint="model_100.pt",
+            checkpoint="wandb://test_user/test_project/test_run/model_100.pt",
             log_dir=str(tmp_path),
         )
 
@@ -241,7 +268,6 @@ def test_load_checkpoint(mock_wandb_api: mock.MagicMock, tmp_path: Path) -> None
     local_checkpoint = tmp_path / "local_model.pt"
     local_checkpoint.touch()  # Create empty file
     checkpoint_path = load_checkpoint(
-        wandb_run_path=None,
         checkpoint=str(local_checkpoint),
         log_dir=str(tmp_path),
     )
@@ -266,7 +292,6 @@ def test_load_checkpoint_with_wandb_prefix(mock_wandb_api: mock.MagicMock, tmp_p
 
     with mock.patch("wandb.Api", return_value=mock_wandb_api):
         checkpoint_path = load_checkpoint(
-            wandb_run_path=None,  # Should be ignored when using wandb:// prefix
             checkpoint="wandb://test_entity/test_project/test_run_id/model_100.pt",
             log_dir=str(tmp_path),
         )
@@ -276,3 +301,33 @@ def test_load_checkpoint_with_wandb_prefix(mock_wandb_api: mock.MagicMock, tmp_p
     mock_run.file.assert_called_once_with("model_100.pt")
     mock_file.download.assert_called_once_with(root=str(tmp_path))
     assert checkpoint_path == tmp_path / "model_100.pt"
+
+
+def test_load_checkpoint_with_wandb_runs_segment(mock_wandb_api: mock.MagicMock, tmp_path: Path) -> None:
+    mock_run = mock.MagicMock()
+    mock_file = mock.MagicMock()
+    mock_run.file.return_value = mock_file
+    mock_wandb_api.run.return_value = mock_run
+
+    with mock.patch("wandb.Api", return_value=mock_wandb_api):
+        checkpoint_path = load_checkpoint(
+            checkpoint="wandb://test_entity/test_project/runs/test_run_id/model_100.pt",
+            log_dir=str(tmp_path),
+        )
+
+    mock_wandb_api.run.assert_called_once_with("test_entity/test_project/test_run_id")
+    mock_run.file.assert_called_once_with("model_100.pt")
+    mock_file.download.assert_called_once_with(root=str(tmp_path))
+    assert checkpoint_path == tmp_path / "model_100.pt"
+
+
+def test_load_checkpoint_with_wandb_prefix_missing_checkpoint_name(tmp_path: Path) -> None:
+    """Ensure wandb:// URIs for checkpoints include the artifact name."""
+    with pytest.raises(
+        ValueError,
+        match="Expected format: wandb://<entity>/<project>/<run_id>/<checkpoint_name>",
+    ):
+        load_checkpoint(
+            checkpoint="wandb://test_entity/test_project/test_run_id",
+            log_dir=str(tmp_path),
+        )

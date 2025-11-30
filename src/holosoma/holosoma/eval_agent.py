@@ -39,7 +39,7 @@ def run_eval_with_tyro(
     tyro_config.save_config(str(eval_log_dir / CONFIG_NAME))
 
     assert checkpoint_cfg.checkpoint is not None
-    checkpoint = load_checkpoint(checkpoint_cfg.wandb_run_path, checkpoint_cfg.checkpoint, str(eval_log_dir))
+    checkpoint = load_checkpoint(checkpoint_cfg.checkpoint, str(eval_log_dir))
     checkpoint_path = str(checkpoint)
 
     algo_class = get_class(tyro_config.algo._target_)
@@ -51,7 +51,7 @@ def run_eval_with_tyro(
         multi_gpu_cfg=None,
     )
     algo.setup()
-    algo.attach_checkpoint_metadata(saved_config, saved_wandb_path or checkpoint_cfg.wandb_run_path)
+    algo.attach_checkpoint_metadata(saved_config, saved_wandb_path)
     algo.load(checkpoint_path)
 
     checkpoint_dir = os.path.dirname(checkpoint_path)

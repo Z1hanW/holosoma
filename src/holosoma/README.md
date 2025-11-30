@@ -76,9 +76,8 @@ For evaluating policies with the exact same configuration used during training (
 ```bash
 # Evaluate checkpoint from Wandb
 python src/holosoma/holosoma/eval_agent.py \
-    --wandb_run_path=<ENTITY>/<PROJECT>/<RUN_ID> \
-    --checkpoint=<CHECKPOINT_NAME>
-# e.g., --wandb_run_path=username/fastsac-t1-locomotion/abcdefgh --checkpoint=model_0010000.pt
+    --checkpoint=wandb://<ENTITY>/<PROJECT>/<RUN_ID>/<CHECKPOINT_NAME>
+# e.g., --checkpoint=wandb://username/fastsac-t1-locomotion/abcdefgh/model_0010000.pt
 
 # Evaluate local checkpoint
 python src/holosoma/holosoma/eval_agent.py \
@@ -90,6 +89,10 @@ This evaluation mode:
 - Automatically loads the training configuration from the checkpoint
 - Runs evaluation in the same simulator and environment as training
 - Can export policies to ONNX format (via `--training.export_onnx=True`)
+- For locomotion evaluation, supports interactive velocity commands via keyboard (when simulator window is active):
+  - `w`/`a`/`s`/`d`: linear velocity commands
+  - `q`/`e`: angular velocity commands
+  - `z`: zero velocity command
 
 ### Cross-Simulator Evaluation (MuJoCo)
 

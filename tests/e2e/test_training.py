@@ -111,8 +111,7 @@ def assert_training_and_eval_workflow(
 
     print(f"Using checkpoint for eval: {checkpoint_path}")
 
-    # Extract wandb run info from training output if available
-    # For now, skip wandb_run_path since we're using local checkpoints
+    # Extract wandb run info from training output if available (tests only use local checkpoints)
     eval_cmd = [
         "python",
         f"{REPO_ROOT}/src/holosoma/holosoma/eval_agent.py",
