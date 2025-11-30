@@ -386,14 +386,6 @@ class WarpBackend(IMujocoBackend):
         - Supports all PyTorch operations natively
         - Works seamlessly on GPU
 
-        IMPORTANT: cfrc_ext contains ALL external forces on each body, including:
-        1. Contact forces (from collisions)
-        2. Applied external forces (from xfrc_applied, e.g., gantry forces)
-
-        To get pure contact forces (matching ClassicBackend behavior), we must
-        subtract xfrc_applied from cfrc_ext. This prevents external applied forces
-        (like gantry support) from triggering contact-based terminations.
-
         Parameters
         ----------
         num_bodies : int
@@ -402,11 +394,10 @@ class WarpBackend(IMujocoBackend):
         Returns
         -------
         torch.Tensor
-            Pure contact forces [num_envs, num_bodies, 3] - native PyTorch tensor
+            Contact forces [num_envs, num_bodies, 3] - native PyTorch tensor
         """
-        # cfrc_ext includes both contact forces AND xfrc_applied
-        # Subtract xfrc_applied to get pure contact forces (matching ClassicBackend)
-        return self.cfrc_t[..., :3] - self.xfrc_applied_t[..., :3]
+        # cfrc_ext is [num_envs, num_bodies, 6], take first 3 components (forces only)
+        return self.cfrc_t[..., :3]
 
     def create_dof_state_view(self, dof_addrs: dict, num_dof: int) -> BaseMujocoView:
         """Create DOF state view using zero-copy GPU tensors.
