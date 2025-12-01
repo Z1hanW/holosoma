@@ -1,10 +1,10 @@
 # Holosoma
 
-Holosoma (Greek: "whole-body") is a comprehensive humanoid robotics framework for training and deploying reinforcement learning policies on humanoid robots, as well as motion retargeting. Supports locomotion (velocity tracking) and whole-body tracking tasks across multiple simulators (IsaacGym, IsaacSim, Mujoco) with algorithms like PPO and FastSAC.
+Holosoma (Greek: "whole-body") is a comprehensive humanoid robotics framework for training and deploying reinforcement learning policies on humanoid robots, as well as motion retargeting. Supports locomotion (velocity tracking) and whole-body tracking tasks across multiple simulators (IsaacGym, IsaacSim, MJWarp, MuJoCo) with algorithms like PPO and FastSAC.
 
 ## Features
 
-- **Multi-simulator support**: IsaacGym, IsaacSim, and Mujoco (inference only)
+- **Multi-simulator support**: IsaacGym, IsaacSim, MuJoCo Warp (MJWarp), and MuJoCo (inference only)
 - **Multiple RL algorithms**: PPO and FastSAC
 - **Robot support**: Unitree G1 and Booster T1 humanoids
 - **Task types**: Locomotion (velocity tracking) and whole-body tracking
@@ -41,7 +41,7 @@ bash scripts/setup_isaacgym.sh
 # Requires Ubuntu 22.04 or later due to IsaacSim dependencies
 bash scripts/setup_isaacsim.sh
 
-# For Mujoco simulation
+# For MJWarp training and MuJoCo simulation (inference)
 bash scripts/setup_mujoco.sh
 
 # For inference/deployment
@@ -88,17 +88,17 @@ Watch real-world deployments of Holosoma policies *(click thumbnails to play)*
   <tr>
     <td width="33%">
       <a href="https://youtu.be/YYMgj5BDIMI">
-        <img src="https://img.youtube.com/vi/YYMgj5BDIMI/maxresdefault.jpg" width="100%" alt="▶ G1 Locomotion">
+        <img src="https://img.youtube.com/vi/YYMgj5BDIMI/hqdefault.jpg" width="100%" alt="▶ G1 Locomotion">
       </a>
     </td>
     <td width="33%">
       <a href="https://youtu.be/Q6rNHJZ2a6Y">
-        <img src="https://img.youtube.com/vi/Q6rNHJZ2a6Y/maxresdefault.jpg" width="100%" alt="▶ T1 Locomotion">
+        <img src="https://img.youtube.com/vi/Q6rNHJZ2a6Y/hqdefault.jpg" width="100%" alt="▶ T1 Locomotion">
       </a>
     </td>
     <td width="33%">
       <a href="https://youtu.be/ouPk69_eFfE">
-        <img src="https://img.youtube.com/vi/ouPk69_eFfE/maxresdefault.jpg" width="100%" alt="▶ G1 Dancing">
+        <img src="https://img.youtube.com/vi/ouPk69_eFfE/hqdefault.jpg" width="100%" alt="▶ G1 Dancing">
       </a>
     </td>
   </tr>
