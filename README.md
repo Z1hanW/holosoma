@@ -75,6 +75,36 @@ After training, deploy your policies:
 
 Or browse all deployment options in the [Inference & Deployment Guide](src/holosoma_inference/README.md).
 
+### Demo Videos
+
+Watch real-world deployments of Holosoma policies *(click thumbnails to play)*
+
+<table>
+  <tr>
+    <th>G1 Locomotion</th>
+    <th>T1 Locomotion</th>
+    <th>G1 Dancing</th>
+  </tr>
+  <tr>
+    <td width="33%">
+      <a href="https://youtu.be/YYMgj5BDIMI">
+        <img src="https://img.youtube.com/vi/YYMgj5BDIMI/maxresdefault.jpg" width="100%" alt="▶ G1 Locomotion">
+      </a>
+    </td>
+    <td width="33%">
+      <a href="https://youtu.be/Q6rNHJZ2a6Y">
+        <img src="https://img.youtube.com/vi/Q6rNHJZ2a6Y/maxresdefault.jpg" width="100%" alt="▶ T1 Locomotion">
+      </a>
+    </td>
+    <td width="33%">
+      <a href="https://youtu.be/ouPk69_eFfE">
+        <img src="https://img.youtube.com/vi/ouPk69_eFfE/maxresdefault.jpg" width="100%" alt="▶ G1 Dancing">
+      </a>
+    </td>
+  </tr>
+</table>
+
+
 ## Security
 
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
