@@ -144,8 +144,8 @@ def validate_config(cfg: RetargetingConfig) -> None:
         raise ValueError("Climbing task requires 'mocap' data format")
     if cfg.task_type == "object_interaction" and cfg.data_format not in (None, "smplh"):
         raise ValueError("Object interaction requires 'smplh' data format")
-    if cfg.task_type == "robot_only" and cfg.data_format not in (None, "lafan", "smplh"):
-        raise ValueError("Robot-only task requires 'lafan' or 'smplh' data format")
+    if cfg.task_type == "robot_only" and cfg.data_format not in (None, "lafan", "smplh", "mocap"):
+        raise ValueError("Robot-only task requires 'lafan' or 'smplh' or 'mocap' data format")
 
 
 def create_ground_points(x_range: tuple[float, float], y_range: tuple[float, float], size: int) -> np.ndarray:
@@ -206,13 +206,23 @@ def load_motion_data(
             # LAFAN-specific spine adjustment
             human_joints[:, spine_joint_idx, -1] -= 0.06
             smpl_scale = motion_data_config.default_scale_factor or 1.0
-        else:  # smplh
+        elif data_format == "smplh":  # smplh
             pt_path = data_path / f"{task_name}.pt"
             if not pt_path.exists():
                 raise FileNotFoundError(f"InterMimic data file not found: {pt_path}")
 
             human_joints, object_poses = load_intermimic_data(str(pt_path))
             smpl_scale = calculate_scale_factor(task_name, constants.ROBOT_HEIGHT)
+        elif data_format == "mocap":
+            downsample = 4
+            npy_file = data_path / f"{task_name}.npy"
+            if not npy_file.exists():
+                raise FileNotFoundError(f"MOCAP data file not found: {npy_file}")
+
+            human_joints = np.load(str(npy_file))[::downsample]
+
+            default_human_height = motion_data_config.default_human_height or 1.78
+            smpl_scale = constants.ROBOT_HEIGHT / default_human_height
 
         # Create dummy object poses for robot_only
         num_frames = human_joints.shape[0]

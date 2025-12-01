@@ -46,8 +46,6 @@
 
     <mesh name="half_sphere" file="../assets/half_sphere.obj"/>
 
-
-    <include file="box_assets.xml"/>
   </asset>
 
 
@@ -447,8 +445,6 @@
         </body>
       </body>
     </body>
-
-    <include file="box_body.xml"/>
 
   </worldbody>
 
