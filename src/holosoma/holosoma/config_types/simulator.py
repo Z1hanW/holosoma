@@ -30,8 +30,8 @@ class MujocoWarpConfig:
     Increase these values if you encounter overflow warnings during training.
     """
 
-    nconmax_per_env: int = 64
-    """Maximum contacts per environment (default: 64).
+    nconmax_per_env: int = 96
+    """Maximum contacts per environment (default: 96).
 
     Increase for:
     - Complex terrains with many contact points

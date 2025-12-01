@@ -10,6 +10,9 @@
         </default>
         <default class="collision">
             <geom group="3" material="transparent" priority="1" friction="1. 0.01 0.005"/>
+            <default class="foot">
+                <geom type="capsule" size="0.01" priority="1" condim="3" friction="1.5 0.005 0.0001" solimp="0.9 0.95 0.001 0.5 2" solref="0.02 1" material=""/>
+            </default>
         </default>
     </default>
 
@@ -49,6 +52,7 @@
         <body name="Trunk" pos="0 0 0.7">
             <inertial pos="0.0551365 -1.42058e-06 0.105062" quat="0.99996 1.40561e-05 -0.00899532 -1.39249e-05" mass="11.7" diaginertia="0.0915404 0.0767787 0.0556055" />
             <site name='imu' size='0.01' pos='0.0 0.0 0.0' />
+            <site name="mid360" pos="0.1 0 0.5" size="0.01" rgba="1 0 0 1"/>
             <freejoint/>
             <geom type="mesh" contype="0" conaffinity="0" group="1" rgba="0.76 0.76 0.76 1.0" mesh="Trunk" />
             <geom size="0.075 0.1 0.15" pos="0.06 0 0.12" type="box" rgba="0.76 0.76 0.76 0.0" />
@@ -172,7 +176,13 @@
                                         <inertial pos="-0.000249 0 -0.00914" quat="0 0.599183 0 0.800612" mass="0.685" diaginertia="0.0027142 0.002385 0.0021708" />
                                         <joint name="Left_Ankle_Roll" pos="0 0 0" axis="1 0 0" limited="true" range="-0.44 0.44" />
                                         <geom type="mesh" contype="0" conaffinity="0" group="1" rgba="0.4 0.4 0.4 1.0" mesh="left_foot_link" />
-                                        <geom size="0.1115 0.05 0.015" pos="0.01 0 -0.015" type="box" rgba="0.4 0.4 0.4 0.0" />
+                                        <geom name="L_rail_1" class="foot" fromto="-0.09 0 -0.03  0.11 0 -0.03"/>
+                                        <geom name="L_rail_2" class="foot" fromto="-0.09 0.014 -0.03  0.11 0.014 -0.03"/>
+                                        <geom name="L_rail_3" class="foot" fromto="-0.09 -0.014 -0.03  0.11 -0.014 -0.03"/>
+                                        <geom name="L_rail_4" class="foot" fromto="-0.08 0.028 -0.03  0.10 0.028 -0.03"/>
+                                        <geom name="L_rail_5" class="foot" fromto="-0.08 -0.028 -0.03  0.10 -0.028 -0.03"/>
+                                        <geom name="L_rail_6" class="foot" fromto="-0.07 0.042 -0.03  0.09 0.042 -0.03"/>
+                                        <geom name="L_rail_7" class="foot" fromto="-0.07 -0.042 -0.03  0.09 -0.042 -0.03"/>
                                         <body name="left_foot_contact_point" pos="0 0 -0.032">
                                             <inertial pos="0 0 0" mass="0.001" diaginertia="0.000001 0.000001 0.000001"/>
                                         </body>
@@ -209,7 +219,13 @@
                                         <inertial pos="-0.000248 0 -0.00914" quat="0 0.599183 0 0.800612" mass="0.685" diaginertia="0.0027142 0.002385 0.0021708" />
                                         <joint name="Right_Ankle_Roll" pos="0 0 0" axis="1 0 0" limited="true" range="-0.44 0.44" />
                                         <geom type="mesh" contype="0" conaffinity="0" group="1" rgba="0.4 0.4 0.4 1.0" mesh="right_foot_link" />
-                                        <geom size="0.1115 0.05 0.015" pos="0.01 0 -0.015" type="box" rgba="0.4 0.4 0.4 0.0" />
+                                        <geom name="R_rail_1" class="foot" fromto="-0.09 0 -0.03  0.11 0 -0.03"/>
+                                        <geom name="R_rail_2" class="foot" fromto="-0.09 0.014 -0.03  0.11 0.014 -0.03"/>
+                                        <geom name="R_rail_3" class="foot" fromto="-0.09 -0.014 -0.03  0.11 -0.014 -0.03"/>
+                                        <geom name="R_rail_4" class="foot" fromto="-0.08 0.028 -0.03  0.10 0.028 -0.03"/>
+                                        <geom name="R_rail_5" class="foot" fromto="-0.08 -0.028 -0.03  0.10 -0.028 -0.03"/>
+                                        <geom name="R_rail_6" class="foot" fromto="-0.07 0.042 -0.03  0.09 0.042 -0.03"/>
+                                        <geom name="R_rail_7" class="foot" fromto="-0.07 -0.042 -0.03  0.09 -0.042 -0.03"/>
                                         <body name="right_foot_contact_point" pos="0 0 -0.032">
                                             <inertial pos="0 0 0" mass="0.001" diaginertia="0.000001 0.000001 0.000001"/>
                                         </body>
