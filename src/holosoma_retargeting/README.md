@@ -1,7 +1,14 @@
-## Single sequence motion retargeting
-```
+# Holosoma Motion Retargeting
+
+This repository provides tools for retargeting human motion data to humanoid robots. It supports multiple data formats (smplh, mocap, lafan) and task types including robot-only motion, object interaction, and climbing.
+
+**Data Requirements**: The retargeting pipeline requires motion data in world joint positions. For custom data, you need to prepare world joint positions in shape `(T, J, 3)` where T is the number of frames and J is the number of joints, and modify `demo_joints` and `joints_mapping` defined in `config_types/data_type.py`.
+
+## Single Sequence Motion Retargeting
+
+```bash
 # Robot-only (OMOMO)
-python examples/robot_retarget.py --data_path demo_data/OMOMO_new --task-type robot_only --task_name sub3_largebox_003 --data_format smplh --retargeter.debug --retargeter.visualize
+python examples/robot_retarget.py --data_path demo_data/OMOMO_new --task-type robot_only --task-name sub3_largebox_003 --data_format smplh --retargeter.debug --retargeter.visualize
 
 # Object interaction (OMOMO)
 python examples/robot_retarget.py --data_path demo_data/OMOMO_new --task-type object_interaction --task-name sub3_largebox_003 --data_format smplh --retargeter.debug --retargeter.visualize
@@ -10,65 +17,78 @@ python examples/robot_retarget.py --data_path demo_data/OMOMO_new --task-type ob
 python examples/robot_retarget.py --data_path demo_data/climb --task-type climbing --task-name mocap_climb_seq_0 --data_format mocap --robot-config.robot-urdf-file models/g1/g1_29dof_spherehand.urdf --retargeter.debug --retargeter.visualize
 ```
 
-Add --augmentation for running sequence with augmentation (need to first run the original sequence before adding augmentation)
+**Note**: Add `--augmentation` to run sequences with augmentation. You must first run the original sequence before adding augmentation.
 
-## Batch processing for motion retargeting
-```
+## Batch Processing for Motion Retargeting
+
+```bash
 # Robot-only (OMOMO)
-python examples/parallel_robot_retarget.py --data-dir demo_data/OMOMO_new --task-type robot_only  --data_format smplh --save_dir demo_results_parallel/g1/robot_only/omomo --task-config.object-name ground
+python examples/parallel_robot_retarget.py --data-dir demo_data/OMOMO_new --task-type robot_only --data_format smplh --save_dir demo_results_parallel/g1/robot_only/omomo --task-config.object-name ground
 
 # Object interaction (OMOMO)
-python examples/parallel_robot_retarget.py --data-dir demo_data/OMOMO_new --task-type object_interaction  --data_format smplh --save_dir demo_results_parallel/g1/object_interaction/omomo --task-config.object-name largebox
+python examples/parallel_robot_retarget.py --data-dir demo_data/OMOMO_new --task-type object_interaction --data_format smplh --save_dir demo_results_parallel/g1/object_interaction/omomo --task-config.object-name largebox
 
 # Climbing
 python examples/parallel_robot_retarget.py --data-dir demo_data/climb --task-type climbing --data_format mocap --robot-config.robot-urdf-file models/g1/g1_29dof_spherehand.urdf --task-config.object-name multi_boxes --save_dir demo_results_parallel/g1/climbing/mocap_climb
 ```
 
-Add --augmentation for running sequence with augmentation (for object interaction and climbing task)
+**Note**: Add `--augmentation` to run original sequences and sequences with augmentation (for object interaction and climbing tasks).
 
 ## Data Preparation
-We provide demo_data/ for fast testing. To test on more motion sequences in OMOMO, please follow the instructions to download the data.
 
+We provide `demo_data/` for fast testing. To test on more motion sequences, please follow the instructions below to download and prepare the data.
 
 ### OMOMO
-Our pipeline used the processed dataset by InterMimic. The data format differs from the original OMOMO dataset. Please download the processed OMOMO data here https://drive.google.com/file/d/141YoPOd2DlJ4jhU2cpZO5VU5GzV_lm5j/view. And put the downloaded folder to demo_data/OMOMO_new.
+
+Our pipeline uses the processed dataset by InterMimic. The data format differs from the original OMOMO dataset.
+
+1. Download the processed OMOMO data from [this link](https://drive.google.com/file/d/141YoPOd2DlJ4jhU2cpZO5VU5GzV_lm5j/view)
+2. Extract the downloaded folder to `demo_data/OMOMO_new`
+
+The data should contain `.pt` files.
 
 ### LAFAN
-#### Download the original LAFAN data.
 
-Dowoloading the [lafan1.zip](https://github.com/ubisoft/ubisoft-laforge-animation-dataset/blob/master/lafan1/lafan1.zip) by clicking View Raw.
+#### Download the Original LAFAN Data
 
-Put lafan1.zip to your designed data folder and uncompress it to DATA_FOLDER_PATH/lafan, the file structure should be demo_data/lafan/*.bvh.
+1. Download [lafan1.zip](https://github.com/ubisoft/ubisoft-laforge-animation-dataset/blob/master/lafan1/lafan1.zip) by clicking "View Raw"
+2. Put `lafan1.zip` in your designated data folder and uncompress it to `DATA_FOLDER_PATH/lafan`
+3. The file structure should be `demo_data/lafan/*.bvh`
 
-#### Convert the original LAFAN data format for motion retargeting.
-We need some data processing files from the [LAFAN github repo](https://github.com/ubisoft/ubisoft-laforge-animation-dataset).
-```
-cd data_utils/
+#### Convert the Original LAFAN Data Format for Motion Retargeting
+
+We need some data processing files from the [LAFAN GitHub repo](https://github.com/ubisoft/ubisoft-laforge-animation-dataset).
+
+```bash
+cd holosoma_retargeting/data_utils/
 git clone https://github.com/ubisoft/ubisoft-laforge-animation-dataset.git
 mv ubisoft-laforge-animation-dataset/lafan1 .
 python extract_global_positions.py --input_dir DATA_FOLDER_PATH/lafan --output_dir ../demo_data/lafan
 ```
 
-#### Single sequence retargeting on LAFAN.
-```
-python examples/robot_retarget.py --data_path demo_data/lafan --task-type robot_only --task_name dance2_subject1 --data_format lafan --task-config.ground-range -10 10 --save_dir demo_results/g1/robot_only/lafan --retargeter.debug --retargeter.visualize --retargeter.foot-sticking-tolerance 0.02
+This will convert the BVH files to `.npy` format with global joint positions.
+
+**Note**: For LAFAN data, you need to relax the foot sticking constraint by setting `--retargeter.foot-sticking-tolerance` (default is stricter). You can adjust this tolerance number based on your data quality and retargeting results.
+
+#### Single Sequence Retargeting on LAFAN
+
+```bash
+python examples/robot_retarget.py --data_path demo_data/lafan --task-type robot_only --task-name dance2_subject1 --data_format lafan --task-config.ground-range -10 10 --save_dir demo_results/g1/robot_only/lafan --retargeter.debug --retargeter.visualize --retargeter.foot-sticking-tolerance 0.02
 ```
 
-#### Batch processing for motion retargeting on LAFAN.
-```
-python examples/parallel_robot_retarget.py --data-dir demo_data/lafan --task-type robot_only  --data_format lafan --save_dir demo_results_parallel/g1/robot_only/lafan --task-config.object-name ground --task-config.ground-range -10 10 --retargeter.foot-sticking-tolerance 0.02
+#### Batch Processing for Motion Retargeting on LAFAN
+
+```bash
+python examples/parallel_robot_retarget.py --data-dir demo_data/lafan --task-type robot_only --data_format lafan --save_dir demo_results_parallel/g1/robot_only/lafan --task-config.object-name ground --task-config.ground-range -10 10 --retargeter.foot-sticking-tolerance 0.02
 ```
 
-## Check visualizations of saved retargeting results
-```
+## Check Visualizations of Saved Retargeting Results
+
+```bash
 # Visualize object-interaction results
 python viser_player.py --robot_urdf models/g1/g1_29dof.urdf \
     --object_urdf models/largebox/largebox.urdf \
     --qpos_npz demo_results_parallel/g1/object_interaction/omomo/sub3_largebox_003_original.npz
-
-python viser_player.py --robot_urdf models/g1/g1_29dof.urdf \
-    --object_urdf models/largebox/largebox.urdf \
-    --qpos_npz demo_results_parallel/g1/object_interaction/omomo/sub3_largebox_003_trans_1.npz
 
 # Visualize climbing results
 python viser_player.py --robot_urdf models/g1/g1_29dof_spherehand.urdf \
@@ -89,7 +109,8 @@ python viser_player.py --robot_urdf models/g1/g1_29dof.urdf \
 ```
 
 ## Quantitative Evaluation
-```
+
+```bash
 # Evaluate robot-object interaction
 python evaluation/eval_retargeting.py --res_dir demo_results_parallel/g1/object_interaction/omomo --data_dir demo_data/OMOMO_new --data_type "robot_object"
 
@@ -100,27 +121,42 @@ python evaluation/eval_retargeting.py --res_dir demo_results_parallel/g1/climbin
 python evaluation/eval_retargeting.py --res_dir demo_results_parallel/g1/robot_only/omomo --data_dir demo_data/OMOMO_new --data_type "robot_only"
 ```
 
-## Prepare data for training RL whole-body tracking policy
-Note that if you run this code on Mac, please use mjpython. For example,
-```
+## Prepare Data for Training RL Whole-Body Tracking Policy
+
+To prepare data for training RL whole-body tracking policies, you need to follow a two-step process:
+
+1. **First, run retargeting** to obtain `.npz` files containing the retargeted robot motion. Use the retargeting commands shown in the sections above (Single Sequence Motion Retargeting or Batch Processing for Motion Retargeting).
+
+2. **Then, run the data conversion code** below to convert the retargeted `.npz` files into the format required for RL training. The conversion script takes the retargeted `.npz` files as input and outputs converted files with the specified frame rate and format.
+
+**Note**: If you run this code on Mac, please use `mjpython` instead of `python`.
+
+### Mac (using mjpython)
+
+```bash
 mjpython data_conversion/convert_data_format_mj.py --input_file ./demo_results/g1/robot_only/omomo/sub3_largebox_003.npz --output_fps 50 --output_name converted_res/robot_only/sub3_largebox_003_mj_fps50.npz --data_format smplh --object_name "ground" --once
 
-mjpython data_conversion/convert_data_format_mj.py --input_file ./demo_results/g1/object_interaction/omomo/sub3_largebox_003_original.npz --output_fps 50 --output_name converted_res/object_interaction/sub3_largebox_003_mj_w_obj.npz --data_format smplh --object_name "largebox"  --has_dynamic_object --once
+mjpython data_conversion/convert_data_format_mj.py --input_file ./demo_results/g1/object_interaction/omomo/sub3_largebox_003_original.npz --output_fps 50 --output_name converted_res/object_interaction/sub3_largebox_003_mj_w_obj.npz --data_format smplh --object_name "largebox" --has_dynamic_object --once
 ```
 
-Robot-only setting
-```
+### Robot-Only Setting
+
+```bash
 python data_conversion/convert_data_format_mj.py --input_file ./demo_results/g1/robot_only/omomo/sub3_largebox_003.npz --output_fps 50 --output_name converted_res/robot_only/sub3_largebox_003_mj_fps50.npz --data_format smplh --object_name "ground" --once
 
-python data_conversion/convert_data_format_mj.py --input_file ./demo_results/g1/robot_only/lafan/dance2_subject1.npz --output_fps 50 --output_name converted_res/robot_only/dance2_subject1_mj_fps50.npz  --data_format lafan --object_name "ground" --once
+python data_conversion/convert_data_format_mj.py --input_file ./demo_results/g1/robot_only/lafan/dance2_subject1.npz --output_fps 50 --output_name converted_res/robot_only/dance2_subject1_mj_fps50.npz --data_format lafan --object_name "ground" --once
 ```
 
-Robot-object setting
-```
-python data_conversion/convert_data_format_mj.py --input_file ./demo_results/g1/object_interaction/omomo/sub3_largebox_003_original.npz --output_fps 50 --output_name converted_res/object_interaction/sub3_largebox_003_mj_w_obj.npz --data_format smplh --object_name "largebox"  --has_dynamic_object --once
+### Robot-Object Setting
+
+```bash
+python data_conversion/convert_data_format_mj.py --input_file ./demo_results/g1/object_interaction/omomo/sub3_largebox_003_original.npz --output_fps 50 --output_name converted_res/object_interaction/sub3_largebox_003_mj_w_obj.npz --data_format smplh --object_name "largebox" --has_dynamic_object --once
 ```
 
-For OmniRetarget data downloaded from HuggingFace, please add --use_omniretarget_data for data conversion.
-```
-python data_conversion/convert_data_format_mj.py --input_file OmniRetarget/robot-object/sub3_largebox_003_original.npz --output_fps 50 --output_name converted_res/object_interaction/sub3_largebox_003_mj_w_obj_omnirt.npz --data_format smplh --object_name "largebox"  --has_dynamic_object --use_omniretarget_data --once
+### OmniRetarget Data
+
+For OmniRetarget data downloaded from HuggingFace, please add `--use_omniretarget_data` for data conversion.
+
+```bash
+python data_conversion/convert_data_format_mj.py --input_file OmniRetarget/robot-object/sub3_largebox_003_original.npz --output_fps 50 --output_name converted_res/object_interaction/sub3_largebox_003_mj_w_obj_omnirt.npz --data_format smplh --object_name "largebox" --has_dynamic_object --use_omniretarget_data --once
 ```
