@@ -105,6 +105,19 @@ Watch real-world deployments of Holosoma policies *(click thumbnails to play)*
 </table>
 
 
+## Issue Reporting
+
+We welcome feedback and issue reports to help improve holosoma. Please use issues to:
+
+- Report bugs and technical issues
+- Request new features
+
+## Support
+
+If you need help with anything aside from issues feel free to join our [discord server](https://discord.gg/TPupMvpqHc).
+
+Use the discord to discuess larger plans and other more involved problems.
+
 ## Security
 
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
