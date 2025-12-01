@@ -109,6 +109,10 @@ Watch real-world deployments of Holosoma policies *(click thumbnails to play)*
 
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
 
+## Citation
+
+If you use Holosoma in your research, please cite it according to the "Cite this repository" panel on the right sidebar of the Github repo.
+
 ## License
 
 This project is licensed under the Apache-2.0 License.
