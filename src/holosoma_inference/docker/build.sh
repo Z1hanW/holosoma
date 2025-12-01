@@ -5,10 +5,10 @@
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )" # holosoma/src/holosoma_inference/docker
 SRC_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")" # holosoma/src
 
-ECR_REPO="241533154612.dkr.ecr.us-east-1.amazonaws.com"
+IMAGE_NAME="holosoma-onboard"
 
-cmd="docker build "$SRC_DIR" -f "$SCRIPT_DIR/Dockerfile" -t "$ECR_REPO/humanoid-onboard""
+cmd="docker build $SRC_DIR -f "$SCRIPT_DIR/Dockerfile" -t $IMAGE_NAME"
 echo $cmd
 eval $cmd
 
-rm $SCRIPT_DIR/*.whl
+rm "$SCRIPT_DIR"/*.whl

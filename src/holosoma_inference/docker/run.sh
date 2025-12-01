@@ -11,7 +11,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )" # holosoma/holoso
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/../../.." && pwd )" # holosoma/
 
 CONTAINER_NAME="far-jetson-container"
-IMAGE_NAME="241533154612.dkr.ecr.us-east-1.amazonaws.com/humanoid-onboard"
+IMAGE_NAME="holosoma-onboard"
 
 # Function to create a new container
 create_container() {
