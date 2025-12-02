@@ -4,7 +4,7 @@ Core training framework for humanoid robot reinforcement learning with support f
 
 | **Category** | **Supported Options** |
 |-------------|----------------------|
-| **Simulators** | IsaacGym, IsaacSim (training) \| Mujoco (evaluation) |
+| **Simulators** | IsaacGym, IsaacSim, MJWarp (training) \| Mujoco (evaluation) |
 | **Algorithms** | PPO, FastSAC |
 | **Robots** | Unitree G1, Booster T1 |
 
@@ -35,6 +35,48 @@ python src/holosoma/holosoma/train_agent.py \
 ```
 
 Once checkpoints are saved, you can evaluate policies using [In-Training Evaluation](#in-training-evaluation) (same simulator as training) or cross-simulator evaluation in MuJoCo (see [holosoma_inference](../holosoma_inference/README.md)).
+
+### MJWarp Training for Locomotion (Velocity Tracking)
+
+Train using the MJWarp simulator (GPU-accelerated MuJoCo). **Note: MJWarp support is in beta.**
+
+```bash
+# G1 with FastSAC
+source scripts/source_mujoco_setup.sh
+python src/holosoma/holosoma/train_agent.py \
+    exp:g1-29dof-fast-sac \
+    simulator:mjwarp \
+    logger:wandb
+
+# G1 with PPO
+source scripts/source_mujoco_setup.sh
+python src/holosoma/holosoma/train_agent.py \
+    exp:g1-29dof \
+    simulator:mjwarp \
+    logger:wandb
+
+# T1 with FastSAC
+source scripts/source_mujoco_setup.sh
+python src/holosoma/holosoma/train_agent.py \
+    exp:t1-29dof-fast-sac \
+    simulator:mjwarp \
+    logger:wandb
+
+# T1 with PPO
+source scripts/source_mujoco_setup.sh
+python src/holosoma/holosoma/train_agent.py \
+    exp:t1-29dof \
+    simulator:mjwarp \
+    logger:wandb \
+    --terrain.terrain-term.scale-factor=0.5  # required to avoid training instabilities
+
+```
+
+> **Note:**
+> - MJWarp uses `nconmax=96` (maximum contacts per environment) by default. This can be adjusted via `--simulator.config.mujoco-warp.nconmax-per-env=96` if needed.
+> - These examples use `--training.num-envs=4096`, but you may need to adjust this value based on your hardware.
+> - When training T1 with PPO on mixed terrain, use `--terrain.terrain-term.scale-factor=0.5` to avoid training instabilities.
+
 
 ### Whole-Body Tracking
 

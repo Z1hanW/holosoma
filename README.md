@@ -116,7 +116,7 @@ We welcome feedback and issue reports to help improve holosoma. Please use issue
 
 If you need help with anything aside from issues feel free to join our [discord server](https://discord.gg/TPupMvpqHc).
 
-Use the discord to discuess larger plans and other more involved problems.
+Use the discord to discuss larger plans and other more involved problems.
 
 ## Security
 
