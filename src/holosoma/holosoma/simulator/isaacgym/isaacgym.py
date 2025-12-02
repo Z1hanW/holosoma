@@ -155,7 +155,7 @@ class IsaacGym(BaseSimulator):
         self.sim = sim
 
     def _parse_sim_params(self):
-        # TODO: this sim params are not loaded from the config file @Jiawei
+        # TODO: this sim params are not loaded from the config file
         # initialize sim
         sim_params = gymapi.SimParams()
         sim_params.dt = 1.0 / self.simulator_config.sim.fps
@@ -391,7 +391,7 @@ class IsaacGym(BaseSimulator):
     def _build_each_env(self, env_id, env_ptr):
         start_pose = gymapi.Transform()
         start_pose.p = gymapi.Vec3(*self.base_init_state[:3])
-        # Yuanhang: keep the base height the same as the initial height
+        # keep the base height the same as the initial height
         # TODO: Move randomization of robot position out of simulator, kept now for backwards
         # compatibility.
         pos = self.env_origins[env_id].clone()
@@ -457,7 +457,7 @@ class IsaacGym(BaseSimulator):
                 start_pose,
                 object_name,
                 env_id,
-                -1,  # self_collisions # TODO: @Xiaofeng@0701: check this later
+                -1,  # self_collisions # TODO: check this later
                 0,  # group
             )
             if self.simulator_config.sim.physx.enable_dof_force_sensors:

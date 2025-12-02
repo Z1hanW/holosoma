@@ -403,5 +403,5 @@ class BaseModule(nn.Module):
             raise NotImplementedError(f"Unsupported layer type: {layer_type}")
 
     def forward(self, policy_input):
-        # Yuanhang: Only forward the MLP layer
+        # Only forward the MLP layer
         return self.module(policy_input)

@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import copy
 import importlib
-import os
 from typing import Any, Type
-
-from loguru import logger
 
 from holosoma.utils.safe_torch_import import torch
 
@@ -120,6 +116,6 @@ def parse_observation(
         obs_noise = noise_scales[key] * current_noise_curriculum_value * noise_level
         actor_obs = getattr(cls, f"_get_obs_{key}")().clone()
         obs_scale = obs_scales[key]
-        # Yuanhang: use rand_like (uniform 0-1) instead of randn_like (N~[0,1])
+        # use rand_like (uniform 0-1) instead of randn_like (N~[0,1])
         # buf_dict[key] = actor_obs * obs_scale + (torch.randn_like(actor_obs)* 2. - 1.) * obs_noise
         buf_dict[key] = (actor_obs + (torch.rand_like(actor_obs) * 2.0 - 1.0) * obs_noise) * obs_scale

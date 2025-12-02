@@ -214,7 +214,7 @@ class BasicSdk2Bridge(ABC):
                 print("Unsupported OS. ")
 
         elif js_type == "switch":
-            # Yuanhang: may differ for different OS, need to be checked
+            # may differ for different OS, need to be checked
             self.axis_id = {
                 "LX": 0,  # Left stick axis x
                 "LY": 1,  # Left stick axis y
