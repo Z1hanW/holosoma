@@ -297,10 +297,24 @@ class LeggedRobotLocomotionManager(BaseTask):
             self.simulator.robot_root_states[env_ids, :3] += self.terrain_manager.get_state(
                 "locomotion_terrain"
             ).env_origins[env_ids]
+
+            # Apply randomized XY offset if custom_origins
             if self.terrain_manager.get_state("locomotion_terrain").custom_origins:
-                self.simulator.robot_root_states[env_ids, :2] += torch_rand_float(
-                    -1.0, 1.0, (len(env_ids), 2), device=str(self.device)
-                )  # xy position within 1m of the center
+                # Compute new XY positions with random offset for training variety
+                current_xy = self.simulator.robot_root_states[env_ids, :2]
+                xy_offsets = torch_rand_float(-1.0, 1.0, (len(env_ids), 2), device=str(self.device))
+                new_xy = current_xy + xy_offsets
+
+                # Query terrain height at new XY positions using shared terrain manager method
+                # (This is still not perfect because we rely on the base XY and not feet...)
+                terrain_state = self.terrain_manager.get_state("locomotion_terrain")
+                terrain_heights = terrain_state.query_terrain_heights(new_xy)
+                robot_base_height = self.robot_config.init_state.pos[2]  # Robot base height above ground
+                new_z = terrain_heights + robot_base_height
+
+                # Write new XYZ position all at once (single write operation)
+                new_xyz = torch.cat([new_xy, new_z.unsqueeze(1)], dim=1)
+                self.simulator.robot_root_states[env_ids, :3] = new_xyz
 
             # base velocities
             self.simulator.robot_root_states[env_ids, 7:13] = torch_rand_float(

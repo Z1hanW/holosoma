@@ -352,7 +352,7 @@ class Terrain(TerrainInterface):
         slope *= down
         terrain_utils.pyramid_sloped_terrain(terrain, slope=slope, platform_size=self._cfg.platform_size)
         terrain_utils.random_uniform_terrain(
-            terrain, min_height=-amplitude, max_height=amplitude, step=0.005, downsampled_scale=0.2
+            terrain, min_height=-amplitude, max_height=amplitude, step=terrain.vertical_scale, downsampled_scale=0.2
         )
 
     def _smooth_stairs_terrain_func(self, terrain: Any, difficulty: float) -> None:
@@ -404,7 +404,7 @@ class Terrain(TerrainInterface):
             terrain, step_width=step_width, step_height=step_height, platform_size=self._cfg.platform_size
         )
         terrain_utils.random_uniform_terrain(
-            terrain, min_height=-amplitude, max_height=amplitude, step=0.005, downsampled_scale=0.2
+            terrain, min_height=-amplitude, max_height=amplitude, step=terrain.vertical_scale, downsampled_scale=0.2
         )
 
     def _slope_terrain_func(self, terrain: Any, difficulty: float) -> None:

@@ -189,6 +189,41 @@ class TerrainLocomotion(TerrainTermBase):
         ray_hits_world = warp_utils.ray_cast(ray_starts_world, ray_directions_world, self.warp_mesh)
         return (foot_positions - ray_hits_world)[..., 2], ray_hits_world
 
+    def query_terrain_heights(self, xy_positions: torch.Tensor) -> torch.Tensor:
+        """Query terrain height at arbitrary XY positions using ray casting.
+
+        This method casts rays straight down from high above the terrain to find
+        the actual terrain height at each XY position. Useful for determining
+        spawn heights, checking clearances, or any arbitrary height query.
+
+        Args:
+            xy_positions: XY coordinates to query. Shape: (N, 2)
+
+        Returns:
+            Terrain heights (Z coordinates). Shape: (N,)
+
+        Example:
+            >>> xy = torch.tensor([[0.5, 0.5], [1.0, 1.0]], device="cuda")
+            >>> heights = terrain.query_terrain_heights(xy)
+            >>> heights.shape  # (2,)
+        """
+        num_points = xy_positions.shape[0]
+
+        # Create ray starts high above terrain (100m should be above any realistic terrain)
+        ray_starts = torch.zeros(num_points, 3, device=self.device)
+        ray_starts[:, :2] = xy_positions
+        ray_starts[:, 2] = 100.0  # Start 100m above ground for safety
+
+        # Ray directions pointing straight down
+        ray_directions = torch.zeros(num_points, 3, device=self.device)
+        ray_directions[:, 2] = -1.0
+
+        # Cast rays to find terrain height
+        ray_hits = warp_utils.ray_cast(ray_starts, ray_directions, self.warp_mesh)
+
+        # Extract Z coordinates (terrain heights)
+        return ray_hits[:, 2]
+
     def draw_debug_viz(self):
         env_id = 0
         for j in range(self._num_base_height_points):

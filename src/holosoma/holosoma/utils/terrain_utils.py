@@ -71,7 +71,7 @@ def random_uniform_terrain(
     # Convert parameters to discrete units
     min_height_px = int(min_height / terrain.vertical_scale)
     max_height_px = int(max_height / terrain.vertical_scale)
-    step_px = int(step / terrain.vertical_scale)
+    step_px = max(1, int(step / terrain.vertical_scale))  # Ensure at least 1 to avoid division by zero
 
     # Calculate downsampled dimensions
     width_downsampled = int(terrain.width * terrain.horizontal_scale / downsampled_scale)
