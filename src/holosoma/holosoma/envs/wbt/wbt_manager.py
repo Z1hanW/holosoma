@@ -187,6 +187,7 @@ class WholeBodyTrackingManager(BaseTask):
 
     def step_visualize_motion(self, actions):
         motion_command = self.command_manager.get_state("motion_command")
+        dt = 1.0 / float(motion_command.motion.fps)
         motion_command.step()
         print("time_steps: ", motion_command.time_steps[0].item())
         self._draw_debug_vis()
@@ -230,4 +231,6 @@ class WholeBodyTrackingManager(BaseTask):
         self.simulator.sim.render()
         self.simulator.refresh_sim_tensors()
 
-        time.sleep(0.02)
+        time.sleep(dt)
+
+        return motion_command.time_steps[0].item() >= motion_command.motion.time_step_total - 2

@@ -103,6 +103,13 @@ python src/holosoma/holosoma/train_agent.py \
     exp:g1-29dof-wbt \
     logger:wandb \
     --command.setup_terms.motion_command.params.motion_config.motion_file="holosoma/data/motions/g1_29dof/whole_body_tracking/<your file>.npz"
+
+# Visualize the motion file in isaacsim before training
+source scripts/source_isaacsim_setup.sh
+python src/holosoma/holosoma/replay.py \
+    exp:g1-29dof-wbt \
+    --training.headless=False \
+    --training.num_envs=1
 ```
 
 Once checkpoints are saved, you can evaluate policies using [In-Training Evaluation](#in-training-evaluation) (same simulator as training) or cross-simulator evaluation in MuJoCo (see [holosoma_inference](../holosoma_inference/README.md)).
