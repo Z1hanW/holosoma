@@ -11,7 +11,6 @@ from typing import Any
 from loguru import logger
 
 from holosoma.config_types.simulator import MujocoBackend
-from holosoma.simulator.mujoco.backends.warp_randomization import expand_model_fields
 from holosoma.simulator.shared.field_decorators import MUJOCO_FIELD_ATTR
 
 
@@ -124,6 +123,8 @@ def prepare_fields(simulator, field_names: list[str]) -> None:
     logger.info(f"Preparing {len(field_names)} fields for per-environment operations")
 
     # Expand model fields (internal implementation detail)
+    from holosoma.simulator.mujoco.backends.warp_randomization import expand_model_fields
+
     expand_model_fields(simulator.backend.mjw_model, nworld=simulator.num_envs, fields_to_expand=field_names)
 
     # Clear bridge cache to reflect expanded arrays (internal implementation detail)
