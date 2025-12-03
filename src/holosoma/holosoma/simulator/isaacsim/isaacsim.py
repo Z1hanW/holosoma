@@ -1057,9 +1057,7 @@ class IsaacSim(BaseSimulator):
         - Quaternions converted from (x,y,z,w) to (w,x,y,z) format for IsaacSim compatibility
         """
         if env_ids is None:
-            env_ids = torch.arange(
-                getattr(self, "num_envs", self.simulator_config.scene.num_envs), device=self.sim_device
-            )
+            env_ids = torch.arange(getattr(self, "num_envs", self.training_config.num_envs), device=self.sim_device)
 
         if root_states is None:
             robot_root_states = self.robot_root_states
@@ -1090,9 +1088,7 @@ class IsaacSim(BaseSimulator):
         >>> sim.set_dof_state_tensor_robots(env_ids, dof_states)
         """
         if env_ids is None:
-            env_ids = torch.arange(
-                getattr(self, "num_envs", self.simulator_config.scene.num_envs), device=self.sim_device
-            )
+            env_ids = torch.arange(getattr(self, "num_envs", self.training_config.num_envs), device=self.sim_device)
 
         if dof_states is None:
             dof_states = self.dof_state

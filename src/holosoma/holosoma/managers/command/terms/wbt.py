@@ -63,10 +63,11 @@ class MotionLoader:
             body_names = data["body_names"].tolist()
             joint_names = data["joint_names"].tolist()
 
-            # The first 7 joints are [xyz, wxyz] of the pelvis, omit them from the joint_pos.
-            # since we use the pelvis position and quaternion from body_pos_w[:, 0] and body_quat_w[:, 0] directly.
+            # The first 7 joints_pos are [xyz, wxyz] of the pelvis, omit them from the joint_pos
+            # The first 6 joints_vel are [vel_xyz, vel_wxyz] of the pelvis, omit them from the joint_vel
+            # We'll use the pelvis position and quaternion from body_pos_w[:, 0] and body_quat_w[:, 0] directly.
             self._joint_pos = torch.tensor(data["joint_pos"][:, 7:], dtype=torch.float32, device=device)
-            self._joint_vel = torch.tensor(data["joint_vel"], dtype=torch.float32, device=device)
+            self._joint_vel = torch.tensor(data["joint_vel"][:, 6:], dtype=torch.float32, device=device)
             assert len(joint_names) == self._joint_pos.shape[1], "Joint names in motion data does not match"
 
             self._body_pos_w = torch.tensor(data["body_pos_w"], dtype=torch.float32, device=device)
@@ -298,10 +299,10 @@ class MotionCommand(CommandTermBase):
         self._joint_indexes_in_motion = self.motion._joint_indexes
 
         # Maybe prepend interpolated transition from default pose
-        self._maybe_prepend_default_pose_transition()
+        self._maybe_add_default_pose_transition(prepend=True)
 
         # Maybe append interpolated transition back to default pose
-        self._maybe_append_default_pose_transition()
+        self._maybe_add_default_pose_transition(prepend=False)
 
         # 2. get the indexes of the root link and the tracked links
         self.ref_body_index = robot_body_names.index(self.motion_cfg.body_name_ref[0])  # int
@@ -745,65 +746,39 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     ## Internal helpers
     #########################################################################################
-    def _maybe_prepend_default_pose_transition(self) -> None:
-        """Prepend interpolated transition from default pose to motion's first frame if enabled."""
-        if not self.motion_cfg.enable_default_pose_prepend:
+    def _maybe_add_default_pose_transition(self, *, prepend: bool) -> None:
+        """Shared path for optionally inserting default-pose interpolation before/after the clip."""
+        enabled = self.motion_cfg.enable_default_pose_prepend if prepend else self.motion_cfg.enable_default_pose_append
+        if not enabled:
             return
 
-        duration = self.motion_cfg.default_pose_prepend_duration_s
+        duration = (
+            self.motion_cfg.default_pose_prepend_duration_s
+            if prepend
+            else self.motion_cfg.default_pose_append_duration_s
+        )
         if duration <= 0.0:
             return
 
         num_steps = round(duration / self._env.dt)
         if num_steps <= 1:
             logger.warning(
-                "Default pose interpolation duration {}s is too short for dt {}; skipping augmentation.",
+                "Default pose {} duration {}s is too short for dt {}; skipping augmentation.",
+                "prepend" if prepend else "append",
                 duration,
                 self._env.dt,
             )
             return
 
-        default_state = self._build_default_pose_state()
+        default_state = self._build_default_pose_state(use_motion_end=not prepend)
 
+        action = "prepend" if prepend else "append"
+        log_str = f"{action} {num_steps} interpolated frames ({duration}s) from default pose to motion"
         try:
-            self._add_transition_to_motion(default_state, num_steps, prepend=True)
-            logger.info(f"Prepended {num_steps} interpolated frames ({duration}s) from default pose to motion")
+            self._add_transition_to_motion(default_state, num_steps, prepend=prepend)
+            logger.info(log_str)
         except Exception as exc:
-            logger.error(f"Failed to prepend default pose transition: {exc}")
-            raise RuntimeError(
-                f"Critical error during motion interpolation setup: {exc}\n"
-                "This indicates a mismatch in tensor dimensions during interpolation. "
-                "Please check that the motion file and robot configuration are compatible."
-            ) from exc
-
-    def _maybe_append_default_pose_transition(self) -> None:
-        """append interpolated transition from motion's last frame back to default pose if enabled."""
-        if not self.motion_cfg.enable_default_pose_append:
-            return
-
-        duration = self.motion_cfg.default_pose_append_duration_s
-        if duration <= 0.0:
-            return
-
-        num_steps = round(duration / self._env.dt)
-        if num_steps <= 1:
-            logger.warning(
-                "Default pose append duration {}s is too short for dt {}; skipping augmentation.",
-                duration,
-                self._env.dt,
-            )
-            return
-
-        default_state = self._build_default_pose_state(use_motion_end=True)
-
-        try:
-            self._add_transition_to_motion(default_state, num_steps, prepend=False)
-            logger.info(
-                f"appended {num_steps} interpolated frames ({duration}s) \
-                from last motion frame to default pose"
-            )
-        except Exception as exc:
-            logger.error(f"Failed to append default pose transition: {exc}")
+            logger.error(f"Failed to {action} default pose transition: {exc}")
             raise RuntimeError(
                 f"Critical error during motion interpolation setup: {exc}\n"
                 "This indicates a mismatch in tensor dimensions during interpolation. "
@@ -823,11 +798,18 @@ class MotionCommand(CommandTermBase):
         init_roll, init_pitch, _ = get_euler_xyz(init_root_quat, w_last=True)
 
         motion_idx = -1 if use_motion_end else 0
-        motion_root_pos = self.motion._body_pos_w[motion_idx, 0].to(self.device)
-        motion_root_quat = self.motion._body_quat_w[motion_idx, 0].to(self.device).unsqueeze(0)
+
+        # Assume the pelvis is the first in robot_body_names
+        motion_root_pos = self.motion.body_pos_w[motion_idx, 0].to(self.device)
+        motion_root_quat = self.motion.body_quat_w[motion_idx, 0].to(self.device).unsqueeze(0)
         _, _, motion_yaw = get_euler_xyz(motion_root_quat, w_last=True)
 
-        default_root_pos = motion_root_pos
+        # Keep z from init config but adopt the clip's x,y at the chosen anchor frame.
+        default_root_pos = torch.tensor(
+            [motion_root_pos[0], motion_root_pos[1], init_state.pos[2]],
+            dtype=torch.float32,
+            device=self.device,
+        ).unsqueeze(0)
         # Keep roll/pitch from init config but adopt the clip's yaw at the chosen anchor frame.
         default_root_quat = quat_from_euler_xyz(
             init_roll.squeeze(0),
@@ -852,9 +834,9 @@ class MotionCommand(CommandTermBase):
         default_body_ang_vel = self._map_robot_bodies_to_motion_order(body_states["ang_vel"])
 
         if self.motion.has_object:
-            object_pos = self.motion._object_pos_w[0].to(self.device)
-            object_quat = self.motion._object_quat_w[0].to(self.device)
-            object_lin_vel = self.motion._object_lin_vel_w[0].to(self.device)
+            object_pos = self.motion._object_pos_w[motion_idx].to(self.device)
+            object_quat = self.motion._object_quat_w[motion_idx].to(self.device)
+            object_lin_vel = self.motion._object_lin_vel_w[motion_idx].to(self.device)
         else:
             object_pos = torch.zeros(0, 3, device=self.device, dtype=torch.float32)
             object_quat = torch.zeros(0, 4, device=self.device, dtype=torch.float32)
@@ -950,6 +932,8 @@ class MotionCommand(CommandTermBase):
             simulator.dof_pos[env_id] = joint_pos
             simulator.dof_vel[env_id] = joint_vel
 
+            simulator.set_actor_root_state_tensor_robots()
+            simulator.set_dof_state_tensor_robots()
             simulator.write_state_updates()
             simulator.refresh_sim_tensors()
 
@@ -961,6 +945,8 @@ class MotionCommand(CommandTermBase):
             simulator.robot_root_states[env_id] = root_backup
             simulator.dof_pos[env_id] = dof_pos_backup
             simulator.dof_vel[env_id] = dof_vel_backup
+            simulator.set_actor_root_state_tensor_robots()
+            simulator.set_dof_state_tensor_robots()
             simulator.write_state_updates()
             simulator.refresh_sim_tensors()
 
