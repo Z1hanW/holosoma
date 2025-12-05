@@ -115,8 +115,8 @@ class TerrainLocomotion(TerrainTermBase):
         """
         self._custom_origins = True
 
-        if self._cfg.randomize_spawn:
-            # Training mode: random difficulty levels for curriculum learning
+        if self._cfg.spawn.randomize_tiles:
+            # Training mode: random terrain tiles for curriculum learning
             self._env_origins[:] = torch.from_numpy(self.terrain.sample_env_origins()).to(self.device).to(torch.float)
         else:
             # Eval mode: all robots at tile (0,0) for deterministic evaluation
@@ -189,7 +189,13 @@ class TerrainLocomotion(TerrainTermBase):
         ray_hits_world = warp_utils.ray_cast(ray_starts_world, ray_directions_world, self.warp_mesh)
         return (foot_positions - ray_hits_world)[..., 2], ray_hits_world
 
-    def query_terrain_heights(self, xy_positions: torch.Tensor) -> torch.Tensor:
+    def query_terrain_heights(
+        self,
+        xy_positions: torch.Tensor,
+        use_grid_sampling: bool = False,
+        grid_size: int = 3,
+        grid_spacing: float = 0.3,
+    ) -> torch.Tensor:
         """Query terrain height at arbitrary XY positions using ray casting.
 
         This method casts rays straight down from high above the terrain to find
@@ -198,6 +204,10 @@ class TerrainLocomotion(TerrainTermBase):
 
         Args:
             xy_positions: XY coordinates to query. Shape: (N, 2)
+            use_grid_sampling: If True, sample a grid around each position and return max height.
+                              This ensures the robot clears all terrain within its footprint.
+            grid_size: Number of points per dimension in the grid (e.g., 3 = 3x3 = 9 points)
+            grid_spacing: Spacing between grid points in meters (e.g., 0.3m)
 
         Returns:
             Terrain heights (Z coordinates). Shape: (N,)
@@ -206,12 +216,38 @@ class TerrainLocomotion(TerrainTermBase):
             >>> xy = torch.tensor([[0.5, 0.5], [1.0, 1.0]], device="cuda")
             >>> heights = terrain.query_terrain_heights(xy)
             >>> heights.shape  # (2,)
+
+            >>> # With grid sampling for safer spawn heights
+            >>> heights = terrain.query_terrain_heights(xy, use_grid_sampling=True)
+            >>> heights.shape  # (2,) - max height from 3x3 grid around each position
         """
-        num_points = xy_positions.shape[0]
+        num_robots = xy_positions.shape[0]
+
+        if use_grid_sampling:
+            # Generate grid offsets centered at origin
+            # For grid_size=3, spacing=0.3: offsets = [-0.3, 0.0, 0.3]
+            half_extent = (grid_size - 1) * grid_spacing / 2.0
+            offsets_1d = torch.linspace(-half_extent, half_extent, grid_size, device=self.device)
+            grid_x, grid_y = torch.meshgrid(offsets_1d, offsets_1d, indexing="ij")
+            grid_offsets = torch.stack([grid_x.flatten(), grid_y.flatten()], dim=1)
+            # Shape: (grid_size^2, 2) e.g., (9, 2) for 3x3
+
+            # Expand positions to include all grid points
+            # xy_positions: (N, 2) -> (N, 1, 2)
+            # grid_offsets: (9, 2) -> (1, 9, 2)
+            # Result: (N, 9, 2) via broadcasting
+            xy_expanded = xy_positions.unsqueeze(1) + grid_offsets.unsqueeze(0)
+
+            # Flatten for batched ray casting
+            xy_flat = xy_expanded.reshape(-1, 2)  # (N*grid_size^2, 2)
+            num_points = len(xy_flat)
+        else:
+            xy_flat = xy_positions
+            num_points = num_robots
 
         # Create ray starts high above terrain (100m should be above any realistic terrain)
         ray_starts = torch.zeros(num_points, 3, device=self.device)
-        ray_starts[:, :2] = xy_positions
+        ray_starts[:, :2] = xy_flat
         ray_starts[:, 2] = 100.0  # Start 100m above ground for safety
 
         # Ray directions pointing straight down
@@ -221,7 +257,14 @@ class TerrainLocomotion(TerrainTermBase):
         # Cast rays to find terrain height
         ray_hits = warp_utils.ray_cast(ray_starts, ray_directions, self.warp_mesh)
 
-        # Extract Z coordinates (terrain heights)
+        if use_grid_sampling:
+            # Reshape and take max per robot.
+            terrain_heights_raw = ray_hits[:, 2]
+            grid_points_per_robot = grid_size * grid_size
+            terrain_heights_grid = terrain_heights_raw.reshape(num_robots, grid_points_per_robot)
+            # Takes max height across grid to improve likelihood robot clears all terrain
+            return terrain_heights_grid.max(dim=1)[0]  # Shape: (N,)
+        # Extract Z coordinates (assumes above terrain heights)
         return ray_hits[:, 2]
 
     def draw_debug_viz(self):

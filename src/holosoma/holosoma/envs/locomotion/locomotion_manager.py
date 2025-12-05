@@ -300,21 +300,35 @@ class LeggedRobotLocomotionManager(BaseTask):
 
             # Apply randomized XY offset if custom_origins
             if self.terrain_manager.get_state("locomotion_terrain").custom_origins:
-                # Compute new XY positions with random offset for training variety
-                current_xy = self.simulator.robot_root_states[env_ids, :2]
-                xy_offsets = torch_rand_float(-1.0, 1.0, (len(env_ids), 2), device=str(self.device))
-                new_xy = current_xy + xy_offsets
+                # Get spawn config from terrain term
+                spawn_cfg = self.terrain_manager.cfg.terrain_term.spawn
 
-                # Query terrain height at new XY positions using shared terrain manager method
-                # (This is still not perfect because we rely on the base XY and not feet...)
-                terrain_state = self.terrain_manager.get_state("locomotion_terrain")
-                terrain_heights = terrain_state.query_terrain_heights(new_xy)
-                robot_base_height = self.robot_config.init_state.pos[2]  # Robot base height above ground
-                new_z = terrain_heights + robot_base_height
+                # Generate random XY offsets
+                xy_offsets = torch_rand_float(
+                    -spawn_cfg.xy_offset_range, spawn_cfg.xy_offset_range, (len(env_ids), 2), device=str(self.device)
+                )
 
-                # Write new XYZ position all at once (single write operation)
-                new_xyz = torch.cat([new_xy, new_z.unsqueeze(1)], dim=1)
-                self.simulator.robot_root_states[env_ids, :3] = new_xyz
+                if spawn_cfg.query_terrain_height:
+                    # ACCURATE: Query terrain height at new XY position (slower, for rough terrain)
+                    current_xy = self.simulator.robot_root_states[env_ids, :2]
+                    new_xy = current_xy + xy_offsets
+
+                    terrain_state = self.terrain_manager.get_state("locomotion_terrain")
+                    terrain_heights = terrain_state.query_terrain_heights(
+                        new_xy,
+                        use_grid_sampling=spawn_cfg.use_grid_sampling,
+                        grid_size=spawn_cfg.grid_size,
+                        grid_spacing=spawn_cfg.grid_spacing,
+                    )
+                    robot_base_height = self.robot_config.init_state.pos[2]  # Robot base height above ground
+                    new_z = terrain_heights + robot_base_height
+
+                    # Write new XYZ position all at once
+                    new_xyz = torch.cat([new_xy, new_z.unsqueeze(1)], dim=1)
+                    self.simulator.robot_root_states[env_ids, :3] = new_xyz
+                else:
+                    # FAST: Original simple spawning - just apply XY offset, keep original Z (faster, for flat terrain)
+                    self.simulator.robot_root_states[env_ids, :2] += xy_offsets
 
             # base velocities
             self.simulator.robot_root_states[env_ids, 7:13] = torch_rand_float(

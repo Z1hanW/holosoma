@@ -92,8 +92,10 @@ class EvalOverridesConfig:
     num_envs: int = 1
     disable_logger: bool = True
     max_episode_length_s: float = 100000.0
-    randomize_spawn: bool = False
+    randomize_tiles: bool = False
     """Use deterministic spawn at tile (0,0) for reproducible evaluation."""
+    xy_offset_range: float = 0.0
+    """Disable XY offset for deterministic spawn position."""
 
 
 @dataclass(frozen=True)
@@ -179,13 +181,20 @@ class ExperimentConfig:
         )
 
     def get_eval_config(self) -> ExperimentConfig:
+        # Create eval spawn config with overrides
+        eval_spawn_cfg = dataclasses.replace(
+            self.terrain.terrain_term.spawn,
+            randomize_tiles=self.eval_overrides.randomize_tiles,
+            xy_offset_range=self.eval_overrides.xy_offset_range,
+        )
+
         return dataclasses.replace(
             self,
             terrain=dataclasses.replace(
                 self.terrain,
                 terrain_term=dataclasses.replace(
                     self.terrain.terrain_term,
-                    randomize_spawn=self.eval_overrides.randomize_spawn,
+                    spawn=eval_spawn_cfg,
                 ),
             ),
             simulator=dataclasses.replace(

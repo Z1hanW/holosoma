@@ -58,6 +58,56 @@ class MeshType(str, Enum):
 
 
 @dataclass(frozen=True)
+class SpawnCfg:
+    """Configuration for robot spawning behavior."""
+
+    randomize_tiles: bool = True
+    """Randomize terrain tile selection for curriculum learning.
+    When True, robots spawn at random tiles across the terrain grid.
+    When False, all robots spawn at tile (0,0) for deterministic evaluation."""
+
+    xy_offset_range: float = 1.0
+    """Random XY offset range within terrain tile (±meters from tile center).
+    Adds positional variety within the selected tile.
+    Set to 0.0 for deterministic spawning at exact tile center."""
+
+    query_terrain_height: bool = False
+    """Query terrain height after applying XY offset to set correct spawn Z position.
+
+    When False (default - faster):
+      - Uses original simple spawning: applies XY offset but keeps original Z from env_origins
+      - Fastest option, works well for plane/flat terrain
+      - May cause robots to spawn slightly below/above terrain on rough terrain
+
+    When True (More accurate for rough terrain):
+      - Queries actual terrain height at new XY position via ray casting
+      - Updates Z position to place robot correctly on terrain surface
+      - Slower due to ray casting, but necessary for uneven terrain
+      - Use with use_grid_sampling for maximum safety on rough terrain"""
+
+    use_grid_sampling: bool = False
+    """Use grid sampling when querying terrain height (requires query_terrain_height=True).
+
+    Only applies if query_terrain_height=True:
+      - False: Single ray cast at new XY position (1 ray per robot)
+                Good for smooth terrain with gentle slopes
+      - True:  Sample grid of points around position, take max height (9 rays per robot)
+               Ensures robot clears all terrain within footprint
+               Essential for rough terrain with obstacles/steep features
+
+    If query_terrain_height=False, this parameter is ignored."""
+
+    grid_size: int = 3
+    """Grid sampling: number of sample points per dimension (e.g., 3 = 3x3 = 9 points).
+    Only used if query_terrain_height=True and use_grid_sampling=True."""
+
+    grid_spacing: float = 0.2
+    """Grid sampling: spacing between sample points in meters.
+    Should roughly match robot footprint size.
+    Only used if query_terrain_height=True and use_grid_sampling=True."""
+
+
+@dataclass(frozen=True)
 class TerrainTermCfg:
     """Configuration for the terrain manager.
 
@@ -113,10 +163,8 @@ class TerrainTermCfg:
     num_cols: int = 20
     """Number of terrain columns (terrain types)."""
 
-    randomize_spawn: bool = True
-    """Whether to randomize spawn difficulty level (row) during env origin sampling.
-    When True (default), robots are placed at random rows for curriculum learning during training.
-    When False, all robots are placed at row 0 (easiest terrain) for deterministic evaluation."""
+    spawn: SpawnCfg = field(default_factory=SpawnCfg)
+    """Spawn behavior configuration."""
 
     # Dictionary keys must match terrain generation function names (without '_terrain_func' suffix)
     # See terrain.py for available terrain types and their corresponding functions
