@@ -142,7 +142,13 @@ ISAACSIM_ONLY_WORKFLOWS = [
     "workflow_name",
     WORKFLOWS,
 )
-@pytest.mark.parametrize("multi_gpu", [False, True])
+@pytest.mark.parametrize(
+    "multi_gpu",
+    [
+        pytest.param(False, id="single-gpu"),
+        pytest.param(True, marks=pytest.mark.multi_gpu, id="multi-gpu"),
+    ],
+)
 def test_training_and_eval_workflow(workflow_name: str, multi_gpu: bool):
     assert_training_and_eval_workflow(workflow_name, multi_gpu=multi_gpu)
 
