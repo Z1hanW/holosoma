@@ -73,6 +73,7 @@ def assert_run_policy_with_hsinference(config_name: str, model_path: str, timeou
             f"inference:{config_name} "
             f"--task.model-path={model_path}",
         ],
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
