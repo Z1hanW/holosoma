@@ -1,3 +1,4 @@
+from loguru import logger
 from unitree_interface import (
     LowState,
     MessageType,
@@ -99,3 +100,21 @@ class UnitreeSdk2Bridge(BasicSdk2Bridge):
         # Publish using C++ interface
         if self.joystick is not None:
             self.interface.publish_wireless_controller(self.wireless_controller)
+
+    def compute_torques(self):
+        """Compute torques using Unitree's unified command structure."""
+        if not (hasattr(self, "low_cmd") and self.low_cmd):
+            return self.torques
+
+        try:
+            # Extract from Unitree's unified structure
+            return self._compute_pd_torques(
+                tau_ff=self.low_cmd.tau_ff,
+                kp=self.low_cmd.kp,
+                kd=self.low_cmd.kd,
+                q_target=self.low_cmd.q_target,
+                dq_target=self.low_cmd.dq_target,
+            )
+        except Exception as e:
+            logger.error(f"Error computing torques: {e}")
+            raise

@@ -62,35 +62,49 @@ class BasicSdk2Bridge(ABC):
     def publish_low_state(self):
         """Publish low-level state. Must be implemented by subclasses."""
 
+    @abstractmethod
     def compute_torques(self):
-        """Compute motor torques using PD control with sensor or ground truth data."""
-        if hasattr(self, "low_cmd") and self.low_cmd:
-            motor_cmd = self.low_cmd
-            try:
-                # Keep as torch tensors (no early conversion)
-                q_actual = self.simulator.dof_pos[0]
-                dq_actual = self.simulator.dof_vel[0]
+        """Compute motor torques. Must be implemented by subclasses."""
 
-                # Extract motor parameters into torch tensors
-                device = q_actual.device
-                tau = torch.tensor(motor_cmd.tau_ff, device=device, dtype=q_actual.dtype)
-                kp = torch.tensor(motor_cmd.kp, device=device, dtype=q_actual.dtype)
-                kd = torch.tensor(motor_cmd.kd, device=device, dtype=q_actual.dtype)
-                q_desired = torch.tensor(motor_cmd.q_target, device=device, dtype=q_actual.dtype)
-                dq_desired = torch.tensor(motor_cmd.dq_target, device=device, dtype=q_actual.dtype)
+    def _compute_pd_torques(self, tau_ff, kp, kd, q_target, dq_target):
+        """Helper method for PD control computation (shared logic).
 
-                # Vectorized PD control in torch
-                torques = tau + kp * (q_desired - q_actual) + kd * (dq_desired - dq_actual)
+        Parameters
+        ----------
+        tau_ff : array-like
+            Feedforward torques (numpy array or torch tensor)
+        kp : array-like
+            Proportional gains (numpy array or torch tensor)
+        kd : array-like
+            Derivative gains (numpy array or torch tensor)
+        q_target : array-like
+            Target positions (numpy array or torch tensor)
+        dq_target : array-like
+            Target velocities (numpy array or torch tensor)
 
-                # Convert to numpy only at the end
-                self.torques = torques.detach().cpu().numpy()
+        Returns
+        -------
+        numpy.ndarray
+            Computed torques with limits applied
+        """
+        # Get actual state from simulator
+        q_actual = self.simulator.dof_pos[0]
+        dq_actual = self.simulator.dof_vel[0]
 
-            except Exception as e:
-                logger.error(f"Error computing torques: {e}")
-                raise
+        # Convert inputs to torch tensors if needed
+        device = q_actual.device
+        tau = torch.as_tensor(tau_ff, device=device, dtype=q_actual.dtype)
+        kp_t = torch.as_tensor(kp, device=device, dtype=q_actual.dtype)
+        kd_t = torch.as_tensor(kd, device=device, dtype=q_actual.dtype)
+        q_des = torch.as_tensor(q_target, device=device, dtype=q_actual.dtype)
+        dq_des = torch.as_tensor(dq_target, device=device, dtype=q_actual.dtype)
 
-        # Apply torque limits
-        self.torques = np.clip(self.torques, -self.torque_limit, self.torque_limit)
+        # PD control computation
+        torques = tau + kp_t * (q_des - q_actual) + kd_t * (dq_des - dq_actual)
+
+        # Convert to numpy and apply limits
+        torques_np = torques.detach().cpu().numpy()
+        self.torques = np.clip(torques_np, -self.torque_limit, self.torque_limit)
         return self.torques
 
     def publish_wireless_controller(self):

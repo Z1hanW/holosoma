@@ -1,3 +1,4 @@
+import numpy as np
 from booster_robotics_sdk import (  # type: ignore[import-not-found]
     B1LowCmdSubscriber,
     B1LowStatePublisher,
@@ -62,7 +63,7 @@ class BoosterSdk2Bridge(BasicSdk2Bridge):
         logger.info("Booster SDK components initialized successfully")
         # TODO: wireless controller for booster
 
-    def low_cmd_handler(self, msg):
+    def low_cmd_handler(self, msg=None):
         """Handle Booster low-level command messages."""
         if msg:
             self.low_cmd = self.LowCmd()
@@ -101,3 +102,23 @@ class BoosterSdk2Bridge(BasicSdk2Bridge):
         imu.acc = acceleration.detach().cpu().numpy()
 
         self.low_state_puber.Write(self.low_state)
+
+    def compute_torques(self):
+        """Compute torques using Booster's list-of-motors structure."""
+        if not (hasattr(self, "low_cmd") and self.low_cmd):
+            return self.torques
+
+        try:
+            # Extract from Booster's list of MotorCmd objects
+            motor_cmds = list(self.low_cmd.motor_cmd)
+            tau_ff = np.array([motor_cmds[i].tau for i in range(self.num_motor)])
+            kp = np.array([motor_cmds[i].kp for i in range(self.num_motor)])
+            kd = np.array([motor_cmds[i].kd for i in range(self.num_motor)])
+            q_target = np.array([motor_cmds[i].q for i in range(self.num_motor)])
+            dq_target = np.array([motor_cmds[i].dq for i in range(self.num_motor)])
+
+            # Use shared PD computation
+            return self._compute_pd_torques(tau_ff, kp, kd, q_target, dq_target)
+        except Exception as e:
+            logger.error(f"Error computing torques: {e}")
+            raise
