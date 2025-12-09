@@ -267,8 +267,11 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         # motion_ref_ori_b
         motion_ref_ori = xyzw_to_wxyz(self.ref_quat_xyzw_t)  # wxyz
+        motion_ref_ori = self._remove_yaw_offset(motion_ref_ori, self.motion_yaw_offset)
+
+        # robot_ref_ori
         robot_ref_ori = self._get_ref_body_orientation_in_world(robot_state_data)  #  wxyz
-        robot_ref_ori = self._remove_robot_yaw_offset(robot_ref_ori)
+        robot_ref_ori = self._remove_yaw_offset(robot_ref_ori, self.robot_yaw_offset)
 
         motion_ref_ori_b = matrix_from_quat(subtract_frame_transforms(robot_ref_ori, motion_ref_ori))
         current_obs_buffer_dict["motion_ref_ori_b"] = motion_ref_ori_b[..., :2].reshape(1, -1)
@@ -331,6 +334,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         super()._handle_start_policy()
         self._stiff_hold_active = False
         self._capture_robot_yaw_offset()
+        self._capture_motion_yaw_offset(self.ref_quat_xyzw_0)
 
     def _update_clock(self):
         # Use synchronized clock with motion-relative timing
@@ -422,16 +426,21 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self.logger.warning("Unable to capture robot yaw offset - missing robot state.")
             return
 
-        robot_ref_ori = self._get_ref_body_orientation_in_world(robot_state_data)
+        robot_ref_ori = self._get_ref_body_orientation_in_world(robot_state_data)  # wxyz
         yaw = self._quat_yaw(robot_ref_ori)
         self.robot_yaw_offset = yaw
         self.logger.info(colored(f"Robot yaw offset captured at {np.degrees(yaw):.1f} deg", "blue"))
 
-    def _remove_robot_yaw_offset(self, quat_wxyz: np.ndarray) -> np.ndarray:
+    def _capture_motion_yaw_offset(self, ref_quat_xyzw_0: np.ndarray) -> float:
+        """Capture motion yaw when policy starts to use as reference offset."""
+        self.motion_yaw_offset = self._quat_yaw(xyzw_to_wxyz(ref_quat_xyzw_0))
+        self.logger.info(colored(f"Motion yaw offset captured at {np.degrees(self.motion_yaw_offset):.1f} deg", "blue"))
+
+    def _remove_yaw_offset(self, quat_wxyz: np.ndarray, yaw_offset: float) -> np.ndarray:
         """Remove stored yaw offset from robot orientation quaternion."""
-        if abs(self.robot_yaw_offset) < 1e-6:
+        if abs(yaw_offset) < 1e-6:
             return quat_wxyz
-        yaw_quat = rpy_to_quat((0.0, 0.0, -self.robot_yaw_offset)).reshape(1, 4)
+        yaw_quat = rpy_to_quat((0.0, 0.0, -yaw_offset)).reshape(1, 4)
         yaw_quat = np.broadcast_to(yaw_quat, quat_wxyz.shape)
         return quat_mul(yaw_quat, quat_wxyz)
 

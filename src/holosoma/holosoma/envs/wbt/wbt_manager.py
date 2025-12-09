@@ -143,6 +143,12 @@ class WholeBodyTrackingManager(BaseTask):
         motion_robot_quat_wxyz = motion_robot_quat_xyzw[:, [3, 0, 1, 2]]
         motion_command.visualization_markers["motion_robot"].visualize(motion_robot_pos_xyz, motion_robot_quat_wxyz)
 
+        for body_idx, body_names in enumerate(motion_command.motion_cfg.body_names_to_track):
+            motion_robot_body_pos_xyz = motion_command.body_pos_w[0, body_idx].clone()
+            motion_command.visualization_markers[f"motion_{body_names}"].visualize(
+                motion_robot_body_pos_xyz.unsqueeze(0)
+            )
+
         # object
         if motion_command.motion.has_object:
             real_object_pos_xyz = motion_command.simulator_object_pos_w.clone()

@@ -1084,7 +1084,7 @@ class MotionCommand(CommandTermBase):
 
     def _setup_visualization_markers_for_isaacsim(self):
         from isaaclab.markers import VisualizationMarkers
-        from isaaclab.markers.config import FRAME_MARKER_CFG
+        from isaaclab.markers.config import FRAME_MARKER_CFG, RAY_CASTER_MARKER_CFG
 
         visualization_markers_cfg = FRAME_MARKER_CFG.replace(
             prim_path="/Visuals/Command/real_robot",
@@ -1097,11 +1097,18 @@ class MotionCommand(CommandTermBase):
         )
         visualization_markers_cfg.markers["frame"].scale = (0.2, 0.2, 0.2)
         motion_robot_visualizer = VisualizationMarkers(visualization_markers_cfg)
-
         self.visualization_markers = {
             "real_robot": real_robot_visualizer,
             "motion_robot": motion_robot_visualizer,
         }
+
+        for body_names in self.motion_cfg.body_names_to_track:
+            visualization_markers_cfg = RAY_CASTER_MARKER_CFG.replace(
+                prim_path=f"/Visuals/Command/motion_robot_body/motion_{body_names}",
+            )
+            visualization_markers_cfg.markers["hit"].radius = 0.03
+            visualization_markers_cfg.markers["hit"].visual_material.diffuse_color = (0.0, 1.0, 0.0)
+            self.visualization_markers[f"motion_{body_names}"] = VisualizationMarkers(visualization_markers_cfg)
 
         if self.motion.has_object:
             visualization_markers_cfg = FRAME_MARKER_CFG.replace(
