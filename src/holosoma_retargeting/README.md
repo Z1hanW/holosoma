@@ -82,6 +82,55 @@ python examples/robot_retarget.py --data_path demo_data/lafan --task-type robot_
 python examples/parallel_robot_retarget.py --data-dir demo_data/lafan --task-type robot_only --data_format lafan --save_dir demo_results_parallel/g1/robot_only/lafan --task-config.object-name ground --task-config.ground-range -10 10 --retargeter.foot-sticking-tolerance 0.02
 ```
 
+### AMASS SMPL-X
+
+#### Download the Original AMASS Data
+
+1. Follow the [AMASS](https://amass.is.tue.mpg.de/) instructions to download the original AMASS data
+2. The AMASS data structure should be `/path/to/amass/dataset_name/subject_name/*.npz`
+
+#### Download SMPL-X Models
+
+1. Follow the [SMPL-X](https://smpl-x.is.tue.mpg.de/index.html) instructions to download SMPL-X models
+2. For AMASS data, we tested on SMPL-X N (neutral) format
+3. The SMPL-X models structure should be `/path/to/models/smplx/SMPLX_NEUTRAL.npz`
+
+#### Convert the Original AMASS SMPL-X Data Format for Motion Retargeting
+
+We provide `data_utils/prep_amass_smplx_for_rt.py` for converting AMASS SMPLX data to the format required for motion retargeting.
+
+```bash
+# Install dependencies
+cd holosoma_retargeting/data_utils/
+git clone https://github.com/nghorbani/human_body_prior.git
+pip install tqdm dotmap PyYAML omegaconf loguru
+cd human_body_prior/
+python setup.py develop
+cd ../
+
+# Run data processing
+python prep_amass_smplx_for_rt.py \
+  --amass-root-folder /path/to/amass \
+  --output-folder /path/to/output \
+  --model-root-folder /path/to/models
+```
+
+This will convert the AMASS `.npz` files to `.npz` format with global joint positions and height information.
+
+**Note**: You can optionally specify `--subdataset-folder` to process only a specific subdataset (e.g., `HumanEva`). If not specified, it will process all datasets recursively.
+
+#### Single Sequence Retargeting on AMASS SMPL-X
+
+```bash
+python examples/robot_retarget.py --data_path demo_data/amass_smplx_processed --task-type robot_only --task-name HumanEva_S3_Jog_1_stageii --data_format smplx --task-config.ground-range -10 10 --save_dir demo_results/g1/robot_only/amass_smplx --retargeter.debug --retargeter.visualize
+```
+
+#### Batch Processing for Motion Retargeting on AMASS SMPL-X
+
+```bash
+python examples/parallel_robot_retarget.py --data-dir demo_data/amass_smplx_processed --task-type robot_only --data_format smplx --save_dir demo_results_parallel/g1/robot_only/amass_smplx --task-config.object-name ground --task-config.ground-range -10 10
+```
+
 ## Check Visualizations of Saved Retargeting Results
 
 ```bash
@@ -106,6 +155,14 @@ python viser_player.py --robot_urdf models/g1/g1_29dof.urdf \
 # Visualize LAFAN robot only results
 python viser_player.py --robot_urdf models/g1/g1_29dof.urdf \
     --qpos_npz demo_results/g1/robot_only/lafan/dance2_subject1.npz
+
+# Visualize AMASS results
+python viser_player.py --robot_urdf models/g1/g1_29dof.urdf \
+    --qpos_npz demo_results/g1/robot_only/amass_smplx/HumanEva_S3_Jog_1_stageii.npz
+
+# Visualize AMASS results
+python viser_player.py --robot_urdf models/g1/g1_29dof.urdf \
+    --qpos_npz demo_results_parallel/g1/robot_only/amass_smplx/HumanEva_S1_Box_1_stageii_original.npz
 ```
 
 ## Quantitative Evaluation
@@ -160,3 +217,9 @@ For OmniRetarget data downloaded from HuggingFace, please add `--use_omniretarge
 ```bash
 python data_conversion/convert_data_format_mj.py --input_file OmniRetarget/robot-object/sub3_largebox_003_original.npz --output_fps 50 --output_name converted_res/object_interaction/sub3_largebox_003_mj_w_obj_omnirt.npz --data_format smplh --object_name "largebox" --has_dynamic_object --use_omniretarget_data --once
 ```
+
+## Custom Human Motion Data Format
+Please see the instructions for custom human motion data formats: [ADD_MOTION_FORMAT_README.md](ADD_MOTION_FORMAT_README.md)
+
+## Custom Robot Type
+Please see the instructions for retargeting custom robot types: [ADD_ROBOT_TYPE_README.md](ADD_ROBOT_TYPE_README.md)

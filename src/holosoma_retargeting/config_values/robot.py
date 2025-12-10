@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 import tyro
 
 from holosoma_retargeting.config_types.robot import RobotConfig
 
 
-def get_default_robot_config(robot_type: Literal["g1", "t1"] = "g1") -> RobotConfig:
+def get_default_robot_config(robot_type: str = "g1") -> RobotConfig:
     """Get default robot configuration.
 
     Args:

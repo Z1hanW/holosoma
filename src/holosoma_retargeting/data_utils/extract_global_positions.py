@@ -11,17 +11,6 @@ import tyro
 from lafan1 import extract, utils  # type: ignore[import-not-found]
 
 
-def forward_kinematics(offsets, parents):
-    """Compute global positions in rest pose (joint_angles=0)."""
-    positions = np.zeros_like(offsets)
-    for j in range(len(offsets)):
-        if parents[j] == -1:  # root
-            positions[j] = offsets[j]
-        else:
-            positions[j] = positions[parents[j]] + offsets[j]
-    return positions
-
-
 def extract_global_positions(bvh_file_path):
     """
     Extract global positions from a BVH file.
@@ -42,7 +31,6 @@ def extract_global_positions(bvh_file_path):
 
     # Compute global positions using Forward Kinematics
     global_quats, global_positions = utils.quat_fk(anim.quats, anim.pos, anim.parents)
-
     return {
         "positions": global_positions / 100,
         "joint_names": anim.bones,

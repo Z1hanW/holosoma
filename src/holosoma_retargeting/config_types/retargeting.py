@@ -24,11 +24,13 @@ class RetargetingConfig:
     """Type of retargeting task."""
 
     # --- top-level run knobs ---
-    robot: Literal["g1", "t1"] = "g1"
-    """Robot type."""
+    robot: str = "g1"
+    """Robot type. Use str to allow dynamic robot types via _ROBOT_DEFAULTS."""
 
-    data_format: Literal["lafan", "smplh", "mocap"] | None = None
-    """Motion data format. Auto-determined by task_type if None."""
+    data_format: str | None = None
+    """Motion data format. Auto-determined by task_type if None.
+    Can be any format registered in DEMO_JOINTS_REGISTRY
+    (e.g., 'lafan', 'smplh', 'mocap', 'smplx', or custom formats)."""
 
     task_name: str = "sub3_largebox_003"
     """Name of the task/sequence."""

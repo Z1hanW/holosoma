@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 from holosoma_retargeting.config_types.data_conversion import DataConversionConfig
 
 
 def get_default_data_conversion_config(
     input_file: str,
-    robot: Literal["g1", "t1"] = "g1",
-    data_format: Literal["lafan", "smplh", "mocap"] = "smplh",
+    robot: str = "g1",
+    data_format: str = "smplh",
     object_name: str | None = None,
     input_fps: int = 30,
     output_fps: int = 50,

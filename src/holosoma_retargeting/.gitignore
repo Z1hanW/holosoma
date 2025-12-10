@@ -21,3 +21,5 @@ demo_results_parallel/
 demo_data/lafan/
 converted_res/
 data_utils/lafan1
+*.sh
+*.bvh

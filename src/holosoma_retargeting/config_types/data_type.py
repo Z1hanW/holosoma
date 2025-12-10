@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, TypedDict
+from typing import Any, TypedDict
 
 # Pre-defined constants for each data format
 LAFAN_DEMO_JOINTS = [
@@ -142,6 +142,31 @@ MOCAP_DEMO_JOINTS = [
     "RightFootMod",
 ]
 
+SMPLX_DEMO_JOINTS = [
+    "Pelvis",
+    "L_Hip",
+    "R_Hip",
+    "Spine1",
+    "L_Knee",
+    "R_Knee",
+    "Spine2",
+    "L_Ankle",
+    "R_Ankle",
+    "Spine3",
+    "L_Foot",
+    "R_Foot",
+    "Neck",
+    "L_Collar",
+    "R_Collar",
+    "Head",
+    "L_Shoulder",
+    "R_Shoulder",
+    "L_Elbow",
+    "R_Elbow",
+    "L_Wrist",
+    "R_Wrist",
+]
+
 # Joint mappings - organized by (data_format, robot_type)
 JOINTS_MAPPINGS = {
     ("lafan", "g1"): {
@@ -212,6 +237,23 @@ JOINTS_MAPPINGS = {
         "L_Wrist": "left_hand_sphere_link",
         "R_Wrist": "right_hand_sphere_link",
     },
+    ("smplx", "g1"): {
+        "Pelvis": "pelvis_contour_link",
+        "L_Hip": "left_hip_pitch_link",
+        "R_Hip": "right_hip_pitch_link",
+        "L_Knee": "left_knee_link",
+        "R_Knee": "right_knee_link",
+        "L_Shoulder": "left_shoulder_roll_link",
+        "R_Shoulder": "right_shoulder_roll_link",
+        "L_Elbow": "left_elbow_link",
+        "R_Elbow": "right_elbow_link",
+        "L_Ankle": "left_ankle_intermediate_1_link",
+        "R_Ankle": "right_ankle_intermediate_1_link",
+        "L_Foot": "left_ankle_roll_sphere_5_link",
+        "R_Foot": "right_ankle_roll_sphere_5_link",
+        "L_Wrist": "left_rubber_hand_link",
+        "R_Wrist": "right_rubber_hand_link",
+    },
     ("mocap", "g1"): {
         "Spine1": "pelvis_contour_link",
         "LeftUpLeg": "left_hip_pitch_link",
@@ -253,6 +295,7 @@ TOE_NAMES_BY_FORMAT = {
     "lafan": ["LeftToeBase", "RightToeBase"],
     "smplh": ["L_Toe", "R_Toe"],
     "mocap": ["LeftToeBase", "RightToeBase"],
+    "smplx": ["L_Foot", "R_Foot"],
 }
 
 
@@ -266,24 +309,50 @@ DATA_FORMAT_CONSTANTS: dict[str, FormatConstants] = {
     "lafan": {
         "default_scale_factor": 1.27 / 1.7,
     },
-    "smplh": {
-        "default_scale_factor": None,  # Calculated per subject
-    },
     "mocap": {
         "default_human_height": 1.78,
     },
 }
 
+# Unified registry: Maps format name to demo joints
+# This is the SINGLE PLACE to add new formats - just add an entry here!
+# No need to update any Literal types - DataFormat is now str with runtime validation
+DEMO_JOINTS_REGISTRY: dict[str, list[str]] = {
+    "lafan": LAFAN_DEMO_JOINTS,
+    "smplh": SMPLH_DEMO_JOINTS,
+    "mocap": MOCAP_DEMO_JOINTS,
+    "smplx": SMPLX_DEMO_JOINTS,
+}
+
+# Type alias for data formats - use str to allow dynamic data formats via DEMO_JOINTS_REGISTRY
+# No need to update this when adding new formats - just add to DEMO_JOINTS_REGISTRY above
+DataFormat = str
+
+
+def _validate_data_format(data_format: str) -> None:
+    """Validate that data_format exists in DEMO_JOINTS_REGISTRY."""
+    if data_format not in DEMO_JOINTS_REGISTRY:
+        available = ", ".join(sorted(DEMO_JOINTS_REGISTRY.keys()))
+        raise ValueError(
+            f"Invalid data_format: '{data_format}'. "
+            f"Available data formats: {available}. "
+            f"Add your format to DEMO_JOINTS_REGISTRY in config_types/data_type.py"
+        )
+
 
 @dataclass(frozen=True)
 class MotionDataConfig:
-    """Simplified motion data format configuration.
+    # Use str instead of Literal to allow dynamic data formats via DEMO_JOINTS_REGISTRY
+    data_format: str = "smplh"
+    # Use str instead of Literal to allow dynamic robot types
+    robot_type: str = "g1"
 
-    Uses properties instead of __post_init__ - much simpler!
-    """
+    def __post_init__(self) -> None:
+        """Validate data_format and robot_type."""
+        _validate_data_format(self.data_format)
+        from holosoma_retargeting.config_types.robot import _validate_robot_type
 
-    data_format: Literal["lafan", "smplh", "mocap"] = "smplh"
-    robot_type: Literal["g1", "t1"] = "g1"
+        _validate_robot_type(self.robot_type)
 
     # Optional overrides - if None, will use defaults from data_format
     demo_joints: list[str] | None = None
@@ -295,12 +364,13 @@ class MotionDataConfig:
         if self.demo_joints is not None:
             return self.demo_joints
 
-        if self.data_format == "lafan":
-            return LAFAN_DEMO_JOINTS
-        if self.data_format == "smplh":
-            return SMPLH_DEMO_JOINTS
-        # mocap
-        return MOCAP_DEMO_JOINTS
+        if self.data_format not in DEMO_JOINTS_REGISTRY:
+            raise ValueError(
+                f"Unknown data_format: {self.data_format}. "
+                f"Available formats: {list(DEMO_JOINTS_REGISTRY.keys())}. "
+                f"Add your format to DEMO_JOINTS_REGISTRY in config_types/data_type.py"
+            )
+        return DEMO_JOINTS_REGISTRY[self.data_format]
 
     @property
     def resolved_joints_mapping(self) -> dict[str, str]:
@@ -317,6 +387,11 @@ class MotionDataConfig:
     @property
     def toe_names(self) -> list[str]:
         """Get toe joint names for this data format."""
+        if self.data_format not in TOE_NAMES_BY_FORMAT:
+            raise ValueError(
+                f"Toe names not defined for data_format: {self.data_format}. "
+                f"Add entry to TOE_NAMES_BY_FORMAT in config_types/data_type.py"
+            )
         return TOE_NAMES_BY_FORMAT[self.data_format]
 
     @property
@@ -340,12 +415,3 @@ class MotionDataConfig:
             "DEFAULT_SCALE_FACTOR": self.default_scale_factor,
             "DEFAULT_HUMAN_HEIGHT": self.default_human_height,
         }
-
-
-# Export constants for backward compatibility
-__all__ = [
-    "LAFAN_DEMO_JOINTS",
-    "MOCAP_DEMO_JOINTS",
-    "SMPLH_DEMO_JOINTS",
-    "MotionDataConfig",
-]

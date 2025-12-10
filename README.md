@@ -66,6 +66,18 @@ python src/holosoma/holosoma/train_agent.py \
 
 See the [Training Guide](src/holosoma/README.md) for more examples and configuration options.
 
+### Quick Demo
+
+We provide scripts to run the complete pipeline: (data downloading and processing for LAFAN), retargeting, data conversion, and whole-body tracking policy training.
+
+```bash
+# Run retargeting and whole-body tracking policy training using OMOMO data
+bash demo_scripts/demo_omomo_wb_tracking.sh
+
+# Run retargeting and whole-body tracking policy training using LAFAN data
+bash demo_scripts/demo_lafan_wb_tracking.sh
+```
+
 ### Deployment & Evaluation
 
 After training, deploy your policies:

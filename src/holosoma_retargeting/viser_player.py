@@ -37,7 +37,8 @@ def make_player(
       [0:3]   robot base position (xyz)
       [3:7]   robot base quat (wxyz)
       [7:7+R] robot joint positions (R = actuated dof)
-      [end-7:end] (optional) object quat (wxyz) + object pos (xyz)
+      [end-7:end-4] (optional) object position (xyz)
+      [end-4:end]   (optional) object quat (wxyz)
 
     We'll infer R from the robot URDF's actuated joints in ViserUrdf.
     """

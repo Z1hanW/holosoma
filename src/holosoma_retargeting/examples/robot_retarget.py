@@ -12,7 +12,7 @@ import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal, cast
+from typing import Literal
 
 import numpy as np
 import tyro
@@ -21,7 +21,7 @@ src_root = Path(__file__).resolve().parents[2]
 if str(src_root) not in sys.path:
     sys.path.insert(0, str(src_root))
 
-from holosoma_retargeting.config_types.data_type import MotionDataConfig  # noqa: E402
+from holosoma_retargeting.config_types.data_type import DEMO_JOINTS_REGISTRY, MotionDataConfig  # noqa: E402
 from holosoma_retargeting.config_types.retargeter import RetargeterConfig  # noqa: E402
 from holosoma_retargeting.config_types.retargeting import RetargetingConfig  # noqa: E402
 from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
@@ -73,7 +73,7 @@ _AUGMENTATION_TRANSLATION = np.array([0.2, 0.0, 0.0])
 
 # Type aliases
 TaskType = Literal["robot_only", "object_interaction", "climbing"]
-DataFormat = Literal["lafan", "smplh", "mocap"]
+# DataFormat is imported from config_types.data_type
 
 
 # ----------------------------- Helper Functions -----------------------------
@@ -140,12 +140,21 @@ def validate_config(cfg: RetargetingConfig) -> None:
     Raises:
         ValueError: If configuration is invalid
     """
+    # Validate that data_format exists in registry (if provided)
+    if cfg.data_format is not None and cfg.data_format not in DEMO_JOINTS_REGISTRY:
+        available = ", ".join(sorted(DEMO_JOINTS_REGISTRY.keys()))
+        raise ValueError(
+            f"Unknown data_format: '{cfg.data_format}'. "
+            f"Available formats: {available}. "
+            f"Add your format to DEMO_JOINTS_REGISTRY in config_types/data_type.py"
+        )
+
+    # Task-specific format requirements
     if cfg.task_type == "climbing" and cfg.data_format not in (None, "mocap"):
         raise ValueError("Climbing task requires 'mocap' data format")
     if cfg.task_type == "object_interaction" and cfg.data_format not in (None, "smplh"):
         raise ValueError("Object interaction requires 'smplh' data format")
-    if cfg.task_type == "robot_only" and cfg.data_format not in (None, "lafan", "smplh", "mocap"):
-        raise ValueError("Robot-only task requires 'lafan' or 'smplh' or 'mocap' data format")
+    # robot_only accepts any format in the registry (already validated above)
 
 
 def create_ground_points(x_range: tuple[float, float], y_range: tuple[float, float], size: int) -> np.ndarray:
@@ -167,7 +176,7 @@ def create_ground_points(x_range: tuple[float, float], y_range: tuple[float, flo
 
 def load_motion_data(
     task_type: TaskType,
-    data_format: DataFormat,
+    data_format: str,
     data_path: Path,
     task_name: str,
     constants: SimpleNamespace,
@@ -223,6 +232,22 @@ def load_motion_data(
 
             default_human_height = motion_data_config.default_human_height or 1.78
             smpl_scale = constants.ROBOT_HEIGHT / default_human_height
+        elif data_format == "smplx":
+            npz_file = data_path / f"{task_name}.npz"
+
+            human_data = np.load(str(npz_file))
+            human_joints = human_data["global_joint_positions"]
+            human_height = human_data["height"]
+            smpl_scale = constants.ROBOT_HEIGHT / human_height
+        else:
+            # For other custom data format, if it uses consistent .npz file like SMPLX,
+            # you can use the same logic as SMPLX.
+            npz_file = data_path / f"{task_name}.npz"
+
+            human_data = np.load(str(npz_file))
+            human_joints = human_data["global_joint_positions"]
+            human_height = human_data["height"]
+            smpl_scale = constants.ROBOT_HEIGHT / human_height
 
         # Create dummy object poses for robot_only
         num_frames = human_joints.shape[0]
@@ -350,7 +375,7 @@ def setup_object_data(
 
 def _compute_q_init_base(
     task_type: TaskType,
-    data_format: DataFormat,
+    data_format: str,
     human_joints: np.ndarray,
     object_poses: np.ndarray,
     constants: SimpleNamespace,
@@ -457,7 +482,7 @@ def build_retargeter_kwargs_from_config(
 
 def initialize_robot_pose(
     task_type: TaskType,
-    data_format: DataFormat,
+    data_format: str,
     human_joints: np.ndarray,
     object_poses: np.ndarray,
     constants: SimpleNamespace,
@@ -584,7 +609,7 @@ def main(cfg: RetargetingConfig) -> None:
     task_type = cfg.task_type
 
     # Set defaults based on task type
-    data_format: DataFormat = cfg.data_format or cast("DataFormat", DEFAULT_DATA_FORMATS[task_type])
+    data_format: str = cfg.data_format or DEFAULT_DATA_FORMATS[task_type]
     save_dir = cfg.save_dir if cfg.save_dir is not None else Path(DEFAULT_SAVE_DIRS[task_type].format(robot=robot))
     data_path = cfg.data_path
 

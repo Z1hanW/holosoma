@@ -124,6 +124,7 @@ def create_motion_control_sliders(
     tick = {"next": time.perf_counter()}  # absolute time for next draw
     prev: dict[str, np.ndarray | None] = {"robot_q": None, "obj_q": None}  # for continuity
     nonlocal_f = {"f": float(frame_slider.value)}  # fractional frame cursor
+    updating_programmatically = {"flag": False}  # flag to prevent callback from pausing during programmatic updates
 
     # ---------------- draw ----------------
     def _apply_frame_from_q(q: np.ndarray) -> None:
@@ -176,13 +177,16 @@ def create_motion_control_sliders(
 
     @frame_slider.on_update
     def _(_evt) -> None:
-        # Pause when scrubbing so the background loop doesn't overwrite immediately
-        playing["flag"] = False
-        tick["next"] = time.perf_counter()
-        _apply_discrete_frame(int(frame_slider.value))
-        prev["robot_q"] = None
-        prev["obj_q"] = None
-        nonlocal_f["f"] = float(frame_slider.value)
+        # Only pause if this is a user interaction, not a programmatic update
+        if not updating_programmatically["flag"]:
+            # Pause when scrubbing so the background loop doesn't overwrite immediately
+            playing["flag"] = False
+            tick["next"] = time.perf_counter()
+            frame_val = int(frame_slider.value)
+            _apply_discrete_frame(frame_val)
+            prev["robot_q"] = None
+            prev["obj_q"] = None
+            nonlocal_f["f"] = float(frame_val)
 
     # ---------------- player loop ----------------
     def _player_loop() -> None:
@@ -211,9 +215,11 @@ def create_motion_control_sliders(
                     q_interp = _interp_frame(qpos, k0, k1, u)
                     _apply_frame_from_q(q_interp)
 
-                    # keep slider roughly in sync when mult == 1
-                    if mult == 1:
-                        frame_slider.value = k0
+                    # Update slider to show current frame number in real-time
+                    # Use flag to prevent callback from pausing playback
+                    updating_programmatically["flag"] = True
+                    frame_slider.value = k0
+                    updating_programmatically["flag"] = False
 
                     tick["next"] = now + dt
                 else:

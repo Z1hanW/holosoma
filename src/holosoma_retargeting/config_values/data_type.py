@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 import tyro
 
 from holosoma_retargeting.config_types.data_type import MotionDataConfig
 
 
 def get_default_motion_data_config(
-    data_format: Literal["lafan", "smplh", "mocap"] = "smplh",
-    robot_type: Literal["g1", "t1"] = "g1",
+    data_format: str = "smplh",
+    robot_type: str = "g1",
 ) -> MotionDataConfig:
     """Get default motion data configuration.
 

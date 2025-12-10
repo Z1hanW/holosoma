@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -17,11 +16,11 @@ class DataConversionConfig:
     input_file: str
     """Path to input motion file."""
 
-    robot: Literal["g1", "t1"] = "g1"
-    """Robot model to use."""
+    robot: str = "g1"
+    """Robot model to use. Use str to allow dynamic robot types."""
 
-    data_format: Literal["lafan", "smplh", "mocap"] = "smplh"
-    """Motion data format."""
+    data_format: str = "smplh"
+    """Motion data format. Use str to allow dynamic data formats."""
 
     object_name: str | None = None
     """Override object name (default depends on robot and data type)."""

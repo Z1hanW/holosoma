@@ -15,7 +15,6 @@ import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Literal, cast
 
 import numpy as np
 import tyro
@@ -85,7 +84,13 @@ def find_files(data_dir: Path, data_format: str, object_name: str | None = None)
         # MOCAP: .npy files in subdirectories
         files = [str(p) for p in data_dir.glob("*/*.npy")]
         return sorted(files)
-    raise ValueError(f"Invalid data format: {data_format}")
+    if data_format == "smplx":
+        # SMPL-X: .npz files in root directory
+        files = [str(p) for p in data_dir.glob("*.npz")]
+        return sorted(files)
+    # For other data format, default to be consistent with SMPL-X
+    files = [str(p) for p in data_dir.glob("*.npz")]
+    return sorted(files)
 
 
 def generate_augmentation_configs(task_type: str, augmentation: bool = True):
@@ -306,9 +311,7 @@ def main(cfg: ParallelRetargetingConfig) -> None:
     task_type = cfg.task_type
 
     # Set defaults based on task type
-    data_format: Literal["lafan", "smplh", "mocap"] = cfg.data_format or cast(
-        "Literal['lafan', 'smplh', 'mocap']", DEFAULT_DATA_FORMATS[task_type]
-    )
+    data_format: str = cfg.data_format or DEFAULT_DATA_FORMATS[task_type]
     save_dir = cfg.save_dir if cfg.save_dir is not None else Path(PARALLEL_SAVE_DIRS[task_type].format(robot=robot))
     data_dir = cfg.data_dir
 

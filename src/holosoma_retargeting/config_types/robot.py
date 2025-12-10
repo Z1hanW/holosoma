@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, TypedDict
+from typing import TypedDict
 
 import numpy as np
 
@@ -21,11 +21,20 @@ _ROBOT_DEFAULTS: dict[str, RobotDefaults] = {
 }
 
 
+def _validate_robot_type(robot_type: str) -> None:
+    """Validate that robot_type exists in _ROBOT_DEFAULTS."""
+    if robot_type not in _ROBOT_DEFAULTS:
+        available = ", ".join(sorted(_ROBOT_DEFAULTS.keys()))
+        raise ValueError(
+            f"Invalid robot_type: '{robot_type}'. "
+            f"Available robot types: {available}. "
+            f"Add your robot to _ROBOT_DEFAULTS in config_types/robot.py"
+        )
+
+
 @dataclass(frozen=True)
 class RobotConfig:
     """Unified configuration for all robot constants (G1, T1) using tyro.
-
-    Uses properties instead of __post_init__ - much simpler!
 
     Example usage:
         # From CLI:
@@ -40,7 +49,12 @@ class RobotConfig:
     """
 
     # Robot type selector - determines which defaults to use
-    robot_type: Literal["g1", "t1"] = "g1"
+    # Use str instead of Literal to allow dynamic robot types via _ROBOT_DEFAULTS
+    robot_type: str = "g1"
+
+    def __post_init__(self) -> None:
+        """Validate robot_type after initialization."""
+        _validate_robot_type(self.robot_type)
 
     # Robot configuration (optional overrides)
     robot_dof: int | None = None
@@ -50,9 +64,6 @@ class RobotConfig:
 
     # Joint definitions (optional overrides)
     foot_sticking_links: list[str] | None = None
-
-    # Robot-specific optional fields
-    q_a_standing: np.ndarray | None = None  # G1 only
 
     # Manual joint limits
     manual_lb: dict[str, float] | None = None
@@ -140,48 +151,6 @@ class RobotConfig:
         doc="Get foot sticking links - use override if provided, else use robot_type default.",
     )
 
-    def _q_a_standing(self) -> np.ndarray | None:
-        """Get standing pose (G1 only)."""
-        if self.q_a_standing is not None:
-            return self.q_a_standing
-        if self.robot_type == "g1":
-            return np.array(
-                [
-                    -0.312,
-                    0.0,
-                    0.0,
-                    0.669,
-                    -0.363,
-                    0.0,
-                    -0.312,
-                    0.0,
-                    0.0,
-                    0.669,
-                    -0.363,
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.2,
-                    0.2,
-                    0.0,
-                    0.6,
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.2,
-                    -0.2,
-                    0.0,
-                    0.6,
-                    0.0,
-                    0.0,
-                    0.0,
-                ]
-            )
-        return None
-
-    Q_A_STANDING = property(_q_a_standing, doc="Get standing pose (G1 only).")
-
     def _manual_lb(self) -> dict[str, float]:
         """Get manual lower bounds."""
         if self.manual_lb is not None:
@@ -253,7 +222,8 @@ class RobotConfig:
             return np.arange(19)
         if self.robot_type == "t1":
             return np.concatenate([np.arange(7), np.arange(11, 23)])
-        raise ValueError(f"Invalid robot type: {self.robot_type}")
+        # Default: return empty array if robot type not defined (nominal tracking not used)
+        return np.array([], dtype=int)
 
     NOMINAL_TRACKING_INDICES = property(
         _nominal_tracking_indices,

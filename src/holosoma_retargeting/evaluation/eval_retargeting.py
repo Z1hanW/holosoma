@@ -13,7 +13,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Literal, Sequence, cast
+from typing import Any, Dict, List, Literal, Sequence
 
 import igl  # type: ignore[import-not-found]
 import mujoco  # type: ignore[import-not-found]
@@ -730,8 +730,8 @@ class Args:
     res_dir: Path
     data_dir: Path
     data_type: Literal["robot_object", "robot_only", "robot_terrain"] = "robot_object"
-    robot: Literal["g1", "t1"] = "g1"
-    data_format: Literal["lafan", "smplh", "mocap"] | None = None
+    robot: str = "g1"  # Use str to allow dynamic robot types
+    data_format: str | None = None  # Use str to allow dynamic data formats
     object_name: str | None = None
     max_workers: int = 1
 
@@ -757,7 +757,7 @@ def main(cfg: Args) -> None:
 
     if cfg.motion_data_config.robot_type != cfg.robot or cfg.motion_data_config.data_format != data_format:
         cfg.motion_data_config = MotionDataConfig(
-            data_format=cast("Literal['lafan', 'smplh', 'mocap']", data_format),
+            data_format=data_format,  # data_format is now str, no cast needed
             robot_type=cfg.robot,
         )
 
