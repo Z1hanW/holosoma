@@ -64,6 +64,8 @@ python src/holosoma/holosoma/train_agent.py \
     --training.seed 1
 ```
 
+> **Note:** For headless servers, see the [training guide](src/holosoma/README.md#video-recording) for video recording configuration.
+
 See the [Training Guide](src/holosoma/README.md) for more examples and configuration options.
 
 ### Quick Demo

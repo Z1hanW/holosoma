@@ -12,6 +12,8 @@ Core training framework for humanoid robot reinforcement learning with support f
 
 All training/eval scripts support `--help` for discovering available flags, e.g. `python src/holosoma/holosoma/train_agent.py --help`.
 
+> **Note:** Video recording is enabled by default with `logger:wandb`. On headless servers, you may need to disable video or configure rendering. See [Video Recording](#video-recording) below.
+
 ### Locomotion (Velocity Tracking)
 
 Train robots to track velocity commands.
@@ -171,24 +173,29 @@ python src/holosoma/holosoma/train_agent.py \
     --logger.name ppo-without-symmetry-seed1
 ```
 
-### Video Logging
+### Video Recording
 
-Video recording is enabled by default. Videos are saved locally and uploaded to Wandb if enabled. For maximum performance, video logging can be disabled with `--logger.video.enabled=False`.
+Video recording is **enabled by default** when using `logger:wandb`. Videos are recorded periodically and uploaded to Weights & Biases.
 
+**Configuration:**
 ```bash
-source scripts/source_isaacgym_setup.sh
-python src/holosoma/holosoma/train_agent.py \
-    exp:g1-29dof-fast-sac \
-    simulator:isaacgym \
-    logger:wandb \
-    --logger.video.enabled=True \
-    --logger.video.interval=5
+# Disable video recording
+--logger.video.enabled False
+
+# Adjust recording interval (episodes)
+--logger.video.interval 10
+
+# Change resolution
+--logger.video.width 640 --logger.video.height 360
 ```
 
-**Video logging parameters:**
-- `--logger.video.enabled=True` - Enable video recording
-- `--logger.video.interval=5` - Record video every 5 episodes
-- Videos are automatically uploaded to Wandb when `logger:wandb` is used
+**Troubleshooting Headless Environments:**
+
+If training fails on headless servers with display/rendering errors (e.g., `GLXBadFBConfig`, `eglInitialize failed`, `GLFW initialization failed`):
+
+- **IsaacSim:** Disable video with `--logger.video.enabled False`, or force EGL with `DISPLAY= python ...`, or use virtual display with `xvfb-run -a python ...`
+- **MJWarp/MuJoCo:** Set environment variable before training: `export MUJOCO_GL=egl`. See [MuJoCo docs](https://mujoco.readthedocs.io/en/stable/programming/index.html#using-opengl)
+- **IsaacGym:** Usually works in headless environments. If issues occur, disable video with `--logger.video.enabled False`
 
 ### Terrain
 
