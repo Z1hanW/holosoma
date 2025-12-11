@@ -28,3 +28,17 @@ repos:
   - id: mixed-line-ending
     args: [--fix=lf] # Ensures consistent line endings (LF) and removes CR
     exclude: \.(dae|obj|mtl|stl)$
+- repo: local
+  hooks:
+  - id: check-extra-index-url
+    name: Check for --extra-index-url usage
+    entry: bash
+    args:
+      - -c
+      - |
+        if grep -r --include="*.sh" --include="*.py" --include="*.txt" --include="*.cfg" --include="*.ini" "\-\-extra-index-url" .; then
+          echo "ERROR: --extra-index-url found. Use --index-url instead to prevent dependency confusion attacks."
+          exit 1
+        fi
+    language: system
+    pass_filenames: false
