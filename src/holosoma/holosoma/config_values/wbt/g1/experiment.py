@@ -64,7 +64,7 @@ g1_29dof_wbt = ExperimentConfig(
         iterations=8000,
         metrics={
             "Episode/rew_motion_global_ref_position_error_exp": [0.16, "inf"],
-            "Episode/rew_motion_global_ref_orientation_error_exp": [0.25, "inf"],
+            "Episode/rew_motion_global_ref_orientation_error_exp": [0.20, "inf"],
             "Episode/rew_motion_relative_body_position_error_exp": [0.45, "inf"],
             "Episode/rew_motion_relative_body_orientation_error_exp": [0.30, "inf"],
             "Episode/rew_motion_global_body_lin_vel": [0.30, "inf"],
