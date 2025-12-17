@@ -5,13 +5,13 @@ import re
 from typing import Any, List
 
 import numpy as np
-import smart_open
 import torch
 from loguru import logger
 
 from holosoma.config_types.command import MotionConfig, NoiseToInitialPoseConfig
 from holosoma.envs.wbt.wbt_manager import WholeBodyTrackingManager
 from holosoma.managers.command.base import CommandTermBase
+from holosoma.utils.file_cache import cached_open
 from holosoma.utils.path import resolve_data_file_path
 from holosoma.utils.rotations import (
     get_euler_xyz,
@@ -57,7 +57,7 @@ class MotionLoader:
         return torch.tensor(indexes, dtype=torch.long, device=device)
 
     def _load_data_from_motion_npz(self, motion_file: str, device: str) -> tuple[list[str], list[str]]:
-        with smart_open.open(motion_file, "rb") as f, np.load(f) as data:
+        with cached_open(motion_file, "rb") as f, np.load(f) as data:
             self.fps = data["fps"]
 
             body_names = data["body_names"].tolist()
