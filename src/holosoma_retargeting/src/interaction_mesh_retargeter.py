@@ -302,6 +302,7 @@ class InteractionMeshRetargeter:
         q_nominal_list=None,
         original=True,
         dest_res_path=None,
+        toe_names: list[str] | None = None,
     ):
         """
         The main function to retarget an entire motion sequence frame by frame.
@@ -333,6 +334,12 @@ class InteractionMeshRetargeter:
         tetrahedra = []
         obj_pts_demo_list = []  # scaled object pts
         obj_pts_list = []  # original size object pts
+
+        foot_link_map = None
+        foot_target_indices = None
+        if toe_names and self.foot_tracking_weight > 0:
+            foot_link_map = self._build_foot_target_links(toe_names)
+            foot_target_indices = {name: self.demo_joints.index(name) for name in foot_link_map}
 
         print(f"\nStarting motion retargeting for {num_frames} frames...")
 
@@ -386,6 +393,13 @@ class InteractionMeshRetargeter:
                 else:
                     w_nominal_tracking = self.w_nominal_tracking_init * np.exp(-i / self.nominal_tracking_tau)
 
+                foot_targets = None
+                if foot_link_map is not None and foot_target_indices is not None:
+                    foot_targets = {
+                        name: human_joint_motions[i, foot_target_indices[name]].copy()
+                        for name in foot_link_map
+                    }
+
                 q, cost = self.iterate(
                     q_locked=q_locked_list[i],
                     q_n=q,
@@ -393,6 +407,8 @@ class InteractionMeshRetargeter:
                     target_laplacian=target_laplacian,
                     adj_list=adj_list,
                     obj_pts_local=object_points_local,
+                    foot_targets=foot_targets,
+                    foot_links=foot_link_map,
                     foot_sticking=foot_sticking_sequences[i],
                     w_nominal_tracking=w_nominal_tracking,
                     q_a_nominal=(q_nominal_list[i, self.q_a_indices] if q_nominal_list is not None else None),
@@ -730,6 +746,8 @@ class InteractionMeshRetargeter:
         target_laplacian: np.ndarray,
         adj_list: list[list[int]],
         obj_pts_local: np.ndarray,
+        foot_targets: dict[str, np.ndarray] | None,
+        foot_links: dict[str, str] | None,
         foot_sticking: tuple[bool, bool],
         w_nominal_tracking: float = 0.0,
         q_a_nominal: np.ndarray | None = None,
@@ -845,6 +863,15 @@ class InteractionMeshRetargeter:
 
         obj_terms.append(cp.sum_squares(cp.multiply(sqrt_w3, lap_var - target_lap_vec)))
 
+        if (foot_targets is not None) and (foot_links is not None) and (self.foot_tracking_weight > 0):
+            J_F_dict, p_F_dict, _ = self._calc_manipulator_jacobians(q, links=foot_links, obj_frame=False)
+            link_names = list(foot_links.keys())
+            J_stack = np.vstack([J_F_dict[name] for name in link_names])
+            p_stack = np.concatenate([p_F_dict[name] for name in link_names])
+            target_stack = np.concatenate([foot_targets[name] for name in link_names])
+            err = target_stack - p_stack
+            obj_terms.append(self.foot_tracking_weight * cp.sum_squares(J_stack @ dqa - err))
+
         # nominal tracking for selected indices
         if (w_nominal_tracking > 0) and (q_a_nominal is not None):
             idx = np.array(self.track_nominal_indices, dtype=int)
@@ -898,6 +925,8 @@ class InteractionMeshRetargeter:
         target_laplacian: np.ndarray,
         adj_list: list[list[int]],
         obj_pts_local: np.ndarray,
+        foot_targets: dict[str, np.ndarray] | None,
+        foot_links: dict[str, str] | None,
         foot_sticking: tuple[bool, bool],
         w_nominal_tracking: float = 0.0,
         q_a_nominal: np.ndarray | None = None,
@@ -915,6 +944,8 @@ class InteractionMeshRetargeter:
                 target_laplacian=target_laplacian,
                 adj_list=adj_list,
                 obj_pts_local=obj_pts_local,
+                foot_targets=foot_targets,
+                foot_links=foot_links,
                 foot_sticking=foot_sticking,
                 q_a_nominal=q_a_nominal,
                 w_nominal_tracking=w_nominal_tracking,

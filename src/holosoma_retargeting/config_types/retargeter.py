@@ -14,7 +14,7 @@ class RetargeterConfig:
 
     algorithm: str = "interaction_mesh"
     """Retargeting algorithm.
-    Options: "interaction_mesh" (default), "foot_tracking".
+    Options: "interaction_mesh" (default), "interaction_mesh_foot", "foot_tracking".
     """
 
     q_a_init_idx: int = -7

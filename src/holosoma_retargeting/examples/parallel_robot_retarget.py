@@ -301,6 +301,20 @@ def process_single_task(args):
                 original=(k == 0),
                 dest_res_path=file_name,
             )
+        elif retargeter_config.algorithm == "interaction_mesh_foot":
+            retargeter.retarget_motion(
+                human_joint_motions=human_joints,
+                object_poses=object_poses,
+                object_poses_augmented=object_poses_augmented,
+                object_points_local_demo=object_local_pts_demo,
+                object_points_local=object_local_pts,
+                foot_sticking_sequences=foot_sticking_sequences,
+                q_a_init=q_init,
+                q_nominal_list=q_nominal,
+                original=(k == 0),
+                dest_res_path=file_name,
+                toe_names=toe_names,
+            )
         else:
             retargeter.retarget_motion(
                 human_joint_motions=human_joints,
