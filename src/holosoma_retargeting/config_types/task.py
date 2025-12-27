@@ -37,3 +37,5 @@ class TaskConfig:
     # Object directory (for climbing tasks)
     # Auto-determined from data_path / task_name if None
     object_dir: Path | None = None
+
+    object_scale_with_smpl: bool = False

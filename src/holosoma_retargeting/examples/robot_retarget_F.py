@@ -120,7 +120,7 @@ def create_task_constants(
         task_constants.OBJECT_MESH_FILE = f"models/{obj_name}/{obj_name}.obj"
         task_constants.OBJECT_URDF_TEMPLATE = f"models/templates/{obj_name}.urdf.jinja"
     elif task_type == "climbing":
-        obj_name = task_config.object_name or "multi_boxes"
+        obj_name = task_config.object_name or "stairs"
         task_constants.OBJECT_NAME = obj_name
         object_dir = task_config.object_dir
         task_constants.OBJECT_DIR = str(object_dir) if object_dir else ""
@@ -337,7 +337,7 @@ def setup_object_data(
         ground_pts = create_ground_points(task_config.ground_range, task_config.ground_range, task_config.ground_size)
         return ground_pts, ground_pts, None
 
-    object_smpl_scale = smpl_scale if task_config.object_scale_with_smpl else 1.0
+    object_smpl_scale = 1.0
 
     if task_type == "object_interaction":
         # Load object data
@@ -345,7 +345,7 @@ def setup_object_data(
             raise ValueError("OBJECT_MESH_FILE not set for object_interaction task")
 
         object_local_pts, object_local_pts_demo = load_object_data(
-            constants.OBJECT_MESH_FILE, smpl_scale=object_smpl_scale, sample_count=100
+            constants.OBJECT_MESH_FILE, smpl_scale=object_smpl_scale, sample_count=3e3
         )
         return object_local_pts, object_local_pts_demo, constants.OBJECT_URDF_FILE
 
@@ -370,7 +370,7 @@ def setup_object_data(
                 if p[2] > task_config.surface_weight_threshold
                 else task_config.surface_weight_low
             ),
-            sample_count=100,
+            sample_count=int(3e3),
         )
 
         if augmentation:
@@ -443,14 +443,17 @@ def _compute_q_init_base(
         _, human_quat_init = transform_from_human_to_world(
             human_joints[0, 0, :], object_poses[0], np.array([0.0, 0.0, 0.0])
         )
-        spine_joint_idx = retargeter.demo_joints.index("Spine1")
-        # MuJoCo order: pos first, then quat
+
+        # Use pelvis/root for the floating base translation
+        if "Pelvis" in retargeter.demo_joints:
+            root_idx = retargeter.demo_joints.index("Pelvis")
+        elif "Hips" in retargeter.demo_joints:
+            root_idx = retargeter.demo_joints.index("Hips")
+        else:
+            root_idx = 0
+
         q_init_base = np.concatenate(
-            [
-                human_joints[0, spine_joint_idx],
-                human_quat_init,
-                np.zeros(constants.ROBOT_DOF),
-            ]
+            [human_joints[0, root_idx], human_quat_init, np.zeros(constants.ROBOT_DOF)]
         )
     else:
         raise ValueError(f"Invalid task type: {task_type}")
@@ -693,7 +696,8 @@ def main(cfg: RetargetingConfig) -> None:
             human_joints,
             retargeter,
             toe_names,
-            scale=smpl_scale,
+            scale=1,
+            mat_height=0.0,
             object_poses=object_poses,
         )
 

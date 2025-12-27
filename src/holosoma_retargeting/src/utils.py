@@ -69,7 +69,7 @@ def load_object_data(
     Returns:
         tuple: (points, points_scaled) - original and scaled point arrays.
     """
-    print("Loading and sampling object mesh...")
+    print("Loading and sampling object mesh...", smpl_scale)
     obj_mesh = trimesh.load(object_file, force="mesh")
 
     if bounding_box_oriented:
@@ -227,10 +227,12 @@ def preprocess_motion_data(
         tuple: (human_joints_scaled, object_poses_scaled, object_moving_frame_idx).
     """
     # Normalize human joint heights
+    
     toe_indices = [
         retargeter.demo_joints.index(foot_names[0]),
         retargeter.demo_joints.index(foot_names[1]),
     ]
+    print(foot_names, 'foot_namesfoot_namesfoot_names', toe_indices)
     z_min = human_joints[:, toe_indices, 2].min()
     if z_min >= mat_height:
         # On a mat.

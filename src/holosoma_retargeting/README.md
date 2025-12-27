@@ -136,8 +136,8 @@ python examples/parallel_robot_retarget.py --data-dir demo_data/amass_smplx_proc
 ```bash
 # Visualize object-interaction results
 python viser_player.py --robot_urdf models/g1/g1_29dof.urdf \
-    --object_urdf models/largebox/largebox.urdf \
-    --qpos_npz demo_results_parallel/g1/object_interaction/omomo/sub3_largebox_003_original.npz
+    --object_urdf models/stairs/stairs.urdf \
+    --qpos_npz demo_results/g1/robot_only/omomo/far_robot.npz
 
 # Visualize climbing results
 python viser_player.py --robot_urdf models/g1/g1_29dof_spherehand.urdf \
