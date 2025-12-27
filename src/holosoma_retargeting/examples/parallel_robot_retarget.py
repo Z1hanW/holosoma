@@ -158,7 +158,7 @@ def process_single_task(args):
         robot_config,
         motion_data_config,
         task_config,
-        retargeter,
+        retargeter_config,
         augmentation,
     ) = args
 
@@ -226,7 +226,9 @@ def process_single_task(args):
             )
 
         # Create retargeter
-        retargeter_kwargs = build_retargeter_kwargs_from_config(retargeter, constants, object_urdf_path, task_type)
+        retargeter_kwargs = build_retargeter_kwargs_from_config(
+            retargeter_config, constants, object_urdf_path, task_type
+        )
         retargeter = InteractionMeshRetargeter(**retargeter_kwargs)
 
         # Preprocess motion data
@@ -287,18 +289,31 @@ def process_single_task(args):
             continue
 
         # Retarget motion
-        retargeted_motions, _, _, _ = retargeter.retarget_motion(
-            human_joint_motions=human_joints,
-            object_poses=object_poses,
-            object_poses_augmented=object_poses_augmented,
-            object_points_local_demo=object_local_pts_demo,
-            object_points_local=object_local_pts,
-            foot_sticking_sequences=foot_sticking_sequences,
-            q_a_init=q_init,
-            q_nominal_list=q_nominal,
-            original=(k == 0),
-            dest_res_path=file_name,
-        )
+        if retargeter_config.algorithm == "foot_tracking":
+            retargeter.retarget_motion_foot_tracking(
+                human_joint_motions=human_joints,
+                object_poses=object_poses,
+                object_poses_augmented=object_poses_augmented,
+                foot_sticking_sequences=foot_sticking_sequences,
+                toe_names=toe_names,
+                q_a_init=q_init,
+                q_nominal_list=q_nominal,
+                original=(k == 0),
+                dest_res_path=file_name,
+            )
+        else:
+            retargeter.retarget_motion(
+                human_joint_motions=human_joints,
+                object_poses=object_poses,
+                object_poses_augmented=object_poses_augmented,
+                object_points_local_demo=object_local_pts_demo,
+                object_points_local=object_local_pts,
+                foot_sticking_sequences=foot_sticking_sequences,
+                q_a_init=q_init,
+                q_nominal_list=q_nominal,
+                original=(k == 0),
+                dest_res_path=file_name,
+            )
 
 
 def main(cfg: ParallelRetargetingConfig) -> None:

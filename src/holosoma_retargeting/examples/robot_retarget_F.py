@@ -501,6 +501,7 @@ def build_retargeter_kwargs_from_config(
         "visualize": retargeter_config.visualize,
         "debug": retargeter_config.debug,
         "w_nominal_tracking_init": retargeter_config.w_nominal_tracking_init,
+        "foot_tracking_weight": retargeter_config.foot_tracking_weight,
     }
     if task_type == "climbing":
         kwargs["nominal_tracking_tau"] = retargeter_config.nominal_tracking_tau
@@ -730,18 +731,31 @@ def main(cfg: RetargetingConfig) -> None:
 
     # Retarget motion
     logger.info("Starting retargeting...")
-    retargeter.retarget_motion(
-        human_joint_motions=human_joints,
-        object_poses=object_poses,
-        object_poses_augmented=object_poses_augmented,
-        object_points_local_demo=object_local_pts_demo,
-        object_points_local=object_local_pts,
-        foot_sticking_sequences=foot_sticking_sequences,
-        q_a_init=q_init,
-        q_nominal_list=q_nominal,
-        original=not cfg.augmentation,
-        dest_res_path=dest_res_path,
-    )
+    if cfg.retargeter.algorithm == "foot_tracking":
+        retargeter.retarget_motion_foot_tracking(
+            human_joint_motions=human_joints,
+            object_poses=object_poses,
+            object_poses_augmented=object_poses_augmented,
+            foot_sticking_sequences=foot_sticking_sequences,
+            toe_names=toe_names,
+            q_a_init=q_init,
+            q_nominal_list=q_nominal,
+            original=not cfg.augmentation,
+            dest_res_path=dest_res_path,
+        )
+    else:
+        retargeter.retarget_motion(
+            human_joint_motions=human_joints,
+            object_poses=object_poses,
+            object_poses_augmented=object_poses_augmented,
+            object_points_local_demo=object_local_pts_demo,
+            object_points_local=object_local_pts,
+            foot_sticking_sequences=foot_sticking_sequences,
+            q_a_init=q_init,
+            q_nominal_list=q_nominal,
+            original=not cfg.augmentation,
+            dest_res_path=dest_res_path,
+        )
     logger.info("Retargeting complete. Results saved to: %s", dest_res_path)
 
     if cfg.retargeter.debug:

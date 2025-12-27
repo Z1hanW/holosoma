@@ -57,6 +57,7 @@ class InteractionMeshRetargeter:
         debug: bool = False,
         w_nominal_tracking_init: float = 5.0,
         nominal_tracking_tau: float = 10.0,
+        foot_tracking_weight: float = 1000.0,
     ):
         """This kinematic retargeter solves the diffIK problem with hard constraints in SQP style.
         During each SQP iteration, the problem is solved with the following constraints and costs:
@@ -77,6 +78,7 @@ class InteractionMeshRetargeter:
             penetration_tolerance: tolerance for penetration when enforcing non-penetration constraints.
             foot_sticking_tolerance: tolerance for foot sticking constraints in x, y.
             nominal_tracking_tau: the time constant for the nominal tracking cost.
+            foot_tracking_weight: weight for foot position tracking in foot-only mode.
         """
 
         self.robot_model_path = task_constants.ROBOT_URDF_FILE
@@ -163,6 +165,7 @@ class InteractionMeshRetargeter:
 
         self.w_nominal_tracking_init = w_nominal_tracking_init
         self.nominal_tracking_tau = nominal_tracking_tau
+        self.foot_tracking_weight = foot_tracking_weight
         self.track_nominal_indices = task_constants.NOMINAL_TRACKING_INDICES
 
     def _setup_visualization(self):
@@ -471,6 +474,253 @@ class InteractionMeshRetargeter:
             obj_pts_list,
             tetrahedra,
         )
+
+    def retarget_motion_foot_tracking(
+        self,
+        human_joint_motions,
+        object_poses,
+        object_poses_augmented,
+        foot_sticking_sequences,
+        *,
+        toe_names: list[str],
+        q_a_init=None,
+        q_nominal_list=None,
+        original=True,
+        dest_res_path=None,
+    ):
+        """
+        Retarget motion using foot position tracking only (ignore object).
+        """
+        num_frames = human_joint_motions.shape[0]
+        if q_nominal_list is not None:
+            q_locked_list = q_nominal_list
+        else:
+            q_locked_list = np.zeros((num_frames, self.nq))
+            q_locked_list[0, self.q_a_indices] = q_a_init
+
+        if self.has_dynamic_object:
+            q_locked_list[:, -7:] = object_poses_augmented
+
+        foot_link_map = self._build_foot_target_links(toe_names)
+        foot_target_indices = {name: self.demo_joints.index(name) for name in foot_link_map}
+
+        q = np.copy(q_locked_list[0])
+        retargeted_motions = [q]
+
+        print(f"\nStarting foot-tracking retargeting for {num_frames} frames...")
+        with tqdm(range(num_frames)) as pbar:
+            for i in pbar:
+                foot_targets = {
+                    name: human_joint_motions[i, foot_target_indices[name]].copy()
+                    for name in foot_link_map
+                }
+
+                if original:
+                    w_nominal_tracking = self.w_nominal_tracking_init
+                else:
+                    w_nominal_tracking = self.w_nominal_tracking_init * np.exp(-i / self.nominal_tracking_tau)
+
+                q, cost = self.iterate_foot_tracking(
+                    q_locked=q_locked_list[i],
+                    q_n=q,
+                    q_t_last=retargeted_motions[-1],
+                    foot_targets=foot_targets,
+                    foot_links=foot_link_map,
+                    foot_sticking=foot_sticking_sequences[i],
+                    w_nominal_tracking=w_nominal_tracking,
+                    q_a_nominal=(q_nominal_list[i, self.q_a_indices] if q_nominal_list is not None else None),
+                    init_t=i == 0,
+                    n_iter=10 if i == 0 else 5,
+                )
+
+                retargeted_motions.append(q)
+                if self.visualize and self.debug:
+                    self.draw_q(q)
+
+                pbar.set_postfix(cost=cost)
+
+        np.savez(
+            dest_res_path,
+            qpos=np.array(retargeted_motions)[1:],
+            human_joints=human_joint_motions,
+            fps=30,
+            cost=cost,
+        )
+        print("Saving results to path:", dest_res_path)
+
+        if self.visualize:
+            robot_dof = len(self.viser_robot.get_actuated_joint_limits())
+
+            create_motion_control_sliders(
+                server=self.server,
+                viser_robot=self.viser_robot,
+                robot_base_frame=self.robot_base,
+                motion_sequence=np.asarray(retargeted_motions)[1:],
+                robot_dof=robot_dof,
+                viser_object=self.viser_object,
+                object_base_frame=getattr(self, "object_base", None) if self.viser_object else None,
+                contains_object_in_qpos=bool(self.viser_object) and bool(self.has_dynamic_object),
+                initial_fps=30,
+                initial_interp_mult=2,
+                loop=False,
+            )
+
+            with self.server.gui.add_folder("Visibility"):
+                show_meshes_cb = self.server.gui.add_checkbox("Show meshes", self.viser_robot.show_visual)
+
+                @show_meshes_cb.on_update
+                def _(_):
+                    self.viser_robot.show_visual = show_meshes_cb.value
+                    if self.viser_object is not None:
+                        self.viser_object.show_visual = show_meshes_cb.value
+
+        return (
+            np.array(retargeted_motions)[1:],
+            [],
+            [],
+            [],
+        )
+
+    def _build_foot_target_links(self, toe_names: list[str]) -> dict[str, str]:
+        foot_links: dict[str, str] = {}
+        for toe_name in toe_names:
+            if toe_name in self.laplacian_match_links:
+                foot_links[toe_name] = self.laplacian_match_links[toe_name]
+        if len(foot_links) < 2:
+            raise ValueError(f"Could not find both foot joints in mapping. toe_names={toe_names}")
+        return foot_links
+
+    def iterate_foot_tracking(
+        self,
+        q_locked: np.ndarray,
+        q_n: np.ndarray,
+        q_t_last: np.ndarray,
+        foot_targets: dict[str, np.ndarray],
+        foot_links: dict[str, str],
+        foot_sticking: tuple[bool, bool],
+        w_nominal_tracking: float = 0.0,
+        q_a_nominal: np.ndarray | None = None,
+        init_t: bool = False,
+        n_iter: int = 10,
+    ):
+        last_cost = np.inf
+        for _ in range(n_iter):
+            q_a_n_last = q_n[self.q_a_indices]
+            q_n, cost = self.solve_single_iteration_foot_tracking(
+                q_locked=q_locked,
+                q_a_n_last=q_a_n_last,
+                q_t_last=q_t_last,
+                foot_targets=foot_targets,
+                foot_links=foot_links,
+                foot_sticking=foot_sticking,
+                q_a_nominal=q_a_nominal,
+                w_nominal_tracking=w_nominal_tracking,
+                init_t=init_t,
+            )
+            if np.isclose(cost, last_cost):
+                break
+            last_cost = cost
+        return q_n, cost
+
+    def solve_single_iteration_foot_tracking(
+        self,
+        q_locked: np.ndarray,
+        q_a_n_last: np.ndarray,
+        q_t_last: np.ndarray,
+        foot_targets: dict[str, np.ndarray],
+        foot_links: dict[str, str],
+        foot_sticking: tuple[bool, bool],
+        w_nominal_tracking: float = 0.0,
+        q_a_nominal: np.ndarray | None = None,
+        init_t: bool = False,
+    ):
+        q = np.copy(q_locked)
+        q[self.q_a_indices] = q_a_n_last
+
+        J_dict, p_dict, _ = self._calc_manipulator_jacobians(q, links=foot_links, obj_frame=False)
+        link_names = list(foot_links.keys())
+        J_stack = np.vstack([J_dict[name] for name in link_names])
+        p_stack = np.concatenate([p_dict[name] for name in link_names])
+        target_stack = np.concatenate([foot_targets[name] for name in link_names])
+        err = target_stack - p_stack
+
+        dqa = cp.Variable(len(self.q_a_indices), name="dqa")
+        obj_terms = []
+        obj_terms.append(self.foot_tracking_weight * cp.sum_squares(J_stack @ dqa - err))
+
+        if (w_nominal_tracking > 0) and (q_a_nominal is not None):
+            idx = np.array(self.track_nominal_indices, dtype=int)
+            if idx.size > 0:
+                z = dqa[idx] - (q_a_nominal[idx] - q_a_n_last[idx])
+                obj_terms.append(w_nominal_tracking * cp.sum_squares(z))
+
+        Qd = np.asarray(self.Q_diag, dtype=float).reshape(-1)
+        obj_terms.append(cp.sum_squares(cp.multiply(np.sqrt(Qd), dqa + q_a_n_last)))
+
+        dqa_smooth = q_t_last[self.q_a_indices] - q_a_n_last
+        if np.isscalar(self.smooth_weight):
+            obj_terms.append(self.smooth_weight * cp.sum_squares(dqa - dqa_smooth))
+        else:
+            Wsmooth = np.asarray(self.smooth_weight, dtype=float)
+            if Wsmooth.ndim == 1:
+                obj_terms.append(cp.sum_squares(cp.multiply(np.sqrt(Wsmooth), dqa - dqa_smooth)))
+            else:
+                obj_terms.append(cp.quad_form(dqa - dqa_smooth, Wsmooth))
+
+        constraints = []
+
+        if (self.q_a_init_idx < 12) and self.activate_foot_sticking:
+            J_WF_dict, p_WF_dict, _ = self._calc_manipulator_jacobians(q, links=self.foot_links, obj_frame=False)
+            _, p_WF_t_last_dict, _ = self._calc_manipulator_jacobians(q_t_last, links=self.foot_links, obj_frame=False)
+            left_key = right_key = None
+            for key in foot_sticking:
+                if key.lower().startswith("l"):
+                    left_key = key
+                elif key.lower().startswith("r"):
+                    right_key = key
+            if left_key is None or right_key is None:
+                raise ValueError("foot_sticking must include one left* and one right* key")
+
+            for key, J_WF in J_WF_dict.items():
+                apply_left = ("left" in key) and foot_sticking[left_key]
+                apply_right = ("right" in key) and foot_sticking[right_key]
+                if apply_left or apply_right:
+                    p_lb = p_WF_t_last_dict[key] - p_WF_dict[key] - self.foot_sticking_tolerance
+                    p_ub = p_lb + 2 * self.foot_sticking_tolerance
+
+                    Jxy = J_WF[:2, self.q_a_indices]
+                    constraints += [
+                        Jxy @ dqa >= p_lb[:2],
+                        Jxy @ dqa <= p_ub[:2],
+                    ]
+
+        if self.activate_joint_limits:
+            constraints += [
+                dqa >= (self.q_a_lb - q_a_n_last),
+                dqa <= (self.q_a_ub - q_a_n_last),
+            ]
+
+        constraints += [cp.SOC(self.step_size, dqa)]
+
+        problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
+        solver_kwargs = {"verbose": False}
+        problem.solve(solver=cp.CLARABEL, **solver_kwargs)
+        if (problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE)) and init_t:
+            constraints = [c for c in constraints if not isinstance(c, cp.constraints.second_order.SOC)]
+            problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
+            problem.solve(solver=cp.CLARABEL, **solver_kwargs)
+
+        if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+            raise RuntimeError(f"CVXPY solve failed: {problem.status}")
+
+        dqa_star = dqa.value
+        cost = problem.value
+
+        q_star = np.copy(q)
+        q_star[self.q_a_indices] = dqa_star + q_a_n_last
+        q_star[3:7] /= np.linalg.norm(q_star[3:7]) + 1e-12
+
+        return q_star, cost
 
     def solve_single_iteration(
         self,

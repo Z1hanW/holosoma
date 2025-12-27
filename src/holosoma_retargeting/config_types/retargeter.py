@@ -12,6 +12,11 @@ class RetargeterConfig:
     These parameters control the retargeting optimization process.
     """
 
+    algorithm: str = "interaction_mesh"
+    """Retargeting algorithm.
+    Options: "interaction_mesh" (default), "foot_tracking".
+    """
+
     q_a_init_idx: int = -7
     """Index in robot's configuration where optimization variables start.
     -7: starts from floating base, -3: starts from translation of floating base,
@@ -46,3 +51,6 @@ class RetargeterConfig:
 
     nominal_tracking_tau: float = 1e6
     """Time constant for the nominal tracking cost."""
+
+    foot_tracking_weight: float = 1000.0
+    """Weight for foot position tracking when using the foot_tracking algorithm."""
