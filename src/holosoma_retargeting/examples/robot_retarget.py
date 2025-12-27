@@ -70,13 +70,118 @@ _OBJECT_SCALE_AUGMENTED = np.array([1.0, 1.0, 1.2])
 _OBJECT_SCALE_NORMAL = np.array([1.0, 1.0, 1.0])
 _AUGMENTATION_TRANSLATION = np.array([0.2, 0.0, 0.0])
 
-
+_CLIMBING_STAIRS_DISTANCE_SCALE = 0.914
 # Type aliases
 TaskType = Literal["robot_only", "object_interaction", "climbing"]
 # DataFormat is imported from config_types.data_type
 
+def _apply_climbing_distance_scale_towards_stairs_by_facing_dir(
+    human_joints: np.ndarray,
+    demo_joints: list[str],
+    object_poses: np.ndarray,
+    distance_scale: float = _CLIMBING_STAIRS_DISTANCE_SCALE,
+    xy_only: bool = True,
+) -> np.ndarray:
+    """Keep stairs fixed; translate the PERSON so the *forward* (facing-direction) distance
+    from root->stairs at frame 0 becomes distance_scale * original.
 
-# ----------------------------- Helper Functions -----------------------------
+    Supports:
+      - human_joints: (T, J, 3) full joints
+      - human_joints: (T, 3)   root positions only (will shift all rows)
+
+    Returns:
+        Shifted human_joints with constant translation applied to all frames.
+    """
+    if not (distance_scale > 0.0):
+        raise ValueError(f"distance_scale must be > 0, got {distance_scale}")
+    if object_poses.ndim != 2 or object_poses.shape[-1] != 7:
+        raise ValueError(f"object_poses must be (T, 7) [qw,qx,qy,qz,x,y,z], got {object_poses.shape}")
+
+    # Detect input format
+    if human_joints.ndim == 3 and human_joints.shape[-1] == 3:
+        # (T, J, 3)
+        if "Pelvis" in demo_joints:
+            root_idx = demo_joints.index("Pelvis")
+        elif "Hips" in demo_joints:
+            root_idx = demo_joints.index("Hips")
+        else:
+            root_idx = 0
+        root0 = human_joints[0, root_idx].astype(float)
+        # For motion direction fallback
+        def _root2d(t: int) -> np.ndarray:
+            return human_joints[t, root_idx].astype(float)[:2]
+        # For hips-based facing
+        def _joint0(name_list: list[str]) -> np.ndarray | None:
+            for n in name_list:
+                if n in demo_joints:
+                    return human_joints[0, demo_joints.index(n)].astype(float)
+            return None
+        lhip0 = _joint0(["LeftHip", "L_Hip", "left_hip", "LeftUpLeg", "LUpLeg"])
+        rhip0 = _joint0(["RightHip", "R_Hip", "right_hip", "RightUpLeg", "RUpLeg"])
+    elif human_joints.ndim == 2 and human_joints.shape[-1] == 3:
+        # (T, 3) root-only
+        root0 = human_joints[0].astype(float)
+        def _root2d(t: int) -> np.ndarray:
+            return human_joints[t].astype(float)[:2]
+        lhip0, rhip0 = None, None
+    else:
+        raise ValueError(
+            f"human_joints must be (T,J,3) or (T,3), got {getattr(human_joints, 'shape', None)}"
+        )
+
+    stairs0 = object_poses[0, 4:7].astype(float)
+    stairs_vec2d = (stairs0 - root0).astype(float)[:2]
+
+    # Estimate forward direction in XY
+    if lhip0 is not None and rhip0 is not None:
+        lateral = (rhip0 - lhip0)
+        up = np.array([0.0, 0.0, 1.0], dtype=float)
+        forward2d = np.cross(up, lateral)[:2]  # z-up assumption
+    else:
+        # Fallback: use root velocity direction
+        if human_joints.shape[0] >= 2:
+            forward2d = (_root2d(1) - _root2d(0)).astype(float)
+        else:
+            forward2d = stairs_vec2d.copy()
+
+    n = float(np.linalg.norm(forward2d))
+    if n < 1e-8:
+        logger.info("Climbing: forward direction ill-defined; skipping person move.")
+        return human_joints
+    forward2d = forward2d / n
+
+    # Disambiguate sign: prefer forward aligned with motion; otherwise point towards stairs
+    if human_joints.shape[0] >= 2:
+        v2d = (_root2d(1) - _root2d(0)).astype(float)
+        if float(np.linalg.norm(v2d)) > 1e-6 and float(np.dot(forward2d, v2d)) < 0.0:
+            forward2d = -forward2d
+    if float(np.dot(forward2d, stairs_vec2d)) < 0.0:
+        forward2d = -forward2d
+
+    d_fwd = float(np.dot(stairs_vec2d, forward2d))
+    if d_fwd <= 0.0:
+        logger.info("Climbing: stairs not in front along facing dir (d_fwd=%.4f); skipping person move.", d_fwd)
+        return human_joints
+
+    # Want: d_fwd_new = distance_scale * d_fwd
+    alpha = (1.0 - float(distance_scale)) * d_fwd  # positive if scale<1
+    delta = np.zeros(3, dtype=float)
+    delta[:2] = alpha * forward2d
+    if not xy_only:
+        # still no z shift by default
+        pass
+
+    if np.allclose(delta, 0.0):
+        logger.info("Climbing: person move produced ~zero shift (already aligned).")
+        return human_joints
+
+    logger.info(
+        "Climbing: keeping stairs fixed; scaling forward root->stairs by %.3f; applying person delta = %s",
+        float(distance_scale),
+        np.array2string(delta, precision=4, suppress_small=True),
+    )
+    return human_joints - delta
+
 
 
 def create_task_constants(
@@ -120,7 +225,7 @@ def create_task_constants(
         task_constants.OBJECT_MESH_FILE = f"models/{obj_name}/{obj_name}.obj"
         task_constants.OBJECT_URDF_TEMPLATE = f"models/templates/{obj_name}.urdf.jinja"
     elif task_type == "climbing":
-        obj_name = task_config.object_name or "multi_boxes"
+        obj_name = task_config.object_name or "stairs"
         task_constants.OBJECT_NAME = obj_name
         object_dir = task_config.object_dir
         task_constants.OBJECT_DIR = str(object_dir) if object_dir else ""
@@ -337,7 +442,7 @@ def setup_object_data(
         ground_pts = create_ground_points(task_config.ground_range, task_config.ground_range, task_config.ground_size)
         return ground_pts, ground_pts, None
 
-    object_smpl_scale = smpl_scale if task_config.object_scale_with_smpl else 1.0
+    object_smpl_scale = 1.0
 
     if task_type == "object_interaction":
         # Load object data
@@ -345,7 +450,7 @@ def setup_object_data(
             raise ValueError("OBJECT_MESH_FILE not set for object_interaction task")
 
         object_local_pts, object_local_pts_demo = load_object_data(
-            constants.OBJECT_MESH_FILE, smpl_scale=object_smpl_scale, sample_count=100
+            constants.OBJECT_MESH_FILE, smpl_scale=object_smpl_scale, sample_count=3e3, use_face_normals=True
         )
         return object_local_pts, object_local_pts_demo, constants.OBJECT_URDF_FILE
 
@@ -365,12 +470,8 @@ def setup_object_data(
         object_local_pts, object_local_pts_demo_original = load_object_data(
             constants.OBJECT_MESH_FILE,
             smpl_scale=object_smpl_scale,
-            surface_weights=lambda p: (
-                task_config.surface_weight_high
-                if p[2] > task_config.surface_weight_threshold
-                else task_config.surface_weight_low
-            ),
-            sample_count=100,
+            sample_count=int(3e3),
+            use_face_normals=True
         )
 
         if augmentation:
@@ -443,14 +544,17 @@ def _compute_q_init_base(
         _, human_quat_init = transform_from_human_to_world(
             human_joints[0, 0, :], object_poses[0], np.array([0.0, 0.0, 0.0])
         )
-        spine_joint_idx = retargeter.demo_joints.index("Spine1")
-        # MuJoCo order: pos first, then quat
+
+        # Use pelvis/root for the floating base translation
+        if "Pelvis" in retargeter.demo_joints:
+            root_idx = retargeter.demo_joints.index("Pelvis")
+        elif "Hips" in retargeter.demo_joints:
+            root_idx = retargeter.demo_joints.index("Hips")
+        else:
+            root_idx = 0
+
         q_init_base = np.concatenate(
-            [
-                human_joints[0, spine_joint_idx],
-                human_quat_init,
-                np.zeros(constants.ROBOT_DOF),
-            ]
+            [human_joints[0, root_idx], human_quat_init, np.zeros(constants.ROBOT_DOF)]
         )
     else:
         raise ValueError(f"Invalid task type: {task_type}")
@@ -693,9 +797,23 @@ def main(cfg: RetargetingConfig) -> None:
             human_joints,
             retargeter,
             toe_names,
-            scale=smpl_scale,
+            scale=1,
+            mat_height=0.14,
             object_poses=object_poses,
         )
+
+
+    # --- Climbing-only: bring the motion closer to the stairs (0.7 * original distance) ---
+    if task_type == "climbing":
+        # NOTE: For augmentation runs, this assumes the "original" qpos you load was generated
+        # with the same scaling. If not, re-generate the original first.
+        human_joints = _apply_climbing_distance_scale_towards_stairs_by_facing_dir(
+        human_joints,              # <-- must be human_joints
+        retargeter.demo_joints,
+        object_poses,              # <-- stairs pose only (unchanged)
+        distance_scale=_CLIMBING_STAIRS_DISTANCE_SCALE,
+        xy_only=True,
+    )
 
     # Initialize robot pose
     q_init, q_nominal, object_poses_augmented, human_joints, object_poses = initialize_robot_pose(
