@@ -1,14 +1,15 @@
 # Ignore everything
 *
 
-# But keep directories (so Git can see files inside)
+# Keep directories (including dot-directories) so Git can traverse
 !*/
+!.*/
 
-# Allow Python and shell scripts
-!*.py
-!*.sh
+# Allow Python and shell scripts anywhere
+!**/*.py
+!**/*.sh
 
-# Optional: keep common top-level files
+# Keep these
 !.gitignore
 !README*
 !LICENSE*
