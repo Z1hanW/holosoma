@@ -82,7 +82,7 @@ def load_object_data(
             # Use center-based weighted sampling
             points = weighted_surface_sampling(obj_mesh, sample_count, surface_weights, seed)
     else:
-        points, _ = trimesh.sample.sample_surface_even(obj_mesh, sample_count, seed=seed)
+        points, _ = trimesh.sample.sample_surface_even(obj_mesh, int(sample_count), seed=seed)
 
     points = np.array(points)
     points_scaled = points * smpl_scale

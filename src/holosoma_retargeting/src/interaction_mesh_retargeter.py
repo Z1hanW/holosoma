@@ -170,7 +170,7 @@ class InteractionMeshRetargeter:
 
     def _setup_visualization(self):
         """Setup Viser visualization components."""
-        self.server = viser.ViserServer()
+        self.server = viser.ViserServer(port=7070)
 
         # 1) Ensure a world frame exists (absolute path!)
         try:

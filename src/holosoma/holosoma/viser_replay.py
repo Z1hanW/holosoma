@@ -308,7 +308,7 @@ def replay(cfg: ExperimentConfig) -> None:
     if cfg.robot.object.object_urdf_path:
         object_urdf_path = _resolve_data_path(cfg.robot.object.object_urdf_path)
 
-    server = viser.ViserServer()
+    server = viser.ViserServer(port=6060)
     robot_root = server.scene.add_frame("/robot", show_axes=False)
     object_root = server.scene.add_frame("/object", show_axes=False)
 
