@@ -8,3 +8,7 @@ python examples/robot_retarget.py \
     --retargeter.visualize \
     --retargeter.algorithm interaction_mesh_foot \
     --retargeter.foot-tracking-weight 1000
+
+# python viser_player.py --robot_urdf models/g1/g1_29dof_spherehand.urdf \
+#    --object_urdf demo_data/far_robot/far_robot/stairs.urdf \
+#    --qpos_npz demo_results/g1/climbing/mocap_climb/far_robot_original.npz
