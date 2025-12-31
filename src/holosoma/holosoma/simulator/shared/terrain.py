@@ -78,15 +78,28 @@ class Terrain(TerrainInterface):
             f"[INFO] Loaded terrain mesh from obj file with {len(base.vertices)} vertices and {len(base.faces)} faces"
         )
 
-        gap = 1e-4  # keeps tiles “kissing” without intersecting
-        stride = (base.bounds[1] - base.bounds[0]) + gap
+        gap = 1e-4  # keeps tiles "kissing" without intersecting
+        bounds = base.bounds.astype(np.float64)
+        min_corner, max_corner = bounds
+        span = max_corner - min_corner
+        spacing_scale = max(float(getattr(self._cfg, "obj_tile_spacing_scale", 1.0)), 1.0)
+        stride = span * spacing_scale + gap
+        base_center_xy = (min_corner[:2] + max_corner[:2]) * 0.5
+        base_height = float(max_corner[2])
 
         tiles = []
         for r in range(self._num_rows):
             for c in range(self._num_cols):
                 tile = base.copy()
-                tile.apply_translation([c * stride[0], r * stride[1], 0.0])
+                # Align row->x and col->y with heightfield terrain convention.
+                tile_offset = np.array([r * stride[0], c * stride[1], 0.0], dtype=np.float64)
+                tile.apply_translation(tile_offset)
                 tiles.append(tile)
+                if not hasattr(self, "_load_obj_origin_grid"):
+                    self._load_obj_origin_grid = np.zeros((self._num_rows, self._num_cols, 3), dtype=np.float32)
+                self._load_obj_origin_grid[r, c, 0] = base_center_xy[0] + tile_offset[0]
+                self._load_obj_origin_grid[r, c, 1] = base_center_xy[1] + tile_offset[1]
+                self._load_obj_origin_grid[r, c, 2] = base_height
 
         return trimesh.util.concatenate(tiles)
 
