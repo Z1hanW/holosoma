@@ -524,6 +524,18 @@ class SymmetryUtils:
         """
         return actions[..., self.joint_index_map] * self.sign_flip_mask
 
+    def mirror_obs_motion_command(self, motion_command: torch.Tensor) -> torch.Tensor:
+        """Mirrors the motion command ([qpos, qvel]) with joint mapping and sign flips."""
+        total_dim = motion_command.shape[-1]
+        if total_dim % 2 != 0:
+            raise ValueError("motion_command must be concatenated [dof_pos, dof_vel].")
+        half = total_dim // 2
+        dof_pos = motion_command[..., :half]
+        dof_vel = motion_command[..., half:]
+        dof_pos = dof_pos[..., self.joint_index_map] * self.sign_flip_mask
+        dof_vel = dof_vel[..., self.joint_index_map] * self.sign_flip_mask
+        return torch.cat([dof_pos, dof_vel], dim=-1)
+
     def mirror_obs_motion_future_target_poses(self, motion_future_target_poses: torch.Tensor) -> torch.Tensor:
         """Pass-through for future target poses.
 
