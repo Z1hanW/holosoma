@@ -154,9 +154,19 @@ class Terrain(TerrainInterface):
     def sample_env_origins(self) -> np.ndarray:
         if self._type == "load_obj":
             origin_grid = self._get_load_obj_env_origin_grid()
-        else:
-            origin_grid = self._env_origins
+            flat_origins = origin_grid.reshape(-1, 3)
+            num_tiles = flat_origins.shape[0]
+            if num_tiles == 0:
+                raise ValueError("OBJ terrain tile grid is empty; check num_rows/num_cols configuration.")
 
+            env_ids = np.arange(self._num_robots, dtype=np.int64)
+            if self._cfg.spawn.randomize_tiles and num_tiles >= self._num_robots:
+                tile_ids = np.random.permutation(num_tiles)[: self._num_robots]
+            else:
+                tile_ids = np.mod(env_ids, num_tiles)
+            return flat_origins[tile_ids]
+
+        origin_grid = self._env_origins
         terrain_levels = np.random.randint(0, self._num_rows, (self._num_robots,))
         terrain_types = np.floor_divide(
             np.arange(self._num_robots),
