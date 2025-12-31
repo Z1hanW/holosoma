@@ -565,10 +565,9 @@ class MotionCommand(CommandTermBase):
 
     @property
     def body_pos_w(self) -> torch.Tensor:
-        return (
-            self.motion.body_pos_w[self.time_steps][:, self.tracked_body_indexes]
-            + self._env.simulator.scene.env_origins[:, None, :]
-        )
+        return self.motion.body_pos_w[self.time_steps][:, self.tracked_body_indexes] + self._get_motion_env_origins()[
+            :, None, :
+        ]
 
     @property
     def body_quat_w(self) -> torch.Tensor:
@@ -584,7 +583,7 @@ class MotionCommand(CommandTermBase):
 
     @property
     def ref_pos_w(self) -> torch.Tensor:
-        return self.motion.body_pos_w[self.time_steps, self.ref_body_index] + self._env.simulator.scene.env_origins
+        return self.motion.body_pos_w[self.time_steps, self.ref_body_index] + self._get_motion_env_origins()
 
     @property
     def ref_quat_w(self) -> torch.Tensor:
@@ -592,7 +591,7 @@ class MotionCommand(CommandTermBase):
 
     @property
     def root_pos_w(self) -> torch.Tensor:
-        return self.motion.body_pos_w[self.time_steps, 0] + self._env.simulator.scene.env_origins
+        return self.motion.body_pos_w[self.time_steps, 0] + self._get_motion_env_origins()
 
     @property
     def root_quat_w(self) -> torch.Tensor:
@@ -671,7 +670,7 @@ class MotionCommand(CommandTermBase):
     @property
     def object_pos_w(self) -> torch.Tensor:
         # Applies env origins, but ideally we should rely on the simulator
-        return self.motion.object_pos_w[self.time_steps] + self._env.simulator.scene.env_origins
+        return self.motion.object_pos_w[self.time_steps] + self._get_motion_env_origins()
 
     @property
     def object_quat_w(self) -> torch.Tensor:
@@ -802,7 +801,7 @@ class MotionCommand(CommandTermBase):
         times = (future_steps - self.time_steps.unsqueeze(1)).to(dtype=torch.float32) * self._env.dt
 
         target_body_pos = self.motion.body_pos_w[future_steps][:, :, self.tracked_body_indexes]
-        target_body_pos = target_body_pos + self._env.simulator.scene.env_origins[:, None, None, :]
+        target_body_pos = target_body_pos + self._get_motion_env_origins()[:, None, None, :]
         target_body_rot = self.motion.body_quat_w[future_steps][:, :, self.tracked_body_indexes]
 
         reference_body_pos = target_body_pos.roll(shifts=1, dims=1)
@@ -1044,7 +1043,7 @@ class MotionCommand(CommandTermBase):
             "Default-pose interpolation only supports IsaacSim; IsaacGym write_state_updates does not run FK."
         )
         env_id = 0
-        env_origin = simulator.scene.env_origins[env_id].to(self.device)
+        env_origin = self._get_motion_env_origins()[env_id].to(self.device)
 
         root_backup = simulator.robot_root_states[env_id].clone()
         dof_pos_backup = simulator.dof_pos[env_id].clone()
@@ -1103,6 +1102,21 @@ class MotionCommand(CommandTermBase):
         motion_tensor = torch.zeros(motion_shape, device=robot_tensor.device, dtype=robot_tensor.dtype)
         motion_tensor[..., self._joint_indexes_in_motion] = robot_tensor
         return motion_tensor
+
+    def _get_motion_env_origins(self) -> torch.Tensor:
+        """Select env origins for motion alignment (terrain-aligned when available)."""
+        terrain_manager = getattr(self._env, "terrain_manager", None)
+        if terrain_manager is None:
+            return self._env.simulator.scene.env_origins
+
+        terrain_state = terrain_manager.get_state("locomotion_terrain")
+        if terrain_state is None or not hasattr(terrain_state, "env_origins"):
+            return self._env.simulator.scene.env_origins
+
+        if getattr(terrain_state, "mesh_type", None) == "load_obj":
+            return terrain_state.env_origins
+
+        return self._env.simulator.scene.env_origins
 
     def _motion_state(self, idx: int, dtype: torch.dtype, device: torch.device) -> dict[str, torch.Tensor]:
         """Slice motion tensors at a given index into a state dict."""
