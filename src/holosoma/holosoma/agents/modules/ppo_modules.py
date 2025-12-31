@@ -126,8 +126,8 @@ class PPOCritic(nn.Module):
 
 
 class PPOActorEncoder(PPOActor):
-    def __init__(self, obs_dim_dict, module_config_dict, num_actions, init_noise_std):
-        super().__init__(obs_dim_dict, module_config_dict, num_actions, init_noise_std)
+    def __init__(self, obs_dim_dict, module_config_dict, num_actions, init_noise_std, history_length: dict[str, int]):
+        super().__init__(obs_dim_dict, module_config_dict, num_actions, init_noise_std, history_length)
         self.module_input_name = module_config_dict.layer_config.module_input_name
         self.encoder_input_name = module_config_dict.layer_config.encoder_input_name
 
@@ -159,8 +159,8 @@ class PPOActorEncoder(PPOActor):
 
 
 class PPOCriticEncoder(PPOCritic):
-    def __init__(self, obs_dim_dict, module_config_dict):
-        super().__init__(obs_dim_dict, module_config_dict)
+    def __init__(self, obs_dim_dict, module_config_dict, history_length: dict[str, int]):
+        super().__init__(obs_dim_dict, module_config_dict, history_length)
         self.module_input_name = module_config_dict.layer_config.module_input_name
         self.encoder_input_name = module_config_dict.layer_config.encoder_input_name
 

@@ -18,6 +18,7 @@ def setup_ppo_actor_module(
             module_config_dict=module_config,
             num_actions=num_actions,
             init_noise_std=init_noise_std,
+            history_length=history_length,
         ).to(device)
     if module_type == "MLP":
         return PPOActor(
@@ -42,6 +43,7 @@ def setup_ppo_critic_module(
         return PPOCriticEncoder(
             obs_dim_dict=obs_dim_dict,
             module_config_dict=module_config,
+            history_length=history_length,
         ).to(device)
     if module_type == "MLP":
         return PPOCritic(
