@@ -385,59 +385,6 @@ class IsaacSim(BaseSimulator):
             self._height_scanner = RayCaster(height_scanner_config)
             self.scene.sensors["height_scanner"] = self._height_scanner
 
-    def _add_debug_chessboard(self, bounds: np.ndarray | None) -> None:
-        """Add a visual-only chessboard at z=0 for alignment debugging."""
-        if bounds is None:
-            return
-        if not self.simulator_config.debug_viz:
-            return
-        if self.training_config.headless:
-            return
-        if self.sim.render_mode < self.sim.RenderMode.PARTIAL_RENDERING:
-            return
-
-        try:
-            import omni.usd
-            from pxr import Gf, UsdGeom
-        except Exception:
-            return
-
-        min_corner = np.asarray(bounds[0], dtype=np.float64)
-        max_corner = np.asarray(bounds[1], dtype=np.float64)
-        span = max_corner - min_corner
-        if span[0] <= 0.0 or span[1] <= 0.0:
-            return
-
-        tile_size = 1.0
-        max_tiles = 40
-        tiles_x = int(math.ceil(span[0] / tile_size))
-        tiles_y = int(math.ceil(span[1] / tile_size))
-        scale = max(tiles_x / max_tiles, tiles_y / max_tiles, 1.0)
-        if scale > 1.0:
-            tile_size *= scale
-            tiles_x = int(math.ceil(span[0] / tile_size))
-            tiles_y = int(math.ceil(span[1] / tile_size))
-
-        stage = omni.usd.get_context().get_stage()
-        root_path = "/World/ground_chessboard"
-        stage.DefinePrim(root_path, "Xform")
-
-        thickness = 0.02
-        z = thickness * 0.5
-        for ix in range(tiles_x):
-            x = min_corner[0] + (ix + 0.5) * tile_size
-            for iy in range(tiles_y):
-                y = min_corner[1] + (iy + 0.5) * tile_size
-                color = (0.0, 0.0, 0.0) if (ix + iy) % 2 == 0 else (1.0, 1.0, 1.0)
-                prim_path = f"{root_path}/tile_{ix}_{iy}"
-                prim = stage.DefinePrim(prim_path, "Cube")
-                xform = UsdGeom.Xformable(prim)
-                xform.AddTranslateOp().Set(Gf.Vec3d(x, y, z))
-                xform.AddScaleOp().Set(Gf.Vec3f(tile_size * 0.5, tile_size * 0.5, thickness * 0.5))
-                gprim = UsdGeom.Gprim(prim)
-                gprim.CreateDisplayColorAttr().Set([Gf.Vec3f(*color)])
-                gprim.CreateDisplayOpacityAttr().Set([1.0])
-
         # clone, filter, and replicate
         self.scene.clone_environments(copy_from_source=False)
 
@@ -493,6 +440,60 @@ class IsaacSim(BaseSimulator):
             color=(0.98, 0.95, 0.88),
         )
         light_config1.func("/World/DomeLight", light_config1, translation=(1, 0, 10))
+
+    def _add_debug_chessboard(self, bounds: np.ndarray | None) -> None:
+        """Add a visual-only chessboard at z=0 for alignment debugging."""
+        if bounds is None:
+            return
+        if not self.simulator_config.debug_viz:
+            return
+        if self.training_config.headless:
+            return
+        if self.sim.render_mode < self.sim.RenderMode.PARTIAL_RENDERING:
+            return
+
+        try:
+            import omni.usd
+            from pxr import Gf, UsdGeom
+        except Exception:
+            return
+
+        min_corner = np.asarray(bounds[0], dtype=np.float64)
+        max_corner = np.asarray(bounds[1], dtype=np.float64)
+        span = max_corner - min_corner
+        if span[0] <= 0.0 or span[1] <= 0.0:
+            return
+
+        tile_size = 1.0
+        max_tiles = 40
+        tiles_x = int(math.ceil(span[0] / tile_size))
+        tiles_y = int(math.ceil(span[1] / tile_size))
+        scale = max(tiles_x / max_tiles, tiles_y / max_tiles, 1.0)
+        if scale > 1.0:
+            tile_size *= scale
+            tiles_x = int(math.ceil(span[0] / tile_size))
+            tiles_y = int(math.ceil(span[1] / tile_size))
+
+        stage = omni.usd.get_context().get_stage()
+        root_path = "/World/ground_chessboard"
+        stage.DefinePrim(root_path, "Xform")
+
+        thickness = 0.02
+        z = thickness * 0.5
+        for ix in range(tiles_x):
+            x = min_corner[0] + (ix + 0.5) * tile_size
+            for iy in range(tiles_y):
+                y = min_corner[1] + (iy + 0.5) * tile_size
+                color = (0.0, 0.0, 0.0) if (ix + iy) % 2 == 0 else (1.0, 1.0, 1.0)
+                prim_path = f"{root_path}/tile_{ix}_{iy}"
+                prim = stage.DefinePrim(prim_path, "Cube")
+                xform = UsdGeom.Xformable(prim)
+                xform.AddTranslateOp().Set(Gf.Vec3d(x, y, z))
+                xform.AddScaleOp().Set(Gf.Vec3f(tile_size * 0.5, tile_size * 0.5, thickness * 0.5))
+                gprim = UsdGeom.Gprim(prim)
+                gprim.CreateDisplayColorAttr().Set([Gf.Vec3f(*color)])
+                gprim.CreateDisplayOpacityAttr().Set([1.0])
+
 
     def _get_base_body_name(self, preference_order: list[str]) -> str:
         """Get the base body name with fallback logic.
