@@ -442,7 +442,7 @@ class IsaacSim(BaseSimulator):
         light_config1.func("/World/DomeLight", light_config1, translation=(1, 0, 10))
 
     def _add_debug_grid(self, bounds: np.ndarray | None) -> None:
-        """Add a visual-only grid floor at z=0 for alignment debugging."""
+        """Add a visual-only checkerboard at z=0 for alignment debugging."""
         if bounds is None:
             return
         if not self.simulator_config.debug_viz:
@@ -465,82 +465,42 @@ class IsaacSim(BaseSimulator):
             return
 
         stage = omni.usd.get_context().get_stage()
-        root_path = "/World/ground_grid"
+        root_path = "/World/ground_chessboard"
         if stage.GetPrimAtPath(root_path).IsValid():
             return
         stage.DefinePrim(root_path, "Xform")
 
-        cell_size = 1.0
-        major_every = 5
-        max_lines = 200
-        length_x = span[0]
-        length_y = span[1]
-        if length_x <= 0.0 or length_y <= 0.0:
-            return
-
-        num_lines_x = int(math.ceil(length_x / cell_size)) + 1
-        num_lines_y = int(math.ceil(length_y / cell_size)) + 1
-        scale = max(num_lines_x / max_lines, num_lines_y / max_lines, 1.0)
+        tile_size = 1.0
+        max_tiles = 40
+        tiles_x = int(math.ceil(span[0] / tile_size))
+        tiles_y = int(math.ceil(span[1] / tile_size))
+        scale = max(tiles_x / max_tiles, tiles_y / max_tiles, 1.0)
         if scale > 1.0:
-            cell_size *= scale
-            num_lines_x = int(math.ceil(length_x / cell_size)) + 1
-            num_lines_y = int(math.ceil(length_y / cell_size)) + 1
+            tile_size *= scale
+            tiles_x = int(math.ceil(span[0] / tile_size))
+            tiles_y = int(math.ceil(span[1] / tile_size))
 
-        start_x = math.floor(min_corner[0] / cell_size) * cell_size
-        end_x = math.ceil(max_corner[0] / cell_size) * cell_size
-        start_y = math.floor(min_corner[1] / cell_size) * cell_size
-        end_y = math.ceil(max_corner[1] / cell_size) * cell_size
+        start_x = math.floor(min_corner[0] / tile_size) * tile_size
+        start_y = math.floor(min_corner[1] / tile_size) * tile_size
 
-        center_x = 0.5 * (start_x + end_x)
-        center_y = 0.5 * (start_y + end_y)
-        size_x = end_x - start_x
-        size_y = end_y - start_y
+        thickness = 0.02
+        z = thickness * 0.5
+        color_dark = (0.04, 0.18, 0.06)
+        color_light = (0.06, 0.22, 0.08)
 
-        base_thickness = 0.02
-        base_color = (0.92, 0.92, 0.92)
-        base_center = (center_x, center_y, -base_thickness * 0.5)
-
-        def _add_box(path: str, center: tuple[float, float, float], size: tuple[float, float, float], color):
-            prim = stage.DefinePrim(path, "Cube")
-            xform = UsdGeom.Xformable(prim)
-            xform.AddTranslateOp().Set(Gf.Vec3d(*center))
-            xform.AddScaleOp().Set(Gf.Vec3f(size[0] * 0.5, size[1] * 0.5, size[2] * 0.5))
-            gprim = UsdGeom.Gprim(prim)
-            gprim.CreateDisplayColorAttr().Set([Gf.Vec3f(*color)])
-            gprim.CreateDisplayOpacityAttr().Set([1.0])
-
-        _add_box(f"{root_path}/base", base_center, (size_x, size_y, base_thickness), base_color)
-
-        minor_color = (0.7, 0.7, 0.7)
-        major_color = (0.5, 0.5, 0.5)
-        minor_width = 0.01
-        major_width = 0.02
-        line_height = 0.003
-        line_z = line_height * 0.5 + 0.001
-
-        for ix in range(num_lines_x):
-            x = start_x + ix * cell_size
-            is_major = ix % major_every == 0
-            width = major_width if is_major else minor_width
-            color = major_color if is_major else minor_color
-            _add_box(
-                f"{root_path}/line_x_{ix}",
-                (x, center_y, line_z),
-                (width, size_y, line_height),
-                color,
-            )
-
-        for iy in range(num_lines_y):
-            y = start_y + iy * cell_size
-            is_major = iy % major_every == 0
-            width = major_width if is_major else minor_width
-            color = major_color if is_major else minor_color
-            _add_box(
-                f"{root_path}/line_y_{iy}",
-                (center_x, y, line_z),
-                (size_x, width, line_height),
-                color,
-            )
+        for ix in range(tiles_x):
+            x = start_x + (ix + 0.5) * tile_size
+            for iy in range(tiles_y):
+                y = start_y + (iy + 0.5) * tile_size
+                color = color_dark if (ix + iy) % 2 == 0 else color_light
+                prim_path = f"{root_path}/tile_{ix}_{iy}"
+                prim = stage.DefinePrim(prim_path, "Cube")
+                xform = UsdGeom.Xformable(prim)
+                xform.AddTranslateOp().Set(Gf.Vec3d(x, y, z))
+                xform.AddScaleOp().Set(Gf.Vec3f(tile_size * 0.5, tile_size * 0.5, thickness * 0.5))
+                gprim = UsdGeom.Gprim(prim)
+                gprim.CreateDisplayColorAttr().Set([Gf.Vec3f(*color)])
+                gprim.CreateDisplayOpacityAttr().Set([1.0])
 
 
     def _get_base_body_name(self, preference_order: list[str]) -> str:
