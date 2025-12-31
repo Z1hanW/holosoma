@@ -135,6 +135,18 @@ def motion_command(env: WholeBodyTrackingManager) -> torch.Tensor:
     return motion_command.command
 
 
+def motion_future_target_poses(
+    env: WholeBodyTrackingManager,
+    num_future_steps: int | None = None,
+    target_pose_type: str | None = None,
+) -> torch.Tensor:
+    motion_command = _get_motion_command_and_assert_type(env)
+    return motion_command.get_future_target_poses(
+        num_future_steps=num_future_steps,
+        target_pose_type=target_pose_type,
+    )
+
+
 def motion_ref_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     pos, _ = subtract_frame_transforms(

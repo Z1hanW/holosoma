@@ -12,7 +12,7 @@ def setup_ppo_actor_module(
     history_length: dict[str, int],
 ):
     module_type = module_config.type
-    if module_type in ["MLPEncoder", "CNNEncoder"]:
+    if module_type in ["MLPEncoder", "CNNEncoder", "TransformerEncoder"]:
         return PPOActorEncoder(
             obs_dim_dict=obs_dim_dict,
             module_config_dict=module_config,
@@ -38,7 +38,7 @@ def setup_ppo_critic_module(
     history_length: dict[str, int],
 ):
     module_type = module_config.type
-    if module_type in ["MLPEncoder", "CNNEncoder"]:
+    if module_type in ["MLPEncoder", "CNNEncoder", "TransformerEncoder"]:
         return PPOCriticEncoder(
             obs_dim_dict=obs_dim_dict,
             module_config_dict=module_config,

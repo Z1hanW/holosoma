@@ -125,3 +125,10 @@ class MotionConfig:
 
     # noise related
     noise_to_initial_pose: NoiseToInitialPoseConfig = field(default_factory=NoiseToInitialPoseConfig)
+
+    # future target pose (MotionTracking-style)
+    num_future_steps: int = 0
+    """Number of future motion steps to expose as target poses. Set to 0 to disable."""
+
+    target_pose_type: str | None = None
+    """Target pose encoding type (e.g., 'max-coords-future-rel' or 'max-coords-future-rel-with-time')."""

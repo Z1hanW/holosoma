@@ -1,5 +1,6 @@
 from dataclasses import replace
 
+from holosoma.config_types.algo import PPOModuleDictConfig
 from holosoma.config_types.experiment import ExperimentConfig, NightlyConfig, TrainingConfig
 from holosoma.config_values import (
     action,
@@ -70,6 +71,111 @@ g1_29dof_wbt = ExperimentConfig(
             "Episode/rew_motion_global_body_lin_vel": [0.30, "inf"],
             "Episode/rew_motion_global_body_ang_vel": [0.02, "inf"],
         },
+    ),
+)
+
+g1_29dof_wbt_motion_tracking = replace(
+    g1_29dof_wbt,
+    training=replace(
+        g1_29dof_wbt.training,
+        name="g1_29dof_wbt_motion_tracking_manager",
+    ),
+    observation=observation.g1_29dof_wbt_observation_motion_tracking,
+    command=command.g1_29dof_wbt_command_motion_tracking,
+)
+
+_motion_tracking_actor_inputs = ["actor_obs", "motion_future_target_poses"]
+_motion_tracking_critic_inputs = ["critic_obs", "motion_future_target_poses"]
+
+_motion_tracking_mlp_layer = replace(
+    algo.ppo.config.module_dict.actor.layer_config,
+    module_input_name=("actor_obs",),
+    encoder_input_name="motion_future_target_poses",
+    encoder_hidden_dims=[512, 256],
+    encoder_output_dim=256,
+)
+
+_motion_tracking_critic_mlp_layer = replace(
+    algo.ppo.config.module_dict.critic.layer_config,
+    module_input_name=("critic_obs",),
+    encoder_input_name="motion_future_target_poses",
+    encoder_hidden_dims=[512, 256],
+    encoder_output_dim=256,
+)
+
+_motion_tracking_mlp_module_dict = PPOModuleDictConfig(
+    actor=replace(
+        algo.ppo.config.module_dict.actor,
+        type="MLPEncoder",
+        input_dim=_motion_tracking_actor_inputs,
+        layer_config=_motion_tracking_mlp_layer,
+    ),
+    critic=replace(
+        algo.ppo.config.module_dict.critic,
+        type="MLPEncoder",
+        input_dim=_motion_tracking_critic_inputs,
+        layer_config=_motion_tracking_critic_mlp_layer,
+    ),
+)
+
+_motion_tracking_transformer_layer = replace(
+    algo.ppo.config.module_dict.actor.layer_config,
+    module_input_name=("actor_obs",),
+    encoder_input_name="motion_future_target_poses",
+    encoder_num_steps=5,
+    transformer_latent_dim=256,
+    transformer_num_layers=2,
+    transformer_num_heads=2,
+    transformer_ff_dim=512,
+    transformer_dropout=0.0,
+    transformer_pooling="mean",
+    hidden_dims=[1024, 512],
+)
+
+_motion_tracking_transformer_critic_layer = replace(
+    algo.ppo.config.module_dict.critic.layer_config,
+    module_input_name=("critic_obs",),
+    encoder_input_name="motion_future_target_poses",
+    encoder_num_steps=5,
+    transformer_latent_dim=256,
+    transformer_num_layers=2,
+    transformer_num_heads=2,
+    transformer_ff_dim=512,
+    transformer_dropout=0.0,
+    transformer_pooling="mean",
+    hidden_dims=[1024, 512],
+)
+
+_motion_tracking_transformer_module_dict = PPOModuleDictConfig(
+    actor=replace(
+        algo.ppo.config.module_dict.actor,
+        type="TransformerEncoder",
+        input_dim=_motion_tracking_actor_inputs,
+        layer_config=_motion_tracking_transformer_layer,
+    ),
+    critic=replace(
+        algo.ppo.config.module_dict.critic,
+        type="TransformerEncoder",
+        input_dim=_motion_tracking_critic_inputs,
+        layer_config=_motion_tracking_transformer_critic_layer,
+    ),
+)
+
+g1_29dof_wbt_motion_tracking_mlp_encoder = replace(
+    g1_29dof_wbt_motion_tracking,
+    observation=observation.g1_29dof_wbt_observation_motion_tracking_split,
+    algo=replace(
+        algo.ppo,
+        config=replace(algo.ppo.config, module_dict=_motion_tracking_mlp_module_dict),
+    ),
+)
+
+g1_29dof_wbt_motion_tracking_transformer = replace(
+    g1_29dof_wbt_motion_tracking,
+    observation=observation.g1_29dof_wbt_observation_motion_tracking_split,
+    algo=replace(
+        algo.ppo,
+        config=replace(algo.ppo.config, module_dict=_motion_tracking_transformer_module_dict),
     ),
 )
 
@@ -181,6 +287,9 @@ g1_29dof_wbt_fast_sac_w_object = replace(
 
 __all__ = [
     "g1_29dof_wbt",
+    "g1_29dof_wbt_motion_tracking",
+    "g1_29dof_wbt_motion_tracking_mlp_encoder",
+    "g1_29dof_wbt_motion_tracking_transformer",
     "g1_29dof_wbt_fast_sac",
     "g1_29dof_wbt_fast_sac_w_object",
     "g1_29dof_wbt_w_object",

@@ -16,10 +16,12 @@ from holosoma.utils.path import resolve_data_file_path
 from holosoma.utils.rotations import (
     get_euler_xyz,
     quat_apply,
+    quat_conjugate,
     quat_error_magnitude,
     quat_from_euler_xyz,
     quat_inverse,
     quat_mul,
+    quaternion_to_matrix,
     slerp,
     yaw_quat,
 )
@@ -329,6 +331,7 @@ class MotionCommand(CommandTermBase):
         # 5. metrics
         self.metrics: dict[str, torch.Tensor] = {}
 
+        self._configure_target_pose_settings()
         self.init_buffers()
 
         # 6. visualization markers for isaacsim
@@ -472,6 +475,8 @@ class MotionCommand(CommandTermBase):
             # 4.3 set the object states in simulator
             self._env.simulator.set_actor_states([self.object_name], env_ids, object_states)
 
+        self._update_future_target_poses()
+
     def step(self) -> None:
         """called in _update_tasks_callback of the environment. (after compute_reward, before compute_observations)"""
         # 0. update time steps, all motion joint/body poses are updated automatically with the time steps.
@@ -540,6 +545,8 @@ class MotionCommand(CommandTermBase):
         ### 1.3 update the adaptive timesteps sampler
         if self.motion_cfg.use_adaptive_timesteps_sampler:
             self.adaptive_timesteps_sampler.update_bin_failed_count()
+
+        self._update_future_target_poses()
 
     @property
     def command(self) -> torch.Tensor:
@@ -703,6 +710,13 @@ class MotionCommand(CommandTermBase):
         )  # type: ignore[arg-type]
         self.body_quat_relative_w[:, :, 0] = 1.0
 
+        if self.num_future_steps > 0 and self.target_pose_type is not None:
+            self.future_target_poses = torch.zeros(
+                self.num_envs,
+                self.num_future_steps * self.num_obs_per_target_pose,
+                device=self.device,
+            )
+
         if self.motion_cfg.use_adaptive_timesteps_sampler:
             self.adaptive_timesteps_sampler.init_buffers()
 
@@ -746,6 +760,118 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     ## Internal helpers
     #########################################################################################
+    def _configure_target_pose_settings(self) -> None:
+        self.num_future_steps = int(self.motion_cfg.num_future_steps)
+        self.target_pose_type = self.motion_cfg.target_pose_type
+        self.num_obs_per_target_pose = 0
+        self.future_target_poses: torch.Tensor | None = None
+
+        if self.num_future_steps <= 0:
+            return
+        if self.target_pose_type is None:
+            raise ValueError("target_pose_type must be set when num_future_steps > 0.")
+
+        include_time = self._target_pose_includes_time(self.target_pose_type)
+        num_bodies = len(self.motion_cfg.body_names_to_track)
+        self.num_obs_per_target_pose = num_bodies * 18 + (1 if include_time else 0)
+
+    def _target_pose_includes_time(self, target_pose_type: str) -> bool:
+        if target_pose_type == "max-coords-future-rel":
+            return False
+        if target_pose_type == "max-coords-future-rel-with-time":
+            return True
+        raise ValueError(f"Unknown target_pose_type '{target_pose_type}'.")
+
+    def _update_future_target_poses(self) -> None:
+        if self.num_future_steps <= 0 or self.target_pose_type is None:
+            return
+        if self.future_target_poses is None:
+            return
+        self.future_target_poses[:] = self._compute_future_target_poses(
+            num_future_steps=self.num_future_steps,
+            target_pose_type=self.target_pose_type,
+        )
+
+    def _compute_future_target_poses(self, num_future_steps: int, target_pose_type: str) -> torch.Tensor:
+        include_time = self._target_pose_includes_time(target_pose_type)
+
+        time_offsets = torch.arange(1, num_future_steps + 1, device=self.device, dtype=torch.long)
+        future_steps = self.time_steps.unsqueeze(1) + time_offsets.unsqueeze(0)
+        future_steps = torch.clamp(future_steps, max=self.motion.time_step_total - 1)
+
+        times = (future_steps - self.time_steps.unsqueeze(1)).to(dtype=torch.float32) * self._env.dt
+
+        target_body_pos = self.motion.body_pos_w[future_steps][:, :, self.tracked_body_indexes]
+        target_body_pos = target_body_pos + self._env.simulator.scene.env_origins[:, None, None, :]
+        target_body_rot = self.motion.body_quat_w[future_steps][:, :, self.tracked_body_indexes]
+
+        reference_body_pos = target_body_pos.roll(shifts=1, dims=1)
+        reference_body_pos[:, 0] = self.body_pos_w
+        reference_body_rot = target_body_rot.roll(shifts=1, dims=1)
+        reference_body_rot[:, 0] = self.body_quat_w
+
+        reference_root_pos = reference_body_pos[:, :, 0, :]
+        reference_root_rot = reference_body_rot[:, :, 0, :]
+
+        heading_quat = yaw_quat(reference_root_rot, w_last=True)
+        heading_inv = quat_inverse(heading_quat, w_last=True)
+        heading_inv = heading_inv.unsqueeze(2).expand(-1, -1, target_body_pos.shape[2], -1)
+
+        target_rel_body_pos = target_body_pos - reference_body_pos
+        target_body_pos_rel_root = target_body_pos - reference_root_pos.unsqueeze(2)
+
+        flat_heading_inv = heading_inv.reshape(-1, 4)
+        flat_rel_body_pos = target_rel_body_pos.reshape(-1, 3)
+        flat_body_pos = target_body_pos_rel_root.reshape(-1, 3)
+
+        flat_rel_body_pos = quat_apply(flat_heading_inv, flat_rel_body_pos, w_last=True)
+        flat_body_pos = quat_apply(flat_heading_inv, flat_body_pos, w_last=True)
+
+        rel_body_pos = flat_rel_body_pos.reshape(
+            self.num_envs, num_future_steps, target_body_pos.shape[2] * 3
+        )
+        body_pos = flat_body_pos.reshape(
+            self.num_envs, num_future_steps, target_body_pos.shape[2] * 3
+        )
+
+        rel_body_rot = quat_mul(
+            quat_conjugate(reference_body_rot, w_last=True),
+            target_body_rot,
+            w_last=True,
+        )
+        body_rot = quat_mul(heading_inv, target_body_rot, w_last=True)
+
+        rel_body_rot_mat = quaternion_to_matrix(rel_body_rot.reshape(-1, 4), w_last=True)
+        body_rot_mat = quaternion_to_matrix(body_rot.reshape(-1, 4), w_last=True)
+
+        rel_body_rot_obs = rel_body_rot_mat[..., :2].reshape(
+            self.num_envs, num_future_steps, target_body_pos.shape[2] * 6
+        )
+        body_rot_obs = body_rot_mat[..., :2].reshape(
+            self.num_envs, num_future_steps, target_body_pos.shape[2] * 6
+        )
+
+        obs = torch.cat((rel_body_pos, body_pos, rel_body_rot_obs, body_rot_obs), dim=-1)
+
+        if include_time:
+            obs = torch.cat((obs, times.unsqueeze(-1)), dim=-1)
+
+        return obs.reshape(self.num_envs, -1)
+
+    def get_future_target_poses(
+        self, *, num_future_steps: int | None = None, target_pose_type: str | None = None
+    ) -> torch.Tensor:
+        if num_future_steps is None and target_pose_type is None:
+            if self.future_target_poses is None:
+                return torch.zeros(self.num_envs, 0, device=self.device)
+            return self.future_target_poses
+
+        resolved_steps = self.num_future_steps if num_future_steps is None else num_future_steps
+        resolved_type = self.target_pose_type if target_pose_type is None else target_pose_type
+        if resolved_steps <= 0 or resolved_type is None:
+            return torch.zeros(self.num_envs, 0, device=self.device)
+        return self._compute_future_target_poses(resolved_steps, resolved_type)
+
     def _maybe_add_default_pose_transition(self, *, prepend: bool) -> None:
         """Shared path for optionally inserting default-pose interpolation before/after the clip."""
         enabled = self.motion_cfg.enable_default_pose_prepend if prepend else self.motion_cfg.enable_default_pose_append

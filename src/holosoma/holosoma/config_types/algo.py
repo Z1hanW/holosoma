@@ -69,6 +69,30 @@ class LayerConfig:
     module_input_name: tuple[str, ...] = ()
     """Input names for module. Only used for encoder modules."""
 
+    encoder_num_steps: int | None = None
+    """Sequence length for transformer-style encoders."""
+
+    encoder_obs_dim: int | None = None
+    """Per-step feature dimension for transformer-style encoders."""
+
+    transformer_latent_dim: int = 256
+    """Latent dimension for transformer-style encoders."""
+
+    transformer_num_layers: int = 2
+    """Number of transformer encoder layers."""
+
+    transformer_num_heads: int = 2
+    """Number of attention heads in the transformer encoder."""
+
+    transformer_ff_dim: int = 512
+    """Feed-forward dimension inside transformer encoder layers."""
+
+    transformer_dropout: float = 0.0
+    """Dropout for transformer encoder layers."""
+
+    transformer_pooling: str = "first"
+    """Pooling for transformer encoder output: 'first' or 'mean'."""
+
 
 @dataclass(frozen=True)
 class ModuleConfig:

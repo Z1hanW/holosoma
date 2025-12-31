@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from holosoma.config_types.algo import LayerConfig, ModuleConfig
@@ -126,6 +127,77 @@ class CNNWrapper(nn.Module):
             x = x.permute(0, 2, 1)
 
         return x
+
+
+class PositionalEncoding(nn.Module):
+    """Sinusoidal positional encoding for transformer inputs."""
+
+    def __init__(self, d_model: int, max_len: int = 5000):
+        super().__init__()
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-torch.log(torch.tensor(10000.0)) / d_model))
+        pe = torch.zeros(max_len, d_model)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer("pe", pe.unsqueeze(0), persistent=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.pe[:, : x.shape[1], : x.shape[2]]
+
+
+def _resolve_transformer_activation(name: str):
+    if not isinstance(name, str):
+        return "gelu"
+    lower = name.lower()
+    if lower in ("relu", "gelu"):
+        return lower
+    if lower == "elu":
+        return F.elu
+    if lower == "tanh":
+        return torch.tanh
+    return "gelu"
+
+
+class TargetPoseTransformer(nn.Module):
+    """Transformer encoder for flattened target-pose sequences."""
+
+    def __init__(
+        self,
+        obs_dim: int,
+        num_steps: int,
+        latent_dim: int,
+        num_layers: int,
+        num_heads: int,
+        ff_dim: int,
+        dropout: float,
+        activation: str,
+        pooling: str,
+    ):
+        super().__init__()
+        self.obs_dim = obs_dim
+        self.num_steps = num_steps
+        self.pooling = pooling
+        self.input_proj = nn.Linear(obs_dim, latent_dim)
+        self.positional_encoding = PositionalEncoding(latent_dim, max_len=num_steps)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=latent_dim,
+            nhead=num_heads,
+            dim_feedforward=ff_dim,
+            dropout=dropout,
+            activation=_resolve_transformer_activation(activation),
+            batch_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size = x.shape[0]
+        x = x.view(batch_size, self.num_steps, self.obs_dim)
+        x = self.input_proj(x)
+        x = self.positional_encoding(x)
+        x = self.encoder(x)
+        if self.pooling == "mean":
+            return x.mean(dim=1)
+        return x[:, 0, :]
 
 
 def build_mlp_layer(
@@ -391,6 +463,36 @@ class BaseModule(nn.Module):
                 layer_config.encoder_hidden_dims,
                 encoder_output_dim,
                 layer_config,
+            )
+            mlp_input_dim = sum(self.input_dim_dict[each_input] for each_input in layer_config.module_input_name)
+            self.module = build_mlp_layer(
+                mlp_input_dim + encoder_output_dim,
+                layer_config.hidden_dims,
+                self.output_dim,
+                layer_config,
+            )
+        elif layer_type == "TransformerEncoder":
+            if layer_config.encoder_num_steps is None:
+                raise ValueError("encoder_num_steps must be set for TransformerEncoder modules.")
+            encoder_input_dim = self.input_dim_dict[layer_config.encoder_input_name]
+            obs_dim = layer_config.encoder_obs_dim
+            if obs_dim is None:
+                if encoder_input_dim % layer_config.encoder_num_steps != 0:
+                    raise ValueError(
+                        "encoder_input_dim must be divisible by encoder_num_steps for TransformerEncoder modules."
+                    )
+                obs_dim = encoder_input_dim // layer_config.encoder_num_steps
+            encoder_output_dim = layer_config.encoder_output_dim or layer_config.transformer_latent_dim
+            self.encoder = TargetPoseTransformer(
+                obs_dim=obs_dim,
+                num_steps=layer_config.encoder_num_steps,
+                latent_dim=encoder_output_dim,
+                num_layers=layer_config.transformer_num_layers,
+                num_heads=layer_config.transformer_num_heads,
+                ff_dim=layer_config.transformer_ff_dim,
+                dropout=layer_config.transformer_dropout,
+                activation=layer_config.encoder_activation,
+                pooling=layer_config.transformer_pooling,
             )
             mlp_input_dim = sum(self.input_dim_dict[each_input] for each_input in layer_config.module_input_name)
             self.module = build_mlp_layer(

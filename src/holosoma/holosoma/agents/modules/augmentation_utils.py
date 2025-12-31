@@ -524,6 +524,14 @@ class SymmetryUtils:
         """
         return actions[..., self.joint_index_map] * self.sign_flip_mask
 
+    def mirror_obs_motion_future_target_poses(self, motion_future_target_poses: torch.Tensor) -> torch.Tensor:
+        """Pass-through for future target poses.
+
+        This observation is a flattened multi-step target pose buffer. Mirroring it
+        requires a per-body mapping, so we keep it unchanged for now.
+        """
+        return motion_future_target_poses
+
     def mirror_obs_ee_apply_force(self, ee_apply_force: torch.Tensor) -> torch.Tensor:
         """Mirrors the end-effector applied forces in base frame.
 
