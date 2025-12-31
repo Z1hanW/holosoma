@@ -18,6 +18,12 @@ def _find_input_dim_from_module(module: torch.nn.Module) -> int:
 
     Tries multiple strategies to find the first Linear layer's input features.
     """
+    # Strategy 0: PPO-style actor/critic with BaseModule input_dim
+    if hasattr(module, "actor_module") and hasattr(module.actor_module, "input_dim"):
+        return module.actor_module.input_dim
+    if hasattr(module, "critic_module") and hasattr(module.critic_module, "input_dim"):
+        return module.critic_module.input_dim
+
     # Strategy 1: PPO-style - actor_module.module (torch.nn.Sequential)
     if hasattr(module, "actor_module") and hasattr(module.actor_module, "module"):
         core_model = module.actor_module.module
