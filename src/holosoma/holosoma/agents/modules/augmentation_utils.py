@@ -524,6 +524,20 @@ class SymmetryUtils:
         """
         return actions[..., self.joint_index_map] * self.sign_flip_mask
 
+    def _mirror_vec3_flat(self, vec: torch.Tensor) -> torch.Tensor:
+        if vec.shape[-1] % 3 != 0:
+            raise ValueError("Expected last dim to be multiple of 3 for vec3 mirroring.")
+        reshaped = vec.view(*vec.shape[:-1], -1, 3)
+        reshaped[..., 1] = -reshaped[..., 1]
+        return reshaped.view(vec.shape)
+
+    def _mirror_mat3x2_flat(self, mat: torch.Tensor) -> torch.Tensor:
+        if mat.shape[-1] % 6 != 0:
+            raise ValueError("Expected last dim to be multiple of 6 for 3x2 matrix mirroring.")
+        reshaped = mat.view(*mat.shape[:-1], -1, 3, 2)
+        reshaped[..., 1, :] = -reshaped[..., 1, :]
+        return reshaped.view(mat.shape)
+
     def mirror_obs_motion_command(self, motion_command: torch.Tensor) -> torch.Tensor:
         """Mirrors the motion command ([qpos, qvel]) with joint mapping and sign flips."""
         total_dim = motion_command.shape[-1]
@@ -535,6 +549,27 @@ class SymmetryUtils:
         dof_pos = dof_pos[..., self.joint_index_map] * self.sign_flip_mask
         dof_vel = dof_vel[..., self.joint_index_map] * self.sign_flip_mask
         return torch.cat([dof_pos, dof_vel], dim=-1)
+
+    def mirror_obs_motion_ref_pos_b(self, motion_ref_pos_b: torch.Tensor) -> torch.Tensor:
+        return self._mirror_vec3_flat(motion_ref_pos_b)
+
+    def mirror_obs_motion_ref_ori_b(self, motion_ref_ori_b: torch.Tensor) -> torch.Tensor:
+        return self._mirror_mat3x2_flat(motion_ref_ori_b)
+
+    def mirror_obs_robot_body_pos_b(self, robot_body_pos_b: torch.Tensor) -> torch.Tensor:
+        return self._mirror_vec3_flat(robot_body_pos_b)
+
+    def mirror_obs_robot_body_ori_b(self, robot_body_ori_b: torch.Tensor) -> torch.Tensor:
+        return self._mirror_mat3x2_flat(robot_body_ori_b)
+
+    def mirror_obs_obj_pos_b(self, obj_pos_b: torch.Tensor) -> torch.Tensor:
+        return self._mirror_vec3_flat(obj_pos_b)
+
+    def mirror_obs_obj_ori_b(self, obj_ori_b: torch.Tensor) -> torch.Tensor:
+        return self._mirror_mat3x2_flat(obj_ori_b)
+
+    def mirror_obs_obj_lin_vel_b(self, obj_lin_vel_b: torch.Tensor) -> torch.Tensor:
+        return self._mirror_vec3_flat(obj_lin_vel_b)
 
     def mirror_obs_motion_future_target_poses(self, motion_future_target_poses: torch.Tensor) -> torch.Tensor:
         """Pass-through for future target poses.
