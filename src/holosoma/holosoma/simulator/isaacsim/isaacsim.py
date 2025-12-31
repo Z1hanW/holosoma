@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import math
 import copy
 import os
 import xml.etree.ElementTree as ET
@@ -8,6 +9,7 @@ from typing import Any
 
 import pathlib
 import trimesh
+import numpy as np
 
 from holosoma.config_types.full_sim import FullSimConfig
 import isaaclab.sim as sim_utils
@@ -346,6 +348,7 @@ class IsaacSim(BaseSimulator):
             terrain_config.env_spacing = self.scene.cfg.env_spacing
             terrain_config.class_type(terrain_config)
             global_collision_prims.append(terrain_config.prim_path)
+            self._add_debug_chessboard(terrain_state.mesh.bounds if terrain_state.mesh is not None else None)
         elif terrain_state.mesh_type in ["trimesh", "load_obj"]:
             self.terrain = self.terrain_manager.get_state("locomotion_terrain").terrain
             visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 0.0))
@@ -364,6 +367,7 @@ class IsaacSim(BaseSimulator):
             )
             global_collision_prims.append(terrain_prim_path)
             print("[INFO] Successfully created custom terrain mesh")
+            self._add_debug_chessboard(self.terrain.mesh.bounds if self.terrain is not None else None)
         else:
             raise ValueError(f"Unsupported terrain mesh type: {terrain_state.mesh_type}")
 
@@ -380,6 +384,59 @@ class IsaacSim(BaseSimulator):
         if height_scanner_config:
             self._height_scanner = RayCaster(height_scanner_config)
             self.scene.sensors["height_scanner"] = self._height_scanner
+
+    def _add_debug_chessboard(self, bounds: np.ndarray | None) -> None:
+        """Add a visual-only chessboard at z=0 for alignment debugging."""
+        if bounds is None:
+            return
+        if not self.simulator_config.debug_viz:
+            return
+        if self.training_config.headless:
+            return
+        if self.sim.render_mode < self.sim.RenderMode.PARTIAL_RENDERING:
+            return
+
+        try:
+            import omni.usd
+            from pxr import Gf, UsdGeom
+        except Exception:
+            return
+
+        min_corner = np.asarray(bounds[0], dtype=np.float64)
+        max_corner = np.asarray(bounds[1], dtype=np.float64)
+        span = max_corner - min_corner
+        if span[0] <= 0.0 or span[1] <= 0.0:
+            return
+
+        tile_size = 1.0
+        max_tiles = 40
+        tiles_x = int(math.ceil(span[0] / tile_size))
+        tiles_y = int(math.ceil(span[1] / tile_size))
+        scale = max(tiles_x / max_tiles, tiles_y / max_tiles, 1.0)
+        if scale > 1.0:
+            tile_size *= scale
+            tiles_x = int(math.ceil(span[0] / tile_size))
+            tiles_y = int(math.ceil(span[1] / tile_size))
+
+        stage = omni.usd.get_context().get_stage()
+        root_path = "/World/ground_chessboard"
+        stage.DefinePrim(root_path, "Xform")
+
+        thickness = 0.02
+        z = thickness * 0.5
+        for ix in range(tiles_x):
+            x = min_corner[0] + (ix + 0.5) * tile_size
+            for iy in range(tiles_y):
+                y = min_corner[1] + (iy + 0.5) * tile_size
+                color = (0.0, 0.0, 0.0) if (ix + iy) % 2 == 0 else (1.0, 1.0, 1.0)
+                prim_path = f"{root_path}/tile_{ix}_{iy}"
+                prim = stage.DefinePrim(prim_path, "Cube")
+                xform = UsdGeom.Xformable(prim)
+                xform.AddTranslateOp().Set(Gf.Vec3d(x, y, z))
+                xform.AddScaleOp().Set(Gf.Vec3f(tile_size * 0.5, tile_size * 0.5, thickness * 0.5))
+                gprim = UsdGeom.Gprim(prim)
+                gprim.CreateDisplayColorAttr().Set([Gf.Vec3f(*color)])
+                gprim.CreateDisplayOpacityAttr().Set([1.0])
 
         # clone, filter, and replicate
         self.scene.clone_environments(copy_from_source=False)
