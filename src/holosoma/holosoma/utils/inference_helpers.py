@@ -18,6 +18,10 @@ def _find_input_dim_from_module(module: torch.nn.Module) -> int:
 
     Tries multiple strategies to find the first Linear layer's input features.
     """
+    # Strategy 0: Modules exposing an explicit input_dim
+    if hasattr(module, "input_dim"):
+        return module.input_dim
+
     # Strategy 0: PPO-style actor/critic with BaseModule input_dim
     if hasattr(module, "actor_module") and hasattr(module.actor_module, "input_dim"):
         return module.actor_module.input_dim
@@ -41,6 +45,24 @@ def _find_input_dim_from_module(module: torch.nn.Module) -> int:
             return submodule.in_features
 
     raise ValueError(f"Cannot determine input dimension from module: {type(module)}")
+
+
+def _infer_actor_input_dim(actor_wrapper: object) -> int:
+    """Best-effort input dimension inference for actor wrappers."""
+    candidates = [actor_wrapper, getattr(actor_wrapper, "actor", None)]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        if hasattr(candidate, "actor_module") and hasattr(candidate.actor_module, "input_dim"):
+            return candidate.actor_module.input_dim
+        if hasattr(candidate, "input_dim"):
+            return candidate.input_dim
+    # Fallback to module inspection
+    if isinstance(actor_wrapper, torch.nn.Module):
+        return _find_input_dim_from_module(actor_wrapper)
+    if hasattr(actor_wrapper, "actor") and isinstance(actor_wrapper.actor, torch.nn.Module):
+        return _find_input_dim_from_module(actor_wrapper.actor)
+    raise ValueError(f"Cannot determine actor input dimension from wrapper: {type(actor_wrapper)}")
 
 
 def _extract_actor_model_and_input_dim(actor_wrapper) -> Tuple[torch.nn.Module, int]:
@@ -113,7 +135,7 @@ def export_policy_as_onnx(wrapper, onnx_file_path: str, example_obs_dict):
         verbose=False,
         input_names=["actor_obs"],  # Specify the input names
         output_names=["action"],  # Name the output
-        opset_version=13,
+        opset_version=14,
         dynamo=False,
     )
 
@@ -140,7 +162,7 @@ def export_multi_agent_decouple_policy_as_onnx(wrapper, path, exported_policy_na
         verbose=False,
         input_names=[f"actor_obs_{body_key}" for body_key in body_keys],
         output_names=["action"],
-        opset_version=13,
+        opset_version=14,
         dynamo=False,
     )
 
@@ -150,7 +172,8 @@ class _OnnxMotionPolicyExporter(torch.nn.Module):
         super().__init__()
         self.device = device
         # Extract the underlying actor model and input dimension generically
-        actor_model, self.input_dim = _extract_actor_model_and_input_dim(actor)
+        actor_model, _ = _extract_actor_model_and_input_dim(actor)
+        self.input_dim = _infer_actor_input_dim(actor)
         # Wrap the actor to handle different return signatures
         self._wrapped_actor = self._create_actor_wrapper(actor_model)
 
@@ -214,7 +237,7 @@ class _OnnxMotionPolicyExporter(torch.nn.Module):
             (obs, time_step),
             onnx_file_path,
             export_params=True,
-            opset_version=13,
+            opset_version=14,
             verbose=False,
             input_names=["obs", "time_step"],
             output_names=["actions", "joint_pos", "joint_vel", "ref_pos_xyz", "ref_quat_xyzw"],
