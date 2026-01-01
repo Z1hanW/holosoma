@@ -78,28 +78,15 @@ class Terrain(TerrainInterface):
             f"[INFO] Loaded terrain mesh from obj file with {len(base.vertices)} vertices and {len(base.faces)} faces"
         )
 
-        gap = 1e-4  # keeps tiles "kissing" without intersecting
-        bounds = base.bounds.astype(np.float64)
-        min_corner, max_corner = bounds
-        span = max_corner - min_corner
-        spacing_scale = max(float(getattr(self._cfg, "obj_tile_spacing_scale", 1.0)), 1.0)
-        stride = span * spacing_scale + gap
-        base_center_xy = (min_corner[:2] + max_corner[:2]) * 0.5
-        base_height = float(max_corner[2])
+        gap = 1e-4  # keeps tiles “kissing” without intersecting
+        stride = (base.bounds[1] - base.bounds[0]) + gap
 
         tiles = []
         for r in range(self._num_rows):
             for c in range(self._num_cols):
                 tile = base.copy()
-                # Original convention: col->x and row->y.
-                tile_offset = np.array([c * stride[0], r * stride[1], 0.0], dtype=np.float64)
-                tile.apply_translation(tile_offset)
+                tile.apply_translation([c * stride[0], r * stride[1], 0.0])
                 tiles.append(tile)
-                if not hasattr(self, "_load_obj_origin_grid"):
-                    self._load_obj_origin_grid = np.zeros((self._num_rows, self._num_cols, 3), dtype=np.float32)
-                self._load_obj_origin_grid[r, c, 0] = base_center_xy[0] + tile_offset[0]
-                self._load_obj_origin_grid[r, c, 1] = base_center_xy[1] + tile_offset[1]
-                self._load_obj_origin_grid[r, c, 2] = base_height
 
         return trimesh.util.concatenate(tiles)
 
@@ -154,19 +141,8 @@ class Terrain(TerrainInterface):
     def sample_env_origins(self) -> np.ndarray:
         if self._type == "load_obj":
             origin_grid = self._get_load_obj_env_origin_grid()
-            flat_origins = origin_grid.reshape(-1, 3)
-            num_tiles = flat_origins.shape[0]
-            if num_tiles == 0:
-                raise ValueError("OBJ terrain tile grid is empty; check num_rows/num_cols configuration.")
-
-            env_ids = np.arange(self._num_robots, dtype=np.int64)
-            if self._cfg.spawn.randomize_tiles and num_tiles >= self._num_robots:
-                tile_ids = np.random.permutation(num_tiles)[: self._num_robots]
-            else:
-                tile_ids = np.mod(env_ids, num_tiles)
-            return flat_origins[tile_ids]
-
-        origin_grid = self._env_origins
+        else:
+            origin_grid = self._env_origins
         terrain_levels = np.random.randint(0, self._num_rows, (self._num_robots,))
         terrain_types = np.floor_divide(
             np.arange(self._num_robots),

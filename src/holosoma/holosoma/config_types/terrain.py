@@ -199,9 +199,6 @@ class TerrainTermCfg:
     obj_file_path: str = ""
     """Path to OBJ file for custom terrain mesh."""
 
-    obj_tile_spacing_scale: float = 1.0
-    """Spacing multiplier for tiling OBJ meshes (>=1.0 increases margins between tiles)."""
-
     scale_factor: float = 1.0
     """Use for performance to scale border_size, terrain_length, terrain_width, num_ros and num_cols."""
 

@@ -15,7 +15,6 @@ python src/holosoma/holosoma/replay.py \
   --terrain.terrain-term.obj-file-path src/holosoma_retargeting/demo_data/far_robot/far_robot/stairs.obj \
   --terrain.terrain-term.num_rows=32 \
   --terrain.terrain-term.num_cols=32 \
-  --terrain.terrain-term.obj_tile_spacing_scale=1.0 \
   --terrain.spawn.randomize_tiles=False \
   --terrain.spawn.xy_offset_range=0 \
   --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale=0 \

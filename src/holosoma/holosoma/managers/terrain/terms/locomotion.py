@@ -115,22 +115,13 @@ class TerrainLocomotion(TerrainTermBase):
         """
         self._custom_origins = True
 
-        terrain_type = getattr(self.terrain, "_type", None)
-        if self._cfg.spawn.randomize_tiles or terrain_type == "load_obj":
-            # Training mode: random terrain tiles for curriculum learning.
-            # For load_obj, always keep per-env tile alignment (deterministic when randomize_tiles=False).
+        if self._cfg.spawn.randomize_tiles:
+            # Training mode: random terrain tiles for curriculum learning
             self._env_origins[:] = torch.from_numpy(self.terrain.sample_env_origins()).to(self.device).to(torch.float)
-            return
-
-        # Eval mode: all robots at tile (0,0) for deterministic evaluation
-        if hasattr(self.terrain, "_env_origins"):
-            origin_grid = self.terrain._env_origins
-        elif hasattr(self.terrain, "_get_load_obj_env_origin_grid"):
-            origin_grid = self.terrain._get_load_obj_env_origin_grid()
         else:
-            raise AttributeError("Terrain does not provide env origin grid for deterministic evaluation.")
-        origin_0_0 = torch.from_numpy(origin_grid[0, 0]).to(self.device).to(torch.float)
-        self._env_origins[:] = origin_0_0  # Broadcast to all robots
+            # Eval mode: all robots at tile (0,0) for deterministic evaluation
+            origin_0_0 = torch.from_numpy(self.terrain._env_origins[0, 0]).to(self.device).to(torch.float)
+            self._env_origins[:] = origin_0_0  # Broadcast to all robots
 
     def _init_base_height_points(self):
         """Returns points at which the height measurments are sampled (in base frame)
