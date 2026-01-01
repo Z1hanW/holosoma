@@ -91,8 +91,8 @@ class Terrain(TerrainInterface):
         for r in range(self._num_rows):
             for c in range(self._num_cols):
                 tile = base.copy()
-                # Align row->x and col->y with heightfield terrain convention.
-                tile_offset = np.array([r * stride[0], c * stride[1], 0.0], dtype=np.float64)
+                # Original convention: col->x and row->y.
+                tile_offset = np.array([c * stride[0], r * stride[1], 0.0], dtype=np.float64)
                 tile.apply_translation(tile_offset)
                 tiles.append(tile)
                 if not hasattr(self, "_load_obj_origin_grid"):
