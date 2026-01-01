@@ -8,10 +8,7 @@ python src/holosoma/holosoma/train_agent.py \
   --command.setup_terms.motion_command.params.motion_config.target_pose_type=max-coords-future-rel-with-time \
   --algo.config.module_dict.actor.layer_config.encoder_num_steps=10 \
   --algo.config.module_dict.critic.layer_config.encoder_num_steps=10 \
-  terrain:terrain-load-obj \
-  --terrain.terrain-term.obj-file-path=src/holosoma_retargeting/demo_data/far_robot/far_robot/stairs.obj \
-  --terrain.terrain_term.num_rows=2 \
-  --terrain.terrain_term.num_cols=2 \
+  --robot.object.object_urdf_path=src/holosoma_retargeting/demo_data/far_robot/far_robot/stairs.urdf \
   --command.setup_terms.motion_command.params.motion_config.motion_file=src/holosoma_retargeting/converted_res/object_interaction/far_robot_mj.npz \
   --randomization.setup_terms.push_randomizer_state.params.enabled=False \
   logger:wandb \
