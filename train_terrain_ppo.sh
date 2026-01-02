@@ -1,10 +1,11 @@
-python src/holosoma/holosoma/train_agent.py \
+CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-motion-tracking-transformer \
-  --training.num_envs=1024 \
+  --training.num_envs=8192 \
   \
   --algo.config.actor_learning_rate=7e-5 \
   --algo.config.critic_learning_rate=7e-5 \
-  --algo.config.num_steps_per_env=36 \
+  --algo.config.module_dict.actor.layer_config.encoder_num_steps=10 \
+  --algo.config.module_dict.critic.layer_config.encoder_num_steps=10 \
   --algo.config.module_dict.actor.min_noise_std=0.10 \
   --algo.config.save_interval=100 \
   \
@@ -18,6 +19,8 @@ python src/holosoma/holosoma/train_agent.py \
   --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob=0.05 \
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_append=False \
   --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s=0 \
+  --command.setup_terms.motion_command.params.motion_config.num_future_steps=10 \
+  --command.setup_terms.motion_command.params.motion_config.target_pose_type=max-coords-future-rel-with-time \
   logger:wandb \
   --logger.video.interval=1000 \
   --simulator.config.scene.env_spacing=0.0
