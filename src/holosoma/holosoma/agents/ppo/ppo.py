@@ -32,6 +32,7 @@ from holosoma.utils.inference_helpers import (
     get_control_gains_from_config,
     get_urdf_text_from_robot_config,
 )
+from holosoma.utils.normalization import EmpiricalNormalization
 
 console = Console()
 
@@ -156,6 +157,71 @@ class PPO(BaseAlgo):
         # Observation related Config
         self.use_symmetry = self.config.use_symmetry
         self._init_obs_keys()
+        self._init_obs_slices()
+        self._setup_obs_normalizers()
+
+    def _init_obs_slices(self) -> None:
+        def build_slices(keys: list[str]) -> dict[str, slice]:
+            slices: dict[str, slice] = {}
+            start = 0
+            for key in keys:
+                dim = self.algo_obs_dim_dict[key]
+                slices[key] = slice(start, start + dim)
+                start += dim
+            return slices
+
+        self.actor_obs_slices = build_slices(self.actor_obs_keys)
+        self.critic_obs_slices = build_slices(self.critic_obs_keys)
+
+    def _setup_obs_normalizers(self) -> None:
+        def build_group_normalizers(keys: list[str], enabled: bool) -> dict[str, nn.Module]:
+            normalizers: dict[str, nn.Module] = {}
+            for key in keys:
+                dim = self.algo_obs_dim_dict[key]
+                if enabled:
+                    normalizers[key] = EmpiricalNormalization(
+                        shape=(dim,),
+                        device=self.device,
+                        eps=self.config.obs_normalizer_eps,
+                        until=self.config.obs_normalizer_until,
+                    )
+                else:
+                    normalizers[key] = nn.Identity()
+            return normalizers
+
+        self.actor_obs_normalizers = build_group_normalizers(self.actor_obs_keys, self.config.normalize_actor_obs)
+        self.critic_obs_normalizers = build_group_normalizers(self.critic_obs_keys, self.config.normalize_critic_obs)
+
+    def _apply_obs_normalizer(self, normalizer: nn.Module, obs: torch.Tensor, update: bool) -> torch.Tensor:
+        if isinstance(normalizer, EmpiricalNormalization):
+            return normalizer(obs, update=update)
+        return normalizer(obs)
+
+    def _normalize_concat_obs(
+        self,
+        obs: torch.Tensor,
+        keys: list[str],
+        slices: dict[str, slice],
+        normalizers: dict[str, nn.Module],
+        *,
+        update: bool,
+    ) -> torch.Tensor:
+        parts = []
+        for key in keys:
+            part = obs[..., slices[key]]
+            part = self._apply_obs_normalizer(normalizers[key], part, update)
+            parts.append(part)
+        return torch.cat(parts, dim=-1)
+
+    def _normalize_actor_obs(self, obs: torch.Tensor, *, update: bool) -> torch.Tensor:
+        return self._normalize_concat_obs(
+            obs, self.actor_obs_keys, self.actor_obs_slices, self.actor_obs_normalizers, update=update
+        )
+
+    def _normalize_critic_obs(self, obs: torch.Tensor, *, update: bool) -> torch.Tensor:
+        return self._normalize_concat_obs(
+            obs, self.critic_obs_keys, self.critic_obs_slices, self.critic_obs_normalizers, update=update
+        )
 
     def _init_obs_keys(self):
         self.actor_obs_keys = self.config.module_dict.actor.input_dim
@@ -249,10 +315,18 @@ class PPO(BaseAlgo):
     def _eval_mode(self):
         self.actor.eval()
         self.critic.eval()
+        for normalizer in self.actor_obs_normalizers.values():
+            normalizer.eval()
+        for normalizer in self.critic_obs_normalizers.values():
+            normalizer.eval()
 
     def _train_mode(self):
         self.actor.train()
         self.critic.train()
+        for normalizer in self.actor_obs_normalizers.values():
+            normalizer.train()
+        for normalizer in self.critic_obs_normalizers.values():
+            normalizer.train()
 
     def learn(self):
         self._train_mode()
@@ -299,8 +373,11 @@ class PPO(BaseAlgo):
         with torch.inference_mode():
             for _ in range(self.config.num_steps_per_env):
                 # Environment step
-                actor_obs = torch.cat([obs_dict[k] for k in self.actor_obs_keys], dim=1)
-                critic_obs = torch.cat([obs_dict[k] for k in self.critic_obs_keys], dim=1)
+                actor_obs_raw = torch.cat([obs_dict[k] for k in self.actor_obs_keys], dim=1)
+                critic_obs_raw = torch.cat([obs_dict[k] for k in self.critic_obs_keys], dim=1)
+
+                actor_obs = self._normalize_actor_obs(actor_obs_raw, update=True)
+                critic_obs = self._normalize_critic_obs(critic_obs_raw, update=True)
 
                 actions = self.actor.act({"actor_obs": actor_obs})
                 values = self.critic.evaluate({"critic_obs": critic_obs}).detach()
@@ -315,6 +392,7 @@ class PPO(BaseAlgo):
                 final_rewards = torch.zeros_like(rewards)
                 if infos["time_outs"].any():
                     final_critic_obs = torch.cat([infos["final_observations"][k] for k in self.critic_obs_keys], dim=1)
+                    final_critic_obs = self._normalize_critic_obs(final_critic_obs, update=True)
                     final_values = self.critic.evaluate({"critic_obs": final_critic_obs}).detach()
                     final_rewards += self.config.gamma * torch.squeeze(
                         final_values * infos["time_outs"].unsqueeze(1).to(self.device), 1
@@ -322,8 +400,8 @@ class PPO(BaseAlgo):
 
                 # Add transition to storage
                 self.storage.add(
-                    actor_obs=actor_obs,
-                    critic_obs=critic_obs,
+                    actor_obs=actor_obs_raw,
+                    critic_obs=critic_obs_raw,
                     actions=actions,
                     values=values,
                     actions_log_prob=self.actor.get_actions_log_prob(actions).detach().unsqueeze(1),
@@ -456,6 +534,9 @@ class PPO(BaseAlgo):
             actor_obs = minibatch["actor_obs"]
             critic_obs = minibatch["critic_obs"]
 
+        actor_obs = self._normalize_actor_obs(actor_obs, update=True)
+        critic_obs = self._normalize_critic_obs(critic_obs, update=True)
+
         self.actor.act({"actor_obs": actor_obs})
         value_batch = self.critic.evaluate({"critic_obs": critic_obs})
         actions_log_prob_batch = self.actor.get_actions_log_prob(actions_batch)
@@ -560,6 +641,16 @@ class PPO(BaseAlgo):
             loaded_dict = torch.load(ckpt_path, map_location=self.device)
             self.actor.load_state_dict(loaded_dict["actor_model_state_dict"])
             self.critic.load_state_dict(loaded_dict["critic_model_state_dict"])
+            actor_norm_state = loaded_dict.get("actor_obs_normalizer_state")
+            critic_norm_state = loaded_dict.get("critic_obs_normalizer_state")
+            if isinstance(actor_norm_state, dict):
+                for key, state in actor_norm_state.items():
+                    if state is not None and key in self.actor_obs_normalizers:
+                        self.actor_obs_normalizers[key].load_state_dict(state)
+            if isinstance(critic_norm_state, dict):
+                for key, state in critic_norm_state.items():
+                    if state is not None and key in self.critic_obs_normalizers:
+                        self.critic_obs_normalizers[key].load_state_dict(state)
             if self.config.load_optimizer:
                 self.actor_optimizer.load_state_dict(loaded_dict["actor_optimizer_state_dict"])
                 self.critic_optimizer.load_state_dict(loaded_dict["critic_optimizer_state_dict"])
@@ -572,6 +663,12 @@ class PPO(BaseAlgo):
         return None
 
     def save(self, path, infos=None):
+        def normalizer_states(normalizers: dict[str, nn.Module]):
+            states: dict[str, dict | None] = {}
+            for key, normalizer in normalizers.items():
+                states[key] = normalizer.state_dict() if hasattr(normalizer, "state_dict") else None
+            return states
+
         checkpoint_dict = {
             "actor_model_state_dict": self.actor.state_dict(),
             "critic_model_state_dict": self.critic.state_dict(),
@@ -579,6 +676,8 @@ class PPO(BaseAlgo):
             "critic_optimizer_state_dict": self.critic_optimizer.state_dict(),
             "iter": self.current_learning_iteration,
             "infos": infos,
+            "actor_obs_normalizer_state": normalizer_states(self.actor_obs_normalizers),
+            "critic_obs_normalizer_state": normalizer_states(self.critic_obs_normalizers),
         }
         checkpoint_dict.update(self._checkpoint_metadata(iteration=self.current_learning_iteration))
         env_state = self._collect_env_state()
@@ -648,6 +747,14 @@ class PPO(BaseAlgo):
                 "mean_noise_std": self.actor.std.mean().item(),
             },
         }
+        motion_command = None
+        if self.env.command_manager is not None:
+            motion_command = self.env.command_manager.get_state("motion_command")
+        if motion_command is not None:
+            train_logs = extra_log_dicts.setdefault("Train", {})
+            motion_total = float(motion_command.motion.time_step_total)
+            train_logs["mean_episode_length_motion_total"] = motion_total
+            train_logs["mean_episode_length_motion_total/time"] = motion_total
         loss_dict["actor_learning_rate"] = self.actor_learning_rate
         loss_dict["critic_learning_rate"] = self.critic_learning_rate
         # Use logging helper
@@ -710,14 +817,27 @@ class PPO(BaseAlgo):
     @property
     def actor_onnx_wrapper(self):
         class ActorWrapper(nn.Module):
-            def __init__(self, actor):
+            def __init__(self, actor, normalizers, keys, slices):
                 super().__init__()
                 self.actor = actor
+                self.normalizers = normalizers
+                self.keys = keys
+                self.slices = slices
 
             def forward(self, actor_obs):
+                parts = []
+                for key in self.keys:
+                    part = actor_obs[..., self.slices[key]]
+                    normalizer = self.normalizers[key]
+                    if isinstance(normalizer, EmpiricalNormalization):
+                        part = normalizer(part, update=False)
+                    else:
+                        part = normalizer(part)
+                    parts.append(part)
+                actor_obs = torch.cat(parts, dim=-1)
                 return self.actor.act_inference({"actor_obs": actor_obs})
 
-        return ActorWrapper(self.actor)
+        return ActorWrapper(self.actor, self.actor_obs_normalizers, self.actor_obs_keys, self.actor_obs_slices)
 
     def env_step(self, actor_state):
         obs_dict, rewards, dones, extras = self.env.step(actor_state)
@@ -780,6 +900,7 @@ class PPO(BaseAlgo):
 
     def _pre_eval_env_step(self, actor_state: dict):
         actor_obs = torch.cat([actor_state["obs"][k] for k in self.actor_obs_keys], dim=1)
+        actor_obs = self._normalize_actor_obs(actor_obs, update=False)
         actions = self.eval_policy({"actor_obs": actor_obs})
         actor_state.update({"actions": actions})
         for c in self.eval_callbacks:
@@ -795,4 +916,14 @@ class PPO(BaseAlgo):
         self.actor.eval()  # switch to evaluation mode (dropout for example)
         if device is not None:
             self.actor.to(device)
-        return self.actor.act_inference
+            for normalizer in self.actor_obs_normalizers.values():
+                normalizer.to(device)
+        for normalizer in self.actor_obs_normalizers.values():
+            normalizer.eval()
+
+        def _policy(obs_dict):
+            actor_obs = obs_dict["actor_obs"]
+            actor_obs = self._normalize_actor_obs(actor_obs, update=False)
+            return self.actor.act_inference({"actor_obs": actor_obs})
+
+        return _policy

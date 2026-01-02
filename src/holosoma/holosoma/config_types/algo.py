@@ -45,6 +45,9 @@ class LayerConfig:
     encoder_input_name: str = ""
     """Input name for encoder. Only used for encoder modules."""
 
+    encoder_obs_token_name: str | None = None
+    """Optional input name for a transformer "current-obs" token."""
+
     input_channels: int = 1
     """Number of input channels. Only used for CNN modules."""
 
@@ -206,6 +209,18 @@ class PPOConfig:
 
     eval_callbacks: Any = None
     """Evaluation callbacks configuration."""
+
+    normalize_actor_obs: bool = False
+    """Whether to apply empirical normalization to actor observations."""
+
+    normalize_critic_obs: bool = False
+    """Whether to apply empirical normalization to critic observations."""
+
+    obs_normalizer_eps: float = 1e-2
+    """Epsilon for observation normalization."""
+
+    obs_normalizer_until: int | None = None
+    """Optional cap on number of samples used to update the obs normalizer."""
 
     max_actor_learning_rate: float | None = None
     min_actor_learning_rate: float | None = None

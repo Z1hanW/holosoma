@@ -39,7 +39,7 @@ motion_config = MotionConfig(
 
 motion_config_motion_tracking = replace(
     motion_config,
-    num_future_steps=5,
+    num_future_steps=10,
     target_pose_type="max-coords-future-rel-with-time",
 )
 

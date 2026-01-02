@@ -120,15 +120,18 @@ _motion_tracking_mlp_module_dict = PPOModuleDictConfig(
 
 _motion_tracking_transformer_layer = replace(
     algo.ppo.config.module_dict.actor.layer_config,
-    module_input_name=("actor_obs",),
+    module_input_name=(),
     encoder_input_name="motion_future_target_poses",
-    encoder_num_steps=5,
+    encoder_obs_token_name="actor_obs",
+    encoder_num_steps=10,
+    encoder_hidden_dims=[512, 256],
+    encoder_activation="ReLU",
     transformer_latent_dim=256,
     transformer_num_layers=2,
     transformer_num_heads=2,
     transformer_ff_dim=512,
     transformer_dropout=0.0,
-    transformer_pooling="mean",
+    transformer_pooling="first",
     hidden_dims=[1024, 512],
 )
 
@@ -136,7 +139,8 @@ _motion_tracking_transformer_critic_layer = replace(
     algo.ppo.config.module_dict.critic.layer_config,
     module_input_name=("critic_obs",),
     encoder_input_name="motion_future_target_poses",
-    encoder_num_steps=5,
+    encoder_num_steps=10,
+    encoder_activation="ReLU",
     transformer_latent_dim=256,
     transformer_num_layers=2,
     transformer_num_heads=2,
@@ -149,15 +153,14 @@ _motion_tracking_transformer_critic_layer = replace(
 _motion_tracking_transformer_module_dict = PPOModuleDictConfig(
     actor=replace(
         algo.ppo.config.module_dict.actor,
-        type="TransformerEncoder",
+        type="TransformerObsTokenEncoder",
         input_dim=_motion_tracking_actor_inputs,
         layer_config=_motion_tracking_transformer_layer,
     ),
     critic=replace(
         algo.ppo.config.module_dict.critic,
-        type="TransformerEncoder",
+        type="MLP",
         input_dim=_motion_tracking_critic_inputs,
-        layer_config=_motion_tracking_transformer_critic_layer,
     ),
 )
 
@@ -175,7 +178,12 @@ g1_29dof_wbt_motion_tracking_transformer = replace(
     observation=observation.g1_29dof_wbt_observation_motion_tracking_split,
     algo=replace(
         algo.ppo,
-        config=replace(algo.ppo.config, module_dict=_motion_tracking_transformer_module_dict),
+        config=replace(
+            algo.ppo.config,
+            module_dict=_motion_tracking_transformer_module_dict,
+            normalize_actor_obs=True,
+            normalize_critic_obs=True,
+        ),
     ),
 )
 

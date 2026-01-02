@@ -4,8 +4,14 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 src/holosoma/holosoma/t
   \
   --algo.config.actor_learning_rate=7e-5 \
   --algo.config.critic_learning_rate=7e-5 \
+  --algo.config.normalize_actor_obs=True \
+  --algo.config.normalize_critic_obs=True \
+  --algo.config.module_dict.actor.type=TransformerObsTokenEncoder \
+  --algo.config.module_dict.critic.type=MLP \
   --algo.config.module_dict.actor.layer_config.encoder_num_steps=10 \
-  --algo.config.module_dict.critic.layer_config.encoder_num_steps=10 \
+  --algo.config.module_dict.actor.layer_config.encoder_obs_token_name=actor_obs \
+  --algo.config.module_dict.actor.layer_config.encoder_activation=ReLU \
+  --algo.config.module_dict.actor.layer_config.transformer_pooling=first \
   --algo.config.module_dict.actor.min_noise_std=0.10 \
   --algo.config.save_interval=100 \
   \
