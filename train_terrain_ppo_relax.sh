@@ -1,11 +1,11 @@
-CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 src/holosoma/holosoma/train_agent.py \
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-motion-tracking-transformer \
   --training.num_envs=8192 \
   \
   --algo.config.actor_learning_rate=7e-5 \
   --algo.config.critic_learning_rate=7e-5 \
-  --algo.config.normalize_actor_obs=True \
-  --algo.config.normalize_critic_obs=True \
+  --algo.config.normalize_actor_obs=False \
+  --algo.config.normalize_critic_obs=False \
   --algo.config.module_dict.actor.type=TransformerObsTokenEncoder \
   --algo.config.module_dict.critic.type=MLP \
   --algo.config.module_dict.actor.layer_config.encoder_num_steps=10 \
