@@ -87,6 +87,16 @@ def get_obs_and_act_sizes(config):
             num_obs = 1 + 52 * (3 + 6 + 3 + 3) - 3  # height + num_bodies * 15 (pos + vel + rot + ang_vel) - root_pos
         else:
             raise NotImplementedError
+    elif robot == "g1_29dof":
+        num_key_bodies = len(config.key_bodies)
+        dof_obs_size = 174
+        num_act = 29
+
+        if config.use_max_coords_obs:
+            num_bodies = getattr(config, "num_bodies", 32)
+            num_obs = 1 + num_bodies * (3 + 6 + 3 + 3) - 3
+        else:
+            num_obs = 13 + dof_obs_size + num_act + 3 * num_key_bodies
     else:
         raise ValueError(f"Unsupported character config file: {robot}")
 
@@ -141,6 +151,9 @@ def get_num_jd_obs(config):
     ):
         dof_obs_size = 306
         num_act = 153
+    elif robot == "g1_29dof":
+        dof_obs_size = 174
+        num_act = 29
 
     else:
         raise ValueError(f"Unsupported character config file: {robot}")
@@ -260,6 +273,20 @@ def isaacgym_asset_file_to_stats(asset_file: str, num_key_bodies: int, use_max_c
             num_obs = 1 + 52 * (3 + 6 + 3 + 3) - 3
         else:
             raise NotImplementedError
+    elif asset_file == "mjcf/g1_29dof.xml":
+        dof_body_ids = [
+            1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13,
+            15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+            25, 26, 27, 28, 29, 30, 31,
+        ]
+        dof_offsets = list(range(0, 30))
+        dof_obs_size = 174
+        num_act = 29
+
+        if use_max_coords:
+            num_obs = 1 + 32 * (3 + 6 + 3 + 3) - 3
+        else:
+            num_obs = 13 + dof_obs_size + num_act + 3 * num_key_bodies
     else:
         raise ValueError(f"Unsupported character config file: {asset_file}")
 

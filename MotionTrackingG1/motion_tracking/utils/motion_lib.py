@@ -21,7 +21,7 @@ import torch
 from torch import nn, Tensor
 from tqdm import tqdm
 from torch import Tensor
-from typing import List, Tuple, Any
+from typing import List, Tuple, Any, Optional
 
 from dataclasses import dataclass
 
@@ -120,6 +120,8 @@ class MotionLib(DeviceDtypeModuleMixin):
             w_last: bool = True,
             create_text_embeddings: bool = False,
             object_names: List[str] = None,
+            body_names: Optional[List[str]] = None,
+            dof_names: Optional[List[str]] = None,
     ):
         super().__init__()
         self.w_last = w_last

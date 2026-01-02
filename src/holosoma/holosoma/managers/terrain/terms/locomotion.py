@@ -120,7 +120,13 @@ class TerrainLocomotion(TerrainTermBase):
             self._env_origins[:] = torch.from_numpy(self.terrain.sample_env_origins()).to(self.device).to(torch.float)
         else:
             # Eval mode: all robots at tile (0,0) for deterministic evaluation
-            origin_0_0 = torch.from_numpy(self.terrain._env_origins[0, 0]).to(self.device).to(torch.float)
+            if hasattr(self.terrain, "_env_origins"):
+                origin_grid = self.terrain._env_origins
+            elif hasattr(self.terrain, "_get_load_obj_env_origin_grid"):
+                origin_grid = self.terrain._get_load_obj_env_origin_grid()
+            else:
+                raise AttributeError("Terrain does not provide env origin grid for deterministic evaluation.")
+            origin_0_0 = torch.from_numpy(origin_grid[0, 0]).to(self.device).to(torch.float)
             self._env_origins[:] = origin_0_0  # Broadcast to all robots
 
     def _init_base_height_points(self):

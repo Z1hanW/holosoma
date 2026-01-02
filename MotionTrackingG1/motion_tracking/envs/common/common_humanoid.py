@@ -63,6 +63,8 @@ class BaseHumanoid(Humanoid):
 
         # General configurations
         self.pd_control = self.config.pd_control
+        self.domain_rand_cfg = getattr(self.config, "domain_rand", None)
+        self.domain_rand_enabled = self._cfg_get(self.domain_rand_cfg, "enabled", False)
         self.power_scale = self.config.power_scale
         self.local_root_obs = self.config.local_root_obs
         self.root_height_obs = self.config.root_height_obs
@@ -113,6 +115,24 @@ class BaseHumanoid(Humanoid):
             self.next_motion_times = torch.zeros_like(self.goal_weight).to(self.device) #torch.clamp(next_motion_times_, max = motion_lengths)
             
 
+    def _cfg_get(self, cfg, key, default=None):
+        if cfg is None:
+            return default
+        if isinstance(cfg, dict):
+            return cfg.get(key, default)
+        return getattr(cfg, key, default)
+
+    def apply_dof_pos_bias(self, env_ids, dof_pos: torch.Tensor) -> torch.Tensor:
+        if not self.domain_rand_enabled:
+            return dof_pos
+        bias_range = self._cfg_get(self.domain_rand_cfg, "dof_pos_bias_range", None)
+        if bias_range is None:
+            return dof_pos
+        low, high = float(bias_range[0]), float(bias_range[1])
+        if low == 0.0 and high == 0.0:
+            return dof_pos
+        bias = torch.empty_like(dof_pos).uniform_(low, high)
+        return dof_pos + bias
     ###############################################################
     # Getters
     ###############################################################

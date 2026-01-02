@@ -443,6 +443,7 @@ class BaseDisc(DiscHumanoid):
         
         root_pos = self.transfer_to_env_coordinates(root_pos, env_ids)
         dof_pos, dof_vel = self.convert_dof(dof_pos, dof_vel)
+        dof_pos = self.apply_dof_pos_bias(env_ids, dof_pos)
 
         rb_pos[:, :, :3] -= rb_pos[:, 0, :3].unsqueeze(1).clone()
         rb_pos[:, :, :3] += root_pos.unsqueeze(1)

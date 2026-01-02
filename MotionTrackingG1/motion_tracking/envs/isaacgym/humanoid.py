@@ -460,32 +460,56 @@ class Humanoid(BaseHumanoid, GymBaseInterface):
             self.body_names = self.gym.get_asset_rigid_body_names(humanoid_asset)
         except Exception:
             self.body_names = None
+        try:
+            self.dof_names = self.gym.get_asset_dof_names(humanoid_asset)
+        except Exception:
+            self.dof_names = None
         # Build skeleton tree from the same MJCF file used to load the asset
         skel_src_path = dyn_asset_path if dyn_enabled else os.path.join(asset_root, asset_file)
         # Cache the exact MJCF path used (for exporting/visualization later)
         self.asset_mjcf_path = skel_src_path
         self.sk_tree = SkeletonTree.from_mjcf(skel_src_path)
 
+        def _resolve_body_index(candidates):
+            if self.body_names is not None:
+                for name in candidates:
+                    if name in self.body_names:
+                        return self.body_names.index(name)
+            for name in candidates:
+                idx = self.gym.find_asset_rigid_body_index(humanoid_asset, name)
+                if idx != -1:
+                    return idx
+            return -1
+
         if "smpl" in asset_file:
-            # create force sensors at the feet
-            right_foot_idx = self.gym.find_asset_rigid_body_index(
-                humanoid_asset, "L_Ankle"
-            )
-            left_foot_idx = self.gym.find_asset_rigid_body_index(
-                humanoid_asset, "R_Ankle"
-            )
+            right_candidates = ["L_Ankle"]
+            left_candidates = ["R_Ankle"]
         else:
-            # create force sensors at the feet
-            right_foot_idx = self.gym.find_asset_rigid_body_index(
-                humanoid_asset, "right_foot"
-            )
-            left_foot_idx = self.gym.find_asset_rigid_body_index(
-                humanoid_asset, "left_foot"
-            )
+            right_candidates = [
+                "right_foot_contact_point",
+                "right_foot",
+                "right_ankle_roll_link",
+                "right_ankle_pitch_link",
+            ]
+            left_candidates = [
+                "left_foot_contact_point",
+                "left_foot",
+                "left_ankle_roll_link",
+                "left_ankle_pitch_link",
+            ]
+
+        right_foot_idx = _resolve_body_index(right_candidates)
+        left_foot_idx = _resolve_body_index(left_candidates)
         sensor_pose = gymapi.Transform()
 
-        self.gym.create_asset_force_sensor(humanoid_asset, right_foot_idx, sensor_pose)
-        self.gym.create_asset_force_sensor(humanoid_asset, left_foot_idx, sensor_pose)
+        if right_foot_idx != -1:
+            self.gym.create_asset_force_sensor(humanoid_asset, right_foot_idx, sensor_pose)
+        else:
+            print("[Humanoid] Warning: failed to find right foot body for force sensor.")
+        if left_foot_idx != -1:
+            self.gym.create_asset_force_sensor(humanoid_asset, left_foot_idx, sensor_pose)
+        else:
+            print("[Humanoid] Warning: failed to find left foot body for force sensor.")
 
         actuator_props = self.gym.get_asset_actuator_properties(humanoid_asset)
         motor_efforts = [prop.motor_effort for prop in actuator_props]
@@ -549,6 +573,8 @@ class Humanoid(BaseHumanoid, GymBaseInterface):
                 "smpl" in asset_file and self.config.fix_pd_offsets,
                 specific_pd_fixes=self.config.specific_pd_fixes,
             )
+        if getattr(self, "domain_rand_enabled", False):
+            self._setup_domain_rand()
 
     def load_object_assets(self):
         self.total_num_objects = 0
@@ -960,6 +986,8 @@ class Humanoid(BaseHumanoid, GymBaseInterface):
         self.refresh_sim_tensors()
 
         super().post_physics_step()
+        if getattr(self, "domain_rand_enabled", False):
+            self._maybe_apply_pushes()
 
         # debug viz
         if self.viewer and self.debug_viz:
@@ -978,6 +1006,8 @@ class Humanoid(BaseHumanoid, GymBaseInterface):
         if len(env_ids) > 0:
             self.reset_actors(env_ids)
             self.reset_env_tensors(env_ids)
+            if getattr(self, "domain_rand_enabled", False):
+                self._apply_domain_rand_props(env_ids)
             self.refresh_sim_tensors()
             self.compute_observations(env_ids)
 
@@ -1037,6 +1067,91 @@ class Humanoid(BaseHumanoid, GymBaseInterface):
         ) = isaacgym_asset_file_to_stats(
             asset_file, num_key_bodies, self.config.use_max_coords_obs
         )
+
+    def _get_domain_rand_val(self, key, default=None):
+        cfg = getattr(self, "domain_rand_cfg", None)
+        if cfg is None:
+            return default
+        if isinstance(cfg, dict):
+            return cfg.get(key, default)
+        return getattr(cfg, key, default)
+
+    def _setup_domain_rand(self):
+        self._rand_friction_range = self._get_domain_rand_val("friction_range", None)
+        self._rand_restitution_range = self._get_domain_rand_val("restitution_range", None)
+        self._rand_pd_gain_range = self._get_domain_rand_val("pd_gain_range", None)
+
+        self._push_interval_s = self._get_domain_rand_val("push_interval_s", None)
+        self._max_push_vel = self._get_domain_rand_val("max_push_vel", None)
+        self._push_enabled = self._push_interval_s is not None and self._max_push_vel is not None
+
+        if self._push_enabled:
+            self._next_push_step = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+            self._sample_next_push_steps(torch.arange(self.num_envs, device=self.device))
+
+    def _apply_domain_rand_props(self, env_ids):
+        if self._rand_friction_range is None and self._rand_restitution_range is None and self._rand_pd_gain_range is None:
+            return
+        for env_id in env_ids:
+            env_ptr = self.envs[env_id]
+            handle = self.humanoid_handles[env_id]
+
+            if self._rand_friction_range is not None or self._rand_restitution_range is not None:
+                props = self.gym.get_actor_rigid_body_properties(env_ptr, handle)
+                for prop in props:
+                    if self._rand_friction_range is not None:
+                        low, high = self._rand_friction_range
+                        prop.friction = float(np.random.uniform(low, high))
+                    if self._rand_restitution_range is not None:
+                        low, high = self._rand_restitution_range
+                        prop.restitution = float(np.random.uniform(low, high))
+                self.gym.set_actor_rigid_body_properties(env_ptr, handle, props, recomputeInertia=False)
+
+            if self._rand_pd_gain_range is not None:
+                dof_props = self.gym.get_actor_dof_properties(env_ptr, handle)
+                low, high = self._rand_pd_gain_range
+                scale = float(np.random.uniform(low, high))
+                dof_props["stiffness"] *= scale
+                dof_props["damping"] *= scale
+                self.gym.set_actor_dof_properties(env_ptr, handle, dof_props)
+
+        if self._push_enabled:
+            self._sample_next_push_steps(env_ids)
+
+    def _sample_next_push_steps(self, env_ids):
+        low_s, high_s = float(self._push_interval_s[0]), float(self._push_interval_s[1])
+        low_steps = max(1, int(low_s / self.dt))
+        high_steps = max(low_steps, int(high_s / self.dt))
+        intervals = torch.randint(low_steps, high_steps + 1, (env_ids.numel(),), device=self.device)
+        self._next_push_step[env_ids] = self.progress_buf[env_ids] + intervals
+
+    def _maybe_apply_pushes(self):
+        if not self._push_enabled:
+            return
+        env_ids = (self.progress_buf >= self._next_push_step).nonzero(as_tuple=False).squeeze(-1)
+        if env_ids.numel() == 0:
+            return
+
+        max_push = self._max_push_vel
+        if len(max_push) < 3:
+            return
+
+        vel = self.humanoid_root_states[env_ids, 7:10]
+        rand_vel = torch.empty_like(vel)
+        rand_vel[:, 0].uniform_(-max_push[0], max_push[0])
+        rand_vel[:, 1].uniform_(-max_push[1], max_push[1])
+        rand_vel[:, 2].uniform_(-max_push[2], max_push[2])
+        self.humanoid_root_states[env_ids, 7:10] = vel + rand_vel
+
+        env_ids_int32 = self.humanoid_actor_ids[env_ids]
+        self.gym.set_actor_root_state_tensor_indexed(
+            self.sim,
+            gymtorch.unwrap_tensor(self.root_states),
+            gymtorch.unwrap_tensor(env_ids_int32),
+            len(env_ids_int32),
+        )
+
+        self._sample_next_push_steps(env_ids)
 
     def render(self):
         if self.viewer:

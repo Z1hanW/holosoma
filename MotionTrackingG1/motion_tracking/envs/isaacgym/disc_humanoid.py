@@ -70,6 +70,8 @@ class DiscHumanoid(BaseDisc, Humanoid):
                 dof_offsets=self.dof_offsets,
                 key_body_ids=self.key_body_ids,
                 device=self.device,
-                object_names=self.spawned_object_names
+                object_names=self.spawned_object_names,
+                body_names=self.body_names,
+                dof_names=self.dof_names,
             )
         return motion_lib

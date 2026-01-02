@@ -41,6 +41,9 @@ class ExportMotion(RL_EvalCallback):
             save_dir.mkdir(exist_ok=True, parents=True)
 
             if self.config.store_poselib:
+                if not hasattr(self.env.motion_lib.state, "motions"):
+                    print("[ExportMotion] motion_lib has no poselib motions; skipping poselib export.")
+                    continue
                 skeleton_tree = self.env.motion_lib.state.motions[0].skeleton_tree
 
                 curr_root_pos = torch.stack([root_pos[idx] for root_pos in trajectory_data["root_pos"]])
