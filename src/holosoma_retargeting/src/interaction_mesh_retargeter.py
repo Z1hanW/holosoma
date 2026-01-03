@@ -550,11 +550,9 @@ class InteractionMeshRetargeter:
 
                 name_filters = (self.object_name,) if self.object_name else None
                 self._ensure_mjcf_geom_handles(name_filters=name_filters)
-                show_mjcf_visual_cb = self.server.gui.add_checkbox("Show MJCF visual geoms", True)
-                show_mjcf_collision_cb = self.server.gui.add_checkbox("Show MJCF collision geoms", False)
-
-                self._set_handles_visible(self._mjcf_visual_handles, show_mjcf_visual_cb.value)
-                self._set_handles_visible(self._mjcf_collision_handles, show_mjcf_collision_cb.value)
+                mjcf_view_mode = self.server.gui.add_slider("MJCF view (0=visual,1=collision)", min=0, max=1, step=1, initial_value=0)
+                self._set_handles_visible(self._mjcf_visual_handles, mjcf_view_mode.value == 0)
+                self._set_handles_visible(self._mjcf_collision_handles, mjcf_view_mode.value == 1)
 
                 @show_meshes_cb.on_update
                 def _(_):
@@ -562,13 +560,10 @@ class InteractionMeshRetargeter:
                     if self.viser_object is not None:
                         self.viser_object.show_visual = show_meshes_cb.value
 
-                @show_mjcf_visual_cb.on_update
+                @mjcf_view_mode.on_update
                 def _(_):
-                    self._set_handles_visible(self._mjcf_visual_handles, show_mjcf_visual_cb.value)
-
-                @show_mjcf_collision_cb.on_update
-                def _(_):
-                    self._set_handles_visible(self._mjcf_collision_handles, show_mjcf_collision_cb.value)
+                    self._set_handles_visible(self._mjcf_visual_handles, mjcf_view_mode.value == 0)
+                    self._set_handles_visible(self._mjcf_collision_handles, mjcf_view_mode.value == 1)
 
         return (
             np.array(retargeted_motions)[1:],
@@ -672,11 +667,9 @@ class InteractionMeshRetargeter:
 
                 name_filters = (self.object_name,) if self.object_name else None
                 self._ensure_mjcf_geom_handles(name_filters=name_filters)
-                show_mjcf_visual_cb = self.server.gui.add_checkbox("Show MJCF visual geoms", True)
-                show_mjcf_collision_cb = self.server.gui.add_checkbox("Show MJCF collision geoms", False)
-
-                self._set_handles_visible(self._mjcf_visual_handles, show_mjcf_visual_cb.value)
-                self._set_handles_visible(self._mjcf_collision_handles, show_mjcf_collision_cb.value)
+                mjcf_view_mode = self.server.gui.add_slider("MJCF view (0=visual,1=collision)", min=0, max=1, step=1, initial_value=0)
+                self._set_handles_visible(self._mjcf_visual_handles, mjcf_view_mode.value == 0)
+                self._set_handles_visible(self._mjcf_collision_handles, mjcf_view_mode.value == 1)
 
                 @show_meshes_cb.on_update
                 def _(_):
@@ -684,13 +677,10 @@ class InteractionMeshRetargeter:
                     if self.viser_object is not None:
                         self.viser_object.show_visual = show_meshes_cb.value
 
-                @show_mjcf_visual_cb.on_update
+                @mjcf_view_mode.on_update
                 def _(_):
-                    self._set_handles_visible(self._mjcf_visual_handles, show_mjcf_visual_cb.value)
-
-                @show_mjcf_collision_cb.on_update
-                def _(_):
-                    self._set_handles_visible(self._mjcf_collision_handles, show_mjcf_collision_cb.value)
+                    self._set_handles_visible(self._mjcf_visual_handles, mjcf_view_mode.value == 0)
+                    self._set_handles_visible(self._mjcf_collision_handles, mjcf_view_mode.value == 1)
 
         return (
             np.array(retargeted_motions)[1:],
