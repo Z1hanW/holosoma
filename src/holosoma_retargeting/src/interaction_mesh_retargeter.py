@@ -289,29 +289,33 @@ class InteractionMeshRetargeter:
                 continue
 
             is_collision = (m.geom_contype[gid] != 0) or (m.geom_conaffinity[gid] != 0)
-            prefix = "/mjcf/collision" if is_collision else "/mjcf/visual"
-            if is_collision:
-                color = (255, 80, 80)
-                opacity = 0.35
-            else:
-                color = (50, 150, 255)
-                opacity = 0.6
-            handle = self.draw_mesh_from_geom(
+
+            visual_handle = self.draw_mesh_from_geom(
                 m,
                 d,
                 gid,
                 gname,
-                name=f"{prefix}/{gname}",
-                color=color,
-                opacity=opacity,
-                use_convex_hull=is_collision,
+                name=f"/mjcf/visual/{gname}",
+                color=(50, 150, 255),
+                opacity=0.6,
+                use_convex_hull=False,
             )
-            if handle is None:
-                continue
+            if visual_handle is not None:
+                visual_handles.append(visual_handle)
+
             if is_collision:
-                collision_handles.append(handle)
-            else:
-                visual_handles.append(handle)
+                collision_handle = self.draw_mesh_from_geom(
+                    m,
+                    d,
+                    gid,
+                    gname,
+                    name=f"/mjcf/collision/{gname}",
+                    color=(255, 80, 80),
+                    opacity=0.35,
+                    use_convex_hull=True,
+                )
+                if collision_handle is not None:
+                    collision_handles.append(collision_handle)
 
         return visual_handles, collision_handles
 
