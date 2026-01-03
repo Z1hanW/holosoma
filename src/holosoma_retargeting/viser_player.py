@@ -22,7 +22,12 @@ from holosoma_retargeting.src.viser_utils import create_motion_control_sliders  
 def load_npz(npz_path: str):
     data = np.load(npz_path, allow_pickle=True)
     # expected: qpos [T, ?], and optional fps
-    qpos = data["qpos"]
+    if "qpos" in data:
+        qpos = data["qpos"]
+    elif "joint_pos" in data:
+        qpos = data["joint_pos"]
+    else:
+        raise KeyError(f"{npz_path} missing 'qpos' (or fallback 'joint_pos') for visualization")
     fps = int(data["fps"]) if "fps" in data else 30
     return qpos, fps
 
