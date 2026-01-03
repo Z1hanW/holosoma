@@ -21,9 +21,8 @@ src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))
 
 # Import with type ignore for mypy compatibility
-from mujoco_utils import (  # type: ignore[import-not-found,no-redef]  # noqa: E402
-    _world_mesh_from_geom,
-)
+from mujoco_utils import _world_mesh_from_geom, _world_hull_from_geom
+
 from utils import (  # type: ignore[import-not-found,no-redef]  # noqa: E402
     calculate_laplacian_coordinates,
     calculate_laplacian_matrix,
@@ -236,22 +235,37 @@ class InteractionMeshRetargeter:
             position=(0.0, 0.0, 0.0),
         )
 
-    def draw_mesh_from_geom(self, model, data, geom_id, geom_name, name="/mesh", color=(50, 150, 255), opacity=0.5):
+    def draw_mesh_from_geom(
+        self,
+        model,
+        data,
+        geom_id,
+        geom_name,
+        name="/mesh",
+        color=(50, 150, 255),
+        opacity=0.5,
+        *,
+        use_convex_hull: bool = True,
+    ):
         """
-        Draw a single MuJoCo mesh geom (already baked to world coords) in viser.
-        color is [0, 255] RGB ints; opacity is [0,1].
+        Draw a MuJoCo mesh geom in viser.
+        If use_convex_hull=True, draw the collision hull (if available) instead of render mesh.
         """
-        if not hasattr(self, "server"):
-            return
-        V, F = _world_mesh_from_geom(model, data, geom_id, geom_name)
+
+        if use_convex_hull:
+            V, F = _world_hull_from_geom(model, data, geom_id)
+        else:
+            V, F = _world_mesh_from_geom(model, data, geom_id, geom_name)
+
         self.server.scene.add_mesh_simple(
             name,
             vertices=V.astype(np.float32),
             faces=F.astype(np.int32),
-            position=(0.0, 0.0, 0.0),  # already world-frame
+            position=(0.0, 0.0, 0.0),
             color=tuple(int(c) for c in color),
             opacity=float(opacity),
         )
+
 
     def draw_mesh_pair_with_contact(
         self,
@@ -1172,6 +1186,7 @@ class InteractionMeshRetargeter:
                 return False
             if contype[g2] == 0 and conaff[g2] == 0:
                 return False
+
             if self.object_name in self._geom_names[g1] and "ground" in self._geom_names[g2]:
                 return False
             if "ground" in self._geom_names[g1] and self.object_name in self._geom_names[g2]:
@@ -1198,8 +1213,8 @@ class InteractionMeshRetargeter:
                 phis[(g1, g2)] = float(dist)
 
                 # For debug
-                # self.draw_mesh_pair_with_contact(self.robot_model, self.robot_data, g1, g2,   \
-                #     self._geom_names[g1], self._geom_names[g2], fromto=fromto)
+                self.draw_mesh_pair_with_contact(self.robot_model, self.robot_data, g1, g2,   \
+                     self._geom_names[g1], self._geom_names[g2], fromto=fromto)
 
         return Js, phis
 

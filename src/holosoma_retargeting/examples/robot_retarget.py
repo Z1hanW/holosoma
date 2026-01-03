@@ -70,7 +70,7 @@ _OBJECT_SCALE_AUGMENTED = np.array([1.0, 1.0, 1.2])
 _OBJECT_SCALE_NORMAL = np.array([1.0, 1.0, 1.0])
 _AUGMENTATION_TRANSLATION = np.array([0.2, 0.0, 0.0])
 
-_CLIMBING_STAIRS_DISTANCE_SCALE = 0.914
+_CLIMBING_STAIRS_DISTANCE_SCALE = 1.0
 # Type aliases
 TaskType = Literal["robot_only", "object_interaction", "climbing"]
 # DataFormat is imported from config_types.data_type
