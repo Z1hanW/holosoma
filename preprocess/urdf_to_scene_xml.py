@@ -54,17 +54,22 @@ def _iter_meshes(
             if geom is None or not hasattr(geom, "geometry"):
                 continue
             g = geom.geometry
-            if not hasattr(g, "filename"):
+            if hasattr(g, "filename"):
+                filename = g.filename
+                scale = g.scale if getattr(g, "scale", None) is not None else (1.0, 1.0, 1.0)
+            elif getattr(g, "mesh", None) is not None and getattr(g.mesh, "filename", None) is not None:
+                filename = g.mesh.filename
+                scale = g.mesh.scale if getattr(g.mesh, "scale", None) is not None else (1.0, 1.0, 1.0)
+            else:
                 continue
-            filename = g.filename
-            scale = g.scale if getattr(g, "scale", None) is not None else (1.0, 1.0, 1.0)
             if isinstance(scale, (list, tuple)) and len(scale) == 3:
                 scale_t = (float(scale[0]), float(scale[1]), float(scale[2]))
             else:
                 scale_t = (1.0, 1.0, 1.0)
             meshes.append((filename, scale_t))
 
-    for link in urdf.links:
+    link_iter = urdf.links if hasattr(urdf, "links") else urdf.link_map.values()
+    for link in link_iter:
         visuals = getattr(link, "visuals", []) or []
         collisions = getattr(link, "collisions", []) or []
         if source == "visual":
@@ -178,6 +183,78 @@ def _build_scene_xml(
     tree.write(output_path, encoding="utf-8", xml_declaration=False)
 
 
+def _build_combined_scene_xml(
+    base_root: ET.Element,
+    meshes: list[tuple[Path, tuple[float, float, float]]],
+    output_path: Path,
+    *,
+    add_freejoint: bool,
+    object_mass: float,
+    object_diaginertia: tuple[float, float, float],
+    use_absolute_paths: bool,
+) -> None:
+    root = copy.deepcopy(base_root)
+    asset = _find_or_create(root, "asset")
+    worldbody = root.find("worldbody")
+    if worldbody is None:
+        raise ValueError("MJCF is missing <worldbody>")
+
+    existing_mesh_names = {m.attrib.get("name", "") for m in asset.findall("mesh")}
+    existing_geom_names = {
+        g.attrib.get("name", "") for g in worldbody.findall(".//geom") if g.attrib.get("name")
+    }
+    existing_body_names = {b.attrib.get("name", "") for b in worldbody.findall(".//body") if b.attrib.get("name")}
+
+    scene_body_name = _unique_name(existing_body_names, "scene_link")
+    body = ET.SubElement(worldbody, "body")
+    body.set("name", scene_body_name)
+    if add_freejoint:
+        ET.SubElement(body, "freejoint")
+
+    inertial = ET.SubElement(body, "inertial")
+    inertial.set("pos", "0 0 0")
+    if add_freejoint:
+        total_mass = float(object_mass) * max(1, len(meshes))
+    else:
+        total_mass = float(object_mass)
+    inertial.set("mass", f"{total_mass}")
+    inertial.set("diaginertia", f"{object_diaginertia[0]} {object_diaginertia[1]} {object_diaginertia[2]}")
+
+    for mesh_path, mesh_scale in meshes:
+        obj_stem = _sanitize_name(mesh_path.stem)
+        mesh_name = _unique_name(existing_mesh_names, f"{obj_stem}_mesh")
+        geom_name = _unique_name(existing_geom_names, obj_stem)
+
+        mesh_file = mesh_path.resolve()
+        if not use_absolute_paths:
+            mesh_file = Path("./") / mesh_file.name
+
+        mesh_elem = ET.SubElement(asset, "mesh")
+        mesh_elem.set("name", mesh_name)
+        mesh_elem.set("file", str(mesh_file))
+        mesh_elem.set("scale", f"{mesh_scale[0]} {mesh_scale[1]} {mesh_scale[2]}")
+
+        geom = ET.SubElement(body, "geom")
+        geom.set("name", geom_name)
+        geom.set("type", "mesh")
+        geom.set("mesh", mesh_name)
+        geom.set("contype", "1")
+        geom.set("conaffinity", "1")
+        geom.set("pos", "0 0 0")
+        geom.set("quat", "1 0 0 0")
+        geom.set("rgba", "0.7 0.8 0.9 0.7")
+        geom.set("friction", "0.9 0.5 0.5")
+        geom.set("solref", "0.02 1")
+        geom.set("solimp", "0.9 0.95 0.001")
+
+    tree = ET.ElementTree(root)
+    try:
+        ET.indent(tree, space="  ")
+    except AttributeError:
+        pass
+    tree.write(output_path, encoding="utf-8", xml_declaration=False)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate MJCF scene XMLs from URDF meshes.")
     parser.add_argument("--urdf", required=True, help="Input URDF path containing mesh references.")
@@ -188,6 +265,12 @@ def main() -> None:
         choices=["auto", "visual", "collision", "both"],
         default="auto",
         help="Which URDF meshes to convert (default: auto prefers collision).",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["per-mesh", "combined"],
+        default="per-mesh",
+        help="Output mode: per-mesh XMLs or one combined scene XML.",
     )
     parser.add_argument(
         "--package",
@@ -224,12 +307,31 @@ def main() -> None:
     base_root = base_tree.getroot()
 
     base_stem = robot_xml.stem
-    wrote = 0
+    meshes: list[tuple[Path, tuple[float, float, float]]] = []
     for mesh_file, scale in _iter_meshes(urdf, args.mesh_source):
         mesh_path = _resolve_mesh_path(mesh_file, urdf_dir, package_map)
         if not mesh_path.exists():
             raise FileNotFoundError(f"Mesh not found: {mesh_path}")
+        meshes.append((mesh_path, scale))
 
+    if args.mode == "combined":
+        scene_name = _sanitize_name(urdf_path.stem)
+        out_name = f"{base_stem}_w_{scene_name}.xml"
+        out_path = output_dir / out_name
+        _build_combined_scene_xml(
+            base_root,
+            meshes,
+            out_path,
+            add_freejoint=not args.static,
+            object_mass=float(args.object_mass),
+            object_diaginertia=tuple(float(x) for x in args.object_diaginertia),
+            use_absolute_paths=not args.relative,
+        )
+        print(f"Wrote combined scene XML to {out_path}")
+        return
+
+    wrote = 0
+    for mesh_path, scale in meshes:
         obj_stem = _sanitize_name(mesh_path.stem)
         out_name = f"{base_stem}_w_{obj_stem}.xml"
         out_path = output_dir / out_name
