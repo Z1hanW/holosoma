@@ -6,9 +6,17 @@ python data_conversion/convert_data_format_mj.py \
     --object_name ground \
     --once \
 
-# Visualize the converted motion with viser (robot only).
-python viser_player.py \
-    --qpos_npz converted_res/object_interaction/far_robot_mj.npz \
-    --robot_urdf models/g1/g1_29dof.urdf \
-    --assume_object_in_qpos False
-
+# Visualize the converted motion with viser (robot + optional scene obj).
+SCENE_OBJ_PATH=""  # TODO: set to /path/to/scene.obj if you want to show the scene mesh.
+if [ -n "$SCENE_OBJ_PATH" ]; then
+    python viser_player.py \
+        --qpos_npz converted_res/object_interaction/far_robot_mj.npz \
+        --robot_urdf models/g1/g1_29dof.urdf \
+        --object_obj "$SCENE_OBJ_PATH" \
+        --assume_object_in_qpos False
+else
+    python viser_player.py \
+        --qpos_npz converted_res/object_interaction/far_robot_mj.npz \
+        --robot_urdf models/g1/g1_29dof.urdf \
+        --assume_object_in_qpos False
+fi

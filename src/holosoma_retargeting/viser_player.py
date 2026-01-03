@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import time
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +33,26 @@ def load_npz(npz_path: str):
     return qpos, fps
 
 
+def _write_obj_urdf(obj_path: str) -> str:
+    obj_abs = str(Path(obj_path).expanduser().resolve())
+    urdf_text = (
+        "<robot name=\"object\">\n"
+        "  <link name=\"object\">\n"
+        "    <visual>\n"
+        "      <origin xyz=\"0 0 0\" rpy=\"0 0 0\"/>\n"
+        "      <geometry>\n"
+        f"        <mesh filename=\"{obj_abs}\"/>\n"
+        "      </geometry>\n"
+        "    </visual>\n"
+        "  </link>\n"
+        "</robot>\n"
+    )
+    tmp_dir = Path(tempfile.mkdtemp(prefix="viser_obj_"))
+    urdf_path = tmp_dir / "object.urdf"
+    urdf_path.write_text(urdf_text)
+    return str(urdf_path)
+
+
 def make_player(
     config: ViserConfig,
     qpos: np.ndarray,
@@ -58,8 +79,13 @@ def make_player(
     vr = ViserUrdf(server, urdf_or_path=robot_urdf_y, root_node_name="/robot")
 
     vo = None
-    if config.object_urdf:
-        object_urdf_y = yourdfpy.URDF.load(config.object_urdf, load_meshes=True, build_scene_graph=True)
+    object_urdf_path = config.object_urdf
+    if object_urdf_path is None and config.object_obj:
+        object_urdf_path = _write_obj_urdf(config.object_obj)
+        print(f"[viser_player] Using object OBJ: {config.object_obj}")
+
+    if object_urdf_path:
+        object_urdf_y = yourdfpy.URDF.load(object_urdf_path, load_meshes=True, build_scene_graph=True)
         vo = ViserUrdf(server, urdf_or_path=object_urdf_y, root_node_name="/object")
 
     # A tiny grid
@@ -104,7 +130,7 @@ def make_player(
     n_frames = int(qpos.shape[0])
     print(
         f"[viser_player] Loaded {n_frames} frames | robot_dof={robot_dof} | "
-        f"object={'yes' if (config.object_urdf and config.assume_object_in_qpos) else 'no'}"
+        f"object={'yes' if object_urdf_path else 'no'}"
     )
     print("Open the viewer URL printed above. Close the process (Ctrl+C) to exit.")
     return server
