@@ -251,13 +251,17 @@ class InteractionMeshRetargeter:
         Draw a MuJoCo mesh geom in viser.
         If use_convex_hull=True, draw the collision hull (if available) instead of render mesh.
         """
+        if not hasattr(self, "server"):
+            return None
 
         if use_convex_hull:
             V, F = _world_hull_from_geom(model, data, geom_id)
+            if V is None or F is None:
+                return None
         else:
             V, F = _world_mesh_from_geom(model, data, geom_id, geom_name)
 
-        self.server.scene.add_mesh_simple(
+        return self.server.scene.add_mesh_simple(
             name,
             vertices=V.astype(np.float32),
             faces=F.astype(np.int32),
@@ -265,6 +269,58 @@ class InteractionMeshRetargeter:
             color=tuple(int(c) for c in color),
             opacity=float(opacity),
         )
+
+    def _build_mjcf_geom_handles(self, name_filters: tuple[str, ...] | None = None):
+        """Draw MJCF mesh geoms once and return (visual_handles, collision_handles)."""
+        if not hasattr(self, "server"):
+            return [], []
+
+        m, d = self.robot_model, self.robot_data
+        mujoco.mj_forward(m, d)
+
+        visual_handles = []
+        collision_handles = []
+
+        for gid in range(m.ngeom):
+            if int(m.geom_dataid[gid]) == -1:
+                continue  # non-mesh
+            gname = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, gid) or f"geom_{gid}"
+            if name_filters and not any(f in gname for f in name_filters):
+                continue
+
+            is_collision = (m.geom_contype[gid] != 0) or (m.geom_conaffinity[gid] != 0)
+            prefix = "/mjcf/collision" if is_collision else "/mjcf/visual"
+            handle = self.draw_mesh_from_geom(
+                m,
+                d,
+                gid,
+                gname,
+                name=f"{prefix}/{gname}",
+                use_convex_hull=is_collision,
+            )
+            if handle is None:
+                continue
+            if is_collision:
+                collision_handles.append(handle)
+            else:
+                visual_handles.append(handle)
+
+        return visual_handles, collision_handles
+
+    def _ensure_mjcf_geom_handles(self, name_filters: tuple[str, ...] | None = None) -> None:
+        if hasattr(self, "_mjcf_visual_handles") and hasattr(self, "_mjcf_collision_handles"):
+            return
+        visual_handles, collision_handles = self._build_mjcf_geom_handles(name_filters=name_filters)
+        self._mjcf_visual_handles = visual_handles
+        self._mjcf_collision_handles = collision_handles
+
+    @staticmethod
+    def _set_handles_visible(handles, visible: bool) -> None:
+        for handle in handles:
+            try:
+                handle.visible = bool(visible)
+            except Exception:
+                pass
 
 
     def draw_mesh_pair_with_contact(
@@ -492,11 +548,27 @@ class InteractionMeshRetargeter:
             with self.server.gui.add_folder("Visibility"):
                 show_meshes_cb = self.server.gui.add_checkbox("Show meshes", self.viser_robot.show_visual)
 
+                name_filters = (self.object_name,) if self.object_name else None
+                self._ensure_mjcf_geom_handles(name_filters=name_filters)
+                show_mjcf_visual_cb = self.server.gui.add_checkbox("Show MJCF visual geoms", True)
+                show_mjcf_collision_cb = self.server.gui.add_checkbox("Show MJCF collision geoms", False)
+
+                self._set_handles_visible(self._mjcf_visual_handles, show_mjcf_visual_cb.value)
+                self._set_handles_visible(self._mjcf_collision_handles, show_mjcf_collision_cb.value)
+
                 @show_meshes_cb.on_update
                 def _(_):
                     self.viser_robot.show_visual = show_meshes_cb.value
                     if self.viser_object is not None:
                         self.viser_object.show_visual = show_meshes_cb.value
+
+                @show_mjcf_visual_cb.on_update
+                def _(_):
+                    self._set_handles_visible(self._mjcf_visual_handles, show_mjcf_visual_cb.value)
+
+                @show_mjcf_collision_cb.on_update
+                def _(_):
+                    self._set_handles_visible(self._mjcf_collision_handles, show_mjcf_collision_cb.value)
 
         return (
             np.array(retargeted_motions)[1:],
@@ -598,11 +670,27 @@ class InteractionMeshRetargeter:
             with self.server.gui.add_folder("Visibility"):
                 show_meshes_cb = self.server.gui.add_checkbox("Show meshes", self.viser_robot.show_visual)
 
+                name_filters = (self.object_name,) if self.object_name else None
+                self._ensure_mjcf_geom_handles(name_filters=name_filters)
+                show_mjcf_visual_cb = self.server.gui.add_checkbox("Show MJCF visual geoms", True)
+                show_mjcf_collision_cb = self.server.gui.add_checkbox("Show MJCF collision geoms", False)
+
+                self._set_handles_visible(self._mjcf_visual_handles, show_mjcf_visual_cb.value)
+                self._set_handles_visible(self._mjcf_collision_handles, show_mjcf_collision_cb.value)
+
                 @show_meshes_cb.on_update
                 def _(_):
                     self.viser_robot.show_visual = show_meshes_cb.value
                     if self.viser_object is not None:
                         self.viser_object.show_visual = show_meshes_cb.value
+
+                @show_mjcf_visual_cb.on_update
+                def _(_):
+                    self._set_handles_visible(self._mjcf_visual_handles, show_mjcf_visual_cb.value)
+
+                @show_mjcf_collision_cb.on_update
+                def _(_):
+                    self._set_handles_visible(self._mjcf_collision_handles, show_mjcf_collision_cb.value)
 
         return (
             np.array(retargeted_motions)[1:],

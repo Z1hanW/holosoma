@@ -128,6 +128,7 @@ def main() -> None:
 
     vertices = load_vertices(input_obj)
     min_x, max_x, min_y, max_y, min_z, max_z = compute_bbox(vertices)
+    # Use bbox span so negative minima expand the plane size (plane spans 0..(max-min)).
     size_x = max_x - min_x
     size_y = max_y - min_y
 
