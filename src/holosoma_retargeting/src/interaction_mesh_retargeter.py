@@ -323,6 +323,11 @@ class InteractionMeshRetargeter:
         if hasattr(self, "_mjcf_visual_handles") and hasattr(self, "_mjcf_collision_handles"):
             return
         visual_handles, collision_handles = self._build_mjcf_geom_handles(name_filters=name_filters)
+        if not visual_handles and not collision_handles and name_filters:
+            print("MJCF: no mesh geoms matched filter; falling back to show all meshes.")
+            visual_handles, collision_handles = self._build_mjcf_geom_handles(name_filters=None)
+        if not visual_handles and not collision_handles:
+            print("MJCF: no mesh geoms found to draw.")
         self._mjcf_visual_handles = visual_handles
         self._mjcf_collision_handles = collision_handles
 
