@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
+CUDA_VISIBLE_DEVICES=5,6,7 torchrun --nproc_per_node=3 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-motion-tracking-transformer \
   --training.num_envs=8192 \
   \
@@ -25,24 +25,27 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=$((29500 
   --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob=0.05 \
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_append=False \
   --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s=0 \
+  --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend=False \
+  --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s=0 \
   --command.setup_terms.motion_command.params.motion_config.num_future_steps=10 \
   --command.setup_terms.motion_command.params.motion_config.target_pose_type=max-coords-future-rel-with-time \
   \
-  --reward.terms.motion_relative_body_position_error_exp.params.sigma=1.0 \
-  --reward.terms.motion_relative_body_position_error_exp.weight=0.2 \
-  --reward.terms.motion_relative_body_orientation_error_exp.params.sigma=1.2 \
-  --reward.terms.motion_relative_body_orientation_error_exp.weight=0.2 \
-  --reward.terms.motion_global_ref_position_error_exp.params.sigma=0.6 \
-  --reward.terms.motion_global_ref_position_error_exp.weight=0.5 \
-  --reward.terms.motion_global_ref_orientation_error_exp.params.sigma=0.8 \
-  --reward.terms.motion_global_ref_orientation_error_exp.weight=0.5 \
+  --reward.terms.undesired_contacts.weight=-0.5 \
+  --reward.terms.limits_dof_pos.weight=-100.0 \
+  --reward.terms.action_rate_l2.weight=-0.1 \
+  \
+  --reward.terms.motion_global_ref_position_error_exp.params.sigma=0.8 \
+  --reward.terms.motion_global_ref_position_error_exp.weight=0.2 \
+  --reward.terms.motion_global_ref_orientation_error_exp.params.sigma=1.0 \
+  --reward.terms.motion_global_ref_orientation_error_exp.weight=0.2 \
+  --reward.terms.motion_relative_body_position_error_exp.params.sigma=0.8 \
+  --reward.terms.motion_relative_body_position_error_exp.weight=0.4 \
+  --reward.terms.motion_relative_body_orientation_error_exp.params.sigma=0.8 \
+  --reward.terms.motion_relative_body_orientation_error_exp.weight=0.4 \
   --reward.terms.motion_global_body_lin_vel.params.sigma=2.0 \
-  --reward.terms.motion_global_body_lin_vel.weight=0.5 \
+  --reward.terms.motion_global_body_lin_vel.weight=0.3 \
   --reward.terms.motion_global_body_ang_vel.params.sigma=4.0 \
-  --reward.terms.motion_global_body_ang_vel.weight=0.5 \
-  --reward.terms.action_rate_l2.weight=-0.02 \
-  --reward.terms.undesired_contacts.weight=0.0 \
-  --reward.terms.limits_dof_pos.weight=-10.0 \
+  --reward.terms.motion_global_body_ang_vel.weight=0.3 \
   \
   --termination.terms.bad_tracking.params.bad_ref_pos_threshold=1.0 \
   --termination.terms.bad_tracking.params.bad_ref_ori_threshold=1.2 \

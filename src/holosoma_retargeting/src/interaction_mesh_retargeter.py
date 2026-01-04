@@ -245,7 +245,7 @@ class InteractionMeshRetargeter:
         color=(50, 150, 255),
         opacity=0.5,
         *,
-        use_convex_hull: bool = True,
+        use_convex_hull: bool = False,
     ):
         """
         Draw a MuJoCo mesh geom in viser.
@@ -338,21 +338,6 @@ class InteractionMeshRetargeter:
                 handle.visible = bool(visible)
             except Exception:
                 pass
-
-    def _clear_mjcf_geom_handles(self) -> None:
-        for attr in ("_mjcf_visual_handles", "_mjcf_collision_handles"):
-            handles = getattr(self, attr, None)
-            if not handles:
-                continue
-            for handle in handles:
-                try:
-                    handle.remove()
-                except Exception:
-                    try:
-                        handle.visible = False
-                    except Exception:
-                        pass
-            setattr(self, attr, [])
 
 
     def draw_mesh_pair_with_contact(
@@ -560,7 +545,6 @@ class InteractionMeshRetargeter:
         print("Saving results to path:", dest_res_path)
 
         if self.visualize:
-            self._clear_mjcf_geom_handles()
             robot_dof = len(self.viser_robot.get_actuated_joint_limits())
 
             create_motion_control_sliders(
@@ -684,7 +668,6 @@ class InteractionMeshRetargeter:
         print("Saving results to path:", dest_res_path)
 
         if self.visualize:
-            self._clear_mjcf_geom_handles()
             robot_dof = len(self.viser_robot.get_actuated_joint_limits())
 
             create_motion_control_sliders(
@@ -1545,3 +1528,4 @@ class InteractionMeshRetargeter:
             robot_link_positions.append(pos)
 
         return np.array(robot_link_positions)
+
