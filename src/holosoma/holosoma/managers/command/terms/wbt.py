@@ -425,10 +425,12 @@ class MotionCommand(CommandTermBase):
         target_dof_vel = dof_vel
 
         # 1.2.3 root_pos
-        target_root_pos = root_pos + (
-            torch.rand(root_pos.shape, device=self.device) - 0.5
-        ) * 2 * root_pos_noise.unsqueeze(0)  # (num_envs, 3)
-
+        pos_noise = torch.zeros_like(root_pos)
+        pos_noise[:, :2] = torch.rand(root_pos.shape, device=self.device)[:, :2] * root_pos_noise[:2].unsqueeze(0)
+        # z 轴你可以选择保持对称或不动
+        pos_noise[:, 2] = (torch.rand(root_pos.shape, device=self.device)[:, 2] - 0.5) * 2 * root_pos_noise[2]
+        target_root_pos = root_pos + pos_noise
+        
         # 1.2.4 root_rot
         rand_sample_rpy = (torch.rand((len(env_ids), 3), device=self.device) - 0.5) * 2 * root_rot_noise_rpy
         orientations_delta = quat_from_euler_xyz(

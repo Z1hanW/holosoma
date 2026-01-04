@@ -799,7 +799,7 @@ def main(cfg: RetargetingConfig) -> None:
             retargeter,
             toe_names,
             scale=1,
-            mat_height=0.14,
+            mat_height=0.17,
             object_poses=object_poses,
         )
 

@@ -28,6 +28,7 @@ CUDA_VISIBLE_DEVICES=5,6,7 torchrun --nproc_per_node=3 --master_port=$((29500 + 
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend=False \
   --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s=0 \
   --command.setup_terms.motion_command.params.motion_config.num_future_steps=10 \
+  --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale=0.77 \
   --command.setup_terms.motion_command.params.motion_config.target_pose_type=max-coords-future-rel-with-time \
   logger:wandb \
   --logger.video.interval=1000 \
