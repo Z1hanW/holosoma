@@ -242,6 +242,8 @@ def _load_motion_qpos(
         robot_body_names,
         robot_config.dof_names,
         device="cpu",
+        motion_clip_id=motion_cfg.motion_clip_id,
+        motion_clip_name=motion_cfg.motion_clip_name,
     )
 
     name_to_robot_idx = {name: idx for idx, name in enumerate(robot_config.dof_names)}
