@@ -8,6 +8,7 @@ from holosoma.managers.action import ActionManager
 from holosoma.managers.command import CommandManager
 from holosoma.managers.curriculum import CurriculumManager
 from holosoma.managers.observation import ObservationManager
+from holosoma.managers.perception import PerceptionManager
 from holosoma.managers.randomization import RandomizationManager
 from holosoma.managers.reset_events.manager import ResetEventManager
 from holosoma.managers.reward import RewardManager
@@ -42,6 +43,7 @@ class BaseTask:
         observation_config = tyro_config.observation
         simulator_config = tyro_config.simulator
         terrain_config = tyro_config.terrain
+        perception_config = tyro_config.perception
         robot_config = tyro_config.robot
         action_config = tyro_config.action
         reward_config = tyro_config.reward
@@ -131,6 +133,10 @@ class BaseTask:
         self._setup_robot_body_indices()
         self.simulator.prepare_sim()
 
+        self.perception_manager = None
+        if perception_config is not None:
+            self.perception_manager = PerceptionManager(perception_config, self, self.device)
+
         # if running with a viewer, set up keyboard shortcuts and camera
         self.viewer = None
         if not self.headless:
@@ -170,6 +176,8 @@ class BaseTask:
             self.curriculum_manager.setup()
         if self.terrain_manager is not None:
             self.terrain_manager.setup()
+        if self.perception_manager is not None:
+            self.perception_manager.setup()
 
         # Initialize reset manager from simulator config
         self.reset_manager = ResetEventManager(
@@ -237,6 +245,8 @@ class BaseTask:
 
         # Reset observation history BEFORE state changes (must happen first to clear history buffers)
         self.observation_manager.reset(env_ids)
+        if self.perception_manager is not None:
+            self.perception_manager.reset(env_ids)
 
         self._pending_episode_lengths[env_ids] = self.episode_length_buf[env_ids]
         self._pending_episode_update_mask[env_ids] = False
@@ -519,7 +529,8 @@ class BaseTask:
 
     def _pre_compute_observations_callback(self):
         """Hook invoked after physics but before observation terms compute (no-op by default)."""
-        return
+        if self.perception_manager is not None:
+            self.perception_manager.update()
 
     def _post_compute_observations_callback(self):
         """Hook invoked after observation buffers are produced (no-op by default)."""

@@ -40,6 +40,7 @@ class WholeBodyTrackingManager(BaseTask):
 
     def _pre_compute_observations_callback(self):
         self.base_quat[:] = self.simulator.base_quat[:]
+        super()._pre_compute_observations_callback()
 
     def _reset_buffers_callback(self, env_ids, target_buf=None):
         self.need_to_refresh_envs[env_ids] = True

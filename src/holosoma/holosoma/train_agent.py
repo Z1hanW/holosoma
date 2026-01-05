@@ -15,6 +15,7 @@ from loguru import logger
 from holosoma.config_types.env import get_tyro_env_config
 from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.config_values.experiment import AnnotatedExperimentConfig
+from holosoma.perception import apply_perception_overrides
 from holosoma.utils.config_utils import CONFIG_NAME
 from holosoma.utils.eval_utils import (
     init_sim_imports,
@@ -245,6 +246,8 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
                 f"Distributed training: GPU {distributed_conf['global_rank']} will run {tyro_config.training.num_envs} "
                 f"environments (total across all GPUs: {original_num_envs})"
             )
+
+        tyro_config = apply_perception_overrides(tyro_config)
 
         env_target = tyro_config.env_class
 

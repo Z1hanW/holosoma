@@ -132,6 +132,7 @@ class LeggedRobotLocomotionManager(BaseTask):
     def _pre_compute_observations_callback(self):
         # prepare quantities
         self.base_quat[:] = self.simulator.base_quat[:]
+        super()._pre_compute_observations_callback()
         self.terrain_manager.update_heights()
 
     def _update_tasks_callback(self):

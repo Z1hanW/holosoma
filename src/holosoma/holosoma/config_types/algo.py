@@ -48,6 +48,12 @@ class LayerConfig:
     encoder_obs_token_name: str | None = None
     """Optional input name for a transformer "current-obs" token."""
 
+    perception_input_name: str = ""
+    """Optional input name for perception encoder."""
+
+    perception_output_dim: int | None = None
+    """Output dimension for perception encoder."""
+
     input_channels: int = 1
     """Number of input channels. Only used for CNN modules."""
 

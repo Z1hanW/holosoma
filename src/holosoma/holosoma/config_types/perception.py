@@ -1,0 +1,45 @@
+"""Configuration types for perception sensors."""
+
+from __future__ import annotations
+
+from dataclasses import field
+
+from pydantic.dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class PerceptionConfig:
+    """Configuration for perception sensing and fusion."""
+
+    enabled: bool = False
+    """Enable perception sensors and policy fusion."""
+
+    output_mode: str = "heightmap"
+    """Perception output type: 'heightmap' or 'camera_depth'."""
+
+    grid_size: int = 11
+    """Number of samples per dimension for the heightmap grid."""
+
+    grid_interval: float = 0.1
+    """Grid spacing in meters between samples."""
+
+    ray_start_height: float = 0.6
+    """Height above the sampling plane to start rays (meters)."""
+
+    max_distance: float = 5.0
+    """Clamp distance for missed rays (meters)."""
+
+    update_hz: float = 50.0
+    """Perception update rate in Hz."""
+
+    use_heading_only: bool = True
+    """Rotate grid/rays using yaw only when True."""
+
+    camera_pitch_deg: float = -20.0
+    """Virtual camera pitch in degrees (negative tilts down)."""
+
+    sensor_offset: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    """Sensor offset from robot root in base frame (meters)."""
+
+    encoder_output_dim: int = 512
+    """Output dimension for the perception encoder."""

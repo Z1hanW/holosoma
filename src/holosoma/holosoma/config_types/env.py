@@ -8,6 +8,7 @@ from holosoma.config_types.curriculum import CurriculumManagerCfg
 from holosoma.config_types.experiment import ExperimentConfig, TrainingConfig
 from holosoma.config_types.logger import LoggerConfig
 from holosoma.config_types.observation import ObservationManagerCfg
+from holosoma.config_types.perception import PerceptionConfig
 from holosoma.config_types.randomization import RandomizationManagerCfg
 from holosoma.config_types.reward import RewardManagerCfg
 from holosoma.config_types.robot import RobotConfig
@@ -24,6 +25,7 @@ class EnvConfig:
 
     simulator: SimulatorConfig
     terrain: TerrainManagerCfg
+    perception: PerceptionConfig | None
     observation: ObservationManagerCfg | None
     action: ActionManagerCfg | None
     reward: RewardManagerCfg | None
@@ -54,6 +56,7 @@ def get_tyro_env_config(tyro_config: ExperimentConfig) -> EnvConfig:
         training=tyro_config.training,
         simulator=tyro_config.simulator,
         terrain=tyro_config.terrain,
+        perception=tyro_config.perception,
         observation=tyro_config.observation,
         action=tyro_config.action,
         reward=tyro_config.reward,

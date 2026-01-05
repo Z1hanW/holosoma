@@ -318,6 +318,19 @@ def build_mlp_layer(
     return nn.Sequential(*layers)
 
 
+class GatedLinearEncoder(nn.Module):
+    """Flatten + linear projection gated by a learned sigmoid."""
+
+    def __init__(self, input_dim: int, output_dim: int):
+        super().__init__()
+        self.proj = nn.Linear(input_dim, output_dim)
+        self.gate = nn.Linear(input_dim, output_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        flat = x.view(x.shape[0], -1)
+        return self.proj(flat) * torch.sigmoid(self.gate(flat))
+
+
 def build_cnn_layer(
     input_channels: int,
     input_height: int,
@@ -445,6 +458,22 @@ class BaseModule(nn.Module):
         self._calculate_output_dim()
         self._build_network_layer(self.module_config_dict)
 
+    def _setup_perception_encoder(self, layer_config: LayerConfig) -> int:
+        self.perception_encoder = None
+        self.perception_input_name = layer_config.perception_input_name
+        self.perception_output_dim = 0
+
+        if not self.perception_input_name:
+            return 0
+        if self.perception_input_name not in self.input_dim_dict:
+            raise ValueError(f"Unknown perception_input_name: {self.perception_input_name}")
+
+        input_dim = self.input_dim_dict[self.perception_input_name]
+        output_dim = layer_config.perception_output_dim or input_dim
+        self.perception_encoder = GatedLinearEncoder(input_dim, output_dim)
+        self.perception_output_dim = output_dim
+        return output_dim
+
     def _calculate_input_dim(self):
         # calculate input dimension and input slices
         self.input_dim = 0
@@ -488,6 +517,8 @@ class BaseModule(nn.Module):
         layer_type = module_config.type
         layer_config = module_config.layer_config
         if layer_type == "MLP":
+            if layer_config.perception_input_name:
+                raise ValueError("perception_input_name is not supported for MLP modules.")
             self.module = build_mlp_layer(
                 self.input_dim,
                 layer_config.hidden_dims,
@@ -495,6 +526,7 @@ class BaseModule(nn.Module):
                 layer_config,
             )
         elif layer_type == "CNNEncoder":
+            perception_output_dim = self._setup_perception_encoder(layer_config)
             self.encoder = build_cnn_layer(
                 layer_config.input_channels,
                 layer_config.input_height,
@@ -509,12 +541,13 @@ class BaseModule(nn.Module):
             encoder_output_dim = self.encoder.output_size
             mlp_input_dim = sum(self.input_dim_dict[each_input] for each_input in layer_config.module_input_name)
             self.module = build_mlp_layer(
-                mlp_input_dim + encoder_output_dim,
+                mlp_input_dim + encoder_output_dim + perception_output_dim,
                 layer_config.hidden_dims,
                 self.output_dim,
                 layer_config,
             )
         elif layer_type == "MLPEncoder":
+            perception_output_dim = self._setup_perception_encoder(layer_config)
             encoder_output_dim = (
                 layer_config.encoder_output_dim
                 if layer_config.encoder_hidden_dims is not None
@@ -528,12 +561,13 @@ class BaseModule(nn.Module):
             )
             mlp_input_dim = sum(self.input_dim_dict[each_input] for each_input in layer_config.module_input_name)
             self.module = build_mlp_layer(
-                mlp_input_dim + encoder_output_dim,
+                mlp_input_dim + encoder_output_dim + perception_output_dim,
                 layer_config.hidden_dims,
                 self.output_dim,
                 layer_config,
             )
         elif layer_type == "TransformerEncoder":
+            perception_output_dim = self._setup_perception_encoder(layer_config)
             if layer_config.encoder_num_steps is None:
                 raise ValueError("encoder_num_steps must be set for TransformerEncoder modules.")
             encoder_input_dim = self.input_dim_dict[layer_config.encoder_input_name]
@@ -558,12 +592,13 @@ class BaseModule(nn.Module):
             )
             mlp_input_dim = sum(self.input_dim_dict[each_input] for each_input in layer_config.module_input_name)
             self.module = build_mlp_layer(
-                mlp_input_dim + encoder_output_dim,
+                mlp_input_dim + encoder_output_dim + perception_output_dim,
                 layer_config.hidden_dims,
                 self.output_dim,
                 layer_config,
             )
         elif layer_type == "TransformerObsTokenEncoder":
+            perception_output_dim = self._setup_perception_encoder(layer_config)
             if layer_config.encoder_num_steps is None:
                 raise ValueError("encoder_num_steps must be set for TransformerObsTokenEncoder modules.")
             if layer_config.encoder_obs_token_name is None:
@@ -594,7 +629,19 @@ class BaseModule(nn.Module):
             )
             mlp_input_dim = sum(self.input_dim_dict[each_input] for each_input in layer_config.module_input_name)
             self.module = build_mlp_layer(
-                mlp_input_dim + encoder_output_dim,
+                mlp_input_dim + encoder_output_dim + perception_output_dim,
+                layer_config.hidden_dims,
+                self.output_dim,
+                layer_config,
+            )
+        elif layer_type == "MLPPerceptionEncoder":
+            perception_output_dim = self._setup_perception_encoder(layer_config)
+            if perception_output_dim == 0:
+                raise ValueError("perception_input_name must be set for MLPPerceptionEncoder modules.")
+            self.encoder = None
+            mlp_input_dim = sum(self.input_dim_dict[each_input] for each_input in layer_config.module_input_name)
+            self.module = build_mlp_layer(
+                mlp_input_dim + perception_output_dim,
                 layer_config.hidden_dims,
                 self.output_dim,
                 layer_config,

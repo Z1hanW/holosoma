@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Sequence
 
 import torch
@@ -578,6 +579,17 @@ class SymmetryUtils:
         requires a per-body mapping, so we keep it unchanged for now.
         """
         return motion_future_target_poses
+
+    def mirror_obs_perception(self, perception: torch.Tensor) -> torch.Tensor:
+        """Mirror perception grids by flipping the lateral axis."""
+        flat = perception.reshape(-1, perception.shape[-1])
+        dim = flat.shape[-1]
+        side = int(math.sqrt(dim))
+        if side * side != dim:
+            return perception
+        grid = flat.view(-1, side, side)
+        mirrored = torch.flip(grid, dims=[2])
+        return mirrored.view(perception.shape)
 
     def mirror_obs_ee_apply_force(self, ee_apply_force: torch.Tensor) -> torch.Tensor:
         """Mirrors the end-effector applied forces in base frame.

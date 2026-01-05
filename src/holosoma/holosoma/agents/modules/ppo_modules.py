@@ -131,11 +131,16 @@ class PPOActorEncoder(PPOActor):
         self.module_input_name = module_config_dict.layer_config.module_input_name
         self.encoder_input_name = module_config_dict.layer_config.encoder_input_name
         self.encoder_obs_token_name = module_config_dict.layer_config.encoder_obs_token_name
+        self.perception_input_name = module_config_dict.layer_config.perception_input_name
 
     def _get_input(self, actor_obs: torch.Tensor) -> torch.Tensor:
         if actor_obs.shape[-1] != self.actor_module.input_dim:
             raise ValueError(f"Actor Obs must be {self.actor_module.input_dim}, got {actor_obs.shape[-1]}")
-        self.encoder_obs = actor_obs[..., self.actor_module.input_indices_dict[self.encoder_input_name]]
+        self.encoder_obs = (
+            actor_obs[..., self.actor_module.input_indices_dict[self.encoder_input_name]]
+            if self.encoder_input_name
+            else None
+        )
         if self.encoder_obs_token_name:
             obs_token = actor_obs[..., self.actor_module.input_indices_dict[self.encoder_obs_token_name]]
             self.actor_encoder_obs = (
@@ -145,8 +150,18 @@ class PPOActorEncoder(PPOActor):
             )
         else:
             self.actor_encoder_obs = (
-                self.actor_module.encoder(self.encoder_obs) if self.actor_module.encoder is not None else self.encoder_obs
+                self.actor_module.encoder(self.encoder_obs)
+                if self.actor_module.encoder is not None and self.encoder_obs is not None
+                else self.encoder_obs
             )
+
+        parts = []
+        if self.actor_encoder_obs is not None:
+            parts.append(self.actor_encoder_obs)
+        perception_encoder = getattr(self.actor_module, "perception_encoder", None)
+        if perception_encoder is not None and self.perception_input_name:
+            perception_obs = actor_obs[..., self.actor_module.input_indices_dict[self.perception_input_name]]
+            parts.append(perception_encoder(perception_obs))
 
         if self.module_input_name:
             self.actor_state_obs = torch.cat(
@@ -156,8 +171,11 @@ class PPOActorEncoder(PPOActor):
                 ],
                 -1,
             )
-            return torch.cat((self.actor_encoder_obs, self.actor_state_obs), dim=-1)
-        return self.actor_encoder_obs
+            parts.append(self.actor_state_obs)
+
+        if len(parts) == 1:
+            return parts[0]
+        return torch.cat(parts, dim=-1)
 
     def act(self, policy_state_dict):
         actor_obs = policy_state_dict["actor_obs"]
@@ -176,11 +194,16 @@ class PPOCriticEncoder(PPOCritic):
         self.module_input_name = module_config_dict.layer_config.module_input_name
         self.encoder_input_name = module_config_dict.layer_config.encoder_input_name
         self.encoder_obs_token_name = module_config_dict.layer_config.encoder_obs_token_name
+        self.perception_input_name = module_config_dict.layer_config.perception_input_name
 
     def _get_input(self, critic_obs: torch.Tensor) -> torch.Tensor:
         if critic_obs.shape[-1] != self.critic_module.input_dim:
             raise ValueError(f"Critic Obs must be {self.critic_module.input_dim}, got {critic_obs.shape[-1]}")
-        self.encoder_obs = critic_obs[..., self.critic_module.input_indices_dict[self.encoder_input_name]]
+        self.encoder_obs = (
+            critic_obs[..., self.critic_module.input_indices_dict[self.encoder_input_name]]
+            if self.encoder_input_name
+            else None
+        )
         if self.encoder_obs_token_name:
             obs_token = critic_obs[..., self.critic_module.input_indices_dict[self.encoder_obs_token_name]]
             self.critic_encoder_obs = (
@@ -191,9 +214,18 @@ class PPOCriticEncoder(PPOCritic):
         else:
             self.critic_encoder_obs = (
                 self.critic_module.encoder(self.encoder_obs)
-                if self.critic_module.encoder is not None
+                if self.critic_module.encoder is not None and self.encoder_obs is not None
                 else self.encoder_obs
             )
+
+        parts = []
+        if self.critic_encoder_obs is not None:
+            parts.append(self.critic_encoder_obs)
+
+        perception_encoder = getattr(self.critic_module, "perception_encoder", None)
+        if perception_encoder is not None and self.perception_input_name:
+            perception_obs = critic_obs[..., self.critic_module.input_indices_dict[self.perception_input_name]]
+            parts.append(perception_encoder(perception_obs))
 
         if self.module_input_name:
             self.critic_state_obs = torch.cat(
@@ -203,8 +235,11 @@ class PPOCriticEncoder(PPOCritic):
                 ],
                 -1,
             )
-            return torch.cat((self.critic_encoder_obs, self.critic_state_obs), dim=-1)
-        return self.critic_encoder_obs
+            parts.append(self.critic_state_obs)
+
+        if len(parts) == 1:
+            return parts[0]
+        return torch.cat(parts, dim=-1)
 
     def evaluate(self, policy_state_dict):
         critic_obs = policy_state_dict["critic_obs"]
