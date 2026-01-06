@@ -57,6 +57,11 @@ class BasePolicy:
         # Initialize latency tracking
         self._init_latency_tracking()
 
+        self.last_robot_state_data = None
+        self._viser_viewer = None
+        self._viser_update_interval = 1
+        self._viser_step_count = 0
+
     # ============================================================================
     # Initialization Methods
     # ============================================================================
@@ -303,6 +308,19 @@ class BasePolicy:
         """Initialize input handlers (ROS, joystick, keyboard)."""
         self._init_rate_handler()
         self._init_input_device()
+
+    def attach_viser(self, viewer, update_interval: int = 1) -> None:
+        """Attach a Viser viewer for optional visualization."""
+        self._viser_viewer = viewer
+        self._viser_update_interval = max(1, int(update_interval))
+        self._viser_step_count = 0
+
+    def _maybe_update_viser(self) -> None:
+        if self._viser_viewer is None or self.last_robot_state_data is None:
+            return
+        if self._viser_step_count % self._viser_update_interval == 0:
+            self._viser_viewer.update(self.last_robot_state_data)
+        self._viser_step_count += 1
 
     def _init_rate_handler(self):
         """Initialize ROS handler if enabled."""
@@ -566,6 +584,7 @@ class BasePolicy:
         # Stage 1: Read State
         with self.latency_tracker.measure("read_state"):
             robot_state_data = self.interface.get_low_state()
+            self.last_robot_state_data = robot_state_data
 
         # Stage 2: Pre-processing
         with self.latency_tracker.measure("preprocessing"):
@@ -799,6 +818,7 @@ class BasePolicy:
                     self.update_phase_time()
 
                 self.policy_action()
+                self._maybe_update_viser()
 
                 self.latency_tracker.end_cycle()
 
