@@ -90,16 +90,16 @@ class MotionConfig:
     motion_file: str
     """Motion file (.npz or .h5) that contains motion clips to track."""
 
+    body_name_ref: list[str]
+    """Body name of the reference frame (in general, torso_link). """
+    body_names_to_track: list[str]
+    """Key body names to track, used for reward/termination computation."""
+
     motion_clip_id: int | None = None
     """Optional clip index inside an HDF5 motion bank."""
 
     motion_clip_name: str | None = None
     """Optional clip name inside an HDF5 motion bank (overrides motion_clip_id)."""
-
-    body_name_ref: list[str]
-    """Body name of the reference frame (in general, torso_link). """
-    body_names_to_track: list[str]
-    """Key body names to track, used for reward/termination computation."""
 
     # motion sampling related
     use_adaptive_timesteps_sampler: bool = False
