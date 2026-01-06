@@ -1,14 +1,38 @@
-python src/holosoma/holosoma/eval_agent.py \
-  --checkpoint=./model_01200.pt \
-  --training.num_envs=1 \
-  --sim2sim.enabled True \
-  --sim2sim.simulator mujoco \
-  --sim2sim.auto-launch True \
-  terrain:terrain-load-obj \
-  --terrain.terrain-term.spawn.randomize_tiles=False \
-  --terrain.terrain-term.obj-file-path stairs.obj \
-  --command.setup_terms.motion_command.params.motion_config.motion_file far_robot_mj.npz \
-  --command.setup_terms.motion_command.params.motion_config.enable_default_pose_append=False \
-  --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s=0 \
-  --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend=False \
-  --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s=0
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Run in two terminals:
+#   Terminal 1: ./eval_terrain_sim2sim.sh sim
+#   Terminal 2: ./eval_terrain_sim2sim.sh policy
+
+MODEL_PATH=${MODEL_PATH:-"/ABS/PATH/to/your_wbt_policy.onnx"}
+OBJ_PATH=${OBJ_PATH:-"stairs.obj"}
+
+if [[ "${1:-}" == "sim" ]]; then
+  source scripts/source_mujoco_setup.sh
+  python src/holosoma/holosoma/run_sim.py \
+    simulator:mujoco \
+    robot:g1-29dof \
+    terrain:terrain-load-obj \
+    --terrain.terrain-term.spawn.randomize_tiles=False \
+    --terrain.terrain-term.obj-file-path "${OBJ_PATH}"
+  exit 0
+fi
+
+if [[ "${1:-}" == "policy" ]]; then
+  if [[ "${MODEL_PATH}" == "/ABS/PATH/to/your_wbt_policy.onnx" ]]; then
+    echo "Set MODEL_PATH to your WBT ONNX model path." >&2
+    exit 1
+  fi
+  source scripts/source_inference_setup.sh
+  python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29dof-wbt \
+    --task.model-path "${MODEL_PATH}" \
+    --task.no-use-joystick \
+    --task.use-sim-time \
+    --task.rl-rate 50 \
+    --task.interface lo
+  exit 0
+fi
+
+echo "Usage: $0 {sim|policy}" >&2
+exit 1
