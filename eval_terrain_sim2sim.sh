@@ -5,11 +5,11 @@ set -euo pipefail
 #   Terminal 1: ./eval_terrain_sim2sim.sh sim
 #   Terminal 2: MODEL_PATH=/ABS/PATH/to/your_wbt_policy.onnx ./eval_terrain_sim2sim.sh policy
 #
-# Optional overrides for manual XY placement:
+# Optional overrides:
+#   ROBOT_XML=/ABS/PATH/to/scene.xml ./eval_terrain_sim2sim.sh sim
 #   ROBOT_X=0.0 ROBOT_Y=0.0 ROBOT_Z=0.8 GANTRY_Z=3.0 ./eval_terrain_sim2sim.sh sim
 
 MODEL_PATH=${MODEL_PATH:-"/ABS/PATH/to/your_wbt_policy.onnx"}
-OBJ_PATH=${OBJ_PATH:-"stairs.obj"}
 ROBOT_XML=${ROBOT_XML:-""}
 
 ROBOT_X=${ROBOT_X:-""}
@@ -23,11 +23,7 @@ if [[ "${1:-}" == "sim" ]]; then
     python src/holosoma/holosoma/run_sim.py
     simulator:mujoco
     robot:g1-29dof
-    terrain:terrain-load-obj
-    --terrain.terrain-term.spawn.randomize_tiles=False
-    --terrain.terrain-term.num-rows 1
-    --terrain.terrain-term.num-cols 1
-    --terrain.terrain-term.obj-file-path "${OBJ_PATH}"
+    terrain:terrain-locomotion-plane
   )
   if [[ -n "${ROBOT_XML}" ]]; then
     cmd+=(--robot.asset.xml_file "${ROBOT_XML}")
