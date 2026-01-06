@@ -44,6 +44,7 @@ class MotionLoader:
     ):
         # Resolve the motion file path using importlib.resources
         motion_file = resolve_data_file_path(motion_file)
+        motion_path = Path(motion_file)
 
         logger.info(f"Loading motion file: {motion_file}")
         self.clip_ids: list[str] = []
@@ -52,7 +53,14 @@ class MotionLoader:
         self.num_clips = 0
         self.motion_clip_id = motion_clip_id
         self.motion_clip_name = motion_clip_name
-        if motion_file.endswith((".h5", ".hdf5")):
+        if motion_path.is_dir():
+            body_names_in_motion_data, joint_names_in_motion_data = self._load_data_from_motion_npz_dir(
+                motion_path,
+                device,
+                motion_clip_id=motion_clip_id,
+                motion_clip_name=motion_clip_name,
+            )
+        elif motion_file.endswith((".h5", ".hdf5")):
             body_names_in_motion_data, joint_names_in_motion_data = self._load_data_from_motion_h5(
                 motion_file,
                 device,
@@ -126,6 +134,158 @@ class MotionLoader:
         clip_id = Path(motion_file).stem
         length = int(self._joint_pos.shape[0])
         self._set_clip_metadata([clip_id], np.array([0]), np.array([length]), device)
+        return body_names, joint_names
+
+    def _load_data_from_motion_npz_dir(
+        self,
+        motion_dir: Path,
+        device: str,
+        motion_clip_id: int | None,
+        motion_clip_name: str | None,
+    ) -> tuple[list[str], list[str]]:
+        files = sorted(motion_dir.glob("*.npz"))
+        if not files:
+            raise FileNotFoundError(f"No .npz files found in motion directory: {motion_dir}")
+
+        if motion_clip_name is not None:
+            matches = [path for path in files if path.stem == motion_clip_name]
+            if not matches:
+                raise ValueError(f"Clip name '{motion_clip_name}' not found in {motion_dir}")
+            files = matches
+        elif motion_clip_id is not None:
+            clip_idx = int(motion_clip_id)
+            if clip_idx < 0 or clip_idx >= len(files):
+                raise IndexError(f"Clip index {clip_idx} out of range for {motion_dir}")
+            files = [files[clip_idx]]
+
+        if len(files) == 1:
+            return self._load_data_from_motion_npz(str(files[0]), device)
+
+        required_keys = (
+            "joint_pos",
+            "joint_vel",
+            "body_pos_w",
+            "body_quat_w",
+            "body_lin_vel_w",
+            "body_ang_vel_w",
+            "joint_names",
+            "body_names",
+            "fps",
+        )
+        object_keys = ("object_pos_w", "object_quat_w", "object_lin_vel_w")
+
+        joint_names: list[str] = []
+        body_names: list[str] = []
+        fps_ref: float | None = None
+        has_object: bool | None = None
+
+        clip_ids: list[str] = []
+        offsets: list[int] = []
+        lengths: list[int] = []
+        offset = 0
+
+        joint_pos_list: list[np.ndarray] = []
+        joint_vel_list: list[np.ndarray] = []
+        body_pos_list: list[np.ndarray] = []
+        body_quat_list: list[np.ndarray] = []
+        body_lin_vel_list: list[np.ndarray] = []
+        body_ang_vel_list: list[np.ndarray] = []
+        object_pos_list: list[np.ndarray] = []
+        object_quat_list: list[np.ndarray] = []
+        object_lin_vel_list: list[np.ndarray] = []
+
+        for file_path in files:
+            with np.load(file_path, allow_pickle=True) as data:
+                missing = [key for key in required_keys if key not in data]
+                if missing:
+                    raise KeyError(f"Missing keys in {file_path}: {missing}")
+
+                clip_has_object = "object_pos_w" in data
+                if clip_has_object:
+                    for key in object_keys:
+                        if key not in data:
+                            raise KeyError(f"Missing object key '{key}' in {file_path}")
+                if has_object is None:
+                    has_object = clip_has_object
+                elif has_object != clip_has_object:
+                    raise ValueError("Object fields are inconsistent across clips.")
+
+                joint_names_clip = self._decode_h5_strings(np.asarray(data["joint_names"]))
+                body_names_clip = self._decode_h5_strings(np.asarray(data["body_names"]))
+                if not joint_names:
+                    joint_names = joint_names_clip
+                elif joint_names_clip != joint_names:
+                    raise ValueError(f"Joint names mismatch in {file_path}")
+                if not body_names:
+                    body_names = body_names_clip
+                elif body_names_clip != body_names:
+                    raise ValueError(f"Body names mismatch in {file_path}")
+
+                fps_arr = np.array(data["fps"]).reshape(-1)
+                fps = float(fps_arr[0]) if fps_arr.size > 0 else 30.0
+                if fps_ref is None:
+                    fps_ref = fps
+                elif abs(fps_ref - fps) > 1e-6:
+                    raise ValueError(f"FPS mismatch in {file_path}: {fps} != {fps_ref}")
+
+                joint_pos = np.asarray(data["joint_pos"])
+                length = int(joint_pos.shape[0])
+
+                clip_ids.append(file_path.stem)
+                offsets.append(offset)
+                lengths.append(length)
+                offset += length
+
+                joint_pos_list.append(joint_pos)
+                joint_vel_list.append(np.asarray(data["joint_vel"]))
+                body_pos_list.append(np.asarray(data["body_pos_w"]))
+                body_quat_list.append(np.asarray(data["body_quat_w"]))
+                body_lin_vel_list.append(np.asarray(data["body_lin_vel_w"]))
+                body_ang_vel_list.append(np.asarray(data["body_ang_vel_w"]))
+
+                if clip_has_object:
+                    object_pos_list.append(np.asarray(data["object_pos_w"]))
+                    object_quat_list.append(np.asarray(data["object_quat_w"]))
+                    object_lin_vel_list.append(np.asarray(data["object_lin_vel_w"]))
+
+        self.fps = float(fps_ref) if fps_ref is not None else 30.0
+        self._set_clip_metadata(clip_ids, np.array(offsets), np.array(lengths), device)
+
+        joint_pos = np.concatenate(joint_pos_list, axis=0)
+        joint_vel = np.concatenate(joint_vel_list, axis=0)
+        body_pos_w = np.concatenate(body_pos_list, axis=0)
+        body_quat_w = np.concatenate(body_quat_list, axis=0)
+        body_lin_vel_w = np.concatenate(body_lin_vel_list, axis=0)
+        body_ang_vel_w = np.concatenate(body_ang_vel_list, axis=0)
+
+        self._joint_pos = torch.tensor(joint_pos[:, 7:], dtype=torch.float32, device=device)
+        self._joint_vel = torch.tensor(joint_vel[:, 6:], dtype=torch.float32, device=device)
+        assert len(joint_names) == self._joint_pos.shape[1], "Joint names in motion data does not match"
+
+        self._body_pos_w = torch.tensor(body_pos_w, dtype=torch.float32, device=device)
+        assert len(body_names) == self._body_pos_w.shape[1], "Body names in motion data does not match"
+
+        body_quat_w_wxyz = torch.tensor(body_quat_w, dtype=torch.float32, device=device)
+        self._body_quat_w = body_quat_w_wxyz[:, :, [1, 2, 3, 0]]
+
+        self._body_lin_vel_w = torch.tensor(body_lin_vel_w, dtype=torch.float32, device=device)
+        self._body_ang_vel_w = torch.tensor(body_ang_vel_w, dtype=torch.float32, device=device)
+
+        self.has_object = bool(has_object)
+        if self.has_object:
+            object_pos_w = np.concatenate(object_pos_list, axis=0)
+            object_quat_w = np.concatenate(object_quat_list, axis=0)
+            object_lin_vel_w = np.concatenate(object_lin_vel_list, axis=0)
+
+            self._object_pos_w = torch.tensor(object_pos_w, dtype=torch.float32, device=device)
+            object_quat_w = torch.tensor(object_quat_w, dtype=torch.float32, device=device)
+            self._object_quat_w = object_quat_w[:, [1, 2, 3, 0]]
+            self._object_lin_vel_w = torch.tensor(object_lin_vel_w, dtype=torch.float32, device=device)
+        else:
+            self._object_pos_w = torch.zeros(0, 3, device=device)
+            self._object_quat_w = torch.zeros(0, 4, device=device)
+            self._object_lin_vel_w = torch.zeros(0, 3, device=device)
+
         return body_names, joint_names
 
     @staticmethod
@@ -491,13 +651,23 @@ class MotionCommand(CommandTermBase):
                 self.motion.time_step_total, self.device, int(1 / (self._env.dt))
             )
 
-        # 5. metrics
+        # 5. clip sampling configuration
+        self.clip_weighting_strategy = self.motion_cfg.clip_weighting_strategy
+        self.min_weight_factor = self.motion_cfg.min_weight_factor
+        self.max_weight_factor = self.motion_cfg.max_weight_factor
+        self._clip_sampling_weights: torch.Tensor | None = None
+        self._base_clip_weights: torch.Tensor | None = None
+        self._clip_success_counts: torch.Tensor | None = None
+        self._clip_total_counts: torch.Tensor | None = None
+
+        # 6. metrics
         self.metrics: dict[str, torch.Tensor] = {}
 
         self._configure_target_pose_settings()
+        self._init_clip_sampling()
         self.init_buffers()
 
-        # 6. visualization markers for isaacsim
+        # 7. visualization markers for isaacsim
         if self._env.viewer and self._env.simulator.get_simulator_type() == SimulatorType.ISAACSIM:
             self._setup_visualization_markers_for_isaacsim()
 
@@ -508,12 +678,18 @@ class MotionCommand(CommandTermBase):
             return
 
         if self.multi_clip:
+            self._update_clip_success_stats(env_ids)
             if self._env.is_evaluating:
                 self.clip_ids[env_ids] = 0
             else:
-                self.clip_ids[env_ids] = torch.randint(
-                    0, self.motion.num_clips, (env_ids.numel(),), device=self.device
-                )
+                if self._clip_sampling_weights is None:
+                    self.clip_ids[env_ids] = torch.randint(
+                        0, self.motion.num_clips, (env_ids.numel(),), device=self.device
+                    )
+                else:
+                    self.clip_ids[env_ids] = torch.multinomial(
+                        self._clip_sampling_weights, env_ids.numel(), replacement=True
+                    )
         else:
             self.clip_ids[env_ids] = 0
 
@@ -527,8 +703,9 @@ class MotionCommand(CommandTermBase):
             phase = torch.zeros_like(phase)
 
         clip_lengths = self._current_clip_lengths(env_ids)
-        max_start = torch.clamp(clip_lengths - 1, min=1)
-        self.time_steps[env_ids] = (phase * max_start).long()
+        start_margin = self._min_start_margin_steps()
+        valid_starts = torch.clamp(clip_lengths - start_margin, min=1)
+        self.time_steps[env_ids] = (phase * valid_starts).long()
 
         # Handle start_at_timestep_zero_prob
         prob = self.motion_cfg.start_at_timestep_zero_prob
@@ -746,6 +923,87 @@ class MotionCommand(CommandTermBase):
         clip_lengths = self._current_clip_lengths()
         return self.time_steps >= (clip_lengths - 2)
 
+    def _min_start_margin_steps(self) -> int:
+        """Ensure enough frames for stepping + future target poses."""
+        return max(2, int(self.num_future_steps))
+
+    def _valid_start_counts(self) -> torch.Tensor:
+        margin = self._min_start_margin_steps()
+        valid = self.motion.clip_lengths - margin
+        valid = torch.clamp(valid, min=1)
+        return valid.to(dtype=torch.float32)
+
+    def _init_clip_sampling(self) -> None:
+        if not self.multi_clip:
+            return
+        strategy = self.clip_weighting_strategy
+        if strategy == "uniform_step":
+            weights = self._valid_start_counts()
+        elif strategy in ("uniform_clip", "success_rate_adaptive"):
+            weights = torch.ones(self.motion.num_clips, device=self.device, dtype=torch.float32)
+        else:
+            raise ValueError(f"Unknown clip_weighting_strategy '{strategy}'.")
+
+        weights = weights / weights.sum()
+        self._clip_sampling_weights = weights
+
+        if strategy == "success_rate_adaptive":
+            self._base_clip_weights = weights.clone()
+            self._clip_success_counts = torch.zeros(self.motion.num_clips, device=self.device)
+            self._clip_total_counts = torch.zeros(self.motion.num_clips, device=self.device)
+
+    def _update_clip_success_stats(self, env_ids: torch.Tensor) -> None:
+        if not self.multi_clip or self.clip_weighting_strategy != "success_rate_adaptive":
+            return
+        if self._env.is_evaluating:
+            return
+        if self._clip_success_counts is None or self._clip_total_counts is None:
+            return
+        if env_ids.numel() == 0:
+            return
+
+        episode_lengths = self._env.episode_length_buf[env_ids]
+        valid_mask = episode_lengths > 0
+        if not torch.any(valid_mask):
+            return
+
+        valid_env_ids = env_ids[valid_mask]
+        clip_ids = self.clip_ids[valid_env_ids]
+        successes = self.motion_end_mask()[valid_env_ids].to(dtype=torch.float32)
+
+        ones = torch.ones_like(successes)
+        self._clip_total_counts.index_add_(0, clip_ids, ones)
+        self._clip_success_counts.index_add_(0, clip_ids, successes)
+        self._refresh_adaptive_clip_weights()
+
+    def _refresh_adaptive_clip_weights(self) -> None:
+        if self.clip_weighting_strategy != "success_rate_adaptive":
+            return
+        if self._clip_total_counts is None or self._clip_success_counts is None:
+            return
+        if self._base_clip_weights is None:
+            return
+
+        total = self._clip_total_counts
+        success = self._clip_success_counts
+        valid_mask = total > 0
+
+        inv_success = torch.ones_like(total)
+        if torch.any(valid_mask):
+            success_rates = torch.zeros_like(total)
+            success_rates[valid_mask] = success[valid_mask] / total[valid_mask]
+            inv_success[valid_mask] = 1.0 / (success_rates[valid_mask] + 0.05)
+            mean_inv = inv_success[valid_mask].mean()
+            if mean_inv > 1e-6:
+                inv_success = inv_success / mean_inv
+
+        factors = torch.clamp(inv_success, self.min_weight_factor, self.max_weight_factor)
+        weights = self._base_clip_weights * factors
+        if weights.sum() > 1e-9:
+            self._clip_sampling_weights = weights / weights.sum()
+        else:
+            self._clip_sampling_weights = self._base_clip_weights.clone()
+
     @property
     def command(self) -> torch.Tensor:
         return torch.cat([self.joint_pos, self.joint_vel], dim=1)
@@ -933,6 +1191,13 @@ class MotionCommand(CommandTermBase):
 
         if self.use_adaptive_timesteps_sampler:
             self.adaptive_timesteps_sampler.init_buffers()
+
+        if self._clip_success_counts is not None:
+            self._clip_success_counts.zero_()
+        if self._clip_total_counts is not None:
+            self._clip_total_counts.zero_()
+        if self.clip_weighting_strategy == "success_rate_adaptive" and self._base_clip_weights is not None:
+            self._clip_sampling_weights = self._base_clip_weights.clone()
 
     def update_metrics(self):
         """Update the metrics. After action, before step() is called."""

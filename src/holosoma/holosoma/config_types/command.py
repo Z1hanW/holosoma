@@ -113,6 +113,21 @@ class MotionConfig:
     This makes the robot practice holding the initial pose. Only applies when episode starts at timestep 0.
     Sampled independently each policy step; expected wait is roughly 1 / (1 - p) steps before unfreezing."""
 
+    clip_weighting_strategy: str = "uniform_clip"
+    """Sampling strategy across clips when a motion bank is loaded.
+
+    Options:
+      - "uniform_clip": each clip gets equal probability.
+      - "uniform_step": clips are weighted by valid start steps (length-aware).
+      - "success_rate_adaptive": clip weights adapt inversely to success rate.
+    """
+
+    min_weight_factor: float = 1.0 / 3.0
+    """Minimum weight multiplier for adaptive clip weighting."""
+
+    max_weight_factor: float = 3.0
+    """Maximum weight multiplier for adaptive clip weighting."""
+
     enable_default_pose_prepend: bool = True
     """If True, pre-append interpolated frames from default pose to the motion's first pose.
     This provides a smooth transition trajectory that the policy can track."""
