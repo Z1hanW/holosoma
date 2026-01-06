@@ -10,6 +10,7 @@ set -euo pipefail
 
 MODEL_PATH=${MODEL_PATH:-"/ABS/PATH/to/your_wbt_policy.onnx"}
 OBJ_PATH=${OBJ_PATH:-"stairs.obj"}
+ROBOT_XML=${ROBOT_XML:-""}
 
 ROBOT_X=${ROBOT_X:-""}
 ROBOT_Y=${ROBOT_Y:-""}
@@ -28,6 +29,9 @@ if [[ "${1:-}" == "sim" ]]; then
     --terrain.terrain-term.num-cols 1
     --terrain.terrain-term.obj-file-path "${OBJ_PATH}"
   )
+  if [[ -n "${ROBOT_XML}" ]]; then
+    cmd+=(--robot.asset.xml_file "${ROBOT_XML}")
+  fi
   if [[ -n "${ROBOT_X}" && -n "${ROBOT_Y}" ]]; then
     cmd+=(
       --robot.init-state.pos "${ROBOT_X}" "${ROBOT_Y}" "${ROBOT_Z}"
