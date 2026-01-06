@@ -4,15 +4,18 @@ set -euo pipefail
 MODEL_PATH="./2100.onnx"
 OBJ_PATH="stairs.obj"
 
-if [[ "${1:-}" == "sim" ]]; then
-  python src/holosoma/holosoma/run_sim.py \
-    simulator:mujoco \
-    robot:g1-29dof \
-    terrain:terrain-load-obj \
-    --terrain.terrain-term.spawn.randomize_tiles=False \
-    --terrain.terrain-term.obj-file-path "${OBJ_PATH}"
-  exit 0
-fi
+
+python src/holosoma/holosoma/run_sim.py \
+  simulator:mujoco \
+  robot:g1-29dof \
+  terrain:terrain-load-obj \
+  --terrain.terrain-term.spawn.randomize_tiles=False \
+  --terrain.terrain-term.obj-file-path "${OBJ_PATH}" \
+  --terrain.terrain-term.num-rows 1 \
+  --terrain.terrain-term.num-cols 1 \
+  --robot.init-state.pos 1.2 -1.4 0.8 \
+
+
 
 if [[ "${1:-}" == "policy" ]]; then
   if [[ "${MODEL_PATH}" == "/ABS/PATH/to/your_wbt_policy.onnx" ]]; then
