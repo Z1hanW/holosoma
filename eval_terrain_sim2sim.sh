@@ -1,15 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run in two terminals:
-#   Terminal 1: ./eval_terrain_sim2sim.sh sim
-#   Terminal 2: ./eval_terrain_sim2sim.sh policy
-
-MODEL_PATH=${MODEL_PATH:-"/ABS/PATH/to/your_wbt_policy.onnx"}
-OBJ_PATH=${OBJ_PATH:-"stairs.obj"}
+MODEL_PATH="./2100.onnx"
+OBJ_PATH="stairs.obj"
 
 if [[ "${1:-}" == "sim" ]]; then
-  source scripts/source_mujoco_setup.sh
   python src/holosoma/holosoma/run_sim.py \
     simulator:mujoco \
     robot:g1-29dof \

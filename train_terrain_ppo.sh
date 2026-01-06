@@ -10,7 +10,6 @@ CUDA_VISIBLE_DEVICES=5,6,7 torchrun --nproc_per_node=3 --master_port=$((29500 + 
   --algo.config.module_dict.critic.type=MLP \
   --algo.config.module_dict.actor.layer_config.encoder_num_steps=10 \
   --algo.config.module_dict.actor.layer_config.encoder_obs_token_name=actor_obs \
-  --algo.config.module_dict.actor.layer_config.encoder_activation=ReLU \
   --algo.config.module_dict.actor.layer_config.transformer_pooling=first \
   --algo.config.module_dict.actor.min_noise_std=0.10 \
   --algo.config.save_interval=100 \
