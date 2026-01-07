@@ -435,14 +435,6 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return None
 
     def _maybe_enable_motion_future_target_poses(self, metadata: dict, model_path: str) -> None:
-        if not self.config.task.include_motion_future_target_poses:
-            return
-
-        if "motion_future_target_poses" in self.obs_dict:
-            self.actor_obs_group_order = ["actor_obs", "motion_future_target_poses"]
-            if self._motion_future_target_pose_provider is not None:
-                return
-
         base_dim = None
         actor_obs_template = self.obs_buf_dict.get("actor_obs")
         if actor_obs_template is not None:
@@ -451,6 +443,30 @@ class WholeBodyTrackingPolicy(BasePolicy):
         extra_dim = None
         if self._onnx_obs_dim is not None and base_dim is not None:
             extra_dim = self._onnx_obs_dim - base_dim
+
+        if extra_dim is not None and extra_dim <= 0:
+            if self.config.task.include_motion_future_target_poses:
+                logger.warning(
+                    "ONNX obs dim ({}) does not exceed actor_obs dim ({}); skipping motion_future_target_poses.",
+                    self._onnx_obs_dim,
+                    base_dim,
+                )
+            return
+
+        should_enable = self.config.task.include_motion_future_target_poses or (extra_dim is not None and extra_dim > 0)
+        if not should_enable:
+            return
+
+        if not self.config.task.include_motion_future_target_poses and extra_dim is not None and extra_dim > 0:
+            logger.info(
+                "ONNX expects {} extra obs dims; auto-enabling motion_future_target_poses.",
+                extra_dim,
+            )
+
+        if "motion_future_target_poses" in self.obs_dict:
+            self.actor_obs_group_order = ["actor_obs", "motion_future_target_poses"]
+            if self._motion_future_target_pose_provider is not None:
+                return
 
         provider = self._motion_future_target_pose_provider
         if provider is None:

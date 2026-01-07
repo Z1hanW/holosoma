@@ -38,6 +38,42 @@ class PerceptionConfig:
     camera_pitch_deg: float = -20.0
     """Virtual camera pitch in degrees (negative tilts down)."""
 
+    camera_width: int | None = None
+    """Camera image width in pixels (defaults to grid_size when None)."""
+
+    camera_height: int | None = None
+    """Camera image height in pixels (defaults to grid_size when None)."""
+
+    camera_vfov_deg: float = 90.0
+    """Camera vertical field of view in degrees."""
+
+    camera_hfov_deg: float | None = None
+    """Camera horizontal field of view in degrees (optional override)."""
+
+    camera_fx: float | None = None
+    """Camera focal length fx in pixels (overrides FOV if provided)."""
+
+    camera_fy: float | None = None
+    """Camera focal length fy in pixels (overrides FOV if provided)."""
+
+    camera_cx: float | None = None
+    """Camera principal point cx in pixels."""
+
+    camera_cy: float | None = None
+    """Camera principal point cy in pixels."""
+
+    camera_fps: float = 30.0
+    """Camera frame rate in Hz."""
+
+    camera_near: float = 0.1
+    """Camera near clipping plane in meters."""
+
+    camera_far: float = 10.0
+    """Camera far clipping plane in meters."""
+
+    camera_distortion: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0, 0.0])
+    """Camera distortion coefficients (k1, k2, p1, p2, k3)."""
+
     sensor_offset: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     """Sensor offset from robot root in base frame (meters)."""
 

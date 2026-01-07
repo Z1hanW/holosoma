@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from holosoma.config_types.perception import PerceptionConfig
+from holosoma.utils.camera_utils import build_camera_parameters, resolve_camera_intrinsics
 from holosoma.utils import warp_utils
 from holosoma.utils.rotations import (
     quat_apply,
@@ -35,13 +36,31 @@ class PerceptionManager:
         self._sensor_offset = torch.tensor(cfg.sensor_offset, device=self.device)
         self._ray_start_offset = torch.tensor([0.0, 0.0, cfg.ray_start_height], device=self.device)
 
+        self._camera_width, self._camera_height = self._resolve_camera_resolution()
+        fx, fy, cx, cy, vfov, hfov = resolve_camera_intrinsics(
+            self._camera_width,
+            self._camera_height,
+            vfov_deg=cfg.camera_vfov_deg,
+            hfov_deg=cfg.camera_hfov_deg,
+            fx=cfg.camera_fx,
+            fy=cfg.camera_fy,
+            cx=cfg.camera_cx,
+            cy=cfg.camera_cy,
+        )
+        self._camera_fx = torch.tensor(fx, device=self.device)
+        self._camera_fy = torch.tensor(fy, device=self.device)
+        self._camera_cx = torch.tensor(cx, device=self.device)
+        self._camera_cy = torch.tensor(cy, device=self.device)
+        self._camera_vfov_deg = vfov
+        self._camera_hfov_deg = hfov
+
         self._num_points = cfg.grid_size * cfg.grid_size
         self._update_interval = 0.0 if cfg.update_hz <= 0 else 1.0 / cfg.update_hz
         self._time_since_update = 0.0
 
         self._heightmap = torch.zeros(self.num_envs, cfg.grid_size, cfg.grid_size, device=self.device)
         self._camera_depth = torch.full(
-            (self.num_envs, cfg.grid_size, cfg.grid_size),
+            (self.num_envs, self._camera_height, self._camera_width),
             cfg.max_distance,
             device=self.device,
         )
@@ -102,6 +121,24 @@ class PerceptionManager:
         if self.cfg.output_mode == "camera_depth":
             return self._camera_depth.view(self.num_envs, -1)
         raise ValueError(f"Unsupported perception output_mode: {self.cfg.output_mode}")
+
+    def get_camera_parameters(self, extrinsics: torch.Tensor) -> dict[str, torch.Tensor | float | int]:
+        """Return camera parameters for supplied extrinsics (batched)."""
+        return build_camera_parameters(
+            extrinsics,
+            width=self._camera_width,
+            height=self._camera_height,
+            vfov_deg=self._camera_vfov_deg,
+            hfov_deg=self._camera_hfov_deg,
+            fx=float(self._camera_fx.item()),
+            fy=float(self._camera_fy.item()),
+            cx=float(self._camera_cx.item()),
+            cy=float(self._camera_cy.item()),
+            fps=self.cfg.camera_fps,
+            near=self.cfg.camera_near,
+            far=self.cfg.camera_far,
+            distortion=self.cfg.camera_distortion,
+        )
 
     def _build_grid(self) -> tuple[torch.Tensor, torch.Tensor]:
         half_extent = (self.cfg.grid_size - 1) * self.cfg.grid_interval / 2.0
@@ -188,28 +225,24 @@ class PerceptionManager:
         x = -points_cam[..., 1]
         y = points_cam[..., 2]
 
-        res = self.cfg.grid_size
-        fov_deg = 90.0
-        fov_rad = torch.deg2rad(torch.tensor(fov_deg, device=self.device))
-        focal = 0.5 * float(res - 1) / torch.tan(fov_rad / 2.0)
-        cx = (res - 1) / 2.0
-        cy = (res - 1) / 2.0
-
         z_safe = torch.where(z.abs() < 1.0e-6, torch.full_like(z, 1.0e-6), z)
-        u = focal * (x / z_safe) + cx
-        v = focal * (y / z_safe) + cy
+        u = self._camera_fx * (x / z_safe) + self._camera_cx
+        v = self._camera_fy * (y / z_safe) + self._camera_cy
+
+        res_h = self._camera_height
+        res_w = self._camera_width
 
         valid = torch.isfinite(z) & (z > 0.0)
-        valid &= (u >= 0.0) & (u < res) & (v >= 0.0) & (v < res)
+        valid &= (u >= 0.0) & (u < res_w) & (v >= 0.0) & (v < res_h)
 
         u_idx = u.round().long()
         v_idx = v.round().long()
 
-        depth_map = torch.full((num_envs, res, res), self.cfg.max_distance, device=self.device)
+        depth_map = torch.full((num_envs, res_h, res_w), self.cfg.max_distance, device=self.device)
 
         if valid.any():
             env_ids = torch.arange(num_envs, device=self.device).unsqueeze(1).expand_as(u_idx)
-            flat_indices = (env_ids * res * res + v_idx * res + u_idx).view(-1)
+            flat_indices = (env_ids * res_h * res_w + v_idx * res_w + u_idx).view(-1)
             flat_depths = z.view(-1)
             flat_valid = valid.view(-1)
 
@@ -226,3 +259,8 @@ class PerceptionManager:
                             flat_map[idx] = depth
 
         return depth_map
+
+    def _resolve_camera_resolution(self) -> tuple[int, int]:
+        width = self.cfg.camera_width if self.cfg.camera_width is not None else self.cfg.grid_size
+        height = self.cfg.camera_height if self.cfg.camera_height is not None else self.cfg.grid_size
+        return int(width), int(height)
