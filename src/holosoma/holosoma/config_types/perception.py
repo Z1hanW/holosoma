@@ -17,6 +17,9 @@ class PerceptionConfig:
     output_mode: str = "heightmap"
     """Perception output type: 'heightmap' or 'camera_depth'."""
 
+    camera_source: str = "raycast"
+    """Camera source for camera_depth output: 'raycast' or 'rendered'."""
+
     grid_size: int = 11
     """Number of samples per dimension for the heightmap grid."""
 
@@ -37,6 +40,12 @@ class PerceptionConfig:
 
     camera_pitch_deg: float = -20.0
     """Virtual camera pitch in degrees (negative tilts down)."""
+
+    camera_body_name: str | None = None
+    """Body name to anchor the camera pose (defaults to robot root when None)."""
+
+    camera_env_id: int = 0
+    """Environment index to render from when using rendered cameras."""
 
     camera_width: int | None = None
     """Camera image width in pixels (defaults to grid_size when None)."""

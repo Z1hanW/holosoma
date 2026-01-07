@@ -144,6 +144,13 @@ class MotionConfig:
     """Duration in seconds of the post-appended interpolation phase.
     Only used if enable_default_pose_append is True."""
 
+    align_motion_to_init_yaw: bool = False
+    """If True, rotate the motion so frame-0 yaw matches the robot init yaw.
+
+    This also applies a translation so the frame-0 root position matches the robot
+    init position (plus env origin), keeping a consistent world frame across episodes.
+    """
+
     # noise related
     noise_to_initial_pose: NoiseToInitialPoseConfig = field(default_factory=NoiseToInitialPoseConfig)
 

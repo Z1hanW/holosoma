@@ -104,6 +104,18 @@ def run_policy(config: InferenceConfig):
         logger.info(f"Using {policy_class.__name__}")
         policy: LocomotionPolicy | WholeBodyTrackingPolicy = policy_class(config=config)
 
+        if config.viser.enabled:
+            from holosoma_inference.utils.viser_viewer import ViserInferenceViewer
+
+            model_path = policy.active_model_path
+            if not model_path:
+                if isinstance(config.task.model_path, (list, tuple)):
+                    model_path = str(config.task.model_path[0])
+                else:
+                    model_path = str(config.task.model_path)
+            viewer = ViserInferenceViewer(policy.robot_config, config.viser, model_path)
+            policy.attach_viser(viewer, update_interval=config.viser.update_interval)
+
         logger.info("✅ Policy initialized successfully!")
         _print_control_guide(policy_class, config.task.use_joystick)
         policy.run()

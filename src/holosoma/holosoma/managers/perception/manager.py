@@ -14,6 +14,7 @@ from holosoma.utils.rotations import (
     quat_rotate_batched,
     quat_rotate_inverse_batched,
 )
+from holosoma.utils.simulator_config import SimulatorType, get_simulator_type
 from holosoma.utils.safe_torch_import import torch
 
 
@@ -35,6 +36,12 @@ class PerceptionManager:
         self._ray_dirs_base: torch.Tensor | None = None
         self._sensor_offset = torch.tensor(cfg.sensor_offset, device=self.device)
         self._ray_start_offset = torch.tensor([0.0, 0.0, cfg.ray_start_height], device=self.device)
+        self._camera_source = cfg.camera_source
+        self._rendered_camera = None
+        self._rendered_camera_env_id = int(getattr(cfg, "camera_env_id", 0))
+
+        if cfg.output_mode == "camera_depth" and self._camera_source not in {"raycast", "rendered"}:
+            raise ValueError(f"Unsupported camera_source: {self._camera_source}")
 
         self._camera_width, self._camera_height = self._resolve_camera_resolution()
         fx, fy, cx, cy, vfov, hfov = resolve_camera_intrinsics(
@@ -70,15 +77,19 @@ class PerceptionManager:
     def setup(self) -> None:
         if not self.enabled:
             return
-        terrain_term = getattr(self.env, "terrain_manager", None)
-        if terrain_term is None or not hasattr(terrain_term, "terrain_term"):
-            raise RuntimeError("PerceptionManager requires an initialized terrain_manager.")
-        terrain_state = terrain_term.terrain_term
-        if not hasattr(terrain_state, "warp_mesh"):
-            raise RuntimeError("PerceptionManager requires terrain term with warp_mesh support.")
-        self._warp_mesh = terrain_state.warp_mesh
+        if self._uses_raycast():
+            terrain_term = getattr(self.env, "terrain_manager", None)
+            if terrain_term is None or not hasattr(terrain_term, "terrain_term"):
+                raise RuntimeError("PerceptionManager requires an initialized terrain_manager.")
+            terrain_state = terrain_term.terrain_term
+            if not hasattr(terrain_state, "warp_mesh"):
+                raise RuntimeError("PerceptionManager requires terrain term with warp_mesh support.")
+            self._warp_mesh = terrain_state.warp_mesh
 
-        self._grid_points_base, self._ray_dirs_base = self._build_grid()
+            self._grid_points_base, self._ray_dirs_base = self._build_grid()
+
+        if self._uses_rendered_camera():
+            self._setup_rendered_camera()
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         if not self.enabled:
@@ -101,6 +112,15 @@ class PerceptionManager:
                 return
             self._time_since_update -= self._update_interval
 
+        if self._uses_rendered_camera():
+            if self._rendered_camera is None:
+                raise RuntimeError("Rendered camera is not initialized; call PerceptionManager.setup().")
+            if env_ids is not None and self._rendered_camera_env_id not in env_ids.tolist():
+                return
+            camera_depth = self._rendered_camera.capture_depth()
+            self._camera_depth[self._rendered_camera_env_id] = camera_depth.squeeze(0)
+            return
+
         ray_starts, ray_dirs, ray_hits_world, root_pos, base_quat, offset_world = self._compute_rays(env_ids)
         distances = self._compute_ray_distances(ray_starts, ray_dirs, ray_hits_world)
         heightmap = distances.view(-1, self.cfg.grid_size, self.cfg.grid_size)
@@ -121,6 +141,11 @@ class PerceptionManager:
         if self.cfg.output_mode == "camera_depth":
             return self._camera_depth.view(self.num_envs, -1)
         raise ValueError(f"Unsupported perception output_mode: {self.cfg.output_mode}")
+
+    def get_camera_depth_map(self) -> torch.Tensor:
+        if not self.enabled or self.cfg.output_mode != "camera_depth":
+            raise RuntimeError("Camera depth map requested but camera_depth output is disabled.")
+        return self._camera_depth
 
     def get_camera_parameters(self, extrinsics: torch.Tensor) -> dict[str, torch.Tensor | float | int]:
         """Return camera parameters for supplied extrinsics (batched)."""
@@ -157,6 +182,29 @@ class PerceptionManager:
         ray_dirs = torch.zeros(self._num_points, 3, device=self.device)
         ray_dirs[:, 2] = -1.0
         return grid_points, ray_dirs
+
+    def _setup_rendered_camera(self) -> None:
+        if get_simulator_type() != SimulatorType.ISAACSIM:
+            raise RuntimeError("Rendered camera requires IsaacSim. Use camera_source=raycast for other simulators.")
+        from holosoma.simulator.isaacsim.perception_camera import IsaacSimDepthCamera
+
+        self._rendered_camera = IsaacSimDepthCamera(
+            env=self.env,
+            config=self.cfg,
+            width=self._camera_width,
+            height=self._camera_height,
+            vfov_deg=self._camera_vfov_deg,
+            device=getattr(self.env.simulator, "device", self.device),
+        )
+        self._rendered_camera.setup()
+
+    def _uses_raycast(self) -> bool:
+        if self.cfg.output_mode == "heightmap":
+            return True
+        return self.cfg.output_mode == "camera_depth" and self._camera_source == "raycast"
+
+    def _uses_rendered_camera(self) -> bool:
+        return self.cfg.output_mode == "camera_depth" and self._camera_source == "rendered"
 
     def _compute_rays(
         self, env_ids: torch.Tensor | None

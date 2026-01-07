@@ -597,6 +597,12 @@ class MotionCommand(CommandTermBase):
         self.num_envs = self._env.num_envs
         self.device = self._env.device
 
+        init_state = self._env.robot_config.init_state
+        self._init_root_pos = torch.tensor(init_state.pos, dtype=torch.float32, device=self.device)
+        init_root_quat = torch.tensor(init_state.rot, dtype=torch.float32, device=self.device).unsqueeze(0)
+        _, _, init_yaw = get_euler_xyz(init_root_quat, w_last=True)
+        self._init_root_yaw = init_yaw.squeeze(0)
+
         robot_body_names = self._env.simulator._body_list  # type: ignore[attr-defined]
         robot_body_names_alias = [FAKE_BODY_NAME_ALIASES.get(bn, bn) for bn in robot_body_names]
 
@@ -721,6 +727,9 @@ class MotionCommand(CommandTermBase):
         # Otherwise, update_tasks_callback will advance the timestep to the next timestep -> out of bounds error.
         max_valid = torch.clamp(clip_lengths - 2, min=0)
         self.time_steps[env_ids] = torch.minimum(self.time_steps[env_ids], max_valid)
+
+        if self.motion_cfg.align_motion_to_init_yaw:
+            self._update_motion_alignment(env_ids)
 
         # 1. Get the reference root/body poses
         root_pos = self.body_pos_w[env_ids, 0].clone()
@@ -1024,55 +1033,82 @@ class MotionCommand(CommandTermBase):
     @property
     def body_pos_w(self) -> torch.Tensor:
         motion_idx = self._get_motion_indices(self.time_steps)
-        return (
-            self.motion.body_pos_w[motion_idx][:, self.tracked_body_indexes]
-            + self._env.simulator.scene.env_origins[:, None, :]
-        )
+        pos = self.motion.body_pos_w[motion_idx][:, self.tracked_body_indexes]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_pos(pos)
+        return pos + self._env.simulator.scene.env_origins[:, None, :]
 
     @property
     def body_quat_w(self) -> torch.Tensor:
         motion_idx = self._get_motion_indices(self.time_steps)
-        return self.motion.body_quat_w[motion_idx][:, self.tracked_body_indexes]
+        quat = self.motion.body_quat_w[motion_idx][:, self.tracked_body_indexes]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_quat(quat)
+        return quat
 
     @property
     def body_lin_vel_w(self) -> torch.Tensor:
         motion_idx = self._get_motion_indices(self.time_steps)
-        return self.motion.body_lin_vel_w[motion_idx][:, self.tracked_body_indexes]
+        vel = self.motion.body_lin_vel_w[motion_idx][:, self.tracked_body_indexes]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_vec(vel)
+        return vel
 
     @property
     def body_ang_vel_w(self) -> torch.Tensor:
         motion_idx = self._get_motion_indices(self.time_steps)
-        return self.motion.body_ang_vel_w[motion_idx][:, self.tracked_body_indexes]
+        vel = self.motion.body_ang_vel_w[motion_idx][:, self.tracked_body_indexes]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_vec(vel)
+        return vel
 
     @property
     def ref_pos_w(self) -> torch.Tensor:
         motion_idx = self._get_motion_indices(self.time_steps)
-        return self.motion.body_pos_w[motion_idx, self.ref_body_index] + self._env.simulator.scene.env_origins
+        pos = self.motion.body_pos_w[motion_idx, self.ref_body_index]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_pos(pos)
+        return pos + self._env.simulator.scene.env_origins
 
     @property
     def ref_quat_w(self) -> torch.Tensor:
         motion_idx = self._get_motion_indices(self.time_steps)
-        return self.motion.body_quat_w[motion_idx, self.ref_body_index]
+        quat = self.motion.body_quat_w[motion_idx, self.ref_body_index]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_quat(quat)
+        return quat
 
     @property
     def root_pos_w(self) -> torch.Tensor:
         motion_idx = self._get_motion_indices(self.time_steps)
-        return self.motion.body_pos_w[motion_idx, 0] + self._env.simulator.scene.env_origins
+        pos = self.motion.body_pos_w[motion_idx, 0]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_pos(pos)
+        return pos + self._env.simulator.scene.env_origins
 
     @property
     def root_quat_w(self) -> torch.Tensor:
         motion_idx = self._get_motion_indices(self.time_steps)
-        return self.motion.body_quat_w[motion_idx, 0]
+        quat = self.motion.body_quat_w[motion_idx, 0]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_quat(quat)
+        return quat
 
     @property
     def ref_lin_vel_w(self) -> torch.Tensor:
         motion_idx = self._get_motion_indices(self.time_steps)
-        return self.motion.body_lin_vel_w[motion_idx, self.ref_body_index]
+        vel = self.motion.body_lin_vel_w[motion_idx, self.ref_body_index]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_vec(vel)
+        return vel
 
     @property
     def ref_ang_vel_w(self) -> torch.Tensor:
         motion_idx = self._get_motion_indices(self.time_steps)
-        return self.motion.body_ang_vel_w[motion_idx, self.ref_body_index]
+        vel = self.motion.body_ang_vel_w[motion_idx, self.ref_body_index]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_vec(vel)
+        return vel
 
     #########################################################################################
     ## Robot from simulator
@@ -1140,17 +1176,26 @@ class MotionCommand(CommandTermBase):
     def object_pos_w(self) -> torch.Tensor:
         # Applies env origins, but ideally we should rely on the simulator
         motion_idx = self._get_motion_indices(self.time_steps)
-        return self.motion.object_pos_w[motion_idx] + self._env.simulator.scene.env_origins
+        pos = self.motion.object_pos_w[motion_idx]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_pos(pos)
+        return pos + self._env.simulator.scene.env_origins
 
     @property
     def object_quat_w(self) -> torch.Tensor:
         motion_idx = self._get_motion_indices(self.time_steps)
-        return self.motion.object_quat_w[motion_idx]
+        quat = self.motion.object_quat_w[motion_idx]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_quat(quat)
+        return quat
 
     @property
     def object_lin_vel_w(self) -> torch.Tensor:
         motion_idx = self._get_motion_indices(self.time_steps)
-        return self.motion.object_lin_vel_w[motion_idx]
+        vel = self.motion.object_lin_vel_w[motion_idx]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            return self._apply_motion_alignment_vec(vel)
+        return vel
 
     #########################################################################################
     ## Object from simulator
@@ -1181,6 +1226,9 @@ class MotionCommand(CommandTermBase):
             self.num_envs, len(self.motion_cfg.body_names_to_track), 4, device=self.device
         )  # type: ignore[arg-type]
         self.body_quat_relative_w[:, :, 0] = 1.0
+        self._align_quat = torch.zeros(self.num_envs, 4, device=self.device)
+        self._align_quat[:, 3] = 1.0
+        self._align_pos = torch.zeros(self.num_envs, 3, device=self.device)
 
         if self.num_future_steps > 0 and self.target_pose_type is not None:
             self.future_target_poses = torch.zeros(
@@ -1198,6 +1246,45 @@ class MotionCommand(CommandTermBase):
             self._clip_total_counts.zero_()
         if self.clip_weighting_strategy == "success_rate_adaptive" and self._base_clip_weights is not None:
             self._clip_sampling_weights = self._base_clip_weights.clone()
+
+    def _update_motion_alignment(self, env_ids: torch.Tensor) -> None:
+        if env_ids.numel() == 0:
+            return
+        clip_ids = self.clip_ids[env_ids]
+        clip_offsets = self.motion.clip_offsets[clip_ids]
+        motion_root_quat = self.motion.body_quat_w[clip_offsets, 0]
+        _, _, motion_yaw = get_euler_xyz(motion_root_quat, w_last=True)
+
+        yaw_delta = self._init_root_yaw - motion_yaw
+        zeros = torch.zeros_like(yaw_delta)
+        align_quat = quat_from_euler_xyz(zeros, zeros, yaw_delta)
+        self._align_quat[env_ids] = align_quat
+
+        motion_root_pos = self.motion.body_pos_w[clip_offsets, 0]
+        env_origins = self._env.simulator.scene.env_origins[env_ids]
+        desired_root_pos = env_origins + self._init_root_pos
+        aligned_root_pos = quat_apply(align_quat, motion_root_pos, w_last=True)
+        self._align_pos[env_ids] = desired_root_pos - aligned_root_pos
+
+    def _apply_motion_alignment_pos(self, pos: torch.Tensor) -> torch.Tensor:
+        align_quat = self._align_quat
+        align_pos = self._align_pos
+        if pos.ndim == 3:
+            align_quat = align_quat[:, None, :].expand(-1, pos.shape[1], -1)
+            align_pos = align_pos[:, None, :]
+        return quat_apply(align_quat, pos, w_last=True) + align_pos
+
+    def _apply_motion_alignment_vec(self, vec: torch.Tensor) -> torch.Tensor:
+        align_quat = self._align_quat
+        if vec.ndim == 3:
+            align_quat = align_quat[:, None, :].expand(-1, vec.shape[1], -1)
+        return quat_apply(align_quat, vec, w_last=True)
+
+    def _apply_motion_alignment_quat(self, quat: torch.Tensor) -> torch.Tensor:
+        align_quat = self._align_quat
+        if quat.ndim == 3:
+            align_quat = align_quat[:, None, :].expand(-1, quat.shape[1], -1)
+        return quat_mul(align_quat, quat, w_last=True)
 
     def update_metrics(self):
         """Update the metrics. After action, before step() is called."""
