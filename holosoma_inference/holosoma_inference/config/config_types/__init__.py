@@ -4,10 +4,12 @@ from .inference import InferenceConfig
 from .observation import ObservationConfig
 from .robot import RobotConfig
 from .task import TaskConfig
+from .viser import ViserConfig
 
 __all__ = [
     "InferenceConfig",
     "ObservationConfig",
     "RobotConfig",
     "TaskConfig",
+    "ViserConfig",
 ]

@@ -51,7 +51,15 @@ class InterfaceWrapper:
             try:
                 import unitree_interface
             except ImportError as e:
-                raise ImportError("unitree_interface python binding not found.") from e
+                logger.warning(
+                    "unitree_interface binding unavailable ({}). Falling back to sdk2py; joystick disabled.",
+                    e,
+                )
+                self.backend = "sdk2py"
+                self.command_sender = create_command_sender(self.robot_config)
+                self.state_processor = create_state_processor(self.robot_config)
+                self.use_joystick = False
+                return
             # Use C++/pybind11 binding (unitree only)
             self.backend = "binding"
             # Parse robot type

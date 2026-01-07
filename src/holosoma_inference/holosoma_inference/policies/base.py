@@ -18,7 +18,6 @@ from sshkeyboard import listen_keyboard
 from termcolor import colored
 
 from holosoma_inference.config.config_types.inference import InferenceConfig
-from holosoma_inference.config.config_types.observation import ObservationConfig
 from holosoma_inference.config.config_types.robot import RobotConfig
 from holosoma_inference.sdk.interface_wrapper import InterfaceWrapper
 from holosoma_inference.utils.latency import LatencyTracker
@@ -57,11 +56,6 @@ class BasePolicy:
         self._init_phase_components()
         # Initialize latency tracking
         self._init_latency_tracking()
-
-        self.last_robot_state_data = None
-        self._viser_viewer = None
-        self._viser_update_interval = 1
-        self._viser_step_count = 0
 
     # ============================================================================
     # Initialization Methods
@@ -128,12 +122,6 @@ class BasePolicy:
 
         # Initialize per-term history buffers using deques
         self._initialize_history_state()
-        self.actor_obs_group_order = ["actor_obs"]
-        if (
-            self.config.task.include_motion_future_target_poses
-            and self.config.task.motion_future_target_poses_dim is not None
-        ):
-            self._enable_motion_future_target_poses(self.config.task.motion_future_target_poses_dim)
 
     def _initialize_history_state(self):
         """Create per-term history deques and zero-initialized flattened buffers."""
@@ -153,38 +141,6 @@ class BasePolicy:
                 flattened_terms.append(np.zeros((1, term_dim * history_len), dtype=np.float32))
 
             self.obs_buf_dict[group] = np.concatenate(flattened_terms, axis=1) if flattened_terms else np.zeros((1, 0))
-
-    def _reset_obs_config(self, obs_config: ObservationConfig):
-        """Replace observation config and rebuild observation buffers."""
-        self.obs_config = obs_config
-        self.obs_scales = self.obs_config.obs_scales
-        self.obs_dims = self.obs_config.obs_dims
-        self.obs_dict = self.obs_config.obs_dict
-        self.obs_dim_dict = self._calculate_obs_dim_dict()
-        self.history_length_dict = self.obs_config.history_length_dict
-        self._initialize_history_state()
-
-    def _enable_motion_future_target_poses(self, obs_dim: int) -> None:
-        if "motion_future_target_poses" in self.obs_dict:
-            self.actor_obs_group_order = ["actor_obs", "motion_future_target_poses"]
-            return
-        obs_dict = dict(self.obs_dict)
-        obs_dict["motion_future_target_poses"] = ["motion_future_target_poses"]
-        obs_dims = dict(self.obs_dims)
-        obs_dims["motion_future_target_poses"] = int(obs_dim)
-        obs_scales = dict(self.obs_scales)
-        obs_scales["motion_future_target_poses"] = 1.0
-        history_length_dict = dict(self.history_length_dict)
-        history_length_dict["motion_future_target_poses"] = 1
-        self._reset_obs_config(
-            ObservationConfig(
-                obs_dict=obs_dict,
-                obs_dims=obs_dims,
-                obs_scales=obs_scales,
-                history_length_dict=history_length_dict,
-            )
-        )
-        self.actor_obs_group_order = ["actor_obs", "motion_future_target_poses"]
 
     def _init_communication_components(self):
         """Initialize state processor and command sender using the wrapper."""
@@ -347,19 +303,6 @@ class BasePolicy:
         """Initialize input handlers (ROS, joystick, keyboard)."""
         self._init_rate_handler()
         self._init_input_device()
-
-    def attach_viser(self, viewer, update_interval: int = 1) -> None:
-        """Attach a Viser viewer for optional visualization."""
-        self._viser_viewer = viewer
-        self._viser_update_interval = max(1, int(update_interval))
-        self._viser_step_count = 0
-
-    def _maybe_update_viser(self) -> None:
-        if self._viser_viewer is None or self.last_robot_state_data is None:
-            return
-        if self._viser_step_count % self._viser_update_interval == 0:
-            self._viser_viewer.update(self.last_robot_state_data)
-        self._viser_step_count += 1
 
     def _init_rate_handler(self):
         """Initialize ROS handler if enabled."""
@@ -598,16 +541,7 @@ class BasePolicy:
         group_outputs = self._prepare_group_observations(robot_state_data)
         if "actor_obs" not in group_outputs:
             raise KeyError("Observation group 'actor_obs' is not configured for this policy.")
-        if self.actor_obs_group_order == ["actor_obs"]:
-            actor_obs = group_outputs["actor_obs"]
-        else:
-            parts = []
-            for group_name in self.actor_obs_group_order:
-                if group_name not in group_outputs:
-                    raise KeyError(f"Observation group '{group_name}' is not configured for this policy.")
-                parts.append(group_outputs[group_name])
-            actor_obs = np.concatenate(parts, axis=1)
-        return {"actor_obs": actor_obs.astype(np.float32, copy=False)}
+        return {"actor_obs": group_outputs["actor_obs"].astype(np.float32, copy=False)}
 
     # ============================================================================
     # Control/Command Methods
@@ -632,7 +566,6 @@ class BasePolicy:
         # Stage 1: Read State
         with self.latency_tracker.measure("read_state"):
             robot_state_data = self.interface.get_low_state()
-            self.last_robot_state_data = robot_state_data
 
         # Stage 2: Pre-processing
         with self.latency_tracker.measure("preprocessing"):
@@ -866,7 +799,6 @@ class BasePolicy:
                     self.update_phase_time()
 
                 self.policy_action()
-                self._maybe_update_viser()
 
                 self.latency_tracker.end_cycle()
 
