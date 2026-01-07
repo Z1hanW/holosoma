@@ -393,17 +393,37 @@ class WholeBodyTrackingPolicy(BasePolicy):
         logger.warning("Motion file not found: {}", motion_file)
         return None
 
-    def _build_motion_future_target_pose_provider(self, metadata: dict) -> MotionFutureTargetPoseProvider | None:
+    def _extract_motion_config(self, metadata: dict) -> dict | None:
         exp_cfg = metadata.get("experiment_config") if metadata else None
-        motion_cfg = None
-        if isinstance(exp_cfg, dict):
-            motion_cfg = (
-                exp_cfg.get("command", {})
-                .get("setup_terms", {})
-                .get("motion_command", {})
-                .get("params", {})
-                .get("motion_config", {})
-            )
+        if not isinstance(exp_cfg, dict):
+            return None
+        motion_cfg = (
+            exp_cfg.get("command", {})
+            .get("setup_terms", {})
+            .get("motion_command", {})
+            .get("params", {})
+            .get("motion_config", {})
+        )
+        return motion_cfg if isinstance(motion_cfg, dict) else None
+
+    def _infer_motion_future_target_poses_dim(self, metadata: dict) -> int | None:
+        motion_cfg = self._extract_motion_config(metadata)
+        if not isinstance(motion_cfg, dict):
+            return None
+        body_names_to_track = motion_cfg.get("body_names_to_track") or []
+        body_names_to_track = [
+            name.decode("utf-8") if isinstance(name, (bytes, bytearray)) else str(name) for name in body_names_to_track
+        ]
+        num_future_steps = int(motion_cfg.get("num_future_steps", 0))
+        target_pose_type = motion_cfg.get("target_pose_type")
+        if not body_names_to_track or num_future_steps <= 0 or not target_pose_type:
+            return None
+        include_time = target_pose_type == "max-coords-future-rel-with-time"
+        num_bodies = len(body_names_to_track)
+        return num_future_steps * (num_bodies * 18 + (1 if include_time else 0))
+
+    def _build_motion_future_target_pose_provider(self, metadata: dict) -> MotionFutureTargetPoseProvider | None:
+        motion_cfg = self._extract_motion_config(metadata)
         if not isinstance(motion_cfg, dict):
             return None
 
@@ -453,7 +473,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 )
             return
 
-        should_enable = self.config.task.include_motion_future_target_poses or (extra_dim is not None and extra_dim > 0)
+        metadata_obs_dim = self._infer_motion_future_target_poses_dim(metadata)
+        should_enable = (
+            self.config.task.include_motion_future_target_poses
+            or (extra_dim is not None and extra_dim > 0)
+            or metadata_obs_dim is not None
+        )
         if not should_enable:
             return
 
@@ -462,6 +487,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 "ONNX expects {} extra obs dims; auto-enabling motion_future_target_poses.",
                 extra_dim,
             )
+        elif not self.config.task.include_motion_future_target_poses and metadata_obs_dim is not None:
+            logger.info("Metadata indicates motion_future_target_poses; auto-enabling.")
 
         if "motion_future_target_poses" in self.obs_dict:
             self.actor_obs_group_order = ["actor_obs", "motion_future_target_poses"]
@@ -481,6 +508,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
             obs_dim = int(self.config.task.motion_future_target_poses_dim)
         elif extra_dim is not None and extra_dim > 0:
             obs_dim = extra_dim
+        elif metadata_obs_dim is not None:
+            obs_dim = int(metadata_obs_dim)
 
         if obs_dim is None or obs_dim <= 0:
             logger.warning(

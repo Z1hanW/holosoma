@@ -24,6 +24,17 @@ from holosoma.config_types.terrain import TerrainManagerCfg
 from holosoma.config_types.video import VideoConfig
 
 
+def _with_hyphen_aliases(defaults: dict[str, object]) -> dict[str, object]:
+    """Add hyphenated aliases for subcommand keys to match docs/scripts."""
+    aliased: dict[str, object] = {}
+    for key, value in defaults.items():
+        aliased[key] = value
+        alias = key.replace("_", "-")
+        if alias not in aliased:
+            aliased[alias] = value
+    return aliased
+
+
 def default_training_config() -> TrainingConfig:
     """Create minimal training config for direct simulation."""
     return TrainingConfig(num_envs=1, headless=False, seed=42, torch_deterministic=False)
@@ -35,7 +46,9 @@ def default_logger_config() -> LoggerConfig:
 
 
 # Use sim2sim-optimized configs from config_values.run_sim
-SIMULATOR_DEFAULTS = holosoma.config_values.run_sim.DEFAULTS
+SIMULATOR_DEFAULTS = _with_hyphen_aliases(holosoma.config_values.run_sim.DEFAULTS)
+ROBOT_DEFAULTS = _with_hyphen_aliases(holosoma.config_values.robot.DEFAULTS)
+TERRAIN_DEFAULTS = _with_hyphen_aliases(holosoma.config_values.terrain.DEFAULTS)
 
 
 @dataclass(frozen=True)
@@ -56,12 +69,12 @@ class RunSimConfig:
 
     robot: Annotated[
         RobotConfig,
-        tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.robot.DEFAULTS)),
+        tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(ROBOT_DEFAULTS)),
     ] = holosoma.config_values.robot.g1_29dof
 
     terrain: Annotated[
         TerrainManagerCfg,
-        tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.terrain.DEFAULTS)),
+        tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(TERRAIN_DEFAULTS)),
     ] = holosoma.config_values.terrain.terrain_locomotion_plane
 
     # Minimal configs needed for FullSimConfig
@@ -77,6 +90,9 @@ class RunSimConfig:
 
     Only used by run_sim.py for real-time display synchronization.
     """
+
+    motion_init_onnx: str | None = None
+    """Optional ONNX path; if set, align robot init yaw to motion clip frame 0."""
 
     device: str | None = "cpu"
     """Device to use for simulation. None auto-detects based on the simulator type.
