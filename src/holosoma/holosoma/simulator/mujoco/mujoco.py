@@ -656,6 +656,11 @@ class MuJoCo(BaseSimulator):
         mujoco.mj_resetData(self.root_model, self.root_data)
 
         self._set_robot_initial_state()
+        self._set_initial_joint_angles()
+        # Ensure MuJoCo's default reset state matches the configured init pose.
+        self.root_model.qpos0[:] = self.root_data.qpos
+        if hasattr(self.root_model, "qvel0"):
+            self.root_model.qvel0[:] = self.root_data.qvel
 
         # Setup ObjectRegistry for robot-only (scenes not yet implemented)
         self.object_registry.setup_ranges(self.num_envs, robot_count=1, scene_count=0, individual_count=0)
