@@ -25,6 +25,7 @@ class GantryCommand(Enum):
     TOGGLE = "gantry_toggle"
     FORCE_ADJUST = "gantry_force_adjust"
     FORCE_SIGN_TOGGLE = "gantry_force_sign_toggle"
+    POSITION_ADJUST = "gantry_position_adjust"
 
     def __str__(self) -> str:
         """Backward compatibility with string-based system"""
@@ -189,6 +190,20 @@ class VirtualGantry:
         self.point = np.array([x, y, self.height])
         logger.debug(f"Virtual gantry position reset to '{self.point}'")
 
+    def adjust_position(self, dx: float = 0.0, dy: float = 0.0, dz: float = 0.0) -> None:
+        """Translate gantry anchor point by a delta in world coordinates."""
+        delta = np.array([dx, dy, dz], dtype=float)
+        self.point = self.point + delta
+        logger.info(
+            "Gantry position adjusted by ({:.3f}, {:.3f}, {:.3f}) to [{:.3f}, {:.3f}, {:.3f}]",
+            dx,
+            dy,
+            dz,
+            float(self.point[0]),
+            float(self.point[1]),
+            float(self.point[2]),
+        )
+
     def handle_command(self, command_data: GantryCommandData | GantryCommand) -> bool:
         """Handle gantry commands with optional parameters.
 
@@ -232,6 +247,13 @@ class VirtualGantry:
         if command == GantryCommand.FORCE_SIGN_TOGGLE:
             self.apply_force_sign *= -1
             logger.info(f"Gantry force sign toggled to {self.apply_force_sign}")
+            return True
+
+        if command == GantryCommand.POSITION_ADJUST:
+            dx = float(params.get("dx", 0.0))
+            dy = float(params.get("dy", 0.0))
+            dz = float(params.get("dz", 0.0))
+            self.adjust_position(dx=dx, dy=dy, dz=dz)
             return True
 
         return False  # Command not handled

@@ -1440,6 +1440,7 @@ class MuJoCo(BaseSimulator):
             "Press '7' to raise it \n"
             "Press '8' to lower it \n"
             "Press '9' to toggle it \n"
+            "Use arrow keys to move gantry (XY) \n"
             "Press backspace to reset the environment \n"
             "Press 'g' to hide this menu"
         )
