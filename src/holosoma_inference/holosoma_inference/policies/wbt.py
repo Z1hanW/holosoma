@@ -1,5 +1,6 @@
 import json
 import sys
+from pathlib import Path
 
 import numpy as np
 import onnx
@@ -75,6 +76,145 @@ class PinocchioRobot:
         return xml_text
 
 
+def _yaw_quat_xyzw(quat: np.ndarray) -> np.ndarray:
+    qx = quat[..., 0]
+    qy = quat[..., 1]
+    qz = quat[..., 2]
+    qw = quat[..., 3]
+    yaw = np.arctan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+    quat_yaw = np.zeros_like(quat)
+    quat_yaw[..., 2] = np.sin(yaw / 2)
+    quat_yaw[..., 3] = np.cos(yaw / 2)
+    norm = np.linalg.norm(quat_yaw, axis=-1, keepdims=True)
+    return np.divide(quat_yaw, norm, out=quat_yaw, where=norm > 0)
+
+
+def _quat_conjugate_xyzw(quat: np.ndarray) -> np.ndarray:
+    return np.concatenate([-quat[..., :3], quat[..., 3:4]], axis=-1)
+
+
+def _quat_mul_xyzw(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    ax, ay, az, aw = a[..., 0], a[..., 1], a[..., 2], a[..., 3]
+    bx, by, bz, bw = b[..., 0], b[..., 1], b[..., 2], b[..., 3]
+    w = aw * bw - ax * bx - ay * by - az * bz
+    x = aw * bx + ax * bw + ay * bz - az * by
+    y = aw * by - ax * bz + ay * bw + az * bx
+    z = aw * bz + ax * by - ay * bx + az * bw
+    return np.stack([x, y, z, w], axis=-1)
+
+
+def _quat_apply_xyzw(quat: np.ndarray, vec: np.ndarray) -> np.ndarray:
+    xyz = quat[..., :3]
+    w = quat[..., 3:4]
+    t = np.cross(xyz, vec) * 2.0
+    return vec + w * t + np.cross(xyz, t)
+
+
+def _matrix_from_quat_xyzw(quat: np.ndarray) -> np.ndarray:
+    quat_wxyz = xyzw_to_wxyz(quat.reshape(-1, 4))
+    mats = matrix_from_quat(quat_wxyz).reshape(quat.shape[:-1] + (3, 3))
+    return mats
+
+
+class MotionFutureTargetPoseProvider:
+    def __init__(
+        self,
+        motion_file: str,
+        body_names_to_track: list[str],
+        num_future_steps: int,
+        target_pose_type: str,
+        dt: float,
+    ) -> None:
+        self.motion_file = motion_file
+        self.body_names_to_track = body_names_to_track
+        self.num_future_steps = int(num_future_steps)
+        self.target_pose_type = target_pose_type
+        self.dt = float(dt)
+        self.include_time = target_pose_type == "max-coords-future-rel-with-time"
+        self.body_names, self.body_pos_w, self.body_quat_w = self._load_motion_npz(motion_file)
+        self.time_step_total = int(self.body_pos_w.shape[0])
+        self.tracked_body_indexes = self._resolve_body_indexes(self.body_names, body_names_to_track)
+        self.num_bodies = len(self.tracked_body_indexes)
+        self.obs_dim = self.num_future_steps * (self.num_bodies * 18 + (1 if self.include_time else 0))
+
+    @staticmethod
+    def _resolve_body_indexes(body_names: list[str], tracked_names: list[str]) -> list[int]:
+        indexes = []
+        for name in tracked_names:
+            if name not in body_names:
+                raise ValueError(f"Body name '{name}' not found in motion data")
+            indexes.append(body_names.index(name))
+        return indexes
+
+    @staticmethod
+    def _load_motion_npz(path: str) -> tuple[list[str], np.ndarray, np.ndarray]:
+        motion_path = Path(path)
+        if not motion_path.exists():
+            raise FileNotFoundError(f"Motion file not found: {motion_path}")
+        with np.load(motion_path, allow_pickle=True) as data:
+            body_names = data["body_names"].tolist()
+            body_names = [bn.decode("utf-8") if isinstance(bn, (bytes, bytearray)) else bn for bn in body_names]
+            body_pos_w = np.asarray(data["body_pos_w"], dtype=np.float32)
+            body_quat_w = np.asarray(data["body_quat_w"], dtype=np.float32)
+        body_quat_w = body_quat_w[:, :, [1, 2, 3, 0]]  # wxyz -> xyzw
+        return body_names, body_pos_w, body_quat_w
+
+    def get_future_target_poses(self, time_step: int) -> np.ndarray:
+        if self.num_future_steps <= 0 or self.num_bodies == 0:
+            return np.zeros((1, 0), dtype=np.float32)
+        step = int(np.clip(time_step, 0, self.time_step_total - 1))
+        time_offsets = np.arange(1, self.num_future_steps + 1, dtype=np.int64)
+        future_steps = np.minimum(step + time_offsets, self.time_step_total - 1)
+        times = (future_steps - step).astype(np.float32) * self.dt
+
+        target_body_pos = self.body_pos_w[future_steps][:, self.tracked_body_indexes, :]
+        target_body_rot = self.body_quat_w[future_steps][:, self.tracked_body_indexes, :]
+        current_body_pos = self.body_pos_w[step, self.tracked_body_indexes, :]
+        current_body_rot = self.body_quat_w[step, self.tracked_body_indexes, :]
+
+        reference_body_pos = np.roll(target_body_pos, shift=1, axis=0)
+        reference_body_pos[0] = current_body_pos
+        reference_body_rot = np.roll(target_body_rot, shift=1, axis=0)
+        reference_body_rot[0] = current_body_rot
+
+        reference_root_pos = reference_body_pos[:, 0, :]
+        reference_root_rot = reference_body_rot[:, 0, :]
+        heading_quat = _yaw_quat_xyzw(reference_root_rot)
+        heading_inv = _quat_conjugate_xyzw(heading_quat)
+        heading_inv = np.repeat(heading_inv[:, None, :], self.num_bodies, axis=1)
+
+        target_rel_body_pos = target_body_pos - reference_body_pos
+        target_body_pos_rel_root = target_body_pos - reference_root_pos[:, None, :]
+
+        rel_body_pos = _quat_apply_xyzw(
+            heading_inv.reshape(-1, 4), target_rel_body_pos.reshape(-1, 3)
+        ).reshape(self.num_future_steps, self.num_bodies * 3)
+        body_pos = _quat_apply_xyzw(
+            heading_inv.reshape(-1, 4), target_body_pos_rel_root.reshape(-1, 3)
+        ).reshape(self.num_future_steps, self.num_bodies * 3)
+
+        rel_body_rot = _quat_mul_xyzw(_quat_conjugate_xyzw(reference_body_rot), target_body_rot)
+        body_rot = _quat_mul_xyzw(heading_inv, target_body_rot)
+
+        rel_body_rot_mat = _matrix_from_quat_xyzw(rel_body_rot.reshape(-1, 4))
+        rel_body_rot_obs = rel_body_rot_mat[:, :, :2].reshape(self.num_future_steps, self.num_bodies * 6)
+        body_rot_mat = _matrix_from_quat_xyzw(body_rot.reshape(-1, 4))
+        body_rot_obs = body_rot_mat[:, :, :2].reshape(self.num_future_steps, self.num_bodies * 6)
+
+        obs = np.concatenate((rel_body_pos, body_pos, rel_body_rot_obs, body_rot_obs), axis=-1)
+        if self.include_time:
+            obs = np.concatenate((obs, times[:, None]), axis=-1)
+        return obs.reshape(1, -1).astype(np.float32, copy=False)
+
+
+class _ZeroFutureTargetPoseProvider:
+    def __init__(self, obs_dim: int) -> None:
+        self.obs_dim = int(obs_dim)
+
+    def get_future_target_poses(self, time_step: int) -> np.ndarray:  # noqa: ARG002 - signature match
+        return np.zeros((1, self.obs_dim), dtype=np.float32)
+
+
 class WholeBodyTrackingPolicy(BasePolicy):
     def __init__(self, config: InferenceConfig):
         # initialize timestep
@@ -99,6 +239,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         self._stiff_hold_active = True
         self.robot_yaw_offset = 0.0
+        self._motion_future_target_pose_provider = None
 
         super().__init__(config)
 
@@ -176,6 +317,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
         metadata = {}
         for prop in onnx_model.metadata_props:
             metadata[prop.key] = json.loads(prop.value)
+        self._onnx_metadata = metadata
+        self._onnx_obs_dim = self._get_onnx_obs_dim()
+        self._maybe_enable_motion_future_target_poses(metadata, model_path)
 
         # Extract URDF text from ONNX metadata
         assert "robot_urdf" in metadata, "Robot urdf text not found in ONNX metadata"
@@ -192,11 +336,18 @@ class WholeBodyTrackingPolicy(BasePolicy):
         # get initial command and ref quat xyzw
         time_step = np.zeros((1, 1), dtype=np.float32)
 
-        # Use configured observation dimensions (including history) instead of a hard-coded value.
-        actor_obs_template = self.obs_buf_dict.get("actor_obs")
-        if actor_obs_template is None:
-            raise ValueError("Observation group 'actor_obs' must be configured for WBT policy.")
-        obs = actor_obs_template.copy()
+        obs_dim = self._onnx_obs_dim
+        if obs_dim is None:
+            actor_obs_template = self.obs_buf_dict.get("actor_obs")
+            if actor_obs_template is None:
+                raise ValueError("Observation group 'actor_obs' must be configured for WBT policy.")
+            if self.actor_obs_group_order == ["actor_obs"]:
+                obs = actor_obs_template.copy()
+            else:
+                expected_dim = sum(self.obs_dim_dict[name] for name in self.actor_obs_group_order)
+                obs = np.zeros((1, expected_dim), dtype=np.float32)
+        else:
+            obs = np.zeros((1, obs_dim), dtype=np.float32)
         input_feed = {"obs": obs, "time_step": time_step}
         outputs = self.onnx_policy_session.run(["joint_pos", "joint_vel", "ref_quat_xyzw"], input_feed)
 
@@ -215,6 +366,125 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return action, motion_command, ref_quat_xyzw
 
         self.policy = policy_act
+
+    def _get_onnx_obs_dim(self) -> int | None:
+        inputs = self.onnx_policy_session.get_inputs()
+        for inp in inputs:
+            if inp.name in {"obs", "actor_obs"}:
+                shape = inp.shape
+                if len(shape) > 1 and isinstance(shape[1], int):
+                    return int(shape[1])
+        if inputs:
+            shape = inputs[0].shape
+            if len(shape) > 1 and isinstance(shape[1], int):
+                return int(shape[1])
+        return None
+
+    def _resolve_motion_file(self, motion_file: str) -> str | None:
+        if not motion_file:
+            return None
+        motion_path = Path(motion_file)
+        if motion_path.exists():
+            return str(motion_path.resolve())
+        repo_root = Path(__file__).resolve().parents[4]
+        candidate = repo_root / motion_file
+        if candidate.exists():
+            return str(candidate)
+        logger.warning("Motion file not found: {}", motion_file)
+        return None
+
+    def _build_motion_future_target_pose_provider(self, metadata: dict) -> MotionFutureTargetPoseProvider | None:
+        exp_cfg = metadata.get("experiment_config") if metadata else None
+        motion_cfg = None
+        if isinstance(exp_cfg, dict):
+            motion_cfg = (
+                exp_cfg.get("command", {})
+                .get("setup_terms", {})
+                .get("motion_command", {})
+                .get("params", {})
+                .get("motion_config", {})
+            )
+        if not isinstance(motion_cfg, dict):
+            return None
+
+        motion_file = self.config.task.motion_future_target_poses_motion_file or motion_cfg.get("motion_file")
+        motion_file = self._resolve_motion_file(motion_file) if motion_file else None
+        if motion_file is None:
+            return None
+
+        body_names_to_track = motion_cfg.get("body_names_to_track") or []
+        body_names_to_track = [
+            name.decode("utf-8") if isinstance(name, (bytes, bytearray)) else str(name) for name in body_names_to_track
+        ]
+        num_future_steps = int(motion_cfg.get("num_future_steps", 0))
+        target_pose_type = motion_cfg.get("target_pose_type")
+        if not body_names_to_track or num_future_steps <= 0 or not target_pose_type:
+            return None
+
+        dt = 1.0 / float(self.config.task.rl_rate)
+        try:
+            return MotionFutureTargetPoseProvider(
+                motion_file=motion_file,
+                body_names_to_track=list(body_names_to_track),
+                num_future_steps=num_future_steps,
+                target_pose_type=str(target_pose_type),
+                dt=dt,
+            )
+        except Exception as exc:
+            logger.warning("Failed to build motion future target poses provider: {}", exc)
+            return None
+
+    def _maybe_enable_motion_future_target_poses(self, metadata: dict, model_path: str) -> None:
+        if not self.config.task.include_motion_future_target_poses:
+            return
+
+        if "motion_future_target_poses" in self.obs_dict:
+            self.actor_obs_group_order = ["actor_obs", "motion_future_target_poses"]
+            if self._motion_future_target_pose_provider is not None:
+                return
+
+        base_dim = None
+        actor_obs_template = self.obs_buf_dict.get("actor_obs")
+        if actor_obs_template is not None:
+            base_dim = int(actor_obs_template.shape[1])
+
+        extra_dim = None
+        if self._onnx_obs_dim is not None and base_dim is not None:
+            extra_dim = self._onnx_obs_dim - base_dim
+
+        provider = self._motion_future_target_pose_provider
+        if provider is None:
+            provider = self._build_motion_future_target_pose_provider(metadata)
+
+        obs_dim = None
+        if provider is not None:
+            obs_dim = provider.obs_dim
+        elif "motion_future_target_poses" in self.obs_dims:
+            obs_dim = int(self.obs_dims["motion_future_target_poses"])
+        elif self.config.task.motion_future_target_poses_dim is not None:
+            obs_dim = int(self.config.task.motion_future_target_poses_dim)
+        elif extra_dim is not None and extra_dim > 0:
+            obs_dim = extra_dim
+
+        if obs_dim is None or obs_dim <= 0:
+            logger.warning(
+                "Cannot enable motion_future_target_poses; provide metadata or --task.motion-future-target-poses-dim."
+            )
+            return
+
+        if provider is None:
+            provider = _ZeroFutureTargetPoseProvider(obs_dim)
+            logger.warning(
+                "Using zero-filled motion_future_target_poses for {} (dim={}).", Path(model_path).name, obs_dim
+            )
+
+        self._motion_future_target_pose_provider = provider
+        self._enable_motion_future_target_poses(obs_dim)
+
+        if extra_dim is not None and obs_dim != extra_dim:
+            logger.warning(
+                "motion_future_target_poses dim ({}) does not match ONNX input delta ({}).", obs_dim, extra_dim
+            )
 
     def _capture_policy_state(self):
         state = super()._capture_policy_state()
@@ -289,6 +559,11 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         # actions
         current_obs_buffer_dict["actions"] = self.last_policy_action
+
+        if self._motion_future_target_pose_provider is not None:
+            current_obs_buffer_dict["motion_future_target_poses"] = (
+                self._motion_future_target_pose_provider.get_future_target_poses(self.motion_timestep)
+            )
 
         return current_obs_buffer_dict
 
