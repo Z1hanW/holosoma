@@ -1,9 +1,6 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-CUDA_VISIBLE_DEVICES=5,6,7 torchrun --nproc_per_node=3 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
+CUDA_VISIBLE_DEVICES=6,7 torchrun --nproc_per_node=2 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-videomimic-mlp \
-  --training.num_envs=8192 \
+  --training.num_envs=12288 \
   \
   --algo.config.actor_learning_rate=7e-5 \
   --algo.config.critic_learning_rate=7e-5 \

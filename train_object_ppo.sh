@@ -15,3 +15,5 @@ python src/holosoma/holosoma/train_agent.py \
   --logger.video.enabled=False \
   --simulator.config.scene.env_spacing=0.0
 
+
+
