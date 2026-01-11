@@ -196,9 +196,83 @@ g1_29dof_wbt_observation_w_object = ObservationManagerCfg(
     },
 )
 
+# VideoMimic-style observation: history for torso signals + target pose terms.
+actor_obs_videomimic_terms = {
+    "torso_real": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:torso_real",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "torso_xy_rel": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:torso_xy_rel",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "torso_yaw_rel": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:torso_yaw_rel",
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
+critic_obs_videomimic_terms = actor_obs_videomimic_terms.copy()
+critic_obs_videomimic_terms["base_lin_vel"] = ObsTermCfg(
+    func="holosoma.managers.observation.terms.wbt:base_lin_vel",
+    scale=1.0,
+    noise=0.0,
+)
+
+videomimic_target_terms = {
+    "target_joints": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:target_joints",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "target_root_roll": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:target_root_roll",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "target_root_pitch": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:target_root_pitch",
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
+g1_29dof_wbt_observation_videomimic = ObservationManagerCfg(
+    groups={
+        "actor_obs": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=5,
+            terms=actor_obs_videomimic_terms,
+        ),
+        "actor_obs_target": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=videomimic_target_terms,
+        ),
+        "critic_obs": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=5,
+            terms=critic_obs_videomimic_terms,
+        ),
+        "critic_obs_target": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=videomimic_target_terms,
+        ),
+    },
+)
+
 __all__ = [
     "g1_29dof_wbt_observation",
     "g1_29dof_wbt_observation_motion_tracking",
     "g1_29dof_wbt_observation_motion_tracking_split",
     "g1_29dof_wbt_observation_w_object",
+    "g1_29dof_wbt_observation_videomimic",
 ]

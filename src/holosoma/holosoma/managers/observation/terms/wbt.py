@@ -7,7 +7,16 @@ from typing import TYPE_CHECKING
 import torch
 
 from holosoma.managers.command.terms.wbt import MotionCommand
-from holosoma.utils.rotations import quat_rotate_inverse, quaternion_to_matrix, subtract_frame_transforms
+from holosoma.utils.rotations import (
+    calc_heading,
+    calc_heading_quat_inv,
+    get_euler_xyz,
+    normalize_angle,
+    quat_apply,
+    quat_rotate_inverse,
+    quaternion_to_matrix,
+    subtract_frame_transforms,
+)
 from holosoma.utils.torch_utils import get_axis_params, to_torch
 
 if TYPE_CHECKING:
@@ -123,6 +132,20 @@ def actions(env: WholeBodyTrackingManager) -> torch.Tensor:
 #########################################################################################################
 
 
+def torso_real(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """VideoMimic-style torso observation (current frame)."""
+    return torch.cat(
+        [
+            base_ang_vel(env),
+            projected_gravity(env),
+            dof_pos(env),
+            dof_vel(env),
+            actions(env),
+        ],
+        dim=-1,
+    )
+
+
 def _get_motion_command_and_assert_type(env: WholeBodyTrackingManager) -> MotionCommand:
     motion_command = env.command_manager.get_state("motion_command")
     assert motion_command is not None, "motion_command not found in command manager"
@@ -145,6 +168,44 @@ def motion_future_target_poses(
         num_future_steps=num_future_steps,
         target_pose_type=target_pose_type,
     )
+
+
+def torso_xy_rel(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Local-frame XY position from robot torso to motion target torso."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    rel_pos_w = motion_command.ref_pos_w - motion_command.robot_ref_pos_w
+    heading_inv = calc_heading_quat_inv(motion_command.robot_ref_quat_w, w_last=True)
+    rel_pos_b = quat_apply(heading_inv, rel_pos_w, w_last=True)
+    return rel_pos_b[:, :2]
+
+
+def torso_yaw_rel(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Local-frame yaw from robot torso to motion target torso."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    target_heading = calc_heading(motion_command.ref_quat_w)
+    robot_heading = calc_heading(motion_command.robot_ref_quat_w)
+    heading_error = normalize_angle(target_heading - robot_heading)
+    return heading_error.unsqueeze(1)
+
+
+def target_joints(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Target joint angles from motion data, relative to default pose."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    return motion_command.joint_pos - env.default_dof_pos
+
+
+def target_root_roll(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Target root roll (motion data) in radians."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    roll, _, _ = get_euler_xyz(motion_command.root_quat_w, w_last=True)
+    return normalize_angle(roll).unsqueeze(1)
+
+
+def target_root_pitch(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Target root pitch (motion data) in radians."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    _, pitch, _ = get_euler_xyz(motion_command.root_quat_w, w_last=True)
+    return normalize_angle(pitch).unsqueeze(1)
 
 
 def motion_ref_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
