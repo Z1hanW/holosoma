@@ -525,6 +525,55 @@ class SymmetryUtils:
         """
         return actions[..., self.joint_index_map] * self.sign_flip_mask
 
+    def mirror_obs_torso_real(self, torso_real: torch.Tensor) -> torch.Tensor:
+        """Mirror the VideoMimic-style torso_real vector."""
+        total_dim = torso_real.shape[-1]
+        num_dof = int(self.joint_index_map.numel())
+        if total_dim < 6 + 2 * num_dof:
+            raise ValueError(f"torso_real dim too small: {total_dim}")
+
+        base_ang_vel = torso_real[..., :3]
+        projected_gravity = torso_real[..., 3:6]
+        remaining = torso_real[..., 6:]
+
+        dof_pos = remaining[..., :num_dof]
+        dof_vel = remaining[..., num_dof : 2 * num_dof]
+        actions = remaining[..., 2 * num_dof :]
+        if actions.shape[-1] not in (0, num_dof):
+            raise ValueError(f"Unexpected actions dim in torso_real: {actions.shape[-1]}")
+
+        base_ang_vel = self.mirror_obs_base_ang_vel(base_ang_vel)
+        projected_gravity = self.mirror_obs_projected_gravity(projected_gravity)
+        dof_pos = self.mirror_obs_dof_pos(dof_pos)
+        dof_vel = self.mirror_obs_dof_vel(dof_vel)
+        if actions.shape[-1]:
+            actions = self.mirror_obs_actions(actions)
+
+        return torch.cat([base_ang_vel, projected_gravity, dof_pos, dof_vel, actions], dim=-1)
+
+    def mirror_obs_torso_xy_rel(self, torso_xy_rel: torch.Tensor) -> torch.Tensor:
+        """Mirror local-frame torso XY offset."""
+        torso_xy_rel[..., 1] = -torso_xy_rel[..., 1]
+        return torso_xy_rel
+
+    def mirror_obs_torso_yaw_rel(self, torso_yaw_rel: torch.Tensor) -> torch.Tensor:
+        """Mirror local-frame torso yaw offset."""
+        torso_yaw_rel[..., 0] = -torso_yaw_rel[..., 0]
+        return torso_yaw_rel
+
+    def mirror_obs_target_joints(self, target_joints: torch.Tensor) -> torch.Tensor:
+        """Mirror target joint angles using joint mapping and sign flips."""
+        return target_joints[..., self.joint_index_map] * self.sign_flip_mask
+
+    def mirror_obs_target_root_roll(self, target_root_roll: torch.Tensor) -> torch.Tensor:
+        """Mirror target root roll."""
+        target_root_roll[..., 0] = -target_root_roll[..., 0]
+        return target_root_roll
+
+    def mirror_obs_target_root_pitch(self, target_root_pitch: torch.Tensor) -> torch.Tensor:
+        """Mirror target root pitch (no sign flip)."""
+        return target_root_pitch
+
     def _mirror_vec3_flat(self, vec: torch.Tensor) -> torch.Tensor:
         if vec.shape[-1] % 3 != 0:
             raise ValueError("Expected last dim to be multiple of 3 for vec3 mirroring.")
