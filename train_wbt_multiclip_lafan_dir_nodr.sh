@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Randomization preset is required, but all terms are disabled below.
-RANDOMIZATION_PRESET="randomization:g1-29dof-wbt"
+# Randomization preset is optional; leave empty to use the exp default.
+RANDOMIZATION_PRESET=""
+RANDOMIZATION_PRESET_ARGS=()
+if [[ -n "${RANDOMIZATION_PRESET}" ]]; then
+  RANDOMIZATION_PRESET_ARGS=("${RANDOMIZATION_PRESET}")
+fi
 RANDOMIZATION_OVERRIDES=(
   --randomization.setup_terms.push_randomizer_state.params.enabled=False
   --randomization.setup_terms.actuator_randomizer_state.params.enable_pd_gain=False
@@ -14,8 +18,6 @@ RANDOMIZATION_OVERRIDES=(
   --randomization.reset_terms.randomize_push_schedule.params.enabled=False
   --randomization.reset_terms.randomize_action_delay.params.enabled=False
   --randomization.reset_terms.randomize_dof_state.params.randomize_dof_pos_bias=False
-  --randomization.reset_terms.randomize_dof_state.params.joint_pos_bias_range='[0.0, 0.0]'
-  --randomization.step_terms.apply_pushes.params.enabled=False
 )
 
 # Clip weighting across multi-clip motion bank.
@@ -34,7 +36,7 @@ fi
 
 CUDA_VISIBLE_DEVICES=3,4,5 torchrun --nproc_per_node=3 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-videomimic-mlp \
-  "${RANDOMIZATION_PRESET}" \
+  "${RANDOMIZATION_PRESET_ARGS[@]}" \
   --training.num_envs=30720 \
   \
   --algo.config.actor_learning_rate=7e-5 \

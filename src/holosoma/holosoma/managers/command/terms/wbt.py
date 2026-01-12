@@ -42,6 +42,9 @@ class MotionLoader:
         motion_clip_id: int | None = None,
         motion_clip_name: str | None = None,
     ):
+        self._robot_body_names = list(robot_body_names)
+        self._robot_joint_names = list(robot_joint_names)
+
         # Resolve the motion file path using importlib.resources
         motion_file = resolve_data_file_path(motion_file)
         motion_path = Path(motion_file)
@@ -298,6 +301,81 @@ class MotionLoader:
                 decoded.append(str(item))
         return decoded
 
+    @staticmethod
+    def _finite_diff(data: np.ndarray, fps: float) -> np.ndarray:
+        if data.shape[0] == 1:
+            return np.zeros_like(data)
+        vel = (data[1:] - data[:-1]) * fps
+        return np.concatenate([vel, vel[-1:]], axis=0)
+
+    @staticmethod
+    def _quat_conjugate_xyzw(q: np.ndarray) -> np.ndarray:
+        out = q.copy()
+        out[..., :3] *= -1.0
+        return out
+
+    @staticmethod
+    def _quat_mul_xyzw(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        ax, ay, az, aw = np.split(a, 4, axis=-1)
+        bx, by, bz, bw = np.split(b, 4, axis=-1)
+        x = aw * bx + ax * bw + ay * bz - az * by
+        y = aw * by - ax * bz + ay * bw + az * bx
+        z = aw * bz + ax * by - ay * bx + az * bw
+        w = aw * bw - ax * bx - ay * by - az * bz
+        return np.concatenate([x, y, z, w], axis=-1)
+
+    @staticmethod
+    def _quat_rotate_xyzw(q: np.ndarray, v: np.ndarray) -> np.ndarray:
+        qvec = q[..., :3]
+        uv = np.cross(qvec, v)
+        uuv = np.cross(qvec, uv)
+        return v + 2.0 * (q[..., 3:4] * uv + uuv)
+
+    @staticmethod
+    def _angular_velocity_xyzw(quats: np.ndarray, fps: float) -> np.ndarray:
+        if quats.shape[0] == 1:
+            return np.zeros(quats.shape[:-1] + (3,), dtype=quats.dtype)
+        q0 = quats[:-1]
+        q1 = quats[1:]
+        dq = MotionLoader._quat_mul_xyzw(q1, MotionLoader._quat_conjugate_xyzw(q0))
+        dq = dq / np.linalg.norm(dq, axis=-1, keepdims=True)
+        w = np.clip(dq[..., 3], -1.0, 1.0)
+        v = dq[..., :3]
+        sin_half = np.linalg.norm(v, axis=-1)
+        angle = 2.0 * np.arctan2(sin_half, w)
+        small = sin_half < 1e-8
+        axis = np.zeros_like(v)
+        axis[~small] = v[~small] / sin_half[~small][..., None]
+        omega = axis * (angle[..., None] * fps)
+        omega[small] = 2.0 * v[small] * fps
+        return np.concatenate([omega, omega[-1:]], axis=0)
+
+    @staticmethod
+    def _xyzw_to_wxyz(q: np.ndarray) -> np.ndarray:
+        return np.concatenate([q[..., 3:4], q[..., :3]], axis=-1)
+
+    @staticmethod
+    def _infer_link_frame(link_names: list[str], link_pos: np.ndarray, root_pos: np.ndarray) -> str:
+        for pelvis_name in ("pelvis", "pelvis_link"):
+            if pelvis_name in link_names:
+                idx = link_names.index(pelvis_name)
+                diff = np.linalg.norm(link_pos[:, idx] - root_pos, axis=-1)
+                if np.median(diff) < 1e-3:
+                    return "world"
+                return "local"
+        return "world"
+
+    def _get_h5_attr_or_dataset(self, h5f: Any, name: str) -> np.ndarray | None:
+        if name in h5f.attrs:
+            return np.asarray(h5f.attrs[name])
+        if f"/{name}" in h5f.attrs:
+            return np.asarray(h5f.attrs[f"/{name}"])
+        if name in h5f:
+            return np.asarray(h5f[name])
+        if f"/{name}" in h5f:
+            return np.asarray(h5f[f"/{name}"])
+        return None
+
     def _load_data_from_motion_h5(
         self,
         motion_file: str,
@@ -312,7 +390,7 @@ class MotionLoader:
 
         with h5py.File(motion_file, "r") as h5f:
             if "meta" not in h5f or "data" not in h5f:
-                raise ValueError("HDF5 motion file must contain /meta and /data groups.")
+                return self._load_data_from_motion_h5_videomimic(h5f, motion_file, device)
 
             meta = h5f["meta"]
             data = h5f["data"]
@@ -405,6 +483,92 @@ class MotionLoader:
                 self._object_quat_w = torch.zeros(0, 4, device=device)
                 self._object_lin_vel_w = torch.zeros(0, 3, device=device)
 
+        return body_names, joint_names
+
+    def _load_data_from_motion_h5_videomimic(
+        self,
+        h5f: Any,
+        motion_file: str,
+        device: str,
+    ) -> tuple[list[str], list[str]]:
+        required = ("root_pos", "root_quat", "joints", "link_pos", "link_quat")
+        missing = [key for key in required if key not in h5f]
+        if missing:
+            raise KeyError(f"Missing keys in VideoMimic HDF5 file: {missing}")
+
+        root_pos = np.asarray(h5f["root_pos"], dtype=np.float32)
+        root_quat_xyzw = np.asarray(h5f["root_quat"], dtype=np.float32)
+        joints = np.asarray(h5f["joints"], dtype=np.float32)
+        link_pos = np.asarray(h5f["link_pos"], dtype=np.float32)
+        link_quat_xyzw = np.asarray(h5f["link_quat"], dtype=np.float32)
+
+        joint_names_raw = self._get_h5_attr_or_dataset(h5f, "joint_names")
+        link_names_raw = self._get_h5_attr_or_dataset(h5f, "link_names")
+        if joint_names_raw is None or link_names_raw is None:
+            raise ValueError("VideoMimic HDF5 file must provide joint_names and link_names.")
+        joint_names = self._decode_h5_strings(np.asarray(joint_names_raw))
+        link_names = self._decode_h5_strings(np.asarray(link_names_raw))
+
+        fps_raw = self._get_h5_attr_or_dataset(h5f, "fps")
+        fps_arr = np.array(fps_raw).reshape(-1) if fps_raw is not None else np.array([30.0], dtype=np.float32)
+        self.fps = float(fps_arr[0]) if fps_arr.size > 0 else 30.0
+
+        num_frames = int(root_pos.shape[0])
+        if joints.shape[0] != num_frames:
+            raise ValueError("VideoMimic HDF5 joint length does not match root_pos length.")
+
+        if self._robot_joint_names:
+            missing_joints = [name for name in self._robot_joint_names if name not in joint_names]
+            if missing_joints:
+                zeros = np.zeros((num_frames, len(missing_joints)), dtype=joints.dtype)
+                joints = np.concatenate([joints, zeros], axis=1)
+                joint_names.extend(missing_joints)
+                logger.warning("Missing joints in VideoMimic HDF5, padded with zeros: {}", missing_joints)
+
+        frame_mode = self._infer_link_frame(link_names, link_pos, root_pos)
+        link_pos_w = link_pos
+        link_quat_w = link_quat_xyzw
+        if frame_mode == "local":
+            link_pos_w = root_pos[:, None, :] + self._quat_rotate_xyzw(root_quat_xyzw[:, None, :], link_pos)
+            link_quat_w = self._quat_mul_xyzw(root_quat_xyzw[:, None, :], link_quat_xyzw)
+
+        body_names = list(self._robot_body_names)
+        num_bodies = len(body_names)
+        body_pos_w = np.broadcast_to(root_pos[:, None, :], (num_frames, num_bodies, 3)).copy()
+        body_quat_w = np.broadcast_to(root_quat_xyzw[:, None, :], (num_frames, num_bodies, 4)).copy()
+
+        link_name_map = {name: i for i, name in enumerate(link_names)}
+        for body_idx, body_name in enumerate(body_names):
+            link_idx = link_name_map.get(body_name)
+            if link_idx is None:
+                continue
+            body_pos_w[:, body_idx] = link_pos_w[:, link_idx]
+            body_quat_w[:, body_idx] = link_quat_w[:, link_idx]
+
+        body_lin_vel_w = self._finite_diff(body_pos_w, self.fps)
+        body_ang_vel_w = self._angular_velocity_xyzw(body_quat_w, self.fps)
+
+        root_lin_vel = self._finite_diff(root_pos, self.fps)
+        root_ang_vel = self._angular_velocity_xyzw(root_quat_xyzw, self.fps)
+        dof_vel = self._finite_diff(joints, self.fps)
+
+        joint_pos = np.concatenate([root_pos, self._xyzw_to_wxyz(root_quat_xyzw), joints], axis=-1)
+        joint_vel = np.concatenate([root_lin_vel, root_ang_vel, dof_vel], axis=-1)
+
+        self._joint_pos = torch.tensor(joint_pos[:, 7:], dtype=torch.float32, device=device)
+        self._joint_vel = torch.tensor(joint_vel[:, 6:], dtype=torch.float32, device=device)
+        self._body_pos_w = torch.tensor(body_pos_w, dtype=torch.float32, device=device)
+        self._body_quat_w = torch.tensor(body_quat_w, dtype=torch.float32, device=device)
+        self._body_lin_vel_w = torch.tensor(body_lin_vel_w, dtype=torch.float32, device=device)
+        self._body_ang_vel_w = torch.tensor(body_ang_vel_w, dtype=torch.float32, device=device)
+
+        self.has_object = False
+        self._object_pos_w = torch.zeros(0, 3, device=device)
+        self._object_quat_w = torch.zeros(0, 4, device=device)
+        self._object_lin_vel_w = torch.zeros(0, 3, device=device)
+
+        clip_id = Path(motion_file).stem
+        self._set_clip_metadata([clip_id], np.array([0]), np.array([num_frames]), device)
         return body_names, joint_names
 
     @property

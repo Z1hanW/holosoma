@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Randomization presets (choose one):
+# Randomization presets (optional; leave empty to use the exp default):
 #   randomization:g1-29dof-wbt
 #   randomization:g1-29dof-wbt-w-object
 #   randomization:g1-29dof
 #   randomization:t1-29dof
-RANDOMIZATION_PRESET="randomization:g1-29dof-wbt"
+RANDOMIZATION_PRESET=""
+RANDOMIZATION_PRESET_ARGS=()
+if [[ -n "${RANDOMIZATION_PRESET}" ]]; then
+  RANDOMIZATION_PRESET_ARGS=("${RANDOMIZATION_PRESET}")
+fi
 
 # Per-term toggles (uncomment to disable specific randomizers):
 RANDOMIZATION_OVERRIDES=(
@@ -40,7 +44,7 @@ fi
 
 CUDA_VISIBLE_DEVICES=5,6,7 torchrun --nproc_per_node=3 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-videomimic-mlp \
-  "${RANDOMIZATION_PRESET}" \
+  "${RANDOMIZATION_PRESET_ARGS[@]}" \
   --training.num_envs=30720 \
   \
   --algo.config.actor_learning_rate=7e-5 \

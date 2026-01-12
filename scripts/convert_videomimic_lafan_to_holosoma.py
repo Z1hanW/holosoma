@@ -24,6 +24,19 @@ def _decode_strings(values: Iterable) -> list[str]:
     return decoded
 
 
+def _normalize_joint_name(name: str) -> str:
+    if name.endswith("_joint"):
+        return name[: -len("_joint")]
+    return name
+
+
+def _normalize_link_name(name: str) -> str:
+    lowered = name.lower()
+    if lowered.endswith(".stl"):
+        return name[: -len(".stl")]
+    return name
+
+
 def _load_template_names(path: Path) -> tuple[list[str], list[str]]:
     with np.load(path, allow_pickle=True) as npz:
         joint_names = _decode_strings(np.asarray(npz["joint_names"]))
@@ -205,26 +218,30 @@ def _infer_link_frame(
 ) -> str:
     if mode != "auto":
         return mode
-    if "pelvis" in link_names:
-        idx = link_names.index("pelvis")
-        diff = np.linalg.norm(link_pos[:, idx] - root_pos, axis=-1)
-        if np.median(diff) < 1e-3:
-            return "world"
-        return "local"
+    link_names_norm = [_normalize_link_name(name) for name in link_names]
+    for pelvis_name in ("pelvis", "pelvis_link"):
+        if pelvis_name in link_names_norm:
+            idx = link_names_norm.index(pelvis_name)
+            diff = np.linalg.norm(link_pos[:, idx] - root_pos, axis=-1)
+            if np.median(diff) < 1e-3:
+                return "world"
+            return "local"
     return "world"
 
 
 def _fill_body(
     name: str,
     link_names: list[str],
+    link_name_map: dict[str, int],
     link_pos_w: np.ndarray,
     link_quat_w_xyzw: np.ndarray,
     root_pos: np.ndarray,
     root_quat_xyzw: np.ndarray,
     missing_policy: str,
 ) -> tuple[np.ndarray, np.ndarray]:
-    if name in link_names:
-        idx = link_names.index(name)
+    name_norm = _normalize_link_name(name)
+    if name_norm in link_name_map:
+        idx = link_name_map[name_norm]
         return link_pos_w[:, idx], link_quat_w_xyzw[:, idx]
     if name == "world":
         pos = np.zeros_like(root_pos)
@@ -235,8 +252,9 @@ def _fill_body(
         return root_pos, root_quat_xyzw
     if name.endswith("_contour_link"):
         base = name.replace("_contour_link", "")
-        if base in link_names:
-            idx = link_names.index(base)
+        base_norm = _normalize_link_name(base)
+        if base_norm in link_name_map:
+            idx = link_name_map[base_norm]
             return link_pos_w[:, idx], link_quat_w_xyzw[:, idx]
     if missing_policy == "root":
         return root_pos, root_quat_xyzw
@@ -252,11 +270,21 @@ def _reorder_joints(
     joints: np.ndarray, joint_names: list[str], target_joint_names: list[str], missing_policy: str
 ) -> np.ndarray:
     out = np.zeros((joints.shape[0], len(target_joint_names)), dtype=joints.dtype)
+    name_to_idx = {name: i for i, name in enumerate(joint_names)}
+    missing: list[str] = []
     for i, name in enumerate(target_joint_names):
-        if name in joint_names:
-            out[:, i] = joints[:, joint_names.index(name)]
+        name_norm = _normalize_joint_name(name)
+        idx = name_to_idx.get(name_norm)
+        if idx is not None:
+            out[:, i] = joints[:, idx]
         elif missing_policy == "error":
             raise KeyError(f"Missing joint '{name}' in replay data.")
+        else:
+            missing.append(name)
+    if missing and missing_policy != "error":
+        missing_str = ", ".join(missing[:10])
+        suffix = "..." if len(missing) > 10 else ""
+        print(f"[warn] Missing joints in replay data: {missing_str}{suffix}")
     return out
 
 
@@ -279,6 +307,9 @@ def convert_clip(
     link_quat_xyzw = np.asarray(data["link_quat"], dtype=np.float32)
     joint_names = _decode_strings(data.get("joint_names", []))
     link_names = _decode_strings(data.get("link_names", []))
+    joint_names = [_normalize_joint_name(name) for name in joint_names]
+    link_names = [_normalize_link_name(name) for name in link_names]
+    link_name_map = {name: i for i, name in enumerate(link_names)}
     fps = float(data.get("fps", target_fps))
 
     if abs(fps - target_fps) > 1e-6:
@@ -306,6 +337,7 @@ def convert_clip(
         pos, quat = _fill_body(
             name,
             link_names,
+            link_name_map,
             link_pos_w,
             link_quat_w_xyzw,
             root_pos,
