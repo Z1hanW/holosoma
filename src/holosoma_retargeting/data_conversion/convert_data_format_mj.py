@@ -386,6 +386,7 @@ def run_simulator(joint_names: list[str]):
             raise ValueError("object_name cannot be None when it's not 'ground' or 'multi_boxes'")
         robot_xml_path = robot_model_path.replace(".urdf", "_w_" + object_name + ".xml")
 
+    robot_xml_path = '/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/models/g1/g1_29dof.xml'
     robot = mujoco.MjModel.from_xml_path(robot_xml_path)
     robot_data = mujoco.MjData(robot)
     print("Loading robot model from: ", robot_xml_path)

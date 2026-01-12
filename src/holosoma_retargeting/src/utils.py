@@ -749,7 +749,7 @@ def transform_y_up_to_z_up(points):
     """
     # Create transformation matrix
     # [x, y, z] -> [x, z, y]
-    transform_matrix = np.array([[1, 0, 0], [0, 0, 1], [0, 1, 0]])
+    transform_matrix = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
 
     # Apply transformation
     if points.ndim == 1:

@@ -20,8 +20,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ==============================================================================
 
 # ----- user config (edit these) -----
-RETARGET_DIR="/ABS/PATH/demo_results_parallel/g1/robot_only/lafan"
-CONVERTED_DIR="/ABS/PATH/converted_res/robot_only/lafan"
+RETARGET_DIR="src/holosoma_retargeting/demo_results_parallel/g1/robot_only/lafan"
+CONVERTED_DIR="src/holosoma_retargeting/converted_res/robot_only/lafan"
 H5_FILE="${CONVERTED_DIR}/motion_bank.h5"
 
 # Geometry for MuJoCo sim2sim
@@ -79,7 +79,7 @@ convert_lafan() {
   require_dir "$RETARGET_DIR" "RETARGET_DIR"
   mkdir -p "$CONVERTED_DIR"
 
-  local converter="$ROOT_DIR/holosoma/src/holosoma_retargeting/data_conversion/convert_data_format_mj.py"
+  local converter="src/holosoma_retargeting/data_conversion/convert_data_format_mj.py"
   require_file "$converter" "convert_data_format_mj.py"
 
   shopt -s nullglob

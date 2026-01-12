@@ -8,14 +8,14 @@ from typing import Any, TypedDict
 # Pre-defined constants for each data format
 LAFAN_DEMO_JOINTS = [
     "Hips",
-    "RightUpLeg",
-    "RightLeg",
-    "RightFoot",
-    "RightToeBase",
     "LeftUpLeg",
     "LeftLeg",
     "LeftFoot",
     "LeftToeBase",
+    "RightUpLeg",
+    "RightLeg",
+    "RightFoot",
+    "RightToeBase",
     "Spine",
     "Spine1",
     "Spine2",

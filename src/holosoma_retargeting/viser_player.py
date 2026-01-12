@@ -68,7 +68,7 @@ def make_player(
 
     We'll infer R from the robot URDF's actuated joints in ViserUrdf.
     """
-    server = viser.ViserServer(port=7232)
+    server = viser.ViserServer(port=7777)
 
     # Root frames
     robot_root = server.scene.add_frame("/robot", show_axes=False)
