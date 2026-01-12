@@ -178,6 +178,8 @@ class InteractionMeshRetargeter:
         # Create parent frames for robot and object
         self.robot_base = self.server.scene.add_frame("/world/robot", show_axes=False)
 
+        print("robot_model_path: ", self.robot_model_path)
+
         # Load robot URDF
         self.robot_urdf = yourdfpy.URDF.load(
             self.robot_model_path,
