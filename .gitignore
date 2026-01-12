@@ -8,6 +8,8 @@
 # Allow Python and shell scripts anywhere
 !**/*.py
 !**/*.sh
+!**/*.urdf
+!**/*.xml
 
 # Keep these
 !.gitignore

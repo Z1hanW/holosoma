@@ -1,0 +1,5 @@
+<mujocoinclude>
+    <mesh name="stairs_1" file="../../../demo_data/far_robot/far_robot/stairs.obj"
+        scale="1.0 1.0 1.0"/>
+    <material name="stairs_1_material" rgba="0.3 0.7 0.9 0.5"/>
+</mujocoinclude>

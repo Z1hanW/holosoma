@@ -1,0 +1,111 @@
+<mujoco model="g1_29dof scene">
+
+  <!-- Robot -->
+  <include file="../g1_29dof.xml"/>
+
+  <!-- Sim options -->
+  <option timestep="0.002" iterations="50" solver="Newton"/>
+
+  <!-- Mesh search directory for this wrapper file -->
+  <compiler angle="radian" meshdir="../meshes/"/>
+
+  <!-- Defaults for scene meshes: visual vs collision -->
+  <default>
+    <default class="scene_vis">
+      <geom type="mesh" contype="0" conaffinity="0" group="1" rgba="1 1 1 1"/>
+    </default>
+
+    <default class="scene_col">
+      <geom type="mesh"
+            contype="1" conaffinity="1"
+            group="3" rgba="0 0 0 0"
+            friction="1 0.005 0.0001"/>
+    </default>
+  </default>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="120" elevation="-20"/>
+  </visual>
+
+  <statistic center="0 0 0.5" extent="2.0"/>
+
+  <asset>
+    <!-- Sky + ground -->
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge"
+             rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
+             markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+
+    <!-- Scene pieces (OBJ) -->
+    <mesh name="part_00-1_mesh" file="pieces/part_00-1.obj" scale="1.0 1.0 1.0"/>
+    <mesh name="part_002_mesh"  file="pieces/part_002.obj"  scale="1.0 1.0 1.0"/>
+    <mesh name="part_003_mesh"  file="pieces/part_003.obj"  scale="1.0 1.0 1.0"/>
+    <mesh name="part_006_mesh"  file="pieces/part_006.obj"  scale="1.0 1.0 1.0"/>
+    <mesh name="part_007_mesh"  file="pieces/part_007.obj"  scale="1.0 1.0 1.0"/>
+    <mesh name="part_011_mesh"  file="pieces/part_011.obj"  scale="1.0 1.0 1.0"/>
+    <mesh name="part_012_mesh"  file="pieces/part_012.obj"  scale="1.0 1.0 1.0"/>
+    <mesh name="part_017_mesh"  file="pieces/part_017.obj"  scale="1.0 1.0 1.0"/>
+    <mesh name="part_022_mesh"  file="pieces/part_022.obj"  scale="1.0 1.0 1.0"/>
+    <mesh name="part_024_mesh"  file="pieces/part_024.obj"  scale="1.0 1.0 1.0"/>
+    <mesh name="part_025_mesh"  file="pieces/part_025.obj"  scale="1.0 1.0 1.0"/>
+  </asset>
+
+  <worldbody>
+    <!-- Light + floor -->
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.01" type="plane" material="groundplane" group="2"/>
+
+    <!-- Scene container: adjust this to move/rotate the entire environment -->
+    <body name="static_scene" pos="0 0 0" quat="1 0 0 0">
+
+      <!-- part_00-1 -->
+      <geom name="part_00-1_vis" class="scene_vis" mesh="part_00-1_mesh"/>
+      <geom name="part_00-1_col" class="scene_col" mesh="part_00-1_mesh"/>
+
+      <!-- part_002 -->
+      <geom name="part_002_vis" class="scene_vis" mesh="part_002_mesh"/>
+      <geom name="part_002_col" class="scene_col" mesh="part_002_mesh"/>
+
+      <!-- part_003 -->
+      <geom name="part_003_vis" class="scene_vis" mesh="part_003_mesh"/>
+      <geom name="part_003_col" class="scene_col" mesh="part_003_mesh"/>
+
+      <!-- part_006 -->
+      <geom name="part_006_vis" class="scene_vis" mesh="part_006_mesh"/>
+      <geom name="part_006_col" class="scene_col" mesh="part_006_mesh"/>
+
+      <!-- part_007 -->
+      <geom name="part_007_vis" class="scene_vis" mesh="part_007_mesh"/>
+      <geom name="part_007_col" class="scene_col" mesh="part_007_mesh"/>
+
+      <!-- part_011 -->
+      <geom name="part_011_vis" class="scene_vis" mesh="part_011_mesh"/>
+      <geom name="part_011_col" class="scene_col" mesh="part_011_mesh"/>
+
+      <!-- part_012 -->
+      <geom name="part_012_vis" class="scene_vis" mesh="part_012_mesh"/>
+      <geom name="part_012_col" class="scene_col" mesh="part_012_mesh"/>
+
+      <!-- part_017 -->
+      <geom name="part_017_vis" class="scene_vis" mesh="part_017_mesh"/>
+      <geom name="part_017_col" class="scene_col" mesh="part_017_mesh"/>
+
+      <!-- part_022 -->
+      <geom name="part_022_vis" class="scene_vis" mesh="part_022_mesh"/>
+      <geom name="part_022_col" class="scene_col" mesh="part_022_mesh"/>
+
+      <!-- part_024 -->
+      <geom name="part_024_vis" class="scene_vis" mesh="part_024_mesh"/>
+      <geom name="part_024_col" class="scene_col" mesh="part_024_mesh"/>
+
+      <!-- part_025 -->
+      <geom name="part_025_vis" class="scene_vis" mesh="part_025_mesh"/>
+      <geom name="part_025_col" class="scene_col" mesh="part_025_mesh"/>
+
+    </body>
+  </worldbody>
+
+</mujoco>

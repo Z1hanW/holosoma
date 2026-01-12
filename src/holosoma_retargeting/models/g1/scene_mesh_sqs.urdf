@@ -1,0 +1,313 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="scene">
+  <link name="world" />
+
+  <link name="part_00-1">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="1.0" />
+      <inertia ixx="1" ixy="0" ixz="0" iyy="1" iyz="0" izz="1" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_00-1.obj" />
+      </geometry>
+      <material name="default_gray">
+        <color rgba="0.7 0.7 0.7 1.0" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_00-1.obj" />
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="part_002">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="1.0" />
+      <inertia ixx="1" ixy="0" ixz="0" iyy="1" iyz="0" izz="1" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_002.obj" />
+      </geometry>
+      <material name="default_gray">
+        <color rgba="0.7 0.7 0.7 1.0" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_002.obj" />
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="part_003">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="1.0" />
+      <inertia ixx="1" ixy="0" ixz="0" iyy="1" iyz="0" izz="1" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_003.obj" />
+      </geometry>
+      <material name="default_gray">
+        <color rgba="0.7 0.7 0.7 1.0" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_003.obj" />
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="part_006">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="1.0" />
+      <inertia ixx="1" ixy="0" ixz="0" iyy="1" iyz="0" izz="1" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_006.obj" />
+      </geometry>
+      <material name="default_gray">
+        <color rgba="0.7 0.7 0.7 1.0" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_006.obj" />
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="part_007">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="1.0" />
+      <inertia ixx="1" ixy="0" ixz="0" iyy="1" iyz="0" izz="1" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_007.obj" />
+      </geometry>
+      <material name="default_gray">
+        <color rgba="0.7 0.7 0.7 1.0" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_007.obj" />
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="part_011">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="1.0" />
+      <inertia ixx="1" ixy="0" ixz="0" iyy="1" iyz="0" izz="1" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_011.obj" />
+      </geometry>
+      <material name="default_gray">
+        <color rgba="0.7 0.7 0.7 1.0" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_011.obj" />
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="part_012">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="1.0" />
+      <inertia ixx="1" ixy="0" ixz="0" iyy="1" iyz="0" izz="1" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_012.obj" />
+      </geometry>
+      <material name="default_gray">
+        <color rgba="0.7 0.7 0.7 1.0" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_012.obj" />
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="part_017">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="1.0" />
+      <inertia ixx="1" ixy="0" ixz="0" iyy="1" iyz="0" izz="1" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_017.obj" />
+      </geometry>
+      <material name="default_gray">
+        <color rgba="0.7 0.7 0.7 1.0" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_017.obj" />
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="part_022">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="1.0" />
+      <inertia ixx="1" ixy="0" ixz="0" iyy="1" iyz="0" izz="1" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_022.obj" />
+      </geometry>
+      <material name="default_gray">
+        <color rgba="0.7 0.7 0.7 1.0" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_022.obj" />
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="part_024">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="1.0" />
+      <inertia ixx="1" ixy="0" ixz="0" iyy="1" iyz="0" izz="1" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_024.obj" />
+      </geometry>
+      <material name="default_gray">
+        <color rgba="0.7 0.7 0.7 1.0" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_024.obj" />
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="part_025">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="1.0" />
+      <inertia ixx="1" ixy="0" ixz="0" iyy="1" iyz="0" izz="1" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_025.obj" />
+      </geometry>
+      <material name="default_gray">
+        <color rgba="0.7 0.7 0.7 1.0" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="pieces/part_025.obj" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="part_00-1_joint" type="fixed">
+    <parent link="world" />
+    <child link="part_00-1" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="part_002_joint" type="fixed">
+    <parent link="world" />
+    <child link="part_002" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="part_003_joint" type="fixed">
+    <parent link="world" />
+    <child link="part_003" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="part_006_joint" type="fixed">
+    <parent link="world" />
+    <child link="part_006" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="part_007_joint" type="fixed">
+    <parent link="world" />
+    <child link="part_007" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="part_011_joint" type="fixed">
+    <parent link="world" />
+    <child link="part_011" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="part_012_joint" type="fixed">
+    <parent link="world" />
+    <child link="part_012" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="part_017_joint" type="fixed">
+    <parent link="world" />
+    <child link="part_017" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="part_022_joint" type="fixed">
+    <parent link="world" />
+    <child link="part_022" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="part_024_joint" type="fixed">
+    <parent link="world" />
+    <child link="part_024" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="part_025_joint" type="fixed">
+    <parent link="world" />
+    <child link="part_025" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+</robot>
