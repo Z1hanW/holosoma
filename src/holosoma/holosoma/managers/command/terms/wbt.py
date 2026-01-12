@@ -365,6 +365,12 @@ class MotionLoader:
                 return "local"
         return "world"
 
+    @staticmethod
+    def _normalize_link_name(name: str) -> str:
+        if name.endswith(".STL") or name.endswith(".stl"):
+            return name[:-4]
+        return name
+
     def _get_h5_attr_or_dataset(self, h5f: Any, name: str) -> np.ndarray | None:
         if name in h5f.attrs:
             return np.asarray(h5f.attrs[name])
@@ -508,6 +514,7 @@ class MotionLoader:
             raise ValueError("VideoMimic HDF5 file must provide joint_names and link_names.")
         joint_names = self._decode_h5_strings(np.asarray(joint_names_raw))
         link_names = self._decode_h5_strings(np.asarray(link_names_raw))
+        link_names = [self._normalize_link_name(name) for name in link_names]
 
         fps_raw = self._get_h5_attr_or_dataset(h5f, "fps")
         fps_arr = np.array(fps_raw).reshape(-1) if fps_raw is not None else np.array([30.0], dtype=np.float32)
@@ -525,12 +532,9 @@ class MotionLoader:
                 joint_names.extend(missing_joints)
                 logger.warning("Missing joints in VideoMimic HDF5, padded with zeros: {}", missing_joints)
 
-        frame_mode = self._infer_link_frame(link_names, link_pos, root_pos)
+        # VideoMimic uses link_pos/link_quat in the env/world frame. Keep them as-is.
         link_pos_w = link_pos
         link_quat_w = link_quat_xyzw
-        if frame_mode == "local":
-            link_pos_w = root_pos[:, None, :] + self._quat_rotate_xyzw(root_quat_xyzw[:, None, :], link_pos)
-            link_quat_w = self._quat_mul_xyzw(root_quat_xyzw[:, None, :], link_quat_xyzw)
 
         body_names = list(self._robot_body_names)
         num_bodies = len(body_names)
