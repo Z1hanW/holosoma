@@ -40,7 +40,7 @@ fi
 
 python src/holosoma/holosoma/replay.py \
   exp:g1-29dof-wbt-videomimic-mlp \
-  "${RANDOMIZATION_PRESET}" \
+  --training.headless=False \
   --training.num_envs=4 \
   --algo.config.actor_learning_rate=7e-5 \
   --algo.config.critic_learning_rate=7e-5 \
@@ -49,13 +49,9 @@ python src/holosoma/holosoma/replay.py \
   --algo.config.save_interval=1000 \
   --algo.config.num_learning_iterations=1000000 \
   \
-  --command.setup_terms.motion_command.params.motion_config.motion_file src/holosoma_retargeting/converted_res/robot_only/lafan \
+  --command.setup_terms.motion_command.params.motion_config.motion_file data/converted_res/robot_only/lafan \
   --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob=0.05 \
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_append=False \
   --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s=0 \
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend=False \
   --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s=0 \
-  "${CLIP_WEIGHTING_ARGS[@]}" \
-  "${RANDOMIZATION_OVERRIDES[@]}" \
-  logger:wandb \
-  --logger.video.interval=1000
