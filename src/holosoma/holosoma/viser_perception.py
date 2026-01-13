@@ -60,23 +60,87 @@ def _resolve_robot_urdf_path(cfg: ExperimentConfig) -> str:
     return _resolve_data_path(urdf_path)
 
 
+_VIRIDIS_LUT = np.array(
+    [
+        (68, 1, 84),
+        (69, 6, 90),
+        (70, 12, 95),
+        (71, 18, 101),
+        (71, 24, 106),
+        (72, 29, 111),
+        (72, 34, 115),
+        (71, 39, 119),
+        (71, 44, 123),
+        (70, 49, 126),
+        (69, 54, 129),
+        (67, 59, 131),
+        (66, 64, 133),
+        (64, 68, 135),
+        (62, 73, 137),
+        (60, 77, 138),
+        (58, 83, 139),
+        (56, 87, 140),
+        (54, 91, 140),
+        (52, 95, 141),
+        (50, 99, 141),
+        (48, 103, 141),
+        (46, 107, 142),
+        (45, 111, 142),
+        (43, 115, 142),
+        (42, 119, 142),
+        (40, 122, 142),
+        (39, 126, 142),
+        (37, 130, 142),
+        (36, 134, 141),
+        (34, 137, 141),
+        (33, 141, 140),
+        (31, 146, 140),
+        (31, 150, 139),
+        (30, 153, 138),
+        (30, 157, 136),
+        (31, 161, 135),
+        (32, 165, 133),
+        (35, 168, 131),
+        (38, 172, 129),
+        (42, 176, 126),
+        (47, 179, 123),
+        (53, 183, 120),
+        (59, 186, 117),
+        (66, 190, 113),
+        (73, 193, 109),
+        (81, 196, 104),
+        (89, 199, 100),
+        (100, 203, 93),
+        (109, 206, 88),
+        (119, 208, 82),
+        (129, 211, 76),
+        (139, 213, 70),
+        (149, 215, 63),
+        (159, 217, 56),
+        (170, 219, 50),
+        (181, 221, 43),
+        (191, 223, 36),
+        (202, 224, 30),
+        (212, 225, 26),
+        (223, 227, 24),
+        (233, 228, 25),
+        (243, 229, 30),
+        (253, 231, 36),
+    ],
+    dtype=np.uint8,
+)
+
+
 def _apply_colormap(values: np.ndarray) -> np.ndarray:
     values = np.clip(values, 0.0, 1.0)
-    stops = [
-        (0.0, np.array([0.0, 0.0, 0.5], dtype=np.float32)),
-        (0.25, np.array([0.0, 0.8, 1.0], dtype=np.float32)),
-        (0.5, np.array([0.0, 1.0, 0.0], dtype=np.float32)),
-        (0.75, np.array([1.0, 1.0, 0.0], dtype=np.float32)),
-        (1.0, np.array([1.0, 0.0, 0.0], dtype=np.float32)),
-    ]
-    colors = np.zeros(values.shape + (3,), dtype=np.float32)
-    for (v0, c0), (v1, c1) in zip(stops[:-1], stops[1:]):
-        mask = (values >= v0) & (values <= v1)
-        if not np.any(mask):
-            continue
-        t = (values[mask] - v0) / max(v1 - v0, 1.0e-6)
-        colors[mask] = c0 + (c1 - c0) * t[:, None]
-    return (colors * 255.0).astype(np.uint8)
+    lut = _VIRIDIS_LUT
+    scaled = values * float(len(lut) - 1)
+    idx0 = np.floor(scaled).astype(np.int32)
+    idx1 = np.clip(idx0 + 1, 0, len(lut) - 1)
+    t = (scaled - idx0)[..., None]
+    c0 = lut[idx0].astype(np.float32)
+    c1 = lut[idx1].astype(np.float32)
+    return ((1.0 - t) * c0 + t * c1).astype(np.uint8)
 
 
 def _depth_to_rgb(depth: np.ndarray, near: float, far: float) -> np.ndarray:
@@ -94,7 +158,9 @@ def _depth_to_rgb(depth: np.ndarray, near: float, far: float) -> np.ndarray:
     denom = max(max_d - min_d, 1.0e-6)
     norm = (depth_clipped - min_d) / denom
     norm = np.where(valid, norm, 0.0)
-    return _apply_colormap(norm)
+    colored = _apply_colormap(norm)
+    colored[~valid] = 0
+    return colored
 
 
 def _parse_vec3(text: str | None) -> tuple[float, float, float]:
@@ -513,9 +579,9 @@ def _raycast_depth(
 def _camera_to_frustum_quat() -> torch.Tensor:
     rot = torch.tensor(
         [
+            [0.0, -1.0, 0.0],
             [0.0, 0.0, 1.0],
-            [-1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
         ],
         dtype=torch.float32,
     )
