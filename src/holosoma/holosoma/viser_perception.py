@@ -503,11 +503,9 @@ def _parse_urdf_joints(urdf_path: str) -> tuple[str, dict[str, JointInfo]]:
     return roots[0], child_to_joint
 
 
-def _get_link_pose_world(
+def _get_link_pose_base(
     vr: ViserUrdf,
     link_name: str,
-    root_pos: torch.Tensor,
-    root_quat_xyzw: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if link_name not in vr._urdf.link_map:  # type: ignore[attr-defined]
         raise ValueError(f"Link '{link_name}' not found in URDF.")
@@ -522,14 +520,7 @@ def _get_link_pose_world(
     rot_base = torch.tensor(tf_base[:3, :3], dtype=torch.float32)
     quat_base_wxyz = matrix_to_quaternion(rot_base)
     quat_base_xyzw = quat_base_wxyz[[1, 2, 3, 0]]
-
-    world_pos = root_pos + quat_apply(root_quat_xyzw.unsqueeze(0), pos_base.unsqueeze(0), w_last=True).squeeze(0)
-    world_quat = quat_mul(
-        root_quat_xyzw.unsqueeze(0),
-        quat_base_xyzw.unsqueeze(0),
-        w_last=True,
-    ).squeeze(0)
-    return world_pos, world_quat
+    return pos_base, quat_base_xyzw
 
 
 def _build_camera_rays(
@@ -771,36 +762,41 @@ def replay_perception(cfg: ExperimentConfig) -> None:
         root_quat_xyzw = torch.tensor(root_quat_wxyz[[1, 2, 3, 0]], dtype=torch.float32)
         root_pos_t = torch.tensor(root_pos, dtype=torch.float32)
 
-        body_pos, body_quat = _get_link_pose_world(vr, camera_body, root_pos_t, root_quat_xyzw)
+        body_pos_base, body_quat_base = _get_link_pose_base(vr, camera_body)
         sensor_offset = torch.tensor(cfg.perception.sensor_offset, dtype=torch.float32)
-        offset_world = quat_apply(body_quat.unsqueeze(0), sensor_offset.unsqueeze(0), w_last=True).squeeze(0)
-        cam_pos = body_pos + offset_world
+        offset_base = quat_apply(body_quat_base.unsqueeze(0), sensor_offset.unsqueeze(0), w_last=True).squeeze(0)
+        cam_pos_base = body_pos_base + offset_base
 
         pitch_rad = torch.deg2rad(torch.tensor(cfg.perception.camera_pitch_deg, dtype=torch.float32))
         pitch_quat = quat_from_euler_xyz(torch.tensor(0.0), pitch_rad, torch.tensor(0.0))
-        cam_quat = quat_mul(body_quat.unsqueeze(0), pitch_quat.unsqueeze(0), w_last=True).squeeze(0)
+        cam_quat_base = quat_mul(body_quat_base.unsqueeze(0), pitch_quat.unsqueeze(0), w_last=True).squeeze(0)
 
-        cam_pos_np = cam_pos.detach().cpu().numpy()
-        cam_quat_np = cam_quat.detach().cpu().numpy()
-        cam_quat_wxyz = cam_quat_np[[3, 0, 1, 2]]
-        camera_frame.position = cam_pos_np
-        camera_frame.wxyz = cam_quat_wxyz
-        camera_marker.position = cam_pos_np
+        cam_pos_base_np = cam_pos_base.detach().cpu().numpy()
+        cam_quat_base_np = cam_quat_base.detach().cpu().numpy()
+        cam_quat_base_wxyz = cam_quat_base_np[[3, 0, 1, 2]]
+        camera_frame.position = cam_pos_base_np
+        camera_frame.wxyz = cam_quat_base_wxyz
+        camera_marker.position = cam_pos_base_np
 
-        frustum_quat = quat_mul(cam_quat.unsqueeze(0), frustum_align_quat.unsqueeze(0), w_last=True).squeeze(0)
+        frustum_quat = quat_mul(cam_quat_base.unsqueeze(0), frustum_align_quat.unsqueeze(0), w_last=True).squeeze(0)
         frustum_quat_np = frustum_quat.detach().cpu().numpy()
-        camera_frustum.position = cam_pos_np
+        camera_frustum.position = cam_pos_base_np
         camera_frustum.wxyz = frustum_quat_np[[3, 0, 1, 2]]
 
         label_offset = np.array([0.0, 0.0, 0.06], dtype=np.float32)
         for _, (link_name, marker_handle, label_handle) in link_markers.items():
-            link_pos, _ = _get_link_pose_world(vr, link_name, root_pos_t, root_quat_xyzw)
-            link_pos_np = link_pos.detach().cpu().numpy()
+            link_pos_base, _ = _get_link_pose_base(vr, link_name)
+            link_pos_np = link_pos_base.detach().cpu().numpy()
             marker_handle.position = link_pos_np
             label_handle.position = link_pos_np + label_offset
 
-        ray_dirs_world = quat_rotate_batched(body_quat.unsqueeze(0), camera_rays_base.unsqueeze(0)).view(-1, 3)
-        ray_starts = cam_pos.unsqueeze(0).expand(ray_dirs_world.shape[0], -1)
+        body_pos_world = root_pos_t + quat_apply(root_quat_xyzw.unsqueeze(0), body_pos_base.unsqueeze(0), w_last=True).squeeze(0)
+        body_quat_world = quat_mul(root_quat_xyzw.unsqueeze(0), body_quat_base.unsqueeze(0), w_last=True).squeeze(0)
+        offset_world = quat_apply(body_quat_world.unsqueeze(0), sensor_offset.unsqueeze(0), w_last=True).squeeze(0)
+        cam_pos_world = body_pos_world + offset_world
+
+        ray_dirs_world = quat_rotate_batched(body_quat_world.unsqueeze(0), camera_rays_base.unsqueeze(0)).view(-1, 3)
+        ray_starts = cam_pos_world.unsqueeze(0).expand(ray_dirs_world.shape[0], -1)
         depth = _raycast_depth(
             terrain_mesh,
             ray_starts.detach().cpu().numpy(),
