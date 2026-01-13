@@ -143,11 +143,22 @@ def _apply_colormap(values: np.ndarray) -> np.ndarray:
     return ((1.0 - t) * c0 + t * c1).astype(np.uint8)
 
 
+def _valid_depth_stats(depth: np.ndarray, near: float, far: float) -> tuple[float | None, float | None, int]:
+    depth = np.asarray(depth, dtype=np.float32)
+    valid = np.isfinite(depth)
+    valid &= depth >= near
+    valid &= depth < (far - 1.0e-6)
+    if not np.any(valid):
+        return None, None, 0
+    depth_valid = depth[valid]
+    return float(depth_valid.min()), float(depth_valid.max()), int(depth_valid.size)
+
+
 def _depth_to_rgb(depth: np.ndarray, near: float, far: float) -> np.ndarray:
     depth = np.asarray(depth, dtype=np.float32)
     valid = np.isfinite(depth)
     valid &= depth >= near
-    valid &= depth <= far
+    valid &= depth < (far - 1.0e-6)
     if not np.any(valid):
         return np.zeros(depth.shape + (3,), dtype=np.uint8)
 
@@ -703,6 +714,7 @@ def replay_perception(cfg: ExperimentConfig) -> None:
         np.zeros((height, width, 3), dtype=np.uint8),
         label="D435i Depth",
     )
+    depth_stats = server.gui.add_markdown("Depth range (valid): n/a")
 
     with server.gui.add_folder("Display"):
         show_meshes_cb = server.gui.add_checkbox("Show meshes", initial_value=True)
@@ -799,6 +811,15 @@ def replay_perception(cfg: ExperimentConfig) -> None:
         depth_img = _depth_to_rgb(depth_map, cfg.perception.camera_near, cfg.perception.max_distance)
         depth_handle.image = depth_img
         camera_frustum.image = depth_img
+        min_d, max_d, count = _valid_depth_stats(depth_map, cfg.perception.camera_near, cfg.perception.max_distance)
+        if count == 0:
+            depth_stats.content = "Depth range (valid): n/a (no hits)"
+        else:
+            total = depth_map.size
+            depth_stats.content = (
+                f"Depth range (valid): {min_d:.3f} - {max_d:.3f} m | "
+                f"valid: {count}/{total}"
+            )
 
     with server.gui.add_folder("Playback"):
         frame_slider = server.gui.add_slider(
