@@ -808,6 +808,7 @@ def replay_perception(cfg: ExperimentConfig) -> None:
             max_distance=cfg.perception.max_distance,
         )
         depth_map = depth.reshape(height, width)
+        depth_map = np.flipud(depth_map)
         depth_img = _depth_to_rgb(depth_map, cfg.perception.camera_near, cfg.perception.max_distance)
         depth_handle.image = depth_img
         camera_frustum.image = depth_img
