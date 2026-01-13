@@ -60,14 +60,41 @@ def _resolve_robot_urdf_path(cfg: ExperimentConfig) -> str:
     return _resolve_data_path(urdf_path)
 
 
+def _apply_colormap(values: np.ndarray) -> np.ndarray:
+    values = np.clip(values, 0.0, 1.0)
+    stops = [
+        (0.0, np.array([0.0, 0.0, 0.5], dtype=np.float32)),
+        (0.25, np.array([0.0, 0.8, 1.0], dtype=np.float32)),
+        (0.5, np.array([0.0, 1.0, 0.0], dtype=np.float32)),
+        (0.75, np.array([1.0, 1.0, 0.0], dtype=np.float32)),
+        (1.0, np.array([1.0, 0.0, 0.0], dtype=np.float32)),
+    ]
+    colors = np.zeros(values.shape + (3,), dtype=np.float32)
+    for (v0, c0), (v1, c1) in zip(stops[:-1], stops[1:]):
+        mask = (values >= v0) & (values <= v1)
+        if not np.any(mask):
+            continue
+        t = (values[mask] - v0) / max(v1 - v0, 1.0e-6)
+        colors[mask] = c0 + (c1 - c0) * t[:, None]
+    return (colors * 255.0).astype(np.uint8)
+
+
 def _depth_to_rgb(depth: np.ndarray, near: float, far: float) -> np.ndarray:
-    depth = np.nan_to_num(depth, nan=far, posinf=far, neginf=near)
-    depth = np.clip(depth, near, far)
-    denom = max(far - near, 1.0e-6)
-    norm = (depth - near) / denom
-    inv = 1.0 - norm
-    img = (inv * 255.0).astype(np.uint8)
-    return np.repeat(img[..., None], 3, axis=2)
+    depth = np.asarray(depth, dtype=np.float32)
+    valid = np.isfinite(depth)
+    valid &= depth >= near
+    valid &= depth <= far
+    if not np.any(valid):
+        return np.zeros(depth.shape + (3,), dtype=np.uint8)
+
+    depth_clipped = np.clip(depth, near, far)
+    depth_valid = depth_clipped[valid]
+    min_d = float(depth_valid.min())
+    max_d = float(depth_valid.max())
+    denom = max(max_d - min_d, 1.0e-6)
+    norm = (depth_clipped - min_d) / denom
+    norm = np.where(valid, norm, 0.0)
+    return _apply_colormap(norm)
 
 
 def _parse_vec3(text: str | None) -> tuple[float, float, float]:
@@ -399,64 +426,33 @@ def _parse_urdf_joints(urdf_path: str) -> tuple[str, dict[str, JointInfo]]:
     return roots[0], child_to_joint
 
 
-class UrdfKinematics:
-    def __init__(self, urdf_path: str) -> None:
-        root_link, child_to_joint = _parse_urdf_joints(urdf_path)
-        self.root_link = root_link
-        self.child_to_joint = child_to_joint
+def _get_link_pose_world(
+    vr: ViserUrdf,
+    link_name: str,
+    root_pos: torch.Tensor,
+    root_quat_xyzw: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if link_name not in vr._urdf.link_map:  # type: ignore[attr-defined]
+        raise ValueError(f"Link '{link_name}' not found in URDF.")
 
-    def compute_link_pose(
-        self,
-        link_name: str,
-        joint_positions: dict[str, float],
-        root_pos: torch.Tensor,
-        root_quat: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if link_name != self.root_link and link_name not in self.child_to_joint:
-            raise ValueError(f"Link '{link_name}' not found in URDF tree rooted at {self.root_link}.")
+    base_link = vr._urdf.base_link  # type: ignore[attr-defined]
+    tf_base = vr._urdf.get_transform(  # type: ignore[attr-defined]
+        link_name,
+        base_link,
+        collision_geometry=not vr._load_meshes,  # type: ignore[attr-defined]
+    )
+    pos_base = torch.tensor(tf_base[:3, 3], dtype=torch.float32)
+    rot_base = torch.tensor(tf_base[:3, :3], dtype=torch.float32)
+    quat_base_wxyz = matrix_to_quaternion(rot_base)
+    quat_base_xyzw = quat_base_wxyz[[1, 2, 3, 0]]
 
-        cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-
-        def _pose(link: str) -> tuple[torch.Tensor, torch.Tensor]:
-            if link == self.root_link:
-                return root_pos, root_quat
-            if link in cache:
-                return cache[link]
-
-            joint = self.child_to_joint[link]
-            parent_pos, parent_quat = _pose(joint.parent)
-
-            origin_pos = torch.tensor(joint.origin_xyz, dtype=torch.float32)
-            origin_rpy = torch.tensor(joint.origin_rpy, dtype=torch.float32)
-            origin_quat = quat_from_euler_xyz(origin_rpy[0], origin_rpy[1], origin_rpy[2])
-
-            rel_pos = origin_pos
-            rel_quat = origin_quat
-            if joint.joint_type in {"revolute", "continuous"}:
-                angle = torch.tensor(float(joint_positions.get(joint.name, 0.0)), dtype=torch.float32)
-                axis = torch.tensor(joint.axis, dtype=torch.float32)
-                if torch.linalg.norm(axis) < 1.0e-6:
-                    axis = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32)
-                axis = axis / torch.linalg.norm(axis)
-                motion_quat = quat_from_angle_axis(angle, axis, w_last=True)
-                rel_quat = quat_mul(origin_quat.unsqueeze(0), motion_quat.unsqueeze(0), w_last=True).squeeze(0)
-            elif joint.joint_type == "prismatic":
-                displacement = float(joint_positions.get(joint.name, 0.0))
-                axis = torch.tensor(joint.axis, dtype=torch.float32)
-                if torch.linalg.norm(axis) < 1.0e-6:
-                    axis = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32)
-                axis = axis / torch.linalg.norm(axis)
-                disp_vec = axis * displacement
-                rel_pos = origin_pos + quat_apply(
-                    origin_quat.unsqueeze(0), disp_vec.unsqueeze(0), w_last=True
-                ).squeeze(0)
-
-            child_pos = parent_pos + quat_apply(parent_quat.unsqueeze(0), rel_pos.unsqueeze(0), w_last=True).squeeze(0)
-            child_quat = quat_mul(parent_quat.unsqueeze(0), rel_quat.unsqueeze(0), w_last=True).squeeze(0)
-            cache[link] = (child_pos, child_quat)
-            return cache[link]
-
-        return _pose(link_name)
+    world_pos = root_pos + quat_apply(root_quat_xyzw.unsqueeze(0), pos_base.unsqueeze(0), w_last=True).squeeze(0)
+    world_quat = quat_mul(
+        root_quat_xyzw.unsqueeze(0),
+        quat_base_xyzw.unsqueeze(0),
+        w_last=True,
+    ).squeeze(0)
+    return world_pos, world_quat
 
 
 def _build_camera_rays(
@@ -634,8 +630,7 @@ def replay_perception(cfg: ExperimentConfig) -> None:
 
     robot_dof = len(cfg.robot.dof_names)
     has_object = qpos.shape[1] >= (7 + robot_dof + 7)
-    kinematics = UrdfKinematics(robot_urdf_path)
-    camera_body = cfg.perception.camera_body_name or kinematics.root_link
+    camera_body = cfg.perception.camera_body_name or vr._urdf.base_link  # type: ignore[attr-defined]
     frustum_align_quat = _camera_to_frustum_quat()
 
     depth_handle = server.gui.add_image(
@@ -695,11 +690,10 @@ def replay_perception(cfg: ExperimentConfig) -> None:
         viser_joints = joints[viser_joint_indices]
         vr.update_cfg(viser_joints.astype(np.float32, copy=False))
 
-        joint_dict = {name: float(joints[idx]) for idx, name in enumerate(cfg.robot.dof_names)}
         root_quat_xyzw = torch.tensor(root_quat_wxyz[[1, 2, 3, 0]], dtype=torch.float32)
         root_pos_t = torch.tensor(root_pos, dtype=torch.float32)
 
-        body_pos, body_quat = kinematics.compute_link_pose(camera_body, joint_dict, root_pos_t, root_quat_xyzw)
+        body_pos, body_quat = _get_link_pose_world(vr, camera_body, root_pos_t, root_quat_xyzw)
         sensor_offset = torch.tensor(cfg.perception.sensor_offset, dtype=torch.float32)
         offset_world = quat_apply(body_quat.unsqueeze(0), sensor_offset.unsqueeze(0), w_last=True).squeeze(0)
         cam_pos = body_pos + offset_world
@@ -722,7 +716,7 @@ def replay_perception(cfg: ExperimentConfig) -> None:
 
         label_offset = np.array([0.0, 0.0, 0.06], dtype=np.float32)
         for _, (link_name, marker_handle, label_handle) in link_markers.items():
-            link_pos, _ = kinematics.compute_link_pose(link_name, joint_dict, root_pos_t, root_quat_xyzw)
+            link_pos, _ = _get_link_pose_world(vr, link_name, root_pos_t, root_quat_xyzw)
             link_pos_np = link_pos.detach().cpu().numpy()
             marker_handle.position = link_pos_np
             label_handle.position = link_pos_np + label_offset
