@@ -592,8 +592,9 @@ def _frustum_quat_from_camera(cam_quat_xyzw: torch.Tensor) -> torch.Tensor:
     z_cam = quat_apply(cam_quat_xyzw.unsqueeze(0), z_axis.unsqueeze(0), w_last=True).squeeze(0)
 
     z_fwd = _normalize_vec(x_cam)
-    y_down = _normalize_vec(z_cam)
-    x_right = _normalize_vec(-y_cam)
+    y_down = _normalize_vec(-z_cam)
+    x_right = _normalize_vec(torch.cross(y_down, z_fwd))
+    y_down = _normalize_vec(torch.cross(z_fwd, x_right))
 
     rot = torch.stack([x_right, y_down, z_fwd], dim=1)
     quat_wxyz = matrix_to_quaternion(rot)
