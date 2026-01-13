@@ -578,17 +578,27 @@ def _raycast_depth(
     return np.clip(depth, 0.0, max_distance)
 
 
-def _camera_to_frustum_quat() -> torch.Tensor:
-    rot = torch.tensor(
-        [
-            [0.0, 0.0, 1.0],
-            [-1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-        ],
-        dtype=torch.float32,
-    )
+def _normalize_vec(vec: torch.Tensor) -> torch.Tensor:
+    return vec / torch.linalg.norm(vec).clamp(min=1.0e-6)
+
+
+def _frustum_quat_from_camera(cam_quat_xyzw: torch.Tensor) -> torch.Tensor:
+    x_axis = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32)
+    y_axis = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32)
+    z_axis = torch.tensor([0.0, 0.0, 1.0], dtype=torch.float32)
+
+    x_cam = quat_apply(cam_quat_xyzw.unsqueeze(0), x_axis.unsqueeze(0), w_last=True).squeeze(0)
+    y_cam = quat_apply(cam_quat_xyzw.unsqueeze(0), y_axis.unsqueeze(0), w_last=True).squeeze(0)
+    z_cam = quat_apply(cam_quat_xyzw.unsqueeze(0), z_axis.unsqueeze(0), w_last=True).squeeze(0)
+
+    z_fwd = _normalize_vec(x_cam)
+    y_down = _normalize_vec(z_cam)
+    x_right = _normalize_vec(torch.cross(y_down, z_fwd))
+    y_down = _normalize_vec(torch.cross(z_fwd, x_right))
+
+    rot = torch.stack([x_right, y_down, z_fwd], dim=1)
     quat_wxyz = matrix_to_quaternion(rot)
-    return quat_wxyz[[1, 2, 3, 0]]
+    return quat_wxyz
 
 
 def replay_perception(cfg: ExperimentConfig) -> None:
@@ -699,7 +709,6 @@ def replay_perception(cfg: ExperimentConfig) -> None:
     robot_dof = len(cfg.robot.dof_names)
     has_object = qpos.shape[1] >= (7 + robot_dof + 7)
     camera_body = cfg.perception.camera_body_name or vr._urdf.base_link  # type: ignore[attr-defined]
-    frustum_align_quat = _camera_to_frustum_quat()
 
     depth_handle = server.gui.add_image(
         np.zeros((height, width, 3), dtype=np.uint8),
@@ -778,10 +787,10 @@ def replay_perception(cfg: ExperimentConfig) -> None:
         camera_frame.wxyz = cam_quat_base_wxyz
         camera_marker.position = cam_pos_base_np
 
-        frustum_quat = quat_mul(cam_quat_base.unsqueeze(0), frustum_align_quat.unsqueeze(0), w_last=True).squeeze(0)
-        frustum_quat_np = frustum_quat.detach().cpu().numpy()
+        frustum_quat_wxyz = _frustum_quat_from_camera(cam_quat_base)
+        frustum_quat_np = frustum_quat_wxyz.detach().cpu().numpy()
         camera_frustum.position = cam_pos_base_np
-        camera_frustum.wxyz = frustum_quat_np[[3, 0, 1, 2]]
+        camera_frustum.wxyz = frustum_quat_np
 
         label_offset = np.array([0.0, 0.0, 0.06], dtype=np.float32)
         for _, (link_name, marker_handle, label_handle) in link_markers.items():
