@@ -18,7 +18,7 @@ class PerceptionConfig:
     """Perception output type: 'heightmap' or 'camera_depth'."""
 
     camera_source: str = "raycast"
-    """Camera source for camera_depth output: 'raycast' or 'rendered'."""
+    """Camera source for camera_depth output: 'raycast', 'mesh_raycast', 'pytorch3d', or 'rendered'."""
 
     grid_size: int = 11
     """Number of samples per dimension for the heightmap grid."""

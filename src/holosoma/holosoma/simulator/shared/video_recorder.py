@@ -404,6 +404,11 @@ class VideoRecorderInterface(ABC):
         """
         return self._is_recording
 
+    @property
+    def current_episode(self) -> int:
+        """Return the current episode id being recorded (0 if inactive)."""
+        return self._current_episode
+
     def _get_save_directory(self) -> Path:
         """Get the directory for saving video files.
 

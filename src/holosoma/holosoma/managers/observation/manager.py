@@ -40,6 +40,7 @@ class ObservationManager:
         # Storage for resolved functions and stateful terms
         self._term_funcs: dict[str, dict[str, Callable]] = {}
         self._term_instances: dict[str, dict[str, ObservationTermBase]] = {}
+        self._term_slice_cache: dict[str, dict[str, slice]] = {}
 
         # History buffers: group_name -> term_name -> deque
         self._history_buffers: dict[str, dict[str, deque]] = {}
@@ -330,3 +331,40 @@ class ObservationManager:
                 }
                 dims[group_name] = term_dims
         return dims
+
+    def get_term_slices(self, group_name: str) -> dict[str, slice]:
+        """Return slice indices for concatenated terms within a group.
+
+        Parameters
+        ----------
+        group_name : str
+            Name of the observation group.
+
+        Returns
+        -------
+        dict[str, slice]
+            Mapping from term name to its slice in the concatenated tensor.
+        """
+        if group_name in self._term_slice_cache:
+            return self._term_slice_cache[group_name]
+
+        if group_name not in self.cfg.groups:
+            raise KeyError(f"Unknown observation group: {group_name}")
+
+        group_cfg = self.cfg.groups[group_name]
+        if not group_cfg.concatenate:
+            raise ValueError(f"Observation group '{group_name}' does not concatenate terms.")
+
+        slices: dict[str, slice] = {}
+        current_index = 0
+        for term_name in sorted(group_cfg.terms.keys()):
+            term_cfg = group_cfg.terms[term_name]
+            obs = self._compute_term(group_name, term_name, term_cfg)
+            term_dim = obs.shape[1]
+            if group_cfg.history_length > 1:
+                term_dim *= group_cfg.history_length
+            slices[term_name] = slice(current_index, current_index + term_dim)
+            current_index += term_dim
+
+        self._term_slice_cache[group_name] = slices
+        return slices

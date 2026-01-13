@@ -110,7 +110,15 @@ def format_command_labels(commands, env_id=0):
     return ", ".join(labels) if labels else "Commands: No data"
 
 
-def create_video(video_frames, fps, save_dir, output_format="mp4", wandb_logging=True, episode_id=None):
+def create_video(
+    video_frames,
+    fps,
+    save_dir,
+    output_format="mp4",
+    wandb_logging=True,
+    episode_id=None,
+    wandb_key="Training rollout",
+):
     """Create video with configurable output format and destination.
 
     Handles both local saving and wandb upload based on configuration.
@@ -130,6 +138,8 @@ def create_video(video_frames, fps, save_dir, output_format="mp4", wandb_logging
         Whether to upload to wandb (if available) or save locally.
     episode_id : int | None, default=None
         Episode ID for filename generation.
+    wandb_key : str, default="Training rollout"
+        Wandb key name for the uploaded video.
 
     Returns
     -------
@@ -208,7 +218,7 @@ def create_video(video_frames, fps, save_dir, output_format="mp4", wandb_logging
 
         # Step 3: Handle wandb upload if requested
         if wandb_logging and _is_wandb_available():
-            wandb.log({"Training rollout": wandb.Video(str(final_video), format="mp4")})
+            wandb.log({wandb_key: wandb.Video(str(final_video), format="mp4")})
 
         # Step 4: Cleanup temp files if needed
         if cleanup_files:

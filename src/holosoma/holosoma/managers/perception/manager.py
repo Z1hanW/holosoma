@@ -11,7 +11,9 @@ from holosoma.utils.rotations import (
     quat_apply,
     quat_apply_yaw,
     quat_from_euler_xyz,
+    quat_mul,
     quat_rotate_batched,
+    quat_rotate_inverse,
     quat_rotate_inverse_batched,
 )
 from holosoma.utils.simulator_config import SimulatorType, get_simulator_type
@@ -32,15 +34,27 @@ class PerceptionManager:
         self.logger = getattr(env, "logger", None)
 
         self._warp_mesh = None
+        self._terrain_mesh = None
         self._grid_points_base: torch.Tensor | None = None
         self._ray_dirs_base: torch.Tensor | None = None
+        self._camera_ray_dirs_base: torch.Tensor | None = None
         self._sensor_offset = torch.tensor(cfg.sensor_offset, device=self.device)
         self._ray_start_offset = torch.tensor([0.0, 0.0, cfg.ray_start_height], device=self.device)
         self._camera_source = cfg.camera_source
+        self._camera_body_name = cfg.camera_body_name
+        self._camera_body_index: int | None = None
         self._rendered_camera = None
         self._rendered_camera_env_id = int(getattr(cfg, "camera_env_id", 0))
+        self._pytorch3d_mesh = None
+        self._pytorch3d_mesh_cache: dict[int, Any] = {}
+        self._pytorch3d_raster_settings = None
 
-        if cfg.output_mode == "camera_depth" and self._camera_source not in {"raycast", "rendered"}:
+        if cfg.output_mode == "camera_depth" and self._camera_source not in {
+            "raycast",
+            "mesh_raycast",
+            "pytorch3d",
+            "rendered",
+        }:
             raise ValueError(f"Unsupported camera_source: {self._camera_source}")
 
         self._camera_width, self._camera_height = self._resolve_camera_resolution()
@@ -60,6 +74,7 @@ class PerceptionManager:
         self._camera_cy = torch.tensor(cy, device=self.device)
         self._camera_vfov_deg = vfov
         self._camera_hfov_deg = hfov
+        self._camera_num_points = self._camera_width * self._camera_height
 
         self._num_points = cfg.grid_size * cfg.grid_size
         self._update_interval = 0.0 if cfg.update_hz <= 0 else 1.0 / cfg.update_hz
@@ -77,16 +92,30 @@ class PerceptionManager:
     def setup(self) -> None:
         if not self.enabled:
             return
-        if self._uses_raycast():
+        if self._uses_raycast() or self._uses_camera_raycast() or self._uses_pytorch3d():
             terrain_term = getattr(self.env, "terrain_manager", None)
             if terrain_term is None or not hasattr(terrain_term, "terrain_term"):
                 raise RuntimeError("PerceptionManager requires an initialized terrain_manager.")
             terrain_state = terrain_term.terrain_term
-            if not hasattr(terrain_state, "warp_mesh"):
-                raise RuntimeError("PerceptionManager requires terrain term with warp_mesh support.")
-            self._warp_mesh = terrain_state.warp_mesh
+            if self._uses_raycast() or self._uses_camera_raycast():
+                if not hasattr(terrain_state, "warp_mesh"):
+                    raise RuntimeError("PerceptionManager requires terrain term with warp_mesh support.")
+                self._warp_mesh = terrain_state.warp_mesh
+            if self._uses_pytorch3d():
+                if not hasattr(terrain_state, "mesh"):
+                    raise RuntimeError("PerceptionManager requires terrain term with mesh support.")
+                self._terrain_mesh = terrain_state.mesh
 
+        if self._uses_raycast():
             self._grid_points_base, self._ray_dirs_base = self._build_grid()
+
+        if self._uses_camera_raycast():
+            self._resolve_camera_body_index()
+            self._camera_ray_dirs_base = self._build_camera_rays()
+
+        if self._uses_pytorch3d():
+            self._resolve_camera_body_index()
+            self._setup_pytorch3d_renderer()
 
         if self._uses_rendered_camera():
             self._setup_rendered_camera()
@@ -119,6 +148,18 @@ class PerceptionManager:
                 return
             camera_depth = self._rendered_camera.capture_depth()
             self._camera_depth[self._rendered_camera_env_id] = camera_depth.squeeze(0)
+            return
+
+        if self._uses_pytorch3d():
+            idx = env_ids if env_ids is not None else slice(None)
+            camera_depth = self._compute_pytorch3d_depth(env_ids)
+            self._camera_depth[idx] = camera_depth
+            return
+
+        if self._uses_camera_raycast():
+            idx = env_ids if env_ids is not None else slice(None)
+            camera_depth = self._compute_camera_raycast_depth(env_ids)
+            self._camera_depth[idx] = camera_depth
             return
 
         ray_starts, ray_dirs, ray_hits_world, root_pos, base_quat, offset_world = self._compute_rays(env_ids)
@@ -183,9 +224,35 @@ class PerceptionManager:
         ray_dirs[:, 2] = -1.0
         return grid_points, ray_dirs
 
+    def _build_camera_rays(self) -> torch.Tensor:
+        u_coords = torch.arange(self._camera_width, device=self.device, dtype=torch.float32)
+        v_coords = torch.arange(self._camera_height, device=self.device, dtype=torch.float32)
+        v_grid, u_grid = torch.meshgrid(v_coords, u_coords, indexing="ij")
+
+        x = (u_grid - self._camera_cx) / self._camera_fx
+        y = (v_grid - self._camera_cy) / self._camera_fy
+
+        dirs_cam = torch.stack((torch.ones_like(x), -x, y), dim=-1)
+        dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
+        dirs_cam = dirs_cam.view(-1, 3)
+
+        pitch_rad = torch.deg2rad(torch.tensor(self.cfg.camera_pitch_deg, device=self.device))
+        pitch_quat = quat_from_euler_xyz(
+            torch.tensor(0.0, device=self.device),
+            pitch_rad,
+            torch.tensor(0.0, device=self.device),
+        )
+        pitch_quat = pitch_quat.unsqueeze(0).expand(dirs_cam.shape[0], -1)
+        dirs_base = quat_rotate_inverse(pitch_quat, dirs_cam, w_last=True)
+        dirs_base = dirs_base / torch.norm(dirs_base, dim=-1, keepdim=True).clamp(min=1.0e-6)
+        return dirs_base
+
     def _setup_rendered_camera(self) -> None:
         if get_simulator_type() != SimulatorType.ISAACSIM:
-            raise RuntimeError("Rendered camera requires IsaacSim. Use camera_source=raycast for other simulators.")
+            raise RuntimeError(
+                "Rendered camera requires IsaacSim. Use camera_source=raycast, mesh_raycast, or pytorch3d "
+                "for other simulators."
+            )
         from holosoma.simulator.isaacsim.perception_camera import IsaacSimDepthCamera
 
         self._rendered_camera = IsaacSimDepthCamera(
@@ -203,8 +270,32 @@ class PerceptionManager:
             return True
         return self.cfg.output_mode == "camera_depth" and self._camera_source == "raycast"
 
+    def _uses_camera_raycast(self) -> bool:
+        return self.cfg.output_mode == "camera_depth" and self._camera_source == "mesh_raycast"
+
+    def _uses_pytorch3d(self) -> bool:
+        return self.cfg.output_mode == "camera_depth" and self._camera_source == "pytorch3d"
+
     def _uses_rendered_camera(self) -> bool:
         return self.cfg.output_mode == "camera_depth" and self._camera_source == "rendered"
+
+    def _resolve_camera_body_index(self) -> None:
+        if self._camera_body_name is None:
+            return
+        body_names = getattr(self.env, "body_names", None)
+        if body_names is None or self._camera_body_name not in body_names:
+            available = body_names if body_names is not None else "unknown"
+            raise RuntimeError(f"Camera body '{self._camera_body_name}' not found in body_names: {available}")
+        self._camera_body_index = int(body_names.index(self._camera_body_name))
+
+    def _get_camera_body_pose(self, idx: torch.Tensor | slice) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._camera_body_index is not None:
+            body_pos = self.env.simulator._rigid_body_pos[idx, self._camera_body_index]
+            body_quat = self.env.simulator._rigid_body_rot[idx, self._camera_body_index]
+        else:
+            body_pos = self.env.simulator.robot_root_states[idx, :3]
+            body_quat = self.env.base_quat[idx]
+        return body_pos, body_quat
 
     def _compute_rays(
         self, env_ids: torch.Tensor | None
@@ -238,6 +329,142 @@ class PerceptionManager:
         ray_hits_world = warp_utils.ray_cast(ray_starts, ray_dirs_world, self._warp_mesh)
 
         return ray_starts, ray_dirs_world, ray_hits_world, root_pos, base_quat, offset_world
+
+    def _compute_camera_raycast_depth(self, env_ids: torch.Tensor | None) -> torch.Tensor:
+        if self._warp_mesh is None:
+            raise RuntimeError("PerceptionManager.setup() must be called before update().")
+        if self._camera_ray_dirs_base is None:
+            raise RuntimeError("PerceptionManager camera ray buffers are not initialized.")
+
+        idx = env_ids if env_ids is not None else slice(None)
+        body_pos, body_quat = self._get_camera_body_pose(idx)
+        num_envs = body_pos.shape[0]
+
+        ray_dirs_base = self._camera_ray_dirs_base.unsqueeze(0).expand(num_envs, -1, -1)
+        ray_dirs_world = quat_rotate_batched(body_quat, ray_dirs_base)
+
+        offset_world = quat_apply(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
+        ray_starts = body_pos.unsqueeze(1) + offset_world.unsqueeze(1)
+
+        ray_hits_world = warp_utils.ray_cast(ray_starts, ray_dirs_world, self._warp_mesh)
+        distances = self._compute_camera_ray_distances(ray_starts, ray_dirs_world, ray_hits_world)
+        return distances.view(num_envs, self._camera_height, self._camera_width)
+
+    def _compute_camera_ray_distances(
+        self, ray_starts: torch.Tensor, ray_dirs: torch.Tensor, ray_hits_world: torch.Tensor
+    ) -> torch.Tensor:
+        delta = ray_hits_world - ray_starts
+        distances = torch.sum(delta * ray_dirs, dim=-1)
+        distances = torch.where(torch.isfinite(distances), distances, torch.full_like(distances, self.cfg.max_distance))
+        return torch.clamp(distances, min=0.0, max=self.cfg.max_distance)
+
+    def _setup_pytorch3d_renderer(self) -> None:
+        if self._terrain_mesh is None:
+            raise RuntimeError("PerceptionManager requires terrain mesh for pytorch3d rendering.")
+        try:
+            from pytorch3d.renderer import RasterizationSettings  # noqa: PLC0415
+            from pytorch3d.structures import Meshes  # noqa: PLC0415
+        except Exception as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError("pytorch3d is not available; install it to use camera_source=pytorch3d.") from exc
+
+        verts = torch.as_tensor(self._terrain_mesh.vertices, device=self.device, dtype=torch.float32)
+        faces = torch.as_tensor(self._terrain_mesh.faces, device=self.device, dtype=torch.int64)
+        self._pytorch3d_mesh = Meshes(verts=[verts], faces=[faces])
+        self._pytorch3d_mesh_cache = {}
+        self._pytorch3d_raster_settings = RasterizationSettings(
+            image_size=(self._camera_height, self._camera_width),
+            blur_radius=0.0,
+            faces_per_pixel=1,
+        )
+
+    def _get_pytorch3d_mesh_batch(self, batch_size: int):
+        if self._pytorch3d_mesh is None:
+            raise RuntimeError("PerceptionManager.setup() must be called before pytorch3d rendering.")
+        if batch_size == 1:
+            return self._pytorch3d_mesh
+        cached = self._pytorch3d_mesh_cache.get(batch_size)
+        if cached is None:
+            cached = self._pytorch3d_mesh.extend(batch_size)
+            self._pytorch3d_mesh_cache[batch_size] = cached
+        return cached
+
+    def _build_pytorch3d_cameras(
+        self, rotation: torch.Tensor, translation: torch.Tensor, k_matrix: torch.Tensor, image_size: torch.Tensor
+    ):
+        try:
+            from pytorch3d.renderer.cameras import cameras_from_opencv_projection  # noqa: PLC0415
+        except Exception as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError(
+                "pytorch3d is missing cameras_from_opencv_projection; install/upgrade pytorch3d "
+                "to use camera_source=pytorch3d."
+            ) from exc
+
+        return cameras_from_opencv_projection(rotation, translation, k_matrix, image_size=image_size)
+
+    def _compute_pytorch3d_depth(self, env_ids: torch.Tensor | None) -> torch.Tensor:
+        if self._pytorch3d_mesh is None or self._pytorch3d_raster_settings is None:
+            raise RuntimeError("PerceptionManager.setup() must be called before pytorch3d rendering.")
+
+        try:
+            from pytorch3d.renderer import MeshRasterizer  # noqa: PLC0415
+        except Exception as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError("pytorch3d is not available; install it to use camera_source=pytorch3d.") from exc
+
+        idx = env_ids if env_ids is not None else slice(None)
+        body_pos, body_quat = self._get_camera_body_pose(idx)
+        num_envs = body_pos.shape[0]
+
+        offset_world = quat_apply(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
+        camera_pos = body_pos + offset_world
+
+        pitch_rad = torch.deg2rad(torch.tensor(self.cfg.camera_pitch_deg, device=self.device))
+        pitch_quat = quat_from_euler_xyz(
+            torch.tensor(0.0, device=self.device),
+            pitch_rad,
+            torch.tensor(0.0, device=self.device),
+        )
+        pitch_quat = pitch_quat.unsqueeze(0).expand(num_envs, -1)
+        camera_quat = quat_mul(body_quat, pitch_quat, w_last=True)
+
+        forward_axis = torch.tensor([1.0, 0.0, 0.0], device=self.device).expand(num_envs, -1)
+        right_axis = torch.tensor([0.0, -1.0, 0.0], device=self.device).expand(num_envs, -1)
+        up_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(num_envs, -1)
+
+        forward_world = quat_apply(camera_quat, forward_axis, w_last=True)
+        right_world = quat_apply(camera_quat, right_axis, w_last=True)
+        up_world = quat_apply(camera_quat, up_axis, w_last=True)
+
+        forward_world = forward_world / torch.norm(forward_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
+        right_world = right_world / torch.norm(right_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
+        up_world = up_world / torch.norm(up_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
+
+        x_axis = right_world
+        y_axis = -up_world
+        z_axis = forward_world
+        rotation = torch.stack((x_axis, y_axis, z_axis), dim=1)
+        translation = -(torch.bmm(rotation, camera_pos.unsqueeze(-1))).squeeze(-1)
+
+        k_matrix = torch.zeros(num_envs, 3, 3, device=self.device)
+        k_matrix[:, 0, 0] = self._camera_fx
+        k_matrix[:, 1, 1] = self._camera_fy
+        k_matrix[:, 0, 2] = self._camera_cx
+        k_matrix[:, 1, 2] = self._camera_cy
+        k_matrix[:, 2, 2] = 1.0
+
+        image_size = torch.tensor([self._camera_height, self._camera_width], device=self.device).repeat(num_envs, 1)
+        cameras = self._build_pytorch3d_cameras(rotation, translation, k_matrix, image_size)
+        rasterizer = MeshRasterizer(cameras=cameras, raster_settings=self._pytorch3d_raster_settings)
+
+        meshes = self._get_pytorch3d_mesh_batch(num_envs)
+        fragments = rasterizer(meshes)
+        depth = fragments.zbuf[..., 0]
+
+        depth = torch.where(
+            torch.isfinite(depth) & (depth > 0.0),
+            depth,
+            torch.full_like(depth, self.cfg.max_distance),
+        )
+        return torch.clamp(depth, min=0.0, max=self.cfg.max_distance)
 
     def _compute_ray_distances(
         self, ray_starts: torch.Tensor, ray_dirs: torch.Tensor, ray_hits_world: torch.Tensor

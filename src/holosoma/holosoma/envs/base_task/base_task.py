@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import numpy as np
 
 from holosoma.config_types.env import EnvConfig
@@ -178,6 +181,7 @@ class BaseTask:
             self.terrain_manager.setup()
         if self.perception_manager is not None:
             self.perception_manager.setup()
+        self._init_depth_logging_state()
 
         # Initialize reset manager from simulator config
         self.reset_manager = ResetEventManager(
@@ -242,6 +246,7 @@ class BaseTask:
         for env_id in env_ids:
             if hasattr(self.simulator, "on_episode_end"):
                 self.simulator.on_episode_end(env_id.item())
+        self._finalize_depth_logging_if_needed()
 
         # Reset observation history BEFORE state changes (must happen first to clear history buffers)
         self.observation_manager.reset(env_ids)
@@ -277,6 +282,7 @@ class BaseTask:
         for env_id in env_ids:
             if hasattr(self.simulator, "on_episode_start"):
                 self.simulator.on_episode_start(env_id.item())
+        self._start_depth_logging_if_needed()
 
     def _reset_envs_idx_impl(self, env_ids, target_states=None, target_buf=None):
         """Template implementation of environment reset.
@@ -534,7 +540,7 @@ class BaseTask:
 
     def _post_compute_observations_callback(self):
         """Hook invoked after observation buffers are produced (no-op by default)."""
-        return
+        self._capture_depth_frame()
 
     def _setup_simulator_control(self):
         """Hook for pushing controller state back to the simulator/viewer (no-op by default)."""
@@ -543,6 +549,198 @@ class BaseTask:
     def _setup_simulator_next_task(self):
         """Hook for interactive viewer task selection (no-op by default)."""
         return
+
+    def _init_depth_logging_state(self) -> None:
+        self._depth_log_is_main_process = int(os.environ.get("RANK", "0")) == 0
+        self._depth_log_active = False
+        self._depth_log_pending_frame0 = False
+        self._depth_log_frames: list[np.ndarray] = []
+        self._depth_log_episode_id: int | None = None
+        self._depth_log_record_env_id = int(getattr(self.simulator.video_config, "record_env_id", 0))
+        self._depth_log_obs_group: str | None = None
+        self._depth_log_obs_slice: slice | None = None
+        self._depth_log_obs_history = 1
+        self._depth_log_obs_frame_dim: int | None = None
+        self._depth_log_obs_scale: float | tuple | None = None
+        self._depth_log_obs_unavailable = False
+        self._depth_log_group_concatenate = True
+
+    def _depth_logging_enabled(self) -> bool:
+        if not self._depth_log_is_main_process:
+            return False
+        if self.perception_manager is None or not self.perception_manager.enabled:
+            return False
+        if self.perception_manager.cfg.output_mode != "camera_depth":
+            return False
+        if self.simulator.video_recorder is None or not self.simulator.video_config.enabled:
+            return False
+        if getattr(self.simulator.logger_cfg, "type", "disabled") != "wandb":
+            return False
+        if not self.simulator.video_config.upload_to_wandb:
+            return False
+        self._resolve_depth_obs_source()
+        if self._depth_log_obs_group is None:
+            return False
+        return True
+
+    def _start_depth_logging_if_needed(self) -> None:
+        if not self._depth_logging_enabled():
+            return
+        if self.simulator.video_recorder is None or not self.simulator.video_recorder.is_recording:
+            return
+        if self._depth_log_active:
+            return
+        self._depth_log_active = True
+        self._depth_log_pending_frame0 = True
+        self._depth_log_frames = []
+        self._depth_log_episode_id = getattr(self.simulator.video_recorder, "current_episode", None)
+
+    def _finalize_depth_logging_if_needed(self) -> None:
+        if not self._depth_log_active:
+            return
+        if self.simulator.video_recorder is None or self.simulator.video_recorder.is_recording:
+            return
+        self._log_depth_video()
+        self._depth_log_active = False
+        self._depth_log_pending_frame0 = False
+        self._depth_log_frames = []
+        self._depth_log_episode_id = None
+
+    def _capture_depth_frame(self) -> None:
+        if not self._depth_log_active:
+            return
+        if not self._depth_logging_enabled():
+            return
+        if self.simulator.video_recorder is None or not self.simulator.video_recorder.is_recording:
+            return
+        depth_map = self._extract_policy_depth_frame()
+        if depth_map is None:
+            return
+        depth_frame = self._depth_to_rgb(depth_map)
+        if self._depth_log_pending_frame0:
+            self._log_depth_frame0(depth_frame)
+            self._depth_log_pending_frame0 = False
+        self._depth_log_frames.append(depth_frame)
+
+    def _depth_to_rgb(self, depth_map: np.ndarray) -> np.ndarray:
+        max_distance = float(self.perception_manager.cfg.max_distance)
+        scale = self._depth_log_obs_scale
+        if isinstance(scale, (int, float)):
+            max_distance *= float(scale)
+        elif isinstance(scale, tuple) and len(scale) > 0:
+            max_distance *= float(max(abs(val) for val in scale))
+        if max_distance <= 1.0e-6:
+            max_distance = 1.0
+        depth = np.nan_to_num(depth_map, nan=max_distance, posinf=max_distance, neginf=0.0)
+        depth = np.clip(depth, 0.0, max_distance)
+        normalized = depth / max_distance
+        # Brighter = closer for quick visualization.
+        gray = (255.0 * (1.0 - normalized)).astype(np.uint8)
+        return np.repeat(gray[..., None], 3, axis=-1)
+
+    def _log_depth_frame0(self, frame: np.ndarray) -> None:
+        try:
+            import wandb  # noqa: PLC0415
+        except Exception:
+            return
+        if wandb.run is None:
+            return
+        caption = f"episode {self._depth_log_episode_id}" if self._depth_log_episode_id is not None else None
+        wandb.log({"Depth/frame0": wandb.Image(frame, caption=caption)})
+
+    def _log_depth_video(self) -> None:
+        if not self._depth_log_frames:
+            return
+        try:
+            from holosoma.utils.video_utils import create_video  # noqa: PLC0415
+        except Exception:
+            return
+        sim_config = self.simulator.simulator_config.sim
+        control_frequency = sim_config.fps / sim_config.control_decimation
+        display_fps = control_frequency * self.simulator.video_config.playback_rate
+        save_dir = (
+            Path(self.simulator.video_config.save_dir)
+            if self.simulator.video_config.save_dir is not None
+            else Path("logs/videos")
+        )
+        video_frames = np.stack(self._depth_log_frames, axis=0).astype(np.uint8)
+        create_video(
+            video_frames=video_frames,
+            fps=display_fps,
+            save_dir=save_dir,
+            output_format=self.simulator.video_config.output_format,
+            wandb_logging=True,
+            episode_id=self._depth_log_episode_id,
+            wandb_key="Depth rollout",
+        )
+
+    def _resolve_depth_obs_source(self) -> None:
+        if self._depth_log_obs_group is not None or self._depth_log_obs_unavailable:
+            return
+        if self.observation_manager is None:
+            self._depth_log_obs_unavailable = True
+            return
+
+        groups = self.observation_manager.cfg.groups
+        group_name = None
+        if "actor_obs" in groups and "perception_obs" in groups["actor_obs"].terms:
+            group_name = "actor_obs"
+        else:
+            for name in sorted(groups.keys()):
+                if "perception_obs" in groups[name].terms:
+                    group_name = name
+                    break
+
+        if group_name is None:
+            self._depth_log_obs_unavailable = True
+            return
+
+        group_cfg = groups[group_name]
+        term_cfg = group_cfg.terms["perception_obs"]
+        self._depth_log_obs_group = group_name
+        self._depth_log_obs_scale = term_cfg.scale
+        self._depth_log_obs_history = group_cfg.history_length
+        self._depth_log_group_concatenate = group_cfg.concatenate
+
+        if group_cfg.concatenate:
+            term_slices = self.observation_manager.get_term_slices(group_name)
+            self._depth_log_obs_slice = term_slices.get("perception_obs")
+            if self._depth_log_obs_slice is not None:
+                slice_len = self._depth_log_obs_slice.stop - self._depth_log_obs_slice.start
+                if self._depth_log_obs_history > 1:
+                    self._depth_log_obs_frame_dim = slice_len // self._depth_log_obs_history
+                else:
+                    self._depth_log_obs_frame_dim = slice_len
+
+    def _extract_policy_depth_frame(self) -> np.ndarray | None:
+        if self._depth_log_obs_group is None:
+            return None
+        group_obs = self.obs_buf_dict.get(self._depth_log_obs_group)
+        if group_obs is None:
+            return None
+
+        if isinstance(group_obs, dict):
+            term_obs = group_obs.get("perception_obs")
+        else:
+            if self._depth_log_obs_slice is None:
+                return None
+            term_obs = group_obs[:, self._depth_log_obs_slice]
+
+        if term_obs is None:
+            return None
+
+        frame_dim = self._depth_log_obs_frame_dim or term_obs.shape[1]
+        if self._depth_log_obs_history > 1:
+            if term_obs.shape[1] % self._depth_log_obs_history != 0:
+                return None
+            frame_dim = term_obs.shape[1] // self._depth_log_obs_history
+            term_obs = term_obs[:, -frame_dim:]
+
+        depth_vec = term_obs[self._depth_log_record_env_id].detach().cpu().numpy()
+        height, width = self.perception_manager.get_camera_depth_map().shape[-2:]
+        if depth_vec.size != height * width:
+            return None
+        return depth_vec.reshape(height, width)
 
     def _update_log_dict(self):
         """Hook for appending task-specific metrics to `self.log_dict` (no-op by default)."""
