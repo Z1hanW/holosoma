@@ -581,9 +581,9 @@ def _raycast_depth(
 def _camera_to_frustum_quat() -> torch.Tensor:
     rot = torch.tensor(
         [
-            [0.0, -1.0, 0.0],
             [0.0, 0.0, 1.0],
-            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
         ],
         dtype=torch.float32,
     )
