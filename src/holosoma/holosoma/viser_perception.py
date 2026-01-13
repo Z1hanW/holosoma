@@ -816,7 +816,7 @@ def replay_perception(cfg: ExperimentConfig) -> None:
         depth_map = np.flipud(depth_map)
         depth_img = _depth_to_rgb(depth_map, cfg.perception.camera_near, cfg.perception.max_distance)
         depth_handle.image = depth_img
-        camera_frustum.image = depth_img
+        camera_frustum.image = np.flipud(depth_img)
         min_d, max_d, count = _valid_depth_stats(depth_map, cfg.perception.camera_near, cfg.perception.max_distance)
         if count == 0:
             depth_stats.content = "Depth range (valid): n/a (no hits)"
