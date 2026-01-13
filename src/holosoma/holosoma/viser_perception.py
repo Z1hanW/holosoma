@@ -585,6 +585,32 @@ def replay_perception(cfg: ExperimentConfig) -> None:
         color=(255, 230, 0),
         variant="wireframe",
     )
+    link_marker_specs = [
+        ("pelvis", "pelvis", "pelvis", (255, 80, 80, 255)),
+        ("waist_yaw_link", "waist_yaw_link", "waist_yaw_link", (80, 255, 80, 255)),
+        ("waist_roll_link", "waist_roll_link", "waist_roll_link", (80, 120, 255, 255)),
+        ("torso_link", "torso_link", "torso_link", (255, 180, 80, 255)),
+        ("mid360_joint", "mid360_link", "mid360_joint", (200, 80, 255, 255)),
+    ]
+    link_markers: dict[str, tuple[str, viser.GlbHandle, viser.LabelHandle]] = {}
+    for name, link, label_text, color in link_marker_specs:
+        marker_mesh = trimesh.creation.icosphere(subdivisions=2, radius=0.025)
+        marker_mesh.visual.face_colors = np.tile(np.array(color, dtype=np.uint8), (len(marker_mesh.faces), 1))
+        marker_handle = server.scene.add_mesh_trimesh(
+            f"/robot/marker_{name}",
+            marker_mesh,
+            cast_shadow=False,
+            receive_shadow=False,
+        )
+        label_handle = server.scene.add_label(
+            f"/robot/label_{name}",
+            text=label_text,
+            font_size_mode="screen",
+            font_screen_scale=1.0,
+            depth_test=False,
+            anchor="bottom-center",
+        )
+        link_markers[name] = (link, marker_handle, label_handle)
 
     server.scene.add_grid("/grid", width=8.0, height=8.0, position=(0.0, 0.0, 0.0))
 
@@ -622,6 +648,7 @@ def replay_perception(cfg: ExperimentConfig) -> None:
         show_terrain_cb = server.gui.add_checkbox("Show terrain", initial_value=terrain_handle is not None)
         show_marker_cb = server.gui.add_checkbox("Show D435 marker", initial_value=True)
         show_frustum_cb = server.gui.add_checkbox("Show D435 frustum", initial_value=True)
+        show_link_markers_cb = server.gui.add_checkbox("Show torso chain markers", initial_value=True)
 
     @show_meshes_cb.on_update
     def _(_evt) -> None:
@@ -639,6 +666,13 @@ def replay_perception(cfg: ExperimentConfig) -> None:
     @show_frustum_cb.on_update
     def _(_evt) -> None:
         camera_frustum.visible = bool(show_frustum_cb.value)
+
+    @show_link_markers_cb.on_update
+    def _(_evt) -> None:
+        visible = bool(show_link_markers_cb.value)
+        for _, marker_handle, label_handle in link_markers.values():
+            marker_handle.visible = visible
+            label_handle.visible = visible
 
     def _interp_qpos(q0: np.ndarray, q1: np.ndarray, u: float) -> np.ndarray:
         out = q0.copy()
@@ -685,6 +719,13 @@ def replay_perception(cfg: ExperimentConfig) -> None:
         frustum_quat_np = frustum_quat.detach().cpu().numpy()
         camera_frustum.position = cam_pos_np
         camera_frustum.wxyz = frustum_quat_np[[3, 0, 1, 2]]
+
+        label_offset = np.array([0.0, 0.0, 0.06], dtype=np.float32)
+        for _, (link_name, marker_handle, label_handle) in link_markers.items():
+            link_pos, _ = kinematics.compute_link_pose(link_name, joint_dict, root_pos_t, root_quat_xyzw)
+            link_pos_np = link_pos.detach().cpu().numpy()
+            marker_handle.position = link_pos_np
+            label_handle.position = link_pos_np + label_offset
 
         ray_dirs_world = quat_rotate_batched(body_quat.unsqueeze(0), camera_rays_base.unsqueeze(0)).view(-1, 3)
         ray_starts = cam_pos.unsqueeze(0).expand(ray_dirs_world.shape[0], -1)
