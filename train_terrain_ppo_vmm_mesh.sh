@@ -1,6 +1,10 @@
-CUDA_VISIBLE_DEVICES=6,7 torchrun --nproc_per_node=2 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
-  exp:g1-29dof-wbt-videomimic-mlp \
-  --training.num_envs=12288 \
+#!/usr/bin/env bash
+set -euo pipefail
+
+CUDA_VISIBLE_DEVICES=1,2,3 torchrun --nproc_per_node=3 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
+  exp:g1-29dof-wbt-videomimic-mlp  \
+  perception:camera_depth_d435i_rendered \
+  --training.num_envs=8192 \
   \
   --algo.config.actor_learning_rate=7e-5 \
   --algo.config.critic_learning_rate=7e-5 \
@@ -24,4 +28,5 @@ CUDA_VISIBLE_DEVICES=6,7 torchrun --nproc_per_node=2 --master_port=$((29500 + RA
   --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale=0.77 \
   logger:wandb \
   --logger.video.interval=1000 \
+  --logger.name="mlp_mesh_depth" \
   --simulator.config.scene.env_spacing=0.0
