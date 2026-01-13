@@ -674,6 +674,27 @@
         <parent link="torso_link"/>
         <child link="mid360_link"/>
     </joint>
+  
+
+    <!-- d435i (added to match Unitree d435 mount pose in a common upstream frame) -->
+    <link name="d435_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="0.007 0.007 0.007"/>
+        </geometry>
+        <material name="invisible">
+          <color rgba="0 0 0 0"/>
+        </material>
+      </visual>
+    </link>
+    <joint name="d435_joint" type="fixed">
+      <!-- 关键：A 用 0.42987（比 B 的 0.41987 高 1cm） -->
+      <origin xyz="0.0576235 0.01753 0.42987" rpy="0 0.8307767239493009 0"/>
+      <parent link="torso_link"/>
+      <child link="d435_link"/>
+    </joint>
+
 
     <!-- Arm -->
     <link name="left_shoulder_pitch_link">
