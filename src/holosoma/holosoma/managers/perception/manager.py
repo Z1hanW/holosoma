@@ -18,6 +18,7 @@ from holosoma.utils.rotations import (
 )
 from holosoma.utils.simulator_config import SimulatorType, get_simulator_type
 from holosoma.utils.safe_torch_import import torch
+from holosoma.utils.urdf_utils import resolve_fixed_link_offset
 
 
 class PerceptionManager:
@@ -43,6 +44,8 @@ class PerceptionManager:
         self._camera_source = cfg.camera_source
         self._camera_body_name = cfg.camera_body_name
         self._camera_body_index: int | None = None
+        self._camera_body_offset_pos = torch.zeros(3, device=self.device)
+        self._camera_body_offset_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
         self._rendered_camera = None
         self._rendered_camera_env_id = int(getattr(cfg, "camera_env_id", 0))
         self._pytorch3d_mesh = None
@@ -283,10 +286,24 @@ class PerceptionManager:
         if self._camera_body_name is None:
             return
         body_names = getattr(self.env, "body_names", None)
-        if body_names is None or self._camera_body_name not in body_names:
+        if body_names is not None and self._camera_body_name in body_names:
+            self._camera_body_index = int(body_names.index(self._camera_body_name))
+            return
+
+        resolved = resolve_fixed_link_offset(
+            self.env.robot_config,
+            self._camera_body_name,
+            available_links=body_names,
+            device=self.device,
+        )
+        if resolved is None or body_names is None:
             available = body_names if body_names is not None else "unknown"
             raise RuntimeError(f"Camera body '{self._camera_body_name}' not found in body_names: {available}")
-        self._camera_body_index = int(body_names.index(self._camera_body_name))
+
+        parent_name, offset_pos, offset_quat = resolved
+        self._camera_body_index = int(body_names.index(parent_name))
+        self._camera_body_offset_pos = offset_pos
+        self._camera_body_offset_quat = offset_quat
 
     def _get_camera_body_pose(self, idx: torch.Tensor | slice) -> tuple[torch.Tensor, torch.Tensor]:
         if self._camera_body_index is not None:
@@ -295,6 +312,11 @@ class PerceptionManager:
         else:
             body_pos = self.env.simulator.robot_root_states[idx, :3]
             body_quat = self.env.base_quat[idx]
+        if self._camera_body_offset_pos is not None:
+            offset_pos = self._camera_body_offset_pos.expand(body_pos.shape[0], -1)
+            offset_quat = self._camera_body_offset_quat.expand(body_pos.shape[0], -1)
+            body_pos = body_pos + quat_apply(body_quat, offset_pos, w_last=True)
+            body_quat = quat_mul(body_quat, offset_quat, w_last=True)
         return body_pos, body_quat
 
     def _compute_rays(

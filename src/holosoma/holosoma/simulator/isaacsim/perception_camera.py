@@ -8,6 +8,7 @@ import numpy as np
 
 from holosoma.utils.rotations import quat_apply, quat_from_euler_xyz, quat_mul
 from holosoma.utils.safe_torch_import import torch
+from holosoma.utils.urdf_utils import resolve_fixed_link_offset
 
 
 class IsaacSimDepthCamera:
@@ -40,6 +41,8 @@ class IsaacSimDepthCamera:
         self._view = None
         self._annotator_name: str | None = None
         self._body_index: int | None = None
+        self._body_offset_pos = torch.zeros(3, device=self._device)
+        self._body_offset_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self._device)
         self._warned_multi_env = False
 
     def setup(self) -> None:
@@ -105,10 +108,24 @@ class IsaacSimDepthCamera:
         if self._body_name is None:
             return
         body_names = getattr(self._env, "body_names", None)
-        if body_names is None or self._body_name not in body_names:
+        if body_names is not None and self._body_name in body_names:
+            self._body_index = int(body_names.index(self._body_name))
+            return
+
+        resolved = resolve_fixed_link_offset(
+            self._env.robot_config,
+            self._body_name,
+            available_links=body_names,
+            device=self._device,
+        )
+        if resolved is None or body_names is None:
             available = body_names if body_names is not None else "unknown"
             raise RuntimeError(f"Camera body '{self._body_name}' not found in body_names: {available}")
-        self._body_index = int(body_names.index(self._body_name))
+
+        parent_name, offset_pos, offset_quat = resolved
+        self._body_index = int(body_names.index(parent_name))
+        self._body_offset_pos = offset_pos
+        self._body_offset_quat = offset_quat
 
     def _update_pose(self) -> None:
         if self._view is None:
@@ -121,6 +138,11 @@ class IsaacSimDepthCamera:
         else:
             body_pos = self._env.simulator.robot_root_states[env_id, :3]
             body_quat = self._env.simulator.base_quat[env_id]
+
+        body_pos = body_pos + quat_apply(body_quat.unsqueeze(0), self._body_offset_pos.unsqueeze(0), w_last=True).squeeze(
+            0
+        )
+        body_quat = quat_mul(body_quat.unsqueeze(0), self._body_offset_quat.unsqueeze(0), w_last=True).squeeze(0)
 
         offset_world = quat_apply(body_quat.unsqueeze(0), self._sensor_offset.unsqueeze(0), w_last=True).squeeze(0)
         camera_pos = body_pos + offset_world
