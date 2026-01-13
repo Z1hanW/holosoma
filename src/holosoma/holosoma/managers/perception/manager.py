@@ -191,6 +191,36 @@ class PerceptionManager:
             raise RuntimeError("Camera depth map requested but camera_depth output is disabled.")
         return self._camera_depth
 
+    def get_camera_pose(
+        self,
+        env_ids: torch.Tensor | None = None,
+        *,
+        apply_sensor_offset: bool = True,
+        apply_pitch: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return camera position and orientation in world frame."""
+        if not self.enabled or self.cfg.output_mode != "camera_depth":
+            raise RuntimeError("Camera pose requested but camera_depth output is disabled.")
+
+        idx = env_ids if env_ids is not None else slice(None)
+        body_pos, body_quat = self._get_camera_body_pose(idx)
+
+        if apply_sensor_offset:
+            offset_world = quat_apply(body_quat, self._sensor_offset.expand(body_pos.shape[0], -1), w_last=True)
+            body_pos = body_pos + offset_world
+
+        if apply_pitch:
+            pitch_rad = torch.deg2rad(torch.tensor(self.cfg.camera_pitch_deg, device=self.device))
+            pitch_quat = quat_from_euler_xyz(
+                torch.tensor(0.0, device=self.device),
+                pitch_rad,
+                torch.tensor(0.0, device=self.device),
+            )
+            pitch_quat = pitch_quat.unsqueeze(0).expand(body_quat.shape[0], -1)
+            body_quat = quat_mul(body_quat, pitch_quat, w_last=True)
+
+        return body_pos, body_quat
+
     def get_camera_parameters(self, extrinsics: torch.Tensor) -> dict[str, torch.Tensor | float | int]:
         """Return camera parameters for supplied extrinsics (batched)."""
         return build_camera_parameters(

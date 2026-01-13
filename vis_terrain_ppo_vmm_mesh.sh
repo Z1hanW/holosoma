@@ -1,23 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CUDA_VISIBLE_DEVICES=1,2,3 torchrun --nproc_per_node=3 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
-  exp:g1-29dof-wbt-videomimic-mlp  \
+HOLOSOMA_VISER_PORT=${HOLOSOMA_VISER_PORT:-6060} \
+python src/holosoma/holosoma/viser_perception.py \
+  exp:g1-29dof-wbt-videomimic-mlp \
   perception:camera_depth_d435i \
-  --training.num_envs=8192 \
-  \
+  --training.num_envs=1 \
+  --training.headless=True \
   --perception.camera_width=160 \
   --perception.camera_height=90 \
   --perception.camera_body_name=d435_link \
   --perception.max_distance=10.0 \
   --perception.update_hz=30.0 \
-  \
-  --algo.config.actor_learning_rate=7e-5 \
-  --algo.config.critic_learning_rate=7e-5 \
-  --algo.config.normalize_actor_obs=False \
-  --algo.config.normalize_critic_obs=False \
-  --algo.config.module_dict.actor.min_noise_std=0.10 \
-  --algo.config.save_interval=100 \
   \
   terrain:terrain-load-obj \
   --terrain.terrain-term.obj-file-path src/holosoma_retargeting/demo_data/far_robot/far_robot/stairs.obj \
@@ -32,7 +26,4 @@ CUDA_VISIBLE_DEVICES=1,2,3 torchrun --nproc_per_node=3 --master_port=$((29500 + 
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend=False \
   --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s=0 \
   --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale=0.77 \
-  logger:wandb \
-  --logger.video.interval=1000 \
-  --logger.name="mlp_mesh_depth" \
   --simulator.config.scene.env_spacing=0.0
