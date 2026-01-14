@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import mujoco
 import mujoco.viewer
+import glfw
 import numpy as np
 import torch
 from loguru import logger
@@ -614,7 +615,7 @@ class MuJoCo(BaseSimulator):
         self.commands = torch.zeros(self.num_envs, 9, device=self.sim_device, dtype=torch.float32)
         logger.info(f"Initialized command system with shape: {self.commands.shape}")
 
-    def _set_robot_initial_state(self) -> None:
+    def _set_robot_initial_state(self, pos_override: list[float] | None = None) -> None:
         """Set complete initial robot state (position, orientation, velocities).
 
         Applies the robot's initial state configuration to the MuJoCo model,
@@ -626,7 +627,7 @@ class MuJoCo(BaseSimulator):
         assert self.robot_qvel_addr is not None
 
         # Set complete initial robot state (position, orientation, velocities)
-        initial_pos = self.robot_config.init_state.pos
+        initial_pos = pos_override if pos_override is not None else self.robot_config.init_state.pos
         initial_rot = self.robot_config.init_state.rot  # [x,y,z,w] quaternion
         initial_lin_vel = self.robot_config.init_state.lin_vel
         initial_ang_vel = self.robot_config.init_state.ang_vel
@@ -644,6 +645,27 @@ class MuJoCo(BaseSimulator):
         # Set velocity: [vx, vy, vz, wx, wy, wz] (6 elements)
         self.root_data.qvel[self.robot_qvel_addr : self.robot_qvel_addr + 3] = initial_lin_vel
         self.root_data.qvel[self.robot_qvel_addr + 3 : self.robot_qvel_addr + 6] = initial_ang_vel
+
+    def reset(self) -> None:
+        """Reset simulation state, optionally snapping to current gantry XY."""
+        if self.root_model is None or self.root_data is None:
+            return
+
+        reset_pos = list(self.robot_config.init_state.pos)
+        if self.virtual_gantry and self.simulator_config.virtual_gantry.reset_to_gantry_xy:
+            reset_pos[0] = float(self.virtual_gantry.point[0])
+            reset_pos[1] = float(self.virtual_gantry.point[1])
+            if self.simulator_config.virtual_gantry.reset_z is not None:
+                reset_pos[2] = float(self.simulator_config.virtual_gantry.reset_z)
+
+        mujoco.mj_resetData(self.root_model, self.root_data)
+        self._set_robot_initial_state(pos_override=reset_pos)
+        self._set_initial_joint_angles()
+        self.root_model.qpos0[:] = self.root_data.qpos
+        if hasattr(self.root_model, "qvel0"):
+            self.root_model.qvel0[:] = self.root_data.qvel
+        self._zero_commands()
+        logger.info("Simulation reset (gantry XY applied: {})", self.simulator_config.virtual_gantry.reset_to_gantry_xy)
 
     def prepare_sim(self) -> None:
         """Prepare simulation - enhanced implementation with ObjectRegistry integration.
@@ -1457,6 +1479,11 @@ class MuJoCo(BaseSimulator):
             GLFW keycode for the pressed key.
         """
         if self.commands is None:
+            return
+
+        if keycode == glfw.KEY_BACKSPACE:
+            self.reset()
+            self._update_text_overlay()
             return
 
         # Handle text overlay toggle

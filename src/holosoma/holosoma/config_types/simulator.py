@@ -422,6 +422,12 @@ class VirtualGantryCfg:
     follow_robot_on_episode_start: bool = True
     """Reset gantry anchor to the robot position on episode start."""
 
+    reset_to_gantry_xy: bool = False
+    """Reset robot XY to the current gantry anchor point when resetting the environment."""
+
+    reset_z: float | None = None
+    """Override Z position for reset when reset_to_gantry_xy is True."""
+
     length: float = 0.0
     """Rest length of the elastic band (zero force distance)."""
 
