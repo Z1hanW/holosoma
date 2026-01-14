@@ -91,9 +91,6 @@ class RunSimConfig:
     Only used by run_sim.py for real-time display synchronization.
     """
 
-    motion_init_onnx: str | None = None
-    """Optional ONNX path; if set, align robot init yaw to motion clip frame 0."""
-
     device: str | None = "cpu"
     """Device to use for simulation. None auto-detects based on the simulator type.
     """
