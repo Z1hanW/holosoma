@@ -7,7 +7,7 @@
   <option timestep="0.002" iterations="50" solver="Newton"/>
 
   <!-- Mesh search directory for this wrapper file -->
-  <compiler angle="radian" meshdir="./"/>
+  <compiler angle="radian" meshdir="./meshes/"/>
 
   <!-- Defaults for scene meshes: visual vs collision -->
   <default>
@@ -40,17 +40,17 @@
     <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
 
     <!-- Scene pieces (OBJ) -->
-    <mesh name="part_00-1_mesh" file="pieces/part_00-1.obj" scale="1.0 1.0 1.0"/>
-    <mesh name="part_002_mesh"  file="pieces/part_002.obj"  scale="1.0 1.0 1.0"/>
-    <mesh name="part_003_mesh"  file="pieces/part_003.obj"  scale="1.0 1.0 1.0"/>
-    <mesh name="part_006_mesh"  file="pieces/part_006.obj"  scale="1.0 1.0 1.0"/>
-    <mesh name="part_007_mesh"  file="pieces/part_007.obj"  scale="1.0 1.0 1.0"/>
-    <mesh name="part_011_mesh"  file="pieces/part_011.obj"  scale="1.0 1.0 1.0"/>
-    <mesh name="part_012_mesh"  file="pieces/part_012.obj"  scale="1.0 1.0 1.0"/>
-    <mesh name="part_017_mesh"  file="pieces/part_017.obj"  scale="1.0 1.0 1.0"/>
-    <mesh name="part_022_mesh"  file="pieces/part_022.obj"  scale="1.0 1.0 1.0"/>
-    <mesh name="part_024_mesh"  file="pieces/part_024.obj"  scale="1.0 1.0 1.0"/>
-    <mesh name="part_025_mesh"  file="pieces/part_025.obj"  scale="1.0 1.0 1.0"/>
+    <mesh name="part_00-1_mesh" file="../pieces/part_00-1.obj" scale="1.0 1.0 1.0"/>
+    <mesh name="part_002_mesh"  file="../pieces/part_002.obj"  scale="1.0 1.0 1.0"/>
+    <mesh name="part_003_mesh"  file="../pieces/part_003.obj"  scale="1.0 1.0 1.0"/>
+    <mesh name="part_006_mesh"  file="../pieces/part_006.obj"  scale="1.0 1.0 1.0"/>
+    <mesh name="part_007_mesh"  file="../pieces/part_007.obj"  scale="1.0 1.0 1.0"/>
+    <mesh name="part_011_mesh"  file="../pieces/part_011.obj"  scale="1.0 1.0 1.0"/>
+    <mesh name="part_012_mesh"  file="../pieces/part_012.obj"  scale="1.0 1.0 1.0"/>
+    <mesh name="part_017_mesh"  file="../pieces/part_017.obj"  scale="1.0 1.0 1.0"/>
+    <mesh name="part_022_mesh"  file="../pieces/part_022.obj"  scale="1.0 1.0 1.0"/>
+    <mesh name="part_024_mesh"  file="../pieces/part_024.obj"  scale="1.0 1.0 1.0"/>
+    <mesh name="part_025_mesh"  file="../pieces/part_025.obj"  scale="1.0 1.0 1.0"/>
   </asset>
 
   <worldbody>
