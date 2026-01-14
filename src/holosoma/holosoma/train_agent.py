@@ -156,6 +156,8 @@ def _zoom_out_video_config(config: VideoConfig, zoom: float) -> VideoConfig:
 
 
 def _apply_debug_camera_tilt(env: Any, target_pitch_deg: float = -20.0) -> bool:
+    import torch
+
     perception = getattr(env, "perception_manager", None)
     if perception is None or perception._camera_ray_dirs_base is None:
         return False
@@ -176,9 +178,8 @@ def _apply_debug_camera_tilt(env: Any, target_pitch_deg: float = -20.0) -> bool:
         if torch.abs(delta).item() < 1.0e-3:
             return False
         delta_quat = quat_from_euler_xyz(torch.tensor(0.0, device=perception.device), delta, torch.tensor(0.0, device=perception.device))
-        perception._camera_ray_dirs_base = quat_rotate_inverse(
-            delta_quat.unsqueeze(0), ray_dirs_base, w_last=True
-        )
+        delta_quat = delta_quat.unsqueeze(0).expand(ray_dirs_base.shape[0], -1)
+        perception._camera_ray_dirs_base = quat_rotate_inverse(delta_quat, ray_dirs_base, w_last=True)
         logger.info(
             f"Debug depth: auto-tilting camera rays by {float(torch.rad2deg(delta)):.2f} deg "
             f"(target pitch {target_pitch_deg:.1f} deg)."
