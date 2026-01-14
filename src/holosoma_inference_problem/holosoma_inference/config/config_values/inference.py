@@ -54,10 +54,16 @@ g1_29dof_wbt = InferenceConfig(
     task=task.wbt,
 )
 
+g1_29dof_wbt_motion_tracking_transformer = replace(
+    g1_29dof_wbt,
+    task=task.wbt_motion_tracking,
+)
+
 DEFAULTS = {
     "g1-29dof-loco": g1_29dof_loco,
     "t1-29dof-loco": t1_29dof_loco,
     "g1-29dof-wbt": g1_29dof_wbt,
+    "g1-29dof-wbt-motion-tracking-transformer": g1_29dof_wbt_motion_tracking_transformer,
 }
 
 # Annotated version for Tyro CLI with subcommands
