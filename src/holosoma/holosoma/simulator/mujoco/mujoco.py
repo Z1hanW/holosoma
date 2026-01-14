@@ -146,6 +146,7 @@ class MuJoCo(BaseSimulator):
 
         # Text overlay visibility toggle
         self.show_text_overlay: bool = True
+        self._pending_reset: bool = False
 
         # Command system for keyboard/joystick controls
         # Initialize commands tensor matching IsaacGym format:
@@ -919,6 +920,12 @@ class MuJoCo(BaseSimulator):
     def simulate_at_each_physics_step(self) -> None:
         """Advance simulation by one step."""
 
+        if self._pending_reset:
+            self._pending_reset = False
+            self.reset()
+            self._update_text_overlay()
+            return
+
         if self.virtual_gantry:
             # Apply virtual gantry forces before step
             self.virtual_gantry.step()
@@ -1485,8 +1492,7 @@ class MuJoCo(BaseSimulator):
             return
 
         if keycode == glfw.KEY_BACKSPACE:
-            self.reset()
-            self._update_text_overlay()
+            self._pending_reset = True
             return
 
         # Handle text overlay toggle
