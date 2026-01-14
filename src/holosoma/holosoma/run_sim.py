@@ -24,38 +24,6 @@ from holosoma.utils.sim_utils import DirectSimulation, setup_simulation_environm
 from holosoma.utils.tyro_utils import TYRO_CONIFG
 
 
-def _coerce_triplet_args(argv: list[str]) -> list[str]:
-    """Allow --flag x y z in addition to list literal syntax."""
-    triplet_flags = {
-        "--robot.init-state.pos",
-        "--robot.init_state.pos",
-        "--simulator.config.virtual-gantry.point",
-        "--simulator.config.virtual_gantry.point",
-    }
-
-    def _is_number(token: str) -> bool:
-        try:
-            float(token)
-        except ValueError:
-            return False
-        return True
-
-    i = 0
-    while i < len(argv):
-        if argv[i] in triplet_flags:
-            if i + 1 < len(argv) and argv[i + 1].lstrip().startswith("["):
-                i += 1
-                continue
-            if i + 3 < len(argv):
-                t1, t2, t3 = argv[i + 1 : i + 4]
-                if _is_number(t1) and _is_number(t2) and _is_number(t3):
-                    argv[i + 1 : i + 4] = [f"[{t1}, {t2}, {t3}]"]
-                    i += 1
-                    continue
-        i += 1
-    return argv
-
-
 def run_simulation(config: RunSimConfig):
     """Run simulation with direct simulator control.
 
@@ -109,7 +77,6 @@ def main() -> None:
     # Parse configuration with tyro - same pattern as ExperimentConfig
     config = tyro.cli(
         RunSimConfig,
-        args=_coerce_triplet_args(sys.argv[1:]),
         description="Run simulation with direct simulator control and bridge support.\n\n"
         "Usage: python -m holosoma.run_sim simulator:<sim> robot:<robot> terrain:<terrain>\n"
         "Examples:\n"
