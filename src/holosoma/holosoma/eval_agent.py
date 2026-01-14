@@ -62,6 +62,9 @@ class Sim2SimConfig:
     run_sim_args: str = ""
     """Extra args appended to run_sim.py (shell-style string)."""
 
+    run_sim_robot: str | None = None
+    """Override run_sim robot preset (e.g., g1-29dof-stairs)."""
+
     run_policy_args: str = ""
     """Extra args appended to run_policy.py (shell-style string)."""
 
@@ -117,7 +120,16 @@ def _resolve_run_sim_robot(config: ExperimentConfig) -> str:
     if not matches:
         raise ValueError(f"No run_sim robot preset matches robot_type '{robot_type}'")
     if len(matches) > 1:
-        raise ValueError(f"Multiple run_sim robot presets match robot_type '{robot_type}': {matches}")
+        xml_file = config.robot.asset.xml_file
+        xml_matches = [key for key in matches if robot_values.DEFAULTS[key].asset.xml_file == xml_file]
+        if len(xml_matches) == 1:
+            return xml_matches[0]
+        if robot_type in matches:
+            return robot_type
+        raise ValueError(
+            f"Multiple run_sim robot presets match robot_type '{robot_type}': {matches}. "
+            "Pass --sim2sim.run-sim-robot to pick one."
+        )
     return matches[0]
 
 
@@ -147,11 +159,15 @@ def _build_sim2sim_commands(
     default_rl_rate = config.simulator.config.sim.fps / config.simulator.config.sim.control_decimation
     rl_rate = sim2sim_cfg.rl_rate if sim2sim_cfg.rl_rate is not None else default_rl_rate
 
+    run_sim_robot = sim2sim_cfg.run_sim_robot or _resolve_run_sim_robot(config)
+    if run_sim_robot.startswith("robot:"):
+        run_sim_robot = run_sim_robot.split(":", 1)[1]
+
     run_sim_cmd = [
         sys.executable,
         "src/holosoma/holosoma/run_sim.py",
         f"simulator:{sim2sim_cfg.simulator}",
-        f"robot:{_resolve_run_sim_robot(config)}",
+        f"robot:{run_sim_robot}",
     ]
     run_sim_cmd += _resolve_run_sim_terrain_args(config)
     if sim2sim_cfg.interface:

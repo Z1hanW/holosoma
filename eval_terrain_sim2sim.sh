@@ -6,10 +6,12 @@ set -euo pipefail
 #   Terminal 2: MODEL_PATH=/ABS/PATH/to/your_wbt_policy.onnx ./eval_terrain_sim2sim.sh policy
 #
 # Optional overrides:
+#   ROBOT_PRESET=g1-29dof-stairs ./eval_terrain_sim2sim.sh sim
 #   ROBOT_XML=/ABS/PATH/to/scene.xml ./eval_terrain_sim2sim.sh sim
 #   ROBOT_X=0.0 ROBOT_Y=0.0 ROBOT_Z=0.8 GANTRY_Z=3.0 ./eval_terrain_sim2sim.sh sim
 
 MODEL_PATH=${MODEL_PATH:-"/ABS/PATH/to/your_wbt_policy.onnx"}
+ROBOT_PRESET=${ROBOT_PRESET:-"g1-29dof"}
 ROBOT_XML=${ROBOT_XML:-""}
 
 ROBOT_X=${ROBOT_X:-""}
@@ -22,7 +24,7 @@ if [[ "${1:-}" == "sim" ]]; then
   cmd=(
     python src/holosoma/holosoma/run_sim.py
     simulator:mujoco
-    robot:g1-29dof
+    robot:${ROBOT_PRESET}
     terrain:terrain-locomotion-plane
   )
   if [[ -n "${ROBOT_XML}" ]]; then

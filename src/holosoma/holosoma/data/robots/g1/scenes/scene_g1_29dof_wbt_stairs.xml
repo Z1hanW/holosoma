@@ -7,7 +7,7 @@
   <option timestep="0.002" iterations="50" solver="Newton"/>
 
   <!-- Mesh search directory for this wrapper file -->
-  <compiler angle="radian" meshdir="../meshes/"/>
+  <compiler angle="radian" meshdir="../"/>
 
   <!-- Defaults for scene meshes: visual vs collision -->
   <default>

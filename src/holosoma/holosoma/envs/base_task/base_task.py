@@ -248,6 +248,7 @@ class BaseTask:
             if hasattr(self.simulator, "on_episode_end"):
                 self.simulator.on_episode_end(env_id.item())
         self._finalize_depth_logging_if_needed()
+        self._finalize_startup_depth_video_if_needed(env_ids)
 
         # Reset observation history BEFORE state changes (must happen first to clear history buffers)
         self.observation_manager.reset(env_ids)
@@ -559,6 +560,7 @@ class BaseTask:
         self._depth_log_episode_id: int | None = None
         self._depth_log_record_env_id = int(getattr(self.simulator.video_config, "record_env_id", 0))
         self._depth_log_obs_group: str | None = None
+        self._depth_log_obs_term_name: str | None = None
         self._depth_log_obs_slice: slice | None = None
         self._depth_log_obs_history = 1
         self._depth_log_obs_frame_dim: int | None = None
@@ -566,6 +568,10 @@ class BaseTask:
         self._depth_log_obs_unavailable = False
         self._depth_log_group_concatenate = True
         self._depth_log_startup_done = False
+        self._depth_log_startup_video_active = False
+        self._depth_log_startup_video_done = False
+        self._depth_log_startup_video_frames: list[np.ndarray] = []
+        self._depth_log_startup_video_episode_id: int | None = None
 
     def _depth_logging_enabled(self) -> bool:
         if not self._depth_log_is_main_process:
@@ -586,6 +592,7 @@ class BaseTask:
         return True
 
     def _start_depth_logging_if_needed(self) -> None:
+        self._start_startup_depth_video_if_needed()
         if not self._depth_logging_enabled():
             return
         if self.simulator.video_recorder is None or not self.simulator.video_recorder.is_recording:
@@ -608,21 +615,80 @@ class BaseTask:
         self._depth_log_frames = []
         self._depth_log_episode_id = None
 
+    def _startup_depth_video_enabled(self) -> bool:
+        if not self._depth_log_is_main_process:
+            return False
+        if self.perception_manager is None or not self.perception_manager.enabled:
+            return False
+        if self.perception_manager.cfg.output_mode != "camera_depth":
+            return False
+        if getattr(self.simulator.logger_cfg, "type", "disabled") != "wandb":
+            return False
+        if not self.simulator.video_config.upload_to_wandb:
+            return False
+        self._resolve_depth_obs_source()
+        if self._depth_log_obs_group is None:
+            return False
+        return True
+
+    def _start_startup_depth_video_if_needed(self) -> None:
+        if self._depth_log_startup_video_done or self._depth_log_startup_video_active:
+            return
+        if not self._startup_depth_video_enabled():
+            return
+        self._depth_log_startup_video_active = True
+        self._depth_log_startup_video_frames = []
+        self._depth_log_startup_video_episode_id = getattr(self.simulator.video_recorder, "current_episode", None)
+
+    def _finalize_startup_depth_video_if_needed(self, env_ids) -> None:
+        if not self._depth_log_startup_video_active:
+            return
+        if not self._startup_depth_video_enabled():
+            return
+        record_env = self._depth_log_record_env_id
+        has_record_env = False
+        if isinstance(env_ids, torch.Tensor):
+            if env_ids.numel() > 0:
+                has_record_env = bool((env_ids == record_env).any().item())
+        else:
+            try:
+                has_record_env = record_env in env_ids
+            except TypeError:
+                has_record_env = False
+        if not has_record_env:
+            return
+        self._log_startup_depth_video()
+        self._depth_log_startup_video_active = False
+        self._depth_log_startup_video_done = True
+        self._depth_log_startup_video_frames = []
+        self._depth_log_startup_video_episode_id = None
+
     def _capture_depth_frame(self) -> None:
-        if not self._depth_log_active:
+        capture_rollout = self._depth_log_active
+        capture_startup = self._depth_log_startup_video_active
+        if not (capture_rollout or capture_startup):
             return
-        if not self._depth_logging_enabled():
-            return
-        if self.simulator.video_recorder is None or not self.simulator.video_recorder.is_recording:
+        if capture_rollout and not self._depth_logging_enabled():
+            capture_rollout = False
+        if capture_rollout and (
+            self.simulator.video_recorder is None or not self.simulator.video_recorder.is_recording
+        ):
+            capture_rollout = False
+        if capture_startup and not self._startup_depth_video_enabled():
+            capture_startup = False
+        if not (capture_rollout or capture_startup):
             return
         depth_map = self._extract_policy_depth_frame()
         if depth_map is None:
             return
         depth_frame = self._depth_to_rgb(depth_map)
-        if self._depth_log_pending_frame0:
-            self._log_depth_frame0(depth_frame)
-            self._depth_log_pending_frame0 = False
-        self._depth_log_frames.append(depth_frame)
+        if capture_rollout:
+            if self._depth_log_pending_frame0:
+                self._log_depth_frame0(depth_frame)
+                self._depth_log_pending_frame0 = False
+            self._depth_log_frames.append(depth_frame)
+        if capture_startup:
+            self._depth_log_startup_video_frames.append(depth_frame)
 
     def _depth_to_rgb(self, depth_map: np.ndarray) -> np.ndarray:
         max_distance = float(self.perception_manager.cfg.max_distance)
@@ -681,6 +747,32 @@ class BaseTask:
         wandb.log({"Depth/startup": wandb.Image(depth_frame, caption="startup")})
         self._depth_log_startup_done = True
 
+    def _log_startup_depth_video(self) -> None:
+        if not self._depth_log_startup_video_frames:
+            return
+        try:
+            from holosoma.utils.video_utils import create_video  # noqa: PLC0415
+        except Exception:
+            return
+        sim_config = self.simulator.simulator_config.sim
+        control_frequency = sim_config.fps / sim_config.control_decimation
+        display_fps = control_frequency * self.simulator.video_config.playback_rate
+        save_dir = (
+            Path(self.simulator.video_config.save_dir)
+            if self.simulator.video_config.save_dir is not None
+            else Path("logs/videos")
+        )
+        video_frames = np.stack(self._depth_log_startup_video_frames, axis=0).astype(np.uint8)
+        create_video(
+            video_frames=video_frames,
+            fps=display_fps,
+            save_dir=save_dir,
+            output_format=self.simulator.video_config.output_format,
+            wandb_logging=True,
+            episode_id=self._depth_log_startup_video_episode_id,
+            wandb_key="Depth rollout (startup)",
+        )
+
     def _log_depth_video(self) -> None:
         if not self._depth_log_frames:
             return
@@ -716,28 +808,43 @@ class BaseTask:
 
         groups = self.observation_manager.cfg.groups
         group_name = None
-        if "actor_obs" in groups and "perception_obs" in groups["actor_obs"].terms:
-            group_name = "actor_obs"
+        term_name = None
+        if "actor_obs" in groups:
+            if "perception_obs" in groups["actor_obs"].terms:
+                group_name = "actor_obs"
+                term_name = "perception_obs"
+            elif "perception" in groups["actor_obs"].terms:
+                group_name = "actor_obs"
+                term_name = "perception"
         else:
             for name in sorted(groups.keys()):
                 if "perception_obs" in groups[name].terms:
                     group_name = name
+                    term_name = "perception_obs"
+                    break
+                if "perception" in groups[name].terms:
+                    group_name = name
+                    term_name = "perception"
                     break
 
         if group_name is None:
             self._depth_log_obs_unavailable = True
             return
+        if term_name is None:
+            self._depth_log_obs_unavailable = True
+            return
 
         group_cfg = groups[group_name]
-        term_cfg = group_cfg.terms["perception_obs"]
+        term_cfg = group_cfg.terms[term_name]
         self._depth_log_obs_group = group_name
+        self._depth_log_obs_term_name = term_name
         self._depth_log_obs_scale = term_cfg.scale
         self._depth_log_obs_history = group_cfg.history_length
         self._depth_log_group_concatenate = group_cfg.concatenate
 
         if group_cfg.concatenate:
             term_slices = self.observation_manager.get_term_slices(group_name)
-            self._depth_log_obs_slice = term_slices.get("perception_obs")
+            self._depth_log_obs_slice = term_slices.get(term_name)
             if self._depth_log_obs_slice is not None:
                 slice_len = self._depth_log_obs_slice.stop - self._depth_log_obs_slice.start
                 if self._depth_log_obs_history > 1:
@@ -751,9 +858,11 @@ class BaseTask:
         group_obs = self.obs_buf_dict.get(self._depth_log_obs_group)
         if group_obs is None:
             return None
+        if self._depth_log_obs_term_name is None:
+            return None
 
         if isinstance(group_obs, dict):
-            term_obs = group_obs.get("perception_obs")
+            term_obs = group_obs.get(self._depth_log_obs_term_name)
         else:
             if self._depth_log_obs_slice is None:
                 return None
