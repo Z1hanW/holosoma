@@ -19,7 +19,7 @@ isaacgym = dataclasses.replace(
     config=dataclasses.replace(
         holosoma.config_values.simulator.isaacgym.config,
         bridge=BridgeConfig(enabled=True),
-        virtual_gantry=VirtualGantryCfg(enabled=True, reset_to_gantry_xy=True, reset_z=0.0),
+        virtual_gantry=VirtualGantryCfg(enabled=True, reset_to_gantry_xy=True),
         sim=dataclasses.replace(
             holosoma.config_values.simulator.isaacgym.config.sim,
             fps=1000,  # Gym on CPU can reach ~900 on 4090 (for sim2sim i.e, num_envs=1)
@@ -37,7 +37,7 @@ isaacsim = dataclasses.replace(
     config=dataclasses.replace(
         holosoma.config_values.simulator.isaacsim.config,
         bridge=BridgeConfig(enabled=True),
-        virtual_gantry=VirtualGantryCfg(enabled=True, reset_to_gantry_xy=True, reset_z=0.0),
+        virtual_gantry=VirtualGantryCfg(enabled=True, reset_to_gantry_xy=True),
         sim=dataclasses.replace(
             holosoma.config_values.simulator.isaacsim.config.sim,
             fps=200,
@@ -51,7 +51,7 @@ mujoco = dataclasses.replace(
     config=dataclasses.replace(
         holosoma.config_values.simulator.mujoco.config,
         bridge=BridgeConfig(enabled=True),
-        virtual_gantry=VirtualGantryCfg(enabled=True, reset_to_gantry_xy=True, reset_z=0.0),
+        virtual_gantry=VirtualGantryCfg(enabled=True, reset_to_gantry_xy=True),
         sim=dataclasses.replace(
             holosoma.config_values.simulator.mujoco.config.sim,
             fps=2000,  # mujoco can run faster
@@ -65,7 +65,7 @@ mjwarp = dataclasses.replace(
     config=dataclasses.replace(
         holosoma.config_values.simulator.mjwarp.config,
         bridge=BridgeConfig(enabled=True),
-        virtual_gantry=VirtualGantryCfg(enabled=True, reset_to_gantry_xy=True, reset_z=0.0),
+        virtual_gantry=VirtualGantryCfg(enabled=True, reset_to_gantry_xy=True),
         sim=dataclasses.replace(
             holosoma.config_values.simulator.mjwarp.config.sim,
             fps=400,
