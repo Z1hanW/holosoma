@@ -332,6 +332,12 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
                 f"environments (total across all GPUs: {original_num_envs})"
             )
 
+        if tyro_config.training.debug and not tyro_config.training.headless:
+            tyro_config = dataclasses.replace(
+                tyro_config, training=dataclasses.replace(tyro_config.training, headless=True)
+            )
+            logger.info("Debug mode: forcing headless=True to avoid viewer-only issues.")
+
         tyro_config = apply_perception_overrides(tyro_config)
 
         env_target = tyro_config.env_class
@@ -357,7 +363,7 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
                 dist.destroy_process_group()
             if is_main_process and wandb_enabled:
                 logger.info("Shutting down wandb...")
-                wandb.teardown()
+                wandb.finish()
             return
 
         experiment_save_dir = experiment_dir
