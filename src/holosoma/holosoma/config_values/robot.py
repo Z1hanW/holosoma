@@ -1108,7 +1108,7 @@ g1_29dof_stairs = replace(
     g1_29dof,
     asset=replace(
         g1_29dof.asset,
-        xml_file="g1/scenes/scene_g1_29dof_wbt_stairs.xml",
+        xml_file="g1/scene_g1_29dof_wbt_stairs.xml",
     ),
 )
 

@@ -1,13 +1,13 @@
 <mujoco model="g1_29dof scene">
 
   <!-- Robot -->
-  <include file="../g1_29dof.xml"/>
+  <include file="g1_29dof.xml"/>
 
   <!-- Sim options -->
   <option timestep="0.002" iterations="50" solver="Newton"/>
 
   <!-- Mesh search directory for this wrapper file -->
-  <compiler angle="radian" meshdir="../"/>
+  <compiler angle="radian" meshdir="./"/>
 
   <!-- Defaults for scene meshes: visual vs collision -->
   <default>
