@@ -657,6 +657,9 @@ class MuJoCo(BaseSimulator):
             reset_pos[1] = float(self.virtual_gantry.point[1])
             if self.simulator_config.virtual_gantry.reset_z is not None:
                 reset_pos[2] = float(self.simulator_config.virtual_gantry.reset_z)
+        if self.virtual_gantry and self.simulator_config.virtual_gantry.reset_match_length:
+            reset_pos_arr = np.array(reset_pos, dtype=float)
+            self.virtual_gantry.length = float(np.linalg.norm(self.virtual_gantry.point - reset_pos_arr))
 
         mujoco.mj_resetData(self.root_model, self.root_data)
         self._set_robot_initial_state(pos_override=reset_pos)

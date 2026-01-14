@@ -428,6 +428,9 @@ class VirtualGantryCfg:
     reset_z: float | None = None
     """Override Z position for reset when reset_to_gantry_xy is True."""
 
+    reset_match_length: bool = False
+    """Recompute gantry length to match the reset pose (avoids bounce)."""
+
     length: float = 0.0
     """Rest length of the elastic band (zero force distance)."""
 
