@@ -237,6 +237,7 @@ class BaseTask:
         actor_state = {}
         actor_state["actions"] = actions
         obs_dict, _, _, _ = self.step(actor_state)
+        self._log_startup_depth_if_needed()
         return obs_dict
 
     def reset_envs_idx(self, env_ids, target_states=None, target_buf=None):
@@ -564,6 +565,7 @@ class BaseTask:
         self._depth_log_obs_scale: float | tuple | None = None
         self._depth_log_obs_unavailable = False
         self._depth_log_group_concatenate = True
+        self._depth_log_startup_done = False
 
     def _depth_logging_enabled(self) -> bool:
         if not self._depth_log_is_main_process:
@@ -647,6 +649,37 @@ class BaseTask:
             return
         caption = f"episode {self._depth_log_episode_id}" if self._depth_log_episode_id is not None else None
         wandb.log({"Depth/frame0": wandb.Image(frame, caption=caption)})
+
+    def _log_startup_depth_if_needed(self) -> None:
+        if self._depth_log_startup_done:
+            return
+        if not self._depth_log_is_main_process:
+            return
+        if self.perception_manager is None or not self.perception_manager.enabled:
+            return
+        if self.perception_manager.cfg.output_mode != "camera_depth":
+            return
+        if getattr(self.simulator.logger_cfg, "type", "disabled") != "wandb":
+            return
+        try:
+            import wandb  # noqa: PLC0415
+        except Exception:
+            return
+        if wandb.run is None:
+            return
+
+        self._resolve_depth_obs_source()
+        depth_map = self._extract_policy_depth_frame()
+        if depth_map is None:
+            depth_map = (
+                self.perception_manager.get_camera_depth_map()[self._depth_log_record_env_id]
+                .detach()
+                .cpu()
+                .numpy()
+            )
+        depth_frame = self._depth_to_rgb(depth_map)
+        wandb.log({"Depth/startup": wandb.Image(depth_frame, caption="startup")})
+        self._depth_log_startup_done = True
 
     def _log_depth_video(self) -> None:
         if not self._depth_log_frames:
