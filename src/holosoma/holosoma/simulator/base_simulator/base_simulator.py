@@ -463,8 +463,8 @@ class BaseSimulator:
             The environment ID where the episode is starting.
         """
         if self.virtual_gantry is not None and env_id == 0:
-            # Follow robot on start (may want this configurable later)
-            self.virtual_gantry.set_position_to_robot()
+            if self.simulator_config.virtual_gantry.follow_robot_on_episode_start:
+                self.virtual_gantry.set_position_to_robot()
 
         if self.video_recorder is not None:
             self.video_recorder.on_episode_start(env_id)

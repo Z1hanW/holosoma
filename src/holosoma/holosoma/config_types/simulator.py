@@ -419,6 +419,9 @@ class VirtualGantryCfg:
     point: list[float] | None = None
     """3D position of gantry anchor point [x, y, z]. If None, defaults to [0, 0, height]."""
 
+    follow_robot_on_episode_start: bool = True
+    """Reset gantry anchor to the robot position on episode start."""
+
     length: float = 0.0
     """Rest length of the elastic band (zero force distance)."""
 
