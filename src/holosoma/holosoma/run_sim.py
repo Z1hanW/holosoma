@@ -9,14 +9,9 @@ or evaluation environments.
 import dataclasses
 import sys
 import traceback
-from pathlib import Path
 
 import tyro
 from loguru import logger
-
-_PKG_ROOT = Path(__file__).resolve().parents[1]
-if str(_PKG_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PKG_ROOT))
 
 from holosoma.config_types.run_sim import RunSimConfig
 from holosoma.utils.eval_utils import init_eval_logging
