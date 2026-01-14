@@ -19,7 +19,7 @@
       <geom type="mesh"
             contype="2" conaffinity="1"
             group="3" rgba="0 0 0 0"
-            friction="0.8 0.8"
+            friction="1.0 1.0"
             solref="0.01 1"/>
     </default>
   </default>
@@ -54,12 +54,169 @@
     <mesh name="part_025_mesh"  file="../pieces/part_025.obj"  scale="1.0 1.0 1.0"/>
   </asset>
 
+  <contact>
+    <pair name="left_foot1_collision_part_00_1_col" geom1="left_foot1_collision" geom2="part_00-1_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot1_collision_part_002_col" geom1="left_foot1_collision" geom2="part_002_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot1_collision_part_003_col" geom1="left_foot1_collision" geom2="part_003_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot1_collision_part_006_col" geom1="left_foot1_collision" geom2="part_006_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot1_collision_part_007_col" geom1="left_foot1_collision" geom2="part_007_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot1_collision_part_011_col" geom1="left_foot1_collision" geom2="part_011_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot1_collision_part_012_col" geom1="left_foot1_collision" geom2="part_012_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot1_collision_part_017_col" geom1="left_foot1_collision" geom2="part_017_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot1_collision_part_022_col" geom1="left_foot1_collision" geom2="part_022_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot1_collision_part_024_col" geom1="left_foot1_collision" geom2="part_024_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot1_collision_part_025_col" geom1="left_foot1_collision" geom2="part_025_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot2_collision_part_00_1_col" geom1="left_foot2_collision" geom2="part_00-1_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot2_collision_part_002_col" geom1="left_foot2_collision" geom2="part_002_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot2_collision_part_003_col" geom1="left_foot2_collision" geom2="part_003_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot2_collision_part_006_col" geom1="left_foot2_collision" geom2="part_006_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot2_collision_part_007_col" geom1="left_foot2_collision" geom2="part_007_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot2_collision_part_011_col" geom1="left_foot2_collision" geom2="part_011_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot2_collision_part_012_col" geom1="left_foot2_collision" geom2="part_012_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot2_collision_part_017_col" geom1="left_foot2_collision" geom2="part_017_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot2_collision_part_022_col" geom1="left_foot2_collision" geom2="part_022_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot2_collision_part_024_col" geom1="left_foot2_collision" geom2="part_024_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot2_collision_part_025_col" geom1="left_foot2_collision" geom2="part_025_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot3_collision_part_00_1_col" geom1="left_foot3_collision" geom2="part_00-1_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot3_collision_part_002_col" geom1="left_foot3_collision" geom2="part_002_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot3_collision_part_003_col" geom1="left_foot3_collision" geom2="part_003_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot3_collision_part_006_col" geom1="left_foot3_collision" geom2="part_006_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot3_collision_part_007_col" geom1="left_foot3_collision" geom2="part_007_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot3_collision_part_011_col" geom1="left_foot3_collision" geom2="part_011_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot3_collision_part_012_col" geom1="left_foot3_collision" geom2="part_012_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot3_collision_part_017_col" geom1="left_foot3_collision" geom2="part_017_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot3_collision_part_022_col" geom1="left_foot3_collision" geom2="part_022_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot3_collision_part_024_col" geom1="left_foot3_collision" geom2="part_024_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot3_collision_part_025_col" geom1="left_foot3_collision" geom2="part_025_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot4_collision_part_00_1_col" geom1="left_foot4_collision" geom2="part_00-1_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot4_collision_part_002_col" geom1="left_foot4_collision" geom2="part_002_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot4_collision_part_003_col" geom1="left_foot4_collision" geom2="part_003_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot4_collision_part_006_col" geom1="left_foot4_collision" geom2="part_006_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot4_collision_part_007_col" geom1="left_foot4_collision" geom2="part_007_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot4_collision_part_011_col" geom1="left_foot4_collision" geom2="part_011_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot4_collision_part_012_col" geom1="left_foot4_collision" geom2="part_012_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot4_collision_part_017_col" geom1="left_foot4_collision" geom2="part_017_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot4_collision_part_022_col" geom1="left_foot4_collision" geom2="part_022_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot4_collision_part_024_col" geom1="left_foot4_collision" geom2="part_024_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot4_collision_part_025_col" geom1="left_foot4_collision" geom2="part_025_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot5_collision_part_00_1_col" geom1="left_foot5_collision" geom2="part_00-1_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot5_collision_part_002_col" geom1="left_foot5_collision" geom2="part_002_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot5_collision_part_003_col" geom1="left_foot5_collision" geom2="part_003_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot5_collision_part_006_col" geom1="left_foot5_collision" geom2="part_006_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot5_collision_part_007_col" geom1="left_foot5_collision" geom2="part_007_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot5_collision_part_011_col" geom1="left_foot5_collision" geom2="part_011_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot5_collision_part_012_col" geom1="left_foot5_collision" geom2="part_012_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot5_collision_part_017_col" geom1="left_foot5_collision" geom2="part_017_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot5_collision_part_022_col" geom1="left_foot5_collision" geom2="part_022_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot5_collision_part_024_col" geom1="left_foot5_collision" geom2="part_024_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot5_collision_part_025_col" geom1="left_foot5_collision" geom2="part_025_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot6_collision_part_00_1_col" geom1="left_foot6_collision" geom2="part_00-1_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot6_collision_part_002_col" geom1="left_foot6_collision" geom2="part_002_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot6_collision_part_003_col" geom1="left_foot6_collision" geom2="part_003_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot6_collision_part_006_col" geom1="left_foot6_collision" geom2="part_006_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot6_collision_part_007_col" geom1="left_foot6_collision" geom2="part_007_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot6_collision_part_011_col" geom1="left_foot6_collision" geom2="part_011_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot6_collision_part_012_col" geom1="left_foot6_collision" geom2="part_012_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot6_collision_part_017_col" geom1="left_foot6_collision" geom2="part_017_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot6_collision_part_022_col" geom1="left_foot6_collision" geom2="part_022_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot6_collision_part_024_col" geom1="left_foot6_collision" geom2="part_024_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot6_collision_part_025_col" geom1="left_foot6_collision" geom2="part_025_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot7_collision_part_00_1_col" geom1="left_foot7_collision" geom2="part_00-1_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot7_collision_part_002_col" geom1="left_foot7_collision" geom2="part_002_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot7_collision_part_003_col" geom1="left_foot7_collision" geom2="part_003_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot7_collision_part_006_col" geom1="left_foot7_collision" geom2="part_006_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot7_collision_part_007_col" geom1="left_foot7_collision" geom2="part_007_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot7_collision_part_011_col" geom1="left_foot7_collision" geom2="part_011_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot7_collision_part_012_col" geom1="left_foot7_collision" geom2="part_012_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot7_collision_part_017_col" geom1="left_foot7_collision" geom2="part_017_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot7_collision_part_022_col" geom1="left_foot7_collision" geom2="part_022_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot7_collision_part_024_col" geom1="left_foot7_collision" geom2="part_024_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="left_foot7_collision_part_025_col" geom1="left_foot7_collision" geom2="part_025_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot1_collision_part_00_1_col" geom1="right_foot1_collision" geom2="part_00-1_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot1_collision_part_002_col" geom1="right_foot1_collision" geom2="part_002_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot1_collision_part_003_col" geom1="right_foot1_collision" geom2="part_003_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot1_collision_part_006_col" geom1="right_foot1_collision" geom2="part_006_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot1_collision_part_007_col" geom1="right_foot1_collision" geom2="part_007_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot1_collision_part_011_col" geom1="right_foot1_collision" geom2="part_011_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot1_collision_part_012_col" geom1="right_foot1_collision" geom2="part_012_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot1_collision_part_017_col" geom1="right_foot1_collision" geom2="part_017_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot1_collision_part_022_col" geom1="right_foot1_collision" geom2="part_022_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot1_collision_part_024_col" geom1="right_foot1_collision" geom2="part_024_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot1_collision_part_025_col" geom1="right_foot1_collision" geom2="part_025_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot2_collision_part_00_1_col" geom1="right_foot2_collision" geom2="part_00-1_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot2_collision_part_002_col" geom1="right_foot2_collision" geom2="part_002_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot2_collision_part_003_col" geom1="right_foot2_collision" geom2="part_003_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot2_collision_part_006_col" geom1="right_foot2_collision" geom2="part_006_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot2_collision_part_007_col" geom1="right_foot2_collision" geom2="part_007_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot2_collision_part_011_col" geom1="right_foot2_collision" geom2="part_011_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot2_collision_part_012_col" geom1="right_foot2_collision" geom2="part_012_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot2_collision_part_017_col" geom1="right_foot2_collision" geom2="part_017_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot2_collision_part_022_col" geom1="right_foot2_collision" geom2="part_022_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot2_collision_part_024_col" geom1="right_foot2_collision" geom2="part_024_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot2_collision_part_025_col" geom1="right_foot2_collision" geom2="part_025_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot3_collision_part_00_1_col" geom1="right_foot3_collision" geom2="part_00-1_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot3_collision_part_002_col" geom1="right_foot3_collision" geom2="part_002_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot3_collision_part_003_col" geom1="right_foot3_collision" geom2="part_003_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot3_collision_part_006_col" geom1="right_foot3_collision" geom2="part_006_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot3_collision_part_007_col" geom1="right_foot3_collision" geom2="part_007_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot3_collision_part_011_col" geom1="right_foot3_collision" geom2="part_011_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot3_collision_part_012_col" geom1="right_foot3_collision" geom2="part_012_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot3_collision_part_017_col" geom1="right_foot3_collision" geom2="part_017_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot3_collision_part_022_col" geom1="right_foot3_collision" geom2="part_022_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot3_collision_part_024_col" geom1="right_foot3_collision" geom2="part_024_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot3_collision_part_025_col" geom1="right_foot3_collision" geom2="part_025_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot4_collision_part_00_1_col" geom1="right_foot4_collision" geom2="part_00-1_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot4_collision_part_002_col" geom1="right_foot4_collision" geom2="part_002_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot4_collision_part_003_col" geom1="right_foot4_collision" geom2="part_003_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot4_collision_part_006_col" geom1="right_foot4_collision" geom2="part_006_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot4_collision_part_007_col" geom1="right_foot4_collision" geom2="part_007_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot4_collision_part_011_col" geom1="right_foot4_collision" geom2="part_011_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot4_collision_part_012_col" geom1="right_foot4_collision" geom2="part_012_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot4_collision_part_017_col" geom1="right_foot4_collision" geom2="part_017_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot4_collision_part_022_col" geom1="right_foot4_collision" geom2="part_022_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot4_collision_part_024_col" geom1="right_foot4_collision" geom2="part_024_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot4_collision_part_025_col" geom1="right_foot4_collision" geom2="part_025_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot5_collision_part_00_1_col" geom1="right_foot5_collision" geom2="part_00-1_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot5_collision_part_002_col" geom1="right_foot5_collision" geom2="part_002_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot5_collision_part_003_col" geom1="right_foot5_collision" geom2="part_003_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot5_collision_part_006_col" geom1="right_foot5_collision" geom2="part_006_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot5_collision_part_007_col" geom1="right_foot5_collision" geom2="part_007_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot5_collision_part_011_col" geom1="right_foot5_collision" geom2="part_011_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot5_collision_part_012_col" geom1="right_foot5_collision" geom2="part_012_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot5_collision_part_017_col" geom1="right_foot5_collision" geom2="part_017_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot5_collision_part_022_col" geom1="right_foot5_collision" geom2="part_022_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot5_collision_part_024_col" geom1="right_foot5_collision" geom2="part_024_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot5_collision_part_025_col" geom1="right_foot5_collision" geom2="part_025_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot6_collision_part_00_1_col" geom1="right_foot6_collision" geom2="part_00-1_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot6_collision_part_002_col" geom1="right_foot6_collision" geom2="part_002_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot6_collision_part_003_col" geom1="right_foot6_collision" geom2="part_003_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot6_collision_part_006_col" geom1="right_foot6_collision" geom2="part_006_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot6_collision_part_007_col" geom1="right_foot6_collision" geom2="part_007_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot6_collision_part_011_col" geom1="right_foot6_collision" geom2="part_011_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot6_collision_part_012_col" geom1="right_foot6_collision" geom2="part_012_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot6_collision_part_017_col" geom1="right_foot6_collision" geom2="part_017_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot6_collision_part_022_col" geom1="right_foot6_collision" geom2="part_022_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot6_collision_part_024_col" geom1="right_foot6_collision" geom2="part_024_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot6_collision_part_025_col" geom1="right_foot6_collision" geom2="part_025_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot7_collision_part_00_1_col" geom1="right_foot7_collision" geom2="part_00-1_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot7_collision_part_002_col" geom1="right_foot7_collision" geom2="part_002_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot7_collision_part_003_col" geom1="right_foot7_collision" geom2="part_003_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot7_collision_part_006_col" geom1="right_foot7_collision" geom2="part_006_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot7_collision_part_007_col" geom1="right_foot7_collision" geom2="part_007_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot7_collision_part_011_col" geom1="right_foot7_collision" geom2="part_011_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot7_collision_part_012_col" geom1="right_foot7_collision" geom2="part_012_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot7_collision_part_017_col" geom1="right_foot7_collision" geom2="part_017_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot7_collision_part_022_col" geom1="right_foot7_collision" geom2="part_022_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot7_collision_part_024_col" geom1="right_foot7_collision" geom2="part_024_col" friction="1.0 1.0" solref="0.01 1"/>
+    <pair name="right_foot7_collision_part_025_col" geom1="right_foot7_collision" geom2="part_025_col" friction="1.0 1.0" solref="0.01 1"/>
+  </contact>
+
   <worldbody>
     <!-- Light + floor -->
     <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
     <geom name="floor" size="0 0 0.01" type="plane" material="groundplane" group="2"
           contype="2" conaffinity="1"
-          friction="0.8 0.8"
+          friction="1.0 1.0"
           solref="0.01 1"/>
 
     <!-- Scene container: adjust this to move/rotate the entire environment -->
