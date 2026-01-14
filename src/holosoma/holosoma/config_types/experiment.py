@@ -87,6 +87,9 @@ class TrainingConfig:
     export_onnx: bool = True
     """Export policy as ONNX model."""
 
+    debug: bool = False
+    """If True, render/log a depth video and exit without training."""
+
 
 @dataclass(frozen=True)
 class EvalOverridesConfig:

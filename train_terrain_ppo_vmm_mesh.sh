@@ -23,6 +23,7 @@ CUDA_VISIBLE_DEVICES=1,2,3 torchrun --nproc_per_node=3 --master_port=$((29500 + 
   --terrain.terrain-term.obj-file-path src/holosoma_retargeting/demo_data/far_robot/far_robot/stairs.obj \
   --terrain.terrain-term.num_rows=1 \
   --terrain.terrain-term.num_cols=1 \
+  --training.debug=True \
   \
   --command.setup_terms.motion_command.params.motion_config.motion_file src/holosoma_retargeting/converted_res/object_interaction/far_robot_mj.npz \
   --command.setup_terms.motion_command.params.motion_config.use_adaptive_timesteps_sampler=True \

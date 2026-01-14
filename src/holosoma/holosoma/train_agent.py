@@ -9,11 +9,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
+import numpy as np
 import tyro
 from loguru import logger
 
 from holosoma.config_types.env import get_tyro_env_config
 from holosoma.config_types.experiment import ExperimentConfig
+from holosoma.config_types.video import CartesianCameraConfig, FixedCameraConfig, SphericalCameraConfig, VideoConfig
 from holosoma.config_values.experiment import AnnotatedExperimentConfig
 from holosoma.perception import apply_perception_overrides
 from holosoma.utils.config_utils import CONFIG_NAME
@@ -134,6 +136,89 @@ def configure_logging(distributed_conf: MultGPUConfig | None = None, log_dir: Pa
     logger.add(sys.stdout, level=console_log_level, colorize=True)
     logging.basicConfig(level=logging.DEBUG if is_main_process else logging.ERROR)
     logging.getLogger().addHandler(LoguruLoggingBridge())
+
+
+def _zoom_out_video_config(config: VideoConfig, zoom: float) -> VideoConfig:
+    if zoom <= 1.0:
+        return config
+    camera = config.camera
+    if isinstance(camera, SphericalCameraConfig):
+        camera = dataclasses.replace(camera, distance=float(camera.distance) * zoom)
+    elif isinstance(camera, CartesianCameraConfig):
+        camera = dataclasses.replace(camera, offset=[float(v) * zoom for v in camera.offset])
+    elif isinstance(camera, FixedCameraConfig):
+        position = np.array(camera.position, dtype=np.float32)
+        target = np.array(camera.target, dtype=np.float32)
+        position = target + (position - target) * zoom
+        camera = dataclasses.replace(camera, position=position.tolist())
+    return dataclasses.replace(config, camera=camera)
+
+
+def _run_debug_depth_video(env: Any, *, wandb_logging: bool) -> None:
+    if not hasattr(env, "step_visualize_motion"):
+        raise RuntimeError("Debug video requires an environment with step_visualize_motion().")
+    if env.perception_manager is None or not env.perception_manager.enabled:
+        raise RuntimeError("Debug video requires perception to be enabled.")
+    if env.perception_manager.cfg.output_mode != "camera_depth":
+        raise RuntimeError("Debug video requires perception output_mode=camera_depth.")
+
+    video_recorder = env.simulator.video_recorder if hasattr(env, "simulator") else None
+    debug_zoom = 2.5
+    if video_recorder is not None and video_recorder.enabled:
+        zoomed_config = _zoom_out_video_config(video_recorder.config, debug_zoom)
+        video_recorder.config = zoomed_config
+        env.simulator.video_config = zoomed_config
+        video_recorder.start_recording(episode_id=0)
+    else:
+        logger.warning("Debug video: simulator video recorder not enabled; only depth video will be logged.")
+
+    env.reset_all()
+
+    record_env_id = int(getattr(env.simulator.video_config, "record_env_id", 0))
+    frames: list[Any] = []
+    done = False
+    max_distance = float(env.perception_manager.cfg.max_distance)
+
+    while not done:
+        if hasattr(env.simulator, "sim"):
+            env.simulator.sim.step()
+        done = bool(env.step_visualize_motion(None))
+        env.perception_manager.update()
+        if video_recorder is not None and video_recorder.enabled:
+            env.simulator.capture_video_frame(record_env_id)
+        depth = env.perception_manager.get_camera_depth_map()[record_env_id].detach().cpu().numpy()
+        if not frames:
+            if np.allclose(depth, max_distance):
+                logger.warning("Debug depth video: all rays hit max_distance; check camera pose/pitch/terrain.")
+        frames.append(env._depth_to_rgb(depth))
+
+    if not frames:
+        logger.warning("Debug depth video: no frames captured.")
+        if video_recorder is not None and video_recorder.enabled:
+            video_recorder.stop_recording()
+        return
+
+    from holosoma.utils.video_utils import create_video  # noqa: PLC0415
+
+    sim_config = env.simulator.simulator_config.sim
+    control_frequency = sim_config.fps / sim_config.control_decimation
+    display_fps = control_frequency * env.simulator.video_config.playback_rate
+    save_dir = (
+        Path(env.simulator.video_config.save_dir)
+        if env.simulator.video_config.save_dir is not None
+        else Path("logs/videos")
+    )
+    create_video(
+        video_frames=np.stack(frames, axis=0).astype(np.uint8),
+        fps=display_fps,
+        save_dir=save_dir,
+        output_format=env.simulator.video_config.output_format,
+        wandb_logging=wandb_logging,
+        episode_id=0,
+        wandb_key="Depth rollout (debug)",
+    )
+    if video_recorder is not None and video_recorder.enabled:
+        video_recorder.stop_recording()
 
 
 def train(tyro_config: ExperimentConfig, training_context: TrainingContext | None = None) -> None:
@@ -262,6 +347,18 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
                 f"Manager environment {env_target} is missing observation_manager attribute. "
                 "This should not happen if the environment is properly configured."
             )
+
+        if tyro_config.training.debug:
+            if is_main_process:
+                _run_debug_depth_video(env, wandb_logging=wandb_enabled)
+            if is_distributed:
+                dist.barrier()
+                logger.info("Shutting down distributed processes...")
+                dist.destroy_process_group()
+            if is_main_process and wandb_enabled:
+                logger.info("Shutting down wandb...")
+                wandb.teardown()
+            return
 
         experiment_save_dir = experiment_dir
         experiment_save_dir.mkdir(exist_ok=True, parents=True)
