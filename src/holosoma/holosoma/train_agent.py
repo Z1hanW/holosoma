@@ -24,6 +24,7 @@ from holosoma.utils.eval_utils import (
     load_checkpoint,
 )
 from holosoma.utils.helpers import get_class
+from holosoma.utils.rotations import quat_apply, quat_from_euler_xyz, quat_rotate_inverse
 from holosoma.utils.sim_utils import close_simulation_app
 from holosoma.utils.tyro_utils import TYRO_CONIFG
 
@@ -154,6 +155,40 @@ def _zoom_out_video_config(config: VideoConfig, zoom: float) -> VideoConfig:
     return dataclasses.replace(config, camera=camera)
 
 
+def _apply_debug_camera_tilt(env: Any, target_pitch_deg: float = -20.0) -> bool:
+    perception = getattr(env, "perception_manager", None)
+    if perception is None or perception._camera_ray_dirs_base is None:
+        return False
+
+    try:
+        record_env_id = int(getattr(env.simulator.video_config, "record_env_id", 0))
+        idx = torch.tensor([record_env_id], device=perception.device)
+        _, body_quat = perception._get_camera_body_pose(idx)
+        ray_dirs_base = perception._camera_ray_dirs_base
+        center_dir = ray_dirs_base.view(perception._camera_height, perception._camera_width, 3)[
+            perception._camera_height // 2, perception._camera_width // 2
+        ]
+        forward_world = quat_apply(body_quat, center_dir.unsqueeze(0), w_last=True).squeeze(0)
+        horiz = torch.sqrt(forward_world[0] ** 2 + forward_world[1] ** 2).clamp(min=1.0e-6)
+        current_pitch = torch.atan2(forward_world[2], horiz)
+        target_pitch = torch.deg2rad(torch.tensor(float(target_pitch_deg), device=perception.device))
+        delta = target_pitch - current_pitch
+        if torch.abs(delta).item() < 1.0e-3:
+            return False
+        delta_quat = quat_from_euler_xyz(torch.tensor(0.0, device=perception.device), delta, torch.tensor(0.0, device=perception.device))
+        perception._camera_ray_dirs_base = quat_rotate_inverse(
+            delta_quat.unsqueeze(0), ray_dirs_base, w_last=True
+        )
+        logger.info(
+            f"Debug depth: auto-tilting camera rays by {float(torch.rad2deg(delta)):.2f} deg "
+            f"(target pitch {target_pitch_deg:.1f} deg)."
+        )
+        return True
+    except Exception as exc:
+        logger.warning(f"Debug depth: failed to auto-tilt camera rays: {exc}")
+        return False
+
+
 def _run_debug_depth_video(env: Any, *, wandb_logging: bool) -> None:
     if not hasattr(env, "step_visualize_motion"):
         raise RuntimeError("Debug video requires an environment with step_visualize_motion().")
@@ -173,6 +208,7 @@ def _run_debug_depth_video(env: Any, *, wandb_logging: bool) -> None:
         logger.warning("Debug video: simulator video recorder not enabled; only depth video will be logged.")
 
     env.reset_all()
+    _apply_debug_camera_tilt(env, target_pitch_deg=-20.0)
 
     record_env_id = int(getattr(env.simulator.video_config, "record_env_id", 0))
     frames: list[Any] = []
