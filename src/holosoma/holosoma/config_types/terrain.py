@@ -197,7 +197,7 @@ class TerrainTermCfg:
     """Slope threshold for trimesh correction to vertical surfaces."""
 
     obj_file_path: str = ""
-    """Path to OBJ file for custom terrain mesh."""
+    """Path to OBJ file (or directory/glob of OBJ files) for custom terrain mesh."""
 
     scale_factor: float = 1.0
     """Use for performance to scale border_size, terrain_length, terrain_width, num_ros and num_cols."""

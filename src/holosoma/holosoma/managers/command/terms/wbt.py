@@ -760,6 +760,7 @@ class MotionCommand(CommandTermBase):
         else:
             self.motion_cfg = MotionConfig(**cfg.params["motion_config"])
         self.init_pose_cfg: NoiseToInitialPoseConfig = self.motion_cfg.noise_to_initial_pose
+        self._clip_terrain_offsets: torch.Tensor | None = None
 
     def setup(self) -> None:
         self.num_envs = self._env.num_envs
@@ -788,6 +789,8 @@ class MotionCommand(CommandTermBase):
         self.multi_clip = self.motion.num_clips > 1
         if self.multi_clip:
             logger.info("Multi-clip motion bank detected ({} clips). Sampling clips per env reset.", self.motion.num_clips)
+
+        self._configure_motion_terrain_pairs()
 
         # Store body and joint indexes for interpolation
         self._body_indexes_in_motion = self.motion._body_indexes
@@ -1185,6 +1188,18 @@ class MotionCommand(CommandTermBase):
     def command(self) -> torch.Tensor:
         return torch.cat([self.joint_pos, self.joint_vel], dim=1)
 
+    def _get_env_offsets(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        base = self._env.simulator.scene.env_origins
+        if self._clip_terrain_offsets is None or not hasattr(self, "clip_ids"):
+            return base if env_ids is None else base[env_ids]
+
+        if base.device != self._clip_terrain_offsets.device:
+            base = base.to(self._clip_terrain_offsets.device)
+
+        if env_ids is None:
+            return base + self._clip_terrain_offsets[self.clip_ids]
+        return base[env_ids] + self._clip_terrain_offsets[self.clip_ids[env_ids]]
+
     #########################################################################################
     ## Robot from motion data
     #########################################################################################
@@ -1204,7 +1219,7 @@ class MotionCommand(CommandTermBase):
         pos = self.motion.body_pos_w[motion_idx][:, self.tracked_body_indexes]
         if self.motion_cfg.align_motion_to_init_yaw:
             return self._apply_motion_alignment_pos(pos)
-        return pos + self._env.simulator.scene.env_origins[:, None, :]
+        return pos + self._get_env_offsets()[:, None, :]
 
     @property
     def body_quat_w(self) -> torch.Tensor:
@@ -1236,7 +1251,7 @@ class MotionCommand(CommandTermBase):
         pos = self.motion.body_pos_w[motion_idx, self.ref_body_index]
         if self.motion_cfg.align_motion_to_init_yaw:
             return self._apply_motion_alignment_pos(pos)
-        return pos + self._env.simulator.scene.env_origins
+        return pos + self._get_env_offsets()
 
     @property
     def ref_quat_w(self) -> torch.Tensor:
@@ -1252,7 +1267,7 @@ class MotionCommand(CommandTermBase):
         pos = self.motion.body_pos_w[motion_idx, 0]
         if self.motion_cfg.align_motion_to_init_yaw:
             return self._apply_motion_alignment_pos(pos)
-        return pos + self._env.simulator.scene.env_origins
+        return pos + self._get_env_offsets()
 
     @property
     def root_quat_w(self) -> torch.Tensor:
@@ -1347,7 +1362,7 @@ class MotionCommand(CommandTermBase):
         pos = self.motion.object_pos_w[motion_idx]
         if self.motion_cfg.align_motion_to_init_yaw:
             return self._apply_motion_alignment_pos(pos)
-        return pos + self._env.simulator.scene.env_origins
+        return pos + self._get_env_offsets()
 
     @property
     def object_quat_w(self) -> torch.Tensor:
@@ -1429,8 +1444,8 @@ class MotionCommand(CommandTermBase):
         self._align_quat[env_ids] = align_quat
 
         motion_root_pos = self.motion.body_pos_w[clip_offsets, 0]
-        env_origins = self._env.simulator.scene.env_origins[env_ids]
-        desired_root_pos = env_origins + self._init_root_pos
+        env_offsets = self._get_env_offsets(env_ids)
+        desired_root_pos = env_offsets + self._init_root_pos
         aligned_root_pos = quat_apply(align_quat, motion_root_pos, w_last=True)
         self._align_pos[env_ids] = desired_root_pos - aligned_root_pos
 
@@ -1494,6 +1509,43 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     ## Internal helpers
     #########################################################################################
+    def _configure_motion_terrain_pairs(self) -> None:
+        self._clip_terrain_offsets = None
+        if not self.motion_cfg.pair_terrain_with_motion:
+            return
+
+        terrain_state = self._env.terrain_manager.get_state("locomotion_terrain")
+        terrain = getattr(terrain_state, "terrain", None)
+        tile_names = getattr(terrain, "obj_tile_names", []) if terrain is not None else []
+        tile_offsets = getattr(terrain, "obj_tile_offsets", None) if terrain is not None else None
+
+        if not tile_names or tile_offsets is None:
+            raise ValueError(
+                "pair_terrain_with_motion requires load_obj terrain with multiple OBJ tiles. "
+                "Set --terrain.terrain-term.obj-file-path to a directory of .obj files."
+            )
+
+        if len(set(tile_names)) != len(tile_names):
+            raise ValueError("Duplicate OBJ tile names detected; stems must be unique for pairing.")
+
+        tile_offsets = np.asarray(tile_offsets, dtype=np.float32)
+        if tile_offsets.shape[0] != len(tile_names):
+            raise ValueError("OBJ tile offsets length does not match tile names.")
+
+        name_to_idx = {name: idx for idx, name in enumerate(tile_names)}
+        missing = [clip_id for clip_id in self.motion.clip_ids if clip_id not in name_to_idx]
+        if missing:
+            raise ValueError(f"Missing terrain OBJ for clips: {missing}")
+
+        offsets = np.stack([tile_offsets[name_to_idx[clip_id]] for clip_id in self.motion.clip_ids], axis=0)
+        self._clip_terrain_offsets = torch.tensor(offsets, device=self.device, dtype=torch.float32)
+
+        unused = [name for name in tile_names if name not in self.motion.clip_ids]
+        if unused:
+            logger.warning("Unused terrain OBJ tiles (no matching motion clip): {}", unused)
+
+        logger.info("Motion/terrain pairing enabled for {} clips.", len(self.motion.clip_ids))
+
     def _configure_target_pose_settings(self) -> None:
         self.num_future_steps = int(self.motion_cfg.num_future_steps)
         self.target_pose_type = self.motion_cfg.target_pose_type
@@ -1539,7 +1591,7 @@ class MotionCommand(CommandTermBase):
 
         target_body_pos = (
             self.motion.body_pos_w[future_steps_global][:, :, self.tracked_body_indexes]
-            + self._env.simulator.scene.env_origins[:, None, None, :]
+            + self._get_env_offsets()[:, None, None, :]
         )
         target_body_rot = self.motion.body_quat_w[future_steps_global][:, :, self.tracked_body_indexes]
 
@@ -1786,7 +1838,7 @@ class MotionCommand(CommandTermBase):
             "Default-pose interpolation only supports IsaacSim; IsaacGym write_state_updates does not run FK."
         )
         env_id = 0
-        env_origin = simulator.scene.env_origins[env_id].to(self.device)
+        env_origin = self._get_env_offsets()[env_id]
 
         root_backup = simulator.robot_root_states[env_id].clone()
         dof_pos_backup = simulator.dof_pos[env_id].clone()

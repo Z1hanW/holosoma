@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import math
 import pathlib
 from typing import Any
@@ -40,6 +41,9 @@ class Terrain(TerrainInterface):
         self._cfg: TerrainTermCfg = cfg
         self._num_robots: int = num_robots
         self._type = self._cfg.mesh_type
+        self._obj_tile_names: list[str] = []
+        self._obj_tile_offsets: np.ndarray = np.zeros((0, 3), dtype=np.float32)
+        self._obj_tile_max_z: np.ndarray = np.zeros((0,), dtype=np.float32)
 
         self._num_rows: int = int(max(1, self._cfg.num_rows * self._cfg.scale_factor))
         self._num_cols: int = int(max(1, self._cfg.num_cols * self._cfg.scale_factor))
@@ -59,34 +63,91 @@ class Terrain(TerrainInterface):
         self._mesh: trimesh.Trimesh = mesh
 
     def _initialize_obj_config(self) -> trimesh.Trimesh:
-        terrain_path = pathlib.Path(self._cfg.obj_file_path)
-        if not terrain_path.exists():
-            raise FileNotFoundError(f"Terrain file not found: {terrain_path}")
-        print(f"[INFO] Loading custom terrain from: {terrain_path}")
+        raw_path = self._cfg.obj_file_path
+        if not raw_path:
+            raise FileNotFoundError("Terrain obj_file_path is empty. Provide a .obj file or directory.")
 
-        # Load the mesh
-        base = trimesh.load(str(terrain_path), process=False)
+        def _resolve_obj_paths(path_str: str) -> list[pathlib.Path]:
+            path = pathlib.Path(path_str)
+            if path.is_dir():
+                matches = list(path.glob("*.obj")) + list(path.glob("*.OBJ"))
+                return sorted(matches)
+            if any(char in path_str for char in ("*", "?", "[")):
+                return sorted(pathlib.Path(p) for p in glob.glob(path_str))
+            if path.exists():
+                return [path]
+            return []
 
-        # Handle Scene objects from multi-mesh files
-        if isinstance(base, trimesh.Scene):
-            base = base.dump(concatenate=True)  # type: ignore[assignment]
+        def _load_mesh(path: pathlib.Path) -> trimesh.Trimesh:
+            base_mesh = trimesh.load(str(path), process=False)
+            if isinstance(base_mesh, trimesh.Scene):
+                base_mesh = base_mesh.dump(concatenate=True)  # type: ignore[assignment]
+            if not isinstance(base_mesh, trimesh.Trimesh):
+                raise ValueError(f"Loaded object is not a valid Trimesh: {type(base_mesh)}")
+            return base_mesh
 
-        if not isinstance(base, trimesh.Trimesh):
-            raise ValueError(f"Loaded object is not a valid Trimesh: {type(base)}")
+        obj_paths = _resolve_obj_paths(raw_path)
+        if not obj_paths:
+            raise FileNotFoundError(f"No terrain OBJ files found at: {raw_path}")
 
-        print(
-            f"[INFO] Loaded terrain mesh from obj file with {len(base.vertices)} vertices and {len(base.faces)} faces"
-        )
+        if len(obj_paths) == 1:
+            terrain_path = obj_paths[0]
+            print(f"[INFO] Loading custom terrain from: {terrain_path}")
+            base = _load_mesh(terrain_path)
+            print(
+                f"[INFO] Loaded terrain mesh from obj file with {len(base.vertices)} vertices and {len(base.faces)} faces"
+            )
 
-        gap = 1e-4  # keeps tiles “kissing” without intersecting
-        stride = (base.bounds[1] - base.bounds[0]) + gap
+            gap = 1e-4  # keeps tiles "kissing" without intersecting
+            stride = (base.bounds[1] - base.bounds[0]) + gap
+
+            tiles = []
+            for r in range(self._num_rows):
+                for c in range(self._num_cols):
+                    tile = base.copy()
+                    tile.apply_translation([c * stride[0], r * stride[1], 0.0])
+                    tiles.append(tile)
+
+            return trimesh.util.concatenate(tiles)
+
+        # Multi-OBJ: place each mesh in the terrain grid (row-major).
+        num_meshes = len(obj_paths)
+        expected = self._num_rows * self._num_cols
+        if expected != num_meshes:
+            raise ValueError(
+                "Number of OBJ files ({}) must match num_rows*num_cols ({}). "
+                "Set --terrain.terrain-term.num-rows/num-cols accordingly.".format(num_meshes, expected)
+            )
+
+        meshes = []
+        spans = []
+        tile_names = []
+        tile_max_z = []
+        for path in obj_paths:
+            mesh = _load_mesh(path)
+            meshes.append(mesh)
+            spans.append(mesh.bounds[1] - mesh.bounds[0])
+            tile_names.append(path.stem)
+            tile_max_z.append(float(mesh.vertices[:, 2].max() if mesh.vertices.size else 0.0))
+
+        spans = np.vstack(spans)
+        gap = 1e-4
+        stride = spans.max(axis=0) + gap
 
         tiles = []
-        for r in range(self._num_rows):
-            for c in range(self._num_cols):
-                tile = base.copy()
-                tile.apply_translation([c * stride[0], r * stride[1], 0.0])
-                tiles.append(tile)
+        tile_offsets = []
+        for idx, mesh in enumerate(meshes):
+            row = idx // self._num_cols
+            col = idx % self._num_cols
+            offset = np.array([col * stride[0], row * stride[1], 0.0], dtype=np.float64)
+            tile = mesh.copy()
+            tile.apply_translation(offset)
+            tiles.append(tile)
+            tile_offsets.append(offset)
+
+        self._obj_tile_names = tile_names
+        self._obj_tile_offsets = np.asarray(tile_offsets, dtype=np.float32)
+        self._obj_tile_max_z = np.asarray(tile_max_z, dtype=np.float32)
 
         return trimesh.util.concatenate(tiles)
 
@@ -166,6 +227,15 @@ class Terrain(TerrainInterface):
         if not hasattr(self, "_mesh"):
             raise RuntimeError("Mesh must be initialized before computing load_obj env origins.")
 
+        if self._obj_tile_offsets.size and self._obj_tile_offsets.shape[0] == self._num_rows * self._num_cols:
+            grid = np.zeros((self._num_rows, self._num_cols, 3), dtype=np.float32)
+            for idx, offset in enumerate(self._obj_tile_offsets):
+                row = idx // self._num_cols
+                col = idx % self._num_cols
+                z = float(self._obj_tile_max_z[idx]) if self._obj_tile_max_z.size else 0.0
+                grid[row, col] = [offset[0], offset[1], z]
+            return grid
+
         bounds = self._mesh.bounds.astype(np.float64)
         min_corner, max_corner = bounds
         span = max_corner - min_corner
@@ -198,6 +268,16 @@ class Terrain(TerrainInterface):
             ),
             axis=-1,
         )
+
+    @property
+    def obj_tile_names(self) -> list[str]:
+        """Names (stems) of OBJ tiles when loading multiple meshes."""
+        return list(self._obj_tile_names)
+
+    @property
+    def obj_tile_offsets(self) -> np.ndarray:
+        """Per-tile translation offsets for multi-OBJ terrains."""
+        return self._obj_tile_offsets
 
     def randomized_terrain(self) -> None:
         """Generate randomized terrain layout with mixed terrain types.

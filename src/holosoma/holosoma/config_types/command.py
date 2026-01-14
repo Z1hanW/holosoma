@@ -151,6 +151,14 @@ class MotionConfig:
     init position (plus env origin), keeping a consistent world frame across episodes.
     """
 
+    pair_terrain_with_motion: bool = False
+    """If True, align each motion clip with a matching terrain OBJ tile.
+
+    This expects the terrain loader to ingest multiple OBJ files (mesh_type=load_obj)
+    where each OBJ stem matches a motion clip name. The motion references are then
+    offset to the matching terrain tile.
+    """
+
     # noise related
     noise_to_initial_pose: NoiseToInitialPoseConfig = field(default_factory=NoiseToInitialPoseConfig)
 
