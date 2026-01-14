@@ -563,11 +563,11 @@ class IsaacSim(BaseSimulator):
         scene_config = self.simulator_config.scene
 
         # Load scene files (USD/URDF scene files as collections) - NEW APPROACH
-        if scene_config.scene_files is not None:
+        if scene_config.scene_files:
             self._load_scene_files(scene_config)
 
         # Load individual rigid objects
-        if scene_config.rigid_objects is not None:
+        if scene_config.rigid_objects:
             self._load_rigid_objects(scene_config)
 
     def _load_scene_files(self, scene_config: SceneConfig) -> None:
