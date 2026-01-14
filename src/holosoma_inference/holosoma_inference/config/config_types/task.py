@@ -42,6 +42,15 @@ class TaskConfig:
     use_sim_time: bool = False
     """Use synchronized simulation time for WBT policies."""
 
+    include_motion_future_target_poses: bool = False
+    """Include motion_future_target_poses in the actor observation (WBT motion-tracking policies)."""
+
+    motion_future_target_poses_dim: int | None = None
+    """Override dimension for motion_future_target_poses when metadata is unavailable."""
+
+    motion_future_target_poses_motion_file: str | None = None
+    """Optional motion file path override for motion_future_target_poses computation."""
+
     wandb_download_dir: str = "/tmp"
     """Directory for downloading W&B checkpoints."""
 

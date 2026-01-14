@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 from holosoma_inference.config.config_types.task import TaskConfig
 
 # Locomotion task
@@ -42,13 +40,7 @@ wbt = TaskConfig(
     wandb_download_dir="/tmp",
 )
 
-wbt_motion_tracking = replace(
-    wbt,
-    include_motion_future_target_poses=True,
-)
-
 DEFAULTS = {
     "locomotion": locomotion,
     "wbt": wbt,
-    "wbt-motion-tracking": wbt_motion_tracking,
 }

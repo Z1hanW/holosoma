@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import field
+
 from pydantic.dataclasses import dataclass
 
 from .observation import ObservationConfig
 from .robot import RobotConfig
 from .task import TaskConfig
+from .viser import ViserConfig
 
 
 @dataclass(frozen=True)
@@ -25,3 +28,6 @@ class InferenceConfig:
 
     task: TaskConfig
     """Task execution configuration."""
+
+    viser: ViserConfig = field(default_factory=ViserConfig)
+    """Optional Viser viewer configuration."""

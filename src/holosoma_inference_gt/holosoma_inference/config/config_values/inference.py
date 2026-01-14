@@ -54,16 +54,41 @@ g1_29dof_wbt = InferenceConfig(
     task=task.wbt,
 )
 
-g1_29dof_wbt_motion_tracking_transformer = replace(
-    g1_29dof_wbt,
-    task=task.wbt_motion_tracking,
+# G1 Whole-Body Tracking (VideoMimic)
+g1_29dof_videomimic = InferenceConfig(
+    robot=replace(
+        robot.g1_29dof,
+        stiff_startup_pos=(
+            -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,  # left leg
+            -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,  # right leg
+            0.0, 0.0, 0.0,  # waist
+            0.2, 0.2, 0.0, 0.6, 0.0, 0.0, 0.0,  # left arm
+            0.2, -0.2, 0.0, 0.6, 0.0, 0.0, 0.0,  # right arm
+        ),
+        stiff_startup_kp=(
+            350.0, 200.0, 200.0, 300.0, 300.0, 150.0,  # left leg
+            350.0, 200.0, 200.0, 300.0, 300.0, 150.0,  # right leg
+            200.0, 200.0, 200.0,  # waist
+            40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0,  # left arm
+            40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0,  # right arm
+        ),
+        stiff_startup_kd=(
+            5.0, 5.0, 5.0, 10.0, 5.0, 5.0,  # left leg
+            5.0, 5.0, 5.0, 10.0, 5.0, 5.0,  # right leg
+            5.0, 5.0, 5.0,  # waist
+            3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,  # left arm
+            3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,  # right arm
+        ),
+    ),
+    observation=observation.wbt_videomimic,
+    task=task.wbt,
 )
 
 DEFAULTS = {
     "g1-29dof-loco": g1_29dof_loco,
     "t1-29dof-loco": t1_29dof_loco,
     "g1-29dof-wbt": g1_29dof_wbt,
-    "g1-29dof-wbt-motion-tracking-transformer": g1_29dof_wbt_motion_tracking_transformer,
+    "g1-29dof-videomimic": g1_29dof_videomimic,
 }
 
 # Annotated version for Tyro CLI with subcommands
