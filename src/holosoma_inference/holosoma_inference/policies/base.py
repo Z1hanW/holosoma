@@ -536,12 +536,29 @@ class BasePolicy:
         self.obs_buf_dict = {group: value.copy() for group, value in group_outputs.items()}
         return group_outputs
 
+    def _assemble_actor_obs(self, group_outputs: dict[str, np.ndarray]) -> np.ndarray:
+        """Concatenate actor observation groups to match training input ordering."""
+        actor_groups: list[str] = []
+        if "actor_obs" in group_outputs:
+            actor_groups.append("actor_obs")
+        for group in ("actor_obs_target", "motion_future_target_poses"):
+            if group in group_outputs:
+                actor_groups.append(group)
+        extra_groups = sorted(
+            group for group in group_outputs if group.startswith("actor_obs") and group not in actor_groups
+        )
+        actor_groups.extend(extra_groups)
+
+        if not actor_groups:
+            raise KeyError("Observation group 'actor_obs' is not configured for this policy.")
+
+        return np.concatenate([group_outputs[group] for group in actor_groups], axis=1).astype(np.float32, copy=False)
+
     def prepare_obs_for_rl(self, robot_state_data):
         """Prepare observations for RL inference."""
         group_outputs = self._prepare_group_observations(robot_state_data)
-        if "actor_obs" not in group_outputs:
-            raise KeyError("Observation group 'actor_obs' is not configured for this policy.")
-        return {"actor_obs": group_outputs["actor_obs"].astype(np.float32, copy=False)}
+        actor_obs = self._assemble_actor_obs(group_outputs)
+        return {"actor_obs": actor_obs}
 
     # ============================================================================
     # Control/Command Methods

@@ -1,5 +1,6 @@
 import json
 import sys
+from pathlib import Path
 
 import numpy as np
 import onnx
@@ -16,8 +17,10 @@ from holosoma_inference.utils.clock import ClockSub
 from holosoma_inference.utils.math.misc import get_index_of_a_in_b
 from holosoma_inference.utils.math.quat import (
     matrix_from_quat,
+    quat_apply,
     quat_mul,
     quat_to_rpy,
+    quat_rotate_inverse,
     rpy_to_quat,
     subtract_frame_transforms,
     wxyz_to_xyzw,
@@ -45,15 +48,20 @@ class PinocchioRobot:
         # get ref body frame id in pinocchio robot
         self.ref_body_frame_id = self.robot_model.getFrameId(robot_cfg.motion["body_name_ref"][0])
 
-    def fk_and_get_ref_body_orientation_in_world(self, configuration: np.ndarray) -> np.ndarray:
+    def fk_and_get_ref_body_pose_in_world(self, configuration: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         # forward kinematics
         pin.framesForwardKinematics(self.robot_model, self.robot_data, configuration)
 
         # get ref body pose in world
         ref_body_pose_in_world = self.robot_data.oMf[self.ref_body_frame_id]
         quaternion = pin.Quaternion(ref_body_pose_in_world.rotation)  # (4, )
+        position = ref_body_pose_in_world.translation
 
-        return np.expand_dims(quaternion.coeffs(), axis=0)  # xyzw, (1, 4)
+        return np.array(position, dtype=np.float32), np.array(quaternion.coeffs(), dtype=np.float32)
+
+    def fk_and_get_ref_body_orientation_in_world(self, configuration: np.ndarray) -> np.ndarray:
+        _, quat_xyzw = self.fk_and_get_ref_body_pose_in_world(configuration)
+        return np.expand_dims(quat_xyzw, axis=0)  # xyzw, (1, 4)
 
     @staticmethod
     def _create_xml_from_urdf(urdf_text: str) -> str:
@@ -75,6 +83,62 @@ class PinocchioRobot:
         return xml_text
 
 
+class MotionData:
+    def __init__(self, motion_path: Path, robot_dof_names: list[str], body_name_ref: str):
+        if motion_path.suffix.lower() != ".npz":
+            raise ValueError(f"Only .npz motion files are supported in inference: {motion_path}")
+
+        with np.load(motion_path, allow_pickle=True) as data:
+            body_names = self._decode_names(data["body_names"])
+            joint_names = self._decode_names(data["joint_names"])
+
+            joint_pos = np.asarray(data["joint_pos"], dtype=np.float32)
+            if joint_pos.shape[1] == len(joint_names) + 7:
+                joint_pos = joint_pos[:, 7:]
+            elif joint_pos.shape[1] != len(joint_names):
+                raise ValueError(
+                    f"Unexpected joint_pos shape {joint_pos.shape} for {motion_path}; "
+                    f"expected {len(joint_names)} or {len(joint_names) + 7} columns."
+                )
+
+            joint_vel = np.asarray(data["joint_vel"], dtype=np.float32)
+            if joint_vel.shape[1] == len(joint_names) + 6:
+                joint_vel = joint_vel[:, 6:]
+            elif joint_vel.shape[1] != len(joint_names):
+                raise ValueError(
+                    f"Unexpected joint_vel shape {joint_vel.shape} for {motion_path}; "
+                    f"expected {len(joint_names)} or {len(joint_names) + 6} columns."
+                )
+
+            body_pos_w = np.asarray(data["body_pos_w"], dtype=np.float32)
+            body_quat_w = np.asarray(data["body_quat_w"], dtype=np.float32)
+
+        joint_indices = get_index_of_a_in_b(robot_dof_names, joint_names)
+        self.joint_pos = joint_pos[:, joint_indices]
+        self.joint_vel = joint_vel[:, joint_indices]
+        self.frame_count = self.joint_pos.shape[0]
+
+        if body_quat_w.ndim != 3 or body_quat_w.shape[2] != 4:
+            raise ValueError(f"Unexpected body_quat_w shape {body_quat_w.shape} in {motion_path}")
+
+        self.ref_body_index = body_names.index(body_name_ref)
+        self.ref_pos_w = body_pos_w[:, self.ref_body_index, :]
+        self.ref_quat_w = body_quat_w[:, self.ref_body_index, :]
+        self.root_quat_w = body_quat_w[:, 0, :]
+        self.root_pos_w = body_pos_w[:, 0, :]
+
+    @staticmethod
+    def _decode_names(arr: np.ndarray) -> list[str]:
+        names = arr.tolist()
+        decoded: list[str] = []
+        for name in names:
+            if isinstance(name, bytes):
+                decoded.append(name.decode("utf-8"))
+            else:
+                decoded.append(str(name))
+        return decoded
+
+
 class WholeBodyTrackingPolicy(BasePolicy):
     def __init__(self, config: InferenceConfig):
         # initialize timestep
@@ -85,6 +149,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.ref_quat_xyzw_t = None
         self.motion_command_0 = None
         self.ref_quat_xyzw_0 = None
+        self.ref_pos_xyz_t = None
 
         # Calculate timestep interval from rl_rate (e.g., 50Hz = 20ms intervals)
         self.timestep_interval_ms = 1000.0 / config.task.rl_rate
@@ -99,6 +164,33 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         self._stiff_hold_active = True
         self.robot_yaw_offset = 0.0
+        self.motion_yaw_offset = 0.0
+
+        obs_terms = {term for terms in config.observation.obs_dict.values() for term in terms}
+        self._uses_videomimic = any(
+            term in obs_terms
+            for term in (
+                "torso_real",
+                "torso_xy_rel",
+                "torso_yaw_rel",
+                "target_joints",
+                "target_root_roll",
+                "target_root_pitch",
+            )
+        )
+        self._uses_motion_command = any(
+            term in obs_terms for term in ("motion_command", "motion_ref_ori_b", "motion_future_target_poses")
+        )
+        self._motion_data: MotionData | None = None
+        self._motion_cfg: dict | None = None
+        self._motion_align_quat_wxyz: np.ndarray | None = None
+        self._motion_align_pos: np.ndarray | None = None
+        self._obs_input_name: str | None = None
+        self._time_step_input_name: str | None = None
+        self._action_output_name: str | None = None
+        self._onnx_output_fetch: list[str] = []
+        self._motion_output_names: set[str] = set()
+        self._motion_alignment_enabled = False
 
         super().__init__(config)
 
@@ -144,7 +236,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         else:
             _show_warning()
 
-    def _get_ref_body_orientation_in_world(self, robot_state_data):
+    def _get_ref_body_pose_in_world(self, robot_state_data) -> tuple[np.ndarray, np.ndarray]:
         # Create configuration for pinocchio robot
         # Note:
         # 1. pinocchio quaternion is in xyzw format, robot_state_data is in wxyz format
@@ -163,8 +255,89 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         configuration = np.concatenate([root_pos, root_ori_xyzw, dof_pos_in_pinocchio], axis=0)
 
-        ref_ori_xyzw = self.pinocchio_robot.fk_and_get_ref_body_orientation_in_world(configuration)
-        return xyzw_to_wxyz(ref_ori_xyzw)
+        ref_pos, ref_ori_xyzw = self.pinocchio_robot.fk_and_get_ref_body_pose_in_world(configuration)
+        ref_pos = np.expand_dims(ref_pos, axis=0)
+        return ref_pos, xyzw_to_wxyz(np.expand_dims(ref_ori_xyzw, axis=0))
+
+    def _get_ref_body_orientation_in_world(self, robot_state_data):
+        _, ref_quat_wxyz = self._get_ref_body_pose_in_world(robot_state_data)
+        return ref_quat_wxyz
+
+    @staticmethod
+    def _extract_motion_config(metadata: dict) -> dict | None:
+        motion_cfg = metadata.get("motion_config")
+        if isinstance(motion_cfg, dict):
+            return motion_cfg
+
+        exp_cfg = metadata.get("experiment_config")
+        if not isinstance(exp_cfg, dict):
+            return None
+
+        motion_cfg = (
+            exp_cfg.get("command", {})
+            .get("setup_terms", {})
+            .get("motion_command", {})
+            .get("params", {})
+            .get("motion_config", {})
+        )
+        return motion_cfg if isinstance(motion_cfg, dict) else None
+
+    @staticmethod
+    def _find_repo_root(start: Path) -> Path:
+        for parent in [start, *start.parents]:
+            if (parent / "src" / "holosoma").exists():
+                return parent
+        return start
+
+    @classmethod
+    def _resolve_motion_file(cls, motion_file: str, onnx_path: Path) -> Path | None:
+        motion_path = Path(motion_file).expanduser()
+        if motion_path.is_file():
+            return motion_path
+
+        candidate = onnx_path.parent / motion_file
+        if candidate.is_file():
+            return candidate
+
+        repo_root = cls._find_repo_root(Path(__file__).resolve())
+        candidate = repo_root / motion_file
+        if candidate.is_file():
+            return candidate
+
+        if motion_file.startswith("holosoma/"):
+            candidate = repo_root / "src" / "holosoma" / motion_file
+            if candidate.is_file():
+                return candidate
+
+        candidate = repo_root / "src" / motion_file
+        if candidate.is_file():
+            return candidate
+
+        return None
+
+    def _load_motion_data_from_metadata(self, metadata: dict, onnx_path: Path) -> None:
+        motion_cfg = self._extract_motion_config(metadata)
+        if not motion_cfg:
+            raise ValueError("Motion config missing from ONNX metadata; cannot build VideoMimic observations.")
+
+        motion_file = motion_cfg.get("motion_file")
+        if not motion_file:
+            raise ValueError("motion_config.motion_file missing from ONNX metadata.")
+
+        motion_path = self._resolve_motion_file(str(motion_file), onnx_path)
+        if motion_path is None:
+            raise FileNotFoundError(f"Motion file not found: {motion_file}")
+
+        body_name_ref = motion_cfg.get("body_name_ref", ["torso_link"])
+        if isinstance(body_name_ref, list) and body_name_ref:
+            ref_name = body_name_ref[0]
+        else:
+            ref_name = "torso_link"
+
+        robot_dof_names = metadata.get("dof_names") or list(self.config.robot.dof_names)
+        self._motion_data = MotionData(motion_path, list(robot_dof_names), ref_name)
+        self._motion_cfg = motion_cfg
+        self._motion_alignment_enabled = bool(motion_cfg.get("align_motion_to_init_yaw", False))
 
     def setup_policy(self, model_path):
         self.onnx_policy_session = onnxruntime.InferenceSession(model_path)
@@ -189,32 +362,68 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
             logger.info(f"Loaded KP/KD from ONNX metadata: {Path(model_path).name}")
 
-        # get initial command and ref quat xyzw
-        time_step = np.zeros((1, 1), dtype=np.float32)
+        if self._uses_videomimic:
+            self._load_motion_data_from_metadata(metadata, Path(model_path))
 
-        # Use configured observation dimensions (including history) instead of a hard-coded value.
-        actor_obs_template = self.obs_buf_dict.get("actor_obs")
-        if actor_obs_template is None:
-            raise ValueError("Observation group 'actor_obs' must be configured for WBT policy.")
-        obs = actor_obs_template.copy()
-        input_feed = {"obs": obs, "time_step": time_step}
-        outputs = self.onnx_policy_session.run(["joint_pos", "joint_vel", "ref_quat_xyzw"], input_feed)
+        if "obs" in self.onnx_input_names:
+            self._obs_input_name = "obs"
+        elif "actor_obs" in self.onnx_input_names:
+            self._obs_input_name = "actor_obs"
+        else:
+            raise ValueError(f"Unsupported ONNX inputs: {self.onnx_input_names}")
 
-        # motion_command_t/ref_quat_xyzw_t will be used in get_current_obs_buffer_dict
-        self.motion_command_t = np.concatenate(outputs[0:2], axis=1)  # (1, 58)
-        self.ref_quat_xyzw_t = outputs[2]
-        # duplicate, will be used in _get_init_target and _handle_stop_policy
-        self.motion_command_0 = self.motion_command_t.copy()
-        self.ref_quat_xyzw_0 = self.ref_quat_xyzw_t.copy()
+        self._time_step_input_name = "time_step" if "time_step" in self.onnx_input_names else None
+
+        if "actions" in self.onnx_output_names:
+            self._action_output_name = "actions"
+        elif "action" in self.onnx_output_names:
+            self._action_output_name = "action"
+        else:
+            self._action_output_name = self.onnx_output_names[0]
+
+        self._motion_output_names = set(self.onnx_output_names)
+        required_motion_outputs = {"joint_pos", "joint_vel", "ref_quat_xyzw"}
+        if self._uses_motion_command and not required_motion_outputs.issubset(self._motion_output_names):
+            raise ValueError(
+                "Motion outputs missing from ONNX; expected joint_pos, joint_vel, ref_quat_xyzw. "
+                f"Available: {self.onnx_output_names}"
+            )
+
+        self._onnx_output_fetch = [self._action_output_name]
+        if self._uses_motion_command:
+            self._onnx_output_fetch += ["joint_pos", "joint_vel", "ref_quat_xyzw"]
+            if "ref_pos_xyz" in self._motion_output_names:
+                self._onnx_output_fetch.append("ref_pos_xyz")
 
         def policy_act(input_feed):
-            output = self.onnx_policy_session.run(["actions", "joint_pos", "joint_vel", "ref_quat_xyzw"], input_feed)
-            action = output[0]
-            motion_command = np.concatenate(output[1:3], axis=1)
-            ref_quat_xyzw = output[3]
-            return action, motion_command, ref_quat_xyzw
+            output = self.onnx_policy_session.run(self._onnx_output_fetch, input_feed)
+            return dict(zip(self._onnx_output_fetch, output))
 
         self.policy = policy_act
+
+        if self._uses_motion_command:
+            time_step = np.zeros((1, 1), dtype=np.float32)
+            obs = self._assemble_actor_obs(self.obs_buf_dict)
+            input_feed = {self._obs_input_name: obs}
+            if self._time_step_input_name:
+                input_feed[self._time_step_input_name] = time_step
+            outputs = self.policy(input_feed)
+            joint_pos = outputs["joint_pos"]
+            joint_vel = outputs["joint_vel"]
+            self.motion_command_t = np.concatenate([joint_pos, joint_vel], axis=1)
+            self.ref_quat_xyzw_t = outputs["ref_quat_xyzw"]
+            self.ref_pos_xyz_t = outputs.get("ref_pos_xyz")
+            self.motion_command_0 = self.motion_command_t.copy()
+            self.ref_quat_xyzw_0 = self.ref_quat_xyzw_t.copy()
+        elif self._uses_videomimic and self._motion_data is not None:
+            joint_pos = self._motion_data.joint_pos[:1]
+            joint_vel = self._motion_data.joint_vel[:1]
+            self.motion_command_t = np.concatenate([joint_pos, joint_vel], axis=1)
+            self.motion_command_0 = self.motion_command_t.copy()
+            ref_quat_wxyz = self._motion_data.ref_quat_w[:1]
+            self.ref_quat_xyzw_t = wxyz_to_xyzw(ref_quat_wxyz)
+            self.ref_quat_xyzw_0 = self.ref_quat_xyzw_t.copy()
+            self.ref_pos_xyz_t = self._motion_data.ref_pos_w[:1]
 
     def _capture_policy_state(self):
         state = super()._capture_policy_state()
@@ -235,6 +444,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_start_timestep = None
         self._last_clock_reading = None
         self.robot_yaw_offset = 0.0
+        self._motion_align_quat_wxyz = None
+        self._motion_align_pos = None
 
     def _on_policy_switched(self, model_path: str):
         super()._on_policy_switched(model_path)
@@ -246,6 +457,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._last_clock_reading = None
         self._stiff_hold_active = True
         self.robot_yaw_offset = 0.0
+        self._motion_align_quat_wxyz = None
+        self._motion_align_pos = None
 
     def get_init_target(self, robot_state_data):
         """Get initialization target joint positions."""
@@ -259,7 +472,109 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return q_target
         return dof_pos
 
+    def _get_motion_index(self) -> int:
+        if self._motion_data is None:
+            return 0
+        idx = int(self.motion_timestep)
+        if idx < 0:
+            return 0
+        return min(idx, self._motion_data.frame_count - 1)
+
+    def _maybe_update_motion_alignment(self, robot_state_data) -> None:
+        if not self._motion_alignment_enabled or self._motion_data is None:
+            return
+        if self._motion_align_quat_wxyz is not None:
+            return
+        motion_root_quat_wxyz = self._motion_data.root_quat_w[:1]
+        motion_yaw = self._quat_yaw(motion_root_quat_wxyz)
+        robot_yaw = self._quat_yaw(robot_state_data[:, 3:7])
+        yaw_delta = robot_yaw - motion_yaw
+        align_quat = rpy_to_quat((0.0, 0.0, yaw_delta)).reshape(1, 4).astype(np.float32)
+        motion_root_pos = self._motion_data.root_pos_w[:1]
+        aligned_root_pos = quat_apply(align_quat, motion_root_pos)
+        robot_root_pos = robot_state_data[:, :3]
+        self._motion_align_quat_wxyz = align_quat
+        self._motion_align_pos = robot_root_pos - aligned_root_pos
+
+    def _apply_motion_alignment_pos(self, pos: np.ndarray) -> np.ndarray:
+        if self._motion_align_quat_wxyz is None or self._motion_align_pos is None:
+            return pos
+        if pos.ndim == 1:
+            pos = pos.reshape(1, -1)
+        aligned = quat_apply(self._motion_align_quat_wxyz, pos)
+        return aligned + self._motion_align_pos
+
+    def _apply_motion_alignment_quat(self, quat_wxyz: np.ndarray) -> np.ndarray:
+        if self._motion_align_quat_wxyz is None:
+            return quat_wxyz
+        if quat_wxyz.ndim == 1:
+            quat_wxyz = quat_wxyz.reshape(1, -1)
+        return quat_mul(self._motion_align_quat_wxyz, quat_wxyz)
+
+    def _calc_heading_quat_inv(self, quat_wxyz: np.ndarray) -> np.ndarray:
+        yaw = self._quat_yaw(quat_wxyz)
+        yaw_quat = rpy_to_quat((0.0, 0.0, -yaw)).reshape(1, 4)
+        return yaw_quat.astype(np.float32)
+
+    @staticmethod
+    def _normalize_angle(angle: float) -> float:
+        return float((angle + np.pi) % (2 * np.pi) - np.pi)
+
+    def _get_videomimic_obs_buffer_dict(self, robot_state_data):
+        if self._motion_data is None:
+            raise ValueError("Motion data is required for VideoMimic observations.")
+
+        self._maybe_update_motion_alignment(robot_state_data)
+        idx = self._get_motion_index()
+
+        base_quat = robot_state_data[:, 3:7]
+        base_ang_vel = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
+        dof_pos = robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles
+        dof_vel = robot_state_data[:, 7 + self.num_dofs + 6 : 7 + self.num_dofs + 6 + self.num_dofs]
+
+        projected_gravity = quat_rotate_inverse(base_quat, np.array([[0.0, 0.0, -1.0]], dtype=np.float32))
+        torso_real = np.concatenate(
+            [base_ang_vel, projected_gravity, dof_pos, dof_vel, self.last_policy_action], axis=1
+        )
+
+        motion_ref_pos_w = self._motion_data.ref_pos_w[idx : idx + 1]
+        motion_ref_quat_w = self._motion_data.ref_quat_w[idx : idx + 1]
+        motion_root_quat_w = self._motion_data.root_quat_w[idx : idx + 1]
+        motion_joint_pos = self._motion_data.joint_pos[idx : idx + 1]
+
+        if self._motion_align_quat_wxyz is not None:
+            motion_ref_pos_w = self._apply_motion_alignment_pos(motion_ref_pos_w)
+            motion_ref_quat_w = self._apply_motion_alignment_quat(motion_ref_quat_w)
+            motion_root_quat_w = self._apply_motion_alignment_quat(motion_root_quat_w)
+
+        robot_ref_pos_w, robot_ref_quat_w = self._get_ref_body_pose_in_world(robot_state_data)
+        rel_pos_w = motion_ref_pos_w - robot_ref_pos_w
+        heading_inv = self._calc_heading_quat_inv(robot_ref_quat_w)
+        rel_pos_b = quat_apply(heading_inv, rel_pos_w)
+        torso_xy_rel = rel_pos_b[:, :2]
+
+        target_heading = self._quat_yaw(motion_ref_quat_w)
+        robot_heading = self._quat_yaw(robot_ref_quat_w)
+        torso_yaw_rel = np.array([[self._normalize_angle(target_heading - robot_heading)]], dtype=np.float32)
+
+        target_joints = motion_joint_pos - self.default_dof_angles
+        roll, pitch, _ = quat_to_rpy(motion_root_quat_w.reshape(-1, 4)[0])
+        target_root_roll = np.array([[self._normalize_angle(roll)]], dtype=np.float32)
+        target_root_pitch = np.array([[self._normalize_angle(pitch)]], dtype=np.float32)
+
+        return {
+            "torso_real": torso_real,
+            "torso_xy_rel": torso_xy_rel,
+            "torso_yaw_rel": torso_yaw_rel,
+            "target_joints": target_joints,
+            "target_root_roll": target_root_roll,
+            "target_root_pitch": target_root_pitch,
+        }
+
     def get_current_obs_buffer_dict(self, robot_state_data):
+        if self._uses_videomimic:
+            return self._get_videomimic_obs_buffer_dict(robot_state_data)
+
         current_obs_buffer_dict = {}
 
         # motion_command
@@ -301,8 +616,20 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self._last_clock_reading = None
 
         obs = self.prepare_obs_for_rl(robot_state_data)
-        input_feed = {"time_step": np.array([[self.motion_timestep]], dtype=np.float32), "obs": obs["actor_obs"]}
-        policy_action, self.motion_command_t, self.ref_quat_xyzw_t = self.policy(input_feed)
+        input_feed = {self._obs_input_name: obs["actor_obs"]}
+        if self._time_step_input_name:
+            input_feed[self._time_step_input_name] = np.array([[self.motion_timestep]], dtype=np.float32)
+        outputs = self.policy(input_feed)
+        policy_action = outputs[self._action_output_name]
+
+        if self._uses_motion_command:
+            joint_pos = outputs.get("joint_pos")
+            joint_vel = outputs.get("joint_vel")
+            if joint_pos is None or joint_vel is None:
+                raise ValueError("Motion outputs missing during inference.")
+            self.motion_command_t = np.concatenate([joint_pos, joint_vel], axis=1)
+            self.ref_quat_xyzw_t = outputs.get("ref_quat_xyzw", self.ref_quat_xyzw_t)
+            self.ref_pos_xyz_t = outputs.get("ref_pos_xyz", self.ref_pos_xyz_t)
 
         # clip policy action
         policy_action = np.clip(policy_action, -100, 100)
@@ -335,6 +662,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._stiff_hold_active = False
         self._capture_robot_yaw_offset()
         self._capture_motion_yaw_offset(self.ref_quat_xyzw_0)
+        if self._motion_alignment_enabled:
+            robot_state_data = self.interface.get_low_state()
+            if robot_state_data is not None:
+                self._maybe_update_motion_alignment(robot_state_data)
 
     def _update_clock(self):
         # Use synchronized clock with motion-relative timing
@@ -389,6 +720,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_command_t = self.motion_command_0.copy()
         self._last_clock_reading = None
         self.robot_yaw_offset = 0.0
+        self._motion_align_quat_wxyz = None
+        self._motion_align_pos = None
 
     def _handle_start_motion_clip(self):
         """Handle start motion clip action."""
@@ -398,6 +731,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_start_timestep = None  # will be set in rl_inference
         self.motion_timestep = 0  # Reset to start from beginning of motion
         self._last_clock_reading = None
+        if self._motion_alignment_enabled:
+            robot_state_data = self.interface.get_low_state()
+            if robot_state_data is not None:
+                self._maybe_update_motion_alignment(robot_state_data)
         self.logger.info(colored("Starting motion clip", "blue"))
 
     def handle_keyboard_button(self, keycode):
