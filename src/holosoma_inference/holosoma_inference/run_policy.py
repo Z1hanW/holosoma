@@ -94,6 +94,24 @@ def _print_control_guide(policy_class, use_joystick: bool):
     logger.info("")
 
 
+def _is_wbt_observation(obs_dict: dict[str, list[str]]) -> bool:
+    wbt_terms = {
+        "motion_command",
+        "motion_ref_ori_b",
+        "motion_future_target_poses",
+        "torso_real",
+        "torso_xy_rel",
+        "torso_yaw_rel",
+        "target_joints",
+        "target_root_roll",
+        "target_root_pitch",
+    }
+    for terms in obs_dict.values():
+        if any(term in wbt_terms for term in terms):
+            return True
+    return False
+
+
 def run_policy(config: InferenceConfig):
     """Run policy with Tyro configuration."""
     logger.info("🚀 Starting Policy with Tyro configuration...")
@@ -104,8 +122,7 @@ def run_policy(config: InferenceConfig):
 
     try:
         # Determine policy class based on observation type
-        actor_obs = config.observation.obs_dict.get("actor_obs", [])
-        policy_class = WholeBodyTrackingPolicy if "motion_command" in actor_obs else LocomotionPolicy
+        policy_class = WholeBodyTrackingPolicy if _is_wbt_observation(config.observation.obs_dict) else LocomotionPolicy
         logger.info(f"Using {policy_class.__name__}")
         policy: LocomotionPolicy | WholeBodyTrackingPolicy = policy_class(config=config)
 

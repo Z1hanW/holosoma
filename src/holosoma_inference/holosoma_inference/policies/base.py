@@ -128,7 +128,7 @@ class BasePolicy:
 
         # Initialize per-term history buffers using deques
         self._initialize_history_state()
-        self.actor_obs_group_order = ["actor_obs"]
+        self.actor_obs_group_order = self._build_actor_obs_group_order()
         if (
             self.config.task.include_motion_future_target_poses
             and self.config.task.motion_future_target_poses_dim is not None
@@ -163,10 +163,19 @@ class BasePolicy:
         self.obs_dim_dict = self._calculate_obs_dim_dict()
         self.history_length_dict = self.obs_config.history_length_dict
         self._initialize_history_state()
+        self.actor_obs_group_order = self._build_actor_obs_group_order()
+
+    def _build_actor_obs_group_order(self) -> list[str]:
+        order = ["actor_obs"]
+        if "actor_obs_target" in self.obs_dict:
+            order.append("actor_obs_target")
+        if "motion_future_target_poses" in self.obs_dict:
+            order.append("motion_future_target_poses")
+        return order
 
     def _enable_motion_future_target_poses(self, obs_dim: int) -> None:
         if "motion_future_target_poses" in self.obs_dict:
-            self.actor_obs_group_order = ["actor_obs", "motion_future_target_poses"]
+            self.actor_obs_group_order = self._build_actor_obs_group_order()
             return
         obs_dict = dict(self.obs_dict)
         obs_dict["motion_future_target_poses"] = ["motion_future_target_poses"]
@@ -184,7 +193,7 @@ class BasePolicy:
                 history_length_dict=history_length_dict,
             )
         )
-        self.actor_obs_group_order = ["actor_obs", "motion_future_target_poses"]
+        self.actor_obs_group_order = self._build_actor_obs_group_order()
 
     def _init_communication_components(self):
         """Initialize state processor and command sender using the wrapper."""

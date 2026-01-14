@@ -3,14 +3,7 @@ set -euo pipefail
 
 CUDA_VISIBLE_DEVICES=1,2,3 torchrun --nproc_per_node=3 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-videomimic-mlp  \
-  perception:camera_depth_d435i \
   --training.num_envs=8192 \
-  \
-  --perception.camera_width=160 \
-  --perception.camera_height=90 \
-  --perception.camera_body_name=d435_link \
-  --perception.max_distance=10.0 \
-  --perception.update_hz=30.0 \
   \
   --algo.config.actor_learning_rate=7e-5 \
   --algo.config.critic_learning_rate=7e-5 \
