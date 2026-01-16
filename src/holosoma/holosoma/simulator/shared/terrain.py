@@ -44,6 +44,9 @@ class Terrain(TerrainInterface):
         self._obj_tile_names: list[str] = []
         self._obj_tile_offsets: np.ndarray = np.zeros((0, 3), dtype=np.float32)
         self._obj_tile_max_z: np.ndarray = np.zeros((0,), dtype=np.float32)
+        self._obj_tile_rows: int = 0
+        self._obj_tile_cols: int = 0
+        self._obj_tile_stride: np.ndarray | None = None
 
         self._num_rows: int = int(max(1, self._cfg.num_rows * self._cfg.scale_factor))
         self._num_cols: int = int(max(1, self._cfg.num_cols * self._cfg.scale_factor))
@@ -110,14 +113,8 @@ class Terrain(TerrainInterface):
 
             return trimesh.util.concatenate(tiles)
 
-        # Multi-OBJ: place each mesh in the terrain grid (row-major).
+        # Multi-OBJ: place each mesh in its own column, repeat across rows (VideoMimic style).
         num_meshes = len(obj_paths)
-        expected = self._num_rows * self._num_cols
-        if expected != num_meshes:
-            raise ValueError(
-                "Number of OBJ files ({}) must match num_rows*num_cols ({}). "
-                "Set --terrain.terrain-term.num-rows/num-cols accordingly.".format(num_meshes, expected)
-            )
 
         meshes = []
         spans = []
@@ -136,14 +133,18 @@ class Terrain(TerrainInterface):
 
         tiles = []
         tile_offsets = []
-        for idx, mesh in enumerate(meshes):
-            row = idx // self._num_cols
-            col = idx % self._num_cols
-            offset = np.array([col * stride[0], row * stride[1], 0.0], dtype=np.float64)
-            tile = mesh.copy()
-            tile.apply_translation(offset)
-            tiles.append(tile)
-            tile_offsets.append(offset)
+        self._obj_tile_rows = self._num_rows
+        self._obj_tile_cols = num_meshes
+        self._num_cols = num_meshes
+        self._obj_tile_stride = stride.astype(np.float32)
+        for col, mesh in enumerate(meshes):
+            col_offset = np.array([col * stride[0], 0.0, 0.0], dtype=np.float64)
+            tile_offsets.append(col_offset)
+            for row in range(self._num_rows):
+                offset = col_offset + np.array([0.0, row * stride[1], 0.0], dtype=np.float64)
+                tile = mesh.copy()
+                tile.apply_translation(offset)
+                tiles.append(tile)
 
         self._obj_tile_names = tile_names
         self._obj_tile_offsets = np.asarray(tile_offsets, dtype=np.float32)
@@ -227,14 +228,23 @@ class Terrain(TerrainInterface):
         if not hasattr(self, "_mesh"):
             raise RuntimeError("Mesh must be initialized before computing load_obj env origins.")
 
-        if self._obj_tile_offsets.size and self._obj_tile_offsets.shape[0] == self._num_rows * self._num_cols:
-            grid = np.zeros((self._num_rows, self._num_cols, 3), dtype=np.float32)
-            for idx, offset in enumerate(self._obj_tile_offsets):
-                row = idx // self._num_cols
-                col = idx % self._num_cols
-                z = float(self._obj_tile_max_z[idx]) if self._obj_tile_max_z.size else 0.0
-                grid[row, col] = [offset[0], offset[1], z]
-            return grid
+        if self._obj_tile_offsets.size:
+            if self._obj_tile_cols and self._obj_tile_rows and self._obj_tile_offsets.shape[0] == self._obj_tile_cols:
+                grid = np.zeros((self._obj_tile_rows, self._obj_tile_cols, 3), dtype=np.float32)
+                stride_y = float(self._obj_tile_stride[1]) if self._obj_tile_stride is not None else 0.0
+                for col, offset in enumerate(self._obj_tile_offsets):
+                    z = float(self._obj_tile_max_z[col]) if self._obj_tile_max_z.size else 0.0
+                    for row in range(self._obj_tile_rows):
+                        grid[row, col] = [offset[0], offset[1] + row * stride_y, z]
+                return grid
+            if self._obj_tile_offsets.shape[0] == self._num_rows * self._num_cols:
+                grid = np.zeros((self._num_rows, self._num_cols, 3), dtype=np.float32)
+                for idx, offset in enumerate(self._obj_tile_offsets):
+                    row = idx // self._num_cols
+                    col = idx % self._num_cols
+                    z = float(self._obj_tile_max_z[idx]) if self._obj_tile_max_z.size else 0.0
+                    grid[row, col] = [offset[0], offset[1], z]
+                return grid
 
         bounds = self._mesh.bounds.astype(np.float64)
         min_corner, max_corner = bounds
@@ -276,8 +286,28 @@ class Terrain(TerrainInterface):
 
     @property
     def obj_tile_offsets(self) -> np.ndarray:
-        """Per-tile translation offsets for multi-OBJ terrains."""
+        """Per-column translation offsets for multi-OBJ terrains."""
         return self._obj_tile_offsets
+
+    @property
+    def obj_tile_stride(self) -> np.ndarray | None:
+        """Stride between OBJ tiles when generating the mesh grid."""
+        return None if self._obj_tile_stride is None else self._obj_tile_stride.copy()
+
+    @property
+    def obj_tile_rows(self) -> int:
+        """Number of rows in the multi-OBJ grid."""
+        return self._obj_tile_rows
+
+    @property
+    def obj_tile_cols(self) -> int:
+        """Number of columns in the multi-OBJ grid."""
+        return self._obj_tile_cols
+
+    @property
+    def obj_tile_max_z(self) -> np.ndarray:
+        """Per-OBJ max Z for multi-OBJ terrains."""
+        return self._obj_tile_max_z
 
     def randomized_terrain(self) -> None:
         """Generate randomized terrain layout with mixed terrain types.

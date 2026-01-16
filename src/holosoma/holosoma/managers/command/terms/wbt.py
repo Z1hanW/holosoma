@@ -761,6 +761,9 @@ class MotionCommand(CommandTermBase):
             self.motion_cfg = MotionConfig(**cfg.params["motion_config"])
         self.init_pose_cfg: NoiseToInitialPoseConfig = self.motion_cfg.noise_to_initial_pose
         self._clip_terrain_offsets: torch.Tensor | None = None
+        self._terrain_row_ids: torch.Tensor | None = None
+        self._terrain_row_stride: float = 0.0
+        self._terrain_row_count: int = 0
 
     def setup(self) -> None:
         self.num_envs = self._env.num_envs
@@ -869,6 +872,14 @@ class MotionCommand(CommandTermBase):
                     )
         else:
             self.clip_ids[env_ids] = 0
+
+        if self._terrain_row_ids is not None:
+            if self._env.is_evaluating or self._terrain_row_count <= 1:
+                self._terrain_row_ids[env_ids] = 0
+            else:
+                self._terrain_row_ids[env_ids] = torch.randint(
+                    0, self._terrain_row_count, (env_ids.numel(),), device=self.device
+                )
 
         # 0. Sample the time steps
         if self.use_adaptive_timesteps_sampler:
@@ -1193,12 +1204,20 @@ class MotionCommand(CommandTermBase):
         if self._clip_terrain_offsets is None or not hasattr(self, "clip_ids"):
             return base if env_ids is None else base[env_ids]
 
-        if base.device != self._clip_terrain_offsets.device:
-            base = base.to(self._clip_terrain_offsets.device)
+        clip_ids = self.clip_ids if env_ids is None else self.clip_ids[env_ids]
+        clip_offsets = self._clip_terrain_offsets[clip_ids]
+        if self._terrain_row_ids is not None and self._terrain_row_stride > 0.0:
+            row_ids = self._terrain_row_ids if env_ids is None else self._terrain_row_ids[env_ids]
+            row_offsets = torch.zeros_like(clip_offsets)
+            row_offsets[:, 1] = row_ids.to(row_offsets.dtype) * self._terrain_row_stride
+            clip_offsets = clip_offsets + row_offsets
 
-        if env_ids is None:
-            return base + self._clip_terrain_offsets[self.clip_ids]
-        return base[env_ids] + self._clip_terrain_offsets[self.clip_ids[env_ids]]
+        if self.motion_cfg.pair_terrain_with_motion:
+            return clip_offsets
+
+        if base.device != clip_offsets.device:
+            base = base.to(clip_offsets.device)
+        return base + clip_offsets
 
     #########################################################################################
     ## Robot from motion data
@@ -1402,6 +1421,8 @@ class MotionCommand(CommandTermBase):
     def init_buffers(self):
         self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.clip_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        if self._terrain_row_ids is not None:
+            self._terrain_row_ids.zero_()
         self.body_pos_relative_w = torch.zeros(
             self.num_envs, len(self.motion_cfg.body_names_to_track), 3, device=self.device
         )  # type: ignore[arg-type]
@@ -1518,8 +1539,10 @@ class MotionCommand(CommandTermBase):
         terrain = getattr(terrain_state, "terrain", None)
         tile_names = getattr(terrain, "obj_tile_names", []) if terrain is not None else []
         tile_offsets = getattr(terrain, "obj_tile_offsets", None) if terrain is not None else None
+        tile_stride = getattr(terrain, "obj_tile_stride", None) if terrain is not None else None
+        tile_rows = int(getattr(terrain, "obj_tile_rows", 0) or 0) if terrain is not None else 0
 
-        if not tile_names or tile_offsets is None:
+        if not tile_names or tile_offsets is None or tile_stride is None or tile_rows <= 0:
             raise ValueError(
                 "pair_terrain_with_motion requires load_obj terrain with multiple OBJ tiles. "
                 "Set --terrain.terrain-term.obj-file-path to a directory of .obj files."
@@ -1531,6 +1554,9 @@ class MotionCommand(CommandTermBase):
         tile_offsets = np.asarray(tile_offsets, dtype=np.float32)
         if tile_offsets.shape[0] != len(tile_names):
             raise ValueError("OBJ tile offsets length does not match tile names.")
+        stride = np.asarray(tile_stride, dtype=np.float32).reshape(-1)
+        if stride.size < 2:
+            raise ValueError("OBJ tile stride must provide at least X/Y spacing.")
 
         name_to_idx = {name: idx for idx, name in enumerate(tile_names)}
         missing = [clip_id for clip_id in self.motion.clip_ids if clip_id not in name_to_idx]
@@ -1539,6 +1565,9 @@ class MotionCommand(CommandTermBase):
 
         offsets = np.stack([tile_offsets[name_to_idx[clip_id]] for clip_id in self.motion.clip_ids], axis=0)
         self._clip_terrain_offsets = torch.tensor(offsets, device=self.device, dtype=torch.float32)
+        self._terrain_row_stride = float(stride[1])
+        self._terrain_row_count = max(1, tile_rows)
+        self._terrain_row_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
         unused = [name for name in tile_names if name not in self.motion.clip_ids]
         if unused:

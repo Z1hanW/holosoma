@@ -127,6 +127,20 @@ class ModuleConfig:
 
 
 @dataclass(frozen=True)
+class DistillationConfig:
+    """Configuration for behavior cloning/distillation from a teacher policy."""
+
+    enabled: bool = False
+    """Enable distillation loss against a teacher policy."""
+
+    teacher_checkpoint: str | None = None
+    """Path to teacher checkpoint (local path or wandb:// URI)."""
+
+    loss_coef: float = 1.0
+    """Weight for the distillation loss added to actor loss."""
+
+
+@dataclass(frozen=True)
 class PPOModuleDictConfig:
     """Configuration for PPO module dictionary."""
 
@@ -232,6 +246,9 @@ class PPOConfig:
     min_actor_learning_rate: float | None = None
     max_critic_learning_rate: float | None = None
     min_critic_learning_rate: float | None = None
+
+    distill: DistillationConfig = field(default_factory=DistillationConfig)
+    """Optional teacher distillation configuration."""
 
 
 @dataclass(frozen=True)

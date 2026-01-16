@@ -159,6 +159,10 @@ class PPO(BaseAlgo):
         self._init_obs_keys()
         self._init_obs_slices()
         self._setup_obs_normalizers()
+        self.distill_enabled = False
+        self.distill_loss_coef = 0.0
+        self.teacher_actor = None
+        self.teacher_actor_obs_normalizers: dict[str, nn.Module] = {}
 
     def _init_obs_slices(self) -> None:
         def build_slices(keys: list[str]) -> dict[str, slice]:
@@ -174,23 +178,23 @@ class PPO(BaseAlgo):
         self.critic_obs_slices = build_slices(self.critic_obs_keys)
 
     def _setup_obs_normalizers(self) -> None:
-        def build_group_normalizers(keys: list[str], enabled: bool) -> dict[str, nn.Module]:
-            normalizers: dict[str, nn.Module] = {}
-            for key in keys:
-                dim = self.algo_obs_dim_dict[key]
-                if enabled:
-                    normalizers[key] = EmpiricalNormalization(
-                        shape=(dim,),
-                        device=self.device,
-                        eps=self.config.obs_normalizer_eps,
-                        until=self.config.obs_normalizer_until,
-                    )
-                else:
-                    normalizers[key] = nn.Identity()
-            return normalizers
+        self.actor_obs_normalizers = self._build_group_normalizers(self.actor_obs_keys, self.config.normalize_actor_obs)
+        self.critic_obs_normalizers = self._build_group_normalizers(self.critic_obs_keys, self.config.normalize_critic_obs)
 
-        self.actor_obs_normalizers = build_group_normalizers(self.actor_obs_keys, self.config.normalize_actor_obs)
-        self.critic_obs_normalizers = build_group_normalizers(self.critic_obs_keys, self.config.normalize_critic_obs)
+    def _build_group_normalizers(self, keys: list[str], enabled: bool) -> dict[str, nn.Module]:
+        normalizers: dict[str, nn.Module] = {}
+        for key in keys:
+            dim = self.algo_obs_dim_dict[key]
+            if enabled:
+                normalizers[key] = EmpiricalNormalization(
+                    shape=(dim,),
+                    device=self.device,
+                    eps=self.config.obs_normalizer_eps,
+                    until=self.config.obs_normalizer_until,
+                )
+            else:
+                normalizers[key] = nn.Identity()
+        return normalizers
 
     def _apply_obs_normalizer(self, normalizer: nn.Module, obs: torch.Tensor, update: bool) -> torch.Tensor:
         if isinstance(normalizer, EmpiricalNormalization):
@@ -221,6 +225,17 @@ class PPO(BaseAlgo):
     def _normalize_critic_obs(self, obs: torch.Tensor, *, update: bool) -> torch.Tensor:
         return self._normalize_concat_obs(
             obs, self.critic_obs_keys, self.critic_obs_slices, self.critic_obs_normalizers, update=update
+        )
+
+    def _normalize_teacher_actor_obs(self, obs: torch.Tensor) -> torch.Tensor:
+        if not self.distill_enabled:
+            return obs
+        return self._normalize_concat_obs(
+            obs,
+            self.actor_obs_keys,
+            self.actor_obs_slices,
+            self.teacher_actor_obs_normalizers,
+            update=False,
         )
 
     def _init_obs_keys(self):
@@ -254,6 +269,8 @@ class PPO(BaseAlgo):
             history_length=self.algo_history_length_dict,
         )
 
+        self._setup_distillation()
+
         if self.use_symmetry:
             self.symmetry_utils = SymmetryUtils(self.env)
 
@@ -267,6 +284,48 @@ class PPO(BaseAlgo):
         self.critic_optimizer = instantiate(
             self.config.critic_optimizer, params=self.critic.parameters(), lr=self.critic_learning_rate
         )
+
+    def _setup_distillation(self) -> None:
+        distill_cfg = self.config.distill
+        self.distill_enabled = bool(distill_cfg.enabled)
+        self.distill_loss_coef = float(distill_cfg.loss_coef)
+        self.teacher_actor = None
+        self.teacher_actor_obs_normalizers: dict[str, nn.Module] = {}
+        if not self.distill_enabled:
+            return
+        if not distill_cfg.teacher_checkpoint:
+            raise ValueError("Distillation enabled but distill.teacher_checkpoint is not set.")
+
+        ckpt_path = distill_cfg.teacher_checkpoint
+        if ckpt_path.startswith("wandb://"):
+            from holosoma.utils.eval_utils import load_checkpoint  # noqa: PLC0415
+
+            ckpt_path = str(load_checkpoint(ckpt_path, str(self.log_dir)))
+
+        teacher_state = torch.load(ckpt_path, map_location=self.device)
+        self.teacher_actor = setup_ppo_actor_module(
+            obs_dim_dict=self.algo_obs_dim_dict,
+            module_config=self.config.module_dict.actor,
+            num_actions=self.num_act,
+            init_noise_std=self.config.init_noise_std,
+            device=self.device,
+            history_length=self.algo_history_length_dict,
+        )
+        self.teacher_actor.load_state_dict(teacher_state["actor_model_state_dict"])
+        self.teacher_actor.eval()
+        for param in self.teacher_actor.parameters():
+            param.requires_grad_(False)
+
+        self.teacher_actor_obs_normalizers = self._build_group_normalizers(
+            self.actor_obs_keys, self.config.normalize_actor_obs
+        )
+        actor_norm_state = teacher_state.get("actor_obs_normalizer_state")
+        if isinstance(actor_norm_state, dict):
+            for key, state in actor_norm_state.items():
+                if state is not None and key in self.teacher_actor_obs_normalizers:
+                    self.teacher_actor_obs_normalizers[key].load_state_dict(state)
+        for normalizer in self.teacher_actor_obs_normalizers.values():
+            normalizer.eval()
 
     def _get_obs_dim(self, obs_keys: list[str]) -> int:
         """Compute total observation dimension for given observation keys."""
@@ -319,6 +378,10 @@ class PPO(BaseAlgo):
             normalizer.eval()
         for normalizer in self.critic_obs_normalizers.values():
             normalizer.eval()
+        if self.teacher_actor is not None:
+            self.teacher_actor.eval()
+            for normalizer in self.teacher_actor_obs_normalizers.values():
+                normalizer.eval()
 
     def _train_mode(self):
         self.actor.train()
@@ -327,6 +390,10 @@ class PPO(BaseAlgo):
             normalizer.train()
         for normalizer in self.critic_obs_normalizers.values():
             normalizer.train()
+        if self.teacher_actor is not None:
+            self.teacher_actor.eval()
+            for normalizer in self.teacher_actor_obs_normalizers.values():
+                normalizer.eval()
 
     def learn(self):
         self._train_mode()
@@ -501,6 +568,7 @@ class PPO(BaseAlgo):
         return loss_dict
 
     def _compute_ppo_loss(self, minibatch: Minibatch):
+        raw_actor_obs = minibatch["actor_obs"]
         actions_batch = minibatch["actions"]
         target_values_batch = minibatch["values"]
         advantages_batch = minibatch["advantages"]
@@ -513,7 +581,7 @@ class PPO(BaseAlgo):
         original_batch_size = actions_batch.shape[0]
         if self.use_symmetry:
             actor_obs = self.symmetry_utils.augment_observations(
-                obs=minibatch["actor_obs"],
+                obs=raw_actor_obs,
                 env=self.env,
                 obs_list=self.actor_obs_keys,
             )
@@ -597,6 +665,15 @@ class PPO(BaseAlgo):
 
         critic_loss = self.config.value_loss_coef * value_loss + self.config.symmetry_critic_coef * symmetry_critic_loss
 
+        distill_loss = torch.tensor(0.0, device=self.device)
+        if self.distill_enabled:
+            assert self.teacher_actor is not None, "Distillation enabled but teacher actor is not initialized."
+            teacher_obs = self._normalize_teacher_actor_obs(raw_actor_obs)
+            with torch.inference_mode():
+                teacher_actions = self.teacher_actor.act_inference({"actor_obs": teacher_obs})
+            distill_loss = F.mse_loss(mu_batch, teacher_actions)
+            actor_loss = actor_loss + self.distill_loss_coef * distill_loss
+
         return {
             "actor_loss": actor_loss,
             "critic_loss": critic_loss,
@@ -605,6 +682,7 @@ class PPO(BaseAlgo):
             "value_loss": value_loss,
             "surrogate_loss": surrogate_loss,
             "entropy_loss": entropy_loss,
+            "distill_loss": distill_loss,
             "kl_mean": kl_mean,
         }
 
