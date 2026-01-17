@@ -6,6 +6,8 @@ from typing import Any
 
 import numpy as np
 
+from loguru import logger
+
 from holosoma.utils.rotations import quat_apply, quat_from_euler_xyz, quat_mul
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.urdf_utils import resolve_fixed_link_offset
@@ -44,6 +46,7 @@ class IsaacSimDepthCamera:
         self._body_offset_pos = torch.zeros(3, device=self._device)
         self._body_offset_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self._device)
         self._warned_multi_env = False
+        self._warned_invalid_depth = False
 
     def setup(self) -> None:
         if self._env_id < 0 or self._env_id >= self._env.num_envs:
@@ -96,11 +99,7 @@ class IsaacSimDepthCamera:
 
         depth_data = self._depth_annotator.get_data()
         depth_array = self._convert_depth_to_numpy(depth_data)
-
-        if depth_array.ndim == 3 and depth_array.shape[-1] == 1:
-            depth_array = depth_array[:, :, 0]
-
-        depth_array = np.clip(depth_array, self._cfg.camera_near, self._cfg.camera_far)
+        depth_array = self._sanitize_depth_array(depth_array)
         depth_tensor = torch.as_tensor(depth_array, device=self._device, dtype=torch.float32)
         return depth_tensor.unsqueeze(0)
 
@@ -193,6 +192,36 @@ class IsaacSimDepthCamera:
             return depth_data.numpy()
         return np.asarray(depth_data)
 
+    def _sanitize_depth_array(self, depth_array: np.ndarray) -> np.ndarray:
+        if depth_array.size == 0:
+            if not self._warned_invalid_depth:
+                logger.warning("Depth annotator returned empty data; filling with max_distance.")
+                self._warned_invalid_depth = True
+            return np.full((self._height, self._width), float(self._cfg.max_distance), dtype=np.float32)
+
+        if depth_array.ndim == 3:
+            depth_array = depth_array[:, :, 0]
+        elif depth_array.ndim == 1 and depth_array.size == self._height * self._width:
+            depth_array = depth_array.reshape(self._height, self._width)
+
+        if depth_array.shape != (self._height, self._width):
+            if not self._warned_invalid_depth:
+                logger.warning(
+                    "Unexpected depth shape {}; expected ({}, {}). Filling with max_distance.",
+                    depth_array.shape,
+                    self._height,
+                    self._width,
+                )
+                self._warned_invalid_depth = True
+            return np.full((self._height, self._width), float(self._cfg.max_distance), dtype=np.float32)
+
+        depth_array = depth_array.astype(np.float32, copy=False)
+        invalid = ~np.isfinite(depth_array) | (depth_array <= 0.0)
+        if np.any(invalid):
+            depth_array = depth_array.copy()
+            depth_array[invalid] = float(self._cfg.max_distance)
+        return np.clip(depth_array, 0.0, float(self._cfg.max_distance))
+
 
 class IsaacSimDepthSensorCamera:
     """Rendered depth camera using IsaacSim depth sensor pipeline."""
@@ -228,6 +257,7 @@ class IsaacSimDepthSensorCamera:
         self._body_offset_pos = torch.zeros(3, device=self._device)
         self._body_offset_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self._device)
         self._warned_multi_env = False
+        self._warned_invalid_depth = False
 
     def setup(self) -> None:
         if self._env_id < 0 or self._env_id >= self._env.num_envs:
@@ -300,9 +330,7 @@ class IsaacSimDepthSensorCamera:
 
         depth_data = self._read_depth_frame()
         depth_array = IsaacSimDepthCamera._convert_depth_to_numpy(depth_data)
-        if depth_array.ndim == 3 and depth_array.shape[-1] == 1:
-            depth_array = depth_array[:, :, 0]
-        depth_array = np.clip(depth_array, self._cfg.camera_near, self._cfg.camera_far)
+        depth_array = self._sanitize_depth_array(depth_array)
         depth_tensor = torch.as_tensor(depth_array, device=self._device, dtype=torch.float32)
         return depth_tensor.unsqueeze(0)
 
@@ -337,6 +365,36 @@ class IsaacSimDepthSensorCamera:
 
             return get_assets_root_path() + asset_path
         return asset_path
+
+    def _sanitize_depth_array(self, depth_array: np.ndarray) -> np.ndarray:
+        if depth_array.size == 0:
+            if not self._warned_invalid_depth:
+                logger.warning("Depth sensor returned empty data; filling with max_distance.")
+                self._warned_invalid_depth = True
+            return np.full((self._height, self._width), float(self._cfg.max_distance), dtype=np.float32)
+
+        if depth_array.ndim == 3:
+            depth_array = depth_array[:, :, 0]
+        elif depth_array.ndim == 1 and depth_array.size == self._height * self._width:
+            depth_array = depth_array.reshape(self._height, self._width)
+
+        if depth_array.shape != (self._height, self._width):
+            if not self._warned_invalid_depth:
+                logger.warning(
+                    "Unexpected depth sensor shape {}; expected ({}, {}). Filling with max_distance.",
+                    depth_array.shape,
+                    self._height,
+                    self._width,
+                )
+                self._warned_invalid_depth = True
+            return np.full((self._height, self._width), float(self._cfg.max_distance), dtype=np.float32)
+
+        depth_array = depth_array.astype(np.float32, copy=False)
+        invalid = ~np.isfinite(depth_array) | (depth_array <= 0.0)
+        if np.any(invalid):
+            depth_array = depth_array.copy()
+            depth_array[invalid] = float(self._cfg.max_distance)
+        return np.clip(depth_array, 0.0, float(self._cfg.max_distance))
 
     def _resolve_body_index(self) -> None:
         if self._body_name is None:
