@@ -74,6 +74,34 @@ def _to_numpy(value) -> np.ndarray:
     return np.asarray(value)
 
 
+def _sanitize_scene_lists(config_data: dict) -> None:
+    simulator_cfg = config_data.get("simulator")
+    if not isinstance(simulator_cfg, dict):
+        return
+    sim_cfg = simulator_cfg.get("config")
+    if not isinstance(sim_cfg, dict):
+        return
+    scene_cfg = sim_cfg.get("scene")
+    if scene_cfg is None:
+        sim_cfg["scene"] = {"scene_files": [], "rigid_objects": []}
+        return
+    if not isinstance(scene_cfg, dict):
+        return
+    if scene_cfg.get("scene_files") is None:
+        scene_cfg["scene_files"] = []
+    if scene_cfg.get("rigid_objects") is None:
+        scene_cfg["rigid_objects"] = []
+
+
+def _load_saved_config_local(checkpoint_path: Path) -> tuple[ExperimentConfig, str | None]:
+    checkpoint_contents = torch.load(checkpoint_path, map_location="cpu")
+    config_data = checkpoint_contents["experiment_config"]
+    if not isinstance(config_data, dict):
+        raise ValueError("experiment_config in checkpoint is not a dict.")
+    _sanitize_scene_lists(config_data)
+    return ExperimentConfig(**config_data), checkpoint_contents.get("wandb_run_path")
+
+
 def _current_clip_name(motion_cmd, env_index: int) -> str | None:
     try:
         clip_ids = motion_cmd.motion.clip_ids
@@ -332,7 +360,13 @@ def run_eval_with_viser_clip(
 def main() -> None:
     init_eval_logging()
     checkpoint_cfg, remaining_args = tyro.cli(CheckpointConfig, return_unknown_args=True, add_help=False)
-    saved_cfg, saved_wandb_path = load_saved_experiment_config(checkpoint_cfg)
+    if checkpoint_cfg.checkpoint is None:
+        raise ValueError("No checkpoint provided.")
+    checkpoint_str = str(checkpoint_cfg.checkpoint)
+    if checkpoint_str.startswith("wandb://"):
+        saved_cfg, saved_wandb_path = load_saved_experiment_config(checkpoint_cfg)
+    else:
+        saved_cfg, saved_wandb_path = _load_saved_config_local(Path(checkpoint_str).expanduser())
     eval_cfg = saved_cfg.get_eval_config()
     eval_cfg_overrides, remaining_args = tyro.cli(
         ExperimentConfig,
