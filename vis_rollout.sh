@@ -13,6 +13,9 @@ set -euo pipefail
 #   TERRAIN_OBJ_PATH=/ABS/PATH/to/obj_dir
 #   RECENTER=False
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
+
 EXP_CFG=${EXP_CFG:-"exp:g1-29dof-wbt-videomimic-mlp"}
 ROLLOUT_DIR=${ROLLOUT_DIR:-"/ABS/PATH/to/rollouts"}
 
@@ -22,7 +25,7 @@ if [[ "${ROLLOUT_DIR}" == "/ABS/PATH/to/rollouts" ]]; then
 fi
 
 cmd=(
-  python -m holosoma.visualize
+  python src/holosoma/holosoma/viser_rollout.py
   "${EXP_CFG}"
   --rollout-dir "${ROLLOUT_DIR}"
   # --rollout-file "${ROLLOUT_FILE}"
