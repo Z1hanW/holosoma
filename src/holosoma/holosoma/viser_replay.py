@@ -33,7 +33,6 @@ from holosoma.utils.module_utils import get_holosoma_root  # noqa: E402
 from holosoma.utils.path import resolve_data_file_path  # noqa: E402
 from holosoma.utils.rotations import get_euler_xyz, quat_from_euler_xyz  # noqa: E402
 from holosoma.utils.tyro_utils import TYRO_CONIFG  # noqa: E402
-from holosoma_retargeting.src.viser_utils import create_motion_control_sliders  # noqa: E402
 
 
 def _resolve_data_path(path: str) -> str:
@@ -62,6 +61,59 @@ def _get_motion_config(cfg: ExperimentConfig) -> MotionConfig:
     if isinstance(motion_cfg, MotionConfig):
         return motion_cfg
     return MotionConfig(**motion_cfg)
+
+
+def _decode_h5_strings(values: np.ndarray) -> list[str]:
+    decoded: list[str] = []
+    for item in values:
+        if isinstance(item, (bytes, np.bytes_)):
+            decoded.append(item.decode("utf-8"))
+        else:
+            decoded.append(str(item))
+    return decoded
+
+
+def _list_motion_clips(motion_cfg: MotionConfig) -> list[str]:
+    motion_path = Path(_resolve_data_path(motion_cfg.motion_file))
+    if motion_path.is_dir():
+        files = sorted(list(motion_path.glob("*.npz")) + list(motion_path.glob("*.NPZ")))
+        if not files:
+            raise FileNotFoundError(f"No motion clips found in directory: {motion_path}")
+        return [path.stem for path in files]
+
+    if motion_path.suffix.lower() in (".h5", ".hdf5"):
+        try:
+            import h5py  # type: ignore[import-not-found]
+        except Exception:
+            return [motion_path.stem]
+        with h5py.File(motion_path, "r") as h5f:
+            clips = h5f.get("clips")
+            if clips is None or "clip_ids" not in clips:
+                return [motion_path.stem]
+            clip_ids = _decode_h5_strings(np.asarray(clips["clip_ids"]))
+            if not clip_ids:
+                return [motion_path.stem]
+            return clip_ids
+
+    if motion_path.exists():
+        return [motion_path.stem]
+
+    raise FileNotFoundError(f"Motion file not found: {motion_path}")
+
+
+def _select_initial_clip(motion_cfg: MotionConfig, clip_names: list[str]) -> str:
+    if motion_cfg.motion_clip_name:
+        if motion_cfg.motion_clip_name not in clip_names:
+            raise ValueError(
+                f"motion_clip_name '{motion_cfg.motion_clip_name}' not found in motion source."
+            )
+        return motion_cfg.motion_clip_name
+    if motion_cfg.motion_clip_id is not None:
+        clip_idx = int(motion_cfg.motion_clip_id)
+        if clip_idx < 0 or clip_idx >= len(clip_names):
+            raise IndexError(f"motion_clip_id {clip_idx} out of range for motion source.")
+        return clip_names[clip_idx]
+    return clip_names[0]
 
 
 def _build_default_joint_pos(robot_config: RobotConfig) -> np.ndarray:
@@ -111,7 +163,11 @@ def _slerp(q0: np.ndarray, q1: np.ndarray, u: float) -> np.ndarray:
     return (np.sin((1.0 - u) * theta) * q0 + np.sin(u * theta) * q1) / sin_theta
 
 
-def _split_qpos(qpos: np.ndarray, robot_dof: int, has_object: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
+def _split_qpos(
+    qpos: np.ndarray,
+    robot_dof: int,
+    has_object: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
     root_pos = qpos[0:3]
     root_quat = qpos[3:7]
     joints = qpos[7 : 7 + robot_dof]
@@ -122,6 +178,18 @@ def _split_qpos(qpos: np.ndarray, robot_dof: int, has_object: bool) -> tuple[np.
         obj_pos = None
         obj_quat = None
     return root_pos, root_quat, joints, obj_pos, obj_quat
+
+
+def _try_load_qpos_npz(path: Path) -> tuple[np.ndarray, int] | None:
+    if not path.exists() or path.suffix.lower() != ".npz":
+        return None
+    with np.load(path, allow_pickle=True) as data:
+        if "qpos" not in data:
+            return None
+        qpos = np.asarray(data["qpos"], dtype=np.float32)
+        fps_val = data.get("fps", 30)
+        fps = int(np.array(fps_val).reshape(-1)[0]) if fps_val is not None else 30
+        return qpos, fps
 
 
 def _build_transition_segment(
@@ -235,15 +303,30 @@ def _load_motion_qpos(
     motion_cfg: MotionConfig,
     robot_config: RobotConfig,
     viser_joint_names: list[str],
+    motion_clip_name: str | None = None,
+    motion_clip_id: int | None = None,
 ) -> tuple[np.ndarray, int]:
+    motion_path = Path(_resolve_data_path(motion_cfg.motion_file))
+    if motion_clip_name and motion_path.is_dir():
+        candidate = motion_path / f"{motion_clip_name}.npz"
+        qpos_payload = _try_load_qpos_npz(candidate)
+        if qpos_payload is not None:
+            return qpos_payload
+    if motion_path.is_file():
+        qpos_payload = _try_load_qpos_npz(motion_path)
+        if qpos_payload is not None:
+            return qpos_payload
+
     robot_body_names = [FAKE_BODY_NAME_ALIASES.get(name, name) for name in robot_config.body_names]
+    clip_name = motion_clip_name if motion_clip_name is not None else motion_cfg.motion_clip_name
+    clip_id = motion_clip_id if motion_clip_id is not None else motion_cfg.motion_clip_id
     motion = MotionLoader(
         motion_cfg.motion_file,
         robot_body_names,
         robot_config.dof_names,
         device="cpu",
-        motion_clip_id=motion_cfg.motion_clip_id,
-        motion_clip_name=motion_cfg.motion_clip_name,
+        motion_clip_id=clip_id,
+        motion_clip_name=clip_name,
     )
 
     name_to_robot_idx = {name: idx for idx, name in enumerate(robot_config.dof_names)}
@@ -271,7 +354,7 @@ def _load_motion_qpos(
     return qpos, fps
 
 
-def _load_terrain_mesh(cfg: ExperimentConfig) -> trimesh.Trimesh | None:
+def _load_terrain_mesh(cfg: ExperimentConfig, clip_name: str | None = None) -> trimesh.Trimesh | None:
     terrain_cfg = cfg.terrain.terrain_term
     mesh_type = terrain_cfg.mesh_type
     mesh_type_value = mesh_type.value if isinstance(mesh_type, MeshType) else str(mesh_type)
@@ -280,12 +363,34 @@ def _load_terrain_mesh(cfg: ExperimentConfig) -> trimesh.Trimesh | None:
     if not terrain_cfg.obj_file_path:
         return None
 
-    terrain_path = _resolve_data_path(terrain_cfg.obj_file_path)
-    base = trimesh.load(terrain_path, process=False)
-    if isinstance(base, trimesh.Scene):
-        base = base.dump(concatenate=True)
-    if not isinstance(base, trimesh.Trimesh):
-        raise ValueError(f"Loaded terrain is not a trimesh: {type(base)}")
+    terrain_path = Path(_resolve_data_path(terrain_cfg.obj_file_path))
+
+    def _load_mesh(path: Path) -> trimesh.Trimesh:
+        base_mesh = trimesh.load(str(path), process=False)
+        if isinstance(base_mesh, trimesh.Scene):
+            base_mesh = base_mesh.dump(concatenate=True)
+        if not isinstance(base_mesh, trimesh.Trimesh):
+            raise ValueError(f"Loaded terrain is not a trimesh: {type(base_mesh)}")
+        return base_mesh
+
+    if terrain_path.is_dir():
+        obj_paths = sorted(list(terrain_path.glob("*.obj")) + list(terrain_path.glob("*.OBJ")))
+        if not obj_paths:
+            return None
+        chosen = None
+        if clip_name:
+            for path in obj_paths:
+                if path.stem == clip_name:
+                    chosen = path
+                    break
+        if chosen is None:
+            chosen = obj_paths[0]
+        return _load_mesh(chosen)
+
+    if not terrain_path.exists():
+        return None
+
+    base = _load_mesh(terrain_path)
 
     num_rows = max(1, int(terrain_cfg.num_rows * terrain_cfg.scale_factor))
     num_cols = max(1, int(terrain_cfg.num_cols * terrain_cfg.scale_factor))
@@ -322,10 +427,8 @@ def replay(cfg: ExperimentConfig) -> None:
 
     server.scene.add_grid("/grid", width=8.0, height=8.0, position=(0.0, 0.0, 0.0))
 
-    terrain_mesh = _load_terrain_mesh(cfg)
-    terrain_handle = None
-    if terrain_mesh is not None:
-        terrain_handle = server.scene.add_mesh_trimesh("/terrain", terrain_mesh)
+    motion_choices = _list_motion_clips(motion_cfg)
+    active_clip = _select_initial_clip(motion_cfg, motion_choices)
 
     viser_joint_names = list(vr.get_actuated_joint_names())
     default_joint_robot = _build_default_joint_pos(cfg.robot)
@@ -336,19 +439,82 @@ def replay(cfg: ExperimentConfig) -> None:
     default_joint_viser = np.array(
         [default_joint_robot[name_to_robot_idx[name]] for name in viser_joint_names], dtype=np.float32
     )
-    qpos, fps = _load_motion_qpos(motion_cfg, cfg.robot, viser_joint_names)
-    qpos = _maybe_add_default_pose_transitions(
-        qpos,
-        motion_cfg=motion_cfg,
-        robot_config=cfg.robot,
-        robot_dof=len(viser_joint_names),
-        fps=float(fps),
-        default_joint_pos=default_joint_viser,
-    )
+
+    terrain_state: dict[str, viser.GlbHandle | None] = {"handle": None}
+    motion_state: dict[str, object] = {}
+
+    def _set_terrain_for_clip(clip_name: str) -> None:
+        handle = terrain_state["handle"]
+        if handle is not None:
+            handle.remove()
+            terrain_state["handle"] = None
+        terrain_mesh = _load_terrain_mesh(cfg, clip_name=clip_name)
+        if terrain_mesh is None:
+            return
+        terrain_state["handle"] = server.scene.add_mesh_trimesh("/terrain", terrain_mesh)
+
+    def _load_clip(clip_name: str) -> None:
+        qpos, fps = _load_motion_qpos(
+            motion_cfg,
+            cfg.robot,
+            viser_joint_names,
+            motion_clip_name=clip_name,
+        )
+        qpos = _maybe_add_default_pose_transitions(
+            qpos,
+            motion_cfg=motion_cfg,
+            robot_config=cfg.robot,
+            robot_dof=len(viser_joint_names),
+            fps=float(fps),
+            default_joint_pos=default_joint_viser,
+        )
+        if qpos.shape[0] == 0:
+            raise ValueError("Loaded motion has zero frames.")
+        motion_state.update(
+            {
+                "clip": clip_name,
+                "qpos": qpos,
+                "fps": int(fps),
+                "n_frames": int(qpos.shape[0]),
+                "has_object": bool(vo is not None and qpos.shape[1] >= (7 + len(viser_joint_names) + 7)),
+            }
+        )
+
+    _load_clip(active_clip)
+    _set_terrain_for_clip(active_clip)
+
+    with server.gui.add_folder("Motion"):
+        clip_dropdown = server.gui.add_dropdown("Clip", options=tuple(motion_choices), initial_value=active_clip)
+        reload_btn = server.gui.add_button("Reload clip")
+        motion_source = server.gui.add_markdown(f"Source: `{motion_cfg.motion_file}`")
+        clip_info = server.gui.add_markdown("")
 
     with server.gui.add_folder("Display"):
         show_meshes_cb = server.gui.add_checkbox("Show meshes", initial_value=True)
-        show_terrain_cb = server.gui.add_checkbox("Show terrain", initial_value=terrain_handle is not None)
+        show_terrain_cb = server.gui.add_checkbox(
+            "Show terrain", initial_value=terrain_state["handle"] is not None
+        )
+
+    with server.gui.add_folder("Playback"):
+        frame_slider = server.gui.add_slider(
+            "Frame",
+            min=0,
+            max=max(0, int(motion_state["n_frames"]) - 1),
+            step=1,
+            initial_value=0,
+        )
+        play_btn = server.gui.add_button("Play / Pause")
+        fps_in = server.gui.add_number("FPS", initial_value=int(motion_state["fps"]), min=1, max=240, step=1)
+        interp_mult_in = server.gui.add_number("Visual FPS multiplier", initial_value=2, min=1, max=8, step=1)
+        loop_cb = server.gui.add_checkbox("Loop", initial_value=False)
+
+    def _update_clip_info() -> None:
+        clip_name = str(motion_state["clip"])
+        n_frames = int(motion_state["n_frames"])
+        fps_val = int(motion_state["fps"])
+        clip_info.content = f"Clip: `{clip_name}` | frames: {n_frames} | fps: {fps_val}"
+
+    _update_clip_info()
 
     @show_meshes_cb.on_update
     def _(_evt) -> None:
@@ -358,27 +524,116 @@ def replay(cfg: ExperimentConfig) -> None:
 
     @show_terrain_cb.on_update
     def _(_evt) -> None:
-        if terrain_handle is not None:
-            terrain_handle.visible = bool(show_terrain_cb.value)
+        handle = terrain_state["handle"]
+        if handle is not None:
+            handle.visible = bool(show_terrain_cb.value)
 
-    create_motion_control_sliders(
-        server=server,
-        viser_robot=vr,
-        robot_base_frame=robot_root,
-        motion_sequence=qpos,
-        robot_dof=len(viser_joint_names),
-        viser_object=vo,
-        object_base_frame=object_root if vo is not None else None,
-        contains_object_in_qpos=bool(vo is not None and qpos.shape[1] >= (7 + len(viser_joint_names) + 7)),
-        initial_fps=fps,
-        initial_interp_mult=2,
-        loop=False,
-    )
+    def _apply_frame(frame: np.ndarray) -> None:
+        root_pos = frame[0:3]
+        root_quat_wxyz = frame[3:7]
+        joints = frame[7 : 7 + len(viser_joint_names)]
+        robot_root.position = root_pos
+        robot_root.wxyz = root_quat_wxyz
+        vr.update_cfg(joints.astype(np.float32, copy=False))
 
-    n_frames = qpos.shape[0]
-    print(
-        f"[viser_replay] Loaded {n_frames} frames | fps={fps} | object={'yes' if vo is not None else 'no'}"
-    )
+        if vo is None:
+            return
+        if motion_state["has_object"]:
+            vo.show_visual = True
+            object_root.position = frame[-7:-4]
+            object_root.wxyz = frame[-4:]
+        else:
+            vo.show_visual = False
+
+    def _interp_qpos(q0: np.ndarray, q1: np.ndarray, u: float) -> np.ndarray:
+        out = q0.copy()
+        out[0:3] = (1.0 - u) * q0[0:3] + u * q1[0:3]
+        out[3:7] = _slerp(q0[3:7], q1[3:7], u)
+        out[7 : 7 + len(viser_joint_names)] = (
+            (1.0 - u) * q0[7 : 7 + len(viser_joint_names)]
+            + u * q1[7 : 7 + len(viser_joint_names)]
+        )
+        if motion_state["has_object"]:
+            out[-7:-4] = (1.0 - u) * q0[-7:-4] + u * q1[-7:-4]
+            out[-4:] = _slerp(q0[-4:], q1[-4:], u)
+        return out
+
+    def _apply_frame_from_float(f_val: float) -> None:
+        qpos = np.asarray(motion_state["qpos"])
+        n_frames = int(motion_state["n_frames"])
+        if n_frames <= 0:
+            return
+        i0 = int(np.clip(np.floor(f_val), 0, n_frames - 1))
+        i1 = min(i0 + 1, n_frames - 1)
+        u = float(f_val - i0)
+        if i0 == i1 or u <= 1.0e-6:
+            _apply_frame(qpos[i0])
+        else:
+            _apply_frame(_interp_qpos(qpos[i0], qpos[i1], u))
+
+    playing = {"flag": False}
+    frame_f = {"value": float(frame_slider.value)}
+    updating_programmatically = {"flag": False}
+
+    @play_btn.on_click
+    def _(_evt) -> None:
+        playing["flag"] = not playing["flag"]
+
+    @frame_slider.on_update
+    def _(_evt) -> None:
+        if not updating_programmatically["flag"]:
+            playing["flag"] = False
+            frame_f["value"] = float(frame_slider.value)
+            _apply_frame_from_float(frame_f["value"])
+
+    def _set_clip(clip_name: str) -> None:
+        playing["flag"] = False
+        _load_clip(clip_name)
+        _set_terrain_for_clip(clip_name)
+        frame_f["value"] = 0.0
+        updating_programmatically["flag"] = True
+        frame_slider.max = max(0, int(motion_state["n_frames"]) - 1)
+        frame_slider.value = 0
+        updating_programmatically["flag"] = False
+        fps_in.value = int(motion_state["fps"])
+        _update_clip_info()
+        _apply_frame_from_float(frame_f["value"])
+        if terrain_state["handle"] is not None:
+            terrain_state["handle"].visible = bool(show_terrain_cb.value)
+
+    @clip_dropdown.on_update
+    def _(_evt) -> None:
+        _set_clip(str(clip_dropdown.value))
+
+    @reload_btn.on_click
+    def _(_evt) -> None:
+        _set_clip(str(clip_dropdown.value))
+
+    def _player_loop() -> None:
+        next_tick = time.perf_counter()
+        while True:
+            if playing["flag"]:
+                now = time.perf_counter()
+                fps_val = max(1, int(fps_in.value))
+                mult = max(1, int(interp_mult_in.value))
+                dt = 1.0 / (fps_val * mult)
+                if now >= next_tick:
+                    next_tick = now + dt
+                    frame_f["value"] += 1.0 / float(mult)
+                    last_frame = int(motion_state["n_frames"]) - 1
+                    if frame_f["value"] >= last_frame:
+                        if loop_cb.value:
+                            frame_f["value"] = 0.0
+                        else:
+                            frame_f["value"] = float(last_frame)
+                            playing["flag"] = False
+                    updating_programmatically["flag"] = True
+                    frame_slider.value = int(frame_f["value"])
+                    updating_programmatically["flag"] = False
+                    _apply_frame_from_float(frame_f["value"])
+            time.sleep(0.001)
+
+    _apply_frame_from_float(frame_f["value"])
     print("Open the viewer URL printed above. Close the process (Ctrl+C) to exit.")
 
     while True:

@@ -139,6 +139,33 @@ class DistillationConfig:
     loss_coef: float = 1.0
     """Weight for the distillation loss added to actor loss."""
 
+    mode: str = "mse"
+    """Distillation mode: "mse" (legacy) or "dagger" (VideoMimic-style BC)."""
+
+    policy_to_clone: str | list[str] | None = None
+    """Teacher checkpoint path(s) for dagger (aliases teacher_checkpoint)."""
+
+    bc_loss_coef: float | None = None
+    """Behavior cloning loss coefficient for dagger. Defaults to loss_coef if unset."""
+
+    clip_teacher_actions: bool = False
+    """Whether to clip teacher actions when computing BC loss."""
+
+    clip_actions_threshold: float = 100.0
+    """Absolute action clip value for BC loss when clip_teacher_actions is enabled."""
+
+    take_teacher_actions: bool = False
+    """Whether to step the environment with teacher actions instead of student actions."""
+
+    switch_to_rl_after: int = -1
+    """Iteration to switch off BC loss (set to 0 or negative to disable)."""
+
+    use_multi_teacher: bool = False
+    """Whether to use multiple teacher checkpoints (requires policy_to_clone list)."""
+
+    multi_teacher_select_obs_var: str = "teacher_checkpoint_index"
+    """Observation key used to select teacher policy when use_multi_teacher is True."""
+
 
 @dataclass(frozen=True)
 class PPOModuleDictConfig:

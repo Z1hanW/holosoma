@@ -19,6 +19,7 @@ from holosoma.managers.termination import TerminationManager
 from holosoma.managers.terrain import TerrainManager
 from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
 from holosoma.utils.helpers import get_class
+from holosoma.utils.rollout_recorder import RolloutRecorder
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.torch_utils import to_torch
 
@@ -182,6 +183,7 @@ class BaseTask:
         if self.perception_manager is not None:
             self.perception_manager.setup()
         self._init_depth_logging_state()
+        self._rollout_recorder = RolloutRecorder(self)
 
         # Initialize reset manager from simulator config
         self.reset_manager = ResetEventManager(
@@ -249,6 +251,8 @@ class BaseTask:
                 self.simulator.on_episode_end(env_id.item())
         self._finalize_depth_logging_if_needed()
         self._finalize_startup_depth_video_if_needed(env_ids)
+        if hasattr(self, "_rollout_recorder"):
+            self._rollout_recorder.on_reset(env_ids)
 
         # Reset observation history BEFORE state changes (must happen first to clear history buffers)
         self.observation_manager.reset(env_ids)
@@ -450,6 +454,8 @@ class BaseTask:
         self._check_termination()
         self._compute_reward()
         self._update_log_dict()
+        if hasattr(self, "_rollout_recorder"):
+            self._rollout_recorder.record_step()
 
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         final_obs_dict = {}

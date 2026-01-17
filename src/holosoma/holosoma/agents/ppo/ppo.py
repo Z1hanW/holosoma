@@ -160,9 +160,20 @@ class PPO(BaseAlgo):
         self._init_obs_slices()
         self._setup_obs_normalizers()
         self.distill_enabled = False
+        self.distill_mode = "mse"
+        self.dagger_enabled = False
         self.distill_loss_coef = 0.0
+        self.bc_loss_coef = 0.0
+        self.clip_teacher_actions = False
+        self.clip_actions_threshold = 0.0
+        self.take_teacher_actions = False
+        self.switch_to_rl_after = -1
+        self.use_multi_teacher = False
+        self.multi_teacher_select_obs_var = "teacher_checkpoint_index"
         self.teacher_actor = None
+        self.teacher_actors: list[nn.Module] = []
         self.teacher_actor_obs_normalizers: dict[str, nn.Module] = {}
+        self.teacher_actor_obs_normalizers_list: list[dict[str, nn.Module]] = []
 
     def _init_obs_slices(self) -> None:
         def build_slices(keys: list[str]) -> dict[str, slice]:
@@ -227,16 +238,33 @@ class PPO(BaseAlgo):
             obs, self.critic_obs_keys, self.critic_obs_slices, self.critic_obs_normalizers, update=update
         )
 
-    def _normalize_teacher_actor_obs(self, obs: torch.Tensor) -> torch.Tensor:
+    def _normalize_teacher_actor_obs(
+        self, obs: torch.Tensor, normalizers: dict[str, nn.Module] | None = None
+    ) -> torch.Tensor:
         if not self.distill_enabled:
             return obs
+        if normalizers is None:
+            normalizers = self.teacher_actor_obs_normalizers
         return self._normalize_concat_obs(
             obs,
             self.actor_obs_keys,
             self.actor_obs_slices,
-            self.teacher_actor_obs_normalizers,
+            normalizers,
             update=False,
         )
+
+    def _get_actor_std_for_loss(self, actor: nn.Module) -> torch.Tensor:
+        std = actor.std
+        min_noise_std = getattr(actor, "min_noise_std", None)
+        min_mean_noise_std = getattr(actor, "min_mean_noise_std", None)
+        if min_noise_std:
+            return torch.clamp(std, min=min_noise_std)
+        if min_mean_noise_std:
+            current_mean = std.mean()
+            if current_mean < min_mean_noise_std:
+                scale_up = min_mean_noise_std / (current_mean + 1e-6)
+                return std * scale_up
+        return std
 
     def _init_obs_keys(self):
         self.actor_obs_keys = self.config.module_dict.actor.input_dim
@@ -285,25 +313,14 @@ class PPO(BaseAlgo):
             self.config.critic_optimizer, params=self.critic.parameters(), lr=self.critic_learning_rate
         )
 
-    def _setup_distillation(self) -> None:
-        distill_cfg = self.config.distill
-        self.distill_enabled = bool(distill_cfg.enabled)
-        self.distill_loss_coef = float(distill_cfg.loss_coef)
-        self.teacher_actor = None
-        self.teacher_actor_obs_normalizers: dict[str, nn.Module] = {}
-        if not self.distill_enabled:
-            return
-        if not distill_cfg.teacher_checkpoint:
-            raise ValueError("Distillation enabled but distill.teacher_checkpoint is not set.")
-
-        ckpt_path = distill_cfg.teacher_checkpoint
+    def _load_teacher_actor(self, ckpt_path: str) -> tuple[nn.Module, dict[str, nn.Module]]:
         if ckpt_path.startswith("wandb://"):
             from holosoma.utils.eval_utils import load_checkpoint  # noqa: PLC0415
 
             ckpt_path = str(load_checkpoint(ckpt_path, str(self.log_dir)))
 
         teacher_state = torch.load(ckpt_path, map_location=self.device)
-        self.teacher_actor = setup_ppo_actor_module(
+        teacher_actor = setup_ppo_actor_module(
             obs_dim_dict=self.algo_obs_dim_dict,
             module_config=self.config.module_dict.actor,
             num_actions=self.num_act,
@@ -311,21 +328,81 @@ class PPO(BaseAlgo):
             device=self.device,
             history_length=self.algo_history_length_dict,
         )
-        self.teacher_actor.load_state_dict(teacher_state["actor_model_state_dict"])
-        self.teacher_actor.eval()
-        for param in self.teacher_actor.parameters():
+        teacher_actor.load_state_dict(teacher_state["actor_model_state_dict"])
+        teacher_actor.eval()
+        for param in teacher_actor.parameters():
             param.requires_grad_(False)
 
-        self.teacher_actor_obs_normalizers = self._build_group_normalizers(
-            self.actor_obs_keys, self.config.normalize_actor_obs
-        )
+        teacher_normalizers = self._build_group_normalizers(self.actor_obs_keys, self.config.normalize_actor_obs)
         actor_norm_state = teacher_state.get("actor_obs_normalizer_state")
         if isinstance(actor_norm_state, dict):
             for key, state in actor_norm_state.items():
-                if state is not None and key in self.teacher_actor_obs_normalizers:
-                    self.teacher_actor_obs_normalizers[key].load_state_dict(state)
-        for normalizer in self.teacher_actor_obs_normalizers.values():
+                if state is not None and key in teacher_normalizers:
+                    teacher_normalizers[key].load_state_dict(state)
+        for normalizer in teacher_normalizers.values():
             normalizer.eval()
+        return teacher_actor, teacher_normalizers
+
+    def _setup_distillation(self) -> None:
+        distill_cfg = self.config.distill
+        self.distill_mode = getattr(distill_cfg, "mode", "mse")
+        self.distill_enabled = False
+        self.dagger_enabled = False
+        self.distill_loss_coef = float(distill_cfg.loss_coef)
+        self.bc_loss_coef = (
+            float(distill_cfg.bc_loss_coef)
+            if distill_cfg.bc_loss_coef is not None
+            else float(distill_cfg.loss_coef)
+        )
+        self.clip_teacher_actions = bool(distill_cfg.clip_teacher_actions)
+        self.clip_actions_threshold = float(distill_cfg.clip_actions_threshold)
+        self.take_teacher_actions = bool(distill_cfg.take_teacher_actions)
+        self.switch_to_rl_after = int(distill_cfg.switch_to_rl_after)
+        self.use_multi_teacher = bool(distill_cfg.use_multi_teacher)
+        self.multi_teacher_select_obs_var = str(distill_cfg.multi_teacher_select_obs_var)
+
+        self.teacher_actor = None
+        self.teacher_actors = []
+        self.teacher_actor_obs_normalizers = {}
+        self.teacher_actor_obs_normalizers_list = []
+
+        teacher_checkpoint = distill_cfg.policy_to_clone or distill_cfg.teacher_checkpoint
+
+        if self.distill_mode == "dagger":
+            if self.bc_loss_coef <= 0.0 and self.switch_to_rl_after <= 0:
+                return
+            if not teacher_checkpoint:
+                raise ValueError("Dagger enabled but distill.policy_to_clone/teacher_checkpoint is not set.")
+
+            teacher_paths = teacher_checkpoint if isinstance(teacher_checkpoint, list) else [teacher_checkpoint]
+            if self.use_multi_teacher:
+                if not teacher_paths:
+                    raise ValueError("use_multi_teacher=True requires a non-empty policy_to_clone list.")
+            elif len(teacher_paths) != 1:
+                raise ValueError("Multiple teacher checkpoints provided but use_multi_teacher is False.")
+
+            for path in teacher_paths:
+                teacher_actor, teacher_normalizers = self._load_teacher_actor(path)
+                if self.use_multi_teacher:
+                    self.teacher_actors.append(teacher_actor)
+                    self.teacher_actor_obs_normalizers_list.append(teacher_normalizers)
+                else:
+                    self.teacher_actor = teacher_actor
+                    self.teacher_actor_obs_normalizers = teacher_normalizers
+
+            self.distill_enabled = True
+            self.dagger_enabled = True
+            return
+
+        if not distill_cfg.enabled:
+            return
+        if not teacher_checkpoint:
+            raise ValueError("Distillation enabled but distill.teacher_checkpoint is not set.")
+        if isinstance(teacher_checkpoint, list):
+            raise ValueError("Distillation mode 'mse' expects a single teacher checkpoint.")
+
+        self.teacher_actor, self.teacher_actor_obs_normalizers = self._load_teacher_actor(teacher_checkpoint)
+        self.distill_enabled = True
 
     def _get_obs_dim(self, obs_keys: list[str]) -> int:
         """Compute total observation dimension for given observation keys."""
@@ -370,6 +447,10 @@ class PPO(BaseAlgo):
         ]
         for key, shape, dtype in minibatch_keys:
             self.storage.register(key, shape=shape, dtype=dtype)
+        if self.dagger_enabled:
+            self.storage.register("teacher_actions", shape=(self.num_act,), dtype=torch.float)
+            if self.use_multi_teacher:
+                self.storage.register("teacher_indices", shape=(1,), dtype=torch.long)
 
     def _eval_mode(self):
         self.actor.eval()
@@ -382,6 +463,11 @@ class PPO(BaseAlgo):
             self.teacher_actor.eval()
             for normalizer in self.teacher_actor_obs_normalizers.values():
                 normalizer.eval()
+        if self.teacher_actors:
+            for teacher_actor, normalizers in zip(self.teacher_actors, self.teacher_actor_obs_normalizers_list):
+                teacher_actor.eval()
+                for normalizer in normalizers.values():
+                    normalizer.eval()
 
     def _train_mode(self):
         self.actor.train()
@@ -394,6 +480,11 @@ class PPO(BaseAlgo):
             self.teacher_actor.eval()
             for normalizer in self.teacher_actor_obs_normalizers.values():
                 normalizer.eval()
+        if self.teacher_actors:
+            for teacher_actor, normalizers in zip(self.teacher_actors, self.teacher_actor_obs_normalizers_list):
+                teacher_actor.eval()
+                for normalizer in normalizers.values():
+                    normalizer.eval()
 
     def learn(self):
         self._train_mode()
@@ -436,6 +527,31 @@ class PPO(BaseAlgo):
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration:05d}.pt"))
             self.export(onnx_file_path=os.path.join(self.log_dir, f"model_{self.current_learning_iteration:05d}.onnx"))
 
+    def _select_teacher_actions(
+        self, actor_obs_raw: torch.Tensor, obs_dict: dict[str, torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self.use_multi_teacher:
+            if self.multi_teacher_select_obs_var not in obs_dict:
+                raise ValueError(
+                    f"Multi-teacher enabled but observation '{self.multi_teacher_select_obs_var}' not found."
+                )
+            teacher_indices = obs_dict[self.multi_teacher_select_obs_var].view(-1).long()
+            teacher_actions = torch.zeros((actor_obs_raw.shape[0], self.num_act), device=actor_obs_raw.device)
+            for idx, (teacher_actor, normalizers) in enumerate(
+                zip(self.teacher_actors, self.teacher_actor_obs_normalizers_list)
+            ):
+                mask = teacher_indices == idx
+                if not mask.any():
+                    continue
+                teacher_obs = self._normalize_teacher_actor_obs(actor_obs_raw[mask], normalizers=normalizers)
+                teacher_actions[mask] = teacher_actor.act({"actor_obs": teacher_obs})
+            return teacher_actions, teacher_indices
+
+        assert self.teacher_actor is not None, "Teacher actor is not initialized."
+        teacher_obs = self._normalize_teacher_actor_obs(actor_obs_raw)
+        teacher_actions = self.teacher_actor.act({"actor_obs": teacher_obs})
+        return teacher_actions, None
+
     def _rollout_step(self, obs_dict):
         with torch.inference_mode():
             for _ in range(self.config.num_steps_per_env):
@@ -449,7 +565,15 @@ class PPO(BaseAlgo):
                 actions = self.actor.act({"actor_obs": actor_obs})
                 values = self.critic.evaluate({"critic_obs": critic_obs}).detach()
 
-                obs_dict, rewards, dones, infos = self.env.step({"actions": actions})
+                teacher_actions = None
+                teacher_indices = None
+                actions_to_step = actions
+                if self.dagger_enabled and self.bc_loss_coef > 0.0:
+                    teacher_actions, teacher_indices = self._select_teacher_actions(actor_obs_raw, obs_dict)
+                    if self.take_teacher_actions:
+                        actions_to_step = teacher_actions
+
+                obs_dict, rewards, dones, infos = self.env.step({"actions": actions_to_step})
 
                 for obs_key in obs_dict:
                     obs_dict[obs_key] = obs_dict[obs_key].to(self.device)
@@ -476,11 +600,23 @@ class PPO(BaseAlgo):
                     action_sigma=self.actor.action_std.detach(),
                     rewards=(rewards + final_rewards).view(-1, 1),
                     dones=dones.view(-1, 1),
+                    teacher_actions=teacher_actions.detach()
+                    if teacher_actions is not None
+                    else torch.zeros_like(actions),
+                    teacher_indices=teacher_indices.view(-1, 1)
+                    if teacher_indices is not None
+                    else torch.zeros(actions.shape[0], 1, device=actions.device, dtype=torch.long),
                 )
 
                 # Reset actor and critic for completed envs
                 self.actor.reset(dones)
                 self.critic.reset(dones)
+                if self.dagger_enabled:
+                    if self.use_multi_teacher:
+                        for teacher_actor in self.teacher_actors:
+                            teacher_actor.reset(dones)
+                    elif self.teacher_actor is not None:
+                        self.teacher_actor.reset(dones)
 
                 if self.log_dir is not None:
                     # Update episode stats using logging helper
@@ -524,6 +660,9 @@ class PPO(BaseAlgo):
         return returns, advantages
 
     def _training_step(self) -> dict[str, float]:
+        if self.dagger_enabled and self.switch_to_rl_after > 0:
+            if self.current_learning_iteration == self.switch_to_rl_after:
+                self.bc_loss_coef = 0.0
         generator = self.storage.mini_batch_generator(self.config.num_mini_batches, self.config.num_learning_epochs)
 
         minibatch: Minibatch
@@ -612,6 +751,7 @@ class PPO(BaseAlgo):
         sigma_batch = self.actor.action_std[:original_batch_size]
         entropy_batch = self.actor.entropy[:original_batch_size]
 
+        kl_mean = torch.tensor(0.0, device=self.device)
         if self.config.desired_kl is not None and self.config.schedule == "adaptive":
             # Compute the KL divergence between the old and new action distributions
             kl_mean = self._compute_kl_div(old_mu_batch, old_sigma_batch, mu_batch, sigma_batch)
@@ -657,7 +797,7 @@ class PPO(BaseAlgo):
             symmetry_critic_loss = torch.tensor(0.0, device=self.device)
 
         entropy_loss = entropy_batch.mean()
-        actor_loss = (
+        actor_loss_base = (
             surrogate_loss
             - self.config.entropy_coef * entropy_loss
             + self.config.symmetry_actor_coef * symmetry_actor_loss
@@ -665,8 +805,39 @@ class PPO(BaseAlgo):
 
         critic_loss = self.config.value_loss_coef * value_loss + self.config.symmetry_critic_coef * symmetry_critic_loss
 
+        actor_loss = actor_loss_base
         distill_loss = torch.tensor(0.0, device=self.device)
-        if self.distill_enabled:
+        bc_loss = torch.tensor(0.0, device=self.device)
+        if self.distill_mode == "dagger" and self.dagger_enabled and self.bc_loss_coef > 0.0:
+            teacher_actions_batch = minibatch.get("teacher_actions")
+            if teacher_actions_batch is None:
+                raise ValueError("Dagger enabled but teacher_actions are missing from rollout storage.")
+            teacher_actions_batch = teacher_actions_batch[:original_batch_size]
+            if self.clip_teacher_actions:
+                teacher_actions_batch = torch.clamp(
+                    teacher_actions_batch, -self.clip_actions_threshold, self.clip_actions_threshold
+                )
+
+            if self.use_multi_teacher:
+                teacher_indices = minibatch.get("teacher_indices")
+                if teacher_indices is None:
+                    raise ValueError("Multi-teacher enabled but teacher_indices are missing from rollout storage.")
+                teacher_indices = teacher_indices.view(-1)[:original_batch_size]
+                sigma_teacher = torch.zeros_like(sigma_batch)
+                for idx, teacher_actor in enumerate(self.teacher_actors):
+                    mask = teacher_indices == idx
+                    if mask.any():
+                        sigma_teacher[mask] = self._get_actor_std_for_loss(teacher_actor).detach()
+            else:
+                assert self.teacher_actor is not None, "Teacher actor is not initialized."
+                sigma_teacher = self._get_actor_std_for_loss(self.teacher_actor).detach()
+                sigma_teacher = sigma_teacher.unsqueeze(0).expand_as(sigma_batch)
+
+            bc_loss = (teacher_actions_batch - mu_batch).pow(2).sum(dim=-1).mean() + (
+                sigma_batch - sigma_teacher
+            ).pow(2).sum(dim=-1).mean()
+            actor_loss = (1.0 - self.bc_loss_coef) * actor_loss_base + self.bc_loss_coef * bc_loss
+        elif self.distill_enabled:
             assert self.teacher_actor is not None, "Distillation enabled but teacher actor is not initialized."
             teacher_obs = self._normalize_teacher_actor_obs(raw_actor_obs)
             with torch.inference_mode():
@@ -683,6 +854,7 @@ class PPO(BaseAlgo):
             "surrogate_loss": surrogate_loss,
             "entropy_loss": entropy_loss,
             "distill_loss": distill_loss,
+            "bc_loss": bc_loss,
             "kl_mean": kl_mean,
         }
 
