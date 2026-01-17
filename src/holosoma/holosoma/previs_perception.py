@@ -54,6 +54,20 @@ def _resolve_save_png_enabled() -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y"}
 
 
+def _resolve_save_rgb_png_enabled() -> bool:
+    raw = os.environ.get("HOLOSOMA_PREVIS_PERCEPTION_SAVE_RGB_PNG", "")
+    if not raw:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _resolve_rgb_video_enabled() -> bool:
+    raw = os.environ.get("HOLOSOMA_PREVIS_PERCEPTION_RGB_VIDEO", "")
+    if not raw:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "y"}
+
+
 def _resolve_video_fps(env) -> float:
     raw = os.environ.get("HOLOSOMA_PREVIS_PERCEPTION_VIDEO_FPS", "")
     if raw:
@@ -86,11 +100,19 @@ def replay_perception(tyro_config: ExperimentConfig) -> None:
     video_enabled = _resolve_video_enabled()
     save_npy = _resolve_save_npy_enabled()
     save_png = _resolve_save_png_enabled()
-    if output_dir is None and (video_enabled or save_npy or save_png):
+    save_rgb_png = _resolve_save_rgb_png_enabled()
+    rgb_video_enabled = _resolve_rgb_video_enabled()
+    if output_dir is None and (video_enabled or save_npy or save_png or save_rgb_png or rgb_video_enabled):
         raise RuntimeError("Depth output requires HOLOSOMA_PREVIS_PERCEPTION_DIR to be set.")
     video_writer = None
+    rgb_video_writer = None
     video_fps = _resolve_video_fps(env) if video_enabled else 0.0
     frame_idx = 0
+
+    if save_rgb_png or rgb_video_enabled:
+        camera_source = getattr(env.perception_manager.cfg, "camera_source", "")
+        if camera_source not in {"rendered", "rendered_depth_sensor"}:
+            raise RuntimeError("RGB output requires camera_source=rendered or rendered_depth_sensor.")
 
     done = False
     while not done:
@@ -124,10 +146,33 @@ def replay_perception(tyro_config: ExperimentConfig) -> None:
 
             video_writer.write(cv2.cvtColor(depth_rgb, cv2.COLOR_RGB2BGR))
 
+        if save_rgb_png or rgb_video_enabled:
+            rgb = env.perception_manager.capture_rendered_rgb()
+
+            if output_dir is not None and save_rgb_png and frame_idx % stride == 0:
+                import cv2  # noqa: PLC0415
+
+                rgb_path = output_dir / f"rgb_{frame_idx:06d}.png"
+                cv2.imwrite(str(rgb_path), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+
+            if rgb_video_enabled:
+                if rgb_video_writer is None:
+                    import cv2  # noqa: PLC0415
+
+                    height, width = rgb.shape[:2]
+                    video_path = output_dir / "rgb_video.mp4"
+                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                    rgb_video_writer = cv2.VideoWriter(str(video_path), fourcc, video_fps, (width, height))
+                import cv2  # noqa: PLC0415
+
+                rgb_video_writer.write(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+
         frame_idx += 1
 
     if video_writer is not None:
         video_writer.release()
+    if rgb_video_writer is not None:
+        rgb_video_writer.release()
 
     close_simulation_app(simulation_app)
 

@@ -40,6 +40,7 @@ class IsaacSimDepthCamera:
         self._camera_prim_path: str | None = None
         self._render_product = None
         self._depth_annotator = None
+        self._rgb_annotator = None
         self._view = None
         self._annotator_name: str | None = None
         self._body_index: int | None = None
@@ -47,6 +48,7 @@ class IsaacSimDepthCamera:
         self._body_offset_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self._device)
         self._warned_multi_env = False
         self._warned_invalid_depth = False
+        self._warned_invalid_rgb = False
 
     def setup(self) -> None:
         if self._env_id < 0 or self._env_id >= self._env.num_envs:
@@ -81,6 +83,12 @@ class IsaacSimDepthCamera:
         self._render_product = rep.create.render_product(self._camera_prim_path, (self._width, self._height))
         self._depth_annotator, self._annotator_name = self._create_depth_annotator(rep)
         self._depth_annotator.attach([self._render_product])
+        self._rgb_annotator = rep.AnnotatorRegistry.get_annotator(
+            "rgb",
+            device=self._device,
+            do_array_copy=False,
+        )
+        self._rgb_annotator.attach([self._render_product])
 
     def capture_depth(self) -> torch.Tensor:
         if self._depth_annotator is None:
@@ -102,6 +110,26 @@ class IsaacSimDepthCamera:
         depth_array = self._sanitize_depth_array(depth_array)
         depth_tensor = torch.as_tensor(depth_array, device=self._device, dtype=torch.float32)
         return depth_tensor.unsqueeze(0)
+
+    def capture_rgb(self) -> np.ndarray:
+        if self._rgb_annotator is None:
+            raise RuntimeError("IsaacSimDepthCamera.setup() must be called before capture_rgb().")
+
+        if self._env.num_envs > 1 and not self._warned_multi_env:
+            self._warned_multi_env = True
+            env_count = self._env.num_envs
+            raise RuntimeError(
+                f"Rendered RGB camera only supports one environment; got num_envs={env_count}. "
+                "Use num_envs=1 for previs_perception or switch to raycast."
+            )
+
+        self._update_pose()
+        self._env.simulator.render()
+
+        rgb_data = self._rgb_annotator.get_data()
+        rgb_array = self._convert_rgb_to_numpy(rgb_data)
+        rgb_array = self._sanitize_rgb_array(rgb_array)
+        return rgb_array
 
     def _resolve_body_index(self) -> None:
         if self._body_name is None:
@@ -160,6 +188,12 @@ class IsaacSimDepthCamera:
             camera_quat_wxyz,
             torch.tensor([env_id], device=self._device, dtype=torch.int32),
         )
+        if self._rgb_view is not None and self._rgb_view is not self._view:
+            self._rgb_view.set_world_poses(
+                camera_pos.unsqueeze(0),
+                camera_quat_wxyz,
+                torch.tensor([env_id], device=self._device, dtype=torch.int32),
+            )
 
     @staticmethod
     def _calculate_focal_length_from_fov(vertical_fov_degrees: float, aperture_mm: float) -> float:
@@ -192,6 +226,14 @@ class IsaacSimDepthCamera:
             return depth_data.numpy()
         return np.asarray(depth_data)
 
+    @staticmethod
+    def _convert_rgb_to_numpy(rgb_data) -> np.ndarray:
+        if isinstance(rgb_data, np.ndarray):
+            return rgb_data
+        if hasattr(rgb_data, "numpy"):
+            return rgb_data.numpy()
+        return np.asarray(rgb_data)
+
     def _sanitize_depth_array(self, depth_array: np.ndarray) -> np.ndarray:
         if depth_array.size == 0:
             if not self._warned_invalid_depth:
@@ -221,6 +263,45 @@ class IsaacSimDepthCamera:
             depth_array = depth_array.copy()
             depth_array[invalid] = float(self._cfg.max_distance)
         return np.clip(depth_array, 0.0, float(self._cfg.max_distance))
+
+    def _sanitize_rgb_array(self, rgb_array: np.ndarray) -> np.ndarray:
+        if rgb_array.size == 0:
+            if not self._warned_invalid_rgb:
+                logger.warning("RGB annotator returned empty data; filling with zeros.")
+                self._warned_invalid_rgb = True
+            return np.zeros((self._height, self._width, 3), dtype=np.uint8)
+
+        if rgb_array.ndim == 1:
+            if rgb_array.size == self._height * self._width * 4:
+                rgb_array = rgb_array.reshape(self._height, self._width, 4)
+            elif rgb_array.size == self._height * self._width * 3:
+                rgb_array = rgb_array.reshape(self._height, self._width, 3)
+
+        if rgb_array.ndim == 3 and rgb_array.shape[-1] >= 3:
+            rgb_array = rgb_array[:, :, :3]
+        else:
+            if not self._warned_invalid_rgb:
+                logger.warning(
+                    "Unexpected RGB shape {}; expected ({}, {}, 3). Filling with zeros.",
+                    rgb_array.shape,
+                    self._height,
+                    self._width,
+                )
+                self._warned_invalid_rgb = True
+            return np.zeros((self._height, self._width, 3), dtype=np.uint8)
+
+        if rgb_array.shape[:2] != (self._height, self._width):
+            if not self._warned_invalid_rgb:
+                logger.warning(
+                    "Unexpected RGB shape {}; expected ({}, {}, 3). Filling with zeros.",
+                    rgb_array.shape,
+                    self._height,
+                    self._width,
+                )
+                self._warned_invalid_rgb = True
+            return np.zeros((self._height, self._width, 3), dtype=np.uint8)
+
+        return rgb_array.astype(np.uint8, copy=False)
 
 
 class IsaacSimDepthSensorCamera:
@@ -253,11 +334,16 @@ class IsaacSimDepthSensorCamera:
         self._depth_sensor = None
         self._sensor_asset = None
         self._view = None
+        self._rgb_view = None
+        self._rgb_camera_prim_path: str | None = None
+        self._rgb_render_product = None
+        self._rgb_annotator = None
         self._body_index: int | None = None
         self._body_offset_pos = torch.zeros(3, device=self._device)
         self._body_offset_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self._device)
         self._warned_multi_env = False
         self._warned_invalid_depth = False
+        self._warned_invalid_rgb = False
 
     def setup(self) -> None:
         if self._env_id < 0 or self._env_id >= self._env.num_envs:
@@ -266,6 +352,7 @@ class IsaacSimDepthSensorCamera:
             )
         self._resolve_body_index()
 
+        import omni.replicator.core as rep
         import omni.usd
         from isaacsim.core.prims import XFormPrim
         from pxr import UsdGeom
@@ -312,6 +399,7 @@ class IsaacSimDepthSensorCamera:
 
         self._view = XFormPrim(self._sensor_prim_path, reset_xform_properties=True)
         self._view.initialize()
+        self._setup_rgb_camera(stage, rep, UsdGeom)
 
     def capture_depth(self) -> torch.Tensor:
         if self._depth_sensor is None:
@@ -333,6 +421,26 @@ class IsaacSimDepthSensorCamera:
         depth_array = self._sanitize_depth_array(depth_array)
         depth_tensor = torch.as_tensor(depth_array, device=self._device, dtype=torch.float32)
         return depth_tensor.unsqueeze(0)
+
+    def capture_rgb(self) -> np.ndarray:
+        if self._rgb_annotator is None:
+            raise RuntimeError("RGB camera is not initialized; call setup() first.")
+
+        if self._env.num_envs > 1 and not self._warned_multi_env:
+            self._warned_multi_env = True
+            env_count = self._env.num_envs
+            raise RuntimeError(
+                f"Rendered RGB camera only supports one environment; got num_envs={env_count}. "
+                "Use num_envs=1 for previs_perception or switch to raycast."
+            )
+
+        self._update_pose()
+        self._env.simulator.render()
+
+        rgb_data = self._rgb_annotator.get_data()
+        rgb_array = IsaacSimDepthCamera._convert_rgb_to_numpy(rgb_data)
+        rgb_array = self._sanitize_rgb_array(rgb_array)
+        return rgb_array
 
     def _read_depth_frame(self):
         if hasattr(self._depth_sensor, "get_current_frame"):
@@ -365,6 +473,84 @@ class IsaacSimDepthSensorCamera:
 
             return get_assets_root_path() + asset_path
         return asset_path
+
+    def _setup_rgb_camera(self, stage, rep_module, usd_geom_module) -> None:
+        camera_prim = usd_geom_module.Camera.Get(stage, self._sensor_prim_path)
+        use_sensor_camera = (
+            camera_prim
+            and camera_prim.GetPrim().IsValid()
+            and camera_prim.GetPrim().IsA(usd_geom_module.Camera)
+        )
+
+        if use_sensor_camera:
+            self._rgb_camera_prim_path = self._sensor_prim_path
+            self._rgb_view = self._view
+        else:
+            self._rgb_camera_prim_path = f"/World/envs/env_{self._env_id}/PerceptionRgbCamera"
+            rgb_camera = usd_geom_module.Camera.Define(stage, self._rgb_camera_prim_path)
+            aspect_ratio = self._width / max(self._height, 1)
+            vertical_aperture = 24.0
+            horizontal_aperture = vertical_aperture * aspect_ratio
+            focal_length = IsaacSimDepthCamera._calculate_focal_length_from_fov(self._vfov_deg, vertical_aperture)
+            rgb_camera.GetFocalLengthAttr().Set(focal_length)
+            rgb_camera.GetClippingRangeAttr().Set((self._cfg.camera_near, self._cfg.camera_far))
+            rgb_camera.GetHorizontalApertureAttr().Set(horizontal_aperture)
+            rgb_camera.GetVerticalApertureAttr().Set(vertical_aperture)
+
+            from isaacsim.core.prims import XFormPrim  # noqa: PLC0415
+
+            self._rgb_view = XFormPrim(self._rgb_camera_prim_path, reset_xform_properties=True)
+            self._rgb_view.initialize()
+
+        self._rgb_render_product = rep_module.create.render_product(
+            self._rgb_camera_prim_path,
+            (self._width, self._height),
+        )
+        self._rgb_annotator = rep_module.AnnotatorRegistry.get_annotator(
+            "rgb",
+            device=self._device,
+            do_array_copy=False,
+        )
+        self._rgb_annotator.attach([self._rgb_render_product])
+
+    def _sanitize_rgb_array(self, rgb_array: np.ndarray) -> np.ndarray:
+        if rgb_array.size == 0:
+            if not self._warned_invalid_rgb:
+                logger.warning("RGB annotator returned empty data; filling with zeros.")
+                self._warned_invalid_rgb = True
+            return np.zeros((self._height, self._width, 3), dtype=np.uint8)
+
+        if rgb_array.ndim == 1:
+            if rgb_array.size == self._height * self._width * 4:
+                rgb_array = rgb_array.reshape(self._height, self._width, 4)
+            elif rgb_array.size == self._height * self._width * 3:
+                rgb_array = rgb_array.reshape(self._height, self._width, 3)
+
+        if rgb_array.ndim == 3 and rgb_array.shape[-1] >= 3:
+            rgb_array = rgb_array[:, :, :3]
+        else:
+            if not self._warned_invalid_rgb:
+                logger.warning(
+                    "Unexpected RGB shape {}; expected ({}, {}, 3). Filling with zeros.",
+                    rgb_array.shape,
+                    self._height,
+                    self._width,
+                )
+                self._warned_invalid_rgb = True
+            return np.zeros((self._height, self._width, 3), dtype=np.uint8)
+
+        if rgb_array.shape[:2] != (self._height, self._width):
+            if not self._warned_invalid_rgb:
+                logger.warning(
+                    "Unexpected RGB shape {}; expected ({}, {}, 3). Filling with zeros.",
+                    rgb_array.shape,
+                    self._height,
+                    self._width,
+                )
+                self._warned_invalid_rgb = True
+            return np.zeros((self._height, self._width, 3), dtype=np.uint8)
+
+        return rgb_array.astype(np.uint8, copy=False)
 
     def _sanitize_depth_array(self, depth_array: np.ndarray) -> np.ndarray:
         if depth_array.size == 0:

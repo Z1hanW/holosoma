@@ -212,6 +212,17 @@ class PerceptionManager:
             raise RuntimeError("Camera depth map requested but camera_depth output is disabled.")
         return self._camera_depth
 
+    def capture_rendered_rgb(self) -> Any:
+        if not self.enabled or self.cfg.output_mode != "camera_depth":
+            raise RuntimeError("RGB capture requested but camera_depth output is disabled.")
+        if not self._uses_rendered_camera():
+            raise RuntimeError("RGB capture requires camera_source=rendered or rendered_depth_sensor.")
+        if self._rendered_camera is None:
+            raise RuntimeError("Rendered camera is not initialized; call PerceptionManager.setup().")
+        if not hasattr(self._rendered_camera, "capture_rgb"):
+            raise RuntimeError("Rendered camera does not support RGB capture.")
+        return self._rendered_camera.capture_rgb()
+
     def get_camera_pose(
         self,
         env_ids: torch.Tensor | None = None,
