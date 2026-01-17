@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from loguru import logger
+
 from holosoma.config_types.perception import PerceptionConfig
 from holosoma.utils.camera_utils import build_camera_parameters, resolve_camera_intrinsics
 from holosoma.utils import warp_utils
@@ -90,6 +92,7 @@ class PerceptionManager:
             cfg.max_distance,
             device=self.device,
         )
+        self._warned_invalid_rendered_depth = False
 
         self._ray_hits_world = torch.zeros(self.num_envs, self._num_points, 3, device=self.device)
 
@@ -151,6 +154,23 @@ class PerceptionManager:
             if env_ids is not None and self._rendered_camera_env_id not in env_ids.tolist():
                 return
             camera_depth = self._rendered_camera.capture_depth()
+            if camera_depth.numel() == 0 or camera_depth.shape[-2:] != (
+                self._camera_height,
+                self._camera_width,
+            ):
+                if not self._warned_invalid_rendered_depth:
+                    (self.logger or logger).warning(
+                        "Rendered depth returned invalid shape %s; filling with max_distance.",
+                        tuple(camera_depth.shape),
+                    )
+                    self._warned_invalid_rendered_depth = True
+                camera_depth = torch.full(
+                    (1, self._camera_height, self._camera_width),
+                    self.cfg.max_distance,
+                    device=self.device,
+                )
+            elif camera_depth.ndim == 2:
+                camera_depth = camera_depth.unsqueeze(0)
             self._camera_depth[self._rendered_camera_env_id] = camera_depth.squeeze(0)
             return
 
