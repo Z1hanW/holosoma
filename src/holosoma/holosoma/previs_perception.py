@@ -79,6 +79,51 @@ def _resolve_video_fps(env) -> float:
     return float(sim_config.fps / sim_config.control_decimation)
 
 
+_SPECTRAL_CMAP = None
+
+
+def _get_spectral_colormap():
+    global _SPECTRAL_CMAP
+    if _SPECTRAL_CMAP is not None:
+        return _SPECTRAL_CMAP
+    try:
+        import matplotlib  # noqa: PLC0415
+    except Exception as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError("matplotlib is required for Spectral depth visualization.") from exc
+
+    try:
+        _SPECTRAL_CMAP = matplotlib.colormaps["Spectral"]
+    except AttributeError:  # pragma: no cover - older matplotlib
+        from matplotlib import cm  # noqa: PLC0415
+
+        _SPECTRAL_CMAP = cm.get_cmap("Spectral")
+    return _SPECTRAL_CMAP
+
+
+def _depth_to_rgb_spectral(depth: np.ndarray) -> np.ndarray:
+    depth = np.asarray(depth, dtype=np.float32)
+    valid = np.isfinite(depth) & (depth > 0.0)
+    if not np.any(valid):
+        return np.zeros(depth.shape + (3,), dtype=np.uint8)
+
+    disp = np.full_like(depth, np.nan, dtype=np.float32)
+    disp[valid] = 1.0 / depth[valid]
+
+    lo, hi = np.nanpercentile(disp, [0.1, 99.9])
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        lo = float(np.nanmin(disp))
+        hi = float(np.nanmax(disp))
+    denom = max(hi - lo, 1.0e-6)
+    disp_norm = (disp - lo) / denom
+    disp_norm = np.clip(disp_norm, 0.0, 1.0)
+
+    cmap = _get_spectral_colormap()
+    rgba = cmap(1.0 - disp_norm)
+    rgb = (rgba[..., :3] * 255.0).astype(np.uint8)
+    rgb[~valid] = 0
+    return rgb
+
+
 def replay_perception(tyro_config: ExperimentConfig) -> None:
     simulation_app = init_sim_imports(tyro_config)
 
@@ -126,7 +171,7 @@ def replay_perception(tyro_config: ExperimentConfig) -> None:
 
         depth_rgb = None
         if save_png or video_enabled:
-            depth_rgb = env._depth_to_rgb(depth)
+            depth_rgb = _depth_to_rgb_spectral(depth)
 
         if output_dir is not None and save_png and frame_idx % stride == 0:
             import cv2  # noqa: PLC0415
