@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -634,6 +635,7 @@ def replay(cfg: ExperimentConfig) -> None:
             time.sleep(0.001)
 
     _apply_frame_from_float(frame_f["value"])
+    threading.Thread(target=_player_loop, daemon=True).start()
     print("Open the viewer URL printed above. Close the process (Ctrl+C) to exit.")
 
     while True:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -378,6 +379,7 @@ def replay_rollout(cfg: ExperimentConfig, rollout_cfg: RolloutViewerConfig) -> N
 
     _load_file(initial_key)
     _apply_frame_from_float(0.0)
+    threading.Thread(target=_player_loop, daemon=True).start()
     print("Open the viewer URL printed above. Close the process (Ctrl+C) to exit.")
 
     while True:
