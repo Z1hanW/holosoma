@@ -49,9 +49,11 @@ def resolve_fixed_link_offset(
     root = ET.fromstring(urdf_text)
 
     joint_map: dict[str, tuple[str, tuple[float, float, float], tuple[float, float, float]]] = {}
+    joint_name_map: dict[str, str] = {}
     for joint in root.findall("joint"):
         if joint.get("type") != "fixed":
             continue
+        joint_name = joint.get("name")
         parent = joint.find("parent")
         child = joint.find("child")
         if parent is None or child is None:
@@ -64,7 +66,11 @@ def resolve_fixed_link_offset(
         xyz = _parse_vec3(origin.get("xyz") if origin is not None else None)
         rpy = _parse_vec3(origin.get("rpy") if origin is not None else None)
         joint_map[child_link] = (parent_link, xyz, rpy)
+        if joint_name:
+            joint_name_map[joint_name] = child_link
 
+    if link_name not in joint_map:
+        link_name = joint_name_map.get(link_name, link_name)
     if link_name not in joint_map:
         return None
 

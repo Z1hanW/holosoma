@@ -18,7 +18,7 @@ class PerceptionConfig:
     """Perception output type: 'heightmap' or 'camera_depth'."""
 
     camera_source: str = "raycast"
-    """Camera source for camera_depth output: 'raycast', 'mesh_raycast', 'pytorch3d', or 'rendered'."""
+    """Camera source for camera_depth output: 'raycast', 'mesh_raycast', 'pytorch3d', 'rendered', or 'rendered_depth_sensor'."""
 
     grid_size: int = 11
     """Number of samples per dimension for the heightmap grid."""
@@ -82,6 +82,12 @@ class PerceptionConfig:
 
     camera_distortion: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0, 0.0])
     """Camera distortion coefficients (k1, k2, p1, p2, k3)."""
+
+    depth_sensor_asset_path: str | None = None
+    """Optional IsaacSim depth sensor asset path (e.g., /Isaac/Sensors/Intel/RealSense/rsd455.usd)."""
+
+    depth_sensor_depth_prim: str | None = None
+    """Optional depth sensor prim path for SingleViewDepthSensorAsset depth output."""
 
     sensor_offset: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     """Sensor offset from robot root in base frame (meters)."""

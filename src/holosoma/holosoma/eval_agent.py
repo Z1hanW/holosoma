@@ -13,6 +13,7 @@ from loguru import logger
 from holosoma.agents.base_algo.base_algo import BaseAlgo
 from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.config_types.terrain import MeshType
+from holosoma.observation import apply_observation_overrides
 from holosoma.perception import apply_perception_overrides
 from holosoma.utils.config_utils import CONFIG_NAME
 from holosoma.utils.eval_utils import (
@@ -218,6 +219,7 @@ def run_eval_with_tyro(
     saved_wandb_path: str | None,
     sim2sim_cfg: Sim2SimConfig,
 ):
+    tyro_config = apply_observation_overrides(tyro_config)
     tyro_config = apply_perception_overrides(tyro_config)
 
     eval_log_dir = get_experiment_dir(tyro_config.logger, tyro_config.training, get_timestamp(), task_name="eval")

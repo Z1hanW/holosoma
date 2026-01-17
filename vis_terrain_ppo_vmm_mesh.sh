@@ -9,7 +9,7 @@ python src/holosoma/holosoma/viser_perception.py \
   --training.headless=True \
   --perception.camera_width=160 \
   --perception.camera_height=90 \
-  --perception.camera_body_name=d435_link \
+  --perception.camera_body_name=d435_joint \
   --perception.max_distance=10.0 \
   --perception.update_hz=30.0 \
   \

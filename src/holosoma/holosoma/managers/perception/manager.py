@@ -57,6 +57,7 @@ class PerceptionManager:
             "mesh_raycast",
             "pytorch3d",
             "rendered",
+            "rendered_depth_sensor",
         }:
             raise ValueError(f"Unsupported camera_source: {self._camera_source}")
 
@@ -286,9 +287,13 @@ class PerceptionManager:
                 "Rendered camera requires IsaacSim. Use camera_source=raycast, mesh_raycast, or pytorch3d "
                 "for other simulators."
             )
-        from holosoma.simulator.isaacsim.perception_camera import IsaacSimDepthCamera
+        from holosoma.simulator.isaacsim.perception_camera import (
+            IsaacSimDepthCamera,
+            IsaacSimDepthSensorCamera,
+        )
 
-        self._rendered_camera = IsaacSimDepthCamera(
+        camera_cls = IsaacSimDepthSensorCamera if self._camera_source == "rendered_depth_sensor" else IsaacSimDepthCamera
+        self._rendered_camera = camera_cls(
             env=self.env,
             config=self.cfg,
             width=self._camera_width,
@@ -310,7 +315,7 @@ class PerceptionManager:
         return self.cfg.output_mode == "camera_depth" and self._camera_source == "pytorch3d"
 
     def _uses_rendered_camera(self) -> bool:
-        return self.cfg.output_mode == "camera_depth" and self._camera_source == "rendered"
+        return self.cfg.output_mode == "camera_depth" and self._camera_source in {"rendered", "rendered_depth_sensor"}
 
     def _resolve_camera_body_index(self) -> None:
         if self._camera_body_name is None:

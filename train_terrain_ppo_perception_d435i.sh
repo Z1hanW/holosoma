@@ -1,6 +1,23 @@
+DEPTH_IMPL=${DEPTH_IMPL:-rendered}
+case "${DEPTH_IMPL}" in
+  rendered)
+    PERCEPTION_PRESET="camera_depth_d435i_rendered"
+    ;;
+  depth_sensor)
+    PERCEPTION_PRESET="camera_depth_d435i_depth_sensor"
+    ;;
+  raycast)
+    PERCEPTION_PRESET="camera_depth_d435i"
+    ;;
+  *)
+    echo "Unknown DEPTH_IMPL=${DEPTH_IMPL}. Use rendered|depth_sensor|raycast." >&2
+    exit 1
+    ;;
+esac
+
 CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-motion-tracking-transformer \
-  perception:camera_depth_d435i \
+  "perception:${PERCEPTION_PRESET}" \
   --training.num_envs=128 \
   \
   --algo.config.actor_learning_rate=7e-5 \

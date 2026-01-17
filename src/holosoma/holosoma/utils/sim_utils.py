@@ -100,7 +100,10 @@ def setup_isaaclab_launcher(config: ExperimentConfig | RunSimConfig, device: str
     video_enabled = config.logger.video.enabled or config.logger.headless_recording
     perception_cfg = getattr(config, "perception", None)
     if perception_cfg is not None:
-        if getattr(perception_cfg, "enabled", False) and getattr(perception_cfg, "camera_source", "") == "rendered":
+        if getattr(perception_cfg, "enabled", False) and getattr(perception_cfg, "camera_source", "") in {
+            "rendered",
+            "rendered_depth_sensor",
+        }:
             video_enabled = True
     if video_enabled:
         args_cli.enable_cameras = True

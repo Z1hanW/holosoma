@@ -503,6 +503,14 @@ def _parse_urdf_joints(urdf_path: str) -> tuple[str, dict[str, JointInfo]]:
     return roots[0], child_to_joint
 
 
+def _resolve_link_from_joint_name(urdf_path: str, link_or_joint: str) -> str:
+    _, child_to_joint = _parse_urdf_joints(urdf_path)
+    for child_link, joint_info in child_to_joint.items():
+        if joint_info.name == link_or_joint:
+            return child_link
+    return link_or_joint
+
+
 def _get_link_pose_base(
     vr: ViserUrdf,
     link_name: str,
@@ -709,6 +717,7 @@ def replay_perception(cfg: ExperimentConfig) -> None:
     robot_dof = len(cfg.robot.dof_names)
     has_object = qpos.shape[1] >= (7 + robot_dof + 7)
     camera_body = cfg.perception.camera_body_name or vr._urdf.base_link  # type: ignore[attr-defined]
+    camera_body = _resolve_link_from_joint_name(robot_urdf_path, camera_body)
 
     depth_handle = server.gui.add_image(
         np.zeros((height, width, 3), dtype=np.uint8),

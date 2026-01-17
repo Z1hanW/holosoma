@@ -104,6 +104,20 @@ class EvalOverridesConfig:
 
 
 @dataclass(frozen=True)
+class ObservationOverridesConfig:
+    """Optional runtime overrides for observation groups."""
+
+    disable_actor_target: bool = False
+    """Remove the actor target observation group (e.g., actor_obs_target) when True."""
+
+    disable_actor_history: bool = False
+    """Force actor_obs history_length=1 when True."""
+
+    disable_critic_history: bool = False
+    """Force critic_obs history_length=1 when True."""
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     """Top-level experiment configuration used by the Tyro CLI."""
 
@@ -175,6 +189,7 @@ class ExperimentConfig:
     nightly: NightlyConfig | None = None
 
     eval_overrides: EvalOverridesConfig = EvalOverridesConfig()
+    observation_overrides: ObservationOverridesConfig = ObservationOverridesConfig()
 
     def get_nightly_config(self) -> ExperimentConfig:
         if self.nightly is None:

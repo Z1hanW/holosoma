@@ -17,6 +17,7 @@ from holosoma.config_types.env import get_tyro_env_config
 from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.config_types.video import CartesianCameraConfig, FixedCameraConfig, SphericalCameraConfig, VideoConfig
 from holosoma.config_values.experiment import AnnotatedExperimentConfig
+from holosoma.observation import apply_observation_overrides
 from holosoma.perception import apply_perception_overrides
 from holosoma.utils.config_utils import CONFIG_NAME
 from holosoma.utils.eval_utils import (
@@ -375,6 +376,7 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
             )
             logger.info("Debug mode: forcing headless=True to avoid viewer-only issues.")
 
+        tyro_config = apply_observation_overrides(tyro_config)
         tyro_config = apply_perception_overrides(tyro_config)
 
         env_target = tyro_config.env_class
