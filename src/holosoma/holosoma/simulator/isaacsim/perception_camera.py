@@ -42,6 +42,7 @@ class IsaacSimDepthCamera:
         self._depth_annotator = None
         self._rgb_annotator = None
         self._view = None
+        self._rgb_view = None
         self._annotator_name: str | None = None
         self._body_index: int | None = None
         self._body_offset_pos = torch.zeros(3, device=self._device)
@@ -188,6 +189,12 @@ class IsaacSimDepthCamera:
             camera_quat_wxyz,
             torch.tensor([env_id], device=self._device, dtype=torch.int32),
         )
+        if self._rgb_view is not None and self._rgb_view is not self._view:
+            self._rgb_view.set_world_poses(
+                camera_pos.unsqueeze(0),
+                camera_quat_wxyz,
+                torch.tensor([env_id], device=self._device, dtype=torch.int32),
+            )
         if self._rgb_view is not None and self._rgb_view is not self._view:
             self._rgb_view.set_world_poses(
                 camera_pos.unsqueeze(0),
