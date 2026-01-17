@@ -1,9 +1,12 @@
-MOTION_FILE=${MOTION_FILE:-/ABS/PATH/TO/motion_mj.npz}
+MOTION_FILE=${MOTION_FILE:-src/holosoma_retargeting/converted_res/object_interaction/far_robot_mj.npz}
 OUTPUT_DIR=${OUTPUT_DIR:-../pre_depth}
 STRIDE=${STRIDE:-1}
 ENABLE_VIDEO=${ENABLE_VIDEO:-1}
 VIDEO_FPS=${VIDEO_FPS:-}
 DEPTH_IMPL=${DEPTH_IMPL:-rendered}
+TERRAIN_OBJ=${TERRAIN_OBJ:-src/holosoma_retargeting/demo_data/far_robot/far_robot/stairs.obj}
+TERRAIN_ROWS=${TERRAIN_ROWS:-1}
+TERRAIN_COLS=${TERRAIN_COLS:-1}
 
 case "${DEPTH_IMPL}" in
   rendered)
@@ -33,4 +36,10 @@ python src/holosoma/holosoma/previs_perception.py \
   "perception:${PERCEPTION_PRESET}" \
   --training.headless=True \
   --training.num_envs=1 \
+  \
+  terrain:terrain-load-obj \
+  --terrain.terrain-term.obj-file-path "$TERRAIN_OBJ" \
+  --terrain.terrain-term.num_rows "$TERRAIN_ROWS" \
+  --terrain.terrain-term.num_cols "$TERRAIN_COLS" \
+  \
   --command.setup_terms.motion_command.params.motion_config.motion_file "$MOTION_FILE"
