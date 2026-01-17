@@ -24,7 +24,6 @@ cd "${SCRIPT_DIR}"
 
 EXP_CFG=${EXP_CFG:-"exp:g1-29dof-wbt-videomimic-mlp"}
 MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/robot_only/lafan"}
-
 MOTION_CLIP_NAME=${MOTION_CLIP_NAME:-""}
 MOTION_CLIP_ID=${MOTION_CLIP_ID:-""}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-""}
@@ -39,6 +38,8 @@ if [[ ! -d "${MOTION_DIR}" ]]; then
   echo "Set MOTION_DIR to a valid directory of LAFAN .npz clips." >&2
   exit 1
 fi
+
+export PYTHONPATH="${SCRIPT_DIR}/src:${PYTHONPATH:-}"
 
 cmd=(
   python src/holosoma/holosoma/viser_replay.py
