@@ -47,6 +47,7 @@ class IsaacSimDepthCamera:
         self._body_index: int | None = None
         self._body_offset_pos = torch.zeros(3, device=self._device)
         self._body_offset_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self._device)
+        self._camera_frame_quat = torch.tensor([0.5, -0.5, -0.5, 0.5], device=self._device)
         self._warned_multi_env = False
         self._warned_invalid_depth = False
         self._warned_invalid_rgb = False
@@ -181,7 +182,12 @@ class IsaacSimDepthCamera:
             pitch_rad,
             torch.tensor(0.0, device=self._device),
         )
-        camera_quat = quat_mul(body_quat.unsqueeze(0), pitch_quat.unsqueeze(0), w_last=True).squeeze(0)
+        camera_quat = quat_mul(body_quat.unsqueeze(0), pitch_quat.unsqueeze(0), w_last=True)
+        camera_quat = quat_mul(
+            camera_quat,
+            self._camera_frame_quat.unsqueeze(0),
+            w_last=True,
+        ).squeeze(0)
         camera_quat_wxyz = camera_quat[[3, 0, 1, 2]].unsqueeze(0)
 
         self._view.set_world_poses(
@@ -348,6 +354,7 @@ class IsaacSimDepthSensorCamera:
         self._body_index: int | None = None
         self._body_offset_pos = torch.zeros(3, device=self._device)
         self._body_offset_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self._device)
+        self._camera_frame_quat = torch.tensor([0.5, -0.5, -0.5, 0.5], device=self._device)
         self._warned_multi_env = False
         self._warned_invalid_depth = False
         self._warned_invalid_rgb = False
@@ -638,7 +645,12 @@ class IsaacSimDepthSensorCamera:
             pitch_rad,
             torch.tensor(0.0, device=self._device),
         )
-        camera_quat = quat_mul(body_quat.unsqueeze(0), pitch_quat.unsqueeze(0), w_last=True).squeeze(0)
+        camera_quat = quat_mul(body_quat.unsqueeze(0), pitch_quat.unsqueeze(0), w_last=True)
+        camera_quat = quat_mul(
+            camera_quat,
+            self._camera_frame_quat.unsqueeze(0),
+            w_last=True,
+        ).squeeze(0)
         camera_quat_wxyz = camera_quat[[3, 0, 1, 2]].unsqueeze(0)
 
         self._view.set_world_poses(
