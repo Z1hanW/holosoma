@@ -103,6 +103,17 @@ def _load_config_from_checkpoint(checkpoint_path: Path) -> tuple[ExperimentConfi
 
     checkpoint_contents = torch.load(checkpoint_path, map_location="cpu")
     config_data = checkpoint_contents["experiment_config"]
+    if isinstance(config_data, dict):
+        simulator_cfg = config_data.get("simulator")
+        if isinstance(simulator_cfg, dict):
+            sim_cfg = simulator_cfg.get("config")
+            if isinstance(sim_cfg, dict):
+                scene_cfg = sim_cfg.get("scene")
+                if isinstance(scene_cfg, dict):
+                    if scene_cfg.get("scene_files") is None:
+                        scene_cfg["scene_files"] = []
+                    if scene_cfg.get("rigid_objects") is None:
+                        scene_cfg["rigid_objects"] = []
     return ExperimentConfig(**config_data), checkpoint_contents.get("wandb_run_path")
 
 
