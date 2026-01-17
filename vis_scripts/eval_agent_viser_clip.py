@@ -120,13 +120,13 @@ class ViserLiveViewer:
         self.object_root = self.server.scene.add_frame("/object", show_axes=False)
 
         urdf_path = _resolve_robot_urdf_path(robot_config)
-        self.robot = ViserUrdf(self.server, urdf_or_path=urdf_path, root_node_name="/robot")
+        self.robot = ViserUrdf(self.server, urdf_or_path=Path(urdf_path), root_node_name="/robot")
         self.robot.show_visual = cfg.show_meshes
 
         self.object = None
         if robot_config.object.object_urdf_path:
             object_path = _resolve_data_path(robot_config.object.object_urdf_path)
-            self.object = ViserUrdf(self.server, urdf_or_path=object_path, root_node_name="/object")
+            self.object = ViserUrdf(self.server, urdf_or_path=Path(object_path), root_node_name="/object")
             self.object.show_visual = cfg.show_meshes
 
         viser_joint_names = list(self.robot.get_actuated_joint_names())
