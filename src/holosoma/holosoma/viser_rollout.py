@@ -11,7 +11,7 @@ import tyro
 import trimesh
 
 # Ensure local packages are importable when running from source.
-SRC_ROOT = Path(__file__).resolve().parents[2]
+SRC_ROOT = Path(__file__).resolve().parents[1]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 

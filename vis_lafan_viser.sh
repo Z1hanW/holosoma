@@ -39,8 +39,6 @@ if [[ ! -d "${MOTION_DIR}" ]]; then
   exit 1
 fi
 
-export PYTHONPATH="${SCRIPT_DIR}/src:${PYTHONPATH:-}"
-
 cmd=(
   python src/holosoma/holosoma/viser_replay.py
   "${EXP_CFG}"
