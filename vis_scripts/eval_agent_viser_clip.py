@@ -310,22 +310,19 @@ def run_eval_with_viser_clip(
 
     viewer = ViserLiveViewer(tyro_config.robot, viser_cfg)
     pending_clip = {"name": None}
+    selected_clip = {"name": clip_names[0], "idx": clip_name_to_idx[clip_names[0]]}
 
     with viewer.server.gui.add_folder("Motion"):
         clip_dropdown = viewer.server.gui.add_dropdown("Clip", options=tuple(clip_names), initial_value=clip_names[0])
         apply_btn = viewer.server.gui.add_button("Apply clip")
         clip_label = viewer.server.gui.add_markdown("")
 
-    @clip_dropdown.on_update
-    def _(_evt) -> None:
-        pending_clip["name"] = str(clip_dropdown.value)
-
     @apply_btn.on_click
     def _(_evt) -> None:
         pending_clip["name"] = str(clip_dropdown.value)
 
     # Ensure initial clip matches the dropdown selection.
-    obs_dict = _force_clip(env, motion_cmd, clip_name_to_idx[str(clip_dropdown.value)], env_index)
+    obs_dict = _force_clip(env, motion_cmd, selected_clip["idx"], env_index)
 
     policy = algo.get_inference_policy()
     step = 0
@@ -335,21 +332,23 @@ def run_eval_with_viser_clip(
             name = pending_clip["name"]
             pending_clip["name"] = None
             if name in clip_name_to_idx:
-                obs_dict = _force_clip(env, motion_cmd, clip_name_to_idx[name], env_index)
+                selected_clip["name"] = name
+                selected_clip["idx"] = clip_name_to_idx[name]
+                obs_dict = _force_clip(env, motion_cmd, selected_clip["idx"], env_index)
 
         actor_obs = _build_actor_obs(algo, obs_dict)
         actions = policy({"actor_obs": actor_obs})
         obs_dict, _, reset_buf, _ = env.step({"actions": actions})
 
+        if viser_cfg.auto_reapply_clip:
+            current_idx = int(motion_cmd.clip_ids[env_index].item())
+            if current_idx != selected_clip["idx"]:
+                obs_dict = _force_clip(env, motion_cmd, selected_clip["idx"], env_index)
+
         if step % max(1, int(viser_cfg.update_interval)) == 0:
             viewer.update_from_env(env, env_index)
             current_clip = _current_clip_name(motion_cmd, env_index) or "n/a"
             clip_label.content = f"Current clip: `{current_clip}`"
-
-        if viser_cfg.auto_reapply_clip and bool(reset_buf[env_index].item()):
-            name = str(clip_dropdown.value)
-            if name in clip_name_to_idx:
-                obs_dict = _force_clip(env, motion_cmd, clip_name_to_idx[name], env_index)
 
         step += 1
 

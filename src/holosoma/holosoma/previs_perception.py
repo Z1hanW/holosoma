@@ -35,6 +35,22 @@ def _resolve_stride() -> int:
     return max(1, stride)
 
 
+def _resolve_video_enabled() -> bool:
+    raw = os.environ.get("HOLOSOMA_PREVIS_PERCEPTION_VIDEO", "")
+    return raw.strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _resolve_video_fps(env) -> float:
+    raw = os.environ.get("HOLOSOMA_PREVIS_PERCEPTION_VIDEO_FPS", "")
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    sim_config = env.simulator.simulator_config.sim
+    return float(sim_config.fps / sim_config.control_decimation)
+
+
 def replay_perception(tyro_config: ExperimentConfig) -> None:
     simulation_app = init_sim_imports(tyro_config)
 
@@ -53,6 +69,11 @@ def replay_perception(tyro_config: ExperimentConfig) -> None:
 
     output_dir = _resolve_output_dir()
     stride = _resolve_stride()
+    video_enabled = _resolve_video_enabled()
+    if video_enabled and output_dir is None:
+        raise RuntimeError("Depth video requires HOLOSOMA_PREVIS_PERCEPTION_DIR to be set.")
+    video_writer = None
+    video_fps = _resolve_video_fps(env) if video_enabled else 0.0
     frame_idx = 0
 
     done = False
@@ -61,11 +82,26 @@ def replay_perception(tyro_config: ExperimentConfig) -> None:
         done = env.step_visualize_motion(None)  # type: ignore[attr-defined]
 
         env.perception_manager.update()
+        depth = env.perception_manager.get_camera_depth_map()[0].detach().cpu().numpy()
         if output_dir is not None and frame_idx % stride == 0:
-            depth = env.perception_manager.get_camera_depth_map()[0].detach().cpu().numpy()
             np.save(output_dir / f"depth_{frame_idx:06d}.npy", depth)
+        if video_enabled:
+            if video_writer is None:
+                import cv2  # noqa: PLC0415
+
+                height, width = depth.shape[:2]
+                video_path = output_dir / "depth_video.mp4"
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                video_writer = cv2.VideoWriter(str(video_path), fourcc, video_fps, (width, height))
+            depth_rgb = env._depth_to_rgb(depth)
+            import cv2  # noqa: PLC0415
+
+            video_writer.write(cv2.cvtColor(depth_rgb, cv2.COLOR_RGB2BGR))
 
         frame_idx += 1
+
+    if video_writer is not None:
+        video_writer.release()
 
     close_simulation_app(simulation_app)
 
