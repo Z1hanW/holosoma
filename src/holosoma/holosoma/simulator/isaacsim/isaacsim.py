@@ -373,8 +373,9 @@ class IsaacSim(BaseSimulator):
 
         self._robot = Articulation(robot_articulation_config)
 
-        print_prim_tree("/World/envs/env_0/Robot")
-        log_robot_properties("/World/envs/env_0/Robot", "*")
+        if os.environ.get("HOLOSOMA_DEBUG_ROBOT_PRIMS") == "1":
+            print_prim_tree("/World/envs/env_0/Robot")
+            log_robot_properties("/World/envs/env_0/Robot", "*")
 
         self.scene.articulations["robot"] = self._robot
 

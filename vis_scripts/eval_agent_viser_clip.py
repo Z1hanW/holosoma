@@ -208,10 +208,15 @@ def _force_clip(env, motion_cmd, clip_idx: int, env_index: int) -> dict[str, tor
     if motion_cmd.motion_cfg.align_motion_to_init_yaw:
         motion_cmd._update_motion_alignment(env_ids)
 
-    root_pos = motion_cmd.body_pos_w[env_ids, 0].clone()
-    root_rot = motion_cmd.body_quat_w[env_ids, 0].clone()
-    root_lin_vel = motion_cmd.body_lin_vel_w[env_ids, 0].clone()
-    root_ang_vel = motion_cmd.body_ang_vel_w[env_ids, 0].clone()
+    root_pos = motion_cmd.root_pos_w[env_ids].clone()
+    root_rot = motion_cmd.root_quat_w[env_ids].clone()
+
+    motion_idx = motion_cmd._get_motion_indices(motion_cmd.time_steps[env_ids], env_ids)
+    root_lin_vel = motion_cmd.motion.body_lin_vel_w[motion_idx, 0].clone()
+    root_ang_vel = motion_cmd.motion.body_ang_vel_w[motion_idx, 0].clone()
+    if motion_cmd.motion_cfg.align_motion_to_init_yaw:
+        root_lin_vel = motion_cmd._apply_motion_alignment_vec(root_lin_vel)
+        root_ang_vel = motion_cmd._apply_motion_alignment_vec(root_ang_vel)
     dof_pos = motion_cmd.joint_pos[env_ids].clone()
     dof_vel = motion_cmd.joint_vel[env_ids].clone()
 
