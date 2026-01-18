@@ -7,6 +7,8 @@ SAVE_PNG=${SAVE_PNG:-1}
 SAVE_RGB_PNG=${SAVE_RGB_PNG:-1}
 RGB_VIDEO=${RGB_VIDEO:-1}
 VIDEO_FPS=${VIDEO_FPS:-}
+IMAGE_WIDTH=${IMAGE_WIDTH:-1280}
+IMAGE_HEIGHT=${IMAGE_HEIGHT:-720}
 DEPTH_IMPL=${DEPTH_IMPL:-rendered}
 TERRAIN_OBJ=${TERRAIN_OBJ:-src/holosoma_retargeting/demo_data/far_robot/far_robot/stairs.obj}
 TERRAIN_ROWS=${TERRAIN_ROWS:-1}
@@ -44,6 +46,8 @@ python src/holosoma/holosoma/previs_perception.py \
   "perception:${PERCEPTION_PRESET}" \
   --training.headless=True \
   --training.num_envs=1 \
+  --perception.camera_width="$IMAGE_WIDTH" \
+  --perception.camera_height="$IMAGE_HEIGHT" \
   \
   terrain:terrain-load-obj \
   --terrain.terrain-term.obj-file-path "$TERRAIN_OBJ" \

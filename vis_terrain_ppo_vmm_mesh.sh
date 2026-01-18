@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+IMAGE_WIDTH=${IMAGE_WIDTH:-160}
+IMAGE_HEIGHT=${IMAGE_HEIGHT:-90}
 HOLOSOMA_VISER_PORT=${HOLOSOMA_VISER_PORT:-6060} \
 python src/holosoma/holosoma/viser_perception.py \
   exp:g1-29dof-wbt-videomimic-mlp \
   perception:camera_depth_d435i \
   --training.num_envs=1 \
   --training.headless=True \
-  --perception.camera_width=160 \
-  --perception.camera_height=90 \
+  --perception.camera_width="$IMAGE_WIDTH" \
+  --perception.camera_height="$IMAGE_HEIGHT" \
   --perception.camera_body_name=d435_joint \
   --perception.max_distance=10.0 \
   --perception.update_hz=30.0 \

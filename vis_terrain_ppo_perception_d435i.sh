@@ -2,6 +2,8 @@
 set -euo pipefail
 
 DEPTH_IMPL=${DEPTH_IMPL:-rendered}
+IMAGE_WIDTH=${IMAGE_WIDTH:-1280}
+IMAGE_HEIGHT=${IMAGE_HEIGHT:-720}
 case "${DEPTH_IMPL}" in
   rendered)
     PERCEPTION_PRESET="camera_depth_d435i_rendered"
@@ -23,6 +25,8 @@ CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 --master_port=$((29500 + RAND
   "perception:${PERCEPTION_PRESET}" \
   --training.num_envs=1 \
   --training.headless=False \
+  --perception.camera_width="$IMAGE_WIDTH" \
+  --perception.camera_height="$IMAGE_HEIGHT" \
   \
   --algo.config.actor_learning_rate=7e-5 \
   --algo.config.critic_learning_rate=7e-5 \
