@@ -145,7 +145,7 @@ class DistillationConfig:
     policy_to_clone: str | list[str] | None = None
     """Teacher checkpoint path(s) for dagger (aliases teacher_checkpoint)."""
 
-    teacher_obs_keys: list[str] | None = None
+    teacher_obs_keys: list[str] | str | None = None
     """Observation keys to feed the teacher policy (defaults to actor_obs keys)."""
 
     bc_loss_coef: float | None = None

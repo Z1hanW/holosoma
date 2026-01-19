@@ -401,6 +401,15 @@ class PPO(BaseAlgo):
         self.teacher_actor_obs_normalizers_list = []
 
         teacher_obs_keys = distill_cfg.teacher_obs_keys or self.actor_obs_keys
+        if isinstance(teacher_obs_keys, str):
+            cleaned = teacher_obs_keys.strip()
+            if cleaned.startswith("[") and cleaned.endswith("]"):
+                cleaned = cleaned[1:-1]
+            teacher_obs_keys = [
+                item.strip().strip("'").strip('"')
+                for item in cleaned.split(",")
+                if item.strip()
+            ]
         if not teacher_obs_keys:
             raise ValueError("Distillation teacher_obs_keys is empty.")
         missing_keys = [key for key in teacher_obs_keys if key not in self.algo_obs_dim_dict]

@@ -17,11 +17,11 @@ if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
   exit 1
 fi
 
-TEACHER_OBS_KEYS=(actor_obs actor_obs_target)
+TEACHER_OBS_KEYS="actor_obs,actor_obs_target"
 EXTRA_ARGS=()
 if [[ "${TEACHER_MODE}" == "perception" ]]; then
   EXTRA_ARGS+=("perception:${PERCEPTION_PRESET}")
-  TEACHER_OBS_KEYS+=(perception_obs)
+  TEACHER_OBS_KEYS="${TEACHER_OBS_KEYS},perception_obs"
 elif [[ "${TEACHER_MODE}" != "blind" ]]; then
   echo "Unknown TEACHER_MODE=${TEACHER_MODE}. Use blind|perception." >&2
   exit 1
@@ -37,11 +37,9 @@ CUDA_VISIBLE_DEVICES=5,6,7 torchrun --nproc_per_node=3 --master_port=$((29500 + 
   --algo.config.distill.bc_loss_coef=1.0 \
   --algo.config.distill.clip_teacher_actions=True \
   --algo.config.distill.clip_actions_threshold=8.0 \
-  --algo.config.distill.teacher_obs_keys "${TEACHER_OBS_KEYS[@]}" \
+  --algo.config.distill.teacher_obs_keys="${TEACHER_OBS_KEYS}" \
   \
-  terrain:terrain-locomotion-plane \
   --training.num_envs=30720 \
-  --simulator.config.scene.env_spacing=0.0 \
   \
   --algo.config.actor_learning_rate=7e-5 \
   --algo.config.critic_learning_rate=7e-5 \
