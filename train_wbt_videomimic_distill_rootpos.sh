@@ -8,10 +8,7 @@ set -euo pipefail
 TEACHER_MODE="blind" # blind|perception
 TEACHER_CHECKPOINT=""
 
-MOTION_DIR="multi-geometry/test"
-OBJ_DIR="multi-motion/test"
-NUM_ROWS=1
-NUM_COLS=1
+MOTION_DIR="src/holosoma_retargeting/converted_res/robot_only/lafan"
 
 PERCEPTION_PRESET="camera_depth_d435i_rendered"
 
@@ -33,21 +30,18 @@ fi
 CUDA_VISIBLE_DEVICES=5,6,7 torchrun --nproc_per_node=3 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-videomimic-mlp \
   "${EXTRA_ARGS[@]}" \
-  --observation_overrides.disable_actor_target_inputs=true \
-  --observation_overrides.disable_critic_target=true \
+  --observation_overrides.disable_actor_target_inputs=True \
+  --observation_overrides.disable_critic_target=True \
   --algo.config.distill.mode=dagger \
   --algo.config.distill.policy_to_clone="${TEACHER_CHECKPOINT}" \
   --algo.config.distill.bc_loss_coef=1.0 \
-  --algo.config.distill.clip_teacher_actions=true \
+  --algo.config.distill.clip_teacher_actions=True \
   --algo.config.distill.clip_actions_threshold=8.0 \
   --algo.config.distill.teacher_obs_keys "${TEACHER_OBS_KEYS[@]}" \
   \
-  terrain:terrain-load-obj \
+  terrain:terrain-locomotion-plane \
   --training.num_envs=30720 \
   --simulator.config.scene.env_spacing=0.0 \
-  --terrain.terrain-term.obj-file-path "${OBJ_DIR}" \
-  --terrain.terrain-term.num-rows "${NUM_ROWS}" \
-  --terrain.terrain-term.num-cols "${NUM_COLS}" \
   \
   --algo.config.actor_learning_rate=7e-5 \
   --algo.config.critic_learning_rate=7e-5 \
@@ -56,7 +50,7 @@ CUDA_VISIBLE_DEVICES=5,6,7 torchrun --nproc_per_node=3 --master_port=$((29500 + 
   --algo.config.save_interval=1000 \
   \
   --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_DIR}" \
-  --command.setup_terms.motion_command.params.motion_config.pair_terrain_with_motion=True \
+  --command.setup_terms.motion_command.params.motion_config.pair_terrain_with_motion=False \
   --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob=0.05 \
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_append=False \
   --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s=0 \
