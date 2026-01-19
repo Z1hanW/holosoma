@@ -1,15 +1,15 @@
-#!/usr/bin/env bash
-set -euo pipefail
 
-MOTION_DIR="multi-geometry/test"
-OBJ_DIR="multi-motion/test"
-NUM_ROWS=1
-NUM_COLS=1
 
-CUDA_VISIBLE_DEVICES=5,6,7 torchrun --nproc_per_node=3 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
+OBJ_DIR="multi-terrain/test"
+MOTION_DIR="multi-motion/test"
+NUM_ROWS=4
+NUM_COLS=4
+
+python src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-videomimic-mlp \
   terrain:terrain-load-obj \
-  --training.num_envs=30720 \
+  --training.headless=False \
+  --training.num_envs=16 \
   --simulator.config.scene.env_spacing=0.0 \
   --terrain.terrain-term.obj-file-path "${OBJ_DIR}" \
   --terrain.terrain-term.num-rows "${NUM_ROWS}" \
