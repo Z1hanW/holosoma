@@ -110,6 +110,15 @@ class ObservationOverridesConfig:
     disable_actor_target: bool = False
     """Remove the actor target observation group (e.g., actor_obs_target) when True."""
 
+    disable_critic_target: bool = False
+    """Remove the critic target observation group (e.g., critic_obs_target) when True."""
+
+    disable_actor_target_inputs: bool = False
+    """Drop actor target inputs from the policy without removing the observation group."""
+
+    disable_critic_target_inputs: bool = False
+    """Drop critic target inputs from the value function without removing the observation group."""
+
     disable_actor_history: bool = False
     """Force actor_obs history_length=1 when True."""
 

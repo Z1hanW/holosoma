@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import os
 from typing import TypedDict
@@ -175,18 +176,21 @@ class PPO(BaseAlgo):
         self.teacher_actor_obs_normalizers: dict[str, nn.Module] = {}
         self.teacher_actor_obs_normalizers_list: list[dict[str, nn.Module]] = []
 
-    def _init_obs_slices(self) -> None:
-        def build_slices(keys: list[str]) -> dict[str, slice]:
-            slices: dict[str, slice] = {}
-            start = 0
-            for key in keys:
-                dim = self.algo_obs_dim_dict[key]
-                slices[key] = slice(start, start + dim)
-                start += dim
-            return slices
+    def _build_obs_slices(self, keys: list[str]) -> dict[str, slice]:
+        slices: dict[str, slice] = {}
+        start = 0
+        for key in keys:
+            dim = self.algo_obs_dim_dict[key]
+            slices[key] = slice(start, start + dim)
+            start += dim
+        return slices
 
-        self.actor_obs_slices = build_slices(self.actor_obs_keys)
-        self.critic_obs_slices = build_slices(self.critic_obs_keys)
+    def _init_obs_slices(self) -> None:
+        self.actor_obs_slices = self._build_obs_slices(self.actor_obs_keys)
+        self.critic_obs_slices = self._build_obs_slices(self.critic_obs_keys)
+        self.teacher_obs_keys = list(self.actor_obs_keys)
+        self.teacher_obs_slices = dict(self.actor_obs_slices)
+        self.teacher_obs_dim = self._get_obs_dim(self.teacher_obs_keys)
 
     def _setup_obs_normalizers(self) -> None:
         self.actor_obs_normalizers = self._build_group_normalizers(self.actor_obs_keys, self.config.normalize_actor_obs)
@@ -243,12 +247,16 @@ class PPO(BaseAlgo):
     ) -> torch.Tensor:
         if not self.distill_enabled:
             return obs
+        if obs.shape[-1] != self.teacher_obs_dim:
+            raise ValueError(
+                f"Teacher obs dim mismatch: expected {self.teacher_obs_dim}, got {obs.shape[-1]}"
+            )
         if normalizers is None:
             normalizers = self.teacher_actor_obs_normalizers
         return self._normalize_concat_obs(
             obs,
-            self.actor_obs_keys,
-            self.actor_obs_slices,
+            self.teacher_obs_keys,
+            self.teacher_obs_slices,
             normalizers,
             update=False,
         )
@@ -313,16 +321,42 @@ class PPO(BaseAlgo):
             self.config.critic_optimizer, params=self.critic.parameters(), lr=self.critic_learning_rate
         )
 
-    def _load_teacher_actor(self, ckpt_path: str) -> tuple[nn.Module, dict[str, nn.Module]]:
+    def _build_teacher_actor_config(self, obs_keys: list[str]):
+        actor_cfg = self.config.module_dict.actor
+        if list(actor_cfg.input_dim) == list(obs_keys):
+            return actor_cfg
+        layer_cfg = actor_cfg.layer_config
+        excluded_inputs = set()
+        if layer_cfg.encoder_input_name:
+            excluded_inputs.add(layer_cfg.encoder_input_name)
+        if layer_cfg.encoder_obs_token_name:
+            excluded_inputs.add(layer_cfg.encoder_obs_token_name)
+        if layer_cfg.perception_input_name:
+            excluded_inputs.add(layer_cfg.perception_input_name)
+        module_inputs = tuple(name for name in obs_keys if name not in excluded_inputs)
+        layer_cfg = dataclasses.replace(layer_cfg, module_input_name=module_inputs)
+        if layer_cfg.encoder_input_name and layer_cfg.encoder_input_name not in obs_keys:
+            layer_cfg = dataclasses.replace(layer_cfg, encoder_input_name="")
+        if layer_cfg.encoder_obs_token_name and layer_cfg.encoder_obs_token_name not in obs_keys:
+            layer_cfg = dataclasses.replace(layer_cfg, encoder_obs_token_name=None)
+        if layer_cfg.perception_input_name and layer_cfg.perception_input_name not in obs_keys:
+            layer_cfg = dataclasses.replace(layer_cfg, perception_input_name="")
+        return dataclasses.replace(actor_cfg, input_dim=list(obs_keys), layer_config=layer_cfg)
+
+    def _load_teacher_actor(
+        self, ckpt_path: str, obs_keys: list[str] | None = None
+    ) -> tuple[nn.Module, dict[str, nn.Module]]:
         if ckpt_path.startswith("wandb://"):
             from holosoma.utils.eval_utils import load_checkpoint  # noqa: PLC0415
 
             ckpt_path = str(load_checkpoint(ckpt_path, str(self.log_dir)))
 
         teacher_state = torch.load(ckpt_path, map_location=self.device)
+        teacher_obs_keys = obs_keys if obs_keys is not None else self.actor_obs_keys
+        teacher_actor_cfg = self._build_teacher_actor_config(teacher_obs_keys)
         teacher_actor = setup_ppo_actor_module(
             obs_dim_dict=self.algo_obs_dim_dict,
-            module_config=self.config.module_dict.actor,
+            module_config=teacher_actor_cfg,
             num_actions=self.num_act,
             init_noise_std=self.config.init_noise_std,
             device=self.device,
@@ -333,7 +367,7 @@ class PPO(BaseAlgo):
         for param in teacher_actor.parameters():
             param.requires_grad_(False)
 
-        teacher_normalizers = self._build_group_normalizers(self.actor_obs_keys, self.config.normalize_actor_obs)
+        teacher_normalizers = self._build_group_normalizers(teacher_obs_keys, self.config.normalize_actor_obs)
         actor_norm_state = teacher_state.get("actor_obs_normalizer_state")
         if isinstance(actor_norm_state, dict):
             for key, state in actor_norm_state.items():
@@ -366,6 +400,16 @@ class PPO(BaseAlgo):
         self.teacher_actor_obs_normalizers = {}
         self.teacher_actor_obs_normalizers_list = []
 
+        teacher_obs_keys = distill_cfg.teacher_obs_keys or self.actor_obs_keys
+        if not teacher_obs_keys:
+            raise ValueError("Distillation teacher_obs_keys is empty.")
+        missing_keys = [key for key in teacher_obs_keys if key not in self.algo_obs_dim_dict]
+        if missing_keys:
+            raise ValueError(f"Teacher obs keys not found in observation manager: {missing_keys}")
+        self.teacher_obs_keys = list(teacher_obs_keys)
+        self.teacher_obs_slices = self._build_obs_slices(self.teacher_obs_keys)
+        self.teacher_obs_dim = self._get_obs_dim(self.teacher_obs_keys)
+
         teacher_checkpoint = distill_cfg.policy_to_clone or distill_cfg.teacher_checkpoint
 
         if self.distill_mode == "dagger":
@@ -382,7 +426,7 @@ class PPO(BaseAlgo):
                 raise ValueError("Multiple teacher checkpoints provided but use_multi_teacher is False.")
 
             for path in teacher_paths:
-                teacher_actor, teacher_normalizers = self._load_teacher_actor(path)
+                teacher_actor, teacher_normalizers = self._load_teacher_actor(path, obs_keys=self.teacher_obs_keys)
                 if self.use_multi_teacher:
                     self.teacher_actors.append(teacher_actor)
                     self.teacher_actor_obs_normalizers_list.append(teacher_normalizers)
@@ -401,7 +445,9 @@ class PPO(BaseAlgo):
         if isinstance(teacher_checkpoint, list):
             raise ValueError("Distillation mode 'mse' expects a single teacher checkpoint.")
 
-        self.teacher_actor, self.teacher_actor_obs_normalizers = self._load_teacher_actor(teacher_checkpoint)
+        self.teacher_actor, self.teacher_actor_obs_normalizers = self._load_teacher_actor(
+            teacher_checkpoint, obs_keys=self.teacher_obs_keys
+        )
         self.distill_enabled = True
 
     def _get_obs_dim(self, obs_keys: list[str]) -> int:
@@ -528,7 +574,7 @@ class PPO(BaseAlgo):
             self.export(onnx_file_path=os.path.join(self.log_dir, f"model_{self.current_learning_iteration:05d}.onnx"))
 
     def _select_teacher_actions(
-        self, actor_obs_raw: torch.Tensor, obs_dict: dict[str, torch.Tensor]
+        self, teacher_obs_raw: torch.Tensor, obs_dict: dict[str, torch.Tensor]
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if self.use_multi_teacher:
             if self.multi_teacher_select_obs_var not in obs_dict:
@@ -536,19 +582,19 @@ class PPO(BaseAlgo):
                     f"Multi-teacher enabled but observation '{self.multi_teacher_select_obs_var}' not found."
                 )
             teacher_indices = obs_dict[self.multi_teacher_select_obs_var].view(-1).long()
-            teacher_actions = torch.zeros((actor_obs_raw.shape[0], self.num_act), device=actor_obs_raw.device)
+            teacher_actions = torch.zeros((teacher_obs_raw.shape[0], self.num_act), device=teacher_obs_raw.device)
             for idx, (teacher_actor, normalizers) in enumerate(
                 zip(self.teacher_actors, self.teacher_actor_obs_normalizers_list)
             ):
                 mask = teacher_indices == idx
                 if not mask.any():
                     continue
-                teacher_obs = self._normalize_teacher_actor_obs(actor_obs_raw[mask], normalizers=normalizers)
+                teacher_obs = self._normalize_teacher_actor_obs(teacher_obs_raw[mask], normalizers=normalizers)
                 teacher_actions[mask] = teacher_actor.act({"actor_obs": teacher_obs})
             return teacher_actions, teacher_indices
 
         assert self.teacher_actor is not None, "Teacher actor is not initialized."
-        teacher_obs = self._normalize_teacher_actor_obs(actor_obs_raw)
+        teacher_obs = self._normalize_teacher_actor_obs(teacher_obs_raw)
         teacher_actions = self.teacher_actor.act({"actor_obs": teacher_obs})
         return teacher_actions, None
 
@@ -569,7 +615,11 @@ class PPO(BaseAlgo):
                 teacher_indices = None
                 actions_to_step = actions
                 if self.dagger_enabled and self.bc_loss_coef > 0.0:
-                    teacher_actions, teacher_indices = self._select_teacher_actions(actor_obs_raw, obs_dict)
+                    if self.teacher_obs_keys == self.actor_obs_keys:
+                        teacher_obs_raw = actor_obs_raw
+                    else:
+                        teacher_obs_raw = torch.cat([obs_dict[k] for k in self.teacher_obs_keys], dim=1)
+                    teacher_actions, teacher_indices = self._select_teacher_actions(teacher_obs_raw, obs_dict)
                     if self.take_teacher_actions:
                         actions_to_step = teacher_actions
 
