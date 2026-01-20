@@ -411,6 +411,48 @@ class BaseSimulator:
     def draw_debug_viz(self):
         pass
 
+    def _draw_contact_forces(self, env_id: int | None = None) -> None:
+        """Draw net contact forces as debug lines."""
+        if not self.simulator_config.contact_force_viz:
+            return
+
+        if not hasattr(self, "contact_forces") or not hasattr(self, "_rigid_body_pos"):
+            return
+
+        if self.contact_forces is None or self._rigid_body_pos is None:
+            return
+
+        if self.contact_forces.numel() == 0 or self._rigid_body_pos.numel() == 0:
+            return
+
+        if env_id is None:
+            env_id = getattr(self, "current_world_id", 0)
+
+        if env_id < 0 or env_id >= self.contact_forces.shape[0]:
+            return
+
+        forces = self.contact_forces[env_id]
+        positions = self._rigid_body_pos[env_id]
+        body_count = min(forces.shape[0], positions.shape[0])
+        if body_count == 0:
+            return
+
+        forces = forces[:body_count]
+        positions = positions[:body_count]
+
+        magnitudes = torch.linalg.norm(forces, dim=-1)
+        threshold = self.simulator_config.contact_force_viz_threshold
+        mask = magnitudes > threshold
+        if torch.count_nonzero(mask) == 0:
+            return
+
+        scale = self.simulator_config.contact_force_viz_scale
+        color = (1.0, 0.2, 0.1)
+        for idx in torch.nonzero(mask, as_tuple=False).flatten().tolist():
+            start = positions[idx].detach().cpu()
+            end = (positions[idx] + forces[idx] * scale).detach().cpu()
+            self.draw_line(start.tolist(), end.tolist(), color, env_id)
+
     # ----- Bridge System Helper Methods -----
 
     def _init_bridge(self) -> None:

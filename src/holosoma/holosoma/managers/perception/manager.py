@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 from typing import Any
+import os
+import xml.etree.ElementTree as ET
+
+import numpy as np
 
 from loguru import logger
 
 from holosoma.config_types.perception import PerceptionConfig
 from holosoma.utils.camera_utils import build_camera_parameters, resolve_camera_intrinsics
 from holosoma.utils import warp_utils
+from holosoma.utils.module_utils import get_holosoma_root
+from holosoma.utils.path import resolve_data_file_path
 from holosoma.utils.rotations import (
     quat_apply,
     quat_apply_yaw,
@@ -20,6 +26,7 @@ from holosoma.utils.rotations import (
 )
 from holosoma.utils.simulator_config import SimulatorType, get_simulator_type
 from holosoma.utils.safe_torch_import import torch
+import torch.nn.functional as F
 from holosoma.utils.urdf_utils import resolve_fixed_link_offset
 
 
@@ -41,10 +48,15 @@ class PerceptionManager:
         self._grid_points_base: torch.Tensor | None = None
         self._ray_dirs_base: torch.Tensor | None = None
         self._camera_ray_dirs_base: torch.Tensor | None = None
+        self._camera_scandots_ray_dirs_base: torch.Tensor | None = None
+        self._camera_scandots_width: int | None = None
+        self._camera_scandots_height: int | None = None
         self._sensor_offset = torch.tensor(cfg.sensor_offset, device=self.device)
         self._ray_start_offset = torch.tensor([0.0, 0.0, cfg.ray_start_height], device=self.device)
         self._camera_source = cfg.camera_source
         self._camera_body_name = cfg.camera_body_name
+        self._camera_include_robot_mesh = bool(getattr(cfg, "camera_include_robot_mesh", False))
+        self._camera_robot_mesh_enabled = False
         self._camera_body_index: int | None = None
         self._camera_body_offset_pos = torch.zeros(3, device=self.device)
         self._camera_body_offset_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
@@ -53,10 +65,16 @@ class PerceptionManager:
         self._pytorch3d_mesh = None
         self._pytorch3d_mesh_cache: dict[int, Any] = {}
         self._pytorch3d_raster_settings = None
+        self._terrain_vertices: np.ndarray | None = None
+        self._terrain_faces: np.ndarray | None = None
+        self._robot_link_meshes: list[dict[str, torch.Tensor]] = []
+        self._camera_warp_mesh = None
+        self._warned_robot_mesh = False
 
         if cfg.output_mode == "camera_depth" and self._camera_source not in {
             "raycast",
             "mesh_raycast",
+            "mesh_raycast_scandots",
             "pytorch3d",
             "rendered",
             "rendered_depth_sensor",
@@ -99,19 +117,30 @@ class PerceptionManager:
     def setup(self) -> None:
         if not self.enabled:
             return
-        if self._uses_raycast() or self._uses_camera_raycast() or self._uses_pytorch3d():
+        if (
+            self._uses_raycast()
+            or self._uses_camera_raycast()
+            or self._uses_camera_scandots()
+            or self._uses_pytorch3d()
+        ):
             terrain_term = getattr(self.env, "terrain_manager", None)
             if terrain_term is None or not hasattr(terrain_term, "terrain_term"):
                 raise RuntimeError("PerceptionManager requires an initialized terrain_manager.")
             terrain_state = terrain_term.terrain_term
-            if self._uses_raycast() or self._uses_camera_raycast():
+            if self._uses_raycast() or self._uses_camera_raycast() or self._uses_camera_scandots():
                 if not hasattr(terrain_state, "warp_mesh"):
                     raise RuntimeError("PerceptionManager requires terrain term with warp_mesh support.")
                 self._warp_mesh = terrain_state.warp_mesh
-            if self._uses_pytorch3d():
+            if self._uses_pytorch3d() or (
+                self._camera_include_robot_mesh and (self._uses_camera_raycast() or self._uses_camera_scandots())
+            ):
                 if not hasattr(terrain_state, "mesh"):
                     raise RuntimeError("PerceptionManager requires terrain term with mesh support.")
                 self._terrain_mesh = terrain_state.mesh
+                if self._camera_include_robot_mesh and (self._uses_camera_raycast() or self._uses_camera_scandots()):
+                    self._terrain_vertices = np.asarray(self._terrain_mesh.vertices, dtype=np.float32)
+                    self._terrain_faces = np.asarray(self._terrain_mesh.faces, dtype=np.int64)
+                    self._load_robot_link_meshes()
 
         if self._uses_raycast():
             self._grid_points_base, self._ray_dirs_base = self._build_grid()
@@ -119,6 +148,10 @@ class PerceptionManager:
         if self._uses_camera_raycast():
             self._resolve_camera_body_index()
             self._camera_ray_dirs_base = self._build_camera_rays()
+
+        if self._uses_camera_scandots():
+            self._resolve_camera_body_index()
+            self._camera_scandots_ray_dirs_base = self._build_camera_scandots_rays()
 
         if self._uses_pytorch3d():
             self._resolve_camera_body_index()
@@ -177,6 +210,12 @@ class PerceptionManager:
         if self._uses_pytorch3d():
             idx = env_ids if env_ids is not None else slice(None)
             camera_depth = self._compute_pytorch3d_depth(env_ids)
+            self._camera_depth[idx] = camera_depth
+            return
+
+        if self._uses_camera_scandots():
+            idx = env_ids if env_ids is not None else slice(None)
+            camera_depth = self._compute_camera_scandots_depth(env_ids)
             self._camera_depth[idx] = camera_depth
             return
 
@@ -312,6 +351,71 @@ class PerceptionManager:
         dirs_base = dirs_base / torch.norm(dirs_base, dim=-1, keepdim=True).clamp(min=1.0e-6)
         return dirs_base
 
+    def _build_camera_scandots_rays(self) -> torch.Tensor:
+        stride = max(1, int(self.cfg.camera_scandots_stride))
+        u_coords = torch.arange(0, self._camera_width, stride, device=self.device, dtype=torch.float32)
+        v_coords = torch.arange(0, self._camera_height, stride, device=self.device, dtype=torch.float32)
+        if u_coords.numel() == 0 or v_coords.numel() == 0:
+            raise ValueError("camera_scandots_stride is too large for the camera resolution.")
+
+        if int(u_coords[-1].item()) != self._camera_width - 1:
+            u_coords = torch.cat(
+                [u_coords, torch.tensor([self._camera_width - 1], device=self.device, dtype=torch.float32)]
+            )
+        if int(v_coords[-1].item()) != self._camera_height - 1:
+            v_coords = torch.cat(
+                [v_coords, torch.tensor([self._camera_height - 1], device=self.device, dtype=torch.float32)]
+            )
+
+        self._camera_scandots_width = int(u_coords.numel())
+        self._camera_scandots_height = int(v_coords.numel())
+
+        v_grid, u_grid = torch.meshgrid(v_coords, u_coords, indexing="ij")
+        x = (u_grid - self._camera_cx) / self._camera_fx
+        y = (v_grid - self._camera_cy) / self._camera_fy
+
+        dirs_cam = torch.stack((torch.ones_like(x), -x, y), dim=-1)
+        dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
+        dirs_cam = dirs_cam.view(-1, 3)
+
+        pitch_rad = torch.deg2rad(torch.tensor(self.cfg.camera_pitch_deg, device=self.device))
+        pitch_quat = quat_from_euler_xyz(
+            torch.tensor(0.0, device=self.device),
+            pitch_rad,
+            torch.tensor(0.0, device=self.device),
+        )
+        pitch_quat = pitch_quat.unsqueeze(0).expand(dirs_cam.shape[0], -1)
+        dirs_base = quat_rotate_inverse(pitch_quat, dirs_cam, w_last=True)
+        dirs_base = dirs_base / torch.norm(dirs_base, dim=-1, keepdim=True).clamp(min=1.0e-6)
+        return dirs_base
+
+    def _get_camera_forward_axis(self, body_quat: torch.Tensor) -> torch.Tensor:
+        pitch_rad = torch.deg2rad(torch.tensor(self.cfg.camera_pitch_deg, device=body_quat.device))
+        pitch_quat = quat_from_euler_xyz(
+            torch.tensor(0.0, device=body_quat.device),
+            pitch_rad,
+            torch.tensor(0.0, device=body_quat.device),
+        )
+        forward_cam = torch.tensor([1.0, 0.0, 0.0], device=body_quat.device)
+        forward_base = quat_rotate_inverse(pitch_quat.unsqueeze(0), forward_cam.unsqueeze(0), w_last=True).squeeze(0)
+        forward_base = forward_base.unsqueeze(0).expand(body_quat.shape[0], -1)
+        forward_world = quat_apply(body_quat, forward_base, w_last=True)
+        return forward_world / torch.norm(forward_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
+
+    def _project_ranges_to_camera_depth(
+        self,
+        ranges: torch.Tensor,
+        ray_dirs_world: torch.Tensor,
+        body_quat: torch.Tensor,
+        hit_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        forward_world = self._get_camera_forward_axis(body_quat)
+        dots = torch.sum(ray_dirs_world * forward_world.unsqueeze(1), dim=-1)
+        dots = torch.clamp(dots, min=0.0)
+        depth = ranges * dots
+        depth = torch.where(hit_mask, depth, torch.full_like(depth, self.cfg.max_distance))
+        return torch.clamp(depth, min=0.0, max=self.cfg.max_distance)
+
     def _setup_rendered_camera(self) -> None:
         if get_simulator_type() != SimulatorType.ISAACSIM:
             raise RuntimeError(
@@ -334,6 +438,268 @@ class PerceptionManager:
         )
         self._rendered_camera.setup()
 
+    @staticmethod
+    def _parse_urdf_vec3(
+        text: str | None,
+        *,
+        device: str | torch.device = "cpu",
+        default: tuple[float, float, float] | None = (0.0, 0.0, 0.0),
+    ) -> torch.Tensor | None:
+        if text is None or text.strip() == "":
+            if default is None:
+                return None
+            return torch.tensor(default, device=device, dtype=torch.float32)
+        parts = text.split()
+        values = [float(val) for val in parts[:3]]
+        values += [0.0] * max(0, 3 - len(values))
+        return torch.tensor(values[:3], device=device, dtype=torch.float32)
+
+    def _resolve_robot_asset_paths(self) -> tuple[str, str]:
+        robot_config = getattr(self.env, "robot_config", None)
+        if robot_config is None:
+            raise RuntimeError("PerceptionManager requires env.robot_config to load robot meshes.")
+        asset_root = robot_config.asset.asset_root
+        if asset_root.startswith("@holosoma/"):
+            asset_root = asset_root.replace("@holosoma", get_holosoma_root())
+        asset_root = resolve_data_file_path(asset_root)
+        urdf_path = os.path.join(asset_root, robot_config.asset.urdf_file)
+        return urdf_path, asset_root
+
+    def _resolve_urdf_mesh_path(self, urdf_dir: str, asset_root: str, filename: str) -> str:
+        if filename.startswith("package://"):
+            filename = filename[len("package://") :]
+            return os.path.join(asset_root, filename)
+        if filename.startswith("file://"):
+            filename = filename[len("file://") :]
+        if os.path.isabs(filename):
+            return filename
+        return os.path.join(urdf_dir, filename)
+
+    def _load_robot_link_meshes(self) -> None:
+        if not self._camera_include_robot_mesh:
+            return
+        try:
+            import trimesh  # noqa: PLC0415
+        except Exception as exc:
+            if not self._warned_robot_mesh:
+                (self.logger or logger).warning("Robot mesh loading skipped; trimesh not available: %s", exc)
+                self._warned_robot_mesh = True
+            return
+
+        try:
+            urdf_path, asset_root = self._resolve_robot_asset_paths()
+        except Exception as exc:
+            if not self._warned_robot_mesh:
+                (self.logger or logger).warning("Robot mesh loading skipped; URDF path error: %s", exc)
+                self._warned_robot_mesh = True
+            return
+
+        if not os.path.exists(urdf_path):
+            if not self._warned_robot_mesh:
+                (self.logger or logger).warning("Robot mesh loading skipped; URDF not found: %s", urdf_path)
+                self._warned_robot_mesh = True
+            return
+
+        try:
+            root = ET.parse(urdf_path).getroot()
+        except Exception as exc:
+            if not self._warned_robot_mesh:
+                (self.logger or logger).warning("Robot mesh loading skipped; URDF parse failed: %s", exc)
+                self._warned_robot_mesh = True
+            return
+
+        body_names = getattr(self.env, "body_names", None) or getattr(self.env.robot_config, "body_names", None)
+        if not body_names:
+            if not self._warned_robot_mesh:
+                (self.logger or logger).warning("Robot mesh loading skipped; body_names unavailable.")
+                self._warned_robot_mesh = True
+            return
+
+        name_to_index = {name: idx for idx, name in enumerate(body_names)}
+        link_meshes: dict[int, list[tuple[torch.Tensor, torch.Tensor]]] = {}
+        urdf_dir = os.path.dirname(urdf_path)
+
+        for link in root.findall("link"):
+            link_name = link.get("name")
+            if not link_name:
+                continue
+
+            parent_name = link_name
+            offset_pos = torch.zeros(3, dtype=torch.float32)
+            offset_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], dtype=torch.float32)
+
+            if link_name not in name_to_index:
+                resolved = resolve_fixed_link_offset(
+                    self.env.robot_config,
+                    link_name,
+                    available_links=body_names,
+                    device="cpu",
+                )
+                if resolved is None:
+                    continue
+                parent_name, offset_pos, offset_quat = resolved
+
+            link_index = name_to_index.get(parent_name)
+            if link_index is None:
+                continue
+
+            for visual in link.findall("visual"):
+                geometry = visual.find("geometry")
+                if geometry is None:
+                    continue
+                mesh = None
+                mesh_tag = geometry.find("mesh")
+                if mesh_tag is not None:
+                    filename = mesh_tag.get("filename")
+                    if not filename:
+                        continue
+                    mesh_path = self._resolve_urdf_mesh_path(urdf_dir, asset_root, filename)
+                    if not os.path.exists(mesh_path):
+                        continue
+                    mesh = trimesh.load(mesh_path, process=False)
+                    if isinstance(mesh, trimesh.Scene):
+                        mesh = mesh.dump(concatenate=True)
+                    if not isinstance(mesh, trimesh.Trimesh):
+                        continue
+                    scale = self._parse_urdf_vec3(mesh_tag.get("scale"), default=None)
+                    if scale is not None:
+                        mesh.apply_scale(scale.numpy())
+                else:
+                    box_tag = geometry.find("box")
+                    cylinder_tag = geometry.find("cylinder")
+                    sphere_tag = geometry.find("sphere")
+                    if box_tag is not None:
+                        size = self._parse_urdf_vec3(box_tag.get("size"), default=None)
+                        if size is None:
+                            continue
+                        mesh = trimesh.creation.box(extents=size.numpy())
+                    elif cylinder_tag is not None:
+                        radius = float(cylinder_tag.get("radius", "0.0"))
+                        length = float(cylinder_tag.get("length", "0.0"))
+                        if radius <= 0.0 or length <= 0.0:
+                            continue
+                        mesh = trimesh.creation.cylinder(radius=radius, height=length)
+                    elif sphere_tag is not None:
+                        radius = float(sphere_tag.get("radius", "0.0"))
+                        if radius <= 0.0:
+                            continue
+                        mesh = trimesh.creation.icosphere(radius=radius)
+                    else:
+                        continue
+
+                origin = visual.find("origin")
+                visual_pos = self._parse_urdf_vec3(
+                    origin.get("xyz") if origin is not None else None, default=(0.0, 0.0, 0.0)
+                )
+                visual_rpy = self._parse_urdf_vec3(
+                    origin.get("rpy") if origin is not None else None, default=(0.0, 0.0, 0.0)
+                )
+                visual_quat = quat_from_euler_xyz(visual_rpy[0], visual_rpy[1], visual_rpy[2])
+
+                combined_pos = offset_pos + quat_apply(offset_quat.unsqueeze(0), visual_pos.unsqueeze(0), w_last=True)
+                combined_pos = combined_pos.squeeze(0)
+                combined_quat = quat_mul(offset_quat.unsqueeze(0), visual_quat.unsqueeze(0), w_last=True)
+                combined_quat = combined_quat.squeeze(0)
+
+                verts = torch.as_tensor(mesh.vertices, dtype=torch.float32)
+                faces = torch.as_tensor(mesh.faces, dtype=torch.int64)
+                if verts.numel() == 0 or faces.numel() == 0:
+                    continue
+
+                quat_batch = combined_quat.unsqueeze(0).expand(verts.shape[0], -1)
+                verts = quat_apply(quat_batch, verts, w_last=True) + combined_pos
+
+                link_meshes.setdefault(link_index, []).append((verts, faces))
+
+        self._robot_link_meshes = []
+        for link_index in sorted(link_meshes.keys()):
+            parts = link_meshes[link_index]
+            if not parts:
+                continue
+            verts_list = []
+            faces_list = []
+            vert_offset = 0
+            for verts, faces in parts:
+                verts_list.append(verts)
+                faces_list.append(faces + vert_offset)
+                vert_offset += verts.shape[0]
+            if verts_list:
+                verts = torch.cat(verts_list, dim=0)
+                faces = torch.cat(faces_list, dim=0)
+                self._robot_link_meshes.append(
+                    {
+                        "link_index": link_index,
+                        "vertices": verts,
+                        "faces": faces,
+                    }
+                )
+
+        if not self._robot_link_meshes:
+            if not self._warned_robot_mesh:
+                (self.logger or logger).warning("Robot mesh loading found no visual meshes; skipping.")
+                self._warned_robot_mesh = True
+            return
+
+        self._camera_robot_mesh_enabled = True
+
+    def _apply_link_transform(
+        self, vertices: torch.Tensor, link_pos: torch.Tensor, link_quat: torch.Tensor
+    ) -> torch.Tensor:
+        num_envs = link_pos.shape[0]
+        num_verts = vertices.shape[0]
+        verts = vertices.unsqueeze(0).expand(num_envs, -1, -1).reshape(-1, 3)
+        quats = link_quat.unsqueeze(1).expand(num_envs, num_verts, 4).reshape(-1, 4)
+        verts_world = quat_apply(quats, verts, w_last=True).view(num_envs, num_verts, 3)
+        return verts_world + link_pos.unsqueeze(1)
+
+    def _build_camera_warp_mesh(self, env_ids: torch.Tensor | None):
+        if self._terrain_vertices is None or self._terrain_faces is None or not self._robot_link_meshes:
+            return self._warp_mesh
+
+        if env_ids is None or isinstance(env_ids, slice):
+            env_ids = torch.arange(self.num_envs, device="cpu")
+        else:
+            env_ids = env_ids.to("cpu")
+
+        if env_ids.numel() == 0:
+            return self._warp_mesh
+
+        body_pos = self.env.simulator._rigid_body_pos[env_ids].detach().cpu()
+        body_quat = self.env.simulator._rigid_body_rot[env_ids].detach().cpu()
+        num_envs = body_pos.shape[0]
+
+        vertices_chunks = [self._terrain_vertices]
+        faces_chunks = [self._terrain_faces]
+        vertex_offset = self._terrain_vertices.shape[0]
+
+        for link_mesh in self._robot_link_meshes:
+            link_index = link_mesh["link_index"]
+            verts = link_mesh["vertices"]
+            faces = link_mesh["faces"]
+            if verts.numel() == 0 or faces.numel() == 0:
+                continue
+
+            link_pos = body_pos[:, link_index]
+            link_quat = body_quat[:, link_index]
+            verts_world = self._apply_link_transform(verts, link_pos, link_quat)
+            vertices_chunks.append(verts_world.reshape(-1, 3).numpy())
+
+            faces_np = faces.numpy()
+            offsets = np.arange(num_envs, dtype=np.int64) * verts.shape[0] + vertex_offset
+            faces_env = faces_np[None, :, :] + offsets[:, None, None]
+            faces_chunks.append(faces_env.reshape(-1, 3))
+
+            vertex_offset += num_envs * verts.shape[0]
+
+        vertices = np.concatenate(vertices_chunks, axis=0)
+        faces = np.concatenate(faces_chunks, axis=0)
+        return warp_utils.convert_to_wp_mesh(vertices, faces, self.device)
+
+    def _get_camera_warp_mesh(self, env_ids: torch.Tensor | None):
+        if not self._camera_robot_mesh_enabled:
+            return self._warp_mesh
+        return self._build_camera_warp_mesh(env_ids)
+
     def _uses_raycast(self) -> bool:
         if self.cfg.output_mode == "heightmap":
             return True
@@ -341,6 +707,9 @@ class PerceptionManager:
 
     def _uses_camera_raycast(self) -> bool:
         return self.cfg.output_mode == "camera_depth" and self._camera_source == "mesh_raycast"
+
+    def _uses_camera_scandots(self) -> bool:
+        return self.cfg.output_mode == "camera_depth" and self._camera_source == "mesh_raycast_scandots"
 
     def _uses_pytorch3d(self) -> bool:
         return self.cfg.output_mode == "camera_depth" and self._camera_source == "pytorch3d"
@@ -434,9 +803,53 @@ class PerceptionManager:
         offset_world = quat_apply(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
         ray_starts = body_pos.unsqueeze(1) + offset_world.unsqueeze(1)
 
-        ray_hits_world = warp_utils.ray_cast(ray_starts, ray_dirs_world, self._warp_mesh)
-        distances = self._compute_camera_ray_distances(ray_starts, ray_dirs_world, ray_hits_world)
-        return distances.view(num_envs, self._camera_height, self._camera_width)
+        warp_mesh = self._get_camera_warp_mesh(env_ids)
+        ray_hits_world = warp_utils.ray_cast(ray_starts, ray_dirs_world, warp_mesh)
+        hit_mask = torch.isfinite(ray_hits_world).all(dim=-1)
+        ranges = self._compute_camera_ray_distances(ray_starts, ray_dirs_world, ray_hits_world)
+        depth = self._project_ranges_to_camera_depth(ranges, ray_dirs_world, body_quat, hit_mask)
+        return depth.view(num_envs, self._camera_height, self._camera_width)
+
+    def _compute_camera_scandots_depth(self, env_ids: torch.Tensor | None) -> torch.Tensor:
+        if self._warp_mesh is None:
+            raise RuntimeError("PerceptionManager.setup() must be called before update().")
+        if self._camera_scandots_ray_dirs_base is None:
+            raise RuntimeError("PerceptionManager scandots ray buffers are not initialized.")
+
+        idx = env_ids if env_ids is not None else slice(None)
+        body_pos, body_quat = self._get_camera_body_pose(idx)
+        num_envs = body_pos.shape[0]
+
+        ray_dirs_base = self._camera_scandots_ray_dirs_base.unsqueeze(0).expand(num_envs, -1, -1)
+        ray_dirs_world = quat_rotate_batched(body_quat, ray_dirs_base)
+
+        offset_world = quat_apply(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
+        ray_starts = body_pos.unsqueeze(1) + offset_world.unsqueeze(1)
+
+        warp_mesh = self._get_camera_warp_mesh(env_ids)
+        ray_hits_world = warp_utils.ray_cast(ray_starts, ray_dirs_world, warp_mesh)
+        hit_mask = torch.isfinite(ray_hits_world).all(dim=-1)
+        ranges = self._compute_camera_ray_distances(ray_starts, ray_dirs_world, ray_hits_world)
+
+        height = self._camera_scandots_height
+        width = self._camera_scandots_width
+        if height is None or width is None:
+            raise RuntimeError("PerceptionManager scandots grid size is not initialized.")
+
+        depth = self._project_ranges_to_camera_depth(ranges, ray_dirs_world, body_quat, hit_mask)
+        depth = depth.view(num_envs, height, width).unsqueeze(1)
+
+        upsample_mode = self.cfg.camera_scandots_upsample
+        if upsample_mode in {"bilinear", "bicubic"}:
+            depth = F.interpolate(
+                depth,
+                size=(self._camera_height, self._camera_width),
+                mode=upsample_mode,
+                align_corners=False,
+            )
+        else:
+            depth = F.interpolate(depth, size=(self._camera_height, self._camera_width), mode=upsample_mode)
+        return depth.squeeze(1)
 
     def _compute_camera_ray_distances(
         self, ray_starts: torch.Tensor, ray_dirs: torch.Tensor, ray_hits_world: torch.Tensor

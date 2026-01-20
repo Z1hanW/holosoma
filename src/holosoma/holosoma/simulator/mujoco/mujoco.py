@@ -905,6 +905,7 @@ class MuJoCo(BaseSimulator):
     def draw_debug_viz(self):
         if self.virtual_gantry:
             self.virtual_gantry.draw_debug()
+        self._draw_contact_forces(env_id=self.current_world_id)
 
     def simulate_at_each_physics_step(self) -> None:
         """Advance simulation by one step."""

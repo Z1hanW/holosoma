@@ -1,6 +1,7 @@
 python src/holosoma/holosoma/eval_agent.py \
   --checkpoint=./model_02800.pt \
   --training.num_envs=1 \
+  --simulator.config.contact_force_viz=True \
   terrain:terrain-load-obj \
   --terrain.terrain-term.spawn.randomize_tiles=False \
   --terrain.terrain-term.obj-file-path stairs.obj \

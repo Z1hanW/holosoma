@@ -872,6 +872,7 @@ class IsaacSim(BaseSimulator):
     def draw_debug_viz(self):
         if self.virtual_gantry:
             self.virtual_gantry.draw_debug()
+        self._draw_contact_forces()
 
     def simulate_at_each_physics_step(self):
         self._sim_step_counter += 1

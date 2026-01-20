@@ -334,11 +334,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._motion_output_names: set[str] = set()
         self._motion_alignment_enabled = False
 
+        self._joystick_goal_enabled = bool(config.task.use_joystick_goal)
+        self._joystick_goal_scale = float(config.task.joystick_goal_scale)
+        self._joystick_yaw_scale = float(config.task.joystick_yaw_scale)
+
         super().__init__(config)
 
-        self._joystick_goal_enabled = bool(self.config.task.use_joystick_goal)
-        self._joystick_goal_scale = float(self.config.task.joystick_goal_scale)
-        self._joystick_yaw_scale = float(self.config.task.joystick_yaw_scale)
         if self._joystick_goal_enabled:
             self.use_joystick = True
             self.stand_command[0, 0] = 1.0

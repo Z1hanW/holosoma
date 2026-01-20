@@ -491,6 +491,15 @@ class SimulatorInitConfig:
     debug_viz: bool = True
     """Enable debug visualization (gantry lines, etc.)."""
 
+    contact_force_viz: bool = True
+    """Enable contact force visualization (net force vectors per body)."""
+
+    contact_force_viz_scale: float = 0.001
+    """Scale factor for contact force visualization (meters per Newton)."""
+
+    contact_force_viz_threshold: float = 1.0
+    """Minimum contact force magnitude (N) to visualize."""
+
     scene: SceneConfig = field(default_factory=SceneConfig)
     """Scene composition and asset configuration."""
 
