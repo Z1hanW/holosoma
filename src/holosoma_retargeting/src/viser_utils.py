@@ -31,8 +31,8 @@ def create_motion_control_sliders(
         [0:3]   robot base position   (xyz)
         [3:7]   robot base quaternion (wxyz)
         [7:7+R] robot joints          (R = robot_dof)
-        [-7:-4] object position  (xyz)            # only if contains_object_in_qpos and viser_object provided
-        [-4:]   object quaternion (wxyz)          # only if contains_object_in_qpos and viser_object provided
+        [-7:-4] object position  (xyz)            # only if contains_object_in_qpos and object_base_frame provided
+        [-4:]   object quaternion (wxyz)          # only if contains_object_in_qpos and object_base_frame provided
 
     Args:
         server: Viser server.
@@ -56,8 +56,7 @@ def create_motion_control_sliders(
         raise ValueError("motion_sequence is empty.")
 
     has_object_input = (
-        viser_object is not None
-        and object_base_frame is not None
+        object_base_frame is not None
         and contains_object_in_qpos
         and qpos.shape[1] >= (7 + robot_dof + 7)
     )

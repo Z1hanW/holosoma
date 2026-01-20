@@ -75,12 +75,12 @@ critic_obs_shared_terms = {
     "motion_ref_pos_b": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:motion_ref_pos_b",
         scale=1.0,
-        noise=0.25,
+        noise=0.0,
     ),
     "motion_ref_ori_b": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:motion_ref_ori_b",
         scale=1.0,
-        noise=0.05,
+        noise=0.0,
     ),
     "robot_body_pos_b": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:robot_body_pos_b",
@@ -100,17 +100,17 @@ critic_obs_shared_terms = {
     "base_ang_vel": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:base_ang_vel",
         scale=1.0,
-        noise=0.2,
+        noise=0.0,
     ),
     "dof_pos": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:dof_pos",
         scale=1.0,
-        noise=0.01,
+        noise=0.0,
     ),
     "dof_vel": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:dof_vel",
         scale=1.0,
-        noise=0.5,
+        noise=0.0,
     ),
     "actions": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:actions",
