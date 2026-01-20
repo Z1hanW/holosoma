@@ -207,6 +207,9 @@ class TerrainTermCfg:
     When a directory or glob resolves to multiple OBJ files, each OBJ becomes a column
     and the set of columns is repeated across num_rows."""
 
+    obj_metadata_path: str | None = None
+    """Optional JSON metadata for prebuilt OBJ tiles (tile names/offsets/stride)."""
+
     scale_factor: float = 1.0
     """Use for performance to scale border_size, terrain_length, terrain_width, num_ros and num_cols."""
 

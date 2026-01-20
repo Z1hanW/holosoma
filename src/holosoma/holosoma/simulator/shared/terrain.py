@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import glob
+import json
 import math
 import pathlib
 from typing import Any
@@ -89,9 +90,81 @@ class Terrain(TerrainInterface):
                 raise ValueError(f"Loaded object is not a valid Trimesh: {type(base_mesh)}")
             return base_mesh
 
+        def _load_obj_metadata(path_str: str) -> dict[str, Any]:
+            meta_path = pathlib.Path(path_str)
+            if not meta_path.exists():
+                raise FileNotFoundError(f"OBJ metadata file not found: {meta_path}")
+            with meta_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if not isinstance(data, dict):
+                raise ValueError("OBJ metadata must be a JSON object.")
+            return data
+
         obj_paths = _resolve_obj_paths(raw_path)
         if not obj_paths:
             raise FileNotFoundError(f"No terrain OBJ files found at: {raw_path}")
+
+        metadata_path = getattr(self._cfg, "obj_metadata_path", None)
+        if metadata_path:
+            if len(obj_paths) != 1:
+                raise ValueError("obj_metadata_path requires obj_file_path to resolve to a single OBJ file.")
+            terrain_path = obj_paths[0]
+            print(f"[INFO] Loading prebuilt terrain from: {terrain_path}")
+            base = _load_mesh(terrain_path)
+
+            meta = _load_obj_metadata(metadata_path)
+            tile_names = list(meta.get("tile_names", []))
+            tile_offsets = np.asarray(meta.get("tile_offsets", []), dtype=np.float32)
+            tile_stride = np.asarray(meta.get("tile_stride", []), dtype=np.float32)
+            tile_rows = int(meta.get("tile_rows", self._num_rows))
+            tile_cols = int(meta.get("tile_cols", len(tile_names) or self._num_cols))
+            tile_max_z = np.asarray(meta.get("tile_max_z", []), dtype=np.float32)
+
+            if tile_offsets.size == 0:
+                raise ValueError("OBJ metadata must include tile_offsets.")
+            if tile_offsets.ndim != 2 or tile_offsets.shape[1] < 2:
+                raise ValueError("OBJ metadata tile_offsets must be Nx3 array.")
+            if tile_offsets.shape[1] == 2:
+                tile_offsets = np.concatenate(
+                    [tile_offsets, np.zeros((tile_offsets.shape[0], 1), dtype=np.float32)], axis=1
+                )
+            elif tile_offsets.shape[1] > 3:
+                tile_offsets = tile_offsets[:, :3]
+            if tile_stride.size < 2:
+                raise ValueError("OBJ metadata must include tile_stride with at least X/Y entries.")
+            if tile_stride.size == 2:
+                tile_stride = np.array([tile_stride[0], tile_stride[1], 0.0], dtype=np.float32)
+            elif tile_stride.size > 3:
+                tile_stride = tile_stride[:3]
+            if tile_names and len(tile_names) != tile_cols:
+                raise ValueError("OBJ metadata tile_names length must match tile_cols.")
+
+            self._obj_tile_names = tile_names
+            self._obj_tile_offsets = tile_offsets
+            self._obj_tile_stride = tile_stride.astype(np.float32)
+            self._obj_tile_rows = max(1, tile_rows)
+            self._obj_tile_cols = max(1, tile_cols)
+            if tile_max_z.size == 0:
+                self._obj_tile_max_z = np.zeros((self._obj_tile_offsets.shape[0],), dtype=np.float32)
+            else:
+                if tile_max_z.size not in {self._obj_tile_offsets.shape[0], self._obj_tile_cols}:
+                    print("[WARN] OBJ metadata tile_max_z length mismatch; filling zeros.")
+                    self._obj_tile_max_z = np.zeros((self._obj_tile_offsets.shape[0],), dtype=np.float32)
+                else:
+                    self._obj_tile_max_z = tile_max_z.astype(np.float32)
+
+            if self._num_rows != self._obj_tile_rows:
+                print(
+                    f"[WARN] Overriding num_rows ({self._num_rows}) to match metadata ({self._obj_tile_rows})."
+                )
+                self._num_rows = self._obj_tile_rows
+            if self._num_cols != self._obj_tile_cols:
+                print(
+                    f"[WARN] Overriding num_cols ({self._num_cols}) to match metadata ({self._obj_tile_cols})."
+                )
+                self._num_cols = self._obj_tile_cols
+
+            return base
 
         if len(obj_paths) == 1:
             terrain_path = obj_paths[0]

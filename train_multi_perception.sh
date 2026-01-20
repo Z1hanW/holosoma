@@ -26,6 +26,23 @@ MOTION_DIR="multi-geometry/test"
 OBJ_DIR="multi-motion/test"
 NUM_ROWS=1
 NUM_COLS=1
+FUSED_OBJ="../tmp_fused.obj"
+FUSED_META="../tmp_fused.meta.json"
+REBUILD_FUSED=${REBUILD_FUSED:-0}
+
+OBJ_PATH="${OBJ_DIR}"
+OBJ_META=""
+if [[ -d "${OBJ_DIR}" ]]; then
+  if [[ "${REBUILD_FUSED}" == "1" || ! -f "${FUSED_OBJ}" || ! -f "${FUSED_META}" ]]; then
+    python preprocess/build_obj_terrain_tiles.py \
+      --obj-dir "${OBJ_DIR}" \
+      --out-obj "${FUSED_OBJ}" \
+      --out-meta "${FUSED_META}" \
+      --num-rows "${NUM_ROWS}"
+  fi
+  OBJ_PATH="${FUSED_OBJ}"
+  OBJ_META="${FUSED_META}"
+fi
 
 CUDA_VISIBLE_DEVICES=5,6,7 torchrun --nproc_per_node=3 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-videomimic-mlp \
@@ -35,7 +52,8 @@ CUDA_VISIBLE_DEVICES=5,6,7 torchrun --nproc_per_node=3 --master_port=$((29500 + 
   terrain:terrain-load-obj \
   --training.num_envs=30720 \
   --simulator.config.scene.env_spacing=0.0 \
-  --terrain.terrain-term.obj-file-path "${OBJ_DIR}" \
+  --terrain.terrain-term.obj-file-path "${OBJ_PATH}" \
+  ${OBJ_META:+--terrain.terrain-term.obj-metadata-path "${OBJ_META}"} \
   --terrain.terrain-term.num-rows "${NUM_ROWS}" \
   --terrain.terrain-term.num-cols "${NUM_COLS}" \
   \
