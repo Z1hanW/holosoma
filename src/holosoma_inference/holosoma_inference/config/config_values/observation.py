@@ -180,6 +180,29 @@ wbt_videomimic = ObservationConfig(
     },
 )
 
+wbt_videomimic_root = ObservationConfig(
+    obs_dict={
+        "actor_obs": [
+            "torso_real",
+            "torso_xy_rel",
+            "torso_yaw_rel",
+        ],
+    },
+    obs_dims={
+        "torso_real": 93,
+        "torso_xy_rel": 2,
+        "torso_yaw_rel": 1,
+    },
+    obs_scales={
+        "torso_real": 1.0,
+        "torso_xy_rel": 1.0,
+        "torso_yaw_rel": 1.0,
+    },
+    history_length_dict={
+        "actor_obs": 5,
+    },
+)
+
 # =============================================================================
 # Default Configurations Dictionary
 # =============================================================================
@@ -189,6 +212,7 @@ DEFAULTS = {
     "loco-t1-29dof": loco_t1_29dof,
     "wbt": wbt,
     "wbt-videomimic": wbt_videomimic,
+    "wbt-videomimic-root": wbt_videomimic_root,
 }
 """Dictionary of all available observation configurations.
 

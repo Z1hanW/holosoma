@@ -336,6 +336,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         super().__init__(config)
 
+        self._joystick_goal_enabled = bool(self.config.task.use_joystick_goal)
+        self._joystick_goal_scale = float(self.config.task.joystick_goal_scale)
+        self._joystick_yaw_scale = float(self.config.task.joystick_yaw_scale)
+        if self._joystick_goal_enabled:
+            self.use_joystick = True
+            self.stand_command[0, 0] = 1.0
+
         # Load stiff startup parameters from robot config
         if config.robot.stiff_startup_pos is not None:
             self._stiff_hold_q = np.array(config.robot.stiff_startup_pos, dtype=np.float32).reshape(1, -1)
@@ -417,7 +424,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             metadata[prop.key] = json.loads(prop.value)
         self._onnx_metadata = metadata
         self._onnx_obs_dim = self._get_onnx_obs_dim()
-        if self._uses_videomimic:
+        if self._uses_videomimic and not self._joystick_goal_enabled:
             self._load_motion_data_from_metadata(metadata, model_path)
         self._maybe_enable_motion_future_target_poses(metadata, model_path)
 
@@ -504,6 +511,14 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self.ref_quat_xyzw_t = wxyz_to_xyzw(ref_quat_wxyz)
             self.ref_quat_xyzw_0 = self.ref_quat_xyzw_t.copy()
             self.ref_pos_xyz_t = self._motion_data.ref_pos_w[:1]
+        elif self._joystick_goal_enabled and self.motion_command_0 is None:
+            joint_pos = self.default_dof_angles.reshape(1, -1).astype(np.float32, copy=False)
+            joint_vel = np.zeros_like(joint_pos)
+            self.motion_command_t = np.concatenate([joint_pos, joint_vel], axis=1)
+            self.motion_command_0 = self.motion_command_t.copy()
+            self.ref_quat_xyzw_t = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+            self.ref_quat_xyzw_0 = self.ref_quat_xyzw_t.copy()
+            self.ref_pos_xyz_t = np.zeros((1, 3), dtype=np.float32)
 
     def _get_onnx_obs_dim(self) -> int | None:
         inputs = self.onnx_policy_session.get_inputs()
@@ -850,12 +865,24 @@ class WholeBodyTrackingPolicy(BasePolicy):
     def _normalize_angle(angle: float) -> float:
         return float((angle + np.pi) % (2 * np.pi) - np.pi)
 
+    def _get_joystick_goal_obs(self) -> tuple[np.ndarray, np.ndarray]:
+        if not self.use_joystick:
+            return np.zeros((1, 2), dtype=np.float32), np.zeros((1, 1), dtype=np.float32)
+        lin_cmd = np.clip(self.lin_vel_command[0], -1.0, 1.0)
+        yaw_cmd = float(np.clip(self.ang_vel_command[0, 0], -1.0, 1.0))
+        torso_xy_rel = (lin_cmd * self._joystick_goal_scale).reshape(1, 2).astype(np.float32, copy=False)
+        torso_yaw_rel = np.array([[yaw_cmd * self._joystick_yaw_scale]], dtype=np.float32)
+        return torso_xy_rel, torso_yaw_rel
+
     def _get_videomimic_obs_buffer_dict(self, robot_state_data):
-        if self._motion_data is None:
+        if self._motion_data is None and not self._joystick_goal_enabled:
             raise ValueError("Motion data is required for VideoMimic observations.")
 
-        self._maybe_update_motion_alignment(robot_state_data)
-        idx = self._get_motion_index()
+        if self._joystick_goal_enabled:
+            torso_xy_rel, torso_yaw_rel = self._get_joystick_goal_obs()
+        else:
+            self._maybe_update_motion_alignment(robot_state_data)
+            idx = self._get_motion_index()
 
         base_quat = robot_state_data[:, 3:7]
         base_ang_vel = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
@@ -867,30 +894,35 @@ class WholeBodyTrackingPolicy(BasePolicy):
             [base_ang_vel, projected_gravity, dof_pos, dof_vel, self.last_policy_action], axis=1
         )
 
-        motion_ref_pos_w = self._motion_data.ref_pos_w[idx : idx + 1]
-        motion_ref_quat_w = self._motion_data.ref_quat_w[idx : idx + 1]
-        motion_root_quat_w = self._motion_data.root_quat_w[idx : idx + 1]
-        motion_joint_pos = self._motion_data.joint_pos[idx : idx + 1]
+        if self._joystick_goal_enabled:
+            target_joints = np.zeros((1, self.num_dofs), dtype=np.float32)
+            target_root_roll = np.zeros((1, 1), dtype=np.float32)
+            target_root_pitch = np.zeros((1, 1), dtype=np.float32)
+        else:
+            motion_ref_pos_w = self._motion_data.ref_pos_w[idx : idx + 1]
+            motion_ref_quat_w = self._motion_data.ref_quat_w[idx : idx + 1]
+            motion_root_quat_w = self._motion_data.root_quat_w[idx : idx + 1]
+            motion_joint_pos = self._motion_data.joint_pos[idx : idx + 1]
 
-        if self._motion_align_quat_wxyz is not None:
-            motion_ref_pos_w = self._apply_motion_alignment_pos(motion_ref_pos_w)
-            motion_ref_quat_w = self._apply_motion_alignment_quat(motion_ref_quat_w)
-            motion_root_quat_w = self._apply_motion_alignment_quat(motion_root_quat_w)
+            if self._motion_align_quat_wxyz is not None:
+                motion_ref_pos_w = self._apply_motion_alignment_pos(motion_ref_pos_w)
+                motion_ref_quat_w = self._apply_motion_alignment_quat(motion_ref_quat_w)
+                motion_root_quat_w = self._apply_motion_alignment_quat(motion_root_quat_w)
 
-        robot_ref_pos_w, robot_ref_quat_w = self._get_ref_body_pose_in_world(robot_state_data)
-        rel_pos_w = motion_ref_pos_w - robot_ref_pos_w
-        heading_inv = self._calc_heading_quat_inv(robot_ref_quat_w)
-        rel_pos_b = quat_apply(heading_inv, rel_pos_w)
-        torso_xy_rel = rel_pos_b[:, :2]
+            robot_ref_pos_w, robot_ref_quat_w = self._get_ref_body_pose_in_world(robot_state_data)
+            rel_pos_w = motion_ref_pos_w - robot_ref_pos_w
+            heading_inv = self._calc_heading_quat_inv(robot_ref_quat_w)
+            rel_pos_b = quat_apply(heading_inv, rel_pos_w)
+            torso_xy_rel = rel_pos_b[:, :2]
 
-        target_heading = self._quat_yaw(motion_ref_quat_w)
-        robot_heading = self._quat_yaw(robot_ref_quat_w)
-        torso_yaw_rel = np.array([[self._normalize_angle(target_heading - robot_heading)]], dtype=np.float32)
+            target_heading = self._quat_yaw(motion_ref_quat_w)
+            robot_heading = self._quat_yaw(robot_ref_quat_w)
+            torso_yaw_rel = np.array([[self._normalize_angle(target_heading - robot_heading)]], dtype=np.float32)
 
-        target_joints = motion_joint_pos - self.default_dof_angles
-        roll, pitch, _ = quat_to_rpy(motion_root_quat_w.reshape(-1, 4)[0])
-        target_root_roll = np.array([[self._normalize_angle(roll)]], dtype=np.float32)
-        target_root_pitch = np.array([[self._normalize_angle(pitch)]], dtype=np.float32)
+            target_joints = motion_joint_pos - self.default_dof_angles
+            roll, pitch, _ = quat_to_rpy(motion_root_quat_w.reshape(-1, 4)[0])
+            target_root_roll = np.array([[self._normalize_angle(roll)]], dtype=np.float32)
+            target_root_pitch = np.array([[self._normalize_angle(pitch)]], dtype=np.float32)
 
         return {
             "torso_real": torso_real,

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import mujoco
 import mujoco.viewer
+import glfw
 import numpy as np
 import torch
 from loguru import logger
@@ -145,6 +146,7 @@ class MuJoCo(BaseSimulator):
 
         # Text overlay visibility toggle
         self.show_text_overlay: bool = True
+        self._pending_reset: bool = False
 
         # Command system for keyboard/joystick controls
         # Initialize commands tensor matching IsaacGym format:
@@ -645,6 +647,24 @@ class MuJoCo(BaseSimulator):
         self.root_data.qvel[self.robot_qvel_addr : self.robot_qvel_addr + 3] = initial_lin_vel
         self.root_data.qvel[self.robot_qvel_addr + 3 : self.robot_qvel_addr + 6] = initial_ang_vel
 
+    def reset(self) -> None:
+        """Reset simulation state, snapping robot XY to gantry point if available."""
+        if self.root_model is None or self.root_data is None:
+            return
+
+        mujoco.mj_resetData(self.root_model, self.root_data)
+        self._set_robot_initial_state()
+
+        if self.virtual_gantry is not None and self.virtual_gantry.point is not None:
+            self.root_data.qpos[self.robot_qpos_addr : self.robot_qpos_addr + 2] = [
+                float(self.virtual_gantry.point[0]),
+                float(self.virtual_gantry.point[1]),
+            ]
+
+        self._zero_commands()
+        mujoco.mj_forward(self.root_model, self.root_data)
+        logger.info("Simulation reset (robot XY snapped to gantry)")
+
     def prepare_sim(self) -> None:
         """Prepare simulation - enhanced implementation with ObjectRegistry integration.
 
@@ -888,6 +908,11 @@ class MuJoCo(BaseSimulator):
 
     def simulate_at_each_physics_step(self) -> None:
         """Advance simulation by one step."""
+        if self._pending_reset:
+            self._pending_reset = False
+            self.reset()
+            self._update_text_overlay()
+            return
 
         if self.virtual_gantry:
             # Apply virtual gantry forces before step
@@ -1436,6 +1461,7 @@ class MuJoCo(BaseSimulator):
             "Press '8' to lower it \n"
             "Press '9' to toggle it \n"
             "Use arrow keys to move gantry (XY) \n"
+            "Press backspace to reset the environment \n"
             "Press 'g' to hide this menu"
         )
 
@@ -1461,6 +1487,10 @@ class MuJoCo(BaseSimulator):
             logger.info(f"Text overlay: {status}")
             # Update overlay immediately when toggled
             self._update_text_overlay()
+            return
+
+        if keycode == glfw.KEY_BACKSPACE:
+            self._pending_reset = True
             return
 
         # Handle world_id toggling for multi-environment visualization (WarpBackend only)

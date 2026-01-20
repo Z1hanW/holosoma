@@ -33,6 +33,15 @@ class TaskConfig:
     use_joystick: bool = False
     """Enable joystick control input."""
 
+    use_joystick_goal: bool = False
+    """Use joystick to generate torso position/yaw goals for WBT policies."""
+
+    joystick_goal_scale: float = 0.5
+    """Scale (meters) applied to joystick XY for torso_xy_rel goals."""
+
+    joystick_yaw_scale: float = 0.5
+    """Scale (radians) applied to joystick yaw for torso_yaw_rel goals."""
+
     joystick_type: str = "xbox"
     """Joystick type."""
 
