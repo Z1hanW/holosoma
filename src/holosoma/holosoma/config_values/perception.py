@@ -11,6 +11,7 @@ heightmap = PerceptionConfig(
     grid_interval=0.1,
     update_hz=50.0,
     encoder_output_dim=512,
+    encoder_type="attention",
 )
 
 camera_depth_d435i = PerceptionConfig(
@@ -30,6 +31,7 @@ camera_depth_d435i = PerceptionConfig(
     camera_far=10.0,
     camera_distortion=[0.0, 0.0, 0.0, 0.0, 0.0],
     encoder_output_dim=512,
+    encoder_type="attention",
 )
 
 camera_depth_d435i_rendered = PerceptionConfig(
@@ -50,6 +52,7 @@ camera_depth_d435i_rendered = PerceptionConfig(
     camera_far=10.0,
     camera_distortion=[0.0, 0.0, 0.0, 0.0, 0.0],
     encoder_output_dim=512,
+    encoder_type="attention",
 )
 
 camera_depth_head_mesh = PerceptionConfig(
@@ -70,6 +73,7 @@ camera_depth_head_mesh = PerceptionConfig(
     camera_distortion=[0.0, 0.0, 0.0, 0.0, 0.0],
     sensor_offset=[0.0, 0.0, 0.0],
     encoder_output_dim=512,
+    encoder_type="attention",
 )
 
 camera_depth_head_pytorch3d = PerceptionConfig(
@@ -90,6 +94,7 @@ camera_depth_head_pytorch3d = PerceptionConfig(
     camera_distortion=[0.0, 0.0, 0.0, 0.0, 0.0],
     sensor_offset=[0.0, 0.0, 0.0],
     encoder_output_dim=512,
+    encoder_type="attention",
 )
 
 camera_depth_d435i_depth_sensor = PerceptionConfig(
@@ -112,6 +117,7 @@ camera_depth_d435i_depth_sensor = PerceptionConfig(
     depth_sensor_asset_path="/Isaac/Sensors/Intel/RealSense/rsd455.usd",
     depth_sensor_depth_prim=None,
     encoder_output_dim=512,
+    encoder_type="attention",
 )
 
 DEFAULTS = {

@@ -70,6 +70,7 @@ def _update_module_config(
         layer_cfg,
         perception_input_name="perception_obs",
         perception_output_dim=config.perception.encoder_output_dim,
+        perception_encoder_type=config.perception.encoder_type,
     )
 
     module_type = module_cfg.type

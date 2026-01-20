@@ -331,6 +331,19 @@ class GatedLinearEncoder(nn.Module):
         return self.proj(flat) * torch.sigmoid(self.gate(flat))
 
 
+class AttentionLinearEncoder(nn.Module):
+    """Flatten + linear projection scaled by learned attention."""
+
+    def __init__(self, input_dim: int, output_dim: int):
+        super().__init__()
+        self.proj = nn.Linear(input_dim, output_dim)
+        self.attention = nn.Parameter(torch.zeros(output_dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        flat = x.view(x.shape[0], -1)
+        return self.proj(flat) * self.attention
+
+
 def build_cnn_layer(
     input_channels: int,
     input_height: int,
@@ -470,7 +483,13 @@ class BaseModule(nn.Module):
 
         input_dim = self.input_dim_dict[self.perception_input_name]
         output_dim = layer_config.perception_output_dim or input_dim
-        self.perception_encoder = GatedLinearEncoder(input_dim, output_dim)
+        encoder_type = getattr(layer_config, "perception_encoder_type", "gated_linear")
+        if encoder_type == "gated_linear":
+            self.perception_encoder = GatedLinearEncoder(input_dim, output_dim)
+        elif encoder_type == "attention":
+            self.perception_encoder = AttentionLinearEncoder(input_dim, output_dim)
+        else:
+            raise ValueError(f"Unknown perception_encoder_type: {encoder_type}")
         self.perception_output_dim = output_dim
         return output_dim
 

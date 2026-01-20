@@ -54,6 +54,9 @@ class LayerConfig:
     perception_output_dim: int | None = None
     """Output dimension for perception encoder."""
 
+    perception_encoder_type: str = "gated_linear"
+    """Perception encoder type: 'gated_linear' or 'attention'."""
+
     input_channels: int = 1
     """Number of input channels. Only used for CNN modules."""
 
