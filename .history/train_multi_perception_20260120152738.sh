@@ -18,7 +18,7 @@ case "${DEPTH_IMPL}" in
     ;;
   scandots)
     PERCEPTION_PRESET="camera-depth-d435i-scandots"
-    ;;
+     ;;
   *)
     echo "Unknown DEPTH_IMPL=${DEPTH_IMPL}. Use rendered|depth_sensor|raycast." >&2
     exit 1
