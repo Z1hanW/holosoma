@@ -138,6 +138,56 @@ class MotionData:
                 decoded.append(str(name))
         return decoded
 
+    def apply_transition(
+        self,
+        start_state: dict[str, np.ndarray],
+        target_state: dict[str, np.ndarray],
+        num_steps: int,
+        prepend: bool,
+        drop_first: bool,
+        drop_last: bool,
+    ) -> None:
+        if num_steps <= 0:
+            return
+
+        alphas = np.linspace(0.0, 1.0, num_steps + 1, dtype=np.float32)
+        if drop_first:
+            alphas = alphas[1:]
+        if drop_last:
+            alphas = alphas[:-1]
+        if alphas.size == 0:
+            return
+
+        def _lerp(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+            a = np.asarray(a, dtype=np.float32)
+            b = np.asarray(b, dtype=np.float32)
+            view = alphas.reshape(-1, *([1] * a.ndim))
+            return a + view * (b - a)
+
+        segment_joint_pos = _lerp(start_state["joint_pos"], target_state["joint_pos"])
+        segment_joint_vel = _lerp(start_state["joint_vel"], target_state["joint_vel"])
+        segment_root_pos = _lerp(start_state["root_pos"], target_state["root_pos"])
+        segment_ref_pos = _lerp(start_state["ref_pos"], target_state["ref_pos"])
+        segment_root_quat = _slerp_quat_wxyz(start_state["root_quat"], target_state["root_quat"], alphas)
+        segment_ref_quat = _slerp_quat_wxyz(start_state["ref_quat"], target_state["ref_quat"], alphas)
+
+        if prepend:
+            self.joint_pos = np.concatenate([segment_joint_pos, self.joint_pos], axis=0)
+            self.joint_vel = np.concatenate([segment_joint_vel, self.joint_vel], axis=0)
+            self.root_pos_w = np.concatenate([segment_root_pos, self.root_pos_w], axis=0)
+            self.root_quat_w = np.concatenate([segment_root_quat, self.root_quat_w], axis=0)
+            self.ref_pos_w = np.concatenate([segment_ref_pos, self.ref_pos_w], axis=0)
+            self.ref_quat_w = np.concatenate([segment_ref_quat, self.ref_quat_w], axis=0)
+        else:
+            self.joint_pos = np.concatenate([self.joint_pos, segment_joint_pos], axis=0)
+            self.joint_vel = np.concatenate([self.joint_vel, segment_joint_vel], axis=0)
+            self.root_pos_w = np.concatenate([self.root_pos_w, segment_root_pos], axis=0)
+            self.root_quat_w = np.concatenate([self.root_quat_w, segment_root_quat], axis=0)
+            self.ref_pos_w = np.concatenate([self.ref_pos_w, segment_ref_pos], axis=0)
+            self.ref_quat_w = np.concatenate([self.ref_quat_w, segment_ref_quat], axis=0)
+
+        self.frame_count = int(self.joint_pos.shape[0])
+
 
 def _yaw_quat_xyzw(quat: np.ndarray) -> np.ndarray:
     qx = quat[..., 0]
@@ -177,6 +227,38 @@ def _matrix_from_quat_xyzw(quat: np.ndarray) -> np.ndarray:
     quat_wxyz = xyzw_to_wxyz(quat.reshape(-1, 4))
     mats = matrix_from_quat(quat_wxyz).reshape(quat.shape[:-1] + (3, 3))
     return mats
+
+
+def _normalize_quat_wxyz(quat: np.ndarray) -> np.ndarray:
+    quat = np.asarray(quat, dtype=np.float32)
+    norm = np.linalg.norm(quat, axis=-1, keepdims=True)
+    return np.divide(quat, norm, out=quat, where=norm > 0)
+
+
+def _slerp_quat_wxyz(start: np.ndarray, end: np.ndarray, alphas: np.ndarray) -> np.ndarray:
+    """Slerp between two wxyz quaternions for a sequence of alphas in [0, 1]."""
+    start = _normalize_quat_wxyz(np.asarray(start, dtype=np.float32).reshape(4))
+    end = _normalize_quat_wxyz(np.asarray(end, dtype=np.float32).reshape(4))
+    alphas = np.asarray(alphas, dtype=np.float32).reshape(-1)
+    if alphas.size == 0:
+        return np.zeros((0, 4), dtype=np.float32)
+
+    dot = float(np.dot(start, end))
+    if dot < 0.0:
+        end = -end
+        dot = -dot
+
+    if dot > 0.9995:
+        blended = start[None, :] + (end - start)[None, :] * alphas[:, None]
+        return _normalize_quat_wxyz(blended)
+
+    theta_0 = np.arccos(np.clip(dot, -1.0, 1.0))
+    sin_theta_0 = np.sin(theta_0)
+    theta = theta_0 * alphas
+    sin_theta = np.sin(theta)
+    s0 = np.cos(theta) - dot * sin_theta / sin_theta_0
+    s1 = sin_theta / sin_theta_0
+    return (s0[:, None] * start[None, :]) + (s1[:, None] * end[None, :])
 
 
 class MotionFutureTargetPoseProvider:
@@ -325,6 +407,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         )
         self._motion_data: MotionData | None = None
         self._motion_cfg: dict | None = None
+        self._motion_dof_names: list[str] | None = None
         self._motion_align_quat_wxyz: np.ndarray | None = None
         self._motion_align_pos: np.ndarray | None = None
         self._obs_input_name: str | None = None
@@ -425,13 +508,14 @@ class WholeBodyTrackingPolicy(BasePolicy):
             metadata[prop.key] = json.loads(prop.value)
         self._onnx_metadata = metadata
         self._onnx_obs_dim = self._get_onnx_obs_dim()
-        if self._uses_videomimic and not self._joystick_goal_enabled:
-            self._load_motion_data_from_metadata(metadata, model_path)
-        self._maybe_enable_motion_future_target_poses(metadata, model_path)
 
         # Extract URDF text from ONNX metadata
         assert "robot_urdf" in metadata, "Robot urdf text not found in ONNX metadata"
         self.pinocchio_robot = PinocchioRobot(self.config.robot, metadata["robot_urdf"])
+        if self._uses_videomimic and not self._joystick_goal_enabled:
+            self._load_motion_data_from_metadata(metadata, model_path)
+            self._apply_default_pose_transitions()
+        self._maybe_enable_motion_future_target_poses(metadata, model_path)
 
         self.onnx_kp = np.array(metadata["kp"]) if "kp" in metadata else None
         self.onnx_kd = np.array(metadata["kd"]) if "kd" in metadata else None
@@ -615,11 +699,127 @@ class WholeBodyTrackingPolicy(BasePolicy):
             ref_name = body_name_ref[0]
         else:
             ref_name = "torso_link"
+        if hasattr(self, "pinocchio_robot"):
+            try:
+                self.pinocchio_robot.ref_body_frame_id = self.pinocchio_robot.robot_model.getFrameId(ref_name)
+            except Exception as exc:
+                logger.warning("Failed to set Pinocchio ref body '{}': {}", ref_name, exc)
 
         robot_dof_names = metadata.get("dof_names") or list(self.config.robot.dof_names)
+        self._motion_dof_names = list(robot_dof_names)
         self._motion_data = MotionData(Path(motion_path), list(robot_dof_names), ref_name)
         self._motion_cfg = motion_cfg
         self._motion_alignment_enabled = bool(motion_cfg.get("align_motion_to_init_yaw", False))
+
+    def _extract_init_state_from_metadata(self) -> dict | None:
+        if not self._onnx_metadata:
+            return None
+        exp_cfg = self._onnx_metadata.get("experiment_config")
+        if not isinstance(exp_cfg, dict):
+            return None
+        robot_cfg = exp_cfg.get("robot")
+        if not isinstance(robot_cfg, dict):
+            return None
+        init_state = robot_cfg.get("init_state")
+        return init_state if isinstance(init_state, dict) else None
+
+    def _build_default_pose_state(self, *, use_motion_end: bool) -> dict[str, np.ndarray] | None:
+        if self._motion_data is None:
+            return None
+        init_state = self._extract_init_state_from_metadata()
+        if init_state is None:
+            logger.warning("Init state missing from ONNX metadata; skipping default pose transition.")
+            return None
+
+        dof_names = self._motion_dof_names or list(self.config.robot.dof_names)
+        default_dof = np.array(self.config.robot.default_dof_angles, dtype=np.float32)
+        default_joint_angles = init_state.get("default_joint_angles")
+        if isinstance(default_joint_angles, dict) and len(default_dof) == len(dof_names):
+            for i, name in enumerate(dof_names):
+                if name in default_joint_angles:
+                    default_dof[i] = float(default_joint_angles[name])
+
+        motion_idx = -1 if use_motion_end else 0
+        motion_root_pos = self._motion_data.root_pos_w[motion_idx]
+        motion_root_quat = self._motion_data.root_quat_w[motion_idx]
+        motion_yaw = self._quat_yaw(motion_root_quat)
+
+        init_pos = np.array(init_state.get("pos", [0.0, 0.0, motion_root_pos[2]]), dtype=np.float32)
+        init_rot_xyzw = np.array(init_state.get("rot", [0.0, 0.0, 0.0, 1.0]), dtype=np.float32).reshape(1, 4)
+        init_rot_wxyz = xyzw_to_wxyz(init_rot_xyzw)[0]
+        init_roll, init_pitch, _ = quat_to_rpy(init_rot_wxyz)
+
+        default_root_pos = np.array(
+            [motion_root_pos[0], motion_root_pos[1], init_pos[2]],
+            dtype=np.float32,
+        )
+        default_root_quat = rpy_to_quat((init_roll, init_pitch, motion_yaw)).astype(np.float32)
+
+        root_quat_xyzw = wxyz_to_xyzw(default_root_quat.reshape(1, 4))[0]
+        dof_pos_pin = default_dof[self.pinocchio_robot.real2pinocchio_index]
+        configuration = np.concatenate([default_root_pos, root_quat_xyzw, dof_pos_pin], axis=0)
+        ref_pos, ref_quat_xyzw = self.pinocchio_robot.fk_and_get_ref_body_pose_in_world(configuration)
+        ref_quat_wxyz = xyzw_to_wxyz(ref_quat_xyzw.reshape(1, 4))[0]
+
+        return {
+            "joint_pos": default_dof,
+            "joint_vel": np.zeros_like(default_dof),
+            "root_pos": default_root_pos,
+            "root_quat": default_root_quat,
+            "ref_pos": ref_pos.astype(np.float32, copy=False),
+            "ref_quat": ref_quat_wxyz.astype(np.float32, copy=False),
+        }
+
+    def _build_motion_state(self, motion_idx: int) -> dict[str, np.ndarray] | None:
+        if self._motion_data is None:
+            return None
+        idx = int(np.clip(motion_idx, -self._motion_data.frame_count, self._motion_data.frame_count - 1))
+        return {
+            "joint_pos": self._motion_data.joint_pos[idx],
+            "joint_vel": self._motion_data.joint_vel[idx],
+            "root_pos": self._motion_data.root_pos_w[idx],
+            "root_quat": self._motion_data.root_quat_w[idx],
+            "ref_pos": self._motion_data.ref_pos_w[idx],
+            "ref_quat": self._motion_data.ref_quat_w[idx],
+        }
+
+    def _maybe_add_default_pose_transition(self, *, prepend: bool) -> None:
+        if self._motion_data is None or self._motion_cfg is None:
+            return
+
+        enabled_key = "enable_default_pose_prepend" if prepend else "enable_default_pose_append"
+        duration_key = "default_pose_prepend_duration_s" if prepend else "default_pose_append_duration_s"
+        enabled = bool(self._motion_cfg.get(enabled_key, False))
+        duration = float(self._motion_cfg.get(duration_key, 0.0) or 0.0)
+        if not enabled or duration <= 0.0:
+            return
+
+        dt = 1.0 / float(self.config.task.rl_rate)
+        num_steps = round(duration / dt)
+        if num_steps <= 1:
+            logger.warning(
+                "Default pose {} duration {}s is too short for dt {}; skipping augmentation.",
+                "prepend" if prepend else "append",
+                duration,
+                dt,
+            )
+            return
+
+        default_state = self._build_default_pose_state(use_motion_end=not prepend)
+        motion_state = self._build_motion_state(0 if prepend else -1)
+        if default_state is None or motion_state is None:
+            return
+
+        start_state = default_state if prepend else motion_state
+        target_state = motion_state if prepend else default_state
+        drop_first, drop_last = (False, True) if prepend else (True, False)
+        self._motion_data.apply_transition(start_state, target_state, num_steps, prepend, drop_first, drop_last)
+
+    def _apply_default_pose_transitions(self) -> None:
+        if self._motion_data is None or self._motion_cfg is None:
+            return
+        self._maybe_add_default_pose_transition(prepend=True)
+        self._maybe_add_default_pose_transition(prepend=False)
 
     def _infer_motion_future_target_poses_dim(self, metadata: dict) -> int | None:
         motion_cfg = self._extract_motion_config(metadata)

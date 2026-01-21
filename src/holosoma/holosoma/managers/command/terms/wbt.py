@@ -1569,6 +1569,17 @@ class MotionCommand(CommandTermBase):
         self._terrain_row_count = max(1, tile_rows)
         self._terrain_row_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
+        capacity = self._terrain_row_count * len(tile_names)
+        if self.num_envs > capacity:
+            logger.warning(
+                "num_envs ({}) exceeds terrain slots (rows={} x cols={} = {}). "
+                "Multiple envs will overlap tiles; increase terrain num_rows or reduce num_envs.",
+                self.num_envs,
+                self._terrain_row_count,
+                len(tile_names),
+                capacity,
+            )
+
         unused = [name for name in tile_names if name not in self.motion.clip_ids]
         if unused:
             logger.warning("Unused terrain OBJ tiles (no matching motion clip): {}", unused)

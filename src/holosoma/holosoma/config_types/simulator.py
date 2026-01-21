@@ -86,6 +86,9 @@ class PhysxConfig:
     bounce_threshold_velocity: float = 0.5
     """Velocity threshold below which bounce responses are suppressed."""
 
+    gpu_collision_stack_size: int | None = None
+    """GPU collision stack size in bytes for PhysX (IsaacSim only)."""
+
 
 @dataclass(frozen=True)
 class MujocoXMLFilterCfg:

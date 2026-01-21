@@ -123,6 +123,7 @@ class IsaacSim(BaseSimulator):
         with Timer("[INFO]: Time taken for scene creation", "scene_creation"):
             self.scene = InteractiveScene(scene_config)
             self._setup_scene()
+            self._apply_physx_gpu_collision_stack_size()
         print("[INFO]: Scene manager: ", self.scene)
 
         viewer_config: ViewerCfg = ViewerCfg()
@@ -443,6 +444,44 @@ class IsaacSim(BaseSimulator):
             color=(0.98, 0.95, 0.88),
         )
         light_config1.func("/World/DomeLight", light_config1, translation=(1, 0, 10))
+
+    def _apply_physx_gpu_collision_stack_size(self) -> None:
+        size_bytes = getattr(self.simulator_config.sim.physx, "gpu_collision_stack_size", None)
+        if size_bytes is None:
+            return
+        try:
+            import omni.usd  # noqa: PLC0415
+            from pxr import PhysxSchema, Sdf, UsdPhysics  # noqa: PLC0415
+        except Exception as exc:
+            logger.warning("PhysX collision stack size not applied (missing USD bindings): {}", exc)
+            return
+
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            logger.warning("PhysX collision stack size not applied (USD stage unavailable).")
+            return
+
+        scene_prim = None
+        for prim in stage.Traverse():
+            if prim.GetTypeName() == "PhysicsScene":
+                scene_prim = prim
+                break
+
+        if scene_prim is None:
+            logger.warning("PhysX collision stack size not applied (PhysicsScene not found).")
+            return
+
+        physx_scene_api = PhysxSchema.PhysxSceneAPI(scene_prim)
+        if not physx_scene_api:
+            physx_scene_api = PhysxSchema.PhysxSceneAPI.Apply(scene_prim)
+
+        try:
+            attr = physx_scene_api.CreateGpuCollisionStackSizeAttr()
+        except Exception:
+            attr = scene_prim.CreateAttribute("physxScene:gpuCollisionStackSize", Sdf.ValueTypeNames.Int)
+
+        attr.Set(int(size_bytes))
+        logger.info("PhysX gpuCollisionStackSize set to {}", int(size_bytes))
 
     def _add_debug_grid(self, bounds: np.ndarray | None) -> None:
         """Add a visual-only checkerboard at z=0 for alignment debugging."""
