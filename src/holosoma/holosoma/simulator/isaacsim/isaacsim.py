@@ -89,6 +89,23 @@ class IsaacSim(BaseSimulator):
             ),
         )
 
+        gpu_stack_size = getattr(self.simulator_config.sim.physx, "gpu_collision_stack_size", None)
+        if gpu_stack_size is not None:
+            if hasattr(sim_config.physx, "gpu_collision_stack_size"):
+                sim_config.physx.gpu_collision_stack_size = int(gpu_stack_size)
+                logger.info(
+                    "PhysX gpu_collision_stack_size configured in SimulationCfg: {}", int(gpu_stack_size)
+                )
+            elif hasattr(sim_config.physx, "gpuCollisionStackSize"):
+                setattr(sim_config.physx, "gpuCollisionStackSize", int(gpu_stack_size))
+                logger.info(
+                    "PhysX gpuCollisionStackSize configured in SimulationCfg: {}", int(gpu_stack_size)
+                )
+            else:
+                logger.warning(
+                    "PhysX GPU collision stack size not supported in SimulationCfg; will set via USD only."
+                )
+
         # create a simulation context to control the simulator
         if SimulationContext.instance() is None:
             self.sim: SimulationContext = SimulationContext(sim_config)
