@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Perception-aware VideoMimic tracking with depth (D435i-style camera).
 
-DEPTH_IMPL=${DEPTH_IMPL:-rendered} # rendered|depth_sensor|raycast
+DEPTH_IMPL=${1:-${DEPTH_IMPL:-rendered}} # rendered|depth_sensor|raycast|scandots
 IMAGE_WIDTH=${IMAGE_WIDTH:-128}
 IMAGE_HEIGHT=${IMAGE_HEIGHT:-72}
 case "${DEPTH_IMPL}" in
@@ -20,10 +20,11 @@ case "${DEPTH_IMPL}" in
     PERCEPTION_PRESET="camera_depth_d435i_scandots"
     ;;
   *)
-    echo "Unknown DEPTH_IMPL=${DEPTH_IMPL}. Use rendered|depth_sensor|raycast." >&2
+    echo "Unknown DEPTH_IMPL=${DEPTH_IMPL}. Use rendered|depth_sensor|raycast|scandots." >&2
     exit 1
     ;;
 esac
+echo "[INFO] DEPTH_IMPL=${DEPTH_IMPL} -> perception:${PERCEPTION_PRESET}"
 
 OBJ_DIR="/home/ubuntu/FAR/Store/___zero_pad_geo"
 MOTION_DIR="/home/ubuntu/FAR/Store/___zero_pad_data"
