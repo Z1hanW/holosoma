@@ -65,11 +65,9 @@ OBJ_META=""
 if [[ -d "${OBJ_DIR}" ]]; then
   NEEDS_REBUILD=0
   if [[ -f "${FUSED_META}" ]]; then
-    read -r META_ROWS META_COLS < <(python - <<'PY'
-import json
-import sys
-
-path = sys.argv[1]
+    read -r META_ROWS META_COLS < <(
+      python -c 'import json,sys
+path = sys.argv[1] if len(sys.argv) > 1 else ""
 rows = 0
 cols = 0
 try:
@@ -81,8 +79,8 @@ except Exception:
     rows = 0
     cols = 0
 print(rows, cols)
-PY
-"${FUSED_META}")
+' "${FUSED_META}"
+    )
     if [[ "${META_ROWS}" -ne "${NUM_ROWS}" || "${META_COLS}" -ne "${NUM_TILES}" ]]; then
       NEEDS_REBUILD=1
     fi
