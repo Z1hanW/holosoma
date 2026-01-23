@@ -89,18 +89,15 @@ class BasePolicy:
             self.lower_dof_indices = []
 
     def _init_sdk_components(self):
-        """Initialize SDK components based on robot type."""
+        """Additional SDK components initialization based on robot type."""
         self.sdk_type = self.robot_config.sdk_type
-
-        if self.sdk_type == "unitree":
-            pass  # No channel initialization needed for binding
-        elif self.sdk_type == "booster":
+        if self.sdk_type == "booster":
             from booster_robotics_sdk import ChannelFactory
 
             ip = ni.ifaddresses(self.config.task.interface)[ni.AF_INET][0]["addr"]
             ChannelFactory.Instance().Init(self.config.task.domain_id, ip)
         else:
-            logger.warning(f"SDK type {self.sdk_type} is not supported yet")
+            pass  # No channel initialization needed for Unitree binding / other robots
 
     def _init_obs_config(self):
         """Initialize observation metadata and history buffers."""
@@ -451,7 +448,7 @@ class BasePolicy:
                     term_dim = self.obs_dims[term_name]
                     history_len = self.history_length_dict.get(group_name, 1)
                     total_dim = term_dim * history_len
-                    term_values = group_obs[0, start_idx:start_idx + total_dim]
+                    term_values = group_obs[0, start_idx : start_idx + total_dim]
                     print(f"  {term_name:20s} (dim={term_dim:2d}, hist={history_len}): {term_values}")
                     start_idx += total_dim
         print("========================================\n")
@@ -611,7 +608,6 @@ class BasePolicy:
                     else:
                         raise NotImplementedError("Upper body controller not implemented")
                 q_target = scaled_policy_action + self.default_dof_angles
-
 
             # Prepare command (reuse pre-allocated arrays)
             self.cmd_q[:] = q_target
