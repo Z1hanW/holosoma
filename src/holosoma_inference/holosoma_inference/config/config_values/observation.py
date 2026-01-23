@@ -6,6 +6,8 @@ robot types and tasks, converted from the original YAML configurations.
 
 from __future__ import annotations
 
+from importlib.metadata import entry_points
+
 from holosoma_inference.config.config_types.observation import ObservationConfig
 
 # =============================================================================
@@ -35,8 +37,8 @@ loco_g1_29dof = ObservationConfig(
         "dof_pos": 29,
         "dof_vel": 29,
         "actions": 29,
-        "sin_phase": 1,
-        "cos_phase": 1,
+        "sin_phase": 2,
+        "cos_phase": 2,
     },
     obs_scales={
         "base_lin_vel": 2.0,
@@ -154,3 +156,7 @@ DEFAULTS = {
 
 Keys use hyphen-case naming convention for CLI compatibility.
 """
+
+# Auto-discover observation configs from installed extensions
+for ep in entry_points(group="holosoma.config.observation"):
+    DEFAULTS[ep.name] = ep.load()

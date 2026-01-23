@@ -117,11 +117,11 @@ def run_policy(config: InferenceConfig):
         restore_terminal_settings()
 
 
-def main():
-    config = tyro.cli(
-        AnnotatedInferenceConfig,
-        config=TYRO_CONFIG,
-    )
+def main(annotated_config=None):
+    """Main entry point. Extensions can pass their own AnnotatedInferenceConfig."""
+    if annotated_config is None:
+        annotated_config = AnnotatedInferenceConfig
+    config = tyro.cli(annotated_config, config=TYRO_CONFIG)
     run_policy(config)
 
 

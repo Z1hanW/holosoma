@@ -19,7 +19,7 @@ from termcolor import colored
 
 from holosoma_inference.config.config_types.inference import InferenceConfig
 from holosoma_inference.config.config_types.robot import RobotConfig
-from holosoma_inference.sdk.interface_wrapper import InterfaceWrapper
+from holosoma_inference.sdk import create_interface
 from holosoma_inference.utils.latency import LatencyTracker
 from holosoma_inference.utils.math.quat import quat_rotate_inverse
 from holosoma_inference.utils.rate import RateLimiter
@@ -94,15 +94,13 @@ class BasePolicy:
 
         if self.sdk_type == "unitree":
             pass  # No channel initialization needed for binding
-        elif self.sdk_type == "ros2":
-            pass
         elif self.sdk_type == "booster":
             from booster_robotics_sdk import ChannelFactory
 
             ip = ni.ifaddresses(self.config.task.interface)[ni.AF_INET][0]["addr"]
             ChannelFactory.Instance().Init(self.config.task.domain_id, ip)
         else:
-            raise NotImplementedError(f"SDK type {self.sdk_type} is not supported yet")
+            logger.warning(f"SDK type {self.sdk_type} is not supported yet")
 
     def _init_obs_config(self):
         """Initialize observation metadata and history buffers."""
@@ -136,8 +134,9 @@ class BasePolicy:
             self.obs_buf_dict[group] = np.concatenate(flattened_terms, axis=1) if flattened_terms else np.zeros((1, 0))
 
     def _init_communication_components(self):
-        """Initialize state processor and command sender using the wrapper."""
-        self.interface = InterfaceWrapper(
+        """Initialize appropriate robot interface."""
+
+        self.interface = create_interface(
             self.robot_config,
             self.config.task.domain_id,
             self.config.task.interface,
@@ -408,12 +407,8 @@ class BasePolicy:
             self.robot_config = replace(
                 self.robot_config, motor_kp=tuple(kp_values.tolist()), motor_kd=tuple(kd_values.tolist())
             )
-            # Update InterfaceWrapper's robot_config reference since replace() creates a new object
-            self.interface.robot_config = self.robot_config
-            # Update sdk2py backend components (booster SDK only)
-            if self.interface.backend == "sdk2py":
-                self.interface.command_sender.config = self.robot_config
-                self.interface.state_processor.config = self.robot_config
+            # Update interface's robot_config and propagate to internal SDK components
+            self.interface.update_config(self.robot_config)
         else:
             # No values available - error
             raise ValueError(
@@ -440,9 +435,31 @@ class BasePolicy:
                 obs_dim_dict[key] += self.obs_dims[obs_name]
         return obs_dim_dict
 
+    def _print_observations(self, obs: dict[str, np.ndarray]) -> None:
+        """Print observation vector with term naming for debugging.
+
+        Args:
+            obs: Dictionary mapping observation group names to their flattened arrays.
+        """
+        np.set_printoptions(suppress=True, precision=3)
+        print("\n========== Observation Vector ==========")
+        for group_name, group_obs in obs.items():
+            print(f"\n{group_name}:")
+            if group_name in self.obs_dict:
+                start_idx = 0
+                for term_name in self.obs_terms_sorted.get(group_name, []):
+                    term_dim = self.obs_dims[term_name]
+                    history_len = self.history_length_dict.get(group_name, 1)
+                    total_dim = term_dim * history_len
+                    term_values = group_obs[0, start_idx:start_idx + total_dim]
+                    print(f"  {term_name:20s} (dim={term_dim:2d}, hist={history_len}): {term_values}")
+                    start_idx += total_dim
+        print("========================================\n")
+
     def rl_inference(self, robot_state_data):
         """Perform RL inference to get policy action."""
         obs = self.prepare_obs_for_rl(robot_state_data)
+
         policy_action = self.policy(obs)
         policy_action = np.clip(policy_action, -100, 100)
 
@@ -595,8 +612,9 @@ class BasePolicy:
                         raise NotImplementedError("Upper body controller not implemented")
                 q_target = scaled_policy_action + self.default_dof_angles
 
+
             # Prepare command (reuse pre-allocated arrays)
-            self.cmd_q[:] = q_target[0]
+            self.cmd_q[:] = q_target
 
         # Stage 5: Action Pub
         with self.latency_tracker.measure("action_pub"):
@@ -749,7 +767,6 @@ class BasePolicy:
 
     def _handle_joystick_kp_control(self, keycode):
         """Handle joystick KP control."""
-        print(keycode)
         if keycode == "down":
             self.interface.kp_level -= 0.1
         elif keycode == "up":

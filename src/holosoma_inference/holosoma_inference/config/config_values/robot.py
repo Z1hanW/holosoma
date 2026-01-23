@@ -6,6 +6,8 @@ for different robot types.
 
 from __future__ import annotations
 
+from importlib.metadata import entry_points
+
 from holosoma_inference.config.config_types.robot import RobotConfig
 
 # =============================================================================
@@ -198,3 +200,7 @@ DEFAULTS = {
 
 Keys use hyphen-case naming convention for CLI compatibility.
 """
+
+# Auto-discover robot configs from installed extensions
+for ep in entry_points(group="holosoma.config.robot"):
+    DEFAULTS[ep.name] = ep.load()

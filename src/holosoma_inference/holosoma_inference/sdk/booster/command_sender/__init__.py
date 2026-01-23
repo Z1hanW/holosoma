@@ -16,15 +16,11 @@ def create_command_sender(config: RobotConfig, lcm=None):
     """
     sdk_type = config.sdk_type
 
-    if sdk_type == "unitree":
-        from .unitree import UnitreeCommandSender
-
-        return UnitreeCommandSender(config, lcm)
     if sdk_type == "booster":
         from .booster import BoosterCommandSender
 
         return BoosterCommandSender(config, lcm)
-    raise ValueError(f"Unsupported SDK type: {sdk_type}")
+    raise ValueError(f"Unsupported SDK type: {sdk_type}. Only 'booster' is supported for command_sender.")
 
 
 # For backward compatibility
@@ -34,6 +30,5 @@ __all__ = [
     "BasicCommandSender",
     "BoosterCommandSender",
     "CommandSender",  # Backward compatibility
-    "UnitreeCommandSender",
     "create_command_sender",
 ]

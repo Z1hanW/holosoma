@@ -146,8 +146,12 @@ class RobotConfig:
     # SDK Configuration (OPTIONAL - with defaults)
     # =========================================================================
 
-    sdk_type: typing.Literal["unitree", "booster", "ros2"] = "unitree"
-    """SDK type for robot communication."""
+    sdk_type: str = "unitree"
+    """SDK type for robot communication.
+
+    Built-in types: 'unitree', 'booster'.
+    Extensions can register additional SDK types.
+    """
 
     motor_type: typing.Literal["serial", "parallel"] = "serial"
     """Motor communication type."""

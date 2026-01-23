@@ -15,7 +15,7 @@ class TaskConfig:
     rl_rate: float = 50
     """Policy inference rate in Hz."""
 
-    policy_action_scale: float = 0.25
+    policy_action_scale: float = 1.0
     """Scaling factor applied to policy actions."""
 
     use_phase: bool = True

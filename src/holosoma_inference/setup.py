@@ -58,6 +58,12 @@ setup(
         "unitree": unitree_extras,
         "booster": booster_extras,
     },
+    entry_points={
+        "holosoma.sdk": [
+            "unitree = holosoma_inference.sdk.unitree.unitree_interface:UnitreeInterface",
+            "booster = holosoma_inference.sdk.booster.booster_interface:BoosterInterface",
+        ],
+    },
     keywords="humanoid robotics inference policy onnx",
     include_package_data=True,
     package_data={
