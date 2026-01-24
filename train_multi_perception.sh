@@ -30,7 +30,7 @@ echo "[INFO] DEPTH_IMPL=${DEPTH_IMPL} -> perception:${PERCEPTION_PRESET}"
 
 OBJ_DIR="/home/ubuntu/FAR/Store/___zero_pad_geo"
 MOTION_DIR="/home/ubuntu/FAR/Store/___zero_pad_data"
-NUM_ROWS=${NUM_ROWS:-}
+NUM_ROWS=${NUM_ROWS:-1}
 NUM_COLS=${NUM_COLS:-}
 FUSED_OBJ="../tmp_fused.obj"
 FUSED_META="../tmp_fused.meta.json"
@@ -43,14 +43,6 @@ if [[ -d "${OBJ_DIR}" ]]; then
   if [[ "${NUM_TILES}" -eq 0 ]]; then
     echo "No OBJ files found in ${OBJ_DIR}" >&2
     exit 1
-  fi
-fi
-
-if [[ -z "${NUM_ROWS}" ]]; then
-  if [[ "${NUM_TILES}" -gt 0 ]]; then
-    NUM_ROWS=$(( (NUM_ENVS + NUM_TILES - 1) / NUM_TILES ))
-  else
-    NUM_ROWS=1
   fi
 fi
 
