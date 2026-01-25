@@ -112,6 +112,7 @@ torchrun --nproc_per_node=8 --master_port=$((29500 + RANDOM % 1000)) src/holosom
   --algo.config.critic_learning_rate=7e-5 \
   --algo.config.normalize_actor_obs=False \
   --algo.config.normalize_critic_obs=False \
+  --algo.config.load_optimizer=False \
   --algo.config.save_interval=1000 \
   \
   --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_DIR}" \
