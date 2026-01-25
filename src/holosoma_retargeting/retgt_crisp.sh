@@ -86,5 +86,5 @@ PY
     fi
 
     mkdir -p "$OUT_ROOT"
-    "$SCRIPT_DIR/retgt_smplx.sh" "$MOTION_ROOT" "$motion_name" "$OBJECT_NAME" "$stage_obj_dir" "$ROBOT_URDF" "smplx" "$OUT_ROOT"
+    bash "$SCRIPT_DIR/retgt_smplx.sh" "$MOTION_ROOT" "$motion_name" "$OBJECT_NAME" "$stage_obj_dir" "$ROBOT_URDF" "smplx" "$OUT_ROOT"
 done
