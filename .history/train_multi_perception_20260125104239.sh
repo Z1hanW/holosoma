@@ -32,8 +32,8 @@ if [[ -n "${STAGE1_CKPT}" ]]; then
   echo "[INFO] Stage1 checkpoint: ${STAGE1_CKPT}"
 fi
 
-OBJ_DIR="/home/ubuntu/FAR/Store/vmm_data/___zero_pad_geo_trans"
-MOTION_DIR="/home/ubuntu/FAR/Store/vmm_data/___zero_pad_data_trans"
+OBJ_DIR="/home/ubuntu/FAR/Store/vmm_data/___zero_pad_data_trans"
+MOTION_DIR="/home/ubuntu/FAR/Store/___zero_pad_data"
 NUM_ROWS=${NUM_ROWS:-1}
 NUM_COLS=${NUM_COLS:-}
 FUSED_OBJ="../tmp_fused.obj"
