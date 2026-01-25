@@ -90,6 +90,21 @@ class TrainingConfig:
     debug: bool = False
     """If True, render/log a depth video and exit without training."""
 
+    enable_viser: bool = False
+    """Enable a Viser live viewer during training."""
+
+    viser_port: int = 6060
+    """Port for the Viser server (HOLOSOMA_VISER_PORT overrides)."""
+
+    viser_env_id: int = 0
+    """Environment index to visualize in the Viser viewer."""
+
+    viser_update_hz: float = 30.0
+    """Update rate for the Viser viewer."""
+
+    viser_recenter: bool = True
+    """Recenter the Viser viewer around the env origin when available."""
+
 
 @dataclass(frozen=True)
 class EvalOverridesConfig:
