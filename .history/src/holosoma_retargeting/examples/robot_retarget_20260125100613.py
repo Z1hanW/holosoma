@@ -442,7 +442,7 @@ def setup_object_data(
         ground_pts = create_ground_points(task_config.ground_range, task_config.ground_range, task_config.ground_size)
         return ground_pts, ground_pts, None
 
-    object_smpl_scale = smpl_scale# 1.0
+    object_smpl_scale = 1.0
 
     if task_type == "object_interaction":
         # Load object data
@@ -798,7 +798,7 @@ def main(cfg: RetargetingConfig) -> None:
             human_joints,
             retargeter,
             toe_names,
-            scale=smpl_scale,
+            scale=1,
             mat_height=0.0,
             object_poses=object_poses,
         )
