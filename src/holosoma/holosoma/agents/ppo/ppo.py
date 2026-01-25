@@ -635,7 +635,7 @@ class PPO(BaseAlgo):
         return teacher_actions, None
 
     def _rollout_step(self, obs_dict):
-        with torch.inference_mode():
+        with torch.no_grad():
             for _ in range(self.config.num_steps_per_env):
                 # Environment step
                 actor_obs_raw = torch.cat([obs_dict[k] for k in self.actor_obs_keys], dim=1)
