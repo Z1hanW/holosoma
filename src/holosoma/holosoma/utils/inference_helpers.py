@@ -118,7 +118,11 @@ def _extract_actor_model_and_input_dim(actor_wrapper) -> Tuple[torch.nn.Module, 
 def export_policy_as_onnx(wrapper, onnx_file_path: str, example_obs_dict):
     # Ensure parent directory exists
     os.makedirs(Path(onnx_file_path).parent, exist_ok=True)
-    example_input_list = example_obs_dict["actor_obs"]
+    example_inputs = [example_obs_dict["actor_obs"]]
+    input_names = ["actor_obs"]
+    if "perception_obs" in example_obs_dict:
+        example_inputs.append(example_obs_dict["perception_obs"])
+        input_names.append("perception_obs")
 
     # --- SUPPRESS LOGS START ---
     # Silence onnxscript and onnx_ir debug/info noise
@@ -128,13 +132,14 @@ def export_policy_as_onnx(wrapper, onnx_file_path: str, example_obs_dict):
         logging.getLogger(logger_name).setLevel(logging.WARNING)
     # --- SUPPRESS LOGS END ---
 
+    export_inputs = tuple(example_inputs) if len(example_inputs) > 1 else example_inputs[0]
     torch.onnx.export(
         wrapper,
-        example_input_list,  # Pass x1 and x2 as separate inputs
+        export_inputs,
         onnx_file_path,
         verbose=False,
-        input_names=["actor_obs"],  # Specify the input names
-        output_names=["action"],  # Name the output
+        input_names=input_names,
+        output_names=["action"],
         opset_version=14,
         dynamo=False,
     )

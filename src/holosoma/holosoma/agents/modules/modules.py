@@ -262,6 +262,47 @@ class ObsTargetPoseTransformer(nn.Module):
         return seq[:, 0, :]
 
 
+class MLPWithExtraProj(nn.Module):
+    """MLP that adds a projected extra input to the first hidden layer."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dims: tuple[int, ...],
+        output_dim: int,
+        layer_config: LayerConfig,
+    ):
+        super().__init__()
+        if hidden_dims is None or len(hidden_dims) == 0:
+            raise ValueError("extra_input_to_hidden requires at least one hidden layer.")
+
+        self.supports_extra_input = True
+        self.first = nn.Linear(input_dim, hidden_dims[0])
+        self.extra_proj = nn.LazyLinear(hidden_dims[0])
+        self.activation = getattr(nn, layer_config.activation)()
+        self.dropout = nn.Dropout(p=layer_config.dropout_prob) if layer_config.dropout_prob > 0 else None
+
+        layers = []
+        for layer_idx in range(len(hidden_dims)):
+            if layer_idx == len(hidden_dims) - 1:
+                layers.append(nn.Linear(hidden_dims[layer_idx], output_dim))
+            else:
+                layers.append(nn.Linear(hidden_dims[layer_idx], hidden_dims[layer_idx + 1]))
+                layers.append(getattr(nn, layer_config.activation)())
+                if layer_config.dropout_prob > 0:
+                    layers.append(nn.Dropout(p=layer_config.dropout_prob))
+        self.rest = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor, extra_input: torch.Tensor | None = None) -> torch.Tensor:
+        x = self.first(x)
+        if extra_input is not None:
+            x = x + self.extra_proj(extra_input)
+        x = self.activation(x)
+        if self.dropout is not None:
+            x = self.dropout(x)
+        return self.rest(x)
+
+
 def build_mlp_layer(
     input_dim,
     hidden_dims,
@@ -288,8 +329,13 @@ def build_mlp_layer(
     nn.Sequential
         The constructed MLP layer
     """
+    use_extra_proj = bool(getattr(layer_config, "extra_input_to_hidden", False))
     if hidden_dims is None:
+        if use_extra_proj:
+            raise ValueError("extra_input_to_hidden requires hidden_dims to be set.")
         return None
+    if use_extra_proj:
+        return MLPWithExtraProj(input_dim, tuple(hidden_dims), output_dim, layer_config)
 
     layers = []
     activation = getattr(nn, layer_config.activation)()
@@ -478,10 +524,12 @@ class BaseModule(nn.Module):
 
         if not self.perception_input_name:
             return 0
-        if self.perception_input_name not in self.input_dim_dict:
+        if self.perception_input_name in self.input_dim_dict:
+            input_dim = self.input_dim_dict[self.perception_input_name]
+        elif self.perception_input_name in self.obs_dim_dict:
+            input_dim = self.obs_dim_dict[self.perception_input_name]
+        else:
             raise ValueError(f"Unknown perception_input_name: {self.perception_input_name}")
-
-        input_dim = self.input_dim_dict[self.perception_input_name]
         output_dim = layer_config.perception_output_dim or input_dim
         encoder_type = getattr(layer_config, "perception_encoder_type", "gated_linear")
         if encoder_type == "gated_linear":
@@ -546,6 +594,7 @@ class BaseModule(nn.Module):
             )
         elif layer_type == "CNNEncoder":
             perception_output_dim = self._setup_perception_encoder(layer_config)
+            perception_input_dim = 0 if layer_config.extra_input_to_hidden else perception_output_dim
             self.encoder = build_cnn_layer(
                 layer_config.input_channels,
                 layer_config.input_height,
@@ -560,13 +609,14 @@ class BaseModule(nn.Module):
             encoder_output_dim = self.encoder.output_size
             mlp_input_dim = sum(self.input_dim_dict[each_input] for each_input in layer_config.module_input_name)
             self.module = build_mlp_layer(
-                mlp_input_dim + encoder_output_dim + perception_output_dim,
+                mlp_input_dim + encoder_output_dim + perception_input_dim,
                 layer_config.hidden_dims,
                 self.output_dim,
                 layer_config,
             )
         elif layer_type == "MLPEncoder":
             perception_output_dim = self._setup_perception_encoder(layer_config)
+            perception_input_dim = 0 if layer_config.extra_input_to_hidden else perception_output_dim
             encoder_output_dim = (
                 layer_config.encoder_output_dim
                 if layer_config.encoder_hidden_dims is not None
@@ -580,13 +630,14 @@ class BaseModule(nn.Module):
             )
             mlp_input_dim = sum(self.input_dim_dict[each_input] for each_input in layer_config.module_input_name)
             self.module = build_mlp_layer(
-                mlp_input_dim + encoder_output_dim + perception_output_dim,
+                mlp_input_dim + encoder_output_dim + perception_input_dim,
                 layer_config.hidden_dims,
                 self.output_dim,
                 layer_config,
             )
         elif layer_type == "TransformerEncoder":
             perception_output_dim = self._setup_perception_encoder(layer_config)
+            perception_input_dim = 0 if layer_config.extra_input_to_hidden else perception_output_dim
             if layer_config.encoder_num_steps is None:
                 raise ValueError("encoder_num_steps must be set for TransformerEncoder modules.")
             encoder_input_dim = self.input_dim_dict[layer_config.encoder_input_name]
@@ -611,13 +662,14 @@ class BaseModule(nn.Module):
             )
             mlp_input_dim = sum(self.input_dim_dict[each_input] for each_input in layer_config.module_input_name)
             self.module = build_mlp_layer(
-                mlp_input_dim + encoder_output_dim + perception_output_dim,
+                mlp_input_dim + encoder_output_dim + perception_input_dim,
                 layer_config.hidden_dims,
                 self.output_dim,
                 layer_config,
             )
         elif layer_type == "TransformerObsTokenEncoder":
             perception_output_dim = self._setup_perception_encoder(layer_config)
+            perception_input_dim = 0 if layer_config.extra_input_to_hidden else perception_output_dim
             if layer_config.encoder_num_steps is None:
                 raise ValueError("encoder_num_steps must be set for TransformerObsTokenEncoder modules.")
             if layer_config.encoder_obs_token_name is None:
@@ -648,7 +700,7 @@ class BaseModule(nn.Module):
             )
             mlp_input_dim = sum(self.input_dim_dict[each_input] for each_input in layer_config.module_input_name)
             self.module = build_mlp_layer(
-                mlp_input_dim + encoder_output_dim + perception_output_dim,
+                mlp_input_dim + encoder_output_dim + perception_input_dim,
                 layer_config.hidden_dims,
                 self.output_dim,
                 layer_config,
@@ -657,10 +709,11 @@ class BaseModule(nn.Module):
             perception_output_dim = self._setup_perception_encoder(layer_config)
             if perception_output_dim == 0:
                 raise ValueError("perception_input_name must be set for MLPPerceptionEncoder modules.")
+            perception_input_dim = 0 if layer_config.extra_input_to_hidden else perception_output_dim
             self.encoder = None
             mlp_input_dim = sum(self.input_dim_dict[each_input] for each_input in layer_config.module_input_name)
             self.module = build_mlp_layer(
-                mlp_input_dim + perception_output_dim,
+                mlp_input_dim + perception_input_dim,
                 layer_config.hidden_dims,
                 self.output_dim,
                 layer_config,
@@ -668,6 +721,9 @@ class BaseModule(nn.Module):
         else:
             raise NotImplementedError(f"Unsupported layer type: {layer_type}")
 
-    def forward(self, policy_input):
-        # Only forward the MLP layer
+    def forward(self, policy_input: torch.Tensor, extra_input: torch.Tensor | None = None) -> torch.Tensor:
+        if extra_input is not None:
+            if not getattr(self.module, "supports_extra_input", False):
+                raise ValueError("Extra input provided but module is not configured for extra_input_to_hidden.")
+            return self.module(policy_input, extra_input=extra_input)
         return self.module(policy_input)

@@ -112,6 +112,7 @@ class Minibatch(TypedDict):
     """
 
 
+
 class PPO(BaseAlgo):
     config: PPOConfig
 
@@ -277,6 +278,12 @@ class PPO(BaseAlgo):
     def _init_obs_keys(self):
         self.actor_obs_keys = self.config.module_dict.actor.input_dim
         self.critic_obs_keys = self.config.module_dict.critic.input_dim
+        self.actor_perception_key = self.config.module_dict.actor.layer_config.perception_input_name or ""
+        self.critic_perception_key = self.config.module_dict.critic.layer_config.perception_input_name or ""
+        if self.actor_perception_key and self.actor_perception_key not in self.algo_obs_dim_dict:
+            raise ValueError(f"Actor perception key '{self.actor_perception_key}' not found in observation manager.")
+        if self.critic_perception_key and self.critic_perception_key not in self.algo_obs_dim_dict:
+            raise ValueError(f"Critic perception key '{self.critic_perception_key}' not found in observation manager.")
 
     def setup(self):
         logger.info("Setting up PPO")
@@ -362,7 +369,16 @@ class PPO(BaseAlgo):
             device=self.device,
             history_length=self.algo_history_length_dict,
         )
-        teacher_actor.load_state_dict(teacher_state["actor_model_state_dict"])
+        allow_non_strict = False
+        if hasattr(teacher_actor, "actor_module"):
+            allow_non_strict = getattr(teacher_actor.actor_module.module, "supports_extra_input", False)
+        try:
+            teacher_actor.load_state_dict(teacher_state["actor_model_state_dict"])
+        except RuntimeError:
+            if not allow_non_strict:
+                raise
+            logger.warning("Strict teacher load failed; retrying with strict=False for extra-input modules.")
+            teacher_actor.load_state_dict(teacher_state["actor_model_state_dict"], strict=False)
         teacher_actor.eval()
         for param in teacher_actor.parameters():
             param.requires_grad_(False)
@@ -422,10 +438,10 @@ class PPO(BaseAlgo):
         teacher_checkpoint = distill_cfg.policy_to_clone or distill_cfg.teacher_checkpoint
 
         if self.distill_mode == "dagger":
+            if not teacher_checkpoint:
+                return
             if self.bc_loss_coef <= 0.0 and self.switch_to_rl_after <= 0:
                 return
-            if not teacher_checkpoint:
-                raise ValueError("Dagger enabled but distill.policy_to_clone/teacher_checkpoint is not set.")
 
             teacher_paths = teacher_checkpoint if isinstance(teacher_checkpoint, list) else [teacher_checkpoint]
             if self.use_multi_teacher:
@@ -443,21 +459,23 @@ class PPO(BaseAlgo):
                     self.teacher_actor = teacher_actor
                     self.teacher_actor_obs_normalizers = teacher_normalizers
 
-            self.distill_enabled = True
-            self.dagger_enabled = True
+            if self.bc_loss_coef > 0.0 or self.switch_to_rl_after > 0:
+                self.distill_enabled = True
+                self.dagger_enabled = True
             return
 
         if not distill_cfg.enabled:
             return
         if not teacher_checkpoint:
-            raise ValueError("Distillation enabled but distill.teacher_checkpoint is not set.")
+            raise ValueError("Teacher checkpoint is required for distillation.")
         if isinstance(teacher_checkpoint, list):
-            raise ValueError("Distillation mode 'mse' expects a single teacher checkpoint.")
+            raise ValueError("Single-teacher mode expects a single teacher checkpoint.")
 
         self.teacher_actor, self.teacher_actor_obs_normalizers = self._load_teacher_actor(
             teacher_checkpoint, obs_keys=self.teacher_obs_keys
         )
-        self.distill_enabled = True
+        if distill_cfg.enabled:
+            self.distill_enabled = True
 
     def _get_obs_dim(self, obs_keys: list[str]) -> int:
         """Compute total observation dimension for given observation keys."""
@@ -477,6 +495,12 @@ class PPO(BaseAlgo):
         """
         actor_obs_dim = self._get_obs_dim(self.actor_obs_keys)
         return torch.zeros(1, actor_obs_dim, device=self.device)
+
+    def _get_zero_perception_input(self) -> torch.Tensor | None:
+        if not self.actor_perception_key:
+            return None
+        perception_dim = self.algo_obs_dim_dict[self.actor_perception_key]
+        return torch.zeros(1, perception_dim, device=self.device)
 
     def _setup_storage(self):
         self.storage = RolloutStorage(self.env.num_envs, self.config.num_steps_per_env, device=self.device)
@@ -506,6 +530,9 @@ class PPO(BaseAlgo):
             self.storage.register("teacher_actions", shape=(self.num_act,), dtype=torch.float)
             if self.use_multi_teacher:
                 self.storage.register("teacher_indices", shape=(1,), dtype=torch.long)
+        perception_keys = {key for key in [self.actor_perception_key, self.critic_perception_key] if key}
+        for key in perception_keys:
+            self.storage.register(key, shape=(self.algo_obs_dim_dict[key],), dtype=torch.float)
 
     def _eval_mode(self):
         self.actor.eval()
@@ -617,8 +644,15 @@ class PPO(BaseAlgo):
                 actor_obs = self._normalize_actor_obs(actor_obs_raw, update=True)
                 critic_obs = self._normalize_critic_obs(critic_obs_raw, update=True)
 
-                actions = self.actor.act({"actor_obs": actor_obs})
-                values = self.critic.evaluate({"critic_obs": critic_obs}).detach()
+                actor_policy_state = {"actor_obs": actor_obs}
+                if self.actor_perception_key:
+                    actor_policy_state[self.actor_perception_key] = obs_dict[self.actor_perception_key]
+                actions = self.actor.act(actor_policy_state)
+
+                critic_policy_state = {"critic_obs": critic_obs}
+                if self.critic_perception_key:
+                    critic_policy_state[self.critic_perception_key] = obs_dict[self.critic_perception_key]
+                values = self.critic.evaluate(critic_policy_state).detach()
 
                 teacher_actions = None
                 teacher_indices = None
@@ -643,29 +677,41 @@ class PPO(BaseAlgo):
                 if infos["time_outs"].any():
                     final_critic_obs = torch.cat([infos["final_observations"][k] for k in self.critic_obs_keys], dim=1)
                     final_critic_obs = self._normalize_critic_obs(final_critic_obs, update=True)
-                    final_values = self.critic.evaluate({"critic_obs": final_critic_obs}).detach()
+                    final_policy_state = {"critic_obs": final_critic_obs}
+                    if (
+                        self.critic_perception_key
+                        and self.critic_perception_key in infos["final_observations"]
+                    ):
+                        final_policy_state[self.critic_perception_key] = infos["final_observations"][
+                            self.critic_perception_key
+                        ]
+                    final_values = self.critic.evaluate(final_policy_state).detach()
                     final_rewards += self.config.gamma * torch.squeeze(
                         final_values * infos["time_outs"].unsqueeze(1).to(self.device), 1
                     )
 
-                # Add transition to storage
-                self.storage.add(
-                    actor_obs=actor_obs_raw,
-                    critic_obs=critic_obs_raw,
-                    actions=actions,
-                    values=values,
-                    actions_log_prob=self.actor.get_actions_log_prob(actions).detach().unsqueeze(1),
-                    action_mean=self.actor.action_mean.detach(),
-                    action_sigma=self.actor.action_std.detach(),
-                    rewards=(rewards + final_rewards).view(-1, 1),
-                    dones=dones.view(-1, 1),
-                    teacher_actions=teacher_actions.detach()
+                storage_kwargs = {
+                    "actor_obs": actor_obs_raw,
+                    "critic_obs": critic_obs_raw,
+                    "actions": actions,
+                    "values": values,
+                    "actions_log_prob": self.actor.get_actions_log_prob(actions).detach().unsqueeze(1),
+                    "action_mean": self.actor.action_mean.detach(),
+                    "action_sigma": self.actor.action_std.detach(),
+                    "rewards": (rewards + final_rewards).view(-1, 1),
+                    "dones": dones.view(-1, 1),
+                    "teacher_actions": teacher_actions.detach()
                     if teacher_actions is not None
                     else torch.zeros_like(actions),
-                    teacher_indices=teacher_indices.view(-1, 1)
+                    "teacher_indices": teacher_indices.view(-1, 1)
                     if teacher_indices is not None
                     else torch.zeros(actions.shape[0], 1, device=actions.device, dtype=torch.long),
-                )
+                }
+                if self.actor_perception_key:
+                    storage_kwargs[self.actor_perception_key] = obs_dict[self.actor_perception_key]
+                if self.critic_perception_key and self.critic_perception_key != self.actor_perception_key:
+                    storage_kwargs[self.critic_perception_key] = obs_dict[self.critic_perception_key]
+                self.storage.add(**storage_kwargs)
 
                 # Reset actor and critic for completed envs
                 self.actor.reset(dones)
@@ -774,6 +820,12 @@ class PPO(BaseAlgo):
         old_actions_log_prob_batch = minibatch["actions_log_prob"]
         old_mu_batch = minibatch["action_mean"]
         old_sigma_batch = minibatch["action_sigma"]
+        actor_perception_obs = (
+            minibatch.get(self.actor_perception_key) if self.actor_perception_key else None
+        )
+        critic_perception_obs = (
+            minibatch.get(self.critic_perception_key) if self.critic_perception_key else None
+        )
 
         # Symmetry augmentation
         original_batch_size = actions_batch.shape[0]
@@ -796,6 +848,10 @@ class PPO(BaseAlgo):
             target_values_batch = target_values_batch.repeat(num_aug, 1)
             advantages_batch = advantages_batch.repeat(num_aug, 1)
             returns_batch = returns_batch.repeat(num_aug, 1)
+            if actor_perception_obs is not None:
+                actor_perception_obs = actor_perception_obs.repeat(num_aug, 1)
+            if critic_perception_obs is not None:
+                critic_perception_obs = critic_perception_obs.repeat(num_aug, 1)
         else:
             actor_obs = minibatch["actor_obs"]
             critic_obs = minibatch["critic_obs"]
@@ -803,8 +859,15 @@ class PPO(BaseAlgo):
         actor_obs = self._normalize_actor_obs(actor_obs, update=True)
         critic_obs = self._normalize_critic_obs(critic_obs, update=True)
 
-        self.actor.act({"actor_obs": actor_obs})
-        value_batch = self.critic.evaluate({"critic_obs": critic_obs})
+        actor_policy_state = {"actor_obs": actor_obs}
+        if actor_perception_obs is not None:
+            actor_policy_state[self.actor_perception_key] = actor_perception_obs
+        self.actor.act(actor_policy_state)
+
+        critic_policy_state = {"critic_obs": critic_obs}
+        if critic_perception_obs is not None:
+            critic_policy_state[self.critic_perception_key] = critic_perception_obs
+        value_batch = self.critic.evaluate(critic_policy_state)
         actions_log_prob_batch = self.actor.get_actions_log_prob(actions_batch)
         mu_batch = self.actor.action_mean[:original_batch_size]
         sigma_batch = self.actor.action_std[:original_batch_size]
@@ -833,7 +896,10 @@ class PPO(BaseAlgo):
         value_loss = torch.max(value_losses, value_losses_clipped).mean()
 
         if self.use_symmetry and (self.config.symmetry_actor_coef > 0.0 or self.config.symmetry_critic_coef > 0.0):
-            mean_actions_batch = self.actor.act_inference({"actor_obs": actor_obs.detach().clone()})
+            mean_policy_state = {"actor_obs": actor_obs.detach().clone()}
+            if actor_perception_obs is not None:
+                mean_policy_state[self.actor_perception_key] = actor_perception_obs.detach().clone()
+            mean_actions_batch = self.actor.act_inference(mean_policy_state)
             mean_actions_for_original_batch, mean_actions_for_symmetry_batch = (
                 mean_actions_batch[:original_batch_size],
                 mean_actions_batch[original_batch_size:],
@@ -948,8 +1014,33 @@ class PPO(BaseAlgo):
         if ckpt_path is not None:
             logger.info(f"Loading checkpoint from {ckpt_path}")
             loaded_dict = torch.load(ckpt_path, map_location=self.device)
-            self.actor.load_state_dict(loaded_dict["actor_model_state_dict"])
-            self.critic.load_state_dict(loaded_dict["critic_model_state_dict"])
+            allow_non_strict = any(
+                getattr(module, "supports_extra_input", False)
+                for module in [
+                    getattr(self.actor, "actor_module", None).module if hasattr(self.actor, "actor_module") else None,
+                    getattr(self.critic, "critic_module", None).module if hasattr(self.critic, "critic_module") else None,
+                ]
+                if module is not None
+            )
+            try:
+                self.actor.load_state_dict(loaded_dict["actor_model_state_dict"])
+                self.critic.load_state_dict(loaded_dict["critic_model_state_dict"])
+            except RuntimeError as exc:
+                if not allow_non_strict:
+                    raise
+                logger.warning("Strict checkpoint load failed; retrying with strict=False for extra-input modules.")
+                actor_keys = self.actor.load_state_dict(loaded_dict["actor_model_state_dict"], strict=False)
+                critic_keys = self.critic.load_state_dict(loaded_dict["critic_model_state_dict"], strict=False)
+                if actor_keys.missing_keys or actor_keys.unexpected_keys:
+                    logger.warning(
+                        f"Actor non-strict load: missing={actor_keys.missing_keys}, "
+                        f"unexpected={actor_keys.unexpected_keys}"
+                    )
+                if critic_keys.missing_keys or critic_keys.unexpected_keys:
+                    logger.warning(
+                        f"Critic non-strict load: missing={critic_keys.missing_keys}, "
+                        f"unexpected={critic_keys.unexpected_keys}"
+                    )
             actor_norm_state = loaded_dict.get("actor_obs_normalizer_state")
             critic_norm_state = loaded_dict.get("critic_obs_normalizer_state")
             if isinstance(actor_norm_state, dict):
@@ -1016,10 +1107,14 @@ class PPO(BaseAlgo):
                 self.device,
             )
         else:
+            example_obs_dict = {"actor_obs": self._get_zero_input()}
+            zero_perception = self._get_zero_perception_input()
+            if zero_perception is not None:
+                example_obs_dict[self.actor_perception_key] = zero_perception
             export_policy_as_onnx(
                 wrapper=self.actor_onnx_wrapper,
                 onnx_file_path=onnx_file_path,
-                example_obs_dict={"actor_obs": self._get_zero_input()},
+                example_obs_dict=example_obs_dict,
             )
 
         # Extract control gains and velocity limits & attach to onnx as metadata
@@ -1126,14 +1221,15 @@ class PPO(BaseAlgo):
     @property
     def actor_onnx_wrapper(self):
         class ActorWrapper(nn.Module):
-            def __init__(self, actor, normalizers, keys, slices):
+            def __init__(self, actor, normalizers, keys, slices, perception_key):
                 super().__init__()
                 self.actor = actor
                 self.normalizers = normalizers
                 self.keys = keys
                 self.slices = slices
+                self.perception_key = perception_key
 
-            def forward(self, actor_obs):
+            def forward(self, actor_obs, perception_obs=None):
                 parts = []
                 for key in self.keys:
                     part = actor_obs[..., self.slices[key]]
@@ -1144,9 +1240,18 @@ class PPO(BaseAlgo):
                         part = normalizer(part)
                     parts.append(part)
                 actor_obs = torch.cat(parts, dim=-1)
-                return self.actor.act_inference({"actor_obs": actor_obs})
+                policy_state = {"actor_obs": actor_obs}
+                if self.perception_key and perception_obs is not None:
+                    policy_state[self.perception_key] = perception_obs
+                return self.actor.act_inference(policy_state)
 
-        return ActorWrapper(self.actor, self.actor_obs_normalizers, self.actor_obs_keys, self.actor_obs_slices)
+        return ActorWrapper(
+            self.actor,
+            self.actor_obs_normalizers,
+            self.actor_obs_keys,
+            self.actor_obs_slices,
+            self.actor_perception_key,
+        )
 
     def env_step(self, actor_state):
         obs_dict, rewards, dones, extras = self.env.step(actor_state)
@@ -1157,10 +1262,13 @@ class PPO(BaseAlgo):
     def get_example_obs(self):
         """Used for exporting policy as onnx."""
         obs_dict = self.env.reset_all()
-        return {
+        example = {
             "actor_obs": torch.cat([obs_dict[k] for k in self.actor_obs_keys], dim=1),
             "critic_obs": torch.cat([obs_dict[k] for k in self.critic_obs_keys], dim=1),
         }
+        if self.actor_perception_key and self.actor_perception_key in obs_dict:
+            example[self.actor_perception_key] = obs_dict[self.actor_perception_key]
+        return example
 
     @torch.no_grad()
     def evaluate_policy(self, max_eval_steps: int | None = None):
@@ -1208,9 +1316,13 @@ class PPO(BaseAlgo):
             c.on_post_evaluate_policy()
 
     def _pre_eval_env_step(self, actor_state: dict):
-        actor_obs = torch.cat([actor_state["obs"][k] for k in self.actor_obs_keys], dim=1)
+        actor_obs_raw = torch.cat([actor_state["obs"][k] for k in self.actor_obs_keys], dim=1)
+        actor_obs = actor_obs_raw
         actor_obs = self._normalize_actor_obs(actor_obs, update=False)
-        actions = self.eval_policy({"actor_obs": actor_obs})
+        policy_state = {"actor_obs": actor_obs}
+        if self.actor_perception_key and self.actor_perception_key in actor_state["obs"]:
+            policy_state[self.actor_perception_key] = actor_state["obs"][self.actor_perception_key]
+        actions = self.eval_policy(policy_state)
         actor_state.update({"actions": actions})
         for c in self.eval_callbacks:
             actor_state = c.on_pre_eval_env_step(actor_state)
@@ -1233,6 +1345,9 @@ class PPO(BaseAlgo):
         def _policy(obs_dict):
             actor_obs = obs_dict["actor_obs"]
             actor_obs = self._normalize_actor_obs(actor_obs, update=False)
-            return self.actor.act_inference({"actor_obs": actor_obs})
+            policy_state = {"actor_obs": actor_obs}
+            if self.actor_perception_key and self.actor_perception_key in obs_dict:
+                policy_state[self.actor_perception_key] = obs_dict[self.actor_perception_key]
+            return self.actor.act_inference(policy_state)
 
         return _policy

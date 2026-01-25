@@ -117,6 +117,7 @@ CUDA_VISIBLE_DEVICES=5,6,7 torchrun --nproc_per_node=3 --master_port=$((29500 + 
   --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s=0 \
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend=False \
   --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s=0 \
+  --logger.video.enabled=False \
   logger:wandb \
   --logger.video.interval=1000 \
   --logger.name="g1_videomimic_multiclip_terrain_depth"

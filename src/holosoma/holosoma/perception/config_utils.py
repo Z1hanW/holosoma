@@ -61,13 +61,12 @@ def _add_perception_modules(config: ExperimentConfig) -> object:
 def _update_module_config(
     module_cfg: ModuleConfig, config: ExperimentConfig, *, is_critic: bool = False
 ) -> ModuleConfig:
-    input_dim = list(module_cfg.input_dim)
-    if "perception_obs" not in input_dim:
-        input_dim.append("perception_obs")
+    input_dim = [name for name in module_cfg.input_dim if name != "perception_obs"]
 
     layer_cfg = module_cfg.layer_config
     layer_cfg = dataclasses.replace(
         layer_cfg,
+        extra_input_to_hidden=True,
         perception_input_name="perception_obs",
         perception_output_dim=config.perception.encoder_output_dim,
         perception_encoder_type=config.perception.encoder_type,

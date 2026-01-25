@@ -70,8 +70,8 @@ class PPOActor(nn.Module):
     def entropy(self):
         return self.distribution.entropy().sum(dim=-1)
 
-    def update_distribution(self, actor_obs):
-        mean = self.actor(actor_obs)
+    def update_distribution(self, actor_obs, extra_input: torch.Tensor | None = None):
+        mean = self.actor(actor_obs, extra_input=extra_input)
         if self.min_noise_std:
             clamped_std = torch.clamp(self.std, min=self.min_noise_std)
             self.distribution = Normal(mean, mean * 0.0 + clamped_std)
@@ -87,14 +87,16 @@ class PPOActor(nn.Module):
             self.distribution = Normal(mean, mean * 0.0 + self.std)
 
     def act(self, policy_state_dict):
-        self.update_distribution(policy_state_dict["actor_obs"])
+        extra_input = policy_state_dict.get("extra_actor_input")
+        self.update_distribution(policy_state_dict["actor_obs"], extra_input=extra_input)
         return self.distribution.sample()
 
     def get_actions_log_prob(self, actions):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
     def act_inference(self, policy_state_dict):
-        return self.actor(policy_state_dict["actor_obs"])
+        extra_input = policy_state_dict.get("extra_actor_input")
+        return self.actor(policy_state_dict["actor_obs"], extra_input=extra_input)
 
     def to_cpu(self):
         self.actor = deepcopy(self.actor).to("cpu")
@@ -116,7 +118,8 @@ class PPOCritic(nn.Module):
 
     def evaluate(self, policy_state_dict):
         critic_obs = policy_state_dict["critic_obs"]
-        return self.critic(critic_obs)
+        extra_input = policy_state_dict.get("extra_critic_input")
+        return self.critic(critic_obs, extra_input=extra_input)
 
     def get_hidden_states(self):
         return None
@@ -133,7 +136,7 @@ class PPOActorEncoder(PPOActor):
         self.encoder_obs_token_name = module_config_dict.layer_config.encoder_obs_token_name
         self.perception_input_name = module_config_dict.layer_config.perception_input_name
 
-    def _get_input(self, actor_obs: torch.Tensor) -> torch.Tensor:
+    def _get_input(self, actor_obs: torch.Tensor, policy_state_dict: dict | None = None) -> tuple[torch.Tensor, torch.Tensor | None]:
         if actor_obs.shape[-1] != self.actor_module.input_dim:
             raise ValueError(f"Actor Obs must be {self.actor_module.input_dim}, got {actor_obs.shape[-1]}")
         self.encoder_obs = (
@@ -159,9 +162,15 @@ class PPOActorEncoder(PPOActor):
         if self.actor_encoder_obs is not None:
             parts.append(self.actor_encoder_obs)
         perception_encoder = getattr(self.actor_module, "perception_encoder", None)
+        perception_embed = None
         if perception_encoder is not None and self.perception_input_name:
-            perception_obs = actor_obs[..., self.actor_module.input_indices_dict[self.perception_input_name]]
-            parts.append(perception_encoder(perception_obs))
+            if self.perception_input_name in self.actor_module.input_indices_dict:
+                perception_obs = actor_obs[..., self.actor_module.input_indices_dict[self.perception_input_name]]
+            elif policy_state_dict is not None and self.perception_input_name in policy_state_dict:
+                perception_obs = policy_state_dict[self.perception_input_name]
+            else:
+                raise ValueError(f"Perception obs '{self.perception_input_name}' not provided for actor.")
+            perception_embed = perception_encoder(perception_obs)
 
         if self.module_input_name:
             self.actor_state_obs = torch.cat(
@@ -173,19 +182,30 @@ class PPOActorEncoder(PPOActor):
             )
             parts.append(self.actor_state_obs)
 
+        supports_extra = getattr(self.actor_module.module, "supports_extra_input", False)
+        if perception_embed is not None and not supports_extra:
+            parts.append(perception_embed)
+
         if len(parts) == 1:
-            return parts[0]
-        return torch.cat(parts, dim=-1)
+            input_actor = parts[0]
+        else:
+            input_actor = torch.cat(parts, dim=-1)
+
+        extra_input = perception_embed if supports_extra else None
+        external_extra = policy_state_dict.get("extra_actor_input") if policy_state_dict else None
+        if external_extra is not None:
+            extra_input = external_extra if extra_input is None else torch.cat([extra_input, external_extra], dim=-1)
+        return input_actor, extra_input
 
     def act(self, policy_state_dict):
         actor_obs = policy_state_dict["actor_obs"]
-        input_actor = self._get_input(actor_obs)
-        return super().act({"actor_obs": input_actor})
+        input_actor, extra_input = self._get_input(actor_obs, policy_state_dict)
+        return super().act({"actor_obs": input_actor, "extra_actor_input": extra_input})
 
     def act_inference(self, policy_state_dict):
         actor_obs = policy_state_dict["actor_obs"]
-        input_actor = self._get_input(actor_obs)
-        return super().act_inference({"actor_obs": input_actor})
+        input_actor, extra_input = self._get_input(actor_obs, policy_state_dict)
+        return super().act_inference({"actor_obs": input_actor, "extra_actor_input": extra_input})
 
 
 class PPOCriticEncoder(PPOCritic):
@@ -196,7 +216,7 @@ class PPOCriticEncoder(PPOCritic):
         self.encoder_obs_token_name = module_config_dict.layer_config.encoder_obs_token_name
         self.perception_input_name = module_config_dict.layer_config.perception_input_name
 
-    def _get_input(self, critic_obs: torch.Tensor) -> torch.Tensor:
+    def _get_input(self, critic_obs: torch.Tensor, policy_state_dict: dict | None = None) -> tuple[torch.Tensor, torch.Tensor | None]:
         if critic_obs.shape[-1] != self.critic_module.input_dim:
             raise ValueError(f"Critic Obs must be {self.critic_module.input_dim}, got {critic_obs.shape[-1]}")
         self.encoder_obs = (
@@ -223,9 +243,15 @@ class PPOCriticEncoder(PPOCritic):
             parts.append(self.critic_encoder_obs)
 
         perception_encoder = getattr(self.critic_module, "perception_encoder", None)
+        perception_embed = None
         if perception_encoder is not None and self.perception_input_name:
-            perception_obs = critic_obs[..., self.critic_module.input_indices_dict[self.perception_input_name]]
-            parts.append(perception_encoder(perception_obs))
+            if self.perception_input_name in self.critic_module.input_indices_dict:
+                perception_obs = critic_obs[..., self.critic_module.input_indices_dict[self.perception_input_name]]
+            elif policy_state_dict is not None and self.perception_input_name in policy_state_dict:
+                perception_obs = policy_state_dict[self.perception_input_name]
+            else:
+                raise ValueError(f"Perception obs '{self.perception_input_name}' not provided for critic.")
+            perception_embed = perception_encoder(perception_obs)
 
         if self.module_input_name:
             self.critic_state_obs = torch.cat(
@@ -237,11 +263,22 @@ class PPOCriticEncoder(PPOCritic):
             )
             parts.append(self.critic_state_obs)
 
+        supports_extra = getattr(self.critic_module.module, "supports_extra_input", False)
+        if perception_embed is not None and not supports_extra:
+            parts.append(perception_embed)
+
         if len(parts) == 1:
-            return parts[0]
-        return torch.cat(parts, dim=-1)
+            input_critic = parts[0]
+        else:
+            input_critic = torch.cat(parts, dim=-1)
+
+        extra_input = perception_embed if supports_extra else None
+        external_extra = policy_state_dict.get("extra_critic_input") if policy_state_dict else None
+        if external_extra is not None:
+            extra_input = external_extra if extra_input is None else torch.cat([extra_input, external_extra], dim=-1)
+        return input_critic, extra_input
 
     def evaluate(self, policy_state_dict):
         critic_obs = policy_state_dict["critic_obs"]
-        input_critic = self._get_input(critic_obs)
-        return super().evaluate({"critic_obs": input_critic})
+        input_critic, extra_input = self._get_input(critic_obs, policy_state_dict)
+        return super().evaluate({"critic_obs": input_critic, "extra_critic_input": extra_input})

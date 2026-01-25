@@ -105,6 +105,9 @@ class LayerConfig:
     transformer_pooling: str = "first"
     """Pooling for transformer encoder output: 'first' or 'mean'."""
 
+    extra_input_to_hidden: bool = False
+    """Whether to add an extra input projection to the first hidden layer."""
+
 
 @dataclass(frozen=True)
 class ModuleConfig:
@@ -171,6 +174,7 @@ class DistillationConfig:
 
     multi_teacher_select_obs_var: str = "teacher_checkpoint_index"
     """Observation key used to select teacher policy when use_multi_teacher is True."""
+
 
 
 @dataclass(frozen=True)
