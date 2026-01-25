@@ -101,6 +101,11 @@ class RolloutStorage:
         if value.requires_grad:
             raise ValueError("Cannot store tensor with requires_grad=True")
 
+        if hasattr(value, "is_inference") and value.is_inference():
+            # Convert inference tensors to normal tensors for training-time autograd.
+            with torch.inference_mode(False):
+                value = value.clone()
+
         self._buffers[key].copy_(value)
 
     def clear(self):

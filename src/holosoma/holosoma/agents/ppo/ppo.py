@@ -859,6 +859,11 @@ class PPO(BaseAlgo):
             actor_obs = minibatch["actor_obs"]
             critic_obs = minibatch["critic_obs"]
 
+        if actor_perception_obs is not None and actor_perception_obs.is_inference():
+            actor_perception_obs = actor_perception_obs.clone()
+        if critic_perception_obs is not None and critic_perception_obs.is_inference():
+            critic_perception_obs = critic_perception_obs.clone()
+
         actor_obs = self._normalize_actor_obs(actor_obs, update=True)
         critic_obs = self._normalize_critic_obs(critic_obs, update=True)
 
