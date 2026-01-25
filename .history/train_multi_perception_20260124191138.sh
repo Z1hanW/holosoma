@@ -123,6 +123,6 @@ torchrun --nproc_per_node=8 --master_port=$((29500 + RANDOM % 1000)) src/holosom
   --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s=0 \
   ${STAGE1_CKPT:+--training.checkpoint "${STAGE1_CKPT}"} \
   logger:wandb \
-  --logger.video.enabled=False \
+    --logger.video.enabled=False \
   --logger.video.interval=1000 \
   --logger.name="g1_videomimic_multiclip_terrain_depth"
