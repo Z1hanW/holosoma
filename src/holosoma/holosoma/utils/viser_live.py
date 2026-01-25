@@ -74,37 +74,74 @@ def _load_terrain_mesh(
         logger.warning("Viser terrain disabled (trimesh unavailable): {}", exc)
         return None
 
-    terrain_path = Path(_resolve_data_path(obj_path))
-    if terrain_path.is_dir():
-        candidates = sorted(list(terrain_path.glob("*.obj")) + list(terrain_path.glob("*.OBJ")))
-        if not candidates:
-            return None
-        terrain_path = candidates[0]
+    def _load_mesh(path: Path) -> trimesh.Trimesh:
+        mesh = trimesh.load(str(path), process=False)
+        if isinstance(mesh, trimesh.Scene):
+            mesh = mesh.dump(concatenate=True)
+        if not isinstance(mesh, trimesh.Trimesh):
+            raise ValueError(f"Loaded terrain is not a trimesh: {type(mesh)}")
+        return mesh
 
-    if not terrain_path.exists():
+    def _resolve_obj_paths(path_str: str) -> list[Path]:
+        path = Path(path_str)
+        if path.is_dir():
+            matches = list(path.glob("*.obj")) + list(path.glob("*.OBJ"))
+            return sorted(matches)
+        if any(char in path_str for char in ("*", "?", "[")):
+            import glob
+
+            return sorted(Path(p) for p in glob.glob(path_str))
+        return [path] if path.exists() else []
+
+    def _tile_single_mesh(mesh: trimesh.Trimesh, rows: int, cols: int) -> trimesh.Trimesh:
+        if rows * cols <= 1:
+            return mesh
+        gap = 1e-4
+        stride = (mesh.bounds[1] - mesh.bounds[0]) + gap
+        tiles = []
+        for r in range(rows):
+            for c in range(cols):
+                tile = mesh.copy()
+                tile.apply_translation([c * stride[0], r * stride[1], 0.0])
+                tiles.append(tile)
+        return trimesh.util.concatenate(tiles)
+
+    terrain_path = Path(_resolve_data_path(obj_path))
+    obj_paths = _resolve_obj_paths(str(terrain_path))
+    if not obj_paths:
         return None
 
-    base_mesh = trimesh.load(str(terrain_path), process=False)
-    if isinstance(base_mesh, trimesh.Scene):
-        base_mesh = base_mesh.dump(concatenate=True)
-    if not isinstance(base_mesh, trimesh.Trimesh):
-        raise ValueError(f"Loaded terrain is not a trimesh: {type(base_mesh)}")
-
     if obj_metadata_path:
+        if len(obj_paths) != 1:
+            logger.warning("OBJ metadata requires a single OBJ file; ignoring metadata for directory input.")
+        base_mesh = _load_mesh(obj_paths[0])
         return base_mesh
 
     rows = int(num_rows or 1)
     cols = int(num_cols or 1)
-    if rows * cols <= 1:
-        return base_mesh
 
+    if len(obj_paths) == 1:
+        base_mesh = _load_mesh(obj_paths[0])
+        return _tile_single_mesh(base_mesh, rows, cols)
+
+    meshes = []
+    spans = []
+    for path in obj_paths:
+        mesh = _load_mesh(path)
+        meshes.append(mesh)
+        spans.append(mesh.bounds[1] - mesh.bounds[0])
+
+    spans = np.vstack(spans)
     gap = 1e-4
-    stride = (base_mesh.bounds[1] - base_mesh.bounds[0]) + gap
+    stride = spans.max(axis=0) + gap
+
     tiles = []
-    for r in range(rows):
-        for c in range(cols):
-            tile = base_mesh.copy()
-            tile.apply_translation([c * stride[0], r * stride[1], 0.0])
+    for col, mesh in enumerate(meshes):
+        col_offset = np.array([col * stride[0], 0.0, 0.0], dtype=np.float64)
+        for row in range(rows):
+            offset = col_offset + np.array([0.0, row * stride[1], 0.0], dtype=np.float64)
+            tile = mesh.copy()
+            tile.apply_translation(offset)
             tiles.append(tile)
     return trimesh.util.concatenate(tiles)
 
@@ -256,6 +293,13 @@ class ViserLiveViewer:
 
         mesh = _load_terrain_mesh(obj_path, obj_metadata_path=obj_meta, num_rows=rows, num_cols=cols)
         if mesh is None:
+            try:
+                import trimesh  # type: ignore[import-not-found]
+            except Exception:
+                return
+            ground_mesh = trimesh.creation.box(extents=(8.0, 8.0, 0.01))
+            ground_mesh.apply_translation([0.0, 0.0, -0.005])
+            self._server.scene.add_mesh_trimesh("/ground", ground_mesh)
             return
         self._server.scene.add_mesh_trimesh("/terrain", mesh)
 
