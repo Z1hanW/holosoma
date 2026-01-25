@@ -170,7 +170,11 @@ class PPOActorEncoder(PPOActor):
                 perception_obs = policy_state_dict[self.perception_input_name]
             else:
                 raise ValueError(f"Perception obs '{self.perception_input_name}' not provided for actor.")
+            if hasattr(perception_obs, "is_inference") and perception_obs.is_inference():
+                perception_obs = perception_obs.clone()
             perception_embed = perception_encoder(perception_obs)
+            if hasattr(perception_embed, "is_inference") and perception_embed.is_inference():
+                perception_embed = perception_embed.clone()
 
         if self.module_input_name:
             self.actor_state_obs = torch.cat(
@@ -194,6 +198,8 @@ class PPOActorEncoder(PPOActor):
         extra_input = perception_embed if supports_extra else None
         external_extra = policy_state_dict.get("extra_actor_input") if policy_state_dict else None
         if external_extra is not None:
+            if hasattr(external_extra, "is_inference") and external_extra.is_inference():
+                external_extra = external_extra.clone()
             extra_input = external_extra if extra_input is None else torch.cat([extra_input, external_extra], dim=-1)
         return input_actor, extra_input
 
@@ -251,7 +257,11 @@ class PPOCriticEncoder(PPOCritic):
                 perception_obs = policy_state_dict[self.perception_input_name]
             else:
                 raise ValueError(f"Perception obs '{self.perception_input_name}' not provided for critic.")
+            if hasattr(perception_obs, "is_inference") and perception_obs.is_inference():
+                perception_obs = perception_obs.clone()
             perception_embed = perception_encoder(perception_obs)
+            if hasattr(perception_embed, "is_inference") and perception_embed.is_inference():
+                perception_embed = perception_embed.clone()
 
         if self.module_input_name:
             self.critic_state_obs = torch.cat(
@@ -275,6 +285,8 @@ class PPOCriticEncoder(PPOCritic):
         extra_input = perception_embed if supports_extra else None
         external_extra = policy_state_dict.get("extra_critic_input") if policy_state_dict else None
         if external_extra is not None:
+            if hasattr(external_extra, "is_inference") and external_extra.is_inference():
+                external_extra = external_extra.clone()
             extra_input = external_extra if extra_input is None else torch.cat([extra_input, external_extra], dim=-1)
         return input_critic, extra_input
 
