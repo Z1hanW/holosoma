@@ -296,6 +296,9 @@ class MLPWithExtraProj(nn.Module):
     def forward(self, x: torch.Tensor, extra_input: torch.Tensor | None = None) -> torch.Tensor:
         x = self.first(x)
         if extra_input is not None:
+            if extra_input.is_inference():
+                # Final safety: ensure extra_input is a normal tensor for autograd.
+                extra_input = extra_input.clone()
             x = x + self.extra_proj(extra_input)
         x = self.activation(x)
         if self.dropout is not None:
