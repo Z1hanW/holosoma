@@ -8,7 +8,7 @@ STAGE1_CKPT=${2:-${STAGE1_CKPT:-}}
 IMAGE_WIDTH=${IMAGE_WIDTH:-128}
 IMAGE_HEIGHT=${IMAGE_HEIGHT:-72}
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-536870912}
-NUM_ENVS=${NUM_ENVS:-4096}
+NUM_ENVS=${NUM_ENVS:-12280}
 case "${DEPTH_IMPL}" in
   rendered)
     PERCEPTION_PRESET="camera_depth_d435i_rendered"
@@ -94,7 +94,7 @@ print(rows, cols)
   OBJ_META="${FUSED_META}"
 fi
 
-torchrun --nproc_per_node=8 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
+torchrun --nproc_per_node=3 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-videomimic-mlp \
   "perception:${PERCEPTION_PRESET}" \
   --perception.camera_width="$IMAGE_WIDTH" \
