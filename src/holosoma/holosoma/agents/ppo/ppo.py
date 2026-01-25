@@ -729,7 +729,10 @@ class PPO(BaseAlgo):
 
             # Return / Advantage computation
             last_critic_obs = torch.cat([obs_dict[k] for k in self.critic_obs_keys], dim=1)
-            last_values = self.critic.evaluate({"critic_obs": last_critic_obs}).detach().to(self.device)
+            last_policy_state = {"critic_obs": last_critic_obs}
+            if self.critic_perception_key and self.critic_perception_key in obs_dict:
+                last_policy_state[self.critic_perception_key] = obs_dict[self.critic_perception_key]
+            last_values = self.critic.evaluate(last_policy_state).detach().to(self.device)
             returns, advantages = self._compute_returns_and_advantages(
                 last_values,
                 self.storage["values"].to(self.device),
