@@ -12,8 +12,8 @@ class ViserConfig:
     enabled: bool = False
     """Enable the Viser viewer."""
 
-    port: int = 6060
-    """Port to host the Viser server."""
+    port: int = 0
+    """Port to host the Viser server (0 -> random)."""
 
     update_interval: int = 1
     """Update Viser every N policy steps."""

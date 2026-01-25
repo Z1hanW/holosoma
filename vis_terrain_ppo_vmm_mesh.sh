@@ -3,7 +3,7 @@ set -euo pipefail
 
 IMAGE_WIDTH=${IMAGE_WIDTH:-160}
 IMAGE_HEIGHT=${IMAGE_HEIGHT:-90}
-HOLOSOMA_VISER_PORT=${HOLOSOMA_VISER_PORT:-6060} \
+HOLOSOMA_VISER_PORT=${HOLOSOMA_VISER_PORT:-$((RANDOM % 8976 + 1024))} \
 python src/holosoma/holosoma/viser_perception.py \
   exp:g1-29dof-wbt-videomimic-mlp \
   perception:camera_depth_d435i \

@@ -93,8 +93,8 @@ class TrainingConfig:
     enable_viser: bool = False
     """Enable a Viser live viewer during training."""
 
-    viser_port: int = 6060
-    """Port for the Viser server (HOLOSOMA_VISER_PORT overrides)."""
+    viser_port: int = 0
+    """Port for the Viser server (0 -> random, HOLOSOMA_VISER_PORT overrides)."""
 
     viser_env_id: int = 0
     """Environment index to visualize in the Viser viewer."""

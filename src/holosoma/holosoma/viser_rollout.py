@@ -30,6 +30,7 @@ from holosoma.config_values.experiment import AnnotatedExperimentConfig  # noqa:
 from holosoma.utils.module_utils import get_holosoma_root  # noqa: E402
 from holosoma.utils.path import resolve_data_file_path  # noqa: E402
 from holosoma.utils.tyro_utils import TYRO_CONIFG  # noqa: E402
+from holosoma.utils.viser_utils import resolve_viser_port  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -168,7 +169,8 @@ def replay_rollout(cfg: ExperimentConfig, rollout_cfg: RolloutViewerConfig) -> N
     else:
         initial_key = files[0].stem
 
-    server = viser.ViserServer(port=int(os.environ.get("HOLOSOMA_VISER_PORT", "6060")))
+    port = resolve_viser_port()
+    server = viser.ViserServer(port=port)
     robot_root = server.scene.add_frame("/robot", show_axes=False)
     object_root = server.scene.add_frame("/object", show_axes=False)
 

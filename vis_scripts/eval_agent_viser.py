@@ -42,11 +42,12 @@ from holosoma.utils.sim_utils import (  # noqa: E402
     setup_simulation_environment,
 )
 from holosoma.utils.tyro_utils import TYRO_CONIFG  # noqa: E402
+from holosoma.utils.viser_utils import resolve_viser_port  # noqa: E402
 
 
 @dataclass(frozen=True)
 class ViserEvalConfig:
-    port: int = 6060
+    port: int = 0
     env_index: int = 0
     update_interval: int = 1
     show_meshes: bool = True
@@ -74,7 +75,8 @@ def _to_numpy(value) -> np.ndarray:
 
 class ViserEvalViewer:
     def __init__(self, robot_config: RobotConfig, cfg: ViserEvalConfig) -> None:
-        self.server = viser.ViserServer(port=cfg.port)
+        port = resolve_viser_port(cfg.port)
+        self.server = viser.ViserServer(port=port)
         self.robot_root = self.server.scene.add_frame("/robot", show_axes=False)
 
         urdf_path = _resolve_robot_urdf_path(robot_config)
@@ -103,7 +105,7 @@ class ViserEvalViewer:
         def _(_evt) -> None:
             self.robot.show_visual = bool(show_meshes_cb.value)
 
-        logger.info(f"Viser server running on port {cfg.port}")
+        logger.info(f"Viser server running on port {port}")
 
     def update_from_env(self, env, env_index: int) -> None:
         root_state = _to_numpy(env.simulator.robot_root_states[env_index])

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import random
 import sys
 import tempfile
 from pathlib import Path
@@ -72,6 +74,24 @@ def _resolve_urdf_path(cfg: ViserConfig, model_path: str) -> Path:
     )
 
 
+def _resolve_viser_port(port: int | None) -> int:
+    env_value = os.environ.get("HOLOSOMA_VISER_PORT") or os.environ.get("VISER_PORT")
+    if env_value:
+        try:
+            return int(env_value)
+        except ValueError:
+            pass
+    if port is None:
+        return random.randint(1024, 9999)
+    try:
+        port_val = int(port)
+    except (TypeError, ValueError):
+        return random.randint(1024, 9999)
+    if port_val <= 0:
+        return random.randint(1024, 9999)
+    return port_val
+
+
 class ViserInferenceViewer:
     def __init__(self, robot_config: RobotConfig, cfg: ViserConfig, model_path: str) -> None:
         self._robot_config = robot_config
@@ -79,7 +99,8 @@ class ViserInferenceViewer:
 
         urdf_path = _resolve_urdf_path(cfg, model_path)
 
-        self.server = viser.ViserServer(port=cfg.port)
+        port = _resolve_viser_port(cfg.port)
+        self.server = viser.ViserServer(port=port)
         self.robot_root = self.server.scene.add_frame("/robot", show_axes=False)
         self.robot = ViserUrdf(self.server, urdf_or_path=urdf_path, root_node_name="/robot")
         self.robot.show_visual = cfg.show_meshes
@@ -106,7 +127,7 @@ class ViserInferenceViewer:
         def _(_evt) -> None:
             self.robot.show_visual = bool(show_meshes_cb.value)
 
-        logger.info("Viser server running on port %s", cfg.port)
+        logger.info("Viser server running on port %s", port)
 
     def update(self, robot_state_data) -> None:
         if robot_state_data is None:

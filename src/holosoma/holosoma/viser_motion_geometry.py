@@ -31,6 +31,7 @@ from holosoma.managers.command.terms.wbt import FAKE_BODY_NAME_ALIASES, MotionLo
 from holosoma.utils.module_utils import get_holosoma_root  # noqa: E402
 from holosoma.utils.path import resolve_data_file_path  # noqa: E402
 from holosoma.utils.tyro_utils import TYRO_CONIFG  # noqa: E402
+from holosoma.utils.viser_utils import resolve_viser_port  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -38,7 +39,7 @@ class MotionGeometryViewerConfig:
     motion_dir: str
     geometry_dir: str
     robot: str = "g1_29dof"
-    port: int = 6060
+    port: int = 0
     fps: int | None = None
     autoplay: bool = True
     loop: bool = True
@@ -159,7 +160,8 @@ def run_viewer(cfg: MotionGeometryViewerConfig) -> None:
     robot_config = _resolve_robot_config(cfg.robot)
     urdf_path = _resolve_robot_urdf_path(robot_config)
 
-    server = viser.ViserServer(port=cfg.port)
+    port = resolve_viser_port(cfg.port)
+    server = viser.ViserServer(port=port)
     robot_root = server.scene.add_frame("/robot", show_axes=False)
     vr = ViserUrdf(server, urdf_or_path=urdf_path, root_node_name="/robot")
     vr.show_visual = cfg.show_meshes

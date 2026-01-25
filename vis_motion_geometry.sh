@@ -7,13 +7,13 @@ set -euo pipefail
 #   MOTION_DIR=/ABS/PATH/to/motions GEOMETRY_DIR=/ABS/PATH/to/geometry ./vis_motion_geometry.sh
 #
 # Optional overrides:
-#   ROBOT=g1_29dof PORT=6060 START_CLIP=clip_name FPS=30 AUTOPLAY=True LOOP=True PRELOAD=True
+#   ROBOT=g1_29dof PORT=#### START_CLIP=clip_name FPS=30 AUTOPLAY=True LOOP=True PRELOAD=True
 #   SHOW_MESHES=True SHOW_GEOMETRY=True GRID=True GRID_SIZE=10.0
 
 MOTION_DIR=${MOTION_DIR:-"/home/ubuntu/FAR/Store/vmm_data/___zero_pad_data_trans"}
 GEOMETRY_DIR=${GEOMETRY_DIR:-"/home/ubuntu/FAR/Store/vmm_data/___zero_pad_geo_trans"}
 ROBOT=${ROBOT:-"g1_29dof"}
-PORT=${PORT:-"2360"}
+PORT=${PORT:-"$((RANDOM % 8976 + 1024))"}
 START_CLIP=${START_CLIP:-""}
 FPS=${FPS:-""}
 AUTOPLAY=${AUTOPLAY:-"True"}

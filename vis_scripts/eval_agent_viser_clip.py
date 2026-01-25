@@ -43,11 +43,12 @@ from holosoma.utils.sim_utils import (  # noqa: E402
     setup_simulation_environment,
 )
 from holosoma.utils.tyro_utils import TYRO_CONIFG  # noqa: E402
+from holosoma.utils.viser_utils import resolve_viser_port  # noqa: E402
 
 
 @dataclass(frozen=True)
 class ViserLiveConfig:
-    port: int = 6060
+    port: int = 0
     env_index: int = 0
     update_interval: int = 1
     show_meshes: bool = True
@@ -115,7 +116,8 @@ def _current_clip_name(motion_cmd, env_index: int) -> str | None:
 
 class ViserLiveViewer:
     def __init__(self, robot_config: RobotConfig, cfg: ViserLiveConfig) -> None:
-        self.server = viser.ViserServer(port=cfg.port)
+        port = resolve_viser_port(cfg.port)
+        self.server = viser.ViserServer(port=port)
         self.robot_root = self.server.scene.add_frame("/robot", show_axes=False)
         self.object_root = self.server.scene.add_frame("/object", show_axes=False)
 
@@ -154,7 +156,7 @@ class ViserLiveViewer:
             if self.object is not None:
                 self.object.show_visual = visible
 
-        logger.info(f"Viser server running on port {cfg.port}")
+        logger.info(f"Viser server running on port {port}")
 
     def _get_object_state_wxyz(self, env, env_index: int) -> tuple[np.ndarray, np.ndarray] | None:
         if self.object is None:

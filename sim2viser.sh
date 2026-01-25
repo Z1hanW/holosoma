@@ -6,7 +6,7 @@ set -euo pipefail
 # =========================
 CKPT="/home/ubuntu/FAR/model_52000.pt"
 MOTION_DIR="/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/converted_res/robot_only/lafan"
-PORT=6060
+PORT=${PORT:-$((RANDOM % 8976 + 1024))}
 HEADLESS=True
 
 # =========================

@@ -12,6 +12,7 @@ from loguru import logger
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.path import resolve_data_file_path
 from holosoma.utils.safe_torch_import import torch
+from holosoma.utils.viser_utils import resolve_viser_port
 
 
 def _ensure_viser_on_path() -> None:
@@ -182,8 +183,8 @@ class ViserLiveViewer:
             self._enabled = False
             return
 
-        port_cfg = int(getattr(cfg, "viser_port", 6060))
-        port = int(os.environ.get("HOLOSOMA_VISER_PORT", str(port_cfg)))
+        port_cfg = int(getattr(cfg, "viser_port", 0) or 0)
+        port = resolve_viser_port(port_cfg)
         self._server = viser_mod.ViserServer(port=port)
 
         self._robot_root = self._server.scene.add_frame("/robot", show_axes=False)

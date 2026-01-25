@@ -46,6 +46,7 @@ from holosoma.utils.rotations import (  # noqa: E402
 )
 from holosoma.utils.safe_torch_import import torch  # noqa: E402
 from holosoma.utils.tyro_utils import TYRO_CONIFG  # noqa: E402
+from holosoma.utils.viser_utils import resolve_viser_port  # noqa: E402
 
 
 def _resolve_data_path(path: str) -> str:
@@ -635,7 +636,8 @@ def replay_perception(cfg: ExperimentConfig) -> None:
         pitch_deg=cfg.perception.camera_pitch_deg,
     )
 
-    server = viser.ViserServer(port=int(os.environ.get("HOLOSOMA_VISER_PORT", "6060")))
+    port = resolve_viser_port()
+    server = viser.ViserServer(port=port)
     robot_root = server.scene.add_frame("/robot", show_axes=False)
     robot_urdf_path = _resolve_robot_urdf_path(cfg)
     vr = ViserUrdf(server, urdf_or_path=Path(robot_urdf_path), root_node_name="/robot")

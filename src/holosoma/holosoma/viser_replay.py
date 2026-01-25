@@ -34,6 +34,7 @@ from holosoma.utils.module_utils import get_holosoma_root  # noqa: E402
 from holosoma.utils.path import resolve_data_file_path  # noqa: E402
 from holosoma.utils.rotations import get_euler_xyz, quat_from_euler_xyz  # noqa: E402
 from holosoma.utils.tyro_utils import TYRO_CONIFG  # noqa: E402
+from holosoma.utils.viser_utils import resolve_viser_port  # noqa: E402
 
 
 def _resolve_data_path(path: str) -> str:
@@ -416,7 +417,8 @@ def replay(cfg: ExperimentConfig) -> None:
     if cfg.robot.object.object_urdf_path:
         object_urdf_path = _resolve_data_path(cfg.robot.object.object_urdf_path)
 
-    server = viser.ViserServer(port=6060)
+    port = resolve_viser_port()
+    server = viser.ViserServer(port=port)
     robot_root = server.scene.add_frame("/robot", show_axes=False)
     object_root = server.scene.add_frame("/object", show_axes=False)
 

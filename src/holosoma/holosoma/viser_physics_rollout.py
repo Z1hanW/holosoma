@@ -37,7 +37,7 @@ class PhysicsRolloutInputs:
     headless: bool = True
     num_envs: int = 1
     pair_terrain_with_motion: bool = True
-    viser_port: int = 6060
+    viser_port: int = 0
     viser_env_id: int = 0
     viser_update_hz: float = 30.0
     viser_recenter: bool = True

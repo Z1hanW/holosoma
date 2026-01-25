@@ -8,7 +8,7 @@ set -euo pipefail
 #
 # Optional overrides:
 #   EXP_CFG=exp:g1-29dof-wbt-videomimic-mlp
-#   HOLOSOMA_VISER_PORT=6060
+#   HOLOSOMA_VISER_PORT=####
 #   ROLLOUT_FILE=/ABS/PATH/to/rollout_0001.npz
 #   TERRAIN_OBJ_PATH=/ABS/PATH/to/obj_dir
 #   RECENTER=False
