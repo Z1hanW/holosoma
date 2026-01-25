@@ -181,6 +181,8 @@ class _OnnxMotionPolicyExporter(torch.nn.Module):
         self.input_dim = _infer_actor_input_dim(actor)
         # Wrap the actor to handle different return signatures
         self._wrapped_actor = self._create_actor_wrapper(actor_model)
+        self.perception_key = getattr(actor, "perception_key", None) or None
+        self.perception_dim = self._infer_perception_dim(actor, self.perception_key)
 
         motion = motion_command.motion
 
@@ -208,8 +210,11 @@ class _OnnxMotionPolicyExporter(torch.nn.Module):
                 super().__init__()
                 self.actor = actor
 
-            def forward(self, x):
-                output = self.actor(x)
+            def forward(self, x, perception_obs=None):
+                if perception_obs is None:
+                    output = self.actor(x)
+                else:
+                    output = self.actor(x, perception_obs)
                 # Handle different return signatures:
                 # - PPO Sequential: returns tensor directly
                 # - PPO ActorWrapper: returns tensor directly
@@ -221,10 +226,25 @@ class _OnnxMotionPolicyExporter(torch.nn.Module):
 
         return ActorWrapper(actor_model)
 
-    def forward(self, x, time_step):
+    def _infer_perception_dim(self, actor_wrapper: object, perception_key: str | None) -> int | None:
+        if not perception_key:
+            return None
+        candidate = getattr(actor_wrapper, "actor", None)
+        if candidate is not None and hasattr(candidate, "actor_module"):
+            obs_dim_dict = getattr(candidate.actor_module, "obs_dim_dict", None)
+            if isinstance(obs_dim_dict, dict) and perception_key in obs_dim_dict:
+                return int(obs_dim_dict[perception_key])
+        obs_dim_dict = getattr(actor_wrapper, "obs_dim_dict", None)
+        if isinstance(obs_dim_dict, dict) and perception_key in obs_dim_dict:
+            return int(obs_dim_dict[perception_key])
+        return None
+
+    def forward(self, x, time_step, perception_obs=None):
         time_step_clamped = torch.clamp(time_step.long().squeeze(-1), max=self.time_step_total - 1)
+        if self.perception_dim is not None and perception_obs is None:
+            raise ValueError("Perception obs is required for ONNX motion export but not provided.")
         return (
-            self._wrapped_actor(x),
+            self._wrapped_actor(x, perception_obs),
             self.joint_pos[time_step_clamped],
             self.joint_vel[time_step_clamped],
             self.ref_body_pos_w[time_step_clamped],
@@ -237,14 +257,20 @@ class _OnnxMotionPolicyExporter(torch.nn.Module):
         self.to("cpu")
         obs = torch.zeros(1, self.input_dim)
         time_step = torch.zeros(1, 1)
+        export_inputs = (obs, time_step)
+        input_names = ["obs", "time_step"]
+        if self.perception_dim is not None:
+            perception_obs = torch.zeros(1, self.perception_dim)
+            export_inputs = (obs, time_step, perception_obs)
+            input_names = ["obs", "time_step", "perception_obs"]
         torch.onnx.export(
             self,
-            (obs, time_step),
+            export_inputs,
             onnx_file_path,
             export_params=True,
             opset_version=14,
             verbose=False,
-            input_names=["obs", "time_step"],
+            input_names=input_names,
             output_names=["actions", "joint_pos", "joint_vel", "ref_pos_xyz", "ref_quat_xyzw"],
             dynamo=False,
         )
