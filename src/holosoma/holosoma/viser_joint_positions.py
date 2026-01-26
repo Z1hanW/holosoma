@@ -36,7 +36,7 @@ class JointViewerConfig:
     preload: bool = True
     add_grid: bool = True
     grid_size: float = 10.0
-    point_size: float = 0.02
+    point_size: float = 0.14
     point_shape: str = "circle"
     show_geometry: bool = True
     start_clip: str | None = None
