@@ -44,9 +44,9 @@ for seq_dir in "$POST_SCENE_ROOT"/*; do
         continue
     fi
 
-    motion_dir="$MOTION_ROOT/$seq_name"
-    mkdir -p "$motion_dir"
-    ln -sf "$hmr_npz" "$motion_dir/$TASK_NAME.npz"
+    mkdir -p "$MOTION_ROOT"
+    motion_file="$MOTION_ROOT/$seq_name.npz"
+    ln -sf "$hmr_npz" "$motion_file"
 
     stage_obj_dir="$OBJECT_ROOT/$seq_name"
     mkdir -p "$stage_obj_dir"
