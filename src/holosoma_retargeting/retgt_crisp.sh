@@ -22,6 +22,7 @@ SCENE_XML_OVERRIDE=${SCENE_XML_OVERRIDE:-""}
 OBJECT_NAME="scene_mesh_sqs"
 TASK_NAME="human_motion"
 TEMPLATE_XML="$SCRIPT_DIR/demo_data/far_robot/far_robot/g1_29dof_w_stairs.xml"
+BOX_BODY_XML="$SCRIPT_DIR/demo_data/far_robot/far_robot/box_body.xml"
 MESH_DIR="$SCRIPT_DIR/models/g1/meshes"
 
 if [ ! -f "$TEMPLATE_XML" ]; then
@@ -88,6 +89,9 @@ PY
     ln -sf "$stage_obj_dir/box_assets.xml" "$XML_ROOT/$seq_name/box_assets.xml"
     ln -sf "$stage_obj_dir/g1_29dof_w_scene_mesh_sqs.xml" "$XML_ROOT/$seq_name/g1_29dof_w_scene_mesh_sqs.xml"
     ln -sf "$stage_obj_dir/scene_mesh_sqs.obj" "$XML_ROOT/$seq_name/scene_mesh_sqs.obj"
+    if [ -f "$BOX_BODY_XML" ]; then
+        ln -sf "$BOX_BODY_XML" "$XML_ROOT/$seq_name/box_body.xml"
+    fi
     if [ -d "$stage_obj_dir/pieces" ]; then
         mkdir -p "$PIECES_ROOT"
         ln -sfn "$stage_obj_dir/pieces" "$PIECES_ROOT/$seq_name"
