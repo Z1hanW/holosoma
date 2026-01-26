@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-KNOWN_MODES = ("rollout", "replay", "perception", "physics")
+KNOWN_MODES = ("rollout", "replay", "perception", "physics", "smpl")
 
 USAGE = """\
 Usage: python -m holosoma.visualize [mode] [args...]
@@ -11,6 +11,7 @@ Modes:
   replay      Replay motion dataset files
   perception  Visualize perception rollouts
   physics     Physics rollout with policy checkpoint + motion input
+  smpl        Visualize SMPL human mesh with optional geometry
 
 Rollout (default) example, config-first like eval_agent.py:
   python -m holosoma.visualize exp:g1-29dof-wbt-videomimic-mlp \\
@@ -34,6 +35,12 @@ Physics rollout example:
     --motion-dir /abs/path/to/motion_folder \\
     --geometry-dir /abs/path/to/obj_folder \\
     # --geometry-metadata /abs/path/to/metadata.json
+
+SMPL mesh example:
+  python -m holosoma.visualize smpl \\
+    --motion-dir /abs/path/to/motion_folder \\
+    --geometry-dir /abs/path/to/obj_folder \\
+    --smpl-model-path /abs/path/to/body_models
 
 Note: ExperimentConfig overrides are the same as eval_agent.py and can be appended here.
 """
@@ -90,6 +97,12 @@ def main() -> None:
         from holosoma.viser_physics_rollout import main as physics_main
 
         _run(physics_main, rest)
+        return
+
+    if mode == "smpl":
+        from holosoma.viser_smpl_geometry import main as smpl_main
+
+        _run(smpl_main, rest)
         return
 
     print(f"Unknown mode: {mode}\n")

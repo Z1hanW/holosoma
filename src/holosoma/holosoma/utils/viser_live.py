@@ -12,19 +12,11 @@ from loguru import logger
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.path import resolve_data_file_path
 from holosoma.utils.safe_torch_import import torch
-from holosoma.utils.viser_utils import resolve_viser_port
-
-
-def _ensure_viser_on_path() -> None:
-    root = Path(get_holosoma_root())
-    repo_root = root.parents[2] if len(root.parents) > 2 else root
-    viser_src = repo_root / "viser" / "src"
-    if viser_src.exists() and str(viser_src) not in sys.path:
-        sys.path.insert(0, str(viser_src))
+from holosoma.utils.viser_utils import ensure_viser_on_path, resolve_viser_port
 
 
 def _import_viser() -> tuple[Any | None, Any | None, str | None]:
-    _ensure_viser_on_path()
+    ensure_viser_on_path()
     try:
         import viser  # type: ignore[import-not-found]
         from viser.extras import ViserUrdf  # type: ignore[import-not-found]

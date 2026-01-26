@@ -2,6 +2,21 @@ from __future__ import annotations
 
 import os
 import random
+import sys
+from pathlib import Path
+
+
+def ensure_viser_on_path() -> None:
+    """Ensure the local Viser sources are importable if vendored in the repo."""
+    here = Path(__file__).resolve()
+    candidates: list[Path] = []
+    for parent in here.parents:
+        candidates.append(parent / "viser" / "src")
+        candidates.append(parent / "holosoma" / "viser" / "src")
+
+    for path in candidates:
+        if path.exists() and str(path) not in sys.path:
+            sys.path.insert(0, str(path))
 
 
 def random_viser_port() -> int:

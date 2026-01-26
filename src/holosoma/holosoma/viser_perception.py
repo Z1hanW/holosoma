@@ -17,10 +17,9 @@ SRC_ROOT = Path(__file__).resolve().parents[1]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-VISER_SRC = REPO_ROOT / "viser" / "src"
-if VISER_SRC.exists() and str(VISER_SRC) not in sys.path:
-    sys.path.insert(0, str(VISER_SRC))
+from holosoma.utils.viser_utils import ensure_viser_on_path  # noqa: E402
+
+ensure_viser_on_path()
 
 import viser  # type: ignore[import-not-found]  # noqa: E402
 from viser.extras import ViserUrdf  # type: ignore[import-not-found]  # noqa: E402
