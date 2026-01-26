@@ -30,7 +30,7 @@ import viser  # type: ignore[import-not-found]  # noqa: E402
 @dataclass(frozen=True)
 class SmplGeometryViewerConfig:
     motion_dir: str = "/home/ubuntu/FAR/CRISP-Real2Sim/results/output/post_scene/vmm_25/gv/hmr"
-    geometry_dir: str | None = "/home/ubuntu/FAR/CRISP-Real2Sim/results/output/post_scene/vmm_25/gv/scene_mesh_sqs"
+    geometry_dir: str | None = "/home/ubuntu/FAR/holosoma/crisp/vmm_data/geo/obj/vmm_25/scene_mesh_sqs.obj"
     smpl_model_path: str | None = "/home/ubuntu/FAR/CRISP-Real2Sim/prep/data/smplx/models/smplx/SMPLX_NEUTRAL.pkl"
     smpl_model_type: str = "smplx"
     gender: str = "neutral"

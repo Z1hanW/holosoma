@@ -4,7 +4,7 @@ set -euo pipefail
 # Viser: SMPL human mesh + optional geometry viewer
 #
 # Usage:
-#   MOTION_DIR=/abs/path/to/motions GEOMETRY_DIR=/abs/path/to/geometry ./vis_smpl_geometry.sh
+#   MOTION_DIR=/abs/path/to/motions GEOMETRY_DIR=/abs/path/to/geometry_or_obj ./vis_smpl_geometry.sh
 #
 # Optional overrides:
 #   SMPL_MODEL_PATH=/abs/path/to/SMPLX_NEUTRAL.pkl (or model root dir)
@@ -16,7 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 MOTION_DIR=${MOTION_DIR:-"/home/ubuntu/FAR/CRISP-Real2Sim/results/output/post_scene/vmm_25/gv/hmr"}
-GEOMETRY_DIR=${GEOMETRY_DIR:-"/home/ubuntu/FAR/CRISP-Real2Sim/results/output/post_scene/vmm_25/gv/scene_mesh_sqs"}
+GEOMETRY_DIR=${GEOMETRY_DIR:-"/home/ubuntu/FAR/holosoma/crisp/vmm_data/geo/obj/vmm_25/scene_mesh_sqs.obj"}
 SMPL_MODEL_PATH=${SMPL_MODEL_PATH:-"/home/ubuntu/FAR/CRISP-Real2Sim/prep/data/smplx/models/smplx/SMPLX_NEUTRAL.pkl"}
 SMPL_MODEL_TYPE=${SMPL_MODEL_TYPE:-"smplx"}
 PORT=${PORT:-"$((RANDOM % 8976 + 1024))"}

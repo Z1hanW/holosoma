@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 
-KNOWN_MODES = ("rollout", "replay", "perception", "physics", "smpl")
+KNOWN_MODES = ("rollout", "replay", "perception", "physics", "smpl", "joints")
 
 USAGE = """\
 Usage: python -m holosoma.visualize [mode] [args...]
@@ -12,6 +12,7 @@ Modes:
   perception  Visualize perception rollouts
   physics     Physics rollout with policy checkpoint + motion input
   smpl        Visualize SMPL human mesh with optional geometry
+  joints      Visualize joint positions from npz (global_joint_positions)
 
 Rollout (default) example, config-first like eval_agent.py:
   python -m holosoma.visualize exp:g1-29dof-wbt-videomimic-mlp \\
@@ -41,6 +42,11 @@ SMPL mesh example:
     --motion-dir /abs/path/to/motion_folder \\
     --geometry-dir /abs/path/to/obj_folder \\
     --smpl-model-path /abs/path/to/body_models
+
+Joints example:
+  python -m holosoma.visualize joints \\
+    --motion-dir /abs/path/to/joint_npz_folder \\
+    # --start-clip clip_name
 
 Note: ExperimentConfig overrides are the same as eval_agent.py and can be appended here.
 """
@@ -103,6 +109,12 @@ def main() -> None:
         from holosoma.viser_smpl_geometry import main as smpl_main
 
         _run(smpl_main, rest)
+        return
+
+    if mode == "joints":
+        from holosoma.viser_joint_positions import main as joints_main
+
+        _run(joints_main, rest)
         return
 
     print(f"Unknown mode: {mode}\n")
