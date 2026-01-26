@@ -44,10 +44,9 @@ for seq_dir in "$POST_SCENE_ROOT"/*; do
         continue
     fi
 
-    mkdir -p "$MOTION_ROOT"
-    motion_name="${TASK_NAME}_${seq_name}"
-    motion_file="$MOTION_ROOT/$motion_name.npz"
-    ln -sf "$hmr_npz" "$motion_file"
+    motion_dir="$MOTION_ROOT/$seq_name"
+    mkdir -p "$motion_dir"
+    ln -sf "$hmr_npz" "$motion_dir/$TASK_NAME.npz"
 
     stage_obj_dir="$OBJECT_ROOT/$seq_name"
     mkdir -p "$stage_obj_dir"
@@ -86,5 +85,5 @@ PY
     fi
 
     mkdir -p "$OUT_ROOT"
-    bash "$SCRIPT_DIR/retgt_smplx.sh" "$MOTION_ROOT" "$motion_name" "$OBJECT_NAME" "$stage_obj_dir" "$ROBOT_URDF" "smplx" "$OUT_ROOT"
+    bash "$SCRIPT_DIR/retgt_smplx.sh" "$MOTION_ROOT" "$seq_name" "$OBJECT_NAME" "$stage_obj_dir" "$ROBOT_URDF" "smplx" "$OUT_ROOT"
 done

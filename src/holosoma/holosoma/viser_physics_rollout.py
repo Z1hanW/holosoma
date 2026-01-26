@@ -188,6 +188,16 @@ def _update_training_config(
     return dataclasses.replace(config, training=training_cfg)
 
 
+def _update_algo_config(config: ExperimentConfig) -> ExperimentConfig:
+    algo_cfg = config.algo.config
+    if hasattr(algo_cfg, "load_optimizer") and getattr(algo_cfg, "load_optimizer"):
+        logger.info("Disabling optimizer load for physics rollout.")
+        algo_cfg = dataclasses.replace(algo_cfg, load_optimizer=False)
+        algo = dataclasses.replace(config.algo, config=algo_cfg)
+        return dataclasses.replace(config, algo=algo)
+    return config
+
+
 def run_physics_rollout(
     tyro_config: ExperimentConfig,
     checkpoint_cfg: CheckpointConfig,
@@ -258,6 +268,7 @@ def main() -> None:
     tyro_config = _update_motion_config(tyro_config, motion_path, pair_terrain)
     tyro_config = _update_terrain_config(tyro_config, geom_path, geom_meta, num_rows, num_cols)
     tyro_config = _update_training_config(tyro_config, inputs)
+    tyro_config = _update_algo_config(tyro_config)
 
     run_physics_rollout(tyro_config, checkpoint_cfg, saved_cfg, saved_wandb_path)
 

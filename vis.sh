@@ -26,6 +26,7 @@ set -euo pipefail
 #   DEFAULT_POSE_APPEND_DURATION_S=0
 #   ENABLE_DEFAULT_POSE_PREPEND=False
 #   DEFAULT_POSE_PREPEND_DURATION_S=0
+#   LOAD_OPTIMIZER=False
 #   VISER_PORT=####
 #   VISER_ENV_ID=0
 #   VISER_UPDATE_HZ=30
@@ -54,6 +55,7 @@ ENABLE_DEFAULT_POSE_APPEND=${ENABLE_DEFAULT_POSE_APPEND:-False}
 DEFAULT_POSE_APPEND_DURATION_S=${DEFAULT_POSE_APPEND_DURATION_S:-0}
 ENABLE_DEFAULT_POSE_PREPEND=${ENABLE_DEFAULT_POSE_PREPEND:-False}
 DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0}
+LOAD_OPTIMIZER=${LOAD_OPTIMIZER:-False}
 VISER_PORT=${VISER_PORT:-$((RANDOM % 8976 + 1024))}
 VISER_ENV_ID=${VISER_ENV_ID:-0}
 VISER_UPDATE_HZ=${VISER_UPDATE_HZ:-30}
@@ -113,6 +115,7 @@ cmd=(
   --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s "${DEFAULT_POSE_APPEND_DURATION_S}"
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend "${ENABLE_DEFAULT_POSE_PREPEND}"
   --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s "${DEFAULT_POSE_PREPEND_DURATION_S}"
+  --algo.config.load_optimizer "${LOAD_OPTIMIZER}"
 )
 
 if [[ -n "${NUM_COLS}" ]]; then
