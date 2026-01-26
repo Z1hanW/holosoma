@@ -11,10 +11,16 @@ OBJECT_DIR=${4:-"$SCRIPT_DIR/demo_data/far_robot/far_robot"}
 ROBOT_URDF=${5:-"models/g1/g1_29dof.urdf"}
 DATA_FORMAT=${6:-"smplx"}
 SAVE_DIR=${7:-""}
+SCENE_XML_FILE=${8:-""}
 
 SAVE_DIR_ARG=()
 if [ -n "$SAVE_DIR" ]; then
     SAVE_DIR_ARG=(--save_dir "$SAVE_DIR")
+fi
+
+SCENE_XML_ARG=()
+if [ -n "$SCENE_XML_FILE" ]; then
+    SCENE_XML_ARG=(--task-config.scene-xml-file "$SCENE_XML_FILE")
 fi
 
 python examples/robot_retarget.py \
@@ -23,6 +29,7 @@ python examples/robot_retarget.py \
     --task-name "$TASK_NAME" \
     --task-config.object_name "$OBJECT_NAME" \
     --task-config.object-dir "$OBJECT_DIR" \
+    "${SCENE_XML_ARG[@]}" \
     --robot-config.robot-urdf-file "$ROBOT_URDF" \
     --data_format "$DATA_FORMAT" \
     "${SAVE_DIR_ARG[@]}" \

@@ -85,5 +85,6 @@ PY
     fi
 
     mkdir -p "$OUT_ROOT"
-    bash "$SCRIPT_DIR/retgt_smplx.sh" "$MOTION_ROOT" "$seq_name" "$OBJECT_NAME" "$stage_obj_dir" "$ROBOT_URDF" "smplx" "$OUT_ROOT"
+    scene_xml_file="$stage_obj_dir/g1_29dof_w_scene_mesh_sqs.xml"
+    bash "$SCRIPT_DIR/retgt_smplx.sh" "$MOTION_ROOT" "$seq_name" "$OBJECT_NAME" "$stage_obj_dir" "$ROBOT_URDF" "smplx" "$OUT_ROOT" "$scene_xml_file"
 done

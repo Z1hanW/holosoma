@@ -461,9 +461,11 @@ def setup_object_data(
         # Setup climbing-specific object
         box_asset_xml = object_dir / "box_assets.xml"
         scene_xml_name = Path(constants.ROBOT_URDF_FILE).name.replace(".urdf", f"_w_{constants.OBJECT_NAME}.xml")
-        scene_xml_file = object_dir / scene_xml_name
+        scene_xml_file = Path(task_config.scene_xml_file) if task_config.scene_xml_file else (object_dir / scene_xml_name)
+        use_scene_xml = task_config.scene_xml_file is not None or constants.OBJECT_NAME == "multi_boxes"
         # Set SCENE_XML_FILE in constants BEFORE creating retargeter (needed for temp_retargeter)
-        constants.SCENE_XML_FILE = str(scene_xml_file)
+        if use_scene_xml:
+            constants.SCENE_XML_FILE = str(scene_xml_file)
 
         np.random.seed(0)
         print("object mesh file: ", constants.OBJECT_MESH_FILE)
@@ -491,7 +493,8 @@ def setup_object_data(
         object_urdf_file = create_scaled_multi_boxes_urdf(constants.OBJECT_URDF_FILE, scale_factors)
         object_asset_xml_path = create_scaled_multi_boxes_xml(str(box_asset_xml), scale_factors)
         new_scene_xml_path = create_new_scene_xml_file(str(scene_xml_file), scale_factors, object_asset_xml_path)
-        constants.SCENE_XML_FILE = new_scene_xml_path
+        if use_scene_xml:
+            constants.SCENE_XML_FILE = new_scene_xml_path
 
         return object_local_pts, object_local_pts_demo, object_urdf_file
 
