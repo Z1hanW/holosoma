@@ -24,8 +24,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 CKPT=${CKPT:-"../store/model_52000.pt"}
-MOTION_DIR=${MOTION_DIR:-"/ABS/PATH/to/motion_folder"}
-GEOMETRY_DIR=${GEOMETRY_DIR:-""}
+MOTION_DIR=${MOTION_DIR:-"/home/ubuntu/FAR/Store/vmm_data/___zero_pad_data_trans"}
+GEOMETRY_DIR=${GEOMETRY_DIR:-"/home/ubuntu/FAR/Store/vmm_data/___zero_pad_geo_trans"}
 GEOMETRY_META=${GEOMETRY_META:-""}
 NUM_ENVS=${NUM_ENVS:-1}
 HEADLESS=${HEADLESS:-True}
