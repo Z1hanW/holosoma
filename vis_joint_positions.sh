@@ -8,7 +8,7 @@ set -euo pipefail
 #
 # Optional overrides:
 #   PORT=#### START_CLIP=name FPS=30 AUTOPLAY=True LOOP=True PRELOAD=True
-#   POINT_SIZE=0.14 POINT_SHAPE=circle SHOW_GEOMETRY=True GRID=True GRID_SIZE=10.0
+#   POINT_SIZE=0.07 POINT_SHAPE=circle SHOW_GEOMETRY=True GRID=True GRID_SIZE=10.0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
@@ -21,7 +21,7 @@ FPS=${FPS:-""}
 AUTOPLAY=${AUTOPLAY:-"True"}
 LOOP=${LOOP:-"True"}
 PRELOAD=${PRELOAD:-"True"}
-POINT_SIZE=${POINT_SIZE:-"0.14"}
+POINT_SIZE=${POINT_SIZE:-"0.07"}
 POINT_SHAPE=${POINT_SHAPE:-"circle"}
 SHOW_GEOMETRY=${SHOW_GEOMETRY:-"True"}
 GRID=${GRID:-"True"}
