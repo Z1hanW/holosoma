@@ -21,7 +21,7 @@ SCENE_XML_OVERRIDE=${SCENE_XML_OVERRIDE:-""}
 
 OBJECT_NAME="scene_mesh_sqs"
 TASK_NAME="human_motion"
-TEMPLATE_XML="$SCRIPT_DIR/demo_data/far_robot/far_robot/g1_29dof_w_stairs.xml"
+TEMPLATE_XML="$SCRIPT_DIR/models/g1/g1_29dof.xml"
 MESH_DIR="$SCRIPT_DIR/models/g1/meshes"
 
 if [ ! -f "$TEMPLATE_XML" ]; then
@@ -114,6 +114,10 @@ from pathlib import Path
 path = Path("$stage_obj_dir/g1_29dof_w_scene_mesh_sqs.xml")
 text = path.read_text()
 text = re.sub(r'meshdir="[^"]*"', f'meshdir="{Path("$MESH_DIR").as_posix()}"', text, count=1)
+if "box_assets.xml" not in text:
+    text = text.replace("</asset>", '  <include file="box_assets.xml"/>\n  </asset>', 1)
+if "box_body.xml" not in text:
+    text = text.replace("</worldbody>", '  <include file="box_body.xml"/>\n  </worldbody>', 1)
 path.write_text(text)
 PY
 
