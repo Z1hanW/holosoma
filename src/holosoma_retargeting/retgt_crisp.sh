@@ -33,7 +33,7 @@ for seq_dir in "$POST_SCENE_ROOT"/*; do
 
     seq_name=$(basename "$seq_dir")
     hmr_dir="$seq_dir/gv/hmr"
-    hmr_npz="$hmr_dir/human_motion.npz"
+    hmr_npz="$hmr_dir/$seq_name.npz"
     scene_dir="$seq_dir/gv/scene_mesh_sqs"
     scene_obj="$scene_dir/scene_mesh_sqs.obj"
     scene_urdf="$scene_dir/scene_mesh_sqs.urdf"
