@@ -17,6 +17,7 @@ URDF_ROOT="$GEO_ROOT/urdf"
 XML_ROOT="$GEO_ROOT/xml"
 PIECES_ROOT="$GEO_ROOT/pieces"
 OBJECT_ROOT="$GEO_ROOT/scene_mesh_sqs"
+SCENE_XML_OVERRIDE=${SCENE_XML_OVERRIDE:-""}
 
 OBJECT_NAME="scene_mesh_sqs"
 TASK_NAME="human_motion"
@@ -79,12 +80,18 @@ PY
     ln -sf "$stage_obj_dir/scene_mesh_sqs.urdf" "$URDF_ROOT/$seq_name/scene_mesh_sqs.urdf"
     ln -sf "$stage_obj_dir/box_assets.xml" "$XML_ROOT/$seq_name/box_assets.xml"
     ln -sf "$stage_obj_dir/g1_29dof_w_scene_mesh_sqs.xml" "$XML_ROOT/$seq_name/g1_29dof_w_scene_mesh_sqs.xml"
+    ln -sf "$stage_obj_dir/scene_mesh_sqs.obj" "$XML_ROOT/$seq_name/scene_mesh_sqs.obj"
     if [ -d "$stage_obj_dir/pieces" ]; then
         mkdir -p "$PIECES_ROOT"
         ln -sfn "$stage_obj_dir/pieces" "$PIECES_ROOT/$seq_name"
+        ln -sfn "$stage_obj_dir/pieces" "$XML_ROOT/$seq_name/pieces"
     fi
 
     mkdir -p "$OUT_ROOT"
-    scene_xml_file="$stage_obj_dir/g1_29dof_w_scene_mesh_sqs.xml"
+    if [ -n "$SCENE_XML_OVERRIDE" ]; then
+        scene_xml_file=${SCENE_XML_OVERRIDE//\{seq\}/$seq_name}
+    else
+        scene_xml_file="$XML_ROOT/$seq_name/g1_29dof_w_scene_mesh_sqs.xml"
+    fi
     bash "$SCRIPT_DIR/retgt_smplx.sh" "$MOTION_ROOT" "$seq_name" "$OBJECT_NAME" "$stage_obj_dir" "$ROBOT_URDF" "smplx" "$OUT_ROOT" "$scene_xml_file"
 done
