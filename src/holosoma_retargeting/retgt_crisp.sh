@@ -58,9 +58,9 @@ for seq_dir in "$POST_SCENE_ROOT"/*; do
         ln -sfn "$pieces_dir" "$stage_obj_dir/pieces"
     fi
 
-    cat > "$stage_obj_dir/box_assets.xml" <<'EOF'
+    cat > "$stage_obj_dir/box_assets.xml" <<EOF
 <mujocoinclude>
-    <mesh name="scene_mesh_sqs" file="scene_mesh_sqs.obj" scale="1.0 1.0 1.0"/>
+    <mesh name="scene_mesh_sqs" file="$stage_obj_dir/scene_mesh_sqs.obj" scale="1.0 1.0 1.0"/>
 </mujocoinclude>
 EOF
 
@@ -72,6 +72,13 @@ from pathlib import Path
 path = Path("$stage_obj_dir/g1_29dof_w_scene_mesh_sqs.xml")
 text = path.read_text()
 text = re.sub(r'meshdir="[^"]*"', f'meshdir="{Path("$MESH_DIR").as_posix()}"', text, count=1)
+pieces_dir = Path("$stage_obj_dir/pieces")
+if pieces_dir.exists():
+    text = re.sub(
+        r'file="pieces/([^"]+)"',
+        lambda m: f'file="{pieces_dir.as_posix()}/{m.group(1)}"',
+        text,
+    )
 path.write_text(text)
 PY
 
