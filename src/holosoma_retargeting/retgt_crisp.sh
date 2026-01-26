@@ -62,6 +62,7 @@ for seq_dir in "$POST_SCENE_ROOT"/*; do
     cat > "$stage_obj_dir/box_assets.xml" <<EOF
 <mujocoinclude>
     <mesh name="scene_mesh_sqs" file="$stage_obj_dir/scene_mesh_sqs.obj" scale="1.0 1.0 1.0"/>
+    <mesh name="stairs_1" file="$stage_obj_dir/scene_mesh_sqs.obj" scale="1.0 1.0 1.0"/>
 </mujocoinclude>
 EOF
 
