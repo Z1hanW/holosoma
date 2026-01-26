@@ -22,7 +22,6 @@ SCENE_XML_OVERRIDE=${SCENE_XML_OVERRIDE:-""}
 OBJECT_NAME="scene_mesh_sqs"
 TASK_NAME="human_motion"
 TEMPLATE_XML="$SCRIPT_DIR/demo_data/far_robot/far_robot/g1_29dof_w_stairs.xml"
-BOX_BODY_XML="$SCRIPT_DIR/demo_data/far_robot/far_robot/box_body.xml"
 MESH_DIR="$SCRIPT_DIR/models/g1/meshes"
 
 if [ ! -f "$TEMPLATE_XML" ]; then
@@ -59,12 +58,53 @@ for seq_dir in "$POST_SCENE_ROOT"/*; do
         ln -sfn "$pieces_dir" "$stage_obj_dir/pieces"
     fi
 
-    cat > "$stage_obj_dir/box_assets.xml" <<EOF
-<mujocoinclude>
-    <mesh name="scene_mesh_sqs" file="$stage_obj_dir/scene_mesh_sqs.obj" scale="1.0 1.0 1.0"/>
-    <mesh name="stairs_1" file="$stage_obj_dir/scene_mesh_sqs.obj" scale="1.0 1.0 1.0"/>
-</mujocoinclude>
-EOF
+    python - <<PY
+from pathlib import Path
+import re
+
+pieces_dir = Path("$stage_obj_dir/pieces")
+assets_path = Path("$stage_obj_dir/box_assets.xml")
+body_path = Path("$stage_obj_dir/box_body.xml")
+fallback_mesh = Path("$stage_obj_dir/scene_mesh_sqs.obj")
+
+def sanitize(name: str) -> str:
+    name = re.sub(r"[^A-Za-z0-9_]", "_", name)
+    if not name or name[0].isdigit():
+        name = f"piece_{name}"
+    return name
+
+meshes = []
+if pieces_dir.exists():
+    for piece in sorted(pieces_dir.glob("*.obj")):
+        mesh_name = f"piece_{sanitize(piece.stem)}"
+        meshes.append((mesh_name, piece))
+
+if not meshes and fallback_mesh.exists():
+    meshes.append(("piece_scene_mesh_sqs", fallback_mesh))
+
+if not meshes:
+    raise SystemExit("No mesh pieces found for box_assets.xml.")
+
+asset_lines = ["<mujocoinclude>"]
+for mesh_name, mesh_path in meshes:
+    asset_lines.append(
+        f'    <mesh name="{mesh_name}" file="{mesh_path.as_posix()}" scale="1.0 1.0 1.0"/>'
+    )
+asset_lines.append('    <material name="scene_piece_material" rgba="0.6 0.6 0.6 1"/>')
+asset_lines.append("</mujocoinclude>")
+assets_path.write_text("\\n".join(asset_lines) + "\\n")
+
+body_lines = ["<mujocoinclude>"]
+for idx, (mesh_name, _mesh_path) in enumerate(meshes, start=1):
+    body_lines.append(f'    <body name="scene_piece_{idx}" pos="0 0 0" quat="1 0 0 0">')
+    body_lines.append(
+        f'        <geom name="scene_piece_{idx}_geom" type="mesh" mesh="{mesh_name}" '
+        f'pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>'
+    )
+    body_lines.append("    </body>")
+body_lines.append("</mujocoinclude>")
+body_path.write_text("\\n".join(body_lines) + "\\n")
+PY
 
     cp -f "$TEMPLATE_XML" "$stage_obj_dir/g1_29dof_w_scene_mesh_sqs.xml"
     python - <<PY
@@ -74,13 +114,6 @@ from pathlib import Path
 path = Path("$stage_obj_dir/g1_29dof_w_scene_mesh_sqs.xml")
 text = path.read_text()
 text = re.sub(r'meshdir="[^"]*"', f'meshdir="{Path("$MESH_DIR").as_posix()}"', text, count=1)
-pieces_dir = Path("$stage_obj_dir/pieces")
-if pieces_dir.exists():
-    text = re.sub(
-        r'file="pieces/([^"]+)"',
-        lambda m: f'file="{pieces_dir.as_posix()}/{m.group(1)}"',
-        text,
-    )
 path.write_text(text)
 PY
 
@@ -90,9 +123,7 @@ PY
     ln -sf "$stage_obj_dir/box_assets.xml" "$XML_ROOT/$seq_name/box_assets.xml"
     ln -sf "$stage_obj_dir/g1_29dof_w_scene_mesh_sqs.xml" "$XML_ROOT/$seq_name/g1_29dof_w_scene_mesh_sqs.xml"
     ln -sf "$stage_obj_dir/scene_mesh_sqs.obj" "$XML_ROOT/$seq_name/scene_mesh_sqs.obj"
-    if [ -f "$BOX_BODY_XML" ]; then
-        ln -sf "$BOX_BODY_XML" "$XML_ROOT/$seq_name/box_body.xml"
-    fi
+    ln -sf "$stage_obj_dir/box_body.xml" "$XML_ROOT/$seq_name/box_body.xml"
     if [ -d "$stage_obj_dir/pieces" ]; then
         mkdir -p "$PIECES_ROOT"
         ln -sfn "$stage_obj_dir/pieces" "$PIECES_ROOT/$seq_name"
