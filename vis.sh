@@ -23,7 +23,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-CKPT=${CKPT:-"/ABS/PATH/to/model.pt"}
+CKPT=${CKPT:-"../store/model_52000.pt"}
 MOTION_DIR=${MOTION_DIR:-"/ABS/PATH/to/motion_folder"}
 GEOMETRY_DIR=${GEOMETRY_DIR:-""}
 GEOMETRY_META=${GEOMETRY_META:-""}
