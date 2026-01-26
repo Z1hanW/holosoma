@@ -5,6 +5,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 
 POST_SCENE_ROOT=${1:-"/home/ubuntu/FAR/CRISP-Real2Sim/results/output/post_scene"}
+HMR_TYPE=${2:-${HMR_TYPE:-"gv"}}
 ROBOT_URDF=${ROBOT_URDF:-"models/g1/g1_29dof.urdf"}
 OUT_ROOT=${OUT_ROOT:-"$SCRIPT_DIR/demo_results/g1/climbing/mocap_crisp"}
 
@@ -21,8 +22,8 @@ SCENE_XML_OVERRIDE=${SCENE_XML_OVERRIDE:-""}
 
 OBJECT_NAME="scene_mesh_sqs"
 TASK_NAME="human_motion"
-TEMPLATE_XML="$SCRIPT_DIR/models/g1/g1_29dof.xml"
-MESH_DIR="$SCRIPT_DIR/models/g1/meshes"
+TEMPLATE_XML="$SCRIPT_DIR/models/g1/g1_29dof_w_stairs.xml"
+MESH_DIR="$SCRIPT_DIR/models/g1/assets"
 
 if [ ! -f "$TEMPLATE_XML" ]; then
     echo "[ERROR] missing template scene xml: $TEMPLATE_XML" >&2
@@ -33,9 +34,9 @@ for seq_dir in "$POST_SCENE_ROOT"/*; do
     [ -d "$seq_dir" ] || continue
 
     seq_name=$(basename "$seq_dir")
-    hmr_dir="$seq_dir/gv/hmr"
+    hmr_dir="$seq_dir/$HMR_TYPE/hmr"
     hmr_npz="$hmr_dir/$seq_name.npz"
-    scene_dir="$seq_dir/gv/scene_mesh_sqs"
+    scene_dir="$seq_dir/$HMR_TYPE/scene_mesh_sqs"
     scene_obj="$scene_dir/scene_mesh_sqs.obj"
     scene_urdf="$scene_dir/scene_mesh_sqs.urdf"
     pieces_dir="$scene_dir/pieces"
@@ -114,6 +115,9 @@ from pathlib import Path
 path = Path("$stage_obj_dir/g1_29dof_w_scene_mesh_sqs.xml")
 text = path.read_text()
 text = re.sub(r'meshdir="[^"]*"', f'meshdir="{Path("$MESH_DIR").as_posix()}"', text, count=1)
+# Drop any template piece assets/geoms so we can inject our own pieces safely.
+text = re.sub(r"\n\\s*<mesh name=\"part_[^\"]+\"[^>]*>", "", text)
+text = re.sub(r"\n\\s*<geom name=\"part_[^\"]+\"[^>]*>", "", text)
 if "box_assets.xml" not in text:
     text = text.replace("</asset>", '  <include file="box_assets.xml"/>\n  </asset>', 1)
 if "box_body.xml" not in text:
