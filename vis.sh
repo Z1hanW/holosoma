@@ -14,7 +14,18 @@ set -euo pipefail
 #   HEADLESS=True
 #   NUM_ROWS=1
 #   NUM_COLS=
+#   ENV_SPACING=0.0
 #   PAIR_TERRAIN=True
+#   DEPTH_IMPL=rendered|depth_sensor|raycast|scandots
+#   PERCEPTION_PRESET=camera_depth_d435i_rendered
+#   IMAGE_WIDTH=128
+#   IMAGE_HEIGHT=72
+#   PHYSX_GPU_COLLISION_STACK_SIZE=4294967295
+#   START_AT_TIMESTEP_ZERO_PROB=0.05
+#   ENABLE_DEFAULT_POSE_APPEND=False
+#   DEFAULT_POSE_APPEND_DURATION_S=0
+#   ENABLE_DEFAULT_POSE_PREPEND=False
+#   DEFAULT_POSE_PREPEND_DURATION_S=0
 #   VISER_PORT=####
 #   VISER_ENV_ID=0
 #   VISER_UPDATE_HZ=30
@@ -23,7 +34,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-CKPT=${CKPT:-"../store/model_52000.pt"}
+CKPT=${CKPT:-"../Store/model_52000.pt"}
 MOTION_DIR=${MOTION_DIR:-"/home/ubuntu/FAR/Store/vmm_data/___zero_pad_data_trans"}
 GEOMETRY_DIR=${GEOMETRY_DIR:-"/home/ubuntu/FAR/Store/vmm_data/___zero_pad_geo_trans"}
 GEOMETRY_META=${GEOMETRY_META:-""}
@@ -31,7 +42,18 @@ NUM_ENVS=${NUM_ENVS:-1}
 HEADLESS=${HEADLESS:-True}
 NUM_ROWS=${NUM_ROWS:-1}
 NUM_COLS=${NUM_COLS:-}
+ENV_SPACING=${ENV_SPACING:-0.0}
 PAIR_TERRAIN=${PAIR_TERRAIN:-True}
+DEPTH_IMPL=${DEPTH_IMPL:-rendered}
+PERCEPTION_PRESET=${PERCEPTION_PRESET:-""}
+IMAGE_WIDTH=${IMAGE_WIDTH:-128}
+IMAGE_HEIGHT=${IMAGE_HEIGHT:-72}
+PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-4294967295}
+START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.05}
+ENABLE_DEFAULT_POSE_APPEND=${ENABLE_DEFAULT_POSE_APPEND:-False}
+DEFAULT_POSE_APPEND_DURATION_S=${DEFAULT_POSE_APPEND_DURATION_S:-0}
+ENABLE_DEFAULT_POSE_PREPEND=${ENABLE_DEFAULT_POSE_PREPEND:-False}
+DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0}
 VISER_PORT=${VISER_PORT:-$((RANDOM % 8976 + 1024))}
 VISER_ENV_ID=${VISER_ENV_ID:-0}
 VISER_UPDATE_HZ=${VISER_UPDATE_HZ:-30}
@@ -46,6 +68,32 @@ if [[ "${MOTION_DIR}" == "/ABS/PATH/to/motion_folder" ]]; then
   exit 1
 fi
 
+if [[ -z "${PERCEPTION_PRESET}" ]]; then
+  case "${DEPTH_IMPL}" in
+    rendered)
+      PERCEPTION_PRESET="camera_depth_d435i_rendered"
+      ;;
+    depth_sensor)
+      PERCEPTION_PRESET="camera_depth_d435i_depth_sensor"
+      ;;
+    raycast)
+      PERCEPTION_PRESET="camera_depth_d435i"
+      ;;
+    scandots)
+      PERCEPTION_PRESET="camera_depth_d435i_scandots"
+      ;;
+    ""|none)
+      PERCEPTION_PRESET=""
+      ;;
+    *)
+      echo "Unknown DEPTH_IMPL=${DEPTH_IMPL}. Use rendered|depth_sensor|raycast|scandots|none." >&2
+      exit 1
+      ;;
+  esac
+fi
+
+echo "[INFO] Viser port: ${VISER_PORT}"
+
 cmd=(
   python -m holosoma.visualize physics
   --checkpoint "${CKPT}"
@@ -53,11 +101,18 @@ cmd=(
   --num-envs "${NUM_ENVS}"
   --headless "${HEADLESS}"
   --num-rows "${NUM_ROWS}"
+  --simulator.config.scene.env_spacing "${ENV_SPACING}"
   --pair-terrain-with-motion "${PAIR_TERRAIN}"
   --viser-port "${VISER_PORT}"
   --viser-env-id "${VISER_ENV_ID}"
   --viser-update-hz "${VISER_UPDATE_HZ}"
   --viser-recenter "${VISER_RECENTER}"
+  --simulator.config.sim.physx.gpu_collision_stack_size "${PHYSX_GPU_COLLISION_STACK_SIZE}"
+  --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob "${START_AT_TIMESTEP_ZERO_PROB}"
+  --command.setup_terms.motion_command.params.motion_config.enable_default_pose_append "${ENABLE_DEFAULT_POSE_APPEND}"
+  --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s "${DEFAULT_POSE_APPEND_DURATION_S}"
+  --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend "${ENABLE_DEFAULT_POSE_PREPEND}"
+  --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s "${DEFAULT_POSE_PREPEND_DURATION_S}"
 )
 
 if [[ -n "${NUM_COLS}" ]]; then
@@ -68,6 +123,13 @@ if [[ -n "${GEOMETRY_DIR}" ]]; then
 fi
 if [[ -n "${GEOMETRY_META}" ]]; then
   cmd+=(--geometry-metadata "${GEOMETRY_META}")
+fi
+if [[ -n "${PERCEPTION_PRESET}" ]]; then
+  cmd+=(
+    "perception:${PERCEPTION_PRESET}"
+    --perception.camera_width "${IMAGE_WIDTH}"
+    --perception.camera_height "${IMAGE_HEIGHT}"
+  )
 fi
 
 "${cmd[@]}"
