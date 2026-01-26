@@ -46,6 +46,7 @@ SMPL mesh example:
 Joints example:
   python -m holosoma.visualize joints \\
     --motion-dir /abs/path/to/joint_npz_folder \\
+    # --geometry-dir /abs/path/to/obj_or_dir \\
     # --start-clip clip_name
 
 Note: ExperimentConfig overrides are the same as eval_agent.py and can be appended here.

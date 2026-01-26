@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import trimesh
 import tyro
 
 # Ensure local packages are importable when running from source.
@@ -27,6 +28,7 @@ import viser  # type: ignore[import-not-found]  # noqa: E402
 @dataclass(frozen=True)
 class JointViewerConfig:
     motion_dir: str
+    geometry_dir: str | None = None
     port: int = 0
     fps: int | None = None
     autoplay: bool = True
@@ -36,6 +38,7 @@ class JointViewerConfig:
     grid_size: float = 10.0
     point_size: float = 0.02
     point_shape: str = "circle"
+    show_geometry: bool = True
     start_clip: str | None = None
 
 
@@ -75,6 +78,42 @@ def _load_joint_positions(path: Path) -> tuple[np.ndarray, int]:
         return joints, fps
 
 
+def _resolve_geometry_inputs(
+    geometry_dir: str | None,
+) -> tuple[dict[str, Path] | None, Path | None]:
+    if geometry_dir is None:
+        return None, None
+    geom_path = _resolve_data_path(geometry_dir)
+    if not geom_path.exists():
+        raise FileNotFoundError(f"Geometry path not found: {geom_path}")
+
+    if geom_path.is_file():
+        return None, geom_path
+
+    if not geom_path.is_dir():
+        raise FileNotFoundError(f"Geometry dir not found: {geom_path}")
+
+    scene_mesh = geom_path / "scene_mesh_sqs.obj"
+    if scene_mesh.exists():
+        return None, scene_mesh
+
+    obj_files = sorted(list(geom_path.glob("*.obj")) + list(geom_path.glob("*.OBJ")))
+    if not obj_files:
+        raise FileNotFoundError(f"No OBJ files found in geometry dir: {geom_path}")
+    if len(obj_files) == 1:
+        return None, obj_files[0]
+    return {path.stem: path for path in obj_files}, None
+
+
+def _load_obj_mesh(path: Path) -> trimesh.Trimesh:
+    mesh = trimesh.load(str(path), process=False)
+    if isinstance(mesh, trimesh.Scene):
+        mesh = mesh.dump(concatenate=True)
+    if not isinstance(mesh, trimesh.Trimesh):
+        raise ValueError(f"Loaded geometry is not a trimesh: {type(mesh)}")
+    return mesh
+
+
 def _make_joint_colors(joint_count: int) -> np.ndarray:
     if joint_count <= 0:
         return np.zeros((0, 3), dtype=np.uint8)
@@ -96,6 +135,8 @@ def run_viewer(cfg: JointViewerConfig) -> None:
     if cfg.start_clip and cfg.start_clip not in clip_names:
         raise ValueError(f"start_clip '{cfg.start_clip}' not found in motions.")
 
+    geom_map, default_geom = _resolve_geometry_inputs(cfg.geometry_dir)
+
     port = resolve_viser_port(cfg.port)
     server = viser.ViserServer(port=port)
 
@@ -108,6 +149,7 @@ def run_viewer(cfg: JointViewerConfig) -> None:
         )
 
     motion_cache: dict[str, dict[str, object]] = {}
+    geometry_cache: dict[str, trimesh.Trimesh] = {}
 
     def _ensure_motion_loaded(name: str) -> dict[str, object]:
         if name in motion_cache:
@@ -125,8 +167,31 @@ def run_viewer(cfg: JointViewerConfig) -> None:
     if cfg.preload:
         for name in clip_names:
             _ensure_motion_loaded(name)
+            if geom_map is not None:
+                geom_path = geom_map.get(name)
+                if geom_path is not None:
+                    geometry_cache[geom_path.as_posix()] = _load_obj_mesh(geom_path)
+            elif default_geom is not None:
+                geometry_cache[default_geom.as_posix()] = _load_obj_mesh(default_geom)
 
     joint_state: dict[str, object] = {}
+    geometry_state: dict[str, object | None] = {"handle": None}
+
+    def _ensure_geometry_loaded(name: str) -> trimesh.Trimesh | None:
+        if geom_map is None and default_geom is None:
+            return None
+        if geom_map is None and default_geom is not None:
+            geom_path = default_geom
+        else:
+            geom_path = geom_map.get(name) if geom_map else None
+        if geom_path is None:
+            return None
+        key = geom_path.as_posix()
+        if key in geometry_cache:
+            return geometry_cache[key]
+        mesh = _load_obj_mesh(geom_path)
+        geometry_cache[key] = mesh
+        return mesh
 
     def _set_motion(name: str) -> None:
         state = _ensure_motion_loaded(name)
@@ -134,6 +199,19 @@ def run_viewer(cfg: JointViewerConfig) -> None:
 
     active_clip = cfg.start_clip or clip_names[0]
     _set_motion(active_clip)
+
+    def _set_geometry(name: str) -> None:
+        handle = geometry_state["handle"]
+        if handle is not None:
+            handle.remove()
+            geometry_state["handle"] = None
+        mesh = _ensure_geometry_loaded(name)
+        if mesh is None:
+            return
+        geometry_state["handle"] = server.scene.add_mesh_trimesh("/geometry", mesh)
+        geometry_state["handle"].visible = bool(cfg.show_geometry)
+
+    _set_geometry(active_clip)
 
     joint_colors = _make_joint_colors(int(joint_state["joints"].shape[1]))
     joint_handle = server.scene.add_point_cloud(
@@ -147,6 +225,9 @@ def run_viewer(cfg: JointViewerConfig) -> None:
     with server.gui.add_folder("Motion"):
         clip_dropdown = server.gui.add_dropdown("Clip", options=tuple(clip_names), initial_value=active_clip)
         clip_info = server.gui.add_markdown("")
+
+    with server.gui.add_folder("Display"):
+        show_geom_cb = server.gui.add_checkbox("Show geometry", initial_value=cfg.show_geometry)
 
     with server.gui.add_folder("Playback"):
         frame_slider = server.gui.add_slider(
@@ -168,10 +249,17 @@ def run_viewer(cfg: JointViewerConfig) -> None:
 
     _update_clip_info()
 
+    @show_geom_cb.on_update
+    def _(_evt) -> None:
+        handle = geometry_state["handle"]
+        if handle is not None:
+            handle.visible = bool(show_geom_cb.value)
+
     @clip_dropdown.on_update
     def _(_evt) -> None:
         name = str(clip_dropdown.value)
         _set_motion(name)
+        _set_geometry(name)
         _update_clip_info()
         frame_slider.max = max(0, int(joint_state["n_frames"]) - 1)
         frame_slider.value = 0
