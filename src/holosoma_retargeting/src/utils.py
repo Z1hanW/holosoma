@@ -212,7 +212,6 @@ def preprocess_motion_data(
     scale=0.714,
     mat_height=0.1,
     object_poses=None,
-    preserve_foot_positions: bool = True,
 ):
     """
     Preprocess human joints and object poses for retargeting.
@@ -222,7 +221,7 @@ def preprocess_motion_data(
         object_poses (np.ndarray): Object poses.
         retargeter: Retargeting object with smplh_joint2idx attribute.
         scale (float): Scaling factor.
-        normalize_height (bool): Whether to normalize human joint heights.
+        mat_height (float): Offset for mat height when normalizing foot z.
 
     Returns:
         tuple: (human_joints_scaled, object_poses_scaled, object_moving_frame_idx).
@@ -233,28 +232,12 @@ def preprocess_motion_data(
         retargeter.demo_joints.index(foot_names[1]),
     ]
     z_min = human_joints[:, toe_indices, 2].min()
+    if z_min >= mat_height:
+        z_min -= mat_height
+    human_joints[:, :, 2] -= z_min
 
-    human_joints[:, :, 2] -= mat_height
-
-    # Scale human joints (optionally preserve foot positions)
-    foot_indices: list[int] = []
-    foot_positions = None
-    if preserve_foot_positions:
-        for name in foot_names:
-            if name in retargeter.demo_joints:
-                foot_indices.append(retargeter.demo_joints.index(name))
-        for idx, name in enumerate(retargeter.demo_joints):
-            lowered = name.lower()
-            if "foot" in lowered or "toe" in lowered:
-                foot_indices.append(idx)
-        foot_indices = sorted(set(foot_indices))
-        if foot_indices:
-            foot_positions = human_joints[:, foot_indices, :].copy()
-
+    # Scale human joints
     human_joints = human_joints * scale
-    print(foot_indices, preserve_foot_positions, 'preserve_foot_positions')
-    if preserve_foot_positions and foot_indices and foot_positions is not None:
-        human_joints[:, foot_indices, :] = foot_positions
 
     if object_poses is not None:
         object_poses[:, -3:-1] = object_poses[:, -3:-1] * scale
