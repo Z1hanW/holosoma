@@ -21,10 +21,11 @@ t1_29dof_loco = InferenceConfig(
     task=task.locomotion,
 )
 
+# fmt: off
 g1_29dof_wbt = InferenceConfig(
     robot=replace(
         robot.g1_29dof,
-        stiff_startup_pos=( 
+        stiff_startup_pos=(
             -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,   # left leg
             -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,   # right leg
             0.0, 0.0, 0.0,                          # waist
@@ -46,6 +47,7 @@ g1_29dof_wbt = InferenceConfig(
             3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,
         ),
     ),
+# fmt: on
     observation=observation.wbt,
     task=task.wbt,
 )
