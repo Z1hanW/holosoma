@@ -61,6 +61,9 @@ def _resolve_motion_path(path: str) -> str:
 
 def _resolve_geometry_inputs(
     inputs: PhysicsRolloutInputs,
+    motion_path: str | None = None,
+    motion_clip_name: str | None = None,
+    motion_clip_id: int | None = None,
 ) -> tuple[str | None, str | None, int | None, int | None, bool]:
     if inputs.geometry_dir is None:
         return None, None, None, None, False
@@ -75,6 +78,38 @@ def _resolve_geometry_inputs(
             geom_path = candidate
 
     if geom_path.is_dir():
+        clip_name = motion_clip_name
+        if clip_name is None and motion_path:
+            motion_candidate = Path(motion_path).expanduser()
+            if motion_candidate.is_file():
+                clip_name = motion_candidate.stem
+            elif motion_clip_id is not None and motion_candidate.is_dir():
+                motion_files = sorted(motion_candidate.glob("*.npz"))
+                if 0 <= int(motion_clip_id) < len(motion_files):
+                    clip_name = motion_files[int(motion_clip_id)].stem
+        if clip_name:
+            matches = list(geom_path.glob(f"{clip_name}.obj")) + list(geom_path.glob(f"{clip_name}.OBJ"))
+            if not matches:
+                matches = [
+                    path
+                    for path in geom_path.glob("*.obj")
+                    if path.stem.lower() == clip_name.lower()
+                ] + [
+                    path
+                    for path in geom_path.glob("*.OBJ")
+                    if path.stem.lower() == clip_name.lower()
+                ]
+            if matches:
+                selected = matches[0]
+                logger.info("Using geometry '{}' for motion clip '{}'.", selected.name, clip_name)
+                num_rows = max(1, int(inputs.num_rows))
+                num_cols = int(inputs.num_cols or 1)
+                return str(selected), None, num_rows, num_cols, False
+            logger.warning(
+                "No geometry OBJ matching clip '{}' in {}; loading all OBJ tiles.",
+                clip_name,
+                geom_path,
+            )
         obj_files = sorted(list(geom_path.glob("*.obj")) + list(geom_path.glob("*.OBJ")))
         if not obj_files:
             raise FileNotFoundError(f"No OBJ files found in geometry directory: {geom_path}")
@@ -139,6 +174,23 @@ def _update_motion_config(
     setup_terms["motion_command"] = term
     command_cfg = dataclasses.replace(command_cfg, setup_terms=setup_terms)
     return dataclasses.replace(config, command=command_cfg)
+
+
+def _extract_motion_clip_hint(config: ExperimentConfig) -> tuple[str | None, int | None]:
+    command_cfg = config.command
+    if command_cfg is None:
+        return None, None
+    term = command_cfg.setup_terms.get("motion_command")
+    if term is None:
+        return None, None
+    motion_cfg = term.params.get("motion_config")
+    if isinstance(motion_cfg, MotionConfig):
+        return motion_cfg.motion_clip_name, motion_cfg.motion_clip_id
+    if isinstance(motion_cfg, dict):
+        clip_name = motion_cfg.get("motion_clip_name")
+        clip_id = motion_cfg.get("motion_clip_id")
+        return clip_name, clip_id
+    return None, None
 
 
 def _update_terrain_config(
@@ -252,7 +304,13 @@ def main() -> None:
     )
 
     motion_path = _resolve_motion_path(inputs.motion_dir)
-    geom_path, geom_meta, num_rows, num_cols, pairing_supported = _resolve_geometry_inputs(inputs)
+    clip_name, clip_id = _extract_motion_clip_hint(eval_cfg_overrides)
+    geom_path, geom_meta, num_rows, num_cols, pairing_supported = _resolve_geometry_inputs(
+        inputs,
+        motion_path=motion_path,
+        motion_clip_name=clip_name,
+        motion_clip_id=clip_id,
+    )
 
     pair_terrain = bool(inputs.pair_terrain_with_motion)
     if geom_path is None:

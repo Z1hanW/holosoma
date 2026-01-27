@@ -33,14 +33,14 @@ Perception example:
 Physics rollout example:
   python -m holosoma.visualize physics \\
     --checkpoint /abs/path/to/model.pt \\
-    --motion-dir /abs/path/to/motion_folder \\
-    --geometry-dir /abs/path/to/obj_folder \\
+    --motion-dir /abs/path/to/motion_folder_or_file \\
+    --geometry-dir /abs/path/to/obj_folder_or_file \\
     # --geometry-metadata /abs/path/to/metadata.json
 
 SMPL mesh example:
   python -m holosoma.visualize smpl \\
-    --motion-dir /abs/path/to/motion_folder \\
-    --geometry-dir /abs/path/to/obj_folder \\
+    --motion-dir /abs/path/to/motion_folder_or_file \\
+    --geometry-dir /abs/path/to/obj_folder_or_file \\
     --smpl-model-path /abs/path/to/body_models
 
 Joints example:

@@ -5,10 +5,12 @@ set -euo pipefail
 #
 # Required:
 #   CKPT=/abs/path/to/model.pt
-#   MOTION_DIR=/abs/path/to/motion_folder
+#   MOTION_DIR=/abs/path/to/motion_folder_or_file
 #
 # Optional:
 #   GEOMETRY_DIR=/abs/path/to/obj_dir_or_obj_file
+#     - If MOTION_DIR is a single .npz and GEOMETRY_DIR is a folder, a matching
+#       <clip>.obj is auto-selected when available.
 #   GEOMETRY_META=/abs/path/to/metadata.json
 #   NUM_ENVS=1
 #   HEADLESS=True
