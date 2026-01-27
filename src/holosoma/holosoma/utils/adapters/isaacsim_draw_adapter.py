@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import numpy as np
+
 from holosoma.simulator.isaacsim.isaacsim import IsaacSim
 from holosoma.utils.adapters.draw_utils import convert_to_list, convert_to_tuple
 
@@ -51,7 +53,57 @@ def draw_line(
 
 # Set the rest to no-op since we only need these 3
 def draw_points(*args, **kwargs):
-    """No-op implementation for draw_points."""
+    """Draw points using IsaacSim debug draw."""
+    if not args:
+        return
+    simulator = args[0]
+    if not hasattr(simulator, "draw") or not simulator.draw:
+        return
+
+    points = args[1] if len(args) > 1 else []
+    colors = args[2] if len(args) > 2 else []
+    sizes = args[3] if len(args) > 3 else []
+
+    points_arr = np.asarray(points)
+    if points_arr.size == 0:
+        return
+    if points_arr.ndim == 1:
+        points_arr = points_arr.reshape(1, -1)
+    points_list = [convert_to_tuple(point) for point in points_arr]
+
+    if not points_list:
+        return
+
+    colors_arr = np.asarray(colors)
+    if colors_arr.size == 0:
+        color_list = [[0.0, 1.0, 1.0, 1.0] for _ in points_list]
+    else:
+        if colors_arr.ndim == 1:
+            base_color = colors_arr.astype(float).tolist()
+            if len(base_color) == 3:
+                base_color.append(1.0)
+            color_list = [base_color for _ in points_list]
+        else:
+            color_list = []
+            for color in colors_arr:
+                color_vals = convert_to_list(color)
+                if len(color_vals) == 3:
+                    color_vals.append(1.0)
+                color_list.append(color_vals)
+            if len(color_list) != len(points_list):
+                color_list = [color_list[0] for _ in points_list]
+
+    sizes_arr = np.asarray(sizes)
+    if sizes_arr.size == 0:
+        size_list = [2.0 for _ in points_list]
+    elif sizes_arr.ndim == 0:
+        size_list = [float(sizes_arr.item()) for _ in points_list]
+    else:
+        size_list = [float(val) for val in sizes_arr.reshape(-1).tolist()]
+        if len(size_list) != len(points_list):
+            size_list = [float(size_list[0]) for _ in points_list]
+
+    simulator.draw.draw_points(points_list, color_list, size_list)
 
 
 def draw_height_points(*args, **kwargs):

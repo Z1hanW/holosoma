@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 import numpy as np
+from loguru import logger
 
 from holosoma.config_types.env import EnvConfig
 from holosoma.config_types.full_sim import FullSimConfig
@@ -20,6 +22,7 @@ from holosoma.managers.terrain import TerrainManager
 from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
 from holosoma.utils.helpers import get_class
 from holosoma.utils.rollout_recorder import RolloutRecorder
+from holosoma.utils.simulator_config import SimulatorType
 from holosoma.utils.viser_live import ViserLiveViewer
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.torch_utils import to_torch
@@ -148,6 +151,8 @@ class BaseTask:
             self.debug_viz = False
             self.simulator.setup_viewer()
             self.viewer = self.simulator.viewer
+        self._isaac_scandots_last_update = 0.0
+        self._isaac_scandots_warned = False
 
         # Initialize remaining managers
         self.observation_manager = ObservationManager(observation_config, self, self.device)
@@ -462,6 +467,7 @@ class BaseTask:
             self._rollout_recorder.record_step()
         if hasattr(self, "_viser_live"):
             self._viser_live.record_step()
+        self._draw_scandots_in_viewer()
 
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         final_obs_dict = {}
@@ -487,6 +493,64 @@ class BaseTask:
         if self.viewer:
             self._setup_simulator_control()
             self._setup_simulator_next_task()
+
+    def _draw_scandots_in_viewer(self) -> None:
+        if not getattr(self.training_config, "isaac_show_scandots", True):
+            return
+        if self.headless:
+            return
+        if self.simulator.get_simulator_type() != SimulatorType.ISAACSIM:
+            return
+        if self.perception_manager is None:
+            return
+        if not getattr(self.simulator, "draw", None):
+            return
+
+        update_hz = float(getattr(self.training_config, "viser_update_hz", 30.0))
+        if update_hz > 0.0:
+            period = 1.0 / update_hz
+            now = time.perf_counter()
+            if now - self._isaac_scandots_last_update < period:
+                return
+            self._isaac_scandots_last_update = now
+
+        env_id = int(getattr(self.training_config, "viser_env_id", 0))
+        if env_id < 0 or env_id >= self.num_envs:
+            env_id = 0
+        env_ids = torch.tensor([env_id], device=self.device, dtype=torch.long)
+
+        try:
+            with torch.no_grad():
+                result = self.perception_manager.get_camera_scandots_points(env_ids, include_misses=False)
+        except Exception as exc:
+            if not self._isaac_scandots_warned:
+                self._isaac_scandots_warned = True
+                logger.warning("IsaacSim scandots draw disabled: {}", exc)
+            return
+
+        if result is None:
+            return
+
+        points, mask = result
+        points_env = points[0]
+        mask_env = mask[0]
+        if mask_env.numel() > 0:
+            points_env = points_env[mask_env]
+        if points_env.numel() == 0:
+            self.simulator.draw.clear_points()
+            return
+
+        pts = points_env.detach().cpu().numpy()
+        point_color = [0.0, 1.0, 1.0]
+        point_size = float(getattr(self.training_config, "isaac_scandots_point_size", 2.0))
+
+        colors = [point_color for _ in range(pts.shape[0])]
+        sizes = [point_size for _ in range(pts.shape[0])]
+
+        self.simulator.draw.clear_points()
+        from holosoma.utils import draw as draw_utils
+
+        draw_utils.draw_points(self.simulator, pts, colors, sizes, env_id)
 
     def _ensure_long_tensor(self, tensor_like):
         if isinstance(tensor_like, torch.Tensor):

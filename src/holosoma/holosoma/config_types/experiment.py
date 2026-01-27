@@ -105,6 +105,18 @@ class TrainingConfig:
     viser_recenter: bool = True
     """Recenter the Viser viewer around the env origin when available."""
 
+    viser_show_scandots: bool = False
+    """Show camera scandots point cloud in the Viser viewer."""
+
+    viser_scandots_point_size: float = 0.02
+    """Point size for scandots visualization in Viser."""
+
+    isaac_show_scandots: bool = True
+    """Show camera scandots in the Isaac Sim debug draw viewer."""
+
+    isaac_scandots_point_size: float = 2.0
+    """Point size for Isaac Sim scandots debug draw."""
+
 
 @dataclass(frozen=True)
 class EvalOverridesConfig:

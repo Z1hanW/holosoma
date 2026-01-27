@@ -30,6 +30,8 @@ python src/holosoma/holosoma/eval_agent.py \
   --simulator.config.sim.physx.gpu_collision_stack_size=4294967295 \
   --training.num_envs=1 \
   --training.headless=False \
+  --training.enable_viser=True \
+  --training.viser_show_scandots=True \
   --simulator.config.scene.env_spacing=0.0 \
   --algo.config.load_optimizer=False \
   --algo.config.save_interval=10000 \
@@ -41,4 +43,5 @@ python src/holosoma/holosoma/eval_agent.py \
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend=False \
   --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s=0 \
   terrain:terrain-load-obj \
-  --terrain.terrain-term.obj-file-path "${OBJ_DIR}"
+  --terrain.terrain-term.obj-file-path "${OBJ_DIR}" \
+  --terrain.terrain-term.obj-metadata-path ""

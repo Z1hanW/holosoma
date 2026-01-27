@@ -152,6 +152,11 @@ class ViserLiveViewer:
         self._joint_count = 0
         self._offset: np.ndarray | None = None
         self._last_update = 0.0
+        self._scandots_handle = None
+        self._scandots_enabled = False
+        self._scandots_point_size = 0.02
+        self._scandots_color = np.array([0, 255, 255], dtype=np.uint8)
+        self._scandots_warned = False
 
         if not self._enabled:
             return
@@ -168,6 +173,8 @@ class ViserLiveViewer:
         update_hz = float(getattr(cfg, "viser_update_hz", 30.0))
         self._update_period = 0.0 if update_hz <= 0 else 1.0 / update_hz
         self._recenter = bool(getattr(cfg, "viser_recenter", True))
+        self._scandots_enabled = bool(getattr(cfg, "viser_show_scandots", False))
+        self._scandots_point_size = float(getattr(cfg, "viser_scandots_point_size", 0.02))
 
         viser_mod, viser_urdf_cls, err = _import_viser()
         if err is not None or viser_mod is None or viser_urdf_cls is None:
@@ -238,6 +245,9 @@ class ViserLiveViewer:
         if joints.shape[0] != self._joint_count:
             return
         self._vr.update_cfg(joints.astype(np.float32, copy=False))
+
+        if self._scandots_enabled:
+            self._update_scandots(offset)
 
         if self._vo is None or self._object_root is None:
             return
@@ -367,6 +377,62 @@ class ViserLiveViewer:
         quat_xyzw = state[3:7]
         quat_wxyz = quat_xyzw[[3, 0, 1, 2]]
         return pos.detach().cpu().numpy(), quat_wxyz.detach().cpu().numpy()
+
+    def _update_scandots(self, offset: np.ndarray) -> None:
+        if not self._server or not self._scandots_enabled:
+            return
+
+        perception_mgr = getattr(self._env, "perception_manager", None)
+        if perception_mgr is None:
+            if not self._scandots_warned:
+                logger.warning("Viser scandots requested but perception_manager is unavailable.")
+                self._scandots_warned = True
+            return
+
+        env_ids = torch.tensor([self._env_id], device=self._env.device, dtype=torch.long)
+        try:
+            with torch.no_grad():
+                result = perception_mgr.get_camera_scandots_points(env_ids, include_misses=False)
+        except Exception as exc:
+            if not self._scandots_warned:
+                logger.warning("Viser scandots disabled: {}", exc)
+                self._scandots_warned = True
+            return
+
+        if result is None:
+            if not self._scandots_warned:
+                logger.warning("Viser scandots disabled: perception is not using mesh_raycast_scandots.")
+                self._scandots_warned = True
+            self._scandots_enabled = False
+            return
+
+        points, mask = result
+        if points.numel() == 0:
+            return
+        points_env = points[0]
+        mask_env = mask[0]
+        if mask_env.numel() > 0:
+            points_env = points_env[mask_env]
+        if points_env.numel() == 0:
+            if self._scandots_handle is not None:
+                self._scandots_handle.visible = False
+            return
+
+        pts = points_env.detach().cpu().numpy()
+        if self._recenter:
+            pts = pts - offset
+
+        if self._scandots_handle is None:
+            self._scandots_handle = self._server.scene.add_point_cloud(
+                "/scandots",
+                points=pts.astype(np.float32, copy=False),
+                colors=self._scandots_color,
+                point_size=float(self._scandots_point_size),
+                point_shape="circle",
+            )
+        else:
+            self._scandots_handle.visible = True
+            self._scandots_handle.points = pts.astype(np.float32, copy=False)
 
 
 def _normalize_env_ids(env_ids) -> list[int]:

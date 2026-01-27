@@ -251,6 +251,40 @@ class PerceptionManager:
             raise RuntimeError("Camera depth map requested but camera_depth output is disabled.")
         return self._camera_depth
 
+    def get_camera_scandots_points(
+        self,
+        env_ids: torch.Tensor | None = None,
+        *,
+        include_misses: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if not self.enabled or not self._uses_camera_scandots():
+            return None
+        if self._warp_mesh is None:
+            raise RuntimeError("PerceptionManager.setup() must be called before scandots queries.")
+        if self._camera_scandots_ray_dirs_base is None:
+            raise RuntimeError("PerceptionManager scandots ray buffers are not initialized.")
+
+        idx = env_ids if env_ids is not None else slice(None)
+        body_pos, body_quat = self._get_camera_body_pose(idx)
+        num_envs = body_pos.shape[0]
+
+        ray_dirs_base = self._camera_scandots_ray_dirs_base.unsqueeze(0).expand(num_envs, -1, -1)
+        ray_dirs_world = quat_rotate_batched(body_quat, ray_dirs_base)
+
+        offset_world = quat_apply(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
+        ray_starts = body_pos.unsqueeze(1) + offset_world.unsqueeze(1)
+
+        warp_mesh = self._get_camera_warp_mesh(env_ids)
+        ray_hits_world = warp_utils.ray_cast(ray_starts, ray_dirs_world, warp_mesh)
+        hit_mask = torch.isfinite(ray_hits_world).all(dim=-1)
+
+        if include_misses:
+            ranges = self._compute_camera_ray_distances(ray_starts, ray_dirs_world, ray_hits_world)
+            points = ray_starts + ray_dirs_world * ranges.unsqueeze(-1)
+        else:
+            points = ray_hits_world
+        return points, hit_mask
+
     def capture_rendered_rgb(self) -> Any:
         if not self.enabled or self.cfg.output_mode != "camera_depth":
             raise RuntimeError("RGB capture requested but camera_depth output is disabled.")
