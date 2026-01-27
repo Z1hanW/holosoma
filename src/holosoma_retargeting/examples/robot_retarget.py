@@ -342,7 +342,7 @@ def load_motion_data(
 
             human_data = np.load(str(npz_file))
             human_joints = human_data["global_joint_positions"]
-            human_height = human_data["height"]
+            human_height = motion_data_config.default_human_height or 1.78
             smpl_scale = constants.ROBOT_HEIGHT / human_height
         else:
             # For other custom data format, if it uses consistent .npz file like SMPLX,
@@ -395,7 +395,7 @@ def load_motion_data(
 
             human_data = np.load(str(npz_file))
             human_joints = human_data["global_joint_positions"][::downsample]
-            human_height = float(human_data["height"])
+            human_height = motion_data_config.default_human_height or 1.78
             smpl_scale = constants.ROBOT_HEIGHT / human_height
 
         num_frames = human_joints.shape[0]

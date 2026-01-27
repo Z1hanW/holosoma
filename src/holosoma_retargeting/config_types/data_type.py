@@ -312,6 +312,9 @@ DATA_FORMAT_CONSTANTS: dict[str, FormatConstants] = {
     "mocap": {
         "default_human_height": 1.78,
     },
+    "smplx": {
+        "default_human_height": 1.78,
+    },
 }
 
 # Unified registry: Maps format name to demo joints
