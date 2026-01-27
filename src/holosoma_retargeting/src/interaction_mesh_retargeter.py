@@ -1429,6 +1429,7 @@ class InteractionMeshRetargeter:
         Fast analytic version: J_qdot = J_v @ T(q)
         """
 
+        body_idx = int(np.asarray(body_idx).reshape(-1)[0].item())
         p_body = np.asarray(p_body, dtype=float).reshape(3)
 
         # 1) Make sure kinematics are current once
@@ -1446,7 +1447,7 @@ class InteractionMeshRetargeter:
         # 3) J_v: translational Jacobian wrt generalized velocities (3 x nv)
         Jp = np.zeros((3, self.robot_model.nv), dtype=np.float64, order="C")
         Jr = np.zeros((3, self.robot_model.nv), dtype=np.float64, order="C")
-        mujoco.mj_jac(self.robot_model, self.robot_data, Jp, Jr, p_W, int(body_idx))  # Jp = J_v
+        mujoco.mj_jac(self.robot_model, self.robot_data, Jp, Jr, p_W, body_idx)  # Jp = J_v
 
         T = self._build_transform_qdot_to_qvel_fast()
 
