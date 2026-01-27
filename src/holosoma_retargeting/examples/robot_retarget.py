@@ -375,7 +375,18 @@ def setup_object_data(
         # Create scaled URDF and XML files
         scale_factors = tuple(float(value) for value in (object_scale * smpl_scale))
         object_urdf_file = create_scaled_multi_boxes_urdf(constants.OBJECT_URDF_FILE, scale_factors)
-        object_asset_xml_path = create_scaled_multi_boxes_xml(str(box_asset_xml), scale_factors)
+        scene_xml_dir = Path(scene_xml_file).parent
+        box_asset_xml_output = None
+        if task_config.scene_xml_file is not None:
+            sx, sy, sz = scale_factors
+            box_asset_xml_output = str(
+                scene_xml_dir / f"{box_asset_xml.stem}_scaled_{sx:.2f}_{sy:.2f}_{sz:.2f}.xml"
+            )
+        object_asset_xml_path = create_scaled_multi_boxes_xml(
+            str(box_asset_xml),
+            scale_factors,
+            output_path=box_asset_xml_output,
+        )
         new_scene_xml_path = create_new_scene_xml_file(str(scene_xml_file), scale_factors, object_asset_xml_path)
         constants.SCENE_XML_FILE = new_scene_xml_path
 

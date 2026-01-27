@@ -468,16 +468,17 @@ def run_viewer(cfg: SmplGeometryViewerConfig) -> None:
     def _apply_frame(frame_idx: int) -> None:
         verts = motion_state["verts"][frame_idx]
         handle = mesh_state["handle"]
-        if handle is not None:
-            handle.vertices = verts
-            handle.visible = bool(show_mesh_cb.value)
-        if cfg.show_joints and motion_state.get("joints") is not None:
-            joints = motion_state["joints"][frame_idx]
-            joint_handle = joint_state["handle"]
-            if joint_handle is not None:
-                joint_handle.points = joints
-                if show_joints_cb is not None:
-                    joint_handle.visible = bool(show_joints_cb.value)
+        with server.atomic():
+            if handle is not None:
+                handle.vertices = verts
+                handle.visible = bool(show_mesh_cb.value)
+            if cfg.show_joints and motion_state.get("joints") is not None:
+                joints = motion_state["joints"][frame_idx]
+                joint_handle = joint_state["handle"]
+                if joint_handle is not None:
+                    joint_handle.points = joints.astype(np.float32, copy=False)
+                    if show_joints_cb is not None:
+                        joint_handle.visible = bool(show_joints_cb.value)
 
     def _player_loop() -> None:
         while True:

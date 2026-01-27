@@ -282,7 +282,8 @@ def run_viewer(cfg: JointViewerConfig) -> None:
 
     def _apply_frame(frame_idx: int) -> None:
         joints = joint_state["joints"][frame_idx]
-        joint_handle.points = joints
+        with server.atomic():
+            joint_handle.points = joints.astype(np.float32, copy=False)
 
     def _player_loop() -> None:
         while True:

@@ -100,7 +100,13 @@ class TrainingConfig:
     """Environment index to visualize in the Viser viewer."""
 
     viser_update_hz: float = 30.0
-    """Update rate for the Viser viewer."""
+    """Update rate for the Viser viewer (<=0 uses simulator control frequency)."""
+
+    viser_sync_to_sim: bool = True
+    """Sync Viser update rate to simulator control frequency when available."""
+
+    viser_force_dt: bool = True
+    """Sleep to enforce the target Viser update period (aligns playback to real time)."""
 
     viser_recenter: bool = True
     """Recenter the Viser viewer around the env origin when available."""

@@ -1080,30 +1080,31 @@ class InteractionMeshRetargeter:
 
     def draw_q(self, q: np.ndarray):
         """Draw a single robot configuration."""
-        # Update robot joint configurations
-        robot_joint_positions = q[7 : 7 + self.task_constants.ROBOT_DOF]
-        self.viser_robot.update_cfg(robot_joint_positions)
+        with self.server.atomic():
+            # Update robot joint configurations
+            robot_joint_positions = q[7 : 7 + self.task_constants.ROBOT_DOF]
+            self.viser_robot.update_cfg(robot_joint_positions)
 
-        # Update robot base pose using set_transform
-        robot_quat = q[3:7]  # Base orientation
-        robot_pos = q[:3]  # Base position
+            # Update robot base pose using set_transform
+            robot_quat = q[3:7]  # Base orientation
+            robot_pos = q[:3]  # Base position
 
-        # Update robot base frame
-        self.robot_base.position = robot_pos
-        self.robot_base.wxyz = robot_quat  # Assuming quaternion is in wxyz order
+            # Update robot base frame
+            self.robot_base.position = robot_pos
+            self.robot_base.wxyz = robot_quat  # Assuming quaternion is in wxyz order
 
-        # Update object pose if it exists
-        if hasattr(self, "viser_object") and self.viser_object is not None:
-            if self.has_dynamic_object:
-                object_quat = q[-4:]
-                object_pos = q[-7:-4]
-            else:
-                object_quat = np.asarray([1, 0, 0, 0])
-                object_pos = np.zeros(3)
+            # Update object pose if it exists
+            if hasattr(self, "viser_object") and self.viser_object is not None:
+                if self.has_dynamic_object:
+                    object_quat = q[-4:]
+                    object_pos = q[-7:-4]
+                else:
+                    object_quat = np.asarray([1, 0, 0, 0])
+                    object_pos = np.zeros(3)
 
-            # Update object base frame
-            self.object_base.position = object_pos
-            self.object_base.wxyz = object_quat  # Assuming quaternion is in wxyz order
+                # Update object base frame
+                self.object_base.position = object_pos
+                self.object_base.wxyz = object_quat  # Assuming quaternion is in wxyz order
 
     def draw_keypoints(self, p, name="keypoint", rgba=(0, 0, 1, 1)):
         """Draw keypoints in visualization."""

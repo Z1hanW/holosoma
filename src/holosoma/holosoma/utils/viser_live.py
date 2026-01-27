@@ -171,7 +171,25 @@ class ViserLiveViewer:
             self._env_id = 0
 
         update_hz = float(getattr(cfg, "viser_update_hz", 30.0))
+        sync_to_sim = bool(getattr(cfg, "viser_sync_to_sim", True))
+        force_dt = bool(getattr(cfg, "viser_force_dt", True))
+        sim_hz = None
+        sim_cfg = getattr(env.simulator, "simulator_config", None)
+        if sim_cfg is not None and hasattr(sim_cfg, "sim"):
+            sim_fps = getattr(sim_cfg.sim, "fps", None)
+            sim_decimation = getattr(sim_cfg.sim, "control_decimation", None)
+            if sim_fps:
+                sim_decimation = int(sim_decimation or 1)
+                sim_hz = float(sim_fps) / max(1, sim_decimation)
+
+        if sync_to_sim and sim_hz:
+            update_hz = sim_hz
+        elif update_hz <= 0 and sim_hz:
+            update_hz = sim_hz
+
         self._update_period = 0.0 if update_hz <= 0 else 1.0 / update_hz
+        self._force_dt = force_dt and self._update_period > 0
+        self._next_tick = time.perf_counter()
         self._recenter = bool(getattr(cfg, "viser_recenter", True))
         self._scandots_enabled = bool(getattr(cfg, "viser_show_scandots", False))
         self._scandots_point_size = float(getattr(cfg, "viser_scandots_point_size", 0.02))
@@ -217,7 +235,14 @@ class ViserLiveViewer:
         if not self._enabled or self._vr is None or self._robot_root is None:
             return
 
-        now = time.perf_counter()
+        if self._force_dt:
+            now = time.perf_counter()
+            if now < self._next_tick:
+                time.sleep(self._next_tick - now)
+            now = time.perf_counter()
+            self._next_tick = now + self._update_period
+        else:
+            now = time.perf_counter()
         if self._update_period > 0 and (now - self._last_update) < self._update_period:
             return
         self._last_update = now
@@ -236,29 +261,30 @@ class ViserLiveViewer:
                 self._offset = root_pos.copy()
         offset = self._offset if self._recenter else np.zeros(3, dtype=np.float32)
 
-        self._robot_root.position = root_pos - offset
-        self._robot_root.wxyz = root_quat_wxyz
+        with self._server.atomic():
+            self._robot_root.position = root_pos - offset
+            self._robot_root.wxyz = root_quat_wxyz
 
-        joints = dof_pos
-        if self._joint_order is not None:
-            joints = joints[self._joint_order]
-        if joints.shape[0] != self._joint_count:
-            return
-        self._vr.update_cfg(joints.astype(np.float32, copy=False))
+            joints = dof_pos
+            if self._joint_order is not None:
+                joints = joints[self._joint_order]
+            if joints.shape[0] != self._joint_count:
+                return
+            self._vr.update_cfg(joints.astype(np.float32, copy=False))
 
-        if self._scandots_enabled:
-            self._update_scandots(offset)
+            if self._scandots_enabled:
+                self._update_scandots(offset)
 
-        if self._vo is None or self._object_root is None:
-            return
-        obj_state = self._get_object_state_wxyz()
-        if obj_state is None:
-            self._vo.show_visual = False
-            return
-        obj_pos, obj_quat_wxyz = obj_state
-        self._object_root.position = obj_pos - offset
-        self._object_root.wxyz = obj_quat_wxyz
-        self._vo.show_visual = True
+            if self._vo is None or self._object_root is None:
+                return
+            obj_state = self._get_object_state_wxyz()
+            if obj_state is None:
+                self._vo.show_visual = False
+                return
+            obj_pos, obj_quat_wxyz = obj_state
+            self._object_root.position = obj_pos - offset
+            self._object_root.wxyz = obj_quat_wxyz
+            self._vo.show_visual = True
 
     def _setup_joint_order(self) -> None:
         if self._vr is None:
@@ -283,18 +309,38 @@ class ViserLiveViewer:
         terrain_mgr = getattr(self._env, "terrain_manager", None)
         if terrain_mgr is None:
             return
-        terrain_cfg = getattr(terrain_mgr, "cfg", None)
-        terrain_term = getattr(terrain_cfg, "terrain_term", None) if terrain_cfg is not None else None
-        if terrain_term is None:
-            return
-        obj_path = getattr(terrain_term, "obj_file_path", None) or ""
-        if not obj_path:
-            return
-        obj_meta = getattr(terrain_term, "obj_metadata_path", None)
-        rows = getattr(terrain_term, "num_rows", None)
-        cols = getattr(terrain_term, "num_cols", None)
+        terrain_state = terrain_mgr.get_state("locomotion_terrain")
+        mesh = getattr(terrain_state, "mesh", None)
+        if mesh is None:
+            terrain = getattr(terrain_state, "terrain", None)
+            mesh = getattr(terrain, "mesh", None) if terrain is not None else None
+        if mesh is not None:
+            try:
+                import trimesh  # type: ignore[import-not-found]
+            except Exception:
+                mesh = None
+            else:
+                if isinstance(mesh, trimesh.Scene):
+                    mesh = mesh.dump(concatenate=True)
+                if not isinstance(mesh, trimesh.Trimesh):
+                    try:
+                        mesh = trimesh.Trimesh(vertices=np.asarray(mesh.vertices), faces=np.asarray(mesh.faces))
+                    except Exception:
+                        mesh = None
 
-        mesh = _load_terrain_mesh(obj_path, obj_metadata_path=obj_meta, num_rows=rows, num_cols=cols)
+        if mesh is None:
+            terrain_cfg = getattr(terrain_mgr, "cfg", None)
+            terrain_term = getattr(terrain_cfg, "terrain_term", None) if terrain_cfg is not None else None
+            if terrain_term is None:
+                return
+            obj_path = getattr(terrain_term, "obj_file_path", None) or ""
+            if not obj_path:
+                return
+            obj_meta = getattr(terrain_term, "obj_metadata_path", None)
+            rows = getattr(terrain_term, "num_rows", None)
+            cols = getattr(terrain_term, "num_cols", None)
+
+            mesh = _load_terrain_mesh(obj_path, obj_metadata_path=obj_meta, num_rows=rows, num_cols=cols)
         if mesh is None:
             try:
                 import trimesh  # type: ignore[import-not-found]

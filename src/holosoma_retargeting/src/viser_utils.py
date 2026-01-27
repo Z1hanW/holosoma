@@ -133,24 +133,25 @@ def create_motion_control_sliders(
             joints = (
                 joints[:robot_dof] if joints.shape[0] > robot_dof else np.pad(joints, (0, robot_dof - joints.shape[0]))
             )
-        viser_robot.update_cfg(joints)
+        with server.atomic():
+            viser_robot.update_cfg(joints)
 
-        # robot base (MuJoCo order: pos first, then quat)
-        robot_base_frame.position = q[0:3]  # pos (xyz)
-        r_q = _quat_continuous(prev["robot_q"], q[3:7])
-        prev["robot_q"] = r_q
-        robot_base_frame.wxyz = r_q
+            # robot base (MuJoCo order: pos first, then quat)
+            robot_base_frame.position = q[0:3]  # pos (xyz)
+            r_q = _quat_continuous(prev["robot_q"], q[3:7])
+            prev["robot_q"] = r_q
+            robot_base_frame.wxyz = r_q
 
-        # object (optional) (MuJoCo order: pos first, then quat)
-        if has_object_input and object_base_frame is not None:
-            object_base_frame.position = q[-7:-4]  # obj pos (xyz)
-            o_q = _quat_continuous(prev["obj_q"], q[-4:])
-            prev["obj_q"] = o_q
-            object_base_frame.wxyz = o_q
-        elif object_base_frame is not None and viser_object is not None:
-            # fallback static pose
-            object_base_frame.position = np.zeros(3)
-            object_base_frame.wxyz = np.array([1.0, 0.0, 0.0, 0.0])
+            # object (optional) (MuJoCo order: pos first, then quat)
+            if has_object_input and object_base_frame is not None:
+                object_base_frame.position = q[-7:-4]  # obj pos (xyz)
+                o_q = _quat_continuous(prev["obj_q"], q[-4:])
+                prev["obj_q"] = o_q
+                object_base_frame.wxyz = o_q
+            elif object_base_frame is not None and viser_object is not None:
+                # fallback static pose
+                object_base_frame.position = np.zeros(3)
+                object_base_frame.wxyz = np.array([1.0, 0.0, 0.0, 0.0])
 
     def _apply_discrete_frame(i: int) -> None:
         i = int(np.clip(i, 0, n_frames - 1))

@@ -534,18 +534,19 @@ def replay(cfg: ExperimentConfig) -> None:
         root_pos = frame[0:3]
         root_quat_wxyz = frame[3:7]
         joints = frame[7 : 7 + len(viser_joint_names)]
-        robot_root.position = root_pos
-        robot_root.wxyz = root_quat_wxyz
-        vr.update_cfg(joints.astype(np.float32, copy=False))
+        with server.atomic():
+            robot_root.position = root_pos
+            robot_root.wxyz = root_quat_wxyz
+            vr.update_cfg(joints.astype(np.float32, copy=False))
 
-        if vo is None:
-            return
-        if motion_state["has_object"]:
-            vo.show_visual = True
-            object_root.position = frame[-7:-4]
-            object_root.wxyz = frame[-4:]
-        else:
-            vo.show_visual = False
+            if vo is None:
+                return
+            if motion_state["has_object"]:
+                vo.show_visual = True
+                object_root.position = frame[-7:-4]
+                object_root.wxyz = frame[-4:]
+            else:
+                vo.show_visual = False
 
     def _interp_qpos(q0: np.ndarray, q1: np.ndarray, u: float) -> np.ndarray:
         out = q0.copy()
