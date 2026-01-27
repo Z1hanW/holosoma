@@ -1,5 +1,7 @@
 """Robot communication package."""
+
 from __future__ import annotations
+
 from importlib.metadata import entry_points
 
 # Auto-discover SDK interfaces from installed packages

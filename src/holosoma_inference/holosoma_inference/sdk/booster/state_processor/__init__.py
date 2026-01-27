@@ -21,9 +21,7 @@ def create_state_processor(config: RobotConfig, lcm=None):
 
         return BoosterStateProcessor(config, lcm)
     if sdk_type in ["lcm_unitree", "lcm_booster"]:
-        raise ValueError(
-            f"LCM SDK types are no longer supported. Please use 'booster' instead of '{sdk_type}'"
-        )
+        raise ValueError(f"LCM SDK types are no longer supported. Please use 'booster' instead of '{sdk_type}'")
     raise ValueError(f"Unsupported SDK type: {sdk_type}. Only 'booster' is supported for state_processor.")
 
 
