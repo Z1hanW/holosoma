@@ -189,7 +189,7 @@ class InteractionMeshRetargeter:
         # Pass the URDF path so mesh paths resolve relative to the URDF location.
         self.viser_robot = ViserUrdf(
             self.server,
-            urdf_or_path=Path(self.robot_model_path),
+            urdf_or_path=Path(self.robot_model_path).resolve(),
             root_node_name="/world/robot",  # This links to the robot_base frame we created
         )
         # Ensure visual meshes are enabled by default.
@@ -205,7 +205,7 @@ class InteractionMeshRetargeter:
             # Create ViserUrdf instance for object, attaching it to the object_base frame
             self.viser_object = ViserUrdf(
                 self.server,
-                urdf_or_path=Path(self.object_model_path),
+                urdf_or_path=Path(self.object_model_path).resolve(),
                 root_node_name="/world/object",  # This links to the object_base frame we created
             )
             try:
