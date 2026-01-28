@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import time
+from functools import partial
 from pathlib import Path
 from types import ModuleType
 
@@ -183,13 +184,20 @@ class InteractionMeshRetargeter:
         # Create parent frames for robot and object
         self.robot_base = self.server.scene.add_frame("/world/robot", show_axes=False)
 
+        robot_urdf_path = Path(self.robot_model_path).resolve()
+        self.robot_urdf = yourdfpy.URDF.load(
+            robot_urdf_path,
+            load_meshes=True,
+            build_scene_graph=True,
+            filename_handler=partial(yourdfpy.filename_handler_magic, dir=robot_urdf_path.parent),
+        )
+
         print("Viser using robot URDF: ", self.robot_model_path)
 
         # Create ViserUrdf instance for robot, attaching it to the robot_base frame
-        # Pass the URDF path so mesh paths resolve relative to the URDF location.
         self.viser_robot = ViserUrdf(
             self.server,
-            urdf_or_path=Path(self.robot_model_path).resolve(),
+            urdf_or_path=self.robot_urdf,
             root_node_name="/world/robot",  # This links to the robot_base frame we created
         )
         # Ensure visual meshes are enabled by default.
@@ -202,10 +210,18 @@ class InteractionMeshRetargeter:
         if self.object_model_path:
             self.object_base = self.server.scene.add_frame("/world/object", show_axes=False)
 
+            object_urdf_path = Path(self.object_model_path).resolve()
+            self.object_urdf = yourdfpy.URDF.load(
+                object_urdf_path,
+                load_meshes=True,
+                build_scene_graph=True,
+                filename_handler=partial(yourdfpy.filename_handler_magic, dir=object_urdf_path.parent),
+            )
+
             # Create ViserUrdf instance for object, attaching it to the object_base frame
             self.viser_object = ViserUrdf(
                 self.server,
-                urdf_or_path=Path(self.object_model_path).resolve(),
+                urdf_or_path=self.object_urdf,
                 root_node_name="/world/object",  # This links to the object_base frame we created
             )
             try:
