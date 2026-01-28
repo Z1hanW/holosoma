@@ -198,6 +198,11 @@ class InteractionMeshRetargeter:
             urdf_or_path=self.robot_urdf,
             root_node_name="/world/robot",  # This links to the robot_base frame we created
         )
+        # Ensure visual meshes are enabled by default.
+        try:
+            self.viser_robot.show_visual = True
+        except Exception:
+            pass
 
         # Similarly for object
         if self.object_model_path:
@@ -215,6 +220,10 @@ class InteractionMeshRetargeter:
                 urdf_or_path=self.object_urdf,
                 root_node_name="/world/object",  # This links to the object_base frame we created
             )
+            try:
+                self.viser_object.show_visual = True
+            except Exception:
+                pass
             print("Viser using object URDF: ", self.object_model_path)
 
         else:
@@ -1249,6 +1258,36 @@ class InteractionMeshRetargeter:
         ngeom = m.ngeom
 
         self._geom_names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or "" for g in range(ngeom)]
+        self._geom_body_names = [
+            mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, int(m.geom_bodyid[g])) or ""
+            for g in range(ngeom)
+        ]
+
+        obj_name = (self.object_name or "").lower()
+        object_mask = np.array(
+            [
+                (obj_name and (obj_name in geom.lower() or obj_name in body.lower()))
+                for geom, body in zip(self._geom_names, self._geom_body_names)
+            ],
+            dtype=bool,
+        )
+        if not object_mask.any():
+            piece_keys = ("piece_", "part_", "scene_piece")
+            object_mask = np.array(
+                [
+                    any(key in geom.lower() for key in piece_keys)
+                    or any(key in body.lower() for key in piece_keys)
+                    for geom, body in zip(self._geom_names, self._geom_body_names)
+                ],
+                dtype=bool,
+            )
+        if not hasattr(self, "_object_geom_mask") or self._object_geom_mask.shape != object_mask.shape:
+            self._object_geom_mask = object_mask
+            if self.debug:
+                obj_count = int(object_mask.sum())
+                print(f"[INFO] detected {obj_count} object geoms for constraints (object_name='{self.object_name}')")
+        else:
+            self._object_geom_mask = object_mask
 
         if not hasattr(self, "_saved_margins"):
             self._saved_margins = np.empty_like(m.geom_margin)
@@ -1296,16 +1335,16 @@ class InteractionMeshRetargeter:
             if contype[g2] == 0 and conaff[g2] == 0:
                 return False
 
-            if self.object_name in self._geom_names[g1] and "ground" in self._geom_names[g2]:
+            is_obj_g1 = bool(self._object_geom_mask[g1]) if hasattr(self, "_object_geom_mask") else False
+            is_obj_g2 = bool(self._object_geom_mask[g2]) if hasattr(self, "_object_geom_mask") else False
+            is_ground_g1 = "ground" in self._geom_names[g1].lower()
+            is_ground_g2 = "ground" in self._geom_names[g2].lower()
+
+            if is_obj_g1 and is_ground_g2:
                 return False
-            if "ground" in self._geom_names[g1] and self.object_name in self._geom_names[g2]:
+            if is_ground_g1 and is_obj_g2:
                 return False
-            return (
-                self.object_name in self._geom_names[g1]
-                or self.object_name in self._geom_names[g2]
-                or "ground" in self._geom_names[g1]
-                or "ground" in self._geom_names[g2]
-            )
+            return is_obj_g1 or is_obj_g2 or is_ground_g1 or is_ground_g2
 
         for g1, g2 in candidates:
             # Optional: keep your own filters here (e.g., skip object-ground, only keep interaction with object/ground)
@@ -1322,8 +1361,16 @@ class InteractionMeshRetargeter:
                 phis[(g1, g2)] = float(dist)
 
                 # For debug
-                self.draw_mesh_pair_with_contact(self.robot_model, self.robot_data, g1, g2,   \
-                     self._geom_names[g1], self._geom_names[g2], fromto=fromto)
+                if self.debug:
+                    self.draw_mesh_pair_with_contact(
+                        self.robot_model,
+                        self.robot_data,
+                        g1,
+                        g2,
+                        self._geom_names[g1],
+                        self._geom_names[g2],
+                        fromto=fromto,
+                    )
 
         return Js, phis
 
