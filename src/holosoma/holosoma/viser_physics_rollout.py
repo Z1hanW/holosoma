@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import dataclasses
+import json
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import trimesh
 import tyro
 from loguru import logger
 
@@ -64,6 +67,7 @@ def _resolve_geometry_inputs(
     motion_path: str | None = None,
     motion_clip_name: str | None = None,
     motion_clip_id: int | None = None,
+    pair_terrain_with_motion: bool | None = None,
 ) -> tuple[str | None, str | None, int | None, int | None, bool]:
     if inputs.geometry_dir is None:
         return None, None, None, None, False
@@ -76,6 +80,28 @@ def _resolve_geometry_inputs(
         candidate = geom_path.with_suffix(".obj")
         if candidate.exists():
             geom_path = candidate
+
+    def _create_single_tile_metadata(mesh_path: Path, clip_name: str) -> str:
+        mesh = trimesh.load(str(mesh_path), process=False)
+        if isinstance(mesh, trimesh.Scene):
+            mesh = mesh.dump(concatenate=True)
+        if not isinstance(mesh, trimesh.Trimesh):
+            raise ValueError(f"Loaded geometry is not a trimesh: {type(mesh)}")
+
+        bounds = mesh.bounds.astype(float)
+        span = bounds[1] - bounds[0]
+        stride = [float(span[0]), float(span[1]), 0.0]
+        meta = {
+            "tile_names": [clip_name],
+            "tile_offsets": [[0.0, 0.0, 0.0]],
+            "tile_stride": stride,
+            "tile_rows": 1,
+            "tile_cols": 1,
+            "tile_max_z": [0.0],
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            json.dump(meta, handle)
+            return handle.name
 
     if geom_path.is_dir():
         clip_name = motion_clip_name
@@ -104,6 +130,10 @@ def _resolve_geometry_inputs(
                 logger.info("Using geometry '{}' for motion clip '{}'.", selected.name, clip_name)
                 num_rows = max(1, int(inputs.num_rows))
                 num_cols = int(inputs.num_cols or 1)
+                if pair_terrain_with_motion:
+                    meta_path = _create_single_tile_metadata(selected, clip_name)
+                    logger.info("Generated temporary geometry metadata at {}.", meta_path)
+                    return str(selected), meta_path, num_rows, num_cols, True
                 return str(selected), None, num_rows, num_cols, False
             logger.warning(
                 "No geometry OBJ matching clip '{}' in {}; loading all OBJ tiles.",
@@ -131,6 +161,10 @@ def _resolve_geometry_inputs(
         if not meta_candidate.exists():
             raise FileNotFoundError(f"Geometry metadata not found: {meta_candidate}")
         meta_path = str(meta_candidate)
+    elif pair_terrain_with_motion:
+        clip_name = motion_clip_name or geom_path.stem
+        meta_path = _create_single_tile_metadata(geom_path, clip_name)
+        logger.info("Generated temporary geometry metadata at {}.", meta_path)
 
     num_rows = max(1, int(inputs.num_rows))
     num_cols = int(inputs.num_cols or 1)
@@ -310,6 +344,7 @@ def main() -> None:
         motion_path=motion_path,
         motion_clip_name=clip_name,
         motion_clip_id=clip_id,
+        pair_terrain_with_motion=inputs.pair_terrain_with_motion,
     )
 
     pair_terrain = bool(inputs.pair_terrain_with_motion)

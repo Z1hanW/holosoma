@@ -9,6 +9,9 @@ set -euo pipefail
 #
 # Optional:
 #   GEOMETRY_DIR=/abs/path/to/obj_dir_or_obj_file
+#   MOTION_CLIP=clip_name
+#   MOTION_CLIP_ID=0
+#   MOTION_ALL=True
 #     - If MOTION_DIR is a single .npz and GEOMETRY_DIR is a folder, a matching
 #       <clip>.obj is auto-selected when available.
 #   GEOMETRY_META=/abs/path/to/metadata.json
@@ -44,6 +47,9 @@ CKPT=${CKPT:-"../Store/model_52000.pt"}
 MOTION_DIR=${MOTION_DIR:-"/home/ubuntu/FAR/Store/vmm_data/___zero_pad_data_trans"}
 GEOMETRY_DIR=${GEOMETRY_DIR:-"/home/ubuntu/FAR/Store/vmm_data/___zero_pad_geo_trans"}
 GEOMETRY_META=${GEOMETRY_META:-""}
+MOTION_CLIP=${MOTION_CLIP:-""}
+MOTION_CLIP_ID=${MOTION_CLIP_ID:-""}
+MOTION_ALL=${MOTION_ALL:-"False"}
 NUM_ENVS=${NUM_ENVS:-1}
 HEADLESS=${HEADLESS:-True}
 NUM_ROWS=${NUM_ROWS:-1}
@@ -102,6 +108,14 @@ if [[ -z "${PERCEPTION_PRESET}" ]]; then
   esac
 fi
 
+if [[ -d "${MOTION_DIR}" && "${MOTION_ALL}" != "True" && -z "${MOTION_CLIP}" && -z "${MOTION_CLIP_ID}" ]]; then
+  first_motion="$(ls "${MOTION_DIR}"/*.npz 2>/dev/null | head -n 1 || true)"
+  if [[ -n "${first_motion}" ]]; then
+    MOTION_CLIP_ID=0
+    echo "[INFO] MOTION_DIR is a folder; defaulting to first clip (${first_motion}). Set MOTION_ALL=True to load all."
+  fi
+fi
+
 echo "[INFO] Viser port: ${VISER_PORT}"
 
 cmd=(
@@ -137,6 +151,12 @@ if [[ -n "${GEOMETRY_DIR}" ]]; then
 fi
 if [[ -n "${GEOMETRY_META}" ]]; then
   cmd+=(--geometry-metadata "${GEOMETRY_META}")
+fi
+if [[ -n "${MOTION_CLIP}" ]]; then
+  cmd+=(--command.setup_terms.motion_command.params.motion_config.motion_clip_name "${MOTION_CLIP}")
+fi
+if [[ -n "${MOTION_CLIP_ID}" ]]; then
+  cmd+=(--command.setup_terms.motion_command.params.motion_config.motion_clip_id "${MOTION_CLIP_ID}")
 fi
 if [[ -n "${PERCEPTION_PRESET}" ]]; then
   cmd+=(

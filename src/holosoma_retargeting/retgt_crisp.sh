@@ -6,6 +6,7 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 
 POST_SCENE_ROOT=${1:-"/home/ubuntu/FAR/CRISP-Real2Sim/results/output/post_scene"}
 HMR_TYPE=${2:-${HMR_TYPE:-"gv"}}
+SEQ_NAME=${3:-${SEQ_NAME:-""}}
 ROBOT_URDF=${ROBOT_URDF:-"models/g1/g1_29dof.urdf"}
 OUT_ROOT=${OUT_ROOT:-"$SCRIPT_DIR/demo_results/g1/climbing/mocap_crisp"}
 
@@ -30,8 +31,25 @@ if [ ! -f "$TEMPLATE_XML" ]; then
     exit 1
 fi
 
-for seq_dir in "$POST_SCENE_ROOT"/*; do
-    [ -d "$seq_dir" ] || continue
+seq_dirs=()
+if [ -n "$SEQ_NAME" ]; then
+    seq_dir="$POST_SCENE_ROOT/$SEQ_NAME"
+    if [ -d "$SEQ_NAME" ]; then
+        seq_dir="$SEQ_NAME"
+    fi
+    if [ ! -d "$seq_dir" ]; then
+        echo "[ERROR] sequence not found: $seq_dir" >&2
+        exit 1
+    fi
+    seq_dirs=("$seq_dir")
+else
+    for seq_dir in "$POST_SCENE_ROOT"/*; do
+        [ -d "$seq_dir" ] || continue
+        seq_dirs+=("$seq_dir")
+    done
+fi
+
+for seq_dir in "${seq_dirs[@]}"; do
 
     seq_name=$(basename "$seq_dir")
     hmr_dir="$seq_dir/$HMR_TYPE/hmr"
