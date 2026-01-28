@@ -191,6 +191,8 @@ class InteractionMeshRetargeter:
             build_scene_graph=True,
             filename_handler=partial(yourdfpy.filename_handler_magic, dir=robot_urdf_path.parent),
         )
+        if self.robot_urdf.scene is None:
+            print(f"[WARN] Robot URDF has no visual scene: {robot_urdf_path}")
 
         print("Viser using robot URDF: ", self.robot_model_path)
 
@@ -217,6 +219,8 @@ class InteractionMeshRetargeter:
                 build_scene_graph=True,
                 filename_handler=partial(yourdfpy.filename_handler_magic, dir=object_urdf_path.parent),
             )
+            if self.object_urdf.scene is None:
+                print(f"[WARN] Object URDF has no visual scene: {object_urdf_path}")
 
             # Create ViserUrdf instance for object, attaching it to the object_base frame
             self.viser_object = ViserUrdf(
@@ -581,27 +585,11 @@ class InteractionMeshRetargeter:
             with self.server.gui.add_folder("Visibility"):
                 show_meshes_cb = self.server.gui.add_checkbox("Show meshes", self.viser_robot.show_visual)
 
-                name_filters = (self.object_name,) if self.object_name else None
-                self._ensure_mjcf_geom_handles(name_filters=name_filters)
-                show_mjcf_visual_cb = self.server.gui.add_checkbox("Show MJCF visual geoms", True)
-                show_mjcf_collision_cb = self.server.gui.add_checkbox("Show MJCF collision geoms", False)
-
-                self._set_handles_visible(self._mjcf_visual_handles, show_mjcf_visual_cb.value)
-                self._set_handles_visible(self._mjcf_collision_handles, show_mjcf_collision_cb.value)
-
                 @show_meshes_cb.on_update
                 def _(_):
                     self.viser_robot.show_visual = show_meshes_cb.value
                     if self.viser_object is not None:
                         self.viser_object.show_visual = show_meshes_cb.value
-
-                @show_mjcf_visual_cb.on_update
-                def _(_):
-                    self._set_handles_visible(self._mjcf_visual_handles, show_mjcf_visual_cb.value)
-
-                @show_mjcf_collision_cb.on_update
-                def _(_):
-                    self._set_handles_visible(self._mjcf_collision_handles, show_mjcf_collision_cb.value)
 
         return (
             np.array(retargeted_motions)[1:],
@@ -703,27 +691,11 @@ class InteractionMeshRetargeter:
             with self.server.gui.add_folder("Visibility"):
                 show_meshes_cb = self.server.gui.add_checkbox("Show meshes", self.viser_robot.show_visual)
 
-                name_filters = (self.object_name,) if self.object_name else None
-                self._ensure_mjcf_geom_handles(name_filters=name_filters)
-                show_mjcf_visual_cb = self.server.gui.add_checkbox("Show MJCF visual geoms", True)
-                show_mjcf_collision_cb = self.server.gui.add_checkbox("Show MJCF collision geoms", False)
-
-                self._set_handles_visible(self._mjcf_visual_handles, show_mjcf_visual_cb.value)
-                self._set_handles_visible(self._mjcf_collision_handles, show_mjcf_collision_cb.value)
-
                 @show_meshes_cb.on_update
                 def _(_):
                     self.viser_robot.show_visual = show_meshes_cb.value
                     if self.viser_object is not None:
                         self.viser_object.show_visual = show_meshes_cb.value
-
-                @show_mjcf_visual_cb.on_update
-                def _(_):
-                    self._set_handles_visible(self._mjcf_visual_handles, show_mjcf_visual_cb.value)
-
-                @show_mjcf_collision_cb.on_update
-                def _(_):
-                    self._set_handles_visible(self._mjcf_collision_handles, show_mjcf_collision_cb.value)
 
         return (
             np.array(retargeted_motions)[1:],
