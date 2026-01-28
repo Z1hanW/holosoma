@@ -183,19 +183,13 @@ class InteractionMeshRetargeter:
         # Create parent frames for robot and object
         self.robot_base = self.server.scene.add_frame("/world/robot", show_axes=False)
 
-        # Load robot URDF
-        self.robot_urdf = yourdfpy.URDF.load(
-            self.robot_model_path,
-            load_meshes=True,
-            build_scene_graph=True,
-        )
-
         print("Viser using robot URDF: ", self.robot_model_path)
 
         # Create ViserUrdf instance for robot, attaching it to the robot_base frame
+        # Pass the URDF path so mesh paths resolve relative to the URDF location.
         self.viser_robot = ViserUrdf(
             self.server,
-            urdf_or_path=self.robot_urdf,
+            urdf_or_path=Path(self.robot_model_path),
             root_node_name="/world/robot",  # This links to the robot_base frame we created
         )
         # Ensure visual meshes are enabled by default.
@@ -208,16 +202,10 @@ class InteractionMeshRetargeter:
         if self.object_model_path:
             self.object_base = self.server.scene.add_frame("/world/object", show_axes=False)
 
-            self.object_urdf = yourdfpy.URDF.load(
-                self.object_model_path,
-                load_meshes=True,
-                build_scene_graph=True,
-            )
-
             # Create ViserUrdf instance for object, attaching it to the object_base frame
             self.viser_object = ViserUrdf(
                 self.server,
-                urdf_or_path=self.object_urdf,
+                urdf_or_path=Path(self.object_model_path),
                 root_node_name="/world/object",  # This links to the object_base frame we created
             )
             try:
