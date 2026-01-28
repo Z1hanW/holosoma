@@ -85,6 +85,7 @@ pieces_dir = Path("$stage_obj_dir/pieces")
 assets_path = Path("$stage_obj_dir/box_assets.xml")
 body_path = Path("$stage_obj_dir/box_body.xml")
 fallback_mesh = Path("$stage_obj_dir/scene_mesh_sqs.obj")
+object_prefix = "$OBJECT_NAME"
 
 def sanitize(name: str) -> str:
     name = re.sub(r"[^A-Za-z0-9_]", "_", name)
@@ -115,9 +116,9 @@ assets_path.write_text("\\n".join(asset_lines) + "\\n")
 
 body_lines = ["<mujocoinclude>"]
 for idx, (mesh_name, _mesh_path) in enumerate(meshes, start=1):
-    body_lines.append(f'    <body name="scene_piece_{idx}" pos="0 0 0" quat="1 0 0 0">')
+    body_lines.append(f'    <body name="{object_prefix}_piece_{idx}" pos="0 0 0" quat="1 0 0 0">')
     body_lines.append(
-        f'        <geom name="scene_piece_{idx}_geom" type="mesh" mesh="{mesh_name}" '
+        f'        <geom name="{object_prefix}_piece_{idx}_geom" type="mesh" mesh="{mesh_name}" '
         f'pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>'
     )
     body_lines.append("    </body>")
