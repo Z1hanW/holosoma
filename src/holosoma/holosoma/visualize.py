@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import sys
+
+from loguru import logger
 
 KNOWN_MODES = ("rollout", "replay", "perception", "physics", "smpl", "joints")
 
@@ -67,6 +70,11 @@ def _run(module_main, argv: list[str]) -> None:
 
 
 def main() -> None:
+    if "LOGURU_LEVEL" not in os.environ:
+        os.environ["LOGURU_LEVEL"] = "WARNING"
+    logger.remove()
+    logger.add(sys.stdout, level=os.environ["LOGURU_LEVEL"].upper(), colorize=True)
+
     argv = sys.argv[1:]
     if not argv or argv[0] in ("-h", "--help", "help"):
         _print_usage()

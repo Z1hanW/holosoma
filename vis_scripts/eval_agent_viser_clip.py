@@ -45,6 +45,11 @@ from holosoma.utils.sim_utils import (  # noqa: E402
 from holosoma.utils.tyro_utils import TYRO_CONIFG  # noqa: E402
 from holosoma.utils.viser_utils import resolve_viser_port  # noqa: E402
 
+if "LOGURU_LEVEL" not in os.environ:
+    os.environ["LOGURU_LEVEL"] = "WARNING"
+logger.remove()
+logger.add(sys.stdout, level=os.environ["LOGURU_LEVEL"].upper(), colorize=True)
+
 
 @dataclass(frozen=True)
 class ViserLiveConfig:
