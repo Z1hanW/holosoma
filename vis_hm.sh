@@ -75,7 +75,7 @@ cmd=(
   --viser-recenter "${VISER_RECENTER}"
   --training.viser-show-scandots "${VISER_SHOW_SCANDOTS}"
   perception:heightmap
-  --perception.heightmap_size "${HEIGHTMAP_SIZE}" "${HEIGHTMAP_SIZE}"
+  --perception.heightmap_size "(${HEIGHTMAP_SIZE}, ${HEIGHTMAP_SIZE})"
   --perception.heightmap_resolution "${HEIGHTMAP_RESOLUTION}"
   --perception.ray_start_height "${RAY_START_HEIGHT}"
 )
