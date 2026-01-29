@@ -544,7 +544,7 @@ class BaseTask:
             return
 
         pts = points_env.detach().cpu().numpy()
-        point_color = [0.0, 1.0, 1.0]
+        point_color = [1.0, 0.0, 0.0]
         point_size = float(getattr(self.training_config, "isaac_scandots_point_size", 2.0))
 
         colors = [point_color for _ in range(pts.shape[0])]

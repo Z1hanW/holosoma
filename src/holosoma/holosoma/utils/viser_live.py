@@ -131,7 +131,7 @@ class ViserLiveViewer:
         self._scandots_handle = None
         self._scandots_enabled = False
         self._scandots_point_size = 0.02
-        self._scandots_color = np.array([0, 255, 255], dtype=np.uint8)
+        self._scandots_color = np.array([255, 0, 0], dtype=np.uint8)
         self._scandots_warned = False
         self._play_control = None
         self._step_button = None
@@ -269,6 +269,26 @@ class ViserLiveViewer:
         self._terrain_handle = None
         self._ground_handle = None
 
+    def _update_terrain_transform(self, viewer_offset: np.ndarray | None = None) -> None:
+        handle = self._terrain_handle or self._ground_handle
+        if handle is None:
+            return
+        terrain_offset = np.zeros(3, dtype=np.float32)
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is not None and getattr(motion_cmd.motion_cfg, "pair_terrain_with_motion", False):
+            resolved = self._resolve_env_origin()
+            if resolved is not None:
+                terrain_offset = resolved
+        if viewer_offset is None:
+            if self._recenter and self._offset is not None:
+                viewer_offset = self._offset
+            else:
+                viewer_offset = np.zeros(3, dtype=np.float32)
+        try:
+            handle.position = terrain_offset - viewer_offset
+        except Exception:
+            pass
+
     def _reload_terrain_for_clip(self, clip_name: str | None) -> None:
         if not self._enabled or self._server is None:
             return
@@ -277,6 +297,7 @@ class ViserLiveViewer:
         self._terrain_clip_name = clip_name
         self._clear_terrain_handles()
         self._load_terrain(clip_name=clip_name)
+        self._update_terrain_transform()
 
     def wait_if_paused(self) -> None:
         if not self._enabled or self._play_control is None:
@@ -335,6 +356,7 @@ class ViserLiveViewer:
             if self._offset is None:
                 self._offset = root_pos.copy()
         offset = self._offset if self._recenter else np.zeros(3, dtype=np.float32)
+        self._update_terrain_transform(offset)
 
         with self._server.atomic():
             self._robot_root.position = root_pos - offset
@@ -464,6 +486,7 @@ class ViserLiveViewer:
             )
             if self._show_terrain_cb is not None:
                 self._ground_handle.visible = bool(self._show_terrain_cb.value)
+            self._update_terrain_transform()
             return
 
         self._terrain_handle = self._server.scene.add_mesh_simple(
@@ -475,6 +498,7 @@ class ViserLiveViewer:
         )
         if self._show_terrain_cb is not None:
             self._terrain_handle.visible = bool(self._show_terrain_cb.value)
+        self._update_terrain_transform()
 
     def _setup_controls(self) -> None:
         if self._server is None:
@@ -660,6 +684,7 @@ class ViserLiveViewer:
                         self._offset = offset
                     else:
                         self._offset = np.zeros(3, dtype=np.float32)
+                    self._update_terrain_transform(self._offset)
 
             clip_gui_enabled = os.environ.get("VISER_ENABLE_CLIP_GUI", "1").lower() not in (
                 "0",

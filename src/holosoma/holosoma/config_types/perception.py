@@ -86,6 +86,12 @@ class PerceptionConfig:
     camera_scandots_stride: int = 4
     """Pixel stride for scandots depth (mesh_raycast_scandots)."""
 
+    camera_scandots_width: int | None = None
+    """Optional scandots sample count along image width (overrides stride when set)."""
+
+    camera_scandots_height: int | None = None
+    """Optional scandots sample count along image height (overrides stride when set)."""
+
     camera_scandots_upsample: str = "bilinear"
     """Upsampling mode for scandots depth (mesh_raycast_scandots)."""
 

@@ -386,20 +386,44 @@ class PerceptionManager:
         return dirs_base
 
     def _build_camera_scandots_rays(self) -> torch.Tensor:
-        stride = max(1, int(self.cfg.camera_scandots_stride))
-        u_coords = torch.arange(0, self._camera_width, stride, device=self.device, dtype=torch.float32)
-        v_coords = torch.arange(0, self._camera_height, stride, device=self.device, dtype=torch.float32)
-        if u_coords.numel() == 0 or v_coords.numel() == 0:
-            raise ValueError("camera_scandots_stride is too large for the camera resolution.")
+        target_w = self.cfg.camera_scandots_width
+        target_h = self.cfg.camera_scandots_height
+        if target_w is not None or target_h is not None:
+            if target_w is None:
+                target_w = target_h
+            if target_h is None:
+                target_h = target_w
+            target_w = max(1, int(target_w or 1))
+            target_h = max(1, int(target_h or 1))
+            u_coords = torch.linspace(
+                0.0,
+                float(self._camera_width - 1),
+                steps=target_w,
+                device=self.device,
+                dtype=torch.float32,
+            )
+            v_coords = torch.linspace(
+                0.0,
+                float(self._camera_height - 1),
+                steps=target_h,
+                device=self.device,
+                dtype=torch.float32,
+            )
+        else:
+            stride = max(1, int(self.cfg.camera_scandots_stride))
+            u_coords = torch.arange(0, self._camera_width, stride, device=self.device, dtype=torch.float32)
+            v_coords = torch.arange(0, self._camera_height, stride, device=self.device, dtype=torch.float32)
+            if u_coords.numel() == 0 or v_coords.numel() == 0:
+                raise ValueError("camera_scandots_stride is too large for the camera resolution.")
 
-        if int(u_coords[-1].item()) != self._camera_width - 1:
-            u_coords = torch.cat(
-                [u_coords, torch.tensor([self._camera_width - 1], device=self.device, dtype=torch.float32)]
-            )
-        if int(v_coords[-1].item()) != self._camera_height - 1:
-            v_coords = torch.cat(
-                [v_coords, torch.tensor([self._camera_height - 1], device=self.device, dtype=torch.float32)]
-            )
+            if int(u_coords[-1].item()) != self._camera_width - 1:
+                u_coords = torch.cat(
+                    [u_coords, torch.tensor([self._camera_width - 1], device=self.device, dtype=torch.float32)]
+                )
+            if int(v_coords[-1].item()) != self._camera_height - 1:
+                v_coords = torch.cat(
+                    [v_coords, torch.tensor([self._camera_height - 1], device=self.device, dtype=torch.float32)]
+                )
 
         self._camera_scandots_width = int(u_coords.numel())
         self._camera_scandots_height = int(v_coords.numel())
