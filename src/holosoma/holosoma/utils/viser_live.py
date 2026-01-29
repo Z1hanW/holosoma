@@ -133,6 +133,9 @@ class ViserLiveViewer:
         self._scandots_point_size = 0.02
         self._scandots_color = np.array([255, 0, 0], dtype=np.uint8)
         self._scandots_warned = False
+        self._target_keypoints_handle = None
+        self._target_keypoints_point_size = 0.03
+        self._target_keypoints_color = np.array([255, 0, 0], dtype=np.uint8)
         self._play_control = None
         self._step_button = None
         self._reset_button = None
@@ -371,6 +374,7 @@ class ViserLiveViewer:
 
             if self._scandots_enabled:
                 self._update_scandots(offset)
+            self._update_target_keypoints(offset)
 
             if self._vo is None or self._object_root is None:
                 return
@@ -1019,9 +1023,17 @@ class ViserLiveViewer:
             return
 
         env_ids = torch.tensor([self._env_id], device=self._env.device, dtype=torch.long)
+        include_misses = os.environ.get("VISER_SCANDOTS_INCLUDE_MISSES", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
         try:
             with torch.no_grad():
-                result = perception_mgr.get_camera_scandots_points(env_ids, include_misses=False)
+                result = perception_mgr.get_camera_scandots_points(
+                    env_ids,
+                    include_misses=include_misses,
+                )
         except Exception as exc:
             if not self._scandots_warned:
                 logger.warning("Viser scandots disabled: {}", exc)
@@ -1039,9 +1051,10 @@ class ViserLiveViewer:
         if points.numel() == 0:
             return
         points_env = points[0]
-        mask_env = mask[0]
-        if mask_env.numel() > 0:
-            points_env = points_env[mask_env]
+        if not include_misses:
+            mask_env = mask[0]
+            if mask_env.numel() > 0:
+                points_env = points_env[mask_env]
         if points_env.numel() == 0:
             if self._scandots_handle is not None:
                 self._scandots_handle.visible = False
@@ -1062,6 +1075,44 @@ class ViserLiveViewer:
         else:
             self._scandots_handle.visible = True
             self._scandots_handle.points = pts.astype(np.float32, copy=False)
+
+    def _update_target_keypoints(self, offset: np.ndarray) -> None:
+        if not self._server:
+            return
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None or not hasattr(motion_cmd, "body_pos_w"):
+            return
+        try:
+            points = motion_cmd.body_pos_w
+            pts_env = points[self._env_id]
+        except Exception:
+            return
+
+        pts = pts_env.detach().cpu().numpy()
+        if self._recenter:
+            pts = pts - offset
+
+        if pts.size == 0:
+            return
+
+        if self._target_keypoints_handle is None:
+            colors = np.tile(self._target_keypoints_color, (pts.shape[0], 1))
+            self._target_keypoints_handle = self._server.scene.add_point_cloud(
+                "/target_keypoints",
+                points=pts.astype(np.float32, copy=False),
+                colors=colors.astype(np.uint8, copy=False),
+                point_size=float(self._target_keypoints_point_size),
+                point_shape="circle",
+                precision="float32",
+            )
+        else:
+            self._target_keypoints_handle.points = pts.astype(np.float32, copy=False)
+            if getattr(self._target_keypoints_handle, "colors", None) is not None:
+                colors = np.tile(self._target_keypoints_color, (pts.shape[0], 1))
+                try:
+                    self._target_keypoints_handle.colors = colors.astype(np.uint8, copy=False)
+                except Exception:
+                    pass
 
 
 def _normalize_env_ids(env_ids) -> list[int]:

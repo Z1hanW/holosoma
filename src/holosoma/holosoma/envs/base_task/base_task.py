@@ -522,9 +522,17 @@ class BaseTask:
             env_id = 0
         env_ids = torch.tensor([env_id], device=self.device, dtype=torch.long)
 
+        include_misses = os.environ.get("ISAAC_SCANDOTS_INCLUDE_MISSES", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
         try:
             with torch.no_grad():
-                result = self.perception_manager.get_camera_scandots_points(env_ids, include_misses=False)
+                result = self.perception_manager.get_camera_scandots_points(
+                    env_ids,
+                    include_misses=include_misses,
+                )
         except Exception as exc:
             if not self._isaac_scandots_warned:
                 self._isaac_scandots_warned = True
@@ -536,9 +544,10 @@ class BaseTask:
 
         points, mask = result
         points_env = points[0]
-        mask_env = mask[0]
-        if mask_env.numel() > 0:
-            points_env = points_env[mask_env]
+        if not include_misses:
+            mask_env = mask[0]
+            if mask_env.numel() > 0:
+                points_env = points_env[mask_env]
         if points_env.numel() == 0:
             self.simulator.draw.clear_points()
             return
