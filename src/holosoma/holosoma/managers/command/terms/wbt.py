@@ -764,6 +764,16 @@ class MotionCommand(CommandTermBase):
         self._terrain_row_ids: torch.Tensor | None = None
         self._terrain_row_stride: float = 0.0
         self._terrain_row_count: int = 0
+        self._forced_clip_idx: int | None = None
+
+    def set_forced_clip(self, clip_idx: int | None) -> None:
+        """Force a specific clip index for resets (None clears the override)."""
+        if clip_idx is None:
+            self._forced_clip_idx = None
+            return
+        if clip_idx < 0 or clip_idx >= self.motion.num_clips:
+            raise ValueError(f"clip_idx {clip_idx} out of range for {self.motion.num_clips} clips.")
+        self._forced_clip_idx = int(clip_idx)
 
     def setup(self) -> None:
         self.num_envs = self._env.num_envs
@@ -857,7 +867,9 @@ class MotionCommand(CommandTermBase):
         if env_ids.numel() == 0:
             return
 
-        if self.multi_clip:
+        if self._forced_clip_idx is not None:
+            self.clip_ids[env_ids] = int(self._forced_clip_idx)
+        elif self.multi_clip:
             self._update_clip_success_stats(env_ids)
             if self._env.is_evaluating:
                 self.clip_ids[env_ids] = 0

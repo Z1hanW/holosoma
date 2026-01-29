@@ -433,6 +433,9 @@ class BaseTask:
 
     def step(self, actor_state):
         """Apply actions, advance the simulation, and return rollout buffers."""
+        if hasattr(self, "_viser_live") and getattr(self._viser_live, "enabled", False):
+            self._viser_live.apply_pending_controls()
+            self._viser_live.wait_if_paused()
         actions = actor_state["actions"]
         self._pre_physics_step(actions)
         self._physics_step()
