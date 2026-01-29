@@ -15,7 +15,7 @@ set -euo pipefail
 #     - If MOTION_DIR is a single .npz and GEOMETRY_DIR is a folder, a matching
 #       <clip>.obj is auto-selected when available.
 #   GEOMETRY_META=/abs/path/to/metadata.json
-#   NUM_ENVS=1
+#   NUM_ENVS=4
 #   HEADLESS=True
 #   NUM_ROWS=1
 #   NUM_COLS=
@@ -38,7 +38,10 @@ set -euo pipefail
 #   VISER_SYNC_TO_SIM=True
 #   VISER_FORCE_DT=True
 #   VISER_RECENTER=True
-#   VISER_SHOW_SCANDOTS=False
+#   VISER_SHOW_SCANDOTS=True
+#   CONTACT_FORCE_VIZ=True
+#   CONTACT_FORCE_VIZ_SCALE=0.001
+#   CONTACT_FORCE_VIZ_THRESHOLD=1.0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
@@ -50,7 +53,7 @@ GEOMETRY_META=${GEOMETRY_META:-""}
 MOTION_CLIP=${MOTION_CLIP:-""}
 MOTION_CLIP_ID=${MOTION_CLIP_ID:-""}
 MOTION_ALL=${MOTION_ALL:-"False"}
-NUM_ENVS=${NUM_ENVS:-1}
+NUM_ENVS=${NUM_ENVS:-4}
 HEADLESS=${HEADLESS:-True}
 NUM_ROWS=${NUM_ROWS:-1}
 NUM_COLS=${NUM_COLS:-}
@@ -73,7 +76,10 @@ VISER_UPDATE_HZ=${VISER_UPDATE_HZ:-0}
 VISER_SYNC_TO_SIM=${VISER_SYNC_TO_SIM:-True}
 VISER_FORCE_DT=${VISER_FORCE_DT:-True}
 VISER_RECENTER=${VISER_RECENTER:-True}
-VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-False}
+VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-True}
+CONTACT_FORCE_VIZ=${CONTACT_FORCE_VIZ:-True}
+CONTACT_FORCE_VIZ_SCALE=${CONTACT_FORCE_VIZ_SCALE:-0.001}
+CONTACT_FORCE_VIZ_THRESHOLD=${CONTACT_FORCE_VIZ_THRESHOLD:-1.0}
 
 if [[ "${CKPT}" == "/ABS/PATH/to/model.pt" ]]; then
   echo "Set CKPT to your checkpoint path." >&2
@@ -134,6 +140,9 @@ cmd=(
   --training.viser-sync-to-sim "${VISER_SYNC_TO_SIM}"
   --training.viser-force-dt "${VISER_FORCE_DT}"
   --training.viser-show-scandots "${VISER_SHOW_SCANDOTS}"
+  --simulator.config.contact_force_viz "${CONTACT_FORCE_VIZ}"
+  --simulator.config.contact_force_viz_scale "${CONTACT_FORCE_VIZ_SCALE}"
+  --simulator.config.contact_force_viz_threshold "${CONTACT_FORCE_VIZ_THRESHOLD}"
   --simulator.config.sim.physx.gpu_collision_stack_size "${PHYSX_GPU_COLLISION_STACK_SIZE}"
   --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob "${START_AT_TIMESTEP_ZERO_PROB}"
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_append "${ENABLE_DEFAULT_POSE_APPEND}"
