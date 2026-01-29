@@ -59,6 +59,7 @@ def _load_terrain_mesh(
     obj_metadata_path: str | None,
     num_rows: int | None,
     num_cols: int | None,
+    clip_name: str | None = None,
 ):
     if not obj_path:
         return None
@@ -72,7 +73,10 @@ def _load_terrain_mesh(
     def _load_mesh(path: Path) -> trimesh.Trimesh:
         mesh = trimesh.load(str(path), process=False)
         if isinstance(mesh, trimesh.Scene):
-            mesh = mesh.dump(concatenate=True)
+            meshes = mesh.dump(concatenate=False)
+            if not meshes:
+                raise ValueError("Loaded terrain scene has no geometries.")
+            mesh = max(meshes, key=lambda m: len(getattr(m, "faces", [])) or len(m.vertices))
         if not isinstance(mesh, trimesh.Trimesh):
             raise ValueError(f"Loaded terrain is not a trimesh: {type(mesh)}")
         return mesh
@@ -88,18 +92,13 @@ def _load_terrain_mesh(
             return sorted(Path(p) for p in glob.glob(path_str))
         return [path] if path.exists() else []
 
-    def _tile_single_mesh(mesh: trimesh.Trimesh, rows: int, cols: int) -> trimesh.Trimesh:
-        if rows * cols <= 1:
-            return mesh
-        gap = 1e-4
-        stride = (mesh.bounds[1] - mesh.bounds[0]) + gap
-        tiles = []
-        for r in range(rows):
-            for c in range(cols):
-                tile = mesh.copy()
-                tile.apply_translation([c * stride[0], r * stride[1], 0.0])
-                tiles.append(tile)
-        return trimesh.util.concatenate(tiles)
+    def _select_obj_path(paths: list[Path], name: str | None) -> Path:
+        if name:
+            for candidate in paths:
+                if candidate.stem == name or candidate.stem.lower() == name.lower():
+                    return candidate
+            logger.warning("No terrain OBJ matching clip '{}'; using {}.", name, paths[0].name)
+        return paths[0]
 
     terrain_path = Path(_resolve_data_path(obj_path))
     obj_paths = _resolve_obj_paths(str(terrain_path))
@@ -109,36 +108,11 @@ def _load_terrain_mesh(
     if obj_metadata_path:
         if len(obj_paths) != 1:
             logger.warning("OBJ metadata requires a single OBJ file; ignoring metadata for directory input.")
-        base_mesh = _load_mesh(obj_paths[0])
-        return base_mesh
+        selected_path = obj_paths[0]
+    else:
+        selected_path = _select_obj_path(obj_paths, clip_name)
 
-    rows = int(num_rows or 1)
-    cols = int(num_cols or 1)
-
-    if len(obj_paths) == 1:
-        base_mesh = _load_mesh(obj_paths[0])
-        return _tile_single_mesh(base_mesh, rows, cols)
-
-    meshes = []
-    spans = []
-    for path in obj_paths:
-        mesh = _load_mesh(path)
-        meshes.append(mesh)
-        spans.append(mesh.bounds[1] - mesh.bounds[0])
-
-    spans = np.vstack(spans)
-    gap = 1e-4
-    stride = spans.max(axis=0) + gap
-
-    tiles = []
-    for col, mesh in enumerate(meshes):
-        col_offset = np.array([col * stride[0], 0.0, 0.0], dtype=np.float64)
-        for row in range(rows):
-            offset = col_offset + np.array([0.0, row * stride[1], 0.0], dtype=np.float64)
-            tile = mesh.copy()
-            tile.apply_translation(offset)
-            tiles.append(tile)
-    return trimesh.util.concatenate(tiles)
+    return _load_mesh(selected_path)
 
 
 class ViserLiveViewer:
@@ -174,6 +148,7 @@ class ViserLiveViewer:
         self._grid_handle = None
         self._terrain_handle = None
         self._ground_handle = None
+        self._terrain_clip_name = None
         self._show_robot_cb = None
         self._show_object_cb = None
         self._show_terrain_cb = None
@@ -245,7 +220,6 @@ class ViserLiveViewer:
             self._server,
             urdf_or_path=Path(robot_urdf),
             root_node_name="/robot",
-            mesh_color_override=LIGHT_BLUE,
         )
 
         object_urdf = _resolve_object_urdf_path(env.robot_config)
@@ -284,6 +258,26 @@ class ViserLiveViewer:
         except Exception:
             return
 
+    def _clear_terrain_handles(self) -> None:
+        for handle in (self._terrain_handle, self._ground_handle):
+            if handle is None:
+                continue
+            try:
+                handle.remove()
+            except Exception:
+                pass
+        self._terrain_handle = None
+        self._ground_handle = None
+
+    def _reload_terrain_for_clip(self, clip_name: str | None) -> None:
+        if not self._enabled or self._server is None:
+            return
+        if clip_name == self._terrain_clip_name:
+            return
+        self._terrain_clip_name = clip_name
+        self._clear_terrain_handles()
+        self._load_terrain(clip_name=clip_name)
+
     def wait_if_paused(self) -> None:
         if not self._enabled or self._play_control is None:
             return
@@ -310,6 +304,7 @@ class ViserLiveViewer:
         if self._env_id not in _normalize_env_ids(env_ids):
             return
         self._offset = self._resolve_env_origin()
+        self._reload_terrain_for_clip(self._current_clip_name(self._get_motion_command()))
 
     def record_step(self) -> None:
         if not self._enabled or self._vr is None or self._robot_root is None:
@@ -377,6 +372,7 @@ class ViserLiveViewer:
                     clip_names = getattr(motion_cmd.motion, "clip_ids", [])
                     clip_name = clip_names[clip_idx] if 0 <= clip_idx < len(clip_names) else str(clip_idx)
                     self._clip_label.content = f"Current clip: `{clip_name}`"
+                    self._reload_terrain_for_clip(str(clip_name))
                 except Exception:
                     pass
 
@@ -397,44 +393,61 @@ class ViserLiveViewer:
         else:
             self._joint_order = np.array([name_to_idx[name] for name in viser_joint_names], dtype=np.int64)
 
-    def _load_terrain(self) -> None:
+    def _load_terrain(self, clip_name: str | None = None) -> None:
         if self._server is None:
             return
         terrain_mgr = getattr(self._env, "terrain_manager", None)
         if terrain_mgr is None:
             return
-        terrain_state = terrain_mgr.get_state("locomotion_terrain")
-        mesh = getattr(terrain_state, "mesh", None)
-        if mesh is None:
-            terrain = getattr(terrain_state, "terrain", None)
-            mesh = getattr(terrain, "mesh", None) if terrain is not None else None
-        if mesh is not None:
-            try:
-                import trimesh  # type: ignore[import-not-found]
-            except Exception:
-                mesh = None
-            else:
-                if isinstance(mesh, trimesh.Scene):
-                    mesh = mesh.dump(concatenate=True)
-                if not isinstance(mesh, trimesh.Trimesh):
-                    try:
-                        mesh = trimesh.Trimesh(vertices=np.asarray(mesh.vertices), faces=np.asarray(mesh.faces))
-                    except Exception:
-                        mesh = None
 
-        if mesh is None:
-            terrain_cfg = getattr(terrain_mgr, "cfg", None)
-            terrain_term = getattr(terrain_cfg, "terrain_term", None) if terrain_cfg is not None else None
-            if terrain_term is None:
-                return
+        motion_cmd = self._get_motion_command()
+        if clip_name is None:
+            clip_name = self._current_clip_name(motion_cmd)
+        self._terrain_clip_name = clip_name
+
+        terrain_state = terrain_mgr.get_state("locomotion_terrain")
+        terrain_cfg = getattr(terrain_mgr, "cfg", None)
+        terrain_term = getattr(terrain_cfg, "terrain_term", None) if terrain_cfg is not None else None
+
+        mesh = None
+        if terrain_term is not None:
             obj_path = getattr(terrain_term, "obj_file_path", None) or ""
-            if not obj_path:
-                return
             obj_meta = getattr(terrain_term, "obj_metadata_path", None)
             rows = getattr(terrain_term, "num_rows", None)
             cols = getattr(terrain_term, "num_cols", None)
+            if obj_path:
+                mesh = _load_terrain_mesh(
+                    obj_path,
+                    obj_metadata_path=obj_meta,
+                    num_rows=rows,
+                    num_cols=cols,
+                    clip_name=clip_name,
+                )
 
-            mesh = _load_terrain_mesh(obj_path, obj_metadata_path=obj_meta, num_rows=rows, num_cols=cols)
+        if mesh is None:
+            mesh = getattr(terrain_state, "mesh", None)
+            if mesh is None:
+                terrain = getattr(terrain_state, "terrain", None)
+                mesh = getattr(terrain, "mesh", None) if terrain is not None else None
+            if mesh is not None:
+                try:
+                    import trimesh  # type: ignore[import-not-found]
+                except Exception:
+                    mesh = None
+                else:
+                    if isinstance(mesh, trimesh.Scene):
+                        meshes = mesh.dump(concatenate=False)
+                        if meshes:
+                            mesh = max(
+                                meshes,
+                                key=lambda m: len(getattr(m, "faces", [])) or len(m.vertices),
+                            )
+                    if not isinstance(mesh, trimesh.Trimesh):
+                        try:
+                            mesh = trimesh.Trimesh(vertices=np.asarray(mesh.vertices), faces=np.asarray(mesh.faces))
+                        except Exception:
+                            mesh = None
+
         if mesh is None:
             try:
                 import trimesh  # type: ignore[import-not-found]
@@ -449,7 +462,10 @@ class ViserLiveViewer:
                 color=LIGHT_BLUE,
                 side="double",
             )
+            if self._show_terrain_cb is not None:
+                self._ground_handle.visible = bool(self._show_terrain_cb.value)
             return
+
         self._terrain_handle = self._server.scene.add_mesh_simple(
             "/terrain",
             mesh.vertices,
@@ -457,6 +473,8 @@ class ViserLiveViewer:
             color=LIGHT_BLUE,
             side="double",
         )
+        if self._show_terrain_cb is not None:
+            self._terrain_handle.visible = bool(self._show_terrain_cb.value)
 
     def _setup_controls(self) -> None:
         if self._server is None:
@@ -750,6 +768,18 @@ class ViserLiveViewer:
         except Exception:
             return None
 
+    def _current_clip_name(self, motion_cmd, clip_idx: int | None = None) -> str | None:
+        if motion_cmd is None or not hasattr(motion_cmd, "motion"):
+            return None
+        if clip_idx is None:
+            clip_idx = self._current_clip_index(motion_cmd)
+        if clip_idx is None:
+            return None
+        clip_names = list(getattr(motion_cmd.motion, "clip_ids", []))
+        if 0 <= int(clip_idx) < len(clip_names):
+            return str(clip_names[int(clip_idx)])
+        return None
+
     def _get_clip_length(self, motion_cmd, clip_idx: int) -> int | None:
         if motion_cmd is None or not hasattr(motion_cmd, "motion"):
             return None
@@ -799,6 +829,7 @@ class ViserLiveViewer:
             except Exception:
                 motion_cmd._forced_clip_idx = None
         self._force_clip_state(motion_cmd, int(clip_idx), clip_start)
+        self._reload_terrain_for_clip(self._current_clip_name(motion_cmd, int(clip_idx)))
 
     def _force_clip_state(self, motion_cmd, clip_idx: int, clip_start: int | None) -> None:
         env_ids = torch.tensor([self._env_id], device=self._env.device, dtype=torch.long)
@@ -869,6 +900,17 @@ class ViserLiveViewer:
         self._env._clip_observations()
 
     def _resolve_env_origin(self) -> np.ndarray | None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is not None and hasattr(motion_cmd, "_get_env_offsets"):
+            try:
+                device = getattr(motion_cmd, "device", None) or getattr(self._env, "device", "cpu")
+                env_ids = torch.tensor([self._env_id], device=device, dtype=torch.long)
+                offsets = motion_cmd._get_env_offsets(env_ids)
+                if offsets is not None:
+                    return offsets[0].detach().cpu().numpy()
+            except Exception:
+                pass
+
         origins = None
         terrain_mgr = getattr(self._env, "terrain_manager", None)
         if terrain_mgr is not None and hasattr(terrain_mgr, "get_state"):
