@@ -100,11 +100,22 @@ class PerceptionManager:
         self._camera_hfov_deg = hfov
         self._camera_num_points = self._camera_width * self._camera_height
 
-        self._num_points = cfg.grid_size * cfg.grid_size
+        (
+            self._heightmap_grid_x,
+            self._heightmap_grid_y,
+            self._heightmap_interval_x,
+            self._heightmap_interval_y,
+        ) = self._resolve_heightmap_grid()
+        self._num_points = self._heightmap_grid_x * self._heightmap_grid_y
         self._update_interval = 0.0 if cfg.update_hz <= 0 else 1.0 / cfg.update_hz
         self._time_since_update = 0.0
 
-        self._heightmap = torch.zeros(self.num_envs, cfg.grid_size, cfg.grid_size, device=self.device)
+        self._heightmap = torch.zeros(
+            self.num_envs,
+            self._heightmap_grid_x,
+            self._heightmap_grid_y,
+            device=self.device,
+        )
         self._camera_depth = torch.full(
             (self.num_envs, self._camera_height, self._camera_width),
             cfg.max_distance,
@@ -227,7 +238,7 @@ class PerceptionManager:
 
         ray_starts, ray_dirs, ray_hits_world, root_pos, base_quat, offset_world = self._compute_rays(env_ids)
         distances = self._compute_ray_distances(ray_starts, ray_dirs, ray_hits_world)
-        heightmap = distances.view(-1, self.cfg.grid_size, self.cfg.grid_size)
+        heightmap = distances.view(-1, self._heightmap_grid_x, self._heightmap_grid_y)
 
         idx = env_ids if env_ids is not None else slice(None)
         self._heightmap[idx] = heightmap
@@ -345,15 +356,23 @@ class PerceptionManager:
         )
 
     def _build_grid(self) -> tuple[torch.Tensor, torch.Tensor]:
-        half_extent = (self.cfg.grid_size - 1) * self.cfg.grid_interval / 2.0
-        coords = torch.linspace(
-            -half_extent,
-            half_extent,
-            self.cfg.grid_size,
+        half_extent_x = (self._heightmap_grid_x - 1) * self._heightmap_interval_x / 2.0
+        half_extent_y = (self._heightmap_grid_y - 1) * self._heightmap_interval_y / 2.0
+        coords_x = torch.linspace(
+            -half_extent_x,
+            half_extent_x,
+            self._heightmap_grid_x,
             device=self.device,
             requires_grad=False,
         )
-        grid_x, grid_y = torch.meshgrid(coords, coords, indexing="ij")
+        coords_y = torch.linspace(
+            -half_extent_y,
+            half_extent_y,
+            self._heightmap_grid_y,
+            device=self.device,
+            requires_grad=False,
+        )
+        grid_x, grid_y = torch.meshgrid(coords_x, coords_y, indexing="ij")
         grid_points = torch.zeros(self._num_points, 3, device=self.device)
         grid_points[:, 0] = grid_x.flatten()
         grid_points[:, 1] = grid_y.flatten()
@@ -446,6 +465,21 @@ class PerceptionManager:
         dirs_base = quat_rotate_inverse(pitch_quat, dirs_cam, w_last=True)
         dirs_base = dirs_base / torch.norm(dirs_base, dim=-1, keepdim=True).clamp(min=1.0e-6)
         return dirs_base
+
+    def _resolve_heightmap_grid(self) -> tuple[int, int, float, float]:
+        size = getattr(self.cfg, "heightmap_size", None)
+        resolution = getattr(self.cfg, "heightmap_resolution", None)
+        if size is not None and resolution is not None:
+            size_x, size_y = size
+            resolution = float(resolution)
+            if resolution <= 0:
+                raise ValueError("heightmap_resolution must be > 0.")
+            grid_x = max(1, int(size_x / resolution) + 1)
+            grid_y = max(1, int(size_y / resolution) + 1)
+            return grid_x, grid_y, resolution, resolution
+        grid_size = int(self.cfg.grid_size)
+        grid_interval = float(self.cfg.grid_interval)
+        return grid_size, grid_size, grid_interval, grid_interval
 
     def _get_camera_forward_axis(self, body_quat: torch.Tensor) -> torch.Tensor:
         pitch_rad = torch.deg2rad(torch.tensor(self.cfg.camera_pitch_deg, device=body_quat.device))

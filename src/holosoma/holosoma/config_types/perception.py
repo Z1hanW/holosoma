@@ -26,6 +26,12 @@ class PerceptionConfig:
     grid_interval: float = 0.1
     """Grid spacing in meters between samples."""
 
+    heightmap_size: tuple[float, float] | None = None
+    """Optional (length, width) in meters for heightmap grid (VideoMimic-style)."""
+
+    heightmap_resolution: float | None = None
+    """Optional resolution (meters) for heightmap grid (VideoMimic-style)."""
+
     ray_start_height: float = 0.6
     """Height above the sampling plane to start rays (meters)."""
 
