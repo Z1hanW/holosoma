@@ -135,7 +135,7 @@ class ViserLiveViewer:
         self._scandots_warned = False
         self._target_keypoints_handle = None
         self._target_keypoints_point_size = 0.03
-        self._target_keypoints_color = np.array([255, 0, 0], dtype=np.uint8)
+        self._target_keypoints_color = np.array([128, 0, 128], dtype=np.uint8)
         self._play_control = None
         self._step_button = None
         self._reset_button = None

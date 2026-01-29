@@ -29,7 +29,7 @@ class PerceptionConfig:
     ray_start_height: float = 0.6
     """Height above the sampling plane to start rays (meters)."""
 
-    max_distance: float = 5.0
+    max_distance: float = 10.0
     """Clamp distance for missed rays (meters)."""
 
     update_hz: float = 50.0
