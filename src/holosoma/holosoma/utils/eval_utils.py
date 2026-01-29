@@ -53,8 +53,14 @@ def init_eval_logging() -> None:
     console_log_level = os.environ.get("LOGURU_LEVEL", "INFO").upper()
     logger.add(sys.stdout, level=console_log_level, colorize=True)
 
-    logging.basicConfig(level=logging.DEBUG)
+    py_log_level = os.environ.get("PY_LOG_LEVEL", console_log_level).upper()
+    level = logging._nameToLevel.get(py_log_level, logging.INFO)
+    logging.basicConfig(level=level)
+    logging.getLogger().setLevel(level)
     logging.getLogger().addHandler(LoguruLoggingBridge())
+    if level > logging.DEBUG:
+        for name in ("websockets", "websockets.server", "trimesh"):
+            logging.getLogger(name).setLevel(level)
 
 
 @dataclass(frozen=True)

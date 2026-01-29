@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from dataclasses import dataclass
@@ -46,8 +47,16 @@ from holosoma.utils.viser_utils import resolve_viser_port  # noqa: E402
 
 if "LOGURU_LEVEL" not in os.environ:
     os.environ["LOGURU_LEVEL"] = "WARNING"
+if "PY_LOG_LEVEL" not in os.environ:
+    os.environ["PY_LOG_LEVEL"] = os.environ["LOGURU_LEVEL"]
 logger.remove()
 logger.add(sys.stdout, level=os.environ["LOGURU_LEVEL"].upper(), colorize=True)
+level = logging._nameToLevel.get(os.environ["PY_LOG_LEVEL"].upper(), logging.WARNING)
+logging.basicConfig(level=level)
+logging.getLogger().setLevel(level)
+if level > logging.DEBUG:
+    for name in ("websockets", "websockets.server", "trimesh"):
+        logging.getLogger(name).setLevel(level)
 
 
 @dataclass(frozen=True)
