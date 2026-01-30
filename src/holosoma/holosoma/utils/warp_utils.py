@@ -52,8 +52,9 @@ def ray_cast(ray_starts_world: torch.Tensor, ray_directions_world: torch.Tensor,
       [Torch.tensor]: The ray hit position. Returns float('inf') for missed hits.
   """
   shape = ray_starts_world.shape
-  ray_starts_world = ray_starts_world.view(-1, 3)
-  ray_directions_world = ray_directions_world.view(-1, 3)
+  # Use reshape to handle non-contiguous expanded tensors.
+  ray_starts_world = ray_starts_world.reshape(-1, 3)
+  ray_directions_world = ray_directions_world.reshape(-1, 3)
   num_rays = len(ray_starts_world)
   ray_starts_world_wp = wp.types.array(
     ptr=ray_starts_world.data_ptr(),
@@ -93,7 +94,7 @@ def ray_cast(ray_starts_world: torch.Tensor, ray_directions_world: torch.Tensor,
     device=wp_mesh.device,
   )
   wp.synchronize()
-  return ray_hits_world.view(shape)
+  return ray_hits_world.reshape(shape)
 
 
 @wp.kernel
@@ -128,7 +129,7 @@ def nearest_point(points: torch.Tensor, wp_mesh: wp.Mesh) -> torch.Tensor:
       [Torch.tensor]: The ray hit position. Returns float('inf') for missed hits.
   """
   shape = points.shape
-  points = points.view(-1, 3)
+  points = points.reshape(-1, 3)
   num_points = len(points)
   points_wp = wp.types.array(
     ptr=points.data_ptr(),
@@ -155,7 +156,7 @@ def nearest_point(points: torch.Tensor, wp_mesh: wp.Mesh) -> torch.Tensor:
     device=wp_mesh.device,
   )
   wp.synchronize()
-  return mesh_points.view(shape)
+  return mesh_points.reshape(shape)
 
 
 def convert_to_wp_mesh(vertices: np.ndarray, triangles: np.ndarray, device: str) -> wp.Mesh:
