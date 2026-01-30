@@ -164,6 +164,19 @@ def _parse_quat_wxyz(raw) -> tuple[float, float, float, float] | None:
     return (vals[0], vals[1], vals[2], vals[3])
 
 
+def _quat_wxyz_to_xyzw(
+    quat_wxyz: tuple[float, float, float, float],
+    *,
+    device: torch.device | None = None,
+    dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    return torch.tensor(
+        [quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]],
+        device=device,
+        dtype=dtype,
+    )
+
+
 def _frustum_quat_from_camera(cam_quat_xyzw: torch.Tensor) -> torch.Tensor:
     x_axis = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32, device=cam_quat_xyzw.device)
     y_axis = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=cam_quat_xyzw.device)
@@ -420,6 +433,7 @@ class ViserLiveViewer:
         self._perception_show_camera_joint_cb = None
         self._perception_frustum = None
         self._perception_frame = None
+        self._perception_frame_quat_wxyz: tuple[float, float, float, float] | None = None
         self._heightmap_marker_handle = None
         self._heightmap_marker_is_pc = False
         self._camera_marker_handle = None
@@ -467,6 +481,9 @@ class ViserLiveViewer:
         self._recenter = bool(getattr(cfg, "viser_recenter", True))
         self._scandots_enabled = bool(getattr(cfg, "viser_show_scandots", False))
         self._scandots_point_size = float(getattr(cfg, "viser_scandots_point_size", 0.02))
+        self._perception_frame_quat_wxyz = _parse_quat_wxyz(
+            getattr(cfg, "viser_perception_frame_quat_wxyz", None)
+        )
 
         viser_mod, viser_urdf_cls, err = _import_viser()
         if err is not None or viser_mod is None or viser_urdf_cls is None:
@@ -1662,6 +1679,15 @@ class ViserLiveViewer:
                 cam_body_quat_xyzw = cam_body_quat_t[0].detach().cpu()
             except Exception:
                 cam_body_quat_xyzw = None
+            if self._perception_frame_quat_wxyz is not None and cam_quat_xyzw is not None:
+                extra_xyzw = _quat_wxyz_to_xyzw(
+                    self._perception_frame_quat_wxyz,
+                    device=cam_quat_xyzw.device,
+                    dtype=cam_quat_xyzw.dtype,
+                )
+                cam_quat_xyzw = quat_mul(cam_quat_xyzw, extra_xyzw, w_last=True)
+                if cam_body_quat_xyzw is not None:
+                    cam_body_quat_xyzw = quat_mul(cam_body_quat_xyzw, extra_xyzw, w_last=True)
         elif output_mode == "heightmap":
             near = 0.0
             try:

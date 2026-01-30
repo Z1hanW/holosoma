@@ -195,7 +195,7 @@ class InteractionMeshRetargeter:
             filename_handler=partial(yourdfpy.filename_handler_magic, dir=robot_urdf_path.parent),
         )
         if self.robot_urdf.scene is None:
-            print(f"[WARN] Robot URDF has no visual scene: {robot_urdf_path}")
+            raise RuntimeError(f"Robot URDF has no visual scene (mesh load failed): {robot_urdf_path}")
 
         print("Viser using robot URDF: ", self.robot_model_path)
 
@@ -223,7 +223,7 @@ class InteractionMeshRetargeter:
                 filename_handler=partial(yourdfpy.filename_handler_magic, dir=object_urdf_path.parent),
             )
             if self.object_urdf.scene is None:
-                print(f"[WARN] Object URDF has no visual scene: {object_urdf_path}")
+                raise RuntimeError(f"Object URDF has no visual scene (mesh load failed): {object_urdf_path}")
 
             # Create ViserUrdf instance for object, attaching it to the object_base frame
             self.viser_object = ViserUrdf(
