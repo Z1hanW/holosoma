@@ -168,6 +168,23 @@ def _frustum_quat_from_camera(cam_quat_xyzw: torch.Tensor) -> torch.Tensor:
     return quat_wxyz
 
 
+def _quat_from_forward_up(forward: torch.Tensor, up_hint: torch.Tensor) -> torch.Tensor:
+    forward = _normalize_vec(forward)
+    up_hint = _normalize_vec(up_hint)
+    up_proj = up_hint - torch.dot(up_hint, forward) * forward
+    if torch.linalg.norm(up_proj) < 1.0e-4:
+        fallback = torch.tensor([0.0, 0.0, 1.0], device=forward.device, dtype=forward.dtype)
+        if torch.abs(torch.dot(fallback, forward)) > 0.9:
+            fallback = torch.tensor([0.0, 1.0, 0.0], device=forward.device, dtype=forward.dtype)
+        up_proj = fallback - torch.dot(fallback, forward) * forward
+    z_axis = _normalize_vec(up_proj)
+    y_axis = _normalize_vec(torch.cross(z_axis, forward))
+    z_axis = _normalize_vec(torch.cross(forward, y_axis))
+    rot = torch.stack([forward, y_axis, z_axis], dim=1)
+    quat_wxyz = matrix_to_quaternion(rot)
+    return quat_wxyz[[1, 2, 3, 0]]
+
+
 def _import_viser() -> tuple[Any | None, Any | None, str | None]:
     ensure_viser_on_path()
     try:
@@ -313,6 +330,7 @@ class ViserLiveViewer:
         self._contact_force_cb = None
         self._contact_force_scale_slider = None
         self._contact_force_threshold_slider = None
+        self._contact_force_handle = None
         self._clip_start_slider = None
         self._clip_lock_cb = None
         self._perception_enabled = False
@@ -540,6 +558,7 @@ class ViserLiveViewer:
             self._update_target_keypoints(offset)
             if self._perception_enabled:
                 self._update_perception_visuals(offset)
+            self._update_contact_forces(offset)
 
             if self._vo is None or self._object_root is None:
                 return
@@ -1454,12 +1473,17 @@ class ViserLiveViewer:
             offset_world = quat_apply(base_quat.unsqueeze(0), sensor_offset.unsqueeze(0), w_last=True).squeeze(0)
             height_world = quat_apply(base_quat.unsqueeze(0), ray_start_offset.unsqueeze(0), w_last=True).squeeze(0)
             cam_pos_t = root_pos + offset_world + height_world
-            pitch_down = quat_from_euler_xyz(
-                torch.tensor(0.0, device=self._env.device),
-                torch.tensor(-np.pi / 2.0, device=self._env.device),
-                torch.tensor(0.0, device=self._env.device),
-            )
-            cam_quat_t = quat_mul(base_quat.unsqueeze(0), pitch_down.unsqueeze(0), w_last=True).squeeze(0)
+            forward_world = quat_apply(
+                base_quat.unsqueeze(0),
+                torch.tensor([0.0, 0.0, -1.0], device=self._env.device),
+                w_last=True,
+            ).squeeze(0)
+            up_hint = quat_apply(
+                base_quat.unsqueeze(0),
+                torch.tensor([1.0, 0.0, 0.0], device=self._env.device),
+                w_last=True,
+            ).squeeze(0)
+            cam_quat_t = _quat_from_forward_up(forward_world, up_hint)
             cam_pos = cam_pos_t.detach().cpu().numpy()
             cam_quat_xyzw = cam_quat_t.detach().cpu()
 
@@ -1564,6 +1588,74 @@ class ViserLiveViewer:
                     self._target_keypoints_handle.colors = colors.astype(np.uint8, copy=False)
                 except Exception:
                     pass
+
+    def _update_contact_forces(self, offset: np.ndarray) -> None:
+        if not self._server:
+            return
+        if self._contact_force_cb is None or not bool(self._contact_force_cb.value):
+            if self._contact_force_handle is not None:
+                self._contact_force_handle.visible = False
+            return
+        sim = getattr(self._env, "simulator", None)
+        if sim is None:
+            return
+        forces = getattr(sim, "contact_forces", None)
+        positions = getattr(sim, "_rigid_body_pos", None)
+        if forces is None or positions is None:
+            return
+        if not isinstance(forces, torch.Tensor) or not isinstance(positions, torch.Tensor):
+            return
+        if forces.numel() == 0 or positions.numel() == 0:
+            return
+        if self._env_id < 0 or self._env_id >= forces.shape[0]:
+            return
+
+        forces_env = forces[self._env_id]
+        positions_env = positions[self._env_id]
+        body_count = min(forces_env.shape[0], positions_env.shape[0])
+        if body_count == 0:
+            return
+
+        forces_env = forces_env[:body_count]
+        positions_env = positions_env[:body_count]
+
+        magnitudes = torch.linalg.norm(forces_env, dim=-1)
+        threshold = float(getattr(self._env.simulator.simulator_config, "contact_force_viz_threshold", 1.0))
+        mask = magnitudes > threshold
+        if torch.count_nonzero(mask) == 0:
+            if self._contact_force_handle is not None:
+                self._contact_force_handle.visible = False
+            return
+
+        scale = float(getattr(self._env.simulator.simulator_config, "contact_force_viz_scale", 0.001))
+        forces_np = forces_env.detach().cpu().numpy()
+        positions_np = positions_env.detach().cpu().numpy()
+        mask_np = mask.detach().cpu().numpy()
+
+        positions_np = positions_np[mask_np]
+        forces_np = forces_np[mask_np]
+        magnitudes_np = np.linalg.norm(forces_np, axis=1, keepdims=True)
+        directions = np.zeros_like(forces_np)
+        nonzero = magnitudes_np > 1.0e-6
+        directions[nonzero[:, 0]] = forces_np[nonzero[:, 0]] / magnitudes_np[nonzero[:, 0]]
+        arrow_ends = positions_np + directions * magnitudes_np * scale
+
+        points = np.stack([positions_np, arrow_ends], axis=1)
+        if self._recenter:
+            points = points - offset[None, None, :]
+        colors = np.full((points.shape[0], 2, 3), [255, 0, 0], dtype=np.uint8)
+
+        if self._contact_force_handle is None:
+            self._contact_force_handle = self._server.scene.add_line_segments(
+                "/contact_force_arrows",
+                points=points,
+                colors=colors,
+                line_width=2.0,
+            )
+        else:
+            self._contact_force_handle.visible = True
+            self._contact_force_handle.points = points
+            self._contact_force_handle.colors = colors
 
 
 def _normalize_env_ids(env_ids) -> list[int]:
