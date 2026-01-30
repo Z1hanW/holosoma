@@ -67,9 +67,36 @@ for seq_dir in "${seq_dirs[@]}"; do
     mkdir -p "$stage_obj_dir"
 
     ln -sf "$scene_obj" "$stage_obj_dir/scene_mesh_sqs.obj"
-    ln -sf "$scene_urdf" "$stage_obj_dir/scene_mesh_sqs.urdf"
+    scene_urdf_local="$stage_obj_dir/scene_mesh_sqs.urdf"
+    cp -f "$scene_urdf" "$scene_urdf_local"
     if [ -d "$pieces_dir" ]; then
         ln -sfn "$pieces_dir" "$stage_obj_dir/pieces"
+        python - <<PY
+from pathlib import Path
+import xml.etree.ElementTree as ET
+
+urdf_path = Path("$scene_urdf_local")
+pieces_dir = Path("$pieces_dir")
+
+try:
+    root = ET.parse(urdf_path).getroot()
+except ET.ParseError as exc:
+    raise SystemExit(f"[ERROR] Failed to parse URDF: {urdf_path}: {exc}") from exc
+
+changed = False
+for mesh in root.findall(".//mesh"):
+    filename = mesh.get("filename")
+    if not filename:
+        continue
+    if "/" in filename or "\\" in filename:
+        continue
+    if (pieces_dir / filename).exists():
+        mesh.set("filename", f"pieces/{filename}")
+        changed = True
+
+if changed:
+    urdf_path.write_text(ET.tostring(root, encoding="unicode"))
+PY
     fi
 
     python - <<PY
