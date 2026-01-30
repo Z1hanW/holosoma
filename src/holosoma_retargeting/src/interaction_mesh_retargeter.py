@@ -508,11 +508,16 @@ class InteractionMeshRetargeter:
             raise RuntimeError(f"Failed to parse URDF XML: {urdf_path}: {exc}") from exc
 
         mesh_files: list[Path] = []
-        for mesh in root.findall(".//visual//mesh"):
-            filename = mesh.attrib.get("filename")
-            if not filename:
+        for visual in root.iter():
+            if visual.tag.split("}")[-1] != "visual":
                 continue
-            mesh_files.append(cls._resolve_mesh_path(filename, base_dir))
+            for mesh in visual.iter():
+                if mesh.tag.split("}")[-1] != "mesh":
+                    continue
+                filename = mesh.attrib.get("filename")
+                if not filename:
+                    continue
+                mesh_files.append(cls._resolve_mesh_path(filename, base_dir))
         return mesh_files
 
     @staticmethod
