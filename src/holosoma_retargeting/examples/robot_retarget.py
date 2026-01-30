@@ -346,7 +346,7 @@ def setup_object_data(
         scene_xml_file = Path(task_config.scene_xml_file) if task_config.scene_xml_file else (object_dir / scene_xml_name)
         # Enforce that scene XML and object URDF come from the generated object_dir.
         object_dir_resolved = object_dir.resolve()
-        scene_xml_parent = scene_xml_file.resolve().parent
+        scene_xml_parent = scene_xml_file.parent.resolve()
         if scene_xml_parent != object_dir_resolved:
             raise RuntimeError(
                 "scene_xml_file must live inside object_dir for retargeting. "
@@ -356,10 +356,11 @@ def setup_object_data(
         if constants.OBJECT_URDF_FILE is None:
             raise RuntimeError("OBJECT_URDF_FILE is not set for climbing task.")
         object_urdf_path = Path(constants.OBJECT_URDF_FILE)
-        if object_urdf_path.resolve().parent != object_dir_resolved:
+        object_urdf_parent = object_urdf_path.parent.resolve()
+        if object_urdf_parent != object_dir_resolved:
             raise RuntimeError(
                 "OBJECT_URDF_FILE must live inside object_dir for retargeting. "
-                f"OBJECT_URDF_FILE={object_urdf_path} (parent={object_urdf_path.resolve().parent}), "
+                f"OBJECT_URDF_FILE={object_urdf_path} (parent={object_urdf_parent}), "
                 f"object_dir={object_dir_resolved}"
             )
         # Set SCENE_XML_FILE in constants BEFORE creating retargeter (needed for temp_retargeter)

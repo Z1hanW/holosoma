@@ -173,10 +173,11 @@ def _frustum_quat_from_camera(cam_quat_xyzw: torch.Tensor) -> torch.Tensor:
     y_cam = quat_apply(cam_quat_xyzw.unsqueeze(0), y_axis.unsqueeze(0), w_last=True).squeeze(0)
     z_cam = quat_apply(cam_quat_xyzw.unsqueeze(0), z_axis.unsqueeze(0), w_last=True).squeeze(0)
 
-    z_fwd = _normalize_vec(x_cam)
-    y_down = _normalize_vec(-z_cam)
-    x_right = _normalize_vec(torch.cross(y_down, z_fwd))
-    y_down = _normalize_vec(torch.cross(z_fwd, x_right))
+    # Viser frustum expects OpenCV: +Z forward, +X right, +Y down.
+    # Perception camera uses USD axes (x right, y up, -z forward) when camera_frame_quat is set.
+    x_right = _normalize_vec(x_cam)
+    y_down = _normalize_vec(-y_cam)
+    z_fwd = _normalize_vec(-z_cam)
 
     rot = torch.stack([x_right, y_down, z_fwd], dim=1)
     quat_wxyz = matrix_to_quaternion(rot)
