@@ -456,7 +456,8 @@ class BasePolicy:
     def rl_inference(self, robot_state_data):
         """Perform RL inference to get policy action."""
         obs = self.prepare_obs_for_rl(robot_state_data)
-        self._print_observations(obs)
+        if self.config.task.print_observations:
+            self._print_observations(obs)
 
         policy_action = self.policy(obs)
         policy_action = np.clip(policy_action, -100, 100)
