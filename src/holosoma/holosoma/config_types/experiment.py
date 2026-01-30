@@ -114,9 +114,6 @@ class TrainingConfig:
     viser_global_frame_quat_wxyz: list[float] | None = None
     """Optional global frame rotation (wxyz) applied to all Viser scene nodes."""
 
-    viser_perception_frame_quat_wxyz: list[float] | None = None
-    """Optional rotation (wxyz) applied to the perception camera in Viser."""
-
     viser_show_scandots: bool = False
     """Show camera scandots point cloud in the Viser viewer."""
 

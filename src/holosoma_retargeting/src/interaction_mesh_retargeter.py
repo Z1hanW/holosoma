@@ -196,6 +196,7 @@ class InteractionMeshRetargeter:
         )
         if self.robot_urdf.scene is None:
             raise RuntimeError(f"Robot URDF has no visual scene (mesh load failed): {robot_urdf_path}")
+        self._validate_urdf_visual_meshes(self.robot_urdf, robot_urdf_path, label="Robot")
 
         print("Viser using robot URDF: ", self.robot_model_path)
 
@@ -224,6 +225,7 @@ class InteractionMeshRetargeter:
             )
             if self.object_urdf.scene is None:
                 raise RuntimeError(f"Object URDF has no visual scene (mesh load failed): {object_urdf_path}")
+            self._validate_urdf_visual_meshes(self.object_urdf, object_urdf_path, label="Object")
 
             # Create ViserUrdf instance for object, attaching it to the object_base frame
             self.viser_object = ViserUrdf(
@@ -428,6 +430,59 @@ class InteractionMeshRetargeter:
         if hasattr(self, "_constraint_geom_handles"):
             return
         self._constraint_geom_handles = self._build_constraint_geom_handles()
+
+    @staticmethod
+    def _resolve_mesh_path(mesh_filename: str, base_dir: Path) -> Path:
+        filename = str(mesh_filename)
+        for prefix in ("package://", "file://", "model://"):
+            if filename.startswith(prefix):
+                filename = filename[len(prefix) :]
+                break
+        mesh_path = Path(filename)
+        if not mesh_path.is_absolute():
+            mesh_path = (base_dir / mesh_path).resolve()
+        return mesh_path
+
+    @classmethod
+    def _validate_urdf_visual_meshes(cls, urdf: yourdfpy.URDF, urdf_path: Path, *, label: str) -> None:
+        mesh_files: list[Path] = []
+        missing: list[Path] = []
+        base_dir = urdf_path.parent
+
+        links = getattr(urdf, "links", []) or []
+        for link in links:
+            visuals = []
+            if getattr(link, "visuals", None):
+                visuals.extend(link.visuals)
+            if getattr(link, "visual", None) is not None:
+                visuals.append(link.visual)
+            for visual in visuals:
+                geom = getattr(visual, "geometry", None)
+                mesh = getattr(geom, "mesh", None)
+                if mesh is None:
+                    continue
+                filename = getattr(mesh, "filename", None)
+                if filename:
+                    path = cls._resolve_mesh_path(filename, base_dir)
+                    mesh_files.append(path)
+                    if not path.exists():
+                        missing.append(path)
+                filenames = getattr(mesh, "filenames", None)
+                if filenames:
+                    for fn in filenames:
+                        path = cls._resolve_mesh_path(fn, base_dir)
+                        mesh_files.append(path)
+                        if not path.exists():
+                            missing.append(path)
+
+        if not mesh_files:
+            raise RuntimeError(f"{label} URDF has no visual mesh references: {urdf_path}")
+        if missing:
+            sample = "\n".join(str(p) for p in missing[:10])
+            more = "" if len(missing) <= 10 else f"\n... and {len(missing) - 10} more"
+            raise RuntimeError(
+                f"{label} URDF visual meshes missing ({len(missing)}):\n{sample}{more}\nURDF: {urdf_path}"
+            )
 
     @staticmethod
     def _set_handles_visible(handles, visible: bool) -> None:

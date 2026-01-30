@@ -33,8 +33,7 @@ set -euo pipefail
 #   VISER_ENV_ID=0
 #   VISER_UPDATE_HZ=30
 #   VISER_RECENTER=True
-#   VISER_GLOBAL_FRAME_QUAT_WXYZ="None"  # wxyz, global scene rotation (usually keep None)
-#   VISER_PERCEPTION_FRAME_QUAT_WXYZ="[0, 1, 0, 0]"  # wxyz, x-axis 180deg for camera/frustum only
+#   VISER_GLOBAL_FRAME_QUAT_WXYZ="None"  # wxyz, global scene rotation (use to align Isaac/Viser)
 #   VISER_SHOW_SCANDOTS=True
 #   CONTACT_FORCE_VIZ=True
 #   CONTACT_FORCE_VIZ_SCALE=0.001
@@ -69,7 +68,6 @@ VISER_ENV_ID=${VISER_ENV_ID:-0}
 VISER_UPDATE_HZ=${VISER_UPDATE_HZ:-30}
 VISER_RECENTER=${VISER_RECENTER:-False}
 VISER_GLOBAL_FRAME_QUAT_WXYZ=${VISER_GLOBAL_FRAME_QUAT_WXYZ:-"None"}
-VISER_PERCEPTION_FRAME_QUAT_WXYZ=${VISER_PERCEPTION_FRAME_QUAT_WXYZ:-"[0, 1, 0, 0]"}
 VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-True}
 CONTACT_FORCE_VIZ=${CONTACT_FORCE_VIZ:-True}
 CONTACT_FORCE_VIZ_SCALE=${CONTACT_FORCE_VIZ_SCALE:-0.001}
@@ -169,9 +167,6 @@ fi
 
 if [[ -n "${VISER_GLOBAL_FRAME_QUAT_WXYZ}" && "${VISER_GLOBAL_FRAME_QUAT_WXYZ}" != "None" ]]; then
   cmd+=(--training.viser-global-frame-quat-wxyz "${VISER_GLOBAL_FRAME_QUAT_WXYZ}")
-fi
-if [[ -n "${VISER_PERCEPTION_FRAME_QUAT_WXYZ}" && "${VISER_PERCEPTION_FRAME_QUAT_WXYZ}" != "None" ]]; then
-  cmd+=(--training.viser-perception-frame-quat-wxyz "${VISER_PERCEPTION_FRAME_QUAT_WXYZ}")
 fi
 
 "${cmd[@]}"
