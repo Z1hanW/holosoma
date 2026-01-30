@@ -449,7 +449,16 @@ class InteractionMeshRetargeter:
         missing: list[Path] = []
         base_dir = urdf_path.parent
 
-        links = getattr(urdf, "links", []) or []
+        links = None
+        if hasattr(urdf, "links"):
+            links = getattr(urdf, "links")
+        elif hasattr(urdf, "link_map"):
+            links = list(getattr(urdf, "link_map").values())
+        elif hasattr(urdf, "robot") and hasattr(urdf.robot, "links"):
+            links = getattr(urdf.robot, "links")
+        if not links:
+            raise RuntimeError(f"{label} URDF has no links to inspect: {urdf_path}")
+
         for link in links:
             visuals = []
             if getattr(link, "visuals", None):
@@ -476,6 +485,11 @@ class InteractionMeshRetargeter:
                             missing.append(path)
 
         if not mesh_files:
+            mesh_files = cls._collect_visual_meshes_from_xml(urdf_path, base_dir)
+            for path in mesh_files:
+                if not path.exists():
+                    missing.append(path)
+        if not mesh_files:
             raise RuntimeError(f"{label} URDF has no visual mesh references: {urdf_path}")
         if missing:
             sample = "\n".join(str(p) for p in missing[:10])
@@ -483,6 +497,23 @@ class InteractionMeshRetargeter:
             raise RuntimeError(
                 f"{label} URDF visual meshes missing ({len(missing)}):\n{sample}{more}\nURDF: {urdf_path}"
             )
+
+    @classmethod
+    def _collect_visual_meshes_from_xml(cls, urdf_path: Path, base_dir: Path) -> list[Path]:
+        import xml.etree.ElementTree as ET
+
+        try:
+            root = ET.parse(urdf_path).getroot()
+        except ET.ParseError as exc:
+            raise RuntimeError(f"Failed to parse URDF XML: {urdf_path}: {exc}") from exc
+
+        mesh_files: list[Path] = []
+        for mesh in root.findall(".//visual//mesh"):
+            filename = mesh.attrib.get("filename")
+            if not filename:
+                continue
+            mesh_files.append(cls._resolve_mesh_path(filename, base_dir))
+        return mesh_files
 
     @staticmethod
     def _set_handles_visible(handles, visible: bool) -> None:

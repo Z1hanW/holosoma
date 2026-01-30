@@ -1734,6 +1734,7 @@ class ViserLiveViewer:
         cam_quat_wxyz = cam_quat_xyzw.detach().cpu().numpy()[[3, 0, 1, 2]]
         frustum_quat_wxyz = None
         if output_mode == "camera_depth" and cam_body_quat_xyzw is not None:
+            use_frame_quat = bool(getattr(perception_mgr, "_use_camera_frame_quat", False))
             ray_dirs_base = getattr(perception_mgr, "_camera_scandots_ray_dirs_base", None)
             width = getattr(perception_mgr, "_camera_scandots_width", None)
             height = getattr(perception_mgr, "_camera_scandots_height", None)
@@ -1741,14 +1742,15 @@ class ViserLiveViewer:
                 ray_dirs_base = getattr(perception_mgr, "_camera_ray_dirs_base", None)
                 width = int(getattr(perception_mgr, "_camera_width", 0) or 0)
                 height = int(getattr(perception_mgr, "_camera_height", 0) or 0)
-            frustum_quat = _frustum_quat_from_rays(
-                ray_dirs_base,
-                cam_body_quat_xyzw,
-                width=width if width and height else None,
-                height=height if width and height else None,
-            )
-            if frustum_quat is not None:
-                frustum_quat_wxyz = frustum_quat.detach().cpu().numpy()
+            if not use_frame_quat:
+                frustum_quat = _frustum_quat_from_rays(
+                    ray_dirs_base,
+                    cam_body_quat_xyzw,
+                    width=width if width and height else None,
+                    height=height if width and height else None,
+                )
+                if frustum_quat is not None:
+                    frustum_quat_wxyz = frustum_quat.detach().cpu().numpy()
         if frustum_quat_wxyz is None:
             frustum_quat_wxyz = _frustum_quat_from_camera(cam_quat_xyzw).detach().cpu().numpy()
 
