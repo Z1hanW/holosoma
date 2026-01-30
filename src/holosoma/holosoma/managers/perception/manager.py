@@ -262,6 +262,12 @@ class PerceptionManager:
             raise RuntimeError("Camera depth map requested but camera_depth output is disabled.")
         return self._camera_depth
 
+    def get_heightmap_map(self, env_ids: torch.Tensor | None = None) -> torch.Tensor | None:
+        if not self.enabled or self.cfg.output_mode != "heightmap":
+            return None
+        idx = env_ids if env_ids is not None else slice(None)
+        return self._heightmap[idx]
+
     def get_camera_scandots_points(
         self,
         env_ids: torch.Tensor | None = None,
@@ -292,6 +298,48 @@ class PerceptionManager:
         if include_misses:
             ranges = self._compute_camera_ray_distances(ray_starts, ray_dirs_world, ray_hits_world)
             points = ray_starts + ray_dirs_world * ranges.unsqueeze(-1)
+        else:
+            points = ray_hits_world
+        return points, hit_mask
+
+    def get_heightmap_points(
+        self,
+        env_ids: torch.Tensor | None = None,
+        *,
+        include_misses: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if not self.enabled or self.cfg.output_mode != "heightmap":
+            return None
+        if self._grid_points_base is None or self._ray_dirs_base is None:
+            raise RuntimeError("PerceptionManager grid buffers are not initialized.")
+
+        idx = env_ids if env_ids is not None else slice(None)
+        base_quat = self.env.base_quat[idx]
+        root_pos = self.env.simulator.robot_root_states[idx, :3]
+        num_envs = base_quat.shape[0]
+
+        grid_points = self._grid_points_base.unsqueeze(0).expand(num_envs, -1, -1)
+        ray_dirs = self._ray_dirs_base.unsqueeze(0).expand(num_envs, -1, -1)
+
+        quat_repeat = base_quat.repeat(1, self._num_points)
+        if self.cfg.use_heading_only:
+            grid_world = quat_apply_yaw(quat_repeat, grid_points, w_last=True)
+            ray_dirs_world = quat_apply_yaw(quat_repeat, ray_dirs, w_last=True)
+            offset_world = quat_apply_yaw(base_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
+            height_offset = quat_apply_yaw(base_quat, self._ray_start_offset.expand(num_envs, -1), w_last=True)
+        else:
+            grid_world = quat_apply(quat_repeat, grid_points, w_last=True)
+            ray_dirs_world = quat_apply(quat_repeat, ray_dirs, w_last=True)
+            offset_world = quat_apply(base_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
+            height_offset = quat_apply(base_quat, self._ray_start_offset.expand(num_envs, -1), w_last=True)
+
+        ray_starts = grid_world + root_pos.unsqueeze(1) + offset_world.unsqueeze(1) + height_offset.unsqueeze(1)
+        ray_hits_world = self._ray_hits_world[idx]
+        hit_mask = torch.isfinite(ray_hits_world).all(dim=-1)
+
+        if include_misses:
+            distances = self._compute_ray_distances(ray_starts, ray_dirs_world, ray_hits_world)
+            points = ray_starts + ray_dirs_world * distances.unsqueeze(-1)
         else:
             points = ray_hits_world
         return points, hit_mask

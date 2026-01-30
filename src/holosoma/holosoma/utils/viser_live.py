@@ -11,10 +11,161 @@ from loguru import logger
 
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.path import resolve_data_file_path
+from holosoma.utils.rotations import (
+    matrix_to_quaternion,
+    quat_apply,
+    quat_from_euler_xyz,
+    quat_mul,
+    yaw_quat,
+)
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.viser_utils import ensure_viser_on_path, resolve_viser_port
 
 LIGHT_BLUE = (130, 180, 235)
+_VIRIDIS_LUT = np.array(
+    [
+        (68, 1, 84),
+        (69, 6, 90),
+        (70, 12, 95),
+        (71, 18, 101),
+        (71, 24, 106),
+        (72, 29, 111),
+        (72, 34, 115),
+        (71, 39, 119),
+        (71, 44, 123),
+        (70, 49, 126),
+        (69, 54, 129),
+        (67, 59, 131),
+        (66, 64, 133),
+        (64, 68, 135),
+        (62, 73, 137),
+        (60, 77, 138),
+        (58, 82, 139),
+        (56, 86, 139),
+        (54, 90, 139),
+        (52, 94, 139),
+        (50, 98, 139),
+        (49, 102, 138),
+        (47, 105, 137),
+        (46, 109, 136),
+        (45, 113, 135),
+        (43, 117, 134),
+        (42, 120, 133),
+        (41, 124, 132),
+        (40, 127, 130),
+        (40, 131, 129),
+        (39, 134, 128),
+        (38, 137, 126),
+        (38, 140, 125),
+        (38, 144, 123),
+        (37, 147, 121),
+        (37, 150, 120),
+        (37, 153, 118),
+        (36, 156, 116),
+        (36, 159, 114),
+        (36, 162, 112),
+        (36, 165, 110),
+        (36, 168, 108),
+        (35, 171, 106),
+        (35, 174, 104),
+        (35, 177, 102),
+        (35, 180, 100),
+        (35, 183, 98),
+        (35, 186, 96),
+        (35, 189, 94),
+        (35, 192, 92),
+        (35, 194, 90),
+        (35, 197, 88),
+        (35, 200, 86),
+        (35, 203, 84),
+        (35, 206, 82),
+        (35, 209, 80),
+        (35, 211, 78),
+        (35, 214, 76),
+        (35, 217, 74),
+        (35, 220, 72),
+        (35, 222, 70),
+        (35, 225, 68),
+        (35, 228, 66),
+        (35, 230, 64),
+        (35, 233, 62),
+        (35, 235, 60),
+        (35, 238, 58),
+        (36, 240, 56),
+        (36, 243, 54),
+        (36, 245, 52),
+        (36, 248, 50),
+        (36, 250, 48),
+        (36, 252, 46),
+        (37, 255, 44),
+    ],
+    dtype=np.uint8,
+)
+
+
+def _apply_colormap(values: np.ndarray) -> np.ndarray:
+    values = np.clip(values, 0.0, 1.0)
+    scaled = values * float(len(_VIRIDIS_LUT) - 1)
+    idx0 = np.floor(scaled).astype(np.int32)
+    idx1 = np.clip(idx0 + 1, 0, len(_VIRIDIS_LUT) - 1)
+    t = (scaled - idx0)[..., None]
+    c0 = _VIRIDIS_LUT[idx0].astype(np.float32)
+    c1 = _VIRIDIS_LUT[idx1].astype(np.float32)
+    return ((1.0 - t) * c0 + t * c1).astype(np.uint8)
+
+
+def _valid_depth_stats(depth: np.ndarray, near: float, far: float) -> tuple[float | None, float | None, int]:
+    depth = np.asarray(depth, dtype=np.float32)
+    valid = np.isfinite(depth)
+    valid &= depth >= near
+    valid &= depth < (far - 1.0e-6)
+    if not np.any(valid):
+        return None, None, 0
+    depth_valid = depth[valid]
+    return float(depth_valid.min()), float(depth_valid.max()), int(depth_valid.size)
+
+
+def _depth_to_rgb(depth: np.ndarray, near: float, far: float) -> np.ndarray:
+    depth = np.asarray(depth, dtype=np.float32)
+    valid = np.isfinite(depth)
+    valid &= depth >= near
+    valid &= depth < (far - 1.0e-6)
+    if not np.any(valid):
+        return np.zeros(depth.shape + (3,), dtype=np.uint8)
+
+    depth_clipped = np.clip(depth, near, far)
+    depth_valid = depth_clipped[valid]
+    min_d = float(depth_valid.min())
+    max_d = float(depth_valid.max())
+    denom = max(max_d - min_d, 1.0e-6)
+    norm = (depth_clipped - min_d) / denom
+    norm = np.where(valid, norm, 0.0)
+    colored = _apply_colormap(norm)
+    colored[~valid] = 0
+    return colored
+
+
+def _normalize_vec(vec: torch.Tensor) -> torch.Tensor:
+    return vec / torch.linalg.norm(vec).clamp(min=1.0e-6)
+
+
+def _frustum_quat_from_camera(cam_quat_xyzw: torch.Tensor) -> torch.Tensor:
+    x_axis = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32, device=cam_quat_xyzw.device)
+    y_axis = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=cam_quat_xyzw.device)
+    z_axis = torch.tensor([0.0, 0.0, 1.0], dtype=torch.float32, device=cam_quat_xyzw.device)
+
+    x_cam = quat_apply(cam_quat_xyzw.unsqueeze(0), x_axis.unsqueeze(0), w_last=True).squeeze(0)
+    y_cam = quat_apply(cam_quat_xyzw.unsqueeze(0), y_axis.unsqueeze(0), w_last=True).squeeze(0)
+    z_cam = quat_apply(cam_quat_xyzw.unsqueeze(0), z_axis.unsqueeze(0), w_last=True).squeeze(0)
+
+    z_fwd = _normalize_vec(x_cam)
+    y_down = _normalize_vec(-z_cam)
+    x_right = _normalize_vec(torch.cross(y_down, z_fwd))
+    y_down = _normalize_vec(torch.cross(z_fwd, x_right))
+
+    rot = torch.stack([x_right, y_down, z_fwd], dim=1)
+    quat_wxyz = matrix_to_quaternion(rot)
+    return quat_wxyz
 
 
 def _import_viser() -> tuple[Any | None, Any | None, str | None]:
@@ -164,6 +315,18 @@ class ViserLiveViewer:
         self._contact_force_threshold_slider = None
         self._clip_start_slider = None
         self._clip_lock_cb = None
+        self._perception_enabled = False
+        self._perception_depth_handle = None
+        self._perception_stats = None
+        self._perception_show_depth_cb = None
+        self._perception_show_frustum_cb = None
+        self._perception_show_points_cb = None
+        self._perception_frustum = None
+        self._perception_frame = None
+        self._perception_last_shape: tuple[int, int] | None = None
+        self._perception_last_mode: str | None = None
+        self._perception_last_fov: float | None = None
+        self._perception_last_aspect: float | None = None
 
         if not self._enabled:
             return
@@ -375,6 +538,8 @@ class ViserLiveViewer:
             if self._scandots_enabled:
                 self._update_scandots(offset)
             self._update_target_keypoints(offset)
+            if self._perception_enabled:
+                self._update_perception_visuals(offset)
 
             if self._vo is None or self._object_root is None:
                 return
@@ -504,6 +669,141 @@ class ViserLiveViewer:
             self._terrain_handle.visible = bool(self._show_terrain_cb.value)
         self._update_terrain_transform()
 
+    def _get_perception_manager(self):
+        mgr = getattr(self._env, "perception_manager", None)
+        if mgr is None or not getattr(mgr, "enabled", False):
+            return None
+        return mgr
+
+    def _resolve_perception_shape(self, perception_mgr) -> tuple[int, int] | None:
+        cfg = getattr(perception_mgr, "cfg", None)
+        if cfg is None:
+            return None
+        output_mode = getattr(cfg, "output_mode", None)
+        if output_mode == "camera_depth":
+            width = int(getattr(perception_mgr, "_camera_width", 0) or 0)
+            height = int(getattr(perception_mgr, "_camera_height", 0) or 0)
+            if width > 0 and height > 0:
+                return height, width
+            width = int(getattr(cfg, "camera_width", 0) or 0)
+            height = int(getattr(cfg, "camera_height", 0) or 0)
+            if width > 0 and height > 0:
+                return height, width
+            grid = int(getattr(cfg, "grid_size", 0) or 0)
+            if grid > 0:
+                return grid, grid
+            return None
+        if output_mode == "heightmap":
+            heightmap = getattr(perception_mgr, "_heightmap", None)
+            if isinstance(heightmap, torch.Tensor) and heightmap.ndim >= 3:
+                return int(heightmap.shape[-2]), int(heightmap.shape[-1])
+            grid_x = int(getattr(perception_mgr, "_heightmap_grid_x", 0) or 0)
+            grid_y = int(getattr(perception_mgr, "_heightmap_grid_y", 0) or 0)
+            if grid_x > 0 and grid_y > 0:
+                return grid_x, grid_y
+        return None
+
+    def _resolve_heightmap_fov_aspect(self, perception_mgr) -> tuple[float, float]:
+        grid_x = int(getattr(perception_mgr, "_heightmap_grid_x", 0) or 0)
+        grid_y = int(getattr(perception_mgr, "_heightmap_grid_y", 0) or 0)
+        interval_x = float(getattr(perception_mgr, "_heightmap_interval_x", 0.0) or 0.0)
+        interval_y = float(getattr(perception_mgr, "_heightmap_interval_y", 0.0) or 0.0)
+        cfg = getattr(perception_mgr, "cfg", None)
+        ray_height = float(getattr(cfg, "ray_start_height", 0.6)) if cfg is not None else 0.6
+        if grid_x <= 1 or grid_y <= 1 or interval_x <= 0 or interval_y <= 0 or ray_height <= 0:
+            return 90.0, 1.0
+        half_x = 0.5 * (grid_x - 1) * interval_x
+        half_y = 0.5 * (grid_y - 1) * interval_y
+        if half_y <= 0:
+            return 90.0, 1.0
+        fov = float(np.degrees(2.0 * np.arctan(half_y / ray_height)))
+        aspect = float(half_x / half_y) if half_y > 0 else 1.0
+        fov = float(np.clip(fov, 5.0, 175.0))
+        aspect = float(max(aspect, 0.1))
+        return fov, aspect
+
+    def _setup_perception_controls(self) -> None:
+        if self._server is None:
+            return
+        perception_mgr = self._get_perception_manager()
+        if perception_mgr is None:
+            return
+        cfg = getattr(perception_mgr, "cfg", None)
+        if cfg is None:
+            return
+        self._perception_enabled = True
+        output_mode = getattr(cfg, "output_mode", "")
+        shape = self._resolve_perception_shape(perception_mgr) or (64, 64)
+        height, width = shape
+        self._perception_last_shape = (height, width)
+        self._perception_last_mode = str(output_mode)
+
+        with self._server.gui.add_folder("Perception"):
+            self._perception_show_depth_cb = self._server.gui.add_checkbox(
+                "Show Depth",
+                initial_value=True,
+                hint="Display perception depth in GUI and frustum",
+            )
+            self._perception_show_frustum_cb = self._server.gui.add_checkbox(
+                "Show Frustum",
+                initial_value=True,
+                hint="Display the perception camera frustum in 3D",
+            )
+            self._perception_show_points_cb = self._server.gui.add_checkbox(
+                "Show Perception Points",
+                initial_value=self._scandots_enabled,
+                hint="Toggle perception hit points (heightmap or camera scandots)",
+            )
+            self._perception_depth_handle = self._server.gui.add_image(
+                np.zeros((height, width, 3), dtype=np.uint8),
+                label="Perception Depth",
+            )
+            self._perception_stats = self._server.gui.add_markdown("Depth range (valid): n/a")
+
+        @self._perception_show_depth_cb.on_update
+        def _(_evt) -> None:
+            if self._perception_depth_handle is None:
+                return
+            if not bool(self._perception_show_depth_cb.value):
+                self._perception_depth_handle.image = np.zeros((height, width, 3), dtype=np.uint8)
+
+        @self._perception_show_frustum_cb.on_update
+        def _(_evt) -> None:
+            if self._perception_frustum is not None:
+                self._perception_frustum.visible = bool(self._perception_show_frustum_cb.value)
+
+        @self._perception_show_points_cb.on_update
+        def _(_evt) -> None:
+            self._scandots_enabled = bool(self._perception_show_points_cb.value)
+            if self._show_scandots_cb is not None and bool(self._show_scandots_cb.value) != self._scandots_enabled:
+                self._show_scandots_cb.value = self._scandots_enabled
+            if not self._scandots_enabled and self._scandots_handle is not None:
+                self._scandots_handle.visible = False
+
+        if output_mode == "heightmap":
+            fov, aspect = self._resolve_heightmap_fov_aspect(perception_mgr)
+        else:
+            fov = float(getattr(cfg, "camera_vfov_deg", 90.0))
+            aspect = float(width / max(1, height))
+        self._perception_last_fov = fov
+        self._perception_last_aspect = aspect
+
+        self._perception_frame = self._server.scene.add_frame("/perception_camera", show_axes=False)
+        self._perception_frustum = self._server.scene.add_camera_frustum(
+            "/perception_frustum",
+            fov=fov,
+            aspect=aspect,
+            scale=0.3,
+            line_width=2.0,
+            color=(0, 0, 0),
+            wxyz=(1.0, 0.0, 0.0, 0.0),
+            position=(0.0, 0.0, 0.0),
+            image=np.zeros((height, width, 3), dtype=np.uint8),
+            format="jpeg",
+            jpeg_quality=90,
+        )
+        if self._perception_show_frustum_cb is not None:
+            self._perception_frustum.visible = bool(self._perception_show_frustum_cb.value)
     def _setup_controls(self) -> None:
         if self._server is None:
             return
@@ -526,6 +826,8 @@ class ViserLiveViewer:
         @self._show_scandots_cb.on_update
         def _(_evt) -> None:
             self._scandots_enabled = bool(self._show_scandots_cb.value)
+            if self._perception_show_points_cb is not None and bool(self._perception_show_points_cb.value) != self._scandots_enabled:
+                self._perception_show_points_cb.value = self._scandots_enabled
             if not self._scandots_enabled and self._scandots_handle is not None:
                 self._scandots_handle.visible = False
 
@@ -534,6 +836,8 @@ class ViserLiveViewer:
             self._scandots_point_size = float(self._scandots_size_slider.value)
             if self._scandots_handle is not None:
                 self._scandots_handle.point_size = float(self._scandots_point_size)
+
+        self._setup_perception_controls()
 
         sim_cfg = getattr(self._env.simulator, "simulator_config", None)
         if sim_cfg is not None and hasattr(sim_cfg, "contact_force_viz"):
@@ -1028,12 +1332,20 @@ class ViserLiveViewer:
             "false",
             "no",
         )
+        output_mode = getattr(getattr(perception_mgr, "cfg", None), "output_mode", None)
+        use_heightmap = output_mode == "heightmap"
         try:
             with torch.no_grad():
-                result = perception_mgr.get_camera_scandots_points(
-                    env_ids,
-                    include_misses=include_misses,
-                )
+                if use_heightmap and hasattr(perception_mgr, "get_heightmap_points"):
+                    result = perception_mgr.get_heightmap_points(
+                        env_ids,
+                        include_misses=include_misses,
+                    )
+                else:
+                    result = perception_mgr.get_camera_scandots_points(
+                        env_ids,
+                        include_misses=include_misses,
+                    )
         except Exception as exc:
             if not self._scandots_warned:
                 logger.warning("Viser scandots disabled: {}", exc)
@@ -1042,7 +1354,10 @@ class ViserLiveViewer:
 
         if result is None:
             if not self._scandots_warned:
-                logger.warning("Viser scandots disabled: perception is not using mesh_raycast_scandots.")
+                if use_heightmap:
+                    logger.warning("Viser scandots disabled: heightmap points are unavailable.")
+                else:
+                    logger.warning("Viser scandots disabled: perception is not using mesh_raycast_scandots.")
                 self._scandots_warned = True
             self._scandots_enabled = False
             return
@@ -1075,6 +1390,142 @@ class ViserLiveViewer:
         else:
             self._scandots_handle.visible = True
             self._scandots_handle.points = pts.astype(np.float32, copy=False)
+
+    def _update_perception_visuals(self, offset: np.ndarray) -> None:
+        if not self._server or not self._perception_enabled:
+            return
+        perception_mgr = self._get_perception_manager()
+        if perception_mgr is None:
+            return
+        cfg = getattr(perception_mgr, "cfg", None)
+        if cfg is None:
+            return
+
+        output_mode = str(getattr(cfg, "output_mode", ""))
+        env_ids = torch.tensor([self._env_id], device=self._env.device, dtype=torch.long)
+        depth_map = None
+        near = float(getattr(cfg, "camera_near", 0.0))
+        far = float(getattr(cfg, "max_distance", 10.0))
+        cam_pos = None
+        cam_quat_xyzw = None
+
+        if output_mode == "camera_depth":
+            try:
+                depth = perception_mgr.get_camera_depth_map()
+            except Exception:
+                depth = None
+            if isinstance(depth, torch.Tensor) and depth.numel() > 0:
+                depth_map = depth[self._env_id].detach().cpu().numpy()
+                depth_map = np.flipud(depth_map)
+            try:
+                cam_pos_t, cam_quat_t = perception_mgr.get_camera_pose(
+                    env_ids,
+                    apply_sensor_offset=True,
+                    apply_pitch=True,
+                )
+                cam_pos = cam_pos_t[0].detach().cpu().numpy()
+                cam_quat_xyzw = cam_quat_t[0].detach().cpu()
+            except Exception:
+                cam_pos = None
+                cam_quat_xyzw = None
+        elif output_mode == "heightmap":
+            near = 0.0
+            try:
+                if hasattr(perception_mgr, "get_heightmap_map"):
+                    hm = perception_mgr.get_heightmap_map(env_ids)
+                else:
+                    hm = getattr(perception_mgr, "_heightmap", None)
+            except Exception:
+                hm = None
+            if isinstance(hm, torch.Tensor) and hm.numel() > 0:
+                if hm.ndim == 3:
+                    depth_map = hm[0].detach().cpu().numpy()
+                elif hm.ndim == 2:
+                    depth_map = hm.detach().cpu().numpy()
+            base_quat = self._env.base_quat[self._env_id]
+            if bool(getattr(cfg, "use_heading_only", True)):
+                base_quat = yaw_quat(base_quat.unsqueeze(0), w_last=True).squeeze(0)
+            root_pos = self._env.simulator.robot_root_states[self._env_id, :3]
+            sensor_offset = torch.tensor(getattr(cfg, "sensor_offset", [0.0, 0.0, 0.0]), device=self._env.device)
+            ray_start_offset = torch.tensor(
+                [0.0, 0.0, float(getattr(cfg, "ray_start_height", 0.6))],
+                device=self._env.device,
+            )
+            offset_world = quat_apply(base_quat.unsqueeze(0), sensor_offset.unsqueeze(0), w_last=True).squeeze(0)
+            height_world = quat_apply(base_quat.unsqueeze(0), ray_start_offset.unsqueeze(0), w_last=True).squeeze(0)
+            cam_pos_t = root_pos + offset_world + height_world
+            pitch_down = quat_from_euler_xyz(
+                torch.tensor(0.0, device=self._env.device),
+                torch.tensor(-np.pi / 2.0, device=self._env.device),
+                torch.tensor(0.0, device=self._env.device),
+            )
+            cam_quat_t = quat_mul(base_quat.unsqueeze(0), pitch_down.unsqueeze(0), w_last=True).squeeze(0)
+            cam_pos = cam_pos_t.detach().cpu().numpy()
+            cam_quat_xyzw = cam_quat_t.detach().cpu()
+
+        if depth_map is None:
+            return
+
+        depth_shape = (int(depth_map.shape[0]), int(depth_map.shape[1]))
+        if depth_shape != self._perception_last_shape or output_mode != self._perception_last_mode:
+            self._perception_last_shape = depth_shape
+            self._perception_last_mode = output_mode
+            if self._perception_depth_handle is not None:
+                self._perception_depth_handle.image = np.zeros(depth_map.shape + (3,), dtype=np.uint8)
+
+        depth_img = _depth_to_rgb(depth_map, near, far)
+        if self._perception_show_depth_cb is None or bool(self._perception_show_depth_cb.value):
+            if self._perception_depth_handle is not None:
+                self._perception_depth_handle.image = depth_img
+        if self._perception_stats is not None:
+            min_d, max_d, count = _valid_depth_stats(depth_map, near, far)
+            if count == 0:
+                self._perception_stats.content = "Depth range (valid): n/a (no hits)"
+            else:
+                total = depth_map.size
+                self._perception_stats.content = (
+                    f"Depth range (valid): {min_d:.3f} - {max_d:.3f} m | valid: {count}/{total}"
+                )
+
+        if cam_pos is None or cam_quat_xyzw is None:
+            return
+
+        cam_pos = cam_pos - offset
+        cam_quat_wxyz = cam_quat_xyzw.detach().cpu().numpy()[[3, 0, 1, 2]]
+        frustum_quat_wxyz = _frustum_quat_from_camera(cam_quat_xyzw).detach().cpu().numpy()
+
+        if self._perception_frame is not None:
+            self._perception_frame.position = cam_pos
+            self._perception_frame.wxyz = cam_quat_wxyz
+
+        if self._perception_frustum is None:
+            return
+
+        if output_mode == "heightmap":
+            fov, aspect = self._resolve_heightmap_fov_aspect(perception_mgr)
+        else:
+            fov = float(getattr(cfg, "camera_vfov_deg", 90.0))
+            aspect = float(depth_shape[1] / max(1, depth_shape[0]))
+
+        if fov != self._perception_last_fov:
+            try:
+                self._perception_frustum.fov = fov
+            except Exception:
+                pass
+            self._perception_last_fov = fov
+        if aspect != self._perception_last_aspect:
+            try:
+                self._perception_frustum.aspect = aspect
+            except Exception:
+                pass
+            self._perception_last_aspect = aspect
+
+        self._perception_frustum.position = cam_pos
+        self._perception_frustum.wxyz = frustum_quat_wxyz
+        if self._perception_show_frustum_cb is None or bool(self._perception_show_frustum_cb.value):
+            self._perception_frustum.visible = True
+        if self._perception_show_depth_cb is None or bool(self._perception_show_depth_cb.value):
+            self._perception_frustum.image = depth_img
 
     def _update_target_keypoints(self, offset: np.ndarray) -> None:
         if not self._server:
