@@ -76,6 +76,7 @@ class PerceptionManager:
         self._camera_warp_mesh = None
         self._warned_robot_mesh = False
         self._camera_auto_tilt_done = False
+        self._camera_pitch_offset_deg = 0.0
 
         if cfg.output_mode == "camera_depth" and self._camera_source not in {
             "raycast",
@@ -401,7 +402,8 @@ class PerceptionManager:
             body_pos = body_pos + offset_world
 
         if apply_pitch:
-            pitch_rad = torch.deg2rad(torch.tensor(self.cfg.camera_pitch_deg, device=self.device))
+            pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
+            pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
             pitch_quat = quat_from_euler_xyz(
                 torch.tensor(0.0, device=self.device),
                 pitch_rad,
@@ -494,7 +496,8 @@ class PerceptionManager:
         dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
         dirs_cam = dirs_cam.view(-1, 3)
 
-        pitch_rad = torch.deg2rad(torch.tensor(self.cfg.camera_pitch_deg, device=self.device))
+        pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
+        pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
         pitch_quat = quat_from_euler_xyz(
             torch.tensor(0.0, device=self.device),
             pitch_rad,
@@ -558,7 +561,8 @@ class PerceptionManager:
         dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
         dirs_cam = dirs_cam.view(-1, 3)
 
-        pitch_rad = torch.deg2rad(torch.tensor(self.cfg.camera_pitch_deg, device=self.device))
+        pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
+        pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
         pitch_quat = quat_from_euler_xyz(
             torch.tensor(0.0, device=self.device),
             pitch_rad,
@@ -585,7 +589,8 @@ class PerceptionManager:
         return grid_size, grid_size, grid_interval, grid_interval
 
     def _get_camera_forward_axis(self, body_quat: torch.Tensor) -> torch.Tensor:
-        pitch_rad = torch.deg2rad(torch.tensor(self.cfg.camera_pitch_deg, device=body_quat.device))
+        pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
+        pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=body_quat.device))
         pitch_quat = quat_from_euler_xyz(
             torch.tensor(0.0, device=body_quat.device),
             pitch_rad,
@@ -1164,6 +1169,9 @@ class PerceptionManager:
             torch.tensor(0.0, device=self.device),
         )
 
+        delta_deg = float(torch.rad2deg(delta).item())
+        self._camera_pitch_offset_deg += delta_deg
+
         if self._camera_ray_dirs_base is not None:
             delta_rep = delta_quat.unsqueeze(0).expand(self._camera_ray_dirs_base.shape[0], -1)
             self._camera_ray_dirs_base = quat_rotate_inverse(delta_rep, self._camera_ray_dirs_base, w_last=True)
@@ -1176,7 +1184,7 @@ class PerceptionManager:
 
         (self.logger or logger).info(
             "Auto-tilting camera rays by {:.2f} deg (target pitch {:.1f} deg).",
-            float(torch.rad2deg(delta).item()),
+            delta_deg,
             float(target_pitch_deg),
         )
         return True
@@ -1248,7 +1256,8 @@ class PerceptionManager:
         offset_world = quat_apply(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
         camera_pos = body_pos + offset_world
 
-        pitch_rad = torch.deg2rad(torch.tensor(self.cfg.camera_pitch_deg, device=self.device))
+        pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
+        pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
         pitch_quat = quat_from_euler_xyz(
             torch.tensor(0.0, device=self.device),
             pitch_rad,
@@ -1317,7 +1326,8 @@ class PerceptionManager:
         points_relative = ray_hits_world - camera_pos.unsqueeze(1)
         points_base = quat_rotate_inverse_batched(base_quat, points_relative)
 
-        pitch_rad = torch.deg2rad(torch.tensor(self.cfg.camera_pitch_deg, device=self.device))
+        pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
+        pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
         pitch_quat = quat_from_euler_xyz(
             torch.tensor(0.0, device=self.device),
             pitch_rad,
