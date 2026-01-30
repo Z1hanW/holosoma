@@ -310,6 +310,7 @@ class ViserLiveViewer:
         self._offset: np.ndarray | None = None
         self._last_update = 0.0
         self._scandots_handle = None
+        self._scandots_rays_handle = None
         self._scandots_enabled = False
         self._scandots_point_size = 0.02
         self._scandots_color = np.array([255, 0, 0], dtype=np.uint8)
@@ -844,6 +845,8 @@ class ViserLiveViewer:
                 self._show_scandots_cb.value = self._scandots_enabled
             if not self._scandots_enabled and self._scandots_handle is not None:
                 self._scandots_handle.visible = False
+            if not self._scandots_enabled and self._scandots_rays_handle is not None:
+                self._scandots_rays_handle.visible = False
 
         if self._perception_show_heightmap_joint_cb is not None:
             @self._perception_show_heightmap_joint_cb.on_update
@@ -907,6 +910,8 @@ class ViserLiveViewer:
                 self._perception_show_points_cb.value = self._scandots_enabled
             if not self._scandots_enabled and self._scandots_handle is not None:
                 self._scandots_handle.visible = False
+            if not self._scandots_enabled and self._scandots_rays_handle is not None:
+                self._scandots_rays_handle.visible = False
 
         @self._scandots_size_slider.on_update
         def _(_evt) -> None:
@@ -1421,11 +1426,13 @@ class ViserLiveViewer:
                     result = perception_mgr.get_heightmap_points(
                         env_ids,
                         include_misses=include_misses,
+                        return_rays=True,
                     )
                 else:
                     result = perception_mgr.get_camera_scandots_points(
                         env_ids,
                         include_misses=include_misses,
+                        return_rays=True,
                     )
         except Exception as exc:
             if not self._scandots_warned:
@@ -1441,19 +1448,33 @@ class ViserLiveViewer:
                     logger.warning("Viser scandots disabled: perception is not using mesh_raycast_scandots.")
                 self._scandots_warned = True
             self._scandots_enabled = False
+            if self._scandots_handle is not None:
+                self._scandots_handle.visible = False
+            if self._scandots_rays_handle is not None:
+                self._scandots_rays_handle.visible = False
             return
 
-        points, mask = result
+        if not isinstance(result, tuple) or len(result) < 2:
+            return
+        points = result[0]
+        mask = result[1]
+        ray_starts = result[2] if len(result) > 2 else None
+        ray_hits_world = result[3] if len(result) > 3 else None
         if points.numel() == 0:
+            if self._scandots_handle is not None:
+                self._scandots_handle.visible = False
+            if self._scandots_rays_handle is not None:
+                self._scandots_rays_handle.visible = False
             return
         points_env = points[0]
-        if not include_misses:
-            mask_env = mask[0]
-            if mask_env.numel() > 0:
-                points_env = points_env[mask_env]
+        mask_env = mask[0] if mask is not None else None
+        if not include_misses and mask_env is not None and mask_env.numel() > 0:
+            points_env = points_env[mask_env]
         if points_env.numel() == 0:
             if self._scandots_handle is not None:
                 self._scandots_handle.visible = False
+            if self._scandots_rays_handle is not None:
+                self._scandots_rays_handle.visible = False
             return
 
         pts = points_env.detach().cpu().numpy()
@@ -1471,6 +1492,37 @@ class ViserLiveViewer:
         else:
             self._scandots_handle.visible = True
             self._scandots_handle.points = pts.astype(np.float32, copy=False)
+
+        if ray_starts is None or ray_hits_world is None:
+            return
+        starts_env = ray_starts[0]
+        hits_env = ray_hits_world[0]
+        if mask_env is not None and mask_env.numel() > 0:
+            starts_env = starts_env[mask_env]
+            hits_env = hits_env[mask_env]
+        if starts_env.numel() == 0:
+            if self._scandots_rays_handle is not None:
+                self._scandots_rays_handle.visible = False
+            return
+
+        lines = torch.stack([starts_env, hits_env], dim=1).detach().cpu().numpy()
+        if self._recenter:
+            lines = lines - offset[None, None, :]
+        colors = np.tile(self._scandots_color, (lines.shape[0], 2, 1))
+        if self._scandots_rays_handle is None:
+            self._scandots_rays_handle = self._server.scene.add_line_segments(
+                "/scandots_rays",
+                points=lines.astype(np.float32, copy=False),
+                colors=colors.astype(np.uint8, copy=False),
+                line_width=1.0,
+            )
+        else:
+            self._scandots_rays_handle.visible = True
+            self._scandots_rays_handle.points = lines.astype(np.float32, copy=False)
+            try:
+                self._scandots_rays_handle.colors = colors.astype(np.uint8, copy=False)
+            except Exception:
+                pass
 
     def _update_perception_visuals(self, offset: np.ndarray) -> None:
         if not self._server or not self._perception_enabled:
