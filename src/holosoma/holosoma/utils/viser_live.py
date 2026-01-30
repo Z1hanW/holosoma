@@ -1392,10 +1392,10 @@ class ViserLiveViewer:
         output_mode = getattr(getattr(perception_mgr, "cfg", None), "output_mode", None)
         use_heightmap = output_mode == "heightmap"
         include_misses_env = os.environ.get("VISER_SCANDOTS_INCLUDE_MISSES")
-        if include_misses_env is None and use_heightmap:
+        if include_misses_env is None:
             include_misses = False
         else:
-            include_misses = (include_misses_env or "1").lower() not in (
+            include_misses = include_misses_env.lower() not in (
                 "0",
                 "false",
                 "no",

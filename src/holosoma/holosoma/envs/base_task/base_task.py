@@ -525,10 +525,10 @@ class BaseTask:
         output_mode = getattr(getattr(self.perception_manager, "cfg", None), "output_mode", None)
         use_heightmap = output_mode == "heightmap"
         include_misses_env = os.environ.get("ISAAC_SCANDOTS_INCLUDE_MISSES")
-        if include_misses_env is None and use_heightmap:
+        if include_misses_env is None:
             include_misses = False
         else:
-            include_misses = (include_misses_env or "1").lower() not in (
+            include_misses = include_misses_env.lower() not in (
                 "0",
                 "false",
                 "no",
