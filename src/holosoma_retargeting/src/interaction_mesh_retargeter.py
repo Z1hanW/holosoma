@@ -125,6 +125,9 @@ class InteractionMeshRetargeter:
 
         self.robot_data = mujoco.MjData(self.robot_model)
 
+        if self.visualize:
+            self._ensure_constraint_geom_handles()
+
         if self.robot_data.qpos.shape[0] > 7 + self.task_constants.ROBOT_DOF:
             self.has_dynamic_object = True
         else:
@@ -350,6 +353,81 @@ class InteractionMeshRetargeter:
             print("MJCF: no mesh geoms found to draw.")
         self._mjcf_visual_handles = visual_handles
         self._mjcf_collision_handles = collision_handles
+
+    def _refresh_object_geom_mask(self) -> np.ndarray:
+        m = self.robot_model
+        ngeom = m.ngeom
+        self._geom_names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or "" for g in range(ngeom)]
+        self._geom_body_names = [
+            mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, int(m.geom_bodyid[g])) or ""
+            for g in range(ngeom)
+        ]
+
+        obj_name = (self.object_name or "").lower()
+        object_mask = np.array(
+            [
+                (obj_name and (obj_name in geom.lower() or obj_name in body.lower()))
+                for geom, body in zip(self._geom_names, self._geom_body_names)
+            ],
+            dtype=bool,
+        )
+        if not object_mask.any():
+            piece_keys = ("piece_", "part_", "scene_piece")
+            object_mask = np.array(
+                [
+                    any(key in geom.lower() for key in piece_keys)
+                    or any(key in body.lower() for key in piece_keys)
+                    for geom, body in zip(self._geom_names, self._geom_body_names)
+                ],
+                dtype=bool,
+            )
+
+        self._object_geom_mask = object_mask
+        if self.debug:
+            obj_count = int(object_mask.sum())
+            print(f"[INFO] detected {obj_count} object geoms for constraints (object_name='{self.object_name}')")
+        return object_mask
+
+    def _build_constraint_geom_handles(self):
+        """Draw mesh geoms that participate in constraint checks (object pieces + ground)."""
+        if not hasattr(self, "server"):
+            return []
+
+        m, d = self.robot_model, self.robot_data
+        mujoco.mj_forward(m, d)
+
+        object_mask = self._refresh_object_geom_mask()
+        handles = []
+
+        for gid in range(m.ngeom):
+            if int(m.geom_dataid[gid]) == -1:
+                continue  # non-mesh
+            gname = self._geom_names[gid] or f"geom_{gid}"
+            gname_lower = gname.lower()
+            if not (bool(object_mask[gid]) or ("ground" in gname_lower)):
+                continue
+
+            handle = self.draw_mesh_from_geom(
+                m,
+                d,
+                gid,
+                gname,
+                name=f"/constraints/{gname}",
+                color=(50, 150, 255),
+                opacity=0.6,
+                use_convex_hull=False,
+            )
+            if handle is not None:
+                handles.append(handle)
+
+        if not handles:
+            print("[WARN] no constraint meshes found to visualize.")
+        return handles
+
+    def _ensure_constraint_geom_handles(self) -> None:
+        if hasattr(self, "_constraint_geom_handles"):
+            return
+        self._constraint_geom_handles = self._build_constraint_geom_handles()
 
     @staticmethod
     def _set_handles_visible(handles, visible: bool) -> None:
@@ -1231,39 +1309,7 @@ class InteractionMeshRetargeter:
 
     def _prefilter_pairs_with_mj_collision(self, threshold: float):
         m, d = self.robot_model, self.robot_data
-        ngeom = m.ngeom
-
-        self._geom_names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or "" for g in range(ngeom)]
-        self._geom_body_names = [
-            mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, int(m.geom_bodyid[g])) or ""
-            for g in range(ngeom)
-        ]
-
-        obj_name = (self.object_name or "").lower()
-        object_mask = np.array(
-            [
-                (obj_name and (obj_name in geom.lower() or obj_name in body.lower()))
-                for geom, body in zip(self._geom_names, self._geom_body_names)
-            ],
-            dtype=bool,
-        )
-        if not object_mask.any():
-            piece_keys = ("piece_", "part_", "scene_piece")
-            object_mask = np.array(
-                [
-                    any(key in geom.lower() for key in piece_keys)
-                    or any(key in body.lower() for key in piece_keys)
-                    for geom, body in zip(self._geom_names, self._geom_body_names)
-                ],
-                dtype=bool,
-            )
-        if not hasattr(self, "_object_geom_mask") or self._object_geom_mask.shape != object_mask.shape:
-            self._object_geom_mask = object_mask
-            if self.debug:
-                obj_count = int(object_mask.sum())
-                print(f"[INFO] detected {obj_count} object geoms for constraints (object_name='{self.object_name}')")
-        else:
-            self._object_geom_mask = object_mask
+        self._refresh_object_geom_mask()
 
         if not hasattr(self, "_saved_margins"):
             self._saved_margins = np.empty_like(m.geom_margin)

@@ -152,6 +152,18 @@ def _normalize_vec(vec: torch.Tensor) -> torch.Tensor:
     return vec / torch.linalg.norm(vec).clamp(min=1.0e-6)
 
 
+def _parse_quat_wxyz(raw) -> tuple[float, float, float, float] | None:
+    if raw is None:
+        return None
+    try:
+        vals = [float(v) for v in raw]
+    except Exception:
+        return None
+    if len(vals) != 4:
+        return None
+    return (vals[0], vals[1], vals[2], vals[3])
+
+
 def _frustum_quat_from_camera(cam_quat_xyzw: torch.Tensor) -> torch.Tensor:
     x_axis = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32, device=cam_quat_xyzw.device)
     y_axis = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=cam_quat_xyzw.device)
@@ -416,6 +428,9 @@ class ViserLiveViewer:
         self._perception_last_mode: str | None = None
         self._perception_last_fov: float | None = None
         self._perception_last_aspect: float | None = None
+        self._scene_prefix = ""
+        self._global_root = None
+        self._global_frame_wxyz: tuple[float, float, float, float] | None = None
 
         if not self._enabled:
             return
@@ -463,10 +478,16 @@ class ViserLiveViewer:
         port = resolve_viser_port(port_cfg)
         self._server = viser_mod.ViserServer(port=port)
 
-        self._robot_root = self._server.scene.add_frame("/robot", show_axes=False)
-        self._object_root = self._server.scene.add_frame("/object", show_axes=False)
+        self._global_frame_wxyz = _parse_quat_wxyz(getattr(cfg, "viser_global_frame_quat_wxyz", None))
+        if self._global_frame_wxyz is not None:
+            self._scene_prefix = "/viser_root"
+            self._global_root = self._server.scene.add_frame(self._scene_prefix, show_axes=False)
+            self._global_root.wxyz = self._global_frame_wxyz
+
+        self._robot_root = self._server.scene.add_frame(self._scene_path("/robot"), show_axes=False)
+        self._object_root = self._server.scene.add_frame(self._scene_path("/object"), show_axes=False)
         self._grid_handle = self._server.scene.add_grid(
-            "/grid", width=8.0, height=8.0, position=(0.0, 0.0, 0.0)
+            self._scene_path("/grid"), width=8.0, height=8.0, position=(0.0, 0.0, 0.0)
         )
         self._grid_handle.visible = False
 
@@ -474,7 +495,7 @@ class ViserLiveViewer:
         self._vr = viser_urdf_cls(
             self._server,
             urdf_or_path=Path(robot_urdf),
-            root_node_name="/robot",
+            root_node_name=self._scene_path("/robot"),
         )
 
         object_urdf = _resolve_object_urdf_path(env.robot_config)
@@ -482,7 +503,7 @@ class ViserLiveViewer:
             self._vo = viser_urdf_cls(
                 self._server,
                 urdf_or_path=Path(object_urdf),
-                root_node_name="/object",
+                root_node_name=self._scene_path("/object"),
                 mesh_color_override=LIGHT_BLUE,
             )
 
@@ -503,6 +524,13 @@ class ViserLiveViewer:
             handle.visible = bool(visible)
         except Exception:
             return
+
+    def _scene_path(self, path: str) -> str:
+        if not self._scene_prefix:
+            return path
+        if not path.startswith("/"):
+            path = "/" + path
+        return f"{self._scene_prefix}{path}"
 
     def _set_sim_cfg(self, field: str, value) -> None:
         sim_cfg = getattr(self._env.simulator, "simulator_config", None)
@@ -749,7 +777,7 @@ class ViserLiveViewer:
             ground_mesh = trimesh.creation.box(extents=(8.0, 8.0, 0.01))
             ground_mesh.apply_translation([0.0, 0.0, -0.005])
             self._ground_handle = self._server.scene.add_mesh_simple(
-                "/ground",
+                self._scene_path("/ground"),
                 ground_mesh.vertices,
                 ground_mesh.faces,
                 color=LIGHT_BLUE,
@@ -762,7 +790,7 @@ class ViserLiveViewer:
             return
 
         self._terrain_handle = self._server.scene.add_mesh_simple(
-            "/terrain",
+            self._scene_path("/terrain"),
             mesh.vertices,
             mesh.faces,
             color=LIGHT_BLUE,
@@ -918,9 +946,9 @@ class ViserLiveViewer:
         self._perception_last_fov = fov
         self._perception_last_aspect = aspect
 
-        self._perception_frame = self._server.scene.add_frame("/perception_camera", show_axes=False)
+        self._perception_frame = self._server.scene.add_frame(self._scene_path("/perception_camera"), show_axes=False)
         self._perception_frustum = self._server.scene.add_camera_frustum(
-            "/perception_frustum",
+            self._scene_path("/perception_frustum"),
             fov=fov,
             aspect=aspect,
             scale=0.3,
@@ -1534,7 +1562,7 @@ class ViserLiveViewer:
 
         if self._scandots_handle is None:
             self._scandots_handle = self._server.scene.add_point_cloud(
-                "/scandots",
+                self._scene_path("/scandots"),
                 points=pts.astype(np.float32, copy=False),
                 colors=self._scandots_color,
                 point_size=float(self._scandots_point_size),
@@ -1574,7 +1602,7 @@ class ViserLiveViewer:
         colors = np.full((lines.shape[0], 2, 3), [0, 0, 0], dtype=np.uint8)
         if self._scandots_rays_handle is None:
             self._scandots_rays_handle = self._server.scene.add_line_segments(
-                "/scandots_rays",
+                self._scene_path("/scandots_rays"),
                 points=lines.astype(np.float32, copy=False),
                 colors=colors.astype(np.uint8, copy=False),
                 line_width=1.0,
@@ -1778,7 +1806,7 @@ class ViserLiveViewer:
         if self._target_keypoints_handle is None:
             colors = np.tile(self._target_keypoints_color, (pts.shape[0], 1))
             self._target_keypoints_handle = self._server.scene.add_point_cloud(
-                "/target_keypoints",
+                self._scene_path("/target_keypoints"),
                 points=pts.astype(np.float32, copy=False),
                 colors=colors.astype(np.uint8, copy=False),
                 point_size=float(self._target_keypoints_point_size),
@@ -1802,6 +1830,7 @@ class ViserLiveViewer:
     ) -> tuple[object | None, bool]:
         if self._server is None:
             return None, False
+        name = self._scene_path(name)
         mesh = _make_marker_mesh(color, radius)
         if mesh is None:
             handle = self._server.scene.add_point_cloud(
@@ -1954,7 +1983,7 @@ class ViserLiveViewer:
 
         if self._contact_force_handle is None:
             self._contact_force_handle = self._server.scene.add_line_segments(
-                "/contact_force_arrows",
+                self._scene_path("/contact_force_arrows"),
                 points=points,
                 colors=colors,
                 line_width=2.0,

@@ -13,12 +13,7 @@ OUT_ROOT=${OUT_ROOT:-"$SCRIPT_DIR/demo_results/g1/climbing/mocap_crisp"}
 DATA_ROOT=${DATA_ROOT:-"$REPO_ROOT/crisp/vmm_data"}
 MOTION_ROOT="$DATA_ROOT/motion"
 GEO_ROOT="$DATA_ROOT/geo"
-
-OBJ_ROOT="$GEO_ROOT/obj"
-URDF_ROOT="$GEO_ROOT/urdf"
-XML_ROOT="$GEO_ROOT/xml"
-PIECES_ROOT="$GEO_ROOT/pieces"
-OBJECT_ROOT="$GEO_ROOT/scene_mesh_sqs"
+MODULE_ROOT="$GEO_ROOT"
 SCENE_XML_OVERRIDE=${SCENE_XML_OVERRIDE:-""}
 
 OBJECT_NAME="scene_mesh_sqs"
@@ -68,7 +63,7 @@ for seq_dir in "${seq_dirs[@]}"; do
     motion_file="$MOTION_ROOT/$seq_name.npz"
     ln -sf "$hmr_npz" "$motion_file"
 
-    stage_obj_dir="$OBJECT_ROOT/$seq_name"
+    stage_obj_dir="$MODULE_ROOT/$seq_name"
     mkdir -p "$stage_obj_dir"
 
     ln -sf "$scene_obj" "$stage_obj_dir/scene_mesh_sqs.obj"
@@ -126,12 +121,18 @@ body_lines.append("</mujocoinclude>")
 body_path.write_text("\\n".join(body_lines) + "\\n")
 PY
 
-    cp -f "$TEMPLATE_XML" "$stage_obj_dir/g1_29dof_w_scene_mesh_sqs.xml"
+    scene_xml_local="$stage_obj_dir/g1_29dof_w_scene_mesh_sqs.xml"
+    if [ -n "$SCENE_XML_OVERRIDE" ]; then
+        scene_xml_src=${SCENE_XML_OVERRIDE//\{seq\}/$seq_name}
+        cp -f "$scene_xml_src" "$scene_xml_local"
+    else
+        cp -f "$TEMPLATE_XML" "$scene_xml_local"
+    fi
     python - <<PY
 import re
 from pathlib import Path
 
-path = Path("$stage_obj_dir/g1_29dof_w_scene_mesh_sqs.xml")
+path = Path("$scene_xml_local")
 text = path.read_text()
 text = re.sub(r'meshdir="[^"]*"', f'meshdir="{Path("$MESH_DIR").as_posix()}"', text, count=1)
 # Drop any template piece assets/geoms so we can inject our own pieces safely.
@@ -144,24 +145,7 @@ if "box_body.xml" not in text:
 path.write_text(text)
 PY
 
-    mkdir -p "$OBJ_ROOT/$seq_name" "$URDF_ROOT/$seq_name" "$XML_ROOT/$seq_name"
-    ln -sf "$stage_obj_dir/scene_mesh_sqs.obj" "$OBJ_ROOT/$seq_name/scene_mesh_sqs.obj"
-    ln -sf "$stage_obj_dir/scene_mesh_sqs.urdf" "$URDF_ROOT/$seq_name/scene_mesh_sqs.urdf"
-    ln -sf "$stage_obj_dir/box_assets.xml" "$XML_ROOT/$seq_name/box_assets.xml"
-    ln -sf "$stage_obj_dir/g1_29dof_w_scene_mesh_sqs.xml" "$XML_ROOT/$seq_name/g1_29dof_w_scene_mesh_sqs.xml"
-    ln -sf "$stage_obj_dir/scene_mesh_sqs.obj" "$XML_ROOT/$seq_name/scene_mesh_sqs.obj"
-    ln -sf "$stage_obj_dir/box_body.xml" "$XML_ROOT/$seq_name/box_body.xml"
-    if [ -d "$stage_obj_dir/pieces" ]; then
-        mkdir -p "$PIECES_ROOT"
-        ln -sfn "$stage_obj_dir/pieces" "$PIECES_ROOT/$seq_name"
-        ln -sfn "$stage_obj_dir/pieces" "$XML_ROOT/$seq_name/pieces"
-    fi
-
     mkdir -p "$OUT_ROOT"
-    if [ -n "$SCENE_XML_OVERRIDE" ]; then
-        scene_xml_file=${SCENE_XML_OVERRIDE//\{seq\}/$seq_name}
-    else
-        scene_xml_file="$XML_ROOT/$seq_name/g1_29dof_w_scene_mesh_sqs.xml"
-    fi
+    scene_xml_file="$scene_xml_local"
     bash "$SCRIPT_DIR/retgt_smplx.sh" "$MOTION_ROOT" "$seq_name" "$OBJECT_NAME" "$stage_obj_dir" "$ROBOT_URDF" "smplx" "$OUT_ROOT" "$scene_xml_file"
 done

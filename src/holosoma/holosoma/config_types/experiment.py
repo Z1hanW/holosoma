@@ -111,6 +111,9 @@ class TrainingConfig:
     viser_recenter: bool = True
     """Recenter the Viser viewer around the env origin when available."""
 
+    viser_global_frame_quat_wxyz: list[float] | None = None
+    """Optional global frame rotation (wxyz) applied to all Viser scene nodes."""
+
     viser_show_scandots: bool = False
     """Show camera scandots point cloud in the Viser viewer."""
 
