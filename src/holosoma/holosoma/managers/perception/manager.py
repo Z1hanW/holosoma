@@ -77,6 +77,17 @@ class PerceptionManager:
         self._warned_robot_mesh = False
         self._camera_auto_tilt_done = False
         self._camera_pitch_offset_deg = 0.0
+        self._camera_frame_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
+        self._use_camera_frame_quat = False
+        cfg_frame_quat = getattr(cfg, "camera_frame_quat", None)
+        if cfg_frame_quat is not None:
+            try:
+                quat_vals = [float(v) for v in cfg_frame_quat]
+            except Exception:
+                quat_vals = None
+            if quat_vals and len(quat_vals) == 4:
+                self._camera_frame_quat = torch.tensor(quat_vals, device=self.device, dtype=torch.float32)
+                self._use_camera_frame_quat = True
 
         if cfg.output_mode == "camera_depth" and self._camera_source not in {
             "raycast",
@@ -411,6 +422,9 @@ class PerceptionManager:
             )
             pitch_quat = pitch_quat.unsqueeze(0).expand(body_quat.shape[0], -1)
             body_quat = quat_mul(body_quat, pitch_quat, w_last=True)
+            if self._use_camera_frame_quat:
+                frame_quat = self._camera_frame_quat.to(body_quat.device).unsqueeze(0).expand(body_quat.shape[0], -1)
+                body_quat = quat_mul(body_quat, frame_quat, w_last=True)
 
         return body_pos, body_quat
 
@@ -490,21 +504,36 @@ class PerceptionManager:
         x = (u_grid - self._camera_cx) / self._camera_fx
         y = (v_grid - self._camera_cy) / self._camera_fy
 
-        # Match VideoMimic pinhole convention: camera (x right, y down, z forward)
-        # -> robotics (x forward, y left, z up) => [z, -x, -y] = [1, -x, -y].
-        dirs_cam = torch.stack((torch.ones_like(x), -x, -y), dim=-1)
-        dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
-        dirs_cam = dirs_cam.view(-1, 3)
-
-        pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
-        pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
-        pitch_quat = quat_from_euler_xyz(
-            torch.tensor(0.0, device=self.device),
-            pitch_rad,
-            torch.tensor(0.0, device=self.device),
-        )
-        pitch_quat = pitch_quat.unsqueeze(0).expand(dirs_cam.shape[0], -1)
-        dirs_base = quat_rotate_inverse(pitch_quat, dirs_cam, w_last=True)
+        if self._use_camera_frame_quat:
+            # USD camera frame: x right, y up, -z forward
+            dirs_cam = torch.stack((x, -y, -torch.ones_like(x)), dim=-1)
+            dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
+            dirs_cam = dirs_cam.view(-1, 3)
+            pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
+            pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
+            pitch_quat = quat_from_euler_xyz(
+                torch.tensor(0.0, device=self.device),
+                pitch_rad,
+                torch.tensor(0.0, device=self.device),
+            )
+            combo = quat_mul(pitch_quat, self._camera_frame_quat, w_last=True)
+            combo = combo.unsqueeze(0).expand(dirs_cam.shape[0], -1)
+            dirs_base = quat_rotate_inverse(combo, dirs_cam, w_last=True)
+        else:
+            # Match VideoMimic pinhole convention: camera (x right, y down, z forward)
+            # -> robotics (x forward, y left, z up) => [z, -x, -y] = [1, -x, -y].
+            dirs_cam = torch.stack((torch.ones_like(x), -x, -y), dim=-1)
+            dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
+            dirs_cam = dirs_cam.view(-1, 3)
+            pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
+            pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
+            pitch_quat = quat_from_euler_xyz(
+                torch.tensor(0.0, device=self.device),
+                pitch_rad,
+                torch.tensor(0.0, device=self.device),
+            )
+            pitch_quat = pitch_quat.unsqueeze(0).expand(dirs_cam.shape[0], -1)
+            dirs_base = quat_rotate_inverse(pitch_quat, dirs_cam, w_last=True)
         dirs_base = dirs_base / torch.norm(dirs_base, dim=-1, keepdim=True).clamp(min=1.0e-6)
         return dirs_base
 
@@ -555,21 +584,36 @@ class PerceptionManager:
         x = (u_grid - self._camera_cx) / self._camera_fx
         y = (v_grid - self._camera_cy) / self._camera_fy
 
-        # Match VideoMimic pinhole convention: camera (x right, y down, z forward)
-        # -> robotics (x forward, y left, z up) => [z, -x, -y] = [1, -x, -y].
-        dirs_cam = torch.stack((torch.ones_like(x), -x, -y), dim=-1)
-        dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
-        dirs_cam = dirs_cam.view(-1, 3)
-
-        pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
-        pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
-        pitch_quat = quat_from_euler_xyz(
-            torch.tensor(0.0, device=self.device),
-            pitch_rad,
-            torch.tensor(0.0, device=self.device),
-        )
-        pitch_quat = pitch_quat.unsqueeze(0).expand(dirs_cam.shape[0], -1)
-        dirs_base = quat_rotate_inverse(pitch_quat, dirs_cam, w_last=True)
+        if self._use_camera_frame_quat:
+            # USD camera frame: x right, y up, -z forward
+            dirs_cam = torch.stack((x, -y, -torch.ones_like(x)), dim=-1)
+            dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
+            dirs_cam = dirs_cam.view(-1, 3)
+            pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
+            pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
+            pitch_quat = quat_from_euler_xyz(
+                torch.tensor(0.0, device=self.device),
+                pitch_rad,
+                torch.tensor(0.0, device=self.device),
+            )
+            combo = quat_mul(pitch_quat, self._camera_frame_quat, w_last=True)
+            combo = combo.unsqueeze(0).expand(dirs_cam.shape[0], -1)
+            dirs_base = quat_rotate_inverse(combo, dirs_cam, w_last=True)
+        else:
+            # Match VideoMimic pinhole convention: camera (x right, y down, z forward)
+            # -> robotics (x forward, y left, z up) => [z, -x, -y] = [1, -x, -y].
+            dirs_cam = torch.stack((torch.ones_like(x), -x, -y), dim=-1)
+            dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
+            dirs_cam = dirs_cam.view(-1, 3)
+            pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
+            pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
+            pitch_quat = quat_from_euler_xyz(
+                torch.tensor(0.0, device=self.device),
+                pitch_rad,
+                torch.tensor(0.0, device=self.device),
+            )
+            pitch_quat = pitch_quat.unsqueeze(0).expand(dirs_cam.shape[0], -1)
+            dirs_base = quat_rotate_inverse(pitch_quat, dirs_cam, w_last=True)
         dirs_base = dirs_base / torch.norm(dirs_base, dim=-1, keepdim=True).clamp(min=1.0e-6)
         return dirs_base
 
@@ -596,8 +640,13 @@ class PerceptionManager:
             pitch_rad,
             torch.tensor(0.0, device=body_quat.device),
         )
-        forward_cam = torch.tensor([1.0, 0.0, 0.0], device=body_quat.device)
-        forward_base = quat_rotate_inverse(pitch_quat.unsqueeze(0), forward_cam.unsqueeze(0), w_last=True).squeeze(0)
+        if self._use_camera_frame_quat:
+            forward_cam = torch.tensor([0.0, 0.0, -1.0], device=body_quat.device)
+            combo = quat_mul(pitch_quat, self._camera_frame_quat.to(body_quat.device), w_last=True)
+            forward_base = quat_rotate_inverse(combo.unsqueeze(0), forward_cam.unsqueeze(0), w_last=True).squeeze(0)
+        else:
+            forward_cam = torch.tensor([1.0, 0.0, 0.0], device=body_quat.device)
+            forward_base = quat_rotate_inverse(pitch_quat.unsqueeze(0), forward_cam.unsqueeze(0), w_last=True).squeeze(0)
         forward_base = forward_base.unsqueeze(0).expand(body_quat.shape[0], -1)
         forward_world = quat_apply(body_quat, forward_base, w_last=True)
         return forward_world / torch.norm(forward_world, dim=-1, keepdim=True).clamp(min=1.0e-6)

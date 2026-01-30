@@ -49,6 +49,8 @@ class PerceptionConfig:
 
     camera_pitch_deg: float = -20.0
     """Virtual camera pitch in degrees (negative tilts down)."""
+    camera_frame_quat: list[float] | None = None
+    """Optional camera frame rotation (xyzw). Matches simulator camera frame when provided."""
 
     camera_target_pitch_deg: float | None = None
     """Optional target pitch in degrees for auto-tilting raycast cameras when no hits are detected."""

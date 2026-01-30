@@ -171,6 +171,50 @@ def _frustum_quat_from_camera(cam_quat_xyzw: torch.Tensor) -> torch.Tensor:
     return quat_wxyz
 
 
+def _frustum_quat_from_rays(
+    ray_dirs_base: torch.Tensor,
+    body_quat_xyzw: torch.Tensor,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+) -> torch.Tensor | None:
+    if ray_dirs_base is None or ray_dirs_base.numel() == 0:
+        return None
+
+    num_rays = int(ray_dirs_base.shape[0])
+    if width and height and num_rays >= (width * height):
+        center_v = height // 2
+        center_u = width // 2
+        idx_center = center_v * width + center_u
+        idx_right = center_v * width + min(center_u + 1, width - 1)
+    else:
+        idx_center = num_rays // 2
+        idx_right = min(idx_center + 1, num_rays - 1)
+
+    center_dir = ray_dirs_base[idx_center]
+    right_dir = ray_dirs_base[idx_right]
+
+    if body_quat_xyzw.ndim == 1:
+        body_quat_xyzw = body_quat_xyzw.unsqueeze(0)
+    center_world = quat_apply(body_quat_xyzw, center_dir.unsqueeze(0), w_last=True).squeeze(0)
+    right_world = quat_apply(body_quat_xyzw, right_dir.unsqueeze(0), w_last=True).squeeze(0)
+
+    fwd = _normalize_vec(center_world)
+    right_proj = right_world - fwd * torch.dot(right_world, fwd)
+    if torch.linalg.norm(right_proj) < 1.0e-6:
+        fallback_right = torch.tensor([0.0, -1.0, 0.0], device=body_quat_xyzw.device)
+        right_proj = quat_apply(body_quat_xyzw, fallback_right.unsqueeze(0), w_last=True).squeeze(0)
+        right_proj = right_proj - fwd * torch.dot(right_proj, fwd)
+        if torch.linalg.norm(right_proj) < 1.0e-6:
+            return None
+
+    right = _normalize_vec(right_proj)
+    down = _normalize_vec(torch.cross(fwd, right))
+
+    rot = torch.stack([right, down, fwd], dim=1)
+    return matrix_to_quaternion(rot)
+
+
 def _quat_from_forward_up(forward: torch.Tensor, up_hint: torch.Tensor) -> torch.Tensor:
     forward = _normalize_vec(forward)
     up_hint = _normalize_vec(up_hint)
@@ -1554,6 +1598,7 @@ class ViserLiveViewer:
         far = float(getattr(cfg, "max_distance", 10.0))
         cam_pos = None
         cam_quat_xyzw = None
+        cam_body_quat_xyzw = None
 
         if output_mode == "camera_depth":
             try:
@@ -1574,6 +1619,15 @@ class ViserLiveViewer:
             except Exception:
                 cam_pos = None
                 cam_quat_xyzw = None
+            try:
+                cam_body_pos_t, cam_body_quat_t = perception_mgr.get_camera_pose(
+                    env_ids,
+                    apply_sensor_offset=True,
+                    apply_pitch=False,
+                )
+                cam_body_quat_xyzw = cam_body_quat_t[0].detach().cpu()
+            except Exception:
+                cam_body_quat_xyzw = None
         elif output_mode == "heightmap":
             near = 0.0
             try:
@@ -1643,7 +1697,25 @@ class ViserLiveViewer:
 
         cam_pos = cam_pos - offset
         cam_quat_wxyz = cam_quat_xyzw.detach().cpu().numpy()[[3, 0, 1, 2]]
-        frustum_quat_wxyz = _frustum_quat_from_camera(cam_quat_xyzw).detach().cpu().numpy()
+        frustum_quat_wxyz = None
+        if output_mode == "camera_depth" and cam_body_quat_xyzw is not None:
+            ray_dirs_base = getattr(perception_mgr, "_camera_scandots_ray_dirs_base", None)
+            width = getattr(perception_mgr, "_camera_scandots_width", None)
+            height = getattr(perception_mgr, "_camera_scandots_height", None)
+            if ray_dirs_base is None:
+                ray_dirs_base = getattr(perception_mgr, "_camera_ray_dirs_base", None)
+                width = int(getattr(perception_mgr, "_camera_width", 0) or 0)
+                height = int(getattr(perception_mgr, "_camera_height", 0) or 0)
+            frustum_quat = _frustum_quat_from_rays(
+                ray_dirs_base,
+                cam_body_quat_xyzw,
+                width=width if width and height else None,
+                height=height if width and height else None,
+            )
+            if frustum_quat is not None:
+                frustum_quat_wxyz = frustum_quat.detach().cpu().numpy()
+        if frustum_quat_wxyz is None:
+            frustum_quat_wxyz = _frustum_quat_from_camera(cam_quat_xyzw).detach().cpu().numpy()
 
         if self._perception_frame is not None:
             self._perception_frame.position = cam_pos
