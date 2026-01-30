@@ -32,7 +32,7 @@ class PerceptionConfig:
     heightmap_resolution: float | None = None
     """Optional resolution (meters) for heightmap grid (VideoMimic-style)."""
 
-    ray_start_height: float = 0.6
+    ray_start_height: float = 0.0
     """Height above the sampling plane to start rays (meters)."""
 
     max_distance: float = 5.0

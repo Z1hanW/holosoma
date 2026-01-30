@@ -13,6 +13,7 @@ heightmap = PerceptionConfig(
     heightmap_resolution=0.1,
     heightmap_body_name="torso_link",
     max_distance=5.0,
+    ray_start_height=0.0,
     update_hz=50.0,
     encoder_output_dim=512,
     encoder_type="attention",

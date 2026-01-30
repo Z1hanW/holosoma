@@ -25,7 +25,7 @@ set -euo pipefail
 # Heightmap (VideoMimic-style):
 #   HEIGHTMAP_SIZE=1.0        # meters (length, width)
 #   HEIGHTMAP_RESOLUTION=0.1  # meters (=> 11x11 when size=1.0)
-#   RAY_START_HEIGHT=0.6
+#   RAY_START_HEIGHT=0.0
 #   MAX_DISTANCE=5.0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,7 +48,7 @@ VISER_RECENTER=${VISER_RECENTER:-False}
 VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-True}
 HEIGHTMAP_SIZE=${HEIGHTMAP_SIZE:-1.0}
 HEIGHTMAP_RESOLUTION=${HEIGHTMAP_RESOLUTION:-0.1}
-RAY_START_HEIGHT=${RAY_START_HEIGHT:-0.6}
+RAY_START_HEIGHT=${RAY_START_HEIGHT:-0.0}
 MAX_DISTANCE=${MAX_DISTANCE:-5.0}
 
 if [[ "${CKPT}" == "/ABS/PATH/to/model.pt" ]]; then

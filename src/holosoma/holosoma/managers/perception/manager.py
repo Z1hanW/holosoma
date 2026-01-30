@@ -330,15 +330,13 @@ class PerceptionManager:
         if self.cfg.use_heading_only:
             grid_world = quat_apply_yaw(quat_repeat, grid_points, w_last=True)
             ray_dirs_world = quat_apply_yaw(quat_repeat, ray_dirs, w_last=True)
-            offset_world = quat_apply_yaw(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
-            height_offset = quat_apply_yaw(body_quat, self._ray_start_offset.expand(num_envs, -1), w_last=True)
         else:
             grid_world = quat_apply(quat_repeat, grid_points, w_last=True)
             ray_dirs_world = quat_apply(quat_repeat, ray_dirs, w_last=True)
-            offset_world = quat_apply(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
-            height_offset = quat_apply(body_quat, self._ray_start_offset.expand(num_envs, -1), w_last=True)
 
-        ray_starts = grid_world + body_pos.unsqueeze(1) + offset_world.unsqueeze(1) + height_offset.unsqueeze(1)
+        offset_world = torch.zeros_like(body_pos)
+        height_offset = torch.zeros_like(body_pos)
+        ray_starts = grid_world + body_pos.unsqueeze(1)
         ray_hits_world = self._ray_hits_world[idx]
         hit_mask = torch.isfinite(ray_hits_world).all(dim=-1)
 
@@ -981,15 +979,13 @@ class PerceptionManager:
         if self.cfg.use_heading_only:
             grid_world = quat_apply_yaw(quat_repeat, grid_points, w_last=True)
             ray_dirs_world = quat_apply_yaw(quat_repeat, ray_dirs, w_last=True)
-            offset_world = quat_apply_yaw(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
-            height_offset = quat_apply_yaw(body_quat, self._ray_start_offset.expand(num_envs, -1), w_last=True)
         else:
             grid_world = quat_apply(quat_repeat, grid_points, w_last=True)
             ray_dirs_world = quat_apply(quat_repeat, ray_dirs, w_last=True)
-            offset_world = quat_apply(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
-            height_offset = quat_apply(body_quat, self._ray_start_offset.expand(num_envs, -1), w_last=True)
 
-        ray_starts = grid_world + body_pos.unsqueeze(1) + offset_world.unsqueeze(1) + height_offset.unsqueeze(1)
+        offset_world = torch.zeros_like(body_pos)
+        height_offset = torch.zeros_like(body_pos)
+        ray_starts = grid_world + body_pos.unsqueeze(1)
         ray_hits_world = warp_utils.ray_cast(ray_starts, ray_dirs_world, self._warp_mesh)
 
         return ray_starts, ray_dirs_world, ray_hits_world, body_pos, body_quat, offset_world

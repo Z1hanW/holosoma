@@ -22,6 +22,9 @@ from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.viser_utils import ensure_viser_on_path, resolve_viser_port
 
 LIGHT_BLUE = (130, 180, 235)
+HEIGHTMAP_MARKER_COLOR = (255, 165, 0)
+CAMERA_MARKER_COLOR = (0, 255, 255)
+SENSOR_MARKER_RADIUS = 0.03
 _VIRIDIS_LUT = np.array(
     [
         (68, 1, 84),
@@ -185,6 +188,16 @@ def _quat_from_forward_up(forward: torch.Tensor, up_hint: torch.Tensor) -> torch
     return quat_wxyz[[1, 2, 3, 0]]
 
 
+def _make_marker_mesh(color: tuple[int, int, int], radius: float):
+    try:
+        import trimesh  # type: ignore[import-not-found]
+    except Exception:
+        return None
+    mesh = trimesh.creation.icosphere(subdivisions=2, radius=radius)
+    mesh.visual.face_colors = np.tile(np.array(color, dtype=np.uint8), (len(mesh.faces), 1))
+    return mesh
+
+
 def _import_viser() -> tuple[Any | None, Any | None, str | None]:
     ensure_viser_on_path()
     try:
@@ -339,8 +352,14 @@ class ViserLiveViewer:
         self._perception_show_depth_cb = None
         self._perception_show_frustum_cb = None
         self._perception_show_points_cb = None
+        self._perception_show_heightmap_joint_cb = None
+        self._perception_show_camera_joint_cb = None
         self._perception_frustum = None
         self._perception_frame = None
+        self._heightmap_marker_handle = None
+        self._heightmap_marker_is_pc = False
+        self._camera_marker_handle = None
+        self._camera_marker_is_pc = False
         self._perception_last_shape: tuple[int, int] | None = None
         self._perception_last_mode: str | None = None
         self._perception_last_fov: float | None = None
@@ -773,6 +792,18 @@ class ViserLiveViewer:
                 initial_value=self._scandots_enabled,
                 hint="Toggle perception hit points (heightmap or camera scandots)",
             )
+            if getattr(cfg, "heightmap_body_name", None):
+                self._perception_show_heightmap_joint_cb = self._server.gui.add_checkbox(
+                    "Show Heightmap Joint",
+                    initial_value=True,
+                    hint="Show the body used for heightmap sampling",
+                )
+            if getattr(cfg, "camera_body_name", None):
+                self._perception_show_camera_joint_cb = self._server.gui.add_checkbox(
+                    "Show Camera Joint",
+                    initial_value=True,
+                    hint="Show the body used for camera sampling",
+                )
             self._perception_depth_handle = self._server.gui.add_image(
                 np.zeros((height, width, 3), dtype=np.uint8),
                 label="Perception Depth",
@@ -798,6 +829,18 @@ class ViserLiveViewer:
                 self._show_scandots_cb.value = self._scandots_enabled
             if not self._scandots_enabled and self._scandots_handle is not None:
                 self._scandots_handle.visible = False
+
+        if self._perception_show_heightmap_joint_cb is not None:
+            @self._perception_show_heightmap_joint_cb.on_update
+            def _(_evt) -> None:
+                if self._heightmap_marker_handle is not None:
+                    self._heightmap_marker_handle.visible = bool(self._perception_show_heightmap_joint_cb.value)
+
+        if self._perception_show_camera_joint_cb is not None:
+            @self._perception_show_camera_joint_cb.on_update
+            def _(_evt) -> None:
+                if self._camera_marker_handle is not None:
+                    self._camera_marker_handle.visible = bool(self._perception_show_camera_joint_cb.value)
 
         if output_mode == "heightmap":
             fov, aspect = self._resolve_heightmap_fov_aspect(perception_mgr)
@@ -1489,6 +1532,8 @@ class ViserLiveViewer:
                 cam_pos = cam_pos_t[0].detach().cpu().numpy()
                 cam_quat_xyzw = cam_quat_t.detach().cpu()
 
+        self._update_perception_markers(perception_mgr, env_ids, offset)
+
         if depth_map is None:
             return
 
@@ -1590,6 +1635,108 @@ class ViserLiveViewer:
                     self._target_keypoints_handle.colors = colors.astype(np.uint8, copy=False)
                 except Exception:
                     pass
+
+    def _ensure_marker_handle(
+        self,
+        name: str,
+        color: tuple[int, int, int],
+        radius: float,
+    ) -> tuple[object | None, bool]:
+        if self._server is None:
+            return None, False
+        mesh = _make_marker_mesh(color, radius)
+        if mesh is None:
+            handle = self._server.scene.add_point_cloud(
+                name,
+                points=np.zeros((1, 3), dtype=np.float32),
+                colors=np.array([color], dtype=np.uint8),
+                point_size=max(0.005, radius * 2.0),
+                point_shape="circle",
+                precision="float32",
+            )
+            return handle, True
+        handle = self._server.scene.add_mesh_trimesh(
+            name,
+            mesh,
+            cast_shadow=False,
+            receive_shadow=False,
+        )
+        return handle, False
+
+    def _update_perception_markers(
+        self,
+        perception_mgr: Any,
+        env_ids: torch.Tensor,
+        offset: np.ndarray,
+    ) -> None:
+        cfg = getattr(perception_mgr, "cfg", None)
+        if cfg is None:
+            return
+
+        if getattr(cfg, "heightmap_body_name", None):
+            show = True if self._perception_show_heightmap_joint_cb is None else bool(
+                self._perception_show_heightmap_joint_cb.value
+            )
+            if show:
+                try:
+                    pose = perception_mgr.get_heightmap_pose(
+                        env_ids,
+                        apply_offsets=False,
+                        apply_heading_only=False,
+                    )
+                except Exception:
+                    pose = None
+                if pose is not None:
+                    pos_t, _ = pose
+                    pos = pos_t[0].detach().cpu().numpy() - offset
+                    if self._heightmap_marker_handle is None:
+                        handle, is_pc = self._ensure_marker_handle(
+                            "/heightmap_joint_marker",
+                            HEIGHTMAP_MARKER_COLOR,
+                            SENSOR_MARKER_RADIUS,
+                        )
+                        self._heightmap_marker_handle = handle
+                        self._heightmap_marker_is_pc = is_pc
+                    if self._heightmap_marker_handle is not None:
+                        self._heightmap_marker_handle.visible = True
+                        if self._heightmap_marker_is_pc:
+                            self._heightmap_marker_handle.points = pos.reshape(1, 3).astype(np.float32)
+                        else:
+                            self._heightmap_marker_handle.position = pos
+            elif self._heightmap_marker_handle is not None:
+                self._heightmap_marker_handle.visible = False
+
+        if getattr(cfg, "camera_body_name", None) and getattr(cfg, "output_mode", "") == "camera_depth":
+            show = True if self._perception_show_camera_joint_cb is None else bool(
+                self._perception_show_camera_joint_cb.value
+            )
+            if show:
+                try:
+                    cam_pos_t, _ = perception_mgr.get_camera_pose(
+                        env_ids,
+                        apply_sensor_offset=False,
+                        apply_pitch=False,
+                    )
+                except Exception:
+                    cam_pos_t = None
+                if cam_pos_t is not None:
+                    pos = cam_pos_t[0].detach().cpu().numpy() - offset
+                    if self._camera_marker_handle is None:
+                        handle, is_pc = self._ensure_marker_handle(
+                            "/camera_joint_marker",
+                            CAMERA_MARKER_COLOR,
+                            SENSOR_MARKER_RADIUS,
+                        )
+                        self._camera_marker_handle = handle
+                        self._camera_marker_is_pc = is_pc
+                    if self._camera_marker_handle is not None:
+                        self._camera_marker_handle.visible = True
+                        if self._camera_marker_is_pc:
+                            self._camera_marker_handle.points = pos.reshape(1, 3).astype(np.float32)
+                        else:
+                            self._camera_marker_handle.position = pos
+            elif self._camera_marker_handle is not None:
+                self._camera_marker_handle.visible = False
 
     def _update_contact_forces(self, offset: np.ndarray) -> None:
         if not self._server:
