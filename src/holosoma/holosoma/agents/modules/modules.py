@@ -393,6 +393,25 @@ class AttentionLinearEncoder(nn.Module):
         return self.proj(flat) * self.attention
 
 
+class GRUPerceptionEncoder(nn.Module):
+    """GRU-based encoder over flattened perception inputs."""
+
+    def __init__(self, input_dim: int, output_dim: int):
+        super().__init__()
+        if input_dim <= 0:
+            raise ValueError(f"GRUPerceptionEncoder input_dim must be positive, got {input_dim}.")
+        self.input_dim = int(input_dim)
+        self.output_dim = int(output_dim)
+        # Treat each scalar entry as a step in the sequence.
+        self.gru = nn.GRU(input_size=1, hidden_size=self.output_dim, num_layers=1, batch_first=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        flat = x.view(x.shape[0], -1)
+        seq = flat.unsqueeze(-1)
+        _, h = self.gru(seq)
+        return h[-1]
+
+
 def build_cnn_layer(
     input_channels: int,
     input_height: int,
@@ -539,6 +558,8 @@ class BaseModule(nn.Module):
             self.perception_encoder = GatedLinearEncoder(input_dim, output_dim)
         elif encoder_type == "attention":
             self.perception_encoder = AttentionLinearEncoder(input_dim, output_dim)
+        elif encoder_type == "gru":
+            self.perception_encoder = GRUPerceptionEncoder(input_dim, output_dim)
         else:
             raise ValueError(f"Unknown perception_encoder_type: {encoder_type}")
         self.perception_output_dim = output_dim

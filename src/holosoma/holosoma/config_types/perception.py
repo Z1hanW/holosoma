@@ -125,4 +125,4 @@ class PerceptionConfig:
     """Output dimension for the perception encoder."""
 
     encoder_type: str = "gated_linear"
-    """Perception encoder type: 'gated_linear' or 'attention'."""
+    """Perception encoder type: 'gated_linear', 'attention', or 'gru'."""

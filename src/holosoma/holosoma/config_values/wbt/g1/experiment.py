@@ -8,6 +8,7 @@ from holosoma.config_values import (
     command,
     curriculum,
     observation,
+    perception,
     randomization,
     reward,
     robot,
@@ -255,6 +256,18 @@ g1_29dof_wbt_videomimic_transformer = replace(
     algo=replace(
         algo.ppo,
         config=replace(algo.ppo.config, module_dict=_videomimic_transformer_module_dict),
+    ),
+)
+
+g1_29dof_wbt_videomimic_mlp_w_gru = replace(
+    g1_29dof_wbt_videomimic_mlp,
+    training=replace(
+        g1_29dof_wbt_videomimic_mlp.training,
+        name="w_gru",
+    ),
+    perception=replace(
+        perception.camera_depth_d435i_scandots,
+        encoder_type="gru",
     ),
 )
 

@@ -181,6 +181,12 @@ def _frustum_quat_from_rays(
     if ray_dirs_base is None or ray_dirs_base.numel() == 0:
         return None
 
+    # Keep math on a single device/dtype to avoid CUDA/CPU mismatches.
+    target_device = ray_dirs_base.device
+    target_dtype = ray_dirs_base.dtype
+    if body_quat_xyzw.device != target_device or body_quat_xyzw.dtype != target_dtype:
+        body_quat_xyzw = body_quat_xyzw.to(device=target_device, dtype=target_dtype)
+
     num_rays = int(ray_dirs_base.shape[0])
     if width and height and num_rays >= (width * height):
         center_v = height // 2
