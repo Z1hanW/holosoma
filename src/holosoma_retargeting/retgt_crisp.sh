@@ -83,19 +83,16 @@ try:
 except ET.ParseError as exc:
     raise SystemExit(f"[ERROR] Failed to parse URDF: {urdf_path}: {exc}") from exc
 
-changed = False
 for mesh in root.findall(".//mesh"):
     filename = mesh.get("filename")
     if not filename:
         continue
-    if "/" in filename or "\\" in filename:
-        continue
-    if (pieces_dir / filename).exists():
-        mesh.set("filename", f"pieces/{filename}")
-        changed = True
+    base = Path(filename).name
+    if (pieces_dir / base).exists():
+        mesh.set("filename", f"pieces/{base}")
 
-if changed:
-    urdf_path.write_text(ET.tostring(root, encoding="unicode"))
+# Always overwrite the local URDF so paths are normalized.
+urdf_path.write_text(ET.tostring(root, encoding="unicode"))
 PY
     fi
 
