@@ -464,7 +464,9 @@ class PerceptionManager:
         x = (u_grid - self._camera_cx) / self._camera_fx
         y = (v_grid - self._camera_cy) / self._camera_fy
 
-        dirs_cam = torch.stack((torch.ones_like(x), -x, y), dim=-1)
+        # Match VideoMimic pinhole convention: camera (x right, y down, z forward)
+        # -> robotics (x forward, y left, z up) => [z, -x, -y] = [1, -x, -y].
+        dirs_cam = torch.stack((torch.ones_like(x), -x, -y), dim=-1)
         dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
         dirs_cam = dirs_cam.view(-1, 3)
 
@@ -526,7 +528,9 @@ class PerceptionManager:
         x = (u_grid - self._camera_cx) / self._camera_fx
         y = (v_grid - self._camera_cy) / self._camera_fy
 
-        dirs_cam = torch.stack((torch.ones_like(x), -x, y), dim=-1)
+        # Match VideoMimic pinhole convention: camera (x right, y down, z forward)
+        # -> robotics (x forward, y left, z up) => [z, -x, -y] = [1, -x, -y].
+        dirs_cam = torch.stack((torch.ones_like(x), -x, -y), dim=-1)
         dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
         dirs_cam = dirs_cam.view(-1, 3)
 
