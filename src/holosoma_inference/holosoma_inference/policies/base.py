@@ -483,9 +483,11 @@ class BasePolicy:
         ]
 
         # Use pre-computed corrected gravity if available (xdof), else compute from quat
-        expected_len = 7 + self.num_dofs + 6 + self.num_dofs  # base_pos(3) + quat(4) + dof_pos + lin_vel(3) + ang_vel(3) + dof_vel
+        expected_len = (
+            7 + self.num_dofs + 6 + self.num_dofs
+        )  # base_pos(3) + quat(4) + dof_pos + lin_vel(3) + ang_vel(3) + dof_vel
         if robot_state_data.shape[1] > expected_len:
-            current_obs_buffer_dict["projected_gravity"] = robot_state_data[:, expected_len:expected_len + 3]
+            current_obs_buffer_dict["projected_gravity"] = robot_state_data[:, expected_len : expected_len + 3]
         else:
             v = np.array([[0, 0, -1]])
             current_obs_buffer_dict["projected_gravity"] = quat_rotate_inverse(current_obs_buffer_dict["base_quat"], v)
@@ -667,19 +669,16 @@ class BasePolicy:
             self.logger.warning("Keyboard input will not be available")
 
     def process_joystick_input(self):
-        """Process joystick input and update commands using InterfaceWrapper."""
-        # Handle stick input
-        self.lin_vel_command, self.ang_vel_command, _ = self.interface.process_joystick_input(
+        """Process joystick input and update commands using interface."""
+        # Store previous key states for edge detection
+        self.last_key_states = self.key_states.copy() if hasattr(self, "key_states") else {}
+
+        # Process joystick input - returns (lin_vel, ang_vel, key_states)
+        self.lin_vel_command, self.ang_vel_command, self.key_states = self.interface.process_joystick_input(
             self.lin_vel_command, self.ang_vel_command, self.stand_command, False
         )
-        # Robust key state tracking: update all key states every frame
-        self.last_key_states = self.key_states.copy() if hasattr(self, "key_states") else {}
-        # Build new key_states: all keys False except the current one
-        new_key_states = dict.fromkeys(self.interface._wc_key_map.values(), False)
-        cur_key = self.interface.get_joystick_key()
-        if cur_key:
-            new_key_states[cur_key] = True
-        self.key_states = new_key_states
+
+        # Handle button presses (edge detection: only trigger on press, not hold)
         for key, is_pressed in self.key_states.items():
             if is_pressed and not self.last_key_states.get(key, False):
                 self.handle_joystick_button(key)

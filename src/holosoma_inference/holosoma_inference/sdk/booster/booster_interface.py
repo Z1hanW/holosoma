@@ -12,7 +12,6 @@ class BoosterInterface(BaseInterface):
 
     def __init__(self, robot_config: RobotConfig, domain_id=0, interface_str=None, use_joystick=True):
         super().__init__(robot_config, domain_id, interface_str, use_joystick)
-        self._wc_key_map = self._default_wc_key_map()
         self._init_sdk2py()
         if use_joystick:
             self._init_joystick()
@@ -101,58 +100,3 @@ class BoosterInterface(BaseInterface):
     def kd_level(self, value):
         """Set derivative gain level."""
         self.command_sender.kd_level = value
-
-    def _default_wc_key_map(self):
-        """Default wireless controller key mapping."""
-        return {
-            1: "R1",
-            2: "L1",
-            3: "L1+R1",
-            4: "start",
-            8: "select",
-            10: "L1+select",
-            16: "R2",
-            32: "L2",
-            64: "F1",
-            128: "F2",
-            256: "A",
-            264: "select+A",
-            512: "B",
-            520: "select+B",
-            768: "A+B",
-            1024: "X",
-            1032: "select+X",
-            1280: "A+X",
-            1536: "B+X",
-            2048: "Y",
-            2304: "A+Y",
-            2560: "B+Y",
-            2056: "select+Y",
-            3072: "X+Y",
-            4096: "up",
-            4097: "R1+up",
-            4352: "A+up",
-            4608: "B+up",
-            4104: "select+up",
-            5120: "X+up",
-            6144: "Y+up",
-            8192: "right",
-            8193: "R1+right",
-            8448: "A+right",
-            9216: "X+right",
-            10240: "Y+right",
-            8200: "select+right",
-            16384: "down",
-            16392: "select+down",
-            16385: "R1+down",
-            16640: "A+down",
-            16896: "B+down",
-            17408: "X+down",
-            18432: "Y+down",
-            32768: "left",
-            32769: "R1+left",
-            32776: "select+left",
-            33024: "A+left",
-            33792: "X+left",
-            34816: "Y+left",
-        }
