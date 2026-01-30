@@ -971,9 +971,8 @@ class PerceptionManager:
             raise RuntimeError("PerceptionManager grid buffers are not initialized.")
 
         idx = env_ids if env_ids is not None else slice(None)
-        base_quat = self.env.base_quat[idx]
-        root_pos = self.env.simulator.robot_root_states[idx, :3]
-        num_envs = base_quat.shape[0]
+        body_pos, body_quat = self._get_heightmap_body_pose(idx)
+        num_envs = body_quat.shape[0]
 
         grid_points = self._grid_points_base.unsqueeze(0).expand(num_envs, -1, -1)
         ray_dirs = self._ray_dirs_base.unsqueeze(0).expand(num_envs, -1, -1)
