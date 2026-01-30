@@ -1459,7 +1459,8 @@ class ViserLiveViewer:
         points = result[0]
         mask = result[1]
         ray_starts = result[2] if len(result) > 2 else None
-        ray_hits_world = result[3] if len(result) > 3 else None
+        ray_dirs = result[3] if len(result) > 3 else None
+        ray_hits_world = result[4] if len(result) > 4 else None
         if points.numel() == 0:
             if self._scandots_handle is not None:
                 self._scandots_handle.visible = False
@@ -1493,22 +1494,34 @@ class ViserLiveViewer:
             self._scandots_handle.visible = True
             self._scandots_handle.points = pts.astype(np.float32, copy=False)
 
-        if ray_starts is None or ray_hits_world is None:
+        if ray_starts is None or ray_dirs is None:
             return
         starts_env = ray_starts[0]
-        hits_env = ray_hits_world[0]
-        if mask_env is not None and mask_env.numel() > 0:
-            starts_env = starts_env[mask_env]
-            hits_env = hits_env[mask_env]
-        if starts_env.numel() == 0:
+        dirs_env = ray_dirs[0]
+        if starts_env.numel() == 0 or dirs_env.numel() == 0:
             if self._scandots_rays_handle is not None:
                 self._scandots_rays_handle.visible = False
             return
 
-        lines = torch.stack([starts_env, hits_env], dim=1).detach().cpu().numpy()
+        ray_len_env = os.environ.get("VISER_SCANDOTS_RAY_LEN")
+        try:
+            ray_len = float(ray_len_env) if ray_len_env is not None else 0.1
+        except ValueError:
+            ray_len = 0.1
+        if ray_len <= 0.0:
+            ray_len = 0.1
+
+        ends_env = starts_env + dirs_env * ray_len
+        if ray_hits_world is not None and mask_env is not None and mask_env.numel() > 0:
+            hits_env = ray_hits_world[0]
+            if hits_env.numel() == starts_env.numel():
+                mask_env = mask_env.to(torch.bool)
+                ends_env = torch.where(mask_env.unsqueeze(-1), hits_env, ends_env)
+
+        lines = torch.stack([starts_env, ends_env], dim=1).detach().cpu().numpy()
         if self._recenter:
             lines = lines - offset[None, None, :]
-        colors = np.tile(self._scandots_color, (lines.shape[0], 2, 1))
+        colors = np.full((lines.shape[0], 2, 3), [0, 0, 0], dtype=np.uint8)
         if self._scandots_rays_handle is None:
             self._scandots_rays_handle = self._server.scene.add_line_segments(
                 "/scandots_rays",

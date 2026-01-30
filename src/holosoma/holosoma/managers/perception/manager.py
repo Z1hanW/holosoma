@@ -287,7 +287,7 @@ class PerceptionManager:
         return_rays: bool = False,
     ) -> (
         tuple[torch.Tensor, torch.Tensor]
-        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
         | None
     ):
         if not self.enabled or self.cfg.output_mode != "camera_depth":
@@ -320,7 +320,7 @@ class PerceptionManager:
         else:
             points = ray_hits_world
         if return_rays:
-            return points, hit_mask, ray_starts, ray_hits_world
+            return points, hit_mask, ray_starts, ray_dirs_world, ray_hits_world
         return points, hit_mask
 
     def get_heightmap_points(
@@ -331,7 +331,7 @@ class PerceptionManager:
         return_rays: bool = False,
     ) -> (
         tuple[torch.Tensor, torch.Tensor]
-        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
         | None
     ):
         if not self.enabled or self.cfg.output_mode != "heightmap":
@@ -366,7 +366,7 @@ class PerceptionManager:
         else:
             points = ray_hits_world
         if return_rays:
-            return points, hit_mask, ray_starts, ray_hits_world
+            return points, hit_mask, ray_starts, ray_dirs_world, ray_hits_world
         return points, hit_mask
 
     def capture_rendered_rgb(self) -> Any:
