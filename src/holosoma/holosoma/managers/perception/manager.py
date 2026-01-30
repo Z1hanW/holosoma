@@ -309,6 +309,8 @@ class PerceptionManager:
 
         offset_world = quat_apply(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
         ray_starts = body_pos.unsqueeze(1) + offset_world.unsqueeze(1)
+        if ray_starts.shape[1] != ray_dirs_world.shape[1]:
+            ray_starts = ray_starts.expand(-1, ray_dirs_world.shape[1], -1)
 
         warp_mesh = self._get_camera_warp_mesh(env_ids)
         ray_hits_world = warp_utils.ray_cast(ray_starts, ray_dirs_world, warp_mesh)
@@ -1041,6 +1043,8 @@ class PerceptionManager:
 
         offset_world = quat_apply(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
         ray_starts = body_pos.unsqueeze(1) + offset_world.unsqueeze(1)
+        if ray_starts.shape[1] != ray_dirs_world.shape[1]:
+            ray_starts = ray_starts.expand(-1, ray_dirs_world.shape[1], -1)
 
         warp_mesh = self._get_camera_warp_mesh(env_ids)
         ray_hits_world = warp_utils.ray_cast(ray_starts, ray_dirs_world, warp_mesh)
@@ -1064,6 +1068,8 @@ class PerceptionManager:
 
         offset_world = quat_apply(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
         ray_starts = body_pos.unsqueeze(1) + offset_world.unsqueeze(1)
+        if ray_starts.shape[1] != ray_dirs_world.shape[1]:
+            ray_starts = ray_starts.expand(-1, ray_dirs_world.shape[1], -1)
 
         warp_mesh = self._get_camera_warp_mesh(env_ids)
         ray_hits_world = warp_utils.ray_cast(ray_starts, ray_dirs_world, warp_mesh)
