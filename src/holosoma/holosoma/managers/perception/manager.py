@@ -23,6 +23,7 @@ from holosoma.utils.rotations import (
     quat_rotate_batched,
     quat_rotate_inverse,
     quat_rotate_inverse_batched,
+    yaw_quat,
 )
 from holosoma.utils.simulator_config import SimulatorType, get_simulator_type
 from holosoma.utils.safe_torch_import import torch
@@ -55,11 +56,15 @@ class PerceptionManager:
         self._ray_start_offset = torch.tensor([0.0, 0.0, cfg.ray_start_height], device=self.device)
         self._camera_source = cfg.camera_source
         self._camera_body_name = cfg.camera_body_name
+        self._heightmap_body_name = cfg.heightmap_body_name
         self._camera_include_robot_mesh = bool(getattr(cfg, "camera_include_robot_mesh", False))
         self._camera_robot_mesh_enabled = False
         self._camera_body_index: int | None = None
         self._camera_body_offset_pos = torch.zeros(3, device=self.device)
         self._camera_body_offset_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
+        self._heightmap_body_index: int | None = None
+        self._heightmap_body_offset_pos = torch.zeros(3, device=self.device)
+        self._heightmap_body_offset_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
         self._rendered_camera = None
         self._rendered_camera_env_id = int(getattr(cfg, "camera_env_id", 0))
         self._pytorch3d_mesh = None
@@ -154,6 +159,7 @@ class PerceptionManager:
                     self._load_robot_link_meshes()
 
         if self._uses_raycast():
+            self._resolve_heightmap_body_index()
             self._grid_points_base, self._ray_dirs_base = self._build_grid()
 
         if self._uses_camera_raycast():
@@ -314,26 +320,25 @@ class PerceptionManager:
             raise RuntimeError("PerceptionManager grid buffers are not initialized.")
 
         idx = env_ids if env_ids is not None else slice(None)
-        base_quat = self.env.base_quat[idx]
-        root_pos = self.env.simulator.robot_root_states[idx, :3]
-        num_envs = base_quat.shape[0]
+        body_pos, body_quat = self._get_heightmap_body_pose(idx)
+        num_envs = body_quat.shape[0]
 
         grid_points = self._grid_points_base.unsqueeze(0).expand(num_envs, -1, -1)
         ray_dirs = self._ray_dirs_base.unsqueeze(0).expand(num_envs, -1, -1)
 
-        quat_repeat = base_quat.repeat(1, self._num_points)
+        quat_repeat = body_quat.repeat(1, self._num_points)
         if self.cfg.use_heading_only:
             grid_world = quat_apply_yaw(quat_repeat, grid_points, w_last=True)
             ray_dirs_world = quat_apply_yaw(quat_repeat, ray_dirs, w_last=True)
-            offset_world = quat_apply_yaw(base_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
-            height_offset = quat_apply_yaw(base_quat, self._ray_start_offset.expand(num_envs, -1), w_last=True)
+            offset_world = quat_apply_yaw(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
+            height_offset = quat_apply_yaw(body_quat, self._ray_start_offset.expand(num_envs, -1), w_last=True)
         else:
             grid_world = quat_apply(quat_repeat, grid_points, w_last=True)
             ray_dirs_world = quat_apply(quat_repeat, ray_dirs, w_last=True)
-            offset_world = quat_apply(base_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
-            height_offset = quat_apply(base_quat, self._ray_start_offset.expand(num_envs, -1), w_last=True)
+            offset_world = quat_apply(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
+            height_offset = quat_apply(body_quat, self._ray_start_offset.expand(num_envs, -1), w_last=True)
 
-        ray_starts = grid_world + root_pos.unsqueeze(1) + offset_world.unsqueeze(1) + height_offset.unsqueeze(1)
+        ray_starts = grid_world + body_pos.unsqueeze(1) + offset_world.unsqueeze(1) + height_offset.unsqueeze(1)
         ray_hits_world = self._ray_hits_world[idx]
         hit_mask = torch.isfinite(ray_hits_world).all(dim=-1)
 
@@ -382,6 +387,30 @@ class PerceptionManager:
             )
             pitch_quat = pitch_quat.unsqueeze(0).expand(body_quat.shape[0], -1)
             body_quat = quat_mul(body_quat, pitch_quat, w_last=True)
+
+        return body_pos, body_quat
+
+    def get_heightmap_pose(
+        self,
+        env_ids: torch.Tensor | None = None,
+        *,
+        apply_offsets: bool = True,
+        apply_heading_only: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Return heightmap ray origin pose in world frame."""
+        if not self.enabled or self.cfg.output_mode != "heightmap":
+            return None
+
+        idx = env_ids if env_ids is not None else slice(None)
+        body_pos, body_quat = self._get_heightmap_body_pose(idx)
+
+        if apply_heading_only and self.cfg.use_heading_only:
+            body_quat = yaw_quat(body_quat, w_last=True)
+
+        if apply_offsets:
+            offset_world = quat_apply(body_quat, self._sensor_offset.expand(body_pos.shape[0], -1), w_last=True)
+            height_offset = quat_apply(body_quat, self._ray_start_offset.expand(body_pos.shape[0], -1), w_last=True)
+            body_pos = body_pos + offset_world + height_offset
 
         return body_pos, body_quat
 
@@ -857,6 +886,31 @@ class PerceptionManager:
     def _uses_rendered_camera(self) -> bool:
         return self.cfg.output_mode == "camera_depth" and self._camera_source in {"rendered", "rendered_depth_sensor"}
 
+    def _resolve_heightmap_body_index(self) -> None:
+        if self._heightmap_body_name is None:
+            return
+        body_names = getattr(self.env, "body_names", None)
+        if body_names is not None and self._heightmap_body_name in body_names:
+            self._heightmap_body_index = int(body_names.index(self._heightmap_body_name))
+            return
+
+        resolved = resolve_fixed_link_offset(
+            self.env.robot_config,
+            self._heightmap_body_name,
+            available_links=body_names,
+            device=self.device,
+        )
+        if resolved is None or body_names is None:
+            available = body_names if body_names is not None else "unknown"
+            raise RuntimeError(
+                f"Heightmap body '{self._heightmap_body_name}' not found in body_names: {available}"
+            )
+
+        parent_name, offset_pos, offset_quat = resolved
+        self._heightmap_body_index = int(body_names.index(parent_name))
+        self._heightmap_body_offset_pos = offset_pos
+        self._heightmap_body_offset_quat = offset_quat
+
     def _resolve_camera_body_index(self) -> None:
         if self._camera_body_name is None:
             return
@@ -879,6 +933,20 @@ class PerceptionManager:
         self._camera_body_index = int(body_names.index(parent_name))
         self._camera_body_offset_pos = offset_pos
         self._camera_body_offset_quat = offset_quat
+
+    def _get_heightmap_body_pose(self, idx: torch.Tensor | slice) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._heightmap_body_index is not None:
+            body_pos = self.env.simulator._rigid_body_pos[idx, self._heightmap_body_index]
+            body_quat = self.env.simulator._rigid_body_rot[idx, self._heightmap_body_index]
+        else:
+            body_pos = self.env.simulator.robot_root_states[idx, :3]
+            body_quat = self.env.base_quat[idx]
+        if self._heightmap_body_offset_pos is not None:
+            offset_pos = self._heightmap_body_offset_pos.expand(body_pos.shape[0], -1)
+            offset_quat = self._heightmap_body_offset_quat.expand(body_pos.shape[0], -1)
+            body_pos = body_pos + quat_apply(body_quat, offset_pos, w_last=True)
+            body_quat = quat_mul(body_quat, offset_quat, w_last=True)
+        return body_pos, body_quat
 
     def _get_camera_body_pose(self, idx: torch.Tensor | slice) -> tuple[torch.Tensor, torch.Tensor]:
         if self._camera_body_index is not None:
@@ -910,22 +978,22 @@ class PerceptionManager:
         grid_points = self._grid_points_base.unsqueeze(0).expand(num_envs, -1, -1)
         ray_dirs = self._ray_dirs_base.unsqueeze(0).expand(num_envs, -1, -1)
 
-        quat_repeat = base_quat.repeat(1, self._num_points)
+        quat_repeat = body_quat.repeat(1, self._num_points)
         if self.cfg.use_heading_only:
             grid_world = quat_apply_yaw(quat_repeat, grid_points, w_last=True)
             ray_dirs_world = quat_apply_yaw(quat_repeat, ray_dirs, w_last=True)
-            offset_world = quat_apply_yaw(base_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
-            height_offset = quat_apply_yaw(base_quat, self._ray_start_offset.expand(num_envs, -1), w_last=True)
+            offset_world = quat_apply_yaw(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
+            height_offset = quat_apply_yaw(body_quat, self._ray_start_offset.expand(num_envs, -1), w_last=True)
         else:
             grid_world = quat_apply(quat_repeat, grid_points, w_last=True)
             ray_dirs_world = quat_apply(quat_repeat, ray_dirs, w_last=True)
-            offset_world = quat_apply(base_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
-            height_offset = quat_apply(base_quat, self._ray_start_offset.expand(num_envs, -1), w_last=True)
+            offset_world = quat_apply(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
+            height_offset = quat_apply(body_quat, self._ray_start_offset.expand(num_envs, -1), w_last=True)
 
-        ray_starts = grid_world + root_pos.unsqueeze(1) + offset_world.unsqueeze(1) + height_offset.unsqueeze(1)
+        ray_starts = grid_world + body_pos.unsqueeze(1) + offset_world.unsqueeze(1) + height_offset.unsqueeze(1)
         ray_hits_world = warp_utils.ray_cast(ray_starts, ray_dirs_world, self._warp_mesh)
 
-        return ray_starts, ray_dirs_world, ray_hits_world, root_pos, base_quat, offset_world
+        return ray_starts, ray_dirs_world, ray_hits_world, body_pos, body_quat, offset_world
 
     def _compute_camera_raycast_depth(self, env_ids: torch.Tensor | None) -> torch.Tensor:
         if self._warp_mesh is None:

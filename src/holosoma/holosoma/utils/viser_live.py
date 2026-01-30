@@ -1346,13 +1346,17 @@ class ViserLiveViewer:
             return
 
         env_ids = torch.tensor([self._env_id], device=self._env.device, dtype=torch.long)
-        include_misses = os.environ.get("VISER_SCANDOTS_INCLUDE_MISSES", "1").lower() not in (
-            "0",
-            "false",
-            "no",
-        )
         output_mode = getattr(getattr(perception_mgr, "cfg", None), "output_mode", None)
         use_heightmap = output_mode == "heightmap"
+        include_misses_env = os.environ.get("VISER_SCANDOTS_INCLUDE_MISSES")
+        if include_misses_env is None and use_heightmap:
+            include_misses = False
+        else:
+            include_misses = (include_misses_env or "1").lower() not in (
+                "0",
+                "false",
+                "no",
+            )
         try:
             with torch.no_grad():
                 if use_heightmap and hasattr(perception_mgr, "get_heightmap_points"):
@@ -1461,31 +1465,29 @@ class ViserLiveViewer:
                     depth_map = hm[0].detach().cpu().numpy()
                 elif hm.ndim == 2:
                     depth_map = hm.detach().cpu().numpy()
-            base_quat = self._env.base_quat[self._env_id]
-            if bool(getattr(cfg, "use_heading_only", True)):
-                base_quat = yaw_quat(base_quat.unsqueeze(0), w_last=True).squeeze(0)
-            root_pos = self._env.simulator.robot_root_states[self._env_id, :3]
-            sensor_offset = torch.tensor(getattr(cfg, "sensor_offset", [0.0, 0.0, 0.0]), device=self._env.device)
-            ray_start_offset = torch.tensor(
-                [0.0, 0.0, float(getattr(cfg, "ray_start_height", 0.6))],
-                device=self._env.device,
-            )
-            offset_world = quat_apply(base_quat.unsqueeze(0), sensor_offset.unsqueeze(0), w_last=True).squeeze(0)
-            height_world = quat_apply(base_quat.unsqueeze(0), ray_start_offset.unsqueeze(0), w_last=True).squeeze(0)
-            cam_pos_t = root_pos + offset_world + height_world
-            forward_world = quat_apply(
-                base_quat.unsqueeze(0),
-                torch.tensor([0.0, 0.0, -1.0], device=self._env.device),
-                w_last=True,
-            ).squeeze(0)
-            up_hint = quat_apply(
-                base_quat.unsqueeze(0),
-                torch.tensor([1.0, 0.0, 0.0], device=self._env.device),
-                w_last=True,
-            ).squeeze(0)
-            cam_quat_t = _quat_from_forward_up(forward_world, up_hint)
-            cam_pos = cam_pos_t.detach().cpu().numpy()
-            cam_quat_xyzw = cam_quat_t.detach().cpu()
+            try:
+                pose = perception_mgr.get_heightmap_pose(
+                    env_ids,
+                    apply_offsets=True,
+                    apply_heading_only=True,
+                )
+            except Exception:
+                pose = None
+            if pose is not None:
+                cam_pos_t, body_quat = pose
+                forward_world = quat_apply(
+                    body_quat,
+                    torch.tensor([0.0, 0.0, -1.0], device=self._env.device),
+                    w_last=True,
+                )
+                up_hint = quat_apply(
+                    body_quat,
+                    torch.tensor([1.0, 0.0, 0.0], device=self._env.device),
+                    w_last=True,
+                )
+                cam_quat_t = _quat_from_forward_up(forward_world, up_hint)
+                cam_pos = cam_pos_t[0].detach().cpu().numpy()
+                cam_quat_xyzw = cam_quat_t.detach().cpu()
 
         if depth_map is None:
             return

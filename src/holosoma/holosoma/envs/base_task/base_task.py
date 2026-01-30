@@ -522,17 +522,29 @@ class BaseTask:
             env_id = 0
         env_ids = torch.tensor([env_id], device=self.device, dtype=torch.long)
 
-        include_misses = os.environ.get("ISAAC_SCANDOTS_INCLUDE_MISSES", "1").lower() not in (
-            "0",
-            "false",
-            "no",
-        )
+        output_mode = getattr(getattr(self.perception_manager, "cfg", None), "output_mode", None)
+        use_heightmap = output_mode == "heightmap"
+        include_misses_env = os.environ.get("ISAAC_SCANDOTS_INCLUDE_MISSES")
+        if include_misses_env is None and use_heightmap:
+            include_misses = False
+        else:
+            include_misses = (include_misses_env or "1").lower() not in (
+                "0",
+                "false",
+                "no",
+            )
         try:
             with torch.no_grad():
-                result = self.perception_manager.get_camera_scandots_points(
-                    env_ids,
-                    include_misses=include_misses,
-                )
+                if use_heightmap and hasattr(self.perception_manager, "get_heightmap_points"):
+                    result = self.perception_manager.get_heightmap_points(
+                        env_ids,
+                        include_misses=include_misses,
+                    )
+                else:
+                    result = self.perception_manager.get_camera_scandots_points(
+                        env_ids,
+                        include_misses=include_misses,
+                    )
         except Exception as exc:
             if not self._isaac_scandots_warned:
                 self._isaac_scandots_warned = True
@@ -540,6 +552,9 @@ class BaseTask:
             return
 
         if result is None:
+            if use_heightmap and not self._isaac_scandots_warned:
+                self._isaac_scandots_warned = True
+                logger.warning("IsaacSim scandots draw disabled: heightmap points are unavailable.")
             return
 
         points, mask = result

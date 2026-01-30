@@ -26,6 +26,7 @@ set -euo pipefail
 #   HEIGHTMAP_SIZE=1.0        # meters (length, width)
 #   HEIGHTMAP_RESOLUTION=0.1  # meters (=> 11x11 when size=1.0)
 #   RAY_START_HEIGHT=0.6
+#   MAX_DISTANCE=5.0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
@@ -48,6 +49,7 @@ VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-True}
 HEIGHTMAP_SIZE=${HEIGHTMAP_SIZE:-1.0}
 HEIGHTMAP_RESOLUTION=${HEIGHTMAP_RESOLUTION:-0.1}
 RAY_START_HEIGHT=${RAY_START_HEIGHT:-0.6}
+MAX_DISTANCE=${MAX_DISTANCE:-5.0}
 
 if [[ "${CKPT}" == "/ABS/PATH/to/model.pt" ]]; then
   echo "Set CKPT to your checkpoint path." >&2
@@ -78,6 +80,7 @@ cmd=(
   --perception.heightmap_size "(${HEIGHTMAP_SIZE}, ${HEIGHTMAP_SIZE})"
   --perception.heightmap_resolution "${HEIGHTMAP_RESOLUTION}"
   --perception.ray_start_height "${RAY_START_HEIGHT}"
+  --perception.max_distance "${MAX_DISTANCE}"
 )
 
 if [[ -n "${NUM_COLS}" ]]; then

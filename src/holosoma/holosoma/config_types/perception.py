@@ -35,7 +35,7 @@ class PerceptionConfig:
     ray_start_height: float = 0.6
     """Height above the sampling plane to start rays (meters)."""
 
-    max_distance: float = 10.0
+    max_distance: float = 5.0
     """Clamp distance for missed rays (meters)."""
 
     update_hz: float = 50.0
@@ -43,6 +43,9 @@ class PerceptionConfig:
 
     use_heading_only: bool = True
     """Rotate grid/rays using yaw only when True."""
+
+    heightmap_body_name: str | None = None
+    """Body name to anchor heightmap rays (defaults to robot root when None)."""
 
     camera_pitch_deg: float = -20.0
     """Virtual camera pitch in degrees (negative tilts down)."""
