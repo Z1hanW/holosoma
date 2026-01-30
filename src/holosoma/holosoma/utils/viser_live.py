@@ -333,6 +333,7 @@ class ViserLiveViewer:
         self._terrain_handle = None
         self._ground_handle = None
         self._terrain_clip_name = None
+        self._terrain_is_local = False
         self._show_robot_cb = None
         self._show_object_cb = None
         self._show_terrain_cb = None
@@ -477,8 +478,7 @@ class ViserLiveViewer:
         if handle is None:
             return
         terrain_offset = np.zeros(3, dtype=np.float32)
-        motion_cmd = self._get_motion_command()
-        if motion_cmd is not None and getattr(motion_cmd.motion_cfg, "pair_terrain_with_motion", False):
+        if self._terrain_is_local:
             resolved = self._resolve_env_origin()
             if resolved is not None:
                 terrain_offset = resolved
@@ -639,6 +639,7 @@ class ViserLiveViewer:
         terrain_term = getattr(terrain_cfg, "terrain_term", None) if terrain_cfg is not None else None
 
         mesh = None
+        mesh_is_local = False
         if terrain_term is not None:
             obj_path = getattr(terrain_term, "obj_file_path", None) or ""
             obj_meta = getattr(terrain_term, "obj_metadata_path", None)
@@ -652,6 +653,16 @@ class ViserLiveViewer:
                     num_cols=cols,
                     clip_name=clip_name,
                 )
+                if mesh is not None:
+                    mesh_is_local = True
+                    if obj_meta:
+                        terrain_obj = getattr(terrain_state, "terrain", None)
+                        tile_rows = int(getattr(terrain_obj, "obj_tile_rows", 0) or 0)
+                        tile_cols = int(getattr(terrain_obj, "obj_tile_cols", 0) or 0)
+                        tile_offsets = getattr(terrain_obj, "obj_tile_offsets", None)
+                        tile_count = int(np.asarray(tile_offsets).shape[0]) if tile_offsets is not None else 0
+                        if tile_count > 1 or tile_rows > 1 or tile_cols > 1:
+                            mesh_is_local = False
 
         if mesh is None:
             mesh = getattr(terrain_state, "mesh", None)
@@ -676,6 +687,8 @@ class ViserLiveViewer:
                             mesh = trimesh.Trimesh(vertices=np.asarray(mesh.vertices), faces=np.asarray(mesh.faces))
                         except Exception:
                             mesh = None
+                    if mesh is not None:
+                        mesh_is_local = False
 
         if mesh is None:
             try:
@@ -693,6 +706,7 @@ class ViserLiveViewer:
             )
             if self._show_terrain_cb is not None:
                 self._ground_handle.visible = bool(self._show_terrain_cb.value)
+            self._terrain_is_local = False
             self._update_terrain_transform()
             return
 
@@ -705,6 +719,7 @@ class ViserLiveViewer:
         )
         if self._show_terrain_cb is not None:
             self._terrain_handle.visible = bool(self._show_terrain_cb.value)
+        self._terrain_is_local = bool(mesh_is_local)
         self._update_terrain_transform()
 
     def _get_perception_manager(self):
