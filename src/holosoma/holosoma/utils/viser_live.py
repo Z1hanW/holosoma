@@ -1468,7 +1468,7 @@ class ViserLiveViewer:
             try:
                 pose = perception_mgr.get_heightmap_pose(
                     env_ids,
-                    apply_offsets=True,
+                    apply_offsets=False,
                     apply_heading_only=True,
                 )
             except Exception:
