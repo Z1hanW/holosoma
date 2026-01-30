@@ -50,6 +50,9 @@ class PerceptionConfig:
     camera_pitch_deg: float = -20.0
     """Virtual camera pitch in degrees (negative tilts down)."""
 
+    camera_target_pitch_deg: float | None = None
+    """Optional target pitch in degrees for auto-tilting raycast cameras when no hits are detected."""
+
     camera_body_name: str | None = None
     """Body name to anchor the camera pose (defaults to robot root when None)."""
 

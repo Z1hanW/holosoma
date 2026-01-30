@@ -20,7 +20,8 @@ set -euo pipefail
 #   PERCEPTION_PRESET=camera_depth_d435i_rendered
 #   IMAGE_WIDTH=128
 #   IMAGE_HEIGHT=72
-#   SCANDOTS_GRID=11
+#   SCANDOTS_GRID=3
+#   SCANDOTS_STRIDE=
 #   PHYSX_GPU_COLLISION_STACK_SIZE=4294967295
 #   START_AT_TIMESTEP_ZERO_PROB=0.05
 #   ENABLE_DEFAULT_POSE_APPEND=False
@@ -69,7 +70,8 @@ VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-True}
 CONTACT_FORCE_VIZ=${CONTACT_FORCE_VIZ:-True}
 CONTACT_FORCE_VIZ_SCALE=${CONTACT_FORCE_VIZ_SCALE:-0.001}
 CONTACT_FORCE_VIZ_THRESHOLD=${CONTACT_FORCE_VIZ_THRESHOLD:-1.0}
-SCANDOTS_GRID=${SCANDOTS_GRID:-11}
+SCANDOTS_GRID=${SCANDOTS_GRID:-3}
+SCANDOTS_STRIDE=${SCANDOTS_STRIDE:-}
 
 if [[ "${CKPT}" == "/ABS/PATH/to/model.pt" ]]; then
   echo "Set CKPT to your checkpoint path." >&2
@@ -148,10 +150,16 @@ if [[ -n "${PERCEPTION_PRESET}" ]]; then
     --perception.camera_height "${IMAGE_HEIGHT}"
   )
   if [[ -n "${SCANDOTS_GRID}" ]]; then
-    cmd+=(
-      --perception.camera_scandots_width "${SCANDOTS_GRID}"
-      --perception.camera_scandots_height "${SCANDOTS_GRID}"
-    )
+    if [[ -n "${SCANDOTS_STRIDE}" ]]; then
+      cmd+=(
+        --perception.camera_scandots_stride "${SCANDOTS_STRIDE}"
+      )
+    else
+      cmd+=(
+        --perception.camera_scandots_width "${SCANDOTS_GRID}"
+        --perception.camera_scandots_height "${SCANDOTS_GRID}"
+      )
+    fi
   fi
 fi
 
