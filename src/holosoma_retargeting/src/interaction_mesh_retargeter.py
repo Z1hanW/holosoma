@@ -506,6 +506,12 @@ class InteractionMeshRetargeter:
             handle = getattr(self, "_contact_line_handle", None)
             if handle is not None:
                 handle.visible = False
+            q_handle = getattr(self, "_contact_q_handle", None)
+            if q_handle is not None:
+                q_handle.visible = False
+            c_handle = getattr(self, "_contact_c_handle", None)
+            if c_handle is not None:
+                c_handle.visible = False
             return
 
         # Colors: start (q) green, end (c) red
@@ -525,6 +531,50 @@ class InteractionMeshRetargeter:
             self._contact_line_handle.points = segments.astype(np.float32)
             self._contact_line_handle.colors = colors
             self._contact_line_handle.visible = True
+
+        # Draw endpoints as small spheres so red endpoints are visible.
+        q_points = segments[:, 0, :].astype(np.float32)
+        c_points = segments[:, 1, :].astype(np.float32)
+
+        if not hasattr(self, "_contact_point_vertices"):
+            sphere = trimesh.primitives.Sphere(radius=0.015)
+            self._contact_point_vertices = sphere.vertices.astype(np.float32)
+            self._contact_point_faces = sphere.faces.astype(np.int32)
+
+        q_wxyz = np.tile(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (q_points.shape[0], 1))
+        c_wxyz = np.tile(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (c_points.shape[0], 1))
+
+        if not hasattr(self, "_contact_q_handle") or self._contact_q_handle is None:
+            self._contact_q_handle = self.server.scene.add_batched_meshes_simple(
+                "/contacts/q_points",
+                vertices=self._contact_point_vertices,
+                faces=self._contact_point_faces,
+                batched_positions=q_points,
+                batched_wxyzs=q_wxyz,
+                batched_colors=(0, 255, 0),
+                opacity=0.9,
+                visible=True,
+            )
+        else:
+            self._contact_q_handle.batched_positions = q_points
+            self._contact_q_handle.batched_wxyzs = q_wxyz
+            self._contact_q_handle.visible = True
+
+        if not hasattr(self, "_contact_c_handle") or self._contact_c_handle is None:
+            self._contact_c_handle = self.server.scene.add_batched_meshes_simple(
+                "/contacts/c_points",
+                vertices=self._contact_point_vertices,
+                faces=self._contact_point_faces,
+                batched_positions=c_points,
+                batched_wxyzs=c_wxyz,
+                batched_colors=(255, 0, 0),
+                opacity=0.9,
+                visible=True,
+            )
+        else:
+            self._contact_c_handle.batched_positions = c_points
+            self._contact_c_handle.batched_wxyzs = c_wxyz
+            self._contact_c_handle.visible = True
 
     def _compute_all_object_contact_segments(self) -> np.ndarray:
         """Return line segments for nearest robot geom per object geom."""

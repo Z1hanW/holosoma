@@ -118,17 +118,42 @@ PY
     python - <<PY
 from pathlib import Path
 import re
+import xml.etree.ElementTree as ET
 
 pieces_dir = Path("$stage_obj_dir/pieces")
 assets_path = Path("$stage_obj_dir/box_assets.xml")
 body_path = Path("$stage_obj_dir/box_body.xml")
 object_prefix = "$OBJECT_NAME"
+scene_urdf_path = Path("$scene_urdf_local")
 
 def sanitize(name: str) -> str:
     name = re.sub(r"[^A-Za-z0-9_]", "_", name)
     if not name or name[0].isdigit():
         name = f"piece_{name}"
     return name
+
+def parse_uniform_scale(urdf_path: Path) -> tuple[float, float, float]:
+    """Try to read a mesh scale from the scene URDF; fallback to (1,1,1)."""
+    try:
+        root = ET.parse(urdf_path).getroot()
+    except Exception:
+        return (1.0, 1.0, 1.0)
+    for mesh in root.findall(".//mesh"):
+        scale = mesh.get("scale")
+        if not scale:
+            continue
+        try:
+            vals = [float(x) for x in scale.split()]
+        except Exception:
+            continue
+        if len(vals) == 3:
+            return (vals[0], vals[1], vals[2])
+        if len(vals) == 1:
+            return (vals[0], vals[0], vals[0])
+    return (1.0, 1.0, 1.0)
+
+scale = parse_uniform_scale(scene_urdf_path)
+scale_str = f"{scale[0]} {scale[1]} {scale[2]}"
 
 meshes = [(f"piece_{sanitize(piece.stem)}", piece) for piece in sorted(pieces_dir.glob("*.obj"))]
 if not meshes:
@@ -137,7 +162,7 @@ if not meshes:
 asset_lines = ["<mujocoinclude>"]
 for mesh_name, mesh_path in meshes:
     asset_lines.append(
-        f'    <mesh name="{mesh_name}" file="{mesh_path.as_posix()}" scale="1.0 1.0 1.0"/>'
+        f'    <mesh name="{mesh_name}" file="{mesh_path.as_posix()}" scale="{scale_str}"/>'
     )
 asset_lines.append('    <material name="scene_piece_material" rgba="0.6 0.6 0.6 1"/>')
 asset_lines.append("</mujocoinclude>")
