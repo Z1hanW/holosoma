@@ -483,11 +483,12 @@ class BasePolicy:
             :, 7 + self.num_dofs + 6 : 7 + self.num_dofs + 6 + self.num_dofs
         ]
 
-        # Use pre-computed corrected gravity if available (xdof), else compute from quat
+        # Use pre-computed corrected gravity if available from interface, else compute
+        # This logic seems very brittle. TODO: Return a dataclass instead of just a numpy array.
         expected_len = (
             7 + self.num_dofs + 6 + self.num_dofs
         )  # base_pos(3) + quat(4) + dof_pos + lin_vel(3) + ang_vel(3) + dof_vel
-        if robot_state_data.shape[1] > expected_len:
+        if robot_state_data.shape[1] == expected_len + 3:
             current_obs_buffer_dict["projected_gravity"] = robot_state_data[:, expected_len : expected_len + 3]
         else:
             v = np.array([[0, 0, -1]])
