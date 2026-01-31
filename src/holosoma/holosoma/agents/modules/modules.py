@@ -393,6 +393,76 @@ class AttentionLinearEncoder(nn.Module):
         return self.proj(flat) * self.attention
 
 
+class PerceptionTimeGRU(nn.Module):
+    """Temporal GRU encoder over per-step perception vectors."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        layer_config: LayerConfig,
+        mlp_hidden_dims: list[int] | None = None,
+    ):
+        super().__init__()
+        if input_dim <= 0:
+            raise ValueError(f"PerceptionTimeGRU input_dim must be positive, got {input_dim}.")
+        self.input_dim = int(input_dim)
+        self.hidden_dim = int(hidden_dim)
+
+        hidden_dims = list(mlp_hidden_dims) if mlp_hidden_dims is not None else []
+        activation = getattr(nn, getattr(layer_config, "encoder_activation", layer_config.activation))()
+        dropout = float(layer_config.dropout_prob)
+
+        layers: list[nn.Module] = []
+        prev_dim = self.input_dim
+        for dim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, dim))
+            layers.append(activation)
+            if dropout > 0:
+                layers.append(nn.Dropout(p=dropout))
+            prev_dim = dim
+        layers.append(nn.Linear(prev_dim, self.hidden_dim))
+        self.pre_mlp = nn.Sequential(*layers)
+
+        self.gru = nn.GRU(input_size=self.hidden_dim, hidden_size=self.hidden_dim, num_layers=1, batch_first=True)
+        self.hidden: torch.Tensor | None = None
+
+    def reset(self, dones: torch.Tensor | None) -> None:
+        if self.hidden is None or dones is None:
+            return
+        done_mask = dones.view(-1).bool()
+        if done_mask.any():
+            keep = (~done_mask).float().view(1, -1, 1)
+            self.hidden = self.hidden * keep
+
+    def step(self, x: torch.Tensor) -> torch.Tensor:
+        """Process a single time step (x: [B, input_dim])."""
+        if x.ndim != 2:
+            raise ValueError(f"PerceptionTimeGRU step expects [B, D], got {x.shape}")
+        x = self.pre_mlp(x)
+        out, self.hidden = self.gru(x.unsqueeze(1), self.hidden)
+        return out[:, -1, :]
+
+    def forward_sequence(self, x_seq: torch.Tensor, dones_seq: torch.Tensor | None = None) -> torch.Tensor:
+        """Process a sequence (x_seq: [T, B, input_dim]) with optional done resets."""
+        if x_seq.ndim != 3:
+            raise ValueError(f"PerceptionTimeGRU sequence expects [T, B, D], got {x_seq.shape}")
+        t_steps, batch = x_seq.shape[0], x_seq.shape[1]
+        x_proj = self.pre_mlp(x_seq.reshape(-1, x_seq.shape[-1])).view(t_steps, batch, -1)
+        device = x_seq.device
+        h = torch.zeros(1, batch, self.hidden_dim, device=device)
+        outputs = []
+        for t in range(t_steps):
+            if dones_seq is not None:
+                done_mask = dones_seq[t].view(-1).bool()
+                if done_mask.any():
+                    keep = (~done_mask).float().view(1, -1, 1)
+                    h = h * keep
+            out, h = self.gru(x_proj[t].unsqueeze(1), h)
+            outputs.append(out[:, -1, :])
+        return torch.stack(outputs, dim=0)
+
+
 def build_cnn_layer(
     input_channels: int,
     input_height: int,
@@ -535,10 +605,17 @@ class BaseModule(nn.Module):
             raise ValueError(f"Unknown perception_input_name: {self.perception_input_name}")
         output_dim = layer_config.perception_output_dim or input_dim
         encoder_type = getattr(layer_config, "perception_encoder_type", "gated_linear")
+        if encoder_type == "gru":
+            encoder_type = "time_gru"
         if encoder_type == "gated_linear":
             self.perception_encoder = GatedLinearEncoder(input_dim, output_dim)
         elif encoder_type == "attention":
             self.perception_encoder = AttentionLinearEncoder(input_dim, output_dim)
+        elif encoder_type == "time_gru":
+            # Time-GRU is handled at the actor/critic level; no per-step encoder here.
+            self.perception_encoder = None
+            self.perception_output_dim = output_dim
+            return output_dim
         else:
             raise ValueError(f"Unknown perception_encoder_type: {encoder_type}")
         self.perception_output_dim = output_dim

@@ -64,9 +64,10 @@ def _update_module_config(
     input_dim = [name for name in module_cfg.input_dim if name != "perception_obs"]
 
     layer_cfg = module_cfg.layer_config
+    use_extra = config.perception.encoder_type != "time_gru"
     layer_cfg = dataclasses.replace(
         layer_cfg,
-        extra_input_to_hidden=True,
+        extra_input_to_hidden=use_extra,
         perception_input_name="perception_obs",
         perception_output_dim=config.perception.encoder_output_dim,
         perception_encoder_type=config.perception.encoder_type,

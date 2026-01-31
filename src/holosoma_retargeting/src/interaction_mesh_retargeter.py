@@ -389,6 +389,74 @@ class InteractionMeshRetargeter:
         self._mjcf_visual_handles = visual_handles
         self._mjcf_collision_handles = collision_handles
 
+    def _set_handles_visible(self, handles, visible: bool) -> None:
+        if not handles:
+            return
+        for handle in handles:
+            try:
+                handle.visible = bool(visible)
+            except Exception:
+                pass
+
+    def _handles_visible(self, handles) -> bool:
+        if not handles:
+            return False
+        for handle in handles:
+            try:
+                if bool(handle.visible):
+                    return True
+            except Exception:
+                # If visibility can't be read, assume it's visible.
+                return True
+        return False
+
+    def _ensure_visibility_gui(self) -> None:
+        if not hasattr(self, "server"):
+            return
+        if getattr(self, "_visibility_gui_added", False):
+            return
+
+        urdf_visible = bool(self.viser_robot.show_visual)
+        if self.object_mesh_handle is not None:
+            try:
+                urdf_visible = urdf_visible or bool(self.object_mesh_handle.visible)
+            except Exception:
+                pass
+        if self.viser_object is not None:
+            urdf_visible = urdf_visible or bool(self.viser_object.show_visual)
+
+        mjcf_visual_visible = self._handles_visible(getattr(self, "_mjcf_visual_handles", []))
+        mjcf_collision_visible = self._handles_visible(getattr(self, "_mjcf_collision_handles", []))
+
+        with self.server.gui.add_folder("Visibility"):
+            show_urdf_cb = self.server.gui.add_checkbox("URDF visuals", initial_value=urdf_visible)
+            show_mjcf_visual_cb = self.server.gui.add_checkbox(
+                "MJCF visuals (scaled)", initial_value=mjcf_visual_visible
+            )
+            show_mjcf_collision_cb = self.server.gui.add_checkbox(
+                "MJCF collision (constraints)", initial_value=mjcf_collision_visible
+            )
+
+        @show_urdf_cb.on_update
+        def _(_):
+            self.viser_robot.show_visual = bool(show_urdf_cb.value)
+            if self.viser_object is not None:
+                self.viser_object.show_visual = bool(show_urdf_cb.value)
+            if self.object_mesh_handle is not None:
+                self.object_mesh_handle.visible = bool(show_urdf_cb.value)
+
+        @show_mjcf_visual_cb.on_update
+        def _(_):
+            self._ensure_mjcf_geom_handles()
+            self._set_handles_visible(self._mjcf_visual_handles, bool(show_mjcf_visual_cb.value))
+
+        @show_mjcf_collision_cb.on_update
+        def _(_):
+            self._ensure_mjcf_geom_handles()
+            self._set_handles_visible(self._mjcf_collision_handles, bool(show_mjcf_collision_cb.value))
+
+        self._visibility_gui_added = True
+
     def draw_mesh_pair_with_contact(
         self,
         model,
@@ -612,16 +680,7 @@ class InteractionMeshRetargeter:
             )
 
             # 4) optional: visibility toggle
-            with self.server.gui.add_folder("Visibility"):
-                show_meshes_cb = self.server.gui.add_checkbox("Show meshes", self.viser_robot.show_visual)
-
-                @show_meshes_cb.on_update
-                def _(_):
-                    self.viser_robot.show_visual = show_meshes_cb.value
-                    if self.viser_object is not None:
-                        self.viser_object.show_visual = show_meshes_cb.value
-                    if self.object_mesh_handle is not None:
-                        self.object_mesh_handle.visible = bool(show_meshes_cb.value)
+            self._ensure_visibility_gui()
 
         return (
             np.array(retargeted_motions)[1:],
@@ -721,16 +780,7 @@ class InteractionMeshRetargeter:
                 loop=False,
             )
 
-            with self.server.gui.add_folder("Visibility"):
-                show_meshes_cb = self.server.gui.add_checkbox("Show meshes", self.viser_robot.show_visual)
-
-                @show_meshes_cb.on_update
-                def _(_):
-                    self.viser_robot.show_visual = show_meshes_cb.value
-                    if self.viser_object is not None:
-                        self.viser_object.show_visual = show_meshes_cb.value
-                    if self.object_mesh_handle is not None:
-                        self.object_mesh_handle.visible = bool(show_meshes_cb.value)
+            self._ensure_visibility_gui()
 
         return (
             np.array(retargeted_motions)[1:],

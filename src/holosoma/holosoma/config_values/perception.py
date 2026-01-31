@@ -67,6 +67,31 @@ camera_depth_d435i_scandots = PerceptionConfig(
     encoder_type="attention",
 )
 
+camera_depth_d435i_scandots_light = PerceptionConfig(
+    enabled=True,
+    output_mode="camera_depth",
+    camera_source="mesh_raycast_scandots",
+    grid_size=11,
+    grid_interval=0.1,
+    update_hz=30.0,
+    camera_width=48,
+    camera_height=27,
+    camera_vfov_deg=55.2,
+    camera_pitch_deg=0.0,
+    camera_target_pitch_deg=-20.0,
+    camera_frame_quat=[0.5, -0.5, -0.5, 0.5],
+    camera_body_name="d435_joint",
+    camera_include_robot_mesh=False,
+    camera_fps=30.0,
+    camera_near=0.1,
+    camera_far=10.0,
+    camera_distortion=[0.0, 0.0, 0.0, 0.0, 0.0],
+    camera_scandots_stride=1,
+    camera_scandots_upsample="nearest",
+    encoder_output_dim=128,
+    encoder_type="time_gru",
+)
+
 camera_depth_d435i_rendered = PerceptionConfig(
     enabled=True,
     output_mode="camera_depth",
@@ -160,6 +185,7 @@ DEFAULTS = {
     "heightmap": heightmap,
     "camera_depth_d435i": camera_depth_d435i,
     "camera_depth_d435i_scandots": camera_depth_d435i_scandots,
+    "camera_depth_d435i_scandots_light": camera_depth_d435i_scandots_light,
     "camera_depth_d435i_rendered": camera_depth_d435i_rendered,
     "camera_depth_d435i_depth_sensor": camera_depth_d435i_depth_sensor,
     "camera_depth_head_mesh": camera_depth_head_mesh,
@@ -171,6 +197,7 @@ __all__ = [
     "heightmap",
     "camera_depth_d435i",
     "camera_depth_d435i_scandots",
+    "camera_depth_d435i_scandots_light",
     "camera_depth_d435i_rendered",
     "camera_depth_d435i_depth_sensor",
     "camera_depth_head_mesh",

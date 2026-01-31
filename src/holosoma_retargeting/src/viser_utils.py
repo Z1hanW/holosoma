@@ -23,6 +23,7 @@ def create_motion_control_sliders(
     initial_fps: int = 30,
     initial_interp_mult: int = 2,
     loop: bool = True,
+    autoplay: bool = True,
 ) -> Tuple[List[viser.GuiInputHandle[int]], List[float]]:
     """
     Create a slider + play/pause controls and a background player thread with smooth, slerp-based interpolation.
@@ -46,6 +47,7 @@ def create_motion_control_sliders(
         initial_fps: base FPS for playback.
         initial_interp_mult: visual upsampling multiplier.
         loop: whether to wrap around at the end.
+        autoplay: whether to start playback immediately.
 
     Returns:
         (controls, initial_values) - currently returns the [frame_slider] and [0.0]
@@ -119,7 +121,7 @@ def create_motion_control_sliders(
         return out
 
     # ---------------- state ----------------
-    playing = {"flag": False}
+    playing = {"flag": bool(autoplay)}
     tick = {"next": time.perf_counter()}  # absolute time for next draw
     prev: dict[str, np.ndarray | None] = {"robot_q": None, "obj_q": None}  # for continuity
     nonlocal_f = {"f": float(frame_slider.value)}  # fractional frame cursor
