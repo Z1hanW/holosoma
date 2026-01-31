@@ -206,7 +206,6 @@ class InteractionMeshRetargeter:
             urdf_or_path=self.robot_urdf,
             root_node_name="/world/robot",  # This links to the robot_base frame we created
         )
-        self._viser_robot_dof = len(self.viser_robot.get_actuated_joint_limits())
         # Ensure visual meshes are enabled by default.
         try:
             self.viser_robot.show_visual = True
@@ -735,7 +734,7 @@ class InteractionMeshRetargeter:
         print("Saving results to path:", dest_res_path)
 
         if self.visualize:
-            robot_dof = int(getattr(self, "_viser_robot_dof", 0) or len(self.viser_robot.get_actuated_joint_limits()))
+            robot_dof = len(self.viser_robot.get_actuated_joint_limits())
 
             create_motion_control_sliders(
                 server=self.server,
@@ -749,7 +748,6 @@ class InteractionMeshRetargeter:
                 initial_fps=30,
                 initial_interp_mult=2,
                 loop=False,
-                force_show_meshes=True,
             )
 
             # 4) optional: visibility toggle
@@ -1238,12 +1236,7 @@ class InteractionMeshRetargeter:
         """Draw a single robot configuration."""
         with self.server.atomic():
             # Update robot joint configurations
-            robot_dof = int(getattr(self, "_viser_robot_dof", 0) or self.task_constants.ROBOT_DOF)
-            robot_joint_positions = q[7 : 7 + robot_dof]
-            try:
-                self.viser_robot.show_visual = True
-            except Exception:
-                pass
+            robot_joint_positions = q[7 : 7 + self.task_constants.ROBOT_DOF]
             self.viser_robot.update_cfg(robot_joint_positions)
 
             # Update robot base pose using set_transform
