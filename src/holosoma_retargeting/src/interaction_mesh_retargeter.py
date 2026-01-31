@@ -94,6 +94,7 @@ class InteractionMeshRetargeter:
         self.debug = debug
         self._contact_constraints_enabled = bool(self.debug)
         self._contact_pairs_enabled = False
+        self._contact_constraints_all = False
         self.demo_joints = task_constants.DEMO_JOINTS
         self.laplacian_match_links = task_constants.JOINTS_MAPPING
         self.task_constants = task_constants
@@ -434,6 +435,7 @@ class InteractionMeshRetargeter:
         mjcf_collision_visible = self._handles_visible(getattr(self, "_mjcf_collision_handles", []))
         contact_constraints_visible = bool(getattr(self, "_contact_constraints_enabled", False))
         contact_pairs_visible = bool(getattr(self, "_contact_pairs_enabled", False))
+        contact_constraints_all = bool(getattr(self, "_contact_constraints_all", False))
 
         with self.server.gui.add_folder("Visibility"):
             show_urdf_cb = self.server.gui.add_checkbox("URDF visuals", initial_value=urdf_visible)
@@ -445,6 +447,9 @@ class InteractionMeshRetargeter:
             )
             show_contact_cb = self.server.gui.add_checkbox(
                 "Contact constraints (lines)", initial_value=contact_constraints_visible
+            )
+            show_contact_all_cb = self.server.gui.add_checkbox(
+                "Contact constraints (all objects)", initial_value=contact_constraints_all
             )
             show_contact_pairs_cb = self.server.gui.add_checkbox(
                 "Contact pair meshes (debug)", initial_value=contact_pairs_visible
@@ -475,6 +480,10 @@ class InteractionMeshRetargeter:
             if handle is not None:
                 handle.visible = bool(show_contact_cb.value)
 
+        @show_contact_all_cb.on_update
+        def _(_):
+            self._contact_constraints_all = bool(show_contact_all_cb.value)
+
         @show_contact_pairs_cb.on_update
         def _(_):
             self._contact_pairs_enabled = bool(show_contact_pairs_cb.value)
@@ -486,6 +495,9 @@ class InteractionMeshRetargeter:
 
     def _contact_pairs_active(self) -> bool:
         return bool(getattr(self, "_contact_pairs_enabled", False))
+
+    def _contact_constraints_all_active(self) -> bool:
+        return bool(getattr(self, "_contact_constraints_all", False))
 
     def _update_contact_constraint_visuals(self, segments: np.ndarray) -> None:
         if not hasattr(self, "server"):
@@ -513,6 +525,60 @@ class InteractionMeshRetargeter:
             self._contact_line_handle.points = segments.astype(np.float32)
             self._contact_line_handle.colors = colors
             self._contact_line_handle.visible = True
+
+    def _compute_all_object_contact_segments(self) -> np.ndarray:
+        """Return line segments for nearest robot geom per object geom."""
+        m, d = self.robot_model, self.robot_data
+        ngeom = m.ngeom
+        contype, conaff = m.geom_contype, m.geom_conaffinity
+        geom_names = self._geom_names if hasattr(self, "_geom_names") else [
+            mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or "" for g in range(ngeom)
+        ]
+
+        obj_names = getattr(self, "_object_geom_names", None)
+
+        def is_obj_geom(name: str) -> bool:
+            if obj_names is None:
+                return self.object_name in name
+            if name in obj_names:
+                return True
+            return name.startswith(self.object_name)
+
+        def is_robot_geom(name: str, gid: int) -> bool:
+            if is_obj_geom(name):
+                return False
+            if "ground" in name:
+                return False
+            if contype[gid] == 0 and conaff[gid] == 0:
+                return False
+            return True
+
+        object_ids = [g for g in range(ngeom) if is_obj_geom(geom_names[g])]
+        robot_ids = [g for g in range(ngeom) if is_robot_geom(geom_names[g], g)]
+
+        if not object_ids or not robot_ids:
+            return np.zeros((0, 2, 3), dtype=float)
+
+        # Large threshold to force distance computation.
+        big_threshold = 1e6
+        segments: list[np.ndarray] = []
+        fromto = np.zeros(6, dtype=float)
+
+        for og in object_ids:
+            best_dist = np.inf
+            best_fromto = None
+            for rg in robot_ids:
+                fromto[:] = 0.0
+                dist = mujoco.mj_geomDistance(m, d, og, rg, big_threshold, fromto)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_fromto = fromto.copy()
+            if best_fromto is not None:
+                segments.append(best_fromto.reshape(2, 3))
+
+        if not segments:
+            return np.zeros((0, 2, 3), dtype=float)
+        return np.asarray(segments, dtype=float)
 
     def draw_mesh_pair_with_contact(
         self,
@@ -1419,8 +1485,13 @@ class InteractionMeshRetargeter:
         contype, conaff = m.geom_contype, m.geom_conaffinity
 
         contact_segments = None
+        collect_active_segments = False
         if self.visualize and self._contact_constraints_active():
-            contact_segments = []
+            if self._contact_constraints_all_active():
+                contact_segments = self._compute_all_object_contact_segments().tolist()
+            else:
+                contact_segments = []
+                collect_active_segments = True
 
         obj_names = getattr(self, "_object_geom_names", None)
 
@@ -1467,7 +1538,7 @@ class InteractionMeshRetargeter:
                 Js[(g1, g2)] = J_rel
                 phis[(g1, g2)] = float(dist)
 
-                if contact_segments is not None:
+                if collect_active_segments:
                     contact_segments.append(fromto.copy().reshape(2, 3))
 
                 # For debug: draw pair meshes if enabled
