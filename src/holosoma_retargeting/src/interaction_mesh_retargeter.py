@@ -1422,17 +1422,23 @@ class InteractionMeshRetargeter:
         if self.visualize and self._contact_constraints_active():
             contact_segments = []
 
+        obj_names = getattr(self, "_object_geom_names", None)
+
+        def is_obj_geom(name: str) -> bool:
+            if obj_names is None:
+                return self.object_name in name
+            if name in obj_names:
+                return True
+            # MuJoCo may auto-rename geoms with suffixes; allow prefix match.
+            return name.startswith(self.object_name)
+
         def masks_ok(g1, g2):
             if contype[g1] == 0 and conaff[g1] == 0:
                 return False
             if contype[g2] == 0 and conaff[g2] == 0:
                 return False
-            obj_names = getattr(self, "_object_geom_names", None)
-            is_obj_g1 = self._geom_names[g1] in obj_names if obj_names is not None else False
-            is_obj_g2 = self._geom_names[g2] in obj_names if obj_names is not None else False
-            if obj_names is None:
-                is_obj_g1 = self.object_name in self._geom_names[g1]
-                is_obj_g2 = self.object_name in self._geom_names[g2]
+            is_obj_g1 = is_obj_geom(self._geom_names[g1])
+            is_obj_g2 = is_obj_geom(self._geom_names[g2])
             is_ground_g1 = "ground" in self._geom_names[g1]
             is_ground_g2 = "ground" in self._geom_names[g2]
 
