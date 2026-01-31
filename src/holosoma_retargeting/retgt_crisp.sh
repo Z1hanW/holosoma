@@ -9,6 +9,8 @@ HMR_TYPE=${2:-${HMR_TYPE:-"gv"}}
 SEQ_NAME=${3:-${SEQ_NAME:-""}}
 ROBOT_URDF=${ROBOT_URDF:-"models/g1/g1_29dof.urdf"}
 OUT_ROOT=${OUT_ROOT:-"$SCRIPT_DIR/demo_results/g1/climbing/mocap_crisp"}
+ROBOT_HEIGHT=${ROBOT_HEIGHT:-1.32}
+HUMAN_HEIGHT=${HUMAN_HEIGHT:-1.78}
 
 DATA_ROOT=${DATA_ROOT:-"$REPO_ROOT/crisp/vmm_data"}
 MOTION_ROOT="$DATA_ROOT/motion"
@@ -118,14 +120,13 @@ PY
     python - <<PY
 from pathlib import Path
 import re
-import xml.etree.ElementTree as ET
 
 pieces_dir = Path("$stage_obj_dir/pieces")
 assets_path = Path("$stage_obj_dir/box_assets.xml")
 body_path = Path("$stage_obj_dir/box_body.xml")
 object_prefix = "$OBJECT_NAME"
-scene_urdf_path = Path("$scene_urdf_local")
-scene_dir = Path("$scene_dir")
+robot_height = float("$ROBOT_HEIGHT")
+human_height = float("$HUMAN_HEIGHT")
 
 def sanitize(name: str) -> str:
     name = re.sub(r"[^A-Za-z0-9_]", "_", name)
@@ -133,69 +134,8 @@ def sanitize(name: str) -> str:
         name = f"piece_{name}"
     return name
 
-def parse_uniform_scale(urdf_path: Path) -> tuple[float, float, float] | None:
-    """Try to read a mesh scale from the scene URDF; fallback to (1,1,1)."""
-    try:
-        root = ET.parse(urdf_path).getroot()
-    except Exception:
-        return None
-    for mesh in root.findall(".//mesh"):
-        scale = mesh.get("scale")
-        if not scale:
-            continue
-        try:
-            vals = [float(x) for x in scale.split()]
-        except Exception:
-            continue
-        if len(vals) == 3:
-            return (vals[0], vals[1], vals[2])
-        if len(vals) == 1:
-            return (vals[0], vals[0], vals[0])
-    return None
-
-def parse_scale_from_assets(xml_path: Path) -> tuple[float, float, float] | None:
-    """Parse the first mesh scale from a box_assets_scaled_*.xml file."""
-    try:
-        text = xml_path.read_text()
-    except Exception:
-        return None
-    m = re.search(r'scale="([^"]+)"', text)
-    if not m:
-        return None
-    try:
-        vals = [float(x) for x in m.group(1).split()]
-    except Exception:
-        return None
-    if len(vals) == 3:
-        return (vals[0], vals[1], vals[2])
-    if len(vals) == 1:
-        return (vals[0], vals[0], vals[0])
-    return None
-
-def parse_scale_from_filename(path: Path) -> tuple[float, float, float] | None:
-    m = re.search(r"_scaled_([0-9.]+)_([0-9.]+)_([0-9.]+)", path.name)
-    if not m:
-        return None
-    try:
-        return (float(m.group(1)), float(m.group(2)), float(m.group(3)))
-    except Exception:
-        return None
-
-# Prefer scale from existing box_assets_scaled_*.xml (CRISP exports), then filename, then URDF.
-scale = None
-scaled_assets = sorted(scene_dir.glob("box_assets_scaled_*.xml"))
-if scaled_assets:
-    scale = parse_scale_from_assets(scaled_assets[0]) or parse_scale_from_filename(scaled_assets[0])
-if scale is None:
-    scaled_urdfs = sorted(scene_dir.glob("scene_mesh_sqs_scaled_*.urdf"))
-    if scaled_urdfs:
-        scale = parse_scale_from_filename(scaled_urdfs[0])
-if scale is None:
-    scale = parse_uniform_scale(scene_urdf_path)
-if scale is None:
-    scale = (1.0, 1.0, 1.0)
-
-scale_str = f"{scale[0]} {scale[1]} {scale[2]}"
+scale = robot_height / human_height
+scale_str = f"{scale} {scale} {scale}"
 
 meshes = [(f"piece_{sanitize(piece.stem)}", piece) for piece in sorted(pieces_dir.glob("*.obj"))]
 if not meshes:
