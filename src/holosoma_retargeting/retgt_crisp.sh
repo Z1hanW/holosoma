@@ -195,7 +195,7 @@ if scale is None:
 if scale is None:
     scale = (1.0, 1.0, 1.0)
 
-scale_str = f\"{scale[0]} {scale[1]} {scale[2]}\"
+scale_str = f"{scale[0]} {scale[1]} {scale[2]}"
 
 meshes = [(f"piece_{sanitize(piece.stem)}", piece) for piece in sorted(pieces_dir.glob("*.obj"))]
 if not meshes:
