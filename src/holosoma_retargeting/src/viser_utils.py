@@ -23,6 +23,7 @@ def create_motion_control_sliders(
     initial_fps: int = 30,
     initial_interp_mult: int = 2,
     loop: bool = True,
+    force_show_meshes: bool = False,
 ) -> Tuple[List[viser.GuiInputHandle[int]], List[float]]:
     """
     Create a slider + play/pause controls and a background player thread with smooth, slerp-based interpolation.
@@ -134,6 +135,8 @@ def create_motion_control_sliders(
                 joints[:robot_dof] if joints.shape[0] > robot_dof else np.pad(joints, (0, robot_dof - joints.shape[0]))
             )
         with server.atomic():
+            if force_show_meshes:
+                viser_robot.show_visual = True
             viser_robot.update_cfg(joints)
 
             # robot base (MuJoCo order: pos first, then quat)
@@ -144,6 +147,8 @@ def create_motion_control_sliders(
 
             # object (optional) (MuJoCo order: pos first, then quat)
             if has_object_input and object_base_frame is not None:
+                if force_show_meshes and viser_object is not None:
+                    viser_object.show_visual = True
                 object_base_frame.position = q[-7:-4]  # obj pos (xyz)
                 o_q = _quat_continuous(prev["obj_q"], q[-4:])
                 prev["obj_q"] = o_q
