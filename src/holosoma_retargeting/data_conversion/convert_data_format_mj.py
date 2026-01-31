@@ -209,7 +209,7 @@ class MotionLoader:
 
     def _slerp(self, q0: torch.Tensor, q1: torch.Tensor, t: torch.Tensor, eps: float = 1e-8):
         """
-        q0, q1: (..., 4) unit quaternions (wxyz or xyzw—just be consistent between inputs).
+        q0, q1: (..., 4) unit quaternions (wxyz or xyzw - just be consistent between inputs).
         t:      (...)  blend in [0,1] that broadcasts against the leading dims of q0/q1.
         """
         q0 = F.normalize(q0, dim=-1)

@@ -48,7 +48,7 @@ def create_motion_control_sliders(
         loop: whether to wrap around at the end.
 
     Returns:
-        (controls, initial_values) — currently returns the [frame_slider] and [0.0]
+        (controls, initial_values) - currently returns the [frame_slider] and [0.0]
     """
     qpos = motion_sequence
     n_frames = int(qpos.shape[0])

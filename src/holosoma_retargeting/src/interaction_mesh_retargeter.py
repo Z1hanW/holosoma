@@ -1242,7 +1242,7 @@ class InteractionMeshRetargeter:
 
         m.geom_margin[:] = threshold
 
-        # Run collision. This runs broad→narrow and fills d.contact.
+        # Run collision. This runs broad->narrow and fills d.contact.
         mujoco.mj_collision(m, d)
 
         # Collect unique candidate pairs
@@ -1343,8 +1343,8 @@ class InteractionMeshRetargeter:
     def _build_transform_qdot_to_qvel_fast(self, use_world_omega=True):
         """
         Return T(q) (nv x nq) such that v = T(q) @ qdot.
-        - Free root: qpos=[x,y,z, qw,qx,qy,qz], qvel=[vx,vy,vz, ωx,ωy,ωz]
-        where ω and v are WORLD-expressed in MuJoCo.
+        - Free root: qpos=[x,y,z, qw,qx,qy,qz], qvel=[vx,vy,vz, omega_x,omega_y,omega_z]
+        where omega and v are WORLD-expressed in MuJoCo.
         - 23 hinge joints: v = qdot.
 
         If use_world_omega=False, uses BODY-omega mapping (for debugging).
@@ -1361,7 +1361,7 @@ class InteractionMeshRetargeter:
         # Linear block: v_lin = xyz_dot
         T[dadr : dadr + 3, qadr : qadr + 3] = np.eye(3)
 
-        # Angular block: ω_* = 2 * E_*(q) * quat_dot
+        # Angular block: omega_* = 2 * E_*(q) * quat_dot
         w, x, y, z = self.robot_data.qpos[qadr + 3 : qadr + 7]
 
         def get_e_world(qw, qx, qy, qz):
@@ -1392,9 +1392,9 @@ class InteractionMeshRetargeter:
 
         qw, qx, qy, qz = self.robot_data.qpos[qadr1 + 3 : qadr1 + 7]
         E1 = 2.0 * E_fn(qw, qx, qy, qz)
-        # linear-first: v_W = rdot, ω_W = 2E(q) * quat_dot
+        # linear-first: v_W = rdot, omega_W = 2E(q) * quat_dot
         T[dadr1 + 0 : dadr1 + 3, qadr1 + 0 : qadr1 + 3] = np.eye(3)  # v block
-        T[dadr1 + 3 : dadr1 + 6, qadr1 + 3 : qadr1 + 7] = E1  # ω block
+        T[dadr1 + 3 : dadr1 + 6, qadr1 + 3 : qadr1 + 7] = E1  # omega block
 
         if self.has_dynamic_object:
             # ---- FREE joint #2 (object): assume it's the last FREE joint; fill its 6x7 block ----
@@ -1410,7 +1410,7 @@ class InteractionMeshRetargeter:
             qw, qx, qy, qz = self.robot_data.qpos[qadr2 + 3 : qadr2 + 7]
             E2 = 2.0 * E_fn(qw, qx, qy, qz)
             T[dadr2 + 0 : dadr2 + 3, qadr2 + 0 : qadr2 + 3] = np.eye(3)  # v block
-            T[dadr2 + 3 : dadr2 + 6, qadr2 + 3 : qadr2 + 7] = E2  # ω block
+            T[dadr2 + 3 : dadr2 + 6, qadr2 + 3 : qadr2 + 7] = E2  # omega block
 
         # ---- remaining hinge/slide joints: v = qdot ----
         for j in range(1, self.robot_model.njnt):

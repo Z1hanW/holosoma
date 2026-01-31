@@ -280,7 +280,7 @@ def load_motion_data(
             smpl_scale = constants.ROBOT_HEIGHT / default_human_height
 
         elif data_format == "smplx":
-            # 你可以选择：放在 data_path/task_name.npz 或 data_path/task_name/*.npz
+            # Choose: data_path/task_name.npz or data_path/task_name/*.npz
             npz_file = (data_path / f"{task_name}.npz")
             if not npz_file.exists():
                 npz_candidates = list((data_path / task_name).glob("*.npz"))
