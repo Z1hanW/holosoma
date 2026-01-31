@@ -393,23 +393,50 @@ class AttentionLinearEncoder(nn.Module):
         return self.proj(flat) * self.attention
 
 
-class GRUPerceptionEncoder(nn.Module):
-    """GRU-based encoder over flattened perception inputs."""
+class PerceptionTimeGRU(nn.Module):
+    """Temporal GRU encoder over per-step perception vectors."""
 
     def __init__(self, input_dim: int, output_dim: int):
         super().__init__()
         if input_dim <= 0:
-            raise ValueError(f"GRUPerceptionEncoder input_dim must be positive, got {input_dim}.")
+            raise ValueError(f"PerceptionTimeGRU input_dim must be positive, got {input_dim}.")
         self.input_dim = int(input_dim)
         self.output_dim = int(output_dim)
-        # Treat each scalar entry as a step in the sequence.
-        self.gru = nn.GRU(input_size=1, hidden_size=self.output_dim, num_layers=1, batch_first=True)
+        self.gru = nn.GRU(input_size=self.input_dim, hidden_size=self.output_dim, num_layers=1, batch_first=True)
+        self.hidden: torch.Tensor | None = None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        flat = x.view(x.shape[0], -1)
-        seq = flat.unsqueeze(-1)
-        _, h = self.gru(seq)
-        return h[-1]
+    def reset(self, dones: torch.Tensor | None) -> None:
+        if self.hidden is None or dones is None:
+            return
+        done_mask = dones.view(-1).bool()
+        if done_mask.any():
+            self.hidden[:, done_mask, :] = 0.0
+
+    def step(self, x: torch.Tensor) -> torch.Tensor:
+        """Process a single time step (x: [B, input_dim])."""
+        if x.ndim != 2:
+            raise ValueError(f"PerceptionTimeGRU step expects [B, D], got {x.shape}")
+        out, self.hidden = self.gru(x.unsqueeze(1), self.hidden)
+        return out[:, -1, :]
+
+    def forward_sequence(
+        self, x_seq: torch.Tensor, dones_seq: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Process a sequence (x_seq: [T, B, input_dim]) with optional done resets."""
+        if x_seq.ndim != 3:
+            raise ValueError(f"PerceptionTimeGRU sequence expects [T, B, D], got {x_seq.shape}")
+        t_steps, batch = x_seq.shape[0], x_seq.shape[1]
+        device = x_seq.device
+        h = torch.zeros(1, batch, self.output_dim, device=device)
+        outputs = []
+        for t in range(t_steps):
+            if dones_seq is not None:
+                done_mask = dones_seq[t].view(-1).bool()
+                if done_mask.any():
+                    h[:, done_mask, :] = 0.0
+            out, h = self.gru(x_seq[t].unsqueeze(1), h)
+            outputs.append(out[:, -1, :])
+        return torch.stack(outputs, dim=0)
 
 
 def build_cnn_layer(
@@ -554,12 +581,17 @@ class BaseModule(nn.Module):
             raise ValueError(f"Unknown perception_input_name: {self.perception_input_name}")
         output_dim = layer_config.perception_output_dim or input_dim
         encoder_type = getattr(layer_config, "perception_encoder_type", "gated_linear")
+        if encoder_type == "gru":
+            encoder_type = "time_gru"
         if encoder_type == "gated_linear":
             self.perception_encoder = GatedLinearEncoder(input_dim, output_dim)
         elif encoder_type == "attention":
             self.perception_encoder = AttentionLinearEncoder(input_dim, output_dim)
-        elif encoder_type == "gru":
-            self.perception_encoder = GRUPerceptionEncoder(input_dim, output_dim)
+        elif encoder_type == "time_gru":
+            # Time-GRU is handled at the actor/critic level; no per-step encoder here.
+            self.perception_encoder = None
+            self.perception_output_dim = output_dim
+            return output_dim
         else:
             raise ValueError(f"Unknown perception_encoder_type: {encoder_type}")
         self.perception_output_dim = output_dim

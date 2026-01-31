@@ -55,7 +55,7 @@ class LayerConfig:
     """Output dimension for perception encoder."""
 
     perception_encoder_type: str = "gated_linear"
-    """Perception encoder type: 'gated_linear', 'attention', or 'gru'."""
+    """Perception encoder type: 'gated_linear', 'attention', or 'time_gru'."""
 
     input_channels: int = 1
     """Number of input channels. Only used for CNN modules."""

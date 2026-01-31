@@ -267,7 +267,7 @@ g1_29dof_wbt_videomimic_mlp_w_gru = replace(
     ),
     perception=replace(
         perception.camera_depth_d435i_scandots,
-        encoder_type="gru",
+        encoder_type="time_gru",
     ),
 )
 

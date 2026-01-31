@@ -60,8 +60,12 @@ for seq_dir in "${seq_dirs[@]}"; do
     pieces_dir="$scene_dir/pieces"
 
     if [ ! -f "$hmr_npz" ] || [ ! -f "$scene_obj" ] || [ ! -f "$scene_urdf" ]; then
-        echo "[WARN] skip $seq_name: missing hmr or scene files" >&2
-        continue
+        echo "[ERROR] missing hmr or scene files for $seq_name" >&2
+        exit 1
+    fi
+    if [ ! -d "$pieces_dir" ]; then
+        echo "[ERROR] missing pieces dir for $seq_name: $pieces_dir" >&2
+        exit 1
     fi
 
     mkdir -p "$MOTION_ROOT"
@@ -86,9 +90,8 @@ for seq_dir in "${seq_dirs[@]}"; do
     ln -sf "$scene_obj" "$stage_obj_dir/scene_mesh_sqs.obj"
     scene_urdf_local="$stage_obj_dir/scene_mesh_sqs.urdf"
     cp -f "$scene_urdf" "$scene_urdf_local"
-    if [ -d "$pieces_dir" ]; then
-        ln -sfn "$pieces_dir" "$stage_obj_dir/pieces"
-        python - <<PY
+    ln -sfn "$pieces_dir" "$stage_obj_dir/pieces"
+    python - <<PY
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
@@ -111,7 +114,6 @@ for mesh in root.findall(".//mesh"):
 # Always overwrite the local URDF so paths are normalized.
 urdf_path.write_text(ET.tostring(root, encoding="unicode"))
 PY
-    fi
 
     python - <<PY
 from pathlib import Path
@@ -120,7 +122,6 @@ import re
 pieces_dir = Path("$stage_obj_dir/pieces")
 assets_path = Path("$stage_obj_dir/box_assets.xml")
 body_path = Path("$stage_obj_dir/box_body.xml")
-fallback_mesh = Path("$stage_obj_dir/scene_mesh_sqs.obj")
 object_prefix = "$OBJECT_NAME"
 
 def sanitize(name: str) -> str:
@@ -129,17 +130,9 @@ def sanitize(name: str) -> str:
         name = f"piece_{name}"
     return name
 
-meshes = []
-if pieces_dir.exists():
-    for piece in sorted(pieces_dir.glob("*.obj")):
-        mesh_name = f"piece_{sanitize(piece.stem)}"
-        meshes.append((mesh_name, piece))
-
-if not meshes and fallback_mesh.exists():
-    meshes.append(("piece_scene_mesh_sqs", fallback_mesh))
-
+meshes = [ (f"piece_{sanitize(piece.stem)}", piece) for piece in sorted(pieces_dir.glob(\"*.obj\")) ]
 if not meshes:
-    raise SystemExit("No mesh pieces found for box_assets.xml.")
+    raise SystemExit("No mesh pieces found in pieces/ for box_assets.xml.")
 
 asset_lines = ["<mujocoinclude>"]
 for mesh_name, mesh_path in meshes:

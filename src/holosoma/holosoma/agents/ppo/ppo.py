@@ -311,6 +311,10 @@ class PPO(BaseAlgo):
             device=self.device,
             history_length=self.algo_history_length_dict,
         )
+        self.use_time_gru = bool(
+            getattr(self.actor, "perception_time_gru", None) is not None
+            or getattr(self.critic, "perception_time_gru", None) is not None
+        )
 
         self._setup_distillation()
 
@@ -780,7 +784,12 @@ class PPO(BaseAlgo):
         if self.dagger_enabled and self.switch_to_rl_after > 0:
             if self.current_learning_iteration == self.switch_to_rl_after:
                 self.bc_loss_coef = 0.0
-        generator = self.storage.mini_batch_generator(self.config.num_mini_batches, self.config.num_learning_epochs)
+        if self.use_time_gru:
+            generator = self.storage.sequence_mini_batch_generator(
+                self.config.num_mini_batches, self.config.num_learning_epochs
+            )
+        else:
+            generator = self.storage.mini_batch_generator(self.config.num_mini_batches, self.config.num_learning_epochs)
 
         minibatch: Minibatch
         loss_dict = {"Value": 0.0, "Surrogate": 0.0, "Entropy": 0.0, "KL": 0.0}
@@ -824,6 +833,8 @@ class PPO(BaseAlgo):
         return loss_dict
 
     def _compute_ppo_loss(self, minibatch: Minibatch):
+        if self.use_time_gru:
+            return self._compute_ppo_loss_sequence(minibatch)
         raw_actor_obs = minibatch["actor_obs"]
         actions_batch = minibatch["actions"]
         target_values_batch = minibatch["values"]
@@ -986,6 +997,176 @@ class PPO(BaseAlgo):
                 teacher_actions = self.teacher_actor.act_inference({"actor_obs": teacher_obs})
             distill_loss = F.mse_loss(mu_batch, teacher_actions)
             actor_loss = actor_loss + self.distill_loss_coef * distill_loss
+
+        return {
+            "actor_loss": actor_loss,
+            "critic_loss": critic_loss,
+            "symmetry_actor_loss": symmetry_actor_loss,
+            "symmetry_critic_loss": symmetry_critic_loss,
+            "value_loss": value_loss,
+            "surrogate_loss": surrogate_loss,
+            "entropy_loss": entropy_loss,
+            "distill_loss": distill_loss,
+            "bc_loss": bc_loss,
+            "kl_mean": kl_mean,
+        }
+
+    def _encode_perception_sequence(
+        self, encoder: nn.Module, obs_seq: torch.Tensor, dones_seq: torch.Tensor | None
+    ) -> torch.Tensor:
+        if not hasattr(encoder, "forward_sequence"):
+            raise ValueError("Perception encoder does not support sequence encoding.")
+        return encoder.forward_sequence(obs_seq, dones_seq=dones_seq)
+
+    def _compute_ppo_loss_sequence(self, minibatch: Minibatch):
+        # Sequence shapes: [T, B, ...]
+        raw_actor_obs = minibatch["actor_obs"]
+        actions_batch = minibatch["actions"]
+        target_values_batch = minibatch["values"]
+        advantages_batch = minibatch["advantages"]
+        returns_batch = minibatch["returns"]
+        old_actions_log_prob_batch = minibatch["actions_log_prob"]
+        old_mu_batch = minibatch["action_mean"]
+        old_sigma_batch = minibatch["action_sigma"]
+        actor_perception_obs = (
+            minibatch.get(self.actor_perception_key) if self.actor_perception_key else None
+        )
+        critic_perception_obs = (
+            minibatch.get(self.critic_perception_key) if self.critic_perception_key else None
+        )
+        dones_seq = minibatch.get("dones")
+
+        # Flatten time/env for normalization
+        t_steps, batch = actions_batch.shape[0], actions_batch.shape[1]
+        actor_obs_flat = raw_actor_obs.flatten(0, 1)
+        critic_obs_flat = minibatch["critic_obs"].flatten(0, 1)
+
+        actor_obs_flat = self._normalize_actor_obs(actor_obs_flat, update=True)
+        critic_obs_flat = self._normalize_critic_obs(critic_obs_flat, update=True)
+
+        actor_obs = actor_obs_flat.view(t_steps, batch, -1)
+        critic_obs = critic_obs_flat.view(t_steps, batch, -1)
+
+        # Encode perception sequences
+        if actor_perception_obs is None or critic_perception_obs is None:
+            raise ValueError("time_gru requires perception_obs for both actor and critic.")
+
+        if hasattr(actor_perception_obs, "is_inference") and actor_perception_obs.is_inference():
+            actor_perception_obs = actor_perception_obs.clone()
+        if hasattr(critic_perception_obs, "is_inference") and critic_perception_obs.is_inference():
+            critic_perception_obs = critic_perception_obs.clone()
+
+        actor_embed_seq = self._encode_perception_sequence(
+            self.actor.perception_time_gru, actor_perception_obs, dones_seq
+        )
+        critic_embed_seq = self._encode_perception_sequence(
+            self.critic.perception_time_gru, critic_perception_obs, dones_seq
+        )
+
+        # Flatten for PPO loss
+        actor_embed_flat = actor_embed_seq.flatten(0, 1)
+        critic_embed_flat = critic_embed_seq.flatten(0, 1)
+        actions_flat = actions_batch.flatten(0, 1)
+        target_values_flat = target_values_batch.flatten(0, 1)
+        returns_flat = returns_batch.flatten(0, 1)
+        advantages_flat = advantages_batch.flatten(0, 1)
+        old_actions_log_prob_flat = old_actions_log_prob_batch.flatten(0, 1)
+        old_mu_flat = old_mu_batch.flatten(0, 1)
+        old_sigma_flat = old_sigma_batch.flatten(0, 1)
+
+        # Symmetry augmentation
+        original_batch_size = actions_flat.shape[0]
+        if self.use_symmetry:
+            actor_obs_aug = self.symmetry_utils.augment_observations(
+                obs=actor_obs_flat,
+                env=self.env,
+                obs_list=self.actor_obs_keys,
+            )
+            critic_obs_aug = self.symmetry_utils.augment_observations(
+                obs=critic_obs_flat,
+                env=self.env,
+                obs_list=self.critic_obs_keys,
+            )
+            actions_flat = self.symmetry_utils.augment_actions(actions=actions_flat)
+            num_aug = int(actor_obs_aug.shape[0] / original_batch_size)
+            old_actions_log_prob_flat = old_actions_log_prob_flat.repeat(num_aug, 1)
+            returns_flat = returns_flat.repeat(num_aug, 1)
+            advantages_flat = advantages_flat.repeat(num_aug, 1)
+            target_values_flat = target_values_flat.repeat(num_aug, 1)
+            old_mu_flat = old_mu_flat.repeat(num_aug, 1)
+            old_sigma_flat = old_sigma_flat.repeat(num_aug, 1)
+            actor_embed_flat = actor_embed_flat.repeat(num_aug, 1)
+            critic_embed_flat = critic_embed_flat.repeat(num_aug, 1)
+            actor_obs_flat = actor_obs_aug
+            critic_obs_flat = critic_obs_aug
+
+        actor_policy_state = {"actor_obs": actor_obs_flat, "extra_actor_input": actor_embed_flat}
+        self.actor.act(actor_policy_state)
+
+        critic_policy_state = {"critic_obs": critic_obs_flat, "extra_critic_input": critic_embed_flat}
+        value_batch = self.critic.evaluate(critic_policy_state)
+
+        actions_log_prob_batch = self.actor.get_actions_log_prob(actions_flat)
+        mu_batch = self.actor.action_mean[:original_batch_size]
+        sigma_batch = self.actor.action_std[:original_batch_size]
+        entropy_batch = self.actor.entropy[:original_batch_size]
+
+        kl_mean = torch.tensor(0.0, device=self.device)
+        if self.config.desired_kl is not None and self.config.schedule == "adaptive":
+            kl_mean = self._compute_kl_div(old_mu_flat, old_sigma_flat, mu_batch, sigma_batch)
+            self._update_learning_rate(kl_mean)
+
+        ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_flat))
+        surrogate = -torch.squeeze(advantages_flat) * ratio
+        surrogate_clipped = -torch.squeeze(advantages_flat) * torch.clamp(
+            ratio, 1.0 - self.config.clip_param, 1.0 + self.config.clip_param
+        )
+        surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+
+        value_clipped = target_values_flat + (value_batch - target_values_flat).clamp(
+            -self.config.clip_param, self.config.clip_param
+        )
+        value_losses = (value_batch - returns_flat).pow(2)
+        value_losses_clipped = (value_clipped - returns_flat).pow(2)
+        value_loss = torch.max(value_losses, value_losses_clipped).mean()
+
+        if self.use_symmetry and (self.config.symmetry_actor_coef > 0.0 or self.config.symmetry_critic_coef > 0.0):
+            mean_policy_state = {"actor_obs": actor_obs_flat.detach().clone(), "extra_actor_input": actor_embed_flat.detach().clone()}
+            mean_actions_batch = self.actor.act_inference(mean_policy_state)
+            mean_actions_for_original_batch, mean_actions_for_symmetry_batch = (
+                mean_actions_batch[:original_batch_size],
+                mean_actions_batch[original_batch_size:],
+            )
+            mean_symmetry_actions_batch = self.symmetry_utils.augment_actions(
+                actions=mean_actions_for_original_batch,
+            )[original_batch_size:]
+            symmetry_actor_loss = F.mse_loss(
+                mean_actions_for_symmetry_batch,
+                mean_symmetry_actions_batch,
+            )
+
+            symmetry_critic_loss = F.mse_loss(
+                value_batch[:original_batch_size],
+                value_batch[original_batch_size:],
+            )
+        else:
+            symmetry_actor_loss = torch.tensor(0.0, device=self.device)
+            symmetry_critic_loss = torch.tensor(0.0, device=self.device)
+
+        entropy_loss = entropy_batch.mean()
+        actor_loss_base = (
+            surrogate_loss
+            - self.config.entropy_coef * entropy_loss
+            + self.config.symmetry_actor_coef * symmetry_actor_loss
+        )
+        actor_loss = actor_loss_base
+        critic_loss = self.config.value_loss_coef * value_loss + self.config.symmetry_critic_coef * symmetry_critic_loss
+
+        distill_loss = torch.tensor(0.0, device=self.device)
+        bc_loss = torch.tensor(0.0, device=self.device)
+        if self.distill_enabled:
+            # Distillation is not supported in time_gru mode for now.
+            pass
 
         return {
             "actor_loss": actor_loss,
