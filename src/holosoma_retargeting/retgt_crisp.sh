@@ -130,7 +130,7 @@ def sanitize(name: str) -> str:
         name = f"piece_{name}"
     return name
 
-meshes = [ (f"piece_{sanitize(piece.stem)}", piece) for piece in sorted(pieces_dir.glob(\"*.obj\")) ]
+meshes = [(f"piece_{sanitize(piece.stem)}", piece) for piece in sorted(pieces_dir.glob("*.obj"))]
 if not meshes:
     raise SystemExit("No mesh pieces found in pieces/ for box_assets.xml.")
 
