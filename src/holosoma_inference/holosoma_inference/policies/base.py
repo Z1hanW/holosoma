@@ -112,6 +112,8 @@ class BasePolicy:
         self.obs_dict = self.obs_config.obs_dict
         self.obs_dim_dict = self._calculate_obs_dim_dict()
         self.history_length_dict = self.obs_config.history_length_dict
+        self.obs_intervals = self.obs_config.obs_intervals
+        self.obs_interval_counters = 0
 
         # Initialize per-term history buffers using deques
         self._initialize_history_state()
@@ -517,9 +519,10 @@ class BasePolicy:
                     history = [np.zeros_like(obs)] * missing + history
 
                 # Match training order: time dimension first, then flatten into [history_len * term_dim].
-                stacked = np.stack(history[-history_len:], axis=1)
+                stacked = np.stack(history[-history_len:], axis=1)  # (num_envs, history_len, term_dim)
                 flattened_terms.append(stacked.reshape(obs.shape[0], -1))
 
+            # each group: [a_t1, a_t2, b_t1, b_t2, ...]
             group_outputs[group] = (
                 np.concatenate(flattened_terms, axis=1).astype(np.float32, copy=False)
                 if flattened_terms
