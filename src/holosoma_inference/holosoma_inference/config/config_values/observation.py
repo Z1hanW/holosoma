@@ -141,6 +141,72 @@ wbt = ObservationConfig(
     },
 )
 
+
+loco_manip_stand_height_waist = ObservationConfig(
+    obs_intervals={
+        "actor_obs": 1,
+        "perception_obs": 5,
+        "command_lin_vel_obs": 1,
+    },
+    obs_dict={
+        "actor_obs": [
+            "base_ang_vel",  # checked
+            "projected_gravity",  # checked
+            "command_lin_vel",  # checked
+            "command_ang_vel",  # checked
+            "command_stand",  # checked
+            "command_base_height",
+            "command_waist_dofs",
+            "ref_upper_dof_pos",
+            "dof_pos",  # checked
+            "dof_vel",  # checked
+            "actions",  # checked
+        ],
+        "perception_obs": [
+            "cam_depth",
+        ],
+        "command_lin_vel_obs": [
+            "command_lin_vel",
+        ],
+    },
+    obs_dims={
+        "base_ang_vel": 3,
+        "projected_gravity": 3,
+        "command_lin_vel": 2,
+        "command_ang_vel": 1,
+        "command_stand": 1,
+        "command_base_height": 1,
+        "command_waist_dofs": 3,
+        "ref_upper_dof_pos": 14,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+        # cam_depth: ${eval:${robot.cameras.props.resized_width} * ${robot.cameras.props.resized_height} * ${len:${robot.cameras.poses}}}
+        "cam_depth": 2592,  # 2 cameras, 48 width, 27 height
+    },
+    obs_scales={
+        "base_ang_vel": 0.25,
+        "projected_gravity": 1.0,
+        "command_lin_vel": 1.0,
+        "command_ang_vel": 1.0,
+        "command_stand": 1.0,
+        "command_base_height": 2.0,
+        "command_waist_dofs": 1.0,
+        "ref_upper_dof_pos": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 0.05,
+        "history": 1.0,
+        "actions": 1.0,
+        "cam_depth": 1.0,
+    },
+    history_length_dict={
+        "actor_obs": 5,
+        "perception_obs": 2,
+        "command_lin_vel_obs": 1,
+    },
+    # Note: obs_intervals from YAML not included as it's not present in other Python configs
+    # Original intervals were: actor_state_obs: 1, perception_obs: ${eval:${task.policy.config.rl_rate} / ${robot.cameras.props.frame_rate}}, command_lin_vel_obs: 1
+)
 # =============================================================================
 # Default Configurations Dictionary
 # =============================================================================
@@ -149,6 +215,7 @@ DEFAULTS = {
     "loco-g1-29dof": loco_g1_29dof,
     "loco-t1-29dof": loco_t1_29dof,
     "wbt": wbt,
+    "loco-manip-stand-height-waist": loco_manip_stand_height_waist,
 }
 """Dictionary of all available observation configurations.
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pydantic.dataclasses import dataclass
 
+from .camera import CameraConfig
 from .observation import ObservationConfig
 from .robot import RobotConfig
 from .task import TaskConfig
@@ -13,7 +14,7 @@ from .task import TaskConfig
 class InferenceConfig:
     """Top-level configuration for policy inference.
 
-    Combines robot, observation, and task configurations
+    Combines robot, observation, task, and camera configurations
     for running policies on real robots or in simulation.
     """
 
@@ -25,3 +26,6 @@ class InferenceConfig:
 
     task: TaskConfig
     """Task execution configuration."""
+
+    camera: CameraConfig | None = None
+    """Camera system configuration (optional)."""

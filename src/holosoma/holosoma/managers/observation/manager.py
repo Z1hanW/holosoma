@@ -129,6 +129,8 @@ class ObservationManager:
                 obs = obs.clip(term_cfg.clip[0], term_cfg.clip[1])
 
             # 5. Handle history buffering
+            # TODO: configuration of history is applied at group level. but here, it is applied at term level.
+            # move this to the group level...
             if group_cfg.history_length > 1:
                 obs = self._apply_history(group_name, term_name, obs, group_cfg, modify_buffer=modify_history)
 

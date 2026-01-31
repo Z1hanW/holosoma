@@ -499,6 +499,10 @@ class BasePolicy:
 
     def _update_obs_history(self, current_obs_dict: dict[str, dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
         """Update observation history buffers and return flattened observations per group."""
+        # [a_t-2, a_t-1, a_t, 
+        #  b_t-2, b_t-1, b_t, 
+        #  c_t-2, c_t-1, c_t
+        # ]
         group_outputs: dict[str, np.ndarray] = {}
 
         for group, term_dict in current_obs_dict.items():
@@ -529,6 +533,7 @@ class BasePolicy:
                 else np.zeros((1, 0), dtype=np.float32)
             )
 
+        # deadcode path: where do we use self.obs_buf_dict?
         self.obs_buf_dict = {group: value.copy() for group, value in group_outputs.items()}
         return group_outputs
 

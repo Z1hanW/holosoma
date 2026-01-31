@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import field
+
 from pydantic.dataclasses import dataclass
 
 
@@ -50,4 +52,13 @@ class ObservationConfig:
 
     Example:
         {"actor_obs": 1, "critic_obs": 3}
+    """
+
+    obs_intervals: dict[str, int] = field(default_factory=lambda: {"actor_obs": 1})
+    """Interval between observations in rl_policy_rate frames.
+
+    Maps each observation group name to the interval between observations in rl_policy_rate frames.
+
+    Example:
+        {"actor_obs": 1, "perception_obs": 5, "command_lin_vel_obs": 1}
     """

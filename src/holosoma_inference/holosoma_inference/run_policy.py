@@ -19,10 +19,16 @@ from loguru import logger
 from holosoma_inference.config.config_types.inference import InferenceConfig
 from holosoma_inference.config.config_values.inference import AnnotatedInferenceConfig
 from holosoma_inference.config.utils import TYRO_CONFIG
+from holosoma_inference.policies.loco_manip_stand_height_wait_depth import LocoManipStandHeightWaitDepthPolicy
 from holosoma_inference.policies.locomotion import LocomotionPolicy
 from holosoma_inference.policies.wbt import WholeBodyTrackingPolicy
 from holosoma_inference.utils.misc import restore_terminal_settings
 
+import numpy as np
+
+import os
+
+DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 
 def _print_control_guide(policy_class, use_joystick: bool):
     """Print control guide for users."""
@@ -97,24 +103,42 @@ def run_policy(config: InferenceConfig):
     logger.info(f"⚙️ RL Rate: {config.task.rl_rate} Hz")
     logger.info(f"📁 Model path: {config.task.model_path}")
 
-    try:
+    # try:
         # Determine policy class based on observation type
-        actor_obs = config.observation.obs_dict.get("actor_obs", [])
-        policy_class = WholeBodyTrackingPolicy if "motion_command" in actor_obs else LocomotionPolicy
-        logger.info(f"Using {policy_class.__name__}")
-        policy: LocomotionPolicy | WholeBodyTrackingPolicy = policy_class(config=config)
+    actor_obs = config.observation.obs_dict.get("actor_obs", [])
+    policy_class = WholeBodyTrackingPolicy if "motion_command" in actor_obs else LocomotionPolicy
+    policy_class = LocoManipStandHeightWaitDepthPolicy
+    logger.info(f"Using {policy_class.__name__}")
+    policy: LocomotionPolicy | WholeBodyTrackingPolicy = policy_class(config=config)
 
-        logger.info("✅ Policy initialized successfully!")
-        _print_control_guide(policy_class, config.task.use_joystick)
-        policy.run()
-        logger.info("✅ Policy execution completed!")
+    logger.info("✅ Policy initialized successfully!")
+    _print_control_guide(policy_class, config.task.use_joystick)
 
-    except Exception as e:
-        logger.error(f"❌ Error running policy: {e}")
-        traceback.print_exc()
-        sys.exit(1)
-    finally:
-        restore_terminal_settings()
+    if DEBUG:
+
+        policy._handle_start_policy()
+
+        # To avoid prininting, 
+        policy.interface.send_low_command(
+            policy.cmd_q,
+            policy.cmd_dq,
+            policy.cmd_tau,
+            np.zeros(policy.num_dofs),
+        )
+        policy.update_phase_time()
+        for i in range(10):
+            print(f"iteration {i}")
+            policy.policy_action()
+    else:
+        try:
+            policy.run()
+        except Exception as e:
+            logger.error(f"❌ Error running policy: {e}")
+            traceback.print_exc()
+            sys.exit(1)
+        finally:
+            restore_terminal_settings()
+    logger.info("✅ Policy execution completed!")
 
 
 def main():
