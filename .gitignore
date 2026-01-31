@@ -16,3 +16,7 @@
 !.gitignore
 !README*
 !LICENSE*
+
+# Local CRISP data packages (always ignore)
+crisp/
+crisp/**

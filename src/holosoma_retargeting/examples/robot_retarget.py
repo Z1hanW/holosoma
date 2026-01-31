@@ -277,6 +277,7 @@ def load_motion_data(
 
             human_data = np.load(str(npz_file))
             human_joints = human_data["global_joint_positions"][::downsample]
+            # Ignore CRISP-provided height; always use default human height.
             human_height = motion_data_config.default_human_height or 1.78
             smpl_scale = constants.ROBOT_HEIGHT / human_height
         else:
