@@ -19,10 +19,15 @@ SCENE_XML_OVERRIDE=${SCENE_XML_OVERRIDE:-""}
 OBJECT_NAME="scene_mesh_sqs"
 TASK_NAME="human_motion"
 TEMPLATE_XML="$SCRIPT_DIR/models/g1/g1_29dof_w_stairs.xml"
-MESH_DIR="$SCRIPT_DIR/models/g1/assets"
+ROBOT_SRC_DIR="$SCRIPT_DIR/models/g1"
+ROBOT_URDF_SRC="$ROBOT_SRC_DIR/g1_29dof.urdf"
 
 if [ ! -f "$TEMPLATE_XML" ]; then
     echo "[ERROR] missing template scene xml: $TEMPLATE_XML" >&2
+    exit 1
+fi
+if [ ! -f "$ROBOT_URDF_SRC" ]; then
+    echo "[ERROR] missing robot urdf: $ROBOT_URDF_SRC" >&2
     exit 1
 fi
 
@@ -65,6 +70,18 @@ for seq_dir in "${seq_dirs[@]}"; do
 
     stage_obj_dir="$MODULE_ROOT/$seq_name"
     mkdir -p "$stage_obj_dir"
+
+    # Copy robot assets into the sequence folder.
+    robot_dir="$stage_obj_dir/robot_g1"
+    mkdir -p "$robot_dir/assets" "$robot_dir/meshes"
+    cp -f "$ROBOT_URDF_SRC" "$robot_dir/g1_29dof.urdf"
+    if [ -f "$ROBOT_SRC_DIR/g1_29dof.xml" ]; then
+        cp -f "$ROBOT_SRC_DIR/g1_29dof.xml" "$robot_dir/g1_29dof.xml"
+    fi
+    cp -R "$ROBOT_SRC_DIR/assets/." "$robot_dir/assets"
+    if [ -d "$ROBOT_SRC_DIR/meshes" ]; then
+        cp -R "$ROBOT_SRC_DIR/meshes/." "$robot_dir/meshes"
+    fi
 
     ln -sf "$scene_obj" "$stage_obj_dir/scene_mesh_sqs.obj"
     scene_urdf_local="$stage_obj_dir/scene_mesh_sqs.urdf"
@@ -158,7 +175,7 @@ from pathlib import Path
 
 path = Path("$scene_xml_local")
 text = path.read_text()
-text = re.sub(r'meshdir="[^"]*"', f'meshdir="{Path("$MESH_DIR").as_posix()}"', text, count=1)
+text = re.sub(r'meshdir="[^"]*"', f'meshdir="{Path("$robot_dir/assets").as_posix()}"', text, count=1)
 # Drop any template piece assets/geoms so we can inject our own pieces safely.
 text = re.sub(r"\n\\s*<mesh name=\"part_[^\"]+\"[^>]*>", "", text)
 text = re.sub(r"\n\\s*<geom name=\"part_[^\"]+\"[^>]*>", "", text)
@@ -171,5 +188,6 @@ PY
 
     mkdir -p "$OUT_ROOT"
     scene_xml_file="$scene_xml_local"
-    bash "$SCRIPT_DIR/retgt_smplx.sh" "$MOTION_ROOT" "$seq_name" "$OBJECT_NAME" "$stage_obj_dir" "$ROBOT_URDF" "smplx" "$OUT_ROOT" "$scene_xml_file"
+    robot_urdf_local="$robot_dir/g1_29dof.urdf"
+    bash "$SCRIPT_DIR/retgt_smplx.sh" "$MOTION_ROOT" "$seq_name" "$OBJECT_NAME" "$stage_obj_dir" "$robot_urdf_local" "smplx" "$OUT_ROOT" "$scene_xml_file"
 done
