@@ -831,8 +831,13 @@ class InteractionMeshRetargeter:
         else:
             nhat_BA_W = np.array([0.0, 0.0, 0.0])
 
-        J_bodyA = self._calc_contact_jacobian_from_point(geom1.bodyid, pos1, input_world=True)
-        J_bodyB = self._calc_contact_jacobian_from_point(geom2.bodyid, pos2, input_world=True)
+        bodyA = int(np.asarray(geom1.bodyid).item())
+        bodyB = int(np.asarray(geom2.bodyid).item())
+        if getattr(self, "debug", False):
+            print(bodyA, bodyB)
+
+        J_bodyA = self._calc_contact_jacobian_from_point(bodyA, pos1, input_world=True)
+        J_bodyB = self._calc_contact_jacobian_from_point(bodyB, pos2, input_world=True)
 
         # Compute relative Jacobian
         Jc = J_bodyA - J_bodyB
