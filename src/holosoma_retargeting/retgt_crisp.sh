@@ -19,7 +19,8 @@ MODULE_ROOT="$GEO_ROOT"
 SCENE_XML_OVERRIDE=${SCENE_XML_OVERRIDE:-""}
 
 OBJECT_NAME="scene_mesh_sqs"
-TASK_NAME="human_motion"
+# Motion file name expected by downstream code (matches retargeting_gt behavior)
+TASK_NAME=${TASK_NAME:-"human_motion"}
 TEMPLATE_XML="$SCRIPT_DIR/models/g1/g1_29dof_w_stairs.xml"
 ROBOT_SRC_DIR="$SCRIPT_DIR/models/g1"
 ROBOT_URDF_SRC="$ROBOT_SRC_DIR/g1_29dof.urdf"
@@ -71,7 +72,7 @@ for seq_dir in "${seq_dirs[@]}"; do
     fi
 
     mkdir -p "$MOTION_ROOT"
-    motion_file="$MOTION_ROOT/$seq_name.npz"
+    motion_file="$MOTION_ROOT/$TASK_NAME.npz"
     ln -sf "$hmr_npz" "$motion_file"
 
     stage_obj_dir="$MODULE_ROOT/$seq_name"
@@ -189,5 +190,5 @@ PY
     mkdir -p "$OUT_ROOT"
     scene_xml_file="$scene_xml_local"
     robot_urdf_local="$robot_dir/g1_29dof.urdf"
-    bash "$SCRIPT_DIR/retgt_smplx.sh" "$MOTION_ROOT" "$seq_name" "$OBJECT_NAME" "$stage_obj_dir" "$robot_urdf_local" "smplx" "$OUT_ROOT" "$scene_xml_file"
+    bash "$SCRIPT_DIR/retgt_smplx.sh" "$MOTION_ROOT" "$TASK_NAME" "$OBJECT_NAME" "$stage_obj_dir" "$robot_urdf_local" "smplx" "$OUT_ROOT" "$scene_xml_file"
 done
