@@ -92,6 +92,8 @@ class InteractionMeshRetargeter:
         self.step_size = step_size
         self.visualize = visualize
         self.debug = debug
+        self._contact_constraints_enabled = bool(self.debug)
+        self._contact_pairs_enabled = False
         self.demo_joints = task_constants.DEMO_JOINTS
         self.laplacian_match_links = task_constants.JOINTS_MAPPING
         self.task_constants = task_constants
@@ -270,6 +272,9 @@ class InteractionMeshRetargeter:
             position=(0.0, 0.0, 0.0),
         )
 
+        # Add visibility GUI early so contact constraints can be toggled during retargeting.
+        self._ensure_visibility_gui()
+
     def draw_mesh_from_geom(
         self,
         model,
@@ -427,6 +432,8 @@ class InteractionMeshRetargeter:
 
         mjcf_visual_visible = self._handles_visible(getattr(self, "_mjcf_visual_handles", []))
         mjcf_collision_visible = self._handles_visible(getattr(self, "_mjcf_collision_handles", []))
+        contact_constraints_visible = bool(getattr(self, "_contact_constraints_enabled", False))
+        contact_pairs_visible = bool(getattr(self, "_contact_pairs_enabled", False))
 
         with self.server.gui.add_folder("Visibility"):
             show_urdf_cb = self.server.gui.add_checkbox("URDF visuals", initial_value=urdf_visible)
@@ -435,6 +442,12 @@ class InteractionMeshRetargeter:
             )
             show_mjcf_collision_cb = self.server.gui.add_checkbox(
                 "MJCF collision (constraints)", initial_value=mjcf_collision_visible
+            )
+            show_contact_cb = self.server.gui.add_checkbox(
+                "Contact constraints (lines)", initial_value=contact_constraints_visible
+            )
+            show_contact_pairs_cb = self.server.gui.add_checkbox(
+                "Contact pair meshes (debug)", initial_value=contact_pairs_visible
             )
 
         @show_urdf_cb.on_update
@@ -455,7 +468,51 @@ class InteractionMeshRetargeter:
             self._ensure_mjcf_geom_handles()
             self._set_handles_visible(self._mjcf_collision_handles, bool(show_mjcf_collision_cb.value))
 
+        @show_contact_cb.on_update
+        def _(_):
+            self._contact_constraints_enabled = bool(show_contact_cb.value)
+            handle = getattr(self, "_contact_line_handle", None)
+            if handle is not None:
+                handle.visible = bool(show_contact_cb.value)
+
+        @show_contact_pairs_cb.on_update
+        def _(_):
+            self._contact_pairs_enabled = bool(show_contact_pairs_cb.value)
+
         self._visibility_gui_added = True
+
+    def _contact_constraints_active(self) -> bool:
+        return bool(getattr(self, "_contact_constraints_enabled", False))
+
+    def _contact_pairs_active(self) -> bool:
+        return bool(getattr(self, "_contact_pairs_enabled", False))
+
+    def _update_contact_constraint_visuals(self, segments: np.ndarray) -> None:
+        if not hasattr(self, "server"):
+            return
+        if segments.size == 0:
+            handle = getattr(self, "_contact_line_handle", None)
+            if handle is not None:
+                handle.visible = False
+            return
+
+        # Colors: start (q) green, end (c) red
+        colors = np.zeros((segments.shape[0], 2, 3), dtype=np.uint8)
+        colors[:, 0, :] = np.array([0, 255, 0], dtype=np.uint8)
+        colors[:, 1, :] = np.array([255, 0, 0], dtype=np.uint8)
+
+        if not hasattr(self, "_contact_line_handle") or self._contact_line_handle is None:
+            self._contact_line_handle = self.server.scene.add_line_segments(
+                "/contacts/segments",
+                points=segments.astype(np.float32),
+                colors=colors,
+                line_width=2,
+                visible=True,
+            )
+        else:
+            self._contact_line_handle.points = segments.astype(np.float32)
+            self._contact_line_handle.colors = colors
+            self._contact_line_handle.visible = True
 
     def draw_mesh_pair_with_contact(
         self,
@@ -1361,6 +1418,10 @@ class InteractionMeshRetargeter:
         # 2) Precise distance only on candidates (early-exit at threshold)
         contype, conaff = m.geom_contype, m.geom_conaffinity
 
+        contact_segments = None
+        if self.visualize and self._contact_constraints_active():
+            contact_segments = []
+
         def masks_ok(g1, g2):
             if contype[g1] == 0 and conaff[g1] == 0:
                 return False
@@ -1400,8 +1461,11 @@ class InteractionMeshRetargeter:
                 Js[(g1, g2)] = J_rel
                 phis[(g1, g2)] = float(dist)
 
-                # For debug
-                if self.debug:
+                if contact_segments is not None:
+                    contact_segments.append(fromto.copy().reshape(2, 3))
+
+                # For debug: draw pair meshes if enabled
+                if self.debug and self._contact_pairs_active():
                     self.draw_mesh_pair_with_contact(
                         self.robot_model,
                         self.robot_data,
@@ -1411,6 +1475,12 @@ class InteractionMeshRetargeter:
                         self._geom_names[g2],
                         fromto=fromto,
                     )
+
+        if contact_segments is not None:
+            if len(contact_segments) == 0:
+                self._update_contact_constraint_visuals(np.zeros((0, 2, 3), dtype=float))
+            else:
+                self._update_contact_constraint_visuals(np.asarray(contact_segments, dtype=float))
 
         return Js, phis
 
