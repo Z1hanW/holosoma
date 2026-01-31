@@ -1,7 +1,7 @@
 import sys
+from importlib.metadata import entry_points
 
 from .base import BasicSdk2Bridge
-from importlib.metadata import entry_points
 
 # Auto-discover bridge implementations from installed extensions
 # Handle Python 3.8/3.9 vs 3.10+ API difference for entry_points
