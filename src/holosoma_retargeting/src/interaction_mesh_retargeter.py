@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sys
 import time
-from functools import partial
 from pathlib import Path
 from types import ModuleType
 
@@ -125,9 +124,6 @@ class InteractionMeshRetargeter:
 
         self.robot_data = mujoco.MjData(self.robot_model)
 
-        if self.visualize:
-            self._ensure_constraint_geom_handles()
-
         if self.robot_data.qpos.shape[0] > 7 + self.task_constants.ROBOT_DOF:
             self.has_dynamic_object = True
         else:
@@ -176,7 +172,7 @@ class InteractionMeshRetargeter:
 
     def _setup_visualization(self):
         """Setup Viser visualization components."""
-        self.server = viser.ViserServer(port=7070)
+        self.server = viser.ViserServer()
 
         # 1) Ensure a world frame exists (absolute path!)
         try:
@@ -187,16 +183,14 @@ class InteractionMeshRetargeter:
         # Create parent frames for robot and object
         self.robot_base = self.server.scene.add_frame("/world/robot", show_axes=False)
 
-        robot_urdf_path = Path(self.robot_model_path).resolve()
+        # Load robot URDF
         self.robot_urdf = yourdfpy.URDF.load(
-            robot_urdf_path,
+            self.robot_model_path,
             load_meshes=True,
             build_scene_graph=True,
-            filename_handler=partial(yourdfpy.filename_handler_magic, dir=robot_urdf_path.parent),
         )
         if self.robot_urdf.scene is None:
-            raise RuntimeError(f"Robot URDF has no visual scene (mesh load failed): {robot_urdf_path}")
-        self._validate_urdf_visual_meshes(self.robot_urdf, robot_urdf_path, label="Robot")
+            print(f"[WARN] Robot URDF has no visual scene: {self.robot_model_path}")
 
         print("Viser using robot URDF: ", self.robot_model_path)
 
@@ -206,26 +200,17 @@ class InteractionMeshRetargeter:
             urdf_or_path=self.robot_urdf,
             root_node_name="/world/robot",  # This links to the robot_base frame we created
         )
-        # Ensure visual meshes are enabled by default.
-        try:
-            self.viser_robot.show_visual = True
-        except Exception:
-            pass
-
         # Similarly for object
         if self.object_model_path:
             self.object_base = self.server.scene.add_frame("/world/object", show_axes=False)
 
-            object_urdf_path = Path(self.object_model_path).resolve()
             self.object_urdf = yourdfpy.URDF.load(
-                object_urdf_path,
+                self.object_model_path,
                 load_meshes=True,
                 build_scene_graph=True,
-                filename_handler=partial(yourdfpy.filename_handler_magic, dir=object_urdf_path.parent),
             )
             if self.object_urdf.scene is None:
-                raise RuntimeError(f"Object URDF has no visual scene (mesh load failed): {object_urdf_path}")
-            self._validate_urdf_visual_meshes(self.object_urdf, object_urdf_path, label="Object")
+                print(f"[WARN] Object URDF has no visual scene: {self.object_model_path}")
 
             # Create ViserUrdf instance for object, attaching it to the object_base frame
             self.viser_object = ViserUrdf(
@@ -233,10 +218,6 @@ class InteractionMeshRetargeter:
                 urdf_or_path=self.object_urdf,
                 root_node_name="/world/object",  # This links to the object_base frame we created
             )
-            try:
-                self.viser_object.show_visual = True
-            except Exception:
-                pass
             print("Viser using object URDF: ", self.object_model_path)
 
         else:
@@ -355,179 +336,6 @@ class InteractionMeshRetargeter:
             print("MJCF: no mesh geoms found to draw.")
         self._mjcf_visual_handles = visual_handles
         self._mjcf_collision_handles = collision_handles
-
-    def _refresh_object_geom_mask(self) -> np.ndarray:
-        m = self.robot_model
-        ngeom = m.ngeom
-        self._geom_names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or "" for g in range(ngeom)]
-        self._geom_body_names = [
-            mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, int(m.geom_bodyid[g])) or ""
-            for g in range(ngeom)
-        ]
-
-        obj_name = (self.object_name or "").lower()
-        object_mask = np.array(
-            [
-                (obj_name and (obj_name in geom.lower() or obj_name in body.lower()))
-                for geom, body in zip(self._geom_names, self._geom_body_names)
-            ],
-            dtype=bool,
-        )
-        if not object_mask.any():
-            piece_keys = ("piece_", "part_", "scene_piece")
-            object_mask = np.array(
-                [
-                    any(key in geom.lower() for key in piece_keys)
-                    or any(key in body.lower() for key in piece_keys)
-                    for geom, body in zip(self._geom_names, self._geom_body_names)
-                ],
-                dtype=bool,
-            )
-
-        self._object_geom_mask = object_mask
-        if self.debug:
-            obj_count = int(object_mask.sum())
-            print(f"[INFO] detected {obj_count} object geoms for constraints (object_name='{self.object_name}')")
-        return object_mask
-
-    def _build_constraint_geom_handles(self):
-        """Draw mesh geoms that participate in constraint checks (object pieces + ground)."""
-        if not hasattr(self, "server"):
-            return []
-
-        m, d = self.robot_model, self.robot_data
-        mujoco.mj_forward(m, d)
-
-        object_mask = self._refresh_object_geom_mask()
-        handles = []
-
-        for gid in range(m.ngeom):
-            if int(m.geom_dataid[gid]) == -1:
-                continue  # non-mesh
-            gname = self._geom_names[gid] or f"geom_{gid}"
-            gname_lower = gname.lower()
-            if not (bool(object_mask[gid]) or ("ground" in gname_lower)):
-                continue
-
-            handle = self.draw_mesh_from_geom(
-                m,
-                d,
-                gid,
-                gname,
-                name=f"/constraints/{gname}",
-                color=(50, 150, 255),
-                opacity=0.6,
-                use_convex_hull=False,
-            )
-            if handle is not None:
-                handles.append(handle)
-
-        if not handles:
-            print("[WARN] no constraint meshes found to visualize.")
-        return handles
-
-    def _ensure_constraint_geom_handles(self) -> None:
-        if hasattr(self, "_constraint_geom_handles"):
-            return
-        self._constraint_geom_handles = self._build_constraint_geom_handles()
-
-    @staticmethod
-    def _resolve_mesh_path(mesh_filename: str, base_dir: Path) -> Path:
-        filename = str(mesh_filename)
-        for prefix in ("package://", "file://", "model://"):
-            if filename.startswith(prefix):
-                filename = filename[len(prefix) :]
-                break
-        mesh_path = Path(filename)
-        if not mesh_path.is_absolute():
-            mesh_path = (base_dir / mesh_path).resolve()
-        return mesh_path
-
-    @classmethod
-    def _validate_urdf_visual_meshes(cls, urdf: yourdfpy.URDF, urdf_path: Path, *, label: str) -> None:
-        mesh_files: list[Path] = []
-        missing: list[Path] = []
-        base_dir = urdf_path.parent
-
-        links = None
-        if hasattr(urdf, "links"):
-            links = getattr(urdf, "links")
-        elif hasattr(urdf, "link_map"):
-            links = list(getattr(urdf, "link_map").values())
-        elif hasattr(urdf, "robot") and hasattr(urdf.robot, "links"):
-            links = getattr(urdf.robot, "links")
-        if not links:
-            raise RuntimeError(f"{label} URDF has no links to inspect: {urdf_path}")
-
-        for link in links:
-            visuals = []
-            if getattr(link, "visuals", None):
-                visuals.extend(link.visuals)
-            if getattr(link, "visual", None) is not None:
-                visuals.append(link.visual)
-            for visual in visuals:
-                geom = getattr(visual, "geometry", None)
-                mesh = getattr(geom, "mesh", None)
-                if mesh is None:
-                    continue
-                filename = getattr(mesh, "filename", None)
-                if filename:
-                    path = cls._resolve_mesh_path(filename, base_dir)
-                    mesh_files.append(path)
-                    if not path.exists():
-                        missing.append(path)
-                filenames = getattr(mesh, "filenames", None)
-                if filenames:
-                    for fn in filenames:
-                        path = cls._resolve_mesh_path(fn, base_dir)
-                        mesh_files.append(path)
-                        if not path.exists():
-                            missing.append(path)
-
-        if not mesh_files:
-            mesh_files = cls._collect_visual_meshes_from_xml(urdf_path, base_dir)
-            for path in mesh_files:
-                if not path.exists():
-                    missing.append(path)
-        if not mesh_files:
-            raise RuntimeError(f"{label} URDF has no visual mesh references: {urdf_path}")
-        if missing:
-            sample = "\n".join(str(p) for p in missing[:10])
-            more = "" if len(missing) <= 10 else f"\n... and {len(missing) - 10} more"
-            raise RuntimeError(
-                f"{label} URDF visual meshes missing ({len(missing)}):\n{sample}{more}\nURDF: {urdf_path}"
-            )
-
-    @classmethod
-    def _collect_visual_meshes_from_xml(cls, urdf_path: Path, base_dir: Path) -> list[Path]:
-        import xml.etree.ElementTree as ET
-
-        try:
-            root = ET.parse(urdf_path).getroot()
-        except ET.ParseError as exc:
-            raise RuntimeError(f"Failed to parse URDF XML: {urdf_path}: {exc}") from exc
-
-        mesh_files: list[Path] = []
-        for visual in root.iter():
-            if visual.tag.split("}")[-1] != "visual":
-                continue
-            for mesh in visual.iter():
-                if mesh.tag.split("}")[-1] != "mesh":
-                    continue
-                filename = mesh.attrib.get("filename")
-                if not filename:
-                    continue
-                mesh_files.append(cls._resolve_mesh_path(filename, base_dir))
-        return mesh_files
-
-    @staticmethod
-    def _set_handles_visible(handles, visible: bool) -> None:
-        for handle in handles:
-            try:
-                handle.visible = bool(visible)
-            except Exception:
-                pass
-
 
     def draw_mesh_pair_with_contact(
         self,
@@ -1400,7 +1208,8 @@ class InteractionMeshRetargeter:
 
     def _prefilter_pairs_with_mj_collision(self, threshold: float):
         m, d = self.robot_model, self.robot_data
-        self._refresh_object_geom_mask()
+        ngeom = m.ngeom
+        self._geom_names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or "" for g in range(ngeom)]
 
         if not hasattr(self, "_saved_margins"):
             self._saved_margins = np.empty_like(m.geom_margin)
@@ -1411,7 +1220,7 @@ class InteractionMeshRetargeter:
         # Run collision. This runs broad→narrow and fills d.contact.
         mujoco.mj_collision(m, d)
 
-        # Collect unique candidate pairs that involve at least one masked geom
+        # Collect unique candidate pairs
         candidates = set()
         for k in range(d.ncon):
             c = d.contact[k]
@@ -1447,17 +1256,16 @@ class InteractionMeshRetargeter:
                 return False
             if contype[g2] == 0 and conaff[g2] == 0:
                 return False
-
-            is_obj_g1 = bool(self._object_geom_mask[g1]) if hasattr(self, "_object_geom_mask") else False
-            is_obj_g2 = bool(self._object_geom_mask[g2]) if hasattr(self, "_object_geom_mask") else False
-            is_ground_g1 = "ground" in self._geom_names[g1].lower()
-            is_ground_g2 = "ground" in self._geom_names[g2].lower()
-
-            if is_obj_g1 and is_ground_g2:
+            if self.object_name in self._geom_names[g1] and "ground" in self._geom_names[g2]:
                 return False
-            if is_ground_g1 and is_obj_g2:
+            if "ground" in self._geom_names[g1] and self.object_name in self._geom_names[g2]:
                 return False
-            return is_obj_g1 or is_obj_g2 or is_ground_g1 or is_ground_g2
+            return (
+                self.object_name in self._geom_names[g1]
+                or self.object_name in self._geom_names[g2]
+                or "ground" in self._geom_names[g1]
+                or "ground" in self._geom_names[g2]
+            )
 
         for g1, g2 in candidates:
             # Optional: keep your own filters here (e.g., skip object-ground, only keep interaction with object/ground)
