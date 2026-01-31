@@ -124,6 +124,8 @@ class InteractionMeshRetargeter:
 
         self.robot_data = mujoco.MjData(self.robot_model)
 
+        self._object_geom_names = self._load_object_geom_names_from_xml()
+
         if self.robot_data.qpos.shape[0] > 7 + self.task_constants.ROBOT_DOF:
             self.has_dynamic_object = True
         else:
@@ -324,6 +326,29 @@ class InteractionMeshRetargeter:
                     collision_handles.append(collision_handle)
 
         return visual_handles, collision_handles
+
+    def _load_object_geom_names_from_xml(self) -> set[str] | None:
+        scene_xml = getattr(self.task_constants, "SCENE_XML_FILE", "")
+        if not scene_xml:
+            return None
+        scene_path = Path(scene_xml)
+        if not scene_path.exists():
+            return None
+        box_body = scene_path.parent / "box_body.xml"
+        if not box_body.exists():
+            return None
+        try:
+            import xml.etree.ElementTree as ET
+
+            root = ET.parse(box_body).getroot()
+        except Exception:
+            return None
+        names: set[str] = set()
+        for geom in root.findall(".//geom"):
+            name = geom.attrib.get("name")
+            if name:
+                names.add(name)
+        return names if names else None
 
     def _ensure_mjcf_geom_handles(self, name_filters: tuple[str, ...] | None = None) -> None:
         if hasattr(self, "_mjcf_visual_handles") and hasattr(self, "_mjcf_collision_handles"):
@@ -1256,15 +1281,24 @@ class InteractionMeshRetargeter:
                 return False
             if contype[g2] == 0 and conaff[g2] == 0:
                 return False
-            if self.object_name in self._geom_names[g1] and "ground" in self._geom_names[g2]:
+            obj_names = getattr(self, "_object_geom_names", None)
+            is_obj_g1 = self._geom_names[g1] in obj_names if obj_names is not None else False
+            is_obj_g2 = self._geom_names[g2] in obj_names if obj_names is not None else False
+            if obj_names is None:
+                is_obj_g1 = self.object_name in self._geom_names[g1]
+                is_obj_g2 = self.object_name in self._geom_names[g2]
+            is_ground_g1 = "ground" in self._geom_names[g1]
+            is_ground_g2 = "ground" in self._geom_names[g2]
+
+            if is_obj_g1 and is_ground_g2:
                 return False
-            if "ground" in self._geom_names[g1] and self.object_name in self._geom_names[g2]:
+            if is_ground_g1 and is_obj_g2:
                 return False
             return (
-                self.object_name in self._geom_names[g1]
-                or self.object_name in self._geom_names[g2]
-                or "ground" in self._geom_names[g1]
-                or "ground" in self._geom_names[g2]
+                is_obj_g1
+                or is_obj_g2
+                or is_ground_g1
+                or is_ground_g2
             )
 
         for g1, g2 in candidates:
