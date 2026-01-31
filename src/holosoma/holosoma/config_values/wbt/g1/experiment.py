@@ -259,18 +259,6 @@ g1_29dof_wbt_videomimic_transformer = replace(
     ),
 )
 
-g1_29dof_wbt_videomimic_mlp_w_gru = replace(
-    g1_29dof_wbt_videomimic_mlp,
-    training=replace(
-        g1_29dof_wbt_videomimic_mlp.training,
-        name="w_gru",
-    ),
-    perception=replace(
-        perception.camera_depth_d435i_scandots,
-        encoder_type="time_gru",
-    ),
-)
-
 g1_29dof_wbt_fast_sac = ExperimentConfig(
     training=TrainingConfig(
         project="WholeBodyTracking",

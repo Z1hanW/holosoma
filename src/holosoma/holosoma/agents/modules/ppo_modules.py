@@ -8,7 +8,7 @@ from torch.distributions import Normal
 
 from holosoma.config_types.algo import ModuleConfig
 
-from .modules import BaseModule, PerceptionTimeGRU
+from .modules import BaseModule
 
 
 class PPOActor(nn.Module):
@@ -135,21 +135,6 @@ class PPOActorEncoder(PPOActor):
         self.encoder_input_name = module_config_dict.layer_config.encoder_input_name
         self.encoder_obs_token_name = module_config_dict.layer_config.encoder_obs_token_name
         self.perception_input_name = module_config_dict.layer_config.perception_input_name
-        self.perception_encoder_type = getattr(module_config_dict.layer_config, "perception_encoder_type", "gated_linear")
-        if self.perception_encoder_type == "gru":
-            self.perception_encoder_type = "time_gru"
-        self.perception_time_gru: PerceptionTimeGRU | None = None
-        if self.perception_input_name and self.perception_encoder_type == "time_gru":
-            if self.perception_input_name in obs_dim_dict:
-                perception_dim = obs_dim_dict[self.perception_input_name]
-            else:
-                raise ValueError(f"Perception obs '{self.perception_input_name}' not found for time_gru.")
-            output_dim = module_config_dict.layer_config.perception_output_dim or perception_dim
-            self.perception_time_gru = PerceptionTimeGRU(perception_dim, output_dim)
-
-    def reset(self, dones=None):
-        if self.perception_time_gru is not None and dones is not None:
-            self.perception_time_gru.reset(dones)
 
     def _get_input(self, actor_obs: torch.Tensor, policy_state_dict: dict | None = None) -> tuple[torch.Tensor, torch.Tensor | None]:
         if actor_obs.shape[-1] != self.actor_module.input_dim:
@@ -178,19 +163,8 @@ class PPOActorEncoder(PPOActor):
             parts.append(self.actor_encoder_obs)
         perception_encoder = getattr(self.actor_module, "perception_encoder", None)
         perception_embed = None
-        external_extra = policy_state_dict.get("extra_actor_input") if policy_state_dict else None
         if self.perception_input_name:
-            if self.perception_encoder_type == "time_gru" and external_extra is None:
-                if self.perception_time_gru is None:
-                    raise ValueError("time_gru enabled but perception_time_gru is not initialized.")
-                if policy_state_dict is not None and self.perception_input_name in policy_state_dict:
-                    perception_obs = policy_state_dict[self.perception_input_name]
-                else:
-                    raise ValueError(f"Perception obs '{self.perception_input_name}' not provided for actor.")
-                if hasattr(perception_obs, "is_inference") and perception_obs.is_inference():
-                    perception_obs = perception_obs.clone()
-                perception_embed = self.perception_time_gru.step(perception_obs)
-            elif perception_encoder is not None:
+            if perception_encoder is not None:
                 if self.perception_input_name in self.actor_module.input_indices_dict:
                     perception_obs = actor_obs[..., self.actor_module.input_indices_dict[self.perception_input_name]]
                 elif policy_state_dict is not None and self.perception_input_name in policy_state_dict:
@@ -223,10 +197,6 @@ class PPOActorEncoder(PPOActor):
             input_actor = torch.cat(parts, dim=-1)
 
         extra_input = perception_embed if supports_extra else None
-        if external_extra is not None:
-            if hasattr(external_extra, "is_inference") and external_extra.is_inference():
-                external_extra = external_extra.clone()
-            extra_input = external_extra if extra_input is None else torch.cat([extra_input, external_extra], dim=-1)
         return input_actor, extra_input
 
     def act(self, policy_state_dict):
@@ -247,21 +217,6 @@ class PPOCriticEncoder(PPOCritic):
         self.encoder_input_name = module_config_dict.layer_config.encoder_input_name
         self.encoder_obs_token_name = module_config_dict.layer_config.encoder_obs_token_name
         self.perception_input_name = module_config_dict.layer_config.perception_input_name
-        self.perception_encoder_type = getattr(module_config_dict.layer_config, "perception_encoder_type", "gated_linear")
-        if self.perception_encoder_type == "gru":
-            self.perception_encoder_type = "time_gru"
-        self.perception_time_gru: PerceptionTimeGRU | None = None
-        if self.perception_input_name and self.perception_encoder_type == "time_gru":
-            if self.perception_input_name in obs_dim_dict:
-                perception_dim = obs_dim_dict[self.perception_input_name]
-            else:
-                raise ValueError(f"Perception obs '{self.perception_input_name}' not found for time_gru.")
-            output_dim = module_config_dict.layer_config.perception_output_dim or perception_dim
-            self.perception_time_gru = PerceptionTimeGRU(perception_dim, output_dim)
-
-    def reset(self, dones=None):
-        if self.perception_time_gru is not None and dones is not None:
-            self.perception_time_gru.reset(dones)
 
     def _get_input(self, critic_obs: torch.Tensor, policy_state_dict: dict | None = None) -> tuple[torch.Tensor, torch.Tensor | None]:
         if critic_obs.shape[-1] != self.critic_module.input_dim:
@@ -291,19 +246,8 @@ class PPOCriticEncoder(PPOCritic):
 
         perception_encoder = getattr(self.critic_module, "perception_encoder", None)
         perception_embed = None
-        external_extra = policy_state_dict.get("extra_critic_input") if policy_state_dict else None
         if self.perception_input_name:
-            if self.perception_encoder_type == "time_gru" and external_extra is None:
-                if self.perception_time_gru is None:
-                    raise ValueError("time_gru enabled but perception_time_gru is not initialized.")
-                if policy_state_dict is not None and self.perception_input_name in policy_state_dict:
-                    perception_obs = policy_state_dict[self.perception_input_name]
-                else:
-                    raise ValueError(f"Perception obs '{self.perception_input_name}' not provided for critic.")
-                if hasattr(perception_obs, "is_inference") and perception_obs.is_inference():
-                    perception_obs = perception_obs.clone()
-                perception_embed = self.perception_time_gru.step(perception_obs)
-            elif perception_encoder is not None:
+            if perception_encoder is not None:
                 if self.perception_input_name in self.critic_module.input_indices_dict:
                     perception_obs = critic_obs[..., self.critic_module.input_indices_dict[self.perception_input_name]]
                 elif policy_state_dict is not None and self.perception_input_name in policy_state_dict:
@@ -336,10 +280,6 @@ class PPOCriticEncoder(PPOCritic):
             input_critic = torch.cat(parts, dim=-1)
 
         extra_input = perception_embed if supports_extra else None
-        if external_extra is not None:
-            if hasattr(external_extra, "is_inference") and external_extra.is_inference():
-                external_extra = external_extra.clone()
-            extra_input = external_extra if extra_input is None else torch.cat([extra_input, external_extra], dim=-1)
         return input_critic, extra_input
 
     def evaluate(self, policy_state_dict):

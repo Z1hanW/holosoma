@@ -142,25 +142,3 @@ class RolloutStorage:
                 # Extract mini-batch for each buffer
                 mini_batch = {key: flattened[key][batch_indices] for key in self._buffers}
                 yield mini_batch
-
-    def sequence_mini_batch_generator(self, num_mini_batches: int, num_epochs: int = 1):
-        """Generate sequential mini-batches for recurrent training.
-
-        This keeps the time dimension intact and batches across environments.
-
-        Yields:
-            Dictionary mapping buffer keys to tensors of shape [T, B, ...]
-        """
-        if num_mini_batches <= 0:
-            raise ValueError("num_mini_batches must be positive.")
-        if self.num_envs % num_mini_batches != 0:
-            raise ValueError("num_envs must be divisible by num_mini_batches for sequence batching.")
-
-        envs_per_batch = self.num_envs // num_mini_batches
-        env_indices = torch.randperm(self.num_envs, requires_grad=False, device=self.device)
-
-        for _ in range(num_epochs):
-            for i in range(num_mini_batches):
-                env_ids = env_indices[i * envs_per_batch : (i + 1) * envs_per_batch]
-                mini_batch = {key: buf[:, env_ids] for key, buf in self._buffers.items()}
-                yield mini_batch

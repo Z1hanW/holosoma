@@ -126,6 +126,18 @@ class InteractionMeshRetargeter:
 
         self._object_geom_names = self._load_object_geom_names_from_xml()
 
+        if self.visualize and self._object_geom_names:
+            # Prefer MJCF meshes for object visualization so scaled assets show correctly.
+            try:
+                self._ensure_mjcf_geom_handles(name_filters=tuple(self._object_geom_names))
+                if self.viser_object is not None:
+                    self.viser_object.show_visual = False
+                if self.object_mesh_handle is not None:
+                    self.object_mesh_handle.visible = False
+                print("[INFO] Using MJCF object meshes for visualization (scaled).")
+            except Exception as exc:
+                print(f"[WARN] Failed to draw MJCF object meshes: {exc}")
+
         if self.robot_data.qpos.shape[0] > 7 + self.task_constants.ROBOT_DOF:
             self.has_dynamic_object = True
         else:
@@ -203,27 +215,42 @@ class InteractionMeshRetargeter:
             root_node_name="/world/robot",  # This links to the robot_base frame we created
         )
         # Similarly for object
+        self.viser_object = None
+        self.object_mesh_handle = None
         if self.object_model_path:
             self.object_base = self.server.scene.add_frame("/world/object", show_axes=False)
 
-            self.object_urdf = yourdfpy.URDF.load(
-                self.object_model_path,
-                load_meshes=True,
-                build_scene_graph=True,
-            )
-            if self.object_urdf.scene is None:
-                print(f"[WARN] Object URDF has no visual scene: {self.object_model_path}")
+            self.object_urdf = None
+            try:
+                self.object_urdf = yourdfpy.URDF.load(
+                    self.object_model_path,
+                    load_meshes=True,
+                    build_scene_graph=True,
+                )
+            except Exception as exc:
+                print(f"[WARN] Failed to load object URDF: {self.object_model_path}: {exc}")
 
-            # Create ViserUrdf instance for object, attaching it to the object_base frame
-            self.viser_object = ViserUrdf(
-                self.server,
-                urdf_or_path=self.object_urdf,
-                root_node_name="/world/object",  # This links to the object_base frame we created
-            )
-            print("Viser using object URDF: ", self.object_model_path)
-
-        else:
-            self.viser_object = None
+            if self.object_urdf is not None and self.object_urdf.scene is not None:
+                # Create ViserUrdf instance for object, attaching it to the object_base frame
+                self.viser_object = ViserUrdf(
+                    self.server,
+                    urdf_or_path=self.object_urdf,
+                    root_node_name="/world/object",  # This links to the object_base frame we created
+                )
+                print("Viser using object URDF: ", self.object_model_path)
+            else:
+                if self.object_urdf is not None:
+                    print(f"[WARN] Object URDF has no visual scene: {self.object_model_path}")
+                obj_path = getattr(self.task_constants, "OBJECT_MESH_FILE", None)
+                if obj_path and Path(obj_path).exists():
+                    try:
+                        obj_mesh = trimesh.load(obj_path, force="mesh")
+                        self.object_mesh_handle = self.server.scene.add_mesh_trimesh(
+                            "/world/object/mesh", obj_mesh
+                        )
+                        print("Viser using object mesh: ", obj_path)
+                    except Exception as exc:
+                        print(f"[WARN] Failed to load object mesh: {obj_path}: {exc}")
 
         # Check the number of actuated joints and their names
         robot_joint_limits = self.viser_robot.get_actuated_joint_limits()
@@ -568,6 +595,7 @@ class InteractionMeshRetargeter:
 
         if self.visualize:
             robot_dof = len(self.viser_robot.get_actuated_joint_limits())
+            object_present = (self.viser_object is not None) or (self.object_mesh_handle is not None)
 
             create_motion_control_sliders(
                 server=self.server,
@@ -576,8 +604,8 @@ class InteractionMeshRetargeter:
                 motion_sequence=np.asarray(retargeted_motions)[1:],
                 robot_dof=robot_dof,
                 viser_object=self.viser_object,
-                object_base_frame=getattr(self, "object_base", None) if self.viser_object else None,
-                contains_object_in_qpos=bool(self.viser_object) and bool(self.has_dynamic_object),
+                object_base_frame=getattr(self, "object_base", None) if object_present else None,
+                contains_object_in_qpos=object_present and bool(self.has_dynamic_object),
                 initial_fps=30,
                 initial_interp_mult=2,
                 loop=False,
@@ -592,6 +620,8 @@ class InteractionMeshRetargeter:
                     self.viser_robot.show_visual = show_meshes_cb.value
                     if self.viser_object is not None:
                         self.viser_object.show_visual = show_meshes_cb.value
+                    if self.object_mesh_handle is not None:
+                        self.object_mesh_handle.visible = bool(show_meshes_cb.value)
 
         return (
             np.array(retargeted_motions)[1:],
@@ -675,6 +705,7 @@ class InteractionMeshRetargeter:
 
         if self.visualize:
             robot_dof = len(self.viser_robot.get_actuated_joint_limits())
+            object_present = (self.viser_object is not None) or (self.object_mesh_handle is not None)
 
             create_motion_control_sliders(
                 server=self.server,
@@ -683,8 +714,8 @@ class InteractionMeshRetargeter:
                 motion_sequence=np.asarray(retargeted_motions)[1:],
                 robot_dof=robot_dof,
                 viser_object=self.viser_object,
-                object_base_frame=getattr(self, "object_base", None) if self.viser_object else None,
-                contains_object_in_qpos=bool(self.viser_object) and bool(self.has_dynamic_object),
+                object_base_frame=getattr(self, "object_base", None) if object_present else None,
+                contains_object_in_qpos=object_present and bool(self.has_dynamic_object),
                 initial_fps=30,
                 initial_interp_mult=2,
                 loop=False,
@@ -698,6 +729,8 @@ class InteractionMeshRetargeter:
                     self.viser_robot.show_visual = show_meshes_cb.value
                     if self.viser_object is not None:
                         self.viser_object.show_visual = show_meshes_cb.value
+                    if self.object_mesh_handle is not None:
+                        self.object_mesh_handle.visible = bool(show_meshes_cb.value)
 
         return (
             np.array(retargeted_motions)[1:],
@@ -1081,7 +1114,9 @@ class InteractionMeshRetargeter:
             self.robot_base.wxyz = robot_quat  # Assuming quaternion is in wxyz order
 
             # Update object pose if it exists
-            if hasattr(self, "viser_object") and self.viser_object is not None:
+            if hasattr(self, "object_base") and (
+                self.viser_object is not None or self.object_mesh_handle is not None
+            ):
                 if self.has_dynamic_object:
                     object_quat = q[-4:]
                     object_pos = q[-7:-4]
