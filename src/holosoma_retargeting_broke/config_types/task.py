@@ -37,6 +37,7 @@ class TaskConfig:
     # Object directory (for climbing tasks)
     # Auto-determined from data_path / task_name if None
     object_dir: Path | None = None
+
     # Override scene XML file (for climbing tasks)
     scene_xml_file: Path | None = None
 

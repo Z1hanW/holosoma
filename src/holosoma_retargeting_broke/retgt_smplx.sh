@@ -34,7 +34,8 @@ python examples/robot_retarget.py \
     --data_format "$DATA_FORMAT" \
     "${SAVE_DIR_ARG[@]}" \
     --retargeter.debug \
-    --retargeter.visualize
+    --retargeter.visualize \
+    --retargeter.foot-tracking-weight 1000
 
 
     # interaction_mesh_foot

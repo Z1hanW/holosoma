@@ -8,14 +8,14 @@ from typing import Any, TypedDict
 # Pre-defined constants for each data format
 LAFAN_DEMO_JOINTS = [
     "Hips",
-    "RightUpLeg",
-    "RightLeg",
-    "RightFoot",
-    "RightToeBase",
     "LeftUpLeg",
     "LeftLeg",
     "LeftFoot",
     "LeftToeBase",
+    "RightUpLeg",
+    "RightLeg",
+    "RightFoot",
+    "RightToeBase",
     "Spine",
     "Spine1",
     "Spine2",
@@ -310,6 +310,9 @@ DATA_FORMAT_CONSTANTS: dict[str, FormatConstants] = {
         "default_scale_factor": 1.27 / 1.7,
     },
     "mocap": {
+        "default_human_height": 1.78,
+    },
+    "smplx": {
         "default_human_height": 1.78,
     },
 }

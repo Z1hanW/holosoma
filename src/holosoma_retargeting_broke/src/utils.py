@@ -82,7 +82,7 @@ def load_object_data(
             # Use center-based weighted sampling
             points = weighted_surface_sampling(obj_mesh, sample_count, surface_weights, seed)
     else:
-        points, _ = trimesh.sample.sample_surface_even(obj_mesh, sample_count, seed=seed)
+        points, _ = trimesh.sample.sample_surface_even(obj_mesh, int(sample_count), seed=seed)
 
     points = np.array(points)
     points_scaled = points * smpl_scale
@@ -221,7 +221,7 @@ def preprocess_motion_data(
         object_poses (np.ndarray): Object poses.
         retargeter: Retargeting object with smplh_joint2idx attribute.
         scale (float): Scaling factor.
-        normalize_height (bool): Whether to normalize human joint heights.
+        mat_height (float): Offset for mat height when normalizing foot z.
 
     Returns:
         tuple: (human_joints_scaled, object_poses_scaled, object_moving_frame_idx).
@@ -233,7 +233,6 @@ def preprocess_motion_data(
     ]
     z_min = human_joints[:, toe_indices, 2].min()
     if z_min >= mat_height:
-        # On a mat.
         z_min -= mat_height
     human_joints[:, :, 2] -= z_min
 
@@ -733,7 +732,7 @@ def transform_y_up_to_z_up(points):
     """
     # Create transformation matrix
     # [x, y, z] -> [x, z, y]
-    transform_matrix = np.array([[1, 0, 0], [0, 0, 1], [0, 1, 0]])
+    transform_matrix = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
 
     # Apply transformation
     if points.ndim == 1:

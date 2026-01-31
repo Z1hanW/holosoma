@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import tyro
 import viser  # type: ignore[import-not-found]  # pip install viser
+import trimesh
 import yourdfpy  # type: ignore[import-untyped]  # pip install yourdfpy
 from viser.extras import ViserUrdf  # type: ignore[import-not-found]
 
@@ -53,9 +54,13 @@ def make_player(
     vr = ViserUrdf(server, urdf_or_path=robot_urdf_y, root_node_name="/robot")
 
     vo = None
+    object_mesh_handle = None
     if config.object_urdf:
         object_urdf_y = yourdfpy.URDF.load(config.object_urdf, load_meshes=True, build_scene_graph=True)
         vo = ViserUrdf(server, urdf_or_path=object_urdf_y, root_node_name="/object")
+    elif config.object_obj:
+        object_mesh = trimesh.load(config.object_obj, force="mesh")
+        object_mesh_handle = server.scene.add_mesh_trimesh("/object/mesh", object_mesh)
 
     # A tiny grid
     server.scene.add_grid("/grid", width=config.grid_width, height=config.grid_height, position=(0.0, 0.0, 0.0))
@@ -71,6 +76,8 @@ def make_player(
     vr.show_visual = config.show_meshes
     if vo is not None:
         vo.show_visual = config.show_meshes
+    if object_mesh_handle is not None:
+        object_mesh_handle.visible = config.show_meshes
 
     # ---------- Additional GUI controls (mesh visibility) ----------
     with server.gui.add_folder("Display"):
@@ -81,8 +88,11 @@ def make_player(
         vr.show_visual = bool(show_meshes_cb.value)
         if vo is not None:
             vo.show_visual = bool(show_meshes_cb.value)
+        if object_mesh_handle is not None:
+            object_mesh_handle.visible = bool(show_meshes_cb.value)
 
     # ---------- Use reusable motion control sliders from viser_utils ----------
+    object_scene_enabled = vo is not None or object_mesh_handle is not None
     create_motion_control_sliders(
         server=server,
         viser_robot=vr,
@@ -90,7 +100,7 @@ def make_player(
         motion_sequence=qpos,
         robot_dof=robot_dof,
         viser_object=vo if config.assume_object_in_qpos else None,
-        object_base_frame=object_root if config.assume_object_in_qpos else None,
+        object_base_frame=object_root if object_scene_enabled else None,
         contains_object_in_qpos=config.assume_object_in_qpos,
         initial_fps=actual_fps,
         initial_interp_mult=config.visual_fps_multiplier,
@@ -99,7 +109,7 @@ def make_player(
     n_frames = int(qpos.shape[0])
     print(
         f"[viser_player] Loaded {n_frames} frames | robot_dof={robot_dof} | "
-        f"object={'yes' if (config.object_urdf and config.assume_object_in_qpos) else 'no'}"
+        f"object={'yes' if ((config.object_urdf or config.object_obj) and config.assume_object_in_qpos) else 'no'}"
     )
     print("Open the viewer URL printed above. Close the process (Ctrl+C) to exit.")
     return server

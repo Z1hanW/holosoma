@@ -22,6 +22,9 @@ class ViserConfig:
     object_urdf: str | None = None
     """Path to object URDF file (optional)."""
 
+    object_obj: str | None = None
+    """Path to object mesh (.obj) for visualization (optional)."""
+
     fps: int = 30
     """Frames per second for playback."""
 
@@ -53,4 +56,6 @@ class ViserConfig:
     """Minimum interpolation multiplier."""
 
     max_interp_mult: int = 8
+
+    port: int = 7007
     """Maximum interpolation multiplier."""

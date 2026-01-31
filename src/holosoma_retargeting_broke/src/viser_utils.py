@@ -23,6 +23,7 @@ def create_motion_control_sliders(
     initial_fps: int = 30,
     initial_interp_mult: int = 2,
     loop: bool = True,
+    autoplay: bool = True,
 ) -> Tuple[List[viser.GuiInputHandle[int]], List[float]]:
     """
     Create a slider + play/pause controls and a background player thread with smooth, slerp-based interpolation.
@@ -31,8 +32,8 @@ def create_motion_control_sliders(
         [0:3]   robot base position   (xyz)
         [3:7]   robot base quaternion (wxyz)
         [7:7+R] robot joints          (R = robot_dof)
-        [-7:-4] object position  (xyz)            # only if contains_object_in_qpos and viser_object provided
-        [-4:]   object quaternion (wxyz)          # only if contains_object_in_qpos and viser_object provided
+        [-7:-4] object position  (xyz)            # only if contains_object_in_qpos and object_base_frame provided
+        [-4:]   object quaternion (wxyz)          # only if contains_object_in_qpos and object_base_frame provided
 
     Args:
         server: Viser server.
@@ -46,9 +47,10 @@ def create_motion_control_sliders(
         initial_fps: base FPS for playback.
         initial_interp_mult: visual upsampling multiplier.
         loop: whether to wrap around at the end.
+        autoplay: whether to start playback immediately.
 
     Returns:
-        (controls, initial_values) — currently returns the [frame_slider] and [0.0]
+        (controls, initial_values) - currently returns the [frame_slider] and [0.0]
     """
     qpos = motion_sequence
     n_frames = int(qpos.shape[0])
@@ -56,8 +58,7 @@ def create_motion_control_sliders(
         raise ValueError("motion_sequence is empty.")
 
     has_object_input = (
-        viser_object is not None
-        and object_base_frame is not None
+        object_base_frame is not None
         and contains_object_in_qpos
         and qpos.shape[1] >= (7 + robot_dof + 7)
     )
@@ -120,7 +121,7 @@ def create_motion_control_sliders(
         return out
 
     # ---------------- state ----------------
-    playing = {"flag": False}
+    playing = {"flag": bool(autoplay)}
     tick = {"next": time.perf_counter()}  # absolute time for next draw
     prev: dict[str, np.ndarray | None] = {"robot_q": None, "obj_q": None}  # for continuity
     nonlocal_f = {"f": float(frame_slider.value)}  # fractional frame cursor
@@ -134,24 +135,25 @@ def create_motion_control_sliders(
             joints = (
                 joints[:robot_dof] if joints.shape[0] > robot_dof else np.pad(joints, (0, robot_dof - joints.shape[0]))
             )
-        viser_robot.update_cfg(joints)
+        with server.atomic():
+            viser_robot.update_cfg(joints)
 
-        # robot base (MuJoCo order: pos first, then quat)
-        robot_base_frame.position = q[0:3]  # pos (xyz)
-        r_q = _quat_continuous(prev["robot_q"], q[3:7])
-        prev["robot_q"] = r_q
-        robot_base_frame.wxyz = r_q
+            # robot base (MuJoCo order: pos first, then quat)
+            robot_base_frame.position = q[0:3]  # pos (xyz)
+            r_q = _quat_continuous(prev["robot_q"], q[3:7])
+            prev["robot_q"] = r_q
+            robot_base_frame.wxyz = r_q
 
-        # object (optional) (MuJoCo order: pos first, then quat)
-        if has_object_input and object_base_frame is not None:
-            object_base_frame.position = q[-7:-4]  # obj pos (xyz)
-            o_q = _quat_continuous(prev["obj_q"], q[-4:])
-            prev["obj_q"] = o_q
-            object_base_frame.wxyz = o_q
-        elif object_base_frame is not None and viser_object is not None:
-            # fallback static pose
-            object_base_frame.position = np.zeros(3)
-            object_base_frame.wxyz = np.array([1.0, 0.0, 0.0, 0.0])
+            # object (optional) (MuJoCo order: pos first, then quat)
+            if has_object_input and object_base_frame is not None:
+                object_base_frame.position = q[-7:-4]  # obj pos (xyz)
+                o_q = _quat_continuous(prev["obj_q"], q[-4:])
+                prev["obj_q"] = o_q
+                object_base_frame.wxyz = o_q
+            elif object_base_frame is not None and viser_object is not None:
+                # fallback static pose
+                object_base_frame.position = np.zeros(3)
+                object_base_frame.wxyz = np.array([1.0, 0.0, 0.0, 0.0])
 
     def _apply_discrete_frame(i: int) -> None:
         i = int(np.clip(i, 0, n_frames - 1))

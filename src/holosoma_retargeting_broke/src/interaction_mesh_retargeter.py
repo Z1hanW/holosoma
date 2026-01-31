@@ -56,6 +56,7 @@ class InteractionMeshRetargeter:
         debug: bool = False,
         w_nominal_tracking_init: float = 5.0,
         nominal_tracking_tau: float = 10.0,
+        foot_tracking_weight: float = 1000.0,
     ):
         """This kinematic retargeter solves the diffIK problem with hard constraints in SQP style.
         During each SQP iteration, the problem is solved with the following constraints and costs:
@@ -76,6 +77,7 @@ class InteractionMeshRetargeter:
             penetration_tolerance: tolerance for penetration when enforcing non-penetration constraints.
             foot_sticking_tolerance: tolerance for foot sticking constraints in x, y.
             nominal_tracking_tau: the time constant for the nominal tracking cost.
+            foot_tracking_weight: weight for foot position tracking in foot-only mode.
         """
 
         self.robot_model_path = task_constants.ROBOT_URDF_FILE
@@ -90,6 +92,9 @@ class InteractionMeshRetargeter:
         self.step_size = step_size
         self.visualize = visualize
         self.debug = debug
+        self._contact_constraints_enabled = bool(self.debug)
+        self._contact_pairs_enabled = False
+        self._contact_constraints_all = False
         self.demo_joints = task_constants.DEMO_JOINTS
         self.laplacian_match_links = task_constants.JOINTS_MAPPING
         self.task_constants = task_constants
@@ -107,7 +112,10 @@ class InteractionMeshRetargeter:
             self._setup_visualization()
 
         # Load Mujoco model
-        if self.object_name == "ground":
+        scene_xml_file = getattr(self.task_constants, "SCENE_XML_FILE", "")
+        if scene_xml_file:
+            robot_xml_path = scene_xml_file
+        elif self.object_name == "ground":
             robot_xml_path = self.robot_model_path.replace(".urdf", ".xml")
         elif self.object_name == "multi_boxes":
             robot_xml_path = self.task_constants.SCENE_XML_FILE
@@ -118,6 +126,20 @@ class InteractionMeshRetargeter:
         print("Loading robot model from: ", robot_xml_path)
 
         self.robot_data = mujoco.MjData(self.robot_model)
+
+        self._object_geom_names = self._load_object_geom_names_from_xml()
+
+        if self.visualize and self._object_geom_names:
+            # Prefer MJCF meshes for object visualization so scaled assets show correctly.
+            try:
+                self._ensure_mjcf_geom_handles(name_filters=tuple(self._object_geom_names))
+                if self.viser_object is not None:
+                    self.viser_object.show_visual = False
+                if self.object_mesh_handle is not None:
+                    self.object_mesh_handle.visible = False
+                print("[INFO] Using MJCF object meshes for visualization (scaled).")
+            except Exception as exc:
+                print(f"[WARN] Failed to draw MJCF object meshes: {exc}")
 
         if self.robot_data.qpos.shape[0] > 7 + self.task_constants.ROBOT_DOF:
             self.has_dynamic_object = True
@@ -162,6 +184,7 @@ class InteractionMeshRetargeter:
 
         self.w_nominal_tracking_init = w_nominal_tracking_init
         self.nominal_tracking_tau = nominal_tracking_tau
+        self.foot_tracking_weight = foot_tracking_weight
         self.track_nominal_indices = task_constants.NOMINAL_TRACKING_INDICES
 
     def _setup_visualization(self):
@@ -183,6 +206,8 @@ class InteractionMeshRetargeter:
             load_meshes=True,
             build_scene_graph=True,
         )
+        if self.robot_urdf.scene is None:
+            print(f"[WARN] Robot URDF has no visual scene: {self.robot_model_path}")
 
         print("Viser using robot URDF: ", self.robot_model_path)
 
@@ -192,27 +217,43 @@ class InteractionMeshRetargeter:
             urdf_or_path=self.robot_urdf,
             root_node_name="/world/robot",  # This links to the robot_base frame we created
         )
-
         # Similarly for object
+        self.viser_object = None
+        self.object_mesh_handle = None
         if self.object_model_path:
             self.object_base = self.server.scene.add_frame("/world/object", show_axes=False)
 
-            self.object_urdf = yourdfpy.URDF.load(
-                self.object_model_path,
-                load_meshes=True,
-                build_scene_graph=True,
-            )
+            self.object_urdf = None
+            try:
+                self.object_urdf = yourdfpy.URDF.load(
+                    self.object_model_path,
+                    load_meshes=True,
+                    build_scene_graph=True,
+                )
+            except Exception as exc:
+                print(f"[WARN] Failed to load object URDF: {self.object_model_path}: {exc}")
 
-            # Create ViserUrdf instance for object, attaching it to the object_base frame
-            self.viser_object = ViserUrdf(
-                self.server,
-                urdf_or_path=self.object_urdf,
-                root_node_name="/world/object",  # This links to the object_base frame we created
-            )
-            print("Viser using object URDF: ", self.object_model_path)
-
-        else:
-            self.viser_object = None
+            if self.object_urdf is not None and self.object_urdf.scene is not None:
+                # Create ViserUrdf instance for object, attaching it to the object_base frame
+                self.viser_object = ViserUrdf(
+                    self.server,
+                    urdf_or_path=self.object_urdf,
+                    root_node_name="/world/object",  # This links to the object_base frame we created
+                )
+                print("Viser using object URDF: ", self.object_model_path)
+            else:
+                if self.object_urdf is not None:
+                    print(f"[WARN] Object URDF has no visual scene: {self.object_model_path}")
+                obj_path = getattr(self.task_constants, "OBJECT_MESH_FILE", None)
+                if obj_path and Path(obj_path).exists():
+                    try:
+                        obj_mesh = trimesh.load(obj_path, force="mesh")
+                        self.object_mesh_handle = self.server.scene.add_mesh_trimesh(
+                            "/world/object/mesh", obj_mesh
+                        )
+                        print("Viser using object mesh: ", obj_path)
+                    except Exception as exc:
+                        print(f"[WARN] Failed to load object mesh: {obj_path}: {exc}")
 
         # Check the number of actuated joints and their names
         robot_joint_limits = self.viser_robot.get_actuated_joint_limits()
@@ -232,22 +273,362 @@ class InteractionMeshRetargeter:
             position=(0.0, 0.0, 0.0),
         )
 
-    def draw_mesh_from_geom(self, model, data, geom_id, geom_name, name="/mesh", color=(50, 150, 255), opacity=0.5):
+        # Add visibility GUI early so contact constraints can be toggled during retargeting.
+        self._ensure_visibility_gui()
+
+    def draw_mesh_from_geom(
+        self,
+        model,
+        data,
+        geom_id,
+        geom_name,
+        name="/mesh",
+        color=(50, 150, 255),
+        opacity=0.5,
+        *,
+        use_convex_hull: bool = False,
+    ):
         """
-        Draw a single MuJoCo mesh geom (already baked to world coords) in viser.
-        color is [0, 255] RGB ints; opacity is [0,1].
+        Draw a MuJoCo mesh geom in viser.
+        If use_convex_hull=True, draw the collision hull (if available) instead of render mesh.
         """
         if not hasattr(self, "server"):
-            return
-        V, F = _world_mesh_from_geom(model, data, geom_id, geom_name)
-        self.server.scene.add_mesh_simple(
+            return None
+
+        if use_convex_hull:
+            V, F = _world_hull_from_geom(model, data, geom_id)
+            if V is None or F is None:
+                return None
+        else:
+            V, F = _world_mesh_from_geom(model, data, geom_id, geom_name)
+
+        return self.server.scene.add_mesh_simple(
             name,
             vertices=V.astype(np.float32),
             faces=F.astype(np.int32),
-            position=(0.0, 0.0, 0.0),  # already world-frame
+            position=(0.0, 0.0, 0.0),
             color=tuple(int(c) for c in color),
             opacity=float(opacity),
         )
+
+    def _build_mjcf_geom_handles(self, name_filters: tuple[str, ...] | None = None):
+        """Draw MJCF mesh geoms once and return (visual_handles, collision_handles)."""
+        if not hasattr(self, "server"):
+            return [], []
+
+        m, d = self.robot_model, self.robot_data
+        mujoco.mj_forward(m, d)
+
+        visual_handles = []
+        collision_handles = []
+
+        for gid in range(m.ngeom):
+            if int(m.geom_dataid[gid]) == -1:
+                continue  # non-mesh
+            gname = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, gid) or f"geom_{gid}"
+            if name_filters and not any(f in gname for f in name_filters):
+                continue
+
+            is_collision = (m.geom_contype[gid] != 0) or (m.geom_conaffinity[gid] != 0)
+
+            visual_handle = self.draw_mesh_from_geom(
+                m,
+                d,
+                gid,
+                gname,
+                name=f"/mjcf/visual/{gname}",
+                color=(50, 150, 255),
+                opacity=0.6,
+                use_convex_hull=False,
+            )
+            if visual_handle is not None:
+                visual_handles.append(visual_handle)
+
+            if is_collision:
+                collision_handle = self.draw_mesh_from_geom(
+                    m,
+                    d,
+                    gid,
+                    gname,
+                    name=f"/mjcf/collision/{gname}",
+                    color=(255, 80, 80),
+                    opacity=0.35,
+                    use_convex_hull=True,
+                )
+                if collision_handle is not None:
+                    collision_handles.append(collision_handle)
+
+        return visual_handles, collision_handles
+
+    def _load_object_geom_names_from_xml(self) -> set[str] | None:
+        scene_xml = getattr(self.task_constants, "SCENE_XML_FILE", "")
+        if not scene_xml:
+            return None
+        scene_path = Path(scene_xml)
+        if not scene_path.exists():
+            return None
+        box_body = scene_path.parent / "box_body.xml"
+        if not box_body.exists():
+            return None
+        try:
+            import xml.etree.ElementTree as ET
+
+            root = ET.parse(box_body).getroot()
+        except Exception:
+            return None
+        names: set[str] = set()
+        for geom in root.findall(".//geom"):
+            name = geom.attrib.get("name")
+            if name:
+                names.add(name)
+        return names if names else None
+
+    def _ensure_mjcf_geom_handles(self, name_filters: tuple[str, ...] | None = None) -> None:
+        if hasattr(self, "_mjcf_visual_handles") and hasattr(self, "_mjcf_collision_handles"):
+            return
+        visual_handles, collision_handles = self._build_mjcf_geom_handles(name_filters=name_filters)
+        if not visual_handles and not collision_handles and name_filters:
+            print("MJCF: no mesh geoms matched filter; falling back to show all meshes.")
+            visual_handles, collision_handles = self._build_mjcf_geom_handles(name_filters=None)
+        if not visual_handles and not collision_handles:
+            print("MJCF: no mesh geoms found to draw.")
+        self._mjcf_visual_handles = visual_handles
+        self._mjcf_collision_handles = collision_handles
+
+    def _set_handles_visible(self, handles, visible: bool) -> None:
+        if not handles:
+            return
+        for handle in handles:
+            try:
+                handle.visible = bool(visible)
+            except Exception:
+                pass
+
+    def _handles_visible(self, handles) -> bool:
+        if not handles:
+            return False
+        for handle in handles:
+            try:
+                if bool(handle.visible):
+                    return True
+            except Exception:
+                # If visibility can't be read, assume it's visible.
+                return True
+        return False
+
+    def _ensure_visibility_gui(self) -> None:
+        if not hasattr(self, "server"):
+            return
+        if getattr(self, "_visibility_gui_added", False):
+            return
+
+        urdf_visible = bool(self.viser_robot.show_visual)
+        if self.object_mesh_handle is not None:
+            try:
+                urdf_visible = urdf_visible or bool(self.object_mesh_handle.visible)
+            except Exception:
+                pass
+        if self.viser_object is not None:
+            urdf_visible = urdf_visible or bool(self.viser_object.show_visual)
+
+        mjcf_visual_visible = self._handles_visible(getattr(self, "_mjcf_visual_handles", []))
+        mjcf_collision_visible = self._handles_visible(getattr(self, "_mjcf_collision_handles", []))
+        contact_constraints_visible = bool(getattr(self, "_contact_constraints_enabled", False))
+        contact_pairs_visible = bool(getattr(self, "_contact_pairs_enabled", False))
+        contact_constraints_all = bool(getattr(self, "_contact_constraints_all", False))
+
+        with self.server.gui.add_folder("Visibility"):
+            show_urdf_cb = self.server.gui.add_checkbox("URDF visuals", initial_value=urdf_visible)
+            show_mjcf_visual_cb = self.server.gui.add_checkbox(
+                "MJCF visuals (scaled)", initial_value=mjcf_visual_visible
+            )
+            show_mjcf_collision_cb = self.server.gui.add_checkbox(
+                "MJCF collision (constraints)", initial_value=mjcf_collision_visible
+            )
+            show_contact_cb = self.server.gui.add_checkbox(
+                "Contact constraints (lines)", initial_value=contact_constraints_visible
+            )
+            show_contact_all_cb = self.server.gui.add_checkbox(
+                "Contact constraints (all objects)", initial_value=contact_constraints_all
+            )
+            show_contact_pairs_cb = self.server.gui.add_checkbox(
+                "Contact pair meshes (debug)", initial_value=contact_pairs_visible
+            )
+
+        @show_urdf_cb.on_update
+        def _(_):
+            self.viser_robot.show_visual = bool(show_urdf_cb.value)
+            if self.viser_object is not None:
+                self.viser_object.show_visual = bool(show_urdf_cb.value)
+            if self.object_mesh_handle is not None:
+                self.object_mesh_handle.visible = bool(show_urdf_cb.value)
+
+        @show_mjcf_visual_cb.on_update
+        def _(_):
+            self._ensure_mjcf_geom_handles()
+            self._set_handles_visible(self._mjcf_visual_handles, bool(show_mjcf_visual_cb.value))
+
+        @show_mjcf_collision_cb.on_update
+        def _(_):
+            self._ensure_mjcf_geom_handles()
+            self._set_handles_visible(self._mjcf_collision_handles, bool(show_mjcf_collision_cb.value))
+
+        @show_contact_cb.on_update
+        def _(_):
+            self._contact_constraints_enabled = bool(show_contact_cb.value)
+            handle = getattr(self, "_contact_line_handle", None)
+            if handle is not None:
+                handle.visible = bool(show_contact_cb.value)
+
+        @show_contact_all_cb.on_update
+        def _(_):
+            self._contact_constraints_all = bool(show_contact_all_cb.value)
+
+        @show_contact_pairs_cb.on_update
+        def _(_):
+            self._contact_pairs_enabled = bool(show_contact_pairs_cb.value)
+
+        self._visibility_gui_added = True
+
+    def _contact_constraints_active(self) -> bool:
+        return bool(getattr(self, "_contact_constraints_enabled", False))
+
+    def _contact_pairs_active(self) -> bool:
+        return bool(getattr(self, "_contact_pairs_enabled", False))
+
+    def _contact_constraints_all_active(self) -> bool:
+        return bool(getattr(self, "_contact_constraints_all", False))
+
+    def _update_contact_constraint_visuals(self, segments: np.ndarray) -> None:
+        if not hasattr(self, "server"):
+            return
+        if segments.size == 0:
+            handle = getattr(self, "_contact_line_handle", None)
+            if handle is not None:
+                handle.visible = False
+            q_handle = getattr(self, "_contact_q_handle", None)
+            if q_handle is not None:
+                q_handle.visible = False
+            c_handle = getattr(self, "_contact_c_handle", None)
+            if c_handle is not None:
+                c_handle.visible = False
+            return
+
+        # Colors: start (q) green, end (c) red
+        colors = np.zeros((segments.shape[0], 2, 3), dtype=np.uint8)
+        colors[:, 0, :] = np.array([0, 255, 0], dtype=np.uint8)
+        colors[:, 1, :] = np.array([255, 0, 0], dtype=np.uint8)
+
+        if not hasattr(self, "_contact_line_handle") or self._contact_line_handle is None:
+            self._contact_line_handle = self.server.scene.add_line_segments(
+                "/contacts/segments",
+                points=segments.astype(np.float32),
+                colors=colors,
+                line_width=2,
+                visible=True,
+            )
+        else:
+            self._contact_line_handle.points = segments.astype(np.float32)
+            self._contact_line_handle.colors = colors
+            self._contact_line_handle.visible = True
+
+        # Draw endpoints as small spheres so red endpoints are visible.
+        q_points = segments[:, 0, :].astype(np.float32)
+        c_points = segments[:, 1, :].astype(np.float32)
+
+        if not hasattr(self, "_contact_point_vertices"):
+            sphere = trimesh.primitives.Sphere(radius=0.015)
+            self._contact_point_vertices = sphere.vertices.astype(np.float32)
+            self._contact_point_faces = sphere.faces.astype(np.int32)
+
+        q_wxyz = np.tile(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (q_points.shape[0], 1))
+        c_wxyz = np.tile(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (c_points.shape[0], 1))
+
+        if not hasattr(self, "_contact_q_handle") or self._contact_q_handle is None:
+            self._contact_q_handle = self.server.scene.add_batched_meshes_simple(
+                "/contacts/q_points",
+                vertices=self._contact_point_vertices,
+                faces=self._contact_point_faces,
+                batched_positions=q_points,
+                batched_wxyzs=q_wxyz,
+                batched_colors=(0, 255, 0),
+                opacity=0.9,
+                visible=True,
+            )
+        else:
+            self._contact_q_handle.batched_positions = q_points
+            self._contact_q_handle.batched_wxyzs = q_wxyz
+            self._contact_q_handle.visible = True
+
+        if not hasattr(self, "_contact_c_handle") or self._contact_c_handle is None:
+            self._contact_c_handle = self.server.scene.add_batched_meshes_simple(
+                "/contacts/c_points",
+                vertices=self._contact_point_vertices,
+                faces=self._contact_point_faces,
+                batched_positions=c_points,
+                batched_wxyzs=c_wxyz,
+                batched_colors=(255, 0, 0),
+                opacity=0.9,
+                visible=True,
+            )
+        else:
+            self._contact_c_handle.batched_positions = c_points
+            self._contact_c_handle.batched_wxyzs = c_wxyz
+            self._contact_c_handle.visible = True
+
+    def _compute_all_object_contact_segments(self) -> np.ndarray:
+        """Return line segments for nearest robot geom per object geom."""
+        m, d = self.robot_model, self.robot_data
+        ngeom = m.ngeom
+        contype, conaff = m.geom_contype, m.geom_conaffinity
+        geom_names = self._geom_names if hasattr(self, "_geom_names") else [
+            mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or "" for g in range(ngeom)
+        ]
+
+        obj_names = getattr(self, "_object_geom_names", None)
+
+        def is_obj_geom(name: str) -> bool:
+            if obj_names is None:
+                return self.object_name in name
+            if name in obj_names:
+                return True
+            return name.startswith(self.object_name)
+
+        def is_robot_geom(name: str, gid: int) -> bool:
+            if is_obj_geom(name):
+                return False
+            if "ground" in name:
+                return False
+            if contype[gid] == 0 and conaff[gid] == 0:
+                return False
+            return True
+
+        object_ids = [g for g in range(ngeom) if is_obj_geom(geom_names[g])]
+        robot_ids = [g for g in range(ngeom) if is_robot_geom(geom_names[g], g)]
+
+        if not object_ids or not robot_ids:
+            return np.zeros((0, 2, 3), dtype=float)
+
+        # Large threshold to force distance computation.
+        big_threshold = 1e6
+        segments: list[np.ndarray] = []
+        fromto = np.zeros(6, dtype=float)
+
+        for og in object_ids:
+            best_dist = np.inf
+            best_fromto = None
+            for rg in robot_ids:
+                fromto[:] = 0.0
+                dist = mujoco.mj_geomDistance(m, d, og, rg, big_threshold, fromto)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_fromto = fromto.copy()
+            if best_fromto is not None:
+                segments.append(best_fromto.reshape(2, 3))
+
+        if not segments:
+            return np.zeros((0, 2, 3), dtype=float)
+        return np.asarray(segments, dtype=float)
 
     def draw_mesh_pair_with_contact(
         self,
@@ -298,6 +679,7 @@ class InteractionMeshRetargeter:
         q_nominal_list=None,
         original=True,
         dest_res_path=None,
+        toe_names: list[str] | None = None,
     ):
         """
         The main function to retarget an entire motion sequence frame by frame.
@@ -329,6 +711,12 @@ class InteractionMeshRetargeter:
         tetrahedra = []
         obj_pts_demo_list = []  # scaled object pts
         obj_pts_list = []  # original size object pts
+
+        foot_link_map = None
+        foot_target_indices = None
+        if toe_names and self.foot_tracking_weight > 0:
+            foot_link_map = self._build_foot_target_links(toe_names)
+            foot_target_indices = {name: self.demo_joints.index(name) for name in foot_link_map}
 
         print(f"\nStarting motion retargeting for {num_frames} frames...")
 
@@ -382,6 +770,13 @@ class InteractionMeshRetargeter:
                 else:
                     w_nominal_tracking = self.w_nominal_tracking_init * np.exp(-i / self.nominal_tracking_tau)
 
+                foot_targets = None
+                if foot_link_map is not None and foot_target_indices is not None:
+                    foot_targets = {
+                        name: human_joint_motions[i, foot_target_indices[name]].copy()
+                        for name in foot_link_map
+                    }
+
                 q, cost = self.iterate(
                     q_locked=q_locked_list[i],
                     q_n=q,
@@ -389,6 +784,8 @@ class InteractionMeshRetargeter:
                     target_laplacian=target_laplacian,
                     adj_list=adj_list,
                     obj_pts_local=object_points_local,
+                    foot_targets=foot_targets,
+                    foot_links=foot_link_map,
                     foot_sticking=foot_sticking_sequences[i],
                     w_nominal_tracking=w_nominal_tracking,
                     q_a_nominal=(q_nominal_list[i, self.q_a_indices] if q_nominal_list is not None else None),
@@ -439,6 +836,7 @@ class InteractionMeshRetargeter:
 
         if self.visualize:
             robot_dof = len(self.viser_robot.get_actuated_joint_limits())
+            object_present = (self.viser_object is not None) or (self.object_mesh_handle is not None)
 
             create_motion_control_sliders(
                 server=self.server,
@@ -447,22 +845,15 @@ class InteractionMeshRetargeter:
                 motion_sequence=np.asarray(retargeted_motions)[1:],
                 robot_dof=robot_dof,
                 viser_object=self.viser_object,
-                object_base_frame=getattr(self, "object_base", None) if self.viser_object else None,
-                contains_object_in_qpos=bool(self.viser_object) and bool(self.has_dynamic_object),
+                object_base_frame=getattr(self, "object_base", None) if object_present else None,
+                contains_object_in_qpos=object_present and bool(self.has_dynamic_object),
                 initial_fps=30,
                 initial_interp_mult=2,
                 loop=False,
             )
 
             # 4) optional: visibility toggle
-            with self.server.gui.add_folder("Visibility"):
-                show_meshes_cb = self.server.gui.add_checkbox("Show meshes", self.viser_robot.show_visual)
-
-                @show_meshes_cb.on_update
-                def _(_):
-                    self.viser_robot.show_visual = show_meshes_cb.value
-                    if self.viser_object is not None:
-                        self.viser_object.show_visual = show_meshes_cb.value
+            self._ensure_visibility_gui()
 
         return (
             np.array(retargeted_motions)[1:],
@@ -470,6 +861,247 @@ class InteractionMeshRetargeter:
             obj_pts_list,
             tetrahedra,
         )
+
+    def retarget_motion_foot_tracking(
+        self,
+        human_joint_motions,
+        object_poses,
+        object_poses_augmented,
+        foot_sticking_sequences,
+        *,
+        toe_names: list[str],
+        q_a_init=None,
+        q_nominal_list=None,
+        original=True,
+        dest_res_path=None,
+    ):
+        """
+        Retarget motion using foot position tracking only (ignore object).
+        """
+        num_frames = human_joint_motions.shape[0]
+        if q_nominal_list is not None:
+            q_locked_list = q_nominal_list
+        else:
+            q_locked_list = np.zeros((num_frames, self.nq))
+            q_locked_list[0, self.q_a_indices] = q_a_init
+
+        if self.has_dynamic_object:
+            q_locked_list[:, -7:] = object_poses_augmented
+
+        foot_link_map = self._build_foot_target_links(toe_names)
+        foot_target_indices = {name: self.demo_joints.index(name) for name in foot_link_map}
+
+        q = np.copy(q_locked_list[0])
+        retargeted_motions = [q]
+
+        print(f"\nStarting foot-tracking retargeting for {num_frames} frames...")
+        with tqdm(range(num_frames)) as pbar:
+            for i in pbar:
+                foot_targets = {
+                    name: human_joint_motions[i, foot_target_indices[name]].copy()
+                    for name in foot_link_map
+                }
+
+                if original:
+                    w_nominal_tracking = self.w_nominal_tracking_init
+                else:
+                    w_nominal_tracking = self.w_nominal_tracking_init * np.exp(-i / self.nominal_tracking_tau)
+
+                q, cost = self.iterate_foot_tracking(
+                    q_locked=q_locked_list[i],
+                    q_n=q,
+                    q_t_last=retargeted_motions[-1],
+                    foot_targets=foot_targets,
+                    foot_links=foot_link_map,
+                    foot_sticking=foot_sticking_sequences[i],
+                    w_nominal_tracking=w_nominal_tracking,
+                    q_a_nominal=(q_nominal_list[i, self.q_a_indices] if q_nominal_list is not None else None),
+                    init_t=i == 0,
+                    n_iter=10 if i == 0 else 5,
+                )
+
+                retargeted_motions.append(q)
+                if self.visualize and self.debug:
+                    self.draw_q(q)
+
+                pbar.set_postfix(cost=cost)
+
+        np.savez(
+            dest_res_path,
+            qpos=np.array(retargeted_motions)[1:],
+            human_joints=human_joint_motions,
+            fps=30,
+            cost=cost,
+        )
+        print("Saving results to path:", dest_res_path)
+
+        if self.visualize:
+            robot_dof = len(self.viser_robot.get_actuated_joint_limits())
+            object_present = (self.viser_object is not None) or (self.object_mesh_handle is not None)
+
+            create_motion_control_sliders(
+                server=self.server,
+                viser_robot=self.viser_robot,
+                robot_base_frame=self.robot_base,
+                motion_sequence=np.asarray(retargeted_motions)[1:],
+                robot_dof=robot_dof,
+                viser_object=self.viser_object,
+                object_base_frame=getattr(self, "object_base", None) if object_present else None,
+                contains_object_in_qpos=object_present and bool(self.has_dynamic_object),
+                initial_fps=30,
+                initial_interp_mult=2,
+                loop=False,
+            )
+
+            self._ensure_visibility_gui()
+
+        return (
+            np.array(retargeted_motions)[1:],
+            [],
+            [],
+            [],
+        )
+
+    def _build_foot_target_links(self, toe_names: list[str]) -> dict[str, str]:
+        foot_links: dict[str, str] = {}
+        for toe_name in toe_names:
+            if toe_name in self.laplacian_match_links:
+                foot_links[toe_name] = self.laplacian_match_links[toe_name]
+        if len(foot_links) < 2:
+            raise ValueError(f"Could not find both foot joints in mapping. toe_names={toe_names}")
+        return foot_links
+
+    def iterate_foot_tracking(
+        self,
+        q_locked: np.ndarray,
+        q_n: np.ndarray,
+        q_t_last: np.ndarray,
+        foot_targets: dict[str, np.ndarray],
+        foot_links: dict[str, str],
+        foot_sticking: tuple[bool, bool],
+        w_nominal_tracking: float = 0.0,
+        q_a_nominal: np.ndarray | None = None,
+        init_t: bool = False,
+        n_iter: int = 10,
+    ):
+        last_cost = np.inf
+        for _ in range(n_iter):
+            q_a_n_last = q_n[self.q_a_indices]
+            q_n, cost = self.solve_single_iteration_foot_tracking(
+                q_locked=q_locked,
+                q_a_n_last=q_a_n_last,
+                q_t_last=q_t_last,
+                foot_targets=foot_targets,
+                foot_links=foot_links,
+                foot_sticking=foot_sticking,
+                q_a_nominal=q_a_nominal,
+                w_nominal_tracking=w_nominal_tracking,
+                init_t=init_t,
+            )
+            if np.isclose(cost, last_cost):
+                break
+            last_cost = cost
+        return q_n, cost
+
+    def solve_single_iteration_foot_tracking(
+        self,
+        q_locked: np.ndarray,
+        q_a_n_last: np.ndarray,
+        q_t_last: np.ndarray,
+        foot_targets: dict[str, np.ndarray],
+        foot_links: dict[str, str],
+        foot_sticking: tuple[bool, bool],
+        w_nominal_tracking: float = 0.0,
+        q_a_nominal: np.ndarray | None = None,
+        init_t: bool = False,
+    ):
+        q = np.copy(q_locked)
+        q[self.q_a_indices] = q_a_n_last
+
+        J_dict, p_dict, _ = self._calc_manipulator_jacobians(q, links=foot_links, obj_frame=False)
+        link_names = list(foot_links.keys())
+        J_stack = np.vstack([J_dict[name] for name in link_names])
+        p_stack = np.concatenate([p_dict[name] for name in link_names])
+        target_stack = np.concatenate([foot_targets[name] for name in link_names])
+        err = target_stack - p_stack
+
+        dqa = cp.Variable(len(self.q_a_indices), name="dqa")
+        obj_terms = []
+        obj_terms.append(self.foot_tracking_weight * cp.sum_squares(J_stack @ dqa - err))
+
+        if (w_nominal_tracking > 0) and (q_a_nominal is not None):
+            idx = np.array(self.track_nominal_indices, dtype=int)
+            if idx.size > 0:
+                z = dqa[idx] - (q_a_nominal[idx] - q_a_n_last[idx])
+                obj_terms.append(w_nominal_tracking * cp.sum_squares(z))
+
+        Qd = np.asarray(self.Q_diag, dtype=float).reshape(-1)
+        obj_terms.append(cp.sum_squares(cp.multiply(np.sqrt(Qd), dqa + q_a_n_last)))
+
+        dqa_smooth = q_t_last[self.q_a_indices] - q_a_n_last
+        if np.isscalar(self.smooth_weight):
+            obj_terms.append(self.smooth_weight * cp.sum_squares(dqa - dqa_smooth))
+        else:
+            Wsmooth = np.asarray(self.smooth_weight, dtype=float)
+            if Wsmooth.ndim == 1:
+                obj_terms.append(cp.sum_squares(cp.multiply(np.sqrt(Wsmooth), dqa - dqa_smooth)))
+            else:
+                obj_terms.append(cp.quad_form(dqa - dqa_smooth, Wsmooth))
+
+        constraints = []
+
+        if (self.q_a_init_idx < 12) and self.activate_foot_sticking:
+            J_WF_dict, p_WF_dict, _ = self._calc_manipulator_jacobians(q, links=self.foot_links, obj_frame=False)
+            _, p_WF_t_last_dict, _ = self._calc_manipulator_jacobians(q_t_last, links=self.foot_links, obj_frame=False)
+            left_key = right_key = None
+            for key in foot_sticking:
+                if key.lower().startswith("l"):
+                    left_key = key
+                elif key.lower().startswith("r"):
+                    right_key = key
+            if left_key is None or right_key is None:
+                raise ValueError("foot_sticking must include one left* and one right* key")
+
+            for key, J_WF in J_WF_dict.items():
+                apply_left = ("left" in key) and foot_sticking[left_key]
+                apply_right = ("right" in key) and foot_sticking[right_key]
+                if apply_left or apply_right:
+                    p_lb = p_WF_t_last_dict[key] - p_WF_dict[key] - self.foot_sticking_tolerance
+                    p_ub = p_lb + 2 * self.foot_sticking_tolerance
+
+                    Jxy = J_WF[:2, self.q_a_indices]
+                    constraints += [
+                        Jxy @ dqa >= p_lb[:2],
+                        Jxy @ dqa <= p_ub[:2],
+                    ]
+
+        if self.activate_joint_limits:
+            constraints += [
+                dqa >= (self.q_a_lb - q_a_n_last),
+                dqa <= (self.q_a_ub - q_a_n_last),
+            ]
+
+        constraints += [cp.SOC(self.step_size, dqa)]
+
+        problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
+        solver_kwargs = {"verbose": False}
+        problem.solve(solver=cp.CLARABEL, **solver_kwargs)
+        if (problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE)) and init_t:
+            constraints = [c for c in constraints if not isinstance(c, cp.constraints.second_order.SOC)]
+            problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
+            problem.solve(solver=cp.CLARABEL, **solver_kwargs)
+
+        if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+            raise RuntimeError(f"CVXPY solve failed: {problem.status}")
+
+        dqa_star = dqa.value
+        cost = problem.value
+
+        q_star = np.copy(q)
+        q_star[self.q_a_indices] = dqa_star + q_a_n_last
+        q_star[3:7] /= np.linalg.norm(q_star[3:7]) + 1e-12
+
+        return q_star, cost
 
     def solve_single_iteration(
         self,
@@ -479,6 +1111,8 @@ class InteractionMeshRetargeter:
         target_laplacian: np.ndarray,
         adj_list: list[list[int]],
         obj_pts_local: np.ndarray,
+        foot_targets: dict[str, np.ndarray] | None,
+        foot_links: dict[str, str] | None,
         foot_sticking: tuple[bool, bool],
         w_nominal_tracking: float = 0.0,
         q_a_nominal: np.ndarray | None = None,
@@ -594,6 +1228,15 @@ class InteractionMeshRetargeter:
 
         obj_terms.append(cp.sum_squares(cp.multiply(sqrt_w3, lap_var - target_lap_vec)))
 
+        if (foot_targets is not None) and (foot_links is not None) and (self.foot_tracking_weight > 0):
+            J_F_dict, p_F_dict, _ = self._calc_manipulator_jacobians(q, links=foot_links, obj_frame=False)
+            link_names = list(foot_links.keys())
+            J_stack = np.vstack([J_F_dict[name] for name in link_names])
+            p_stack = np.concatenate([p_F_dict[name] for name in link_names])
+            target_stack = np.concatenate([foot_targets[name] for name in link_names])
+            err = target_stack - p_stack
+            obj_terms.append(self.foot_tracking_weight * cp.sum_squares(J_stack @ dqa - err))
+
         # nominal tracking for selected indices
         if (w_nominal_tracking > 0) and (q_a_nominal is not None):
             idx = np.array(self.track_nominal_indices, dtype=int)
@@ -647,6 +1290,8 @@ class InteractionMeshRetargeter:
         target_laplacian: np.ndarray,
         adj_list: list[list[int]],
         obj_pts_local: np.ndarray,
+        foot_targets: dict[str, np.ndarray] | None,
+        foot_links: dict[str, str] | None,
         foot_sticking: tuple[bool, bool],
         w_nominal_tracking: float = 0.0,
         q_a_nominal: np.ndarray | None = None,
@@ -664,6 +1309,8 @@ class InteractionMeshRetargeter:
                 target_laplacian=target_laplacian,
                 adj_list=adj_list,
                 obj_pts_local=obj_pts_local,
+                foot_targets=foot_targets,
+                foot_links=foot_links,
                 foot_sticking=foot_sticking,
                 q_a_nominal=q_a_nominal,
                 w_nominal_tracking=w_nominal_tracking,
@@ -676,30 +1323,33 @@ class InteractionMeshRetargeter:
 
     def draw_q(self, q: np.ndarray):
         """Draw a single robot configuration."""
-        # Update robot joint configurations
-        robot_joint_positions = q[7 : 7 + self.task_constants.ROBOT_DOF]
-        self.viser_robot.update_cfg(robot_joint_positions)
+        with self.server.atomic():
+            # Update robot joint configurations
+            robot_joint_positions = q[7 : 7 + self.task_constants.ROBOT_DOF]
+            self.viser_robot.update_cfg(robot_joint_positions)
 
-        # Update robot base pose using set_transform
-        robot_quat = q[3:7]  # Base orientation
-        robot_pos = q[:3]  # Base position
+            # Update robot base pose using set_transform
+            robot_quat = q[3:7]  # Base orientation
+            robot_pos = q[:3]  # Base position
 
-        # Update robot base frame
-        self.robot_base.position = robot_pos
-        self.robot_base.wxyz = robot_quat  # Assuming quaternion is in wxyz order
+            # Update robot base frame
+            self.robot_base.position = robot_pos
+            self.robot_base.wxyz = robot_quat  # Assuming quaternion is in wxyz order
 
-        # Update object pose if it exists
-        if hasattr(self, "viser_object") and self.viser_object is not None:
-            if self.has_dynamic_object:
-                object_quat = q[-4:]
-                object_pos = q[-7:-4]
-            else:
-                object_quat = np.asarray([1, 0, 0, 0])
-                object_pos = np.zeros(3)
+            # Update object pose if it exists
+            if hasattr(self, "object_base") and (
+                self.viser_object is not None or self.object_mesh_handle is not None
+            ):
+                if self.has_dynamic_object:
+                    object_quat = q[-4:]
+                    object_pos = q[-7:-4]
+                else:
+                    object_quat = np.asarray([1, 0, 0, 0])
+                    object_pos = np.zeros(3)
 
-            # Update object base frame
-            self.object_base.position = object_pos
-            self.object_base.wxyz = object_quat  # Assuming quaternion is in wxyz order
+                # Update object base frame
+                self.object_base.position = object_pos
+                self.object_base.wxyz = object_quat  # Assuming quaternion is in wxyz order
 
     def draw_keypoints(self, p, name="keypoint", rgba=(0, 0, 1, 1)):
         """Draw keypoints in visualization."""
@@ -842,7 +1492,6 @@ class InteractionMeshRetargeter:
     def _prefilter_pairs_with_mj_collision(self, threshold: float):
         m, d = self.robot_model, self.robot_data
         ngeom = m.ngeom
-
         self._geom_names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or "" for g in range(ngeom)]
 
         if not hasattr(self, "_saved_margins"):
@@ -851,10 +1500,10 @@ class InteractionMeshRetargeter:
 
         m.geom_margin[:] = threshold
 
-        # Run collision. This runs broad→narrow and fills d.contact.
+        # Run collision. This runs broad->narrow and fills d.contact.
         mujoco.mj_collision(m, d)
 
-        # Collect unique candidate pairs that involve at least one masked geom
+        # Collect unique candidate pairs
         candidates = set()
         for k in range(d.ncon):
             c = d.contact[k]
@@ -885,20 +1534,44 @@ class InteractionMeshRetargeter:
         # 2) Precise distance only on candidates (early-exit at threshold)
         contype, conaff = m.geom_contype, m.geom_conaffinity
 
+        contact_segments = None
+        collect_active_segments = False
+        if self.visualize and self._contact_constraints_active():
+            if self._contact_constraints_all_active():
+                contact_segments = self._compute_all_object_contact_segments().tolist()
+            else:
+                contact_segments = []
+                collect_active_segments = True
+
+        obj_names = getattr(self, "_object_geom_names", None)
+
+        def is_obj_geom(name: str) -> bool:
+            if obj_names is None:
+                return self.object_name in name
+            if name in obj_names:
+                return True
+            # MuJoCo may auto-rename geoms with suffixes; allow prefix match.
+            return name.startswith(self.object_name)
+
         def masks_ok(g1, g2):
             if contype[g1] == 0 and conaff[g1] == 0:
                 return False
             if contype[g2] == 0 and conaff[g2] == 0:
                 return False
-            if self.object_name in self._geom_names[g1] and "ground" in self._geom_names[g2]:
+            is_obj_g1 = is_obj_geom(self._geom_names[g1])
+            is_obj_g2 = is_obj_geom(self._geom_names[g2])
+            is_ground_g1 = "ground" in self._geom_names[g1]
+            is_ground_g2 = "ground" in self._geom_names[g2]
+
+            if is_obj_g1 and is_ground_g2:
                 return False
-            if "ground" in self._geom_names[g1] and self.object_name in self._geom_names[g2]:
+            if is_ground_g1 and is_obj_g2:
                 return False
             return (
-                self.object_name in self._geom_names[g1]
-                or self.object_name in self._geom_names[g2]
-                or "ground" in self._geom_names[g1]
-                or "ground" in self._geom_names[g2]
+                is_obj_g1
+                or is_obj_g2
+                or is_ground_g1
+                or is_ground_g2
             )
 
         for g1, g2 in candidates:
@@ -915,9 +1588,26 @@ class InteractionMeshRetargeter:
                 Js[(g1, g2)] = J_rel
                 phis[(g1, g2)] = float(dist)
 
-                # For debug
-                # self.draw_mesh_pair_with_contact(self.robot_model, self.robot_data, g1, g2,   \
-                #     self._geom_names[g1], self._geom_names[g2], fromto=fromto)
+                if collect_active_segments:
+                    contact_segments.append(fromto.copy().reshape(2, 3))
+
+                # For debug: draw pair meshes if enabled
+                if self.debug and self._contact_pairs_active():
+                    self.draw_mesh_pair_with_contact(
+                        self.robot_model,
+                        self.robot_data,
+                        g1,
+                        g2,
+                        self._geom_names[g1],
+                        self._geom_names[g2],
+                        fromto=fromto,
+                    )
+
+        if contact_segments is not None:
+            if len(contact_segments) == 0:
+                self._update_contact_constraint_visuals(np.zeros((0, 2, 3), dtype=float))
+            else:
+                self._update_contact_constraint_visuals(np.asarray(contact_segments, dtype=float))
 
         return Js, phis
 
@@ -935,8 +1625,8 @@ class InteractionMeshRetargeter:
     def _build_transform_qdot_to_qvel_fast(self, use_world_omega=True):
         """
         Return T(q) (nv x nq) such that v = T(q) @ qdot.
-        - Free root: qpos=[x,y,z, qw,qx,qy,qz], qvel=[vx,vy,vz, ωx,ωy,ωz]
-        where ω and v are WORLD-expressed in MuJoCo.
+        - Free root: qpos=[x,y,z, qw,qx,qy,qz], qvel=[vx,vy,vz, omega_x,omega_y,omega_z]
+        where omega and v are WORLD-expressed in MuJoCo.
         - 23 hinge joints: v = qdot.
 
         If use_world_omega=False, uses BODY-omega mapping (for debugging).
@@ -953,7 +1643,7 @@ class InteractionMeshRetargeter:
         # Linear block: v_lin = xyz_dot
         T[dadr : dadr + 3, qadr : qadr + 3] = np.eye(3)
 
-        # Angular block: ω_* = 2 * E_*(q) * quat_dot
+        # Angular block: omega_* = 2 * E_*(q) * quat_dot
         w, x, y, z = self.robot_data.qpos[qadr + 3 : qadr + 7]
 
         def get_e_world(qw, qx, qy, qz):
@@ -984,9 +1674,9 @@ class InteractionMeshRetargeter:
 
         qw, qx, qy, qz = self.robot_data.qpos[qadr1 + 3 : qadr1 + 7]
         E1 = 2.0 * E_fn(qw, qx, qy, qz)
-        # linear-first: v_W = rdot, ω_W = 2E(q) * quat_dot
+        # linear-first: v_W = rdot, omega_W = 2E(q) * quat_dot
         T[dadr1 + 0 : dadr1 + 3, qadr1 + 0 : qadr1 + 3] = np.eye(3)  # v block
-        T[dadr1 + 3 : dadr1 + 6, qadr1 + 3 : qadr1 + 7] = E1  # ω block
+        T[dadr1 + 3 : dadr1 + 6, qadr1 + 3 : qadr1 + 7] = E1  # omega block
 
         if self.has_dynamic_object:
             # ---- FREE joint #2 (object): assume it's the last FREE joint; fill its 6x7 block ----
@@ -1002,7 +1692,7 @@ class InteractionMeshRetargeter:
             qw, qx, qy, qz = self.robot_data.qpos[qadr2 + 3 : qadr2 + 7]
             E2 = 2.0 * E_fn(qw, qx, qy, qz)
             T[dadr2 + 0 : dadr2 + 3, qadr2 + 0 : qadr2 + 3] = np.eye(3)  # v block
-            T[dadr2 + 3 : dadr2 + 6, qadr2 + 3 : qadr2 + 7] = E2  # ω block
+            T[dadr2 + 3 : dadr2 + 6, qadr2 + 3 : qadr2 + 7] = E2  # omega block
 
         # ---- remaining hinge/slide joints: v = qdot ----
         for j in range(1, self.robot_model.njnt):
@@ -1024,6 +1714,7 @@ class InteractionMeshRetargeter:
         Fast analytic version: J_qdot = J_v @ T(q)
         """
 
+        body_idx = int(np.asarray(body_idx).reshape(-1)[0].item())
         p_body = np.asarray(p_body, dtype=float).reshape(3)
 
         # 1) Make sure kinematics are current once
@@ -1041,7 +1732,7 @@ class InteractionMeshRetargeter:
         # 3) J_v: translational Jacobian wrt generalized velocities (3 x nv)
         Jp = np.zeros((3, self.robot_model.nv), dtype=np.float64, order="C")
         Jr = np.zeros((3, self.robot_model.nv), dtype=np.float64, order="C")
-        mujoco.mj_jac(self.robot_model, self.robot_data, Jp, Jr, p_W, int(body_idx))  # Jp = J_v
+        mujoco.mj_jac(self.robot_model, self.robot_data, Jp, Jr, p_W, body_idx)  # Jp = J_v
 
         T = self._build_transform_qdot_to_qvel_fast()
 

@@ -209,7 +209,7 @@ class MotionLoader:
 
     def _slerp(self, q0: torch.Tensor, q1: torch.Tensor, t: torch.Tensor, eps: float = 1e-8):
         """
-        q0, q1: (..., 4) unit quaternions (wxyz or xyzw—just be consistent between inputs).
+        q0, q1: (..., 4) unit quaternions (wxyz or xyzw - just be consistent between inputs).
         t:      (...)  blend in [0,1] that broadcasts against the leading dims of q0/q1.
         """
         q0 = F.normalize(q0, dim=-1)
@@ -386,6 +386,7 @@ def run_simulator(joint_names: list[str]):
             raise ValueError("object_name cannot be None when it's not 'ground' or 'multi_boxes'")
         robot_xml_path = robot_model_path.replace(".urdf", "_w_" + object_name + ".xml")
 
+    robot_xml_path = '/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/models/g1/g1_29dof.xml'
     robot = mujoco.MjModel.from_xml_path(robot_xml_path)
     robot_data = mujoco.MjData(robot)
     print("Loading robot model from: ", robot_xml_path)
@@ -417,6 +418,8 @@ def run_simulator(joint_names: list[str]):
     if has_dynamic_object:
         log = {
             "fps": [args_cli.output_fps],
+            "qpos": [],
+            "qvel": [],
             "joint_pos": [],
             "joint_vel": [],
             "body_pos_w": [],
@@ -431,6 +434,8 @@ def run_simulator(joint_names: list[str]):
     else:
         log = {
             "fps": [args_cli.output_fps],
+            "qpos": [],
+            "qvel": [],
             "joint_pos": [],
             "joint_vel": [],
             "body_pos_w": [],
@@ -514,6 +519,8 @@ def run_simulator(joint_names: list[str]):
         time.sleep(max(0, motion.output_dt - (end_time - start_time)))
 
         if not file_saved:
+            log["qpos"].append(robot_data.qpos.copy())
+            log["qvel"].append(robot_data.qvel.copy())
             lin_vel_w, ang_vel_w = world_body_velocities(robot, robot_data)
             if has_dynamic_object:
                 log["object_pos_w"].append(robot_data.qpos[-7:-4].copy())
@@ -536,6 +543,8 @@ def run_simulator(joint_names: list[str]):
         if reset_flag and not file_saved:
             file_saved = True
             for k in (
+                "qpos",
+                "qvel",
                 "joint_pos",
                 "joint_vel",
                 "body_pos_w",
