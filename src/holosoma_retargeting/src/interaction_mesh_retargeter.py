@@ -894,26 +894,48 @@ class InteractionMeshRetargeter:
                 return False
             if "ground" in self._geom_names[g1] and self.object_name in self._geom_names[g2]:
                 return False
+            def is_obj(name: str) -> bool:
+                if self.object_name in name:
+                    return True
+                # Supplement: treat terrain pieces named "part_*" as object geoms.
+                return name.startswith("part_")
+
             return (
-                self.object_name in self._geom_names[g1]
-                or self.object_name in self._geom_names[g2]
+                is_obj(self._geom_names[g1])
+                or is_obj(self._geom_names[g2])
                 or "ground" in self._geom_names[g1]
                 or "ground" in self._geom_names[g2]
             )
 
-        for g1, g2 in candidates:
-            # Optional: keep your own filters here (e.g., skip object-ground, only keep interaction with object/ground)
-            if not masks_ok(g1, g2):
-                continue
+        def _as_int_list(val):
+            arr = np.asarray(val)
+            if arr.shape == ():
+                return [int(arr)]
+            return [int(v) for v in arr.reshape(-1)]
 
-            fromto[:] = 0.0
-            dist = mujoco.mj_geomDistance(m, d, g1, g2, threshold, fromto)
-            if dist <= threshold:
-                J_rel = self._compute_jacobian_for_contact_relative(
-                    m.geom(g1), m.geom(g2), self._geom_names[g1], self._geom_names[g2], fromto, dist
-                )
-                Js[(g1, g2)] = J_rel
-                phis[(g1, g2)] = float(dist)
+        for g1_raw, g2_raw in candidates:
+            g1_list = _as_int_list(g1_raw)
+            g2_list = _as_int_list(g2_raw)
+
+            # If both are arrays from a paired query (e.g., np.where), preserve pairing.
+            if len(g1_list) == len(g2_list) and len(g1_list) > 1:
+                pair_iter = zip(g1_list, g2_list)
+            else:
+                pair_iter = ((g1, g2) for g1 in g1_list for g2 in g2_list)
+
+            for g1, g2 in pair_iter:
+                # Optional: keep your own filters here (e.g., skip object-ground, only keep interaction with object/ground)
+                if not masks_ok(g1, g2):
+                    continue
+
+                fromto[:] = 0.0
+                dist = mujoco.mj_geomDistance(m, d, g1, g2, threshold, fromto)
+                if dist <= threshold:
+                    J_rel = self._compute_jacobian_for_contact_relative(
+                        m.geom(g1), m.geom(g2), self._geom_names[g1], self._geom_names[g2], fromto, dist
+                    )
+                    Js[(g1, g2)] = J_rel
+                    phis[(g1, g2)] = float(dist)
 
                 # For debug
                 # self.draw_mesh_pair_with_contact(self.robot_model, self.robot_data, g1, g2,   \
