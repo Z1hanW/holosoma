@@ -21,7 +21,7 @@ src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))
 
 # Import with type ignore for mypy compatibility
-from mujoco_utils import _world_mesh_from_geom, _world_hull_from_geom
+from mujoco_utils import _mesh_convex_hull_local_vf, _world_mesh_from_geom
 
 from utils import (  # type: ignore[import-not-found,no-redef]  # noqa: E402
     calculate_laplacian_coordinates,
@@ -163,6 +163,11 @@ class InteractionMeshRetargeter:
         self.w_nominal_tracking_init = w_nominal_tracking_init
         self.nominal_tracking_tau = nominal_tracking_tau
         self.track_nominal_indices = task_constants.NOMINAL_TRACKING_INDICES
+        self._show_collision_meshes = False
+        self._show_collision_all = False
+        self._collision_handles = {}
+        self._collision_local_cache = {}
+        self._geom_names_cache = None
 
     def _setup_visualization(self):
         """Setup Viser visualization components."""
@@ -248,6 +253,143 @@ class InteractionMeshRetargeter:
             color=tuple(int(c) for c in color),
             opacity=float(opacity),
         )
+
+    def _ensure_geom_names_cache(self):
+        if self._geom_names_cache is None:
+            self._geom_names_cache = [
+                mujoco.mj_id2name(self.robot_model, mujoco.mjtObj.mjOBJ_GEOM, g) or ""
+                for g in range(self.robot_model.ngeom)
+            ]
+
+    def _geom_name_cached(self, geom_id: int) -> str:
+        self._ensure_geom_names_cache()
+        return self._geom_names_cache[geom_id]
+
+    def _geom_is_collision(self, geom_id: int) -> bool:
+        return bool(self.robot_model.geom_contype[geom_id] or self.robot_model.geom_conaffinity[geom_id])
+
+    def _geom_is_object_or_ground(self, geom_id: int) -> bool:
+        name = self._geom_name_cached(geom_id)
+        if "ground" in name:
+            return True
+        if self.object_name and self.object_name in name:
+            return True
+        return name.startswith("part_")
+
+    def _collision_geom_color(self, geom_id: int) -> tuple[int, int, int]:
+        name = self._geom_name_cached(geom_id)
+        if "ground" in name:
+            return (110, 110, 110)
+        if self.object_name and (self.object_name in name or name.startswith("part_")):
+            return (255, 80, 80)
+        return (60, 150, 255)
+
+    def _collision_local_mesh_for_geom(self, geom_id: int):
+        gtype = int(self.robot_model.geom_type[geom_id])
+        size = np.asarray(self.robot_model.geom_size[geom_id], dtype=float)
+
+        if gtype == mujoco.mjtGeom.mjGEOM_MESH:
+            V_local, F = _mesh_convex_hull_local_vf(self.robot_model, geom_id)
+            if V_local is None or F is None:
+                return None, None
+            return V_local, F
+
+        if gtype == mujoco.mjtGeom.mjGEOM_BOX:
+            mesh = trimesh.creation.box(extents=2.0 * size)
+        elif gtype == mujoco.mjtGeom.mjGEOM_SPHERE:
+            mesh = trimesh.creation.icosphere(subdivisions=2, radius=float(size[0]))
+        elif gtype == mujoco.mjtGeom.mjGEOM_CAPSULE:
+            mesh = trimesh.creation.capsule(height=2.0 * float(size[1]), radius=float(size[0]))
+        elif gtype == mujoco.mjtGeom.mjGEOM_CYLINDER:
+            mesh = trimesh.creation.cylinder(radius=float(size[0]), height=2.0 * float(size[1]))
+        elif gtype == mujoco.mjtGeom.mjGEOM_ELLIPSOID:
+            base = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
+            return base.vertices * size, base.faces
+        elif gtype == mujoco.mjtGeom.mjGEOM_PLANE:
+            sx = float(size[0]) if size[0] > 0 else 5.0
+            sy = float(size[1]) if size[1] > 0 else 5.0
+            thickness = max(1e-3, 0.002 * max(sx, sy))
+            mesh = trimesh.creation.box(extents=(2.0 * sx, 2.0 * sy, thickness))
+        else:
+            return None, None
+
+        return mesh.vertices, mesh.faces
+
+    def _ensure_collision_cache(self):
+        if self._collision_local_cache:
+            return
+        for geom_id in range(self.robot_model.ngeom):
+            if not self._geom_is_collision(geom_id):
+                self._collision_local_cache[geom_id] = None
+                continue
+            V_local, F = self._collision_local_mesh_for_geom(geom_id)
+            if V_local is None or F is None:
+                self._collision_local_cache[geom_id] = None
+            else:
+                self._collision_local_cache[geom_id] = (
+                    np.asarray(V_local, dtype=np.float32),
+                    np.asarray(F, dtype=np.int32),
+                )
+
+    def _clear_collision_meshes(self):
+        if not hasattr(self, "server"):
+            return
+        for handle in self._collision_handles.values():
+            try:
+                handle.remove()
+            except Exception:
+                pass
+        self._collision_handles = {}
+
+    def _refresh_collision_meshes(self, q: np.ndarray | None, show_all: bool):
+        if not hasattr(self, "server"):
+            return
+
+        self._ensure_collision_cache()
+        if q is not None:
+            self.robot_data.qpos[:] = q
+            mujoco.mj_forward(self.robot_model, self.robot_data)
+
+        self._clear_collision_meshes()
+
+        for geom_id in range(self.robot_model.ngeom):
+            if not self._geom_is_collision(geom_id):
+                continue
+            if not show_all and not self._geom_is_object_or_ground(geom_id):
+                continue
+            cached = self._collision_local_cache.get(geom_id)
+            if cached is None:
+                continue
+            V_local, F = cached
+            R = self.robot_data.geom_xmat[geom_id].reshape(3, 3)
+            t = self.robot_data.geom_xpos[geom_id].reshape(3)
+            V_world = V_local @ R.T + t
+            geom_name = self._geom_name_cached(geom_id) or f"geom_{geom_id}"
+            safe_name = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in geom_name)
+            path = f"/world/mj_collision/{geom_id}_{safe_name}"
+            handle = self.server.scene.add_mesh_simple(
+                path,
+                vertices=V_world.astype(np.float32),
+                faces=F,
+                position=(0.0, 0.0, 0.0),
+                color=self._collision_geom_color(geom_id),
+                opacity=0.25,
+            )
+            self._collision_handles[geom_id] = handle
+
+    def _set_collision_visualization(self, show: bool, show_all: bool):
+        self._show_collision_meshes = bool(show)
+        self._show_collision_all = bool(show_all)
+        if not show:
+            self._clear_collision_meshes()
+            return
+        q = getattr(self, "_last_q", None)
+        self._refresh_collision_meshes(q, show_all=self._show_collision_all)
+
+    def _on_viser_frame_update(self, q: np.ndarray):
+        self._last_q = np.asarray(q, dtype=float).copy()
+        if self._show_collision_meshes:
+            self._refresh_collision_meshes(self._last_q, show_all=self._show_collision_all)
 
     def draw_mesh_pair_with_contact(
         self,
@@ -452,6 +594,7 @@ class InteractionMeshRetargeter:
                 initial_fps=30,
                 initial_interp_mult=2,
                 loop=False,
+                on_update=self._on_viser_frame_update,
             )
 
             # 4) optional: visibility toggle
@@ -463,6 +606,17 @@ class InteractionMeshRetargeter:
                     self.viser_robot.show_visual = show_meshes_cb.value
                     if self.viser_object is not None:
                         self.viser_object.show_visual = show_meshes_cb.value
+            with self.server.gui.add_folder("Collision"):
+                show_collision_cb = self.server.gui.add_checkbox("Show MuJoCo collision", False)
+                show_collision_all_cb = self.server.gui.add_checkbox("Include robot geoms", False)
+
+                @show_collision_cb.on_update
+                def _(_):
+                    self._set_collision_visualization(show_collision_cb.value, show_collision_all_cb.value)
+
+                @show_collision_all_cb.on_update
+                def _(_):
+                    self._set_collision_visualization(show_collision_cb.value, show_collision_all_cb.value)
 
         return (
             np.array(retargeted_motions)[1:],
@@ -676,6 +830,7 @@ class InteractionMeshRetargeter:
 
     def draw_q(self, q: np.ndarray):
         """Draw a single robot configuration."""
+        self._last_q = np.asarray(q, dtype=float).copy()
         # Update robot joint configurations
         robot_joint_positions = q[7 : 7 + self.task_constants.ROBOT_DOF]
         self.viser_robot.update_cfg(robot_joint_positions)
@@ -700,6 +855,8 @@ class InteractionMeshRetargeter:
             # Update object base frame
             self.object_base.position = object_pos
             self.object_base.wxyz = object_quat  # Assuming quaternion is in wxyz order
+        if self._show_collision_meshes:
+            self._refresh_collision_meshes(self._last_q, show_all=self._show_collision_all)
 
     def draw_keypoints(self, p, name="keypoint", rgba=(0, 0, 1, 1)):
         """Draw keypoints in visualization."""

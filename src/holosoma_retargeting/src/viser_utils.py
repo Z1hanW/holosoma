@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import List, Tuple
+from typing import Callable, List, Tuple
 
 import numpy as np
 import viser  # type: ignore[import-not-found]
@@ -23,6 +23,7 @@ def create_motion_control_sliders(
     initial_fps: int = 30,
     initial_interp_mult: int = 2,
     loop: bool = True,
+    on_update: Callable[[np.ndarray], None] | None = None,
 ) -> Tuple[List[viser.GuiInputHandle[int]], List[float]]:
     """
     Create a slider + play/pause controls and a background player thread with smooth, slerp-based interpolation.
@@ -46,6 +47,7 @@ def create_motion_control_sliders(
         initial_fps: base FPS for playback.
         initial_interp_mult: visual upsampling multiplier.
         loop: whether to wrap around at the end.
+        on_update: optional callback invoked after each frame is applied.
 
     Returns:
         (controls, initial_values) — currently returns the [frame_slider] and [0.0]
@@ -152,6 +154,8 @@ def create_motion_control_sliders(
             # fallback static pose
             object_base_frame.position = np.zeros(3)
             object_base_frame.wxyz = np.array([1.0, 0.0, 0.0, 0.0])
+        if on_update is not None:
+            on_update(q)
 
     def _apply_discrete_frame(i: int) -> None:
         i = int(np.clip(i, 0, n_frames - 1))
