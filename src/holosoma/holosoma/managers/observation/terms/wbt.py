@@ -173,6 +173,12 @@ def motion_future_target_poses(
 def torso_xy_rel(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Local-frame XY position from robot torso to motion target torso."""
     motion_command = _get_motion_command_and_assert_type(env)
+    if getattr(motion_command, "manual_control_enabled", False):
+        manual_xy = getattr(motion_command, "manual_xy_rel", None)
+        if manual_xy is not None:
+            if manual_xy.device != motion_command.robot_ref_pos_w.device:
+                manual_xy = manual_xy.to(motion_command.robot_ref_pos_w.device)
+            return manual_xy
     rel_pos_w = motion_command.ref_pos_w - motion_command.robot_ref_pos_w
     heading_inv = calc_heading_quat_inv(motion_command.robot_ref_quat_w, w_last=True)
     rel_pos_b = quat_apply(heading_inv, rel_pos_w, w_last=True)
@@ -182,6 +188,12 @@ def torso_xy_rel(env: WholeBodyTrackingManager) -> torch.Tensor:
 def torso_yaw_rel(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Local-frame yaw from robot torso to motion target torso."""
     motion_command = _get_motion_command_and_assert_type(env)
+    if getattr(motion_command, "manual_control_enabled", False):
+        manual_yaw = getattr(motion_command, "manual_yaw_rel", None)
+        if manual_yaw is not None:
+            if manual_yaw.device != motion_command.robot_ref_pos_w.device:
+                manual_yaw = manual_yaw.to(motion_command.robot_ref_pos_w.device)
+            return manual_yaw
     target_heading = calc_heading(motion_command.ref_quat_w)
     robot_heading = calc_heading(motion_command.robot_ref_quat_w)
     heading_error = normalize_angle(target_heading - robot_heading)

@@ -765,6 +765,9 @@ class MotionCommand(CommandTermBase):
         self._terrain_row_stride: float = 0.0
         self._terrain_row_count: int = 0
         self._forced_clip_idx: int | None = None
+        self.manual_control_enabled = False
+        self.manual_xy_rel: torch.Tensor | None = None
+        self.manual_yaw_rel: torch.Tensor | None = None
 
     def set_forced_clip(self, clip_idx: int | None) -> None:
         """Force a specific clip index for resets (None clears the override)."""
@@ -778,6 +781,9 @@ class MotionCommand(CommandTermBase):
     def setup(self) -> None:
         self.num_envs = self._env.num_envs
         self.device = self._env.device
+        self.manual_control_enabled = False
+        self.manual_xy_rel = torch.zeros((self.num_envs, 2), device=self.device, dtype=torch.float32)
+        self.manual_yaw_rel = torch.zeros((self.num_envs, 1), device=self.device, dtype=torch.float32)
 
         init_state = self._env.robot_config.init_state
         self._init_root_pos = torch.tensor(init_state.pos, dtype=torch.float32, device=self.device)

@@ -409,6 +409,15 @@ class ViserLiveViewer:
         self._contact_force_scale_slider = None
         self._contact_force_threshold_slider = None
         self._contact_force_handle = None
+        self._manual_control_cb = None
+        self._manual_forward_cb = None
+        self._manual_back_cb = None
+        self._manual_left_cb = None
+        self._manual_right_cb = None
+        self._manual_yaw_left_cb = None
+        self._manual_yaw_right_cb = None
+        self._manual_lin_scale_slider = None
+        self._manual_yaw_scale_slider = None
         self._clip_start_slider = None
         self._clip_lock_cb = None
         self._perception_enabled = False
@@ -596,11 +605,44 @@ class ViserLiveViewer:
     def apply_pending_controls(self) -> None:
         if not self._enabled:
             return
+        self._update_manual_root_command()
         if self._reset_requested:
             self._reset_requested = False
             self._reset_env()
         if self._pending_clip_idx is not None or self._pending_clip_start is not None:
             self._apply_clip_selection()
+
+    def _update_manual_root_command(self) -> None:
+        if self._manual_control_cb is None:
+            return
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            return
+        enabled = bool(self._manual_control_cb.value)
+        motion_cmd.manual_control_enabled = enabled
+        if not enabled:
+            return
+        device = self._env.device
+        lin_scale = float(self._manual_lin_scale_slider.value) if self._manual_lin_scale_slider is not None else 0.5
+        yaw_scale = float(self._manual_yaw_scale_slider.value) if self._manual_yaw_scale_slider is not None else 0.3
+        forward = 1.0 if self._manual_forward_cb is not None and bool(self._manual_forward_cb.value) else 0.0
+        back = 1.0 if self._manual_back_cb is not None and bool(self._manual_back_cb.value) else 0.0
+        left = 1.0 if self._manual_left_cb is not None and bool(self._manual_left_cb.value) else 0.0
+        right = 1.0 if self._manual_right_cb is not None and bool(self._manual_right_cb.value) else 0.0
+        yaw_left = 1.0 if self._manual_yaw_left_cb is not None and bool(self._manual_yaw_left_cb.value) else 0.0
+        yaw_right = 1.0 if self._manual_yaw_right_cb is not None and bool(self._manual_yaw_right_cb.value) else 0.0
+        cmd_xy = torch.tensor(
+            [[(forward - back) * lin_scale, (left - right) * lin_scale]],
+            device=device,
+            dtype=torch.float32,
+        ).repeat(self._env.num_envs, 1)
+        cmd_yaw = torch.tensor(
+            [[(yaw_left - yaw_right) * yaw_scale]],
+            device=device,
+            dtype=torch.float32,
+        ).repeat(self._env.num_envs, 1)
+        motion_cmd.manual_xy_rel = cmd_xy
+        motion_cmd.manual_yaw_rel = cmd_yaw
 
     def on_reset(self, env_ids) -> None:
         if not self._enabled or not self._recenter:
@@ -999,6 +1041,59 @@ class ViserLiveViewer:
                 self._scandots_handle.point_size = float(self._scandots_point_size)
 
         self._setup_perception_controls()
+
+        with self._server.gui.add_folder("Manual Control", expand_by_default=False):
+            self._manual_control_cb = self._server.gui.add_checkbox(
+                "Enable Manual Root Command",
+                initial_value=False,
+                hint="Override torso_xy_rel/yaw_rel with GUI commands",
+            )
+            self._manual_lin_scale_slider = self._server.gui.add_slider(
+                "XY Command (m)",
+                min=0.0,
+                max=2.0,
+                step=0.05,
+                initial_value=0.5,
+                hint="Magnitude applied to XY command",
+            )
+            self._manual_yaw_scale_slider = self._server.gui.add_slider(
+                "Yaw Command (rad)",
+                min=0.0,
+                max=1.5,
+                step=0.05,
+                initial_value=0.3,
+                hint="Magnitude applied to yaw command",
+            )
+            self._manual_forward_cb = self._server.gui.add_checkbox(
+                "Move +X",
+                initial_value=False,
+                hint="Command positive X in torso frame",
+            )
+            self._manual_back_cb = self._server.gui.add_checkbox(
+                "Move -X",
+                initial_value=False,
+                hint="Command negative X in torso frame",
+            )
+            self._manual_left_cb = self._server.gui.add_checkbox(
+                "Move +Y",
+                initial_value=False,
+                hint="Command positive Y in torso frame",
+            )
+            self._manual_right_cb = self._server.gui.add_checkbox(
+                "Move -Y",
+                initial_value=False,
+                hint="Command negative Y in torso frame",
+            )
+            self._manual_yaw_left_cb = self._server.gui.add_checkbox(
+                "Yaw +",
+                initial_value=False,
+                hint="Command positive yaw",
+            )
+            self._manual_yaw_right_cb = self._server.gui.add_checkbox(
+                "Yaw -",
+                initial_value=False,
+                hint="Command negative yaw",
+            )
 
         sim_cfg = getattr(self._env.simulator, "simulator_config", None)
         if sim_cfg is not None and hasattr(sim_cfg, "contact_force_viz"):
