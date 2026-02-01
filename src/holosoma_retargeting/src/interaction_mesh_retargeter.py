@@ -165,9 +165,16 @@ class InteractionMeshRetargeter:
         self.track_nominal_indices = task_constants.NOMINAL_TRACKING_INDICES
         self._show_collision_meshes = False
         self._show_collision_all = False
+        self._show_interaction_mesh_src = False
+        self._show_interaction_mesh_tgt = False
         self._collision_handles = {}
         self._collision_local_cache = {}
         self._geom_names_cache = None
+        self._interaction_mesh_handles = {}
+        self._interaction_mesh_frames_src = []
+        self._interaction_mesh_frames_tgt = []
+        self._interaction_mesh_tetrahedra = []
+        self._last_frame_idx = 0
 
     def _setup_visualization(self):
         """Setup Viser visualization components."""
@@ -386,10 +393,58 @@ class InteractionMeshRetargeter:
         q = getattr(self, "_last_q", None)
         self._refresh_collision_meshes(q, show_all=self._show_collision_all)
 
-    def _on_viser_frame_update(self, q: np.ndarray):
+    def _on_viser_frame_update(self, q: np.ndarray, frame_idx: int | None = None):
         self._last_q = np.asarray(q, dtype=float).copy()
+        if frame_idx is not None:
+            self._last_frame_idx = int(frame_idx)
         if self._show_collision_meshes:
             self._refresh_collision_meshes(self._last_q, show_all=self._show_collision_all)
+        if self._show_interaction_mesh_src or self._show_interaction_mesh_tgt:
+            frame_idx = getattr(self, "_last_frame_idx", None)
+            if frame_idx is not None:
+                self._update_interaction_mesh_vis(frame_idx)
+
+    def _clear_interaction_meshes(self):
+        for handle in self._interaction_mesh_handles.values():
+            try:
+                handle.remove()
+            except Exception:
+                pass
+        self._interaction_mesh_handles = {}
+
+    def _set_interaction_mesh_visualization(self, show_src: bool, show_tgt: bool):
+        self._show_interaction_mesh_src = bool(show_src)
+        self._show_interaction_mesh_tgt = bool(show_tgt)
+        if not self._show_interaction_mesh_src and not self._show_interaction_mesh_tgt:
+            self._clear_interaction_meshes()
+            return
+        frame_idx = getattr(self, "_last_frame_idx", 0)
+        self._update_interaction_mesh_vis(int(frame_idx))
+
+    def _update_interaction_mesh_vis(self, frame_idx: int):
+        if not hasattr(self, "server"):
+            return
+        if not hasattr(self, "_interaction_mesh_frames_src") or not hasattr(self, "_interaction_mesh_tetrahedra"):
+            return
+        if frame_idx < 0 or frame_idx >= len(self._interaction_mesh_tetrahedra):
+            return
+
+        self._clear_interaction_meshes()
+        tetra = self._interaction_mesh_tetrahedra[frame_idx]
+
+        if self._show_interaction_mesh_src and self._interaction_mesh_frames_src:
+            if frame_idx < len(self._interaction_mesh_frames_src):
+                verts_src = self._interaction_mesh_frames_src[frame_idx]
+                handle = self.visualize_tetrahedra(verts_src, tetra, name="interaction_mesh_src", color=(1, 0, 0, 1))
+                if handle is not None:
+                    self._interaction_mesh_handles["src"] = handle
+
+        if self._show_interaction_mesh_tgt and self._interaction_mesh_frames_tgt:
+            if frame_idx < len(self._interaction_mesh_frames_tgt):
+                verts_tgt = self._interaction_mesh_frames_tgt[frame_idx]
+                handle = self.visualize_tetrahedra(verts_tgt, tetra, name="interaction_mesh_tgt", color=(0, 1, 0, 1))
+                if handle is not None:
+                    self._interaction_mesh_handles["tgt"] = handle
 
     def draw_mesh_pair_with_contact(
         self,
@@ -471,6 +526,8 @@ class InteractionMeshRetargeter:
         tetrahedra = []
         obj_pts_demo_list = []  # scaled object pts
         obj_pts_list = []  # original size object pts
+        interaction_mesh_frames_src = [] if self.visualize else None
+        interaction_mesh_frames_tgt = [] if self.visualize else None
 
         print(f"\nStarting motion retargeting for {num_frames} frames...")
 
@@ -494,6 +551,15 @@ class InteractionMeshRetargeter:
                     np.vstack([human_mapped_joints_in_object, object_points_local_demo])
                 )
                 tetrahedra.append(source_tetrahedra)
+
+                if interaction_mesh_frames_src is not None:
+                    if self.object_name == "ground":
+                        source_vertices_world = source_vertices
+                    else:
+                        source_vertices_world = transform_points_local_to_world(
+                            object_quat_demo, object_trans_demo, source_vertices
+                        )
+                    interaction_mesh_frames_src.append(source_vertices_world)
 
                 if self.debug:
                     # Only for visualization
@@ -537,10 +603,18 @@ class InteractionMeshRetargeter:
                     init_t=i == 0,
                     n_iter=50 if i == 0 else 10,
                 )
-                if self.debug:
+                robot_link_positions = None
+                obj_pts = None
+                if interaction_mesh_frames_tgt is not None or self.debug:
+                    object_quat = object_poses_augmented[i, 3:]
+                    object_trans = object_poses_augmented[i, :3]
+                    obj_pts = transform_points_local_to_world(object_quat, object_trans, object_points_local)
                     robot_link_positions = self._get_robot_link_positions(
                         q, self.laplacian_match_links.values()
                     )  # 15 X 3
+                if interaction_mesh_frames_tgt is not None and robot_link_positions is not None and obj_pts is not None:
+                    interaction_mesh_frames_tgt.append(np.vstack([robot_link_positions, obj_pts]))
+                if self.debug and robot_link_positions is not None:
                     robot_kpts_handle_list = self.draw_keypoints(
                         robot_link_positions, name="robot_kpts", rgba=(0, 1, 0, 1)
                     )
@@ -580,6 +654,12 @@ class InteractionMeshRetargeter:
         print("Saving results to path:", dest_res_path)
 
         if self.visualize:
+            self._interaction_mesh_frames_src = interaction_mesh_frames_src or []
+            self._interaction_mesh_frames_tgt = interaction_mesh_frames_tgt or []
+            self._interaction_mesh_tetrahedra = tetrahedra
+            self._last_frame_idx = 0
+
+        if self.visualize:
             robot_dof = len(self.viser_robot.get_actuated_joint_limits())
 
             create_motion_control_sliders(
@@ -617,6 +697,21 @@ class InteractionMeshRetargeter:
                 @show_collision_all_cb.on_update
                 def _(_):
                     self._set_collision_visualization(show_collision_cb.value, show_collision_all_cb.value)
+            with self.server.gui.add_folder("Interaction Mesh"):
+                show_interaction_src_cb = self.server.gui.add_checkbox("Show source mesh", False)
+                show_interaction_tgt_cb = self.server.gui.add_checkbox("Show target mesh", False)
+
+                @show_interaction_src_cb.on_update
+                def _(_):
+                    self._set_interaction_mesh_visualization(
+                        show_interaction_src_cb.value, show_interaction_tgt_cb.value
+                    )
+
+                @show_interaction_tgt_cb.on_update
+                def _(_):
+                    self._set_interaction_mesh_visualization(
+                        show_interaction_src_cb.value, show_interaction_tgt_cb.value
+                    )
 
         return (
             np.array(retargeted_motions)[1:],
@@ -962,7 +1057,7 @@ class InteractionMeshRetargeter:
         colors = np.array(colors)
 
         # Add line segments for all edges at once
-        self.server.scene.add_line_segments(
+        return self.server.scene.add_line_segments(
             f"/{name}",
             points=points,
             colors=colors,

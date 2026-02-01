@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import threading
 import time
+import inspect
 from typing import Callable, List, Tuple
 
 import numpy as np
@@ -23,7 +24,7 @@ def create_motion_control_sliders(
     initial_fps: int = 30,
     initial_interp_mult: int = 2,
     loop: bool = True,
-    on_update: Callable[[np.ndarray], None] | None = None,
+    on_update: Callable[..., None] | None = None,
 ) -> Tuple[List[viser.GuiInputHandle[int]], List[float]]:
     """
     Create a slider + play/pause controls and a background player thread with smooth, slerp-based interpolation.
@@ -47,7 +48,8 @@ def create_motion_control_sliders(
         initial_fps: base FPS for playback.
         initial_interp_mult: visual upsampling multiplier.
         loop: whether to wrap around at the end.
-        on_update: optional callback invoked after each frame is applied.
+        on_update: optional callback invoked after each frame is applied. If it accepts 2 args,
+            it will be called as on_update(q, frame_idx).
 
     Returns:
         (controls, initial_values) — currently returns the [frame_slider] and [0.0]
@@ -129,7 +131,14 @@ def create_motion_control_sliders(
     updating_programmatically = {"flag": False}  # flag to prevent callback from pausing during programmatic updates
 
     # ---------------- draw ----------------
-    def _apply_frame_from_q(q: np.ndarray) -> None:
+    on_update_arity = None
+    if on_update is not None:
+        try:
+            on_update_arity = len(inspect.signature(on_update).parameters)
+        except (TypeError, ValueError):
+            on_update_arity = 1
+
+    def _apply_frame_from_q(q: np.ndarray, frame_idx: int | None = None) -> None:
         # joints -> ensure length
         joints = q[7 : 7 + robot_dof]
         if joints.shape[0] != robot_dof:
@@ -155,11 +164,14 @@ def create_motion_control_sliders(
             object_base_frame.position = np.zeros(3)
             object_base_frame.wxyz = np.array([1.0, 0.0, 0.0, 0.0])
         if on_update is not None:
-            on_update(q)
+            if on_update_arity is not None and on_update_arity >= 2:
+                on_update(q, frame_idx)
+            else:
+                on_update(q)
 
     def _apply_discrete_frame(i: int) -> None:
         i = int(np.clip(i, 0, n_frames - 1))
-        _apply_frame_from_q(qpos[i])
+        _apply_frame_from_q(qpos[i], frame_idx=i)
 
     # ---------------- controls ----------------
     @play_btn.on_click
@@ -217,7 +229,7 @@ def create_motion_control_sliders(
                     u = float(f - k0)
 
                     q_interp = _interp_frame(qpos, k0, k1, u)
-                    _apply_frame_from_q(q_interp)
+                    _apply_frame_from_q(q_interp, frame_idx=k0)
 
                     # Update slider to show current frame number in real-time
                     # Use flag to prevent callback from pausing playback
