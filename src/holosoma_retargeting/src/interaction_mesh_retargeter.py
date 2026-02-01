@@ -175,6 +175,7 @@ class InteractionMeshRetargeter:
         self._interaction_mesh_frames_tgt = []
         self._interaction_mesh_tetrahedra = []
         self._last_frame_idx = 0
+        self._interaction_mesh_line_width = 0.03
 
     def _setup_visualization(self):
         """Setup Viser visualization components."""
@@ -435,14 +436,26 @@ class InteractionMeshRetargeter:
         if self._show_interaction_mesh_src and self._interaction_mesh_frames_src:
             if frame_idx < len(self._interaction_mesh_frames_src):
                 verts_src = self._interaction_mesh_frames_src[frame_idx]
-                handle = self.visualize_tetrahedra(verts_src, tetra, name="interaction_mesh_src", color=(1, 0, 0, 1))
+                handle = self.visualize_tetrahedra(
+                    verts_src,
+                    tetra,
+                    name="interaction_mesh_src",
+                    color=(1, 0, 0, 1),
+                    line_width=self._interaction_mesh_line_width,
+                )
                 if handle is not None:
                     self._interaction_mesh_handles["src"] = handle
 
         if self._show_interaction_mesh_tgt and self._interaction_mesh_frames_tgt:
             if frame_idx < len(self._interaction_mesh_frames_tgt):
                 verts_tgt = self._interaction_mesh_frames_tgt[frame_idx]
-                handle = self.visualize_tetrahedra(verts_tgt, tetra, name="interaction_mesh_tgt", color=(0, 1, 0, 1))
+                handle = self.visualize_tetrahedra(
+                    verts_tgt,
+                    tetra,
+                    name="interaction_mesh_tgt",
+                    color=(0, 1, 0, 1),
+                    line_width=self._interaction_mesh_line_width,
+                )
                 if handle is not None:
                     self._interaction_mesh_handles["tgt"] = handle
 
@@ -700,6 +713,13 @@ class InteractionMeshRetargeter:
             with self.server.gui.add_folder("Interaction Mesh"):
                 show_interaction_src_cb = self.server.gui.add_checkbox("Show source mesh", False)
                 show_interaction_tgt_cb = self.server.gui.add_checkbox("Show target mesh", False)
+                mesh_line_width_in = self.server.gui.add_number(
+                    "Line width",
+                    initial_value=float(self._interaction_mesh_line_width),
+                    min=0.001,
+                    max=0.2,
+                    step=0.001,
+                )
 
                 @show_interaction_src_cb.on_update
                 def _(_):
@@ -712,6 +732,12 @@ class InteractionMeshRetargeter:
                     self._set_interaction_mesh_visualization(
                         show_interaction_src_cb.value, show_interaction_tgt_cb.value
                     )
+
+                @mesh_line_width_in.on_update
+                def _(_):
+                    self._interaction_mesh_line_width = float(mesh_line_width_in.value)
+                    if self._show_interaction_mesh_src or self._show_interaction_mesh_tgt:
+                        self._update_interaction_mesh_vis(getattr(self, "_last_frame_idx", 0))
 
         return (
             np.array(retargeted_motions)[1:],
@@ -1032,12 +1058,19 @@ class InteractionMeshRetargeter:
                     np.vstack([robot_link_positions, object_pts]),
                     tetrahedra[i],
                     name="robot_tetrahedra",
-                    rgba=(0, 1, 1, 1),
+                    color=(0, 1, 1, 1),
                 )
             else:
                 time.sleep(dt)
 
-    def visualize_tetrahedra(self, vertices, tetrahedra, name="tetrahedra", color=(0, 0, 0, 1)):
+    def visualize_tetrahedra(
+        self,
+        vertices,
+        tetrahedra,
+        name="tetrahedra",
+        color=(0, 0, 0, 1),
+        line_width: float = 0.01,
+    ):
         # Convert color to 0-255 range
         color_255 = np.array(color[:3]) * 255
 
@@ -1061,7 +1094,7 @@ class InteractionMeshRetargeter:
             f"/{name}",
             points=points,
             colors=colors,
-            line_width=0.01,
+            line_width=float(line_width),
         )
 
     def _compute_jacobian_for_contact_relative(self, geom1, geom2, geom1_name, geom2_name, fromto, dist):
