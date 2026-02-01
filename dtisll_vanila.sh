@@ -31,10 +31,9 @@ LOGGER="${LOGGER:-logger:wandb}"
 RUN_NAME="${RUN_NAME:-g1_videomimic_distill_vanilla}"
 
 torchrun --nproc_per_node="${NPROC}" --master_port="${MASTER_PORT}" src/holosoma/holosoma/train_agent.py \
-  exp:g1-29dof-wbt-videomimic-mlp \
+  exp:g1-29dof-wbt-videomimic-stage3-mlp \
   "${EXTRA_ARGS[@]}" \
   --observation_overrides.disable_actor_target_inputs=True \
-  --observation_overrides.disable_critic_target=True \
   --algo.config.distill.mode=dagger \
   --algo.config.distill.policy_to_clone="${TEACHER_CHECKPOINT}" \
   --algo.config.distill.bc_loss_coef=1.0 \

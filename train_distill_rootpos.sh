@@ -28,10 +28,9 @@ elif [[ "${TEACHER_MODE}" != "blind" ]]; then
 fi
 
 CUDA_VISIBLE_DEVICES=5,6,7 torchrun --nproc_per_node=3 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
-  exp:g1-29dof-wbt-videomimic-mlp \
+  exp:g1-29dof-wbt-videomimic-stage3-mlp \
   "${EXTRA_ARGS[@]}" \
   --observation_overrides.disable_actor_target_inputs=True \
-  --observation_overrides.disable_critic_target=True \
   --algo.config.distill.mode=dagger \
   --algo.config.distill.policy_to_clone="${TEACHER_CHECKPOINT}" \
   --algo.config.distill.bc_loss_coef=1.0 \

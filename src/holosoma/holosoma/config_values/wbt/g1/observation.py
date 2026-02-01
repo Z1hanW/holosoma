@@ -269,10 +269,61 @@ g1_29dof_wbt_observation_videomimic = ObservationManagerCfg(
     },
 )
 
+g1_29dof_wbt_observation_videomimic_stage3 = ObservationManagerCfg(
+    groups={
+        # Teacher-style actor obs (history on torso + goals) kept for distillation inputs.
+        "actor_obs": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=5,
+            terms=actor_obs_videomimic_terms,
+        ),
+        # Student actor obs: history on torso_real only.
+        "actor_obs_torso": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=5,
+            terms={
+                "torso_real": actor_obs_videomimic_terms["torso_real"],
+            },
+        ),
+        # Student actor obs: single-frame goals (no history on torso_xy_rel/yaw_rel).
+        "actor_obs_goal": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms={
+                "torso_xy_rel": actor_obs_videomimic_terms["torso_xy_rel"],
+                "torso_yaw_rel": actor_obs_videomimic_terms["torso_yaw_rel"],
+            },
+        ),
+        # Keep target terms for teacher input (actor) and critic.
+        "actor_obs_target": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=videomimic_target_terms,
+        ),
+        "critic_obs": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=5,
+            terms=critic_obs_videomimic_terms,
+        ),
+        "critic_obs_target": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=videomimic_target_terms,
+        ),
+    },
+)
+
 __all__ = [
     "g1_29dof_wbt_observation",
     "g1_29dof_wbt_observation_motion_tracking",
     "g1_29dof_wbt_observation_motion_tracking_split",
     "g1_29dof_wbt_observation_w_object",
     "g1_29dof_wbt_observation_videomimic",
+    "g1_29dof_wbt_observation_videomimic_stage3",
 ]
