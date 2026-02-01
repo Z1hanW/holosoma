@@ -269,7 +269,7 @@ g1_29dof_wbt_observation_videomimic = ObservationManagerCfg(
     },
 )
 
-g1_29dof_wbt_observation_videomimic_stage3 = ObservationManagerCfg(
+g1_29dof_wbt_observation_videomimic_distill = ObservationManagerCfg(
     groups={
         # Teacher-style actor obs (history on torso + goals) kept for distillation inputs.
         "actor_obs": ObsGroupCfg(
@@ -325,5 +325,5 @@ __all__ = [
     "g1_29dof_wbt_observation_motion_tracking_split",
     "g1_29dof_wbt_observation_w_object",
     "g1_29dof_wbt_observation_videomimic",
-    "g1_29dof_wbt_observation_videomimic_stage3",
+    "g1_29dof_wbt_observation_videomimic_distill",
 ]

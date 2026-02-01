@@ -18,7 +18,7 @@ LOGGER="${LOGGER:-logger:wandb}"
 RUN_NAME="${RUN_NAME:-g1_videomimic_distill_lafan_blind}"
 
 torchrun --nproc_per_node="${NPROC}" --master_port="${MASTER_PORT}" src/holosoma/holosoma/train_agent.py \
-  exp:g1-29dof-wbt-videomimic-stage3-mlp \
+  exp:g1-29dof-wbt-videomimic-distill-mlp \
   --observation_overrides.disable_actor_target_inputs=True \
   --algo.config.distill.mode=dagger \
   --algo.config.distill.policy_to_clone="${TEACHER_CHECKPOINT}" \

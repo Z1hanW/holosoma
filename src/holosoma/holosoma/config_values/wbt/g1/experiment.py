@@ -233,19 +233,19 @@ _videomimic_transformer_module_dict = PPOModuleDictConfig(
     ),
 )
 
-_videomimic_stage3_actor_inputs = ["actor_obs_torso", "actor_obs_goal"]
-_videomimic_stage3_critic_inputs = ["critic_obs", "critic_obs_target"]
+_videomimic_distill_actor_inputs = ["actor_obs_torso", "actor_obs_goal"]
+_videomimic_distill_critic_inputs = ["critic_obs", "critic_obs_target"]
 
-_videomimic_stage3_mlp_module_dict = PPOModuleDictConfig(
+_videomimic_distill_mlp_module_dict = PPOModuleDictConfig(
     actor=replace(
         algo.ppo.config.module_dict.actor,
         type="MLP",
-        input_dim=_videomimic_stage3_actor_inputs,
+        input_dim=_videomimic_distill_actor_inputs,
     ),
     critic=replace(
         algo.ppo.config.module_dict.critic,
         type="MLP",
-        input_dim=_videomimic_stage3_critic_inputs,
+        input_dim=_videomimic_distill_critic_inputs,
     ),
 )
 
@@ -275,16 +275,16 @@ g1_29dof_wbt_videomimic_transformer = replace(
     ),
 )
 
-g1_29dof_wbt_videomimic_stage3_mlp = replace(
+g1_29dof_wbt_videomimic_distill_mlp = replace(
     g1_29dof_wbt_videomimic_mlp,
     training=replace(
         g1_29dof_wbt_videomimic_mlp.training,
-        name="g1_29dof_wbt_videomimic_stage3_mlp",
+        name="g1_29dof_wbt_videomimic_distill_mlp",
     ),
-    observation=observation.g1_29dof_wbt_observation_videomimic_stage3,
+    observation=observation.g1_29dof_wbt_observation_videomimic_distill,
     algo=replace(
         algo.ppo,
-        config=replace(algo.ppo.config, module_dict=_videomimic_stage3_mlp_module_dict),
+        config=replace(algo.ppo.config, module_dict=_videomimic_distill_mlp_module_dict),
     ),
 )
 
