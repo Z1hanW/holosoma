@@ -1053,8 +1053,8 @@ class InteractionMeshRetargeter:
                     colors.extend([color_255, color_255])
 
         # Convert to numpy arrays
-        points = np.array(points)
-        colors = np.array(colors)
+        points = np.array(points).reshape(-1, 2, 3)
+        colors = np.array(colors).reshape(-1, 2, 3)
 
         # Add line segments for all edges at once
         return self.server.scene.add_line_segments(
