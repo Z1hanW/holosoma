@@ -282,6 +282,7 @@ g1_29dof_wbt_videomimic_distill_mlp = replace(
         name="g1_29dof_wbt_videomimic_distill_mlp",
     ),
     observation=observation.g1_29dof_wbt_observation_videomimic_distill,
+    termination=termination.g1_29dof_wbt_termination_distill,
     algo=replace(
         algo.ppo,
         config=replace(algo.ppo.config, module_dict=_videomimic_distill_mlp_module_dict),

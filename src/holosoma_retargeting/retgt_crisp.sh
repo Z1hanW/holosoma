@@ -116,8 +116,8 @@ from pathlib import Path
 import re
 
 pieces_dir = Path("$stage_obj_dir/pieces")
-    assets_path = Path("$stage_obj_dir/box_assets.xml")
-    body_path = Path("$stage_obj_dir/box_body.xml")
+assets_path = Path("$stage_obj_dir/box_assets.xml")
+body_path = Path("$stage_obj_dir/box_body.xml")
 object_prefix = "$OBJECT_NAME"
 robot_height = float("$ROBOT_HEIGHT")
 human_height = float("$HUMAN_HEIGHT")

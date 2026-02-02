@@ -50,4 +50,16 @@ g1_29dof_wbt_termination = TerminationManagerCfg(
     }
 )
 
-__all__ = ["g1_29dof_wbt_termination"]
+g1_29dof_wbt_termination_distill = TerminationManagerCfg(
+    terms={
+        "timeout": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.common:timeout_exceeded",
+            is_timeout=True,
+        ),
+        "motion_ends": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:motion_ends",
+        ),
+    }
+)
+
+__all__ = ["g1_29dof_wbt_termination", "g1_29dof_wbt_termination_distill"]
