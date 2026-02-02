@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
+from typing import Callable, Dict, Tuple
 
 import numpy as np
 import tyro
@@ -31,6 +32,8 @@ def make_player(
     config: ViserConfig,
     qpos: np.ndarray,
     fps: int | None = None,
+    *,
+    sequence_setter_out: dict[str, Callable[[np.ndarray, int | None], None]] | None = None,
 ):
     """
     qpos layout (MuJoCo order):
@@ -95,6 +98,7 @@ def make_player(
         initial_fps=actual_fps,
         initial_interp_mult=config.visual_fps_multiplier,
         loop=config.loop,
+        sequence_setter_out=sequence_setter_out,
     )
     n_frames = int(qpos.shape[0])
     print(
@@ -105,14 +109,65 @@ def make_player(
     return server
 
 
+def _collect_npz_paths(cfg: ViserConfig) -> Tuple[list[str], Dict[str, Path]]:
+    qpos_path = Path(cfg.qpos_npz)
+    if qpos_path.is_dir():
+        root = qpos_path
+        paths = sorted(root.rglob(cfg.qpos_glob) if cfg.qpos_recursive else root.glob(cfg.qpos_glob))
+    else:
+        root = qpos_path.parent
+        paths = [qpos_path]
+
+    paths = [p for p in paths if p.is_file() and p.suffix == ".npz"]
+    if not paths:
+        raise FileNotFoundError(f"No .npz files found at: {qpos_path}")
+
+    labels = []
+    label_to_path: Dict[str, Path] = {}
+    for p in paths:
+        label = p.relative_to(root).as_posix() if root in p.parents or p == root else p.name
+        # Avoid accidental overwrites by falling back to filename if needed
+        if label in label_to_path:
+            label = p.name
+        labels.append(label)
+        label_to_path[label] = p
+    return labels, label_to_path
+
+
 def main(cfg: ViserConfig) -> None:
     """Main function for viser player."""
-    qpos, fps = load_npz(cfg.qpos_npz)
-    make_player(
+    labels, label_to_path = _collect_npz_paths(cfg)
+
+    cache: Dict[str, Tuple[np.ndarray, int]] = {}
+
+    def _load_label(label: str) -> Tuple[np.ndarray, int]:
+        qpos, fps = load_npz(str(label_to_path[label]))
+        cache[label] = (qpos, fps)
+        return qpos, fps
+
+    first_label = labels[0]
+    qpos, fps = _load_label(first_label)
+
+    sequence_setter_out: dict[str, Callable[[np.ndarray, int | None], None]] = {}
+    server = make_player(
         config=cfg,
         qpos=qpos,
         fps=fps,
+        sequence_setter_out=sequence_setter_out,
     )
+
+    if len(labels) > 1 and "set_sequence" in sequence_setter_out:
+        set_sequence = sequence_setter_out["set_sequence"]
+        with server.gui.add_folder("Sequence"):
+            seq_dropdown = server.gui.add_dropdown("Motion", options=labels, initial_value=first_label)
+
+        @seq_dropdown.on_update
+        def _(_evt) -> None:
+            label = seq_dropdown.value
+            if label not in cache:
+                _load_label(label)
+            qpos_sel, fps_sel = cache[label]
+            set_sequence(qpos_sel, fps_sel)
 
     # keep process alive
     while True:

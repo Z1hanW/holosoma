@@ -9,6 +9,7 @@ IMAGE_WIDTH=${IMAGE_WIDTH:-128}
 IMAGE_HEIGHT=${IMAGE_HEIGHT:-72}
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-4294967295}
 NUM_ENVS=${NUM_ENVS:-4096}
+TTTEST=${TTTEST:-0}
 case "${DEPTH_IMPL}" in
   rendered)
     PERCEPTION_PRESET="camera_depth_d435i_rendered"
@@ -92,6 +93,46 @@ print(rows, cols)
   fi
   OBJ_PATH="${FUSED_OBJ}"
   OBJ_META="${FUSED_META}"
+fi
+
+if [[ "${TTTEST}" != "0" ]]; then
+  echo "[INFO] TTTEST enabled: launching Viser physics preview with 1 env"
+  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} python src/holosoma/holosoma/train_agent.py \
+    exp:g1-29dof-wbt-videomimic-mlp \
+    "perception:${PERCEPTION_PRESET}" \
+    --perception.camera_width="$IMAGE_WIDTH" \
+    --perception.camera_height="$IMAGE_HEIGHT" \
+    --simulator.config.sim.physx.gpu_collision_stack_size="${PHYSX_GPU_COLLISION_STACK_SIZE}" \
+    terrain:terrain-load-obj \
+    --training.num_envs=1 \
+    --training.headless=False \
+    --training.enable_viser=True \
+    --training.viser_env_id=0 \
+    --training.viser_update_hz=30 \
+    --training.viser_recenter=True \
+    --training.viser_show_scandots=True \
+    --simulator.config.scene.env_spacing=0.0 \
+    --terrain.terrain-term.obj-file-path "${OBJ_PATH}" \
+    ${OBJ_META:+--terrain.terrain-term.obj-metadata-path "${OBJ_META}"} \
+    --terrain.terrain-term.num-rows "${NUM_ROWS}" \
+    --terrain.terrain-term.num-cols "${NUM_COLS}" \
+    \
+    --algo.config.actor_learning_rate=7e-5 \
+    --algo.config.critic_learning_rate=7e-5 \
+    --algo.config.normalize_actor_obs=False \
+    --algo.config.normalize_critic_obs=False \
+    --algo.config.load_optimizer=False \
+    \
+    --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_DIR}" \
+    --command.setup_terms.motion_command.params.motion_config.pair_terrain_with_motion=True \
+    --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob=0.05 \
+    --command.setup_terms.motion_command.params.motion_config.enable_default_pose_append=False \
+    --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s=0 \
+    --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend=False \
+    --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s=0 \
+    ${STAGE1_CKPT:+--training.checkpoint "${STAGE1_CKPT}"} \
+    logger:disabled
+  exit 0
 fi
 
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node=8 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
