@@ -730,6 +730,17 @@ def main(cfg: RetargetingConfig) -> None:
             scale=smpl_scale,
             object_poses=object_poses,
         )
+    if cfg.retargeter.debug:
+        root_name_candidates = ("Pelvis", "Spine1")
+        root_idx = 0
+        for name in root_name_candidates:
+            if name in constants.DEMO_JOINTS:
+                root_idx = constants.DEMO_JOINTS.index(name)
+                break
+        hj_min = human_joints.reshape(-1, 3).min(axis=0)
+        hj_max = human_joints.reshape(-1, 3).max(axis=0)
+        print(f"[debug] human_joints root={constants.DEMO_JOINTS[root_idx]} pos0={human_joints[0, root_idx]}")
+        print(f"[debug] human_joints bounds min={hj_min} max={hj_max}")
 
     # Initialize robot pose
     q_init, q_nominal, object_poses_augmented, human_joints, object_poses = initialize_robot_pose(
