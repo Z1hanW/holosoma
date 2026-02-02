@@ -381,6 +381,11 @@ class ViserLiveViewer:
         self._target_keypoints_handle = None
         self._target_keypoints_point_size = 0.03
         self._target_keypoints_color = np.array([128, 0, 128], dtype=np.uint8)
+        self._show_target_keypoints = os.environ.get("VISER_SHOW_TARGET_KEYPOINTS", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
         self._play_control = None
         self._step_button = None
         self._reset_button = None
@@ -1890,6 +1895,13 @@ class ViserLiveViewer:
 
     def _update_target_keypoints(self, offset: np.ndarray) -> None:
         if not self._server:
+            return
+        if not self._show_target_keypoints:
+            if self._target_keypoints_handle is not None:
+                try:
+                    self._target_keypoints_handle.visible = False
+                except Exception:
+                    pass
             return
         motion_cmd = self._get_motion_command()
         if motion_cmd is None or not hasattr(motion_cmd, "body_pos_w"):

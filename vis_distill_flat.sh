@@ -52,7 +52,8 @@ fi
 echo "[INFO] Viser port: ${VISER_PORT}"
 
 export VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI:-0}
-export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-0}
+export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-1}
+export VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-0}
 
 python -m holosoma.visualize physics \
   --checkpoint "${CKPT}" \
