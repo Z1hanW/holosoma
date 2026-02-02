@@ -13,9 +13,6 @@ ROBOT_HEIGHT=${ROBOT_HEIGHT:-1.32}
 HUMAN_HEIGHT=${HUMAN_HEIGHT:-1.78}
 
 DATA_ROOT=${DATA_ROOT:-"$REPO_ROOT/crisp/vmm_data"}
-MOTION_ROOT="$DATA_ROOT/motion"
-GEO_ROOT="$DATA_ROOT/geo"
-MODULE_ROOT="$GEO_ROOT"
 SCENE_XML_OVERRIDE=${SCENE_XML_OVERRIDE:-""}
 
 OBJECT_NAME="scene_mesh_sqs"
@@ -71,28 +68,28 @@ for seq_dir in "${seq_dirs[@]}"; do
         exit 1
     fi
 
-    mkdir -p "$MOTION_ROOT"
-    motion_file="$MOTION_ROOT/$TASK_NAME.npz"
-    ln -sf "$hmr_npz" "$motion_file"
-
-    stage_obj_dir="$MODULE_ROOT/$seq_name"
+    stage_obj_dir="$DATA_ROOT/$seq_name"
     mkdir -p "$stage_obj_dir"
+
+    # Put motion and geometry into the same sequence folder (real files, no symlinks).
+    cp -f "$hmr_npz" "$stage_obj_dir/$TASK_NAME.npz"
 
     # Copy all robot assets into the sequence folder.
     robot_dir="$stage_obj_dir/g1"
     mkdir -p "$robot_dir"
     cp -R "$ROBOT_SRC_DIR/." "$robot_dir/"
 
-    ln -sf "$scene_obj" "$stage_obj_dir/scene_mesh_sqs.obj"
+    cp -f "$scene_obj" "$stage_obj_dir/scene_mesh_sqs.obj"
     scene_urdf_local="$stage_obj_dir/scene_mesh_sqs.urdf"
     cp -f "$scene_urdf" "$scene_urdf_local"
-    ln -sfn "$pieces_dir" "$stage_obj_dir/pieces"
+    rm -rf "$stage_obj_dir/pieces"
+    cp -R "$pieces_dir" "$stage_obj_dir/pieces"
     python - <<PY
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
 urdf_path = Path("$scene_urdf_local")
-pieces_dir = Path("$pieces_dir")
+pieces_dir = Path("$stage_obj_dir/pieces")
 
 try:
     root = ET.parse(urdf_path).getroot()
@@ -191,5 +188,16 @@ PY
     mkdir -p "$OUT_ROOT"
     scene_xml_file="$scene_xml_local"
     robot_urdf_local="$robot_dir/g1_29dof.urdf"
-    bash "$SCRIPT_DIR/retgt_smplx.sh" "$MOTION_ROOT" "$TASK_NAME" "$OBJECT_NAME" "$stage_obj_dir" "$robot_urdf_local" "smplx" "$OUT_ROOT" "$scene_xml_file"
+    echo "[retgt_crisp] seq=$seq_name"
+    echo "  data_path=$stage_obj_dir"
+    echo "  motion=$stage_obj_dir/$TASK_NAME.npz"
+    echo "  object_dir=$stage_obj_dir"
+    echo "  scene_xml=$scene_xml_local"
+    echo "  robot_urdf=$robot_urdf_local"
+    echo "  object_urdf=$scene_urdf_local"
+    echo "  object_obj=$stage_obj_dir/scene_mesh_sqs.obj"
+    echo "  pieces=$stage_obj_dir/pieces"
+    echo "  box_assets=$stage_obj_dir/box_assets.xml"
+    echo "  box_body=$stage_obj_dir/box_body.xml"
+    bash "$SCRIPT_DIR/retgt_smplx.sh" "$stage_obj_dir" "$TASK_NAME" "$OBJECT_NAME" "$stage_obj_dir" "$robot_urdf_local" "smplx" "$OUT_ROOT" "$scene_xml_file"
 done

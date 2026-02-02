@@ -678,6 +678,15 @@ def main(cfg: RetargetingConfig) -> None:
         task_config=cfg.task_config,
         task_type=task_type,
     )
+    if cfg.retargeter.debug:
+        print("[debug] task:", task_type, "format:", data_format, "task_name:", task_name)
+        print("[debug] data_path:", data_path)
+        print("[debug] object_dir:", cfg.task_config.object_dir)
+        print("[debug] scene_xml_file arg:", cfg.task_config.scene_xml_file)
+        print("[debug] robot_urdf_file:", cfg.robot_config.robot_urdf_file)
+        print("[debug] constants.ROBOT_URDF_FILE:", constants.ROBOT_URDF_FILE)
+        print("[debug] constants.OBJECT_URDF_FILE:", constants.OBJECT_URDF_FILE)
+        print("[debug] constants.OBJECT_MESH_FILE:", constants.OBJECT_MESH_FILE)
 
     # Load motion data
     human_joints, object_poses, smpl_scale = load_motion_data(
@@ -697,6 +706,13 @@ def main(cfg: RetargetingConfig) -> None:
         cfg.augmentation,
         object_scale_augmented=_OBJECT_SCALE_AUGMENTED,
     )
+    if cfg.retargeter.debug:
+        print("[debug] resolved object_urdf_path:", object_urdf_path)
+        print("[debug] constants.SCENE_XML_FILE:", getattr(constants, "SCENE_XML_FILE", None))
+        if object_local_pts is not None:
+            print("[debug] object_local_pts:", object_local_pts.shape)
+        if object_local_pts_demo is not None:
+            print("[debug] object_local_pts_demo:", object_local_pts_demo.shape)
 
     # Create retargeter
     retargeter_kwargs = build_retargeter_kwargs_from_config(cfg.retargeter, constants, object_urdf_path, task_type)
