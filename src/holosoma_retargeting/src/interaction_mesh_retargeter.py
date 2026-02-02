@@ -1118,9 +1118,6 @@ class InteractionMeshRetargeter:
 
         bodyA = int(np.asarray(geom1.bodyid).item())
         bodyB = int(np.asarray(geom2.bodyid).item())
-        if getattr(self, "debug", False):
-            print(bodyA, bodyB)
-
         J_bodyA = self._calc_contact_jacobian_from_point(bodyA, pos1, input_world=True)
         J_bodyB = self._calc_contact_jacobian_from_point(bodyB, pos2, input_world=True)
 
