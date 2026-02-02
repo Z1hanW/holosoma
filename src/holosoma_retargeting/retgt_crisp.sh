@@ -21,7 +21,7 @@ SCENE_XML_OVERRIDE=${SCENE_XML_OVERRIDE:-""}
 OBJECT_NAME="scene_mesh_sqs"
 # Motion file name expected by downstream code (matches retargeting_gt behavior)
 TASK_NAME=${TASK_NAME:-"human_motion"}
-TEMPLATE_XML="$SCRIPT_DIR/models/g1/g1_29dof_w_stairs.xml"
+TEMPLATE_XML="$SCRIPT_DIR/models/g1/g1_29dof_w_terrain.xml"
 ROBOT_SRC_DIR="$SCRIPT_DIR/models/g1"
 ROBOT_URDF_SRC="$ROBOT_SRC_DIR/g1_29dof.urdf"
 
@@ -78,17 +78,10 @@ for seq_dir in "${seq_dirs[@]}"; do
     stage_obj_dir="$MODULE_ROOT/$seq_name"
     mkdir -p "$stage_obj_dir"
 
-    # Copy robot assets into the sequence folder.
-    robot_dir="$stage_obj_dir/robot_g1"
-    mkdir -p "$robot_dir/assets" "$robot_dir/meshes"
-    cp -f "$ROBOT_URDF_SRC" "$robot_dir/g1_29dof.urdf"
-    if [ -f "$ROBOT_SRC_DIR/g1_29dof.xml" ]; then
-        cp -f "$ROBOT_SRC_DIR/g1_29dof.xml" "$robot_dir/g1_29dof.xml"
-    fi
-    cp -R "$ROBOT_SRC_DIR/assets/." "$robot_dir/assets"
-    if [ -d "$ROBOT_SRC_DIR/meshes" ]; then
-        cp -R "$ROBOT_SRC_DIR/meshes/." "$robot_dir/meshes"
-    fi
+    # Copy all robot assets into the sequence folder.
+    robot_dir="$stage_obj_dir/g1"
+    mkdir -p "$robot_dir"
+    cp -R "$ROBOT_SRC_DIR/." "$robot_dir/"
 
     ln -sf "$scene_obj" "$stage_obj_dir/scene_mesh_sqs.obj"
     scene_urdf_local="$stage_obj_dir/scene_mesh_sqs.urdf"
@@ -123,8 +116,8 @@ from pathlib import Path
 import re
 
 pieces_dir = Path("$stage_obj_dir/pieces")
-assets_path = Path("$stage_obj_dir/box_assets.xml")
-body_path = Path("$stage_obj_dir/box_body.xml")
+    assets_path = Path("$stage_obj_dir/box_assets.xml")
+    body_path = Path("$stage_obj_dir/box_body.xml")
 object_prefix = "$OBJECT_NAME"
 robot_height = float("$ROBOT_HEIGHT")
 human_height = float("$HUMAN_HEIGHT")
@@ -163,7 +156,7 @@ body_lines.append("</mujocoinclude>")
 body_path.write_text("\\n".join(body_lines) + "\\n")
 PY
 
-    scene_xml_local="$stage_obj_dir/g1_29dof_w_scene_mesh_sqs.xml"
+    scene_xml_local="$stage_obj_dir/g1_29dof_w_terrain.xml"
     if [ -n "$SCENE_XML_OVERRIDE" ]; then
         scene_xml_src=${SCENE_XML_OVERRIDE//\{seq\}/$seq_name}
         cp -f "$scene_xml_src" "$scene_xml_local"
@@ -186,6 +179,14 @@ if "box_body.xml" not in text:
     text = text.replace("</worldbody>", '  <include file="box_body.xml"/>\n  </worldbody>', 1)
 path.write_text(text)
 PY
+
+    # Keep box assets alongside the robot package too (for the in-robot scene XML).
+    cp -f "$stage_obj_dir/box_assets.xml" "$robot_dir/box_assets.xml"
+    cp -f "$stage_obj_dir/box_body.xml" "$robot_dir/box_body.xml"
+
+    # Provide scene XMLs next to the robot URDF for MuJoCo loading.
+    cp -f "$scene_xml_local" "$robot_dir/g1_29dof_w_scene_mesh_sqs.xml"
+    cp -f "$scene_xml_local" "$robot_dir/g1_29dof_w_terrain.xml"
 
     mkdir -p "$OUT_ROOT"
     scene_xml_file="$scene_xml_local"

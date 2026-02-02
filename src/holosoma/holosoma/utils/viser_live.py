@@ -1042,58 +1042,64 @@ class ViserLiveViewer:
 
         self._setup_perception_controls()
 
-        with self._server.gui.add_folder("Manual Control", expand_by_default=False):
-            self._manual_control_cb = self._server.gui.add_checkbox(
-                "Enable Manual Root Command",
-                initial_value=False,
-                hint="Override torso_xy_rel/yaw_rel with GUI commands",
-            )
-            self._manual_lin_scale_slider = self._server.gui.add_slider(
-                "XY Command (m)",
-                min=0.0,
-                max=2.0,
-                step=0.05,
-                initial_value=0.5,
-                hint="Magnitude applied to XY command",
-            )
-            self._manual_yaw_scale_slider = self._server.gui.add_slider(
-                "Yaw Command (rad)",
-                min=0.0,
-                max=1.5,
-                step=0.05,
-                initial_value=0.3,
-                hint="Magnitude applied to yaw command",
-            )
-            self._manual_forward_cb = self._server.gui.add_checkbox(
-                "Move +X",
-                initial_value=False,
-                hint="Command positive X in torso frame",
-            )
-            self._manual_back_cb = self._server.gui.add_checkbox(
-                "Move -X",
-                initial_value=False,
-                hint="Command negative X in torso frame",
-            )
-            self._manual_left_cb = self._server.gui.add_checkbox(
-                "Move +Y",
-                initial_value=False,
-                hint="Command positive Y in torso frame",
-            )
-            self._manual_right_cb = self._server.gui.add_checkbox(
-                "Move -Y",
-                initial_value=False,
-                hint="Command negative Y in torso frame",
-            )
-            self._manual_yaw_left_cb = self._server.gui.add_checkbox(
-                "Yaw +",
-                initial_value=False,
-                hint="Command positive yaw",
-            )
-            self._manual_yaw_right_cb = self._server.gui.add_checkbox(
-                "Yaw -",
-                initial_value=False,
-                hint="Command negative yaw",
-            )
+        manual_gui_enabled = os.environ.get("VISER_ENABLE_MANUAL_GUI", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+        if manual_gui_enabled:
+            with self._server.gui.add_folder("Manual Control", expand_by_default=False):
+                self._manual_control_cb = self._server.gui.add_checkbox(
+                    "Enable Manual Root Command",
+                    initial_value=False,
+                    hint="Override torso_xy_rel/yaw_rel with GUI commands",
+                )
+                self._manual_lin_scale_slider = self._server.gui.add_slider(
+                    "XY Command (m)",
+                    min=0.0,
+                    max=2.0,
+                    step=0.05,
+                    initial_value=0.5,
+                    hint="Magnitude applied to XY command",
+                )
+                self._manual_yaw_scale_slider = self._server.gui.add_slider(
+                    "Yaw Command (rad)",
+                    min=0.0,
+                    max=1.5,
+                    step=0.05,
+                    initial_value=0.3,
+                    hint="Magnitude applied to yaw command",
+                )
+                self._manual_forward_cb = self._server.gui.add_checkbox(
+                    "Move +X",
+                    initial_value=False,
+                    hint="Command positive X in torso frame",
+                )
+                self._manual_back_cb = self._server.gui.add_checkbox(
+                    "Move -X",
+                    initial_value=False,
+                    hint="Command negative X in torso frame",
+                )
+                self._manual_left_cb = self._server.gui.add_checkbox(
+                    "Move +Y",
+                    initial_value=False,
+                    hint="Command positive Y in torso frame",
+                )
+                self._manual_right_cb = self._server.gui.add_checkbox(
+                    "Move -Y",
+                    initial_value=False,
+                    hint="Command negative Y in torso frame",
+                )
+                self._manual_yaw_left_cb = self._server.gui.add_checkbox(
+                    "Yaw +",
+                    initial_value=False,
+                    hint="Command positive yaw",
+                )
+                self._manual_yaw_right_cb = self._server.gui.add_checkbox(
+                    "Yaw -",
+                    initial_value=False,
+                    hint="Command negative yaw",
+                )
 
         sim_cfg = getattr(self._env.simulator, "simulator_config", None)
         if sim_cfg is not None and hasattr(sim_cfg, "contact_force_viz"):

@@ -29,11 +29,12 @@ MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/r
 NUM_ENVS=${NUM_ENVS:-4}
 HEADLESS=${HEADLESS:-True}
 PAIR_TERRAIN=${PAIR_TERRAIN:-False}
-START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.05}
+START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-1.0}
+FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.95}
 ENABLE_DEFAULT_POSE_APPEND=${ENABLE_DEFAULT_POSE_APPEND:-False}
 DEFAULT_POSE_APPEND_DURATION_S=${DEFAULT_POSE_APPEND_DURATION_S:-0}
-ENABLE_DEFAULT_POSE_PREPEND=${ENABLE_DEFAULT_POSE_PREPEND:-False}
-DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0}
+ENABLE_DEFAULT_POSE_PREPEND=${ENABLE_DEFAULT_POSE_PREPEND:-True}
+DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-2.0}
 VISER_PORT=${VISER_PORT:-$((RANDOM % 8976 + 1024))}
 VISER_ENV_ID=${VISER_ENV_ID:-0}
 VISER_UPDATE_HZ=${VISER_UPDATE_HZ:-30}
@@ -50,6 +51,9 @@ fi
 
 echo "[INFO] Viser port: ${VISER_PORT}"
 
+export VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI:-0}
+export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-0}
+
 python -m holosoma.visualize physics \
   --checkpoint "${CKPT}" \
   --motion-dir "${MOTION_DIR}" \
@@ -61,6 +65,7 @@ python -m holosoma.visualize physics \
   --viser-update-hz "${VISER_UPDATE_HZ}" \
   --viser-recenter "${VISER_RECENTER}" \
   --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob "${START_AT_TIMESTEP_ZERO_PROB}" \
+  --command.setup_terms.motion_command.params.motion_config.freeze_at_timestep_zero_prob "${FREEZE_AT_TIMESTEP_ZERO_PROB}" \
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_append "${ENABLE_DEFAULT_POSE_APPEND}" \
   --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s "${DEFAULT_POSE_APPEND_DURATION_S}" \
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend "${ENABLE_DEFAULT_POSE_PREPEND}" \
