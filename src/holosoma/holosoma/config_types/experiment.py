@@ -12,6 +12,7 @@ from typing_extensions import Annotated
 
 import holosoma.config_values.action
 import holosoma.config_values.algo
+import holosoma.config_values.camera
 import holosoma.config_values.command
 import holosoma.config_values.curriculum
 import holosoma.config_values.logger
@@ -24,6 +25,7 @@ import holosoma.config_values.termination
 import holosoma.config_values.terrain
 from holosoma.config_types.action import ActionManagerCfg
 from holosoma.config_types.algo import AlgoConfig
+from holosoma.config_types.camera import CameraManagerCfg
 from holosoma.config_types.command import CommandManagerCfg
 from holosoma.config_types.curriculum import CurriculumManagerCfg
 from holosoma.config_types.logger import LoggerConfig
@@ -117,6 +119,10 @@ class ExperimentConfig:
         TerrainManagerCfg,
         tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.terrain.DEFAULTS)),
     ] = holosoma.config_values.terrain.terrain_locomotion_plane
+    camera: Annotated[
+        CameraManagerCfg,
+        tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.camera.DEFAULTS)),
+    ] = holosoma.config_values.camera.none
     observation: Annotated[
         ObservationManagerCfg | None,
         tyro.conf.arg(

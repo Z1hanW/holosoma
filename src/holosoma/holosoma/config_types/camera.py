@@ -1,6 +1,9 @@
-"""Camera configuration types for holosoma_inference."""
+"""Configuration types for the camera manager."""
 
 from __future__ import annotations
+
+from dataclasses import field
+from typing import Any
 
 from pydantic.dataclasses import dataclass
 
@@ -12,7 +15,7 @@ class CameraPose:
     Defines the position and orientation of a camera relative to a robot link.
     """
 
-    parent_link: str
+    camera_body_link: str
     """Robot link to which the camera is attached."""
 
     camera_offset: tuple[float, float, float]
@@ -76,18 +79,11 @@ class CameraConfig:
     --------
     Dual depth camera setup:
     >>> camera_config = CameraConfig(
-    ...     poses={
-    ...         "cam_front_depth": CameraPose(
-    ...             parent_link="robot/torso_link",
+    ...     pose=CameraPose(
+    ...             camera_body_link="torso_link",
     ...             camera_offset=(0.1, 0.0, 0.1),
     ...             camera_rotation=(0.0, 75.0, 0.0)
     ...         ),
-    ...         "cam_back_depth": CameraPose(
-    ...             parent_link="robot/torso_link",
-    ...             camera_offset=(-0.1, 0.0, 0.1),
-    ...             camera_rotation=(0.0, 75.0, 180.0)
-    ...         )
-    ...     },
     ...     props=CameraProps(
     ...         image_type="depth",
     ...         width=240,
@@ -97,7 +93,7 @@ class CameraConfig:
     ... )
     """
 
-    poses: dict[str, CameraPose]
+    pose: CameraPose
     """Dictionary mapping camera names to their pose configurations.
 
     Each key is a camera identifier (e.g., "cam_front_depth", "cam_back_depth"),
@@ -110,3 +106,22 @@ class CameraConfig:
     All cameras in the system use the same technical specifications
     (resolution, FOV, frame rate, etc.) as defined in this CameraProps instance.
     """
+
+
+@dataclass(frozen=True)
+class CameraTermCfg:
+    """Configuration for a single camera term."""
+
+    func: str
+    """Import path for the camera hook (function or callable class)."""
+
+    params: dict[str, Any] = field(default_factory=dict)
+    """Additional parameters forwarded to the camera hook."""
+
+
+@dataclass(frozen=True)
+class CameraManagerCfg:
+    """Configuration for the camera manager."""
+
+    terms: dict[str, CameraTermCfg] = field(default_factory=dict)
+    """Mapping of camera term name to configuration."""

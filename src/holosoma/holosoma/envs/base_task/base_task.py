@@ -5,6 +5,7 @@ import numpy as np
 from holosoma.config_types.env import EnvConfig
 from holosoma.config_types.full_sim import FullSimConfig
 from holosoma.managers.action import ActionManager
+from holosoma.managers.camera import CameraManager
 from holosoma.managers.command import CommandManager
 from holosoma.managers.curriculum import CurriculumManager
 from holosoma.managers.observation import ObservationManager
@@ -42,6 +43,7 @@ class BaseTask:
         observation_config = tyro_config.observation
         simulator_config = tyro_config.simulator
         terrain_config = tyro_config.terrain
+        camera_config = tyro_config.camera
         robot_config = tyro_config.robot
         action_config = tyro_config.action
         reward_config = tyro_config.reward
@@ -100,8 +102,12 @@ class BaseTask:
         self.device = device
 
         self.terrain_manager = TerrainManager(terrain_config, self, device)
+        self.camera_manager = CameraManager(camera_config, self, device)
         self.simulator: BaseSimulator = SimulatorClass(
-            tyro_config=full_sim_config, terrain_manager=self.terrain_manager, device=device
+            tyro_config=full_sim_config,
+            terrain_manager=self.terrain_manager,
+            camera_manager=self.camera_manager,
+            device=device,
         )
 
         self.headless = self.training_config.headless
@@ -160,6 +166,8 @@ class BaseTask:
         )
 
         # Call setup for managers that need it
+
+        # TOD: Why these manager can be None ?!!!
         if self.randomization_manager is not None and not is_isaacgym_manager:
             self.randomization_manager.setup()
         if self.action_manager is not None:
@@ -170,6 +178,8 @@ class BaseTask:
             self.curriculum_manager.setup()
         if self.terrain_manager is not None:
             self.terrain_manager.setup()
+        if self.camera_manager is not None:
+            self.camera_manager.setup()
 
         # Initialize reset manager from simulator config
         self.reset_manager = ResetEventManager(

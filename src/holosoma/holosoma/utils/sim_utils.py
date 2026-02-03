@@ -16,12 +16,15 @@ from typing import Any
 
 from loguru import logger
 from typing_extensions import Self
+from threading import Thread
 
 from holosoma.config_types.env import get_tyro_env_config
 from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.config_types.full_sim import FullSimConfig
 from holosoma.config_types.run_sim import RunSimConfig
 from holosoma.managers.terrain.manager import TerrainManager
+from holosoma.managers.camera.manager import CameraManager
+from holosoma.utils.image_server import ImageServer
 from holosoma.utils.common import seeding
 from holosoma.utils.helpers import get_class
 from holosoma.utils.rate import RateLimiter
@@ -253,9 +256,13 @@ def setup_simulation_environment(
         # Use terrain configuration from RunSimConfig
         terrain_manager = TerrainManager(config.terrain, env=EnvProxy(device), device=device)
 
+        # Use camera configuration from RunSimConfig
+        # camera_manager = CameraManager(config.camera, env=EnvProxy(device), device=device)
+        camera_manager = None
+
         # Create simulator using get_class() to avoid circular imports
         simulator_class = get_class(config.simulator._target_)
-        simulator = simulator_class(full_config, terrain_manager, device)
+        simulator = simulator_class(full_config, terrain_manager, camera_manager, device)
 
         # Now we have an "env" to return which is actually the direct simulator
         env = DirectSimWrapper(simulator)
@@ -430,8 +437,16 @@ class DirectSimulation:
             # arbitrary episode ID given this is sim2sim, we may want to
             # actually support toggling recording and with better filenames too
             self.simulator.video_recorder.start_recording(episode_id=0)
+        
+        # Step 8: setup the image server
+        self.image_server = ImageServer(self.simulator)
+        self.cam_thread = Thread(target=self.image_server.send_process)
+        self.cam_thread.daemon = True
 
-    def run(self) -> None:
+        self.sim_thread = Thread(target=self.simulation_thread)
+
+
+    def simulation_thread(self) -> None:
         """Run the direct simulation loop with viewer sync and FPS logging.
 
         Manages the complete simulation loop including rate limiting,
@@ -509,7 +524,7 @@ class DirectSimulation:
         # Cleanup simulation app
         if self.simulation_app:
             close_simulation_app(self.simulation_app)
-
+        
     def _create_base_init_state(self) -> torch.Tensor:
         """Create base initialization state tensor from robot configuration.
 

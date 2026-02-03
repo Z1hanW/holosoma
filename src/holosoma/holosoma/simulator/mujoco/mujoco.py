@@ -17,6 +17,7 @@ from loguru import logger
 from holosoma.config_types.full_sim import FullSimConfig
 from holosoma.config_types.simulator import MujocoBackend
 from holosoma.managers.terrain.manager import TerrainManager
+from holosoma.managers.camera import CameraManager
 from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
 from holosoma.simulator.mujoco.backends import WARP_AVAILABLE, ClassicBackend, WarpBackend
 from holosoma.simulator.mujoco.command_registry import CommandRegistry
@@ -30,7 +31,6 @@ from holosoma.simulator.shared.object_registry import ObjectType
 from holosoma.simulator.shared.virtual_gantry import create_virtual_gantry
 from holosoma.simulator.types import ActorIndices, ActorNames, ActorPoses, ActorStates, EnvIds
 from holosoma.utils.adapters import mujoco_draw_adapter
-
 
 class MuJoCoScene:
     """MuJoCo Scene implementation following SceneInterface protocol.
@@ -90,13 +90,23 @@ class MuJoCo(BaseSimulator):
     the holosoma simulator interface with unified state access and the shared terrain system.
     """
 
-    def __init__(self, tyro_config: FullSimConfig, terrain_manager: TerrainManager, device: str) -> None:
+    def __init__(
+        self,
+        tyro_config: FullSimConfig,
+        terrain_manager: TerrainManager,
+        camera_manager: CameraManager,
+        device: str,
+    ) -> None:
         """Initialize MuJoCo simulator.
 
         Parameters
         ----------
         tyro_config : FullSimConfig
             Tyro configuration containing simulator, robot, and terrain settings.
+        terrain_manager : TerrainManager
+            Terrain manager for the simulation.
+        camera_manager : CameraManager
+            Camera manager for the simulation.
         device : str
             Device type for simulation ('cpu' or 'cuda').
 
@@ -111,7 +121,7 @@ class MuJoCo(BaseSimulator):
         logger.info(f"Device: {device}")
         logger.info(f"Simulator config: {simulator_config}")
 
-        super().__init__(tyro_config, terrain_manager, device)
+        super().__init__(tyro_config, terrain_manager, camera_manager, device)
 
         # Set robot config for consistency with Isaac simulators
         if not hasattr(tyro_config, "robot"):
@@ -400,6 +410,8 @@ class MuJoCo(BaseSimulator):
         self.scene_manager.add_robot(
             terrain_state, self.robot_config, xml_filter=self.simulator_config.robot_mjcf_filter
         )
+        # Always add camera after robot, in case it attaches to robot bodies
+        self.scene_manager.add_camera(self.camera_manager, self.num_envs)
 
     def _set_robot_properties(self) -> None:
         """Set robot properties including DOF names, body names, and index mappings.
@@ -904,6 +916,7 @@ class MuJoCo(BaseSimulator):
         # Call video recorder capture frame if recording is active
         if self.video_recorder and self.video_recorder.is_recording:
             self.capture_video_frame()
+        
 
     def get_actor_states_by_index(self, indices: ActorIndices) -> ActorStates:
         """Get actor states using MuJoCo best practices with robot-only validation.

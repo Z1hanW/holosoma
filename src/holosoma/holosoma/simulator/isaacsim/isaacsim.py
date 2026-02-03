@@ -33,6 +33,7 @@ from omegaconf import DictConfig
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.path import resolve_data_file_path
 from holosoma.config_types.simulator import SimulatorInitConfig, SceneConfig
+from holosoma.managers.camera import CameraManager
 from holosoma.managers.terrain import TerrainManager
 from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
 from holosoma.simulator.isaacsim.event_cfg import EventCfg
@@ -61,8 +62,14 @@ from holosoma.simulator.types import ActorNames, ActorIndices, EnvIds, ActorStat
 
 
 class IsaacSim(BaseSimulator):
-    def __init__(self, tyro_config: FullSimConfig, terrain_manager: TerrainManager, device: str):
-        super().__init__(tyro_config, terrain_manager, device)
+    def __init__(
+        self,
+        tyro_config: FullSimConfig,
+        terrain_manager: TerrainManager,
+        camera_manager: CameraManager,
+        device: str,
+    ):
+        super().__init__(tyro_config, terrain_manager, camera_manager, device)
 
         # Add device attribute for base simulator compatibility
         self.device = device

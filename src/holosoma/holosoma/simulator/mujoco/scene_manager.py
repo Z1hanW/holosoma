@@ -14,6 +14,7 @@ from holosoma.config_types.robot import RobotConfig
 from holosoma.config_types.simulator import MujocoXMLFilterCfg, SimulatorConfig
 from holosoma.managers.terrain.base import TerrainTermBase
 from holosoma.utils.module_utils import get_holosoma_root
+from holosoma.managers.camera import CameraManager
 
 
 class MujocoSceneManager:
@@ -139,6 +140,31 @@ class MujocoSceneManager:
         #    castshadow=True,
         #    type=mujoco.mjtLightType.mjLIGHT_DIRECTIONAL,
         # )
+
+    def add_camera(self, camera_manager: CameraManager, num_envs: int) -> None:
+        """Add cameras to the world specification.
+
+        Parameters
+        ----------
+        camera_manager : CameraManager
+            Camera manager for the simulation.
+        num_envs : int
+            Number of environments (affects camera layout planning).
+        """
+
+        # # 0. get the robot torso link;
+        # mj_model = self.world_spec.root_model
+
+        # # read different terms in camera_manager, and attach them to the robot torso link;
+        # cam_terms = camera_manager.camera_terms
+        # for cam_name, cam_term in cam_terms.items():
+        #     cam_config = cam_term.cfg
+        #     cam_pose = cam_config.pose
+        #     cam_pos = cam_pose.camera_offset
+        #     cam_quat = cam_pose.camera_rotation
+        # TODO: Currently, add camera in xml file.
+        pass
+
 
     def add_terrain(self, terrain_state: TerrainTermBase, num_envs: int) -> None:
         """Add terrain to the world specification with extensible dispatch.

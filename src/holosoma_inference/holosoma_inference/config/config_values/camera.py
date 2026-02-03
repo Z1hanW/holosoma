@@ -16,12 +16,12 @@ from holosoma_inference.config.config_types.camera import CameraConfig, CameraPo
 dual_depth_cameras = CameraConfig(
     poses={
         "cam_front_depth": CameraPose(
-            camera_body_link="torso_link",
+            parent_link="robot/torso_link",
             camera_offset=(0.1, 0.0, 0.1),  # x, y, z [m]
             camera_rotation=(0.0, 75.0, 0.0),  # roll, pitch, yaw [deg]
         ),
         "cam_back_depth": CameraPose(
-            camera_body_link="torso_link",
+            parent_link="robot/torso_link",
             camera_offset=(-0.1, 0.0, 0.1),  # x, y, z [m]
             camera_rotation=(0.0, 75.0, 180.0),  # roll, pitch, yaw [deg]
         ),

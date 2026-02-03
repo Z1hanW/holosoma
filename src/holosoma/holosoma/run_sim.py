@@ -53,7 +53,12 @@ def run_simulation(config: RunSimConfig):
 
         # Create and run direct simulation using context manager for automatic clean-up
         with DirectSimulation(config, env, device, simulation_app) as sim:
-            sim.run()
+            # start the simulation
+            logger.info("Starting simulation thread")
+            sim.sim_thread.start()
+            # start the camera thread
+            logger.info("Starting camera thread")
+            sim.cam_thread.start()
 
     except Exception as e:
         logger.error(f"Error during simulation: {e}")

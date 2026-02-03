@@ -21,6 +21,7 @@ from holosoma.config_types.logger import DisabledLoggerConfig, LoggerConfig
 from holosoma.config_types.robot import RobotConfig
 from holosoma.config_types.simulator import SimulatorConfig
 from holosoma.config_types.terrain import TerrainManagerCfg
+from holosoma.config_types.camera import CameraManagerCfg
 from holosoma.config_types.video import VideoConfig
 
 
@@ -63,6 +64,11 @@ class RunSimConfig:
         TerrainManagerCfg,
         tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.terrain.DEFAULTS)),
     ] = holosoma.config_values.terrain.terrain_locomotion_plane
+
+    camera: Annotated[
+        CameraManagerCfg,
+        tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.camera.DEFAULTS)),
+    ] = holosoma.config_values.camera.dual_depth_cameras
 
     # Minimal configs needed for FullSimConfig
     training: TrainingConfig = field(default_factory=default_training_config)

@@ -5,6 +5,16 @@ including reset event management, observation management, action management,
 reward management, and other utilities.
 """
 
-from . import action, command, curriculum, observation, randomization, reward, termination, terrain
+from . import action, camera, command, curriculum, observation, randomization, reward, termination, terrain
 
-__all__ = ["action", "command", "curriculum", "observation", "randomization", "reward", "termination", "terrain"]
+__all__ = [
+    "action",
+    "camera",
+    "command",
+    "curriculum",
+    "observation",
+    "randomization",
+    "reward",
+    "termination",
+    "terrain",
+]

@@ -10,6 +10,7 @@ from holosoma.config_types.experiment import TrainingConfig
 from holosoma.config_types.full_sim import FullSimConfig
 from holosoma.config_types.robot import RobotConfig
 from holosoma.config_types.simulator import SimulatorInitConfig
+from holosoma.managers.camera import CameraManager
 from holosoma.managers.terrain import TerrainManager
 from holosoma.simulator.shared.object_registry import ObjectRegistry
 from holosoma.simulator.shared.scene_types import SceneInterface
@@ -128,7 +129,13 @@ class BaseSimulator:
     _rigid_body_vel: torch.Tensor
     _rigid_body_ang_vel: torch.Tensor
 
-    def __init__(self, tyro_config: FullSimConfig, terrain_manager: TerrainManager, device: str):
+    def __init__(
+        self,
+        tyro_config: FullSimConfig,
+        terrain_manager: TerrainManager,
+        camera_manager: CameraManager,
+        device: str,
+    ):
         """
         Initializes the base simulator with configuration settings and simulation device.
 
@@ -138,11 +145,14 @@ class BaseSimulator:
             Tyro configuration for the simulation.
         terrain_manager: TerrainManager
             Terrain manager for the simulation.
+        camera_manager: CameraManager
+            Optional camera manager for simulator-integrated camera hooks.
         device: str
             Device type for simulation ('cpu' or 'cuda').
 
         """
         self.terrain_manager = terrain_manager
+        self.camera_manager = camera_manager
         self.training_config = tyro_config.training
         self.simulator_config = tyro_config.simulator
         self.robot_config = tyro_config.robot

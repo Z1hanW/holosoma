@@ -12,6 +12,7 @@ from rich.progress import Progress
 from torch import Tensor
 
 from holosoma.config_types.full_sim import FullSimConfig
+from holosoma.managers.camera import CameraManager
 from holosoma.managers.terrain import TerrainManager
 from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
 from holosoma.simulator.isaacgym.physics import apply_mass_from_config, apply_rigid_shape_properties
@@ -29,7 +30,6 @@ from holosoma.utils.draw import draw_line, draw_sphere
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.torch_utils import to_torch, torch_rand_float
-
 
 class Scene:
     """Scene wrapper for IsaacGym to provide unified interface.
@@ -81,8 +81,14 @@ class Scene:
 
 
 class IsaacGym(BaseSimulator):
-    def __init__(self, tyro_config: FullSimConfig, terrain_manager: TerrainManager, device: str):
-        super().__init__(tyro_config, terrain_manager, device)
+    def __init__(
+        self,
+        tyro_config: FullSimConfig,
+        terrain_manager: TerrainManager,
+        camera_manager: CameraManager,
+        device: str,
+    ):
+        super().__init__(tyro_config, terrain_manager, camera_manager, device)
 
         self.visualize_viewer = False
 
