@@ -1,6 +1,7 @@
 """Unitree robot interface using C++/pybind11 binding."""
 
 import numpy as np
+from termcolor import colored
 
 from holosoma_inference.config.config_types import RobotConfig
 from holosoma_inference.sdk.base.base_interface import BaseInterface
@@ -15,6 +16,11 @@ class UnitreeInterface(BaseInterface):
         self._kp_level = 1.0
         self._kd_level = 1.0
         self._init_binding()
+
+        # Initialize local joystick if enabled
+        self._local_joystick_msg = None
+        if use_joystick:
+            self._init_joystick()
 
     def _init_binding(self):
         """Initialize C++/pybind11 binding."""
@@ -41,6 +47,23 @@ class UnitreeInterface(BaseInterface):
         # GO2 SDK motor order differs from joint order
         if self.robot_config.robot.lower() == "go2":
             self._unitree_motor_order = (3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8)
+
+    def _init_joystick(self):
+        """Initialize local joystick/remote control."""
+        from holosoma_inference.sdk.booster.command_sender.booster.joystick_message import BoosterJoystickMessage
+        from holosoma_inference.sdk.booster.command_sender.booster.remote_control_service import (
+            BoosterRemoteControlService,
+        )
+
+        try:
+            self._remote_control = BoosterRemoteControlService()
+            self._local_joystick_msg = BoosterJoystickMessage(self._remote_control)
+            print(colored("Local joystick initialized for Unitree interface", "green"))
+        except Exception as e:
+            print(colored(f"Warning: Failed to initialize local joystick: {e}", "yellow"))
+            print(colored("Falling back to G1 physical remote controller", "yellow"))
+            self._remote_control = None
+            self._local_joystick_msg = None
 
     def get_low_state(self) -> np.ndarray:
         """Get robot state as numpy array."""
@@ -104,6 +127,10 @@ class UnitreeInterface(BaseInterface):
 
     def get_joystick_msg(self):
         """Get wireless controller message."""
+        # Prefer local USB joystick if available
+        if self._local_joystick_msg is not None:
+            return self._local_joystick_msg
+        # Fall back to G1's physical remote via C++ binding
         return self.unitree_interface.read_wireless_controller()
 
     def get_joystick_key(self, wc_msg=None):
