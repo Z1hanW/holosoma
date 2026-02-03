@@ -310,6 +310,7 @@ class InterfaceWrapper:
             lx = getattr(wc_msg, "lx", 0.0)
             ly = getattr(wc_msg, "ly", 0.0)
             rx = getattr(wc_msg, "rx", 0.0)
+
             lin_vel_command[0, 1] = -(lx if abs(lx) > 0.1 else 0.0) * stand_command[0, 0]
             lin_vel_command[0, 0] = (ly if abs(ly) > 0.1 else 0.0) * stand_command[0, 0]
             ang_vel_command[0, 0] = -(rx if abs(rx) > 0.1 else 0.0) * stand_command[0, 0]
@@ -320,7 +321,6 @@ class InterfaceWrapper:
             self._key_states[cur_key] = True
         else:
             self._key_states = dict.fromkeys(self._wc_key_map.values(), False)
-
         return lin_vel_command, ang_vel_command, self._key_states
 
     # ============================================================================

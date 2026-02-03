@@ -165,7 +165,6 @@ class MujocoSceneManager:
         # TODO: Currently, add camera in xml file.
         pass
 
-
     def add_terrain(self, terrain_state: TerrainTermBase, num_envs: int) -> None:
         """Add terrain to the world specification with extensible dispatch.
 
@@ -294,7 +293,8 @@ class MujocoSceneManager:
         # Handle negative heights: shift to make non-negative (MuJoCo requirement)
         min_height = height_data_scaled.min()
         z_offset = 0.0
-        if min_height < 0:
+        # min_height needs to be positive. zero is not allowed.
+        if min_height <= 0:
             height_data_scaled = height_data_scaled - min_height + 1e-9
             z_offset = min_height
             logger.info(f"Shifted heightfield by {-min_height:.3f}m to ensure non-negative heights")

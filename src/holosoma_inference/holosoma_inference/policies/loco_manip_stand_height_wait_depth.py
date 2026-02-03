@@ -28,6 +28,9 @@ class LocoManipStandHeightWaitDepthPolicy(LocomotionPolicy):
         # Initialize depth image client
         self._init_depth_shm()
 
+        # Initialize pre-fixed speed command
+        self._init_fixed_speed_command()
+
     def _initialize_history_state(self):
         # KEEP
         """Initialize history state for observation buffers."""
@@ -49,6 +52,31 @@ class LocoManipStandHeightWaitDepthPolicy(LocomotionPolicy):
         self.ref_upper_dof_pos = np.array([robot_config.default_dof_angles[i] for i in self.upper_dof_indices]).reshape(
             1, -1
         )
+
+    def _init_depth_shm(self):
+        # KEEP
+        """Initialize depth image client using shared memory."""
+        # Create shared memory for depth images
+        camera_config = self.config.camera
+        img_shape = [camera_config.props.resized_height, camera_config.props.resized_width]
+        channels = 1  # depth camera is always 1 channel
+        num_cameras = len(camera_config.poses)
+        expected_shape = [num_cameras, channels, img_shape[0], img_shape[1]]
+        print(f"expected_shape: {expected_shape}")
+
+        # TDDO: enable this after debugging
+        self.depth_img_shm = shared_memory.SharedMemory(name="depth_img_shm")
+        self.depth_img_array = np.ndarray(expected_shape, dtype=np.float32, buffer=self.depth_img_shm.buf)
+        print(f"[Policy] Depth image client initialized with shared memory: {self.depth_img_shm.name}")
+        # self.depth_img_array = np.zeros(expected_shape, dtype=np.float32)
+    
+    def _init_fixed_forward_speed_command(self):
+        # KEEP
+        """Initialize pre-fixed speed command."""
+        # default forward speed is 0.5 m/s; only influence the forward speed.
+        self.fixed_forward_speed = 0.5
+        self.fixed_forward_speed_enabled = False
+    
 
     def get_current_obs_buffer_dict(self, robot_state_data):
         # KEEP
@@ -123,22 +151,24 @@ class LocoManipStandHeightWaitDepthPolicy(LocomotionPolicy):
             "actor_obs_upper_body": actor_obs_upper_body.astype(np.float32),
         }
 
-    def _init_depth_shm(self):
-        # KEEP
-        """Initialize depth image client using shared memory."""
-        # Create shared memory for depth images
-        camera_config = self.config.camera
-        img_shape = [camera_config.props.resized_height, camera_config.props.resized_width]
-        channels = 1  # depth camera is always 1 channel
-        num_cameras = len(camera_config.poses)
-        expected_shape = [num_cameras, channels, img_shape[0], img_shape[1]]
-        print(f"expected_shape: {expected_shape}")
+    def handle_joystick_button(self, cur_key: str):
+        """Handle joystick button presses for locomotion."""
+        # Call parent handler for common commands
+        super().handle_joystick_button(cur_key)
 
-        # TDDO: enable this after debugging
-        self.depth_img_shm = shared_memory.SharedMemory(name="depth_img_shm")
-        self.depth_img_array = np.ndarray(expected_shape, dtype=np.float32, buffer=self.depth_img_shm.buf)
-        print(f"[Policy] Depth image client initialized with shared memory: {self.depth_img_shm.name}")
-        # self.depth_img_array = np.zeros(expected_shape, dtype=np.float32)
+        if cur_key == "L2+R2":
+            # When setting up the fixed forward speed, it should be in standing position.
+            assert self.stand_command[0, 0] == 0
+            self.fixed_forward_speed_enabled = not self.fixed_forward_speed_enabled
+            self.fixed_forward_speed = 0.5
+        
+        elif cur_key == "R2+up":
+            self.fixed_forward_speed += 0.1
+        elif cur_key == "R2+down":
+            self.fixed_forward_speed -= 0.1
+        
+        if self.fixed_forward_speed_enabled:
+            self.lin_vel_command[0, 0] = self.fixed_forward_speed
 
     # def shutdown(self):
     #     """Clean shutdown of threading and resources."""
