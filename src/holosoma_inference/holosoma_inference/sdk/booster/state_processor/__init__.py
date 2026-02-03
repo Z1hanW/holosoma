@@ -16,19 +16,13 @@ def create_state_processor(config: RobotConfig, lcm=None):
     """
     sdk_type = config.sdk_type
 
-    if sdk_type == "unitree":
-        from .unitree import UnitreeStateProcessor
-
-        return UnitreeStateProcessor(config, lcm)
     if sdk_type == "booster":
         from .booster import BoosterStateProcessor
 
         return BoosterStateProcessor(config, lcm)
     if sdk_type in ["lcm_unitree", "lcm_booster"]:
-        raise ValueError(
-            f"LCM SDK types are no longer supported. Please use 'unitree' or 'booster' instead of '{sdk_type}'"
-        )
-    raise ValueError(f"Unsupported SDK type: {sdk_type}")
+        raise ValueError(f"LCM SDK types are no longer supported. Please use 'booster' instead of '{sdk_type}'")
+    raise ValueError(f"Unsupported SDK type: {sdk_type}. Only 'booster' is supported for state_processor.")
 
 
 # For backward compatibility
@@ -38,6 +32,5 @@ __all__ = [
     "BasicStateProcessor",
     "BoosterStateProcessor",
     "StateProcessor",  # Backward compatibility
-    "UnitreeStateProcessor",
     "create_state_processor",
 ]

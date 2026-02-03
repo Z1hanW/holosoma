@@ -2,29 +2,42 @@
 
 # Parse command line arguments
 NEW_CONTAINER=false
-if [ "$1" == "--new" ]; then
-    NEW_CONTAINER=true
-fi
+EXT_DIR=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --new) NEW_CONTAINER=true; shift ;;
+        --ext-repo-path) EXT_DIR="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
 
 # Get the project root directory dynamically
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )" # holosoma/holosoma_inference/docker
-PROJECT_ROOT="$( cd "$SCRIPT_DIR/../../.." && pwd )" # holosoma/
-
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_ROOT="$( cd "$SCRIPT_DIR/../../.." && pwd )"
 CONTAINER_NAME="far-jetson-container"
 IMAGE_NAME="holosoma-onboard"
 
 # Function to create a new container
 create_container() {
+    local mounts=(
+        -v "$PROJECT_ROOT":/workspace/holosoma
+        -v ~/cyclonedds_ws/:/workspace/cyclonedds_ws
+        -v /tmp/.X11-unix:/tmp/.X11-unix
+        -v $HOME/.Xauthority:/root/.Xauthority:ro
+        -v /dev/shm:/dev/shm
+    )
+    [[ -d "$EXT_DIR" ]] && mounts+=(-v "$EXT_DIR":/workspace/holosoma-extension) # optionally mount extension repo
+
     docker run -it \
         --privileged \
         --name ${CONTAINER_NAME} \
         --network host \
+        --ipc host \
         -e DISPLAY=$DISPLAY \
         -e XAUTHORITY=/root/.Xauthority \
-        -v /tmp/.X11-unix:/tmp/.X11-unix \
-        -v ~/cyclonedds_ws/:/workspace/cyclonedds_ws \
-        -v $HOME/.Xauthority:/root/.Xauthority:ro \
-        -v "$PROJECT_ROOT":/workspace/holosoma \
+        -e ROS_DOMAIN_ID=${ROS_DOMAIN_ID} \
+        -e ROS_LOCALHOST_ONLY=${ROS_LOCALHOST_ONLY} \
+        "${mounts[@]}" \
         -w /workspace/holosoma \
         "$IMAGE_NAME"
 }

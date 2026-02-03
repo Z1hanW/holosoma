@@ -54,3 +54,6 @@ class TaskConfig:
 
     use_ros: bool = False
     """Use ROS2 for rate limiting."""
+
+    print_observations: bool = False
+    """Print observation vectors for debugging."""

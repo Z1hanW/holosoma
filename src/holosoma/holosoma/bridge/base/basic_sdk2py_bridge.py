@@ -5,13 +5,14 @@ import numpy as np
 import pygame
 from loguru import logger
 
+from holosoma.config_types.robot import RobotConfig
 from holosoma.utils.safe_torch_import import torch
 
 
 class BasicSdk2Bridge(ABC):
     """Abstract base class for SDK2Py bridge implementations."""
 
-    def __init__(self, simulator, robot_config, bridge_config, lcm=None):
+    def __init__(self, simulator, robot_config: RobotConfig, bridge_config, lcm=None):
         self.lcm = lcm
         self.robot = robot_config
         self.bridge_config = bridge_config
@@ -101,7 +102,6 @@ class BasicSdk2Bridge(ABC):
 
         # PD control computation
         torques = tau + kp_t * (q_des - q_actual) + kd_t * (dq_des - dq_actual)
-
         # Convert to numpy and apply limits
         torques_np = torques.detach().cpu().numpy()
         self.torques = np.clip(torques_np, -self.torque_limit, self.torque_limit)

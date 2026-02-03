@@ -1,13 +1,24 @@
+import sys
+from importlib.metadata import entry_points
+
 from .base import BasicSdk2Bridge
+
+# Auto-discover bridge implementations from installed extensions
+# Handle Python 3.8/3.9 vs 3.10+ API difference for entry_points
+if sys.version_info >= (3, 10):
+    _bridge_registry = {ep.name: ep.load for ep in entry_points(group="holosoma.bridge")}
+else:
+    _eps = entry_points()
+    _bridge_eps = _eps.get("holosoma.bridge", [])
+    _bridge_registry = {ep.name: ep.load for ep in _bridge_eps}
 
 
 def create_sdk2py_bridge(simulator, robot_config, bridge_config, lcm=None):
     """
     Factory function to create the appropriate SDK2Py bridge based on configuration.
 
-    Now uses robot.bridge.sdk_type for SDK selection instead of bridge_config.type.
-    This allows robot-specific bridge parameters (motor_type, message_type, etc.)
-    to be properly configured.
+    Uses entry points for SDK selection, allowing extensions to register their own
+    bridge implementations without modifying the main codebase.
 
     Args:
         simulator: BaseSimulator instance (simulator-agnostic)
@@ -18,27 +29,17 @@ def create_sdk2py_bridge(simulator, robot_config, bridge_config, lcm=None):
     Returns:
         An instance of the appropriate bridge class
     """
-    # Use robot.bridge.sdk_type instead of bridge_config.type for SDK selection
     sdk_type = robot_config.bridge.sdk_type
 
-    if sdk_type == "unitree":
-        from .unitree import UnitreeSdk2Bridge  # noqa: PLC0415 -- deferred
+    if sdk_type not in _bridge_registry:
+        raise ValueError(f"Unsupported SDK type: {sdk_type}. Available: {list(_bridge_registry.keys())}")
 
-        return UnitreeSdk2Bridge(simulator, robot_config, bridge_config, lcm)
-    if sdk_type == "booster":
-        from .booster import BoosterSdk2Bridge  # noqa: PLC0415 -- deferred
-
-        return BoosterSdk2Bridge(simulator, robot_config, bridge_config, lcm)
-    if sdk_type == "ros2":
-        from .ros2 import ROS2Bridge  # noqa: PLC0415 -- deferred
-
-        return ROS2Bridge(simulator, robot_config, bridge_config, lcm)
-    raise ValueError(f"Unsupported SDK type: {sdk_type}")
+    # Lazy load the bridge class
+    bridge_cls = _bridge_registry[sdk_type]()
+    return bridge_cls(simulator, robot_config, bridge_config, lcm)
 
 
 __all__ = [
     "BasicSdk2Bridge",
-    "BoosterSdk2Bridge",
-    "UnitreeSdk2Bridge",
     "create_sdk2py_bridge",
 ]
