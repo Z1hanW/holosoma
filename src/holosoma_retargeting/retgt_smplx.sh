@@ -33,7 +33,8 @@ python examples/robot_retarget.py \
     --robot-config.robot-urdf-file "$ROBOT_URDF" \
     --data_format "$DATA_FORMAT" \
     "${SAVE_DIR_ARG[@]}" \
-    --retargeter.base_tracking_weight 5.0 \
+    --retargeter.q_a_init_idx -7 \
+    --retargeter.base_tracking_weight 500.0 \
     --retargeter.debug \
     --retargeter.visualize
 
