@@ -217,6 +217,7 @@ def preprocess_motion_data(
     scale=0.714,
     mat_height=0.1,
     object_poses=None,
+    human_z_offset: float = 0.0,
 ):
     """
     Preprocess human joints and object poses for retargeting.
@@ -244,6 +245,8 @@ def preprocess_motion_data(
 
     # Scale human joints
     human_joints = human_joints * scale
+    if human_z_offset != 0.0:
+        human_joints[:, :, 2] += float(human_z_offset)
 
     if object_poses is not None:
         object_poses[:, -3:-1] = object_poses[:, -3:-1] * scale

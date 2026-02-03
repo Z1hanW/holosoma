@@ -56,8 +56,6 @@ class InteractionMeshRetargeter:
         debug: bool = False,
         w_nominal_tracking_init: float = 5.0,
         nominal_tracking_tau: float = 10.0,
-        base_tracking_weight: float = 0.0,
-        laplacian_weight: float = 0.0,
     ):
         """This kinematic retargeter solves the diffIK problem with hard constraints in SQP style.
         During each SQP iteration, the problem is solved with the following constraints and costs:
@@ -95,12 +93,11 @@ class InteractionMeshRetargeter:
         self.demo_joints = task_constants.DEMO_JOINTS
         self.laplacian_match_links = task_constants.JOINTS_MAPPING
         self.task_constants = task_constants
-        self.base_tracking_weight = float(base_tracking_weight)
 
         self.smplh_mapped_joint_indices = [self.demo_joints.index(name) for name in self.laplacian_match_links]
 
         # Setup weights and parameters
-        self.laplacian_weights = float(laplacian_weight)
+        self.laplacian_weights = 10
         self.smooth_weight = 0.2
         # Tolerance for foot sticking constraints in x, y.
         self.foot_sticking_tolerance = foot_sticking_tolerance
@@ -615,16 +612,6 @@ class InteractionMeshRetargeter:
                 else:
                     w_nominal_tracking = self.w_nominal_tracking_init * np.exp(-i / self.nominal_tracking_tau)
 
-                base_target = None
-                if self.base_tracking_weight > 0.0:
-                    if "Spine1" in self.demo_joints:
-                        root_idx = self.demo_joints.index("Spine1")
-                    elif "Pelvis" in self.demo_joints:
-                        root_idx = self.demo_joints.index("Pelvis")
-                    else:
-                        root_idx = 0
-                    base_target = human_joint_motions[i, root_idx]
-
                 q, cost = self.iterate(
                     q_locked=q_locked_list[i],
                     q_n=q,
@@ -633,7 +620,6 @@ class InteractionMeshRetargeter:
                     adj_list=adj_list,
                     obj_pts_local=object_points_local,
                     foot_sticking=foot_sticking_sequences[i],
-                    base_target=base_target,
                     w_nominal_tracking=w_nominal_tracking,
                     q_a_nominal=(q_nominal_list[i, self.q_a_indices] if q_nominal_list is not None else None),
                     init_t=i == 0,
@@ -780,7 +766,6 @@ class InteractionMeshRetargeter:
         foot_sticking: tuple[bool, bool],
         w_nominal_tracking: float = 0.0,
         q_a_nominal: np.ndarray | None = None,
-        base_target: np.ndarray | None = None,
         verbose=False,
         init_t=False,
     ):
@@ -905,22 +890,6 @@ class InteractionMeshRetargeter:
         Qd = np.asarray(self.Q_diag, dtype=float).reshape(-1)
         obj_terms.append(cp.sum_squares(cp.multiply(np.sqrt(Qd), dqa + q_a_n_last)))
 
-        # Soft tracking for base translation (optional)
-        if self.base_tracking_weight > 0.0 and base_target is not None:
-            base_target = np.asarray(base_target, dtype=float).reshape(3)
-            base_local = []
-            for k in (0, 1, 2):
-                idx = np.where(self.q_a_indices == k)[0]
-                if idx.size == 1:
-                    base_local.append(int(idx[0]))
-            if len(base_local) == 3:
-                base_local_idx = np.array(base_local, dtype=int)
-                base_pos = q[:3]
-                dqa_base = dqa[base_local_idx]
-                obj_terms.append(
-                    self.base_tracking_weight * cp.sum_squares((base_pos + dqa_base) - base_target)
-                )
-
         # Smoothness cost
         dqa_smooth = q_t_last[self.q_a_indices] - q_a_n_last
         if np.isscalar(self.smooth_weight):
@@ -964,7 +933,6 @@ class InteractionMeshRetargeter:
         adj_list: list[list[int]],
         obj_pts_local: np.ndarray,
         foot_sticking: tuple[bool, bool],
-        base_target: np.ndarray | None = None,
         w_nominal_tracking: float = 0.0,
         q_a_nominal: np.ndarray | None = None,
         init_t: bool = False,
@@ -983,7 +951,6 @@ class InteractionMeshRetargeter:
                 obj_pts_local=obj_pts_local,
                 foot_sticking=foot_sticking,
                 q_a_nominal=q_a_nominal,
-                base_target=base_target,
                 w_nominal_tracking=w_nominal_tracking,
                 init_t=init_t,
             )

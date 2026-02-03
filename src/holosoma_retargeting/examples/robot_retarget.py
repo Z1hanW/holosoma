@@ -515,8 +515,6 @@ def build_retargeter_kwargs_from_config(
         "visualize": retargeter_config.visualize,
         "debug": retargeter_config.debug,
         "w_nominal_tracking_init": retargeter_config.w_nominal_tracking_init,
-        "base_tracking_weight": retargeter_config.base_tracking_weight,
-        "laplacian_weight": retargeter_config.laplacian_weight,
         # "foot_tracking_weight": retargeter_config.foot_tracking_weight,
     }
     if task_type == "climbing":
@@ -723,7 +721,13 @@ def main(cfg: RetargetingConfig) -> None:
 
     # Preprocess motion data
     if task_type == "robot_only":
-        human_joints = preprocess_motion_data(human_joints, retargeter, toe_names, smpl_scale)
+        human_joints = preprocess_motion_data(
+            human_joints,
+            retargeter,
+            toe_names,
+            smpl_scale,
+            human_z_offset=cfg.task_config.human_z_offset,
+        )
     elif task_type in {"object_interaction", "climbing"}:
         human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
             human_joints,
@@ -731,6 +735,7 @@ def main(cfg: RetargetingConfig) -> None:
             toe_names,
             scale=smpl_scale,
             object_poses=object_poses,
+            human_z_offset=cfg.task_config.human_z_offset,
         )
     if cfg.retargeter.debug:
         root_name_candidates = ("Pelvis", "Spine1")

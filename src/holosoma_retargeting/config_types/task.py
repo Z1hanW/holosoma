@@ -41,3 +41,6 @@ class TaskConfig:
     scene_xml_file: Path | None = None
 
     object_scale_with_smpl: bool = False
+
+    # Optional human vertical offset applied during preprocessing (meters)
+    human_z_offset: float = 0.0
