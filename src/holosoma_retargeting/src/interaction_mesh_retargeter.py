@@ -406,7 +406,7 @@ class InteractionMeshRetargeter:
                 self._update_interaction_mesh_vis(frame_idx)
 
     def _clear_interaction_meshes(self):
-        for handle in self._interaction_mesh_handles.values():
+        for handle in list(self._interaction_mesh_handles.values()):
             try:
                 handle.remove()
             except Exception:
@@ -530,7 +530,17 @@ class InteractionMeshRetargeter:
             q_locked_list = q_nominal_list
         else:
             q_locked_list = np.zeros((num_frames, self.nq))
-            q_locked_list[0, self.q_a_indices] = q_a_init
+            if q_a_init is None:
+                raise ValueError("q_a_init must be provided when q_nominal_list is None.")
+            q_a_init_arr = np.asarray(q_a_init).reshape(-1)
+            if q_a_init_arr.shape[0] != len(self.q_a_indices):
+                if q_a_init_arr.shape[0] >= (self.q_a_indices.max() + 1):
+                    q_a_init_arr = q_a_init_arr[self.q_a_indices]
+                else:
+                    raise ValueError(
+                        f"q_a_init has shape {q_a_init_arr.shape}, expected {len(self.q_a_indices)}"
+                    )
+            q_locked_list[0, self.q_a_indices] = q_a_init_arr
 
         q_locked_list[:, -7:] = object_poses_augmented
         q = np.copy(q_locked_list[0])
@@ -543,7 +553,6 @@ class InteractionMeshRetargeter:
         interaction_mesh_frames_tgt = [] if self.visualize else None
 
         print(f"\nStarting motion retargeting for {num_frames} frames...")
-
         with tqdm(range(num_frames)) as pbar:
             for i in pbar:
                 # Get object poses and transform points
