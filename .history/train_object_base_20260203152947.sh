@@ -19,5 +19,5 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" torchrun --nproc_per_node="${NPRO
   --training.num_envs="${NUM_ENVS}" \
   --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_FILE}" \
   logger:wandb \
-  --logger.video.interval=2000 \
+  --logger.video.interval=4000 \
   "${EXTRA_ARGS[@]}"
