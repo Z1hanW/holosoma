@@ -46,3 +46,6 @@ class RetargeterConfig:
 
     nominal_tracking_tau: float = 1e6
     """Time constant for the nominal tracking cost."""
+
+    base_tracking_weight: float = 0.0
+    """Soft weight to keep the floating base near the human root (0 disables)."""
