@@ -29,6 +29,7 @@ python examples/robot_retarget.py \
     --task-name "$TASK_NAME" \
     --task-config.object_name "$OBJECT_NAME" \
     --task-config.object-dir "$OBJECT_DIR" \
+    --task-config.human-z-offset 0.1 \
     "${SCENE_XML_ARG[@]}" \
     --robot-config.robot-urdf-file "$ROBOT_URDF" \
     --data_format "$DATA_FORMAT" \
