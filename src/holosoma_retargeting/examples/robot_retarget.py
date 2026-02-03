@@ -516,6 +516,7 @@ def build_retargeter_kwargs_from_config(
         "debug": retargeter_config.debug,
         "w_nominal_tracking_init": retargeter_config.w_nominal_tracking_init,
         "base_tracking_weight": retargeter_config.base_tracking_weight,
+        "laplacian_weight": retargeter_config.laplacian_weight,
         # "foot_tracking_weight": retargeter_config.foot_tracking_weight,
     }
     if task_type == "climbing":

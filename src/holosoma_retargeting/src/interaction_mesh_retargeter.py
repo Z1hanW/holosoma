@@ -57,6 +57,7 @@ class InteractionMeshRetargeter:
         w_nominal_tracking_init: float = 5.0,
         nominal_tracking_tau: float = 10.0,
         base_tracking_weight: float = 0.0,
+        laplacian_weight: float = 0.0,
     ):
         """This kinematic retargeter solves the diffIK problem with hard constraints in SQP style.
         During each SQP iteration, the problem is solved with the following constraints and costs:
@@ -99,7 +100,7 @@ class InteractionMeshRetargeter:
         self.smplh_mapped_joint_indices = [self.demo_joints.index(name) for name in self.laplacian_match_links]
 
         # Setup weights and parameters
-        self.laplacian_weights = 10
+        self.laplacian_weights = float(laplacian_weight)
         self.smooth_weight = 0.2
         # Tolerance for foot sticking constraints in x, y.
         self.foot_sticking_tolerance = foot_sticking_tolerance

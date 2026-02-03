@@ -49,3 +49,6 @@ class RetargeterConfig:
 
     base_tracking_weight: float = 0.0
     """Soft weight to keep the floating base near the human root (0 disables)."""
+
+    laplacian_weight: float = 0.0
+    """Weight for Laplacian matching term (0 disables the interaction mesh objective)."""

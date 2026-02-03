@@ -12,6 +12,7 @@ ROBOT_URDF=${5:-"models/g1/g1_29dof.urdf"}
 DATA_FORMAT=${6:-"smplx"}
 SAVE_DIR=${7:-""}
 SCENE_XML_FILE=${8:-""}
+LAPLACIAN_WEIGHT=${LAPLACIAN_WEIGHT:-0}
 
 SAVE_DIR_ARG=()
 if [ -n "$SAVE_DIR" ]; then
@@ -21,6 +22,11 @@ fi
 SCENE_XML_ARG=()
 if [ -n "$SCENE_XML_FILE" ]; then
     SCENE_XML_ARG=(--task-config.scene-xml-file "$SCENE_XML_FILE")
+fi
+
+LAPLACIAN_ARG=()
+if [ -n "$LAPLACIAN_WEIGHT" ]; then
+    LAPLACIAN_ARG=(--retargeter.laplacian-weight "$LAPLACIAN_WEIGHT")
 fi
 
 python examples/robot_retarget.py \
@@ -35,6 +41,7 @@ python examples/robot_retarget.py \
     "${SAVE_DIR_ARG[@]}" \
     --retargeter.q_a_init_idx -7 \
     --retargeter.base_tracking_weight 500.0 \
+    "${LAPLACIAN_ARG[@]}" \
     --retargeter.debug \
     --retargeter.visualize
 
