@@ -6,6 +6,7 @@ set -euo pipefail
 
 CKPT="/ABS/PATH/to/model.pt"
 MOTION_DIR="src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz"
+OBJECT_URDF="holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
 NUM_ENVS=1
 HEADLESS=True
 DEPTH_IMPL=none
@@ -45,6 +46,7 @@ cmd=(
   --num-envs "${NUM_ENVS}"
   --headless "${HEADLESS}"
   --viser-port "${VISER_PORT}"
+  --robot.object.object_urdf_path "${OBJECT_URDF}"
 )
 
 if [[ -n "${PERCEPTION_PRESET}" ]]; then
