@@ -222,6 +222,8 @@ class InteractionMeshRetargeter:
                 urdf_or_path=self.object_urdf,
                 root_node_name="/world/object",  # This links to the object_base frame we created
             )
+            # Hide object visual mesh by default (avoids showing the unscaled/grey mesh).
+            self.viser_object.show_visual = False
             print("Viser using object URDF: ", self.object_model_path)
 
         else:
@@ -706,8 +708,6 @@ class InteractionMeshRetargeter:
                 @show_meshes_cb.on_update
                 def _(_):
                     self.viser_robot.show_visual = show_meshes_cb.value
-                    if self.viser_object is not None:
-                        self.viser_object.show_visual = show_meshes_cb.value
             with self.server.gui.add_folder("Collision"):
                 show_collision_cb = self.server.gui.add_checkbox("Show MuJoCo collision", False)
                 show_collision_all_cb = self.server.gui.add_checkbox("Include robot geoms", False)
