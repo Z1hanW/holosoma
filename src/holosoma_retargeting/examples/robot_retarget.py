@@ -304,7 +304,7 @@ def setup_object_data(
     task_config: TaskConfig,
     augmentation: bool,
     object_scale_augmented: np.ndarray | None = None,
-) -> tuple[np.ndarray | None, np.ndarray | None, str | None]:
+) -> tuple[np.ndarray | None, np.ndarray | None, str | None, np.ndarray | None]:
     """Setup object-specific data (ground, object mesh, climbing terrain).
     Args:
         task_type: Type of task
@@ -315,9 +315,10 @@ def setup_object_data(
         augmentation: Whether augmentation is enabled
         object_scale_augmented: Scale factor for augmented objects (default: [1.0, 1.0, 1.2])
     Returns:
-        Tuple of (object_local_pts, object_local_pts_demo, object_urdf_path)
+        Tuple of (object_local_pts, object_local_pts_demo, object_urdf_path, object_mesh_scale)
     """
     object_scale_normal = np.array([1.0, 1.0, 1.0])
+    object_mesh_scale = None
     if object_scale_augmented is None:
         object_scale_augmented = np.array([1.0, 1.0, 1.2])  # For climbing task augmentation
     logger.info("Setting up object data for task: %s", task_type)
@@ -325,7 +326,7 @@ def setup_object_data(
     if task_type == "robot_only":
         # Create ground points meshgrid
         ground_pts = create_ground_points(task_config.ground_range, task_config.ground_range, task_config.ground_size)
-        return ground_pts, ground_pts, None
+        return ground_pts, ground_pts, None, None
 
     if task_type == "object_interaction":
         # Load object data
@@ -335,7 +336,8 @@ def setup_object_data(
         object_local_pts, object_local_pts_demo = load_object_data(
             constants.OBJECT_MESH_FILE, smpl_scale=smpl_scale, sample_count=100
         )
-        return object_local_pts, object_local_pts_demo, constants.OBJECT_URDF_FILE
+        object_mesh_scale = np.array([smpl_scale, smpl_scale, smpl_scale], dtype=float)
+        return object_local_pts, object_local_pts_demo, constants.OBJECT_URDF_FILE, object_mesh_scale
 
     if task_type == "climbing":
         if object_dir is None:
@@ -394,6 +396,7 @@ def setup_object_data(
 
         # Create scaled URDF and XML files
         scale_factors = tuple(float(value) for value in (object_scale * smpl_scale))
+        object_mesh_scale = np.array(scale_factors, dtype=float)
         object_urdf_file = create_scaled_multi_boxes_urdf(constants.OBJECT_URDF_FILE, scale_factors)
         scene_xml_dir = Path(scene_xml_file).parent
         box_asset_xml_output = None
@@ -410,7 +413,7 @@ def setup_object_data(
         new_scene_xml_path = create_new_scene_xml_file(str(scene_xml_file), scale_factors, object_asset_xml_path)
         constants.SCENE_XML_FILE = new_scene_xml_path
 
-        return object_local_pts, object_local_pts_demo, object_urdf_file
+        return object_local_pts, object_local_pts_demo, object_urdf_file, object_mesh_scale
 
     raise ValueError(f"Unknown task type: {task_type}")
 
@@ -697,7 +700,7 @@ def main(cfg: RetargetingConfig) -> None:
     toe_names = cfg.motion_data_config.toe_names
 
     # Setup object data
-    object_local_pts, object_local_pts_demo, object_urdf_path = setup_object_data(
+    object_local_pts, object_local_pts_demo, object_urdf_path, object_mesh_scale = setup_object_data(
         task_type,
         constants,
         cfg.task_config.object_dir,
@@ -716,6 +719,8 @@ def main(cfg: RetargetingConfig) -> None:
 
     # Create retargeter
     retargeter_kwargs = build_retargeter_kwargs_from_config(cfg.retargeter, constants, object_urdf_path, task_type)
+    retargeter_kwargs["object_mesh_path"] = constants.OBJECT_MESH_FILE
+    retargeter_kwargs["object_mesh_scale"] = object_mesh_scale
     retargeter = InteractionMeshRetargeter(**retargeter_kwargs)
     logger.info("Retargeter created")
 

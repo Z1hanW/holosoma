@@ -206,7 +206,7 @@ def process_single_task(args):
         # Setup object data
         if task_type == "climbing":
             print("obejct_dir: ", task_config.object_dir)
-            object_local_pts, object_local_pts_demo, object_urdf_path = setup_object_data(
+            object_local_pts, object_local_pts_demo, object_urdf_path, object_mesh_scale = setup_object_data(
                 task_type,
                 constants,
                 task_config.object_dir,
@@ -216,7 +216,7 @@ def process_single_task(args):
                 object_scale_augmented=aug_config["scale"],
             )
         else:
-            object_local_pts, object_local_pts_demo, object_urdf_path = setup_object_data(
+            object_local_pts, object_local_pts_demo, object_urdf_path, object_mesh_scale = setup_object_data(
                 task_type,
                 constants,
                 task_config.object_dir,
@@ -227,6 +227,8 @@ def process_single_task(args):
 
         # Create retargeter
         retargeter_kwargs = build_retargeter_kwargs_from_config(retargeter, constants, object_urdf_path, task_type)
+        retargeter_kwargs["object_mesh_path"] = constants.OBJECT_MESH_FILE
+        retargeter_kwargs["object_mesh_scale"] = object_mesh_scale
         retargeter = InteractionMeshRetargeter(**retargeter_kwargs)
 
         # Preprocess motion data

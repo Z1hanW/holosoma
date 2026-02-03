@@ -56,6 +56,8 @@ class InteractionMeshRetargeter:
         debug: bool = False,
         w_nominal_tracking_init: float = 5.0,
         nominal_tracking_tau: float = 10.0,
+        object_mesh_path: str | None = None,
+        object_mesh_scale: float | tuple[float, float, float] | np.ndarray | None = None,
     ):
         """This kinematic retargeter solves the diffIK problem with hard constraints in SQP style.
         During each SQP iteration, the problem is solved with the following constraints and costs:
@@ -81,6 +83,11 @@ class InteractionMeshRetargeter:
         self.robot_model_path = task_constants.ROBOT_URDF_FILE
         self.object_model_path = object_urdf_path
         self.object_name = task_constants.OBJECT_NAME
+        self.object_mesh_path = object_mesh_path
+        self.object_mesh_scale = self._normalize_mesh_scale(object_mesh_scale)
+        self._object_mesh_source = None
+        self._object_mesh_handle = None
+        self._show_object_mesh_source = True
         self.collision_detection_threshold = collision_detection_threshold
         self.activate_foot_sticking = activate_foot_sticking
         self.activate_obj_non_penetration = activate_obj_non_penetration
@@ -228,6 +235,11 @@ class InteractionMeshRetargeter:
 
         else:
             self.viser_object = None
+            self.object_base = None
+
+        # Optional: show the sampled mesh source (.obj) in the object frame.
+        if self.object_base is not None and self.object_mesh_path:
+            self._set_object_mesh_source_visualization(self._show_object_mesh_source)
 
         # Check the number of actuated joints and their names
         robot_joint_limits = self.viser_robot.get_actuated_joint_limits()
@@ -245,6 +257,57 @@ class InteractionMeshRetargeter:
             width=8,
             height=8,
             position=(0.0, 0.0, 0.0),
+        )
+
+    def _normalize_mesh_scale(self, scale):
+        if scale is None:
+            return np.ones(3, dtype=float)
+        scale_arr = np.asarray(scale, dtype=float).reshape(-1)
+        if scale_arr.size == 1:
+            return np.repeat(scale_arr, 3)
+        if scale_arr.size != 3:
+            raise ValueError("object_mesh_scale must be a scalar or a 3-element array.")
+        return scale_arr
+
+    def _load_object_mesh_source(self):
+        if not self.object_mesh_path:
+            return None
+        try:
+            mesh = trimesh.load(self.object_mesh_path, force="mesh")
+        except Exception as exc:  # pragma: no cover - best-effort debug visual
+            print(f"[viser] Failed to load object mesh: {self.object_mesh_path} ({exc})")
+            return None
+        if isinstance(mesh, trimesh.Scene):
+            mesh = trimesh.util.concatenate(mesh.dump())
+        verts = np.asarray(mesh.vertices, dtype=np.float32)
+        faces = np.asarray(mesh.faces, dtype=np.int32)
+        verts = verts * self.object_mesh_scale.reshape(1, 3)
+        self._object_mesh_source = (verts, faces)
+        return self._object_mesh_source
+
+    def _set_object_mesh_source_visualization(self, show: bool):
+        self._show_object_mesh_source = bool(show)
+        if not hasattr(self, "server") or self.object_base is None:
+            return
+        if not self._show_object_mesh_source:
+            if self._object_mesh_handle is not None:
+                self._object_mesh_handle.remove()
+                self._object_mesh_handle = None
+            return
+        if self._object_mesh_source is None:
+            self._load_object_mesh_source()
+        if self._object_mesh_source is None:
+            return
+        verts, faces = self._object_mesh_source
+        if self._object_mesh_handle is not None:
+            self._object_mesh_handle.remove()
+            self._object_mesh_handle = None
+        self._object_mesh_handle = self.server.scene.add_mesh_simple(
+            "/world/object/sample_mesh",
+            vertices=verts,
+            faces=faces,
+            color=(0.2, 0.8, 1.0),
+            opacity=0.35,
         )
 
     def draw_mesh_from_geom(self, model, data, geom_id, geom_name, name="/mesh", color=(50, 150, 255), opacity=0.5):
@@ -708,6 +771,15 @@ class InteractionMeshRetargeter:
                 @show_meshes_cb.on_update
                 def _(_):
                     self.viser_robot.show_visual = show_meshes_cb.value
+                if self.object_mesh_path and self.object_base is not None:
+                    show_obj_mesh_cb = self.server.gui.add_checkbox(
+                        "Show sampled OBJ",
+                        self._show_object_mesh_source,
+                    )
+
+                    @show_obj_mesh_cb.on_update
+                    def _(_):
+                        self._set_object_mesh_source_visualization(show_obj_mesh_cb.value)
             with self.server.gui.add_folder("Collision"):
                 show_collision_cb = self.server.gui.add_checkbox("Show MuJoCo collision", False)
                 show_collision_all_cb = self.server.gui.add_checkbox("Include robot geoms", False)
