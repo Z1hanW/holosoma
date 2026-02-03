@@ -20,7 +20,7 @@ def _find_input_dim(module: nn.Module) -> int:
     raise ValueError("Unable to infer actor input dim from module.")
 
 
-def _load_videomimic_actor(task: str, checkpoint_path: str, device: str) -> nn.Module:
+def _load_videomimic_actor(task: str, checkpoint_path: str, device: str):
     from legged_gym.utils import task_registry
     from legged_gym.utils.helpers import get_args
 
@@ -40,10 +40,10 @@ def _load_videomimic_actor(task: str, checkpoint_path: str, device: str) -> nn.M
     actor_critic.eval()
     actor = getattr(actor_critic, "actor", actor_critic)
     actor.eval()
-    return actor
+    return actor_critic, actor
 
 
-class VideoMimicAdapter(nn.Module):
+class VideoMimicLegacyAdapter(nn.Module):
     def __init__(
         self,
         actor: nn.Module,
@@ -161,15 +161,176 @@ class VideoMimicAdapter(nn.Module):
         return action_29
 
 
+class VideoMimicDictAdapter(nn.Module):
+    def __init__(
+        self,
+        actor_input_net: nn.Module,
+        actor: nn.Module,
+        obs_proc_spec: dict[str, dict],
+        obs_shapes: dict[str, tuple],
+        dof_names: list[str],
+        history_len: int,
+        holosoma_obs: str,
+    ):
+        super().__init__()
+        self.actor_input_net = actor_input_net
+        self.actor = actor
+        self.obs_proc_spec = obs_proc_spec
+        self.obs_shapes = obs_shapes
+        self.dof_names = list(dof_names)
+        self.history_len = int(history_len)
+        self.holosoma_obs = holosoma_obs
+
+        drop_names = {
+            "left_wrist_roll_joint",
+            "left_wrist_pitch_joint",
+            "left_wrist_yaw_joint",
+            "right_wrist_roll_joint",
+            "right_wrist_pitch_joint",
+            "right_wrist_yaw_joint",
+        }
+        self.keep_dof_indices = [i for i, name in enumerate(self.dof_names) if name not in drop_names]
+        if len(self.keep_dof_indices) != len(self.dof_names) - 6:
+            raise ValueError("Unexpected DOF layout; wrist joints not found where expected.")
+
+        dof_count = len(self.dof_names)
+        self.torso_real_dim = 6 + dof_count * 3
+        if holosoma_obs == "videomimic":
+            self.holosoma_actor_obs_dim = self.history_len * (self.torso_real_dim + 2 + 1) + dof_count + 2
+        elif holosoma_obs == "videomimic_root":
+            self.holosoma_actor_obs_dim = self.history_len * (self.torso_real_dim + 2 + 1)
+        else:
+            raise ValueError(f"Unsupported holosoma_obs variant: {holosoma_obs}")
+
+        self._torso_keep = self._build_torso_keep_indices(dof_count)
+        self._target_keep = torch.tensor(self.keep_dof_indices, dtype=torch.long)
+
+    def _build_torso_keep_indices(self, dof_count: int) -> torch.Tensor:
+        keep = list(range(6))
+        for offset in (6, 6 + dof_count, 6 + 2 * dof_count):
+            keep.extend([offset + idx for idx in self.keep_dof_indices])
+        return torch.tensor(keep, dtype=torch.long)
+
+    def _split_holosoma_obs(self, actor_obs: torch.Tensor):
+        batch = actor_obs.shape[0]
+        if actor_obs.shape[1] != self.holosoma_actor_obs_dim:
+            raise ValueError(
+                f"Expected holosoma actor_obs dim {self.holosoma_actor_obs_dim}, got {actor_obs.shape[1]}."
+            )
+
+        offset = 0
+        torso_len = self.history_len * self.torso_real_dim
+        torso_real = actor_obs[:, offset : offset + torso_len].reshape(
+            batch, self.history_len, self.torso_real_dim
+        )
+        offset += torso_len
+
+        torso_xy = actor_obs[:, offset : offset + self.history_len * 2].reshape(batch, self.history_len, 2)
+        offset += self.history_len * 2
+
+        torso_yaw = actor_obs[:, offset : offset + self.history_len].reshape(batch, self.history_len, 1)
+        offset += self.history_len
+
+        target_joints = None
+        target_root_pitch = None
+        target_root_roll = None
+        if self.holosoma_obs == "videomimic":
+            dof_count = len(self.dof_names)
+            target_joints = actor_obs[:, offset : offset + dof_count]
+            offset += dof_count
+            target_root_pitch = actor_obs[:, offset : offset + 1]
+            offset += 1
+            target_root_roll = actor_obs[:, offset : offset + 1]
+        return torso_real, torso_xy, torso_yaw, target_joints, target_root_pitch, target_root_roll
+
+    def _zeros_for_key(self, key: str, batch: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        shape = self.obs_shapes.get(key)
+        if shape is None:
+            raise ValueError(f"Missing obs shape for key '{key}'")
+        return torch.zeros((batch, *shape), device=device, dtype=dtype)
+
+    def forward(self, actor_obs: torch.Tensor) -> torch.Tensor:
+        batch = actor_obs.shape[0]
+        device = actor_obs.device
+        dtype = actor_obs.dtype
+        torso_real, torso_xy, torso_yaw, target_joints, target_root_pitch, target_root_roll = (
+            self._split_holosoma_obs(actor_obs)
+        )
+
+        torso_real_reduced = torch.index_select(torso_real, dim=2, index=self._torso_keep)
+        torso_xy_last = torso_xy[:, -1, :]
+        torso_yaw_last = torso_yaw[:, -1, :]
+
+        obs_dict = {}
+        for key in self.obs_proc_spec.keys():
+            if key == "history_torso_real":
+                obs_dict[key] = torso_real_reduced
+            elif key == "torso_real":
+                obs_dict[key] = torso_real_reduced[:, -1, :]
+            elif key == "history_torso_xy_rel":
+                obs_dict[key] = torso_xy
+            elif key == "torso_xy_rel":
+                obs_dict[key] = torso_xy_last
+            elif key == "history_torso_yaw_rel":
+                obs_dict[key] = torso_yaw
+            elif key == "torso_yaw_rel":
+                obs_dict[key] = torso_yaw_last
+            elif key == "target_joints":
+                if target_joints is None:
+                    obs_dict[key] = self._zeros_for_key(key, batch, device, dtype)
+                else:
+                    obs_dict[key] = torch.index_select(target_joints, dim=1, index=self._target_keep)
+            elif key == "target_root_pitch":
+                obs_dict[key] = target_root_pitch if target_root_pitch is not None else self._zeros_for_key(
+                    key, batch, device, dtype
+                )
+            elif key == "target_root_roll":
+                obs_dict[key] = target_root_roll if target_root_roll is not None else self._zeros_for_key(
+                    key, batch, device, dtype
+                )
+            else:
+                obs_dict[key] = self._zeros_for_key(key, batch, device, dtype)
+
+        obs, extra_proj_outputs = self.actor_input_net(obs_dict)
+        action_23 = self.actor(obs, extra_proj_outputs=extra_proj_outputs)
+        action_29 = torch.zeros((batch, len(self.dof_names)), device=device, dtype=dtype)
+        action_29[:, self.keep_dof_indices] = action_23
+        return action_29
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export VideoMimic checkpoint to holosoma-compatible ONNX.")
-    parser.add_argument("--checkpoint", required=True, help="Path to VideoMimic checkpoint (.pt).")
+    parser.add_argument("--checkpoint", help="Path to VideoMimic checkpoint (.pt).")
+    parser.add_argument("--load-run", help="VideoMimic run name (as used by play.py --load_run).")
+    parser.add_argument(
+        "--checkpoint-index",
+        type=int,
+        default=-1,
+        help="Checkpoint index to load when using --load-run (-1 for latest).",
+    )
+    parser.add_argument(
+        "--log-root",
+        default=None,
+        help="Root folder for VideoMimic logs (defaults to videomimic_gym/logs/g1_deepmimic).",
+    )
     parser.add_argument("--task", default="g1_deepmimic_proj_heightfield", help="VideoMimic task name.")
     parser.add_argument("--motion-file", required=True, help="Holosoma motion npz used for VideoMimic obs.")
     parser.add_argument("--output", required=True, help="Output ONNX path.")
     parser.add_argument("--device", default="cuda:0", help="Torch device for export.")
     parser.add_argument("--history-len", type=int, default=5, help="History length for torso_* obs.")
     parser.add_argument("--heightmap-dim", type=int, default=None, help="Heightmap dim to append (auto if None).")
+    parser.add_argument(
+        "--adapter",
+        choices=("legacy", "root_no_history"),
+        default="legacy",
+        help="Adapter strategy for mapping holosoma observations to VideoMimic policy.",
+    )
+    parser.add_argument(
+        "--holosoma-obs",
+        choices=("videomimic", "videomimic_root"),
+        default="videomimic",
+        help="Holosoma observation layout expected at ONNX input.",
+    )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
@@ -181,21 +342,45 @@ def main() -> None:
         get_control_gains_from_config,
         get_urdf_text_from_robot_config,
     )
+    from legged_gym.utils.helpers import get_load_path
 
-    actor = _load_videomimic_actor(args.task, args.checkpoint, args.device)
+    checkpoint_path = args.checkpoint
+    if not checkpoint_path:
+        if not args.load_run:
+            raise ValueError("Either --checkpoint or --load-run must be provided.")
+        log_root = args.log_root
+        if log_root is None:
+            log_root = repo_root / "VideoMimic" / "simulation" / "videomimic_gym" / "logs" / "g1_deepmimic"
+        checkpoint_path = get_load_path(str(log_root), args.load_run, args.checkpoint_index)
+
+    actor_critic, actor = _load_videomimic_actor(args.task, checkpoint_path, args.device)
     actor_input_dim = _find_input_dim(actor)
 
     dof_names = list(robot_cfg.g1_29dof.dof_names)
-    adapter = VideoMimicAdapter(
-        actor=actor,
-        dof_names=dof_names,
-        history_len=args.history_len,
-        actor_input_dim=actor_input_dim,
-        heightmap_dim=args.heightmap_dim,
-    )
+    if args.adapter == "legacy":
+        adapter = VideoMimicLegacyAdapter(
+            actor=actor,
+            dof_names=dof_names,
+            history_len=args.history_len,
+            actor_input_dim=actor_input_dim,
+            heightmap_dim=args.heightmap_dim,
+        )
+        example_obs_dim = adapter.holosoma_actor_obs_dim
+    else:
+        obs_proc_spec = dict(getattr(actor_critic.actor_input_net, "obs_proc_spec", {}))
+        obs_shapes = dict(getattr(actor_critic, "env_obs_shapes", {}))
+        adapter = VideoMimicDictAdapter(
+            actor_input_net=actor_critic.actor_input_net,
+            actor=actor_critic.actor,
+            obs_proc_spec=obs_proc_spec,
+            obs_shapes=obs_shapes,
+            dof_names=dof_names,
+            history_len=args.history_len,
+            holosoma_obs=args.holosoma_obs,
+        )
+        example_obs_dim = adapter.holosoma_actor_obs_dim
     adapter.eval()
 
-    example_obs_dim = adapter.holosoma_actor_obs_dim
     example_obs = torch.zeros((1, example_obs_dim), dtype=torch.float32, device="cpu")
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
