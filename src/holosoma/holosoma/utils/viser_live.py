@@ -284,7 +284,10 @@ def _resolve_robot_urdf_path(robot_config: Any) -> str:
 
 
 def _resolve_object_urdf_path(robot_config: Any) -> str | None:
-    obj_path = getattr(getattr(robot_config, "object", None), "object_urdf_path", None)
+    obj_cfg = getattr(robot_config, "object", None)
+    if not obj_cfg or not getattr(obj_cfg, "enabled", False):
+        return None
+    obj_path = getattr(obj_cfg, "object_urdf_path", None)
     if not obj_path:
         return None
     return _resolve_data_path(obj_path)
@@ -1556,6 +1559,8 @@ class ViserLiveViewer:
 
     def _get_object_state_wxyz(self) -> tuple[np.ndarray, np.ndarray] | None:
         if not getattr(self._env.robot_config, "object", None):
+            return None
+        if not getattr(self._env.robot_config.object, "enabled", False):
             return None
         if not getattr(self._env.robot_config.object, "object_urdf_path", None):
             return None

@@ -74,6 +74,7 @@ class RobotForceControlConfig:
 @dataclass(frozen=True)
 class ObjectConfig:
     object_urdf_path: str | None = None
+    enabled: bool = False
 
 
 @dataclass(frozen=True)

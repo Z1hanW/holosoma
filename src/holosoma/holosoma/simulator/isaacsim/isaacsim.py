@@ -414,30 +414,28 @@ class IsaacSim(BaseSimulator):
         self.scene.filter_collisions(global_prim_paths=global_collision_prims)
 
         # add objects if object is provided
-        if self.robot_config.object.object_urdf_path:
+        if getattr(self.robot_config.object, "enabled", False) and self.robot_config.object.object_urdf_path:
             # Resolve the object asset urdf path using importlib.resources
             object_asset_urdf_path = resolve_data_file_path(self.robot_config.object.object_urdf_path)
             object_name = "object"  # hardcoded object name
             object_cfg = RigidObjectCfg(
                 prim_path=f"/World/envs/env_.*/Object",
                 spawn=sim_utils.UrdfFileCfg(
-                    fix_base=True,
+                    fix_base=False,
                     replace_cylinders_with_capsules=True,
                     asset_path=object_asset_urdf_path,
                     activate_contact_sensors=True,
                     rigid_props=sim_utils.RigidBodyPropertiesCfg(
                         disable_gravity=False,
-                        kinematic_enabled=True,
                         retain_accelerations=False,
                         linear_damping=0.01,
                         angular_damping=0.01,
-                        max_linear_velocity=0.0,
-                        max_angular_velocity=0.0,
+                        max_linear_velocity=1000.0,
+                        max_angular_velocity=1000.0,
                         max_depenetration_velocity=1.0,
                     ),
                     articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                         enabled_self_collisions=True,
-                        articulation_enabled=False,
                         solver_position_iteration_count=8,
                         solver_velocity_iteration_count=4,
                     ),
@@ -446,7 +444,7 @@ class IsaacSim(BaseSimulator):
                     ),
                 ),
                 init_state=RigidObjectCfg.InitialStateCfg(
-                    pos=(0.0, 0.0, 0.0),
+                    pos=(0.0, 0.0, 0.5),
                 ),
             )
             self._object = RigidObject(object_cfg)

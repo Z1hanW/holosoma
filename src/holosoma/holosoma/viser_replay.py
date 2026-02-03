@@ -413,7 +413,7 @@ def replay(cfg: ExperimentConfig) -> None:
     motion_cfg = _get_motion_config(cfg)
     robot_urdf_path = _resolve_robot_urdf_path(cfg.robot)
     object_urdf_path = None
-    if cfg.robot.object.object_urdf_path:
+    if getattr(cfg.robot.object, "enabled", False) and cfg.robot.object.object_urdf_path:
         object_urdf_path = _resolve_data_path(cfg.robot.object.object_urdf_path)
 
     port = resolve_viser_port()

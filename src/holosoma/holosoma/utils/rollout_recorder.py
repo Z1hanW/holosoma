@@ -155,6 +155,8 @@ class RolloutRecorder:
     def _get_object_state_wxyz(self) -> tuple[np.ndarray, np.ndarray] | None:
         if not getattr(self._env.robot_config, "object", None):
             return None
+        if not getattr(self._env.robot_config.object, "enabled", False):
+            return None
         if not getattr(self._env.robot_config.object, "object_urdf_path", None):
             return None
 

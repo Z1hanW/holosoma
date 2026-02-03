@@ -371,6 +371,7 @@ g1_29dof_wbt_w_object = replace(
         object=replace(
             robot.g1_29dof_w_object.object,
             object_urdf_path="holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf",
+            enabled=True,
         ),
         init_state=replace(robot.g1_29dof_w_object.init_state, pos=[0.0, 0.0, 0.76]),
     ),
@@ -392,6 +393,7 @@ g1_29dof_wbt_fast_sac_w_object = replace(
         object=replace(
             robot.g1_29dof_w_object.object,
             object_urdf_path="holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf",
+            enabled=True,
         ),
         init_state=replace(robot.g1_29dof_w_object.init_state, pos=[0.0, 0.0, 0.76]),
     ),

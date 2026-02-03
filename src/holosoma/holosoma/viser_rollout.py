@@ -177,7 +177,7 @@ def replay_rollout(cfg: ExperimentConfig, rollout_cfg: RolloutViewerConfig) -> N
     vr = ViserUrdf(server, urdf_or_path=Path(robot_urdf_path), root_node_name="/robot")
 
     vo = None
-    if cfg.robot.object.object_urdf_path:
+    if getattr(cfg.robot.object, "enabled", False) and cfg.robot.object.object_urdf_path:
         object_urdf_path = _resolve_data_path(cfg.robot.object.object_urdf_path)
         vo = ViserUrdf(server, urdf_or_path=Path(object_urdf_path), root_node_name="/object")
 
