@@ -29,7 +29,7 @@ class LocoManipStandHeightWaitDepthPolicy(LocomotionPolicy):
         self._init_depth_shm()
 
         # Initialize pre-fixed speed command
-        self._init_fixed_speed_command()
+        self._init_fixed_forward_speed_command()
 
     def _initialize_history_state(self):
         # KEEP

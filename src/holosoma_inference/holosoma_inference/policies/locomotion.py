@@ -101,6 +101,7 @@ class LocomotionPolicy(BasePolicy):
             self.ang_vel_command[0, 0] = 0.0
             self.lin_vel_command[0, 0] = 0.0
             self.lin_vel_command[0, 1] = 0.0
+            self.fixed_forward_speed_enabled = False
             self.logger.info(colored("Stance command", "blue"))
         else:
             self.base_height_command[0, 0] = self.desired_base_height
