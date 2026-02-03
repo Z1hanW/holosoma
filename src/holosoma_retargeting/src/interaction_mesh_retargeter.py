@@ -826,7 +826,7 @@ class InteractionMeshRetargeter:
         constraints = []
 
         # Linear equality
-        constraints += [cp.Constant(J_L[:, self.q_a_indices]) @ dqa - lap_var == -lap0_vec]
+        constraints += [cp.Constant(J_L) @ dqa - lap_var == -lap0_vec]
 
         # Foot sticking
         if (self.q_a_init_idx < 12) and self.activate_foot_sticking:
@@ -849,7 +849,8 @@ class InteractionMeshRetargeter:
                     p_lb = p_WF_t_last_dict[key] - p_WF_dict[key] - self.foot_sticking_tolerance
                     p_ub = p_lb + 2 * self.foot_sticking_tolerance  # symmetric window
 
-                    Jxy = J_WF[:2, self.q_a_indices]  # (2 x nq_act)
+                    # J_WF is already reduced to q_a_indices in _calc_manipulator_jacobians.
+                    Jxy = J_WF[:2, :]  # (2 x nq_act)
                     constraints += [
                         Jxy @ dqa >= p_lb[:2],
                         Jxy @ dqa <= p_ub[:2],
