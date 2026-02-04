@@ -150,38 +150,33 @@ class LocoManipStandHeightWaitDepthPolicy(LocomotionPolicy):
             "actor_obs_lower_body": actor_obs_lower_body.astype(np.float32),
             "actor_obs_upper_body": actor_obs_upper_body.astype(np.float32),
         }
+    
+    def process_joystick_input(self):
+        """Process joystick input and update commands using interface."""
+        super().process_joystick_input()
+
+        if self.fixed_forward_speed_enabled:
+            self.lin_vel_command[0, 0] = self.fixed_forward_speed
+
 
     def handle_joystick_button(self, cur_key: str):
         """Handle joystick button presses for locomotion."""
         # Call parent handler for common commands
         super().handle_joystick_button(cur_key)
-
-        if cur_key == "L2+R2":
-            # When setting up the fixed forward speed, it should be in standing position.
-            assert self.stand_command[0, 0] == 0
-            self.fixed_forward_speed_enabled = not self.fixed_forward_speed_enabled
+        if cur_key == "L2": 
+            self.fixed_forward_speed_enabled = True 
             self.fixed_forward_speed = 0.5
-        
+        elif cur_key == "R2":
+            self.fixed_forward_speed_enabled = True 
+            self.fixed_forward_speed = -0.5
         elif cur_key == "R2+up":
             self.fixed_forward_speed += 0.1
         elif cur_key == "R2+down":
             self.fixed_forward_speed -= 0.1
-        
-        if self.fixed_forward_speed_enabled:
-            self.lin_vel_command[0, 0] = self.fixed_forward_speed
-
-    # def shutdown(self):
-    #     """Clean shutdown of threading and resources."""
-    #     # Clean up depth camera resources
-    #     if self.depth_img_shm:
-    #         try:
-    #             self.depth_img_shm.close()
-    #         except:
-    #             pass
-
-    #     print(colored("LocoManipStandHeightWaitDepthNewPolicy shutdown complete", "yellow"))
-
-    def __del__(self):
-        """Destructor to ensure cleanup."""
-        # TODO: recover shutdown function after debugging
-        # self.shutdown()
+    
+    def _handle_stand_command(self):
+        """Handle stand command toggle."""
+        super()._handle_stand_command()
+        if self.stand_command[0, 0] == 0:
+            self.fixed_forward_speed_enabled = False
+            self.fixed_forward_speed = 0.0
