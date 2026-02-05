@@ -71,7 +71,7 @@ terrain_locomotion_stairs_and_slope_eval = TerrainManagerCfg(
         restitution=0.0,
         terrain_length=8.0,
         terrain_width=8.0,
-        num_rows=1,
+        num_rows=2,
         num_cols=2,
         terrain_config={
             "smooth_stairs": 0.5,

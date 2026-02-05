@@ -1,7 +1,7 @@
-from doctest import FAIL_FAST
 import time
 import threading
 from queue import Queue, Full
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 from multiprocessing import shared_memory
 from typing import Literal
+import tyro
 from holosoma.simulator.mujoco.mujoco import MujocoRendererWrapper
 from holosoma.utils.rate import RateLimiter
 from datetime import datetime
@@ -203,6 +204,20 @@ class ZedCamerasWrapper:
 
 
 @dataclass(frozen=True)
+class ImageSaverConfig:
+    """Configuration for Image Saver."""
+    
+    image_root_dir: str = "image_server_images"
+    """Root directory for saving images."""
+    
+    save_queue_maxsize: int = 0
+    """Maximum queue size for image saving. 0 = unlimited. When full, oldest items are dropped."""
+    
+    save_workers: int = 2
+    """Number of worker threads for parallel image saving."""
+
+
+@dataclass(frozen=True)
 class ImageServerConfig:
     """Configuration for Image Server."""
 
@@ -212,19 +227,23 @@ class ImageServerConfig:
     resized_height: int = 27
     resized_width: int = 48
 
-    enable_save_images: bool = True 
-    enable_visualize_images: bool = False 
-    image_root_dir: str = "image_server_images"
-    save_queue_maxsize: int = 0
-    """Maximum queue size for image saving. 0 = unlimited. When full, oldest items are dropped."""
-    save_workers: int = 2
-    """Number of worker threads for parallel image saving."""
+    gum: bool = False
+    """Enable GUM for depth prediction."""
 
-    gum_enabled: bool = False
+    visualize_images: bool = False 
+    """Enable image visualization."""
 
+    save_images: bool = True 
+    """Enable image saving."""
 
-class SaveImagesProfiler:
-    """Profiler for tracking save_images operation statistics."""
+    image_saver_config: ImageSaverConfig = ImageSaverConfig()
+    """Configuration for image saver. If None and save_images is True, uses default ImageSaverConfig."""
+
+    num_delay_frames: int = 0
+    """Number of frames to delay before sending to shared memory. 0 = no delay, 1 = send previous frame, 2 = send frame from 2 steps ago, etc."""
+
+class TimeProfiler:
+    """Profiler for tracking time statistics."""
     
     def __init__(self):
         self.times = []
@@ -263,78 +282,48 @@ class SaveImagesProfiler:
         self.max_time = 0.0
 
 
-class ImageServer:
-    def __init__(self, camera_wrapper: list[MujocoRendererWrapper | ZedCamerasWrapper], config: ImageServerConfig, gum: None):
-        self.config = config
-        self.camera_wrapper: ZedCamerasWrapper | MujocoRendererWrapper = camera_wrapper
-        self.gum = gum
-        self._init_shared_memory()
-
-        if self.config.enable_save_images:
-            self._init_save_images_dir()
-            self.save_images_profiler = SaveImagesProfiler()
-            self.save_queue = Queue(maxsize=self.config.save_queue_maxsize if self.config.save_queue_maxsize > 0 else 0)
-            self.save_queue_dropped_count = 0
-            self.camera_dirs_created = False
-            self._dirs_lock = threading.Lock()
-            # Start multiple worker threads for parallel saving
-            self.save_threads = []
-            for i in range(self.config.save_workers):
-                thread = threading.Thread(target=self._save_images_worker, daemon=True, name=f"SaveWorker-{i}")
-                thread.start()
-                self.save_threads.append(thread)
+class ImageSaver:
+    """Handles image saving logic with background worker threads."""
+    
+    def __init__(self, config: ImageSaverConfig):
+        """Initialize ImageSaver.
         
-        self.frame_count = 0
+        Args:
+            config: Configuration for image saving
+        """
+        self.config = config
+        self.image_root_dir = config.image_root_dir
+        self.save_queue_maxsize = config.save_queue_maxsize
+        self.save_workers = config.save_workers
+        
+        # Initialize save directory
+        self._init_save_images_dir()
+        
+        # Initialize profiler
+        self.profiler = TimeProfiler()
+        
+        # Initialize queue
+        self.save_queue = Queue(maxsize=self.save_queue_maxsize if self.save_queue_maxsize > 0 else 0)
+        self.save_queue_dropped_count = 0
+        
+        # Directory management
+        self.camera_dirs_created = False
+        self._dirs_lock = threading.Lock()
+        
+        # Start worker threads
+        self.save_threads = []
+        for i in range(self.save_workers):
+            thread = threading.Thread(target=self._save_images_worker, daemon=True, name=f"SaveWorker-{i}")
+            thread.start()
+            self.save_threads.append(thread)
     
     def _init_save_images_dir(self):
-        # create a subdirectory in the save_images_dir for each session, and name the session with timestamp like 20260204_123456
-        session_dir = Path(self.config.image_root_dir) / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        """Create a subdirectory for each session with timestamp."""
+        session_dir = Path(self.image_root_dir) / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         session_dir.mkdir(exist_ok=True, parents=True)
         self.save_images_dir = session_dir
-        print(f"[Image Server] Initialized save images directory: {self.save_images_dir}")
+        print(f"[Image Saver] Initialized save images directory: {self.save_images_dir}")
     
-    def _init_shared_memory(self):
-        img_shm_name = "depth_img_shm"
-
-        # Initialize shared memory
-        expected_shape = [self.camera_wrapper.num_cameras, 1, self.config.resized_height, self.config.resized_width]
-        dtype = np.float32
-        
-        try:
-            memory_size = np.prod(expected_shape) * np.dtype(dtype).itemsize
-            # Try to create new shared memory, if it exists, connect to existing one
-            try:
-                self.image_shm = shared_memory.SharedMemory(create=True, size=memory_size, name=img_shm_name)
-                print(f"[Image Server] Created new shared memory: {img_shm_name}")
-            except FileExistsError:
-                self.image_shm = shared_memory.SharedMemory(name=img_shm_name)
-                print(f"[Image Server] Connected to existing shared memory: {img_shm_name}")
-            
-            self.img_array = np.ndarray(expected_shape, dtype=dtype, buffer=self.image_shm.buf)
-            print(f"[Image Server] Shared memory: shape={expected_shape}, dtype={dtype}")
-        except Exception as e:
-            print(f"[Image Server] Failed to initialize shared memory: {e}")
-            raise
-
-        print("ImageServer initialized")
-
-    def _resize_clip_expand_transpose(self, frame):
-        # resize
-        frame = cv2.resize(frame, (self.config.resized_width, self.config.resized_height), cv2.INTER_CUBIC)
-
-        # clip and scale to [-0.5, 0.5] range
-        frame = np.clip(frame, self.config.near_clip, self.config.far_clip)
-        frame = (frame - self.config.near_clip) / (self.config.far_clip - self.config.near_clip) - 0.5
-
-        # [H, W] -> [1, H, W]
-        frame = np.expand_dims(frame, axis=0)
-        return frame
-    
-
-    def _display_frame(self, name: str, frame: np.ndarray) -> bool:
-        cv2.imshow(f"Image Server Stream {name}", frame)
-        return cv2.waitKey(1) & 0xFF == ord("q")
-        
     def _ensure_camera_dirs(self, camera_names):
         """Pre-create directories for all cameras (thread-safe, idempotent)."""
         if self.camera_dirs_created:
@@ -371,10 +360,15 @@ class ImageServer:
                 
                 self.save_queue.task_done()
             except Exception as e:
-                print(f"[Image Server] Error in save_images_worker: {e}")
+                print(f"[Image Saver] Error in save_images_worker: {e}")
     
-    def _save_images(self, raw_images: dict, step_count: int):
-        """Enqueue images for background saving. Blocks if queue is full to avoid dropping frames."""
+    def save(self, raw_images: dict, step_count: int):
+        """Enqueue images for background saving. Blocks if queue is full to avoid dropping frames.
+        
+        Args:
+            raw_images: Dictionary with "depth" and "rgb" keys, each containing dict of camera_name -> image array
+            step_count: Step count for naming files
+        """
         t0 = time.perf_counter()
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
         # Copy images to avoid modification while in queue
@@ -385,24 +379,159 @@ class ImageServer:
         # Use blocking put to ensure no frames are dropped
         self.save_queue.put((images_copy, step_count, timestamp))
         elapsed_ms = (time.perf_counter() - t0) * 1000
-        self.save_images_profiler.record(elapsed_ms)
+        self.profiler.record(elapsed_ms)
+    
+    def get_stats(self) -> dict[str, float]:
+        """Get statistics about image saving operations."""
+        stats = self.profiler.get_stats()
+        stats["queue_size"] = self.save_queue.qsize()
+        return stats
+    
+    def shutdown(self):
+        """Shutdown worker threads gracefully."""
+        # Send sentinel to each worker thread
+        for _ in self.save_threads:
+            self.save_queue.put(None)
+        
+        # Wait for threads to finish
+        for thread in self.save_threads:
+            thread.join()
 
+
+class ImageVisualizer:
+    """Handles image visualization logic."""
+    
+    def __init__(self, near_clip: float, far_clip: float):
+        """Initialize ImageVisualizer.
+        
+        Args:
+            near_clip: Near clipping plane for depth visualization
+            far_clip: Far clipping plane for depth visualization
+        """
+        self.near_clip = near_clip
+        self.far_clip = far_clip
+    
+    def _display_frame(self, name: str, frame: np.ndarray) -> bool:
+        """Display a frame in a window.
+        
+        Args:
+            name: Window name
+            frame: Image frame to display
+            
+        Returns:
+            True if 'q' key was pressed, False otherwise
+        """
+        cv2.imshow(f"Image Server Stream {name}", frame)
+        return cv2.waitKey(1) & 0xFF == ord("q")
     
     def _prepare_depth_for_visualization(self, depth: np.ndarray) -> np.ndarray:
+        """Prepare depth frame for visualization by clipping and scaling.
+        
+        Args:
+            depth: Depth frame array
+            
+        Returns:
+            Depth frame scaled to [0, 255] as uint8
+        """
         # clip and scale to [0, 1]
-        depth = np.clip(depth, self.config.near_clip, self.config.far_clip)
-        depth = (depth - self.config.near_clip) / (self.config.far_clip - self.config.near_clip) # [0, 1]
+        depth = np.clip(depth, self.near_clip, self.far_clip)
+        depth = (depth - self.near_clip) / (self.far_clip - self.near_clip)  # [0, 1]
 
         # [0, 1] -> [0, 255]
-        return (depth * 255.0).astype(np.uint8) # [0, 255] # uint8, for visualization
-
-    def _visualize_images(self, raw_image: dict[str, np.ndarray]):
+        return (depth * 255.0).astype(np.uint8)  # [0, 255] # uint8, for visualization
+    
+    def visualize(self, raw_image: dict[str, np.ndarray]):
+        """Visualize depth and RGB images.
+        
+        Args:
+            raw_image: Dictionary with "depth" and "rgb" keys, each containing dict of camera_name -> image array
+        """
         depth_for_vis = [self._prepare_depth_for_visualization(frame) for frame in raw_image["depth"].values()]
         concatenated_depth = np.concatenate(depth_for_vis, axis=0)
         self._display_frame("depth", concatenated_depth)
         concatenated_rgb = np.concatenate(list(raw_image["rgb"].values()), axis=0)
         self._display_frame("rgb", concatenated_rgb)
+
+
+class ImageServer:
+    def __init__(self, camera_wrapper: list[MujocoRendererWrapper | ZedCamerasWrapper], cfg: ImageServerConfig, gum: None=None):
+        self.cfg: ImageServerConfig = cfg
+        self.camera_wrapper: ZedCamerasWrapper | MujocoRendererWrapper = camera_wrapper
+        self._init_shared_memory()
+
+        if self.cfg.gum:
+            raise NotImplementedError("GUM is not implemented yet")
+            # optional:
+            # self.gum_profiler = TimeProfiler()
+        else:
+            self.gum = None
+        
+        # Non-functional components, for debugging and visualization
+        if self.cfg.save_images:
+            self.image_saver = ImageSaver(self.cfg.image_saver_config)
+        else:
+            self.image_saver = None
+        
+        if self.cfg.visualize_images:
+            self.image_visualizer = ImageVisualizer(
+                near_clip=self.cfg.near_clip,
+                far_clip=self.cfg.far_clip
+            )
+        else:
+            self.image_visualizer = None
+        
+        # Initialize delay buffer for frame delay
+        self.num_delay_frames = self.cfg.num_delay_frames
+        if self.num_delay_frames > 0:
+            # Buffer needs to hold num_delay_frames + 1 frames to store current + delayed frames
+            # When buffer is full, buffer[0] contains the frame from num_delay_frames steps ago
+            # Buffer stores tuples of (step_count, full_image) for debugging
+            self.delay_buffer: deque[tuple[int, np.ndarray]] = deque(maxlen=self.num_delay_frames + 1)
+            print(f"[Image Server] Initialized delay buffer with {self.num_delay_frames} delay frames (will send frames from {self.num_delay_frames} steps ago)")
+        else:
+            self.delay_buffer = None
+        
+        self.capture_profiler = TimeProfiler()
+        
     
+    def _init_shared_memory(self):
+        img_shm_name = "depth_img_shm"
+
+        # Initialize shared memory
+        expected_shape = [self.camera_wrapper.num_cameras, 1, self.cfg.resized_height, self.cfg.resized_width]
+        dtype = np.float32
+        
+        try:
+            memory_size = np.prod(expected_shape) * np.dtype(dtype).itemsize
+            # Try to create new shared memory, if it exists, connect to existing one
+            try:
+                self.image_shm = shared_memory.SharedMemory(create=True, size=memory_size, name=img_shm_name)
+                print(f"[Image Server] Created new shared memory: {img_shm_name}")
+            except FileExistsError:
+                self.image_shm = shared_memory.SharedMemory(name=img_shm_name)
+                print(f"[Image Server] Connected to existing shared memory: {img_shm_name}")
+            
+            self.img_array = np.ndarray(expected_shape, dtype=dtype, buffer=self.image_shm.buf)
+            print(f"[Image Server] Shared memory: shape={expected_shape}, dtype={dtype}")
+        except Exception as e:
+            print(f"[Image Server] Failed to initialize shared memory: {e}")
+            raise
+
+        print("ImageServer initialized")
+
+    def _resize_clip_expand_transpose(self, frame):
+        # resize
+        frame = cv2.resize(frame, (self.cfg.resized_width, self.cfg.resized_height), cv2.INTER_CUBIC)
+
+        # clip and scale to [-0.5, 0.5] range
+        frame = np.clip(frame, self.cfg.near_clip, self.cfg.far_clip)
+        frame = (frame - self.cfg.near_clip) / (self.cfg.far_clip - self.cfg.near_clip) - 0.5
+
+        # [H, W] -> [1, H, W]
+        frame = np.expand_dims(frame, axis=0)
+        return frame
+    
+
     def send_process(self):
         # this thread should be running at 10hz
 
@@ -413,10 +542,13 @@ class ImageServer:
         while True:
 
             # 0. grab frames from cameras
+            t0 = time.perf_counter()
             raw_image = self.camera_wrapper.get_frames()
-            
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            self.capture_profiler.record(elapsed_ms)
+
             # 1. get depth frames
-            if self.config.gum_enabled:
+            if self.cfg.gum:
                 depth_frames = [self.gum.predict(x) for x in raw_image["rgb"].values()]
             else:
                 depth_frames = list(raw_image["depth"].values())  
@@ -427,26 +559,50 @@ class ImageServer:
             # [C, H, W] -> [N, C, H, W] N is the number of cameras; front camera is first, back camera is second
             full_image = np.stack(depth_frames, axis=0)
 
+            # 2.5. Add to delay buffer and get delayed image
+            if self.delay_buffer is not None:
+                # Note: When buffer is full (maxlen reached), deque automatically removes
+                # the oldest item (leftmost) to make room for the new frame
+                self.delay_buffer.append((step_count, full_image.copy()))
+                
+                # Wait until buffer is full before sending delayed frames
+                if len(self.delay_buffer) <= self.num_delay_frames:
+                    # Buffer not full yet, skip this frame
+                    rate_limiter.sleep()
+                    step_count += 1
+                    continue
+                
+                # Retrieve the delayed frame (from num_delay_frames steps ago)
+                # buffer[0] always contains the oldest frame (num_delay_frames steps ago)
+                # because deque with maxlen automatically maintains the size
+                delayed_step_count, delayed_image = self.delay_buffer[0]  # Oldest frame in buffer
+                # print delayed_step_count for debugging purposes
+            else:
+                # No delay, use current frame
+                delayed_image = full_image
+                delayed_step_count = step_count
+
             # 3. copy to shared memory for policy
             try:
-                np.copyto(self.img_array, full_image)
+                # print(f"[Image Server] Current step count: {step_count}, delayed step count: {delayed_step_count}")
+                np.copyto(self.img_array, delayed_image)
             except Exception as e:
                 print(f"[Image Server] Failed to copy to shared memory: {e}")
                 continue
                 
             # 4. save and visualize images
-            if self.config.enable_save_images:
-                self._save_images(raw_image, step_count)
+            if self.cfg.save_images:
+                self.image_saver.save(raw_image, step_count)
 
-            if self.config.enable_visualize_images:
-                self._visualize_images(raw_image)
+            if self.cfg.visualize_images:
+                self.image_visualizer.visualize(raw_image)
 
-            if step_count % 10 == 0:
+            if step_count % 50 == 0:
                 print(f"[Image Server] Rate limiter stats: {rate_limiter.get_stats()}")
-                if self.config.enable_save_images:
-                    stats = self.save_images_profiler.get_stats()
-                    stats["queue_size"] = self.save_queue.qsize()
-                    print(f"[Image Server] save_images stats: {stats}")
+                print(f"[Image Server] capture stats: {self.capture_profiler.get_stats()}")
+                # if self.cfg.save_images:
+                #     stats = self.image_saver.get_stats()
+                #     print(f"[Image Server] save_images stats: {stats}")
 
             rate_limiter.sleep()
             step_count += 1
@@ -504,7 +660,11 @@ def write_depth_video_from_frames(
 
 
 if __name__ == "__main__":
-    image_server = ImageServer(ZedCamerasWrapper(ZedCamerasConfig()), ImageServerConfig(), None)
+    # Parse command line arguments using tyro
+    cfg = tyro.cli(ImageServerConfig)
+    
+    # Create image server with parsed config
+    image_server = ImageServer(ZedCamerasWrapper(ZedCamerasConfig()), cfg, None)
     thread = threading.Thread(target=image_server.send_process)
     thread.start()
     time.sleep(10)
