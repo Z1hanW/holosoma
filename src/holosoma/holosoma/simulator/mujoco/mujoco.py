@@ -32,6 +32,9 @@ from holosoma.simulator.shared.virtual_gantry import create_virtual_gantry
 from holosoma.simulator.types import ActorIndices, ActorNames, ActorPoses, ActorStates, EnvIds
 from holosoma.utils.adapters import mujoco_draw_adapter
 
+import threading
+
+
 class MuJoCoScene:
     """MuJoCo Scene implementation following SceneInterface protocol.
 
@@ -82,6 +85,49 @@ class MuJoCoScene:
         """
         return self._env_origins
 
+
+class MujocoRendererWrapper:
+    def __init__(self, simulator: 'MuJoCo') -> None:
+
+        # TODO: get height/width of renderer from config
+        self._height = 135
+        self._width = 240
+        self.camera_names = [
+            "robot_cam_front_depth",
+            "robot_cam_back_depth"
+        ]
+
+        self._simulator: 'MuJoCo' = simulator
+
+        self._renderer: mujoco.Renderer | None = None
+        self._renderer_thread_id: int | None = None
+
+
+    def _get_renderer(self) -> mujoco.Renderer: 
+        current_thread_id = threading.get_ident()
+        if self._renderer is None or self._renderer_thread_id != current_thread_id:
+            self._renderer = mujoco.Renderer(
+                self._simulator.root_model, height=self._height, width=self._width
+            )
+            self._renderer.enable_depth_rendering()
+            self._renderer_thread_id = current_thread_id
+        return self._renderer
+        
+    def get_frames(self):
+        # Lazy initialization of renderer on the rendering thread
+        renderer = self._get_renderer()
+
+        # Get render data from the simulator
+        world_id = getattr(self.simulator, "current_world_id", 0)
+        render_data = self.simulator.backend.get_render_data(world_id=world_id)
+
+        frames = []
+        for camera_name in self.camera_names:
+            renderer.update_scene(render_data, camera=camera_name)
+            # depth, already in meters
+            frame = renderer.render()
+            frames.append(frame)
+        return frames
 
 class MuJoCo(BaseSimulator):
     """MuJoCo physics simulator with terrain support.
@@ -363,6 +409,9 @@ class MuJoCo(BaseSimulator):
         self._set_robot_properties()
         self._set_robot_joint_addressing()
         self._set_initial_joint_angles()
+
+        # Initialize rgb/depth renderer wrapper
+        self.renderer_wrapper = MujocoRendererWrapper(self)
 
         # Initialize virtual gantry after the robot using config
         gantry_cfg = self.simulator_config.virtual_gantry

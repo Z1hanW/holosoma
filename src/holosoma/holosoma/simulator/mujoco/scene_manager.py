@@ -15,8 +15,7 @@ from holosoma.config_types.simulator import MujocoXMLFilterCfg, SimulatorConfig
 from holosoma.managers.terrain.base import TerrainTermBase
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.managers.camera import CameraManager
-
-
+import threading
 class MujocoSceneManager:
     """Compositional world builder using MjSpec for MuJoCo simulations.
 
@@ -140,30 +139,6 @@ class MujocoSceneManager:
         #    castshadow=True,
         #    type=mujoco.mjtLightType.mjLIGHT_DIRECTIONAL,
         # )
-
-    def add_camera(self, camera_manager: CameraManager, num_envs: int) -> None:
-        """Add cameras to the world specification.
-
-        Parameters
-        ----------
-        camera_manager : CameraManager
-            Camera manager for the simulation.
-        num_envs : int
-            Number of environments (affects camera layout planning).
-        """
-
-        # # 0. get the robot torso link;
-        # mj_model = self.world_spec.root_model
-
-        # # read different terms in camera_manager, and attach them to the robot torso link;
-        # cam_terms = camera_manager.camera_terms
-        # for cam_name, cam_term in cam_terms.items():
-        #     cam_config = cam_term.cfg
-        #     cam_pose = cam_config.pose
-        #     cam_pos = cam_pose.camera_offset
-        #     cam_quat = cam_pose.camera_rotation
-        # TODO: Currently, add camera in xml file.
-        pass
 
     def add_terrain(self, terrain_state: TerrainTermBase, num_envs: int) -> None:
         """Add terrain to the world specification with extensible dispatch.
@@ -294,7 +269,7 @@ class MujocoSceneManager:
         min_height = height_data_scaled.min()
         z_offset = 0.0
         # min_height needs to be positive. zero is not allowed.
-        if min_height <= 0:
+        if min_height < 1e-9:
             height_data_scaled = height_data_scaled - min_height + 1e-9
             z_offset = min_height
             logger.info(f"Shifted heightfield by {-min_height:.3f}m to ensure non-negative heights")
@@ -306,6 +281,8 @@ class MujocoSceneManager:
         # size = [x_half, y_half, HEIGHT_RANGE, z_baseline]
         # Note: nrow/ncol are swapped for correct orientation
         height_range = max_height - min_height_final
+        if height_range < 1e-9:
+            height_range = 1e-9
 
         # Create heightfield asset
         hfield_spec = self.world_spec.add_hfield(name="terrain")
@@ -317,7 +294,7 @@ class MujocoSceneManager:
 
         logger.info(
             f"Created heightfield: {hfield_spec.nrow}x{hfield_spec.ncol},"
-            " size=[{0.5 * total_length:.2f}, {0.5 * total_width:.2f}, {height_range:.3f}, {min_height_final:.3f}]"
+            f" size=[{0.5 * total_length:.2f}, {0.5 * total_width:.2f}, {height_range:.3f}, {min_height_final:.3f}]"
         )
 
         # Create heightfield geom, positioned to match terrain coordinate system

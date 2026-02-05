@@ -24,7 +24,7 @@ from holosoma.config_types.full_sim import FullSimConfig
 from holosoma.config_types.run_sim import RunSimConfig
 from holosoma.managers.terrain.manager import TerrainManager
 from holosoma.managers.camera.manager import CameraManager
-from holosoma.utils.image_server import ImageServer
+from holosoma.sensors.image_server import ImageServer
 from holosoma.utils.common import seeding
 from holosoma.utils.helpers import get_class
 from holosoma.utils.rate import RateLimiter
@@ -439,7 +439,7 @@ class DirectSimulation:
             self.simulator.video_recorder.start_recording(episode_id=0)
         
         # Step 8: setup the image server
-        self.image_server = ImageServer(self.simulator)
+        self.image_server = ImageServer([self.simulator.renderer_wrapper])
         self.cam_thread = Thread(target=self.image_server.send_process)
         self.cam_thread.daemon = True
 
