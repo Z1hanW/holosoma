@@ -1,0 +1,379 @@
+"""Depth distillation policy for far-tracking student models.
+
+Loads two ONNX models:
+- depth_backbone.onnx: depth image (1, H, W) -> depth latent (1, D)
+- student.onnx: (obs, time_step) -> (actions, motion_refs...)
+
+The depth backbone processes depth images from shared memory into a latent
+vector that is concatenated with proprioceptive observations before being
+fed to the student network.
+"""
+
+from __future__ import annotations
+
+import json
+from collections import deque
+from multiprocessing import shared_memory
+from pathlib import Path
+
+import numpy as np
+import onnx
+import onnxruntime
+from loguru import logger
+
+from holosoma_inference.config.config_types.inference import InferenceConfig
+from holosoma_inference.policies.locomotion import LocomotionPolicy
+
+
+class DepthDistillationPolicy(LocomotionPolicy):
+    """Policy for far-tracking depth distillation student models.
+
+    Uses a two-model ONNX architecture:
+    - depth_backbone: CNN that converts depth images to latent vectors
+    - student: MLP that takes [proprioceptive_obs, command, depth_latent] -> actions
+
+    The student model also outputs motion reference data (joint_pos, joint_vel,
+    body_pos_w, etc.) indexed by a time_step counter.
+    """
+
+    def __init__(self, config: InferenceConfig):
+        self.motion_timestep = 0
+        self.motion_clip_progressing = False
+
+        # Will be populated in _init_policy_components
+        self.depth_backbone_session = None
+        self.depth_backbone_input_name = None
+        self.depth_backbone_output_name = None
+        self.depth_latent_dim = None
+        self.depth_image_shape = None  # (H, W) from backbone input
+        self.time_step_total = None
+
+        super().__init__(config)
+
+        # Initialize depth shared memory client
+        self._init_depth_shm()
+
+        # Initialize depth frame buffer
+        depth_history_len = config.observation.history_length_dict.get("depth_obs", 3)
+        self.depth_frame_buffer = deque(maxlen=depth_history_len)
+
+    def _init_depth_shm(self):
+        """Initialize depth image client using shared memory."""
+        camera_config = self.config.camera
+        if camera_config is None:
+            raise ValueError("DepthDistillationPolicy requires a camera configuration.")
+
+        img_shape = [camera_config.props.resized_height, camera_config.props.resized_width]
+        channels = 1  # depth is always 1 channel
+        num_cameras = len(camera_config.poses)
+        expected_shape = [num_cameras, channels, img_shape[0], img_shape[1]]
+
+        self.depth_img_shm = shared_memory.SharedMemory(name="depth_img_shm")
+        self.depth_img_array = np.ndarray(expected_shape, dtype=np.float32, buffer=self.depth_img_shm.buf)
+        logger.info(f"[DepthDistillationPolicy] Depth SHM client initialized: shape={expected_shape}")
+
+    def _init_policy_components(self, model_path, policy_action_scale, rl_rate):
+        """Override to load two ONNX models: depth_backbone and student."""
+        self.policy_action_scale = policy_action_scale
+        self.rl_rate = rl_rate
+
+        # Collect and resolve model paths
+        self.model_paths = self._collect_model_paths(model_path)
+        if len(self.model_paths) != 2:
+            raise ValueError(
+                f"DepthDistillationPolicy requires exactly 2 model paths "
+                f"[depth_backbone.onnx, student.onnx], got {len(self.model_paths)}"
+            )
+
+        resolved_paths = []
+        for path in self.model_paths:
+            local_path = self._resolve_model_path(str(path))
+            resolved_paths.append(local_path)
+        self.model_paths = resolved_paths
+
+        backbone_path = self.model_paths[0]
+        student_path = self.model_paths[1]
+
+        # Load depth backbone
+        self._load_depth_backbone(backbone_path)
+
+        # Load student model
+        self._load_student_model(student_path)
+
+        # Initialize action buffers
+        self.last_policy_action = np.zeros((1, self.num_dofs))
+        self.scaled_policy_action = np.zeros((1, self.num_dofs))
+
+        # Initialize policy states for multi-policy support
+        self._policy_states = [self._capture_policy_state()]
+        self.active_policy_index = 0
+        self.active_model_path = student_path
+
+        # Resolve control gains from ONNX metadata or config
+        self._resolve_control_gains()
+
+    def _load_depth_backbone(self, model_path: str):
+        """Load the depth backbone ONNX model."""
+        self.depth_backbone_session = onnxruntime.InferenceSession(model_path)
+
+        inputs = self.depth_backbone_session.get_inputs()
+        outputs = self.depth_backbone_session.get_outputs()
+
+        self.depth_backbone_input_name = inputs[0].name   # "depth_image"
+        self.depth_backbone_output_name = outputs[0].name  # "depth_latent"
+
+        # Extract input shape to auto-detect (H, W)
+        input_shape = inputs[0].shape  # e.g. [1, 3, 58, 87] or [1, 58, 87]
+        if len(input_shape) == 4:
+            # (batch, buffer_len, H, W)
+            self.depth_image_shape = (input_shape[2], input_shape[3])
+            self.depth_buffer_len = input_shape[1]
+        elif len(input_shape) == 3:
+            # (batch, H, W)
+            self.depth_image_shape = (input_shape[1], input_shape[2])
+            self.depth_buffer_len = 1
+        else:
+            raise ValueError(f"Unexpected depth backbone input shape: {input_shape}")
+
+        # Extract output dim
+        output_shape = outputs[0].shape  # e.g. [1, 32]
+        self.depth_latent_dim = output_shape[-1]
+
+        logger.info(
+            f"[DepthDistillationPolicy] Depth backbone loaded: "
+            f"input={input_shape}, latent_dim={self.depth_latent_dim}"
+        )
+
+    def _load_student_model(self, model_path: str):
+        """Load the student ONNX model and extract metadata."""
+        self.onnx_policy_session = onnxruntime.InferenceSession(model_path)
+        self.onnx_input_names = [inp.name for inp in self.onnx_policy_session.get_inputs()]
+        self.onnx_output_names = [out.name for out in self.onnx_policy_session.get_outputs()]
+
+        # Extract metadata
+        onnx_model = onnx.load(model_path)
+        metadata = {}
+        for prop in onnx_model.metadata_props:
+            try:
+                metadata[prop.key] = json.loads(prop.value)
+            except (json.JSONDecodeError, ValueError):
+                metadata[prop.key] = prop.value
+
+        # Extract KP/KD from metadata
+        self.onnx_kp = np.array(metadata["kp"]) if "kp" in metadata else None
+        self.onnx_kd = np.array(metadata["kd"]) if "kd" in metadata else None
+
+        if self.onnx_kp is not None:
+            logger.info(f"Loaded KP/KD from ONNX metadata: {Path(model_path).name}")
+
+        # Extract action scale from metadata if available
+        if "action_scale" in metadata:
+            action_scale = metadata["action_scale"]
+            if isinstance(action_scale, (int, float)):
+                self.policy_action_scale = float(action_scale)
+                logger.info(f"Using action_scale from ONNX metadata: {self.policy_action_scale}")
+
+        # Determine time_step_total from student outputs (motion clip length)
+        # Run a dummy inference to get the motion reference shapes
+        obs_input = self.onnx_policy_session.get_inputs()[0]  # "obs"
+        obs_dim = obs_input.shape[-1]
+        dummy_obs = np.zeros((1, obs_dim), dtype=np.float32)
+        dummy_time_step = np.zeros((1, 1), dtype=np.float32)
+
+        try:
+            outputs = self.onnx_policy_session.run(
+                self.onnx_output_names,
+                {"obs": dummy_obs, "time_step": dummy_time_step},
+            )
+            # outputs[0] = actions, outputs[1:] = motion refs (joint_pos, joint_vel, etc.)
+            if len(outputs) > 1:
+                # The motion reference data has a fixed number of frames baked into the ONNX
+                # We can't determine total from a single inference; store None and wrap via modulo
+                self.time_step_total = None
+                logger.info(
+                    f"[DepthDistillationPolicy] Student model has {len(outputs)} outputs "
+                    f"(actions + {len(outputs) - 1} motion refs)"
+                )
+        except Exception as e:
+            logger.warning(f"Could not run dummy student inference: {e}")
+            self.time_step_total = None
+
+        # Build the policy callable
+        def policy_act(obs_dict):
+            input_feed = {name: obs_dict[name] for name in self.onnx_input_names}
+            outputs = self.onnx_policy_session.run(self.onnx_output_names, input_feed)
+            return outputs  # Return all outputs, not just actions
+
+        self.policy = policy_act
+
+        logger.info(
+            f"[DepthDistillationPolicy] Student model loaded: "
+            f"inputs={self.onnx_input_names}, outputs={self.onnx_output_names}"
+        )
+
+    def _capture_policy_state(self) -> dict:
+        """Capture the current policy state for later reuse."""
+        return {
+            "onnx_policy_session": self.onnx_policy_session,
+            "onnx_input_names": self.onnx_input_names,
+            "onnx_output_names": self.onnx_output_names,
+            "policy_callable": self.policy,
+            "onnx_kp": self.onnx_kp,
+            "onnx_kd": self.onnx_kd,
+            "depth_backbone_session": self.depth_backbone_session,
+        }
+
+    def _restore_policy_state(self, state: dict):
+        """Restore a previously captured policy state."""
+        super()._restore_policy_state(state)
+        self.depth_backbone_session = state["depth_backbone_session"]
+
+    def _run_depth_backbone(self, depth_image: np.ndarray) -> np.ndarray:
+        """Run depth backbone to get latent vector.
+
+        Parameters
+        ----------
+        depth_image : np.ndarray
+            Depth image with shape matching backbone input requirements.
+
+        Returns
+        -------
+        np.ndarray
+            Depth latent vector of shape (1, depth_latent_dim).
+        """
+        input_feed = {self.depth_backbone_input_name: depth_image.astype(np.float32)}
+        outputs = self.depth_backbone_session.run([self.depth_backbone_output_name], input_feed)
+        return outputs[0]
+
+    def _get_depth_image(self) -> np.ndarray:
+        """Read depth image from shared memory and prepare for backbone.
+
+        Returns
+        -------
+        np.ndarray
+            Depth image ready for backbone inference.
+        """
+        # Read from shared memory: shape (num_cameras, 1, H, W)
+        depth_images = self.depth_img_array.copy()
+
+        # Use first (and only) camera for single D435i setup
+        # Shape: (1, H, W)
+        depth_frame = depth_images[0]  # (1, H, W)
+
+        # Update depth frame buffer
+        self.depth_frame_buffer.append(depth_frame.copy())
+
+        # Pad buffer if not yet full
+        buffer_len = self.depth_frame_buffer.maxlen
+        frames = list(self.depth_frame_buffer)
+        if len(frames) < buffer_len:
+            missing = buffer_len - len(frames)
+            frames = [frames[0]] * missing + frames
+
+        # Stack frames: (buffer_len, H, W)
+        stacked = np.concatenate(frames, axis=0)  # (buffer_len, H, W)
+
+        # Add batch dimension: (1, buffer_len, H, W)
+        return np.expand_dims(stacked, axis=0)
+
+    def get_current_obs_buffer_dict(self, robot_state_data):
+        """Build observation buffer with proprioceptive data."""
+        current_obs_buffer_dict = super().get_current_obs_buffer_dict(robot_state_data)
+
+        # Add depth image placeholder (actual processing happens in prepare_obs_for_rl)
+        # This is needed so parse_current_obs_dict doesn't fail on missing "cam_depth"
+        camera_config = self.config.camera
+        if camera_config is not None:
+            h = camera_config.props.resized_height
+            w = camera_config.props.resized_width
+            current_obs_buffer_dict["cam_depth"] = np.zeros((1, h * w))
+
+        return current_obs_buffer_dict
+
+    def prepare_obs_for_rl(self, robot_state_data):
+        """Prepare observations for RL inference.
+
+        1. Build proprioceptive observation vector (projected_gravity, ang_vel, dof_pos, dof_vel, actions)
+        2. Read depth image from shared memory
+        3. Run depth_backbone ONNX -> depth latent
+        4. Concatenate: [proprioceptive, depth_latent]
+        5. Return dict with {"obs": concatenated, "time_step": current_step}
+        """
+        # Build proprioceptive observations using group history
+        self._prepare_group_observations(robot_state_data)
+
+        # Get the actor_obs (proprioceptive) from history buffers
+        actor_obs = self.obs_buf_dict["actor_obs"]  # (1, prop_dim)
+
+        # Get depth image and run backbone
+        depth_image = self._get_depth_image()  # (1, buffer_len, H, W)
+        depth_latent = self._run_depth_backbone(depth_image)  # (1, latent_dim)
+
+        # Concatenate proprioceptive + depth latent
+        obs = np.concatenate([actor_obs, depth_latent], axis=1).astype(np.float32)
+
+        return {
+            "obs": obs,
+            "time_step": np.array([[self.motion_timestep]], dtype=np.float32),
+        }
+
+    def rl_inference(self, robot_state_data):
+        """Perform RL inference with two-model architecture."""
+        obs_dict = self.prepare_obs_for_rl(robot_state_data)
+
+        if self.config.task.print_observations:
+            self._print_observations(obs_dict)
+
+        # Run student model
+        outputs = self.policy(obs_dict)
+
+        # Extract actions (first output)
+        policy_action = outputs[0]
+        policy_action = np.clip(policy_action, -100, 100)
+
+        self.last_policy_action = policy_action.copy()
+        self.scaled_policy_action = policy_action * self.policy_action_scale
+
+        # Store motion reference data if available (outputs[1:])
+        if len(outputs) > 1:
+            self._motion_refs = outputs[1:]
+
+        # Increment timestep
+        if self.motion_clip_progressing:
+            self.motion_timestep += 1
+
+        return self.scaled_policy_action
+
+    def handle_keyboard_button(self, keycode):
+        """Handle keyboard button presses."""
+        if keycode == "s":
+            self._handle_start_motion_clip()
+        else:
+            super().handle_keyboard_button(keycode)
+
+    def handle_joystick_button(self, cur_key):
+        """Handle joystick button presses."""
+        if cur_key == "start":
+            self._handle_start_motion_clip()
+        else:
+            super().handle_joystick_button(cur_key)
+
+    def _handle_start_policy(self):
+        """Handle start policy action."""
+        super()._handle_start_policy()
+        self.motion_clip_progressing = True
+        self.motion_timestep = 0
+        logger.info("Depth distillation policy started, motion clip progressing")
+
+    def _handle_stop_policy(self):
+        """Handle stop policy action."""
+        super()._handle_stop_policy()
+        self.motion_clip_progressing = False
+        self.motion_timestep = 0
+        self.depth_frame_buffer.clear()
+
+    def _handle_start_motion_clip(self):
+        """Handle start motion clip action."""
+        self.motion_clip_progressing = True
+        self.motion_timestep = 0
+        logger.info("Starting motion clip from timestep 0")

@@ -12,13 +12,12 @@ from holosoma.utils.rate import RateLimiter
 
 # mainly an interface with camera.
 class MujocoCameraRenderer:
-    def __init__(self, simulator: MuJoCo, height: int, width: int) -> None:
+    def __init__(self, simulator: MuJoCo, height: int, width: int, camera_names: list[str] | None = None) -> None:
 
         self.simulator: MuJoCo = simulator
-        # TODO: get height/width of renderer from config
         self._height = height
         self._width = width
-        self.camera_names = [
+        self.camera_names = camera_names or [
             "robot_cam_front_depth",
             "robot_cam_back_depth"
         ]
@@ -35,7 +34,7 @@ class MujocoCameraRenderer:
             self._renderer.enable_depth_rendering()
             self._renderer_thread_id = current_thread_id
         return self._renderer
-        
+
     def get_frames(self):
         renderer = self._get_renderer()
         world_id = getattr(self.simulator, "current_world_id", 0)
@@ -50,32 +49,40 @@ class MujocoCameraRenderer:
         return frames
 
 class ImageServer:
-    def __init__(self, simulator): 
-
-        # TODO: A bunch of configs, refactor this to use a config class 
-        self.image_type = "depth"
-        self.near_clip = 0.1
-        self.far_clip = 2.0
-        self.expected_shape = (27, 48)
-
-        renderer_height = 135  
-        renderer_width = 240 
+    def __init__(
+        self,
+        simulator,
+        camera_names: list[str] | None = None,
+        image_type: str = "depth",
+        renderer_height: int = 135,
+        renderer_width: int = 240,
+        resized_height: int = 27,
+        resized_width: int = 48,
+        near_clip: float = 0.1,
+        far_clip: float = 2.0,
+        frame_rate: int = 10,
+    ):
+        self.image_type = image_type
+        self.near_clip = near_clip
+        self.far_clip = far_clip
+        self.expected_shape = (resized_height, resized_width)
+        self.frame_rate = frame_rate
 
         # Initialize camera renderer
-        self.camera = MujocoCameraRenderer(simulator, renderer_height, renderer_width)
+        self.camera = MujocoCameraRenderer(simulator, renderer_height, renderer_width, camera_names)
+        self.num_cameras = len(self.camera.camera_names)
 
         # Initialize shared memory
         self._init_shared_memory()
-    
+
     def _init_shared_memory(self):
         img_shm_name = "depth_img_shm"
 
         # Initialize shared memory
         channels = 1 if self.image_type == "depth" else 3
-        num_cameras = 2
-        expected_shape = [num_cameras, channels, self.expected_shape[0], self.expected_shape[1]]
+        expected_shape = [self.num_cameras, channels, self.expected_shape[0], self.expected_shape[1]]
         dtype = np.float32 if self.image_type == "depth" else np.uint8
-        
+
         try:
             memory_size = np.prod(expected_shape) * np.dtype(dtype).itemsize
             # Try to create new shared memory, if it exists, connect to existing one
@@ -85,7 +92,7 @@ class ImageServer:
             except FileExistsError:
                 self.image_shm = shared_memory.SharedMemory(name=img_shm_name)
                 print(f"[Image Server] Connected to existing shared memory: {img_shm_name}")
-            
+
             self.img_array = np.ndarray(expected_shape, dtype=dtype, buffer=self.image_shm.buf)
             print(f"[Image Server] Shared memory: shape={expected_shape}, dtype={dtype}")
         except Exception as e:
@@ -103,37 +110,26 @@ class ImageServer:
             frame = np.clip(frame, self.near_clip, self.far_clip)
             frame = (frame - self.near_clip) / (self.far_clip - self.near_clip) - 0.5
             frame = np.expand_dims(frame, axis=2)
-        
+
         # [H, W, C] -> [C, H, W]
         frame = frame.transpose(2, 0, 1)
         return frame
-    
+
 
     def _display_frame(self, name, frame):
-        # if self.image_type == "depth":
-        #     # Normalize depth image from [-0.5, 0.5] to [0, 1] to [0, 255]
-        #     display = ((frame + 0.5) * 255.0).astype(np.uint8)
-        # else:
-        #     display = frame
         display = ((frame + 0.5) * 255.0).astype(np.uint8)
         cv2.imshow(f"Image Server Stream {name}", display)
         return cv2.waitKey(1) & 0xFF == ord("q")
-        
-    
-    def send_process(self):
-        # this thread should be running at 10hz
 
-        render_frequency = 10
-        rate_limiter = RateLimiter(render_frequency)
+
+    def send_process(self):
+        rate_limiter = RateLimiter(self.frame_rate)
 
         step_count = 0
         while True:
 
             frames = self.camera.get_frames()
             frames = [self._post_process_frame(frame) for frame in frames]
-
-            # concatenated_frames = np.concatenate(processed_frames, axis=1)
-            # self._display_frame("resized and clipped", concatenated_frames)
 
              # Concatenate frames before channel dimension (axis=0)
             # [C, H, W] -> [N, C, H, W] N is the number of cameras
@@ -151,7 +147,7 @@ class ImageServer:
 
             rate_limiter.sleep()
             step_count += 1
-    
+
 ######################## temporary functions ########################
 
     def _depth_to_pixels(self, depth_frame): # Shift nearest values to the origin.

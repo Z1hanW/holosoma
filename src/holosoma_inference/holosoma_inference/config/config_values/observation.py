@@ -209,6 +209,53 @@ loco_manip_stand_height_waist = ObservationConfig(
     # Note: obs_intervals from YAML not included as it's not present in other Python configs
     # Original intervals were: actor_state_obs: 1, perception_obs: ${eval:${task.policy.config.rl_rate} / ${robot.cameras.props.frame_rate}}, command_lin_vel_obs: 1
 )
+
+
+# =============================================================================
+# WBT Distillation (far-tracking depth distillation) Observation Configurations
+# =============================================================================
+
+wbt_distillation_g1 = ObservationConfig(
+    obs_intervals={
+        "actor_obs": 1,
+        "depth_obs": 1,  # FREQ_RATIO=1 in far-tracking
+    },
+    obs_dict={
+        "actor_obs": [
+            "projected_gravity",
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+            "actions",
+        ],
+        "depth_obs": [
+            "cam_depth",
+        ],
+    },
+    obs_dims={
+        "projected_gravity": 3,
+        "base_ang_vel": 3,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+        # cam_depth: resized_height * resized_width = 58 * 87 = 5046
+        "cam_depth": 5046,
+    },
+    obs_scales={
+        "projected_gravity": 1.0,
+        "base_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 1.0,
+        "actions": 1.0,
+        "cam_depth": 1.0,
+    },
+    history_length_dict={
+        "actor_obs": 1,
+        "depth_obs": 3,
+    },
+)
+
+
 # =============================================================================
 # Default Configurations Dictionary
 # =============================================================================
@@ -218,6 +265,7 @@ DEFAULTS = {
     "loco-t1-29dof": loco_t1_29dof,
     "wbt": wbt,
     "loco-manip-stand-height-waist": loco_manip_stand_height_waist,
+    "wbt-distillation-g1": wbt_distillation_g1,
 }
 """Dictionary of all available observation configurations.
 

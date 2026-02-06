@@ -267,6 +267,8 @@ Changed group of some visual geoms to support ray-tracing that passes through ro
                     <body name="torso_link">
                         <camera name="cam_front_depth" pos="0.135 0.06 0.02" euler="0 -0.2618 -1.57" fovy="69.00" />
                         <camera name="cam_back_depth" pos="-0.125 -0.06 0.02" euler="0 0.2618 1.57" fovy="69.00" />
+                        <!-- D435i depth camera for far-tracking distillation -->
+                        <camera name="cam_d435i_depth" pos="0.01 0.01 0.44" euler="0.01745 0.47124 0.01745" fovy="48.68" />
 
                         <inertial pos="0.00203158 0.000339683 0.184568" quat="0.999803 -6.03319e-05 0.0198256 0.00131986"
                                 mass="7.818" diaginertia="0.121847 0.109825 0.0273735"/>

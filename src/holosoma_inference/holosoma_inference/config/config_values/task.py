@@ -58,8 +58,27 @@ loco_manip_stand_height_waist = TaskConfig(
     wandb_download_dir="/tmp",
 )
 
+# Depth distillation task (far-tracking two-model architecture)
+wbt_distillation = TaskConfig(
+    model_path=["/home/ANT.AMAZON.COM/lujiey/workplace/FAR-Holosoma/models/depth_backbone.onnx", "/home/ANT.AMAZON.COM/lujiey/workplace/FAR-Holosoma/models/student.onnx"],  # [depth_backbone.onnx, student.onnx] - must be provided by user
+    rl_rate=50,
+    policy_action_scale=1.0,  # read from ONNX metadata action_scale if available
+    use_phase=False,
+    gait_period=1.0,
+    desired_base_height=0.75,
+    residual_upper_body_action=False,
+    domain_id=0,
+    interface="lo",
+    use_joystick=False,
+    joystick_type="xbox",
+    joystick_device=0,
+    use_ros=False,
+    wandb_download_dir="/tmp",
+)
+
 DEFAULTS = {
     "locomotion": locomotion,
     "wbt": wbt,
     "loco-manip-stand-height-waist": loco_manip_stand_height_waist,
+    "wbt-distillation": wbt_distillation,
 }

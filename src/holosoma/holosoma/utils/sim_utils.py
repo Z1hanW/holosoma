@@ -338,7 +338,14 @@ class DirectSimulation:
     ...     sim.run()
     """
 
-    def __init__(self, config: RunSimConfig, env: Any, device: str, simulation_app: Any):
+    def __init__(
+        self,
+        config: RunSimConfig,
+        env: Any,
+        device: str,
+        simulation_app: Any,
+        image_server_kwargs: dict[str, Any] | None = None,
+    ):
         """Initialize DirectSimulation instance.
 
         Parameters
@@ -351,12 +358,16 @@ class DirectSimulation:
             Device for tensor operations.
         simulation_app : Any
             Simulation app instance (if any).
+        image_server_kwargs : dict[str, Any] | None, optional
+            Optional keyword arguments forwarded to ImageServer (camera_names,
+            renderer dimensions, near/far clip, frame_rate, etc.).
         """
         self.config = config
         self.env = env
         self.device = device
         self.simulation_app = simulation_app
         self.simulator = env.sim
+        self._image_server_kwargs = image_server_kwargs or {}
 
     def __enter__(self) -> Self:
         """Context manager entry - initialize the simulation.
@@ -439,7 +450,7 @@ class DirectSimulation:
             self.simulator.video_recorder.start_recording(episode_id=0)
         
         # Step 8: setup the image server
-        self.image_server = ImageServer(self.simulator)
+        self.image_server = ImageServer(self.simulator, **self._get_image_server_kwargs())
         self.cam_thread = Thread(target=self.image_server.send_process)
         self.cam_thread.daemon = True
 
@@ -572,3 +583,49 @@ class DirectSimulation:
         fps = 1000 / elapsed
         logger.info(f"Simulation FPS: {fps:.1f}")
         return time.time()
+
+    def _get_image_server_kwargs(self) -> dict[str, Any]:
+        """Build keyword arguments for ImageServer from config and stored overrides.
+
+        Extracts camera parameters from RunSimConfig.camera when available,
+        then applies any explicit overrides from _image_server_kwargs.
+
+        Returns
+        -------
+        dict[str, Any]
+            Keyword arguments forwarded to ImageServer constructor.
+        """
+        kwargs: dict[str, Any] = {}
+
+        # Auto-derive from RunSimConfig.camera if camera terms are configured
+        camera_cfg = self.config.camera
+        if camera_cfg.terms:
+            # Derive camera names (prefixed with "robot_" as MuJoCo attach does)
+            prefix = "robot_"
+            cam_names = []
+            props = None
+            for term_name, term_cfg in camera_cfg.terms.items():
+                params = term_cfg.params
+                pose = params.get("pose")
+                if pose is not None:
+                    # Camera name in XML is derived from config term name pattern
+                    # e.g. "front_depth" -> XML "cam_front_depth" -> prefixed "robot_cam_front_depth"
+                    cam_names.append(f"{prefix}cam_{term_name}")
+                if props is None and "props" in params:
+                    props = params["props"]
+
+            if cam_names:
+                kwargs["camera_names"] = cam_names
+            if props is not None:
+                kwargs["renderer_height"] = props.height
+                kwargs["renderer_width"] = props.width
+                kwargs["resized_height"] = props.resized_height
+                kwargs["resized_width"] = props.resized_width
+                kwargs["near_clip"] = props.near_clip
+                kwargs["far_clip"] = props.far_clip
+                kwargs["frame_rate"] = props.frame_rate
+                kwargs["image_type"] = props.image_type
+
+        # Explicit overrides take precedence
+        kwargs.update(self._image_server_kwargs)
+        return kwargs

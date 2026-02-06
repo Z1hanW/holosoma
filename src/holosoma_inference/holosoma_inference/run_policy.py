@@ -19,6 +19,7 @@ from loguru import logger
 from holosoma_inference.config.config_types.inference import InferenceConfig
 from holosoma_inference.config.config_values.inference import AnnotatedInferenceConfig
 from holosoma_inference.config.utils import TYRO_CONFIG
+from holosoma_inference.policies.depth_distillation import DepthDistillationPolicy
 from holosoma_inference.policies.loco_manip_stand_height_wait_depth import LocoManipStandHeightWaitDepthPolicy
 from holosoma_inference.policies.locomotion import LocomotionPolicy
 from holosoma_inference.policies.wbt import WholeBodyTrackingPolicy
@@ -28,7 +29,7 @@ import numpy as np
 
 import os
 
-DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+DEBUG = True #os.getenv("DEBUG", "False").lower() == "true"
 
 def _print_control_guide(policy_class, use_joystick: bool):
     """Print control guide for users."""
@@ -95,6 +96,38 @@ def _print_control_guide(policy_class, use_joystick: bool):
     logger.info("")
 
 
+def _select_policy_class(config: InferenceConfig):
+    """Select the appropriate policy class based on configuration.
+
+    Selection rules (in priority order):
+    1. If task.model_path is a list of 2 paths and depth_obs is in observation groups
+       -> DepthDistillationPolicy
+    2. If actor_obs contains "motion_command" -> WholeBodyTrackingPolicy
+    3. If observation groups contain "perception_obs" (dual depth cameras)
+       -> LocoManipStandHeightWaitDepthPolicy
+    4. Otherwise -> LocomotionPolicy
+    """
+    obs_dict = config.observation.obs_dict
+    actor_obs = obs_dict.get("actor_obs", [])
+    model_path = config.task.model_path
+
+    # Check for depth distillation: two model paths + depth_obs group
+    has_depth_obs = "depth_obs" in obs_dict
+    has_two_models = isinstance(model_path, list) and len(model_path) == 2
+    if has_depth_obs and has_two_models:
+        return DepthDistillationPolicy
+
+    # Check for WBT policy
+    if "motion_command" in actor_obs:
+        return WholeBodyTrackingPolicy
+
+    # Check for loco-manip depth policy
+    if "perception_obs" in obs_dict:
+        return LocoManipStandHeightWaitDepthPolicy
+
+    return LocomotionPolicy
+
+
 def run_policy(config: InferenceConfig):
     """Run policy with Tyro configuration."""
     logger.info("🚀 Starting Policy with Tyro configuration...")
@@ -103,11 +136,8 @@ def run_policy(config: InferenceConfig):
     logger.info(f"⚙️ RL Rate: {config.task.rl_rate} Hz")
     logger.info(f"📁 Model path: {config.task.model_path}")
 
-    # try:
-        # Determine policy class based on observation type
-    actor_obs = config.observation.obs_dict.get("actor_obs", [])
-    policy_class = WholeBodyTrackingPolicy if "motion_command" in actor_obs else LocomotionPolicy
-    policy_class = LocoManipStandHeightWaitDepthPolicy
+    # Determine policy class based on observation and task configuration
+    policy_class = _select_policy_class(config)
     logger.info(f"Using {policy_class.__name__}")
     policy: LocomotionPolicy | WholeBodyTrackingPolicy = policy_class(config=config)
 

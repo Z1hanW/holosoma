@@ -59,11 +59,19 @@ g1_29dof_loco_manip_stand_height_waist = InferenceConfig(
     camera=camera.dual_depth_cameras,
 )
 
+g1_wbt_distillation = InferenceConfig(
+    robot=robot.g1_29dof,
+    observation=observation.wbt_distillation_g1,
+    task=task.wbt_distillation,
+    camera=camera.single_d435i_depth,
+)
+
 DEFAULTS = {
     "g1-29dof-loco": g1_29dof_loco,
     "t1-29dof-loco": t1_29dof_loco,
     "g1-29dof-wbt": g1_29dof_wbt,
     "g1-29dof-loco-manip-stand-height-waist": g1_29dof_loco_manip_stand_height_waist,
+    "g1-wbt-distillation": g1_wbt_distillation,
 }
 
 # Auto-discover inference configs from installed extensions
