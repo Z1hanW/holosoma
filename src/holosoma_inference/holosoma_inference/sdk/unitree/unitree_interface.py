@@ -37,6 +37,8 @@ class UnitreeInterface(BaseInterface):
         }
         message_type_map = {"HG": unitree_interface.MessageType.HG, "GO2": unitree_interface.MessageType.GO2}
 
+        print(f"self.interface_str: {self.interface_str}")
+
         self.unitree_interface = unitree_interface.create_robot(
             self.interface_str,
             robot_type_map[self.robot_config.robot.upper()],

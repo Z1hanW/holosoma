@@ -106,7 +106,7 @@ def run_policy(config: InferenceConfig):
     # try:
         # Determine policy class based on observation type
     actor_obs = config.observation.obs_dict.get("actor_obs", [])
-    policy_class = WholeBodyTrackingPolicy if "motion_command" in actor_obs else LocomotionPolicy
+    # policy_class = WholeBodyTrackingPolicy if "motion_command" in actor_obs else LocomotionPolicy
     policy_class = LocoManipStandHeightWaitDepthPolicy
     logger.info(f"Using {policy_class.__name__}")
     policy: LocomotionPolicy | WholeBodyTrackingPolicy = policy_class(config=config)
@@ -141,11 +141,11 @@ def run_policy(config: InferenceConfig):
     logger.info("✅ Policy execution completed!")
 
 
-def main(annotated_config=None):
-    """Main entry point. Extensions can pass their own AnnotatedInferenceConfig."""
-    if annotated_config is None:
-        annotated_config = AnnotatedInferenceConfig
-    config = tyro.cli(annotated_config, config=TYRO_CONFIG)
+def main():
+    config = tyro.cli(
+        AnnotatedInferenceConfig,
+        config=TYRO_CONFIG,
+    )
     run_policy(config)
 
 
