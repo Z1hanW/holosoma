@@ -46,7 +46,7 @@ class ZEDCameraConfig:
 
 default_terms = {
     "front": ZEDCameraConfig(
-        serial_number=32658215,
+        serial_number=35996713,
     ),
     "back": ZEDCameraConfig(
         serial_number=33082869,
