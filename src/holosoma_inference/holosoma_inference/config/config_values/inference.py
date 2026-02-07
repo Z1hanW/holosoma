@@ -60,7 +60,7 @@ g1_29dof_loco_manip_stand_height_waist = InferenceConfig(
 )
 
 g1_wbt_distillation = InferenceConfig(
-    robot=robot.g1_29dof,
+    robot=robot.g1_29dof_wbt_distillation,
     observation=observation.wbt_distillation_g1,
     task=task.wbt_distillation,
     camera=camera.single_d435i_depth,

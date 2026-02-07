@@ -155,7 +155,8 @@ def run_policy(config: InferenceConfig):
             policy.cmd_tau,
             np.zeros(policy.num_dofs),
         )
-        policy.update_phase_time()
+        if hasattr(policy, 'phase_dt'):
+            policy.update_phase_time()
         for i in range(10):
             print(f"iteration {i}")
             policy.policy_action()

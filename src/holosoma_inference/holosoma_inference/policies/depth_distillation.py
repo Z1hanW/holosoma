@@ -16,6 +16,8 @@ from collections import deque
 from multiprocessing import shared_memory
 from pathlib import Path
 
+import math
+
 import numpy as np
 import onnx
 import onnxruntime
@@ -35,6 +37,14 @@ class DepthDistillationPolicy(LocomotionPolicy):
     The student model also outputs motion reference data (joint_pos, joint_vel,
     body_pos_w, etc.) indexed by a time_step counter.
     """
+    # Joystick-to-velocity-command mapping.
+    # Maps joystick angle sectors to one-hot command indices.
+    # Adjust these indices to match your motion data's vel_cmd encoding.
+    JOYSTICK_CMD_STAND = 0
+    JOYSTICK_CMD_FORWARD = 1
+    JOYSTICK_CMD_LEFT_45 = 2
+    JOYSTICK_CMD_RIGHT_45 = 4
+    JOYSTICK_CMD_BACK = 11
 
     def __init__(self, config: InferenceConfig):
         self.motion_timestep = 0
@@ -47,6 +57,14 @@ class DepthDistillationPolicy(LocomotionPolicy):
         self.depth_latent_dim = None
         self.depth_image_shape = None  # (H, W) from backbone input
         self.time_step_total = None
+
+        # Velocity command: one-hot vector selecting the active command class.
+        # During training this comes from the "command" obs group (vel_cmd in motion data).
+        # During inference the user sets it via keyboard/joystick.
+        self.velocity_command_dim = config.observation.obs_dims.get("velocity_command", 0)
+        self.velocity_command = np.zeros((1, self.velocity_command_dim), dtype=np.float32)
+        self.active_velocity_command_idx = self.JOYSTICK_CMD_STAND  # default to standing
+        self.set_velocity_command(self.active_velocity_command_idx)
 
         super().__init__(config)
 
@@ -251,30 +269,31 @@ class DepthDistillationPolicy(LocomotionPolicy):
         Returns
         -------
         np.ndarray
-            Depth image ready for backbone inference.
+            Depth image shaped to match the backbone's expected input.
         """
         # Read from shared memory: shape (num_cameras, 1, H, W)
         depth_images = self.depth_img_array.copy()
 
         # Use first (and only) camera for single D435i setup
-        # Shape: (1, H, W)
-        depth_frame = depth_images[0]  # (1, H, W)
+        # Shape: (1, H, W) -> squeeze channel dim -> (H, W)
+        depth_frame = depth_images[0, 0]  # (H, W)
 
         # Update depth frame buffer
         self.depth_frame_buffer.append(depth_frame.copy())
 
         # Pad buffer if not yet full
-        buffer_len = self.depth_frame_buffer.maxlen
+        buffer_len = self.depth_buffer_len
         frames = list(self.depth_frame_buffer)
         if len(frames) < buffer_len:
             missing = buffer_len - len(frames)
             frames = [frames[0]] * missing + frames
+        frames = frames[-buffer_len:]
 
         # Stack frames: (buffer_len, H, W)
-        stacked = np.concatenate(frames, axis=0)  # (buffer_len, H, W)
+        stacked = np.stack(frames, axis=0)  # (buffer_len, H, W)
 
-        # Add batch dimension: (1, buffer_len, H, W)
-        return np.expand_dims(stacked, axis=0)
+        # Reshape to match the backbone's exact expected input shape
+        return stacked
 
     def get_current_obs_buffer_dict(self, robot_state_data):
         """Build observation buffer with proprioceptive data."""
@@ -294,10 +313,11 @@ class DepthDistillationPolicy(LocomotionPolicy):
         """Prepare observations for RL inference.
 
         1. Build proprioceptive observation vector (projected_gravity, ang_vel, dof_pos, dof_vel, actions)
-        2. Read depth image from shared memory
-        3. Run depth_backbone ONNX -> depth latent
-        4. Concatenate: [proprioceptive, depth_latent]
-        5. Return dict with {"obs": concatenated, "time_step": current_step}
+        2. Append velocity command (one-hot) — matches training where command obs is concatenated to policy obs
+        3. Read depth image from shared memory
+        4. Run depth_backbone ONNX -> depth latent
+        5. Concatenate: [proprioceptive, velocity_command, depth_latent]
+        6. Return dict with {"obs": concatenated, "time_step": current_step}
         """
         # Build proprioceptive observations using group history
         self._prepare_group_observations(robot_state_data)
@@ -309,8 +329,14 @@ class DepthDistillationPolicy(LocomotionPolicy):
         depth_image = self._get_depth_image()  # (1, buffer_len, H, W)
         depth_latent = self._run_depth_backbone(depth_image)  # (1, latent_dim)
 
-        # Concatenate proprioceptive + depth latent
-        obs = np.concatenate([actor_obs, depth_latent], axis=1).astype(np.float32)
+        # Concatenate proprioceptive + velocity command + depth latent
+        # This matches the training order: obs = cat([policy_obs, command], dim=-1)
+        # then depth_latent is appended by the student model forward pass.
+        parts = [actor_obs]
+        if self.velocity_command_dim > 0:
+            parts.append(self.velocity_command)
+        parts.append(depth_latent)
+        obs = np.concatenate(parts, axis=1).astype(np.float32)
 
         return {
             "obs": obs,
@@ -344,6 +370,49 @@ class DepthDistillationPolicy(LocomotionPolicy):
 
         return self.scaled_policy_action
 
+    def process_joystick_input(self):
+        """Process joystick input and map to velocity command one-hot."""
+        super().process_joystick_input()
+        self._update_velocity_command_from_joystick()
+
+    def _update_velocity_command_from_joystick(self):
+        """Map joystick axes to a discrete velocity command via angle sectors.
+
+        Uses atan2(linear_x, -angular_z / 1.5) to compute a direction angle,
+        then selects a one-hot command index based on 90-degree sectors:
+            (-45, 45)   -> right_45
+            [45, 135)   -> forward
+            [135, 180] or [-180, -135) -> left_45
+            [-135, -45] -> back
+
+        When joystick magnitude is below the deadzone threshold, the previous
+        command is retained.
+        """
+        if self.velocity_command_dim == 0:
+            return
+
+        linear_x = float(self.lin_vel_command[0, 0])
+        angular_z = float(self.ang_vel_command[0, 0])
+
+        # # Deadzone: keep previous command when joystick is near center
+        # magnitude = math.sqrt(linear_x ** 2 + angular_z ** 2)
+        # if magnitude < self.JOYSTICK_DEADZONE:
+        #     return
+
+        a_deg = math.atan2(linear_x, -angular_z / 1.5) * 180.0 / math.pi
+
+        if -45.0 < a_deg < 45.0:
+            cmd_idx = self.JOYSTICK_CMD_RIGHT_45
+        elif 45.0 <= a_deg < 135.0:
+            cmd_idx = self.JOYSTICK_CMD_FORWARD
+        elif a_deg >= 135.0 or a_deg < -135.0:
+            cmd_idx = self.JOYSTICK_CMD_LEFT_45
+        else:  # -135.0 <= a_deg <= -45.0
+            cmd_idx = self.JOYSTICK_CMD_BACK
+
+        if cmd_idx != self.active_velocity_command_idx:
+            self.set_velocity_command(cmd_idx)
+
     def handle_keyboard_button(self, keycode):
         """Handle keyboard button presses."""
         if keycode == "s":
@@ -371,6 +440,27 @@ class DepthDistillationPolicy(LocomotionPolicy):
         self.motion_clip_progressing = False
         self.motion_timestep = 0
         self.depth_frame_buffer.clear()
+        self.set_velocity_command(0)  # Clear velocity command on stop
+
+    def set_velocity_command(self, idx: int):
+        """Set the active velocity command as a one-hot vector.
+
+        Parameters
+        ----------
+        idx : int
+            Index of the active command class (0 to velocity_command_dim-1).
+            Use -1 to clear (all zeros).
+        """
+        if self.velocity_command_dim == 0:
+            return
+        self.velocity_command[:] = 0.0
+        if 0 <= idx < self.velocity_command_dim:
+            self.velocity_command[0, idx] = 1.0
+            self.active_velocity_command_idx = idx
+            logger.info(f"Velocity command set to index {idx} (one-hot dim {self.velocity_command_dim})")
+        else:
+            self.active_velocity_command_idx = self.JOYSTICK_CMD_STAND
+            logger.info("Velocity command cleared (all zeros)")
 
     def _handle_start_motion_clip(self):
         """Handle start motion clip action."""

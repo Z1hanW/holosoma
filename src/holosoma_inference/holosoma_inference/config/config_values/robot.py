@@ -282,6 +282,36 @@ g1_29dof_loco_manip_stand_height_waist = replace(
 )
 
 # =============================================================================
+# G1 WBT Distillation — training-matched gains (armature-derived)
+# =============================================================================
+
+# fmt: off
+# Kp/Kd derived from motor armatures: Kp = armature * omega^2, Kd = 2 * zeta * armature * omega
+# (omega = 62.83 rad/s, zeta = 2.0)
+WBT_MOTOR_KP = [
+    40.179, 99.098, 40.179, 99.098, 28.501, 28.501,   # left leg  (hip_pitch, hip_roll, hip_yaw, knee, ankle_pitch, ankle_roll)
+    40.179, 99.098, 40.179, 99.098, 28.501, 28.501,   # right leg
+    40.179, 28.501, 28.501,                             # waist (yaw, roll, pitch)
+    14.251, 14.251, 14.251, 14.251, 14.251, 16.778, 16.778,  # left arm  (sh_p, sh_r, sh_y, elbow, wr_r, wr_p, wr_y)
+    14.251, 14.251, 14.251, 14.251, 14.251, 16.778, 16.778,  # right arm
+]
+
+WBT_MOTOR_KD = [
+    2.558, 6.309, 2.558, 6.309, 1.814, 1.814,   # left leg
+    2.558, 6.309, 2.558, 6.309, 1.814, 1.814,   # right leg
+    2.558, 1.814, 1.814,                          # waist
+    0.907, 0.907, 0.907, 0.907, 0.907, 1.068, 1.068,  # left arm
+    0.907, 0.907, 0.907, 0.907, 0.907, 1.068, 1.068,  # right arm
+]
+# fmt: on
+
+g1_29dof_wbt_distillation = replace(
+    g1_29dof,
+    motor_kp=WBT_MOTOR_KP,
+    motor_kd=WBT_MOTOR_KD,
+)
+
+# =============================================================================
 # Default Configurations Dictionary
 # =============================================================================
 
@@ -289,6 +319,7 @@ DEFAULTS = {
     "g1-29dof": g1_29dof,
     "t1-29dof": t1_29dof,
     "g1-29dof-loco-manip-stand-height-waist": g1_29dof_loco_manip_stand_height_waist,
+    "g1-29dof-wbt-distillation": g1_29dof_wbt_distillation,
 }
 """Dictionary of all available robot configurations.
 

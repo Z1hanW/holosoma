@@ -240,6 +240,9 @@ wbt_distillation_g1 = ObservationConfig(
         "actions": 29,
         # cam_depth: resized_height * resized_width = 58 * 87 = 5046
         "cam_depth": 5046,
+        # velocity_command: one-hot vector from the "command" obs group in training.
+        # Not part of actor_obs — concatenated separately by DepthDistillationPolicy.
+        "velocity_command": 15,
     },
     obs_scales={
         "projected_gravity": 1.0,
