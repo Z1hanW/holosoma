@@ -13,6 +13,7 @@ set -euo pipefail
 MOTION_DIR=${MOTION_DIR:-"/home/ubuntu/FAR/Store/vmm_data/___zero_pad_data_trans"}
 GEOMETRY_DIR=${GEOMETRY_DIR:-"/home/ubuntu/FAR/Store/vmm_data/___zero_pad_geo_trans"}
 OBJECT_URDF_DIR=${OBJECT_URDF_DIR:-""}
+OBJECT_URDF=${OBJECT_URDF:-""}
 ROBOT=${ROBOT:-"g1_29dof"}
 PORT=${PORT:-"$((RANDOM % 8976 + 1024))"}
 START_CLIP=${START_CLIP:-""}
@@ -62,11 +63,20 @@ if [[ -n "${OBJECT_URDF_DIR}" ]]; then
   fi
 fi
 
+if [[ -n "${OBJECT_URDF}" ]]; then
+  if [[ ! -f "${OBJECT_URDF}" ]]; then
+    echo "[WARN] object urdf not found: ${OBJECT_URDF} (disabling object)"
+    OBJECT_URDF=""
+    SHOW_OBJECT="False"
+  fi
+fi
+
 
 cmd=(
   python3 src/holosoma/holosoma/viser_motion_geometry.py
   --motion-dir "${MOTION_DIR}"
   --geometry-dir "${GEOMETRY_DIR}"
+  --object-urdf "${OBJECT_URDF}"
   --object-urdf-dir "${OBJECT_URDF_DIR}"
   --robot "${ROBOT}"
   --port "${PORT}"

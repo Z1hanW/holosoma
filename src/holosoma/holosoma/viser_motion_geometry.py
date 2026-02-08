@@ -37,6 +37,7 @@ from holosoma.utils.viser_utils import resolve_viser_port  # noqa: E402
 class MotionGeometryViewerConfig:
     motion_dir: str
     geometry_dir: str
+    object_urdf: str = ""
     object_urdf_dir: str = ""
     robot: str = "g1_29dof"
     port: int = 0
@@ -188,6 +189,10 @@ def run_viewer(cfg: MotionGeometryViewerConfig) -> None:
     geometry_dir_raw = (cfg.geometry_dir or "").strip()
     if geometry_dir_raw:
         geometry_dir = _resolve_data_path(geometry_dir_raw)
+    object_urdf_path = None
+    object_urdf_raw = (cfg.object_urdf or "").strip()
+    if object_urdf_raw:
+        object_urdf_path = _resolve_data_path(object_urdf_raw)
     object_dir = None
     object_dir_raw = (cfg.object_urdf_dir or "").strip()
     if object_dir_raw:
@@ -197,13 +202,29 @@ def run_viewer(cfg: MotionGeometryViewerConfig) -> None:
     if geometry_dir is not None and not geometry_dir.is_dir():
         logger.warning("Geometry dir not found (%s); falling back to ground-only.", geometry_dir)
         geometry_dir = None
+    if object_urdf_path is not None and not object_urdf_path.exists():
+        logger.warning("Object URDF not found (%s); disabling object URDF.", object_urdf_path)
+        object_urdf_path = None
     if object_dir is not None and not object_dir.is_dir():
         logger.warning("Object URDF dir not found (%s); disabling object URDF.", object_dir)
         object_dir = None
 
-    pair_names, motion_map, geom_map, geometry_available, object_map, object_available = _list_pairs(
-        motion_dir, geometry_dir, object_dir
-    )
+    if object_urdf_path is None and object_dir is not None:
+        urdf_paths = sorted(list(object_dir.glob("*.urdf")) + list(object_dir.glob("*.URDF")))
+        if len(urdf_paths) == 1:
+            object_urdf_path = urdf_paths[0]
+            object_dir = None
+            logger.info("Using single object URDF for all clips: %s", object_urdf_path)
+
+    if object_urdf_path is not None:
+        pair_names, motion_map, geom_map, geometry_available, object_map, object_available = _list_pairs(
+            motion_dir, geometry_dir, None
+        )
+        object_available = True
+    else:
+        pair_names, motion_map, geom_map, geometry_available, object_map, object_available = _list_pairs(
+            motion_dir, geometry_dir, object_dir
+        )
 
     if cfg.start_clip and cfg.start_clip not in pair_names:
         raise ValueError(f"start_clip '{cfg.start_clip}' not found in pairs.")
@@ -216,7 +237,7 @@ def run_viewer(cfg: MotionGeometryViewerConfig) -> None:
     robot_root = server.scene.add_frame("/robot", show_axes=False)
     vr = ViserUrdf(server, urdf_or_path=urdf_path, root_node_name="/robot")
     vr.show_visual = cfg.show_meshes
-    object_state: dict[str, object | None] = {"name": None, "urdf": None, "frame": None}
+    object_state: dict[str, object | None] = {"name": None, "urdf": None, "frame": None, "single": None}
 
     viser_joint_names = list(vr.get_actuated_joint_names())
     name_to_robot_idx = {name: idx for idx, name in enumerate(robot_config.dof_names)}
@@ -282,7 +303,7 @@ def run_viewer(cfg: MotionGeometryViewerConfig) -> None:
             _ensure_motion_loaded(name)
             if geometry_available:
                 _ensure_geometry_loaded(name)
-            if object_available:
+            if object_available and object_urdf_path is None:
                 _ensure_object_loaded(name)
 
     geometry_state: dict[str, viser.GlbHandle | None] = {"handle": None}
@@ -311,6 +332,17 @@ def run_viewer(cfg: MotionGeometryViewerConfig) -> None:
             object_state["name"] = None
             object_state["urdf"] = None
             object_state["frame"] = None
+            object_state["single"] = None
+            return
+        if object_urdf_path is not None:
+            if object_state["single"] is None:
+                obj_frame = server.scene.add_frame("/object", show_axes=False)
+                obj_urdf = ViserUrdf(server, urdf_or_path=object_urdf_path, root_node_name="/object")
+                obj_urdf.show_visual = bool(cfg.show_object)
+                object_state["single"] = obj_urdf
+                object_state["frame"] = obj_frame
+            object_state["name"] = name
+            object_state["urdf"] = object_state["single"]
             return
         if object_state["name"] is not None and object_state["name"] in object_cache:
             object_cache[object_state["name"]].show_visual = False
@@ -374,7 +406,7 @@ def run_viewer(cfg: MotionGeometryViewerConfig) -> None:
     def _(_evt) -> None:
         if object_state["name"] is None:
             return
-        urdf = object_cache.get(object_state["name"])
+        urdf = object_state["urdf"] if object_urdf_path is not None else object_cache.get(object_state["name"])
         if urdf is not None:
             urdf.show_visual = bool(show_object_cb.value)
 
@@ -394,7 +426,7 @@ def run_viewer(cfg: MotionGeometryViewerConfig) -> None:
         if handle is not None:
             handle.visible = bool(show_geom_cb.value)
         if object_state["name"] is not None:
-            urdf = object_cache.get(object_state["name"])
+            urdf = object_state["urdf"] if object_urdf_path is not None else object_cache.get(object_state["name"])
             if urdf is not None:
                 urdf.show_visual = bool(show_object_cb.value)
 
