@@ -48,28 +48,20 @@ else
 fi
 
 if [[ -n "${OBJECT_URDF_DIR}" ]]; then
-  if [[ -f "${OBJECT_URDF_DIR}" ]]; then
-    # Single URDF provided via OBJECT_URDF_DIR; treat as common object.
-    OBJECT_URDF="${OBJECT_URDF_DIR}"
-    OBJECT_URDF_DIR=""
-  elif [[ ! -d "${OBJECT_URDF_DIR}" ]]; then
-    echo "[WARN] object urdf dir not found: ${OBJECT_URDF_DIR} (disabling object)"
-    OBJECT_URDF_DIR=""
-    SHOW_OBJECT="False"
-  else
-    shopt -s nullglob
-    _urdf_files=("${OBJECT_URDF_DIR}"/*.urdf "${OBJECT_URDF_DIR}"/*.URDF)
-    shopt -u nullglob
-    if (( ${#_urdf_files[@]} == 0 )); then
-      echo "[WARN] object urdf dir is empty: ${OBJECT_URDF_DIR} (disabling object)"
-      OBJECT_URDF_DIR=""
-      SHOW_OBJECT="False"
-    elif (( ${#_urdf_files[@]} == 1 )); then
-      # Single URDF in directory; treat as common object.
-      OBJECT_URDF="${_urdf_files[0]}"
-      OBJECT_URDF_DIR=""
-    fi
-  fi
+  if [[ ! -d "${OBJECT_URDF_DIR}" ]]; then
+    echo "[WARN] object urdf dir not found: ${OBJECT_URDF_DIR} (disabling object)"
+    OBJECT_URDF_DIR=""
+    SHOW_OBJECT="False"
+  else
+    shopt -s nullglob
+    _urdf_files=("${OBJECT_URDF_DIR}"/*.urdf "${OBJECT_URDF_DIR}"/*.URDF)
+    shopt -u nullglob
+    if (( ${#_urdf_files[@]} == 0 )); then
+      echo "[WARN] object urdf dir is empty: ${OBJECT_URDF_DIR} (disabling object)"
+      OBJECT_URDF_DIR=""
+      SHOW_OBJECT="False"
+    fi
+  fi
 fi
 
 if [[ -n "${OBJECT_URDF}" ]]; then
