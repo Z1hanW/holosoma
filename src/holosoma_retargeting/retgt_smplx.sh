@@ -34,6 +34,8 @@ python examples/robot_retarget.py \
     --robot-config.robot-urdf-file "$ROBOT_URDF" \
     --data_format "$DATA_FORMAT" \
     "${SAVE_DIR_ARG[@]}" \
+    --retargeter.penetration-tolerance 0.0 \
+    --retargeter.step-size 0.05 \
     --retargeter.debug \
     --retargeter.visualize
 
