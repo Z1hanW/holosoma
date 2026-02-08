@@ -68,23 +68,31 @@ def _resolve_robot_urdf_path(robot_config: RobotConfig) -> Path:
     return _resolve_data_path(os.path.join(str(asset_root), robot_config.asset.urdf_file))
 
 
-def _list_pairs(motion_dir: Path, geometry_dir: Path) -> tuple[list[str], dict[str, Path], dict[str, Path]]:
+def _list_pairs(
+    motion_dir: Path, geometry_dir: Path | None
+) -> tuple[list[str], dict[str, Path], dict[str, Path], bool]:
     motion_paths = sorted(list(motion_dir.glob("*.npz")) + list(motion_dir.glob("*.NPZ")))
-    geom_paths = sorted(list(geometry_dir.glob("*.obj")) + list(geometry_dir.glob("*.OBJ")))
     motion_map = {path.stem: path for path in motion_paths}
+    if geometry_dir is None:
+        return sorted(motion_map), motion_map, {}, False
+
+    geom_paths = sorted(list(geometry_dir.glob("*.obj")) + list(geometry_dir.glob("*.OBJ")))
     geom_map = {path.stem: path for path in geom_paths}
     shared = sorted(set(motion_map) & set(geom_map))
     if not shared:
-        raise FileNotFoundError(
-            f"No matching motion/geometry pairs found. motions={len(motion_paths)}, geometry={len(geom_paths)}"
+        logger.warning(
+            "No matching motion/geometry pairs found. Falling back to ground-only. motions=%d geometry=%d",
+            len(motion_paths),
+            len(geom_paths),
         )
+        return sorted(motion_map), motion_map, {}, False
     missing_geom = sorted(set(motion_map) - set(geom_map))
     missing_motion = sorted(set(geom_map) - set(motion_map))
     if missing_geom:
         logger.warning("No geometry for motions: {}", missing_geom[:10])
     if missing_motion:
         logger.warning("No motion for geometry: {}", missing_motion[:10])
-    return shared, motion_map, geom_map
+    return shared, motion_map, geom_map, True
 
 
 def _try_load_qpos_npz(path: Path) -> tuple[np.ndarray, int] | None:
@@ -145,13 +153,17 @@ def _load_obj_mesh(path: Path) -> trimesh.Trimesh:
 
 def run_viewer(cfg: MotionGeometryViewerConfig) -> None:
     motion_dir = _resolve_data_path(cfg.motion_dir)
-    geometry_dir = _resolve_data_path(cfg.geometry_dir)
+    geometry_dir = None
+    geometry_dir_raw = (cfg.geometry_dir or "").strip()
+    if geometry_dir_raw:
+        geometry_dir = _resolve_data_path(geometry_dir_raw)
     if not motion_dir.is_dir():
         raise FileNotFoundError(f"Motion dir not found: {motion_dir}")
-    if not geometry_dir.is_dir():
-        raise FileNotFoundError(f"Geometry dir not found: {geometry_dir}")
+    if geometry_dir is not None and not geometry_dir.is_dir():
+        logger.warning("Geometry dir not found (%s); falling back to ground-only.", geometry_dir)
+        geometry_dir = None
 
-    pair_names, motion_map, geom_map = _list_pairs(motion_dir, geometry_dir)
+    pair_names, motion_map, geom_map, geometry_available = _list_pairs(motion_dir, geometry_dir)
 
     if cfg.start_clip and cfg.start_clip not in pair_names:
         raise ValueError(f"start_clip '{cfg.start_clip}' not found in pairs.")
@@ -179,6 +191,8 @@ def run_viewer(cfg: MotionGeometryViewerConfig) -> None:
             height=cfg.grid_size,
             position=(0.0, 0.0, 0.0),
         )
+    if not geometry_available:
+        logger.info("Geometry disabled: using ground-only view.")
 
     motion_cache: dict[str, dict[str, object]] = {}
     geometry_cache: dict[str, trimesh.Trimesh] = {}
@@ -197,6 +211,8 @@ def run_viewer(cfg: MotionGeometryViewerConfig) -> None:
         return motion_cache[name]
 
     def _ensure_geometry_loaded(name: str) -> trimesh.Trimesh:
+        if not geometry_available:
+            raise FileNotFoundError("Geometry is not available for this viewer session.")
         if name in geometry_cache:
             return geometry_cache[name]
         mesh = _load_obj_mesh(geom_map[name])
@@ -206,12 +222,19 @@ def run_viewer(cfg: MotionGeometryViewerConfig) -> None:
     if cfg.preload:
         for name in pair_names:
             _ensure_motion_loaded(name)
-            _ensure_geometry_loaded(name)
+            if geometry_available:
+                _ensure_geometry_loaded(name)
 
     geometry_state: dict[str, viser.GlbHandle | None] = {"handle": None}
     motion_state: dict[str, object] = {}
 
     def _set_geometry(name: str) -> None:
+        if not geometry_available:
+            handle = geometry_state["handle"]
+            if handle is not None:
+                handle.remove()
+                geometry_state["handle"] = None
+            return
         handle = geometry_state["handle"]
         if handle is not None:
             handle.remove()
@@ -233,7 +256,10 @@ def run_viewer(cfg: MotionGeometryViewerConfig) -> None:
 
     with server.gui.add_folder("Display"):
         show_meshes_cb = server.gui.add_checkbox("Show robot meshes", initial_value=cfg.show_meshes)
-        show_geom_cb = server.gui.add_checkbox("Show geometry", initial_value=cfg.show_geometry)
+        show_geom_cb = server.gui.add_checkbox(
+            "Show geometry",
+            initial_value=cfg.show_geometry and geometry_available,
+        )
 
     with server.gui.add_folder("Playback"):
         frame_slider = server.gui.add_slider(

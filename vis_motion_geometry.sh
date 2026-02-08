@@ -24,6 +24,25 @@ SHOW_GEOMETRY=${SHOW_GEOMETRY:-"True"}
 GRID=${GRID:-"True"}
 GRID_SIZE=${GRID_SIZE:-"10.0"}
 
+if [[ -z "${GEOMETRY_DIR}" ]]; then
+  SHOW_GEOMETRY="False"
+else
+  if [[ ! -d "${GEOMETRY_DIR}" ]]; then
+    echo "[WARN] geometry dir not found: ${GEOMETRY_DIR} (falling back to ground)"
+    GEOMETRY_DIR=""
+    SHOW_GEOMETRY="False"
+  else
+    shopt -s nullglob
+    _geom_files=("${GEOMETRY_DIR}"/*.obj "${GEOMETRY_DIR}"/*.OBJ)
+    shopt -u nullglob
+    if (( ${#_geom_files[@]} == 0 )); then
+      echo "[WARN] geometry dir is empty: ${GEOMETRY_DIR} (falling back to ground)"
+      GEOMETRY_DIR=""
+      SHOW_GEOMETRY="False"
+    fi
+  fi
+fi
+
 
 cmd=(
   python3 src/holosoma/holosoma/viser_motion_geometry.py
