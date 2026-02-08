@@ -12,6 +12,7 @@ set -euo pipefail
 
 MOTION_DIR=${MOTION_DIR:-"/home/ubuntu/FAR/Store/vmm_data/___zero_pad_data_trans"}
 GEOMETRY_DIR=${GEOMETRY_DIR:-"/home/ubuntu/FAR/Store/vmm_data/___zero_pad_geo_trans"}
+OBJECT_URDF_DIR=${OBJECT_URDF_DIR:-""}
 ROBOT=${ROBOT:-"g1_29dof"}
 PORT=${PORT:-"$((RANDOM % 8976 + 1024))"}
 START_CLIP=${START_CLIP:-""}
@@ -21,6 +22,7 @@ LOOP=${LOOP:-"True"}
 PRELOAD=${PRELOAD:-"True"}
 SHOW_MESHES=${SHOW_MESHES:-"True"}
 SHOW_GEOMETRY=${SHOW_GEOMETRY:-"True"}
+SHOW_OBJECT=${SHOW_OBJECT:-"True"}
 GRID=${GRID:-"True"}
 GRID_SIZE=${GRID_SIZE:-"10.0"}
 
@@ -43,11 +45,29 @@ else
   fi
 fi
 
+if [[ -n "${OBJECT_URDF_DIR}" ]]; then
+  if [[ ! -d "${OBJECT_URDF_DIR}" ]]; then
+    echo "[WARN] object urdf dir not found: ${OBJECT_URDF_DIR} (disabling object)"
+    OBJECT_URDF_DIR=""
+    SHOW_OBJECT="False"
+  else
+    shopt -s nullglob
+    _urdf_files=("${OBJECT_URDF_DIR}"/*.urdf "${OBJECT_URDF_DIR}"/*.URDF)
+    shopt -u nullglob
+    if (( ${#_urdf_files[@]} == 0 )); then
+      echo "[WARN] object urdf dir is empty: ${OBJECT_URDF_DIR} (disabling object)"
+      OBJECT_URDF_DIR=""
+      SHOW_OBJECT="False"
+    fi
+  fi
+fi
+
 
 cmd=(
   python3 src/holosoma/holosoma/viser_motion_geometry.py
   --motion-dir "${MOTION_DIR}"
   --geometry-dir "${GEOMETRY_DIR}"
+  --object-urdf-dir "${OBJECT_URDF_DIR}"
   --robot "${ROBOT}"
   --port "${PORT}"
   --autoplay "${AUTOPLAY}"
@@ -55,6 +75,7 @@ cmd=(
   --preload "${PRELOAD}"
   --show-meshes "${SHOW_MESHES}"
   --show-geometry "${SHOW_GEOMETRY}"
+  --show-object "${SHOW_OBJECT}"
   --add-grid "${GRID}"
   --grid-size "${GRID_SIZE}"
 )
