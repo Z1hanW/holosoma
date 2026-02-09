@@ -125,6 +125,10 @@ def _process_sequence(seq_dir: Path) -> None:
     if out_dir.exists():
         shutil.rmtree(out_dir)
 
+    obj_name = _get_obj_name(seq_dir.name).lower()
+    if "box" not in obj_name or obj_name == "toolbox":
+        return
+
     smpl_path = seq_dir / "smpl_fit_all.npz"
     obj_path = seq_dir / "object_fit_all.npz"
     info_path = seq_dir / "info.json"
@@ -195,7 +199,15 @@ def _process_sequence(seq_dir: Path) -> None:
     trans = (trans @ ROT.T).astype(np.float32, copy=False)
 
     obj_name = _get_obj_name(seq_dir.name)
-    min_z = _compute_min_z(poses.astype(np.float32), betas.astype(np.float32), trans, obj_rotmats, obj_trans, obj_name, gender)
+    min_z = _compute_min_z(
+        poses.astype(np.float32),
+        betas.astype(np.float32),
+        trans,
+        obj_rotmats,
+        obj_trans,
+        obj_name,
+        gender,
+    )
     trans = trans.copy()
     obj_trans = obj_trans.copy()
     trans[:, 2] -= min_z
