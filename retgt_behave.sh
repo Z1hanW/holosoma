@@ -1,20 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
 IN_ROOT="/data/behave/annotation_30fps"
 OUT_ROOT="/data/behave/annotation_30fps_zup"
+OBJ_ROOT="/data/behave/objects"
+SMPL_MODEL_ROOT="/data/behave/HMR"
 
 python - <<'PY'
 from __future__ import annotations
 
 import shutil
+import sys
 from pathlib import Path
 
 import numpy as np
 from scipy.spatial.transform import Rotation
+import trimesh
+import torch
+
+REPO_ROOT = Path.cwd()
+if (REPO_ROOT / "behave").exists():
+    sys.path.insert(0, str(REPO_ROOT / "behave"))
+    sys.path.insert(0, str(REPO_ROOT))
 
 IN_ROOT = Path("/data/behave/annotation_30fps")
 OUT_ROOT = Path("/data/behave/annotation_30fps_zup")
+OBJ_ROOT = Path("/data/behave/objects")
+SMPL_MODEL_ROOT = Path("/data/behave/HMR")
 
 ROT = np.array(
     [
@@ -24,6 +38,8 @@ ROT = np.array(
     ],
     dtype=np.float32,
 )
+
+from libsmpl.smplpytorch.pytorch.smpl_layer import SMPL_Layer  # noqa: E402
 
 
 def _load_npz(path: Path) -> dict[str, object]:
@@ -46,19 +62,68 @@ def _rotate_rotmat(rotmats: np.ndarray) -> np.ndarray:
     return (ROT[None, :, :] @ rotmats).astype(rotmats.dtype, copy=False)
 
 
-def _apply_z_offset(smpl_trans: np.ndarray, obj_trans: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
-    min_z = float(np.min([smpl_trans[:, 2].min(), obj_trans[:, 2].min()]))
-    smpl_trans = smpl_trans.copy()
-    obj_trans = obj_trans.copy()
-    smpl_trans[:, 2] -= min_z
-    obj_trans[:, 2] -= min_z
-    return smpl_trans, obj_trans, min_z
+def _get_obj_name(seq_name: str) -> str:
+    parts = seq_name.split("_")
+    if len(parts) <= 2:
+        raise ValueError(f"Cannot parse object name from sequence: {seq_name}")
+    return parts[2]
+
+
+def _load_centered_object_mesh(obj_name: str) -> trimesh.Trimesh:
+    mesh_path = OBJ_ROOT / obj_name / f"{obj_name}_f1000.ply"
+    if not mesh_path.exists():
+        raise FileNotFoundError(f"Object mesh not found: {mesh_path}")
+    mesh = trimesh.load_mesh(str(mesh_path), process=False)
+    if isinstance(mesh, trimesh.Scene):
+        mesh = mesh.dump(concatenate=True)
+    center = np.mean(mesh.vertices, axis=0)
+    mesh.vertices = mesh.vertices - center
+    return mesh
+
+
+def _compute_min_z(
+    smpl_poses: np.ndarray,
+    smpl_betas: np.ndarray,
+    smpl_trans: np.ndarray,
+    obj_rotmats: np.ndarray,
+    obj_trans: np.ndarray,
+    obj_name: str,
+    gender: str,
+) -> float:
+    smpl = SMPL_Layer(
+        center_idx=0,
+        gender=gender,
+        num_betas=int(smpl_betas.shape[1]),
+        model_root=str(SMPL_MODEL_ROOT),
+        hands=True,
+    )
+    smpl = smpl.to(torch.device("cpu"))
+
+    with torch.no_grad():
+        verts, _, _, _ = smpl(
+            torch.from_numpy(smpl_poses),
+            th_betas=torch.from_numpy(smpl_betas),
+            th_trans=torch.from_numpy(smpl_trans),
+        )
+    human_verts = verts.detach().cpu().numpy()
+
+    obj_mesh = _load_centered_object_mesh(obj_name)
+    base = obj_mesh.vertices.astype(np.float32)
+    obj_verts = (base[None, :, :] @ obj_rotmats.transpose(0, 2, 1)) + obj_trans[:, None, :]
+
+    min_z = float(
+        min(
+            np.min(human_verts[..., 2]),
+            np.min(obj_verts[..., 2]),
+        )
+    )
+    return min_z
 
 
 def _process_sequence(seq_dir: Path) -> None:
     out_dir = OUT_ROOT / seq_dir.name
     if out_dir.exists():
-        return
+        shutil.rmtree(out_dir)
 
     smpl_path = seq_dir / "smpl_fit_all.npz"
     obj_path = seq_dir / "object_fit_all.npz"
@@ -71,15 +136,21 @@ def _process_sequence(seq_dir: Path) -> None:
 
     poses = smpl.get("poses")
     trans = smpl.get("trans")
+    betas = smpl.get("betas")
+    gender = str(smpl.get("gender", "male"))
     if poses is None or trans is None:
         raise ValueError(f"Missing poses/trans in {smpl_path}")
     poses = np.asarray(poses)
     trans = np.asarray(trans)
+    betas = np.asarray(betas) if betas is not None else np.zeros((poses.shape[0], 10), dtype=np.float32)
     if poses.ndim != 2 or poses.shape[1] not in (72, 156):
         raise ValueError(f"Unsupported poses shape {poses.shape} in {smpl_path}")
 
-    obj_angles = None
-    obj_rots = None
+    if betas.ndim == 1:
+        betas = betas[None, :]
+    if betas.shape[0] == 1 and poses.shape[0] > 1:
+        betas = np.repeat(betas, poses.shape[0], axis=0)
+
     obj_trans = obj.get("trans")
     if obj_trans is None:
         obj_trans = obj.get("obj_trans")
@@ -87,47 +158,61 @@ def _process_sequence(seq_dir: Path) -> None:
         raise ValueError(f"Missing object translation in {obj_path}")
     obj_trans = np.asarray(obj_trans)
 
+    obj_rotmats = None
     if "angles" in obj:
         obj_angles = np.asarray(obj["angles"])
-        obj_angles = _rotate_rotvec(obj_angles)
-        obj["angles"] = obj_angles
+        obj_rotmats = Rotation.from_rotvec(obj_angles).as_matrix().astype(np.float32)
     elif "angle" in obj:
         obj_angles = np.asarray(obj["angle"])
-        obj_angles = _rotate_rotvec(obj_angles)
-        obj["angle"] = obj_angles
+        obj_rotmats = Rotation.from_rotvec(obj_angles).as_matrix().astype(np.float32)
     elif "obj_rot" in obj:
         obj_rots = np.asarray(obj["obj_rot"])
         if obj_rots.ndim == 2 and obj_rots.shape[1] == 3:
-            obj_angles = _rotate_rotvec(obj_rots)
-            obj["obj_rot"] = Rotation.from_rotvec(obj_angles).as_matrix().astype(obj_rots.dtype, copy=False)
+            obj_rotmats = Rotation.from_rotvec(obj_rots).as_matrix().astype(np.float32)
         elif obj_rots.ndim == 3:
-            obj["obj_rot"] = _rotate_rotmat(obj_rots)
+            obj_rotmats = obj_rots.astype(np.float32)
         else:
             raise ValueError(f"Unsupported obj_rot shape {obj_rots.shape} in {obj_path}")
     elif "rot" in obj:
         obj_rots = np.asarray(obj["rot"])
         if obj_rots.ndim == 2 and obj_rots.shape[1] == 3:
-            obj_angles = _rotate_rotvec(obj_rots)
-            obj["rot"] = Rotation.from_rotvec(obj_angles).as_matrix().astype(obj_rots.dtype, copy=False)
+            obj_rotmats = Rotation.from_rotvec(obj_rots).as_matrix().astype(np.float32)
         elif obj_rots.ndim == 3:
-            obj["rot"] = _rotate_rotmat(obj_rots)
+            obj_rotmats = obj_rots.astype(np.float32)
         else:
             raise ValueError(f"Unsupported rot shape {obj_rots.shape} in {obj_path}")
     else:
         raise ValueError(f"No object rotation found in {obj_path}")
 
-    obj_trans = (obj_trans @ ROT.T).astype(obj_trans.dtype, copy=False)
+    obj_rotmats = ROT[None, :, :] @ obj_rotmats
+    obj_trans = (obj_trans @ ROT.T).astype(np.float32, copy=False)
 
     global_orient = poses[:, :3]
     global_orient = _rotate_rotvec(global_orient)
     poses = poses.copy()
     poses[:, :3] = global_orient
 
-    trans = (trans @ ROT.T).astype(trans.dtype, copy=False)
-    trans, obj_trans, _ = _apply_z_offset(trans, obj_trans)
+    trans = (trans @ ROT.T).astype(np.float32, copy=False)
+
+    obj_name = _get_obj_name(seq_dir.name)
+    min_z = _compute_min_z(poses.astype(np.float32), betas.astype(np.float32), trans, obj_rotmats, obj_trans, obj_name, gender)
+    trans = trans.copy()
+    obj_trans = obj_trans.copy()
+    trans[:, 2] -= min_z
+    obj_trans[:, 2] -= min_z
 
     smpl["poses"] = poses
-    smpl["trans"] = trans
+    smpl["trans"] = trans.astype(np.float32, copy=False)
+
+    if "angles" in obj:
+        obj["angles"] = Rotation.from_matrix(obj_rotmats).as_rotvec().astype(np.float32, copy=False)
+    elif "angle" in obj:
+        obj["angle"] = Rotation.from_matrix(obj_rotmats).as_rotvec().astype(np.float32, copy=False)
+    elif "obj_rot" in obj:
+        obj["obj_rot"] = obj_rotmats.astype(np.float32, copy=False)
+    elif "rot" in obj:
+        obj["rot"] = obj_rotmats.astype(np.float32, copy=False)
+
     obj["trans"] = obj_trans
     if "obj_trans" in obj:
         obj["obj_trans"] = obj_trans
@@ -143,6 +228,10 @@ def main() -> None:
     OUT_ROOT.mkdir(parents=True, exist_ok=True)
     if not IN_ROOT.exists():
         raise FileNotFoundError(f"Missing input root: {IN_ROOT}")
+    if not OBJ_ROOT.exists():
+        raise FileNotFoundError(f"Missing object root: {OBJ_ROOT}")
+    if not SMPL_MODEL_ROOT.exists():
+        raise FileNotFoundError(f"Missing SMPL model root: {SMPL_MODEL_ROOT}")
     for seq_dir in sorted(p for p in IN_ROOT.iterdir() if p.is_dir()):
         _process_sequence(seq_dir)
 
