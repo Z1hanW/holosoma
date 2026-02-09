@@ -82,6 +82,8 @@ def _guess_obj_name_from_stem(stem: str) -> str | None:
     for part in parts:
         if part in OBJ_NAMES:
             return part
+    if len(parts) > 2:
+        return parts[2]
     return None
 
 
@@ -180,9 +182,19 @@ def _extract_object_params(data: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray
     return obj_rot, obj_trans
 
 
-def _load_object_mesh(objects_root: Path, obj_name: str, override_mesh: Path | None) -> trimesh.Trimesh:
+def _load_object_mesh(
+    objects_root: Path,
+    obj_name: str,
+    override_mesh: Path | None,
+    *,
+    use_simplified: bool,
+) -> trimesh.Trimesh:
     if override_mesh is not None:
         mesh_path = override_mesh
+    elif use_simplified:
+        mesh_path = objects_root / obj_name / f"{obj_name}_f1000.ply"
+        if not mesh_path.exists():
+            raise FileNotFoundError(f"Simplified object mesh not found: {mesh_path}")
     else:
         mesh_path = objects_root / obj_name / f"{obj_name}.obj"
         if not mesh_path.exists():
@@ -195,18 +207,7 @@ def _load_object_mesh(objects_root: Path, obj_name: str, override_mesh: Path | N
     if isinstance(mesh, trimesh.Scene):
         mesh = mesh.dump(concatenate=True)
 
-    center = None
-    simp_rel = SIMPLIFIED_MESH.get(obj_name)
-    if simp_rel is not None and override_mesh is None:
-        simp_path = objects_root / simp_rel
-        if simp_path.exists():
-            simp_mesh = trimesh.load_mesh(str(simp_path), process=False)
-            if isinstance(simp_mesh, trimesh.Scene):
-                simp_mesh = simp_mesh.dump(concatenate=True)
-            center = np.mean(simp_mesh.vertices, axis=0)
-    if center is None:
-        center = np.mean(mesh.vertices, axis=0)
-
+    center = np.mean(mesh.vertices, axis=0)
     mesh.vertices = mesh.vertices - center
     return mesh
 
@@ -228,6 +229,43 @@ def _collect_npz_paths(path: Path, recursive: bool) -> Tuple[list[str], Dict[str
         labels.append(label)
         label_to_path[label] = p
     return labels, label_to_path
+
+
+def _collect_seq_dirs(path: Path) -> Tuple[list[str], Dict[str, Path]]:
+    if not path.exists():
+        raise FileNotFoundError(f"Annotation root not found: {path}")
+    seq_dirs = sorted([p for p in path.iterdir() if p.is_dir()])
+    labels: list[str] = []
+    label_to_path: Dict[str, Path] = {}
+    for p in seq_dirs:
+        if (p / "object_fit_all.npz").exists() and (p / "smpl_fit_all.npz").exists():
+            label = p.name
+            labels.append(label)
+            label_to_path[label] = p
+    if not labels:
+        raise FileNotFoundError(f"No sequences with object_fit_all.npz and smpl_fit_all.npz in: {path}")
+    return labels, label_to_path
+
+
+def _load_annotation_pair(seq_dir: Path) -> Dict[str, Any]:
+    smpl_path = seq_dir / "smpl_fit_all.npz"
+    obj_path = seq_dir / "object_fit_all.npz"
+    smpl = _load_npz(smpl_path)
+    obj = _load_npz(obj_path)
+    if "obj_trans" not in obj:
+        for key in ("trans", "transl", "translation"):
+            if key in obj:
+                obj["obj_trans"] = obj.pop(key)
+                break
+    if "obj_rot" not in obj:
+        for key in ("rot", "rots", "rotation", "angle"):
+            if key in obj:
+                obj["obj_rot"] = obj.pop(key)
+                break
+    merged = dict(smpl)
+    merged.update(obj)
+    merged["seq_name"] = seq_dir.name
+    return merged
 
 
 def _load_npz(path: Path) -> Dict[str, Any]:
@@ -268,6 +306,8 @@ def _build_sequence(
     device_name: str,
     stride: int,
     max_frames: int | None,
+    *,
+    use_simplified_mesh: bool,
 ) -> Dict[str, Any]:
     poses, betas, trans = _extract_smpl_params(data)
     obj_rot, obj_trans = _extract_object_params(data)
@@ -278,6 +318,12 @@ def _build_sequence(
         gender = gender_override or "male"
 
     obj_name = override_obj_name
+    if obj_name is None and use_simplified_mesh:
+        seq_name = _decode_scalar(_extract_key(data, ("seq_name", "sequence", "name", "seq")))
+        if seq_name is not None:
+            parts = str(seq_name).split("_")
+            if len(parts) > 2:
+                obj_name = parts[2]
     if obj_name is None:
         meta = _extract_key(data, ("meta", "metadata"))
         if meta is not None:
@@ -291,7 +337,7 @@ def _build_sequence(
     if obj_name is None:
         raise ValueError("Object name not found in annotation file. Pass --object-name to override.")
 
-    mesh = _load_object_mesh(objects_root, obj_name, override_mesh)
+    mesh = _load_object_mesh(objects_root, obj_name, override_mesh, use_simplified=use_simplified_mesh)
 
     frame_times = _decode_frame_times(_extract_key(data, ("frame_times", "frames", "frame_ids")))
 
@@ -352,8 +398,13 @@ def _build_sequence(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Viser viewer for BEHAVE 30fps annotation npz files.")
-    parser.add_argument("npz_path", type=str, help="Path to a 30fps annotation .npz file or folder.")
+    parser.add_argument(
+        "npz_path",
+        type=str,
+        help="Path to a 30fps annotation .npz file, a folder of .npz files, or the annotation_30fps root.",
+    )
     parser.add_argument("--recursive", action="store_true", help="Search recursively for .npz files.")
+    parser.add_argument("--annotation-root", action="store_true", help="Interpret input as annotation_30fps root.")
     parser.add_argument("--dataset-root", type=str, default=None, help="BEHAVE dataset root path.")
     parser.add_argument("--objects-root", type=str, default=None, help="Path to BEHAVE objects folder.")
     parser.add_argument("--object-name", type=str, default=None, help="Override object name.")
@@ -372,7 +423,10 @@ def main() -> None:
     args = parser.parse_args()
 
     npz_root = Path(args.npz_path).expanduser().resolve()
-    labels, label_to_path = _collect_npz_paths(npz_root, args.recursive)
+    if args.annotation_root:
+        labels, label_to_path = _collect_seq_dirs(npz_root)
+    else:
+        labels, label_to_path = _collect_npz_paths(npz_root, args.recursive)
 
     if args.dataset_root:
         objects_root = Path(args.dataset_root).expanduser().resolve() / "objects"
@@ -406,7 +460,10 @@ def main() -> None:
     def _load_label(label: str) -> Dict[str, Any]:
         if label in cache:
             return cache[label]
-        data = _load_npz(label_to_path[label])
+        if args.annotation_root:
+            data = _load_annotation_pair(label_to_path[label])
+        else:
+            data = _load_npz(label_to_path[label])
         seq = _build_sequence(
             data,
             objects_root=objects_root,
@@ -417,6 +474,7 @@ def main() -> None:
             device_name=args.device,
             stride=args.stride,
             max_frames=args.max_frames,
+            use_simplified_mesh=args.annotation_root,
         )
         cache[label] = seq
         return seq
