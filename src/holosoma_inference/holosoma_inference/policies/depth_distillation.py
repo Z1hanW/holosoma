@@ -12,10 +12,9 @@ fed to the student network.
 from __future__ import annotations
 
 import json
+import os
 from collections import deque
 from multiprocessing import shared_memory
-from pathlib import Path
-
 import math
 
 import numpy as np
@@ -118,6 +117,10 @@ class DepthDistillationPolicy(LocomotionPolicy):
         # Load student model
         self._load_student_model(student_path)
 
+        # TODO: Remove once onnx model is trained with holosoma.
+        # Setup joint reordering (robot order <-> model's expected order)
+        self._setup_joint_reordering()
+
         # Initialize action buffers
         self.last_policy_action = np.zeros((1, self.num_dofs))
         self.scaled_policy_action = np.zeros((1, self.num_dofs))
@@ -162,6 +165,43 @@ class DepthDistillationPolicy(LocomotionPolicy):
             f"input={input_shape}, latent_dim={self.depth_latent_dim}"
         )
 
+    def _setup_joint_reordering(self):
+        """Compute joint reordering indices between robot and model joint orders.
+
+        Uses ``joint_names`` from the ONNX model metadata (the training joint order)
+        and ``self.robot_config.dof_names`` (the robot's canonical joint order).
+
+        - ``_real2model_index``: indexing real-order data with this yields model order.
+          Used on observations (dof_pos, dof_vel) before feeding the ONNX model.
+        - ``_model2real_index``: indexing model-order data with this yields real order.
+          Used on actions output by the ONNX model for motor commands.
+        """
+        model_joint_names = self._model_joint_names
+        real_joint_names = list(self.robot_config.dof_names)
+
+        if model_joint_names is None or list(model_joint_names) == real_joint_names:
+            self._real2model_index = None
+            self._model2real_index = None
+            if model_joint_names is None:
+                logger.info("[DepthDistillationPolicy] No joint_names in ONNX metadata, skipping reordering")
+            return
+
+        from holosoma_inference.utils.math.misc import get_index_of_a_in_b
+
+        # real2model: for each model joint, find its position in real joint order
+        self._real2model_index = get_index_of_a_in_b(model_joint_names, real_joint_names)
+
+        # model2real: inverse mapping
+        n = len(self._real2model_index)
+        self._model2real_index = [0] * n
+        for model_pos, real_pos in enumerate(self._real2model_index):
+            self._model2real_index[real_pos] = model_pos
+
+        logger.info(
+            f"[DepthDistillationPolicy] Joint reordering enabled via ONNX metadata: "
+            f"model={model_joint_names}, real={real_joint_names}"
+        )
+
     def _load_student_model(self, model_path: str):
         """Load the student ONNX model and extract metadata."""
         self.onnx_policy_session = onnxruntime.InferenceSession(model_path)
@@ -182,7 +222,10 @@ class DepthDistillationPolicy(LocomotionPolicy):
         self.onnx_kd = np.array(metadata["kd"]) if "kd" in metadata else None
 
         if self.onnx_kp is not None:
-            logger.info(f"Loaded KP/KD from ONNX metadata: {Path(model_path).name}")
+            logger.info(f"Loaded KP/KD from ONNX metadata: {os.path.basename(model_path)}")
+
+        # Extract joint names from metadata for joint reordering
+        self._model_joint_names = metadata.get("joint_names", None).split(",")
 
         # Extract action scale from metadata if available
         if "action_scale" in metadata:
@@ -296,8 +339,20 @@ class DepthDistillationPolicy(LocomotionPolicy):
         return stacked
 
     def get_current_obs_buffer_dict(self, robot_state_data):
-        """Build observation buffer with proprioceptive data."""
+        """Build observation buffer with proprioceptive data.
+
+        If joint reordering is enabled (``motion_dof_names`` differs from ``dof_names``),
+        ``dof_pos`` and ``dof_vel`` are reordered from robot order to the model's
+        expected motion-data order.  ``actions`` is already stored in model order
+        (the raw ONNX output from the previous step), so it needs no reordering here.
+        """
         current_obs_buffer_dict = super().get_current_obs_buffer_dict(robot_state_data)
+
+        # Reorder joint-related observations from robot order to model's expected order
+        if self._real2model_index is not None:
+            current_obs_buffer_dict["dof_pos"] = current_obs_buffer_dict["dof_pos"][:, self._real2model_index]
+            current_obs_buffer_dict["dof_vel"] = current_obs_buffer_dict["dof_vel"][:, self._real2model_index]
+            current_obs_buffer_dict["actions"] = current_obs_buffer_dict["actions"][:, self._real2model_index]
 
         # Add depth image placeholder (actual processing happens in prepare_obs_for_rl)
         # This is needed so parse_current_obs_dict doesn't fail on missing "cam_depth"
@@ -344,7 +399,14 @@ class DepthDistillationPolicy(LocomotionPolicy):
         }
 
     def rl_inference(self, robot_state_data):
-        """Perform RL inference with two-model architecture."""
+        """Perform RL inference with two-model architecture.
+
+        When joint reordering is enabled, the raw ONNX action output is kept in
+        model (motion-data) order for ``last_policy_action`` so that it feeds back
+        correctly as the ``actions`` observation on the next step.  The returned
+        ``scaled_policy_action`` is reordered to robot order so that it can be
+        added to ``default_dof_angles`` and sent to the motors.
+        """
         obs_dict = self.prepare_obs_for_rl(robot_state_data)
 
         if self.config.task.print_observations:
@@ -353,11 +415,17 @@ class DepthDistillationPolicy(LocomotionPolicy):
         # Run student model
         outputs = self.policy(obs_dict)
 
-        # Extract actions (first output)
+        # Extract actions (first output) — in model's joint order
         policy_action = outputs[0]
         policy_action = np.clip(policy_action, -100, 100)
 
+        # Store raw action in model order (fed back as the "actions" observation)
         self.last_policy_action = policy_action.copy()
+
+        # Reorder actions from model order to robot order for motor commands
+        if self._model2real_index is not None:
+            policy_action = policy_action[:, self._model2real_index]
+
         self.scaled_policy_action = policy_action * self.policy_action_scale
 
         # Store motion reference data if available (outputs[1:])

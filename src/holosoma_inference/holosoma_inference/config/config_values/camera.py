@@ -63,9 +63,9 @@ single_d435i_depth = CameraConfig(
         resized_width=87,
         resized_height=58,
         # D435i FOV settings
-        horizontal_fov=86.0,
-        vertical_fov=86.0 * (60 / 106),  # estimated from aspect ratio
-        near_clip=0.15,
+        horizontal_fov=89.5,
+        vertical_fov=89.5 * (60 / 106),  # estimated from aspect ratio
+        near_clip=0.3,
         far_clip=3.0,
         frame_rate=50,  # FREQ_RATIO=1 in far-tracking, updates every sim step
         image_show=False,
