@@ -238,6 +238,12 @@ def _collect_seq_dirs(path: Path) -> Tuple[list[str], Dict[str, Path]]:
     labels: list[str] = []
     label_to_path: Dict[str, Path] = {}
     for p in seq_dirs:
+        parts = p.name.split("_")
+        if len(parts) <= 2:
+            continue
+        obj_name = parts[2].lower()
+        if "box" not in obj_name or obj_name == "toolbox":
+            continue
         if (p / "object_fit_all.npz").exists() and (p / "smpl_fit_all.npz").exists():
             label = p.name
             labels.append(label)
