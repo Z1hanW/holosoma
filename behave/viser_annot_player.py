@@ -304,6 +304,21 @@ def _resolve_device(name: str):
 
 def _safe_set_prop(handle: Any, name: str, value: Any) -> None:
     if isinstance(value, np.ndarray):
+        impl = getattr(handle, "_impl", None)
+        if impl is not None and hasattr(impl, "props") and hasattr(handle, "_queue_update"):
+            current = getattr(impl.props, name, None)
+            cast_value = value
+            if isinstance(current, np.ndarray) and hasattr(current, "dtype"):
+                if cast_value.dtype != current.dtype:
+                    cast_value = cast_value.astype(current.dtype)
+                if hasattr(current, "shape") and cast_value.shape == current.shape:
+                    current[:] = cast_value
+                else:
+                    setattr(impl.props, name, cast_value.copy())
+            else:
+                setattr(impl.props, name, np.asarray(cast_value))
+            handle._queue_update(name, cast_value)
+            return
         current = getattr(handle, name, None)
         if isinstance(current, tuple):
             flat = value.reshape(-1).tolist()
