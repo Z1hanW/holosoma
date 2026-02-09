@@ -60,12 +60,12 @@ for seq_dir in "${seq_dirs[@]}"; do
     pieces_dir="$scene_dir/pieces"
 
     if [ ! -f "$hmr_npz" ] || [ ! -f "$scene_obj" ] || [ ! -f "$scene_urdf" ]; then
-        echo "[ERROR] missing hmr or scene files for $seq_name" >&2
-        exit 1
+        echo "[WARN] missing hmr or scene files for $seq_name; skipping" >&2
+        continue
     fi
     if [ ! -d "$pieces_dir" ]; then
-        echo "[ERROR] missing pieces dir for $seq_name: $pieces_dir" >&2
-        exit 1
+        echo "[WARN] missing pieces dir for $seq_name: $pieces_dir; skipping" >&2
+        continue
     fi
 
     stage_obj_dir="$DATA_ROOT/$seq_name"
@@ -84,7 +84,7 @@ for seq_dir in "${seq_dirs[@]}"; do
     cp -f "$scene_urdf" "$scene_urdf_local"
     rm -rf "$stage_obj_dir/pieces"
     cp -R "$pieces_dir" "$stage_obj_dir/pieces"
-    python - <<PY
+    if ! python - <<PY
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
@@ -107,8 +107,12 @@ for mesh in root.findall(".//mesh"):
 # Always overwrite the local URDF so paths are normalized.
 urdf_path.write_text(ET.tostring(root, encoding="unicode"))
 PY
+    then
+        echo "[WARN] failed to rewrite scene URDF for $seq_name; skipping" >&2
+        continue
+    fi
 
-    python - <<PY
+    if ! python - <<PY
 from pathlib import Path
 import re
 
@@ -152,6 +156,10 @@ for idx, (mesh_name, _mesh_path) in enumerate(meshes, start=1):
 body_lines.append("</mujocoinclude>")
 body_path.write_text("\\n".join(body_lines) + "\\n")
 PY
+    then
+        echo "[WARN] failed to generate box_assets/box_body for $seq_name; skipping" >&2
+        continue
+    fi
 
     scene_xml_local="$stage_obj_dir/g1_29dof_w_terrain.xml"
     if [ -n "$SCENE_XML_OVERRIDE" ]; then
@@ -160,7 +168,7 @@ PY
     else
         cp -f "$TEMPLATE_XML" "$scene_xml_local"
     fi
-    python - <<PY
+    if ! python - <<PY
 import re
 from pathlib import Path
 
@@ -176,6 +184,10 @@ if "box_body.xml" not in text:
     text = text.replace("</worldbody>", '  <include file="box_body.xml"/>\n  </worldbody>', 1)
 path.write_text(text)
 PY
+    then
+        echo "[WARN] failed to patch scene XML for $seq_name; skipping" >&2
+        continue
+    fi
 
     # Keep box assets alongside the robot package too (for the in-robot scene XML).
     cp -f "$stage_obj_dir/box_assets.xml" "$robot_dir/box_assets.xml"
@@ -199,5 +211,8 @@ PY
     echo "  pieces=$stage_obj_dir/pieces"
     echo "  box_assets=$stage_obj_dir/box_assets.xml"
     echo "  box_body=$stage_obj_dir/box_body.xml"
-    SAVE_MODE=True bash "$SCRIPT_DIR/retgt_smplx.sh" "$stage_obj_dir" "$TASK_NAME" "$OBJECT_NAME" "$stage_obj_dir" "$robot_urdf_local" "smplx" "$OUT_ROOT" "$scene_xml_file"
+    if ! SAVE_MODE=True bash "$SCRIPT_DIR/retgt_smplx.sh" "$stage_obj_dir" "$TASK_NAME" "$OBJECT_NAME" "$stage_obj_dir" "$robot_urdf_local" "smplx" "$OUT_ROOT" "$scene_xml_file"; then
+        echo "[WARN] retarget failed for $seq_name; skipping" >&2
+        continue
+    fi
 done
