@@ -302,6 +302,17 @@ def _resolve_device(name: str):
     return torch.device(name)
 
 
+def _safe_set_prop(handle: Any, name: str, value: Any) -> None:
+    if isinstance(value, np.ndarray):
+        current = getattr(handle, name, None)
+        if isinstance(current, tuple):
+            flat = value.reshape(-1).tolist()
+            value = tuple(float(x) for x in flat[: len(current)])
+        elif isinstance(current, (float, int, bool)) and value.size == 1:
+            value = float(value.reshape(-1)[0])
+    setattr(handle, name, value)
+
+
 def _build_sequence(
     data: Dict[str, Any],
     objects_root: Path,
@@ -549,18 +560,26 @@ def main() -> None:
     def _apply_frame(frame_idx: int) -> None:
         frame_idx = int(np.clip(frame_idx, 0, state["n_frames"] - 1))
         with server.atomic():
-            human_handle.vertices = state["human_verts"][frame_idx]
-            object_handle.vertices = state["obj_verts"][frame_idx]
-            human_handle.visible = bool(show_human_cb.value)
-            object_handle.visible = bool(show_object_cb.value)
-            object_frame.visible = bool(show_obj_frame_cb.value)
+            _safe_set_prop(human_handle, "vertices", state["human_verts"][frame_idx])
+            _safe_set_prop(object_handle, "vertices", state["obj_verts"][frame_idx])
+            _safe_set_prop(human_handle, "visible", bool(show_human_cb.value))
+            _safe_set_prop(object_handle, "visible", bool(show_object_cb.value))
+            _safe_set_prop(object_frame, "visible", bool(show_obj_frame_cb.value))
         if show_obj_frame_cb.value:
             try:
                 from scipy.spatial.transform import Rotation
 
                 rot = Rotation.from_matrix(state["obj_rot"][frame_idx]).as_quat()
-                object_frame.wxyz = (float(rot[3]), float(rot[0]), float(rot[1]), float(rot[2]))
-                object_frame.position = tuple(float(x) for x in state["obj_trans"][frame_idx])
+                _safe_set_prop(
+                    object_frame,
+                    "wxyz",
+                    (float(rot[3]), float(rot[0]), float(rot[1]), float(rot[2])),
+                )
+                _safe_set_prop(
+                    object_frame,
+                    "position",
+                    tuple(float(x) for x in state["obj_trans"][frame_idx]),
+                )
             except Exception:
                 pass
         _update_info(frame_idx)
@@ -580,10 +599,10 @@ def main() -> None:
         nonlocal state
         label = str(seq_dropdown.value)
         state = _load_label(label)
-        human_handle.faces = state["human_faces"]
-        human_handle.vertices = state["human_verts"][0]
-        object_handle.faces = state["obj_faces"]
-        object_handle.vertices = state["obj_verts"][0]
+        _safe_set_prop(human_handle, "faces", state["human_faces"])
+        _safe_set_prop(human_handle, "vertices", state["human_verts"][0])
+        _safe_set_prop(object_handle, "faces", state["obj_faces"])
+        _safe_set_prop(object_handle, "vertices", state["obj_verts"][0])
         updating_slider["flag"] = True
         frame_slider.max = max(0, int(state["n_frames"]) - 1)
         frame_slider.value = 0
