@@ -64,6 +64,9 @@ class RetargetingConfig:
     """Retargeter configuration (nested - can override q_a_init_idx, activate_joint_limits, etc.
     via --retargeter.q-a-init-idx)."""
 
+    save_mode: bool = False
+    """If True, skip interactive prompts and exit automatically after saving."""
+
 
 @dataclass
 class ParallelRetargetingConfig(RetargetingConfig):

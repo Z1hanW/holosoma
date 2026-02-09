@@ -12,6 +12,7 @@ ROBOT_URDF=${5:-"models/g1/g1_29dof.urdf"}
 DATA_FORMAT=${6:-"smplx"}
 SAVE_DIR=${7:-""}
 SCENE_XML_FILE=${8:-""}
+SAVE_MODE=${SAVE_MODE:-"False"}
 
 SAVE_DIR_ARG=()
 if [ -n "$SAVE_DIR" ]; then
@@ -34,6 +35,7 @@ python examples/robot_retarget.py \
     --robot-config.robot-urdf-file "$ROBOT_URDF" \
     --data_format "$DATA_FORMAT" \
     "${SAVE_DIR_ARG[@]}" \
+    --save-mode "$SAVE_MODE" \
     --retargeter.penetration-tolerance 0.0 \
     --retargeter.step-size 0.05 \
     --retargeter.debug \

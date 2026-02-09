@@ -199,5 +199,5 @@ PY
     echo "  pieces=$stage_obj_dir/pieces"
     echo "  box_assets=$stage_obj_dir/box_assets.xml"
     echo "  box_body=$stage_obj_dir/box_body.xml"
-    bash "$SCRIPT_DIR/retgt_smplx.sh" "$stage_obj_dir" "$TASK_NAME" "$OBJECT_NAME" "$stage_obj_dir" "$robot_urdf_local" "smplx" "$OUT_ROOT" "$scene_xml_file"
+    SAVE_MODE=True bash "$SCRIPT_DIR/retgt_smplx.sh" "$stage_obj_dir" "$TASK_NAME" "$OBJECT_NAME" "$stage_obj_dir" "$robot_urdf_local" "smplx" "$OUT_ROOT" "$scene_xml_file"
 done

@@ -797,7 +797,7 @@ def main(cfg: RetargetingConfig) -> None:
     )
     logger.info("Retargeting complete. Results saved to: %s", dest_res_path)
 
-    if cfg.retargeter.debug:
+    if cfg.retargeter.debug and not cfg.save_mode:
         input("Press Enter to exit ...")
 
 
