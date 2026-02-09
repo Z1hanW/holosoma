@@ -114,6 +114,8 @@ class MujocoSceneManager:
         # Add global lighting orientation
         self.world_spec.visual.global_.azimuth = -130
         self.world_spec.visual.global_.elevation = -20
+        self.world_spec.visual.global_.offwidth = 1920
+        self.world_spec.visual.global_.offheight = 1080
 
         # Match our existing scene files
         self.world_spec.visual.rgba.haze = [0.15, 0.25, 0.35, 1.0]

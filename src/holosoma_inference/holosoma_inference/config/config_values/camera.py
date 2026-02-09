@@ -70,6 +70,9 @@ single_d435i_depth = CameraConfig(
         frame_rate=50,  # FREQ_RATIO=1 in far-tracking, updates every sim step
         image_show=False,
         depth_delay=0,
+        crop_y_start=2,
+        crop_x_start=4,
+        crop_x_end=-4,
     ),
 )
 

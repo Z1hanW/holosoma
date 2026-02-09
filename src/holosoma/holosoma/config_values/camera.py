@@ -8,17 +8,20 @@ none = CameraManagerCfg()
 # D435i depth camera props for far-tracking distillation
 d435i_depth_props = CameraProps(
     image_type="depth",
-    width=106,
-    height=60,
+    width=848,
+    height=480,
     resized_width=87,
     resized_height=58,
-    horizontal_fov=86.0,
-    vertical_fov=86.0 * (60 / 106),
-    near_clip=0.15,
+    horizontal_fov=89.5,
+    vertical_fov=89.5 * (60 / 106),
+    near_clip=0.3,
     far_clip=3.0,
-    image_show=False,
+    image_show=True,
     frame_rate=50,
     depth_delay=0,
+    crop_y_start=16,
+    crop_x_start=32,
+    crop_x_end=-32,
 )
 
 single_d435i_depth = CameraManagerCfg(terms={

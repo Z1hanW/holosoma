@@ -61,10 +61,20 @@ class ImageServer:
         near_clip: float = 0.1,
         far_clip: float = 2.0,
         frame_rate: int = 10,
+        crop_y_start: int|None = None,
+        crop_x_start: int|None = None,
+        crop_x_end: int|None = None,
+        crop_y_end: int|None = None,
+        image_show: bool = False,
     ):
         self.image_type = image_type
         self.near_clip = near_clip
         self.far_clip = far_clip
+        self.crop_y_start = crop_y_start
+        self.crop_x_start = crop_x_start
+        self.crop_x_end = crop_x_end
+        self.crop_y_end = crop_y_end
+        self.image_show = image_show
         self.expected_shape = (resized_height, resized_width)
         self.frame_rate = frame_rate
 
@@ -102,6 +112,9 @@ class ImageServer:
         print("ImageServer initialized")
 
     def _post_process_frame(self, frame):
+        # crop
+        if self.crop_y_start is not None or self.crop_y_end is not None or self.crop_x_start is not None or self.crop_x_end is not None: 
+            frame = frame[..., self.crop_y_start:self.crop_y_end, self.crop_x_start:self.crop_x_end]
         # resize
         frame = cv2.resize(frame, (self.expected_shape[1], self.expected_shape[0]), cv2.INTER_CUBIC)
 
@@ -129,6 +142,8 @@ class ImageServer:
         while True:
 
             frames = self.camera.get_frames()
+            if self.image_show:
+                self._display_frame("depth_raw", frames[0])
             frames = [self._post_process_frame(frame) for frame in frames]
 
              # Concatenate frames before channel dimension (axis=0)

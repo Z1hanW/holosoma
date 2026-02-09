@@ -56,6 +56,18 @@ class CameraProps:
     far_clip: float
     """Far clipping plane distance in meters."""
 
+    crop_y_start: int|None = None
+    """Start index of the y-axis to crop."""
+
+    crop_x_start: int|None = None
+    """Start index of the x-axis to crop."""
+
+    crop_y_end: int|None = None
+    """End index of the y-axis to crop."""
+
+    crop_x_end: int|None = None
+    """End index of the x-axis to crop."""
+
     frame_rate: int
     """Capture frame rate in Hz."""
 
