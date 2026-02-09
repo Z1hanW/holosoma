@@ -111,6 +111,9 @@ def _compute_min_z(
     base = obj_mesh.vertices.astype(np.float32)
     obj_verts = (base[None, :, :] @ obj_rotmats.transpose(0, 2, 1)) + obj_trans[:, None, :]
 
+    human_verts = human_verts @ ROT.T
+    obj_verts = obj_verts @ ROT.T
+
     min_z = float(
         min(
             np.min(human_verts[..., 2]),
@@ -188,6 +191,17 @@ def _process_sequence(seq_dir: Path) -> None:
     else:
         raise ValueError(f"No object rotation found in {obj_path}")
 
+    obj_name = _get_obj_name(seq_dir.name)
+    min_z = _compute_min_z(
+        poses.astype(np.float32),
+        betas.astype(np.float32),
+        trans.astype(np.float32),
+        obj_rotmats.astype(np.float32),
+        obj_trans.astype(np.float32),
+        obj_name,
+        gender,
+    )
+
     obj_rotmats = ROT[None, :, :] @ obj_rotmats
     obj_trans = (obj_trans @ ROT.T).astype(np.float32, copy=False)
 
@@ -197,17 +211,6 @@ def _process_sequence(seq_dir: Path) -> None:
     poses[:, :3] = global_orient
 
     trans = (trans @ ROT.T).astype(np.float32, copy=False)
-
-    obj_name = _get_obj_name(seq_dir.name)
-    min_z = _compute_min_z(
-        poses.astype(np.float32),
-        betas.astype(np.float32),
-        trans,
-        obj_rotmats,
-        obj_trans,
-        obj_name,
-        gender,
-    )
     trans = trans.copy()
     obj_trans = obj_trans.copy()
     trans[:, 2] -= min_z
