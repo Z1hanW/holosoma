@@ -24,6 +24,13 @@ if [ -n "$SCENE_XML_FILE" ]; then
     SCENE_XML_ARG=(--task-config.scene-xml-file "$SCENE_XML_FILE")
 fi
 
+SAVE_MODE_ARG=()
+case "${SAVE_MODE}" in
+    True|true|1|YES|yes|Y|y)
+        SAVE_MODE_ARG=(--save-mode)
+        ;;
+esac
+
 python examples/robot_retarget.py \
     --data_path "$DATA_PATH" \
     --task-type climbing \
@@ -35,7 +42,7 @@ python examples/robot_retarget.py \
     --robot-config.robot-urdf-file "$ROBOT_URDF" \
     --data_format "$DATA_FORMAT" \
     "${SAVE_DIR_ARG[@]}" \
-    --save-mode "$SAVE_MODE" \
+    "${SAVE_MODE_ARG[@]}" \
     --retargeter.penetration-tolerance 0.0 \
     --retargeter.step-size 0.05 \
     --retargeter.debug \
