@@ -307,8 +307,8 @@ def _behave_to_viser_rotation() -> np.ndarray:
     return np.array(
         [
             [1.0, 0.0, 0.0],
-            [0.0, 0.0, -1.0],
-            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, -1.0, 0.0],
         ],
         dtype=np.float32,
     )
