@@ -302,6 +302,18 @@ def _resolve_device(name: str):
     return torch.device(name)
 
 
+def _behave_to_viser_rotation() -> np.ndarray:
+    # BEHAVE annotations use an OpenCV-style frame (Y down). Rotate so Z is up.
+    return np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 1.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+
+
 def _safe_set_prop(handle: Any, name: str, value: Any) -> None:
     if isinstance(value, np.ndarray):
         impl = getattr(handle, "_impl", None)
@@ -410,9 +422,15 @@ def _build_sequence(
     human_verts = verts.detach().cpu().numpy().astype(np.float32)
     human_faces = smpl.th_faces.detach().cpu().numpy().astype(np.int32)
 
+    rot_global = _behave_to_viser_rotation()
+    human_verts = human_verts @ rot_global.T
+
     obj_faces = mesh.faces.astype(np.int32)
     base_verts = mesh.vertices.astype(np.float32)
     obj_verts = (base_verts[None, :, :] @ obj_rot.transpose(0, 2, 1)) + obj_trans[:, None, :]
+    obj_verts = obj_verts @ rot_global.T
+    obj_rot = rot_global[None, :, :] @ obj_rot
+    obj_trans = obj_trans @ rot_global.T
 
     return {
         "human_verts": human_verts,
