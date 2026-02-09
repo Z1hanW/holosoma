@@ -258,7 +258,7 @@ def _load_annotation_pair(seq_dir: Path) -> Dict[str, Any]:
                 obj["obj_trans"] = obj.pop(key)
                 break
     if "obj_rot" not in obj:
-        for key in ("rot", "rots", "rotation", "angle"):
+        for key in ("rot", "rots", "rotation", "angle", "angles"):
             if key in obj:
                 obj["obj_rot"] = obj.pop(key)
                 break
