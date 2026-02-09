@@ -89,6 +89,8 @@ def _compute_min_z(
     obj_trans: np.ndarray,
     obj_name: str,
     gender: str,
+    *,
+    already_rotated: bool,
 ) -> float:
     smpl = SMPL_Layer(
         center_idx=0,
@@ -111,8 +113,9 @@ def _compute_min_z(
     base = obj_mesh.vertices.astype(np.float32)
     obj_verts = (base[None, :, :] @ obj_rotmats.transpose(0, 2, 1)) + obj_trans[:, None, :]
 
-    human_verts = human_verts @ ROT.T
-    obj_verts = obj_verts @ ROT.T
+    if not already_rotated:
+        human_verts = human_verts @ ROT.T
+        obj_verts = obj_verts @ ROT.T
 
     min_z = float(
         min(
@@ -121,6 +124,41 @@ def _compute_min_z(
         )
     )
     return min_z
+
+
+def _compute_pelvis_delta(
+    smpl_poses: np.ndarray,
+    smpl_betas: np.ndarray,
+    smpl_trans: np.ndarray,
+    smpl_poses_rot: np.ndarray,
+    smpl_trans_rot: np.ndarray,
+    gender: str,
+) -> np.ndarray:
+    smpl = SMPL_Layer(
+        center_idx=0,
+        gender=gender,
+        num_betas=int(smpl_betas.shape[1]),
+        model_root=str(SMPL_MODEL_ROOT),
+        hands=True,
+    )
+    smpl = smpl.to(torch.device("cpu"))
+
+    with torch.no_grad():
+        verts, joints, _, _ = smpl(
+            torch.from_numpy(smpl_poses),
+            th_betas=torch.from_numpy(smpl_betas),
+            th_trans=torch.from_numpy(smpl_trans),
+        )
+        _, joints_rot, _, _ = smpl(
+            torch.from_numpy(smpl_poses_rot),
+            th_betas=torch.from_numpy(smpl_betas),
+            th_trans=torch.from_numpy(smpl_trans_rot),
+        )
+    pelvis = joints.detach().cpu().numpy()[:, 0, :]
+    pelvis_expected = pelvis @ ROT.T
+    pelvis_rot = joints_rot.detach().cpu().numpy()[:, 0, :]
+    delta = pelvis_expected - pelvis_rot
+    return np.mean(delta, axis=0)
 
 
 def _process_sequence(seq_dir: Path) -> None:
@@ -191,46 +229,59 @@ def _process_sequence(seq_dir: Path) -> None:
     else:
         raise ValueError(f"No object rotation found in {obj_path}")
 
-    obj_name = _get_obj_name(seq_dir.name)
-    min_z = _compute_min_z(
-        poses.astype(np.float32),
-        betas.astype(np.float32),
-        trans.astype(np.float32),
-        obj_rotmats.astype(np.float32),
-        obj_trans.astype(np.float32),
-        obj_name,
-        gender,
-    )
-
-    obj_rotmats = ROT[None, :, :] @ obj_rotmats
-    obj_trans = (obj_trans @ ROT.T).astype(np.float32, copy=False)
+    obj_rotmats_rot = ROT[None, :, :] @ obj_rotmats
+    obj_trans_rot = (obj_trans @ ROT.T).astype(np.float32, copy=False)
 
     global_orient = poses[:, :3]
     global_orient = _rotate_rotvec(global_orient)
-    poses = poses.copy()
-    poses[:, :3] = global_orient
+    poses_rot = poses.copy()
+    poses_rot[:, :3] = global_orient
 
-    trans = (trans @ ROT.T).astype(np.float32, copy=False)
-    trans = trans.copy()
-    obj_trans = obj_trans.copy()
-    trans[:, 2] -= min_z
-    obj_trans[:, 2] -= min_z
+    trans_rot = (trans @ ROT.T).astype(np.float32, copy=False)
 
-    smpl["poses"] = poses
-    smpl["trans"] = trans.astype(np.float32, copy=False)
+    delta = _compute_pelvis_delta(
+        poses.astype(np.float32),
+        betas.astype(np.float32),
+        trans.astype(np.float32),
+        poses_rot.astype(np.float32),
+        trans_rot.astype(np.float32),
+        gender,
+    )
+    trans_rot = trans_rot + delta[None, :]
+    obj_trans_rot = obj_trans_rot + delta[None, :]
+
+    obj_name = _get_obj_name(seq_dir.name)
+    min_z = _compute_min_z(
+        poses_rot.astype(np.float32),
+        betas.astype(np.float32),
+        trans_rot.astype(np.float32),
+        obj_rotmats_rot.astype(np.float32),
+        obj_trans_rot.astype(np.float32),
+        obj_name,
+        gender,
+        already_rotated=True,
+    )
+
+    trans_rot = trans_rot.copy()
+    obj_trans_rot = obj_trans_rot.copy()
+    trans_rot[:, 2] -= min_z
+    obj_trans_rot[:, 2] -= min_z
+
+    smpl["poses"] = poses_rot
+    smpl["trans"] = trans_rot.astype(np.float32, copy=False)
 
     if "angles" in obj:
-        obj["angles"] = Rotation.from_matrix(obj_rotmats).as_rotvec().astype(np.float32, copy=False)
+        obj["angles"] = Rotation.from_matrix(obj_rotmats_rot).as_rotvec().astype(np.float32, copy=False)
     elif "angle" in obj:
-        obj["angle"] = Rotation.from_matrix(obj_rotmats).as_rotvec().astype(np.float32, copy=False)
+        obj["angle"] = Rotation.from_matrix(obj_rotmats_rot).as_rotvec().astype(np.float32, copy=False)
     elif "obj_rot" in obj:
-        obj["obj_rot"] = obj_rotmats.astype(np.float32, copy=False)
+        obj["obj_rot"] = obj_rotmats_rot.astype(np.float32, copy=False)
     elif "rot" in obj:
-        obj["rot"] = obj_rotmats.astype(np.float32, copy=False)
+        obj["rot"] = obj_rotmats_rot.astype(np.float32, copy=False)
 
-    obj["trans"] = obj_trans
+    obj["trans"] = obj_trans_rot
     if "obj_trans" in obj:
-        obj["obj_trans"] = obj_trans
+        obj["obj_trans"] = obj_trans_rot
 
     out_dir.mkdir(parents=True, exist_ok=True)
     _save_npz(out_dir / "smpl_fit_all.npz", smpl)
