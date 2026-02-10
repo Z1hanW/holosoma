@@ -120,7 +120,7 @@ class BasePolicy:
         self.obs_buf_dict: dict[str, np.ndarray] = {}
 
         for group, term_names in self.obs_dict.items():
-            self.obs_terms_sorted[group] = sorted(term_names)
+            self.obs_terms_sorted[group] = term_names
             history_len = self.history_length_dict.get(group, 1)
             self.obs_history_buffers[group] = {}
             flattened_terms: list[np.ndarray] = []
@@ -494,9 +494,21 @@ class BasePolicy:
             current_obs_buffer_dict["projected_gravity"] = robot_state_data[:, expected_len : expected_len + 3]
         else:
             v = np.array([[0, 0, -1]])
-            current_obs_buffer_dict["projected_gravity"] = quat_rotate_inverse(current_obs_buffer_dict["base_quat"], v)
+            gravity_quat = self._get_gravity_frame_quat(robot_state_data, current_obs_buffer_dict["base_quat"])
+            current_obs_buffer_dict["projected_gravity"] = quat_rotate_inverse(gravity_quat, v)
 
         return current_obs_buffer_dict
+
+    def _get_gravity_frame_quat(self, robot_state_data, base_quat):
+        """Return the quaternion used to project gravity into the body frame.
+
+        Override in subclasses to use a different reference frame (e.g., an
+        anchor body like ``torso_link`` instead of the root body).
+
+        The default implementation returns ``base_quat`` unchanged, which is
+        the root body quaternion from the robot state.
+        """
+        return base_quat
 
     def parse_current_obs_dict(self, current_obs_buffer_dict):
         """Parse observation buffer into observation dictionary with per-term scaling."""

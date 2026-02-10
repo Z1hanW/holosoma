@@ -257,8 +257,8 @@ def setup_simulation_environment(
         terrain_manager = TerrainManager(config.terrain, env=EnvProxy(device), device=device)
 
         # Use camera configuration from RunSimConfig
-        # camera_manager = CameraManager(config.camera, env=EnvProxy(device), device=device)
-        camera_manager = None
+        camera_manager = CameraManager(config.camera, env=EnvProxy(device), device=device)
+        # camera_manager = None
 
         # Create simulator using get_class() to avoid circular imports
         simulator_class = get_class(config.simulator._target_)

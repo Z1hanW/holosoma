@@ -30,11 +30,11 @@ class CameraManager:
         self.logger = getattr(env, "logger", None)
 
         self.camera_terms: dict[str, CameraTermBase] = {}
-        for term_name, term_cfg in self.cfg.terms.items():
-            self.camera_terms[term_name] = resolve_callable(
-                term_cfg.func,
-                context=f"camera term '{term_name}'",
-            )(term_cfg, self.env)
+        # for term_name, term_cfg in self.cfg.terms.items():
+        #     self.camera_terms[term_name] = resolve_callable(
+        #         term_cfg.func,
+        #         context=f"camera term '{term_name}'",
+        #     )(term_cfg, self.env)
 
     def setup(self) -> None:
         """Run setup hooks."""

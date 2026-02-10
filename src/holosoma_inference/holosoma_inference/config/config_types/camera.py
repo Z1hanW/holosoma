@@ -56,6 +56,15 @@ class CameraProps:
     far_clip: float
     """Far clipping plane distance in meters."""
 
+    frame_rate: int
+    """Capture frame rate in Hz."""
+
+    image_show: bool = False
+    """Whether to display captured images (for debugging)."""
+
+    depth_delay: int = 1
+    """Depth sensor delay in frames. Total delay = depth_delay / frame_rate [s]."""
+
     crop_y_start: int|None = None
     """Start index of the y-axis to crop."""
 
@@ -67,15 +76,6 @@ class CameraProps:
 
     crop_x_end: int|None = None
     """End index of the x-axis to crop."""
-
-    frame_rate: int
-    """Capture frame rate in Hz."""
-
-    image_show: bool = False
-    """Whether to display captured images (for debugging)."""
-
-    depth_delay: int = 1
-    """Depth sensor delay in frames. Total delay = depth_delay / frame_rate [s]."""
 
 
 @dataclass(frozen=True)

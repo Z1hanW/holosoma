@@ -265,22 +265,19 @@ Changed group of some visual geoms to support ray-tracing that passes through ro
                     <joint name="waist_roll_joint" class="waist_roll"/>
                     <geom class="visual" mesh="waist_roll_link"/>
                     <body name="torso_link">
-                        <camera name="cam_front_depth" pos="0.135 0.06 0.02" euler="0 -0.2618 -1.57" fovy="69.00" />
-                        <camera name="cam_back_depth" pos="-0.125 -0.06 0.02" euler="0 0.2618 1.57" fovy="69.00" />
-                        <!-- D435i depth camera for far-tracking distillation -->
-                        <camera name="cam_d435i_depth" pos="0.01 0.01 0.44" euler="0.01745 0.47124 0.01745" fovy="48.68" />
+                        <camera name="cam_d435i_depth" pos="0.01 0.01 0.44" euler="0.01745 -0.47124 0.01745" fovy="48.68" />
 
                         <inertial pos="0.00203158 0.000339683 0.184568" quat="0.999803 -6.03319e-05 0.0198256 0.00131986"
                                 mass="7.818" diaginertia="0.121847 0.109825 0.0273735"/>
                         <joint name="waist_pitch_joint" class="waist_pitch"/>
                         <geom class="visual" mesh="torso_link"/>
                         <geom pos="0.0039635 0 -0.044" quat="1 0 0 0" class="visual" material="black" mesh="logo_link"/>
-                        <geom pos="0.0039635 0 -0.044" class="visual" material="black" mesh="head_link"/>
+                        <geom pos="0.0039635 0 -0.044" class="visual" material="black" mesh="head_link" group="2"/>
 
                         <geom name="torso_collision1" class="collision" type="capsule" size="0.073" fromto="0.005 -0.032 .22 0.005 0.032 .22"/>
                         <geom name="torso_collision2" class="collision" type="capsule" size="0.07" fromto="0.005 -0.028 .13 0.005 0.028 .13"/>
                         <geom name="torso_collision3" class="collision" type="capsule" size="0.065" fromto="0.005 -0.02 .06 0.005 0.02 .06"/>
-                        <geom name="head_collision" class="collision" type="capsule" size="0.068" fromto="0.01 0 .41 0.01 0 .42"/>
+                        <geom name="head_collision" class="collision" type="capsule" size="0.068" fromto="0.01 0 .41 0.01 0 .42" group="2"/>
 
                         <site name="imu_in_torso" size="0.01" pos="-0.03959 -0.00224 0.14792"/>
                         <site name="mid360" size="0.01" pos="0.0002835 0.00003 0.41618" quat="0.00000094 -0.99979404 0.00004632 0.02029493"/>

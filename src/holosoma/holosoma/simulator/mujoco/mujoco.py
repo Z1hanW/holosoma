@@ -1326,6 +1326,10 @@ class MuJoCo(BaseSimulator):
             return
 
         self.viewer = mujoco.viewer.launch_passive(self.root_model, self.root_data, key_callback=self._key_callback)
+
+        # Show camera frustums in the viewer for debugging camera placement
+        self.viewer._opt.flags[mujoco.mjtVisFlag.mjVIS_CAMERA] = True
+
         logger.info("=== Viewer setup completed with keyboard callback ===")
 
     def _add_text_overlay(

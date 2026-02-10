@@ -33,6 +33,9 @@ class MujocoCameraRenderer:
             )
             self._renderer.enable_depth_rendering()
             self._renderer_thread_id = current_thread_id
+            # Exclude head mesh (group 2) from depth rendering
+            self._depth_scene_option = mujoco.MjvOption()
+            self._depth_scene_option.geomgroup[2] = 0
         return self._renderer
 
     def get_frames(self):
@@ -42,7 +45,7 @@ class MujocoCameraRenderer:
 
         frames = []
         for camera_name in self.camera_names:
-            renderer.update_scene(render_data, camera=camera_name)
+            renderer.update_scene(render_data, camera=camera_name, scene_option=self._depth_scene_option)
             # depth, already in meters
             frame = renderer.render()
             frames.append(frame)
@@ -142,9 +145,9 @@ class ImageServer:
         while True:
 
             frames = self.camera.get_frames()
-            if self.image_show:
-                self._display_frame("depth_raw", frames[0])
             frames = [self._post_process_frame(frame) for frame in frames]
+            if self.image_show:
+                self._display_frame("depth_processed", frames[0][0])
 
              # Concatenate frames before channel dimension (axis=0)
             # [C, H, W] -> [N, C, H, W] N is the number of cameras

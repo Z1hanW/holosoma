@@ -131,3 +131,23 @@ def xyzw_to_wxyz(xyzw):
 
 def wxyz_to_xyzw(wxyz):
     return np.concatenate([wxyz[:, 1:], wxyz[:, :1]], axis=1)
+
+
+def quat_from_angle_axis(angle: float, axis: np.ndarray) -> np.ndarray:
+    """Create a unit quaternion from a rotation angle and axis.
+
+    Parameters
+    ----------
+    angle : float
+        Rotation angle in radians.
+    axis : np.ndarray
+        Unit 3-vector specifying the rotation axis.
+
+    Returns
+    -------
+    np.ndarray
+        Quaternion of shape (1, 4) in wxyz convention.
+    """
+    half = angle * 0.5
+    s = np.sin(half)
+    return np.array([[np.cos(half), s * axis[0], s * axis[1], s * axis[2]]])

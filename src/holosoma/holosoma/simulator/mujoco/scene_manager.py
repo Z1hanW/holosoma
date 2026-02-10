@@ -17,6 +17,36 @@ from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.managers.camera import CameraManager
 
 
+def _euler_xyz_to_quat_wxyz(euler_rad: np.ndarray) -> np.ndarray:
+    """Convert intrinsic XYZ Euler angles (roll, pitch, yaw) to quaternion (w, x, y, z).
+
+    Uses the same convention as quat_from_euler_xyz in the warp camera sensor code,
+    but returns MuJoCo's (w, x, y, z) ordering.
+    """
+    roll, pitch, yaw = euler_rad
+    cr, sr = np.cos(roll * 0.5), np.sin(roll * 0.5)
+    cp, sp = np.cos(pitch * 0.5), np.sin(pitch * 0.5)
+    cy, sy = np.cos(yaw * 0.5), np.sin(yaw * 0.5)
+
+    w = cy * cr * cp + sy * sr * sp
+    x = cy * sr * cp - sy * cr * sp
+    y = cy * cr * sp + sy * sr * cp
+    z = sy * cr * cp - cy * sr * sp
+    return np.array([w, x, y, z])
+
+
+def _quat_mul_wxyz(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    """Multiply two quaternions in (w, x, y, z) format."""
+    w1, x1, y1, z1 = q1
+    w2, x2, y2, z2 = q2
+    return np.array([
+        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+    ])
+
+
 class MujocoSceneManager:
     """Compositional world builder using MjSpec for MuJoCo simulations.
 
@@ -144,7 +174,12 @@ class MujocoSceneManager:
         # )
 
     def add_camera(self, camera_manager: CameraManager, num_envs: int) -> None:
-        """Add cameras to the world specification.
+        """Add cameras to the world specification from camera manager config.
+
+        Reads camera terms from the CameraManager config and creates MuJoCo camera
+        elements attached to the appropriate robot body links. Converts camera pose
+        from the warp/IsaacGym convention (camera views along +Z) to MuJoCo convention
+        (camera views along -Z) using offset_rot_base and a frame flip.
 
         Parameters
         ----------
@@ -153,19 +188,72 @@ class MujocoSceneManager:
         num_envs : int
             Number of environments (affects camera layout planning).
         """
+        if not camera_manager.cfg.terms:
+            return
 
-        # # 0. get the robot torso link;
-        # mj_model = self.world_spec.root_model
+        prefix = getattr(self, "robot_prefix", "robot_")
 
-        # # read different terms in camera_manager, and attach them to the robot torso link;
-        # cam_terms = camera_manager.camera_terms
-        # for cam_name, cam_term in cam_terms.items():
-        #     cam_config = cam_term.cfg
-        #     cam_pose = cam_config.pose
-        #     cam_pos = cam_pose.camera_offset
-        #     cam_quat = cam_pose.camera_rotation
-        # TODO: Currently, add camera in xml file.
-        pass
+        for term_name, term_cfg in camera_manager.cfg.terms.items():
+            params = term_cfg.params
+            pose = params.get("pose")
+            props = params.get("props")
+
+            if pose is None:
+                continue
+
+            # Find parent body in world spec (robot bodies are prefixed after attach)
+            body_name = f"{prefix}{pose.camera_body_link}"
+            body = self.world_spec.body(body_name)
+            if body is None:
+                logger.warning(f"Camera '{term_name}': parent body '{body_name}' not found, skipping")
+                continue
+
+            # Camera name follows the convention used by sim_utils / image_server
+            camera_name = f"{prefix}cam_{term_name}"
+
+            # Remove existing camera with same name from XML (avoid duplicates)
+            try:
+                existing = self.world_spec.camera(camera_name)
+                if existing is not None:
+                    self.world_spec.delete(existing)
+                    logger.info(f"Replaced existing XML camera '{camera_name}'")
+            except (AttributeError, ValueError):
+                pass  # find_camera may not exist in older MuJoCo versions
+
+            # Convert orientation from warp/IsaacGym convention to MuJoCo.
+            #
+            # In warp:   camera views along +Z in its data frame.
+            #            offset_rot_base = [-90, 0, -90] (roll, pitch, yaw deg) converts
+            #            from the data frame to the physical sensor frame.
+            #            Final local orientation = q_user * q_base
+            #
+            # In MuJoCo: camera views along -Z in its local frame.
+            #            We apply Rx(180°) to flip +Z to -Z:
+            #            q_mujoco = q_user * q_base * q_flip
+            user_rot_rad = np.deg2rad(list(pose.camera_rotation))  # (roll, pitch, yaw)
+            base_rot_rad = np.deg2rad([-90.0, 0.0, -90.0])  # offset_rot_base
+
+            q_user = _euler_xyz_to_quat_wxyz(user_rot_rad)
+            q_base = _euler_xyz_to_quat_wxyz(base_rot_rad)
+            q_flip = np.array([0.0, 1.0, 0.0, 0.0])  # Rx(180°) in (w,x,y,z)
+
+            q_mj = _quat_mul_wxyz(_quat_mul_wxyz(q_user, q_base), q_flip)
+            q_mj = q_mj / np.linalg.norm(q_mj)
+
+            # Vertical FOV from camera properties
+            fovy = props.vertical_fov if props is not None else 45.0
+
+            body.add_camera(
+                name=camera_name,
+                pos=list(pose.camera_offset),
+                quat=q_mj.tolist(),
+                fovy=fovy,
+            )
+
+            logger.info(
+                f"Added camera '{camera_name}' to '{body_name}': "
+                f"pos={list(pose.camera_offset)}, fovy={fovy}"
+            )
 
     def add_terrain(self, terrain_state: TerrainTermBase, num_envs: int) -> None:
         """Add terrain to the world specification with extensible dispatch.

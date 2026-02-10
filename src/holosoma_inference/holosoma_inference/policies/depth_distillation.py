@@ -24,6 +24,7 @@ from loguru import logger
 
 from holosoma_inference.config.config_types.inference import InferenceConfig
 from holosoma_inference.policies.locomotion import LocomotionPolicy
+from holosoma_inference.utils.math.quat import quat_from_angle_axis, quat_mul
 
 
 class DepthDistillationPolicy(LocomotionPolicy):
@@ -121,6 +122,9 @@ class DepthDistillationPolicy(LocomotionPolicy):
         # Setup joint reordering (robot order <-> model's expected order)
         self._setup_joint_reordering()
 
+        # Pre-compute waist joint indices for anchor body FK
+        self._init_waist_joint_indices()
+
         # Initialize action buffers
         self.last_policy_action = np.zeros((1, self.num_dofs))
         self.scaled_policy_action = np.zeros((1, self.num_dofs))
@@ -182,8 +186,6 @@ class DepthDistillationPolicy(LocomotionPolicy):
         if model_joint_names is None or list(model_joint_names) == real_joint_names:
             self._real2model_index = None
             self._model2real_index = None
-            if model_joint_names is None:
-                logger.info("[DepthDistillationPolicy] No joint_names in ONNX metadata, skipping reordering")
             return
 
         from holosoma_inference.utils.math.misc import get_index_of_a_in_b
@@ -197,10 +199,64 @@ class DepthDistillationPolicy(LocomotionPolicy):
         for model_pos, real_pos in enumerate(self._real2model_index):
             self._model2real_index[real_pos] = model_pos
 
+        self.default_dof_angles = self.default_dof_angles_model[self._model2real_index]
+
         logger.info(
             f"[DepthDistillationPolicy] Joint reordering enabled via ONNX metadata: "
             f"model={model_joint_names}, real={real_joint_names}"
         )
+
+    def _init_waist_joint_indices(self):
+        """Pre-compute waist joint indices for anchor-body FK.
+
+        The training observation ``robot_anchor_projected_gravity`` projects
+        gravity into the anchor body frame (``torso_link``), which is connected
+        to the root (pelvis) through waist_yaw → waist_roll → waist_pitch.
+        We store the indices so ``_get_gravity_frame_quat`` can chain the
+        rotations at runtime.
+        """
+        # (joint_name_substring, local rotation axis)
+        waist_chain = [
+            ("waist_yaw_joint", np.array([0.0, 0.0, 1.0])),
+            ("waist_roll_joint", np.array([1.0, 0.0, 0.0])),
+            ("waist_pitch_joint", np.array([0.0, 1.0, 0.0])),
+        ]
+
+        self._waist_joint_info: list[tuple[int, np.ndarray]] = []
+        for name, axis in waist_chain:
+            if name in self.dof_names:
+                self._waist_joint_info.append((self.dof_names.index(name), axis))
+
+        if self._waist_joint_info:
+            names = [self.dof_names[idx] for idx, _ in self._waist_joint_info]
+            logger.info(f"[DepthDistillationPolicy] Anchor-body FK through waist joints: {names}")
+
+    def _get_gravity_frame_quat(self, robot_state_data, base_quat):
+        """Compute the anchor body (torso) quaternion for projected gravity.
+
+        Matches the training's ``robot_anchor_projected_gravity`` observation
+        which uses ``body_quat_w[:, torso_link_index]`` rather than the root
+        body quaternion.
+
+        On the real G1 robot the IMU is mounted in the torso, so ``base_quat``
+        already equals the torso quaternion and the FK chain is a no-op
+        (waist joint angles are near zero relative to the IMU frame).  For
+        sim-to-sim (e.g. MuJoCo) the floating-base quaternion is the pelvis,
+        so we chain the waist joint rotations to obtain the torso quaternion.
+        """
+        if not self._waist_joint_info:
+            return base_quat
+
+        # Raw (absolute) joint positions — before default-angle subtraction
+        raw_dof_pos = robot_state_data[:, 7 : 7 + self.num_dofs]
+
+        anchor_quat = base_quat.copy()
+        for idx, axis in self._waist_joint_info:
+            angle = float(raw_dof_pos[0, idx])
+            joint_quat = quat_from_angle_axis(angle, axis)
+            anchor_quat = quat_mul(anchor_quat, joint_quat)
+
+        return anchor_quat
 
     def _load_student_model(self, model_path: str):
         """Load the student ONNX model and extract metadata."""
@@ -226,6 +282,7 @@ class DepthDistillationPolicy(LocomotionPolicy):
 
         # Extract joint names from metadata for joint reordering
         self._model_joint_names = metadata.get("joint_names", None).split(",")
+        self.default_dof_angles_model = np.array([float(angle) for angle in metadata["default_joint_pos"].split(",")])
 
         # Extract action scale from metadata if available
         if "action_scale" in metadata:
@@ -348,11 +405,9 @@ class DepthDistillationPolicy(LocomotionPolicy):
         """
         current_obs_buffer_dict = super().get_current_obs_buffer_dict(robot_state_data)
 
-        # Reorder joint-related observations from robot order to model's expected order
         if self._real2model_index is not None:
             current_obs_buffer_dict["dof_pos"] = current_obs_buffer_dict["dof_pos"][:, self._real2model_index]
             current_obs_buffer_dict["dof_vel"] = current_obs_buffer_dict["dof_vel"][:, self._real2model_index]
-            current_obs_buffer_dict["actions"] = current_obs_buffer_dict["actions"][:, self._real2model_index]
 
         # Add depth image placeholder (actual processing happens in prepare_obs_for_rl)
         # This is needed so parse_current_obs_dict doesn't fail on missing "cam_depth"
