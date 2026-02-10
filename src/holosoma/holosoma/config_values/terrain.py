@@ -59,6 +59,24 @@ terrain_load_obj = TerrainManagerCfg(
     )
 )
 
+terrain_load_step = TerrainManagerCfg(
+    terrain_term=TerrainTermCfg(
+        static_friction=1.0,
+        dynamic_friction=1.0,
+        restitution=0.0,
+        mesh_type=MeshType.LOAD_OBJ,
+        func="holosoma.managers.terrain.terms.locomotion:TerrainLocomotion",
+        obj_file_path="/home/ANT.AMAZON.COM/lujiey/workplace/FAR-Holosoma/models/step/step.obj",
+        num_rows=1,
+        num_cols=1,
+        spawn=SpawnCfg(
+            randomize_tiles=False,
+            query_terrain_height=True,
+            use_grid_sampling=True,
+        ),
+    )
+)
+
 terrain_locomotion_stairs_and_slope_eval = TerrainManagerCfg(
     terrain_term=TerrainTermCfg(
         func="holosoma.managers.terrain.terms.locomotion:TerrainLocomotion",
@@ -96,5 +114,6 @@ DEFAULTS = {
     "terrain_locomotion_plane": terrain_locomotion_plane,
     "terrain_locomotion_mix": terrain_locomotion_mix,
     "terrain_load_obj": terrain_load_obj,
+    "terrain_load_step": terrain_load_step,
     "terrain_locomotion_stairs_and_slope_eval": terrain_locomotion_stairs_and_slope_eval,
 }
