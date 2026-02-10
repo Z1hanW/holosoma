@@ -126,41 +126,6 @@ def _compute_min_z(
     return min_z
 
 
-def _compute_pelvis_delta(
-    smpl_poses: np.ndarray,
-    smpl_betas: np.ndarray,
-    smpl_trans: np.ndarray,
-    smpl_poses_rot: np.ndarray,
-    smpl_trans_rot: np.ndarray,
-    gender: str,
-) -> np.ndarray:
-    smpl = SMPL_Layer(
-        center_idx=0,
-        gender=gender,
-        num_betas=int(smpl_betas.shape[1]),
-        model_root=str(SMPL_MODEL_ROOT),
-        hands=True,
-    )
-    smpl = smpl.to(torch.device("cpu"))
-
-    with torch.no_grad():
-        verts, joints, _, _ = smpl(
-            torch.from_numpy(smpl_poses),
-            th_betas=torch.from_numpy(smpl_betas),
-            th_trans=torch.from_numpy(smpl_trans),
-        )
-        _, joints_rot, _, _ = smpl(
-            torch.from_numpy(smpl_poses_rot),
-            th_betas=torch.from_numpy(smpl_betas),
-            th_trans=torch.from_numpy(smpl_trans_rot),
-        )
-    pelvis = joints.detach().cpu().numpy()[:, 0, :]
-    pelvis_expected = pelvis @ ROT.T
-    pelvis_rot = joints_rot.detach().cpu().numpy()[:, 0, :]
-    delta = pelvis_expected - pelvis_rot
-    return np.mean(delta, axis=0)
-
-
 def _process_sequence(seq_dir: Path) -> None:
     out_dir = OUT_ROOT / seq_dir.name
     if out_dir.exists():
@@ -238,17 +203,6 @@ def _process_sequence(seq_dir: Path) -> None:
     poses_rot[:, :3] = global_orient
 
     trans_rot = (trans @ ROT.T).astype(np.float32, copy=False)
-
-    delta = _compute_pelvis_delta(
-        poses.astype(np.float32),
-        betas.astype(np.float32),
-        trans.astype(np.float32),
-        poses_rot.astype(np.float32),
-        trans_rot.astype(np.float32),
-        gender,
-    )
-    trans_rot = trans_rot + delta[None, :]
-    obj_trans_rot = obj_trans_rot + delta[None, :]
 
     obj_name = _get_obj_name(seq_dir.name)
     min_z = _compute_min_z(
