@@ -459,6 +459,13 @@ def _build_sequence(
     if obj_name is None:
         raise ValueError("Object name not found in annotation file. Pass --object-name to override.")
 
+    has_object = obj_rot is not None and obj_trans is not None
+    mesh = None
+    if has_object:
+        if objects_root is None:
+            raise FileNotFoundError("Objects root not found. Pass --objects-root or --dataset-root.")
+        mesh = _load_object_mesh(objects_root, obj_name, override_mesh, use_simplified=use_simplified_mesh)
+
     frame_times = _decode_frame_times(_extract_key(data, ("frame_times", "frames", "frame_ids")))
 
     if joints is None:
@@ -521,12 +528,22 @@ def _build_sequence(
             )
         joints = smpl_joints.detach().cpu().numpy().astype(np.float32)
 
+    obj_faces = None
+    obj_verts = None
+    if has_object and mesh is not None:
+        obj_faces = mesh.faces.astype(np.int32)
+        base_verts = mesh.vertices.astype(np.float32)
+        obj_verts = (base_verts[None, :, :] @ obj_rot.transpose(0, 2, 1)) + obj_trans[:, None, :]
+
     return {
         "joints": joints.astype(np.float32),
         "frame_times": frame_times,
         "n_frames": int(joints.shape[0]),
         "gender": gender,
         "obj_name": obj_name,
+        "obj_verts": obj_verts.astype(np.float32) if obj_verts is not None else None,
+        "obj_faces": obj_faces,
+        "has_object": bool(has_object and obj_verts is not None),
     }
 
 
@@ -627,6 +644,16 @@ def main() -> None:
         point_shape="circle",
     )
 
+    object_handle = None
+    if state.get("has_object"):
+        object_handle = server.scene.add_mesh_simple(
+            "/object",
+            vertices=state["obj_verts"][0],
+            faces=state["obj_faces"],
+            color=(120, 180, 220),
+            flat_shading=False,
+        )
+
     with server.gui.add_folder("Sequence"):
         seq_dropdown = server.gui.add_dropdown("Sequence", options=labels, initial_value=active_label)
 
@@ -644,6 +671,7 @@ def main() -> None:
 
     with server.gui.add_folder("Display"):
         show_joints_cb = server.gui.add_checkbox("Show joints", initial_value=True)
+        show_object_cb = server.gui.add_checkbox("Show object", initial_value=bool(state.get("has_object")))
 
     info_md = server.gui.add_markdown("")
 
@@ -668,6 +696,9 @@ def main() -> None:
         with server.atomic():
             _safe_set_prop(joint_handle, "points", state["joints"][frame_idx])
             _safe_set_prop(joint_handle, "visible", bool(show_joints_cb.value))
+            if object_handle is not None and state.get("has_object"):
+                _safe_set_prop(object_handle, "vertices", state["obj_verts"][frame_idx])
+            _safe_set_prop(object_handle, "visible", bool(show_object_cb.value))
         _update_info(frame_idx)
 
     @frame_slider.on_update
@@ -682,12 +713,26 @@ def main() -> None:
 
     @seq_dropdown.on_update
     def _(_evt) -> None:
-        nonlocal state
+        nonlocal state, object_handle
         label = str(seq_dropdown.value)
         state = _load_label(label)
         new_colors = _make_body_part_colors(int(state["joints"].shape[1]))
         _safe_set_prop(joint_handle, "colors", new_colors)
         _safe_set_prop(joint_handle, "points", state["joints"][0])
+        if state.get("has_object"):
+            if object_handle is None:
+                object_handle = server.scene.add_mesh_simple(
+                    "/object",
+                    vertices=state["obj_verts"][0],
+                    faces=state["obj_faces"],
+                    color=(120, 180, 220),
+                    flat_shading=False,
+                )
+            else:
+                _safe_set_prop(object_handle, "faces", state["obj_faces"])
+                _safe_set_prop(object_handle, "vertices", state["obj_verts"][0])
+        elif object_handle is not None:
+            _safe_set_prop(object_handle, "visible", False)
         updating_slider["flag"] = True
         frame_slider.max = max(0, int(state["n_frames"]) - 1)
         frame_slider.value = 0

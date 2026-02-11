@@ -236,7 +236,9 @@ def _process_sequence(seq_dir: Path) -> None:
     human_joints_22[:, :, 2] -= min_z
     obj_trans_rot[:, 2] -= min_z
 
-    smpl["global_joint_positions"] = human_joints_22.astype(np.float32, copy=False)
+    smpl_out = {
+        "global_joint_positions": human_joints_22.astype(np.float32, copy=False),
+    }
 
     if "angles" in obj:
         obj["angles"] = Rotation.from_matrix(obj_rotmats_rot).as_rotvec().astype(np.float32, copy=False)
@@ -252,7 +254,7 @@ def _process_sequence(seq_dir: Path) -> None:
         obj["obj_trans"] = obj_trans_rot
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    _save_npz(out_dir / "smpl_fit_all.npz", smpl)
+    _save_npz(out_dir / "smpl_fit_all.npz", smpl_out)
     _save_npz(out_dir / "object_fit_all.npz", obj)
     if info_path.exists():
         shutil.copy2(info_path, out_dir / "info.json")
