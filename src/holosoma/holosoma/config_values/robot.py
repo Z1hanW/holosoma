@@ -1096,12 +1096,13 @@ g1_29dof_w_object = replace(
     asset=replace(
         g1_29dof.asset,
         urdf_file="g1/main_mesh_collision_halfspherehand.urdf",
+        xml_file="g1/g1_29dof_halfspherehand.xml",
     ),
-    control=replace(
-        g1_29dof.control,
-        action_scales_by_effort_limit_over_p_gain=True,
-        action_scale=0.25,
-    ),
+    # control=replace(
+    #     g1_29dof.control,
+    #     action_scales_by_effort_limit_over_p_gain=True,
+    #     action_scale=0.25,
+    # ),
 )
 
 DEFAULTS = {

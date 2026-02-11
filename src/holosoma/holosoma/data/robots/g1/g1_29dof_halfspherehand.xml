@@ -1,15 +1,7 @@
-<!-- Juyue Chen:
-The source file is from:
-    Docker image:qiayuanl/unitree, /opt/ros/humble/share/unitree_description/mjcf/g1.xml
-    (No public url available)
+<!-- Based on g1_29dof.xml, with rubber hands replaced by half-sphere hands.
+     See main_mesh_collision_halfspherehand.urdf for the URDF equivalent. -->
 
-Juyue Chen added <actuator> on top of the source file -->
-
-<!-- Younggyo Seo:
-Changed group of some visual geoms to support ray-tracing that passes through robots
--->
-
-<mujoco model="g1_29dof">
+<mujoco model="g1_29dof_halfspherehand">
     <compiler angle="radian" meshdir="./meshes/"/>
 
     <default>
@@ -125,7 +117,6 @@ Changed group of some visual geoms to support ray-tracing that passes through ro
         <mesh name="left_wrist_pitch_link"
             file="left_wrist_pitch_link.STL"/>
         <mesh name="left_wrist_yaw_link" file="left_wrist_yaw_link.STL"/>
-        <mesh name="left_rubber_hand" file="left_rubber_hand.STL"/>
         <mesh name="right_shoulder_pitch_link"
             file="right_shoulder_pitch_link.STL"/>
         <mesh name="right_shoulder_roll_link"
@@ -138,7 +129,7 @@ Changed group of some visual geoms to support ray-tracing that passes through ro
         <mesh name="right_wrist_pitch_link"
             file="right_wrist_pitch_link.STL"/>
         <mesh name="right_wrist_yaw_link" file="right_wrist_yaw_link.STL"/>
-        <mesh name="right_rubber_hand" file="right_rubber_hand.STL"/>
+        <mesh name="half_sphere" file="half_sphere.obj"/>
     </asset>
 
     <worldbody>
@@ -321,9 +312,12 @@ Changed group of some visual geoms to support ray-tracing that passes through ro
                                                             mass="0.254576" diaginertia="0.000646113 0.000559993 0.000147566"/>
                                                     <joint name="left_wrist_yaw_joint" class="wrist_yaw"/>
                                                     <geom class="visual" mesh="left_wrist_yaw_link"/>
-                                                    <geom pos="0.0415 0.003 0" quat="1 0 0 0" class="visual" mesh="left_rubber_hand"/>
-                                                    <site name="left_palm" pos="0.08 0 0" size="0.01"/>
-                                                    <geom name="left_hand_collision" class="collision" type="capsule" size="0.05" fromto="0.05 0 0 0.1 0 0"/>
+                                                    <body name="left_sphere_hand_link" pos="0.029 -0.003 0" quat="0.707107 0 0.707107 0">
+                                                        <inertial pos="0 0 0" mass="0.124" diaginertia="0.0000446 0.0000446 0.0000446"/>
+                                                        <geom class="visual" mesh="half_sphere"/>
+                                                        <geom name="left_hand_collision" class="collision" type="mesh" mesh="half_sphere"/>
+                                                        <site name="left_palm" pos="0 0 0" size="0.01"/>
+                                                    </body>
                                                 </body>
                                             </body>
                                         </body>
@@ -371,9 +365,12 @@ Changed group of some visual geoms to support ray-tracing that passes through ro
                                                             mass="0.254576" diaginertia="0.000646113 0.000559993 0.000147566"/>
                                                     <joint name="right_wrist_yaw_joint" class="wrist_yaw"/>
                                                     <geom class="visual" mesh="right_wrist_yaw_link"/>
-                                                    <geom pos="0.0415 -0.003 0" quat="1 0 0 0" class="visual" mesh="right_rubber_hand"/>
-                                                    <site name="right_palm" pos="0.08 0 0" size="0.01"/>
-                                                    <geom name="right_hand_collision" class="collision" type="capsule" size="0.05" fromto="0.05 0 0 0.1 0 0"/>
+                                                    <body name="right_sphere_hand_link" pos="0.029 -0.003 0" quat="0.707107 0 0.707107 0">
+                                                        <inertial pos="0 0 0" mass="0.124" diaginertia="0.0000446 0.0000446 0.0000446"/>
+                                                        <geom class="visual" mesh="half_sphere"/>
+                                                        <geom name="right_hand_collision" class="collision" type="mesh" mesh="half_sphere"/>
+                                                        <site name="right_palm" pos="0 0 0" size="0.01"/>
+                                                    </body>
                                                 </body>
                                             </body>
                                         </body>

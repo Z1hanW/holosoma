@@ -63,7 +63,7 @@ class DepthDistillationPolicy(LocomotionPolicy):
         # During inference the user sets it via keyboard/joystick.
         self.velocity_command_dim = config.observation.obs_dims.get("velocity_command", 0)
         self.velocity_command = np.zeros((1, self.velocity_command_dim), dtype=np.float32)
-        self.active_velocity_command_idx = self.JOYSTICK_CMD_STAND  # default to standing
+        self.active_velocity_command_idx = 6  # default to standing
         self.set_velocity_command(self.active_velocity_command_idx)
 
         super().__init__(config)
@@ -199,7 +199,6 @@ class DepthDistillationPolicy(LocomotionPolicy):
         for model_pos, real_pos in enumerate(self._real2model_index):
             self._model2real_index[real_pos] = model_pos
 
-        self.default_dof_angles = self.default_dof_angles_model[self._model2real_index]
 
         logger.info(
             f"[DepthDistillationPolicy] Joint reordering enabled via ONNX metadata: "
@@ -282,7 +281,6 @@ class DepthDistillationPolicy(LocomotionPolicy):
 
         # Extract joint names from metadata for joint reordering
         self._model_joint_names = metadata.get("joint_names", None).split(",")
-        self.default_dof_angles_model = np.array([float(angle) for angle in metadata["default_joint_pos"].split(",")])
 
         # Extract action scale from metadata if available
         if "action_scale" in metadata:
@@ -514,15 +512,12 @@ class DepthDistillationPolicy(LocomotionPolicy):
         if self.velocity_command_dim == 0:
             return
 
-        linear_x = float(self.lin_vel_command[0, 0])
-        angular_z = float(self.ang_vel_command[0, 0])
-
         # # Deadzone: keep previous command when joystick is near center
         # magnitude = math.sqrt(linear_x ** 2 + angular_z ** 2)
         # if magnitude < self.JOYSTICK_DEADZONE:
         #     return
 
-        a_deg = math.atan2(linear_x, -angular_z / 1.5) * 180.0 / math.pi
+        a_deg = self.ang_vel_command[0, 0] * 180.0 / math.pi
 
         if -45.0 < a_deg < 45.0:
             cmd_idx = self.JOYSTICK_CMD_RIGHT_45
