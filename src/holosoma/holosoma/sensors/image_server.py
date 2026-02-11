@@ -1,206 +1,22 @@
 import time
 import threading
-from queue import Queue, Full
+from queue import Queue
 from collections import deque
-from dataclasses import dataclass, field
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from pathlib import Path
-import re
+from typing import Literal
 import cv2
 import numpy as np
+import torch
 from multiprocessing import shared_memory
-from typing import Literal
 import tyro
 from holosoma.simulator.mujoco.mujoco import MujocoRendererWrapper
 from holosoma.utils.rate import RateLimiter
 from datetime import datetime
-
-@dataclass(frozen=True)
-class ZEDCameraConfig:
-    """Configuration for ZED Camera initialization.
-    
-    """
-    
-    img_shape: tuple[int, int] = (720, 1280)
-    """Image shape as (height, width). Common resolutions: (720, 1280), (1080, 1920), (1242, 2208), (376, 672)"""
-    
-    fps: int = 10
-    """Frames per second"""
-    
-    serial_number: int = 32658215
-    """Camera serial number."""
-    
-    depth_mode: Literal["NONE", "NEURAL", "NEURAL_LIGHT", "PERFORMANCE", "QUALITY", "ULTRA"] = "NEURAL"
-    """Depth mode. Options: NONE, NEURAL, NEURAL_LIGHT, PERFORMANCE, QUALITY, ULTRA"""
-    
-    confidence_threshold: int = 100
-    """Confidence threshold for depth measurement (0-100)"""
-
-    positive_inf_depth_value: float = 2.0
-    """How +inf should be mapped to in the depth image, in meters"""
-
-    negative_inf_depth_value: float = 0.1
-    """How -inf should be mapped to in the depth image, in meters"""
-
-    nan_depth_value: float = 0.0
-    """How nan should be mapped to in the depth image, in meters"""
-
-default_terms = {
-    "front": ZEDCameraConfig(
-        serial_number=35996713,
-    ),
-    "back": ZEDCameraConfig(
-        serial_number=33082869,
-    ),
-}
-@dataclass(frozen=True)
-class ZedCamerasConfig:
-    """Configuration for ZED Cameras."""
-
-    terms: dict[str, ZEDCameraConfig] = field(default_factory=lambda: default_terms.copy())
-
-class ZEDCamera:
-    def __init__(self, config: ZEDCameraConfig):
-        # Lazy import ZED SDK, in case using simulator-camera
-        try:
-            import pyzed.sl as sl
-        except ImportError:
-            raise ImportError("pyzed.sl is not available. Please install the ZED SDK Python API to use ZED cameras.")
-        
-        self.sl = sl
-        self.config = config
-        self._init_zed()
-
-    def _init_zed(self):
-        """Initialize ZED camera"""
-        # 
-        sl = self.sl
-        # Initialize ZED camera objects
-        self.zed = sl.Camera()
-
-        # Initialize image buffers
-        self.rgb_mat_side_by_side = sl.Mat()
-        self.depth_mat = sl.Mat()
-
-        # Setup runtime parameters
-        self.runtime_params = sl.RuntimeParameters()
-        self.runtime_params.confidence_threshold = self.config.confidence_threshold
-
-        # Setup init parameters
-        self.init_params = sl.InitParameters()
-        # self.init_params.camera_fps = self.config.fps
-        # TODO: Understand why camera.get_frame() depends on this.
-
-        self.init_params.camera_fps = 200
-        self.init_params.coordinate_units = sl.UNIT.METER
-        self.init_params.set_from_serial_number(self.config.serial_number)
-        self.init_params.camera_resolution = self._get_zed_resolution_enum(self.config.img_shape)
-
-        self.init_params.sdk_verbose = True
-
-        self.init_params.depth_mode = self._get_depth_mode_enum()
-        
-        print(f"[ZED Camera] Init parameters: {self.init_params.depth_mode}")
-        
-        # Open camera
-        status = self.zed.open(self.init_params)
-        if status != sl.ERROR_CODE.SUCCESS:
-            raise RuntimeError(f"Failed to open ZED camera: {repr(status)}")
-        
-        # Get camera info
-
-        cam_info = self.zed.get_camera_information()
-        calib = cam_info.camera_configuration.calibration_parameters
-        left_fov = calib.left_cam.h_fov, calib.left_cam.v_fov
-        
-        print(f"[ZED Camera] Initialized successfully")
-        print(f"[ZED Camera] Resolution: {cam_info.camera_configuration.resolution.width}x{cam_info.camera_configuration.resolution.height}")
-        print(f"[ZED Camera] FOV: {left_fov[0]:.2f}° x {left_fov[1]:.2f}°")
-        print(f"[ZED Camera] Depth mode: {self.config.depth_mode}")
-
-    def _get_depth_mode_enum(self):
-        """Convert depth_mode string from config to ZED SDK enum."""
-        sl = self.sl
-        depth_mode_map = {
-            "NONE": sl.DEPTH_MODE.NONE,
-            "NEURAL": sl.DEPTH_MODE.NEURAL,
-            "NEURAL_LIGHT": sl.DEPTH_MODE.NEURAL_LIGHT,
-            "PERFORMANCE": sl.DEPTH_MODE.PERFORMANCE,
-            "QUALITY": sl.DEPTH_MODE.QUALITY,
-            "ULTRA": sl.DEPTH_MODE.ULTRA,
-        }
-        return depth_mode_map.get(self.config.depth_mode, self.sl.DEPTH_MODE.NEURAL)
-    
-    def _get_zed_resolution_enum(self, img_shape):
-        """Convert image shape to ZED resolution enum"""
-        sl = self.sl
-        height, width = img_shape[0], img_shape[1]
-        
-        # Common ZED resolutions
-        if width == 1280 and height == 720:
-            return sl.RESOLUTION.HD720
-        elif width == 1920 and height == 1080:
-            return sl.RESOLUTION.HD1080
-        elif width == 2208 and height == 1242:
-            return sl.RESOLUTION.HD2K
-        elif width == 672 and height == 376:
-            return sl.RESOLUTION.VGA
-        else:
-            # Default to HD720 if no exact match
-            print(f"[ZED Camera] Warning: Resolution {width}x{height} not exactly matched, using HD720")
-            return sl.RESOLUTION.HD720
-    
-    def _get_depth_data(self):
-        """Get depth data from ZED camera, in meters"""
-        sl = self.sl
-        # Retrieve depth image
-        self.zed.retrieve_measure(self.depth_mat, sl.MEASURE.DEPTH)
-
-        # unit of depth_mat is in init_parameters.coordinate_units
-        depth_data = self.depth_mat.get_data()
-
-        # TODO: +inf should be 1. -inf should be 0. nan should be ? not sure...
-        # TODO: nan should use interpolation to fill in the gaps (nearest neighbor interpolation?)
-        depth_data = np.nan_to_num(depth_data, nan=self.config.nan_depth_value, posinf=self.config.positive_inf_depth_value, neginf=self.config.negative_inf_depth_value)
-        return depth_data
-    
-    def _get_rgb_data(self):
-        """Get RGB data from ZED camera"""
-        sl = self.sl
-        self.zed.retrieve_image(self.rgb_mat_side_by_side, sl.VIEW.SIDE_BY_SIDE_BGR)
-        image_data = self.rgb_mat_side_by_side.get_data()
-        return image_data
-    
-    def capture(self):
-        """Capture rgb and depth data from ZED camera"""
-        sl = self.sl
-        if self.zed.grab(self.runtime_params) == sl.ERROR_CODE.SUCCESS:
-            depth_data = self._get_depth_data() if self.config.depth_mode != "NONE" else None
-            rgb_data = self._get_rgb_data()
-            return {"depth": depth_data, "rgb": rgb_data}
-        else:
-            print(f"[ZED Camera] Grab error: failed to grab frame")
-            return None, None
-    
-        
-    def release(self):
-        """Release ZED camera resources"""
-        if self.zed.is_opened():
-            self.zed.close()
-            print("[ZED Camera] Released")
-
-class ZedCamerasWrapper:
-    def __init__(self, config: ZedCamerasConfig):
-       
-        self.cameras = {name: ZEDCamera(config.terms[name]) for name in config.terms.keys()}
-        self.num_cameras = len(self.cameras)
-
-    def get_frames(self):
-        depth_data: dict[str, np.ndarray] = {}
-        rgb_data: dict[str, np.ndarray] = {}
-        for name, camera in self.cameras.items():
-            depth_data[name] = camera.capture()["depth"]
-            rgb_data[name] = camera.capture()["rgb"]
-        return {"depth": depth_data, "rgb": rgb_data}
+from holosoma.models.gum.infer import GUM
+from holosoma.sensors.zed import ZedCamerasConfig, ZedCamerasWrapper
+from holosoma.sensors.utils import _prepare_depth_for_visualization
 
 
 @dataclass(frozen=True)
@@ -218,29 +34,99 @@ class ImageSaverConfig:
 
 
 @dataclass(frozen=True)
+class ImageVisualizerConfig:
+    """Configuration for image visualization."""
+
+    near_clip: float = 0.1
+    """Near clipping plane for depth visualization."""
+
+    far_clip: float = 2.0
+    """Far clipping plane for depth visualization."""
+
+    scale: float = 1.0
+    """Uniform display scale factor applied to frames (0, 1]."""
+
+
+@dataclass(frozen=True)
+class GUMConfig:
+    """Configuration for GUM."""
+    
+    model_checkpoint: str = "one_stage/model.pt/0b8b6af968522da4813f691ab743d00f-106"
+    """Path to GUM model checkpoint (.pt file)."""
+
+    root_folder: str = "."
+    """Workspace/git root folder used to resolve relative GUM paths."""
+    
+    torch_ops_dir: str = ""
+    """Directory containing torch operations .so files. If empty, will try to find relative to infer.py."""
+
+    device: str = "cuda"
+    """Device to run GUM model on ("cuda" or "cpu")."""
+
+    #########################################################
+    # GUM Model Configuration
+    #########################################################
+    
+    depth_min: float = 0.2
+    """Minimum depth value in meters for GUM prediction."""
+    
+    depth_max: float = 10.0
+    """Maximum depth value in meters for GUM prediction."""
+
+    target_h: int = 480
+    """Target input height for each stereo image before GUM inference."""
+
+    target_w: int = 768
+    """Target input width for each stereo image (per-eye width) before GUM inference."""
+
+
+@dataclass(frozen=True)
 class ImageServerConfig:
     """Configuration for Image Server."""
 
     near_clip: float = 0.1
+
     far_clip: float = 2.0
 
     resized_height: int = 27
     resized_width: int = 48
 
-    gum: bool = False
-    """Enable GUM for depth prediction."""
+    enable_gum_depth_prediction: bool = False
+    """If True, run depth prediction with GUM; otherwise gum_depth is None. Options: True, False."""
+
+    enable_zed_depth_prediction: bool = True
+    """If True, use ZED depth stream; otherwise zed_depth is None. Options: True, False."""
+
+    depth_source: Literal["gum", "zed"] = "zed"
+    """Depth source to send to policy shared memory. Options: 'gum', 'zed'."""
+
+    gum_config: GUMConfig = GUMConfig()
+    """Configuration for GUM."""
 
     visualize_images: bool = False 
-    """Enable image visualization."""
+    """Enable image visualization. Options: True, False."""
+
+    image_visualizer_config: ImageVisualizerConfig = ImageVisualizerConfig()
+    """Configuration for image visualizer."""
 
     save_images: bool = True 
-    """Enable image saving."""
+    """Enable image saving. Options: True, False."""
 
     image_saver_config: ImageSaverConfig = ImageSaverConfig()
-    """Configuration for image saver. If None and save_images is True, uses default ImageSaverConfig."""
+    """Configuration for image saver. If None and save_images is True, uses default ImageSaverConfig. If save_images is False, this is ignored."""
 
     num_delay_frames: int = 0
     """Number of frames to delay before sending to shared memory. 0 = no delay, 1 = send previous frame, 2 = send frame from 2 steps ago, etc."""
+
+    def __post_init__(self):
+        if self.depth_source == "gum" and not self.enable_gum_depth_prediction:
+            raise ValueError(
+                "Invalid ImageServerConfig: depth_source='gum' requires enable_gum_depth_prediction=True."
+            )
+        if self.depth_source == "zed" and not self.enable_zed_depth_prediction:
+            raise ValueError(
+                "Invalid ImageServerConfig: depth_source='zed' requires enable_zed_depth_prediction=True."
+            )
 
 class TimeProfiler:
     """Profiler for tracking time statistics."""
@@ -259,6 +145,16 @@ class TimeProfiler:
         self.total_time += elapsed_ms
         self.min_time = min(self.min_time, elapsed_ms)
         self.max_time = max(self.max_time, elapsed_ms)
+
+    @contextmanager
+    def measure(self):
+        """Context manager for measuring and recording elapsed time."""
+        start_time = time.perf_counter()
+        try:
+            yield
+        finally:
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            self.record(elapsed_ms)
     
     def get_stats(self) -> dict[str, float]:
         """Get statistics about recorded timings."""
@@ -285,16 +181,20 @@ class TimeProfiler:
 class ImageSaver:
     """Handles image saving logic with background worker threads."""
     
-    def __init__(self, config: ImageSaverConfig):
+    def __init__(self, config: ImageSaverConfig, near_clip: float, far_clip: float):
         """Initialize ImageSaver.
         
         Args:
             config: Configuration for image saving
+            near_clip: Near clipping plane for depth visualization
+            far_clip: Far clipping plane for depth visualization
         """
         self.config = config
         self.image_root_dir = config.image_root_dir
         self.save_queue_maxsize = config.save_queue_maxsize
         self.save_workers = config.save_workers
+        self.near_clip = near_clip
+        self.far_clip = far_clip
         
         # Initialize save directory
         self._init_save_images_dir()
@@ -332,8 +232,29 @@ class ImageSaver:
             if not self.camera_dirs_created:
                 for cam_name in camera_names:
                     (self.save_images_dir / cam_name / "depth").mkdir(exist_ok=True, parents=True)
+                    (self.save_images_dir / cam_name / "depth_gum").mkdir(exist_ok=True, parents=True)
                     (self.save_images_dir / cam_name / "rgb").mkdir(exist_ok=True, parents=True)
+                    (self.save_images_dir / cam_name / "calibration").mkdir(exist_ok=True, parents=True)
                 self.camera_dirs_created = True
+
+    def save_calibration(self, calibration_by_camera: dict[str, dict[str, np.ndarray]]):
+        """Save camera intrinsics/extrinsics under each camera calibration directory."""
+        if not calibration_by_camera:
+            return
+
+        for cam_name, calibration in calibration_by_camera.items():
+            calibration_dir = self.save_images_dir / cam_name / "calibration"
+            calibration_dir.mkdir(exist_ok=True, parents=True)
+
+            intrinsics = calibration.get("intrinsics")
+            extrinsics = calibration.get("extrinsics")
+
+            if intrinsics is not None:
+                np.save(calibration_dir / "intrinsics.npy", intrinsics)
+            if extrinsics is not None:
+                np.save(calibration_dir / "extrinsics.npy", extrinsics)
+
+        print(f"[Image Saver] Saved calibration for cameras: {list(calibration_by_camera.keys())}")
     
     def _save_images_worker(self):
         """Background thread worker that saves images from the queue."""
@@ -346,17 +267,33 @@ class ImageSaver:
                 raw_images, step_count, timestamp = item
                 
                 # Pre-create directories if needed (only once)
-                camera_names = list(raw_images["depth"].keys())
+                camera_names = list(raw_images["rgb"].keys())
                 self._ensure_camera_dirs(camera_names)
                 
                 # Save images in parallel (each camera can be saved independently)
                 for cam_name in camera_names:
-                    depth_path = self.save_images_dir / cam_name / "depth" / f"{cam_name}_{step_count}_{timestamp}.png"
+                    zed_depth_path = self.save_images_dir / cam_name / "depth" / f"{cam_name}_{step_count}_{timestamp}.png"
+                    gum_depth_path = self.save_images_dir / cam_name / "depth_gum" / f"{cam_name}_{step_count}_{timestamp}.png"
                     rgb_path = self.save_images_dir / cam_name / "rgb" / f"{cam_name}_{step_count}_{timestamp}.png"
-                    
-                    # Save both depth and RGB as PNG (lossless, important for model prediction)
-                    cv2.imwrite(str(depth_path), raw_images["depth"][cam_name])
-                    cv2.imwrite(str(rgb_path), raw_images["rgb"][cam_name])
+
+                    if raw_images["depth"].get(cam_name) is not None:
+                        zed_depth_for_png = _prepare_depth_for_visualization(
+                            raw_images["depth"][cam_name],
+                            near_clip=self.near_clip,
+                            far_clip=self.far_clip,
+                        )
+                        cv2.imwrite(str(zed_depth_path), zed_depth_for_png)
+
+                    if raw_images["depth_gum"].get(cam_name) is not None:
+                        gum_depth_for_png = _prepare_depth_for_visualization(
+                            raw_images["depth_gum"][cam_name],
+                            near_clip=self.near_clip,
+                            far_clip=self.far_clip,
+                        )
+                        cv2.imwrite(str(gum_depth_path), gum_depth_for_png)
+
+                    if raw_images["rgb"].get(cam_name) is not None:
+                        cv2.imwrite(str(rgb_path), raw_images["rgb"][cam_name])
                 
                 self.save_queue.task_done()
             except Exception as e:
@@ -366,20 +303,19 @@ class ImageSaver:
         """Enqueue images for background saving. Blocks if queue is full to avoid dropping frames.
         
         Args:
-            raw_images: Dictionary with "depth" and "rgb" keys, each containing dict of camera_name -> image array
+            raw_images: Dictionary with "rgb", "depth", and "depth_gum" keys
             step_count: Step count for naming files
         """
-        t0 = time.perf_counter()
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-        # Copy images to avoid modification while in queue
-        images_copy = {
-            "depth": {k: v.copy() for k, v in raw_images["depth"].items()},
-            "rgb": {k: v.copy() for k, v in raw_images["rgb"].items()}
-        }
-        # Use blocking put to ensure no frames are dropped
-        self.save_queue.put((images_copy, step_count, timestamp))
-        elapsed_ms = (time.perf_counter() - t0) * 1000
-        self.profiler.record(elapsed_ms)
+        with self.profiler.measure():
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+            # Copy images to avoid modification while in queue
+            images_copy = {
+                "rgb": {k: (v.copy() if v is not None else None) for k, v in raw_images["rgb"].items()},
+                "depth": {k: (v.copy() if v is not None else None) for k, v in raw_images["depth"].items()},
+                "depth_gum": {k: (v.copy() if v is not None else None) for k, v in raw_images["depth_gum"].items()},
+            }
+            # Use blocking put to ensure no frames are dropped
+            self.save_queue.put((images_copy, step_count, timestamp))
     
     def get_stats(self) -> dict[str, float]:
         """Get statistics about image saving operations."""
@@ -401,15 +337,15 @@ class ImageSaver:
 class ImageVisualizer:
     """Handles image visualization logic."""
     
-    def __init__(self, near_clip: float, far_clip: float):
+    def __init__(self, config: ImageVisualizerConfig):
         """Initialize ImageVisualizer.
         
         Args:
-            near_clip: Near clipping plane for depth visualization
-            far_clip: Far clipping plane for depth visualization
+            config: Visualization window sizing configuration
         """
-        self.near_clip = near_clip
-        self.far_clip = far_clip
+        self.near_clip = config.near_clip
+        self.far_clip = config.far_clip
+        self.scale = config.scale
     
     def _display_frame(self, name: str, frame: np.ndarray) -> bool:
         """Display a frame in a window.
@@ -421,64 +357,110 @@ class ImageVisualizer:
         Returns:
             True if 'q' key was pressed, False otherwise
         """
+        if self.scale < 1.0:
+            h, w = frame.shape[:2]
+            frame = cv2.resize(
+                frame,
+                (max(1, int(w * self.scale)), max(1, int(h * self.scale))),
+                interpolation=cv2.INTER_CUBIC,
+            )
+
+        # window_name = f"Image Server Stream {name}"
+        # cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        # cv2.imshow(window_name, frame)
         cv2.imshow(f"Image Server Stream {name}", frame)
         return cv2.waitKey(1) & 0xFF == ord("q")
-    
-    def _prepare_depth_for_visualization(self, depth: np.ndarray) -> np.ndarray:
-        """Prepare depth frame for visualization by clipping and scaling.
-        
-        Args:
-            depth: Depth frame array
-            
-        Returns:
-            Depth frame scaled to [0, 255] as uint8
-        """
-        # clip and scale to [0, 1]
-        depth = np.clip(depth, self.near_clip, self.far_clip)
-        depth = (depth - self.near_clip) / (self.far_clip - self.near_clip)  # [0, 1]
 
-        # [0, 1] -> [0, 255]
-        return (depth * 255.0).astype(np.uint8)  # [0, 255] # uint8, for visualization
+    def _depth_or_placeholder(
+        self,
+        depth: np.ndarray | None,
+        height: int,
+        width: int,
+        camera_name: str,
+        source_name: str,
+    ) -> np.ndarray:
+        """Return depth visualization or a labeled placeholder when depth is unavailable."""
+        label = f"{camera_name}: {source_name}"
+        if depth is None:
+            vis = np.zeros((height, width), dtype=np.uint8)
+            label = f"{label} not predicted"
+        else:
+            vis = _prepare_depth_for_visualization(
+                depth,
+                near_clip=self.near_clip,
+                far_clip=self.far_clip,
+            )
+
+        cv2.putText(
+            vis,
+            label,
+            (10, min(height - 10, 40)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            255,
+            2,
+            cv2.LINE_AA,
+        )
+        return vis
     
-    def visualize(self, raw_image: dict[str, np.ndarray]):
+    def visualize(self, raw_image: dict):
         """Visualize depth and RGB images.
         
         Args:
-            raw_image: Dictionary with "depth" and "rgb" keys, each containing dict of camera_name -> image array
+            raw_image: Dictionary with "rgb", "depth", and "depth_gum" keys
         """
-        depth_for_vis = [self._prepare_depth_for_visualization(frame) for frame in raw_image["depth"].values()]
-        concatenated_depth = np.concatenate(depth_for_vis, axis=0)
+        camera_names = list(raw_image["rgb"].keys())
+        if not camera_names:
+            return
+
+        combined_depth_rows = []
+        for camera_name in camera_names:
+            rgb_frame = raw_image["rgb"][camera_name]
+            if rgb_frame is None:
+                continue
+            h, w = rgb_frame.shape[:2]
+
+            depth_vis = self._depth_or_placeholder(
+                raw_image["depth"].get(camera_name),
+                h,
+                w,
+                camera_name,
+                "zed",
+            )
+            gum_vis = self._depth_or_placeholder(
+                raw_image["depth_gum"].get(camera_name),
+                h,
+                w,
+                camera_name,
+                "gum",
+            )
+            
+            # Show zed and gum depth side-by-side in one depth window.
+            combined_depth_rows.append(np.concatenate([depth_vis, gum_vis], axis=1))
+
+        if not combined_depth_rows:
+            return
+
+        concatenated_depth = np.concatenate(combined_depth_rows, axis=0)
         self._display_frame("depth", concatenated_depth)
-        concatenated_rgb = np.concatenate(list(raw_image["rgb"].values()), axis=0)
+        concatenated_rgb = np.concatenate(
+            [raw_image["rgb"][name] for name in camera_names if raw_image["rgb"][name] is not None], axis=0
+        )
         self._display_frame("rgb", concatenated_rgb)
 
 
 class ImageServer:
     def __init__(self, camera_wrapper: list[MujocoRendererWrapper | ZedCamerasWrapper], cfg: ImageServerConfig, gum: None=None):
         self.cfg: ImageServerConfig = cfg
+
+        # Initialize camera wrapper
         self.camera_wrapper: ZedCamerasWrapper | MujocoRendererWrapper = camera_wrapper
+
+        # Initialize shared memory
         self._init_shared_memory()
 
-        if self.cfg.gum:
-            raise NotImplementedError("GUM is not implemented yet")
-            # optional:
-            # self.gum_profiler = TimeProfiler()
-        else:
-            self.gum = None
-        
-        # Non-functional components, for debugging and visualization
-        if self.cfg.save_images:
-            self.image_saver = ImageSaver(self.cfg.image_saver_config)
-        else:
-            self.image_saver = None
-        
-        if self.cfg.visualize_images:
-            self.image_visualizer = ImageVisualizer(
-                near_clip=self.cfg.near_clip,
-                far_clip=self.cfg.far_clip
-            )
-        else:
-            self.image_visualizer = None
+        # Initialize depth prediction models
+        self.gum = GUM(cfg=self.cfg.gum_config, dtype=torch.bfloat16) if self.cfg.enable_gum_depth_prediction else None
         
         # Initialize delay buffer for frame delay
         self.num_delay_frames = self.cfg.num_delay_frames
@@ -491,8 +473,46 @@ class ImageServer:
         else:
             self.delay_buffer = None
         
+        # Initialize profilers for capturing and depth prediction
         self.capture_profiler = TimeProfiler()
+        if self.gum:
+            self.gum_profiler = TimeProfiler()
         
+        # Initialize image saver and visualizer, for debugging and visualization
+        if self.cfg.save_images:
+            self.image_saver = ImageSaver(
+                self.cfg.image_saver_config,
+                near_clip=self.cfg.near_clip,
+                far_clip=self.cfg.far_clip,
+            )
+            self._save_camera_calibration()
+        else:
+            self.image_saver = None
+
+        if self.cfg.visualize_images:
+            self.image_visualizer = ImageVisualizer(
+                config=self.cfg.image_visualizer_config,
+            )
+        else:
+            self.image_visualizer = None
+
+    def _save_camera_calibration(self):
+        """Save camera calibration right after ImageSaver initialization."""
+
+        cameras = getattr(self.camera_wrapper, "cameras", None)
+
+        calibration_by_camera: dict[str, dict[str, np.ndarray]] = {}
+        for cam_name, camera in cameras.items():
+            calibration = getattr(camera, "calibration", None)
+            if calibration is None:
+                continue
+            calibration_by_camera[cam_name] = calibration
+
+        if not calibration_by_camera:
+            print("[Image Server] No camera calibration found to save.")
+            return
+
+        self.image_saver.save_calibration(calibration_by_camera)
     
     def _init_shared_memory(self):
         img_shm_name = "depth_img_shm"
@@ -542,28 +562,34 @@ class ImageServer:
         while True:
 
             # 0. grab frames from cameras
-            t0 = time.perf_counter()
-            raw_image = self.camera_wrapper.get_frames()
-            elapsed_ms = (time.perf_counter() - t0) * 1000
-            self.capture_profiler.record(elapsed_ms)
+            with self.capture_profiler.measure():
+                all_frames = self.camera_wrapper.get_frames()
 
-            # 1. get depth frames
-            if self.cfg.gum:
-                depth_frames = [self.gum.predict(x) for x in raw_image["rgb"].values()]
-            else:
-                depth_frames = list(raw_image["depth"].values())  
+            if self.cfg.enable_gum_depth_prediction:
+                with self.gum_profiler.measure():
+                    all_frames["depth_gum"] = {}
+                    # Curently, gum does not support batch inference. We feed one camera at a time.
+                    for camera_name in all_frames["rgb"].keys():
+                        gum_depth = self.gum.predict(
+                            side_by_side_image=all_frames["rgb"][camera_name],
+                            camera_intrinsics=all_frames["calibration"][camera_name]["intrinsics"],
+                            camera_extrinsics=all_frames["calibration"][camera_name]["extrinsics"],
+                        )
+                        all_frames["depth_gum"][camera_name] = gum_depth
 
+            
             # 2. Process data to be sent to policy;
-            depth_frames = [self._resize_clip_expand_transpose(frame) for frame in depth_frames]
+            depth_for_policy = all_frames["depth_gum"] if self.cfg.depth_source == "gum" else all_frames["depth"]
+            depth_for_policy = [self._resize_clip_expand_transpose(x) for x in depth_for_policy.values()]
              # Concatenate frames before channel dimension (axis=0)
             # [C, H, W] -> [N, C, H, W] N is the number of cameras; front camera is first, back camera is second
-            full_image = np.stack(depth_frames, axis=0)
+            full_depth_for_policy = np.stack(depth_for_policy, axis=0)
 
             # 2.5. Add to delay buffer and get delayed image
             if self.delay_buffer is not None:
                 # Note: When buffer is full (maxlen reached), deque automatically removes
                 # the oldest item (leftmost) to make room for the new frame
-                self.delay_buffer.append((step_count, full_image.copy()))
+                self.delay_buffer.append((step_count, full_depth_for_policy.copy()))
                 
                 # Wait until buffer is full before sending delayed frames
                 if len(self.delay_buffer) <= self.num_delay_frames:
@@ -579,8 +605,7 @@ class ImageServer:
                 # print delayed_step_count for debugging purposes
             else:
                 # No delay, use current frame
-                delayed_image = full_image
-                delayed_step_count = step_count
+                delayed_step_count, delayed_image = step_count, full_depth_for_policy
 
             # 3. copy to shared memory for policy
             try:
@@ -592,79 +617,40 @@ class ImageServer:
                 
             # 4. save and visualize images
             if self.cfg.save_images:
-                self.image_saver.save(raw_image, step_count)
+                self.image_saver.save(
+                    all_frames,
+                    step_count,
+                )
 
             if self.cfg.visualize_images:
-                self.image_visualizer.visualize(raw_image)
+                self.image_visualizer.visualize(
+                    all_frames,
+                )
 
             if step_count % 50 == 0:
                 print(f"[Image Server] Rate limiter stats: {rate_limiter.get_stats()}")
                 print(f"[Image Server] capture stats: {self.capture_profiler.get_stats()}")
-                # if self.cfg.save_images:
-                #     stats = self.image_saver.get_stats()
-                #     print(f"[Image Server] save_images stats: {stats}")
+                if self.cfg.enable_gum_depth_prediction:
+                    print(f"[Image Server] GUM prediction stats: {self.gum_profiler.get_stats()}")
 
             rate_limiter.sleep()
             step_count += 1
-        
     
-######################## temporary functions ########################
-
-
-
-def write_depth_video_from_frames(
-    frames_dir: str | Path,
-    output_path: str | Path,
-    fps: int = 10,
-) -> None:
-    """Create a depth video from concatenated_frames_*.png files."""
-    frames_dir = Path(frames_dir)
-    output_path = Path(output_path)
-    pattern = re.compile(r"concatenated_frames_(\d+)\.png$")
-
-    frame_paths: list[Path] = []
-    for path in frames_dir.iterdir():
-        if not path.is_file():
-            continue
-        match = pattern.match(path.name)
-        if match:
-            frame_paths.append(path)
-
-    if not frame_paths:
-        raise FileNotFoundError(f"No concatenated_frames_*.png found in {frames_dir}")
-
-    frame_paths.sort(key=lambda p: int(pattern.match(p.name).group(1)))
-
-    first_frame = cv2.imread(str(frame_paths[0]), cv2.IMREAD_UNCHANGED)
-    if first_frame is None:
-        raise RuntimeError(f"Failed to read frame: {frame_paths[0]}")
-
-    height, width = first_frame.shape[:2]
-    writer = cv2.VideoWriter(
-        str(output_path),
-        cv2.VideoWriter_fourcc(*"mp4v"),
-        fps,
-        (width, height),
-        isColor=(first_frame.ndim == 3),
-    )
-    if not writer.isOpened():
-        raise RuntimeError(f"Failed to open video writer at {output_path}")
-
-    for path in frame_paths:
-        frame = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-        if frame is None:
-            raise RuntimeError(f"Failed to read frame: {path}")
-        writer.write(frame)
-
-    writer.release()
-
-
 if __name__ == "__main__":
     # Parse command line arguments using tyro
     cfg = tyro.cli(ImageServerConfig)
     
+    # Set ZED depth mode based on config toggle.
+    depth_mode = "NEURAL" if cfg.enable_zed_depth_prediction else "NONE"
+    zed_cfg = ZedCamerasConfig(
+        terms={
+            name: replace(camera_cfg, depth_mode=depth_mode)
+            for name, camera_cfg in ZedCamerasConfig().terms.items()
+        }
+    )
+
     # Create image server with parsed config
-    image_server = ImageServer(ZedCamerasWrapper(ZedCamerasConfig()), cfg, None)
+    image_server = ImageServer(ZedCamerasWrapper(zed_cfg), cfg, None)
     thread = threading.Thread(target=image_server.send_process)
     thread.start()
     time.sleep(10)
