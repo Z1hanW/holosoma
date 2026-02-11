@@ -41,6 +41,8 @@ ROT = np.array(
 
 from libsmpl.smplpytorch.pytorch.smpl_layer import SMPL_Layer  # noqa: E402
 
+SMPL_JOINTS_22 = np.arange(22, dtype=np.int64)
+
 
 def _load_npz(path: Path) -> dict[str, object]:
     with np.load(path, allow_pickle=True) as data:
@@ -52,14 +54,16 @@ def _save_npz(path: Path, payload: dict[str, object]) -> None:
     np.savez(path, **payload)
 
 
-def _rotate_rotvec(rotvecs: np.ndarray) -> np.ndarray:
-    rotmats = Rotation.from_rotvec(rotvecs).as_matrix()
-    rotmats = ROT[None, :, :] @ rotmats
-    return Rotation.from_matrix(rotmats).as_rotvec().astype(rotvecs.dtype, copy=False)
-
-
-def _rotate_rotmat(rotmats: np.ndarray) -> np.ndarray:
-    return (ROT[None, :, :] @ rotmats).astype(rotmats.dtype, copy=False)
+def _decode_str(value: object | None, default: str) -> str:
+    if value is None:
+        return default
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return default
+        value = value.reshape(-1)[0]
+    if isinstance(value, (bytes, np.bytes_)):
+        return value.decode("utf-8")
+    return str(value)
 
 
 def _get_obj_name(seq_name: str) -> str:
@@ -81,49 +85,47 @@ def _load_centered_object_mesh(obj_name: str) -> trimesh.Trimesh:
     return mesh
 
 
-def _compute_min_z(
+def _run_smpl(
     smpl_poses: np.ndarray,
     smpl_betas: np.ndarray,
     smpl_trans: np.ndarray,
-    obj_rotmats: np.ndarray,
-    obj_trans: np.ndarray,
-    obj_name: str,
     gender: str,
-    *,
-    already_rotated: bool,
-) -> float:
+) -> tuple[np.ndarray, np.ndarray]:
+    hands = smpl_poses.shape[1] == 156
+    gender_val = gender.lower()
+    if hands:
+        if gender_val not in ("male", "female"):
+            gender_val = "male"
+    else:
+        if gender_val not in ("male", "female", "neutral"):
+            gender_val = "neutral"
     smpl = SMPL_Layer(
         center_idx=0,
-        gender=gender,
+        gender=gender_val,
         num_betas=int(smpl_betas.shape[1]),
         model_root=str(SMPL_MODEL_ROOT),
-        hands=True,
+        hands=hands,
     )
     smpl = smpl.to(torch.device("cpu"))
 
     with torch.no_grad():
-        verts, _, _, _ = smpl(
+        verts, joints, _, _ = smpl(
             torch.from_numpy(smpl_poses),
             th_betas=torch.from_numpy(smpl_betas),
             th_trans=torch.from_numpy(smpl_trans),
         )
-    human_verts = verts.detach().cpu().numpy()
-
-    obj_mesh = _load_centered_object_mesh(obj_name)
-    base = obj_mesh.vertices.astype(np.float32)
-    obj_verts = (base[None, :, :] @ obj_rotmats.transpose(0, 2, 1)) + obj_trans[:, None, :]
-
-    if not already_rotated:
-        human_verts = human_verts @ ROT.T
-        obj_verts = obj_verts @ ROT.T
-
-    min_z = float(
-        min(
-            np.min(human_verts[..., 2]),
-            np.min(obj_verts[..., 2]),
-        )
+    return (
+        verts.detach().cpu().numpy().astype(np.float32, copy=False),
+        joints.detach().cpu().numpy().astype(np.float32, copy=False),
     )
-    return min_z
+
+
+def _repeat_to_length(array: np.ndarray, length: int, name: str) -> np.ndarray:
+    if array.shape[0] == length:
+        return array
+    if array.shape[0] == 1 and length > 1:
+        return np.repeat(array, length, axis=0)
+    raise ValueError(f"{name} length {array.shape[0]} does not match poses length {length}")
 
 
 def _process_sequence(seq_dir: Path) -> None:
@@ -147,11 +149,10 @@ def _process_sequence(seq_dir: Path) -> None:
     poses = smpl.get("poses")
     trans = smpl.get("trans")
     betas = smpl.get("betas")
-    gender = str(smpl.get("gender", "male"))
     if poses is None or trans is None:
         raise ValueError(f"Missing poses/trans in {smpl_path}")
-    poses = np.asarray(poses)
-    trans = np.asarray(trans)
+    poses = np.asarray(poses, dtype=np.float32)
+    trans = np.asarray(trans, dtype=np.float32)
     betas = np.asarray(betas) if betas is not None else np.zeros((poses.shape[0], 10), dtype=np.float32)
     if poses.ndim != 2 or poses.shape[1] not in (72, 156):
         raise ValueError(f"Unsupported poses shape {poses.shape} in {smpl_path}")
@@ -161,12 +162,17 @@ def _process_sequence(seq_dir: Path) -> None:
     if betas.shape[0] == 1 and poses.shape[0] > 1:
         betas = np.repeat(betas, poses.shape[0], axis=0)
 
+    num_frames = poses.shape[0]
+
     obj_trans = obj.get("trans")
     if obj_trans is None:
         obj_trans = obj.get("obj_trans")
     if obj_trans is None:
         raise ValueError(f"Missing object translation in {obj_path}")
-    obj_trans = np.asarray(obj_trans)
+    obj_trans = np.asarray(obj_trans, dtype=np.float32)
+    if obj_trans.ndim == 1:
+        obj_trans = obj_trans[None, :]
+    obj_trans = _repeat_to_length(obj_trans, num_frames, "obj_trans")
 
     obj_rotmats = None
     if "angles" in obj:
@@ -194,35 +200,43 @@ def _process_sequence(seq_dir: Path) -> None:
     else:
         raise ValueError(f"No object rotation found in {obj_path}")
 
+    if obj_rotmats.ndim == 2:
+        obj_rotmats = obj_rotmats[None, :, :]
+    obj_rotmats = _repeat_to_length(obj_rotmats, num_frames, "obj_rotmats")
+
+    gender = _decode_str(smpl.get("gender", "male"), "male")
+    human_verts, human_joints = _run_smpl(
+        poses.astype(np.float32),
+        betas.astype(np.float32),
+        trans.astype(np.float32),
+        gender,
+    )
+    human_verts_rot = human_verts @ ROT.T
+    human_joints_rot = human_joints @ ROT.T
+    if human_joints_rot.shape[1] < SMPL_JOINTS_22.size:
+        raise ValueError(f"SMPL joints shape {human_joints_rot.shape} has fewer than 22 joints")
+    human_joints_22 = human_joints_rot[:, SMPL_JOINTS_22, :]
+
     obj_rotmats_rot = ROT[None, :, :] @ obj_rotmats
     obj_trans_rot = (obj_trans @ ROT.T).astype(np.float32, copy=False)
 
-    global_orient = poses[:, :3]
-    global_orient = _rotate_rotvec(global_orient)
-    poses_rot = poses.copy()
-    poses_rot[:, :3] = global_orient
+    obj_mesh = _load_centered_object_mesh(obj_name)
+    base = obj_mesh.vertices.astype(np.float32)
+    obj_verts = (base[None, :, :] @ obj_rotmats_rot.transpose(0, 2, 1)) + obj_trans_rot[:, None, :]
 
-    trans_rot = (trans @ ROT.T).astype(np.float32, copy=False)
-
-    obj_name = _get_obj_name(seq_dir.name)
-    min_z = _compute_min_z(
-        poses_rot.astype(np.float32),
-        betas.astype(np.float32),
-        trans_rot.astype(np.float32),
-        obj_rotmats_rot.astype(np.float32),
-        obj_trans_rot.astype(np.float32),
-        obj_name,
-        gender,
-        already_rotated=True,
+    min_z = float(
+        min(
+            np.min(human_verts_rot[..., 2]),
+            np.min(obj_verts[..., 2]),
+        )
     )
 
-    trans_rot = trans_rot.copy()
+    human_joints_22 = human_joints_22.copy()
     obj_trans_rot = obj_trans_rot.copy()
-    trans_rot[:, 2] -= min_z
+    human_joints_22[:, :, 2] -= min_z
     obj_trans_rot[:, 2] -= min_z
 
-    smpl["poses"] = poses_rot
-    smpl["trans"] = trans_rot.astype(np.float32, copy=False)
+    smpl["global_joint_positions"] = human_joints_22.astype(np.float32, copy=False)
 
     if "angles" in obj:
         obj["angles"] = Rotation.from_matrix(obj_rotmats_rot).as_rotvec().astype(np.float32, copy=False)

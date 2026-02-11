@@ -151,6 +151,41 @@ def _extract_smpl_params(data: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray, 
     return poses.astype(np.float32), betas, trans
 
 
+def _normalize_joint_positions(joints: np.ndarray) -> np.ndarray:
+    joints = _as_numpy(joints)
+    if joints.ndim == 2 and joints.shape[1] % 3 == 0:
+        joint_count = joints.shape[1] // 3
+        joints = joints.reshape(joints.shape[0], joint_count, 3)
+    elif joints.ndim == 2 and joints.shape[0] == 3:
+        joints = joints.T[None, :, :]
+    elif joints.ndim == 2 and joints.shape[1] == 3:
+        joints = joints[None, :, :]
+    elif joints.ndim == 3 and joints.shape[-1] == 3:
+        pass
+    elif joints.ndim == 3 and joints.shape[1] == 3:
+        joints = np.transpose(joints, (0, 2, 1))
+    else:
+        raise ValueError(f"Unsupported joints shape: {joints.shape}")
+    return joints.astype(np.float32)
+
+
+def _extract_joint_positions(data: Dict[str, Any]) -> np.ndarray | None:
+    joints = _extract_key(
+        data,
+        (
+            "global_joint_positions",
+            "joint_positions",
+            "joints",
+            "j3d",
+            "J",
+            "J3D",
+        ),
+    )
+    if joints is None:
+        return None
+    return _normalize_joint_positions(_as_numpy(joints))
+
+
 def _extract_object_params(data: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray]:
     obj_rot = _extract_key(data, ("obj_rot", "obj_rots", "object_rot", "object_rots"))
     obj_trans = _extract_key(data, ("obj_trans", "obj_transl", "object_trans", "object_transl"))
@@ -210,6 +245,55 @@ def _load_object_mesh(
     center = np.mean(mesh.vertices, axis=0)
     mesh.vertices = mesh.vertices - center
     return mesh
+
+
+def _make_body_part_colors(joint_count: int) -> np.ndarray:
+    if joint_count <= 0:
+        return np.zeros((0, 3), dtype=np.uint8)
+    colors = np.zeros((joint_count, 3), dtype=np.uint8)
+
+    torso_color = np.array([255, 215, 0], dtype=np.uint8)
+    left_arm_color = np.array([80, 160, 255], dtype=np.uint8)
+    right_arm_color = np.array([255, 90, 90], dtype=np.uint8)
+    left_leg_color = np.array([80, 200, 120], dtype=np.uint8)
+    right_leg_color = np.array([170, 100, 255], dtype=np.uint8)
+    default_color = np.array([200, 200, 200], dtype=np.uint8)
+
+    if joint_count >= 22:
+        torso = [0, 3, 6, 9, 12, 15]
+        left_leg = [1, 4, 7, 10]
+        right_leg = [2, 5, 8, 11]
+        left_arm = [13, 16, 18, 20]
+        right_arm = [14, 17, 19, 21]
+        if joint_count >= 24:
+            left_arm.append(22)
+            right_arm.append(23)
+        for idx in torso:
+            if idx < joint_count:
+                colors[idx] = torso_color
+        for idx in left_leg:
+            if idx < joint_count:
+                colors[idx] = left_leg_color
+        for idx in right_leg:
+            if idx < joint_count:
+                colors[idx] = right_leg_color
+        for idx in left_arm:
+            if idx < joint_count:
+                colors[idx] = left_arm_color
+        for idx in right_arm:
+            if idx < joint_count:
+                colors[idx] = right_arm_color
+        for idx in range(joint_count):
+            if not colors[idx].any():
+                colors[idx] = default_color
+        return colors
+
+    for idx in range(joint_count):
+        hue = idx / max(1, joint_count - 1)
+        colors[idx] = np.array(
+            [int(255 * (1 - hue)), int(128 + 127 * hue), int(255 * hue)], dtype=np.uint8
+        )
+    return colors
 
 
 def _collect_npz_paths(path: Path, recursive: bool) -> Tuple[list[str], Dict[str, Path]]:
@@ -330,8 +414,8 @@ def _safe_set_prop(handle: Any, name: str, value: Any) -> None:
 
 def _build_sequence(
     data: Dict[str, Any],
-    objects_root: Path,
-    smpl_model_root: Path,
+    objects_root: Path | None,
+    smpl_model_root: Path | None,
     override_obj_name: str | None,
     override_mesh: Path | None,
     gender_override: str | None,
@@ -341,8 +425,14 @@ def _build_sequence(
     *,
     use_simplified_mesh: bool,
 ) -> Dict[str, Any]:
-    poses, betas, trans = _extract_smpl_params(data)
-    obj_rot, obj_trans = _extract_object_params(data)
+    joints = _extract_joint_positions(data)
+    obj_rot = None
+    obj_trans = None
+    try:
+        obj_rot, obj_trans = _extract_object_params(data)
+    except Exception:
+        obj_rot = None
+        obj_trans = None
 
     gender = _decode_scalar(_extract_key(data, ("gender",))) or gender_override or "male"
     gender = gender.lower()
@@ -369,14 +459,25 @@ def _build_sequence(
     if obj_name is None:
         raise ValueError("Object name not found in annotation file. Pass --object-name to override.")
 
-    mesh = _load_object_mesh(objects_root, obj_name, override_mesh, use_simplified=use_simplified_mesh)
-
     frame_times = _decode_frame_times(_extract_key(data, ("frame_times", "frames", "frame_ids")))
 
-    num_frames = poses.shape[0]
-    if betas.shape[0] == 1 and num_frames > 1:
-        betas = np.repeat(betas, num_frames, axis=0)
-    num_frames = min(num_frames, betas.shape[0], trans.shape[0], obj_rot.shape[0], obj_trans.shape[0])
+    if joints is None:
+        if smpl_model_root is None:
+            raise FileNotFoundError(
+                "SMPL model root not found. Pass --smpl-model-root or set SMPL_MODEL_PATH/SMPLH_MODEL_PATH."
+            )
+        poses, betas, trans = _extract_smpl_params(data)
+        num_frames = poses.shape[0]
+        if betas.shape[0] == 1 and num_frames > 1:
+            betas = np.repeat(betas, num_frames, axis=0)
+        if obj_rot is not None and obj_trans is not None:
+            num_frames = min(num_frames, betas.shape[0], trans.shape[0], obj_rot.shape[0], obj_trans.shape[0])
+        else:
+            num_frames = min(num_frames, betas.shape[0], trans.shape[0])
+    else:
+        num_frames = joints.shape[0]
+        if obj_rot is not None and obj_trans is not None:
+            num_frames = min(num_frames, obj_rot.shape[0], obj_trans.shape[0])
     if frame_times is not None:
         num_frames = min(num_frames, len(frame_times))
 
@@ -387,42 +488,43 @@ def _build_sequence(
         stride = 1
 
     idx = np.arange(0, num_frames, stride)
-    poses = poses[idx]
-    betas = betas[idx]
-    trans = trans[idx]
-    obj_rot = obj_rot[idx]
-    obj_trans = obj_trans[idx]
+    if joints is None:
+        poses = poses[idx]
+        betas = betas[idx]
+        trans = trans[idx]
+    else:
+        joints = joints[idx]
+    if obj_rot is not None and obj_trans is not None:
+        obj_rot = obj_rot[idx]
+        obj_trans = obj_trans[idx]
     if frame_times is not None:
         frame_times = [frame_times[i] for i in idx]
 
-    device = _resolve_device(device_name)
-    import torch
+    if joints is None:
+        device = _resolve_device(device_name)
+        import torch
 
-    smpl = SMPL_Layer(center_idx=0, gender=gender, num_betas=int(betas.shape[1]), model_root=str(smpl_model_root), hands=True)
-    smpl = smpl.to(device)
-
-    with torch.no_grad():
-        verts, _, _, _ = smpl(
-            torch.from_numpy(poses).to(device=device),
-            th_betas=torch.from_numpy(betas).to(device=device),
-            th_trans=torch.from_numpy(trans).to(device=device),
+        smpl = SMPL_Layer(
+            center_idx=0,
+            gender=gender,
+            num_betas=int(betas.shape[1]),
+            model_root=str(smpl_model_root),
+            hands=True,
         )
-    human_verts = verts.detach().cpu().numpy().astype(np.float32)
-    human_faces = smpl.th_faces.detach().cpu().numpy().astype(np.int32)
+        smpl = smpl.to(device)
 
-    obj_faces = mesh.faces.astype(np.int32)
-    base_verts = mesh.vertices.astype(np.float32)
-    obj_verts = (base_verts[None, :, :] @ obj_rot.transpose(0, 2, 1)) + obj_trans[:, None, :]
+        with torch.no_grad():
+            _, smpl_joints, _, _ = smpl(
+                torch.from_numpy(poses).to(device=device),
+                th_betas=torch.from_numpy(betas).to(device=device),
+                th_trans=torch.from_numpy(trans).to(device=device),
+            )
+        joints = smpl_joints.detach().cpu().numpy().astype(np.float32)
 
     return {
-        "human_verts": human_verts,
-        "human_faces": human_faces,
-        "obj_verts": obj_verts.astype(np.float32),
-        "obj_faces": obj_faces,
-        "obj_rot": obj_rot,
-        "obj_trans": obj_trans,
+        "joints": joints.astype(np.float32),
         "frame_times": frame_times,
-        "n_frames": int(human_verts.shape[0]),
+        "n_frames": int(joints.shape[0]),
         "gender": gender,
         "obj_name": obj_name,
     }
@@ -465,9 +567,9 @@ def main() -> None:
     elif args.objects_root:
         objects_root = Path(args.objects_root).expanduser().resolve()
     else:
-        objects_root = Path("objects").resolve()
-    if not objects_root.exists():
-        raise FileNotFoundError(f"Objects root not found: {objects_root}")
+        objects_root = None
+    if objects_root is not None and not objects_root.exists():
+        objects_root = None
 
     if args.smpl_model_root:
         smpl_model_root = Path(args.smpl_model_root).expanduser().resolve()
@@ -478,11 +580,9 @@ def main() -> None:
             or os.environ.get("SMPLX_MODEL_PATH")
         )
         smpl_model_root = Path(env_path).expanduser().resolve() if env_path else None
-    if smpl_model_root is None or not smpl_model_root.exists():
-        raise FileNotFoundError(
-            "SMPL model root not found. Pass --smpl-model-root or set SMPL_MODEL_PATH/SMPLH_MODEL_PATH."
-        )
-    if smpl_model_root.is_file():
+    if smpl_model_root is not None and not smpl_model_root.exists():
+        smpl_model_root = None
+    if smpl_model_root is not None and smpl_model_root.is_file():
         smpl_model_root = smpl_model_root.parent
 
     override_mesh = Path(args.object_mesh).expanduser().resolve() if args.object_mesh else None
@@ -518,21 +618,14 @@ def main() -> None:
     if not args.no_grid:
         server.scene.add_grid("/grid", width=8, height=8, position=(0.0, 0.0, 0.0))
 
-    human_handle = server.scene.add_mesh_simple(
-        "/human",
-        vertices=state["human_verts"][0],
-        faces=state["human_faces"],
-        color=(255, 215, 0),
-        flat_shading=False,
+    joint_colors = _make_body_part_colors(int(state["joints"].shape[1]))
+    joint_handle = server.scene.add_point_cloud(
+        "/joints",
+        points=state["joints"][0],
+        colors=joint_colors,
+        point_size=0.035,
+        point_shape="circle",
     )
-    object_handle = server.scene.add_mesh_simple(
-        "/object",
-        vertices=state["obj_verts"][0],
-        faces=state["obj_faces"],
-        color=(120, 180, 220),
-        flat_shading=False,
-    )
-    object_frame = server.scene.add_frame("/object_frame", show_axes=args.show_object_frame)
 
     with server.gui.add_folder("Sequence"):
         seq_dropdown = server.gui.add_dropdown("Sequence", options=labels, initial_value=active_label)
@@ -550,9 +643,7 @@ def main() -> None:
         loop_cb = server.gui.add_checkbox("Loop", initial_value=args.loop)
 
     with server.gui.add_folder("Display"):
-        show_human_cb = server.gui.add_checkbox("Show human", initial_value=True)
-        show_object_cb = server.gui.add_checkbox("Show object", initial_value=True)
-        show_obj_frame_cb = server.gui.add_checkbox("Show object frame", initial_value=args.show_object_frame)
+        show_joints_cb = server.gui.add_checkbox("Show joints", initial_value=True)
 
     info_md = server.gui.add_markdown("")
 
@@ -575,28 +666,8 @@ def main() -> None:
     def _apply_frame(frame_idx: int) -> None:
         frame_idx = int(np.clip(frame_idx, 0, state["n_frames"] - 1))
         with server.atomic():
-            _safe_set_prop(human_handle, "vertices", state["human_verts"][frame_idx])
-            _safe_set_prop(object_handle, "vertices", state["obj_verts"][frame_idx])
-            _safe_set_prop(human_handle, "visible", bool(show_human_cb.value))
-            _safe_set_prop(object_handle, "visible", bool(show_object_cb.value))
-            _safe_set_prop(object_frame, "visible", bool(show_obj_frame_cb.value))
-        if show_obj_frame_cb.value:
-            try:
-                from scipy.spatial.transform import Rotation
-
-                rot = Rotation.from_matrix(state["obj_rot"][frame_idx]).as_quat()
-                _safe_set_prop(
-                    object_frame,
-                    "wxyz",
-                    (float(rot[3]), float(rot[0]), float(rot[1]), float(rot[2])),
-                )
-                _safe_set_prop(
-                    object_frame,
-                    "position",
-                    tuple(float(x) for x in state["obj_trans"][frame_idx]),
-                )
-            except Exception:
-                pass
+            _safe_set_prop(joint_handle, "points", state["joints"][frame_idx])
+            _safe_set_prop(joint_handle, "visible", bool(show_joints_cb.value))
         _update_info(frame_idx)
 
     @frame_slider.on_update
@@ -614,10 +685,9 @@ def main() -> None:
         nonlocal state
         label = str(seq_dropdown.value)
         state = _load_label(label)
-        _safe_set_prop(human_handle, "faces", state["human_faces"])
-        _safe_set_prop(human_handle, "vertices", state["human_verts"][0])
-        _safe_set_prop(object_handle, "faces", state["obj_faces"])
-        _safe_set_prop(object_handle, "vertices", state["obj_verts"][0])
+        new_colors = _make_body_part_colors(int(state["joints"].shape[1]))
+        _safe_set_prop(joint_handle, "colors", new_colors)
+        _safe_set_prop(joint_handle, "points", state["joints"][0])
         updating_slider["flag"] = True
         frame_slider.max = max(0, int(state["n_frames"]) - 1)
         frame_slider.value = 0
