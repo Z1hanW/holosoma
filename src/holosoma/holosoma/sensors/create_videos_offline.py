@@ -40,9 +40,9 @@ def _add_tile_label(frame: np.ndarray, label: str) -> np.ndarray:
     """Overlay tile label text with a filled background strip."""
     labeled = frame.copy()
     frame_h, frame_w = labeled.shape[:2]
-    bar_height = max(40, int(frame_h * 0.07))
-    font_scale = max(0.85, frame_h / 900.0)
-    thickness = max(2, int(frame_h / 360))
+    bar_height = max(30, int(frame_h * 0.055))
+    font_scale = max(0.6, frame_h / 1300.0)
+    thickness = max(1, int(frame_h / 520))
     x_pad = max(10, int(frame_w * 0.01))
 
     (_text_w, text_h), baseline = cv2.getTextSize(
@@ -67,16 +67,34 @@ def _add_tile_label(frame: np.ndarray, label: str) -> np.ndarray:
     return labeled
 
 
-def _resize_to_tile(frame: np.ndarray, tile_size: tuple[int, int]) -> np.ndarray:
-    """Resize frame to (tile_w, tile_h) and convert to BGR."""
-    tile_w, tile_h = tile_size
+def _ensure_bgr(frame: np.ndarray) -> np.ndarray:
+    """Convert grayscale/single-channel frame to BGR."""
     if frame.ndim == 2:
-        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
     elif frame.ndim == 3 and frame.shape[2] == 1:
-        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-    if frame.shape[0] != tile_h or frame.shape[1] != tile_w:
-        frame = cv2.resize(frame, (tile_w, tile_h), interpolation=cv2.INTER_AREA)
+        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
     return frame
+
+
+def _create_missing_tile(
+    tile_w: int,
+    tile_h: int,
+    camera_name: str,
+    modality: str,
+) -> np.ndarray:
+    """Create a visible placeholder tile for a missing modality frame."""
+    tile = np.zeros((tile_h, tile_w, 3), dtype=np.uint8)
+    cv2.putText(
+        tile,
+        "MISSING",
+        (max(10, tile_w // 12), max(40, tile_h // 2)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        max(0.55, tile_h / 1100.0),
+        (0, 0, 255),
+        max(1, tile_h // 500),
+        cv2.LINE_AA,
+    )
+    return _add_tile_label(tile, f"{camera_name}_{modality}")
 
 
 def write_combined_video_for_session(
@@ -90,7 +108,8 @@ def write_combined_video_for_session(
 
     Layout per frame:
       - one row per camera
-      - each row is [side_by_side_cameras, depth, depth_gum]
+      - each row is [side_by_side_cameras, depth?, depth_gum?]
+      - optional modalities are included only if found in at least one camera
     """
     session_dir = Path(session_dir)
     if not session_dir.exists():
@@ -100,11 +119,16 @@ def write_combined_video_for_session(
     ordered_camera_names = _get_ordered_camera_names(camera_names)
 
     camera_modalities: dict[tuple[str, str], dict[int, Path]] = {}
+    optional_modalities = ("depth", "depth_gum")
+    available_optional_modalities: set[str] = set()
+
     for camera_name in ordered_camera_names:
-        for modality in ("rgb", "depth", "depth_gum"):
+        for modality in ("rgb", *optional_modalities):
             modality_dir = session_dir / camera_name / modality
             if not modality_dir.exists():
-                raise FileNotFoundError(f"Missing modality directory: {modality_dir}")
+                if modality == "rgb":
+                    raise FileNotFoundError(f"Missing required modality directory: {modality_dir}")
+                continue
             indexed_paths: dict[int, Path] = {}
             for frame_path in modality_dir.iterdir():
                 if not frame_path.is_file() or frame_path.suffix.lower() != ".png":
@@ -113,15 +137,21 @@ def write_combined_video_for_session(
                 if step is not None:
                     indexed_paths[step] = frame_path
             if not indexed_paths:
-                raise FileNotFoundError(f"No frames found in {modality_dir}")
+                if modality == "rgb":
+                    raise FileNotFoundError(f"No frames found in required modality: {modality_dir}")
+                continue
             camera_modalities[(camera_name, modality)] = indexed_paths
+            if modality in optional_modalities:
+                available_optional_modalities.add(modality)
+
+    ordered_modalities = ["rgb"] + [
+        modality for modality in optional_modalities if modality in available_optional_modalities
+    ]
 
     first_camera = ordered_camera_names[0]
     common_steps = set(camera_modalities[(first_camera, "rgb")].keys())
     for camera_name in ordered_camera_names:
         common_steps &= set(camera_modalities[(camera_name, "rgb")].keys())
-        common_steps &= set(camera_modalities[(camera_name, "depth")].keys())
-        common_steps &= set(camera_modalities[(camera_name, "depth_gum")].keys())
     ordered_steps = sorted(common_steps)
     if not ordered_steps:
         raise RuntimeError(f"No aligned frame steps found in session {session_dir}")
@@ -130,8 +160,30 @@ def write_combined_video_for_session(
     first_rgb = cv2.imread(str(first_rgb_path), cv2.IMREAD_COLOR)
     if first_rgb is None:
         raise RuntimeError(f"Failed to read RGB frame: {first_rgb_path}")
-    tile_h, tile_w = first_rgb.shape[:2]
-    tile_size = (tile_w, tile_h)
+    row_h, _ = first_rgb.shape[:2]
+
+    modality_widths: dict[str, int] = {"rgb": max(1, first_rgb.shape[1])}
+    for modality in ordered_modalities:
+        if modality == "rgb":
+            continue
+        sample_width: int | None = None
+        for camera_name in ordered_camera_names:
+            modality_steps = camera_modalities.get((camera_name, modality))
+            if not modality_steps:
+                continue
+            sample_path = next(iter(modality_steps.values()))
+            sample_frame = cv2.imread(str(sample_path), cv2.IMREAD_UNCHANGED)
+            if sample_frame is None:
+                continue
+            if sample_frame.ndim == 3:
+                sample_frame = sample_frame[..., 0]
+            if sample_frame.shape[0] != row_h:
+                raise RuntimeError(
+                    f"Expected {modality} height {row_h}, got {sample_frame.shape[0]} at {sample_path}"
+                )
+            sample_width = int(sample_frame.shape[1])
+            break
+        modality_widths[modality] = sample_width if sample_width is not None else row_h
 
     if output_path is None:
         output_path = session_dir / "combined.mp4"
@@ -142,7 +194,7 @@ def write_combined_video_for_session(
         str(output_path),
         cv2.VideoWriter_fourcc(*"mp4v"),
         fps,
-        (tile_w * 3, tile_h * len(ordered_camera_names)),
+        (sum(modality_widths[modality] for modality in ordered_modalities), row_h * len(ordered_camera_names)),
         isColor=True,
     )
     if not writer.isOpened():
@@ -152,32 +204,61 @@ def write_combined_video_for_session(
         row_tiles = []
         for camera_name in ordered_camera_names:
             rgb_path = camera_modalities[(camera_name, "rgb")][step]
-            depth_path = camera_modalities[(camera_name, "depth")][step]
-            depth_gum_path = camera_modalities[(camera_name, "depth_gum")][step]
 
             rgb = cv2.imread(str(rgb_path), cv2.IMREAD_COLOR)
             if rgb is None:
                 raise RuntimeError(f"Failed to read RGB frame: {rgb_path}")
-            rgb = _resize_to_tile(rgb, tile_size)
+            if rgb.shape[0] != row_h:
+                raise RuntimeError(f"Expected RGB height {row_h}, got {rgb.shape[0]} at {rgb_path}")
+            if rgb.shape[1] != modality_widths["rgb"]:
+                raise RuntimeError(
+                    f"Expected RGB width {modality_widths['rgb']}, got {rgb.shape[1]} at {rgb_path}"
+                )
             rgb = _add_tile_label(rgb, f"{camera_name}_side_by_side_cameras")
 
-            depth_raw = cv2.imread(str(depth_path), cv2.IMREAD_UNCHANGED)
-            if depth_raw is None:
-                raise RuntimeError(f"Failed to read depth frame: {depth_path}")
-            if depth_raw.ndim == 3:
-                depth_raw = depth_raw[..., 0]
-            depth_vis = _resize_to_tile(depth_raw, tile_size)
-            depth_vis = _add_tile_label(depth_vis, f"{camera_name}_depth")
+            modality_tiles = [rgb]
+            for modality in ordered_modalities:
+                if modality == "rgb":
+                    continue
+                modality_steps = camera_modalities.get((camera_name, modality))
+                modality_path = None if modality_steps is None else modality_steps.get(step)
+                if modality_path is None:
+                    modality_tiles.append(
+                        _create_missing_tile(
+                            tile_w=modality_widths[modality],
+                            tile_h=row_h,
+                            camera_name=camera_name,
+                            modality=modality,
+                        )
+                    )
+                    continue
 
-            depth_gum_raw = cv2.imread(str(depth_gum_path), cv2.IMREAD_UNCHANGED)
-            if depth_gum_raw is None:
-                raise RuntimeError(f"Failed to read depth_gum frame: {depth_gum_path}")
-            if depth_gum_raw.ndim == 3:
-                depth_gum_raw = depth_gum_raw[..., 0]
-            depth_gum_vis = _resize_to_tile(depth_gum_raw, tile_size)
-            depth_gum_vis = _add_tile_label(depth_gum_vis, f"{camera_name}_depth_gum")
+                modality_raw = cv2.imread(str(modality_path), cv2.IMREAD_UNCHANGED)
+                if modality_raw is None:
+                    modality_tiles.append(
+                        _create_missing_tile(
+                            tile_w=modality_widths[modality],
+                            tile_h=row_h,
+                            camera_name=camera_name,
+                            modality=modality,
+                        )
+                    )
+                    continue
+                if modality_raw.ndim == 3:
+                    modality_raw = modality_raw[..., 0]
+                if modality_raw.shape[0] != row_h:
+                    raise RuntimeError(
+                        f"Expected {modality} height {row_h}, got {modality_raw.shape[0]} at {modality_path}"
+                    )
+                if modality_raw.shape[1] != modality_widths[modality]:
+                    raise RuntimeError(
+                        f"Expected {modality} width {modality_widths[modality]}, got {modality_raw.shape[1]} at {modality_path}"
+                    )
+                modality_vis = _ensure_bgr(modality_raw)
+                modality_vis = _add_tile_label(modality_vis, f"{camera_name}_{modality}")
+                modality_tiles.append(modality_vis)
 
-            row_tiles.append(cv2.hconcat([rgb, depth_vis, depth_gum_vis]))
+            row_tiles.append(cv2.hconcat(modality_tiles))
 
         frame_grid = row_tiles[0] if len(row_tiles) == 1 else cv2.vconcat(row_tiles)
         writer.write(frame_grid)

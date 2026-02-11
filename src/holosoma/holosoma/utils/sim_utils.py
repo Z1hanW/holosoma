@@ -33,7 +33,6 @@ from holosoma.utils.simulator_config import SimulatorType, get_simulator_type, s
 from holosoma.utils.torch_utils import to_torch
 
 from holosoma.simulator.mujoco.mujoco import MujocoRendererWrapper
-from holosoma.sensors.image_server import ImageServerConfig
 
 def setup_simulator_imports(config: ExperimentConfig | RunSimConfig) -> None:
     """Setup simulator-specific imports without side effects.
@@ -443,7 +442,7 @@ class DirectSimulation:
         # Step 8: setup the image server
         self.image_server = ImageServer(
             camera_wrapper=MujocoRendererWrapper(self.simulator), 
-            cfg=ImageServerConfig())
+            cfg=self.config.image_server)
         self.cam_thread = Thread(target=self.image_server.send_process)
         self.cam_thread.daemon = True
 

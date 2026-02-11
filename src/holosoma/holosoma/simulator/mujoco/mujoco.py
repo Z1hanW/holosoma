@@ -107,6 +107,9 @@ class MujocoRendererWrapper:
         self._rgb_renderer: mujoco.Renderer | None = None
         self._rgb_renderer_thread_id: int | None = None
 
+        # 
+        self.cameras = None
+
 
     @property
     def depth_renderer(self) -> mujoco.Renderer: 

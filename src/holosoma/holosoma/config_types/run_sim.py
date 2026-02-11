@@ -16,6 +16,8 @@ from typing_extensions import Annotated
 import holosoma.config_values.robot
 import holosoma.config_values.run_sim
 import holosoma.config_values.terrain
+import holosoma.config_values.image_server
+from holosoma.config_types.image_server import ImageServerConfig
 from holosoma.config_types.experiment import TrainingConfig
 from holosoma.config_types.logger import DisabledLoggerConfig, LoggerConfig
 from holosoma.config_types.robot import RobotConfig
@@ -69,6 +71,11 @@ class RunSimConfig:
         CameraManagerCfg,
         tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.camera.DEFAULTS)),
     ] = holosoma.config_values.camera.dual_depth_cameras
+
+    image_server: Annotated[
+        ImageServerConfig,
+        tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.image_server.DEFAULTS)),
+    ] = holosoma.config_values.image_server.mujoco
 
     # Minimal configs needed for FullSimConfig
     training: TrainingConfig = field(default_factory=default_training_config)
