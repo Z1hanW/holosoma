@@ -198,9 +198,9 @@ class ZEDCamera:
 #########################################################
 
 DEFAULT_ZED_CAMERA_CONFIGS: dict[str, ZEDCameraConfig] = {
-    # "front": ZEDCameraConfig(serial_number=35996713),
-    # "back": ZEDCameraConfig(serial_number=33082869),
-    "test": ZEDCameraConfig(serial_number=31224262),
+    "front": ZEDCameraConfig(serial_number=35996713),
+    "back": ZEDCameraConfig(serial_number=33082869),
+    # "test": ZEDCameraConfig(serial_number=31224262),
 }
 
 

@@ -545,6 +545,7 @@ class ImageServer:
 
             if step_count % 50 == 0:
                 print(f"[Image Server] Rate limiter stats: {rate_limiter.get_stats()}")
+                rate_limiter.reset()
                 print(f"[Image Server] capture stats: {self.capture_profiler.get_stats()}")
                 if self.cfg.enable_gum_depth_prediction:
                     print(f"[Image Server] GUM prediction stats: {self.gum_profiler.get_stats()}")
@@ -569,5 +570,5 @@ if __name__ == "__main__":
     image_server = ImageServer(ZedCamerasWrapper(zed_cfg), cfg)
     thread = threading.Thread(target=image_server.send_process)
     thread.start()
-    time.sleep(10)
+    time.sleep(2)
     thread.join()
