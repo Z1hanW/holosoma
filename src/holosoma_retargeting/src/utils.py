@@ -35,6 +35,97 @@ def load_intermimic_data(file_path):
     return human_joints, object_poses
 
 
+def _normalize_joint_positions(joints: np.ndarray) -> np.ndarray:
+    joints = np.asarray(joints)
+    if joints.ndim == 3 and joints.shape[-1] == 3:
+        return joints.astype(np.float32)
+    if joints.ndim == 3 and joints.shape[1] == 3:
+        return np.transpose(joints, (0, 2, 1)).astype(np.float32)
+    if joints.ndim == 2 and joints.shape[1] % 3 == 0:
+        joint_count = joints.shape[1] // 3
+        return joints.reshape(joints.shape[0], joint_count, 3).astype(np.float32)
+    if joints.ndim == 2 and joints.shape[1] == 3:
+        return joints[None, :, :].astype(np.float32)
+    raise ValueError(f"Unsupported joint positions shape: {joints.shape}")
+
+
+def _object_pose_from_npz(obj_npz: dict) -> np.ndarray:
+    trans = None
+    for key in ("trans", "obj_trans", "transl", "translation"):
+        if key in obj_npz:
+            trans = np.asarray(obj_npz[key])
+            break
+    if trans is None:
+        raise ValueError("Object translation not found in object_fit_all.npz")
+    if trans.ndim == 1:
+        trans = trans[None, :]
+    trans = trans.astype(np.float32)
+
+    rot = None
+    for key in ("obj_rot", "rot", "angles", "angle"):
+        if key in obj_npz:
+            rot = np.asarray(obj_npz[key])
+            break
+    if rot is None:
+        raise ValueError("Object rotation not found in object_fit_all.npz")
+
+    rot_from_scipy = False
+    if rot.ndim == 2 and rot.shape == (3, 3):
+        rot = rot[None, :, :]
+    if rot.ndim == 2 and rot.shape[1] == 3:
+        rot = R.from_rotvec(rot).as_quat()
+        rot_from_scipy = True
+    elif rot.ndim == 3 and rot.shape[-2:] == (3, 3):
+        rot = R.from_matrix(rot).as_quat()
+        rot_from_scipy = True
+    elif rot.ndim == 2 and rot.shape[1] == 9:
+        rot = R.from_matrix(rot.reshape(-1, 3, 3)).as_quat()
+        rot_from_scipy = True
+    elif rot.ndim == 2 and rot.shape[1] == 4:
+        rot = rot.astype(np.float32)
+    else:
+        raise ValueError(f"Unsupported object rotation shape: {rot.shape}")
+
+    rot = rot.astype(np.float32)
+    if rot.shape[1] != 4:
+        raise ValueError(f"Invalid quaternion shape: {rot.shape}")
+    if rot_from_scipy:
+        quat_wxyz = rot[:, [3, 0, 1, 2]]
+    else:
+        quat_wxyz = rot
+
+    num_frames = min(len(quat_wxyz), len(trans))
+    quat_wxyz = quat_wxyz[:num_frames]
+    trans = trans[:num_frames]
+    return np.concatenate([quat_wxyz, trans], axis=1)
+
+
+def load_behave_zup_data(seq_dir: str | Path):
+    """
+    Load BEHAVE z-up annotations produced by retgt_behave.sh.
+
+    Expected files:
+      - smpl_fit_all.npz with global_joint_positions (T, 22, 3) or equivalent
+      - object_fit_all.npz with object rotation + translation
+    """
+    seq_dir = Path(seq_dir)
+    smpl_path = seq_dir / "smpl_fit_all.npz"
+    obj_path = seq_dir / "object_fit_all.npz"
+    if not smpl_path.exists() or not obj_path.exists():
+        raise FileNotFoundError(f"Missing smpl_fit_all.npz or object_fit_all.npz under {seq_dir}")
+
+    smpl = np.load(str(smpl_path), allow_pickle=True)
+    if "global_joint_positions" not in smpl:
+        raise KeyError("global_joint_positions not found in smpl_fit_all.npz")
+    human_joints = _normalize_joint_positions(smpl["global_joint_positions"])
+
+    obj = np.load(str(obj_path), allow_pickle=True)
+    object_poses = _object_pose_from_npz(obj)
+
+    num_frames = min(len(human_joints), len(object_poses))
+    return human_joints[:num_frames], object_poses[:num_frames]
+
+
 def calculate_scale_factor(task_name, robot_height):
     """Calculate scale factor based on human height."""
     with open("demo_data/height_dict.pkl", "rb") as f:

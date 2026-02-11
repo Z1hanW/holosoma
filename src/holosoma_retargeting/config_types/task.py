@@ -44,3 +44,6 @@ class TaskConfig:
 
     # Optional human vertical offset applied during preprocessing (meters)
     human_z_offset: float = 0.0
+
+    # Optional object mesh root (e.g., BEHAVE objects root)
+    object_mesh_root: Path | None = None

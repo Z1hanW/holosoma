@@ -254,6 +254,23 @@ JOINTS_MAPPINGS = {
         "L_Wrist": "left_rubber_hand_link",
         "R_Wrist": "right_rubber_hand_link",
     },
+    ("behave_zup", "g1"): {
+        "Pelvis": "pelvis_contour_link",
+        "L_Hip": "left_hip_pitch_link",
+        "R_Hip": "right_hip_pitch_link",
+        "L_Knee": "left_knee_link",
+        "R_Knee": "right_knee_link",
+        "L_Shoulder": "left_shoulder_roll_link",
+        "R_Shoulder": "right_shoulder_roll_link",
+        "L_Elbow": "left_elbow_link",
+        "R_Elbow": "right_elbow_link",
+        "L_Ankle": "left_ankle_intermediate_1_link",
+        "R_Ankle": "right_ankle_intermediate_1_link",
+        "L_Foot": "left_ankle_roll_sphere_5_link",
+        "R_Foot": "right_ankle_roll_sphere_5_link",
+        "L_Wrist": "left_rubber_hand_link",
+        "R_Wrist": "right_rubber_hand_link",
+    },
     ("mocap", "g1"): {
         "Spine1": "pelvis_contour_link",
         "LeftUpLeg": "left_hip_pitch_link",
@@ -296,6 +313,7 @@ TOE_NAMES_BY_FORMAT = {
     "smplh": ["L_Toe", "R_Toe"],
     "mocap": ["LeftToeBase", "RightToeBase"],
     "smplx": ["L_Foot", "R_Foot"],
+    "behave_zup": ["L_Foot", "R_Foot"],
 }
 
 
@@ -322,6 +340,7 @@ DEMO_JOINTS_REGISTRY: dict[str, list[str]] = {
     "smplh": SMPLH_DEMO_JOINTS,
     "mocap": MOCAP_DEMO_JOINTS,
     "smplx": SMPLX_DEMO_JOINTS,
+    "behave_zup": SMPLX_DEMO_JOINTS,
 }
 
 # Type alias for data formats - use str to allow dynamic data formats via DEMO_JOINTS_REGISTRY

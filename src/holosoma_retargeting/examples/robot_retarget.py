@@ -38,6 +38,7 @@ from holosoma_retargeting.src.utils import (  # noqa: E402
     estimate_human_orientation,
     extract_foot_sticking_sequence_velocity,
     extract_object_first_moving_frame,
+    load_behave_zup_data,
     load_intermimic_data,
     load_object_data,
     preprocess_motion_data,
@@ -107,12 +108,14 @@ def create_task_constants(
         task_constants.OBJECT_NAME = obj_name
         task_constants.OBJECT_URDF_FILE = None
         task_constants.OBJECT_MESH_FILE = None
+        task_constants.OBJECT_MESH_ROOT = str(task_config.object_mesh_root) if task_config.object_mesh_root else ""
     elif task_type == "object_interaction":
         obj_name = task_config.object_name or "largebox"
         task_constants.OBJECT_NAME = obj_name
         task_constants.OBJECT_URDF_FILE = f"models/{obj_name}/{obj_name}.urdf"
         task_constants.OBJECT_MESH_FILE = f"models/{obj_name}/{obj_name}.obj"
         task_constants.OBJECT_URDF_TEMPLATE = f"models/templates/{obj_name}.urdf.jinja"
+        task_constants.OBJECT_MESH_ROOT = str(task_config.object_mesh_root) if task_config.object_mesh_root else ""
     elif task_type == "climbing":
         obj_name = task_config.object_name or "multi_boxes"
         task_constants.OBJECT_NAME = obj_name
@@ -121,6 +124,7 @@ def create_task_constants(
         task_constants.OBJECT_URDF_FILE = str(object_dir / f"{obj_name}.urdf") if object_dir else f"{obj_name}.urdf"
         task_constants.OBJECT_MESH_FILE = str(object_dir / f"{obj_name}.obj") if object_dir else f"{obj_name}.obj"
         task_constants.SCENE_XML_FILE = ""  # Will be set later
+        task_constants.OBJECT_MESH_ROOT = str(task_config.object_mesh_root) if task_config.object_mesh_root else ""
 
     return task_constants
 
@@ -146,8 +150,8 @@ def validate_config(cfg: RetargetingConfig) -> None:
     # Task-specific format requirements
     if cfg.task_type == "climbing" and cfg.data_format not in (None, "mocap", "smplx"):
         raise ValueError("Climbing task requires 'mocap' data format")
-    if cfg.task_type == "object_interaction" and cfg.data_format not in (None, "smplh"):
-        raise ValueError("Object interaction requires 'smplh' data format")
+    if cfg.task_type == "object_interaction" and cfg.data_format not in (None, "smplh", "behave_zup"):
+        raise ValueError("Object interaction requires 'smplh' or 'behave_zup' data format")
     # robot_only accepts any format in the registry (already validated above)
 
 
@@ -248,12 +252,35 @@ def load_motion_data(
         object_poses = np.tile(np.array([[1, 0, 0, 0, 0, 0, 0]]), (num_frames, 1))
 
     elif task_type == "object_interaction":
-        pt_path = data_path / f"{task_name}.pt"
-        if not pt_path.exists():
-            raise FileNotFoundError(f"InterMimic data file not found: {pt_path}")
+        if data_format == "behave_zup":
+            seq_dir = data_path / task_name
+            human_joints, object_poses = load_behave_zup_data(seq_dir)
+            smpl_scale = motion_data_config.default_scale_factor or 1.0
 
-        human_joints, object_poses = load_intermimic_data(str(pt_path))
-        smpl_scale = calculate_scale_factor(task_name, constants.ROBOT_HEIGHT)
+            parts = task_name.split("_")
+            if len(parts) > 2:
+                obj_name = parts[2]
+                constants.OBJECT_NAME = obj_name
+                mesh_root = getattr(constants, "OBJECT_MESH_ROOT", "")
+                if mesh_root:
+                    mesh_path = Path(mesh_root) / obj_name / f"{obj_name}_f1000.ply"
+                    if mesh_path.exists():
+                        constants.OBJECT_MESH_FILE = str(mesh_path)
+                else:
+                    mesh_path = Path("models") / obj_name / f"{obj_name}.obj"
+                    if mesh_path.exists():
+                        constants.OBJECT_MESH_FILE = str(mesh_path)
+                urdf_path = Path("models") / obj_name / f"{obj_name}.urdf"
+                if urdf_path.exists():
+                    constants.OBJECT_URDF_FILE = str(urdf_path)
+                    constants.OBJECT_URDF_TEMPLATE = f"models/templates/{obj_name}.urdf.jinja"
+        else:
+            pt_path = data_path / f"{task_name}.pt"
+            if not pt_path.exists():
+                raise FileNotFoundError(f"InterMimic data file not found: {pt_path}")
+
+            human_joints, object_poses = load_intermimic_data(str(pt_path))
+            smpl_scale = calculate_scale_factor(task_name, constants.ROBOT_HEIGHT)
 
     elif task_type == "climbing":
         task_dir = data_path / task_name

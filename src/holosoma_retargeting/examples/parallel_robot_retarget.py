@@ -88,6 +88,15 @@ def find_files(data_dir: Path, data_format: str, object_name: str | None = None)
         # SMPL-X: .npz files in root directory
         files = [str(p) for p in data_dir.glob("*.npz")]
         return sorted(files)
+    if data_format == "behave_zup":
+        # BEHAVE z-up: sequence directories containing smpl_fit_all.npz + object_fit_all.npz
+        seq_dirs = []
+        for p in data_dir.iterdir():
+            if not p.is_dir():
+                continue
+            if (p / "smpl_fit_all.npz").exists() and (p / "object_fit_all.npz").exists():
+                seq_dirs.append(str(p))
+        return sorted(seq_dirs)
     # For other data format, default to be consistent with SMPL-X
     files = [str(p) for p in data_dir.glob("*.npz")]
     return sorted(files)
@@ -140,8 +149,11 @@ def generate_augmentation_configs(task_type: str, augmentation: bool = True):
 
 
 def extract_task_name(file_path):
-    """Extract task name from file path."""
-    return Path(file_path).stem
+    """Extract task name from file path or directory."""
+    path = Path(file_path)
+    if path.is_dir():
+        return path.name
+    return path.stem
 
 
 def process_single_task(args):
