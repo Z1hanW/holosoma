@@ -10,6 +10,13 @@ SEQ_NAME="Date01_Sub01_boxlong_backpack"
 OBJECT_ROOT="/data/behave/objects"
 SAVE_DIR="demo_results/g1/object_interaction/behave_zup"
 
+OBJ_NAME=$(echo "${SEQ_NAME}" | awk -F'_' '{print $3}')
+OBJ_NAME_LOWER=$(echo "${OBJ_NAME}" | tr '[:upper:]' '[:lower:]')
+if [[ "${OBJ_NAME_LOWER}" != *box* || "${OBJ_NAME_LOWER}" == "toolbox" ]]; then
+  echo "[ERROR] SEQ_NAME must be a box sequence (exclude toolbox). Got: ${SEQ_NAME}"
+  exit 1
+fi
+
 python src/holosoma_retargeting/examples/robot_retarget.py \
   --task-type object_interaction \
   --data-format behave_zup \
