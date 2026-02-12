@@ -39,6 +39,7 @@ real = dataclasses.replace(
 # Add gum depth prediction, 
 real_enable_gum = dataclasses.replace(real, 
     enable_gum_depth_prediction=True,
+    depth_source="depth",
     visualize_images=False,
 )
  

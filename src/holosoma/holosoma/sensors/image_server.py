@@ -493,7 +493,7 @@ class ImageServer:
             if self.cfg.enable_gum_depth_prediction:
                 with self.gum_profiler.measure():
                     all_frames["depth_gum"] = self._predict_gum_depth(all_frames)
-
+            
             # 2. Process data to be sent to policy;
             depth_for_policy = all_frames[self.cfg.depth_source]
             depth_for_policy = [self._resize_clip_expand_transpose(frame) for frame in depth_for_policy.values()]
