@@ -13,8 +13,10 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
+import xml.etree.ElementTree as ET
 
 import numpy as np
+import trimesh
 import tyro
 
 src_root = Path(__file__).resolve().parents[2]
@@ -73,6 +75,116 @@ _AUGMENTATION_TRANSLATION = np.array([0.2, 0.0, 0.0])
 
 # Type aliases
 TaskType = Literal["robot_only", "object_interaction", "climbing"]
+# DataFormat is imported from config_types.data_type
+
+
+def _ensure_mujoco_mesh(obj_name: str, mesh_path: Path, output_dir: Path) -> Path:
+    """Ensure MuJoCo-compatible mesh (.obj) exists for the object."""
+    mesh_path = mesh_path.resolve()
+    suffix = mesh_path.suffix.lower()
+    if suffix == ".obj":
+        return mesh_path
+    if suffix not in {".ply", ".stl"}:
+        raise ValueError(f"Unsupported mesh format for MuJoCo: {mesh_path}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / f"{obj_name}.obj"
+    if out_path.exists():
+        return out_path
+
+    mesh = trimesh.load_mesh(str(mesh_path), process=False)
+    if isinstance(mesh, trimesh.Scene):
+        mesh = mesh.dump(concatenate=True)
+    mesh.export(str(out_path))
+    return out_path
+
+
+def _write_object_urdf(obj_name: str, mesh_path: Path, urdf_path: Path) -> None:
+    """Create a simple single-link URDF for the object mesh."""
+    urdf_path.parent.mkdir(parents=True, exist_ok=True)
+    if urdf_path.exists():
+        return
+
+    mesh_ref = mesh_path.name if mesh_path.parent == urdf_path.parent else str(mesh_path)
+    urdf_text = f"""<?xml version="1.0" ?>
+<robot name="{obj_name}">
+  <dynamics damping="0.5" friction="0.9"/>
+  <link name="{obj_name}_link">
+    <inertial>
+      <mass value="0.1"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.002" ixy="0" ixz="0" iyy="0.002" iyz="0" izz="0.002"/>
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <mesh filename="{mesh_ref}" scale="1.0 1.0 1.0"/>
+      </geometry>
+      <material name="mat">
+        <color rgba="0.7 0.8 0.9 0.7"/>
+      </material>
+    </visual>
+    <collision name="{obj_name}">
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <mesh filename="{mesh_ref}" scale="1.0 1.0 1.0"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>
+"""
+    urdf_path.write_text(urdf_text)
+
+
+def _write_robot_object_xml(robot_xml_base: Path, robot_xml_out: Path, obj_name: str, mesh_path: Path) -> None:
+    """Create a MuJoCo XML that adds a free object body to the robot model."""
+    if robot_xml_out.exists():
+        return
+
+    tree = ET.parse(robot_xml_base)
+    root = tree.getroot()
+
+    asset = root.find("asset")
+    if asset is None:
+        asset = ET.SubElement(root, "asset")
+
+    mesh_name = f"{obj_name}_mesh"
+    if not any(m.get("name") == mesh_name for m in asset.findall("mesh")):
+        ET.SubElement(
+            asset,
+            "mesh",
+            {
+                "name": mesh_name,
+                "file": str(mesh_path),
+                "scale": "1 1 1",
+            },
+        )
+
+    worldbody = root.find("worldbody")
+    if worldbody is None:
+        worldbody = ET.SubElement(root, "worldbody")
+
+    if not any(b.get("name") == obj_name for b in worldbody.findall("body")):
+        body = ET.SubElement(worldbody, "body", {"name": obj_name})
+        ET.SubElement(body, "freejoint")
+        ET.SubElement(body, "inertial", {"pos": "0 0 0", "mass": "0.1", "diaginertia": "0.002 0.002 0.002"})
+        ET.SubElement(
+            body,
+            "geom",
+            {
+                "type": "mesh",
+                "mesh": mesh_name,
+                "pos": "0 0 0",
+                "quat": "1 0 0 0",
+                "rgba": "0.7 0.8 0.9 0.7",
+                "friction": "0.9 0.5 0.5",
+                "solref": "0.02 1",
+                "solimp": "0.9 0.95 0.001",
+            },
+        )
+
+    robot_xml_out.parent.mkdir(parents=True, exist_ok=True)
+    tree.write(robot_xml_out)
 # DataFormat is imported from config_types.data_type
 def create_task_constants(
     robot_config: RobotConfig,
@@ -259,21 +371,40 @@ def load_motion_data(
 
             parts = task_name.split("_")
             if len(parts) > 2:
-                obj_name = parts[2]
+                obj_name = parts[2].lower()
                 constants.OBJECT_NAME = obj_name
                 mesh_root = getattr(constants, "OBJECT_MESH_ROOT", "")
+                mesh_path = None
                 if mesh_root:
                     mesh_path = Path(mesh_root) / obj_name / f"{obj_name}_f1000.ply"
-                    if mesh_path.exists():
-                        constants.OBJECT_MESH_FILE = str(mesh_path)
-                else:
-                    mesh_path = Path("models") / obj_name / f"{obj_name}.obj"
-                    if mesh_path.exists():
-                        constants.OBJECT_MESH_FILE = str(mesh_path)
-                urdf_path = Path("models") / obj_name / f"{obj_name}.urdf"
-                if urdf_path.exists():
-                    constants.OBJECT_URDF_FILE = str(urdf_path)
-                    constants.OBJECT_URDF_TEMPLATE = f"models/templates/{obj_name}.urdf.jinja"
+                if mesh_path is None or not mesh_path.exists():
+                    fallback = Path("models") / obj_name / f"{obj_name}.obj"
+                    if fallback.exists():
+                        mesh_path = fallback
+                if mesh_path is None or not mesh_path.exists():
+                    raise FileNotFoundError(f"Missing BEHAVE mesh for {obj_name}")
+
+                retarget_root = Path(__file__).resolve().parents[1]
+                generated_root = retarget_root / "models" / "behave_objects" / obj_name
+                mujoco_mesh_path = _ensure_mujoco_mesh(obj_name, mesh_path, generated_root)
+                constants.OBJECT_MESH_FILE = str(mujoco_mesh_path)
+
+                urdf_path = generated_root / f"{obj_name}.urdf"
+                _write_object_urdf(obj_name, mujoco_mesh_path, urdf_path)
+                constants.OBJECT_URDF_FILE = str(urdf_path)
+                constants.OBJECT_URDF_TEMPLATE = ""
+
+                robot_urdf_path = Path(constants.ROBOT_URDF_FILE)
+                if not robot_urdf_path.is_absolute():
+                    candidate = retarget_root / robot_urdf_path
+                    if candidate.exists():
+                        robot_urdf_path = candidate
+                        constants.ROBOT_URDF_FILE = str(robot_urdf_path)
+
+                robot_xml_base = robot_urdf_path.with_suffix(".xml")
+                robot_xml_out = robot_urdf_path.parent / f"{robot_urdf_path.stem}_w_{obj_name}.xml"
+                if robot_xml_base.exists():
+                    _write_robot_object_xml(robot_xml_base, robot_xml_out, obj_name, mujoco_mesh_path)
         else:
             pt_path = data_path / f"{task_name}.pt"
             if not pt_path.exists():
