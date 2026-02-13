@@ -162,6 +162,7 @@ PY
     fi
 
     scene_xml_local="$stage_obj_dir/g1_29dof_w_terrain.xml"
+    scene_xml_expected="$stage_obj_dir/$(basename "$ROBOT_URDF_SRC" .urdf)_w_${OBJECT_NAME}.xml"
     if [ -n "$SCENE_XML_OVERRIDE" ]; then
         scene_xml_src=${SCENE_XML_OVERRIDE//\{seq\}/$seq_name}
         cp -f "$scene_xml_src" "$scene_xml_local"
@@ -196,8 +197,11 @@ PY
     # Provide scene XMLs next to the robot URDF for MuJoCo loading.
     cp -f "$scene_xml_local" "$robot_dir/g1_29dof_w_scene_mesh_sqs.xml"
     cp -f "$scene_xml_local" "$robot_dir/g1_29dof_w_terrain.xml"
+    # Also place the expected scene XML inside object_dir for climbing setup.
+    cp -f "$scene_xml_local" "$scene_xml_expected"
 
-    mkdir -p "$OUT_ROOT"
+    seq_out_root="$OUT_ROOT/$seq_name"
+    mkdir -p "$seq_out_root"
     scene_xml_file="$scene_xml_local"
     robot_urdf_local="$robot_dir/g1_29dof.urdf"
     echo "[retgt_crisp] seq=$seq_name"
@@ -211,7 +215,7 @@ PY
     echo "  pieces=$stage_obj_dir/pieces"
     echo "  box_assets=$stage_obj_dir/box_assets.xml"
     echo "  box_body=$stage_obj_dir/box_body.xml"
-    if ! SAVE_MODE=True bash "$SCRIPT_DIR/retgt_smplx.sh" "$stage_obj_dir" "$TASK_NAME" "$OBJECT_NAME" "$stage_obj_dir" "$robot_urdf_local" "smplx" "$OUT_ROOT" "$scene_xml_file"; then
+    if ! SAVE_MODE=True bash "$SCRIPT_DIR/retgt_smplx.sh" "$stage_obj_dir" "$TASK_NAME" "$OBJECT_NAME" "$stage_obj_dir" "$robot_urdf_local" "smplx" "$seq_out_root" "$scene_xml_file"; then
         echo "[WARN] retarget failed for $seq_name; skipping" >&2
         continue
     fi

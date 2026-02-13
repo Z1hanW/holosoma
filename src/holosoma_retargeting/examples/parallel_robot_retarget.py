@@ -56,7 +56,12 @@ PARALLEL_SAVE_DIRS = {
 }
 
 
-def find_files(data_dir: Path, data_format: str, object_name: str | None = None):
+def find_files(
+    data_dir: Path,
+    data_format: str,
+    object_name: str | None = None,
+    task_type: str | None = None,
+):
     """Find files based on data format.
 
     Args:
@@ -85,7 +90,11 @@ def find_files(data_dir: Path, data_format: str, object_name: str | None = None)
         files = [str(p) for p in data_dir.glob("*/*.npy")]
         return sorted(files)
     if data_format == "smplx":
-        # SMPL-X: .npz files in root directory
+        # SMPL-X: .npz files in root directory (or per-sequence folders for climbing/CRISP)
+        if task_type == "climbing":
+            files = [str(p) for p in data_dir.glob("*/human_motion.npz")]
+            if files:
+                return sorted(files)
         files = [str(p) for p in data_dir.glob("*.npz")]
         return sorted(files)
     if data_format == "behave_zup":
@@ -181,8 +190,11 @@ def process_single_task(args):
     else:
         task_name = extract_task_name(file_path)
     print(f"Processing: {task_name}")
-    # Store outputs under a per-sequence subfolder.
-    save_dir_task = Path(save_dir) / task_name
+    # Store outputs under a per-sequence subfolder unless BEHAVE expects flat output.
+    if data_format == "behave_zup":
+        save_dir_task = Path(save_dir)
+    else:
+        save_dir_task = Path(save_dir) / task_name
     os.makedirs(save_dir_task, exist_ok=True)
 
     # Task-specific object setup: set default object_dir for climbing if not provided
@@ -344,9 +356,9 @@ def main(cfg: ParallelRetargetingConfig) -> None:
         cfg.motion_data_config = MotionDataConfig(data_format=data_format, robot_type=robot)
 
     if task_type == "robot_only":
-        files = find_files(data_dir, data_format)
+        files = find_files(data_dir, data_format, task_type=task_type)
     else:
-        files = find_files(data_dir, data_format, cfg.task_config.object_name)
+        files = find_files(data_dir, data_format, cfg.task_config.object_name, task_type=task_type)
     print(f"Found {len(files)} files for task type: {task_type}")
 
     # Pass configs to worker processes
