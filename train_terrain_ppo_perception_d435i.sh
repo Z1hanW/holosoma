@@ -1,6 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
 DEPTH_IMPL=${DEPTH_IMPL:-rendered}
-IMAGE_WIDTH=${IMAGE_WIDTH:-1280}
-IMAGE_HEIGHT=${IMAGE_HEIGHT:-720}
+if [[ "${DEPTH_IMPL}" == "raycast" ]]; then
+  IMAGE_WIDTH=${IMAGE_WIDTH:-106}
+  IMAGE_HEIGHT=${IMAGE_HEIGHT:-60}
+  CAMERA_HFOV=${CAMERA_HFOV:-89.5}
+  CAMERA_VFOV=${CAMERA_VFOV:-58.6}
+  CAMERA_NEAR=${CAMERA_NEAR:-0.3}
+  CAMERA_FAR=${CAMERA_FAR:-3.0}
+  CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-3.0}
+
+  CAMERA_JITTER_X=${CAMERA_JITTER_X:-0.025}
+  CAMERA_JITTER_Y=${CAMERA_JITTER_Y:-0.025}
+  CAMERA_JITTER_Z=${CAMERA_JITTER_Z:-0.025}
+  CAMERA_JITTER_ROLL=${CAMERA_JITTER_ROLL:-2.5}
+  CAMERA_JITTER_PITCH=${CAMERA_JITTER_PITCH:-3.0}
+  CAMERA_JITTER_YAW=${CAMERA_JITTER_YAW:-2.5}
+  CAMERA_NOISE_STD=${CAMERA_NOISE_STD:-0.05}
+  CAMERA_NOISE_DROP=${CAMERA_NOISE_DROP:-0.025}
+
+  CAMERA_MESH_ALLOWLIST=${CAMERA_MESH_ALLOWLIST:-'["pelvis","left_hip_pitch_link","left_hip_roll_link","left_hip_yaw_link","left_knee_link","left_ankle_pitch_link","left_ankle_roll_link","right_hip_pitch_link","right_hip_roll_link","right_hip_yaw_link","right_knee_link","right_ankle_pitch_link","right_ankle_roll_link","waist_yaw_link","waist_roll_link","left_shoulder_pitch_link","left_shoulder_roll_link","left_shoulder_yaw_link","left_elbow_link","left_wrist_roll_link","left_wrist_pitch_link","left_wrist_yaw_link","right_shoulder_pitch_link","right_shoulder_roll_link","right_shoulder_yaw_link","right_elbow_link","right_wrist_roll_link","right_wrist_pitch_link","right_wrist_yaw_link"]'}
+else
+  IMAGE_WIDTH=${IMAGE_WIDTH:-1280}
+  IMAGE_HEIGHT=${IMAGE_HEIGHT:-720}
+fi
 case "${DEPTH_IMPL}" in
   rendered)
     PERCEPTION_PRESET="camera_depth_d435i_rendered"
@@ -17,12 +41,38 @@ case "${DEPTH_IMPL}" in
     ;;
 esac
 
+PERCEPTION_OVERRIDES=(
+  --perception.camera_width="$IMAGE_WIDTH"
+  --perception.camera_height="$IMAGE_HEIGHT"
+)
+
+RANDOMIZATION_OVERRIDES=()
+if [[ "${DEPTH_IMPL}" == "raycast" ]]; then
+  PERCEPTION_OVERRIDES+=(
+    --perception.camera_hfov_deg="$CAMERA_HFOV"
+    --perception.camera_vfov_deg="$CAMERA_VFOV"
+    --perception.camera_near="$CAMERA_NEAR"
+    --perception.camera_far="$CAMERA_FAR"
+    --perception.max_distance="$CAMERA_MAX_DISTANCE"
+    --perception.camera_include_robot_mesh=True
+  )
+  RANDOMIZATION_OVERRIDES+=(
+    --randomization.setup_terms.setup_camera_raycast_randomization.params.enabled=True
+    --randomization.setup_terms.setup_camera_raycast_randomization.params.mesh_allowlist="${CAMERA_MESH_ALLOWLIST}"
+    --randomization.reset_terms.randomize_camera_raycast.params.enabled=True
+    --randomization.reset_terms.randomize_camera_raycast.params.translation_range='{"x":[-'"${CAMERA_JITTER_X}"', '"${CAMERA_JITTER_X}"'], "y":[-'"${CAMERA_JITTER_Y}"', '"${CAMERA_JITTER_Y}"'], "z":[-'"${CAMERA_JITTER_Z}"', '"${CAMERA_JITTER_Z}"']}'
+    --randomization.reset_terms.randomize_camera_raycast.params.rotation_range_deg='{"roll":[-'"${CAMERA_JITTER_ROLL}"', '"${CAMERA_JITTER_ROLL}"'], "pitch":[-'"${CAMERA_JITTER_PITCH}"', '"${CAMERA_JITTER_PITCH}"'], "yaw":[-'"${CAMERA_JITTER_YAW}"', '"${CAMERA_JITTER_YAW}"']}'
+    --randomization.reset_terms.randomize_camera_raycast.params.noise_std_mult_range='[0.0, '"${CAMERA_NOISE_STD}"']'
+    --randomization.reset_terms.randomize_camera_raycast.params.noise_drop_prob_range='[0.0, '"${CAMERA_NOISE_DROP}"']'
+  )
+fi
+
 CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-motion-tracking-transformer \
   "perception:${PERCEPTION_PRESET}" \
   --training.num_envs=128 \
-  --perception.camera_width="$IMAGE_WIDTH" \
-  --perception.camera_height="$IMAGE_HEIGHT" \
+  "${PERCEPTION_OVERRIDES[@]}" \
+  "${RANDOMIZATION_OVERRIDES[@]}" \
   \
   --algo.config.actor_learning_rate=7e-5 \
   --algo.config.critic_learning_rate=7e-5 \
