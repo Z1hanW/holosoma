@@ -5,11 +5,12 @@ set -euo pipefail
 #
 # Required inputs:
 #   DATA_ROOT:  path to annotation_30fps_zup (per-sequence folders)
-#   OBJECT_ROOT: path to BEHAVE objects (contains <obj>/<obj>_f1000.ply)
+#   OBJECT_ROOT: path to BEHAVE objects (contains <obj>/<obj>_f1000.ply by default)
 #
 # Optional:
 #   ROBOT: g1 or t1 (default: g1)
-#   SAVE_DIR: output directory (default: demo_results_parallel/g1/object_interaction/behave_zup)
+#   SAVE_DIR: output directory (default: src/holosoma_retargeting/demo_results/g1/object_interaction/behave_zup)
+#   OBJECT_MESH_SUFFIX: object mesh filename suffix (default: _f1000.ply)
 #   MAX_WORKERS: override parallel workers
 #   AUGMENT: True/False (default: False)
 #
@@ -25,6 +26,7 @@ cd "${REPO_ROOT}"
 
 DATA_ROOT=${DATA_ROOT:-"/data/behave/annotation_30fps_zup"}
 OBJECT_ROOT=${OBJECT_ROOT:-"/data/behave/objects"}
+OBJECT_MESH_SUFFIX=${OBJECT_MESH_SUFFIX:-"_f1000.ply"}
 ROBOT=${ROBOT:-"g1"}
 SAVE_DIR=${SAVE_DIR:-"${REPO_ROOT}/src/holosoma_retargeting/demo_results/${ROBOT}/object_interaction/behave_zup"}
 MAX_WORKERS=${MAX_WORKERS:-""}
@@ -45,6 +47,7 @@ cmd=(
   --data-format behave_zup
   --data-dir "${DATA_ROOT}"
   --task-config.object-mesh-root "${OBJECT_ROOT}"
+  --task-config.object-mesh-suffix "${OBJECT_MESH_SUFFIX}"
   --save-dir "${SAVE_DIR}"
   --robot "${ROBOT}"
 )

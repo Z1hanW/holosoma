@@ -47,3 +47,5 @@ class TaskConfig:
 
     # Optional object mesh root (e.g., BEHAVE objects root)
     object_mesh_root: Path | None = None
+    # Optional object mesh filename suffix (e.g., "_sq.obj" or "_f1000.ply")
+    object_mesh_suffix: str | None = "_f1000.ply"

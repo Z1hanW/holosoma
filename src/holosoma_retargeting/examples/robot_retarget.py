@@ -85,7 +85,25 @@ def _ensure_mujoco_mesh(
     mesh_path = mesh_path.resolve()
     suffix = mesh_path.suffix.lower()
     if suffix == ".obj":
-        return mesh_path
+        if not center_mesh:
+            return mesh_path
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out_path = output_dir / f"{obj_name}.obj"
+        if out_path.exists():
+            existing = trimesh.load_mesh(str(out_path), process=False)
+            if isinstance(existing, trimesh.Scene):
+                existing = existing.dump(concatenate=True)
+            if isinstance(existing, trimesh.Trimesh):
+                center = existing.vertices.mean(axis=0)
+                if float(np.linalg.norm(center)) < 1e-5:
+                    return out_path
+        mesh = trimesh.load_mesh(str(mesh_path), process=False)
+        if isinstance(mesh, trimesh.Scene):
+            mesh = mesh.dump(concatenate=True)
+        if isinstance(mesh, trimesh.Trimesh):
+            mesh.vertices = mesh.vertices - mesh.vertices.mean(axis=0)
+        mesh.export(str(out_path))
+        return out_path
     if suffix not in {".ply", ".stl"}:
         raise ValueError(f"Unsupported mesh format for MuJoCo: {mesh_path}")
 
@@ -112,13 +130,23 @@ def _ensure_mujoco_mesh(
     return out_path
 
 
-def _write_object_urdf(obj_name: str, mesh_path: Path, urdf_path: Path) -> None:
+def _write_object_urdf(
+    obj_name: str,
+    mesh_path: Path,
+    urdf_path: Path,
+    mesh_scale: float | None = None,
+    *,
+    overwrite: bool = False,
+) -> None:
     """Create a simple single-link URDF for the object mesh."""
     urdf_path.parent.mkdir(parents=True, exist_ok=True)
-    if urdf_path.exists():
-        return
+    if mesh_scale is None:
+        mesh_scale = 1.0
+    scale_str = f"{mesh_scale} {mesh_scale} {mesh_scale}"
 
     mesh_ref = mesh_path.name if mesh_path.parent == urdf_path.parent else str(mesh_path)
+    if urdf_path.exists() and not overwrite:
+        return
     urdf_text = f"""<?xml version="1.0" ?>
 <robot name="{obj_name}">
   <dynamics damping="0.5" friction="0.9"/>
@@ -131,7 +159,7 @@ def _write_object_urdf(obj_name: str, mesh_path: Path, urdf_path: Path) -> None:
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="{mesh_ref}" scale="1.0 1.0 1.0"/>
+        <mesh filename="{mesh_ref}" scale="{scale_str}"/>
       </geometry>
       <material name="mat">
         <color rgba="0.7 0.8 0.9 0.7"/>
@@ -140,7 +168,7 @@ def _write_object_urdf(obj_name: str, mesh_path: Path, urdf_path: Path) -> None:
     <collision name="{obj_name}">
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="{mesh_ref}" scale="1.0 1.0 1.0"/>
+        <mesh filename="{mesh_ref}" scale="{scale_str}"/>
       </geometry>
     </collision>
   </link>
@@ -149,9 +177,20 @@ def _write_object_urdf(obj_name: str, mesh_path: Path, urdf_path: Path) -> None:
     urdf_path.write_text(urdf_text)
 
 
-def _write_robot_object_xml(robot_xml_base: Path, robot_xml_out: Path, obj_name: str, mesh_path: Path) -> None:
+def _write_robot_object_xml(
+    robot_xml_base: Path,
+    robot_xml_out: Path,
+    obj_name: str,
+    mesh_path: Path,
+    mesh_scale: float | None = None,
+    *,
+    overwrite: bool = False,
+) -> None:
     """Create a MuJoCo XML that adds a free object body to the robot model."""
-    if robot_xml_out.exists():
+    if mesh_scale is None:
+        mesh_scale = 1.0
+    scale_str = f"{mesh_scale} {mesh_scale} {mesh_scale}"
+    if robot_xml_out.exists() and not overwrite:
         return
 
     tree = ET.parse(robot_xml_base)
@@ -169,7 +208,7 @@ def _write_robot_object_xml(robot_xml_base: Path, robot_xml_out: Path, obj_name:
             {
                 "name": mesh_name,
                 "file": str(mesh_path),
-                "scale": "1 1 1",
+                "scale": scale_str,
             },
         )
 
@@ -234,6 +273,9 @@ def create_task_constants(
         task_constants.OBJECT_URDF_FILE = None
         task_constants.OBJECT_MESH_FILE = None
         task_constants.OBJECT_MESH_ROOT = str(task_config.object_mesh_root) if task_config.object_mesh_root else ""
+        task_constants.OBJECT_MESH_SUFFIX = (
+            str(task_config.object_mesh_suffix) if task_config.object_mesh_suffix else ""
+        )
     elif task_type == "object_interaction":
         obj_name = task_config.object_name or "largebox"
         task_constants.OBJECT_NAME = obj_name
@@ -241,6 +283,9 @@ def create_task_constants(
         task_constants.OBJECT_MESH_FILE = f"models/{obj_name}/{obj_name}.obj"
         task_constants.OBJECT_URDF_TEMPLATE = f"models/templates/{obj_name}.urdf.jinja"
         task_constants.OBJECT_MESH_ROOT = str(task_config.object_mesh_root) if task_config.object_mesh_root else ""
+        task_constants.OBJECT_MESH_SUFFIX = (
+            str(task_config.object_mesh_suffix) if task_config.object_mesh_suffix else ""
+        )
     elif task_type == "climbing":
         obj_name = task_config.object_name or "multi_boxes"
         task_constants.OBJECT_NAME = obj_name
@@ -250,6 +295,9 @@ def create_task_constants(
         task_constants.OBJECT_MESH_FILE = str(object_dir / f"{obj_name}.obj") if object_dir else f"{obj_name}.obj"
         task_constants.SCENE_XML_FILE = ""  # Will be set later
         task_constants.OBJECT_MESH_ROOT = str(task_config.object_mesh_root) if task_config.object_mesh_root else ""
+        task_constants.OBJECT_MESH_SUFFIX = (
+            str(task_config.object_mesh_suffix) if task_config.object_mesh_suffix else ""
+        )
 
     return task_constants
 
@@ -388,15 +436,18 @@ def load_motion_data(
                 obj_name = parts[2].lower()
                 constants.OBJECT_NAME = obj_name
                 mesh_root = getattr(constants, "OBJECT_MESH_ROOT", "")
+                mesh_suffix = getattr(constants, "OBJECT_MESH_SUFFIX", "") or "_sq.obj"
                 mesh_path = None
                 if mesh_root:
-                    mesh_path = Path(mesh_root) / obj_name / f"{obj_name}_f1000.ply"
+                    mesh_path = Path(mesh_root) / obj_name / f"{obj_name}{mesh_suffix}"
                 if mesh_path is None or not mesh_path.exists():
                     fallback = Path("models") / obj_name / f"{obj_name}.obj"
                     if fallback.exists():
                         mesh_path = fallback
                 if mesh_path is None or not mesh_path.exists():
-                    raise FileNotFoundError(f"Missing BEHAVE mesh for {obj_name}")
+                    raise FileNotFoundError(
+                        f"Missing BEHAVE mesh for {obj_name} with suffix '{mesh_suffix}'"
+                    )
 
                 retarget_root = Path(__file__).resolve().parents[1]
                 generated_root = retarget_root / "models" / "behave_objects" / obj_name
@@ -404,7 +455,7 @@ def load_motion_data(
                 constants.OBJECT_MESH_FILE = str(mujoco_mesh_path)
 
                 urdf_path = generated_root / f"{obj_name}.urdf"
-                _write_object_urdf(obj_name, mujoco_mesh_path, urdf_path)
+                _write_object_urdf(obj_name, mujoco_mesh_path, urdf_path, mesh_scale=smpl_scale, overwrite=True)
                 constants.OBJECT_URDF_FILE = str(urdf_path)
                 constants.OBJECT_URDF_TEMPLATE = ""
 
@@ -418,7 +469,14 @@ def load_motion_data(
                 robot_xml_base = robot_urdf_path.with_suffix(".xml")
                 robot_xml_out = robot_urdf_path.parent / f"{robot_urdf_path.stem}_w_{obj_name}.xml"
                 if robot_xml_base.exists():
-                    _write_robot_object_xml(robot_xml_base, robot_xml_out, obj_name, mujoco_mesh_path)
+                    _write_robot_object_xml(
+                        robot_xml_base,
+                        robot_xml_out,
+                        obj_name,
+                        mujoco_mesh_path,
+                        mesh_scale=smpl_scale,
+                        overwrite=True,
+                    )
                     constants.SCENE_XML_FILE = str(robot_xml_out)
         else:
             pt_path = data_path / f"{task_name}.pt"
