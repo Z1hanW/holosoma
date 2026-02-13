@@ -380,7 +380,8 @@ def load_motion_data(
         if data_format == "behave_zup":
             seq_dir = data_path / task_name
             human_joints, object_poses = load_behave_zup_data(seq_dir)
-            smpl_scale = motion_data_config.default_scale_factor or 1.0
+            default_human_height = motion_data_config.default_human_height or 1.78
+            smpl_scale = constants.ROBOT_HEIGHT / default_human_height
 
             parts = task_name.split("_")
             if len(parts) > 2:
