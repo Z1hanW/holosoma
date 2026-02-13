@@ -32,6 +32,10 @@ if [ ! -f "$ROBOT_URDF_SRC" ]; then
 fi
 
 seq_dirs=()
+total_seqs=0
+success_seqs=0
+failed_seqs=0
+failed_list=()
 if [ -n "$SEQ_NAME" ]; then
     seq_dir="$POST_SCENE_ROOT/$SEQ_NAME"
     if [ -d "$SEQ_NAME" ]; then
@@ -52,6 +56,7 @@ fi
 for seq_dir in "${seq_dirs[@]}"; do
 
     seq_name=$(basename "$seq_dir")
+    total_seqs=$((total_seqs + 1))
     hmr_dir="$seq_dir/$HMR_TYPE/hmr"
     hmr_npz="$hmr_dir/$seq_name.npz"
     scene_dir="$seq_dir/$HMR_TYPE/scene_mesh_sqs"
@@ -61,10 +66,14 @@ for seq_dir in "${seq_dirs[@]}"; do
 
     if [ ! -f "$hmr_npz" ] || [ ! -f "$scene_obj" ] || [ ! -f "$scene_urdf" ]; then
         echo "[WARN] missing hmr or scene files for $seq_name; skipping" >&2
+        failed_seqs=$((failed_seqs + 1))
+        failed_list+=("$seq_name")
         continue
     fi
     if [ ! -d "$pieces_dir" ]; then
         echo "[WARN] missing pieces dir for $seq_name: $pieces_dir; skipping" >&2
+        failed_seqs=$((failed_seqs + 1))
+        failed_list+=("$seq_name")
         continue
     fi
 
@@ -109,6 +118,8 @@ urdf_path.write_text(ET.tostring(root, encoding="unicode"))
 PY
     then
         echo "[WARN] failed to rewrite scene URDF for $seq_name; skipping" >&2
+        failed_seqs=$((failed_seqs + 1))
+        failed_list+=("$seq_name")
         continue
     fi
 
@@ -158,6 +169,8 @@ body_path.write_text("\\n".join(body_lines) + "\\n")
 PY
     then
         echo "[WARN] failed to generate box_assets/box_body for $seq_name; skipping" >&2
+        failed_seqs=$((failed_seqs + 1))
+        failed_list+=("$seq_name")
         continue
     fi
 
@@ -187,6 +200,8 @@ path.write_text(text)
 PY
     then
         echo "[WARN] failed to patch scene XML for $seq_name; skipping" >&2
+        failed_seqs=$((failed_seqs + 1))
+        failed_list+=("$seq_name")
         continue
     fi
 
@@ -217,6 +232,15 @@ PY
     echo "  box_body=$stage_obj_dir/box_body.xml"
     if ! SAVE_MODE=True bash "$SCRIPT_DIR/retgt_smplx.sh" "$stage_obj_dir" "$TASK_NAME" "$OBJECT_NAME" "$stage_obj_dir" "$robot_urdf_local" "smplx" "$seq_out_root" "$scene_xml_file"; then
         echo "[WARN] retarget failed for $seq_name; skipping" >&2
+        failed_seqs=$((failed_seqs + 1))
+        failed_list+=("$seq_name")
         continue
     fi
+    success_seqs=$((success_seqs + 1))
 done
+
+echo "[retgt_crisp] summary:"
+echo "  total=${total_seqs} success=${success_seqs} failed=${failed_seqs}"
+if [ "${#failed_list[@]}" -gt 0 ]; then
+  echo "  failed_list=${failed_list[*]}"
+fi
