@@ -115,7 +115,7 @@ def _process_sequence(seq_dir: Path) -> None:
     # SMPL 22 joint indices: 20 = L_Wrist, 21 = R_Wrist, 0 = Pelvis
     l_wrist = joints[:, 20]
     r_wrist = joints[:, 21]
-    pelvis = joints[:, 0]
+    hand_mid = 0.5 * (l_wrist + r_wrist)
 
     dt = 1.0 / FPS
     l_vel = _velocity(l_wrist, dt)
@@ -123,7 +123,7 @@ def _process_sequence(seq_dir: Path) -> None:
     l_speed = np.linalg.norm(l_vel, axis=1)
     r_speed = np.linalg.norm(r_vel, axis=1)
 
-    rel_pos = pelvis - obj_trans
+    rel_pos = hand_mid - obj_trans
     rel_vel = _velocity(rel_pos, dt)
     rel_speed = np.linalg.norm(rel_vel, axis=1)
 
@@ -138,8 +138,8 @@ def _process_sequence(seq_dir: Path) -> None:
     )
     _plot_series(
         t,
-        {"pelvis_rel_box_center": rel_speed},
-        f"{seq_dir.name} pelvis rel-box speed",
+        {"hands_mid_rel_box_center": rel_speed},
+        f"{seq_dir.name} hands-mid rel-box speed",
         out_dir / "relative_velocity.png",
     )
 

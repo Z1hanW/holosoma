@@ -78,7 +78,9 @@ TaskType = Literal["robot_only", "object_interaction", "climbing"]
 # DataFormat is imported from config_types.data_type
 
 
-def _ensure_mujoco_mesh(obj_name: str, mesh_path: Path, output_dir: Path) -> Path:
+def _ensure_mujoco_mesh(
+    obj_name: str, mesh_path: Path, output_dir: Path, *, center_mesh: bool = False
+) -> Path:
     """Ensure MuJoCo-compatible mesh (.obj) exists for the object."""
     mesh_path = mesh_path.resolve()
     suffix = mesh_path.suffix.lower()
@@ -89,12 +91,23 @@ def _ensure_mujoco_mesh(obj_name: str, mesh_path: Path, output_dir: Path) -> Pat
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / f"{obj_name}.obj"
-    if out_path.exists():
+    if out_path.exists() and not center_mesh:
         return out_path
 
     mesh = trimesh.load_mesh(str(mesh_path), process=False)
     if isinstance(mesh, trimesh.Scene):
         mesh = mesh.dump(concatenate=True)
+    if center_mesh:
+        mesh.vertices = mesh.vertices - mesh.vertices.mean(axis=0)
+    if out_path.exists() and center_mesh:
+        # Avoid rewriting if already centered.
+        existing = trimesh.load_mesh(str(out_path), process=False)
+        if isinstance(existing, trimesh.Scene):
+            existing = existing.dump(concatenate=True)
+        if isinstance(existing, trimesh.Trimesh):
+            center = existing.vertices.mean(axis=0)
+            if float(np.linalg.norm(center)) < 1e-5:
+                return out_path
     mesh.export(str(out_path))
     return out_path
 
@@ -386,7 +399,7 @@ def load_motion_data(
 
                 retarget_root = Path(__file__).resolve().parents[1]
                 generated_root = retarget_root / "models" / "behave_objects" / obj_name
-                mujoco_mesh_path = _ensure_mujoco_mesh(obj_name, mesh_path, generated_root)
+                mujoco_mesh_path = _ensure_mujoco_mesh(obj_name, mesh_path, generated_root, center_mesh=True)
                 constants.OBJECT_MESH_FILE = str(mujoco_mesh_path)
 
                 urdf_path = generated_root / f"{obj_name}.urdf"
@@ -405,6 +418,7 @@ def load_motion_data(
                 robot_xml_out = robot_urdf_path.parent / f"{robot_urdf_path.stem}_w_{obj_name}.xml"
                 if robot_xml_base.exists():
                     _write_robot_object_xml(robot_xml_base, robot_xml_out, obj_name, mujoco_mesh_path)
+                    constants.SCENE_XML_FILE = str(robot_xml_out)
         else:
             pt_path = data_path / f"{task_name}.pt"
             if not pt_path.exists():
