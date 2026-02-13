@@ -48,6 +48,12 @@ else
   fi
 fi
 
+object_mode_lc=$(printf "%s" "${OBJECT_URDF_MODE}" | tr '[:upper:]' '[:lower:]')
+object_mode_recursive="false"
+if [[ "${object_mode_lc}" == "recursive" || "${object_mode_lc}" == "behave" ]]; then
+  object_mode_recursive="true"
+fi
+
 if [[ -n "${OBJECT_URDF_DIR}" ]]; then
   if [[ -f "${OBJECT_URDF_DIR}" ]]; then
     # Single URDF provided via OBJECT_URDF_DIR; treat as common object.
@@ -58,14 +64,21 @@ if [[ -n "${OBJECT_URDF_DIR}" ]]; then
     OBJECT_URDF_DIR=""
     SHOW_OBJECT="False"
   else
-    shopt -s nullglob
-    _urdf_files=("${OBJECT_URDF_DIR}"/*.urdf "${OBJECT_URDF_DIR}"/*.URDF)
-    shopt -u nullglob
+    if [[ "${object_mode_recursive}" == "true" ]]; then
+      _urdf_files=()
+      while IFS= read -r -d '' _f; do
+        _urdf_files+=("$_f")
+      done < <(find "${OBJECT_URDF_DIR}" -type f \( -name "*.urdf" -o -name "*.URDF" \) -print0)
+    else
+      shopt -s nullglob
+      _urdf_files=("${OBJECT_URDF_DIR}"/*.urdf "${OBJECT_URDF_DIR}"/*.URDF)
+      shopt -u nullglob
+    fi
     if (( ${#_urdf_files[@]} == 0 )); then
       echo "[WARN] object urdf dir is empty: ${OBJECT_URDF_DIR} (disabling object)"
       OBJECT_URDF_DIR=""
       SHOW_OBJECT="False"
-    elif (( ${#_urdf_files[@]} == 1 )); then
+    elif (( ${#_urdf_files[@]} == 1 )) && [[ "${object_mode_recursive}" == "false" ]]; then
       # Single URDF in directory; treat as common object.
       OBJECT_URDF="${_urdf_files[0]}"
       OBJECT_URDF_DIR=""

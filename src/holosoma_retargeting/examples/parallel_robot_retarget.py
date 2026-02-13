@@ -181,6 +181,9 @@ def process_single_task(args):
     else:
         task_name = extract_task_name(file_path)
     print(f"Processing: {task_name}")
+    # Store outputs under a per-sequence subfolder.
+    save_dir_task = Path(save_dir) / task_name
+    os.makedirs(save_dir_task, exist_ok=True)
 
     # Task-specific object setup: set default object_dir for climbing if not provided
     if task_type == "climbing" and task_config.object_dir is None:
@@ -211,7 +214,7 @@ def process_single_task(args):
         human_joints = human_joints_original.copy()
         object_poses = object_poses_original.copy()
         aug_name = aug_config["name"]
-        file_name = f"{save_dir}/{task_name}_{aug_name}.npz"
+        file_name = str(save_dir_task / f"{task_name}_{aug_name}.npz")
 
         print(f"  Processing augmentation: {aug_name}")
 
@@ -276,7 +279,7 @@ def process_single_task(args):
                 retargeter,
                 task_config,
                 is_augmentation_run,
-                save_dir,
+                save_dir_task,
                 task_name,
                 augmentation_translation=aug_config["translation"],
                 augmentation_rotation=aug_config["rotation"],
@@ -292,7 +295,7 @@ def process_single_task(args):
                 retargeter,
                 task_config,
                 is_augmentation_run,
-                save_dir,
+                save_dir_task,
                 task_name,
             )
 

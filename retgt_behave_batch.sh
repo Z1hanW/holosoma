@@ -26,7 +26,7 @@ cd "${REPO_ROOT}"
 DATA_ROOT=${DATA_ROOT:-"/data/behave/annotation_30fps_zup"}
 OBJECT_ROOT=${OBJECT_ROOT:-"/data/behave/objects"}
 ROBOT=${ROBOT:-"g1"}
-SAVE_DIR=${SAVE_DIR:-"demo_results/${ROBOT}/object_interaction/behave_zup"}
+SAVE_DIR=${SAVE_DIR:-"${REPO_ROOT}/src/holosoma_retargeting/demo_results/${ROBOT}/object_interaction/behave_zup"}
 MAX_WORKERS=${MAX_WORKERS:-""}
 AUGMENT=${AUGMENT:-"False"}
 
