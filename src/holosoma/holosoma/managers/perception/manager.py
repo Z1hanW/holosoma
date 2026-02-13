@@ -665,6 +665,34 @@ class PerceptionManager:
         depth = torch.where(hit_mask, depth, torch.full_like(depth, self.cfg.max_distance))
         return torch.clamp(depth, min=0.0, max=self.cfg.max_distance)
 
+    def _apply_camera_depth_noise(self, depth: torch.Tensor) -> torch.Tensor:
+        std_mult = getattr(self.env, "_perception_camera_noise_std_mult", None)
+        drop_prob = getattr(self.env, "_perception_camera_noise_drop_prob", None)
+        if std_mult is None and drop_prob is None:
+            return depth
+
+        depth_out = depth
+        if std_mult is not None:
+            if isinstance(std_mult, torch.Tensor):
+                std = std_mult.to(depth.device)
+                if std.ndim == 1:
+                    std = std.view(-1, 1, 1)
+            else:
+                std = torch.tensor(float(std_mult), device=depth.device)
+            depth_out = depth_out + torch.randn_like(depth_out) * (depth_out * std)
+
+        if drop_prob is not None:
+            if isinstance(drop_prob, torch.Tensor):
+                prob = drop_prob.to(depth.device)
+                if prob.ndim == 1:
+                    prob = prob.view(-1, 1, 1)
+            else:
+                prob = torch.tensor(float(drop_prob), device=depth.device)
+            mask = torch.rand_like(depth_out) < prob
+            depth_out = torch.where(mask, torch.full_like(depth_out, self.cfg.max_distance), depth_out)
+
+        return torch.clamp(depth_out, min=0.0, max=self.cfg.max_distance)
+
     def _setup_rendered_camera(self) -> None:
         if get_simulator_type() != SimulatorType.ISAACSIM:
             raise RuntimeError(
@@ -764,6 +792,10 @@ class PerceptionManager:
                 self._warned_robot_mesh = True
             return
 
+        allowlist = getattr(self.env, "_perception_camera_mesh_allowlist", None)
+        if allowlist is not None:
+            allowlist = {str(name) for name in allowlist}
+
         name_to_index = {name: idx for idx, name in enumerate(body_names)}
         link_meshes: dict[int, list[tuple[torch.Tensor, torch.Tensor]]] = {}
         urdf_dir = os.path.dirname(urdf_path)
@@ -787,6 +819,9 @@ class PerceptionManager:
                 if resolved is None:
                     continue
                 parent_name, offset_pos, offset_quat = resolved
+
+            if allowlist is not None and link_name not in allowlist and parent_name not in allowlist:
+                continue
 
             link_index = name_to_index.get(parent_name)
             if link_index is None:
@@ -1050,6 +1085,17 @@ class PerceptionManager:
             offset_quat = self._camera_body_offset_quat.expand(body_pos.shape[0], -1)
             body_pos = body_pos + quat_apply(body_quat, offset_pos, w_last=True)
             body_quat = quat_mul(body_quat, offset_quat, w_last=True)
+        extra_pos = getattr(self.env, "_perception_camera_offset_pos", None)
+        extra_quat = getattr(self.env, "_perception_camera_offset_quat", None)
+        if extra_pos is not None and extra_quat is not None:
+            if isinstance(idx, slice):
+                offset_pos = extra_pos
+                offset_quat = extra_quat
+            else:
+                offset_pos = extra_pos[idx]
+                offset_quat = extra_quat[idx]
+            body_pos = body_pos + quat_apply(body_quat, offset_pos, w_last=True)
+            body_quat = quat_mul(body_quat, offset_quat, w_last=True)
         return body_pos, body_quat
 
     def _compute_rays(
@@ -1105,7 +1151,8 @@ class PerceptionManager:
         hit_mask = torch.isfinite(ray_hits_world).all(dim=-1)
         ranges = self._compute_camera_ray_distances(ray_starts, ray_dirs_world, ray_hits_world)
         depth = self._project_ranges_to_camera_depth(ranges, ray_dirs_world, body_quat, hit_mask)
-        return depth.view(num_envs, self._camera_height, self._camera_width)
+        depth = depth.view(num_envs, self._camera_height, self._camera_width)
+        return self._apply_camera_depth_noise(depth)
 
     def _compute_camera_scandots_depth(self, env_ids: torch.Tensor | None) -> torch.Tensor:
         if self._warp_mesh is None:
@@ -1148,7 +1195,8 @@ class PerceptionManager:
             )
         else:
             depth = F.interpolate(depth, size=(self._camera_height, self._camera_width), mode=upsample_mode)
-        return depth.squeeze(1)
+        depth = depth.squeeze(1)
+        return self._apply_camera_depth_noise(depth)
 
     def _maybe_auto_tilt_camera(self, depth_map: torch.Tensor, env_ids: torch.Tensor | None) -> bool:
         target_pitch_deg = getattr(self.cfg, "camera_target_pitch_deg", None)

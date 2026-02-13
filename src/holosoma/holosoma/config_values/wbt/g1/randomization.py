@@ -2,6 +2,38 @@
 
 from holosoma.config_types.randomization import RandomizationManagerCfg, RandomizationTermCfg
 
+CAMERA_RAYCAST_MESH_ALLOWLIST = [
+    "pelvis",
+    "left_hip_pitch_link",
+    "left_hip_roll_link",
+    "left_hip_yaw_link",
+    "left_knee_link",
+    "left_ankle_pitch_link",
+    "left_ankle_roll_link",
+    "right_hip_pitch_link",
+    "right_hip_roll_link",
+    "right_hip_yaw_link",
+    "right_knee_link",
+    "right_ankle_pitch_link",
+    "right_ankle_roll_link",
+    "waist_yaw_link",
+    "waist_roll_link",
+    "left_shoulder_pitch_link",
+    "left_shoulder_roll_link",
+    "left_shoulder_yaw_link",
+    "left_elbow_link",
+    "left_wrist_roll_link",
+    "left_wrist_pitch_link",
+    "left_wrist_yaw_link",
+    "right_shoulder_pitch_link",
+    "right_shoulder_roll_link",
+    "right_shoulder_yaw_link",
+    "right_elbow_link",
+    "right_wrist_roll_link",
+    "right_wrist_pitch_link",
+    "right_wrist_yaw_link",
+]
+
 robot_state_dr_at_setup = {
     "randomize_robot_rigid_body_material_startup": RandomizationTermCfg(
         func="holosoma.managers.randomization.terms.locomotion:randomize_robot_rigid_body_material_startup",
@@ -23,6 +55,13 @@ robot_state_dr_at_setup = {
         params={
             "dof_pos_bias_range": [-0.025, 0.025],
             "enabled": True,
+        },
+    ),
+    "setup_camera_raycast_randomization": RandomizationTermCfg(
+        func="holosoma.managers.randomization.terms.locomotion:setup_camera_raycast_randomization",
+        params={
+            "enabled": True,
+            "mesh_allowlist": CAMERA_RAYCAST_MESH_ALLOWLIST,
         },
     ),
 }
@@ -109,6 +148,16 @@ base_reset_terms = {
             "joint_vel_range": [0.0, 0.0],
             "joint_pos_bias_range": [-0.025, 0.025],
             "randomize_dof_pos_bias": True,
+        },
+    ),
+    "randomize_camera_raycast": RandomizationTermCfg(
+        func="holosoma.managers.randomization.terms.locomotion:randomize_camera_raycast",
+        params={
+            "enabled": True,
+            "translation_range": {"x": [-0.025, 0.025], "y": [-0.025, 0.025], "z": [-0.025, 0.025]},
+            "rotation_range_deg": {"roll": [-2.5, 2.5], "pitch": [-3.0, 3.0], "yaw": [-2.5, 2.5]},
+            "noise_std_mult_range": [0.0, 0.05],
+            "noise_drop_prob_range": [0.0, 0.025],
         },
     ),
 }

@@ -11,9 +11,10 @@ set -euo pipefail
 #   OUTPUT_MOTION_DIR=/ABS/PATH OUT_GEOMETRY_DIR=/ABS/PATH OUT_OBJECT_DIR=/ABS/PATH
 #   DIST_THRESH=0.15  # (optional) max distance to hand-line segment
 
-MOTION_DIR=${MOTION_DIR:-""}
+# Keep defaults aligned with vis_motion_geometry.sh.
+MOTION_DIR=${MOTION_DIR:-"/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/demo_results_parallel/g1/object_interaction/omomo"}
 GEOMETRY_DIR=${GEOMETRY_DIR:-""}
-OBJECT_URDF_DIR=${OBJECT_URDF_DIR:-""}
+OBJECT_URDF_DIR=${OBJECT_URDF_DIR:-"/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/models/largebox/largebox.urdf"}
 ROBOT=${ROBOT:-"g1_29dof"}
 LEFT_LINK=${LEFT_LINK:-""}
 RIGHT_LINK=${RIGHT_LINK:-""}
@@ -21,11 +22,6 @@ OUTPUT_MOTION_DIR=${OUTPUT_MOTION_DIR:-""}
 OUTPUT_GEOMETRY_DIR=${OUTPUT_GEOMETRY_DIR:-""}
 OUTPUT_OBJECT_DIR=${OUTPUT_OBJECT_DIR:-""}
 DIST_THRESH=${DIST_THRESH:-""}
-
-if [[ -z "${MOTION_DIR}" ]]; then
-  echo "[ERROR] MOTION_DIR is required." >&2
-  exit 1
-fi
 
 export MOTION_DIR GEOMETRY_DIR OBJECT_URDF_DIR ROBOT LEFT_LINK RIGHT_LINK
 export OUTPUT_MOTION_DIR OUTPUT_GEOMETRY_DIR OUTPUT_OBJECT_DIR DIST_THRESH
@@ -172,18 +168,29 @@ def _between_hands(
 
 
 def main() -> None:
-    env = dict(**{k: v for k, v in vars(__import__("os").environ).items()})
+    import os
 
-    motion_dir = _resolve_data_path(env["MOTION_DIR"])
-    geometry_dir = _resolve_data_path(env["GEOMETRY_DIR"]) if env.get("GEOMETRY_DIR") else None
-    object_dir = _resolve_data_path(env["OBJECT_URDF_DIR"]) if env.get("OBJECT_URDF_DIR") else None
-    robot_name = env.get("ROBOT", "g1_29dof")
-    left_link_override = env.get("LEFT_LINK", "").strip()
-    right_link_override = env.get("RIGHT_LINK", "").strip()
-    out_motion = _resolve_data_path(env["OUTPUT_MOTION_DIR"]) if env.get("OUTPUT_MOTION_DIR") else None
-    out_geometry = _resolve_data_path(env["OUTPUT_GEOMETRY_DIR"]) if env.get("OUTPUT_GEOMETRY_DIR") else None
-    out_object = _resolve_data_path(env["OUTPUT_OBJECT_DIR"]) if env.get("OUTPUT_OBJECT_DIR") else None
-    dist_thresh = env.get("DIST_THRESH", "").strip()
+    motion_dir = _resolve_data_path(
+        os.environ.get(
+            "MOTION_DIR",
+            "/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/demo_results_parallel/g1/object_interaction/omomo",
+        )
+    )
+    geometry_raw = os.environ.get("GEOMETRY_DIR", "").strip()
+    geometry_dir = _resolve_data_path(geometry_raw) if geometry_raw else None
+    object_raw = os.environ.get(
+        "OBJECT_URDF_DIR",
+        "/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/models/largebox/largebox.urdf",
+    ).strip()
+    robot_name = os.environ.get("ROBOT", "g1_29dof")
+    left_link_override = os.environ.get("LEFT_LINK", "").strip()
+    right_link_override = os.environ.get("RIGHT_LINK", "").strip()
+    out_motion = _resolve_data_path(os.environ["OUTPUT_MOTION_DIR"]) if os.environ.get("OUTPUT_MOTION_DIR") else None
+    out_geometry = (
+        _resolve_data_path(os.environ["OUTPUT_GEOMETRY_DIR"]) if os.environ.get("OUTPUT_GEOMETRY_DIR") else None
+    )
+    out_object = _resolve_data_path(os.environ["OUTPUT_OBJECT_DIR"]) if os.environ.get("OUTPUT_OBJECT_DIR") else None
+    dist_thresh = os.environ.get("DIST_THRESH", "").strip()
     dist_thresh_val = float(dist_thresh) if dist_thresh else None
 
     if not motion_dir.is_dir():
@@ -198,10 +205,28 @@ def main() -> None:
     obj_map: dict[str, Path] = {}
     pair_names = sorted(motion_map)
 
+    if geometry_dir is not None and not geometry_dir.is_dir():
+        geometry_dir = None
+
     if geometry_dir is not None:
         geom_paths = sorted(list(geometry_dir.glob("*.obj")) + list(geometry_dir.glob("*.OBJ")))
         geom_map = {p.stem: p for p in geom_paths}
         pair_names = sorted(set(pair_names) & set(geom_map))
+
+    object_dir: Path | None = None
+    object_urdf_path: Path | None = None
+    if object_raw:
+        obj_path = _resolve_data_path(object_raw)
+        if obj_path.is_file():
+            object_urdf_path = obj_path
+        elif obj_path.is_dir():
+            object_dir = obj_path
+
+    if object_dir is not None and not object_dir.is_dir():
+        object_dir = None
+
+    if object_urdf_path is not None and not object_urdf_path.exists():
+        object_urdf_path = None
 
     if object_dir is not None:
         obj_paths = sorted(list(object_dir.glob("*.urdf")) + list(object_dir.glob("*.URDF")))
@@ -215,8 +240,11 @@ def main() -> None:
         out_motion = motion_dir.parent / f"{motion_dir.name}_carry"
     if geometry_dir is not None and out_geometry is None:
         out_geometry = geometry_dir.parent / f"{geometry_dir.name}_carry"
-    if object_dir is not None and out_object is None:
-        out_object = object_dir.parent / f"{object_dir.name}_carry"
+    if (object_dir is not None or object_urdf_path is not None) and out_object is None:
+        if object_dir is not None:
+            out_object = object_dir.parent / f"{object_dir.name}_carry"
+        else:
+            out_object = object_urdf_path.parent / f"{object_urdf_path.stem}_carry"
 
     out_motion.mkdir(parents=True, exist_ok=True)
     if out_geometry is not None:
@@ -303,10 +331,15 @@ def main() -> None:
             out_geom_path = out_geometry / f"{geom_path.stem}_carry{geom_path.suffix}"
             shutil.copy2(geom_path, out_geom_path)
 
-        if out_object is not None and name in obj_map:
-            obj_path = obj_map[name]
-            out_obj_path = out_object / f"{obj_path.stem}_carry{obj_path.suffix}"
-            shutil.copy2(obj_path, out_obj_path)
+        if out_object is not None:
+            if object_urdf_path is not None:
+                out_obj_path = out_object / f"{object_urdf_path.stem}_carry{object_urdf_path.suffix}"
+                if not out_obj_path.exists():
+                    shutil.copy2(object_urdf_path, out_obj_path)
+            elif name in obj_map:
+                obj_path = obj_map[name]
+                out_obj_path = out_object / f"{obj_path.stem}_carry{obj_path.suffix}"
+                shutil.copy2(obj_path, out_obj_path)
 
         kept += 1
 

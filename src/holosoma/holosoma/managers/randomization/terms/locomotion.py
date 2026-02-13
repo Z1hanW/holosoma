@@ -14,6 +14,7 @@ from holosoma.managers.randomization.base import RandomizationTermBase
 from holosoma.managers.randomization.exceptions import RandomizerNotSupportedError
 from holosoma.simulator import mujoco_required_field
 from holosoma.simulator.shared.field_decorators import MUJOCO_FIELD_ATTR
+from holosoma.utils.rotations import quat_from_euler_xyz
 from holosoma.utils.torch_utils import torch_rand_float
 
 if TYPE_CHECKING:
@@ -1175,3 +1176,119 @@ def apply_pushes(
     state.resample(push_robot_env_ids)
     env._max_push_vel = state.max_push_vel.clone()
     env._push_robots(push_robot_env_ids)
+
+
+def _camera_raycast_enabled(env: Any) -> bool:
+    pm = getattr(env, "perception_manager", None)
+    if pm is None or not hasattr(pm, "cfg"):
+        return False
+    cfg = pm.cfg
+    return bool(
+        getattr(cfg, "output_mode", "") == "camera_depth"
+        and getattr(cfg, "camera_source", "") in {"mesh_raycast", "mesh_raycast_scandots"}
+    )
+
+
+def setup_camera_raycast_randomization(
+    env: Any,
+    *,
+    enabled: bool = True,
+    mesh_allowlist: Sequence[str] | None = None,
+    **_,
+) -> None:
+    """Configure camera raycast options before perception setup."""
+    if not enabled:
+        return
+    if mesh_allowlist is not None:
+        env._perception_camera_mesh_allowlist = list(mesh_allowlist)
+
+
+def randomize_camera_raycast(
+    env: Any,
+    env_ids: torch.Tensor | Sequence[int] | None,
+    *,
+    enabled: bool = True,
+    translation_range: dict[str, Sequence[float]] | Sequence[float] | float | None = None,
+    rotation_range_deg: dict[str, Sequence[float]] | Sequence[float] | float | None = None,
+    noise_std_mult_range: Sequence[float] | float | None = None,
+    noise_drop_prob_range: Sequence[float] | float | None = None,
+    **_,
+) -> None:
+    """Randomize camera pose jitter and depth noise for raycast depth cameras."""
+    if not enabled or not _camera_raycast_enabled(env):
+        return
+
+    idx = _ensure_env_ids_tensor(env, env_ids)
+    if idx.numel() == 0:
+        return
+
+    device = env.device
+
+    if not hasattr(env, "_perception_camera_offset_pos"):
+        env._perception_camera_offset_pos = torch.zeros((env.num_envs, 3), device=device)
+        env._perception_camera_offset_quat = torch.zeros((env.num_envs, 4), device=device)
+        env._perception_camera_offset_quat[:, 3] = 1.0
+
+    if translation_range is not None or rotation_range_deg is not None:
+        def _parse_vec_range(spec, keys):
+            if spec is None:
+                return None
+            if isinstance(spec, (list, tuple)) and len(spec) == 2:
+                mins = torch.tensor([float(spec[0])] * len(keys), device=device)
+                maxs = torch.tensor([float(spec[1])] * len(keys), device=device)
+                return mins, maxs
+            if isinstance(spec, (int, float)):
+                mins = torch.tensor([float(spec)] * len(keys), device=device)
+                maxs = torch.tensor([float(spec)] * len(keys), device=device)
+                return mins, maxs
+            if isinstance(spec, dict):
+                mins = []
+                maxs = []
+                for key in keys:
+                    val = spec.get(key, [0.0, 0.0])
+                    if isinstance(val, (list, tuple)) and len(val) == 2:
+                        mins.append(float(val[0]))
+                        maxs.append(float(val[1]))
+                    else:
+                        v = float(val)
+                        mins.append(v)
+                        maxs.append(v)
+                return torch.tensor(mins, device=device), torch.tensor(maxs, device=device)
+            raise ValueError("Invalid range spec for camera randomization.")
+
+        trans_range = _parse_vec_range(translation_range, ("x", "y", "z"))
+        if trans_range is not None:
+            t_min, t_max = trans_range
+            rand = torch.rand((idx.numel(), 3), device=device)
+            env._perception_camera_offset_pos[idx] = t_min + (t_max - t_min) * rand
+
+        rot_range = _parse_vec_range(rotation_range_deg, ("roll", "pitch", "yaw"))
+        if rot_range is not None:
+            r_min, r_max = rot_range
+            rand = torch.rand((idx.numel(), 3), device=device)
+            rot_deg = r_min + (r_max - r_min) * rand
+            rot_rad = torch.deg2rad(rot_deg)
+            quat = quat_from_euler_xyz(rot_rad[:, 0], rot_rad[:, 1], rot_rad[:, 2])
+            env._perception_camera_offset_quat[idx] = quat
+
+    def _sample_scalar(spec):
+        if spec is None:
+            return None
+        if isinstance(spec, (list, tuple)) and len(spec) == 2:
+            low, high = float(spec[0]), float(spec[1])
+        else:
+            low = high = float(spec)
+        return torch_rand_float(low, high, (idx.numel(),), device=device)
+
+    std_mult = _sample_scalar(noise_std_mult_range)
+    drop_prob = _sample_scalar(noise_drop_prob_range)
+
+    if std_mult is not None:
+        if not hasattr(env, "_perception_camera_noise_std_mult"):
+            env._perception_camera_noise_std_mult = torch.zeros((env.num_envs,), device=device)
+        env._perception_camera_noise_std_mult[idx] = std_mult
+
+    if drop_prob is not None:
+        if not hasattr(env, "_perception_camera_noise_drop_prob"):
+            env._perception_camera_noise_drop_prob = torch.zeros((env.num_envs,), device=device)
+        env._perception_camera_noise_drop_prob[idx] = drop_prob
