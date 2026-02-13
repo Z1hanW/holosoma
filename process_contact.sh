@@ -23,6 +23,7 @@ SEQ_NAME=${SEQ_NAME:-""}
 python - <<'PY'
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -35,10 +36,14 @@ try:
 except Exception as exc:  # pragma: no cover - defensive
     raise RuntimeError("matplotlib is required for plotting velocity curves.") from exc
 
-DATA_ROOT = Path("${DATA_ROOT}")
-OUT_ROOT = Path("${OUT_ROOT}")
-FPS = float("${FPS}")
-SEQ_NAME = "${SEQ_NAME}".strip()
+DATA_ROOT = Path(os.environ.get("DATA_ROOT", "/data/behave/annotation_30fps_zup"))
+OUT_ROOT = Path(os.environ.get("OUT_ROOT", "velocity"))
+fps_raw = os.environ.get("FPS", "30")
+SEQ_NAME = os.environ.get("SEQ_NAME", "").strip()
+try:
+    FPS = float(fps_raw)
+except ValueError as exc:
+    raise ValueError(f"Invalid FPS value: {fps_raw}") from exc
 
 if not DATA_ROOT.exists():
     raise FileNotFoundError(f"Missing DATA_ROOT: {DATA_ROOT}")
