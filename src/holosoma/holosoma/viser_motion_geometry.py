@@ -39,6 +39,7 @@ class MotionGeometryViewerConfig:
     geometry_dir: str
     object_urdf: str = ""
     object_urdf_dir: str = ""
+    object_urdf_mode: str = "stem"
     robot: str = "g1_29dof"
     port: int = 0
     fps: int | None = None
@@ -75,6 +76,7 @@ def _list_pairs(
     motion_dir: Path,
     geometry_dir: Path | None,
     object_urdf_dir: Path | None,
+    object_urdf_mode: str = "stem",
 ) -> tuple[list[str], dict[str, Path], dict[str, Path], bool, dict[str, Path], bool]:
     motion_paths = sorted(list(motion_dir.glob("*.npz")) + list(motion_dir.glob("*.NPZ")))
     motion_map = {path.stem: path for path in motion_paths}
@@ -105,9 +107,29 @@ def _list_pairs(
                 logger.warning("No motion for geometry: {}", missing_motion[:10])
 
     if object_urdf_dir is not None:
-        urdf_paths = sorted(list(object_urdf_dir.glob("*.urdf")) + list(object_urdf_dir.glob("*.URDF")))
-        object_map = {path.stem: path for path in urdf_paths}
-        shared_obj = sorted(set(pair_names) & set(object_map))
+        mode = (object_urdf_mode or "stem").strip().lower()
+        recursive = mode in {"recursive", "behave"}
+        if recursive:
+            urdf_paths = sorted(list(object_urdf_dir.rglob("*.urdf")) + list(object_urdf_dir.rglob("*.URDF")))
+        else:
+            urdf_paths = sorted(list(object_urdf_dir.glob("*.urdf")) + list(object_urdf_dir.glob("*.URDF")))
+
+        if mode == "behave":
+            object_by_name = {path.stem.lower(): path for path in urdf_paths}
+            for clip_name in pair_names:
+                parts = clip_name.split("_")
+                if len(parts) > 2:
+                    obj_key = parts[2].lower()
+                else:
+                    obj_key = clip_name.lower()
+                urdf_path = object_by_name.get(obj_key)
+                if urdf_path is not None:
+                    object_map[clip_name] = urdf_path
+            shared_obj = sorted(object_map.keys())
+        else:
+            object_map = {path.stem: path for path in urdf_paths}
+            shared_obj = sorted(set(pair_names) & set(object_map))
+
         if not shared_obj:
             logger.warning(
                 "No matching motion/object URDF pairs found. Disabling object URDF. motions=%d urdf=%d",
@@ -223,7 +245,7 @@ def run_viewer(cfg: MotionGeometryViewerConfig) -> None:
         object_available = True
     else:
         pair_names, motion_map, geom_map, geometry_available, object_map, object_available = _list_pairs(
-            motion_dir, geometry_dir, object_dir
+            motion_dir, geometry_dir, object_dir, cfg.object_urdf_mode
         )
 
     if cfg.start_clip and cfg.start_clip not in pair_names:

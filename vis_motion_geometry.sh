@@ -13,6 +13,7 @@ set -euo pipefail
 MOTION_DIR=${MOTION_DIR:-"/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/demo_results_parallel/g1/object_interaction/omomo"}
 GEOMETRY_DIR=${GEOMETRY_DIR:-""}
 OBJECT_URDF_DIR=${OBJECT_URDF_DIR:-"/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/models/largebox/largebox.urdf"}
+OBJECT_URDF_MODE=${OBJECT_URDF_MODE:-"stem"}
 
 OBJECT_URDF=${OBJECT_URDF:-""}
 ROBOT=${ROBOT:-"g1_29dof"}
@@ -88,6 +89,7 @@ cmd=(
   --geometry-dir "${GEOMETRY_DIR}"
   --object-urdf "${OBJECT_URDF}"
   --object-urdf-dir "${OBJECT_URDF_DIR}"
+  --object-urdf-mode "${OBJECT_URDF_MODE}"
   --robot "${ROBOT}"
   --port "${PORT}"
   --autoplay "${AUTOPLAY}"
