@@ -64,7 +64,10 @@ class BadTracking(TerminationTermBase):
             f"termination.params['body_names_to_track']: {self.body_names_to_track}"
         )
 
-        # return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        # During evaluation, disable BadTracking-based termination entirely.
+        if self.env.is_evaluating:
+            return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
         bad_ref_pos = self.bad_ref_pos(motion_command)
         bad_ref_ori = self.bad_ref_ori(motion_command)
         bad_motion_body_pos = self.bad_motion_body_pos(motion_command)

@@ -1,1 +1,0 @@
-"""Termination term implementations."""
