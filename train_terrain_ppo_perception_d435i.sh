@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DEPTH_IMPL=${DEPTH_IMPL:-rendered}
+DEPTH_IMPL=${DEPTH_IMPL:-raycast}
 if [[ "${DEPTH_IMPL}" == "raycast" ]]; then
   IMAGE_WIDTH=${IMAGE_WIDTH:-106}
   IMAGE_HEIGHT=${IMAGE_HEIGHT:-60}

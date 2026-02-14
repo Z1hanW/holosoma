@@ -14,6 +14,8 @@ MOTION_DIR=${MOTION_DIR:-"/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/dem
 GEOMETRY_DIR=${GEOMETRY_DIR:-""}
 OBJECT_URDF_DIR=${OBJECT_URDF_DIR:-"/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/models/behave_objects"}
 OBJECT_URDF_MODE=${OBJECT_URDF_MODE:-"behave"}
+OBJECT_URDF=${OBJECT_URDF:-""}
+ROBOT=${ROBOT:-"g1_29dof"}
 PORT=${PORT:-"$((RANDOM % 8976 + 1024))"}
 START_CLIP=${START_CLIP:-""}
 FPS=${FPS:-""}
@@ -45,19 +47,35 @@ else
   fi
 fi
 
+object_mode_lc=$(printf "%s" "${OBJECT_URDF_MODE}" | tr '[:upper:]' '[:lower:]')
+object_mode_recursive="false"
+if [[ "${object_mode_lc}" == "recursive" || "${object_mode_lc}" == "behave" ]]; then
+  object_mode_recursive="true"
+fi
+
 if [[ -n "${OBJECT_URDF_DIR}" ]]; then
   if [[ ! -d "${OBJECT_URDF_DIR}" ]]; then
     echo "[WARN] object urdf dir not found: ${OBJECT_URDF_DIR} (disabling object)"
     OBJECT_URDF_DIR=""
     SHOW_OBJECT="False"
   else
-    shopt -s nullglob
-    _urdf_files=("${OBJECT_URDF_DIR}"/*.urdf "${OBJECT_URDF_DIR}"/*.URDF)
-    shopt -u nullglob
+    if [[ "${object_mode_recursive}" == "true" ]]; then
+      _urdf_files=()
+      while IFS= read -r -d '' _f; do
+        _urdf_files+=("$_f")
+      done < <(find "${OBJECT_URDF_DIR}" -type f \( -name "*.urdf" -o -name "*.URDF" \) -print0)
+    else
+      shopt -s nullglob
+      _urdf_files=("${OBJECT_URDF_DIR}"/*.urdf "${OBJECT_URDF_DIR}"/*.URDF)
+      shopt -u nullglob
+    fi
     if (( ${#_urdf_files[@]} == 0 )); then
       echo "[WARN] object urdf dir is empty: ${OBJECT_URDF_DIR} (disabling object)"
       OBJECT_URDF_DIR=""
       SHOW_OBJECT="False"
+    elif (( ${#_urdf_files[@]} == 1 )) && [[ "${object_mode_recursive}" == "false" ]]; then
+      OBJECT_URDF="${_urdf_files[0]}"
+      OBJECT_URDF_DIR=""
     fi
   fi
 fi
@@ -77,6 +95,7 @@ cmd=(
   --geometry-dir "${GEOMETRY_DIR}"
   --object-urdf "${OBJECT_URDF}"
   --object-urdf-dir "${OBJECT_URDF_DIR}"
+  --object-urdf-mode "${OBJECT_URDF_MODE}"
   --robot "${ROBOT}"
   --port "${PORT}"
   --autoplay "${AUTOPLAY}"
