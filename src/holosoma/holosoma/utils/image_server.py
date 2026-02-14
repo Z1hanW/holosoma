@@ -12,11 +12,12 @@ from holosoma.utils.rate import RateLimiter
 
 # mainly an interface with camera.
 class MujocoCameraRenderer:
-    def __init__(self, simulator: MuJoCo, height: int, width: int, camera_names: list[str] | None = None) -> None:
+    def __init__(self, simulator: MuJoCo, height: int, width: int, camera_names: list[str] | None = None, znear: float = 0.001) -> None:
 
         self.simulator: MuJoCo = simulator
         self._height = height
         self._width = width
+        self._znear = znear
         self.camera_names = camera_names or [
             "robot_cam_front_depth",
             "robot_cam_back_depth"
@@ -40,6 +41,9 @@ class MujocoCameraRenderer:
 
     def get_frames(self):
         renderer = self._get_renderer()
+        # Set znear before every render to prevent other components from overriding it
+        extent = self.simulator.root_model.stat.extent
+        self.simulator.root_model.vis.map.znear = self._znear / extent
         world_id = getattr(self.simulator, "current_world_id", 0)
         render_data = self.simulator.backend.get_render_data(world_id=world_id)
 
@@ -69,6 +73,7 @@ class ImageServer:
         crop_x_end: int|None = None,
         crop_y_end: int|None = None,
         image_show: bool = False,
+        render_near_plane: float = 0.001,
     ):
         self.image_type = image_type
         self.near_clip = near_clip
@@ -80,9 +85,16 @@ class ImageServer:
         self.image_show = image_show
         self.expected_shape = (resized_height, resized_width)
         self.frame_rate = frame_rate
+        self.render_near_plane = render_near_plane
 
         # Initialize camera renderer
-        self.camera = MujocoCameraRenderer(simulator, renderer_height, renderer_width, camera_names)
+        self.camera = MujocoCameraRenderer(
+            simulator,
+            renderer_height,
+            renderer_width,
+            camera_names,
+            znear=self.render_near_plane,
+        )
         self.num_cameras = len(self.camera.camera_names)
 
         # Initialize shared memory
