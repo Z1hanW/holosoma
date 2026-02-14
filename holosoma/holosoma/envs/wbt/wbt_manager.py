@@ -192,6 +192,10 @@ class WholeBodyTrackingManager(BaseTask):
             self._draw_debug_vis_isaacgym()
 
     def step_visualize_motion(self, actions):
+        if hasattr(self, "_viser_live") and getattr(self._viser_live, "enabled", False):
+            self._viser_live.apply_pending_controls()
+            self._viser_live.wait_if_paused()
+
         motion_command = self.command_manager.get_state("motion_command")
         dt = 1.0 / float(motion_command.motion.fps)
         motion_command.step()
@@ -236,6 +240,9 @@ class WholeBodyTrackingManager(BaseTask):
         self.simulator.sim.forward()
         self.simulator.sim.render()
         self.simulator.refresh_sim_tensors()
+        if hasattr(self, "_viser_live"):
+            self._viser_live.record_step()
+        self._draw_scandots_in_viewer()
 
         time.sleep(dt)
 
