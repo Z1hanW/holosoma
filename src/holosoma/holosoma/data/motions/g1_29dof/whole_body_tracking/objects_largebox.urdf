@@ -25,7 +25,7 @@
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <box size="0.47115421 0.45873013 0.40789548"/>
+        <mesh filename="largebox.obj" scale="1.0 1.0 1.0"/>
       </geometry>
     </collision>
   </link>

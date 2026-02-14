@@ -96,7 +96,6 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" torchrun --nproc_per_node="${NPRO
   --training.viser_show_scandots="${VISER_SHOW_SCANDOTS}" \
   --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_FILE}" \
   --algo.config.save_interval=500 \
-  --reward.terms.undesired_contacts.weight=0.0 \
   logger:wandb \
   --logger.video.interval=2000 \
   "${EXTRA_ARGS[@]}"
