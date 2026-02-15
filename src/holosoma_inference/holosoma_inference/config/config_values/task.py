@@ -60,7 +60,7 @@ loco_manip_stand_height_waist = TaskConfig(
 
 # Depth distillation task (far-tracking two-model architecture)
 wbt_distillation = TaskConfig(
-    model_path=["/home/ANT.AMAZON.COM/lujiey/workplace/FAR-Holosoma/models/depth_backbone.onnx", "/home/ANT.AMAZON.COM/lujiey/workplace/FAR-Holosoma/models/student.onnx"],  # [depth_backbone.onnx, student.onnx] - must be provided by user
+    model_path=["/home/ANT.AMAZON.COM/lujiey/workspace/FAR-Holosoma/src/holosoma_inference/holosoma_inference/models/parkour/depth_backbone.onnx", "/home/ANT.AMAZON.COM/lujiey/workspace/FAR-Holosoma/src/holosoma_inference/holosoma_inference/models/parkour/student.onnx"],  # [depth_backbone.onnx, student.onnx] - must be provided by user
     rl_rate=50,
     policy_action_scale=1.0,  # read from ONNX metadata action_scale if available
     use_phase=False,
