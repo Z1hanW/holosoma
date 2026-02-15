@@ -97,8 +97,23 @@ class ImageServerConfig:
     image_saver_config: ImageSaverConfig = field(default_factory=ImageSaverConfig)
     """Configuration for image saver."""
 
+    frame_rate: int = 10
+    """Capture and send frequency in Hz."""
+
     num_delay_frames: int = 0
     """Number of frames to delay before sending to shared memory."""
+
+    crop_y_start: int | None = None
+    """Start row for cropping depth frames before resize. None means no crop."""
+
+    crop_y_end: int | None = None
+    """End row for cropping depth frames before resize. None means no crop."""
+
+    crop_x_start: int | None = None
+    """Start column for cropping depth frames before resize. None means no crop."""
+
+    crop_x_end: int | None = None
+    """End column for cropping depth frames before resize. None means no crop."""
 
     def __post_init__(self):
         if self.depth_source == "depth_gum" and not self.enable_gum_depth_prediction:

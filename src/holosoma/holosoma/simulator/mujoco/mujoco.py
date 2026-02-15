@@ -87,32 +87,40 @@ class MuJoCoScene:
 
 
 class MujocoRendererWrapper:
-    def __init__(self, simulator: 'MuJoCo') -> None:
+    def __init__(
+        self,
+        simulator: 'MuJoCo',
+        height: int = 135,
+        width: int = 240,
+        camera_names: list[str] | None = None,
+        znear: float = 0.001,
+    ) -> None:
 
-        # TODO: get height/width of renderer from config
-        self._height = 135
-        self._width = 240
-        self.camera_names = [
+        self._height = height
+        self._width = width
+        self._znear = znear
+        self.camera_names = camera_names or [
             "robot_cam_front_depth",
             "robot_cam_back_depth"
         ]
 
-        self.num_cameras = 2
+        self.num_cameras = len(self.camera_names)
 
         self._simulator: 'MuJoCo' = simulator
 
         self._depth_renderer: mujoco.Renderer | None = None
         self._depth_renderer_thread_id: int | None = None
+        self._depth_scene_option: mujoco.MjvOption | None = None
 
         self._rgb_renderer: mujoco.Renderer | None = None
         self._rgb_renderer_thread_id: int | None = None
 
-        # 
+        #
         self.cameras = None
 
 
     @property
-    def depth_renderer(self) -> mujoco.Renderer: 
+    def depth_renderer(self) -> mujoco.Renderer:
         """Lazy initialization of depth renderer on the rendering thread"""
         current_thread_id = threading.get_ident()
         if self._depth_renderer is None or self._depth_renderer_thread_id != current_thread_id:
@@ -121,10 +129,13 @@ class MujocoRendererWrapper:
             )
             self._depth_renderer.enable_depth_rendering()
             self._depth_renderer_thread_id = current_thread_id
+            # Exclude head mesh (group 2) from depth rendering
+            self._depth_scene_option = mujoco.MjvOption()
+            self._depth_scene_option.geomgroup[2] = 0
         return self._depth_renderer
-    
+
     @property
-    def rgb_renderer(self) -> mujoco.Renderer: 
+    def rgb_renderer(self) -> mujoco.Renderer:
         """Lazy initialization of rgb renderer on the rendering thread"""
         current_thread_id = threading.get_ident()
         if self._rgb_renderer is None or self._rgb_renderer_thread_id != current_thread_id:
@@ -133,9 +144,13 @@ class MujocoRendererWrapper:
             )
             self._rgb_renderer_thread_id = current_thread_id
         return self._rgb_renderer
-        
+
     def get_frames(self):
         """Get depth and rgb frames from the renderer."""
+
+        # Set znear before every render to prevent other components from overriding it
+        extent = self._simulator.root_model.stat.extent
+        self._simulator.root_model.vis.map.znear = self._znear / extent
 
         # Get render data from the simulator
         world_id = getattr(self._simulator, "current_world_id", 0)
@@ -146,12 +161,14 @@ class MujocoRendererWrapper:
 
         for camera_name in self.camera_names:
             # depth, already in meters
-            self.depth_renderer.update_scene(render_data, camera=camera_name)
+            self.depth_renderer.update_scene(
+                render_data, camera=camera_name, scene_option=self._depth_scene_option
+            )
             depth_frames[camera_name] = self.depth_renderer.render()
 
             self.rgb_renderer.update_scene(render_data, camera=camera_name)
             rgb_frames[camera_name] = self.rgb_renderer.render()
-        
+
         return {"depth": depth_frames, "rgb": rgb_frames}
 
 class MuJoCo(BaseSimulator):
@@ -484,6 +501,8 @@ class MuJoCo(BaseSimulator):
         self.scene_manager.add_robot(
             terrain_state, self.robot_config, xml_filter=self.simulator_config.robot_mjcf_filter
         )
+        # Always add camera after robot, in case it attaches to robot bodies
+        self.scene_manager.add_camera(self.camera_manager, self.num_envs)
 
     def _set_robot_properties(self) -> None:
         """Set robot properties including DOF names, body names, and index mappings.

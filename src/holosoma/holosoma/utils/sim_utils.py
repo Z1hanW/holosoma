@@ -345,7 +345,6 @@ class DirectSimulation:
         env: Any,
         device: str,
         simulation_app: Any,
-        image_server_kwargs: dict[str, Any] | None = None,
     ):
         """Initialize DirectSimulation instance.
 
@@ -359,16 +358,12 @@ class DirectSimulation:
             Device for tensor operations.
         simulation_app : Any
             Simulation app instance (if any).
-        image_server_kwargs : dict[str, Any] | None, optional
-            Optional keyword arguments forwarded to ImageServer (camera_names,
-            renderer dimensions, near/far clip, frame_rate, etc.).
         """
         self.config = config
         self.env = env
         self.device = device
         self.simulation_app = simulation_app
         self.simulator = env.sim
-        self._image_server_kwargs = image_server_kwargs or {}
 
     def __enter__(self) -> Self:
         """Context manager entry - initialize the simulation.
@@ -451,9 +446,11 @@ class DirectSimulation:
             self.simulator.video_recorder.start_recording(episode_id=0)
         
         # Step 8: setup the image server
+        renderer_kwargs = self._get_renderer_kwargs()
+        image_server_cfg = self._sync_image_server_config()
         self.image_server = ImageServer(
-            camera_wrapper=MujocoRendererWrapper(self.simulator), 
-            cfg=self.config.image_server)
+            camera_wrapper=MujocoRendererWrapper(self.simulator, **renderer_kwargs),
+            cfg=image_server_cfg)
         self.cam_thread = Thread(target=self.image_server.send_process)
         self.cam_thread.daemon = True
 
@@ -567,6 +564,93 @@ class DirectSimulation:
         sim_dt = 1.0 / self.config.simulator.config.sim.fps
         return max(1, int(viewer_dt / sim_dt))
 
+    def _get_camera_props(self):
+        """Extract CameraProps and camera names from the camera config.
+
+        Returns
+        -------
+        tuple[list[str], CameraProps | None]
+            List of prefixed camera names and the first CameraProps found
+            (or None if no camera terms are configured).
+        """
+        camera_cfg = self.config.camera
+        if not camera_cfg.terms:
+            return [], None
+
+        prefix = "robot_"
+        cam_names = []
+        props = None
+        for term_name, term_cfg in camera_cfg.terms.items():
+            params = term_cfg.params
+            if params.get("pose") is not None:
+                cam_names.append(f"{prefix}cam_{term_name}")
+            if props is None and "props" in params:
+                props = params["props"]
+
+        return cam_names, props
+
+    def _get_renderer_kwargs(self) -> dict[str, Any]:
+        """Derive MujocoRendererWrapper parameters from the camera config.
+
+        Returns
+        -------
+        dict[str, Any]
+            Keyword arguments forwarded to MujocoRendererWrapper.
+        """
+        cam_names, props = self._get_camera_props()
+        kwargs: dict[str, Any] = {}
+        if cam_names:
+            kwargs["camera_names"] = cam_names
+        if props is not None:
+            kwargs["height"] = props.height
+            kwargs["width"] = props.width
+        return kwargs
+
+    def _sync_image_server_config(self) -> "ImageServerConfig":
+        """Sync ImageServerConfig fields from CameraProps.
+
+        Overrides duplicated fields (resized dims, clip planes, crop, frame_rate)
+        so that the camera config is the single source of truth.
+
+        Returns
+        -------
+        ImageServerConfig
+            A new config with camera-derived fields applied.
+        """
+        from dataclasses import replace as dc_replace
+        from holosoma.config_types.image_server import ImageVisualizerConfig
+
+        _, props = self._get_camera_props()
+        cfg = self.config.image_server
+        if props is None:
+            return cfg
+
+        cfg = dc_replace(
+            cfg,
+            near_clip=props.near_clip,
+            far_clip=props.far_clip,
+            resized_height=props.resized_height,
+            resized_width=props.resized_width,
+            frame_rate=props.frame_rate,
+            crop_y_start=props.crop_y_start,
+            crop_y_end=props.crop_y_end,
+            crop_x_start=props.crop_x_start,
+            crop_x_end=props.crop_x_end,
+        )
+
+        # Also sync the visualizer clip range so depth display is correct
+        if cfg.visualize_images:
+            cfg = dc_replace(
+                cfg,
+                image_visualizer_config=ImageVisualizerConfig(
+                    near_clip=props.near_clip,
+                    far_clip=props.far_clip,
+                    scale=cfg.image_visualizer_config.scale,
+                ),
+            )
+
+        return cfg
+
     def _log_fps(self, step_count: int, fps_start_time: float) -> float:
         """Log FPS statistics for simulation performance monitoring.
 
@@ -587,54 +671,3 @@ class DirectSimulation:
         logger.info(f"Simulation FPS: {fps:.1f}")
         return time.time()
 
-    def _get_image_server_kwargs(self) -> dict[str, Any]:
-        """Build keyword arguments for ImageServer from config and stored overrides.
-
-        Extracts camera parameters from RunSimConfig.camera when available,
-        then applies any explicit overrides from _image_server_kwargs.
-
-        Returns
-        -------
-        dict[str, Any]
-            Keyword arguments forwarded to ImageServer constructor.
-        """
-        kwargs: dict[str, Any] = {}
-
-        # Auto-derive from RunSimConfig.camera if camera terms are configured
-        camera_cfg = self.config.camera
-        if camera_cfg.terms:
-            # Derive camera names (prefixed with "robot_" as MuJoCo attach does)
-            prefix = "robot_"
-            cam_names = []
-            props = None
-            for term_name, term_cfg in camera_cfg.terms.items():
-                params = term_cfg.params
-                pose = params.get("pose")
-                if pose is not None:
-                    # Camera name in XML is derived from config term name pattern
-                    # e.g. "front_depth" -> XML "cam_front_depth" -> prefixed "robot_cam_front_depth"
-                    cam_names.append(f"{prefix}cam_{term_name}")
-                if props is None and "props" in params:
-                    props = params["props"]
-
-            if cam_names:
-                kwargs["camera_names"] = cam_names
-            if props is not None:
-                kwargs["renderer_height"] = props.height
-                kwargs["renderer_width"] = props.width
-                kwargs["resized_height"] = props.resized_height
-                kwargs["resized_width"] = props.resized_width
-                kwargs["near_clip"] = props.near_clip
-                kwargs["far_clip"] = props.far_clip
-                kwargs["frame_rate"] = props.frame_rate
-                kwargs["image_type"] = props.image_type
-                kwargs["crop_y_start"] = props.crop_y_start
-                kwargs["crop_x_start"] = props.crop_x_start
-                kwargs["crop_x_end"] = props.crop_x_end
-                kwargs["crop_y_end"] = props.crop_y_end
-                kwargs["image_show"] = props.image_show
-                kwargs["latency_frame"] = props.latency_frame
-                kwargs["buffer_len"] = props.buffer_len
-        # Explicit overrides take precedence
-        kwargs.update(self._image_server_kwargs)
-        return kwargs

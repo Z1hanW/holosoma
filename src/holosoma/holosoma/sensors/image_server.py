@@ -448,6 +448,12 @@ class ImageServer:
         print("ImageServer initialized")
 
     def _resize_clip_expand_transpose(self, frame):
+        # crop
+        if any(v is not None for v in (self.cfg.crop_y_start, self.cfg.crop_y_end,
+                                        self.cfg.crop_x_start, self.cfg.crop_x_end)):
+            frame = frame[self.cfg.crop_y_start:self.cfg.crop_y_end,
+                          self.cfg.crop_x_start:self.cfg.crop_x_end]
+
         # resize
         frame = cv2.resize(frame, (self.cfg.resized_width, self.cfg.resized_height), cv2.INTER_CUBIC)
 
@@ -478,9 +484,7 @@ class ImageServer:
 
 
     def send_process(self):
-        # this thread should be running at 10hz
-
-        render_frequency = 10
+        render_frequency = self.cfg.frame_rate
         rate_limiter = RateLimiter(render_frequency)
 
         step_count = 0

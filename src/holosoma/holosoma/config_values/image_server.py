@@ -17,6 +17,19 @@ mujoco = dataclasses.replace(
     save_images=True,
 )
 
+# MuJoCo sim2sim preset for single D435i depth camera (far-tracking distillation).
+# Note: near_clip, far_clip, resized_height, resized_width, crop_*, and frame_rate
+# are auto-synced from CameraProps by sim_utils._sync_image_server_config().
+mujoco_d435i = dataclasses.replace(
+    base,
+    enable_gum_depth_prediction=False,
+    enable_zed_depth_prediction=True,
+    depth_source="depth",
+    save_images=False,
+    visualize_images=True,
+    num_delay_frames=7,
+)
+
 # Debug-friendly ZED profile with visualization and both depth sources enabled.
 real_verbose = dataclasses.replace(
     base,
@@ -53,6 +66,7 @@ real_depth_gum = dataclasses.replace(real,
 
 DEFAULTS = {
     "mujoco": mujoco,
+    "mujoco_d435i": mujoco_d435i,
     "real_verbose": real_verbose,
     "real": real,
     "real_enable_gum": real_enable_gum,
