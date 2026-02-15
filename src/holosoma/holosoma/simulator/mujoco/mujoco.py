@@ -110,14 +110,22 @@ class MujocoRendererWrapper:
 
         self._depth_renderer: mujoco.Renderer | None = None
         self._depth_renderer_thread_id: int | None = None
-        self._depth_scene_option: mujoco.MjvOption | None = None
 
         self._rgb_renderer: mujoco.Renderer | None = None
         self._rgb_renderer_thread_id: int | None = None
 
-        #
+        # Exclude head mesh (group 2) from camera rendering
+        self._scene_option: mujoco.MjvOption | None = None
+
         self.cameras = None
 
+
+    @property
+    def scene_option(self) -> mujoco.MjvOption:
+        if self._scene_option is None:
+            self._scene_option = mujoco.MjvOption()
+            self._scene_option.geomgroup[2] = 0
+        return self._scene_option
 
     @property
     def depth_renderer(self) -> mujoco.Renderer:
@@ -129,9 +137,6 @@ class MujocoRendererWrapper:
             )
             self._depth_renderer.enable_depth_rendering()
             self._depth_renderer_thread_id = current_thread_id
-            # Exclude head mesh (group 2) from depth rendering
-            self._depth_scene_option = mujoco.MjvOption()
-            self._depth_scene_option.geomgroup[2] = 0
         return self._depth_renderer
 
     @property
@@ -160,13 +165,14 @@ class MujocoRendererWrapper:
         rgb_frames = {}
 
         for camera_name in self.camera_names:
-            # depth, already in meters
             self.depth_renderer.update_scene(
-                render_data, camera=camera_name, scene_option=self._depth_scene_option
+                render_data, camera=camera_name, scene_option=self.scene_option
             )
             depth_frames[camera_name] = self.depth_renderer.render()
 
-            self.rgb_renderer.update_scene(render_data, camera=camera_name)
+            self.rgb_renderer.update_scene(
+                render_data, camera=camera_name, scene_option=self.scene_option
+            )
             rgb_frames[camera_name] = self.rgb_renderer.render()
 
         return {"depth": depth_frames, "rgb": rgb_frames}
