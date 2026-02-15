@@ -14,6 +14,17 @@ HUMAN_HEIGHT=${HUMAN_HEIGHT:-1.78}
 
 DATA_ROOT=${DATA_ROOT:-"$REPO_ROOT/crisp/vmm_data"}
 SCENE_XML_OVERRIDE=${SCENE_XML_OVERRIDE:-""}
+TRAIN_MOTION_DIR=${TRAIN_MOTION_DIR:-"$DATA_ROOT/___crisp_motion"}
+TRAIN_GEOMETRY_DIR=${TRAIN_GEOMETRY_DIR:-"$DATA_ROOT/___crisp_geometry"}
+TRAIN_OBJECT_URDF_DIR=${TRAIN_OBJECT_URDF_DIR:-""}
+CONVERT_OUTPUT_FPS=${CONVERT_OUTPUT_FPS:-50}
+if [ -z "${CONVERTER_PYTHON:-}" ]; then
+    if command -v mjpython >/dev/null 2>&1; then
+        CONVERTER_PYTHON="mjpython"
+    else
+        CONVERTER_PYTHON="python"
+    fi
+fi
 
 OBJECT_NAME="scene_mesh_sqs"
 # Motion file name expected by downstream code (matches retargeting_gt behavior)
@@ -21,6 +32,26 @@ TASK_NAME=${TASK_NAME:-"human_motion"}
 TEMPLATE_XML="$SCRIPT_DIR/models/g1/g1_29dof_w_terrain.xml"
 ROBOT_SRC_DIR="$SCRIPT_DIR/models/g1"
 ROBOT_URDF_SRC="$ROBOT_SRC_DIR/g1_29dof.urdf"
+
+if [ "${DATA_ROOT#/}" = "$DATA_ROOT" ]; then
+    DATA_ROOT="$PWD/$DATA_ROOT"
+fi
+if [ "${OUT_ROOT#/}" = "$OUT_ROOT" ]; then
+    OUT_ROOT="$PWD/$OUT_ROOT"
+fi
+if [ "${TRAIN_MOTION_DIR#/}" = "$TRAIN_MOTION_DIR" ]; then
+    TRAIN_MOTION_DIR="$PWD/$TRAIN_MOTION_DIR"
+fi
+if [ "${TRAIN_GEOMETRY_DIR#/}" = "$TRAIN_GEOMETRY_DIR" ]; then
+    TRAIN_GEOMETRY_DIR="$PWD/$TRAIN_GEOMETRY_DIR"
+fi
+if [ -n "$TRAIN_OBJECT_URDF_DIR" ] && [ "${TRAIN_OBJECT_URDF_DIR#/}" = "$TRAIN_OBJECT_URDF_DIR" ]; then
+    TRAIN_OBJECT_URDF_DIR="$PWD/$TRAIN_OBJECT_URDF_DIR"
+fi
+if ! command -v "$CONVERTER_PYTHON" >/dev/null 2>&1; then
+    echo "[ERROR] converter python executable not found: $CONVERTER_PYTHON" >&2
+    exit 1
+fi
 
 if [ ! -f "$TEMPLATE_XML" ]; then
     echo "[ERROR] missing template scene xml: $TEMPLATE_XML" >&2
@@ -36,6 +67,14 @@ total_seqs=0
 success_seqs=0
 failed_seqs=0
 failed_list=()
+converted_seqs=0
+exported_seqs=0
+
+mkdir -p "$TRAIN_MOTION_DIR"
+mkdir -p "$TRAIN_GEOMETRY_DIR"
+if [ -n "$TRAIN_OBJECT_URDF_DIR" ]; then
+    mkdir -p "$TRAIN_OBJECT_URDF_DIR"
+fi
 if [ -n "$SEQ_NAME" ]; then
     seq_dir="$POST_SCENE_ROOT/$SEQ_NAME"
     if [ -d "$SEQ_NAME" ]; then
@@ -236,11 +275,71 @@ PY
         failed_list+=("$seq_name")
         continue
     fi
+
+    retarget_npz=""
+    for candidate in \
+        "$seq_out_root/${TASK_NAME}_original.npz" \
+        "$seq_out_root/${TASK_NAME}.npz" \
+        "$seq_out_root/${TASK_NAME}_augmented.npz"; do
+        if [ -f "$candidate" ]; then
+            retarget_npz="$candidate"
+            break
+        fi
+    done
+    if [ -z "$retarget_npz" ]; then
+        echo "[WARN] retarget output npz not found for $seq_name under $seq_out_root; skipping" >&2
+        failed_seqs=$((failed_seqs + 1))
+        failed_list+=("$seq_name")
+        continue
+    fi
+
+    # Convert retargeted qpos npz into RL training format (joint_pos/body_pos_w/...).
+    converted_npz="$seq_out_root/$seq_name.npz"
+    stage_models_dir="$stage_obj_dir/models"
+    mkdir -p "$stage_models_dir"
+    ln -sfn "$robot_dir" "$stage_models_dir/g1"
+    echo "  retarget_npz=$retarget_npz"
+    echo "  converting_to=$converted_npz"
+    if ! (
+        cd "$stage_obj_dir"
+        "$CONVERTER_PYTHON" "$SCRIPT_DIR/data_conversion/convert_data_format_mj.py" \
+            --input_file "$retarget_npz" \
+            --output_fps "$CONVERT_OUTPUT_FPS" \
+            --output_name "$converted_npz" \
+            --data_format smplx \
+            --object_name "$OBJECT_NAME" \
+            --has_dynamic_object \
+            --once
+    ); then
+        echo "[WARN] conversion failed for $seq_name; skipping" >&2
+        failed_seqs=$((failed_seqs + 1))
+        failed_list+=("$seq_name")
+        continue
+    fi
+    converted_seqs=$((converted_seqs + 1))
+
+    train_motion_npz="$TRAIN_MOTION_DIR/$seq_name.npz"
+    train_geometry_obj="$TRAIN_GEOMETRY_DIR/$seq_name.obj"
+    cp -f "$converted_npz" "$train_motion_npz"
+    cp -f "$scene_obj" "$train_geometry_obj"
+    if [ -n "$TRAIN_OBJECT_URDF_DIR" ]; then
+        cp -f "$scene_urdf_local" "$TRAIN_OBJECT_URDF_DIR/$seq_name.urdf"
+    fi
+    exported_seqs=$((exported_seqs + 1))
+    echo "  train_motion=$train_motion_npz"
+    echo "  train_geometry=$train_geometry_obj"
+
     success_seqs=$((success_seqs + 1))
 done
 
 echo "[retgt_crisp] summary:"
 echo "  total=${total_seqs} success=${success_seqs} failed=${failed_seqs}"
+echo "  converted=${converted_seqs} exported=${exported_seqs}"
+echo "  train_motion_dir=${TRAIN_MOTION_DIR}"
+echo "  train_geometry_dir=${TRAIN_GEOMETRY_DIR}"
+if [ -n "$TRAIN_OBJECT_URDF_DIR" ]; then
+  echo "  train_object_urdf_dir=${TRAIN_OBJECT_URDF_DIR}"
+fi
 if [ "${#failed_list[@]}" -gt 0 ]; then
   echo "  failed_list=${failed_list[*]}"
 fi
