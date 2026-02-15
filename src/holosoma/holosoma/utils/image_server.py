@@ -1,6 +1,7 @@
 import mujoco
 import time
 import threading
+import random
 from pathlib import Path
 import re
 import cv2
@@ -74,6 +75,8 @@ class ImageServer:
         crop_y_end: int|None = None,
         image_show: bool = False,
         render_near_plane: float = 0.001,
+        latency_frame: int | tuple[int, int] = 0,
+        buffer_len: int = 1,
     ):
         self.image_type = image_type
         self.near_clip = near_clip
@@ -87,6 +90,22 @@ class ImageServer:
         self.frame_rate = frame_rate
         self.render_near_plane = render_near_plane
 
+        # Latency buffer config
+        if isinstance(latency_frame, (tuple, list)) and len(latency_frame) == 2:
+            self.latency_frame_range = latency_frame
+            self.latency_frame = None
+        else:
+            self.latency_frame_range = None
+            self.latency_frame = latency_frame
+        self.buffer_len = buffer_len
+
+        if self.latency_frame_range is not None:
+            assert self.latency_frame_range[1] < self.buffer_len, \
+                f"Max latency frame ({self.latency_frame_range[1]}) must be less than buffer length ({self.buffer_len})"
+        elif self.latency_frame is not None:
+            assert self.latency_frame < self.buffer_len, \
+                f"Latency frame ({self.latency_frame}) must be less than buffer length ({self.buffer_len})"
+
         # Initialize camera renderer
         self.camera = MujocoCameraRenderer(
             simulator,
@@ -99,6 +118,14 @@ class ImageServer:
 
         # Initialize shared memory
         self._init_shared_memory()
+
+        # Initialize latency buffer: [buffer_len, num_cameras, channels, H, W]
+        channels = 1 if self.image_type == "depth" else 3
+        dtype = np.float32 if self.image_type == "depth" else np.uint8
+        self._frame_buffer = np.zeros(
+            (self.buffer_len, self.num_cameras, channels, self.expected_shape[0], self.expected_shape[1]),
+            dtype=dtype,
+        )
 
     def _init_shared_memory(self):
         img_shm_name = "depth_img_shm"
@@ -164,15 +191,27 @@ class ImageServer:
              # Concatenate frames before channel dimension (axis=0)
             # [C, H, W] -> [N, C, H, W] N is the number of cameras
             full_image = np.stack(frames, axis=0)
+
+            # Shift buffer left and insert the newest frame at the end
+            target_dtype = np.float32 if self.image_type == "depth" else np.uint8
+            processed = full_image.astype(target_dtype)
+            self._frame_buffer[:-1] = self._frame_buffer[1:]
+            self._frame_buffer[-1] = processed
+
+            # Select the delayed frame from the buffer
+            if self.latency_frame_range is not None:
+                current_latency = random.randint(self.latency_frame_range[0], self.latency_frame_range[1])
+            else:
+                current_latency = self.latency_frame
+            delayed_frame = self._frame_buffer[-1 - current_latency]
+
             # copy to shared memory
             try:
-                target_dtype = np.float32 if self.image_type == "depth" else np.uint8
-                processed = full_image.astype(target_dtype)
-                np.copyto(self.img_array, processed)
+                np.copyto(self.img_array, delayed_frame)
             except Exception as e:
                 print(f"[Image Server] Failed to copy to shared memory: {e}")
-                print(f"[Image Server] Input shape: {full_image.shape}, Target shape: {self.img_array.shape}")
-                print(f"[Image Server] Input dtype: {full_image.dtype}, Target dtype: {target_dtype}")
+                print(f"[Image Server] Input shape: {delayed_frame.shape}, Target shape: {self.img_array.shape}")
+                print(f"[Image Server] Input dtype: {delayed_frame.dtype}, Target dtype: {self.img_array.dtype}")
                 continue
 
             rate_limiter.sleep()

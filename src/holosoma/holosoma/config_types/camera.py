@@ -80,6 +80,14 @@ class CameraProps:
     crop_x_end: int|None = None
     """End index of the x-axis to crop."""
 
+    latency_frame: int | tuple[int, int] = 0
+    """Latency in frames. An int gives fixed latency; a (min, max) tuple gives
+    per-step random latency sampled uniformly from that range."""
+
+    buffer_len: int = 1
+    """Number of frames kept in the latency ring buffer. Must be > latency_frame
+    (or > max of the range when latency_frame is a tuple)."""
+
 @dataclass(frozen=True)
 class CameraConfig:
     """Complete camera system configuration.

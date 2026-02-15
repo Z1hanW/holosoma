@@ -22,6 +22,8 @@ d435i_depth_props = CameraProps(
     crop_y_start=16,
     crop_x_start=32,
     crop_x_end=-32,
+    latency_frame=(7, 8),
+    buffer_len=9,
 )
 
 single_d435i_depth = CameraManagerCfg(terms={

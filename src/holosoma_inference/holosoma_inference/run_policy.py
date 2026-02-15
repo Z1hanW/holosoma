@@ -29,7 +29,7 @@ import numpy as np
 
 import os
 
-DEBUG = True #os.getenv("DEBUG", "False").lower() == "true"
+DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 
 def _print_control_guide(policy_class, use_joystick: bool):
     """Print control guide for users."""

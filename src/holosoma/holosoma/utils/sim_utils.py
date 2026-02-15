@@ -630,6 +630,8 @@ class DirectSimulation:
                 kwargs["crop_x_end"] = props.crop_x_end
                 kwargs["crop_y_end"] = props.crop_y_end
                 kwargs["image_show"] = props.image_show
+                kwargs["latency_frame"] = props.latency_frame
+                kwargs["buffer_len"] = props.buffer_len
         # Explicit overrides take precedence
         kwargs.update(self._image_server_kwargs)
         return kwargs
