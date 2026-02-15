@@ -38,17 +38,20 @@ class DepthDistillationPolicy(LocomotionPolicy):
     body_pos_w, etc.) indexed by a time_step counter.
     """
     # Joystick-to-velocity-command mapping.
-    # Maps joystick angle sectors to one-hot command indices.
-    # Adjust these indices to match your motion data's vel_cmd encoding.
-    JOYSTICK_CMD_STAND = 0
-    JOYSTICK_CMD_FORWARD = 1
-    JOYSTICK_CMD_LEFT_45 = 2
-    JOYSTICK_CMD_RIGHT_45 = 4
-    JOYSTICK_CMD_BACK = 11
+    # Command codes per speed mode, matching the C++ MotionTrackingController.
+    # speed_mode 0 = low, 1 = high, 2 = madmax
+    CMD_CODES = {
+        0: {"stand": 0, "forward": 1, "left_45": 2, "left_90": 3, "right_45": 4, "right_90": 5, "back": 11},
+        1: {"stand": 0, "forward": 6, "left_45": 7, "left_90": 8, "right_45": 9, "right_90": 10, "back": 11},
+        2: {"stand": 0, "forward": 12, "left_45": 13, "left_90": 13, "right_45": 14, "right_90": 14, "back": 11},
+    }
+    JOYSTICK_DEADZONE = 0.05
 
     def __init__(self, config: InferenceConfig):
         self.motion_timestep = 0
         self.motion_clip_progressing = False
+        self.speed_mode_high = False
+        self.speed_mode = 0  # 0=low, 1=high, 2=madmax
 
         # Will be populated in _init_policy_components
         self.depth_backbone_session = None
@@ -63,7 +66,7 @@ class DepthDistillationPolicy(LocomotionPolicy):
         # During inference the user sets it via keyboard/joystick.
         self.velocity_command_dim = config.observation.obs_dims.get("velocity_command", 0)
         self.velocity_command = np.zeros((1, self.velocity_command_dim), dtype=np.float32)
-        self.active_velocity_command_idx = 6  # default to standing
+        self.active_velocity_command_idx =  self.CMD_CODES[0]["stand"]  # default to standing
         self.set_velocity_command(self.active_velocity_command_idx)
 
         super().__init__(config)
@@ -493,55 +496,103 @@ class DepthDistillationPolicy(LocomotionPolicy):
 
     def process_joystick_input(self):
         """Process joystick input and map to velocity command one-hot."""
+        prev_raw_keys = getattr(self, '_prev_raw_keys', 0)
+
         super().process_joystick_input()
+
+        wc_msg = self.interface.get_joystick_msg()
+        raw_keys = getattr(wc_msg, "keys", 0) if wc_msg else 0
+        self._prev_raw_keys = raw_keys
+
+        _L1 = 2
+        _X = 1024
+        _Y = 2048
+        l1_held = bool(raw_keys & _L1)
+        y_rising = bool(raw_keys & _Y) and not bool(prev_raw_keys & _Y)
+
+        if l1_held and y_rising:
+            self.speed_mode_high = not self.speed_mode_high
+            logger.info(f"Speed mode switched to: {'HIGH' if self.speed_mode_high else 'LOW'}")
+
+        if self.speed_mode_high:
+            x_held = bool(raw_keys & _X)
+            self.speed_mode = 2 if x_held else 1
+        else:
+            self.speed_mode = 0
+
         self._update_velocity_command_from_joystick()
 
     def _update_velocity_command_from_joystick(self):
-        """Map joystick axes to a discrete velocity command via angle sectors.
+        """Map left joystick axes to a discrete velocity command via angle sectors.
 
-        Uses atan2(linear_x, -angular_z / 1.5) to compute a direction angle,
-        then selects a one-hot command index based on 90-degree sectors:
-            (-45, 45)   -> right_45
-            [45, 135)   -> forward
-            [135, 180] or [-180, -135) -> left_45
-            [-135, -45] -> back
+        Only active while L1 is held. Reads stick values directly from the raw
+        joystick message to bypass the base_interface gate (which suppresses
+        sticks when any button is pressed).
 
-        When joystick magnitude is below the deadzone threshold, the previous
-        command is retained.
+        Uses the left stick exclusively:
+          - ly → linear_x  (forward/backward)
+          - lx → angular_z (yaw/turning, negated)
+
+        Mirrors the C++ MotionTrackingController::cmd_vel_callback logic:
+        1. If L1 is not held, do nothing (keep previous command).
+        2. Deadzone on hypot(linear_x, angular_z) < 0.05 -> stand.
+        3. Compute a_deg = atan2(linear_x, -angular_z / 1.5) * 180 / pi.
+        4. Map angle sectors to discrete command codes:
+             (-45, 45)    -> right_45
+             [45, 135)    -> forward
+             [135, 225)   -> left_45
+             [225, ...) or <= -45 -> back
+        5. Select command code table based on current speed_mode.
         """
         if self.velocity_command_dim == 0:
             return
 
-        # # Deadzone: keep previous command when joystick is near center
-        # magnitude = math.sqrt(linear_x ** 2 + angular_z ** 2)
-        # if magnitude < self.JOYSTICK_DEADZONE:
-        #     return
+        if not self.key_states.get("L1", False):
+            return
 
-        a_deg = self.ang_vel_command[0, 0] * 180.0 / math.pi
+        # Read raw stick values directly from the joystick message,
+        # since base_interface suppresses sticks when buttons are held.
+        wc_msg = self.interface.get_joystick_msg()
+        if wc_msg is None:
+            return
 
-        if -45.0 < a_deg < 45.0:
-            cmd_idx = self.JOYSTICK_CMD_RIGHT_45
-        elif 45.0 <= a_deg < 135.0:
-            cmd_idx = self.JOYSTICK_CMD_FORWARD
-        elif a_deg >= 135.0 or a_deg < -135.0:
-            cmd_idx = self.JOYSTICK_CMD_LEFT_45
-        else:  # -135.0 <= a_deg <= -45.0
-            cmd_idx = self.JOYSTICK_CMD_BACK
+        lx = getattr(wc_msg, "lx", 0.0)
+        ly = getattr(wc_msg, "ly", 0.0)
+        linear_x = ly if abs(ly) > 0.1 else 0.0
+        angular_z = -lx if abs(lx) > 0.1 else 0.0
+
+        norm_xz = math.hypot(linear_x, angular_z)
+        codes = self.CMD_CODES[self.speed_mode]
+
+        if norm_xz < self.JOYSTICK_DEADZONE:
+            cmd_idx = codes["stand"]
+        else:
+            a_deg = math.atan2(linear_x, -angular_z / 1.5) * 180.0 / math.pi
+
+            if -45.0 < a_deg < 45.0:
+                cmd_idx = codes["right_45"]
+            elif 45.0 <= a_deg < 135.0:
+                cmd_idx = codes["forward"]
+            elif 135.0 <= a_deg < 225.0:
+                cmd_idx = codes["left_45"]
+            else:  # a_deg >= 225 or a_deg <= -45
+                cmd_idx = codes["back"]
 
         if cmd_idx != self.active_velocity_command_idx:
             self.set_velocity_command(cmd_idx)
 
     def handle_keyboard_button(self, keycode):
         """Handle keyboard button presses."""
-        if keycode == "s":
-            self._handle_start_motion_clip()
-        else:
-            super().handle_keyboard_button(keycode)
+        super().handle_keyboard_button(keycode)
 
     def handle_joystick_button(self, cur_key):
         """Handle joystick button presses."""
         if cur_key == "start":
             self._handle_start_motion_clip()
+        elif cur_key == "Y":
+            # Toggle speed mode (low <-> high), matching C++ Y-button behavior
+            self.speed_mode_high = not self.speed_mode_high
+            logger.info(f"Speed mode switched to: {'HIGH' if self.speed_mode_high else 'LOW'}")
         else:
             super().handle_joystick_button(cur_key)
 
@@ -558,7 +609,7 @@ class DepthDistillationPolicy(LocomotionPolicy):
         self.motion_clip_progressing = False
         self.motion_timestep = 0
         self.depth_frame_buffer.clear()
-        self.set_velocity_command(0)  # Clear velocity command on stop
+        self.set_velocity_command(self.CMD_CODES[0]["stand"])  # Clear velocity command on stop
 
     def set_velocity_command(self, idx: int):
         """Set the active velocity command as a one-hot vector.
@@ -577,11 +628,5 @@ class DepthDistillationPolicy(LocomotionPolicy):
             self.active_velocity_command_idx = idx
             logger.info(f"Velocity command set to index {idx} (one-hot dim {self.velocity_command_dim})")
         else:
-            self.active_velocity_command_idx = self.JOYSTICK_CMD_STAND
+            self.active_velocity_command_idx = self.CMD_CODES[0]["stand"]
             logger.info("Velocity command cleared (all zeros)")
-
-    def _handle_start_motion_clip(self):
-        """Handle start motion clip action."""
-        self.motion_clip_progressing = True
-        self.motion_timestep = 0
-        logger.info("Starting motion clip from timestep 0")

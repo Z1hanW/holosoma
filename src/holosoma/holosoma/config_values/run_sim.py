@@ -54,7 +54,7 @@ mujoco = dataclasses.replace(
         virtual_gantry=VirtualGantryCfg(enabled=True),
         sim=dataclasses.replace(
             holosoma.config_values.simulator.mujoco.config.sim,
-            fps=2000,  # mujoco can run faster
+            fps=500,  # mujoco can run faster
         ),
     ),
 )
