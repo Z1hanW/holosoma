@@ -32,6 +32,9 @@ from holosoma.simulator.shared.virtual_gantry import create_virtual_gantry
 from holosoma.simulator.types import ActorIndices, ActorNames, ActorPoses, ActorStates, EnvIds
 from holosoma.utils.adapters import mujoco_draw_adapter
 
+import threading
+
+
 class MuJoCoScene:
     """MuJoCo Scene implementation following SceneInterface protocol.
 
@@ -82,6 +85,74 @@ class MuJoCoScene:
         """
         return self._env_origins
 
+
+class MujocoRendererWrapper:
+    def __init__(self, simulator: 'MuJoCo') -> None:
+
+        # TODO: get height/width of renderer from config
+        self._height = 135
+        self._width = 240
+        self.camera_names = [
+            "robot_cam_front_depth",
+            "robot_cam_back_depth"
+        ]
+
+        self.num_cameras = 2
+
+        self._simulator: 'MuJoCo' = simulator
+
+        self._depth_renderer: mujoco.Renderer | None = None
+        self._depth_renderer_thread_id: int | None = None
+
+        self._rgb_renderer: mujoco.Renderer | None = None
+        self._rgb_renderer_thread_id: int | None = None
+
+        # 
+        self.cameras = None
+
+
+    @property
+    def depth_renderer(self) -> mujoco.Renderer: 
+        """Lazy initialization of depth renderer on the rendering thread"""
+        current_thread_id = threading.get_ident()
+        if self._depth_renderer is None or self._depth_renderer_thread_id != current_thread_id:
+            self._depth_renderer = mujoco.Renderer(
+                self._simulator.root_model, height=self._height, width=self._width
+            )
+            self._depth_renderer.enable_depth_rendering()
+            self._depth_renderer_thread_id = current_thread_id
+        return self._depth_renderer
+    
+    @property
+    def rgb_renderer(self) -> mujoco.Renderer: 
+        """Lazy initialization of rgb renderer on the rendering thread"""
+        current_thread_id = threading.get_ident()
+        if self._rgb_renderer is None or self._rgb_renderer_thread_id != current_thread_id:
+            self._rgb_renderer = mujoco.Renderer(
+                self._simulator.root_model, height=self._height, width=self._width
+            )
+            self._rgb_renderer_thread_id = current_thread_id
+        return self._rgb_renderer
+        
+    def get_frames(self):
+        """Get depth and rgb frames from the renderer."""
+
+        # Get render data from the simulator
+        world_id = getattr(self._simulator, "current_world_id", 0)
+        render_data = self._simulator.backend.get_render_data(world_id=world_id)
+
+        depth_frames = {}
+        rgb_frames = {}
+
+        for camera_name in self.camera_names:
+            # depth, already in meters
+            self.depth_renderer.update_scene(render_data, camera=camera_name)
+            depth_frames[camera_name] = self.depth_renderer.render()
+
+            self.rgb_renderer.update_scene(render_data, camera=camera_name)
+            rgb_frames[camera_name] = self.rgb_renderer.render()
+        
+        return {"depth": depth_frames, "rgb": rgb_frames}
 
 class MuJoCo(BaseSimulator):
     """MuJoCo physics simulator with terrain support.
@@ -364,6 +435,9 @@ class MuJoCo(BaseSimulator):
         self._set_robot_joint_addressing()
         self._set_initial_joint_angles()
 
+        # Initialize rgb/depth renderer wrapper
+        self.renderer_wrapper = MujocoRendererWrapper(self)
+
         # Initialize virtual gantry after the robot using config
         gantry_cfg = self.simulator_config.virtual_gantry
         self.virtual_gantry = create_virtual_gantry(
@@ -410,8 +484,6 @@ class MuJoCo(BaseSimulator):
         self.scene_manager.add_robot(
             terrain_state, self.robot_config, xml_filter=self.simulator_config.robot_mjcf_filter
         )
-        # Always add camera after robot, in case it attaches to robot bodies
-        self.scene_manager.add_camera(self.camera_manager, self.num_envs)
 
     def _set_robot_properties(self) -> None:
         """Set robot properties including DOF names, body names, and index mappings.

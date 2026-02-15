@@ -24,7 +24,7 @@ from holosoma.config_types.full_sim import FullSimConfig
 from holosoma.config_types.run_sim import RunSimConfig
 from holosoma.managers.terrain.manager import TerrainManager
 from holosoma.managers.camera.manager import CameraManager
-from holosoma.utils.image_server import ImageServer
+from holosoma.sensors.image_server import ImageServer
 from holosoma.utils.common import seeding
 from holosoma.utils.helpers import get_class
 from holosoma.utils.rate import RateLimiter
@@ -32,6 +32,7 @@ from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.simulator_config import SimulatorType, get_simulator_type, set_simulator_type
 from holosoma.utils.torch_utils import to_torch
 
+from holosoma.simulator.mujoco.mujoco import MujocoRendererWrapper
 
 def setup_simulator_imports(config: ExperimentConfig | RunSimConfig) -> None:
     """Setup simulator-specific imports without side effects.
@@ -450,7 +451,9 @@ class DirectSimulation:
             self.simulator.video_recorder.start_recording(episode_id=0)
         
         # Step 8: setup the image server
-        self.image_server = ImageServer(self.simulator, **self._get_image_server_kwargs())
+        self.image_server = ImageServer(
+            camera_wrapper=MujocoRendererWrapper(self.simulator), 
+            cfg=self.config.image_server)
         self.cam_thread = Thread(target=self.image_server.send_process)
         self.cam_thread.daemon = True
 

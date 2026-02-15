@@ -408,7 +408,7 @@ class MujocoSceneManager:
         min_height = height_data_scaled.min()
         z_offset = 0.0
         # min_height needs to be positive. zero is not allowed.
-        if min_height <= 0:
+        if min_height < 1e-9:
             height_data_scaled = height_data_scaled - min_height + 1e-9
             z_offset = min_height
             logger.info(f"Shifted heightfield by {-min_height:.3f}m to ensure non-negative heights")
@@ -420,6 +420,8 @@ class MujocoSceneManager:
         # size = [x_half, y_half, HEIGHT_RANGE, z_baseline]
         # Note: nrow/ncol are swapped for correct orientation
         height_range = max_height - min_height_final
+        if height_range < 1e-9:
+            height_range = 1e-9
 
         # Create heightfield asset
         hfield_spec = self.world_spec.add_hfield(name="terrain")
@@ -431,7 +433,7 @@ class MujocoSceneManager:
 
         logger.info(
             f"Created heightfield: {hfield_spec.nrow}x{hfield_spec.ncol},"
-            " size=[{0.5 * total_length:.2f}, {0.5 * total_width:.2f}, {height_range:.3f}, {min_height_final:.3f}]"
+            f" size=[{0.5 * total_length:.2f}, {0.5 * total_width:.2f}, {height_range:.3f}, {min_height_final:.3f}]"
         )
 
         # Create heightfield geom, positioned to match terrain coordinate system

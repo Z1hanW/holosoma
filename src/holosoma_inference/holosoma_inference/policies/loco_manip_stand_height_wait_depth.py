@@ -168,7 +168,7 @@ class LocoManipStandHeightWaitDepthPolicy(LocomotionPolicy):
             self.fixed_forward_speed = 0.5
         elif cur_key == "R2":
             self.fixed_forward_speed_enabled = True 
-            self.fixed_forward_speed = -0.5
+            self.fixed_forward_speed = -0.6
         elif cur_key == "R2+up":
             self.fixed_forward_speed += 0.1
         elif cur_key == "R2+down":
