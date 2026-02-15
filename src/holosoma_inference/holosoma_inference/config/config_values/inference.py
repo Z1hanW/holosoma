@@ -60,7 +60,30 @@ g1_29dof_loco_manip_stand_height_waist = InferenceConfig(
 )
 
 g1_wbt_distillation = InferenceConfig(
-    robot=robot.g1_29dof_wbt_distillation,
+    robot=replace(
+        robot.g1_29dof_wbt_distillation,
+        stiff_startup_pos=(
+            -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,   # left leg
+            -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,   # right leg
+            0.0, 0.0, 0.0,                          # waist
+            0.2, 0.2, 0.0, 0.6, 0.0, 0.0, 0.0,      # left arm
+            0.2, -0.2, 0.0, 0.6, 0.0, 0.0, 0.0,     # right arm
+        ),
+        stiff_startup_kp=(
+            350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
+            350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
+            200.0, 200.0, 200.0,
+            40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0,
+            40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0,
+        ),
+        stiff_startup_kd=(
+            5.0, 5.0, 5.0, 10.0, 5.0, 5.0,
+            5.0, 5.0, 5.0, 10.0, 5.0, 5.0,
+            5.0, 5.0, 5.0,
+            3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,
+            3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,
+        ),
+    ),
     observation=observation.wbt_distillation_g1,
     task=task.wbt_distillation,
     camera=camera.single_d435i_depth,

@@ -2,7 +2,7 @@
 
 Loads two ONNX models:
 - depth_backbone.onnx: depth image (1, H, W) -> depth latent (1, D)
-- student.onnx: (obs, time_step) -> (actions, motion_refs...)
+- student.onnx: obs -> actions
 
 The depth backbone processes depth images from shared memory into a latent
 vector that is concatenated with proprioceptive observations before being
@@ -33,9 +33,6 @@ class DepthDistillationPolicy(LocomotionPolicy):
     Uses a two-model ONNX architecture:
     - depth_backbone: CNN that converts depth images to latent vectors
     - student: MLP that takes [proprioceptive_obs, command, depth_latent] -> actions
-
-    The student model also outputs motion reference data (joint_pos, joint_vel,
-    body_pos_w, etc.) indexed by a time_step counter.
     """
     # Joystick-to-velocity-command mapping.
     # Command codes per speed mode, matching the C++ MotionTrackingController.
@@ -48,10 +45,10 @@ class DepthDistillationPolicy(LocomotionPolicy):
     JOYSTICK_DEADZONE = 0.05
 
     def __init__(self, config: InferenceConfig):
-        self.motion_timestep = 0
-        self.motion_clip_progressing = False
         self.speed_mode_high = False
         self.speed_mode = 0  # 0=low, 1=high, 2=madmax
+        self._stiff_hold_active = True
+        self._damping_mode_active = False
 
         # Will be populated in _init_policy_components
         self.depth_backbone_session = None
@@ -59,7 +56,6 @@ class DepthDistillationPolicy(LocomotionPolicy):
         self.depth_backbone_output_name = None
         self.depth_latent_dim = None
         self.depth_image_shape = None  # (H, W) from backbone input
-        self.time_step_total = None
 
         # Velocity command: one-hot vector selecting the active command class.
         # During training this comes from the "command" obs group (vel_cmd in motion data).
@@ -70,6 +66,25 @@ class DepthDistillationPolicy(LocomotionPolicy):
         self.set_velocity_command(self.active_velocity_command_idx)
 
         super().__init__(config)
+
+        # Load stiff startup parameters from robot config
+        if config.robot.stiff_startup_pos is not None:
+            self._stiff_hold_q = np.array(config.robot.stiff_startup_pos, dtype=np.float32).reshape(1, -1)
+        else:
+            self._stiff_hold_q = np.array(config.robot.default_dof_angles, dtype=np.float32).reshape(1, -1)
+
+        if config.robot.stiff_startup_kp is not None:
+            self._stiff_hold_kp = np.array(config.robot.stiff_startup_kp, dtype=np.float32)
+        else:
+            raise ValueError("Robot config must specify stiff_startup_kp for DepthDistillationPolicy")
+
+        if config.robot.stiff_startup_kd is not None:
+            self._stiff_hold_kd = np.array(config.robot.stiff_startup_kd, dtype=np.float32)
+        else:
+            raise ValueError("Robot config must specify stiff_startup_kd for DepthDistillationPolicy")
+
+        if self._stiff_hold_q.shape[1] != self.num_dofs:
+            raise ValueError("Stiff startup pose dimension mismatch with robot DOFs")
 
         # Initialize depth shared memory client
         self._init_depth_shm()
@@ -292,31 +307,6 @@ class DepthDistillationPolicy(LocomotionPolicy):
                 self.policy_action_scale = float(action_scale)
                 logger.info(f"Using action_scale from ONNX metadata: {self.policy_action_scale}")
 
-        # Determine time_step_total from student outputs (motion clip length)
-        # Run a dummy inference to get the motion reference shapes
-        obs_input = self.onnx_policy_session.get_inputs()[0]  # "obs"
-        obs_dim = obs_input.shape[-1]
-        dummy_obs = np.zeros((1, obs_dim), dtype=np.float32)
-        dummy_time_step = np.zeros((1, 1), dtype=np.float32)
-
-        try:
-            outputs = self.onnx_policy_session.run(
-                self.onnx_output_names,
-                {"obs": dummy_obs, "time_step": dummy_time_step},
-            )
-            # outputs[0] = actions, outputs[1:] = motion refs (joint_pos, joint_vel, etc.)
-            if len(outputs) > 1:
-                # The motion reference data has a fixed number of frames baked into the ONNX
-                # We can't determine total from a single inference; store None and wrap via modulo
-                self.time_step_total = None
-                logger.info(
-                    f"[DepthDistillationPolicy] Student model has {len(outputs)} outputs "
-                    f"(actions + {len(outputs) - 1} motion refs)"
-                )
-        except Exception as e:
-            logger.warning(f"Could not run dummy student inference: {e}")
-            self.time_step_total = None
-
         # Build the policy callable
         def policy_act(obs_dict):
             input_feed = {name: obs_dict[name] for name in self.onnx_input_names}
@@ -428,7 +418,6 @@ class DepthDistillationPolicy(LocomotionPolicy):
         3. Read depth image from shared memory
         4. Run depth_backbone ONNX -> depth latent
         5. Concatenate: [proprioceptive, velocity_command, depth_latent]
-        6. Return dict with {"obs": concatenated, "time_step": current_step}
         """
         # Build proprioceptive observations using group history
         self._prepare_group_observations(robot_state_data)
@@ -449,10 +438,10 @@ class DepthDistillationPolicy(LocomotionPolicy):
         parts.append(depth_latent)
         obs = np.concatenate(parts, axis=1).astype(np.float32)
 
-        return {
-            "obs": obs,
-            "time_step": np.array([[self.motion_timestep]], dtype=np.float32),
-        }
+        input_feed = {"obs": obs}
+        if "time_step" in self.onnx_input_names:
+            input_feed["time_step"] = np.zeros((1, 1), dtype=np.float32)
+        return input_feed
 
     def rl_inference(self, robot_state_data):
         """Perform RL inference with two-model architecture.
@@ -483,14 +472,6 @@ class DepthDistillationPolicy(LocomotionPolicy):
             policy_action = policy_action[:, self._model2real_index]
 
         self.scaled_policy_action = policy_action * self.policy_action_scale
-
-        # Store motion reference data if available (outputs[1:])
-        if len(outputs) > 1:
-            self._motion_refs = outputs[1:]
-
-        # Increment timestep
-        if self.motion_clip_progressing:
-            self.motion_timestep += 1
 
         return self.scaled_policy_action
 
@@ -588,7 +569,7 @@ class DepthDistillationPolicy(LocomotionPolicy):
     def handle_joystick_button(self, cur_key):
         """Handle joystick button presses."""
         if cur_key == "start":
-            self._handle_start_motion_clip()
+            self._handle_enter_stiff_hold()
         elif cur_key == "Y":
             # Toggle speed mode (low <-> high), matching C++ Y-button behavior
             self.speed_mode_high = not self.speed_mode_high
@@ -596,20 +577,63 @@ class DepthDistillationPolicy(LocomotionPolicy):
         else:
             super().handle_joystick_button(cur_key)
 
+
+    def _get_manual_command(self, robot_state_data):
+        """Return manual command when policy is not active.
+
+        Stiff hold: high Kp/Kd at a fixed standing pose (on boot).
+        Damping mode: Kp=0, Kd>0 so joints resist motion without tracking a position.
+        """
+        if self._stiff_hold_active:
+            return {
+                "q": self._stiff_hold_q.copy(),
+                "kp": self._stiff_hold_kp,
+                "kd": self._stiff_hold_kd,
+            }
+        if self._damping_mode_active:
+            dof_pos = robot_state_data[:, 7 : 7 + self.num_dofs]
+            return {
+                "q": dof_pos,
+                "kp": np.zeros_like(self._stiff_hold_kp),
+                "kd": self._stiff_hold_kd,
+            }
+        return None
+
+    def _handle_enter_stiff_hold(self):
+        """Enter stiff hold: hold the default standing pose with high Kp/Kd."""
+        self.use_policy_action = False
+        self.get_ready_state = False
+        self._stiff_hold_active = True
+        self._damping_mode_active = False
+        if hasattr(self.interface, "no_action"):
+            self.interface.no_action = 0
+        self.depth_frame_buffer.clear()
+        self.set_velocity_command(self.CMD_CODES[0]["stand"])
+        logger.info("Entering stiff hold mode")
+
     def _handle_start_policy(self):
         """Handle start policy action."""
         super()._handle_start_policy()
-        self.motion_clip_progressing = True
-        self.motion_timestep = 0
-        logger.info("Depth distillation policy started, motion clip progressing")
+        self._stiff_hold_active = False
+        self._damping_mode_active = False
+        logger.info("Depth distillation policy started")
 
     def _handle_stop_policy(self):
-        """Handle stop policy action."""
-        super()._handle_stop_policy()
-        self.motion_clip_progressing = False
-        self.motion_timestep = 0
+        """Enter damping mode: Kp=0, Kd>0 so joints resist motion without position tracking.
+
+        Does NOT call super() because BasePolicy._handle_stop_policy sets
+        no_action=1, which forces Kp=0 AND Kd=0 in the command sender,
+        bypassing _get_manual_command overrides entirely.
+        """
+        self.use_policy_action = False
+        self.get_ready_state = False
+        self._stiff_hold_active = False
+        self._damping_mode_active = True
+        if hasattr(self.interface, "no_action"):
+            self.interface.no_action = 0
         self.depth_frame_buffer.clear()
-        self.set_velocity_command(self.CMD_CODES[0]["stand"])  # Clear velocity command on stop
+        self.set_velocity_command(self.CMD_CODES[0]["stand"])
+        logger.info("Entering damping mode (Kp=0, Kd>0)")
 
     def set_velocity_command(self, idx: int):
         """Set the active velocity command as a one-hot vector.
@@ -629,4 +653,4 @@ class DepthDistillationPolicy(LocomotionPolicy):
             logger.info(f"Velocity command set to index {idx} (one-hot dim {self.velocity_command_dim})")
         else:
             self.active_velocity_command_idx = self.CMD_CODES[0]["stand"]
-            logger.info("Velocity command cleared (all zeros)")
+            logger.info("Velocity command cleared (back to stand)")
