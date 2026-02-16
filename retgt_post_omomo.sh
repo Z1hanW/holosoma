@@ -19,6 +19,7 @@ set -euo pipefail
 #   USE_OMNIRETARGET_DATA=0
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+RETARGET_ROOT="${SCRIPT_DIR}/src/holosoma_retargeting"
 
 INPUT_DIR=${INPUT_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/demo_results_parallel/g1/object_interaction/omomo_carry"}
 OUTPUT_DIR=${OUTPUT_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"}
@@ -28,10 +29,15 @@ DATA_FORMAT=${DATA_FORMAT:-smplh}
 OBJECT_NAME=${OBJECT_NAME:-largebox}
 USE_OMNIRETARGET_DATA=${USE_OMNIRETARGET_DATA:-0}
 
-CONVERTER="${SCRIPT_DIR}/src/holosoma_retargeting/data_conversion/convert_data_format_mj.py"
+CONVERTER="${RETARGET_ROOT}/data_conversion/convert_data_format_mj.py"
 
 if [[ ! -f "${CONVERTER}" ]]; then
   echo "[ERROR] Converter not found: ${CONVERTER}"
+  exit 1
+fi
+
+if [[ ! -d "${RETARGET_ROOT}" ]]; then
+  echo "[ERROR] RETARGET_ROOT not found: ${RETARGET_ROOT}"
   exit 1
 fi
 
@@ -53,6 +59,9 @@ echo "[INFO] Input dir : ${INPUT_DIR}"
 echo "[INFO] Output dir: ${OUTPUT_DIR}"
 echo "[INFO] Converting ${#files[@]} files..."
 
+pushd "${RETARGET_ROOT}" >/dev/null
+trap 'popd >/dev/null' EXIT
+
 for input_path in "${files[@]}"; do
   base_name=$(basename "${input_path}" .npz)
   stem="${base_name%_original}"
@@ -61,7 +70,7 @@ for input_path in "${files[@]}"; do
   echo "[INFO] Converting ${base_name}.npz -> $(basename "${output_path}")"
 
   cmd=(
-    "${PYTHON_BIN}" "${CONVERTER}"
+    "${PYTHON_BIN}" "data_conversion/convert_data_format_mj.py"
     --input_file "${input_path}"
     --output_fps "${OUTPUT_FPS}"
     --output_name "${output_path}"
