@@ -167,6 +167,7 @@ def _object_local_vertices_from_urdf(urdf_path: Path, cache: dict[Path, np.ndarr
     urdf = yourdfpy.URDF.load(str(key), load_meshes=False, build_scene_graph=True)
     links = list(urdf.link_map.values())
     use_collision = any(bool(getattr(link, "collisions", None)) for link in links)
+    base_frame = getattr(urdf, "base_link", None)
 
     parts: list[np.ndarray] = []
     for link in links:
@@ -178,7 +179,13 @@ def _object_local_vertices_from_urdf(urdf_path: Path, cache: dict[Path, np.ndarr
         try:
             link_tf = np.asarray(urdf.get_transform(frame_to=link.name, frame_from="world"), dtype=np.float64)
         except Exception:
-            link_tf = np.eye(4, dtype=np.float64)
+            try:
+                if base_frame:
+                    link_tf = np.asarray(urdf.get_transform(frame_to=link.name, frame_from=base_frame), dtype=np.float64)
+                else:
+                    raise RuntimeError("base frame unavailable")
+            except Exception:
+                link_tf = np.eye(4, dtype=np.float64)
 
         for geom_entry in geoms:
             geometry = getattr(geom_entry, "geometry", None)
@@ -239,6 +246,16 @@ def _hand_positions_from_qpos(
         raise ValueError(f"URDF actuated joints not found in robot config: {missing}")
     urdf_order_idx = [name_to_qpos_idx[name] for name in urdf_act]
 
+    source_frame = "world"
+    if links:
+        probe_link = links[0]
+        try:
+            urdf.get_transform(frame_to=probe_link, frame_from=source_frame)
+        except Exception:
+            base_frame = getattr(urdf, "base_link", None)
+            if base_frame:
+                source_frame = str(base_frame)
+
     out = {name: [] for name in links}
     for frame in qpos:
         root_pos = frame[:3]
@@ -249,7 +266,7 @@ def _hand_positions_from_qpos(
         joint_vals = frame[7 : 7 + joint_count]
         urdf.update_cfg(joint_vals[urdf_order_idx])
         for name in links:
-            t = urdf.get_transform(frame_to=name, frame_from="world")
+            t = urdf.get_transform(frame_to=name, frame_from=source_frame)
             local = t[:3, 3]
             out[name].append(root_pos + root_rot.apply(local))
 
