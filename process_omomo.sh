@@ -6,7 +6,7 @@ set -euo pipefail
 # Keep only sequences that:
 # 1) have stable contact with the object from both left/right hand groups;
 # 2) look like "holding" (dual-hand overlap + object between hands);
-# 3) start with object position close to [0, 0, 0].
+# 3) start with object mesh lowest point (world z-min) close to 0.
 #
 # Usage:
 #   MOTION_DIR=/ABS/PATH/to/motions \
@@ -61,6 +61,7 @@ from typing import Any
 
 import numpy as np
 from scipy.spatial.transform import Rotation
+import trimesh
 
 from holosoma.config_values import robot as robot_values
 from holosoma.utils.module_utils import get_holosoma_root
@@ -109,6 +110,116 @@ def _object_positions_from_npz(data: dict[str, np.ndarray], qpos: np.ndarray | N
         # last freejoint convention: [x, y, z, qw, qx, qy, qz]
         return qpos[:, -7:-4]
     return None
+
+
+def _object_quaternions_from_npz(data: dict[str, np.ndarray], qpos: np.ndarray | None, joint_count: int) -> np.ndarray | None:
+    if "object_quat_w" in data:
+        quat = np.asarray(data["object_quat_w"], dtype=np.float32)
+        if quat.ndim == 2 and quat.shape[1] == 4:
+            return quat
+    if qpos is None:
+        return None
+    if qpos.shape[1] >= 7 + joint_count + 7:
+        # last freejoint convention: [x, y, z, qw, qx, qy, qz]
+        return qpos[:, -4:]
+    return None
+
+
+def _normalize_quat_wxyz(quat_wxyz: np.ndarray) -> np.ndarray:
+    q = np.asarray(quat_wxyz, dtype=np.float64).reshape(4)
+    norm = float(np.linalg.norm(q))
+    if norm < 1e-8:
+        return np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    return q / norm
+
+
+def _resolve_urdf_mesh_path(urdf_path: Path, mesh_filename: str) -> Path:
+    raw = mesh_filename.strip()
+    if raw.startswith("package://"):
+        raw = raw[len("package://") :]
+    if raw.startswith("file://"):
+        raw = raw[len("file://") :]
+    if raw.startswith("@holosoma/"):
+        return _resolve_data_path(raw)
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return candidate
+    return urdf_path.parent / candidate
+
+
+def _load_mesh_vertices(mesh_path: Path) -> np.ndarray:
+    mesh = trimesh.load(str(mesh_path), force="mesh", process=False)
+    if isinstance(mesh, trimesh.Scene):
+        mesh = mesh.dump(concatenate=True)
+    if not isinstance(mesh, trimesh.Trimesh):
+        raise ValueError(f"Loaded mesh is not a trimesh: {mesh_path} ({type(mesh)})")
+    vertices = np.asarray(mesh.vertices, dtype=np.float32)
+    if vertices.ndim != 2 or vertices.shape[1] != 3 or vertices.shape[0] == 0:
+        raise ValueError(f"Invalid vertices for mesh: {mesh_path}")
+    return vertices
+
+
+def _object_local_vertices_from_urdf(urdf_path: Path, cache: dict[Path, np.ndarray]) -> np.ndarray:
+    key = urdf_path.resolve()
+    if key in cache:
+        return cache[key]
+
+    urdf = yourdfpy.URDF.load(str(key), load_meshes=False, build_scene_graph=True)
+    links = list(urdf.link_map.values())
+    use_collision = any(bool(getattr(link, "collisions", None)) for link in links)
+
+    parts: list[np.ndarray] = []
+    for link in links:
+        geoms = getattr(link, "collisions", None) if use_collision else getattr(link, "visuals", None)
+        if not geoms and use_collision:
+            geoms = getattr(link, "visuals", None)
+        if not geoms:
+            continue
+        try:
+            link_tf = np.asarray(urdf.get_transform(frame_to=link.name, frame_from="world"), dtype=np.float64)
+        except Exception:
+            link_tf = np.eye(4, dtype=np.float64)
+
+        for geom_entry in geoms:
+            geometry = getattr(geom_entry, "geometry", None)
+            mesh_info = getattr(geometry, "mesh", None) if geometry is not None else None
+            if mesh_info is None or not getattr(mesh_info, "filename", None):
+                continue
+
+            mesh_path = _resolve_urdf_mesh_path(key, str(mesh_info.filename))
+            if not mesh_path.exists():
+                raise FileNotFoundError(f"Mesh referenced by URDF does not exist: {mesh_path}")
+            verts = _load_mesh_vertices(mesh_path).astype(np.float64, copy=False)
+
+            scale = getattr(mesh_info, "scale", None)
+            if scale is not None:
+                s = np.asarray(scale, dtype=np.float64).reshape(-1)
+                if s.size == 1:
+                    verts = verts * float(s[0])
+                elif s.size >= 3:
+                    verts = verts * s[:3]
+
+            origin = getattr(geom_entry, "origin", None)
+            origin_tf = np.asarray(origin, dtype=np.float64) if origin is not None else np.eye(4, dtype=np.float64)
+            tf = link_tf @ origin_tf
+            verts_h = np.concatenate([verts, np.ones((verts.shape[0], 1), dtype=np.float64)], axis=1)
+            verts_tf = (tf @ verts_h.T).T[:, :3].astype(np.float32)
+            parts.append(verts_tf)
+
+    if not parts:
+        raise RuntimeError(f"No mesh geometry found in URDF: {key}")
+    out = np.concatenate(parts, axis=0)
+    cache[key] = out
+    return out
+
+
+def _object_init_min_z_world(obj_pos0: np.ndarray, obj_quat0_wxyz: np.ndarray, object_vertices_local: np.ndarray) -> float:
+    quat = _normalize_quat_wxyz(obj_quat0_wxyz)
+    rot = Rotation.from_quat([quat[1], quat[2], quat[3], quat[0]])
+    world_vertices = rot.apply(object_vertices_local.astype(np.float64, copy=False)) + np.asarray(
+        obj_pos0, dtype=np.float64
+    )[None, :]
+    return float(np.min(world_vertices[:, 2]))
 
 
 def _hand_positions_from_qpos(
@@ -323,9 +434,12 @@ def main() -> None:
         "dropped_contact": 0,
         "dropped_init_not_zero": 0,
         "skipped_no_object": 0,
+        "skipped_no_object_mesh": 0,
+        "skipped_bad_object_mesh": 0,
         "skipped_no_hands": 0,
     }
     kept_contact_summary: list[tuple[str, list[str], list[str], float, float]] = []
+    object_vertices_cache: dict[Path, np.ndarray] = {}
 
     for name in pair_names:
         motion_path = motion_map[name]
@@ -341,8 +455,32 @@ def main() -> None:
             counters["skipped_no_object"] += 1
             continue
 
-        # Strictly remove sequences whose object start position is not ~0.
-        if float(np.linalg.norm(obj_pos[0])) > obj_init_tol:
+        obj_quat = _object_quaternions_from_npz(payload, qpos, joint_count)
+        if obj_quat is None:
+            obj_quat = np.tile(np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32), (obj_pos.shape[0], 1))
+        if obj_pos.shape[0] == 0 or obj_quat.shape[0] == 0:
+            counters["skipped_no_object"] += 1
+            continue
+
+        seq_object_urdf: Path | None = None
+        if object_urdf_path is not None:
+            seq_object_urdf = object_urdf_path
+        elif object_dir is not None:
+            seq_object_urdf = obj_map.get(name)
+        if seq_object_urdf is None:
+            counters["skipped_no_object_mesh"] += 1
+            continue
+
+        try:
+            object_vertices_local = _object_local_vertices_from_urdf(seq_object_urdf, object_vertices_cache)
+            init_min_z = _object_init_min_z_world(obj_pos[0], obj_quat[0], object_vertices_local)
+        except Exception as exc:
+            counters["skipped_bad_object_mesh"] += 1
+            print(f"[process_omomo] skip {name}: failed mesh z-min check: {exc}")
+            continue
+
+        # Strictly remove sequences whose object mesh lowest point is not ~0 at frame 0.
+        if abs(init_min_z) > obj_init_tol:
             counters["dropped_init_not_zero"] += 1
             continue
 
@@ -455,6 +593,7 @@ def main() -> None:
     print(
         "[process_omomo] scanned={scanned} kept={kept} dropped_contact={dropped_contact} "
         "dropped_init_not_zero={dropped_init_not_zero} skipped_no_object={skipped_no_object} "
+        "skipped_no_object_mesh={skipped_no_object_mesh} skipped_bad_object_mesh={skipped_bad_object_mesh} "
         "skipped_no_hands={skipped_no_hands}".format(scanned=scanned, **counters)
     )
     print(f"[process_omomo] output motion dir: {out_motion}")
