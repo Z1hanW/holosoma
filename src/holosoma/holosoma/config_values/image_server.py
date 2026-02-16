@@ -64,6 +64,25 @@ real_depth_gum = dataclasses.replace(real,
 )
 
 
+# Real-robot D435i.
+real_d435i = dataclasses.replace(
+    base,
+    enable_gum_depth_prediction=False,
+    enable_zed_depth_prediction=False,
+    depth_source="depth",
+    near_clip=0.3,
+    far_clip=3.0,
+    resized_height=58,
+    resized_width=87,
+    frame_rate=50,
+    crop_y_start=16,
+    crop_x_start=32,
+    crop_x_end=-32,
+    save_images=False,
+    visualize_images=True,
+    camera_type="realsense",
+)
+
 DEFAULTS = {
     "mujoco": mujoco,
     "mujoco_d435i": mujoco_d435i,
@@ -71,4 +90,5 @@ DEFAULTS = {
     "real": real,
     "real_enable_gum": real_enable_gum,
     "real_depth_gum": real_depth_gum,
+    "real_d435i": real_d435i,
 }

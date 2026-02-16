@@ -23,6 +23,7 @@ from holosoma.config_types.image_server import (
     ImageVisualizerConfig,
 )
 from holosoma.sensors.zed import ZedCamerasConfig, ZedCamerasWrapper
+from holosoma.sensors.realsense import RealSenseCamerasConfig, RealSenseCamerasWrapper
 from holosoma.sensors.utils import _prepare_depth_for_visualization
 
 
@@ -357,11 +358,11 @@ class ImageVisualizer:
 
 
 class ImageServer:
-    def __init__(self, camera_wrapper: MujocoRendererWrapper | ZedCamerasWrapper, cfg: ImageServerConfig):
+    def __init__(self, camera_wrapper: MujocoRendererWrapper | ZedCamerasWrapper | RealSenseCamerasWrapper, cfg: ImageServerConfig):
         self.cfg: ImageServerConfig = cfg
 
         # Initialize camera wrapper
-        self.camera_wrapper: ZedCamerasWrapper | MujocoRendererWrapper = camera_wrapper
+        self.camera_wrapper: MujocoRendererWrapper | ZedCamerasWrapper | RealSenseCamerasWrapper = camera_wrapper
 
         # Initialize shared memory
         self._init_shared_memory()
@@ -560,18 +561,22 @@ class ImageServer:
 if __name__ == "__main__":
     # Parse command line arguments using subcommand presets from config_values.image_server.
     cfg = tyro.cli(ImageServerCliConfig, default=holosoma.config_values.image_server.real)
-    
-    # Set ZED depth mode based on config toggle.
-    depth_mode = "NEURAL" if cfg.enable_zed_depth_prediction else "NONE"
-    zed_cfg = ZedCamerasConfig(
-        terms={
-            name: replace(camera_cfg, depth_mode=depth_mode)
-            for name, camera_cfg in ZedCamerasConfig().terms.items()
-        }
-    )
+
+    if cfg.camera_type == "realsense":
+        camera_wrapper = RealSenseCamerasWrapper(RealSenseCamerasConfig())
+    else:
+        # Default: ZED cameras
+        depth_mode = "NEURAL" if cfg.enable_zed_depth_prediction else "NONE"
+        zed_cfg = ZedCamerasConfig(
+            terms={
+                name: replace(camera_cfg, depth_mode=depth_mode)
+                for name, camera_cfg in ZedCamerasConfig().terms.items()
+            }
+        )
+        camera_wrapper = ZedCamerasWrapper(zed_cfg)
 
     # Create image server with parsed config
-    image_server = ImageServer(ZedCamerasWrapper(zed_cfg), cfg)
+    image_server = ImageServer(camera_wrapper, cfg)
     thread = threading.Thread(target=image_server.send_process)
     thread.start()
     time.sleep(2)

@@ -115,6 +115,9 @@ class ImageServerConfig:
     crop_x_end: int | None = None
     """End column for cropping depth frames before resize. None means no crop."""
 
+    camera_type: Literal["zed", "realsense"] = "zed"
+    """Camera backend to use when running the standalone image server."""
+
     def __post_init__(self):
         if self.depth_source == "depth_gum" and not self.enable_gum_depth_prediction:
             raise ValueError(
