@@ -26,7 +26,7 @@ case "${DATASET_KNOB}" in
     DEFAULT_OBJECT_URDF=""
     ;;
   omomo)
-    DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/demo_results_parallel/g1/object_interaction/omomo"
+    DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/demo_results_parallel/g1/object_interaction/omomo_carry"
     DEFAULT_GEOMETRY_DIR=""
     DEFAULT_OBJECT_URDF_DIR=""
     DEFAULT_OBJECT_URDF_MODE="stem"
@@ -45,30 +45,13 @@ case "${DATASET_KNOB}" in
     ;;
 esac
 
-MOTION_DIR=${MOTION_DIR:-"${DEFAULT_MOTION_DIR}"}
-GEOMETRY_DIR=${GEOMETRY_DIR:-"${DEFAULT_GEOMETRY_DIR}"}
-OBJECT_URDF_DIR=${OBJECT_URDF_DIR:-"${DEFAULT_OBJECT_URDF_DIR}"}
-OBJECT_URDF_MODE=${OBJECT_URDF_MODE:-"${DEFAULT_OBJECT_URDF_MODE}"}
-OBJECT_URDF=${OBJECT_URDF:-"${DEFAULT_OBJECT_URDF}"}
-
-# Make dataset knob authoritative for object source to avoid stale shell env leakage.
-case "${DATASET_KNOB}" in
-  omomo)
-    OBJECT_URDF_DIR=""
-    OBJECT_URDF_MODE="stem"
-    OBJECT_URDF="${DEFAULT_OBJECT_URDF}"
-    ;;
-  behave)
-    OBJECT_URDF=""
-    OBJECT_URDF_DIR="${DEFAULT_OBJECT_URDF_DIR}"
-    OBJECT_URDF_MODE="behave"
-    ;;
-  crisp)
-    OBJECT_URDF=""
-    OBJECT_URDF_DIR="${DEFAULT_OBJECT_URDF_DIR}"
-    OBJECT_URDF_MODE="stem"
-    ;;
-esac
+# Make dataset knob authoritative for motion/geometry/object source.
+MOTION_DIR="${DEFAULT_MOTION_DIR}"
+GEOMETRY_DIR="${DEFAULT_GEOMETRY_DIR}"
+OBJECT_URDF_DIR="${DEFAULT_OBJECT_URDF_DIR}"
+OBJECT_URDF_MODE="${DEFAULT_OBJECT_URDF_MODE}"
+OBJECT_URDF="${DEFAULT_OBJECT_URDF}"
+echo "[INFO] DATASET_KNOB=${DATASET_KNOB} motion=${MOTION_DIR} geometry=${GEOMETRY_DIR} object_urdf=${OBJECT_URDF} object_urdf_dir=${OBJECT_URDF_DIR} object_mode=${OBJECT_URDF_MODE}"
 
 ROBOT=${ROBOT:-"g1_29dof"}
 PORT=${PORT:-"$((RANDOM % 8976 + 1024))"}
