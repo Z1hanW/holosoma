@@ -83,6 +83,29 @@ real_d435i = dataclasses.replace(
     camera_type="realsense",
 )
 
+# Debug-friendly D435i profile with visualization and both depth sources enabled.
+real_verbose_d435i = dataclasses.replace(
+    real_d435i,
+    enable_gum_depth_prediction=True,
+    visualize_images=True,
+    save_images=True,
+)
+
+# D435i with GUM depth prediction enabled (policy still uses camera depth).
+real_enable_gum_d435i = dataclasses.replace(
+    real_d435i,
+    enable_gum_depth_prediction=True,
+    visualize_images=False,
+)
+
+# D435i with GUM depth prediction as the policy depth source.
+real_depth_gum_d435i = dataclasses.replace(
+    real_d435i,
+    enable_gum_depth_prediction=True,
+    depth_source="depth_gum",
+    visualize_images=False,
+)
+
 DEFAULTS = {
     "mujoco": mujoco,
     "mujoco_d435i": mujoco_d435i,
@@ -91,4 +114,7 @@ DEFAULTS = {
     "real_enable_gum": real_enable_gum,
     "real_depth_gum": real_depth_gum,
     "real_d435i": real_d435i,
+    "real_verbose_d435i": real_verbose_d435i,
+    "real_enable_gum_d435i": real_enable_gum_d435i,
+    "real_depth_gum_d435i": real_depth_gum_d435i,
 }
