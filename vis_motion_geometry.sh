@@ -4,17 +4,52 @@ set -euo pipefail
 # Viser: motion + geometry viewer
 #
 # Usage:
+#   DATASET_KNOB=crisp ./vis_motion_geometry.sh
+#   DATASET_KNOB=omomo ./vis_motion_geometry.sh
+#   DATASET_KNOB=behave ./vis_motion_geometry.sh
 #   MOTION_DIR=/ABS/PATH/to/motions GEOMETRY_DIR=/ABS/PATH/to/geometry ./vis_motion_geometry.sh
 #
 # Optional overrides:
+#   DATASET_KNOB=crisp|omomo|behave (default: behave)
 #   ROBOT=g1_29dof PORT=#### START_CLIP=clip_name FPS=30 AUTOPLAY=True LOOP=True PRELOAD=True
 #   SHOW_MESHES=True SHOW_GEOMETRY=True GRID=True GRID_SIZE=10.0
 
-MOTION_DIR=${MOTION_DIR:-"/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/demo_results/g1/object_interaction/behave_zup"}
-GEOMETRY_DIR=${GEOMETRY_DIR:-""}
-OBJECT_URDF_DIR=${OBJECT_URDF_DIR:-"/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/models/behave_objects"}
-OBJECT_URDF_MODE=${OBJECT_URDF_MODE:-"behave"}
-OBJECT_URDF=${OBJECT_URDF:-""}
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+DATASET_KNOB=${DATASET_KNOB:-"behave"}
+
+case "${DATASET_KNOB}" in
+  crisp)
+    DEFAULT_MOTION_DIR="${SCRIPT_DIR}/crisp/vmm_data/___crisp_motion"
+    DEFAULT_GEOMETRY_DIR="${SCRIPT_DIR}/crisp/vmm_data/___crisp_geometry"
+    DEFAULT_OBJECT_URDF_DIR="${SCRIPT_DIR}/crisp/vmm_data/___crisp_object_urdf"
+    DEFAULT_OBJECT_URDF_MODE="stem"
+    DEFAULT_OBJECT_URDF=""
+    ;;
+  omomo)
+    DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/demo_results_parallel/g1/object_interaction/omomo"
+    DEFAULT_GEOMETRY_DIR=""
+    DEFAULT_OBJECT_URDF_DIR=""
+    DEFAULT_OBJECT_URDF_MODE="stem"
+    DEFAULT_OBJECT_URDF="${SCRIPT_DIR}/src/holosoma_retargeting/models/largebox/largebox.urdf"
+    ;;
+  behave)
+    DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/demo_results/g1/object_interaction/behave_zup"
+    DEFAULT_GEOMETRY_DIR=""
+    DEFAULT_OBJECT_URDF_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/models/behave_objects"
+    DEFAULT_OBJECT_URDF_MODE="behave"
+    DEFAULT_OBJECT_URDF=""
+    ;;
+  *)
+    echo "[ERROR] Unknown DATASET_KNOB=${DATASET_KNOB}. Use crisp|omomo|behave." >&2
+    exit 1
+    ;;
+esac
+
+MOTION_DIR=${MOTION_DIR:-"${DEFAULT_MOTION_DIR}"}
+GEOMETRY_DIR=${GEOMETRY_DIR:-"${DEFAULT_GEOMETRY_DIR}"}
+OBJECT_URDF_DIR=${OBJECT_URDF_DIR:-"${DEFAULT_OBJECT_URDF_DIR}"}
+OBJECT_URDF_MODE=${OBJECT_URDF_MODE:-"${DEFAULT_OBJECT_URDF_MODE}"}
+OBJECT_URDF=${OBJECT_URDF:-"${DEFAULT_OBJECT_URDF}"}
 ROBOT=${ROBOT:-"g1_29dof"}
 PORT=${PORT:-"$((RANDOM % 8976 + 1024))"}
 START_CLIP=${START_CLIP:-""}
