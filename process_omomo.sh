@@ -25,7 +25,7 @@ set -euo pipefail
 #   MIN_DUAL_RATIO=0.15
 #   MIN_BETWEEN_RATIO=0.15
 #   SEGMENT_DIST_THRESH=0.18
-#   OBJ_INIT_TOL=1e-4
+#   OBJ_INIT_TOL=0.01
 #   REQUIRE_BOTH_HANDS=true
 
 MOTION_DIR=${MOTION_DIR:-"/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/demo_results_parallel/g1/object_interaction/omomo"}
@@ -44,7 +44,7 @@ MIN_CONSEC_FRAMES=${MIN_CONSEC_FRAMES:-"12"}
 MIN_DUAL_RATIO=${MIN_DUAL_RATIO:-"0.15"}
 MIN_BETWEEN_RATIO=${MIN_BETWEEN_RATIO:-"0.15"}
 SEGMENT_DIST_THRESH=${SEGMENT_DIST_THRESH:-"0.18"}
-OBJ_INIT_TOL=${OBJ_INIT_TOL:-"1e-4"}
+OBJ_INIT_TOL=${OBJ_INIT_TOL:-"0.01"}
 REQUIRE_BOTH_HANDS=${REQUIRE_BOTH_HANDS:-"true"}
 
 export MOTION_DIR GEOMETRY_DIR OBJECT_URDF_DIR ROBOT LEFT_LINK RIGHT_LINK
@@ -343,7 +343,7 @@ def main() -> None:
     min_dual_ratio = float(os.environ.get("MIN_DUAL_RATIO", "0.15"))
     min_between_ratio = float(os.environ.get("MIN_BETWEEN_RATIO", "0.15"))
     segment_dist_thresh = float(os.environ.get("SEGMENT_DIST_THRESH", "0.18"))
-    obj_init_tol = float(os.environ.get("OBJ_INIT_TOL", "1e-4"))
+    obj_init_tol = float(os.environ.get("OBJ_INIT_TOL", "0.01"))
     require_both_hands = _normalize_bool_env(os.environ.get("REQUIRE_BOTH_HANDS", "true"))
 
     geometry_dir = _resolve_data_path(geometry_raw) if geometry_raw else None
