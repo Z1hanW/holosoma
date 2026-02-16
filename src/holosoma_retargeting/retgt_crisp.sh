@@ -18,13 +18,8 @@ TRAIN_MOTION_DIR=${TRAIN_MOTION_DIR:-"$DATA_ROOT/___crisp_motion"}
 TRAIN_GEOMETRY_DIR=${TRAIN_GEOMETRY_DIR:-"$DATA_ROOT/___crisp_geometry"}
 TRAIN_OBJECT_URDF_DIR=${TRAIN_OBJECT_URDF_DIR:-""}
 CONVERT_OUTPUT_FPS=${CONVERT_OUTPUT_FPS:-50}
-if [ -z "${CONVERTER_PYTHON:-}" ]; then
-    if command -v mjpython >/dev/null 2>&1; then
-        CONVERTER_PYTHON="mjpython"
-    else
-        CONVERTER_PYTHON="python"
-    fi
-fi
+CONVERTER_PYTHON=${CONVERTER_PYTHON:-python}
+CONVERTER_HEADLESS=${CONVERTER_HEADLESS:-1}
 
 OBJECT_NAME="scene_mesh_sqs"
 # Motion file name expected by downstream code (matches retargeting_gt behavior)
@@ -52,6 +47,12 @@ if ! command -v "$CONVERTER_PYTHON" >/dev/null 2>&1; then
     echo "[ERROR] converter python executable not found: $CONVERTER_PYTHON" >&2
     exit 1
 fi
+CONVERTER_HEADLESS_ARG=()
+case "${CONVERTER_HEADLESS}" in
+    True|true|1|YES|yes|Y|y)
+        CONVERTER_HEADLESS_ARG=(--headless)
+        ;;
+esac
 
 if [ ! -f "$TEMPLATE_XML" ]; then
     echo "[ERROR] missing template scene xml: $TEMPLATE_XML" >&2
@@ -69,6 +70,8 @@ failed_seqs=0
 failed_list=()
 converted_seqs=0
 exported_seqs=0
+convert_failed_seqs=0
+convert_failed_list=()
 
 mkdir -p "$TRAIN_MOTION_DIR"
 mkdir -p "$TRAIN_GEOMETRY_DIR"
@@ -275,6 +278,7 @@ PY
         failed_list+=("$seq_name")
         continue
     fi
+    success_seqs=$((success_seqs + 1))
 
     retarget_npz=""
     for candidate in \
@@ -287,9 +291,9 @@ PY
         fi
     done
     if [ -z "$retarget_npz" ]; then
-        echo "[WARN] retarget output npz not found for $seq_name under $seq_out_root; skipping" >&2
-        failed_seqs=$((failed_seqs + 1))
-        failed_list+=("$seq_name")
+        echo "[WARN] retarget output npz not found for $seq_name under $seq_out_root; conversion skipped" >&2
+        convert_failed_seqs=$((convert_failed_seqs + 1))
+        convert_failed_list+=("$seq_name")
         continue
     fi
 
@@ -309,11 +313,12 @@ PY
             --data_format smplx \
             --object_name "$OBJECT_NAME" \
             --has_dynamic_object \
+            "${CONVERTER_HEADLESS_ARG[@]}" \
             --once
     ); then
-        echo "[WARN] conversion failed for $seq_name; skipping" >&2
-        failed_seqs=$((failed_seqs + 1))
-        failed_list+=("$seq_name")
+        echo "[WARN] conversion failed for $seq_name; retarget kept, export skipped" >&2
+        convert_failed_seqs=$((convert_failed_seqs + 1))
+        convert_failed_list+=("$seq_name")
         continue
     fi
     converted_seqs=$((converted_seqs + 1))
@@ -329,12 +334,12 @@ PY
     echo "  train_motion=$train_motion_npz"
     echo "  train_geometry=$train_geometry_obj"
 
-    success_seqs=$((success_seqs + 1))
 done
 
 echo "[retgt_crisp] summary:"
 echo "  total=${total_seqs} success=${success_seqs} failed=${failed_seqs}"
 echo "  converted=${converted_seqs} exported=${exported_seqs}"
+echo "  convert_failed=${convert_failed_seqs}"
 echo "  train_motion_dir=${TRAIN_MOTION_DIR}"
 echo "  train_geometry_dir=${TRAIN_GEOMETRY_DIR}"
 if [ -n "$TRAIN_OBJECT_URDF_DIR" ]; then
@@ -342,4 +347,7 @@ if [ -n "$TRAIN_OBJECT_URDF_DIR" ]; then
 fi
 if [ "${#failed_list[@]}" -gt 0 ]; then
   echo "  failed_list=${failed_list[*]}"
+fi
+if [ "${#convert_failed_list[@]}" -gt 0 ]; then
+  echo "  convert_failed_list=${convert_failed_list[*]}"
 fi

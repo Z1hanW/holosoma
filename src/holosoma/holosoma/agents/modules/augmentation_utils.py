@@ -621,6 +621,17 @@ class SymmetryUtils:
     def mirror_obs_obj_lin_vel_b(self, obj_lin_vel_b: torch.Tensor) -> torch.Tensor:
         return self._mirror_vec3_flat(obj_lin_vel_b)
 
+    def mirror_obs_obj_target_pose_size_b(self, obj_target_pose_size_b: torch.Tensor) -> torch.Tensor:
+        """Mirror [obj_pos_b(3), obj_rot_6d(6), obj_size(3)] blocks."""
+        if obj_target_pose_size_b.shape[-1] % 12 != 0:
+            raise ValueError("Expected last dim to be multiple of 12 for obj_target_pose_size_b mirroring.")
+        reshaped = obj_target_pose_size_b.view(*obj_target_pose_size_b.shape[:-1], -1, 12)
+        reshaped[..., 1] = -reshaped[..., 1]
+        ori = reshaped[..., 3:9].clone().view(*reshaped.shape[:-1], 3, 2)
+        ori[..., 1, :] = -ori[..., 1, :]
+        reshaped[..., 3:9] = ori.view(*reshaped.shape[:-1], 6)
+        return reshaped.view(obj_target_pose_size_b.shape)
+
     def mirror_obs_motion_future_target_poses(self, motion_future_target_poses: torch.Tensor) -> torch.Tensor:
         """Pass-through for future target poses.
 

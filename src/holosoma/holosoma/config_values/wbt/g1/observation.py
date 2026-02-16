@@ -56,6 +56,11 @@ actor_obs_motion_tracking = ObsGroupCfg(
 actor_obs_w_object_terms = actor_obs_shared.terms.copy()
 actor_obs_w_object_terms.update(
     {
+        "obj_target_pose_size_b": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_target_pose_size_b",
+            scale=1.0,
+            noise=0.0,
+        ),
         "obj_pos_b": ObsTermCfg(
             func="holosoma.managers.observation.terms.wbt:obj_pos_b",
             scale=1.0,
@@ -151,6 +156,11 @@ critic_obs_motion_tracking_terms["motion_future_target_poses"] = ObsTermCfg(
 critic_obs_w_object_terms = critic_obs_shared_terms.copy()
 critic_obs_w_object_terms.update(
     {
+        "obj_target_pose_size_b": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_target_pose_size_b",
+            scale=1.0,
+            noise=0.0,
+        ),
         "obj_pos_b": ObsTermCfg(
             func="holosoma.managers.observation.terms.wbt:obj_pos_b",
             scale=1.0,

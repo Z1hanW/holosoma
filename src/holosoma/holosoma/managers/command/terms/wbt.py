@@ -33,6 +33,13 @@ from holosoma.utils.simulator_config import SimulatorType
 ## MotionLoader and AdaptiveTimestepsSampler
 #########################################################################################################
 class MotionLoader:
+    _OBJECT_SIZE_KEYS = (
+        "object_size",
+        "box_size",
+        "object_scale",
+        "box_scale",
+    )
+
     def __init__(
         self,
         motion_file: str,
@@ -78,6 +85,47 @@ class MotionLoader:
         self._joint_indexes = joint_indexes
         self._body_indexes = body_indexes
         self.time_step_total = self._joint_pos.shape[0]
+
+    @classmethod
+    def _normalize_object_size_array(cls, raw: np.ndarray, length: int, *, source: str) -> np.ndarray:
+        arr = np.asarray(raw, dtype=np.float32)
+        if arr.ndim == 0:
+            scalar = float(arr)
+            return np.full((length, 3), scalar, dtype=np.float32)
+
+        if arr.ndim == 1:
+            if arr.shape[0] == 1:
+                return np.full((length, 3), float(arr[0]), dtype=np.float32)
+            if arr.shape[0] == 3:
+                return np.repeat(arr.reshape(1, 3), repeats=length, axis=0)
+            if arr.shape[0] == length:
+                return np.repeat(arr.reshape(length, 1), repeats=3, axis=1)
+
+        if arr.ndim == 2:
+            if arr.shape == (1, 3):
+                return np.repeat(arr, repeats=length, axis=0)
+            if arr.shape == (3, 1):
+                row = arr.reshape(1, 3)
+                return np.repeat(row, repeats=length, axis=0)
+            if arr.shape == (length, 1):
+                return np.repeat(arr, repeats=3, axis=1)
+            if arr.shape == (3, length):
+                return arr.transpose(1, 0)
+            if arr.shape == (length, 3):
+                return arr
+
+        raise ValueError(
+            f"Unsupported object-size shape {arr.shape} in {source}; "
+            "expected scalar, (3,), (T,), (T,3), (1,3), or (T,1)."
+        )
+
+    @classmethod
+    def _extract_object_size_np(cls, data: Any, length: int, *, source: str) -> np.ndarray:
+        for key in cls._OBJECT_SIZE_KEYS:
+            if key in data:
+                raw = np.asarray(data[key], dtype=np.float32)
+                return cls._normalize_object_size_array(raw, length, source=f"{source}:{key}")
+        return np.ones((length, 3), dtype=np.float32)
 
     def _get_index_of_a_in_b(self, a_names: List[str], b_names: List[str], device: str = "cpu") -> torch.Tensor:
         indexes = []
@@ -125,15 +173,19 @@ class MotionLoader:
             # add object pos and quat
             self.has_object = "object_pos_w" in data
             if self.has_object:
+                length = int(self._joint_pos.shape[0])
                 # NOTE: wxyz after loading from npz
                 self._object_pos_w = torch.tensor(data["object_pos_w"], dtype=torch.float32, device=device)
                 object_quat_w = torch.tensor(data["object_quat_w"], dtype=torch.float32, device=device)
                 self._object_quat_w = object_quat_w[:, [1, 2, 3, 0]]  # Change to xyzw
                 self._object_lin_vel_w = torch.tensor(data["object_lin_vel_w"], dtype=torch.float32, device=device)
+                object_size = self._extract_object_size_np(data, length, source=motion_file)
+                self._object_size = torch.tensor(object_size, dtype=torch.float32, device=device)
             else:
                 self._object_pos_w = torch.zeros(0, 3, device=device)
                 self._object_quat_w = torch.zeros(0, 4, device=device)
                 self._object_lin_vel_w = torch.zeros(0, 3, device=device)
+                self._object_size = torch.zeros(0, 3, device=device)
         clip_id = Path(motion_file).stem
         length = int(self._joint_pos.shape[0])
         self._set_clip_metadata([clip_id], np.array([0]), np.array([length]), device)
@@ -196,6 +248,7 @@ class MotionLoader:
         object_pos_list: list[np.ndarray] = []
         object_quat_list: list[np.ndarray] = []
         object_lin_vel_list: list[np.ndarray] = []
+        object_size_list: list[np.ndarray] = []
 
         for file_path in files:
             with np.load(file_path, allow_pickle=True) as data:
@@ -250,6 +303,9 @@ class MotionLoader:
                     object_pos_list.append(np.asarray(data["object_pos_w"]))
                     object_quat_list.append(np.asarray(data["object_quat_w"]))
                     object_lin_vel_list.append(np.asarray(data["object_lin_vel_w"]))
+                    object_size_list.append(
+                        self._extract_object_size_np(data, length, source=str(file_path))
+                    )
 
         self.fps = float(fps_ref) if fps_ref is not None else 30.0
         self._set_clip_metadata(clip_ids, np.array(offsets), np.array(lengths), device)
@@ -279,15 +335,18 @@ class MotionLoader:
             object_pos_w = np.concatenate(object_pos_list, axis=0)
             object_quat_w = np.concatenate(object_quat_list, axis=0)
             object_lin_vel_w = np.concatenate(object_lin_vel_list, axis=0)
+            object_size = np.concatenate(object_size_list, axis=0)
 
             self._object_pos_w = torch.tensor(object_pos_w, dtype=torch.float32, device=device)
             object_quat_w = torch.tensor(object_quat_w, dtype=torch.float32, device=device)
             self._object_quat_w = object_quat_w[:, [1, 2, 3, 0]]
             self._object_lin_vel_w = torch.tensor(object_lin_vel_w, dtype=torch.float32, device=device)
+            self._object_size = torch.tensor(object_size, dtype=torch.float32, device=device)
         else:
             self._object_pos_w = torch.zeros(0, 3, device=device)
             self._object_quat_w = torch.zeros(0, 4, device=device)
             self._object_lin_vel_w = torch.zeros(0, 3, device=device)
+            self._object_size = torch.zeros(0, 3, device=device)
 
         return body_names, joint_names
 
@@ -409,6 +468,7 @@ class MotionLoader:
             offsets = None
             lengths = None
             clip_fps = None
+            selected_clip_idx: int | None = None
             if clips is not None:
                 clip_ids = self._decode_h5_strings(np.asarray(clips["clip_ids"]))
                 offsets = np.asarray(clips["offsets"], dtype=np.int64)
@@ -445,6 +505,7 @@ class MotionLoader:
                 assert offsets is not None and lengths is not None
                 if clip_idx < 0 or clip_idx >= len(lengths):
                     raise IndexError(f"Clip index {clip_idx} out of range for HDF5 motion file.")
+                selected_clip_idx = clip_idx
                 start = int(offsets[clip_idx])
                 length = int(lengths[clip_idx])
                 fps_val = clip_fps[clip_idx] if clip_fps is not None else np.asarray(meta["fps"])
@@ -479,15 +540,53 @@ class MotionLoader:
                 object_pos_w = np.asarray(data["object_pos_w"][start:end])
                 object_quat_w = np.asarray(data["object_quat_w"][start:end])
                 object_lin_vel_w = np.asarray(data["object_lin_vel_w"][start:end])
+                object_size = None
+                for key in self._OBJECT_SIZE_KEYS:
+                    if key not in data:
+                        continue
+                    raw_size = np.asarray(data[key], dtype=np.float32)
+                    # Support clip-wise object size annotations: shape (num_clips, 3) or (num_clips,).
+                    if (
+                        clips is not None
+                        and lengths is not None
+                        and raw_size.ndim in (1, 2)
+                        and raw_size.shape[0] == len(lengths)
+                    ):
+                        if selected_clip_idx is not None:
+                            raw_size = raw_size[selected_clip_idx]
+                            object_size = self._normalize_object_size_array(
+                                raw_size, length, source=f"{motion_file}:{key}"
+                            )
+                            break
+                        if load_all:
+                            per_clip_sizes = []
+                            for clip_i, clip_len in enumerate(lengths):
+                                clip_size = self._normalize_object_size_array(
+                                    raw_size[clip_i], int(clip_len), source=f"{motion_file}:{key}"
+                                )
+                                per_clip_sizes.append(clip_size)
+                            object_size = np.concatenate(per_clip_sizes, axis=0)
+                            break
+                    # Most common format stores size per frame for the full bank.
+                    if raw_size.ndim >= 1 and raw_size.shape[0] >= end:
+                        raw_size = raw_size[start:end]
+                    object_size = self._normalize_object_size_array(
+                        raw_size, length, source=f"{motion_file}:{key}"
+                    )
+                    break
+                if object_size is None:
+                    object_size = np.ones((length, 3), dtype=np.float32)
 
                 self._object_pos_w = torch.tensor(object_pos_w, dtype=torch.float32, device=device)
                 object_quat_w = torch.tensor(object_quat_w, dtype=torch.float32, device=device)
                 self._object_quat_w = object_quat_w[:, [1, 2, 3, 0]]
                 self._object_lin_vel_w = torch.tensor(object_lin_vel_w, dtype=torch.float32, device=device)
+                self._object_size = torch.tensor(object_size, dtype=torch.float32, device=device)
             else:
                 self._object_pos_w = torch.zeros(0, 3, device=device)
                 self._object_quat_w = torch.zeros(0, 4, device=device)
                 self._object_lin_vel_w = torch.zeros(0, 3, device=device)
+                self._object_size = torch.zeros(0, 3, device=device)
 
         return body_names, joint_names
 
@@ -570,6 +669,7 @@ class MotionLoader:
         self._object_pos_w = torch.zeros(0, 3, device=device)
         self._object_quat_w = torch.zeros(0, 4, device=device)
         self._object_lin_vel_w = torch.zeros(0, 3, device=device)
+        self._object_size = torch.zeros(0, 3, device=device)
 
         clip_id = Path(motion_file).stem
         self._set_clip_metadata([clip_id], np.array([0]), np.array([num_frames]), device)
@@ -611,6 +711,10 @@ class MotionLoader:
     def object_lin_vel_w(self) -> torch.Tensor:
         return self._object_lin_vel_w[:]
 
+    @property
+    def object_size(self) -> torch.Tensor:
+        return self._object_size[:]
+
     def extend_with_segments(self, segments: dict[str, torch.Tensor], prepend: bool) -> MotionLoader:
         """Merge interpolated segments with motion data, mutating this MotionLoader."""
         concat_targets = [
@@ -627,6 +731,7 @@ class MotionLoader:
                     ("object_pos", "_object_pos_w"),
                     ("object_quat", "_object_quat_w"),
                     ("object_lin_vel", "_object_lin_vel_w"),
+                    ("object_size", "_object_size"),
                 ]
             )
 
@@ -984,11 +1089,9 @@ class MotionCommand(CommandTermBase):
         target_dof_vel = dof_vel
 
         # 1.2.3 root_pos
-        pos_noise = torch.zeros_like(root_pos)
-        pos_noise[:, :2] = torch.rand(root_pos.shape, device=self.device)[:, :2] * root_pos_noise[:2].unsqueeze(0)
-        # z 轴你可以选择保持对称或不动
-        pos_noise[:, 2] = (torch.rand(root_pos.shape, device=self.device)[:, 2] - 0.5) * 2 * root_pos_noise[2]
-        target_root_pos = root_pos + pos_noise
+        target_root_pos = root_pos + (
+            torch.rand(root_pos.shape, device=self.device) - 0.5
+        ) * 2 * root_pos_noise.unsqueeze(0)  # (num_envs, 3)
         
         # 1.2.4 root_rot
         rand_sample_rpy = (torch.rand((len(env_ids), 3), device=self.device) - 0.5) * 2 * root_rot_noise_rpy
@@ -1417,6 +1520,13 @@ class MotionCommand(CommandTermBase):
             return self._apply_motion_alignment_vec(vel)
         return vel
 
+    @property
+    def object_size(self) -> torch.Tensor:
+        if not self.motion.has_object:
+            return torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
+        motion_idx = self._get_motion_indices(self.time_steps)
+        return self.motion.object_size[motion_idx]
+
     #########################################################################################
     ## Object from simulator
     #########################################################################################
@@ -1815,10 +1925,12 @@ class MotionCommand(CommandTermBase):
             object_pos = self.motion._object_pos_w[motion_idx].to(self.device)
             object_quat = self.motion._object_quat_w[motion_idx].to(self.device)
             object_lin_vel = self.motion._object_lin_vel_w[motion_idx].to(self.device)
+            object_size = self.motion._object_size[motion_idx].to(self.device)
         else:
             object_pos = torch.zeros(0, 3, device=self.device, dtype=torch.float32)
             object_quat = torch.zeros(0, 4, device=self.device, dtype=torch.float32)
             object_lin_vel = torch.zeros(0, 3, device=self.device, dtype=torch.float32)
+            object_size = torch.zeros(0, 3, device=self.device, dtype=torch.float32)
 
         return {
             "joint_pos": joint_pos.clone(),
@@ -1834,6 +1946,7 @@ class MotionCommand(CommandTermBase):
             "object_pos": object_pos,
             "object_quat": object_quat,
             "object_lin_vel": object_lin_vel,
+            "object_size": object_size,
         }
 
     def _add_transition_to_motion(self, default_state: dict[str, torch.Tensor], num_steps: int, prepend: bool) -> None:
@@ -1971,6 +2084,7 @@ class MotionCommand(CommandTermBase):
             state["object_pos"] = self.motion._object_pos_w[idx].to(device=device, dtype=dtype)
             state["object_quat"] = self.motion._object_quat_w[idx].to(device=device, dtype=dtype)
             state["object_lin_vel"] = self.motion._object_lin_vel_w[idx].to(device=device, dtype=dtype)
+            state["object_size"] = self.motion._object_size[idx].to(device=device, dtype=dtype)
         return state
 
     def _default_motion_state(
@@ -1995,6 +2109,7 @@ class MotionCommand(CommandTermBase):
             state["object_pos"] = default_state["object_pos"].to(device=device, dtype=dtype)
             state["object_quat"] = default_state["object_quat"].to(device=device, dtype=dtype)
             state["object_lin_vel"] = default_state["object_lin_vel"].to(device=device, dtype=dtype)
+            state["object_size"] = default_state["object_size"].to(device=device, dtype=dtype)
         return state
 
     def _build_transition_segments(
@@ -2025,6 +2140,7 @@ class MotionCommand(CommandTermBase):
             segments["object_quat"] = self._slerp_quat_sequence(
                 start["object_quat"].unsqueeze(0), target["object_quat"].unsqueeze(0), alphas
             ).squeeze(1)
+            segments["object_size"] = _lerp(start["object_size"], target["object_size"], alphas_joint)
 
         return segments
 
