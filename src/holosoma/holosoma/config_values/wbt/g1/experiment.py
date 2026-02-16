@@ -391,7 +391,6 @@ g1_29dof_wbt_w_object_generalist = replace(
         name="g1_29dof_wbt_w_object_generalist",
     ),
     command=command.g1_29dof_wbt_command_w_object_generalist,
-    randomization=randomization.g1_29dof_wbt_randomization_w_object_generalist,
 )
 
 g1_29dof_wbt_fast_sac_w_object = replace(

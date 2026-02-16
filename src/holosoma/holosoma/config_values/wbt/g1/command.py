@@ -52,10 +52,6 @@ motion_config_w_object_generalist = replace(
     motion_config_w_object,
     # For directory motion banks, sample clips proportional to valid start steps.
     clip_weighting_strategy="uniform_step",
-    # Multi-clip motion banks skip default-pose prepend/append internally.
-    # Keep these off explicitly to avoid confusion in logs.
-    enable_default_pose_prepend=False,
-    enable_default_pose_append=False,
 )
 
 g1_29dof_wbt_command = CommandManagerCfg(

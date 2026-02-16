@@ -1,126 +1,103 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Generalist W-Object training (multi-clip directory input).
-#
-# Example:
-#   MOTION_DIR=/ABS/PATH/to/omomo_carry ./train_object_generalist.sh
+# Generalist whole-body tracking training with dynamic object from a motion bank directory.
+# Workflow:
+#   1) Inspect kinematic motion in IsaacSim ("both" markers: real + motion).
+#   2) Close the visualizer window.
+#   3) Start training with live Viser updates.
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-5,6,7}
 EXP=${EXP:-g1-29dof-wbt-w-object-generalist}
 MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/demo_results_parallel/g1/object_interaction/omomo_carry"}
 NUM_ENVS=${NUM_ENVS:-12288}
-NPROC=${NPROC:-4}
+NPROC=${NPROC:-3}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
-SAVE_INTERVAL=${SAVE_INTERVAL:-500}
-STRICT_VALIDATE=${STRICT_VALIDATE:-1}
-REQUIRE_OBJECT_SIZE=${REQUIRE_OBJECT_SIZE:-1}
 
-if [[ -z "${MOTION_DIR}" ]]; then
-  echo "[ERROR] MOTION_DIR is required and must point to a directory of .npz clips."
-  echo "        Example: MOTION_DIR=/ABS/PATH/to/omomo_carry ./train_object_generalist.sh"
-  exit 1
-fi
+INSPECT_KINEMATIC_FIRST=${INSPECT_KINEMATIC_FIRST:-1}
+INSPECT_KINEMATIC_MODE=${INSPECT_KINEMATIC_MODE:-both}
+INSPECT_NUM_ENVS=${INSPECT_NUM_ENVS:-1}
+INSPECT_HEADLESS=${INSPECT_HEADLESS:-False}
+PREVIEW_CUDA_VISIBLE_DEVICES=${PREVIEW_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES%%,*}}
+PREVIEW_CUDA_VISIBLE_DEVICES=${PREVIEW_CUDA_VISIBLE_DEVICES:-0}
 
-if [[ ! -d "${MOTION_DIR}" ]]; then
-  echo "[ERROR] MOTION_DIR does not exist or is not a directory: ${MOTION_DIR}"
-  exit 1
-fi
+VISER_PORT=${VISER_PORT:-$((RANDOM % 8976 + 1024))}
+VISER_ENV_ID=${VISER_ENV_ID:-0}
+VISER_UPDATE_HZ=${VISER_UPDATE_HZ:-30}
+VISER_SYNC_TO_SIM=${VISER_SYNC_TO_SIM:-True}
+VISER_FORCE_DT=${VISER_FORCE_DT:-True}
+VISER_RECENTER=${VISER_RECENTER:-True}
+VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-False}
 
-if [[ "${STRICT_VALIDATE}" != "0" ]]; then
-  echo "[INFO] Validating motion bank consistency..."
-  MOTION_DIR="${MOTION_DIR}" REQUIRE_OBJECT_SIZE="${REQUIRE_OBJECT_SIZE}" python - <<'PY'
-from __future__ import annotations
+INSPECT_ENABLE_VISER=${INSPECT_ENABLE_VISER:-1}
+INSPECT_VISER_PORT=${INSPECT_VISER_PORT:-$((RANDOM % 8976 + 1024))}
+INSPECT_VISER_ENV_ID=${INSPECT_VISER_ENV_ID:-0}
+INSPECT_VISER_UPDATE_HZ=${INSPECT_VISER_UPDATE_HZ:-30}
+INSPECT_VISER_SYNC_TO_SIM=${INSPECT_VISER_SYNC_TO_SIM:-True}
+INSPECT_VISER_FORCE_DT=${INSPECT_VISER_FORCE_DT:-True}
+INSPECT_VISER_RECENTER=${INSPECT_VISER_RECENTER:-True}
+INSPECT_VISER_SHOW_SCANDOTS=${INSPECT_VISER_SHOW_SCANDOTS:-False}
 
-import os
-from pathlib import Path
+EXTRA_ARGS=("$@")
 
-import numpy as np
+if [[ "${INSPECT_KINEMATIC_FIRST}" != "0" ]]; then
+  case "${INSPECT_KINEMATIC_MODE}" in
+    both)
+      ;;
+    *)
+      echo "[WARN] Unsupported INSPECT_KINEMATIC_MODE=${INSPECT_KINEMATIC_MODE}; falling back to both."
+      INSPECT_KINEMATIC_MODE="both"
+      ;;
+  esac
 
-motion_dir = Path(os.environ["MOTION_DIR"]).expanduser().resolve()
-require_object_size = str(os.environ.get("REQUIRE_OBJECT_SIZE", "1")) != "0"
-files = sorted(motion_dir.glob("*.npz"))
-if len(files) < 2:
-    raise SystemExit(
-        f"[ERROR] {motion_dir} has {len(files)} npz file(s). "
-        "Generalist multi-file training requires at least 2 clips."
+  echo "[INFO] Inspect kinematic motion mode: ${INSPECT_KINEMATIC_MODE}"
+  if [[ "${INSPECT_ENABLE_VISER}" != "0" ]]; then
+    echo "[INFO] Inspect Viser: http://localhost:${INSPECT_VISER_PORT}"
+  fi
+  echo "[INFO] Launching replay viewer. Close it to start training."
+  replay_cmd=(
+    python src/holosoma/holosoma/replay.py
+    "exp:${EXP}"
+    "${EXTRA_ARGS[@]}"
+    --training.headless="${INSPECT_HEADLESS}"
+    --training.num_envs="${INSPECT_NUM_ENVS}"
+    --simulator.config.debug_viz=True
+    --simulator.config.scene.env_spacing=0.0
+    --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_DIR}"
+  )
+  if [[ "${INSPECT_ENABLE_VISER}" != "0" ]]; then
+    replay_cmd+=(
+      --training.enable_viser=True
+      --training.viser_port="${INSPECT_VISER_PORT}"
+      --training.viser_env_id="${INSPECT_VISER_ENV_ID}"
+      --training.viser_update_hz="${INSPECT_VISER_UPDATE_HZ}"
+      --training.viser_sync_to_sim="${INSPECT_VISER_SYNC_TO_SIM}"
+      --training.viser_force_dt="${INSPECT_VISER_FORCE_DT}"
+      --training.viser_recenter="${INSPECT_VISER_RECENTER}"
+      --training.viser_show_scandots="${INSPECT_VISER_SHOW_SCANDOTS}"
     )
-
-required_keys = (
-    "joint_pos",
-    "joint_vel",
-    "body_pos_w",
-    "body_quat_w",
-    "body_lin_vel_w",
-    "body_ang_vel_w",
-    "joint_names",
-    "body_names",
-    "fps",
-)
-required_object_keys = ("object_pos_w", "object_quat_w", "object_lin_vel_w")
-size_keys = ("object_size", "box_size", "object_scale", "box_scale")
-
-joint_names_ref = None
-body_names_ref = None
-fps_ref = None
-missing_size_count = 0
-frame_total = 0
-
-for file_path in files:
-    with np.load(file_path, allow_pickle=True) as data:
-        missing = [k for k in required_keys if k not in data]
-        if missing:
-            raise SystemExit(f"[ERROR] {file_path.name} missing keys: {missing}")
-
-        missing_obj = [k for k in required_object_keys if k not in data]
-        if missing_obj:
-            raise SystemExit(f"[ERROR] {file_path.name} missing object keys: {missing_obj}")
-
-        if not any(k in data for k in size_keys):
-            missing_size_count += 1
-
-        joint_names = tuple(str(x.decode("utf-8") if isinstance(x, (bytes, np.bytes_)) else x) for x in data["joint_names"].tolist())
-        body_names = tuple(str(x.decode("utf-8") if isinstance(x, (bytes, np.bytes_)) else x) for x in data["body_names"].tolist())
-        if joint_names_ref is None:
-            joint_names_ref = joint_names
-            body_names_ref = body_names
-        else:
-            if joint_names != joint_names_ref:
-                raise SystemExit(f"[ERROR] joint_names mismatch in {file_path.name}")
-            if body_names != body_names_ref:
-                raise SystemExit(f"[ERROR] body_names mismatch in {file_path.name}")
-
-        fps_arr = np.asarray(data["fps"]).reshape(-1)
-        fps = float(fps_arr[0]) if fps_arr.size > 0 else 30.0
-        if fps_ref is None:
-            fps_ref = fps
-        elif abs(fps - fps_ref) > 1e-6:
-            raise SystemExit(f"[ERROR] fps mismatch in {file_path.name}: {fps} != {fps_ref}")
-
-        frame_total += int(np.asarray(data["joint_pos"]).shape[0])
-
-print(f"[OK] clips={len(files)}, total_frames={frame_total}, fps={fps_ref}")
-if missing_size_count > 0:
-    msg = (
-        f"{missing_size_count}/{len(files)} clips have no explicit object size key "
-        "(object_size/box_size/object_scale/box_scale). Loader would fall back to [1,1,1]."
-    )
-    if require_object_size:
-        raise SystemExit(f"[ERROR] {msg} Set REQUIRE_OBJECT_SIZE=0 to allow this fallback.")
-    print(f"[WARN] {msg}")
-PY
+  fi
+  CUDA_VISIBLE_DEVICES="${PREVIEW_CUDA_VISIBLE_DEVICES}" "${replay_cmd[@]}"
 fi
 
-echo "[INFO] Training exp=${EXP}"
-echo "[INFO] Motion bank dir=${MOTION_DIR}"
-
-torchrun --nproc_per_node="${NPROC}" --master_port="${MASTER_PORT}" \
+echo "[INFO] Starting training with live Viser on port ${VISER_PORT}"
+echo "[INFO] Open: http://localhost:${VISER_PORT}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" torchrun --nproc_per_node="${NPROC}" --master_port="${MASTER_PORT}" \
   src/holosoma/holosoma/train_agent.py \
   "exp:${EXP}" \
   --training.num_envs="${NUM_ENVS}" \
+  --training.enable_viser=True \
+  --training.viser_port="${VISER_PORT}" \
+  --training.viser_env_id="${VISER_ENV_ID}" \
+  --training.viser_update_hz="${VISER_UPDATE_HZ}" \
+  --training.viser_sync_to_sim="${VISER_SYNC_TO_SIM}" \
+  --training.viser_force_dt="${VISER_FORCE_DT}" \
+  --training.viser_recenter="${VISER_RECENTER}" \
+  --training.viser_show_scandots="${VISER_SHOW_SCANDOTS}" \
   --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_DIR}" \
-  --command.setup_terms.motion_command.params.motion_config.clip_weighting_strategy uniform_step \
-  --algo.config.save_interval="${SAVE_INTERVAL}" \
+  --algo.config.save_interval=500 \
   logger:wandb \
-  "$@"
+  --logger.video.interval=2000 \
+  "${EXTRA_ARGS[@]}"

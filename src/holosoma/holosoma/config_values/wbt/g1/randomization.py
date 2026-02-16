@@ -98,39 +98,6 @@ object_state_dr_at_setup = {
     ),
 }
 
-object_state_dr_at_setup_generalist = {
-    "randomize_object_rigid_body_material_startup": RandomizationTermCfg(
-        func="holosoma.managers.randomization.terms.locomotion:randomize_object_rigid_body_material_startup",
-        params={
-            # Keep restitution small to reduce "object gets bounced away" failures.
-            "static_friction_range": [0.3, 1.0],
-            "dynamic_friction_range": [0.25, 0.9],
-            "restitution_range": [0.0, 0.2],
-        },
-    ),
-    "randomize_object_rigid_body_mass_startup": RandomizationTermCfg(
-        func="holosoma.managers.randomization.terms.locomotion:randomize_object_rigid_body_mass_startup",
-        params={
-            # Use milder additive mass randomization for stable early training.
-            "mass_distribution_params": [0.0, 2.0],
-        },
-    ),
-    "randomize_object_rigid_body_inertia_startup": RandomizationTermCfg(
-        func="holosoma.managers.randomization.terms.locomotion:randomize_object_rigid_body_inertia_startup",
-        params={
-            "inertia_distribution_params_dict": {
-                "Ixx": [0.8, 1.25],
-                "Iyy": [0.8, 1.25],
-                "Izz": [0.8, 1.25],
-                # Keep cross-terms fixed to avoid introducing unstable skewed inertia tensors.
-                "Ixy": [1.0, 1.0],
-                "Iyz": [1.0, 1.0],
-                "Ixz": [1.0, 1.0],
-            }
-        },
-    ),
-}
-
 base_setup_terms = {
     "push_randomizer_state": RandomizationTermCfg(
         func="holosoma.managers.randomization.terms.locomotion:PushRandomizerState",
@@ -158,25 +125,6 @@ base_setup_terms = {
         },
     ),
     **robot_state_dr_at_setup,
-}
-
-base_setup_terms_generalist = {
-    **base_setup_terms,
-    "push_randomizer_state": RandomizationTermCfg(
-        func="holosoma.managers.randomization.terms.locomotion:PushRandomizerState",
-        params={
-            "push_interval_s": [1.5, 4.0],
-            "max_push_vel": [0.35, 0.35, 0.12, 0.35, 0.35, 0.45],
-            "enabled": True,
-        },
-    ),
-    "setup_dof_pos_bias": RandomizationTermCfg(
-        func="holosoma.managers.randomization.terms.locomotion:setup_dof_pos_bias",
-        params={
-            "dof_pos_bias_range": [-0.015, 0.015],
-            "enabled": True,
-        },
-    ),
 }
 
 base_reset_terms = {
@@ -214,19 +162,6 @@ base_reset_terms = {
     ),
 }
 
-base_reset_terms_generalist = {
-    **base_reset_terms,
-    "randomize_dof_state": RandomizationTermCfg(
-        func="holosoma.managers.randomization.terms.locomotion:randomize_dof_state",
-        params={
-            "joint_pos_scale_range": [1.0, 1.0],
-            "joint_vel_range": [0.0, 0.0],
-            "joint_pos_bias_range": [-0.015, 0.015],
-            "randomize_dof_pos_bias": True,
-        },
-    ),
-}
-
 base_step_terms = {
     "push_randomizer_state": RandomizationTermCfg(
         func="holosoma.managers.randomization.terms.locomotion:PushRandomizerState"
@@ -255,21 +190,4 @@ g1_29dof_wbt_randomization_w_object = RandomizationManagerCfg(
     },
 )
 
-g1_29dof_wbt_randomization_w_object_generalist = RandomizationManagerCfg(
-    setup_terms={
-        **base_setup_terms_generalist,
-        **object_state_dr_at_setup_generalist,
-    },
-    reset_terms={
-        **base_reset_terms_generalist,
-    },
-    step_terms={
-        **base_step_terms,
-    },
-)
-
-__all__ = [
-    "g1_29dof_wbt_randomization",
-    "g1_29dof_wbt_randomization_w_object",
-    "g1_29dof_wbt_randomization_w_object_generalist",
-]
+__all__ = ["g1_29dof_wbt_randomization", "g1_29dof_wbt_randomization_w_object"]
