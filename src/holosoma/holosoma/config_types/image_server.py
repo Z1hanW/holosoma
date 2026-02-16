@@ -76,8 +76,8 @@ class ImageServerConfig:
     enable_gum_depth_prediction: bool = False
     """If True, run depth prediction with GUM."""
 
-    enable_zed_depth_prediction: bool = True
-    """If True, use ZED depth stream."""
+    enable_camera_depth_prediction: bool = True
+    """If True, use the camera's own depth stream (ZED or RealSense)."""
 
     depth_source: Literal["depth", "depth_gum"] = "depth"
     """Depth source to send to policy shared memory."""
@@ -123,7 +123,7 @@ class ImageServerConfig:
             raise ValueError(
                 "Invalid ImageServerConfig: depth_source='depth_gum' requires enable_gum_depth_prediction=True."
             )
-        if self.depth_source == "depth" and not self.enable_zed_depth_prediction:
+        if self.depth_source == "depth" and not self.enable_camera_depth_prediction:
             raise ValueError(
-                "Invalid ImageServerConfig: depth_source='depth' requires enable_zed_depth_prediction=True."
+                "Invalid ImageServerConfig: depth_source='depth' requires enable_camera_depth_prediction=True."
             )

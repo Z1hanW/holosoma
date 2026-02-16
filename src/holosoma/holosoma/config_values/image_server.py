@@ -12,7 +12,7 @@ base_visualizer = ImageVisualizerConfig()
 mujoco = dataclasses.replace(
     base,
     enable_gum_depth_prediction=False,
-    enable_zed_depth_prediction=True,
+    enable_camera_depth_prediction=True,
     depth_source="depth",
     save_images=True,
 )
@@ -23,7 +23,7 @@ mujoco = dataclasses.replace(
 mujoco_d435i = dataclasses.replace(
     base,
     enable_gum_depth_prediction=False,
-    enable_zed_depth_prediction=True,
+    enable_camera_depth_prediction=True,
     depth_source="depth",
     save_images=False,
     visualize_images=True,
@@ -34,7 +34,7 @@ mujoco_d435i = dataclasses.replace(
 real_verbose = dataclasses.replace(
     base,
     enable_gum_depth_prediction=True,
-    enable_zed_depth_prediction=True,
+    enable_camera_depth_prediction=True,
     depth_source="depth",
     visualize_images=True,
     save_images=True,
@@ -44,7 +44,7 @@ real_verbose = dataclasses.replace(
 real = dataclasses.replace(
     base,
     enable_gum_depth_prediction=False,
-    enable_zed_depth_prediction=True,
+    enable_camera_depth_prediction=True,
     depth_source="depth",
     visualize_images=False,
 )
@@ -68,7 +68,7 @@ real_depth_gum = dataclasses.replace(real,
 real_d435i = dataclasses.replace(
     base,
     enable_gum_depth_prediction=False,
-    enable_zed_depth_prediction=False,
+    enable_camera_depth_prediction=True,
     depth_source="depth",
     near_clip=0.3,
     far_clip=3.0,

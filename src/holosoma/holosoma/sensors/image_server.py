@@ -566,7 +566,7 @@ if __name__ == "__main__":
         camera_wrapper = RealSenseCamerasWrapper(RealSenseCamerasConfig())
     else:
         # Default: ZED cameras
-        depth_mode = "NEURAL" if cfg.enable_zed_depth_prediction else "NONE"
+        depth_mode = "NEURAL" if cfg.enable_camera_depth_prediction else "NONE"
         zed_cfg = ZedCamerasConfig(
             terms={
                 name: replace(camera_cfg, depth_mode=depth_mode)
