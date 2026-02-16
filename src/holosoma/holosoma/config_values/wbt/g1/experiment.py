@@ -384,6 +384,16 @@ g1_29dof_wbt_w_object = replace(
     ),
 )
 
+g1_29dof_wbt_w_object_generalist = replace(
+    g1_29dof_wbt_w_object,
+    training=replace(
+        g1_29dof_wbt_w_object.training,
+        name="g1_29dof_wbt_w_object_generalist",
+    ),
+    command=command.g1_29dof_wbt_command_w_object_generalist,
+    randomization=randomization.g1_29dof_wbt_randomization_w_object_generalist,
+)
+
 g1_29dof_wbt_fast_sac_w_object = replace(
     g1_29dof_wbt_fast_sac,
     command=command.g1_29dof_wbt_command_w_object,
@@ -414,6 +424,7 @@ __all__ = [
     "g1_29dof_wbt_fast_sac",
     "g1_29dof_wbt_fast_sac_w_object",
     "g1_29dof_wbt_w_object",
+    "g1_29dof_wbt_w_object_generalist",
 ]
 
 """

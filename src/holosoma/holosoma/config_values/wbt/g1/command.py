@@ -48,6 +48,16 @@ motion_config_w_object = replace(
     motion_file="holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz",
 )
 
+motion_config_w_object_generalist = replace(
+    motion_config_w_object,
+    # For directory motion banks, sample clips proportional to valid start steps.
+    clip_weighting_strategy="uniform_step",
+    # Multi-clip motion banks skip default-pose prepend/append internally.
+    # Keep these off explicitly to avoid confusion in logs.
+    enable_default_pose_prepend=False,
+    enable_default_pose_append=False,
+)
+
 g1_29dof_wbt_command = CommandManagerCfg(
     params={},
     setup_terms={
@@ -94,8 +104,21 @@ g1_29dof_wbt_command_w_object = replace(
     },
 )
 
+g1_29dof_wbt_command_w_object_generalist = replace(
+    g1_29dof_wbt_command,
+    setup_terms={
+        "motion_command": CommandTermCfg(
+            func="holosoma.managers.command.terms.wbt:MotionCommand",
+            params={
+                "motion_config": motion_config_w_object_generalist,
+            },
+        )
+    },
+)
+
 __all__ = [
     "g1_29dof_wbt_command",
     "g1_29dof_wbt_command_motion_tracking",
     "g1_29dof_wbt_command_w_object",
+    "g1_29dof_wbt_command_w_object_generalist",
 ]
