@@ -87,10 +87,45 @@ class RealSenseCamera:
         else:
             self.align = None
 
+        # Extract intrinsics
+        self._compute_intrinsics(profile)
+
         print(
             f"[RealSense] Initialized: serial={self.config.serial_number or 'auto'}, "
             f"resolution={width}x{height}@{self.config.fps}fps, "
             f"depth_scale={self.depth_scale:.6f}"
+        )
+
+    def _compute_intrinsics(self, profile):
+        """Extract intrinsics from the depth (or aligned color) stream profile."""
+        rs = self.rs
+
+        # When aligned to color, use the color stream intrinsics; otherwise depth.
+        if self.align is not None:
+            stream = rs.stream.color
+        else:
+            stream = rs.stream.depth
+
+        video_profile = profile.get_stream(stream).as_video_stream_profile()
+        intr = video_profile.get_intrinsics()
+
+        intrinsics = np.array([
+            [intr.fx, 0.0, intr.ppx],
+            [0.0, intr.fy, intr.ppy],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float32)
+
+        # Single camera: shape (1, 3, 3) to match ZED's (num_cams, 3, 3) layout.
+        extrinsics = np.eye(4, dtype=np.float32)
+
+        self.calibration: dict[str, np.ndarray] = {
+            "intrinsics": intrinsics[np.newaxis],
+            "extrinsics": extrinsics[np.newaxis],
+        }
+
+        print(
+            f"[RealSense] Intrinsics: fx={intr.fx:.2f}, fy={intr.fy:.2f}, "
+            f"cx={intr.ppx:.2f}, cy={intr.ppy:.2f}"
         )
 
     def capture(self) -> dict:
@@ -170,12 +205,15 @@ class RealSenseCamerasWrapper:
         Returns
         -------
         dict
-            ``{"depth": {name: ndarray}, "rgb": {name: ndarray}}``
+            ``{"depth": {name: ndarray}, "rgb": {name: ndarray},
+               "calibration": {name: {"intrinsics": ..., "extrinsics": ...}}}``
         """
         depth_data: dict[str, np.ndarray] = {}
         rgb_data: dict[str, np.ndarray] = {}
+        calibration_data: dict[str, dict[str, np.ndarray]] = {}
         for name, camera in self.cameras.items():
             frame = camera.capture()
             depth_data[name] = frame["depth"]
             rgb_data[name] = frame["rgb"]
-        return {"depth": depth_data, "rgb": rgb_data}
+            calibration_data[name] = camera.calibration
+        return {"depth": depth_data, "rgb": rgb_data, "calibration": calibration_data}
