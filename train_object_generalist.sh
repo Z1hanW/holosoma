@@ -11,7 +11,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-5,6,7}
 EXP=${EXP:-g1-29dof-wbt-w-object-generalist}
-MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/demo_results_parallel/g1/object_interaction/omomo_carry"}
+MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"}
 NUM_ENVS=${NUM_ENVS:-12288}
 NPROC=${NPROC:-3}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
