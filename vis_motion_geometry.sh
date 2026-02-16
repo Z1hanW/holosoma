@@ -50,6 +50,26 @@ GEOMETRY_DIR=${GEOMETRY_DIR:-"${DEFAULT_GEOMETRY_DIR}"}
 OBJECT_URDF_DIR=${OBJECT_URDF_DIR:-"${DEFAULT_OBJECT_URDF_DIR}"}
 OBJECT_URDF_MODE=${OBJECT_URDF_MODE:-"${DEFAULT_OBJECT_URDF_MODE}"}
 OBJECT_URDF=${OBJECT_URDF:-"${DEFAULT_OBJECT_URDF}"}
+
+# Make dataset knob authoritative for object source to avoid stale shell env leakage.
+case "${DATASET_KNOB}" in
+  omomo)
+    OBJECT_URDF_DIR=""
+    OBJECT_URDF_MODE="stem"
+    OBJECT_URDF="${DEFAULT_OBJECT_URDF}"
+    ;;
+  behave)
+    OBJECT_URDF=""
+    OBJECT_URDF_DIR="${DEFAULT_OBJECT_URDF_DIR}"
+    OBJECT_URDF_MODE="behave"
+    ;;
+  crisp)
+    OBJECT_URDF=""
+    OBJECT_URDF_DIR="${DEFAULT_OBJECT_URDF_DIR}"
+    OBJECT_URDF_MODE="stem"
+    ;;
+esac
+
 ROBOT=${ROBOT:-"g1_29dof"}
 PORT=${PORT:-"$((RANDOM % 8976 + 1024))"}
 START_CLIP=${START_CLIP:-""}
