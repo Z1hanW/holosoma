@@ -94,6 +94,8 @@ class MujocoRendererWrapper:
         width: int = 240,
         camera_names: list[str] | None = None,
         znear: float = 0.001,
+        horizontal_fov: float | None = None,
+        vertical_fov: float | None = None,
     ) -> None:
 
         self._height = height
@@ -118,6 +120,39 @@ class MujocoRendererWrapper:
         self._scene_option: mujoco.MjvOption | None = None
 
         self.cameras = None
+
+        # Compute calibration from FOV if provided
+        self._calibration = self._compute_calibration(horizontal_fov, vertical_fov)
+
+    def _compute_calibration(
+        self,
+        horizontal_fov: float | None,
+        vertical_fov: float | None,
+    ) -> dict[str, np.ndarray] | None:
+        """Compute camera intrinsics from FOV and render resolution."""
+        if horizontal_fov is None or vertical_fov is None:
+            return None
+
+        hfov_rad = np.radians(horizontal_fov)
+        vfov_rad = np.radians(vertical_fov)
+
+        fx = self._width / (2.0 * np.tan(hfov_rad / 2.0))
+        fy = self._height / (2.0 * np.tan(vfov_rad / 2.0))
+        cx = self._width / 2.0
+        cy = self._height / 2.0
+
+        intrinsics = np.array([
+            [fx, 0.0, cx],
+            [0.0, fy, cy],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float32)
+
+        extrinsics = np.eye(4, dtype=np.float32)
+
+        return {
+            "intrinsics": intrinsics[np.newaxis],  # (1, 3, 3)
+            "extrinsics": extrinsics[np.newaxis],   # (1, 4, 4)
+        }
 
 
     @property
@@ -175,7 +210,12 @@ class MujocoRendererWrapper:
             )
             rgb_frames[camera_name] = self.rgb_renderer.render()
 
-        return {"depth": depth_frames, "rgb": rgb_frames}
+        result = {"depth": depth_frames, "rgb": rgb_frames}
+        if self._calibration is not None:
+            result["calibration"] = {
+                name: self._calibration for name in self.camera_names
+            }
+        return result
 
 class MuJoCo(BaseSimulator):
     """MuJoCo physics simulator with terrain support.

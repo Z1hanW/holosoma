@@ -64,6 +64,15 @@ real_depth_gum = dataclasses.replace(real,
 )
 
 
+# MuJoCo sim2sim D435i with GUM depth prediction as the policy depth source.
+mujoco_depth_gum_d435i = dataclasses.replace(
+    mujoco_d435i,
+    enable_gum_depth_prediction=True,
+    depth_source="depth_gum",
+    visualize_images=True,
+    save_images=False,
+)
+
 # Real-robot D435i.
 real_d435i = dataclasses.replace(
     base,
@@ -95,7 +104,7 @@ real_verbose_d435i = dataclasses.replace(
 real_enable_gum_d435i = dataclasses.replace(
     real_d435i,
     enable_gum_depth_prediction=True,
-    visualize_images=False,
+    visualize_images=True,
 )
 
 # D435i with GUM depth prediction as the policy depth source.
@@ -109,6 +118,7 @@ real_depth_gum_d435i = dataclasses.replace(
 DEFAULTS = {
     "mujoco": mujoco,
     "mujoco_d435i": mujoco_d435i,
+    "mujoco_depth_gum_d435i": mujoco_depth_gum_d435i,
     "real_verbose": real_verbose,
     "real": real,
     "real_enable_gum": real_enable_gum,

@@ -604,6 +604,8 @@ class DirectSimulation:
         if props is not None:
             kwargs["height"] = props.height
             kwargs["width"] = props.width
+            kwargs["horizontal_fov"] = props.horizontal_fov
+            kwargs["vertical_fov"] = props.vertical_fov
         return kwargs
 
     def _sync_image_server_config(self) -> "ImageServerConfig":
