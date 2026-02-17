@@ -391,6 +391,11 @@ class ViserLiveViewer:
             "false",
             "no",
         )
+        self._start_paused = os.environ.get("VISER_START_PAUSED", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         self._play_control = None
         self._step_button = None
         self._reset_button = None
@@ -1164,7 +1169,7 @@ class ViserLiveViewer:
             with self._server.gui.add_folder("Simulation Control"):
                 self._play_control = self._server.gui.add_checkbox(
                     "Play",
-                    initial_value=True,
+                    initial_value=not self._start_paused,
                     hint="Toggle simulation play/pause",
                 )
                 self._step_button = self._server.gui.add_button(
