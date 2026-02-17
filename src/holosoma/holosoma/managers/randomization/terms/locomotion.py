@@ -1278,7 +1278,8 @@ def randomize_camera_raycast(
             low, high = float(spec[0]), float(spec[1])
         else:
             low = high = float(spec)
-        return torch_rand_float(low, high, (idx.numel(),), device=device)
+        # torch_rand_float expects a 2D shape tuple.
+        return torch_rand_float(low, high, (idx.numel(), 1), device=device).squeeze(1)
 
     std_mult = _sample_scalar(noise_std_mult_range)
     drop_prob = _sample_scalar(noise_drop_prob_range)

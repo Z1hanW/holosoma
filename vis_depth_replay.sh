@@ -94,6 +94,14 @@ if [[ "${STRICT_OPTIONS}" == "1" ]]; then
     echo "[ERROR] STRICT_OPTIONS=1 requires DEPTH_IMPL=scandots, got: ${DEPTH_IMPL}" >&2
     exit 1
   fi
+  if [[ -f "${MOTION_FILE}" && "${MOTION_FILE}" == *.npz && -f "${TERRAIN_OBJ}" && "${TERRAIN_OBJ}" == *.obj ]]; then
+    motion_stem="$(basename "${MOTION_FILE}" .npz)"
+    terrain_stem="$(basename "${TERRAIN_OBJ}" .obj)"
+    if [[ "${motion_stem}" != "${terrain_stem}" ]]; then
+      echo "[ERROR] STRICT_OPTIONS=1 requires terrain stem to match motion stem: motion=${motion_stem}, terrain=${terrain_stem}" >&2
+      exit 1
+    fi
+  fi
 fi
 
 echo "[INFO] EXP=exp:${EXP}"
