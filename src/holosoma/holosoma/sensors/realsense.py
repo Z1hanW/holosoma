@@ -37,6 +37,16 @@ class RealSenseCameraConfig:
     nan_depth_value: float = 0.0
     """How nan / zero-depth should be mapped in the depth image, in meters."""
 
+    enable_ir_stereo: bool = False
+    """Enable left/right infrared stereo streams (for GUM depth prediction).
+    When True, capture() returns a side-by-side (H, 2*W, 3) IR image as 'rgb'
+    and calibration includes stereo intrinsics (2, 3, 3) and extrinsics (2, 4, 4)."""
+
+    emitter_enabled: bool = False
+    """Enable the IR emitter (dot projector). Set to False to turn it off,
+    e.g. when using stereo IR images for GUM where the projected pattern
+    can interfere with stereo matching."""
+
 
 class RealSenseCamera:
     """Manages a single Intel RealSense D435i camera via pyrealsense2."""
@@ -75,11 +85,27 @@ class RealSenseCamera:
                 rs.stream.color, width, height, rs.format.bgr8, self.config.fps,
             )
 
+        # Enable infrared stereo streams (left IR1 + right IR2) for GUM
+        if self.config.enable_ir_stereo:
+            rs_config.enable_stream(
+                rs.stream.infrared, 1, width, height, rs.format.y8, self.config.fps,
+            )
+            rs_config.enable_stream(
+                rs.stream.infrared, 2, width, height, rs.format.y8, self.config.fps,
+            )
+
         profile = self.pipeline.start(rs_config)
 
         # Depth scale: converts raw uint16 depth values to meters
         depth_sensor = profile.get_device().first_depth_sensor()
         self.depth_scale = depth_sensor.get_depth_scale()
+
+        # IR emitter control
+        if depth_sensor.supports(rs.option.emitter_enabled):
+            depth_sensor.set_option(
+                rs.option.emitter_enabled, 1.0 if self.config.emitter_enabled else 0.0,
+            )
+            print(f"[RealSense] IR emitter: {'on' if self.config.emitter_enabled else 'off'}")
 
         # Align object (reusable across frames)
         if self.config.align_depth_to_color and self.config.enable_color:
@@ -97,8 +123,17 @@ class RealSenseCamera:
         )
 
     def _compute_intrinsics(self, profile):
-        """Extract intrinsics from the depth (or aligned color) stream profile."""
+        """Extract intrinsics from the depth (or aligned color) stream profile.
+
+        When ``enable_ir_stereo`` is True, builds stereo calibration with shapes
+        ``(2, 3, 3)`` for intrinsics and ``(2, 4, 4)`` for extrinsics, matching
+        the format that GUM expects (same as ZED stereo).
+        """
         rs = self.rs
+
+        if self.config.enable_ir_stereo:
+            self._compute_stereo_ir_intrinsics(profile)
+            return
 
         # When aligned to color, use the color stream intrinsics; otherwise depth.
         if self.align is not None:
@@ -126,6 +161,57 @@ class RealSenseCamera:
         print(
             f"[RealSense] Intrinsics: fx={intr.fx:.2f}, fy={intr.fy:.2f}, "
             f"cx={intr.ppx:.2f}, cy={intr.ppy:.2f}"
+        )
+
+    def _compute_stereo_ir_intrinsics(self, profile):
+        """Extract stereo IR calibration (intrinsics + extrinsics) for GUM."""
+        rs = self.rs
+
+        left_ir_profile = profile.get_stream(rs.stream.infrared, 1).as_video_stream_profile()
+        right_ir_profile = profile.get_stream(rs.stream.infrared, 2).as_video_stream_profile()
+
+        left_intr = left_ir_profile.get_intrinsics()
+        right_intr = right_ir_profile.get_intrinsics()
+
+        def _build_K(intr):
+            return np.array([
+                [intr.fx, 0.0, intr.ppx],
+                [0.0, intr.fy, intr.ppy],
+                [0.0, 0.0, 1.0],
+            ], dtype=np.float32)
+
+        # intrinsics shape (2, 3, 3): [left, right]
+        intrinsics = np.stack([_build_K(left_intr), _build_K(right_intr)], axis=0)
+
+        # Extrinsics: right-to-left transform from RealSense SDK
+        rs_extr = right_ir_profile.get_extrinsics_to(left_ir_profile)
+        R = np.array(rs_extr.rotation, dtype=np.float32).reshape(3, 3)
+        t = np.array(rs_extr.translation, dtype=np.float32)
+        t[0] *= -1.0
+
+        # Left camera is identity (reference frame)
+        left_ext = np.eye(4, dtype=np.float32)
+
+        # Right camera extrinsics: right-to-left transform
+        right_ext = np.eye(4, dtype=np.float32)
+        right_ext[:3, :3] = R
+        right_ext[:3, 3] = t
+
+        # extrinsics shape (2, 4, 4): [left, right]
+        extrinsics = np.stack([left_ext, right_ext], axis=0)
+
+        self.calibration = {
+            "intrinsics": intrinsics,
+            "extrinsics": extrinsics,
+        }
+
+        print(
+            f"[RealSense] Stereo IR intrinsics:\n"
+            f"  Left  IR1: fx={left_intr.fx:.2f}, fy={left_intr.fy:.2f}, "
+            f"cx={left_intr.ppx:.2f}, cy={left_intr.ppy:.2f}\n"
+            f"  Right IR2: fx={right_intr.fx:.2f}, fy={right_intr.fy:.2f}, "
+            f"cx={right_intr.ppx:.2f}, cy={right_intr.ppy:.2f}\n"
+            f"  Baseline (tx): {t[0]:.6f} m"
         )
 
     def capture(self) -> dict:
@@ -156,6 +242,21 @@ class RealSenseCamera:
             )
         else:
             depth_data = None
+
+        # Stereo IR: side-by-side (H, 2*W, 3) for GUM
+        if self.config.enable_ir_stereo:
+            left_ir = frames.get_infrared_frame(1)
+            right_ir = frames.get_infrared_frame(2)
+            if left_ir and right_ir:
+                left_arr = np.asanyarray(left_ir.get_data())   # (H, W) uint8
+                right_arr = np.asanyarray(right_ir.get_data())  # (H, W) uint8
+                # Convert grayscale to 3-channel and concatenate side-by-side
+                left_rgb = np.stack([left_arr] * 3, axis=-1)   # (H, W, 3)
+                right_rgb = np.stack([right_arr] * 3, axis=-1)  # (H, W, 3)
+                rgb_data = np.concatenate([left_rgb, right_rgb], axis=1)  # (H, 2*W, 3)
+            else:
+                rgb_data = None
+            return {"depth": depth_data, "rgb": rgb_data}
 
         # Color
         rgb_data = None

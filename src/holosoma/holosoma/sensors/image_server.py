@@ -23,7 +23,7 @@ from holosoma.config_types.image_server import (
     ImageVisualizerConfig,
 )
 from holosoma.sensors.zed import ZedCamerasConfig, ZedCamerasWrapper
-from holosoma.sensors.realsense import RealSenseCamerasConfig, RealSenseCamerasWrapper
+from holosoma.sensors.realsense import RealSenseCameraConfig, RealSenseCamerasConfig, RealSenseCamerasWrapper
 from holosoma.sensors.utils import _prepare_depth_for_visualization
 
 
@@ -563,7 +563,14 @@ if __name__ == "__main__":
     cfg = tyro.cli(ImageServerCliConfig, default=holosoma.config_values.image_server.real)
 
     if cfg.camera_type == "realsense":
-        camera_wrapper = RealSenseCamerasWrapper(RealSenseCamerasConfig())
+        # Enable IR stereo streams when GUM depth prediction is requested;
+        # GUM requires stereo image pairs and stereo calibration.
+        if cfg.enable_gum_depth_prediction:
+            rs_cam_cfg = RealSenseCameraConfig(enable_ir_stereo=True)
+            rs_cfg = RealSenseCamerasConfig(terms={"d435i_depth": rs_cam_cfg})
+        else:
+            rs_cfg = RealSenseCamerasConfig()
+        camera_wrapper = RealSenseCamerasWrapper(rs_cfg)
     else:
         # Default: ZED cameras
         depth_mode = "NEURAL" if cfg.enable_camera_depth_prediction else "NONE"

@@ -186,7 +186,6 @@ class GUM:
             left_tensor, right_tensor, intrinsics = self._resize_to_target_size(img_left_tensor, img_right_tensor, camera_intrinsics)
             extrinsics = torch.from_numpy(camera_extrinsics).to(self.device)
 
-
             # Predict depth [target_height, target_width]
             rgbs = torch.stack([left_tensor, right_tensor], dim=0) # (2, C, H, W)
             backbone_out = self.model.predict_backbone(rgbs)
