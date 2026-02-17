@@ -94,11 +94,17 @@ if [[ "${STRICT_OPTIONS}" == "1" ]]; then
     echo "[ERROR] STRICT_OPTIONS=1 requires DEPTH_IMPL=scandots, got: ${DEPTH_IMPL}" >&2
     exit 1
   fi
-  if [[ -f "${MOTION_FILE}" && "${MOTION_FILE}" == *.npz && -f "${TERRAIN_OBJ}" && "${TERRAIN_OBJ}" == *.obj ]]; then
-    motion_stem="$(basename "${MOTION_FILE}" .npz)"
-    terrain_stem="$(basename "${TERRAIN_OBJ}" .obj)"
-    if [[ "${motion_stem}" != "${terrain_stem}" ]]; then
-      echo "[ERROR] STRICT_OPTIONS=1 requires terrain stem to match motion stem: motion=${motion_stem}, terrain=${terrain_stem}" >&2
+  # Strict terrain check:
+  # - If TERRAIN_OBJ is a directory, require a clip-matching OBJ file.
+  # - If TERRAIN_OBJ is a single OBJ file, treat it as an explicit global terrain.
+  if [[ -d "${TERRAIN_OBJ}" ]]; then
+    motion_stem="$(basename "${MOTION_FILE}")"
+    motion_stem="${motion_stem%.npz}"
+    if [[ -n "${MOTION_CLIP_NAME}" ]]; then
+      motion_stem="${MOTION_CLIP_NAME}"
+    fi
+    if [[ ! -f "${TERRAIN_OBJ}/${motion_stem}.obj" && ! -f "${TERRAIN_OBJ}/${motion_stem}.OBJ" ]]; then
+      echo "[ERROR] STRICT_OPTIONS=1 requires ${TERRAIN_OBJ}/${motion_stem}.obj (or .OBJ) for motion clip '${motion_stem}'" >&2
       exit 1
     fi
   fi

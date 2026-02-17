@@ -340,6 +340,8 @@ def _load_terrain_mesh(
         return [path] if path.exists() else []
 
     def _select_obj_path(paths: list[Path], name: str | None) -> Path:
+        if len(paths) == 1:
+            return paths[0]
         if name:
             for candidate in paths:
                 if candidate.stem == name or candidate.stem.lower() == name.lower():
