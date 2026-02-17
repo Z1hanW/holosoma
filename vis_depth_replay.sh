@@ -15,8 +15,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-EXP=${EXP:-"g1-29dof-wbt-w-object"}
-MOTION_FILE=${MOTION_FILE:-"${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz"}
+EXP=${EXP:-"g1-29dof-wbt-videomimic-mlp"}
+MOTION_FILE=${MOTION_FILE:-"${SCRIPT_DIR}/src/holosoma_retargeting/demo_data/far_robot/far_robot/far_robot.npz"}
 MOTION_CLIP_NAME=${MOTION_CLIP_NAME:-""}
 TERRAIN_OBJ=${TERRAIN_OBJ:-"${SCRIPT_DIR}/src/holosoma_retargeting/demo_data/far_robot/far_robot/stairs.obj"}
 
@@ -43,6 +43,7 @@ esac
 IMAGE_WIDTH=${IMAGE_WIDTH:-640}
 IMAGE_HEIGHT=${IMAGE_HEIGHT:-360}
 SCANDOTS_STRIDE=${SCANDOTS_STRIDE:-4}
+CAMERA_BODY_NAME=${CAMERA_BODY_NAME:-d435_joint}
 HEADLESS=${HEADLESS:-False}
 NUM_ENVS=${NUM_ENVS:-1}
 
@@ -68,6 +69,7 @@ echo "[INFO] TERRAIN_OBJ=${TERRAIN_OBJ}"
 if [[ -n "${MOTION_CLIP_NAME}" ]]; then
   echo "[INFO] MOTION_CLIP_NAME=${MOTION_CLIP_NAME}"
 fi
+echo "[INFO] CAMERA_BODY_NAME=${CAMERA_BODY_NAME}"
 echo "[INFO] PERCEPTION_PRESET=${PERCEPTION_PRESET}"
 echo "[INFO] VISER=http://localhost:${VISER_PORT}"
 
@@ -88,6 +90,7 @@ cmd=(
   --perception.camera_width="${IMAGE_WIDTH}"
   --perception.camera_height="${IMAGE_HEIGHT}"
   --perception.camera_scandots_stride="${SCANDOTS_STRIDE}"
+  --perception.camera_body_name "${CAMERA_BODY_NAME}"
 )
 
 if [[ -n "${MOTION_CLIP_NAME}" ]]; then
