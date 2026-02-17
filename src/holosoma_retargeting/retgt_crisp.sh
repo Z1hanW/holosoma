@@ -17,6 +17,7 @@ SCENE_XML_OVERRIDE=${SCENE_XML_OVERRIDE:-""}
 TRAIN_MOTION_DIR=${TRAIN_MOTION_DIR:-"$DATA_ROOT/___crisp_motion"}
 TRAIN_GEOMETRY_DIR=${TRAIN_GEOMETRY_DIR:-"$DATA_ROOT/___crisp_geometry"}
 TRAIN_OBJECT_URDF_DIR=${TRAIN_OBJECT_URDF_DIR:-""}
+CONVERTED_RES_DIR=${CONVERTED_RES_DIR:-"$SCRIPT_DIR/converted_res/crisp"}
 CONVERT_OUTPUT_FPS=${CONVERT_OUTPUT_FPS:-50}
 CONVERTER_PYTHON=${CONVERTER_PYTHON:-python}
 CONVERTER_HEADLESS=${CONVERTER_HEADLESS:-1}
@@ -42,6 +43,9 @@ if [ "${TRAIN_GEOMETRY_DIR#/}" = "$TRAIN_GEOMETRY_DIR" ]; then
 fi
 if [ -n "$TRAIN_OBJECT_URDF_DIR" ] && [ "${TRAIN_OBJECT_URDF_DIR#/}" = "$TRAIN_OBJECT_URDF_DIR" ]; then
     TRAIN_OBJECT_URDF_DIR="$PWD/$TRAIN_OBJECT_URDF_DIR"
+fi
+if [ "${CONVERTED_RES_DIR#/}" = "$CONVERTED_RES_DIR" ]; then
+    CONVERTED_RES_DIR="$PWD/$CONVERTED_RES_DIR"
 fi
 if ! command -v "$CONVERTER_PYTHON" >/dev/null 2>&1; then
     echo "[ERROR] converter python executable not found: $CONVERTER_PYTHON" >&2
@@ -75,6 +79,7 @@ convert_failed_list=()
 
 mkdir -p "$TRAIN_MOTION_DIR"
 mkdir -p "$TRAIN_GEOMETRY_DIR"
+mkdir -p "$CONVERTED_RES_DIR"
 if [ -n "$TRAIN_OBJECT_URDF_DIR" ]; then
     mkdir -p "$TRAIN_OBJECT_URDF_DIR"
 fi
@@ -323,16 +328,25 @@ PY
     fi
     converted_seqs=$((converted_seqs + 1))
 
+    # Keep per-sequence bundle (motion + geometry) in the same output folder.
+    cp -f "$scene_obj" "$seq_out_root/scene_mesh_sqs.obj"
+    cp -f "$scene_obj" "$seq_out_root/$seq_name.obj"
+    cp -f "$scene_urdf_local" "$seq_out_root/scene_mesh_sqs.urdf"
+
     train_motion_npz="$TRAIN_MOTION_DIR/$seq_name.npz"
     train_geometry_obj="$TRAIN_GEOMETRY_DIR/$seq_name.obj"
+    converted_res_npz="$CONVERTED_RES_DIR/$seq_name.npz"
     cp -f "$converted_npz" "$train_motion_npz"
+    cp -f "$converted_npz" "$converted_res_npz"
     cp -f "$scene_obj" "$train_geometry_obj"
     if [ -n "$TRAIN_OBJECT_URDF_DIR" ]; then
         cp -f "$scene_urdf_local" "$TRAIN_OBJECT_URDF_DIR/$seq_name.urdf"
     fi
     exported_seqs=$((exported_seqs + 1))
+    echo "  bundle_dir=$seq_out_root"
     echo "  train_motion=$train_motion_npz"
     echo "  train_geometry=$train_geometry_obj"
+    echo "  converted_res_motion=$converted_res_npz"
 
 done
 
@@ -342,6 +356,7 @@ echo "  converted=${converted_seqs} exported=${exported_seqs}"
 echo "  convert_failed=${convert_failed_seqs}"
 echo "  train_motion_dir=${TRAIN_MOTION_DIR}"
 echo "  train_geometry_dir=${TRAIN_GEOMETRY_DIR}"
+echo "  converted_res_dir=${CONVERTED_RES_DIR}"
 if [ -n "$TRAIN_OBJECT_URDF_DIR" ]; then
   echo "  train_object_urdf_dir=${TRAIN_OBJECT_URDF_DIR}"
 fi
