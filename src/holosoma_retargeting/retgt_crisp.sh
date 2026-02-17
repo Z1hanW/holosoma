@@ -21,6 +21,7 @@ CONVERTED_RES_DIR=${CONVERTED_RES_DIR:-"$SCRIPT_DIR/converted_res/crisp"}
 CONVERT_OUTPUT_FPS=${CONVERT_OUTPUT_FPS:-50}
 CONVERTER_PYTHON=${CONVERTER_PYTHON:-python}
 CONVERTER_HEADLESS=${CONVERTER_HEADLESS:-1}
+CONVERT_HAS_DYNAMIC_OBJECT=${CONVERT_HAS_DYNAMIC_OBJECT:-0}
 
 OBJECT_NAME="scene_mesh_sqs"
 # Motion file name expected by downstream code (matches retargeting_gt behavior)
@@ -55,6 +56,12 @@ CONVERTER_HEADLESS_ARG=()
 case "${CONVERTER_HEADLESS}" in
     True|true|1|YES|yes|Y|y)
         CONVERTER_HEADLESS_ARG=(--headless)
+        ;;
+esac
+CONVERT_DYNAMIC_OBJECT_ARG=()
+case "${CONVERT_HAS_DYNAMIC_OBJECT}" in
+    True|true|1|YES|yes|Y|y)
+        CONVERT_DYNAMIC_OBJECT_ARG=(--has_dynamic_object)
         ;;
 esac
 
@@ -317,7 +324,7 @@ PY
             --output_name "$converted_npz" \
             --data_format smplx \
             --object_name "$OBJECT_NAME" \
-            --has_dynamic_object \
+            "${CONVERT_DYNAMIC_OBJECT_ARG[@]}" \
             "${CONVERTER_HEADLESS_ARG[@]}" \
             --once
     ); then
