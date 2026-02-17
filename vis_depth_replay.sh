@@ -60,6 +60,7 @@ MOTION_ALIGN_TO_INIT_YAW=${MOTION_ALIGN_TO_INIT_YAW:-False}
 MOTION_PAIR_TERRAIN_WITH_MOTION=${MOTION_PAIR_TERRAIN_WITH_MOTION:-False}
 DEBUG_MOTION_TERRAIN=${DEBUG_MOTION_TERRAIN:-1}
 STRICT_OPTIONS=${STRICT_OPTIONS:-1}
+VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI:-0}
 
 VISER_PORT=${VISER_PORT:-$((RANDOM % 8976 + 1024))}
 
@@ -119,6 +120,7 @@ fi
 echo "[INFO] CAMERA_BODY_NAME=${CAMERA_BODY_NAME}"
 echo "[INFO] PERCEPTION_PRESET=${PERCEPTION_PRESET}"
 echo "[INFO] VISER=http://localhost:${VISER_PORT}"
+echo "[INFO] VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI}"
 echo "[INFO] MOTION_DEBUG use_adaptive=${MOTION_USE_ADAPTIVE_TIMESTEP_SAMPLER} start_at_zero_prob=${MOTION_START_AT_ZERO_PROB} prepend=${MOTION_ENABLE_DEFAULT_POSE_PREPEND}/${MOTION_DEFAULT_POSE_PREPEND_DURATION_S}s append=${MOTION_ENABLE_DEFAULT_POSE_APPEND}/${MOTION_DEFAULT_POSE_APPEND_DURATION_S}s init_noise=${MOTION_INIT_NOISE_SCALE} align_yaw=${MOTION_ALIGN_TO_INIT_YAW} pair_terrain=${MOTION_PAIR_TERRAIN_WITH_MOTION}"
 
 if [[ "${DEBUG_MOTION_TERRAIN}" == "1" ]]; then
@@ -159,6 +161,8 @@ except Exception as exc:
 PY
 fi
 
+export VISER_ENABLE_CLIP_GUI
+
 cmd=(
   python src/holosoma/holosoma/replay.py
   "exp:${EXP}"
@@ -183,6 +187,12 @@ cmd=(
   --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale "${MOTION_INIT_NOISE_SCALE}"
   --command.setup_terms.motion_command.params.motion_config.align_motion_to_init_yaw "${MOTION_ALIGN_TO_INIT_YAW}"
   --command.setup_terms.motion_command.params.motion_config.pair_terrain_with_motion "${MOTION_PAIR_TERRAIN_WITH_MOTION}"
+  --randomization.setup_terms.setup_camera_raycast_randomization.params.enabled=False
+  --randomization.reset_terms.randomize_camera_raycast.params.enabled=False
+  --randomization.setup_terms.push_randomizer_state.params.enabled=False
+  --randomization.setup_terms.setup_dof_pos_bias.params.enabled=False
+  --randomization.reset_terms.randomize_dof_state.params.randomize_dof_pos_bias=False
+  --randomization.reset_terms.randomize_dof_state.params.joint_pos_bias_range="[0.0,0.0]"
   --perception.camera_width="${IMAGE_WIDTH}"
   --perception.camera_height="${IMAGE_HEIGHT}"
   --perception.camera_scandots_stride="${SCANDOTS_STRIDE}"
