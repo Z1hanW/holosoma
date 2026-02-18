@@ -63,6 +63,8 @@ fi
 
 SCANDOTS_STRIDE=${SCANDOTS_STRIDE:-1}
 CAMERA_BODY_NAME=${CAMERA_BODY_NAME:-d435_joint}
+# Match warp_sensors offset_rot_base=[-90,0,-90] in xyzw convention.
+CAMERA_FRAME_QUAT=${CAMERA_FRAME_QUAT:-"[-0.5,0.5,-0.5,0.5]"}
 HEADLESS=${HEADLESS:-False}
 NUM_ENVS=${NUM_ENVS:-1}
 SEED=${SEED:-42}
@@ -160,6 +162,7 @@ if [[ -n "${MOTION_CLIP_NAME}" ]]; then
   echo "[INFO] MOTION_CLIP_NAME=${MOTION_CLIP_NAME}"
 fi
 echo "[INFO] CAMERA_BODY_NAME=${CAMERA_BODY_NAME}"
+echo "[INFO] CAMERA_FRAME_QUAT=${CAMERA_FRAME_QUAT}"
 echo "[INFO] PERCEPTION_PRESET=${PERCEPTION_PRESET}"
 echo "[INFO] DEPTH_IMPL=${DEPTH_IMPL}"
 echo "[INFO] CAMERA_CFG width=${IMAGE_WIDTH} height=${IMAGE_HEIGHT} vfov=${CAMERA_VFOV_DEG} hfov=${CAMERA_HFOV_DEG} near=${CAMERA_NEAR} far=${CAMERA_FAR} include_robot_mesh=${CAMERA_INCLUDE_ROBOT_MESH}"
@@ -258,6 +261,7 @@ cmd=(
   --perception.camera_include_robot_mesh="${CAMERA_INCLUDE_ROBOT_MESH}"
   --perception.camera_scandots_stride="${SCANDOTS_STRIDE}"
   --perception.camera_body_name "${CAMERA_BODY_NAME}"
+  --perception.camera_frame_quat "${CAMERA_FRAME_QUAT}"
 )
 
 if [[ -n "${MOTION_CLIP_NAME}" ]]; then
