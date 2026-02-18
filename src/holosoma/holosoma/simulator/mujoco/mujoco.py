@@ -96,11 +96,13 @@ class MujocoRendererWrapper:
         znear: float = 0.001,
         horizontal_fov: float | None = None,
         vertical_fov: float | None = None,
+        enable_rgb: bool = True,
     ) -> None:
 
         self._height = height
         self._width = width
         self._znear = znear
+        self._enable_rgb = enable_rgb
         self.camera_names = camera_names or [
             "robot_cam_front_depth",
             "robot_cam_back_depth"
@@ -205,12 +207,15 @@ class MujocoRendererWrapper:
             )
             depth_frames[camera_name] = self.depth_renderer.render()
 
-            self.rgb_renderer.update_scene(
-                render_data, camera=camera_name, scene_option=self.scene_option
-            )
-            rgb_frames[camera_name] = self.rgb_renderer.render()
+            if self._enable_rgb:
+                self.rgb_renderer.update_scene(
+                    render_data, camera=camera_name, scene_option=self.scene_option
+                )
+                rgb_frames[camera_name] = self.rgb_renderer.render()
 
-        result = {"depth": depth_frames, "rgb": rgb_frames}
+        result = {"depth": depth_frames}
+        if rgb_frames:
+            result["rgb"] = rgb_frames
         if self._calibration is not None:
             result["calibration"] = {
                 name: self._calibration for name in self.camera_names

@@ -79,6 +79,11 @@ class ImageServerConfig:
     enable_camera_depth_prediction: bool = True
     """If True, use the camera's own depth stream (ZED or RealSense)."""
 
+    enable_rgb: bool = True
+    """If True, capture/render RGB frames. Disable to save rendering cost when
+    RGB is not needed (e.g. when only camera depth is used for the policy).
+    Must be True when enable_gum_depth_prediction is True (GUM requires RGB)."""
+
     depth_source: Literal["depth", "depth_gum"] = "depth"
     """Depth source to send to policy shared memory."""
 
@@ -100,8 +105,12 @@ class ImageServerConfig:
     frame_rate: int = 10
     """Capture and send frequency in Hz."""
 
-    num_delay_frames: int = 0
-    """Number of frames to delay before sending to shared memory."""
+    latency_frame: int | tuple[int, int] = 0
+    """Frame latency for depth images. Can be a fixed int or a (min, max) tuple for stochastic delay."""
+
+    buffer_len: int = 1
+    """Number of frames kept in the latency ring buffer. Must be > latency_frame
+    (or > max of the range when latency_frame is a tuple)."""
 
     crop_y_start: int | None = None
     """Start row for cropping depth frames before resize. None means no crop."""
@@ -126,4 +135,9 @@ class ImageServerConfig:
         if self.depth_source == "depth" and not self.enable_camera_depth_prediction:
             raise ValueError(
                 "Invalid ImageServerConfig: depth_source='depth' requires enable_camera_depth_prediction=True."
+            )
+        if self.enable_gum_depth_prediction and not self.enable_rgb:
+            raise ValueError(
+                "Invalid ImageServerConfig: enable_gum_depth_prediction=True requires enable_rgb=True "
+                "(GUM needs RGB images)."
             )

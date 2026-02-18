@@ -446,8 +446,9 @@ class DirectSimulation:
             self.simulator.video_recorder.start_recording(episode_id=0)
         
         # Step 8: setup the image server
-        renderer_kwargs = self._get_renderer_kwargs()
         image_server_cfg = self._sync_image_server_config()
+        renderer_kwargs = self._get_renderer_kwargs()
+        renderer_kwargs["enable_rgb"] = image_server_cfg.enable_rgb
         self.image_server = ImageServer(
             camera_wrapper=MujocoRendererWrapper(self.simulator, **renderer_kwargs),
             cfg=image_server_cfg)
@@ -638,6 +639,8 @@ class DirectSimulation:
             crop_y_end=props.crop_y_end,
             crop_x_start=props.crop_x_start,
             crop_x_end=props.crop_x_end,
+            latency_frame=props.latency_frame,
+            buffer_len=props.buffer_len,
         )
 
         # Also sync the visualizer clip range so depth display is correct

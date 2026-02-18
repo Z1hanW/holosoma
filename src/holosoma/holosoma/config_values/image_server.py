@@ -27,7 +27,8 @@ mujoco_d435i = dataclasses.replace(
     depth_source="depth",
     save_images=False,
     visualize_images=True,
-    num_delay_frames=7,
+    latency_frame=(7, 8),
+    buffer_len=9,
 )
 
 # Debug-friendly ZED profile with visualization and both depth sources enabled.
