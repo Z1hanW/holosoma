@@ -37,8 +37,8 @@ CAMERA_INCLUDE_ROBOT_MESH=${CAMERA_INCLUDE_ROBOT_MESH:-True}
 
 SCANDOTS_STRIDE=${SCANDOTS_STRIDE:-1}
 CAMERA_BODY_NAME=${CAMERA_BODY_NAME:-d435_joint}
-# Match warp_sensors offset_rot_base=[-90,0,-90] in xyzw convention.
-CAMERA_FRAME_QUAT=${CAMERA_FRAME_QUAT:-"[-0.5,0.5,-0.5,0.5]"}
+# Canonical d435 frame quat in this codebase (xyzw); keep aligned with perception presets/IsaacSim camera code.
+CAMERA_FRAME_QUAT=${CAMERA_FRAME_QUAT:-"[0.5,-0.5,-0.5,0.5]"}
 HEADLESS=${HEADLESS:-False}
 NUM_ENVS=${NUM_ENVS:-1}
 SEED=${SEED:-42}
@@ -92,6 +92,10 @@ if [[ "${STRICT_OPTIONS}" == "1" ]]; then
   fi
   if [[ "${CAMERA_BODY_NAME}" != "d435_joint" ]]; then
     echo "[ERROR] STRICT_OPTIONS=1 requires CAMERA_BODY_NAME=d435_joint, got: ${CAMERA_BODY_NAME}" >&2
+    exit 1
+  fi
+  if [[ "${CAMERA_FRAME_QUAT}" != "[0.5,-0.5,-0.5,0.5]" ]]; then
+    echo "[ERROR] STRICT_OPTIONS=1 requires CAMERA_FRAME_QUAT=[0.5,-0.5,-0.5,0.5], got: ${CAMERA_FRAME_QUAT}" >&2
     exit 1
   fi
   if [[ "${DEPTH_IMPL}" == "warp_like" ]]; then
