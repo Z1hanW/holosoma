@@ -10,7 +10,7 @@ set -euo pipefail
 # Usage:
 #   ./vis_depth_replay.sh
 #   MOTION_FILE=/abs/or/rel/path/to/motion_or_dir TERRAIN_OBJ=/abs/or/rel/path/to/scene.obj ./vis_depth_replay.sh
-#   DEPTH_IMPL=rendered ./vis_depth_replay.sh  # rendered|depth_sensor|warp_like|raycast|scandots
+#   DEPTH_IMPL=warp_like ./vis_depth_replay.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
@@ -21,45 +21,19 @@ MOTION_CLIP_NAME=${MOTION_CLIP_NAME:-""}
 TERRAIN_OBJ=${TERRAIN_OBJ:-"${SCRIPT_DIR}/src/holosoma_retargeting/demo_data/far_robot/far_robot/stairs.obj"}
 
 DEPTH_IMPL=${DEPTH_IMPL:-warp_like}
-case "${DEPTH_IMPL}" in
-  warp_like)
-    PERCEPTION_PRESET="camera_depth_d435i"
-    ;;
-  scandots)
-    PERCEPTION_PRESET="camera_depth_d435i_scandots"
-    ;;
-  rendered)
-    PERCEPTION_PRESET="camera_depth_d435i_rendered"
-    ;;
-  depth_sensor)
-    PERCEPTION_PRESET="camera_depth_d435i_depth_sensor"
-    ;;
-  raycast)
-    PERCEPTION_PRESET="camera_depth_d435i"
-    ;;
-  *)
-    echo "[ERROR] Unknown DEPTH_IMPL=${DEPTH_IMPL}. Use warp_like|scandots|rendered|depth_sensor|raycast." >&2
-    exit 1
-    ;;
-esac
-
-if [[ "${DEPTH_IMPL}" == "warp_like" ]]; then
-  IMAGE_WIDTH=${IMAGE_WIDTH:-106}
-  IMAGE_HEIGHT=${IMAGE_HEIGHT:-60}
-  CAMERA_VFOV_DEG=${CAMERA_VFOV_DEG:-58.6}
-  CAMERA_HFOV_DEG=${CAMERA_HFOV_DEG:-89.5}
-  CAMERA_NEAR=${CAMERA_NEAR:-0.3}
-  CAMERA_FAR=${CAMERA_FAR:-3.0}
-  CAMERA_INCLUDE_ROBOT_MESH=${CAMERA_INCLUDE_ROBOT_MESH:-True}
-else
-  IMAGE_WIDTH=${IMAGE_WIDTH:-640}
-  IMAGE_HEIGHT=${IMAGE_HEIGHT:-360}
-  CAMERA_VFOV_DEG=${CAMERA_VFOV_DEG:-55.2}
-  CAMERA_HFOV_DEG=${CAMERA_HFOV_DEG:-89.5}
-  CAMERA_NEAR=${CAMERA_NEAR:-0.1}
-  CAMERA_FAR=${CAMERA_FAR:-10.0}
-  CAMERA_INCLUDE_ROBOT_MESH=${CAMERA_INCLUDE_ROBOT_MESH:-False}
+if [[ "${DEPTH_IMPL}" != "warp_like" ]]; then
+  echo "[ERROR] vis_depth_replay.sh is locked to DEPTH_IMPL=warp_like, got: ${DEPTH_IMPL}" >&2
+  exit 1
 fi
+PERCEPTION_PRESET="camera_depth_d435i"
+
+IMAGE_WIDTH=${IMAGE_WIDTH:-106}
+IMAGE_HEIGHT=${IMAGE_HEIGHT:-60}
+CAMERA_VFOV_DEG=${CAMERA_VFOV_DEG:-58.6}
+CAMERA_HFOV_DEG=${CAMERA_HFOV_DEG:-89.5}
+CAMERA_NEAR=${CAMERA_NEAR:-0.3}
+CAMERA_FAR=${CAMERA_FAR:-3.0}
+CAMERA_INCLUDE_ROBOT_MESH=${CAMERA_INCLUDE_ROBOT_MESH:-True}
 
 SCANDOTS_STRIDE=${SCANDOTS_STRIDE:-1}
 CAMERA_BODY_NAME=${CAMERA_BODY_NAME:-d435_joint}
@@ -68,17 +42,9 @@ CAMERA_FRAME_QUAT=${CAMERA_FRAME_QUAT:-"[-0.5,0.5,-0.5,0.5]"}
 HEADLESS=${HEADLESS:-False}
 NUM_ENVS=${NUM_ENVS:-1}
 SEED=${SEED:-42}
-if [[ "${DEPTH_IMPL}" == "scandots" ]]; then
-  VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-True}
-  ISAAC_SHOW_SCANDOTS=${ISAAC_SHOW_SCANDOTS:-True}
-elif [[ "${DEPTH_IMPL}" == "warp_like" ]]; then
-  # Enable Viser ray/hit debug overlay for warp-like mesh raycast depth.
-  VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-True}
-  ISAAC_SHOW_SCANDOTS=${ISAAC_SHOW_SCANDOTS:-False}
-else
-  VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-False}
-  ISAAC_SHOW_SCANDOTS=${ISAAC_SHOW_SCANDOTS:-False}
-fi
+# Enable Viser ray/hit debug overlay for warp-like mesh raycast depth.
+VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-True}
+ISAAC_SHOW_SCANDOTS=${ISAAC_SHOW_SCANDOTS:-False}
 
 # Motion alignment debug defaults (deterministic + no synthetic transitions).
 MOTION_USE_ADAPTIVE_TIMESTEP_SAMPLER=${MOTION_USE_ADAPTIVE_TIMESTEP_SAMPLER:-False}
@@ -113,9 +79,7 @@ if [[ -n "${TERRAIN_OBJ}" ]] && [[ ! -e "${TERRAIN_OBJ}" ]]; then
   exit 1
 fi
 
-if [[ "${DEPTH_IMPL}" != "scandots" ]]; then
-  echo "[INFO] DEPTH_IMPL=${DEPTH_IMPL}: full-image perception mode (scandots debug points are disabled by default)."
-fi
+echo "[INFO] DEPTH_IMPL=${DEPTH_IMPL}: full-image perception mode with Viser ray/hit overlay enabled."
 
 if [[ "${STRICT_OPTIONS}" == "1" ]]; then
   if [[ "${EXP}" != "g1-29dof-wbt-videomimic-mlp" ]]; then
