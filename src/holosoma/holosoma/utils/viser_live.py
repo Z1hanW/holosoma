@@ -383,6 +383,7 @@ class ViserLiveViewer:
         self._scandots_point_size = 0.02
         self._scandots_color = np.array([255, 0, 0], dtype=np.uint8)
         self._scandots_warned = False
+        self._camera_ray_origin_warned = False
         self._target_keypoints_handle = None
         self._target_keypoints_point_size = 0.03
         self._target_keypoints_color = np.array([128, 0, 128], dtype=np.uint8)
@@ -1728,6 +1729,36 @@ class ViserLiveViewer:
             if self._scandots_rays_handle is not None:
                 self._scandots_rays_handle.visible = False
             return
+
+        # Camera-depth rays should all originate from a single POV.
+        # Force ray starts to the canonical camera origin from pose query.
+        if not use_heightmap:
+            cam_origin = None
+            try:
+                cam_pos_t, _cam_quat_t = perception_mgr.get_camera_pose(
+                    env_ids,
+                    apply_sensor_offset=True,
+                    apply_pitch=False,
+                )
+                if isinstance(cam_pos_t, torch.Tensor) and cam_pos_t.numel() >= 3:
+                    cam_origin = cam_pos_t[0:1]
+            except Exception:
+                cam_origin = None
+            if cam_origin is not None:
+                starts_env = cam_origin.expand_as(starts_env)
+
+        if not use_heightmap and starts_env.shape[0] > 1:
+            start0 = starts_env[0:1]
+            origin_spread = torch.linalg.norm(starts_env - start0, dim=-1)
+            max_spread = float(torch.max(origin_spread).item())
+            if max_spread > 1.0e-6:
+                if not self._camera_ray_origin_warned:
+                    logger.warning(
+                        "Camera ray starts are not single-POV (max spread {:.6f} m); collapsing to one origin in Viser.",
+                        max_spread,
+                    )
+                    self._camera_ray_origin_warned = True
+                starts_env = start0.expand_as(starts_env)
 
         ray_len_env = os.environ.get("VISER_SCANDOTS_RAY_LEN")
         try:

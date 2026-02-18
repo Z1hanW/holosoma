@@ -235,6 +235,7 @@ cmd=(
   --training.isaac_show_scandots="${ISAAC_SHOW_SCANDOTS}"
   --training.isaac_scandots_point_size=3.0
   --simulator.config.debug_viz=True
+  --simulator.config.contact_force_viz=False
   --simulator.config.scene.env_spacing=0.0
   --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_FILE}"
   --command.setup_terms.motion_command.params.motion_config.use_adaptive_timesteps_sampler "${MOTION_USE_ADAPTIVE_TIMESTEP_SAMPLER}"
