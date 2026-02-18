@@ -9,15 +9,21 @@ set -euo pipefail
 #
 # Optional:
 #   ROBOT: g1 or t1 (default: g1)
-#   SAVE_DIR: output directory (default: src/holosoma_retargeting/demo_results/g1/object_interaction/behave_zup)
+#   SAVE_DIR: raw retarget output directory
+#             (default: src/holosoma_retargeting/demo_results_parallel/g1/object_interaction/behave_zup)
+#   CONVERTED_DIR: converted training-motion output directory
+#                  (default: src/holosoma_retargeting/converted_res/behave)
+#   AUTO_CONVERT: 1/0 whether to run post-conversion automatically (default: 1)
 #   OBJECT_MESH_SUFFIX: object mesh filename suffix (default: _f1000.ply)
 #   MAX_WORKERS: override parallel workers
 #   AUGMENT: True/False (default: False)
+#   PYTHON_BIN: python executable for post-conversion (default: python)
 #
 # Example:
 #   DATA_ROOT=/data/behave/annotation_30fps_zup \
 #   OBJECT_ROOT=/data/behave/objects \
 #   SAVE_DIR=demo_results_parallel/g1/object_interaction/behave_zup \
+#   CONVERTED_DIR=src/holosoma_retargeting/converted_res/behave \
 #   bash retgt_behave_batch.sh
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -28,9 +34,12 @@ DATA_ROOT=${DATA_ROOT:-"/data/behave/annotation_30fps_zup"}
 OBJECT_ROOT=${OBJECT_ROOT:-"/data/behave/objects"}
 OBJECT_MESH_SUFFIX=${OBJECT_MESH_SUFFIX:-"_f1000.ply"}
 ROBOT=${ROBOT:-"g1"}
-SAVE_DIR=${SAVE_DIR:-"${REPO_ROOT}/src/holosoma_retargeting/demo_results/${ROBOT}/object_interaction/behave_zup"}
+SAVE_DIR=${SAVE_DIR:-"${REPO_ROOT}/src/holosoma_retargeting/demo_results_parallel/${ROBOT}/object_interaction/behave_zup"}
+CONVERTED_DIR=${CONVERTED_DIR:-"${REPO_ROOT}/src/holosoma_retargeting/converted_res/behave"}
+AUTO_CONVERT=${AUTO_CONVERT:-"1"}
 MAX_WORKERS=${MAX_WORKERS:-""}
 AUGMENT=${AUGMENT:-"False"}
+PYTHON_BIN=${PYTHON_BIN:-"python"}
 
 if [[ ! -d "${DATA_ROOT}" ]]; then
   echo "[ERROR] DATA_ROOT not found: ${DATA_ROOT}"
@@ -63,3 +72,16 @@ fi
 cmd+=("$@")
 
 "${cmd[@]}"
+
+if [[ "${AUTO_CONVERT}" == "1" || "${AUTO_CONVERT}" == "true" || "${AUTO_CONVERT}" == "True" ]]; then
+  POST_SCRIPT="${REPO_ROOT}/retgt_post_behave.sh"
+  if [[ ! -f "${POST_SCRIPT}" ]]; then
+    echo "[ERROR] post-conversion script not found: ${POST_SCRIPT}"
+    exit 1
+  fi
+  INPUT_DIR="${SAVE_DIR}" \
+  OUTPUT_DIR="${CONVERTED_DIR}" \
+  ROBOT="${ROBOT}" \
+  PYTHON_BIN="${PYTHON_BIN}" \
+  "${POST_SCRIPT}"
+fi

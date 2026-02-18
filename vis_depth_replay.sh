@@ -69,6 +69,15 @@ VISER_STRICT_CAMERA_RAYS=${VISER_STRICT_CAMERA_RAYS:-1}
 
 VISER_PORT=${VISER_PORT:-$((RANDOM % 8976 + 1024))}
 
+# In some Linux headless/non-interactive setups, desktop URL launchers may try
+# to invoke zenity and emit noisy "zenity: not found" errors. If zenity is not
+# installed and BROWSER is unset, force a no-op browser command and rely on the
+# printed Viser URL for manual opening.
+if [[ "$(uname -s)" == "Linux" ]] && ! command -v zenity >/dev/null 2>&1 && [[ -z "${BROWSER:-}" ]]; then
+  export BROWSER=true
+  echo "[WARN] zenity not found and BROWSER is unset; suppressing auto browser launch."
+fi
+
 if [[ ! -e "${MOTION_FILE}" ]]; then
   echo "[ERROR] MOTION_FILE not found: ${MOTION_FILE}" >&2
   exit 1
