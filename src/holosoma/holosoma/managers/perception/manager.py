@@ -528,7 +528,7 @@ class PerceptionManager:
             )
             combo = quat_mul(pitch_quat, self._camera_frame_quat, w_last=True)
             combo = combo.unsqueeze(0).expand(dirs_cam.shape[0], -1)
-            dirs_base = quat_rotate_inverse(combo, dirs_cam, w_last=True)
+            dirs_base = quat_apply(combo, dirs_cam, w_last=True)
         else:
             # Match VideoMimic pinhole convention: camera (x right, y down, z forward)
             # -> robotics (x forward, y left, z up) => [z, -x, -y] = [1, -x, -y].
@@ -543,7 +543,7 @@ class PerceptionManager:
                 torch.tensor(0.0, device=self.device),
             )
             pitch_quat = pitch_quat.unsqueeze(0).expand(dirs_cam.shape[0], -1)
-            dirs_base = quat_rotate_inverse(pitch_quat, dirs_cam, w_last=True)
+            dirs_base = quat_apply(pitch_quat, dirs_cam, w_last=True)
         dirs_base = dirs_base / torch.norm(dirs_base, dim=-1, keepdim=True).clamp(min=1.0e-6)
         return dirs_base
 
@@ -608,7 +608,7 @@ class PerceptionManager:
             )
             combo = quat_mul(pitch_quat, self._camera_frame_quat, w_last=True)
             combo = combo.unsqueeze(0).expand(dirs_cam.shape[0], -1)
-            dirs_base = quat_rotate_inverse(combo, dirs_cam, w_last=True)
+            dirs_base = quat_apply(combo, dirs_cam, w_last=True)
         else:
             # Match VideoMimic pinhole convention: camera (x right, y down, z forward)
             # -> robotics (x forward, y left, z up) => [z, -x, -y] = [1, -x, -y].
@@ -623,7 +623,7 @@ class PerceptionManager:
                 torch.tensor(0.0, device=self.device),
             )
             pitch_quat = pitch_quat.unsqueeze(0).expand(dirs_cam.shape[0], -1)
-            dirs_base = quat_rotate_inverse(pitch_quat, dirs_cam, w_last=True)
+            dirs_base = quat_apply(pitch_quat, dirs_cam, w_last=True)
         dirs_base = dirs_base / torch.norm(dirs_base, dim=-1, keepdim=True).clamp(min=1.0e-6)
         return dirs_base
 
@@ -653,10 +653,10 @@ class PerceptionManager:
         if self._use_camera_frame_quat:
             forward_cam = torch.tensor([0.0, 0.0, -1.0], device=body_quat.device)
             combo = quat_mul(pitch_quat, self._camera_frame_quat.to(body_quat.device), w_last=True)
-            forward_base = quat_rotate_inverse(combo.unsqueeze(0), forward_cam.unsqueeze(0), w_last=True).squeeze(0)
+            forward_base = quat_apply(combo.unsqueeze(0), forward_cam.unsqueeze(0), w_last=True).squeeze(0)
         else:
             forward_cam = torch.tensor([1.0, 0.0, 0.0], device=body_quat.device)
-            forward_base = quat_rotate_inverse(pitch_quat.unsqueeze(0), forward_cam.unsqueeze(0), w_last=True).squeeze(0)
+            forward_base = quat_apply(pitch_quat.unsqueeze(0), forward_cam.unsqueeze(0), w_last=True).squeeze(0)
         forward_base = forward_base.unsqueeze(0).expand(body_quat.shape[0], -1)
         forward_world = quat_apply(body_quat, forward_base, w_last=True)
         return forward_world / torch.norm(forward_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
@@ -1299,11 +1299,11 @@ class PerceptionManager:
 
         if self._camera_ray_dirs_base is not None:
             delta_rep = delta_quat.unsqueeze(0).expand(self._camera_ray_dirs_base.shape[0], -1)
-            self._camera_ray_dirs_base = quat_rotate_inverse(delta_rep, self._camera_ray_dirs_base, w_last=True)
+            self._camera_ray_dirs_base = quat_apply(delta_rep, self._camera_ray_dirs_base, w_last=True)
 
         if self._camera_scandots_ray_dirs_base is not None:
             delta_rep = delta_quat.unsqueeze(0).expand(self._camera_scandots_ray_dirs_base.shape[0], -1)
-            self._camera_scandots_ray_dirs_base = quat_rotate_inverse(
+            self._camera_scandots_ray_dirs_base = quat_apply(
                 delta_rep, self._camera_scandots_ray_dirs_base, w_last=True
             )
 
