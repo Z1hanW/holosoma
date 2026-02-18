@@ -10,7 +10,7 @@ set -euo pipefail
 # Usage:
 #   ./vis_depth_replay.sh
 #   MOTION_FILE=/abs/or/rel/path/to/motion_or_dir TERRAIN_OBJ=/abs/or/rel/path/to/scene.obj ./vis_depth_replay.sh
-#   DEPTH_IMPL=rendered ./vis_depth_replay.sh   # rendered|depth_sensor|raycast|scandots
+#   DEPTH_IMPL=warp_like ./vis_depth_replay.sh  # warp_like|rendered|depth_sensor|raycast|scandots
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
@@ -20,8 +20,11 @@ MOTION_FILE=${MOTION_FILE:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res
 MOTION_CLIP_NAME=${MOTION_CLIP_NAME:-""}
 TERRAIN_OBJ=${TERRAIN_OBJ:-"${SCRIPT_DIR}/src/holosoma_retargeting/demo_data/far_robot/far_robot/stairs.obj"}
 
-DEPTH_IMPL=${DEPTH_IMPL:-scandots}
+DEPTH_IMPL=${DEPTH_IMPL:-warp_like}
 case "${DEPTH_IMPL}" in
+  warp_like)
+    PERCEPTION_PRESET="camera_depth_d435i"
+    ;;
   scandots)
     PERCEPTION_PRESET="camera_depth_d435i_scandots"
     ;;
@@ -35,18 +38,41 @@ case "${DEPTH_IMPL}" in
     PERCEPTION_PRESET="camera_depth_d435i"
     ;;
   *)
-    echo "[ERROR] Unknown DEPTH_IMPL=${DEPTH_IMPL}. Use scandots|rendered|depth_sensor|raycast." >&2
+    echo "[ERROR] Unknown DEPTH_IMPL=${DEPTH_IMPL}. Use warp_like|scandots|rendered|depth_sensor|raycast." >&2
     exit 1
     ;;
 esac
 
-IMAGE_WIDTH=${IMAGE_WIDTH:-640}
-IMAGE_HEIGHT=${IMAGE_HEIGHT:-360}
+if [[ "${DEPTH_IMPL}" == "warp_like" ]]; then
+  IMAGE_WIDTH=${IMAGE_WIDTH:-106}
+  IMAGE_HEIGHT=${IMAGE_HEIGHT:-60}
+  CAMERA_VFOV_DEG=${CAMERA_VFOV_DEG:-58.6}
+  CAMERA_HFOV_DEG=${CAMERA_HFOV_DEG:-89.5}
+  CAMERA_NEAR=${CAMERA_NEAR:-0.3}
+  CAMERA_FAR=${CAMERA_FAR:-3.0}
+  CAMERA_INCLUDE_ROBOT_MESH=${CAMERA_INCLUDE_ROBOT_MESH:-True}
+else
+  IMAGE_WIDTH=${IMAGE_WIDTH:-640}
+  IMAGE_HEIGHT=${IMAGE_HEIGHT:-360}
+  CAMERA_VFOV_DEG=${CAMERA_VFOV_DEG:-55.2}
+  CAMERA_HFOV_DEG=${CAMERA_HFOV_DEG:-89.5}
+  CAMERA_NEAR=${CAMERA_NEAR:-0.1}
+  CAMERA_FAR=${CAMERA_FAR:-10.0}
+  CAMERA_INCLUDE_ROBOT_MESH=${CAMERA_INCLUDE_ROBOT_MESH:-False}
+fi
+
 SCANDOTS_STRIDE=${SCANDOTS_STRIDE:-4}
 CAMERA_BODY_NAME=${CAMERA_BODY_NAME:-d435_joint}
 HEADLESS=${HEADLESS:-False}
 NUM_ENVS=${NUM_ENVS:-1}
 SEED=${SEED:-42}
+if [[ "${DEPTH_IMPL}" == "scandots" ]]; then
+  VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-True}
+  ISAAC_SHOW_SCANDOTS=${ISAAC_SHOW_SCANDOTS:-True}
+else
+  VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-False}
+  ISAAC_SHOW_SCANDOTS=${ISAAC_SHOW_SCANDOTS:-False}
+fi
 
 # Motion alignment debug defaults (deterministic + no synthetic transitions).
 MOTION_USE_ADAPTIVE_TIMESTEP_SAMPLER=${MOTION_USE_ADAPTIVE_TIMESTEP_SAMPLER:-False}
@@ -76,7 +102,7 @@ if [[ -n "${TERRAIN_OBJ}" ]] && [[ ! -e "${TERRAIN_OBJ}" ]]; then
 fi
 
 if [[ "${DEPTH_IMPL}" != "scandots" ]]; then
-  echo "[WARN] DEPTH_IMPL=${DEPTH_IMPL}: scene scan points may disappear. Use DEPTH_IMPL=scandots for scan-point debugging."
+  echo "[INFO] DEPTH_IMPL=${DEPTH_IMPL}: full-image depth mode (scandots debug points are disabled by default)."
 fi
 
 if [[ "${STRICT_OPTIONS}" == "1" ]]; then
@@ -92,8 +118,16 @@ if [[ "${STRICT_OPTIONS}" == "1" ]]; then
     echo "[ERROR] STRICT_OPTIONS=1 requires CAMERA_BODY_NAME=d435_joint, got: ${CAMERA_BODY_NAME}" >&2
     exit 1
   fi
-  if [[ "${DEPTH_IMPL}" != "scandots" ]]; then
-    echo "[ERROR] STRICT_OPTIONS=1 requires DEPTH_IMPL=scandots, got: ${DEPTH_IMPL}" >&2
+  if [[ "${DEPTH_IMPL}" != "warp_like" ]]; then
+    echo "[ERROR] STRICT_OPTIONS=1 requires DEPTH_IMPL=warp_like, got: ${DEPTH_IMPL}" >&2
+    exit 1
+  fi
+  if [[ "${IMAGE_WIDTH}" != "106" || "${IMAGE_HEIGHT}" != "60" ]]; then
+    echo "[ERROR] STRICT_OPTIONS=1 requires IMAGE_WIDTH/HEIGHT=106/60, got ${IMAGE_WIDTH}/${IMAGE_HEIGHT}" >&2
+    exit 1
+  fi
+  if [[ "${CAMERA_INCLUDE_ROBOT_MESH}" != "True" ]]; then
+    echo "[ERROR] STRICT_OPTIONS=1 requires CAMERA_INCLUDE_ROBOT_MESH=True, got: ${CAMERA_INCLUDE_ROBOT_MESH}" >&2
     exit 1
   fi
   # Strict terrain check:
@@ -120,6 +154,8 @@ if [[ -n "${MOTION_CLIP_NAME}" ]]; then
 fi
 echo "[INFO] CAMERA_BODY_NAME=${CAMERA_BODY_NAME}"
 echo "[INFO] PERCEPTION_PRESET=${PERCEPTION_PRESET}"
+echo "[INFO] DEPTH_IMPL=${DEPTH_IMPL}"
+echo "[INFO] CAMERA_CFG width=${IMAGE_WIDTH} height=${IMAGE_HEIGHT} vfov=${CAMERA_VFOV_DEG} hfov=${CAMERA_HFOV_DEG} near=${CAMERA_NEAR} far=${CAMERA_FAR} include_robot_mesh=${CAMERA_INCLUDE_ROBOT_MESH}"
 echo "[INFO] VISER=http://localhost:${VISER_PORT}"
 echo "[INFO] VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI}"
 echo "[INFO] VISER_START_PAUSED=${VISER_START_PAUSED}"
@@ -175,8 +211,8 @@ cmd=(
   --training.num_envs="${NUM_ENVS}"
   --training.enable_viser=True
   --training.viser_port="${VISER_PORT}"
-  --training.viser_show_scandots=True
-  --training.isaac_show_scandots=True
+  --training.viser_show_scandots="${VISER_SHOW_SCANDOTS}"
+  --training.isaac_show_scandots="${ISAAC_SHOW_SCANDOTS}"
   --training.isaac_scandots_point_size=3.0
   --simulator.config.debug_viz=True
   --simulator.config.scene.env_spacing=0.0
@@ -198,6 +234,11 @@ cmd=(
   --randomization.reset_terms.randomize_dof_state.params.joint_pos_bias_range="[0.0,0.0]"
   --perception.camera_width="${IMAGE_WIDTH}"
   --perception.camera_height="${IMAGE_HEIGHT}"
+  --perception.camera_vfov_deg="${CAMERA_VFOV_DEG}"
+  --perception.camera_hfov_deg="${CAMERA_HFOV_DEG}"
+  --perception.camera_near="${CAMERA_NEAR}"
+  --perception.camera_far="${CAMERA_FAR}"
+  --perception.camera_include_robot_mesh="${CAMERA_INCLUDE_ROBOT_MESH}"
   --perception.camera_scandots_stride="${SCANDOTS_STRIDE}"
   --perception.camera_body_name "${CAMERA_BODY_NAME}"
 )
