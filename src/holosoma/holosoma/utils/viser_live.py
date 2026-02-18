@@ -396,6 +396,11 @@ class ViserLiveViewer:
             "true",
             "yes",
         )
+        self._disable_perception_image_pipeline = os.environ.get("VISER_DISABLE_PERCEPTION_IMAGE_PIPELINE", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         perception_image_mode = os.environ.get("VISER_PERCEPTION_IMAGE_MODE", "auto").strip().lower()
         if perception_image_mode not in ("auto", "depth", "rgb"):
             perception_image_mode = "auto"
@@ -1758,13 +1763,14 @@ class ViserLiveViewer:
         cam_body_quat_xyzw = None
 
         if output_mode == "camera_depth":
-            try:
-                depth = perception_mgr.get_camera_depth_map()
-            except Exception:
-                depth = None
-            if isinstance(depth, torch.Tensor) and depth.numel() > 0:
-                depth_map = depth[self._env_id].detach().cpu().numpy()
-                depth_map = np.flipud(depth_map)
+            if not self._disable_perception_image_pipeline:
+                try:
+                    depth = perception_mgr.get_camera_depth_map()
+                except Exception:
+                    depth = None
+                if isinstance(depth, torch.Tensor) and depth.numel() > 0:
+                    depth_map = depth[self._env_id].detach().cpu().numpy()
+                    depth_map = np.flipud(depth_map)
             try:
                 cam_pos_t, cam_quat_t = perception_mgr.get_camera_pose(
                     env_ids,
@@ -1825,12 +1831,16 @@ class ViserLiveViewer:
 
         self._update_perception_markers(perception_mgr, env_ids, offset)
 
+        if self._disable_perception_image_pipeline:
+            h, w = self._perception_last_shape
+            depth_map = np.full((h, w), np.nan, dtype=np.float32)
+
         if depth_map is None:
             return
 
         depth_img = _depth_to_rgb(depth_map, near, far)
         display_img = depth_img
-        image_mode = self._perception_image_mode
+        image_mode = "depth" if self._disable_perception_image_pipeline else self._perception_image_mode
         source_mode = str(getattr(cfg, "camera_source", ""))
         can_show_rendered_rgb = output_mode == "camera_depth" and source_mode in {"rendered", "rendered_depth_sensor"}
         if image_mode == "rgb":
@@ -1870,14 +1880,17 @@ class ViserLiveViewer:
             if self._perception_depth_handle is not None:
                 self._perception_depth_handle.image = display_img
         if self._perception_stats is not None:
-            min_d, max_d, count = _valid_depth_stats(depth_map, near, far)
-            if count == 0:
-                self._perception_stats.content = "Depth range (valid): n/a (no hits)"
+            if self._disable_perception_image_pipeline:
+                self._perception_stats.content = "Perception image pipeline disabled (VISER_DISABLE_PERCEPTION_IMAGE_PIPELINE=1)"
             else:
-                total = depth_map.size
-                self._perception_stats.content = (
-                    f"Depth range (valid): {min_d:.3f} - {max_d:.3f} m | valid: {count}/{total}"
-                )
+                min_d, max_d, count = _valid_depth_stats(depth_map, near, far)
+                if count == 0:
+                    self._perception_stats.content = "Depth range (valid): n/a (no hits)"
+                else:
+                    total = depth_map.size
+                    self._perception_stats.content = (
+                        f"Depth range (valid): {min_d:.3f} - {max_d:.3f} m | valid: {count}/{total}"
+                    )
 
         if cam_pos is None or cam_quat_xyzw is None:
             return

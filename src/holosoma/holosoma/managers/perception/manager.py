@@ -304,29 +304,7 @@ class PerceptionManager:
     ):
         if not self.enabled or self.cfg.output_mode != "camera_depth":
             return None
-        if self._warp_mesh is None:
-            raise RuntimeError("PerceptionManager.setup() must be called before scandots queries.")
-        if self._camera_scandots_ray_dirs_base is None:
-            raise RuntimeError(
-                "PerceptionManager scandots ray buffers are not initialized. "
-                "Set camera_scandots_width/height or camera_scandots_stride to enable visualization."
-            )
-
-        idx = env_ids if env_ids is not None else slice(None)
-        body_pos, body_quat = self._get_camera_body_pose(idx)
-        num_envs = body_pos.shape[0]
-
-        ray_dirs_base = self._camera_scandots_ray_dirs_base.unsqueeze(0).expand(num_envs, -1, -1)
-        ray_dirs_world = quat_rotate_batched(body_quat, ray_dirs_base)
-
-        offset_world = quat_apply(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
-        ray_starts = body_pos.unsqueeze(1) + offset_world.unsqueeze(1)
-        if ray_starts.shape[1] != ray_dirs_world.shape[1]:
-            ray_starts = ray_starts.expand(-1, ray_dirs_world.shape[1], -1)
-
-        warp_mesh = self._get_camera_warp_mesh(env_ids)
-        ray_hits_world = warp_utils.ray_cast(ray_starts, ray_dirs_world, warp_mesh)
-        hit_mask = torch.isfinite(ray_hits_world).all(dim=-1)
+        ray_starts, ray_dirs_world, ray_hits_world, hit_mask, _body_quat = self._cast_camera_scandots_rays(env_ids)
 
         if include_misses:
             ranges = self._compute_camera_ray_distances(ray_starts, ray_dirs_world, ray_hits_world)
@@ -1155,26 +1133,8 @@ class PerceptionManager:
         return self._apply_camera_depth_noise(depth)
 
     def _compute_camera_scandots_depth(self, env_ids: torch.Tensor | None) -> torch.Tensor:
-        if self._warp_mesh is None:
-            raise RuntimeError("PerceptionManager.setup() must be called before update().")
-        if self._camera_scandots_ray_dirs_base is None:
-            raise RuntimeError("PerceptionManager scandots ray buffers are not initialized.")
-
-        idx = env_ids if env_ids is not None else slice(None)
-        body_pos, body_quat = self._get_camera_body_pose(idx)
-        num_envs = body_pos.shape[0]
-
-        ray_dirs_base = self._camera_scandots_ray_dirs_base.unsqueeze(0).expand(num_envs, -1, -1)
-        ray_dirs_world = quat_rotate_batched(body_quat, ray_dirs_base)
-
-        offset_world = quat_apply(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
-        ray_starts = body_pos.unsqueeze(1) + offset_world.unsqueeze(1)
-        if ray_starts.shape[1] != ray_dirs_world.shape[1]:
-            ray_starts = ray_starts.expand(-1, ray_dirs_world.shape[1], -1)
-
-        warp_mesh = self._get_camera_warp_mesh(env_ids)
-        ray_hits_world = warp_utils.ray_cast(ray_starts, ray_dirs_world, warp_mesh)
-        hit_mask = torch.isfinite(ray_hits_world).all(dim=-1)
+        ray_starts, ray_dirs_world, ray_hits_world, hit_mask, body_quat = self._cast_camera_scandots_rays(env_ids)
+        num_envs = body_quat.shape[0]
         ranges = self._compute_camera_ray_distances(ray_starts, ray_dirs_world, ray_hits_world)
 
         height = self._camera_scandots_height
@@ -1197,6 +1157,35 @@ class PerceptionManager:
             depth = F.interpolate(depth, size=(self._camera_height, self._camera_width), mode=upsample_mode)
         depth = depth.squeeze(1)
         return self._apply_camera_depth_noise(depth)
+
+    def _cast_camera_scandots_rays(
+        self, env_ids: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Ray-cast camera scandots using the same pinhole + mesh flow as warp_sensors."""
+        if self._warp_mesh is None:
+            raise RuntimeError("PerceptionManager.setup() must be called before scandots ray queries.")
+        if self._camera_scandots_ray_dirs_base is None:
+            raise RuntimeError(
+                "PerceptionManager scandots ray buffers are not initialized. "
+                "Set camera_scandots_width/height or camera_scandots_stride to enable visualization."
+            )
+
+        idx = env_ids if env_ids is not None else slice(None)
+        body_pos, body_quat = self._get_camera_body_pose(idx)
+        num_envs = body_pos.shape[0]
+
+        ray_dirs_base = self._camera_scandots_ray_dirs_base.unsqueeze(0).expand(num_envs, -1, -1)
+        ray_dirs_world = quat_rotate_batched(body_quat, ray_dirs_base)
+
+        offset_world = quat_apply(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
+        ray_starts = body_pos.unsqueeze(1) + offset_world.unsqueeze(1)
+        if ray_starts.shape[1] != ray_dirs_world.shape[1]:
+            ray_starts = ray_starts.expand(-1, ray_dirs_world.shape[1], -1)
+
+        warp_mesh = self._get_camera_warp_mesh(env_ids)
+        ray_hits_world = warp_utils.ray_cast(ray_starts, ray_dirs_world, warp_mesh)
+        hit_mask = torch.isfinite(ray_hits_world).all(dim=-1)
+        return ray_starts, ray_dirs_world, ray_hits_world, hit_mask, body_quat
 
     def _maybe_auto_tilt_camera(self, depth_map: torch.Tensor, env_ids: torch.Tensor | None) -> bool:
         target_pitch_deg = getattr(self.cfg, "camera_target_pitch_deg", None)
