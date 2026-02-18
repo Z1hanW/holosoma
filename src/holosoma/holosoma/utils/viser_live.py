@@ -412,6 +412,11 @@ class ViserLiveViewer:
             "false",
             "no",
         )
+        self._disable_contact_force_viz = os.environ.get("VISER_DISABLE_CONTACT_FORCE_VIZ", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         perception_image_mode = os.environ.get("VISER_PERCEPTION_IMAGE_MODE", "auto").strip().lower()
         if perception_image_mode not in ("auto", "depth", "rgb"):
             perception_image_mode = "auto"
@@ -734,7 +739,8 @@ class ViserLiveViewer:
             self._update_target_keypoints(offset)
             if self._perception_enabled:
                 self._update_perception_visuals(offset)
-            self._update_contact_forces(offset)
+            if not self._disable_contact_force_viz:
+                self._update_contact_forces(offset)
 
             if self._vo is None or self._object_root is None:
                 return
@@ -1147,7 +1153,7 @@ class ViserLiveViewer:
                 )
 
         sim_cfg = getattr(self._env.simulator, "simulator_config", None)
-        if sim_cfg is not None and hasattr(sim_cfg, "contact_force_viz"):
+        if (not self._disable_contact_force_viz) and sim_cfg is not None and hasattr(sim_cfg, "contact_force_viz"):
             with self._server.gui.add_folder("Contact Forces"):
                 self._contact_force_cb = self._server.gui.add_checkbox(
                     "Show Contact Forces",
