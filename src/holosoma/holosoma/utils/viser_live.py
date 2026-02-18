@@ -396,6 +396,10 @@ class ViserLiveViewer:
             "true",
             "yes",
         )
+        perception_image_mode = os.environ.get("VISER_PERCEPTION_IMAGE_MODE", "auto").strip().lower()
+        if perception_image_mode not in ("auto", "depth", "rgb"):
+            perception_image_mode = "auto"
+        self._perception_image_mode = perception_image_mode
         self._play_control = None
         self._step_button = None
         self._reset_button = None
@@ -930,9 +934,9 @@ class ViserLiveViewer:
 
         with self._server.gui.add_folder("Perception"):
             self._perception_show_depth_cb = self._server.gui.add_checkbox(
-                "Show Depth",
+                "Show Image",
                 initial_value=True,
-                hint="Display perception depth in GUI and frustum",
+                hint="Display perception image (depth or rendered RGB) in GUI and frustum",
             )
             self._perception_show_frustum_cb = self._server.gui.add_checkbox(
                 "Show Frustum",
@@ -958,7 +962,7 @@ class ViserLiveViewer:
                 )
             self._perception_depth_handle = self._server.gui.add_image(
                 np.zeros((height, width, 3), dtype=np.uint8),
-                label="Perception Depth",
+                label="Perception Image",
             )
             self._perception_stats = self._server.gui.add_markdown("Depth range (valid): n/a")
 
@@ -1824,17 +1828,47 @@ class ViserLiveViewer:
         if depth_map is None:
             return
 
-        depth_shape = (int(depth_map.shape[0]), int(depth_map.shape[1]))
-        if depth_shape != self._perception_last_shape or output_mode != self._perception_last_mode:
-            self._perception_last_shape = depth_shape
+        depth_img = _depth_to_rgb(depth_map, near, far)
+        display_img = depth_img
+        image_mode = self._perception_image_mode
+        source_mode = str(getattr(cfg, "camera_source", ""))
+        can_show_rendered_rgb = output_mode == "camera_depth" and source_mode in {"rendered", "rendered_depth_sensor"}
+        if image_mode == "rgb":
+            if not can_show_rendered_rgb:
+                raise RuntimeError(
+                    "VISER_PERCEPTION_IMAGE_MODE=rgb requires camera_source=rendered or rendered_depth_sensor."
+                )
+            rgb = perception_mgr.capture_rendered_rgb()
+            rgb_img = np.asarray(rgb)
+            if rgb_img.ndim != 3 or rgb_img.shape[-1] < 3:
+                raise RuntimeError(f"Rendered RGB image has invalid shape: {tuple(rgb_img.shape)}")
+            rgb_img = np.flipud(rgb_img[:, :, :3])
+            if rgb_img.dtype != np.uint8:
+                rgb_img = np.clip(rgb_img, 0, 255).astype(np.uint8)
+            display_img = rgb_img
+        elif image_mode == "auto" and can_show_rendered_rgb:
+            try:
+                rgb = perception_mgr.capture_rendered_rgb()
+            except Exception:
+                rgb = None
+            if rgb is not None:
+                rgb_img = np.asarray(rgb)
+                if rgb_img.ndim == 3 and rgb_img.shape[-1] >= 3:
+                    rgb_img = np.flipud(rgb_img[:, :, :3])
+                    if rgb_img.dtype != np.uint8:
+                        rgb_img = np.clip(rgb_img, 0, 255).astype(np.uint8)
+                    display_img = rgb_img
+
+        display_shape = (int(display_img.shape[0]), int(display_img.shape[1]))
+        if display_shape != self._perception_last_shape or output_mode != self._perception_last_mode:
+            self._perception_last_shape = display_shape
             self._perception_last_mode = output_mode
             if self._perception_depth_handle is not None:
-                self._perception_depth_handle.image = np.zeros(depth_map.shape + (3,), dtype=np.uint8)
+                self._perception_depth_handle.image = np.zeros(display_img.shape, dtype=np.uint8)
 
-        depth_img = _depth_to_rgb(depth_map, near, far)
         if self._perception_show_depth_cb is None or bool(self._perception_show_depth_cb.value):
             if self._perception_depth_handle is not None:
-                self._perception_depth_handle.image = depth_img
+                self._perception_depth_handle.image = display_img
         if self._perception_stats is not None:
             min_d, max_d, count = _valid_depth_stats(depth_map, near, far)
             if count == 0:
@@ -1883,7 +1917,7 @@ class ViserLiveViewer:
             fov, aspect = self._resolve_heightmap_fov_aspect(perception_mgr)
         else:
             fov = float(getattr(cfg, "camera_vfov_deg", 90.0))
-            aspect = float(depth_shape[1] / max(1, depth_shape[0]))
+            aspect = float(display_shape[1] / max(1, display_shape[0]))
 
         if fov != self._perception_last_fov:
             try:
@@ -1903,7 +1937,7 @@ class ViserLiveViewer:
         if self._perception_show_frustum_cb is None or bool(self._perception_show_frustum_cb.value):
             self._perception_frustum.visible = True
         if self._perception_show_depth_cb is None or bool(self._perception_show_depth_cb.value):
-            self._perception_frustum.image = depth_img
+            self._perception_frustum.image = display_img
 
     def _update_target_keypoints(self, offset: np.ndarray) -> None:
         if not self._server:

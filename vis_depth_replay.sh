@@ -10,7 +10,7 @@ set -euo pipefail
 # Usage:
 #   ./vis_depth_replay.sh
 #   MOTION_FILE=/abs/or/rel/path/to/motion_or_dir TERRAIN_OBJ=/abs/or/rel/path/to/scene.obj ./vis_depth_replay.sh
-#   DEPTH_IMPL=warp_like ./vis_depth_replay.sh  # warp_like|rendered|depth_sensor|raycast|scandots
+#   DEPTH_IMPL=rendered ./vis_depth_replay.sh  # rendered|depth_sensor|warp_like|raycast|scandots
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
@@ -20,7 +20,7 @@ MOTION_FILE=${MOTION_FILE:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res
 MOTION_CLIP_NAME=${MOTION_CLIP_NAME:-""}
 TERRAIN_OBJ=${TERRAIN_OBJ:-"${SCRIPT_DIR}/src/holosoma_retargeting/demo_data/far_robot/far_robot/stairs.obj"}
 
-DEPTH_IMPL=${DEPTH_IMPL:-warp_like}
+DEPTH_IMPL=${DEPTH_IMPL:-rendered}
 case "${DEPTH_IMPL}" in
   warp_like)
     PERCEPTION_PRESET="camera_depth_d435i"
@@ -92,6 +92,7 @@ DEBUG_MOTION_TERRAIN=${DEBUG_MOTION_TERRAIN:-1}
 STRICT_OPTIONS=${STRICT_OPTIONS:-1}
 VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI:-0}
 VISER_START_PAUSED=${VISER_START_PAUSED:-1}
+VISER_PERCEPTION_IMAGE_MODE=${VISER_PERCEPTION_IMAGE_MODE:-rgb}
 VISER_SCANDOTS_INCLUDE_MISSES=${VISER_SCANDOTS_INCLUDE_MISSES:-1}
 VISER_SCANDOTS_RAY_LEN=${VISER_SCANDOTS_RAY_LEN:-2.0}
 
@@ -108,7 +109,7 @@ if [[ -n "${TERRAIN_OBJ}" ]] && [[ ! -e "${TERRAIN_OBJ}" ]]; then
 fi
 
 if [[ "${DEPTH_IMPL}" != "scandots" ]]; then
-  echo "[INFO] DEPTH_IMPL=${DEPTH_IMPL}: full-image depth mode (scandots debug points are disabled by default)."
+  echo "[INFO] DEPTH_IMPL=${DEPTH_IMPL}: full-image perception mode (scandots debug points are disabled by default)."
 fi
 
 if [[ "${STRICT_OPTIONS}" == "1" ]]; then
@@ -124,17 +125,15 @@ if [[ "${STRICT_OPTIONS}" == "1" ]]; then
     echo "[ERROR] STRICT_OPTIONS=1 requires CAMERA_BODY_NAME=d435_joint, got: ${CAMERA_BODY_NAME}" >&2
     exit 1
   fi
-  if [[ "${DEPTH_IMPL}" != "warp_like" ]]; then
-    echo "[ERROR] STRICT_OPTIONS=1 requires DEPTH_IMPL=warp_like, got: ${DEPTH_IMPL}" >&2
-    exit 1
-  fi
-  if [[ "${IMAGE_WIDTH}" != "106" || "${IMAGE_HEIGHT}" != "60" ]]; then
-    echo "[ERROR] STRICT_OPTIONS=1 requires IMAGE_WIDTH/HEIGHT=106/60, got ${IMAGE_WIDTH}/${IMAGE_HEIGHT}" >&2
-    exit 1
-  fi
-  if [[ "${CAMERA_INCLUDE_ROBOT_MESH}" != "True" ]]; then
-    echo "[ERROR] STRICT_OPTIONS=1 requires CAMERA_INCLUDE_ROBOT_MESH=True, got: ${CAMERA_INCLUDE_ROBOT_MESH}" >&2
-    exit 1
+  if [[ "${DEPTH_IMPL}" == "warp_like" ]]; then
+    if [[ "${IMAGE_WIDTH}" != "106" || "${IMAGE_HEIGHT}" != "60" ]]; then
+      echo "[ERROR] STRICT_OPTIONS=1 requires IMAGE_WIDTH/HEIGHT=106/60 for DEPTH_IMPL=warp_like, got ${IMAGE_WIDTH}/${IMAGE_HEIGHT}" >&2
+      exit 1
+    fi
+    if [[ "${CAMERA_INCLUDE_ROBOT_MESH}" != "True" ]]; then
+      echo "[ERROR] STRICT_OPTIONS=1 requires CAMERA_INCLUDE_ROBOT_MESH=True for DEPTH_IMPL=warp_like, got: ${CAMERA_INCLUDE_ROBOT_MESH}" >&2
+      exit 1
+    fi
   fi
   # Strict terrain check:
   # - If TERRAIN_OBJ is a directory, require a clip-matching OBJ file.
@@ -165,6 +164,7 @@ echo "[INFO] CAMERA_CFG width=${IMAGE_WIDTH} height=${IMAGE_HEIGHT} vfov=${CAMER
 echo "[INFO] VISER=http://localhost:${VISER_PORT}"
 echo "[INFO] VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI}"
 echo "[INFO] VISER_START_PAUSED=${VISER_START_PAUSED}"
+echo "[INFO] VISER_PERCEPTION_IMAGE_MODE=${VISER_PERCEPTION_IMAGE_MODE}"
 echo "[INFO] VISER_SCANDOTS_INCLUDE_MISSES=${VISER_SCANDOTS_INCLUDE_MISSES}"
 echo "[INFO] VISER_SCANDOTS_RAY_LEN=${VISER_SCANDOTS_RAY_LEN}"
 echo "[INFO] MOTION_DEBUG use_adaptive=${MOTION_USE_ADAPTIVE_TIMESTEP_SAMPLER} start_at_zero_prob=${MOTION_START_AT_ZERO_PROB} prepend=${MOTION_ENABLE_DEFAULT_POSE_PREPEND}/${MOTION_DEFAULT_POSE_PREPEND_DURATION_S}s append=${MOTION_ENABLE_DEFAULT_POSE_APPEND}/${MOTION_DEFAULT_POSE_APPEND_DURATION_S}s init_noise=${MOTION_INIT_NOISE_SCALE} align_yaw=${MOTION_ALIGN_TO_INIT_YAW} pair_terrain=${MOTION_PAIR_TERRAIN_WITH_MOTION}"
@@ -209,6 +209,7 @@ fi
 
 export VISER_ENABLE_CLIP_GUI
 export VISER_START_PAUSED
+export VISER_PERCEPTION_IMAGE_MODE
 export VISER_SCANDOTS_INCLUDE_MISSES
 export VISER_SCANDOTS_RAY_LEN
 
