@@ -69,6 +69,10 @@ SEED=${SEED:-42}
 if [[ "${DEPTH_IMPL}" == "scandots" ]]; then
   VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-True}
   ISAAC_SHOW_SCANDOTS=${ISAAC_SHOW_SCANDOTS:-True}
+elif [[ "${DEPTH_IMPL}" == "warp_like" ]]; then
+  # Enable Viser ray/hit debug overlay for warp-like mesh raycast depth.
+  VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-True}
+  ISAAC_SHOW_SCANDOTS=${ISAAC_SHOW_SCANDOTS:-False}
 else
   VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-False}
   ISAAC_SHOW_SCANDOTS=${ISAAC_SHOW_SCANDOTS:-False}
