@@ -25,6 +25,9 @@ class DataConversionConfig:
     object_name: str | None = None
     """Override object name (default depends on robot and data type)."""
 
+    scene_xml_file: str | None = None
+    """Optional explicit MuJoCo scene XML path. If set, converter loads this file directly."""
+
     input_fps: int = 30
     """FPS of the input motion."""
 

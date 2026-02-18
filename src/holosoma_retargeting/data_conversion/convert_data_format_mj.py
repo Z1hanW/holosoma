@@ -377,7 +377,9 @@ def run_simulator(joint_names: list[str]):
     # Load Mujoco model
     object_name = constants.OBJECT_NAME
     robot_model_path = constants.ROBOT_URDF_FILE
-    if object_name == "ground":
+    if args_cli.scene_xml_file:
+        robot_xml_path = args_cli.scene_xml_file
+    elif object_name == "ground":
         robot_xml_path = robot_model_path.replace(".urdf", ".xml")
     elif object_name == "multi_boxes":
         robot_xml_path = constants.SCENE_XML_FILE
@@ -385,6 +387,9 @@ def run_simulator(joint_names: list[str]):
         if object_name is None:
             raise ValueError("object_name cannot be None when it's not 'ground' or 'multi_boxes'")
         robot_xml_path = robot_model_path.replace(".urdf", "_w_" + object_name + ".xml")
+
+    if not Path(robot_xml_path).exists():
+        raise FileNotFoundError(f"MuJoCo scene xml not found: {robot_xml_path}")
 
     robot = mujoco.MjModel.from_xml_path(robot_xml_path)
     robot_data = mujoco.MjData(robot)

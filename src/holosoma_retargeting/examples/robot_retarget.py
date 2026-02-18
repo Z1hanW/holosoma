@@ -432,52 +432,63 @@ def load_motion_data(
             smpl_scale = constants.ROBOT_HEIGHT / default_human_height
 
             parts = task_name.split("_")
-            if len(parts) > 2:
-                obj_name = parts[2].lower()
-                constants.OBJECT_NAME = obj_name
-                mesh_root = getattr(constants, "OBJECT_MESH_ROOT", "")
-                mesh_suffix = getattr(constants, "OBJECT_MESH_SUFFIX", "") or "_sq.obj"
-                mesh_path = None
-                if mesh_root:
-                    mesh_path = Path(mesh_root) / obj_name / f"{obj_name}{mesh_suffix}"
-                if mesh_path is None or not mesh_path.exists():
-                    fallback = Path("models") / obj_name / f"{obj_name}.obj"
-                    if fallback.exists():
-                        mesh_path = fallback
-                if mesh_path is None or not mesh_path.exists():
-                    raise FileNotFoundError(
-                        f"Missing BEHAVE mesh for {obj_name} with suffix '{mesh_suffix}'"
-                    )
+            if len(parts) <= 2:
+                raise ValueError(
+                    f"Cannot parse BEHAVE object name from task_name='{task_name}'. "
+                    "Expected format like 'Date03_Sub03_boxlarge'."
+                )
 
-                retarget_root = Path(__file__).resolve().parents[1]
-                generated_root = retarget_root / "models" / "behave_objects" / obj_name
-                mujoco_mesh_path = _ensure_mujoco_mesh(obj_name, mesh_path, generated_root, center_mesh=True)
-                constants.OBJECT_MESH_FILE = str(mujoco_mesh_path)
+            obj_name = parts[2].strip().lower()
+            if not obj_name:
+                raise ValueError(f"Parsed empty BEHAVE object name from task_name='{task_name}'")
 
-                urdf_path = generated_root / f"{obj_name}.urdf"
-                _write_object_urdf(obj_name, mujoco_mesh_path, urdf_path, mesh_scale=smpl_scale, overwrite=True)
-                constants.OBJECT_URDF_FILE = str(urdf_path)
-                constants.OBJECT_URDF_TEMPLATE = ""
+            constants.OBJECT_NAME = obj_name
+            mesh_root = getattr(constants, "OBJECT_MESH_ROOT", "")
+            mesh_suffix = getattr(constants, "OBJECT_MESH_SUFFIX", "") or "_f1000.ply"
+            if not mesh_root:
+                raise ValueError(
+                    "BEHAVE retargeting requires --task-config.object-mesh-root. "
+                    "No fallback to built-in models is allowed."
+                )
 
-                robot_urdf_path = Path(constants.ROBOT_URDF_FILE)
-                if not robot_urdf_path.is_absolute():
-                    candidate = retarget_root / robot_urdf_path
-                    if candidate.exists():
-                        robot_urdf_path = candidate
-                        constants.ROBOT_URDF_FILE = str(robot_urdf_path)
+            mesh_path = Path(mesh_root) / obj_name / f"{obj_name}{mesh_suffix}"
+            if not mesh_path.exists():
+                raise FileNotFoundError(
+                    f"Missing BEHAVE mesh for object='{obj_name}': {mesh_path}. "
+                    "No fallback mesh is used."
+                )
 
-                robot_xml_base = robot_urdf_path.with_suffix(".xml")
-                robot_xml_out = robot_urdf_path.parent / f"{robot_urdf_path.stem}_w_{obj_name}.xml"
-                if robot_xml_base.exists():
-                    _write_robot_object_xml(
-                        robot_xml_base,
-                        robot_xml_out,
-                        obj_name,
-                        mujoco_mesh_path,
-                        mesh_scale=smpl_scale,
-                        overwrite=True,
-                    )
-                    constants.SCENE_XML_FILE = str(robot_xml_out)
+            retarget_root = Path(__file__).resolve().parents[1]
+            generated_root = retarget_root / "models" / "behave_objects" / obj_name
+            mujoco_mesh_path = _ensure_mujoco_mesh(obj_name, mesh_path, generated_root, center_mesh=True)
+            constants.OBJECT_MESH_FILE = str(mujoco_mesh_path)
+
+            urdf_path = generated_root / f"{obj_name}.urdf"
+            _write_object_urdf(obj_name, mujoco_mesh_path, urdf_path, mesh_scale=smpl_scale, overwrite=True)
+            constants.OBJECT_URDF_FILE = str(urdf_path)
+            constants.OBJECT_URDF_TEMPLATE = ""
+
+            robot_urdf_path = Path(constants.ROBOT_URDF_FILE)
+            if not robot_urdf_path.is_absolute():
+                candidate = retarget_root / robot_urdf_path
+                if candidate.exists():
+                    robot_urdf_path = candidate
+                    constants.ROBOT_URDF_FILE = str(robot_urdf_path)
+
+            robot_xml_base = robot_urdf_path.with_suffix(".xml")
+            robot_xml_out = robot_urdf_path.parent / f"{robot_urdf_path.stem}_w_{obj_name}.xml"
+            if not robot_xml_base.exists():
+                raise FileNotFoundError(f"Missing robot xml base for BEHAVE object retargeting: {robot_xml_base}")
+
+            _write_robot_object_xml(
+                robot_xml_base,
+                robot_xml_out,
+                obj_name,
+                mujoco_mesh_path,
+                mesh_scale=smpl_scale,
+                overwrite=True,
+            )
+            constants.SCENE_XML_FILE = str(robot_xml_out)
         else:
             pt_path = data_path / f"{task_name}.pt"
             if not pt_path.exists():

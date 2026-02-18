@@ -10,9 +10,9 @@ set -euo pipefail
 #   src/holosoma_retargeting/converted_res/behave/*_mj_w_obj.npz
 #
 # Notes:
-# - Object is parsed per sequence from filename:
-#   Date03_Sub03_boxlarge_original.npz -> object_name=boxlarge
-# - Each file is converted with its own object XML/URDF (no shared fallback).
+# - Strict mode: object_name / object_urdf_path / scene_xml_file / object_mesh_scale
+#   must come from retarget output metadata.
+# - No filename-based parsing fallback is allowed.
 #
 # Optional overrides:
 #   INPUT_DIR=/abs/path/to/raw_npz_dir
@@ -37,27 +37,70 @@ USE_OMNIRETARGET_DATA=${USE_OMNIRETARGET_DATA:-0}
 CONVERTER="${RETARGET_ROOT}/data_conversion/convert_data_format_mj.py"
 
 case "${ROBOT}" in
-  g1) ROBOT_DOF=29 ;;
-  t1) ROBOT_DOF=23 ;;
+  g1|t1) ;;
   *)
     echo "[ERROR] Unsupported ROBOT='${ROBOT}'. Expected one of: g1, t1" >&2
     exit 1
     ;;
 esac
 
-parse_object_name() {
-  local seq_stem="$1"
-  local parts
-  IFS='_' read -r -a parts <<< "${seq_stem}"
-  if [[ ${#parts[@]} -lt 3 ]]; then
-    return 1
-  fi
-  local object_name="${parts[2]}"
-  object_name="${object_name,,}"
-  if [[ -z "${object_name}" ]]; then
-    return 1
-  fi
-  printf '%s' "${object_name}"
+extract_metadata() {
+  local npz_path="$1"
+  "${PYTHON_BIN}" - "${npz_path}" <<'PY'
+import sys
+from pathlib import Path
+
+import numpy as np
+
+npz_path = Path(sys.argv[1])
+if not npz_path.exists():
+    raise SystemExit(f"[ERROR] missing input file: {npz_path}")
+
+with np.load(str(npz_path), allow_pickle=True) as data:
+    required = ("object_name", "object_urdf_path", "scene_xml_file", "object_mesh_scale")
+    missing = [k for k in required if k not in data.files]
+    if missing:
+        raise SystemExit(
+            f"[ERROR] Missing strict metadata in {npz_path}: {missing}. "
+            "Please rerun retargeting with updated code."
+        )
+
+    def scalar_str(key: str) -> str:
+        arr = np.asarray(data[key])
+        if arr.size == 0:
+            return ""
+        if arr.shape == ():
+            val = arr.item()
+        else:
+            val = arr.reshape(-1)[0]
+            if hasattr(val, "item"):
+                val = val.item()
+        return str(val).strip()
+
+    object_name = scalar_str("object_name")
+    object_urdf_path = scalar_str("object_urdf_path")
+    scene_xml_file = scalar_str("scene_xml_file")
+
+    if not object_name:
+        raise SystemExit(f"[ERROR] Empty object_name in metadata: {npz_path}")
+    if not object_urdf_path:
+        raise SystemExit(f"[ERROR] Empty object_urdf_path in metadata: {npz_path}")
+    if not scene_xml_file:
+        raise SystemExit(f"[ERROR] Empty scene_xml_file in metadata: {npz_path}")
+
+    scale = np.asarray(data["object_mesh_scale"], dtype=np.float64).reshape(-1)
+    if scale.size == 1:
+        scale = np.repeat(scale, 3)
+    if scale.size != 3:
+        raise SystemExit(
+            f"[ERROR] Invalid object_mesh_scale in metadata: {npz_path}, shape={np.asarray(data['object_mesh_scale']).shape}"
+        )
+
+    print(object_name)
+    print(object_urdf_path)
+    print(scene_xml_file)
+    print(f"{scale[0]:.8g} {scale[1]:.8g} {scale[2]:.8g}")
+PY
 }
 
 if [[ ! -f "${CONVERTER}" ]]; then
@@ -86,7 +129,7 @@ fi
 
 echo "[INFO] Input dir : ${INPUT_DIR}"
 echo "[INFO] Output dir: ${OUTPUT_DIR}"
-echo "[INFO] Robot     : ${ROBOT} (${ROBOT_DOF} dof)"
+echo "[INFO] Robot     : ${ROBOT}"
 echo "[INFO] Converting ${#files[@]} files..."
 
 pushd "${RETARGET_ROOT}" >/dev/null
@@ -100,24 +143,36 @@ for input_path in "${files[@]}"; do
     stem="${base_name}"
   fi
 
-  if ! object_name=$(parse_object_name "${stem}"); then
-    echo "[ERROR] Cannot parse object name from sequence stem: ${stem}" >&2
+  metadata_tmp=$(mktemp)
+  if ! extract_metadata "${input_path}" >"${metadata_tmp}"; then
+    rm -f "${metadata_tmp}"
+    echo "[ERROR] Failed to extract strict metadata from: ${input_path}" >&2
+    exit 1
+  fi
+  metadata_line_count=$(wc -l <"${metadata_tmp}" | tr -d ' ')
+  if [[ "${metadata_line_count}" -ne 4 ]]; then
+    rm -f "${metadata_tmp}"
+    echo "[ERROR] Unexpected metadata format in ${input_path}: ${metadata_line_count} lines" >&2
     exit 1
   fi
 
-  object_urdf="${RETARGET_ROOT}/models/behave_objects/${object_name}/${object_name}.urdf"
-  scene_xml="${RETARGET_ROOT}/models/${ROBOT}/${ROBOT}_${ROBOT_DOF}dof_w_${object_name}.xml"
+  object_name=$(sed -n '1p' "${metadata_tmp}")
+  object_urdf=$(sed -n '2p' "${metadata_tmp}")
+  scene_xml=$(sed -n '3p' "${metadata_tmp}")
+  object_scale=$(sed -n '4p' "${metadata_tmp}")
+  rm -f "${metadata_tmp}"
+
   if [[ ! -f "${object_urdf}" ]]; then
-    echo "[ERROR] Missing per-object URDF for '${object_name}': ${object_urdf}" >&2
+    echo "[ERROR] Missing object URDF from metadata for '${object_name}': ${object_urdf}" >&2
     exit 1
   fi
   if [[ ! -f "${scene_xml}" ]]; then
-    echo "[ERROR] Missing per-object scene XML for '${object_name}': ${scene_xml}" >&2
+    echo "[ERROR] Missing scene XML from metadata for '${object_name}': ${scene_xml}" >&2
     exit 1
   fi
 
   output_path="${OUTPUT_DIR}/${stem}_mj_w_obj.npz"
-  echo "[INFO] Converting ${base_name}.npz (object=${object_name}) -> $(basename "${output_path}")"
+  echo "[INFO] Converting ${base_name}.npz (object=${object_name}, scale=${object_scale}) -> $(basename "${output_path}")"
 
   cmd=(
     "${PYTHON_BIN}" "data_conversion/convert_data_format_mj.py"
@@ -127,6 +182,7 @@ for input_path in "${files[@]}"; do
     --output_name "${output_path}"
     --data_format "${DATA_FORMAT}"
     --object_name "${object_name}"
+    --scene_xml_file "${scene_xml}"
     --has_dynamic_object
     --once
     --headless

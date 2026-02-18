@@ -740,6 +740,12 @@ class InteractionMeshRetargeter:
             human_joints=human_joint_motions,
             fps=30,
             cost=cost,
+            object_name=str(self.object_name) if self.object_name is not None else "",
+            object_urdf_path=str(self.object_model_path) if self.object_model_path is not None else "",
+            scene_xml_file=str(getattr(self.task_constants, "SCENE_XML_FILE", "") or ""),
+            robot_urdf_file=str(getattr(self.task_constants, "ROBOT_URDF_FILE", "") or ""),
+            object_mesh_path=str(self.object_mesh_path) if self.object_mesh_path is not None else "",
+            object_mesh_scale=np.asarray(self.object_mesh_scale, dtype=np.float32),
         )
         print("Saving results to path:", dest_res_path)
 
