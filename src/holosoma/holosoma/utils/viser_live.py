@@ -383,7 +383,11 @@ class ViserLiveViewer:
         self._scandots_point_size = 0.02
         self._scandots_color = np.array([255, 0, 0], dtype=np.uint8)
         self._scandots_warned = False
-        self._camera_ray_origin_warned = False
+        self._strict_camera_rays = os.environ.get("VISER_STRICT_CAMERA_RAYS", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         self._target_keypoints_handle = None
         self._target_keypoints_point_size = 0.03
         self._target_keypoints_color = np.array([128, 0, 128], dtype=np.uint8)
@@ -1662,11 +1666,20 @@ class ViserLiveViewer:
                         return_rays=True,
                     )
                 else:
-                    result = perception_mgr.get_camera_scandots_points(
-                        env_ids,
-                        include_misses=include_misses,
-                        return_rays=True,
-                    )
+                    if self._strict_camera_rays and output_mode == "camera_depth":
+                        if not hasattr(perception_mgr, "get_camera_depth_ray_samples"):
+                            raise RuntimeError("PerceptionManager does not expose get_camera_depth_ray_samples().")
+                        result = perception_mgr.get_camera_depth_ray_samples(
+                            env_ids,
+                            include_misses=include_misses,
+                            return_rays=True,
+                        )
+                    else:
+                        result = perception_mgr.get_camera_scandots_points(
+                            env_ids,
+                            include_misses=include_misses,
+                            return_rays=True,
+                        )
         except Exception as exc:
             if not self._scandots_warned:
                 logger.warning("Viser scandots disabled: {}", exc)
@@ -1677,6 +1690,10 @@ class ViserLiveViewer:
             if not self._scandots_warned:
                 if use_heightmap:
                     logger.warning("Viser scandots disabled: heightmap points are unavailable.")
+                elif self._strict_camera_rays and output_mode == "camera_depth":
+                    logger.warning(
+                        "Viser rays disabled: strict camera ray sync requested but active perception source has no ray samples."
+                    )
                 else:
                     logger.warning("Viser scandots disabled: perception is not using mesh_raycast_scandots.")
                 self._scandots_warned = True
@@ -1700,10 +1717,11 @@ class ViserLiveViewer:
             if self._scandots_rays_handle is not None:
                 self._scandots_rays_handle.visible = False
             return
-        points_env = points[0]
+        points_all_env = points[0]
         mask_env = mask[0] if mask is not None else None
+        points_env = points_all_env
         if not include_misses and mask_env is not None and mask_env.numel() > 0:
-            points_env = points_env[mask_env]
+            points_env = points_all_env[mask_env]
         if points_env.numel() == 0:
             if self._scandots_handle is not None:
                 self._scandots_handle.visible = False
@@ -1729,57 +1747,30 @@ class ViserLiveViewer:
 
         if ray_starts is None or ray_dirs is None:
             return
-        starts_env = ray_starts[0]
+        starts_all_env = ray_starts[0]
         dirs_env = ray_dirs[0]
-        if starts_env.numel() == 0 or dirs_env.numel() == 0:
+        if starts_all_env.numel() == 0 or dirs_env.numel() == 0:
             if self._scandots_rays_handle is not None:
                 self._scandots_rays_handle.visible = False
             return
-
-        # Camera-depth rays should all originate from a single POV.
-        # Force ray starts to the canonical camera origin from pose query.
-        if not use_heightmap:
-            cam_origin = None
-            try:
-                cam_pos_t, _cam_quat_t = perception_mgr.get_camera_pose(
-                    env_ids,
-                    apply_sensor_offset=True,
-                    apply_pitch=False,
-                )
-                if isinstance(cam_pos_t, torch.Tensor) and cam_pos_t.numel() >= 3:
-                    cam_origin = cam_pos_t[0:1]
-            except Exception:
-                cam_origin = None
-            if cam_origin is not None:
-                starts_env = cam_origin.expand_as(starts_env)
-
-        if not use_heightmap and starts_env.shape[0] > 1:
-            start0 = starts_env[0:1]
-            origin_spread = torch.linalg.norm(starts_env - start0, dim=-1)
-            max_spread = float(torch.max(origin_spread).item())
-            if max_spread > 1.0e-6:
-                if not self._camera_ray_origin_warned:
-                    logger.warning(
-                        "Camera ray starts are not single-POV (max spread {:.6f} m); collapsing to one origin in Viser.",
-                        max_spread,
-                    )
-                    self._camera_ray_origin_warned = True
-                starts_env = start0.expand_as(starts_env)
-
-        ray_len_env = os.environ.get("VISER_SCANDOTS_RAY_LEN")
-        try:
-            ray_len = float(ray_len_env) if ray_len_env is not None else 0.1
-        except ValueError:
-            ray_len = 0.1
-        if ray_len <= 0.0:
-            ray_len = 0.1
-
-        ends_env = starts_env + dirs_env * ray_len
-        if ray_hits_world is not None and mask_env is not None and mask_env.numel() > 0:
+        if include_misses:
+            ends_all_env = points_all_env
+        elif ray_hits_world is not None:
             hits_env = ray_hits_world[0]
-            if hits_env.numel() == starts_env.numel():
-                mask_env = mask_env.to(torch.bool)
-                ends_env = torch.where(mask_env.unsqueeze(-1), hits_env, ends_env)
+            ends_all_env = hits_env if hits_env.shape == starts_all_env.shape else points_all_env
+        else:
+            ends_all_env = points_all_env
+
+        starts_env = starts_all_env
+        ends_env = ends_all_env
+        if not include_misses and mask_env is not None and mask_env.numel() > 0:
+            mask_env = mask_env.to(torch.bool)
+            starts_env = starts_all_env[mask_env]
+            ends_env = ends_all_env[mask_env]
+        if starts_env.numel() == 0 or ends_env.numel() == 0:
+            if self._scandots_rays_handle is not None:
+                self._scandots_rays_handle.visible = False
+            return
 
         lines = torch.stack([starts_env, ends_env], dim=1).detach().cpu().numpy()
         if self._recenter:

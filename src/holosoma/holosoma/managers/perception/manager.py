@@ -291,6 +291,38 @@ class PerceptionManager:
         idx = env_ids if env_ids is not None else slice(None)
         return self._heightmap[idx]
 
+    def get_camera_depth_ray_samples(
+        self,
+        env_ids: torch.Tensor | None = None,
+        *,
+        include_misses: bool = False,
+        return_rays: bool = False,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        | None
+    ):
+        if not self.enabled or self.cfg.output_mode != "camera_depth":
+            return None
+
+        if self._uses_camera_raycast():
+            ray_starts, ray_dirs_world, ray_hits_world, hit_mask, _body_quat = self._cast_camera_raycast_rays(env_ids)
+        elif self._uses_camera_scandots():
+            ray_starts, ray_dirs_world, ray_hits_world, hit_mask, _body_quat = self._cast_camera_scandots_rays(env_ids)
+        else:
+            raise RuntimeError(
+                f"Camera depth ray samples require camera_source=mesh_raycast or mesh_raycast_scandots, got: {self._camera_source}"
+            )
+
+        if include_misses:
+            ranges = self._compute_camera_ray_distances(ray_starts, ray_dirs_world, ray_hits_world)
+            points = ray_starts + ray_dirs_world * ranges.unsqueeze(-1)
+        else:
+            points = ray_hits_world
+        if return_rays:
+            return points, hit_mask, ray_starts, ray_dirs_world, ray_hits_world
+        return points, hit_mask
+
     def get_camera_scandots_points(
         self,
         env_ids: torch.Tensor | None = None,
@@ -1106,7 +1138,9 @@ class PerceptionManager:
 
         return ray_starts, ray_dirs_world, ray_hits_world, body_pos, body_quat, offset_world
 
-    def _compute_camera_raycast_depth(self, env_ids: torch.Tensor | None) -> torch.Tensor:
+    def _cast_camera_raycast_rays(
+        self, env_ids: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if self._warp_mesh is None:
             raise RuntimeError("PerceptionManager.setup() must be called before update().")
         if self._camera_ray_dirs_base is None:
@@ -1127,6 +1161,11 @@ class PerceptionManager:
         warp_mesh = self._get_camera_warp_mesh(env_ids)
         ray_hits_world = warp_utils.ray_cast(ray_starts, ray_dirs_world, warp_mesh)
         hit_mask = torch.isfinite(ray_hits_world).all(dim=-1)
+        return ray_starts, ray_dirs_world, ray_hits_world, hit_mask, body_quat
+
+    def _compute_camera_raycast_depth(self, env_ids: torch.Tensor | None) -> torch.Tensor:
+        ray_starts, ray_dirs_world, ray_hits_world, hit_mask, body_quat = self._cast_camera_raycast_rays(env_ids)
+        num_envs = body_quat.shape[0]
         ranges = self._compute_camera_ray_distances(ray_starts, ray_dirs_world, ray_hits_world)
         depth = self._project_ranges_to_camera_depth(ranges, ray_dirs_world, body_quat, hit_mask)
         depth = depth.view(num_envs, self._camera_height, self._camera_width)
