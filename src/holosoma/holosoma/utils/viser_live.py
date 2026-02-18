@@ -1764,9 +1764,9 @@ class ViserLiveViewer:
         starts_env = starts_all_env
         ends_env = ends_all_env
         if not include_misses and mask_env is not None and mask_env.numel() > 0:
+            # Keep line count fixed frame-to-frame to avoid stale line artifacts in the viewer.
             mask_env = mask_env.to(torch.bool)
-            starts_env = starts_all_env[mask_env]
-            ends_env = ends_all_env[mask_env]
+            ends_env = torch.where(mask_env.unsqueeze(-1), ends_all_env, starts_all_env)
         if starts_env.numel() == 0 or ends_env.numel() == 0:
             if self._scandots_rays_handle is not None:
                 self._scandots_rays_handle.visible = False
