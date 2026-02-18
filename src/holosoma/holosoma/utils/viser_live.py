@@ -401,6 +401,16 @@ class ViserLiveViewer:
             "true",
             "yes",
         )
+        self._disable_perception_frustum = os.environ.get("VISER_DISABLE_PERCEPTION_FRUSTUM", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        self._show_perception_frustum_default = os.environ.get("VISER_SHOW_PERCEPTION_FRUSTUM", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
         perception_image_mode = os.environ.get("VISER_PERCEPTION_IMAGE_MODE", "auto").strip().lower()
         if perception_image_mode not in ("auto", "depth", "rgb"):
             perception_image_mode = "auto"
@@ -938,16 +948,22 @@ class ViserLiveViewer:
         self._perception_last_mode = str(output_mode)
 
         with self._server.gui.add_folder("Perception"):
+            show_image_hint = "Display perception image in GUI"
+            if not self._disable_perception_frustum:
+                show_image_hint = "Display perception image (depth or rendered RGB) in GUI and frustum"
             self._perception_show_depth_cb = self._server.gui.add_checkbox(
                 "Show Image",
                 initial_value=True,
-                hint="Display perception image (depth or rendered RGB) in GUI and frustum",
+                hint=show_image_hint,
             )
-            self._perception_show_frustum_cb = self._server.gui.add_checkbox(
-                "Show Frustum",
-                initial_value=True,
-                hint="Display the perception camera frustum in 3D",
-            )
+            if not self._disable_perception_frustum:
+                self._perception_show_frustum_cb = self._server.gui.add_checkbox(
+                    "Show Frustum",
+                    initial_value=self._show_perception_frustum_default,
+                    hint="Display the perception camera frustum in 3D",
+                )
+            else:
+                self._perception_show_frustum_cb = None
             self._perception_show_points_cb = self._server.gui.add_checkbox(
                 "Show Perception Points",
                 initial_value=self._scandots_enabled,
@@ -978,10 +994,11 @@ class ViserLiveViewer:
             if not bool(self._perception_show_depth_cb.value):
                 self._perception_depth_handle.image = np.zeros((height, width, 3), dtype=np.uint8)
 
-        @self._perception_show_frustum_cb.on_update
-        def _(_evt) -> None:
-            if self._perception_frustum is not None:
-                self._perception_frustum.visible = bool(self._perception_show_frustum_cb.value)
+        if self._perception_show_frustum_cb is not None:
+            @self._perception_show_frustum_cb.on_update
+            def _(_evt) -> None:
+                if self._perception_frustum is not None:
+                    self._perception_frustum.visible = bool(self._perception_show_frustum_cb.value)
 
         @self._perception_show_points_cb.on_update
         def _(_evt) -> None:
@@ -1014,21 +1031,24 @@ class ViserLiveViewer:
         self._perception_last_aspect = aspect
 
         self._perception_frame = self._server.scene.add_frame(self._scene_path("/perception_camera"), show_axes=False)
-        self._perception_frustum = self._server.scene.add_camera_frustum(
-            self._scene_path("/perception_frustum"),
-            fov=fov,
-            aspect=aspect,
-            scale=0.3,
-            line_width=2.0,
-            color=(0, 0, 0),
-            wxyz=(1.0, 0.0, 0.0, 0.0),
-            position=(0.0, 0.0, 0.0),
-            image=np.zeros((height, width, 3), dtype=np.uint8),
-            format="jpeg",
-            jpeg_quality=90,
-        )
-        if self._perception_show_frustum_cb is not None:
-            self._perception_frustum.visible = bool(self._perception_show_frustum_cb.value)
+        if not self._disable_perception_frustum:
+            self._perception_frustum = self._server.scene.add_camera_frustum(
+                self._scene_path("/perception_frustum"),
+                fov=fov,
+                aspect=aspect,
+                scale=0.3,
+                line_width=2.0,
+                color=(0, 0, 0),
+                wxyz=(1.0, 0.0, 0.0, 0.0),
+                position=(0.0, 0.0, 0.0),
+                image=np.zeros((height, width, 3), dtype=np.uint8),
+                format="jpeg",
+                jpeg_quality=90,
+            )
+            if self._perception_show_frustum_cb is not None:
+                self._perception_frustum.visible = bool(self._perception_show_frustum_cb.value)
+        else:
+            self._perception_frustum = None
     def _setup_controls(self) -> None:
         if self._server is None:
             return
