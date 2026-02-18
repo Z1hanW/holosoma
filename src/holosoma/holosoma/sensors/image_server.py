@@ -547,6 +547,13 @@ class ImageServer:
                 self.image_visualizer.visualize(
                     all_frames,
                 )
+                # Also show the processed depth that is actually sent to the policy
+                # delayed_image: [N, 1, H, W] in [-0.5, 0.5]
+                panels = [delayed_image[i, 0] for i in range(delayed_image.shape[0])]
+                combined = np.concatenate(panels, axis=1)
+                display = ((combined + 0.5) * 255.0).astype(np.uint8)
+                cv2.imshow("Processed Depth (policy input)", display)
+                cv2.waitKey(1)
 
             if step_count % 50 == 0:
                 print(f"[Image Server] Rate limiter stats: {rate_limiter.get_stats()}")
