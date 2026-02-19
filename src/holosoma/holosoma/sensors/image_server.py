@@ -1,7 +1,7 @@
 import time
 import threading
+import random
 from queue import Queue
-from collections import deque
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -179,9 +179,13 @@ class ImageSaver:
                     break
                 
                 raw_images, step_count, timestamp = item
-                rgb_by_camera = raw_images.get("rgb", {})
-                names = list(rgb_by_camera.keys())
                 channels = [channel for channel in ("rgb", "depth", "depth_gum") if raw_images.get(channel)]
+                # Derive camera names from the first available channel
+                names = []
+                for ch in channels:
+                    names = list(raw_images[ch].keys())
+                    if names:
+                        break
                 self._ensure_camera_dirs(names, channels)
 
                 for cam_name in names:
@@ -370,16 +374,27 @@ class ImageServer:
         # Initialize depth prediction models
         self.gum = GUM(cfg=self.cfg.gum_config, dtype=torch.bfloat16) if self.cfg.enable_gum_depth_prediction else None
         
-        # Initialize delay buffer for frame delay
-        self.num_delay_frames = self.cfg.num_delay_frames
-        if self.num_delay_frames > 0:
-            # Buffer needs to hold num_delay_frames + 1 frames to store current + delayed frames
-            # When buffer is full, buffer[0] contains the frame from num_delay_frames steps ago
-            # Buffer stores tuples of (step_count, full_image) for debugging
-            self.delay_buffer: deque[tuple[int, np.ndarray]] = deque(maxlen=self.num_delay_frames + 1)
-            print(f"[Image Server] Initialized delay buffer with {self.num_delay_frames} delay frames (will send frames from {self.num_delay_frames} steps ago)")
+        # Latency buffer config (matches old sim2sim ring-buffer approach)
+        if isinstance(self.cfg.latency_frame, (tuple, list)) and len(self.cfg.latency_frame) == 2:
+            self.latency_frame_range = self.cfg.latency_frame
+            self.latency_frame = None
         else:
-            self.delay_buffer = None
+            self.latency_frame_range = None
+            self.latency_frame = self.cfg.latency_frame
+        self.buffer_len = self.cfg.buffer_len
+
+        if self.latency_frame_range is not None:
+            assert self.latency_frame_range[1] < self.buffer_len, \
+                f"Max latency frame ({self.latency_frame_range[1]}) must be less than buffer length ({self.buffer_len})"
+        elif self.latency_frame is not None and self.latency_frame > 0:
+            assert self.latency_frame < self.buffer_len, \
+                f"Latency frame ({self.latency_frame}) must be less than buffer length ({self.buffer_len})"
+
+        # Pre-filled ring buffer: [buffer_len, num_cameras, 1, H, W]
+        self._frame_buffer = np.zeros(
+            (self.buffer_len, self.camera_wrapper.num_cameras, 1, self.cfg.resized_height, self.cfg.resized_width),
+            dtype=np.float32,
+        )
         
         # Initialize profilers for capturing and depth prediction
         self.capture_profiler = TimeProfiler()
@@ -495,6 +510,10 @@ class ImageServer:
             with self.capture_profiler.measure():
                 all_frames: FrameBundle = dict(self.camera_wrapper.get_frames())
 
+            # Strip RGB frames when RGB is disabled to avoid downstream use
+            if not self.cfg.enable_rgb:
+                all_frames.pop("rgb", None)
+
             if self.cfg.enable_gum_depth_prediction:
                 with self.gum_profiler.measure():
                     all_frames["depth_gum"] = self._predict_gum_depth(all_frames)
@@ -506,27 +525,15 @@ class ImageServer:
             # [C, H, W] -> [N, C, H, W] N is the number of cameras; front camera is first, back camera is second
             full_depth_for_policy = np.stack(depth_for_policy, axis=0)
 
-            # 2.5. Add to delay buffer and get delayed image
-            if self.delay_buffer is not None:
-                # Note: When buffer is full (maxlen reached), deque automatically removes
-                # the oldest item (leftmost) to make room for the new frame
-                self.delay_buffer.append((step_count, full_depth_for_policy.copy()))
-                
-                # Wait until buffer is full before sending delayed frames
-                if len(self.delay_buffer) <= self.num_delay_frames:
-                    # Buffer not full yet, skip this frame
-                    rate_limiter.sleep()
-                    step_count += 1
-                    continue
-                
-                # Retrieve the delayed frame (from num_delay_frames steps ago)
-                # buffer[0] always contains the oldest frame (num_delay_frames steps ago)
-                # because deque with maxlen automatically maintains the size
-                delayed_step_count, delayed_image = self.delay_buffer[0]  # Oldest frame in buffer
-                # print delayed_step_count for debugging purposes
+            # 2.5. Shift ring buffer and select delayed frame
+            self._frame_buffer[:-1] = self._frame_buffer[1:]
+            self._frame_buffer[-1] = full_depth_for_policy.astype(np.float32)
+
+            if self.latency_frame_range is not None:
+                current_latency = random.randint(self.latency_frame_range[0], self.latency_frame_range[1])
             else:
-                # No delay, use current frame
-                delayed_step_count, delayed_image = step_count, full_depth_for_policy
+                current_latency = self.latency_frame
+            delayed_image = self._frame_buffer[-1 - current_latency]
 
             # 3. copy to shared memory for policy
             try:
@@ -576,7 +583,8 @@ if __name__ == "__main__":
             rs_cam_cfg = RealSenseCameraConfig(enable_ir_stereo=True)
             rs_cfg = RealSenseCamerasConfig(terms={"d435i_depth": rs_cam_cfg})
         else:
-            rs_cfg = RealSenseCamerasConfig()
+            rs_cam_cfg = RealSenseCameraConfig(enable_color=cfg.enable_rgb)
+            rs_cfg = RealSenseCamerasConfig(terms={"d435i_depth": rs_cam_cfg})
         camera_wrapper = RealSenseCamerasWrapper(rs_cfg)
     else:
         # Default: ZED cameras
