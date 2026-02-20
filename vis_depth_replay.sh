@@ -245,16 +245,16 @@ cmd=(
   --simulator.config.debug_viz=True
   --simulator.config.contact_force_viz=False
   --simulator.config.scene.env_spacing=0.0
-  --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_FILE}"
-  --command.setup_terms.motion_command.params.motion_config.use_adaptive_timesteps_sampler "${MOTION_USE_ADAPTIVE_TIMESTEP_SAMPLER}"
-  --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob "${MOTION_START_AT_ZERO_PROB}"
-  --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend "${MOTION_ENABLE_DEFAULT_POSE_PREPEND}"
-  --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s "${MOTION_DEFAULT_POSE_PREPEND_DURATION_S}"
-  --command.setup_terms.motion_command.params.motion_config.enable_default_pose_append "${MOTION_ENABLE_DEFAULT_POSE_APPEND}"
-  --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s "${MOTION_DEFAULT_POSE_APPEND_DURATION_S}"
-  --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale "${MOTION_INIT_NOISE_SCALE}"
-  --command.setup_terms.motion_command.params.motion_config.align_motion_to_init_yaw "${MOTION_ALIGN_TO_INIT_YAW}"
-  --command.setup_terms.motion_command.params.motion_config.pair_terrain_with_motion "${MOTION_PAIR_TERRAIN_WITH_MOTION}"
+  "--command.setup-terms.motion-command.params.motion-config.motion-file=${MOTION_FILE}"
+  "--command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler=${MOTION_USE_ADAPTIVE_TIMESTEP_SAMPLER}"
+  "--command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob=${MOTION_START_AT_ZERO_PROB}"
+  "--command.setup-terms.motion-command.params.motion-config.enable-default-pose-prepend=${MOTION_ENABLE_DEFAULT_POSE_PREPEND}"
+  "--command.setup-terms.motion-command.params.motion-config.default-pose-prepend-duration-s=${MOTION_DEFAULT_POSE_PREPEND_DURATION_S}"
+  "--command.setup-terms.motion-command.params.motion-config.enable-default-pose-append=${MOTION_ENABLE_DEFAULT_POSE_APPEND}"
+  "--command.setup-terms.motion-command.params.motion-config.default-pose-append-duration-s=${MOTION_DEFAULT_POSE_APPEND_DURATION_S}"
+  "--command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.overall-noise-scale=${MOTION_INIT_NOISE_SCALE}"
+  "--command.setup-terms.motion-command.params.motion-config.align-motion-to-init-yaw=${MOTION_ALIGN_TO_INIT_YAW}"
+  "--command.setup-terms.motion-command.params.motion-config.pair-terrain-with-motion=${MOTION_PAIR_TERRAIN_WITH_MOTION}"
   --perception.camera_width="${IMAGE_WIDTH}"
   --perception.camera_height="${IMAGE_HEIGHT}"
   --perception.camera_vfov_deg="${CAMERA_VFOV_DEG}"
@@ -268,7 +268,7 @@ cmd=(
 )
 
 if [[ -n "${MOTION_CLIP_NAME}" ]]; then
-  cmd+=(--command.setup_terms.motion_command.params.motion_config.motion_clip_name "${MOTION_CLIP_NAME}")
+  cmd+=("--command.setup-terms.motion-command.params.motion-config.motion-clip-name=${MOTION_CLIP_NAME}")
 fi
 
 if [[ -n "${TERRAIN_OBJ}" ]]; then
@@ -282,12 +282,12 @@ fi
 
 if [[ "${DISABLE_RANDOMIZATION_AND_NOISE}" != "1" ]]; then
   cmd+=(
-    --randomization.setup_terms.setup_camera_raycast_randomization.params.enabled=False
-    --randomization.reset_terms.randomize_camera_raycast.params.enabled=False
-    --randomization.setup_terms.push_randomizer_state.params.enabled=False
-    --randomization.setup_terms.setup_dof_pos_bias.params.enabled=False
-    --randomization.reset_terms.randomize_dof_state.params.randomize_dof_pos_bias=False
-    --randomization.reset_terms.randomize_dof_state.params.joint_pos_bias_range="[0.0,0.0]"
+    --randomization.setup-terms.setup-camera-raycast-randomization.params.enabled=False
+    --randomization.reset-terms.randomize-camera-raycast.params.enabled=False
+    --randomization.setup-terms.push-randomizer-state.params.enabled=False
+    --randomization.setup-terms.setup-dof-pos-bias.params.enabled=False
+    --randomization.reset-terms.randomize-dof-state.params.randomize-dof-pos-bias=False
+    --randomization.reset-terms.randomize-dof-state.params.joint-pos-bias-range="[0.0,0.0]"
   )
 fi
 
@@ -296,16 +296,16 @@ cmd+=("$@")
 if [[ "${DISABLE_RANDOMIZATION_AND_NOISE}" == "1" ]]; then
   # Enforce at the end so user-provided overrides in "$@" cannot re-enable.
   cmd+=(
+    --command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler=False
+    --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob=1.0
+    --command.setup-terms.motion-command.params.motion-config.enable-default-pose-prepend=False
+    --command.setup-terms.motion-command.params.motion-config.default-pose-prepend-duration-s=0.0
+    --command.setup-terms.motion-command.params.motion-config.enable-default-pose-append=False
+    --command.setup-terms.motion-command.params.motion-config.default-pose-append-duration-s=0.0
+    --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.overall-noise-scale=0.0
+    --command.setup-terms.motion-command.params.motion-config.align-motion-to-init-yaw=False
+    --command.setup-terms.motion-command.params.motion-config.pair-terrain-with-motion=False
     randomization:none
-    --command.setup_terms.motion_command.params.motion_config.use_adaptive_timesteps_sampler False
-    --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob 1.0
-    --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend False
-    --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s 0.0
-    --command.setup_terms.motion_command.params.motion_config.enable_default_pose_append False
-    --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s 0.0
-    --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale 0.0
-    --command.setup_terms.motion_command.params.motion_config.align_motion_to_init_yaw False
-    --command.setup_terms.motion_command.params.motion_config.pair_terrain_with_motion False
   )
 fi
 "${cmd[@]}"
