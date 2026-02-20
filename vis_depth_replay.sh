@@ -56,6 +56,7 @@ MOTION_DEFAULT_POSE_APPEND_DURATION_S=${MOTION_DEFAULT_POSE_APPEND_DURATION_S:-0
 MOTION_INIT_NOISE_SCALE=${MOTION_INIT_NOISE_SCALE:-0.0}
 MOTION_ALIGN_TO_INIT_YAW=${MOTION_ALIGN_TO_INIT_YAW:-False}
 MOTION_PAIR_TERRAIN_WITH_MOTION=${MOTION_PAIR_TERRAIN_WITH_MOTION:-False}
+DISABLE_RANDOMIZATION_AND_NOISE=${DISABLE_RANDOMIZATION_AND_NOISE:-1}
 DEBUG_MOTION_TERRAIN=${DEBUG_MOTION_TERRAIN:-1}
 STRICT_OPTIONS=${STRICT_OPTIONS:-1}
 VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI:-0}
@@ -73,6 +74,19 @@ VISER_PERCEPTION_FLIP_VERTICAL=${VISER_PERCEPTION_FLIP_VERTICAL:-0}
 VISER_DEPTH_COLORMAP=${VISER_DEPTH_COLORMAP:-fixed}
 
 VISER_PORT=${VISER_PORT:-$((RANDOM % 8976 + 1024))}
+
+if [[ "${DISABLE_RANDOMIZATION_AND_NOISE}" == "1" ]]; then
+  # Force deterministic playback: no randomization manager and no motion/perception noise knobs.
+  MOTION_USE_ADAPTIVE_TIMESTEP_SAMPLER="False"
+  MOTION_START_AT_ZERO_PROB="1.0"
+  MOTION_ENABLE_DEFAULT_POSE_PREPEND="False"
+  MOTION_DEFAULT_POSE_PREPEND_DURATION_S="0.0"
+  MOTION_ENABLE_DEFAULT_POSE_APPEND="False"
+  MOTION_DEFAULT_POSE_APPEND_DURATION_S="0.0"
+  MOTION_INIT_NOISE_SCALE="0.0"
+  MOTION_ALIGN_TO_INIT_YAW="False"
+  MOTION_PAIR_TERRAIN_WITH_MOTION="False"
+fi
 
 # In some Linux headless/non-interactive setups, desktop URL launchers may try
 # to invoke zenity and emit noisy "zenity: not found" errors. If zenity is not
@@ -162,6 +176,7 @@ echo "[INFO] VISER_FAITHFUL_MODE=${VISER_FAITHFUL_MODE}"
 echo "[INFO] VISER_PERCEPTION_IMAGE_FORMAT=${VISER_PERCEPTION_IMAGE_FORMAT}"
 echo "[INFO] VISER_PERCEPTION_FLIP_VERTICAL=${VISER_PERCEPTION_FLIP_VERTICAL}"
 echo "[INFO] VISER_DEPTH_COLORMAP=${VISER_DEPTH_COLORMAP}"
+echo "[INFO] DISABLE_RANDOMIZATION_AND_NOISE=${DISABLE_RANDOMIZATION_AND_NOISE}"
 echo "[INFO] MOTION_DEBUG use_adaptive=${MOTION_USE_ADAPTIVE_TIMESTEP_SAMPLER} start_at_zero_prob=${MOTION_START_AT_ZERO_PROB} prepend=${MOTION_ENABLE_DEFAULT_POSE_PREPEND}/${MOTION_DEFAULT_POSE_PREPEND_DURATION_S}s append=${MOTION_ENABLE_DEFAULT_POSE_APPEND}/${MOTION_DEFAULT_POSE_APPEND_DURATION_S}s init_noise=${MOTION_INIT_NOISE_SCALE} align_yaw=${MOTION_ALIGN_TO_INIT_YAW} pair_terrain=${MOTION_PAIR_TERRAIN_WITH_MOTION}"
 
 if [[ "${DEBUG_MOTION_TERRAIN}" == "1" ]]; then
@@ -240,12 +255,6 @@ cmd=(
   --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale "${MOTION_INIT_NOISE_SCALE}"
   --command.setup_terms.motion_command.params.motion_config.align_motion_to_init_yaw "${MOTION_ALIGN_TO_INIT_YAW}"
   --command.setup_terms.motion_command.params.motion_config.pair_terrain_with_motion "${MOTION_PAIR_TERRAIN_WITH_MOTION}"
-  --randomization.setup_terms.setup_camera_raycast_randomization.params.enabled=False
-  --randomization.reset_terms.randomize_camera_raycast.params.enabled=False
-  --randomization.setup_terms.push_randomizer_state.params.enabled=False
-  --randomization.setup_terms.setup_dof_pos_bias.params.enabled=False
-  --randomization.reset_terms.randomize_dof_state.params.randomize_dof_pos_bias=False
-  --randomization.reset_terms.randomize_dof_state.params.joint_pos_bias_range="[0.0,0.0]"
   --perception.camera_width="${IMAGE_WIDTH}"
   --perception.camera_height="${IMAGE_HEIGHT}"
   --perception.camera_vfov_deg="${CAMERA_VFOV_DEG}"
@@ -271,5 +280,32 @@ if [[ -n "${TERRAIN_OBJ}" ]]; then
   )
 fi
 
+if [[ "${DISABLE_RANDOMIZATION_AND_NOISE}" != "1" ]]; then
+  cmd+=(
+    --randomization.setup_terms.setup_camera_raycast_randomization.params.enabled=False
+    --randomization.reset_terms.randomize_camera_raycast.params.enabled=False
+    --randomization.setup_terms.push_randomizer_state.params.enabled=False
+    --randomization.setup_terms.setup_dof_pos_bias.params.enabled=False
+    --randomization.reset_terms.randomize_dof_state.params.randomize_dof_pos_bias=False
+    --randomization.reset_terms.randomize_dof_state.params.joint_pos_bias_range="[0.0,0.0]"
+  )
+fi
+
 cmd+=("$@")
+
+if [[ "${DISABLE_RANDOMIZATION_AND_NOISE}" == "1" ]]; then
+  # Enforce at the end so user-provided overrides in "$@" cannot re-enable.
+  cmd+=(
+    randomization:none
+    --command.setup_terms.motion_command.params.motion_config.use_adaptive_timesteps_sampler False
+    --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob 1.0
+    --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend False
+    --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s 0.0
+    --command.setup_terms.motion_command.params.motion_config.enable_default_pose_append False
+    --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s 0.0
+    --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale 0.0
+    --command.setup_terms.motion_command.params.motion_config.align_motion_to_init_yaw False
+    --command.setup_terms.motion_command.params.motion_config.pair_terrain_with_motion False
+  )
+fi
 "${cmd[@]}"

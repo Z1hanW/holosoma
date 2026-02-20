@@ -412,6 +412,7 @@ class ViserLiveViewer:
         self._scandots_point_size = 0.02
         self._scandots_color = np.array([255, 0, 0], dtype=np.uint8)
         self._scandots_warned = False
+        self._ray_direction_stats_suffix = ""
         self._strict_camera_rays = os.environ.get("VISER_STRICT_CAMERA_RAYS", "0").lower() in (
             "1",
             "true",
@@ -1708,6 +1709,7 @@ class ViserLiveViewer:
         if not self._server or not self._scandots_enabled:
             return
 
+        self._ray_direction_stats_suffix = ""
         perception_mgr = getattr(self._env, "perception_manager", None)
         if perception_mgr is None:
             if not self._scandots_warned:
@@ -1823,6 +1825,51 @@ class ViserLiveViewer:
             if self._scandots_rays_handle is not None:
                 self._scandots_rays_handle.visible = False
             return
+
+        if output_mode == "camera_depth":
+            try:
+                dirs_norm = dirs_env / torch.norm(dirs_env, dim=-1, keepdim=True).clamp(min=1.0e-6)
+
+                use_frame_quat = bool(getattr(perception_mgr, "_use_camera_frame_quat", False))
+                cam_pose = perception_mgr.get_camera_pose(
+                    env_ids,
+                    apply_sensor_offset=True,
+                    apply_pitch=True,
+                )
+                cam_quat = cam_pose[1][0:1]
+                forward_local = torch.tensor(
+                    [[0.0, 0.0, -1.0]] if use_frame_quat else [[1.0, 0.0, 0.0]],
+                    device=cam_quat.device,
+                    dtype=cam_quat.dtype,
+                )
+                cam_forward = quat_apply(cam_quat, forward_local, w_last=True)[0]
+                cam_forward = cam_forward / torch.norm(cam_forward).clamp(min=1.0e-6)
+                dots_cam = torch.sum(dirs_norm * cam_forward.unsqueeze(0), dim=-1)
+                back_cam = int((dots_cam <= 0.0).sum().item())
+                total = int(dots_cam.numel())
+                min_dot_cam = float(dots_cam.min().item())
+
+                root_suffix = ""
+                root_quat = getattr(self._env, "base_quat", None)
+                if isinstance(root_quat, torch.Tensor) and root_quat.ndim >= 2 and self._env_id < root_quat.shape[0]:
+                    root_quat_env = root_quat[self._env_id : self._env_id + 1]
+                    root_forward_local = torch.tensor(
+                        [[1.0, 0.0, 0.0]],
+                        device=root_quat_env.device,
+                        dtype=root_quat_env.dtype,
+                    )
+                    root_forward = quat_apply(root_quat_env, root_forward_local, w_last=True)[0]
+                    root_forward = root_forward / torch.norm(root_forward).clamp(min=1.0e-6)
+                    dots_root = torch.sum(dirs_norm * root_forward.unsqueeze(0), dim=-1)
+                    back_root = int((dots_root <= 0.0).sum().item())
+                    min_dot_root = float(dots_root.min().item())
+                    root_suffix = f" | rays_back_root={back_root}/{total} min_dot_root={min_dot_root:.3f}"
+
+                self._ray_direction_stats_suffix = (
+                    f" | rays_back_cam={back_cam}/{total} min_dot_cam={min_dot_cam:.3f}" + root_suffix
+                )
+            except Exception:
+                self._ray_direction_stats_suffix = ""
         if include_misses:
             ends_all_env = points_all_env
         elif ray_hits_world is not None:
@@ -2006,8 +2053,12 @@ class ViserLiveViewer:
             if self._perception_depth_handle is not None:
                 self._perception_depth_handle.image = display_img
         if self._perception_stats is not None:
+            direction_stats_suffix = self._ray_direction_stats_suffix if output_mode == "camera_depth" else ""
             if self._disable_perception_image_pipeline:
-                self._perception_stats.content = "Perception image pipeline disabled (VISER_DISABLE_PERCEPTION_IMAGE_PIPELINE=1)"
+                self._perception_stats.content = (
+                    "Perception image pipeline disabled (VISER_DISABLE_PERCEPTION_IMAGE_PIPELINE=1)"
+                    f"{direction_stats_suffix}"
+                )
             else:
                 min_d, max_d, count = _valid_depth_stats(depth_map, near, far)
                 frame_crc = _depth_crc32(depth_map, far)
@@ -2018,6 +2069,7 @@ class ViserLiveViewer:
                         f" | map={self._depth_colormap}"
                         f" | flip_v={int(self._perception_flip_vertical)}"
                         f" | tx={self._perception_transport_format}"
+                        f"{direction_stats_suffix}"
                     )
                 else:
                     total = depth_map.size
@@ -2027,6 +2079,7 @@ class ViserLiveViewer:
                         f" | map={self._depth_colormap}"
                         f" | flip_v={int(self._perception_flip_vertical)}"
                         f" | tx={self._perception_transport_format}"
+                        f"{direction_stats_suffix}"
                     )
 
         if cam_pos is None or cam_quat_xyzw is None:
