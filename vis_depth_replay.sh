@@ -16,6 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 EXP=${EXP:-"g1-29dof-wbt-videomimic-mlp"}
+COMMAND_PRESET=${COMMAND_PRESET:-"g1-29dof-wbt"}
 MOTION_FILE=${MOTION_FILE:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/far_robot_mj.npz"}
 MOTION_CLIP_NAME=${MOTION_CLIP_NAME:-""}
 TERRAIN_OBJ=${TERRAIN_OBJ:-"${SCRIPT_DIR}/src/holosoma_retargeting/demo_data/far_robot/far_robot/stairs.obj"}
@@ -114,6 +115,10 @@ if [[ "${STRICT_OPTIONS}" == "1" ]]; then
     echo "[ERROR] STRICT_OPTIONS=1 requires EXP=g1-29dof-wbt-videomimic-mlp, got: ${EXP}" >&2
     exit 1
   fi
+  if [[ "${COMMAND_PRESET}" != "g1-29dof-wbt" ]]; then
+    echo "[ERROR] STRICT_OPTIONS=1 requires COMMAND_PRESET=g1-29dof-wbt, got: ${COMMAND_PRESET}" >&2
+    exit 1
+  fi
   if [[ "${MOTION_FILE}" != *"/converted_res/"* ]]; then
     echo "[ERROR] STRICT_OPTIONS=1 requires MOTION_FILE under converted_res, got: ${MOTION_FILE}" >&2
     exit 1
@@ -153,6 +158,7 @@ if [[ "${STRICT_OPTIONS}" == "1" ]]; then
 fi
 
 echo "[INFO] EXP=exp:${EXP}"
+echo "[INFO] COMMAND_PRESET=command:${COMMAND_PRESET}"
 echo "[INFO] MOTION_FILE=${MOTION_FILE}"
 echo "[INFO] TERRAIN_OBJ=${TERRAIN_OBJ}"
 if [[ -n "${MOTION_CLIP_NAME}" ]]; then
@@ -233,6 +239,7 @@ export VISER_DEPTH_COLORMAP
 cmd=(
   python src/holosoma/holosoma/replay.py
   "exp:${EXP}"
+  "command:${COMMAND_PRESET}"
   "perception:${PERCEPTION_PRESET}"
   --training.seed="${SEED}"
   --training.headless="${HEADLESS}"
