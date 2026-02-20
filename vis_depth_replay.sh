@@ -287,31 +287,11 @@ if [[ -n "${TERRAIN_OBJ}" ]]; then
   )
 fi
 
-if [[ "${DISABLE_RANDOMIZATION_AND_NOISE}" != "1" ]]; then
-  cmd+=(
-    --randomization.setup_terms.setup_camera_raycast_randomization.params.enabled False
-    --randomization.reset_terms.randomize_camera_raycast.params.enabled False
-    --randomization.setup_terms.push_randomizer_state.params.enabled False
-    --randomization.setup_terms.setup_dof_pos_bias.params.enabled False
-    --randomization.reset_terms.randomize_dof_state.params.randomize_dof_pos_bias False
-    --randomization.reset_terms.randomize_dof_state.params.joint_pos_bias_range "[0.0,0.0]"
-  )
-fi
-
 cmd+=("$@")
 
 if [[ "${DISABLE_RANDOMIZATION_AND_NOISE}" == "1" ]]; then
   # Enforce at the end so user-provided overrides in "$@" cannot re-enable.
   cmd+=(
-    --command.setup_terms.motion_command.params.motion_config.use_adaptive_timesteps_sampler False
-    --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob 1.0
-    --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend False
-    --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s 0.0
-    --command.setup_terms.motion_command.params.motion_config.enable_default_pose_append False
-    --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s 0.0
-    --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale 0.0
-    --command.setup_terms.motion_command.params.motion_config.align_motion_to_init_yaw False
-    --command.setup_terms.motion_command.params.motion_config.pair_terrain_with_motion False
     randomization:none
   )
 fi
