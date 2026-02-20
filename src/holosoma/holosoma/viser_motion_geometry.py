@@ -191,7 +191,14 @@ def _load_motion_qpos(
     root_quat_xyzw = motion.body_quat_w[:, 0].cpu().numpy()
     root_quat_wxyz = root_quat_xyzw[:, [3, 0, 1, 2]]
 
-    qpos = np.concatenate([root_pos, root_quat_wxyz, joint_pos], axis=1).astype(np.float32, copy=False)
+    qpos_parts: list[np.ndarray] = [root_pos, root_quat_wxyz, joint_pos]
+    if getattr(motion, "has_object", False):
+        object_pos = motion.object_pos_w.cpu().numpy()
+        object_quat_xyzw = motion.object_quat_w.cpu().numpy()
+        object_quat_wxyz = object_quat_xyzw[:, [3, 0, 1, 2]]
+        qpos_parts.extend([object_pos, object_quat_wxyz])
+
+    qpos = np.concatenate(qpos_parts, axis=1).astype(np.float32, copy=False)
     fps = int(motion.fps) if hasattr(motion, "fps") else 30
     return qpos, fps
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -128,6 +129,14 @@ def _valid_depth_stats(depth: np.ndarray, near: float, far: float) -> tuple[floa
     return float(depth_valid.min()), float(depth_valid.max()), int(depth_valid.size)
 
 
+def _depth_crc32(depth: np.ndarray, far: float) -> str:
+    depth = np.asarray(depth, dtype=np.float32)
+    missing_fill = np.float32(far + 1.0)
+    payload = np.nan_to_num(depth, nan=missing_fill, posinf=missing_fill, neginf=missing_fill)
+    checksum = zlib.crc32(payload.tobytes()) & 0xFFFFFFFF
+    return f"{checksum:08x}"
+
+
 def _depth_to_rgb(depth: np.ndarray, near: float, far: float) -> np.ndarray:
     depth = np.asarray(depth, dtype=np.float32)
     valid = np.isfinite(depth)
@@ -142,6 +151,21 @@ def _depth_to_rgb(depth: np.ndarray, near: float, far: float) -> np.ndarray:
     max_d = float(depth_valid.max())
     denom = max(max_d - min_d, 1.0e-6)
     norm = (depth_clipped - min_d) / denom
+    norm = np.where(valid, norm, 0.0)
+    colored = _apply_colormap(norm)
+    colored[~valid] = 0
+    return colored
+
+
+def _depth_to_rgb_fixed_range(depth: np.ndarray, near: float, far: float) -> np.ndarray:
+    depth = np.asarray(depth, dtype=np.float32)
+    valid = np.isfinite(depth)
+    valid &= depth >= near
+    valid &= depth < (far - 1.0e-6)
+    if far <= near + 1.0e-6:
+        far = near + 1.0
+    depth_clipped = np.clip(depth, near, far)
+    norm = (depth_clipped - near) / max(far - near, 1.0e-6)
     norm = np.where(valid, norm, 0.0)
     colored = _apply_colormap(norm)
     colored[~valid] = 0
@@ -368,6 +392,11 @@ class ViserLiveViewer:
     def __init__(self, env: Any) -> None:
         self._env = env
         self._enabled = bool(getattr(env.training_config, "enable_viser", False))
+        self._faithful_mode = os.environ.get("VISER_FAITHFUL_MODE", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         self._server = None
         self._vr = None
         self._vo = None
@@ -421,10 +450,46 @@ class ViserLiveViewer:
             "true",
             "yes",
         )
+        perception_transport_format = os.environ.get("VISER_PERCEPTION_IMAGE_FORMAT", "auto").strip().lower()
+        if perception_transport_format not in ("auto", "png", "jpeg"):
+            perception_transport_format = "auto"
+        if self._faithful_mode and "VISER_PERCEPTION_IMAGE_FORMAT" not in os.environ:
+            perception_transport_format = "png"
+        self._perception_transport_format = perception_transport_format
+
+        perception_jpeg_quality_raw = os.environ.get("VISER_PERCEPTION_JPEG_QUALITY", "90").strip()
+        try:
+            perception_jpeg_quality = int(perception_jpeg_quality_raw)
+        except Exception:
+            perception_jpeg_quality = 90
+        if perception_jpeg_quality < 1 or perception_jpeg_quality > 100:
+            perception_jpeg_quality = 90
+        self._perception_jpeg_quality = perception_jpeg_quality
+
+        self._perception_flip_vertical = os.environ.get("VISER_PERCEPTION_FLIP_VERTICAL", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+        if self._faithful_mode and "VISER_PERCEPTION_FLIP_VERTICAL" not in os.environ:
+            self._perception_flip_vertical = False
+
+        depth_colormap = os.environ.get("VISER_DEPTH_COLORMAP", "dynamic").strip().lower()
+        if depth_colormap not in ("dynamic", "fixed"):
+            depth_colormap = "dynamic"
+        if self._faithful_mode and "VISER_DEPTH_COLORMAP" not in os.environ:
+            depth_colormap = "fixed"
+        self._depth_colormap = depth_colormap
+
         perception_image_mode = os.environ.get("VISER_PERCEPTION_IMAGE_MODE", "auto").strip().lower()
         if perception_image_mode not in ("auto", "depth", "rgb"):
             perception_image_mode = "auto"
+        if self._faithful_mode and "VISER_PERCEPTION_IMAGE_MODE" not in os.environ:
+            perception_image_mode = "depth"
         self._perception_image_mode = perception_image_mode
+        if self._faithful_mode:
+            self._strict_camera_rays = True
+            self._disable_perception_image_pipeline = False
         self._play_control = None
         self._step_button = None
         self._reset_button = None
@@ -514,6 +579,9 @@ class ViserLiveViewer:
             update_hz = sim_hz
         elif update_hz <= 0 and sim_hz:
             update_hz = sim_hz
+        if self._faithful_mode:
+            update_hz = 0.0
+            force_dt = False
 
         self._update_period = 0.0 if update_hz <= 0 else 1.0 / update_hz
         self._force_dt = force_dt and self._update_period > 0
@@ -995,6 +1063,8 @@ class ViserLiveViewer:
             self._perception_depth_handle = self._server.gui.add_image(
                 np.zeros((height, width, 3), dtype=np.uint8),
                 label="Perception Image",
+                format=self._perception_transport_format,
+                jpeg_quality=self._perception_jpeg_quality,
             )
             self._perception_stats = self._server.gui.add_markdown("Depth range (valid): n/a")
 
@@ -1053,8 +1123,8 @@ class ViserLiveViewer:
                 wxyz=(1.0, 0.0, 0.0, 0.0),
                 position=(0.0, 0.0, 0.0),
                 image=np.zeros((height, width, 3), dtype=np.uint8),
-                format="jpeg",
-                jpeg_quality=90,
+                format=self._perception_transport_format,
+                jpeg_quality=self._perception_jpeg_quality,
             )
             if self._perception_show_frustum_cb is not None:
                 self._perception_frustum.visible = bool(self._perception_show_frustum_cb.value)
@@ -1818,7 +1888,8 @@ class ViserLiveViewer:
                     depth = None
                 if isinstance(depth, torch.Tensor) and depth.numel() > 0:
                     depth_map = depth[self._env_id].detach().cpu().numpy()
-                    depth_map = np.flipud(depth_map)
+                    if self._perception_flip_vertical:
+                        depth_map = np.flipud(depth_map)
             try:
                 cam_pos_t, cam_quat_t = perception_mgr.get_camera_pose(
                     env_ids,
@@ -1886,7 +1957,10 @@ class ViserLiveViewer:
         if depth_map is None:
             return
 
-        depth_img = _depth_to_rgb(depth_map, near, far)
+        if self._depth_colormap == "fixed":
+            depth_img = _depth_to_rgb_fixed_range(depth_map, near, far)
+        else:
+            depth_img = _depth_to_rgb(depth_map, near, far)
         display_img = depth_img
         image_mode = "depth" if self._disable_perception_image_pipeline else self._perception_image_mode
         source_mode = str(getattr(cfg, "camera_source", ""))
@@ -1900,7 +1974,9 @@ class ViserLiveViewer:
             rgb_img = np.asarray(rgb)
             if rgb_img.ndim != 3 or rgb_img.shape[-1] < 3:
                 raise RuntimeError(f"Rendered RGB image has invalid shape: {tuple(rgb_img.shape)}")
-            rgb_img = np.flipud(rgb_img[:, :, :3])
+            rgb_img = rgb_img[:, :, :3]
+            if self._perception_flip_vertical:
+                rgb_img = np.flipud(rgb_img)
             if rgb_img.dtype != np.uint8:
                 rgb_img = np.clip(rgb_img, 0, 255).astype(np.uint8)
             display_img = rgb_img
@@ -1912,7 +1988,9 @@ class ViserLiveViewer:
             if rgb is not None:
                 rgb_img = np.asarray(rgb)
                 if rgb_img.ndim == 3 and rgb_img.shape[-1] >= 3:
-                    rgb_img = np.flipud(rgb_img[:, :, :3])
+                    rgb_img = rgb_img[:, :, :3]
+                    if self._perception_flip_vertical:
+                        rgb_img = np.flipud(rgb_img)
                     if rgb_img.dtype != np.uint8:
                         rgb_img = np.clip(rgb_img, 0, 255).astype(np.uint8)
                     display_img = rgb_img
@@ -1932,12 +2010,23 @@ class ViserLiveViewer:
                 self._perception_stats.content = "Perception image pipeline disabled (VISER_DISABLE_PERCEPTION_IMAGE_PIPELINE=1)"
             else:
                 min_d, max_d, count = _valid_depth_stats(depth_map, near, far)
+                frame_crc = _depth_crc32(depth_map, far)
                 if count == 0:
-                    self._perception_stats.content = "Depth range (valid): n/a (no hits)"
+                    self._perception_stats.content = (
+                        "Depth range (valid): n/a (no hits)"
+                        f" | crc32={frame_crc}"
+                        f" | map={self._depth_colormap}"
+                        f" | flip_v={int(self._perception_flip_vertical)}"
+                        f" | tx={self._perception_transport_format}"
+                    )
                 else:
                     total = depth_map.size
                     self._perception_stats.content = (
                         f"Depth range (valid): {min_d:.3f} - {max_d:.3f} m | valid: {count}/{total}"
+                        f" | crc32={frame_crc}"
+                        f" | map={self._depth_colormap}"
+                        f" | flip_v={int(self._perception_flip_vertical)}"
+                        f" | tx={self._perception_transport_format}"
                     )
 
         if cam_pos is None or cam_quat_xyzw is None:
