@@ -8,7 +8,7 @@ if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
 fi
 
 MOTION_DIR="${MOTION_DIR:-src/holosoma_retargeting/converted_res/robot_only/lafan}"
-PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i_rendered}"
+PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
 
 NPROC="${NPROC:-1}"
 MASTER_PORT="${MASTER_PORT:-$((29500 + RANDOM % 1000))}"

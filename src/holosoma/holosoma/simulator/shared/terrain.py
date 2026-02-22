@@ -289,6 +289,15 @@ class Terrain(TerrainInterface):
     def mesh(self) -> trimesh.Trimesh:
         return self._mesh
 
+    @property
+    def env_origin_grid(self) -> np.ndarray:
+        """Return per-tile environment origins as a (rows, cols, 3) array."""
+        if self._type == "load_obj":
+            return self._get_load_obj_env_origin_grid().copy()
+        if hasattr(self, "_env_origins"):
+            return np.asarray(self._env_origins, dtype=np.float32).copy()
+        raise RuntimeError("Terrain origins are unavailable for the current terrain type.")
+
     def _get_load_obj_env_origin_grid(self) -> np.ndarray:
         grid = getattr(self, "_load_obj_origin_grid", None)
         if grid is None:

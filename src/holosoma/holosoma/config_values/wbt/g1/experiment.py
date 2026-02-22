@@ -295,7 +295,7 @@ g1_29dof_wbt_videomimic_mlp_w_gru = replace(
         g1_29dof_wbt_videomimic_mlp.training,
         name="w_gru",
     ),
-    perception=perception.camera_depth_d435i_scandots_light,
+    perception=perception.camera_depth_d435i,
 )
 
 g1_29dof_wbt_fast_sac = ExperimentConfig(
@@ -393,6 +393,39 @@ g1_29dof_wbt_w_object_generalist = replace(
     command=command.g1_29dof_wbt_command_w_object_generalist,
 )
 
+_w_object_distill_torso_box_actor_inputs = ["actor_obs_torso", "actor_obs_box"]
+_w_object_distill_torso_box_critic_inputs = ["critic_obs"]
+
+_w_object_distill_torso_box_module_dict = PPOModuleDictConfig(
+    actor=replace(
+        g1_29dof_wbt_w_object_generalist.algo.config.module_dict.actor,
+        type="MLP",
+        input_dim=_w_object_distill_torso_box_actor_inputs,
+    ),
+    critic=replace(
+        g1_29dof_wbt_w_object_generalist.algo.config.module_dict.critic,
+        type="MLP",
+        input_dim=_w_object_distill_torso_box_critic_inputs,
+    ),
+)
+
+g1_29dof_wbt_w_object_distill_torso_box = replace(
+    g1_29dof_wbt_w_object_generalist,
+    training=replace(
+        g1_29dof_wbt_w_object_generalist.training,
+        name="g1_29dof_wbt_w_object_distill_torso_box",
+    ),
+    observation=observation.g1_29dof_wbt_observation_w_object_distill_torso_box,
+    termination=termination.g1_29dof_wbt_termination_distill,
+    algo=replace(
+        g1_29dof_wbt_w_object_generalist.algo,
+        config=replace(
+            g1_29dof_wbt_w_object_generalist.algo.config,
+            module_dict=_w_object_distill_torso_box_module_dict,
+        ),
+    ),
+)
+
 g1_29dof_wbt_fast_sac_w_object = replace(
     g1_29dof_wbt_fast_sac,
     command=command.g1_29dof_wbt_command_w_object,
@@ -424,6 +457,7 @@ __all__ = [
     "g1_29dof_wbt_fast_sac_w_object",
     "g1_29dof_wbt_w_object",
     "g1_29dof_wbt_w_object_generalist",
+    "g1_29dof_wbt_w_object_distill_torso_box",
 ]
 
 """

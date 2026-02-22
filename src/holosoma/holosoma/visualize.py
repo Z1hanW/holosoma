@@ -32,7 +32,7 @@ Replay (motion) example:
 
 Perception example:
   python -m holosoma.visualize perception exp:g1-29dof-wbt-videomimic-mlp \\
-    # perception:camera_depth_d435i_rendered
+    # perception:camera_depth_d435i
 
 Physics rollout example:
   python -m holosoma.visualize physics \\

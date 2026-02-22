@@ -1,0 +1,26 @@
+<?xml version="1.0" ?>
+<robot name="boxsmall">
+  <dynamics damping="0.5" friction="0.9"/>
+  <link name="boxsmall_link">
+    <inertial>
+      <mass value="0.1"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.002" ixy="0" ixz="0" iyy="0.002" iyz="0" izz="0.002"/>
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <mesh filename="boxsmall.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+      </geometry>
+      <material name="mat">
+        <color rgba="0.7 0.8 0.9 0.7"/>
+      </material>
+    </visual>
+    <collision name="boxsmall">
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <mesh filename="boxsmall.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>

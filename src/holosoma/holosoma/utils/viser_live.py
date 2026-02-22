@@ -551,6 +551,9 @@ class ViserLiveViewer:
         self._scene_prefix = ""
         self._global_root = None
         self._global_frame_wxyz: tuple[float, float, float, float] | None = None
+        self._root_body_index: int | None = None
+        self._root_body_name: str | None = None
+        self._root_pose_debug_logged = False
 
         if not self._enabled:
             return
@@ -563,6 +566,7 @@ class ViserLiveViewer:
         if self._env_id < 0 or self._env_id >= getattr(env, "num_envs", 1):
             logger.warning("Viser env_id {} out of range; defaulting to 0.", self._env_id)
             self._env_id = 0
+        self._resolve_root_body_index()
 
         update_hz = float(getattr(cfg, "viser_update_hz", 30.0))
         sync_to_sim = bool(getattr(cfg, "viser_sync_to_sim", True))
@@ -654,6 +658,24 @@ class ViserLiveViewer:
         if not path.startswith("/"):
             path = "/" + path
         return f"{self._scene_prefix}{path}"
+
+    def _resolve_root_body_index(self) -> None:
+        body_names = getattr(self._env, "body_names", None)
+        if body_names is None:
+            return
+        try:
+            names = [str(name) for name in body_names]
+        except Exception:
+            return
+        if not names:
+            return
+        for candidate in ("pelvis", "base_link", "torso_link"):
+            if candidate in names:
+                self._root_body_index = int(names.index(candidate))
+                self._root_body_name = candidate
+                return
+        self._root_body_index = 0
+        self._root_body_name = names[0]
 
     def _set_sim_cfg(self, field: str, value) -> None:
         sim_cfg = getattr(self._env.simulator, "simulator_config", None)
@@ -1000,16 +1022,16 @@ class ViserLiveViewer:
         cfg = getattr(perception_mgr, "cfg", None)
         ray_height = float(getattr(cfg, "ray_start_height", 0.6)) if cfg is not None else 0.6
         if grid_x <= 1 or grid_y <= 1 or interval_x <= 0 or interval_y <= 0 or ray_height <= 0:
-            return 90.0, 1.0
+            return float(np.deg2rad(90.0)), 1.0
         half_x = 0.5 * (grid_x - 1) * interval_x
         half_y = 0.5 * (grid_y - 1) * interval_y
         if half_y <= 0:
-            return 90.0, 1.0
+            return float(np.deg2rad(90.0)), 1.0
         fov = float(np.degrees(2.0 * np.arctan(half_y / ray_height)))
         aspect = float(half_x / half_y) if half_y > 0 else 1.0
         fov = float(np.clip(fov, 5.0, 175.0))
         aspect = float(max(aspect, 0.1))
-        return fov, aspect
+        return float(np.deg2rad(fov)), aspect
 
     def _setup_perception_controls(self) -> None:
         if self._server is None:
@@ -1107,7 +1129,8 @@ class ViserLiveViewer:
         if output_mode == "heightmap":
             fov, aspect = self._resolve_heightmap_fov_aspect(perception_mgr)
         else:
-            fov = float(getattr(cfg, "camera_vfov_deg", 90.0))
+            # viser frustum expects vertical FOV in radians.
+            fov = float(np.deg2rad(float(getattr(cfg, "camera_vfov_deg", 90.0))))
             aspect = float(width / max(1, height))
         self._perception_last_fov = fov
         self._perception_last_aspect = aspect
@@ -1653,20 +1676,57 @@ class ViserLiveViewer:
         return np.asarray(origin, dtype=np.float32)
 
     def _get_root_state_wxyz(self) -> tuple[np.ndarray | None, np.ndarray | None]:
-        root_states = getattr(self._env.simulator, "robot_root_states", None)
+        sim = self._env.simulator
+        root_states = getattr(sim, "robot_root_states", None)
+
+        rb_pos_all = getattr(sim, "_rigid_body_pos", None)
+        rb_quat_all = getattr(sim, "_rigid_body_rot", None)
+        rb_idx = self._root_body_index
+        if (
+            rb_idx is not None
+            and isinstance(rb_pos_all, torch.Tensor)
+            and isinstance(rb_quat_all, torch.Tensor)
+            and rb_pos_all.ndim >= 3
+            and rb_quat_all.ndim >= 3
+            and self._env_id < rb_pos_all.shape[0]
+            and self._env_id < rb_quat_all.shape[0]
+            and rb_idx < rb_pos_all.shape[1]
+            and rb_idx < rb_quat_all.shape[1]
+        ):
+            pos = rb_pos_all[self._env_id, rb_idx]
+            quat_xyzw = rb_quat_all[self._env_id, rb_idx]
+            quat_wxyz = quat_xyzw[[3, 0, 1, 2]]
+
+            if not self._root_pose_debug_logged and root_states is not None:
+                try:
+                    root = root_states[self._env_id]
+                    root_pos = root[0:3]
+                    root_quat_xyzw = root[3:7]
+                    pos_err = float(torch.linalg.norm(pos - root_pos).item())
+                    q0 = quat_xyzw / torch.norm(quat_xyzw).clamp(min=1.0e-6)
+                    q1 = root_quat_xyzw / torch.norm(root_quat_xyzw).clamp(min=1.0e-6)
+                    dot = torch.clamp(torch.abs(torch.sum(q0 * q1)), min=0.0, max=1.0)
+                    ang = float(2.0 * torch.rad2deg(torch.arccos(dot)).item())
+                    logger.info(
+                        "Viser root pose uses rigid body '{}' (idx={}): delta_vs_root_state pos={:.4f}m ang={:.2f}deg",
+                        self._root_body_name or "unknown",
+                        int(rb_idx),
+                        pos_err,
+                        ang,
+                    )
+                except Exception:
+                    pass
+                self._root_pose_debug_logged = True
+
+            return pos.detach().cpu().numpy(), quat_wxyz.detach().cpu().numpy()
+
         if root_states is None:
             return None, None
 
-        if hasattr(root_states, "tensor_wxyz"):
-            root = root_states.tensor_wxyz[self._env_id]
-            pos = root[0:3]
-            quat_wxyz = root[3:7]
-        else:
-            root = root_states[self._env_id]
-            pos = root[0:3]
-            quat_xyzw = root[3:7]
-            quat_wxyz = quat_xyzw[[3, 0, 1, 2]]
-
+        root = root_states[self._env_id]
+        pos = root[0:3]
+        quat_xyzw = root[3:7]
+        quat_wxyz = quat_xyzw[[3, 0, 1, 2]]
         return pos.detach().cpu().numpy(), quat_wxyz.detach().cpu().numpy()
 
     def _get_dof_pos(self) -> np.ndarray | None:
@@ -1881,9 +1941,10 @@ class ViserLiveViewer:
         starts_env = starts_all_env
         ends_env = ends_all_env
         if not include_misses and mask_env is not None and mask_env.numel() > 0:
-            # Keep line count fixed frame-to-frame to avoid stale line artifacts in the viewer.
+            # Render only true hits; don't draw zero-length "miss" lines at the ray origin.
             mask_env = mask_env.to(torch.bool)
-            ends_env = torch.where(mask_env.unsqueeze(-1), ends_all_env, starts_all_env)
+            starts_env = starts_all_env[mask_env]
+            ends_env = ends_all_env[mask_env]
         if starts_env.numel() == 0 or ends_env.numel() == 0:
             if self._scandots_rays_handle is not None:
                 self._scandots_rays_handle.visible = False
@@ -1908,6 +1969,91 @@ class ViserLiveViewer:
             except Exception:
                 pass
 
+    def _depth_map_from_strict_camera_rays(
+        self,
+        perception_mgr: Any,
+        env_ids: torch.Tensor,
+        *,
+        near: float,
+        far: float,
+    ) -> tuple[np.ndarray | None, str]:
+        """Rebuild a depth map from the exact strict ray samples shown in Viser."""
+        if not self._strict_camera_rays:
+            return None, ""
+        if not hasattr(perception_mgr, "get_camera_depth_ray_samples"):
+            return None, ""
+
+        try:
+            with torch.no_grad():
+                result = perception_mgr.get_camera_depth_ray_samples(
+                    env_ids,
+                    include_misses=False,
+                    return_rays=True,
+                )
+        except Exception:
+            return None, ""
+
+        if not isinstance(result, tuple) or len(result) < 5:
+            return None, ""
+
+        _points, hit_mask, ray_starts, ray_dirs_world, ray_hits_world = result
+        if ray_starts is None or ray_dirs_world is None or ray_hits_world is None:
+            return None, ""
+        if ray_starts.numel() == 0 or ray_dirs_world.numel() == 0 or ray_hits_world.numel() == 0:
+            return None, ""
+
+        starts = ray_starts[0]
+        dirs = ray_dirs_world[0]
+        hits = ray_hits_world[0]
+        if starts.shape != dirs.shape or hits.shape != dirs.shape:
+            return None, ""
+
+        if hit_mask is not None and hit_mask.numel() > 0:
+            mask = hit_mask[0].to(torch.bool)
+        else:
+            mask = torch.isfinite(hits).all(dim=-1)
+
+        far_val = float(far)
+        if far_val <= 0.0:
+            return None, ""
+
+        dirs_norm = dirs / torch.norm(dirs, dim=-1, keepdim=True).clamp(min=1.0e-6)
+        delta = hits - starts
+        ranges = torch.sum(delta * dirs_norm, dim=-1)
+        ranges = torch.where(torch.isfinite(ranges), ranges, torch.full_like(ranges, far_val))
+        ranges = torch.clamp(ranges, min=0.0, max=far_val)
+
+        width = int(getattr(perception_mgr, "_camera_width", 0) or 0)
+        height = int(getattr(perception_mgr, "_camera_height", 0) or 0)
+        if width > 0 and height > 0 and (width * height) == int(dirs_norm.shape[0]):
+            center_idx = (height // 2) * width + (width // 2)
+        else:
+            center_idx = int(dirs_norm.shape[0] // 2)
+        center_dir = dirs_norm[center_idx]
+        center_dir = center_dir / torch.norm(center_dir).clamp(min=1.0e-6)
+
+        # Match warp_sensors depth projection multiplier: clamp dot(rd, rd_principal) to [eps, 1].
+        dots = torch.sum(dirs_norm * center_dir.unsqueeze(0), dim=-1)
+        dots = torch.clamp(dots, min=1.0e-6, max=1.0)
+
+        depth = ranges * dots
+        depth = torch.where(mask, depth, torch.full_like(depth, far_val))
+        depth = torch.clamp(depth, min=0.0, max=far_val)
+
+        if width <= 0 or height <= 0 or (width * height) != int(depth.numel()):
+            return None, ""
+
+        valid = torch.isfinite(depth)
+        valid &= depth >= float(near)
+        valid &= depth < (far_val - 1.0e-6)
+        strict_suffix = (
+            f" | strict_hits={int(mask.sum().item())}/{int(depth.numel())}"
+            f" strict_valid={int(valid.sum().item())}/{int(depth.numel())}"
+        )
+
+        depth_map = depth.view(height, width).detach().cpu().numpy()
+        return depth_map, strict_suffix
+
     def _update_perception_visuals(self, offset: np.ndarray) -> None:
         if not self._server or not self._perception_enabled:
             return
@@ -1922,10 +2068,13 @@ class ViserLiveViewer:
         env_ids = torch.tensor([self._env_id], device=self._env.device, dtype=torch.long)
         depth_map = None
         near = float(getattr(cfg, "camera_near", 0.0))
-        far = float(getattr(cfg, "max_distance", 10.0))
+        max_distance = float(getattr(cfg, "max_distance", 10.0))
+        camera_far = float(getattr(cfg, "camera_far", max_distance))
+        far = float(min(max_distance, camera_far))
         cam_pos = None
         cam_quat_xyzw = None
         cam_body_quat_xyzw = None
+        strict_depth_suffix = ""
 
         if output_mode == "camera_depth":
             if not self._disable_perception_image_pipeline:
@@ -1937,6 +2086,14 @@ class ViserLiveViewer:
                     depth_map = depth[self._env_id].detach().cpu().numpy()
                     if self._perception_flip_vertical:
                         depth_map = np.flipud(depth_map)
+                strict_depth_map, strict_depth_suffix = self._depth_map_from_strict_camera_rays(
+                    perception_mgr,
+                    env_ids,
+                    near=near,
+                    far=far,
+                )
+                if strict_depth_map is not None:
+                    depth_map = strict_depth_map
             try:
                 cam_pos_t, cam_quat_t = perception_mgr.get_camera_pose(
                     env_ids,
@@ -2053,7 +2210,9 @@ class ViserLiveViewer:
             if self._perception_depth_handle is not None:
                 self._perception_depth_handle.image = display_img
         if self._perception_stats is not None:
-            direction_stats_suffix = self._ray_direction_stats_suffix if output_mode == "camera_depth" else ""
+            direction_stats_suffix = ""
+            if output_mode == "camera_depth":
+                direction_stats_suffix = f"{self._ray_direction_stats_suffix}{strict_depth_suffix}"
             if self._disable_perception_image_pipeline:
                 self._perception_stats.content = (
                     "Perception image pipeline disabled (VISER_DISABLE_PERCEPTION_IMAGE_PIPELINE=1)"
@@ -2119,7 +2278,8 @@ class ViserLiveViewer:
         if output_mode == "heightmap":
             fov, aspect = self._resolve_heightmap_fov_aspect(perception_mgr)
         else:
-            fov = float(getattr(cfg, "camera_vfov_deg", 90.0))
+            # viser frustum expects vertical FOV in radians.
+            fov = float(np.deg2rad(float(getattr(cfg, "camera_vfov_deg", 90.0))))
             aspect = float(display_shape[1] / max(1, display_shape[0]))
 
         if fov != self._perception_last_fov:

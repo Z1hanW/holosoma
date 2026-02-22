@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Perception-aware VideoMimic tracking with scandots + time-GRU.
 
-PERCEPTION_PRESET=${1:-${PERCEPTION_PRESET:-camera_depth_d435i_scandots_light}}
+PERCEPTION_PRESET=${1:-${PERCEPTION_PRESET:-camera_depth_d435i}}
 STAGE1_CKPT=${2:-${STAGE1_CKPT:-}}
 IMAGE_WIDTH=${IMAGE_WIDTH:-48}
 IMAGE_HEIGHT=${IMAGE_HEIGHT:-27}

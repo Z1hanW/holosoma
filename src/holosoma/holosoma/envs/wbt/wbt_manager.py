@@ -245,6 +245,9 @@ class WholeBodyTrackingManager(BaseTask):
         self.simulator.sim.forward()
         self.simulator.sim.render()
         self.simulator.refresh_sim_tensors()
+        # Keep replay perception outputs in sync with the kinematic state written above.
+        # Without this call, ray debug overlays can update while camera depth maps remain stale.
+        self._pre_compute_observations_callback()
         if hasattr(self, "_viser_live"):
             self._viser_live.record_step()
         self._draw_scandots_in_viewer()

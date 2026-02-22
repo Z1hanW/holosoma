@@ -866,6 +866,7 @@ class MotionCommand(CommandTermBase):
             self.motion_cfg = MotionConfig(**cfg.params["motion_config"])
         self.init_pose_cfg: NoiseToInitialPoseConfig = self.motion_cfg.noise_to_initial_pose
         self._clip_terrain_offsets: torch.Tensor | None = None
+        self._clip_terrain_offsets_by_row: torch.Tensor | None = None
         self._terrain_row_ids: torch.Tensor | None = None
         self._terrain_row_stride: float = 0.0
         self._terrain_row_count: int = 0
@@ -1327,11 +1328,14 @@ class MotionCommand(CommandTermBase):
 
         clip_ids = self.clip_ids if env_ids is None else self.clip_ids[env_ids]
         clip_offsets = self._clip_terrain_offsets[clip_ids]
-        if self._terrain_row_ids is not None and self._terrain_row_stride > 0.0:
+        if self._terrain_row_ids is not None:
             row_ids = self._terrain_row_ids if env_ids is None else self._terrain_row_ids[env_ids]
-            row_offsets = torch.zeros_like(clip_offsets)
-            row_offsets[:, 1] = row_ids.to(row_offsets.dtype) * self._terrain_row_stride
-            clip_offsets = clip_offsets + row_offsets
+            if self._clip_terrain_offsets_by_row is not None:
+                clip_offsets = self._clip_terrain_offsets_by_row[row_ids, clip_ids]
+            elif self._terrain_row_stride > 0.0:
+                row_offsets = torch.zeros_like(clip_offsets)
+                row_offsets[:, 1] = row_ids.to(row_offsets.dtype) * self._terrain_row_stride
+                clip_offsets = clip_offsets + row_offsets
 
         if self.motion_cfg.pair_terrain_with_motion:
             return clip_offsets
@@ -1660,6 +1664,10 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     def _configure_motion_terrain_pairs(self) -> None:
         self._clip_terrain_offsets = None
+        self._clip_terrain_offsets_by_row = None
+        self._terrain_row_ids = None
+        self._terrain_row_stride = 0.0
+        self._terrain_row_count = 0
         if not self.motion_cfg.pair_terrain_with_motion:
             return
 
@@ -1670,49 +1678,95 @@ class MotionCommand(CommandTermBase):
         tile_stride = getattr(terrain, "obj_tile_stride", None) if terrain is not None else None
         tile_rows = int(getattr(terrain, "obj_tile_rows", 0) or 0) if terrain is not None else 0
 
-        if not tile_names or tile_offsets is None or tile_stride is None or tile_rows <= 0:
+        if tile_names and tile_offsets is not None and tile_stride is not None and tile_rows > 0:
+            if len(set(tile_names)) != len(tile_names):
+                raise ValueError("Duplicate OBJ tile names detected; stems must be unique for pairing.")
+
+            tile_offsets = np.asarray(tile_offsets, dtype=np.float32)
+            if tile_offsets.shape[0] != len(tile_names):
+                raise ValueError("OBJ tile offsets length does not match tile names.")
+            stride = np.asarray(tile_stride, dtype=np.float32).reshape(-1)
+            if stride.size < 2:
+                raise ValueError("OBJ tile stride must provide at least X/Y spacing.")
+
+            name_to_idx = {name: idx for idx, name in enumerate(tile_names)}
+            missing = [clip_id for clip_id in self.motion.clip_ids if clip_id not in name_to_idx]
+            if missing:
+                raise ValueError(f"Missing terrain OBJ for clips: {missing}")
+
+            clip_offsets = np.stack([tile_offsets[name_to_idx[clip_id]] for clip_id in self.motion.clip_ids], axis=0)
+            row_offsets = np.repeat(clip_offsets[None, :, :], repeats=max(1, tile_rows), axis=0)
+            if row_offsets.shape[0] > 1:
+                row_offsets[:, :, 1] += np.arange(row_offsets.shape[0], dtype=np.float32)[:, None] * float(stride[1])
+            self._clip_terrain_offsets = torch.tensor(clip_offsets, device=self.device, dtype=torch.float32)
+            self._clip_terrain_offsets_by_row = torch.tensor(row_offsets, device=self.device, dtype=torch.float32)
+            self._terrain_row_stride = float(stride[1])
+            self._terrain_row_count = max(1, tile_rows)
+            self._terrain_row_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+
+            capacity = self._terrain_row_count * len(tile_names)
+            if self.num_envs > capacity:
+                logger.warning(
+                    "num_envs ({}) exceeds terrain slots (rows={} x cols={} = {}). "
+                    "Multiple envs will overlap tiles; increase terrain num_rows or reduce num_envs.",
+                    self.num_envs,
+                    self._terrain_row_count,
+                    len(tile_names),
+                    capacity,
+                )
+
+            unused = [name for name in tile_names if name not in self.motion.clip_ids]
+            if unused:
+                logger.warning("Unused terrain OBJ tiles (no matching motion clip): {}", unused)
+
+            logger.info("Motion/terrain pairing enabled for {} clips.", len(self.motion.clip_ids))
+            return
+
+        origin_grid = None
+        if terrain is not None and hasattr(terrain, "env_origin_grid"):
+            origin_grid = getattr(terrain, "env_origin_grid")
+        elif terrain is not None and hasattr(terrain, "_env_origins"):
+            origin_grid = getattr(terrain, "_env_origins")
+
+        if origin_grid is None:
             raise ValueError(
-                "pair_terrain_with_motion requires load_obj terrain with multiple OBJ tiles. "
-                "Set --terrain.terrain-term.obj-file-path to a directory of .obj files."
+                "pair_terrain_with_motion requires terrain tile metadata or a terrain origin grid. "
+                "For OBJ pairing, set --terrain.terrain-term.obj-file-path to named OBJ tiles."
             )
 
-        if len(set(tile_names)) != len(tile_names):
-            raise ValueError("Duplicate OBJ tile names detected; stems must be unique for pairing.")
+        origin_grid_np = np.asarray(origin_grid, dtype=np.float32)
+        if origin_grid_np.ndim != 3 or origin_grid_np.shape[2] < 3:
+            raise ValueError(
+                "Terrain origin grid must have shape (rows, cols, 3) to pair motion clips with terrain columns."
+            )
+        if origin_grid_np.shape[2] > 3:
+            origin_grid_np = origin_grid_np[:, :, :3]
 
-        tile_offsets = np.asarray(tile_offsets, dtype=np.float32)
-        if tile_offsets.shape[0] != len(tile_names):
-            raise ValueError("OBJ tile offsets length does not match tile names.")
-        stride = np.asarray(tile_stride, dtype=np.float32).reshape(-1)
-        if stride.size < 2:
-            raise ValueError("OBJ tile stride must provide at least X/Y spacing.")
+        num_rows, num_cols, _ = origin_grid_np.shape
+        num_clips = len(self.motion.clip_ids)
+        if num_cols < num_clips:
+            raise ValueError(
+                "pair_terrain_with_motion requires terrain columns >= motion clips "
+                f"(got num_cols={num_cols}, num_clips={num_clips})."
+            )
 
-        name_to_idx = {name: idx for idx, name in enumerate(tile_names)}
-        missing = [clip_id for clip_id in self.motion.clip_ids if clip_id not in name_to_idx]
-        if missing:
-            raise ValueError(f"Missing terrain OBJ for clips: {missing}")
-
-        offsets = np.stack([tile_offsets[name_to_idx[clip_id]] for clip_id in self.motion.clip_ids], axis=0)
-        self._clip_terrain_offsets = torch.tensor(offsets, device=self.device, dtype=torch.float32)
-        self._terrain_row_stride = float(stride[1])
-        self._terrain_row_count = max(1, tile_rows)
+        clip_offsets_by_row = origin_grid_np[:, :num_clips, :]
+        self._clip_terrain_offsets = torch.tensor(clip_offsets_by_row[0], device=self.device, dtype=torch.float32)
+        self._clip_terrain_offsets_by_row = torch.tensor(clip_offsets_by_row, device=self.device, dtype=torch.float32)
+        self._terrain_row_count = max(1, num_rows)
         self._terrain_row_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
-        capacity = self._terrain_row_count * len(tile_names)
-        if self.num_envs > capacity:
+        if num_cols > num_clips:
             logger.warning(
-                "num_envs ({}) exceeds terrain slots (rows={} x cols={} = {}). "
-                "Multiple envs will overlap tiles; increase terrain num_rows or reduce num_envs.",
-                self.num_envs,
-                self._terrain_row_count,
-                len(tile_names),
-                capacity,
+                "Terrain has more columns ({}) than motion clips ({}); extra columns are unused for pairing.",
+                num_cols,
+                num_clips,
             )
 
-        unused = [name for name in tile_names if name not in self.motion.clip_ids]
-        if unused:
-            logger.warning("Unused terrain OBJ tiles (no matching motion clip): {}", unused)
-
-        logger.info("Motion/terrain pairing enabled for {} clips.", len(self.motion.clip_ids))
+        logger.info(
+            "Motion/terrain pairing enabled for {} clips using terrain origin-grid column order.",
+            len(self.motion.clip_ids),
+        )
 
     def _configure_target_pose_settings(self) -> None:
         self.num_future_steps = int(self.motion_cfg.num_future_steps)

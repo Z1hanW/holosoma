@@ -16,10 +16,10 @@ TERRAIN_COLS=${TERRAIN_COLS:-1}
 
 case "${DEPTH_IMPL}" in
   rendered)
-    PERCEPTION_PRESET="camera_depth_d435i_rendered"
+    PERCEPTION_PRESET="camera_depth_d435i"
     ;;
   depth_sensor)
-    PERCEPTION_PRESET="camera_depth_d435i_depth_sensor"
+    PERCEPTION_PRESET="camera_depth_d435i"
     ;;
   raycast)
     PERCEPTION_PRESET="camera_depth_d435i"

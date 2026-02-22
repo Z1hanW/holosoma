@@ -13,6 +13,18 @@ from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.urdf_utils import resolve_fixed_link_offset
 
 
+def _resolve_camera_frame_quat(config: Any, device: str) -> torch.Tensor:
+    default_quat = [0.5, -0.5, -0.5, 0.5]
+    cfg_quat = getattr(config, "camera_frame_quat", None)
+    try:
+        quat_vals = [float(v) for v in cfg_quat] if cfg_quat is not None else default_quat
+    except Exception:
+        quat_vals = default_quat
+    if len(quat_vals) != 4:
+        quat_vals = default_quat
+    return torch.tensor(quat_vals, device=device, dtype=torch.float32)
+
+
 class IsaacSimDepthCamera:
     """Rendered depth camera backed by IsaacSim replicator."""
 
@@ -47,7 +59,7 @@ class IsaacSimDepthCamera:
         self._body_index: int | None = None
         self._body_offset_pos = torch.zeros(3, device=self._device)
         self._body_offset_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self._device)
-        self._camera_frame_quat = torch.tensor([0.5, -0.5, -0.5, 0.5], device=self._device)
+        self._camera_frame_quat = _resolve_camera_frame_quat(config, self._device)
         self._warned_multi_env = False
         self._warned_invalid_depth = False
         self._warned_invalid_rgb = False
@@ -354,7 +366,7 @@ class IsaacSimDepthSensorCamera:
         self._body_index: int | None = None
         self._body_offset_pos = torch.zeros(3, device=self._device)
         self._body_offset_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self._device)
-        self._camera_frame_quat = torch.tensor([0.5, -0.5, -0.5, 0.5], device=self._device)
+        self._camera_frame_quat = _resolve_camera_frame_quat(config, self._device)
         self._warned_multi_env = False
         self._warned_invalid_depth = False
         self._warned_invalid_rgb = False

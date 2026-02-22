@@ -112,6 +112,9 @@ class PerceptionConfig:
     camera_include_robot_mesh: bool = False
     """Include robot visual meshes in camera raycasting (mesh_raycast / mesh_raycast_scandots)."""
 
+    camera_mesh_allowlist: list[str] | None = None
+    """Optional robot link allowlist for camera raycast self-meshes (uses all links when None)."""
+
     depth_sensor_asset_path: str | None = None
     """Optional IsaacSim depth sensor asset path (e.g., /Isaac/Sensors/Intel/RealSense/rsd455.usd)."""
 

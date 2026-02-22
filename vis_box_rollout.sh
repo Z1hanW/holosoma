@@ -58,16 +58,16 @@ case "${DEPTH_IMPL}" in
     PERCEPTION_PRESET=""
     ;;
   rendered)
-    PERCEPTION_PRESET="camera_depth_d435i_rendered"
+    PERCEPTION_PRESET="camera_depth_d435i"
     ;;
   depth_sensor)
-    PERCEPTION_PRESET="camera_depth_d435i_depth_sensor"
+    PERCEPTION_PRESET="camera_depth_d435i"
     ;;
   raycast)
     PERCEPTION_PRESET="camera_depth_d435i"
     ;;
   scandots)
-    PERCEPTION_PRESET="camera_depth_d435i_scandots"
+    PERCEPTION_PRESET="camera_depth_d435i"
     ;;
   *)
     echo "Unknown DEPTH_IMPL=${DEPTH_IMPL}. Use rendered|depth_sensor|raycast|scandots|none." >&2

@@ -10,7 +10,7 @@ TEACHER_CHECKPOINT=""
 
 MOTION_DIR="src/holosoma_retargeting/converted_res/robot_only/lafan"
 
-PERCEPTION_PRESET="camera_depth_d435i_rendered"
+PERCEPTION_PRESET="camera_depth_d435i"
 
 if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
   echo "Set TEACHER_CHECKPOINT to the trained teacher policy checkpoint." >&2

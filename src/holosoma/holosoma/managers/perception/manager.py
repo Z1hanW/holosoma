@@ -75,8 +75,6 @@ class PerceptionManager:
         self._robot_link_meshes: list[dict[str, torch.Tensor]] = []
         self._camera_warp_mesh = None
         self._warned_robot_mesh = False
-        self._camera_auto_tilt_done = False
-        self._camera_pitch_offset_deg = 0.0
         self._camera_frame_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
         self._use_camera_frame_quat = False
         cfg_frame_quat = getattr(cfg, "camera_frame_quat", None)
@@ -183,6 +181,9 @@ class PerceptionManager:
             self._resolve_camera_body_index()
             self._camera_scandots_ray_dirs_base = self._build_camera_scandots_rays()
 
+        if self.cfg.output_mode == "camera_depth":
+            self._log_camera_ray_alignment()
+
         if self._uses_pytorch3d():
             self._resolve_camera_body_index()
             self._setup_pytorch3d_renderer()
@@ -246,16 +247,12 @@ class PerceptionManager:
         if self._uses_camera_scandots():
             idx = env_ids if env_ids is not None else slice(None)
             camera_depth = self._compute_camera_scandots_depth(env_ids)
-            if self._maybe_auto_tilt_camera(camera_depth, env_ids):
-                camera_depth = self._compute_camera_scandots_depth(env_ids)
             self._camera_depth[idx] = camera_depth
             return
 
         if self._uses_camera_raycast():
             idx = env_ids if env_ids is not None else slice(None)
             camera_depth = self._compute_camera_raycast_depth(env_ids)
-            if self._maybe_auto_tilt_camera(camera_depth, env_ids):
-                camera_depth = self._compute_camera_raycast_depth(env_ids)
             self._camera_depth[idx] = camera_depth
             return
 
@@ -306,17 +303,21 @@ class PerceptionManager:
             return None
 
         if self._uses_camera_raycast():
-            ray_starts, ray_dirs_world, ray_hits_world, hit_mask, _body_quat = self._cast_camera_raycast_rays(env_ids)
+            ray_starts, ray_dirs_world, ray_hits_world, hit_mask, body_quat = self._cast_camera_raycast_rays(env_ids)
         elif self._uses_camera_scandots():
-            ray_starts, ray_dirs_world, ray_hits_world, hit_mask, _body_quat = self._cast_camera_scandots_rays(env_ids)
+            ray_starts, ray_dirs_world, ray_hits_world, hit_mask, body_quat = self._cast_camera_scandots_rays(env_ids)
         else:
             raise RuntimeError(
                 f"Camera depth ray samples require camera_source=mesh_raycast or mesh_raycast_scandots, got: {self._camera_source}"
             )
 
+        ranges = self._compute_camera_ray_distances(ray_starts, ray_dirs_world, ray_hits_world)
+        hit_mask = self._filter_camera_hit_mask_by_depth(ranges, ray_dirs_world, body_quat, hit_mask)
+
         if include_misses:
-            ranges = self._compute_camera_ray_distances(ray_starts, ray_dirs_world, ray_hits_world)
-            points = ray_starts + ray_dirs_world * ranges.unsqueeze(-1)
+            miss_ranges = self._compute_camera_miss_ranges(ray_dirs_world, body_quat)
+            draw_ranges = torch.where(hit_mask, ranges, miss_ranges)
+            points = ray_starts + ray_dirs_world * draw_ranges.unsqueeze(-1)
         else:
             points = ray_hits_world
         if return_rays:
@@ -336,11 +337,15 @@ class PerceptionManager:
     ):
         if not self.enabled or self.cfg.output_mode != "camera_depth":
             return None
-        ray_starts, ray_dirs_world, ray_hits_world, hit_mask, _body_quat = self._cast_camera_scandots_rays(env_ids)
+        ray_starts, ray_dirs_world, ray_hits_world, hit_mask, body_quat = self._cast_camera_scandots_rays(env_ids)
+
+        ranges = self._compute_camera_ray_distances(ray_starts, ray_dirs_world, ray_hits_world)
+        hit_mask = self._filter_camera_hit_mask_by_depth(ranges, ray_dirs_world, body_quat, hit_mask)
 
         if include_misses:
-            ranges = self._compute_camera_ray_distances(ray_starts, ray_dirs_world, ray_hits_world)
-            points = ray_starts + ray_dirs_world * ranges.unsqueeze(-1)
+            miss_ranges = self._compute_camera_miss_ranges(ray_dirs_world, body_quat)
+            draw_ranges = torch.where(hit_mask, ranges, miss_ranges)
+            points = ray_starts + ray_dirs_world * draw_ranges.unsqueeze(-1)
         else:
             points = ray_hits_world
         if return_rays:
@@ -423,7 +428,7 @@ class PerceptionManager:
             body_pos = body_pos + offset_world
 
         if apply_pitch:
-            pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
+            pitch_deg = float(self.cfg.camera_pitch_deg)
             pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
             pitch_quat = quat_from_euler_xyz(
                 torch.tensor(0.0, device=self.device),
@@ -519,7 +524,7 @@ class PerceptionManager:
             dirs_cam = torch.stack((x, -y, -torch.ones_like(x)), dim=-1)
             dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
             dirs_cam = dirs_cam.view(-1, 3)
-            pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
+            pitch_deg = float(self.cfg.camera_pitch_deg)
             pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
             pitch_quat = quat_from_euler_xyz(
                 torch.tensor(0.0, device=self.device),
@@ -535,7 +540,7 @@ class PerceptionManager:
             dirs_cam = torch.stack((torch.ones_like(x), -x, -y), dim=-1)
             dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
             dirs_cam = dirs_cam.view(-1, 3)
-            pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
+            pitch_deg = float(self.cfg.camera_pitch_deg)
             pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
             pitch_quat = quat_from_euler_xyz(
                 torch.tensor(0.0, device=self.device),
@@ -599,7 +604,7 @@ class PerceptionManager:
             dirs_cam = torch.stack((x, -y, -torch.ones_like(x)), dim=-1)
             dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
             dirs_cam = dirs_cam.view(-1, 3)
-            pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
+            pitch_deg = float(self.cfg.camera_pitch_deg)
             pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
             pitch_quat = quat_from_euler_xyz(
                 torch.tensor(0.0, device=self.device),
@@ -615,7 +620,7 @@ class PerceptionManager:
             dirs_cam = torch.stack((torch.ones_like(x), -x, -y), dim=-1)
             dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
             dirs_cam = dirs_cam.view(-1, 3)
-            pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
+            pitch_deg = float(self.cfg.camera_pitch_deg)
             pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
             pitch_quat = quat_from_euler_xyz(
                 torch.tensor(0.0, device=self.device),
@@ -642,21 +647,91 @@ class PerceptionManager:
         grid_interval = float(self.cfg.grid_interval)
         return grid_size, grid_size, grid_interval, grid_interval
 
+    def _log_camera_ray_alignment(self) -> None:
+        """Log one-time camera ray alignment stats for debugging mount orientation."""
+        ray_dirs_base = self._camera_ray_dirs_base
+        if ray_dirs_base is None or ray_dirs_base.numel() == 0:
+            return
+
+        try:
+            env_ids = torch.tensor([0], device=self.device, dtype=torch.long)
+            _body_pos, body_quat = self._get_camera_body_pose(env_ids)
+            ray_dirs_world = quat_rotate_batched(body_quat, ray_dirs_base.unsqueeze(0))[0]
+            ray_dirs_world = ray_dirs_world / torch.norm(ray_dirs_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
+
+            total = int(ray_dirs_world.shape[0])
+            if total <= 0:
+                return
+
+            root_quat = getattr(self.env, "base_quat", None)
+            if isinstance(root_quat, torch.Tensor) and root_quat.ndim >= 2 and root_quat.shape[0] > 0:
+                root_quat_env = root_quat[0:1].to(device=ray_dirs_world.device, dtype=ray_dirs_world.dtype)
+                root_forward = quat_apply(
+                    root_quat_env,
+                    torch.tensor([[1.0, 0.0, 0.0]], device=ray_dirs_world.device, dtype=ray_dirs_world.dtype),
+                    w_last=True,
+                )[0]
+                root_forward = root_forward / torch.norm(root_forward).clamp(min=1.0e-6)
+                dots_root = torch.sum(ray_dirs_world * root_forward.unsqueeze(0), dim=-1)
+                back_root = int((dots_root <= 0.0).sum().item())
+                min_dot_root = float(dots_root.min().item())
+                (self.logger or logger).info(
+                    "Camera ray alignment (root): back={}/{} min_dot={:.3f}",
+                    back_root,
+                    total,
+                    min_dot_root,
+                )
+
+            width = int(self._camera_width)
+            height = int(self._camera_height)
+            if width > 0 and height > 0 and (width * height) == total:
+                center_idx = (height // 2) * width + (width // 2)
+                center_dir = ray_dirs_world[center_idx]
+                dots_center = torch.sum(ray_dirs_world * center_dir.unsqueeze(0), dim=-1)
+                back_center = int((dots_center <= 0.0).sum().item())
+                min_dot_center = float(dots_center.min().item())
+                (self.logger or logger).info(
+                    "Camera ray alignment (center): back={}/{} min_dot={:.3f} center=[{:.3f}, {:.3f}, {:.3f}]",
+                    back_center,
+                    total,
+                    min_dot_center,
+                    float(center_dir[0].item()),
+                    float(center_dir[1].item()),
+                    float(center_dir[2].item()),
+                )
+        except Exception as exc:
+            (self.logger or logger).warning("Camera ray alignment debug skipped: {}", exc)
+
     def _get_camera_forward_axis(self, body_quat: torch.Tensor) -> torch.Tensor:
-        pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
-        pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=body_quat.device))
+        # Match warp_sensors depth projection:
+        # principal axis is built from integer (c_x, c_y) using the same pinhole model as ray generation.
+        device = body_quat.device
+        dtype = body_quat.dtype
+        cx = float(self._camera_cx.item())
+        cy = float(self._camera_cy.item())
+        fx = float(self._camera_fx.item())
+        fy = float(self._camera_fy.item())
+        u0 = float(int(self._camera_width / 2))
+        v0 = float(int(self._camera_height / 2))
+        x0 = (u0 - cx) / fx
+        y0 = (v0 - cy) / fy
+
+        pitch_deg = float(self.cfg.camera_pitch_deg)
+        pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=device, dtype=dtype))
         pitch_quat = quat_from_euler_xyz(
-            torch.tensor(0.0, device=body_quat.device),
+            torch.tensor(0.0, device=device, dtype=dtype),
             pitch_rad,
-            torch.tensor(0.0, device=body_quat.device),
+            torch.tensor(0.0, device=device, dtype=dtype),
         )
         if self._use_camera_frame_quat:
-            forward_cam = torch.tensor([0.0, 0.0, -1.0], device=body_quat.device)
-            combo = quat_mul(pitch_quat, self._camera_frame_quat.to(body_quat.device), w_last=True)
-            forward_base = quat_apply(combo.unsqueeze(0), forward_cam.unsqueeze(0), w_last=True).squeeze(0)
+            principal_cam = torch.tensor([x0, -y0, -1.0], device=device, dtype=dtype)
+            principal_cam = principal_cam / torch.norm(principal_cam).clamp(min=1.0e-6)
+            combo = quat_mul(pitch_quat, self._camera_frame_quat.to(device=device, dtype=dtype), w_last=True)
+            forward_base = quat_apply(combo.unsqueeze(0), principal_cam.unsqueeze(0), w_last=True).squeeze(0)
         else:
-            forward_cam = torch.tensor([1.0, 0.0, 0.0], device=body_quat.device)
-            forward_base = quat_apply(pitch_quat.unsqueeze(0), forward_cam.unsqueeze(0), w_last=True).squeeze(0)
+            principal_cam = torch.tensor([1.0, -x0, -y0], device=device, dtype=dtype)
+            principal_cam = principal_cam / torch.norm(principal_cam).clamp(min=1.0e-6)
+            forward_base = quat_apply(pitch_quat.unsqueeze(0), principal_cam.unsqueeze(0), w_last=True).squeeze(0)
         forward_base = forward_base.unsqueeze(0).expand(body_quat.shape[0], -1)
         forward_world = quat_apply(body_quat, forward_base, w_last=True)
         return forward_world / torch.norm(forward_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
@@ -668,12 +743,50 @@ class PerceptionManager:
         body_quat: torch.Tensor,
         hit_mask: torch.Tensor,
     ) -> torch.Tensor:
+        ray_dirs_world = ray_dirs_world / torch.norm(ray_dirs_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
         forward_world = self._get_camera_forward_axis(body_quat)
         dots = torch.sum(ray_dirs_world * forward_world.unsqueeze(1), dim=-1)
-        dots = torch.clamp(dots, min=0.0)
+        dots = torch.clamp(dots, min=1.0e-6, max=1.0)
         depth = ranges * dots
+        near = float(getattr(self.cfg, "camera_near", 0.0) or 0.0)
+        # Match warp_sensors semantics: only rays whose projected depth is inside [near, max_distance] are valid hits.
+        hit_mask = (
+            hit_mask
+            & torch.isfinite(depth)
+            & (depth >= (near - 1.0e-6))
+            & (depth <= (self.cfg.max_distance + 1.0e-6))
+        )
         depth = torch.where(hit_mask, depth, torch.full_like(depth, self.cfg.max_distance))
         return torch.clamp(depth, min=0.0, max=self.cfg.max_distance)
+
+    def _filter_camera_hit_mask_by_depth(
+        self,
+        ranges: torch.Tensor,
+        ray_dirs_world: torch.Tensor,
+        body_quat: torch.Tensor,
+        hit_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        ray_dirs_world = ray_dirs_world / torch.norm(ray_dirs_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
+        forward_world = self._get_camera_forward_axis(body_quat)
+        dots = torch.sum(ray_dirs_world * forward_world.unsqueeze(1), dim=-1)
+        dots = torch.clamp(dots, min=1.0e-6, max=1.0)
+        depth = ranges * dots
+        near = float(getattr(self.cfg, "camera_near", 0.0) or 0.0)
+        return (
+            hit_mask
+            & torch.isfinite(depth)
+            & (depth >= (near - 1.0e-6))
+            & (depth <= (self.cfg.max_distance + 1.0e-6))
+        )
+
+    def _compute_camera_miss_ranges(
+        self, ray_dirs_world: torch.Tensor, body_quat: torch.Tensor
+    ) -> torch.Tensor:
+        ray_dirs_world = ray_dirs_world / torch.norm(ray_dirs_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
+        forward_world = self._get_camera_forward_axis(body_quat)
+        dots = torch.sum(ray_dirs_world * forward_world.unsqueeze(1), dim=-1)
+        dots = torch.clamp(dots, min=1.0e-6, max=1.0)
+        return self.cfg.max_distance / dots
 
     def _apply_camera_depth_noise(self, depth: torch.Tensor) -> torch.Tensor:
         std_mult = getattr(self.env, "_perception_camera_noise_std_mult", None)
@@ -803,6 +916,8 @@ class PerceptionManager:
             return
 
         allowlist = getattr(self.env, "_perception_camera_mesh_allowlist", None)
+        if allowlist is None:
+            allowlist = getattr(self.cfg, "camera_mesh_allowlist", None)
         if allowlist is not None:
             allowlist = {str(name) for name in allowlist}
 
@@ -1167,6 +1282,7 @@ class PerceptionManager:
         ray_starts, ray_dirs_world, ray_hits_world, hit_mask, body_quat = self._cast_camera_raycast_rays(env_ids)
         num_envs = body_quat.shape[0]
         ranges = self._compute_camera_ray_distances(ray_starts, ray_dirs_world, ray_hits_world)
+        hit_mask = self._filter_camera_hit_mask_by_depth(ranges, ray_dirs_world, body_quat, hit_mask)
         depth = self._project_ranges_to_camera_depth(ranges, ray_dirs_world, body_quat, hit_mask)
         depth = depth.view(num_envs, self._camera_height, self._camera_width)
         return self._apply_camera_depth_noise(depth)
@@ -1175,6 +1291,7 @@ class PerceptionManager:
         ray_starts, ray_dirs_world, ray_hits_world, hit_mask, body_quat = self._cast_camera_scandots_rays(env_ids)
         num_envs = body_quat.shape[0]
         ranges = self._compute_camera_ray_distances(ray_starts, ray_dirs_world, ray_hits_world)
+        hit_mask = self._filter_camera_hit_mask_by_depth(ranges, ray_dirs_world, body_quat, hit_mask)
 
         height = self._camera_scandots_height
         width = self._camera_scandots_width
@@ -1226,101 +1343,14 @@ class PerceptionManager:
         hit_mask = torch.isfinite(ray_hits_world).all(dim=-1)
         return ray_starts, ray_dirs_world, ray_hits_world, hit_mask, body_quat
 
-    def _maybe_auto_tilt_camera(self, depth_map: torch.Tensor, env_ids: torch.Tensor | None) -> bool:
-        target_pitch_deg = getattr(self.cfg, "camera_target_pitch_deg", None)
-        if target_pitch_deg is None or self._camera_auto_tilt_done:
-            return False
-        if depth_map is None or depth_map.numel() == 0:
-            return False
-
-        depth = depth_map
-        if depth.ndim >= 3:
-            depth = depth[0]
-        valid = torch.isfinite(depth) & (depth < (self.cfg.max_distance - 1.0e-6))
-        if valid.any():
-            return False
-
-        applied = self._auto_tilt_camera_rays(float(target_pitch_deg), env_ids)
-        if applied:
-            self._camera_auto_tilt_done = True
-        return applied
-
-    def _auto_tilt_camera_rays(self, target_pitch_deg: float, env_ids: torch.Tensor | None) -> bool:
-        ray_dirs_base = None
-        if self._camera_scandots_ray_dirs_base is not None:
-            ray_dirs_base = self._camera_scandots_ray_dirs_base
-        elif self._camera_ray_dirs_base is not None:
-            ray_dirs_base = self._camera_ray_dirs_base
-        if ray_dirs_base is None:
-            return False
-
-        if env_ids is None:
-            idx = torch.tensor([0], device=self.device, dtype=torch.long)
-        elif isinstance(env_ids, torch.Tensor) and env_ids.numel() > 0:
-            idx = env_ids[:1]
-        else:
-            idx = torch.tensor([0], device=self.device, dtype=torch.long)
-
-        _, body_quat = self._get_camera_body_pose(idx)
-
-        if ray_dirs_base is self._camera_scandots_ray_dirs_base and self._camera_scandots_width and self._camera_scandots_height:
-            h = int(self._camera_scandots_height)
-            w = int(self._camera_scandots_width)
-            if ray_dirs_base.shape[0] == h * w:
-                center_dir = ray_dirs_base.view(h, w, 3)[h // 2, w // 2]
-            else:
-                center_dir = ray_dirs_base[ray_dirs_base.shape[0] // 2]
-        elif ray_dirs_base is self._camera_ray_dirs_base:
-            h = int(self._camera_height)
-            w = int(self._camera_width)
-            if ray_dirs_base.shape[0] == h * w:
-                center_dir = ray_dirs_base.view(h, w, 3)[h // 2, w // 2]
-            else:
-                center_dir = ray_dirs_base[ray_dirs_base.shape[0] // 2]
-        else:
-            center_dir = ray_dirs_base[ray_dirs_base.shape[0] // 2]
-
-        forward_world = quat_apply(body_quat, center_dir.unsqueeze(0), w_last=True).squeeze(0)
-        horiz = torch.sqrt(forward_world[0] ** 2 + forward_world[1] ** 2).clamp(min=1.0e-6)
-        current_pitch = torch.atan2(forward_world[2], horiz)
-        target_pitch = torch.deg2rad(torch.tensor(float(target_pitch_deg), device=self.device))
-        delta = target_pitch - current_pitch
-        if torch.abs(delta).item() < 1.0e-3:
-            return False
-
-        delta_quat = quat_from_euler_xyz(
-            torch.tensor(0.0, device=self.device),
-            delta,
-            torch.tensor(0.0, device=self.device),
-        )
-
-        delta_deg = float(torch.rad2deg(delta).item())
-        self._camera_pitch_offset_deg += delta_deg
-
-        if self._camera_ray_dirs_base is not None:
-            delta_rep = delta_quat.unsqueeze(0).expand(self._camera_ray_dirs_base.shape[0], -1)
-            self._camera_ray_dirs_base = quat_apply(delta_rep, self._camera_ray_dirs_base, w_last=True)
-
-        if self._camera_scandots_ray_dirs_base is not None:
-            delta_rep = delta_quat.unsqueeze(0).expand(self._camera_scandots_ray_dirs_base.shape[0], -1)
-            self._camera_scandots_ray_dirs_base = quat_apply(
-                delta_rep, self._camera_scandots_ray_dirs_base, w_last=True
-            )
-
-        (self.logger or logger).info(
-            "Auto-tilting camera rays by {:.2f} deg (target pitch {:.1f} deg).",
-            delta_deg,
-            float(target_pitch_deg),
-        )
-        return True
-
     def _compute_camera_ray_distances(
         self, ray_starts: torch.Tensor, ray_dirs: torch.Tensor, ray_hits_world: torch.Tensor
     ) -> torch.Tensor:
+        ray_dirs = ray_dirs / torch.norm(ray_dirs, dim=-1, keepdim=True).clamp(min=1.0e-6)
         delta = ray_hits_world - ray_starts
         distances = torch.sum(delta * ray_dirs, dim=-1)
-        distances = torch.where(torch.isfinite(distances), distances, torch.full_like(distances, self.cfg.max_distance))
-        return torch.clamp(distances, min=0.0, max=self.cfg.max_distance)
+        distances = torch.where(torch.isfinite(distances), distances, torch.zeros_like(distances))
+        return torch.clamp(distances, min=0.0)
 
     def _setup_pytorch3d_renderer(self) -> None:
         if self._terrain_mesh is None:
@@ -1381,7 +1411,7 @@ class PerceptionManager:
         offset_world = quat_apply(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
         camera_pos = body_pos + offset_world
 
-        pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
+        pitch_deg = float(self.cfg.camera_pitch_deg)
         pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
         pitch_quat = quat_from_euler_xyz(
             torch.tensor(0.0, device=self.device),
@@ -1451,7 +1481,7 @@ class PerceptionManager:
         points_relative = ray_hits_world - camera_pos.unsqueeze(1)
         points_base = quat_rotate_inverse_batched(base_quat, points_relative)
 
-        pitch_deg = float(self.cfg.camera_pitch_deg) + float(self._camera_pitch_offset_deg)
+        pitch_deg = float(self.cfg.camera_pitch_deg)
         pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
         pitch_quat = quat_from_euler_xyz(
             torch.tensor(0.0, device=self.device),

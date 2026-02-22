@@ -152,11 +152,12 @@ class MotionConfig:
     """
 
     pair_terrain_with_motion: bool = False
-    """If True, align each motion clip with a matching terrain OBJ tile.
+    """If True, align each motion clip with a terrain tile/column.
 
-    This expects the terrain loader to ingest multiple OBJ files (mesh_type=load_obj)
-    where each OBJ stem matches a motion clip name. The motion references are then
-    offset to the matching terrain tile.
+    Preferred mode uses named OBJ tiles (mesh_type=load_obj) where each OBJ stem
+    matches a motion clip name. If OBJ names are not available but the terrain
+    exposes a tile origin grid (for example, procedural/heightmap terrains), clips
+    are paired to terrain columns by clip order.
     """
 
     # noise related

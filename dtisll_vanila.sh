@@ -10,7 +10,7 @@ if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
 fi
 
 MOTION_DIR="${MOTION_DIR:-src/holosoma_retargeting/converted_res/robot_only/lafan}"
-PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i_rendered}"
+PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
 
 TEACHER_OBS_KEYS="actor_obs,actor_obs_target"
 EXTRA_ARGS=()

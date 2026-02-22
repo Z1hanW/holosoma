@@ -49,6 +49,7 @@ class RolloutRecorder:
         self._terrain_obj_path = self._resolve_terrain_path()
         self._terrain_rows, self._terrain_cols = self._resolve_terrain_grid()
         self._env_origin = self._resolve_env_origin()
+        self._root_body_index, self._root_body_name = self._resolve_root_body()
 
         atexit.register(self._finalize, "exit")
 
@@ -127,24 +128,34 @@ class RolloutRecorder:
         return np.concatenate(parts, axis=0).astype(np.float32, copy=False)
 
     def _get_root_state_wxyz(self) -> tuple[np.ndarray | None, np.ndarray | None]:
-        root_states = getattr(self._env.simulator, "robot_root_states", None)
+        sim = self._env.simulator
+        rb_pos_all = getattr(sim, "_rigid_body_pos", None)
+        rb_quat_all = getattr(sim, "_rigid_body_rot", None)
+        rb_idx = self._root_body_index
+        if (
+            rb_idx is not None
+            and isinstance(rb_pos_all, torch.Tensor)
+            and isinstance(rb_quat_all, torch.Tensor)
+            and rb_pos_all.ndim >= 3
+            and rb_quat_all.ndim >= 3
+            and self._record_env_id < rb_pos_all.shape[0]
+            and self._record_env_id < rb_quat_all.shape[0]
+            and rb_idx < rb_pos_all.shape[1]
+            and rb_idx < rb_quat_all.shape[1]
+        ):
+            pos = rb_pos_all[self._record_env_id, rb_idx]
+            quat_xyzw = rb_quat_all[self._record_env_id, rb_idx]
+            quat_wxyz = quat_xyzw[[3, 0, 1, 2]]
+            return pos.detach().cpu().numpy(), quat_wxyz.detach().cpu().numpy()
+
+        root_states = getattr(sim, "robot_root_states", None)
         if root_states is None:
             return None, None
-
-        if hasattr(root_states, "tensor_wxyz"):
-            root = root_states.tensor_wxyz[self._record_env_id]
-            pos = root[0:3]
-            quat_wxyz = root[3:7]
-        else:
-            root = root_states[self._record_env_id]
-            pos = root[0:3]
-            quat_xyzw = root[3:7]
-            quat_wxyz = quat_xyzw[[3, 0, 1, 2]]
-
-        return (
-            pos.detach().cpu().numpy(),
-            quat_wxyz.detach().cpu().numpy(),
-        )
+        root = root_states[self._record_env_id]
+        pos = root[0:3]
+        quat_xyzw = root[3:7]
+        quat_wxyz = quat_xyzw[[3, 0, 1, 2]]
+        return pos.detach().cpu().numpy(), quat_wxyz.detach().cpu().numpy()
 
     def _get_dof_pos(self) -> np.ndarray | None:
         dof_pos = getattr(self._env.simulator, "dof_pos", None)
@@ -232,6 +243,21 @@ class RolloutRecorder:
         if rows is None or cols is None:
             return None, None
         return int(rows), int(cols)
+
+    def _resolve_root_body(self) -> tuple[int | None, str | None]:
+        body_names = getattr(self._env, "body_names", None)
+        if body_names is None:
+            return None, None
+        try:
+            names = [str(name) for name in body_names]
+        except Exception:
+            return None, None
+        if not names:
+            return None, None
+        for candidate in ("pelvis", "base_link", "torso_link"):
+            if candidate in names:
+                return int(names.index(candidate)), candidate
+        return 0, names[0]
 
     def _resolve_env_origin(self) -> np.ndarray | None:
         scene = getattr(self._env.simulator, "scene", None)
