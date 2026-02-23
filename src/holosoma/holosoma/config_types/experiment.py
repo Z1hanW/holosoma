@@ -120,7 +120,7 @@ class TrainingConfig:
     viser_scandots_point_size: float = 0.02
     """Point size for scandots visualization in Viser."""
 
-    isaac_show_scandots: bool = True
+    isaac_show_scandots: bool = False
     """Show camera scandots in the Isaac Sim debug draw viewer."""
 
     isaac_scandots_point_size: float = 2.0
@@ -186,7 +186,7 @@ class ExperimentConfig:
         tyro.conf.arg(
             constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.perception.DEFAULTS)
         ),
-    ] = holosoma.config_values.perception.none
+    ] = holosoma.config_values.perception.heightmap
     observation: Annotated[
         ObservationManagerCfg | None,
         tyro.conf.arg(

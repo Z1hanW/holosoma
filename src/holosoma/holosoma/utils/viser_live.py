@@ -188,6 +188,16 @@ def _parse_quat_wxyz(raw) -> tuple[float, float, float, float] | None:
     return (vals[0], vals[1], vals[2], vals[3])
 
 
+def _axis_override(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        return default
+
+
 def _frustum_quat_from_camera(cam_quat_xyzw: torch.Tensor) -> torch.Tensor:
     x_axis = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32, device=cam_quat_xyzw.device)
     y_axis = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=cam_quat_xyzw.device)
@@ -446,6 +456,45 @@ class ViserLiveViewer:
             "false",
             "no",
         )
+        self._manual_control_default = os.environ.get("VISER_MANUAL_CONTROL_DEFAULT", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        self._manual_force_enabled = os.environ.get("VISER_FORCE_MANUAL_CONTROL", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        self._manual_use_hw_joystick = os.environ.get("VISER_MANUAL_USE_HW_JOYSTICK", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+        manual_hw_backend = os.environ.get("VISER_MANUAL_HW_BACKEND", "auto").strip().lower()
+        if manual_hw_backend not in ("auto", "bridge", "pygame"):
+            manual_hw_backend = "auto"
+        self._manual_hw_backend = manual_hw_backend
+        try:
+            self._manual_hw_device = int(
+                os.environ.get(
+                    "VISER_MANUAL_HW_DEVICE",
+                    os.environ.get("JOYSTICK_DEVICE", "0"),
+                )
+            )
+        except Exception:
+            self._manual_hw_device = 0
+        self._manual_hw_type = os.environ.get("VISER_MANUAL_HW_TYPE", os.environ.get("JOYSTICK_TYPE", "xbox")).strip().lower()
+        if self._manual_hw_type not in ("xbox", "switch"):
+            self._manual_hw_type = "xbox"
+        try:
+            self._manual_hw_deadzone = float(os.environ.get("VISER_MANUAL_HW_DEADZONE", "0.08"))
+        except Exception:
+            self._manual_hw_deadzone = 0.08
+        if self._manual_hw_deadzone < 0.0:
+            self._manual_hw_deadzone = 0.0
+        if self._manual_hw_deadzone > 1.0:
+            self._manual_hw_deadzone = 1.0
         self._disable_contact_force_viz = os.environ.get("VISER_DISABLE_CONTACT_FORCE_VIZ", "0").lower() in (
             "1",
             "true",
@@ -528,6 +577,11 @@ class ViserLiveViewer:
         self._manual_yaw_right_cb = None
         self._manual_lin_scale_slider = None
         self._manual_yaw_scale_slider = None
+        self._manual_hw_joystick = None
+        self._manual_hw_pygame = None
+        self._manual_hw_axes = {"LX": 0, "LY": 1, "RX": 2}
+        self._manual_hw_init_attempted = False
+        self._manual_hw_warned = False
         self._clip_start_slider = None
         self._clip_lock_cb = None
         self._perception_enabled = False
@@ -747,32 +801,207 @@ class ViserLiveViewer:
         if self._pending_clip_idx is not None or self._pending_clip_start is not None:
             self._apply_clip_selection()
 
-    def _update_manual_root_command(self) -> None:
-        if self._manual_control_cb is None:
+    def _bridge_hw_joystick_enabled(self) -> bool:
+        sim_cfg = getattr(self._env.simulator, "simulator_config", None)
+        bridge_cfg = getattr(sim_cfg, "bridge", None)
+        return bool(getattr(bridge_cfg, "use_joystick", False))
+
+    def _resolve_manual_hw_axes(self) -> dict[str, int]:
+        if self._manual_hw_type == "switch":
+            defaults = {"LX": 0, "LY": 1, "RX": 2}
+        elif sys.platform.startswith("linux"):
+            defaults = {"LX": 0, "LY": 1, "RX": 3}
+        else:
+            defaults = {"LX": 0, "LY": 1, "RX": 2}
+        return {
+            "LX": _axis_override("VISER_MANUAL_HW_AXIS_LX", defaults["LX"]),
+            "LY": _axis_override("VISER_MANUAL_HW_AXIS_LY", defaults["LY"]),
+            "RX": _axis_override("VISER_MANUAL_HW_AXIS_RX", defaults["RX"]),
+        }
+
+    def _init_manual_hw_joystick(self) -> bool:
+        if self._manual_hw_init_attempted:
+            return self._manual_hw_joystick is not None and self._manual_hw_pygame is not None
+        self._manual_hw_init_attempted = True
+        try:
+            import pygame
+        except Exception as exc:
+            if not self._manual_hw_warned:
+                self._manual_hw_warned = True
+                logger.warning("Viser manual joystick disabled: pygame import failed ({})", exc)
+            return False
+        try:
+            pygame.init()
+            pygame.joystick.init()
+            joystick_count = int(pygame.joystick.get_count())
+            if joystick_count <= self._manual_hw_device:
+                raise RuntimeError(f"device index {self._manual_hw_device} is unavailable; found {joystick_count} device(s)")
+            joystick = pygame.joystick.Joystick(self._manual_hw_device)
+            joystick.init()
+            self._manual_hw_pygame = pygame
+            self._manual_hw_joystick = joystick
+            self._manual_hw_axes = self._resolve_manual_hw_axes()
+            logger.info(
+                "Viser manual joystick initialized (backend=pygame, device={}, name='{}', type={})",
+                self._manual_hw_device,
+                joystick.get_name(),
+                self._manual_hw_type,
+            )
+            return True
+        except Exception as exc:
+            if not self._manual_hw_warned:
+                self._manual_hw_warned = True
+                logger.warning("Viser manual joystick unavailable via pygame: {}", exc)
+            return False
+
+    def _hw_joystick_mode_enabled(self) -> bool:
+        if not self._manual_use_hw_joystick:
+            return False
+        if self._manual_hw_backend in ("auto", "bridge") and self._bridge_hw_joystick_enabled():
+            return True
+        if self._manual_hw_backend in ("auto", "pygame"):
+            return self._init_manual_hw_joystick()
+        return False
+
+    def _hw_joystick_axes(self) -> tuple[float, float, float]:
+        if self._manual_hw_backend in ("auto", "bridge") and self._bridge_hw_joystick_enabled():
+            bridge = getattr(self._env.simulator, "bridge", None)
+            robot_bridge = getattr(bridge, "robot_bridge", None)
+            wc = getattr(robot_bridge, "wireless_controller", None)
+            if wc is not None:
+                try:
+                    lx = float(getattr(wc, "lx", 0.0))
+                    ly = float(getattr(wc, "ly", 0.0))
+                    rx = float(getattr(wc, "rx", 0.0))
+                except Exception:
+                    lx, ly, rx = 0.0, 0.0, 0.0
+                if np.isfinite(lx) and np.isfinite(ly) and np.isfinite(rx):
+                    return lx, ly, rx
+
+        if self._manual_hw_backend not in ("auto", "pygame"):
+            return 0.0, 0.0, 0.0
+        if not self._init_manual_hw_joystick():
+            return 0.0, 0.0, 0.0
+        if self._manual_hw_joystick is None or self._manual_hw_pygame is None:
+            return 0.0, 0.0, 0.0
+
+        lx_axis = self._manual_hw_axes.get("LX", 0)
+        ly_axis = self._manual_hw_axes.get("LY", 1)
+        rx_axis = self._manual_hw_axes.get("RX", 2)
+        try:
+            self._manual_hw_pygame.event.pump()
+            lx = float(self._manual_hw_joystick.get_axis(lx_axis))
+            ly = -float(self._manual_hw_joystick.get_axis(ly_axis))
+            rx = float(self._manual_hw_joystick.get_axis(rx_axis))
+        except Exception:
+            return 0.0, 0.0, 0.0
+
+        if not np.isfinite(lx):
+            lx = 0.0
+        if not np.isfinite(ly):
+            ly = 0.0
+        if not np.isfinite(rx):
+            rx = 0.0
+        return lx, ly, rx
+
+    def _apply_deadzone(self, value: float) -> float:
+        return 0.0 if abs(value) < self._manual_hw_deadzone else value
+
+    def _clear_manual_commands(self, *, clear_gui_toggles: bool = False) -> None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is not None:
+            manual_xy = getattr(motion_cmd, "manual_xy_rel", None)
+            if isinstance(manual_xy, torch.Tensor) and manual_xy.numel() > 0:
+                manual_xy.zero_()
+            manual_yaw = getattr(motion_cmd, "manual_yaw_rel", None)
+            if isinstance(manual_yaw, torch.Tensor) and manual_yaw.numel() > 0:
+                manual_yaw.zero_()
+
+        if not clear_gui_toggles:
             return
+        for cb in (
+            self._manual_forward_cb,
+            self._manual_back_cb,
+            self._manual_left_cb,
+            self._manual_right_cb,
+            self._manual_yaw_left_cb,
+            self._manual_yaw_right_cb,
+        ):
+            if cb is not None:
+                try:
+                    cb.value = False
+                except Exception:
+                    pass
+
+    def _update_manual_root_command(self) -> None:
         motion_cmd = self._get_motion_command()
         if motion_cmd is None:
             return
-        enabled = bool(self._manual_control_cb.value)
+        gui_enabled = bool(self._manual_control_cb.value) if self._manual_control_cb is not None else False
+        hw_enabled = self._hw_joystick_mode_enabled()
+        enabled = bool(self._manual_force_enabled or gui_enabled or hw_enabled)
         motion_cmd.manual_control_enabled = enabled
         if not enabled:
+            self._clear_manual_commands(clear_gui_toggles=False)
+            # If clip-lock is off, release any manual forced-clip override.
+            lock_enabled = bool(self._clip_lock_cb.value) if self._clip_lock_cb is not None else False
+            if not lock_enabled:
+                try:
+                    motion_cmd.set_forced_clip(None)
+                except Exception:
+                    motion_cmd._forced_clip_idx = None
+                try:
+                    motion_cmd.set_forced_clip_start(None)
+                except Exception:
+                    motion_cmd._forced_start_step = None
             return
+
+        # Manual control is "non-tracking" mode: force-lock current clip so resets don't randomize.
+        clip_idx = self._current_clip_index(motion_cmd)
+        if clip_idx is None and hasattr(motion_cmd, "clip_ids"):
+            try:
+                clip_idx = int(motion_cmd.clip_ids[self._env_id].item())
+            except Exception:
+                clip_idx = None
+        if clip_idx is not None:
+            try:
+                motion_cmd.set_forced_clip(int(clip_idx))
+            except Exception:
+                motion_cmd._forced_clip_idx = int(clip_idx)
+            start_frame = int(self._clip_start_slider.value) if self._clip_start_slider is not None else 0
+            try:
+                motion_cmd.set_forced_clip_start(start_frame)
+            except Exception:
+                motion_cmd._forced_start_step = int(start_frame)
+            if self._clip_lock_cb is not None and not bool(self._clip_lock_cb.value):
+                # Keep GUI lock state consistent with manual-control behavior.
+                self._clip_lock_cb.value = True
+
         device = self._env.device
         lin_scale = float(self._manual_lin_scale_slider.value) if self._manual_lin_scale_slider is not None else 0.5
         yaw_scale = float(self._manual_yaw_scale_slider.value) if self._manual_yaw_scale_slider is not None else 0.3
-        forward = 1.0 if self._manual_forward_cb is not None and bool(self._manual_forward_cb.value) else 0.0
-        back = 1.0 if self._manual_back_cb is not None and bool(self._manual_back_cb.value) else 0.0
-        left = 1.0 if self._manual_left_cb is not None and bool(self._manual_left_cb.value) else 0.0
-        right = 1.0 if self._manual_right_cb is not None and bool(self._manual_right_cb.value) else 0.0
-        yaw_left = 1.0 if self._manual_yaw_left_cb is not None and bool(self._manual_yaw_left_cb.value) else 0.0
-        yaw_right = 1.0 if self._manual_yaw_right_cb is not None and bool(self._manual_yaw_right_cb.value) else 0.0
+        if hw_enabled:
+            lx, ly, rx = self._hw_joystick_axes()
+            cmd_x = self._apply_deadzone(ly) * lin_scale
+            cmd_y = self._apply_deadzone(lx) * lin_scale
+            cmd_yaw_val = self._apply_deadzone(rx) * yaw_scale
+        else:
+            forward = 1.0 if self._manual_forward_cb is not None and bool(self._manual_forward_cb.value) else 0.0
+            back = 1.0 if self._manual_back_cb is not None and bool(self._manual_back_cb.value) else 0.0
+            left = 1.0 if self._manual_left_cb is not None and bool(self._manual_left_cb.value) else 0.0
+            right = 1.0 if self._manual_right_cb is not None and bool(self._manual_right_cb.value) else 0.0
+            yaw_left = 1.0 if self._manual_yaw_left_cb is not None and bool(self._manual_yaw_left_cb.value) else 0.0
+            yaw_right = 1.0 if self._manual_yaw_right_cb is not None and bool(self._manual_yaw_right_cb.value) else 0.0
+            cmd_x = (forward - back) * lin_scale
+            cmd_y = (left - right) * lin_scale
+            cmd_yaw_val = (yaw_left - yaw_right) * yaw_scale
         cmd_xy = torch.tensor(
-            [[(forward - back) * lin_scale, (left - right) * lin_scale]],
+            [[cmd_x, cmd_y]],
             device=device,
             dtype=torch.float32,
         ).repeat(self._env.num_envs, 1)
         cmd_yaw = torch.tensor(
-            [[(yaw_left - yaw_right) * yaw_scale]],
+            [[cmd_yaw_val]],
             device=device,
             dtype=torch.float32,
         ).repeat(self._env.num_envs, 1)
@@ -1200,7 +1429,7 @@ class ViserLiveViewer:
             with self._server.gui.add_folder("Manual Control", expand_by_default=False):
                 self._manual_control_cb = self._server.gui.add_checkbox(
                     "Enable Manual Root Command",
-                    initial_value=False,
+                    initial_value=bool(self._manual_control_default),
                     hint="Override torso_xy_rel/yaw_rel with GUI commands",
                 )
                 self._manual_lin_scale_slider = self._server.gui.add_slider(
@@ -1484,6 +1713,10 @@ class ViserLiveViewer:
                                     motion_cmd.set_forced_clip(None)
                                 except Exception:
                                     motion_cmd._forced_clip_idx = None
+                                try:
+                                    motion_cmd.set_forced_clip_start(None)
+                                except Exception:
+                                    motion_cmd._forced_start_step = None
 
                         @self._clip_apply.on_click
                         def _(_evt) -> None:
@@ -1540,6 +1773,38 @@ class ViserLiveViewer:
     def _reset_env(self) -> None:
         if not hasattr(self._env, "reset_envs_idx"):
             return
+
+        motion_cmd = self._get_motion_command()
+        manual_enabled = bool(getattr(motion_cmd, "manual_control_enabled", False))
+        if self._manual_control_cb is not None:
+            manual_enabled = bool(manual_enabled or bool(self._manual_control_cb.value))
+        lock_enabled = bool(self._clip_lock_cb.value) if self._clip_lock_cb is not None else False
+
+        # In non-tracking/manual mode (or locked-clip mode), reset by explicitly forcing the
+        # selected clip/start so reset behavior is deterministic and aligned with the GUI.
+        if motion_cmd is not None and (manual_enabled or lock_enabled):
+            if manual_enabled:
+                self._clear_manual_commands(clear_gui_toggles=True)
+            clip_idx = self._current_clip_index(motion_cmd)
+            if clip_idx is None and hasattr(motion_cmd, "clip_ids"):
+                try:
+                    clip_idx = int(motion_cmd.clip_ids[self._env_id].item())
+                except Exception:
+                    clip_idx = None
+            if clip_idx is not None:
+                try:
+                    motion_cmd.set_forced_clip(int(clip_idx))
+                except Exception:
+                    motion_cmd._forced_clip_idx = int(clip_idx)
+                clip_start = int(self._clip_start_slider.value) if self._clip_start_slider is not None else 0
+                try:
+                    motion_cmd.set_forced_clip_start(int(clip_start))
+                except Exception:
+                    motion_cmd._forced_start_step = int(clip_start)
+                self._force_clip_state(motion_cmd, int(clip_idx), clip_start)
+                self._reload_terrain_for_clip(self._current_clip_name(motion_cmd, int(clip_idx)))
+                return
+
         env_ids = torch.tensor([self._env_id], device=self._env.device, dtype=torch.long)
         self._env.reset_envs_idx(env_ids)
         if hasattr(self._env, "reset_buf"):
@@ -1567,11 +1832,20 @@ class ViserLiveViewer:
                 motion_cmd.set_forced_clip(int(clip_idx))
             except Exception:
                 motion_cmd._forced_clip_idx = int(clip_idx)
+            start_frame = int(clip_start or 0)
+            try:
+                motion_cmd.set_forced_clip_start(start_frame)
+            except Exception:
+                motion_cmd._forced_start_step = start_frame
         else:
             try:
                 motion_cmd.set_forced_clip(None)
             except Exception:
                 motion_cmd._forced_clip_idx = None
+            try:
+                motion_cmd.set_forced_clip_start(None)
+            except Exception:
+                motion_cmd._forced_start_step = None
         self._force_clip_state(motion_cmd, int(clip_idx), clip_start)
         self._reload_terrain_for_clip(self._current_clip_name(motion_cmd, int(clip_idx)))
 
@@ -1638,6 +1912,8 @@ class ViserLiveViewer:
             self._env.reset_buf[env_ids] = 0
         if hasattr(self._env, "time_out_buf"):
             self._env.time_out_buf[env_ids] = 0
+        if hasattr(self._env, "episode_length_buf"):
+            self._env.episode_length_buf[env_ids] = 0
 
         self._env._compute_observations()
         self._env._post_compute_observations_callback()
@@ -1851,9 +2127,28 @@ class ViserLiveViewer:
             return
         points_all_env = points[0]
         mask_env = mask[0] if mask is not None else None
+        mask_env_bool = None
+        if mask_env is not None and mask_env.numel() > 0:
+            mask_env_bool = mask_env.to(torch.bool)
+
         points_env = points_all_env
-        if not include_misses and mask_env is not None and mask_env.numel() > 0:
-            points_env = points_all_env[mask_env]
+        hits_env = None
+        mesh_hit_mask_env = None
+        if ray_hits_world is not None and ray_hits_world.numel() > 0:
+            hits_candidate = ray_hits_world[0]
+            if hits_candidate.shape == points_all_env.shape:
+                hits_env = hits_candidate
+                mesh_hit_mask_env = torch.isfinite(hits_env).all(dim=-1)
+
+        if hits_env is not None and mesh_hit_mask_env is not None:
+            # Red dots should represent true mesh intersections.
+            # Always respect the depth-valid hit mask when available so dots match displayed valid hits.
+            point_mask_env = mesh_hit_mask_env
+            if (mask_env_bool is not None) and (mask_env_bool.shape == point_mask_env.shape):
+                point_mask_env = point_mask_env & mask_env_bool
+            points_env = hits_env[point_mask_env]
+        elif mask_env_bool is not None:
+            points_env = points_all_env[mask_env_bool]
         if points_env.numel() == 0:
             if self._scandots_handle is not None:
                 self._scandots_handle.visible = False
@@ -1891,17 +2186,19 @@ class ViserLiveViewer:
                 dirs_norm = dirs_env / torch.norm(dirs_env, dim=-1, keepdim=True).clamp(min=1.0e-6)
 
                 use_frame_quat = bool(getattr(perception_mgr, "_use_camera_frame_quat", False))
+                strict_warp = bool(getattr(perception_mgr, "_camera_strict_warp", False))
                 cam_pose = perception_mgr.get_camera_pose(
                     env_ids,
                     apply_sensor_offset=True,
                     apply_pitch=True,
                 )
                 cam_quat = cam_pose[1][0:1]
-                forward_local = torch.tensor(
-                    [[0.0, 0.0, -1.0]] if use_frame_quat else [[1.0, 0.0, 0.0]],
-                    device=cam_quat.device,
-                    dtype=cam_quat.dtype,
-                )
+                if strict_warp:
+                    forward_local = torch.tensor([[0.0, 0.0, 1.0]], device=cam_quat.device, dtype=cam_quat.dtype)
+                elif use_frame_quat:
+                    forward_local = torch.tensor([[0.0, 0.0, -1.0]], device=cam_quat.device, dtype=cam_quat.dtype)
+                else:
+                    forward_local = torch.tensor([[1.0, 0.0, 0.0]], device=cam_quat.device, dtype=cam_quat.dtype)
                 cam_forward = quat_apply(cam_quat, forward_local, w_last=True)[0]
                 cam_forward = cam_forward / torch.norm(cam_forward).clamp(min=1.0e-6)
                 dots_cam = torch.sum(dirs_norm * cam_forward.unsqueeze(0), dim=-1)
@@ -1932,19 +2229,17 @@ class ViserLiveViewer:
                 self._ray_direction_stats_suffix = ""
         if include_misses:
             ends_all_env = points_all_env
-        elif ray_hits_world is not None:
-            hits_env = ray_hits_world[0]
+        elif hits_env is not None:
             ends_all_env = hits_env if hits_env.shape == starts_all_env.shape else points_all_env
         else:
             ends_all_env = points_all_env
 
         starts_env = starts_all_env
         ends_env = ends_all_env
-        if not include_misses and mask_env is not None and mask_env.numel() > 0:
+        if not include_misses and mask_env_bool is not None and mask_env_bool.numel() > 0:
             # Render only true hits; don't draw zero-length "miss" lines at the ray origin.
-            mask_env = mask_env.to(torch.bool)
-            starts_env = starts_all_env[mask_env]
-            ends_env = ends_all_env[mask_env]
+            starts_env = starts_all_env[mask_env_bool]
+            ends_env = ends_all_env[mask_env_bool]
         if starts_env.numel() == 0 or ends_env.numel() == 0:
             if self._scandots_rays_handle is not None:
                 self._scandots_rays_handle.visible = False
@@ -2025,12 +2320,25 @@ class ViserLiveViewer:
 
         width = int(getattr(perception_mgr, "_camera_width", 0) or 0)
         height = int(getattr(perception_mgr, "_camera_height", 0) or 0)
-        if width > 0 and height > 0 and (width * height) == int(dirs_norm.shape[0]):
-            center_idx = (height // 2) * width + (width // 2)
-        else:
-            center_idx = int(dirs_norm.shape[0] // 2)
-        center_dir = dirs_norm[center_idx]
-        center_dir = center_dir / torch.norm(center_dir).clamp(min=1.0e-6)
+        center_dir = None
+        if hasattr(perception_mgr, "_get_camera_forward_axis"):
+            try:
+                _cam_pos, body_quat = perception_mgr.get_camera_pose(
+                    env_ids,
+                    apply_sensor_offset=False,
+                    apply_pitch=False,
+                )
+                forward_world = perception_mgr._get_camera_forward_axis(body_quat)[0]  # noqa: SLF001
+                center_dir = forward_world / torch.norm(forward_world).clamp(min=1.0e-6)
+            except Exception:
+                center_dir = None
+        if center_dir is None:
+            if width > 0 and height > 0 and (width * height) == int(dirs_norm.shape[0]):
+                center_idx = (height // 2) * width + (width // 2)
+            else:
+                center_idx = int(dirs_norm.shape[0] // 2)
+            center_dir = dirs_norm[center_idx]
+            center_dir = center_dir / torch.norm(center_dir).clamp(min=1.0e-6)
 
         # Match warp_sensors depth projection multiplier: clamp dot(rd, rd_principal) to [eps, 1].
         dots = torch.sum(dirs_norm * center_dir.unsqueeze(0), dim=-1)
@@ -2249,6 +2557,7 @@ class ViserLiveViewer:
         frustum_quat_wxyz = None
         if output_mode == "camera_depth" and cam_body_quat_xyzw is not None:
             use_frame_quat = bool(getattr(perception_mgr, "_use_camera_frame_quat", False))
+            strict_warp = bool(getattr(perception_mgr, "_camera_strict_warp", False))
             ray_dirs_base = getattr(perception_mgr, "_camera_scandots_ray_dirs_base", None)
             width = getattr(perception_mgr, "_camera_scandots_width", None)
             height = getattr(perception_mgr, "_camera_scandots_height", None)
@@ -2256,7 +2565,7 @@ class ViserLiveViewer:
                 ray_dirs_base = getattr(perception_mgr, "_camera_ray_dirs_base", None)
                 width = int(getattr(perception_mgr, "_camera_width", 0) or 0)
                 height = int(getattr(perception_mgr, "_camera_height", 0) or 0)
-            if not use_frame_quat:
+            if strict_warp or (not use_frame_quat):
                 frustum_quat = _frustum_quat_from_rays(
                     ray_dirs_base,
                     cam_body_quat_xyzw,

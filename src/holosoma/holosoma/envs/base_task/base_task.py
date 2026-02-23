@@ -524,6 +524,12 @@ class BaseTask:
 
         output_mode = getattr(getattr(self.perception_manager, "cfg", None), "output_mode", None)
         use_heightmap = output_mode == "heightmap"
+        use_camera_depth = output_mode == "camera_depth"
+        camera_source = getattr(getattr(self.perception_manager, "cfg", None), "camera_source", None)
+        if not use_heightmap and not use_camera_depth:
+            return
+        if use_camera_depth and camera_source not in ("mesh_raycast_scandots", "mesh_raycast"):
+            return
         include_misses_env = os.environ.get("ISAAC_SCANDOTS_INCLUDE_MISSES")
         if include_misses_env is None:
             include_misses = False
@@ -539,12 +545,24 @@ class BaseTask:
                     result = self.perception_manager.get_heightmap_points(
                         env_ids,
                         include_misses=include_misses,
+                        return_rays=True,
                     )
-                else:
+                elif use_camera_depth and camera_source == "mesh_raycast" and hasattr(
+                    self.perception_manager, "get_camera_depth_ray_samples"
+                ):
+                    result = self.perception_manager.get_camera_depth_ray_samples(
+                        env_ids,
+                        include_misses=include_misses,
+                        return_rays=True,
+                    )
+                elif hasattr(self.perception_manager, "get_camera_scandots_points"):
                     result = self.perception_manager.get_camera_scandots_points(
                         env_ids,
                         include_misses=include_misses,
+                        return_rays=True,
                     )
+                else:
+                    result = None
         except Exception as exc:
             if not self._isaac_scandots_warned:
                 self._isaac_scandots_warned = True
@@ -557,12 +575,28 @@ class BaseTask:
                 logger.warning("IsaacSim scandots draw disabled: heightmap points are unavailable.")
             return
 
-        points, mask = result
+        if not isinstance(result, tuple) or len(result) < 2:
+            return
+
+        points = result[0]
+        mask = result[1]
+        ray_hits_world = result[4] if len(result) > 4 else None
+
         points_env = points[0]
-        if not include_misses:
-            mask_env = mask[0]
-            if mask_env.numel() > 0:
-                points_env = points_env[mask_env]
+        mask_env = mask[0] if mask is not None else None
+        mask_env_bool = None
+        if mask_env is not None and mask_env.numel() > 0:
+            mask_env_bool = mask_env.to(torch.bool)
+
+        if ray_hits_world is not None and ray_hits_world.numel() > 0:
+            hits_env = ray_hits_world[0]
+            if hits_env.shape == points_env.shape:
+                hit_mask = torch.isfinite(hits_env).all(dim=-1)
+                if mask_env_bool is not None and mask_env_bool.shape == hit_mask.shape:
+                    hit_mask = hit_mask & mask_env_bool
+                points_env = hits_env[hit_mask]
+        elif mask_env_bool is not None:
+            points_env = points_env[mask_env_bool]
         if points_env.numel() == 0:
             self.simulator.draw.clear_points()
             return

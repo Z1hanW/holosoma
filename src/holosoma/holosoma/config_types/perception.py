@@ -17,8 +17,8 @@ class PerceptionConfig:
     output_mode: str = "heightmap"
     """Perception output type: 'heightmap' or 'camera_depth'."""
 
-    camera_source: str = "raycast"
-    """Camera source for camera_depth output: 'raycast', 'mesh_raycast', 'mesh_raycast_scandots', 'pytorch3d', 'rendered', or 'rendered_depth_sensor'."""
+    camera_source: str = "mesh_raycast"
+    """Camera source for camera_depth output. Only 'mesh_raycast' is supported."""
 
     grid_size: int = 11
     """Number of samples per dimension for the heightmap grid."""
@@ -49,6 +49,8 @@ class PerceptionConfig:
 
     camera_pitch_deg: float = -20.0
     """Virtual camera pitch in degrees (negative tilts down)."""
+    camera_mount_quat: list[float] | None = None
+    """Optional local camera mount rotation (xyzw), typically link->sensor mount."""
     camera_frame_quat: list[float] | None = None
     """Optional camera frame rotation (xyzw). Matches simulator camera frame when provided."""
 

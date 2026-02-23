@@ -227,6 +227,40 @@ def _extract_motion_clip_hint(config: ExperimentConfig) -> tuple[str | None, int
     return None, None
 
 
+def _normalize_motion_config_for_cli(config: ExperimentConfig) -> ExperimentConfig:
+    """Coerce legacy dict payloads into MotionConfig so Tyro accepts typed overrides."""
+
+    command_cfg = config.command
+    if command_cfg is None:
+        return config
+
+    term = command_cfg.setup_terms.get("motion_command")
+    if term is None:
+        return config
+
+    params = dict(term.params)
+    motion_cfg = params.get("motion_config")
+    if isinstance(motion_cfg, MotionConfig):
+        return config
+    if not isinstance(motion_cfg, dict):
+        return config
+
+    try:
+        params["motion_config"] = MotionConfig(**motion_cfg)
+    except Exception as exc:
+        logger.warning(
+            "Failed to coerce motion_config dict into MotionConfig for CLI overrides; keeping raw dict. Error: {}",
+            exc,
+        )
+        return config
+
+    term = dataclasses.replace(term, params=params)
+    setup_terms = dict(command_cfg.setup_terms)
+    setup_terms["motion_command"] = term
+    command_cfg = dataclasses.replace(command_cfg, setup_terms=setup_terms)
+    return dataclasses.replace(config, command=command_cfg)
+
+
 def _update_terrain_config(
     config: ExperimentConfig,
     geometry_path: str | None,
@@ -327,7 +361,7 @@ def main() -> None:
     )
 
     saved_cfg, saved_wandb_path = load_saved_experiment_config(checkpoint_cfg)
-    eval_cfg = saved_cfg.get_eval_config()
+    eval_cfg = _normalize_motion_config_for_cli(saved_cfg.get_eval_config())
     eval_cfg_overrides, _ = tyro.cli(
         ExperimentConfig,
         default=eval_cfg,

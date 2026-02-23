@@ -64,10 +64,14 @@ camera_depth_d435i = PerceptionConfig(
     camera_height=60,
     camera_vfov_deg=58.6,
     camera_hfov_deg=89.5,
-    camera_pitch_deg=-20.0,
+    camera_pitch_deg=0.0,
     camera_target_pitch_deg=None,
-    camera_frame_quat=[0.5, -0.5, -0.5, 0.5],
-    camera_body_name="d435_joint",
+    # Strict warp_sensors chain:
+    # world_cam = world_torso * mount(offset_rot=[1,27,1]) * sensor_frame(offset_rot_base=[-90,0,-90]).
+    camera_mount_quat=[0.00644801, 0.23350163, 0.00644801, 0.97231365],
+    camera_frame_quat=[-0.5, 0.5, -0.5, 0.5],
+    camera_body_name="torso_link",
+    sensor_offset=[0.01, 0.01, 0.44],
     camera_include_robot_mesh=True,
     camera_mesh_allowlist=WARP_SENSORS_G1_D435_MESH_ALLOWLIST,
     camera_fps=30.0,

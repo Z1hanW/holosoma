@@ -6,10 +6,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ==============================================================================
 # Usage:
 #   ./run_multimotion_sim2sim.sh convert   # convert retargeted LAFAN npz -> training npz
-#   ./run_multimotion_sim2sim.sh pack      # pack converted npz into an HDF5 motion bank
 #   ./run_multimotion_sim2sim.sh train     # multi-motion WBT training
 #   ./run_multimotion_sim2sim.sh sim2sim   # MuJoCo sim-to-sim with OBJ geometry
-#   ./run_multimotion_sim2sim.sh all       # convert + pack + train
+#   ./run_multimotion_sim2sim.sh all       # convert + train
 #
 # Notes:
 # - Source the proper env before running:
@@ -22,7 +21,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ----- user config (edit these) -----
 RETARGET_DIR="src/holosoma_retargeting/demo_results_parallel/g1/robot_only/lafan"
 CONVERTED_DIR="src/holosoma_retargeting/converted_res/robot_only/lafan"
-H5_FILE="${CONVERTED_DIR}/motion_bank.h5"
+# Motion source for training (directory of converted .npz clips)
+MOTION_SOURCE="$CONVERTED_DIR"
 
 # Geometry for MuJoCo sim2sim
 OBJ_PATH="/ABS/PATH/scene.obj"
@@ -102,25 +102,22 @@ convert_lafan() {
   done
 }
 
-pack_h5() {
-  require_dir "$CONVERTED_DIR" "CONVERTED_DIR"
-  local packer="$ROOT_DIR/holosoma/src/holosoma_retargeting/data_conversion/convert_npz_to_h5.py"
-  require_file "$packer" "convert_npz_to_h5.py"
-
-  "$PYTHON_BIN" "$packer" \
-    --input_dir "$CONVERTED_DIR" \
-    --output_h5 "$H5_FILE" \
-    --pattern "*.npz"
-}
-
 train_multimotion() {
-  require_file "$H5_FILE" "HDF5 motion bank"
+  require_dir "$MOTION_SOURCE" "MOTION_SOURCE"
+  shopt -s nullglob
+  local clips=("$MOTION_SOURCE"/*.npz "$MOTION_SOURCE"/*.NPZ)
+  shopt -u nullglob
+  if [[ ${#clips[@]} -eq 0 ]]; then
+    echo "ERROR: No .npz clips found in motion source: $MOTION_SOURCE" >&2
+    exit 1
+  fi
+
   "$PYTHON_BIN" "$ROOT_DIR/src/holosoma/holosoma/train_agent.py" \
     "exp:${TRAIN_EXP}" \
     "simulator:${TRAIN_SIMULATOR}" \
     --training.num_envs "$NUM_ENVS" \
     --training.headless "$HEADLESS" \
-    --command.setup_terms.motion_command.params.motion_config.motion_file "$H5_FILE"
+    --command.setup_terms.motion_command.params.motion_config.motion_file "$MOTION_SOURCE"
 }
 
 run_sim2sim() {
@@ -175,9 +172,6 @@ main() {
     convert)
       convert_lafan
       ;;
-    pack)
-      pack_h5
-      ;;
     train)
       train_multimotion
       ;;
@@ -186,11 +180,10 @@ main() {
       ;;
     all)
       convert_lafan
-      pack_h5
       train_multimotion
       ;;
     *)
-      echo "Usage: $0 {convert|pack|train|sim2sim|all}" >&2
+      echo "Usage: $0 {convert|train|sim2sim|all}" >&2
       exit 1
       ;;
   esac

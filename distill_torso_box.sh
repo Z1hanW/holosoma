@@ -6,24 +6,27 @@ set -euo pipefail
 # - obj_pos_b + obj_target_pose_size_b (target goal pose + size)
 #
 # Default behavior (DISTILL_TWO_STAGE=1):
-# - Stage 1: pure BC imitation (bc_loss_coef=1.0)
-# - Stage 2: resume Stage 1 student, mix RL+BC then switch to RL at configured iteration
+# - Stage 1: true DAgger data collection (teacher steps env) + pure BC
+# - Stage 2: resume Stage 1 student, student steps env, mix RL+BC then switch to RL
+
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"/home/ubuntu/FAR/holosoma/logs/WholeBodyTracking/20260216_214200-g1_29dof_wbt_w_object_generalist-locomotion/model_30000.pt"}
 
 if [[ $# -gt 0 ]]; then
   TEACHER_CHECKPOINT="$1"
   shift
 else
-  TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-}"
+  TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 fi
 
 if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
   echo "Usage: $0 <teacher_checkpoint.pt> [extra train_agent.py args...]" >&2
+  echo "Default teacher checkpoint: ${DEFAULT_TEACHER_CHECKPOINT}" >&2
   exit 1
 fi
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2,3,4,5,6,7}
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4,5,6,7}
 EXP=${EXP:-g1-29dof-wbt-w-object-distill-torso-box}
 MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"}
 OBJECT_URDF=${OBJECT_URDF:-"${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"}
@@ -66,6 +69,8 @@ CLIP_TEACHER_ACTIONS=${CLIP_TEACHER_ACTIONS:-True}
 CLIP_ACTIONS_THRESHOLD=${CLIP_ACTIONS_THRESHOLD:-8.0}
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.05}
+RESET_NOISE_SCALE=${RESET_NOISE_SCALE:-1.0}
+TAKE_TEACHER_ACTIONS=${TAKE_TEACHER_ACTIONS:-False}
 SAVE_INTERVAL=${SAVE_INTERVAL:-200}
 LOGGER=${LOGGER:-logger:wandb}
 RUN_NAME=${RUN_NAME:-g1_w_object_distill_torso_box}
@@ -76,6 +81,12 @@ LOGGER_BASE_DIR=${LOGGER_BASE_DIR:-logs}
 STAGE1_BC_LOSS_COEF=${STAGE1_BC_LOSS_COEF:-1.0}
 STAGE2_BC_LOSS_COEF=${STAGE2_BC_LOSS_COEF:-0.3}
 STAGE2_SWITCH_TO_RL_AFTER=${STAGE2_SWITCH_TO_RL_AFTER:-20000}
+STAGE1_TAKE_TEACHER_ACTIONS=${STAGE1_TAKE_TEACHER_ACTIONS:-True}
+STAGE2_TAKE_TEACHER_ACTIONS=${STAGE2_TAKE_TEACHER_ACTIONS:-False}
+STAGE1_START_AT_TIMESTEP_ZERO_PROB=${STAGE1_START_AT_TIMESTEP_ZERO_PROB:-1.0}
+STAGE2_START_AT_TIMESTEP_ZERO_PROB=${STAGE2_START_AT_TIMESTEP_ZERO_PROB:-0.2}
+STAGE1_RESET_NOISE_SCALE=${STAGE1_RESET_NOISE_SCALE:-0.0}
+STAGE2_RESET_NOISE_SCALE=${STAGE2_RESET_NOISE_SCALE:-0.1}
 STAGE1_RUN_NAME=${STAGE1_RUN_NAME:-${RUN_NAME}_stage1}
 STAGE2_RUN_NAME=${STAGE2_RUN_NAME:-${RUN_NAME}_stage2}
 STAGE1_TRAINING_NAME=${STAGE1_TRAINING_NAME:-${TRAINING_NAME}_stage1}
@@ -107,11 +118,17 @@ run_distill_stage() {
   local stage_master_port="$5"
   local stage_resume_checkpoint="${6:-}"
   local stage_switch_to_rl_after="${7:-}"
+  local stage_take_teacher_actions="${8:-}"
+  local stage_start_at_timestep_zero_prob="${9:-}"
+  local stage_reset_noise_scale="${10:-}"
 
   echo "[INFO] Starting ${stage_label}"
   echo "[INFO]   run_name=${stage_run_name}"
   echo "[INFO]   training_name=${stage_training_name}"
   echo "[INFO]   bc_loss_coef=${stage_bc_loss_coef}"
+  echo "[INFO]   take_teacher_actions=${stage_take_teacher_actions}"
+  echo "[INFO]   start_at_timestep_zero_prob=${stage_start_at_timestep_zero_prob}"
+  echo "[INFO]   reset_noise_scale=${stage_reset_noise_scale}"
   echo "[INFO]   distributed: nnodes=${NNODES} node_rank=${NODE_RANK} nproc_per_node=${NPROC}"
 
   local cmd=(
@@ -130,6 +147,7 @@ run_distill_stage() {
     --algo.config.distill.clip_teacher_actions="${CLIP_TEACHER_ACTIONS}"
     --algo.config.distill.clip_actions_threshold="${CLIP_ACTIONS_THRESHOLD}"
     --algo.config.distill.teacher_obs_keys="${TEACHER_OBS_KEYS}"
+    --algo.config.distill.take_teacher_actions="${stage_take_teacher_actions}"
     --training.num_envs="${NUM_ENVS}"
     --training.project="${TRAINING_PROJECT}"
     --training.name="${stage_training_name}"
@@ -141,7 +159,8 @@ run_distill_stage() {
     --algo.config.save_interval="${SAVE_INTERVAL}"
     --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_DIR}"
     --command.setup_terms.motion_command.params.motion_config.pair_terrain_with_motion=False
-    --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob="${START_AT_TIMESTEP_ZERO_PROB}"
+    --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob="${stage_start_at_timestep_zero_prob}"
+    --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale="${stage_reset_noise_scale}"
     --command.setup_terms.motion_command.params.motion_config.enable_default_pose_append=False
     --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s=0
     --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend=False
@@ -180,13 +199,18 @@ find_latest_stage_checkpoint() {
 }
 
 if [[ "${DISTILL_TWO_STAGE}" != "0" ]]; then
-  # Stage 1: pure BC imitation
+  # Stage 1: DAgger BC with teacher-driven rollout
   run_distill_stage \
-    "Stage 1 (pure BC imitation)" \
+    "Stage 1 (DAgger BC, teacher rollout)" \
     "${STAGE1_BC_LOSS_COEF}" \
     "${STAGE1_RUN_NAME}" \
     "${STAGE1_TRAINING_NAME}" \
-    "${STAGE1_MASTER_PORT}"
+    "${STAGE1_MASTER_PORT}" \
+    "" \
+    "" \
+    "${STAGE1_TAKE_TEACHER_ACTIONS}" \
+    "${STAGE1_START_AT_TIMESTEP_ZERO_PROB}" \
+    "${STAGE1_RESET_NOISE_SCALE}"
 
   # Stage 2: resume student, mix RL/BC then switch to RL.
   if [[ -z "${STAGE1_STUDENT_CHECKPOINT}" ]]; then
@@ -205,7 +229,10 @@ if [[ "${DISTILL_TWO_STAGE}" != "0" ]]; then
     "${STAGE2_TRAINING_NAME}" \
     "${STAGE2_MASTER_PORT}" \
     "${STAGE1_STUDENT_CHECKPOINT}" \
-    "${STAGE2_SWITCH_TO_RL_AFTER}"
+    "${STAGE2_SWITCH_TO_RL_AFTER}" \
+    "${STAGE2_TAKE_TEACHER_ACTIONS}" \
+    "${STAGE2_START_AT_TIMESTEP_ZERO_PROB}" \
+    "${STAGE2_RESET_NOISE_SCALE}"
 else
   run_distill_stage \
     "Single Stage" \
@@ -214,5 +241,8 @@ else
     "${TRAINING_NAME}" \
     "${MASTER_PORT}" \
     "" \
-    "${SWITCH_TO_RL_AFTER}"
+    "${SWITCH_TO_RL_AFTER}" \
+    "${TAKE_TEACHER_ACTIONS}" \
+    "${START_AT_TIMESTEP_ZERO_PROB}" \
+    "${RESET_NOISE_SCALE}"
 fi

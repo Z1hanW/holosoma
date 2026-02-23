@@ -1185,7 +1185,7 @@ def _camera_raycast_enabled(env: Any) -> bool:
     cfg = pm.cfg
     return bool(
         getattr(cfg, "output_mode", "") == "camera_depth"
-        and getattr(cfg, "camera_source", "") in {"mesh_raycast", "mesh_raycast_scandots"}
+        and getattr(cfg, "camera_source", "") == "mesh_raycast"
     )
 
 

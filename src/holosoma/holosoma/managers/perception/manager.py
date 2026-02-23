@@ -56,7 +56,11 @@ class PerceptionManager:
         self._ray_start_offset = torch.tensor([0.0, 0.0, cfg.ray_start_height], device=self.device)
         self._camera_source = cfg.camera_source
         self._camera_body_name = cfg.camera_body_name
-        self._heightmap_body_name = cfg.heightmap_body_name
+        heightmap_body_name = cfg.heightmap_body_name
+        if heightmap_body_name is None:
+            robot_cfg = getattr(env, "robot_config", None)
+            heightmap_body_name = getattr(robot_cfg, "torso_name", None)
+        self._heightmap_body_name = heightmap_body_name
         self._camera_include_robot_mesh = bool(getattr(cfg, "camera_include_robot_mesh", False))
         self._camera_robot_mesh_enabled = False
         self._camera_body_index: int | None = None
@@ -75,8 +79,36 @@ class PerceptionManager:
         self._robot_link_meshes: list[dict[str, torch.Tensor]] = []
         self._camera_warp_mesh = None
         self._warned_robot_mesh = False
+        self._camera_mount_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
+        self._use_camera_mount_quat = False
         self._camera_frame_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
         self._use_camera_frame_quat = False
+        strict_warp_raw = os.environ.get("HOLOSOMA_CAMERA_STRICT_WARP", "0").strip().lower()
+        self._camera_strict_warp = strict_warp_raw not in {"0", "false", "no", "off", ""}
+        self._camera_ray_correction_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device, dtype=torch.float32)
+        auto_fix_raw = os.environ.get("HOLOSOMA_CAMERA_AUTOFIX_BACKWARD", "0").strip().lower()
+        self._camera_auto_fix_backward = (auto_fix_raw not in {"0", "false", "no", "off", ""}) and (
+            not self._camera_strict_warp
+        )
+        disable_offsets_raw = os.environ.get("HOLOSOMA_CAMERA_DISABLE_OFFSETS", "0").strip().lower()
+        self._camera_disable_offsets = disable_offsets_raw not in {"0", "false", "no", "off", ""}
+        threshold_raw = os.environ.get("HOLOSOMA_CAMERA_BACKWARD_RATIO_THRESHOLD", "0.6").strip()
+        try:
+            self._camera_backward_ratio_threshold = float(threshold_raw)
+        except Exception:
+            self._camera_backward_ratio_threshold = 0.6
+        extra_yaw_raw = os.environ.get("HOLOSOMA_CAMERA_EXTRA_YAW_DEG", "0.0").strip()
+        try:
+            extra_yaw_deg = float(extra_yaw_raw)
+        except Exception:
+            extra_yaw_deg = 0.0
+        if abs(extra_yaw_deg) > 1.0e-6:
+            extra_yaw_rad = torch.deg2rad(torch.tensor(extra_yaw_deg, device=self.device, dtype=torch.float32))
+            self._camera_ray_correction_quat = quat_from_euler_xyz(
+                torch.tensor(0.0, device=self.device, dtype=torch.float32),
+                torch.tensor(0.0, device=self.device, dtype=torch.float32),
+                extra_yaw_rad,
+            ).to(device=self.device, dtype=torch.float32)
         cfg_frame_quat = getattr(cfg, "camera_frame_quat", None)
         if cfg_frame_quat is not None:
             try:
@@ -86,16 +118,23 @@ class PerceptionManager:
             if quat_vals and len(quat_vals) == 4:
                 self._camera_frame_quat = torch.tensor(quat_vals, device=self.device, dtype=torch.float32)
                 self._use_camera_frame_quat = True
+        cfg_mount_quat = getattr(cfg, "camera_mount_quat", None)
+        if cfg_mount_quat is not None:
+            try:
+                quat_vals = [float(v) for v in cfg_mount_quat]
+            except Exception:
+                quat_vals = None
+            if quat_vals and len(quat_vals) == 4:
+                self._camera_mount_quat = torch.tensor(quat_vals, device=self.device, dtype=torch.float32)
+                self._use_camera_mount_quat = True
 
-        if cfg.output_mode == "camera_depth" and self._camera_source not in {
-            "raycast",
-            "mesh_raycast",
-            "mesh_raycast_scandots",
-            "pytorch3d",
-            "rendered",
-            "rendered_depth_sensor",
-        }:
-            raise ValueError(f"Unsupported camera_source: {self._camera_source}")
+        if cfg.output_mode not in {"heightmap", "camera_depth"}:
+            raise ValueError(f"Unsupported output_mode: {cfg.output_mode}")
+        if cfg.output_mode == "camera_depth" and self._camera_source != "mesh_raycast":
+            raise ValueError(
+                "Unsupported camera_source. Only 'mesh_raycast' is supported for camera_depth "
+                "(use perception:camera_depth_d435i)."
+            )
 
         self._camera_width, self._camera_height = self._resolve_camera_resolution()
         fx, fy, cx, cy, vfov, hfov = resolve_camera_intrinsics(
@@ -182,6 +221,7 @@ class PerceptionManager:
             self._camera_scandots_ray_dirs_base = self._build_camera_scandots_rays()
 
         if self.cfg.output_mode == "camera_depth":
+            self._maybe_fix_camera_backward()
             self._log_camera_ray_alignment()
 
         if self._uses_pytorch3d():
@@ -428,20 +468,84 @@ class PerceptionManager:
             body_pos = body_pos + offset_world
 
         if apply_pitch:
-            pitch_deg = float(self.cfg.camera_pitch_deg)
-            pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
-            pitch_quat = quat_from_euler_xyz(
-                torch.tensor(0.0, device=self.device),
-                pitch_rad,
-                torch.tensor(0.0, device=self.device),
-            )
-            pitch_quat = pitch_quat.unsqueeze(0).expand(body_quat.shape[0], -1)
-            body_quat = quat_mul(body_quat, pitch_quat, w_last=True)
-            if self._use_camera_frame_quat:
-                frame_quat = self._camera_frame_quat.to(body_quat.device).unsqueeze(0).expand(body_quat.shape[0], -1)
-                body_quat = quat_mul(body_quat, frame_quat, w_last=True)
+            combo = self._camera_ray_rotation_quat(device=body_quat.device, dtype=body_quat.dtype)
+            combo = combo.unsqueeze(0).expand(body_quat.shape[0], -1)
+            body_quat = quat_mul(body_quat, combo, w_last=True)
 
         return body_pos, body_quat
+
+    def _camera_backward_stats(self, ray_dirs_base: torch.Tensor) -> tuple[float, float]:
+        if ray_dirs_base is None or ray_dirs_base.numel() == 0:
+            return 0.0, 1.0
+        env_ids = torch.tensor([0], device=self.device, dtype=torch.long)
+        _body_pos, body_quat = self._get_camera_body_pose(env_ids)
+        ray_dirs_world = quat_rotate_batched(body_quat, ray_dirs_base.unsqueeze(0))[0]
+        ray_dirs_world = ray_dirs_world / torch.norm(ray_dirs_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
+
+        root_quat = getattr(self.env, "base_quat", None)
+        if isinstance(root_quat, torch.Tensor) and root_quat.ndim >= 2 and root_quat.shape[0] > 0:
+            root_quat_env = root_quat[0:1].to(device=ray_dirs_world.device, dtype=ray_dirs_world.dtype)
+            root_forward = quat_apply(
+                root_quat_env,
+                torch.tensor([[1.0, 0.0, 0.0]], device=ray_dirs_world.device, dtype=ray_dirs_world.dtype),
+                w_last=True,
+            )[0]
+        else:
+            root_forward = torch.tensor([1.0, 0.0, 0.0], device=ray_dirs_world.device, dtype=ray_dirs_world.dtype)
+        root_forward = root_forward / torch.norm(root_forward).clamp(min=1.0e-6)
+
+        dots_root = torch.sum(ray_dirs_world * root_forward.unsqueeze(0), dim=-1)
+        back_ratio = float((dots_root <= 0.0).to(torch.float32).mean().item())
+        min_dot = float(dots_root.min().item()) if dots_root.numel() > 0 else 1.0
+        return back_ratio, min_dot
+
+    def _maybe_fix_camera_backward(self) -> None:
+        if (
+            not self._camera_auto_fix_backward
+            or self._camera_ray_dirs_base is None
+            or self._camera_ray_dirs_base.numel() == 0
+        ):
+            return
+        try:
+            before_ratio, before_min_dot = self._camera_backward_stats(self._camera_ray_dirs_base)
+        except Exception as exc:
+            (self.logger or logger).warning("Camera backward auto-fix skipped: {}", exc)
+            return
+
+        threshold = float(np.clip(self._camera_backward_ratio_threshold, 0.0, 1.0))
+        if before_ratio <= threshold:
+            return
+
+        # Try a 180 deg yaw correction when most rays point behind root forward.
+        old_correction = self._camera_ray_correction_quat.clone()
+        yaw_pi = quat_from_euler_xyz(
+            torch.tensor(0.0, device=self.device, dtype=torch.float32),
+            torch.tensor(0.0, device=self.device, dtype=torch.float32),
+            torch.tensor(np.pi, device=self.device, dtype=torch.float32),
+        ).to(device=self.device, dtype=torch.float32)
+        self._camera_ray_correction_quat = quat_mul(yaw_pi, old_correction, w_last=True)
+        candidate_rays = self._build_camera_rays()
+        after_ratio, after_min_dot = self._camera_backward_stats(candidate_rays)
+
+        if after_ratio + 1.0e-6 < before_ratio:
+            self._camera_ray_dirs_base = candidate_rays
+            if self._camera_scandots_ray_dirs_base is not None:
+                self._camera_scandots_ray_dirs_base = self._build_camera_scandots_rays()
+            (self.logger or logger).warning(
+                "Applied camera backward auto-fix: ratio {:.3f}->{:.3f}, min_dot {:.3f}->{:.3f}",
+                before_ratio,
+                after_ratio,
+                before_min_dot,
+                after_min_dot,
+            )
+            return
+
+        self._camera_ray_correction_quat = old_correction
+        (self.logger or logger).warning(
+            "Camera backward auto-fix attempted but not improved: ratio {:.3f}->{:.3f}",
+            before_ratio,
+            after_ratio,
+        )
 
     def get_heightmap_pose(
         self,
@@ -511,46 +615,59 @@ class PerceptionManager:
         ray_dirs[:, 2] = -1.0
         return grid_points, ray_dirs
 
+    def _camera_ray_rotation_quat(self, *, device: torch.device | str, dtype: torch.dtype) -> torch.Tensor:
+        pitch_deg = float(self.cfg.camera_pitch_deg)
+        pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=device, dtype=dtype))
+        pitch_quat = quat_from_euler_xyz(
+            torch.tensor(0.0, device=device, dtype=dtype),
+            pitch_rad,
+            torch.tensor(0.0, device=device, dtype=dtype),
+        )
+        correction_quat = self._camera_ray_correction_quat.to(device=device, dtype=dtype)
+        identity_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=device, dtype=dtype)
+
+        if self._camera_strict_warp:
+            combo = identity_quat
+            if self._use_camera_mount_quat:
+                combo = self._camera_mount_quat.to(device=device, dtype=dtype)
+            if self._use_camera_frame_quat:
+                combo = quat_mul(combo, self._camera_frame_quat.to(device=device, dtype=dtype), w_last=True)
+            if abs(pitch_deg) > 1.0e-6:
+                combo = quat_mul(pitch_quat, combo, w_last=True)
+            return quat_mul(correction_quat, combo, w_last=True)
+
+        if self._use_camera_frame_quat:
+            combo = quat_mul(pitch_quat, self._camera_frame_quat.to(device=device, dtype=dtype), w_last=True)
+            return quat_mul(correction_quat, combo, w_last=True)
+
+        return quat_mul(correction_quat, pitch_quat, w_last=True)
+
+    def _camera_dirs_cam_from_xy(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        if self._camera_strict_warp:
+            dirs_cam = torch.stack((x, y, torch.ones_like(x)), dim=-1)
+        elif self._use_camera_frame_quat:
+            # USD camera frame: x right, y up, -z forward.
+            dirs_cam = torch.stack((x, -y, -torch.ones_like(x)), dim=-1)
+        else:
+            # VideoMimic pinhole convention: camera (x right, y down, z forward)
+            # -> robotics (x forward, y left, z up) => [z, -x, -y] = [1, -x, -y].
+            dirs_cam = torch.stack((torch.ones_like(x), -x, -y), dim=-1)
+        return dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
+
+    def _build_camera_rays_from_coords(self, u_coords: torch.Tensor, v_coords: torch.Tensor) -> torch.Tensor:
+        v_grid, u_grid = torch.meshgrid(v_coords, u_coords, indexing="ij")
+        x = (u_grid - self._camera_cx) / self._camera_fx
+        y = (v_grid - self._camera_cy) / self._camera_fy
+        dirs_cam = self._camera_dirs_cam_from_xy(x, y).view(-1, 3)
+        combo = self._camera_ray_rotation_quat(device=self.device, dtype=torch.float32)
+        combo = combo.unsqueeze(0).expand(dirs_cam.shape[0], -1)
+        dirs_base = quat_apply(combo, dirs_cam, w_last=True)
+        return dirs_base / torch.norm(dirs_base, dim=-1, keepdim=True).clamp(min=1.0e-6)
+
     def _build_camera_rays(self) -> torch.Tensor:
         u_coords = torch.arange(self._camera_width, device=self.device, dtype=torch.float32)
         v_coords = torch.arange(self._camera_height, device=self.device, dtype=torch.float32)
-        v_grid, u_grid = torch.meshgrid(v_coords, u_coords, indexing="ij")
-
-        x = (u_grid - self._camera_cx) / self._camera_fx
-        y = (v_grid - self._camera_cy) / self._camera_fy
-
-        if self._use_camera_frame_quat:
-            # USD camera frame: x right, y up, -z forward
-            dirs_cam = torch.stack((x, -y, -torch.ones_like(x)), dim=-1)
-            dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
-            dirs_cam = dirs_cam.view(-1, 3)
-            pitch_deg = float(self.cfg.camera_pitch_deg)
-            pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
-            pitch_quat = quat_from_euler_xyz(
-                torch.tensor(0.0, device=self.device),
-                pitch_rad,
-                torch.tensor(0.0, device=self.device),
-            )
-            combo = quat_mul(pitch_quat, self._camera_frame_quat, w_last=True)
-            combo = combo.unsqueeze(0).expand(dirs_cam.shape[0], -1)
-            dirs_base = quat_apply(combo, dirs_cam, w_last=True)
-        else:
-            # Match VideoMimic pinhole convention: camera (x right, y down, z forward)
-            # -> robotics (x forward, y left, z up) => [z, -x, -y] = [1, -x, -y].
-            dirs_cam = torch.stack((torch.ones_like(x), -x, -y), dim=-1)
-            dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
-            dirs_cam = dirs_cam.view(-1, 3)
-            pitch_deg = float(self.cfg.camera_pitch_deg)
-            pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
-            pitch_quat = quat_from_euler_xyz(
-                torch.tensor(0.0, device=self.device),
-                pitch_rad,
-                torch.tensor(0.0, device=self.device),
-            )
-            pitch_quat = pitch_quat.unsqueeze(0).expand(dirs_cam.shape[0], -1)
-            dirs_base = quat_apply(pitch_quat, dirs_cam, w_last=True)
-        dirs_base = dirs_base / torch.norm(dirs_base, dim=-1, keepdim=True).clamp(min=1.0e-6)
-        return dirs_base
+        return self._build_camera_rays_from_coords(u_coords, v_coords)
 
     def _build_camera_scandots_rays(self) -> torch.Tensor:
         target_w = self.cfg.camera_scandots_width
@@ -595,42 +712,7 @@ class PerceptionManager:
         self._camera_scandots_width = int(u_coords.numel())
         self._camera_scandots_height = int(v_coords.numel())
 
-        v_grid, u_grid = torch.meshgrid(v_coords, u_coords, indexing="ij")
-        x = (u_grid - self._camera_cx) / self._camera_fx
-        y = (v_grid - self._camera_cy) / self._camera_fy
-
-        if self._use_camera_frame_quat:
-            # USD camera frame: x right, y up, -z forward
-            dirs_cam = torch.stack((x, -y, -torch.ones_like(x)), dim=-1)
-            dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
-            dirs_cam = dirs_cam.view(-1, 3)
-            pitch_deg = float(self.cfg.camera_pitch_deg)
-            pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
-            pitch_quat = quat_from_euler_xyz(
-                torch.tensor(0.0, device=self.device),
-                pitch_rad,
-                torch.tensor(0.0, device=self.device),
-            )
-            combo = quat_mul(pitch_quat, self._camera_frame_quat, w_last=True)
-            combo = combo.unsqueeze(0).expand(dirs_cam.shape[0], -1)
-            dirs_base = quat_apply(combo, dirs_cam, w_last=True)
-        else:
-            # Match VideoMimic pinhole convention: camera (x right, y down, z forward)
-            # -> robotics (x forward, y left, z up) => [z, -x, -y] = [1, -x, -y].
-            dirs_cam = torch.stack((torch.ones_like(x), -x, -y), dim=-1)
-            dirs_cam = dirs_cam / torch.norm(dirs_cam, dim=-1, keepdim=True).clamp(min=1.0e-6)
-            dirs_cam = dirs_cam.view(-1, 3)
-            pitch_deg = float(self.cfg.camera_pitch_deg)
-            pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device))
-            pitch_quat = quat_from_euler_xyz(
-                torch.tensor(0.0, device=self.device),
-                pitch_rad,
-                torch.tensor(0.0, device=self.device),
-            )
-            pitch_quat = pitch_quat.unsqueeze(0).expand(dirs_cam.shape[0], -1)
-            dirs_base = quat_apply(pitch_quat, dirs_cam, w_last=True)
-        dirs_base = dirs_base / torch.norm(dirs_base, dim=-1, keepdim=True).clamp(min=1.0e-6)
-        return dirs_base
+        return self._build_camera_rays_from_coords(u_coords, v_coords)
 
     def _resolve_heightmap_grid(self) -> tuple[int, int, float, float]:
         size = getattr(self.cfg, "heightmap_size", None)
@@ -715,23 +797,15 @@ class PerceptionManager:
         v0 = float(int(self._camera_height / 2))
         x0 = (u0 - cx) / fx
         y0 = (v0 - cy) / fy
-
-        pitch_deg = float(self.cfg.camera_pitch_deg)
-        pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=device, dtype=dtype))
-        pitch_quat = quat_from_euler_xyz(
-            torch.tensor(0.0, device=device, dtype=dtype),
-            pitch_rad,
-            torch.tensor(0.0, device=device, dtype=dtype),
-        )
-        if self._use_camera_frame_quat:
+        if self._camera_strict_warp:
+            principal_cam = torch.tensor([x0, y0, 1.0], device=device, dtype=dtype)
+        elif self._use_camera_frame_quat:
             principal_cam = torch.tensor([x0, -y0, -1.0], device=device, dtype=dtype)
-            principal_cam = principal_cam / torch.norm(principal_cam).clamp(min=1.0e-6)
-            combo = quat_mul(pitch_quat, self._camera_frame_quat.to(device=device, dtype=dtype), w_last=True)
-            forward_base = quat_apply(combo.unsqueeze(0), principal_cam.unsqueeze(0), w_last=True).squeeze(0)
         else:
             principal_cam = torch.tensor([1.0, -x0, -y0], device=device, dtype=dtype)
-            principal_cam = principal_cam / torch.norm(principal_cam).clamp(min=1.0e-6)
-            forward_base = quat_apply(pitch_quat.unsqueeze(0), principal_cam.unsqueeze(0), w_last=True).squeeze(0)
+        principal_cam = principal_cam / torch.norm(principal_cam).clamp(min=1.0e-6)
+        combo = self._camera_ray_rotation_quat(device=device, dtype=dtype)
+        forward_base = quat_apply(combo.unsqueeze(0), principal_cam.unsqueeze(0), w_last=True).squeeze(0)
         forward_base = forward_base.unsqueeze(0).expand(body_quat.shape[0], -1)
         forward_world = quat_apply(body_quat, forward_base, w_last=True)
         return forward_world / torch.norm(forward_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
@@ -1110,31 +1184,22 @@ class PerceptionManager:
         return self._build_camera_warp_mesh(env_ids)
 
     def _uses_raycast(self) -> bool:
-        if self.cfg.output_mode == "heightmap":
-            return True
-        return self.cfg.output_mode == "camera_depth" and self._camera_source == "raycast"
+        return self.cfg.output_mode == "heightmap"
 
     def _uses_camera_raycast(self) -> bool:
         return self.cfg.output_mode == "camera_depth" and self._camera_source == "mesh_raycast"
 
     def _uses_camera_scandots(self) -> bool:
-        return self.cfg.output_mode == "camera_depth" and self._camera_source == "mesh_raycast_scandots"
+        return False
 
     def _wants_camera_scandots(self) -> bool:
-        if self.cfg.output_mode != "camera_depth":
-            return False
-        if self._uses_camera_scandots():
-            return True
-        if self.cfg.camera_scandots_width is not None or self.cfg.camera_scandots_height is not None:
-            return True
-        stride = int(getattr(self.cfg, "camera_scandots_stride", 0) or 0)
-        return stride > 0
+        return False
 
     def _uses_pytorch3d(self) -> bool:
-        return self.cfg.output_mode == "camera_depth" and self._camera_source == "pytorch3d"
+        return False
 
     def _uses_rendered_camera(self) -> bool:
-        return self.cfg.output_mode == "camera_depth" and self._camera_source in {"rendered", "rendered_depth_sensor"}
+        return False
 
     def _resolve_heightmap_body_index(self) -> None:
         if self._heightmap_body_name is None:
@@ -1210,8 +1275,8 @@ class PerceptionManager:
             offset_quat = self._camera_body_offset_quat.expand(body_pos.shape[0], -1)
             body_pos = body_pos + quat_apply(body_quat, offset_pos, w_last=True)
             body_quat = quat_mul(body_quat, offset_quat, w_last=True)
-        extra_pos = getattr(self.env, "_perception_camera_offset_pos", None)
-        extra_quat = getattr(self.env, "_perception_camera_offset_quat", None)
+        extra_pos = None if self._camera_disable_offsets else getattr(self.env, "_perception_camera_offset_pos", None)
+        extra_quat = None if self._camera_disable_offsets else getattr(self.env, "_perception_camera_offset_quat", None)
         if extra_pos is not None and extra_quat is not None:
             if isinstance(idx, slice):
                 offset_pos = extra_pos
