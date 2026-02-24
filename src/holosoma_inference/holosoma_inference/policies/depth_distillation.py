@@ -49,6 +49,9 @@ class DepthDistillationPolicy(LocomotionPolicy):
         self.speed_mode = 0  # 0=low, 1=high, 2=madmax
         self._stiff_hold_active = True
         self._damping_mode_active = False
+        self._stiff_blend_count: int = 0
+        self._stiff_blend_duration: int = 100
+        self._stiff_blend_start_q: np.ndarray | None = None
 
         # Will be populated in _init_policy_components
         self.depth_backbone_session = None
@@ -585,10 +588,27 @@ class DepthDistillationPolicy(LocomotionPolicy):
         Damping mode: Kp=0, Kd>0 so joints resist motion without tracking a position.
         """
         if self._stiff_hold_active:
+            # On first call of a new stiff hold activation, capture current joint positions
+            if self._stiff_blend_start_q is None:
+                self._stiff_blend_start_q = robot_state_data[:, 7 : 7 + self.num_dofs].copy()
+
+            # Compute interpolation alpha with smoothstep easing (slow start and end)
+            t = min(self._stiff_blend_count / self._stiff_blend_duration, 1.0)
+            alpha = t * t * (3.0 - 2.0 * t)
+
+            # Interpolate joint positions from current to stiff target
+            q = (1 - alpha) * self._stiff_blend_start_q + alpha * self._stiff_hold_q
+
+            # Interpolate KP/KD from zero to stiff gains (robot starts soft, stiffens up)
+            kp = alpha * self._stiff_hold_kp
+            kd = alpha * self._stiff_hold_kd
+
+            self._stiff_blend_count += 1
+
             return {
-                "q": self._stiff_hold_q.copy(),
-                "kp": self._stiff_hold_kp,
-                "kd": self._stiff_hold_kd,
+                "q": q,
+                "kp": kp,
+                "kd": kd,
             }
         if self._damping_mode_active:
             dof_pos = robot_state_data[:, 7 : 7 + self.num_dofs]
@@ -605,6 +625,8 @@ class DepthDistillationPolicy(LocomotionPolicy):
         self.get_ready_state = False
         self._stiff_hold_active = True
         self._damping_mode_active = False
+        self._stiff_blend_count = 0
+        self._stiff_blend_start_q = None
         if hasattr(self.interface, "no_action"):
             self.interface.no_action = 0
         self.depth_frame_buffer.clear()
