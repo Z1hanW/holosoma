@@ -8,20 +8,23 @@ STAGE1_CKPT=${2:-${STAGE1_CKPT:-}}
 IMAGE_WIDTH=${IMAGE_WIDTH:-128}
 IMAGE_HEIGHT=${IMAGE_HEIGHT:-72}
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-4294967295}
-NUM_ENVS=${NUM_ENVS:-4096}
+NUM_GPUS=${NUM_GPUS:-6}
+PER_GPU_ENVS=${PER_GPU_ENVS:-$((4096 * 2))}
+NUM_ENVS=${NUM_ENVS:-$((NUM_GPUS * PER_GPU_ENVS))}
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5}
 TTTEST=${TTTEST:-0}
 case "${DEPTH_IMPL}" in
   rendered)
-    PERCEPTION_PRESET="camera_depth_d435i"
+    PERCEPTION_PRESET="heightmap"
     ;;
   depth_sensor)
-    PERCEPTION_PRESET="camera_depth_d435i"
+    PERCEPTION_PRESET="heightmap"
     ;;
   raycast)
-    PERCEPTION_PRESET="camera_depth_d435i"
+    PERCEPTION_PRESET="heightmap"
     ;;
   scandots)
-    PERCEPTION_PRESET="camera_depth_d435i"
+    PERCEPTION_PRESET="heightmap"
     ;;
   *)
     echo "Unknown DEPTH_IMPL=${DEPTH_IMPL}. Use rendered|depth_sensor|raycast|scandots." >&2
@@ -33,8 +36,8 @@ if [[ -n "${STAGE1_CKPT}" ]]; then
   echo "[INFO] Stage1 checkpoint: ${STAGE1_CKPT}"
 fi
 
-OBJ_DIR="/home/ubuntu/FAR/Store/vmm_data/___zero_pad_geo_trans"
-MOTION_DIR="/home/ubuntu/FAR/Store/vmm_data/___zero_pad_data_trans"
+OBJ_DIR="/data/terrain/___crisp_clean_geometry"
+MOTION_DIR="/data/terrain/___crisp_clean_motion"
 NUM_ROWS=${NUM_ROWS:-1}
 NUM_COLS=${NUM_COLS:-}
 FUSED_OBJ="../tmp_fused.obj"
@@ -55,7 +58,7 @@ if [[ -z "${NUM_COLS}" ]]; then
   NUM_COLS=${NUM_TILES}
 fi
 
-echo "[INFO] NUM_ENVS=${NUM_ENVS} NUM_TILES=${NUM_TILES} NUM_ROWS=${NUM_ROWS}"
+echo "[INFO] NUM_GPUS=${NUM_GPUS} PER_GPU_ENVS=${PER_GPU_ENVS} TOTAL_ENVS=${NUM_ENVS} NUM_TILES=${NUM_TILES} NUM_ROWS=${NUM_ROWS}"
 
 OBJ_PATH="${OBJ_DIR}"
 OBJ_META=""
@@ -97,7 +100,7 @@ fi
 
 if [[ "${TTTEST}" != "0" ]]; then
   echo "[INFO] TTTEST enabled: launching Viser physics preview with 1 env"
-  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} python src/holosoma/holosoma/train_agent.py \
+  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2,3,4,5,6,7} python src/holosoma/holosoma/train_agent.py \
     exp:g1-29dof-wbt-videomimic-mlp \
     "perception:${PERCEPTION_PRESET}" \
     --perception.camera_width="$IMAGE_WIDTH" \
@@ -135,7 +138,7 @@ if [[ "${TTTEST}" != "0" ]]; then
   exit 0
 fi
 
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node=8 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" torchrun --nproc_per_node="${NUM_GPUS}" --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-videomimic-mlp \
   "perception:${PERCEPTION_PRESET}" \
   --perception.camera_width="$IMAGE_WIDTH" \

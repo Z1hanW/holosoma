@@ -153,6 +153,7 @@ class BaseTask:
             self.viewer = self.simulator.viewer
         self._isaac_scandots_last_update = 0.0
         self._isaac_scandots_warned = False
+        self._isaac_scandots_payload: dict[str, object] | None = None
 
         # Initialize remaining managers
         self.observation_manager = ObservationManager(observation_config, self, self.device)
@@ -468,9 +469,9 @@ class BaseTask:
         self._update_log_dict()
         if hasattr(self, "_rollout_recorder"):
             self._rollout_recorder.record_step()
+        self._draw_scandots_in_viewer()
         if hasattr(self, "_viser_live"):
             self._viser_live.record_step()
-        self._draw_scandots_in_viewer()
 
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         final_obs_dict = {}
@@ -499,14 +500,19 @@ class BaseTask:
 
     def _draw_scandots_in_viewer(self) -> None:
         if not getattr(self.training_config, "isaac_show_scandots", True):
+            self._isaac_scandots_payload = None
             return
         if self.headless:
+            self._isaac_scandots_payload = None
             return
         if self.simulator.get_simulator_type() != SimulatorType.ISAACSIM:
+            self._isaac_scandots_payload = None
             return
         if self.perception_manager is None:
+            self._isaac_scandots_payload = None
             return
         if not getattr(self.simulator, "draw", None):
+            self._isaac_scandots_payload = None
             return
 
         update_hz = float(getattr(self.training_config, "viser_update_hz", 30.0))
@@ -527,14 +533,25 @@ class BaseTask:
         use_camera_depth = output_mode == "camera_depth"
         camera_source = getattr(getattr(self.perception_manager, "cfg", None), "camera_source", None)
         if not use_heightmap and not use_camera_depth:
+            self._isaac_scandots_payload = None
             return
         if use_camera_depth and camera_source not in ("mesh_raycast_scandots", "mesh_raycast"):
+            self._isaac_scandots_payload = None
             return
         include_misses_env = os.environ.get("ISAAC_SCANDOTS_INCLUDE_MISSES")
         if include_misses_env is None:
             include_misses = False
         else:
             include_misses = include_misses_env.lower() not in (
+                "0",
+                "false",
+                "no",
+            )
+        use_depth_mask_env = os.environ.get("ISAAC_SCANDOTS_USE_DEPTH_MASK")
+        if use_depth_mask_env is None:
+            use_depth_mask = True
+        else:
+            use_depth_mask = use_depth_mask_env.lower() not in (
                 "0",
                 "false",
                 "no",
@@ -567,19 +584,23 @@ class BaseTask:
             if not self._isaac_scandots_warned:
                 self._isaac_scandots_warned = True
                 logger.warning("IsaacSim scandots draw disabled: {}", exc)
+            self._isaac_scandots_payload = None
             return
 
         if result is None:
             if use_heightmap and not self._isaac_scandots_warned:
                 self._isaac_scandots_warned = True
                 logger.warning("IsaacSim scandots draw disabled: heightmap points are unavailable.")
+            self._isaac_scandots_payload = None
             return
 
         if not isinstance(result, tuple) or len(result) < 2:
+            self._isaac_scandots_payload = None
             return
 
         points = result[0]
         mask = result[1]
+        ray_starts = result[2] if len(result) > 2 else None
         ray_hits_world = result[4] if len(result) > 4 else None
 
         points_env = points[0]
@@ -588,17 +609,41 @@ class BaseTask:
         if mask_env is not None and mask_env.numel() > 0:
             mask_env_bool = mask_env.to(torch.bool)
 
+        draw_hit_mask = None
         if ray_hits_world is not None and ray_hits_world.numel() > 0:
             hits_env = ray_hits_world[0]
             if hits_env.shape == points_env.shape:
                 hit_mask = torch.isfinite(hits_env).all(dim=-1)
-                if mask_env_bool is not None and mask_env_bool.shape == hit_mask.shape:
+                if use_depth_mask and mask_env_bool is not None and mask_env_bool.shape == hit_mask.shape:
                     hit_mask = hit_mask & mask_env_bool
                 points_env = hits_env[hit_mask]
-        elif mask_env_bool is not None:
+                draw_hit_mask = hit_mask
+        elif mask_env_bool is not None and use_depth_mask:
             points_env = points_env[mask_env_bool]
+        line_starts_np = np.zeros((0, 3), dtype=np.float32)
+        line_ends_np = np.zeros((0, 3), dtype=np.float32)
+        if (
+            draw_hit_mask is not None
+            and ray_starts is not None
+            and ray_starts.numel() > 0
+            and ray_hits_world is not None
+            and ray_hits_world.numel() > 0
+        ):
+            starts_env = ray_starts[0]
+            hits_env = ray_hits_world[0]
+            if starts_env.shape == hits_env.shape and draw_hit_mask.shape[0] == starts_env.shape[0]:
+                starts_draw = starts_env[draw_hit_mask]
+                ends_draw = hits_env[draw_hit_mask]
+                line_starts_np = starts_draw.detach().cpu().numpy().astype(np.float32, copy=False)
+                line_ends_np = ends_draw.detach().cpu().numpy().astype(np.float32, copy=False)
         if points_env.numel() == 0:
             self.simulator.draw.clear_points()
+            self._isaac_scandots_payload = {
+                "env_id": int(env_id),
+                "points": np.zeros((0, 3), dtype=np.float32),
+                "line_starts": line_starts_np,
+                "line_ends": line_ends_np,
+            }
             return
 
         pts = points_env.detach().cpu().numpy()
@@ -612,6 +657,12 @@ class BaseTask:
         from holosoma.utils import draw as draw_utils
 
         draw_utils.draw_points(self.simulator, pts, colors, sizes, env_id)
+        self._isaac_scandots_payload = {
+            "env_id": int(env_id),
+            "points": pts.astype(np.float32, copy=False),
+            "line_starts": line_starts_np,
+            "line_ends": line_ends_np,
+        }
 
     def _ensure_long_tensor(self, tensor_like):
         if isinstance(tensor_like, torch.Tensor):

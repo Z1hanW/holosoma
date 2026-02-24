@@ -134,6 +134,35 @@ class MotionLoader:
             indexes.append(b_names.index(name))
         return torch.tensor(indexes, dtype=torch.long, device=device)
 
+    def _resolve_body_subset_indexes(
+        self,
+        body_names_clip: list[str],
+        *,
+        source: str,
+    ) -> tuple[list[str], np.ndarray]:
+        """Select body indexes in clip order according to configured robot body names.
+
+        This makes multi-clip loading robust when clips include extra scene bodies whose
+        count varies per clip.
+        """
+        name_to_idx: dict[str, int] = {}
+        duplicates: list[str] = []
+        for idx, name in enumerate(body_names_clip):
+            if name in name_to_idx:
+                duplicates.append(name)
+                continue
+            name_to_idx[name] = idx
+        if duplicates:
+            dup_sorted = sorted(set(duplicates))
+            raise ValueError(f"Duplicate body names in {source}: {dup_sorted}")
+
+        missing = [name for name in self._robot_body_names if name not in name_to_idx]
+        if missing:
+            raise ValueError(f"Missing robot body names in {source}: {missing}")
+
+        body_indexes = np.array([name_to_idx[name] for name in self._robot_body_names], dtype=np.int64)
+        return list(self._robot_body_names), body_indexes
+
     def _set_clip_metadata(
         self,
         clip_ids: list[str],
@@ -267,7 +296,11 @@ class MotionLoader:
                     raise ValueError("Object fields are inconsistent across clips.")
 
                 joint_names_clip = self._decode_h5_strings(np.asarray(data["joint_names"]))
-                body_names_clip = self._decode_h5_strings(np.asarray(data["body_names"]))
+                body_names_clip_raw = self._decode_h5_strings(np.asarray(data["body_names"]))
+                body_names_clip, body_indexes_clip = self._resolve_body_subset_indexes(
+                    body_names_clip_raw,
+                    source=str(file_path),
+                )
                 if not joint_names:
                     joint_names = joint_names_clip
                 elif joint_names_clip != joint_names:
@@ -294,10 +327,27 @@ class MotionLoader:
 
                 joint_pos_list.append(joint_pos)
                 joint_vel_list.append(np.asarray(data["joint_vel"]))
-                body_pos_list.append(np.asarray(data["body_pos_w"]))
-                body_quat_list.append(np.asarray(data["body_quat_w"]))
-                body_lin_vel_list.append(np.asarray(data["body_lin_vel_w"]))
-                body_ang_vel_list.append(np.asarray(data["body_ang_vel_w"]))
+                body_pos = np.asarray(data["body_pos_w"])
+                body_quat = np.asarray(data["body_quat_w"])
+                body_lin_vel = np.asarray(data["body_lin_vel_w"])
+                body_ang_vel = np.asarray(data["body_ang_vel_w"])
+                expected_bodies = len(body_names_clip_raw)
+                for key, arr in (
+                    ("body_pos_w", body_pos),
+                    ("body_quat_w", body_quat),
+                    ("body_lin_vel_w", body_lin_vel),
+                    ("body_ang_vel_w", body_ang_vel),
+                ):
+                    if arr.shape[1] != expected_bodies:
+                        raise ValueError(
+                            f"{key} body dimension mismatch in {file_path}: "
+                            f"{arr.shape[1]} != {expected_bodies}"
+                        )
+
+                body_pos_list.append(body_pos[:, body_indexes_clip])
+                body_quat_list.append(body_quat[:, body_indexes_clip])
+                body_lin_vel_list.append(body_lin_vel[:, body_indexes_clip])
+                body_ang_vel_list.append(body_ang_vel[:, body_indexes_clip])
 
                 if clip_has_object:
                     object_pos_list.append(np.asarray(data["object_pos_w"]))

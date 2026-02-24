@@ -2046,6 +2046,21 @@ class ViserLiveViewer:
             return
 
         self._ray_direction_stats_suffix = ""
+        source_env = os.environ.get("VISER_SCANDOTS_SOURCE", "auto").strip().lower()
+        if source_env in ("isaac", "isaacsim", "isaac_payload"):
+            if self._update_scandots_from_isaac_payload(offset):
+                return
+            if not self._scandots_warned:
+                logger.warning("Viser scandots source=isaac requested but Isaac payload is unavailable.")
+                self._scandots_warned = True
+            if self._scandots_handle is not None:
+                self._scandots_handle.visible = False
+            if self._scandots_rays_handle is not None:
+                self._scandots_rays_handle.visible = False
+            return
+        if source_env == "auto" and self._update_scandots_from_isaac_payload(offset):
+            return
+
         perception_mgr = getattr(self._env, "perception_manager", None)
         if perception_mgr is None:
             if not self._scandots_warned:
@@ -2061,6 +2076,24 @@ class ViserLiveViewer:
             include_misses = False
         else:
             include_misses = include_misses_env.lower() not in (
+                "0",
+                "false",
+                "no",
+            )
+        use_depth_mask_env = os.environ.get("VISER_SCANDOTS_USE_DEPTH_MASK")
+        if use_depth_mask_env is None:
+            use_depth_mask = True
+        else:
+            use_depth_mask = use_depth_mask_env.lower() not in (
+                "0",
+                "false",
+                "no",
+            )
+        points_follow_lines_env = os.environ.get("VISER_SCANDOTS_POINTS_FOLLOW_LINES")
+        if points_follow_lines_env is None:
+            points_follow_lines = True
+        else:
+            points_follow_lines = points_follow_lines_env.lower() not in (
                 "0",
                 "false",
                 "no",
@@ -2142,12 +2175,17 @@ class ViserLiveViewer:
 
         if hits_env is not None and mesh_hit_mask_env is not None:
             # Red dots should represent true mesh intersections.
-            # Always respect the depth-valid hit mask when available so dots match displayed valid hits.
+            # By default respect the depth-valid hit mask so dots match the final depth map.
+            # For debugging, VISER_SCANDOTS_USE_DEPTH_MASK=0 keeps all finite mesh intersections.
             point_mask_env = mesh_hit_mask_env
-            if (mask_env_bool is not None) and (mask_env_bool.shape == point_mask_env.shape):
+            if (
+                use_depth_mask
+                and (mask_env_bool is not None)
+                and (mask_env_bool.shape == point_mask_env.shape)
+            ):
                 point_mask_env = point_mask_env & mask_env_bool
             points_env = hits_env[point_mask_env]
-        elif mask_env_bool is not None:
+        elif (mask_env_bool is not None) and use_depth_mask:
             points_env = points_all_env[mask_env_bool]
         if points_env.numel() == 0:
             if self._scandots_handle is not None:
@@ -2236,14 +2274,41 @@ class ViserLiveViewer:
 
         starts_env = starts_all_env
         ends_env = ends_all_env
-        if not include_misses and mask_env_bool is not None and mask_env_bool.numel() > 0:
-            # Render only true hits; don't draw zero-length "miss" lines at the ray origin.
-            starts_env = starts_all_env[mask_env_bool]
-            ends_env = ends_all_env[mask_env_bool]
+        if not include_misses:
+            draw_mask = None
+            if use_depth_mask and mask_env_bool is not None and mask_env_bool.numel() > 0:
+                # Render only depth-valid hits.
+                draw_mask = mask_env_bool
+            elif mesh_hit_mask_env is not None and mesh_hit_mask_env.numel() > 0:
+                # Debug mode: render finite mesh hits even if they are depth-invalid.
+                draw_mask = mesh_hit_mask_env
+            if draw_mask is not None:
+                starts_env = starts_all_env[draw_mask]
+                ends_env = ends_all_env[draw_mask]
         if starts_env.numel() == 0 or ends_env.numel() == 0:
+            if points_follow_lines and self._scandots_handle is not None:
+                self._scandots_handle.visible = False
             if self._scandots_rays_handle is not None:
                 self._scandots_rays_handle.visible = False
             return
+
+        if points_follow_lines:
+            # Keep dots and line endpoints exactly consistent for debugging.
+            points_env = ends_env
+            pts = points_env.detach().cpu().numpy()
+            if self._recenter:
+                pts = pts - offset
+            if self._scandots_handle is None:
+                self._scandots_handle = self._server.scene.add_point_cloud(
+                    self._scene_path("/scandots"),
+                    points=pts.astype(np.float32, copy=False),
+                    colors=self._scandots_color,
+                    point_size=float(self._scandots_point_size),
+                    point_shape="circle",
+                )
+            else:
+                self._scandots_handle.visible = True
+                self._scandots_handle.points = pts.astype(np.float32, copy=False)
 
         lines = torch.stack([starts_env, ends_env], dim=1).detach().cpu().numpy()
         if self._recenter:
@@ -2263,6 +2328,83 @@ class ViserLiveViewer:
                 self._scandots_rays_handle.colors = colors.astype(np.uint8, copy=False)
             except Exception:
                 pass
+
+    def _update_scandots_from_isaac_payload(self, offset: np.ndarray) -> bool:
+        payload = getattr(self._env, "_isaac_scandots_payload", None)
+        if not isinstance(payload, dict):
+            return False
+        try:
+            payload_env_id = int(payload.get("env_id", -1))
+        except Exception:
+            return False
+        if payload_env_id != self._env_id:
+            return False
+
+        points = payload.get("points")
+        if points is None:
+            return False
+        pts = np.asarray(points, dtype=np.float32)
+        if pts.ndim != 2 or pts.shape[1] != 3:
+            return False
+        if pts.shape[0] == 0:
+            if self._scandots_handle is not None:
+                self._scandots_handle.visible = False
+            if self._scandots_rays_handle is not None:
+                self._scandots_rays_handle.visible = False
+            return True
+
+        pts_draw = pts
+        if self._recenter:
+            pts_draw = pts_draw - offset
+        if self._scandots_handle is None:
+            self._scandots_handle = self._server.scene.add_point_cloud(
+                self._scene_path("/scandots"),
+                points=pts_draw.astype(np.float32, copy=False),
+                colors=self._scandots_color,
+                point_size=float(self._scandots_point_size),
+                point_shape="circle",
+            )
+        else:
+            self._scandots_handle.visible = True
+            self._scandots_handle.points = pts_draw.astype(np.float32, copy=False)
+
+        line_starts = payload.get("line_starts")
+        line_ends = payload.get("line_ends")
+        if line_starts is None or line_ends is None:
+            if self._scandots_rays_handle is not None:
+                self._scandots_rays_handle.visible = False
+            return True
+
+        starts = np.asarray(line_starts, dtype=np.float32)
+        ends = np.asarray(line_ends, dtype=np.float32)
+        if starts.ndim != 2 or ends.ndim != 2 or starts.shape != ends.shape or starts.shape[1] != 3:
+            if self._scandots_rays_handle is not None:
+                self._scandots_rays_handle.visible = False
+            return True
+        if starts.shape[0] == 0:
+            if self._scandots_rays_handle is not None:
+                self._scandots_rays_handle.visible = False
+            return True
+
+        lines = np.stack([starts, ends], axis=1).astype(np.float32, copy=False)
+        if self._recenter:
+            lines = lines - offset[None, None, :]
+        colors = np.full((lines.shape[0], 2, 3), [0, 0, 0], dtype=np.uint8)
+        if self._scandots_rays_handle is None:
+            self._scandots_rays_handle = self._server.scene.add_line_segments(
+                self._scene_path("/scandots_rays"),
+                points=lines,
+                colors=colors.astype(np.uint8, copy=False),
+                line_width=1.0,
+            )
+        else:
+            self._scandots_rays_handle.visible = True
+            self._scandots_rays_handle.points = lines
+            try:
+                self._scandots_rays_handle.colors = colors.astype(np.uint8, copy=False)
+            except Exception:
+                pass
+        return True
 
     def _depth_map_from_strict_camera_rays(
         self,

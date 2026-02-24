@@ -820,12 +820,13 @@ class PerceptionManager:
         ray_dirs_world = ray_dirs_world / torch.norm(ray_dirs_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
         forward_world = self._get_camera_forward_axis(body_quat)
         dots = torch.sum(ray_dirs_world * forward_world.unsqueeze(1), dim=-1)
-        dots = torch.clamp(dots, min=1.0e-6, max=1.0)
-        depth = ranges * dots
+        front = dots > 1.0e-6
+        depth = ranges * torch.where(front, dots, torch.ones_like(dots))
         near = float(getattr(self.cfg, "camera_near", 0.0) or 0.0)
         # Match warp_sensors semantics: only rays whose projected depth is inside [near, max_distance] are valid hits.
         hit_mask = (
             hit_mask
+            & front
             & torch.isfinite(depth)
             & (depth >= (near - 1.0e-6))
             & (depth <= (self.cfg.max_distance + 1.0e-6))
@@ -843,11 +844,12 @@ class PerceptionManager:
         ray_dirs_world = ray_dirs_world / torch.norm(ray_dirs_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
         forward_world = self._get_camera_forward_axis(body_quat)
         dots = torch.sum(ray_dirs_world * forward_world.unsqueeze(1), dim=-1)
-        dots = torch.clamp(dots, min=1.0e-6, max=1.0)
-        depth = ranges * dots
+        front = dots > 1.0e-6
+        depth = ranges * torch.where(front, dots, torch.ones_like(dots))
         near = float(getattr(self.cfg, "camera_near", 0.0) or 0.0)
         return (
             hit_mask
+            & front
             & torch.isfinite(depth)
             & (depth >= (near - 1.0e-6))
             & (depth <= (self.cfg.max_distance + 1.0e-6))
@@ -859,8 +861,9 @@ class PerceptionManager:
         ray_dirs_world = ray_dirs_world / torch.norm(ray_dirs_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
         forward_world = self._get_camera_forward_axis(body_quat)
         dots = torch.sum(ray_dirs_world * forward_world.unsqueeze(1), dim=-1)
-        dots = torch.clamp(dots, min=1.0e-6, max=1.0)
-        return self.cfg.max_distance / dots
+        front = dots > 1.0e-6
+        miss_front = self.cfg.max_distance / torch.clamp(dots, min=1.0e-6)
+        return torch.where(front, miss_front, torch.zeros_like(miss_front))
 
     def _apply_camera_depth_noise(self, depth: torch.Tensor) -> torch.Tensor:
         std_mult = getattr(self.env, "_perception_camera_noise_std_mult", None)

@@ -187,6 +187,50 @@ class InteractionMeshRetargeter:
         self._last_frame_idx = 0
         self._interaction_mesh_line_width = 0.03
 
+    def _normalize_yourdfpy_actuated_indices(self, urdf_model: yourdfpy.URDF) -> None:
+        """Work around yourdfpy returning single-DOF indices as one-element lists."""
+        raw_indices = getattr(urdf_model, "_actuated_dof_indices", None)
+        if not isinstance(raw_indices, list):
+            return
+
+        normalized_indices = []
+        for idx in raw_indices:
+            arr = np.asarray(idx).reshape(-1)
+            if arr.size == 1:
+                normalized_indices.append(int(arr[0]))
+            else:
+                normalized_indices.append([int(v) for v in arr.tolist()])
+        urdf_model._actuated_dof_indices = normalized_indices
+
+    def _load_urdf_for_viser(self, urdf_path: str) -> yourdfpy.URDF:
+        """Load URDF robustly for viser, with a fallback for yourdfpy scalar-index bug."""
+        try:
+            return yourdfpy.URDF.load(
+                urdf_path,
+                load_meshes=True,
+                build_scene_graph=True,
+            )
+        except TypeError as exc:
+            message = str(exc)
+            if "0-dimensional arrays can be converted to Python scalars" not in message:
+                raise
+
+            print(
+                "[warn] yourdfpy failed to build scene graph due scalar-index issue; "
+                f"retrying with compatibility workaround for: {urdf_path}"
+            )
+            urdf_model = yourdfpy.URDF.load(
+                urdf_path,
+                load_meshes=True,
+                build_scene_graph=False,
+            )
+            self._normalize_yourdfpy_actuated_indices(urdf_model)
+            urdf_model._scene = urdf_model._create_scene(
+                use_collision_geometry=False,
+                load_geometry=True,
+            )
+            return urdf_model
+
     def _setup_visualization(self):
         """Setup Viser visualization components."""
         self.server = viser.ViserServer()
@@ -201,11 +245,7 @@ class InteractionMeshRetargeter:
         self.robot_base = self.server.scene.add_frame("/world/robot", show_axes=False)
 
         # Load robot URDF
-        self.robot_urdf = yourdfpy.URDF.load(
-            self.robot_model_path,
-            load_meshes=True,
-            build_scene_graph=True,
-        )
+        self.robot_urdf = self._load_urdf_for_viser(self.robot_model_path)
 
         print("Viser using robot URDF: ", self.robot_model_path)
 
@@ -220,11 +260,7 @@ class InteractionMeshRetargeter:
         if self.object_model_path:
             self.object_base = self.server.scene.add_frame("/world/object", show_axes=False)
 
-            self.object_urdf = yourdfpy.URDF.load(
-                self.object_model_path,
-                load_meshes=True,
-                build_scene_graph=True,
-            )
+            self.object_urdf = self._load_urdf_for_viser(self.object_model_path)
 
             # Create ViserUrdf instance for object, attaching it to the object_base frame
             self.viser_object = ViserUrdf(
@@ -619,6 +655,10 @@ class InteractionMeshRetargeter:
         obj_pts_list = []  # original size object pts
         interaction_mesh_frames_src = [] if self.visualize else None
         interaction_mesh_frames_tgt = [] if self.visualize else None
+        human_kpts_handle_list = []
+        obj_kpts_demo_handle_list = []
+        obj_kpts_handle_list = []
+        robot_kpts_handle_list = []
 
         print(f"\nStarting motion retargeting for {num_frames} frames...")
         with tqdm(range(num_frames)) as pbar:
@@ -662,13 +702,13 @@ class InteractionMeshRetargeter:
 
                     obj_pts_demo_list.append(obj_pts_demo)
                     obj_pts_list.append(obj_pts)
-                    human_kpts_handle_list = self.draw_keypoints(human_mapped_joints, name="human_kpts")  # 15 X 3
+                    human_kpts_handle_list = self.draw_keypoints(human_mapped_joints, name="human_kpts") or []  # 15 X 3
                     obj_kpts_demo_handle_list = self.draw_keypoints(
                         obj_pts_demo, name="object_demo_kpts", rgba=(1, 0, 0, 1)
-                    )  # 100 X 3
+                    ) or []  # 100 X 3
                     obj_kpts_handle_list = self.draw_keypoints(
                         obj_pts, name="object_kpts", rgba=(0, 1, 1, 1)
-                    )  # 100 X 3
+                    ) or []  # 100 X 3
 
                 # Create adjacency list and calculate target Laplacian coordinates
                 adj_list = get_adjacency_list(source_tetrahedra, len(source_vertices))
@@ -707,7 +747,7 @@ class InteractionMeshRetargeter:
                 if self.debug and robot_link_positions is not None:
                     robot_kpts_handle_list = self.draw_keypoints(
                         robot_link_positions, name="robot_kpts", rgba=(0, 1, 0, 1)
-                    )
+                    ) or []
 
                 retargeted_motions.append(q)
                 if self.visualize and self.debug:
