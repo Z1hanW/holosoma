@@ -592,7 +592,7 @@ if __name__ == "__main__":
             rs_cam_cfg = RealSenseCameraConfig(enable_ir_stereo=True)
             rs_cfg = RealSenseCamerasConfig(terms={"d435i_depth": rs_cam_cfg})
         else:
-            rs_cam_cfg = RealSenseCameraConfig(enable_color=cfg.enable_rgb)
+            rs_cam_cfg = RealSenseCameraConfig(enable_rgb=cfg.enable_rgb)
             rs_cfg = RealSenseCamerasConfig(terms={"d435i_depth": rs_cam_cfg})
         camera_wrapper = RealSenseCamerasWrapper(rs_cfg)
     else:

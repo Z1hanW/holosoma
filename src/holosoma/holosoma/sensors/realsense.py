@@ -23,7 +23,7 @@ class RealSenseCameraConfig:
     fps: int = 30
     """Capture frame rate for both depth and color streams."""
 
-    enable_color: bool = True
+    enable_rgb: bool = True
     """Enable the color (RGB) stream."""
 
     align_depth_to_color: bool = True
@@ -81,7 +81,7 @@ class RealSenseCamera:
         )
 
         # Enable color stream
-        if self.config.enable_color:
+        if self.config.enable_rgb:
             rs_config.enable_stream(
                 rs.stream.color, width, height, rs.format.bgr8, self.config.fps,
             )
@@ -109,7 +109,7 @@ class RealSenseCamera:
             print(f"[RealSense] IR emitter: {'on' if self.config.emitter_enabled else 'off'}")
 
         # Align object (reusable across frames)
-        if self.config.align_depth_to_color and self.config.enable_color:
+        if self.config.align_depth_to_color and self.config.enable_rgb:
             self.align = rs.align(rs.stream.color)
         else:
             self.align = None
@@ -270,7 +270,7 @@ class RealSenseCamera:
 
         # Color
         rgb_data = None
-        if self.config.enable_color:
+        if self.config.enable_rgb:
             color_frame = frames.get_color_frame()
             if color_frame:
                 rgb_data = np.asanyarray(color_frame.get_data())  # BGR uint8

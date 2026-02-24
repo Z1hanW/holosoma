@@ -27,7 +27,7 @@ mujoco_d435i = dataclasses.replace(
     depth_source="depth",
     save_images=False,
     visualize_images=True,
-    latency_frame=(7, 8),
+    latency_frame=(7, 7),
     buffer_len=9,
 )
 
@@ -88,9 +88,12 @@ real_d435i = dataclasses.replace(
     crop_y_start=16,
     crop_x_start=32,
     crop_x_end=-32,
-    save_images=False,
-    visualize_images=True,
+    save_images=True,
+    visualize_images=False,
     camera_type="realsense",
+    enable_rgb=False,
+    latency_frame=(3, 3),  # 80-100ms RealSense latency, training uses (7,8)*20ms
+    buffer_len=4,
 )
 
 # Debug-friendly D435i profile with visualization and both depth sources enabled.
