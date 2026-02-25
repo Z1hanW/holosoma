@@ -20,6 +20,12 @@ class PerceptionConfig:
     camera_source: str = "mesh_raycast"
     """Camera source for camera_depth output. Only 'mesh_raycast' is supported."""
 
+    camera_strict_warp: bool | None = None
+    """When set, force strict warp camera ray convention instead of env-var defaults."""
+
+    camera_auto_fix_backward: bool | None = None
+    """When set, enable/disable automatic backward-ray correction (ignored in strict warp mode)."""
+
     grid_size: int = 11
     """Number of samples per dimension for the heightmap grid."""
 
@@ -98,6 +104,66 @@ class PerceptionConfig:
 
     camera_distortion: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0, 0.0])
     """Camera distortion coefficients (k1, k2, p1, p2, k3)."""
+
+    camera_warp_preprocess: bool = False
+    """Apply warp-image-style depth preprocessing (crop/resize/noise/latency/normalization)."""
+
+    camera_warp_freq_ratio: int = 1
+    """Update preprocessed depth every N perception updates (1 = every update)."""
+
+    camera_warp_latency_frame: int = 0
+    """Return delayed frame index from temporal buffer."""
+
+    camera_warp_buffer_len: int = 1
+    """Temporal depth buffer length for latency modeling."""
+
+    camera_warp_resize: tuple[int, int] | None = None
+    """Optional (height, width) resize after crop."""
+
+    camera_warp_crop_top: int = 0
+    """Pixels cropped from top before resize."""
+
+    camera_warp_crop_bottom: int = 0
+    """Pixels cropped from bottom before resize."""
+
+    camera_warp_crop_left: int = 0
+    """Pixels cropped from left before resize."""
+
+    camera_warp_crop_right: int = 0
+    """Pixels cropped from right before resize."""
+
+    camera_warp_min_valid_depth: float = 0.15
+    """Depth below this threshold is treated as empty (set to max_distance)."""
+
+    camera_warp_normalize: bool = False
+    """Normalize depth to [-0.5, 0.5] using [camera_near, max_distance]."""
+
+    camera_warp_edge_noise: bool = False
+    """Enable Sobel edge perturbation to mimic depth discontinuity artifacts."""
+
+    camera_warp_edge_border: int = 3
+    """Ignore edge perturbation near image borders by this many pixels."""
+
+    camera_warp_edge_shuffle_prob: float = 0.9
+    """Probability for edge pixels to be replaced by shuffled local neighbors."""
+
+    camera_warp_edge_empty_prob: float = 0.7
+    """Probability for selected edge pixels to be set to empty depth."""
+
+    camera_warp_edge_thresh_primary: float = 1.0
+    """Primary Sobel magnitude threshold used for neighbor shuffling."""
+
+    camera_warp_edge_thresh_secondary: float = 0.6
+    """Secondary Sobel magnitude threshold used for empty-pixel injection."""
+
+    camera_warp_edge_far_depth_thresh: float = 2.5
+    """Depth threshold used by secondary edge-empty mask."""
+
+    camera_warp_enable_holes: bool = False
+    """Enable synthetic hole dropout (coarse approximation of perlin-style holes)."""
+
+    camera_warp_hole_prob: float = 0.0
+    """Probability threshold for synthetic hole masks when enabled."""
 
     camera_scandots_stride: int = 4
     """Pixel stride for scandots depth (mesh_raycast_scandots)."""

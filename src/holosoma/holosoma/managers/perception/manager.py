@@ -83,13 +83,20 @@ class PerceptionManager:
         self._use_camera_mount_quat = False
         self._camera_frame_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
         self._use_camera_frame_quat = False
-        strict_warp_raw = os.environ.get("HOLOSOMA_CAMERA_STRICT_WARP", "0").strip().lower()
-        self._camera_strict_warp = strict_warp_raw not in {"0", "false", "no", "off", ""}
+        cfg_strict_warp = getattr(cfg, "camera_strict_warp", None)
+        if cfg_strict_warp is None:
+            strict_warp_raw = os.environ.get("HOLOSOMA_CAMERA_STRICT_WARP", "0").strip().lower()
+            self._camera_strict_warp = strict_warp_raw not in {"0", "false", "no", "off", ""}
+        else:
+            self._camera_strict_warp = bool(cfg_strict_warp)
         self._camera_ray_correction_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device, dtype=torch.float32)
-        auto_fix_raw = os.environ.get("HOLOSOMA_CAMERA_AUTOFIX_BACKWARD", "0").strip().lower()
-        self._camera_auto_fix_backward = (auto_fix_raw not in {"0", "false", "no", "off", ""}) and (
-            not self._camera_strict_warp
-        )
+        cfg_auto_fix_backward = getattr(cfg, "camera_auto_fix_backward", None)
+        if cfg_auto_fix_backward is None:
+            auto_fix_raw = os.environ.get("HOLOSOMA_CAMERA_AUTOFIX_BACKWARD", "0").strip().lower()
+            auto_fix_enabled = auto_fix_raw not in {"0", "false", "no", "off", ""}
+        else:
+            auto_fix_enabled = bool(cfg_auto_fix_backward)
+        self._camera_auto_fix_backward = auto_fix_enabled and (not self._camera_strict_warp)
         disable_offsets_raw = os.environ.get("HOLOSOMA_CAMERA_DISABLE_OFFSETS", "0").strip().lower()
         self._camera_disable_offsets = disable_offsets_raw not in {"0", "false", "no", "off", ""}
         threshold_raw = os.environ.get("HOLOSOMA_CAMERA_BACKWARD_RATIO_THRESHOLD", "0.6").strip()
@@ -154,6 +161,60 @@ class PerceptionManager:
         self._camera_vfov_deg = vfov
         self._camera_hfov_deg = hfov
         self._camera_num_points = self._camera_width * self._camera_height
+        self._camera_warp_preprocess = (
+            self.cfg.output_mode == "camera_depth" and bool(getattr(self.cfg, "camera_warp_preprocess", False))
+        )
+        self._camera_warp_freq_ratio = max(1, int(getattr(self.cfg, "camera_warp_freq_ratio", 1) or 1))
+        self._camera_warp_latency_frame = max(0, int(getattr(self.cfg, "camera_warp_latency_frame", 0) or 0))
+        self._camera_warp_buffer_len = max(1, int(getattr(self.cfg, "camera_warp_buffer_len", 1) or 1))
+        if self._camera_warp_latency_frame >= self._camera_warp_buffer_len:
+            raise ValueError("camera_warp_latency_frame must be smaller than camera_warp_buffer_len.")
+
+        self._camera_warp_crop_top = max(0, int(getattr(self.cfg, "camera_warp_crop_top", 0) or 0))
+        self._camera_warp_crop_bottom = max(0, int(getattr(self.cfg, "camera_warp_crop_bottom", 0) or 0))
+        self._camera_warp_crop_left = max(0, int(getattr(self.cfg, "camera_warp_crop_left", 0) or 0))
+        self._camera_warp_crop_right = max(0, int(getattr(self.cfg, "camera_warp_crop_right", 0) or 0))
+
+        resize_cfg = getattr(self.cfg, "camera_warp_resize", None)
+        self._camera_warp_resize: tuple[int, int] | None = None
+        if resize_cfg is not None:
+            try:
+                resize_h, resize_w = resize_cfg
+                self._camera_warp_resize = (max(1, int(resize_h)), max(1, int(resize_w)))
+            except Exception as exc:
+                raise ValueError("camera_warp_resize must be a (height, width) tuple when provided.") from exc
+
+        self._camera_warp_min_valid_depth = float(getattr(self.cfg, "camera_warp_min_valid_depth", 0.15) or 0.15)
+        self._camera_warp_normalize = bool(getattr(self.cfg, "camera_warp_normalize", False))
+        self._camera_warp_edge_noise = bool(getattr(self.cfg, "camera_warp_edge_noise", False))
+        self._camera_warp_edge_border = max(0, int(getattr(self.cfg, "camera_warp_edge_border", 3) or 0))
+        self._camera_warp_edge_shuffle_prob = float(getattr(self.cfg, "camera_warp_edge_shuffle_prob", 0.9) or 0.0)
+        self._camera_warp_edge_empty_prob = float(getattr(self.cfg, "camera_warp_edge_empty_prob", 0.7) or 0.0)
+        self._camera_warp_edge_thresh_primary = float(
+            getattr(self.cfg, "camera_warp_edge_thresh_primary", 1.0) or 0.0
+        )
+        self._camera_warp_edge_thresh_secondary = float(
+            getattr(self.cfg, "camera_warp_edge_thresh_secondary", 0.6) or 0.0
+        )
+        self._camera_warp_edge_far_depth_thresh = float(
+            getattr(self.cfg, "camera_warp_edge_far_depth_thresh", 2.5) or 0.0
+        )
+        self._camera_warp_enable_holes = bool(getattr(self.cfg, "camera_warp_enable_holes", False))
+        self._camera_warp_hole_prob = float(getattr(self.cfg, "camera_warp_hole_prob", 0.0) or 0.0)
+
+        self._camera_obs_height, self._camera_obs_width = self._resolve_camera_obs_resolution()
+        self._camera_obs_fill_value = self._camera_obs_default_fill_value()
+        self._camera_obs_step_counter = 0
+        self._camera_warp_sobel_x = torch.tensor(
+            [[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]],
+            device=self.device,
+            dtype=torch.float32,
+        ).view(1, 1, 3, 3)
+        self._camera_warp_sobel_y = torch.tensor(
+            [[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]],
+            device=self.device,
+            dtype=torch.float32,
+        ).view(1, 1, 3, 3)
 
         (
             self._heightmap_grid_x,
@@ -176,6 +237,17 @@ class PerceptionManager:
             cfg.max_distance,
             device=self.device,
         )
+        self._camera_depth_obs = torch.full(
+            (self.num_envs, self._camera_obs_height, self._camera_obs_width),
+            self._camera_obs_fill_value,
+            device=self.device,
+        )
+        self._camera_depth_buffer = torch.full(
+            (self.num_envs, self._camera_warp_buffer_len, self._camera_obs_height, self._camera_obs_width),
+            self._camera_obs_fill_value,
+            device=self.device,
+        )
+        self._camera_depth_buffer_ready = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
         self._warned_invalid_rendered_depth = False
 
         self._ray_hits_world = torch.zeros(self.num_envs, self._num_points, 3, device=self.device)
@@ -237,10 +309,17 @@ class PerceptionManager:
         if env_ids is None:
             self._heightmap.zero_()
             self._camera_depth.fill_(self.cfg.max_distance)
+            self._camera_depth_obs.fill_(self._camera_obs_fill_value)
+            self._camera_depth_buffer.fill_(self._camera_obs_fill_value)
+            self._camera_depth_buffer_ready.zero_()
+            self._camera_obs_step_counter = 0
             self._ray_hits_world.zero_()
             return
         self._heightmap[env_ids] = 0.0
         self._camera_depth[env_ids] = self.cfg.max_distance
+        self._camera_depth_obs[env_ids] = self._camera_obs_fill_value
+        self._camera_depth_buffer[env_ids] = self._camera_obs_fill_value
+        self._camera_depth_buffer_ready[env_ids] = False
         self._ray_hits_world[env_ids] = 0.0
 
     def update(self, env_ids: torch.Tensor | None = None) -> None:
@@ -275,25 +354,46 @@ class PerceptionManager:
                 )
             elif camera_depth.ndim == 2:
                 camera_depth = camera_depth.unsqueeze(0)
-            self._camera_depth[self._rendered_camera_env_id] = camera_depth.squeeze(0)
+            env_id = torch.tensor([self._rendered_camera_env_id], device=self.device, dtype=torch.long)
+            self._camera_depth[env_id] = camera_depth
+            self._update_camera_depth_observation(
+                env_id,
+                camera_depth,
+                refresh=self._consume_camera_obs_refresh_flag(),
+            )
             return
 
         if self._uses_pytorch3d():
             idx = env_ids if env_ids is not None else slice(None)
             camera_depth = self._compute_pytorch3d_depth(env_ids)
             self._camera_depth[idx] = camera_depth
+            self._update_camera_depth_observation(
+                idx,
+                camera_depth,
+                refresh=self._consume_camera_obs_refresh_flag(),
+            )
             return
 
         if self._uses_camera_scandots():
             idx = env_ids if env_ids is not None else slice(None)
             camera_depth = self._compute_camera_scandots_depth(env_ids)
             self._camera_depth[idx] = camera_depth
+            self._update_camera_depth_observation(
+                idx,
+                camera_depth,
+                refresh=self._consume_camera_obs_refresh_flag(),
+            )
             return
 
         if self._uses_camera_raycast():
             idx = env_ids if env_ids is not None else slice(None)
             camera_depth = self._compute_camera_raycast_depth(env_ids)
             self._camera_depth[idx] = camera_depth
+            self._update_camera_depth_observation(
+                idx,
+                camera_depth,
+                refresh=self._consume_camera_obs_refresh_flag(),
+            )
             return
 
         ray_starts, ray_dirs, ray_hits_world, root_pos, base_quat, offset_world = self._compute_rays(env_ids)
@@ -306,7 +406,13 @@ class PerceptionManager:
 
         if self.cfg.output_mode == "camera_depth":
             camera_depth = self._project_to_camera(ray_hits_world, root_pos, base_quat, offset_world)
+            camera_depth = self._apply_camera_depth_noise(camera_depth)
             self._camera_depth[idx] = camera_depth
+            self._update_camera_depth_observation(
+                idx,
+                camera_depth,
+                refresh=self._consume_camera_obs_refresh_flag(),
+            )
 
     def get_obs(self) -> torch.Tensor:
         if not self.enabled:
@@ -314,13 +420,18 @@ class PerceptionManager:
         if self.cfg.output_mode == "heightmap":
             return self._heightmap.view(self.num_envs, -1)
         if self.cfg.output_mode == "camera_depth":
-            return self._camera_depth.view(self.num_envs, -1)
+            return self._camera_depth_obs.view(self.num_envs, -1)
         raise ValueError(f"Unsupported perception output_mode: {self.cfg.output_mode}")
 
     def get_camera_depth_map(self) -> torch.Tensor:
         if not self.enabled or self.cfg.output_mode != "camera_depth":
             raise RuntimeError("Camera depth map requested but camera_depth output is disabled.")
         return self._camera_depth
+
+    def get_camera_depth_obs_map(self) -> torch.Tensor:
+        if not self.enabled or self.cfg.output_mode != "camera_depth":
+            raise RuntimeError("Camera depth observation map requested but camera_depth output is disabled.")
+        return self._camera_depth_obs
 
     def get_heightmap_map(self, env_ids: torch.Tensor | None = None) -> torch.Tensor | None:
         if not self.enabled or self.cfg.output_mode != "heightmap":
@@ -892,6 +1003,181 @@ class PerceptionManager:
             depth_out = torch.where(mask, torch.full_like(depth_out, self.cfg.max_distance), depth_out)
 
         return torch.clamp(depth_out, min=0.0, max=self.cfg.max_distance)
+
+    def _resolve_camera_obs_resolution(self) -> tuple[int, int]:
+        if not self._camera_warp_preprocess:
+            return self._camera_height, self._camera_width
+
+        crop_height = max(1, self._camera_height - self._camera_warp_crop_top - self._camera_warp_crop_bottom)
+        crop_width = max(1, self._camera_width - self._camera_warp_crop_left - self._camera_warp_crop_right)
+        if self._camera_warp_resize is None:
+            return crop_height, crop_width
+        return self._camera_warp_resize
+
+    def _camera_obs_default_fill_value(self) -> float:
+        if self._camera_warp_preprocess and self._camera_warp_normalize:
+            return 0.5
+        return float(self.cfg.max_distance)
+
+    def _consume_camera_obs_refresh_flag(self) -> bool:
+        refresh = True
+        if self._camera_warp_preprocess and self._camera_warp_freq_ratio > 1:
+            refresh = (self._camera_obs_step_counter % self._camera_warp_freq_ratio) == 0
+        self._camera_obs_step_counter += 1
+        return refresh
+
+    def _normalize_env_ids(self, idx: torch.Tensor | slice | int | list[int] | tuple[int, ...]) -> torch.Tensor:
+        if isinstance(idx, slice):
+            return torch.arange(self.num_envs, device=self.device, dtype=torch.long)[idx]
+        if isinstance(idx, torch.Tensor):
+            if idx.ndim == 0:
+                idx = idx.view(1)
+            return idx.to(device=self.device, dtype=torch.long)
+        if isinstance(idx, (list, tuple, np.ndarray)):
+            return torch.as_tensor(idx, device=self.device, dtype=torch.long).view(-1)
+        return torch.tensor([int(idx)], device=self.device, dtype=torch.long)
+
+    def _update_camera_depth_observation(
+        self,
+        idx: torch.Tensor | slice | int | list[int] | tuple[int, ...],
+        depth: torch.Tensor,
+        *,
+        refresh: bool,
+    ) -> None:
+        depth_obs = depth.unsqueeze(0) if depth.ndim == 2 else depth
+        env_ids = self._normalize_env_ids(idx)
+        if depth_obs.shape[0] != env_ids.numel():
+            raise RuntimeError(
+                f"Depth batch size ({depth_obs.shape[0]}) does not match env_ids ({env_ids.numel()})."
+            )
+
+        if not self._camera_warp_preprocess:
+            self._camera_depth_obs[env_ids] = depth_obs
+            return
+
+        ready = self._camera_depth_buffer_ready[env_ids]
+        should_process = bool(refresh or (~ready).any().item())
+        if should_process:
+            processed = self._process_camera_depth_for_obs(depth_obs)
+            if self._camera_warp_buffer_len > 1:
+                self._camera_depth_buffer[env_ids, :-1] = self._camera_depth_buffer[env_ids, 1:].clone()
+            self._camera_depth_buffer[env_ids, -1] = processed
+
+            if (~ready).any():
+                new_env_ids = env_ids[~ready]
+                repeated = processed[~ready].unsqueeze(1).repeat(1, self._camera_warp_buffer_len, 1, 1)
+                self._camera_depth_buffer[new_env_ids] = repeated
+            self._camera_depth_buffer_ready[env_ids] = True
+
+        self._camera_depth_obs[env_ids] = self._camera_depth_buffer[env_ids, -1 - self._camera_warp_latency_frame]
+
+    def _process_camera_depth_for_obs(self, depth: torch.Tensor) -> torch.Tensor:
+        if not self._camera_warp_preprocess:
+            return depth
+
+        depth_obs = self._crop_camera_depth(depth)
+        if (depth_obs.shape[-2], depth_obs.shape[-1]) != (self._camera_obs_height, self._camera_obs_width):
+            depth_obs = F.interpolate(
+                depth_obs.unsqueeze(1),
+                size=(self._camera_obs_height, self._camera_obs_width),
+                mode="bicubic",
+                align_corners=False,
+            ).squeeze(1)
+
+        max_depth = float(self.cfg.max_distance)
+        depth_obs = torch.clamp(depth_obs, min=0.0, max=max_depth)
+        if self._camera_warp_min_valid_depth > 0.0:
+            depth_obs = torch.where(
+                depth_obs < self._camera_warp_min_valid_depth,
+                torch.full_like(depth_obs, max_depth),
+                depth_obs,
+            )
+
+        if self._camera_warp_edge_noise:
+            depth_obs = self._apply_warp_edge_noise(depth_obs, max_depth=max_depth)
+
+        if self._camera_warp_enable_holes and self._camera_warp_hole_prob > 0.0:
+            depth_obs = self._apply_warp_hole_noise(depth_obs, max_depth=max_depth)
+
+        if self._camera_warp_normalize:
+            depth_obs = self._normalize_camera_depth_for_obs(depth_obs, max_depth=max_depth)
+
+        return depth_obs
+
+    def _crop_camera_depth(self, depth: torch.Tensor) -> torch.Tensor:
+        _, height, width = depth.shape
+        top = min(self._camera_warp_crop_top, max(0, height - 1))
+        bottom = min(self._camera_warp_crop_bottom, max(0, height - top - 1))
+        left = min(self._camera_warp_crop_left, max(0, width - 1))
+        right = min(self._camera_warp_crop_right, max(0, width - left - 1))
+        height_end = max(top + 1, height - bottom)
+        width_end = max(left + 1, width - right)
+        return depth[:, top:height_end, left:width_end]
+
+    def _mask_camera_edge_borders(self, mask: torch.Tensor) -> torch.Tensor:
+        border = self._camera_warp_edge_border
+        if border <= 0:
+            return mask
+        _, height, width = mask.shape
+        border = min(border, height // 2, width // 2)
+        if border <= 0:
+            return mask
+        out = mask.clone()
+        out[:, :, :border] = False
+        out[:, :, -border:] = False
+        out[:, :border, :] = False
+        out[:, -border:, :] = False
+        return out
+
+    def _apply_warp_edge_noise(self, depth: torch.Tensor, *, max_depth: float) -> torch.Tensor:
+        image = depth.unsqueeze(1)
+        sobel_x = self._camera_warp_sobel_x.to(device=depth.device, dtype=depth.dtype)
+        sobel_y = self._camera_warp_sobel_y.to(device=depth.device, dtype=depth.dtype)
+        grad_x = F.conv2d(image, sobel_x, padding=1)
+        grad_y = F.conv2d(image, sobel_y, padding=1)
+        grad_mag = torch.sqrt(grad_x.square() + grad_y.square()).squeeze(1)
+
+        random_vals = torch.rand_like(grad_mag)
+        edge_mask = grad_mag > self._camera_warp_edge_thresh_primary
+        edge_mask = self._mask_camera_edge_borders(edge_mask)
+
+        shuffle_mask = edge_mask & (random_vals < self._camera_warp_edge_shuffle_prob)
+        if shuffle_mask.any():
+            shuffle_mask = F.max_pool2d(
+                shuffle_mask.unsqueeze(1).to(depth.dtype), kernel_size=3, stride=1, padding=1
+            ).squeeze(1) > 0.5
+            num_envs, height, width = depth.shape
+            padded = F.pad(depth.unsqueeze(1), (1, 1, 1, 1), mode="circular")
+            patches = F.unfold(padded, kernel_size=3, stride=1).view(num_envs, 9, height, width)
+            neighbor_idx = torch.randint(0, 9, (num_envs, 1, height, width), device=depth.device)
+            shuffled = torch.gather(patches, 1, neighbor_idx).squeeze(1)
+            depth = torch.where(shuffle_mask, shuffled, depth)
+
+        edge_mask_empty = (grad_mag > self._camera_warp_edge_thresh_secondary) & (
+            F.max_pool2d(depth.unsqueeze(1), kernel_size=3, stride=1, padding=1).squeeze(1)
+            > self._camera_warp_edge_far_depth_thresh
+        )
+        edge_mask_empty = self._mask_camera_edge_borders(edge_mask_empty)
+        set_empty = edge_mask_empty & (random_vals < self._camera_warp_edge_empty_prob)
+        if set_empty.any():
+            depth = torch.where(set_empty, torch.full_like(depth, max_depth), depth)
+
+        return depth
+
+    def _apply_warp_hole_noise(self, depth: torch.Tensor, *, max_depth: float) -> torch.Tensor:
+        num_envs, height, width = depth.shape
+        noise = torch.rand((num_envs, 1, height, width), device=depth.device, dtype=depth.dtype)
+        blobs = F.max_pool2d(noise, kernel_size=3, stride=1, padding=1).squeeze(1)
+        holes = (blobs < self._camera_warp_hole_prob) & (depth < 2.0) & (depth > 0.2)
+        if holes.any():
+            depth = torch.where(holes, torch.full_like(depth, max_depth), depth)
+        return depth
+
+    def _normalize_camera_depth_for_obs(self, depth: torch.Tensor, *, max_depth: float) -> torch.Tensor:
+        near = float(getattr(self.cfg, "camera_near", 0.0) or 0.0)
+        denom = max(1.0e-6, max_depth - near)
+        depth = (depth - near) / denom - 0.5
+        return torch.clamp(depth, min=-0.5, max=0.5)
 
     def _setup_rendered_camera(self) -> None:
         if get_simulator_type() != SimulatorType.ISAACSIM:
