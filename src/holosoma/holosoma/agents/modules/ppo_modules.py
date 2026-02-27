@@ -70,21 +70,33 @@ class PPOActor(nn.Module):
     def entropy(self):
         return self.distribution.entropy().sum(dim=-1)
 
+    def _safe_std(self) -> torch.Tensor:
+        """Return a numerically safe standard deviation tensor for Normal policy."""
+        std = torch.nan_to_num(
+            self.std,
+            nan=1.0,
+            posinf=10.0,
+            neginf=0.0,
+        )
+        # Always keep scale strictly positive for torch.distributions.Normal.
+        return torch.clamp(std, min=1e-6)
+
     def update_distribution(self, actor_obs, extra_input: torch.Tensor | None = None):
         mean = self.actor(actor_obs, extra_input=extra_input)
+        safe_std = self._safe_std()
         if self.min_noise_std:
-            clamped_std = torch.clamp(self.std, min=self.min_noise_std)
+            clamped_std = torch.clamp(safe_std, min=self.min_noise_std)
             self.distribution = Normal(mean, mean * 0.0 + clamped_std)
         elif self.min_mean_noise_std:
-            current_mean = self.std.mean()
+            current_mean = safe_std.mean()
             if current_mean < self.min_mean_noise_std:
                 scale_up = self.min_mean_noise_std / (current_mean + 1e-6)
-                clamped_std = self.std * scale_up
+                clamped_std = safe_std * scale_up
             else:
-                clamped_std = self.std
+                clamped_std = safe_std
             self.distribution = Normal(mean, mean * 0.0 + clamped_std)
         else:
-            self.distribution = Normal(mean, mean * 0.0 + self.std)
+            self.distribution = Normal(mean, mean * 0.0 + safe_std)
 
     def act(self, policy_state_dict):
         extra_input = policy_state_dict.get("extra_actor_input")

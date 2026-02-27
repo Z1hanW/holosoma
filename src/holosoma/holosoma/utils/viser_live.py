@@ -268,6 +268,41 @@ def _frustum_quat_from_rays(
     return matrix_to_quaternion(rot)
 
 
+def _frustum_quat_from_world_rays(
+    ray_dirs_world: torch.Tensor,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+) -> torch.Tensor | None:
+    if ray_dirs_world is None or ray_dirs_world.numel() == 0:
+        return None
+    if ray_dirs_world.ndim != 2 or ray_dirs_world.shape[-1] != 3:
+        return None
+
+    num_rays = int(ray_dirs_world.shape[0])
+    if width and height and num_rays >= (width * height):
+        center_v = height // 2
+        center_u = width // 2
+        idx_center = center_v * width + center_u
+        idx_right = center_v * width + min(center_u + 1, width - 1)
+    else:
+        idx_center = num_rays // 2
+        idx_right = min(idx_center + 1, num_rays - 1)
+
+    center_dir = ray_dirs_world[idx_center]
+    right_dir = ray_dirs_world[idx_right]
+
+    fwd = _normalize_vec(center_dir)
+    right_proj = right_dir - fwd * torch.dot(right_dir, fwd)
+    if torch.linalg.norm(right_proj) < 1.0e-6:
+        return None
+
+    right = _normalize_vec(right_proj)
+    down = _normalize_vec(torch.cross(fwd, right))
+    rot = torch.stack([right, down, fwd], dim=1)
+    return matrix_to_quaternion(rot)
+
+
 def _quat_from_forward_up(forward: torch.Tensor, up_hint: torch.Tensor) -> torch.Tensor:
     forward = _normalize_vec(forward)
     up_hint = _normalize_vec(up_hint)
@@ -2768,7 +2803,34 @@ class ViserLiveViewer:
         cam_pos = cam_pos - offset
         cam_quat_wxyz = cam_quat_xyzw.detach().cpu().numpy()[[3, 0, 1, 2]]
         frustum_quat_wxyz = None
-        if output_mode == "camera_depth" and cam_body_quat_xyzw is not None:
+        if output_mode == "camera_depth":
+            # Prefer orientation reconstructed from this frame's actual ray directions.
+            if hasattr(perception_mgr, "get_camera_depth_ray_samples"):
+                try:
+                    with torch.no_grad():
+                        frustum_samples = perception_mgr.get_camera_depth_ray_samples(
+                            env_ids,
+                            include_misses=False,
+                            return_rays=True,
+                        )
+                except Exception:
+                    frustum_samples = None
+                if isinstance(frustum_samples, tuple) and len(frustum_samples) >= 4:
+                    ray_dirs_world = frustum_samples[3]
+                    if isinstance(ray_dirs_world, torch.Tensor) and ray_dirs_world.numel() > 0:
+                        dirs_env = ray_dirs_world[0]
+                        width = int(getattr(perception_mgr, "_camera_width", 0) or 0)
+                        height = int(getattr(perception_mgr, "_camera_height", 0) or 0)
+                        use_grid = (width > 0 and height > 0 and (width * height) == int(dirs_env.shape[0]))
+                        frustum_quat = _frustum_quat_from_world_rays(
+                            dirs_env,
+                            width=width if use_grid else None,
+                            height=height if use_grid else None,
+                        )
+                        if frustum_quat is not None:
+                            frustum_quat_wxyz = frustum_quat.detach().cpu().numpy()
+
+        if output_mode == "camera_depth" and cam_body_quat_xyzw is not None and frustum_quat_wxyz is None:
             use_frame_quat = bool(getattr(perception_mgr, "_use_camera_frame_quat", False))
             strict_warp = bool(getattr(perception_mgr, "_camera_strict_warp", False))
             ray_dirs_base = getattr(perception_mgr, "_camera_scandots_ray_dirs_base", None)

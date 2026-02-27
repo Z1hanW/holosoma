@@ -41,7 +41,7 @@ if [[ "${FORCE_EIGHT_GPU_CONFIG}" != "0" ]]; then
   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
   NPROC=8
   PER_GPU_ENVS=$((2048 * 6))
-  NUM_ENVS=$((NPROC * PER_GPU_ENVS))
+  NUM_ENVS=${PER_GPU_ENVS}
   if command -v nvidia-smi >/dev/null 2>&1; then
     AVAILABLE_GPUS=$(nvidia-smi -L | wc -l | tr -d ' ')
     if [[ "${AVAILABLE_GPUS}" -lt 8 ]]; then
@@ -68,7 +68,7 @@ else
     fi
   fi
   PER_GPU_ENVS=${PER_GPU_ENVS:-$((2048 * 6))}
-  NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
+  NUM_ENVS=${NUM_ENVS:-${PER_GPU_ENVS}}
 fi
 
 if [[ "${FORCE_EIGHT_GPU_CONFIG}" != "0" ]]; then
@@ -80,8 +80,8 @@ if [[ "${FORCE_EIGHT_GPU_CONFIG}" != "0" ]]; then
     echo "Expected PER_GPU_ENVS=$((2048 * 6)), got ${PER_GPU_ENVS}." >&2
     exit 1
   fi
-  if [[ "${NUM_ENVS}" -ne 98304 ]]; then
-    echo "Expected NUM_ENVS=98304, got ${NUM_ENVS}." >&2
+  if [[ "${NUM_ENVS}" -ne $((2048 * 6)) ]]; then
+    echo "Expected NUM_ENVS(per-GPU)= $((2048 * 6)), got ${NUM_ENVS}." >&2
     exit 1
   fi
 fi
@@ -106,6 +106,8 @@ MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
 NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-10000}
 ACTOR_LR=${ACTOR_LR:-7e-5}
 CRITIC_LR=${CRITIC_LR:-7e-5}
+ACTOR_MIN_NOISE_STD=${ACTOR_MIN_NOISE_STD:-0.05}
+PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-268435456}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
 SWITCH_TO_RL_AFTER=${SWITCH_TO_RL_AFTER:-}
 CLIP_TEACHER_ACTIONS=${CLIP_TEACHER_ACTIONS:-True}
@@ -156,6 +158,7 @@ EXTRA_ARGS=("$@")
 
 echo "[INFO] Distill teacher checkpoint: ${TEACHER_CHECKPOINT}"
 echo "[INFO] DISTILL_TWO_STAGE=${DISTILL_TWO_STAGE}"
+echo "[INFO] per_gpu_envs=${NUM_ENVS} world_size=${NPROC} total_envs=$((NUM_ENVS * NPROC))"
 
 run_distill_stage() {
   local stage_label="$1"
@@ -203,9 +206,11 @@ run_distill_stage() {
     --algo.config.num_learning_iterations="${NUM_LEARNING_ITERATIONS}"
     --algo.config.actor_learning_rate="${ACTOR_LR}"
     --algo.config.critic_learning_rate="${CRITIC_LR}"
+    --algo.config.module_dict.actor.min_noise_std="${ACTOR_MIN_NOISE_STD}"
     --algo.config.normalize_actor_obs=False
     --algo.config.normalize_critic_obs=False
     --algo.config.save_interval="${SAVE_INTERVAL}"
+    --simulator.config.sim.physx.gpu_collision_stack_size="${PHYSX_GPU_COLLISION_STACK_SIZE}"
     --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_DIR}"
     --command.setup_terms.motion_command.params.motion_config.pair_terrain_with_motion="${PAIR_TERRAIN_WITH_MOTION}"
     --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob="${stage_start_at_timestep_zero_prob}"
