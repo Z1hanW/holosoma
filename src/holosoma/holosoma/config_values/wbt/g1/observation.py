@@ -254,6 +254,19 @@ object_distill_box_terms = {
     ),
 }
 
+object_distill_box_goal_terms = {
+    "obj_pos_b": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:obj_pos_b",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "obj_goal_pos_size_b": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:obj_goal_pos_size_b",
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
 g1_29dof_wbt_observation_w_object_distill_torso_box = ObservationManagerCfg(
     groups={
         # Keep full teacher actor observation available for teacher policy queries.
@@ -271,6 +284,35 @@ g1_29dof_wbt_observation_w_object_distill_torso_box = ObservationManagerCfg(
             enable_noise=False,
             history_length=1,
             terms=object_distill_box_terms,
+        ),
+        "critic_obs": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=critic_obs_w_object_terms,
+        ),
+    },
+)
+
+g1_29dof_wbt_observation_w_object_distill_torso_box_goal = ObservationManagerCfg(
+    groups={
+        # Keep full teacher actor observation available for teacher policy queries.
+        "actor_obs": actor_obs_w_object,
+        # Student torso command state.
+        "actor_obs_torso": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_distill_torso_terms,
+        ),
+        # Student object state in robot base frame:
+        # - current object pose (obj_pos_b)
+        # - final clip goal position + size (obj_goal_pos_size_b)
+        "actor_obs_box": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_distill_box_goal_terms,
         ),
         "critic_obs": ObsGroupCfg(
             concatenate=True,
@@ -410,6 +452,7 @@ __all__ = [
     "g1_29dof_wbt_observation_motion_tracking_split",
     "g1_29dof_wbt_observation_w_object",
     "g1_29dof_wbt_observation_w_object_distill_torso_box",
+    "g1_29dof_wbt_observation_w_object_distill_torso_box_goal",
     "g1_29dof_wbt_observation_videomimic",
     "g1_29dof_wbt_observation_videomimic_distill",
 ]

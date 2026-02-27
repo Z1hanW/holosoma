@@ -1821,15 +1821,14 @@ class ViserLiveViewer:
         if not hasattr(self._env, "reset_envs_idx"):
             return
 
+        env_ids = torch.tensor([self._env_id], device=self._env.device, dtype=torch.long)
         motion_cmd = self._get_motion_command()
         manual_enabled = bool(getattr(motion_cmd, "manual_control_enabled", False))
         if self._manual_control_cb is not None:
             manual_enabled = bool(manual_enabled or bool(self._manual_control_cb.value))
-        lock_enabled = bool(self._clip_lock_cb.value) if self._clip_lock_cb is not None else False
 
-        # In non-tracking/manual mode (or locked-clip mode), reset by explicitly forcing the
-        # selected clip/start so reset behavior is deterministic and aligned with the GUI.
-        if motion_cmd is not None and (manual_enabled or lock_enabled):
+        # Reset always restarts the selected/current motion from frame 0.
+        if motion_cmd is not None:
             if manual_enabled:
                 self._clear_manual_commands(clear_gui_toggles=True)
             clip_idx = self._current_clip_index(motion_cmd)
@@ -1843,7 +1842,9 @@ class ViserLiveViewer:
                     motion_cmd.set_forced_clip(int(clip_idx))
                 except Exception:
                     motion_cmd._forced_clip_idx = int(clip_idx)
-                clip_start = int(self._clip_start_slider.value) if self._clip_start_slider is not None else 0
+                clip_start = 0
+                if self._clip_start_slider is not None and int(self._clip_start_slider.value) != 0:
+                    self._clip_start_slider.value = 0
                 try:
                     motion_cmd.set_forced_clip_start(int(clip_start))
                 except Exception:
@@ -1853,14 +1854,33 @@ class ViserLiveViewer:
                 if active_idx is None:
                     active_idx = int(clip_idx)
                 self._reload_terrain_for_clip(self._current_clip_name(motion_cmd, int(active_idx)))
+                self._sync_after_reset(env_ids)
                 return
 
-        env_ids = torch.tensor([self._env_id], device=self._env.device, dtype=torch.long)
         self._env.reset_envs_idx(env_ids)
         if hasattr(self._env, "reset_buf"):
             self._env.reset_buf[env_ids] = 0
         if hasattr(self._env, "time_out_buf"):
             self._env.time_out_buf[env_ids] = 0
+        self._sync_after_reset(env_ids)
+
+    def _sync_after_reset(self, env_ids: torch.Tensor) -> None:
+        refresh_hook = getattr(self._env, "_refresh_envs_after_reset", None)
+        if callable(refresh_hook):
+            try:
+                refresh_hook(env_ids)
+            except Exception:
+                pass
+        if hasattr(self._env, "_compute_observations"):
+            self._env._compute_observations()
+        if hasattr(self._env, "_post_compute_observations_callback"):
+            self._env._post_compute_observations_callback()
+        if hasattr(self._env, "_clip_observations"):
+            self._env._clip_observations()
+        self._invalidate_isaac_scandots_payload()
+        if hasattr(self._env, "_draw_scandots_in_viewer"):
+            self._env._draw_scandots_in_viewer()
+        self.record_step()
 
     def _apply_clip_selection(self) -> None:
         motion_cmd = self._get_motion_command()

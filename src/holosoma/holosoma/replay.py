@@ -444,7 +444,15 @@ def replay(tyro_config: ExperimentConfig):
         print("[INFO] Replay finished. Keeping simulator open. Press Ctrl+C to exit.")
         try:
             while True:
+                viser_live = getattr(env, "_viser_live", None)
+                if viser_live is not None and getattr(viser_live, "enabled", False):
+                    viser_live.apply_pending_controls()
+                    viser_live.wait_if_paused()
                 env.simulator.sim.step()
+                if getattr(env, "perception_manager", None) is not None:
+                    env.perception_manager.update()
+                if viser_live is not None and getattr(viser_live, "enabled", False):
+                    viser_live.record_step()
         except KeyboardInterrupt:
             pass
 

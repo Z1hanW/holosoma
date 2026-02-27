@@ -426,6 +426,23 @@ g1_29dof_wbt_w_object_distill_torso_box = replace(
     ),
 )
 
+g1_29dof_wbt_w_object_distill_torso_box_goal = replace(
+    g1_29dof_wbt_w_object_generalist,
+    training=replace(
+        g1_29dof_wbt_w_object_generalist.training,
+        name="g1_29dof_wbt_w_object_distill_torso_box_goal",
+    ),
+    observation=observation.g1_29dof_wbt_observation_w_object_distill_torso_box_goal,
+    termination=termination.g1_29dof_wbt_termination_distill,
+    algo=replace(
+        g1_29dof_wbt_w_object_generalist.algo,
+        config=replace(
+            g1_29dof_wbt_w_object_generalist.algo.config,
+            module_dict=_w_object_distill_torso_box_module_dict,
+        ),
+    ),
+)
+
 g1_29dof_wbt_fast_sac_w_object = replace(
     g1_29dof_wbt_fast_sac,
     command=command.g1_29dof_wbt_command_w_object,
@@ -458,6 +475,7 @@ __all__ = [
     "g1_29dof_wbt_w_object",
     "g1_29dof_wbt_w_object_generalist",
     "g1_29dof_wbt_w_object_distill_torso_box",
+    "g1_29dof_wbt_w_object_distill_torso_box_goal",
 ]
 
 """

@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from loguru import logger
 from rich.console import Console
 from torch import nn
+from torch.nn.parameter import UninitializedParameter
 from torch.distributions import Normal, kl_divergence
 from torch.utils.tensorboard import SummaryWriter as TensorboardSummaryWriter
 
@@ -358,9 +359,20 @@ class PPO(BaseAlgo):
             layer_cfg = dataclasses.replace(layer_cfg, encoder_input_name="")
         if layer_cfg.encoder_obs_token_name and layer_cfg.encoder_obs_token_name not in obs_keys:
             layer_cfg = dataclasses.replace(layer_cfg, encoder_obs_token_name=None)
+        removed_perception_input = False
         if layer_cfg.perception_input_name and layer_cfg.perception_input_name not in obs_keys:
             layer_cfg = dataclasses.replace(layer_cfg, perception_input_name="")
-        return dataclasses.replace(actor_cfg, input_dim=list(obs_keys), layer_config=layer_cfg)
+            removed_perception_input = True
+
+        actor_type = actor_cfg.type
+        # Teacher checkpoints can be non-perception models while student actor is perception-enabled.
+        # If perception input is removed for teacher obs keys, fall back to plain MLP to keep teacher load valid.
+        if actor_type == "MLPPerceptionEncoder" and not layer_cfg.perception_input_name:
+            actor_type = "MLP"
+        if removed_perception_input and layer_cfg.extra_input_to_hidden:
+            layer_cfg = dataclasses.replace(layer_cfg, extra_input_to_hidden=False)
+
+        return dataclasses.replace(actor_cfg, type=actor_type, input_dim=list(obs_keys), layer_config=layer_cfg)
 
     def _load_teacher_actor(
         self, ckpt_path: str, obs_keys: list[str] | None = None
@@ -393,6 +405,8 @@ class PPO(BaseAlgo):
             teacher_actor.load_state_dict(teacher_state["actor_model_state_dict"], strict=False)
         teacher_actor.eval()
         for param in teacher_actor.parameters():
+            if isinstance(param, UninitializedParameter):
+                continue
             param.requires_grad_(False)
 
         teacher_normalizers = self._build_group_normalizers(teacher_obs_keys, self.config.normalize_actor_obs)

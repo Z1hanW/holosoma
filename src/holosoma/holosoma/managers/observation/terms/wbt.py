@@ -322,3 +322,34 @@ def obj_target_pose_size_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     rot_6d = rot_mat[..., :2].reshape(rot_mat.shape[0], -1)
     size = motion_command.object_size.view(env.num_envs, -1)
     return torch.cat([pos_b.view(env.num_envs, -1), rot_6d, size], dim=-1)
+
+
+def obj_goal_pos_size_b(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Final object goal in robot-reference frame: [goal_pos(3), size(3)].
+
+    The goal position is extracted from each active motion clip's last frame.
+    """
+    motion_command = _get_motion_command_and_assert_type(env)
+    if not motion_command.motion.has_object:
+        return torch.zeros(env.num_envs, 6, device=env.device, dtype=torch.float32)
+
+    clip_ids = motion_command.clip_ids
+    clip_offsets = motion_command.motion.clip_offsets[clip_ids]
+    clip_lengths = motion_command.motion.clip_lengths[clip_ids]
+    final_steps = torch.clamp(clip_lengths - 1, min=0)
+    final_motion_idx = clip_offsets + final_steps
+
+    goal_pos_w = motion_command.motion.object_pos_w[final_motion_idx]
+    if motion_command.motion_cfg.align_motion_to_init_yaw:
+        goal_pos_w = motion_command._apply_motion_alignment_pos(goal_pos_w)  # noqa: SLF001
+    else:
+        goal_pos_w = goal_pos_w + motion_command._get_env_offsets()  # noqa: SLF001
+
+    goal_size = motion_command.motion.object_size[final_motion_idx].view(env.num_envs, -1)
+    goal_pos_b, _ = subtract_frame_transforms(
+        motion_command.robot_ref_pos_w,
+        motion_command.robot_ref_quat_w,
+        goal_pos_w,
+        motion_command.robot_ref_quat_w,
+    )
+    return torch.cat([goal_pos_b.view(env.num_envs, -1), goal_size], dim=-1)

@@ -9,7 +9,7 @@ set -euo pipefail
 # - Stage 1: true DAgger data collection (teacher steps env) + pure BC
 # - Stage 2: resume Stage 1 student, student steps env, mix RL+BC then switch to RL
 
-DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"/home/ubuntu/FAR/holosoma/logs/WholeBodyTracking/20260216_214200-g1_29dof_wbt_w_object_generalist-locomotion/model_30000.pt"}
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"/home/ubuntu/FAR/holosoma/logs/WholeBodyTracking/20260216_214200-g1_29dof_wbt_w_object_generalist-locomotion/model_17000.pt"}
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 
 # Optional positional arg:
@@ -36,29 +36,62 @@ fi
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4,5,6,7}
+FORCE_EIGHT_GPU_CONFIG=${FORCE_EIGHT_GPU_CONFIG:-1}
+if [[ "${FORCE_EIGHT_GPU_CONFIG}" != "0" ]]; then
+  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  NPROC=8
+  PER_GPU_ENVS=$((2048 * 6))
+  NUM_ENVS=$((NPROC * PER_GPU_ENVS))
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    AVAILABLE_GPUS=$(nvidia-smi -L | wc -l | tr -d ' ')
+    if [[ "${AVAILABLE_GPUS}" -lt 8 ]]; then
+      echo "FORCE_EIGHT_GPU_CONFIG=1 requires >=8 visible GPUs, found ${AVAILABLE_GPUS}." >&2
+      exit 1
+    fi
+  fi
+else
+  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+  if [[ -z "${NPROC:-}" ]]; then
+    if [[ -n "${CUDA_VISIBLE_DEVICES}" ]]; then
+      if [[ "${CUDA_VISIBLE_DEVICES}" == "all" || "${CUDA_VISIBLE_DEVICES}" == "ALL" ]]; then
+        if command -v nvidia-smi >/dev/null 2>&1; then
+          NPROC=$(nvidia-smi -L | wc -l | tr -d ' ')
+        else
+          NPROC=1
+        fi
+      else
+        IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
+        NPROC=${#_visible_gpus[@]}
+      fi
+    else
+      NPROC=1
+    fi
+  fi
+  PER_GPU_ENVS=${PER_GPU_ENVS:-$((2048 * 6))}
+  NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
+fi
+
+if [[ "${FORCE_EIGHT_GPU_CONFIG}" != "0" ]]; then
+  if [[ "${NPROC}" -ne 8 ]]; then
+    echo "Expected NPROC=8, got ${NPROC}." >&2
+    exit 1
+  fi
+  if [[ "${PER_GPU_ENVS}" -ne $((2048 * 6)) ]]; then
+    echo "Expected PER_GPU_ENVS=$((2048 * 6)), got ${PER_GPU_ENVS}." >&2
+    exit 1
+  fi
+  if [[ "${NUM_ENVS}" -ne 98304 ]]; then
+    echo "Expected NUM_ENVS=98304, got ${NUM_ENVS}." >&2
+    exit 1
+  fi
+fi
+
 EXP=${EXP:-g1-29dof-wbt-w-object-distill-torso-box}
 MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"}
 OBJECT_URDF=${OBJECT_URDF:-"${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"}
 
 DISTILL_TWO_STAGE=${DISTILL_TWO_STAGE:-1}
 
-if [[ -z "${NPROC:-}" ]]; then
-  if [[ -n "${CUDA_VISIBLE_DEVICES}" ]]; then
-    if [[ "${CUDA_VISIBLE_DEVICES}" == "all" || "${CUDA_VISIBLE_DEVICES}" == "ALL" ]]; then
-      if command -v nvidia-smi >/dev/null 2>&1; then
-        NPROC=$(nvidia-smi -L | wc -l | tr -d ' ')
-      else
-        NPROC=1
-      fi
-    else
-      IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
-      NPROC=${#_visible_gpus[@]}
-    fi
-  else
-    NPROC=1
-  fi
-fi
 if [[ "${NPROC}" -lt 1 ]]; then
   echo "NPROC must be >= 1. Got: ${NPROC}" >&2
   exit 1
@@ -70,7 +103,7 @@ MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 MAX_RESTARTS=${MAX_RESTARTS:-0}
 
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
-NUM_ENVS=${NUM_ENVS:-24576}
+NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-10000}
 ACTOR_LR=${ACTOR_LR:-7e-5}
 CRITIC_LR=${CRITIC_LR:-7e-5}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
@@ -78,6 +111,7 @@ SWITCH_TO_RL_AFTER=${SWITCH_TO_RL_AFTER:-}
 CLIP_TEACHER_ACTIONS=${CLIP_TEACHER_ACTIONS:-True}
 CLIP_ACTIONS_THRESHOLD=${CLIP_ACTIONS_THRESHOLD:-8.0}
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
+PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.05}
 RESET_NOISE_SCALE=${RESET_NOISE_SCALE:-1.0}
 TAKE_TEACHER_ACTIONS=${TAKE_TEACHER_ACTIONS:-False}
@@ -166,13 +200,14 @@ run_distill_stage() {
     --training.project="${TRAINING_PROJECT}"
     --training.name="${stage_training_name}"
     --training.multigpu=$([[ "${NPROC}" -gt 1 || "${NNODES}" -gt 1 ]] && echo True || echo False)
+    --algo.config.num_learning_iterations="${NUM_LEARNING_ITERATIONS}"
     --algo.config.actor_learning_rate="${ACTOR_LR}"
     --algo.config.critic_learning_rate="${CRITIC_LR}"
     --algo.config.normalize_actor_obs=False
     --algo.config.normalize_critic_obs=False
     --algo.config.save_interval="${SAVE_INTERVAL}"
     --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_DIR}"
-    --command.setup_terms.motion_command.params.motion_config.pair_terrain_with_motion=False
+    --command.setup_terms.motion_command.params.motion_config.pair_terrain_with_motion="${PAIR_TERRAIN_WITH_MOTION}"
     --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob="${stage_start_at_timestep_zero_prob}"
     --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale="${stage_reset_noise_scale}"
     --command.setup_terms.motion_command.params.motion_config.enable_default_pose_append=False
