@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import field
+from typing import Dict
 
 from pydantic.dataclasses import dataclass
 
@@ -43,6 +44,9 @@ class PerceptionConfig:
 
     max_distance: float = 5.0
     """Clamp distance for missed rays (meters)."""
+
+    heightmap_obs_offset: float = 0.0
+    """Offset subtracted from heightmap observations (far-tracking parity uses 0.5)."""
 
     update_hz: float = 50.0
     """Perception update rate in Hz."""
@@ -182,6 +186,9 @@ class PerceptionConfig:
 
     camera_mesh_allowlist: list[str] | None = None
     """Optional robot link allowlist for camera raycast self-meshes (uses all links when None)."""
+
+    camera_mesh_file_map: Dict[str, str] | None = None
+    """Optional explicit link->mesh filename map for camera self-mesh raycasting (far-tracking parity)."""
 
     depth_sensor_asset_path: str | None = None
     """Optional IsaacSim depth sensor asset path (e.g., /Isaac/Sensors/Intel/RealSense/rsd455.usd)."""

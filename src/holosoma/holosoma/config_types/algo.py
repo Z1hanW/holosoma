@@ -175,6 +175,25 @@ class DistillationConfig:
     multi_teacher_select_obs_var: str = "teacher_checkpoint_index"
     """Observation key used to select teacher policy when use_multi_teacher is True."""
 
+    # Far-tracking DepthDistillationPPO parity controls.
+    ppo_start_epoch: int = -1
+    """Epoch to start mixing PPO loss in dagger mode (-1 disables schedule)."""
+
+    dagger_end_epoch: int = -1
+    """Epoch where PPO contribution saturates in dagger mode (-1 disables schedule)."""
+
+    dagger_loss_coef: float = 1.0
+    """Scale on dagger/distillation loss term in scheduled PPO+DAgger mode."""
+
+    distill_loss_type: str = "mse"
+    """DAgger loss type: 'mse' or 'huber'."""
+
+    dagger_ignore_zero_teacher_actions: bool = True
+    """Ignore samples where teacher action is exactly zero across all dims."""
+
+    dagger_match_std: bool = False
+    """Match policy std against teacher std in BC loss (legacy behavior)."""
+
 
 
 @dataclass(frozen=True)

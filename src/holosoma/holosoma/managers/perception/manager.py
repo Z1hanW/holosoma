@@ -418,6 +418,9 @@ class PerceptionManager:
         if not self.enabled:
             raise RuntimeError("Perception is disabled but perception observations were requested.")
         if self.cfg.output_mode == "heightmap":
+            offset = float(getattr(self.cfg, "heightmap_obs_offset", 0.0) or 0.0)
+            if abs(offset) > 1.0e-8:
+                return (self._heightmap - offset).view(self.num_envs, -1)
             return self._heightmap.view(self.num_envs, -1)
         if self.cfg.output_mode == "camera_depth":
             return self._camera_depth_obs.view(self.num_envs, -1)
@@ -931,15 +934,13 @@ class PerceptionManager:
         ray_dirs_world = ray_dirs_world / torch.norm(ray_dirs_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
         forward_world = self._get_camera_forward_axis(body_quat)
         dots = torch.sum(ray_dirs_world * forward_world.unsqueeze(1), dim=-1)
-        front = dots > 1.0e-6
-        depth = ranges * torch.where(front, dots, torch.ones_like(dots))
-        near = float(getattr(self.cfg, "camera_near", 0.0) or 0.0)
-        # Match warp_sensors semantics: only rays whose projected depth is inside [near, max_distance] are valid hits.
+        # Match far-tracking warp kernel semantics:
+        #   mul = clamp(dot(rd, rd_principal), eps, 1.0), depth = mul * range.
+        depth_mul = torch.clamp(dots, min=1.0e-6, max=1.0)
+        depth = ranges * depth_mul
         hit_mask = (
             hit_mask
-            & front
             & torch.isfinite(depth)
-            & (depth >= (near - 1.0e-6))
             & (depth <= (self.cfg.max_distance + 1.0e-6))
         )
         depth = torch.where(hit_mask, depth, torch.full_like(depth, self.cfg.max_distance))
@@ -955,14 +956,11 @@ class PerceptionManager:
         ray_dirs_world = ray_dirs_world / torch.norm(ray_dirs_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
         forward_world = self._get_camera_forward_axis(body_quat)
         dots = torch.sum(ray_dirs_world * forward_world.unsqueeze(1), dim=-1)
-        front = dots > 1.0e-6
-        depth = ranges * torch.where(front, dots, torch.ones_like(dots))
-        near = float(getattr(self.cfg, "camera_near", 0.0) or 0.0)
+        depth_mul = torch.clamp(dots, min=1.0e-6, max=1.0)
+        depth = ranges * depth_mul
         return (
             hit_mask
-            & front
             & torch.isfinite(depth)
-            & (depth >= (near - 1.0e-6))
             & (depth <= (self.cfg.max_distance + 1.0e-6))
         )
 
@@ -972,9 +970,8 @@ class PerceptionManager:
         ray_dirs_world = ray_dirs_world / torch.norm(ray_dirs_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
         forward_world = self._get_camera_forward_axis(body_quat)
         dots = torch.sum(ray_dirs_world * forward_world.unsqueeze(1), dim=-1)
-        front = dots > 1.0e-6
-        miss_front = self.cfg.max_distance / torch.clamp(dots, min=1.0e-6)
-        return torch.where(front, miss_front, torch.zeros_like(miss_front))
+        depth_mul = torch.clamp(dots, min=1.0e-6, max=1.0)
+        return self.cfg.max_distance / depth_mul
 
     def _apply_camera_depth_noise(self, depth: torch.Tensor) -> torch.Tensor:
         std_mult = getattr(self.env, "_perception_camera_noise_std_mult", None)
@@ -1287,6 +1284,85 @@ class PerceptionManager:
         name_to_index = {name: idx for idx, name in enumerate(body_names)}
         link_meshes: dict[int, list[tuple[torch.Tensor, torch.Tensor]]] = {}
         urdf_dir = os.path.dirname(urdf_path)
+
+        # Strict far-tracking parity path: use explicit ray_cast_bodies mesh mapping.
+        explicit_mesh_map = getattr(self.cfg, "camera_mesh_file_map", None)
+        if explicit_mesh_map:
+            for link_name, mesh_file in explicit_mesh_map.items():
+                parent_name = str(link_name)
+                if parent_name not in name_to_index:
+                    resolved = resolve_fixed_link_offset(
+                        self.env.robot_config,
+                        parent_name,
+                        available_links=body_names,
+                        device="cpu",
+                    )
+                    if resolved is None:
+                        continue
+                    parent_name, _offset_pos, _offset_quat = resolved
+
+                if allowlist is not None and link_name not in allowlist and parent_name not in allowlist:
+                    continue
+
+                link_index = name_to_index.get(parent_name)
+                if link_index is None:
+                    continue
+
+                mesh_path = str(mesh_file)
+                if mesh_path.startswith("package://"):
+                    mesh_path = mesh_path[len("package://") :]
+                    mesh_path = os.path.join(asset_root, mesh_path)
+                elif mesh_path.startswith("file://"):
+                    mesh_path = mesh_path[len("file://") :]
+                elif not os.path.isabs(mesh_path):
+                    if "/" in mesh_path or "\\" in mesh_path:
+                        mesh_path = os.path.join(asset_root, mesh_path)
+                    else:
+                        mesh_path = os.path.join(urdf_dir, "meshes", mesh_path)
+
+                if not os.path.exists(mesh_path):
+                    continue
+
+                mesh = trimesh.load(mesh_path, process=False)
+                if isinstance(mesh, trimesh.Scene):
+                    mesh = mesh.dump(concatenate=True)
+                if not isinstance(mesh, trimesh.Trimesh):
+                    continue
+
+                verts = torch.as_tensor(mesh.vertices, dtype=torch.float32)
+                faces = torch.as_tensor(mesh.faces, dtype=torch.int64)
+                if verts.numel() == 0 or faces.numel() == 0:
+                    continue
+
+                link_meshes.setdefault(link_index, []).append((verts, faces))
+
+            if link_meshes:
+                self._robot_link_meshes = []
+                for link_index in sorted(link_meshes.keys()):
+                    parts = link_meshes[link_index]
+                    if not parts:
+                        continue
+                    verts_list = []
+                    faces_list = []
+                    vert_offset = 0
+                    for verts, faces in parts:
+                        verts_list.append(verts)
+                        faces_list.append(faces + vert_offset)
+                        vert_offset += verts.shape[0]
+                    if verts_list:
+                        verts = torch.cat(verts_list, dim=0)
+                        faces = torch.cat(faces_list, dim=0)
+                        self._robot_link_meshes.append(
+                            {
+                                "link_index": link_index,
+                                "vertices": verts,
+                                "faces": faces,
+                            }
+                        )
+
+                if self._robot_link_meshes:
+                    self._camera_robot_mesh_enabled = True
+                    return
 
         for link in root.findall("link"):
             link_name = link.get("name")

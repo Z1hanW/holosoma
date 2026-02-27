@@ -172,6 +172,14 @@ class PPO(BaseAlgo):
         self.switch_to_rl_after = -1
         self.use_multi_teacher = False
         self.multi_teacher_select_obs_var = "teacher_checkpoint_index"
+        self.ppo_start_epoch = -1
+        self.dagger_end_epoch = -1
+        self.dagger_loss_coef = 1.0
+        self.use_ppo_dagger_schedule = False
+        self.ppo_coeff = 1.0
+        self.distill_loss_fn = F.mse_loss
+        self.dagger_ignore_zero_teacher_actions = True
+        self.dagger_match_std = False
         self.teacher_actor = None
         self.teacher_actors: list[nn.Module] = []
         self.teacher_actor_obs_normalizers: dict[str, nn.Module] = {}
@@ -414,6 +422,22 @@ class PPO(BaseAlgo):
         self.switch_to_rl_after = int(distill_cfg.switch_to_rl_after)
         self.use_multi_teacher = bool(distill_cfg.use_multi_teacher)
         self.multi_teacher_select_obs_var = str(distill_cfg.multi_teacher_select_obs_var)
+        self.ppo_start_epoch = int(getattr(distill_cfg, "ppo_start_epoch", -1))
+        self.dagger_end_epoch = int(getattr(distill_cfg, "dagger_end_epoch", -1))
+        self.dagger_loss_coef = float(getattr(distill_cfg, "dagger_loss_coef", 1.0))
+        self.use_ppo_dagger_schedule = self.ppo_start_epoch >= 0 and self.dagger_end_epoch > self.ppo_start_epoch
+        self.ppo_coeff = 0.0 if self.use_ppo_dagger_schedule else 1.0
+        loss_type = str(getattr(distill_cfg, "distill_loss_type", "mse")).strip().lower()
+        if loss_type == "mse":
+            self.distill_loss_fn = F.mse_loss
+        elif loss_type == "huber":
+            self.distill_loss_fn = F.huber_loss
+        else:
+            raise ValueError(f"Unknown distill_loss_type: {loss_type}")
+        self.dagger_ignore_zero_teacher_actions = bool(
+            getattr(distill_cfg, "dagger_ignore_zero_teacher_actions", True)
+        )
+        self.dagger_match_std = bool(getattr(distill_cfg, "dagger_match_std", False))
 
         self.teacher_actor = None
         self.teacher_actors = []
@@ -444,7 +468,7 @@ class PPO(BaseAlgo):
         if self.distill_mode == "dagger":
             if not teacher_checkpoint:
                 return
-            if self.bc_loss_coef <= 0.0 and self.switch_to_rl_after <= 0:
+            if self.bc_loss_coef <= 0.0 and self.switch_to_rl_after <= 0 and not self.use_ppo_dagger_schedule:
                 return
 
             teacher_paths = teacher_checkpoint if isinstance(teacher_checkpoint, list) else [teacher_checkpoint]
@@ -463,7 +487,7 @@ class PPO(BaseAlgo):
                     self.teacher_actor = teacher_actor
                     self.teacher_actor_obs_normalizers = teacher_normalizers
 
-            if self.bc_loss_coef > 0.0 or self.switch_to_rl_after > 0:
+            if self.bc_loss_coef > 0.0 or self.switch_to_rl_after > 0 or self.use_ppo_dagger_schedule:
                 self.distill_enabled = True
                 self.dagger_enabled = True
             return
@@ -647,6 +671,28 @@ class PPO(BaseAlgo):
         teacher_actions = self.teacher_actor.act({"actor_obs": teacher_obs})
         return teacher_actions, None
 
+    def _adjust_ppo_dagger_coeff(self, current_epoch: int) -> None:
+        """Far-tracking style PPO/DAgger mixing schedule.
+
+        - epoch < ppo_start_epoch: ppo_coeff = 0.0
+        - epoch >= dagger_end_epoch: ppo_coeff = 0.9
+        - otherwise: linear ramp to 0.9
+        """
+        if not self.use_ppo_dagger_schedule:
+            self.ppo_coeff = 1.0
+            return
+
+        if current_epoch < self.ppo_start_epoch:
+            self.ppo_coeff = 0.0
+            return
+        if current_epoch >= self.dagger_end_epoch:
+            self.ppo_coeff = 0.9
+            return
+
+        total_epochs = max(1, self.dagger_end_epoch - self.ppo_start_epoch)
+        ppo_epochs = max(0, current_epoch - self.ppo_start_epoch)
+        self.ppo_coeff = min(float(ppo_epochs) / float(total_epochs), 0.9)
+
     def _rollout_step(self, obs_dict):
         with torch.no_grad():
             for _ in range(self.config.num_steps_per_env):
@@ -670,7 +716,7 @@ class PPO(BaseAlgo):
                 teacher_actions = None
                 teacher_indices = None
                 actions_to_step = actions
-                if self.dagger_enabled and self.bc_loss_coef > 0.0:
+                if self.dagger_enabled and (self.bc_loss_coef > 0.0 or self.use_ppo_dagger_schedule):
                     if self.teacher_obs_keys == self.actor_obs_keys:
                         teacher_obs_raw = actor_obs_raw
                     else:
@@ -781,7 +827,9 @@ class PPO(BaseAlgo):
         return returns, advantages
 
     def _training_step(self) -> dict[str, float]:
-        if self.dagger_enabled and self.switch_to_rl_after > 0:
+        if self.dagger_enabled and self.use_ppo_dagger_schedule:
+            self._adjust_ppo_dagger_coeff(self.current_learning_iteration)
+        if self.dagger_enabled and (not self.use_ppo_dagger_schedule) and self.switch_to_rl_after > 0:
             if self.current_learning_iteration == self.switch_to_rl_after:
                 self.bc_loss_coef = 0.0
         if self.use_time_gru:
@@ -902,7 +950,8 @@ class PPO(BaseAlgo):
         entropy_batch = self.actor.entropy[:original_batch_size]
 
         kl_mean = torch.tensor(0.0, device=self.device)
-        if self.config.desired_kl is not None and self.config.schedule == "adaptive":
+        update_kl = not (self.dagger_enabled and self.use_ppo_dagger_schedule and self.ppo_coeff <= 0.1)
+        if self.config.desired_kl is not None and self.config.schedule == "adaptive" and update_kl:
             # Compute the KL divergence between the old and new action distributions
             kl_mean = self._compute_kl_div(old_mu_batch, old_sigma_batch, mu_batch, sigma_batch)
             self._update_learning_rate(kl_mean)
@@ -961,7 +1010,9 @@ class PPO(BaseAlgo):
         actor_loss = actor_loss_base
         distill_loss = torch.tensor(0.0, device=self.device)
         bc_loss = torch.tensor(0.0, device=self.device)
-        if self.distill_mode == "dagger" and self.dagger_enabled and self.bc_loss_coef > 0.0:
+        if self.distill_mode == "dagger" and self.dagger_enabled and (
+            self.bc_loss_coef > 0.0 or self.use_ppo_dagger_schedule
+        ):
             teacher_actions_batch = minibatch.get("teacher_actions")
             if teacher_actions_batch is None:
                 raise ValueError("Dagger enabled but teacher_actions are missing from rollout storage.")
@@ -971,25 +1022,43 @@ class PPO(BaseAlgo):
                     teacher_actions_batch, -self.clip_actions_threshold, self.clip_actions_threshold
                 )
 
-            if self.use_multi_teacher:
-                teacher_indices = minibatch.get("teacher_indices")
-                if teacher_indices is None:
-                    raise ValueError("Multi-teacher enabled but teacher_indices are missing from rollout storage.")
-                teacher_indices = teacher_indices.view(-1)[:original_batch_size]
-                sigma_teacher = torch.zeros_like(sigma_batch)
-                for idx, teacher_actor in enumerate(self.teacher_actors):
-                    mask = teacher_indices == idx
-                    if mask.any():
-                        sigma_teacher[mask] = self._get_actor_std_for_loss(teacher_actor).detach()
+            distill_per_elem = self.distill_loss_fn(mu_batch, teacher_actions_batch, reduction="none")
+            if distill_per_elem.ndim > 1:
+                distill_per_sample = distill_per_elem.mean(dim=-1)
             else:
-                assert self.teacher_actor is not None, "Teacher actor is not initialized."
-                sigma_teacher = self._get_actor_std_for_loss(self.teacher_actor).detach()
-                sigma_teacher = sigma_teacher.unsqueeze(0).expand_as(sigma_batch)
+                distill_per_sample = distill_per_elem
 
-            bc_loss = (teacher_actions_batch - mu_batch).pow(2).sum(dim=-1).mean() + (
-                sigma_batch - sigma_teacher
-            ).pow(2).sum(dim=-1).mean()
-            actor_loss = (1.0 - self.bc_loss_coef) * actor_loss_base + self.bc_loss_coef * bc_loss
+            if self.dagger_ignore_zero_teacher_actions:
+                expert_terminate = torch.all(teacher_actions_batch == 0.0, dim=-1)
+                if (~expert_terminate).any():
+                    bc_loss = distill_per_sample[~expert_terminate].mean()
+                else:
+                    bc_loss = torch.tensor(0.0, device=self.device)
+            else:
+                bc_loss = distill_per_sample.mean()
+
+            if self.dagger_match_std:
+                if self.use_multi_teacher:
+                    teacher_indices = minibatch.get("teacher_indices")
+                    if teacher_indices is None:
+                        raise ValueError("Multi-teacher enabled but teacher_indices are missing from rollout storage.")
+                    teacher_indices = teacher_indices.view(-1)[:original_batch_size]
+                    sigma_teacher = torch.zeros_like(sigma_batch)
+                    for idx, teacher_actor in enumerate(self.teacher_actors):
+                        mask = teacher_indices == idx
+                        if mask.any():
+                            sigma_teacher[mask] = self._get_actor_std_for_loss(teacher_actor).detach()
+                else:
+                    assert self.teacher_actor is not None, "Teacher actor is not initialized."
+                    sigma_teacher = self._get_actor_std_for_loss(self.teacher_actor).detach()
+                    sigma_teacher = sigma_teacher.unsqueeze(0).expand_as(sigma_batch)
+                bc_loss = bc_loss + (sigma_batch - sigma_teacher).pow(2).sum(dim=-1).mean()
+
+            if self.use_ppo_dagger_schedule:
+                dagger_weight = self.dagger_loss_coef * (1.0 - self.ppo_coeff)
+                actor_loss = self.ppo_coeff * actor_loss_base + dagger_weight * bc_loss
+            elif self.bc_loss_coef > 0.0:
+                actor_loss = (1.0 - self.bc_loss_coef) * actor_loss_base + self.bc_loss_coef * bc_loss
         elif self.distill_enabled:
             assert self.teacher_actor is not None, "Distillation enabled but teacher actor is not initialized."
             teacher_obs = self._normalize_teacher_actor_obs(raw_actor_obs)
@@ -1108,7 +1177,8 @@ class PPO(BaseAlgo):
         entropy_batch = self.actor.entropy[:original_batch_size]
 
         kl_mean = torch.tensor(0.0, device=self.device)
-        if self.config.desired_kl is not None and self.config.schedule == "adaptive":
+        update_kl = not (self.dagger_enabled and self.use_ppo_dagger_schedule and self.ppo_coeff <= 0.1)
+        if self.config.desired_kl is not None and self.config.schedule == "adaptive" and update_kl:
             kl_mean = self._compute_kl_div(old_mu_flat, old_sigma_flat, mu_batch, sigma_batch)
             self._update_learning_rate(kl_mean)
 

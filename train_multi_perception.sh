@@ -1,39 +1,96 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Perception-aware VideoMimic tracking with depth (D435i-style camera).
+# Perception-aware VideoMimic tracking.
+# Supported perception presets are intentionally restricted to:
+#   - camera_depth_d435i (default, far-tracking aligned)
+#   - heightmap
 
-DEPTH_IMPL=${1:-${DEPTH_IMPL:-rendered}} # rendered|depth_sensor|raycast|scandots
+PERCEPTION_PRESET=${1:-${PERCEPTION_PRESET:-camera_depth_d435i}} # camera_depth_d435i|heightmap
 STAGE1_CKPT=${2:-${STAGE1_CKPT:-}}
-IMAGE_WIDTH=${IMAGE_WIDTH:-128}
-IMAGE_HEIGHT=${IMAGE_HEIGHT:-72}
-PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-4294967295}
+RESUME_CKPT=${RESUME_CKPT:-}
+IMAGE_WIDTH=${IMAGE_WIDTH:-106}
+IMAGE_HEIGHT=${IMAGE_HEIGHT:-60}
+PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-268435456}
 NUM_GPUS=${NUM_GPUS:-6}
 PER_GPU_ENVS=${PER_GPU_ENVS:-$((4096 * 2))}
 NUM_ENVS=${NUM_ENVS:-$((NUM_GPUS * PER_GPU_ENVS))}
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5}
 TTTEST=${TTTEST:-0}
-case "${DEPTH_IMPL}" in
-  rendered)
-    PERCEPTION_PRESET="heightmap"
-    ;;
-  depth_sensor)
-    PERCEPTION_PRESET="heightmap"
-    ;;
-  raycast)
-    PERCEPTION_PRESET="heightmap"
-    ;;
-  scandots)
-    PERCEPTION_PRESET="heightmap"
+PPO_START_EPOCH=${PPO_START_EPOCH:-0}
+DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-10000}
+DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-10.0}
+DISTILL_LOSS_TYPE=${DISTILL_LOSS_TYPE:-mse}
+TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs,actor_obs_target}
+
+case "${PERCEPTION_PRESET}" in
+  camera_depth_d435i|heightmap)
     ;;
   *)
-    echo "Unknown DEPTH_IMPL=${DEPTH_IMPL}. Use rendered|depth_sensor|raycast|scandots." >&2
+    echo "Unknown PERCEPTION_PRESET=${PERCEPTION_PRESET}. Use camera_depth_d435i|heightmap." >&2
     exit 1
     ;;
 esac
-echo "[INFO] DEPTH_IMPL=${DEPTH_IMPL} -> perception:${PERCEPTION_PRESET}"
-if [[ -n "${STAGE1_CKPT}" ]]; then
-  echo "[INFO] Stage1 checkpoint: ${STAGE1_CKPT}"
+echo "[INFO] perception:${PERCEPTION_PRESET}"
+
+PERCEPTION_OVERRIDES=()
+if [[ "${PERCEPTION_PRESET}" == "camera_depth_d435i" ]]; then
+  PERCEPTION_OVERRIDES=(
+    --perception.camera_width="${IMAGE_WIDTH}"
+    --perception.camera_height="${IMAGE_HEIGHT}"
+    --perception.camera_warp_preprocess=True
+    --perception.camera_warp_freq_ratio=1
+    --perception.camera_warp_latency_frame=0
+    --perception.camera_warp_buffer_len=3
+    --perception.camera_warp_crop_top=2
+    --perception.camera_warp_crop_bottom=0
+    --perception.camera_warp_crop_left=4
+    --perception.camera_warp_crop_right=4
+    --perception.camera_warp_min_valid_depth=0.15
+    --perception.camera_warp_normalize=True
+    --perception.camera_warp_edge_noise=True
+    --perception.camera_warp_edge_border=3
+    --perception.camera_warp_edge_shuffle_prob=0.9
+    --perception.camera_warp_edge_empty_prob=0.7
+    --perception.camera_warp_edge_thresh_primary=1.0
+    --perception.camera_warp_edge_thresh_secondary=0.6
+    --perception.camera_warp_edge_far_depth_thresh=2.5
+    --perception.camera_warp_enable_holes=False
+    --perception.camera_warp_hole_prob=0.0
+  )
+fi
+
+EXP_NAME="exp:g1-29dof-wbt-videomimic-mlp"
+DISTILL_OVERRIDES=()
+CHECKPOINT_OVERRIDES=()
+
+if [[ -n "${RESUME_CKPT}" ]]; then
+  CHECKPOINT_OVERRIDES+=(--training.checkpoint "${RESUME_CKPT}")
+fi
+
+if [[ "${PERCEPTION_PRESET}" == "camera_depth_d435i" ]]; then
+  if [[ -z "${STAGE1_CKPT}" ]]; then
+    echo "camera_depth_d435i requires Stage1 teacher checkpoint as arg2." >&2
+    exit 1
+  fi
+  EXP_NAME="exp:g1-29dof-wbt-videomimic-distill-mlp"
+  DISTILL_OVERRIDES=(
+    --algo.config.distill.mode=dagger
+    --algo.config.distill.policy_to_clone="${STAGE1_CKPT}"
+    --algo.config.distill.teacher_obs_keys="${TEACHER_OBS_KEYS}"
+    --algo.config.distill.bc_loss_coef=1.0
+    --algo.config.distill.distill_loss_type="${DISTILL_LOSS_TYPE}"
+    --algo.config.distill.ppo_start_epoch="${PPO_START_EPOCH}"
+    --algo.config.distill.dagger_end_epoch="${DAGGER_END_EPOCH}"
+    --algo.config.distill.dagger_loss_coef="${DAGGER_LOSS_COEF}"
+    --algo.config.distill.dagger_ignore_zero_teacher_actions=True
+    --algo.config.distill.dagger_match_std=False
+  )
+  echo "[INFO] teacher_ckpt=${STAGE1_CKPT}"
+  echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH} dagger_loss_coef=${DAGGER_LOSS_COEF}"
+elif [[ -n "${STAGE1_CKPT}" && -z "${RESUME_CKPT}" ]]; then
+  # Preserve legacy behavior for heightmap: arg2 resumes training.
+  CHECKPOINT_OVERRIDES+=(--training.checkpoint "${STAGE1_CKPT}")
 fi
 
 OBJ_DIR="/data/terrain/___crisp_clean_geometry"
@@ -101,10 +158,9 @@ fi
 if [[ "${TTTEST}" != "0" ]]; then
   echo "[INFO] TTTEST enabled: launching Viser physics preview with 1 env"
   CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2,3,4,5,6,7} python src/holosoma/holosoma/train_agent.py \
-    exp:g1-29dof-wbt-videomimic-mlp \
+    "${EXP_NAME}" \
     "perception:${PERCEPTION_PRESET}" \
-    --perception.camera_width="$IMAGE_WIDTH" \
-    --perception.camera_height="$IMAGE_HEIGHT" \
+    "${PERCEPTION_OVERRIDES[@]}" \
     --simulator.config.sim.physx.gpu_collision_stack_size="${PHYSX_GPU_COLLISION_STACK_SIZE}" \
     terrain:terrain-load-obj \
     --training.num_envs=1 \
@@ -114,6 +170,8 @@ if [[ "${TTTEST}" != "0" ]]; then
     --training.viser_update_hz=30 \
     --training.viser_recenter=True \
     --training.viser_show_scandots=True \
+    --training.isaac_show_scandots=True \
+    --training.isaac_scandots_point_size=3.0 \
     --simulator.config.scene.env_spacing=0.0 \
     --terrain.terrain-term.obj-file-path "${OBJ_PATH}" \
     ${OBJ_META:+--terrain.terrain-term.obj-metadata-path "${OBJ_META}"} \
@@ -125,6 +183,7 @@ if [[ "${TTTEST}" != "0" ]]; then
     --algo.config.normalize_actor_obs=False \
     --algo.config.normalize_critic_obs=False \
     --algo.config.load_optimizer=False \
+    "${DISTILL_OVERRIDES[@]}" \
     \
     --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_DIR}" \
     --command.setup_terms.motion_command.params.motion_config.pair_terrain_with_motion=True \
@@ -133,16 +192,15 @@ if [[ "${TTTEST}" != "0" ]]; then
     --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s=0 \
     --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend=False \
     --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s=0 \
-    ${STAGE1_CKPT:+--training.checkpoint "${STAGE1_CKPT}"} \
+    "${CHECKPOINT_OVERRIDES[@]}" \
     logger:disabled
   exit 0
 fi
 
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" torchrun --nproc_per_node="${NUM_GPUS}" --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
-  exp:g1-29dof-wbt-videomimic-mlp \
+  "${EXP_NAME}" \
   "perception:${PERCEPTION_PRESET}" \
-  --perception.camera_width="$IMAGE_WIDTH" \
-  --perception.camera_height="$IMAGE_HEIGHT" \
+  "${PERCEPTION_OVERRIDES[@]}" \
   --simulator.config.sim.physx.gpu_collision_stack_size="${PHYSX_GPU_COLLISION_STACK_SIZE}" \
   terrain:terrain-load-obj \
   --training.num_envs="${NUM_ENVS}" \
@@ -158,6 +216,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" torchrun --nproc_per_node="${NUM_
   --algo.config.normalize_critic_obs=False \
   --algo.config.load_optimizer=False \
   --algo.config.save_interval=10000 \
+  "${DISTILL_OVERRIDES[@]}" \
   \
   --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_DIR}" \
   --command.setup_terms.motion_command.params.motion_config.pair_terrain_with_motion=True \
@@ -166,7 +225,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" torchrun --nproc_per_node="${NUM_
   --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s=0 \
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend=False \
   --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s=0 \
-  ${STAGE1_CKPT:+--training.checkpoint "${STAGE1_CKPT}"} \
+  "${CHECKPOINT_OVERRIDES[@]}" \
   logger:wandb \
   --logger.video.enabled=False \
   --logger.video.interval=1000 \

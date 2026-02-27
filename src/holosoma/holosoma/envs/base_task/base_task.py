@@ -549,7 +549,7 @@ class BaseTask:
             )
         use_depth_mask_env = os.environ.get("ISAAC_SCANDOTS_USE_DEPTH_MASK")
         if use_depth_mask_env is None:
-            use_depth_mask = True
+            use_depth_mask = False
         else:
             use_depth_mask = use_depth_mask_env.lower() not in (
                 "0",

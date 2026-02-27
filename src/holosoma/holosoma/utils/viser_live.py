@@ -373,14 +373,39 @@ def _load_terrain_mesh(
             return sorted(Path(p) for p in glob.glob(path_str))
         return [path] if path.exists() else []
 
+    def _canonical_pair_key(raw_name: str | None) -> str | None:
+        if raw_name is None:
+            return None
+        name = str(raw_name).strip()
+        if not name:
+            return None
+        if (name.startswith("b'") and name.endswith("'")) or (name.startswith('b"') and name.endswith('"')):
+            name = name[2:-1]
+        name = Path(name).name
+        lower = name.lower()
+        for suffix in (".npz", ".h5", ".hdf5", ".obj"):
+            if lower.endswith(suffix):
+                name = name[: -len(suffix)]
+                break
+        return name.casefold()
+
     def _select_obj_path(paths: list[Path], name: str | None) -> Path:
         if len(paths) == 1:
             return paths[0]
-        if name:
+        clip_key = _canonical_pair_key(name)
+        if clip_key:
+            keyed_paths: dict[str, Path] = {}
             for candidate in paths:
-                if candidate.stem == name or candidate.stem.lower() == name.lower():
-                    return candidate
-            logger.warning("No terrain OBJ matching clip '{}'; using {}.", name, paths[0].name)
+                key = _canonical_pair_key(candidate.stem)
+                if key is not None and key not in keyed_paths:
+                    keyed_paths[key] = candidate
+            if clip_key in keyed_paths:
+                return keyed_paths[clip_key]
+            candidates_preview = ", ".join(path.stem for path in paths[:12])
+            raise FileNotFoundError(
+                f"No terrain OBJ matching clip '{name}'. Available stems (first 12): {candidates_preview}"
+            )
+        logger.warning("Terrain OBJ input has multiple meshes; no clip provided, using {}.", paths[0].name)
         return paths[0]
 
     terrain_path = Path(_resolve_data_path(obj_path))
@@ -388,12 +413,16 @@ def _load_terrain_mesh(
     if not obj_paths:
         return None
 
-    if obj_metadata_path:
-        if len(obj_paths) != 1:
-            logger.warning("OBJ metadata requires a single OBJ file; ignoring metadata for directory input.")
+    if obj_metadata_path and len(obj_paths) == 1:
         selected_path = obj_paths[0]
     else:
-        selected_path = _select_obj_path(obj_paths, clip_name)
+        if obj_metadata_path and len(obj_paths) != 1:
+            logger.warning("OBJ metadata provided with directory/glob input; using clip-based OBJ selection.")
+        try:
+            selected_path = _select_obj_path(obj_paths, clip_name)
+        except FileNotFoundError as exc:
+            logger.error("{}", exc)
+            return None
 
     return _load_mesh(selected_path)
 
@@ -775,10 +804,19 @@ class ViserLiveViewer:
             return
         if clip_name == self._terrain_clip_name:
             return
-        self._terrain_clip_name = clip_name
         self._clear_terrain_handles()
         self._load_terrain(clip_name=clip_name)
         self._update_terrain_transform()
+
+    def _invalidate_isaac_scandots_payload(self) -> None:
+        # Clip/env switches can update robot pose immediately while Isaac payload still carries prior-step rays.
+        if hasattr(self._env, "_isaac_scandots_payload"):
+            self._env._isaac_scandots_payload = None
+        if hasattr(self._env, "_isaac_scandots_last_update"):
+            try:
+                self._env._isaac_scandots_last_update = 0.0
+            except Exception:
+                pass
 
     def wait_if_paused(self) -> None:
         if not self._enabled or self._play_control is None:
@@ -1119,7 +1157,6 @@ class ViserLiveViewer:
         motion_cmd = self._get_motion_command()
         if clip_name is None:
             clip_name = self._current_clip_name(motion_cmd)
-        self._terrain_clip_name = clip_name
 
         terrain_state = terrain_mgr.get_state("locomotion_terrain")
         terrain_cfg = getattr(terrain_mgr, "cfg", None)
@@ -1194,6 +1231,7 @@ class ViserLiveViewer:
             if self._show_terrain_cb is not None:
                 self._ground_handle.visible = bool(self._show_terrain_cb.value)
             self._terrain_is_local = False
+            self._terrain_clip_name = clip_name
             self._update_terrain_transform()
             return
 
@@ -1207,6 +1245,7 @@ class ViserLiveViewer:
         if self._show_terrain_cb is not None:
             self._terrain_handle.visible = bool(self._show_terrain_cb.value)
         self._terrain_is_local = bool(mesh_is_local)
+        self._terrain_clip_name = clip_name
         self._update_terrain_transform()
 
     def _get_perception_manager(self):
@@ -1745,6 +1784,14 @@ class ViserLiveViewer:
         except Exception:
             return None
 
+    def _active_clip_index(self, motion_cmd) -> int | None:
+        if motion_cmd is None or not hasattr(motion_cmd, "clip_ids"):
+            return None
+        try:
+            return int(motion_cmd.clip_ids[self._env_id].item())
+        except Exception:
+            return None
+
     def _current_clip_name(self, motion_cmd, clip_idx: int | None = None) -> str | None:
         if motion_cmd is None or not hasattr(motion_cmd, "motion"):
             return None
@@ -1802,7 +1849,10 @@ class ViserLiveViewer:
                 except Exception:
                     motion_cmd._forced_start_step = int(clip_start)
                 self._force_clip_state(motion_cmd, int(clip_idx), clip_start)
-                self._reload_terrain_for_clip(self._current_clip_name(motion_cmd, int(clip_idx)))
+                active_idx = self._active_clip_index(motion_cmd)
+                if active_idx is None:
+                    active_idx = int(clip_idx)
+                self._reload_terrain_for_clip(self._current_clip_name(motion_cmd, int(active_idx)))
                 return
 
         env_ids = torch.tensor([self._env_id], device=self._env.device, dtype=torch.long)
@@ -1847,7 +1897,10 @@ class ViserLiveViewer:
             except Exception:
                 motion_cmd._forced_start_step = None
         self._force_clip_state(motion_cmd, int(clip_idx), clip_start)
-        self._reload_terrain_for_clip(self._current_clip_name(motion_cmd, int(clip_idx)))
+        active_idx = self._active_clip_index(motion_cmd)
+        if active_idx is None:
+            active_idx = int(clip_idx)
+        self._reload_terrain_for_clip(self._current_clip_name(motion_cmd, int(active_idx)))
 
     def _force_clip_state(self, motion_cmd, clip_idx: int, clip_start: int | None) -> None:
         env_ids = torch.tensor([self._env_id], device=self._env.device, dtype=torch.long)
@@ -1918,6 +1971,7 @@ class ViserLiveViewer:
         self._env._compute_observations()
         self._env._post_compute_observations_callback()
         self._env._clip_observations()
+        self._invalidate_isaac_scandots_payload()
 
     def _resolve_env_origin(self) -> np.ndarray | None:
         motion_cmd = self._get_motion_command()
@@ -2047,17 +2101,14 @@ class ViserLiveViewer:
 
         self._ray_direction_stats_suffix = ""
         source_env = os.environ.get("VISER_SCANDOTS_SOURCE", "auto").strip().lower()
-        if source_env in ("isaac", "isaacsim", "isaac_payload"):
-            if self._update_scandots_from_isaac_payload(offset):
-                return
-            if not self._scandots_warned:
-                logger.warning("Viser scandots source=isaac requested but Isaac payload is unavailable.")
-                self._scandots_warned = True
-            if self._scandots_handle is not None:
-                self._scandots_handle.visible = False
-            if self._scandots_rays_handle is not None:
-                self._scandots_rays_handle.visible = False
+        isaac_only = source_env in ("isaac", "isaacsim", "isaac_payload")
+        if isaac_only and self._update_scandots_from_isaac_payload(offset):
             return
+        if isaac_only and not self._scandots_warned:
+            logger.warning(
+                "Viser scandots source=isaac payload unavailable/stale; falling back to live perception rays."
+            )
+            self._scandots_warned = True
         if source_env == "auto" and self._update_scandots_from_isaac_payload(offset):
             return
 
@@ -2082,7 +2133,7 @@ class ViserLiveViewer:
             )
         use_depth_mask_env = os.environ.get("VISER_SCANDOTS_USE_DEPTH_MASK")
         if use_depth_mask_env is None:
-            use_depth_mask = True
+            use_depth_mask = False
         else:
             use_depth_mask = use_depth_mask_env.lower() not in (
                 "0",
