@@ -113,6 +113,7 @@ SWITCH_TO_RL_AFTER=${SWITCH_TO_RL_AFTER:-}
 CLIP_TEACHER_ACTIONS=${CLIP_TEACHER_ACTIONS:-True}
 CLIP_ACTIONS_THRESHOLD=${CLIP_ACTIONS_THRESHOLD:-8.0}
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
+TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.05}
 RESET_NOISE_SCALE=${RESET_NOISE_SCALE:-1.0}
@@ -177,6 +178,7 @@ run_distill_stage() {
   echo "[INFO]   training_name=${stage_training_name}"
   echo "[INFO]   bc_loss_coef=${stage_bc_loss_coef}"
   echo "[INFO]   take_teacher_actions=${stage_take_teacher_actions}"
+  echo "[INFO]   teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
   echo "[INFO]   start_at_timestep_zero_prob=${stage_start_at_timestep_zero_prob}"
   echo "[INFO]   reset_noise_scale=${stage_reset_noise_scale}"
   echo "[INFO]   distributed: nnodes=${NNODES} node_rank=${NODE_RANK} nproc_per_node=${NPROC}"
@@ -199,6 +201,7 @@ run_distill_stage() {
     --algo.config.distill.clip_actions_threshold="${CLIP_ACTIONS_THRESHOLD}"
     --algo.config.distill.teacher_obs_keys="${TEACHER_OBS_KEYS}"
     --algo.config.distill.take_teacher_actions="${stage_take_teacher_actions}"
+    --algo.config.distill.teacher_action_mix_ratio="${TEACHER_ACTION_MIX_RATIO}"
     --training.num_envs="${NUM_ENVS}"
     --training.project="${TRAINING_PROJECT}"
     --training.name="${stage_training_name}"

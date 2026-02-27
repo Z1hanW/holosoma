@@ -33,6 +33,7 @@ EXP=${EXP:-g1-29dof-wbt-w-object-distill-torso-box-goal}
 RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_perception}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_perception_access_to_depth}
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
+TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.5}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
 
@@ -46,12 +47,14 @@ echo "[INFO] distill mode: depth-access-no-box-state"
 echo "[INFO] teacher checkpoint: ${TEACHER_CHECKPOINT}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
 echo "[INFO] student actor uses actor_obs_torso + perception_obs only"
+echo "[INFO] teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
 
 exec env \
   EXP="${EXP}" \
   RUN_NAME="${RUN_NAME}" \
   TRAINING_NAME="${TRAINING_NAME}" \
   TEACHER_OBS_KEYS="${TEACHER_OBS_KEYS}" \
+  TEACHER_ACTION_MIX_RATIO="${TEACHER_ACTION_MIX_RATIO}" \
   PAIR_TERRAIN_WITH_MOTION="${PAIR_TERRAIN_WITH_MOTION}" \
   bash "${SCRIPT_DIR}/distill_torso_box.sh" "${TEACHER_CHECKPOINT}" \
     "perception:${PERCEPTION_PRESET}" \

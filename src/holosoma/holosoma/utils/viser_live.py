@@ -292,6 +292,8 @@ def _frustum_quat_from_world_rays(
     center_dir = ray_dirs_world[idx_center]
     right_dir = ray_dirs_world[idx_right]
 
+    # Use camera center ray as frustum forward so frustum orientation matches
+    # the actual depth rays emitted into the scene.
     fwd = _normalize_vec(center_dir)
     right_proj = right_dir - fwd * torch.dot(right_dir, fwd)
     if torch.linalg.norm(right_proj) < 1.0e-6:

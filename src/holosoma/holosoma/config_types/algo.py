@@ -166,6 +166,9 @@ class DistillationConfig:
     take_teacher_actions: bool = False
     """Whether to step the environment with teacher actions instead of student actions."""
 
+    teacher_action_mix_ratio: float = 0.0
+    """Per-step env mix ratio for teacher actions in DAgger rollout (0.0=student only, 1.0=teacher only)."""
+
     switch_to_rl_after: int = -1
     """Iteration to switch off BC loss (set to 0 or negative to disable)."""
 

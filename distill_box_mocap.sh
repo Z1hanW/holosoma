@@ -35,6 +35,7 @@ EXP=${EXP:-g1-29dof-wbt-w-object-distill-torso-box-goal}
 RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_mocap}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_mocap_access_to_mocap_data}
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
+TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.5}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 ACTOR_LR=${ACTOR_LR:-5e-5}
 CRITIC_LR=${CRITIC_LR:-5e-5}
@@ -44,12 +45,14 @@ echo "[INFO] teacher checkpoint: ${TEACHER_CHECKPOINT}"
 echo "[INFO] exp=${EXP}"
 echo "[INFO] actor box state is in robot base frame (b): obj_pos_b + obj_goal_pos_size_b"
 echo "[INFO] actor_lr=${ACTOR_LR} critic_lr=${CRITIC_LR}"
+echo "[INFO] teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
 
 exec env \
   EXP="${EXP}" \
   RUN_NAME="${RUN_NAME}" \
   TRAINING_NAME="${TRAINING_NAME}" \
   TEACHER_OBS_KEYS="${TEACHER_OBS_KEYS}" \
+  TEACHER_ACTION_MIX_RATIO="${TEACHER_ACTION_MIX_RATIO}" \
   PAIR_TERRAIN_WITH_MOTION="${PAIR_TERRAIN_WITH_MOTION}" \
   ACTOR_LR="${ACTOR_LR}" \
   CRITIC_LR="${CRITIC_LR}" \

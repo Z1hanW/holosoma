@@ -170,6 +170,7 @@ class PPO(BaseAlgo):
         self.clip_teacher_actions = False
         self.clip_actions_threshold = 0.0
         self.take_teacher_actions = False
+        self.teacher_action_mix_ratio = 0.0
         self.switch_to_rl_after = -1
         self.use_multi_teacher = False
         self.multi_teacher_select_obs_var = "teacher_checkpoint_index"
@@ -433,6 +434,11 @@ class PPO(BaseAlgo):
         self.clip_teacher_actions = bool(distill_cfg.clip_teacher_actions)
         self.clip_actions_threshold = float(distill_cfg.clip_actions_threshold)
         self.take_teacher_actions = bool(distill_cfg.take_teacher_actions)
+        self.teacher_action_mix_ratio = float(getattr(distill_cfg, "teacher_action_mix_ratio", 0.0))
+        if not (0.0 <= self.teacher_action_mix_ratio <= 1.0):
+            raise ValueError(
+                f"distill.teacher_action_mix_ratio must be in [0.0, 1.0], got {self.teacher_action_mix_ratio}."
+            )
         self.switch_to_rl_after = int(distill_cfg.switch_to_rl_after)
         self.use_multi_teacher = bool(distill_cfg.use_multi_teacher)
         self.multi_teacher_select_obs_var = str(distill_cfg.multi_teacher_select_obs_var)
@@ -736,7 +742,12 @@ class PPO(BaseAlgo):
                     else:
                         teacher_obs_raw = torch.cat([obs_dict[k] for k in self.teacher_obs_keys], dim=1)
                     teacher_actions, teacher_indices = self._select_teacher_actions(teacher_obs_raw, obs_dict)
-                    if self.take_teacher_actions:
+                    if self.teacher_action_mix_ratio > 0.0:
+                        teacher_mask = (
+                            torch.rand((actions.shape[0], 1), device=actions.device) < self.teacher_action_mix_ratio
+                        )
+                        actions_to_step = torch.where(teacher_mask, teacher_actions, actions)
+                    elif self.take_teacher_actions:
                         actions_to_step = teacher_actions
 
                 obs_dict, rewards, dones, infos = self.env.step({"actions": actions_to_step})

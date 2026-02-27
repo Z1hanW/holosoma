@@ -14,9 +14,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT_DIR}"
 
-EXP="g1-29dof-wbt-videomimic-distill-mlp"
+EXP="g1-29dof-wbt"
 COMMAND_PRESET="g1-29dof-wbt"
-PERCEPTION_PRESET="camera_depth_d435i"
+PERCEPTION_PRESET="camera-depth-d435i"
 
 MOTION_FILE="${MOTION_FILE:-${ROOT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/far_robot_mj.npz}"
 TERRAIN_OBJ="${TERRAIN_OBJ:-${ROOT_DIR}/src/holosoma_retargeting/demo_data/far_robot/far_robot/stairs.obj}"

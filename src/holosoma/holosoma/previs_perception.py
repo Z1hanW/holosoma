@@ -138,7 +138,7 @@ def replay_perception(tyro_config: ExperimentConfig) -> None:
     env = get_class(env_target)(tyro_env_config, device=device)
 
     if env.perception_manager is None:
-        raise RuntimeError("Perception is disabled. Use perception:camera_depth_d435i (or similar).")
+        raise RuntimeError("Perception is disabled. Use perception:camera-depth-d435i (or similar).")
 
     output_dir = _resolve_output_dir()
     stride = _resolve_stride()
