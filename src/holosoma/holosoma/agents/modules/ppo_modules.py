@@ -81,12 +81,28 @@ class PPOActor(nn.Module):
         # Always keep scale strictly positive for torch.distributions.Normal.
         return torch.clamp(std, min=1e-6)
 
+    @staticmethod
+    def _expand_std_like(std: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
+        """Broadcast 1D action std to match policy mean shape without value-dependent ops."""
+        if std.ndim == 1:
+            return std.unsqueeze(0).expand_as(ref)
+        return std.expand_as(ref)
+
+    @staticmethod
+    def _sanitize_scale(scale: torch.Tensor) -> torch.Tensor:
+        """Guarantee a valid Normal scale tensor (finite and strictly positive)."""
+        scale = torch.nan_to_num(scale, nan=1e-3, posinf=10.0, neginf=1e-3)
+        scale = torch.abs(scale)
+        return torch.clamp(scale, min=1e-6)
+
     def update_distribution(self, actor_obs, extra_input: torch.Tensor | None = None):
         mean = self.actor(actor_obs, extra_input=extra_input)
+        mean = torch.nan_to_num(mean, nan=0.0, posinf=1e3, neginf=-1e3)
         safe_std = self._safe_std()
         if self.min_noise_std:
             clamped_std = torch.clamp(safe_std, min=self.min_noise_std)
-            self.distribution = Normal(mean, mean * 0.0 + clamped_std)
+            scale = self._sanitize_scale(self._expand_std_like(clamped_std, mean))
+            self.distribution = Normal(mean, scale)
         elif self.min_mean_noise_std:
             current_mean = safe_std.mean()
             if current_mean < self.min_mean_noise_std:
@@ -94,13 +110,20 @@ class PPOActor(nn.Module):
                 clamped_std = safe_std * scale_up
             else:
                 clamped_std = safe_std
-            self.distribution = Normal(mean, mean * 0.0 + clamped_std)
+            scale = self._sanitize_scale(self._expand_std_like(clamped_std, mean))
+            self.distribution = Normal(mean, scale)
         else:
-            self.distribution = Normal(mean, mean * 0.0 + safe_std)
+            scale = self._sanitize_scale(self._expand_std_like(safe_std, mean))
+            self.distribution = Normal(mean, scale)
 
     def act(self, policy_state_dict):
         extra_input = policy_state_dict.get("extra_actor_input")
         self.update_distribution(policy_state_dict["actor_obs"], extra_input=extra_input)
+        # Defensive guard: rebuild distribution with sanitized scale if any corruption remains.
+        if self.distribution is not None:
+            loc = torch.nan_to_num(self.distribution.loc, nan=0.0, posinf=1e3, neginf=-1e3)
+            scale = self._sanitize_scale(self.distribution.scale)
+            self.distribution = Normal(loc, scale)
         return self.distribution.sample()
 
     def get_actions_log_prob(self, actions):
