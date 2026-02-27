@@ -90,7 +90,7 @@ heightmap = PerceptionConfig(
 camera_depth_d435i = PerceptionConfig(
     enabled=True,
     output_mode="camera_depth",
-    camera_source="mesh_raycast",
+    camera_source="far_tracking_warp",
     camera_strict_warp=True,
     camera_auto_fix_backward=False,
     max_distance=3.0,
@@ -113,7 +113,7 @@ camera_depth_d435i = PerceptionConfig(
     camera_mesh_allowlist=WARP_SENSORS_G1_D435_MESH_ALLOWLIST,
     camera_mesh_file_map=WARP_SENSORS_G1_D435_MESH_FILE_MAP,
     camera_fps=30.0,
-    camera_near=0.001,
+    camera_near=0.3,
     camera_far=3.0,
     camera_distortion=[0.0, 0.0, 0.0, 0.0, 0.0],
     # Align observation preprocessing with far-tracking warp_image_features.

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 import os
+import sys
+from pathlib import Path
+from types import SimpleNamespace
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -79,6 +82,11 @@ class PerceptionManager:
         self._robot_link_meshes: list[dict[str, torch.Tensor]] = []
         self._camera_warp_mesh = None
         self._warned_robot_mesh = False
+        self._far_tracking_camera_sensor: Any = None
+        self._far_tracking_tf_apply = None
+        self._far_tracking_quat_mul = None
+        self._far_tracking_ray_cast_body_indices: torch.Tensor | None = None
+        self._far_tracking_base_link_indices: torch.Tensor | None = None
         self._camera_mount_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
         self._use_camera_mount_quat = False
         self._camera_frame_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
@@ -104,6 +112,17 @@ class PerceptionManager:
             self._camera_backward_ratio_threshold = float(threshold_raw)
         except Exception:
             self._camera_backward_ratio_threshold = 0.6
+        runtime_log_every_raw = os.environ.get("HOLOSOMA_CAMERA_LOG_ROOT_BACK_EVERY", "0").strip()
+        try:
+            self._camera_runtime_log_every = max(0, int(runtime_log_every_raw))
+        except Exception:
+            self._camera_runtime_log_every = 0
+        runtime_warn_ratio_raw = os.environ.get("HOLOSOMA_CAMERA_WARN_ROOT_BACK_RATIO", "0.6").strip()
+        try:
+            self._camera_runtime_warn_ratio = float(runtime_warn_ratio_raw)
+        except Exception:
+            self._camera_runtime_warn_ratio = 0.6
+        self._camera_runtime_log_counter = 0
         extra_yaw_raw = os.environ.get("HOLOSOMA_CAMERA_EXTRA_YAW_DEG", "0.0").strip()
         try:
             extra_yaw_deg = float(extra_yaw_raw)
@@ -137,10 +156,10 @@ class PerceptionManager:
 
         if cfg.output_mode not in {"heightmap", "camera_depth"}:
             raise ValueError(f"Unsupported output_mode: {cfg.output_mode}")
-        if cfg.output_mode == "camera_depth" and self._camera_source != "mesh_raycast":
+        if cfg.output_mode == "camera_depth" and self._camera_source != "far_tracking_warp":
             raise ValueError(
-                "Unsupported camera_source. Only 'mesh_raycast' is supported for camera_depth "
-                "(use perception:camera_depth_d435i)."
+                "Unsupported camera_source. Supported camera_depth sources: "
+                "'far_tracking_warp'."
             )
 
         self._camera_width, self._camera_height = self._resolve_camera_resolution()
@@ -258,6 +277,7 @@ class PerceptionManager:
         if (
             self._uses_raycast()
             or self._uses_camera_raycast()
+            or self._uses_camera_far_tracking()
             or self._uses_camera_scandots()
             or self._uses_pytorch3d()
         ):
@@ -265,11 +285,11 @@ class PerceptionManager:
             if terrain_term is None or not hasattr(terrain_term, "terrain_term"):
                 raise RuntimeError("PerceptionManager requires an initialized terrain_manager.")
             terrain_state = terrain_term.terrain_term
-            if self._uses_raycast() or self._uses_camera_raycast() or self._uses_camera_scandots():
+            if self._uses_raycast() or self._uses_camera_raycast() or self._uses_camera_far_tracking() or self._uses_camera_scandots():
                 if not hasattr(terrain_state, "warp_mesh"):
                     raise RuntimeError("PerceptionManager requires terrain term with warp_mesh support.")
                 self._warp_mesh = terrain_state.warp_mesh
-            if self._uses_pytorch3d() or (
+            if self._uses_pytorch3d() or self._uses_camera_far_tracking() or (
                 self._camera_include_robot_mesh and (self._uses_camera_raycast() or self._uses_camera_scandots())
             ):
                 if not hasattr(terrain_state, "mesh"):
@@ -287,6 +307,9 @@ class PerceptionManager:
         if self._uses_camera_raycast():
             self._resolve_camera_body_index()
             self._camera_ray_dirs_base = self._build_camera_rays()
+
+        if self._uses_camera_far_tracking():
+            self._setup_far_tracking_camera_sensor()
 
         if self._wants_camera_scandots():
             self._resolve_camera_body_index()
@@ -354,6 +377,7 @@ class PerceptionManager:
                 )
             elif camera_depth.ndim == 2:
                 camera_depth = camera_depth.unsqueeze(0)
+            camera_depth = self._clamp_camera_depth_to_sensor_range(camera_depth)
             env_id = torch.tensor([self._rendered_camera_env_id], device=self.device, dtype=torch.long)
             self._camera_depth[env_id] = camera_depth
             self._update_camera_depth_observation(
@@ -361,39 +385,59 @@ class PerceptionManager:
                 camera_depth,
                 refresh=self._consume_camera_obs_refresh_flag(),
             )
+            self._maybe_log_runtime_camera_alignment()
             return
 
         if self._uses_pytorch3d():
             idx = env_ids if env_ids is not None else slice(None)
             camera_depth = self._compute_pytorch3d_depth(env_ids)
+            camera_depth = self._clamp_camera_depth_to_sensor_range(camera_depth)
             self._camera_depth[idx] = camera_depth
             self._update_camera_depth_observation(
                 idx,
                 camera_depth,
                 refresh=self._consume_camera_obs_refresh_flag(),
             )
+            self._maybe_log_runtime_camera_alignment()
+            return
+
+        if self._uses_camera_far_tracking():
+            idx = env_ids if env_ids is not None else slice(None)
+            camera_depth = self._compute_far_tracking_camera_depth(env_ids)
+            camera_depth = self._clamp_camera_depth_to_sensor_range(camera_depth)
+            self._camera_depth[idx] = camera_depth
+            self._update_camera_depth_observation(
+                idx,
+                camera_depth,
+                refresh=self._consume_camera_obs_refresh_flag(),
+            )
+            self._maybe_log_runtime_camera_alignment()
             return
 
         if self._uses_camera_scandots():
             idx = env_ids if env_ids is not None else slice(None)
             camera_depth = self._compute_camera_scandots_depth(env_ids)
+            camera_depth = self._clamp_camera_depth_to_sensor_range(camera_depth)
             self._camera_depth[idx] = camera_depth
             self._update_camera_depth_observation(
                 idx,
                 camera_depth,
                 refresh=self._consume_camera_obs_refresh_flag(),
             )
+            self._maybe_log_runtime_camera_alignment()
             return
 
         if self._uses_camera_raycast():
             idx = env_ids if env_ids is not None else slice(None)
             camera_depth = self._compute_camera_raycast_depth(env_ids)
+            camera_depth = self._clamp_camera_depth_to_sensor_range(camera_depth)
             self._camera_depth[idx] = camera_depth
             self._update_camera_depth_observation(
                 idx,
                 camera_depth,
                 refresh=self._consume_camera_obs_refresh_flag(),
             )
+            self._maybe_log_runtime_camera_alignment()
             return
 
         ray_starts, ray_dirs, ray_hits_world, root_pos, base_quat, offset_world = self._compute_rays(env_ids)
@@ -407,12 +451,14 @@ class PerceptionManager:
         if self.cfg.output_mode == "camera_depth":
             camera_depth = self._project_to_camera(ray_hits_world, root_pos, base_quat, offset_world)
             camera_depth = self._apply_camera_depth_noise(camera_depth)
+            camera_depth = self._clamp_camera_depth_to_sensor_range(camera_depth)
             self._camera_depth[idx] = camera_depth
             self._update_camera_depth_observation(
                 idx,
                 camera_depth,
                 refresh=self._consume_camera_obs_refresh_flag(),
             )
+            self._maybe_log_runtime_camera_alignment()
 
     def get_obs(self) -> torch.Tensor:
         if not self.enabled:
@@ -462,7 +508,7 @@ class PerceptionManager:
             ray_starts, ray_dirs_world, ray_hits_world, hit_mask, body_quat = self._cast_camera_scandots_rays(env_ids)
         else:
             raise RuntimeError(
-                f"Camera depth ray samples require camera_source=mesh_raycast or mesh_raycast_scandots, got: {self._camera_source}"
+                f"Camera depth ray samples are unavailable for camera_source={self._camera_source}"
             )
 
         ranges = self._compute_camera_ray_distances(ray_starts, ray_dirs_world, ray_hits_world)
@@ -613,6 +659,55 @@ class PerceptionManager:
         min_dot = float(dots_root.min().item()) if dots_root.numel() > 0 else 1.0
         return back_ratio, min_dot
 
+    def _camera_backward_stats_cam_frame(self, ray_dirs_base: torch.Tensor) -> tuple[float, float]:
+        if ray_dirs_base is None or ray_dirs_base.numel() == 0:
+            return 0.0, 1.0
+        env_ids = torch.tensor([0], device=self.device, dtype=torch.long)
+        _body_pos, body_quat = self._get_camera_body_pose(env_ids)
+        ray_dirs_world = quat_rotate_batched(body_quat, ray_dirs_base.unsqueeze(0))[0]
+        ray_dirs_world = ray_dirs_world / torch.norm(ray_dirs_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
+
+        cam_forward = self._get_camera_forward_axis(body_quat)[0]
+        cam_forward = cam_forward / torch.norm(cam_forward).clamp(min=1.0e-6)
+        dots_cam = torch.sum(ray_dirs_world * cam_forward.unsqueeze(0), dim=-1)
+        back_ratio = float((dots_cam <= 0.0).to(torch.float32).mean().item())
+        min_dot = float(dots_cam.min().item()) if dots_cam.numel() > 0 else 1.0
+        return back_ratio, min_dot
+
+    def _maybe_log_runtime_camera_alignment(self) -> None:
+        if self._camera_runtime_log_every <= 0:
+            return
+        if self._camera_ray_dirs_base is None or self._camera_ray_dirs_base.numel() == 0:
+            return
+        self._camera_runtime_log_counter += 1
+        if (self._camera_runtime_log_counter % self._camera_runtime_log_every) != 0:
+            return
+        try:
+            root_ratio, root_min_dot = self._camera_backward_stats(self._camera_ray_dirs_base)
+            cam_ratio, cam_min_dot = self._camera_backward_stats_cam_frame(self._camera_ray_dirs_base)
+        except Exception as exc:
+            (self.logger or logger).warning("Camera runtime alignment check skipped: {}", exc)
+            return
+        warn = (root_ratio > self._camera_runtime_warn_ratio) or (cam_ratio > self._camera_runtime_warn_ratio)
+        if warn:
+            (self.logger or logger).warning(
+                "Camera runtime alignment: step={} root_back_ratio={:.3f} min_dot_root={:.3f} cam_back_ratio={:.3f} min_dot_cam={:.3f}",
+                self._camera_runtime_log_counter,
+                root_ratio,
+                root_min_dot,
+                cam_ratio,
+                cam_min_dot,
+            )
+        else:
+            (self.logger or logger).info(
+                "Camera runtime alignment: step={} root_back_ratio={:.3f} min_dot_root={:.3f} cam_back_ratio={:.3f} min_dot_cam={:.3f}",
+                self._camera_runtime_log_counter,
+                root_ratio,
+                root_min_dot,
+                cam_ratio,
+                cam_min_dot,
+            )
+
     def _maybe_fix_camera_backward(self) -> None:
         if (
             not self._camera_auto_fix_backward
@@ -702,6 +797,173 @@ class PerceptionManager:
             far=self.cfg.camera_far,
             distortion=self.cfg.camera_distortion,
         )
+
+    def _setup_far_tracking_camera_sensor(self) -> None:
+        if self._far_tracking_camera_sensor is not None:
+            return
+        if self._terrain_mesh is None:
+            raise RuntimeError("far_tracking_warp camera source requires terrain mesh.")
+
+        repo_root = Path(__file__).resolve().parents[5]
+        far_tracking_pkg_root = repo_root / "far-tracking" / "source" / "whole_body_tracking"
+        if not far_tracking_pkg_root.exists():
+            raise RuntimeError(f"far-tracking package not found at: {far_tracking_pkg_root}")
+        if str(far_tracking_pkg_root) not in sys.path:
+            sys.path.insert(0, str(far_tracking_pkg_root))
+
+        from whole_body_tracking.utils.warp_sensors.camera_sensor import (  # noqa: PLC0415
+            CameraSensor as FarTrackingCameraSensor,
+        )
+        from whole_body_tracking.utils.warp_sensors.sensor_utils import (  # noqa: PLC0415
+            quat_mul_xyzw as ft_quat_mul_xyzw,
+        )
+        from whole_body_tracking.utils.warp_sensors.sensor_utils import (  # noqa: PLC0415
+            tf_apply_xyzw as ft_tf_apply_xyzw,
+        )
+
+        urdf_path, _asset_root = self._resolve_robot_asset_paths()
+        mesh_root = os.path.join(os.path.dirname(urdf_path), "meshes")
+        ray_cast_bodies_raw = dict(getattr(self.cfg, "camera_mesh_file_map", None) or {})
+        if not ray_cast_bodies_raw:
+            raise RuntimeError("far_tracking_warp requires perception.camera_mesh_file_map to be populated.")
+        ray_cast_bodies: dict[str, str] = {}
+        for link_name, mesh_name in ray_cast_bodies_raw.items():
+            candidates = [
+                str(mesh_name),
+                f"{link_name}.STL",
+                f"{link_name}.stl",
+            ]
+            resolved = None
+            for candidate in candidates:
+                if os.path.isfile(os.path.join(mesh_root, candidate)):
+                    resolved = candidate
+                    break
+            if resolved is None:
+                (self.logger or logger).warning(
+                    "far_tracking_warp mesh missing for link '{}': '{}' not found under '{}'; skipping link.",
+                    link_name,
+                    mesh_name,
+                    mesh_root,
+                )
+                continue
+            if resolved != mesh_name:
+                (self.logger or logger).warning(
+                    "far_tracking_warp mesh remap: link '{}' '{}' -> '{}'",
+                    link_name,
+                    mesh_name,
+                    resolved,
+                )
+            ray_cast_bodies[link_name] = resolved
+        if not ray_cast_bodies:
+            raise RuntimeError(f"No valid far_tracking_warp ray_cast_bodies found under mesh root: {mesh_root}")
+
+        camera_body_name = self._camera_body_name or "torso_link"
+        offset_pos = tuple(float(v) for v in self._sensor_offset.detach().cpu().tolist())
+        # far-tracking G1FlatRsD435iConfig defaults for d435i mount rotation.
+        offset_rot_deg = (1.0, 27.0, 1.0)
+
+        sensor_cfg = SimpleNamespace(
+            num_sensors=1,
+            width=int(self._camera_width),
+            height=int(self._camera_height),
+            horizontal_fov_deg=float(self._camera_hfov_deg),
+            max_range=float(self.cfg.max_distance),
+            min_range=float(getattr(self.cfg, "camera_near", 0.0) or 0.0),
+            calculate_depth=True,
+            return_pointcloud=False,
+            pointcloud_in_world_frame=False,
+            segmentation_camera=False,
+            dynamic_meshes=True,
+            randomize_placement=False,
+            min_translation={"cam_front_depth": [-0.025, -0.025, -0.025]},
+            max_translation={"cam_front_depth": [0.025, 0.025, 0.025]},
+            min_euler_rotation_deg={"cam_front_depth": [-2.5, -3.0, -2.5]},
+            max_euler_rotation_deg={"cam_front_depth": [2.5, 3.0, 2.5]},
+            offset_rot_base=[-90.0, 0.0, -90.0],
+            offset={"cam_front_depth": {"offset_pos": offset_pos, "offset_rot": offset_rot_deg}},
+            base_link_frame={"cam_front_depth": camera_body_name},
+            ray_cast_bodies=ray_cast_bodies,
+            add_offpath_obstacle=False,
+            offpath_obstacle_meshes_root=None,
+            offpath_obstacle_bodies={},
+            asset_meshes_root=mesh_root,
+        )
+
+        body_names = getattr(self.env, "body_names", None) or getattr(self.env.robot_config, "body_names", None)
+        if not body_names:
+            raise RuntimeError("Cannot setup far_tracking_warp camera: body_names unavailable.")
+
+        def _resolve_body_index(name: str) -> int:
+            if name in body_names:
+                return int(body_names.index(name))
+            resolved = resolve_fixed_link_offset(
+                self.env.robot_config,
+                name,
+                available_links=body_names,
+                device=self.device,
+            )
+            if resolved is None:
+                raise RuntimeError(f"Body '{name}' not found in robot body_names for far_tracking_warp source.")
+            parent_name, _offset_pos, _offset_quat = resolved
+            return int(body_names.index(parent_name))
+
+        base_link_indices = [_resolve_body_index(camera_body_name)]
+        ray_cast_body_indices = [_resolve_body_index(name) for name in ray_cast_bodies.keys()]
+
+        self._far_tracking_camera_sensor = FarTrackingCameraSensor(
+            self.num_envs,
+            sensor_cfg,
+            self._terrain_mesh,
+            device=self.device,
+        )
+        self._far_tracking_tf_apply = ft_tf_apply_xyzw
+        self._far_tracking_quat_mul = ft_quat_mul_xyzw
+        self._far_tracking_base_link_indices = torch.tensor(base_link_indices, dtype=torch.long, device=self.device)
+        self._far_tracking_ray_cast_body_indices = torch.tensor(
+            ray_cast_body_indices, dtype=torch.long, device=self.device
+        )
+
+    def _compute_far_tracking_camera_depth(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        if self._far_tracking_camera_sensor is None:
+            raise RuntimeError("far_tracking_warp camera sensor is not initialized.")
+        if self._far_tracking_tf_apply is None or self._far_tracking_quat_mul is None:
+            raise RuntimeError("far_tracking_warp camera helpers are not initialized.")
+        if self._far_tracking_base_link_indices is None or self._far_tracking_ray_cast_body_indices is None:
+            raise RuntimeError("far_tracking_warp camera indices are not initialized.")
+
+        body_pos = self.env.simulator._rigid_body_pos
+        body_quat = self.env.simulator._rigid_body_rot
+
+        ray_cast_body_poses = body_pos[:, self._far_tracking_ray_cast_body_indices]
+        ray_cast_body_quats = body_quat[:, self._far_tracking_ray_cast_body_indices]
+        self._far_tracking_camera_sensor.ray_cast_body_poses_tensor[:, :] = ray_cast_body_poses
+        self._far_tracking_camera_sensor.ray_cast_body_quats_tensor[:, :] = ray_cast_body_quats
+
+        camera_base_link_pos = body_pos[:, self._far_tracking_base_link_indices]
+        camera_base_link_quat = body_quat[:, self._far_tracking_base_link_indices]
+        self._far_tracking_camera_sensor.camera_sensor_position[:] = self._far_tracking_tf_apply(
+            camera_base_link_quat,
+            camera_base_link_pos,
+            self._far_tracking_camera_sensor.camera_sensor_local_position,
+        )
+        self._far_tracking_camera_sensor.camera_sensor_orientation[:] = self._far_tracking_quat_mul(
+            camera_base_link_quat,
+            self._far_tracking_quat_mul(
+                self._far_tracking_camera_sensor.camera_sensor_local_orientation,
+                self._far_tracking_camera_sensor.camera_sensor_data_frame_quat,
+            ),
+        )
+
+        depth = self._far_tracking_camera_sensor.capture()
+        if depth.ndim == 4:
+            depth = depth[:, 0]
+        if depth.ndim != 3:
+            raise RuntimeError(f"Unexpected far_tracking_warp depth shape: {tuple(depth.shape)}")
+        depth = self._clamp_camera_depth_to_sensor_range(depth)
+
+        if env_ids is None:
+            return depth
+        return depth[env_ids]
 
     def _build_grid(self) -> tuple[torch.Tensor, torch.Tensor]:
         half_extent_x = (self._heightmap_grid_x - 1) * self._heightmap_interval_x / 2.0
@@ -973,11 +1235,16 @@ class PerceptionManager:
         depth_mul = torch.clamp(dots, min=1.0e-6, max=1.0)
         return self.cfg.max_distance / depth_mul
 
+    def _clamp_camera_depth_to_sensor_range(self, depth: torch.Tensor) -> torch.Tensor:
+        min_depth = float(getattr(self.cfg, "camera_near", 0.0) or 0.0)
+        max_depth = float(self.cfg.max_distance)
+        return torch.clamp(depth, min=min_depth, max=max_depth)
+
     def _apply_camera_depth_noise(self, depth: torch.Tensor) -> torch.Tensor:
         std_mult = getattr(self.env, "_perception_camera_noise_std_mult", None)
         drop_prob = getattr(self.env, "_perception_camera_noise_drop_prob", None)
         if std_mult is None and drop_prob is None:
-            return depth
+            return self._clamp_camera_depth_to_sensor_range(depth)
 
         depth_out = depth
         if std_mult is not None:
@@ -999,7 +1266,7 @@ class PerceptionManager:
             mask = torch.rand_like(depth_out) < prob
             depth_out = torch.where(mask, torch.full_like(depth_out, self.cfg.max_distance), depth_out)
 
-        return torch.clamp(depth_out, min=0.0, max=self.cfg.max_distance)
+        return self._clamp_camera_depth_to_sensor_range(depth_out)
 
     def _resolve_camera_obs_resolution(self) -> tuple[int, int]:
         if not self._camera_warp_preprocess:
@@ -1081,8 +1348,9 @@ class PerceptionManager:
                 align_corners=False,
             ).squeeze(1)
 
+        min_depth = float(getattr(self.cfg, "camera_near", 0.0) or 0.0)
         max_depth = float(self.cfg.max_distance)
-        depth_obs = torch.clamp(depth_obs, min=0.0, max=max_depth)
+        depth_obs = torch.clamp(depth_obs, min=min_depth, max=max_depth)
         if self._camera_warp_min_valid_depth > 0.0:
             depth_obs = torch.where(
                 depth_obs < self._camera_warp_min_valid_depth,
@@ -1179,7 +1447,7 @@ class PerceptionManager:
     def _setup_rendered_camera(self) -> None:
         if get_simulator_type() != SimulatorType.ISAACSIM:
             raise RuntimeError(
-                "Rendered camera requires IsaacSim. Use camera_source=raycast, mesh_raycast, or pytorch3d "
+                "Rendered camera requires IsaacSim. Use camera_source=far_tracking_warp or pytorch3d "
                 "for other simulators."
             )
         from holosoma.simulator.isaacsim.perception_camera import (
@@ -1552,7 +1820,10 @@ class PerceptionManager:
         return self.cfg.output_mode == "heightmap"
 
     def _uses_camera_raycast(self) -> bool:
-        return self.cfg.output_mode == "camera_depth" and self._camera_source == "mesh_raycast"
+        return False
+
+    def _uses_camera_far_tracking(self) -> bool:
+        return self.cfg.output_mode == "camera_depth" and self._camera_source == "far_tracking_warp"
 
     def _uses_camera_scandots(self) -> bool:
         return False

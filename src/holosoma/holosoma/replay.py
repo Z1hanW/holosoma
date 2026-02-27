@@ -15,6 +15,7 @@ from holosoma.utils.eval_utils import (
     init_sim_imports,
 )
 from holosoma.utils.helpers import get_class
+from holosoma.utils.rotations import quat_apply
 from holosoma.utils.sim_utils import close_simulation_app
 from holosoma.utils.tyro_utils import TYRO_CONIFG
 
@@ -125,6 +126,23 @@ def _init_replay_wandb(tyro_config: ExperimentConfig):
         return None, None
 
 
+def _replay_debug_paths() -> tuple[Path, Path]:
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+    csv_path = Path(
+        os.environ.get(
+            "HOLOSOMA_REPLAY_STEP_DEBUG_CSV",
+            f"logs/replay_depth_debug/replay_step_debug_{timestamp}.csv",
+        )
+    )
+    hits_dir = Path(
+        os.environ.get(
+            "HOLOSOMA_REPLAY_STEP_DEBUG_HITS_DIR",
+            f"logs/replay_depth_debug/replay_hits_{timestamp}",
+        )
+    )
+    return csv_path, hits_dir
+
+
 def replay(tyro_config: ExperimentConfig):
     simulation_app = init_sim_imports(tyro_config)
 
@@ -150,6 +168,52 @@ def replay(tyro_config: ExperimentConfig):
     depth_env_id = min(max(0, int(os.environ.get("HOLOSOMA_REPLAY_WANDB_ENV_ID", "0"))), env_id_max)
     depth_video_frames: list[np.ndarray] = []
     depth_log_failed = False
+    step_debug_enable = _is_truthy(os.environ.get("HOLOSOMA_REPLAY_STEP_DEBUG"), default=False)
+    step_dump_hits = _is_truthy(os.environ.get("HOLOSOMA_REPLAY_STEP_DEBUG_DUMP_HITS"), default=False)
+    step_debug_fh = None
+    step_debug_csv_path: Path | None = None
+    step_hits_dir: Path | None = None
+    if step_debug_enable:
+        step_debug_csv_path, step_hits_dir = _replay_debug_paths()
+        step_debug_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        if step_dump_hits:
+            assert step_hits_dir is not None
+            step_hits_dir.mkdir(parents=True, exist_ok=True)
+        step_debug_fh = step_debug_csv_path.open("w", encoding="utf-8", buffering=1)
+        step_debug_fh.write(
+            ",".join(
+                [
+                    "step",
+                    "motion_step",
+                    "depth_height",
+                    "depth_width",
+                    "depth_finite_ratio",
+                    "depth_hit_ratio",
+                    "depth_valid_ratio",
+                    "depth_below_near_ratio",
+                    "depth_min_valid",
+                    "depth_max_valid",
+                    "rays_total",
+                    "rays_hit_valid",
+                    "root_back_ratio",
+                    "root_min_dot",
+                    "cam_back_ratio",
+                    "cam_min_dot",
+                    "center_dot_root",
+                    "center_dot_cam",
+                    "root_x",
+                    "root_y",
+                    "root_z",
+                    "torso_x",
+                    "torso_y",
+                    "torso_z",
+                ]
+            )
+            + "\n"
+        )
+        print(f"[INFO] Replay step debug CSV: {step_debug_csv_path}")
+        if step_dump_hits:
+            print(f"[INFO] Replay step hit dumps: {step_hits_dir}")
 
     done = False
     step = 0
@@ -202,6 +266,153 @@ def replay(tyro_config: ExperimentConfig):
                 if not depth_log_failed:
                     print(f"[WARN] Failed to log depth frame to W&B: {exc}")
                     depth_log_failed = True
+        if step_debug_enable and step_debug_fh is not None and getattr(env, "perception_manager", None) is not None:
+            try:
+                pm = env.perception_manager
+                if getattr(pm.cfg, "output_mode", "") == "camera_depth":
+                    env_ids = torch.tensor([depth_env_id], device=env.device, dtype=torch.long)
+                    depth_map_t = pm.get_camera_depth_map()[depth_env_id]
+
+                    cfg = pm.cfg
+                    near = float(getattr(cfg, "camera_near", 0.0) or 0.0)
+                    max_distance = float(getattr(cfg, "max_distance", getattr(cfg, "camera_far", float("nan"))) or float("nan"))
+                    camera_far = float(getattr(cfg, "camera_far", max_distance) or max_distance)
+                    far = float(min(max_distance, camera_far)) if np.isfinite(max_distance) else float(camera_far)
+
+                    finite = torch.isfinite(depth_map_t)
+                    hit_depth = finite & (depth_map_t < (far - 1.0e-6))
+                    valid_depth = hit_depth & (depth_map_t >= near)
+                    below_near_depth = hit_depth & (depth_map_t < near)
+
+                    depth_valid_vals = depth_map_t[valid_depth]
+                    depth_min = float(depth_valid_vals.min().item()) if depth_valid_vals.numel() > 0 else float("nan")
+                    depth_max = float(depth_valid_vals.max().item()) if depth_valid_vals.numel() > 0 else float("nan")
+
+                    hit_mask = torch.empty((0,), device=env.device, dtype=torch.bool)
+                    ray_starts = torch.empty((0, 3), device=env.device, dtype=torch.float32)
+                    ray_dirs = torch.empty((0, 3), device=env.device, dtype=torch.float32)
+                    ray_hits = torch.empty((0, 3), device=env.device, dtype=torch.float32)
+                    dots_root = torch.empty((0,), device=env.device, dtype=torch.float32)
+                    dots_cam = torch.empty((0,), device=env.device, dtype=torch.float32)
+                    root_back_ratio = float("nan")
+                    cam_back_ratio = float("nan")
+                    root_min_dot = float("nan")
+                    cam_min_dot = float("nan")
+                    center_dot_root = float("nan")
+                    center_dot_cam = float("nan")
+                    ray_count = int(depth_map_t.numel())
+                    rays_hit_valid = int(valid_depth.to(torch.int32).sum().item())
+
+                    try:
+                        sample = pm.get_camera_depth_ray_samples(env_ids, include_misses=False, return_rays=True)
+                    except Exception:
+                        sample = None
+
+                    if sample is not None:
+                        hit_mask = sample[1][0].to(torch.bool)
+                        ray_starts = sample[2][0]
+                        ray_dirs = sample[3][0]
+                        ray_hits = sample[4][0]
+
+                        ray_dirs_norm = ray_dirs / torch.norm(ray_dirs, dim=-1, keepdim=True).clamp(min=1.0e-6)
+                        body_pos, body_quat = pm.get_camera_pose(
+                            env_ids=env_ids,
+                            apply_sensor_offset=False,
+                            apply_pitch=False,
+                        )
+                        cam_forward = pm._get_camera_forward_axis(body_quat)[0]
+                        cam_forward = cam_forward / torch.norm(cam_forward).clamp(min=1.0e-6)
+
+                        root_quat = getattr(env, "base_quat", None)
+                        if isinstance(root_quat, torch.Tensor) and root_quat.shape[0] > depth_env_id:
+                            root_quat_env = root_quat[depth_env_id : depth_env_id + 1]
+                            root_forward = pm._camera_ray_dirs_base.new_tensor([[1.0, 0.0, 0.0]])
+                            root_forward = quat_apply(root_quat_env, root_forward, w_last=True)[0]
+                        else:
+                            root_forward = pm._camera_ray_dirs_base.new_tensor([1.0, 0.0, 0.0])
+                        root_forward = root_forward / torch.norm(root_forward).clamp(min=1.0e-6)
+
+                        dots_root = torch.sum(ray_dirs_norm * root_forward.unsqueeze(0), dim=-1)
+                        dots_cam = torch.sum(ray_dirs_norm * cam_forward.unsqueeze(0), dim=-1)
+                        root_back_ratio = float((dots_root <= 0.0).to(torch.float32).mean().item())
+                        cam_back_ratio = float((dots_cam <= 0.0).to(torch.float32).mean().item())
+                        root_min_dot = float(dots_root.min().item()) if dots_root.numel() > 0 else 1.0
+                        cam_min_dot = float(dots_cam.min().item()) if dots_cam.numel() > 0 else 1.0
+
+                        ray_count = int(ray_dirs_norm.shape[0])
+                        rays_hit_valid = int(hit_mask.to(torch.int32).sum().item())
+                        width = int(getattr(pm, "_camera_width", 0) or 0)
+                        height = int(getattr(pm, "_camera_height", 0) or 0)
+                        center_idx = 0
+                        if width > 0 and height > 0 and (width * height) == ray_count:
+                            center_idx = (height // 2) * width + (width // 2)
+                        center_dot_root = float(dots_root[center_idx].item()) if ray_count > 0 else float("nan")
+                        center_dot_cam = float(dots_cam[center_idx].item()) if ray_count > 0 else float("nan")
+
+                    motion_step = -1
+                    try:
+                        motion_cmd = env.command_manager.get_state("motion_command")
+                        motion_step = int(motion_cmd.time_steps[depth_env_id].item())
+                    except Exception:
+                        pass
+
+                    root_pos = env.simulator.robot_root_states[depth_env_id, :3]
+                    torso_pos = root_pos
+                    try:
+                        body_names = getattr(env, "body_names", None)
+                        if body_names is not None and "torso_link" in body_names:
+                            torso_idx = int(body_names.index("torso_link"))
+                            torso_pos = env.simulator._rigid_body_pos[depth_env_id, torso_idx]
+                    except Exception:
+                        pass
+
+                    step_debug_fh.write(
+                        ",".join(
+                            [
+                                str(step),
+                                str(motion_step),
+                                str(int(depth_map_t.shape[0])),
+                                str(int(depth_map_t.shape[1])),
+                                f"{float(finite.to(torch.float32).mean().item()):.6f}",
+                                f"{float(hit_depth.to(torch.float32).mean().item()):.6f}",
+                                f"{float(valid_depth.to(torch.float32).mean().item()):.6f}",
+                                f"{float(below_near_depth.to(torch.float32).mean().item()):.6f}",
+                                f"{depth_min:.6f}",
+                                f"{depth_max:.6f}",
+                                str(ray_count),
+                                str(rays_hit_valid),
+                                f"{root_back_ratio:.6f}",
+                                f"{root_min_dot:.6f}",
+                                f"{cam_back_ratio:.6f}",
+                                f"{cam_min_dot:.6f}",
+                                f"{center_dot_root:.6f}",
+                                f"{center_dot_cam:.6f}",
+                                f"{float(root_pos[0].item()):.6f}",
+                                f"{float(root_pos[1].item()):.6f}",
+                                f"{float(root_pos[2].item()):.6f}",
+                                f"{float(torso_pos[0].item()):.6f}",
+                                f"{float(torso_pos[1].item()):.6f}",
+                                f"{float(torso_pos[2].item()):.6f}",
+                            ]
+                        )
+                        + "\n"
+                    )
+
+                    if step_dump_hits and step_hits_dir is not None:
+                        np.savez_compressed(
+                            step_hits_dir / f"step_{step:06d}.npz",
+                            step=np.int32(step),
+                            motion_step=np.int32(motion_step),
+                            depth=depth_map_t.detach().cpu().numpy(),
+                            hit_mask=hit_mask.detach().cpu().numpy(),
+                            ray_starts=ray_starts.detach().cpu().numpy(),
+                            ray_dirs=ray_dirs.detach().cpu().numpy(),
+                            ray_hits=ray_hits.detach().cpu().numpy(),
+                            dots_root=dots_root.detach().cpu().numpy(),
+                            dots_cam=dots_cam.detach().cpu().numpy(),
+                        )
+            except Exception as exc:
+                print(f"[WARN] Replay step debug failed at step={step}: {exc}")
         step += 1
 
     if wandb_run is not None and depth_log_video and depth_video_frames:
@@ -242,6 +453,9 @@ def replay(tyro_config: ExperimentConfig):
             wandb.finish()
         except Exception:
             pass
+    if step_debug_fh is not None:
+        step_debug_fh.close()
+        print(f"[INFO] Replay step debug CSV saved: {step_debug_csv_path}")
 
     close_simulation_app(simulation_app)
 

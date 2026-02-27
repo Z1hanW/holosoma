@@ -18,8 +18,8 @@ class PerceptionConfig:
     output_mode: str = "heightmap"
     """Perception output type: 'heightmap' or 'camera_depth'."""
 
-    camera_source: str = "mesh_raycast"
-    """Camera source for camera_depth output. Only 'mesh_raycast' is supported."""
+    camera_source: str = "far_tracking_warp"
+    """Camera source for camera_depth output. Supported: 'far_tracking_warp'."""
 
     camera_strict_warp: bool | None = None
     """When set, force strict warp camera ray convention instead of env-var defaults."""
@@ -170,7 +170,7 @@ class PerceptionConfig:
     """Probability threshold for synthetic hole masks when enabled."""
 
     camera_scandots_stride: int = 4
-    """Pixel stride for scandots depth (mesh_raycast_scandots)."""
+    """Pixel stride for legacy scandots depth path (currently unused)."""
 
     camera_scandots_width: int | None = None
     """Optional scandots sample count along image width (overrides stride when set)."""
@@ -179,10 +179,10 @@ class PerceptionConfig:
     """Optional scandots sample count along image height (overrides stride when set)."""
 
     camera_scandots_upsample: str = "bilinear"
-    """Upsampling mode for scandots depth (mesh_raycast_scandots)."""
+    """Upsampling mode for legacy scandots depth path (currently unused)."""
 
     camera_include_robot_mesh: bool = False
-    """Include robot visual meshes in camera raycasting (mesh_raycast / mesh_raycast_scandots)."""
+    """Include robot visual meshes in camera raycasting."""
 
     camera_mesh_allowlist: list[str] | None = None
     """Optional robot link allowlist for camera raycast self-meshes (uses all links when None)."""

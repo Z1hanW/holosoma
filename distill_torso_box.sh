@@ -10,12 +10,22 @@ set -euo pipefail
 # - Stage 2: resume Stage 1 student, student steps env, mix RL+BC then switch to RL
 
 DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"/home/ubuntu/FAR/holosoma/logs/WholeBodyTracking/20260216_214200-g1_29dof_wbt_w_object_generalist-locomotion/model_30000.pt"}
+TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 
+# Optional positional arg:
+#   1) If first arg is a checkpoint path / wandb URI, use it as teacher checkpoint.
+#   2) If first arg looks like an option (starts with '-'), keep default/env checkpoint and
+#      forward all args to train_agent.py unchanged.
 if [[ $# -gt 0 ]]; then
-  TEACHER_CHECKPOINT="$1"
-  shift
-else
-  TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
+  if [[ "$1" == wandb://* || "$1" == /* || "$1" == ./* || "$1" == ../* || "$1" == *.pt ]]; then
+    TEACHER_CHECKPOINT="$1"
+    shift
+  elif [[ "$1" == -* ]]; then
+    :
+  else
+    TEACHER_CHECKPOINT="$1"
+    shift
+  fi
 fi
 
 if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
@@ -110,6 +120,9 @@ fi
 
 EXTRA_ARGS=("$@")
 
+echo "[INFO] Distill teacher checkpoint: ${TEACHER_CHECKPOINT}"
+echo "[INFO] DISTILL_TWO_STAGE=${DISTILL_TWO_STAGE}"
+
 run_distill_stage() {
   local stage_label="$1"
   local stage_bc_loss_coef="$2"
@@ -141,6 +154,7 @@ run_distill_stage() {
     --master_port="${stage_master_port}"
     src/holosoma/holosoma/train_agent.py
     "exp:${EXP}"
+    --algo.config.distill.enabled=True
     --algo.config.distill.mode=dagger
     --algo.config.distill.policy_to_clone="${TEACHER_CHECKPOINT}"
     --algo.config.distill.bc_loss_coef="${stage_bc_loss_coef}"
