@@ -5,16 +5,21 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
+SIM_ENV_BIN=/home/ubuntu/miniconda3/envs/sim/bin
+if ! command -v torchrun >/dev/null 2>&1 && [[ -x "${SIM_ENV_BIN}/torchrun" ]]; then
+  export PATH="${SIM_ENV_BIN}:${PATH}"
+fi
+
 DEFAULT_CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-${DEFAULT_CUDA_VISIBLE_DEVICES}}
 EXP=${EXP:-g1-29dof-wbt-w-object-generalist}
 MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_aug_mix_ml"}
 OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-""}
-NUM_ENVS=${NUM_ENVS:-12288}
+NUM_ENVS=${NUM_ENVS:-24576}
 NPROC=${NPROC:-$(awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}")}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
 
-AUTO_PREP_MIXED_BANK=${AUTO_PREP_MIXED_BANK:-1}
+AUTO_PREP_MIXED_BANK=${AUTO_PREP_MIXED_BANK:-0}
 MIXED_CLEAN_OUT=${MIXED_CLEAN_OUT:-1}
 MIXED_LINK_MODE=${MIXED_LINK_MODE:-symlink}
 MIXED_BEHAVE_FILTER=${MIXED_BEHAVE_FILTER:-boxmedium,boxlarge}
