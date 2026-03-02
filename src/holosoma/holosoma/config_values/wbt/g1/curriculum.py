@@ -35,6 +35,7 @@ g1_29dof_wbt_curriculum_w_object = CurriculumManagerCfg(
                 "similarity_metric_key": "motion/error_body_pos",
                 "similarity_sigma": 0.50,
                 "similarity_threshold": 0.60,
+                "enable_task_mixing": False,
                 "imitation_prob_start": 1.0,
                 "imitation_prob_target": 0.5,
                 "assist_beta_max": 1.0,

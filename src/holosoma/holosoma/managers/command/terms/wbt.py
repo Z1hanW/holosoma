@@ -1679,6 +1679,11 @@ class MotionCommand(CommandTermBase):
             self._task_imitation_prob = 1.0
             return
 
+        if not bool(getattr(self._env, "_wobj_curriculum_task_mixing_enabled", False)):
+            self._task_is_generalization[env_ids] = False
+            self._task_imitation_prob = 1.0
+            return
+
         p_imitation = float(getattr(self._env, "_wobj_curriculum_p_imitation", 1.0))
         p_imitation = float(np.clip(p_imitation, 0.0, 1.0))
         self._task_imitation_prob = p_imitation
@@ -1998,6 +2003,7 @@ class MotionCommand(CommandTermBase):
 
     def update_metrics(self):
         """Update the metrics. After action, before step() is called."""
+        # Human (robot) tracking metrics.
         self.metrics["motion/error_ref_pos"] = torch.norm(self.ref_pos_w - self.robot_ref_pos_w, dim=-1)
         self.metrics["motion/error_ref_rot"] = quat_error_magnitude(self.ref_quat_w, self.robot_ref_quat_w)
         self.metrics["motion/error_ref_lin_vel"] = torch.norm(self.ref_lin_vel_w - self.robot_ref_lin_vel_w, dim=-1)
@@ -2020,6 +2026,23 @@ class MotionCommand(CommandTermBase):
 
         self.metrics["motion/error_joint_pos"] = torch.norm(self.joint_pos - self.robot_joint_pos, dim=-1)
         self.metrics["motion/error_joint_vel"] = torch.norm(self.joint_vel - self.robot_joint_vel, dim=-1)
+
+        # Object co-tracking metrics (separate from human tracking metrics).
+        if self.motion.has_object:
+            self.metrics["motion/error_object_ref_pos"] = torch.norm(
+                self.object_pos_w - self.simulator_object_pos_w, dim=-1
+            )
+            self.metrics["motion/error_object_ref_rot"] = quat_error_magnitude(
+                self.object_quat_w, self.simulator_object_quat_w
+            )
+            self.metrics["motion/error_object_ref_lin_vel"] = torch.norm(
+                self.object_lin_vel_w - self.simulator_object_lin_vel_w, dim=-1
+            )
+        else:
+            zeros = torch.zeros(self.num_envs, device=self.device, dtype=torch.float32)
+            self.metrics["motion/error_object_ref_pos"] = zeros
+            self.metrics["motion/error_object_ref_rot"] = zeros
+            self.metrics["motion/error_object_ref_lin_vel"] = zeros
 
         if self.use_adaptive_timesteps_sampler:
             self.adaptive_timesteps_sampler.get_stats()

@@ -108,8 +108,8 @@ class WObjectDifficultyCurriculum(CurriculumTermBase):
 
     A global difficulty scalar ``lambda_value`` in [0, 1] controls:
     - Assistive base support scale (decreases as lambda increases)
-    - Imitation vs. generalization task-mix probability
-    - Reset randomization strength for generalization episodes
+    - (Optional) imitation vs. generalization task-mix probability
+    - (Optional) reset randomization strength for generalization episodes
     """
 
     def __init__(self, cfg: Any, env: Any):
@@ -128,6 +128,7 @@ class WObjectDifficultyCurriculum(CurriculumTermBase):
 
         self.imitation_prob_start = float(params.get("imitation_prob_start", 1.0))
         self.imitation_prob_target = float(params.get("imitation_prob_target", 0.5))
+        self.enable_task_mixing = bool(params.get("enable_task_mixing", False))
 
         self.assist_beta_max = float(params.get("assist_beta_max", 1.0))
         self.assist_kp_pos = float(params.get("assist_kp_pos", 4.0))
@@ -146,6 +147,7 @@ class WObjectDifficultyCurriculum(CurriculumTermBase):
         )
 
         self._last_early_termination_rate = 1.0
+        self._last_motion_end_rate = 0.0
         self._last_similarity = 0.0
 
     def setup(self) -> None:
@@ -173,9 +175,20 @@ class WObjectDifficultyCurriculum(CurriculumTermBase):
             self._publish_state()
             return
 
-        # Early termination proxy: reset and not timeout.
-        timed_out = time_out_buf.index_select(0, env_ids_tensor).to(dtype=torch.float32)
-        early_termination_rate = float((1.0 - timed_out).mean().item())
+        timed_out = time_out_buf.index_select(0, env_ids_tensor).to(dtype=torch.bool)
+        motion_end_mask = None
+        termination_manager = getattr(self.env, "termination_manager", None)
+        if termination_manager is not None and hasattr(termination_manager, "get_last_term_result"):
+            motion_end_mask = termination_manager.get_last_term_result("motion_ends")
+        if torch.is_tensor(motion_end_mask):
+            motion_ended = motion_end_mask.index_select(0, env_ids_tensor).to(dtype=torch.bool)
+        else:
+            motion_ended = torch.zeros_like(timed_out, dtype=torch.bool)
+
+        # Early termination should exclude true timeout and clean motion-end resets.
+        early_termination = ~(timed_out | motion_ended)
+        early_termination_rate = float(early_termination.to(dtype=torch.float32).mean().item())
+        self._last_motion_end_rate = float(motion_ended.to(dtype=torch.float32).mean().item())
         similarity = self._compute_similarity(env_ids_tensor)
 
         self._last_early_termination_rate = early_termination_rate
@@ -270,19 +283,25 @@ class WObjectDifficultyCurriculum(CurriculumTermBase):
             gen_noise_scale = 1.0
             gen_start_zero_scale = 1.0
         else:
-            p_imitation = (1.0 - lam) * self.imitation_prob_start + lam * self.imitation_prob_target
+            if self.enable_task_mixing:
+                p_imitation = (1.0 - lam) * self.imitation_prob_start + lam * self.imitation_prob_target
+                gen_noise_scale = self.generalization_noise_scale_min + lam * (
+                    self.generalization_noise_scale_max - self.generalization_noise_scale_min
+                )
+                gen_start_zero_scale = self.generalization_start_zero_prob_scale_min + lam * (
+                    self.generalization_start_zero_prob_scale_max - self.generalization_start_zero_prob_scale_min
+                )
+            else:
+                p_imitation = 1.0
+                gen_noise_scale = 1.0
+                gen_start_zero_scale = 1.0
             assist_scale = (1.0 - lam) * self.assist_beta_max
-            gen_noise_scale = self.generalization_noise_scale_min + lam * (
-                self.generalization_noise_scale_max - self.generalization_noise_scale_min
-            )
-            gen_start_zero_scale = self.generalization_start_zero_prob_scale_min + lam * (
-                self.generalization_start_zero_prob_scale_max - self.generalization_start_zero_prob_scale_min
-            )
 
         self.env._wobj_curriculum_enabled = bool(self.enabled)
         self.env._wobj_curriculum_lambda = float(lam)
         self.env._wobj_curriculum_imitation_prob_start = float(self.imitation_prob_start)
         self.env._wobj_curriculum_imitation_prob_target = float(self.imitation_prob_target)
+        self.env._wobj_curriculum_task_mixing_enabled = bool(self.enable_task_mixing)
         self.env._wobj_curriculum_p_imitation = float(np.clip(p_imitation, 0.0, 1.0))
         self.env._wobj_curriculum_assist_scale = float(max(assist_scale, 0.0))
         self.env._wobj_curriculum_generalization_noise_scale = float(max(gen_noise_scale, 1e-6))
@@ -312,6 +331,11 @@ class WObjectDifficultyCurriculum(CurriculumTermBase):
         )
         self.env.log_dict["curriculum/wobj_early_term_rate"] = torch.tensor(
             self._last_early_termination_rate,
+            device=device,
+            dtype=torch.float,
+        )
+        self.env.log_dict["curriculum/wobj_motion_end_rate"] = torch.tensor(
+            self._last_motion_end_rate,
             device=device,
             dtype=torch.float,
         )
