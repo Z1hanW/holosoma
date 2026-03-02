@@ -90,6 +90,9 @@ class TrainingConfig:
     debug: bool = False
     """If True, render/log a depth video and exit without training."""
 
+    toy_mode: bool = False
+    """If True, run a small-scale training setup intended for debugging."""
+
     enable_viser: bool = False
     """Enable a Viser live viewer during training."""
 
@@ -98,6 +101,12 @@ class TrainingConfig:
 
     viser_env_id: int = 0
     """Environment index to visualize in the Viser viewer."""
+
+    viser_env_count: int = 1
+    """Number of consecutive environments to visualize in the Viser viewer."""
+
+    viser_multi_env_spacing: float = 2.5
+    """Additional Y-offset (meters) between extra Viser env views."""
 
     viser_update_hz: float = 30.0
     """Update rate for the Viser viewer (<=0 uses simulator control frequency)."""

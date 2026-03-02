@@ -1059,6 +1059,7 @@ class MotionCommand(CommandTermBase):
         self._sim_object_names: list[str] = []
         self._clip_object_ids: torch.Tensor | None = None
         self._object_indices_matrix: torch.Tensor | None = None
+        self._debug_representative_clip_ids: torch.Tensor | None = None
 
     def set_forced_clip(self, clip_idx: int | None) -> None:
         """Force a specific clip index for resets (None clears the override)."""
@@ -1124,6 +1125,7 @@ class MotionCommand(CommandTermBase):
                 "Object is only supported in IsaacSim"
             )
             self._configure_simulator_object_mapping()
+            self._configure_debug_representative_clips()
 
         # 4. get the adaptive timesteps sampler
         self.use_adaptive_timesteps_sampler = self.motion_cfg.use_adaptive_timesteps_sampler
@@ -1269,6 +1271,45 @@ class MotionCommand(CommandTermBase):
             self.motion.num_clips,
         )
 
+    def _configure_debug_representative_clips(self) -> None:
+        self._debug_representative_clip_ids = None
+        debug_mode = bool(getattr(self._env.training_config, "debug", False))
+        toy_mode = bool(getattr(self._env.training_config, "toy_mode", False))
+        if not (debug_mode or toy_mode):
+            return
+        if not self.multi_clip or not self.motion.has_object:
+            return
+
+        clip_object_names = self.motion.clip_object_names
+        clip_object_urdfs = self.motion.clip_object_urdf_paths
+        representative_ids: list[int] = []
+        seen_keys: set[str] = set()
+        for clip_idx in range(self.motion.num_clips):
+            obj_name = clip_object_names[clip_idx].strip() if clip_idx < len(clip_object_names) else ""
+            obj_urdf = clip_object_urdfs[clip_idx].strip() if clip_idx < len(clip_object_urdfs) else ""
+            normalized_urdf = self._normalize_path_key(obj_urdf)
+            if normalized_urdf:
+                key = f"urdf::{normalized_urdf}"
+            elif obj_name:
+                key = f"name::{obj_name.lower()}"
+            else:
+                key = "unknown"
+
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            representative_ids.append(clip_idx)
+
+        if not representative_ids:
+            representative_ids = [0]
+
+        self._debug_representative_clip_ids = torch.tensor(representative_ids, dtype=torch.long, device=self.device)
+        logger.info(
+            "Debug/Toy mode: using {} representative clips (one per URDF/object key) over {} total clips.",
+            len(representative_ids),
+            self.motion.num_clips,
+        )
+
     def _get_active_object_indices(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         env_ids_tensor = self._ensure_index_tensor(env_ids)
         if not self._multi_object_enabled or self._clip_object_ids is None or self._object_indices_matrix is None:
@@ -1304,6 +1345,9 @@ class MotionCommand(CommandTermBase):
 
         if self._forced_clip_idx is not None:
             self.clip_ids[env_ids] = int(self._forced_clip_idx)
+        elif self._debug_representative_clip_ids is not None and self._debug_representative_clip_ids.numel() > 0:
+            reps = self._debug_representative_clip_ids
+            self.clip_ids[env_ids] = reps[env_ids % reps.numel()]
         elif self.multi_clip:
             self._update_clip_success_stats(env_ids)
             if self._env.is_evaluating:

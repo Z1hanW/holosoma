@@ -274,8 +274,8 @@ def robot_body_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
 def obj_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     pos, _ = subtract_frame_transforms(
-        motion_command.robot_root_pos_w,
-        motion_command.robot_root_quat_w,
+        motion_command.robot_ref_pos_w,
+        motion_command.robot_ref_quat_w,
         motion_command.simulator_object_pos_w,
         motion_command.simulator_object_quat_w,
     )
@@ -285,8 +285,8 @@ def obj_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
 def obj_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     _, ori = subtract_frame_transforms(
-        motion_command.robot_root_pos_w,
-        motion_command.robot_root_quat_w,
+        motion_command.robot_ref_pos_w,
+        motion_command.robot_ref_quat_w,
         motion_command.simulator_object_pos_w,
         motion_command.simulator_object_quat_w,
     )
@@ -298,8 +298,8 @@ def obj_lin_vel_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     unit_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=env.device).unsqueeze(0).repeat(env.num_envs, 1)
     vel_b, _ = subtract_frame_transforms(
-        motion_command.robot_root_pos_w.clone(),
-        motion_command.robot_root_quat_w.clone(),
+        motion_command.robot_ref_pos_w.clone(),
+        motion_command.robot_ref_quat_w.clone(),
         motion_command.simulator_object_lin_vel_w,
         unit_quat,
     )

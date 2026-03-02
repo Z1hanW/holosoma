@@ -16,12 +16,12 @@ set -euo pipefail
 #   OBJECT_FILTER=boxmedium,boxlarge (comma-separated clip-name filters)
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-DATASET_KNOB=${DATASET_KNOB:-"behave"}
+DATASET_KNOB=${DATASET_KNOB:-"crisp"}
 
 case "${DATASET_KNOB}" in
   crisp)
-    DEFAULT_MOTION_DIR="${SCRIPT_DIR}/crisp/vmm_data/___crisp_motion"
-    DEFAULT_GEOMETRY_DIR="${SCRIPT_DIR}/crisp/vmm_data/___crisp_geometry"
+    DEFAULT_GEOMETRY_DIR="/data/terrain/___crisp_clean_geometry"
+    DEFAULT_MOTION_DIR="/data/terrain/___crisp_clean_motion"
     DEFAULT_OBJECT_URDF_DIR="${SCRIPT_DIR}/crisp/vmm_data/___crisp_object_urdf"
     DEFAULT_OBJECT_URDF_MODE="stem"
     DEFAULT_OBJECT_URDF=""

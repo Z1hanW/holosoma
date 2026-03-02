@@ -9,16 +9,29 @@ SIM_ENV_BIN=/home/ubuntu/miniconda3/envs/sim/bin
 if ! command -v torchrun >/dev/null 2>&1 && [[ -x "${SIM_ENV_BIN}/torchrun" ]]; then
   export PATH="${SIM_ENV_BIN}:${PATH}"
 fi
+if [[ -x "${SIM_ENV_BIN}/python" ]]; then
+  DEFAULT_PYTHON_BIN="${SIM_ENV_BIN}/python"
+else
+  DEFAULT_PYTHON_BIN="$(command -v python)"
+fi
+PYTHON_BIN=${PYTHON_BIN:-"${DEFAULT_PYTHON_BIN}"}
 
 DEFAULT_CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-${DEFAULT_CUDA_VISIBLE_DEVICES}}
 EXP=${EXP:-g1-29dof-wbt-w-object-generalist}
-MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_aug_mix_ml"}
+WANDB_PROJECT=${WANDB_PROJECT:-boxer}
+DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_aug_mix_ml"
+MOTION_DIR_FROM_ENV=0
+if [[ -n "${MOTION_DIR+x}" ]]; then
+  MOTION_DIR_FROM_ENV=1
+fi
+MOTION_DIR=${MOTION_DIR:-"${DEFAULT_MOTION_DIR}"}
 OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-""}
 NUM_ENVS=${NUM_ENVS:-24576}
 NPROC=${NPROC:-$(awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}")}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
 
+TRAIN_DATASETS=${TRAIN_DATASETS:-"omomo,behave"}
 AUTO_PREP_MIXED_BANK=${AUTO_PREP_MIXED_BANK:-0}
 MIXED_CLEAN_OUT=${MIXED_CLEAN_OUT:-1}
 MIXED_LINK_MODE=${MIXED_LINK_MODE:-symlink}
@@ -35,20 +48,79 @@ VISER_FORCE_DT=${VISER_FORCE_DT:-True}
 VISER_RECENTER=${VISER_RECENTER:-True}
 VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-False}
 ENABLE_VISER=${ENABLE_VISER:-0}
+DEBUG_MODE=${DEBUG_MODE:-${DEBUG_MODEL:-off}}
 
+SEQUENCE_NAME=${SEQUENCE_NAME:-""}
+if [[ "$#" -gt 0 ]]; then
+  SEQUENCE_NAME="$1"
+  shift
+fi
 EXTRA_ARGS=("$@")
+if [[ -n "${SEQUENCE_NAME}" ]]; then
+  echo "[INFO] Sequence name: ${SEQUENCE_NAME}"
+fi
+
+datasets_normalized=$(echo "${TRAIN_DATASETS}" | tr '[:upper:]' '[:lower:]' | tr -d '[]')
+IFS=',' read -r -a dataset_tokens <<< "${datasets_normalized}"
+USE_OMOMO=0
+USE_BEHAVE=0
+for token in "${dataset_tokens[@]}"; do
+  dataset_key=$(echo "${token}" | tr -d '[:space:]')
+  if [[ -z "${dataset_key}" ]]; then
+    continue
+  fi
+  case "${dataset_key}" in
+    omomo)
+      USE_OMOMO=1
+      ;;
+    behave)
+      USE_BEHAVE=1
+      ;;
+    *)
+      echo "[ERROR] Unsupported dataset '${dataset_key}' in TRAIN_DATASETS='${TRAIN_DATASETS}'. Use only omomo,behave." >&2
+      exit 2
+      ;;
+  esac
+done
+if [[ "${USE_OMOMO}" != "1" && "${USE_BEHAVE}" != "1" ]]; then
+  echo "[ERROR] TRAIN_DATASETS='${TRAIN_DATASETS}' selected no datasets. Use omomo and/or behave." >&2
+  exit 2
+fi
+
+selected_datasets=()
+if [[ "${USE_OMOMO}" == "1" ]]; then
+  selected_datasets+=("omomo")
+fi
+if [[ "${USE_BEHAVE}" == "1" ]]; then
+  selected_datasets+=("behave")
+fi
+if [[ "${MOTION_DIR_FROM_ENV}" != "1" ]]; then
+  if [[ "${USE_OMOMO}" == "1" && "${USE_BEHAVE}" == "1" ]]; then
+    MOTION_DIR="${DEFAULT_MOTION_DIR}"
+  elif [[ "${USE_OMOMO}" == "1" ]]; then
+    MOTION_DIR="${MIXED_OMOMO_DIR}"
+  else
+    MOTION_DIR="${MIXED_BEHAVE_DIR}"
+  fi
+fi
+echo "[INFO] TRAIN_DATASETS (resolved): $(IFS=,; echo "${selected_datasets[*]}")"
+echo "[INFO] MOTION_DIR: ${MOTION_DIR}"
 
 if [[ "${AUTO_PREP_MIXED_BANK}" != "0" ]]; then
-  echo "[INFO] Preparing mixed motion bank into: ${MOTION_DIR}"
-  OMOMO_DIR="${MIXED_OMOMO_DIR}" \
-  BEHAVE_DIR="${MIXED_BEHAVE_DIR}" \
-  OUT_DIR="${MOTION_DIR}" \
-  BEHAVE_FILTER="${MIXED_BEHAVE_FILTER}" \
-  LINK_MODE="${MIXED_LINK_MODE}" \
-  CLEAN_OUT="${MIXED_CLEAN_OUT}" \
-  BEHAVE_MAP_FILE="${MIXED_BEHAVE_MAP_FILE}" \
-  PREFIX_DATASET=1 \
-  bash "${SCRIPT_DIR}/prepare_mixed_object_bank.sh"
+  if [[ "${USE_OMOMO}" == "1" && "${USE_BEHAVE}" == "1" ]]; then
+    echo "[INFO] Preparing mixed motion bank into: ${MOTION_DIR}"
+    OMOMO_DIR="${MIXED_OMOMO_DIR}" \
+    BEHAVE_DIR="${MIXED_BEHAVE_DIR}" \
+    OUT_DIR="${MOTION_DIR}" \
+    BEHAVE_FILTER="${MIXED_BEHAVE_FILTER}" \
+    LINK_MODE="${MIXED_LINK_MODE}" \
+    CLEAN_OUT="${MIXED_CLEAN_OUT}" \
+    BEHAVE_MAP_FILE="${MIXED_BEHAVE_MAP_FILE}" \
+    PREFIX_DATASET=1 \
+    bash "${SCRIPT_DIR}/prepare_mixed_object_bank.sh"
+  else
+    echo "[INFO] AUTO_PREP_MIXED_BANK is enabled but skipped for single-dataset training ($(IFS=,; echo "${selected_datasets[*]}"))."
+  fi
 fi
 
 if [[ -z "${OBJECT_SPEC_PATH}" ]]; then
@@ -56,7 +128,70 @@ if [[ -z "${OBJECT_SPEC_PATH}" ]]; then
   if [[ -f "${default_map}" ]]; then
     OBJECT_SPEC_PATH="${default_map}"
     echo "[INFO] Using clip-object URDF map: ${OBJECT_SPEC_PATH}"
+  elif [[ "${USE_BEHAVE}" == "1" && -f "${MIXED_BEHAVE_MAP_FILE}" ]]; then
+    OBJECT_SPEC_PATH="${MIXED_BEHAVE_MAP_FILE}"
+    echo "[INFO] Using BEHAVE clip-object URDF map: ${OBJECT_SPEC_PATH}"
+  elif [[ "${USE_BEHAVE}" == "1" ]]; then
+    echo "[WARN] BEHAVE selected but no clip-object URDF map found. Training may fallback to single-object URDF." >&2
   fi
+fi
+
+DEBUG_MODE=$(echo "${DEBUG_MODE}" | tr '[:upper:]' '[:lower:]')
+case "${DEBUG_MODE}" in
+  ""|0|off|none)
+    DEBUG_MODE="off"
+    ;;
+  1|replay)
+    DEBUG_MODE="replay"
+    ;;
+  toy)
+    DEBUG_MODE="toy"
+    ;;
+  *)
+    echo "[ERROR] Unsupported DEBUG_MODE='${DEBUG_MODE}'. Use one of: off, replay, toy"
+    exit 2
+    ;;
+esac
+
+if [[ "${DEBUG_MODE}" == "replay" || "${DEBUG_MODE}" == "toy" ]]; then
+  if [[ -n "${OBJECT_SPEC_PATH}" && -f "${OBJECT_SPEC_PATH}" ]]; then
+    DEBUG_URDF_COUNT=$(python - <<'PY' "${OBJECT_SPEC_PATH}"
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text(encoding="utf-8"))
+if isinstance(payload, dict) and isinstance(payload.get("clips"), dict):
+    payload = payload["clips"]
+if not isinstance(payload, dict):
+    print(0)
+    raise SystemExit(0)
+
+seen = set()
+for _, entry in payload.items():
+    if isinstance(entry, str):
+        urdf = entry.strip()
+    elif isinstance(entry, dict):
+        urdf = str(entry.get("object_urdf_path", "")).strip()
+    else:
+        urdf = ""
+    if urdf:
+        seen.add(str(Path(urdf).resolve()))
+print(len(seen))
+PY
+)
+    if [[ "${DEBUG_URDF_COUNT}" =~ ^[0-9]+$ ]] && (( DEBUG_URDF_COUNT > 0 )); then
+      NUM_ENVS="${DEBUG_URDF_COUNT}"
+      echo "[INFO] DEBUG_MODE=${DEBUG_MODE}: using one env per unique URDF => NUM_ENVS=${NUM_ENVS}"
+    else
+      echo "[WARN] DEBUG_MODE=${DEBUG_MODE}: failed to infer URDF count from ${OBJECT_SPEC_PATH}; keeping NUM_ENVS=${NUM_ENVS}"
+    fi
+  else
+    echo "[WARN] DEBUG_MODE=${DEBUG_MODE}: OBJECT_SPEC_PATH missing; keeping NUM_ENVS=${NUM_ENVS}"
+  fi
+  ENABLE_VISER=1
+  NPROC=1
 fi
 
 if [[ "${ENABLE_VISER}" == "1" ]]; then
@@ -66,30 +201,47 @@ else
   echo "[INFO] Starting training without Viser"
 fi
 train_cmd=(
-  torchrun --nproc_per_node="${NPROC}" --master_port="${MASTER_PORT}"
   src/holosoma/holosoma/train_agent.py
   "exp:${EXP}"
-  --training.num_envs="${NUM_ENVS}"
-  --training.enable_viser=False
-  --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_DIR}"
-  --algo.config.save_interval=500
-  logger:wandb
-  --logger.video.interval=2000
-  "${EXTRA_ARGS[@]}"
+  --training.project="${WANDB_PROJECT}"
+  --training.num-envs="${NUM_ENVS}"
+  --command.setup-terms.motion-command.params.motion-config.motion-file "${MOTION_DIR}"
+  --algo.config.save-interval=500
 )
+if [[ "${DEBUG_MODE}" == "replay" || "${DEBUG_MODE}" == "toy" ]]; then
+  train_cmd=("${PYTHON_BIN}" "${train_cmd[@]}")
+else
+  train_cmd=(torchrun --nproc_per_node="${NPROC}" --master_port="${MASTER_PORT}" "${train_cmd[@]}")
+fi
+if [[ "${DEBUG_MODE}" == "replay" ]]; then
+  train_cmd+=(--training.debug=True)
+fi
+if [[ "${DEBUG_MODE}" == "toy" ]]; then
+  train_cmd+=(--training.toy-mode=True)
+  train_cmd+=(--training.viser-env-count="${NUM_ENVS}")
+fi
 if [[ "${ENABLE_VISER}" == "1" ]]; then
   train_cmd+=(
-    --training.enable_viser=True
-    --training.viser_port="${VISER_PORT}"
-    --training.viser_env_id="${VISER_ENV_ID}"
-    --training.viser_update_hz="${VISER_UPDATE_HZ}"
-    --training.viser_sync_to_sim="${VISER_SYNC_TO_SIM}"
-    --training.viser_force_dt="${VISER_FORCE_DT}"
-    --training.viser_recenter="${VISER_RECENTER}"
-    --training.viser_show_scandots="${VISER_SHOW_SCANDOTS}"
+    --training.enable-viser=True
+    --training.viser-port="${VISER_PORT}"
+    --training.viser-env-id="${VISER_ENV_ID}"
+    --training.viser-update-hz="${VISER_UPDATE_HZ}"
+    --training.viser-sync-to-sim="${VISER_SYNC_TO_SIM}"
+    --training.viser-force-dt="${VISER_FORCE_DT}"
+    --training.viser-recenter="${VISER_RECENTER}"
+    --training.viser-show-scandots="${VISER_SHOW_SCANDOTS}"
   )
 fi
 if [[ -n "${OBJECT_SPEC_PATH}" ]]; then
-  train_cmd+=(--robot.object.object_urdf_path "${OBJECT_SPEC_PATH}")
+  train_cmd+=(--robot.object.object-urdf-path "${OBJECT_SPEC_PATH}")
 fi
+if [[ -n "${SEQUENCE_NAME}" ]]; then
+  train_cmd+=(--training.name="${SEQUENCE_NAME}")
+fi
+train_cmd+=("${EXTRA_ARGS[@]}")
+train_cmd+=(logger:wandb)
+if [[ -n "${SEQUENCE_NAME}" ]]; then
+  train_cmd+=(--logger.name="${SEQUENCE_NAME}")
+fi
+train_cmd+=(--logger.video.interval=2000)
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${train_cmd[@]}"

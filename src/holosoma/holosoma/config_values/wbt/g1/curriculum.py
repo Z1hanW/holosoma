@@ -27,7 +27,8 @@ g1_29dof_wbt_curriculum_w_object = CurriculumManagerCfg(
         "w_object_difficulty_curriculum": CurriculumTermCfg(
             func="holosoma.managers.curriculum.terms.locomotion:WObjectDifficultyCurriculum",
             params={
-                "enabled": True,
+                # Keep curriculum logic available, but disable by default for w-object training.
+                "enabled": False,
                 "initial_lambda": 0.0,
                 "lambda_step_up": 0.01,
                 "lambda_step_down": 0.01,

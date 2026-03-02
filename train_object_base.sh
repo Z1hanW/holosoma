@@ -5,6 +5,7 @@ set -euo pipefail
 
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-5,6,7}
 EXP=${EXP:-g1-29dof-wbt-w-object}
+WANDB_PROJECT=${WANDB_PROJECT:-boxer}
 MOTION_FILE=${MOTION_FILE:-src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz}
 NUM_ENVS=${NUM_ENVS:-12288}
 NPROC=${NPROC:-3}
@@ -25,6 +26,7 @@ echo "[INFO] Open: http://localhost:${VISER_PORT}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" torchrun --nproc_per_node="${NPROC}" --master_port="${MASTER_PORT}" \
   src/holosoma/holosoma/train_agent.py \
   "exp:${EXP}" \
+  --training.project="${WANDB_PROJECT}" \
   --training.num_envs="${NUM_ENVS}" \
   --training.enable_viser=True \
   --training.viser_port="${VISER_PORT}" \

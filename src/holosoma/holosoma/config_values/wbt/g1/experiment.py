@@ -19,7 +19,7 @@ from holosoma.config_values import (
 
 g1_29dof_wbt = ExperimentConfig(
     training=TrainingConfig(
-        project="WholeBodyTracking",
+        project="boxer",
         name="g1_29dof_wbt_manager",
         num_envs=8192,
     ),
@@ -300,7 +300,7 @@ g1_29dof_wbt_videomimic_mlp_w_gru = replace(
 
 g1_29dof_wbt_fast_sac = ExperimentConfig(
     training=TrainingConfig(
-        project="WholeBodyTracking",
+        project="boxer",
         name="g1_29dof_wbt_fast_sac_manager",
         num_envs=8192,
     ),

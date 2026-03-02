@@ -259,6 +259,42 @@ def _run_debug_depth_video(env: Any, *, wandb_logging: bool) -> None:
         video_recorder.stop_recording()
 
 
+def _run_debug_motion_preview(env: Any, *, max_steps: int | None = None) -> None:
+    if not hasattr(env, "step_visualize_motion"):
+        raise RuntimeError("Debug motion preview requires an environment with step_visualize_motion().")
+    env.reset_all()
+    done = False
+    step = 0
+    while not done:
+        done = bool(env.step_visualize_motion(None))
+        step += 1
+        if max_steps is not None and step >= max_steps:
+            logger.info("Debug motion preview reached max_steps={} and will exit.", max_steps)
+            break
+
+
+def _run_debug_mode_by_perception(
+    env: Any,
+    *,
+    wandb_logging: bool,
+    max_steps: int | None = None,
+) -> None:
+    perception_mgr = getattr(env, "perception_manager", None)
+    perception_enabled = bool(getattr(perception_mgr, "enabled", False))
+    output_mode = str(getattr(getattr(perception_mgr, "cfg", None), "output_mode", "")).strip().lower()
+    if perception_enabled and output_mode == "camera_depth":
+        logger.info("Debug mode: perception output_mode=camera_depth, running depth debug rollout.")
+        _run_debug_depth_video(env, wandb_logging=wandb_logging)
+        return
+
+    logger.info(
+        "Debug mode: perception output_mode='{}' (enabled={}), running motion/viser preview.",
+        output_mode or "none",
+        perception_enabled,
+    )
+    _run_debug_motion_preview(env, max_steps=max_steps)
+
+
 def train(tyro_config: ExperimentConfig, training_context: TrainingContext | None = None) -> None:
     """Train an agent with optional context for sim app management.
 
@@ -395,7 +431,12 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
 
         if tyro_config.training.debug:
             if is_main_process:
-                _run_debug_depth_video(env, wandb_logging=wandb_enabled)
+                max_debug_steps = tyro_config.training.max_eval_steps
+                _run_debug_mode_by_perception(
+                    env,
+                    wandb_logging=wandb_enabled,
+                    max_steps=max_debug_steps,
+                )
             if is_distributed:
                 dist.barrier()
                 logger.info("Shutting down distributed processes...")
