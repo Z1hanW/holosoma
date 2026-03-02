@@ -1059,8 +1059,6 @@ class MotionCommand(CommandTermBase):
         self._sim_object_names: list[str] = []
         self._clip_object_ids: torch.Tensor | None = None
         self._object_indices_matrix: torch.Tensor | None = None
-        self._task_is_generalization: torch.Tensor | None = None
-        self._task_imitation_prob: float = 1.0
 
     def set_forced_clip(self, clip_idx: int | None) -> None:
         """Force a specific clip index for resets (None clears the override)."""
@@ -1304,8 +1302,6 @@ class MotionCommand(CommandTermBase):
         if env_ids.numel() == 0:
             return
 
-        self._sample_task_modes(env_ids)
-
         if self._forced_clip_idx is not None:
             self.clip_ids[env_ids] = int(self._forced_clip_idx)
         elif self.multi_clip:
@@ -1346,13 +1342,10 @@ class MotionCommand(CommandTermBase):
         valid_starts = torch.clamp(clip_lengths - start_margin, min=1)
         self.time_steps[env_ids] = (phase * valid_starts).long()
 
-        # Handle start_at_timestep_zero_prob (optionally reduced for generalization resets).
+        # Handle start_at_timestep_zero_prob.
         base_prob = float(self.motion_cfg.start_at_timestep_zero_prob)
         if base_prob > 0.0:
             probs = torch.full((env_ids.numel(),), base_prob, device=self.device, dtype=torch.float32)
-            if self._task_is_generalization is not None and self._task_is_generalization[env_ids].any():
-                gen_scale = float(getattr(self._env, "_wobj_curriculum_generalization_start_zero_prob_scale", 1.0))
-                probs[self._task_is_generalization[env_ids]] *= gen_scale
             probs = torch.clamp(probs, 0.0, 1.0)
             subset = self.time_steps[env_ids]
             rand_vals = torch.rand_like(subset, dtype=torch.float32)
@@ -1378,9 +1371,6 @@ class MotionCommand(CommandTermBase):
 
         # 2. Adding noise
         reset_noise_scale = torch.ones((env_ids.numel(), 1), device=self.device, dtype=torch.float32)
-        if self._task_is_generalization is not None and self._task_is_generalization[env_ids].any():
-            gen_noise_scale = float(getattr(self._env, "_wobj_curriculum_generalization_noise_scale", 1.0))
-            reset_noise_scale[self._task_is_generalization[env_ids]] = gen_noise_scale
         reset_noise_scale_3 = reset_noise_scale.expand(-1, 3)
 
         # 2.1 prepare the noise scale
@@ -1663,34 +1653,6 @@ class MotionCommand(CommandTermBase):
         else:
             self._clip_sampling_weights = self._base_clip_weights.clone()
 
-    def _is_wobj_curriculum_enabled(self) -> bool:
-        if self._env.is_evaluating:
-            return False
-        if not self.motion.has_object:
-            return False
-        return bool(getattr(self._env, "_wobj_curriculum_enabled", False))
-
-    def _sample_task_modes(self, env_ids: torch.Tensor) -> None:
-        if self._task_is_generalization is None:
-            return
-
-        if not self._is_wobj_curriculum_enabled():
-            self._task_is_generalization[env_ids] = False
-            self._task_imitation_prob = 1.0
-            return
-
-        if not bool(getattr(self._env, "_wobj_curriculum_task_mixing_enabled", False)):
-            self._task_is_generalization[env_ids] = False
-            self._task_imitation_prob = 1.0
-            return
-
-        p_imitation = float(getattr(self._env, "_wobj_curriculum_p_imitation", 1.0))
-        p_imitation = float(np.clip(p_imitation, 0.0, 1.0))
-        self._task_imitation_prob = p_imitation
-
-        imitation_mask = torch.rand(env_ids.numel(), device=self.device) < p_imitation
-        self._task_is_generalization[env_ids] = ~imitation_mask
-
     @property
     def command(self) -> torch.Tensor:
         return torch.cat([self.joint_pos, self.joint_vel], dim=1)
@@ -1930,8 +1892,6 @@ class MotionCommand(CommandTermBase):
     def init_buffers(self):
         self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.clip_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self._task_is_generalization = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self._task_imitation_prob = 1.0
         if self._terrain_row_ids is not None:
             self._terrain_row_ids.zero_()
         self.body_pos_relative_w = torch.zeros(
@@ -2055,14 +2015,6 @@ class MotionCommand(CommandTermBase):
             self.metrics["motion/adaptive_timesteps_sampler_top1_bin"] = self.adaptive_timesteps_sampler.metrics[
                 "sampling_top1_bin"
             ]
-
-        if self._task_is_generalization is not None:
-            self.metrics["motion/task_generalization_fraction"] = self._task_is_generalization.to(dtype=torch.float32).mean()
-            self.metrics["motion/task_imitation_prob"] = torch.tensor(
-                self._task_imitation_prob,
-                device=self.device,
-                dtype=torch.float32,
-            )
 
     #########################################################################################
     ## Internal helpers

@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from holosoma.managers.curriculum.base import CurriculumTermBase
+from holosoma.utils.rotations import quat_conjugate, quat_mul, quat_normalize, quat_to_exp_map
 
 
 class AverageEpisodeLengthTracker(CurriculumTermBase):
@@ -107,9 +108,7 @@ class WObjectDifficultyCurriculum(CurriculumTermBase):
     """Single-knob curriculum for w-object training.
 
     A global difficulty scalar ``lambda_value`` in [0, 1] controls:
-    - Assistive base support scale (decreases as lambda increases)
-    - (Optional) imitation vs. generalization task-mix probability
-    - (Optional) reset randomization strength for generalization episodes
+    - Object assistive controller scale (decreases as lambda increases).
     """
 
     def __init__(self, cfg: Any, env: Any):
@@ -126,25 +125,15 @@ class WObjectDifficultyCurriculum(CurriculumTermBase):
         self.similarity_sigma = float(params.get("similarity_sigma", 0.50))
         self.similarity_threshold = float(params.get("similarity_threshold", 0.60))
 
-        self.imitation_prob_start = float(params.get("imitation_prob_start", 1.0))
-        self.imitation_prob_target = float(params.get("imitation_prob_target", 0.5))
-        self.enable_task_mixing = bool(params.get("enable_task_mixing", False))
-
         self.assist_beta_max = float(params.get("assist_beta_max", 1.0))
-        self.assist_kp_pos = float(params.get("assist_kp_pos", 4.0))
-        self.assist_kd_lin_vel = float(params.get("assist_kd_lin_vel", 2.0))
-        self.assist_kd_ang_vel = float(params.get("assist_kd_ang_vel", 1.5))
-        self.assist_max_delta_lin = float(params.get("assist_max_delta_lin", 0.20))
-        self.assist_max_delta_ang = float(params.get("assist_max_delta_ang", 0.20))
-
-        self.generalization_noise_scale_min = float(params.get("generalization_noise_scale_min", 1.0))
-        self.generalization_noise_scale_max = float(params.get("generalization_noise_scale_max", 2.0))
-        self.generalization_start_zero_prob_scale_min = float(
-            params.get("generalization_start_zero_prob_scale_min", 1.0)
-        )
-        self.generalization_start_zero_prob_scale_max = float(
-            params.get("generalization_start_zero_prob_scale_max", 0.25)
-        )
+        self.object_pos_kp = float(params.get("object_pos_kp", 4.0))
+        self.object_lin_vel_kd = float(params.get("object_lin_vel_kd", 2.0))
+        self.object_rot_kp = float(params.get("object_rot_kp", 3.0))
+        self.object_ang_vel_kd = float(params.get("object_ang_vel_kd", 1.5))
+        self.object_force_to_velocity = float(params.get("object_force_to_velocity", 1.0))
+        self.object_torque_to_ang_velocity = float(params.get("object_torque_to_ang_velocity", 1.0))
+        self.object_max_delta_lin = float(params.get("object_max_delta_lin", 0.20))
+        self.object_max_delta_ang = float(params.get("object_max_delta_ang", 0.20))
 
         self._last_early_termination_rate = 1.0
         self._last_motion_end_rate = 0.0
@@ -223,7 +212,7 @@ class WObjectDifficultyCurriculum(CurriculumTermBase):
             return
 
         simulator = getattr(self.env, "simulator", None)
-        if simulator is None or not hasattr(simulator, "robot_root_states"):
+        if simulator is None or not hasattr(simulator, "all_root_states"):
             return
 
         dt = float(getattr(self.env, "dt", 0.0))
@@ -231,21 +220,36 @@ class WObjectDifficultyCurriculum(CurriculumTermBase):
             return
 
         try:
-            pos_err = motion_command.ref_pos_w - motion_command.robot_ref_pos_w
-            lin_vel_err = motion_command.ref_lin_vel_w - motion_command.robot_ref_lin_vel_w
-            ang_vel_err = motion_command.ref_ang_vel_w - motion_command.robot_ref_ang_vel_w
+            object_indices = motion_command._get_active_object_indices()
+            object_states = simulator.all_root_states[object_indices][:, :13]
+            if object_states.numel() == 0:
+                return
 
-            lin_delta = (
-                self.assist_kp_pos * pos_err + self.assist_kd_lin_vel * lin_vel_err
-            ) * (assist_scale * dt)
-            ang_delta = (self.assist_kd_ang_vel * ang_vel_err) * (assist_scale * dt)
+            ref_pos = motion_command.object_pos_w
+            ref_quat = motion_command.object_quat_w
+            ref_lin_vel = motion_command.object_lin_vel_w
 
-            lin_delta = torch.clamp(lin_delta, -self.assist_max_delta_lin, self.assist_max_delta_lin)
-            ang_delta = torch.clamp(ang_delta, -self.assist_max_delta_ang, self.assist_max_delta_ang)
+            pos_err = ref_pos - object_states[:, :3]
+            lin_vel_err = ref_lin_vel - object_states[:, 7:10]
 
-            simulator.robot_root_states[:, 7:10] = simulator.robot_root_states[:, 7:10] + lin_delta
-            simulator.robot_root_states[:, 10:13] = simulator.robot_root_states[:, 10:13] + ang_delta
-            simulator.set_actor_root_state_tensor_robots(None, simulator.robot_root_states)
+            quat_err = quat_mul(ref_quat, quat_conjugate(object_states[:, 3:7], w_last=True), w_last=True)
+            rot_err = quat_to_exp_map(quat_normalize(quat_err))
+            ang_vel_err = -object_states[:, 10:13]
+
+            force_cmd = self.object_pos_kp * pos_err + self.object_lin_vel_kd * lin_vel_err
+            torque_cmd = self.object_rot_kp * rot_err + self.object_ang_vel_kd * ang_vel_err
+
+            lin_delta = force_cmd * (assist_scale * dt * self.object_force_to_velocity)
+            ang_delta = torque_cmd * (assist_scale * dt * self.object_torque_to_ang_velocity)
+
+            lin_delta = torch.clamp(lin_delta, -self.object_max_delta_lin, self.object_max_delta_lin)
+            ang_delta = torch.clamp(ang_delta, -self.object_max_delta_ang, self.object_max_delta_ang)
+
+            updated_states = object_states.clone()
+            updated_states[:, 7:10] = updated_states[:, 7:10] + lin_delta
+            updated_states[:, 10:13] = updated_states[:, 10:13] + ang_delta
+            simulator.all_root_states[object_indices, :13] = updated_states
+            simulator.write_state_updates()
         except Exception:
             # Keep curriculum non-fatal: if simulator backend does not support this path, skip assist.
             return
@@ -278,34 +282,13 @@ class WObjectDifficultyCurriculum(CurriculumTermBase):
         self.lambda_value = lam
 
         if getattr(self.env, "is_evaluating", False):
-            p_imitation = 1.0
             assist_scale = 0.0
-            gen_noise_scale = 1.0
-            gen_start_zero_scale = 1.0
         else:
-            if self.enable_task_mixing:
-                p_imitation = (1.0 - lam) * self.imitation_prob_start + lam * self.imitation_prob_target
-                gen_noise_scale = self.generalization_noise_scale_min + lam * (
-                    self.generalization_noise_scale_max - self.generalization_noise_scale_min
-                )
-                gen_start_zero_scale = self.generalization_start_zero_prob_scale_min + lam * (
-                    self.generalization_start_zero_prob_scale_max - self.generalization_start_zero_prob_scale_min
-                )
-            else:
-                p_imitation = 1.0
-                gen_noise_scale = 1.0
-                gen_start_zero_scale = 1.0
             assist_scale = (1.0 - lam) * self.assist_beta_max
 
         self.env._wobj_curriculum_enabled = bool(self.enabled)
         self.env._wobj_curriculum_lambda = float(lam)
-        self.env._wobj_curriculum_imitation_prob_start = float(self.imitation_prob_start)
-        self.env._wobj_curriculum_imitation_prob_target = float(self.imitation_prob_target)
-        self.env._wobj_curriculum_task_mixing_enabled = bool(self.enable_task_mixing)
-        self.env._wobj_curriculum_p_imitation = float(np.clip(p_imitation, 0.0, 1.0))
         self.env._wobj_curriculum_assist_scale = float(max(assist_scale, 0.0))
-        self.env._wobj_curriculum_generalization_noise_scale = float(max(gen_noise_scale, 1e-6))
-        self.env._wobj_curriculum_generalization_start_zero_prob_scale = float(np.clip(gen_start_zero_scale, 0.0, 1.0))
 
         self._update_log_dict()
 
@@ -316,16 +299,6 @@ class WObjectDifficultyCurriculum(CurriculumTermBase):
         self.env.log_dict["curriculum/wobj_lambda"] = torch.tensor(self.lambda_value, device=device, dtype=torch.float)
         self.env.log_dict["curriculum/wobj_assist_scale"] = torch.tensor(
             float(getattr(self.env, "_wobj_curriculum_assist_scale", 0.0)),
-            device=device,
-            dtype=torch.float,
-        )
-        self.env.log_dict["curriculum/wobj_p_imitation"] = torch.tensor(
-            float(getattr(self.env, "_wobj_curriculum_p_imitation", 1.0)),
-            device=device,
-            dtype=torch.float,
-        )
-        self.env.log_dict["curriculum/wobj_gen_noise_scale"] = torch.tensor(
-            float(getattr(self.env, "_wobj_curriculum_generalization_noise_scale", 1.0)),
             device=device,
             dtype=torch.float,
         )
