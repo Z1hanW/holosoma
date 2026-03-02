@@ -162,11 +162,6 @@ def load_object_data(
     """
     print("Loading and sampling object mesh...")
     obj_mesh = trimesh.load(object_file, force="mesh")
-    if hasattr(obj_mesh, "bounds"):
-        bounds = obj_mesh.bounds
-        center = bounds.mean(axis=0)
-        print(f"[object_mesh] file={object_file}")
-        print(f"[object_mesh] bounds_min={bounds[0]} bounds_max={bounds[1]} center={center}")
 
     if bounding_box_oriented:
         points = obj_mesh.bounding_box_oriented.vertices
@@ -308,7 +303,6 @@ def preprocess_motion_data(
     scale=0.714,
     mat_height=0.1,
     object_poses=None,
-    human_z_offset: float = 0.0,
 ):
     """
     Preprocess human joints and object poses for retargeting.
@@ -336,10 +330,10 @@ def preprocess_motion_data(
 
     # Scale human joints
     human_joints = human_joints * scale
-    if human_z_offset != 0.0:
-        human_joints[:, :, 2] += float(human_z_offset)
 
     if object_poses is not None:
+        # Keep object trajectory in the same scaled world as human joints.
+        # Scaling only xy (or only z displacement) leads to severe human/object mismatch.
         object_poses[:, -3:] = object_poses[:, -3:] * scale
 
         object_moving_frame_idx = extract_object_first_moving_frame(object_poses)

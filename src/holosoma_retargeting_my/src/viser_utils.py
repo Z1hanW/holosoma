@@ -1,0 +1,289 @@
+# viser_utils.py
+from __future__ import annotations
+
+import threading
+import time
+import inspect
+from typing import Callable, List, Tuple
+
+import numpy as np
+import viser  # type: ignore[import-not-found]
+from viser.extras import ViserUrdf  # type: ignore[import-not-found]
+
+
+def create_motion_control_sliders(
+    server: viser.ViserServer,
+    viser_robot: ViserUrdf,
+    robot_base_frame: viser.FrameHandle,
+    motion_sequence: np.ndarray,
+    *,
+    robot_dof: int,
+    viser_object: ViserUrdf | None = None,
+    object_base_frame: viser.FrameHandle | None = None,
+    contains_object_in_qpos: bool = True,
+    initial_fps: int = 30,
+    initial_interp_mult: int = 2,
+    loop: bool = True,
+    on_update: Callable[..., None] | None = None,
+    sequence_setter_out: dict[str, Callable[[np.ndarray, int | None], None]] | None = None,
+) -> Tuple[List[viser.GuiInputHandle[int]], List[float]]:
+    """
+    Create a slider + play/pause controls and a background player thread with smooth, slerp-based interpolation.
+
+    Assumed qpos layout per frame (MuJoCo order):
+        [0:3]   robot base position   (xyz)
+        [3:7]   robot base quaternion (wxyz)
+        [7:7+R] robot joints          (R = robot_dof)
+        [-7:-4] object position  (xyz)            # only if contains_object_in_qpos and viser_object provided
+        [-4:]   object quaternion (wxyz)          # only if contains_object_in_qpos and viser_object provided
+
+    Args:
+        server: Viser server.
+        viser_robot: ViserUrdf for the robot.
+        robot_base_frame: server.scene.add_frame(...) return for the robot root frame (we set wxyz/position here).
+        motion_sequence: np.ndarray with shape [T, D], sequence of qpos frames.
+        robot_dof: number of actuated joints expected by viser_robot.
+        viser_object: optional ViserUrdf for an object.
+        object_base_frame: optional frame handle for the object root.
+        contains_object_in_qpos: set True if motion_sequence includes the object 7D pose at the end.
+        initial_fps: base FPS for playback.
+        initial_interp_mult: visual upsampling multiplier.
+        loop: whether to wrap around at the end.
+        on_update: optional callback invoked after each frame is applied. If it accepts 2 args,
+            it will be called as on_update(q, frame_idx).
+
+    Returns:
+        (controls, initial_values) — currently returns the [frame_slider] and [0.0]
+    """
+    qpos = motion_sequence
+    n_frames = int(qpos.shape[0])
+    if n_frames == 0:
+        raise ValueError("motion_sequence is empty.")
+
+    def _compute_has_object_input(qpos_arr: np.ndarray) -> bool:
+        return (
+            viser_object is not None
+            and object_base_frame is not None
+            and contains_object_in_qpos
+            and qpos_arr.shape[1] >= (7 + robot_dof + 7)
+        )
+
+    state = {
+        "qpos": qpos,
+        "n_frames": n_frames,
+        "has_object_input": _compute_has_object_input(qpos),
+    }
+
+    # ---------------- GUI ----------------
+    with server.gui.add_folder("Playback"):
+        frame_slider = server.gui.add_slider("Frame", min=0, max=max(0, n_frames - 1), step=1, initial_value=0)
+        play_btn = server.gui.add_button("Play / Pause")
+        fps_in = server.gui.add_number("FPS", initial_value=int(initial_fps), min=1, max=240, step=1)
+    with server.gui.add_folder("Smoothing"):
+        interp_mult_in = server.gui.add_number(
+            "Visual FPS multiplier", initial_value=int(initial_interp_mult), min=1, max=8, step=1
+        )
+
+    # ---------------- helpers ----------------
+    def _quat_normalize(q: np.ndarray) -> np.ndarray:
+        q = np.asarray(q, float)
+        n = float(np.linalg.norm(q))
+        return q if n == 0.0 else q / n
+
+    def _quat_continuous(prev_q: np.ndarray | None, curr_q: np.ndarray) -> np.ndarray:
+        q = _quat_normalize(curr_q)
+        if prev_q is None:
+            return q
+        return -q if float(np.dot(prev_q, q)) < 0.0 else q
+
+    def _slerp(q0: np.ndarray, q1: np.ndarray, u: float) -> np.ndarray:
+        q0 = _quat_normalize(q0)
+        q1 = _quat_normalize(q1)
+        dot = float(np.dot(q0, q1))
+        if dot < 0.0:
+            q1 = -q1
+            dot = -dot
+        if dot > 0.9995:
+            q = q0 + u * (q1 - q0)
+            return _quat_normalize(q)
+        theta = np.arccos(np.clip(dot, -1.0, 1.0))
+        s = np.sin(theta)
+        return (np.sin((1.0 - u) * theta) * q0 + np.sin(u * theta) * q1) / s
+
+    def _interp_frame(qpos_arr: np.ndarray, i0: int, i1: int, u: float) -> np.ndarray:
+        """SLERP for base & (optional) object quats; linear for positions and joints."""
+        q0 = qpos_arr[i0]
+        q1 = qpos_arr[i1]
+        out = q0.copy()
+
+        # Robot base (MuJoCo order: pos first, then quat)
+        out[0:3] = (1.0 - u) * q0[0:3] + u * q1[0:3]  # pos (xyz)
+        out[3:7] = _slerp(q0[3:7], q1[3:7], u)  # quat (wxyz)
+
+        # Joints
+        j0 = q0[7 : 7 + robot_dof]
+        j1 = q1[7 : 7 + robot_dof]
+        out[7 : 7 + robot_dof] = (1.0 - u) * j0 + u * j1
+
+        # Object (optional) (MuJoCo order: pos first, then quat)
+        if state["has_object_input"]:
+            out[-7:-4] = (1.0 - u) * q0[-7:-4] + u * q1[-7:-4]  # obj pos (xyz)
+            out[-4:] = _slerp(q0[-4:], q1[-4:], u)  # obj quat (wxyz)
+        return out
+
+    # ---------------- state ----------------
+    playing = {"flag": False}
+    tick = {"next": time.perf_counter()}  # absolute time for next draw
+    prev: dict[str, np.ndarray | None] = {"robot_q": None, "obj_q": None}  # for continuity
+    nonlocal_f = {"f": float(frame_slider.value)}  # fractional frame cursor
+    updating_programmatically = {"flag": False}  # flag to prevent callback from pausing during programmatic updates
+
+    # ---------------- draw ----------------
+    on_update_arity = None
+    if on_update is not None:
+        try:
+            on_update_arity = len(inspect.signature(on_update).parameters)
+        except (TypeError, ValueError):
+            on_update_arity = 1
+
+    def _apply_frame_from_q(q: np.ndarray, frame_idx: int | None = None) -> None:
+        # joints -> ensure length
+        joints = q[7 : 7 + robot_dof]
+        if joints.shape[0] != robot_dof:
+            joints = (
+                joints[:robot_dof] if joints.shape[0] > robot_dof else np.pad(joints, (0, robot_dof - joints.shape[0]))
+            )
+        viser_robot.update_cfg(joints)
+
+        # robot base (MuJoCo order: pos first, then quat)
+        robot_base_frame.position = q[0:3]  # pos (xyz)
+        r_q = _quat_continuous(prev["robot_q"], q[3:7])
+        prev["robot_q"] = r_q
+        robot_base_frame.wxyz = r_q
+
+        # object (optional) (MuJoCo order: pos first, then quat)
+        if state["has_object_input"] and object_base_frame is not None:
+            object_base_frame.position = q[-7:-4]  # obj pos (xyz)
+            o_q = _quat_continuous(prev["obj_q"], q[-4:])
+            prev["obj_q"] = o_q
+            object_base_frame.wxyz = o_q
+        elif object_base_frame is not None and viser_object is not None:
+            # fallback static pose
+            object_base_frame.position = np.zeros(3)
+            object_base_frame.wxyz = np.array([1.0, 0.0, 0.0, 0.0])
+        if on_update is not None:
+            if on_update_arity is not None and on_update_arity >= 2:
+                on_update(q, frame_idx)
+            else:
+                on_update(q)
+
+    def _apply_discrete_frame(i: int) -> None:
+        max_i = max(0, int(state["n_frames"]) - 1)
+        i = int(np.clip(i, 0, max_i))
+        _apply_frame_from_q(state["qpos"][i], frame_idx=i)
+
+    def _set_sequence(new_qpos: np.ndarray, new_fps: int | None = None) -> None:
+        new_qpos = np.asarray(new_qpos)
+        if new_qpos.ndim != 2 or new_qpos.shape[0] == 0:
+            raise ValueError("new_qpos must have shape [T, D] with T > 0.")
+        playing["flag"] = False
+        tick["next"] = time.perf_counter()
+        prev["robot_q"] = None
+        prev["obj_q"] = None
+
+        state["qpos"] = new_qpos
+        state["n_frames"] = int(new_qpos.shape[0])
+        state["has_object_input"] = _compute_has_object_input(new_qpos)
+
+        updating_programmatically["flag"] = True
+        frame_slider.max = max(0, state["n_frames"] - 1)
+        frame_slider.value = 0
+        updating_programmatically["flag"] = False
+
+        nonlocal_f["f"] = 0.0
+        if new_fps is not None:
+            fps_in.value = int(new_fps)
+        _apply_discrete_frame(0)
+
+    # ---------------- controls ----------------
+    @play_btn.on_click
+    def _(_evt) -> None:
+        playing["flag"] = not playing["flag"]
+        # reset timing & continuity starting from the current slider frame
+        tick["next"] = time.perf_counter()
+        prev["robot_q"] = None
+        prev["obj_q"] = None
+        nonlocal_f["f"] = float(frame_slider.value)
+
+    @fps_in.on_update
+    def _(_evt) -> None:
+        tick["next"] = time.perf_counter()
+
+    @interp_mult_in.on_update
+    def _(_evt) -> None:
+        tick["next"] = time.perf_counter()
+
+    @frame_slider.on_update
+    def _(_evt) -> None:
+        # Only pause if this is a user interaction, not a programmatic update
+        if not updating_programmatically["flag"]:
+            # Pause when scrubbing so the background loop doesn't overwrite immediately
+            playing["flag"] = False
+            tick["next"] = time.perf_counter()
+            frame_val = int(frame_slider.value)
+            _apply_discrete_frame(frame_val)
+            prev["robot_q"] = None
+            prev["obj_q"] = None
+            nonlocal_f["f"] = float(frame_val)
+
+    # ---------------- player loop ----------------
+    def _player_loop() -> None:
+        while True:
+            if state["n_frames"] <= 1:
+                time.sleep(0.05)
+                continue
+            if playing["flag"]:
+                now = time.perf_counter()
+                fps_val = max(1, int(fps_in.value))
+                mult = max(1, int(interp_mult_in.value))
+                dt = 1.0 / (fps_val * mult)
+
+                if now >= tick["next"]:
+                    # advance by one visual step
+                    n_frames_local = max(1, int(state["n_frames"]))
+                    f = nonlocal_f["f"] + 1.0 / mult
+                    if loop:
+                        f = f % n_frames_local
+                    else:
+                        f = min(f, float(n_frames_local - 1))
+                    nonlocal_f["f"] = f
+
+                    k0 = int(np.floor(f))
+                    k1 = (k0 + 1) % n_frames_local if loop else min(k0 + 1, n_frames_local - 1)
+                    u = float(f - k0)
+
+                    q_interp = _interp_frame(state["qpos"], k0, k1, u)
+                    _apply_frame_from_q(q_interp, frame_idx=k0)
+
+                    # Update slider to show current frame number in real-time
+                    # Use flag to prevent callback from pausing playback
+                    updating_programmatically["flag"] = True
+                    frame_slider.value = k0
+                    updating_programmatically["flag"] = False
+
+                    tick["next"] = now + dt
+                else:
+                    time.sleep(min(0.002, max(0.0, tick["next"] - now)))
+            else:
+                time.sleep(0.02)
+
+    threading.Thread(target=_player_loop, daemon=True).start()
+
+    # initial draw
+    _apply_discrete_frame(0)
+
+    if sequence_setter_out is not None:
+        sequence_setter_out["set_sequence"] = _set_sequence
+
+    # keep consistent with your previous return convention
+    return [frame_slider], [0.0]

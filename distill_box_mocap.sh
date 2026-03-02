@@ -5,8 +5,10 @@ set -euo pipefail
 #
 # Student policy observation (actor):
 # - actor_obs_torso
+# - actor_obs_proprio (base_lin_vel, base_ang_vel, dof_pos, dof_vel, actions)
 # - actor_obs_box, where:
 #   - obj_pos_b: current box position in robot base frame
+#   - obj_ori_b: current box orientation (6D) in robot base frame
 #   - obj_goal_pos_size_b: final clip goal position + box size in robot base frame
 #
 # Teacher policy observation:
@@ -16,7 +18,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
 
 
-DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"/home/ubuntu/FAR/model_17000.pt"}
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"/home/ubuntu/FAR/holosoma/logs/WholeBodyTracking/20260216_214200-g1_29dof_wbt_w_object_generalist-locomotion/model_17000.pt"}
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 
 if [[ $# -gt 0 ]]; then
@@ -35,9 +37,11 @@ EXP=${EXP:-g1-29dof-wbt-w-object-distill-torso-box-goal}
 RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_mocap}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_mocap_access_to_mocap_data}
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
-DISTILL_TWO_STAGE=${DISTILL_TWO_STAGE:-0}
-TAKE_TEACHER_ACTIONS=${TAKE_TEACHER_ACTIONS:-False}
 TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.5}
+BC_LOSS_COEF=${BC_LOSS_COEF:-0.5}
+PPO_START_EPOCH=${PPO_START_EPOCH:-0}
+DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-10000}
+DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-0.5}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 ACTOR_LR=${ACTOR_LR:-5e-5}
 CRITIC_LR=${CRITIC_LR:-5e-5}
@@ -47,20 +51,23 @@ echo "[INFO] teacher checkpoint: ${TEACHER_CHECKPOINT}"
 echo "[INFO] exp=${EXP}"
 echo "[INFO] actor box state is in robot base frame (b): obj_pos_b + obj_goal_pos_size_b"
 echo "[INFO] actor_lr=${ACTOR_LR} critic_lr=${CRITIC_LR}"
-echo "[INFO] distill_two_stage=${DISTILL_TWO_STAGE}"
-echo "[INFO] take_teacher_actions=${TAKE_TEACHER_ACTIONS}"
 echo "[INFO] teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
+echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH} dagger_loss_coef=${DAGGER_LOSS_COEF}"
 
 exec env \
   EXP="${EXP}" \
   RUN_NAME="${RUN_NAME}" \
   TRAINING_NAME="${TRAINING_NAME}" \
   TEACHER_OBS_KEYS="${TEACHER_OBS_KEYS}" \
-  DISTILL_TWO_STAGE="${DISTILL_TWO_STAGE}" \
-  TAKE_TEACHER_ACTIONS="${TAKE_TEACHER_ACTIONS}" \
   TEACHER_ACTION_MIX_RATIO="${TEACHER_ACTION_MIX_RATIO}" \
+  BC_LOSS_COEF="${BC_LOSS_COEF}" \
+  PPO_START_EPOCH="${PPO_START_EPOCH}" \
+  DAGGER_END_EPOCH="${DAGGER_END_EPOCH}" \
+  DAGGER_LOSS_COEF="${DAGGER_LOSS_COEF}" \
   PAIR_TERRAIN_WITH_MOTION="${PAIR_TERRAIN_WITH_MOTION}" \
   ACTOR_LR="${ACTOR_LR}" \
   CRITIC_LR="${CRITIC_LR}" \
   bash "${SCRIPT_DIR}/distill_torso_box.sh" "${TEACHER_CHECKPOINT}" \
+    perception:none \
+    --algo.config.module-dict.actor.input-dim "['actor_obs_torso','actor_obs_proprio','actor_obs_box']" \
     "$@"

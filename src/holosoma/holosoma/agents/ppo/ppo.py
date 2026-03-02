@@ -273,7 +273,13 @@ class PPO(BaseAlgo):
         )
 
     def _get_actor_std_for_loss(self, actor: nn.Module) -> torch.Tensor:
-        std = actor.std
+        std = torch.nan_to_num(
+            actor.std,
+            nan=self.config.init_noise_std,
+            posinf=10.0,
+            neginf=0.0,
+        )
+        std = torch.clamp(std, min=1e-6)
         min_noise_std = getattr(actor, "min_noise_std", None)
         min_mean_noise_std = getattr(actor, "min_mean_noise_std", None)
         if min_noise_std:
@@ -713,6 +719,14 @@ class PPO(BaseAlgo):
         ppo_epochs = max(0, current_epoch - self.ppo_start_epoch)
         self.ppo_coeff = min(float(ppo_epochs) / float(total_epochs), 0.9)
 
+    def _use_deterministic_student_actions(self) -> bool:
+        """Use mean actions during pure BC phases to reduce rollout noise drift."""
+        if not self.dagger_enabled:
+            return False
+        if self.use_ppo_dagger_schedule:
+            return self.ppo_coeff <= 0.0
+        return self.bc_loss_coef >= 1.0
+
     def _rollout_step(self, obs_dict):
         with torch.no_grad():
             for _ in range(self.config.num_steps_per_env):
@@ -727,6 +741,8 @@ class PPO(BaseAlgo):
                 if self.actor_perception_key:
                     actor_policy_state[self.actor_perception_key] = obs_dict[self.actor_perception_key]
                 actions = self.actor.act(actor_policy_state)
+                if self._use_deterministic_student_actions():
+                    actions = self.actor.action_mean.detach()
 
                 critic_policy_state = {"critic_obs": critic_obs}
                 if self.critic_perception_key:
@@ -875,17 +891,86 @@ class PPO(BaseAlgo):
         self.storage.clear()
         return loss_dict
 
+    @staticmethod
+    def _loss_to_float(loss: torch.Tensor | float | int) -> float:
+        if torch.is_tensor(loss):
+            loss = loss.detach()
+            if loss.numel() != 1:
+                loss = loss.mean()
+            return float(torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0).item())
+        loss_value = float(loss)
+        if loss_value != loss_value or loss_value in (float("inf"), float("-inf")):
+            return 0.0
+        return loss_value
+
+    def _accumulate_loss_dict(self, loss_dict: dict[str, float], ppo_loss_dict: dict[str, torch.Tensor]):
+        loss_dict["Value"] += self._loss_to_float(ppo_loss_dict.get("value_loss", 0.0))
+        loss_dict["Surrogate"] += self._loss_to_float(ppo_loss_dict.get("surrogate_loss", 0.0))
+        loss_dict["Entropy"] += self._loss_to_float(ppo_loss_dict.get("entropy_loss", 0.0))
+        loss_dict["KL"] += self._loss_to_float(ppo_loss_dict.get("kl_mean", 0.0))
+        reserved = {"value_loss", "surrogate_loss", "entropy_loss", "kl_mean"}
+        for key, loss in ppo_loss_dict.items():
+            if key in reserved:
+                continue
+            if key not in loss_dict:
+                loss_dict[key] = 0.0
+            loss_dict[key] += self._loss_to_float(loss)
+        return loss_dict
+
+    def _sanitize_actor_std(self):
+        if not hasattr(self.actor, "std"):
+            return
+        with torch.no_grad():
+            std = torch.nan_to_num(
+                self.actor.std.data,
+                nan=self.config.init_noise_std,
+                posinf=10.0,
+                neginf=0.0,
+            )
+            min_noise_std = getattr(self.actor, "min_noise_std", None)
+            if min_noise_std:
+                std = torch.clamp(std, min=min_noise_std)
+            else:
+                std = torch.clamp(std, min=1e-6)
+            self.actor.std.data.copy_(std)
+
+    def _has_non_finite_gradients(self) -> bool:
+        for param in itertools.chain(self.actor.parameters(), self.critic.parameters()):
+            if param.grad is not None and not torch.isfinite(param.grad).all():
+                return True
+        return False
+
     def _update_algo_step(self, minibatch: Minibatch, loss_dict: dict[str, float]):
         ppo_loss_dict = self._compute_ppo_loss(minibatch)
+        actor_loss = ppo_loss_dict["actor_loss"]
+        critic_loss = ppo_loss_dict["critic_loss"]
+
+        if not torch.isfinite(actor_loss).all() or not torch.isfinite(critic_loss).all():
+            logger.warning(
+                "Skipping optimizer step due to non-finite loss "
+                f"(actor={actor_loss.detach().float().mean().item():.6f}, "
+                f"critic={critic_loss.detach().float().mean().item():.6f})."
+            )
+            self._sanitize_actor_std()
+            self.actor_optimizer.zero_grad(set_to_none=True)
+            self.critic_optimizer.zero_grad(set_to_none=True)
+            return self._accumulate_loss_dict(loss_dict, ppo_loss_dict)
 
         self.actor_optimizer.zero_grad()
         self.critic_optimizer.zero_grad()
 
-        ppo_loss = ppo_loss_dict["actor_loss"] + ppo_loss_dict["critic_loss"]
+        ppo_loss = actor_loss + critic_loss
         ppo_loss.backward()
 
         if self.is_multi_gpu:
             self._reduce_parameters()
+
+        if self._has_non_finite_gradients():
+            logger.warning("Skipping optimizer step due to non-finite gradients.")
+            self._sanitize_actor_std()
+            self.actor_optimizer.zero_grad(set_to_none=True)
+            self.critic_optimizer.zero_grad(set_to_none=True)
+            return self._accumulate_loss_dict(loss_dict, ppo_loss_dict)
 
         # Gradient step
         nn.utils.clip_grad_norm_(self.actor.parameters(), self.config.max_grad_norm)
@@ -894,16 +979,7 @@ class PPO(BaseAlgo):
         self.actor_optimizer.step()
         self.critic_optimizer.step()
 
-        loss_dict["Value"] += ppo_loss_dict.pop("value_loss").item()
-        loss_dict["Surrogate"] += ppo_loss_dict.pop("surrogate_loss").item()
-        loss_dict["Entropy"] += ppo_loss_dict.pop("entropy_loss").item()
-        loss_dict["KL"] += ppo_loss_dict.pop("kl_mean").item()
-        for key, loss in ppo_loss_dict.items():
-            if key not in loss_dict:
-                loss_dict[key] = 0.0
-            loss_value = loss.item() if torch.is_tensor(loss) else loss
-            loss_dict[key] += loss_value
-        return loss_dict
+        return self._accumulate_loss_dict(loss_dict, ppo_loss_dict)
 
     def _compute_ppo_loss(self, minibatch: Minibatch):
         if self.use_time_gru:
@@ -1079,9 +1155,17 @@ class PPO(BaseAlgo):
                     sigma_teacher = sigma_teacher.unsqueeze(0).expand_as(sigma_batch)
                 bc_loss = bc_loss + (sigma_batch - sigma_teacher).pow(2).sum(dim=-1).mean()
 
+            # In DAgger mode, distillation objective is the BC term.
+            distill_loss = bc_loss
+
             if self.use_ppo_dagger_schedule:
-                dagger_weight = self.dagger_loss_coef * (1.0 - self.ppo_coeff)
-                actor_loss = self.ppo_coeff * actor_loss_base + dagger_weight * bc_loss
+                dagger_weight = max(0.0, self.dagger_loss_coef * (1.0 - self.ppo_coeff))
+                if self.ppo_coeff <= 0.0:
+                    actor_loss = dagger_weight * bc_loss
+                elif dagger_weight <= 0.0:
+                    actor_loss = self.ppo_coeff * actor_loss_base
+                else:
+                    actor_loss = self.ppo_coeff * actor_loss_base + dagger_weight * bc_loss
             elif self.bc_loss_coef > 0.0:
                 actor_loss = (1.0 - self.bc_loss_coef) * actor_loss_base + self.bc_loss_coef * bc_loss
         elif self.distill_enabled:
@@ -1437,9 +1521,11 @@ class PPO(BaseAlgo):
             self._train_mode()
 
     def _post_epoch_logging(self, it, loss_dict):
+        mean_noise_std_tensor = self.actor.std.detach().mean()
         extra_log_dicts = {
             "Policy": {
-                "mean_noise_std": self.actor.std.mean().item(),
+                "mean_noise_std": self._loss_to_float(mean_noise_std_tensor),
+                "mean_noise_std_is_finite": float(torch.isfinite(mean_noise_std_tensor).item()),
             },
         }
         motion_command = None

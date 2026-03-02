@@ -37,14 +37,11 @@ class TaskConfig:
     # Object directory (for climbing tasks)
     # Auto-determined from data_path / task_name if None
     object_dir: Path | None = None
-    # Override scene XML file (for climbing tasks)
+    # Optional explicit MuJoCo scene XML override (useful for robot-w-obj scenes)
     scene_xml_file: Path | None = None
-
-    object_scale_with_smpl: bool = False
-
-    # Optional human vertical offset applied during preprocessing (meters)
-    human_z_offset: float = 0.0
-
+    # Optional object-geometry name token used by contact filtering
+    # (e.g., "obj" when scene geoms are named generically instead of per-object names)
+    object_contact_name: str | None = None
     # Optional object mesh root (e.g., BEHAVE objects root)
     object_mesh_root: Path | None = None
     # Optional object mesh filename suffix (e.g., "_sq.obj" or "_f1000.ply")

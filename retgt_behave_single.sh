@@ -19,6 +19,8 @@ set -euo pipefail
 #   SAVE_DIR      (default: src/holosoma_retargeting/demo_results/g1/object_interaction/behave_single_test)
 #   ROBOT         (default: g1)
 #   PYTHON_BIN    (default: python)
+#   SCENE_XML_FILE optional explicit MuJoCo scene xml (e.g., .../g1_29dof_w_obj.xml)
+#   OBJECT_CONTACT_NAME optional object geom token for collision filtering (e.g., obj)
 #   DEBUG         (default: 1)        # 1/0
 #   VISUALIZE     (default: 1)        # 1/0
 #   SAVE_MODE     (default: 0)        # 1/0
@@ -45,6 +47,8 @@ OBJECT_ROOT="${OBJECT_ROOT:-/data/behave/objects}"
 SAVE_DIR="${SAVE_DIR:-${REPO_ROOT}/src/holosoma_retargeting/demo_results/g1/object_interaction/behave_single_test}"
 ROBOT="${ROBOT:-g1}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
+SCENE_XML_FILE="${SCENE_XML_FILE:-}"
+OBJECT_CONTACT_NAME="${OBJECT_CONTACT_NAME:-}"
 DEBUG="${DEBUG:-1}"
 VISUALIZE="${VISUALIZE:-1}"
 SAVE_MODE="${SAVE_MODE:-0}"
@@ -68,6 +72,13 @@ cmd=(
   --save-dir "${SAVE_DIR}"
   --robot "${ROBOT}"
 )
+
+if [[ -n "${SCENE_XML_FILE}" ]]; then
+  cmd+=(--task-config.scene-xml-file "${SCENE_XML_FILE}")
+fi
+if [[ -n "${OBJECT_CONTACT_NAME}" ]]; then
+  cmd+=(--task-config.object-contact-name "${OBJECT_CONTACT_NAME}")
+fi
 
 if [[ "${DEBUG}" == "1" || "${DEBUG}" == "true" || "${DEBUG}" == "True" ]]; then
   cmd+=(--retargeter.debug)

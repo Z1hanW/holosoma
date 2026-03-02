@@ -241,9 +241,42 @@ object_distill_torso_terms = {
     ),
 }
 
+object_distill_proprio_terms = {
+    "base_lin_vel": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:base_lin_vel",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "base_ang_vel": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:base_ang_vel",
+        scale=1.0,
+        noise=0.2,
+    ),
+    "dof_pos": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:dof_pos",
+        scale=1.0,
+        noise=0.01,
+    ),
+    "dof_vel": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:dof_vel",
+        scale=1.0,
+        noise=0.5,
+    ),
+    "actions": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:actions",
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
 object_distill_box_terms = {
     "obj_pos_b": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:obj_pos_b",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "obj_ori_b": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:obj_ori_b",
         scale=1.0,
         noise=0.0,
     ),
@@ -257,6 +290,11 @@ object_distill_box_terms = {
 object_distill_box_goal_terms = {
     "obj_pos_b": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:obj_pos_b",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "obj_ori_b": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:obj_ori_b",
         scale=1.0,
         noise=0.0,
     ),
@@ -277,6 +315,13 @@ g1_29dof_wbt_observation_w_object_distill_torso_box = ObservationManagerCfg(
             enable_noise=False,
             history_length=1,
             terms=object_distill_torso_terms,
+        ),
+        # Student proprioception state (keep proprio; remove tracking pose terms only).
+        "actor_obs_proprio": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_distill_proprio_terms,
         ),
         # Student object-aware state (current object pose + target pose/size).
         "actor_obs_box": ObsGroupCfg(
@@ -304,6 +349,13 @@ g1_29dof_wbt_observation_w_object_distill_torso_box_goal = ObservationManagerCfg
             enable_noise=False,
             history_length=1,
             terms=object_distill_torso_terms,
+        ),
+        # Student proprioception state (keep proprio; remove tracking pose terms only).
+        "actor_obs_proprio": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_distill_proprio_terms,
         ),
         # Student object state in robot base frame:
         # - current object pose (obj_pos_b)

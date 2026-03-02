@@ -85,8 +85,12 @@ class PerceptionManager:
         self._far_tracking_camera_sensor: Any = None
         self._far_tracking_tf_apply = None
         self._far_tracking_quat_mul = None
-        self._far_tracking_ray_cast_body_indices: torch.Tensor | None = None
+        self._far_tracking_robot_slot_indices: torch.Tensor | None = None
+        self._far_tracking_robot_body_indices: torch.Tensor | None = None
+        self._far_tracking_object_slot_indices: torch.Tensor | None = None
+        self._far_tracking_object_names: list[str] = []
         self._far_tracking_base_link_indices: torch.Tensor | None = None
+        self._registered_object_mesh_cache: dict[str, str] = {}
         self._camera_mount_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
         self._use_camera_mount_quat = False
         self._camera_frame_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
@@ -857,6 +861,20 @@ class PerceptionManager:
         if not ray_cast_bodies:
             raise RuntimeError(f"No valid far_tracking_warp ray_cast_bodies found under mesh root: {mesh_root}")
 
+        # Include all registered non-robot simulator objects (e.g., training box)
+        # so they participate in depth raycasting alongside terrain/robot meshes.
+        registered_object_meshes = self._collect_registered_sim_object_meshes()
+        for object_name, mesh_path in registered_object_meshes.items():
+            if object_name in ray_cast_bodies:
+                continue
+            ray_cast_bodies[object_name] = mesh_path
+        if registered_object_meshes:
+            (self.logger or logger).info(
+                "far_tracking_warp: added {} registered simulator object(s) to perception raycast: {}",
+                len(registered_object_meshes),
+                ", ".join(sorted(registered_object_meshes.keys())),
+            )
+
         camera_body_name = self._camera_body_name or "torso_link"
         offset_pos = tuple(float(v) for v in self._sensor_offset.detach().cpu().tolist())
         # far-tracking G1FlatRsD435iConfig defaults for d435i mount rotation.
@@ -874,7 +892,7 @@ class PerceptionManager:
             pointcloud_in_world_frame=False,
             segmentation_camera=False,
             dynamic_meshes=True,
-            randomize_placement=False,
+            randomize_placement=True,
             min_translation={"cam_front_depth": [-0.025, -0.025, -0.025]},
             max_translation={"cam_front_depth": [0.025, 0.025, 0.025]},
             min_euler_rotation_deg={"cam_front_depth": [-2.5, -3.0, -2.5]},
@@ -893,7 +911,7 @@ class PerceptionManager:
         if not body_names:
             raise RuntimeError("Cannot setup far_tracking_warp camera: body_names unavailable.")
 
-        def _resolve_body_index(name: str) -> int:
+        def _resolve_body_index(name: str) -> int | None:
             if name in body_names:
                 return int(body_names.index(name))
             resolved = resolve_fixed_link_offset(
@@ -903,12 +921,31 @@ class PerceptionManager:
                 device=self.device,
             )
             if resolved is None:
-                raise RuntimeError(f"Body '{name}' not found in robot body_names for far_tracking_warp source.")
+                return None
             parent_name, _offset_pos, _offset_quat = resolved
             return int(body_names.index(parent_name))
 
         base_link_indices = [_resolve_body_index(camera_body_name)]
-        ray_cast_body_indices = [_resolve_body_index(name) for name in ray_cast_bodies.keys()]
+        if base_link_indices[0] is None:
+            raise RuntimeError(f"Body '{camera_body_name}' not found in robot body_names for far_tracking_warp source.")
+
+        robot_slot_indices: list[int] = []
+        robot_body_indices: list[int] = []
+        object_slot_indices: list[int] = []
+        object_names: list[str] = []
+        for slot_idx, name in enumerate(ray_cast_bodies.keys()):
+            body_idx = _resolve_body_index(name)
+            if body_idx is not None:
+                robot_slot_indices.append(slot_idx)
+                robot_body_indices.append(body_idx)
+                continue
+            if name in registered_object_meshes:
+                object_slot_indices.append(slot_idx)
+                object_names.append(name)
+                continue
+            raise RuntimeError(
+                f"ray_cast body '{name}' is neither a robot body nor a registered object with mesh."
+            )
 
         self._far_tracking_camera_sensor = FarTrackingCameraSensor(
             self.num_envs,
@@ -919,25 +956,55 @@ class PerceptionManager:
         self._far_tracking_tf_apply = ft_tf_apply_xyzw
         self._far_tracking_quat_mul = ft_quat_mul_xyzw
         self._far_tracking_base_link_indices = torch.tensor(base_link_indices, dtype=torch.long, device=self.device)
-        self._far_tracking_ray_cast_body_indices = torch.tensor(
-            ray_cast_body_indices, dtype=torch.long, device=self.device
+        self._far_tracking_robot_slot_indices = torch.tensor(
+            robot_slot_indices, dtype=torch.long, device=self.device
         )
+        self._far_tracking_robot_body_indices = torch.tensor(
+            robot_body_indices, dtype=torch.long, device=self.device
+        )
+        self._far_tracking_object_slot_indices = torch.tensor(
+            object_slot_indices, dtype=torch.long, device=self.device
+        )
+        self._far_tracking_object_names = object_names
 
     def _compute_far_tracking_camera_depth(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         if self._far_tracking_camera_sensor is None:
             raise RuntimeError("far_tracking_warp camera sensor is not initialized.")
         if self._far_tracking_tf_apply is None or self._far_tracking_quat_mul is None:
             raise RuntimeError("far_tracking_warp camera helpers are not initialized.")
-        if self._far_tracking_base_link_indices is None or self._far_tracking_ray_cast_body_indices is None:
+        if (
+            self._far_tracking_base_link_indices is None
+            or self._far_tracking_robot_slot_indices is None
+            or self._far_tracking_robot_body_indices is None
+            or self._far_tracking_object_slot_indices is None
+        ):
             raise RuntimeError("far_tracking_warp camera indices are not initialized.")
 
         body_pos = self.env.simulator._rigid_body_pos
         body_quat = self.env.simulator._rigid_body_rot
 
-        ray_cast_body_poses = body_pos[:, self._far_tracking_ray_cast_body_indices]
-        ray_cast_body_quats = body_quat[:, self._far_tracking_ray_cast_body_indices]
-        self._far_tracking_camera_sensor.ray_cast_body_poses_tensor[:, :] = ray_cast_body_poses
-        self._far_tracking_camera_sensor.ray_cast_body_quats_tensor[:, :] = ray_cast_body_quats
+        # Fill robot-body-backed slots.
+        if self._far_tracking_robot_slot_indices.numel() > 0:
+            ray_cast_body_poses = body_pos[:, self._far_tracking_robot_body_indices]
+            ray_cast_body_quats = body_quat[:, self._far_tracking_robot_body_indices]
+            self._far_tracking_camera_sensor.ray_cast_body_poses_tensor[:, self._far_tracking_robot_slot_indices] = (
+                ray_cast_body_poses
+            )
+            self._far_tracking_camera_sensor.ray_cast_body_quats_tensor[:, self._far_tracking_robot_slot_indices] = (
+                ray_cast_body_quats
+            )
+
+        # Fill registered object slots from simulator actor states.
+        if self._far_tracking_object_slot_indices.numel() > 0:
+            env_ids_all = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+            object_states = self.env.simulator.get_actor_states(self._far_tracking_object_names, env_ids_all)
+            object_states = object_states.view(len(self._far_tracking_object_names), self.num_envs, -1).permute(1, 0, 2)
+            self._far_tracking_camera_sensor.ray_cast_body_poses_tensor[:, self._far_tracking_object_slot_indices] = (
+                object_states[:, :, :3]
+            )
+            self._far_tracking_camera_sensor.ray_cast_body_quats_tensor[:, self._far_tracking_object_slot_indices] = (
+                object_states[:, :, 3:7]
+            )
 
         camera_base_link_pos = body_pos[:, self._far_tracking_base_link_indices]
         camera_base_link_quat = body_quat[:, self._far_tracking_base_link_indices]
@@ -964,6 +1031,217 @@ class PerceptionManager:
         if env_ids is None:
             return depth
         return depth[env_ids]
+
+    def _collect_registered_sim_object_meshes(self) -> dict[str, str]:
+        """Resolve mesh files for all registered non-robot simulator objects."""
+        mesh_map: dict[str, str] = {}
+        simulator = getattr(self.env, "simulator", None)
+        object_registry = getattr(simulator, "object_registry", None)
+        if object_registry is None:
+            return mesh_map
+
+        for name, obj_type, _position_in_type, _indices, _initial_poses in getattr(object_registry, "objects", []):
+            if obj_type == "robot":
+                continue
+            mesh_path = self._resolve_registered_object_mesh_path(name)
+            if mesh_path:
+                mesh_map[name] = mesh_path
+            else:
+                (self.logger or logger).warning(
+                    "Skipping registered object '{}' in perception raycast: unable to resolve mesh path.",
+                    name,
+                )
+        return mesh_map
+
+    def _resolve_registered_object_mesh_path(self, object_name: str) -> str | None:
+        """Resolve (and cache) a mesh file path for a registered simulator object."""
+        if object_name in self._registered_object_mesh_cache:
+            return self._registered_object_mesh_cache[object_name]
+
+        simulator = getattr(self.env, "simulator", None)
+        scene = getattr(simulator, "scene", None)
+        rigid_objects = getattr(scene, "rigid_objects", None)
+        if rigid_objects is None:
+            return None
+
+        rigid_object = rigid_objects.get(object_name, None)
+        if rigid_object is None:
+            # Best-effort fallback for scene collection objects registered by basename.
+            scene_collection = rigid_objects.get("usd_scene_objects", None)
+            scene_cfg = getattr(scene_collection, "cfg", None) if scene_collection is not None else None
+            scene_rigid_cfgs = getattr(scene_cfg, "rigid_objects", None)
+            if isinstance(scene_rigid_cfgs, dict):
+                for prim_path, cfg in scene_rigid_cfgs.items():
+                    if str(prim_path).split("/")[-1] == object_name:
+                        rigid_object = cfg
+                        break
+        if rigid_object is None:
+            return None
+
+        cfg = getattr(rigid_object, "cfg", None)
+        spawn = getattr(cfg, "spawn", None) if cfg is not None else getattr(rigid_object, "spawn", None)
+        if spawn is None:
+            return None
+
+        candidate_path = None
+        for attr_name in ("asset_path", "urdf_path", "usd_path"):
+            attr_val = getattr(spawn, attr_name, None)
+            if attr_val:
+                candidate_path = str(attr_val)
+                break
+        if candidate_path is None:
+            return None
+
+        resolved_path = resolve_data_file_path(candidate_path)
+        ext = os.path.splitext(resolved_path)[1].lower()
+
+        mesh_path: str | None = None
+        if ext == ".urdf":
+            mesh_path = self._export_combined_urdf_visual_mesh(resolved_path, object_name)
+        elif ext in {".obj", ".stl", ".ply"}:
+            mesh_path = resolved_path if os.path.exists(resolved_path) else None
+        elif ext in {".usd", ".usda", ".usdc"}:
+            mesh_path = self._export_combined_mesh_from_scene_asset(resolved_path, object_name)
+
+        if mesh_path and os.path.exists(mesh_path):
+            self._registered_object_mesh_cache[object_name] = mesh_path
+            return mesh_path
+        return None
+
+    def _export_combined_urdf_visual_mesh(self, urdf_path: str, object_name: str) -> str | None:
+        """Build a single OBJ mesh from URDF visual geometry for dynamic object raycasting."""
+        try:
+            import trimesh  # noqa: PLC0415
+        except Exception:
+            return None
+
+        urdf_file = Path(urdf_path).expanduser()
+        if not urdf_file.exists():
+            return None
+
+        cache_dir = Path("/tmp/holosoma_perception_mesh_cache")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_mesh_path = cache_dir / f"{object_name}_{urdf_file.stem}_combined.obj"
+        if cache_mesh_path.exists():
+            return str(cache_mesh_path)
+
+        try:
+            root = ET.parse(str(urdf_file)).getroot()
+        except Exception:
+            return None
+
+        urdf_dir = str(urdf_file.parent)
+        meshes: list[Any] = []
+
+        for link in root.findall("link"):
+            for visual in link.findall("visual"):
+                geometry = visual.find("geometry")
+                if geometry is None:
+                    continue
+
+                mesh = None
+                mesh_tag = geometry.find("mesh")
+                if mesh_tag is not None:
+                    filename = mesh_tag.get("filename")
+                    if not filename:
+                        continue
+                    mesh_file = self._resolve_urdf_mesh_path(urdf_dir, urdf_dir, filename)
+                    if not os.path.exists(mesh_file):
+                        continue
+                    mesh = trimesh.load(mesh_file, process=False)
+                    if isinstance(mesh, trimesh.Scene):
+                        mesh = mesh.dump(concatenate=True)
+                    if not isinstance(mesh, trimesh.Trimesh):
+                        continue
+                    scale = self._parse_urdf_vec3(mesh_tag.get("scale"), default=None)
+                    if scale is not None:
+                        mesh.apply_scale(scale.detach().cpu().numpy())
+                else:
+                    box_tag = geometry.find("box")
+                    cylinder_tag = geometry.find("cylinder")
+                    sphere_tag = geometry.find("sphere")
+                    if box_tag is not None:
+                        size = self._parse_urdf_vec3(box_tag.get("size"), default=None)
+                        if size is None:
+                            continue
+                        mesh = trimesh.creation.box(extents=size.detach().cpu().numpy())
+                    elif cylinder_tag is not None:
+                        radius = float(cylinder_tag.get("radius", "0.0"))
+                        length = float(cylinder_tag.get("length", "0.0"))
+                        if radius <= 0.0 or length <= 0.0:
+                            continue
+                        mesh = trimesh.creation.cylinder(radius=radius, height=length)
+                    elif sphere_tag is not None:
+                        radius = float(sphere_tag.get("radius", "0.0"))
+                        if radius <= 0.0:
+                            continue
+                        mesh = trimesh.creation.icosphere(radius=radius)
+                    else:
+                        continue
+
+                if not isinstance(mesh, trimesh.Trimesh):
+                    continue
+
+                origin = visual.find("origin")
+                visual_pos = self._parse_urdf_vec3(
+                    origin.get("xyz") if origin is not None else None, default=(0.0, 0.0, 0.0)
+                )
+                visual_rpy = self._parse_urdf_vec3(
+                    origin.get("rpy") if origin is not None else None, default=(0.0, 0.0, 0.0)
+                )
+                visual_quat = quat_from_euler_xyz(visual_rpy[0], visual_rpy[1], visual_rpy[2])
+
+                quat_batch = visual_quat.unsqueeze(0).expand(mesh.vertices.shape[0], -1)
+                verts = torch.as_tensor(mesh.vertices, dtype=torch.float32)
+                verts = quat_apply(quat_batch, verts, w_last=True) + visual_pos.unsqueeze(0)
+                mesh.vertices = verts.detach().cpu().numpy()
+                meshes.append(mesh)
+
+        if not meshes:
+            return None
+
+        try:
+            combined = trimesh.util.concatenate(meshes)
+            combined.export(str(cache_mesh_path))
+        except Exception:
+            return None
+        return str(cache_mesh_path)
+
+    def _export_combined_mesh_from_scene_asset(self, asset_path: str, object_name: str) -> str | None:
+        """Best-effort mesh export for USD scene assets."""
+        try:
+            import trimesh  # noqa: PLC0415
+        except Exception:
+            return None
+
+        source_path = Path(asset_path).expanduser()
+        if not source_path.exists():
+            return None
+
+        cache_dir = Path("/tmp/holosoma_perception_mesh_cache")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_mesh_path = cache_dir / f"{object_name}_{source_path.stem}_combined.obj"
+        if cache_mesh_path.exists():
+            return str(cache_mesh_path)
+
+        try:
+            mesh = trimesh.load(str(source_path), process=False)
+        except Exception:
+            return None
+
+        if isinstance(mesh, trimesh.Scene):
+            try:
+                mesh = mesh.dump(concatenate=True)
+            except Exception:
+                return None
+        if not hasattr(mesh, "vertices") or not hasattr(mesh, "faces"):
+            return None
+
+        try:
+            mesh.export(str(cache_mesh_path))
+        except Exception:
+            return None
+        return str(cache_mesh_path)
 
     def _build_grid(self) -> tuple[torch.Tensor, torch.Tensor]:
         half_extent_x = (self._heightmap_grid_x - 1) * self._heightmap_interval_x / 2.0

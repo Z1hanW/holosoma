@@ -362,6 +362,7 @@ g1_29dof_wbt_fast_sac = ExperimentConfig(
 g1_29dof_wbt_w_object = replace(
     g1_29dof_wbt,
     command=command.g1_29dof_wbt_command_w_object,
+    curriculum=curriculum.g1_29dof_wbt_curriculum_w_object,
     robot=replace(
         robot.g1_29dof_w_object,
         asset=replace(
@@ -393,7 +394,7 @@ g1_29dof_wbt_w_object_generalist = replace(
     command=command.g1_29dof_wbt_command_w_object_generalist,
 )
 
-_w_object_distill_torso_box_actor_inputs = ["actor_obs_torso", "actor_obs_box"]
+_w_object_distill_torso_box_actor_inputs = ["actor_obs_torso", "actor_obs_proprio", "actor_obs_box"]
 _w_object_distill_torso_box_critic_inputs = ["critic_obs"]
 
 _w_object_distill_torso_box_module_dict = PPOModuleDictConfig(

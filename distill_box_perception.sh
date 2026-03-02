@@ -4,7 +4,8 @@ set -euo pipefail
 # Distill object-carry generalist -> sim2real student with depth perception access.
 #
 # Student policy observation (actor):
-# - actor_obs_torso (robot proprio torso terms)
+# - actor_obs_torso
+# - actor_obs_proprio (base_ang_vel, dof_pos, dof_vel, actions)
 # - perception_obs (camera depth)
 # - No actor box state is used by student actor.
 #
@@ -33,9 +34,11 @@ EXP=${EXP:-g1-29dof-wbt-w-object-distill-torso-box-goal}
 RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_perception}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_perception_access_to_depth}
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
-DISTILL_TWO_STAGE=${DISTILL_TWO_STAGE:-0}
-TAKE_TEACHER_ACTIONS=${TAKE_TEACHER_ACTIONS:-False}
 TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.5}
+BC_LOSS_COEF=${BC_LOSS_COEF:-0.5}
+PPO_START_EPOCH=${PPO_START_EPOCH:-0}
+DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-10000}
+DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-0.5}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
 
@@ -48,26 +51,27 @@ CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-3.0}
 echo "[INFO] distill mode: depth-access-no-box-state"
 echo "[INFO] teacher checkpoint: ${TEACHER_CHECKPOINT}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
-echo "[INFO] student actor uses actor_obs_torso + perception_obs only"
-echo "[INFO] distill_two_stage=${DISTILL_TWO_STAGE}"
-echo "[INFO] take_teacher_actions=${TAKE_TEACHER_ACTIONS}"
+echo "[INFO] student actor uses actor_obs_torso + actor_obs_proprio + perception_obs (no actor box state)"
 echo "[INFO] teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
+echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH} dagger_loss_coef=${DAGGER_LOSS_COEF}"
 
 exec env \
   EXP="${EXP}" \
   RUN_NAME="${RUN_NAME}" \
   TRAINING_NAME="${TRAINING_NAME}" \
   TEACHER_OBS_KEYS="${TEACHER_OBS_KEYS}" \
-  DISTILL_TWO_STAGE="${DISTILL_TWO_STAGE}" \
-  TAKE_TEACHER_ACTIONS="${TAKE_TEACHER_ACTIONS}" \
   TEACHER_ACTION_MIX_RATIO="${TEACHER_ACTION_MIX_RATIO}" \
+  BC_LOSS_COEF="${BC_LOSS_COEF}" \
+  PPO_START_EPOCH="${PPO_START_EPOCH}" \
+  DAGGER_END_EPOCH="${DAGGER_END_EPOCH}" \
+  DAGGER_LOSS_COEF="${DAGGER_LOSS_COEF}" \
   PAIR_TERRAIN_WITH_MOTION="${PAIR_TERRAIN_WITH_MOTION}" \
   bash "${SCRIPT_DIR}/distill_torso_box.sh" "${TEACHER_CHECKPOINT}" \
     "perception:${PERCEPTION_PRESET}" \
-    --algo.config.module_dict.actor.input_dim "['actor_obs_torso']" \
-    --perception.camera_width="${IMAGE_WIDTH}" \
-    --perception.camera_height="${IMAGE_HEIGHT}" \
-    --perception.camera_near="${CAMERA_NEAR}" \
-    --perception.camera_far="${CAMERA_FAR}" \
-    --perception.max_distance="${CAMERA_MAX_DISTANCE}" \
+    --algo.config.module-dict.actor.input-dim "['actor_obs_torso','actor_obs_proprio']" \
+    --perception.camera-width="${IMAGE_WIDTH}" \
+    --perception.camera-height="${IMAGE_HEIGHT}" \
+    --perception.camera-near="${CAMERA_NEAR}" \
+    --perception.camera-far="${CAMERA_FAR}" \
+    --perception.max-distance="${CAMERA_MAX_DISTANCE}" \
     "$@"

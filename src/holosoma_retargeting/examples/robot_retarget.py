@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -73,9 +74,13 @@ _OBJECT_SCALE_AUGMENTED = np.array([1.0, 1.0, 1.2])
 _OBJECT_SCALE_NORMAL = np.array([1.0, 1.0, 1.0])
 _AUGMENTATION_TRANSLATION = np.array([0.2, 0.0, 0.0])
 
+
 # Type aliases
 TaskType = Literal["robot_only", "object_interaction", "climbing"]
 # DataFormat is imported from config_types.data_type
+
+
+# ----------------------------- Helper Functions -----------------------------
 
 
 def _ensure_mujoco_mesh(
@@ -174,7 +179,9 @@ def _write_object_urdf(
   </link>
 </robot>
 """
-    urdf_path.write_text(urdf_text)
+    tmp_path = urdf_path.with_suffix(f"{urdf_path.suffix}.tmp.{os.getpid()}")
+    tmp_path.write_text(urdf_text)
+    os.replace(tmp_path, urdf_path)
 
 
 def _write_robot_object_xml(
@@ -183,12 +190,14 @@ def _write_robot_object_xml(
     obj_name: str,
     mesh_path: Path,
     mesh_scale: float | None = None,
+    body_name: str | None = None,
     *,
     overwrite: bool = False,
 ) -> None:
     """Create a MuJoCo XML that adds a free object body to the robot model."""
     if mesh_scale is None:
         mesh_scale = 1.0
+    object_body_name = body_name or obj_name
     scale_str = f"{mesh_scale} {mesh_scale} {mesh_scale}"
     if robot_xml_out.exists() and not overwrite:
         return
@@ -200,7 +209,7 @@ def _write_robot_object_xml(
     if asset is None:
         asset = ET.SubElement(root, "asset")
 
-    mesh_name = f"{obj_name}_mesh"
+    mesh_name = f"{object_body_name}_mesh"
     if not any(m.get("name") == mesh_name for m in asset.findall("mesh")):
         ET.SubElement(
             asset,
@@ -216,8 +225,8 @@ def _write_robot_object_xml(
     if worldbody is None:
         worldbody = ET.SubElement(root, "worldbody")
 
-    if not any(b.get("name") == obj_name for b in worldbody.findall("body")):
-        body = ET.SubElement(worldbody, "body", {"name": obj_name})
+    if not any(b.get("name") == object_body_name for b in worldbody.findall("body")):
+        body = ET.SubElement(worldbody, "body", {"name": object_body_name})
         ET.SubElement(body, "freejoint")
         ET.SubElement(body, "inertial", {"pos": "0 0 0", "mass": "0.1", "diaginertia": "0.002 0.002 0.002"})
         ET.SubElement(
@@ -236,8 +245,11 @@ def _write_robot_object_xml(
         )
 
     robot_xml_out.parent.mkdir(parents=True, exist_ok=True)
-    tree.write(robot_xml_out)
-# DataFormat is imported from config_types.data_type
+    tmp_path = robot_xml_out.with_suffix(f"{robot_xml_out.suffix}.tmp.{os.getpid()}")
+    tree.write(tmp_path)
+    os.replace(tmp_path, robot_xml_out)
+
+
 def create_task_constants(
     robot_config: RobotConfig,
     motion_data_config: MotionDataConfig,
@@ -270,6 +282,7 @@ def create_task_constants(
     if task_type == "robot_only":
         obj_name = task_config.object_name or "ground"
         task_constants.OBJECT_NAME = obj_name
+        task_constants.OBJECT_CONTACT_NAME = task_config.object_contact_name or obj_name
         task_constants.OBJECT_URDF_FILE = None
         task_constants.OBJECT_MESH_FILE = None
         task_constants.OBJECT_MESH_ROOT = str(task_config.object_mesh_root) if task_config.object_mesh_root else ""
@@ -279,9 +292,16 @@ def create_task_constants(
     elif task_type == "object_interaction":
         obj_name = task_config.object_name or "largebox"
         task_constants.OBJECT_NAME = obj_name
+        if task_config.object_contact_name is not None:
+            task_constants.OBJECT_CONTACT_NAME = task_config.object_contact_name
+        elif task_config.scene_xml_file is not None and "_w_obj" in task_config.scene_xml_file.name:
+            task_constants.OBJECT_CONTACT_NAME = "obj"
+        else:
+            task_constants.OBJECT_CONTACT_NAME = obj_name
         task_constants.OBJECT_URDF_FILE = f"models/{obj_name}/{obj_name}.urdf"
         task_constants.OBJECT_MESH_FILE = f"models/{obj_name}/{obj_name}.obj"
         task_constants.OBJECT_URDF_TEMPLATE = f"models/templates/{obj_name}.urdf.jinja"
+        task_constants.SCENE_XML_FILE = str(task_config.scene_xml_file) if task_config.scene_xml_file else ""
         task_constants.OBJECT_MESH_ROOT = str(task_config.object_mesh_root) if task_config.object_mesh_root else ""
         task_constants.OBJECT_MESH_SUFFIX = (
             str(task_config.object_mesh_suffix) if task_config.object_mesh_suffix else ""
@@ -289,11 +309,12 @@ def create_task_constants(
     elif task_type == "climbing":
         obj_name = task_config.object_name or "multi_boxes"
         task_constants.OBJECT_NAME = obj_name
+        task_constants.OBJECT_CONTACT_NAME = task_config.object_contact_name or obj_name
         object_dir = task_config.object_dir
         task_constants.OBJECT_DIR = str(object_dir) if object_dir else ""
         task_constants.OBJECT_URDF_FILE = str(object_dir / f"{obj_name}.urdf") if object_dir else f"{obj_name}.urdf"
         task_constants.OBJECT_MESH_FILE = str(object_dir / f"{obj_name}.obj") if object_dir else f"{obj_name}.obj"
-        task_constants.SCENE_XML_FILE = ""  # Will be set later
+        task_constants.SCENE_XML_FILE = str(task_config.scene_xml_file) if task_config.scene_xml_file else ""
         task_constants.OBJECT_MESH_ROOT = str(task_config.object_mesh_root) if task_config.object_mesh_root else ""
         task_constants.OBJECT_MESH_SUFFIX = (
             str(task_config.object_mesh_suffix) if task_config.object_mesh_suffix else ""
@@ -321,7 +342,7 @@ def validate_config(cfg: RetargetingConfig) -> None:
         )
 
     # Task-specific format requirements
-    if cfg.task_type == "climbing" and cfg.data_format not in (None, "mocap", "smplx"):
+    if cfg.task_type == "climbing" and cfg.data_format not in (None, "mocap"):
         raise ValueError("Climbing task requires 'mocap' data format")
     if cfg.task_type == "object_interaction" and cfg.data_format not in (None, "smplh", "behave_zup"):
         raise ValueError("Object interaction requires 'smplh' or 'behave_zup' data format")
@@ -408,7 +429,7 @@ def load_motion_data(
 
             human_data = np.load(str(npz_file))
             human_joints = human_data["global_joint_positions"]
-            human_height = motion_data_config.default_human_height or 1.78
+            human_height = human_data["height"]
             smpl_scale = constants.ROBOT_HEIGHT / human_height
         else:
             # For other custom data format, if it uses consistent .npz file like SMPLX,
@@ -437,7 +458,6 @@ def load_motion_data(
                     f"Cannot parse BEHAVE object name from task_name='{task_name}'. "
                     "Expected format like 'Date03_Sub03_boxlarge'."
                 )
-
             obj_name = parts[2].strip().lower()
             if not obj_name:
                 raise ValueError(f"Parsed empty BEHAVE object name from task_name='{task_name}'")
@@ -464,7 +484,7 @@ def load_motion_data(
             constants.OBJECT_MESH_FILE = str(mujoco_mesh_path)
 
             urdf_path = generated_root / f"{obj_name}.urdf"
-            _write_object_urdf(obj_name, mujoco_mesh_path, urdf_path, mesh_scale=smpl_scale, overwrite=True)
+            _write_object_urdf(obj_name, mujoco_mesh_path, urdf_path, mesh_scale=smpl_scale, overwrite=False)
             constants.OBJECT_URDF_FILE = str(urdf_path)
             constants.OBJECT_URDF_TEMPLATE = ""
 
@@ -476,19 +496,46 @@ def load_motion_data(
                     constants.ROBOT_URDF_FILE = str(robot_urdf_path)
 
             robot_xml_base = robot_urdf_path.with_suffix(".xml")
-            robot_xml_out = robot_urdf_path.parent / f"{robot_urdf_path.stem}_w_{obj_name}.xml"
-            if not robot_xml_base.exists():
-                raise FileNotFoundError(f"Missing robot xml base for BEHAVE object retargeting: {robot_xml_base}")
+            object_contact_name = str(getattr(constants, "OBJECT_CONTACT_NAME", "") or obj_name)
+            scene_xml_override = str(getattr(constants, "SCENE_XML_FILE", "") or "").strip()
+            if scene_xml_override:
+                scene_xml_path = Path(scene_xml_override)
+                if not scene_xml_path.is_absolute():
+                    candidate_cwd = Path.cwd() / scene_xml_path
+                    candidate_retarget = retarget_root / scene_xml_path
+                    scene_xml_path = candidate_cwd if candidate_cwd.exists() else candidate_retarget
 
-            _write_robot_object_xml(
-                robot_xml_base,
-                robot_xml_out,
-                obj_name,
-                mujoco_mesh_path,
-                mesh_scale=smpl_scale,
-                overwrite=True,
-            )
-            constants.SCENE_XML_FILE = str(robot_xml_out)
+                if not scene_xml_path.exists():
+                    if not robot_xml_base.exists():
+                        raise FileNotFoundError(f"Missing robot xml base for BEHAVE object retargeting: {robot_xml_base}")
+                    _write_robot_object_xml(
+                        robot_xml_base,
+                        scene_xml_path,
+                        obj_name,
+                        mujoco_mesh_path,
+                        mesh_scale=smpl_scale,
+                        body_name=object_contact_name,
+                        overwrite=True,
+                    )
+
+                constants.SCENE_XML_FILE = str(scene_xml_path)
+            else:
+                safe_task = re.sub(r"[^0-9A-Za-z_\\-]+", "_", task_name).strip("_")
+                if not safe_task:
+                    safe_task = f"task_{os.getpid()}"
+                robot_xml_out = robot_urdf_path.parent / f"{robot_urdf_path.stem}_w_{obj_name}_{safe_task}.xml"
+                if not robot_xml_base.exists():
+                    raise FileNotFoundError(f"Missing robot xml base for BEHAVE object retargeting: {robot_xml_base}")
+                _write_robot_object_xml(
+                    robot_xml_base,
+                    robot_xml_out,
+                    obj_name,
+                    mujoco_mesh_path,
+                    mesh_scale=smpl_scale,
+                    body_name=obj_name,
+                    overwrite=True,
+                )
+                constants.SCENE_XML_FILE = str(robot_xml_out)
         else:
             pt_path = data_path / f"{task_name}.pt"
             if not pt_path.exists():
@@ -499,36 +546,18 @@ def load_motion_data(
 
     elif task_type == "climbing":
         task_dir = data_path / task_name
+        npy_files = list(task_dir.glob("*.npy"))
+        if not npy_files:
+            raise FileNotFoundError(f"No .npy file found in {task_dir}")
+
+        npy_file = npy_files[0]
+        # MOCAP-specific downsample factor
         downsample = 4
-        if data_format == "mocap":
-            npy_files = list(task_dir.glob("*.npy"))
-            if not npy_files:
-                raise FileNotFoundError(f"No .npy file found in {task_dir}")
-
-            npy_file = npy_files[0]
-            human_joints = np.load(str(npy_file))[::downsample]
-            default_human_height = motion_data_config.default_human_height or 1.78
-            smpl_scale = constants.ROBOT_HEIGHT / default_human_height
-        elif data_format == "smplx":
-            npz_file = data_path / f"{task_name}.npz"
-            if not npz_file.exists():
-                npz_candidates = list((data_path / task_name).glob("*.npz"))
-                if not npz_candidates:
-                    raise FileNotFoundError(f"No .npz file found for {task_name} in {data_path}")
-                npz_file = npz_candidates[0]
-
-            human_data = np.load(str(npz_file))
-            human_joints = human_data["global_joint_positions"][::downsample]
-            # Ignore CRISP-provided height; always use default human height.
-            human_height = motion_data_config.default_human_height or 1.78
-            smpl_scale = constants.ROBOT_HEIGHT / human_height
-        else:
-            raise ValueError("Climbing task requires 'mocap' or 'smplx' data format")
-
+        human_joints = np.load(str(npy_file))[::downsample]
         num_frames = human_joints.shape[0]
         object_poses = np.tile(np.array([[1, 0, 0, 0, 0, 0, 0]]), (num_frames, 1))
-    else:
-        raise ValueError(f"Unknown task type: {task_type}")
+        default_human_height = motion_data_config.default_human_height or 1.78
+        smpl_scale = constants.ROBOT_HEIGHT / default_human_height
 
     logger.debug(
         "Loaded %d frames, scale factor: %.4f",
@@ -575,9 +604,13 @@ def setup_object_data(
         if constants.OBJECT_MESH_FILE is None:
             raise ValueError("OBJECT_MESH_FILE not set for object_interaction task")
 
-        object_local_pts, object_local_pts_demo = load_object_data(
+        _, object_local_pts_scaled = load_object_data(
             constants.OBJECT_MESH_FILE, smpl_scale=smpl_scale, sample_count=100
         )
+        # Keep object geometry consistently scaled in optimization and demo space.
+        # Using unscaled points here causes a mismatch against scaled human/object poses.
+        object_local_pts = np.array(object_local_pts_scaled, copy=True)
+        object_local_pts_demo = np.array(object_local_pts_scaled, copy=True)
         object_mesh_scale = np.array([smpl_scale, smpl_scale, smpl_scale], dtype=float)
         return object_local_pts, object_local_pts_demo, constants.OBJECT_URDF_FILE, object_mesh_scale
 
@@ -588,26 +621,7 @@ def setup_object_data(
         # Setup climbing-specific object
         box_asset_xml = object_dir / "box_assets.xml"
         scene_xml_name = Path(constants.ROBOT_URDF_FILE).name.replace(".urdf", f"_w_{constants.OBJECT_NAME}.xml")
-        scene_xml_file = Path(task_config.scene_xml_file) if task_config.scene_xml_file else (object_dir / scene_xml_name)
-        # Enforce that scene XML and object URDF come from the generated object_dir.
-        object_dir_resolved = object_dir.resolve()
-        scene_xml_parent = scene_xml_file.parent.resolve()
-        if scene_xml_parent != object_dir_resolved:
-            raise RuntimeError(
-                "scene_xml_file must live inside object_dir for retargeting. "
-                f"scene_xml_file={scene_xml_file} (parent={scene_xml_parent}), "
-                f"object_dir={object_dir_resolved}"
-            )
-        if constants.OBJECT_URDF_FILE is None:
-            raise RuntimeError("OBJECT_URDF_FILE is not set for climbing task.")
-        object_urdf_path = Path(constants.OBJECT_URDF_FILE)
-        object_urdf_parent = object_urdf_path.parent.resolve()
-        if object_urdf_parent != object_dir_resolved:
-            raise RuntimeError(
-                "OBJECT_URDF_FILE must live inside object_dir for retargeting. "
-                f"OBJECT_URDF_FILE={object_urdf_path} (parent={object_urdf_parent}), "
-                f"object_dir={object_dir_resolved}"
-            )
+        scene_xml_file = object_dir / scene_xml_name
         # Set SCENE_XML_FILE in constants BEFORE creating retargeter (needed for temp_retargeter)
         constants.SCENE_XML_FILE = str(scene_xml_file)
 
@@ -640,18 +654,7 @@ def setup_object_data(
         scale_factors = tuple(float(value) for value in (object_scale * smpl_scale))
         object_mesh_scale = np.array(scale_factors, dtype=float)
         object_urdf_file = create_scaled_multi_boxes_urdf(constants.OBJECT_URDF_FILE, scale_factors)
-        scene_xml_dir = Path(scene_xml_file).parent
-        box_asset_xml_output = None
-        if task_config.scene_xml_file is not None:
-            sx, sy, sz = scale_factors
-            box_asset_xml_output = str(
-                scene_xml_dir / f"{box_asset_xml.stem}_scaled_{sx:.2f}_{sy:.2f}_{sz:.2f}.xml"
-            )
-        object_asset_xml_path = create_scaled_multi_boxes_xml(
-            str(box_asset_xml),
-            scale_factors,
-            output_path=box_asset_xml_output,
-        )
+        object_asset_xml_path = create_scaled_multi_boxes_xml(str(box_asset_xml), scale_factors)
         new_scene_xml_path = create_new_scene_xml_file(str(scene_xml_file), scale_factors, object_asset_xml_path)
         constants.SCENE_XML_FILE = new_scene_xml_path
 
@@ -707,6 +710,7 @@ def _compute_q_init_base(
             human_joints[0, 0, :], object_poses[0], np.array([0.0, 0.0, 0.0])
         )
         spine_joint_idx = retargeter.demo_joints.index("Spine1")
+        # MuJoCo order: pos first, then quat
         q_init_base = np.concatenate(
             [
                 human_joints[0, spine_joint_idx],
@@ -760,7 +764,6 @@ def build_retargeter_kwargs_from_config(
         "visualize": retargeter_config.visualize,
         "debug": retargeter_config.debug,
         "w_nominal_tracking_init": retargeter_config.w_nominal_tracking_init,
-        # "foot_tracking_weight": retargeter_config.foot_tracking_weight,
     }
     if task_type == "climbing":
         kwargs["nominal_tracking_tau"] = retargeter_config.nominal_tracking_tau
@@ -923,15 +926,6 @@ def main(cfg: RetargetingConfig) -> None:
         task_config=cfg.task_config,
         task_type=task_type,
     )
-    if cfg.retargeter.debug:
-        print("[debug] task:", task_type, "format:", data_format, "task_name:", task_name)
-        print("[debug] data_path:", data_path)
-        print("[debug] object_dir:", cfg.task_config.object_dir)
-        print("[debug] scene_xml_file arg:", cfg.task_config.scene_xml_file)
-        print("[debug] robot_urdf_file:", cfg.robot_config.robot_urdf_file)
-        print("[debug] constants.ROBOT_URDF_FILE:", constants.ROBOT_URDF_FILE)
-        print("[debug] constants.OBJECT_URDF_FILE:", constants.OBJECT_URDF_FILE)
-        print("[debug] constants.OBJECT_MESH_FILE:", constants.OBJECT_MESH_FILE)
 
     # Load motion data
     human_joints, object_poses, smpl_scale = load_motion_data(
@@ -951,13 +945,6 @@ def main(cfg: RetargetingConfig) -> None:
         cfg.augmentation,
         object_scale_augmented=_OBJECT_SCALE_AUGMENTED,
     )
-    if cfg.retargeter.debug:
-        print("[debug] resolved object_urdf_path:", object_urdf_path)
-        print("[debug] constants.SCENE_XML_FILE:", getattr(constants, "SCENE_XML_FILE", None))
-        if object_local_pts is not None:
-            print("[debug] object_local_pts:", object_local_pts.shape)
-        if object_local_pts_demo is not None:
-            print("[debug] object_local_pts_demo:", object_local_pts_demo.shape)
 
     # Create retargeter
     retargeter_kwargs = build_retargeter_kwargs_from_config(cfg.retargeter, constants, object_urdf_path, task_type)
@@ -968,13 +955,7 @@ def main(cfg: RetargetingConfig) -> None:
 
     # Preprocess motion data
     if task_type == "robot_only":
-        human_joints = preprocess_motion_data(
-            human_joints,
-            retargeter,
-            toe_names,
-            smpl_scale,
-            human_z_offset=cfg.task_config.human_z_offset,
-        )
+        human_joints = preprocess_motion_data(human_joints, retargeter, toe_names, smpl_scale)
     elif task_type in {"object_interaction", "climbing"}:
         human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
             human_joints,
@@ -982,19 +963,7 @@ def main(cfg: RetargetingConfig) -> None:
             toe_names,
             scale=smpl_scale,
             object_poses=object_poses,
-            human_z_offset=cfg.task_config.human_z_offset,
         )
-    if cfg.retargeter.debug:
-        root_name_candidates = ("Pelvis", "Spine1")
-        root_idx = 0
-        for name in root_name_candidates:
-            if name in constants.DEMO_JOINTS:
-                root_idx = constants.DEMO_JOINTS.index(name)
-                break
-        hj_min = human_joints.reshape(-1, 3).min(axis=0)
-        hj_max = human_joints.reshape(-1, 3).max(axis=0)
-        print(f"[debug] human_joints root={constants.DEMO_JOINTS[root_idx]} pos0={human_joints[0, root_idx]}")
-        print(f"[debug] human_joints bounds min={hj_min} max={hj_max}")
 
     # Initialize robot pose
     q_init, q_nominal, object_poses_augmented, human_joints, object_poses = initialize_robot_pose(
@@ -1039,7 +1008,7 @@ def main(cfg: RetargetingConfig) -> None:
     )
     logger.info("Retargeting complete. Results saved to: %s", dest_res_path)
 
-    if cfg.retargeter.debug and not cfg.save_mode:
+    if cfg.retargeter.debug:
         input("Press Enter to exit ...")
 
 

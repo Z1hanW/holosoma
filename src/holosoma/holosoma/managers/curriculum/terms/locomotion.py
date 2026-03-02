@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from typing import Any
 
@@ -100,6 +101,225 @@ class AverageEpisodeLengthTracker(CurriculumTermBase):
         if avg is not None:
             self.average_episode_length = torch.as_tensor(float(avg), device=self.env.device, dtype=torch.float)
         self._suppress_next_update = bool(state.get("suppress_next_update", False))
+
+
+class WObjectDifficultyCurriculum(CurriculumTermBase):
+    """Single-knob curriculum for w-object training.
+
+    A global difficulty scalar ``lambda_value`` in [0, 1] controls:
+    - Assistive base support scale (decreases as lambda increases)
+    - Imitation vs. generalization task-mix probability
+    - Reset randomization strength for generalization episodes
+    """
+
+    def __init__(self, cfg: Any, env: Any):
+        super().__init__(cfg, env)
+        params = cfg.params or {}
+
+        self.enabled = bool(params.get("enabled", True))
+        self.lambda_value = float(params.get("initial_lambda", 0.0))
+        self.lambda_step_up = float(params.get("lambda_step_up", 0.01))
+        self.lambda_step_down = float(params.get("lambda_step_down", 0.01))
+
+        self.early_termination_threshold = float(params.get("early_termination_threshold", 0.30))
+        self.similarity_metric_key = str(params.get("similarity_metric_key", "motion/error_body_pos"))
+        self.similarity_sigma = float(params.get("similarity_sigma", 0.50))
+        self.similarity_threshold = float(params.get("similarity_threshold", 0.60))
+
+        self.imitation_prob_start = float(params.get("imitation_prob_start", 1.0))
+        self.imitation_prob_target = float(params.get("imitation_prob_target", 0.5))
+
+        self.assist_beta_max = float(params.get("assist_beta_max", 1.0))
+        self.assist_kp_pos = float(params.get("assist_kp_pos", 4.0))
+        self.assist_kd_lin_vel = float(params.get("assist_kd_lin_vel", 2.0))
+        self.assist_kd_ang_vel = float(params.get("assist_kd_ang_vel", 1.5))
+        self.assist_max_delta_lin = float(params.get("assist_max_delta_lin", 0.20))
+        self.assist_max_delta_ang = float(params.get("assist_max_delta_ang", 0.20))
+
+        self.generalization_noise_scale_min = float(params.get("generalization_noise_scale_min", 1.0))
+        self.generalization_noise_scale_max = float(params.get("generalization_noise_scale_max", 2.0))
+        self.generalization_start_zero_prob_scale_min = float(
+            params.get("generalization_start_zero_prob_scale_min", 1.0)
+        )
+        self.generalization_start_zero_prob_scale_max = float(
+            params.get("generalization_start_zero_prob_scale_max", 0.25)
+        )
+
+        self._last_early_termination_rate = 1.0
+        self._last_similarity = 0.0
+
+    def setup(self) -> None:
+        self.lambda_value = float(np.clip(self.lambda_value, 0.0, 1.0))
+        self._publish_state()
+
+    def reset(self, env_ids) -> None:
+        if not self.enabled:
+            self._publish_state()
+            return
+        if env_ids is None:
+            self._publish_state()
+            return
+
+        if not torch.is_tensor(env_ids):
+            env_ids_tensor = torch.as_tensor(env_ids, device=self.env.device, dtype=torch.long)
+        else:
+            env_ids_tensor = env_ids.to(device=self.env.device, dtype=torch.long)
+        if env_ids_tensor.numel() == 0:
+            self._publish_state()
+            return
+
+        time_out_buf = getattr(self.env, "time_out_buf", None)
+        if time_out_buf is None:
+            self._publish_state()
+            return
+
+        # Early termination proxy: reset and not timeout.
+        timed_out = time_out_buf.index_select(0, env_ids_tensor).to(dtype=torch.float32)
+        early_termination_rate = float((1.0 - timed_out).mean().item())
+        similarity = self._compute_similarity(env_ids_tensor)
+
+        self._last_early_termination_rate = early_termination_rate
+        self._last_similarity = similarity
+
+        if not getattr(self.env, "is_evaluating", False):
+            should_increase = (
+                early_termination_rate <= self.early_termination_threshold and similarity >= self.similarity_threshold
+            )
+            if should_increase:
+                self.lambda_value = min(1.0, self.lambda_value + self.lambda_step_up)
+            else:
+                self.lambda_value = max(0.0, self.lambda_value - self.lambda_step_down)
+
+        self._publish_state()
+
+    def step(self) -> None:
+        self._update_log_dict()
+        if not self.enabled or getattr(self.env, "is_evaluating", False):
+            return
+
+        motion_command = None
+        if hasattr(self.env, "command_manager"):
+            motion_command = self.env.command_manager.get_state("motion_command")
+        if motion_command is None:
+            return
+        if not hasattr(motion_command, "motion") or not getattr(motion_command.motion, "has_object", False):
+            return
+
+        assist_scale = float(getattr(self.env, "_wobj_curriculum_assist_scale", 0.0))
+        if assist_scale <= 1e-6:
+            return
+
+        simulator = getattr(self.env, "simulator", None)
+        if simulator is None or not hasattr(simulator, "robot_root_states"):
+            return
+
+        dt = float(getattr(self.env, "dt", 0.0))
+        if dt <= 0.0:
+            return
+
+        try:
+            pos_err = motion_command.ref_pos_w - motion_command.robot_ref_pos_w
+            lin_vel_err = motion_command.ref_lin_vel_w - motion_command.robot_ref_lin_vel_w
+            ang_vel_err = motion_command.ref_ang_vel_w - motion_command.robot_ref_ang_vel_w
+
+            lin_delta = (
+                self.assist_kp_pos * pos_err + self.assist_kd_lin_vel * lin_vel_err
+            ) * (assist_scale * dt)
+            ang_delta = (self.assist_kd_ang_vel * ang_vel_err) * (assist_scale * dt)
+
+            lin_delta = torch.clamp(lin_delta, -self.assist_max_delta_lin, self.assist_max_delta_lin)
+            ang_delta = torch.clamp(ang_delta, -self.assist_max_delta_ang, self.assist_max_delta_ang)
+
+            simulator.robot_root_states[:, 7:10] = simulator.robot_root_states[:, 7:10] + lin_delta
+            simulator.robot_root_states[:, 10:13] = simulator.robot_root_states[:, 10:13] + ang_delta
+            simulator.set_actor_root_state_tensor_robots(None, simulator.robot_root_states)
+        except Exception:
+            # Keep curriculum non-fatal: if simulator backend does not support this path, skip assist.
+            return
+
+    def _compute_similarity(self, env_ids: torch.Tensor) -> float:
+        log_dict = getattr(self.env, "log_dict", None)
+        if not isinstance(log_dict, dict):
+            return 0.0
+        metric = log_dict.get(self.similarity_metric_key)
+        if metric is None:
+            return 0.0
+
+        if torch.is_tensor(metric):
+            metric_tensor = metric.to(device=self.env.device, dtype=torch.float32)
+            if metric_tensor.ndim > 0 and metric_tensor.shape[0] == self.env.num_envs:
+                metric_tensor = metric_tensor.index_select(0, env_ids)
+            mean_error = float(metric_tensor.mean().item())
+        else:
+            try:
+                mean_error = float(metric)
+            except Exception:
+                return 0.0
+
+        sigma = max(self.similarity_sigma, 1e-6)
+        similarity = math.exp(-mean_error / sigma)
+        return float(np.clip(similarity, 0.0, 1.0))
+
+    def _publish_state(self) -> None:
+        lam = float(np.clip(self.lambda_value, 0.0, 1.0))
+        self.lambda_value = lam
+
+        if getattr(self.env, "is_evaluating", False):
+            p_imitation = 1.0
+            assist_scale = 0.0
+            gen_noise_scale = 1.0
+            gen_start_zero_scale = 1.0
+        else:
+            p_imitation = (1.0 - lam) * self.imitation_prob_start + lam * self.imitation_prob_target
+            assist_scale = (1.0 - lam) * self.assist_beta_max
+            gen_noise_scale = self.generalization_noise_scale_min + lam * (
+                self.generalization_noise_scale_max - self.generalization_noise_scale_min
+            )
+            gen_start_zero_scale = self.generalization_start_zero_prob_scale_min + lam * (
+                self.generalization_start_zero_prob_scale_max - self.generalization_start_zero_prob_scale_min
+            )
+
+        self.env._wobj_curriculum_enabled = bool(self.enabled)
+        self.env._wobj_curriculum_lambda = float(lam)
+        self.env._wobj_curriculum_imitation_prob_start = float(self.imitation_prob_start)
+        self.env._wobj_curriculum_imitation_prob_target = float(self.imitation_prob_target)
+        self.env._wobj_curriculum_p_imitation = float(np.clip(p_imitation, 0.0, 1.0))
+        self.env._wobj_curriculum_assist_scale = float(max(assist_scale, 0.0))
+        self.env._wobj_curriculum_generalization_noise_scale = float(max(gen_noise_scale, 1e-6))
+        self.env._wobj_curriculum_generalization_start_zero_prob_scale = float(np.clip(gen_start_zero_scale, 0.0, 1.0))
+
+        self._update_log_dict()
+
+    def _update_log_dict(self) -> None:
+        if not hasattr(self.env, "log_dict"):
+            return
+        device = getattr(self.env, "device", "cpu")
+        self.env.log_dict["curriculum/wobj_lambda"] = torch.tensor(self.lambda_value, device=device, dtype=torch.float)
+        self.env.log_dict["curriculum/wobj_assist_scale"] = torch.tensor(
+            float(getattr(self.env, "_wobj_curriculum_assist_scale", 0.0)),
+            device=device,
+            dtype=torch.float,
+        )
+        self.env.log_dict["curriculum/wobj_p_imitation"] = torch.tensor(
+            float(getattr(self.env, "_wobj_curriculum_p_imitation", 1.0)),
+            device=device,
+            dtype=torch.float,
+        )
+        self.env.log_dict["curriculum/wobj_gen_noise_scale"] = torch.tensor(
+            float(getattr(self.env, "_wobj_curriculum_generalization_noise_scale", 1.0)),
+            device=device,
+            dtype=torch.float,
+        )
+        self.env.log_dict["curriculum/wobj_early_term_rate"] = torch.tensor(
+            self._last_early_termination_rate,
+            device=device,
+            dtype=torch.float,
+        )
+        self.env.log_dict["curriculum/wobj_similarity"] = torch.tensor(
+            self._last_similarity,
+            device=device,
+            dtype=torch.float,
+        )
 
 
 class PenaltyCurriculum(CurriculumTermBase):

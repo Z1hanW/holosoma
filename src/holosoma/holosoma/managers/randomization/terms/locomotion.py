@@ -53,6 +53,70 @@ def _get_joint_action_term(env: Any) -> JointPositionActionTerm | None:
     return None
 
 
+def _resolve_object_asset_cfgs(simulator: Any) -> list["SceneEntityCfg"]:
+    """Resolve scene entity configs for all loaded training objects.
+
+    Supports both single-object scenes (entity name usually ``object``) and
+    multi-object scenes loaded from clip->URDF maps (e.g. ``boxmedium`` / ``boxlarge``).
+    """
+    try:
+        from isaaclab.managers import SceneEntityCfg
+    except ImportError as exc:  # pragma: no cover - defensive
+        raise RuntimeError("IsaacSim object randomization requires isaaclab.") from exc
+
+    candidate_names: list[str] = []
+
+    # Preferred source: names that were actually loaded from object URDF specs.
+    object_urdf_by_name = getattr(simulator, "_object_urdf_by_name", {})
+    if isinstance(object_urdf_by_name, dict):
+        candidate_names.extend(str(name) for name in object_urdf_by_name.keys())
+
+    # Fallback source: rigid object registry on scene.
+    rigid_objects = getattr(getattr(simulator, "scene", None), "rigid_objects", None)
+    if hasattr(rigid_objects, "keys"):
+        for name in rigid_objects.keys():
+            if name == "usd_scene_objects":
+                continue
+            candidate_names.append(str(name))
+
+    # Final compatibility fallback for legacy single-object setup.
+    if not candidate_names:
+        candidate_names.append("object")
+
+    # Stable de-dup while preserving order.
+    deduped_names = list(dict.fromkeys(candidate_names))
+    scene_keys = set(simulator.scene.keys()) if hasattr(simulator.scene, "keys") else set()
+
+    asset_cfgs: list[SceneEntityCfg] = []
+    skipped: list[str] = []
+    for name in deduped_names:
+        if scene_keys and name not in scene_keys:
+            skipped.append(name)
+            continue
+        try:
+            asset_cfg = SceneEntityCfg(name, body_names=".*")
+            asset_cfg.resolve(simulator.scene)
+            asset_cfgs.append(asset_cfg)
+        except Exception:
+            skipped.append(name)
+
+    if not asset_cfgs:
+        available = sorted(scene_keys) if scene_keys else []
+        raise ValueError(
+            f"No object entities available for randomization. Candidates={deduped_names}, "
+            f"available scene entities={available}"
+        )
+
+    if skipped:
+        logger.warning(
+            "Skipped {} object entity candidate(s) during randomization setup: {}",
+            len(skipped),
+            skipped,
+        )
+
+    return asset_cfgs
+
+
 def _isaacsim_randomize_rigid_body_mass(
     simulator: IsaacSim,
     env_ids_cpu: torch.Tensor,
@@ -1008,28 +1072,21 @@ def randomize_object_rigid_body_material_startup(
             f"randomize_object_rigid_body_material_startup only supports IsaacSim, got {type(simulator).__name__}"
         )
 
-    try:
-        from isaaclab.managers import SceneEntityCfg
-    except ImportError as exc:  # pragma: no cover - defensive
-        raise RuntimeError("IsaacSim material randomization requires isaaclab.") from exc
-
     env_ids_cpu = idx.to(device="cpu", dtype=torch.long)
     if env_ids_cpu.numel() == 0:
         return
 
-    asset_cfg = SceneEntityCfg("object", body_names=".*")
-    asset_cfg.resolve(simulator.scene)
-
     num_buckets = 64
-    _isaacsim_randomize_rigid_body_material(
-        simulator,
-        env_ids_cpu,
-        asset_cfg,
-        static_friction_range=(static_friction_range[0], static_friction_range[1]),
-        dynamic_friction_range=(dynamic_friction_range[0], dynamic_friction_range[1]),
-        restitution_range=(restitution_range[0], restitution_range[1]),
-        num_buckets=num_buckets,
-    )
+    for asset_cfg in _resolve_object_asset_cfgs(simulator):
+        _isaacsim_randomize_rigid_body_material(
+            simulator,
+            env_ids_cpu,
+            asset_cfg,
+            static_friction_range=(static_friction_range[0], static_friction_range[1]),
+            dynamic_friction_range=(dynamic_friction_range[0], dynamic_friction_range[1]),
+            restitution_range=(restitution_range[0], restitution_range[1]),
+            num_buckets=num_buckets,
+        )
 
 
 def randomize_object_rigid_body_mass_startup(
@@ -1054,26 +1111,18 @@ def randomize_object_rigid_body_mass_startup(
             f"randomize_object_rigid_body_mass_startup only supports IsaacSim, got {type(simulator).__name__}"
         )
 
-    try:
-        from isaaclab.managers import SceneEntityCfg
-
-    except ImportError as exc:  # pragma: no cover - defensive
-        raise RuntimeError("IsaacSim mass randomization requires isaaclab.") from exc
-
     env_ids_cpu = idx.to(device="cpu", dtype=torch.long)
     if env_ids_cpu.numel() == 0:
         return
 
-    asset_cfg = SceneEntityCfg("object", body_names=".*")
-    asset_cfg.resolve(simulator.scene)
-
-    _isaacsim_randomize_rigid_body_mass(
-        simulator,
-        env_ids_cpu,
-        asset_cfg,
-        (mass_distribution_params[0], mass_distribution_params[1]),
-        operation="add",
-    )
+    for asset_cfg in _resolve_object_asset_cfgs(simulator):
+        _isaacsim_randomize_rigid_body_mass(
+            simulator,
+            env_ids_cpu,
+            asset_cfg,
+            (mass_distribution_params[0], mass_distribution_params[1]),
+            operation="add",
+        )
 
 
 def randomize_object_rigid_body_inertia_startup(
@@ -1098,33 +1147,26 @@ def randomize_object_rigid_body_inertia_startup(
             f"randomize_object_rigid_body_inertia_startup only supports IsaacSim, got {type(simulator).__name__}"
         )
 
-    try:
-        from isaaclab.managers import SceneEntityCfg
-    except ImportError as exc:  # pragma: no cover - defensive
-        raise RuntimeError("IsaacSim inertia randomization requires isaaclab.") from exc
-
     from holosoma.simulator.isaacsim.events import randomize_rigid_body_inertia
 
     env_ids_cpu = idx.to(device="cpu", dtype=torch.long)
     if env_ids_cpu.numel() == 0:
         return
 
-    asset_cfg = SceneEntityCfg("object", body_names=".*")
-    asset_cfg.resolve(simulator.scene)
-
     ordering = ["Ixx", "Iyy", "Izz", "Ixy", "Iyz", "Ixz"]
     lower_bounds = [inertia_distribution_params_dict[key][0] for key in ordering]
     upper_bounds = [inertia_distribution_params_dict[key][1] for key in ordering]
     inertia_distribution_params = (torch.tensor(lower_bounds, device="cpu"), torch.tensor(upper_bounds, device="cpu"))
 
-    randomize_rigid_body_inertia(
-        simulator,
-        env_ids_cpu,
-        asset_cfg,
-        inertia_distribution_params,
-        operation="scale",
-        distribution="uniform",
-    )
+    for asset_cfg in _resolve_object_asset_cfgs(simulator):
+        randomize_rigid_body_inertia(
+            simulator,
+            env_ids_cpu,
+            asset_cfg,
+            inertia_distribution_params,
+            operation="scale",
+            distribution="uniform",
+        )
 
 
 def configure_torque_rfi(

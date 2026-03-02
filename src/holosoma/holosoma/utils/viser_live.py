@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -361,7 +362,51 @@ def _resolve_object_urdf_path(robot_config: Any) -> str | None:
     obj_path = getattr(obj_cfg, "object_urdf_path", None)
     if not obj_path:
         return None
-    return _resolve_data_path(obj_path)
+    resolved = _resolve_data_path(obj_path)
+    resolved_path = Path(resolved)
+
+    if resolved_path.is_dir():
+        urdfs = sorted(list(resolved_path.rglob("*.urdf")) + list(resolved_path.rglob("*.URDF")))
+        return str(urdfs[0]) if urdfs else None
+
+    if resolved_path.suffix.lower() != ".json":
+        return resolved
+
+    try:
+        payload = json.loads(resolved_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Failed to parse object spec map '{}': {}", resolved_path, exc)
+        return None
+
+    if isinstance(payload, dict) and isinstance(payload.get("clips"), dict):
+        payload = payload["clips"]
+    if not isinstance(payload, dict):
+        logger.warning("Invalid object spec map '{}': expected dict payload", resolved_path)
+        return None
+
+    for entry in payload.values():
+        if isinstance(entry, str):
+            urdf_raw = entry.strip()
+        elif isinstance(entry, dict):
+            urdf_raw = str(entry.get("object_urdf_path", "")).strip()
+        else:
+            urdf_raw = ""
+        if not urdf_raw:
+            continue
+        try:
+            if not Path(urdf_raw).is_absolute() and not urdf_raw.startswith("@holosoma/") and not urdf_raw.startswith(
+                "holosoma/"
+            ):
+                candidate = (resolved_path.parent / urdf_raw).resolve()
+            else:
+                candidate = Path(_resolve_data_path(urdf_raw))
+        except Exception:
+            continue
+        if candidate.exists() and candidate.suffix.lower() == ".urdf":
+            return str(candidate)
+
+    logger.warning("No valid URDF found in object spec map '{}'; disabling Viser object URDF.", resolved_path)
+    return None
 
 
 def _is_rank0() -> bool:
@@ -528,6 +573,11 @@ class ViserLiveViewer:
             "yes",
         )
         self._manual_force_enabled = os.environ.get("VISER_FORCE_MANUAL_CONTROL", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        self._clip_lock_default = os.environ.get("VISER_CLIP_LOCK_DEFAULT", "1").lower() in (
             "1",
             "true",
             "yes",
@@ -747,12 +797,16 @@ class ViserLiveViewer:
 
         object_urdf = _resolve_object_urdf_path(env.robot_config)
         if object_urdf:
-            self._vo = viser_urdf_cls(
-                self._server,
-                urdf_or_path=Path(object_urdf),
-                root_node_name=self._scene_path("/object"),
-                mesh_color_override=LIGHT_BLUE,
-            )
+            try:
+                self._vo = viser_urdf_cls(
+                    self._server,
+                    urdf_or_path=Path(object_urdf),
+                    root_node_name=self._scene_path("/object"),
+                    mesh_color_override=LIGHT_BLUE,
+                )
+            except Exception as exc:
+                logger.warning("Viser object URDF disabled (failed to load '{}'): {}", object_urdf, exc)
+                self._vo = None
 
         self._setup_joint_order()
         self._load_terrain()
@@ -1030,27 +1084,6 @@ class ViserLiveViewer:
                 except Exception:
                     motion_cmd._forced_start_step = None
             return
-
-        # Manual control is "non-tracking" mode: force-lock current clip so resets don't randomize.
-        clip_idx = self._current_clip_index(motion_cmd)
-        if clip_idx is None and hasattr(motion_cmd, "clip_ids"):
-            try:
-                clip_idx = int(motion_cmd.clip_ids[self._env_id].item())
-            except Exception:
-                clip_idx = None
-        if clip_idx is not None:
-            try:
-                motion_cmd.set_forced_clip(int(clip_idx))
-            except Exception:
-                motion_cmd._forced_clip_idx = int(clip_idx)
-            start_frame = int(self._clip_start_slider.value) if self._clip_start_slider is not None else 0
-            try:
-                motion_cmd.set_forced_clip_start(start_frame)
-            except Exception:
-                motion_cmd._forced_start_step = int(start_frame)
-            if self._clip_lock_cb is not None and not bool(self._clip_lock_cb.value):
-                # Keep GUI lock state consistent with manual-control behavior.
-                self._clip_lock_cb.value = True
 
         device = self._env.device
         lin_scale = float(self._manual_lin_scale_slider.value) if self._manual_lin_scale_slider is not None else 0.5
@@ -1744,7 +1777,7 @@ class ViserLiveViewer:
                             )
                             self._clip_lock_cb = self._server.gui.add_checkbox(
                                 "Lock Clip",
-                                initial_value=True,
+                                initial_value=bool(self._clip_lock_default),
                                 hint="Keep the selected clip fixed across resets",
                             )
                             self._clip_apply = self._server.gui.add_button("Apply Clip")
@@ -1864,7 +1897,6 @@ class ViserLiveViewer:
         if self._manual_control_cb is not None:
             manual_enabled = bool(manual_enabled or bool(self._manual_control_cb.value))
 
-        # Reset always restarts the selected/current motion from frame 0.
         if motion_cmd is not None:
             if manual_enabled:
                 self._clear_manual_commands(clear_gui_toggles=True)
@@ -1874,14 +1906,13 @@ class ViserLiveViewer:
                     clip_idx = int(motion_cmd.clip_ids[self._env_id].item())
                 except Exception:
                     clip_idx = None
-            if clip_idx is not None:
+            lock_enabled = bool(self._clip_lock_cb.value) if self._clip_lock_cb is not None else False
+            if clip_idx is not None and lock_enabled:
                 try:
                     motion_cmd.set_forced_clip(int(clip_idx))
                 except Exception:
                     motion_cmd._forced_clip_idx = int(clip_idx)
-                clip_start = 0
-                if self._clip_start_slider is not None and int(self._clip_start_slider.value) != 0:
-                    self._clip_start_slider.value = 0
+                clip_start = int(self._clip_start_slider.value) if self._clip_start_slider is not None else 0
                 try:
                     motion_cmd.set_forced_clip_start(int(clip_start))
                 except Exception:

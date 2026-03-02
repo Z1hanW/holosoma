@@ -13,6 +13,7 @@ set -euo pipefail
 #   DATASET_KNOB=crisp|omomo|behave (default: behave)
 #   ROBOT=g1_29dof PORT=#### START_CLIP=clip_name FPS=30 AUTOPLAY=True LOOP=True PRELOAD=True
 #   SHOW_MESHES=True SHOW_GEOMETRY=True GRID=True GRID_SIZE=10.0
+#   OBJECT_FILTER=boxmedium,boxlarge (comma-separated clip-name filters)
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DATASET_KNOB=${DATASET_KNOB:-"behave"}
@@ -24,6 +25,7 @@ case "${DATASET_KNOB}" in
     DEFAULT_OBJECT_URDF_DIR="${SCRIPT_DIR}/crisp/vmm_data/___crisp_object_urdf"
     DEFAULT_OBJECT_URDF_MODE="stem"
     DEFAULT_OBJECT_URDF=""
+    DEFAULT_OBJECT_FILTER=""
     ;;
   omomo)
     DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/demo_results_parallel/g1/object_interaction/omomo_carry"
@@ -31,6 +33,7 @@ case "${DATASET_KNOB}" in
     DEFAULT_OBJECT_URDF_DIR=""
     DEFAULT_OBJECT_URDF_MODE="stem"
     DEFAULT_OBJECT_URDF="${SCRIPT_DIR}/src/holosoma_retargeting/models/largebox/largebox.urdf"
+    DEFAULT_OBJECT_FILTER=""
     ;;
   behave)
     DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/demo_results/g1/object_interaction/behave_zup"
@@ -38,6 +41,7 @@ case "${DATASET_KNOB}" in
     DEFAULT_OBJECT_URDF_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/models/behave_objects"
     DEFAULT_OBJECT_URDF_MODE="behave"
     DEFAULT_OBJECT_URDF=""
+    DEFAULT_OBJECT_FILTER="boxmedium,boxlarge"
     ;;
   *)
     echo "[ERROR] Unknown DATASET_KNOB=${DATASET_KNOB}. Use crisp|omomo|behave." >&2
@@ -51,7 +55,8 @@ GEOMETRY_DIR="${GEOMETRY_DIR:-"${DEFAULT_GEOMETRY_DIR}"}"
 OBJECT_URDF_DIR="${OBJECT_URDF_DIR:-"${DEFAULT_OBJECT_URDF_DIR}"}"
 OBJECT_URDF_MODE="${OBJECT_URDF_MODE:-"${DEFAULT_OBJECT_URDF_MODE}"}"
 OBJECT_URDF="${OBJECT_URDF:-"${DEFAULT_OBJECT_URDF}"}"
-echo "[INFO] DATASET_KNOB=${DATASET_KNOB} motion=${MOTION_DIR} geometry=${GEOMETRY_DIR} object_urdf=${OBJECT_URDF} object_urdf_dir=${OBJECT_URDF_DIR} object_mode=${OBJECT_URDF_MODE}"
+OBJECT_FILTER="${OBJECT_FILTER:-"${DEFAULT_OBJECT_FILTER}"}"
+echo "[INFO] DATASET_KNOB=${DATASET_KNOB} motion=${MOTION_DIR} geometry=${GEOMETRY_DIR} object_urdf=${OBJECT_URDF} object_urdf_dir=${OBJECT_URDF_DIR} object_mode=${OBJECT_URDF_MODE} object_filter=${OBJECT_FILTER}"
 
 ROBOT=${ROBOT:-"g1_29dof"}
 PORT=${PORT:-"$((RANDOM % 8976 + 1024))"}
@@ -144,6 +149,7 @@ cmd=(
   --show-object "${SHOW_OBJECT}"
   --add-grid "${GRID}"
   --grid-size "${GRID_SIZE}"
+  --object-filter-csv "${OBJECT_FILTER}"
 )
 
 if [[ -n "${START_CLIP}" ]]; then

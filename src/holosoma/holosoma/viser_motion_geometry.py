@@ -52,6 +52,7 @@ class MotionGeometryViewerConfig:
     add_grid: bool = True
     grid_size: float = 10.0
     start_clip: str | None = None
+    object_filter_csv: str = ""
 
 
 def _resolve_data_path(path: str) -> Path:
@@ -161,6 +162,16 @@ def _try_load_qpos_npz(path: Path) -> tuple[np.ndarray, int] | None:
         return qpos, fps
 
 
+def _filter_pair_names(pair_names: list[str], object_filter_csv: str) -> list[str]:
+    terms = [s.strip().lower() for s in object_filter_csv.split(",") if s.strip()]
+    if not terms:
+        return pair_names
+    filtered = [name for name in pair_names if any(term in name.lower() for term in terms)]
+    if not filtered:
+        raise ValueError(f"No clips match object filter: {terms}")
+    return filtered
+
+
 def _load_motion_qpos(
     motion_path: Path,
     robot_config: RobotConfig,
@@ -253,6 +264,16 @@ def run_viewer(cfg: MotionGeometryViewerConfig) -> None:
     else:
         pair_names, motion_map, geom_map, geometry_available, object_map, object_available = _list_pairs(
             motion_dir, geometry_dir, object_dir, cfg.object_urdf_mode
+        )
+
+    pair_count_before_filter = len(pair_names)
+    pair_names = _filter_pair_names(pair_names, cfg.object_filter_csv)
+    if cfg.object_filter_csv.strip():
+        logger.info(
+            "Applied object filter '{}': {} -> {} clips",
+            cfg.object_filter_csv,
+            pair_count_before_filter,
+            len(pair_names),
         )
 
     if cfg.start_clip and cfg.start_clip not in pair_names:

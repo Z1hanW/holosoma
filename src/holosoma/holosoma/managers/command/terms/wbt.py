@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 from pathlib import Path
@@ -58,6 +59,8 @@ class MotionLoader:
 
         logger.info(f"Loading motion file: {motion_file}")
         self.clip_ids: list[str] = []
+        self.clip_object_names: list[str] = []
+        self.clip_object_urdf_paths: list[str] = []
         self.clip_offsets = torch.zeros(0, dtype=torch.long, device=device)
         self.clip_lengths = torch.zeros(0, dtype=torch.long, device=device)
         self.num_clips = 0
@@ -127,6 +130,78 @@ class MotionLoader:
                 return cls._normalize_object_size_array(raw, length, source=f"{source}:{key}")
         return np.ones((length, 3), dtype=np.float32)
 
+    @staticmethod
+    def _scalar_str(value: Any) -> str:
+        arr = np.asarray(value)
+        if arr.size == 0:
+            return ""
+        if arr.shape == ():
+            item = arr.item()
+        else:
+            item = arr.reshape(-1)[0]
+            if hasattr(item, "item"):
+                item = item.item()
+        return str(item).strip()
+
+    @classmethod
+    def _load_clip_object_metadata_map(cls, motion_dir: Path) -> dict[str, dict[str, str]]:
+        candidate_files = (
+            motion_dir / "_clip_object_urdf_map.json",
+            motion_dir / "clip_object_urdf_map.json",
+        )
+        for path in candidate_files:
+            if not path.is_file():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.warning("Failed to parse clip-object metadata map '{}': {}", path, exc)
+                return {}
+
+            if isinstance(payload, dict) and isinstance(payload.get("clips"), dict):
+                payload = payload["clips"]
+            if not isinstance(payload, dict):
+                logger.warning("Invalid clip-object metadata map format in '{}': expected dict.", path)
+                return {}
+
+            normalized: dict[str, dict[str, str]] = {}
+            for clip_id, entry in payload.items():
+                if not isinstance(clip_id, str):
+                    continue
+                if isinstance(entry, str):
+                    normalized[clip_id] = {"object_name": "", "object_urdf_path": entry.strip()}
+                elif isinstance(entry, dict):
+                    obj_name = str(entry.get("object_name", "")).strip()
+                    obj_urdf = str(entry.get("object_urdf_path", "")).strip()
+                    normalized[clip_id] = {"object_name": obj_name, "object_urdf_path": obj_urdf}
+            logger.info("Loaded clip-object metadata map '{}' ({} entries).", path, len(normalized))
+            return normalized
+        return {}
+
+    @classmethod
+    def _extract_object_clip_metadata(
+        cls,
+        *,
+        data: Any,
+        clip_id: str,
+        clip_map: dict[str, dict[str, str]] | None = None,
+    ) -> tuple[str, str]:
+        object_name = cls._scalar_str(data["object_name"]) if "object_name" in data else ""
+        object_urdf_path = cls._scalar_str(data["object_urdf_path"]) if "object_urdf_path" in data else ""
+
+        if clip_map is not None and clip_id in clip_map:
+            mapped = clip_map[clip_id]
+            if not object_name:
+                object_name = mapped.get("object_name", "").strip()
+            if not object_urdf_path:
+                object_urdf_path = mapped.get("object_urdf_path", "").strip()
+
+        if not object_name and object_urdf_path:
+            object_name = Path(object_urdf_path).stem
+        if not object_name:
+            object_name = "object"
+        return object_name, object_urdf_path
+
     def _get_index_of_a_in_b(self, a_names: List[str], b_names: List[str], device: str = "cpu") -> torch.Tensor:
         indexes = []
         for name in a_names:
@@ -169,13 +244,28 @@ class MotionLoader:
         offsets: np.ndarray,
         lengths: np.ndarray,
         device: str,
+        clip_object_names: list[str] | None = None,
+        clip_object_urdf_paths: list[str] | None = None,
     ) -> None:
         self.clip_ids = clip_ids
+        if clip_object_names is None:
+            clip_object_names = [""] * len(clip_ids)
+        if clip_object_urdf_paths is None:
+            clip_object_urdf_paths = [""] * len(clip_ids)
+        if len(clip_object_names) != len(clip_ids):
+            raise ValueError("clip_object_names length must match clip_ids length")
+        if len(clip_object_urdf_paths) != len(clip_ids):
+            raise ValueError("clip_object_urdf_paths length must match clip_ids length")
+        self.clip_object_names = clip_object_names
+        self.clip_object_urdf_paths = clip_object_urdf_paths
         self.clip_offsets = torch.tensor(offsets, dtype=torch.long, device=device)
         self.clip_lengths = torch.tensor(lengths, dtype=torch.long, device=device)
         self.num_clips = len(clip_ids)
 
     def _load_data_from_motion_npz(self, motion_file: str, device: str) -> tuple[list[str], list[str]]:
+        clip_id = Path(motion_file).stem
+        clip_object_names: list[str] | None = None
+        clip_object_urdfs: list[str] | None = None
         with smart_open.open(motion_file, "rb") as f, np.load(f) as data:
             self.fps = data["fps"]
 
@@ -210,14 +300,23 @@ class MotionLoader:
                 self._object_lin_vel_w = torch.tensor(data["object_lin_vel_w"], dtype=torch.float32, device=device)
                 object_size = self._extract_object_size_np(data, length, source=motion_file)
                 self._object_size = torch.tensor(object_size, dtype=torch.float32, device=device)
+                obj_name, obj_urdf = self._extract_object_clip_metadata(data=data, clip_id=clip_id, clip_map=None)
+                clip_object_names = [obj_name]
+                clip_object_urdfs = [obj_urdf]
             else:
                 self._object_pos_w = torch.zeros(0, 3, device=device)
                 self._object_quat_w = torch.zeros(0, 4, device=device)
                 self._object_lin_vel_w = torch.zeros(0, 3, device=device)
                 self._object_size = torch.zeros(0, 3, device=device)
-        clip_id = Path(motion_file).stem
         length = int(self._joint_pos.shape[0])
-        self._set_clip_metadata([clip_id], np.array([0]), np.array([length]), device)
+        self._set_clip_metadata(
+            [clip_id],
+            np.array([0]),
+            np.array([length]),
+            device,
+            clip_object_names=clip_object_names,
+            clip_object_urdf_paths=clip_object_urdfs,
+        )
         return body_names, joint_names
 
     def _load_data_from_motion_npz_dir(
@@ -227,6 +326,7 @@ class MotionLoader:
         motion_clip_id: int | None,
         motion_clip_name: str | None,
     ) -> tuple[list[str], list[str]]:
+        clip_object_map = self._load_clip_object_metadata_map(motion_dir)
         files = sorted(motion_dir.glob("*.npz"))
         if not files:
             raise FileNotFoundError(f"No .npz files found in motion directory: {motion_dir}")
@@ -243,7 +343,18 @@ class MotionLoader:
             files = [files[clip_idx]]
 
         if len(files) == 1:
-            return self._load_data_from_motion_npz(str(files[0]), device)
+            body_names, joint_names = self._load_data_from_motion_npz(str(files[0]), device)
+            clip_entry = clip_object_map.get(files[0].stem, {})
+            if self.has_object and clip_entry:
+                mapped_name = str(clip_entry.get("object_name", "")).strip()
+                mapped_urdf = str(clip_entry.get("object_urdf_path", "")).strip()
+                if self.clip_object_names:
+                    if mapped_name and (not self.clip_object_names[0] or self.clip_object_names[0] == "object"):
+                        self.clip_object_names[0] = mapped_name
+                if self.clip_object_urdf_paths:
+                    if mapped_urdf and not self.clip_object_urdf_paths[0]:
+                        self.clip_object_urdf_paths[0] = mapped_urdf
+            return body_names, joint_names
 
         required_keys = (
             "joint_pos",
@@ -278,6 +389,9 @@ class MotionLoader:
         object_quat_list: list[np.ndarray] = []
         object_lin_vel_list: list[np.ndarray] = []
         object_size_list: list[np.ndarray] = []
+
+        clip_object_names: list[str] = []
+        clip_object_urdfs: list[str] = []
 
         for file_path in files:
             with np.load(file_path, allow_pickle=True) as data:
@@ -356,9 +470,26 @@ class MotionLoader:
                     object_size_list.append(
                         self._extract_object_size_np(data, length, source=str(file_path))
                     )
+                    obj_name, obj_urdf = self._extract_object_clip_metadata(
+                        data=data,
+                        clip_id=file_path.stem,
+                        clip_map=clip_object_map,
+                    )
+                    clip_object_names.append(obj_name)
+                    clip_object_urdfs.append(obj_urdf)
+                else:
+                    clip_object_names.append("")
+                    clip_object_urdfs.append("")
 
         self.fps = float(fps_ref) if fps_ref is not None else 30.0
-        self._set_clip_metadata(clip_ids, np.array(offsets), np.array(lengths), device)
+        self._set_clip_metadata(
+            clip_ids,
+            np.array(offsets),
+            np.array(lengths),
+            device,
+            clip_object_names=clip_object_names,
+            clip_object_urdf_paths=clip_object_urdfs,
+        )
 
         joint_pos = np.concatenate(joint_pos_list, axis=0)
         joint_vel = np.concatenate(joint_vel_list, axis=0)
@@ -924,6 +1055,12 @@ class MotionCommand(CommandTermBase):
         self.manual_control_enabled = False
         self.manual_xy_rel: torch.Tensor | None = None
         self.manual_yaw_rel: torch.Tensor | None = None
+        self._multi_object_enabled = False
+        self._sim_object_names: list[str] = []
+        self._clip_object_ids: torch.Tensor | None = None
+        self._object_indices_matrix: torch.Tensor | None = None
+        self._task_is_generalization: torch.Tensor | None = None
+        self._task_imitation_prob: float = 1.0
 
     def set_forced_clip(self, clip_idx: int | None) -> None:
         """Force a specific clip index for resets (None clears the override)."""
@@ -985,13 +1122,10 @@ class MotionCommand(CommandTermBase):
 
         # 3. get the name of the object, or indices of the object
         if self.motion.has_object:
-            # cache the object_index_in_simulator
-            self.object_name = "object"  # hardcoded object name
-            self.object_indices_in_simulator = self._env.simulator.get_actor_indices(self.object_name, env_ids=None)
-
             assert self._env.simulator.get_simulator_type() == SimulatorType.ISAACSIM, (
                 "Object is only supported in IsaacSim"
             )
+            self._configure_simulator_object_mapping()
 
         # 4. get the adaptive timesteps sampler
         self.use_adaptive_timesteps_sampler = self.motion_cfg.use_adaptive_timesteps_sampler
@@ -1023,11 +1157,154 @@ class MotionCommand(CommandTermBase):
         if self._env.viewer and self._env.simulator.get_simulator_type() == SimulatorType.ISAACSIM:
             self._setup_visualization_markers_for_isaacsim()
 
+    @staticmethod
+    def _normalize_path_key(path: str) -> str:
+        if not path:
+            return ""
+        try:
+            return str(Path(path).resolve())
+        except Exception:
+            return path
+
+    def _resolve_sim_object_name(
+        self,
+        *,
+        clip_id: str,
+        clip_object_name: str,
+        clip_object_urdf: str,
+        sim_names: list[str],
+        sim_name_by_urdf: dict[str, str],
+        sim_name_by_stem: dict[str, str],
+    ) -> str:
+        normalized_urdf = self._normalize_path_key(clip_object_urdf)
+        if normalized_urdf and normalized_urdf in sim_name_by_urdf:
+            return sim_name_by_urdf[normalized_urdf]
+
+        if normalized_urdf:
+            stem = Path(normalized_urdf).stem.lower()
+            if stem in sim_name_by_stem:
+                return sim_name_by_stem[stem]
+
+        key = clip_object_name.strip().lower()
+        if key:
+            if key in sim_name_by_stem:
+                return sim_name_by_stem[key]
+            for name in sim_names:
+                name_lc = name.lower()
+                if key == name_lc or name_lc.endswith(f"_{key}") or name_lc.endswith(key):
+                    return name
+
+        logger.warning(
+            "No simulator object matched clip '{}' (object_name='{}', object_urdf='{}'); "
+            "fallback to '{}'.",
+            clip_id,
+            clip_object_name,
+            clip_object_urdf,
+            sim_names[0],
+        )
+        return sim_names[0]
+
+    def _configure_simulator_object_mapping(self) -> None:
+        sim = self._env.simulator
+        rigid_objects = getattr(getattr(sim, "scene", None), "rigid_objects", {})
+
+        object_urdf_by_name_raw = getattr(sim, "_object_urdf_by_name", {})
+        object_urdf_by_name: dict[str, str] = (
+            dict(object_urdf_by_name_raw) if isinstance(object_urdf_by_name_raw, dict) else {}
+        )
+
+        sim_object_names: list[str] = [name for name in object_urdf_by_name.keys() if name != "usd_scene_objects"]
+        if not sim_object_names and hasattr(rigid_objects, "keys"):
+            sim_object_names = [name for name in rigid_objects.keys() if name != "usd_scene_objects"]
+        if not sim_object_names:
+            sim_object_names = ["object"]
+
+        self._sim_object_names = list(dict.fromkeys(sim_object_names))
+        self._clip_object_ids = torch.zeros(self.motion.num_clips, dtype=torch.long, device=self.device)
+
+        if len(self._sim_object_names) == 1:
+            self.object_name = self._sim_object_names[0]
+            self.object_indices_in_simulator = sim.get_actor_indices(self.object_name, env_ids=None)
+            self._multi_object_enabled = False
+            self._object_indices_matrix = None
+            logger.info("Using single object '{}' for all {} clips.", self.object_name, self.motion.num_clips)
+            return
+
+        sim_name_by_urdf: dict[str, str] = {}
+        sim_name_by_stem: dict[str, str] = {}
+        for name in self._sim_object_names:
+            sim_name_by_stem[name.lower()] = name
+            urdf_path = object_urdf_by_name.get(name, "")
+            normalized = self._normalize_path_key(urdf_path)
+            if normalized:
+                sim_name_by_urdf[normalized] = name
+                sim_name_by_stem[Path(normalized).stem.lower()] = name
+
+        clip_object_names = self.motion.clip_object_names
+        clip_object_urdfs = self.motion.clip_object_urdf_paths
+        if len(clip_object_names) != self.motion.num_clips:
+            clip_object_names = [""] * self.motion.num_clips
+        if len(clip_object_urdfs) != self.motion.num_clips:
+            clip_object_urdfs = [""] * self.motion.num_clips
+
+        clip_object_ids: list[int] = []
+        for clip_idx, clip_id in enumerate(self.motion.clip_ids):
+            resolved_name = self._resolve_sim_object_name(
+                clip_id=clip_id,
+                clip_object_name=clip_object_names[clip_idx],
+                clip_object_urdf=clip_object_urdfs[clip_idx],
+                sim_names=self._sim_object_names,
+                sim_name_by_urdf=sim_name_by_urdf,
+                sim_name_by_stem=sim_name_by_stem,
+            )
+            clip_object_ids.append(self._sim_object_names.index(resolved_name))
+
+        self._clip_object_ids = torch.tensor(clip_object_ids, dtype=torch.long, device=self.device)
+        object_indices = [sim.get_actor_indices(name, env_ids=None) for name in self._sim_object_names]
+        self._object_indices_matrix = torch.stack(object_indices, dim=0)
+        self.object_name = self._sim_object_names[0]
+        self.object_indices_in_simulator = self._object_indices_matrix[0]
+        self._multi_object_enabled = True
+        logger.info(
+            "Configured multi-object mapping: {} simulator objects for {} clips.",
+            len(self._sim_object_names),
+            self.motion.num_clips,
+        )
+
+    def _get_active_object_indices(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        env_ids_tensor = self._ensure_index_tensor(env_ids)
+        if not self._multi_object_enabled or self._clip_object_ids is None or self._object_indices_matrix is None:
+            if env_ids is None:
+                return self.object_indices_in_simulator
+            return self.object_indices_in_simulator[env_ids_tensor]
+        active_object_ids = self._clip_object_ids[self.clip_ids[env_ids_tensor]]
+        return self._object_indices_matrix[active_object_ids, env_ids_tensor]
+
+    def _set_simulator_object_states(self, env_ids: torch.Tensor, active_states: torch.Tensor) -> None:
+        if not self._multi_object_enabled or self._clip_object_ids is None:
+            self._env.simulator.set_actor_states([self.object_name], env_ids, active_states)
+            return
+
+        active_object_ids = self._clip_object_ids[self.clip_ids[env_ids]]
+        all_states: list[torch.Tensor] = []
+        for object_id, _ in enumerate(self._sim_object_names):
+            states = torch.zeros((env_ids.numel(), 13), device=self.device, dtype=torch.float32)
+            states[:, 2] = -100.0 - 5.0 * float(object_id)
+            states[:, 6] = 1.0
+            active_mask = active_object_ids == object_id
+            if active_mask.any():
+                states[active_mask] = active_states[active_mask]
+            all_states.append(states)
+        stacked_states = torch.cat(all_states, dim=0)
+        self._env.simulator.set_actor_states(self._sim_object_names, env_ids, stacked_states)
+
     def reset(self, env_ids: torch.Tensor | None) -> None:
         """called per reset_idx, reset timesteps and robot/object poses."""
         env_ids = self._ensure_index_tensor(env_ids)
         if env_ids.numel() == 0:
             return
+
+        self._sample_task_modes(env_ids)
 
         if self._forced_clip_idx is not None:
             self.clip_ids[env_ids] = int(self._forced_clip_idx)
@@ -1069,14 +1346,17 @@ class MotionCommand(CommandTermBase):
         valid_starts = torch.clamp(clip_lengths - start_margin, min=1)
         self.time_steps[env_ids] = (phase * valid_starts).long()
 
-        # Handle start_at_timestep_zero_prob
-        prob = self.motion_cfg.start_at_timestep_zero_prob
-        if prob >= 1.0:
-            self.time_steps[env_ids] = 0
-        elif prob > 0.0:
+        # Handle start_at_timestep_zero_prob (optionally reduced for generalization resets).
+        base_prob = float(self.motion_cfg.start_at_timestep_zero_prob)
+        if base_prob > 0.0:
+            probs = torch.full((env_ids.numel(),), base_prob, device=self.device, dtype=torch.float32)
+            if self._task_is_generalization is not None and self._task_is_generalization[env_ids].any():
+                gen_scale = float(getattr(self._env, "_wobj_curriculum_generalization_start_zero_prob_scale", 1.0))
+                probs[self._task_is_generalization[env_ids]] *= gen_scale
+            probs = torch.clamp(probs, 0.0, 1.0)
             subset = self.time_steps[env_ids]
             rand_vals = torch.rand_like(subset, dtype=torch.float32)
-            subset = torch.where(rand_vals < prob, torch.zeros_like(subset), subset)
+            subset = torch.where(rand_vals < probs, torch.zeros_like(subset), subset)
             self.time_steps[env_ids] = subset
 
         # If the motion is at the last timestep, set it to the second last timestep;
@@ -1097,6 +1377,12 @@ class MotionCommand(CommandTermBase):
         dof_vel = self.joint_vel[env_ids].clone()
 
         # 2. Adding noise
+        reset_noise_scale = torch.ones((env_ids.numel(), 1), device=self.device, dtype=torch.float32)
+        if self._task_is_generalization is not None and self._task_is_generalization[env_ids].any():
+            gen_noise_scale = float(getattr(self._env, "_wobj_curriculum_generalization_noise_scale", 1.0))
+            reset_noise_scale[self._task_is_generalization[env_ids]] = gen_noise_scale
+        reset_noise_scale_3 = reset_noise_scale.expand(-1, 3)
+
         # 2.1 prepare the noise scale
         dof_pos_noise = self.init_pose_cfg.dof_pos * self.init_pose_cfg.overall_noise_scale  # float
         root_pos_noise = (
@@ -1131,7 +1417,7 @@ class MotionCommand(CommandTermBase):
         # 2.2 Adding noise to dof_pos, root_pos, root_vel, root_ang_vel, root_rot
         # 1.2.1 dof_pos
         target_dof_pos = (
-            dof_pos + (torch.rand(dof_pos.shape, device=self.device) - 0.5) * 2 * dof_pos_noise
+            dof_pos + (torch.rand(dof_pos.shape, device=self.device) - 0.5) * 2 * dof_pos_noise * reset_noise_scale
         )  # (num_envs, num_dofs)
         soft_joint_pos_limits = self._env.simulator.dof_pos_limits  # type: ignore[attr-defined]  # (num_dofs, 2)
         target_dof_pos = torch.clip(target_dof_pos, soft_joint_pos_limits[:, 0], soft_joint_pos_limits[:, 1])
@@ -1142,10 +1428,15 @@ class MotionCommand(CommandTermBase):
         # 1.2.3 root_pos
         target_root_pos = root_pos + (
             torch.rand(root_pos.shape, device=self.device) - 0.5
-        ) * 2 * root_pos_noise.unsqueeze(0)  # (num_envs, 3)
-        
+        ) * 2 * root_pos_noise.unsqueeze(0) * reset_noise_scale_3  # (num_envs, 3)
+
         # 1.2.4 root_rot
-        rand_sample_rpy = (torch.rand((len(env_ids), 3), device=self.device) - 0.5) * 2 * root_rot_noise_rpy
+        rand_sample_rpy = (
+            (torch.rand((len(env_ids), 3), device=self.device) - 0.5)
+            * 2
+            * root_rot_noise_rpy.unsqueeze(0)
+            * reset_noise_scale_3
+        )
         orientations_delta = quat_from_euler_xyz(
             rand_sample_rpy[:, 0], rand_sample_rpy[:, 1], rand_sample_rpy[:, 2]
         )  # (num_envs, 4), xyzw
@@ -1154,12 +1445,12 @@ class MotionCommand(CommandTermBase):
         # 1.2.5 root_lin_vel
         target_root_lin_vel = root_lin_vel + (
             torch.rand(root_lin_vel.shape, device=self.device) - 0.5
-        ) * 2 * root_vel_noise.unsqueeze(0)  # (num_envs, 3)
+        ) * 2 * root_vel_noise.unsqueeze(0) * reset_noise_scale_3  # (num_envs, 3)
 
         # 1.2.6 root_ang_vel
         target_root_ang_vel = root_ang_vel + (
             torch.rand(root_ang_vel.shape, device=self.device) - 0.5
-        ) * 2 * root_ang_vel_noise_rpy.unsqueeze(0)  # (num_envs, 3)
+        ) * 2 * root_ang_vel_noise_rpy.unsqueeze(0) * reset_noise_scale_3  # (num_envs, 3)
 
         # 3. Set the robot states in simulator
         self._env.simulator.dof_pos[env_ids] = target_dof_pos
@@ -1181,14 +1472,19 @@ class MotionCommand(CommandTermBase):
                 [self.init_pose_cfg.object_pos],
                 device=self.device,
             )
-            obj_pos_noise = obj_pos_noise * self.init_pose_cfg.overall_noise_scale  # (3,)
-            target_obj_pos = obj_pos + (torch.rand(obj_pos.shape, device=self.device) - 0.5) * 2 * obj_pos_noise
+            obj_pos_noise = obj_pos_noise * self.init_pose_cfg.overall_noise_scale  # (1, 3)
+            target_obj_pos = obj_pos + (
+                (torch.rand(obj_pos.shape, device=self.device) - 0.5)
+                * 2
+                * obj_pos_noise
+                * reset_noise_scale_3
+            )
 
             object_states = torch.cat(
                 [target_obj_pos, obj_ori, obj_lin_vel, torch.zeros_like(obj_lin_vel)], dim=-1
-            )  # (num_envs, 7)
-            # 4.3 set the object states in simulator
-            self._env.simulator.set_actor_states([self.object_name], env_ids, object_states)
+            )  # (num_envs, 13), xyzw
+            # 4.3 set active object states; inactive objects are parked away for multi-URDF banks.
+            self._set_simulator_object_states(env_ids, object_states)
 
         self._update_future_target_poses()
 
@@ -1366,6 +1662,29 @@ class MotionCommand(CommandTermBase):
             self._clip_sampling_weights = weights / weights.sum()
         else:
             self._clip_sampling_weights = self._base_clip_weights.clone()
+
+    def _is_wobj_curriculum_enabled(self) -> bool:
+        if self._env.is_evaluating:
+            return False
+        if not self.motion.has_object:
+            return False
+        return bool(getattr(self._env, "_wobj_curriculum_enabled", False))
+
+    def _sample_task_modes(self, env_ids: torch.Tensor) -> None:
+        if self._task_is_generalization is None:
+            return
+
+        if not self._is_wobj_curriculum_enabled():
+            self._task_is_generalization[env_ids] = False
+            self._task_imitation_prob = 1.0
+            return
+
+        p_imitation = float(getattr(self._env, "_wobj_curriculum_p_imitation", 1.0))
+        p_imitation = float(np.clip(p_imitation, 0.0, 1.0))
+        self._task_imitation_prob = p_imitation
+
+        imitation_mask = torch.rand(env_ids.numel(), device=self.device) < p_imitation
+        self._task_is_generalization[env_ids] = ~imitation_mask
 
     @property
     def command(self) -> torch.Tensor:
@@ -1586,15 +1905,18 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     @property
     def simulator_object_pos_w(self) -> torch.Tensor:
-        return self._env.simulator.all_root_states[self.object_indices_in_simulator][:, :3]
+        indices = self._get_active_object_indices()
+        return self._env.simulator.all_root_states[indices][:, :3]
 
     @property
     def simulator_object_quat_w(self) -> torch.Tensor:
-        return self._env.simulator.all_root_states[self.object_indices_in_simulator][:, 3:7]
+        indices = self._get_active_object_indices()
+        return self._env.simulator.all_root_states[indices][:, 3:7]
 
     @property
     def simulator_object_lin_vel_w(self) -> torch.Tensor:
-        return self._env.simulator.all_root_states[self.object_indices_in_simulator][:, 7:10]
+        indices = self._get_active_object_indices()
+        return self._env.simulator.all_root_states[indices][:, 7:10]
 
     #########################################################################################
     ## Methods that does not fit into setup/step/reset pattern
@@ -1603,6 +1925,8 @@ class MotionCommand(CommandTermBase):
     def init_buffers(self):
         self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.clip_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._task_is_generalization = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._task_imitation_prob = 1.0
         if self._terrain_row_ids is not None:
             self._terrain_row_ids.zero_()
         self.body_pos_relative_w = torch.zeros(
@@ -1708,6 +2032,14 @@ class MotionCommand(CommandTermBase):
             self.metrics["motion/adaptive_timesteps_sampler_top1_bin"] = self.adaptive_timesteps_sampler.metrics[
                 "sampling_top1_bin"
             ]
+
+        if self._task_is_generalization is not None:
+            self.metrics["motion/task_generalization_fraction"] = self._task_is_generalization.to(dtype=torch.float32).mean()
+            self.metrics["motion/task_imitation_prob"] = torch.tensor(
+                self._task_imitation_prob,
+                device=self.device,
+                dtype=torch.float32,
+            )
 
     #########################################################################################
     ## Internal helpers

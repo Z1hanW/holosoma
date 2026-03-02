@@ -223,13 +223,19 @@ def _load_object_mesh(
     override_mesh: Path | None,
     *,
     use_simplified: bool,
+    use_sq_obj: bool,
 ) -> trimesh.Trimesh:
     if override_mesh is not None:
         mesh_path = override_mesh
     elif use_simplified:
-        mesh_path = objects_root / obj_name / f"{obj_name}_f1000.ply"
-        if not mesh_path.exists():
-            raise FileNotFoundError(f"Simplified object mesh not found: {mesh_path}")
+        if use_sq_obj:
+            mesh_path = objects_root / obj_name / f"{obj_name}_sq.obj"
+            if not mesh_path.exists():
+                raise FileNotFoundError(f"Square object mesh not found: {mesh_path}")
+        else:
+            mesh_path = objects_root / obj_name / f"{obj_name}_f1000.ply"
+            if not mesh_path.exists():
+                raise FileNotFoundError(f"Simplified object mesh not found: {mesh_path}")
     else:
         mesh_path = objects_root / obj_name / f"{obj_name}.obj"
         if not mesh_path.exists():
@@ -315,7 +321,7 @@ def _collect_npz_paths(path: Path, recursive: bool) -> Tuple[list[str], Dict[str
     return labels, label_to_path
 
 
-def _collect_seq_dirs(path: Path) -> Tuple[list[str], Dict[str, Path]]:
+def _collect_seq_dirs(path: Path, allowed_objects: set[str] | None = None) -> Tuple[list[str], Dict[str, Path]]:
     if not path.exists():
         raise FileNotFoundError(f"Annotation root not found: {path}")
     seq_dirs = sorted([p for p in path.iterdir() if p.is_dir()])
@@ -327,6 +333,8 @@ def _collect_seq_dirs(path: Path) -> Tuple[list[str], Dict[str, Path]]:
             continue
         obj_name = parts[2].lower()
         if "box" not in obj_name or obj_name == "toolbox":
+            continue
+        if allowed_objects is not None and obj_name not in allowed_objects:
             continue
         if (p / "object_fit_all.npz").exists() and (p / "smpl_fit_all.npz").exists():
             label = p.name
@@ -424,6 +432,7 @@ def _build_sequence(
     max_frames: int | None,
     *,
     use_simplified_mesh: bool,
+    use_sq_obj: bool,
 ) -> Dict[str, Any]:
     joints = _extract_joint_positions(data)
     obj_rot = None
@@ -464,7 +473,13 @@ def _build_sequence(
     if has_object:
         if objects_root is None:
             raise FileNotFoundError("Objects root not found. Pass --objects-root or --dataset-root.")
-        mesh = _load_object_mesh(objects_root, obj_name, override_mesh, use_simplified=use_simplified_mesh)
+        mesh = _load_object_mesh(
+            objects_root,
+            obj_name,
+            override_mesh,
+            use_simplified=use_simplified_mesh,
+            use_sq_obj=use_sq_obj,
+        )
 
     frame_times = _decode_frame_times(_extract_key(data, ("frame_times", "frames", "frame_ids")))
 
@@ -568,14 +583,28 @@ def main() -> None:
     parser.add_argument("--fps", type=int, default=30, help="Playback FPS.")
     parser.add_argument("--no-grid", action="store_true", help="Disable grid.")
     parser.add_argument("--show-object-frame", action="store_true", help="Show object frame axes.")
+    parser.add_argument(
+        "--allowed-objects",
+        type=str,
+        default="",
+        help="Comma-separated object names to include (e.g. boxmedium,boxlarge). Empty means all.",
+    )
+    parser.add_argument(
+        "--use-sq-obj",
+        action="store_true",
+        help="When reading annotation root, load object mesh as <obj>_sq.obj instead of <obj>_f1000.ply.",
+    )
     parser.add_argument("--no-autoplay", dest="autoplay", action="store_false", help="Start paused.")
     parser.add_argument("--no-loop", dest="loop", action="store_false", help="Disable looping.")
     parser.set_defaults(autoplay=True, loop=True)
     args = parser.parse_args()
+    allowed_objects = {x.strip().lower() for x in args.allowed_objects.split(",") if x.strip()}
+    if not allowed_objects:
+        allowed_objects = None
 
     npz_root = Path(args.npz_path).expanduser().resolve()
     if args.annotation_root:
-        labels, label_to_path = _collect_seq_dirs(npz_root)
+        labels, label_to_path = _collect_seq_dirs(npz_root, allowed_objects=allowed_objects)
     else:
         labels, label_to_path = _collect_npz_paths(npz_root, args.recursive)
 
@@ -624,6 +653,7 @@ def main() -> None:
             stride=args.stride,
             max_frames=args.max_frames,
             use_simplified_mesh=args.annotation_root,
+            use_sq_obj=args.use_sq_obj,
         )
         cache[label] = seq
         return seq

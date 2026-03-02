@@ -274,8 +274,8 @@ def robot_body_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
 def obj_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     pos, _ = subtract_frame_transforms(
-        motion_command.robot_ref_pos_w,
-        motion_command.robot_ref_quat_w,
+        motion_command.robot_root_pos_w,
+        motion_command.robot_root_quat_w,
         motion_command.simulator_object_pos_w,
         motion_command.simulator_object_quat_w,
     )
@@ -285,8 +285,8 @@ def obj_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
 def obj_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     _, ori = subtract_frame_transforms(
-        motion_command.robot_ref_pos_w,
-        motion_command.robot_ref_quat_w,
+        motion_command.robot_root_pos_w,
+        motion_command.robot_root_quat_w,
         motion_command.simulator_object_pos_w,
         motion_command.simulator_object_quat_w,
     )
@@ -298,8 +298,8 @@ def obj_lin_vel_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     unit_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=env.device).unsqueeze(0).repeat(env.num_envs, 1)
     vel_b, _ = subtract_frame_transforms(
-        motion_command.robot_ref_pos_w.clone(),
-        motion_command.robot_ref_quat_w.clone(),
+        motion_command.robot_root_pos_w.clone(),
+        motion_command.robot_root_quat_w.clone(),
         motion_command.simulator_object_lin_vel_w,
         unit_quat,
     )
@@ -307,14 +307,14 @@ def obj_lin_vel_b(env: WholeBodyTrackingManager) -> torch.Tensor:
 
 
 def obj_target_pose_size_b(env: WholeBodyTrackingManager) -> torch.Tensor:
-    """Target object info in robot-reference frame: [pos(3), rot6d(6), size(3)]."""
+    """Target object info in robot-root frame: [pos(3), rot6d(6), size(3)]."""
     motion_command = _get_motion_command_and_assert_type(env)
     if not motion_command.motion.has_object:
         return torch.zeros(env.num_envs, 12, device=env.device, dtype=torch.float32)
 
     pos_b, ori_b = subtract_frame_transforms(
-        motion_command.robot_ref_pos_w,
-        motion_command.robot_ref_quat_w,
+        motion_command.robot_root_pos_w,
+        motion_command.robot_root_quat_w,
         motion_command.object_pos_w,
         motion_command.object_quat_w,
     )
@@ -325,7 +325,7 @@ def obj_target_pose_size_b(env: WholeBodyTrackingManager) -> torch.Tensor:
 
 
 def obj_goal_pos_size_b(env: WholeBodyTrackingManager) -> torch.Tensor:
-    """Final object goal in robot-reference frame: [goal_pos(3), size(3)].
+    """Final object goal in robot-root frame: [goal_pos(3), size(3)].
 
     The goal position is extracted from each active motion clip's last frame.
     """
@@ -347,9 +347,9 @@ def obj_goal_pos_size_b(env: WholeBodyTrackingManager) -> torch.Tensor:
 
     goal_size = motion_command.motion.object_size[final_motion_idx].view(env.num_envs, -1)
     goal_pos_b, _ = subtract_frame_transforms(
-        motion_command.robot_ref_pos_w,
-        motion_command.robot_ref_quat_w,
+        motion_command.robot_root_pos_w,
+        motion_command.robot_root_quat_w,
         goal_pos_w,
-        motion_command.robot_ref_quat_w,
+        motion_command.robot_root_quat_w,
     )
     return torch.cat([goal_pos_b.view(env.num_envs, -1), goal_size], dim=-1)

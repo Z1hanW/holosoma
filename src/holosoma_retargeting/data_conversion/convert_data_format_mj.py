@@ -420,6 +420,26 @@ def run_simulator(joint_names: list[str]):
         viewer.cam.elevation = -20.0
         viewer.cam.azimuth = 45.0
 
+    # Preserve clip-level object metadata for downstream multi-URDF training.
+    clip_metadata: dict[str, Any] = {}
+    input_path = Path(args_cli.input_file)
+    if input_path.suffix.lower() == ".npz":
+        try:
+            with np.load(input_path, allow_pickle=True) as src:
+                for key in ("object_name", "object_urdf_path", "scene_xml_file", "object_mesh_scale", "object_mesh_path"):
+                    if key in src:
+                        clip_metadata[key] = src[key]
+        except Exception as exc:
+            print(f"[WARN] Failed to load metadata from input npz '{input_path}': {exc}")
+
+    if has_dynamic_object:
+        if "object_name" not in clip_metadata:
+            clip_metadata["object_name"] = np.array(object_name if object_name is not None else "object")
+        if "object_urdf_path" not in clip_metadata:
+            clip_metadata["object_urdf_path"] = np.array(str(Path(constants.OBJECT_URDF_FILE).resolve()))
+        if "scene_xml_file" not in clip_metadata:
+            clip_metadata["scene_xml_file"] = np.array(str(Path(robot_xml_path).resolve()))
+
     log: dict[str, Any]
     if has_dynamic_object:
         log = {
@@ -577,6 +597,8 @@ def run_simulator(joint_names: list[str]):
                 raise ValueError("output_name cannot be None")
             output_res_folder = Path(args_cli.output_name).parent
             os.makedirs(output_res_folder, exist_ok=True)
+            if clip_metadata:
+                log.update(clip_metadata)
             np.savez(args_cli.output_name, **log)
 
         if args_cli.once and file_saved:

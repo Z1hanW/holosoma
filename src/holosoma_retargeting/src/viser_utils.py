@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import threading
 import time
-import inspect
-from typing import Callable, List, Tuple
+from typing import List, Tuple
 
 import numpy as np
 import viser  # type: ignore[import-not-found]
@@ -24,8 +23,6 @@ def create_motion_control_sliders(
     initial_fps: int = 30,
     initial_interp_mult: int = 2,
     loop: bool = True,
-    on_update: Callable[..., None] | None = None,
-    sequence_setter_out: dict[str, Callable[[np.ndarray, int | None], None]] | None = None,
 ) -> Tuple[List[viser.GuiInputHandle[int]], List[float]]:
     """
     Create a slider + play/pause controls and a background player thread with smooth, slerp-based interpolation.
@@ -49,8 +46,6 @@ def create_motion_control_sliders(
         initial_fps: base FPS for playback.
         initial_interp_mult: visual upsampling multiplier.
         loop: whether to wrap around at the end.
-        on_update: optional callback invoked after each frame is applied. If it accepts 2 args,
-            it will be called as on_update(q, frame_idx).
 
     Returns:
         (controls, initial_values) — currently returns the [frame_slider] and [0.0]
@@ -60,19 +55,12 @@ def create_motion_control_sliders(
     if n_frames == 0:
         raise ValueError("motion_sequence is empty.")
 
-    def _compute_has_object_input(qpos_arr: np.ndarray) -> bool:
-        return (
-            viser_object is not None
-            and object_base_frame is not None
-            and contains_object_in_qpos
-            and qpos_arr.shape[1] >= (7 + robot_dof + 7)
-        )
-
-    state = {
-        "qpos": qpos,
-        "n_frames": n_frames,
-        "has_object_input": _compute_has_object_input(qpos),
-    }
+    has_object_input = (
+        viser_object is not None
+        and object_base_frame is not None
+        and contains_object_in_qpos
+        and qpos.shape[1] >= (7 + robot_dof + 7)
+    )
 
     # ---------------- GUI ----------------
     with server.gui.add_folder("Playback"):
@@ -126,7 +114,7 @@ def create_motion_control_sliders(
         out[7 : 7 + robot_dof] = (1.0 - u) * j0 + u * j1
 
         # Object (optional) (MuJoCo order: pos first, then quat)
-        if state["has_object_input"]:
+        if has_object_input:
             out[-7:-4] = (1.0 - u) * q0[-7:-4] + u * q1[-7:-4]  # obj pos (xyz)
             out[-4:] = _slerp(q0[-4:], q1[-4:], u)  # obj quat (wxyz)
         return out
@@ -139,14 +127,7 @@ def create_motion_control_sliders(
     updating_programmatically = {"flag": False}  # flag to prevent callback from pausing during programmatic updates
 
     # ---------------- draw ----------------
-    on_update_arity = None
-    if on_update is not None:
-        try:
-            on_update_arity = len(inspect.signature(on_update).parameters)
-        except (TypeError, ValueError):
-            on_update_arity = 1
-
-    def _apply_frame_from_q(q: np.ndarray, frame_idx: int | None = None) -> None:
+    def _apply_frame_from_q(q: np.ndarray) -> None:
         # joints -> ensure length
         joints = q[7 : 7 + robot_dof]
         if joints.shape[0] != robot_dof:
@@ -162,7 +143,7 @@ def create_motion_control_sliders(
         robot_base_frame.wxyz = r_q
 
         # object (optional) (MuJoCo order: pos first, then quat)
-        if state["has_object_input"] and object_base_frame is not None:
+        if has_object_input and object_base_frame is not None:
             object_base_frame.position = q[-7:-4]  # obj pos (xyz)
             o_q = _quat_continuous(prev["obj_q"], q[-4:])
             prev["obj_q"] = o_q
@@ -171,39 +152,10 @@ def create_motion_control_sliders(
             # fallback static pose
             object_base_frame.position = np.zeros(3)
             object_base_frame.wxyz = np.array([1.0, 0.0, 0.0, 0.0])
-        if on_update is not None:
-            if on_update_arity is not None and on_update_arity >= 2:
-                on_update(q, frame_idx)
-            else:
-                on_update(q)
 
     def _apply_discrete_frame(i: int) -> None:
-        max_i = max(0, int(state["n_frames"]) - 1)
-        i = int(np.clip(i, 0, max_i))
-        _apply_frame_from_q(state["qpos"][i], frame_idx=i)
-
-    def _set_sequence(new_qpos: np.ndarray, new_fps: int | None = None) -> None:
-        new_qpos = np.asarray(new_qpos)
-        if new_qpos.ndim != 2 or new_qpos.shape[0] == 0:
-            raise ValueError("new_qpos must have shape [T, D] with T > 0.")
-        playing["flag"] = False
-        tick["next"] = time.perf_counter()
-        prev["robot_q"] = None
-        prev["obj_q"] = None
-
-        state["qpos"] = new_qpos
-        state["n_frames"] = int(new_qpos.shape[0])
-        state["has_object_input"] = _compute_has_object_input(new_qpos)
-
-        updating_programmatically["flag"] = True
-        frame_slider.max = max(0, state["n_frames"] - 1)
-        frame_slider.value = 0
-        updating_programmatically["flag"] = False
-
-        nonlocal_f["f"] = 0.0
-        if new_fps is not None:
-            fps_in.value = int(new_fps)
-        _apply_discrete_frame(0)
+        i = int(np.clip(i, 0, n_frames - 1))
+        _apply_frame_from_q(qpos[i])
 
     # ---------------- controls ----------------
     @play_btn.on_click
@@ -238,10 +190,9 @@ def create_motion_control_sliders(
 
     # ---------------- player loop ----------------
     def _player_loop() -> None:
+        if n_frames <= 1:
+            return
         while True:
-            if state["n_frames"] <= 1:
-                time.sleep(0.05)
-                continue
             if playing["flag"]:
                 now = time.perf_counter()
                 fps_val = max(1, int(fps_in.value))
@@ -250,20 +201,19 @@ def create_motion_control_sliders(
 
                 if now >= tick["next"]:
                     # advance by one visual step
-                    n_frames_local = max(1, int(state["n_frames"]))
                     f = nonlocal_f["f"] + 1.0 / mult
                     if loop:
-                        f = f % n_frames_local
+                        f = f % max(1, n_frames)
                     else:
-                        f = min(f, float(n_frames_local - 1))
+                        f = min(f, float(n_frames - 1))
                     nonlocal_f["f"] = f
 
                     k0 = int(np.floor(f))
-                    k1 = (k0 + 1) % n_frames_local if loop else min(k0 + 1, n_frames_local - 1)
+                    k1 = (k0 + 1) % max(1, n_frames) if loop else min(k0 + 1, n_frames - 1)
                     u = float(f - k0)
 
-                    q_interp = _interp_frame(state["qpos"], k0, k1, u)
-                    _apply_frame_from_q(q_interp, frame_idx=k0)
+                    q_interp = _interp_frame(qpos, k0, k1, u)
+                    _apply_frame_from_q(q_interp)
 
                     # Update slider to show current frame number in real-time
                     # Use flag to prevent callback from pausing playback
@@ -281,9 +231,6 @@ def create_motion_control_sliders(
 
     # initial draw
     _apply_discrete_frame(0)
-
-    if sequence_setter_out is not None:
-        sequence_setter_out["set_sequence"] = _set_sequence
 
     # keep consistent with your previous return convention
     return [frame_slider], [0.0]

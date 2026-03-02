@@ -50,8 +50,8 @@ motion_config_w_object = replace(
 
 motion_config_w_object_generalist = replace(
     motion_config_w_object,
-    # For directory motion banks, sample clips proportional to valid start steps.
-    clip_weighting_strategy="uniform_step",
+    # Enable adaptive clip sampling by default for generalist training.
+    clip_weighting_strategy="success_rate_adaptive",
 )
 
 g1_29dof_wbt_command = CommandManagerCfg(

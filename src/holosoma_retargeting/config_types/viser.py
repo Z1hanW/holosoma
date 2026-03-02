@@ -16,12 +16,6 @@ class ViserConfig:
     qpos_npz: str = "rt_results/OMOMO_new/box_parallel/sub8_largebox_051_original.npz"
     """Path to .npz file with qpos data."""
 
-    qpos_glob: str = "*.npz"
-    """Glob pattern to match .npz files when qpos_npz points to a directory."""
-
-    qpos_recursive: bool = False
-    """Whether to search for .npz files recursively when qpos_npz is a directory."""
-
     robot_urdf: str = "models/g1/g1_29dof.urdf"
     """Path to robot URDF file."""
 

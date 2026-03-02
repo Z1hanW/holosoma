@@ -21,8 +21,9 @@ src_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_path))
 
 # Import with type ignore for mypy compatibility
-from mujoco_utils import _mesh_convex_hull_local_vf, _world_mesh_from_geom
-
+from mujoco_utils import (  # type: ignore[import-not-found,no-redef]  # noqa: E402
+    _world_mesh_from_geom,
+)
 from utils import (  # type: ignore[import-not-found,no-redef]  # noqa: E402
     calculate_laplacian_coordinates,
     calculate_laplacian_matrix,
@@ -83,11 +84,9 @@ class InteractionMeshRetargeter:
         self.robot_model_path = task_constants.ROBOT_URDF_FILE
         self.object_model_path = object_urdf_path
         self.object_name = task_constants.OBJECT_NAME
+        self.object_contact_name = getattr(task_constants, "OBJECT_CONTACT_NAME", self.object_name)
         self.object_mesh_path = object_mesh_path
         self.object_mesh_scale = self._normalize_mesh_scale(object_mesh_scale)
-        self._object_mesh_source = None
-        self._object_mesh_handle = None
-        self._show_object_mesh_source = True
         self.collision_detection_threshold = collision_detection_threshold
         self.activate_foot_sticking = activate_foot_sticking
         self.activate_obj_non_penetration = activate_obj_non_penetration
@@ -128,6 +127,7 @@ class InteractionMeshRetargeter:
         print("Loading robot model from: ", robot_xml_path)
 
         self.robot_data = mujoco.MjData(self.robot_model)
+        self._object_body_ids = self._infer_object_body_ids()
 
         if self.robot_data.qpos.shape[0] > 7 + self.task_constants.ROBOT_DOF:
             self.has_dynamic_object = True
@@ -173,63 +173,50 @@ class InteractionMeshRetargeter:
         self.w_nominal_tracking_init = w_nominal_tracking_init
         self.nominal_tracking_tau = nominal_tracking_tau
         self.track_nominal_indices = task_constants.NOMINAL_TRACKING_INDICES
-        self._show_collision_meshes = False
-        self._show_collision_all = False
-        self._show_interaction_mesh_src = False
-        self._show_interaction_mesh_tgt = False
-        self._collision_handles = {}
-        self._collision_local_cache = {}
-        self._geom_names_cache = None
-        self._interaction_mesh_handles = {}
-        self._interaction_mesh_frames_src = []
-        self._interaction_mesh_frames_tgt = []
-        self._interaction_mesh_tetrahedra = []
-        self._last_frame_idx = 0
-        self._interaction_mesh_line_width = 0.03
 
-    def _normalize_yourdfpy_actuated_indices(self, urdf_model: yourdfpy.URDF) -> None:
-        """Work around yourdfpy returning single-DOF indices as one-element lists."""
-        raw_indices = getattr(urdf_model, "_actuated_dof_indices", None)
-        if not isinstance(raw_indices, list):
-            return
+    def _infer_object_body_ids(self) -> set[int]:
+        """Infer object-related body ids from body names using configured tokens."""
+        tokens = []
+        for token in (self.object_contact_name, self.object_name):
+            token_str = str(token).strip().lower() if token is not None else ""
+            if token_str:
+                tokens.append(token_str)
+        tokens = list(dict.fromkeys(tokens))
+        if not tokens:
+            return set()
 
-        normalized_indices = []
-        for idx in raw_indices:
-            arr = np.asarray(idx).reshape(-1)
-            if arr.size == 1:
-                normalized_indices.append(int(arr[0]))
-            else:
-                normalized_indices.append([int(v) for v in arr.tolist()])
-        urdf_model._actuated_dof_indices = normalized_indices
+        m = self.robot_model
+        base_ids: set[int] = set()
+        for body_id in range(m.nbody):
+            body_name = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, body_id) or ""
+            lname = body_name.lower()
+            if any(tok in lname for tok in tokens):
+                base_ids.add(body_id)
 
-    def _load_urdf_for_viser(self, urdf_path: str) -> yourdfpy.URDF:
-        """Load URDF robustly for viser, with a fallback for yourdfpy scalar-index bug."""
-        try:
-            return yourdfpy.URDF.load(
-                urdf_path,
-                load_meshes=True,
-                build_scene_graph=True,
-            )
-        except TypeError as exc:
-            message = str(exc)
-            if "0-dimensional arrays can be converted to Python scalars" not in message:
-                raise
+        if not base_ids:
+            return set()
 
-            print(
-                "[warn] yourdfpy failed to build scene graph due scalar-index issue; "
-                f"retrying with compatibility workaround for: {urdf_path}"
-            )
-            urdf_model = yourdfpy.URDF.load(
-                urdf_path,
-                load_meshes=True,
-                build_scene_graph=False,
-            )
-            self._normalize_yourdfpy_actuated_indices(urdf_model)
-            urdf_model._scene = urdf_model._create_scene(
-                use_collision_geometry=False,
-                load_geometry=True,
-            )
-            return urdf_model
+        # Include descendants whose parent chain reaches a matched object body.
+        object_ids: set[int] = set(base_ids)
+        for body_id in range(m.nbody):
+            cur = body_id
+            while cur > 0:
+                if cur in base_ids:
+                    object_ids.add(body_id)
+                    break
+                cur = int(m.body_parentid[cur])
+
+        return object_ids
+
+    def _normalize_mesh_scale(self, scale):
+        if scale is None:
+            return np.ones(3, dtype=float)
+        scale_arr = np.asarray(scale, dtype=float).reshape(-1)
+        if scale_arr.size == 1:
+            return np.repeat(scale_arr, 3)
+        if scale_arr.size != 3:
+            raise ValueError("object_mesh_scale must be a scalar or a 3-element array.")
+        return scale_arr
 
     def _setup_visualization(self):
         """Setup Viser visualization components."""
@@ -245,7 +232,11 @@ class InteractionMeshRetargeter:
         self.robot_base = self.server.scene.add_frame("/world/robot", show_axes=False)
 
         # Load robot URDF
-        self.robot_urdf = self._load_urdf_for_viser(self.robot_model_path)
+        self.robot_urdf = yourdfpy.URDF.load(
+            self.robot_model_path,
+            load_meshes=True,
+            build_scene_graph=True,
+        )
 
         print("Viser using robot URDF: ", self.robot_model_path)
 
@@ -260,7 +251,11 @@ class InteractionMeshRetargeter:
         if self.object_model_path:
             self.object_base = self.server.scene.add_frame("/world/object", show_axes=False)
 
-            self.object_urdf = self._load_urdf_for_viser(self.object_model_path)
+            self.object_urdf = yourdfpy.URDF.load(
+                self.object_model_path,
+                load_meshes=True,
+                build_scene_graph=True,
+            )
 
             # Create ViserUrdf instance for object, attaching it to the object_base frame
             self.viser_object = ViserUrdf(
@@ -268,17 +263,10 @@ class InteractionMeshRetargeter:
                 urdf_or_path=self.object_urdf,
                 root_node_name="/world/object",  # This links to the object_base frame we created
             )
-            # Hide object visual mesh by default (avoids showing the unscaled/grey mesh).
-            self.viser_object.show_visual = False
             print("Viser using object URDF: ", self.object_model_path)
 
         else:
             self.viser_object = None
-            self.object_base = None
-
-        # Optional: show the sampled mesh source (.obj) in the object frame.
-        if self.object_base is not None and self.object_mesh_path:
-            self._set_object_mesh_source_visualization(self._show_object_mesh_source)
 
         # Check the number of actuated joints and their names
         robot_joint_limits = self.viser_robot.get_actuated_joint_limits()
@@ -298,57 +286,6 @@ class InteractionMeshRetargeter:
             position=(0.0, 0.0, 0.0),
         )
 
-    def _normalize_mesh_scale(self, scale):
-        if scale is None:
-            return np.ones(3, dtype=float)
-        scale_arr = np.asarray(scale, dtype=float).reshape(-1)
-        if scale_arr.size == 1:
-            return np.repeat(scale_arr, 3)
-        if scale_arr.size != 3:
-            raise ValueError("object_mesh_scale must be a scalar or a 3-element array.")
-        return scale_arr
-
-    def _load_object_mesh_source(self):
-        if not self.object_mesh_path:
-            return None
-        try:
-            mesh = trimesh.load(self.object_mesh_path, force="mesh")
-        except Exception as exc:  # pragma: no cover - best-effort debug visual
-            print(f"[viser] Failed to load object mesh: {self.object_mesh_path} ({exc})")
-            return None
-        if isinstance(mesh, trimesh.Scene):
-            mesh = trimesh.util.concatenate(mesh.dump())
-        verts = np.asarray(mesh.vertices, dtype=np.float32)
-        faces = np.asarray(mesh.faces, dtype=np.int32)
-        verts = verts * self.object_mesh_scale.reshape(1, 3)
-        self._object_mesh_source = (verts, faces)
-        return self._object_mesh_source
-
-    def _set_object_mesh_source_visualization(self, show: bool):
-        self._show_object_mesh_source = bool(show)
-        if not hasattr(self, "server") or self.object_base is None:
-            return
-        if not self._show_object_mesh_source:
-            if self._object_mesh_handle is not None:
-                self._object_mesh_handle.remove()
-                self._object_mesh_handle = None
-            return
-        if self._object_mesh_source is None:
-            self._load_object_mesh_source()
-        if self._object_mesh_source is None:
-            return
-        verts, faces = self._object_mesh_source
-        if self._object_mesh_handle is not None:
-            self._object_mesh_handle.remove()
-            self._object_mesh_handle = None
-        self._object_mesh_handle = self.server.scene.add_mesh_simple(
-            "/world/object/sample_mesh",
-            vertices=verts,
-            faces=faces,
-            color=(0.2, 0.8, 1.0),
-            opacity=0.35,
-        )
-
     def draw_mesh_from_geom(self, model, data, geom_id, geom_name, name="/mesh", color=(50, 150, 255), opacity=0.5):
         """
         Draw a single MuJoCo mesh geom (already baked to world coords) in viser.
@@ -365,203 +302,6 @@ class InteractionMeshRetargeter:
             color=tuple(int(c) for c in color),
             opacity=float(opacity),
         )
-
-    def _ensure_geom_names_cache(self):
-        if self._geom_names_cache is None:
-            self._geom_names_cache = [
-                mujoco.mj_id2name(self.robot_model, mujoco.mjtObj.mjOBJ_GEOM, g) or ""
-                for g in range(self.robot_model.ngeom)
-            ]
-
-    def _geom_name_cached(self, geom_id: int) -> str:
-        self._ensure_geom_names_cache()
-        return self._geom_names_cache[geom_id]
-
-    def _geom_is_collision(self, geom_id: int) -> bool:
-        return bool(self.robot_model.geom_contype[geom_id] or self.robot_model.geom_conaffinity[geom_id])
-
-    def _geom_is_object_or_ground(self, geom_id: int) -> bool:
-        name = self._geom_name_cached(geom_id)
-        if "ground" in name:
-            return True
-        if self.object_name and self.object_name in name:
-            return True
-        return name.startswith("part_")
-
-    def _collision_geom_color(self, geom_id: int) -> tuple[int, int, int]:
-        name = self._geom_name_cached(geom_id)
-        if "ground" in name:
-            return (110, 110, 110)
-        if self.object_name and (self.object_name in name or name.startswith("part_")):
-            return (255, 80, 80)
-        return (60, 150, 255)
-
-    def _collision_local_mesh_for_geom(self, geom_id: int):
-        gtype = int(self.robot_model.geom_type[geom_id])
-        size = np.asarray(self.robot_model.geom_size[geom_id], dtype=float)
-
-        if gtype == mujoco.mjtGeom.mjGEOM_MESH:
-            V_local, F = _mesh_convex_hull_local_vf(self.robot_model, geom_id)
-            if V_local is None or F is None:
-                return None, None
-            return V_local, F
-
-        if gtype == mujoco.mjtGeom.mjGEOM_BOX:
-            mesh = trimesh.creation.box(extents=2.0 * size)
-        elif gtype == mujoco.mjtGeom.mjGEOM_SPHERE:
-            mesh = trimesh.creation.icosphere(subdivisions=2, radius=float(size[0]))
-        elif gtype == mujoco.mjtGeom.mjGEOM_CAPSULE:
-            mesh = trimesh.creation.capsule(height=2.0 * float(size[1]), radius=float(size[0]))
-        elif gtype == mujoco.mjtGeom.mjGEOM_CYLINDER:
-            mesh = trimesh.creation.cylinder(radius=float(size[0]), height=2.0 * float(size[1]))
-        elif gtype == mujoco.mjtGeom.mjGEOM_ELLIPSOID:
-            base = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
-            return base.vertices * size, base.faces
-        elif gtype == mujoco.mjtGeom.mjGEOM_PLANE:
-            sx = float(size[0]) if size[0] > 0 else 5.0
-            sy = float(size[1]) if size[1] > 0 else 5.0
-            thickness = max(1e-3, 0.002 * max(sx, sy))
-            mesh = trimesh.creation.box(extents=(2.0 * sx, 2.0 * sy, thickness))
-        else:
-            return None, None
-
-        return mesh.vertices, mesh.faces
-
-    def _ensure_collision_cache(self):
-        if self._collision_local_cache:
-            return
-        for geom_id in range(self.robot_model.ngeom):
-            if not self._geom_is_collision(geom_id):
-                self._collision_local_cache[geom_id] = None
-                continue
-            V_local, F = self._collision_local_mesh_for_geom(geom_id)
-            if V_local is None or F is None:
-                self._collision_local_cache[geom_id] = None
-            else:
-                self._collision_local_cache[geom_id] = (
-                    np.asarray(V_local, dtype=np.float32),
-                    np.asarray(F, dtype=np.int32),
-                )
-
-    def _clear_collision_meshes(self):
-        if not hasattr(self, "server"):
-            return
-        for handle in self._collision_handles.values():
-            try:
-                handle.remove()
-            except Exception:
-                pass
-        self._collision_handles = {}
-
-    def _refresh_collision_meshes(self, q: np.ndarray | None, show_all: bool):
-        if not hasattr(self, "server"):
-            return
-
-        self._ensure_collision_cache()
-        if q is not None:
-            self.robot_data.qpos[:] = q
-            mujoco.mj_forward(self.robot_model, self.robot_data)
-
-        self._clear_collision_meshes()
-
-        for geom_id in range(self.robot_model.ngeom):
-            if not self._geom_is_collision(geom_id):
-                continue
-            if not show_all and not self._geom_is_object_or_ground(geom_id):
-                continue
-            cached = self._collision_local_cache.get(geom_id)
-            if cached is None:
-                continue
-            V_local, F = cached
-            R = self.robot_data.geom_xmat[geom_id].reshape(3, 3)
-            t = self.robot_data.geom_xpos[geom_id].reshape(3)
-            V_world = V_local @ R.T + t
-            geom_name = self._geom_name_cached(geom_id) or f"geom_{geom_id}"
-            safe_name = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in geom_name)
-            path = f"/world/mj_collision/{geom_id}_{safe_name}"
-            handle = self.server.scene.add_mesh_simple(
-                path,
-                vertices=V_world.astype(np.float32),
-                faces=F,
-                position=(0.0, 0.0, 0.0),
-                color=self._collision_geom_color(geom_id),
-                opacity=0.25,
-            )
-            self._collision_handles[geom_id] = handle
-
-    def _set_collision_visualization(self, show: bool, show_all: bool):
-        self._show_collision_meshes = bool(show)
-        self._show_collision_all = bool(show_all)
-        if not show:
-            self._clear_collision_meshes()
-            return
-        q = getattr(self, "_last_q", None)
-        self._refresh_collision_meshes(q, show_all=self._show_collision_all)
-
-    def _on_viser_frame_update(self, q: np.ndarray, frame_idx: int | None = None):
-        self._last_q = np.asarray(q, dtype=float).copy()
-        if frame_idx is not None:
-            self._last_frame_idx = int(frame_idx)
-        if self._show_collision_meshes:
-            self._refresh_collision_meshes(self._last_q, show_all=self._show_collision_all)
-        if self._show_interaction_mesh_src or self._show_interaction_mesh_tgt:
-            frame_idx = getattr(self, "_last_frame_idx", None)
-            if frame_idx is not None:
-                self._update_interaction_mesh_vis(frame_idx)
-
-    def _clear_interaction_meshes(self):
-        for handle in list(self._interaction_mesh_handles.values()):
-            try:
-                handle.remove()
-            except Exception:
-                pass
-        self._interaction_mesh_handles = {}
-
-    def _set_interaction_mesh_visualization(self, show_src: bool, show_tgt: bool):
-        self._show_interaction_mesh_src = bool(show_src)
-        self._show_interaction_mesh_tgt = bool(show_tgt)
-        if not self._show_interaction_mesh_src and not self._show_interaction_mesh_tgt:
-            self._clear_interaction_meshes()
-            return
-        frame_idx = getattr(self, "_last_frame_idx", 0)
-        self._update_interaction_mesh_vis(int(frame_idx))
-
-    def _update_interaction_mesh_vis(self, frame_idx: int):
-        if not hasattr(self, "server"):
-            return
-        if not hasattr(self, "_interaction_mesh_frames_src") or not hasattr(self, "_interaction_mesh_tetrahedra"):
-            return
-        if frame_idx < 0 or frame_idx >= len(self._interaction_mesh_tetrahedra):
-            return
-
-        self._clear_interaction_meshes()
-        tetra = self._interaction_mesh_tetrahedra[frame_idx]
-
-        if self._show_interaction_mesh_src and self._interaction_mesh_frames_src:
-            if frame_idx < len(self._interaction_mesh_frames_src):
-                verts_src = self._interaction_mesh_frames_src[frame_idx]
-                handle = self.visualize_tetrahedra(
-                    verts_src,
-                    tetra,
-                    name="interaction_mesh_src",
-                    color=(1, 0, 0, 1),
-                    line_width=self._interaction_mesh_line_width,
-                )
-                if handle is not None:
-                    self._interaction_mesh_handles["src"] = handle
-
-        if self._show_interaction_mesh_tgt and self._interaction_mesh_frames_tgt:
-            if frame_idx < len(self._interaction_mesh_frames_tgt):
-                verts_tgt = self._interaction_mesh_frames_tgt[frame_idx]
-                handle = self.visualize_tetrahedra(
-                    verts_tgt,
-                    tetra,
-                    name="interaction_mesh_tgt",
-                    color=(0, 1, 0, 1),
-                    line_width=self._interaction_mesh_line_width,
-                )
-                if handle is not None:
-                    self._interaction_mesh_handles["tgt"] = handle
 
     def draw_mesh_pair_with_contact(
         self,
@@ -634,17 +374,7 @@ class InteractionMeshRetargeter:
             q_locked_list = q_nominal_list
         else:
             q_locked_list = np.zeros((num_frames, self.nq))
-            if q_a_init is None:
-                raise ValueError("q_a_init must be provided when q_nominal_list is None.")
-            q_a_init_arr = np.asarray(q_a_init).reshape(-1)
-            if q_a_init_arr.shape[0] != len(self.q_a_indices):
-                if q_a_init_arr.shape[0] >= (self.q_a_indices.max() + 1):
-                    q_a_init_arr = q_a_init_arr[self.q_a_indices]
-                else:
-                    raise ValueError(
-                        f"q_a_init has shape {q_a_init_arr.shape}, expected {len(self.q_a_indices)}"
-                    )
-            q_locked_list[0, self.q_a_indices] = q_a_init_arr
+            q_locked_list[0, self.q_a_indices] = q_a_init
 
         q_locked_list[:, -7:] = object_poses_augmented
         q = np.copy(q_locked_list[0])
@@ -653,14 +383,9 @@ class InteractionMeshRetargeter:
         tetrahedra = []
         obj_pts_demo_list = []  # scaled object pts
         obj_pts_list = []  # original size object pts
-        interaction_mesh_frames_src = [] if self.visualize else None
-        interaction_mesh_frames_tgt = [] if self.visualize else None
-        human_kpts_handle_list = []
-        obj_kpts_demo_handle_list = []
-        obj_kpts_handle_list = []
-        robot_kpts_handle_list = []
 
         print(f"\nStarting motion retargeting for {num_frames} frames...")
+
         with tqdm(range(num_frames)) as pbar:
             for i in pbar:
                 # Get object poses and transform points
@@ -682,15 +407,6 @@ class InteractionMeshRetargeter:
                 )
                 tetrahedra.append(source_tetrahedra)
 
-                if interaction_mesh_frames_src is not None:
-                    if self.object_name == "ground":
-                        source_vertices_world = source_vertices
-                    else:
-                        source_vertices_world = transform_points_local_to_world(
-                            object_quat_demo, object_trans_demo, source_vertices
-                        )
-                    interaction_mesh_frames_src.append(source_vertices_world)
-
                 if self.debug:
                     # Only for visualization
                     object_quat = object_poses_augmented[i, 3:]
@@ -702,13 +418,13 @@ class InteractionMeshRetargeter:
 
                     obj_pts_demo_list.append(obj_pts_demo)
                     obj_pts_list.append(obj_pts)
-                    human_kpts_handle_list = self.draw_keypoints(human_mapped_joints, name="human_kpts") or []  # 15 X 3
+                    human_kpts_handle_list = self.draw_keypoints(human_mapped_joints, name="human_kpts")  # 15 X 3
                     obj_kpts_demo_handle_list = self.draw_keypoints(
                         obj_pts_demo, name="object_demo_kpts", rgba=(1, 0, 0, 1)
-                    ) or []  # 100 X 3
+                    )  # 100 X 3
                     obj_kpts_handle_list = self.draw_keypoints(
                         obj_pts, name="object_kpts", rgba=(0, 1, 1, 1)
-                    ) or []  # 100 X 3
+                    )  # 100 X 3
 
                 # Create adjacency list and calculate target Laplacian coordinates
                 adj_list = get_adjacency_list(source_tetrahedra, len(source_vertices))
@@ -733,21 +449,13 @@ class InteractionMeshRetargeter:
                     init_t=i == 0,
                     n_iter=50 if i == 0 else 10,
                 )
-                robot_link_positions = None
-                obj_pts = None
-                if interaction_mesh_frames_tgt is not None or self.debug:
-                    object_quat = object_poses_augmented[i, 3:]
-                    object_trans = object_poses_augmented[i, :3]
-                    obj_pts = transform_points_local_to_world(object_quat, object_trans, object_points_local)
+                if self.debug:
                     robot_link_positions = self._get_robot_link_positions(
                         q, self.laplacian_match_links.values()
                     )  # 15 X 3
-                if interaction_mesh_frames_tgt is not None and robot_link_positions is not None and obj_pts is not None:
-                    interaction_mesh_frames_tgt.append(np.vstack([robot_link_positions, obj_pts]))
-                if self.debug and robot_link_positions is not None:
                     robot_kpts_handle_list = self.draw_keypoints(
                         robot_link_positions, name="robot_kpts", rgba=(0, 1, 0, 1)
-                    ) or []
+                    )
 
                 retargeted_motions.append(q)
                 if self.visualize and self.debug:
@@ -781,6 +489,7 @@ class InteractionMeshRetargeter:
             fps=30,
             cost=cost,
             object_name=str(self.object_name) if self.object_name is not None else "",
+            object_contact_name=str(self.object_contact_name) if self.object_contact_name is not None else "",
             object_urdf_path=str(self.object_model_path) if self.object_model_path is not None else "",
             scene_xml_file=str(getattr(self.task_constants, "SCENE_XML_FILE", "") or ""),
             robot_urdf_file=str(getattr(self.task_constants, "ROBOT_URDF_FILE", "") or ""),
@@ -788,12 +497,6 @@ class InteractionMeshRetargeter:
             object_mesh_scale=np.asarray(self.object_mesh_scale, dtype=np.float32),
         )
         print("Saving results to path:", dest_res_path)
-
-        if self.visualize:
-            self._interaction_mesh_frames_src = interaction_mesh_frames_src or []
-            self._interaction_mesh_frames_tgt = interaction_mesh_frames_tgt or []
-            self._interaction_mesh_tetrahedra = tetrahedra
-            self._last_frame_idx = 0
 
         if self.visualize:
             robot_dof = len(self.viser_robot.get_actuated_joint_limits())
@@ -810,7 +513,6 @@ class InteractionMeshRetargeter:
                 initial_fps=30,
                 initial_interp_mult=2,
                 loop=False,
-                on_update=self._on_viser_frame_update,
             )
 
             # 4) optional: visibility toggle
@@ -820,54 +522,8 @@ class InteractionMeshRetargeter:
                 @show_meshes_cb.on_update
                 def _(_):
                     self.viser_robot.show_visual = show_meshes_cb.value
-                if self.object_mesh_path and self.object_base is not None:
-                    show_obj_mesh_cb = self.server.gui.add_checkbox(
-                        "Show sampled OBJ",
-                        self._show_object_mesh_source,
-                    )
-
-                    @show_obj_mesh_cb.on_update
-                    def _(_):
-                        self._set_object_mesh_source_visualization(show_obj_mesh_cb.value)
-            with self.server.gui.add_folder("Collision"):
-                show_collision_cb = self.server.gui.add_checkbox("Show MuJoCo collision", False)
-                show_collision_all_cb = self.server.gui.add_checkbox("Include robot geoms", False)
-
-                @show_collision_cb.on_update
-                def _(_):
-                    self._set_collision_visualization(show_collision_cb.value, show_collision_all_cb.value)
-
-                @show_collision_all_cb.on_update
-                def _(_):
-                    self._set_collision_visualization(show_collision_cb.value, show_collision_all_cb.value)
-            with self.server.gui.add_folder("Interaction Mesh"):
-                show_interaction_src_cb = self.server.gui.add_checkbox("Show source mesh", False)
-                show_interaction_tgt_cb = self.server.gui.add_checkbox("Show target mesh", False)
-                mesh_line_width_in = self.server.gui.add_number(
-                    "Line width",
-                    initial_value=float(self._interaction_mesh_line_width),
-                    min=0.001,
-                    max=0.2,
-                    step=0.001,
-                )
-
-                @show_interaction_src_cb.on_update
-                def _(_):
-                    self._set_interaction_mesh_visualization(
-                        show_interaction_src_cb.value, show_interaction_tgt_cb.value
-                    )
-
-                @show_interaction_tgt_cb.on_update
-                def _(_):
-                    self._set_interaction_mesh_visualization(
-                        show_interaction_src_cb.value, show_interaction_tgt_cb.value
-                    )
-
-                @mesh_line_width_in.on_update
-                def _(_):
-                    self._interaction_mesh_line_width = float(mesh_line_width_in.value)
-                    if self._show_interaction_mesh_src or self._show_interaction_mesh_tgt:
-                        self._update_interaction_mesh_vis(getattr(self, "_last_frame_idx", 0))
+                    if self.viser_object is not None:
+                        self.viser_object.show_visual = show_meshes_cb.value
 
         return (
             np.array(retargeted_motions)[1:],
@@ -947,7 +603,7 @@ class InteractionMeshRetargeter:
         constraints = []
 
         # Linear equality
-        constraints += [cp.Constant(J_L) @ dqa - lap_var == -lap0_vec]
+        constraints += [cp.Constant(J_L[:, self.q_a_indices]) @ dqa - lap_var == -lap0_vec]
 
         # Foot sticking
         if (self.q_a_init_idx < 12) and self.activate_foot_sticking:
@@ -970,8 +626,7 @@ class InteractionMeshRetargeter:
                     p_lb = p_WF_t_last_dict[key] - p_WF_dict[key] - self.foot_sticking_tolerance
                     p_ub = p_lb + 2 * self.foot_sticking_tolerance  # symmetric window
 
-                    # J_WF is already reduced to q_a_indices in _calc_manipulator_jacobians.
-                    Jxy = J_WF[:2, :]  # (2 x nq_act)
+                    Jxy = J_WF[:2, self.q_a_indices]  # (2 x nq_act)
                     constraints += [
                         Jxy @ dqa >= p_lb[:2],
                         Jxy @ dqa <= p_ub[:2],
@@ -1082,7 +737,6 @@ class InteractionMeshRetargeter:
 
     def draw_q(self, q: np.ndarray):
         """Draw a single robot configuration."""
-        self._last_q = np.asarray(q, dtype=float).copy()
         # Update robot joint configurations
         robot_joint_positions = q[7 : 7 + self.task_constants.ROBOT_DOF]
         self.viser_robot.update_cfg(robot_joint_positions)
@@ -1107,8 +761,6 @@ class InteractionMeshRetargeter:
             # Update object base frame
             self.object_base.position = object_pos
             self.object_base.wxyz = object_quat  # Assuming quaternion is in wxyz order
-        if self._show_collision_meshes:
-            self._refresh_collision_meshes(self._last_q, show_all=self._show_collision_all)
 
     def draw_keypoints(self, p, name="keypoint", rgba=(0, 0, 1, 1)):
         """Draw keypoints in visualization."""
@@ -1189,19 +841,12 @@ class InteractionMeshRetargeter:
                     np.vstack([robot_link_positions, object_pts]),
                     tetrahedra[i],
                     name="robot_tetrahedra",
-                    color=(0, 1, 1, 1),
+                    rgba=(0, 1, 1, 1),
                 )
             else:
                 time.sleep(dt)
 
-    def visualize_tetrahedra(
-        self,
-        vertices,
-        tetrahedra,
-        name="tetrahedra",
-        color=(0, 0, 0, 1),
-        line_width: float = 0.01,
-    ):
+    def visualize_tetrahedra(self, vertices, tetrahedra, name="tetrahedra", color=(0, 0, 0, 1)):
         # Convert color to 0-255 range
         color_255 = np.array(color[:3]) * 255
 
@@ -1217,15 +862,15 @@ class InteractionMeshRetargeter:
                     colors.extend([color_255, color_255])
 
         # Convert to numpy arrays
-        points = np.array(points).reshape(-1, 2, 3)
-        colors = np.array(colors).reshape(-1, 2, 3)
+        points = np.array(points)
+        colors = np.array(colors)
 
         # Add line segments for all edges at once
-        return self.server.scene.add_line_segments(
+        self.server.scene.add_line_segments(
             f"/{name}",
             points=points,
             colors=colors,
-            line_width=float(line_width),
+            line_width=0.01,
         )
 
     def _compute_jacobian_for_contact_relative(self, geom1, geom2, geom1_name, geom2_name, fromto, dist):
@@ -1247,10 +892,8 @@ class InteractionMeshRetargeter:
         else:
             nhat_BA_W = np.array([0.0, 0.0, 0.0])
 
-        bodyA = int(np.asarray(geom1.bodyid).item())
-        bodyB = int(np.asarray(geom2.bodyid).item())
-        J_bodyA = self._calc_contact_jacobian_from_point(bodyA, pos1, input_world=True)
-        J_bodyB = self._calc_contact_jacobian_from_point(bodyB, pos2, input_world=True)
+        J_bodyA = self._calc_contact_jacobian_from_point(geom1.bodyid, pos1, input_world=True)
+        J_bodyB = self._calc_contact_jacobian_from_point(geom2.bodyid, pos2, input_world=True)
 
         # Compute relative Jacobian
         Jc = J_bodyA - J_bodyB
@@ -1286,6 +929,21 @@ class InteractionMeshRetargeter:
 
         return candidates
 
+    def _is_object_geom(self, geom_id: int, geom_name: str) -> bool:
+        """Return True if a MuJoCo geom belongs to the dynamic object."""
+        if 0 <= int(geom_id) < int(self.robot_model.ngeom):
+            body_id = int(self.robot_model.geom_bodyid[int(geom_id)])
+            if body_id in self._object_body_ids:
+                return True
+
+        name = (geom_name or "").lower()
+        for token in (self.object_contact_name, self.object_name):
+            token_str = str(token).strip().lower() if token is not None else ""
+            if token_str and token_str in name:
+                return True
+        # Terrain/object scenes can expose pieces as part_* geoms.
+        return name.startswith("part_")
+
     def _update_jacobians_and_phis_from_q(self, q: np.ndarray):
         self.robot_data.qpos[:] = q
 
@@ -1308,52 +966,31 @@ class InteractionMeshRetargeter:
                 return False
             if contype[g2] == 0 and conaff[g2] == 0:
                 return False
-            if self.object_name in self._geom_names[g1] and "ground" in self._geom_names[g2]:
+            g1_name = self._geom_names[g1]
+            g2_name = self._geom_names[g2]
+            g1_is_obj = self._is_object_geom(g1, g1_name)
+            g2_is_obj = self._is_object_geom(g2, g2_name)
+            g1_is_ground = "ground" in g1_name.lower()
+            g2_is_ground = "ground" in g2_name.lower()
+            if g1_is_obj and g2_is_ground:
                 return False
-            if "ground" in self._geom_names[g1] and self.object_name in self._geom_names[g2]:
+            if g1_is_ground and g2_is_obj:
                 return False
-            def is_obj(name: str) -> bool:
-                if self.object_name in name:
-                    return True
-                # Supplement: treat terrain pieces named "part_*" as object geoms.
-                return name.startswith("part_")
+            return g1_is_obj or g2_is_obj or g1_is_ground or g2_is_ground
 
-            return (
-                is_obj(self._geom_names[g1])
-                or is_obj(self._geom_names[g2])
-                or "ground" in self._geom_names[g1]
-                or "ground" in self._geom_names[g2]
-            )
+        for g1, g2 in candidates:
+            # Optional: keep your own filters here (e.g., skip object-ground, only keep interaction with object/ground)
+            if not masks_ok(g1, g2):
+                continue
 
-        def _as_int_list(val):
-            arr = np.asarray(val)
-            if arr.shape == ():
-                return [int(arr)]
-            return [int(v) for v in arr.reshape(-1)]
-
-        for g1_raw, g2_raw in candidates:
-            g1_list = _as_int_list(g1_raw)
-            g2_list = _as_int_list(g2_raw)
-
-            # If both are arrays from a paired query (e.g., np.where), preserve pairing.
-            if len(g1_list) == len(g2_list) and len(g1_list) > 1:
-                pair_iter = zip(g1_list, g2_list)
-            else:
-                pair_iter = ((g1, g2) for g1 in g1_list for g2 in g2_list)
-
-            for g1, g2 in pair_iter:
-                # Optional: keep your own filters here (e.g., skip object-ground, only keep interaction with object/ground)
-                if not masks_ok(g1, g2):
-                    continue
-
-                fromto[:] = 0.0
-                dist = mujoco.mj_geomDistance(m, d, g1, g2, threshold, fromto)
-                if dist <= threshold:
-                    J_rel = self._compute_jacobian_for_contact_relative(
-                        m.geom(g1), m.geom(g2), self._geom_names[g1], self._geom_names[g2], fromto, dist
-                    )
-                    Js[(g1, g2)] = J_rel
-                    phis[(g1, g2)] = float(dist)
+            fromto[:] = 0.0
+            dist = mujoco.mj_geomDistance(m, d, g1, g2, threshold, fromto)
+            if dist <= threshold:
+                J_rel = self._compute_jacobian_for_contact_relative(
+                    m.geom(g1), m.geom(g2), self._geom_names[g1], self._geom_names[g2], fromto, dist
+                )
+                Js[(g1, g2)] = J_rel
+                phis[(g1, g2)] = float(dist)
 
                 # For debug
                 # self.draw_mesh_pair_with_contact(self.robot_model, self.robot_data, g1, g2,   \
@@ -1481,7 +1118,8 @@ class InteractionMeshRetargeter:
         # 3) J_v: translational Jacobian wrt generalized velocities (3 x nv)
         Jp = np.zeros((3, self.robot_model.nv), dtype=np.float64, order="C")
         Jr = np.zeros((3, self.robot_model.nv), dtype=np.float64, order="C")
-        mujoco.mj_jac(self.robot_model, self.robot_data, Jp, Jr, p_W, int(body_idx))  # Jp = J_v
+        body_id_int = int(np.asarray(body_idx).reshape(-1)[0])
+        mujoco.mj_jac(self.robot_model, self.robot_data, Jp, Jr, p_W, body_id_int)  # Jp = J_v
 
         T = self._build_transform_qdot_to_qvel_fast()
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import json
 import math
 import copy
 import os
@@ -67,6 +68,7 @@ class IsaacSim(BaseSimulator):
 
         # Add device attribute for base simulator compatibility
         self.device = device
+        self._object_urdf_by_name: dict[str, str] = {}
 
         sim_config: SimulationCfg = SimulationCfg(
             dt=1.0 / self.simulator_config.sim.fps,
@@ -207,6 +209,69 @@ class IsaacSim(BaseSimulator):
         # print the environment information
 
         logger.info("Completed setting up the environment...")
+
+    @staticmethod
+    def _sanitize_object_name(name: str) -> str:
+        cleaned = "".join(ch if ch.isalnum() else "_" for ch in name.strip().lower())
+        cleaned = cleaned.strip("_")
+        return cleaned or "object"
+
+    def _resolve_object_specs(self, object_path_spec: str) -> list[tuple[str, str]]:
+        """Resolve object asset specification into unique (object_name, urdf_path) pairs."""
+        resolved = resolve_data_file_path(object_path_spec)
+        path = pathlib.Path(resolved)
+
+        raw_specs: list[tuple[str, str]] = []
+        if path.is_file() and path.suffix.lower() == ".json":
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and isinstance(payload.get("clips"), dict):
+                payload = payload["clips"]
+            if not isinstance(payload, dict):
+                raise ValueError(f"Invalid object spec json: {path}")
+            for entry in payload.values():
+                if isinstance(entry, str):
+                    urdf_path = entry.strip()
+                    if urdf_path:
+                        if not pathlib.Path(urdf_path).is_absolute() and not urdf_path.startswith("holosoma/data"):
+                            urdf_path = str((path.parent / urdf_path).resolve())
+                        raw_specs.append(("", urdf_path))
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                urdf_path = str(entry.get("object_urdf_path", "")).strip()
+                obj_name = str(entry.get("object_name", "")).strip()
+                if urdf_path:
+                    if not pathlib.Path(urdf_path).is_absolute() and not urdf_path.startswith("holosoma/data"):
+                        urdf_path = str((path.parent / urdf_path).resolve())
+                    raw_specs.append((obj_name, urdf_path))
+        elif path.is_dir():
+            for urdf in sorted(list(path.rglob("*.urdf")) + list(path.rglob("*.URDF"))):
+                raw_specs.append((urdf.stem, str(urdf)))
+        else:
+            if path.suffix.lower() != ".urdf":
+                raise ValueError(f"Object path must be a URDF file, directory, or json map: {resolved}")
+            raw_specs.append((path.stem, str(path)))
+
+        unique_specs: list[tuple[str, str]] = []
+        seen_paths: set[str] = set()
+        used_names: set[str] = set()
+        for obj_name, urdf_path in raw_specs:
+            urdf_resolved = pathlib.Path(resolve_data_file_path(urdf_path)).resolve()
+            urdf_key = str(urdf_resolved)
+            if urdf_key in seen_paths:
+                continue
+            seen_paths.add(urdf_key)
+
+            base_name = self._sanitize_object_name(obj_name if obj_name else urdf_resolved.stem)
+            name = base_name
+            suffix = 1
+            while name in used_names:
+                suffix += 1
+                name = f"{base_name}_{suffix}"
+            used_names.add(name)
+            unique_specs.append((name, urdf_key))
+
+        return unique_specs
 
     def _setup_scene(self) -> None:
         self._load_scene_config()
@@ -404,42 +469,57 @@ class IsaacSim(BaseSimulator):
             self._height_scanner = RayCaster(height_scanner_config)
             self.scene.sensors["height_scanner"] = self._height_scanner
 
-        # add training object before collision filtering so it is included in env isolation.
+        # add training object(s) before collision filtering so they are included in env isolation.
         if getattr(self.robot_config.object, "enabled", False) and self.robot_config.object.object_urdf_path:
-            # Resolve the object asset urdf path using importlib.resources
-            object_asset_urdf_path = resolve_data_file_path(self.robot_config.object.object_urdf_path)
-            object_name = "object"  # hardcoded object name
-            object_cfg = RigidObjectCfg(
-                prim_path=f"/World/envs/env_.*/Object",
-                spawn=sim_utils.UrdfFileCfg(
-                    fix_base=False,
-                    replace_cylinders_with_capsules=True,
-                    asset_path=object_asset_urdf_path,
-                    activate_contact_sensors=True,
-                    rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                        disable_gravity=False,
-                        retain_accelerations=False,
-                        linear_damping=0.01,
-                        angular_damping=0.01,
-                        max_linear_velocity=1000.0,
-                        max_angular_velocity=1000.0,
-                        max_depenetration_velocity=1.0,
+            object_specs = self._resolve_object_specs(self.robot_config.object.object_urdf_path)
+            if not object_specs:
+                raise ValueError(
+                    f"No valid object URDFs resolved from: {self.robot_config.object.object_urdf_path}"
+                )
+
+            use_single_name = len(object_specs) == 1
+            self._object_urdf_by_name = {}
+            for idx, (raw_name, object_asset_urdf_path) in enumerate(object_specs):
+                object_name = "object" if use_single_name else raw_name
+                prim_suffix = "Object" if use_single_name else f"Object_{idx}_{object_name}"
+                object_cfg = RigidObjectCfg(
+                    prim_path=f"/World/envs/env_.*/{prim_suffix}",
+                    spawn=sim_utils.UrdfFileCfg(
+                        fix_base=False,
+                        replace_cylinders_with_capsules=True,
+                        asset_path=object_asset_urdf_path,
+                        activate_contact_sensors=True,
+                        rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                            disable_gravity=False,
+                            retain_accelerations=False,
+                            linear_damping=0.01,
+                            angular_damping=0.01,
+                            max_linear_velocity=1000.0,
+                            max_angular_velocity=1000.0,
+                            max_depenetration_velocity=1.0,
+                        ),
+                        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                            enabled_self_collisions=True,
+                            solver_position_iteration_count=8,
+                            solver_velocity_iteration_count=4,
+                        ),
+                        joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
+                            gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=0, damping=0)
+                        ),
                     ),
-                    articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                        enabled_self_collisions=True,
-                        solver_position_iteration_count=8,
-                        solver_velocity_iteration_count=4,
+                    init_state=RigidObjectCfg.InitialStateCfg(
+                        pos=(0.0, 0.0, 0.5),
                     ),
-                    joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
-                        gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=0, damping=0)
-                    ),
-                ),
-                init_state=RigidObjectCfg.InitialStateCfg(
-                    pos=(0.0, 0.0, 0.5),
-                ),
+                )
+                rigid_object = RigidObject(object_cfg)
+                self.scene.rigid_objects[object_name] = rigid_object
+                self._object_urdf_by_name[object_name] = str(pathlib.Path(object_asset_urdf_path).resolve())
+
+            logger.info(
+                "Loaded {} training object URDF(s): {}",
+                len(self._object_urdf_by_name),
+                list(self._object_urdf_by_name.keys()),
             )
-            self._object = RigidObject(object_cfg)
-            self.scene.rigid_objects[object_name] = self._object
 
         # clone, filter, and replicate
         self.scene.clone_environments(copy_from_source=False)
