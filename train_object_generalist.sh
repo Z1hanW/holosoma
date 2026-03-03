@@ -20,7 +20,7 @@ DEFAULT_CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-${DEFAULT_CUDA_VISIBLE_DEVICES}}
 EXP=${EXP:-g1-29dof-wbt-w-object-generalist}
 WANDB_PROJECT=${WANDB_PROJECT:-boxer}
-DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_aug_mix_ml"
+DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_carry_aug_mix_ml"
 MOTION_DIR_FROM_ENV=0
 if [[ -n "${MOTION_DIR+x}" ]]; then
   MOTION_DIR_FROM_ENV=1
@@ -37,7 +37,7 @@ MIXED_CLEAN_OUT=${MIXED_CLEAN_OUT:-1}
 MIXED_LINK_MODE=${MIXED_LINK_MODE:-symlink}
 MIXED_BEHAVE_FILTER=${MIXED_BEHAVE_FILTER:-boxmedium,boxlarge}
 MIXED_OMOMO_DIR=${MIXED_OMOMO_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"}
-MIXED_BEHAVE_DIR=${MIXED_BEHAVE_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_sq_obj"}
+MIXED_BEHAVE_DIR=${MIXED_BEHAVE_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_sq_carry"}
 MIXED_BEHAVE_MAP_FILE=${MIXED_BEHAVE_MAP_FILE:-"${MIXED_BEHAVE_DIR}/_clip_object_urdf_map.json"}
 
 VISER_PORT=${VISER_PORT:-$((RANDOM % 8976 + 1024))}

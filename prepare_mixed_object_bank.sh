@@ -27,8 +27,8 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 OMOMO_DIR=${OMOMO_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"}
-BEHAVE_DIR=${BEHAVE_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_sq_obj"}
-OUT_DIR=${OUT_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_aug_mix_ml"}
+BEHAVE_DIR=${BEHAVE_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_sq_carry"}
+OUT_DIR=${OUT_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_carry_aug_mix_ml"}
 
 BEHAVE_FILTER=${BEHAVE_FILTER:-"boxmedium,boxlarge"}
 LINK_MODE=${LINK_MODE:-"symlink"}     # symlink|copy
