@@ -27,7 +27,7 @@ if [[ -n "${MOTION_DIR+x}" ]]; then
 fi
 MOTION_DIR=${MOTION_DIR:-"${DEFAULT_MOTION_DIR}"}
 OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-""}
-NUM_ENVS=${NUM_ENVS:-24576}
+NUM_ENVS=${NUM_ENVS:-65536}
 NPROC=${NPROC:-$(awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}")}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
 
@@ -49,6 +49,8 @@ VISER_RECENTER=${VISER_RECENTER:-True}
 VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-False}
 ENABLE_VISER=${ENABLE_VISER:-0}
 DEBUG_MODE=${DEBUG_MODE:-${DEBUG_MODEL:-off}}
+ENABLE_TRAIN_VIDEO=${ENABLE_TRAIN_VIDEO:-0}
+LOGGER_VIDEO_INTERVAL=${LOGGER_VIDEO_INTERVAL:-2000}
 
 SEQUENCE_NAME=${SEQUENCE_NAME:-""}
 if [[ "$#" -gt 0 ]]; then
@@ -243,5 +245,14 @@ train_cmd+=(logger:wandb)
 if [[ -n "${SEQUENCE_NAME}" ]]; then
   train_cmd+=(--logger.name="${SEQUENCE_NAME}")
 fi
-train_cmd+=(--logger.video.interval=2000)
+if [[ "${ENABLE_TRAIN_VIDEO}" == "1" ]]; then
+  echo "[INFO] Training video recording enabled (interval=${LOGGER_VIDEO_INTERVAL})."
+  train_cmd+=(--logger.video.enabled=True)
+  train_cmd+=(--logger.video.interval="${LOGGER_VIDEO_INTERVAL}")
+else
+  echo "[INFO] Training video recording disabled by default (set ENABLE_TRAIN_VIDEO=1 to enable)."
+  train_cmd+=(--logger.video.enabled=False)
+  train_cmd+=(--logger.headless_recording=False)
+  train_cmd+=(--logger.video.upload_to_wandb=False)
+fi
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${train_cmd[@]}"

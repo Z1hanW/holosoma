@@ -16,7 +16,7 @@ set -euo pipefail
 #   OBJECT_FILTER=boxmedium,boxlarge (comma-separated clip-name filters)
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-DATASET_KNOB=${DATASET_KNOB:-"crisp"}
+DATASET_KNOB=${DATASET_KNOB:-"behave"}
 
 case "${DATASET_KNOB}" in
   crisp)
@@ -36,7 +36,7 @@ case "${DATASET_KNOB}" in
     DEFAULT_OBJECT_FILTER=""
     ;;
   behave)
-    DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/demo_results/g1/object_interaction/behave_zup"
+    DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/demo_results_parallel/g1/object_interaction/behave_zup_sq_obj"
     DEFAULT_GEOMETRY_DIR=""
     DEFAULT_OBJECT_URDF_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/models/behave_objects"
     DEFAULT_OBJECT_URDF_MODE="behave"
