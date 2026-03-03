@@ -52,6 +52,7 @@ DEBUG_MODE=${DEBUG_MODE:-${DEBUG_MODEL:-off}}
 ENABLE_TRAIN_VIDEO=${ENABLE_TRAIN_VIDEO:-0}
 LOGGER_VIDEO_INTERVAL=${LOGGER_VIDEO_INTERVAL:-2000}
 CURRICULUM=${CURRICULUM:-0}
+PERCEPTION=${PERCEPTION:-none}
 
 SEQUENCE_NAME=${SEQUENCE_NAME:-""}
 if [[ "$#" -gt 0 ]]; then
@@ -206,6 +207,7 @@ fi
 train_cmd=(
   src/holosoma/holosoma/train_agent.py
   "exp:${EXP}"
+  "perception:${PERCEPTION}"
   --training.project="${WANDB_PROJECT}"
   --training.num-envs="${NUM_ENVS}"
   --command.setup-terms.motion-command.params.motion-config.motion-file "${MOTION_DIR}"
