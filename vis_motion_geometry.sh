@@ -1,46 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Viser: motion + geometry viewer
+# Isaac Sim replay + Viser state viewer.
+#
+# This script intentionally does NOT use direct qpos viewer anymore.
+# It always replays motion in Isaac Sim, and Viser reads simulator states.
 #
 # Usage:
-#   DATASET_KNOB=crisp ./vis_motion_geometry.sh
-#   DATASET_KNOB=omomo ./vis_motion_geometry.sh
-#   DATASET_KNOB=behave ./vis_motion_geometry.sh
-#   MOTION_DIR=/ABS/PATH/to/motions GEOMETRY_DIR=/ABS/PATH/to/geometry ./vis_motion_geometry.sh
-#
-# Optional overrides:
-#   DATASET_KNOB=crisp|omomo|behave (default: behave)
-#   ROBOT=g1_29dof PORT=#### START_CLIP=clip_name FPS=30 AUTOPLAY=True LOOP=True PRELOAD=True
-#   SHOW_MESHES=True SHOW_GEOMETRY=True GRID=True GRID_SIZE=10.0
-#   OBJECT_FILTER=boxmedium,boxlarge (comma-separated clip-name filters)
+#   DATASET_KNOB=behave bash ./vis_motion_geometry.sh
+#   DATASET_KNOB=omomo START_CLIP=sub10_largebox_032_mj_w_obj bash ./vis_motion_geometry.sh
+#   MOTION_DIR=/abs/path OBJECT_URDF=/abs/path/to/spec_or_urdf bash ./vis_motion_geometry.sh
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DATASET_KNOB=${DATASET_KNOB:-"behave"}
 
 case "${DATASET_KNOB}" in
   crisp)
-    DEFAULT_GEOMETRY_DIR="/data/terrain/___crisp_clean_geometry"
     DEFAULT_MOTION_DIR="/data/terrain/___crisp_clean_motion"
+    DEFAULT_GEOMETRY_DIR="/data/terrain/___crisp_clean_geometry"
     DEFAULT_OBJECT_URDF_DIR="${SCRIPT_DIR}/crisp/vmm_data/___crisp_object_urdf"
-    DEFAULT_OBJECT_URDF_MODE="stem"
     DEFAULT_OBJECT_URDF=""
     DEFAULT_OBJECT_FILTER=""
     ;;
   omomo)
-    DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/demo_results_parallel/g1/object_interaction/omomo_carry"
+    DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"
     DEFAULT_GEOMETRY_DIR=""
     DEFAULT_OBJECT_URDF_DIR=""
-    DEFAULT_OBJECT_URDF_MODE="stem"
     DEFAULT_OBJECT_URDF="${SCRIPT_DIR}/src/holosoma_retargeting/models/largebox/largebox.urdf"
     DEFAULT_OBJECT_FILTER=""
     ;;
   behave)
-    DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/demo_results_parallel/g1/object_interaction/behave_zup_sq_obj"
+    DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_sq_carry"
     DEFAULT_GEOMETRY_DIR=""
-    DEFAULT_OBJECT_URDF_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/models/behave_objects"
-    DEFAULT_OBJECT_URDF_MODE="behave"
-    DEFAULT_OBJECT_URDF=""
+    DEFAULT_OBJECT_URDF_DIR=""
+    DEFAULT_OBJECT_URDF="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_sq_carry/_clip_object_urdf_map.json"
     DEFAULT_OBJECT_FILTER="boxmedium,boxlarge"
     ;;
   *)
@@ -49,115 +42,146 @@ case "${DATASET_KNOB}" in
     ;;
 esac
 
-# Use dataset knob defaults, but allow explicit env overrides.
 MOTION_DIR="${MOTION_DIR:-"${DEFAULT_MOTION_DIR}"}"
 GEOMETRY_DIR="${GEOMETRY_DIR:-"${DEFAULT_GEOMETRY_DIR}"}"
 OBJECT_URDF_DIR="${OBJECT_URDF_DIR:-"${DEFAULT_OBJECT_URDF_DIR}"}"
-OBJECT_URDF_MODE="${OBJECT_URDF_MODE:-"${DEFAULT_OBJECT_URDF_MODE}"}"
 OBJECT_URDF="${OBJECT_URDF:-"${DEFAULT_OBJECT_URDF}"}"
 OBJECT_FILTER="${OBJECT_FILTER:-"${DEFAULT_OBJECT_FILTER}"}"
-echo "[INFO] DATASET_KNOB=${DATASET_KNOB} motion=${MOTION_DIR} geometry=${GEOMETRY_DIR} object_urdf=${OBJECT_URDF} object_urdf_dir=${OBJECT_URDF_DIR} object_mode=${OBJECT_URDF_MODE} object_filter=${OBJECT_FILTER}"
 
-ROBOT=${ROBOT:-"g1_29dof"}
+EXP=${EXP:-"g1-29dof-wbt-w-object-generalist"}
+HEADLESS_FLAG=${HEADLESS:-True}
+NUM_ENVS=${NUM_ENVS:-1}
 PORT=${PORT:-"$((RANDOM % 8976 + 1024))"}
 START_CLIP=${START_CLIP:-""}
-FPS=${FPS:-""}
-AUTOPLAY=${AUTOPLAY:-"True"}
-LOOP=${LOOP:-"True"}
-PRELOAD=${PRELOAD:-"True"}
-SHOW_MESHES=${SHOW_MESHES:-"True"}
-SHOW_GEOMETRY=${SHOW_GEOMETRY:-"True"}
-SHOW_OBJECT=${SHOW_OBJECT:-"True"}
-GRID=${GRID:-"True"}
-GRID_SIZE=${GRID_SIZE:-"10.0"}
+VISER_ENV_ID=${VISER_ENV_ID:-0}
+VISER_UPDATE_HZ=${VISER_UPDATE_HZ:-30}
+VISER_SYNC_TO_SIM=${VISER_SYNC_TO_SIM:-True}
+VISER_FORCE_DT=${VISER_FORCE_DT:-True}
+VISER_RECENTER=${VISER_RECENTER:-True}
+VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-False}
+START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-1.0}
+FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
+RESET_NOISE_SCALE=${RESET_NOISE_SCALE:-0.0}
+VIS_GPU=${VIS_GPU:-auto}
 
-if [[ -z "${GEOMETRY_DIR}" ]]; then
-  SHOW_GEOMETRY="False"
-else
-  if [[ ! -d "${GEOMETRY_DIR}" ]]; then
-    echo "[WARN] geometry dir not found: ${GEOMETRY_DIR} (falling back to ground)"
-    GEOMETRY_DIR=""
-    SHOW_GEOMETRY="False"
-  else
-    shopt -s nullglob
-    _geom_files=("${GEOMETRY_DIR}"/*.obj "${GEOMETRY_DIR}"/*.OBJ)
-    shopt -u nullglob
-    if (( ${#_geom_files[@]} == 0 )); then
-      echo "[WARN] geometry dir is empty: ${GEOMETRY_DIR} (falling back to ground)"
-      GEOMETRY_DIR=""
-      SHOW_GEOMETRY="False"
+headless_lc=$(echo "${HEADLESS_FLAG}" | tr '[:upper:]' '[:lower:]')
+case "${headless_lc}" in
+  1|true|yes|on)
+    HEADLESS_ENV=1
+    HEADLESS_FLAG=True
+    ;;
+  0|false|no|off)
+    HEADLESS_ENV=0
+    HEADLESS_FLAG=False
+    ;;
+  *)
+    echo "[WARN] Unknown HEADLESS='${HEADLESS_FLAG}', fallback to True."
+    HEADLESS_ENV=1
+    HEADLESS_FLAG=True
+    ;;
+esac
+# IsaacLab launcher expects HEADLESS as integer env var.
+export HEADLESS="${HEADLESS_ENV}"
+
+# Select a single GPU for visualization to avoid PhysX scene creation failure on busy GPU0.
+if [[ -z "${CUDA_VISIBLE_DEVICES+x}" || -z "${CUDA_VISIBLE_DEVICES}" ]]; then
+  if [[ "${VIS_GPU}" == "auto" ]]; then
+    if command -v nvidia-smi >/dev/null 2>&1; then
+      _gpu_pick=$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits | sort -t',' -k2n | head -n1 | cut -d',' -f1 | xargs)
+      if [[ -n "${_gpu_pick}" ]]; then
+        export CUDA_VISIBLE_DEVICES="${_gpu_pick}"
+      fi
     fi
+  else
+    export CUDA_VISIBLE_DEVICES="${VIS_GPU}"
   fi
 fi
 
-object_mode_lc=$(printf "%s" "${OBJECT_URDF_MODE}" | tr '[:upper:]' '[:lower:]')
-object_mode_recursive="false"
-if [[ "${object_mode_lc}" == "recursive" || "${object_mode_lc}" == "behave" ]]; then
-  object_mode_recursive="true"
+if [[ ! -e "${MOTION_DIR}" ]]; then
+  echo "[ERROR] motion dir not found: ${MOTION_DIR}" >&2
+  exit 1
 fi
 
-if [[ -n "${OBJECT_URDF_DIR}" ]]; then
-  if [[ ! -d "${OBJECT_URDF_DIR}" ]]; then
-    echo "[WARN] object urdf dir not found: ${OBJECT_URDF_DIR} (disabling object)"
-    OBJECT_URDF_DIR=""
-    SHOW_OBJECT="False"
-  else
-    if [[ "${object_mode_recursive}" == "true" ]]; then
-      _urdf_files=()
-      while IFS= read -r -d '' _f; do
-        _urdf_files+=("$_f")
-      done < <(find "${OBJECT_URDF_DIR}" -type f \( -name "*.urdf" -o -name "*.URDF" \) -print0)
-    else
-      shopt -s nullglob
-      _urdf_files=("${OBJECT_URDF_DIR}"/*.urdf "${OBJECT_URDF_DIR}"/*.URDF)
-      shopt -u nullglob
-    fi
-    if (( ${#_urdf_files[@]} == 0 )); then
-      echo "[WARN] object urdf dir is empty: ${OBJECT_URDF_DIR} (disabling object)"
-      OBJECT_URDF_DIR=""
-      SHOW_OBJECT="False"
-    elif (( ${#_urdf_files[@]} == 1 )) && [[ "${object_mode_recursive}" == "false" ]]; then
-      OBJECT_URDF="${_urdf_files[0]}"
-      OBJECT_URDF_DIR=""
-    fi
-  fi
-fi
-
+OBJECT_SPEC=""
 if [[ -n "${OBJECT_URDF}" ]]; then
   if [[ ! -f "${OBJECT_URDF}" ]]; then
-    echo "[WARN] object urdf not found: ${OBJECT_URDF} (disabling object)"
-    OBJECT_URDF=""
-    SHOW_OBJECT="False"
+    echo "[WARN] object urdf not found: ${OBJECT_URDF} (disabling object asset)"
+  else
+    OBJECT_SPEC="${OBJECT_URDF}"
+  fi
+elif [[ -n "${OBJECT_URDF_DIR}" ]]; then
+  if [[ ! -d "${OBJECT_URDF_DIR}" ]]; then
+    echo "[WARN] object urdf dir not found: ${OBJECT_URDF_DIR} (disabling object asset)"
+  else
+    OBJECT_SPEC="${OBJECT_URDF_DIR}"
   fi
 fi
 
+if [[ -z "${START_CLIP}" && -n "${OBJECT_FILTER}" && -d "${MOTION_DIR}" ]]; then
+  IFS=',' read -r -a _filter_terms <<< "${OBJECT_FILTER}"
+  while IFS= read -r _npz; do
+    _stem=$(basename "${_npz}" .npz)
+    _stem_lc=$(echo "${_stem}" | tr '[:upper:]' '[:lower:]')
+    for _term in "${_filter_terms[@]}"; do
+      _term_lc=$(echo "${_term}" | tr '[:upper:]' '[:lower:]' | xargs)
+      if [[ -n "${_term_lc}" && "${_stem_lc}" == *"${_term_lc}"* ]]; then
+        START_CLIP="${_stem}"
+        break 2
+      fi
+    done
+  done < <(find "${MOTION_DIR}" -maxdepth 1 -type f -name "*.npz" | sort)
+fi
+
+# Keep replay GUI controls consistent with infer/debug behavior.
+export VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI:-1}
+export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-0}
+export VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-1}
+export VISER_START_PAUSED=${VISER_START_PAUSED:-0}
+export OMNI_KIT_ACCEPT_EULA=${OMNI_KIT_ACCEPT_EULA:-YES}
 
 cmd=(
-  python3 src/holosoma/holosoma/viser_motion_geometry.py
-  --motion-dir "${MOTION_DIR}"
-  --geometry-dir "${GEOMETRY_DIR}"
-  --object-urdf "${OBJECT_URDF}"
-  --object-urdf-dir "${OBJECT_URDF_DIR}"
-  --object-urdf-mode "${OBJECT_URDF_MODE}"
-  --robot "${ROBOT}"
-  --port "${PORT}"
-  --autoplay "${AUTOPLAY}"
-  --loop "${LOOP}"
-  --preload "${PRELOAD}"
-  --show-meshes "${SHOW_MESHES}"
-  --show-geometry "${SHOW_GEOMETRY}"
-  --show-object "${SHOW_OBJECT}"
-  --add-grid "${GRID}"
-  --grid-size "${GRID_SIZE}"
-  --object-filter-csv "${OBJECT_FILTER}"
+  python3 src/holosoma/holosoma/replay.py
+  "exp:${EXP}"
+  --training.headless="${HEADLESS_FLAG}"
+  --training.num-envs="${NUM_ENVS}"
+  --training.enable-viser=True
+  --training.viser-port="${PORT}"
+  --training.viser-env-id="${VISER_ENV_ID}"
+  --training.viser-update-hz="${VISER_UPDATE_HZ}"
+  --training.viser-sync-to-sim="${VISER_SYNC_TO_SIM}"
+  --training.viser-force-dt="${VISER_FORCE_DT}"
+  --training.viser-recenter="${VISER_RECENTER}"
+  --training.viser-show-scandots="${VISER_SHOW_SCANDOTS}"
+  --command.setup-terms.motion-command.params.motion-config.motion-file "${MOTION_DIR}"
+  --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob "${START_AT_TIMESTEP_ZERO_PROB}"
+  --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob "${FREEZE_AT_TIMESTEP_ZERO_PROB}"
+  --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.overall-noise-scale "${RESET_NOISE_SCALE}"
 )
 
 if [[ -n "${START_CLIP}" ]]; then
-  cmd+=(--start-clip "${START_CLIP}")
+  cmd+=(--command.setup-terms.motion-command.params.motion-config.motion-clip-name "${START_CLIP}")
 fi
 
-if [[ -n "${FPS}" ]]; then
-  cmd+=(--fps "${FPS}")
+if [[ -n "${OBJECT_SPEC}" ]]; then
+  cmd+=(--robot.object.enabled=True)
+  cmd+=(--robot.object.object-urdf-path "${OBJECT_SPEC}")
 fi
+
+if [[ -n "${GEOMETRY_DIR}" ]]; then
+  if [[ -e "${GEOMETRY_DIR}" ]]; then
+    cmd+=(--terrain.terrain-term.mesh-type=load_obj)
+    cmd+=(--terrain.terrain-term.obj-file-path "${GEOMETRY_DIR}")
+  else
+    echo "[WARN] geometry path not found: ${GEOMETRY_DIR} (using default terrain)"
+  fi
+fi
+
+echo "[INFO] Replay backend: Isaac Sim"
+echo "[INFO] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<default>}"
+echo "[INFO] DATASET_KNOB=${DATASET_KNOB}"
+echo "[INFO] motion_dir=${MOTION_DIR}"
+echo "[INFO] start_clip=${START_CLIP:-<auto>}"
+echo "[INFO] object_spec=${OBJECT_SPEC:-<none>}"
+echo "[INFO] viser=http://localhost:${PORT}"
 
 "${cmd[@]}"

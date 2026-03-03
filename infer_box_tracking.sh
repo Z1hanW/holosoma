@@ -9,9 +9,10 @@ set -euo pipefail
 #
 # Optional env vars:
 #   TEACHER_CHECKPOINT        (default: distill_box teacher default)
-#   MOTION_DIR                (default: src/holosoma_retargeting/converted_res/object_interaction/omomo_carry)
+#   INFER_DATASET             (default: omomo; options: omomo|behave|mixed)
+#   MOTION_DIR                (optional override; if unset, chosen by INFER_DATASET)
 #   MOTION_CLIP_NAME          (optional: pin a single clip)
-#   OBJECT_URDF               (default: src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf)
+#   OBJECT_URDF               (optional override; if unset, chosen by INFER_DATASET)
 #   NUM_ENVS                  (default: 1)
 #   HEADLESS                  (default: False; set True for headless eval)
 #   VISER_PORT                (default: random)
@@ -21,6 +22,7 @@ set -euo pipefail
 #   VISER_SYNC_TO_SIM         (default: True)
 #   VISER_FORCE_DT            (default: True)
 #   DISABLE_RANDOMIZATION     (default: True)
+#   VIS_GPU                   (default: auto; picks least-used GPU if CUDA_VISIBLE_DEVICES is unset)
 
 usage() {
   cat <<'EOF'
@@ -31,6 +33,11 @@ Examples:
   bash infer_box_tracking.sh
   bash infer_box_tracking.sh /abs/path/to/model_17000.pt
   MOTION_CLIP_NAME=sub3_largebox_003_mj_w_obj bash infer_box_tracking.sh
+
+Dataset selection examples:
+  INFER_DATASET=omomo bash infer_box_tracking.sh
+  INFER_DATASET=behave bash infer_box_tracking.sh
+  INFER_DATASET=mixed bash infer_box_tracking.sh
 EOF
 }
 
@@ -56,9 +63,72 @@ if [[ $# -gt 0 ]]; then
   fi
 fi
 
-MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"}
+INFER_DATASET=${INFER_DATASET:-${DATASET:-omomo}}
+INFER_DATASET=$(echo "${INFER_DATASET}" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
+case "${INFER_DATASET}" in
+  omomo|behave|mixed) ;;
+  *)
+    echo "[ERROR] INFER_DATASET must be one of: omomo, behave, mixed. Got: ${INFER_DATASET}" >&2
+    exit 2
+    ;;
+esac
+
+DEFAULT_OMOMO_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"
+DEFAULT_BEHAVE_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_sq_carry"
+DEFAULT_MIXED_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_carry_aug_mix_ml"
+DEFAULT_OMOMO_URDF="${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
+DEFAULT_BEHAVE_MAP_FILE="${DEFAULT_BEHAVE_MOTION_DIR}/_clip_object_urdf_map.json"
+DEFAULT_MIXED_MAP_FILE="${DEFAULT_MIXED_MOTION_DIR}/_clip_object_urdf_map.json"
+
+MOTION_DIR_FROM_ENV=0
+if [[ -n "${MOTION_DIR+x}" ]]; then
+  MOTION_DIR_FROM_ENV=1
+fi
+OBJECT_URDF_FROM_ENV=0
+if [[ -n "${OBJECT_URDF+x}" ]]; then
+  OBJECT_URDF_FROM_ENV=1
+fi
+
+if [[ "${MOTION_DIR_FROM_ENV}" != "1" ]]; then
+  case "${INFER_DATASET}" in
+    omomo)
+      MOTION_DIR="${DEFAULT_OMOMO_MOTION_DIR}"
+      ;;
+    behave)
+      MOTION_DIR="${DEFAULT_BEHAVE_MOTION_DIR}"
+      ;;
+    mixed)
+      MOTION_DIR="${DEFAULT_MIXED_MOTION_DIR}"
+      ;;
+  esac
+fi
+
 MOTION_CLIP_NAME=${MOTION_CLIP_NAME:-}
-OBJECT_URDF=${OBJECT_URDF:-"${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"}
+if [[ "${OBJECT_URDF_FROM_ENV}" != "1" ]]; then
+  case "${INFER_DATASET}" in
+    omomo)
+      OBJECT_URDF="${DEFAULT_OMOMO_URDF}"
+      ;;
+    behave)
+      if [[ -f "${DEFAULT_BEHAVE_MAP_FILE}" ]]; then
+        OBJECT_URDF="${DEFAULT_BEHAVE_MAP_FILE}"
+      else
+        echo "[WARN] BEHAVE map file not found: ${DEFAULT_BEHAVE_MAP_FILE}. Falling back to ${DEFAULT_OMOMO_URDF}."
+        OBJECT_URDF="${DEFAULT_OMOMO_URDF}"
+      fi
+      ;;
+    mixed)
+      if [[ -f "${DEFAULT_MIXED_MAP_FILE}" ]]; then
+        OBJECT_URDF="${DEFAULT_MIXED_MAP_FILE}"
+      elif [[ -f "${DEFAULT_BEHAVE_MAP_FILE}" ]]; then
+        OBJECT_URDF="${DEFAULT_BEHAVE_MAP_FILE}"
+      else
+        echo "[WARN] Mixed map file not found. Falling back to ${DEFAULT_OMOMO_URDF}."
+        OBJECT_URDF="${DEFAULT_OMOMO_URDF}"
+      fi
+      ;;
+  esac
+fi
 
 NUM_ENVS=${NUM_ENVS:-1}
 HEADLESS=${HEADLESS:-False}
@@ -76,8 +146,23 @@ FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
 RESET_NOISE_SCALE=${RESET_NOISE_SCALE:-0.0}
 MAX_EPISODE_LENGTH_S=${MAX_EPISODE_LENGTH_S:-1000000}
 SIM_ENV_SPACING=${SIM_ENV_SPACING:-0.0}
-PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-268435456}
+PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-67108864}
 DISABLE_RANDOMIZATION=${DISABLE_RANDOMIZATION:-True}
+VIS_GPU=${VIS_GPU:-auto}
+
+# Pick a less-loaded GPU by default for IsaacSim startup stability.
+if [[ -z "${CUDA_VISIBLE_DEVICES+x}" || -z "${CUDA_VISIBLE_DEVICES}" ]]; then
+  if [[ "${VIS_GPU}" == "auto" ]]; then
+    if command -v nvidia-smi >/dev/null 2>&1; then
+      AUTO_GPU="$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits | sort -t, -k2,2n | head -n1 | cut -d, -f1 | tr -d ' ')"
+      if [[ -n "${AUTO_GPU}" ]]; then
+        export CUDA_VISIBLE_DEVICES="${AUTO_GPU}"
+      fi
+    fi
+  elif [[ "${VIS_GPU}" =~ ^[0-9]+$ ]]; then
+    export CUDA_VISIBLE_DEVICES="${VIS_GPU}"
+  fi
+fi
 
 # Useful defaults for interactive motion/clip inspection.
 export VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI:-1}
@@ -162,9 +247,11 @@ if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
 fi
 
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
+echo "[INFO] infer_dataset=${INFER_DATASET}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
 echo "[INFO] motion_clip_name=${MOTION_CLIP_NAME:-<auto>}"
 echo "[INFO] object_urdf=${OBJECT_URDF}"
+echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-<unset>}"
 echo "[INFO] headless=${HEADLESS}"
 echo "[INFO] viser=http://localhost:${VISER_PORT}"
 echo "[INFO] viser_sync_to_sim=${VISER_SYNC_TO_SIM} viser_force_dt=${VISER_FORCE_DT}"

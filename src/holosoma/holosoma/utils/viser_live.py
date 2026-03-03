@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -519,8 +520,11 @@ class ViserLiveViewer:
             "yes",
         )
         self._server = None
+        self._viser_urdf_cls = None
         self._vr = None
         self._vo = None
+        self._primary_object_variants: dict[str, Any] = {}
+        self._active_primary_object_urdf: str | None = None
         self._robot_root = None
         self._object_root = None
         self._secondary_env_ids: list[int] = []
@@ -792,6 +796,7 @@ class ViserLiveViewer:
             logger.warning("Viser live viewer disabled: {}", err or "missing dependency")
             self._enabled = False
             return
+        self._viser_urdf_cls = viser_urdf_cls
 
         port_cfg = int(getattr(cfg, "viser_port", 0) or 0)
         port = resolve_viser_port(port_cfg)
@@ -817,18 +822,7 @@ class ViserLiveViewer:
             root_node_name=self._scene_path("/robot"),
         )
 
-        object_urdf = _resolve_object_urdf_path(env.robot_config)
-        if object_urdf:
-            try:
-                self._vo = viser_urdf_cls(
-                    self._server,
-                    urdf_or_path=Path(object_urdf),
-                    root_node_name=self._scene_path("/object"),
-                    mesh_color_override=LIGHT_BLUE,
-                )
-            except Exception as exc:
-                logger.warning("Viser object URDF disabled (failed to load '{}'): {}", object_urdf, exc)
-                self._vo = None
+        self._refresh_primary_object_handle()
 
         self._setup_joint_order()
         self._setup_secondary_env_handles(viser_urdf_cls, robot_urdf)
@@ -861,6 +855,59 @@ class ViserLiveViewer:
         if slot <= 0:
             return np.zeros(3, dtype=np.float32)
         return np.array([0.0, float(slot) * self._viser_multi_env_spacing, 0.0], dtype=np.float32)
+
+    def _primary_object_variant_node(self, object_urdf: str) -> str:
+        digest = hashlib.sha1(object_urdf.encode("utf-8")).hexdigest()[:10]
+        return self._scene_path(f"/object/variant_{digest}")
+
+    def _ensure_primary_object_variant(self, object_urdf: str) -> Any | None:
+        if self._server is None or self._viser_urdf_cls is None:
+            return None
+        cached = self._primary_object_variants.get(object_urdf)
+        if cached is not None:
+            return cached
+        try:
+            handle = self._viser_urdf_cls(
+                self._server,
+                urdf_or_path=Path(object_urdf),
+                root_node_name=self._primary_object_variant_node(object_urdf),
+                mesh_color_override=LIGHT_BLUE,
+            )
+        except Exception as exc:
+            logger.warning("Viser object URDF disabled (failed to load '{}'): {}", object_urdf, exc)
+            return None
+        try:
+            handle.show_visual = False
+        except Exception:
+            pass
+        self._primary_object_variants[object_urdf] = handle
+        return handle
+
+    def _set_primary_object_urdf(self, object_urdf: str | None) -> None:
+        if not object_urdf:
+            self._active_primary_object_urdf = None
+            self._vo = None
+            for handle in self._primary_object_variants.values():
+                try:
+                    handle.show_visual = False
+                except Exception:
+                    pass
+            return
+        if object_urdf == self._active_primary_object_urdf and self._vo is not None:
+            return
+        handle = self._ensure_primary_object_variant(object_urdf)
+        if handle is None:
+            return
+        self._active_primary_object_urdf = object_urdf
+        self._vo = handle
+        for variant in self._primary_object_variants.values():
+            try:
+                variant.show_visual = False
+            except Exception:
+                pass
+
+    def _refresh_primary_object_handle(self) -> None:
+        self._set_primary_object_urdf(self._resolve_object_urdf_for_env(self._env_id))
 
     def _resolve_object_urdf_for_env(self, env_id: int) -> str | None:
         fallback = _resolve_object_urdf_path(self._env.robot_config)
@@ -1303,6 +1350,7 @@ class ViserLiveViewer:
             if not self._disable_contact_force_viz:
                 self._update_contact_forces(offset)
 
+            self._refresh_primary_object_handle()
             if self._vo is not None and self._object_root is not None:
                 if not show_object:
                     self._vo.show_visual = False

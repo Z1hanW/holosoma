@@ -53,6 +53,7 @@ ENABLE_TRAIN_VIDEO=${ENABLE_TRAIN_VIDEO:-0}
 LOGGER_VIDEO_INTERVAL=${LOGGER_VIDEO_INTERVAL:-2000}
 CURRICULUM=${CURRICULUM:-0}
 PERCEPTION=${PERCEPTION:-none}
+LEGACY_OBS=${LEGACY_OBS:-0}
 
 SEQUENCE_NAME=${SEQUENCE_NAME:-""}
 if [[ "$#" -gt 0 ]]; then
@@ -140,6 +141,41 @@ if [[ -z "${OBJECT_SPEC_PATH}" ]]; then
   fi
 fi
 
+# BEHAVE requires per-clip URDF mapping; do not silently fall back to a single URDF.
+if [[ "${USE_BEHAVE}" == "1" ]]; then
+  if [[ -z "${OBJECT_SPEC_PATH}" || ! -f "${OBJECT_SPEC_PATH}" ]]; then
+    echo "[ERROR] BEHAVE training requires a valid _clip_object_urdf_map.json, but OBJECT_SPEC_PATH is missing." >&2
+    echo "[ERROR] Expected map example: ${MIXED_BEHAVE_DIR}/_clip_object_urdf_map.json" >&2
+    exit 2
+  fi
+  python - <<'PY' "${OBJECT_SPEC_PATH}" || exit 2
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text(encoding="utf-8"))
+if isinstance(payload, dict) and isinstance(payload.get("clips"), dict):
+    payload = payload["clips"]
+if not isinstance(payload, dict) or not payload:
+    raise SystemExit(f"[ERROR] Invalid or empty object map: {path}")
+has_urdf = False
+for entry in payload.values():
+    if isinstance(entry, str):
+        urdf = entry.strip()
+    elif isinstance(entry, dict):
+        urdf = str(entry.get("object_urdf_path", "")).strip()
+    else:
+        urdf = ""
+    if urdf:
+        has_urdf = True
+        break
+if not has_urdf:
+    raise SystemExit(f"[ERROR] Object map has no valid object_urdf_path entries: {path}")
+print(f"[INFO] Validated BEHAVE object map: {path}")
+PY
+fi
+
 DEBUG_MODE=$(echo "${DEBUG_MODE}" | tr '[:upper:]' '[:lower:]')
 case "${DEBUG_MODE}" in
   ""|0|off|none)
@@ -204,6 +240,16 @@ if [[ "${ENABLE_VISER}" == "1" ]]; then
 else
   echo "[INFO] Starting training without Viser"
 fi
+
+legacy_obs_normalized=$(echo "${LEGACY_OBS}" | tr '[:upper:]' '[:lower:]')
+if [[ "${legacy_obs_normalized}" == "1" || "${legacy_obs_normalized}" == "true" ]]; then
+  if [[ "${EXP}" == "g1-29dof-wbt-w-object-generalist" ]]; then
+    EXP="g1-29dof-wbt-w-object-generalist-legacy-obs"
+  fi
+  echo "[INFO] LEGACY_OBS enabled: using legacy actor observation (175-dim, no object velocity terms)."
+  echo "[INFO] Resolved EXP: ${EXP}"
+fi
+
 train_cmd=(
   src/holosoma/holosoma/train_agent.py
   "exp:${EXP}"

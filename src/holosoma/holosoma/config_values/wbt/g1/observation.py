@@ -90,6 +90,17 @@ actor_obs_w_object = ObsGroupCfg(
     terms=actor_obs_w_object_terms,
 )
 
+actor_obs_w_object_legacy_terms = actor_obs_w_object_terms.copy()
+actor_obs_w_object_legacy_terms.pop("obj_lin_vel_b", None)
+actor_obs_w_object_legacy_terms.pop("obj_ang_vel_b", None)
+
+actor_obs_w_object_legacy = ObsGroupCfg(
+    concatenate=actor_obs_shared.concatenate,
+    enable_noise=actor_obs_shared.enable_noise,
+    history_length=actor_obs_shared.history_length,
+    terms=actor_obs_w_object_legacy_terms,
+)
+
 motion_future_target_poses_group = ObsGroupCfg(
     concatenate=True,
     enable_noise=False,
@@ -229,6 +240,18 @@ g1_29dof_wbt_observation_motion_tracking_split = ObservationManagerCfg(
 g1_29dof_wbt_observation_w_object = ObservationManagerCfg(
     groups={
         "actor_obs": actor_obs_w_object,
+        "critic_obs": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=critic_obs_w_object_terms,
+        ),
+    },
+)
+
+g1_29dof_wbt_observation_w_object_legacy = ObservationManagerCfg(
+    groups={
+        "actor_obs": actor_obs_w_object_legacy,
         "critic_obs": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
@@ -513,6 +536,7 @@ __all__ = [
     "g1_29dof_wbt_observation_motion_tracking",
     "g1_29dof_wbt_observation_motion_tracking_split",
     "g1_29dof_wbt_observation_w_object",
+    "g1_29dof_wbt_observation_w_object_legacy",
     "g1_29dof_wbt_observation_w_object_distill_torso_box",
     "g1_29dof_wbt_observation_w_object_distill_torso_box_goal",
     "g1_29dof_wbt_observation_videomimic",

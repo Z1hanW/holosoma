@@ -394,6 +394,15 @@ g1_29dof_wbt_w_object_generalist = replace(
     command=command.g1_29dof_wbt_command_w_object_generalist,
 )
 
+g1_29dof_wbt_w_object_generalist_legacy_obs = replace(
+    g1_29dof_wbt_w_object_generalist,
+    training=replace(
+        g1_29dof_wbt_w_object_generalist.training,
+        name="g1_29dof_wbt_w_object_generalist_legacy_obs",
+    ),
+    observation=observation.g1_29dof_wbt_observation_w_object_legacy,
+)
+
 _w_object_distill_torso_box_actor_inputs = ["actor_obs_torso", "actor_obs_proprio", "actor_obs_box"]
 _w_object_distill_torso_box_critic_inputs = ["critic_obs"]
 
@@ -475,6 +484,7 @@ __all__ = [
     "g1_29dof_wbt_fast_sac_w_object",
     "g1_29dof_wbt_w_object",
     "g1_29dof_wbt_w_object_generalist",
+    "g1_29dof_wbt_w_object_generalist_legacy_obs",
     "g1_29dof_wbt_w_object_distill_torso_box",
     "g1_29dof_wbt_w_object_distill_torso_box_goal",
 ]
