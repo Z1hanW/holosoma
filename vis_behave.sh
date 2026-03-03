@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+
+#### if selected everything go different 
+
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ALLOWED_OBJECTS=${ALLOWED_OBJECTS:-"boxmedium,boxlarge"}
 
@@ -19,7 +22,7 @@ done
 
 cmd=(
   python "$SCRIPT_DIR/behave/viser_annot_player.py"
-  "/data/behave/annotation_30fps_zup"
+  "/data/behave/annotation_30fps_zup_carry"
   --annotation-root
   --objects-root "/data/behave/objects"
   --smpl-model-root "/data/behave/HMR"

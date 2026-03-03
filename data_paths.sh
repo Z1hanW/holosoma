@@ -7,6 +7,7 @@
 BOX3R_PATHS=(
   "/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"
   "/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/converted_res/behave_sq_obj"
+  "/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/converted_res/behave_sq_carry"
   "/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/converted_res/behave"
   "/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_aug_mix_ml"
   "/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_mix_ml"
