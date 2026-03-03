@@ -51,6 +51,7 @@ ENABLE_VISER=${ENABLE_VISER:-0}
 DEBUG_MODE=${DEBUG_MODE:-${DEBUG_MODEL:-off}}
 ENABLE_TRAIN_VIDEO=${ENABLE_TRAIN_VIDEO:-0}
 LOGGER_VIDEO_INTERVAL=${LOGGER_VIDEO_INTERVAL:-2000}
+CURRICULUM=${CURRICULUM:-0}
 
 SEQUENCE_NAME=${SEQUENCE_NAME:-""}
 if [[ "$#" -gt 0 ]]; then
@@ -239,6 +240,10 @@ if [[ -n "${OBJECT_SPEC_PATH}" ]]; then
 fi
 if [[ -n "${SEQUENCE_NAME}" ]]; then
   train_cmd+=(--training.name="${SEQUENCE_NAME}")
+fi
+if [[ "${CURRICULUM}" == "1" || "${CURRICULUM,,}" == "true" ]]; then
+  echo "[INFO] Enabling w-object curriculum."
+  train_cmd+=(--curriculum.setup-terms.w-object-difficulty-curriculum.params.enabled=True)
 fi
 train_cmd+=("${EXTRA_ARGS[@]}")
 train_cmd+=(logger:wandb)
