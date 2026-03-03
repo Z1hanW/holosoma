@@ -9,6 +9,10 @@ BOX_BUCKET=${BOX_BUCKET:-box3r}
 CRISP_BUCKET=${CRISP_BUCKET:-crisp}
 DRY_RUN=${DRY_RUN:-0}
 STRICT=${STRICT:-0}
+# Sync mode:
+#   missing (default): only restore files that don't already exist locally
+#   full: restore and update changed files (default rsync behavior)
+SYNC_MODE=${SYNC_MODE:-missing}
 
 if ! command -v rsync >/dev/null 2>&1; then
   echo "[ERROR] rsync not found in PATH." >&2
@@ -18,6 +22,12 @@ fi
 rsync_opts=(-a --human-readable --info=stats2,progress2)
 if [[ "${DRY_RUN}" == "1" ]]; then
   rsync_opts+=(--dry-run)
+fi
+if [[ "${SYNC_MODE}" == "missing" ]]; then
+  rsync_opts+=(--ignore-existing)
+elif [[ "${SYNC_MODE}" != "full" ]]; then
+  echo "[ERROR] Invalid SYNC_MODE='${SYNC_MODE}'. Use: missing|full" >&2
+  exit 1
 fi
 
 restored=0
@@ -63,3 +73,4 @@ echo "[INFO] Done."
 echo "[INFO] Restored entries: ${restored}"
 echo "[INFO] Missing entries : ${missing}"
 echo "[INFO] NFS root        : ${NFS_ROOT}"
+echo "[INFO] Sync mode       : ${SYNC_MODE}"

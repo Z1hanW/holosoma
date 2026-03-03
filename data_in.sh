@@ -8,6 +8,10 @@ NFS_ROOT=${NFS_ROOT:-/nfs/zzzihanw}
 BOX_BUCKET=${BOX_BUCKET:-box3r}
 CRISP_BUCKET=${CRISP_BUCKET:-crisp}
 DRY_RUN=${DRY_RUN:-0}
+# Sync mode:
+#   missing (default): only copy files that don't already exist at destination
+#   full: copy and update changed files (default rsync behavior)
+SYNC_MODE=${SYNC_MODE:-missing}
 
 if ! command -v rsync >/dev/null 2>&1; then
   echo "[ERROR] rsync not found in PATH." >&2
@@ -17,6 +21,12 @@ fi
 rsync_opts=(-aL --human-readable --info=stats2,progress2)
 if [[ "${DRY_RUN}" == "1" ]]; then
   rsync_opts+=(--dry-run)
+fi
+if [[ "${SYNC_MODE}" == "missing" ]]; then
+  rsync_opts+=(--ignore-existing)
+elif [[ "${SYNC_MODE}" != "full" ]]; then
+  echo "[ERROR] Invalid SYNC_MODE='${SYNC_MODE}'. Use: missing|full" >&2
+  exit 1
 fi
 
 copied=0
@@ -61,3 +71,4 @@ echo "[INFO] Done."
 echo "[INFO] Copied entries : ${copied}"
 echo "[INFO] Missing entries: ${missing}"
 echo "[INFO] NFS root       : ${NFS_ROOT}"
+echo "[INFO] Sync mode      : ${SYNC_MODE}"
