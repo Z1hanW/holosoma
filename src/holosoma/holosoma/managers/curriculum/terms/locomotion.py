@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from loguru import logger
 
 from holosoma.managers.curriculum.base import CurriculumTermBase
 from holosoma.utils.rotations import quat_conjugate, quat_mul, quat_normalize, quat_to_exp_map
@@ -134,10 +135,15 @@ class WObjectDifficultyCurriculum(CurriculumTermBase):
         self.object_torque_to_ang_velocity = float(params.get("object_torque_to_ang_velocity", 1.0))
         self.object_max_delta_lin = float(params.get("object_max_delta_lin", 0.20))
         self.object_max_delta_ang = float(params.get("object_max_delta_ang", 0.20))
+        self.object_max_lin_vel_abs = float(params.get("object_max_lin_vel_abs", 2.5))
+        self.object_max_ang_vel_abs = float(params.get("object_max_ang_vel_abs", 6.0))
+        self.object_max_pos_err = float(params.get("object_max_pos_err", 0.50))
+        self.object_max_rot_err = float(params.get("object_max_rot_err", 1.20))
 
         self._last_early_termination_rate = 1.0
         self._last_motion_end_rate = 0.0
         self._last_similarity = 0.0
+        self._assist_exception_logged = False
 
     def setup(self) -> None:
         self.lambda_value = float(np.clip(self.lambda_value, 0.0, 1.0))
@@ -229,11 +235,20 @@ class WObjectDifficultyCurriculum(CurriculumTermBase):
             ref_quat = motion_command.object_quat_w
             ref_lin_vel = motion_command.object_lin_vel_w
 
+            finite_mask = torch.isfinite(object_states[:, :13]).all(dim=-1)
+            finite_mask = finite_mask & torch.isfinite(ref_pos).all(dim=-1)
+            finite_mask = finite_mask & torch.isfinite(ref_quat).all(dim=-1)
+            finite_mask = finite_mask & torch.isfinite(ref_lin_vel).all(dim=-1)
+            if not torch.any(finite_mask):
+                return
+
             pos_err = ref_pos - object_states[:, :3]
+            pos_err = torch.clamp(pos_err, -self.object_max_pos_err, self.object_max_pos_err)
             lin_vel_err = ref_lin_vel - object_states[:, 7:10]
 
             quat_err = quat_mul(ref_quat, quat_conjugate(object_states[:, 3:7], w_last=True), w_last=True)
             rot_err = quat_to_exp_map(quat_normalize(quat_err))
+            rot_err = torch.clamp(rot_err, -self.object_max_rot_err, self.object_max_rot_err)
             ang_vel_err = -object_states[:, 10:13]
 
             force_cmd = self.object_pos_kp * pos_err + self.object_lin_vel_kd * lin_vel_err
@@ -246,12 +261,25 @@ class WObjectDifficultyCurriculum(CurriculumTermBase):
             ang_delta = torch.clamp(ang_delta, -self.object_max_delta_ang, self.object_max_delta_ang)
 
             updated_states = object_states.clone()
-            updated_states[:, 7:10] = updated_states[:, 7:10] + lin_delta
-            updated_states[:, 10:13] = updated_states[:, 10:13] + ang_delta
+            updated_states[:, 7:10] = torch.clamp(
+                updated_states[:, 7:10] + lin_delta,
+                -self.object_max_lin_vel_abs,
+                self.object_max_lin_vel_abs,
+            )
+            updated_states[:, 10:13] = torch.clamp(
+                updated_states[:, 10:13] + ang_delta,
+                -self.object_max_ang_vel_abs,
+                self.object_max_ang_vel_abs,
+            )
+            updated_states = torch.where(finite_mask.unsqueeze(-1), updated_states, object_states)
             simulator.all_root_states[object_indices, :13] = updated_states
-            simulator.write_state_updates()
-        except Exception:
+            # Do not call simulator.write_state_updates() here.
+            # IsaacSim already calls scene.write_data_to_sim() once per physics step.
+        except Exception as exc:
             # Keep curriculum non-fatal: if simulator backend does not support this path, skip assist.
+            if not self._assist_exception_logged:
+                logger.warning("WObjectDifficultyCurriculum assist step skipped due to error: {}", exc)
+                self._assist_exception_logged = True
             return
 
     def _compute_similarity(self, env_ids: torch.Tensor) -> float:
