@@ -71,6 +71,16 @@ actor_obs_w_object_terms.update(
             scale=1.0,
             noise=0.0,
         ),
+        "obj_lin_vel_b": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_lin_vel_b",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "obj_ang_vel_b": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_ang_vel_b",
+            scale=1.0,
+            noise=0.0,
+        ),
     }
 )
 actor_obs_w_object = ObsGroupCfg(

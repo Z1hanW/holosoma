@@ -306,6 +306,15 @@ def obj_lin_vel_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     return vel_b.view(env.num_envs, -1)
 
 
+def obj_ang_vel_b(env: WholeBodyTrackingManager) -> torch.Tensor:
+    motion_command = _get_motion_command_and_assert_type(env)
+    return quat_rotate_inverse(
+        motion_command.robot_ref_quat_w,
+        motion_command.simulator_object_ang_vel_w,
+        w_last=True,
+    )
+
+
 def obj_target_pose_size_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Target object info in robot-ref frame: [pos(3), rot6d(6), size(3)]."""
     motion_command = _get_motion_command_and_assert_type(env)

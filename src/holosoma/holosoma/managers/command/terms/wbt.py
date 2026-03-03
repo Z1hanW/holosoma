@@ -1929,6 +1929,11 @@ class MotionCommand(CommandTermBase):
         indices = self._get_active_object_indices()
         return self._env.simulator.all_root_states[indices][:, 7:10]
 
+    @property
+    def simulator_object_ang_vel_w(self) -> torch.Tensor:
+        indices = self._get_active_object_indices()
+        return self._env.simulator.all_root_states[indices][:, 10:13]
+
     #########################################################################################
     ## Methods that does not fit into setup/step/reset pattern
     #########################################################################################
