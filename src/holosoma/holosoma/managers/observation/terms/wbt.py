@@ -375,6 +375,28 @@ def obj_target_pose_size_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     return torch.cat([pos_b.view(env.num_envs, -1), rot_6d, size], dim=-1)
 
 
+def obj_current_pose_size_b(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Current object info in robot-ref frame: [pos(3), rot6d(6), size(3)].
+
+    Uses simulator object pose (current state), not mocap target pose.
+    Size stays sourced from active motion clip metadata.
+    """
+    motion_command = _get_motion_command_and_assert_type(env)
+    if not motion_command.motion.has_object:
+        return torch.zeros(env.num_envs, 12, device=env.device, dtype=torch.float32)
+
+    pos_b, ori_b = subtract_frame_transforms(
+        motion_command.robot_ref_pos_w,
+        motion_command.robot_ref_quat_w,
+        motion_command.simulator_object_pos_w,
+        motion_command.simulator_object_quat_w,
+    )
+    rot_mat = quaternion_to_matrix(ori_b, w_last=True)
+    rot_6d = rot_mat[..., :2].reshape(rot_mat.shape[0], -1)
+    size = motion_command.object_size.view(env.num_envs, -1)
+    return torch.cat([pos_b.view(env.num_envs, -1), rot_6d, size], dim=-1)
+
+
 def obj_goal_pos_size_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Final object goal in robot-ref frame: [goal_pos(3), size(3)].
 

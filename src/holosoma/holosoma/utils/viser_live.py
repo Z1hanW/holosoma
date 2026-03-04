@@ -29,6 +29,7 @@ SIM_ROBOT_POINTS_COLOR = np.array([70, 190, 120], dtype=np.uint8)
 SIM_OBJECT_POINTS_COLOR = np.array([130, 180, 235], dtype=np.uint8)
 HEIGHTMAP_MARKER_COLOR = (255, 165, 0)
 CAMERA_MARKER_COLOR = (0, 255, 255)
+COMMAND_ARROW_COLOR = np.array([255, 165, 0], dtype=np.uint8)
 SENSOR_MARKER_RADIUS = 0.03
 _VIRIDIS_LUT = np.array(
     [
@@ -712,6 +713,17 @@ class ViserLiveViewer:
         self._manual_yaw_right_cb = None
         self._manual_lin_scale_slider = None
         self._manual_yaw_scale_slider = None
+        self._manual_command_arrow_handle = None
+        self._manual_command_arrow_height = 0.30
+        self._manual_command_arrow_head_ratio = 0.30
+        self._manual_command_arrow_head_width_ratio = 0.65
+        self._manual_command_arrow_max_len = 1.20
+        self._manual_command_arrow_line_width = 5.0
+        self._manual_command_yaw_radius = 0.28
+        self._manual_command_yaw_arc_angle = 4.5
+        self._manual_command_yaw_head_len = 0.10
+        self._manual_command_yaw_head_width = 0.08
+        self._manual_command_yaw_segments = 20
         self._manual_hw_joystick = None
         self._manual_hw_pygame = None
         self._manual_hw_axes = {"LX": 0, "LY": 1, "RX": 2}
@@ -1260,6 +1272,7 @@ class ViserLiveViewer:
             manual_yaw = getattr(motion_cmd, "manual_yaw_rel", None)
             if isinstance(manual_yaw, torch.Tensor) and manual_yaw.numel() > 0:
                 manual_yaw.zero_()
+        self._hide_manual_command_arrow()
 
         if not clear_gui_toggles:
             return
@@ -1331,6 +1344,153 @@ class ViserLiveViewer:
         motion_cmd.manual_xy_rel = cmd_xy
         motion_cmd.manual_yaw_rel = cmd_yaw
 
+    def _hide_manual_command_arrow(self) -> None:
+        if self._manual_command_arrow_handle is None:
+            return
+        try:
+            self._manual_command_arrow_handle.visible = False
+        except Exception:
+            pass
+
+    @staticmethod
+    def _yaw_from_quat_wxyz(quat_wxyz: np.ndarray) -> float:
+        qw, qx, qy, qz = [float(v) for v in quat_wxyz]
+        return float(np.arctan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz)))
+
+    def _update_manual_command_arrow(
+        self,
+        root_pos: np.ndarray,
+        root_quat_wxyz: np.ndarray,
+        offset: np.ndarray,
+    ) -> None:
+        if self._server is None:
+            return
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            self._hide_manual_command_arrow()
+            return
+        if not bool(getattr(motion_cmd, "manual_control_enabled", False)):
+            self._hide_manual_command_arrow()
+            return
+
+        manual_xy = getattr(motion_cmd, "manual_xy_rel", None)
+        manual_yaw = getattr(motion_cmd, "manual_yaw_rel", None)
+        if not isinstance(manual_xy, torch.Tensor) or manual_xy.ndim < 2:
+            self._hide_manual_command_arrow()
+            return
+        if self._env_id < 0 or self._env_id >= int(manual_xy.shape[0]):
+            self._hide_manual_command_arrow()
+            return
+
+        cmd_xy = manual_xy[self._env_id].detach().float().cpu().numpy()
+        cmd_yaw = 0.0
+        if isinstance(manual_yaw, torch.Tensor) and manual_yaw.ndim >= 2 and self._env_id < int(manual_yaw.shape[0]):
+            cmd_yaw = float(manual_yaw[self._env_id, 0].item())
+
+        cmd_xy_norm = float(np.linalg.norm(cmd_xy))
+        cmd_yaw_abs = abs(cmd_yaw)
+        if cmd_xy_norm < 1.0e-4 and cmd_yaw_abs < 1.0e-4:
+            self._hide_manual_command_arrow()
+            return
+
+        segments: list[np.ndarray] = []
+
+        if cmd_xy_norm >= 1.0e-4:
+            body_cmd = np.array([float(cmd_xy[0]), float(cmd_xy[1]), 0.0], dtype=np.float32)
+            cmd_len = float(np.linalg.norm(body_cmd[:2]))
+            if cmd_len > float(self._manual_command_arrow_max_len):
+                body_cmd *= float(self._manual_command_arrow_max_len / max(cmd_len, 1.0e-6))
+                cmd_len = float(np.linalg.norm(body_cmd[:2]))
+            if cmd_len >= 1.0e-6:
+                yaw = self._yaw_from_quat_wxyz(root_quat_wxyz)
+                cy = float(np.cos(yaw))
+                sy = float(np.sin(yaw))
+                world_cmd = np.array(
+                    [
+                        cy * float(body_cmd[0]) - sy * float(body_cmd[1]),
+                        sy * float(body_cmd[0]) + cy * float(body_cmd[1]),
+                        0.0,
+                    ],
+                    dtype=np.float32,
+                )
+
+                origin = root_pos.astype(np.float32, copy=True)
+                origin[2] += float(self._manual_command_arrow_height)
+                tip = origin + world_cmd
+                direction = tip - origin
+                length = float(np.linalg.norm(direction))
+                if length >= 1.0e-6:
+                    direction /= length
+                    perp = np.array([-direction[1], direction[0], 0.0], dtype=np.float32)
+                    head_len = min(
+                        float(length * self._manual_command_arrow_head_ratio),
+                        0.5 * length,
+                    )
+                    head_width = float(head_len * self._manual_command_arrow_head_width_ratio)
+                    left = tip - direction * head_len + perp * head_width
+                    right = tip - direction * head_len - perp * head_width
+                    segments.append(np.stack([origin, tip], axis=0))
+                    segments.append(np.stack([tip, left], axis=0))
+                    segments.append(np.stack([tip, right], axis=0))
+        if cmd_yaw_abs >= 1.0e-4:
+            yaw = self._yaw_from_quat_wxyz(root_quat_wxyz)
+            sign = 1.0 if cmd_yaw >= 0.0 else -1.0
+            radius = float(self._manual_command_yaw_radius)
+            arc_angle = float(self._manual_command_yaw_arc_angle)
+            seg_count = max(8, int(self._manual_command_yaw_segments))
+            start = yaw - sign * (0.5 * arc_angle)
+            end = yaw + sign * (0.5 * arc_angle)
+            angles = np.linspace(start, end, seg_count + 1, dtype=np.float32)
+
+            center = root_pos.astype(np.float32, copy=True)
+            center[2] += float(self._manual_command_arrow_height)
+            arc_pts = np.stack(
+                [
+                    center[0] + radius * np.cos(angles),
+                    center[1] + radius * np.sin(angles),
+                    np.full_like(angles, center[2]),
+                ],
+                axis=1,
+            )
+            for idx in range(seg_count):
+                segments.append(np.stack([arc_pts[idx], arc_pts[idx + 1]], axis=0))
+
+            tip = arc_pts[-1]
+            tangent = sign * np.array([-np.sin(angles[-1]), np.cos(angles[-1]), 0.0], dtype=np.float32)
+            tangent_norm = float(np.linalg.norm(tangent))
+            if tangent_norm > 1.0e-6:
+                tangent /= tangent_norm
+                radial = np.array([np.cos(angles[-1]), np.sin(angles[-1]), 0.0], dtype=np.float32)
+                h_len = float(self._manual_command_yaw_head_len)
+                h_width = float(self._manual_command_yaw_head_width)
+                head_base = tip - tangent * h_len
+                left = head_base + radial * h_width
+                right = head_base - radial * h_width
+                segments.append(np.stack([tip, left], axis=0))
+                segments.append(np.stack([tip, right], axis=0))
+
+        if len(segments) == 0:
+            self._hide_manual_command_arrow()
+            return
+
+        points = np.stack(segments, axis=0)
+        if self._recenter:
+            points = points - offset[None, None, :]
+        points = points.astype(np.float32, copy=False)
+        colors = np.full((points.shape[0], 2, 3), COMMAND_ARROW_COLOR, dtype=np.uint8)
+
+        if self._manual_command_arrow_handle is None:
+            self._manual_command_arrow_handle = self._server.scene.add_line_segments(
+                self._scene_path("/manual_command_arrow"),
+                points=points,
+                colors=colors,
+                line_width=float(self._manual_command_arrow_line_width),
+            )
+        else:
+            self._manual_command_arrow_handle.visible = True
+            self._manual_command_arrow_handle.points = points
+            self._manual_command_arrow_handle.colors = colors
+
     def on_reset(self, env_ids) -> None:
         if not self._enabled or not self._recenter:
             return
@@ -1393,6 +1553,7 @@ class ViserLiveViewer:
             if self._scandots_enabled:
                 self._update_scandots(offset)
             self._update_target_keypoints(offset)
+            self._update_manual_command_arrow(root_pos, root_quat_wxyz, offset)
             if self._perception_enabled:
                 self._update_perception_visuals(offset)
             if not self._disable_contact_force_viz:
@@ -3391,14 +3552,15 @@ class ViserLiveViewer:
     def _update_target_keypoints(self, offset: np.ndarray) -> None:
         if not self._server:
             return
-        if not self._show_target_keypoints:
+        motion_cmd = self._get_motion_command()
+        manual_active = bool(getattr(motion_cmd, "manual_control_enabled", False)) if motion_cmd is not None else False
+        if (not self._show_target_keypoints) or manual_active:
             if self._target_keypoints_handle is not None:
                 try:
                     self._target_keypoints_handle.visible = False
                 except Exception:
                     pass
             return
-        motion_cmd = self._get_motion_command()
         if motion_cmd is None or not hasattr(motion_cmd, "body_pos_w"):
             return
         try:
@@ -3425,6 +3587,10 @@ class ViserLiveViewer:
                 precision="float32",
             )
         else:
+            try:
+                self._target_keypoints_handle.visible = True
+            except Exception:
+                pass
             self._target_keypoints_handle.points = pts.astype(np.float32, copy=False)
             if getattr(self._target_keypoints_handle, "colors", None) is not None:
                 colors = np.tile(self._target_keypoints_color, (pts.shape[0], 1))

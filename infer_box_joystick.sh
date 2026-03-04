@@ -10,16 +10,17 @@ set -euo pipefail
 # - Optional hardware joystick via pygame/bridge backend
 #
 # Usage:
-#   bash infer_joystick.sh <mocap|depth> [checkpoint.pt] [extra tyro args...]
+#   bash infer_box_joystick.sh <mocap|depth> [checkpoint.pt|wandb://...|https://wandb.ai/.../runs/.../files] [extra tyro args...]
 #
 # Examples:
-#   bash infer_joystick.sh mocap /abs/path/model.pt
-#   bash infer_joystick.sh depth /abs/path/model.pt --viser-port 18080
+#   bash infer_box_joystick.sh mocap /abs/path/model.pt
+#   bash infer_box_joystick.sh depth /abs/path/model.pt --viser-port 18080
+#   bash infer_box_joystick.sh mocap https://wandb.ai/zihanw22/WholeBodyTracking/runs/d20ktze6/files
 
 usage() {
   cat <<'EOF'
 Usage:
-  bash infer_joystick.sh <mocap|depth> [checkpoint.pt] [extra tyro args...]
+  bash infer_box_joystick.sh <mocap|depth> [checkpoint.pt|wandb://...|https://wandb.ai/.../runs/.../files] [extra tyro args...]
 
 Modes:
   mocap   Distilled policy with box-state (mocap) actor observation
@@ -36,6 +37,8 @@ Optional env vars:
   VISER_ENV_ID            (default: 0)
   VISER_UPDATE_HZ         (default: 30)
   VISER_RECENTER          (default: True)
+  WANDB_MODEL_FILE        (default: model_00800.pt, used when checkpoint is a wandb run URL)
+  MOCAP_PERCEPTION_PRESET (default: checkpoint; checkpoint|none|heightmap)
 
 Hardware joystick (optional):
   VISER_MANUAL_USE_HW_JOYSTICK=1
@@ -72,8 +75,34 @@ esac
 LOG_ROOT="${SCRIPT_DIR}/logs/WholeBodyTracking"
 MOCAP_TRAINING_NAME_DEFAULT="g1_29dof_wbt_w_object_distill_box_mocap_access_to_mocap_data"
 DEPTH_TRAINING_NAME_DEFAULT="g1_29dof_wbt_w_object_distill_box_perception_access_to_depth"
-MOCAP_CHECKPOINT_DEFAULT=${MOCAP_CHECKPOINT_DEFAULT:-"/home/ubuntu/FAR/holosoma/logs/WholeBodyTracking/20260228_055847-g1_29dof_wbt_w_object_distill_box_mocap_access_to_mocap_data-locomotion/model_00600.pt"}
+MOCAP_CHECKPOINT_DEFAULT=${MOCAP_CHECKPOINT_DEFAULT:-"wandb://zihanw22/WholeBodyTracking/d20ktze6/model_00800.pt"}
 DEPTH_CHECKPOINT_DEFAULT=${DEPTH_CHECKPOINT_DEFAULT:-"wandb://zihanw22/WholeBodyTracking/xplmudrp/model_01000.pt"}
+if [[ -z "${WANDB_MODEL_FILE:-}" ]]; then
+  if [[ "${MODE}" == "depth" ]]; then
+    WANDB_MODEL_FILE="model_01000.pt"
+  else
+    WANDB_MODEL_FILE="model_00800.pt"
+  fi
+fi
+
+normalize_checkpoint_ref() {
+  local ref="$1"
+  if [[ "${ref}" == https://wandb.ai/*/runs/* ]]; then
+    local clean_ref="${ref%%\?*}"
+    local trimmed="${clean_ref#https://wandb.ai/}"
+    IFS='/' read -r -a parts <<< "${trimmed}"
+    # expected: <entity>/<project>/runs/<run_id>/files...
+    if [[ "${#parts[@]}" -ge 4 && "${parts[2]}" == "runs" ]]; then
+      local entity="${parts[0]}"
+      local project="${parts[1]}"
+      local run_id="${parts[3]}"
+      if [[ -n "${entity}" && -n "${project}" && -n "${run_id}" ]]; then
+        ref="wandb://${entity}/${project}/${run_id}/${WANDB_MODEL_FILE}"
+      fi
+    fi
+  fi
+  echo "${ref}"
+}
 
 find_latest_ckpt() {
   local training_name="$1"
@@ -92,10 +121,14 @@ find_latest_ckpt() {
 
 CKPT=""
 if [[ $# -gt 0 ]]; then
-  if [[ "$1" == wandb://* || "$1" == /* || "$1" == ./* || "$1" == ../* || "$1" == *.pt ]]; then
+  if [[ "$1" == wandb://* || "$1" == https://wandb.ai/* || "$1" == /* || "$1" == ./* || "$1" == ../* || "$1" == *.pt ]]; then
     CKPT="$1"
     shift
   fi
+fi
+
+if [[ -n "${CKPT}" ]]; then
+  CKPT="$(normalize_checkpoint_ref "${CKPT}")"
 fi
 
 if [[ -z "${CKPT}" ]]; then
@@ -148,6 +181,7 @@ IMAGE_HEIGHT=${IMAGE_HEIGHT:-60}
 CAMERA_NEAR=${CAMERA_NEAR:-0.001}
 CAMERA_FAR=${CAMERA_FAR:-3.0}
 CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-3.0}
+MOCAP_PERCEPTION_PRESET=${MOCAP_PERCEPTION_PRESET:-checkpoint}
 
 if [[ ! -e "${MOTION_DIR}" ]]; then
   echo "[ERROR] MOTION_DIR not found: ${MOTION_DIR}" >&2
@@ -243,7 +277,21 @@ if [[ "${USE_HW_JOYSTICK_BRIDGE}" == "True" || "${USE_HW_JOYSTICK_BRIDGE}" == "t
 fi
 
 if [[ "${MODE}" == "mocap" ]]; then
-  cmd+=(perception:none)
+  case "$(echo "${MOCAP_PERCEPTION_PRESET}" | tr '[:upper:]' '[:lower:]')" in
+    checkpoint|auto|"")
+      # Keep checkpoint-saved perception config (required by some distill checkpoints).
+      ;;
+    none)
+      cmd+=(perception:none)
+      ;;
+    heightmap)
+      cmd+=(perception:heightmap)
+      ;;
+    *)
+      echo "[ERROR] MOCAP_PERCEPTION_PRESET must be one of: checkpoint|none|heightmap. Got: ${MOCAP_PERCEPTION_PRESET}" >&2
+      exit 2
+      ;;
+  esac
 else
   # Depth branch explicitly follows D435i perception setup.
   export VISER_PERCEPTION_IMAGE_MODE=${VISER_PERCEPTION_IMAGE_MODE:-depth}
@@ -274,5 +322,21 @@ echo "[INFO] manual_gui=${VISER_ENABLE_MANUAL_GUI} clip_gui=${VISER_ENABLE_CLIP_
 echo "[INFO] manual_control_default=${VISER_MANUAL_CONTROL_DEFAULT} force_manual=${VISER_FORCE_MANUAL_CONTROL}"
 echo "[INFO] hw_joystick=${VISER_MANUAL_USE_HW_JOYSTICK}"
 echo "[INFO] hw_backend=${VISER_MANUAL_HW_BACKEND:-auto} bridge_joystick=${USE_HW_JOYSTICK_BRIDGE}"
+if [[ "${MODE}" == "mocap" ]]; then
+  echo "[INFO] mocap_perception_preset=${MOCAP_PERCEPTION_PRESET}"
+fi
+echo "[INFO] Viser controls:"
+echo "  1) Open 'Manual Control' and enable 'Enable Manual Root Command'."
+echo "  2) Use Move +X/-X/+Y/-Y and Yaw +/- to command root trajectory."
+echo "  3) Tune 'XY Command (m)' and 'Yaw Command (rad)' sliders."
+echo "  4) Use 'Clip Playback' to select clip/start frame and click 'Apply Clip'."
+echo "  5) Use 'Advanced > Simulation Control' for Play/Step/Reset."
+if command -v hostname >/dev/null 2>&1; then
+  HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  if [[ -n "${HOST_IP}" ]]; then
+    echo "[INFO] Remote URL: http://${HOST_IP}:${VISER_PORT}"
+    echo "[INFO] SSH tunnel example: ssh -N -L ${VISER_PORT}:localhost:${VISER_PORT} <user>@<host>"
+  fi
+fi
 
 "${cmd[@]}"
