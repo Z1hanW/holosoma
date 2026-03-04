@@ -39,6 +39,43 @@ fi
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
+# Resolve wandb:// teacher checkpoint once per launcher (node), then pass a local absolute path to all ranks.
+if [[ "${TEACHER_CHECKPOINT}" == wandb://* ]]; then
+  TEACHER_CACHE_ROOT=${TEACHER_CACHE_ROOT:-"${SCRIPT_DIR}/.teacher_checkpoints"}
+  mkdir -p "${TEACHER_CACHE_ROOT}"
+  TEACHER_CHECKPOINT=$(
+    TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT}" TEACHER_CACHE_ROOT="${TEACHER_CACHE_ROOT}" python - <<'PY'
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import wandb
+
+uri = os.environ["TEACHER_CHECKPOINT"]
+cache_root = Path(os.environ["TEACHER_CACHE_ROOT"]).expanduser()
+prefix = "wandb://"
+if not uri.startswith(prefix):
+    raise ValueError(f"Expected wandb uri, got: {uri}")
+
+parts = uri[len(prefix):].split("/")
+if len(parts) < 4:
+    raise ValueError(
+        f"Invalid wandb checkpoint path: {uri}. "
+        "Expected wandb://<entity>/<project>/<run_id>/<checkpoint_name>"
+    )
+entity, project, run_id = parts[:3]
+file_name = "/".join(parts[3:])
+cache_root.mkdir(parents=True, exist_ok=True)
+
+api = wandb.Api()
+run = api.run(f"{entity}/{project}/{run_id}")
+downloaded = run.file(file_name).download(root=str(cache_root), replace=True)
+print(str(Path(downloaded.name).resolve()))
+PY
+  )
+fi
+
 FORCE_EIGHT_GPU_CONFIG=${FORCE_EIGHT_GPU_CONFIG:-0}
 if [[ "${FORCE_EIGHT_GPU_CONFIG}" != "0" ]]; then
   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
