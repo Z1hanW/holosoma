@@ -810,7 +810,8 @@ class PerceptionManager:
             raise RuntimeError("far_tracking_warp camera source requires terrain mesh.")
 
         # Resolve far-tracking package from common locations; allow override via env.
-        repo_root = Path(get_holosoma_root()).resolve()
+        module_repo_root = Path(__file__).resolve().parents[5]
+        holosoma_root = Path(get_holosoma_root()).resolve()
         far_tracking_override = os.environ.get("HOLOSOMA_FAR_TRACKING_PKG_ROOT", "").strip()
         candidate_roots: list[Path] = []
         if far_tracking_override:
@@ -821,8 +822,10 @@ class PerceptionManager:
                 candidate_roots.append(override_path / "whole_body_tracking")
         candidate_roots.extend(
             [
-                repo_root / "far-tracking" / "source" / "whole_body_tracking",
-                repo_root.parent / "far-tracking" / "source" / "whole_body_tracking",
+                module_repo_root / "far-tracking" / "source" / "whole_body_tracking",
+                module_repo_root.parent / "far-tracking" / "source" / "whole_body_tracking",
+                holosoma_root / "far-tracking" / "source" / "whole_body_tracking",
+                holosoma_root.parent / "far-tracking" / "source" / "whole_body_tracking",
             ]
         )
 
@@ -830,14 +833,15 @@ class PerceptionManager:
         if far_tracking_pkg_root is not None and str(far_tracking_pkg_root) not in sys.path:
             sys.path.insert(0, str(far_tracking_pkg_root))
 
-        # If path-based lookup failed, fall back to regular python import resolution.
-        if far_tracking_pkg_root is None and importlib.util.find_spec("whole_body_tracking") is None:
+        # If external package is unavailable, we will use bundled fallback below.
+        external_far_tracking_available = far_tracking_pkg_root is not None or (
+            importlib.util.find_spec("whole_body_tracking") is not None
+        )
+        if not external_far_tracking_available:
             searched = ", ".join(str(path) for path in candidate_roots)
-            raise RuntimeError(
-                "far-tracking package not found. "
-                f"Searched: {searched}. "
-                "Set HOLOSOMA_FAR_TRACKING_PKG_ROOT to your far-tracking source root "
-                "(or .../source/whole_body_tracking), or install whole_body_tracking."
+            (self.logger or logger).warning(
+                "External far-tracking package not found. Searched: {}. Falling back to bundled implementation.",
+                searched,
             )
 
         try:
