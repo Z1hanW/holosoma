@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -808,22 +809,62 @@ class PerceptionManager:
         if self._terrain_mesh is None:
             raise RuntimeError("far_tracking_warp camera source requires terrain mesh.")
 
-        repo_root = Path(__file__).resolve().parents[5]
-        far_tracking_pkg_root = repo_root / "far-tracking" / "source" / "whole_body_tracking"
-        if not far_tracking_pkg_root.exists():
-            raise RuntimeError(f"far-tracking package not found at: {far_tracking_pkg_root}")
-        if str(far_tracking_pkg_root) not in sys.path:
+        # Resolve far-tracking package from common locations; allow override via env.
+        repo_root = Path(get_holosoma_root()).resolve()
+        far_tracking_override = os.environ.get("HOLOSOMA_FAR_TRACKING_PKG_ROOT", "").strip()
+        candidate_roots: list[Path] = []
+        if far_tracking_override:
+            override_path = Path(far_tracking_override).expanduser().resolve()
+            if override_path.name == "whole_body_tracking":
+                candidate_roots.append(override_path)
+            else:
+                candidate_roots.append(override_path / "whole_body_tracking")
+        candidate_roots.extend(
+            [
+                repo_root / "far-tracking" / "source" / "whole_body_tracking",
+                repo_root.parent / "far-tracking" / "source" / "whole_body_tracking",
+            ]
+        )
+
+        far_tracking_pkg_root = next((root for root in candidate_roots if root.exists()), None)
+        if far_tracking_pkg_root is not None and str(far_tracking_pkg_root) not in sys.path:
             sys.path.insert(0, str(far_tracking_pkg_root))
 
-        from whole_body_tracking.utils.warp_sensors.camera_sensor import (  # noqa: PLC0415
-            CameraSensor as FarTrackingCameraSensor,
-        )
-        from whole_body_tracking.utils.warp_sensors.sensor_utils import (  # noqa: PLC0415
-            quat_mul_xyzw as ft_quat_mul_xyzw,
-        )
-        from whole_body_tracking.utils.warp_sensors.sensor_utils import (  # noqa: PLC0415
-            tf_apply_xyzw as ft_tf_apply_xyzw,
-        )
+        # If path-based lookup failed, fall back to regular python import resolution.
+        if far_tracking_pkg_root is None and importlib.util.find_spec("whole_body_tracking") is None:
+            searched = ", ".join(str(path) for path in candidate_roots)
+            raise RuntimeError(
+                "far-tracking package not found. "
+                f"Searched: {searched}. "
+                "Set HOLOSOMA_FAR_TRACKING_PKG_ROOT to your far-tracking source root "
+                "(or .../source/whole_body_tracking), or install whole_body_tracking."
+            )
+
+        try:
+            from whole_body_tracking.utils.warp_sensors.camera_sensor import (  # noqa: PLC0415
+                CameraSensor as FarTrackingCameraSensor,
+            )
+            from whole_body_tracking.utils.warp_sensors.sensor_utils import (  # noqa: PLC0415
+                quat_mul_xyzw as ft_quat_mul_xyzw,
+            )
+            from whole_body_tracking.utils.warp_sensors.sensor_utils import (  # noqa: PLC0415
+                tf_apply_xyzw as ft_tf_apply_xyzw,
+            )
+        except ModuleNotFoundError:
+            # Internal fallback: keep perception runnable even when external far-tracking
+            # package is unavailable on the current node.
+            from holosoma.third_party.ft_warp_sensors.camera_sensor import (  # noqa: PLC0415
+                CameraSensor as FarTrackingCameraSensor,
+            )
+            from holosoma.third_party.ft_warp_sensors.sensor_utils import (  # noqa: PLC0415
+                quat_mul_xyzw as ft_quat_mul_xyzw,
+            )
+            from holosoma.third_party.ft_warp_sensors.sensor_utils import (  # noqa: PLC0415
+                tf_apply_xyzw as ft_tf_apply_xyzw,
+            )
+            (self.logger or logger).warning(
+                "External far-tracking python package not importable. Using bundled holosoma fallback warp_sensors."
+            )
 
         urdf_path, _asset_root = self._resolve_robot_asset_paths()
         mesh_root = os.path.join(os.path.dirname(urdf_path), "meshes")
