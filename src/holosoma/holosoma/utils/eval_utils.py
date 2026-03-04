@@ -274,9 +274,22 @@ def load_checkpoint(checkpoint: str, log_dir: str) -> Path:
         checkpoint_file = run.file(checkpoint)  # Get the specific checkpoint file
         downloaded = checkpoint_file.download(root=log_dir, replace=True)
         logger.info(f"Finished downloading checkpoint {checkpoint} to {log_dir} from W&B run {wandb_run_path}")
-        checkpoint_path = Path(downloaded.name)
-        if not checkpoint_path.is_absolute():
-            checkpoint_path = log_dir_path / checkpoint_path
+        # Primary expected location: <log_dir>/<wandb_file_name>
+        checkpoint_path = log_dir_path / Path(checkpoint_file.name)
+        if not checkpoint_path.exists():
+            # Fallback for wandb path-return quirks (absolute vs relative to cwd).
+            downloaded_path = Path(downloaded.name)
+            if downloaded_path.exists():
+                checkpoint_path = downloaded_path
+            else:
+                cwd_downloaded = Path.cwd() / downloaded_path
+                if cwd_downloaded.exists():
+                    checkpoint_path = cwd_downloaded
+                else:
+                    raise FileNotFoundError(
+                        f"Downloaded checkpoint not found. expected={checkpoint_path}, "
+                        f"downloaded_name={downloaded.name}"
+                    )
     else:
         checkpoint_path = Path(checkpoint)
     return checkpoint_path
