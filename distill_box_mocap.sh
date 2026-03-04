@@ -9,7 +9,7 @@ set -euo pipefail
 # - actor_obs_box: obj_target_pose_size_b = [obj_pos(3), obj_rot6d(6), obj_scale(3)]
 #
 # Teacher policy observation:
-# - actor_obs + perception_obs (heightmap by default)
+# - actor_obs_legacy + perception_obs (heightmap by default)
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
@@ -34,7 +34,14 @@ EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd}
 RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_mocap}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_mocap_access_to_mocap_data}
 MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"}
-TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs,perception_obs}
+TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs_legacy,perception_obs}
+_teacher_obs_keys_no_space="$(echo "${TEACHER_OBS_KEYS}" | tr -d '[:space:]')"
+case "${_teacher_obs_keys_no_space}" in
+  "actor_obs"|"['actor_obs']"|"[\"actor_obs\"]"|"actor_obs,perception_obs"|"['actor_obs','perception_obs']"|"[\"actor_obs\",\"perception_obs\"]")
+    echo "[WARN] Remapping TEACHER_OBS_KEYS to actor_obs_legacy,perception_obs to match teacher checkpoint dim/config."
+    TEACHER_OBS_KEYS="actor_obs_legacy,perception_obs"
+    ;;
+esac
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-heightmap}
 PERCEPTION_INTO_POLICY_MODULES=${PERCEPTION_INTO_POLICY_MODULES:-False}
 TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
