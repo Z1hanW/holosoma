@@ -9,6 +9,9 @@ set -euo pipefail
 #
 # Optional env vars:
 #   TEACHER_CHECKPOINT        (default: distill_box teacher default)
+#   LEGACY_OBS                (default: 0; set 1/true to require legacy checkpoint observation layout)
+#   DEFAULT_LEGACY_TEACHER_CHECKPOINT
+#                             (optional; used as default checkpoint when LEGACY_OBS=1 and no checkpoint is explicitly provided)
 #   INFER_DATASET             (default: omomo; options: omomo|behave|mixed)
 #   MOTION_DIR                (optional override; if unset, chosen by INFER_DATASET)
 #   MOTION_CLIP_NAME          (optional: pin a single clip)
@@ -21,6 +24,7 @@ set -euo pipefail
 #   VISER_RECENTER            (default: True)
 #   VISER_SYNC_TO_SIM         (default: True)
 #   VISER_FORCE_DT            (default: True)
+#   VISER_LOAD_URDF           (default: 1; URDF meshes are shown in Viser, but pose/object selection comes from Isaac Sim runtime state)
 #   DISABLE_RANDOMIZATION     (default: True)
 #   VIS_GPU                   (default: auto; picks least-used GPU if CUDA_VISIBLE_DEVICES is unset)
 
@@ -52,14 +56,40 @@ if [[ $# -gt 0 ]]; then
       ;;
   esac
 fi
-
 DEFAULT_TEACHER_CHECKPOINT="/home/ubuntu/FAR/holosoma/logs/WholeBodyTracking/20260216_214200-g1_29dof_wbt_w_object_generalist-locomotion/model_17000.pt"
+DEFAULT_LEGACY_TEACHER_CHECKPOINT="${DEFAULT_LEGACY_TEACHER_CHECKPOINT:-}"
+LEGACY_OBS=${LEGACY_OBS:-0}
+legacy_obs_normalized=$(echo "${LEGACY_OBS}" | tr '[:upper:]' '[:lower:]')
+if [[ "${legacy_obs_normalized}" == "1" || "${legacy_obs_normalized}" == "true" ]]; then
+  LEGACY_OBS_ENABLED=1
+else
+  LEGACY_OBS_ENABLED=0
+fi
+
+TEACHER_CHECKPOINT_FROM_ENV=0
+if [[ -n "${TEACHER_CHECKPOINT+x}" || -n "${CKPT+x}" ]]; then
+  TEACHER_CHECKPOINT_FROM_ENV=1
+fi
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${CKPT:-${DEFAULT_TEACHER_CHECKPOINT}}}"
+TEACHER_CHECKPOINT_FROM_ARG=0
 
 if [[ $# -gt 0 ]]; then
   if [[ "$1" == wandb://* || "$1" == /* || "$1" == ./* || "$1" == ../* || "$1" == *.pt ]]; then
     TEACHER_CHECKPOINT="$1"
+    TEACHER_CHECKPOINT_FROM_ARG=1
     shift
+  fi
+fi
+
+if [[ "${LEGACY_OBS_ENABLED}" == "1" ]]; then
+  if [[ "${TEACHER_CHECKPOINT_FROM_ENV}" != "1" && "${TEACHER_CHECKPOINT_FROM_ARG}" != "1" ]]; then
+    if [[ -n "${DEFAULT_LEGACY_TEACHER_CHECKPOINT}" ]]; then
+      TEACHER_CHECKPOINT="${DEFAULT_LEGACY_TEACHER_CHECKPOINT}"
+    else
+      echo "[ERROR] LEGACY_OBS=1 requires an explicit legacy checkpoint." >&2
+      echo "[ERROR] Provide TEACHER_CHECKPOINT/CKPT/positional .pt, or set DEFAULT_LEGACY_TEACHER_CHECKPOINT." >&2
+      exit 2
+    fi
   fi
 fi
 
@@ -113,25 +143,38 @@ if [[ "${OBJECT_URDF_FROM_ENV}" != "1" ]]; then
       if [[ -f "${DEFAULT_BEHAVE_MAP_FILE}" ]]; then
         OBJECT_URDF="${DEFAULT_BEHAVE_MAP_FILE}"
       else
-        echo "[WARN] BEHAVE map file not found: ${DEFAULT_BEHAVE_MAP_FILE}. Falling back to ${DEFAULT_OMOMO_URDF}."
-        OBJECT_URDF="${DEFAULT_OMOMO_URDF}"
+        echo "[ERROR] BEHAVE map file not found: ${DEFAULT_BEHAVE_MAP_FILE}" >&2
+        exit 2
       fi
       ;;
     mixed)
       if [[ -f "${DEFAULT_MIXED_MAP_FILE}" ]]; then
         OBJECT_URDF="${DEFAULT_MIXED_MAP_FILE}"
-      elif [[ -f "${DEFAULT_BEHAVE_MAP_FILE}" ]]; then
-        OBJECT_URDF="${DEFAULT_BEHAVE_MAP_FILE}"
       else
-        echo "[WARN] Mixed map file not found. Falling back to ${DEFAULT_OMOMO_URDF}."
-        OBJECT_URDF="${DEFAULT_OMOMO_URDF}"
+        echo "[ERROR] Mixed map file not found: ${DEFAULT_MIXED_MAP_FILE}" >&2
+        exit 2
       fi
       ;;
   esac
 fi
 
 NUM_ENVS=${NUM_ENVS:-1}
-HEADLESS=${HEADLESS:-False}
+HEADLESS_RAW=${HEADLESS:-False}
+HEADLESS_NORM=$(echo "${HEADLESS_RAW}" | tr '[:upper:]' '[:lower:]')
+case "${HEADLESS_NORM}" in
+  1|true|yes|on)
+    HEADLESS_FLAG=True
+    export HEADLESS=1
+    ;;
+  0|false|no|off|"")
+    HEADLESS_FLAG=False
+    export HEADLESS=0
+    ;;
+  *)
+    echo "[ERROR] HEADLESS must be one of: 0/1/true/false/yes/no/on/off. Got: ${HEADLESS_RAW}" >&2
+    exit 2
+    ;;
+esac
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 VISER_PORT=${VISER_PORT:-$((RANDOM % 8976 + 1024))}
 VISER_ENV_ID=${VISER_ENV_ID:-0}
@@ -140,6 +183,7 @@ VISER_RECENTER=${VISER_RECENTER:-True}
 VISER_SYNC_TO_SIM=${VISER_SYNC_TO_SIM:-True}
 VISER_FORCE_DT=${VISER_FORCE_DT:-True}
 VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-False}
+VISER_LOAD_URDF=${VISER_LOAD_URDF:-1}
 
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-1.0}
 FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
@@ -169,6 +213,7 @@ export VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI:-1}
 export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-0}
 export VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-1}
 export VISER_START_PAUSED=${VISER_START_PAUSED:-0}
+export VISER_LOAD_URDF
 
 if [[ "${TEACHER_CHECKPOINT}" != wandb://* ]] && [[ ! -f "${TEACHER_CHECKPOINT}" ]]; then
   echo "[ERROR] teacher checkpoint not found: ${TEACHER_CHECKPOINT}" >&2
@@ -184,9 +229,37 @@ if [[ ! -f "${OBJECT_URDF}" ]]; then
 fi
 
 if [[ -d "${MOTION_DIR}" && -n "${MOTION_CLIP_NAME}" && ! -f "${MOTION_DIR}/${MOTION_CLIP_NAME}.npz" ]]; then
-  echo "[WARN] MOTION_CLIP_NAME not found in MOTION_DIR: ${MOTION_CLIP_NAME}.npz"
-  echo "[WARN] Falling back to random clip selection."
-  MOTION_CLIP_NAME=""
+  echo "[ERROR] MOTION_CLIP_NAME not found in MOTION_DIR: ${MOTION_CLIP_NAME}.npz" >&2
+  exit 2
+fi
+
+if [[ "${LEGACY_OBS_ENABLED}" == "1" && "${TEACHER_CHECKPOINT}" != wandb://* ]]; then
+  python - <<'PY' "${TEACHER_CHECKPOINT}" || exit 2
+import sys
+import torch
+
+ckpt_path = sys.argv[1]
+payload = torch.load(ckpt_path, map_location="cpu")
+cfg = payload.get("experiment_config")
+if not isinstance(cfg, dict):
+    raise SystemExit(f"[ERROR] checkpoint has no experiment_config dict: {ckpt_path}")
+
+obs_cfg = cfg.get("observation")
+groups = obs_cfg.get("groups", {}) if isinstance(obs_cfg, dict) else {}
+actor_obs = groups.get("actor_obs", {}) if isinstance(groups, dict) else {}
+terms = actor_obs.get("terms", {}) if isinstance(actor_obs, dict) else {}
+if not isinstance(terms, dict):
+    raise SystemExit(f"[ERROR] checkpoint actor_obs.terms is invalid: {ckpt_path}")
+
+legacy_forbidden = ("obj_lin_vel_b", "obj_ang_vel_b")
+present = [name for name in legacy_forbidden if name in terms]
+if present:
+    raise SystemExit(
+        "[ERROR] LEGACY_OBS=1 but checkpoint actor_obs is non-legacy "
+        f"(contains {present}): {ckpt_path}"
+    )
+print(f"[INFO] LEGACY_OBS checkpoint validation passed: {ckpt_path}")
+PY
 fi
 
 EXTRA_ARGS=("$@")
@@ -196,7 +269,7 @@ cmd=(
   --checkpoint "${TEACHER_CHECKPOINT}"
   --motion-dir "${MOTION_DIR}"
   --num-envs "${NUM_ENVS}"
-  --headless "${HEADLESS}"
+  --headless "${HEADLESS_FLAG}"
   --pair-terrain-with-motion "${PAIR_TERRAIN_WITH_MOTION}"
   --viser-port "${VISER_PORT}"
   --viser-env-id "${VISER_ENV_ID}"
@@ -247,14 +320,16 @@ if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
 fi
 
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
+echo "[INFO] legacy_obs_enabled=${LEGACY_OBS_ENABLED}"
 echo "[INFO] infer_dataset=${INFER_DATASET}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
 echo "[INFO] motion_clip_name=${MOTION_CLIP_NAME:-<auto>}"
 echo "[INFO] object_urdf=${OBJECT_URDF}"
 echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-<unset>}"
-echo "[INFO] headless=${HEADLESS}"
+echo "[INFO] headless=${HEADLESS_FLAG} (env HEADLESS=${HEADLESS})"
 echo "[INFO] viser=http://localhost:${VISER_PORT}"
 echo "[INFO] viser_sync_to_sim=${VISER_SYNC_TO_SIM} viser_force_dt=${VISER_FORCE_DT}"
+echo "[INFO] viser_load_urdf=${VISER_LOAD_URDF}"
 echo "[INFO] disable_randomization=${DISABLE_RANDOMIZATION}"
 
 "${cmd[@]}"

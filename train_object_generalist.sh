@@ -47,6 +47,7 @@ VISER_SYNC_TO_SIM=${VISER_SYNC_TO_SIM:-True}
 VISER_FORCE_DT=${VISER_FORCE_DT:-True}
 VISER_RECENTER=${VISER_RECENTER:-True}
 VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-False}
+VISER_LOAD_URDF=${VISER_LOAD_URDF:-1}
 ENABLE_VISER=${ENABLE_VISER:-0}
 DEBUG_MODE=${DEBUG_MODE:-${DEBUG_MODEL:-off}}
 ENABLE_TRAIN_VIDEO=${ENABLE_TRAIN_VIDEO:-0}
@@ -237,6 +238,7 @@ fi
 if [[ "${ENABLE_VISER}" == "1" ]]; then
   echo "[INFO] Starting training with live Viser on port ${VISER_PORT}"
   echo "[INFO] Open: http://localhost:${VISER_PORT}"
+  echo "[INFO] Viser runtime source: Isaac Sim state; URDF mesh loading in Viser = ${VISER_LOAD_URDF}"
 else
   echo "[INFO] Starting training without Viser"
 fi
@@ -308,4 +310,4 @@ else
   train_cmd+=(--logger.headless_recording=False)
   train_cmd+=(--logger.video.upload_to_wandb=False)
 fi
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${train_cmd[@]}"
+VISER_LOAD_URDF="${VISER_LOAD_URDF}" CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${train_cmd[@]}"

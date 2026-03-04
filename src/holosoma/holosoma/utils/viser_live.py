@@ -25,6 +25,8 @@ from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.viser_utils import ensure_viser_on_path, resolve_viser_port
 
 LIGHT_BLUE = (130, 180, 235)
+SIM_ROBOT_POINTS_COLOR = np.array([70, 190, 120], dtype=np.uint8)
+SIM_OBJECT_POINTS_COLOR = np.array([130, 180, 235], dtype=np.uint8)
 HEIGHTMAP_MARKER_COLOR = (255, 165, 0)
 CAMERA_MARKER_COLOR = (0, 255, 255)
 SENSOR_MARKER_RADIUS = 0.03
@@ -521,8 +523,11 @@ class ViserLiveViewer:
         )
         self._server = None
         self._viser_urdf_cls = None
+        self._load_urdf_visuals = os.environ.get("VISER_LOAD_URDF", "1").lower() in ("1", "true", "yes", "on")
         self._vr = None
         self._vo = None
+        self._robot_points_handle = None
+        self._object_points_handle = None
         self._primary_object_variants: dict[str, Any] = {}
         self._active_primary_object_urdf: str | None = None
         self._robot_root = None
@@ -533,6 +538,8 @@ class ViserLiveViewer:
         self._secondary_object_roots: dict[int, Any] = {}
         self._secondary_vr: dict[int, Any] = {}
         self._secondary_vo: dict[int, Any] = {}
+        self._secondary_robot_points_handles: dict[int, Any] = {}
+        self._secondary_object_points_handles: dict[int, Any] = {}
         self._secondary_object_urdf: dict[int, str] = {}
         self._viser_multi_env_spacing = 2.5
         self._joint_order: np.ndarray | None = None
@@ -791,12 +798,22 @@ class ViserLiveViewer:
         self._scandots_enabled = bool(getattr(cfg, "viser_show_scandots", False))
         self._scandots_point_size = float(getattr(cfg, "viser_scandots_point_size", 0.02))
 
-        viser_mod, viser_urdf_cls, err = _import_viser()
-        if err is not None or viser_mod is None or viser_urdf_cls is None:
-            logger.warning("Viser live viewer disabled: {}", err or "missing dependency")
-            self._enabled = False
-            return
-        self._viser_urdf_cls = viser_urdf_cls
+        if self._load_urdf_visuals:
+            viser_mod, viser_urdf_cls, err = _import_viser()
+            if err is not None or viser_mod is None or viser_urdf_cls is None:
+                logger.warning("Viser live viewer disabled: {}", err or "missing dependency")
+                self._enabled = False
+                return
+            self._viser_urdf_cls = viser_urdf_cls
+        else:
+            ensure_viser_on_path()
+            try:
+                import viser as viser_mod  # type: ignore[import-not-found]
+            except Exception as exc:
+                logger.warning("Viser live viewer disabled: {}", exc)
+                self._enabled = False
+                return
+            logger.info("Viser running in Isaac-sim-state mode (URDF visuals disabled).")
 
         port_cfg = int(getattr(cfg, "viser_port", 0) or 0)
         port = resolve_viser_port(port_cfg)
@@ -815,17 +832,18 @@ class ViserLiveViewer:
         )
         self._grid_handle.visible = False
 
-        robot_urdf = _resolve_robot_urdf_path(env.robot_config)
-        self._vr = viser_urdf_cls(
-            self._server,
-            urdf_or_path=Path(robot_urdf),
-            root_node_name=self._scene_path("/robot"),
-        )
-
-        self._refresh_primary_object_handle()
-
-        self._setup_joint_order()
-        self._setup_secondary_env_handles(viser_urdf_cls, robot_urdf)
+        if self._load_urdf_visuals:
+            robot_urdf = _resolve_robot_urdf_path(env.robot_config)
+            self._vr = self._viser_urdf_cls(
+                self._server,
+                urdf_or_path=Path(robot_urdf),
+                root_node_name=self._scene_path("/robot"),
+            )
+            self._refresh_primary_object_handle()
+            self._setup_joint_order()
+            self._setup_secondary_env_handles(self._viser_urdf_cls, robot_urdf)
+        else:
+            self._setup_secondary_env_frames_only()
         self._load_terrain()
         self._setup_controls()
 
@@ -905,42 +923,58 @@ class ViserLiveViewer:
                 variant.show_visual = False
             except Exception:
                 pass
+        try:
+            show_object = self._show_object_cb is None or bool(self._show_object_cb.value)
+            handle.show_visual = bool(show_object)
+        except Exception:
+            pass
 
     def _refresh_primary_object_handle(self) -> None:
         self._set_primary_object_urdf(self._resolve_object_urdf_for_env(self._env_id))
 
+    def _resolve_sim_object_name_for_env(self, env_id: int) -> str | None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            return None
+
+        # Multi-object mapping (clip -> object_id -> simulator object name)
+        sim_object_names = list(getattr(motion_cmd, "_sim_object_names", []))
+        clip_object_ids = getattr(motion_cmd, "_clip_object_ids", None)
+        clip_ids = getattr(motion_cmd, "clip_ids", None)
+        if sim_object_names and clip_object_ids is not None and clip_ids is not None:
+            try:
+                clip_idx = int(clip_ids[int(env_id)].item())
+                object_id = int(clip_object_ids[int(clip_idx)].item())
+                if 0 <= object_id < len(sim_object_names):
+                    return str(sim_object_names[object_id])
+            except Exception:
+                pass
+
+        # Single-object mapping fallback
+        object_name = str(getattr(motion_cmd, "object_name", "")).strip()
+        if object_name:
+            return object_name
+        return None
+
     def _resolve_object_urdf_for_env(self, env_id: int) -> str | None:
         fallback = _resolve_object_urdf_path(self._env.robot_config)
-        motion_cmd = self._get_motion_command()
-        if motion_cmd is None or not hasattr(motion_cmd, "motion") or not hasattr(motion_cmd, "clip_ids"):
-            return fallback
-        try:
-            clip_idx = int(motion_cmd.clip_ids[int(env_id)].item())
-        except Exception:
-            return fallback
 
-        clip_urdfs = list(getattr(motion_cmd.motion, "clip_object_urdf_paths", []))
-        if clip_idx < 0 or clip_idx >= len(clip_urdfs):
-            return fallback
-        urdf_raw = str(clip_urdfs[clip_idx]).strip()
-        if not urdf_raw:
-            return fallback
+        sim = getattr(self._env, "simulator", None)
+        object_urdf_by_name = getattr(sim, "_object_urdf_by_name", {})
+        if isinstance(object_urdf_by_name, dict) and object_urdf_by_name:
+            sim_object_name = self._resolve_sim_object_name_for_env(int(env_id))
+            if sim_object_name:
+                urdf_path = str(object_urdf_by_name.get(sim_object_name, "")).strip()
+                if urdf_path:
+                    candidate = Path(urdf_path)
+                    if candidate.exists() and candidate.suffix.lower() == ".urdf":
+                        return str(candidate)
+            if len(object_urdf_by_name) == 1:
+                only_urdf = str(next(iter(object_urdf_by_name.values()))).strip()
+                candidate = Path(only_urdf)
+                if candidate.exists() and candidate.suffix.lower() == ".urdf":
+                    return str(candidate)
 
-        candidates: list[Path] = []
-        try:
-            candidates.append(Path(_resolve_data_path(urdf_raw)))
-        except Exception:
-            pass
-
-        obj_spec = str(getattr(getattr(self._env.robot_config, "object", None), "object_urdf_path", "")).strip()
-        if obj_spec:
-            spec_path = Path(_resolve_data_path(obj_spec))
-            if spec_path.suffix.lower() == ".json":
-                candidates.append((spec_path.parent / urdf_raw).resolve())
-
-        for candidate in candidates:
-            if candidate.exists() and candidate.suffix.lower() == ".urdf":
-                return str(candidate)
         return fallback
 
     def _setup_secondary_env_handles(self, viser_urdf_cls: Any, robot_urdf: str) -> None:
@@ -979,6 +1013,17 @@ class ViserLiveViewer:
                     object_urdf,
                     exc,
                 )
+
+    def _setup_secondary_env_frames_only(self) -> None:
+        if not self._secondary_env_ids or self._server is None:
+            return
+        for env_id in self._secondary_env_ids:
+            robot_node = self._scene_path(f"/env_{env_id}/robot")
+            object_node = self._scene_path(f"/env_{env_id}/object")
+            if env_id not in self._secondary_robot_roots:
+                self._secondary_robot_roots[env_id] = self._server.scene.add_frame(robot_node, show_axes=False)
+            if env_id not in self._secondary_object_roots:
+                self._secondary_object_roots[env_id] = self._server.scene.add_frame(object_node, show_axes=False)
 
     def _ensure_secondary_object_handle(self, env_id: int) -> None:
         if env_id in self._secondary_vo or self._server is None:
@@ -1295,7 +1340,7 @@ class ViserLiveViewer:
         self._reload_terrain_for_clip(self._current_clip_name(self._get_motion_command()))
 
     def record_step(self) -> None:
-        if not self._enabled or self._vr is None or self._robot_root is None:
+        if not self._enabled or self._server is None or self._robot_root is None:
             return
 
         if self._force_dt:
@@ -1314,8 +1359,8 @@ class ViserLiveViewer:
         if root_pos is None or root_quat_wxyz is None:
             return
 
-        dof_pos = self._get_dof_pos()
-        if dof_pos is None:
+        dof_pos = self._get_dof_pos() if self._vr is not None else None
+        if self._vr is not None and dof_pos is None:
             return
 
         if self._offset is None:
@@ -1331,16 +1376,19 @@ class ViserLiveViewer:
             self._robot_root.position = root_pos - offset
             self._robot_root.wxyz = root_quat_wxyz
 
-            joints = dof_pos
-            if self._joint_order is not None:
-                joints = joints[self._joint_order]
-            if joints.shape[0] != self._joint_count:
-                return
-            self._vr.update_cfg(joints.astype(np.float32, copy=False))
-            try:
-                self._vr.show_visual = bool(show_robot)
-            except Exception:
-                pass
+            if self._vr is not None and dof_pos is not None:
+                joints = dof_pos
+                if self._joint_order is not None:
+                    joints = joints[self._joint_order]
+                if joints.shape[0] != self._joint_count:
+                    return
+                self._vr.update_cfg(joints.astype(np.float32, copy=False))
+                try:
+                    self._vr.show_visual = bool(show_robot)
+                except Exception:
+                    pass
+            else:
+                self._update_robot_points(env_id=self._env_id, offset=offset, visible=bool(show_robot))
 
             if self._scandots_enabled:
                 self._update_scandots(offset)
@@ -1350,28 +1398,38 @@ class ViserLiveViewer:
             if not self._disable_contact_force_viz:
                 self._update_contact_forces(offset)
 
-            self._refresh_primary_object_handle()
+            if self._load_urdf_visuals:
+                self._refresh_primary_object_handle()
+            obj_state = self._get_object_state_wxyz()
+            if obj_state is not None and self._object_root is not None:
+                obj_pos, obj_quat_wxyz = obj_state
+                self._object_root.position = obj_pos - offset
+                self._object_root.wxyz = obj_quat_wxyz
+            else:
+                obj_pos = None
             if self._vo is not None and self._object_root is not None:
-                if not show_object:
+                if not show_object or obj_state is None:
                     self._vo.show_visual = False
                 else:
-                    obj_state = self._get_object_state_wxyz()
-                    if obj_state is None:
-                        self._vo.show_visual = False
-                    else:
-                        obj_pos, obj_quat_wxyz = obj_state
-                        self._object_root.position = obj_pos - offset
-                        self._object_root.wxyz = obj_quat_wxyz
-                        self._vo.show_visual = True
+                    self._vo.show_visual = True
+            if self._vo is None:
+                self._update_object_point(
+                    env_id=self._env_id,
+                    object_pos=obj_pos,
+                    offset=offset,
+                    visible=bool(show_object and obj_pos is not None),
+                )
 
             for env_id in self._secondary_env_ids:
                 robot_root = self._secondary_robot_roots.get(env_id)
                 vr = self._secondary_vr.get(env_id)
-                if robot_root is None or vr is None:
+                if robot_root is None:
                     continue
                 secondary_root, secondary_quat = self._get_root_state_wxyz_for(env_id)
-                secondary_dof = self._get_dof_pos_for(env_id)
-                if secondary_root is None or secondary_quat is None or secondary_dof is None:
+                if secondary_root is None or secondary_quat is None:
+                    continue
+                secondary_dof = self._get_dof_pos_for(env_id) if vr is not None else None
+                if vr is not None and secondary_dof is None:
                     continue
                 secondary_offset = (
                     self._resolve_env_origin_for(env_id) if self._recenter else np.zeros(3, dtype=np.float32)
@@ -1382,27 +1440,62 @@ class ViserLiveViewer:
                 robot_root.position = secondary_root - secondary_offset + display_shift
                 robot_root.wxyz = secondary_quat
 
-                secondary_joints = secondary_dof
-                if self._joint_order is not None:
-                    secondary_joints = secondary_joints[self._joint_order]
-                if secondary_joints.shape[0] == self._joint_count:
-                    vr.update_cfg(secondary_joints.astype(np.float32, copy=False))
-                try:
-                    vr.show_visual = bool(show_robot)
-                except Exception:
-                    pass
+                if vr is not None and secondary_dof is not None:
+                    secondary_joints = secondary_dof
+                    if self._joint_order is not None:
+                        secondary_joints = secondary_joints[self._joint_order]
+                    if secondary_joints.shape[0] == self._joint_count:
+                        vr.update_cfg(secondary_joints.astype(np.float32, copy=False))
+                    try:
+                        vr.show_visual = bool(show_robot)
+                    except Exception:
+                        pass
+                elif vr is None:
+                    self._update_robot_points(
+                        env_id=env_id,
+                        offset=secondary_offset,
+                        display_shift=display_shift,
+                        visible=bool(show_robot),
+                    )
 
-                self._ensure_secondary_object_handle(env_id)
+                if self._load_urdf_visuals:
+                    self._ensure_secondary_object_handle(env_id)
                 secondary_vo = self._secondary_vo.get(env_id)
                 secondary_object_root = self._secondary_object_roots.get(env_id)
                 if secondary_vo is None or secondary_object_root is None:
+                    secondary_obj_state = self._get_object_state_wxyz_for(env_id)
+                    if secondary_obj_state is not None and secondary_object_root is not None:
+                        secondary_obj_pos, secondary_obj_quat = secondary_obj_state
+                        secondary_object_root.position = secondary_obj_pos - secondary_offset + display_shift
+                        secondary_object_root.wxyz = secondary_obj_quat
+                        self._update_object_point(
+                            env_id=env_id,
+                            object_pos=secondary_obj_pos,
+                            offset=secondary_offset,
+                            display_shift=display_shift,
+                            visible=bool(show_object),
+                        )
                     continue
                 if not show_object:
                     secondary_vo.show_visual = False
+                    self._update_object_point(
+                        env_id=env_id,
+                        object_pos=None,
+                        offset=secondary_offset,
+                        display_shift=display_shift,
+                        visible=False,
+                    )
                     continue
                 secondary_obj_state = self._get_object_state_wxyz_for(env_id)
                 if secondary_obj_state is None:
                     secondary_vo.show_visual = False
+                    self._update_object_point(
+                        env_id=env_id,
+                        object_pos=None,
+                        offset=secondary_offset,
+                        display_shift=display_shift,
+                        visible=False,
+                    )
                     continue
                 secondary_obj_pos, secondary_obj_quat = secondary_obj_state
                 secondary_object_root.position = secondary_obj_pos - secondary_offset + display_shift
@@ -1888,7 +1981,9 @@ class ViserLiveViewer:
                     initial_value=bool(getattr(self._vr, "show_visual", True)),
                     hint="Toggle robot mesh visibility",
                 )
-                if self._vo is not None or self._secondary_vo:
+                object_cfg = getattr(self._env.robot_config, "object", None)
+                has_object_enabled = bool(object_cfg is not None and getattr(object_cfg, "enabled", False))
+                if self._vo is not None or self._secondary_vo or has_object_enabled:
                     self._show_object_cb = self._server.gui.add_checkbox(
                         "Show Object",
                         initial_value=bool(getattr(self._vo, "show_visual", True))
@@ -2446,6 +2541,116 @@ class ViserLiveViewer:
 
     def _get_object_state_wxyz(self) -> tuple[np.ndarray, np.ndarray] | None:
         return self._get_object_state_wxyz_for(self._env_id)
+
+    def _get_robot_body_points_for(self, env_id: int) -> np.ndarray | None:
+        sim = self._env.simulator
+        rigid_body_pos = getattr(sim, "_rigid_body_pos", None)
+        if rigid_body_pos is None:
+            return None
+        env_idx = int(env_id)
+        if env_idx < 0 or env_idx >= int(rigid_body_pos.shape[0]):
+            return None
+        try:
+            pts = rigid_body_pos[env_idx].detach().cpu().numpy()
+        except Exception:
+            return None
+        if pts.ndim != 2 or pts.shape[-1] != 3:
+            return None
+        return pts
+
+    def _update_robot_points(
+        self,
+        *,
+        env_id: int,
+        offset: np.ndarray,
+        display_shift: np.ndarray | None = None,
+        visible: bool,
+    ) -> None:
+        if self._server is None:
+            return
+        if env_id == self._env_id:
+            handle = self._robot_points_handle
+            path = self._scene_path("/robot/body_points")
+        else:
+            handle = self._secondary_robot_points_handles.get(int(env_id))
+            path = self._scene_path(f"/env_{env_id}/robot/body_points")
+        points = self._get_robot_body_points_for(env_id)
+        if points is None or points.size == 0:
+            if handle is not None:
+                try:
+                    handle.visible = False
+                except Exception:
+                    pass
+            return
+        pts = points - offset
+        if display_shift is not None:
+            pts = pts + display_shift
+        if handle is None:
+            handle = self._server.scene.add_point_cloud(
+                path,
+                points=pts.astype(np.float32, copy=False),
+                colors=np.tile(SIM_ROBOT_POINTS_COLOR, (pts.shape[0], 1)),
+                point_size=0.02,
+                point_shape="circle",
+                precision="float32",
+            )
+            if env_id == self._env_id:
+                self._robot_points_handle = handle
+            else:
+                self._secondary_robot_points_handles[int(env_id)] = handle
+        else:
+            handle.points = pts.astype(np.float32, copy=False)
+        try:
+            handle.visible = bool(visible)
+        except Exception:
+            pass
+
+    def _update_object_point(
+        self,
+        *,
+        env_id: int,
+        object_pos: np.ndarray | None,
+        offset: np.ndarray,
+        display_shift: np.ndarray | None = None,
+        visible: bool,
+    ) -> None:
+        if self._server is None:
+            return
+        if env_id == self._env_id:
+            handle = self._object_points_handle
+            path = self._scene_path("/object/position")
+        else:
+            handle = self._secondary_object_points_handles.get(int(env_id))
+            path = self._scene_path(f"/env_{env_id}/object/position")
+        if object_pos is None:
+            if handle is not None:
+                try:
+                    handle.visible = False
+                except Exception:
+                    pass
+            return
+        pts = object_pos.reshape(1, 3) - offset.reshape(1, 3)
+        if display_shift is not None:
+            pts = pts + display_shift.reshape(1, 3)
+        if handle is None:
+            handle = self._server.scene.add_point_cloud(
+                path,
+                points=pts.astype(np.float32, copy=False),
+                colors=np.tile(SIM_OBJECT_POINTS_COLOR, (1, 1)),
+                point_size=0.045,
+                point_shape="circle",
+                precision="float32",
+            )
+            if env_id == self._env_id:
+                self._object_points_handle = handle
+            else:
+                self._secondary_object_points_handles[int(env_id)] = handle
+        else:
+            handle.points = pts.astype(np.float32, copy=False)
+        try:
+            handle.visible = bool(visible)
+        except Exception:
+            pass
 
     def _update_scandots(self, offset: np.ndarray) -> None:
         if not self._server or not self._scandots_enabled:

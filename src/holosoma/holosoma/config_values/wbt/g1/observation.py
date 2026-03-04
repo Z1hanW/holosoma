@@ -261,14 +261,9 @@ g1_29dof_wbt_observation_w_object_legacy = ObservationManagerCfg(
     },
 )
 
-object_distill_torso_terms = {
-    "torso_xy_rel": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:torso_xy_rel",
-        scale=1.0,
-        noise=0.0,
-    ),
-    "torso_yaw_rel": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:torso_yaw_rel",
+object_distill_sparse_root_cmd_terms = {
+    "sparse_target_root_trajectory_command": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:sparse_target_root_trajectory_command",
         scale=1.0,
         noise=0.0,
     ),
@@ -303,16 +298,6 @@ object_distill_proprio_terms = {
 }
 
 object_distill_box_terms = {
-    "obj_pos_b": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:obj_pos_b",
-        scale=1.0,
-        noise=0.0,
-    ),
-    "obj_ori_b": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:obj_ori_b",
-        scale=1.0,
-        noise=0.0,
-    ),
     "obj_target_pose_size_b": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:obj_target_pose_size_b",
         scale=1.0,
@@ -320,84 +305,32 @@ object_distill_box_terms = {
     ),
 }
 
-object_distill_box_goal_terms = {
-    "obj_pos_b": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:obj_pos_b",
-        scale=1.0,
-        noise=0.0,
-    ),
-    "obj_ori_b": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:obj_ori_b",
-        scale=1.0,
-        noise=0.0,
-    ),
-    "obj_goal_pos_size_b": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:obj_goal_pos_size_b",
-        scale=1.0,
-        noise=0.0,
-    ),
-}
-
-g1_29dof_wbt_observation_w_object_distill_torso_box = ObservationManagerCfg(
+g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCfg(
     groups={
         # Keep full teacher actor observation available for teacher policy queries.
         "actor_obs": actor_obs_w_object,
-        # Student torso command state.
+        # Legacy teacher observation group (without object velocities).
+        "actor_obs_legacy": actor_obs_w_object_legacy,
+        # Student sparse root-trajectory command.
         "actor_obs_torso": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
             history_length=1,
-            terms=object_distill_torso_terms,
+            terms=object_distill_sparse_root_cmd_terms,
         ),
-        # Student proprioception state (keep proprio; remove tracking pose terms only).
+        # Student proprioception state.
         "actor_obs_proprio": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
             history_length=1,
             terms=object_distill_proprio_terms,
         ),
-        # Student object-aware state (current object pose + target pose/size).
+        # Student object state from motion command: [pos(3), rot6d(6), size(3)].
         "actor_obs_box": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
             history_length=1,
             terms=object_distill_box_terms,
-        ),
-        "critic_obs": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms=critic_obs_w_object_terms,
-        ),
-    },
-)
-
-g1_29dof_wbt_observation_w_object_distill_torso_box_goal = ObservationManagerCfg(
-    groups={
-        # Keep full teacher actor observation available for teacher policy queries.
-        "actor_obs": actor_obs_w_object,
-        # Student torso command state.
-        "actor_obs_torso": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms=object_distill_torso_terms,
-        ),
-        # Student proprioception state (keep proprio; remove tracking pose terms only).
-        "actor_obs_proprio": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms=object_distill_proprio_terms,
-        ),
-        # Student object state in robot base frame:
-        # - current object pose (obj_pos_b)
-        # - final clip goal position + size (obj_goal_pos_size_b)
-        "actor_obs_box": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms=object_distill_box_goal_terms,
         ),
         "critic_obs": ObsGroupCfg(
             concatenate=True,
@@ -481,64 +414,12 @@ g1_29dof_wbt_observation_videomimic = ObservationManagerCfg(
     },
 )
 
-g1_29dof_wbt_observation_videomimic_distill = ObservationManagerCfg(
-    groups={
-        # Teacher-style actor obs (history on torso + goals) kept for distillation inputs.
-        "actor_obs": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=5,
-            terms=actor_obs_videomimic_terms,
-        ),
-        # Student actor obs: history on torso_real only.
-        "actor_obs_torso": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=5,
-            terms={
-                "torso_real": actor_obs_videomimic_terms["torso_real"],
-            },
-        ),
-        # Student actor obs: single-frame goals (no history on torso_xy_rel/yaw_rel).
-        "actor_obs_goal": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms={
-                "torso_xy_rel": actor_obs_videomimic_terms["torso_xy_rel"],
-                "torso_yaw_rel": actor_obs_videomimic_terms["torso_yaw_rel"],
-            },
-        ),
-        # Keep target terms for teacher input (actor) and critic.
-        "actor_obs_target": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms=videomimic_target_terms,
-        ),
-        "critic_obs": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=5,
-            terms=critic_obs_videomimic_terms,
-        ),
-        "critic_obs_target": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms=videomimic_target_terms,
-        ),
-    },
-)
-
 __all__ = [
     "g1_29dof_wbt_observation",
     "g1_29dof_wbt_observation_motion_tracking",
     "g1_29dof_wbt_observation_motion_tracking_split",
     "g1_29dof_wbt_observation_w_object",
     "g1_29dof_wbt_observation_w_object_legacy",
-    "g1_29dof_wbt_observation_w_object_distill_torso_box",
-    "g1_29dof_wbt_observation_w_object_distill_torso_box_goal",
+    "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd",
     "g1_29dof_wbt_observation_videomimic",
-    "g1_29dof_wbt_observation_videomimic_distill",
 ]

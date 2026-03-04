@@ -233,22 +233,6 @@ _videomimic_transformer_module_dict = PPOModuleDictConfig(
     ),
 )
 
-_videomimic_distill_actor_inputs = ["actor_obs_torso", "actor_obs_goal"]
-_videomimic_distill_critic_inputs = ["critic_obs", "critic_obs_target"]
-
-_videomimic_distill_mlp_module_dict = PPOModuleDictConfig(
-    actor=replace(
-        algo.ppo.config.module_dict.actor,
-        type="MLP",
-        input_dim=_videomimic_distill_actor_inputs,
-    ),
-    critic=replace(
-        algo.ppo.config.module_dict.critic,
-        type="MLP",
-        input_dim=_videomimic_distill_critic_inputs,
-    ),
-)
-
 g1_29dof_wbt_videomimic_mlp = replace(
     g1_29dof_wbt,
     training=replace(
@@ -272,20 +256,6 @@ g1_29dof_wbt_videomimic_transformer = replace(
     algo=replace(
         algo.ppo,
         config=replace(algo.ppo.config, module_dict=_videomimic_transformer_module_dict),
-    ),
-)
-
-g1_29dof_wbt_videomimic_distill_mlp = replace(
-    g1_29dof_wbt_videomimic_mlp,
-    training=replace(
-        g1_29dof_wbt_videomimic_mlp.training,
-        name="g1_29dof_wbt_videomimic_distill_mlp",
-    ),
-    observation=observation.g1_29dof_wbt_observation_videomimic_distill,
-    termination=termination.g1_29dof_wbt_termination_distill,
-    algo=replace(
-        algo.ppo,
-        config=replace(algo.ppo.config, module_dict=_videomimic_distill_mlp_module_dict),
     ),
 )
 
@@ -403,52 +373,35 @@ g1_29dof_wbt_w_object_generalist_legacy_obs = replace(
     observation=observation.g1_29dof_wbt_observation_w_object_legacy,
 )
 
-_w_object_distill_torso_box_actor_inputs = ["actor_obs_torso", "actor_obs_proprio", "actor_obs_box"]
-_w_object_distill_torso_box_critic_inputs = ["critic_obs"]
+_w_object_distill_sparse_root_cmd_actor_inputs = ["actor_obs_torso", "actor_obs_proprio", "actor_obs_box"]
+_w_object_distill_sparse_root_cmd_critic_inputs = ["critic_obs"]
 
-_w_object_distill_torso_box_module_dict = PPOModuleDictConfig(
+_w_object_distill_sparse_root_cmd_module_dict = PPOModuleDictConfig(
     actor=replace(
         g1_29dof_wbt_w_object_generalist.algo.config.module_dict.actor,
         type="MLP",
-        input_dim=_w_object_distill_torso_box_actor_inputs,
+        input_dim=_w_object_distill_sparse_root_cmd_actor_inputs,
     ),
     critic=replace(
         g1_29dof_wbt_w_object_generalist.algo.config.module_dict.critic,
         type="MLP",
-        input_dim=_w_object_distill_torso_box_critic_inputs,
+        input_dim=_w_object_distill_sparse_root_cmd_critic_inputs,
     ),
 )
 
-g1_29dof_wbt_w_object_distill_torso_box = replace(
+g1_29dof_wbt_w_object_distill_sparse_root_cmd = replace(
     g1_29dof_wbt_w_object_generalist,
     training=replace(
         g1_29dof_wbt_w_object_generalist.training,
-        name="g1_29dof_wbt_w_object_distill_torso_box",
+        name="g1_29dof_wbt_w_object_distill_sparse_root_cmd",
     ),
-    observation=observation.g1_29dof_wbt_observation_w_object_distill_torso_box,
+    observation=observation.g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
     termination=termination.g1_29dof_wbt_termination_distill,
     algo=replace(
         g1_29dof_wbt_w_object_generalist.algo,
         config=replace(
             g1_29dof_wbt_w_object_generalist.algo.config,
-            module_dict=_w_object_distill_torso_box_module_dict,
-        ),
-    ),
-)
-
-g1_29dof_wbt_w_object_distill_torso_box_goal = replace(
-    g1_29dof_wbt_w_object_generalist,
-    training=replace(
-        g1_29dof_wbt_w_object_generalist.training,
-        name="g1_29dof_wbt_w_object_distill_torso_box_goal",
-    ),
-    observation=observation.g1_29dof_wbt_observation_w_object_distill_torso_box_goal,
-    termination=termination.g1_29dof_wbt_termination_distill,
-    algo=replace(
-        g1_29dof_wbt_w_object_generalist.algo,
-        config=replace(
-            g1_29dof_wbt_w_object_generalist.algo.config,
-            module_dict=_w_object_distill_torso_box_module_dict,
+            module_dict=_w_object_distill_sparse_root_cmd_module_dict,
         ),
     ),
 )
@@ -485,8 +438,7 @@ __all__ = [
     "g1_29dof_wbt_w_object",
     "g1_29dof_wbt_w_object_generalist",
     "g1_29dof_wbt_w_object_generalist_legacy_obs",
-    "g1_29dof_wbt_w_object_distill_torso_box",
-    "g1_29dof_wbt_w_object_distill_torso_box_goal",
+    "g1_29dof_wbt_w_object_distill_sparse_root_cmd",
 ]
 
 """

@@ -96,6 +96,27 @@ g1_29dof_wbt_fast_sac_reward = RewardManagerCfg(
 g1_29dof_wbt_reward_w_object = RewardManagerCfg(
     terms={
         **g1_29dof_wbt_reward.terms,
+        # Allow expected upper-body contacts during box carrying.
+        "undesired_contacts": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:UndesiredContacts",
+            params={
+                "threshold": 1.0,
+                "undesired_contacts_body_names": (
+                    "^(?!left_foot_contact_point$)(?!right_foot_contact_point$)"
+                    "(?!left_wrist_yaw_link$)(?!right_wrist_yaw_link$)"
+                    "(?!left_ankle_roll_link$)(?!right_ankle_roll_link$)"
+                    "(?!left_rubber_hand$)(?!right_rubber_hand$)"
+                    "(?!left_hand_palm_link$)(?!right_hand_palm_link$)"
+                    "(?!left_wrist_roll_link$)(?!right_wrist_roll_link$)"
+                    "(?!left_wrist_pitch_link$)(?!right_wrist_pitch_link$)"
+                    "(?!left_elbow_link$)(?!right_elbow_link$)"
+                    "(?!torso_link$)"
+                    "(?!left_shoulder_pitch_link$)(?!left_shoulder_roll_link$)(?!left_shoulder_yaw_link$)"
+                    "(?!right_shoulder_pitch_link$)(?!right_shoulder_roll_link$)(?!right_shoulder_yaw_link$).+$"
+                ),
+            },
+            weight=-0.5,
+        ),
         # Motion tracking rewards - global reference frame
         "object_global_ref_position_error_exp": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:object_global_ref_position_error_exp",

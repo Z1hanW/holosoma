@@ -200,6 +200,48 @@ def torso_yaw_rel(env: WholeBodyTrackingManager) -> torch.Tensor:
     return heading_error.unsqueeze(1)
 
 
+def sparse_target_root_trajectory_command(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Sparse root-trajectory command for locomotion-style distillation.
+
+    Returns [rel_xy(2), rel_yaw(1), target_vxy(2), target_wz(1)] in robot heading frame.
+    """
+    motion_command = _get_motion_command_and_assert_type(env)
+    command_device = motion_command.robot_ref_pos_w.device
+
+    # Joystick/manual mode: use the operator command directly as sparse root command.
+    if getattr(motion_command, "manual_control_enabled", False):
+        manual_xy = getattr(motion_command, "manual_xy_rel", None)
+        manual_yaw = getattr(motion_command, "manual_yaw_rel", None)
+        if manual_xy is not None and manual_yaw is not None:
+            if manual_xy.device != command_device:
+                manual_xy = manual_xy.to(command_device)
+            if manual_yaw.device != command_device:
+                manual_yaw = manual_yaw.to(command_device)
+            # We expose the same desired motion in both pose- and velocity-like slots.
+            return torch.cat([manual_xy, manual_yaw, manual_xy, manual_yaw], dim=-1)
+
+    rel_pos_w = motion_command.ref_pos_w - motion_command.robot_ref_pos_w
+    heading_inv = calc_heading_quat_inv(motion_command.robot_ref_quat_w, w_last=True)
+    rel_pos_b = quat_apply(heading_inv, rel_pos_w, w_last=True)
+    rel_xy = rel_pos_b[:, :2]
+
+    target_heading = calc_heading(motion_command.ref_quat_w)
+    robot_heading = calc_heading(motion_command.robot_ref_quat_w)
+    rel_yaw = normalize_angle(target_heading - robot_heading).unsqueeze(1)
+
+    target_lin_vel_b = quat_apply(heading_inv, motion_command.ref_lin_vel_w, w_last=True)
+    target_vxy = target_lin_vel_b[:, :2]
+
+    target_ang_vel_b = quat_rotate_inverse(
+        motion_command.robot_ref_quat_w,
+        motion_command.ref_ang_vel_w,
+        w_last=True,
+    )
+    target_wz = target_ang_vel_b[:, 2:3]
+
+    return torch.cat([rel_xy, rel_yaw, target_vxy, target_wz], dim=-1)
+
+
 def target_joints(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Target joint angles from motion data, relative to default pose."""
     motion_command = _get_motion_command_and_assert_type(env)

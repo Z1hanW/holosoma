@@ -6,6 +6,7 @@ import os
 import sys
 import traceback
 from contextlib import contextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
@@ -77,14 +78,35 @@ def configure_multi_gpu() -> MultGPUConfig | None:
     gpu_local_rank = int(os.getenv("LOCAL_RANK", "0"))
     gpu_global_rank = int(os.getenv("RANK", "0"))
 
-    if gpu_local_rank >= gpu_world_size:
-        raise ValueError(f"Local rank '{gpu_local_rank}' is greater than or equal to world size '{gpu_world_size}'.")
+    gpu_local_world_size = int(os.getenv("LOCAL_WORLD_SIZE", str(gpu_world_size)))
+    if gpu_local_rank >= gpu_local_world_size:
+        raise ValueError(
+            f"Local rank '{gpu_local_rank}' is greater than or equal to local world size '{gpu_local_world_size}'."
+        )
 
     if gpu_global_rank >= gpu_world_size:
         raise ValueError(f"Global rank '{gpu_global_rank}' is greater than or equal to world size '{gpu_world_size}'.")
 
-    torch.distributed.init_process_group(backend="nccl", rank=gpu_global_rank, world_size=gpu_world_size)
+    if not torch.cuda.is_available():
+        raise RuntimeError("Distributed NCCL training requested but CUDA is not available.")
+
+    visible_gpu_count = torch.cuda.device_count()
+    if gpu_local_rank >= visible_gpu_count:
+        raise ValueError(
+            f"Local rank '{gpu_local_rank}' is out of range for {visible_gpu_count} visible CUDA devices. "
+            "Check CUDA_VISIBLE_DEVICES and --nproc_per_node."
+        )
+
     torch.cuda.set_device(gpu_local_rank)
+    dist_timeout_sec = int(os.getenv("TORCH_DIST_TIMEOUT_SEC", "600"))
+    if dist_timeout_sec <= 0:
+        raise ValueError(f"TORCH_DIST_TIMEOUT_SEC must be positive, got {dist_timeout_sec}.")
+    torch.distributed.init_process_group(
+        backend="nccl",
+        rank=gpu_global_rank,
+        world_size=gpu_world_size,
+        timeout=timedelta(seconds=dist_timeout_sec),
+    )
 
     multi_gpu_config: MultGPUConfig = {
         "global_rank": gpu_global_rank,
@@ -330,7 +352,7 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
         distributed_conf: MultGPUConfig | None = configure_multi_gpu()
         device: str = get_device(tyro_config, distributed_conf)
         is_distributed = distributed_conf is not None
-        is_main_process = distributed_conf is None or distributed_conf["local_rank"] == 0
+        is_main_process = distributed_conf is None or distributed_conf["global_rank"] == 0
 
         # Configure logger
         logger_cfg = tyro_config.logger
@@ -353,51 +375,22 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
 
         wandb_run_path: str | None = None
 
-        # Configure wandb in rank 0
-        if wandb_enabled and is_main_process:
-            from holosoma.config_types.logger import WandbLoggerConfig
-
-            assert isinstance(logger_cfg, WandbLoggerConfig), (
-                "Logger config must be WandbLoggerConfig when type is wandb"
-            )
-            wandb_cfg = logger_cfg
-            # Use training config for project/name, fallback to logger config, then defaults
-            default_project = tyro_config.training.project or wandb_cfg.project or "default_project"
-            default_run_name = (
-                f"{timestamp}_{tyro_config.training.name or 'run'}_"
-                f"{wandb_cfg.group or 'default'}_{tyro_config.robot.asset.robot_type}"
-            )
-            wandb_dir = Path(wandb_cfg.dir or (experiment_dir / ".wandb"))
-            wandb_dir.mkdir(exist_ok=True, parents=True)
-            logger.info(f"Saving wandb logs to {wandb_dir}")
-
-            # Only pass optional parameters when specified so wandb can fall back to environment defaults.
-            wandb_kwargs: dict[str, Any] = {
-                "project": wandb_cfg.project or default_project,
-                "name": wandb_cfg.name or default_run_name,
-                "config": dataclasses.asdict(tyro_config),
-                "dir": str(wandb_dir),
-                "mode": wandb_cfg.mode,
-            }
-            if wandb_cfg.entity:
-                wandb_kwargs["entity"] = wandb_cfg.entity
-            if wandb_cfg.group:
-                wandb_kwargs["group"] = wandb_cfg.group
-            if wandb_cfg.id:
-                wandb_kwargs["id"] = wandb_cfg.id
-            if wandb_cfg.tags:
-                wandb_kwargs["tags"] = list(wandb_cfg.tags)
-            if wandb_cfg.resume is not None:
-                wandb_kwargs["resume"] = wandb_cfg.resume
-
-            wandb.init(**wandb_kwargs)
-            if wandb.run is not None:
-                wandb_run_path = f"{wandb.run.entity}/{wandb.run.project}/{wandb.run.id}"
-
         # Distribute environments across GPUs for proper multi-GPU training
         if distributed_conf is not None:
             original_num_envs = tyro_config.training.num_envs
             num_envs = original_num_envs // distributed_conf["world_size"]
+            if num_envs < 1:
+                raise ValueError(
+                    f"training.num_envs ({original_num_envs}) is too small for world size "
+                    f"{distributed_conf['world_size']}. Increase num_envs or reduce --nproc_per_node."
+                )
+            if original_num_envs % distributed_conf["world_size"] != 0 and is_main_process:
+                logger.warning(
+                    "training.num_envs={} is not divisible by world_size={}; using floor division ({} envs per rank).",
+                    original_num_envs,
+                    distributed_conf["world_size"],
+                    num_envs,
+                )
             tyro_config = dataclasses.replace(
                 tyro_config, training=dataclasses.replace(tyro_config.training, num_envs=num_envs)
             )
@@ -449,12 +442,11 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
         experiment_save_dir = experiment_dir
         experiment_save_dir.mkdir(exist_ok=True, parents=True)
 
+        config_path: Path | None = None
         if is_main_process:
             logger.info(f"Saving config file to {experiment_save_dir}")
             config_path = experiment_save_dir / CONFIG_NAME
             tyro_config.save_config(str(config_path))
-            if wandb_enabled:
-                wandb.save(str(config_path), base_path=experiment_save_dir)
 
         algo_class = get_class(tyro_config.algo._target_)
         algo: BaseAlgo = algo_class(
@@ -465,6 +457,60 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
             multi_gpu_cfg=distributed_conf,
         )
         algo.setup()
+
+        # Configure wandb after distributed model synchronization to avoid rank skew before first collectives.
+        if wandb_enabled and is_main_process:
+            from holosoma.config_types.logger import WandbLoggerConfig
+
+            assert isinstance(logger_cfg, WandbLoggerConfig), (
+                "Logger config must be WandbLoggerConfig when type is wandb"
+            )
+            wandb_cfg = logger_cfg
+            default_project = tyro_config.training.project or wandb_cfg.project or "default_project"
+            default_run_name = (
+                f"{timestamp}_{tyro_config.training.name or 'run'}_"
+                f"{wandb_cfg.group or 'default'}_{tyro_config.robot.asset.robot_type}"
+            )
+            wandb_dir = Path(wandb_cfg.dir or (experiment_dir / ".wandb"))
+            wandb_dir.mkdir(exist_ok=True, parents=True)
+            logger.info(f"Saving wandb logs to {wandb_dir}")
+
+            wandb_kwargs: dict[str, Any] = {
+                "project": wandb_cfg.project or default_project,
+                "name": wandb_cfg.name or default_run_name,
+                "config": dataclasses.asdict(tyro_config),
+                "dir": str(wandb_dir),
+                "mode": wandb_cfg.mode,
+            }
+            if wandb_cfg.entity:
+                wandb_kwargs["entity"] = wandb_cfg.entity
+            if wandb_cfg.group:
+                wandb_kwargs["group"] = wandb_cfg.group
+            if wandb_cfg.id:
+                wandb_kwargs["id"] = wandb_cfg.id
+            if wandb_cfg.tags:
+                wandb_kwargs["tags"] = list(wandb_cfg.tags)
+            if wandb_cfg.resume is not None:
+                wandb_kwargs["resume"] = wandb_cfg.resume
+            wandb_kwargs["settings"] = wandb.Settings(
+                init_timeout=float(os.environ.get("WANDB_INIT_TIMEOUT", "60"))
+            )
+
+            try:
+                wandb.init(**wandb_kwargs)
+            except Exception as wandb_exc:
+                logger.exception(
+                    f"wandb.init failed on rank0: {wandb_exc}. Continuing without an active wandb run."
+                )
+
+            if wandb.run is not None:
+                wandb_run_path = f"{wandb.run.entity}/{wandb.run.project}/{wandb.run.id}"
+                if config_path is not None:
+                    wandb.save(str(config_path), base_path=experiment_save_dir)
+
+        if is_distributed and dist.is_initialized():
+            dist.barrier()
+
         algo.attach_checkpoint_metadata(tyro_config, wandb_run_path)
         if tyro_config.training.checkpoint is not None:
             loaded_checkpoint = load_checkpoint(tyro_config.training.checkpoint, str(experiment_save_dir))

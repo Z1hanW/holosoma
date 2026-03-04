@@ -185,7 +185,7 @@ class DistillationConfig:
     dagger_end_epoch: int = -1
     """Epoch where PPO contribution saturates in dagger mode (-1 disables schedule)."""
 
-    dagger_loss_coef: float = 1.0
+    dagger_loss_coef: float = 10.0
     """Scale on dagger/distillation loss term in scheduled PPO+DAgger mode."""
 
     distill_loss_type: str = "mse"
@@ -196,6 +196,9 @@ class DistillationConfig:
 
     dagger_match_std: bool = False
     """Match policy std against teacher std in BC loss (legacy behavior)."""
+
+    strict_teacher_load: bool = True
+    """Fail fast on teacher architecture/obs mismatch instead of fallback loading."""
 
 
 

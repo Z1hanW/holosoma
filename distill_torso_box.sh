@@ -2,14 +2,17 @@
 set -euo pipefail
 
 # Distill an object-generalist teacher into an object-aware student with reduced actor inputs:
-# - torso_xy_rel + torso_yaw_rel
-# - obj_pos_b + obj_target_pose_size_b (target goal pose + size)
+# - actor_obs_torso: sparse target root trajectory command
+#   [rel_xy(2), rel_yaw(1), target_vxy(2), target_wz(1)]
+# - actor_obs_proprio: base_lin_vel, base_ang_vel, dof_pos, dof_vel, actions
+# - actor_obs_box: obj_target_pose_size_b = [obj_pos(3), obj_rot6d(6), obj_scale(3)]
 #
-# Single-stage VIRAL-style run:
-# - DAgger/PPO scheduled mixing via ppo_start_epoch and dagger_end_epoch
+# Single-stage run:
+# - Pure DAgger by default
+# - Optional DAgger/PPO scheduled mixing via ppo_start_epoch and dagger_end_epoch
 # - Optional 0.5 teacher-action rollout mixing via teacher_action_mix_ratio
 
-DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"/home/ubuntu/FAR/holosoma/logs/WholeBodyTracking/20260216_214200-g1_29dof_wbt_w_object_generalist-locomotion/model_17000.pt"}
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/5vlz6pj8/model_10000.pt"}
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 
 # Optional positional arg:
@@ -36,11 +39,11 @@ fi
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-FORCE_EIGHT_GPU_CONFIG=${FORCE_EIGHT_GPU_CONFIG:-1}
+FORCE_EIGHT_GPU_CONFIG=${FORCE_EIGHT_GPU_CONFIG:-0}
 if [[ "${FORCE_EIGHT_GPU_CONFIG}" != "0" ]]; then
   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
   NPROC=8
-  PER_GPU_ENVS=$((2048 * 6))
+  PER_GPU_ENVS=${PER_GPU_ENVS:-2048}
   NUM_ENVS=${PER_GPU_ENVS}
   if command -v nvidia-smi >/dev/null 2>&1; then
     AVAILABLE_GPUS=$(nvidia-smi -L | wc -l | tr -d ' ')
@@ -67,7 +70,7 @@ else
       NPROC=1
     fi
   fi
-  PER_GPU_ENVS=${PER_GPU_ENVS:-$((2048 * 6))}
+  PER_GPU_ENVS=${PER_GPU_ENVS:-2048}
   NUM_ENVS=${NUM_ENVS:-${PER_GPU_ENVS}}
 fi
 
@@ -76,17 +79,13 @@ if [[ "${FORCE_EIGHT_GPU_CONFIG}" != "0" ]]; then
     echo "Expected NPROC=8, got ${NPROC}." >&2
     exit 1
   fi
-  if [[ "${PER_GPU_ENVS}" -ne $((2048 * 6)) ]]; then
-    echo "Expected PER_GPU_ENVS=$((2048 * 6)), got ${PER_GPU_ENVS}." >&2
-    exit 1
-  fi
-  if [[ "${NUM_ENVS}" -ne $((2048 * 6)) ]]; then
-    echo "Expected NUM_ENVS(per-GPU)= $((2048 * 6)), got ${NUM_ENVS}." >&2
+  if [[ "${NUM_ENVS}" -ne "${PER_GPU_ENVS}" ]]; then
+    echo "Expected NUM_ENVS(per-GPU) == PER_GPU_ENVS, got NUM_ENVS=${NUM_ENVS}, PER_GPU_ENVS=${PER_GPU_ENVS}." >&2
     exit 1
   fi
 fi
 
-EXP=${EXP:-g1-29dof-wbt-w-object-distill-torso-box}
+EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd}
 MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"}
 OBJECT_URDF=${OBJECT_URDF:-"${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"}
 
@@ -99,6 +98,7 @@ NNODES=${NNODES:-1}
 NODE_RANK=${NODE_RANK:-0}
 MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
 MAX_RESTARTS=${MAX_RESTARTS:-0}
+TORCH_DIST_TIMEOUT_SEC=${TORCH_DIST_TIMEOUT_SEC:-1800}
 
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
 NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-10000}
@@ -112,11 +112,12 @@ BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
 SWITCH_TO_RL_AFTER=${SWITCH_TO_RL_AFTER:-}
 CLIP_TEACHER_ACTIONS=${CLIP_TEACHER_ACTIONS:-True}
 CLIP_ACTIONS_THRESHOLD=${CLIP_ACTIONS_THRESHOLD:-8.0}
-TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
+TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs_legacy}
+STRICT_TEACHER_LOAD=${STRICT_TEACHER_LOAD:-True}
 TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
 PPO_START_EPOCH=${PPO_START_EPOCH:--1}
 DAGGER_END_EPOCH=${DAGGER_END_EPOCH:--1}
-DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
+DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-10.0}
 DISTILL_LOSS_TYPE=${DISTILL_LOSS_TYPE:-mse}
 DAGGER_IGNORE_ZERO_TEACHER_ACTIONS=${DAGGER_IGNORE_ZERO_TEACHER_ACTIONS:-True}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
@@ -124,8 +125,8 @@ START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.05}
 RESET_NOISE_SCALE=${RESET_NOISE_SCALE:-1.0}
 SAVE_INTERVAL=${SAVE_INTERVAL:-200}
 LOGGER=${LOGGER:-logger:wandb}
-RUN_NAME=${RUN_NAME:-g1_w_object_distill_torso_box}
-TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_torso_box}
+RUN_NAME=${RUN_NAME:-g1_w_object_distill_sparse_root_cmd}
+TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_sparse_root_cmd}
 TRAINING_PROJECT=${TRAINING_PROJECT:-WholeBodyTracking}
 
 if [[ "${TEACHER_CHECKPOINT}" != wandb://* ]] && [[ ! -f "${TEACHER_CHECKPOINT}" ]]; then
@@ -144,9 +145,12 @@ fi
 EXTRA_ARGS=("$@")
 
 echo "[INFO] Distill teacher checkpoint: ${TEACHER_CHECKPOINT}"
+echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS} strict_teacher_load=${STRICT_TEACHER_LOAD}"
+echo "[INFO] Teacher observation mismatch will fail fast (no fallback)."
 echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH} dagger_loss_coef=${DAGGER_LOSS_COEF}"
 echo "[INFO] init_noise_std=${INIT_NOISE_STD} actor_min_noise_std=${ACTOR_MIN_NOISE_STD}"
 echo "[INFO] per_gpu_envs=${NUM_ENVS} world_size=${NPROC} total_envs=$((NUM_ENVS * NPROC))"
+echo "[INFO] torch_dist_timeout_sec=${TORCH_DIST_TIMEOUT_SEC}"
 
 run_distill_stage() {
   local stage_label="$1"
@@ -185,6 +189,7 @@ run_distill_stage() {
     --algo.config.distill.clip-teacher-actions="${CLIP_TEACHER_ACTIONS}"
     --algo.config.distill.clip-actions-threshold="${CLIP_ACTIONS_THRESHOLD}"
     --algo.config.distill.teacher-obs-keys="${TEACHER_OBS_KEYS}"
+    --algo.config.distill.strict-teacher-load="${STRICT_TEACHER_LOAD}"
     --algo.config.distill.teacher-action-mix-ratio="${TEACHER_ACTION_MIX_RATIO}"
     --algo.config.distill.ppo-start-epoch="${PPO_START_EPOCH}"
     --algo.config.distill.dagger-end-epoch="${DAGGER_END_EPOCH}"
@@ -227,7 +232,7 @@ run_distill_stage() {
   fi
   cmd+=("${EXTRA_ARGS[@]}")
 
-  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${cmd[@]}"
+  TORCH_DIST_TIMEOUT_SEC="${TORCH_DIST_TIMEOUT_SEC}" CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${cmd[@]}"
 }
 
 run_distill_stage \

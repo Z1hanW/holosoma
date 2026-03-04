@@ -176,12 +176,13 @@ class PPO(BaseAlgo):
         self.multi_teacher_select_obs_var = "teacher_checkpoint_index"
         self.ppo_start_epoch = -1
         self.dagger_end_epoch = -1
-        self.dagger_loss_coef = 1.0
+        self.dagger_loss_coef = 10.0
         self.use_ppo_dagger_schedule = False
         self.ppo_coeff = 1.0
         self.distill_loss_fn = F.mse_loss
         self.dagger_ignore_zero_teacher_actions = True
         self.dagger_match_std = False
+        self.strict_teacher_load = True
         self.teacher_actor = None
         self.teacher_actors: list[nn.Module] = []
         self.teacher_actor_obs_normalizers: dict[str, nn.Module] = {}
@@ -372,9 +373,14 @@ class PPO(BaseAlgo):
             removed_perception_input = True
 
         actor_type = actor_cfg.type
-        # Teacher checkpoints can be non-perception models while student actor is perception-enabled.
-        # If perception input is removed for teacher obs keys, fall back to plain MLP to keep teacher load valid.
-        if actor_type == "MLPPerceptionEncoder" and not layer_cfg.perception_input_name:
+        # In strict mode we do not auto-fallback teacher architecture on obs mismatch.
+        if self.strict_teacher_load and actor_type == "MLPPerceptionEncoder" and not layer_cfg.perception_input_name:
+            raise ValueError(
+                "Teacher checkpoint expects perception input, but current teacher_obs_keys remove it. "
+                "Set matching teacher_obs_keys (e.g. legacy group) or disable strict_teacher_load explicitly."
+            )
+        # Backward-compatible fallback for non-strict mode only.
+        if (not self.strict_teacher_load) and actor_type == "MLPPerceptionEncoder" and not layer_cfg.perception_input_name:
             actor_type = "MLP"
         if removed_perception_input and layer_cfg.extra_input_to_hidden:
             layer_cfg = dataclasses.replace(layer_cfg, extra_input_to_hidden=False)
@@ -400,12 +406,14 @@ class PPO(BaseAlgo):
             device=self.device,
             history_length=self.algo_history_length_dict,
         )
-        allow_non_strict = False
-        if hasattr(teacher_actor, "actor_module"):
-            allow_non_strict = getattr(teacher_actor.actor_module.module, "supports_extra_input", False)
         try:
             teacher_actor.load_state_dict(teacher_state["actor_model_state_dict"])
         except RuntimeError:
+            if self.strict_teacher_load:
+                raise
+            allow_non_strict = False
+            if hasattr(teacher_actor, "actor_module"):
+                allow_non_strict = getattr(teacher_actor.actor_module.module, "supports_extra_input", False)
             if not allow_non_strict:
                 raise
             logger.warning("Strict teacher load failed; retrying with strict=False for extra-input modules.")
@@ -450,7 +458,7 @@ class PPO(BaseAlgo):
         self.multi_teacher_select_obs_var = str(distill_cfg.multi_teacher_select_obs_var)
         self.ppo_start_epoch = int(getattr(distill_cfg, "ppo_start_epoch", -1))
         self.dagger_end_epoch = int(getattr(distill_cfg, "dagger_end_epoch", -1))
-        self.dagger_loss_coef = float(getattr(distill_cfg, "dagger_loss_coef", 1.0))
+        self.dagger_loss_coef = float(getattr(distill_cfg, "dagger_loss_coef", 10.0))
         self.use_ppo_dagger_schedule = self.ppo_start_epoch >= 0 and self.dagger_end_epoch > self.ppo_start_epoch
         self.ppo_coeff = 0.0 if self.use_ppo_dagger_schedule else 1.0
         loss_type = str(getattr(distill_cfg, "distill_loss_type", "mse")).strip().lower()
@@ -464,6 +472,7 @@ class PPO(BaseAlgo):
             getattr(distill_cfg, "dagger_ignore_zero_teacher_actions", True)
         )
         self.dagger_match_std = bool(getattr(distill_cfg, "dagger_match_std", False))
+        self.strict_teacher_load = bool(getattr(distill_cfg, "strict_teacher_load", True))
 
         self.teacher_actor = None
         self.teacher_actors = []
@@ -1111,6 +1120,7 @@ class PPO(BaseAlgo):
         actor_loss = actor_loss_base
         distill_loss = torch.tensor(0.0, device=self.device)
         bc_loss = torch.tensor(0.0, device=self.device)
+        dagger_weight = torch.tensor(0.0, device=self.device)
         if self.distill_mode == "dagger" and self.dagger_enabled and (
             self.bc_loss_coef > 0.0 or self.use_ppo_dagger_schedule
         ):
@@ -1159,10 +1169,11 @@ class PPO(BaseAlgo):
             distill_loss = bc_loss
 
             if self.use_ppo_dagger_schedule:
-                dagger_weight = max(0.0, self.dagger_loss_coef * (1.0 - self.ppo_coeff))
+                dagger_weight_value = max(0.0, self.dagger_loss_coef * (1.0 - self.ppo_coeff))
+                dagger_weight = torch.tensor(dagger_weight_value, device=self.device)
                 if self.ppo_coeff <= 0.0:
                     actor_loss = dagger_weight * bc_loss
-                elif dagger_weight <= 0.0:
+                elif dagger_weight_value <= 0.0:
                     actor_loss = self.ppo_coeff * actor_loss_base
                 else:
                     actor_loss = self.ppo_coeff * actor_loss_base + dagger_weight * bc_loss
@@ -1186,6 +1197,8 @@ class PPO(BaseAlgo):
             "entropy_loss": entropy_loss,
             "distill_loss": distill_loss,
             "bc_loss": bc_loss,
+            "ppo_coeff": float(self.ppo_coeff),
+            "dagger_weight": dagger_weight,
             "kl_mean": kl_mean,
         }
 
@@ -1355,6 +1368,8 @@ class PPO(BaseAlgo):
             "entropy_loss": entropy_loss,
             "distill_loss": distill_loss,
             "bc_loss": bc_loss,
+            "ppo_coeff": float(self.ppo_coeff),
+            "dagger_weight": 0.0,
             "kl_mean": kl_mean,
         }
 
@@ -1389,33 +1404,8 @@ class PPO(BaseAlgo):
         if ckpt_path is not None:
             logger.info(f"Loading checkpoint from {ckpt_path}")
             loaded_dict = torch.load(ckpt_path, map_location=self.device)
-            allow_non_strict = any(
-                getattr(module, "supports_extra_input", False)
-                for module in [
-                    getattr(self.actor, "actor_module", None).module if hasattr(self.actor, "actor_module") else None,
-                    getattr(self.critic, "critic_module", None).module if hasattr(self.critic, "critic_module") else None,
-                ]
-                if module is not None
-            )
-            try:
-                self.actor.load_state_dict(loaded_dict["actor_model_state_dict"])
-                self.critic.load_state_dict(loaded_dict["critic_model_state_dict"])
-            except RuntimeError as exc:
-                if not allow_non_strict:
-                    raise
-                logger.warning("Strict checkpoint load failed; retrying with strict=False for extra-input modules.")
-                actor_keys = self.actor.load_state_dict(loaded_dict["actor_model_state_dict"], strict=False)
-                critic_keys = self.critic.load_state_dict(loaded_dict["critic_model_state_dict"], strict=False)
-                if actor_keys.missing_keys or actor_keys.unexpected_keys:
-                    logger.warning(
-                        f"Actor non-strict load: missing={actor_keys.missing_keys}, "
-                        f"unexpected={actor_keys.unexpected_keys}"
-                    )
-                if critic_keys.missing_keys or critic_keys.unexpected_keys:
-                    logger.warning(
-                        f"Critic non-strict load: missing={critic_keys.missing_keys}, "
-                        f"unexpected={critic_keys.unexpected_keys}"
-                    )
+            self.actor.load_state_dict(loaded_dict["actor_model_state_dict"])
+            self.critic.load_state_dict(loaded_dict["critic_model_state_dict"])
             actor_norm_state = loaded_dict.get("actor_obs_normalizer_state")
             critic_norm_state = loaded_dict.get("critic_obs_normalizer_state")
             if isinstance(actor_norm_state, dict):
