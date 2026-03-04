@@ -1254,6 +1254,22 @@ class IsaacSim(BaseSimulator):
         """See base class."""
         return self.object_registry.get_object_indices(names, env_ids)
 
+    def get_actor_states_by_index(self, indices: ActorIndices) -> ActorStates:
+        """Get actor states by pre-computed indices.
+
+        IsaacSim stores robot/object root states in a unified proxy (`all_root_states`)
+        using the same flattened indexing scheme as ObjectRegistry.
+        """
+        return self.all_root_states[indices, :13]
+
+    def set_actor_states_by_index(
+        self, indices: ActorIndices, states: ActorStates, write_updates: bool = True
+    ) -> None:
+        """Set actor states by pre-computed indices."""
+        self.all_root_states[indices, :13] = states
+        if write_updates:
+            self.write_state_updates()
+
     def set_actor_states(self, names: ActorNames, env_ids: EnvIds, states: ActorStates):
         """See base class.
 

@@ -15,7 +15,14 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
 
-DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/5vlz6pj8/model_10000.pt"}
+# Prefer local cached teacher checkpoint for reproducibility/speed.
+LOCAL_TEACHER_CHECKPOINT="${SCRIPT_DIR}/.teacher_checkpoints/model_10000.pt"
+if [[ -f "${LOCAL_TEACHER_CHECKPOINT}" ]]; then
+  _default_teacher_checkpoint="${LOCAL_TEACHER_CHECKPOINT}"
+else
+  _default_teacher_checkpoint="wandb://zihanw22/boxer/5vlz6pj8/model_10000.pt"
+fi
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"${_default_teacher_checkpoint}"}
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 
 if [[ $# -gt 0 ]]; then
@@ -33,7 +40,27 @@ fi
 EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd}
 RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_perception}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_perception_access_to_depth}
-TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs_legacy}
+TRAINING_PROJECT=${TRAINING_PROJECT:-boxer}
+
+# Keep launcher self-contained: direct `bash ./distill_box_perception.sh` works out of box.
+HSSIM_BIN_DIR=${HSSIM_BIN_DIR:-/home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin}
+if [[ -d "${HSSIM_BIN_DIR}" ]]; then
+  export PATH="${HSSIM_BIN_DIR}:${PATH}"
+fi
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+if [[ -z "${NPROC:-}" ]]; then
+  IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
+  NPROC=${#_visible_gpus[@]}
+fi
+
+TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs_legacy,perception_obs}
+_teacher_obs_keys_no_space="$(echo "${TEACHER_OBS_KEYS}" | tr -d '[:space:]')"
+case "${_teacher_obs_keys_no_space}" in
+  "actor_obs"|"['actor_obs']"|"[\"actor_obs\"]"|"actor_obs,perception_obs"|"['actor_obs','perception_obs']"|"[\"actor_obs\",\"perception_obs\"]")
+    echo "[WARN] Remapping TEACHER_OBS_KEYS to actor_obs_legacy,perception_obs to match teacher checkpoint dim/config."
+    TEACHER_OBS_KEYS="actor_obs_legacy,perception_obs"
+    ;;
+esac
 TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
 PPO_START_EPOCH=${PPO_START_EPOCH:-0}
@@ -42,15 +69,19 @@ DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
 
-IMAGE_WIDTH=${IMAGE_WIDTH:-106}
-IMAGE_HEIGHT=${IMAGE_HEIGHT:-60}
+# Teacher 5vlz6pj8 expects perception encoder input dim 289 => 17x17.
+IMAGE_WIDTH=${IMAGE_WIDTH:-17}
+IMAGE_HEIGHT=${IMAGE_HEIGHT:-17}
 CAMERA_NEAR=${CAMERA_NEAR:-0.001}
 CAMERA_FAR=${CAMERA_FAR:-3.0}
 CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-3.0}
+PERCEPTION_WARP_PREPROCESS=${PERCEPTION_WARP_PREPROCESS:-False}
 
 echo "[INFO] distill mode: depth-access-no-box-state"
 echo "[INFO] teacher checkpoint: ${TEACHER_CHECKPOINT}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
+echo "[INFO] training_project=${TRAINING_PROJECT}"
+echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC}"
 echo "[INFO] student actor uses actor_obs_torso + actor_obs_proprio + perception_obs (no actor box state)"
 echo "[INFO] hybrid PPO+DAgger curriculum default=True"
 echo "[INFO] teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
@@ -60,6 +91,9 @@ exec env \
   EXP="${EXP}" \
   RUN_NAME="${RUN_NAME}" \
   TRAINING_NAME="${TRAINING_NAME}" \
+  TRAINING_PROJECT="${TRAINING_PROJECT}" \
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
+  NPROC="${NPROC}" \
   TEACHER_OBS_KEYS="${TEACHER_OBS_KEYS}" \
   TEACHER_ACTION_MIX_RATIO="${TEACHER_ACTION_MIX_RATIO}" \
   BC_LOSS_COEF="${BC_LOSS_COEF}" \
@@ -75,4 +109,5 @@ exec env \
     --perception.camera-near="${CAMERA_NEAR}" \
     --perception.camera-far="${CAMERA_FAR}" \
     --perception.max-distance="${CAMERA_MAX_DISTANCE}" \
+    --perception.camera-warp-preprocess="${PERCEPTION_WARP_PREPROCESS}" \
     "$@"
