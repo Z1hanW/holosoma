@@ -192,7 +192,6 @@ run_distill_stage() {
     --algo.config.distill.clip-actions-threshold="${CLIP_ACTIONS_THRESHOLD}"
     --algo.config.distill.teacher-obs-keys="${TEACHER_OBS_KEYS}"
     --algo.config.distill.strict-teacher-load="${STRICT_TEACHER_LOAD}"
-    --perception.inject-into-policy-modules="${PERCEPTION_INTO_POLICY_MODULES}"
     --algo.config.distill.teacher-action-mix-ratio="${TEACHER_ACTION_MIX_RATIO}"
     --algo.config.distill.ppo-start-epoch="${PPO_START_EPOCH}"
     --algo.config.distill.dagger-end-epoch="${DAGGER_END_EPOCH}"
@@ -235,7 +234,10 @@ run_distill_stage() {
   fi
   cmd+=("${EXTRA_ARGS[@]}")
 
-  TORCH_DIST_TIMEOUT_SEC="${TORCH_DIST_TIMEOUT_SEC}" CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${cmd[@]}"
+  HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES="${PERCEPTION_INTO_POLICY_MODULES}" \
+  TORCH_DIST_TIMEOUT_SEC="${TORCH_DIST_TIMEOUT_SEC}" \
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
+  "${cmd[@]}"
 }
 
 run_distill_stage \

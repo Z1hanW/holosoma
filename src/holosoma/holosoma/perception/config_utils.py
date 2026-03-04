@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 
 from holosoma.config_types.algo import ModuleConfig
 from holosoma.config_types.experiment import ExperimentConfig
@@ -13,6 +14,23 @@ def apply_perception_overrides(config: ExperimentConfig) -> ExperimentConfig:
     """Inject perception observations and encoder settings when enabled."""
     if config.perception is None or not config.perception.enabled:
         return config
+
+    inject_env = os.getenv("HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES")
+    if inject_env is not None:
+        inject_str = inject_env.strip().lower()
+        if inject_str in {"1", "true", "yes", "y", "on"}:
+            inject_override = True
+        elif inject_str in {"0", "false", "no", "n", "off"}:
+            inject_override = False
+        else:
+            raise ValueError(
+                "Invalid HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES value: "
+                f"{inject_env!r}. Expected one of true/false/1/0."
+            )
+        config = dataclasses.replace(
+            config,
+            perception=dataclasses.replace(config.perception, inject_into_policy_modules=inject_override),
+        )
 
     observation = _add_perception_group(config.observation)
     if not config.perception.inject_into_policy_modules:
