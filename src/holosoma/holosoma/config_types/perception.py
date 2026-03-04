@@ -15,6 +15,9 @@ class PerceptionConfig:
     enabled: bool = False
     """Enable perception sensors and policy fusion."""
 
+    inject_into_policy_modules: bool = True
+    """Whether to inject perception encoder branches into actor/critic modules."""
+
     output_mode: str = "heightmap"
     """Perception output type: 'heightmap' or 'camera_depth'."""
 

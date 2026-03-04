@@ -23,7 +23,7 @@ from holosoma.agents.modules.module_utils import (
     setup_ppo_actor_module,
     setup_ppo_critic_module,
 )
-from holosoma.config_types.algo import PPOConfig
+from holosoma.config_types.algo import LayerConfig, ModuleConfig, PPOConfig
 from holosoma.envs.base_task.base_task import BaseTask
 from holosoma.utils.helpers import instantiate
 from holosoma.utils.inference_helpers import (
@@ -349,8 +349,8 @@ class PPO(BaseAlgo):
             self.config.critic_optimizer, params=self.critic.parameters(), lr=self.critic_learning_rate
         )
 
-    def _build_teacher_actor_config(self, obs_keys: list[str]):
-        actor_cfg = self.config.module_dict.actor
+    def _build_teacher_actor_config(self, obs_keys: list[str], base_actor_cfg: ModuleConfig | None = None):
+        actor_cfg = base_actor_cfg or self.config.module_dict.actor
         if list(actor_cfg.input_dim) == list(obs_keys):
             return actor_cfg
         layer_cfg = actor_cfg.layer_config
@@ -387,6 +387,38 @@ class PPO(BaseAlgo):
 
         return dataclasses.replace(actor_cfg, type=actor_type, input_dim=list(obs_keys), layer_config=layer_cfg)
 
+    def _extract_teacher_actor_config(self, teacher_state: dict) -> ModuleConfig | None:
+        exp_cfg = teacher_state.get("experiment_config")
+        if not isinstance(exp_cfg, dict):
+            return None
+        try:
+            actor_cfg_raw = exp_cfg["algo"]["config"]["module_dict"]["actor"]
+        except (KeyError, TypeError):
+            return None
+        if not isinstance(actor_cfg_raw, dict):
+            return None
+        layer_cfg_raw = actor_cfg_raw.get("layer_config")
+        if not isinstance(layer_cfg_raw, dict):
+            return None
+        layer_kwargs = dict(layer_cfg_raw)
+        module_input_name = layer_kwargs.get("module_input_name")
+        if isinstance(module_input_name, list):
+            layer_kwargs["module_input_name"] = tuple(module_input_name)
+        try:
+            layer_cfg = LayerConfig(**layer_kwargs)
+            actor_cfg = ModuleConfig(
+                type=str(actor_cfg_raw.get("type", "MLP")),
+                input_dim=list(actor_cfg_raw.get("input_dim", [])),
+                output_dim=list(actor_cfg_raw.get("output_dim", [])),
+                layer_config=layer_cfg,
+                min_noise_std=actor_cfg_raw.get("min_noise_std"),
+                min_mean_noise_std=actor_cfg_raw.get("min_mean_noise_std"),
+            )
+            return actor_cfg
+        except Exception as exc:
+            logger.warning(f"Failed to parse teacher actor config from checkpoint; falling back to runtime config. {exc}")
+            return None
+
     def _load_teacher_actor(
         self, ckpt_path: str, obs_keys: list[str] | None = None
     ) -> tuple[nn.Module, dict[str, nn.Module]]:
@@ -397,7 +429,8 @@ class PPO(BaseAlgo):
 
         teacher_state = torch.load(ckpt_path, map_location=self.device)
         teacher_obs_keys = obs_keys if obs_keys is not None else self.actor_obs_keys
-        teacher_actor_cfg = self._build_teacher_actor_config(teacher_obs_keys)
+        teacher_actor_base_cfg = self._extract_teacher_actor_config(teacher_state)
+        teacher_actor_cfg = self._build_teacher_actor_config(teacher_obs_keys, base_actor_cfg=teacher_actor_base_cfg)
         teacher_actor = setup_ppo_actor_module(
             obs_dim_dict=self.algo_obs_dim_dict,
             module_config=teacher_actor_cfg,

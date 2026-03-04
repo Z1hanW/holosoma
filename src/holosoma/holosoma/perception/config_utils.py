@@ -15,6 +15,8 @@ def apply_perception_overrides(config: ExperimentConfig) -> ExperimentConfig:
         return config
 
     observation = _add_perception_group(config.observation)
+    if not config.perception.inject_into_policy_modules:
+        return dataclasses.replace(config, observation=observation)
     algo = _add_perception_modules(config)
     return dataclasses.replace(config, observation=observation, algo=algo)
 

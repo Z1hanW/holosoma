@@ -114,6 +114,7 @@ CLIP_TEACHER_ACTIONS=${CLIP_TEACHER_ACTIONS:-True}
 CLIP_ACTIONS_THRESHOLD=${CLIP_ACTIONS_THRESHOLD:-8.0}
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs_legacy}
 STRICT_TEACHER_LOAD=${STRICT_TEACHER_LOAD:-True}
+PERCEPTION_INTO_POLICY_MODULES=${PERCEPTION_INTO_POLICY_MODULES:-True}
 TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
 PPO_START_EPOCH=${PPO_START_EPOCH:--1}
 DAGGER_END_EPOCH=${DAGGER_END_EPOCH:--1}
@@ -146,6 +147,7 @@ EXTRA_ARGS=("$@")
 
 echo "[INFO] Distill teacher checkpoint: ${TEACHER_CHECKPOINT}"
 echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS} strict_teacher_load=${STRICT_TEACHER_LOAD}"
+echo "[INFO] perception.inject_into_policy_modules=${PERCEPTION_INTO_POLICY_MODULES}"
 echo "[INFO] Teacher observation mismatch will fail fast (no fallback)."
 echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH} dagger_loss_coef=${DAGGER_LOSS_COEF}"
 echo "[INFO] init_noise_std=${INIT_NOISE_STD} actor_min_noise_std=${ACTOR_MIN_NOISE_STD}"
@@ -190,6 +192,7 @@ run_distill_stage() {
     --algo.config.distill.clip-actions-threshold="${CLIP_ACTIONS_THRESHOLD}"
     --algo.config.distill.teacher-obs-keys="${TEACHER_OBS_KEYS}"
     --algo.config.distill.strict-teacher-load="${STRICT_TEACHER_LOAD}"
+    --perception.inject-into-policy-modules="${PERCEPTION_INTO_POLICY_MODULES}"
     --algo.config.distill.teacher-action-mix-ratio="${TEACHER_ACTION_MIX_RATIO}"
     --algo.config.distill.ppo-start-epoch="${PPO_START_EPOCH}"
     --algo.config.distill.dagger-end-epoch="${DAGGER_END_EPOCH}"
