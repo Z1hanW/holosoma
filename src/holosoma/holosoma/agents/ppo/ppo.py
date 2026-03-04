@@ -425,7 +425,8 @@ class PPO(BaseAlgo):
         if ckpt_path.startswith("wandb://"):
             from holosoma.utils.eval_utils import load_checkpoint  # noqa: PLC0415
 
-            ckpt_path = str(load_checkpoint(ckpt_path, str(self.log_dir)))
+            teacher_cache_dir = self.log_dir / ".teacher_ckpt_cache" / f"rank_{self.gpu_global_rank}"
+            ckpt_path = str(load_checkpoint(ckpt_path, str(teacher_cache_dir)))
 
         teacher_state = torch.load(ckpt_path, map_location=self.device)
         teacher_obs_keys = obs_keys if obs_keys is not None else self.actor_obs_keys

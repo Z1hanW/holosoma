@@ -272,9 +272,11 @@ def load_checkpoint(checkpoint: str, log_dir: str) -> Path:
         log_dir_path.mkdir(parents=True, exist_ok=True)
         # Download checkpoint to log_dir
         checkpoint_file = run.file(checkpoint)  # Get the specific checkpoint file
-        checkpoint_file.download(root=log_dir, exist_ok=True)
+        downloaded = checkpoint_file.download(root=log_dir, replace=True)
         logger.info(f"Finished downloading checkpoint {checkpoint} to {log_dir} from W&B run {wandb_run_path}")
-        checkpoint_path = log_dir_path / checkpoint
+        checkpoint_path = Path(downloaded.name)
+        if not checkpoint_path.is_absolute():
+            checkpoint_path = log_dir_path / checkpoint_path
     else:
         checkpoint_path = Path(checkpoint)
     return checkpoint_path
