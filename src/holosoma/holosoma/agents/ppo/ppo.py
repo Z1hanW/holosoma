@@ -741,7 +741,7 @@ class PPO(BaseAlgo):
         return teacher_actions, None
 
     def _adjust_ppo_dagger_coeff(self, current_epoch: int) -> None:
-        """Far-tracking style PPO/DAgger mixing schedule.
+        """PPO/DAgger curriculum mixing schedule.
 
         - epoch < ppo_start_epoch: ppo_coeff = 0.0
         - epoch >= dagger_end_epoch: ppo_coeff = 0.9
@@ -1203,14 +1203,12 @@ class PPO(BaseAlgo):
             distill_loss = bc_loss
 
             if self.use_ppo_dagger_schedule:
-                dagger_weight_value = max(0.0, self.dagger_loss_coef * (1.0 - self.ppo_coeff))
-                dagger_weight = torch.tensor(dagger_weight_value, device=self.device)
-                if self.ppo_coeff <= 0.0:
-                    actor_loss = dagger_weight * bc_loss
-                elif dagger_weight_value <= 0.0:
-                    actor_loss = self.ppo_coeff * actor_loss_base
-                else:
-                    actor_loss = self.ppo_coeff * actor_loss_base + dagger_weight * bc_loss
+                # Paper-style hybrid objective:
+                #   L = lambda_ppo * L_ppo + lambda_d * L_dagger, lambda_ppo + lambda_d = 1
+                lambda_ppo = max(0.0, min(1.0, float(self.ppo_coeff)))
+                lambda_d = 1.0 - lambda_ppo
+                dagger_weight = torch.tensor(lambda_d, device=self.device)
+                actor_loss = lambda_ppo * actor_loss_base + dagger_weight * bc_loss
             elif self.bc_loss_coef > 0.0:
                 actor_loss = (1.0 - self.bc_loss_coef) * actor_loss_base + self.bc_loss_coef * bc_loss
         elif self.distill_enabled:

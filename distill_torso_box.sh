@@ -153,9 +153,9 @@ TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs_legacy}
 STRICT_TEACHER_LOAD=${STRICT_TEACHER_LOAD:-True}
 PERCEPTION_INTO_POLICY_MODULES=${PERCEPTION_INTO_POLICY_MODULES:-True}
 TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
-PPO_START_EPOCH=${PPO_START_EPOCH:--1}
-DAGGER_END_EPOCH=${DAGGER_END_EPOCH:--1}
-DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-10.0}
+PPO_START_EPOCH=${PPO_START_EPOCH:-0}
+DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-10000}
+DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
 DISTILL_LOSS_TYPE=${DISTILL_LOSS_TYPE:-mse}
 DAGGER_IGNORE_ZERO_TEACHER_ACTIONS=${DAGGER_IGNORE_ZERO_TEACHER_ACTIONS:-True}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
@@ -186,7 +186,7 @@ echo "[INFO] Distill teacher checkpoint: ${TEACHER_CHECKPOINT}"
 echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS} strict_teacher_load=${STRICT_TEACHER_LOAD}"
 echo "[INFO] perception.inject_into_policy_modules=${PERCEPTION_INTO_POLICY_MODULES}"
 echo "[INFO] Teacher observation mismatch will fail fast (no fallback)."
-echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH} dagger_loss_coef=${DAGGER_LOSS_COEF}"
+echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH} (hybrid PPO+DAgger curriculum enabled by default)"
 echo "[INFO] init_noise_std=${INIT_NOISE_STD} actor_min_noise_std=${ACTOR_MIN_NOISE_STD}"
 echo "[INFO] per_gpu_envs=${NUM_ENVS} world_size=${NPROC} total_envs=$((NUM_ENVS * NPROC))"
 echo "[INFO] torch_dist_timeout_sec=${TORCH_DIST_TIMEOUT_SEC}"
