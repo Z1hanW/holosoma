@@ -19,7 +19,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-CKPT=${CKPT:-"/home/ubuntu/FAR/holosoma/logs/WholeBodyTracking/20260222_081034-g1_29dof_wbt_w_object_distill_torso_box_stage1-locomotion/model_01000.pt"}
+CKPT=${CKPT:-"/data/logs_new/WholeBodyTracking/20260222_081034-g1_29dof_wbt_w_object_distill_torso_box_stage1-locomotion/model_01000.pt"}
 MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"}
 MOTION_CLIP_NAME=${MOTION_CLIP_NAME:-sub3_largebox_003_mj_w_obj}
 OBJECT_URDF=${OBJECT_URDF:-"${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"}

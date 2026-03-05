@@ -3,6 +3,7 @@ set -euo pipefail
 
 CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-videomimic-mlp  \
+  perception:none \
   --training.num_envs=8192 \
   \
   --algo.config.actor_learning_rate=7e-5 \

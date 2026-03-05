@@ -195,7 +195,7 @@ class ExperimentConfig:
         tyro.conf.arg(
             constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.perception.DEFAULTS)
         ),
-    ] = holosoma.config_values.perception.heightmap
+    ] = holosoma.config_values.perception.none
     observation: Annotated[
         ObservationManagerCfg | None,
         tyro.conf.arg(

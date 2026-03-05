@@ -16,7 +16,7 @@ Usage:
 Notes:
   - terrain branch defaults to perception:heightmap
   - terrain branch default ckpt:
-    /home/ubuntu/FAR/holosoma/logs/WholeBodyTracking/20260224_204920-g1_29dof_wbt_videomimic_mlp-locomotion/model_10000.pt
+    /data/logs_new/WholeBodyTracking/20260224_204920-g1_29dof_wbt_videomimic_mlp-locomotion/model_10000.pt
   - terrain branch default motion:
     /data/terrain/___crisp_clean_motion
   - terrain branch default terrain:
@@ -33,7 +33,7 @@ fi
 MODE="$1"
 shift
 
-DEFAULT_TERRAIN_CKPT="/home/ubuntu/FAR/holosoma/logs/WholeBodyTracking/20260224_204920-g1_29dof_wbt_videomimic_mlp-locomotion/model_10000.pt"
+DEFAULT_TERRAIN_CKPT="/data/logs_new/WholeBodyTracking/20260224_204920-g1_29dof_wbt_videomimic_mlp-locomotion/model_10000.pt"
 DEFAULT_TERRAIN_MOTION="/data/terrain/___crisp_clean_motion"
 DEFAULT_TERRAIN_ASSET="/data/terrain/___crisp_clean_geometry"
 

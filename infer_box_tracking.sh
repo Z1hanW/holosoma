@@ -9,7 +9,8 @@ set -euo pipefail
 #
 # Optional env vars:
 #   TEACHER_CHECKPOINT        (default: distill_box teacher default)
-#   LEGACY_OBS                (default: 0; set 1/true to require legacy checkpoint observation layout)
+#   LEGACY_OBS                (default: 1; set 1/true to require legacy checkpoint observation layout)
+#   REQUIRE_HEIGHTMAP         (default: 1; set 1/true to require checkpoint perception.enabled=True and output_mode=heightmap)
 #   DEFAULT_LEGACY_TEACHER_CHECKPOINT
 #                             (optional; used as default checkpoint when LEGACY_OBS=1 and no checkpoint is explicitly provided)
 #   INFER_DATASET             (default: omomo; options: omomo|behave|mixed)
@@ -56,14 +57,21 @@ if [[ $# -gt 0 ]]; then
       ;;
   esac
 fi
-DEFAULT_TEACHER_CHECKPOINT="/home/ubuntu/FAR/holosoma/logs/WholeBodyTracking/20260216_214200-g1_29dof_wbt_w_object_generalist-locomotion/model_17000.pt"
+DEFAULT_TEACHER_CHECKPOINT="/data/logs_new/WholeBodyTracking/20260216_214200-g1_29dof_wbt_w_object_generalist-locomotion/model_17000.pt"
 DEFAULT_LEGACY_TEACHER_CHECKPOINT="${DEFAULT_LEGACY_TEACHER_CHECKPOINT:-}"
-LEGACY_OBS=${LEGACY_OBS:-0}
+LEGACY_OBS=${LEGACY_OBS:-1}
 legacy_obs_normalized=$(echo "${LEGACY_OBS}" | tr '[:upper:]' '[:lower:]')
 if [[ "${legacy_obs_normalized}" == "1" || "${legacy_obs_normalized}" == "true" ]]; then
   LEGACY_OBS_ENABLED=1
 else
   LEGACY_OBS_ENABLED=0
+fi
+REQUIRE_HEIGHTMAP=${REQUIRE_HEIGHTMAP:-1}
+require_heightmap_normalized=$(echo "${REQUIRE_HEIGHTMAP}" | tr '[:upper:]' '[:lower:]')
+if [[ "${require_heightmap_normalized}" == "1" || "${require_heightmap_normalized}" == "true" ]]; then
+  HEIGHTMAP_REQUIRED=1
+else
+  HEIGHTMAP_REQUIRED=0
 fi
 
 TEACHER_CHECKPOINT_FROM_ENV=0
@@ -233,32 +241,115 @@ if [[ -d "${MOTION_DIR}" && -n "${MOTION_CLIP_NAME}" && ! -f "${MOTION_DIR}/${MO
   exit 2
 fi
 
-if [[ "${LEGACY_OBS_ENABLED}" == "1" && "${TEACHER_CHECKPOINT}" != wandb://* ]]; then
-  python - <<'PY' "${TEACHER_CHECKPOINT}" || exit 2
+if [[ "${LEGACY_OBS_ENABLED}" == "1" || "${HEIGHTMAP_REQUIRED}" == "1" ]]; then
+  python - <<'PY' "${TEACHER_CHECKPOINT}" "${LEGACY_OBS_ENABLED}" "${HEIGHTMAP_REQUIRED}" || exit 2
 import sys
+import tempfile
+from pathlib import Path
+
 import torch
 
-ckpt_path = sys.argv[1]
-payload = torch.load(ckpt_path, map_location="cpu")
+
+def parse_bool(v: str) -> bool:
+    return v.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_wandb_reference(reference: str) -> tuple[str, str]:
+    if not reference.startswith("wandb://"):
+        raise ValueError("Not a wandb:// reference")
+    remainder = reference[len("wandb://") :]
+    parts = remainder.split("/")
+    if len(parts) < 4:
+        raise ValueError(
+            "Invalid wandb checkpoint path. Expected wandb://<entity>/<project>/<run_id>/<checkpoint_name>"
+        )
+    entity, project = parts[0], parts[1]
+    run_id_index = 2
+    if len(parts) > 4 and parts[2] == "runs":
+        run_id_index = 3
+    if run_id_index >= len(parts):
+        raise ValueError(
+            "Invalid wandb checkpoint path. Expected wandb://<entity>/<project>/<run_id>/<checkpoint_name>"
+        )
+    run_id = parts[run_id_index]
+    ckpt_name = "/".join(parts[run_id_index + 1 :]).strip()
+    if not ckpt_name:
+        raise ValueError(
+            "wandb checkpoint reference must include checkpoint filename, e.g. model_12000.pt"
+        )
+    return f"{entity}/{project}/{run_id}", ckpt_name
+
+
+def load_payload(checkpoint_ref: str):
+    if checkpoint_ref.startswith("wandb://"):
+        import wandb
+
+        run_path, ckpt_name = _parse_wandb_reference(checkpoint_ref)
+        run = wandb.Api().run(run_path)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            downloaded = run.file(ckpt_name).download(root=tmp_dir, replace=True)
+            ckpt_path = Path(downloaded.name)
+            if not ckpt_path.is_absolute():
+                ckpt_path = (Path.cwd() / ckpt_path).resolve()
+            payload = torch.load(ckpt_path, map_location="cpu")
+            return payload
+    return torch.load(checkpoint_ref, map_location="cpu")
+
+
+checkpoint_ref = sys.argv[1]
+require_legacy = parse_bool(sys.argv[2])
+require_heightmap = parse_bool(sys.argv[3])
+
+payload = load_payload(checkpoint_ref)
 cfg = payload.get("experiment_config")
 if not isinstance(cfg, dict):
-    raise SystemExit(f"[ERROR] checkpoint has no experiment_config dict: {ckpt_path}")
+    raise SystemExit(f"[ERROR] checkpoint has no experiment_config dict: {checkpoint_ref}")
 
 obs_cfg = cfg.get("observation")
 groups = obs_cfg.get("groups", {}) if isinstance(obs_cfg, dict) else {}
 actor_obs = groups.get("actor_obs", {}) if isinstance(groups, dict) else {}
 terms = actor_obs.get("terms", {}) if isinstance(actor_obs, dict) else {}
 if not isinstance(terms, dict):
-    raise SystemExit(f"[ERROR] checkpoint actor_obs.terms is invalid: {ckpt_path}")
+    raise SystemExit(f"[ERROR] checkpoint actor_obs.terms is invalid: {checkpoint_ref}")
 
-legacy_forbidden = ("obj_lin_vel_b", "obj_ang_vel_b")
-present = [name for name in legacy_forbidden if name in terms]
-if present:
-    raise SystemExit(
-        "[ERROR] LEGACY_OBS=1 but checkpoint actor_obs is non-legacy "
-        f"(contains {present}): {ckpt_path}"
-    )
-print(f"[INFO] LEGACY_OBS checkpoint validation passed: {ckpt_path}")
+if require_legacy:
+    legacy_forbidden = ("obj_lin_vel_b", "obj_ang_vel_b")
+    present = [name for name in legacy_forbidden if name in terms]
+    if present:
+        raise SystemExit(
+            "[ERROR] LEGACY_OBS=1 but checkpoint actor_obs is non-legacy "
+            f"(contains {present}): {checkpoint_ref}"
+        )
+
+if require_heightmap:
+    perception_cfg = cfg.get("perception")
+    if not isinstance(perception_cfg, dict):
+        raise SystemExit(
+            "[ERROR] REQUIRE_HEIGHTMAP=1 but checkpoint has no perception config dict: "
+            f"{checkpoint_ref}"
+        )
+    enabled = bool(perception_cfg.get("enabled", False))
+    output_mode = str(perception_cfg.get("output_mode", "")).strip()
+    if not enabled:
+        raise SystemExit(
+            "[ERROR] REQUIRE_HEIGHTMAP=1 but checkpoint perception.enabled is False: "
+            f"{checkpoint_ref}"
+        )
+    if output_mode != "heightmap":
+        raise SystemExit(
+            "[ERROR] REQUIRE_HEIGHTMAP=1 but checkpoint perception.output_mode is "
+            f"'{output_mode}' (expected 'heightmap'): {checkpoint_ref}"
+        )
+    if "perception_obs" not in groups:
+        raise SystemExit(
+            "[ERROR] REQUIRE_HEIGHTMAP=1 but observation groups has no 'perception_obs': "
+            f"{checkpoint_ref}"
+        )
+
+print(
+    f"[INFO] Checkpoint validation passed (legacy={require_legacy}, "
+    f"heightmap={require_heightmap}): {checkpoint_ref}"
+)
 PY
 fi
 
@@ -321,6 +412,7 @@ fi
 
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
 echo "[INFO] legacy_obs_enabled=${LEGACY_OBS_ENABLED}"
+echo "[INFO] require_heightmap=${HEIGHTMAP_REQUIRED}"
 echo "[INFO] infer_dataset=${INFER_DATASET}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
 echo "[INFO] motion_clip_name=${MOTION_CLIP_NAME:-<auto>}"

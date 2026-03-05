@@ -131,13 +131,13 @@ def _replay_debug_paths() -> tuple[Path, Path]:
     csv_path = Path(
         os.environ.get(
             "HOLOSOMA_REPLAY_STEP_DEBUG_CSV",
-            f"logs/replay_depth_debug/replay_step_debug_{timestamp}.csv",
+            f"/data/logs_new/replay_depth_debug/replay_step_debug_{timestamp}.csv",
         )
     )
     hits_dir = Path(
         os.environ.get(
             "HOLOSOMA_REPLAY_STEP_DEBUG_HITS_DIR",
-            f"logs/replay_depth_debug/replay_hits_{timestamp}",
+            f"/data/logs_new/replay_depth_debug/replay_hits_{timestamp}",
         )
     )
     return csv_path, hits_dir
@@ -425,7 +425,7 @@ def replay(tyro_config: ExperimentConfig):
         try:
             from holosoma.utils.video_utils import create_video
 
-            save_dir = Path(os.environ.get("HOLOSOMA_REPLAY_WANDB_VIDEO_DIR", "logs/videos/replay_depth"))
+            save_dir = Path(os.environ.get("HOLOSOMA_REPLAY_WANDB_VIDEO_DIR", "/data/logs_new/videos/replay_depth"))
             output_format = os.environ.get("HOLOSOMA_REPLAY_WANDB_VIDEO_FORMAT", "h264")
             create_video(
                 video_frames=np.stack(depth_video_frames, axis=0).astype(np.uint8),

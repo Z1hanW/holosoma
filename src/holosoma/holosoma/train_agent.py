@@ -266,7 +266,7 @@ def _run_debug_depth_video(env: Any, *, wandb_logging: bool) -> None:
     save_dir = (
         Path(env.simulator.video_config.save_dir)
         if env.simulator.video_config.save_dir is not None
-        else Path("logs/videos")
+        else Path("/data/logs_new/videos")
     )
     create_video(
         video_frames=np.stack(frames, axis=0).astype(np.uint8),

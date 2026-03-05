@@ -26,6 +26,7 @@ echo "[INFO] Open: http://localhost:${VISER_PORT}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" torchrun --nproc_per_node="${NPROC}" --master_port="${MASTER_PORT}" \
   src/holosoma/holosoma/train_agent.py \
   "exp:${EXP}" \
+  perception:none \
   --training.project="${WANDB_PROJECT}" \
   --training.num_envs="${NUM_ENVS}" \
   --training.enable_viser=True \

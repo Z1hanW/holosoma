@@ -32,13 +32,14 @@ Optional env vars:
   GEOMETRY_DIR            (optional; OBJ file/dir for terrain visualization)
   PAIR_TERRAIN_WITH_MOTION (default: False)
   NUM_ENVS                (default: 1)
-  HEADLESS                (default: True)
+  HEADLESS                (default: True; accepts 0/1/true/false/yes/no/on/off)
   VISER_PORT              (default: random)
   VISER_ENV_ID            (default: 0)
   VISER_UPDATE_HZ         (default: 30)
   VISER_RECENTER          (default: True)
   WANDB_MODEL_FILE        (default: model_00800.pt, used when checkpoint is a wandb run URL)
   MOCAP_PERCEPTION_PRESET (default: checkpoint; checkpoint|none|heightmap)
+  DEPTH_PERCEPTION_PRESET (default: checkpoint; checkpoint|d435i)
 
 Hardware joystick (optional):
   VISER_MANUAL_USE_HW_JOYSTICK=1
@@ -72,7 +73,7 @@ case "${MODE}" in
     ;;
 esac
 
-LOG_ROOT="${SCRIPT_DIR}/logs/WholeBodyTracking"
+LOG_ROOT="/data/logs_new/WholeBodyTracking"
 MOCAP_TRAINING_NAME_DEFAULT="g1_29dof_wbt_w_object_distill_box_mocap_access_to_mocap_data"
 DEPTH_TRAINING_NAME_DEFAULT="g1_29dof_wbt_w_object_distill_box_perception_access_to_depth"
 MOCAP_CHECKPOINT_DEFAULT=${MOCAP_CHECKPOINT_DEFAULT:-"wandb://zihanw22/WholeBodyTracking/d20ktze6/model_00800.pt"}
@@ -162,7 +163,22 @@ GEOMETRY_DIR=${GEOMETRY_DIR:-}
 
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 NUM_ENVS=${NUM_ENVS:-1}
-HEADLESS=${HEADLESS:-True}
+HEADLESS_RAW=${HEADLESS:-True}
+HEADLESS_NORM=$(echo "${HEADLESS_RAW}" | tr '[:upper:]' '[:lower:]')
+case "${HEADLESS_NORM}" in
+  1|true|yes|on)
+    HEADLESS_FLAG=True
+    export HEADLESS=1
+    ;;
+  0|false|no|off|"")
+    HEADLESS_FLAG=False
+    export HEADLESS=0
+    ;;
+  *)
+    echo "[ERROR] HEADLESS must be one of: 0/1/true/false/yes/no/on/off. Got: ${HEADLESS_RAW}" >&2
+    exit 2
+    ;;
+esac
 VISER_PORT=${VISER_PORT:-$((RANDOM % 8976 + 1024))}
 VISER_ENV_ID=${VISER_ENV_ID:-0}
 VISER_UPDATE_HZ=${VISER_UPDATE_HZ:-30}
@@ -182,6 +198,7 @@ CAMERA_NEAR=${CAMERA_NEAR:-0.001}
 CAMERA_FAR=${CAMERA_FAR:-3.0}
 CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-3.0}
 MOCAP_PERCEPTION_PRESET=${MOCAP_PERCEPTION_PRESET:-checkpoint}
+DEPTH_PERCEPTION_PRESET=${DEPTH_PERCEPTION_PRESET:-checkpoint}
 
 if [[ ! -e "${MOTION_DIR}" ]]; then
   echo "[ERROR] MOTION_DIR not found: ${MOTION_DIR}" >&2
@@ -214,6 +231,9 @@ USE_HW_JOYSTICK_BRIDGE=${USE_HW_JOYSTICK_BRIDGE:-False}
 export VISER_MANUAL_HW_BACKEND=${VISER_MANUAL_HW_BACKEND:-auto}
 export VISER_MANUAL_HW_DEVICE=${VISER_MANUAL_HW_DEVICE:-0}
 export VISER_MANUAL_HW_TYPE=${VISER_MANUAL_HW_TYPE:-xbox}
+# Keep noisy third-party debug logs off by default.
+export LOGURU_LEVEL=${LOGURU_LEVEL:-WARNING}
+export PY_LOG_LEVEL=${PY_LOG_LEVEL:-WARNING}
 
 EXTRA_ARGS=("$@")
 
@@ -222,7 +242,7 @@ cmd=(
   --checkpoint "${CKPT}"
   --motion-dir "${MOTION_DIR}"
   --num-envs "${NUM_ENVS}"
-  --headless "${HEADLESS}"
+  --headless "${HEADLESS_FLAG}"
   --pair-terrain-with-motion "${PAIR_TERRAIN_WITH_MOTION}"
   --viser-port "${VISER_PORT}"
   --viser-env-id "${VISER_ENV_ID}"
@@ -240,6 +260,11 @@ cmd=(
   --algo.config.distill.switch_to_rl_after -1
   --algo.config.distill.take_teacher_actions False
   --algo.config.distill.teacher_action_mix_ratio 0.0
+  # Hard-disable distillation teacher loading during inference.
+  --algo.config.distill.enabled False
+  --algo.config.distill.mode mse
+  --algo.config.distill.ppo_start_epoch -1
+  --algo.config.distill.dagger_end_epoch -1
 )
 
 if [[ -n "${GEOMETRY_DIR}" ]]; then
@@ -293,17 +318,28 @@ if [[ "${MODE}" == "mocap" ]]; then
       ;;
   esac
 else
-  # Depth branch explicitly follows D435i perception setup.
+  # Depth branch defaults to checkpoint-native perception so actor dims match checkpoint.
   export VISER_PERCEPTION_IMAGE_MODE=${VISER_PERCEPTION_IMAGE_MODE:-depth}
   export VISER_SHOW_PERCEPTION_FRUSTUM=${VISER_SHOW_PERCEPTION_FRUSTUM:-1}
-  cmd+=(
-    perception:camera-depth-d435i
-    --perception.camera_width "${IMAGE_WIDTH}"
-    --perception.camera_height "${IMAGE_HEIGHT}"
-    --perception.camera_near "${CAMERA_NEAR}"
-    --perception.camera_far "${CAMERA_FAR}"
-    --perception.max_distance "${CAMERA_MAX_DISTANCE}"
-  )
+  case "$(echo "${DEPTH_PERCEPTION_PRESET}" | tr '[:upper:]' '[:lower:]')" in
+    checkpoint|auto|"")
+      # Keep checkpoint-saved perception config.
+      ;;
+    d435i)
+      cmd+=(
+        perception:camera-depth-d435i
+        --perception.camera_width "${IMAGE_WIDTH}"
+        --perception.camera_height "${IMAGE_HEIGHT}"
+        --perception.camera_near "${CAMERA_NEAR}"
+        --perception.camera_far "${CAMERA_FAR}"
+        --perception.max_distance "${CAMERA_MAX_DISTANCE}"
+      )
+      ;;
+    *)
+      echo "[ERROR] DEPTH_PERCEPTION_PRESET must be one of: checkpoint|d435i. Got: ${DEPTH_PERCEPTION_PRESET}" >&2
+      exit 2
+      ;;
+  esac
 fi
 
 if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
@@ -317,6 +353,7 @@ echo "[INFO] object_urdf=${OBJECT_URDF}"
 if [[ -n "${GEOMETRY_DIR}" ]]; then
   echo "[INFO] geometry_dir=${GEOMETRY_DIR}"
 fi
+echo "[INFO] headless=${HEADLESS_FLAG} (env HEADLESS=${HEADLESS})"
 echo "[INFO] viser=http://localhost:${VISER_PORT}"
 echo "[INFO] manual_gui=${VISER_ENABLE_MANUAL_GUI} clip_gui=${VISER_ENABLE_CLIP_GUI}"
 echo "[INFO] manual_control_default=${VISER_MANUAL_CONTROL_DEFAULT} force_manual=${VISER_FORCE_MANUAL_CONTROL}"
@@ -324,6 +361,8 @@ echo "[INFO] hw_joystick=${VISER_MANUAL_USE_HW_JOYSTICK}"
 echo "[INFO] hw_backend=${VISER_MANUAL_HW_BACKEND:-auto} bridge_joystick=${USE_HW_JOYSTICK_BRIDGE}"
 if [[ "${MODE}" == "mocap" ]]; then
   echo "[INFO] mocap_perception_preset=${MOCAP_PERCEPTION_PRESET}"
+else
+  echo "[INFO] depth_perception_preset=${DEPTH_PERCEPTION_PRESET}"
 fi
 echo "[INFO] Viser controls:"
 echo "  1) Open 'Manual Control' and enable 'Enable Manual Root Command'."

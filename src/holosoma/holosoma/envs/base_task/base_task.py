@@ -948,7 +948,7 @@ class BaseTask:
         save_dir = (
             Path(self.simulator.video_config.save_dir)
             if self.simulator.video_config.save_dir is not None
-            else Path("logs/videos")
+            else Path("/data/logs_new/videos")
         )
         video_frames = np.stack(self._depth_log_startup_video_frames, axis=0).astype(np.uint8)
         create_video(
@@ -974,7 +974,7 @@ class BaseTask:
         save_dir = (
             Path(self.simulator.video_config.save_dir)
             if self.simulator.video_config.save_dir is not None
-            else Path("logs/videos")
+            else Path("/data/logs_new/videos")
         )
         video_frames = np.stack(self._depth_log_frames, axis=0).astype(np.uint8)
         create_video(

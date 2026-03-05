@@ -420,7 +420,7 @@ class VideoRecorderInterface(ABC):
         if self.config.save_dir is not None:
             return Path(self.config.save_dir)
 
-        return Path("logs/videos")
+        return Path("/data/logs_new/videos")
 
     # ===== Shared Frame Buffer Management =====
 

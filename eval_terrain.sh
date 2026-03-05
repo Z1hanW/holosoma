@@ -1,5 +1,6 @@
 python src/holosoma/holosoma/eval_agent.py \
   --checkpoint=/home/ANT.AMAZON.COM/zzzihanw/Downloads/prefill_pose/prefill_pose/model_06600.pt \
+  perception:none \
   --training.num_envs=1 \
   terrain:terrain-load-obj \
   --terrain.terrain-term.spawn.randomize_tiles=False \

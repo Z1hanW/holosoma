@@ -7,6 +7,7 @@ NUM_COLS=4
 
 python src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-videomimic-mlp \
+  perception:none \
   terrain:terrain-load-obj \
   --training.headless=False \
   --training.num_envs=16 \

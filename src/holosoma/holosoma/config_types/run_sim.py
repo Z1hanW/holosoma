@@ -42,7 +42,7 @@ def default_training_config() -> TrainingConfig:
 
 def default_logger_config() -> LoggerConfig:
     """Create minimal logger config for direct simulation."""
-    return DisabledLoggerConfig(video=VideoConfig(enabled=False), base_dir="logs")
+    return DisabledLoggerConfig(video=VideoConfig(enabled=False), base_dir="/data/logs_new")
 
 
 # Use sim2sim-optimized configs from config_values.run_sim

@@ -28,7 +28,7 @@ class DisabledLoggerConfig:
     """Enable video recording in headless mode (saves to local directory)."""
 
     # Directory settings
-    base_dir: str = "logs"
+    base_dir: str = "/data/logs_new"
     """Base directory for all logs and outputs."""
 
 
@@ -80,7 +80,7 @@ class WandbLoggerConfig:
     """
 
     # Directory settings
-    base_dir: str = "logs"
+    base_dir: str = "/data/logs_new"
     """Base directory for all logs and outputs."""
 
 

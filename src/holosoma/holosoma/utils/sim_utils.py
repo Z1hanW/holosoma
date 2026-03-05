@@ -75,7 +75,7 @@ def setup_isaaclab_launcher(config: ExperimentConfig | RunSimConfig, device: str
     parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate.")
     parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
     parser.add_argument("--env_spacing", type=int, default=20, help="Distance between environments in simulator.")
-    parser.add_argument("--output_dir", type=str, default="logs", help="Directory to store the output.")
+    parser.add_argument("--output_dir", type=str, default="/data/logs_new", help="Directory to store the output.")
     AppLauncher.add_app_launcher_args(parser)
 
     # Parse known arguments to get argparse params
