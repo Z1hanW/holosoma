@@ -45,6 +45,7 @@ isaacsim = SimulatorConfig(
                 num_position_iterations=8,
                 num_velocity_iterations=4,
                 bounce_threshold_velocity=0.5,
+                gpu_max_rigid_patch_count=20 * 2**15,  # 655360
             ),
             render_mode="human",
             render_interval=4,

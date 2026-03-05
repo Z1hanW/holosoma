@@ -267,6 +267,11 @@ object_distill_sparse_root_cmd_terms = {
         scale=1.0,
         noise=0.0,
     ),
+    "clip_phase": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:clip_phase",
+        scale=1.0,
+        noise=0.0,
+    ),
 }
 
 object_distill_proprio_terms = {
@@ -303,6 +308,11 @@ object_distill_box_terms = {
         scale=1.0,
         noise=0.0,
     ),
+    "obj_goal_pos_size_b": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:obj_goal_pos_size_b",
+        scale=1.0,
+        noise=0.0,
+    ),
 }
 
 g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCfg(
@@ -325,7 +335,8 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
             history_length=1,
             terms=object_distill_proprio_terms,
         ),
-        # Student object state from current simulator object pose: [pos(3), rot6d(6), size(3)].
+        # Student object state: current object [pos(3), rot6d(6), size(3)]
+        # + final goal [goal_pos(3), size(3)].
         "actor_obs_box": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,

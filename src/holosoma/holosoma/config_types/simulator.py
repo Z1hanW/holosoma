@@ -89,6 +89,9 @@ class PhysxConfig:
     gpu_collision_stack_size: int | None = None
     """GPU collision stack size in bytes for PhysX (IsaacSim only)."""
 
+    gpu_max_rigid_patch_count: int | None = None
+    """Maximum rigid contact patch count for PhysX GPU narrow phase (IsaacSim only)."""
+
 
 @dataclass(frozen=True)
 class MujocoXMLFilterCfg:

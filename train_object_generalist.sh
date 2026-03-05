@@ -16,7 +16,7 @@ else
 fi
 PYTHON_BIN=${PYTHON_BIN:-"${DEFAULT_PYTHON_BIN}"}
 
-DEFAULT_CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+DEFAULT_CUDA_VISIBLE_DEVICES=4,5,6,7
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-${DEFAULT_CUDA_VISIBLE_DEVICES}}
 EXP=${EXP:-g1-29dof-wbt-w-object-generalist}
 WANDB_PROJECT=${WANDB_PROJECT:-boxer}
@@ -30,6 +30,7 @@ OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-""}
 NUM_ENVS=${NUM_ENVS:-65536}
 NPROC=${NPROC:-$(awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}")}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
+PHYSX_GPU_MAX_RIGID_PATCH_COUNT=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT:-655360}
 
 TRAIN_DATASETS=${TRAIN_DATASETS:-"omomo,behave"}
 AUTO_PREP_MIXED_BANK=${AUTO_PREP_MIXED_BANK:-0}
@@ -260,6 +261,7 @@ train_cmd=(
   --training.num-envs="${NUM_ENVS}"
   --command.setup-terms.motion-command.params.motion-config.motion-file "${MOTION_DIR}"
   --algo.config.save-interval=500
+  --simulator.config.sim.physx.gpu-max-rigid-patch-count="${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}"
 )
 if [[ "${DEBUG_MODE}" == "replay" || "${DEBUG_MODE}" == "toy" ]]; then
   train_cmd=("${PYTHON_BIN}" "${train_cmd[@]}")

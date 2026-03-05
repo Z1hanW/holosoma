@@ -5,7 +5,9 @@ set -euo pipefail
 # - actor_obs_torso: sparse target root trajectory command
 #   [rel_xy(2), rel_yaw(1), target_vxy(2), target_wz(1)]
 # - actor_obs_proprio: base_lin_vel, base_ang_vel, dof_pos, dof_vel, actions
-# - actor_obs_box: obj_target_pose_size_b = [obj_pos(3), obj_rot6d(6), obj_scale(3)]
+# - actor_obs_box:
+#   - obj_current_pose_size_b = [obj_pos(3), obj_rot6d(6), obj_scale(3)]
+#   - obj_goal_pos_size_b = [goal_pos(3), obj_scale(3)]
 #
 # Single-stage run:
 # - Pure DAgger by default

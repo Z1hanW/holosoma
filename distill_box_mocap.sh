@@ -6,7 +6,9 @@ set -euo pipefail
 # Student policy observation (actor):
 # - actor_obs_torso: sparse target root trajectory command
 # - actor_obs_proprio (base_lin_vel, base_ang_vel, dof_pos, dof_vel, actions)
-# - actor_obs_box: obj_target_pose_size_b = [obj_pos(3), obj_rot6d(6), obj_scale(3)]
+# - actor_obs_box:
+#   - obj_current_pose_size_b = [obj_pos(3), obj_rot6d(6), obj_scale(3)]
+#   - obj_goal_pos_size_b = [goal_pos(3), obj_scale(3)]
 #
 # Teacher policy observation:
 # - actor_obs_legacy + perception_obs (heightmap by default)
@@ -60,7 +62,7 @@ echo "[INFO] motion_dir=${MOTION_DIR}"
 echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS}"
 echo "[INFO] perception preset for teacher=${PERCEPTION_PRESET}"
 echo "[INFO] perception.inject_into_policy_modules=${PERCEPTION_INTO_POLICY_MODULES} (student stays non-perception)"
-echo "[INFO] actor box state: obj_target_pose_size_b = [obj_pos(3), obj_rot6d(6), obj_scale(3)]"
+echo "[INFO] actor box state: obj_current_pose_size_b + obj_goal_pos_size_b"
 echo "[INFO] actor_lr=${ACTOR_LR} critic_lr=${CRITIC_LR}"
 echo "[INFO] hybrid PPO+DAgger curriculum default=True"
 echo "[INFO] teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"

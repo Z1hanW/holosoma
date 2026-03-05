@@ -70,6 +70,12 @@ class IsaacSim(BaseSimulator):
         self.device = device
         self._object_urdf_by_name: dict[str, str] = {}
 
+        # Patch buffer overflow in PhysX GPU narrow phase is sensitive to contact density.
+        # Keep a safer default than IsaacLab's default for large multi-env object training.
+        gpu_max_rigid_patch_count = getattr(self.simulator_config.sim.physx, "gpu_max_rigid_patch_count", None)
+        if gpu_max_rigid_patch_count is None:
+            gpu_max_rigid_patch_count = 20 * 2**15  # 655360
+
         sim_config: SimulationCfg = SimulationCfg(
             dt=1.0 / self.simulator_config.sim.fps,
             render_interval=self.simulator_config.sim.render_interval,
@@ -79,7 +85,7 @@ class IsaacSim(BaseSimulator):
                 solver_type=self.simulator_config.sim.physx.solver_type,
                 max_position_iteration_count=self.simulator_config.sim.physx.num_position_iterations,
                 max_velocity_iteration_count=self.simulator_config.sim.physx.num_velocity_iterations,
-                gpu_max_rigid_patch_count=10 * 2**15,
+                gpu_max_rigid_patch_count=int(gpu_max_rigid_patch_count),
             ),
             # Global physics material, can be overridden by the individual articulation
             # Can be inspected by:
@@ -90,6 +96,7 @@ class IsaacSim(BaseSimulator):
                 restitution=0.0,
             ),
         )
+        logger.info("PhysX gpu_max_rigid_patch_count set to {}", int(gpu_max_rigid_patch_count))
 
         gpu_stack_size = getattr(self.simulator_config.sim.physx, "gpu_collision_stack_size", None)
         if gpu_stack_size is not None:

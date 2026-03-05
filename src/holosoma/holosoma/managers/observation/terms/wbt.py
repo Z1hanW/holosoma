@@ -242,6 +242,15 @@ def sparse_target_root_trajectory_command(env: WholeBodyTrackingManager) -> torc
     return torch.cat([rel_xy, rel_yaw, target_vxy, target_wz], dim=-1)
 
 
+def clip_phase(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Normalized motion progress in current clip, in [0, 1]."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    clip_lengths = motion_command.current_clip_lengths.to(dtype=torch.float32)
+    denom = torch.clamp(clip_lengths - 1.0, min=1.0)
+    phase = motion_command.time_steps.to(dtype=torch.float32) / denom
+    return phase.unsqueeze(1)
+
+
 def target_joints(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Target joint angles from motion data, relative to default pose."""
     motion_command = _get_motion_command_and_assert_type(env)
