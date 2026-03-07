@@ -17,7 +17,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
 
 
-DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/5vlz6pj8/model_10000.pt"}
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/kge4jozt/model_12000.pt"}
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 
 if [[ $# -gt 0 ]]; then
@@ -39,14 +39,9 @@ EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-goal-cmd}
 RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_mocap}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_mocap_access_to_mocap_data}
 MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"}
-TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs_legacy,perception_obs}
-_teacher_obs_keys_no_space="$(echo "${TEACHER_OBS_KEYS}" | tr -d '[:space:]')"
-case "${_teacher_obs_keys_no_space}" in
-  "actor_obs"|"['actor_obs']"|"[\"actor_obs\"]"|"actor_obs,perception_obs"|"['actor_obs','perception_obs']"|"[\"actor_obs\",\"perception_obs\"]")
-    echo "[WARN] Remapping TEACHER_OBS_KEYS to actor_obs_legacy,perception_obs to match teacher checkpoint dim/config."
-    TEACHER_OBS_KEYS="actor_obs_legacy,perception_obs"
-    ;;
-esac
+# Default teacher (kge4jozt/model_12000.pt) uses actor_obs-only input.
+# For legacy teachers, override TEACHER_OBS_KEYS explicitly (e.g., actor_obs_legacy,perception_obs).
+TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-heightmap}
 PERCEPTION_INTO_POLICY_MODULES=${PERCEPTION_INTO_POLICY_MODULES:-False}
 TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}

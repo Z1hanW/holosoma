@@ -9,8 +9,8 @@ set -euo pipefail
 #
 # Optional env vars:
 #   TEACHER_CHECKPOINT        (default: distill_box teacher default)
-#   LEGACY_OBS                (default: 1; set 1/true to require legacy checkpoint observation layout)
-#   REQUIRE_HEIGHTMAP         (default: 1; set 1/true to require checkpoint perception.enabled=True and output_mode=heightmap)
+#   LEGACY_OBS                (default: 0; set 1/true to require legacy checkpoint observation layout)
+#   REQUIRE_HEIGHTMAP         (default: 0; set 1/true to require checkpoint perception.enabled=True and output_mode=heightmap)
 #   DEFAULT_LEGACY_TEACHER_CHECKPOINT
 #                             (optional; used as default checkpoint when LEGACY_OBS=1 and no checkpoint is explicitly provided)
 #   INFER_DATASET             (default: omomo; options: omomo|behave|mixed)
@@ -57,16 +57,16 @@ if [[ $# -gt 0 ]]; then
       ;;
   esac
 fi
-DEFAULT_TEACHER_CHECKPOINT="/data/logs_new/WholeBodyTracking/20260216_214200-g1_29dof_wbt_w_object_generalist-locomotion/model_17000.pt"
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/kge4jozt/model_12000.pt"}
 DEFAULT_LEGACY_TEACHER_CHECKPOINT="${DEFAULT_LEGACY_TEACHER_CHECKPOINT:-}"
-LEGACY_OBS=${LEGACY_OBS:-1}
+LEGACY_OBS=${LEGACY_OBS:-0}
 legacy_obs_normalized=$(echo "${LEGACY_OBS}" | tr '[:upper:]' '[:lower:]')
 if [[ "${legacy_obs_normalized}" == "1" || "${legacy_obs_normalized}" == "true" ]]; then
   LEGACY_OBS_ENABLED=1
 else
   LEGACY_OBS_ENABLED=0
 fi
-REQUIRE_HEIGHTMAP=${REQUIRE_HEIGHTMAP:-1}
+REQUIRE_HEIGHTMAP=${REQUIRE_HEIGHTMAP:-0}
 require_heightmap_normalized=$(echo "${REQUIRE_HEIGHTMAP}" | tr '[:upper:]' '[:lower:]')
 if [[ "${require_heightmap_normalized}" == "1" || "${require_heightmap_normalized}" == "true" ]]; then
   HEIGHTMAP_REQUIRED=1

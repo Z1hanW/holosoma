@@ -14,7 +14,7 @@ set -euo pipefail
 # - Optional DAgger/PPO scheduled mixing via ppo_start_epoch and dagger_end_epoch
 # - Optional 0.5 teacher-action rollout mixing via teacher_action_mix_ratio
 
-DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/5vlz6pj8/model_10000.pt"}
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/kge4jozt/model_12000.pt"}
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 
 # Optional positional arg:
@@ -154,7 +154,9 @@ BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
 SWITCH_TO_RL_AFTER=${SWITCH_TO_RL_AFTER:-}
 CLIP_TEACHER_ACTIONS=${CLIP_TEACHER_ACTIONS:-True}
 CLIP_ACTIONS_THRESHOLD=${CLIP_ACTIONS_THRESHOLD:-8.0}
-TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs_legacy}
+# Default teacher (kge4jozt/model_12000.pt) is trained with actor_obs-only input (181-dim).
+# Legacy teachers may require actor_obs_legacy and/or perception_obs; override TEACHER_OBS_KEYS explicitly in that case.
+TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
 STRICT_TEACHER_LOAD=${STRICT_TEACHER_LOAD:-True}
 PERCEPTION_INTO_POLICY_MODULES=${PERCEPTION_INTO_POLICY_MODULES:-True}
 TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}

@@ -15,14 +15,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
 
-# Prefer local cached teacher checkpoint for reproducibility/speed.
-LOCAL_TEACHER_CHECKPOINT="${SCRIPT_DIR}/.teacher_checkpoints/model_10000.pt"
-if [[ -f "${LOCAL_TEACHER_CHECKPOINT}" ]]; then
-  _default_teacher_checkpoint="${LOCAL_TEACHER_CHECKPOINT}"
-else
-  _default_teacher_checkpoint="wandb://zihanw22/boxer/5vlz6pj8/model_10000.pt"
-fi
-DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"${_default_teacher_checkpoint}"}
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/kge4jozt/model_12000.pt"}
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 
 if [[ $# -gt 0 ]]; then
@@ -56,14 +49,9 @@ if [[ -z "${NPROC:-}" ]]; then
   NPROC=${#_visible_gpus[@]}
 fi
 
-TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs_legacy,perception_obs}
-_teacher_obs_keys_no_space="$(echo "${TEACHER_OBS_KEYS}" | tr -d '[:space:]')"
-case "${_teacher_obs_keys_no_space}" in
-  "actor_obs"|"['actor_obs']"|"[\"actor_obs\"]"|"actor_obs,perception_obs"|"['actor_obs','perception_obs']"|"[\"actor_obs\",\"perception_obs\"]")
-    echo "[WARN] Remapping TEACHER_OBS_KEYS to actor_obs_legacy,perception_obs to match teacher checkpoint dim/config."
-    TEACHER_OBS_KEYS="actor_obs_legacy,perception_obs"
-    ;;
-esac
+# Default teacher (kge4jozt/model_12000.pt) uses actor_obs-only input.
+# For legacy teachers, override TEACHER_OBS_KEYS explicitly (e.g., actor_obs_legacy,perception_obs).
+TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
 TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
 PPO_START_EPOCH=${PPO_START_EPOCH:-0}
@@ -72,7 +60,7 @@ DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
 
-# Teacher 5vlz6pj8 expects perception encoder input dim 289 => 17x17.
+# Teacher expects perception encoder input dim 289 => 17x17.
 IMAGE_WIDTH=${IMAGE_WIDTH:-17}
 IMAGE_HEIGHT=${IMAGE_HEIGHT:-17}
 CAMERA_NEAR=${CAMERA_NEAR:-0.001}
