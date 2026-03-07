@@ -7,7 +7,7 @@ set -euo pipefail
 # - actor_obs_proprio: base_lin_vel, base_ang_vel, dof_pos, dof_vel, actions
 # - actor_obs_box:
 #   - obj_current_pose_size_b = [obj_pos(3), obj_rot6d(6), obj_scale(3)]
-#   - obj_goal_pos_size_b = [goal_pos(3), obj_scale(3)]
+#   - obj_goal_pose_size_b = [goal_pos(3), goal_rot6d(6), obj_scale(3)]
 #
 # Single-stage run:
 # - Pure DAgger by default
@@ -124,7 +124,10 @@ if [[ "${FORCE_EIGHT_GPU_CONFIG}" != "0" ]]; then
   fi
 fi
 
-EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd}
+# Sim2real default: sparse-goal distill without clip_phase in student torso observation.
+# Legacy option (old behavior with clip_phase):
+#   EXP=g1-29dof-wbt-w-object-distill-sparse-goal-cmd-legacy
+EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-goal-cmd}
 MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"}
 OBJECT_URDF=${OBJECT_URDF:-"${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"}
 
@@ -165,8 +168,8 @@ START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.05}
 RESET_NOISE_SCALE=${RESET_NOISE_SCALE:-1.0}
 SAVE_INTERVAL=${SAVE_INTERVAL:-200}
 LOGGER=${LOGGER:-logger:wandb}
-RUN_NAME=${RUN_NAME:-g1_w_object_distill_sparse_root_cmd}
-TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_sparse_root_cmd}
+RUN_NAME=${RUN_NAME:-g1_w_object_distill_sparse_goal_cmd}
+TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_sparse_goal_cmd}
 TRAINING_PROJECT=${TRAINING_PROJECT:-WholeBodyTracking}
 
 if [[ "${TEACHER_CHECKPOINT}" != wandb://* ]] && [[ ! -f "${TEACHER_CHECKPOINT}" ]]; then
@@ -261,9 +264,16 @@ run_distill_stage() {
     --robot.object.enabled=True
     --robot.object.object-urdf-path "${OBJECT_URDF}"
     "${LOGGER}"
-    --logger.video.interval=1000
-    --logger.name="${stage_run_name}"
   )
+
+  # logger:disabled does not accept logger sub-options such as --logger.name.
+  # Keep legacy behavior for all other logger backends.
+  if [[ "${LOGGER}" != "logger:disabled" ]]; then
+    cmd+=(
+      --logger.video.interval=1000
+      --logger.name="${stage_run_name}"
+    )
+  fi
 
   if [[ -n "${stage_resume_checkpoint}" ]]; then
     cmd+=(--training.checkpoint "${stage_resume_checkpoint}")

@@ -19,6 +19,7 @@ from holosoma.utils.rotations import (
     quat_apply,
     quat_from_euler_xyz,
     quat_mul,
+    quaternion_to_matrix,
     yaw_quat,
 )
 from holosoma.utils.safe_torch_import import torch
@@ -201,6 +202,13 @@ def _axis_override(name: str, default: int) -> int:
         return int(raw)
     except Exception:
         return default
+
+
+def _quat_xyzw_to_rot6d(quat_xyzw: torch.Tensor) -> torch.Tensor:
+    if quat_xyzw.ndim == 1:
+        quat_xyzw = quat_xyzw.unsqueeze(0)
+    rot_mat = quaternion_to_matrix(quat_xyzw, w_last=True)
+    return rot_mat[..., :2].reshape(rot_mat.shape[0], 6)
 
 
 def _frustum_quat_from_camera(cam_quat_xyzw: torch.Tensor) -> torch.Tensor:
@@ -705,6 +713,8 @@ class ViserLiveViewer:
         self._contact_force_threshold_slider = None
         self._contact_force_handle = None
         self._manual_control_cb = None
+        self._manual_goal_cb = None
+        self._manual_goal_sync_button = None
         self._manual_forward_cb = None
         self._manual_back_cb = None
         self._manual_left_cb = None
@@ -713,6 +723,10 @@ class ViserLiveViewer:
         self._manual_yaw_right_cb = None
         self._manual_lin_scale_slider = None
         self._manual_yaw_scale_slider = None
+        self._manual_goal_pos_x_slider = None
+        self._manual_goal_pos_y_slider = None
+        self._manual_goal_pos_z_slider = None
+        self._manual_goal_rot6d_sliders = []
         self._manual_command_arrow_handle = None
         self._manual_command_arrow_height = 0.30
         self._manual_command_arrow_head_ratio = 0.30
@@ -1150,6 +1164,7 @@ class ViserLiveViewer:
     def apply_pending_controls(self) -> None:
         if not self._enabled:
             return
+        self._update_manual_object_goal_command()
         self._update_manual_root_command()
         if self._reset_requested:
             self._reset_requested = False
@@ -1290,13 +1305,83 @@ class ViserLiveViewer:
                 except Exception:
                     pass
 
+    def _sync_manual_goal_from_object(self) -> None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            return
+        if not hasattr(motion_cmd, "simulator_object_pos_w") or not hasattr(motion_cmd, "simulator_object_quat_w"):
+            return
+        if (
+            self._manual_goal_pos_x_slider is None
+            or self._manual_goal_pos_y_slider is None
+            or self._manual_goal_pos_z_slider is None
+            or len(self._manual_goal_rot6d_sliders) != 6
+        ):
+            return
+        try:
+            if self._env_id < 0 or self._env_id >= int(motion_cmd.simulator_object_pos_w.shape[0]):
+                return
+            goal_pos = motion_cmd.simulator_object_pos_w[self._env_id].detach().float().cpu().numpy()
+            goal_quat_xyzw = motion_cmd.simulator_object_quat_w[self._env_id].detach().float()
+            goal_rot6d = _quat_xyzw_to_rot6d(goal_quat_xyzw).squeeze(0).cpu().numpy()
+        except Exception:
+            return
+
+        try:
+            self._manual_goal_pos_x_slider.value = float(goal_pos[0])
+            self._manual_goal_pos_y_slider.value = float(goal_pos[1])
+            self._manual_goal_pos_z_slider.value = float(goal_pos[2])
+            for idx, slider in enumerate(self._manual_goal_rot6d_sliders):
+                slider.value = float(goal_rot6d[idx])
+        except Exception:
+            pass
+
+    def _update_manual_object_goal_command(self) -> None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            return
+        if not hasattr(motion_cmd, "manual_goal_enabled"):
+            return
+
+        goal_enabled = bool(self._manual_goal_cb.value) if self._manual_goal_cb is not None else False
+        motion_cmd.manual_goal_enabled = bool(goal_enabled)
+        if not goal_enabled:
+            return
+
+        if (
+            self._manual_goal_pos_x_slider is None
+            or self._manual_goal_pos_y_slider is None
+            or self._manual_goal_pos_z_slider is None
+            or len(self._manual_goal_rot6d_sliders) != 6
+        ):
+            return
+
+        goal_pos = np.array(
+            [
+                float(self._manual_goal_pos_x_slider.value),
+                float(self._manual_goal_pos_y_slider.value),
+                float(self._manual_goal_pos_z_slider.value),
+            ],
+            dtype=np.float32,
+        )
+        goal_rot6d = np.array([float(slider.value) for slider in self._manual_goal_rot6d_sliders], dtype=np.float32)
+
+        device = self._env.device
+        motion_cmd.manual_goal_object_pos_w = torch.tensor(
+            goal_pos.reshape(1, 3), device=device, dtype=torch.float32
+        ).repeat(self._env.num_envs, 1)
+        motion_cmd.manual_goal_object_rot6d_w = torch.tensor(
+            goal_rot6d.reshape(1, 6), device=device, dtype=torch.float32
+        ).repeat(self._env.num_envs, 1)
+
     def _update_manual_root_command(self) -> None:
         motion_cmd = self._get_motion_command()
         if motion_cmd is None:
             return
+        goal_enabled = bool(self._manual_goal_cb.value) if self._manual_goal_cb is not None else False
         gui_enabled = bool(self._manual_control_cb.value) if self._manual_control_cb is not None else False
         hw_enabled = self._hw_joystick_mode_enabled()
-        enabled = bool(self._manual_force_enabled or gui_enabled or hw_enabled)
+        enabled = bool((not goal_enabled) and (self._manual_force_enabled or gui_enabled or hw_enabled))
         motion_cmd.manual_control_enabled = enabled
         if not enabled:
             self._clear_manual_commands(clear_gui_toggles=False)
@@ -2062,6 +2147,61 @@ class ViserLiveViewer:
                     initial_value=False,
                     hint="Command negative yaw",
                 )
+                self._manual_goal_cb = self._server.gui.add_checkbox(
+                    "Enable Sparse Object Goal",
+                    initial_value=False,
+                    hint="Goal-on: provide box target pose [pos + rot6d], root joystick command is disabled.",
+                )
+                self._manual_goal_sync_button = self._server.gui.add_button(
+                    "Goal <- Current Box",
+                    hint="Initialize goal target from current object pose.",
+                )
+                self._manual_goal_pos_x_slider = self._server.gui.add_slider(
+                    "Goal Pos X (world)",
+                    min=-5.0,
+                    max=5.0,
+                    step=0.02,
+                    initial_value=0.0,
+                )
+                self._manual_goal_pos_y_slider = self._server.gui.add_slider(
+                    "Goal Pos Y (world)",
+                    min=-5.0,
+                    max=5.0,
+                    step=0.02,
+                    initial_value=0.0,
+                )
+                self._manual_goal_pos_z_slider = self._server.gui.add_slider(
+                    "Goal Pos Z (world)",
+                    min=0.0,
+                    max=2.0,
+                    step=0.02,
+                    initial_value=0.8,
+                )
+                self._manual_goal_rot6d_sliders = [
+                    self._server.gui.add_slider(
+                        f"Goal Rot6D [{idx}]",
+                        min=-1.0,
+                        max=1.0,
+                        step=0.01,
+                        initial_value=val,
+                    )
+                    for idx, val in enumerate((1.0, 0.0, 0.0, 1.0, 0.0, 0.0))
+                ]
+
+                @self._manual_goal_sync_button.on_click
+                def _(_evt) -> None:
+                    self._sync_manual_goal_from_object()
+                    self.apply_pending_controls()
+
+                @self._manual_goal_cb.on_update
+                def _(_evt) -> None:
+                    if self._manual_goal_cb is not None and bool(self._manual_goal_cb.value):
+                        if self._manual_control_cb is not None:
+                            self._manual_control_cb.value = False
+                        self._clear_manual_commands(clear_gui_toggles=True)
+                        self._sync_manual_goal_from_object()
+                    self.apply_pending_controls()
+                self._sync_manual_goal_from_object()
 
         sim_cfg = getattr(self._env.simulator, "simulator_config", None)
         if (not self._disable_contact_force_viz) and sim_cfg is not None and hasattr(sim_cfg, "contact_force_viz"):
@@ -3553,7 +3693,12 @@ class ViserLiveViewer:
         if not self._server:
             return
         motion_cmd = self._get_motion_command()
-        manual_active = bool(getattr(motion_cmd, "manual_control_enabled", False)) if motion_cmd is not None else False
+        manual_active = False
+        if motion_cmd is not None:
+            manual_active = bool(
+                bool(getattr(motion_cmd, "manual_control_enabled", False))
+                or bool(getattr(motion_cmd, "manual_goal_enabled", False))
+            )
         if (not self._show_target_keypoints) or manual_active:
             if self._target_keypoints_handle is not None:
                 try:

@@ -632,6 +632,18 @@ class SymmetryUtils:
         reshaped[..., 3:9] = ori.view(*reshaped.shape[:-1], 6)
         return reshaped.view(obj_target_pose_size_b.shape)
 
+    def mirror_obs_obj_goal_pos_size_b(self, obj_goal_pos_size_b: torch.Tensor) -> torch.Tensor:
+        """Mirror [goal_pos_b(3), obj_size(3)] blocks."""
+        if obj_goal_pos_size_b.shape[-1] % 6 != 0:
+            raise ValueError("Expected last dim to be multiple of 6 for obj_goal_pos_size_b mirroring.")
+        reshaped = obj_goal_pos_size_b.view(*obj_goal_pos_size_b.shape[:-1], -1, 6)
+        reshaped[..., 1] = -reshaped[..., 1]
+        return reshaped.view(obj_goal_pos_size_b.shape)
+
+    def mirror_obs_obj_goal_pose_size_b(self, obj_goal_pose_size_b: torch.Tensor) -> torch.Tensor:
+        """Mirror [goal_pos_b(3), goal_rot_6d(6), obj_size(3)] blocks."""
+        return self.mirror_obs_obj_target_pose_size_b(obj_goal_pose_size_b)
+
     def mirror_obs_motion_future_target_poses(self, motion_future_target_poses: torch.Tensor) -> torch.Tensor:
         """Pass-through for future target poses.
 

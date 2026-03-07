@@ -36,7 +36,7 @@ from holosoma.utils.viser_utils import resolve_viser_port  # noqa: E402
 @dataclass(frozen=True)
 class MotionGeometryViewerConfig:
     motion_dir: str
-    geometry_dir: str
+    geometry_dir: str = ""
     object_urdf: str = ""
     object_urdf_dir: str = ""
     object_urdf_mode: str = "stem"

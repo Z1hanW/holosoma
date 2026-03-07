@@ -1,21 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Distill object-carry generalist -> sim2real student with mocap-access box state.
+# Goal-conditioned distill (mocap box state) with goal-consistent defaults:
+# - student actor: actor_obs_torso + actor_obs_proprio + actor_obs_box
+# - sparse object-goal curriculum is enabled
+# - external random goals are disabled by default during distill to avoid teacher/goal mismatch
 #
-# Student policy observation (actor):
-# - actor_obs_torso: sparse target root trajectory command
-# - actor_obs_proprio (base_lin_vel, base_ang_vel, dof_pos, dof_vel, actions)
-# - actor_obs_box:
-#   - obj_current_pose_size_b = [obj_pos(3), obj_rot6d(6), obj_scale(3)]
-#   - obj_goal_pose_size_b = [goal_pos(3), goal_rot6d(6), obj_scale(3)]
+# Stage-A default (goal-consistent distill):
+#   GOAL_EXTERNAL_PROB_START=0.0
+#   GOAL_EXTERNAL_PROB_END=0.0
 #
-# Teacher policy observation:
-# - actor_obs_legacy + perception_obs (heightmap by default)
+# You can still override any flag from CLI or env.
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
-
 
 DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/5vlz6pj8/model_10000.pt"}
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
@@ -32,13 +30,11 @@ if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
   exit 1
 fi
 
-# Sim2real default: sparse-goal distill without clip_phase in student torso observation.
-# Legacy option (old behavior with clip_phase):
-#   EXP=g1-29dof-wbt-w-object-distill-sparse-goal-cmd-legacy
 EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-goal-cmd}
-RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_mocap}
-TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_mocap_access_to_mocap_data}
+RUN_NAME=${RUN_NAME:-g1_w_object_distill_goal_box_mocap}
+TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_goal_box_mocap}
 MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"}
+
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs_legacy,perception_obs}
 _teacher_obs_keys_no_space="$(echo "${TEACHER_OBS_KEYS}" | tr -d '[:space:]')"
 case "${_teacher_obs_keys_no_space}" in
@@ -47,6 +43,7 @@ case "${_teacher_obs_keys_no_space}" in
     TEACHER_OBS_KEYS="actor_obs_legacy,perception_obs"
     ;;
 esac
+
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-heightmap}
 PERCEPTION_INTO_POLICY_MODULES=${PERCEPTION_INTO_POLICY_MODULES:-False}
 TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
@@ -58,18 +55,22 @@ PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 ACTOR_LR=${ACTOR_LR:-5e-5}
 CRITIC_LR=${CRITIC_LR:-5e-5}
 
-echo "[INFO] distill mode: mocap-access-to-box"
+# Sparse object-goal curriculum knobs.
+GOAL_CLIP_DELTA_MIN_STEPS=${GOAL_CLIP_DELTA_MIN_STEPS:-30}
+GOAL_CLIP_DELTA_MAX_STEPS=${GOAL_CLIP_DELTA_MAX_STEPS:-180}
+GOAL_EXTERNAL_PROB_START=${GOAL_EXTERNAL_PROB_START:-0.0}
+GOAL_EXTERNAL_PROB_END=${GOAL_EXTERNAL_PROB_END:-0.0}
+GOAL_EXTERNAL_PROB_RAMP_RESETS=${GOAL_EXTERNAL_PROB_RAMP_RESETS:-500000}
+GOAL_EVAL_EXTERNAL_PROB=${GOAL_EVAL_EXTERNAL_PROB:-0.0}
+
+echo "[INFO] distill mode: goal-box mocap"
 echo "[INFO] teacher checkpoint: ${TEACHER_CHECKPOINT}"
 echo "[INFO] exp=${EXP}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
-echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS}"
 echo "[INFO] perception preset for teacher=${PERCEPTION_PRESET}"
-echo "[INFO] perception.inject_into_policy_modules=${PERCEPTION_INTO_POLICY_MODULES} (student stays non-perception)"
 echo "[INFO] actor box state: obj_current_pose_size_b + obj_goal_pose_size_b"
-echo "[INFO] actor_lr=${ACTOR_LR} critic_lr=${CRITIC_LR}"
-echo "[INFO] hybrid PPO+DAgger curriculum default=True"
-echo "[INFO] teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
-echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
+echo "[INFO] sparse goal: delta=[${GOAL_CLIP_DELTA_MIN_STEPS}, ${GOAL_CLIP_DELTA_MAX_STEPS}]"
+echo "[INFO] sparse goal external prob: train ${GOAL_EXTERNAL_PROB_START} -> ${GOAL_EXTERNAL_PROB_END}, eval=${GOAL_EVAL_EXTERNAL_PROB}"
 
 exec env \
   EXP="${EXP}" \
@@ -89,4 +90,12 @@ exec env \
   bash "${SCRIPT_DIR}/distill_torso_box.sh" "${TEACHER_CHECKPOINT}" \
     "perception:${PERCEPTION_PRESET}" \
     --algo.config.module-dict.actor.input-dim "['actor_obs_torso','actor_obs_proprio','actor_obs_box']" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.enabled=True \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.clip-goal-delta-min-steps="${GOAL_CLIP_DELTA_MIN_STEPS}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.clip-goal-delta-max-steps="${GOAL_CLIP_DELTA_MAX_STEPS}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-prob-start="${GOAL_EXTERNAL_PROB_START}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-prob-end="${GOAL_EXTERNAL_PROB_END}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-prob-ramp-resets="${GOAL_EXTERNAL_PROB_RAMP_RESETS}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.eval-external-goal-prob="${GOAL_EVAL_EXTERNAL_PROB}" \
     "$@"
+

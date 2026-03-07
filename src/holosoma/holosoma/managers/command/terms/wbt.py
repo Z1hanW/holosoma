@@ -11,7 +11,7 @@ import smart_open
 import torch
 from loguru import logger
 
-from holosoma.config_types.command import MotionConfig, NoiseToInitialPoseConfig
+from holosoma.config_types.command import MotionConfig, NoiseToInitialPoseConfig, SparseObjectGoalConfig
 from holosoma.envs.wbt.wbt_manager import WholeBodyTrackingManager
 from holosoma.managers.command.base import CommandTermBase
 from holosoma.utils.path import resolve_data_file_path
@@ -1055,6 +1055,14 @@ class MotionCommand(CommandTermBase):
         self.manual_control_enabled = False
         self.manual_xy_rel: torch.Tensor | None = None
         self.manual_yaw_rel: torch.Tensor | None = None
+        self.manual_goal_enabled = False
+        self.manual_goal_object_pos_w: torch.Tensor | None = None
+        self.manual_goal_object_rot6d_w: torch.Tensor | None = None
+        self._sparse_goal_cfg: SparseObjectGoalConfig | None = None
+        self._sparse_goal_curriculum_enabled = False
+        self._sparse_goal_reset_counter = 0
+        self._sparse_goal_external_prob = 0.0
+        self._sparse_goal_external_fraction_last_reset = 0.0
         self._multi_object_enabled = False
         self._sim_object_names: list[str] = []
         self._clip_object_ids: torch.Tensor | None = None
@@ -1076,6 +1084,15 @@ class MotionCommand(CommandTermBase):
         self.manual_control_enabled = False
         self.manual_xy_rel = torch.zeros((self.num_envs, 2), device=self.device, dtype=torch.float32)
         self.manual_yaw_rel = torch.zeros((self.num_envs, 1), device=self.device, dtype=torch.float32)
+        self.manual_goal_enabled = False
+        self.manual_goal_object_pos_w = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
+        identity_rot6d = torch.tensor([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], device=self.device, dtype=torch.float32)
+        self.manual_goal_object_rot6d_w = identity_rot6d.unsqueeze(0).repeat(self.num_envs, 1)
+        self._sparse_goal_cfg = self.motion_cfg.sparse_object_goal
+        self._sparse_goal_curriculum_enabled = bool(self._sparse_goal_cfg.enabled)
+        self._sparse_goal_reset_counter = 0
+        self._sparse_goal_external_prob = 0.0
+        self._sparse_goal_external_fraction_last_reset = 0.0
 
         init_state = self._env.robot_config.init_state
         self._init_root_pos = torch.tensor(init_state.pos, dtype=torch.float32, device=self.device)
@@ -1126,6 +1143,9 @@ class MotionCommand(CommandTermBase):
             )
             self._configure_simulator_object_mapping()
             self._configure_debug_representative_clips()
+        elif self._sparse_goal_curriculum_enabled:
+            logger.warning("Sparse object-goal curriculum requested but motion has no object; disabling curriculum.")
+            self._sparse_goal_curriculum_enabled = False
 
         # 4. get the adaptive timesteps sampler
         self.use_adaptive_timesteps_sampler = self.motion_cfg.use_adaptive_timesteps_sampler
@@ -1403,6 +1423,7 @@ class MotionCommand(CommandTermBase):
 
         if self.motion_cfg.align_motion_to_init_yaw:
             self._update_motion_alignment(env_ids)
+        self._update_sparse_object_goals_on_reset(env_ids, clip_lengths)
 
         # 1. Get the reference root/body poses
         root_pos = self.body_pos_w[env_ids, 0].clone()
@@ -1697,6 +1718,125 @@ class MotionCommand(CommandTermBase):
         else:
             self._clip_sampling_weights = self._base_clip_weights.clone()
 
+    @staticmethod
+    def _clamp01(value: float) -> float:
+        return float(max(0.0, min(1.0, value)))
+
+    def _goal_vec3(self, values: list[float], *, name: str) -> torch.Tensor:
+        if len(values) != 3:
+            raise ValueError(f"{name} must provide exactly 3 values, got {len(values)}")
+        return torch.tensor(values, device=self.device, dtype=torch.float32)
+
+    def _apply_motion_alignment_pos_subset(self, pos: torch.Tensor, env_ids: torch.Tensor) -> torch.Tensor:
+        align_quat = self._align_quat[env_ids]
+        align_pos = self._align_pos[env_ids]
+        if pos.ndim == 3:
+            align_quat = align_quat[:, None, :].expand(-1, pos.shape[1], -1)
+            align_pos = align_pos[:, None, :]
+        return quat_apply(align_quat, pos, w_last=True) + align_pos
+
+    def _apply_motion_alignment_quat_subset(self, quat: torch.Tensor, env_ids: torch.Tensor) -> torch.Tensor:
+        align_quat = self._align_quat[env_ids]
+        if quat.ndim == 3:
+            align_quat = align_quat[:, None, :].expand(-1, quat.shape[1], -1)
+        return quat_mul(align_quat, quat, w_last=True)
+
+    def _sample_clip_based_object_goal_pose_w(
+        self, env_ids: torch.Tensor, clip_lengths: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._sparse_goal_cfg is None:
+            raise RuntimeError("Sparse goal config is not initialized.")
+
+        num_samples = env_ids.numel()
+        min_delta = max(0, int(self._sparse_goal_cfg.clip_goal_delta_min_steps))
+        max_delta = max(min_delta, int(self._sparse_goal_cfg.clip_goal_delta_max_steps))
+        if max_delta == min_delta:
+            delta_steps = torch.full((num_samples,), min_delta, device=self.device, dtype=torch.long)
+        else:
+            delta_steps = torch.randint(min_delta, max_delta + 1, (num_samples,), device=self.device)
+
+        max_goal_steps = torch.clamp(clip_lengths - 1, min=0)
+        goal_steps = torch.minimum(self.time_steps[env_ids] + delta_steps, max_goal_steps)
+        goal_motion_idx = self._get_motion_indices(goal_steps, env_ids=env_ids)
+
+        goal_pos_w = self.motion.object_pos_w[goal_motion_idx]
+        goal_quat_w = self.motion.object_quat_w[goal_motion_idx]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            goal_pos_w = self._apply_motion_alignment_pos_subset(goal_pos_w, env_ids)
+            goal_quat_w = self._apply_motion_alignment_quat_subset(goal_quat_w, env_ids)
+        else:
+            goal_pos_w = goal_pos_w + self._get_env_offsets(env_ids)
+        return goal_pos_w, goal_quat_w
+
+    def _sample_external_object_goal_pose_w(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._sparse_goal_cfg is None:
+            raise RuntimeError("Sparse goal config is not initialized.")
+
+        num_samples = env_ids.numel()
+        pos_min = self._goal_vec3(self._sparse_goal_cfg.external_goal_pos_local_min, name="external_goal_pos_local_min")
+        pos_max = self._goal_vec3(self._sparse_goal_cfg.external_goal_pos_local_max, name="external_goal_pos_local_max")
+        pos_lo = torch.minimum(pos_min, pos_max)
+        pos_hi = torch.maximum(pos_min, pos_max)
+        local_pos = pos_lo.unsqueeze(0) + (pos_hi - pos_lo).unsqueeze(0) * torch.rand(
+            (num_samples, 3), device=self.device
+        )
+        goal_pos_w = self._get_env_offsets(env_ids) + local_pos
+
+        rpy_min = self._goal_vec3(self._sparse_goal_cfg.external_goal_rpy_min, name="external_goal_rpy_min")
+        rpy_max = self._goal_vec3(self._sparse_goal_cfg.external_goal_rpy_max, name="external_goal_rpy_max")
+        rpy_lo = torch.minimum(rpy_min, rpy_max)
+        rpy_hi = torch.maximum(rpy_min, rpy_max)
+        rpy = rpy_lo.unsqueeze(0) + (rpy_hi - rpy_lo).unsqueeze(0) * torch.rand((num_samples, 3), device=self.device)
+        goal_quat_w = quat_from_euler_xyz(rpy[:, 0], rpy[:, 1], rpy[:, 2])
+        return goal_pos_w, goal_quat_w
+
+    def _current_external_goal_prob(self) -> float:
+        if self._sparse_goal_cfg is None:
+            return 0.0
+        if self._env.is_evaluating:
+            if self._sparse_goal_cfg.eval_external_goal_prob is not None:
+                return self._clamp01(float(self._sparse_goal_cfg.eval_external_goal_prob))
+            return self._clamp01(float(self._sparse_goal_cfg.external_goal_prob_end))
+
+        prob_start = float(self._sparse_goal_cfg.external_goal_prob_start)
+        prob_end = float(self._sparse_goal_cfg.external_goal_prob_end)
+        ramp_resets = max(0, int(self._sparse_goal_cfg.external_goal_prob_ramp_resets))
+        if ramp_resets <= 0:
+            alpha = 1.0
+        else:
+            alpha = min(float(self._sparse_goal_reset_counter) / float(ramp_resets), 1.0)
+        return self._clamp01(prob_start + (prob_end - prob_start) * alpha)
+
+    def _update_sparse_object_goals_on_reset(self, env_ids: torch.Tensor, clip_lengths: torch.Tensor) -> None:
+        if not self._sparse_goal_curriculum_enabled or self._sparse_goal_cfg is None:
+            return
+        if env_ids.numel() == 0:
+            return
+        if not self.motion.has_object:
+            return
+        if self.manual_goal_object_pos_w is None or self.manual_goal_object_rot6d_w is None:
+            return
+
+        self.manual_goal_enabled = True
+        goal_pos_w, goal_quat_w = self._sample_clip_based_object_goal_pose_w(env_ids, clip_lengths)
+
+        p_ext = self._current_external_goal_prob()
+        self._sparse_goal_external_prob = p_ext
+        external_mask = torch.rand(env_ids.numel(), device=self.device) < p_ext
+        if external_mask.any():
+            ext_pos_w, ext_quat_w = self._sample_external_object_goal_pose_w(env_ids)
+            goal_pos_w = torch.where(external_mask.unsqueeze(1), ext_pos_w, goal_pos_w)
+            goal_quat_w = torch.where(external_mask.unsqueeze(1), ext_quat_w, goal_quat_w)
+
+        goal_rot_mat = quaternion_to_matrix(goal_quat_w, w_last=True)
+        goal_rot6d_w = goal_rot_mat[..., :2].reshape(goal_rot_mat.shape[0], 6)
+        self.manual_goal_object_pos_w[env_ids] = goal_pos_w
+        self.manual_goal_object_rot6d_w[env_ids] = goal_rot6d_w
+        self._sparse_goal_external_fraction_last_reset = float(external_mask.float().mean().item())
+
+        if not self._env.is_evaluating:
+            self._sparse_goal_reset_counter += int(env_ids.numel())
+
     @property
     def command(self) -> torch.Tensor:
         return torch.cat([self.joint_pos, self.joint_vel], dim=1)
@@ -1970,6 +2110,9 @@ class MotionCommand(CommandTermBase):
             self._clip_total_counts.zero_()
         if self.clip_weighting_strategy == "success_rate_adaptive" and self._base_clip_weights is not None:
             self._clip_sampling_weights = self._base_clip_weights.clone()
+        self._sparse_goal_reset_counter = 0
+        self._sparse_goal_external_prob = 0.0
+        self._sparse_goal_external_fraction_last_reset = 0.0
 
     def _update_motion_alignment(self, env_ids: torch.Tensor) -> None:
         if env_ids.numel() == 0:
@@ -2052,6 +2195,30 @@ class MotionCommand(CommandTermBase):
             self.metrics["motion/error_object_ref_pos"] = zeros
             self.metrics["motion/error_object_ref_rot"] = zeros
             self.metrics["motion/error_object_ref_lin_vel"] = zeros
+
+        if self._sparse_goal_curriculum_enabled:
+            self.metrics["goal/external_prob"] = torch.full(
+                (self.num_envs,),
+                float(self._sparse_goal_external_prob),
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self.metrics["goal/external_fraction_last_reset"] = torch.full(
+                (self.num_envs,),
+                float(self._sparse_goal_external_fraction_last_reset),
+                device=self.device,
+                dtype=torch.float32,
+            )
+            ramp = 0
+            if self._sparse_goal_cfg is not None:
+                ramp = max(0, int(self._sparse_goal_cfg.external_goal_prob_ramp_resets))
+            progress = 1.0 if ramp <= 0 else min(float(self._sparse_goal_reset_counter) / float(ramp), 1.0)
+            self.metrics["goal/external_prob_curriculum_progress"] = torch.full(
+                (self.num_envs,),
+                float(progress),
+                device=self.device,
+                dtype=torch.float32,
+            )
 
         if self.use_adaptive_timesteps_sampler:
             self.adaptive_timesteps_sampler.get_stats()

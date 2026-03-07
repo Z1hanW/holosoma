@@ -404,6 +404,63 @@ g1_29dof_wbt_w_object_distill_sparse_root_cmd = replace(
     ),
 )
 
+# Legacy variant that keeps clip_phase in actor_obs_torso.
+# Use only for backward compatibility / old checkpoint reproduction.
+g1_29dof_wbt_w_object_distill_sparse_root_cmd_legacy = replace(
+    g1_29dof_wbt_w_object_generalist,
+    training=replace(
+        g1_29dof_wbt_w_object_generalist.training,
+        name="g1_29dof_wbt_w_object_distill_sparse_root_cmd_legacy",
+    ),
+    observation=observation.g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy,
+    termination=termination.g1_29dof_wbt_termination_distill,
+    algo=replace(
+        g1_29dof_wbt_w_object_generalist.algo,
+        config=replace(
+            g1_29dof_wbt_w_object_generalist.algo.config,
+            module_dict=_w_object_distill_sparse_root_cmd_module_dict,
+        ),
+    ),
+)
+
+g1_29dof_wbt_w_object_distill_sparse_goal_cmd = replace(
+    g1_29dof_wbt_w_object_generalist,
+    training=replace(
+        g1_29dof_wbt_w_object_generalist.training,
+        name="g1_29dof_wbt_w_object_distill_sparse_goal_cmd",
+    ),
+    command=command.g1_29dof_wbt_command_w_object_generalist_sparse_goal_curriculum,
+    observation=observation.g1_29dof_wbt_observation_w_object_distill_sparse_goal_cmd,
+    termination=termination.g1_29dof_wbt_termination_distill,
+    algo=replace(
+        g1_29dof_wbt_w_object_generalist.algo,
+        config=replace(
+            g1_29dof_wbt_w_object_generalist.algo.config,
+            module_dict=_w_object_distill_sparse_root_cmd_module_dict,
+        ),
+    ),
+)
+
+# Legacy variant that keeps clip_phase in actor_obs_torso.
+# Use only for backward compatibility / old checkpoint reproduction.
+g1_29dof_wbt_w_object_distill_sparse_goal_cmd_legacy = replace(
+    g1_29dof_wbt_w_object_generalist,
+    training=replace(
+        g1_29dof_wbt_w_object_generalist.training,
+        name="g1_29dof_wbt_w_object_distill_sparse_goal_cmd_legacy",
+    ),
+    command=command.g1_29dof_wbt_command_w_object_generalist_sparse_goal_curriculum,
+    observation=observation.g1_29dof_wbt_observation_w_object_distill_sparse_goal_cmd_legacy,
+    termination=termination.g1_29dof_wbt_termination_distill,
+    algo=replace(
+        g1_29dof_wbt_w_object_generalist.algo,
+        config=replace(
+            g1_29dof_wbt_w_object_generalist.algo.config,
+            module_dict=_w_object_distill_sparse_root_cmd_module_dict,
+        ),
+    ),
+)
+
 g1_29dof_wbt_fast_sac_w_object = replace(
     g1_29dof_wbt_fast_sac,
     command=command.g1_29dof_wbt_command_w_object,
@@ -437,6 +494,9 @@ __all__ = [
     "g1_29dof_wbt_w_object_generalist",
     "g1_29dof_wbt_w_object_generalist_legacy_obs",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd",
+    "g1_29dof_wbt_w_object_distill_sparse_root_cmd_legacy",
+    "g1_29dof_wbt_w_object_distill_sparse_goal_cmd",
+    "g1_29dof_wbt_w_object_distill_sparse_goal_cmd_legacy",
 ]
 
 """

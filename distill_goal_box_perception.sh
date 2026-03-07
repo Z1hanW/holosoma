@@ -1,28 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Distill object-carry generalist -> sim2real student with depth perception access.
+# Goal-conditioned distill (depth perception) with goal-consistent defaults:
+# - student actor: actor_obs_torso + actor_obs_proprio + perception_obs
+# - sparse object-goal curriculum is enabled
+# - external random goals are disabled by default during distill to avoid teacher/goal mismatch
 #
-# Student policy observation (actor):
-# - actor_obs_torso: sparse target root trajectory command
-# - actor_obs_proprio (base_lin_vel, base_ang_vel, dof_pos, dof_vel, actions)
-# - perception_obs (camera depth)
-# - No actor box state is used by student actor.
+# Stage-A default (goal-consistent distill):
+#   GOAL_EXTERNAL_PROB_START=0.0
+#   GOAL_EXTERNAL_PROB_END=0.0
 #
-# Teacher policy observation:
-# - actor_obs (full teacher state, includes object terms)
+# You can still override any flag from CLI or env.
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
 
-# Prefer local cached teacher checkpoint for reproducibility/speed.
-LOCAL_TEACHER_CHECKPOINT="${SCRIPT_DIR}/.teacher_checkpoints/model_10000.pt"
-if [[ -f "${LOCAL_TEACHER_CHECKPOINT}" ]]; then
-  _default_teacher_checkpoint="${LOCAL_TEACHER_CHECKPOINT}"
-else
-  _default_teacher_checkpoint="wandb://zihanw22/boxer/5vlz6pj8/model_10000.pt"
-fi
-DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"${_default_teacher_checkpoint}"}
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/5vlz6pj8/model_10000.pt"}
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 
 if [[ $# -gt 0 ]]; then
@@ -37,19 +30,16 @@ if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
   exit 1
 fi
 
-# Sim2real default: sparse-goal distill without clip_phase in student torso observation.
-# Legacy option (old behavior with clip_phase):
-#   EXP=g1-29dof-wbt-w-object-distill-sparse-goal-cmd-legacy
 EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-goal-cmd}
-RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_perception}
-TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_perception_access_to_depth}
+RUN_NAME=${RUN_NAME:-g1_w_object_distill_goal_box_perception}
+TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_goal_box_perception}
 TRAINING_PROJECT=${TRAINING_PROJECT:-boxer}
 
-# Keep launcher self-contained: direct `bash ./distill_box_perception.sh` works out of box.
 HSSIM_BIN_DIR=${HSSIM_BIN_DIR:-/home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin}
 if [[ -d "${HSSIM_BIN_DIR}" ]]; then
   export PATH="${HSSIM_BIN_DIR}:${PATH}"
 fi
+
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
 if [[ -z "${NPROC:-}" ]]; then
   IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
@@ -64,6 +54,7 @@ case "${_teacher_obs_keys_no_space}" in
     TEACHER_OBS_KEYS="actor_obs_legacy,perception_obs"
     ;;
 esac
+
 TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
 PPO_START_EPOCH=${PPO_START_EPOCH:-0}
@@ -72,7 +63,6 @@ DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
 
-# Teacher 5vlz6pj8 expects perception encoder input dim 289 => 17x17.
 IMAGE_WIDTH=${IMAGE_WIDTH:-17}
 IMAGE_HEIGHT=${IMAGE_HEIGHT:-17}
 CAMERA_NEAR=${CAMERA_NEAR:-0.001}
@@ -80,15 +70,21 @@ CAMERA_FAR=${CAMERA_FAR:-3.0}
 CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-3.0}
 PERCEPTION_WARP_PREPROCESS=${PERCEPTION_WARP_PREPROCESS:-False}
 
-echo "[INFO] distill mode: depth-access-no-box-state"
+# Sparse object-goal curriculum knobs.
+GOAL_CLIP_DELTA_MIN_STEPS=${GOAL_CLIP_DELTA_MIN_STEPS:-30}
+GOAL_CLIP_DELTA_MAX_STEPS=${GOAL_CLIP_DELTA_MAX_STEPS:-180}
+GOAL_EXTERNAL_PROB_START=${GOAL_EXTERNAL_PROB_START:-0.0}
+GOAL_EXTERNAL_PROB_END=${GOAL_EXTERNAL_PROB_END:-0.0}
+GOAL_EXTERNAL_PROB_RAMP_RESETS=${GOAL_EXTERNAL_PROB_RAMP_RESETS:-500000}
+GOAL_EVAL_EXTERNAL_PROB=${GOAL_EVAL_EXTERNAL_PROB:-0.0}
+
+echo "[INFO] distill mode: goal-box perception"
 echo "[INFO] teacher checkpoint: ${TEACHER_CHECKPOINT}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
 echo "[INFO] training_project=${TRAINING_PROJECT}"
-echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC}"
-echo "[INFO] student actor uses actor_obs_torso + actor_obs_proprio + perception_obs (no actor box state)"
-echo "[INFO] hybrid PPO+DAgger curriculum default=True"
-echo "[INFO] teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
-echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
+echo "[INFO] sparse goal: delta=[${GOAL_CLIP_DELTA_MIN_STEPS}, ${GOAL_CLIP_DELTA_MAX_STEPS}]"
+echo "[INFO] sparse goal external prob: train ${GOAL_EXTERNAL_PROB_START} -> ${GOAL_EXTERNAL_PROB_END}, eval=${GOAL_EVAL_EXTERNAL_PROB}"
+echo "[INFO] student actor uses actor_obs_torso + actor_obs_proprio + perception_obs"
 
 exec env \
   EXP="${EXP}" \
@@ -113,4 +109,11 @@ exec env \
     --perception.camera-far="${CAMERA_FAR}" \
     --perception.max-distance="${CAMERA_MAX_DISTANCE}" \
     --perception.camera-warp-preprocess="${PERCEPTION_WARP_PREPROCESS}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.enabled=True \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.clip-goal-delta-min-steps="${GOAL_CLIP_DELTA_MIN_STEPS}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.clip-goal-delta-max-steps="${GOAL_CLIP_DELTA_MAX_STEPS}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-prob-start="${GOAL_EXTERNAL_PROB_START}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-prob-end="${GOAL_EXTERNAL_PROB_END}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-prob-ramp-resets="${GOAL_EXTERNAL_PROB_RAMP_RESETS}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.eval-external-goal-prob="${GOAL_EVAL_EXTERNAL_PROB}" \
     "$@"

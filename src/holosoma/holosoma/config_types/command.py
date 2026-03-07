@@ -65,6 +65,44 @@ class NoiseToInitialPoseConfig:
 
 
 @dataclass(frozen=True)
+class SparseObjectGoalConfig:
+    """Sparse object-goal sampling configuration for distillation."""
+
+    enabled: bool = False
+    """Enable mixed sparse-goal sampling (clip-based + external random goals)."""
+
+    clip_goal_delta_min_steps: int = 60
+    """Minimum delta steps for clip-based goal: goal_step = min(t + delta, clip_end)."""
+
+    clip_goal_delta_max_steps: int = 180
+    """Maximum delta steps for clip-based goal."""
+
+    external_goal_prob_start: float = 0.0
+    """Initial probability of sampling external random goals."""
+
+    external_goal_prob_end: float = 1.0
+    """Final probability of sampling external random goals."""
+
+    external_goal_prob_ramp_resets: int = 200000
+    """Linear ramp horizon in reset-events (env-wise), from start prob to end prob."""
+
+    eval_external_goal_prob: float | None = None
+    """Optional external-goal probability used during evaluation; defaults to end prob when None."""
+
+    external_goal_pos_local_min: list[float] = field(default_factory=lambda: [0.3, -0.8, 0.7])
+    """External goal position lower bounds [x, y, z] in local frame around env origin."""
+
+    external_goal_pos_local_max: list[float] = field(default_factory=lambda: [1.2, 0.8, 1.0])
+    """External goal position upper bounds [x, y, z] in local frame around env origin."""
+
+    external_goal_rpy_min: list[float] = field(default_factory=lambda: [0.0, 0.0, -3.1415926])
+    """External goal orientation lower bounds [roll, pitch, yaw] in radians."""
+
+    external_goal_rpy_max: list[float] = field(default_factory=lambda: [0.0, 0.0, 3.1415926])
+    """External goal orientation upper bounds [roll, pitch, yaw] in radians."""
+
+
+@dataclass(frozen=True)
 class MotionConfig:
     """Motion related configuration for Whole Body Tracking.
 
@@ -162,6 +200,9 @@ class MotionConfig:
 
     # noise related
     noise_to_initial_pose: NoiseToInitialPoseConfig = field(default_factory=NoiseToInitialPoseConfig)
+
+    # sparse object-goal distillation
+    sparse_object_goal: SparseObjectGoalConfig = field(default_factory=SparseObjectGoalConfig)
 
     # future target pose (MotionTracking-style)
     num_future_steps: int = 0

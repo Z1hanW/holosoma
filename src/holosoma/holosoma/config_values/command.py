@@ -7,6 +7,7 @@ from holosoma.config_values.wbt.g1.command import (
     g1_29dof_wbt_command_motion_tracking,
     g1_29dof_wbt_command_w_object,
     g1_29dof_wbt_command_w_object_generalist,
+    g1_29dof_wbt_command_w_object_generalist_sparse_goal_curriculum,
 )
 
 none = None
@@ -19,4 +20,5 @@ DEFAULTS = {
     "g1_29dof_wbt_motion_tracking": g1_29dof_wbt_command_motion_tracking,
     "g1_29dof_wbt_w_object": g1_29dof_wbt_command_w_object,
     "g1_29dof_wbt_w_object_generalist": g1_29dof_wbt_command_w_object_generalist,
+    "g1_29dof_wbt_w_object_generalist_sparse_goal_curriculum": g1_29dof_wbt_command_w_object_generalist_sparse_goal_curriculum,
 }
