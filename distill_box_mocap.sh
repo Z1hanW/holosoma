@@ -38,7 +38,7 @@ fi
 EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-goal-cmd}
 RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_mocap}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_mocap_access_to_mocap_data}
-MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"}
+MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_carry_aug_mix_ml"}
 # Default teacher (kge4jozt/model_12000.pt) uses actor_obs-only input.
 # For legacy teachers, override TEACHER_OBS_KEYS explicitly (e.g., actor_obs_legacy,perception_obs).
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}

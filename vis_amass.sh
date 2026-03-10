@@ -12,10 +12,14 @@ set -euo pipefail
 # Usage:
 #   bash vis_amass.sh
 #   AMASS_SRC_DIR=/abs/path/to/amass_folder bash vis_amass.sh
+#   VIS_MODE=converted CONVERTED_DIR=/abs/path/to/converted_res_dir bash vis_amass.sh
 #   START_CLIP=dance1_subject1 PORT=8090 bash vis_amass.sh
 #
 # Optional env vars:
+#   VIS_MODE        amass|converted (default: auto)
 #   AMASS_SRC_DIR   source folder with .npz clips
+#   CONVERTED_DIR   converted_res folder to visualize directly when VIS_MODE=converted
+#   CONVERTED_VIEW_DIR flat cache of symlinked npz used when CONVERTED_DIR is nested
 #   CACHE_DIR       output proxy folder
 #   REF_LAFAN_DIR   reference converted lafan folder for auto 29dof remap
 #   PORT            viser port
@@ -34,7 +38,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
+CONVERTED_DIR_WAS_SET=0
+if [[ "${CONVERTED_DIR+x}" == "x" ]]; then
+  CONVERTED_DIR_WAS_SET=1
+fi
+
+VIS_MODE=${VIS_MODE:-""}
 AMASS_SRC_DIR=${AMASS_SRC_DIR:-"${SCRIPT_DIR}/amass/LAFAN1_npz"}
+CONVERTED_DIR=${CONVERTED_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting_my/converted_res/robot_only/amass_all_trainready"}
+CONVERTED_VIEW_DIR=${CONVERTED_VIEW_DIR:-"${SCRIPT_DIR}/.cache/vis_amass_converted_flat"}
 CACHE_DIR=${CACHE_DIR:-"${SCRIPT_DIR}/.cache/vis_amass_lafan1_proxy"}
 REF_LAFAN_DIR=${REF_LAFAN_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting_my/converted_res/robot_only/lafan"}
 PORT=${PORT:-"$((RANDOM % 8976 + 1024))"}
@@ -51,19 +63,118 @@ WRIST_POLICY=${WRIST_POLICY:-"mapped"}
 CONVERT_ONLY=${CONVERT_ONLY:-"False"}
 PYTHON_BIN=${PYTHON_BIN:-python}
 
-if [[ ! -d "${AMASS_SRC_DIR}" ]]; then
+if [[ -z "${VIS_MODE}" ]]; then
+  if [[ "${CONVERTED_DIR_WAS_SET}" == "1" ]]; then
+    VIS_MODE="converted"
+  else
+    VIS_MODE="amass"
+  fi
+fi
+
+case "${VIS_MODE,,}" in
+  amass|converted) ;;
+  *)
+    echo "[ERROR] VIS_MODE must be amass|converted, got: ${VIS_MODE}" >&2
+    exit 1
+    ;;
+esac
+
+if [[ "${VIS_MODE,,}" == "converted" ]]; then
+  MOTION_DIR="${CONVERTED_DIR}"
+  NEED_CONVERT=0
+else
+  MOTION_DIR="${CACHE_DIR}"
+  NEED_CONVERT=1
+fi
+
+if [[ "${NEED_CONVERT}" == "1" && ! -d "${AMASS_SRC_DIR}" ]]; then
   echo "[ERROR] AMASS_SRC_DIR not found: ${AMASS_SRC_DIR}" >&2
   exit 1
 fi
 
-mkdir -p "${CACHE_DIR}"
+if [[ "${NEED_CONVERT}" == "0" && ! -d "${MOTION_DIR}" ]]; then
+  echo "[ERROR] CONVERTED_DIR not found: ${MOTION_DIR}" >&2
+  exit 1
+fi
 
-echo "[INFO] Source AMASS dir : ${AMASS_SRC_DIR}"
-echo "[INFO] Proxy cache dir  : ${CACHE_DIR}"
-echo "[INFO] Ref LAFAN dir    : ${REF_LAFAN_DIR}"
-echo "[INFO] Order mode       : ${ORDER_MODE}"
-echo "[INFO] Building proxy clips (qpos/qvel)..."
+if [[ "${NEED_CONVERT}" == "0" ]]; then
+  ROOT_NPZ_COUNT="$(find "${CONVERTED_DIR}" -maxdepth 1 -type f \( -name '*.npz' -o -name '*.NPZ' \) | wc -l | tr -d ' ')"
+  if [[ "${ROOT_NPZ_COUNT}" == "0" ]]; then
+    mkdir -p "${CONVERTED_VIEW_DIR}"
+    echo "[INFO] CONVERTED_DIR has nested folders; flattening recursively into: ${CONVERTED_VIEW_DIR}"
+    "${PYTHON_BIN}" - <<'PY' "${CONVERTED_DIR}" "${CONVERTED_VIEW_DIR}"
+from __future__ import annotations
 
+import json
+import os
+import sys
+from pathlib import Path
+
+src_dir = Path(sys.argv[1]).resolve()
+view_dir = Path(sys.argv[2]).resolve()
+cfg_path = view_dir / "_converted_view_config.json"
+
+files = sorted(list(src_dir.rglob("*.npz")) + list(src_dir.rglob("*.NPZ")))
+if not files:
+    raise SystemExit(f"[ERROR] No .npz files found recursively in {src_dir}")
+
+cfg = {"source_dir": str(src_dir), "count": len(files), "version": 1}
+existing_links = sorted(view_dir.glob("*.npz"))
+reuse = False
+if cfg_path.exists():
+    try:
+        prev = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception:
+        prev = None
+    if prev == cfg and len(existing_links) == len(files):
+        reuse = True
+
+if reuse:
+    print(f"[INFO] Reusing flattened converted cache: {view_dir} ({len(existing_links)} files)")
+    raise SystemExit(0)
+
+for p in existing_links:
+    p.unlink()
+
+seen: set[str] = set()
+for src in files:
+    rel = src.relative_to(src_dir).as_posix()
+    base = rel[:-4] if rel.lower().endswith(".npz") else rel
+    base = base.replace("/", "__")
+    name = f"{base}.npz"
+    if name in seen:
+        idx = 1
+        while f"{base}__{idx}.npz" in seen:
+            idx += 1
+        name = f"{base}__{idx}.npz"
+    seen.add(name)
+    dst = view_dir / name
+    if dst.exists() or dst.is_symlink():
+        dst.unlink()
+    os.symlink(src, dst)
+
+cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+print(f"[INFO] Flattened converted cache ready: {view_dir} ({len(files)} files)")
+PY
+    MOTION_DIR="${CONVERTED_VIEW_DIR}"
+  fi
+fi
+
+if [[ "${NEED_CONVERT}" == "1" ]]; then
+  mkdir -p "${CACHE_DIR}"
+fi
+
+echo "[INFO] Visualizer mode  : ${VIS_MODE}"
+echo "[INFO] Motion dir       : ${MOTION_DIR}"
+if [[ "${NEED_CONVERT}" == "1" ]]; then
+  echo "[INFO] Source AMASS dir : ${AMASS_SRC_DIR}"
+  echo "[INFO] Proxy cache dir  : ${CACHE_DIR}"
+  echo "[INFO] Ref LAFAN dir    : ${REF_LAFAN_DIR}"
+  echo "[INFO] Order mode       : ${ORDER_MODE}"
+  echo "[INFO] Building proxy clips (qpos/qvel)..."
+fi
+
+if [[ "${NEED_CONVERT}" == "1" ]]; then
 "${PYTHON_BIN}" - <<'PY' "${AMASS_SRC_DIR}" "${CACHE_DIR}" "${MAX_CLIPS}" "${REF_LAFAN_DIR}" "${AUTO_MAP}" "${ORDER_MODE}" "${WRIST_POLICY}"
 from __future__ import annotations
 
@@ -360,6 +471,9 @@ config_path.write_text(json.dumps(curr_cfg, indent=2), encoding="utf-8")
 
 print(f"[INFO] Proxy conversion done. converted={converted}, skipped={skipped}, total={len(files)}")
 PY
+else
+  echo "[INFO] VIS_MODE=converted: skip proxy conversion."
+fi
 
 if [[ "${CONVERT_ONLY,,}" == "true" || "${CONVERT_ONLY}" == "1" ]]; then
   echo "[INFO] CONVERT_ONLY=True, skip launching viewer."
@@ -378,7 +492,7 @@ fi
 
 cmd=(
   "${PYTHON_BIN}" src/holosoma/holosoma/viser_motion_geometry.py
-  --motion-dir "${CACHE_DIR}"
+  --motion-dir "${MOTION_DIR}"
   --geometry-dir ""
   --robot "${ROBOT}"
   --port "${PORT}"

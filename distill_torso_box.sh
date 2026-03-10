@@ -78,12 +78,12 @@ PY
   )
 fi
 
+DEFAULT_CUDA_VISIBLE_DEVICES=4,5,6,7
+DEFAULT_TOTAL_ENVS=65536
 FORCE_EIGHT_GPU_CONFIG=${FORCE_EIGHT_GPU_CONFIG:-0}
 if [[ "${FORCE_EIGHT_GPU_CONFIG}" != "0" ]]; then
   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
   NPROC=8
-  PER_GPU_ENVS=${PER_GPU_ENVS:-2048}
-  NUM_ENVS=${PER_GPU_ENVS}
   if command -v nvidia-smi >/dev/null 2>&1; then
     AVAILABLE_GPUS=$(nvidia-smi -L | wc -l | tr -d ' ')
     if [[ "${AVAILABLE_GPUS}" -lt 8 ]]; then
@@ -92,7 +92,7 @@ if [[ "${FORCE_EIGHT_GPU_CONFIG}" != "0" ]]; then
     fi
   fi
 else
-  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-${DEFAULT_CUDA_VISIBLE_DEVICES}}
   if [[ -z "${NPROC:-}" ]]; then
     if [[ -n "${CUDA_VISIBLE_DEVICES}" ]]; then
       if [[ "${CUDA_VISIBLE_DEVICES}" == "all" || "${CUDA_VISIBLE_DEVICES}" == "ALL" ]]; then
@@ -109,18 +109,20 @@ else
       NPROC=1
     fi
   fi
-  PER_GPU_ENVS=${PER_GPU_ENVS:-2048}
-  NUM_ENVS=${NUM_ENVS:-${PER_GPU_ENVS}}
 fi
 
-if [[ "${FORCE_EIGHT_GPU_CONFIG}" != "0" ]]; then
-  if [[ "${NPROC}" -ne 8 ]]; then
-    echo "Expected NPROC=8, got ${NPROC}." >&2
-    exit 1
-  fi
-  if [[ "${NUM_ENVS}" -ne "${PER_GPU_ENVS}" ]]; then
-    echo "Expected NUM_ENVS(per-GPU) == PER_GPU_ENVS, got NUM_ENVS=${NUM_ENVS}, PER_GPU_ENVS=${PER_GPU_ENVS}." >&2
-    exit 1
+if [[ "${FORCE_EIGHT_GPU_CONFIG}" != "0" && "${NPROC}" -ne 8 ]]; then
+  echo "Expected NPROC=8, got ${NPROC}." >&2
+  exit 1
+fi
+
+# NUM_ENVS is global (all-ranks total). For backward compatibility, users can still
+# set PER_GPU_ENVS; in that case NUM_ENVS defaults to PER_GPU_ENVS * NPROC.
+if [[ -z "${NUM_ENVS:-}" ]]; then
+  if [[ -n "${PER_GPU_ENVS:-}" ]]; then
+    NUM_ENVS=$((PER_GPU_ENVS * NPROC))
+  else
+    NUM_ENVS=${DEFAULT_TOTAL_ENVS}
   fi
 fi
 
@@ -128,11 +130,22 @@ fi
 # Legacy option (old behavior with clip_phase):
 #   EXP=g1-29dof-wbt-w-object-distill-sparse-goal-cmd-legacy
 EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-goal-cmd}
-MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"}
-OBJECT_URDF=${OBJECT_URDF:-"${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"}
+DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_carry_aug_mix_ml"
+MOTION_DIR=${MOTION_DIR:-"${DEFAULT_MOTION_DIR}"}
+DEFAULT_OBJECT_URDF="${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
+DEFAULT_OBJECT_MAP="${MOTION_DIR}/_clip_object_urdf_map.json"
+if [[ -f "${DEFAULT_OBJECT_MAP}" ]]; then
+  OBJECT_URDF=${OBJECT_URDF:-"${DEFAULT_OBJECT_MAP}"}
+else
+  OBJECT_URDF=${OBJECT_URDF:-"${DEFAULT_OBJECT_URDF}"}
+fi
 
 if [[ "${NPROC}" -lt 1 ]]; then
   echo "NPROC must be >= 1. Got: ${NPROC}" >&2
+  exit 1
+fi
+if [[ "${NUM_ENVS}" -lt "${NPROC}" ]]; then
+  echo "NUM_ENVS must be >= NPROC. Got NUM_ENVS=${NUM_ENVS}, NPROC=${NPROC}." >&2
   exit 1
 fi
 
@@ -172,7 +185,7 @@ SAVE_INTERVAL=${SAVE_INTERVAL:-200}
 LOGGER=${LOGGER:-logger:wandb}
 RUN_NAME=${RUN_NAME:-g1_w_object_distill_sparse_goal_cmd}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_sparse_goal_cmd}
-TRAINING_PROJECT=${TRAINING_PROJECT:-WholeBodyTracking}
+TRAINING_PROJECT=${TRAINING_PROJECT:-boxer}
 
 if [[ "${TEACHER_CHECKPOINT}" != wandb://* ]] && [[ ! -f "${TEACHER_CHECKPOINT}" ]]; then
   echo "Teacher checkpoint not found: ${TEACHER_CHECKPOINT}" >&2
@@ -195,7 +208,7 @@ echo "[INFO] perception.inject_into_policy_modules=${PERCEPTION_INTO_POLICY_MODU
 echo "[INFO] Teacher observation mismatch will fail fast (no fallback)."
 echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH} (hybrid PPO+DAgger curriculum enabled by default)"
 echo "[INFO] init_noise_std=${INIT_NOISE_STD} actor_min_noise_std=${ACTOR_MIN_NOISE_STD}"
-echo "[INFO] per_gpu_envs=${NUM_ENVS} world_size=${NPROC} total_envs=$((NUM_ENVS * NPROC))"
+echo "[INFO] total_envs=${NUM_ENVS} world_size=${NPROC} envs_per_rank=$((NUM_ENVS / NPROC))"
 echo "[INFO] torch_dist_timeout_sec=${TORCH_DIST_TIMEOUT_SEC}"
 
 run_distill_stage() {

@@ -112,7 +112,7 @@ class PerceptionConfig:
     camera_distortion: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0, 0.0])
     """Camera distortion coefficients (k1, k2, p1, p2, k3)."""
 
-    camera_warp_preprocess: bool = False
+    camera_warp_preprocess: bool = True
     """Apply warp-image-style depth preprocessing (crop/resize/noise/latency/normalization)."""
 
     camera_warp_freq_ratio: int = 1

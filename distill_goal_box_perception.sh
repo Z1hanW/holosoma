@@ -35,12 +35,22 @@ RUN_NAME=${RUN_NAME:-g1_w_object_distill_goal_box_perception}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_goal_box_perception}
 TRAINING_PROJECT=${TRAINING_PROJECT:-boxer}
 
+# Optional positional sequence/run name:
+#   bash distill_goal_box_perception.sh mixed_goal
+#   bash distill_goal_box_perception.sh wandb://.../model_12000.pt mixed_goal
+if [[ $# -gt 0 ]]; then
+  if [[ "$1" != -* && "$1" != *:* ]]; then
+    RUN_NAME="$1"
+    shift
+  fi
+fi
+
 HSSIM_BIN_DIR=${HSSIM_BIN_DIR:-/home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin}
 if [[ -d "${HSSIM_BIN_DIR}" ]]; then
   export PATH="${HSSIM_BIN_DIR}:${PATH}"
 fi
 
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4,5,6,7}
 if [[ -z "${NPROC:-}" ]]; then
   IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
   NPROC=${#_visible_gpus[@]}
@@ -63,7 +73,7 @@ IMAGE_HEIGHT=${IMAGE_HEIGHT:-17}
 CAMERA_NEAR=${CAMERA_NEAR:-0.001}
 CAMERA_FAR=${CAMERA_FAR:-3.0}
 CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-3.0}
-PERCEPTION_WARP_PREPROCESS=${PERCEPTION_WARP_PREPROCESS:-False}
+PERCEPTION_WARP_PREPROCESS=${PERCEPTION_WARP_PREPROCESS:-True}
 
 # Sparse object-goal curriculum knobs.
 GOAL_CLIP_DELTA_MIN_STEPS=${GOAL_CLIP_DELTA_MIN_STEPS:-30}
@@ -75,6 +85,7 @@ GOAL_EXTERNAL_PROB_RAMP_RESETS=${GOAL_EXTERNAL_PROB_RAMP_RESETS:-500000}
 echo "[INFO] distill mode: goal-box perception"
 echo "[INFO] teacher checkpoint: ${TEACHER_CHECKPOINT}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
+echo "[INFO] run_name=${RUN_NAME} training_name=${TRAINING_NAME}"
 echo "[INFO] training_project=${TRAINING_PROJECT}"
 echo "[INFO] sparse goal: delta=[${GOAL_CLIP_DELTA_MIN_STEPS}, ${GOAL_CLIP_DELTA_MAX_STEPS}]"
 echo "[INFO] sparse goal external prob: train ${GOAL_EXTERNAL_PROB_START} -> ${GOAL_EXTERNAL_PROB_END}"
