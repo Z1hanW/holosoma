@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 import os
 import subprocess
 import sys
+import threading
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -134,8 +136,27 @@ def write_manifest(clips: list[BrokenClip], manifest_path: Path) -> None:
             )
 
 
-def _run(cmd: list[str], *, env: dict[str, str] | None = None) -> None:
-    subprocess.run(cmd, cwd=str(REPO_ROOT), env=env, check=True)
+def _run(cmd: list[str], *, env: dict[str, str] | None = None, quiet: bool = False) -> None:
+    if not quiet:
+        subprocess.run(cmd, cwd=str(REPO_ROOT), env=env, check=True)
+        return
+
+    proc = subprocess.run(
+        cmd,
+        cwd=str(REPO_ROOT),
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        tail_parts: list[str] = []
+        if proc.stdout:
+            tail_parts.append(f"stdout: {proc.stdout[-1000:]}")
+        if proc.stderr:
+            tail_parts.append(f"stderr: {proc.stderr[-1000:]}")
+        tail = " | ".join(tail_parts)
+        raise subprocess.CalledProcessError(proc.returncode, cmd, output=tail)
 
 
 def ensure_proxy_dir(
@@ -176,29 +197,31 @@ def repair_clips(
     output_fps: int,
     order_mode: str,
     wrist_policy: str,
+    jobs: int,
 ) -> tuple[int, int]:
-    repaired = 0
-    failed = 0
     rebuilt_proxy_dirs: set[Path] = set()
+    proxy_lock = threading.Lock()
 
-    for clip in clips:
+    def repair_one(clip: BrokenClip) -> tuple[bool, str]:
         try:
             if not clip.source_path.exists():
                 raise FileNotFoundError(f"source motion not found: {clip.source_path}")
 
             if not clip.proxy_path.exists():
                 proxy_dir = clip.proxy_path.parent
-                if proxy_dir not in rebuilt_proxy_dirs:
-                    source_dir = clip.source_path.parent
-                    ensure_proxy_dir(
-                        source_dir=source_dir,
-                        proxy_dir=proxy_dir,
-                        vis_script=vis_script,
-                        python_bin=python_bin,
-                        order_mode=order_mode,
-                        wrist_policy=wrist_policy,
-                    )
-                    rebuilt_proxy_dirs.add(proxy_dir)
+                with proxy_lock:
+                    needs_rebuild = proxy_dir not in rebuilt_proxy_dirs and not clip.proxy_path.exists()
+                    if needs_rebuild:
+                        source_dir = clip.source_path.parent
+                        ensure_proxy_dir(
+                            source_dir=source_dir,
+                            proxy_dir=proxy_dir,
+                            vis_script=vis_script,
+                            python_bin=python_bin,
+                            order_mode=order_mode,
+                            wrist_policy=wrist_policy,
+                        )
+                        rebuilt_proxy_dirs.add(proxy_dir)
 
             if not clip.proxy_path.exists():
                 raise FileNotFoundError(f"proxy motion not found after rebuild: {clip.proxy_path}")
@@ -224,16 +247,30 @@ def repair_clips(
                     str(clip.output_path),
                     "--once",
                     "--headless",
-                ]
+                ],
+                quiet=True,
             )
             if not zipfile.is_zipfile(clip.output_path):
                 raise RuntimeError(f"output still invalid after regeneration: {clip.output_path}")
-
-            repaired += 1
-            print(f"[OK] repaired {clip.rel_path.as_posix()}")
+            return True, clip.rel_path.as_posix()
         except Exception as exc:
-            failed += 1
-            print(f"[FAIL] {clip.rel_path.as_posix()} :: {exc}", file=sys.stderr)
+            return False, f"{clip.rel_path.as_posix()} :: {exc}"
+
+    repaired = 0
+    failed = 0
+    total = len(clips)
+    max_workers = max(1, int(jobs))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_clip = {executor.submit(repair_one, clip): clip for clip in clips}
+        for idx, future in enumerate(as_completed(future_to_clip), start=1):
+            ok, message = future.result()
+            if ok:
+                repaired += 1
+                print(f"[{idx}/{total}] [OK] repaired {message}")
+            else:
+                failed += 1
+                print(f"[{idx}/{total}] [FAIL] {message}", file=sys.stderr)
 
     return repaired, failed
 
@@ -255,6 +292,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--order-mode", default="amass_csv")
     parser.add_argument("--wrist-policy", default="mapped")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of broken clips to report/repair.")
+    parser.add_argument("--jobs", type=int, default=1, help="Number of concurrent repair workers.")
     parser.add_argument("--repair", action="store_true", help="Regenerate broken clips in-place.")
     return parser.parse_args()
 
@@ -307,6 +345,7 @@ def main() -> int:
         output_fps=args.output_fps,
         order_mode=args.order_mode,
         wrist_policy=args.wrist_policy,
+        jobs=args.jobs,
     )
     print(f"[INFO] repaired: {repaired}")
     print(f"[INFO] failed  : {failed}")

@@ -65,7 +65,7 @@ TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
 PPO_START_EPOCH=${PPO_START_EPOCH:-0}
 DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-10000}
-DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
+DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-10.0}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.7}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
@@ -82,7 +82,7 @@ echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
 echo "[INFO] run_name=${RUN_NAME} training_name=${TRAINING_NAME}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
 echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC}"
-echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
+echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} dagger_loss_coef=${DAGGER_LOSS_COEF} teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
 echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
 

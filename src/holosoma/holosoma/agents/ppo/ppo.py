@@ -1143,15 +1143,12 @@ class PPO(BaseAlgo):
             symmetry_critic_loss = torch.tensor(0.0, device=self.device)
 
         entropy_loss = entropy_batch.mean()
-        actor_loss_base = (
-            surrogate_loss
-            - self.config.entropy_coef * entropy_loss
-            + self.config.symmetry_actor_coef * symmetry_actor_loss
-        )
+        actor_loss_base = surrogate_loss - self.config.entropy_coef * entropy_loss
+        actor_regularizer = self.config.symmetry_actor_coef * symmetry_actor_loss
 
         critic_loss = self.config.value_loss_coef * value_loss + self.config.symmetry_critic_coef * symmetry_critic_loss
 
-        actor_loss = actor_loss_base
+        actor_loss = actor_loss_base + actor_regularizer
         distill_loss = torch.tensor(0.0, device=self.device)
         bc_loss = torch.tensor(0.0, device=self.device)
         dagger_weight = torch.tensor(0.0, device=self.device)
@@ -1203,14 +1200,14 @@ class PPO(BaseAlgo):
             distill_loss = bc_loss
 
             if self.use_ppo_dagger_schedule:
-                # Paper-style hybrid objective:
-                #   L = lambda_ppo * L_ppo + lambda_d * L_dagger, lambda_ppo + lambda_d = 1
+                # Match far-tracking hybrid loss:
+                #   L = L_ppo + dagger_loss_coef * (1 - ppo_coeff) * L_dagger
                 lambda_ppo = max(0.0, min(1.0, float(self.ppo_coeff)))
                 lambda_d = 1.0 - lambda_ppo
-                dagger_weight = torch.tensor(lambda_d, device=self.device)
-                actor_loss = lambda_ppo * actor_loss_base + dagger_weight * bc_loss
+                dagger_weight = torch.tensor(self.dagger_loss_coef * lambda_d, device=self.device)
+                actor_loss = lambda_ppo * actor_loss_base + actor_regularizer + dagger_weight * bc_loss
             elif self.bc_loss_coef > 0.0:
-                actor_loss = (1.0 - self.bc_loss_coef) * actor_loss_base + self.bc_loss_coef * bc_loss
+                actor_loss = (1.0 - self.bc_loss_coef) * actor_loss_base + actor_regularizer + self.bc_loss_coef * bc_loss
         elif self.distill_enabled:
             assert self.teacher_actor is not None, "Distillation enabled but teacher actor is not initialized."
             teacher_obs = self._normalize_teacher_actor_obs(raw_actor_obs)

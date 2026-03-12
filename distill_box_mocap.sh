@@ -53,7 +53,7 @@ TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
 PPO_START_EPOCH=${PPO_START_EPOCH:-0}
 DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-10000}
-DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
+DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-10.0}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 ACTOR_LR=${ACTOR_LR:-5e-5}
 CRITIC_LR=${CRITIC_LR:-5e-5}
@@ -70,7 +70,7 @@ echo "[INFO] actor box state: obj_current_pose_size_b + final clip target (obj_g
 echo "[INFO] actor_lr=${ACTOR_LR} critic_lr=${CRITIC_LR}"
 echo "[INFO] hybrid PPO+DAgger curriculum default=True"
 echo "[INFO] teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
-echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
+echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} dagger_loss_coef=${DAGGER_LOSS_COEF} ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
 
 exec env \
   EXP="${EXP}" \
