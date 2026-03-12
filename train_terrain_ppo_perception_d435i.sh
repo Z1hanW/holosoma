@@ -104,5 +104,7 @@ CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 --master_port=$((29500 + RAND
   --command.setup_terms.motion_command.params.motion_config.target_pose_type=max-coords-future-rel-with-time \
   \
   logger:wandb \
-  --logger.video.interval=1000 \
+  --logger.video.enabled=False \
+  --logger.headless_recording=False \
+  --logger.video.upload_to_wandb=False \
   --simulator.config.scene.env_spacing=0.0

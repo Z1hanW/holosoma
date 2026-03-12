@@ -7,7 +7,6 @@ from holosoma.config_types.command import (
     CommandTermCfg,
     MotionConfig,
     NoiseToInitialPoseConfig,
-    SparseObjectGoalConfig,
 )
 
 init_pose_config = NoiseToInitialPoseConfig(
@@ -58,24 +57,6 @@ motion_config_w_object_generalist = replace(
     motion_config_w_object,
     # Enable adaptive clip sampling by default for generalist training.
     clip_weighting_strategy="success_rate_adaptive",
-)
-
-motion_config_w_object_generalist_sparse_goal_curriculum = replace(
-    motion_config_w_object_generalist,
-    sparse_object_goal=SparseObjectGoalConfig(
-        enabled=True,
-        # First train with clip-conditioned goal g_clip(t + delta), then ramp in external goals.
-        clip_goal_delta_min_steps=30,
-        clip_goal_delta_max_steps=180,
-        external_goal_prob_start=0.0,
-        external_goal_prob_end=1.0,
-        external_goal_prob_ramp_resets=500000,
-        # External random goals are sampled in env-local workspace and converted to world frame.
-        external_goal_pos_local_min=[0.2, -0.8, 0.7],
-        external_goal_pos_local_max=[1.4, 0.8, 1.0],
-        external_goal_rpy_min=[0.0, 0.0, -3.1415926],
-        external_goal_rpy_max=[0.0, 0.0, 3.1415926],
-    ),
 )
 
 g1_29dof_wbt_command = CommandManagerCfg(
@@ -136,22 +117,9 @@ g1_29dof_wbt_command_w_object_generalist = replace(
     },
 )
 
-g1_29dof_wbt_command_w_object_generalist_sparse_goal_curriculum = replace(
-    g1_29dof_wbt_command,
-    setup_terms={
-        "motion_command": CommandTermCfg(
-            func="holosoma.managers.command.terms.wbt:MotionCommand",
-            params={
-                "motion_config": motion_config_w_object_generalist_sparse_goal_curriculum,
-            },
-        )
-    },
-)
-
 __all__ = [
     "g1_29dof_wbt_command",
     "g1_29dof_wbt_command_motion_tracking",
     "g1_29dof_wbt_command_w_object",
     "g1_29dof_wbt_command_w_object_generalist",
-    "g1_29dof_wbt_command_w_object_generalist_sparse_goal_curriculum",
 ]

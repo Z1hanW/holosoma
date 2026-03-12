@@ -7,6 +7,8 @@ source "${SCRIPT_DIR}/data_paths.sh"
 NFS_ROOT=${NFS_ROOT:-/nfs/zzzihanw}
 BOX_BUCKET=${BOX_BUCKET:-box3r}
 CRISP_BUCKET=${CRISP_BUCKET:-crisp}
+RETARGETING_CONVERTED_RES_LOCAL=${RETARGETING_CONVERTED_RES_LOCAL:-/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/converted_res}
+RETARGETING_CONVERTED_RES_NFS=${RETARGETING_CONVERTED_RES_NFS:-/nfs/zzzihanw/amass/converted_res}
 DRY_RUN=${DRY_RUN:-0}
 STRICT=${STRICT:-0}
 # Restore current data layout before payload restore.
@@ -172,6 +174,32 @@ restore_one() {
 
 restore_inferred_layout
 
+restore_converted_res_from_amass() {
+  local src="${RETARGETING_CONVERTED_RES_NFS}"
+  local dst="${RETARGETING_CONVERTED_RES_LOCAL}"
+
+  if [[ ! -e "${src}" ]]; then
+    echo "[WARN] Missing converted_res on NFS, skip: ${src}"
+    missing=$((missing + 1))
+    if [[ "${STRICT}" == "1" ]]; then
+      return 1
+    fi
+    return 0
+  fi
+
+  mkdir -p "$(dirname "${dst}")"
+  echo "[INFO] Restore <- amass: ${src} => ${dst}"
+  if [[ -d "${src}" ]]; then
+    mkdir -p "${dst}"
+    rsync "${rsync_opts[@]}" "${src}/" "${dst}/"
+  else
+    rsync "${rsync_opts[@]}" "${src}" "${dst}"
+  fi
+  restored=$((restored + 1))
+}
+
+restore_converted_res_from_amass
+
 for p in "${BOX3R_PATHS[@]}"; do
   restore_one "${BOX_BUCKET}" "${p}"
 done
@@ -187,3 +215,4 @@ echo "[INFO] NFS root        : ${NFS_ROOT}"
 echo "[INFO] Sync mode       : ${SYNC_MODE}"
 echo "[INFO] Links created   : ${links_created}"
 echo "[INFO] Links skipped   : ${links_skipped}"
+echo "[INFO] amass path      : ${RETARGETING_CONVERTED_RES_NFS}"

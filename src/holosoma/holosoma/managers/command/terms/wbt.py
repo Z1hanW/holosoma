@@ -1067,6 +1067,8 @@ class MotionCommand(CommandTermBase):
         self._sim_object_names: list[str] = []
         self._clip_object_ids: torch.Tensor | None = None
         self._object_indices_matrix: torch.Tensor | None = None
+        self.object_name: str = "object"
+        self.object_indices_in_simulator: torch.Tensor | None = None
         self._debug_representative_clip_ids: torch.Tensor | None = None
 
     def set_forced_clip(self, clip_idx: int | None) -> None:
@@ -1146,6 +1148,7 @@ class MotionCommand(CommandTermBase):
         elif self._sparse_goal_curriculum_enabled:
             logger.warning("Sparse object-goal curriculum requested but motion has no object; disabling curriculum.")
             self._sparse_goal_curriculum_enabled = False
+            self.object_indices_in_simulator = None
 
         # 4. get the adaptive timesteps sampler
         self.use_adaptive_timesteps_sampler = self.motion_cfg.use_adaptive_timesteps_sampler
@@ -1331,6 +1334,12 @@ class MotionCommand(CommandTermBase):
         )
 
     def _get_active_object_indices(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        if self.object_indices_in_simulator is None:
+            raise RuntimeError(
+                "Simulator object indices are not configured. "
+                "Use motion clips with object data and enable robot object assets, "
+                "or switch to a non-object experiment."
+            )
         env_ids_tensor = self._ensure_index_tensor(env_ids)
         if not self._multi_object_enabled or self._clip_object_ids is None or self._object_indices_matrix is None:
             if env_ids is None:
@@ -2021,6 +2030,8 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     @property
     def object_pos_w(self) -> torch.Tensor:
+        if not self.motion.has_object:
+            return torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
         # Applies env origins, but ideally we should rely on the simulator
         motion_idx = self._get_motion_indices(self.time_steps)
         pos = self.motion.object_pos_w[motion_idx]
@@ -2030,6 +2041,10 @@ class MotionCommand(CommandTermBase):
 
     @property
     def object_quat_w(self) -> torch.Tensor:
+        if not self.motion.has_object:
+            quat = torch.zeros(self.num_envs, 4, device=self.device, dtype=torch.float32)
+            quat[:, 3] = 1.0
+            return quat
         motion_idx = self._get_motion_indices(self.time_steps)
         quat = self.motion.object_quat_w[motion_idx]
         if self.motion_cfg.align_motion_to_init_yaw:
@@ -2038,6 +2053,8 @@ class MotionCommand(CommandTermBase):
 
     @property
     def object_lin_vel_w(self) -> torch.Tensor:
+        if not self.motion.has_object:
+            return torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
         motion_idx = self._get_motion_indices(self.time_steps)
         vel = self.motion.object_lin_vel_w[motion_idx]
         if self.motion_cfg.align_motion_to_init_yaw:
@@ -2056,21 +2073,31 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     @property
     def simulator_object_pos_w(self) -> torch.Tensor:
+        if not self.motion.has_object:
+            return torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
         indices = self._get_active_object_indices()
         return self._env.simulator.all_root_states[indices][:, :3]
 
     @property
     def simulator_object_quat_w(self) -> torch.Tensor:
+        if not self.motion.has_object:
+            quat = torch.zeros(self.num_envs, 4, device=self.device, dtype=torch.float32)
+            quat[:, 3] = 1.0
+            return quat
         indices = self._get_active_object_indices()
         return self._env.simulator.all_root_states[indices][:, 3:7]
 
     @property
     def simulator_object_lin_vel_w(self) -> torch.Tensor:
+        if not self.motion.has_object:
+            return torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
         indices = self._get_active_object_indices()
         return self._env.simulator.all_root_states[indices][:, 7:10]
 
     @property
     def simulator_object_ang_vel_w(self) -> torch.Tensor:
+        if not self.motion.has_object:
+            return torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
         indices = self._get_active_object_indices()
         return self._env.simulator.all_root_states[indices][:, 10:13]
 

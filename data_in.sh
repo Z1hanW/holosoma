@@ -7,6 +7,8 @@ source "${SCRIPT_DIR}/data_paths.sh"
 NFS_ROOT=${NFS_ROOT:-/nfs/zzzihanw}
 BOX_BUCKET=${BOX_BUCKET:-box3r}
 CRISP_BUCKET=${CRISP_BUCKET:-crisp}
+RETARGETING_CONVERTED_RES_LOCAL=${RETARGETING_CONVERTED_RES_LOCAL:-/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/converted_res}
+RETARGETING_CONVERTED_RES_NFS=${RETARGETING_CONVERTED_RES_NFS:-/nfs/zzzihanw/amass/converted_res}
 DRY_RUN=${DRY_RUN:-0}
 # Sync mode:
 #   missing (default): only copy files that don't already exist at destination
@@ -31,6 +33,26 @@ fi
 
 copied=0
 missing=0
+
+copy_converted_res_to_amass() {
+  local src="${RETARGETING_CONVERTED_RES_LOCAL}"
+  local dst="${RETARGETING_CONVERTED_RES_NFS}"
+
+  if [[ ! -e "${src}" ]]; then
+    echo "[WARN] Missing converted_res source, skip: ${src}"
+    missing=$((missing + 1))
+    return 0
+  fi
+
+  mkdir -p "${dst}"
+  echo "[INFO] Copy -> amass: ${src} => ${dst}"
+  if [[ -d "${src}" ]]; then
+    rsync "${rsync_opts[@]}" "${src}/" "${dst}/"
+  else
+    rsync "${rsync_opts[@]}" "${src}" "${dst}"
+  fi
+  copied=$((copied + 1))
+}
 
 copy_one() {
   local bucket="$1"
@@ -59,6 +81,8 @@ copy_one() {
 
 mkdir -p "${NFS_ROOT}/${BOX_BUCKET}" "${NFS_ROOT}/${CRISP_BUCKET}"
 
+copy_converted_res_to_amass
+
 for p in "${BOX3R_PATHS[@]}"; do
   copy_one "${BOX_BUCKET}" "${p}"
 done
@@ -72,3 +96,4 @@ echo "[INFO] Copied entries : ${copied}"
 echo "[INFO] Missing entries: ${missing}"
 echo "[INFO] NFS root       : ${NFS_ROOT}"
 echo "[INFO] Sync mode      : ${SYNC_MODE}"
+echo "[INFO] amass path     : ${RETARGETING_CONVERTED_RES_NFS}"

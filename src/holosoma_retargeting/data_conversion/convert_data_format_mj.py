@@ -432,7 +432,15 @@ def run_simulator(joint_names: list[str]):
     if input_path.suffix.lower() == ".npz":
         try:
             with np.load(input_path, allow_pickle=True) as src:
-                for key in ("object_name", "object_urdf_path", "scene_xml_file", "object_mesh_scale", "object_mesh_path"):
+                for key in (
+                    "object_name",
+                    "object_urdf_path",
+                    "scene_xml_file",
+                    "object_mesh_scale",
+                    "object_mesh_path",
+                    "object_scale",
+                    "object_size",
+                ):
                     if key in src:
                         clip_metadata[key] = src[key]
         except Exception as exc:
@@ -445,6 +453,13 @@ def run_simulator(joint_names: list[str]):
             clip_metadata["object_urdf_path"] = np.array(str(Path(constants.OBJECT_URDF_FILE).resolve()))
         if "scene_xml_file" not in clip_metadata:
             clip_metadata["scene_xml_file"] = np.array(str(Path(robot_xml_path).resolve()))
+        if "object_mesh_scale" in clip_metadata:
+            object_scale = np.asarray(clip_metadata["object_mesh_scale"], dtype=np.float32).reshape(-1)
+            if object_scale.size == 1:
+                object_scale = np.repeat(object_scale, 3)
+            if object_scale.size == 3:
+                clip_metadata.setdefault("object_scale", object_scale.copy())
+                clip_metadata.setdefault("object_size", object_scale.copy())
 
     log: dict[str, Any]
     if has_dynamic_object:

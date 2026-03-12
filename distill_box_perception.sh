@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Distill object-carry generalist -> sim2real student with depth perception access.
+# Distill object-carry generalist -> non-goal student with depth perception access.
 #
 # Student policy observation (actor):
-# - actor_obs_torso: sparse target root trajectory command
+# - actor_obs_root: sparse root command
 # - actor_obs_proprio (base_lin_vel, base_ang_vel, dof_pos, dof_vel, actions)
 # - perception_obs (camera depth)
 # - No actor box state is used by student actor.
@@ -30,10 +30,10 @@ if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
   exit 1
 fi
 
-# Sim2real default: sparse-goal distill without clip_phase in student torso observation.
+# Sim2real default: sparse root-command distill without clip_phase in student torso observation.
 # Legacy option (old behavior with clip_phase):
-#   EXP=g1-29dof-wbt-w-object-distill-sparse-goal-cmd-legacy
-EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-goal-cmd}
+#   EXP=g1-29dof-wbt-w-object-distill-sparse-root-cmd-legacy
+EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd}
 RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_perception}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_perception_access_to_depth}
 TRAINING_PROJECT=${TRAINING_PROJECT:-boxer}
@@ -73,7 +73,7 @@ echo "[INFO] teacher checkpoint: ${TEACHER_CHECKPOINT}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
 echo "[INFO] training_project=${TRAINING_PROJECT}"
 echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC}"
-echo "[INFO] student actor uses actor_obs_torso + actor_obs_proprio + perception_obs (no actor box state)"
+echo "[INFO] student actor uses actor_obs_root + actor_obs_proprio + perception_obs (no actor box state)"
 echo "[INFO] hybrid PPO+DAgger curriculum default=True"
 echo "[INFO] teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
 echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
@@ -92,9 +92,9 @@ exec env \
   DAGGER_END_EPOCH="${DAGGER_END_EPOCH}" \
   DAGGER_LOSS_COEF="${DAGGER_LOSS_COEF}" \
   PAIR_TERRAIN_WITH_MOTION="${PAIR_TERRAIN_WITH_MOTION}" \
-  bash "${SCRIPT_DIR}/distill_torso_box.sh" "${TEACHER_CHECKPOINT}" \
+  bash "${SCRIPT_DIR}/distill_root_box.sh" "${TEACHER_CHECKPOINT}" \
     "perception:${PERCEPTION_PRESET}" \
-    --algo.config.module-dict.actor.input-dim "['actor_obs_torso','actor_obs_proprio']" \
+    --algo.config.module-dict.actor.input-dim "['actor_obs_root','actor_obs_proprio']" \
     --perception.camera-width="${IMAGE_WIDTH}" \
     --perception.camera-height="${IMAGE_HEIGHT}" \
     --perception.camera-near="${CAMERA_NEAR}" \

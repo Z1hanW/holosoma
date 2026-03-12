@@ -204,13 +204,6 @@ def _axis_override(name: str, default: int) -> int:
         return default
 
 
-def _quat_xyzw_to_rot6d(quat_xyzw: torch.Tensor) -> torch.Tensor:
-    if quat_xyzw.ndim == 1:
-        quat_xyzw = quat_xyzw.unsqueeze(0)
-    rot_mat = quaternion_to_matrix(quat_xyzw, w_last=True)
-    return rot_mat[..., :2].reshape(rot_mat.shape[0], 6)
-
-
 def _frustum_quat_from_camera(cam_quat_xyzw: torch.Tensor) -> torch.Tensor:
     x_axis = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32, device=cam_quat_xyzw.device)
     y_axis = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=cam_quat_xyzw.device)
@@ -713,8 +706,8 @@ class ViserLiveViewer:
         self._contact_force_threshold_slider = None
         self._contact_force_handle = None
         self._manual_control_cb = None
-        self._manual_goal_cb = None
-        self._manual_goal_sync_button = None
+        self._manual_root_sync_button = None
+        self._manual_root_status = None
         self._manual_forward_cb = None
         self._manual_back_cb = None
         self._manual_left_cb = None
@@ -723,10 +716,9 @@ class ViserLiveViewer:
         self._manual_yaw_right_cb = None
         self._manual_lin_scale_slider = None
         self._manual_yaw_scale_slider = None
-        self._manual_goal_pos_x_slider = None
-        self._manual_goal_pos_y_slider = None
-        self._manual_goal_pos_z_slider = None
-        self._manual_goal_rot6d_sliders = []
+        self._manual_root_pos_x_slider = None
+        self._manual_root_pos_y_slider = None
+        self._manual_root_yaw_slider = None
         self._manual_command_arrow_handle = None
         self._manual_command_arrow_height = 0.30
         self._manual_command_arrow_head_ratio = 0.30
@@ -1164,7 +1156,6 @@ class ViserLiveViewer:
     def apply_pending_controls(self) -> None:
         if not self._enabled:
             return
-        self._update_manual_object_goal_command()
         self._update_manual_root_command()
         if self._reset_requested:
             self._reset_requested = False
@@ -1288,6 +1279,7 @@ class ViserLiveViewer:
             if isinstance(manual_yaw, torch.Tensor) and manual_yaw.numel() > 0:
                 manual_yaw.zero_()
         self._hide_manual_command_arrow()
+        self._update_manual_root_status()
 
         if not clear_gui_toggles:
             return
@@ -1305,83 +1297,216 @@ class ViserLiveViewer:
                 except Exception:
                     pass
 
-    def _sync_manual_goal_from_object(self) -> None:
-        motion_cmd = self._get_motion_command()
-        if motion_cmd is None:
-            return
-        if not hasattr(motion_cmd, "simulator_object_pos_w") or not hasattr(motion_cmd, "simulator_object_quat_w"):
-            return
+    @staticmethod
+    def _wrap_to_pi(angle: float) -> float:
+        return float(np.arctan2(np.sin(angle), np.cos(angle)))
+
+    def _sync_manual_root_target_from_robot(self) -> None:
         if (
-            self._manual_goal_pos_x_slider is None
-            or self._manual_goal_pos_y_slider is None
-            or self._manual_goal_pos_z_slider is None
-            or len(self._manual_goal_rot6d_sliders) != 6
+            self._manual_root_pos_x_slider is None
+            or self._manual_root_pos_y_slider is None
+            or self._manual_root_yaw_slider is None
         ):
             return
-        try:
-            if self._env_id < 0 or self._env_id >= int(motion_cmd.simulator_object_pos_w.shape[0]):
-                return
-            goal_pos = motion_cmd.simulator_object_pos_w[self._env_id].detach().float().cpu().numpy()
-            goal_quat_xyzw = motion_cmd.simulator_object_quat_w[self._env_id].detach().float()
-            goal_rot6d = _quat_xyzw_to_rot6d(goal_quat_xyzw).squeeze(0).cpu().numpy()
-        except Exception:
+        root_pos, root_quat_wxyz = self._get_root_state_wxyz()
+        if root_pos is None or root_quat_wxyz is None:
             return
-
+        root_yaw = self._yaw_from_quat_wxyz(np.asarray(root_quat_wxyz, dtype=np.float32))
         try:
-            self._manual_goal_pos_x_slider.value = float(goal_pos[0])
-            self._manual_goal_pos_y_slider.value = float(goal_pos[1])
-            self._manual_goal_pos_z_slider.value = float(goal_pos[2])
-            for idx, slider in enumerate(self._manual_goal_rot6d_sliders):
-                slider.value = float(goal_rot6d[idx])
+            self._manual_root_pos_x_slider.value = float(root_pos[0])
+            self._manual_root_pos_y_slider.value = float(root_pos[1])
+            self._manual_root_yaw_slider.value = float(root_yaw)
         except Exception:
             pass
 
-    def _update_manual_object_goal_command(self) -> None:
-        motion_cmd = self._get_motion_command()
-        if motion_cmd is None:
-            return
-        if not hasattr(motion_cmd, "manual_goal_enabled"):
-            return
-
-        goal_enabled = bool(self._manual_goal_cb.value) if self._manual_goal_cb is not None else False
-        motion_cmd.manual_goal_enabled = bool(goal_enabled)
-        if not goal_enabled:
-            return
-
+    def _manual_root_target_payload(
+        self,
+        *,
+        current_pos: np.ndarray | None = None,
+        current_quat_wxyz: np.ndarray | None = None,
+    ) -> dict[str, np.ndarray | float] | None:
         if (
-            self._manual_goal_pos_x_slider is None
-            or self._manual_goal_pos_y_slider is None
-            or self._manual_goal_pos_z_slider is None
-            or len(self._manual_goal_rot6d_sliders) != 6
+            self._manual_root_pos_x_slider is None
+            or self._manual_root_pos_y_slider is None
+            or self._manual_root_yaw_slider is None
         ):
-            return
+            return None
+        if current_pos is None or current_quat_wxyz is None:
+            current_pos, current_quat_wxyz = self._get_root_state_wxyz()
+        if current_pos is None or current_quat_wxyz is None:
+            return None
 
-        goal_pos = np.array(
+        current_pos = np.asarray(current_pos, dtype=np.float32)
+        current_quat_wxyz = np.asarray(current_quat_wxyz, dtype=np.float32)
+        current_yaw = self._yaw_from_quat_wxyz(current_quat_wxyz)
+
+        target_pos = current_pos.copy()
+        target_pos[0] = float(self._manual_root_pos_x_slider.value)
+        target_pos[1] = float(self._manual_root_pos_y_slider.value)
+        target_yaw = float(self._manual_root_yaw_slider.value)
+
+        delta_world = target_pos - current_pos
+        delta_world[2] = 0.0
+
+        cy = float(np.cos(current_yaw))
+        sy = float(np.sin(current_yaw))
+        delta_body = np.array(
             [
-                float(self._manual_goal_pos_x_slider.value),
-                float(self._manual_goal_pos_y_slider.value),
-                float(self._manual_goal_pos_z_slider.value),
+                cy * float(delta_world[0]) + sy * float(delta_world[1]),
+                -sy * float(delta_world[0]) + cy * float(delta_world[1]),
             ],
             dtype=np.float32,
         )
-        goal_rot6d = np.array([float(slider.value) for slider in self._manual_goal_rot6d_sliders], dtype=np.float32)
+        yaw_gap = self._wrap_to_pi(target_yaw - current_yaw)
 
-        device = self._env.device
-        motion_cmd.manual_goal_object_pos_w = torch.tensor(
-            goal_pos.reshape(1, 3), device=device, dtype=torch.float32
-        ).repeat(self._env.num_envs, 1)
-        motion_cmd.manual_goal_object_rot6d_w = torch.tensor(
-            goal_rot6d.reshape(1, 6), device=device, dtype=torch.float32
-        ).repeat(self._env.num_envs, 1)
+        return {
+            "current_pos": current_pos,
+            "target_pos": target_pos,
+            "current_yaw": float(current_yaw),
+            "target_yaw": float(target_yaw),
+            "delta_world": delta_world,
+            "delta_body": delta_body,
+            "yaw_gap": float(yaw_gap),
+            "dist_xy": float(np.linalg.norm(delta_world[:2])),
+        }
+
+    @staticmethod
+    def _format_policy_root_command(cmd_x: float, cmd_y: float, cmd_yaw: float) -> str:
+        return f"Policy cmd(root): `dx={cmd_x:+.2f}` `dy={cmd_y:+.2f}` `dyaw={cmd_yaw:+.2f}`"
+
+    def _manual_policy_root_command(self) -> tuple[float, float, float] | None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            return None
+
+        manual_xy = getattr(motion_cmd, "manual_xy_rel", None)
+        manual_yaw = getattr(motion_cmd, "manual_yaw_rel", None)
+        if not isinstance(manual_xy, torch.Tensor) or manual_xy.ndim < 2:
+            return None
+        if self._env_id < 0 or self._env_id >= int(manual_xy.shape[0]):
+            return None
+
+        cmd_x = float(manual_xy[self._env_id, 0].item())
+        cmd_y = float(manual_xy[self._env_id, 1].item())
+        cmd_yaw = 0.0
+        if isinstance(manual_yaw, torch.Tensor) and manual_yaw.ndim >= 2 and self._env_id < int(manual_yaw.shape[0]):
+            cmd_yaw = float(manual_yaw[self._env_id, 0].item())
+        return cmd_x, cmd_y, cmd_yaw
+
+    def _update_manual_root_status(
+        self,
+        *,
+        current_root_pos: np.ndarray | None = None,
+        current_root_quat_wxyz: np.ndarray | None = None,
+    ) -> None:
+        if self._manual_root_status is None:
+            return
+
+        motion_cmd = self._get_motion_command()
+        manual_enabled = bool(getattr(motion_cmd, "manual_control_enabled", False)) if motion_cmd is not None else False
+        if self._manual_control_cb is not None:
+            manual_enabled = bool(manual_enabled or bool(self._manual_control_cb.value))
+        hw_enabled = self._hw_joystick_mode_enabled()
+
+        if manual_enabled and not hw_enabled:
+            payload = self._manual_root_target_payload(
+                current_pos=current_root_pos,
+                current_quat_wxyz=current_root_quat_wxyz,
+            )
+            if payload is not None:
+                current_pos = payload["current_pos"]
+                target_pos = payload["target_pos"]
+                delta_world = payload["delta_world"]
+                delta_body = payload["delta_body"]
+                current_yaw = float(payload["current_yaw"])
+                target_yaw = float(payload["target_yaw"])
+                yaw_gap = float(payload["yaw_gap"])
+                dist_xy = float(payload["dist_xy"])
+                manual_cmd = self._manual_policy_root_command()
+                if manual_cmd is None:
+                    manual_cmd = (float(delta_body[0]), float(delta_body[1]), yaw_gap)
+                self._manual_root_status.content = (
+                    "Mode: `manual(gui)`\n\n"
+                    f"Current: `({current_pos[0]:+.2f}, {current_pos[1]:+.2f})` yaw=`{current_yaw:+.2f}`\n\n"
+                    f"Target: `({target_pos[0]:+.2f}, {target_pos[1]:+.2f})` yaw=`{target_yaw:+.2f}`\n\n"
+                    f"{self._format_policy_root_command(*manual_cmd)}\n\n"
+                    f"Gap world: `dx={delta_world[0]:+.2f}` `dy={delta_world[1]:+.2f}` `dist={dist_xy:.2f}`"
+                )
+                return
+
+        if manual_enabled and hw_enabled:
+            manual_cmd = self._manual_policy_root_command()
+            root_pos = current_root_pos
+            if root_pos is None:
+                root_pos, _ = self._get_root_state_wxyz()
+            if root_pos is not None:
+                command_line = (
+                    self._format_policy_root_command(*manual_cmd)
+                    if manual_cmd is not None
+                    else "Policy cmd(root): unavailable"
+                )
+                self._manual_root_status.content = (
+                    "Mode: `manual(hw)`\n\n"
+                    f"Current root: `({float(root_pos[0]):+.2f}, {float(root_pos[1]):+.2f}, {float(root_pos[2]):+.2f})`\n\n"
+                    f"{command_line}\n\n"
+                    "Absolute target is not defined for joystick control."
+                )
+            else:
+                command_line = (
+                    self._format_policy_root_command(*manual_cmd)
+                    if manual_cmd is not None
+                    else "Policy cmd(root): unavailable"
+                )
+                self._manual_root_status.content = (
+                    "Mode: `manual(hw)`\n\n"
+                    f"{command_line}\n\n"
+                    "Absolute target is not defined for joystick control."
+                )
+            return
+
+        if motion_cmd is None:
+            self._manual_root_status.content = "Mode: `idle`\n\nPolicy cmd(root): n/a"
+            return
+
+        try:
+            current_pos = motion_cmd.robot_root_pos_w[self._env_id].detach().float().cpu().numpy()
+            target_pos = motion_cmd.root_pos_w[self._env_id].detach().float().cpu().numpy()
+            current_quat_xyzw = motion_cmd.robot_root_quat_w[self._env_id].detach().float().cpu().numpy()
+            target_quat_xyzw = motion_cmd.root_quat_w[self._env_id].detach().float().cpu().numpy()
+        except Exception:
+            self._manual_root_status.content = "Mode: `motion`\n\nPolicy cmd(root): unavailable"
+            return
+
+        current_yaw = self._yaw_from_quat_wxyz(current_quat_xyzw[[3, 0, 1, 2]])
+        target_yaw = self._yaw_from_quat_wxyz(target_quat_xyzw[[3, 0, 1, 2]])
+        delta_world = np.asarray(target_pos - current_pos, dtype=np.float32)
+        delta_world[2] = 0.0
+        cy = float(np.cos(current_yaw))
+        sy = float(np.sin(current_yaw))
+        delta_body = np.array(
+            [
+                cy * float(delta_world[0]) + sy * float(delta_world[1]),
+                -sy * float(delta_world[0]) + cy * float(delta_world[1]),
+            ],
+            dtype=np.float32,
+        )
+        yaw_gap = self._wrap_to_pi(target_yaw - current_yaw)
+        dist_xy = float(np.linalg.norm(delta_world[:2]))
+        self._manual_root_status.content = (
+            "Mode: `motion`\n\n"
+            f"Current: `({current_pos[0]:+.2f}, {current_pos[1]:+.2f})` yaw=`{current_yaw:+.2f}`\n\n"
+            f"Target: `({target_pos[0]:+.2f}, {target_pos[1]:+.2f})` yaw=`{target_yaw:+.2f}`\n\n"
+            f"{self._format_policy_root_command(float(delta_body[0]), float(delta_body[1]), yaw_gap)}\n\n"
+            f"Gap world: `dx={delta_world[0]:+.2f}` `dy={delta_world[1]:+.2f}` `dist={dist_xy:.2f}`"
+        )
 
     def _update_manual_root_command(self) -> None:
         motion_cmd = self._get_motion_command()
         if motion_cmd is None:
             return
-        goal_enabled = bool(self._manual_goal_cb.value) if self._manual_goal_cb is not None else False
         gui_enabled = bool(self._manual_control_cb.value) if self._manual_control_cb is not None else False
         hw_enabled = self._hw_joystick_mode_enabled()
-        enabled = bool((not goal_enabled) and (self._manual_force_enabled or gui_enabled or hw_enabled))
+        enabled = bool(self._manual_force_enabled or gui_enabled or hw_enabled)
         motion_cmd.manual_control_enabled = enabled
         if not enabled:
             self._clear_manual_commands(clear_gui_toggles=False)
@@ -1407,15 +1532,22 @@ class ViserLiveViewer:
             cmd_y = self._apply_deadzone(lx) * lin_scale
             cmd_yaw_val = self._apply_deadzone(rx) * yaw_scale
         else:
-            forward = 1.0 if self._manual_forward_cb is not None and bool(self._manual_forward_cb.value) else 0.0
-            back = 1.0 if self._manual_back_cb is not None and bool(self._manual_back_cb.value) else 0.0
-            left = 1.0 if self._manual_left_cb is not None and bool(self._manual_left_cb.value) else 0.0
-            right = 1.0 if self._manual_right_cb is not None and bool(self._manual_right_cb.value) else 0.0
-            yaw_left = 1.0 if self._manual_yaw_left_cb is not None and bool(self._manual_yaw_left_cb.value) else 0.0
-            yaw_right = 1.0 if self._manual_yaw_right_cb is not None and bool(self._manual_yaw_right_cb.value) else 0.0
-            cmd_x = (forward - back) * lin_scale
-            cmd_y = (left - right) * lin_scale
-            cmd_yaw_val = (yaw_left - yaw_right) * yaw_scale
+            payload = self._manual_root_target_payload()
+            if payload is not None:
+                delta_body = np.asarray(payload["delta_body"], dtype=np.float32)
+                cmd_x = float(delta_body[0])
+                cmd_y = float(delta_body[1])
+                cmd_yaw_val = float(payload["yaw_gap"])
+            else:
+                forward = 1.0 if self._manual_forward_cb is not None and bool(self._manual_forward_cb.value) else 0.0
+                back = 1.0 if self._manual_back_cb is not None and bool(self._manual_back_cb.value) else 0.0
+                left = 1.0 if self._manual_left_cb is not None and bool(self._manual_left_cb.value) else 0.0
+                right = 1.0 if self._manual_right_cb is not None and bool(self._manual_right_cb.value) else 0.0
+                yaw_left = 1.0 if self._manual_yaw_left_cb is not None and bool(self._manual_yaw_left_cb.value) else 0.0
+                yaw_right = 1.0 if self._manual_yaw_right_cb is not None and bool(self._manual_yaw_right_cb.value) else 0.0
+                cmd_x = (forward - back) * lin_scale
+                cmd_y = (left - right) * lin_scale
+                cmd_yaw_val = (yaw_left - yaw_right) * yaw_scale
         cmd_xy = torch.tensor(
             [[cmd_x, cmd_y]],
             device=device,
@@ -1428,6 +1560,7 @@ class ViserLiveViewer:
         ).repeat(self._env.num_envs, 1)
         motion_cmd.manual_xy_rel = cmd_xy
         motion_cmd.manual_yaw_rel = cmd_yaw
+        self._update_manual_root_status()
 
     def _hide_manual_command_arrow(self) -> None:
         if self._manual_command_arrow_handle is None:
@@ -1639,6 +1772,10 @@ class ViserLiveViewer:
                 self._update_scandots(offset)
             self._update_target_keypoints(offset)
             self._update_manual_command_arrow(root_pos, root_quat_wxyz, offset)
+            self._update_manual_root_status(
+                current_root_pos=root_pos,
+                current_root_quat_wxyz=root_quat_wxyz,
+            )
             if self._perception_enabled:
                 self._update_perception_visuals(offset)
             if not self._disable_contact_force_viz:
@@ -2099,109 +2236,56 @@ class ViserLiveViewer:
                 self._manual_control_cb = self._server.gui.add_checkbox(
                     "Enable Manual Root Command",
                     initial_value=bool(self._manual_control_default),
-                    hint="Override torso_xy_rel/yaw_rel with GUI commands",
+                    hint="Override the root-relative policy command using a world-frame target root pose.",
                 )
-                self._manual_lin_scale_slider = self._server.gui.add_slider(
-                    "XY Command (m)",
-                    min=0.0,
-                    max=2.0,
-                    step=0.05,
-                    initial_value=0.5,
-                    hint="Magnitude applied to XY command",
+                self._manual_root_sync_button = self._server.gui.add_button(
+                    "Target <- Current Root",
+                    hint="Initialize target root x/y/yaw from the current robot root pose.",
                 )
-                self._manual_yaw_scale_slider = self._server.gui.add_slider(
-                    "Yaw Command (rad)",
-                    min=0.0,
-                    max=1.5,
-                    step=0.05,
-                    initial_value=0.3,
-                    hint="Magnitude applied to yaw command",
-                )
-                self._manual_forward_cb = self._server.gui.add_checkbox(
-                    "Move +X",
-                    initial_value=False,
-                    hint="Command positive X in torso frame",
-                )
-                self._manual_back_cb = self._server.gui.add_checkbox(
-                    "Move -X",
-                    initial_value=False,
-                    hint="Command negative X in torso frame",
-                )
-                self._manual_left_cb = self._server.gui.add_checkbox(
-                    "Move +Y",
-                    initial_value=False,
-                    hint="Command positive Y in torso frame",
-                )
-                self._manual_right_cb = self._server.gui.add_checkbox(
-                    "Move -Y",
-                    initial_value=False,
-                    hint="Command negative Y in torso frame",
-                )
-                self._manual_yaw_left_cb = self._server.gui.add_checkbox(
-                    "Yaw +",
-                    initial_value=False,
-                    hint="Command positive yaw",
-                )
-                self._manual_yaw_right_cb = self._server.gui.add_checkbox(
-                    "Yaw -",
-                    initial_value=False,
-                    hint="Command negative yaw",
-                )
-                self._manual_goal_cb = self._server.gui.add_checkbox(
-                    "Enable Sparse Object Goal",
-                    initial_value=False,
-                    hint="Goal-on: provide box target pose [pos + rot6d], root joystick command is disabled.",
-                )
-                self._manual_goal_sync_button = self._server.gui.add_button(
-                    "Goal <- Current Box",
-                    hint="Initialize goal target from current object pose.",
-                )
-                self._manual_goal_pos_x_slider = self._server.gui.add_slider(
-                    "Goal Pos X (world)",
+                self._manual_root_pos_x_slider = self._server.gui.add_slider(
+                    "Target Root X (world)",
                     min=-5.0,
                     max=5.0,
                     step=0.02,
                     initial_value=0.0,
                 )
-                self._manual_goal_pos_y_slider = self._server.gui.add_slider(
-                    "Goal Pos Y (world)",
+                self._manual_root_pos_y_slider = self._server.gui.add_slider(
+                    "Target Root Y (world)",
                     min=-5.0,
                     max=5.0,
                     step=0.02,
                     initial_value=0.0,
                 )
-                self._manual_goal_pos_z_slider = self._server.gui.add_slider(
-                    "Goal Pos Z (world)",
-                    min=0.0,
-                    max=2.0,
+                self._manual_root_yaw_slider = self._server.gui.add_slider(
+                    "Target Root Yaw (rad)",
+                    min=-np.pi,
+                    max=np.pi,
                     step=0.02,
-                    initial_value=0.8,
+                    initial_value=0.0,
                 )
-                self._manual_goal_rot6d_sliders = [
-                    self._server.gui.add_slider(
-                        f"Goal Rot6D [{idx}]",
-                        min=-1.0,
-                        max=1.0,
-                        step=0.01,
-                        initial_value=val,
-                    )
-                    for idx, val in enumerate((1.0, 0.0, 0.0, 1.0, 0.0, 0.0))
-                ]
+                self._manual_root_status = self._server.gui.add_markdown("Mode: `idle`\n\nPolicy cmd(root): n/a")
 
-                @self._manual_goal_sync_button.on_click
+                @self._manual_root_sync_button.on_click
                 def _(_evt) -> None:
-                    self._sync_manual_goal_from_object()
+                    self._sync_manual_root_target_from_robot()
                     self.apply_pending_controls()
 
-                @self._manual_goal_cb.on_update
+                @self._manual_control_cb.on_update
                 def _(_evt) -> None:
-                    if self._manual_goal_cb is not None and bool(self._manual_goal_cb.value):
-                        if self._manual_control_cb is not None:
-                            self._manual_control_cb.value = False
-                        self._clear_manual_commands(clear_gui_toggles=True)
-                        self._sync_manual_goal_from_object()
+                    if self._manual_control_cb is not None and bool(self._manual_control_cb.value):
+                        self._sync_manual_root_target_from_robot()
                     self.apply_pending_controls()
-                self._sync_manual_goal_from_object()
+
+                for control in (
+                    self._manual_root_pos_x_slider,
+                    self._manual_root_pos_y_slider,
+                    self._manual_root_yaw_slider,
+                ):
+
+                    @control.on_update
+                    def _(_evt) -> None:
+                        self.apply_pending_controls()
+                self._sync_manual_root_target_from_robot()
 
         sim_cfg = getattr(self._env.simulator, "simulator_config", None)
         if (not self._disable_contact_force_viz) and sim_cfg is not None and hasattr(sim_cfg, "contact_force_viz"):
@@ -3695,10 +3779,7 @@ class ViserLiveViewer:
         motion_cmd = self._get_motion_command()
         manual_active = False
         if motion_cmd is not None:
-            manual_active = bool(
-                bool(getattr(motion_cmd, "manual_control_enabled", False))
-                or bool(getattr(motion_cmd, "manual_goal_enabled", False))
-            )
+            manual_active = bool(getattr(motion_cmd, "manual_control_enabled", False))
         if (not self._show_target_keypoints) or manual_active:
             if self._target_keypoints_handle is not None:
                 try:

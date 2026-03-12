@@ -207,7 +207,7 @@ class JointPositionActionTerm(ActionTermBase):
         super().reset(env_ids)
 
         # Reset action delay queue if applicable
-        if self.env._randomize_ctrl_delay and self.action_queue is not None:
+        if getattr(self.env, "_randomize_ctrl_delay", False) and self.action_queue is not None:
             if env_ids is None:
                 self.action_queue.zero_()
             else:

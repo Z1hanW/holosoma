@@ -327,19 +327,6 @@ object_distill_box_terms = {
     ),
 }
 
-object_distill_box_pose_terms = {
-    "obj_current_pose_size_b": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:obj_current_pose_size_b",
-        scale=1.0,
-        noise=0.0,
-    ),
-    "obj_goal_pose_size_b": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:obj_goal_pose_size_b",
-        scale=1.0,
-        noise=0.0,
-    ),
-}
-
 g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCfg(
     groups={
         # Keep full teacher actor observation available for teacher policy queries.
@@ -347,6 +334,13 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
         # Legacy teacher observation group (without object velocities).
         "actor_obs_legacy": actor_obs_w_object_legacy,
         # Student sparse root-trajectory command.
+        "actor_obs_root": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_distill_sparse_root_cmd_terms,
+        ),
+        # Backward-compatible alias; semantics are root-relative, not torso-relative.
         "actor_obs_torso": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
@@ -361,7 +355,7 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
             terms=object_distill_proprio_terms,
         ),
         # Student object state: current object [pos(3), rot6d(6), size(3)]
-        # + final goal [goal_pos(3), size(3)].
+        # + final clip target [target_pos(3), size(3)].
         "actor_obs_box": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
@@ -384,6 +378,13 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy = ObservationMa
         # Legacy teacher observation group (without object velocities).
         "actor_obs_legacy": actor_obs_w_object_legacy,
         # Student sparse root-trajectory command (legacy includes clip_phase).
+        "actor_obs_root": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_distill_sparse_root_cmd_terms_legacy,
+        ),
+        # Backward-compatible alias; semantics are root-relative, not torso-relative.
         "actor_obs_torso": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
@@ -398,86 +399,12 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy = ObservationMa
             terms=object_distill_proprio_terms,
         ),
         # Student object state: current object [pos(3), rot6d(6), size(3)]
-        # + final goal [goal_pos(3), size(3)].
+        # + final clip target [target_pos(3), size(3)].
         "actor_obs_box": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
             history_length=1,
             terms=object_distill_box_terms,
-        ),
-        "critic_obs": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms=critic_obs_w_object_terms,
-        ),
-    },
-)
-
-g1_29dof_wbt_observation_w_object_distill_sparse_goal_cmd = ObservationManagerCfg(
-    groups={
-        # Keep full teacher actor observation available for teacher policy queries.
-        "actor_obs": actor_obs_w_object,
-        # Legacy teacher observation group (without object velocities).
-        "actor_obs_legacy": actor_obs_w_object_legacy,
-        # Student sparse root-trajectory command.
-        "actor_obs_torso": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms=object_distill_sparse_root_cmd_terms,
-        ),
-        # Student proprioception state.
-        "actor_obs_proprio": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms=object_distill_proprio_terms,
-        ),
-        # Student object state: current object [pos(3), rot6d(6), size(3)]
-        # + sparse object goal [goal_pos(3), goal_rot6d(6), size(3)].
-        "actor_obs_box": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms=object_distill_box_pose_terms,
-        ),
-        "critic_obs": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms=critic_obs_w_object_terms,
-        ),
-    },
-)
-
-g1_29dof_wbt_observation_w_object_distill_sparse_goal_cmd_legacy = ObservationManagerCfg(
-    groups={
-        # Keep full teacher actor observation available for teacher policy queries.
-        "actor_obs": actor_obs_w_object,
-        # Legacy teacher observation group (without object velocities).
-        "actor_obs_legacy": actor_obs_w_object_legacy,
-        # Student sparse root-trajectory command (legacy includes clip_phase).
-        "actor_obs_torso": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms=object_distill_sparse_root_cmd_terms_legacy,
-        ),
-        # Student proprioception state.
-        "actor_obs_proprio": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms=object_distill_proprio_terms,
-        ),
-        # Student object state: current object [pos(3), rot6d(6), size(3)]
-        # + sparse object goal [goal_pos(3), goal_rot6d(6), size(3)].
-        "actor_obs_box": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms=object_distill_box_pose_terms,
         ),
         "critic_obs": ObsGroupCfg(
             concatenate=True,
@@ -569,7 +496,5 @@ __all__ = [
     "g1_29dof_wbt_observation_w_object_legacy",
     "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd",
     "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy",
-    "g1_29dof_wbt_observation_w_object_distill_sparse_goal_cmd",
-    "g1_29dof_wbt_observation_w_object_distill_sparse_goal_cmd_legacy",
     "g1_29dof_wbt_observation_videomimic",
 ]

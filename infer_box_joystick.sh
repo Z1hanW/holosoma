@@ -6,7 +6,7 @@ set -euo pipefail
 # Features:
 # - Two branches: mocap | depth
 # - Viser clip selection GUI
-# - Viser manual command GUI (torso-frame XY + yaw), VideoMimic-style workflow
+# - Viser manual command GUI (root-frame XY + yaw), VideoMimic-style workflow
 # - Optional hardware joystick via pygame/bridge backend
 #
 # Usage:
@@ -27,8 +27,9 @@ Modes:
   depth   Distilled policy with camera depth perception (D435i)
 
 Optional env vars:
-  MOTION_DIR              (default: src/holosoma_retargeting/converted_res/object_interaction/omomo_carry)
-  OBJECT_URDF             (default: src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf)
+  INFER_DATASET           (default: omomo; options: omomo|behave|mixed)
+  MOTION_DIR              (optional override; default chosen by INFER_DATASET)
+  OBJECT_URDF             (optional override; default chosen by INFER_DATASET)
   GEOMETRY_DIR            (optional; OBJ file/dir for terrain visualization)
   PAIR_TERRAIN_WITH_MOTION (default: False)
   NUM_ENVS                (default: 1)
@@ -37,7 +38,7 @@ Optional env vars:
   VISER_ENV_ID            (default: 0)
   VISER_UPDATE_HZ         (default: 30)
   VISER_RECENTER          (default: True)
-  WANDB_MODEL_FILE        (default: model_00800.pt, used when checkpoint is a wandb run URL)
+  WANDB_MODEL_FILE        (default varies by mode; used when checkpoint is a wandb run URL)
   MOCAP_PERCEPTION_PRESET (default: checkpoint; checkpoint|none|heightmap)
   DEPTH_PERCEPTION_PRESET (default: checkpoint; checkpoint|d435i)
 
@@ -58,27 +59,36 @@ if [[ $# -lt 1 ]]; then
   exit 1
 fi
 
-MODE="$1"
+MODE_INPUT="$1"
 shift
 
-case "${MODE}" in
+case "${MODE_INPUT}" in
   mocap|depth) ;;
   -h|--help|help)
     usage
     exit 0
     ;;
+  mixed_goal)
+    echo "[ERROR] mixed_goal inference has been removed. Use mode=depth or mode=mocap." >&2
+    exit 1
+    ;;
   *)
-    echo "[ERROR] mode must be 'mocap' or 'depth', got: ${MODE}" >&2
+    echo "[ERROR] mode must be one of: mocap|depth. Got: ${MODE_INPUT}" >&2
     exit 1
     ;;
 esac
+
+MODE="${MODE_INPUT}"
 
 LOG_ROOT="/data/logs_new/WholeBodyTracking"
 MOCAP_TRAINING_NAME_DEFAULT="g1_29dof_wbt_w_object_distill_box_mocap_access_to_mocap_data"
 DEPTH_TRAINING_NAME_DEFAULT="g1_29dof_wbt_w_object_distill_box_perception_access_to_depth"
 MOCAP_CHECKPOINT_DEFAULT=${MOCAP_CHECKPOINT_DEFAULT:-"wandb://zihanw22/WholeBodyTracking/d20ktze6/model_00800.pt"}
 DEPTH_CHECKPOINT_DEFAULT=${DEPTH_CHECKPOINT_DEFAULT:-"wandb://zihanw22/WholeBodyTracking/xplmudrp/model_01000.pt"}
-if [[ -z "${WANDB_MODEL_FILE:-}" ]]; then
+if [[ -n "${WANDB_MODEL_FILE+x}" && -n "${WANDB_MODEL_FILE}" ]]; then
+  WANDB_MODEL_FILE_FROM_ENV=1
+else
+  WANDB_MODEL_FILE_FROM_ENV=0
   if [[ "${MODE}" == "depth" ]]; then
     WANDB_MODEL_FILE="model_01000.pt"
   else
@@ -86,31 +96,166 @@ if [[ -z "${WANDB_MODEL_FILE:-}" ]]; then
   fi
 fi
 
+parse_wandb_run_url() {
+  local ref="$1"
+  local clean_ref="${ref%%\?*}"
+  if [[ "${clean_ref}" != https://wandb.ai/*/runs/* ]]; then
+    return 1
+  fi
+
+  local trimmed="${clean_ref#https://wandb.ai/}"
+  local entity=""
+  local project=""
+  local run_id=""
+  local explicit_file=""
+  IFS='/' read -r -a parts <<< "${trimmed}"
+  if [[ "${#parts[@]}" -lt 4 || "${parts[2]}" != "runs" ]]; then
+    return 1
+  fi
+
+  entity="${parts[0]}"
+  project="${parts[1]}"
+  run_id="${parts[3]}"
+  if [[ -z "${entity}" || -z "${project}" || -z "${run_id}" ]]; then
+    return 1
+  fi
+
+  if [[ "${#parts[@]}" -ge 6 && "${parts[4]}" == "files" ]]; then
+    explicit_file="${trimmed#${entity}/${project}/runs/${run_id}/files/}"
+  fi
+
+  printf '%s\t%s\t%s\t%s\n' "${entity}" "${project}" "${run_id}" "${explicit_file}"
+}
+
+extract_wandb_run_id_from_url() {
+  local ref="$1"
+  local parsed=""
+  parsed="$(parse_wandb_run_url "${ref}" || true)"
+  if [[ -n "${parsed}" ]]; then
+    IFS=$'\t' read -r _entity _project run_id _explicit_file <<< "${parsed}"
+    echo "${run_id}"
+    return 0
+  fi
+  echo ""
+}
+
+resolve_remote_wandb_checkpoint_name() {
+  local entity="$1"
+  local project="$2"
+  local run_id="$3"
+
+  python - "${entity}" "${project}" "${run_id}" <<'PY' 2>/dev/null || true
+import re
+import sys
+from pathlib import Path
+
+repo_root = Path.cwd().resolve()
+sanitized_sys_path: list[str] = []
+for path_entry in sys.path:
+    if path_entry in {"", "."}:
+        continue
+    try:
+        if Path(path_entry).resolve() == repo_root:
+            continue
+    except Exception:
+        pass
+    sanitized_sys_path.append(path_entry)
+sys.path = sanitized_sys_path
+
+try:
+    import wandb
+except Exception:
+    sys.exit(0)
+
+entity, project, run_id = sys.argv[1:4]
+api = wandb.Api(timeout=30)
+run = api.run(f"{entity}/{project}/{run_id}")
+model_pattern = re.compile(r"^model_(\d+)\.pt$")
+latest_step = -1
+latest_name = ""
+for file_obj in run.files():
+    name = getattr(file_obj, "name", "")
+    match = model_pattern.match(name)
+    if not match:
+        continue
+    step = int(match.group(1))
+    if step >= latest_step:
+        latest_step = step
+        latest_name = name
+if latest_name:
+    print(latest_name)
+PY
+}
+
 normalize_checkpoint_ref() {
   local ref="$1"
   if [[ "${ref}" == https://wandb.ai/*/runs/* ]]; then
-    local clean_ref="${ref%%\?*}"
-    local trimmed="${clean_ref#https://wandb.ai/}"
-    IFS='/' read -r -a parts <<< "${trimmed}"
-    # expected: <entity>/<project>/runs/<run_id>/files...
-    if [[ "${#parts[@]}" -ge 4 && "${parts[2]}" == "runs" ]]; then
-      local entity="${parts[0]}"
-      local project="${parts[1]}"
-      local run_id="${parts[3]}"
-      if [[ -n "${entity}" && -n "${project}" && -n "${run_id}" ]]; then
-        ref="wandb://${entity}/${project}/${run_id}/${WANDB_MODEL_FILE}"
+    local parsed=""
+    local entity=""
+    local project=""
+    local run_id=""
+    local explicit_file=""
+    local model_file="${WANDB_MODEL_FILE}"
+
+    parsed="$(parse_wandb_run_url "${ref}" || true)"
+    if [[ -n "${parsed}" ]]; then
+      IFS=$'\t' read -r entity project run_id explicit_file <<< "${parsed}"
+      if [[ -n "${explicit_file}" ]]; then
+        model_file="${explicit_file}"
+      elif [[ "${WANDB_MODEL_FILE_FROM_ENV}" != "1" ]]; then
+        local remote_model_file=""
+        remote_model_file="$(resolve_remote_wandb_checkpoint_name "${entity}" "${project}" "${run_id}")"
+        if [[ -n "${remote_model_file}" ]]; then
+          model_file="${remote_model_file}"
+          echo "[INFO] Resolved wandb run URL to latest remote checkpoint: ${model_file}" >&2
+        fi
+      fi
+      if [[ -n "${entity}" && -n "${project}" && -n "${run_id}" && -n "${model_file}" ]]; then
+        ref="wandb://${entity}/${project}/${run_id}/${model_file}"
       fi
     fi
   fi
   echo "${ref}"
 }
 
+resolve_local_checkpoint_from_run_url() {
+  local ref="$1"
+  local parsed=""
+  local run_id=""
+  local explicit_file=""
+  local wandb_run_dir=""
+  local run_log_dir=""
+  local local_ckpt=""
+
+  parsed="$(parse_wandb_run_url "${ref}" || true)"
+  if [[ -z "${parsed}" ]]; then
+    echo ""
+    return 0
+  fi
+  IFS=$'\t' read -r _entity _project run_id explicit_file <<< "${parsed}"
+
+  wandb_run_dir=$(find /data/logs_new -maxdepth 8 -type d -name "run-*-${run_id}" 2>/dev/null | head -n 1 || true)
+  if [[ -z "${wandb_run_dir}" ]]; then
+    echo ""
+    return 0
+  fi
+
+  run_log_dir="$(dirname "$(dirname "$(dirname "${wandb_run_dir}")")")"
+  if [[ -n "${explicit_file}" && -f "${run_log_dir}/${explicit_file}" ]]; then
+    local_ckpt="${run_log_dir}/${explicit_file}"
+  else
+    local_ckpt=$(ls -1 "${run_log_dir}"/model_*.pt 2>/dev/null | sort -V | tail -n 1 || true)
+  fi
+  echo "${local_ckpt}"
+}
+
 find_latest_ckpt() {
-  local training_name="$1"
+  local root="$1"
+  local training_name="$2"
   local latest_run=""
   local latest_ckpt=""
 
-  latest_run=$(ls -dt "${LOG_ROOT}"/*-"${training_name}"* 2>/dev/null | head -n 1 || true)
+  latest_run=$(ls -dt "${root}"/*-"${training_name}"* 2>/dev/null | head -n 1 || true)
   if [[ -z "${latest_run}" ]]; then
     echo ""
     return 0
@@ -129,6 +274,13 @@ if [[ $# -gt 0 ]]; then
 fi
 
 if [[ -n "${CKPT}" ]]; then
+  if [[ "${CKPT}" == https://wandb.ai/*/runs/* ]]; then
+    LOCAL_WANDB_CKPT="$(resolve_local_checkpoint_from_run_url "${CKPT}")"
+    if [[ -n "${LOCAL_WANDB_CKPT}" && -f "${LOCAL_WANDB_CKPT}" ]]; then
+      CKPT="${LOCAL_WANDB_CKPT}"
+      echo "[INFO] Resolved wandb run URL to local checkpoint: ${CKPT}"
+    fi
+  fi
   CKPT="$(normalize_checkpoint_ref "${CKPT}")"
 fi
 
@@ -137,13 +289,13 @@ if [[ -z "${CKPT}" ]]; then
     if [[ "${MOCAP_CHECKPOINT_DEFAULT}" == wandb://* ]] || [[ -f "${MOCAP_CHECKPOINT_DEFAULT}" ]]; then
       CKPT="${MOCAP_CHECKPOINT_DEFAULT}"
     else
-      CKPT="$(find_latest_ckpt "${MOCAP_TRAINING_NAME_DEFAULT}")"
+      CKPT="$(find_latest_ckpt "${LOG_ROOT}" "${MOCAP_TRAINING_NAME_DEFAULT}")"
     fi
   else
     if [[ "${DEPTH_CHECKPOINT_DEFAULT}" == wandb://* ]] || [[ -f "${DEPTH_CHECKPOINT_DEFAULT}" ]]; then
       CKPT="${DEPTH_CHECKPOINT_DEFAULT}"
     else
-      CKPT="$(find_latest_ckpt "${DEPTH_TRAINING_NAME_DEFAULT}")"
+      CKPT="$(find_latest_ckpt "${LOG_ROOT}" "${DEPTH_TRAINING_NAME_DEFAULT}")"
     fi
   fi
 fi
@@ -157,8 +309,39 @@ if [[ "${CKPT}" != wandb://* ]] && [[ ! -f "${CKPT}" ]]; then
   exit 1
 fi
 
-MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"}
-OBJECT_URDF=${OBJECT_URDF:-"${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"}
+INFER_DATASET_DEFAULT="omomo"
+INFER_DATASET=${INFER_DATASET:-${INFER_DATASET_DEFAULT}}
+INFER_DATASET=$(echo "${INFER_DATASET}" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
+case "${INFER_DATASET}" in
+  omomo|behave|mixed) ;;
+  *)
+    echo "[ERROR] INFER_DATASET must be one of: omomo|behave|mixed. Got: ${INFER_DATASET}" >&2
+    exit 2
+    ;;
+esac
+
+DEFAULT_OMOMO_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"
+DEFAULT_BEHAVE_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_sq_carry"
+DEFAULT_MIXED_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_carry_aug_mix_ml"
+DEFAULT_OMOMO_URDF="${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
+DEFAULT_BEHAVE_MAP_FILE="${DEFAULT_BEHAVE_MOTION_DIR}/_clip_object_urdf_map.json"
+DEFAULT_MIXED_MAP_FILE="${DEFAULT_MIXED_MOTION_DIR}/_clip_object_urdf_map.json"
+
+if [[ -z "${MOTION_DIR+x}" ]]; then
+  case "${INFER_DATASET}" in
+    omomo) MOTION_DIR="${DEFAULT_OMOMO_MOTION_DIR}" ;;
+    behave) MOTION_DIR="${DEFAULT_BEHAVE_MOTION_DIR}" ;;
+    mixed) MOTION_DIR="${DEFAULT_MIXED_MOTION_DIR}" ;;
+  esac
+fi
+if [[ -z "${OBJECT_URDF+x}" ]]; then
+  case "${INFER_DATASET}" in
+    omomo) OBJECT_URDF="${DEFAULT_OMOMO_URDF}" ;;
+    behave) OBJECT_URDF="${DEFAULT_BEHAVE_MAP_FILE}" ;;
+    mixed) OBJECT_URDF="${DEFAULT_MIXED_MAP_FILE}" ;;
+  esac
+fi
+
 GEOMETRY_DIR=${GEOMETRY_DIR:-}
 
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
@@ -346,7 +529,8 @@ if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
   cmd+=("${EXTRA_ARGS[@]}")
 fi
 
-echo "[INFO] mode=${MODE}"
+echo "[INFO] mode_input=${MODE_INPUT} runtime_mode=${MODE}"
+echo "[INFO] infer_dataset=${INFER_DATASET}"
 echo "[INFO] checkpoint=${CKPT}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
 echo "[INFO] object_urdf=${OBJECT_URDF}"

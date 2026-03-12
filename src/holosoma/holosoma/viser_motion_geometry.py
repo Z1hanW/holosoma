@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 import time
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -150,6 +151,60 @@ def _list_pairs(
     return pair_names, motion_map, geom_map, geometry_available, object_map, object_available
 
 
+def _load_object_spec_map(object_spec_path: Path) -> dict[str, Path]:
+    payload = json.loads(object_spec_path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict) and isinstance(payload.get("clips"), dict):
+        payload = payload["clips"]
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid object spec json: {object_spec_path}")
+
+    object_map: dict[str, Path] = {}
+    for clip_name, entry in payload.items():
+        if not isinstance(clip_name, str):
+            continue
+
+        if isinstance(entry, str):
+            raw_urdf = entry.strip()
+        elif isinstance(entry, dict):
+            raw_urdf = str(entry.get("object_urdf_path", "")).strip()
+        else:
+            continue
+
+        if not raw_urdf:
+            continue
+
+        urdf_path = Path(raw_urdf)
+        if not urdf_path.is_absolute():
+            urdf_path = (object_spec_path.parent / urdf_path).resolve()
+        if urdf_path.exists():
+            object_map[clip_name] = urdf_path
+
+    return object_map
+
+
+def _restrict_pairs_to_object_map(
+    pair_names: list[str],
+    motion_map: dict[str, Path],
+    object_map: dict[str, Path],
+) -> tuple[list[str], bool]:
+    shared_obj = sorted(set(pair_names) & set(object_map))
+    if not shared_obj:
+        logger.warning(
+            "No matching motion/object URDF pairs found from JSON map. Disabling object URDF. motions=%d urdf=%d",
+            len(motion_map),
+            len(object_map),
+        )
+        return pair_names, False
+
+    missing_obj = sorted(set(motion_map) - set(object_map))
+    missing_motion_obj = sorted(set(object_map) - set(motion_map))
+    if missing_obj:
+        logger.warning("No object URDF for motions: {}", missing_obj[:10])
+    if missing_motion_obj:
+        logger.warning("No motion for object URDF map entries: {}", missing_motion_obj[:10])
+    return shared_obj, True
+
+
 def _try_load_qpos_npz(path: Path) -> tuple[np.ndarray, int] | None:
     if not path.exists() or path.suffix.lower() != ".npz":
         return None
@@ -210,7 +265,10 @@ def _load_motion_qpos(
         qpos_parts.extend([object_pos, object_quat_wxyz])
 
     qpos = np.concatenate(qpos_parts, axis=1).astype(np.float32, copy=False)
-    fps = int(motion.fps) if hasattr(motion, "fps") else 30
+    if hasattr(motion, "fps"):
+        fps = int(np.asarray(motion.fps).reshape(-1)[0])
+    else:
+        fps = 30
     return qpos, fps
 
 
@@ -240,23 +298,38 @@ def run_viewer(cfg: MotionGeometryViewerConfig) -> None:
     if not motion_dir.is_dir():
         raise FileNotFoundError(f"Motion dir not found: {motion_dir}")
     if geometry_dir is not None and not geometry_dir.is_dir():
-        logger.warning("Geometry dir not found (%s); falling back to ground-only.", geometry_dir)
+        logger.warning("Geometry dir not found ({}); falling back to ground-only.", geometry_dir)
         geometry_dir = None
     if object_urdf_path is not None and not object_urdf_path.exists():
-        logger.warning("Object URDF not found (%s); disabling object URDF.", object_urdf_path)
+        logger.warning("Object URDF not found ({}); disabling object URDF.", object_urdf_path)
         object_urdf_path = None
     if object_dir is not None and not object_dir.is_dir():
-        logger.warning("Object URDF dir not found (%s); disabling object URDF.", object_dir)
+        logger.warning("Object URDF dir not found ({}); disabling object URDF.", object_dir)
         object_dir = None
+
+    object_map_from_spec: dict[str, Path] | None = None
+    if object_urdf_path is not None and object_urdf_path.suffix.lower() == ".json":
+        object_map_from_spec = _load_object_spec_map(object_urdf_path)
+        if not object_map_from_spec:
+            logger.warning("Object URDF map is empty or unresolved ({}); disabling object URDF.", object_urdf_path)
+        else:
+            logger.info("Loaded clip-object URDF map '{}' ({} entries).", object_urdf_path, len(object_map_from_spec))
+        object_urdf_path = None
 
     if object_urdf_path is None and object_dir is not None:
         urdf_paths = sorted(list(object_dir.glob("*.urdf")) + list(object_dir.glob("*.URDF")))
         if len(urdf_paths) == 1:
             object_urdf_path = urdf_paths[0]
             object_dir = None
-            logger.info("Using single object URDF for all clips: %s", object_urdf_path)
+            logger.info("Using single object URDF for all clips: {}", object_urdf_path)
 
-    if object_urdf_path is not None:
+    if object_map_from_spec is not None:
+        pair_names, motion_map, geom_map, geometry_available, object_map, object_available = _list_pairs(
+            motion_dir, geometry_dir, None
+        )
+        object_map = object_map_from_spec
+        pair_names, object_available = _restrict_pairs_to_object_map(pair_names, motion_map, object_map)
+    elif object_urdf_path is not None:
         pair_names, motion_map, geom_map, geometry_available, object_map, object_available = _list_pairs(
             motion_dir, geometry_dir, None
         )

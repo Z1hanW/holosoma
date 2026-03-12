@@ -228,5 +228,6 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" torchrun --nproc_per_node="${NUM_
   "${CHECKPOINT_OVERRIDES[@]}" \
   logger:wandb \
   --logger.video.enabled=False \
-  --logger.video.interval=1000 \
+  --logger.headless_recording=False \
+  --logger.video.upload_to_wandb=False \
   --logger.name="g1_videomimic_multiclip_terrain_depth"

@@ -40,5 +40,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" torchrun --nproc_per_node="${NPRO
   --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_FILE}" \
   --algo.config.save_interval=500 \
   logger:wandb \
-  --logger.video.interval=2000 \
+  --logger.video.enabled=False \
+  --logger.headless_recording=False \
+  --logger.video.upload_to_wandb=False \
   "${EXTRA_ARGS[@]}"

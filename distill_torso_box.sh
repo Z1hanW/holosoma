@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Distill an object-generalist teacher into an object-aware student with reduced actor inputs:
-# - actor_obs_torso: sparse target root trajectory command
-#   [rel_xy(2), rel_yaw(1), target_vxy(2), target_wz(1)]
+# Base launcher for non-goal object distillation.
+# Preferred entrypoint is `distill_root_box.sh`; this file is kept as a compatibility wrapper target.
+# - actor_obs_root: sparse root command [rel_xy(2), rel_yaw(1)]
 # - actor_obs_proprio: base_lin_vel, base_ang_vel, dof_pos, dof_vel, actions
-# - actor_obs_box:
-#   - obj_current_pose_size_b = [obj_pos(3), obj_rot6d(6), obj_scale(3)]
-#   - obj_goal_pose_size_b = [goal_pos(3), goal_rot6d(6), obj_scale(3)]
+# - actor_obs_box: optional wrapper-specific object state (for mocap variants)
 #
 # Single-stage run:
 # - Pure DAgger by default
@@ -126,10 +124,10 @@ if [[ -z "${NUM_ENVS:-}" ]]; then
   fi
 fi
 
-# Sim2real default: sparse-goal distill without clip_phase in student torso observation.
+# Sim2real default: sparse root-command distill without clip_phase in student torso observation.
 # Legacy option (old behavior with clip_phase):
-#   EXP=g1-29dof-wbt-w-object-distill-sparse-goal-cmd-legacy
-EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-goal-cmd}
+#   EXP=g1-29dof-wbt-w-object-distill-sparse-root-cmd-legacy
+EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd}
 DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_carry_aug_mix_ml"
 MOTION_DIR=${MOTION_DIR:-"${DEFAULT_MOTION_DIR}"}
 DEFAULT_OBJECT_URDF="${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
@@ -183,8 +181,8 @@ START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.05}
 RESET_NOISE_SCALE=${RESET_NOISE_SCALE:-1.0}
 SAVE_INTERVAL=${SAVE_INTERVAL:-200}
 LOGGER=${LOGGER:-logger:wandb}
-RUN_NAME=${RUN_NAME:-g1_w_object_distill_sparse_goal_cmd}
-TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_sparse_goal_cmd}
+RUN_NAME=${RUN_NAME:-g1_w_object_distill_sparse_root_cmd}
+TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_sparse_root_cmd}
 TRAINING_PROJECT=${TRAINING_PROJECT:-boxer}
 
 if [[ "${TEACHER_CHECKPOINT}" != wandb://* ]] && [[ ! -f "${TEACHER_CHECKPOINT}" ]]; then
@@ -282,11 +280,13 @@ run_distill_stage() {
   )
 
   # logger:disabled does not accept logger sub-options such as --logger.name.
-  # Keep legacy behavior for all other logger backends.
+  # Keep legacy behavior for all other logger backends, but keep video logging disabled.
   if [[ "${LOGGER}" != "logger:disabled" ]]; then
     cmd+=(
-      --logger.video.interval=1000
       --logger.name="${stage_run_name}"
+      --logger.video.enabled=False
+      --logger.headless_recording=False
+      --logger.video.upload_to_wandb=False
     )
   fi
 

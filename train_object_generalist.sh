@@ -51,8 +51,6 @@ VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-False}
 VISER_LOAD_URDF=${VISER_LOAD_URDF:-1}
 ENABLE_VISER=${ENABLE_VISER:-0}
 DEBUG_MODE=${DEBUG_MODE:-${DEBUG_MODEL:-off}}
-ENABLE_TRAIN_VIDEO=${ENABLE_TRAIN_VIDEO:-0}
-LOGGER_VIDEO_INTERVAL=${LOGGER_VIDEO_INTERVAL:-2000}
 CURRICULUM=${CURRICULUM:-0}
 PERCEPTION=${PERCEPTION:-none}
 LEGACY_OBS=${LEGACY_OBS:-0}
@@ -302,14 +300,8 @@ train_cmd+=(logger:wandb)
 if [[ -n "${SEQUENCE_NAME}" ]]; then
   train_cmd+=(--logger.name="${SEQUENCE_NAME}")
 fi
-if [[ "${ENABLE_TRAIN_VIDEO}" == "1" ]]; then
-  echo "[INFO] Training video recording enabled (interval=${LOGGER_VIDEO_INTERVAL})."
-  train_cmd+=(--logger.video.enabled=True)
-  train_cmd+=(--logger.video.interval="${LOGGER_VIDEO_INTERVAL}")
-else
-  echo "[INFO] Training video recording disabled by default (set ENABLE_TRAIN_VIDEO=1 to enable)."
-  train_cmd+=(--logger.video.enabled=False)
-  train_cmd+=(--logger.headless_recording=False)
-  train_cmd+=(--logger.video.upload_to_wandb=False)
-fi
+echo "[INFO] Training video recording disabled."
+train_cmd+=(--logger.video.enabled=False)
+train_cmd+=(--logger.headless_recording=False)
+train_cmd+=(--logger.video.upload_to_wandb=False)
 VISER_LOAD_URDF="${VISER_LOAD_URDF}" CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${train_cmd[@]}"

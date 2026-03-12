@@ -27,6 +27,8 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 --master_port=$((29500 + RA
   --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s=1 \
   --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale=0.77 \
   logger:wandb \
-  --logger.video.interval=1000 \
+  --logger.video.enabled=False \
+  --logger.headless_recording=False \
+  --logger.video.upload_to_wandb=False \
   --logger.name="mlp_mesh_depth" \
   --simulator.config.scene.env_spacing=0.0

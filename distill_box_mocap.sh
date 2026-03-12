@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Distill object-carry generalist -> sim2real student with mocap-access box state.
+# Distill object-carry generalist -> non-goal student with mocap-access box state.
 #
 # Student policy observation (actor):
-# - actor_obs_torso: sparse target root trajectory command
+# - actor_obs_root: sparse root command
 # - actor_obs_proprio (base_lin_vel, base_ang_vel, dof_pos, dof_vel, actions)
 # - actor_obs_box:
 #   - obj_current_pose_size_b = [obj_pos(3), obj_rot6d(6), obj_scale(3)]
-#   - obj_goal_pose_size_b = [goal_pos(3), goal_rot6d(6), obj_scale(3)]
+#   - obj_goal_pos_size_b = final clip target [target_pos(3), obj_scale(3)]
 #
-# Teacher policy observation:
-# - actor_obs_legacy + perception_obs (heightmap by default)
+# Teacher policy observation defaults to actor_obs; legacy teachers may opt into perception explicitly.
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
@@ -32,17 +31,23 @@ if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
   exit 1
 fi
 
-# Sim2real default: sparse-goal distill without clip_phase in student torso observation.
+# Sim2real default: sparse root-command distill without clip_phase in student torso observation.
 # Legacy option (old behavior with clip_phase):
-#   EXP=g1-29dof-wbt-w-object-distill-sparse-goal-cmd-legacy
-EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-goal-cmd}
+#   EXP=g1-29dof-wbt-w-object-distill-sparse-root-cmd-legacy
+EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd}
 RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_mocap}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_mocap_access_to_mocap_data}
 MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_carry_aug_mix_ml"}
+# Default mocap placement: GPUs 0,1,2,3.
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+if [[ -z "${NPROC:-}" ]]; then
+  IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
+  NPROC=${#_visible_gpus[@]}
+fi
 # Default teacher (kge4jozt/model_12000.pt) uses actor_obs-only input.
 # For legacy teachers, override TEACHER_OBS_KEYS explicitly (e.g., actor_obs_legacy,perception_obs).
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
-PERCEPTION_PRESET=${PERCEPTION_PRESET:-heightmap}
+PERCEPTION_PRESET=${PERCEPTION_PRESET:-none}
 PERCEPTION_INTO_POLICY_MODULES=${PERCEPTION_INTO_POLICY_MODULES:-False}
 TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
@@ -57,10 +62,11 @@ echo "[INFO] distill mode: mocap-access-to-box"
 echo "[INFO] teacher checkpoint: ${TEACHER_CHECKPOINT}"
 echo "[INFO] exp=${EXP}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
+echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC}"
 echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS}"
-echo "[INFO] perception preset for teacher=${PERCEPTION_PRESET}"
+echo "[INFO] perception preset=${PERCEPTION_PRESET} (default none; enable only if teacher_obs_keys needs perception_obs)"
 echo "[INFO] perception.inject_into_policy_modules=${PERCEPTION_INTO_POLICY_MODULES} (student stays non-perception)"
-echo "[INFO] actor box state: obj_current_pose_size_b + obj_goal_pose_size_b"
+echo "[INFO] actor box state: obj_current_pose_size_b + final clip target (obj_goal_pos_size_b)"
 echo "[INFO] actor_lr=${ACTOR_LR} critic_lr=${CRITIC_LR}"
 echo "[INFO] hybrid PPO+DAgger curriculum default=True"
 echo "[INFO] teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
@@ -71,6 +77,8 @@ exec env \
   RUN_NAME="${RUN_NAME}" \
   TRAINING_NAME="${TRAINING_NAME}" \
   MOTION_DIR="${MOTION_DIR}" \
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
+  NPROC="${NPROC}" \
   PERCEPTION_INTO_POLICY_MODULES="${PERCEPTION_INTO_POLICY_MODULES}" \
   TEACHER_OBS_KEYS="${TEACHER_OBS_KEYS}" \
   TEACHER_ACTION_MIX_RATIO="${TEACHER_ACTION_MIX_RATIO}" \
@@ -81,7 +89,7 @@ exec env \
   PAIR_TERRAIN_WITH_MOTION="${PAIR_TERRAIN_WITH_MOTION}" \
   ACTOR_LR="${ACTOR_LR}" \
   CRITIC_LR="${CRITIC_LR}" \
-  bash "${SCRIPT_DIR}/distill_torso_box.sh" "${TEACHER_CHECKPOINT}" \
+  bash "${SCRIPT_DIR}/distill_root_box.sh" "${TEACHER_CHECKPOINT}" \
     "perception:${PERCEPTION_PRESET}" \
-    --algo.config.module-dict.actor.input-dim "['actor_obs_torso','actor_obs_proprio','actor_obs_box']" \
+    --algo.config.module-dict.actor.input-dim "['actor_obs_root','actor_obs_proprio','actor_obs_box']" \
     "$@"

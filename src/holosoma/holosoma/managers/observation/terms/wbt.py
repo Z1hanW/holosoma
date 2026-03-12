@@ -11,7 +11,6 @@ from holosoma.utils.rotations import (
     calc_heading,
     calc_heading_quat_inv,
     get_euler_xyz,
-    matrix_to_quaternion,
     normalize_angle,
     quat_apply,
     quat_rotate_inverse,
@@ -154,53 +153,17 @@ def _get_motion_command_and_assert_type(env: WholeBodyTrackingManager) -> Motion
     return motion_command
 
 
-def _rot6d_to_quat_xyzw(rot6d: torch.Tensor) -> torch.Tensor:
-    """Convert rotation-6D representation to xyzw quaternion."""
-    if rot6d.ndim != 2 or rot6d.shape[1] != 6:
-        raise ValueError(f"Expected rot6d with shape [N, 6], got {tuple(rot6d.shape)}")
+def _root_relative_xy_yaw_command(motion_command: MotionCommand) -> tuple[torch.Tensor, torch.Tensor]:
+    """Root-relative XY/yaw command in the robot root heading frame."""
+    rel_pos_w = motion_command.root_pos_w - motion_command.robot_root_pos_w
+    heading_inv = calc_heading_quat_inv(motion_command.robot_root_quat_w, w_last=True)
+    rel_pos_b = quat_apply(heading_inv, rel_pos_w, w_last=True)
+    rel_xy = rel_pos_b[:, :2]
 
-    x_raw = rot6d[:, 0:3]
-    y_raw = rot6d[:, 3:6]
-
-    x_axis = torch.nn.functional.normalize(x_raw, dim=-1, eps=1.0e-6)
-    y_ortho = y_raw - torch.sum(x_axis * y_raw, dim=-1, keepdim=True) * x_axis
-    y_axis = torch.nn.functional.normalize(y_ortho, dim=-1, eps=1.0e-6)
-
-    z_axis = torch.cross(x_axis, y_axis, dim=-1)
-    z_axis = torch.nn.functional.normalize(z_axis, dim=-1, eps=1.0e-6)
-    y_axis = torch.cross(z_axis, x_axis, dim=-1)
-    y_axis = torch.nn.functional.normalize(y_axis, dim=-1, eps=1.0e-6)
-
-    rot_mat = torch.stack([x_axis, y_axis, z_axis], dim=-1)
-    quat_wxyz = matrix_to_quaternion(rot_mat)
-    return quat_wxyz[:, [1, 2, 3, 0]]
-
-
-def _manual_object_goal_pose_size_w(motion_command: MotionCommand) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-    if not bool(getattr(motion_command, "manual_goal_enabled", False)):
-        return None
-    if not motion_command.motion.has_object:
-        return None
-
-    goal_pos_w = getattr(motion_command, "manual_goal_object_pos_w", None)
-    goal_rot6d_w = getattr(motion_command, "manual_goal_object_rot6d_w", None)
-    if not isinstance(goal_pos_w, torch.Tensor) or not isinstance(goal_rot6d_w, torch.Tensor):
-        return None
-    if goal_pos_w.ndim != 2 or goal_pos_w.shape[1] != 3:
-        return None
-    if goal_rot6d_w.ndim != 2 or goal_rot6d_w.shape[1] != 6:
-        return None
-
-    num_envs = int(motion_command.robot_ref_pos_w.shape[0])
-    if goal_pos_w.shape[0] != num_envs or goal_rot6d_w.shape[0] != num_envs:
-        return None
-
-    device = motion_command.robot_ref_pos_w.device
-    goal_pos_w = goal_pos_w.to(device=device, dtype=torch.float32)
-    goal_rot6d_w = goal_rot6d_w.to(device=device, dtype=torch.float32)
-    goal_quat_w = _rot6d_to_quat_xyzw(goal_rot6d_w)
-    goal_size = motion_command.object_size.view(num_envs, -1)
-    return goal_pos_w, goal_quat_w, goal_size
+    target_heading = calc_heading(motion_command.root_quat_w)
+    robot_heading = calc_heading(motion_command.robot_root_quat_w)
+    rel_yaw = normalize_angle(target_heading - robot_heading).unsqueeze(1)
+    return rel_xy, rel_yaw
 
 
 def _clip_final_object_goal_pose_size_w(motion_command: MotionCommand) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -224,9 +187,6 @@ def _clip_final_object_goal_pose_size_w(motion_command: MotionCommand) -> tuple[
 def _object_goal_pose_size_w(motion_command: MotionCommand) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
     if not motion_command.motion.has_object:
         return None
-    manual_goal = _manual_object_goal_pose_size_w(motion_command)
-    if manual_goal is not None:
-        return manual_goal
     return _clip_final_object_goal_pose_size_w(motion_command)
 
 
@@ -280,14 +240,10 @@ def torso_yaw_rel(env: WholeBodyTrackingManager) -> torch.Tensor:
 def sparse_target_root_trajectory_command(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Sparse root-trajectory command for locomotion-style distillation.
 
-    Returns [rel_xy(2), rel_yaw(1), target_vxy(2), target_wz(1)] in robot heading frame.
+    Returns [rel_xy(2), rel_yaw(1)] in the robot root heading frame.
     """
     motion_command = _get_motion_command_and_assert_type(env)
-    command_device = motion_command.robot_ref_pos_w.device
-
-    # Sparse goal mode: object goal is externally specified; keep root command underdetermined.
-    if bool(getattr(motion_command, "manual_goal_enabled", False)):
-        return torch.zeros((env.num_envs, 6), device=command_device, dtype=torch.float32)
+    command_device = motion_command.robot_root_pos_w.device
 
     # Joystick/manual mode: use the operator command directly as sparse root command.
     if getattr(motion_command, "manual_control_enabled", False):
@@ -298,29 +254,10 @@ def sparse_target_root_trajectory_command(env: WholeBodyTrackingManager) -> torc
                 manual_xy = manual_xy.to(command_device)
             if manual_yaw.device != command_device:
                 manual_yaw = manual_yaw.to(command_device)
-            # We expose the same desired motion in both pose- and velocity-like slots.
-            return torch.cat([manual_xy, manual_yaw, manual_xy, manual_yaw], dim=-1)
+            return torch.cat([manual_xy, manual_yaw], dim=-1)
 
-    rel_pos_w = motion_command.ref_pos_w - motion_command.robot_ref_pos_w
-    heading_inv = calc_heading_quat_inv(motion_command.robot_ref_quat_w, w_last=True)
-    rel_pos_b = quat_apply(heading_inv, rel_pos_w, w_last=True)
-    rel_xy = rel_pos_b[:, :2]
-
-    target_heading = calc_heading(motion_command.ref_quat_w)
-    robot_heading = calc_heading(motion_command.robot_ref_quat_w)
-    rel_yaw = normalize_angle(target_heading - robot_heading).unsqueeze(1)
-
-    target_lin_vel_b = quat_apply(heading_inv, motion_command.ref_lin_vel_w, w_last=True)
-    target_vxy = target_lin_vel_b[:, :2]
-
-    target_ang_vel_b = quat_rotate_inverse(
-        motion_command.robot_ref_quat_w,
-        motion_command.ref_ang_vel_w,
-        w_last=True,
-    )
-    target_wz = target_ang_vel_b[:, 2:3]
-
-    return torch.cat([rel_xy, rel_yaw, target_vxy, target_wz], dim=-1)
+    rel_xy, rel_yaw = _root_relative_xy_yaw_command(motion_command)
+    return torch.cat([rel_xy, rel_yaw], dim=-1)
 
 
 def clip_phase(env: WholeBodyTrackingManager) -> torch.Tensor:
@@ -488,10 +425,9 @@ def obj_current_pose_size_b(env: WholeBodyTrackingManager) -> torch.Tensor:
 
 
 def obj_goal_pos_size_b(env: WholeBodyTrackingManager) -> torch.Tensor:
-    """Final object goal in robot-ref frame: [goal_pos(3), size(3)].
+    """Final clip object target in robot-ref frame: [target_pos(3), size(3)].
 
-    In sparse-goal mode, the goal comes from externally provided object target pose.
-    Otherwise, the goal is extracted from each active motion clip's last frame.
+    The target is extracted from each active motion clip's last frame.
     """
     motion_command = _get_motion_command_and_assert_type(env)
     goal = _object_goal_pose_size_w(motion_command)
@@ -509,9 +445,9 @@ def obj_goal_pos_size_b(env: WholeBodyTrackingManager) -> torch.Tensor:
 
 
 def obj_goal_pose_size_b(env: WholeBodyTrackingManager) -> torch.Tensor:
-    """Final object goal in robot-ref frame: [goal_pos(3), goal_rot6d(6), size(3)].
+    """Final clip object target in robot-ref frame: [target_pos(3), target_rot6d(6), size(3)].
 
-    In sparse-goal mode, goal pose is user-provided; otherwise it comes from the clip's final frame.
+    The target pose is extracted from each active motion clip's last frame.
     """
     motion_command = _get_motion_command_and_assert_type(env)
     goal = _object_goal_pose_size_w(motion_command)

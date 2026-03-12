@@ -30,5 +30,7 @@ python src/holosoma/holosoma/train_agent.py \
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend=False \
   --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s=0 \
   logger:wandb \
-  --logger.video.interval=1000 \
+  --logger.video.enabled=False \
+  --logger.headless_recording=False \
+  --logger.video.upload_to_wandb=False \
   --logger.name="g1_videomimic_multiclip_terrain"

@@ -135,19 +135,34 @@ def _ensure_mujoco_mesh(
     return out_path
 
 
+def _normalize_scale_vec(scale: float | tuple[float, float, float] | np.ndarray | None) -> np.ndarray:
+    """Normalize scalar/tuple/array scale into a 3-vector."""
+    if scale is None:
+        return np.ones(3, dtype=float)
+    scale_arr = np.asarray(scale, dtype=float).reshape(-1)
+    if scale_arr.size == 1:
+        return np.repeat(scale_arr, 3)
+    if scale_arr.size != 3:
+        raise ValueError("Scale must be a scalar or a 3-element sequence.")
+    return scale_arr
+
+
+def _scale_to_str(scale: float | tuple[float, float, float] | np.ndarray | None) -> str:
+    scale_vec = _normalize_scale_vec(scale)
+    return f"{scale_vec[0]} {scale_vec[1]} {scale_vec[2]}"
+
+
 def _write_object_urdf(
     obj_name: str,
     mesh_path: Path,
     urdf_path: Path,
-    mesh_scale: float | None = None,
+    mesh_scale: float | tuple[float, float, float] | np.ndarray | None = None,
     *,
     overwrite: bool = False,
 ) -> None:
     """Create a simple single-link URDF for the object mesh."""
     urdf_path.parent.mkdir(parents=True, exist_ok=True)
-    if mesh_scale is None:
-        mesh_scale = 1.0
-    scale_str = f"{mesh_scale} {mesh_scale} {mesh_scale}"
+    scale_str = _scale_to_str(mesh_scale)
 
     mesh_ref = mesh_path.name if mesh_path.parent == urdf_path.parent else str(mesh_path)
     if urdf_path.exists() and not overwrite:
@@ -189,16 +204,15 @@ def _write_robot_object_xml(
     robot_xml_out: Path,
     obj_name: str,
     mesh_path: Path,
-    mesh_scale: float | None = None,
+    mesh_scale: float | tuple[float, float, float] | np.ndarray | None = None,
     body_name: str | None = None,
     *,
     overwrite: bool = False,
 ) -> None:
     """Create a MuJoCo XML that adds a free object body to the robot model."""
-    if mesh_scale is None:
-        mesh_scale = 1.0
     object_body_name = body_name or obj_name
-    scale_str = f"{mesh_scale} {mesh_scale} {mesh_scale}"
+    scale_str = _scale_to_str(mesh_scale)
+    mesh_file = str(Path(mesh_path).resolve())
     if robot_xml_out.exists() and not overwrite:
         return
 
@@ -210,22 +224,27 @@ def _write_robot_object_xml(
         asset = ET.SubElement(root, "asset")
 
     mesh_name = f"{object_body_name}_mesh"
-    if not any(m.get("name") == mesh_name for m in asset.findall("mesh")):
+    mesh_elem = next((m for m in asset.findall("mesh") if m.get("name") == mesh_name), None)
+    if mesh_elem is None:
         ET.SubElement(
             asset,
             "mesh",
             {
                 "name": mesh_name,
-                "file": str(mesh_path),
+                "file": mesh_file,
                 "scale": scale_str,
             },
         )
+    else:
+        mesh_elem.set("file", mesh_file)
+        mesh_elem.set("scale", scale_str)
 
     worldbody = root.find("worldbody")
     if worldbody is None:
         worldbody = ET.SubElement(root, "worldbody")
 
-    if not any(b.get("name") == object_body_name for b in worldbody.findall("body")):
+    body = next((b for b in worldbody.findall("body") if b.get("name") == object_body_name), None)
+    if body is None:
         body = ET.SubElement(worldbody, "body", {"name": object_body_name})
         ET.SubElement(body, "freejoint")
         ET.SubElement(body, "inertial", {"pos": "0 0 0", "mass": "0.1", "diaginertia": "0.002 0.002 0.002"})
@@ -243,11 +262,83 @@ def _write_robot_object_xml(
                 "solimp": "0.9 0.95 0.001",
             },
         )
+    else:
+        body_mesh_geoms = [g for g in body.findall("geom") if g.get("mesh") is not None]
+        if body_mesh_geoms:
+            body_mesh_geoms[0].set("mesh", mesh_name)
+        else:
+            ET.SubElement(
+                body,
+                "geom",
+                {
+                    "type": "mesh",
+                    "mesh": mesh_name,
+                    "pos": "0 0 0",
+                    "quat": "1 0 0 0",
+                    "rgba": "0.7 0.8 0.9 0.7",
+                    "friction": "0.9 0.5 0.5",
+                    "solref": "0.02 1",
+                    "solimp": "0.9 0.95 0.001",
+                },
+            )
 
     robot_xml_out.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = robot_xml_out.with_suffix(f"{robot_xml_out.suffix}.tmp.{os.getpid()}")
     tree.write(tmp_path)
     os.replace(tmp_path, robot_xml_out)
+
+
+def _resolve_object_interaction_scene_xml(constants: SimpleNamespace) -> Path:
+    scene_xml_override = str(getattr(constants, "SCENE_XML_FILE", "") or "").strip()
+    if scene_xml_override:
+        return Path(scene_xml_override)
+    return Path(str(constants.ROBOT_URDF_FILE).replace(".urdf", f"_w_{constants.OBJECT_NAME}.xml"))
+
+
+def _create_scaled_object_interaction_assets(
+    constants: SimpleNamespace,
+    mesh_scale: float | tuple[float, float, float] | np.ndarray,
+) -> tuple[str, str]:
+    """Create scale-specific URDF/XML assets for object_interaction."""
+    if constants.OBJECT_MESH_FILE is None or constants.OBJECT_URDF_FILE is None:
+        raise ValueError("OBJECT_MESH_FILE/OBJECT_URDF_FILE must be set for object_interaction scaling.")
+
+    mesh_scale_vec = _normalize_scale_vec(mesh_scale)
+    scale_tag = f"{mesh_scale_vec[0]:.3f}_{mesh_scale_vec[1]:.3f}_{mesh_scale_vec[2]:.3f}"
+
+    object_name = str(constants.OBJECT_NAME)
+    object_contact_name = str(getattr(constants, "OBJECT_CONTACT_NAME", "") or object_name)
+    mesh_path = Path(str(constants.OBJECT_MESH_FILE))
+
+    base_urdf_path = Path(str(constants.OBJECT_URDF_FILE))
+    scaled_urdf_path = base_urdf_path.with_name(f"{base_urdf_path.stem}_scaled_{scale_tag}{base_urdf_path.suffix}")
+    _write_object_urdf(
+        object_name,
+        mesh_path,
+        scaled_urdf_path,
+        mesh_scale=mesh_scale_vec,
+        overwrite=True,
+    )
+
+    scene_xml_base = _resolve_object_interaction_scene_xml(constants)
+    robot_xml_base = Path(str(constants.ROBOT_URDF_FILE)).with_suffix(".xml")
+    xml_base = scene_xml_base if scene_xml_base.exists() else robot_xml_base
+    if not xml_base.exists():
+        raise FileNotFoundError(
+            f"Cannot find base XML for object_interaction scaling: scene={scene_xml_base}, robot={robot_xml_base}"
+        )
+    scaled_scene_xml = xml_base.with_name(f"{xml_base.stem}_scaled_{scale_tag}{xml_base.suffix}")
+    _write_robot_object_xml(
+        xml_base,
+        scaled_scene_xml,
+        object_name,
+        mesh_path,
+        mesh_scale=mesh_scale_vec,
+        body_name=object_contact_name,
+        overwrite=True,
+    )
+
+    return str(scaled_urdf_path), str(scaled_scene_xml)
 
 
 def create_task_constants(
@@ -462,7 +553,14 @@ def load_motion_data(
             if not obj_name:
                 raise ValueError(f"Parsed empty BEHAVE object name from task_name='{task_name}'")
 
+            prev_object_name = str(getattr(constants, "OBJECT_NAME", "") or "")
+            prev_contact_name = str(getattr(constants, "OBJECT_CONTACT_NAME", "") or "")
             constants.OBJECT_NAME = obj_name
+            # Keep the contact/body token aligned with the parsed BEHAVE object name.
+            # If this stays at the default "largebox", scaled scene XML generation adds
+            # a second free body instead of updating the existing object body.
+            if not prev_contact_name or prev_contact_name == prev_object_name:
+                constants.OBJECT_CONTACT_NAME = obj_name
             mesh_root = getattr(constants, "OBJECT_MESH_ROOT", "")
             mesh_suffix = getattr(constants, "OBJECT_MESH_SUFFIX", "") or "_f1000.ply"
             if not mesh_root:
@@ -609,10 +707,19 @@ def setup_object_data(
         )
         # Keep object geometry consistently scaled in optimization and demo space.
         # Using unscaled points here causes a mismatch against scaled human/object poses.
-        object_local_pts = np.array(object_local_pts_scaled, copy=True)
         object_local_pts_demo = np.array(object_local_pts_scaled, copy=True)
-        object_mesh_scale = np.array([smpl_scale, smpl_scale, smpl_scale], dtype=float)
-        return object_local_pts, object_local_pts_demo, constants.OBJECT_URDF_FILE, object_mesh_scale
+        object_scale = np.ones(3, dtype=float)
+        if task_config.object_interaction_scale_augmented is not None:
+            object_scale = _normalize_scale_vec(task_config.object_interaction_scale_augmented)
+        object_local_pts = np.array(object_local_pts_demo * object_scale.reshape(1, 3), copy=True)
+        object_mesh_scale = np.array(object_scale * smpl_scale, dtype=float)
+
+        object_urdf_file = constants.OBJECT_URDF_FILE
+        if not np.allclose(object_scale, np.ones(3, dtype=float)):
+            object_urdf_file, scaled_scene_xml = _create_scaled_object_interaction_assets(constants, object_mesh_scale)
+            constants.SCENE_XML_FILE = scaled_scene_xml
+
+        return object_local_pts, object_local_pts_demo, object_urdf_file, object_mesh_scale
 
     if task_type == "climbing":
         if object_dir is None:

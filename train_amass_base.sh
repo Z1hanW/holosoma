@@ -20,7 +20,7 @@ EXP=${EXP:-g1-29dof-wbt}
 WANDB_PROJECT=${WANDB_PROJECT:-boxer}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_amass_base}
 
-MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting_my/converted_res/robot_only/amass_all_trainready"}
+MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/robot_only/amass_all_trainready"}
 FLATTEN_IF_NESTED=${FLATTEN_IF_NESTED:-1}
 FLAT_MOTION_DIR=${FLAT_MOTION_DIR:-"${SCRIPT_DIR}/.cache/amass_all_trainready_flat"}
 
@@ -35,8 +35,6 @@ NORM_CRITIC_OBS=${NORM_CRITIC_OBS:-False}
 START_AT_ZERO_PROB=${START_AT_ZERO_PROB:-0.05}
 ADAPTIVE_SAMPLER=${ADAPTIVE_SAMPLER:-True}
 
-ENABLE_TRAIN_VIDEO=${ENABLE_TRAIN_VIDEO:-0}
-LOGGER_VIDEO_INTERVAL=${LOGGER_VIDEO_INTERVAL:-2000}
 LOGGER_NAME=${LOGGER_NAME:-amass_base_29dof_wbt}
 
 EXTRA_ARGS=("$@")
@@ -149,17 +147,11 @@ train_cmd=(
   --command.setup_terms.motion_command.params.motion_config.pair_terrain_with_motion=False
 )
 
-if [[ "${ENABLE_TRAIN_VIDEO}" == "1" ]]; then
-  train_cmd+=(logger:wandb)
-  train_cmd+=(--logger.name="${LOGGER_NAME}")
-  train_cmd+=(--logger.video.interval="${LOGGER_VIDEO_INTERVAL}")
-else
-  train_cmd+=(logger:wandb)
-  train_cmd+=(--logger.name="${LOGGER_NAME}")
-  train_cmd+=(--logger.video.enabled=False)
-  train_cmd+=(--logger.headless_recording=False)
-  train_cmd+=(--logger.video.upload_to_wandb=False)
-fi
+train_cmd+=(logger:wandb)
+train_cmd+=(--logger.name="${LOGGER_NAME}")
+train_cmd+=(--logger.video.enabled=False)
+train_cmd+=(--logger.headless_recording=False)
+train_cmd+=(--logger.video.upload_to_wandb=False)
 
 train_cmd+=("${EXTRA_ARGS[@]}")
 

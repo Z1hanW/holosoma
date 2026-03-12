@@ -436,19 +436,28 @@ class InteractionMeshRetargeter:
                 else:
                     w_nominal_tracking = self.w_nominal_tracking_init * np.exp(-i / self.nominal_tracking_tau)
 
-                q, cost = self.iterate(
-                    q_locked=q_locked_list[i],
-                    q_n=q,
-                    q_t_last=retargeted_motions[-1],
-                    target_laplacian=target_laplacian,
-                    adj_list=adj_list,
-                    obj_pts_local=object_points_local,
-                    foot_sticking=foot_sticking_sequences[i],
-                    w_nominal_tracking=w_nominal_tracking,
-                    q_a_nominal=(q_nominal_list[i, self.q_a_indices] if q_nominal_list is not None else None),
-                    init_t=i == 0,
-                    n_iter=50 if i == 0 else 10,
-                )
+                try:
+                    q, cost = self.iterate(
+                        q_locked=q_locked_list[i],
+                        q_n=q,
+                        q_t_last=retargeted_motions[-1],
+                        target_laplacian=target_laplacian,
+                        adj_list=adj_list,
+                        obj_pts_local=object_points_local,
+                        foot_sticking=foot_sticking_sequences[i],
+                        w_nominal_tracking=w_nominal_tracking,
+                        q_a_nominal=(q_nominal_list[i, self.q_a_indices] if q_nominal_list is not None else None),
+                        init_t=i == 0,
+                        n_iter=50 if i == 0 else 10,
+                    )
+                except RuntimeError as exc:
+                    if "CVXPY solve failed" not in str(exc):
+                        raise
+                    print(
+                        f"[WARN] Frame {i} optimization failed with '{exc}'. Reusing previous valid configuration."
+                    )
+                    q = np.copy(retargeted_motions[-1])
+                    cost = np.inf
                 if self.debug:
                     robot_link_positions = self._get_robot_link_positions(
                         q, self.laplacian_match_links.values()
@@ -683,10 +692,15 @@ class InteractionMeshRetargeter:
         # -------- Solve with Clarabel --------
         solver_kwargs = {"verbose": verbose}
         problem.solve(solver=cp.CLARABEL, **solver_kwargs)
-        if (problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE)) and init_t:
-            constraints = [c for c in constraints if not isinstance(c, cp.constraints.second_order.SOC)]
-            problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
-            problem.solve(solver=cp.CLARABEL, **solver_kwargs)
+        if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+            constraints_wo_soc = [c for c in constraints if not isinstance(c, cp.constraints.second_order.SOC)]
+            if len(constraints_wo_soc) != len(constraints):
+                if verbose:
+                    print(
+                        f"[WARN] Clarabel status={problem.status} (init_t={init_t}); retrying without SOC step limit."
+                    )
+                problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints_wo_soc)
+                problem.solve(solver=cp.CLARABEL, **solver_kwargs)
 
         if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
             raise RuntimeError(f"CVXPY solve failed: {problem.status}")
