@@ -109,7 +109,7 @@ PY
 fi
 
 if [[ -d "${MOTION_SOURCE}" ]]; then
-  CLIP_COUNT=$(find "${MOTION_SOURCE}" -maxdepth 1 -type f \( -name '*.npz' -o -name '*.NPZ' \) | wc -l | tr -d ' ')
+  CLIP_COUNT=$(find "${MOTION_SOURCE}" -maxdepth 1 \( -type f -o -type l \) \( -name '*.npz' -o -name '*.NPZ' \) | wc -l | tr -d ' ')
   if [[ "${CLIP_COUNT}" == "0" ]]; then
     echo "[ERROR] No .npz clips found in MOTION_SOURCE: ${MOTION_SOURCE}" >&2
     exit 1
