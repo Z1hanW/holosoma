@@ -334,7 +334,7 @@ class MotionLoader:
                     self._object_quat_w = torch.zeros(0, 4, device=device)
                     self._object_lin_vel_w = torch.zeros(0, 3, device=device)
                     self._object_size = torch.zeros(0, 3, device=device)
-        except (zipfile.BadZipFile, EOFError, OSError, ValueError) as exc:
+        except (AssertionError, KeyError, zipfile.BadZipFile, EOFError, OSError, ValueError) as exc:
             raise zipfile.BadZipFile(f"Failed to load motion npz '{motion_file}': {exc}") from exc
         length = int(self._joint_pos.shape[0])
         self._set_clip_metadata(
@@ -444,91 +444,95 @@ class MotionLoader:
                 continue
 
             with data_file as data:
-                missing = [key for key in required_keys if key not in data]
-                if missing:
-                    raise KeyError(f"Missing keys in {file_path}: {missing}")
+                try:
+                    missing = [key for key in required_keys if key not in data]
+                    if missing:
+                        raise KeyError(f"Missing keys in {file_path}: {missing}")
 
-                clip_has_object = "object_pos_w" in data
-                if clip_has_object:
-                    for key in object_keys:
-                        if key not in data:
-                            raise KeyError(f"Missing object key '{key}' in {file_path}")
-                if has_object is None:
-                    has_object = clip_has_object
-                elif has_object != clip_has_object:
-                    raise ValueError("Object fields are inconsistent across clips.")
+                    clip_has_object = "object_pos_w" in data
+                    if clip_has_object:
+                        for key in object_keys:
+                            if key not in data:
+                                raise KeyError(f"Missing object key '{key}' in {file_path}")
+                    if has_object is None:
+                        has_object = clip_has_object
+                    elif has_object != clip_has_object:
+                        raise ValueError("Object fields are inconsistent across clips.")
 
-                joint_names_clip = self._decode_h5_strings(np.asarray(data["joint_names"]))
-                body_names_clip_raw = self._decode_h5_strings(np.asarray(data["body_names"]))
-                body_names_clip, body_indexes_clip = self._resolve_body_subset_indexes(
-                    body_names_clip_raw,
-                    source=str(file_path),
-                )
-                if not joint_names:
-                    joint_names = joint_names_clip
-                elif joint_names_clip != joint_names:
-                    raise ValueError(f"Joint names mismatch in {file_path}")
-                if not body_names:
-                    body_names = body_names_clip
-                elif body_names_clip != body_names:
-                    raise ValueError(f"Body names mismatch in {file_path}")
+                    joint_names_clip = self._decode_h5_strings(np.asarray(data["joint_names"]))
+                    body_names_clip_raw = self._decode_h5_strings(np.asarray(data["body_names"]))
+                    body_names_clip, body_indexes_clip = self._resolve_body_subset_indexes(
+                        body_names_clip_raw,
+                        source=str(file_path),
+                    )
+                    if not joint_names:
+                        joint_names = joint_names_clip
+                    elif joint_names_clip != joint_names:
+                        raise ValueError(f"Joint names mismatch in {file_path}")
+                    if not body_names:
+                        body_names = body_names_clip
+                    elif body_names_clip != body_names:
+                        raise ValueError(f"Body names mismatch in {file_path}")
 
-                fps_arr = np.array(data["fps"]).reshape(-1)
-                fps = float(fps_arr[0]) if fps_arr.size > 0 else 30.0
-                if fps_ref is None:
-                    fps_ref = fps
-                elif abs(fps_ref - fps) > 1e-6:
-                    raise ValueError(f"FPS mismatch in {file_path}: {fps} != {fps_ref}")
+                    fps_arr = np.array(data["fps"]).reshape(-1)
+                    fps = float(fps_arr[0]) if fps_arr.size > 0 else 30.0
+                    if fps_ref is None:
+                        fps_ref = fps
+                    elif abs(fps_ref - fps) > 1e-6:
+                        raise ValueError(f"FPS mismatch in {file_path}: {fps} != {fps_ref}")
 
-                joint_pos = np.asarray(data["joint_pos"])
-                length = int(joint_pos.shape[0])
+                    joint_pos = np.asarray(data["joint_pos"])
+                    length = int(joint_pos.shape[0])
 
-                clip_ids.append(file_path.stem)
-                offsets.append(offset)
-                lengths.append(length)
-                offset += length
+                    clip_ids.append(file_path.stem)
+                    offsets.append(offset)
+                    lengths.append(length)
+                    offset += length
 
-                joint_pos_list.append(joint_pos)
-                joint_vel_list.append(np.asarray(data["joint_vel"]))
-                body_pos = np.asarray(data["body_pos_w"])
-                body_quat = np.asarray(data["body_quat_w"])
-                body_lin_vel = np.asarray(data["body_lin_vel_w"])
-                body_ang_vel = np.asarray(data["body_ang_vel_w"])
-                expected_bodies = len(body_names_clip_raw)
-                for key, arr in (
-                    ("body_pos_w", body_pos),
-                    ("body_quat_w", body_quat),
-                    ("body_lin_vel_w", body_lin_vel),
-                    ("body_ang_vel_w", body_ang_vel),
-                ):
-                    if arr.shape[1] != expected_bodies:
-                        raise ValueError(
-                            f"{key} body dimension mismatch in {file_path}: "
-                            f"{arr.shape[1]} != {expected_bodies}"
+                    joint_pos_list.append(joint_pos)
+                    joint_vel_list.append(np.asarray(data["joint_vel"]))
+                    body_pos = np.asarray(data["body_pos_w"])
+                    body_quat = np.asarray(data["body_quat_w"])
+                    body_lin_vel = np.asarray(data["body_lin_vel_w"])
+                    body_ang_vel = np.asarray(data["body_ang_vel_w"])
+                    expected_bodies = len(body_names_clip_raw)
+                    for key, arr in (
+                        ("body_pos_w", body_pos),
+                        ("body_quat_w", body_quat),
+                        ("body_lin_vel_w", body_lin_vel),
+                        ("body_ang_vel_w", body_ang_vel),
+                    ):
+                        if arr.shape[1] != expected_bodies:
+                            raise ValueError(
+                                f"{key} body dimension mismatch in {file_path}: "
+                                f"{arr.shape[1]} != {expected_bodies}"
+                            )
+
+                    body_pos_list.append(body_pos[:, body_indexes_clip])
+                    body_quat_list.append(body_quat[:, body_indexes_clip])
+                    body_lin_vel_list.append(body_lin_vel[:, body_indexes_clip])
+                    body_ang_vel_list.append(body_ang_vel[:, body_indexes_clip])
+
+                    if clip_has_object:
+                        object_pos_list.append(np.asarray(data["object_pos_w"]))
+                        object_quat_list.append(np.asarray(data["object_quat_w"]))
+                        object_lin_vel_list.append(np.asarray(data["object_lin_vel_w"]))
+                        object_size_list.append(
+                            self._extract_object_size_np(data, length, source=str(file_path))
                         )
-
-                body_pos_list.append(body_pos[:, body_indexes_clip])
-                body_quat_list.append(body_quat[:, body_indexes_clip])
-                body_lin_vel_list.append(body_lin_vel[:, body_indexes_clip])
-                body_ang_vel_list.append(body_ang_vel[:, body_indexes_clip])
-
-                if clip_has_object:
-                    object_pos_list.append(np.asarray(data["object_pos_w"]))
-                    object_quat_list.append(np.asarray(data["object_quat_w"]))
-                    object_lin_vel_list.append(np.asarray(data["object_lin_vel_w"]))
-                    object_size_list.append(
-                        self._extract_object_size_np(data, length, source=str(file_path))
-                    )
-                    obj_name, obj_urdf = self._extract_object_clip_metadata(
-                        data=data,
-                        clip_id=file_path.stem,
-                        clip_map=clip_object_map,
-                    )
-                    clip_object_names.append(obj_name)
-                    clip_object_urdfs.append(obj_urdf)
-                else:
-                    clip_object_names.append("")
-                    clip_object_urdfs.append("")
+                        obj_name, obj_urdf = self._extract_object_clip_metadata(
+                            data=data,
+                            clip_id=file_path.stem,
+                            clip_map=clip_object_map,
+                        )
+                        clip_object_names.append(obj_name)
+                        clip_object_urdfs.append(obj_urdf)
+                    else:
+                        clip_object_names.append("")
+                        clip_object_urdfs.append("")
+                except (AssertionError, KeyError, ValueError) as exc:
+                    late_load_failures.append((file_path, f"{type(exc).__name__}: {exc}"))
+                    continue
 
         if late_load_failures:
             issue_summary = self._format_motion_file_issues(late_load_failures)

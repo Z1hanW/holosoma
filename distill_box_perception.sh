@@ -78,16 +78,12 @@ CAMERA_FAR=${CAMERA_FAR:-3.0}
 CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-3.0}
 PERCEPTION_WARP_PREPROCESS=${PERCEPTION_WARP_PREPROCESS:-True}
 
-echo "[INFO] distill mode: depth-access-no-box-state"
-echo "[INFO] teacher checkpoint: ${TEACHER_CHECKPOINT}"
+echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
+echo "[INFO] run_name=${RUN_NAME} training_name=${TRAINING_NAME}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
-echo "[INFO] training_project=${TRAINING_PROJECT}"
 echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC}"
-echo "[INFO] student actor uses actor_obs_root + actor_obs_proprio + perception_obs (no actor box state)"
-echo "[INFO] hybrid PPO+DAgger curriculum default=True"
-echo "[INFO] wandb_run_name=${RUN_NAME}"
-echo "[INFO] teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
-echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
+echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
+echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
 
 exec env \

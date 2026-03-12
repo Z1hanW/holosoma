@@ -200,14 +200,12 @@ fi
 
 EXTRA_ARGS=("$@")
 
-echo "[INFO] Distill teacher checkpoint: ${TEACHER_CHECKPOINT}"
+echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
 echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS} strict_teacher_load=${STRICT_TEACHER_LOAD}"
-echo "[INFO] perception.inject_into_policy_modules=${PERCEPTION_INTO_POLICY_MODULES}"
-echo "[INFO] Teacher observation mismatch will fail fast (no fallback)."
-echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH} (hybrid PPO+DAgger curriculum enabled by default)"
-echo "[INFO] init_noise_std=${INIT_NOISE_STD} actor_min_noise_std=${ACTOR_MIN_NOISE_STD}"
+echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
+echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
 echo "[INFO] total_envs=${NUM_ENVS} world_size=${NPROC} envs_per_rank=$((NUM_ENVS / NPROC))"
-echo "[INFO] torch_dist_timeout_sec=${TORCH_DIST_TIMEOUT_SEC}"
+echo "[INFO] init_noise_std=${INIT_NOISE_STD} actor_min_noise_std=${ACTOR_MIN_NOISE_STD}"
 
 run_distill_stage() {
   local stage_label="$1"
@@ -223,8 +221,6 @@ run_distill_stage() {
   echo "[INFO] Starting ${stage_label}"
   echo "[INFO]   run_name=${stage_run_name}"
   echo "[INFO]   training_name=${stage_training_name}"
-  echo "[INFO]   bc_loss_coef=${stage_bc_loss_coef}"
-  echo "[INFO]   teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
   echo "[INFO]   start_at_timestep_zero_prob=${stage_start_at_timestep_zero_prob}"
   echo "[INFO]   reset_noise_scale=${stage_reset_noise_scale}"
   echo "[INFO]   distributed: nnodes=${NNODES} node_rank=${NODE_RANK} nproc_per_node=${NPROC}"
@@ -305,7 +301,7 @@ run_distill_stage() {
 }
 
 run_distill_stage \
-  "Single Stage (VIRAL style)" \
+  "distill training" \
   "${BC_LOSS_COEF}" \
   "${RUN_NAME}" \
   "${TRAINING_NAME}" \
