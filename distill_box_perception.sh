@@ -17,10 +17,14 @@ cd "${SCRIPT_DIR}"
 
 DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/kge4jozt/model_12000.pt"}
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
+POSITIONAL_RUN_NAME=""
 
 if [[ $# -gt 0 ]]; then
   if [[ "$1" == wandb://* || "$1" == /* || "$1" == ./* || "$1" == ../* || "$1" == *.pt ]]; then
     TEACHER_CHECKPOINT="$1"
+    shift
+  elif [[ "$1" != -* ]]; then
+    POSITIONAL_RUN_NAME="$1"
     shift
   fi
 fi
@@ -38,12 +42,17 @@ RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_perception}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_perception_access_to_depth}
 TRAINING_PROJECT=${TRAINING_PROJECT:-boxer}
 
+if [[ -n "${POSITIONAL_RUN_NAME}" ]]; then
+  RUN_NAME="${POSITIONAL_RUN_NAME}"
+fi
+
 # Keep launcher self-contained: direct `bash ./distill_box_perception.sh` works out of box.
 HSSIM_BIN_DIR=${HSSIM_BIN_DIR:-/home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin}
 if [[ -d "${HSSIM_BIN_DIR}" ]]; then
   export PATH="${HSSIM_BIN_DIR}:${PATH}"
 fi
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4,5,6,7}
+#CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4,5,6,7}
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 if [[ -z "${NPROC:-}" ]]; then
   IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
   NPROC=${#_visible_gpus[@]}
@@ -57,6 +66,7 @@ BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
 PPO_START_EPOCH=${PPO_START_EPOCH:-0}
 DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-10000}
 DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
+START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.7}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
 
@@ -75,8 +85,10 @@ echo "[INFO] training_project=${TRAINING_PROJECT}"
 echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC}"
 echo "[INFO] student actor uses actor_obs_root + actor_obs_proprio + perception_obs (no actor box state)"
 echo "[INFO] hybrid PPO+DAgger curriculum default=True"
+echo "[INFO] wandb_run_name=${RUN_NAME}"
 echo "[INFO] teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
 echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
+echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
 
 exec env \
   EXP="${EXP}" \
@@ -91,6 +103,7 @@ exec env \
   PPO_START_EPOCH="${PPO_START_EPOCH}" \
   DAGGER_END_EPOCH="${DAGGER_END_EPOCH}" \
   DAGGER_LOSS_COEF="${DAGGER_LOSS_COEF}" \
+  START_AT_TIMESTEP_ZERO_PROB="${START_AT_TIMESTEP_ZERO_PROB}" \
   PAIR_TERRAIN_WITH_MOTION="${PAIR_TERRAIN_WITH_MOTION}" \
   bash "${SCRIPT_DIR}/distill_root_box.sh" "${TEACHER_CHECKPOINT}" \
     "perception:${PERCEPTION_PRESET}" \

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import zipfile
 from pathlib import Path
 from typing import Any, List
 
@@ -202,6 +203,30 @@ class MotionLoader:
             object_name = "object"
         return object_name, object_urdf_path
 
+    @staticmethod
+    def _format_motion_file_issues(issues: list[tuple[Path, str]], limit: int = 5) -> str:
+        if not issues:
+            return ""
+        sample = "; ".join(f"{path}: {reason}" for path, reason in issues[:limit])
+        remaining = len(issues) - min(len(issues), limit)
+        if remaining > 0:
+            sample = f"{sample}; +{remaining} more"
+        return sample
+
+    @staticmethod
+    def _filter_valid_npz_archives(files: list[Path]) -> tuple[list[Path], list[tuple[Path, str]]]:
+        valid_files: list[Path] = []
+        invalid_files: list[tuple[Path, str]] = []
+        for path in files:
+            try:
+                if zipfile.is_zipfile(path):
+                    valid_files.append(path)
+                else:
+                    invalid_files.append((path, "not a valid .npz zip archive"))
+            except OSError as exc:
+                invalid_files.append((path, f"{type(exc).__name__}: {exc}"))
+        return valid_files, invalid_files
+
     def _get_index_of_a_in_b(self, a_names: List[str], b_names: List[str], device: str = "cpu") -> torch.Tensor:
         indexes = []
         for name in a_names:
@@ -266,48 +291,51 @@ class MotionLoader:
         clip_id = Path(motion_file).stem
         clip_object_names: list[str] | None = None
         clip_object_urdfs: list[str] | None = None
-        with smart_open.open(motion_file, "rb") as f, np.load(f) as data:
-            self.fps = data["fps"]
+        try:
+            with smart_open.open(motion_file, "rb") as f, np.load(f, allow_pickle=True) as data:
+                self.fps = data["fps"]
 
-            body_names = data["body_names"].tolist()
-            joint_names = data["joint_names"].tolist()
+                body_names = data["body_names"].tolist()
+                joint_names = data["joint_names"].tolist()
 
-            # The first 7 joints_pos are [xyz, wxyz] of the pelvis, omit them from the joint_pos
-            # The first 6 joints_vel are [vel_xyz, vel_wxyz] of the pelvis, omit them from the joint_vel
-            # We'll use the pelvis position and quaternion from body_pos_w[:, 0] and body_quat_w[:, 0] directly.
-            self._joint_pos = torch.tensor(data["joint_pos"][:, 7:], dtype=torch.float32, device=device)
-            self._joint_vel = torch.tensor(data["joint_vel"][:, 6:], dtype=torch.float32, device=device)
-            assert len(joint_names) == self._joint_pos.shape[1], "Joint names in motion data does not match"
+                # The first 7 joints_pos are [xyz, wxyz] of the pelvis, omit them from the joint_pos
+                # The first 6 joints_vel are [vel_xyz, vel_wxyz] of the pelvis, omit them from the joint_vel
+                # We'll use the pelvis position and quaternion from body_pos_w[:, 0] and body_quat_w[:, 0] directly.
+                self._joint_pos = torch.tensor(data["joint_pos"][:, 7:], dtype=torch.float32, device=device)
+                self._joint_vel = torch.tensor(data["joint_vel"][:, 6:], dtype=torch.float32, device=device)
+                assert len(joint_names) == self._joint_pos.shape[1], "Joint names in motion data does not match"
 
-            self._body_pos_w = torch.tensor(data["body_pos_w"], dtype=torch.float32, device=device)
-            assert len(body_names) == self._body_pos_w.shape[1], "Body names in motion data does not match"
+                self._body_pos_w = torch.tensor(data["body_pos_w"], dtype=torch.float32, device=device)
+                assert len(body_names) == self._body_pos_w.shape[1], "Body names in motion data does not match"
 
-            # NOTE: wxyz after loading from npz
-            body_quat_w_wxyz = torch.tensor(data["body_quat_w"], dtype=torch.float32, device=device)  # This is wxyz
-            self._body_quat_w = body_quat_w_wxyz[:, :, [1, 2, 3, 0]]  # Change to xyzw
-
-            self._body_lin_vel_w = torch.tensor(data["body_lin_vel_w"], dtype=torch.float32, device=device)
-            self._body_ang_vel_w = torch.tensor(data["body_ang_vel_w"], dtype=torch.float32, device=device)
-
-            # add object pos and quat
-            self.has_object = "object_pos_w" in data
-            if self.has_object:
-                length = int(self._joint_pos.shape[0])
                 # NOTE: wxyz after loading from npz
-                self._object_pos_w = torch.tensor(data["object_pos_w"], dtype=torch.float32, device=device)
-                object_quat_w = torch.tensor(data["object_quat_w"], dtype=torch.float32, device=device)
-                self._object_quat_w = object_quat_w[:, [1, 2, 3, 0]]  # Change to xyzw
-                self._object_lin_vel_w = torch.tensor(data["object_lin_vel_w"], dtype=torch.float32, device=device)
-                object_size = self._extract_object_size_np(data, length, source=motion_file)
-                self._object_size = torch.tensor(object_size, dtype=torch.float32, device=device)
-                obj_name, obj_urdf = self._extract_object_clip_metadata(data=data, clip_id=clip_id, clip_map=None)
-                clip_object_names = [obj_name]
-                clip_object_urdfs = [obj_urdf]
-            else:
-                self._object_pos_w = torch.zeros(0, 3, device=device)
-                self._object_quat_w = torch.zeros(0, 4, device=device)
-                self._object_lin_vel_w = torch.zeros(0, 3, device=device)
-                self._object_size = torch.zeros(0, 3, device=device)
+                body_quat_w_wxyz = torch.tensor(data["body_quat_w"], dtype=torch.float32, device=device)  # This is wxyz
+                self._body_quat_w = body_quat_w_wxyz[:, :, [1, 2, 3, 0]]  # Change to xyzw
+
+                self._body_lin_vel_w = torch.tensor(data["body_lin_vel_w"], dtype=torch.float32, device=device)
+                self._body_ang_vel_w = torch.tensor(data["body_ang_vel_w"], dtype=torch.float32, device=device)
+
+                # add object pos and quat
+                self.has_object = "object_pos_w" in data
+                if self.has_object:
+                    length = int(self._joint_pos.shape[0])
+                    # NOTE: wxyz after loading from npz
+                    self._object_pos_w = torch.tensor(data["object_pos_w"], dtype=torch.float32, device=device)
+                    object_quat_w = torch.tensor(data["object_quat_w"], dtype=torch.float32, device=device)
+                    self._object_quat_w = object_quat_w[:, [1, 2, 3, 0]]  # Change to xyzw
+                    self._object_lin_vel_w = torch.tensor(data["object_lin_vel_w"], dtype=torch.float32, device=device)
+                    object_size = self._extract_object_size_np(data, length, source=motion_file)
+                    self._object_size = torch.tensor(object_size, dtype=torch.float32, device=device)
+                    obj_name, obj_urdf = self._extract_object_clip_metadata(data=data, clip_id=clip_id, clip_map=None)
+                    clip_object_names = [obj_name]
+                    clip_object_urdfs = [obj_urdf]
+                else:
+                    self._object_pos_w = torch.zeros(0, 3, device=device)
+                    self._object_quat_w = torch.zeros(0, 4, device=device)
+                    self._object_lin_vel_w = torch.zeros(0, 3, device=device)
+                    self._object_size = torch.zeros(0, 3, device=device)
+        except (zipfile.BadZipFile, EOFError, OSError, ValueError) as exc:
+            raise zipfile.BadZipFile(f"Failed to load motion npz '{motion_file}': {exc}") from exc
         length = int(self._joint_pos.shape[0])
         self._set_clip_metadata(
             [clip_id],
@@ -341,6 +369,20 @@ class MotionLoader:
             if clip_idx < 0 or clip_idx >= len(files):
                 raise IndexError(f"Clip index {clip_idx} out of range for {motion_dir}")
             files = [files[clip_idx]]
+
+        files, invalid_archives = self._filter_valid_npz_archives(files)
+        if invalid_archives:
+            issue_summary = self._format_motion_file_issues(invalid_archives)
+            if not files:
+                raise zipfile.BadZipFile(
+                    f"No valid motion clips remain in {motion_dir}. Invalid clips: {issue_summary}"
+                )
+            logger.warning(
+                "Skipping {} invalid motion clips in '{}'. Examples: {}",
+                len(invalid_archives),
+                motion_dir,
+                issue_summary,
+            )
 
         if len(files) == 1:
             body_names, joint_names = self._load_data_from_motion_npz(str(files[0]), device)
@@ -392,9 +434,16 @@ class MotionLoader:
 
         clip_object_names: list[str] = []
         clip_object_urdfs: list[str] = []
+        late_load_failures: list[tuple[Path, str]] = []
 
         for file_path in files:
-            with np.load(file_path, allow_pickle=True) as data:
+            try:
+                data_file = np.load(file_path, allow_pickle=True)
+            except (zipfile.BadZipFile, EOFError, OSError, ValueError) as exc:
+                late_load_failures.append((file_path, f"{type(exc).__name__}: {exc}"))
+                continue
+
+            with data_file as data:
                 missing = [key for key in required_keys if key not in data]
                 if missing:
                     raise KeyError(f"Missing keys in {file_path}: {missing}")
@@ -480,6 +529,19 @@ class MotionLoader:
                 else:
                     clip_object_names.append("")
                     clip_object_urdfs.append("")
+
+        if late_load_failures:
+            issue_summary = self._format_motion_file_issues(late_load_failures)
+            if not clip_ids:
+                raise zipfile.BadZipFile(
+                    f"Failed to load any motion clips from {motion_dir}. Examples: {issue_summary}"
+                )
+            logger.warning(
+                "Skipped {} motion clips that failed to open in '{}'. Examples: {}",
+                len(late_load_failures),
+                motion_dir,
+                issue_summary,
+            )
 
         self.fps = float(fps_ref) if fps_ref is not None else 30.0
         self._set_clip_metadata(
