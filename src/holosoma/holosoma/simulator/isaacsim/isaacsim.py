@@ -484,6 +484,20 @@ class IsaacSim(BaseSimulator):
                     f"No valid object URDFs resolved from: {self.robot_config.object.object_urdf_path}"
                 )
 
+            object_scale = None
+            object_scale_raw = getattr(self.robot_config.object, "scale", None)
+            if object_scale_raw is not None:
+                if len(object_scale_raw) == 1:
+                    value = float(object_scale_raw[0])
+                    object_scale = (value, value, value)
+                elif len(object_scale_raw) == 3:
+                    object_scale = tuple(float(v) for v in object_scale_raw)
+                else:
+                    raise ValueError(
+                        "robot.object.scale must have length 1 or 3. "
+                        f"Got: {object_scale_raw}"
+                    )
+
             use_single_name = len(object_specs) == 1
             self._object_urdf_by_name = {}
             for idx, (raw_name, object_asset_urdf_path) in enumerate(object_specs):
@@ -495,6 +509,7 @@ class IsaacSim(BaseSimulator):
                         fix_base=False,
                         replace_cylinders_with_capsules=True,
                         asset_path=object_asset_urdf_path,
+                        scale=object_scale,
                         activate_contact_sensors=True,
                         rigid_props=sim_utils.RigidBodyPropertiesCfg(
                             disable_gravity=False,

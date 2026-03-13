@@ -62,10 +62,12 @@ g1_29dof_wbt_termination_distill = TerminationManagerCfg(
         "bad_tracking": TerminationTermCfg(
             func="holosoma.managers.termination.terms.wbt:BadTracking",
             params={
+                # Distillation rollouts benefit from more tolerance before early reset
+                # so the student can recover from teacher/student mismatch.
                 # robot tracking
-                "bad_ref_pos_threshold": 0.5,
-                "bad_ref_ori_threshold": 0.8,
-                "bad_motion_body_pos_threshold": 0.25,
+                "bad_ref_pos_threshold": 1.0,
+                "bad_ref_ori_threshold": 1.2,
+                "bad_motion_body_pos_threshold": 0.55,
                 # NOTE: body_names_to_track is shared with command_manager
                 "body_names_to_track": [
                     "pelvis",
@@ -91,8 +93,8 @@ g1_29dof_wbt_termination_distill = TerminationManagerCfg(
                 ],
                 # object tracking
                 # only triggered when has_object=True
-                "bad_object_pos_threshold": 0.25,
-                "bad_object_ori_threshold": 0.8,
+                "bad_object_pos_threshold": 0.65,
+                "bad_object_ori_threshold": 1.2,
             },
         ),
     }

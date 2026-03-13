@@ -320,11 +320,6 @@ object_distill_box_terms = {
         scale=1.0,
         noise=0.0,
     ),
-    "obj_goal_pos_size_b": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:obj_goal_pos_size_b",
-        scale=1.0,
-        noise=0.0,
-    ),
 }
 
 g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCfg(
@@ -354,8 +349,7 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
             history_length=1,
             terms=object_distill_proprio_terms,
         ),
-        # Student object state: current object [pos(3), rot6d(6), size(3)]
-        # + final clip target [target_pos(3), size(3)].
+        # Student object state: current object [pos(3), rot6d(6), size(3)] only.
         "actor_obs_box": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
@@ -398,8 +392,7 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy = ObservationMa
             history_length=1,
             terms=object_distill_proprio_terms,
         ),
-        # Student object state: current object [pos(3), rot6d(6), size(3)]
-        # + final clip target [target_pos(3), size(3)].
+        # Student object state: current object [pos(3), rot6d(6), size(3)] only.
         "actor_obs_box": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,

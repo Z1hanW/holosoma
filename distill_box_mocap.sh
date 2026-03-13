@@ -8,7 +8,6 @@ set -euo pipefail
 # - actor_obs_proprio (base_lin_vel, base_ang_vel, dof_pos, dof_vel, actions)
 # - actor_obs_box:
 #   - obj_current_pose_size_b = [obj_pos(3), obj_rot6d(6), obj_scale(3)]
-#   - obj_goal_pos_size_b = final clip target [target_pos(3), obj_scale(3)]
 #
 # Teacher policy observation defaults to actor_obs; legacy teachers may opt into perception explicitly.
 
@@ -66,7 +65,7 @@ echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC}"
 echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS}"
 echo "[INFO] perception preset=${PERCEPTION_PRESET} (default none; enable only if teacher_obs_keys needs perception_obs)"
 echo "[INFO] perception.inject_into_policy_modules=${PERCEPTION_INTO_POLICY_MODULES} (student stays non-perception)"
-echo "[INFO] actor box state: obj_current_pose_size_b + final clip target (obj_goal_pos_size_b)"
+echo "[INFO] actor box state: obj_current_pose_size_b only"
 echo "[INFO] actor_lr=${ACTOR_LR} critic_lr=${CRITIC_LR}"
 echo "[INFO] hybrid PPO+DAgger curriculum default=True"
 echo "[INFO] teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"

@@ -1121,6 +1121,9 @@ class MotionCommand(CommandTermBase):
         self.manual_control_enabled = False
         self.manual_xy_rel: torch.Tensor | None = None
         self.manual_yaw_rel: torch.Tensor | None = None
+        self.manual_object_reset_enabled = False
+        self.manual_object_reset_pos_offset_w: torch.Tensor | None = None
+        self.manual_object_reset_rpy_offset: torch.Tensor | None = None
         self.manual_goal_enabled = False
         self.manual_goal_object_pos_w: torch.Tensor | None = None
         self.manual_goal_object_rot6d_w: torch.Tensor | None = None
@@ -1152,6 +1155,9 @@ class MotionCommand(CommandTermBase):
         self.manual_control_enabled = False
         self.manual_xy_rel = torch.zeros((self.num_envs, 2), device=self.device, dtype=torch.float32)
         self.manual_yaw_rel = torch.zeros((self.num_envs, 1), device=self.device, dtype=torch.float32)
+        self.manual_object_reset_enabled = False
+        self.manual_object_reset_pos_offset_w = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
+        self.manual_object_reset_rpy_offset = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
         self.manual_goal_enabled = False
         self.manual_goal_object_pos_w = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
         identity_rot6d = torch.tensor([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], device=self.device, dtype=torch.float32)
@@ -1432,6 +1438,22 @@ class MotionCommand(CommandTermBase):
         stacked_states = torch.cat(all_states, dim=0)
         self._env.simulator.set_actor_states(self._sim_object_names, env_ids, stacked_states)
 
+    def _apply_manual_object_reset_overrides(
+        self,
+        obj_pos_w: torch.Tensor,
+        obj_quat_w: torch.Tensor,
+        env_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.manual_object_reset_enabled:
+            return obj_pos_w, obj_quat_w
+        if self.manual_object_reset_pos_offset_w is not None:
+            obj_pos_w = obj_pos_w + self.manual_object_reset_pos_offset_w[env_ids]
+        if self.manual_object_reset_rpy_offset is not None:
+            rpy = self.manual_object_reset_rpy_offset[env_ids]
+            delta_quat = quat_from_euler_xyz(rpy[:, 0], rpy[:, 1], rpy[:, 2])
+            obj_quat_w = quat_mul(delta_quat, obj_quat_w, w_last=True)
+        return obj_pos_w, obj_quat_w
+
     def reset(self, env_ids: torch.Tensor | None) -> None:
         """called per reset_idx, reset timesteps and robot/object poses."""
         env_ids = self._ensure_index_tensor(env_ids)
@@ -1609,9 +1631,12 @@ class MotionCommand(CommandTermBase):
                 * obj_pos_noise
                 * reset_noise_scale_3
             )
+            target_obj_pos, target_obj_ori = self._apply_manual_object_reset_overrides(
+                target_obj_pos, obj_ori, env_ids
+            )
 
             object_states = torch.cat(
-                [target_obj_pos, obj_ori, obj_lin_vel, torch.zeros_like(obj_lin_vel)], dim=-1
+                [target_obj_pos, target_obj_ori, obj_lin_vel, torch.zeros_like(obj_lin_vel)], dim=-1
             )  # (num_envs, 13), xyzw
             # 4.3 set active object states; inactive objects are parked away for multi-URDF banks.
             self._set_simulator_object_states(env_ids, object_states)

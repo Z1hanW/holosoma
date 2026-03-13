@@ -719,6 +719,15 @@ class ViserLiveViewer:
         self._manual_root_pos_x_slider = None
         self._manual_root_pos_y_slider = None
         self._manual_root_yaw_slider = None
+        self._object_reset_override_cb = None
+        self._object_reset_zero_button = None
+        self._object_reset_pos_x_slider = None
+        self._object_reset_pos_y_slider = None
+        self._object_reset_pos_z_slider = None
+        self._object_reset_roll_slider = None
+        self._object_reset_pitch_slider = None
+        self._object_reset_yaw_slider = None
+        self._object_reset_status = None
         self._manual_command_arrow_handle = None
         self._manual_command_arrow_height = 0.30
         self._manual_command_arrow_head_ratio = 0.30
@@ -1157,6 +1166,7 @@ class ViserLiveViewer:
         if not self._enabled:
             return
         self._update_manual_root_command()
+        self._update_manual_object_reset_override()
         if self._reset_requested:
             self._reset_requested = False
             self._reset_env()
@@ -1308,14 +1318,10 @@ class ViserLiveViewer:
             or self._manual_root_yaw_slider is None
         ):
             return
-        root_pos, root_quat_wxyz = self._get_root_state_wxyz()
-        if root_pos is None or root_quat_wxyz is None:
-            return
-        root_yaw = self._yaw_from_quat_wxyz(np.asarray(root_quat_wxyz, dtype=np.float32))
         try:
-            self._manual_root_pos_x_slider.value = float(root_pos[0])
-            self._manual_root_pos_y_slider.value = float(root_pos[1])
-            self._manual_root_yaw_slider.value = float(root_yaw)
+            self._manual_root_pos_x_slider.value = 0.0
+            self._manual_root_pos_y_slider.value = 0.0
+            self._manual_root_yaw_slider.value = 0.0
         except Exception:
             pass
 
@@ -1331,44 +1337,54 @@ class ViserLiveViewer:
             or self._manual_root_yaw_slider is None
         ):
             return None
+
+        cmd_xy = np.array(
+            [
+                float(self._manual_root_pos_x_slider.value),
+                float(self._manual_root_pos_y_slider.value),
+            ],
+            dtype=np.float32,
+        )
+        cmd_yaw = self._wrap_to_pi(float(self._manual_root_yaw_slider.value))
+        payload: dict[str, np.ndarray | float] = {
+            "cmd_xy": cmd_xy,
+            "cmd_yaw": float(cmd_yaw),
+        }
+
         if current_pos is None or current_quat_wxyz is None:
             current_pos, current_quat_wxyz = self._get_root_state_wxyz()
         if current_pos is None or current_quat_wxyz is None:
-            return None
+            return payload
 
         current_pos = np.asarray(current_pos, dtype=np.float32)
         current_quat_wxyz = np.asarray(current_quat_wxyz, dtype=np.float32)
         current_yaw = self._yaw_from_quat_wxyz(current_quat_wxyz)
 
-        target_pos = current_pos.copy()
-        target_pos[0] = float(self._manual_root_pos_x_slider.value)
-        target_pos[1] = float(self._manual_root_pos_y_slider.value)
-        target_yaw = float(self._manual_root_yaw_slider.value)
-
-        delta_world = target_pos - current_pos
-        delta_world[2] = 0.0
-
         cy = float(np.cos(current_yaw))
         sy = float(np.sin(current_yaw))
-        delta_body = np.array(
+        delta_world = np.array(
             [
-                cy * float(delta_world[0]) + sy * float(delta_world[1]),
-                -sy * float(delta_world[0]) + cy * float(delta_world[1]),
+                cy * float(cmd_xy[0]) - sy * float(cmd_xy[1]),
+                sy * float(cmd_xy[0]) + cy * float(cmd_xy[1]),
+                0.0,
             ],
             dtype=np.float32,
         )
-        yaw_gap = self._wrap_to_pi(target_yaw - current_yaw)
+        target_pos = current_pos.copy()
+        target_pos[:2] += delta_world[:2]
+        target_yaw = self._wrap_to_pi(current_yaw + cmd_yaw)
 
-        return {
-            "current_pos": current_pos,
-            "target_pos": target_pos,
-            "current_yaw": float(current_yaw),
-            "target_yaw": float(target_yaw),
-            "delta_world": delta_world,
-            "delta_body": delta_body,
-            "yaw_gap": float(yaw_gap),
-            "dist_xy": float(np.linalg.norm(delta_world[:2])),
-        }
+        payload.update(
+            {
+                "current_pos": current_pos,
+                "target_pos": target_pos,
+                "current_yaw": float(current_yaw),
+                "target_yaw": float(target_yaw),
+                "delta_world": delta_world,
+                "dist_xy": float(np.linalg.norm(delta_world[:2])),
+            }
+        )
+        return payload
 
     @staticmethod
     def _format_policy_root_command(cmd_x: float, cmd_y: float, cmd_yaw: float) -> str:
@@ -1393,6 +1409,83 @@ class ViserLiveViewer:
             cmd_yaw = float(manual_yaw[self._env_id, 0].item())
         return cmd_x, cmd_y, cmd_yaw
 
+    def _zero_object_reset_overrides(self) -> None:
+        controls = (
+            self._object_reset_pos_x_slider,
+            self._object_reset_pos_y_slider,
+            self._object_reset_pos_z_slider,
+            self._object_reset_roll_slider,
+            self._object_reset_pitch_slider,
+            self._object_reset_yaw_slider,
+        )
+        for control in controls:
+            if control is None:
+                continue
+            try:
+                control.value = 0.0
+            except Exception:
+                pass
+
+    def _update_object_reset_status(self) -> None:
+        if self._object_reset_status is None:
+            return
+        enabled = bool(self._object_reset_override_cb.value) if self._object_reset_override_cb is not None else False
+        if not enabled:
+            self._object_reset_status.content = (
+                "Mode: `off`\n\n"
+                "Applies on next reset only.\n\n"
+                "Runtime size scaling is not supported yet; size still comes from the spawned URDF scale."
+            )
+            return
+
+        dx = float(self._object_reset_pos_x_slider.value) if self._object_reset_pos_x_slider is not None else 0.0
+        dy = float(self._object_reset_pos_y_slider.value) if self._object_reset_pos_y_slider is not None else 0.0
+        dz = float(self._object_reset_pos_z_slider.value) if self._object_reset_pos_z_slider is not None else 0.0
+        dr = float(self._object_reset_roll_slider.value) if self._object_reset_roll_slider is not None else 0.0
+        dp = float(self._object_reset_pitch_slider.value) if self._object_reset_pitch_slider is not None else 0.0
+        dyaw = float(self._object_reset_yaw_slider.value) if self._object_reset_yaw_slider is not None else 0.0
+        self._object_reset_status.content = (
+            "Mode: `on`\n\n"
+            "Frame: `world offset on reset`\n\n"
+            f"Position: `dx={dx:+.2f}` `dy={dy:+.2f}` `dz={dz:+.2f}`\n\n"
+            f"Rotation: `droll={dr:+.2f}` `dpitch={dp:+.2f}` `dyaw={dyaw:+.2f}`\n\n"
+            "Applies on next reset only.\n\n"
+            "Runtime size scaling is not supported yet; size still comes from the spawned URDF scale."
+        )
+
+    def _update_manual_object_reset_override(self) -> None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None or not hasattr(motion_cmd, "motion") or not bool(getattr(motion_cmd.motion, "has_object", False)):
+            self._update_object_reset_status()
+            return
+
+        enabled = bool(self._object_reset_override_cb.value) if self._object_reset_override_cb is not None else False
+        motion_cmd.manual_object_reset_enabled = enabled
+
+        device = self._env.device
+        pos_offset = torch.tensor(
+            [[
+                float(self._object_reset_pos_x_slider.value) if self._object_reset_pos_x_slider is not None else 0.0,
+                float(self._object_reset_pos_y_slider.value) if self._object_reset_pos_y_slider is not None else 0.0,
+                float(self._object_reset_pos_z_slider.value) if self._object_reset_pos_z_slider is not None else 0.0,
+            ]],
+            device=device,
+            dtype=torch.float32,
+        ).repeat(self._env.num_envs, 1)
+        rpy_offset = torch.tensor(
+            [[
+                float(self._object_reset_roll_slider.value) if self._object_reset_roll_slider is not None else 0.0,
+                float(self._object_reset_pitch_slider.value) if self._object_reset_pitch_slider is not None else 0.0,
+                float(self._object_reset_yaw_slider.value) if self._object_reset_yaw_slider is not None else 0.0,
+            ]],
+            device=device,
+            dtype=torch.float32,
+        ).repeat(self._env.num_envs, 1)
+
+        motion_cmd.manual_object_reset_pos_offset_w = pos_offset
+        motion_cmd.manual_object_reset_rpy_offset = rpy_offset
+        self._update_object_reset_status()
+
     def _update_manual_root_status(
         self,
         *,
@@ -1414,24 +1507,27 @@ class ViserLiveViewer:
                 current_quat_wxyz=current_root_quat_wxyz,
             )
             if payload is not None:
-                current_pos = payload["current_pos"]
-                target_pos = payload["target_pos"]
-                delta_world = payload["delta_world"]
-                delta_body = payload["delta_body"]
-                current_yaw = float(payload["current_yaw"])
-                target_yaw = float(payload["target_yaw"])
-                yaw_gap = float(payload["yaw_gap"])
-                dist_xy = float(payload["dist_xy"])
                 manual_cmd = self._manual_policy_root_command()
                 if manual_cmd is None:
-                    manual_cmd = (float(delta_body[0]), float(delta_body[1]), yaw_gap)
-                self._manual_root_status.content = (
-                    "Mode: `manual(gui)`\n\n"
-                    f"Current: `({current_pos[0]:+.2f}, {current_pos[1]:+.2f})` yaw=`{current_yaw:+.2f}`\n\n"
-                    f"Target: `({target_pos[0]:+.2f}, {target_pos[1]:+.2f})` yaw=`{target_yaw:+.2f}`\n\n"
-                    f"{self._format_policy_root_command(*manual_cmd)}\n\n"
-                    f"Gap world: `dx={delta_world[0]:+.2f}` `dy={delta_world[1]:+.2f}` `dist={dist_xy:.2f}`"
-                )
+                    cmd_xy = np.asarray(payload["cmd_xy"], dtype=np.float32)
+                    manual_cmd = (float(cmd_xy[0]), float(cmd_xy[1]), float(payload["cmd_yaw"]))
+                current_pos = payload.get("current_pos")
+                current_yaw = payload.get("current_yaw")
+                if current_pos is not None and current_yaw is not None:
+                    current_pos_np = np.asarray(current_pos, dtype=np.float32)
+                    self._manual_root_status.content = (
+                        "Mode: `manual(gui)`\n\n"
+                        "Frame: `root-relative (distill actor_obs_root)`\n\n"
+                        f"Current root: `({current_pos_np[0]:+.2f}, {current_pos_np[1]:+.2f}, {current_pos_np[2]:+.2f})` yaw=`{float(current_yaw):+.2f}`\n\n"
+                        f"{self._format_policy_root_command(*manual_cmd)}\n\n"
+                        "Command sliders map directly to the training command frame."
+                    )
+                else:
+                    self._manual_root_status.content = (
+                        "Mode: `manual(gui)`\n\n"
+                        "Frame: `root-relative (distill actor_obs_root)`\n\n"
+                        f"{self._format_policy_root_command(*manual_cmd)}"
+                    )
                 return
 
         if manual_enabled and hw_enabled:
@@ -1447,9 +1543,10 @@ class ViserLiveViewer:
                 )
                 self._manual_root_status.content = (
                     "Mode: `manual(hw)`\n\n"
+                    "Frame: `root-relative (distill actor_obs_root)`\n\n"
                     f"Current root: `({float(root_pos[0]):+.2f}, {float(root_pos[1]):+.2f}, {float(root_pos[2]):+.2f})`\n\n"
                     f"{command_line}\n\n"
-                    "Absolute target is not defined for joystick control."
+                    "Joystick input writes the same root-relative command seen during training."
                 )
             else:
                 command_line = (
@@ -1459,8 +1556,9 @@ class ViserLiveViewer:
                 )
                 self._manual_root_status.content = (
                     "Mode: `manual(hw)`\n\n"
+                    "Frame: `root-relative (distill actor_obs_root)`\n\n"
                     f"{command_line}\n\n"
-                    "Absolute target is not defined for joystick control."
+                    "Joystick input writes the same root-relative command seen during training."
                 )
             return
 
@@ -1534,10 +1632,10 @@ class ViserLiveViewer:
         else:
             payload = self._manual_root_target_payload()
             if payload is not None:
-                delta_body = np.asarray(payload["delta_body"], dtype=np.float32)
-                cmd_x = float(delta_body[0])
-                cmd_y = float(delta_body[1])
-                cmd_yaw_val = float(payload["yaw_gap"])
+                cmd_xy = np.asarray(payload["cmd_xy"], dtype=np.float32)
+                cmd_x = float(cmd_xy[0])
+                cmd_y = float(cmd_xy[1])
+                cmd_yaw_val = float(payload["cmd_yaw"])
             else:
                 forward = 1.0 if self._manual_forward_cb is not None and bool(self._manual_forward_cb.value) else 0.0
                 back = 1.0 if self._manual_back_cb is not None and bool(self._manual_back_cb.value) else 0.0
@@ -2236,28 +2334,28 @@ class ViserLiveViewer:
                 self._manual_control_cb = self._server.gui.add_checkbox(
                     "Enable Manual Root Command",
                     initial_value=bool(self._manual_control_default),
-                    hint="Override the root-relative policy command using a world-frame target root pose.",
+                    hint="Override the policy with the same root-relative [dx, dy, dyaw] command used during distillation.",
                 )
                 self._manual_root_sync_button = self._server.gui.add_button(
-                    "Target <- Current Root",
-                    hint="Initialize target root x/y/yaw from the current robot root pose.",
+                    "Zero Root Command",
+                    hint="Reset the root-relative command sliders to zero.",
                 )
                 self._manual_root_pos_x_slider = self._server.gui.add_slider(
-                    "Target Root X (world)",
+                    "Root Command X (forward, m)",
                     min=-5.0,
                     max=5.0,
                     step=0.02,
                     initial_value=0.0,
                 )
                 self._manual_root_pos_y_slider = self._server.gui.add_slider(
-                    "Target Root Y (world)",
+                    "Root Command Y (left, m)",
                     min=-5.0,
                     max=5.0,
                     step=0.02,
                     initial_value=0.0,
                 )
                 self._manual_root_yaw_slider = self._server.gui.add_slider(
-                    "Target Root Yaw (rad)",
+                    "Root Command Yaw (rad)",
                     min=-np.pi,
                     max=np.pi,
                     step=0.02,
@@ -2359,6 +2457,95 @@ class ViserLiveViewer:
             @self._reset_button.on_click
             def _(_evt) -> None:
                 self._reset_requested = True
+
+            motion_cmd = self._get_motion_command()
+            has_resettable_object = bool(
+                motion_cmd is not None
+                and hasattr(motion_cmd, "motion")
+                and bool(getattr(motion_cmd.motion, "has_object", False))
+            )
+            if has_resettable_object:
+                with self._server.gui.add_folder("Reset Object"):
+                    self._object_reset_override_cb = self._server.gui.add_checkbox(
+                        "Enable Reset Box Override",
+                        initial_value=False,
+                        hint="Apply world-frame box pose offsets on the next reset.",
+                    )
+                    self._object_reset_zero_button = self._server.gui.add_button(
+                        "Zero Reset Box Override",
+                        hint="Reset box position/rotation offsets to zero.",
+                    )
+                    self._object_reset_pos_x_slider = self._server.gui.add_slider(
+                        "Reset Box dX (world m)",
+                        min=-1.0,
+                        max=1.0,
+                        step=0.01,
+                        initial_value=0.0,
+                    )
+                    self._object_reset_pos_y_slider = self._server.gui.add_slider(
+                        "Reset Box dY (world m)",
+                        min=-1.0,
+                        max=1.0,
+                        step=0.01,
+                        initial_value=0.0,
+                    )
+                    self._object_reset_pos_z_slider = self._server.gui.add_slider(
+                        "Reset Box dZ (world m)",
+                        min=-0.5,
+                        max=0.5,
+                        step=0.01,
+                        initial_value=0.0,
+                    )
+                    self._object_reset_roll_slider = self._server.gui.add_slider(
+                        "Reset Box dRoll (rad)",
+                        min=-np.pi,
+                        max=np.pi,
+                        step=0.02,
+                        initial_value=0.0,
+                    )
+                    self._object_reset_pitch_slider = self._server.gui.add_slider(
+                        "Reset Box dPitch (rad)",
+                        min=-np.pi,
+                        max=np.pi,
+                        step=0.02,
+                        initial_value=0.0,
+                    )
+                    self._object_reset_yaw_slider = self._server.gui.add_slider(
+                        "Reset Box dYaw (rad)",
+                        min=-np.pi,
+                        max=np.pi,
+                        step=0.02,
+                        initial_value=0.0,
+                    )
+                    self._object_reset_status = self._server.gui.add_markdown(
+                        "Mode: `off`\n\n"
+                        "Applies on next reset only.\n\n"
+                        "Runtime size scaling is not supported yet; size still comes from the spawned URDF scale."
+                    )
+
+                @self._object_reset_zero_button.on_click
+                def _(_evt) -> None:
+                    self._zero_object_reset_overrides()
+                    self._update_manual_object_reset_override()
+
+                @self._object_reset_override_cb.on_update
+                def _(_evt) -> None:
+                    self._update_manual_object_reset_override()
+
+                for control in (
+                    self._object_reset_pos_x_slider,
+                    self._object_reset_pos_y_slider,
+                    self._object_reset_pos_z_slider,
+                    self._object_reset_roll_slider,
+                    self._object_reset_pitch_slider,
+                    self._object_reset_yaw_slider,
+                ):
+
+                    @control.on_update
+                    def _(_evt) -> None:
+                        self._update_manual_object_reset_override()
+
+                self._update_manual_object_reset_override()
 
             with self._server.gui.add_folder("World Viz"):
                 self._show_robot_cb = self._server.gui.add_checkbox(
@@ -2755,6 +2942,8 @@ class ViserLiveViewer:
             obj_pos = motion_cmd.object_pos_w[env_ids]
             obj_ori = motion_cmd.object_quat_w[env_ids]
             obj_lin_vel = motion_cmd.object_lin_vel_w[env_ids]
+            if hasattr(motion_cmd, "_apply_manual_object_reset_overrides"):
+                obj_pos, obj_ori = motion_cmd._apply_manual_object_reset_overrides(obj_pos, obj_ori, env_ids)
             obj_states = torch.cat([obj_pos, obj_ori, obj_lin_vel, torch.zeros_like(obj_lin_vel)], dim=-1)
             if hasattr(motion_cmd, "_set_simulator_object_states"):
                 motion_cmd._set_simulator_object_states(env_ids, obj_states)

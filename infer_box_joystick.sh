@@ -16,6 +16,11 @@ set -euo pipefail
 #   bash infer_box_joystick.sh mocap /abs/path/model.pt
 #   bash infer_box_joystick.sh depth /abs/path/model.pt --viser-port 18080
 #   bash infer_box_joystick.sh mocap https://wandb.ai/zihanw22/WholeBodyTracking/runs/d20ktze6/files
+# Boxer reference checkpoints:
+#   https://wandb.ai/zihanw22/boxer/runs/wttqf2em/files/model_04000.pt -> wandb://zihanw22/boxer/wttqf2em/model_04000.pt
+#   https://wandb.ai/zihanw22/boxer/runs/wttqf2em?nw=nwuserz1hanw -> wandb://zihanw22/boxer/wttqf2em/model_04000.pt
+#   https://wandb.ai/zihanw22/boxer/runs/wttqf2em -> wandb://zihanw22/boxer/wttqf2em/model_04000.pt
+#   https://wandb.ai/zihanw22/boxer/runs/0z2aggr2 -> wandb://zihanw22/boxer/0z2aggr2/model_00200.pt
 
 usage() {
   cat <<'EOF'
@@ -30,6 +35,7 @@ Optional env vars:
   INFER_DATASET           (default: omomo; options: omomo|behave|mixed)
   MOTION_DIR              (optional override; default chosen by INFER_DATASET)
   OBJECT_URDF             (optional override; default chosen by INFER_DATASET)
+  OBJECT_SCALE            (optional; scalar or x,y,z spawn scale for current object URDF)
   GEOMETRY_DIR            (optional; OBJ file/dir for terrain visualization)
   PAIR_TERRAIN_WITH_MOTION (default: False)
   NUM_ENVS                (default: 1)
@@ -396,6 +402,32 @@ if [[ -n "${GEOMETRY_DIR}" && ! -e "${GEOMETRY_DIR}" ]]; then
   exit 1
 fi
 
+normalize_object_scale() {
+  local raw="$1"
+  local compact="${raw//[\[\]\(\)[:space:]]/}"
+  local values=()
+  if [[ -z "${compact}" ]]; then
+    echo ""
+    return 0
+  fi
+  IFS=',' read -r -a values <<< "${compact}"
+  if [[ "${#values[@]}" -eq 1 ]]; then
+    printf '[%s,%s,%s]' "${values[0]}" "${values[0]}" "${values[0]}"
+    return 0
+  fi
+  if [[ "${#values[@]}" -eq 3 ]]; then
+    printf '[%s,%s,%s]' "${values[0]}" "${values[1]}" "${values[2]}"
+    return 0
+  fi
+  echo "[ERROR] OBJECT_SCALE must be a scalar or comma-separated x,y,z triple. Got: ${raw}" >&2
+  exit 2
+}
+
+OBJECT_SCALE_ARG=""
+if [[ -n "${OBJECT_SCALE+x}" && -n "${OBJECT_SCALE}" ]]; then
+  OBJECT_SCALE_ARG="$(normalize_object_scale "${OBJECT_SCALE}")"
+fi
+
 # Viser GUI defaults aligned with VideoMimic-style manual + clip control.
 export VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI:-1}
 export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-1}
@@ -449,6 +481,10 @@ cmd=(
   --algo.config.distill.ppo_start_epoch -1
   --algo.config.distill.dagger_end_epoch -1
 )
+
+if [[ -n "${OBJECT_SCALE_ARG}" ]]; then
+  cmd+=(--robot.object.scale "${OBJECT_SCALE_ARG}")
+fi
 
 if [[ -n "${GEOMETRY_DIR}" ]]; then
   cmd+=(--geometry-dir "${GEOMETRY_DIR}")
@@ -534,6 +570,9 @@ echo "[INFO] infer_dataset=${INFER_DATASET}"
 echo "[INFO] checkpoint=${CKPT}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
 echo "[INFO] object_urdf=${OBJECT_URDF}"
+if [[ -n "${OBJECT_SCALE_ARG}" ]]; then
+  echo "[INFO] object_scale=${OBJECT_SCALE_ARG}"
+fi
 if [[ -n "${GEOMETRY_DIR}" ]]; then
   echo "[INFO] geometry_dir=${GEOMETRY_DIR}"
 fi
@@ -550,10 +589,11 @@ else
 fi
 echo "[INFO] Viser controls:"
 echo "  1) Open 'Manual Control' and enable 'Enable Manual Root Command'."
-echo "  2) Use Move +X/-X/+Y/-Y and Yaw +/- to command root trajectory."
-echo "  3) Tune 'XY Command (m)' and 'Yaw Command (rad)' sliders."
-echo "  4) Use 'Clip Playback' to select clip/start frame and click 'Apply Clip'."
-echo "  5) Use 'Advanced > Simulation Control' for Play/Step/Reset."
+echo "  2) Set 'Root Command X/Y/Yaw' in the robot root frame."
+echo "  3) Use 'Zero Root Command' to reset the manual command to zero."
+echo "  4) Use 'Advanced > Reset Object' to add box position/rotation offsets for the next reset."
+echo "  5) Use 'Clip Playback' to select clip/start frame and click 'Apply Clip'."
+echo "  6) Use 'Advanced > Simulation Control' for Play/Step/Reset."
 if command -v hostname >/dev/null 2>&1; then
   HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
   if [[ -n "${HOST_IP}" ]]; then

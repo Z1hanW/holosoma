@@ -45,9 +45,11 @@ case "${DATASET_KNOB}" in
     ;;
   behave)
     DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_sq_carry_xy_0p5_1p5_flat"
+    DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_sq_carry"
     DEFAULT_GEOMETRY_DIR=""
     DEFAULT_OBJECT_URDF_DIR=""
     DEFAULT_OBJECT_URDF="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_sq_carry_xy_0p5_1p5_flat/_clip_object_urdf_map.json"
+    DEFAULT_OBJECT_URDF="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_sq_carry/_clip_object_urdf_map.json"
     DEFAULT_OBJECT_URDF_MODE="behave"
     DEFAULT_OBJECT_FILTER="boxmedium,boxlarge"
     DEFAULT_EXP="g1-29dof-wbt-w-object-generalist"
