@@ -46,15 +46,31 @@ python3 src/holosoma_inference/holosoma_inference/run_policy.py inference:g1-29d
     --task.interface lo
 ```
 
+To reuse the existing inference-side `viser` viewer with the MuJoCo dance demo,
+run the wrapper from the repo root instead:
+
+```bash
+bash ./sim2sim_dancing_viser.sh
+```
+
+This launches the same `fastsac_g1_29dof_dancing.onnx` MuJoCo workflow, enables
+sim-state publishing from MuJoCo, disables the virtual gantry by default, and
+opens the existing `viser` viewer on port `18080` by default. The `viser` GUI
+also exposes a manual `Reset sim + motion` button and an `Auto reset on motion end`
+toggle.
+
 ### 3. Initialize Stiff Control Mode
 
 In policy terminal, press `Enter` when prompted. The robot enters stiff control mode and holds its initial pose.
 
-### 4. Deploy the Robot
+### 4. Stabilize the Robot
 
-- In MuJoCo window, press `8` to lower the gantry until robot touches ground
-- In MuJoCo window, press `9` to remove gantry
-- Wait a few seconds for the stiff controller to stabilize the robot
+If you use `sim2sim_dancing_viser.sh`, the robot starts without the virtual
+gantry. Wait a few seconds for the stiff controller to stabilize the robot
+before starting the policy.
+
+If you launch MuJoCo manually with the default gantry-enabled config, lower and
+remove the gantry first, then wait a few seconds for stabilization.
 
 ### 5. Start the Policy
 
@@ -75,6 +91,9 @@ In policy terminal, press `s` to start the motion clip. The robot will begin tra
 - `7`: Lift the gantry
 - `8`: Lower the gantry
 - `9`: Disable/remove the gantry
+
+These are only needed when running a gantry-enabled MuJoCo config. The
+`sim2sim_dancing_viser.sh` wrapper disables the gantry.
 
 ### General Controls
 
@@ -106,9 +125,11 @@ In policy terminal, press `s` to start the motion clip. The robot will begin tra
 
 ## Tips and Troubleshooting
 
-- **Reset anytime**: Press `Backspace` in the MuJoCo window to reset the simulation
+- **Reset anytime**: Press `Backspace` in the MuJoCo window, or use `Reset sim + motion` in the `viser` GUI
+- **Automatic reset**: Only the motion end is auto-reset. Disable it from `viser` if you want the robot to stop on the final frame instead
 - **Interface**: Always use `lo` (loopback) for sim-to-sim on the same machine
 - **Stiff mode**: The `Enter` prompt initializes stiff control mode - this is required for WBT policies to maintain balance before the policy starts
-- **Stabilization**: Wait a few seconds after removing the gantry (step 3) before starting the policy to let the stiff controller stabilize
+- **Root height**: In `viser`, the robot root is the free base / pelvis frame, so its `z` is expected to be above `0`; that does not mean the robot is hanging
+- **Stabilization**: Wait a few seconds after removing the gantry, or after spawn in the gantry-disabled wrapper, before starting the policy to let the stiff controller stabilize
 - **RL rate**: Use `--task.rl-rate 50` for WBT policies (50 Hz control rate)
 - **Sim time**: Use `--task.use-sim-time` to synchronize with MuJoCo's simulation time

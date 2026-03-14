@@ -1106,34 +1106,48 @@ class PerceptionManager:
         simulator = getattr(self.env, "simulator", None)
         scene = getattr(simulator, "scene", None)
         rigid_objects = getattr(scene, "rigid_objects", None)
-        if rigid_objects is None:
-            return None
-
-        rigid_object = rigid_objects.get(object_name, None)
-        if rigid_object is None:
-            # Best-effort fallback for scene collection objects registered by basename.
-            scene_collection = rigid_objects.get("usd_scene_objects", None)
-            scene_cfg = getattr(scene_collection, "cfg", None) if scene_collection is not None else None
-            scene_rigid_cfgs = getattr(scene_cfg, "rigid_objects", None)
-            if isinstance(scene_rigid_cfgs, dict):
-                for prim_path, cfg in scene_rigid_cfgs.items():
-                    if str(prim_path).split("/")[-1] == object_name:
-                        rigid_object = cfg
-                        break
-        if rigid_object is None:
-            return None
-
-        cfg = getattr(rigid_object, "cfg", None)
-        spawn = getattr(cfg, "spawn", None) if cfg is not None else getattr(rigid_object, "spawn", None)
-        if spawn is None:
-            return None
-
+        use_mujoco_object_urdf_fallback = (
+            simulator is not None
+            and get_simulator_type() == SimulatorType.MUJOCO
+            and hasattr(simulator, "_object_urdf_by_name")
+        )
         candidate_path = None
-        for attr_name in ("asset_path", "urdf_path", "usd_path"):
-            attr_val = getattr(spawn, attr_name, None)
-            if attr_val:
-                candidate_path = str(attr_val)
-                break
+        if rigid_objects is None:
+            object_urdf_by_name = getattr(simulator, "_object_urdf_by_name", None)
+            if use_mujoco_object_urdf_fallback and isinstance(object_urdf_by_name, dict):
+                candidate_path = object_urdf_by_name.get(object_name)
+            if candidate_path is None:
+                return None
+
+        if candidate_path is None:
+            rigid_object = rigid_objects.get(object_name, None)
+            if rigid_object is None:
+                # Best-effort fallback for scene collection objects registered by basename.
+                scene_collection = rigid_objects.get("usd_scene_objects", None)
+                scene_cfg = getattr(scene_collection, "cfg", None) if scene_collection is not None else None
+                scene_rigid_cfgs = getattr(scene_cfg, "rigid_objects", None)
+                if isinstance(scene_rigid_cfgs, dict):
+                    for prim_path, cfg in scene_rigid_cfgs.items():
+                        if str(prim_path).split("/")[-1] == object_name:
+                            rigid_object = cfg
+                            break
+            if rigid_object is None:
+                object_urdf_by_name = getattr(simulator, "_object_urdf_by_name", None)
+                if use_mujoco_object_urdf_fallback and isinstance(object_urdf_by_name, dict):
+                    candidate_path = object_urdf_by_name.get(object_name)
+                if candidate_path is None:
+                    return None
+            else:
+                cfg = getattr(rigid_object, "cfg", None)
+                spawn = getattr(cfg, "spawn", None) if cfg is not None else getattr(rigid_object, "spawn", None)
+                if spawn is None:
+                    return None
+
+                for attr_name in ("asset_path", "urdf_path", "usd_path"):
+                    attr_val = getattr(spawn, attr_name, None)
+                    if attr_val:
+                        candidate_path = str(attr_val)
+                        break
         if candidate_path is None:
             return None
 

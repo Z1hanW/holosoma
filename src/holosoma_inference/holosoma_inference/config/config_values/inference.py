@@ -118,10 +118,47 @@ g1_29dof_wbt_motion_tracking_transformer = replace(
     task=task.wbt_motion_tracking,
 )
 
+g1_29dof_wbt_object_distill = replace(
+    g1_29dof_wbt,
+    observation=observation.wbt_object_distill,
+    task=replace(
+        task.wbt,
+        use_sim_time=True,
+        auto_start_motion=True,
+        use_sim_state=True,
+    ),
+)
+
+g1_29dof_wbt_object_generalist = replace(
+    g1_29dof_wbt,
+    observation=observation.wbt_object_generalist,
+    task=replace(
+        task.wbt,
+        use_sim_time=True,
+        auto_start_motion=True,
+        use_sim_state=True,
+    ),
+)
+
+g1_29dof_wbt_object_distill_depth = replace(
+    g1_29dof_wbt,
+    observation=observation.wbt_object_distill_depth,
+    task=replace(
+        task.wbt,
+        use_sim_time=True,
+        auto_start_motion=True,
+        use_sim_state=True,
+        use_sim_perception=True,
+    ),
+)
+
 DEFAULTS = {
     "g1-29dof-loco": g1_29dof_loco,
     "t1-29dof-loco": t1_29dof_loco,
     "g1-29dof-wbt": g1_29dof_wbt,
+    "g1-29dof-wbt-object-generalist": g1_29dof_wbt_object_generalist,
+    "g1-29dof-wbt-object-distill": g1_29dof_wbt_object_distill,
+    "g1-29dof-wbt-object-distill-depth": g1_29dof_wbt_object_distill_depth,
     "g1-29dof-videomimic": g1_29dof_videomimic,
     "g1-29dof-videomimic-root": g1_29dof_videomimic_root,
     "g1-29dof-wbt-motion-tracking-transformer": g1_29dof_wbt_motion_tracking_transformer,

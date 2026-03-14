@@ -76,6 +76,15 @@ class ObjectConfig:
     object_urdf_path: str | None = None
     enabled: bool = False
     scale: list[float] | None = None
+    mujoco_add_default_actuators: bool = False
+    mujoco_copy_joint_defaults_from_robot_xml: bool = False
+    mujoco_copy_tendons_from_robot_xml: bool = False
+    mujoco_copy_collision_geoms_from_robot_xml: bool = False
+    mujoco_copy_contact_pairs_from_robot_xml: bool = False
+    mujoco_object_mass_scale: float | None = None
+    mujoco_object_mass_override: float | None = None
+    mujoco_object_geom_friction: list[float] | None = None
+    mujoco_object_terrain_pair_friction: list[float] | None = None
 
 
 @dataclass(frozen=True)

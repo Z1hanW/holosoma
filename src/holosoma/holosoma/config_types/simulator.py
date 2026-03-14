@@ -483,6 +483,46 @@ class BridgeConfig:
     use_ros: bool = False
     """Whether to use ROS for communication."""
 
+    publish_sim_state: bool = False
+    """Publish simulator robot/object state over ZMQ for split sim2sim inference."""
+
+    clock_port: int = 5555
+    """ZMQ port used for split sim2sim simulator clock publishing."""
+
+    sim_state_port: int = 5557
+    """ZMQ port used for split sim2sim simulator state publishing."""
+
+    listen_control: bool = False
+    """Listen for split sim2sim control requests such as reset."""
+
+    control_port: int = 5559
+    """ZMQ port used to receive split sim2sim control requests."""
+
+    publish_perception_obs: bool = False
+    """Publish simulator perception observations over ZMQ for split sim2sim inference."""
+
+    perception_obs_port: int = 5558
+    """ZMQ port used for split sim2sim perception observation publishing."""
+
+    ignore_default_idle_command: bool = False
+    """Ignore backend-provided placeholder low commands when no real command has arrived yet.
+
+    This is primarily useful for MuJoCo split sim2sim, where the Unitree bridge can
+    surface a non-zero default command before inference starts publishing lowcmd.
+    """
+
+    log_first_command_summary: bool = False
+    """Log a one-time summary for the first non-idle lowcmd received by the bridge."""
+
+    hold_default_pose_until_first_command: bool = False
+    """Apply a default-pose PD hold until the first external lowcmd arrives."""
+
+    hold_initial_pose_until_first_command: bool = False
+    """Apply a PD hold at the simulator's current initial joint pose until the first external lowcmd arrives."""
+
+    freeze_until_first_command: bool = False
+    """For split sim2sim, keep MuJoCo physics paused at the initialized state until the first active lowcmd arrives."""
+
 
 @dataclass(frozen=True)
 class SimulatorInitConfig:

@@ -15,6 +15,9 @@ from loguru import logger
 from holosoma.bridge import BasicSdk2Bridge, create_sdk2py_bridge
 from holosoma.config_types.simulator import BridgeConfig
 from holosoma.utils.clock import ClockPub
+from holosoma.utils.perception_obs import PerceptionObsPub
+from holosoma.utils.sim_control import SimControlPull
+from holosoma.utils.sim_state import SimStatePub
 from holosoma.utils.safe_torch_import import torch
 
 if TYPE_CHECKING:
@@ -50,9 +53,13 @@ class SimulatorBridge:
         self.simulator: BaseSimulator = simulator
         self.bridge_config: BridgeConfig = bridge_config
         self.robot_bridge: BasicSdk2Bridge | None = None
+        self.sim_state_pub: SimStatePub | None = None
+        self.perception_obs_pub: PerceptionObsPub | None = None
+        self.sim_control_sub: SimControlPull | None = None
+        self._logged_perception_obs_publish = False
 
         # Initialize clock publisher for WBT motion synchronization
-        self.clock_pub: ClockPub = ClockPub()
+        self.clock_pub: ClockPub = ClockPub(port=self.bridge_config.clock_port)
 
         if self.bridge_config.interface is None:
             interface = self._auto_detect_interface()
@@ -62,6 +69,15 @@ class SimulatorBridge:
         if bridge_config.enabled:
             logger.info("Robot bridge is enabled, initializing...")
             self._init_robot_bridge()
+            if self.bridge_config.publish_sim_state:
+                self.sim_state_pub = SimStatePub(port=self.bridge_config.sim_state_port)
+                self.sim_state_pub.start()
+            if self.bridge_config.listen_control:
+                self.sim_control_sub = SimControlPull(port=self.bridge_config.control_port)
+                self.sim_control_sub.start()
+            if self.bridge_config.publish_perception_obs:
+                self.perception_obs_pub = PerceptionObsPub(port=self.bridge_config.perception_obs_port)
+                self.perception_obs_pub.start()
             # Start clock publisher for motion synchronization
             self.clock_pub.start()
             logger.info("Clock publisher initialized for motion synchronization")
@@ -120,8 +136,12 @@ class SimulatorBridge:
         if not self.robot_bridge:
             return
 
+        self._process_control_requests()
+
         # Publish robot state to SDK
         self.robot_bridge.publish_low_state()
+        self._publish_sim_state()
+        self._publish_perception_obs()
 
         # Handle joystick input if available
         if hasattr(self.robot_bridge, "joystick") and self.robot_bridge.joystick:
@@ -144,6 +164,87 @@ class SimulatorBridge:
         # Publish simulation clock for e.g, WBT policies
         sim_time = self.simulator.time()
         self.clock_pub.publish(sim_time)
+
+    def _process_control_requests(self) -> None:
+        if self.sim_control_sub is None:
+            return
+
+        for payload in self.sim_control_sub.drain():
+            if str(payload.get("action", "")).lower() != "reset":
+                continue
+
+            reason = str(payload.get("reason", "manual"))
+            if hasattr(self.simulator, "_pending_reset"):
+                self.simulator._pending_reset = True
+            logger.info("Queued simulator reset from sim-control channel ({})", reason)
+
+    def _publish_sim_state(self) -> None:
+        if self.sim_state_pub is None:
+            return
+
+        try:
+            robot_root_state = self.simulator.robot_root_states[0].detach().cpu().tolist()
+            actor_states: dict[str, list[float]] = {}
+            env_ids = torch.tensor([0], device=self.simulator.device, dtype=torch.long)
+
+            actor_metadata = getattr(self.simulator, "_actor_root_metadata", {})
+            if isinstance(actor_metadata, dict) and actor_metadata:
+                actor_names = [name for name in actor_metadata if name != "robot"]
+            else:
+                actor_names = list(getattr(self.simulator, "_object_urdf_by_name", {}).keys())
+
+            for name in actor_names:
+                try:
+                    indices = self.simulator.get_actor_indices(name, env_ids=env_ids)
+                    if indices.numel() == 0:
+                        continue
+                    actor_states[name] = self.simulator.all_root_states[indices[0]].detach().cpu().tolist()
+                except Exception as exc:  # pragma: no cover - best effort side-channel
+                    logger.debug("Skipping sim-state actor '{}': {}", name, exc)
+
+            payload = {
+                "sim_time_ms": int(self.simulator.time() * 1000.0),
+                "robot_root_state": robot_root_state,
+                "actors": actor_states,
+            }
+            extra_payload_provider = getattr(self.simulator, "_get_split_sim_state_extra_payload", None)
+            if callable(extra_payload_provider):
+                extra_payload = extra_payload_provider()
+                if isinstance(extra_payload, dict):
+                    payload.update(extra_payload)
+
+            self.sim_state_pub.publish(payload)
+        except Exception as exc:  # pragma: no cover - best effort side-channel
+            logger.debug("Failed to publish sim state: {}", exc)
+
+    def _publish_perception_obs(self) -> None:
+        if self.perception_obs_pub is None:
+            return
+
+        provider = getattr(self.simulator, "_split_sim_perception_provider", None)
+        if not callable(provider):
+            return
+
+        try:
+            perception_obs = provider()
+            if perception_obs is None:
+                return
+            if not self._logged_perception_obs_publish:
+                logger.info("Publishing split sim perception obs with {} values", len(perception_obs))
+                self._logged_perception_obs_publish = True
+            self.perception_obs_pub.publish(
+                {
+                    "sim_time_ms": int(self.simulator.time() * 1000.0),
+                    "perception_obs": perception_obs,
+                }
+            )
+        except Exception as exc:  # pragma: no cover - best effort side-channel
+            logger.warning("Failed to publish perception obs: {}", exc)
+
+    def has_received_external_active_command(self) -> bool:
+        if self.robot_bridge is None:
+            return False
+        return bool(getattr(self.robot_bridge, "received_external_active_command", False))
 
     def is_enabled(self) -> bool:
         """Check if the bridge is enabled and functional.

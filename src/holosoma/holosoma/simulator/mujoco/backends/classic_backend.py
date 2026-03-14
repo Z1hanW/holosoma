@@ -64,8 +64,8 @@ class ClassicBackend(IMujocoBackend):
                 f"Use WarpBackend (use_warp=True) for multi-environment simulation."
             )
 
-        # Pre-allocate contact force tensor
-        self._force_tensor = torch.zeros(1, model.nbody, 3, device=device)
+        # holosoma body tensors exclude MuJoCo's world body (ID 0).
+        self._force_tensor = torch.zeros(1, max(model.nbody - 1, 0), 3, device=device)
 
         logger.info(f"ClassicBackend initialized: {model.nbody} bodies, device={device}")
 
@@ -130,10 +130,10 @@ class ClassicBackend(IMujocoBackend):
             b2 = self.model.geom_bodyid[contact.geom2]
 
             # Apply Newton's 3rd law: body1 gets -force, body2 gets +force
-            if b1 < self.model.nbody:
-                self._force_tensor[0, b1] -= force
-            if b2 < self.model.nbody:
-                self._force_tensor[0, b2] += force
+            if 0 < b1 < self.model.nbody:
+                self._force_tensor[0, b1 - 1] -= force
+            if 0 < b2 < self.model.nbody:
+                self._force_tensor[0, b2 - 1] += force
 
         # Update history: shift old values right, add current at position 0
         contact_history_tensor[:] = torch.cat(

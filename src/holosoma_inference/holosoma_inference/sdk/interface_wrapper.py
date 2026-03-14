@@ -80,6 +80,7 @@ class InterfaceWrapper:
             self.unitree_interface.set_control_mode(unitree_interface.ControlMode.PR)
             control_mode = self.unitree_interface.get_control_mode()
             print(f"Control mode set to: {'PR' if control_mode == unitree_interface.ControlMode.PR else 'AB'}")
+            self._binding_command = self.unitree_interface.create_zero_command()
 
             # GO2 SDK motor order differs from our joint order; override when using the binding.
             if self.robot_config.robot.lower() == "go2":
@@ -181,14 +182,14 @@ class InterfaceWrapper:
 
     def _send_binding_command(self, cmd_q, cmd_dq, cmd_tau, kp_override=None, kd_override=None):
         """Send command using the C++/pybind11 binding."""
-        cmd = self.unitree_interface.create_zero_command()
-        cmd.q_target = list(cmd_q)
-        cmd.dq_target = list(cmd_dq)
-        cmd.tau_ff = list(cmd_tau)
+        cmd = self._binding_command
+        cmd.q_target = [float(value) for value in cmd_q]
+        cmd.dq_target = [float(value) for value in cmd_dq]
+        cmd.tau_ff = [float(value) for value in cmd_tau]
         motor_kp = np.array(kp_override if kp_override is not None else self.robot_config.motor_kp)
         motor_kd = np.array(kd_override if kd_override is not None else self.robot_config.motor_kd)
-        cmd.kp = list(motor_kp * self._kp_level)
-        cmd.kd = list(motor_kd * self._kd_level)
+        cmd.kp = [float(value) for value in motor_kp * self._kp_level]
+        cmd.kd = [float(value) for value in motor_kd * self._kd_level]
         self.unitree_interface.write_low_command(cmd)
 
     # ============================================================================

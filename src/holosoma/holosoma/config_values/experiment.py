@@ -17,6 +17,7 @@ from holosoma.config_values.wbt.g1.experiment import (
     g1_29dof_wbt_w_object,
     g1_29dof_wbt_w_object_distill_sparse_root_cmd,
     g1_29dof_wbt_w_object_distill_sparse_root_cmd_legacy,
+    g1_29dof_wbt_w_object_extend,
     g1_29dof_wbt_w_object_generalist,
     g1_29dof_wbt_w_object_generalist_legacy_obs,
 )
@@ -34,6 +35,7 @@ DEFAULTS = {
     "w_gru": g1_29dof_wbt_videomimic_mlp_w_gru,
     "g1_29dof_wbt_videomimic_transformer": g1_29dof_wbt_videomimic_transformer,
     "g1_29dof_wbt_w_object": g1_29dof_wbt_w_object,
+    "g1_29dof_wbt_w_object_extend": g1_29dof_wbt_w_object_extend,
     "g1_29dof_wbt_w_object_generalist": g1_29dof_wbt_w_object_generalist,
     "g1_29dof_wbt_w_object_generalist_legacy_obs": g1_29dof_wbt_w_object_generalist_legacy_obs,
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd": g1_29dof_wbt_w_object_distill_sparse_root_cmd,

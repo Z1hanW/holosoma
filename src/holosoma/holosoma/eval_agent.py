@@ -69,6 +69,12 @@ class Sim2SimConfig:
     run_policy_args: str = ""
     """Extra args appended to run_policy.py (shell-style string)."""
 
+    sim_python: str | None = None
+    """Python executable used for run_sim.py. Defaults to the current interpreter."""
+
+    policy_python: str | None = None
+    """Python executable used for run_policy.py. Defaults to the current interpreter."""
+
 
 @dataclass(frozen=True)
 class EvalCliConfig:
@@ -94,8 +100,17 @@ def _is_wbt_experiment(config: ExperimentConfig) -> bool:
     return False
 
 
+def _is_object_distill_experiment(config: ExperimentConfig) -> bool:
+    observation_cfg = getattr(config, "observation", None)
+    groups = getattr(observation_cfg, "groups", None)
+    if not isinstance(groups, dict):
+        return False
+    return "actor_obs_box" in groups and ("actor_obs_proprio" in groups or "actor_obs_root" in groups)
+
+
 def _infer_inference_config(config: ExperimentConfig) -> tuple[str, bool]:
     is_wbt = _is_wbt_experiment(config)
+    is_object_distill = _is_object_distill_experiment(config)
     robot_type = config.robot.asset.robot_type
     robot_map = {
         "g1_29dof": "g1-29dof",
@@ -109,7 +124,10 @@ def _infer_inference_config(config: ExperimentConfig) -> tuple[str, bool]:
             f"No default WBT inference config for robot '{robot_type}'. "
             "Pass --sim2sim.inference-config explicitly."
         )
-    suffix = "wbt" if is_wbt else "loco"
+    if is_object_distill:
+        suffix = "wbt-object-distill"
+    else:
+        suffix = "wbt" if is_wbt else "loco"
     return f"inference:{base}-{suffix}", is_wbt
 
 
@@ -165,7 +183,7 @@ def _build_sim2sim_commands(
         run_sim_robot = run_sim_robot.split(":", 1)[1]
 
     run_sim_cmd = [
-        sys.executable,
+        sim2sim_cfg.sim_python or sys.executable,
         "src/holosoma/holosoma/run_sim.py",
         f"simulator:{sim2sim_cfg.simulator}",
         f"robot:{run_sim_robot}",
@@ -179,7 +197,7 @@ def _build_sim2sim_commands(
         run_sim_cmd += shlex.split(sim2sim_cfg.run_sim_args)
 
     run_policy_cmd = [
-        sys.executable,
+        sim2sim_cfg.policy_python or sys.executable,
         "src/holosoma_inference/holosoma_inference/run_policy.py",
         inference_cfg,
         "--task.model-path",

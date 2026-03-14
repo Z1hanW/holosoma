@@ -485,7 +485,7 @@ def create_virtual_gantry(
     attachment_body_names: list[str] | None = None,
     cfg: VirtualGantryCfg | None = None,
     **kwargs: Any,
-) -> VirtualGantry:
+) -> VirtualGantry | None:
     """Factory function to create and setup virtual gantry with automatic body detection.
 
     Attempts to attach the virtual gantry to one of the specified body names,
@@ -510,8 +510,9 @@ def create_virtual_gantry(
 
     Returns
     -------
-    VirtualGantry
-        Configured virtual gantry instance attached to the first found body.
+    VirtualGantry | None
+        Configured virtual gantry instance attached to the first found body, or
+        ``None`` when gantry support is disabled.
 
     Raises
     ------
@@ -534,6 +535,10 @@ def create_virtual_gantry(
     ...     enable=True
     ... )
     """
+    if not enable:
+        logger.info("Virtual gantry disabled by configuration; skipping setup")
+        return None
+
     if attachment_body_names is None:
         # Default names from holosoma_inference, likely needs updating or removing to force users to specify
         attachment_body_names = ["torso_link", "torso", "base_link", "pelvis", "Trunk", "Waist", "base"]

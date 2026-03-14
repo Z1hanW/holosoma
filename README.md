@@ -86,6 +86,7 @@ After training, deploy your policies:
 
 - **Real Robot**: See [Real Robot Locomotion](src/holosoma_inference/docs/workflows/real-robot-locomotion.md) or [Real Robot WBT](src/holosoma_inference/docs/workflows/real-robot-wbt.md)
 - **MuJoCo Simulation**: See [Sim-to-Sim Locomotion](src/holosoma_inference/docs/workflows/sim-to-sim-locomotion.md) or [Sim-to-Sim WBT](src/holosoma_inference/docs/workflows/sim-to-sim-wbt.md)
+- **G1 dance replay with existing `viser`**: Run `bash ./sim2sim_dancing_viser.sh` from the repo root to launch the packaged MuJoCo + inference dance workflow. This path disables the virtual gantry by default, reuses the existing inference-side `viser`, exposes `Reset sim + motion` plus `Auto reset on motion end`, and currently renders the robot with a grid rather than the full MuJoCo scene.
 
 Or browse all deployment options in the [Inference & Deployment Guide](src/holosoma_inference/README.md).
 

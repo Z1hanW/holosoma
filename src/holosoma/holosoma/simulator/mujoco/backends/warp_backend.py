@@ -280,9 +280,8 @@ class WarpBackend(IMujocoBackend):
         contact_history_tensor : torch.Tensor
             Contact force history buffer [num_envs, history_len, num_bodies, 3]
         """
-        # cfrc_ext is already computed by Warp: [num_envs, num_bodies, 6]
-        # Take first 3 components (forces, ignore torques)
-        forces = self.cfrc_t[..., :3]  # [num_envs, num_bodies, 3]
+        # cfrc_ext includes MuJoCo world body at slot 0; holosoma body tensors exclude it.
+        forces = self.cfrc_t[:, 1:, :3]  # [num_envs, num_bodies_without_world, 3]
 
         # Update history: shift old values right, add current at position 0
         contact_history_tensor[:] = torch.cat([forces.unsqueeze(1), contact_history_tensor[:, :-1]], dim=1)
@@ -396,8 +395,8 @@ class WarpBackend(IMujocoBackend):
         torch.Tensor
             Contact forces [num_envs, num_bodies, 3] - native PyTorch tensor
         """
-        # cfrc_ext is [num_envs, num_bodies, 6], take first 3 components (forces only)
-        return self.cfrc_t[..., :3]
+        # cfrc_ext includes MuJoCo world body at slot 0; drop it to match simulator.body_names.
+        return self.cfrc_t[:, 1:, :3]
 
     def create_dof_state_view(self, dof_addrs: dict, num_dof: int) -> BaseMujocoView:
         """Create DOF state view using zero-copy GPU tensors.
@@ -491,15 +490,15 @@ class WarpBackend(IMujocoBackend):
             - angular_vel: [num_envs, num_bodies, 3] - angular velocities
         """
         # Position: already in correct format
-        positions = self.xpos_t  # [N, nbody, 3]
+        positions = self.xpos_t[:, 1:, :]  # [N, nbody_without_world, 3]
 
         # Orientation: convert MuJoCo [w,x,y,z] → holosoma [x,y,z,w]
-        quat_mj = self.xquat_t  # [N, nbody, 4] - [w,x,y,z]
+        quat_mj = self.xquat_t[:, 1:, :]  # [N, nbody_without_world, 4] - [w,x,y,z]
         orientations = quat_mj[..., [1, 2, 3, 0]]  # [x,y,z,w]
 
         # Velocities: split cvel [angular(3), linear(3)]
-        angular_vel = self.cvel_t[..., 0:3]  # [N, nbody, 3]
-        linear_vel = self.cvel_t[..., 3:6]  # [N, nbody, 3]
+        angular_vel = self.cvel_t[:, 1:, 0:3]  # [N, nbody_without_world, 3]
+        linear_vel = self.cvel_t[:, 1:, 3:6]  # [N, nbody_without_world, 3]
 
         return positions, orientations, linear_vel, angular_vel
 

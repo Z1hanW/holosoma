@@ -353,6 +353,15 @@ g1_29dof_wbt_w_object = replace(
     ),
 )
 
+g1_29dof_wbt_w_object_extend = replace(
+    g1_29dof_wbt_w_object,
+    training=replace(
+        g1_29dof_wbt_w_object.training,
+        name="g1_29dof_wbt_w_object_extend",
+    ),
+    reward=reward.g1_29dof_wbt_reward_w_object_extend,
+)
+
 g1_29dof_wbt_w_object_generalist = replace(
     g1_29dof_wbt_w_object,
     training=replace(
@@ -453,6 +462,7 @@ __all__ = [
     "g1_29dof_wbt_fast_sac",
     "g1_29dof_wbt_fast_sac_w_object",
     "g1_29dof_wbt_w_object",
+    "g1_29dof_wbt_w_object_extend",
     "g1_29dof_wbt_w_object_generalist",
     "g1_29dof_wbt_w_object_generalist_legacy_obs",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd",

@@ -92,6 +92,7 @@ class ClockSub:
         self.socket = None
         self.last_clock = 0
         self._offset = 0
+        self._dropped_backward_messages = 0
 
     def start(self):
         """Start the clock subscriber."""
@@ -110,7 +111,18 @@ class ClockSub:
         while True:
             try:
                 message = self.socket.recv_string(zmq.NOBLOCK)
-                self.last_clock = int(message)
+                clock_value = int(message)
+                if clock_value < self.last_clock:
+                    self._dropped_backward_messages += 1
+                    if self._dropped_backward_messages == 1 or self._dropped_backward_messages % 50 == 0:
+                        logger.warning(
+                            "Dropping backward clock sample {} < {} (count={})",
+                            clock_value,
+                            self.last_clock,
+                            self._dropped_backward_messages,
+                        )
+                    continue
+                self.last_clock = clock_value
             except zmq.Again:  # noqa: PERF203
                 break
 
@@ -132,6 +144,7 @@ class ClockSub:
         """Reset the clock origin to the latest received timestamp."""
         self._drain_messages()
         self._offset = self.last_clock
+        self._dropped_backward_messages = 0
 
     def close(self):
         """Close the clock subscriber."""

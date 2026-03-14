@@ -40,6 +40,9 @@ Select the appropriate workflow guide based on your setup:
 #### Simulation (MuJoCo)
 - **[Sim-to-Sim Locomotion](docs/workflows/sim-to-sim-locomotion.md)** - Test locomotion policies in MuJoCo simulation
 - **[Sim-to-Sim Whole Body Tracking](docs/workflows/sim-to-sim-wbt.md)** - Test WBT policies in MuJoCo simulation
+- **[Sim2Sim Verification](docs/workflows/sim2sim.md)** - Split `hsmujoco` + `hsinference` verification for checkpoint + motion clip replay in MuJoCo, including the object-generalist tracking teacher, raw-motion init guidance, and depth-distill checkpoints from `distill_box_perception.sh`
+
+For the packaged G1 dance replay with the existing inference-side `viser`, run `bash ./sim2sim_dancing_viser.sh` from the repo root. This wrapper publishes MuJoCo sim-state into inference for visualization, disables the virtual gantry by default, adds `Reset sim + motion` plus `Auto reset on motion end` in `viser`, and currently renders the robot with a grid only, not the MuJoCo plane or full scene.
 
 Each workflow guide includes:
 - Hardware/environment setup instructions

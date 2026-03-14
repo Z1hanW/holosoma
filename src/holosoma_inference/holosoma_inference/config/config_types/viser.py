@@ -29,3 +29,9 @@ class ViserConfig:
 
     urdf_path: str | None = None
     """Optional override for the robot URDF path used by Viser."""
+
+    enable_reset_gui: bool = True
+    """Show reset controls in the Viser GUI."""
+
+    auto_reset_on_motion_end: bool = True
+    """Automatically reset and restart when the motion clip reaches its final frame."""

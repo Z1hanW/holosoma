@@ -198,6 +198,14 @@ class MotionConfig:
     are paired to terrain columns by clip order.
     """
 
+    object_size_scale: list[float] | None = None
+    """Optional scale applied to motion-provided object-size metadata.
+
+    This is useful when the simulator object asset is scaled at launch time via
+    ``robot.object.scale`` and observations should expose the scaled dimensions
+    instead of the raw motion-bank metadata.
+    """
+
     # noise related
     noise_to_initial_pose: NoiseToInitialPoseConfig = field(default_factory=NoiseToInitialPoseConfig)
 

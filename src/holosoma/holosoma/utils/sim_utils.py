@@ -12,8 +12,10 @@ import sys
 import threading
 import time
 import traceback
+from pathlib import Path
 from typing import Any
 
+import numpy as np
 from loguru import logger
 from typing_extensions import Self
 
@@ -21,10 +23,12 @@ from holosoma.config_types.env import get_tyro_env_config
 from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.config_types.full_sim import FullSimConfig
 from holosoma.config_types.run_sim import RunSimConfig
+from holosoma.managers.perception import PerceptionManager
 from holosoma.managers.terrain.manager import TerrainManager
 from holosoma.utils.common import seeding
 from holosoma.utils.helpers import get_class
 from holosoma.utils.rate import RateLimiter
+from holosoma.utils.rotations import get_euler_xyz, quat_from_euler_xyz
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.simulator_config import SimulatorType, get_simulator_type, set_simulator_type
 from holosoma.utils.torch_utils import to_torch
@@ -357,6 +361,8 @@ class DirectSimulation:
         self.device = device
         self.simulation_app = simulation_app
         self.simulator = env.sim
+        self._perception_env_proxy: _DirectPerceptionEnvProxy | None = None
+        self._perception_manager: PerceptionManager | None = None
 
     def __enter__(self) -> Self:
         """Context manager entry - initialize the simulation.
@@ -392,8 +398,8 @@ class DirectSimulation:
         """
         logger.debug("Initializing simulator...")
 
-        # Need to manually set headless since it's in training config currently
-        self.simulator.set_headless(False)
+        # Need to manually set headless since it's stored in training config.
+        self.simulator.set_headless(bool(self.config.training.headless))
 
         # Step 1: Basic setup
         self.simulator.setup()
@@ -425,6 +431,10 @@ class DirectSimulation:
         self.simulator.on_episode_start(env_id=0)
         logger.debug("simulator.on_episode_start() completed")
 
+        # Optional clip-driven initialization for split sim2sim verification.
+        self._maybe_apply_motion_initial_state()
+        self._maybe_setup_split_sim_perception()
+
         # Step 6: Setup viewer if not headless
         if not self.config.training.headless:
             self.simulator.setup_viewer()
@@ -450,6 +460,7 @@ class DirectSimulation:
 
         # Calculate viewer sync frequency
         viewer_steps = self._calculate_viewer_steps()
+        should_render = not self.config.training.headless
 
         logger.info(f"Simulation rate: {sim_frequency} Hz ({1.0 / sim_frequency * 1000:.2f} ms)")
         logger.info(f"Viewer rate: {1 / self.config.viewer_dt:.1f} Hz (sync every {viewer_steps} steps)")
@@ -480,7 +491,7 @@ class DirectSimulation:
                 self.simulator.simulate_at_each_physics_step()
 
                 # Update viewer at display rate
-                if step_count % viewer_steps == 0:
+                if should_render and step_count % viewer_steps == 0:
                     self.simulator.render()
 
                 # Periodic FPS logging (every 1000 steps)
@@ -506,6 +517,9 @@ class DirectSimulation:
 
     def cleanup(self) -> None:
         """Handle simulation cleanup."""
+        if hasattr(self.simulator, "_split_sim_perception_provider"):
+            self.simulator._split_sim_perception_provider = None
+
         # Cleanup environment
         if hasattr(self.env, "close"):
             self.env.close()
@@ -516,6 +530,209 @@ class DirectSimulation:
         # Cleanup simulation app
         if self.simulation_app:
             close_simulation_app(self.simulation_app)
+
+    @staticmethod
+    def _decode_names(values: np.ndarray) -> list[str]:
+        decoded: list[str] = []
+        for item in values.tolist():
+            if isinstance(item, (bytes, bytearray, np.bytes_)):
+                decoded.append(item.decode("utf-8"))
+            else:
+                decoded.append(str(item))
+        return decoded
+
+    @staticmethod
+    def _resolve_root_body_index(body_names: list[str]) -> int:
+        for candidate in ("pelvis", "pelvis_link", "base_link", "torso_link"):
+            if candidate in body_names:
+                return body_names.index(candidate)
+        for idx, name in enumerate(body_names):
+            if name.lower() != "world":
+                return idx
+        return 0
+
+    def _maybe_setup_split_sim_perception(self) -> None:
+        bridge_cfg = self.config.simulator.config.bridge
+        wants_publish = bool(getattr(bridge_cfg, "publish_perception_obs", False))
+        if not self.config.perception.enabled:
+            if wants_publish:
+                raise ValueError(
+                    "split sim2sim perception publishing requires a perception config, "
+                    "e.g. perception:camera_depth_d435i"
+                )
+            return
+
+        self._perception_env_proxy = _DirectPerceptionEnvProxy(
+            simulator=self.simulator,
+            terrain_manager=self.simulator.terrain_manager,
+            robot_config=self.config.robot,
+            dt=float(self.simulator.sim_dt),
+            device=self.device,
+        )
+        self._perception_manager = PerceptionManager(self.config.perception, self._perception_env_proxy, self.device)
+        self._perception_manager.setup()
+        self._perception_manager.reset()
+        self._perception_manager.update()
+        logger.info(
+            "Split sim perception initialized: mode={} camera_source={}",
+            self.config.perception.output_mode,
+            self.config.perception.camera_source,
+        )
+
+        if wants_publish:
+            self.simulator._split_sim_perception_provider = self._get_split_sim_perception_obs
+
+    def _get_split_sim_perception_obs(self) -> list[float] | None:
+        if self._perception_manager is None:
+            return None
+
+        self._perception_manager.update()
+        perception_obs = self._perception_manager.get_obs()
+        if perception_obs.ndim != 2 or perception_obs.shape[0] < 1:
+            raise RuntimeError(f"Unexpected perception observation shape: {tuple(perception_obs.shape)}")
+        return perception_obs[0].detach().cpu().to(torch.float32).tolist()
+
+    def _maybe_apply_motion_initial_state(self) -> None:
+        motion_init_cfg = self.config.motion_init
+        if not motion_init_cfg.enabled:
+            return
+        if not motion_init_cfg.motion_file:
+            raise ValueError("run_sim.motion_init.enabled=True requires --motion-init.motion-file")
+
+        motion_path = Path(motion_init_cfg.motion_file).expanduser().resolve()
+        if motion_path.suffix.lower() != ".npz":
+            raise ValueError(f"run_sim.motion_init currently supports only .npz clips, got: {motion_path}")
+
+        env_ids = torch.tensor([0], device=self.device, dtype=torch.long)
+        with np.load(motion_path, allow_pickle=True) as data:
+            body_names = self._decode_names(np.asarray(data["body_names"]))
+            joint_names = self._decode_names(np.asarray(data["joint_names"]))
+            frame_count = int(np.asarray(data["joint_pos"]).shape[0])
+            frame_idx = int(np.clip(motion_init_cfg.frame_idx, 0, max(frame_count - 1, 0)))
+            init_mode = str(getattr(motion_init_cfg, "mode", "raw_motion")).strip().lower().replace("-", "_")
+
+            joint_pos = np.asarray(data["joint_pos"][frame_idx], dtype=np.float32)
+            if joint_pos.shape[0] == len(joint_names) + 7:
+                joint_pos = joint_pos[7:]
+            joint_vel = np.asarray(data["joint_vel"][frame_idx], dtype=np.float32)
+            if joint_vel.shape[0] == len(joint_names) + 6:
+                joint_vel = joint_vel[6:]
+
+            root_idx = self._resolve_root_body_index(body_names)
+            body_pos_w = np.asarray(data["body_pos_w"][frame_idx], dtype=np.float32)
+            body_quat_w = np.asarray(data["body_quat_w"][frame_idx], dtype=np.float32)
+            body_lin_vel_w = np.asarray(data["body_lin_vel_w"][frame_idx], dtype=np.float32)
+            body_ang_vel_w = np.asarray(data["body_ang_vel_w"][frame_idx], dtype=np.float32)
+
+            root_pos = body_pos_w[root_idx]
+            root_quat_wxyz = body_quat_w[root_idx]
+            root_lin_vel = body_lin_vel_w[root_idx]
+            root_ang_vel = body_ang_vel_w[root_idx]
+
+            joint_name_to_index = {name: i for i, name in enumerate(joint_names)}
+            dof_pos = np.array(self.simulator.dof_pos[0].detach().cpu().numpy(), dtype=np.float32, copy=True)
+            dof_vel = np.array(self.simulator.dof_vel[0].detach().cpu().numpy(), dtype=np.float32, copy=True)
+            if init_mode == "raw_motion":
+                for sim_idx, sim_name in enumerate(self.simulator.dof_names):
+                    clip_idx = joint_name_to_index.get(sim_name)
+                    if clip_idx is None:
+                        continue
+                    dof_pos[sim_idx] = float(joint_pos[clip_idx])
+                    dof_vel[sim_idx] = float(joint_vel[clip_idx])
+                root_quat_xyzw = np.array(
+                    [root_quat_wxyz[1], root_quat_wxyz[2], root_quat_wxyz[3], root_quat_wxyz[0]],
+                    dtype=np.float32,
+                )
+            elif init_mode == "training_default_pose":
+                init_state = self.config.robot.init_state
+                default_joint_angles = getattr(init_state, "default_joint_angles", {}) or {}
+                for sim_idx, sim_name in enumerate(self.simulator.dof_names):
+                    if sim_name in default_joint_angles:
+                        dof_pos[sim_idx] = float(default_joint_angles[sim_name])
+                init_root_quat = torch.tensor(init_state.rot, dtype=torch.float32, device=self.device).unsqueeze(0)
+                init_roll, init_pitch, _ = get_euler_xyz(init_root_quat, w_last=True)
+                motion_root_quat = torch.tensor(root_quat_wxyz, dtype=torch.float32, device=self.device).unsqueeze(0)
+                _, _, motion_yaw = get_euler_xyz(motion_root_quat, w_last=False)
+                default_root_quat_xyzw = quat_from_euler_xyz(
+                    init_roll.squeeze(0),
+                    init_pitch.squeeze(0),
+                    motion_yaw.squeeze(0),
+                )
+                root_pos = np.array([root_pos[0], root_pos[1], init_state.pos[2]], dtype=np.float32)
+                root_quat_xyzw = default_root_quat_xyzw.squeeze(0).detach().cpu().numpy().astype(np.float32, copy=False)
+                root_lin_vel = np.asarray(init_state.lin_vel, dtype=np.float32)
+                root_ang_vel = np.asarray(init_state.ang_vel, dtype=np.float32)
+                dof_vel = np.zeros_like(dof_pos, dtype=np.float32)
+            else:
+                raise ValueError(
+                    f"Unsupported motion-init.mode='{motion_init_cfg.mode}'. "
+                    "Expected 'raw_motion' or 'training_default_pose'."
+                )
+
+            root_state = torch.tensor(
+                [[*root_pos.tolist(), *root_quat_xyzw.tolist(), *root_lin_vel.tolist(), *root_ang_vel.tolist()]],
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self.simulator.robot_root_states[0] = root_state[0]
+
+            dof_state = torch.stack(
+                [
+                    torch.tensor(dof_pos, device=self.device, dtype=torch.float32),
+                    torch.tensor(dof_vel, device=self.device, dtype=torch.float32),
+                ],
+                dim=-1,
+            ).unsqueeze(0)
+            self.simulator.set_dof_state_tensor_robots(env_ids, dof_state)
+            self.simulator.set_actor_root_state_tensor_robots(env_ids, root_state)
+
+            if "object_pos_w" in data and motion_init_cfg.object_name:
+                object_pos = np.asarray(data["object_pos_w"][frame_idx], dtype=np.float32)
+                object_quat_wxyz = np.asarray(data["object_quat_w"][frame_idx], dtype=np.float32)
+                object_quat_xyzw = np.array(
+                    [object_quat_wxyz[1], object_quat_wxyz[2], object_quat_wxyz[3], object_quat_wxyz[0]],
+                    dtype=np.float32,
+                )
+                object_lin_vel = np.asarray(data["object_lin_vel_w"][frame_idx], dtype=np.float32)
+                object_ang_vel = np.asarray(data["object_ang_vel_w"][frame_idx], dtype=np.float32)
+                object_state = torch.tensor(
+                    [[*object_pos.tolist(), *object_quat_xyzw.tolist(), *object_lin_vel.tolist(), *object_ang_vel.tolist()]],
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+                self.simulator.set_actor_states([motion_init_cfg.object_name], env_ids, object_state)
+
+        if hasattr(self.simulator, "write_state_updates"):
+            self.simulator.write_state_updates()
+        else:
+            self.simulator.refresh_sim_tensors()
+        try:
+            robot_root_state = self.simulator.robot_root_states[0].detach().cpu().numpy().astype(np.float32, copy=False)
+            object_state = None
+            if "object_pos_w" in data and motion_init_cfg.object_name:
+                object_env_ids = torch.tensor([0], device=self.device, dtype=torch.long)
+                object_state = (
+                    self.simulator.get_actor_states([motion_init_cfg.object_name], object_env_ids)[0]
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32, copy=False)
+                )
+            logger.info(
+                "Motion-init readback: robot_root_state={}{}",
+                np.array2string(robot_root_state, precision=4),
+                ""
+                if object_state is None
+                else f", object_state={np.array2string(object_state, precision=4)}",
+            )
+        except Exception as exc:
+            logger.warning("Failed to read back motion-init state: {}", exc)
+        logger.info(
+            "Initialized direct simulation from motion frame {} using mode '{}': {}",
+            frame_idx,
+            init_mode,
+            motion_path.name,
+        )
 
     def _create_base_init_state(self) -> torch.Tensor:
         """Create base initialization state tensor from robot configuration.
@@ -564,3 +781,26 @@ class DirectSimulation:
         fps = 1000 / elapsed
         logger.info(f"Simulation FPS: {fps:.1f}")
         return time.time()
+
+
+class _DirectPerceptionEnvProxy:
+    """Minimal env facade required by PerceptionManager during direct sim runs."""
+
+    def __init__(self, simulator: Any, terrain_manager: Any, robot_config: Any, dt: float, device: str):
+        self.simulator = simulator
+        self.terrain_manager = terrain_manager
+        self.robot_config = robot_config
+        self.dt = dt
+        self.device = device
+        self.num_envs = int(getattr(simulator, "num_envs", 1))
+        self.logger = logger
+        self._perception_camera_offset_pos = None
+        self._perception_camera_offset_quat = None
+
+    @property
+    def body_names(self) -> list[str]:
+        return list(getattr(self.simulator, "body_names", []))
+
+    @property
+    def base_quat(self):
+        return self.simulator.base_quat

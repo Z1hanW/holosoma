@@ -23,6 +23,92 @@ def _get_motion_command_and_assert_type(env: WholeBodyTrackingManager) -> Motion
     return motion_command
 
 
+def _get_cached_name_subset_indexes(
+    env: WholeBodyTrackingManager,
+    *,
+    cache_name: str,
+    all_names: list[str],
+    names: list[str] | tuple[str, ...] | None = None,
+    pattern: str | None = None,
+) -> torch.Tensor:
+    cache = getattr(env, cache_name, None)
+    if cache is None:
+        cache = {}
+        setattr(env, cache_name, cache)
+
+    key = (tuple(names) if names is not None else None, pattern)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    if names is not None:
+        missing = [name for name in names if name not in all_names]
+        if missing:
+            raise ValueError(f"Requested names {missing} are not available in {all_names}.")
+        indexes = [all_names.index(name) for name in names]
+    elif pattern:
+        regex = re.compile(pattern)
+        indexes = [idx for idx, name in enumerate(all_names) if regex.match(name)]
+    else:
+        indexes = list(range(len(all_names)))
+
+    if not indexes:
+        raise ValueError(
+            f"No names matched names={list(names) if names is not None else None} "
+            f"pattern={pattern!r} in {all_names}."
+        )
+
+    tensor = torch.tensor(indexes, dtype=torch.long, device=env.device)
+    cache[key] = tensor
+    return tensor
+
+
+def _get_tracked_body_subset_indexes(
+    env: WholeBodyTrackingManager,
+    motion_command: MotionCommand,
+    *,
+    body_names: list[str] | tuple[str, ...] | None = None,
+    body_name_pattern: str | None = None,
+) -> torch.Tensor:
+    return _get_cached_name_subset_indexes(
+        env,
+        cache_name="_wbt_reward_tracked_body_subset_cache",
+        all_names=list(motion_command.motion_cfg.body_names_to_track),
+        names=body_names,
+        pattern=body_name_pattern,
+    )
+
+
+def _get_dof_subset_indexes(
+    env: WholeBodyTrackingManager,
+    *,
+    dof_names: list[str] | tuple[str, ...] | None = None,
+    dof_name_pattern: str | None = None,
+) -> torch.Tensor:
+    return _get_cached_name_subset_indexes(
+        env,
+        cache_name="_wbt_reward_dof_subset_cache",
+        all_names=list(env.simulator.dof_names),
+        names=dof_names,
+        pattern=dof_name_pattern,
+    )
+
+
+def _get_sim_body_subset_indexes(
+    env: WholeBodyTrackingManager,
+    *,
+    body_names: list[str] | tuple[str, ...] | None = None,
+    body_name_pattern: str | None = None,
+) -> torch.Tensor:
+    return _get_cached_name_subset_indexes(
+        env,
+        cache_name="_wbt_reward_sim_body_subset_cache",
+        all_names=list(env.simulator.body_names),  # type: ignore[attr-defined]
+        names=body_names,
+        pattern=body_name_pattern,
+    )
+
+
 #########################################################################################################
 ## terms same to managers/reward/terms/locomotion.py
 #########################################################################################################
@@ -84,27 +170,101 @@ def motion_global_ref_orientation_error_exp(env: WholeBodyTrackingManager, sigma
     return torch.exp(-error / sigma**2)
 
 
-def motion_relative_body_position_error_exp(env: WholeBodyTrackingManager, sigma: float) -> torch.Tensor:
+def motion_relative_body_position_error_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+    body_names: list[str] | None = None,
+    body_name_pattern: str | None = None,
+) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     error = torch.sum(torch.square(motion_command.body_pos_relative_w - motion_command.robot_body_pos_w), dim=-1)
+    body_indexes = _get_tracked_body_subset_indexes(
+        env,
+        motion_command,
+        body_names=body_names,
+        body_name_pattern=body_name_pattern,
+    )
+    error = error.index_select(1, body_indexes)
     return torch.exp(-error.mean(-1) / sigma**2)
 
 
-def motion_relative_body_orientation_error_exp(env: WholeBodyTrackingManager, sigma: float) -> torch.Tensor:
+def motion_relative_body_orientation_error_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+    body_names: list[str] | None = None,
+    body_name_pattern: str | None = None,
+) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     error = quat_error_magnitude(motion_command.body_quat_relative_w, motion_command.robot_body_quat_w) ** 2
+    body_indexes = _get_tracked_body_subset_indexes(
+        env,
+        motion_command,
+        body_names=body_names,
+        body_name_pattern=body_name_pattern,
+    )
+    error = error.index_select(1, body_indexes)
     return torch.exp(-error.mean(-1) / sigma**2)
 
 
-def motion_global_body_lin_vel(env: WholeBodyTrackingManager, sigma: float) -> torch.Tensor:
+def motion_global_body_lin_vel(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+    body_names: list[str] | None = None,
+    body_name_pattern: str | None = None,
+) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     error = torch.sum(torch.square(motion_command.body_lin_vel_w - motion_command.robot_body_lin_vel_w), dim=-1)
+    body_indexes = _get_tracked_body_subset_indexes(
+        env,
+        motion_command,
+        body_names=body_names,
+        body_name_pattern=body_name_pattern,
+    )
+    error = error.index_select(1, body_indexes)
     return torch.exp(-error.mean(-1) / sigma**2)
 
 
-def motion_global_body_ang_vel(env: WholeBodyTrackingManager, sigma: float) -> torch.Tensor:
+def motion_global_body_ang_vel(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+    body_names: list[str] | None = None,
+    body_name_pattern: str | None = None,
+) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     error = torch.sum(torch.square(motion_command.body_ang_vel_w - motion_command.robot_body_ang_vel_w), dim=-1)
+    body_indexes = _get_tracked_body_subset_indexes(
+        env,
+        motion_command,
+        body_names=body_names,
+        body_name_pattern=body_name_pattern,
+    )
+    error = error.index_select(1, body_indexes)
+    return torch.exp(-error.mean(-1) / sigma**2)
+
+
+def motion_joint_position_error_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+    dof_names: list[str] | None = None,
+    dof_name_pattern: str | None = None,
+) -> torch.Tensor:
+    motion_command = _get_motion_command_and_assert_type(env)
+    error = torch.square(motion_command.joint_pos - env.simulator.dof_pos)
+    dof_indexes = _get_dof_subset_indexes(env, dof_names=dof_names, dof_name_pattern=dof_name_pattern)
+    error = error.index_select(1, dof_indexes)
+    return torch.exp(-error.mean(-1) / sigma**2)
+
+
+def motion_joint_velocity_error_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+    dof_names: list[str] | None = None,
+    dof_name_pattern: str | None = None,
+) -> torch.Tensor:
+    motion_command = _get_motion_command_and_assert_type(env)
+    error = torch.square(motion_command.joint_vel - env.simulator.dof_vel)
+    dof_indexes = _get_dof_subset_indexes(env, dof_names=dof_names, dof_name_pattern=dof_name_pattern)
+    error = error.index_select(1, dof_indexes)
     return torch.exp(-error.mean(-1) / sigma**2)
 
 
@@ -123,6 +283,35 @@ def object_global_ref_orientation_error_exp(env: WholeBodyTrackingManager, sigma
     motion_command = _get_motion_command_and_assert_type(env)
     error = quat_error_magnitude(motion_command.object_quat_w, motion_command.simulator_object_quat_w) ** 2
     return torch.exp(-error / sigma**2)
+
+
+def body_contact_reward(
+    env: WholeBodyTrackingManager,
+    threshold: float = 1.0,
+    force_scale: float = 25.0,
+    reward_mode: str = "binary",
+    body_names: list[str] | None = None,
+    body_name_pattern: str | None = None,
+) -> torch.Tensor:
+    body_indexes = _get_sim_body_subset_indexes(
+        env,
+        body_names=body_names,
+        body_name_pattern=body_name_pattern,
+    )
+    contact_forces = env.simulator.contact_forces_history[:, :, body_indexes]
+    magnitudes = torch.norm(contact_forces, dim=-1)
+    peak_force = torch.max(magnitudes, dim=1)[0]
+
+    if reward_mode == "binary":
+        reward = (peak_force > threshold).to(dtype=torch.float32)
+    elif reward_mode == "linear":
+        reward = torch.clamp((peak_force - threshold) / max(force_scale, 1.0e-6), min=0.0, max=1.0)
+    elif reward_mode == "tanh":
+        reward = torch.tanh(torch.clamp(peak_force - threshold, min=0.0) / max(force_scale, 1.0e-6))
+    else:
+        raise ValueError(f"Unsupported reward_mode '{reward_mode}'. Use one of: binary, linear, tanh.")
+
+    return reward.mean(dim=1)
 
 
 # ================================================================================================

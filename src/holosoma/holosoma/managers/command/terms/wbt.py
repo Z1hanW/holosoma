@@ -50,9 +50,11 @@ class MotionLoader:
         device: str = "cpu",
         motion_clip_id: int | None = None,
         motion_clip_name: str | None = None,
+        object_size_scale: list[float] | None = None,
     ):
         self._robot_body_names = list(robot_body_names)
         self._robot_joint_names = list(robot_joint_names)
+        self._object_size_scale = self._normalize_object_size_scale(object_size_scale)
 
         # Resolve the motion file path using importlib.resources
         motion_file = resolve_data_file_path(motion_file)
@@ -89,6 +91,32 @@ class MotionLoader:
         self._joint_indexes = joint_indexes
         self._body_indexes = body_indexes
         self.time_step_total = self._joint_pos.shape[0]
+        self._apply_object_size_scale()
+
+    @staticmethod
+    def _normalize_object_size_scale(raw_scale: list[float] | None) -> np.ndarray | None:
+        if raw_scale is None:
+            return None
+        arr = np.asarray(raw_scale, dtype=np.float32).reshape(-1)
+        if arr.size == 0:
+            return None
+        if arr.size == 1:
+            value = float(arr[0])
+            return np.array([value, value, value], dtype=np.float32)
+        if arr.size == 3:
+            return arr.astype(np.float32, copy=False)
+        raise ValueError(
+            "MotionConfig.object_size_scale must have length 1 or 3. "
+            f"Got shape {arr.shape} from value {raw_scale!r}."
+        )
+
+    def _apply_object_size_scale(self) -> None:
+        if self._object_size_scale is None or not hasattr(self, "_object_size"):
+            return
+        if self._object_size.numel() == 0:
+            return
+        scale = torch.tensor(self._object_size_scale, dtype=self._object_size.dtype, device=self._object_size.device)
+        self._object_size = self._object_size * scale.view(1, 3)
 
     @classmethod
     def _normalize_object_size_array(cls, raw: np.ndarray, length: int, *, source: str) -> np.ndarray:
@@ -1187,6 +1215,7 @@ class MotionCommand(CommandTermBase):
             device=self.device,
             motion_clip_id=self.motion_cfg.motion_clip_id,
             motion_clip_name=self.motion_cfg.motion_clip_name,
+            object_size_scale=self.motion_cfg.object_size_scale,
         )
         self.multi_clip = self.motion.num_clips > 1
         if self.multi_clip:
@@ -1212,8 +1241,9 @@ class MotionCommand(CommandTermBase):
 
         # 3. get the name of the object, or indices of the object
         if self.motion.has_object:
-            assert self._env.simulator.get_simulator_type() == SimulatorType.ISAACSIM, (
-                "Object is only supported in IsaacSim"
+            simulator_type = self._env.simulator.get_simulator_type()
+            assert simulator_type in {SimulatorType.ISAACSIM, SimulatorType.MUJOCO}, (
+                f"Object carry motions currently support IsaacSim or MuJoCo, got {simulator_type}."
             )
             self._configure_simulator_object_mapping()
             self._configure_debug_representative_clips()

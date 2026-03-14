@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import sys
 import threading
 import time
@@ -62,6 +63,12 @@ class BasePolicy:
         self._viser_viewer = None
         self._viser_update_interval = 1
         self._viser_step_count = 0
+        self._clip_joint_targets = str(os.getenv("HOLOSOMA_CLIP_JOINT_TARGETS", "1")).lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
     # ============================================================================
     # Initialization Methods
@@ -166,7 +173,16 @@ class BasePolicy:
         self.actor_obs_group_order = self._build_actor_obs_group_order()
 
     def _build_actor_obs_group_order(self) -> list[str]:
-        order = ["actor_obs"]
+        if "actor_obs_proprio" in self.obs_dict or "actor_obs_box" in self.obs_dict:
+            order = [
+                group_name
+                for group_name in ("actor_obs_root", "actor_obs_torso", "actor_obs_proprio", "actor_obs_box")
+                if group_name in self.obs_dict
+            ]
+            if order:
+                return order
+
+        order = ["actor_obs"] if "actor_obs" in self.obs_dict else []
         if "actor_obs_target" in self.obs_dict:
             order.append("actor_obs_target")
         if "motion_future_target_poses" in self.obs_dict:
@@ -206,7 +222,8 @@ class BasePolicy:
 
     def _init_policy_components(self, model_path, policy_action_scale, rl_rate):
         """Initialize policy-related components."""
-        self.policy_action_scale = policy_action_scale
+        self.policy_action_scale = float(policy_action_scale)
+        self.policy_action_scales = np.full((1, self.num_dofs), self.policy_action_scale, dtype=np.float32)
         self.rl_rate = rl_rate
         self.model_paths = self._collect_model_paths(model_path)
         self._policy_states: list[dict] = []
@@ -265,6 +282,8 @@ class BasePolicy:
             "policy_callable": self.policy,
             "onnx_kp": self.onnx_kp,
             "onnx_kd": self.onnx_kd,
+            "onnx_metadata": getattr(self, "_onnx_metadata", None),
+            "policy_action_scales": self.policy_action_scales.copy(),
         }
 
     def _restore_policy_state(self, state: dict):
@@ -275,6 +294,8 @@ class BasePolicy:
         self.policy = state["policy_callable"]
         self.onnx_kp = state["onnx_kp"]
         self.onnx_kd = state["onnx_kd"]
+        self._onnx_metadata = state.get("onnx_metadata")
+        self.policy_action_scales = state["policy_action_scales"].copy()
 
     def _activate_policy(self, index: int, announce: bool = True):
         """Activate a preloaded policy."""
@@ -316,6 +337,7 @@ class BasePolicy:
     def _init_command_components(self):
         """Initialize control-related components and commands."""
         self.use_policy_action = False
+        self._pending_noninteractive_policy_start = False
         self.init_count = 0
         self.get_ready_state = False
         self.desired_base_height = self.config.task.desired_base_height
@@ -363,12 +385,51 @@ class BasePolicy:
         self._viser_update_interval = max(1, int(update_interval))
         self._viser_step_count = 0
 
+    def _get_viser_state_data(self, robot_state_data):
+        """Return the state payload to send to the optional Viser viewer."""
+        return robot_state_data
+
+    def _has_valid_robot_state(self, robot_state_data: np.ndarray) -> bool:
+        if robot_state_data is None or robot_state_data.ndim != 2 or robot_state_data.shape[0] < 1:
+            return False
+        quat = robot_state_data[0, 3:7]
+        if float(np.linalg.norm(quat)) < 0.5:
+            return False
+        joint_pos = robot_state_data[0, 7 : 7 + self.num_dofs]
+        return bool(np.any(np.abs(joint_pos) > 1e-6) or np.any(np.abs(quat) > 1e-6))
+
     def _maybe_update_viser(self) -> None:
         if self._viser_viewer is None or self.last_robot_state_data is None:
             return
         if self._viser_step_count % self._viser_update_interval == 0:
             self._viser_viewer.update(self.last_robot_state_data)
         self._viser_step_count += 1
+
+    def _maybe_handle_viser_requests(self) -> None:
+        if self._viser_viewer is None:
+            return
+        consume_reset_requested = getattr(self._viser_viewer, "consume_reset_requested", None)
+        if callable(consume_reset_requested) and consume_reset_requested():
+            self._handle_viser_reset_request()
+
+    def _handle_viser_reset_request(self) -> None:
+        """Handle reset requests coming from the optional Viser GUI."""
+
+    def _can_finish_pending_policy_start(self, robot_state_data: np.ndarray) -> bool:  # noqa: ARG002
+        return True
+
+    def _after_auto_start_policy(self) -> None:
+        """Hook invoked after auto-starting the policy from a valid state."""
+
+    def _maybe_auto_start_rollout(self) -> None:
+        """Hook for derived policies to auto-start task-specific rollout state."""
+
+    def _should_auto_start_policy_immediately(self) -> bool:
+        """Hook for derived policies to gate base auto-start behavior."""
+        return True
+
+    def _on_run_exit(self) -> None:
+        """Hook for derived policies to cleanup run-time resources."""
 
     def _init_rate_handler(self):
         """Initialize ROS handler if enabled."""
@@ -412,8 +473,12 @@ class BasePolicy:
         if not sys.stdin.isatty():
             self.logger.warning("Not running in a TTY environment - keyboard input disabled")
             self.logger.warning("This is normal for automated tests or non-interactive environments")
-            self.logger.info("Auto-starting policy in non-interactive mode")
-            self.use_policy_action = True
+            if self.config.task.defer_policy_start_until_valid_state:
+                self.logger.info("Deferring policy auto-start until a valid robot state is received")
+                self._pending_noninteractive_policy_start = True
+            else:
+                self.logger.info("Auto-starting policy in non-interactive mode")
+                self.use_policy_action = True
             return
         # Start keyboard listener in a daemon thread
         threading.Thread(target=self.start_key_listener, daemon=True).start()
@@ -437,6 +502,7 @@ class BasePolicy:
         metadata = {}
         for prop in onnx_model.metadata_props:
             metadata[prop.key] = json.loads(prop.value)
+        self._onnx_metadata = metadata
 
         # Extract KP/KD from metadata (will be None if not present)
         self.onnx_kp = np.array(metadata["kp"]) if "kp" in metadata else None
@@ -444,6 +510,8 @@ class BasePolicy:
 
         if self.onnx_kp is not None:
             logger.info(f"Loaded KP/KD from ONNX metadata: {Path(model_path).name}")
+
+        self._set_policy_action_scales_from_metadata(metadata)
 
         def policy_act(obs_dict):
             # For example,obs_dict contains:
@@ -504,6 +572,79 @@ class BasePolicy:
                 f"KD array length ({len(kd_values)}) does not match num_motors ({self.robot_config.num_motors})"
             )
 
+    def _resolve_motor_kp_from_control_cfg(self, control_cfg: dict) -> np.ndarray | None:
+        stiffness_cfg = control_cfg.get("stiffness")
+        if not isinstance(stiffness_cfg, dict):
+            return None
+
+        joint_kp = np.zeros(self.num_dofs, dtype=np.float32)
+        for i, name in enumerate(self.dof_names):
+            matched = False
+            for dof_name, stiffness in stiffness_cfg.items():
+                if dof_name in name:
+                    joint_kp[i] = float(stiffness)
+                    matched = True
+            if not matched:
+                return None
+
+        motor_kp = np.zeros(self.robot_config.num_motors, dtype=np.float32)
+        joint2motor = tuple(self.robot_config.joint2motor)
+        for joint_idx, kp in enumerate(joint_kp):
+            motor_kp[joint2motor[joint_idx]] = kp
+        return motor_kp
+
+    def _set_policy_action_scales_from_metadata(self, metadata: dict) -> None:
+        scale_array = np.full((self.num_dofs,), self.policy_action_scale, dtype=np.float32)
+
+        experiment_cfg = metadata.get("experiment_config", {})
+        if not isinstance(experiment_cfg, dict):
+            self.policy_action_scales = scale_array.reshape(1, -1)
+            return
+
+        control_cfg = experiment_cfg.get("robot", {}).get("control", {})
+        if not isinstance(control_cfg, dict):
+            self.policy_action_scales = scale_array.reshape(1, -1)
+            return
+
+        base_scale = control_cfg.get("action_scale")
+        if base_scale is not None:
+            self.policy_action_scale = float(base_scale)
+            scale_array.fill(self.policy_action_scale)
+
+        if not control_cfg.get("action_scales_by_effort_limit_over_p_gain", False):
+            self.policy_action_scales = scale_array.reshape(1, -1)
+            return
+
+        motor_kp = self.onnx_kp
+        if motor_kp is None:
+            motor_kp = self._resolve_motor_kp_from_control_cfg(control_cfg)
+        if motor_kp is None:
+            logger.warning("Training metadata requested per-joint action scaling, but KP values were unavailable.")
+            self.policy_action_scales = scale_array.reshape(1, -1)
+            return
+
+        motor_kp = np.asarray(motor_kp, dtype=np.float32)
+        motor_effort = np.asarray(self.robot_config.motor_effort_limit, dtype=np.float32)
+        if motor_kp.shape[0] != self.robot_config.num_motors or motor_effort.shape[0] != self.robot_config.num_motors:
+            logger.warning(
+                "Skipping per-joint action scaling due to shape mismatch: kp={}, effort={}, num_motors={}",
+                motor_kp.shape,
+                motor_effort.shape,
+                self.robot_config.num_motors,
+            )
+            self.policy_action_scales = scale_array.reshape(1, -1)
+            return
+
+        joint2motor = np.asarray(self.robot_config.joint2motor, dtype=np.int64)
+        for joint_idx in range(self.num_dofs):
+            motor_idx = int(joint2motor[joint_idx])
+            stiffness = float(motor_kp[motor_idx])
+            effort = float(motor_effort[motor_idx])
+            scale_array[joint_idx] = 0.0 if stiffness == 0.0 else self.policy_action_scale * effort / stiffness
+
+        self.policy_action_scales = scale_array.reshape(1, -1)
+        logger.info("Using training-aligned per-joint action scales from ONNX metadata")
+
     def _calculate_obs_dim_dict(self):
         """Calculate observation dimensions for each observation type."""
         obs_dim_dict = {}
@@ -520,7 +661,7 @@ class BasePolicy:
         policy_action = np.clip(policy_action, -100, 100)
 
         self.last_policy_action = policy_action.copy()
-        self.scaled_policy_action = policy_action * self.policy_action_scale
+        self.scaled_policy_action = policy_action * self.policy_action_scales
 
         return self.scaled_policy_action
 
@@ -605,9 +746,9 @@ class BasePolicy:
     def prepare_obs_for_rl(self, robot_state_data):
         """Prepare observations for RL inference."""
         group_outputs = self._prepare_group_observations(robot_state_data)
-        if "actor_obs" not in group_outputs:
-            raise KeyError("Observation group 'actor_obs' is not configured for this policy.")
         if self.actor_obs_group_order == ["actor_obs"]:
+            if "actor_obs" not in group_outputs:
+                raise KeyError("Observation group 'actor_obs' is not configured for this policy.")
             actor_obs = group_outputs["actor_obs"]
         else:
             parts = []
@@ -616,7 +757,9 @@ class BasePolicy:
                     raise KeyError(f"Observation group '{group_name}' is not configured for this policy.")
                 parts.append(group_outputs[group_name])
             actor_obs = np.concatenate(parts, axis=1)
-        return {"actor_obs": actor_obs.astype(np.float32, copy=False)}
+        prepared = {group_name: value.astype(np.float32, copy=False) for group_name, value in group_outputs.items()}
+        prepared["actor_obs"] = actor_obs.astype(np.float32, copy=False)
+        return prepared
 
     # ============================================================================
     # Control/Command Methods
@@ -641,10 +784,21 @@ class BasePolicy:
         # Stage 1: Read State
         with self.latency_tracker.measure("read_state"):
             robot_state_data = self.interface.get_low_state()
-            self.last_robot_state_data = robot_state_data
+            self.last_robot_state_data = self._get_viser_state_data(robot_state_data)
+            if self._pending_noninteractive_policy_start:
+                if self._has_valid_robot_state(robot_state_data) and self._can_finish_pending_policy_start(
+                    robot_state_data
+                ):
+                    self.logger.info("Valid robot state received; auto-starting policy")
+                    self._handle_start_policy()
+                    self._pending_noninteractive_policy_start = False
+                    self._after_auto_start_policy()
+                else:
+                    return
 
         # Stage 2: Pre-processing
         with self.latency_tracker.measure("preprocessing"):
+            q_target = np.array(robot_state_data[:, 7 : 7 + self.num_dofs], dtype=np.float32, copy=True)
             # Determine target joint positions
             if self.get_ready_state:
                 q_target = self.get_init_target(robot_state_data)
@@ -655,8 +809,6 @@ class BasePolicy:
                     q_target = manual_cmd["q"]
                     kp_override = manual_cmd.get("kp")
                     kd_override = manual_cmd.get("kd")
-                else:
-                    q_target = robot_state_data[:, 7 : 7 + self.num_dofs]
             else:
                 # Prepare for inference - any preprocessing before RL inference
                 pass
@@ -679,7 +831,7 @@ class BasePolicy:
                 q_target = scaled_policy_action + self.default_dof_angles
 
             # Clip target positions to motor limits (in-place for speed)
-            if self.q_min_arr is not None and self.q_max_arr is not None:
+            if self._clip_joint_targets and self.q_min_arr is not None and self.q_max_arr is not None:
                 np.clip(q_target[0], self.q_min_arr, self.q_max_arr, out=q_target[0])
 
             # Prepare command (reuse pre-allocated arrays)
@@ -866,6 +1018,16 @@ class BasePolicy:
     def run(self):
         """Main run loop for the policy."""
         try:
+            if (
+                getattr(self.config.task, "auto_start_policy", False)
+                and not self.use_policy_action
+                and self._should_auto_start_policy_immediately()
+            ):
+                self.logger.info("Auto-start enabled: starting policy actions at launch.")
+                self._handle_start_policy()
+
+            self._maybe_auto_start_rollout()
+
             for it in itertools.count():
                 self.latency_tracker.start_cycle()
 
@@ -873,6 +1035,7 @@ class BasePolicy:
                     self.process_joystick_input()
                 if self.use_phase:
                     self.update_phase_time()
+                self._maybe_handle_viser_requests()
 
                 self.policy_action()
                 self._maybe_update_viser()
@@ -887,3 +1050,5 @@ class BasePolicy:
 
         except KeyboardInterrupt:
             pass
+        finally:
+            self._on_run_exit()

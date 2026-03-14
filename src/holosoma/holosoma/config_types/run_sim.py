@@ -16,8 +16,10 @@ from typing_extensions import Annotated
 import holosoma.config_values.robot
 import holosoma.config_values.run_sim
 import holosoma.config_values.terrain
+import holosoma.config_values.perception
 from holosoma.config_types.experiment import TrainingConfig
 from holosoma.config_types.logger import DisabledLoggerConfig, LoggerConfig
+from holosoma.config_types.perception import PerceptionConfig
 from holosoma.config_types.robot import RobotConfig
 from holosoma.config_types.simulator import SimulatorConfig
 from holosoma.config_types.terrain import TerrainManagerCfg
@@ -45,10 +47,31 @@ def default_logger_config() -> LoggerConfig:
     return DisabledLoggerConfig(video=VideoConfig(enabled=False), base_dir="/data/logs_new")
 
 
+@dataclass(frozen=True)
+class MotionInitConfig:
+    """Optional clip-driven initialization for direct MuJoCo sim2sim runs."""
+
+    enabled: bool = False
+    """Initialize robot/object states from a motion clip before the loop starts."""
+
+    motion_file: str | None = None
+    """Motion clip (.npz/.h5) used to initialize simulator state."""
+
+    frame_idx: int = 0
+    """Motion frame index used for initialization."""
+
+    mode: str = "raw_motion"
+    """Initialization mode: 'raw_motion' or 'training_default_pose'."""
+
+    object_name: str = "object"
+    """Simulator actor name for the initialized object."""
+
+
 # Use sim2sim-optimized configs from config_values.run_sim
 SIMULATOR_DEFAULTS = _with_hyphen_aliases(holosoma.config_values.run_sim.DEFAULTS)
 ROBOT_DEFAULTS = _with_hyphen_aliases(holosoma.config_values.robot.DEFAULTS)
 TERRAIN_DEFAULTS = _with_hyphen_aliases(holosoma.config_values.terrain.DEFAULTS)
+PERCEPTION_DEFAULTS = _with_hyphen_aliases(holosoma.config_values.perception.DEFAULTS)
 
 
 @dataclass(frozen=True)
@@ -77,6 +100,11 @@ class RunSimConfig:
         tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(TERRAIN_DEFAULTS)),
     ] = holosoma.config_values.terrain.terrain_locomotion_plane
 
+    perception: Annotated[
+        PerceptionConfig,
+        tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(PERCEPTION_DEFAULTS)),
+    ] = holosoma.config_values.perception.none
+
     # Minimal configs needed for FullSimConfig
     training: TrainingConfig = field(default_factory=default_training_config)
     logger: LoggerConfig = field(default_factory=default_logger_config)
@@ -90,6 +118,9 @@ class RunSimConfig:
 
     Only used by run_sim.py for real-time display synchronization.
     """
+
+    motion_init: MotionInitConfig = field(default_factory=MotionInitConfig)
+    """Optional clip-driven robot/object initialization."""
 
     device: str | None = "cpu"
     """Device to use for simulation. None auto-detects based on the simulator type.

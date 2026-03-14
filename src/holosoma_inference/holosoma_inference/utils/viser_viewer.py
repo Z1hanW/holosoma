@@ -96,11 +96,15 @@ class ViserInferenceViewer:
     def __init__(self, robot_config: RobotConfig, cfg: ViserConfig, model_path: str) -> None:
         self._robot_config = robot_config
         self._num_dofs = len(robot_config.dof_names)
+        self._reset_requested = False
+        self._auto_reset_on_motion_end = bool(cfg.auto_reset_on_motion_end)
 
         urdf_path = _resolve_urdf_path(cfg, model_path)
 
         port = _resolve_viser_port(cfg.port)
         self.server = viser.ViserServer(port=port)
+        self.server.initial_camera.position = (3.0, -3.0, 1.8)
+        self.server.initial_camera.look_at = (0.0, 0.0, 0.9)
         self.robot_root = self.server.scene.add_frame("/robot", show_axes=False)
         self.robot = ViserUrdf(self.server, urdf_or_path=urdf_path, root_node_name="/robot")
         self.robot.show_visual = cfg.show_meshes
@@ -127,7 +131,31 @@ class ViserInferenceViewer:
         def _(_evt) -> None:
             self.robot.show_visual = bool(show_meshes_cb.value)
 
+        if cfg.enable_reset_gui:
+            with self.server.gui.add_folder("Controls"):
+                auto_reset_cb = self.server.gui.add_checkbox(
+                    "Auto reset on motion end",
+                    initial_value=self._auto_reset_on_motion_end,
+                )
+                reset_button = self.server.gui.add_button("Reset sim + motion")
+
+            @auto_reset_cb.on_update
+            def _(_evt) -> None:
+                self._auto_reset_on_motion_end = bool(auto_reset_cb.value)
+
+            @reset_button.on_click
+            def _(_evt) -> None:
+                self._reset_requested = True
+
         logger.info("Viser server running on port %s", port)
+
+    def consume_reset_requested(self) -> bool:
+        requested = self._reset_requested
+        self._reset_requested = False
+        return requested
+
+    def auto_reset_on_motion_end_enabled(self) -> bool:
+        return self._auto_reset_on_motion_end
 
     def update(self, robot_state_data) -> None:
         if robot_state_data is None:
