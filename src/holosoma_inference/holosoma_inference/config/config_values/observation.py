@@ -260,6 +260,40 @@ wbt_distillation_g1 = ObservationConfig(
 
 
 # =============================================================================
+# Blind Fall Recovery Observation Configurations
+# =============================================================================
+
+blind_fall_recovery_g1 = ObservationConfig(
+    obs_dict={
+        "actor_obs": [
+            "projected_gravity",
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+            "actions",
+        ],
+    },
+    obs_dims={
+        "projected_gravity": 3,
+        "base_ang_vel": 3,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+    },
+    obs_scales={
+        "projected_gravity": 1.0,
+        "base_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 1.0,
+        "actions": 1.0,
+    },
+    history_length_dict={
+        "actor_obs": 1,
+    },
+)
+
+
+# =============================================================================
 # Default Configurations Dictionary
 # =============================================================================
 
@@ -269,6 +303,7 @@ DEFAULTS = {
     "wbt": wbt,
     "loco-manip-stand-height-waist": loco_manip_stand_height_waist,
     "wbt-distillation-g1": wbt_distillation_g1,
+    "blind-fall-recovery-g1": blind_fall_recovery_g1,
 }
 """Dictionary of all available observation configurations.
 

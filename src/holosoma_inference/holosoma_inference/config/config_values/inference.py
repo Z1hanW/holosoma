@@ -89,12 +89,44 @@ g1_wbt_distillation = InferenceConfig(
     camera=camera.single_d435i_depth,
 )
 
+# fmt: off
+g1_blind_fall_recovery = InferenceConfig(
+    robot=replace(
+        robot.g1_29dof,
+        stiff_startup_pos=(
+            -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,   # left leg
+            -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,   # right leg
+            0.0, 0.0, 0.0,                          # waist
+            0.2, 0.2, 0.0, 0.6, 0.0, 0.0, 0.0,      # left arm
+            0.2, -0.2, 0.0, 0.6, 0.0, 0.0, 0.0,     # right arm
+        ),
+        stiff_startup_kp=(
+            350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
+            350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
+            200.0, 200.0, 200.0,
+            40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0,
+            40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0,
+        ),
+        stiff_startup_kd=(
+            5.0, 5.0, 5.0, 10.0, 5.0, 5.0,
+            5.0, 5.0, 5.0, 10.0, 5.0, 5.0,
+            5.0, 5.0, 5.0,
+            3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,
+            3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,
+        ),
+    ),
+# fmt: on
+    observation=observation.blind_fall_recovery_g1,
+    task=task.blind_fall_recovery,
+)
+
 DEFAULTS = {
     "g1-29dof-loco": g1_29dof_loco,
     "t1-29dof-loco": t1_29dof_loco,
     "g1-29dof-wbt": g1_29dof_wbt,
     "g1-29dof-loco-manip-stand-height-waist": g1_29dof_loco_manip_stand_height_waist,
     "g1-wbt-distillation": g1_wbt_distillation,
+    "g1-blind-fall-recovery": g1_blind_fall_recovery,
 }
 
 # Auto-discover inference configs from installed extensions

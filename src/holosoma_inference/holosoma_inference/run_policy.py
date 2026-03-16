@@ -19,6 +19,7 @@ from loguru import logger
 from holosoma_inference.config.config_types.inference import InferenceConfig
 from holosoma_inference.config.config_values.inference import AnnotatedInferenceConfig
 from holosoma_inference.config.utils import TYRO_CONFIG
+from holosoma_inference.policies.blind_fall_recovery import BlindFallRecoveryPolicy
 from holosoma_inference.policies.depth_distillation import DepthDistillationPolicy
 from holosoma_inference.policies.loco_manip_stand_height_wait_depth import LocoManipStandHeightWaitDepthPolicy
 from holosoma_inference.policies.locomotion import LocomotionPolicy
@@ -31,17 +32,19 @@ import os
 
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 
+
 def _print_control_guide(policy_class, use_joystick: bool):
     """Print control guide for users."""
+    is_blind_fall_recovery = issubclass(policy_class, BlindFallRecoveryPolicy)
     is_wbt = policy_class.__name__ == "WholeBodyTrackingPolicy"
 
     logger.info("=" * 80)
-    logger.info("🎮 POLICY CONTROLS")
+    logger.info("POLICY CONTROLS")
     logger.info("=" * 80)
     logger.info("")
 
     if use_joystick:
-        logger.info("📝 Using JOYSTICK control mode")
+        logger.info("Using JOYSTICK control mode")
         logger.info("")
         logger.info("General Controls:")
         logger.info("  A button       - Start the policy")
@@ -49,7 +52,14 @@ def _print_control_guide(policy_class, use_joystick: bool):
         logger.info("  Y button       - Set robot to default pose")
         logger.info("  L1+R1 (LB+RB)  - Kill controller program")
 
-        if is_wbt:
+        if is_blind_fall_recovery:
+            logger.info("")
+            logger.info("Blind Fall Recovery Controls:")
+            logger.info("  Start button   - Enter stiff hold mode")
+            logger.info("  R1 + Right stick Y - Push forward/backward (hip pitch torque)")
+            logger.info("  R1 + Right stick X - Push left/right (hip roll torque)")
+            logger.info("  Release R1         - Zero all push torques")
+        elif is_wbt:
             logger.info("")
             logger.info("Whole-Body Tracking Controls:")
             logger.info("  Start button   - Start motion clip")
@@ -60,10 +70,10 @@ def _print_control_guide(policy_class, use_joystick: bool):
             logger.info("  Left stick     - Adjust linear velocity (forward/backward/left/right)")
             logger.info("  Right stick    - Adjust angular velocity (turn left/right)")
     else:
-        logger.info("⌨️  Using KEYBOARD control mode")
+        logger.info("Using KEYBOARD control mode")
         logger.info("")
-        logger.info("⚠️  IMPORTANT: Make sure THIS TERMINAL is active to receive keyboard input!")
-        logger.info("⚠️  All commands below must be entered in THIS terminal window.")
+        logger.info("IMPORTANT: Make sure THIS TERMINAL is active to receive keyboard input!")
+        logger.info("All commands below must be entered in THIS terminal window.")
         logger.info("")
         logger.info("General Controls:")
         logger.info("  ]  - Start the policy")
@@ -84,14 +94,14 @@ def _print_control_guide(policy_class, use_joystick: bool):
             logger.info("  z          - Set all velocities to zero")
 
     logger.info("")
-    logger.info("🎬 MuJoCo Simulator Controls (⚠️  ONLY in MuJoCo window, NOT this terminal!):")
+    logger.info("MuJoCo Simulator Controls (ONLY in MuJoCo window, NOT this terminal!):")
     logger.info("  7/8        - Decrease/increase elastic band length")
     logger.info("  9          - Toggle elastic band enable/disable")
     logger.info("  BACKSPACE  - Reset simulation")
 
     logger.info("")
     logger.info("=" * 80)
-    logger.info("👆 Press the appropriate button/key to begin!")
+    logger.info("Press the appropriate button/key to begin!")
     logger.info("=" * 80)
     logger.info("")
 
@@ -100,13 +110,19 @@ def _select_policy_class(config: InferenceConfig):
     """Select the appropriate policy class based on configuration.
 
     Selection rules (in priority order):
-    1. If task.model_path is a list of 2 paths and depth_obs is in observation groups
+    1. If task.policy_type == "blind_fall_recovery" -> BlindFallRecoveryPolicy
+    2. If task.model_path is a list of 2 paths and depth_obs is in observation groups
        -> DepthDistillationPolicy
-    2. If actor_obs contains "motion_command" -> WholeBodyTrackingPolicy
-    3. If observation groups contain "perception_obs" (dual depth cameras)
+    3. If actor_obs contains "motion_command" -> WholeBodyTrackingPolicy
+    4. If observation groups contain "perception_obs" (dual depth cameras)
        -> LocoManipStandHeightWaitDepthPolicy
-    4. Otherwise -> LocomotionPolicy
+    5. Otherwise -> LocomotionPolicy
     """
+    # Explicit policy_type takes priority
+    policy_type = getattr(config.task, "policy_type", None)
+    if policy_type == "blind_fall_recovery":
+        return BlindFallRecoveryPolicy
+
     obs_dict = config.observation.obs_dict
     actor_obs = obs_dict.get("actor_obs", [])
     model_path = config.task.model_path
@@ -130,25 +146,25 @@ def _select_policy_class(config: InferenceConfig):
 
 def run_policy(config: InferenceConfig):
     """Run policy with Tyro configuration."""
-    logger.info("🚀 Starting Policy with Tyro configuration...")
-    logger.info(f"🤖 Robot: {config.robot.robot_type}")
-    logger.info(f"📋 Observation groups: {list(config.observation.obs_dict.keys())}")
-    logger.info(f"⚙️ RL Rate: {config.task.rl_rate} Hz")
-    logger.info(f"📁 Model path: {config.task.model_path}")
+    logger.info("Starting Policy with Tyro configuration...")
+    logger.info(f"Robot: {config.robot.robot_type}")
+    logger.info(f"Observation groups: {list(config.observation.obs_dict.keys())}")
+    logger.info(f"RL Rate: {config.task.rl_rate} Hz")
+    logger.info(f"Model path: {config.task.model_path}")
 
     # Determine policy class based on observation and task configuration
     policy_class = _select_policy_class(config)
     logger.info(f"Using {policy_class.__name__}")
     policy: LocomotionPolicy | WholeBodyTrackingPolicy = policy_class(config=config)
 
-    logger.info("✅ Policy initialized successfully!")
+    logger.info("Policy initialized successfully!")
     _print_control_guide(policy_class, config.task.use_joystick)
 
     if DEBUG:
 
         policy._handle_start_policy()
 
-        # To avoid prininting, 
+        # To avoid prininting,
         policy.interface.send_low_command(
             policy.cmd_q,
             policy.cmd_dq,
@@ -164,12 +180,12 @@ def run_policy(config: InferenceConfig):
         try:
             policy.run()
         except Exception as e:
-            logger.error(f"❌ Error running policy: {e}")
+            logger.error(f"Error running policy: {e}")
             traceback.print_exc()
             sys.exit(1)
         finally:
             restore_terminal_settings()
-    logger.info("✅ Policy execution completed!")
+    logger.info("Policy execution completed!")
 
 
 def main():
