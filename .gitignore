@@ -35,3 +35,7 @@ image_server_images
 src/holosoma/holosoma/models/gum/build/
 src/holosoma/holosoma/models/gum/torch_ops/build/
 src/holosoma/holosoma/models/gum/one_stage/
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
