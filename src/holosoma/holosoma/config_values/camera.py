@@ -33,7 +33,7 @@ single_d435i_depth = CameraManagerCfg(terms={
             "pose": CameraPose(
                 camera_body_link="torso_link",
                 camera_offset=(0.01, 0.01, 0.44),
-                camera_rotation=(1.0, 27.0, 1.0),
+                camera_rotation=(1.0, 45.0, 1.0),   # (1.0, 27.0, 1.0) for other PHP tasks
             ),
             "props": d435i_depth_props,
         },

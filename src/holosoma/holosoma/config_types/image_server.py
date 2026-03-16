@@ -136,7 +136,7 @@ class ImageServerConfig:
             raise ValueError(
                 "Invalid ImageServerConfig: depth_source='depth' requires enable_camera_depth_prediction=True."
             )
-        if self.enable_gum_depth_prediction and not self.enable_rgb:
+        if self.enable_gum_depth_prediction and not self.enable_rgb and self.camera_type == "zed":
             raise ValueError(
                 "Invalid ImageServerConfig: enable_gum_depth_prediction=True requires enable_rgb=True "
                 "(GUM needs RGB images)."

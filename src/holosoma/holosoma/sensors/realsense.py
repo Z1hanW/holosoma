@@ -4,6 +4,7 @@ Follows the same interface as ZedCamerasWrapper so it can be used
 interchangeably with ImageServer.
 """
 
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -22,7 +23,7 @@ class RealSenseCameraConfig:
     fps: int = 30
     """Capture frame rate for both depth and color streams."""
 
-    enable_color: bool = True
+    enable_rgb: bool = True
     """Enable the color (RGB) stream."""
 
     align_depth_to_color: bool = True
@@ -80,7 +81,7 @@ class RealSenseCamera:
         )
 
         # Enable color stream
-        if self.config.enable_color:
+        if self.config.enable_rgb:
             rs_config.enable_stream(
                 rs.stream.color, width, height, rs.format.bgr8, self.config.fps,
             )
@@ -108,7 +109,7 @@ class RealSenseCamera:
             print(f"[RealSense] IR emitter: {'on' if self.config.emitter_enabled else 'off'}")
 
         # Align object (reusable across frames)
-        if self.config.align_depth_to_color and self.config.enable_color:
+        if self.config.align_depth_to_color and self.config.enable_rgb:
             self.align = rs.align(rs.stream.color)
         else:
             self.align = None
@@ -223,7 +224,14 @@ class RealSenseCamera:
             ``{"depth": np.ndarray (H, W) float32 in meters,
                "rgb": np.ndarray (H, W, 3) uint8 BGR or None}``
         """
+        t_start = time.perf_counter()
         frames = self.pipeline.wait_for_frames()
+        t_received = time.time() * 1000  # system time in ms when frame arrived
+
+        # Hardware latency: compare frame's global_time timestamp to system clock
+        depth_frame_raw = frames.get_depth_frame()
+        frame_ts = depth_frame_raw.get_timestamp() if depth_frame_raw else None
+        ts_domain = depth_frame_raw.get_frame_timestamp_domain() if depth_frame_raw else None
 
         if self.align is not None:
             frames = self.align.process(frames)
@@ -256,16 +264,41 @@ class RealSenseCamera:
                 rgb_data = np.concatenate([left_rgb, right_rgb], axis=1)  # (H, 2*W, 3)
             else:
                 rgb_data = None
-            return {"depth": depth_data, "rgb": rgb_data}
+            t_end = time.perf_counter()
+            total_latency_ms = self._compute_latency(frame_ts, ts_domain, t_received, t_start, t_end)
+            return {"depth": depth_data, "rgb": rgb_data, "total_latency_ms": total_latency_ms}
 
         # Color
         rgb_data = None
-        if self.config.enable_color:
+        if self.config.enable_rgb:
             color_frame = frames.get_color_frame()
             if color_frame:
                 rgb_data = np.asanyarray(color_frame.get_data())  # BGR uint8
 
-        return {"depth": depth_data, "rgb": rgb_data}
+        t_end = time.perf_counter()
+        total_latency_ms = self._compute_latency(frame_ts, ts_domain, t_received, t_start, t_end)
+        return {"depth": depth_data, "rgb": rgb_data, "total_latency_ms": total_latency_ms}
+
+    def _compute_latency(
+        self,
+        frame_ts: float | None,
+        ts_domain,
+        t_received: float,
+        t_start: float,
+        t_end: float,
+    ) -> float | None:
+        """Compute capture latency breakdown.
+
+        Returns the total latency in ms (hw + process) when the hardware
+        timestamp is available, otherwise None.
+        """
+        rs = self.rs
+        process_ms = (t_end - t_start) * 1000
+
+        if frame_ts is not None and ts_domain == rs.timestamp_domain.global_time:
+            hw_latency_ms = t_received - frame_ts
+            return hw_latency_ms + process_ms
+        return None
 
     def release(self):
         """Stop the RealSense pipeline."""
@@ -312,9 +345,15 @@ class RealSenseCamerasWrapper:
         depth_data: dict[str, np.ndarray] = {}
         rgb_data: dict[str, np.ndarray] = {}
         calibration_data: dict[str, dict[str, np.ndarray]] = {}
+        latency_values: list[float] = []
         for name, camera in self.cameras.items():
             frame = camera.capture()
             depth_data[name] = frame["depth"]
             rgb_data[name] = frame["rgb"]
             calibration_data[name] = camera.calibration
-        return {"depth": depth_data, "rgb": rgb_data, "calibration": calibration_data}
+            if frame["total_latency_ms"] is not None:
+                latency_values.append(frame["total_latency_ms"])
+        result = {"depth": depth_data, "rgb": rgb_data, "calibration": calibration_data}
+        if latency_values:
+            result["total_latency_ms"] = sum(latency_values) / len(latency_values)
+        return result

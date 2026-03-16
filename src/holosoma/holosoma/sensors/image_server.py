@@ -398,6 +398,7 @@ class ImageServer:
         
         # Initialize profilers for capturing and depth prediction
         self.capture_profiler = TimeProfiler()
+        self.hw_latency_profiler = TimeProfiler()
         if self.gum:
             self.gum_profiler = TimeProfiler()
         
@@ -510,6 +511,11 @@ class ImageServer:
             with self.capture_profiler.measure():
                 all_frames: FrameBundle = dict(self.camera_wrapper.get_frames())
 
+            # Record hardware latency if available
+            total_latency_ms = all_frames.pop("total_latency_ms", None)
+            if total_latency_ms is not None:
+                self.hw_latency_profiler.record(total_latency_ms)
+
             # Strip RGB frames when RGB is disabled to avoid downstream use
             if not self.cfg.enable_rgb:
                 all_frames.pop("rgb", None)
@@ -566,6 +572,9 @@ class ImageServer:
                 print(f"[Image Server] Rate limiter stats: {rate_limiter.get_stats()}")
                 rate_limiter.reset()
                 print(f"[Image Server] capture stats: {self.capture_profiler.get_stats()}")
+                hw_stats = self.hw_latency_profiler.get_stats()
+                if hw_stats:
+                    print(f"[Image Server] RealSense total latency stats: {hw_stats}")
                 if self.cfg.enable_gum_depth_prediction:
                     print(f"[Image Server] GUM prediction stats: {self.gum_profiler.get_stats()}")
 
@@ -583,7 +592,7 @@ if __name__ == "__main__":
             rs_cam_cfg = RealSenseCameraConfig(enable_ir_stereo=True)
             rs_cfg = RealSenseCamerasConfig(terms={"d435i_depth": rs_cam_cfg})
         else:
-            rs_cam_cfg = RealSenseCameraConfig(enable_color=cfg.enable_rgb)
+            rs_cam_cfg = RealSenseCameraConfig(enable_rgb=cfg.enable_rgb)
             rs_cfg = RealSenseCamerasConfig(terms={"d435i_depth": rs_cam_cfg})
         camera_wrapper = RealSenseCamerasWrapper(rs_cfg)
     else:
