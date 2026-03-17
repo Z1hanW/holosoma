@@ -86,6 +86,7 @@ class BasePolicy:
             "yes",
             "on",
         }
+        self._logged_waiting_for_robot_state = False
         if self._use_motion_command_as_q_target:
             logger.warning("HOLOSOMA_USE_MOTION_COMMAND_AS_Q_TARGET enabled: using motion-command joint targets directly.")
 
@@ -874,6 +875,13 @@ class BasePolicy:
                     self._after_auto_start_policy()
                 else:
                     return
+
+            if not self._has_valid_robot_state(robot_state_data):
+                if not self._logged_waiting_for_robot_state:
+                    self.logger.info("Waiting for a valid robot state from the simulator before stepping the policy.")
+                    self._logged_waiting_for_robot_state = True
+                return
+            self._logged_waiting_for_robot_state = False
 
         # Stage 2: Pre-processing
         with self.latency_tracker.measure("preprocessing"):

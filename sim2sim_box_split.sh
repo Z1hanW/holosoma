@@ -2,8 +2,14 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MOTION_FILE="${1:?usage: sim2sim_box_split.sh <motion.npz> <checkpoint.pt|model.onnx>}"
-MODEL_INPUT="${2:?usage: sim2sim_box_split.sh <motion.npz> <checkpoint.pt|model.onnx>}"
+DEFAULT_MOTION_FILE="${DEFAULT_MOTION_FILE:-$ROOT_DIR/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz}"
+DEFAULT_MODEL_INPUT="${DEFAULT_MODEL_INPUT:-/tmp/opq0wbyq_latest/model_07500.onnx}"
+if [[ $# -gt 2 ]]; then
+  echo "usage: sim2sim_box_split.sh [motion.npz] [checkpoint.pt|model.onnx]" >&2
+  exit 1
+fi
+MOTION_FILE="${1:-$DEFAULT_MOTION_FILE}"
+MODEL_INPUT="${2:-$DEFAULT_MODEL_INPUT}"
 
 MUJOCO_PY="${MUJOCO_PY:-}"
 INFER_PY="${INFER_PY:-}"
@@ -456,7 +462,7 @@ if [[ -z "$INFERENCE_CONFIG" ]]; then
   INFERENCE_CONFIG="$(infer_inference_config "$PATCHED_ONNX")"
 fi
 
-if [[ "$INFERENCE_CONFIG" == "g1-29dof-wbt-w-object" ]]; then
+if [[ "$INFERENCE_CONFIG" == "g1-29dof-wbt-w-object" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-generalist" ]]; then
   if [[ -z "$USE_SIM_TIME" ]]; then
     USE_SIM_TIME="1"
   fi
