@@ -118,6 +118,12 @@ g1_29dof_wbt_motion_tracking_transformer = replace(
     task=task.wbt_motion_tracking,
 )
 
+g1_29dof_wbt_w_object = replace(
+    g1_29dof_wbt,
+    observation=observation.wbt_w_object,
+    task=task.wbt,
+)
+
 g1_29dof_wbt_object_distill = replace(
     g1_29dof_wbt,
     observation=observation.wbt_object_distill,
@@ -156,6 +162,7 @@ DEFAULTS = {
     "g1-29dof-loco": g1_29dof_loco,
     "t1-29dof-loco": t1_29dof_loco,
     "g1-29dof-wbt": g1_29dof_wbt,
+    "g1-29dof-wbt-w-object": g1_29dof_wbt_w_object,
     "g1-29dof-wbt-object-generalist": g1_29dof_wbt_object_generalist,
     "g1-29dof-wbt-object-distill": g1_29dof_wbt_object_distill,
     "g1-29dof-wbt-object-distill-depth": g1_29dof_wbt_object_distill_depth,

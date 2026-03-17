@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOTION_FILE="${1:?usage: sim2sim_box_split_tracking.sh <motion.npz> <checkpoint.pt|model.onnx>}"
 MODEL_INPUT="${2:?usage: sim2sim_box_split_tracking.sh <motion.npz> <checkpoint.pt|model.onnx>}"
 
-MUJOCO_PY="${MUJOCO_PY:-/home/ubuntu/.holosoma_deps/miniconda3/envs/hsmujoco/bin/python}"
-INFER_PY="${INFER_PY:-/home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python}"
+MUJOCO_PY="${MUJOCO_PY:-}"
+INFER_PY="${INFER_PY:-}"
 MUJOCO_CPUSET="${MUJOCO_CPUSET:-0}"
 SIM_FPS="${SIM_FPS:-200}"
 SIM_CONTROL_DECIMATION="${SIM_CONTROL_DECIMATION:-4}"
@@ -30,7 +30,8 @@ RUN_SECONDS="${RUN_SECONDS:-20}"
 SIM_READY_TIMEOUT="${SIM_READY_TIMEOUT:-45}"
 SIM_READY_PATTERN="${SIM_READY_PATTERN:-Starting direct simulation loop...}"
 SIM_STARTUP_WAIT="${SIM_STARTUP_WAIT:-0}"
-OBJECT_URDF="${OBJECT_URDF:-$ROOT_DIR/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf}"
+DEFAULT_OBJECT_URDF="$ROOT_DIR/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
+OBJECT_URDF="${OBJECT_URDF:-}"
 PATCH_DIR="${PATCH_DIR:-$ROOT_DIR/logs/sim2sim_exports}"
 POLICY_ACTION_SCALE="${POLICY_ACTION_SCALE:-}"
 POLICY_DEFER_UNTIL_VALID_STATE="${POLICY_DEFER_UNTIL_VALID_STATE:-0}"
@@ -52,6 +53,7 @@ MUJOCO_OBJECT_MASS_OVERRIDE="${MUJOCO_OBJECT_MASS_OVERRIDE:-2.0}"
 MUJOCO_OBJECT_GEOM_FRICTION="${MUJOCO_OBJECT_GEOM_FRICTION:-[0.4,0.005,0.001]}"
 MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION="${MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION:-[0.4,0.005,0.001]}"
 PREFER_SIM_REF_FROM_SIM_STATE="${PREFER_SIM_REF_FROM_SIM_STATE:-1}"
+MOTION_METADATA_TOOL="$ROOT_DIR/src/holosoma_inference/holosoma_inference/tools/read_motion_clip_metadata.py"
 
 mkdir -p "$PATCH_DIR"
 
@@ -66,6 +68,83 @@ export HOLOSOMA_ONNX_ALIGN_MAX_STEPS
 export HOLOSOMA_ONNX_ALIGN_POSE_TOL
 export HOLOSOMA_ONNX_OFFSET_APPLIES_TO_MOTION_INDEX
 export HOLOSOMA_CLIP_JOINT_TARGETS
+
+resolve_python() {
+  local configured="$1"
+  shift
+  if [[ -n "$configured" ]]; then
+    if [[ ! -x "$configured" ]]; then
+      echo "Configured python is not executable: $configured" >&2
+      exit 1
+    fi
+    printf '%s\n' "$configured"
+    return
+  fi
+  local candidate
+  for candidate in "$@"; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  if command -v python >/dev/null 2>&1; then
+    command -v python
+    return
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    command -v python3
+    return
+  fi
+  echo "No usable python interpreter found for split sim2sim launcher" >&2
+  exit 1
+}
+
+python_has_module() {
+  local python_bin="$1"
+  local module_name="$2"
+  "$python_bin" - <<'PY' "$module_name" >/dev/null 2>&1
+import importlib.util
+import sys
+
+sys.exit(0 if importlib.util.find_spec(sys.argv[1]) is not None else 1)
+PY
+}
+
+resolve_python_with_module() {
+  local module_name="$1"
+  shift
+  local candidate
+  for candidate in "$@"; do
+    [[ -n "$candidate" && -x "$candidate" ]] || continue
+    if python_has_module "$candidate" "$module_name"; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  echo "No usable python interpreter with module '$module_name' found for split sim2sim launcher" >&2
+  exit 1
+}
+
+MUJOCO_PY="$(resolve_python_with_module mujoco \
+  "$(resolve_python "$MUJOCO_PY")" \
+  /home/ubuntu/.holosoma_deps/miniconda3/envs/hsmujoco/bin/python \
+  /home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin/python \
+  /home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python)"
+INFER_PY="$(resolve_python "$INFER_PY" \
+  /home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python \
+  /home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python)"
+
+apply_motion_clip_object_defaults() {
+  if [[ -f "$MOTION_METADATA_TOOL" ]]; then
+    eval "$("$INFER_PY" "$MOTION_METADATA_TOOL" --motion-file "$MOTION_FILE" --format shell)"
+    if [[ -z "$OBJECT_URDF" && -n "${SIM2SIM_CLIP_OBJECT_URDF_PATH:-}" ]]; then
+      OBJECT_URDF="$SIM2SIM_CLIP_OBJECT_URDF_PATH"
+    fi
+  fi
+  if [[ -z "$OBJECT_URDF" ]]; then
+    OBJECT_URDF="$DEFAULT_OBJECT_URDF"
+  fi
+}
 
 apply_training_sim_overrides() {
   if [[ "$USE_TRAINING_SIM_CONFIG" != "1" ]]; then
@@ -142,6 +221,8 @@ PY
   done <<< "$override_lines"
 }
 
+apply_motion_clip_object_defaults
+
 "$INFER_PY" "$ROOT_DIR/src/holosoma_inference/holosoma_inference/tools/patch_motion_onnx.py" \
   --model-path "$MODEL_INPUT" \
   --motion-file "$MOTION_FILE" \
@@ -203,6 +284,7 @@ wait_for_sim_ready() {
   while (( SECONDS < deadline )); do
     if ! kill -0 "$SIM_PID" 2>/dev/null; then
       echo "MuJoCo simulator exited during startup. See $SIM_LOG" >&2
+      tail -n 40 "$SIM_LOG" >&2 || true
       return 1
     fi
     if [[ -f "$SIM_LOG" ]] && grep -qF "$SIM_READY_PATTERN" "$SIM_LOG"; then

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, List
+import xml.etree.ElementTree as ET
 
 import mujoco
 import mujoco.viewer
@@ -352,34 +353,60 @@ class MujocoSceneManager:
         prefix : str
             Namespace prefix for robot elements (default: "robot_").
         """
-        asset_root = robot_config.asset.asset_root
-        if asset_root.startswith("@holosoma/"):
-            asset_root = asset_root.replace("@holosoma", get_holosoma_root())
-        robot_xml_path = os.path.join(asset_root, robot_config.asset.xml_file)
-
-        resolved_object_scene = self._resolve_supported_object_scene(robot_config)
-        using_composite_object_scene = resolved_object_scene is not None
-        if resolved_object_scene is not None:
-            robot_xml_path, object_urdf_by_name, object_body_name_by_name = resolved_object_scene
+        object_spec_to_attach: mujoco.MjSpec | None = None
+        external_object_body_names: set[str] = set()
+        if self._should_use_training_urdf_object_scene(robot_config):
+            (
+                robot_spec,
+                object_spec_to_attach,
+                robot_xml_path,
+                object_urdf_by_name,
+                object_body_name_by_name,
+                external_object_body_names,
+            ) = self._build_training_urdf_object_scene(robot_config)
+            using_composite_object_scene = False
             self._object_urdf_by_name = object_urdf_by_name
             self._object_body_name_by_name = object_body_name_by_name
             logger.info(
-                "Using MuJoCo composite object scene '{}' for actor(s): {}",
+                "Using MuJoCo training-URDF object scene '{}' with object URDF(s): {}",
                 robot_xml_path,
-                list(object_urdf_by_name.keys()),
+                list(object_urdf_by_name.values()),
             )
         else:
-            self._object_urdf_by_name = {}
-            self._object_body_name_by_name = {}
+            asset_root = robot_config.asset.asset_root
+            if asset_root.startswith("@holosoma/"):
+                asset_root = asset_root.replace("@holosoma", get_holosoma_root())
+            robot_xml_path = os.path.join(asset_root, robot_config.asset.xml_file)
+
+            resolved_object_scene = self._resolve_supported_object_scene(robot_config)
+            using_composite_object_scene = resolved_object_scene is not None
+            if resolved_object_scene is not None:
+                robot_xml_path, object_urdf_by_name, object_body_name_by_name = resolved_object_scene
+                self._object_urdf_by_name = object_urdf_by_name
+                self._object_body_name_by_name = object_body_name_by_name
+                logger.info(
+                    "Using MuJoCo composite object scene '{}' for actor(s): {}",
+                    robot_xml_path,
+                    list(object_urdf_by_name.keys()),
+                )
+            else:
+                self._object_urdf_by_name = {}
+                self._object_body_name_by_name = {}
+
+            robot_spec = mujoco.MjSpec.from_file(robot_xml_path)
 
         logger.info(f"Adding robot from: {robot_xml_path} with prefix: {prefix}")
         self.robot_model_path = robot_xml_path
-        robot_spec = mujoco.MjSpec.from_file(robot_xml_path)
 
         if xml_filter and getattr(xml_filter, "enable", False):
             # Remove worldbody lights and ground|floor|plane geoms because they're added dynamically
             robot_spec = self._filter_robot_worldbody(robot_spec, xml_filter)
 
+        self._maybe_align_composite_body_inertials_with_training_urdf(
+            robot_spec,
+            robot_config,
+            using_composite_object_scene=using_composite_object_scene,
+        )
         self._maybe_copy_joint_defaults_from_reference_robot_xml(
             robot_spec,
             robot_config,
@@ -388,6 +415,12 @@ class MujocoSceneManager:
         self._maybe_copy_collision_geoms_from_reference_robot_xml(
             robot_spec,
             robot_config,
+            using_composite_object_scene=using_composite_object_scene,
+        )
+        self._maybe_align_composite_hand_collision_geoms_with_training_urdf(
+            robot_spec,
+            robot_config,
+            robot_xml_path=robot_xml_path,
             using_composite_object_scene=using_composite_object_scene,
         )
         self._maybe_copy_tendons_from_reference_robot_xml(
@@ -409,6 +442,15 @@ class MujocoSceneManager:
         )
         self._maybe_add_default_actuators(robot_spec, robot_config)
 
+        if object_spec_to_attach is not None:
+            self._configure_object_collisions(object_spec_to_attach)
+            self._maybe_override_object_properties(
+                object_spec_to_attach,
+                robot_config,
+                terrain_geom_name=str(getattr(terrain_state, "name", "floor")),
+                target_body_names=external_object_body_names,
+            )
+
         if hasattr(terrain_state, "geom") and terrain_state.geom:
             # Apply collision settings based on unified self_collisions flag in config
             # Only modifies collision groups if we have programmatically added terrain, otherwise
@@ -421,9 +463,94 @@ class MujocoSceneManager:
         robot_rot = [1, 0, 0, 0]
         site = self.world_spec.worldbody.add_site(pos=robot_pos, quat=robot_rot)
         self.world_spec.attach(robot_spec, site=site, prefix=prefix)
+        if object_spec_to_attach is not None:
+            object_site = self.world_spec.worldbody.add_site(name="object_spawn", pos=[0, 0, 0.0], quat=[1, 0, 0, 0])
+            self.world_spec.attach(object_spec_to_attach, site=object_site, prefix="object_")
 
         # Store prefix for later use by simulator
         self.robot_prefix = prefix
+
+    @staticmethod
+    def _resolve_robot_asset_root(robot_config: RobotConfig) -> Path:
+        asset_root = str(robot_config.asset.asset_root)
+        if asset_root.startswith("@holosoma/"):
+            asset_root = asset_root.replace("@holosoma", get_holosoma_root())
+        return Path(asset_root).expanduser().resolve()
+
+    @classmethod
+    def _resolve_robot_urdf_path(cls, robot_config: RobotConfig) -> Path:
+        return (cls._resolve_robot_asset_root(robot_config) / str(robot_config.asset.urdf_file)).resolve()
+
+    @staticmethod
+    def _configure_urdf_meshdir(spec: mujoco.MjSpec, urdf_path: Path) -> None:
+        meshdir_candidates = [urdf_path.parent / "meshes", urdf_path.parent]
+        for candidate in meshdir_candidates:
+            if candidate.is_dir():
+                spec.compiler.meshdir = str(candidate.resolve())
+                return
+        spec.compiler.meshdir = str(urdf_path.parent.resolve())
+
+    @staticmethod
+    def _find_spec_body(spec: mujoco.MjSpec, body_name: str) -> mujoco.MjSpec.Body:
+        for body in spec.bodies:
+            if body.name == body_name:
+                return body
+        raise ValueError(f"Body '{body_name}' not found in MuJoCo spec")
+
+    @staticmethod
+    def _select_object_root_body_name(object_spec: mujoco.MjSpec) -> str:
+        for preferred_name in ("baseLink", "base_link"):
+            for body in object_spec.bodies:
+                if body.name == preferred_name:
+                    return preferred_name
+        for body in object_spec.bodies:
+            if body.name:
+                return str(body.name)
+        raise ValueError("Could not resolve a named object root body from the MuJoCo object URDF")
+
+    @classmethod
+    def _should_use_training_urdf_object_scene(cls, robot_config: RobotConfig) -> bool:
+        object_cfg = getattr(robot_config, "object", None)
+        if object_cfg is None or not getattr(object_cfg, "enabled", False):
+            return False
+        if not getattr(object_cfg, "object_urdf_path", None):
+            return False
+        return bool(getattr(object_cfg, "mujoco_use_training_urdf_scene", False))
+
+    @classmethod
+    def _build_training_urdf_object_scene(
+        cls,
+        robot_config: RobotConfig,
+    ) -> tuple[mujoco.MjSpec, mujoco.MjSpec, str, dict[str, str], dict[str, str], set[str]]:
+        robot_urdf = cls._resolve_robot_urdf_path(robot_config)
+        robot_spec = mujoco.MjSpec.from_file(str(robot_urdf))
+        cls._configure_urdf_meshdir(robot_spec, robot_urdf)
+
+        robot_root_body_name = str(robot_config.body_names[0])
+        robot_root_body = cls._find_spec_body(robot_spec, robot_root_body_name)
+        robot_root_body.add_freejoint(name="floating_base_joint")
+
+        object_cfg = getattr(robot_config, "object", None)
+        assert object_cfg is not None
+        object_urdf = cls._resolve_single_object_urdf(str(object_cfg.object_urdf_path))
+        object_spec = mujoco.MjSpec.from_file(str(object_urdf))
+        cls._configure_urdf_meshdir(object_spec, object_urdf)
+
+        object_root_body_name = cls._select_object_root_body_name(object_spec)
+        object_root_body = cls._find_spec_body(object_spec, object_root_body_name)
+        object_root_body.add_freejoint(name="object_freejoint")
+
+        object_actor_name = "object"
+        object_prefix = "object_"
+        object_body_names = {str(body.name) for body in object_spec.bodies if body.name}
+        return (
+            robot_spec,
+            object_spec,
+            str(robot_urdf),
+            {object_actor_name: str(object_urdf)},
+            {object_actor_name: f"{object_prefix}{object_root_body_name}"},
+            object_body_names,
+        )
 
     def _maybe_add_default_actuators(self, robot_spec: mujoco.MjSpec, robot_config: RobotConfig) -> None:
         """Inject default torque actuators for MuJoCo-only scenes when explicitly requested."""
@@ -474,8 +601,9 @@ class MujocoSceneManager:
         object_cfg = getattr(robot_config, "object", None)
         if object_cfg is None or not getattr(object_cfg, "mujoco_copy_joint_defaults_from_robot_xml", False):
             return
-        if not using_composite_object_scene:
-            logger.info("Skipping joint-default copy because current MuJoCo scene is not a composite object scene")
+        using_training_urdf_object_scene = self._should_use_training_urdf_object_scene(robot_config)
+        if not using_composite_object_scene and not using_training_urdf_object_scene:
+            logger.info("Skipping joint-default copy because current MuJoCo scene does not use object verification")
             return
 
         asset_root = robot_config.asset.asset_root
@@ -526,7 +654,7 @@ class MujocoSceneManager:
             )
 
         logger.info(
-            "Copied MuJoCo joint defaults from '{}' into composite scene for {} joint(s) across {} field update(s)",
+            "Copied MuJoCo joint defaults from '{}' into MuJoCo object scene for {} joint(s) across {} field update(s)",
             reference_xml_path,
             updated_joint_count,
             updated_fields_count,
@@ -544,11 +672,12 @@ class MujocoSceneManager:
         object_cfg = getattr(robot_config, "object", None)
         if object_cfg is None or not getattr(object_cfg, "mujoco_copy_tendons_from_robot_xml", False):
             return
-        if not using_composite_object_scene:
-            logger.info("Skipping tendon copy because current MuJoCo scene is not a composite object scene")
+        using_training_urdf_object_scene = self._should_use_training_urdf_object_scene(robot_config)
+        if not using_composite_object_scene and not using_training_urdf_object_scene:
+            logger.info("Skipping tendon copy because current MuJoCo scene does not use object verification")
             return
         if len(robot_spec.tendons) > 0:
-            logger.info("Skipping tendon copy because composite scene already defines {} tendons", len(robot_spec.tendons))
+            logger.info("Skipping tendon copy because current MuJoCo robot spec already defines {} tendons", len(robot_spec.tendons))
             return
 
         asset_root = robot_config.asset.asset_root
@@ -624,7 +753,7 @@ class MujocoSceneManager:
             copied_tendon_count += 1
 
         logger.info(
-            "Copied {} MuJoCo tendon(s) with {} wrap(s) from '{}' into composite scene",
+            "Copied {} MuJoCo tendon(s) with {} wrap(s) from '{}' into MuJoCo object scene",
             copied_tendon_count,
             copied_wrap_count,
             reference_xml_path,
@@ -644,6 +773,14 @@ class MujocoSceneManager:
             return
         if not using_composite_object_scene:
             logger.info("Skipping collision-geom copy because current MuJoCo scene is not a composite object scene")
+            return
+        urdf_file = str(getattr(robot_config.asset, "urdf_file", "") or "")
+        if urdf_file.endswith("main_mesh_collision_halfspherehand.urdf"):
+            logger.info(
+                "Skipping collision-geom copy from reference MuJoCo XML because training URDF '{}' already "
+                "defines the intended carry colliders and the reference XML uses a mismatched collision set.",
+                urdf_file,
+            )
             return
 
         asset_root = robot_config.asset.asset_root
@@ -710,6 +847,265 @@ class MujocoSceneManager:
             reference_xml_path,
         )
 
+    def _maybe_align_composite_body_inertials_with_training_urdf(
+        self,
+        robot_spec: mujoco.MjSpec,
+        robot_config: RobotConfig,
+        *,
+        using_composite_object_scene: bool,
+    ) -> None:
+        """Align composite MuJoCo body inertials with the training Isaac URDF when possible.
+
+        The object-carry MuJoCo scenes under ``holosoma_retargeting/models`` were produced from a
+        different robot model than the Isaac training path. For ``g1_29dof_w_object``, this leads to
+        materially different body masses/inertias on key carry links (torso, wrists, etc.), so copy
+        the inertial parameters from the training URDF into the composite scene before compiling it.
+        """
+
+        if not using_composite_object_scene:
+            return
+
+        urdf_file = str(getattr(robot_config.asset, "urdf_file", "") or "")
+        if not urdf_file.endswith("main_mesh_collision_halfspherehand.urdf"):
+            return
+
+        asset_root = robot_config.asset.asset_root
+        if asset_root.startswith("@holosoma/"):
+            asset_root = asset_root.replace("@holosoma", get_holosoma_root())
+        training_urdf_path = Path(asset_root) / urdf_file
+        training_urdf_path = training_urdf_path.resolve()
+        if not training_urdf_path.is_file():
+            raise FileNotFoundError(
+                "Expected training URDF for MuJoCo carry inertial alignment at "
+                f"'{training_urdf_path}', but it was not found."
+            )
+
+        def _parse_xyz(raw: str | None) -> list[float]:
+            values = [float(v) for v in (raw or "0 0 0").split()]
+            if len(values) != 3:
+                raise ValueError(f"Expected 3 inertial-origin values, got {values}")
+            return values
+
+        def _rpy_to_quat_wxyz(rpy: list[float]) -> list[float]:
+            roll, pitch, yaw = [float(v) for v in rpy]
+            cr = np.cos(roll * 0.5)
+            sr = np.sin(roll * 0.5)
+            cp = np.cos(pitch * 0.5)
+            sp = np.sin(pitch * 0.5)
+            cy = np.cos(yaw * 0.5)
+            sy = np.sin(yaw * 0.5)
+            return [
+                float(cr * cp * cy + sr * sp * sy),
+                float(sr * cp * cy - cr * sp * sy),
+                float(cr * sp * cy + sr * cp * sy),
+                float(cr * cp * sy - sr * sp * cy),
+            ]
+
+        def _quat_to_matrix(quat_wxyz: list[float]) -> np.ndarray:
+            w, x, y, z = [float(v) for v in quat_wxyz]
+            return np.array(
+                [
+                    [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+                    [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+                    [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+                ],
+                dtype=np.float64,
+            )
+
+        def _matrix_to_quat_wxyz(rot: np.ndarray) -> list[float]:
+            trace = float(np.trace(rot))
+            if trace > 0.0:
+                s = np.sqrt(trace + 1.0) * 2.0
+                w = 0.25 * s
+                x = (rot[2, 1] - rot[1, 2]) / s
+                y = (rot[0, 2] - rot[2, 0]) / s
+                z = (rot[1, 0] - rot[0, 1]) / s
+            elif rot[0, 0] > rot[1, 1] and rot[0, 0] > rot[2, 2]:
+                s = np.sqrt(1.0 + rot[0, 0] - rot[1, 1] - rot[2, 2]) * 2.0
+                w = (rot[2, 1] - rot[1, 2]) / s
+                x = 0.25 * s
+                y = (rot[0, 1] + rot[1, 0]) / s
+                z = (rot[0, 2] + rot[2, 0]) / s
+            elif rot[1, 1] > rot[2, 2]:
+                s = np.sqrt(1.0 + rot[1, 1] - rot[0, 0] - rot[2, 2]) * 2.0
+                w = (rot[0, 2] - rot[2, 0]) / s
+                x = (rot[0, 1] + rot[1, 0]) / s
+                y = 0.25 * s
+                z = (rot[1, 2] + rot[2, 1]) / s
+            else:
+                s = np.sqrt(1.0 + rot[2, 2] - rot[0, 0] - rot[1, 1]) * 2.0
+                w = (rot[1, 0] - rot[0, 1]) / s
+                x = (rot[0, 2] + rot[2, 0]) / s
+                y = (rot[1, 2] + rot[2, 1]) / s
+                z = 0.25 * s
+            quat = np.array([w, x, y, z], dtype=np.float64)
+            quat /= np.linalg.norm(quat)
+            return quat.tolist()
+
+        root = ET.parse(training_urdf_path).getroot()
+        inertials_by_link: dict[str, dict[str, list[float] | float]] = {}
+        for link in root.findall("link"):
+            link_name = link.attrib.get("name")
+            inertial = link.find("inertial")
+            if not link_name or inertial is None:
+                continue
+            mass_elem = inertial.find("mass")
+            inertia_elem = inertial.find("inertia")
+            if mass_elem is None or inertia_elem is None:
+                continue
+            origin_elem = inertial.find("origin")
+            xyz = _parse_xyz(origin_elem.attrib.get("xyz") if origin_elem is not None else None)
+            rpy = _parse_xyz(origin_elem.attrib.get("rpy") if origin_elem is not None else None)
+            origin_rot = _quat_to_matrix(_rpy_to_quat_wxyz(rpy))
+            inertia_body = np.array(
+                [
+                    [
+                        float(inertia_elem.attrib.get("ixx", "0")),
+                        float(inertia_elem.attrib.get("ixy", "0")),
+                        float(inertia_elem.attrib.get("ixz", "0")),
+                    ],
+                    [
+                        float(inertia_elem.attrib.get("ixy", "0")),
+                        float(inertia_elem.attrib.get("iyy", "0")),
+                        float(inertia_elem.attrib.get("iyz", "0")),
+                    ],
+                    [
+                        float(inertia_elem.attrib.get("ixz", "0")),
+                        float(inertia_elem.attrib.get("iyz", "0")),
+                        float(inertia_elem.attrib.get("izz", "0")),
+                    ],
+                ],
+                dtype=np.float64,
+            )
+            inertia_in_origin = origin_rot.T @ inertia_body @ origin_rot
+            eigvals, eigvecs = np.linalg.eigh(inertia_in_origin)
+            if np.linalg.det(eigvecs) < 0.0:
+                eigvecs[:, 0] *= -1.0
+            principal_rot = origin_rot @ eigvecs
+            inertials_by_link[link_name] = {
+                "mass": float(mass_elem.attrib["value"]),
+                "ipos": xyz,
+                "iquat": _matrix_to_quat_wxyz(principal_rot),
+                "inertia": np.maximum(eigvals, 0.0).tolist(),
+            }
+
+        updated_body_count = 0
+        for body in robot_spec.bodies:
+            body_name = body.name
+            if not body_name or body_name not in inertials_by_link:
+                continue
+            aligned = inertials_by_link[body_name]
+            body.mass = float(aligned["mass"])
+            body.ipos = list(aligned["ipos"])
+            body.iquat = list(aligned["iquat"])
+            body.inertia = list(aligned["inertia"])
+            updated_body_count += 1
+
+        logger.info(
+            "Aligned {} composite MuJoCo body inertials from training URDF '{}'.",
+            updated_body_count,
+            training_urdf_path,
+        )
+
+    def _maybe_align_composite_hand_collision_geoms_with_training_urdf(
+        self,
+        robot_spec: mujoco.MjSpec,
+        robot_config: RobotConfig,
+        *,
+        robot_xml_path: str,
+        using_composite_object_scene: bool,
+    ) -> None:
+        """Align composite MuJoCo hand collision geoms with the training Isaac URDF when possible.
+
+        The object-carry training path uses ``main_mesh_collision_halfspherehand.urdf`` in Isaac Sim,
+        which provides a half-sphere palm collider on each wrist and does not expose the composite
+        scene's extra rubber-hand/thumb/pinky collision geoms. The MuJoCo split path loads a
+        composite XML instead, so reconcile the hand colliders here without changing body topology.
+        """
+
+        if not using_composite_object_scene:
+            return
+
+        urdf_file = str(getattr(robot_config.asset, "urdf_file", "") or "")
+        if not urdf_file.endswith("main_mesh_collision_halfspherehand.urdf"):
+            return
+
+        existing_geom_names = {geom.name for body in robot_spec.bodies for geom in body.geoms if geom.name}
+        hand_targets = (
+            (
+                "left_wrist_yaw_link",
+                "left_sphere_hand",
+                "left_hand_collision",
+                ("left_rubber_hand_link", "left_thumb_link", "left_pinky_link"),
+            ),
+            (
+                "right_wrist_yaw_link",
+                "right_sphere_hand",
+                "right_hand_collision",
+                ("right_rubber_hand_link", "right_thumb_link", "right_pinky_link"),
+            ),
+        )
+
+        # Reuse the same half-sphere asset that the retargeting scene already ships with.
+        half_sphere_asset = Path(robot_xml_path).resolve().parent / "assets" / "half_sphere.obj"
+        if not half_sphere_asset.is_file():
+            raise FileNotFoundError(
+                "Expected half-sphere hand mesh for MuJoCo carry alignment at "
+                f"'{half_sphere_asset}', but it was not found."
+            )
+
+        half_sphere_mesh_name = "halfsphere_hand_mesh"
+        existing_mesh_names = {mesh.name for mesh in robot_spec.meshes if mesh.name}
+        if half_sphere_mesh_name not in existing_mesh_names:
+            robot_spec.add_mesh(name=half_sphere_mesh_name, file=str(half_sphere_asset))
+
+        target_bodies = {body.name: body for body in robot_spec.bodies if body.name}
+        disabled_names_global = {
+            "left_hand_collision",
+            "right_hand_collision",
+            "left_rubber_hand_link",
+            "right_rubber_hand_link",
+            "left_thumb_link",
+            "right_thumb_link",
+            "left_pinky_link",
+            "right_pinky_link",
+        }
+        added_geom_count = 0
+        disabled_geom_count = 0
+        for body_name, sphere_geom_name, legacy_capsule_name, extra_geom_names in hand_targets:
+            body = target_bodies.get(body_name)
+            if body is None:
+                raise ValueError(
+                    "Cannot align MuJoCo half-sphere hand collisions because body "
+                    f"'{body_name}' is missing from composite scene '{robot_xml_path}'."
+                )
+
+            if sphere_geom_name not in existing_geom_names:
+                body.add_geom(
+                    name=sphere_geom_name,
+                    type=mujoco.mjtGeom.mjGEOM_MESH,
+                    meshname=half_sphere_mesh_name,
+                    pos=[0.029, -0.003, 0.0],
+                    quat=[0.707107, 0.0, 0.707107, 0.0],
+                )
+                existing_geom_names.add(sphere_geom_name)
+                added_geom_count += 1
+
+        for body in robot_spec.bodies:
+            for geom in body.geoms:
+                if geom.name in disabled_names_global and (int(geom.contype) != 0 or int(geom.conaffinity) != 0):
+                    geom.contype = 0
+                    geom.conaffinity = 0
+                    disabled_geom_count += 1
+
+        logger.info(
+            "Aligned MuJoCo composite hand collisions with training URDF '{}': added {} half-sphere geom(s), "
+            "disabled {} mismatched hand geom(s)",
+            urdf_file,
+            added_geom_count,
+            disabled_geom_count,
+        )
+
     def _maybe_copy_contact_pairs_from_reference_robot_xml(
         self,
         robot_spec: mujoco.MjSpec,
@@ -723,11 +1119,12 @@ class MujocoSceneManager:
         object_cfg = getattr(robot_config, "object", None)
         if object_cfg is None or not getattr(object_cfg, "mujoco_copy_contact_pairs_from_robot_xml", False):
             return
-        if not using_composite_object_scene:
-            logger.info("Skipping contact-pair copy because current MuJoCo scene is not a composite object scene")
+        using_training_urdf_object_scene = self._should_use_training_urdf_object_scene(robot_config)
+        if not using_composite_object_scene and not using_training_urdf_object_scene:
+            logger.info("Skipping contact-pair copy because current MuJoCo scene does not use object verification")
             return
         if len(robot_spec.pairs) > 0:
-            logger.info("Skipping contact-pair copy because composite scene already defines {} pair(s)", len(robot_spec.pairs))
+            logger.info("Skipping contact-pair copy because current MuJoCo robot spec already defines {} pair(s)", len(robot_spec.pairs))
             return
 
         asset_root = robot_config.asset.asset_root
@@ -776,23 +1173,36 @@ class MujocoSceneManager:
                 existing_pair_names.add(reference_pair.name)
 
         logger.info(
-            "Copied {} MuJoCo contact pair(s) from '{}' into composite scene (terrain geom '{}')",
+            "Copied {} MuJoCo contact pair(s) from '{}' into MuJoCo object scene (terrain geom '{}')",
             copied_pair_count,
             reference_xml_path,
             terrain_geom_name,
         )
 
-    def _maybe_override_composite_object_properties(
+    def _configure_object_collisions(self, object_spec: mujoco.MjSpec) -> None:
+        object_contype = 4
+        object_conaffinity = 3
+        updated_geoms = 0
+        for body in object_spec.bodies:
+            for geom in body.geoms:
+                if geom.contype == 0 or geom.conaffinity == 0:
+                    continue
+                if geom.contype == 1 and geom.conaffinity == 1:
+                    geom.contype = object_contype
+                    geom.conaffinity = object_conaffinity
+                    updated_geoms += 1
+        logger.info("Applied MuJoCo object collision settings to {} geom(s)", updated_geoms)
+
+    def _maybe_override_object_properties(
         self,
-        robot_spec: mujoco.MjSpec,
+        target_spec: mujoco.MjSpec,
         robot_config: RobotConfig,
         *,
         terrain_geom_name: str,
-        using_composite_object_scene: bool,
+        target_body_names: set[str],
     ) -> None:
-        """Override composite object mass/inertia/contact properties for MuJoCo-only sim2sim."""
         object_cfg = getattr(robot_config, "object", None)
-        if object_cfg is None or not using_composite_object_scene:
+        if object_cfg is None:
             return
 
         mass_scale = getattr(object_cfg, "mujoco_object_mass_scale", None)
@@ -801,8 +1211,6 @@ class MujocoSceneManager:
         terrain_pair_friction = getattr(object_cfg, "mujoco_object_terrain_pair_friction", None)
         if mass_scale is None and mass_override is None and geom_friction is None and terrain_pair_friction is None:
             return
-
-        target_body_names = set(getattr(self, "_object_body_name_by_name", {}).values())
         if not target_body_names:
             return
 
@@ -826,8 +1234,8 @@ class MujocoSceneManager:
         updated_bodies = 0
         updated_geoms = 0
         updated_pairs = 0
-        existing_pair_names = {pair.name for pair in robot_spec.pairs if pair.name}
-        for body in robot_spec.bodies:
+        existing_pair_names = {pair.name for pair in target_spec.pairs if pair.name}
+        for body in target_spec.bodies:
             if not body.name or body.name not in target_body_names:
                 continue
 
@@ -839,7 +1247,7 @@ class MujocoSceneManager:
                     raise ValueError(f"robot.object.mujoco_object_mass_override must be > 0, got {target_mass}")
                 if original_mass <= 0.0:
                     raise ValueError(
-                        "Cannot override MuJoCo object mass because the composite scene body has non-positive mass: "
+                        "Cannot override MuJoCo object mass because the target body has non-positive mass: "
                         f"{body.name} mass={original_mass}"
                     )
                 body_ratio = target_mass / original_mass
@@ -868,7 +1276,7 @@ class MujocoSceneManager:
                     pair_name = f"{geom.name}__{terrain_geom_name}__sim2sim"
                     if pair_name in existing_pair_names:
                         continue
-                    robot_spec.add_pair(
+                    target_spec.add_pair(
                         name=pair_name,
                         geomname1=str(geom.name),
                         geomname2=str(terrain_geom_name),
@@ -880,17 +1288,13 @@ class MujocoSceneManager:
 
         if updated_bodies > 0:
             logger.info(
-                "Overrode MuJoCo composite object mass/inertia for {} body(s): mass_scale={}, mass_override={}",
+                "Overrode MuJoCo object mass/inertia for {} body(s): mass_scale={}, mass_override={}",
                 updated_bodies,
                 mass_scale,
                 mass_override,
             )
         if updated_geoms > 0:
-            logger.info(
-                "Overrode MuJoCo composite object geom friction for {} geom(s): {}",
-                updated_geoms,
-                friction_override,
-            )
+            logger.info("Overrode MuJoCo object geom friction for {} geom(s): {}", updated_geoms, friction_override)
         if updated_pairs > 0:
             logger.info(
                 "Added {} MuJoCo object-terrain pair override(s) against terrain geom '{}': {}",
@@ -898,6 +1302,24 @@ class MujocoSceneManager:
                 terrain_geom_name,
                 terrain_pair_friction_override,
             )
+
+    def _maybe_override_composite_object_properties(
+        self,
+        robot_spec: mujoco.MjSpec,
+        robot_config: RobotConfig,
+        *,
+        terrain_geom_name: str,
+        using_composite_object_scene: bool,
+    ) -> None:
+        """Override composite object mass/inertia/contact properties for MuJoCo-only sim2sim."""
+        if not using_composite_object_scene:
+            return
+        self._maybe_override_object_properties(
+            robot_spec,
+            robot_config,
+            terrain_geom_name=terrain_geom_name,
+            target_body_names=set(getattr(self, "_object_body_name_by_name", {}).values()),
+        )
 
     @staticmethod
     def _expand_pair_friction(friction_triplet: list[float]) -> list[float]:
@@ -922,13 +1344,44 @@ class MujocoSceneManager:
             robot_spec,
             robot_config.asset.enable_self_collisions,
             object_body_names=set(self._object_body_name_by_name.values()),
+            object_contact_body_names=self._get_object_contact_enabled_body_names(robot_spec, robot_config),
         )
+
+    def _get_object_contact_enabled_body_names(
+        self,
+        robot_spec: mujoco.MjSpec,
+        robot_config: RobotConfig,
+    ) -> set[str] | None:
+        object_cfg = getattr(robot_config, "object", None)
+        if object_cfg is None or not getattr(object_cfg, "mujoco_limit_object_contacts_to_carry_bodies", False):
+            return None
+
+        carry_body_markers = (
+            "waist",
+            "torso",
+            "shoulder",
+            "elbow",
+            "wrist",
+            "hand",
+        )
+        allowed_body_names = {
+            str(body.name)
+            for body in robot_spec.bodies
+            if body.name and any(marker in str(body.name).lower() for marker in carry_body_markers)
+        }
+        logger.info(
+            "Limiting MuJoCo object contacts to {} carry body(ies): {}",
+            len(allowed_body_names),
+            sorted(allowed_body_names),
+        )
+        return allowed_body_names
 
     def _configure_robot_collisions(
         self,
         robot_spec: mujoco.MjSpec,
         enable_self_collisions: bool,
         object_body_names: set[str] | None = None,
+        object_contact_body_names: set[str] | None = None,
     ) -> None:
         """Configure robot collision behavior using MuJoCo collision classes.
 
@@ -950,13 +1403,19 @@ class MujocoSceneManager:
           otherwise robot-object contacts are silently disabled in one direction.
         """
         has_object_bodies = bool(object_body_names)
+        carry_robot_contype = 1
+        noncarry_robot_contype = 8 if object_contact_body_names else carry_robot_contype
         robot_conaffinity = 2  # Environment
         if enable_self_collisions:
-            robot_conaffinity |= 1  # Robot
+            robot_conaffinity |= carry_robot_contype
+            if object_contact_body_names:
+                robot_conaffinity |= noncarry_robot_contype
+        robot_conaffinity_with_object = robot_conaffinity
         if has_object_bodies:
-            robot_conaffinity |= 4  # Object
+            robot_conaffinity_with_object |= 4  # Object
 
         object_body_names = object_body_names or set()
+        object_contact_body_names = object_contact_body_names or set()
         object_contype = 4
         object_conaffinity = 3  # Collide with robot (1) and terrain (2)
 
@@ -984,8 +1443,16 @@ class MujocoSceneManager:
                         geom.contype = object_contype
                         geom.conaffinity = object_conaffinity
                     else:
-                        geom.contype = 1  # Robot collision class
-                        geom.conaffinity = robot_conaffinity  # Configurable based on self_collisions
+                        geom.contype = carry_robot_contype
+                        if object_contact_body_names:
+                            if body.name in object_contact_body_names:
+                                geom.contype = carry_robot_contype
+                                geom.conaffinity = robot_conaffinity_with_object
+                            else:
+                                geom.contype = noncarry_robot_contype
+                                geom.conaffinity = robot_conaffinity
+                        else:
+                            geom.conaffinity = robot_conaffinity_with_object
                     geoms_processed += 1
                     logger.debug(
                         "Set {} geom collision to contype={}, conaffinity={}",

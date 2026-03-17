@@ -34,6 +34,7 @@ class ClockPub:
         try:
             self.context = zmq.Context()
             self.socket = self.context.socket(zmq.PUB)
+            self.socket.setsockopt(zmq.LINGER, 0)
             self.socket.bind(f"tcp://*:{self.port}")
             self.start_time = time.time()
             self.enabled = True
@@ -68,10 +69,14 @@ class ClockPub:
 
     def close(self):
         """Close the clock publisher."""
-        if self.socket:
-            self.socket.close()
-        if self.context:
-            self.context.term()
+        socket = self.socket
+        context = self.context
+        self.socket = None
+        self.context = None
+        if socket:
+            socket.close(0)
+        if context:
+            context.term()
         self.enabled = False
 
 
@@ -98,6 +103,7 @@ class ClockSub:
         """Start the clock subscriber."""
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.SUB)
+        self.socket.setsockopt(zmq.LINGER, 0)
         self.socket.connect(f"tcp://localhost:{self.port}")
         self.socket.setsockopt(zmq.SUBSCRIBE, b"")  # Subscribe to all messages
         self.socket.setsockopt(zmq.RCVTIMEO, 10)  # 10ms timeout
@@ -113,14 +119,16 @@ class ClockSub:
                 message = self.socket.recv_string(zmq.NOBLOCK)
                 clock_value = int(message)
                 if clock_value < self.last_clock:
+                    previous_clock = self.last_clock
                     self._dropped_backward_messages += 1
-                    if self._dropped_backward_messages == 1 or self._dropped_backward_messages % 50 == 0:
-                        logger.warning(
-                            "Dropping backward clock sample {} < {} (count={})",
-                            clock_value,
-                            self.last_clock,
-                            self._dropped_backward_messages,
-                        )
+                    logger.warning(
+                        "Clock sample moved backward {} < {}; treating it as a simulator reset and re-anchoring.",
+                        clock_value,
+                        previous_clock,
+                    )
+                    self.last_clock = clock_value
+                    self._offset = clock_value
+                    self._dropped_backward_messages = 0
                     continue
                 self.last_clock = clock_value
             except zmq.Again:  # noqa: PERF203
@@ -148,7 +156,11 @@ class ClockSub:
 
     def close(self):
         """Close the clock subscriber."""
-        if self.socket:
-            self.socket.close()
-        if self.context:
-            self.context.term()
+        socket = self.socket
+        context = self.context
+        self.socket = None
+        self.context = None
+        if socket:
+            socket.close(0)
+        if context:
+            context.term()

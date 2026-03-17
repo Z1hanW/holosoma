@@ -90,6 +90,9 @@ class TaskConfig:
     sim_control_port: int = 5559
     """ZMQ port used to send split sim2sim simulator control requests such as reset."""
 
+    use_zmq_lowcmd: bool = False
+    """Send lowcmd over the split sim-control ZMQ channel instead of Unitree DDS."""
+
     sim_reset_restart_delay_sec: float = 0.5
     """Delay between requesting a simulator reset and restarting policy+motion playback."""
 

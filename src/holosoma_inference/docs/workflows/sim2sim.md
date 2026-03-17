@@ -53,6 +53,13 @@ The split path was verified with:
 - `hsmujoco`: `/home/ubuntu/.holosoma_deps/miniconda3/envs/hsmujoco/bin/python`
 - `hsinference`: `/home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python`
 
+When the motion clip contains retargeting metadata, the split launchers now auto-resolve:
+
+- `object_urdf_path`
+
+from the `.npz` before falling back to the default `largebox` object scene. Manual `OBJECT_URDF=...`
+still overrides the clip metadata.
+
 ## What Stays Compatible
 
 The original code path stays intact. The Sim2Sim changes only activate through new scripts or new config values:

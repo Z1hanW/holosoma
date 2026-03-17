@@ -43,8 +43,12 @@ class SimControlPush:
         self.publish({"action": "reset", "reason": str(reason)})
 
     def close(self) -> None:
-        if self.socket is not None:
-            self.socket.close()
-        if self.context is not None:
-            self.context.term()
+        socket = self.socket
+        context = self.context
+        self.socket = None
+        self.context = None
+        if socket is not None:
+            socket.close(0)
+        if context is not None:
+            context.term()
         self.enabled = False

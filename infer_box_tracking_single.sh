@@ -1,22 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Teacher-policy inference for box tracking on the same motion-box pairs used by
-# train_object_generalist.sh, with Isaac Sim <-> Viser sync enabled.
+# Teacher-policy inference for box tracking.
+#
+# Defaults prefer the motion/object settings serialized inside the checkpoint so
+# single-motion tracking runs from train_object_base.sh replay their training
+# motion/object by default. If the checkpoint does not provide them, the script
+# falls back to the same single-motion defaults used by train_object_base.sh.
 #
 # Usage:
-#   bash infer_box_tracking.sh [teacher_checkpoint.pt|wandb://...] [extra tyro args...]
+#   bash infer_box_tracking_single.sh [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
 #
 # Optional env vars:
-#   TEACHER_CHECKPOINT        (default: distill_box teacher default)
+#   TEACHER_CHECKPOINT        (default: latest checkpoint from the train_object_base.sh W&B run)
+#   WANDB_MODEL_FILE          (optional; used when TEACHER_CHECKPOINT is a W&B run URL without /files/<checkpoint>)
 #   LEGACY_OBS                (default: 0; set 1/true to require legacy checkpoint observation layout)
 #   REQUIRE_HEIGHTMAP         (default: 0; set 1/true to require checkpoint perception.enabled=True and output_mode=heightmap)
 #   DEFAULT_LEGACY_TEACHER_CHECKPOINT
 #                             (optional; used as default checkpoint when LEGACY_OBS=1 and no checkpoint is explicitly provided)
-#   INFER_DATASET             (default: mixed; options: omomo|behave|behave_carry|behave_sq_carry|mixed)
-#   MOTION_DIR                (optional override; if unset, chosen by INFER_DATASET)
+#   MOTION_DIR                (optional override; if unset, prefer checkpoint motion_file, else the train_object_base.sh single-motion default)
 #   MOTION_CLIP_NAME          (optional: pin a single clip)
-#   OBJECT_URDF               (optional override; if unset, chosen by INFER_DATASET)
+#   OBJECT_URDF               (optional override; if unset, prefer checkpoint object_urdf_path, else the train_object_base.sh single-object default)
 #   NUM_ENVS                  (default: 1)
 #   HEADLESS                  (default: False; set True for headless eval)
 #   VISER_PORT                (default: random)
@@ -32,18 +36,13 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  bash infer_box_tracking.sh [teacher_checkpoint.pt|wandb://...] [extra tyro args...]
+  bash infer_box_tracking_single.sh [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
 
 Examples:
-  bash infer_box_tracking.sh
-  bash infer_box_tracking.sh /abs/path/to/model_17000.pt
-  MOTION_CLIP_NAME=sub3_largebox_003_mj_w_obj bash infer_box_tracking.sh
-
-Dataset selection examples:
-  INFER_DATASET=omomo bash infer_box_tracking.sh
-  INFER_DATASET=behave bash infer_box_tracking.sh
-  INFER_DATASET=behave_carry bash infer_box_tracking.sh
-  INFER_DATASET=mixed bash infer_box_tracking.sh
+  bash infer_box_tracking_single.sh
+  bash infer_box_tracking_single.sh /abs/path/to/model_17000.pt
+  bash infer_box_tracking_single.sh https://wandb.ai/zihanw22/boxer/runs/gx2wduvw
+  MOTION_CLIP_NAME=sub3_largebox_003_mj_w_obj bash infer_box_tracking_single.sh
 EOF
 }
 
@@ -58,8 +57,238 @@ if [[ $# -gt 0 ]]; then
       ;;
   esac
 fi
-DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/kge4jozt/model_12000.pt"}
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"https://wandb.ai/zihanw22/boxer/runs/opq0wbyq"}
 DEFAULT_LEGACY_TEACHER_CHECKPOINT="${DEFAULT_LEGACY_TEACHER_CHECKPOINT:-}"
+if [[ -n "${WANDB_MODEL_FILE+x}" && -n "${WANDB_MODEL_FILE}" ]]; then
+  WANDB_MODEL_FILE_FROM_ENV=1
+else
+  WANDB_MODEL_FILE_FROM_ENV=0
+fi
+
+parse_wandb_run_url() {
+  local ref="$1"
+  local clean_ref="${ref%%\?*}"
+  if [[ "${clean_ref}" != https://wandb.ai/*/runs/* ]]; then
+    return 1
+  fi
+
+  local trimmed="${clean_ref#https://wandb.ai/}"
+  local entity=""
+  local project=""
+  local run_id=""
+  local explicit_file=""
+  IFS='/' read -r -a parts <<< "${trimmed}"
+  if [[ "${#parts[@]}" -lt 4 || "${parts[2]}" != "runs" ]]; then
+    return 1
+  fi
+
+  entity="${parts[0]}"
+  project="${parts[1]}"
+  run_id="${parts[3]}"
+  if [[ -z "${entity}" || -z "${project}" || -z "${run_id}" ]]; then
+    return 1
+  fi
+
+  if [[ "${#parts[@]}" -ge 6 && "${parts[4]}" == "files" ]]; then
+    explicit_file="${trimmed#${entity}/${project}/runs/${run_id}/files/}"
+  fi
+
+  printf '%s\t%s\t%s\t%s\n' "${entity}" "${project}" "${run_id}" "${explicit_file}"
+}
+
+resolve_remote_wandb_checkpoint_name() {
+  local entity="$1"
+  local project="$2"
+  local run_id="$3"
+
+  python - "${entity}" "${project}" "${run_id}" <<'PY' 2>/dev/null || true
+import re
+import sys
+from pathlib import Path
+
+repo_root = Path.cwd().resolve()
+sanitized_sys_path: list[str] = []
+for path_entry in sys.path:
+    if path_entry in {"", "."}:
+        continue
+    try:
+        if Path(path_entry).resolve() == repo_root:
+            continue
+    except Exception:
+        pass
+    sanitized_sys_path.append(path_entry)
+sys.path = sanitized_sys_path
+
+try:
+    import wandb
+except Exception:
+    sys.exit(0)
+
+entity, project, run_id = sys.argv[1:4]
+api = wandb.Api(timeout=30)
+run = api.run(f"{entity}/{project}/{run_id}")
+numbered_models: list[tuple[int, str]] = []
+pt_candidates: list[str] = []
+model_pattern = re.compile(r"^model_(\d+)\.pt$")
+
+for file_obj in run.files():
+    name = getattr(file_obj, "name", "")
+    if not name.endswith(".pt"):
+        continue
+    pt_candidates.append(name)
+    match = model_pattern.match(name)
+    if match:
+        numbered_models.append((int(match.group(1)), name))
+
+if numbered_models:
+    print(max(numbered_models, key=lambda item: item[0])[1])
+elif len(pt_candidates) == 1:
+    print(pt_candidates[0])
+elif pt_candidates:
+    print(sorted(pt_candidates)[-1])
+PY
+}
+
+resolve_data_path() {
+  local path_value="$1"
+  if [[ -z "${path_value}" ]]; then
+    echo ""
+    return 0
+  fi
+
+  if [[ "${path_value}" == s3://* || "${path_value}" == /* ]]; then
+    echo "${path_value}"
+    return 0
+  fi
+
+  if [[ "${path_value}" == holosoma/data/* ]]; then
+    echo "${SCRIPT_DIR}/src/holosoma/${path_value}"
+    return 0
+  fi
+
+  python - "${path_value}" <<'PY'
+import sys
+from pathlib import Path
+
+print(str(Path(sys.argv[1]).expanduser().resolve()))
+PY
+}
+
+normalize_checkpoint_ref() {
+  local ref="$1"
+  if [[ "${ref}" != https://wandb.ai/*/runs/* ]]; then
+    echo "${ref}"
+    return 0
+  fi
+
+  local parsed=""
+  local entity=""
+  local project=""
+  local run_id=""
+  local explicit_file=""
+  local model_file=""
+
+  parsed="$(parse_wandb_run_url "${ref}" || true)"
+  if [[ -z "${parsed}" ]]; then
+    echo "${ref}"
+    return 0
+  fi
+
+  IFS=$'\t' read -r entity project run_id explicit_file <<< "${parsed}"
+  if [[ -n "${explicit_file}" ]]; then
+    model_file="${explicit_file}"
+  elif [[ "${WANDB_MODEL_FILE_FROM_ENV}" == "1" ]]; then
+    model_file="${WANDB_MODEL_FILE}"
+  else
+    model_file="$(resolve_remote_wandb_checkpoint_name "${entity}" "${project}" "${run_id}")"
+    if [[ -n "${model_file}" ]]; then
+      echo "[INFO] Resolved wandb run URL to remote checkpoint: ${model_file}" >&2
+    fi
+  fi
+
+  if [[ -z "${model_file}" ]]; then
+    echo "[ERROR] Could not determine a .pt checkpoint for W&B run URL: ${ref}" >&2
+    echo "[ERROR] Pass a /files/<checkpoint>.pt URL or set WANDB_MODEL_FILE." >&2
+    return 2
+  fi
+
+  echo "wandb://${entity}/${project}/${run_id}/${model_file}"
+}
+
+extract_checkpoint_motion_defaults() {
+  local checkpoint_ref="$1"
+
+  python - <<'PY' "${checkpoint_ref}" 2>/dev/null || true
+import sys
+import tempfile
+from pathlib import Path
+
+import torch
+
+
+def _parse_wandb_reference(reference: str) -> tuple[str, str]:
+    if not reference.startswith("wandb://"):
+        raise ValueError("Not a wandb:// reference")
+    remainder = reference[len("wandb://") :]
+    parts = remainder.split("/")
+    if len(parts) < 4:
+        raise ValueError(
+            "Invalid wandb checkpoint path. Expected wandb://<entity>/<project>/<run_id>/<checkpoint_name>"
+        )
+    entity, project = parts[0], parts[1]
+    run_id_index = 2
+    if len(parts) > 4 and parts[2] == "runs":
+        run_id_index = 3
+    if run_id_index >= len(parts):
+        raise ValueError(
+            "Invalid wandb checkpoint path. Expected wandb://<entity>/<project>/<run_id>/<checkpoint_name>"
+        )
+    run_id = parts[run_id_index]
+    ckpt_name = "/".join(parts[run_id_index + 1 :]).strip()
+    if not ckpt_name:
+        raise ValueError(
+            "wandb checkpoint reference must include checkpoint filename, e.g. model_12000.pt"
+        )
+    return f"{entity}/{project}/{run_id}", ckpt_name
+
+
+def load_payload(checkpoint_ref: str):
+    if checkpoint_ref.startswith("wandb://"):
+        import wandb
+
+        run_path, ckpt_name = _parse_wandb_reference(checkpoint_ref)
+        run = wandb.Api().run(run_path)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            downloaded = run.file(ckpt_name).download(root=tmp_dir, replace=True)
+            ckpt_path = Path(downloaded.name)
+            if not ckpt_path.is_absolute():
+                ckpt_path = (Path.cwd() / ckpt_path).resolve()
+            return torch.load(ckpt_path, map_location="cpu")
+    return torch.load(checkpoint_ref, map_location="cpu")
+
+
+payload = load_payload(sys.argv[1])
+cfg = payload.get("experiment_config")
+if not isinstance(cfg, dict):
+    sys.exit(0)
+
+command_cfg = cfg.get("command")
+setup_terms = command_cfg.get("setup_terms", {}) if isinstance(command_cfg, dict) else {}
+motion_command = setup_terms.get("motion_command", {}) if isinstance(setup_terms, dict) else {}
+params = motion_command.get("params", {}) if isinstance(motion_command, dict) else {}
+motion_cfg = params.get("motion_config", {}) if isinstance(params, dict) else {}
+robot_cfg = cfg.get("robot")
+object_cfg = robot_cfg.get("object", {}) if isinstance(robot_cfg, dict) else {}
+
+motion_file = motion_cfg.get("motion_file") if isinstance(motion_cfg, dict) else None
+motion_clip_name = motion_cfg.get("motion_clip_name") if isinstance(motion_cfg, dict) else None
+object_urdf_path = object_cfg.get("object_urdf_path") if isinstance(object_cfg, dict) else None
+
+for value in (motion_file, motion_clip_name, object_urdf_path):
+    print("" if value is None else str(value))
+PY
+}
+
 LEGACY_OBS=${LEGACY_OBS:-0}
 legacy_obs_normalized=$(echo "${LEGACY_OBS}" | tr '[:upper:]' '[:lower:]')
 if [[ "${legacy_obs_normalized}" == "1" || "${legacy_obs_normalized}" == "true" ]]; then
@@ -83,7 +312,7 @@ TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${CKPT:-${DEFAULT_TEACHER_CHECKPOINT}}
 TEACHER_CHECKPOINT_FROM_ARG=0
 
 if [[ $# -gt 0 ]]; then
-  if [[ "$1" == wandb://* || "$1" == /* || "$1" == ./* || "$1" == ../* || "$1" == *.pt ]]; then
+  if [[ "$1" == wandb://* || "$1" == https://wandb.ai/*/runs/* || "$1" == /* || "$1" == ./* || "$1" == ../* || "$1" == *.pt ]]; then
     TEACHER_CHECKPOINT="$1"
     TEACHER_CHECKPOINT_FROM_ARG=1
     shift
@@ -102,39 +331,10 @@ if [[ "${LEGACY_OBS_ENABLED}" == "1" ]]; then
   fi
 fi
 
-pick_first_existing_path() {
-  local candidate=""
-  for candidate in "$@"; do
-    if [[ -e "${candidate}" ]]; then
-      echo "${candidate}"
-      return 0
-    fi
-  done
-  if [[ $# -gt 0 ]]; then
-    echo "$1"
-  fi
-}
+TEACHER_CHECKPOINT="$(normalize_checkpoint_ref "${TEACHER_CHECKPOINT}")"
 
-INFER_DATASET=${INFER_DATASET:-${DATASET:-mixed}}
-INFER_DATASET=$(echo "${INFER_DATASET}" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
-case "${INFER_DATASET}" in
-  omomo|behave|behave_carry|behave_sq_carry|mixed) ;;
-  *)
-    echo "[ERROR] INFER_DATASET must be one of: omomo, behave, behave_carry, behave_sq_carry, mixed. Got: ${INFER_DATASET}" >&2
-    exit 2
-    ;;
-esac
-
-DEFAULT_OMOMO_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"
-DEFAULT_BEHAVE_MOTION_DIR="$(pick_first_existing_path \
-  "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_carry" \
-  "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_sq_carry")"
-DEFAULT_MIXED_MOTION_DIR="$(pick_first_existing_path \
-  "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_carry_aug_mix_ml" \
-  "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_carry_aug_mix_ml")"
-DEFAULT_OMOMO_URDF="${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
-DEFAULT_BEHAVE_MAP_FILE="${DEFAULT_BEHAVE_MOTION_DIR}/_clip_object_urdf_map.json"
-DEFAULT_MIXED_MAP_FILE="${DEFAULT_MIXED_MOTION_DIR}/_clip_object_urdf_map.json"
+DEFAULT_SINGLE_MOTION_SOURCE="${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz"
+DEFAULT_SINGLE_OBJECT_URDF="${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
 
 MOTION_DIR_FROM_ENV=0
 if [[ -n "${MOTION_DIR+x}" ]]; then
@@ -144,44 +344,47 @@ OBJECT_URDF_FROM_ENV=0
 if [[ -n "${OBJECT_URDF+x}" ]]; then
   OBJECT_URDF_FROM_ENV=1
 fi
-
-if [[ "${MOTION_DIR_FROM_ENV}" != "1" ]]; then
-  case "${INFER_DATASET}" in
-    omomo)
-      MOTION_DIR="${DEFAULT_OMOMO_MOTION_DIR}"
-      ;;
-    behave|behave_carry|behave_sq_carry)
-      MOTION_DIR="${DEFAULT_BEHAVE_MOTION_DIR}"
-      ;;
-    mixed)
-      MOTION_DIR="${DEFAULT_MIXED_MOTION_DIR}"
-      ;;
-  esac
+MOTION_CLIP_NAME_FROM_ENV=0
+if [[ -n "${MOTION_CLIP_NAME+x}" ]]; then
+  MOTION_CLIP_NAME_FROM_ENV=1
 fi
 
-MOTION_CLIP_NAME=${MOTION_CLIP_NAME:-}
+CHECKPOINT_MOTION_SOURCE=""
+CHECKPOINT_MOTION_CLIP_NAME=""
+CHECKPOINT_OBJECT_URDF=""
+mapfile -t checkpoint_defaults_lines < <(extract_checkpoint_motion_defaults "${TEACHER_CHECKPOINT}")
+checkpoint_motion_source="${checkpoint_defaults_lines[0]:-}"
+checkpoint_motion_clip_name="${checkpoint_defaults_lines[1]:-}"
+checkpoint_object_urdf="${checkpoint_defaults_lines[2]:-}"
+if [[ -n "${checkpoint_motion_source}" ]]; then
+  CHECKPOINT_MOTION_SOURCE="$(resolve_data_path "${checkpoint_motion_source}")"
+fi
+if [[ -n "${checkpoint_motion_clip_name}" ]]; then
+  CHECKPOINT_MOTION_CLIP_NAME="${checkpoint_motion_clip_name}"
+fi
+if [[ -n "${checkpoint_object_urdf}" ]]; then
+  CHECKPOINT_OBJECT_URDF="$(resolve_data_path "${checkpoint_object_urdf}")"
+fi
+
+if [[ "${MOTION_DIR_FROM_ENV}" != "1" ]]; then
+  if [[ -n "${CHECKPOINT_MOTION_SOURCE}" ]]; then
+    MOTION_DIR="${CHECKPOINT_MOTION_SOURCE}"
+  else
+    MOTION_DIR="${DEFAULT_SINGLE_MOTION_SOURCE}"
+  fi
+fi
+
+if [[ "${MOTION_CLIP_NAME_FROM_ENV}" != "1" && -n "${CHECKPOINT_MOTION_CLIP_NAME}" ]]; then
+  MOTION_CLIP_NAME="${CHECKPOINT_MOTION_CLIP_NAME}"
+else
+  MOTION_CLIP_NAME=${MOTION_CLIP_NAME:-}
+fi
 if [[ "${OBJECT_URDF_FROM_ENV}" != "1" ]]; then
-  case "${INFER_DATASET}" in
-    omomo)
-      OBJECT_URDF="${DEFAULT_OMOMO_URDF}"
-      ;;
-    behave|behave_carry|behave_sq_carry)
-      if [[ -f "${DEFAULT_BEHAVE_MAP_FILE}" ]]; then
-        OBJECT_URDF="${DEFAULT_BEHAVE_MAP_FILE}"
-      else
-        echo "[ERROR] BEHAVE map file not found: ${DEFAULT_BEHAVE_MAP_FILE}" >&2
-        exit 2
-      fi
-      ;;
-    mixed)
-      if [[ -f "${DEFAULT_MIXED_MAP_FILE}" ]]; then
-        OBJECT_URDF="${DEFAULT_MIXED_MAP_FILE}"
-      else
-        echo "[ERROR] Mixed map file not found: ${DEFAULT_MIXED_MAP_FILE}" >&2
-        exit 2
-      fi
-      ;;
-  esac
+  if [[ -n "${CHECKPOINT_OBJECT_URDF}" ]]; then
+    OBJECT_URDF="${CHECKPOINT_OBJECT_URDF}"
+  else
+    OBJECT_URDF="${DEFAULT_SINGLE_OBJECT_URDF}"
+  fi
 fi
 
 NUM_ENVS=${NUM_ENVS:-1}
@@ -431,7 +634,6 @@ fi
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
 echo "[INFO] legacy_obs_enabled=${LEGACY_OBS_ENABLED}"
 echo "[INFO] require_heightmap=${HEIGHTMAP_REQUIRED}"
-echo "[INFO] infer_dataset=${INFER_DATASET}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
 echo "[INFO] motion_clip_name=${MOTION_CLIP_NAME:-<auto>}"
 echo "[INFO] object_urdf=${OBJECT_URDF}"

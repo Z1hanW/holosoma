@@ -20,6 +20,7 @@ class PerceptionObsSub:
     def start(self) -> None:
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.SUB)
+        self.socket.setsockopt(zmq.LINGER, 0)
         self.socket.connect(f"tcp://localhost:{self.port}")
         self.socket.setsockopt(zmq.SUBSCRIBE, b"")
         self.socket.setsockopt(zmq.RCVTIMEO, 10)
@@ -39,7 +40,11 @@ class PerceptionObsSub:
         return self.last_payload
 
     def close(self) -> None:
-        if self.socket is not None:
-            self.socket.close()
-        if self.context is not None:
-            self.context.term()
+        socket = self.socket
+        context = self.context
+        self.socket = None
+        self.context = None
+        if socket is not None:
+            socket.close(0)
+        if context is not None:
+            context.term()

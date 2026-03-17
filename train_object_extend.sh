@@ -46,7 +46,7 @@ if [[ -z "${PYTHON_BIN}" ]]; then
   exit 2
 fi
 
-DEFAULT_CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+DEFAULT_CUDA_VISIBLE_DEVICES=4,5,6,7
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-${DEFAULT_CUDA_VISIBLE_DEVICES}}
 NPROC=${NPROC:-$(awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}")}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
@@ -82,7 +82,7 @@ fi
 MOTION_CLIP_ID=${MOTION_CLIP_ID:-""}
 MOTION_CLIP_NAME=${MOTION_CLIP_NAME:-""}
 PERCEPTION=${PERCEPTION:-none}
-NUM_ENVS=${NUM_ENVS:-$((12288 * 8))}
+NUM_ENVS=${NUM_ENVS:-$((12288 * 4))}
 SAVE_INTERVAL=${SAVE_INTERVAL:-500}
 NUM_ITERS=${NUM_ITERS:-""}
 CHECKPOINT=${CHECKPOINT:-""}
@@ -236,7 +236,8 @@ profile_default_value() {
       echo 0.20
       ;;
     decoupled:TORSO_CONTACT_W|custom:TORSO_CONTACT_W)
-      echo 0.10
+      # Aggressively favor chest-brace carries in the extend profile.
+      echo 0.60
       ;;
     *)
       echo "[ERROR] Unsupported profile/weight combination '${profile}:${knob}'." >&2

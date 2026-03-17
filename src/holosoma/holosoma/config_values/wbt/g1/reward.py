@@ -64,6 +64,8 @@ _ARM_SUPPORT_CONTACT_BODY_NAMES = [
     "left_wrist_pitch_link",
     "right_wrist_pitch_link",
 ]
+# On the current G1 object-carry asset, chest/trunk bracing against the box
+# is represented by torso_link contact.
 _TORSO_SUPPORT_CONTACT_BODY_NAMES = ["torso_link"]
 
 g1_29dof_wbt_reward = RewardManagerCfg(

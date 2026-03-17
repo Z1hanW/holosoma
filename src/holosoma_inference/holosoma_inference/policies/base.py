@@ -10,18 +10,27 @@ from collections import deque
 from dataclasses import replace
 from pathlib import Path
 
-import netifaces as ni
 import numpy as np
 import onnx
 import onnxruntime
 from loguru import logger
-from sshkeyboard import listen_keyboard
 from termcolor import colored
+
+try:
+    import netifaces as ni
+except ModuleNotFoundError:  # pragma: no cover - optional runtime dependency
+    ni = None
+
+try:
+    from sshkeyboard import listen_keyboard
+except ModuleNotFoundError:  # pragma: no cover - optional runtime dependency
+    listen_keyboard = None
 
 from holosoma_inference.config.config_types.inference import InferenceConfig
 from holosoma_inference.config.config_types.observation import ObservationConfig
 from holosoma_inference.config.config_types.robot import RobotConfig
 from holosoma_inference.sdk.interface_wrapper import InterfaceWrapper
+from holosoma_inference.sdk.zmq_interface_wrapper import ZmqSimInterfaceWrapper
 from holosoma_inference.utils.latency import LatencyTracker
 from holosoma_inference.utils.math.quat import quat_rotate_inverse
 from holosoma_inference.utils.rate import RateLimiter
@@ -69,6 +78,16 @@ class BasePolicy:
             "yes",
             "on",
         }
+        self._use_motion_command_as_q_target = str(
+            os.getenv("HOLOSOMA_USE_MOTION_COMMAND_AS_Q_TARGET", "0")
+        ).lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if self._use_motion_command_as_q_target:
+            logger.warning("HOLOSOMA_USE_MOTION_COMMAND_AS_Q_TARGET enabled: using motion-command joint targets directly.")
 
     # ============================================================================
     # Initialization Methods
@@ -111,6 +130,8 @@ class BasePolicy:
     def _init_sdk_components(self):
         """Initialize SDK components based on robot type."""
         self.sdk_type = self.robot_config.sdk_type
+        if bool(getattr(self.config.task, "use_zmq_lowcmd", False)):
+            return
 
         if self.sdk_type == "unitree":
             pass  # No channel initialization needed for binding
@@ -119,6 +140,10 @@ class BasePolicy:
         elif self.sdk_type == "booster":
             from booster_robotics_sdk import ChannelFactory
 
+            if ni is None:
+                raise ModuleNotFoundError(
+                    "booster SDK requires the optional 'netifaces' package, which is not installed in this env."
+                )
             ip = ni.ifaddresses(self.config.task.interface)[ni.AF_INET][0]["addr"]
             ChannelFactory.Instance().Init(self.config.task.domain_id, ip)
         else:
@@ -213,12 +238,39 @@ class BasePolicy:
 
     def _init_communication_components(self):
         """Initialize state processor and command sender using the wrapper."""
-        self.interface = InterfaceWrapper(
-            self.robot_config,
-            self.config.task.domain_id,
-            self.config.task.interface,
-            self.config.task.use_joystick,
-        )
+        if bool(getattr(self.config.task, "use_zmq_lowcmd", False)):
+            self.interface = ZmqSimInterfaceWrapper(
+                self.robot_config,
+                sim_state_port=self.config.task.sim_state_port,
+                sim_control_port=self.config.task.sim_control_port,
+                use_joystick=self.config.task.use_joystick,
+            )
+        else:
+            self.interface = InterfaceWrapper(
+                self.robot_config,
+                self.config.task.domain_id,
+                self.config.task.interface,
+                self.config.task.use_joystick,
+            )
+        self._apply_interface_gain_overrides_from_env()
+
+    def _apply_interface_gain_overrides_from_env(self) -> None:
+        """Allow non-interactive rollout scripts to scale low-level gains via environment variables."""
+        kp_level = os.getenv("HOLOSOMA_KP_LEVEL")
+        if kp_level not in (None, ""):
+            try:
+                self.interface.kp_level = float(kp_level)
+                logger.info("Using interface KP level override from env: {}", self.interface.kp_level)
+            except ValueError:
+                logger.warning("Ignoring invalid HOLOSOMA_KP_LEVEL={!r}", kp_level)
+
+        kd_level = os.getenv("HOLOSOMA_KD_LEVEL")
+        if kd_level not in (None, ""):
+            try:
+                self.interface.kd_level = float(kd_level)
+                logger.info("Using interface KD level override from env: {}", self.interface.kd_level)
+            except ValueError:
+                logger.warning("Ignoring invalid HOLOSOMA_KD_LEVEL={!r}", kd_level)
 
     def _init_policy_components(self, model_path, policy_action_scale, rl_rate):
         """Initialize policy-related components."""
@@ -531,13 +583,40 @@ class BasePolicy:
 
         Creates a new config instance with resolved values if needed.
         """
-        # Check if config has explicit KP/KD values
-        config_has_kp = hasattr(self.robot_config, "motor_kp") and self.robot_config.motor_kp is not None
-        config_has_kd = hasattr(self.robot_config, "motor_kd") and self.robot_config.motor_kd is not None
+        use_stiff_startup_gains = str(os.getenv("HOLOSOMA_USE_STIFF_STARTUP_GAINS_FOR_POLICY", "0")).lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if use_stiff_startup_gains:
+            stiff_kp = getattr(self.robot_config, "stiff_startup_kp", None)
+            stiff_kd = getattr(self.robot_config, "stiff_startup_kd", None)
+            if stiff_kp is None or stiff_kd is None:
+                raise ValueError(
+                    "HOLOSOMA_USE_STIFF_STARTUP_GAINS_FOR_POLICY=1 requires robot.stiff_startup_kp/kd in config."
+                )
+            logger.info(colored("Using stiff-startup KP/KD for policy control (env override)", "yellow"))
+            kp_values = np.array(stiff_kp, dtype=np.float32)
+            kd_values = np.array(stiff_kd, dtype=np.float32)
+            self.robot_config = replace(
+                self.robot_config, motor_kp=tuple(kp_values.tolist()), motor_kd=tuple(kd_values.tolist())
+            )
+            self.interface.robot_config = self.robot_config
+            if self.interface.backend == "sdk2py":
+                self.interface.command_sender.config = self.robot_config
+                self.interface.state_processor.config = self.robot_config
+            config_has_kp = True
+            config_has_kd = True
+        else:
+            # Check if config has explicit KP/KD values
+            config_has_kp = hasattr(self.robot_config, "motor_kp") and self.robot_config.motor_kp is not None
+            config_has_kd = hasattr(self.robot_config, "motor_kd") and self.robot_config.motor_kd is not None
 
         if config_has_kp and config_has_kd:
             # Config already has values (override) - nothing to do
-            logger.info(colored("Using KP/KD from config (override)", "yellow"))
+            if not use_stiff_startup_gains:
+                logger.info(colored("Using KP/KD from config (override)", "yellow"))
             kp_values = np.array(self.robot_config.motor_kp)
             kd_values = np.array(self.robot_config.motor_kd)
         elif self.onnx_kp is not None and self.onnx_kd is not None:
@@ -829,6 +908,10 @@ class BasePolicy:
                     else:
                         raise NotImplementedError("Upper body controller not implemented")
                 q_target = scaled_policy_action + self.default_dof_angles
+                if self._use_motion_command_as_q_target:
+                    motion_command = getattr(self, "motion_command_t", None)
+                    if motion_command is not None and motion_command.shape[1] >= self.num_dofs:
+                        q_target = np.array(motion_command[:, : self.num_dofs], dtype=np.float32, copy=True)
 
             # Clip target positions to motor limits (in-place for speed)
             if self._clip_joint_targets and self.q_min_arr is not None and self.q_max_arr is not None:
@@ -870,6 +953,9 @@ class BasePolicy:
 
     def start_key_listener(self):
         """Start keyboard listener thread."""
+        if listen_keyboard is None:
+            self.logger.warning("sshkeyboard is not installed; keyboard input will not be available in this env")
+            return
 
         def on_press(keycode):
             try:
@@ -1051,4 +1137,7 @@ class BasePolicy:
         except KeyboardInterrupt:
             pass
         finally:
-            self._on_run_exit()
+            try:
+                self._on_run_exit()
+            except KeyboardInterrupt:
+                pass

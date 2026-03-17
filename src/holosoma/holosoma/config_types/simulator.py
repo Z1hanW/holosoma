@@ -498,6 +498,9 @@ class BridgeConfig:
     control_port: int = 5559
     """ZMQ port used to receive split sim2sim control requests."""
 
+    use_zmq_lowcmd: bool = False
+    """Use the split sim-control ZMQ channel for lowcmd instead of Unitree DDS."""
+
     publish_perception_obs: bool = False
     """Publish simulator perception observations over ZMQ for split sim2sim inference."""
 

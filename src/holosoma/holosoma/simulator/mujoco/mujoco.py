@@ -6,6 +6,8 @@ implementations for terrain rendering, contact detection, and physics simulation
 
 from __future__ import annotations
 
+import os
+
 import mujoco
 import mujoco.viewer
 import glfw
@@ -417,18 +419,13 @@ class MuJoCo(BaseSimulator):
         # Get all joint names
         assert self.root_model
         all_joint_names = [self.root_model.joint(i).name for i in range(self.root_model.njnt)]
-
-        # Filter out freejoints
-        # TODO: make more robust/not hardcoded names, also handle objects
         prefix = self.scene_manager.robot_prefix
-        exclude_names = [
+        exclude_names = {
             f"{prefix}freejoint",
             f"{prefix}floating_base_joint",
-            f"{prefix}",  # keep named joints only
-            "",  # keep named joints only
-        ]
+        }
 
-        robot_joint_names = [n for n in all_joint_names if n not in exclude_names]
+        robot_joint_names = [n for n in all_joint_names if n and n.startswith(prefix) and n not in exclude_names]
 
         # Build name maps first
         self._build_name_maps()
@@ -437,9 +434,12 @@ class MuJoCo(BaseSimulator):
         # Use map lookup for clean names
         self.dof_names = [self._get_clean_name(name) for name in robot_joint_names]
 
-        all_body_names = [self._get_clean_name(self.root_model.body(i).name) for i in range(self.root_model.nbody)]
-        self._rigid_body_mujoco_ids = [body_id for body_id, name in enumerate(all_body_names) if name != "world"]
-        self.body_names = [all_body_names[body_id] for body_id in self._rigid_body_mujoco_ids]
+        self._rigid_body_mujoco_ids = [
+            body_id
+            for body_id in range(self.root_model.nbody)
+            if self.root_model.body(body_id).name and self.root_model.body(body_id).name.startswith(prefix)
+        ]
+        self.body_names = [self._get_clean_name(self.root_model.body(body_id).name) for body_id in self._rigid_body_mujoco_ids]
         self.num_bodies = len(self.body_names)
 
         # Build body index mapping for contact forces (after body_names is defined)
@@ -787,6 +787,7 @@ class MuJoCo(BaseSimulator):
         """Publish MuJoCo-measured reference-body pose for split sim2sim alignment."""
         assert self.root_model is not None
         assert self.root_data is not None
+        include_object_contact_details = os.getenv("HOLOSOMA_SIM_STATE_INCLUDE_OBJECT_CONTACT_DETAILS", "0") == "1"
 
         ref_body_name = getattr(self.robot_config, "torso_name", None) or (self.body_names[0] if self.body_names else None)
         if ref_body_name is None:
@@ -828,6 +829,8 @@ class MuJoCo(BaseSimulator):
         object_scene_contact_count = 0
         object_robot_max_pen = 0.0
         object_scene_max_pen = 0.0
+        object_robot_contact_bodies: set[str] = set()
+        object_robot_contact_geoms: set[str] = set()
         if object_geom_ids:
             for contact_idx in range(int(self.root_data.ncon)):
                 contact = self.root_data.contact[contact_idx]
@@ -844,11 +847,22 @@ class MuJoCo(BaseSimulator):
                 if other_body_id in robot_body_ids:
                     object_robot_contact_count += 1
                     object_robot_max_pen = max(object_robot_max_pen, penetration)
+                    if include_object_contact_details:
+                        body_name = mujoco.mj_id2name(self.root_model, mujoco.mjtObj.mjOBJ_BODY, other_body_id)
+                        if body_name:
+                            object_robot_contact_bodies.add(str(body_name))
+                        object_geom_id = geom1_id if geom1_id in object_geom_ids else geom2_id
+                        other_geom_name = mujoco.mj_id2name(self.root_model, mujoco.mjtObj.mjOBJ_GEOM, other_geom_id)
+                        object_geom_name = mujoco.mj_id2name(self.root_model, mujoco.mjtObj.mjOBJ_GEOM, object_geom_id)
+                        if other_geom_name:
+                            object_robot_contact_geoms.add(str(other_geom_name))
+                        if object_geom_name:
+                            object_robot_contact_geoms.add(str(object_geom_name))
                 elif other_body_id not in object_body_ids:
                     object_scene_contact_count += 1
                     object_scene_max_pen = max(object_scene_max_pen, penetration)
 
-        return {
+        payload = {
             "robot_ref_body_name": ref_body_name,
             "robot_ref_state": [
                 float(ref_pos[0]),
@@ -870,6 +884,10 @@ class MuJoCo(BaseSimulator):
             "object_robot_max_pen": float(object_robot_max_pen),
             "object_scene_max_pen": float(object_scene_max_pen),
         }
+        if include_object_contact_details:
+            payload["object_robot_contact_bodies"] = sorted(object_robot_contact_bodies)
+            payload["object_robot_contact_geoms"] = sorted(object_robot_contact_geoms)
+        return payload
 
     def _sync_robot_rows_into_all_root_states(self, env_ids: torch.Tensor) -> None:
         if self.all_root_states is self.robot_root_states or env_ids.numel() == 0:

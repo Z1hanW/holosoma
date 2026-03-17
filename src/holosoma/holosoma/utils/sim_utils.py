@@ -604,6 +604,10 @@ class DirectSimulation:
             raise ValueError(f"run_sim.motion_init currently supports only .npz clips, got: {motion_path}")
 
         env_ids = torch.tensor([0], device=self.device, dtype=torch.long)
+        desired_root_state_np: np.ndarray | None = None
+        desired_dof_pos_np: np.ndarray | None = None
+        desired_object_state_np: np.ndarray | None = None
+        has_object_motion = False
         with np.load(motion_path, allow_pickle=True) as data:
             body_names = self._decode_names(np.asarray(data["body_names"]))
             joint_names = self._decode_names(np.asarray(data["joint_names"]))
@@ -674,6 +678,7 @@ class DirectSimulation:
                 device=self.device,
                 dtype=torch.float32,
             )
+            desired_root_state_np = root_state[0].detach().cpu().numpy().astype(np.float32, copy=False)
             self.simulator.robot_root_states[0] = root_state[0]
 
             dof_state = torch.stack(
@@ -683,10 +688,12 @@ class DirectSimulation:
                 ],
                 dim=-1,
             ).unsqueeze(0)
+            desired_dof_pos_np = dof_state[0, :, 0].detach().cpu().numpy().astype(np.float32, copy=False)
             self.simulator.set_dof_state_tensor_robots(env_ids, dof_state)
             self.simulator.set_actor_root_state_tensor_robots(env_ids, root_state)
 
-            if "object_pos_w" in data and motion_init_cfg.object_name:
+            has_object_motion = "object_pos_w" in data and motion_init_cfg.object_name
+            if has_object_motion:
                 object_pos = np.asarray(data["object_pos_w"][frame_idx], dtype=np.float32)
                 object_quat_wxyz = np.asarray(data["object_quat_w"][frame_idx], dtype=np.float32)
                 object_quat_xyzw = np.array(
@@ -700,6 +707,7 @@ class DirectSimulation:
                     device=self.device,
                     dtype=torch.float32,
                 )
+                desired_object_state_np = object_state[0].detach().cpu().numpy().astype(np.float32, copy=False)
                 self.simulator.set_actor_states([motion_init_cfg.object_name], env_ids, object_state)
 
         if hasattr(self.simulator, "write_state_updates"):
@@ -708,8 +716,9 @@ class DirectSimulation:
             self.simulator.refresh_sim_tensors()
         try:
             robot_root_state = self.simulator.robot_root_states[0].detach().cpu().numpy().astype(np.float32, copy=False)
+            dof_pos_readback = self.simulator.dof_pos[0].detach().cpu().numpy().astype(np.float32, copy=False)
             object_state = None
-            if "object_pos_w" in data and motion_init_cfg.object_name:
+            if has_object_motion:
                 object_env_ids = torch.tensor([0], device=self.device, dtype=torch.long)
                 object_state = (
                     self.simulator.get_actor_states([motion_init_cfg.object_name], object_env_ids)[0]
@@ -718,12 +727,26 @@ class DirectSimulation:
                     .numpy()
                     .astype(np.float32, copy=False)
                 )
+            root_err = None
+            dof_err = None
+            object_err = None
+            if desired_root_state_np is not None:
+                root_err = float(np.max(np.abs(robot_root_state - desired_root_state_np)))
+            if desired_dof_pos_np is not None:
+                dof_err = float(np.max(np.abs(dof_pos_readback - desired_dof_pos_np)))
+            if desired_object_state_np is not None and object_state is not None:
+                object_err = float(np.max(np.abs(object_state - desired_object_state_np)))
             logger.info(
-                "Motion-init readback: robot_root_state={}{}",
+                "Motion-init readback: robot_root_state={}, dof_pos_max_abs_err={}{}{}",
                 np.array2string(robot_root_state, precision=4),
+                "n/a" if dof_err is None else f"{dof_err:.6f}",
+                "" if root_err is None else f", root_state_max_abs_err={root_err:.6f}",
                 ""
                 if object_state is None
-                else f", object_state={np.array2string(object_state, precision=4)}",
+                else (
+                    f", object_state={np.array2string(object_state, precision=4)}"
+                    + ("" if object_err is None else f", object_state_max_abs_err={object_err:.6f}")
+                ),
             )
         except Exception as exc:
             logger.warning("Failed to read back motion-init state: {}", exc)

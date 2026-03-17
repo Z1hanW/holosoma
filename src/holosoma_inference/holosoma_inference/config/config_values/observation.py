@@ -294,6 +294,47 @@ wbt_object_generalist = ObservationConfig(
     },
 )
 
+wbt_w_object = ObservationConfig(
+    obs_dict={
+        "actor_obs": [
+            "motion_command",
+            "motion_ref_ori_b",
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+            "actions",
+            "obj_target_pose_size_b",
+            "obj_pos_b",
+            "obj_ori_b",
+        ],
+    },
+    obs_dims={
+        "motion_command": 58,
+        "motion_ref_ori_b": 6,
+        "base_ang_vel": 3,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+        "obj_target_pose_size_b": 12,
+        "obj_pos_b": 3,
+        "obj_ori_b": 6,
+    },
+    obs_scales={
+        "motion_command": 1.0,
+        "motion_ref_ori_b": 1.0,
+        "base_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 1.0,
+        "actions": 1.0,
+        "obj_target_pose_size_b": 1.0,
+        "obj_pos_b": 1.0,
+        "obj_ori_b": 1.0,
+    },
+    history_length_dict={
+        "actor_obs": 1,
+    },
+)
+
 wbt_object_distill_depth = ObservationConfig(
     obs_dict={
         "actor_obs_root": [
@@ -345,6 +386,7 @@ DEFAULTS = {
     "wbt": wbt,
     "wbt-videomimic": wbt_videomimic,
     "wbt-videomimic-root": wbt_videomimic_root,
+    "wbt-w-object": wbt_w_object,
     "wbt-object-generalist": wbt_object_generalist,
     "wbt-object-distill": wbt_object_distill,
     "wbt-object-distill-depth": wbt_object_distill_depth,

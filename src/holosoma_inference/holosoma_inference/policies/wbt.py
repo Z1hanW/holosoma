@@ -518,6 +518,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 "obj_ang_vel_b",
             )
         ) and not self._uses_object_distill
+        self._uses_legacy_object_obs = (
+            all(term in obs_terms for term in ("obj_target_pose_size_b", "obj_pos_b", "obj_ori_b"))
+            and "obj_lin_vel_b" not in obs_terms
+            and "obj_ang_vel_b" not in obs_terms
+            and not self._uses_object_distill
+        )
         self._motion_data: MotionData | None = None
         self._motion_cfg: dict | None = None
         self._motion_dof_names: list[str] | None = None
@@ -547,6 +553,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._onnx_offset_applies_to_motion_index: bool = str(
             os.getenv("HOLOSOMA_ONNX_OFFSET_APPLIES_TO_MOTION_INDEX", "1")
         ).lower() in {"1", "true", "yes", "on"}
+        self._last_motion_output_timestep: int | None = None
 
         self._joystick_goal_enabled = bool(config.task.use_joystick_goal)
         self._joystick_goal_scale = float(config.task.joystick_goal_scale)
@@ -558,6 +565,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._auto_start_pose_tolerance = float(getattr(config.task, "auto_start_stiff_pose_tolerance", 0.12))
         self._logged_root_reference_clip_start = False
         self._logged_sim_ref_from_sim_state = False
+        self._logged_object_contact_details = False
 
         super().__init__(config)
 
@@ -1327,6 +1335,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._motion_align_quat_wxyz = None
         self._motion_align_pos = None
         self._logged_sim_ref_from_sim_state = False
+        self._logged_object_contact_details = False
 
     def _on_policy_switched(self, model_path: str):
         super()._on_policy_switched(model_path)
@@ -1343,6 +1352,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._onnx_timestep_offset = 0
         self._onnx_timestep_offset_aligned = False
         self._logged_sim_ref_from_sim_state = False
+        self._logged_object_contact_details = False
 
     def get_init_target(self, robot_state_data):
         """Get initialization target joint positions."""
@@ -1375,6 +1385,38 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return self._get_policy_motion_timestep()
         idx = max(0, int(self.motion_timestep))
         return min(idx, self._motion_data.frame_count - 1)
+
+    def _refresh_motion_outputs_for_current_timestep(self) -> None:
+        if not self._uses_motion_command or self._time_step_input_name is None:
+            return
+
+        motion_step = self._get_policy_motion_timestep()
+        if self._last_motion_output_timestep == motion_step and self.motion_command_t is not None:
+            return
+
+        query = self._query_motion_outputs_at(motion_step)
+        if query is None:
+            return
+
+        joint_pos = query.get("joint_pos")
+        joint_vel = query.get("joint_vel")
+        if joint_pos is None or joint_vel is None:
+            return
+
+        self.motion_command_t = np.concatenate(
+            [np.asarray(joint_pos, dtype=np.float32), np.asarray(joint_vel, dtype=np.float32)],
+            axis=1,
+        )
+
+        ref_quat_xyzw = query.get("ref_quat_xyzw")
+        if ref_quat_xyzw is not None:
+            self.ref_quat_xyzw_t = np.asarray(ref_quat_xyzw, dtype=np.float32)
+
+        ref_pos_xyz = query.get("ref_pos_xyz")
+        if ref_pos_xyz is not None:
+            self.ref_pos_xyz_t = np.asarray(ref_pos_xyz, dtype=np.float32)
+
+        self._last_motion_output_timestep = int(motion_step)
 
     def _maybe_update_motion_alignment(self, robot_state_data) -> None:
         if not self._motion_alignment_enabled or self._motion_data is None:
@@ -1489,6 +1531,16 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return self._latest_sim_state
         state = self._sim_state_sub.get_state()
         if state is not None:
+            if not self._logged_object_contact_details:
+                contact_bodies = state.get("object_robot_contact_bodies")
+                contact_geoms = state.get("object_robot_contact_geoms")
+                if contact_bodies or contact_geoms:
+                    logger.info(
+                        "Received object contact details from split sim-state: bodies={} geoms={}",
+                        contact_bodies or [],
+                        contact_geoms or [],
+                    )
+                    self._logged_object_contact_details = True
             self._latest_sim_state = state
         return self._latest_sim_state
 
@@ -1602,6 +1654,44 @@ class WholeBodyTrackingPolicy(BasePolicy):
         augmented[:, :3] = sim_root_state[:, :3]
         augmented[:, 3:7] = xyzw_to_wxyz(sim_root_state[:, 3:7])
         return augmented
+
+    @staticmethod
+    def _pose_to_ref_frame(
+        ref_pos_w: np.ndarray,
+        ref_quat_wxyz: np.ndarray,
+        pos_w: np.ndarray,
+        quat_wxyz: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        rel_pos_w = pos_w - ref_pos_w
+        ref_quat_inv = quat_inverse(ref_quat_wxyz)
+        pos_b = quat_apply(ref_quat_inv, rel_pos_w).astype(np.float32, copy=False)
+        ori_b = quat_mul(ref_quat_inv, quat_wxyz).astype(np.float32, copy=False)
+        ori_mat = matrix_from_quat(ori_b)
+        ori_6d = ori_mat[..., :2].reshape(1, -1).astype(np.float32, copy=False)
+        return pos_b, ori_6d
+
+    def _get_live_object_state_from_sim_state(self) -> dict[str, np.ndarray] | None:
+        actor_state = self._get_sim_actor_state(self.config.task.sim_object_name)
+        if actor_state is None:
+            return None
+
+        object_pos_w = actor_state[:, :3].astype(np.float32, copy=False)
+        object_quat_wxyz = xyzw_to_wxyz(actor_state[:, 3:7]).astype(np.float32, copy=False)
+        object_lin_vel_w = actor_state[:, 7:10].astype(np.float32, copy=False)
+        sim_ref_state = self._get_sim_ref_state()
+        robot_ref_pos_w = None
+        robot_ref_quat_wxyz = None
+        if sim_ref_state is not None:
+            robot_ref_pos_w = sim_ref_state[:, :3].astype(np.float32, copy=False)
+            robot_ref_quat_wxyz = xyzw_to_wxyz(sim_ref_state[:, 3:7]).astype(np.float32, copy=False)
+
+        return {
+            "object_pos_w": object_pos_w,
+            "object_quat_wxyz": object_quat_wxyz,
+            "object_lin_vel_w": object_lin_vel_w,
+            "robot_ref_pos_w": robot_ref_pos_w,
+            "robot_ref_quat_wxyz": robot_ref_quat_wxyz,
+        }
 
     def _pose_in_robot_ref_frame(
         self,
@@ -1744,7 +1834,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         obj_target_rot6d = matrix_from_quat(obj_target_quat_b)[..., :2].reshape(1, -1)
         obj_rot6d = matrix_from_quat(obj_quat_b)[..., :2].reshape(1, -1)
-        obj_lin_vel_b = quat_rotate_inverse(robot_ref_quat_wxyz, current_object_lin_vel_w)
+        obj_lin_vel_b = quat_apply(
+            quat_inverse(robot_ref_quat_wxyz),
+            current_object_lin_vel_w - robot_ref_pos_w,
+        )
         obj_ang_vel_b = quat_rotate_inverse(robot_ref_quat_wxyz, current_object_ang_vel_w)
         object_size = self._motion_data.object_size[idx : idx + 1].astype(np.float32, copy=False)
 
@@ -1786,10 +1879,72 @@ class WholeBodyTrackingPolicy(BasePolicy):
         current_obs_buffer_dict["perception"] = self._get_perception_obs_input()
         return current_obs_buffer_dict
 
+    def _get_legacy_object_obs_buffer_dict(self, robot_state_data: np.ndarray) -> dict[str, np.ndarray]:
+        current_obs_buffer_dict = {
+            "motion_command": self.motion_command_t,
+            "motion_ref_ori_b": self._get_motion_ref_ori_b(robot_state_data),
+            "base_ang_vel": robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6],
+            "dof_pos": robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles,
+            "dof_vel": robot_state_data[:, 7 + self.num_dofs + 6 : 7 + self.num_dofs + 6 + self.num_dofs],
+            "actions": self.last_policy_action,
+        }
+
+        robot_ref_pos_w, robot_ref_quat_wxyz = self._get_observation_reference_pose_in_world(robot_state_data)
+        object_state = self._get_live_object_state_from_sim_state()
+        if object_state is not None:
+            sim_ref_pos_w = object_state.get("robot_ref_pos_w")
+            sim_ref_quat_wxyz = object_state.get("robot_ref_quat_wxyz")
+            if (
+                bool(getattr(self.config.task, "prefer_sim_ref_from_sim_state", False))
+                and sim_ref_pos_w is not None
+                and sim_ref_quat_wxyz is not None
+            ):
+                robot_ref_pos_w = sim_ref_pos_w
+                robot_ref_quat_wxyz = sim_ref_quat_wxyz
+
+        if object_state is None:
+            object_pos_b = np.zeros((1, 3), dtype=np.float32)
+            object_ori_6d = np.zeros((1, 6), dtype=np.float32)
+        else:
+            object_pos_b, object_ori_6d = self._pose_to_ref_frame(
+                robot_ref_pos_w,
+                robot_ref_quat_wxyz,
+                object_state["object_pos_w"],
+                object_state["object_quat_wxyz"],
+            )
+
+        if self._motion_data is None or not self._motion_data.has_object:
+            target_pose_size_b = np.zeros((1, 12), dtype=np.float32)
+        else:
+            self._maybe_update_motion_alignment(robot_state_data)
+            idx = self._get_motion_index()
+            target_pos_w = self._motion_data.object_pos_w[idx : idx + 1].copy()
+            target_quat_wxyz = self._motion_data.object_quat_w[idx : idx + 1].copy()
+            target_size = self._motion_data.object_size[idx : idx + 1].astype(np.float32, copy=False)
+            if self._motion_align_quat_wxyz is not None:
+                target_pos_w = self._apply_motion_alignment_pos(target_pos_w)
+                target_quat_wxyz = self._apply_motion_alignment_quat(target_quat_wxyz)
+            target_pos_b, target_ori_6d = self._pose_to_ref_frame(
+                robot_ref_pos_w,
+                robot_ref_quat_wxyz,
+                target_pos_w.astype(np.float32, copy=False),
+                target_quat_wxyz.astype(np.float32, copy=False),
+            )
+            target_pose_size_b = np.concatenate([target_pos_b, target_ori_6d, target_size], axis=1).astype(
+                np.float32, copy=False
+            )
+
+        current_obs_buffer_dict["obj_target_pose_size_b"] = target_pose_size_b
+        current_obs_buffer_dict["obj_pos_b"] = object_pos_b.astype(np.float32, copy=False)
+        current_obs_buffer_dict["obj_ori_b"] = object_ori_6d.astype(np.float32, copy=False)
+        return current_obs_buffer_dict
+
     def get_current_obs_buffer_dict(self, robot_state_data):
         robot_state_data = self._augment_robot_state_with_sim_state(robot_state_data)
         if robot_state_data is None:
             raise ValueError("Robot state is required for WBT observations.")
+
+        self._refresh_motion_outputs_for_current_timestep()
 
         if self._uses_object_distill:
             current_obs_buffer_dict = self._get_object_distill_obs_buffer_dict(robot_state_data)
@@ -1797,6 +1952,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         if self._uses_object_generalist:
             current_obs_buffer_dict = self._get_object_generalist_obs_buffer_dict(robot_state_data)
+            return self._maybe_attach_perception_obs(current_obs_buffer_dict)
+
+        if self._uses_legacy_object_obs:
+            current_obs_buffer_dict = self._get_legacy_object_obs_buffer_dict(robot_state_data)
             return self._maybe_attach_perception_obs(current_obs_buffer_dict)
 
         if self._uses_videomimic:
@@ -1863,6 +2022,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self.motion_command_t = np.concatenate([joint_pos, joint_vel], axis=1)
             self.ref_quat_xyzw_t = outputs.get("ref_quat_xyzw", self.ref_quat_xyzw_t)
             self.ref_pos_xyz_t = outputs.get("ref_pos_xyz", self.ref_pos_xyz_t)
+            self._last_motion_output_timestep = self._get_policy_motion_timestep()
 
         # clip policy action
         policy_action = np.clip(policy_action, -100, 100)
@@ -1983,7 +2143,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._motion_align_pos = None
         self._onnx_timestep_offset = 0
         self._onnx_timestep_offset_aligned = False
+        self._last_motion_output_timestep = None
         self._logged_sim_ref_from_sim_state = False
+        self._logged_object_contact_details = False
 
     def _handle_start_motion_clip(self):
         """Handle start motion clip action."""
@@ -1993,6 +2155,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_start_timestep = None  # will be set in rl_inference
         self.motion_timestep = 0  # Reset to start from beginning of motion
         self._last_clock_reading = None
+        self._last_motion_output_timestep = None
         if self._motion_alignment_enabled:
             robot_state_data = self._augment_robot_state_with_sim_state(self.interface.get_low_state())
             if robot_state_data is not None:
