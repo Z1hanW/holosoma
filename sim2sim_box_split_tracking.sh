@@ -25,6 +25,7 @@ SIM_FREEZE_UNTIL_FIRST_COMMAND="${SIM_FREEZE_UNTIL_FIRST_COMMAND:-1}"
 SIM_CLOCK_PORT="${SIM_CLOCK_PORT:-5655}"
 SIM_STATE_PORT="${SIM_STATE_PORT:-5657}"
 SIM_CONTROL_PORT="${SIM_CONTROL_PORT:-5659}"
+SIM_USE_ZMQ_LOWCMD="${SIM_USE_ZMQ_LOWCMD:-0}"
 INTERFACE_NAME="${INTERFACE_NAME:-lo}"
 RUN_SECONDS="${RUN_SECONDS:-20}"
 SIM_READY_TIMEOUT="${SIM_READY_TIMEOUT:-45}"
@@ -326,6 +327,7 @@ wait_for_sim_ready() {
   --simulator.config.bridge.publish-sim-state=True \
   --simulator.config.bridge.sim-state-port "$SIM_STATE_PORT" \
   --simulator.config.bridge.control-port "$SIM_CONTROL_PORT" \
+  $( [[ "$SIM_USE_ZMQ_LOWCMD" == "1" ]] && printf '%s %s' "--simulator.config.bridge.use-zmq-lowcmd" "True" ) \
   $( [[ "$SIM_IGNORE_DEFAULT_IDLE_COMMAND" == "1" ]] && printf '%s %s' "--simulator.config.bridge.ignore-default-idle-command" "True" ) \
   $( [[ "$SIM_LOG_FIRST_COMMAND_SUMMARY" == "1" ]] && printf '%s %s' "--simulator.config.bridge.log-first-command-summary" "True" ) \
   $( [[ "$SIM_HOLD_DEFAULT_POSE_UNTIL_FIRST_COMMAND" == "1" ]] && printf '%s %s' "--simulator.config.bridge.hold-default-pose-until-first-command" "True" ) \
@@ -357,6 +359,7 @@ timeout --signal=INT "${RUN_SECONDS}s" \
   --task.sim-clock-port "$SIM_CLOCK_PORT" \
   --task.sim-state-port "$SIM_STATE_PORT" \
   --task.sim-control-port "$SIM_CONTROL_PORT" \
+  $( [[ "$SIM_USE_ZMQ_LOWCMD" == "1" ]] && printf '%s' "--task.use-zmq-lowcmd" ) \
   --task.use-sim-time \
   --task.no-auto-start-motion \
   --task.auto-start-motion-clip \

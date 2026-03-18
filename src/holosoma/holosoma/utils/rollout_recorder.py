@@ -50,6 +50,7 @@ class RolloutRecorder:
         self._terrain_rows, self._terrain_cols = self._resolve_terrain_grid()
         self._env_origin = self._resolve_env_origin()
         self._root_body_index, self._root_body_name = self._resolve_root_body()
+        self._history_name_suffix = self._resolve_history_name_suffix()
 
         atexit.register(self._finalize, "exit")
 
@@ -84,7 +85,8 @@ class RolloutRecorder:
             return
 
         clip_name = self._get_clip_name() or "rollout"
-        safe_clip = re.sub(r"[^A-Za-z0-9_.-]+", "_", clip_name).strip("_") or "rollout"
+        sequence_name = self._format_sequence_name(clip_name)
+        safe_clip = re.sub(r"[^A-Za-z0-9_.-]+", "_", sequence_name).strip("_") or "rollout"
         timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
         filename = f"{self._prefix}_{self._episode_idx:04d}_{safe_clip}_{timestamp}.npz"
         path = self._save_dir / filename
@@ -94,9 +96,12 @@ class RolloutRecorder:
             "qpos": qpos,
             "fps": np.array([self._fps], dtype=np.float32),
             "clip_name": np.array([clip_name]),
+            "sequence_name": np.array([sequence_name]),
             "record_env_id": np.array([self._record_env_id], dtype=np.int64),
             "reason": np.array([reason]),
         }
+        if self._history_name_suffix:
+            payload["history_tag"] = np.array([self._history_name_suffix.lstrip("_")])
 
         if self._env_origin is not None:
             payload["env_origin"] = self._env_origin.astype(np.float32, copy=False)
@@ -212,6 +217,32 @@ class RolloutRecorder:
         if not clip_names or clip_idx < 0 or clip_idx >= len(clip_names):
             return None
         return str(clip_names[clip_idx])
+
+    def _resolve_history_name_suffix(self) -> str:
+        observation_manager = getattr(self._env, "observation_manager", None)
+        cfg = getattr(observation_manager, "cfg", None)
+        groups = getattr(cfg, "groups", None)
+        if not isinstance(groups, dict):
+            return ""
+
+        actor_history_lengths = [
+            int(getattr(group_cfg, "history_length", 0))
+            for group_name, group_cfg in groups.items()
+            if isinstance(group_name, str) and group_name.startswith("actor_obs")
+        ]
+        actor_history_lengths = [length for length in actor_history_lengths if length > 0]
+        if not actor_history_lengths:
+            return ""
+
+        history_length = max(actor_history_lengths)
+        return f"_hist{history_length}"
+
+    def _format_sequence_name(self, base_name: str) -> str:
+        if not self._history_name_suffix:
+            return base_name
+        if base_name.endswith(self._history_name_suffix):
+            return base_name
+        return f"{base_name}{self._history_name_suffix}"
 
     def _resolve_terrain_path(self) -> str | None:
         terrain_mgr = getattr(self._env, "terrain_manager", None)

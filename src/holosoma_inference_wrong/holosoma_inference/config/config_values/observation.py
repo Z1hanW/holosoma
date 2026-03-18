@@ -1,0 +1,399 @@
+"""Default observation configurations for holosoma_inference.
+
+This module provides pre-configured observation spaces for different
+robot types and tasks, converted from the original YAML configurations.
+"""
+
+from __future__ import annotations
+
+from holosoma_inference.config.config_types.observation import ObservationConfig
+
+DEFAULT_WBT_POLICY_HISTORY_LENGTH = 10
+
+# =============================================================================
+# Locomotion Observation Configurations
+# =============================================================================
+
+loco_g1_29dof = ObservationConfig(
+    obs_dict={
+        "actor_obs": [
+            "base_ang_vel",
+            "projected_gravity",
+            "command_lin_vel",
+            "command_ang_vel",
+            "dof_pos",
+            "dof_vel",
+            "actions",
+            "sin_phase",
+            "cos_phase",
+        ]
+    },
+    obs_dims={
+        "base_lin_vel": 3,
+        "base_ang_vel": 3,
+        "projected_gravity": 3,
+        "command_lin_vel": 2,
+        "command_ang_vel": 1,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+        "sin_phase": 1,
+        "cos_phase": 1,
+    },
+    obs_scales={
+        "base_lin_vel": 2.0,
+        "base_ang_vel": 0.25,
+        "projected_gravity": 1.0,
+        "command_lin_vel": 1.0,
+        "command_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 0.05,
+        "actions": 1.0,
+        "sin_phase": 1.0,
+        "cos_phase": 1.0,
+    },
+    history_length_dict={
+        "actor_obs": 1,
+    },
+)
+
+loco_t1_29dof = ObservationConfig(
+    obs_dict={
+        "actor_obs": [
+            "base_ang_vel",
+            "projected_gravity",
+            "command_lin_vel",
+            "command_ang_vel",
+            "dof_pos",
+            "dof_vel",
+            "actions",
+            "sin_phase",
+            "cos_phase",
+        ]
+    },
+    obs_dims={
+        "base_lin_vel": 3,
+        "base_ang_vel": 3,
+        "projected_gravity": 3,
+        "command_lin_vel": 2,
+        "command_ang_vel": 1,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+        "sin_phase": 2,
+        "cos_phase": 2,
+    },
+    obs_scales={
+        "base_lin_vel": 1.0,  # T1 uses 1.0 (vs G1's 2.0)
+        "base_ang_vel": 1.0,  # T1 uses 1.0 (vs G1's 0.25)
+        "projected_gravity": 1.0,
+        "command_lin_vel": 1.0,
+        "command_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 0.1,  # T1 uses 0.1 (vs G1's 0.05)
+        "actions": 1.0,
+        "sin_phase": 1.0,
+        "cos_phase": 1.0,
+    },
+    history_length_dict={
+        "actor_obs": 1,
+    },
+)
+
+
+# =============================================================================
+# WBT (Whole Body Tracking) Observation Configurations
+# =============================================================================
+
+wbt = ObservationConfig(
+    obs_dict={
+        "actor_obs": [
+            "motion_command",
+            "motion_ref_ori_b",
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+            "actions",
+        ]
+    },
+    obs_dims={
+        "motion_command": 58,
+        "motion_ref_pos_b": 3,
+        "motion_ref_ori_b": 6,
+        "base_lin_vel": 3,
+        "base_ang_vel": 3,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+    },
+    obs_scales={
+        "actions": 1.0,
+        "motion_command": 1.0,
+        "motion_ref_pos_b": 1.0,
+        "motion_ref_ori_b": 1.0,
+        "base_lin_vel": 1.0,
+        "base_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 1.0,
+        "robot_body_pos_b": 1.0,
+        "robot_body_ori_b": 1.0,
+    },
+    history_length_dict={
+        "actor_obs": DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+    },
+)
+
+# =============================================================================
+# WBT VideoMimic Observation Configurations
+# =============================================================================
+
+wbt_videomimic = ObservationConfig(
+    obs_dict={
+        "actor_obs": [
+            "torso_real",
+            "torso_xy_rel",
+            "torso_yaw_rel",
+        ],
+        "actor_obs_target": [
+            "target_joints",
+            "target_root_roll",
+            "target_root_pitch",
+        ],
+    },
+    obs_dims={
+        "torso_real": 93,
+        "torso_xy_rel": 2,
+        "torso_yaw_rel": 1,
+        "target_joints": 29,
+        "target_root_roll": 1,
+        "target_root_pitch": 1,
+    },
+    obs_scales={
+        "torso_real": 1.0,
+        "torso_xy_rel": 1.0,
+        "torso_yaw_rel": 1.0,
+        "target_joints": 1.0,
+        "target_root_roll": 1.0,
+        "target_root_pitch": 1.0,
+    },
+    history_length_dict={
+        "actor_obs": DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+        "actor_obs_target": 1,
+    },
+)
+
+wbt_videomimic_root = ObservationConfig(
+    obs_dict={
+        "actor_obs": [
+            "torso_real",
+            "torso_xy_rel",
+            "torso_yaw_rel",
+        ],
+    },
+    obs_dims={
+        "torso_real": 93,
+        "torso_xy_rel": 2,
+        "torso_yaw_rel": 1,
+    },
+    obs_scales={
+        "torso_real": 1.0,
+        "torso_xy_rel": 1.0,
+        "torso_yaw_rel": 1.0,
+    },
+    history_length_dict={
+        "actor_obs": DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+    },
+)
+
+wbt_object_distill = ObservationConfig(
+    obs_dict={
+        "actor_obs_torso": [
+            "sparse_target_root_trajectory_command",
+        ],
+        "actor_obs_proprio": [
+            "base_lin_vel",
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+            "actions",
+        ],
+        "actor_obs_box": [
+            "obj_current_pose_size_b",
+            "obj_goal_pose_size_b",
+        ],
+    },
+    obs_dims={
+        "sparse_target_root_trajectory_command": 3,
+        "base_lin_vel": 3,
+        "base_ang_vel": 3,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+        "obj_current_pose_size_b": 12,
+        "obj_goal_pose_size_b": 12,
+    },
+    obs_scales={
+        "sparse_target_root_trajectory_command": 1.0,
+        "base_lin_vel": 1.0,
+        "base_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 1.0,
+        "actions": 1.0,
+        "obj_current_pose_size_b": 1.0,
+        "obj_goal_pose_size_b": 1.0,
+    },
+    history_length_dict={
+        "actor_obs_torso": DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+        "actor_obs_proprio": DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+        "actor_obs_box": DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+    },
+)
+
+wbt_object_generalist = ObservationConfig(
+    obs_dict={
+        "actor_obs": [
+            "motion_command",
+            "motion_ref_ori_b",
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+            "actions",
+            "obj_target_pose_size_b",
+            "obj_pos_b",
+            "obj_ori_b",
+            "obj_lin_vel_b",
+            "obj_ang_vel_b",
+        ],
+    },
+    obs_dims={
+        "motion_command": 58,
+        "motion_ref_ori_b": 6,
+        "base_ang_vel": 3,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+        "obj_target_pose_size_b": 12,
+        "obj_pos_b": 3,
+        "obj_ori_b": 6,
+        "obj_lin_vel_b": 3,
+        "obj_ang_vel_b": 3,
+    },
+    obs_scales={
+        "motion_command": 1.0,
+        "motion_ref_ori_b": 1.0,
+        "base_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 1.0,
+        "actions": 1.0,
+        "obj_target_pose_size_b": 1.0,
+        "obj_pos_b": 1.0,
+        "obj_ori_b": 1.0,
+        "obj_lin_vel_b": 1.0,
+        "obj_ang_vel_b": 1.0,
+    },
+    history_length_dict={
+        "actor_obs": DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+    },
+)
+
+wbt_w_object = ObservationConfig(
+    obs_dict={
+        "actor_obs": [
+            "motion_command",
+            "motion_ref_ori_b",
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+            "actions",
+            "obj_target_pose_size_b",
+            "obj_pos_b",
+            "obj_ori_b",
+        ],
+    },
+    obs_dims={
+        "motion_command": 58,
+        "motion_ref_ori_b": 6,
+        "base_ang_vel": 3,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+        "obj_target_pose_size_b": 12,
+        "obj_pos_b": 3,
+        "obj_ori_b": 6,
+    },
+    obs_scales={
+        "motion_command": 1.0,
+        "motion_ref_ori_b": 1.0,
+        "base_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 1.0,
+        "actions": 1.0,
+        "obj_target_pose_size_b": 1.0,
+        "obj_pos_b": 1.0,
+        "obj_ori_b": 1.0,
+    },
+    history_length_dict={
+        "actor_obs": DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+    },
+)
+
+wbt_object_distill_depth = ObservationConfig(
+    obs_dict={
+        "actor_obs_root": [
+            "sparse_target_root_trajectory_command",
+        ],
+        "actor_obs_proprio": [
+            "base_lin_vel",
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+            "actions",
+        ],
+        "perception_obs": [
+            "perception",
+        ],
+    },
+    obs_dims={
+        "sparse_target_root_trajectory_command": 3,
+        "base_lin_vel": 3,
+        "base_ang_vel": 3,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+        "perception": 5046,
+    },
+    obs_scales={
+        "sparse_target_root_trajectory_command": 1.0,
+        "base_lin_vel": 1.0,
+        "base_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 1.0,
+        "actions": 1.0,
+        "perception": 1.0,
+    },
+    history_length_dict={
+        "actor_obs_root": DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+        "actor_obs_proprio": DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+        "perception_obs": 1,
+    },
+)
+
+# =============================================================================
+# Default Configurations Dictionary
+# =============================================================================
+
+DEFAULTS = {
+    "loco-g1-29dof": loco_g1_29dof,
+    "loco-t1-29dof": loco_t1_29dof,
+    "wbt": wbt,
+    "wbt-videomimic": wbt_videomimic,
+    "wbt-videomimic-root": wbt_videomimic_root,
+    "wbt-w-object": wbt_w_object,
+    "wbt-object-generalist": wbt_object_generalist,
+    "wbt-object-distill": wbt_object_distill,
+    "wbt-object-distill-depth": wbt_object_distill_depth,
+}
+"""Dictionary of all available observation configurations.
+
+Keys use hyphen-case naming convention for CLI compatibility.
+"""

@@ -921,7 +921,39 @@ class MuJoCo(BaseSimulator):
             return
 
         mujoco.mj_resetData(self.root_model, self.root_data)
-        self._set_robot_initial_state()
+
+        motion_init_root_state = getattr(self, "_motion_init_reset_root_state", None)
+        motion_init_dof_state = getattr(self, "_motion_init_reset_dof_state", None)
+        motion_init_actor_states = getattr(self, "_motion_init_reset_actor_states", None)
+        if motion_init_root_state is not None and motion_init_dof_state is not None:
+            env_ids = torch.tensor([0], device=self.sim_device, dtype=torch.long)
+            logger.info(
+                "Reset restoring motion-init state: have_object_states={} actor_names={}",
+                isinstance(motion_init_actor_states, dict) and bool(motion_init_actor_states),
+                sorted(motion_init_actor_states.keys()) if isinstance(motion_init_actor_states, dict) else [],
+            )
+            self.set_actor_root_state_tensor_robots(env_ids, motion_init_root_state)
+            self.set_dof_state_tensor_robots(env_ids, motion_init_dof_state)
+            if isinstance(motion_init_actor_states, dict):
+                for actor_name, actor_state in motion_init_actor_states.items():
+                    self.set_actor_states([str(actor_name)], env_ids, actor_state)
+            try:
+                robot_state_readback = self.get_actor_states(["robot"], env_ids)[0].detach().cpu().numpy()
+                object_state_readback = None
+                if isinstance(motion_init_actor_states, dict) and motion_init_actor_states:
+                    actor_names = [str(actor_name) for actor_name in motion_init_actor_states]
+                    object_state_readback = self.get_actor_states(actor_names, env_ids).detach().cpu().numpy()
+                logger.info(
+                    "Reset motion-init readback: robot_state={}{}",
+                    np.array2string(robot_state_readback, precision=4),
+                    ""
+                    if object_state_readback is None
+                    else f", object_state={np.array2string(object_state_readback, precision=4)}",
+                )
+            except Exception as exc:
+                logger.warning("Failed to read back motion-init reset state: {}", exc)
+        else:
+            self._set_robot_initial_state()
 
         snapped_to_gantry = self.virtual_gantry is not None and self.virtual_gantry.point is not None
         if snapped_to_gantry:

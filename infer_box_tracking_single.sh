@@ -57,7 +57,7 @@ if [[ $# -gt 0 ]]; then
       ;;
   esac
 fi
-DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"https://wandb.ai/zihanw22/boxer/runs/opq0wbyq"}
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"https://wandb.ai/zihanw22/boxer/runs/j21xgvcb"} # j21xgvcb opq0wbyq
 DEFAULT_LEGACY_TEACHER_CHECKPOINT="${DEFAULT_LEGACY_TEACHER_CHECKPOINT:-}"
 if [[ -n "${WANDB_MODEL_FILE+x}" && -n "${WANDB_MODEL_FILE}" ]]; then
   WANDB_MODEL_FILE_FROM_ENV=1

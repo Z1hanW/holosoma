@@ -10,12 +10,12 @@ set -euo pipefail
 # - No actor box state is used by student actor.
 #
 # Teacher policy observation:
-# - actor_obs (full teacher state, includes object terms)
+# - actor_obs_legacy + perception_obs (single-frame legacy teacher state + perception)
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
 
-DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/kge4jozt/model_12000.pt"}
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/5vlz6pj8/model_24000.pt"}
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 POSITIONAL_RUN_NAME=""
 
@@ -58,9 +58,9 @@ if [[ -z "${NPROC:-}" ]]; then
   NPROC=${#_visible_gpus[@]}
 fi
 
-# Default teacher (kge4jozt/model_12000.pt) uses actor_obs-only input.
-# For legacy teachers, override TEACHER_OBS_KEYS explicitly (e.g., actor_obs_legacy,perception_obs).
-TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
+# Default teacher (5vlz6pj8/model_24000.pt) uses single-frame actor_obs_legacy + perception_obs
+# with dimensions 175 + 289. Runtime must keep history_length=1 for teacher alignment.
+TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs_legacy,perception_obs}
 TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
 NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-3000}
@@ -70,9 +70,10 @@ DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-2000}
 DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-5.0}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.7}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
-PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
+PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i_17x17}
 
-# Teacher expects perception encoder input dim 289 => 17x17.
+# The selected teacher expects a 289-d perception input. Default to a dedicated 17x17
+# depth preset so runtime perception_obs matches the teacher's encoder input width.
 IMAGE_WIDTH=${IMAGE_WIDTH:-17}
 IMAGE_HEIGHT=${IMAGE_HEIGHT:-17}
 CAMERA_NEAR=${CAMERA_NEAR:-0.001}
@@ -88,6 +89,7 @@ echo "[INFO] num_learning_iterations=${NUM_LEARNING_ITERATIONS}"
 echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} dagger_loss_coef=${DAGGER_LOSS_COEF} teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
 echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
+echo "[INFO] observation_overrides.disable_actor_history=True"
 
 exec env \
   EXP="${EXP}" \
@@ -107,6 +109,7 @@ exec env \
   PAIR_TERRAIN_WITH_MOTION="${PAIR_TERRAIN_WITH_MOTION}" \
   bash "${SCRIPT_DIR}/distill_root_box.sh" "${TEACHER_CHECKPOINT}" \
     "perception:${PERCEPTION_PRESET}" \
+    --observation_overrides.disable_actor_history True \
     --algo.config.module-dict.actor.input-dim "['actor_obs_root','actor_obs_proprio']" \
     --perception.camera-width="${IMAGE_WIDTH}" \
     --perception.camera-height="${IMAGE_HEIGHT}" \

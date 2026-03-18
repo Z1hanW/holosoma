@@ -32,7 +32,7 @@ class SimStateSub:
         while True:
             try:
                 self.last_state = json.loads(self.socket.recv_string(zmq.NOBLOCK))
-            except zmq.Again:  # noqa: PERF203
+            except zmq.Again:
                 break
 
     def get_state(self) -> dict | None:

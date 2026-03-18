@@ -2,10 +2,12 @@
 
 from holosoma.config_types.observation import ObservationManagerCfg, ObsGroupCfg, ObsTermCfg
 
+DEFAULT_WBT_POLICY_HISTORY_LENGTH = 10
+
 actor_obs_shared = ObsGroupCfg(
     concatenate=True,
     enable_noise=True,
-    history_length=1,
+    history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
     terms={
         "motion_command": ObsTermCfg(
             func="holosoma.managers.observation.terms.wbt:motion_command",
@@ -332,28 +334,28 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
         "actor_obs_root": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=1,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
             terms=object_distill_sparse_root_cmd_terms,
         ),
         # Backward-compatible alias; semantics are root-relative, not torso-relative.
         "actor_obs_torso": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=1,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
             terms=object_distill_sparse_root_cmd_terms,
         ),
         # Student proprioception state.
         "actor_obs_proprio": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=1,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
             terms=object_distill_proprio_terms,
         ),
         # Student object state: current object [pos(3), rot6d(6), size(3)] only.
         "actor_obs_box": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=1,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
             terms=object_distill_box_terms,
         ),
         "critic_obs": ObsGroupCfg(
@@ -375,28 +377,28 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy = ObservationMa
         "actor_obs_root": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=1,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
             terms=object_distill_sparse_root_cmd_terms_legacy,
         ),
         # Backward-compatible alias; semantics are root-relative, not torso-relative.
         "actor_obs_torso": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=1,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
             terms=object_distill_sparse_root_cmd_terms_legacy,
         ),
         # Student proprioception state.
         "actor_obs_proprio": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=1,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
             terms=object_distill_proprio_terms,
         ),
         # Student object state: current object [pos(3), rot6d(6), size(3)] only.
         "actor_obs_box": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=1,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
             terms=object_distill_box_terms,
         ),
         "critic_obs": ObsGroupCfg(
@@ -457,7 +459,7 @@ g1_29dof_wbt_observation_videomimic = ObservationManagerCfg(
         "actor_obs": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=5,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
             terms=actor_obs_videomimic_terms,
         ),
         "actor_obs_target": ObsGroupCfg(

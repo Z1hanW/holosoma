@@ -32,12 +32,21 @@ SIM_HOLD_DEFAULT_POSE_UNTIL_FIRST_COMMAND="${SIM_HOLD_DEFAULT_POSE_UNTIL_FIRST_C
 SIM_HOLD_INITIAL_POSE_UNTIL_FIRST_COMMAND="${SIM_HOLD_INITIAL_POSE_UNTIL_FIRST_COMMAND:-}"
 SIM_FREEZE_UNTIL_FIRST_COMMAND="${SIM_FREEZE_UNTIL_FIRST_COMMAND:-}"
 SIM_LOG_FIRST_COMMAND_SUMMARY="${SIM_LOG_FIRST_COMMAND_SUMMARY:-0}"
-SIM_CLOCK_PORT="${SIM_CLOCK_PORT:-5555}"
-SIM_STATE_PORT="${SIM_STATE_PORT:-5557}"
-SIM_CONTROL_PORT="${SIM_CONTROL_PORT:-5559}"
+SIM_PORT_BASE="${SIM_PORT_BASE:-}"
+if [[ -z "$SIM_PORT_BASE" ]]; then
+  SIM_PORT_BASE="$((RANDOM % 20000 + 30000))"
+fi
+SIM_CLOCK_PORT="${SIM_CLOCK_PORT:-$SIM_PORT_BASE}"
+SIM_STATE_PORT="${SIM_STATE_PORT:-$((SIM_PORT_BASE + 2))}"
+SIM_CONTROL_PORT="${SIM_CONTROL_PORT:-$((SIM_PORT_BASE + 4))}"
 INTERFACE_NAME="${INTERFACE_NAME:-lo}"
 RUN_SECONDS="${RUN_SECONDS:-20}"
 HEADLESS="${HEADLESS:-1}"
+VISER_ENABLED="${VISER_ENABLED:-}"
+VISER_PORT="${VISER_PORT:-$((RANDOM % 8976 + 1024))}"
+VISER_UPDATE_INTERVAL="${VISER_UPDATE_INTERVAL:-1}"
+VISER_AUTO_RESET_ON_MOTION_END="${VISER_AUTO_RESET_ON_MOTION_END:-0}"
+RAW_CLIP_PLAYBACK="${RAW_CLIP_PLAYBACK:-0}"
 SIM_READY_TIMEOUT="${SIM_READY_TIMEOUT:-45}"
 SIM_READY_PATTERN="${SIM_READY_PATTERN:-Starting direct simulation loop...}"
 SIM_STARTUP_WAIT="${SIM_STARTUP_WAIT:-0}"
@@ -47,12 +56,14 @@ PATCH_DIR="${PATCH_DIR:-$ROOT_DIR/logs/sim2sim_exports}"
 RUN_DIR_SUFFIX="${RUN_DIR_SUFFIX:-}"
 POLICY_ACTION_SCALE="${POLICY_ACTION_SCALE:-}"
 POLICY_ACTION_SCALE_CAP="${POLICY_ACTION_SCALE_CAP:-}"
+SIM_USE_MOTION_COMMAND_AS_Q_TARGET="${SIM_USE_MOTION_COMMAND_AS_Q_TARGET:-1}"
 AUTO_START_STIFF_HOLD_SEC_RAW="${AUTO_START_STIFF_HOLD_SEC-__unset__}"
 AUTO_START_STIFF_HOLD_SEC="${AUTO_START_STIFF_HOLD_SEC:-}"
 AUTO_START_STIFF_MAX_WAIT_SEC_RAW="${AUTO_START_STIFF_MAX_WAIT_SEC-__unset__}"
 AUTO_START_STIFF_MAX_WAIT_SEC="${AUTO_START_STIFF_MAX_WAIT_SEC:-}"
 AUTO_START_STIFF_POSE_TOL="${AUTO_START_STIFF_POSE_TOL:-0.12}"
 POLICY_DEFER_UNTIL_VALID_STATE="${POLICY_DEFER_UNTIL_VALID_STATE:-0}"
+SIM_RESET_RESTART_DELAY_SEC="${SIM_RESET_RESTART_DELAY_SEC:-0.0}"
 HOLOSOMA_ONNX_ALIGN_MAX_STEPS="${HOLOSOMA_ONNX_ALIGN_MAX_STEPS:-0}"
 HOLOSOMA_ONNX_ALIGN_POSE_TOL="${HOLOSOMA_ONNX_ALIGN_POSE_TOL:-5e-3}"
 HOLOSOMA_ONNX_OFFSET_APPLIES_TO_MOTION_INDEX="${HOLOSOMA_ONNX_OFFSET_APPLIES_TO_MOTION_INDEX:-1}"
@@ -80,6 +91,14 @@ MOTION_METADATA_TOOL="$ROOT_DIR/src/holosoma_inference/holosoma_inference/tools/
 
 mkdir -p "$PATCH_DIR"
 
+if [[ -z "$VISER_ENABLED" ]]; then
+  if [[ "$HEADLESS" == "1" ]]; then
+    VISER_ENABLED=1
+  else
+    VISER_ENABLED=0
+  fi
+fi
+
 MOTION_STEM="$(basename "${MOTION_FILE%.*}")"
 MODEL_STEM="$(basename "${MODEL_INPUT%.*}")"
 PATCHED_ONNX="$PATCH_DIR/${MODEL_STEM}__${MOTION_STEM}.onnx"
@@ -94,6 +113,7 @@ export HOLOSOMA_ONNX_ALIGN_MAX_STEPS
 export HOLOSOMA_ONNX_ALIGN_POSE_TOL
 export HOLOSOMA_ONNX_OFFSET_APPLIES_TO_MOTION_INDEX
 export HOLOSOMA_CLIP_JOINT_TARGETS
+export HOLOSOMA_USE_MOTION_COMMAND_AS_Q_TARGET="$SIM_USE_MOTION_COMMAND_AS_Q_TARGET"
 
 resolve_python() {
   local configured="$1"
@@ -190,10 +210,17 @@ MUJOCO_PY="$(resolve_python_with_modules "$MUJOCO_PY" mujoco -- \
   /home/ubuntu/.holosoma_deps/miniconda3/envs/hsmujoco/bin/python \
   /home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin/python \
   /home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python)"
-INFER_PY="$(resolve_python_with_modules "$INFER_PY" onnx onnxruntime -- \
-  /home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python \
-  /home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin/python \
-  /home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python)"
+if [[ "$VISER_ENABLED" == "1" ]]; then
+  INFER_PY="$(resolve_python_with_modules "$INFER_PY" onnx onnxruntime viser.extras -- \
+    /home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python \
+    /home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python \
+    /home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin/python)"
+else
+  INFER_PY="$(resolve_python_with_modules "$INFER_PY" onnx onnxruntime -- \
+    /home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python \
+    /home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin/python \
+    /home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python)"
+fi
 
 apply_motion_clip_object_defaults() {
   if [[ -f "$MOTION_METADATA_TOOL" ]]; then
@@ -448,6 +475,13 @@ PY
 }
 
 apply_training_motion_launch_defaults "$MODEL_INPUT"
+if [[ "$RAW_CLIP_PLAYBACK" == "1" ]]; then
+  APPLY_TRAINING_MOTION_TRANSITIONS="0"
+  SIM_MOTION_INIT_MODE="raw_motion"
+  USE_ROOT_REFERENCE_AT_CLIP_START="0"
+  AUTO_START_STIFF_HOLD_SEC="0.0"
+  AUTO_START_STIFF_MAX_WAIT_SEC="0.0"
+fi
 apply_motion_clip_object_defaults
 
 "$INFER_PY" "$ROOT_DIR/src/holosoma_inference/holosoma_inference/tools/patch_motion_onnx.py" \
@@ -598,6 +632,19 @@ wait_for_sim_ready() {
 echo "Using inference config: $INFERENCE_CONFIG"
 echo "Using object URDF: $OBJECT_URDF"
 echo "Using policy action scale: $POLICY_ACTION_SCALE"
+echo "Using split sim ports: clock=$SIM_CLOCK_PORT sim_state=$SIM_STATE_PORT control=$SIM_CONTROL_PORT"
+if [[ "$VISER_ENABLED" == "1" ]]; then
+  echo "Using Viser URL: http://localhost:$VISER_PORT"
+  if [[ "$VISER_AUTO_RESET_ON_MOTION_END" == "1" ]]; then
+    echo "Using Viser auto-reset on motion end: enabled"
+  fi
+fi
+if [[ "$RAW_CLIP_PLAYBACK" == "1" ]]; then
+  echo "Using raw clip playback mode: enabled"
+fi
+if [[ "$RUN_SECONDS" == "0" ]]; then
+  echo "Policy timeout disabled; run will stay open until Ctrl+C"
+fi
 
 PYTHONUNBUFFERED=1 "${MUJOCO_LAUNCH_PREFIX[@]}" "$MUJOCO_PY" "$ROOT_DIR/src/holosoma/holosoma/run_sim.py" \
   simulator:mujoco \
@@ -655,32 +702,62 @@ if [[ "$SIM_STARTUP_WAIT" != "0" ]]; then
   sleep "$SIM_STARTUP_WAIT"
 fi
 
+POLICY_CMD=(
+  "$INFER_PY" "$ROOT_DIR/src/holosoma_inference/holosoma_inference/run_policy.py"
+  "inference:${INFERENCE_CONFIG}"
+  --task.model-path "$PATCHED_ONNX"
+  --task.motion-file "$MOTION_FILE"
+  --task.interface "$INTERFACE_NAME"
+  --task.use-sim-state
+  --task.sim-clock-port "$SIM_CLOCK_PORT"
+  --task.sim-state-port "$SIM_STATE_PORT"
+  --task.sim-control-port "$SIM_CONTROL_PORT"
+  --task.no-auto-start-motion
+  --task.auto-start-motion-clip
+  --task.auto-start-stiff-hold-sec "$AUTO_START_STIFF_HOLD_SEC"
+  --task.auto-start-stiff-max-wait-sec "$AUTO_START_STIFF_MAX_WAIT_SEC"
+  --task.auto-start-stiff-pose-tolerance "$AUTO_START_STIFF_POSE_TOL"
+  --task.sim-reset-restart-delay-sec "$SIM_RESET_RESTART_DELAY_SEC"
+  --task.policy-action-scale "$POLICY_ACTION_SCALE"
+  --task.sim-object-name object
+)
+
+if [[ "$SIM_USE_ZMQ_LOWCMD" == "1" ]]; then
+  POLICY_CMD+=(--task.use-zmq-lowcmd)
+fi
+if [[ "$USE_SIM_TIME" == "1" ]]; then
+  POLICY_CMD+=(--task.use-sim-time)
+else
+  POLICY_CMD+=(--task.no-use-sim-time)
+fi
+if [[ "$USE_ROOT_REFERENCE_AT_CLIP_START" == "1" ]]; then
+  POLICY_CMD+=(--task.use-root-reference-at-clip-start)
+fi
+if [[ "$PREFER_SIM_REF_FROM_SIM_STATE" == "1" ]]; then
+  POLICY_CMD+=(--task.prefer-sim-ref-from-sim-state)
+fi
+if [[ "$APPLY_TRAINING_MOTION_TRANSITIONS" == "1" ]]; then
+  POLICY_CMD+=(--task.apply-training-motion-transitions)
+fi
+if [[ "$POLICY_DEFER_UNTIL_VALID_STATE" == "1" ]]; then
+  POLICY_CMD+=(--task.defer-policy-start-until-valid-state)
+fi
+if [[ "$VISER_ENABLED" == "1" ]]; then
+  POLICY_CMD+=(--viser.port "$VISER_PORT")
+  POLICY_CMD+=(--viser.update-interval "$VISER_UPDATE_INTERVAL")
+  POLICY_CMD+=(--viser.object-urdf-path "$OBJECT_URDF")
+  POLICY_CMD+=(--viser.enabled)
+  if [[ "$VISER_AUTO_RESET_ON_MOTION_END" != "1" ]]; then
+    POLICY_CMD+=(--viser.no-auto-reset-on-motion-end)
+  fi
+fi
+
 set +e
-PYTHONUNBUFFERED=1 timeout --signal=INT "${RUN_SECONDS}s" \
-  "$INFER_PY" "$ROOT_DIR/src/holosoma_inference/holosoma_inference/run_policy.py" \
-  "inference:${INFERENCE_CONFIG}" \
-  --task.model-path "$PATCHED_ONNX" \
-  --task.motion-file "$MOTION_FILE" \
-  --task.interface "$INTERFACE_NAME" \
-  --task.use-sim-state \
-  --task.sim-clock-port "$SIM_CLOCK_PORT" \
-  --task.sim-state-port "$SIM_STATE_PORT" \
-  --task.sim-control-port "$SIM_CONTROL_PORT" \
-  $( [[ "$SIM_USE_ZMQ_LOWCMD" == "1" ]] && printf '%s' "--task.use-zmq-lowcmd" ) \
-  $( [[ "$USE_SIM_TIME" == "1" ]] && printf '%s' "--task.use-sim-time" || printf '%s' "--task.no-use-sim-time" ) \
-  --task.no-auto-start-motion \
-  --task.auto-start-motion-clip \
-  --task.auto-start-stiff-hold-sec "$AUTO_START_STIFF_HOLD_SEC" \
-  --task.auto-start-stiff-max-wait-sec "$AUTO_START_STIFF_MAX_WAIT_SEC" \
-  --task.auto-start-stiff-pose-tolerance "$AUTO_START_STIFF_POSE_TOL" \
-  $( [[ "$USE_ROOT_REFERENCE_AT_CLIP_START" == "1" ]] && printf '%s' "--task.use-root-reference-at-clip-start" ) \
-  $( [[ "$PREFER_SIM_REF_FROM_SIM_STATE" == "1" ]] && printf '%s' "--task.prefer-sim-ref-from-sim-state" ) \
-  $( [[ "$APPLY_TRAINING_MOTION_TRANSITIONS" == "1" ]] && printf '%s' "--task.apply-training-motion-transitions" ) \
-  --task.policy-action-scale "$POLICY_ACTION_SCALE" \
-  --task.sim-object-name object \
-  $( [[ "$POLICY_DEFER_UNTIL_VALID_STATE" == "1" ]] && printf '%s' "--task.defer-policy-start-until-valid-state" ) \
-  --viser.no-auto-reset-on-motion-end \
-  >"$POLICY_LOG" 2>&1
+if [[ "$RUN_SECONDS" == "0" ]]; then
+  PYTHONUNBUFFERED=1 "${POLICY_CMD[@]}" >"$POLICY_LOG" 2>&1
+else
+  PYTHONUNBUFFERED=1 timeout --signal=INT "${RUN_SECONDS}s" "${POLICY_CMD[@]}" >"$POLICY_LOG" 2>&1
+fi
 STATUS=$?
 set -e
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import itertools
 import json
-import os
 import sys
 import threading
 import time
@@ -27,7 +26,6 @@ except ModuleNotFoundError:  # pragma: no cover - optional runtime dependency
     listen_keyboard = None
 
 from holosoma_inference.config.config_types.inference import InferenceConfig
-from holosoma_inference.config.config_types.observation import ObservationConfig
 from holosoma_inference.config.config_types.robot import RobotConfig
 from holosoma_inference.sdk.interface_wrapper import InterfaceWrapper
 from holosoma_inference.sdk.zmq_interface_wrapper import ZmqSimInterfaceWrapper
@@ -67,28 +65,6 @@ class BasePolicy:
         self._init_phase_components()
         # Initialize latency tracking
         self._init_latency_tracking()
-
-        self.last_robot_state_data = None
-        self._viser_viewer = None
-        self._viser_update_interval = 1
-        self._viser_step_count = 0
-        self._clip_joint_targets = str(os.getenv("HOLOSOMA_CLIP_JOINT_TARGETS", "1")).lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        self._use_motion_command_as_q_target = str(
-            os.getenv("HOLOSOMA_USE_MOTION_COMMAND_AS_Q_TARGET", "0")
-        ).lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        self._logged_waiting_for_robot_state = False
-        if self._use_motion_command_as_q_target:
-            logger.warning("HOLOSOMA_USE_MOTION_COMMAND_AS_Q_TARGET enabled: using motion-command joint targets directly.")
 
     # ============================================================================
     # Initialization Methods
@@ -131,6 +107,7 @@ class BasePolicy:
     def _init_sdk_components(self):
         """Initialize SDK components based on robot type."""
         self.sdk_type = self.robot_config.sdk_type
+
         if bool(getattr(self.config.task, "use_zmq_lowcmd", False)):
             return
 
@@ -161,12 +138,6 @@ class BasePolicy:
 
         # Initialize per-term history buffers using deques
         self._initialize_history_state()
-        self.actor_obs_group_order = self._build_actor_obs_group_order()
-        if (
-            self.config.task.include_motion_future_target_poses
-            and self.config.task.motion_future_target_poses_dim is not None
-        ):
-            self._enable_motion_future_target_poses(self.config.task.motion_future_target_poses_dim)
 
     def _initialize_history_state(self):
         """Create per-term history deques and zero-initialized flattened buffers."""
@@ -187,56 +158,6 @@ class BasePolicy:
 
             self.obs_buf_dict[group] = np.concatenate(flattened_terms, axis=1) if flattened_terms else np.zeros((1, 0))
 
-    def _reset_obs_config(self, obs_config: ObservationConfig):
-        """Replace observation config and rebuild observation buffers."""
-        self.obs_config = obs_config
-        self.obs_scales = self.obs_config.obs_scales
-        self.obs_dims = self.obs_config.obs_dims
-        self.obs_dict = self.obs_config.obs_dict
-        self.obs_dim_dict = self._calculate_obs_dim_dict()
-        self.history_length_dict = self.obs_config.history_length_dict
-        self._initialize_history_state()
-        self.actor_obs_group_order = self._build_actor_obs_group_order()
-
-    def _build_actor_obs_group_order(self) -> list[str]:
-        if "actor_obs_proprio" in self.obs_dict or "actor_obs_box" in self.obs_dict:
-            order = [
-                group_name
-                for group_name in ("actor_obs_root", "actor_obs_torso", "actor_obs_proprio", "actor_obs_box")
-                if group_name in self.obs_dict
-            ]
-            if order:
-                return order
-
-        order = ["actor_obs"] if "actor_obs" in self.obs_dict else []
-        if "actor_obs_target" in self.obs_dict:
-            order.append("actor_obs_target")
-        if "motion_future_target_poses" in self.obs_dict:
-            order.append("motion_future_target_poses")
-        return order
-
-    def _enable_motion_future_target_poses(self, obs_dim: int) -> None:
-        if "motion_future_target_poses" in self.obs_dict:
-            self.actor_obs_group_order = self._build_actor_obs_group_order()
-            return
-        obs_dict = dict(self.obs_dict)
-        obs_dict["motion_future_target_poses"] = ["motion_future_target_poses"]
-        obs_dims = dict(self.obs_dims)
-        obs_dims["motion_future_target_poses"] = int(obs_dim)
-        obs_scales = dict(self.obs_scales)
-        obs_scales["motion_future_target_poses"] = 1.0
-        history_length_dict = dict(self.history_length_dict)
-        history_length_dict["motion_future_target_poses"] = 1
-        self._reset_obs_config(
-            ObservationConfig(
-                obs_dict=obs_dict,
-                obs_dims=obs_dims,
-                obs_scales=obs_scales,
-                history_length_dict=history_length_dict,
-            )
-        )
-        self.actor_obs_group_order = self._build_actor_obs_group_order()
-
     def _init_communication_components(self):
         """Initialize state processor and command sender using the wrapper."""
         if bool(getattr(self.config.task, "use_zmq_lowcmd", False)):
@@ -253,25 +174,6 @@ class BasePolicy:
                 self.config.task.interface,
                 self.config.task.use_joystick,
             )
-        self._apply_interface_gain_overrides_from_env()
-
-    def _apply_interface_gain_overrides_from_env(self) -> None:
-        """Allow non-interactive rollout scripts to scale low-level gains via environment variables."""
-        kp_level = os.getenv("HOLOSOMA_KP_LEVEL")
-        if kp_level not in (None, ""):
-            try:
-                self.interface.kp_level = float(kp_level)
-                logger.info("Using interface KP level override from env: {}", self.interface.kp_level)
-            except ValueError:
-                logger.warning("Ignoring invalid HOLOSOMA_KP_LEVEL={!r}", kp_level)
-
-        kd_level = os.getenv("HOLOSOMA_KD_LEVEL")
-        if kd_level not in (None, ""):
-            try:
-                self.interface.kd_level = float(kd_level)
-                logger.info("Using interface KD level override from env: {}", self.interface.kd_level)
-            except ValueError:
-                logger.warning("Ignoring invalid HOLOSOMA_KD_LEVEL={!r}", kd_level)
 
     def _init_policy_components(self, model_path, policy_action_scale, rl_rate):
         """Initialize policy-related components."""
@@ -432,16 +334,6 @@ class BasePolicy:
         self._init_rate_handler()
         self._init_input_device()
 
-    def attach_viser(self, viewer, update_interval: int = 1) -> None:
-        """Attach a Viser viewer for optional visualization."""
-        self._viser_viewer = viewer
-        self._viser_update_interval = max(1, int(update_interval))
-        self._viser_step_count = 0
-
-    def _get_viser_state_data(self, robot_state_data):
-        """Return the state payload to send to the optional Viser viewer."""
-        return robot_state_data
-
     def _has_valid_robot_state(self, robot_state_data: np.ndarray) -> bool:
         if robot_state_data is None or robot_state_data.ndim != 2 or robot_state_data.shape[0] < 1:
             return False
@@ -450,23 +342,6 @@ class BasePolicy:
             return False
         joint_pos = robot_state_data[0, 7 : 7 + self.num_dofs]
         return bool(np.any(np.abs(joint_pos) > 1e-6) or np.any(np.abs(quat) > 1e-6))
-
-    def _maybe_update_viser(self) -> None:
-        if self._viser_viewer is None or self.last_robot_state_data is None:
-            return
-        if self._viser_step_count % self._viser_update_interval == 0:
-            self._viser_viewer.update(self.last_robot_state_data)
-        self._viser_step_count += 1
-
-    def _maybe_handle_viser_requests(self) -> None:
-        if self._viser_viewer is None:
-            return
-        consume_reset_requested = getattr(self._viser_viewer, "consume_reset_requested", None)
-        if callable(consume_reset_requested) and consume_reset_requested():
-            self._handle_viser_reset_request()
-
-    def _handle_viser_reset_request(self) -> None:
-        """Handle reset requests coming from the optional Viser GUI."""
 
     def _can_finish_pending_policy_start(self, robot_state_data: np.ndarray) -> bool:  # noqa: ARG002
         return True
@@ -480,9 +355,6 @@ class BasePolicy:
     def _should_auto_start_policy_immediately(self) -> bool:
         """Hook for derived policies to gate base auto-start behavior."""
         return True
-
-    def _on_run_exit(self) -> None:
-        """Hook for derived policies to cleanup run-time resources."""
 
     def _init_rate_handler(self):
         """Initialize ROS handler if enabled."""
@@ -584,40 +456,13 @@ class BasePolicy:
 
         Creates a new config instance with resolved values if needed.
         """
-        use_stiff_startup_gains = str(os.getenv("HOLOSOMA_USE_STIFF_STARTUP_GAINS_FOR_POLICY", "0")).lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        if use_stiff_startup_gains:
-            stiff_kp = getattr(self.robot_config, "stiff_startup_kp", None)
-            stiff_kd = getattr(self.robot_config, "stiff_startup_kd", None)
-            if stiff_kp is None or stiff_kd is None:
-                raise ValueError(
-                    "HOLOSOMA_USE_STIFF_STARTUP_GAINS_FOR_POLICY=1 requires robot.stiff_startup_kp/kd in config."
-                )
-            logger.info(colored("Using stiff-startup KP/KD for policy control (env override)", "yellow"))
-            kp_values = np.array(stiff_kp, dtype=np.float32)
-            kd_values = np.array(stiff_kd, dtype=np.float32)
-            self.robot_config = replace(
-                self.robot_config, motor_kp=tuple(kp_values.tolist()), motor_kd=tuple(kd_values.tolist())
-            )
-            self.interface.robot_config = self.robot_config
-            if self.interface.backend == "sdk2py":
-                self.interface.command_sender.config = self.robot_config
-                self.interface.state_processor.config = self.robot_config
-            config_has_kp = True
-            config_has_kd = True
-        else:
-            # Check if config has explicit KP/KD values
-            config_has_kp = hasattr(self.robot_config, "motor_kp") and self.robot_config.motor_kp is not None
-            config_has_kd = hasattr(self.robot_config, "motor_kd") and self.robot_config.motor_kd is not None
+        # Check if config has explicit KP/KD values
+        config_has_kp = hasattr(self.robot_config, "motor_kp") and self.robot_config.motor_kp is not None
+        config_has_kd = hasattr(self.robot_config, "motor_kd") and self.robot_config.motor_kd is not None
 
         if config_has_kp and config_has_kd:
             # Config already has values (override) - nothing to do
-            if not use_stiff_startup_gains:
-                logger.info(colored("Using KP/KD from config (override)", "yellow"))
+            logger.info(colored("Using KP/KD from config (override)", "yellow"))
             kp_values = np.array(self.robot_config.motor_kp)
             kd_values = np.array(self.robot_config.motor_kd)
         elif self.onnx_kp is not None and self.onnx_kd is not None:
@@ -651,6 +496,15 @@ class BasePolicy:
             raise ValueError(
                 f"KD array length ({len(kd_values)}) does not match num_motors ({self.robot_config.num_motors})"
             )
+
+    def _calculate_obs_dim_dict(self):
+        """Calculate observation dimensions for each observation type."""
+        obs_dim_dict = {}
+        for key in self.obs_dict:
+            obs_dim_dict[key] = 0
+            for obs_name in self.obs_dict[key]:
+                obs_dim_dict[key] += self.obs_dims[obs_name]
+        return obs_dim_dict
 
     def _resolve_motor_kp_from_control_cfg(self, control_cfg: dict) -> np.ndarray | None:
         stiffness_cfg = control_cfg.get("stiffness")
@@ -724,15 +578,6 @@ class BasePolicy:
 
         self.policy_action_scales = scale_array.reshape(1, -1)
         logger.info("Using training-aligned per-joint action scales from ONNX metadata")
-
-    def _calculate_obs_dim_dict(self):
-        """Calculate observation dimensions for each observation type."""
-        obs_dim_dict = {}
-        for key in self.obs_dict:
-            obs_dim_dict[key] = 0
-            for obs_name in self.obs_dict[key]:
-                obs_dim_dict[key] += self.obs_dims[obs_name]
-        return obs_dim_dict
 
     def rl_inference(self, robot_state_data):
         """Perform RL inference to get policy action."""
@@ -823,23 +668,29 @@ class BasePolicy:
         self.obs_buf_dict = {group: value.copy() for group, value in group_outputs.items()}
         return group_outputs
 
+    def _assemble_actor_obs(self, group_outputs: dict[str, np.ndarray]) -> np.ndarray:
+        """Concatenate actor observation groups to match training input ordering."""
+        actor_groups: list[str] = []
+        if "actor_obs" in group_outputs:
+            actor_groups.append("actor_obs")
+        for group in ("actor_obs_target", "motion_future_target_poses"):
+            if group in group_outputs:
+                actor_groups.append(group)
+        extra_groups = sorted(
+            group for group in group_outputs if group.startswith("actor_obs") and group not in actor_groups
+        )
+        actor_groups.extend(extra_groups)
+
+        if not actor_groups:
+            raise KeyError("Observation group 'actor_obs' is not configured for this policy.")
+
+        return np.concatenate([group_outputs[group] for group in actor_groups], axis=1).astype(np.float32, copy=False)
+
     def prepare_obs_for_rl(self, robot_state_data):
         """Prepare observations for RL inference."""
         group_outputs = self._prepare_group_observations(robot_state_data)
-        if self.actor_obs_group_order == ["actor_obs"]:
-            if "actor_obs" not in group_outputs:
-                raise KeyError("Observation group 'actor_obs' is not configured for this policy.")
-            actor_obs = group_outputs["actor_obs"]
-        else:
-            parts = []
-            for group_name in self.actor_obs_group_order:
-                if group_name not in group_outputs:
-                    raise KeyError(f"Observation group '{group_name}' is not configured for this policy.")
-                parts.append(group_outputs[group_name])
-            actor_obs = np.concatenate(parts, axis=1)
-        prepared = {group_name: value.astype(np.float32, copy=False) for group_name, value in group_outputs.items()}
-        prepared["actor_obs"] = actor_obs.astype(np.float32, copy=False)
-        return prepared
+        actor_obs = self._assemble_actor_obs(group_outputs)
+        return {"actor_obs": actor_obs}
 
     # ============================================================================
     # Control/Command Methods
@@ -864,28 +715,19 @@ class BasePolicy:
         # Stage 1: Read State
         with self.latency_tracker.measure("read_state"):
             robot_state_data = self.interface.get_low_state()
-            self.last_robot_state_data = self._get_viser_state_data(robot_state_data)
-            if self._pending_noninteractive_policy_start:
-                if self._has_valid_robot_state(robot_state_data) and self._can_finish_pending_policy_start(
-                    robot_state_data
-                ):
-                    self.logger.info("Valid robot state received; auto-starting policy")
-                    self._handle_start_policy()
-                    self._pending_noninteractive_policy_start = False
-                    self._after_auto_start_policy()
-                else:
-                    return
-
-            if not self._has_valid_robot_state(robot_state_data):
-                if not self._logged_waiting_for_robot_state:
-                    self.logger.info("Waiting for a valid robot state from the simulator before stepping the policy.")
-                    self._logged_waiting_for_robot_state = True
-                return
-            self._logged_waiting_for_robot_state = False
 
         # Stage 2: Pre-processing
         with self.latency_tracker.measure("preprocessing"):
-            q_target = np.array(robot_state_data[:, 7 : 7 + self.num_dofs], dtype=np.float32, copy=True)
+            if (
+                self._pending_noninteractive_policy_start
+                and not self.use_policy_action
+                and self._has_valid_robot_state(robot_state_data)
+                and self._can_finish_pending_policy_start(robot_state_data)
+            ):
+                self.logger.info("Valid robot state received; enabling policy actions.")
+                self._pending_noninteractive_policy_start = False
+                self._handle_start_policy()
+                self._after_auto_start_policy()
             # Determine target joint positions
             if self.get_ready_state:
                 q_target = self.get_init_target(robot_state_data)
@@ -896,6 +738,8 @@ class BasePolicy:
                     q_target = manual_cmd["q"]
                     kp_override = manual_cmd.get("kp")
                     kd_override = manual_cmd.get("kd")
+                else:
+                    q_target = robot_state_data[:, 7 : 7 + self.num_dofs]
             else:
                 # Prepare for inference - any preprocessing before RL inference
                 pass
@@ -916,13 +760,9 @@ class BasePolicy:
                     else:
                         raise NotImplementedError("Upper body controller not implemented")
                 q_target = scaled_policy_action + self.default_dof_angles
-                if self._use_motion_command_as_q_target:
-                    motion_command = getattr(self, "motion_command_t", None)
-                    if motion_command is not None and motion_command.shape[1] >= self.num_dofs:
-                        q_target = np.array(motion_command[:, : self.num_dofs], dtype=np.float32, copy=True)
 
             # Clip target positions to motor limits (in-place for speed)
-            if self._clip_joint_targets and self.q_min_arr is not None and self.q_max_arr is not None:
+            if self.q_min_arr is not None and self.q_max_arr is not None:
                 np.clip(q_target[0], self.q_min_arr, self.q_max_arr, out=q_target[0])
 
             # Prepare command (reuse pre-allocated arrays)
@@ -961,9 +801,6 @@ class BasePolicy:
 
     def start_key_listener(self):
         """Start keyboard listener thread."""
-        if listen_keyboard is None:
-            self.logger.warning("sshkeyboard is not installed; keyboard input will not be available in this env")
-            return
 
         def on_press(keycode):
             try:
@@ -972,6 +809,9 @@ class BasePolicy:
                 pass  # Handle special keys if needed
 
         try:
+            if listen_keyboard is None:
+                self.logger.warning("sshkeyboard is not installed; keyboard input will not be available")
+                return
             listener = listen_keyboard(on_press=on_press)
             listener.start()
             listener.join()
@@ -1129,10 +969,8 @@ class BasePolicy:
                     self.process_joystick_input()
                 if self.use_phase:
                     self.update_phase_time()
-                self._maybe_handle_viser_requests()
 
                 self.policy_action()
-                self._maybe_update_viser()
 
                 self.latency_tracker.end_cycle()
 
@@ -1144,8 +982,3 @@ class BasePolicy:
 
         except KeyboardInterrupt:
             pass
-        finally:
-            try:
-                self._on_run_exit()
-            except KeyboardInterrupt:
-                pass

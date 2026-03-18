@@ -21,11 +21,15 @@ def apply_observation_overrides(config: ExperimentConfig) -> ExperimentConfig:
 
     groups = dict(observation.groups)
 
-    if overrides.disable_actor_history and "actor_obs" in groups:
-        groups["actor_obs"] = dataclasses.replace(groups["actor_obs"], history_length=1)
+    if overrides.disable_actor_history:
+        for group_name, group_cfg in list(groups.items()):
+            if group_name.startswith("actor_obs"):
+                groups[group_name] = dataclasses.replace(group_cfg, history_length=1)
 
-    if overrides.disable_critic_history and "critic_obs" in groups:
-        groups["critic_obs"] = dataclasses.replace(groups["critic_obs"], history_length=1)
+    if overrides.disable_critic_history:
+        for group_name, group_cfg in list(groups.items()):
+            if group_name.startswith("critic_obs"):
+                groups[group_name] = dataclasses.replace(group_cfg, history_length=1)
 
     if overrides.disable_actor_target and "actor_obs_target" in groups:
         groups.pop("actor_obs_target")

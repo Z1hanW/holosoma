@@ -12,14 +12,9 @@ Usage:
 
 import sys
 import traceback
-from pathlib import Path
 
 import tyro
 from loguru import logger
-
-_PKG_ROOT = Path(__file__).resolve().parents[1]
-if str(_PKG_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PKG_ROOT))
 
 from holosoma_inference.config.config_types.inference import InferenceConfig
 from holosoma_inference.config.config_values.inference import AnnotatedInferenceConfig
@@ -105,9 +100,6 @@ def _is_wbt_observation(obs_dict: dict[str, list[str]]) -> bool:
         "target_joints",
         "target_root_roll",
         "target_root_pitch",
-        "sparse_target_root_trajectory_command",
-        "obj_current_pose_size_b",
-        "obj_goal_pose_size_b",
     }
     for terms in obs_dict.values():
         if any(term in wbt_terms for term in terms):
@@ -128,18 +120,6 @@ def run_policy(config: InferenceConfig):
         policy_class = WholeBodyTrackingPolicy if _is_wbt_observation(config.observation.obs_dict) else LocomotionPolicy
         logger.info(f"Using {policy_class.__name__}")
         policy: LocomotionPolicy | WholeBodyTrackingPolicy = policy_class(config=config)
-
-        if config.viser.enabled:
-            from holosoma_inference.utils.viser_viewer import ViserInferenceViewer
-
-            model_path = policy.active_model_path
-            if not model_path:
-                if isinstance(config.task.model_path, (list, tuple)):
-                    model_path = str(config.task.model_path[0])
-                else:
-                    model_path = str(config.task.model_path)
-            viewer = ViserInferenceViewer(policy.robot_config, config.viser, model_path)
-            policy.attach_viser(viewer, update_interval=config.viser.update_interval)
 
         logger.info("✅ Policy initialized successfully!")
         _print_control_guide(policy_class, config.task.use_joystick)

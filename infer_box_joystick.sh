@@ -89,8 +89,9 @@ MODE="${MODE_INPUT}"
 LOG_ROOT="/data/logs_new/WholeBodyTracking"
 MOCAP_TRAINING_NAME_DEFAULT="g1_29dof_wbt_w_object_distill_box_mocap_access_to_mocap_data"
 DEPTH_TRAINING_NAME_DEFAULT="g1_29dof_wbt_w_object_distill_box_perception_access_to_depth"
-MOCAP_CHECKPOINT_DEFAULT=${MOCAP_CHECKPOINT_DEFAULT:-"wandb://zihanw22/WholeBodyTracking/d20ktze6/model_00800.pt"}
-DEPTH_CHECKPOINT_DEFAULT=${DEPTH_CHECKPOINT_DEFAULT:-"wandb://zihanw22/WholeBodyTracking/xplmudrp/model_01000.pt"}
+MOCAP_CHECKPOINT_DEFAULT=${MOCAP_CHECKPOINT_DEFAULT:-"wandb://zihanw22/boxer/d20ktze6/model_00800.pt"}
+# DEPTH_CHECKPOINT_DEFAULT=${DEPTH_CHECKPOINT_DEFAULT:-"wandb://zihanw22/boxer/7fxeaecw/model_03000.pt"}
+DEPTH_CHECKPOINT_DEFAULT=${DEPTH_CHECKPOINT_DEFAULT:-"wandb://zihanw22/boxer/0z2aggr2/model_05000.pt"}
 if [[ -n "${WANDB_MODEL_FILE+x}" && -n "${WANDB_MODEL_FILE}" ]]; then
   WANDB_MODEL_FILE_FROM_ENV=1
 else
@@ -438,6 +439,8 @@ export VISER_START_PAUSED=${VISER_START_PAUSED:-0}
 export VISER_MANUAL_USE_HW_JOYSTICK=${VISER_MANUAL_USE_HW_JOYSTICK:-0}
 export VISER_MANUAL_HW_DEADZONE=${VISER_MANUAL_HW_DEADZONE:-0.08}
 export VISER_CLIP_LOCK_DEFAULT=${VISER_CLIP_LOCK_DEFAULT:-1}
+export HOLOSOMA_DISABLE_MOTION_END_RESET=${HOLOSOMA_DISABLE_MOTION_END_RESET:-1}
+export HOLOSOMA_RESET_TO_DEFAULT_POSE=${HOLOSOMA_RESET_TO_DEFAULT_POSE:-1}
 
 # VideoMimic-style default:
 # - manual control comes from Viser GUI toggles.
@@ -470,6 +473,9 @@ cmd=(
   --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob "${START_AT_TIMESTEP_ZERO_PROB}"
   --command.setup_terms.motion_command.params.motion_config.freeze_at_timestep_zero_prob "${FREEZE_AT_TIMESTEP_ZERO_PROB}"
   --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale "${RESET_NOISE_SCALE}"
+  # Joystick inference should stay single-frame even if training defaults use longer history.
+  --observation_overrides.disable_actor_history True
+  --observation_overrides.disable_critic_history True
   --algo.config.distill.bc_loss_coef 0.0
   --algo.config.distill.loss_coef 0.0
   --algo.config.distill.switch_to_rl_after -1
@@ -570,6 +576,7 @@ echo "[INFO] infer_dataset=${INFER_DATASET}"
 echo "[INFO] checkpoint=${CKPT}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
 echo "[INFO] object_urdf=${OBJECT_URDF}"
+echo "[INFO] forced_obs_history=1 (actor/critic observation groups)"
 if [[ -n "${OBJECT_SCALE_ARG}" ]]; then
   echo "[INFO] object_scale=${OBJECT_SCALE_ARG}"
 fi
@@ -582,6 +589,8 @@ echo "[INFO] manual_gui=${VISER_ENABLE_MANUAL_GUI} clip_gui=${VISER_ENABLE_CLIP_
 echo "[INFO] manual_control_default=${VISER_MANUAL_CONTROL_DEFAULT} force_manual=${VISER_FORCE_MANUAL_CONTROL}"
 echo "[INFO] hw_joystick=${VISER_MANUAL_USE_HW_JOYSTICK}"
 echo "[INFO] hw_backend=${VISER_MANUAL_HW_BACKEND:-auto} bridge_joystick=${USE_HW_JOYSTICK_BRIDGE}"
+echo "[INFO] disable_motion_end_reset=${HOLOSOMA_DISABLE_MOTION_END_RESET}"
+echo "[INFO] reset_to_default_pose=${HOLOSOMA_RESET_TO_DEFAULT_POSE}"
 if [[ "${MODE}" == "mocap" ]]; then
   echo "[INFO] mocap_perception_preset=${MOCAP_PERCEPTION_PRESET}"
 else
@@ -593,7 +602,7 @@ echo "  2) Set 'Root Command X/Y/Yaw' in the robot root frame."
 echo "  3) Use 'Zero Root Command' to reset the manual command to zero."
 echo "  4) Use 'Advanced > Reset Object' to add box position/rotation offsets for the next reset."
 echo "  5) Use 'Clip Playback' to select clip/start frame and click 'Apply Clip'."
-echo "  6) Use 'Advanced > Simulation Control' for Play/Step/Reset."
+echo "  6) Use 'Advanced > Simulation Control' for Play/Step/Reset (Reset returns to the default pose)."
 if command -v hostname >/dev/null 2>&1; then
   HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
   if [[ -n "${HOST_IP}" ]]; then

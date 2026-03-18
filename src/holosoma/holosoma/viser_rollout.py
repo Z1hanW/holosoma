@@ -79,10 +79,12 @@ def _load_rollout(path: Path) -> dict[str, object]:
         fps_val = data.get("fps", 30)
         fps = float(np.array(fps_val).reshape(-1)[0]) if fps_val is not None else 30.0
         clip_name = _decode_str(data.get("clip_name"))
+        sequence_name = _decode_str(data.get("sequence_name"))
         env_origin = data.get("env_origin")
         if env_origin is not None:
             env_origin = np.asarray(env_origin, dtype=np.float32).reshape(-1)
         terrain_obj_path = _decode_str(data.get("terrain_obj_path"))
+        history_tag = _decode_str(data.get("history_tag"))
         terrain_rows = data.get("terrain_num_rows")
         terrain_cols = data.get("terrain_num_cols")
         terrain_rows_val = int(np.array(terrain_rows).reshape(-1)[0]) if terrain_rows is not None else None
@@ -91,6 +93,8 @@ def _load_rollout(path: Path) -> dict[str, object]:
         "qpos": qpos,
         "fps": fps,
         "clip_name": clip_name,
+        "sequence_name": sequence_name,
+        "history_tag": history_tag,
         "env_origin": env_origin,
         "terrain_obj_path": terrain_obj_path,
         "terrain_num_rows": terrain_rows_val,
@@ -208,10 +212,12 @@ def replay_rollout(cfg: ExperimentConfig, rollout_cfg: RolloutViewerConfig) -> N
 
     def _update_file_info() -> None:
         clip = state.get("clip_name")
+        sequence = state.get("sequence_name")
         fps_val = int(state.get("fps", 0))
         n_frames = int(state.get("n_frames", 0))
         clip_str = clip if clip else "n/a"
-        file_info.content = f"Clip: `{clip_str}` | frames: {n_frames} | fps: {fps_val}"
+        sequence_str = sequence if sequence else clip_str
+        file_info.content = f"Sequence: `{sequence_str}` | clip: `{clip_str}` | frames: {n_frames} | fps: {fps_val}"
 
     def _set_terrain(clip_name: str | None, terrain_path: str | None, rows: int | None, cols: int | None) -> None:
         nonlocal terrain_handle
@@ -241,6 +247,7 @@ def replay_rollout(cfg: ExperimentConfig, rollout_cfg: RolloutViewerConfig) -> N
         qpos = np.asarray(payload["qpos"], dtype=np.float32)
         fps_val = int(payload["fps"]) if payload["fps"] else 30
         clip_name = payload.get("clip_name")
+        sequence_name = payload.get("sequence_name")
         env_origin = payload.get("env_origin")
 
         terrain_path = rollout_cfg.terrain_obj_path or payload.get("terrain_obj_path")
@@ -252,6 +259,7 @@ def replay_rollout(cfg: ExperimentConfig, rollout_cfg: RolloutViewerConfig) -> N
                 "qpos": qpos,
                 "fps": fps_val,
                 "clip_name": clip_name,
+                "sequence_name": sequence_name,
                 "env_origin": env_origin,
                 "n_frames": int(qpos.shape[0]),
                 "has_object": bool(vo is not None and qpos.shape[1] >= (7 + len(cfg.robot.dof_names) + 7)),

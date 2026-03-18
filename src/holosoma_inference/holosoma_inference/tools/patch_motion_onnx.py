@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import onnx
-from onnx import helper, numpy_helper
+from onnx import numpy_helper
 
 
 def _decode_names(values: np.ndarray) -> list[str]:
@@ -33,6 +33,16 @@ def _resolve_model_path(model_path: str) -> Path:
     if not path.is_file():
         raise FileNotFoundError(path)
     return path
+
+
+def _resolve_root_body_index(body_names: list[str]) -> int:
+    for candidate in ("pelvis", "pelvis_link", "base_link", "torso_link"):
+        if candidate in body_names:
+            return body_names.index(candidate)
+    for idx, name in enumerate(body_names):
+        if name.lower() != "world":
+            return idx
+    return 0
 
 
 def _load_motion_clip(motion_path: Path, dof_names: list[str], ref_body_name: str) -> dict[str, np.ndarray]:
@@ -64,16 +74,6 @@ def _load_motion_clip(motion_path: Path, dof_names: list[str], ref_body_name: st
         "root_pos_w": body_pos_w[:, root_idx, :],
         "root_quat_wxyz": body_quat_w[:, root_idx, :],
     }
-
-
-def _resolve_root_body_index(body_names: list[str]) -> int:
-    for candidate in ("pelvis", "pelvis_link", "base_link", "torso_link"):
-        if candidate in body_names:
-            return body_names.index(candidate)
-    for idx, name in enumerate(body_names):
-        if name.lower() != "world":
-            return idx
-    return 0
 
 
 def _extract_motion_cfg(metadata: dict[str, object]) -> dict | None:

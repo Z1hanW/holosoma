@@ -1,5 +1,7 @@
 """Perception configuration presets."""
 
+from dataclasses import replace
+
 from holosoma.config_types.perception import PerceptionConfig
 
 
@@ -141,15 +143,28 @@ camera_depth_d435i = PerceptionConfig(
     encoder_type="attention",
 )
 
+camera_depth_d435i_17x17 = replace(
+    camera_depth_d435i,
+    camera_width=17,
+    camera_height=17,
+    camera_warp_resize=(17, 17),
+    camera_warp_crop_top=0,
+    camera_warp_crop_bottom=0,
+    camera_warp_crop_left=0,
+    camera_warp_crop_right=0,
+)
+
 DEFAULTS = {
     "none": none,
     "heightmap": heightmap,
     "camera_depth_d435i": camera_depth_d435i,
+    "camera_depth_d435i_17x17": camera_depth_d435i_17x17,
 }
 
 __all__ = [
     "none",
     "heightmap",
     "camera_depth_d435i",
+    "camera_depth_d435i_17x17",
     "DEFAULTS",
 ]

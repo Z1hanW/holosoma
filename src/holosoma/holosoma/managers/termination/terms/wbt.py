@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, List
 
 from holosoma.config_types.termination import TerminationTermCfg
@@ -21,6 +22,8 @@ from holosoma.utils.safe_torch_import import torch
 #########################################################################################################
 def motion_ends(env, **_) -> torch.Tensor:
     """Terminate if the motion ends."""
+    if os.environ.get("HOLOSOMA_DISABLE_MOTION_END_RESET", "0").lower() in ("1", "true", "yes", "on"):
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     motion_command = env.command_manager.get_state("motion_command")
     return motion_command.motion_end_mask()
 

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 from holosoma_inference.config.config_types.task import TaskConfig
 
 # Locomotion task
@@ -20,6 +18,23 @@ locomotion = TaskConfig(
     use_joystick=False,
     joystick_type="xbox",
     joystick_device=0,
+    sim_clock_port=5555,
+    auto_start_policy=False,
+    auto_start_motion=False,
+    auto_start_motion_clip=False,
+    auto_start_stiff_hold_sec=1.0,
+    auto_start_stiff_pose_tolerance=0.12,
+    auto_start_stiff_max_wait_sec=4.0,
+    defer_policy_start_until_valid_state=False,
+    motion_file=None,
+    apply_training_motion_transitions=False,
+    use_sim_state=False,
+    sim_state_port=5557,
+    sim_control_port=5559,
+    use_zmq_lowcmd=False,
+    sim_object_name="object",
+    use_root_reference_at_clip_start=False,
+    prefer_sim_ref_from_sim_state=False,
     use_ros=False,
     wandb_download_dir="/tmp",
 )
@@ -38,17 +53,29 @@ wbt = TaskConfig(
     use_joystick=False,
     joystick_type="xbox",
     joystick_device=0,
+    use_sim_time=False,
+    sim_clock_port=5555,
+    auto_start_policy=False,
+    auto_start_motion=False,
+    auto_start_motion_clip=False,
+    auto_start_stiff_hold_sec=1.0,
+    auto_start_stiff_pose_tolerance=0.12,
+    auto_start_stiff_max_wait_sec=4.0,
+    defer_policy_start_until_valid_state=False,
+    motion_file=None,
+    apply_training_motion_transitions=False,
+    use_sim_state=False,
+    sim_state_port=5557,
+    sim_control_port=5559,
+    use_zmq_lowcmd=False,
+    sim_object_name="object",
+    use_root_reference_at_clip_start=False,
+    prefer_sim_ref_from_sim_state=False,
     use_ros=False,
     wandb_download_dir="/tmp",
-)
-
-wbt_motion_tracking = replace(
-    wbt,
-    include_motion_future_target_poses=True,
 )
 
 DEFAULTS = {
     "locomotion": locomotion,
     "wbt": wbt,
-    "wbt-motion-tracking": wbt_motion_tracking,
 }

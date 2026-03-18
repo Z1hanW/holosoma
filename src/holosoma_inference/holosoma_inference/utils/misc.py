@@ -1,6 +1,5 @@
 import os
 import subprocess
-import sys
 
 
 def get_holosoma_inference_root() -> str:
@@ -31,6 +30,4 @@ def restore_terminal_settings() -> None:
     into raw mode to capture keystrokes directly. This function restores
     the terminal to normal mode before closing the process.
     """
-    if not sys.stdin.isatty():
-        return
     subprocess.run(["stty", "sane"], check=False)

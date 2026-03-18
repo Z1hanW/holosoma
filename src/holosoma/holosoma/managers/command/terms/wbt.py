@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import zipfile
 from pathlib import Path
@@ -1197,7 +1198,16 @@ class MotionCommand(CommandTermBase):
         self._sparse_goal_external_fraction_last_reset = 0.0
 
         init_state = self._env.robot_config.init_state
+        self._reset_to_default_pose = os.environ.get("HOLOSOMA_RESET_TO_DEFAULT_POSE", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
         self._init_root_pos = torch.tensor(init_state.pos, dtype=torch.float32, device=self.device)
+        self._init_root_rot = torch.tensor(init_state.rot, dtype=torch.float32, device=self.device)
+        self._init_root_lin_vel = torch.tensor(init_state.lin_vel, dtype=torch.float32, device=self.device)
+        self._init_root_ang_vel = torch.tensor(init_state.ang_vel, dtype=torch.float32, device=self.device)
         init_root_quat = torch.tensor(init_state.rot, dtype=torch.float32, device=self.device).unsqueeze(0)
         _, _, init_yaw = get_euler_xyz(init_root_quat, w_last=True)
         self._init_root_yaw = init_yaw.squeeze(0)
@@ -1484,6 +1494,24 @@ class MotionCommand(CommandTermBase):
             obj_quat_w = quat_mul(delta_quat, obj_quat_w, w_last=True)
         return obj_pos_w, obj_quat_w
 
+    def _default_pose_reset_targets(
+        self, env_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        dof_pos = self._env.default_dof_pos[env_ids].clone()
+        dof_vel = torch.zeros_like(dof_pos)
+
+        root_pos = self.body_pos_w[env_ids, 0].clone()
+        root_pos[:, 2] = self._init_root_pos[2]
+
+        init_root_quat = self._init_root_rot.unsqueeze(0).expand(env_ids.numel(), -1)
+        init_roll, init_pitch, _ = get_euler_xyz(init_root_quat, w_last=True)
+        _, _, motion_yaw = get_euler_xyz(self.body_quat_w[env_ids, 0], w_last=True)
+        root_rot = quat_from_euler_xyz(init_roll, init_pitch, motion_yaw)
+
+        root_lin_vel = self._init_root_lin_vel.unsqueeze(0).expand(env_ids.numel(), -1).clone()
+        root_ang_vel = self._init_root_ang_vel.unsqueeze(0).expand(env_ids.numel(), -1).clone()
+        return dof_pos, dof_vel, root_pos, root_rot, root_lin_vel, root_ang_vel
+
     def reset(self, env_ids: torch.Tensor | None) -> None:
         """called per reset_idx, reset timesteps and robot/object poses."""
         env_ids = self._ensure_index_tensor(env_ids)
@@ -1560,6 +1588,9 @@ class MotionCommand(CommandTermBase):
 
         dof_pos = self.joint_pos[env_ids].clone()
         dof_vel = self.joint_vel[env_ids].clone()
+
+        if self._reset_to_default_pose:
+            dof_pos, dof_vel, root_pos, root_rot, root_lin_vel, root_ang_vel = self._default_pose_reset_targets(env_ids)
 
         # 2. Adding noise
         reset_noise_scale = torch.ones((env_ids.numel(), 1), device=self.device, dtype=torch.float32)

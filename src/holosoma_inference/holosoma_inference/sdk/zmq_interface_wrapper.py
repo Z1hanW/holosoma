@@ -59,20 +59,17 @@ class ZmqSimInterfaceWrapper:
         root_state = np.asarray(robot_root_state, dtype=np.float64)
         dof_pos = np.asarray(robot_dof_pos, dtype=np.float64)
         dof_vel = np.asarray(robot_dof_vel, dtype=np.float64)
-        if root_state.shape[0] < 13 or dof_pos.shape[0] < self.robot_config.num_joints or dof_vel.shape[0] < self.robot_config.num_joints:
+        if (
+            root_state.shape[0] < 13
+            or dof_pos.shape[0] < self.robot_config.num_joints
+            or dof_vel.shape[0] < self.robot_config.num_joints
+        ):
             return self._last_robot_state_data
 
         quat_xyzw = root_state[3:7]
         quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]], dtype=np.float64)
         q = np.concatenate([root_state[:3], quat_wxyz, dof_pos[: self.robot_config.num_joints]], axis=0)
-        dq = np.concatenate(
-            [
-                root_state[7:10],
-                root_state[10:13],
-                dof_vel[: self.robot_config.num_joints],
-            ],
-            axis=0,
-        )
+        dq = np.concatenate([root_state[7:10], root_state[10:13], dof_vel[: self.robot_config.num_joints]], axis=0)
         tau_est = np.zeros_like(dq)
         ddq = np.zeros_like(dq)
         robot_state_data = np.concatenate([q, dq, tau_est, ddq], axis=0).reshape(1, -1)
@@ -88,6 +85,7 @@ class ZmqSimInterfaceWrapper:
         kp_override=None,
         kd_override=None,
     ) -> None:
+        del dof_pos_latest
         q_target = np.asarray(cmd_q, dtype=np.float32).reshape(-1)
         dq_target = np.asarray(cmd_dq, dtype=np.float32).reshape(-1)
         tau_ff = np.asarray(cmd_tau, dtype=np.float32).reshape(-1)

@@ -710,6 +710,15 @@ class DirectSimulation:
                 desired_object_state_np = object_state[0].detach().cpu().numpy().astype(np.float32, copy=False)
                 self.simulator.set_actor_states([motion_init_cfg.object_name], env_ids, object_state)
 
+            # Preserve the motion-init state so MuJoCo split sim resets/restarts return to the
+            # same clip start pose instead of the raw URDF default pose.
+            self.simulator._motion_init_reset_root_state = root_state.detach().clone()
+            self.simulator._motion_init_reset_dof_state = dof_state.detach().clone()
+            motion_init_actor_states: dict[str, torch.Tensor] = {}
+            if has_object_motion:
+                motion_init_actor_states[str(motion_init_cfg.object_name)] = object_state.detach().clone()
+            self.simulator._motion_init_reset_actor_states = motion_init_actor_states
+
         if hasattr(self.simulator, "write_state_updates"):
             self.simulator.write_state_updates()
         else:

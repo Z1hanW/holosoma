@@ -140,6 +140,15 @@ class SimulatorBridge:
 
     def _init_zmq_lowcmd_state(self) -> None:
         self._default_hold_q, self._default_hold_kp, self._default_hold_kd = self._build_default_pose_hold_targets()
+        self._reset_zmq_lowcmd_runtime_state()
+
+    def _reset_zmq_lowcmd_runtime_state(self) -> None:
+        """Clear runtime lowcmd state so simulator resets do not reuse stale commands."""
+        self._latest_lowcmd_payload = None
+        self._received_external_active_command = False
+        self._logged_first_command_summary = False
+        self._logged_default_pose_hold = False
+        self._logged_initial_pose_hold = False
         self._initial_hold_q = None
 
     def _build_default_pose_hold_targets(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -231,6 +240,8 @@ class SimulatorBridge:
                 reason = str(payload.get("reason", "manual"))
                 if hasattr(self.simulator, "_pending_reset"):
                     self.simulator._pending_reset = True
+                if self._use_zmq_lowcmd:
+                    self._reset_zmq_lowcmd_runtime_state()
                 logger.info("Queued simulator reset from sim-control channel ({})", reason)
                 continue
             if action == "lowcmd" and self._use_zmq_lowcmd:
@@ -353,10 +364,10 @@ class SimulatorBridge:
 
             for name in actor_names:
                 try:
-                    indices = self.simulator.get_actor_indices(name, env_ids=env_ids)
-                    if indices.numel() == 0:
+                    actor_state = self.simulator.get_actor_states([name], env_ids)
+                    if actor_state.numel() == 0:
                         continue
-                    actor_states[name] = self.simulator.all_root_states[indices[0]].detach().cpu().tolist()
+                    actor_states[name] = actor_state[0].detach().cpu().tolist()
                 except Exception as exc:  # pragma: no cover - best effort side-channel
                     logger.debug("Skipping sim-state actor '{}': {}", name, exc)
 

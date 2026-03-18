@@ -33,15 +33,6 @@ class TaskConfig:
     use_joystick: bool = False
     """Enable joystick control input."""
 
-    use_joystick_goal: bool = False
-    """Use joystick to generate torso position/yaw goals for WBT policies."""
-
-    joystick_goal_scale: float = 0.5
-    """Scale (meters) applied to joystick XY for torso_xy_rel goals."""
-
-    joystick_yaw_scale: float = 0.5
-    """Scale (radians) applied to joystick yaw for torso_yaw_rel goals."""
-
     joystick_type: str = "xbox"
     """Joystick type."""
 
@@ -61,19 +52,19 @@ class TaskConfig:
     """Automatically start WBT motion progression after policy startup."""
 
     auto_start_motion_clip: bool = False
-    """Automatically stiff-hold, then start policy + motion clip together."""
+    """Automatically start WBT policy + motion clip in non-interactive mode."""
 
     auto_start_stiff_hold_sec: float = 1.0
-    """Minimum stiff-hold duration before starting auto-start WBT rollout."""
+    """Minimum stiff-hold duration before auto-start WBT rollout."""
 
     auto_start_stiff_pose_tolerance: float = 0.12
-    """Maximum joint-position error (rad) to treat stiff-hold target as reached."""
+    """Maximum joint-position error treated as stiff-hold target reached."""
 
     auto_start_stiff_max_wait_sec: float = 4.0
-    """Maximum wait before auto-start WBT rollout proceeds even if pose error stays high."""
+    """Maximum wait before auto-start WBT rollout proceeds anyway."""
 
     defer_policy_start_until_valid_state: bool = False
-    """In non-interactive mode, wait for the first valid robot state before enabling policy actions."""
+    """In non-interactive mode, wait for a valid robot state before enabling policy."""
 
     motion_file: str | None = None
     """Optional single motion clip path used for split sim2sim WBT inference."""
@@ -88,37 +79,19 @@ class TaskConfig:
     """ZMQ port used to receive split sim2sim simulator state."""
 
     sim_control_port: int = 5559
-    """ZMQ port used to send split sim2sim simulator control requests such as reset."""
+    """ZMQ port used to send split sim2sim simulator control requests."""
 
     use_zmq_lowcmd: bool = False
     """Send lowcmd over the split sim-control ZMQ channel instead of Unitree DDS."""
 
-    sim_reset_restart_delay_sec: float = 0.5
-    """Delay between requesting a simulator reset and restarting policy+motion playback."""
-
     sim_object_name: str = "object"
     """Simulator actor name used for the carried object in split sim2sim inference."""
 
-    use_sim_perception: bool = False
-    """Subscribe to simulator perception observations over ZMQ for split sim2sim inference."""
-
-    sim_perception_port: int = 5558
-    """ZMQ port used to receive split sim2sim perception observations."""
-
-    include_motion_future_target_poses: bool = False
-    """Include motion_future_target_poses in the actor observation (WBT motion-tracking policies)."""
-
-    motion_future_target_poses_dim: int | None = None
-    """Override dimension for motion_future_target_poses when metadata is unavailable."""
-
-    motion_future_target_poses_motion_file: str | None = None
-    """Optional motion file path override for motion_future_target_poses computation."""
-
     use_root_reference_at_clip_start: bool = False
-    """For split WBT tracking, mimic training step-0 observations by using robot root instead of ref body."""
+    """Use robot root instead of ref body at clip start to match training step-0 semantics."""
 
     prefer_sim_ref_from_sim_state: bool = False
-    """Prefer simulator-measured ref-body pose from split sim-state over Pinocchio FK when available."""
+    """Prefer simulator-measured ref-body pose from split sim-state when available."""
 
     wandb_download_dir: str = "/tmp"
     """Directory for downloading W&B checkpoints."""

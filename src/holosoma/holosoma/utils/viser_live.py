@@ -603,6 +603,12 @@ class ViserLiveViewer:
             "true",
             "yes",
         )
+        self._reset_to_default_pose = os.environ.get("HOLOSOMA_RESET_TO_DEFAULT_POSE", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
         self._manual_use_hw_joystick = os.environ.get("VISER_MANUAL_USE_HW_JOYSTICK", "1").lower() not in (
             "0",
             "false",
@@ -2816,6 +2822,18 @@ class ViserLiveViewer:
                     motion_cmd.set_forced_clip(int(clip_idx))
                 except Exception:
                     motion_cmd._forced_clip_idx = int(clip_idx)
+                if self._reset_to_default_pose:
+                    self._env.reset_envs_idx(env_ids)
+                    if hasattr(self._env, "reset_buf"):
+                        self._env.reset_buf[env_ids] = 0
+                    if hasattr(self._env, "time_out_buf"):
+                        self._env.time_out_buf[env_ids] = 0
+                    active_idx = self._active_clip_index(motion_cmd)
+                    if active_idx is None:
+                        active_idx = int(clip_idx)
+                    self._reload_terrain_for_clip(self._current_clip_name(motion_cmd, int(active_idx)))
+                    self._sync_after_reset(env_ids)
+                    return
                 clip_start = int(self._clip_start_slider.value) if self._clip_start_slider is not None else 0
                 try:
                     motion_cmd.set_forced_clip_start(int(clip_start))
