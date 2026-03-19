@@ -1945,6 +1945,33 @@ class MotionCommand(CommandTermBase):
             raise ValueError(f"{name} must provide exactly 3 values, got {len(values)}")
         return torch.tensor(values, device=self.device, dtype=torch.float32)
 
+    def _sparse_goal_curriculum_progress(self) -> float:
+        if self._sparse_goal_cfg is None:
+            return 1.0
+        ramp_cfg = self._sparse_goal_cfg.external_goal_range_ramp_resets
+        if ramp_cfg is None:
+            ramp = max(0, int(self._sparse_goal_cfg.external_goal_prob_ramp_resets))
+        else:
+            ramp = max(0, int(ramp_cfg))
+        if ramp <= 0:
+            return 1.0
+        return min(float(self._sparse_goal_reset_counter) / float(ramp), 1.0)
+
+    def _goal_vec3_interp(
+        self,
+        end_values: list[float],
+        *,
+        name: str,
+        start_values: list[float] | None = None,
+        alpha: float | None = None,
+    ) -> torch.Tensor:
+        end_tensor = self._goal_vec3(end_values, name=name)
+        if start_values is None:
+            return end_tensor
+        start_tensor = self._goal_vec3(start_values, name=f"{name}_start")
+        mix = float(self._clamp01(self._sparse_goal_curriculum_progress() if alpha is None else alpha))
+        return start_tensor + (end_tensor - start_tensor) * mix
+
     def _reset_pickup_anchor_state(
         self,
         env_ids: torch.Tensor,
@@ -2049,8 +2076,19 @@ class MotionCommand(CommandTermBase):
             raise RuntimeError("Sparse goal config is not initialized.")
 
         num_samples = env_ids.numel()
-        pos_min = self._goal_vec3(self._sparse_goal_cfg.external_goal_pos_local_min, name="external_goal_pos_local_min")
-        pos_max = self._goal_vec3(self._sparse_goal_cfg.external_goal_pos_local_max, name="external_goal_pos_local_max")
+        progress = self._sparse_goal_curriculum_progress()
+        pos_min = self._goal_vec3_interp(
+            self._sparse_goal_cfg.external_goal_pos_local_min,
+            name="external_goal_pos_local_min",
+            start_values=self._sparse_goal_cfg.external_goal_pos_local_min_start,
+            alpha=progress,
+        )
+        pos_max = self._goal_vec3_interp(
+            self._sparse_goal_cfg.external_goal_pos_local_max,
+            name="external_goal_pos_local_max",
+            start_values=self._sparse_goal_cfg.external_goal_pos_local_max_start,
+            alpha=progress,
+        )
         pos_lo = torch.minimum(pos_min, pos_max)
         pos_hi = torch.maximum(pos_min, pos_max)
         local_pos = pos_lo.unsqueeze(0) + (pos_hi - pos_lo).unsqueeze(0) * torch.rand(
@@ -2058,8 +2096,18 @@ class MotionCommand(CommandTermBase):
         )
         goal_pos_w = self._get_env_offsets(env_ids) + local_pos
 
-        rpy_min = self._goal_vec3(self._sparse_goal_cfg.external_goal_rpy_min, name="external_goal_rpy_min")
-        rpy_max = self._goal_vec3(self._sparse_goal_cfg.external_goal_rpy_max, name="external_goal_rpy_max")
+        rpy_min = self._goal_vec3_interp(
+            self._sparse_goal_cfg.external_goal_rpy_min,
+            name="external_goal_rpy_min",
+            start_values=self._sparse_goal_cfg.external_goal_rpy_min_start,
+            alpha=progress,
+        )
+        rpy_max = self._goal_vec3_interp(
+            self._sparse_goal_cfg.external_goal_rpy_max,
+            name="external_goal_rpy_max",
+            start_values=self._sparse_goal_cfg.external_goal_rpy_max_start,
+            alpha=progress,
+        )
         rpy_lo = torch.minimum(rpy_min, rpy_max)
         rpy_hi = torch.maximum(rpy_min, rpy_max)
         rpy = rpy_lo.unsqueeze(0) + (rpy_hi - rpy_lo).unsqueeze(0) * torch.rand((num_samples, 3), device=self.device)
@@ -2668,16 +2716,58 @@ class MotionCommand(CommandTermBase):
                 device=self.device,
                 dtype=torch.float32,
             )
-            ramp = 0
-            if self._sparse_goal_cfg is not None:
-                ramp = max(0, int(self._sparse_goal_cfg.external_goal_prob_ramp_resets))
-            progress = 1.0 if ramp <= 0 else min(float(self._sparse_goal_reset_counter) / float(ramp), 1.0)
+            progress = self._sparse_goal_curriculum_progress()
             self.metrics["goal/external_prob_curriculum_progress"] = torch.full(
                 (self.num_envs,),
                 float(progress),
                 device=self.device,
                 dtype=torch.float32,
             )
+            if self._sparse_goal_cfg is not None:
+                pos_min = self._goal_vec3_interp(
+                    self._sparse_goal_cfg.external_goal_pos_local_min,
+                    name="external_goal_pos_local_min",
+                    start_values=self._sparse_goal_cfg.external_goal_pos_local_min_start,
+                    alpha=progress,
+                )
+                pos_max = self._goal_vec3_interp(
+                    self._sparse_goal_cfg.external_goal_pos_local_max,
+                    name="external_goal_pos_local_max",
+                    start_values=self._sparse_goal_cfg.external_goal_pos_local_max_start,
+                    alpha=progress,
+                )
+                rpy_min = self._goal_vec3_interp(
+                    self._sparse_goal_cfg.external_goal_rpy_min,
+                    name="external_goal_rpy_min",
+                    start_values=self._sparse_goal_cfg.external_goal_rpy_min_start,
+                    alpha=progress,
+                )
+                rpy_max = self._goal_vec3_interp(
+                    self._sparse_goal_cfg.external_goal_rpy_max,
+                    name="external_goal_rpy_max",
+                    start_values=self._sparse_goal_cfg.external_goal_rpy_max_start,
+                    alpha=progress,
+                )
+                pos_half_extent = 0.5 * torch.abs(pos_max - pos_min)
+                yaw_half_extent = 0.5 * abs(float(rpy_max[2] - rpy_min[2]))
+                self.metrics["goal/external_pos_range_x_half"] = torch.full(
+                    (self.num_envs,),
+                    float(pos_half_extent[0]),
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+                self.metrics["goal/external_pos_range_y_half"] = torch.full(
+                    (self.num_envs,),
+                    float(pos_half_extent[1]),
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+                self.metrics["goal/external_yaw_range_half"] = torch.full(
+                    (self.num_envs,),
+                    yaw_half_extent,
+                    device=self.device,
+                    dtype=torch.float32,
+                )
 
         if self.use_adaptive_timesteps_sampler:
             self.adaptive_timesteps_sampler.get_stats()

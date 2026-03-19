@@ -89,11 +89,26 @@ class SparseObjectGoalConfig:
     eval_external_goal_prob: float | None = None
     """Optional external-goal probability used during evaluation; defaults to end prob when None."""
 
+    external_goal_range_ramp_resets: int | None = None
+    """Optional ramp horizon for external-goal sampling range; defaults to external_goal_prob_ramp_resets."""
+
+    external_goal_pos_local_min_start: list[float] | None = None
+    """Optional initial lower bounds [x, y, z] for external goal position in local frame around env origin."""
+
+    external_goal_pos_local_max_start: list[float] | None = None
+    """Optional initial upper bounds [x, y, z] for external goal position in local frame around env origin."""
+
     external_goal_pos_local_min: list[float] = field(default_factory=lambda: [0.3, -0.8, 0.7])
     """External goal position lower bounds [x, y, z] in local frame around env origin."""
 
     external_goal_pos_local_max: list[float] = field(default_factory=lambda: [1.2, 0.8, 1.0])
     """External goal position upper bounds [x, y, z] in local frame around env origin."""
+
+    external_goal_rpy_min_start: list[float] | None = None
+    """Optional initial orientation lower bounds [roll, pitch, yaw] in radians."""
+
+    external_goal_rpy_max_start: list[float] | None = None
+    """Optional initial orientation upper bounds [roll, pitch, yaw] in radians."""
 
     external_goal_rpy_min: list[float] = field(default_factory=lambda: [0.0, 0.0, -3.1415926])
     """External goal orientation lower bounds [roll, pitch, yaw] in radians."""

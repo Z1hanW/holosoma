@@ -77,8 +77,13 @@ EXTERNAL_GOAL_PROB_START=${EXTERNAL_GOAL_PROB_START:-0.0}
 EXTERNAL_GOAL_PROB_END=${EXTERNAL_GOAL_PROB_END:-0.7}
 EXTERNAL_GOAL_PROB_RAMP_RESETS=${EXTERNAL_GOAL_PROB_RAMP_RESETS:-150000}
 EVAL_EXTERNAL_GOAL_PROB=${EVAL_EXTERNAL_GOAL_PROB:-1.0}
+EXTERNAL_GOAL_RANGE_RAMP_RESETS=${EXTERNAL_GOAL_RANGE_RAMP_RESETS:-${EXTERNAL_GOAL_PROB_RAMP_RESETS}}
+EXTERNAL_GOAL_POS_LOCAL_MIN_START=${EXTERNAL_GOAL_POS_LOCAL_MIN_START:-"[0.40, -0.20, 0.185]"}
+EXTERNAL_GOAL_POS_LOCAL_MAX_START=${EXTERNAL_GOAL_POS_LOCAL_MAX_START:-"[0.65, 0.20, 0.185]"}
 EXTERNAL_GOAL_POS_LOCAL_MIN=${EXTERNAL_GOAL_POS_LOCAL_MIN:-"[0.25, -0.75, 0.185]"}
 EXTERNAL_GOAL_POS_LOCAL_MAX=${EXTERNAL_GOAL_POS_LOCAL_MAX:-"[1.00, 0.75, 0.185]"}
+EXTERNAL_GOAL_RPY_MIN_START=${EXTERNAL_GOAL_RPY_MIN_START:-"[0.0, 0.0, -0.80]"}
+EXTERNAL_GOAL_RPY_MAX_START=${EXTERNAL_GOAL_RPY_MAX_START:-"[0.0, 0.0, 0.80]"}
 EXTERNAL_GOAL_RPY_MIN=${EXTERNAL_GOAL_RPY_MIN:-"[0.0, 0.0, -3.1415926]"}
 EXTERNAL_GOAL_RPY_MAX=${EXTERNAL_GOAL_RPY_MAX:-"[0.0, 0.0, 3.1415926]"}
 
@@ -100,6 +105,10 @@ echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
 echo "[INFO] student_actor_inputs=${STUDENT_ACTOR_INPUTS}"
 echo "[INFO] sparse_goal_enabled=${SPARSE_GOAL_ENABLED} ext_prob=${EXTERNAL_GOAL_PROB_START}->${EXTERNAL_GOAL_PROB_END}"
+echo "[INFO] external_goal_range_xy_start=${EXTERNAL_GOAL_POS_LOCAL_MIN_START} -> ${EXTERNAL_GOAL_POS_LOCAL_MAX_START}"
+echo "[INFO] external_goal_range_xy_end=${EXTERNAL_GOAL_POS_LOCAL_MIN} -> ${EXTERNAL_GOAL_POS_LOCAL_MAX}"
+echo "[INFO] external_goal_range_yaw_start=${EXTERNAL_GOAL_RPY_MIN_START} -> ${EXTERNAL_GOAL_RPY_MAX_START}"
+echo "[INFO] external_goal_range_yaw_end=${EXTERNAL_GOAL_RPY_MIN} -> ${EXTERNAL_GOAL_RPY_MAX}"
 echo "[INFO] clip_goal_delta_steps=${CLIP_GOAL_DELTA_MIN_STEPS}-${CLIP_GOAL_DELTA_MAX_STEPS}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
 echo "[INFO] dagger_ignore_external_goal_samples=${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES}"
@@ -133,8 +142,13 @@ exec env \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-prob-end="${EXTERNAL_GOAL_PROB_END}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-prob-ramp-resets="${EXTERNAL_GOAL_PROB_RAMP_RESETS}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.eval-external-goal-prob="${EVAL_EXTERNAL_GOAL_PROB}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-range-ramp-resets="${EXTERNAL_GOAL_RANGE_RAMP_RESETS}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-pos-local-min-start "${EXTERNAL_GOAL_POS_LOCAL_MIN_START}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-pos-local-max-start "${EXTERNAL_GOAL_POS_LOCAL_MAX_START}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-pos-local-min "${EXTERNAL_GOAL_POS_LOCAL_MIN}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-pos-local-max "${EXTERNAL_GOAL_POS_LOCAL_MAX}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-rpy-min-start "${EXTERNAL_GOAL_RPY_MIN_START}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-rpy-max-start "${EXTERNAL_GOAL_RPY_MAX_START}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-rpy-min "${EXTERNAL_GOAL_RPY_MIN}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-rpy-max "${EXTERNAL_GOAL_RPY_MAX}" \
     --simulator.config.sim.max_episode_length_s "${MAX_EPISODE_LENGTH_S}" \
