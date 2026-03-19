@@ -54,6 +54,13 @@ DEBUG_MODE=${DEBUG_MODE:-${DEBUG_MODEL:-off}}
 CURRICULUM=${CURRICULUM:-0}
 PERCEPTION=${PERCEPTION:-none}
 LEGACY_OBS=${LEGACY_OBS:-0}
+GENERALIST_CONTACT_REWARD_ENABLED=${GENERALIST_CONTACT_REWARD_ENABLED:-1}
+GENERALIST_CONTACT_REWARD_MODE=${GENERALIST_CONTACT_REWARD_MODE:-tanh}
+GENERALIST_CONTACT_REWARD_THRESHOLD=${GENERALIST_CONTACT_REWARD_THRESHOLD:-1.0}
+GENERALIST_CONTACT_REWARD_FORCE_SCALE=${GENERALIST_CONTACT_REWARD_FORCE_SCALE:-25.0}
+GENERALIST_TORSO_CONTACT_REWARD_WEIGHT=${GENERALIST_TORSO_CONTACT_REWARD_WEIGHT:-0.30}
+GENERALIST_ARM_CONTACT_REWARD_WEIGHT=${GENERALIST_ARM_CONTACT_REWARD_WEIGHT:-0.20}
+GENERALIST_PALM_CONTACT_REWARD_WEIGHT=${GENERALIST_PALM_CONTACT_REWARD_WEIGHT:-0.10}
 
 SEQUENCE_NAME=${SEQUENCE_NAME:-""}
 if [[ "$#" -gt 0 ]]; then
@@ -251,6 +258,30 @@ if [[ "${legacy_obs_normalized}" == "1" || "${legacy_obs_normalized}" == "true" 
   echo "[INFO] Resolved EXP: ${EXP}"
 fi
 
+contact_reward_enabled_normalized=$(echo "${GENERALIST_CONTACT_REWARD_ENABLED}" | tr '[:upper:]' '[:lower:]')
+case "${contact_reward_enabled_normalized}" in
+  1|true|yes|on)
+    GENERALIST_CONTACT_REWARD_ENABLED_FLAG=1
+    ;;
+  0|false|no|off|"")
+    GENERALIST_CONTACT_REWARD_ENABLED_FLAG=0
+    ;;
+  *)
+    echo "[ERROR] GENERALIST_CONTACT_REWARD_ENABLED must be one of: 0/1/true/false/yes/no/on/off. Got: ${GENERALIST_CONTACT_REWARD_ENABLED}" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "${GENERALIST_CONTACT_REWARD_ENABLED_FLAG}" != "1" ]]; then
+  GENERALIST_TORSO_CONTACT_REWARD_WEIGHT=0.0
+  GENERALIST_ARM_CONTACT_REWARD_WEIGHT=0.0
+  GENERALIST_PALM_CONTACT_REWARD_WEIGHT=0.0
+fi
+
+echo "[INFO] Generalist contact reward enabled: ${GENERALIST_CONTACT_REWARD_ENABLED_FLAG}"
+echo "[INFO] Generalist contact reward mode=${GENERALIST_CONTACT_REWARD_MODE} threshold=${GENERALIST_CONTACT_REWARD_THRESHOLD} force_scale=${GENERALIST_CONTACT_REWARD_FORCE_SCALE}"
+echo "[INFO] Generalist contact reward weights torso=${GENERALIST_TORSO_CONTACT_REWARD_WEIGHT} arms=${GENERALIST_ARM_CONTACT_REWARD_WEIGHT} palms=${GENERALIST_PALM_CONTACT_REWARD_WEIGHT}"
+
 train_cmd=(
   src/holosoma/holosoma/train_agent.py
   "exp:${EXP}"
@@ -260,6 +291,18 @@ train_cmd=(
   --command.setup-terms.motion-command.params.motion-config.motion-file "${MOTION_DIR}"
   --algo.config.save-interval=500
   --simulator.config.sim.physx.gpu-max-rigid-patch-count="${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}"
+  --reward.terms.body_contact_reward_torso.weight="${GENERALIST_TORSO_CONTACT_REWARD_WEIGHT}"
+  --reward.terms.body_contact_reward_arms.weight="${GENERALIST_ARM_CONTACT_REWARD_WEIGHT}"
+  --reward.terms.body_contact_reward_palms.weight="${GENERALIST_PALM_CONTACT_REWARD_WEIGHT}"
+  --reward.terms.body_contact_reward_torso.params.reward_mode="${GENERALIST_CONTACT_REWARD_MODE}"
+  --reward.terms.body_contact_reward_arms.params.reward_mode="${GENERALIST_CONTACT_REWARD_MODE}"
+  --reward.terms.body_contact_reward_palms.params.reward_mode="${GENERALIST_CONTACT_REWARD_MODE}"
+  --reward.terms.body_contact_reward_torso.params.threshold="${GENERALIST_CONTACT_REWARD_THRESHOLD}"
+  --reward.terms.body_contact_reward_arms.params.threshold="${GENERALIST_CONTACT_REWARD_THRESHOLD}"
+  --reward.terms.body_contact_reward_palms.params.threshold="${GENERALIST_CONTACT_REWARD_THRESHOLD}"
+  --reward.terms.body_contact_reward_torso.params.force_scale="${GENERALIST_CONTACT_REWARD_FORCE_SCALE}"
+  --reward.terms.body_contact_reward_arms.params.force_scale="${GENERALIST_CONTACT_REWARD_FORCE_SCALE}"
+  --reward.terms.body_contact_reward_palms.params.force_scale="${GENERALIST_CONTACT_REWARD_FORCE_SCALE}"
 )
 if [[ "${DEBUG_MODE}" == "replay" || "${DEBUG_MODE}" == "toy" ]]; then
   train_cmd=("${PYTHON_BIN}" "${train_cmd[@]}")

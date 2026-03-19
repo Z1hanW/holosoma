@@ -390,9 +390,46 @@ g1_29dof_wbt_reward_w_object_extend = RewardManagerCfg(
     }
 )
 
+g1_29dof_wbt_reward_w_object_generalist = RewardManagerCfg(
+    terms={
+        **g1_29dof_wbt_reward_w_object_extend.terms,
+        "body_contact_reward_palms": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:body_contact_reward",
+            params={
+                "threshold": 1.0,
+                "force_scale": 25.0,
+                "reward_mode": "tanh",
+                "body_names": _PALM_CONTACT_BODY_NAMES,
+            },
+            weight=0.10,
+        ),
+        "body_contact_reward_arms": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:body_contact_reward",
+            params={
+                "threshold": 1.0,
+                "force_scale": 25.0,
+                "reward_mode": "tanh",
+                "body_names": _ARM_SUPPORT_CONTACT_BODY_NAMES,
+            },
+            weight=0.20,
+        ),
+        "body_contact_reward_torso": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:body_contact_reward",
+            params={
+                "threshold": 1.0,
+                "force_scale": 25.0,
+                "reward_mode": "tanh",
+                "body_names": _TORSO_SUPPORT_CONTACT_BODY_NAMES,
+            },
+            weight=0.30,
+        ),
+    }
+)
+
 __all__ = [
     "g1_29dof_wbt_fast_sac_reward",
     "g1_29dof_wbt_reward",
     "g1_29dof_wbt_reward_w_object",
+    "g1_29dof_wbt_reward_w_object_generalist",
     "g1_29dof_wbt_reward_w_object_extend",
 ]

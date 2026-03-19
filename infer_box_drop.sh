@@ -56,6 +56,7 @@ Optional env vars:
   PHYSX_GPU_COLLISION_STACK_SIZE (default: 268435456)
   DEPTH_PERCEPTION_PRESET  (default: checkpoint; options: checkpoint|d435i_17x17)
   EVAL_EXTERNAL_GOAL_PROB  (mixed mode default: 1.0; clip mode leaves checkpoint logic unchanged)
+  HOLOSOMA_DISABLE_BAD_TRACKING_RESET (default: 1 for infer)
   DRY_RUN                  (default: 0; set 1/true to print the command without launching)
 EOF
 }
@@ -91,6 +92,17 @@ esac
 
 DEFAULT_CLIP_RUN_URL="${DEFAULT_CLIP_RUN_URL:-https://wandb.ai/zihanw22/boxer/runs/oitf644a}"
 DEFAULT_MIXED_RUN_URL="${DEFAULT_MIXED_RUN_URL:-https://wandb.ai/zihanw22/boxer/runs/hw5jbitz}"
+DEFAULT_CLIP_CHECKPOINT="${DEFAULT_CLIP_CHECKPOINT:-wandb://zihanw22/boxer/oitf644a/model_01600.pt}"
+DEFAULT_MIXED_CHECKPOINT="${DEFAULT_MIXED_CHECKPOINT:-wandb://zihanw22/boxer/hw5jbitz/model_02800.pt}"
+
+default_model_file_for_run_id() {
+  local run_id="$1"
+  case "${run_id}" in
+    oitf644a) echo "model_01600.pt" ;;
+    hw5jbitz) echo "model_02800.pt" ;;
+    *) echo "" ;;
+  esac
+}
 
 parse_wandb_run_url() {
   local ref="$1"
@@ -184,6 +196,8 @@ normalize_checkpoint_ref() {
   local run_id=""
   local explicit_file=""
   local model_file="${WANDB_MODEL_FILE:-}"
+  local remote_model_file=""
+  local builtin_model_file=""
 
   parsed="$(parse_wandb_run_url "${ref}" || true)"
   if [[ -z "${parsed}" ]]; then
@@ -195,9 +209,16 @@ normalize_checkpoint_ref() {
   if [[ -n "${explicit_file}" ]]; then
     model_file="${explicit_file}"
   elif [[ -z "${model_file}" ]]; then
-    model_file="$(resolve_remote_wandb_checkpoint_name "${entity}" "${project}" "${run_id}")"
-    if [[ -n "${model_file}" ]]; then
+    remote_model_file="$(resolve_remote_wandb_checkpoint_name "${entity}" "${project}" "${run_id}")"
+    if [[ -n "${remote_model_file}" ]]; then
+      model_file="${remote_model_file}"
       echo "[INFO] Resolved wandb run URL to latest remote checkpoint: ${model_file}" >&2
+    else
+      builtin_model_file="$(default_model_file_for_run_id "${run_id}")"
+      if [[ -n "${builtin_model_file}" ]]; then
+        model_file="${builtin_model_file}"
+        echo "[INFO] Falling back to built-in checkpoint file for run ${run_id}: ${model_file}" >&2
+      fi
     fi
   fi
 
@@ -251,9 +272,9 @@ fi
 
 if [[ -z "${CKPT}" ]]; then
   if [[ "${MODE}" == "mixed" ]]; then
-    CKPT="${DEFAULT_MIXED_RUN_URL}"
+    CKPT="${DEFAULT_MIXED_CHECKPOINT}"
   else
-    CKPT="${DEFAULT_CLIP_RUN_URL}"
+    CKPT="${DEFAULT_CLIP_CHECKPOINT}"
   fi
 fi
 
@@ -432,10 +453,13 @@ if [[ -z "${CUDA_VISIBLE_DEVICES+x}" || -z "${CUDA_VISIBLE_DEVICES}" ]]; then
 fi
 
 export VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI:-1}
-export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-0}
+export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-1}
+export VISER_ENABLE_MANUAL_GOAL_GUI=${VISER_ENABLE_MANUAL_GOAL_GUI:-1}
 export VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-1}
+export VISER_SHOW_TARGET_BOX=${VISER_SHOW_TARGET_BOX:-1}
 export VISER_PERCEPTION_IMAGE_MODE=${VISER_PERCEPTION_IMAGE_MODE:-depth}
 export VISER_SHOW_PERCEPTION_FRUSTUM=${VISER_SHOW_PERCEPTION_FRUSTUM:-1}
+export HOLOSOMA_DISABLE_BAD_TRACKING_RESET=${HOLOSOMA_DISABLE_BAD_TRACKING_RESET:-1}
 export LOGURU_LEVEL=${LOGURU_LEVEL:-WARNING}
 export PY_LOG_LEVEL=${PY_LOG_LEVEL:-WARNING}
 
@@ -575,7 +599,7 @@ echo "[INFO] object_urdf=${OBJECT_URDF}"
 echo "[INFO] preserving checkpoint actor/critic observation history"
 echo "[INFO] headless=${HEADLESS_FLAG} (env HEADLESS=${HEADLESS})"
 echo "[INFO] viser=http://localhost:${VISER_PORT}"
-echo "[INFO] clip_gui=${VISER_ENABLE_CLIP_GUI} manual_gui=${VISER_ENABLE_MANUAL_GUI}"
+echo "[INFO] clip_gui=${VISER_ENABLE_CLIP_GUI} manual_gui=${VISER_ENABLE_MANUAL_GUI} manual_goal_gui=${VISER_ENABLE_MANUAL_GOAL_GUI}"
 if [[ -n "${MOTION_CLIP_NAME}" ]]; then
   echo "[INFO] motion_clip_name=${MOTION_CLIP_NAME}"
 fi

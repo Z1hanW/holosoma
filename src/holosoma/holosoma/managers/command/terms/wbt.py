@@ -11,12 +11,14 @@ from typing import Any, List
 import numpy as np
 import smart_open
 import torch
+import torch.nn.functional as F
 from loguru import logger
 
 from holosoma.config_types.command import MotionConfig, NoiseToInitialPoseConfig, SparseObjectGoalConfig
 from holosoma.envs.wbt.wbt_manager import WholeBodyTrackingManager
 from holosoma.managers.command.base import CommandTermBase
 from holosoma.utils.path import resolve_data_file_path
+from holosoma.utils.object_geometry import load_urdf_geometry_extents
 from holosoma.utils.rotations import (
     get_euler_xyz,
     quat_apply,
@@ -33,6 +35,17 @@ from holosoma.utils.simulator_config import SimulatorType
 
 _RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD = 0.10
 _RUNTIME_PICKUP_CONSECUTIVE_STEPS = 5
+
+
+def _rot6d_to_matrix(rot6d: torch.Tensor) -> torch.Tensor:
+    first_col = F.normalize(rot6d[..., 0:3], dim=-1)
+    second_col_raw = rot6d[..., 3:6]
+    second_col = F.normalize(
+        second_col_raw - torch.sum(first_col * second_col_raw, dim=-1, keepdim=True) * first_col,
+        dim=-1,
+    )
+    third_col = torch.cross(first_col, second_col, dim=-1)
+    return torch.stack((first_col, second_col, third_col), dim=-1)
 
 
 #########################################################################################################
@@ -1159,6 +1172,12 @@ class MotionCommand(CommandTermBase):
         self.manual_goal_enabled = False
         self.manual_goal_object_pos_w: torch.Tensor | None = None
         self.manual_goal_object_rot6d_w: torch.Tensor | None = None
+        self.manual_goal_override_enabled = False
+        self.manual_goal_xy_rel: torch.Tensor | None = None
+        self.manual_goal_yaw_rel: torch.Tensor | None = None
+        self.base_goal_object_pos_w: torch.Tensor | None = None
+        self.base_goal_object_rot6d_w: torch.Tensor | None = None
+        self.base_goal_is_external: torch.Tensor | None = None
         self.manual_goal_is_external: torch.Tensor | None = None
         self.clip_goal_object_pos_w: torch.Tensor | None = None
         self.clip_goal_object_rot6d_w: torch.Tensor | None = None
@@ -1202,6 +1221,12 @@ class MotionCommand(CommandTermBase):
         self.manual_goal_object_pos_w = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
         identity_rot6d = torch.tensor([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], device=self.device, dtype=torch.float32)
         self.manual_goal_object_rot6d_w = identity_rot6d.unsqueeze(0).repeat(self.num_envs, 1)
+        self.manual_goal_override_enabled = False
+        self.manual_goal_xy_rel = torch.zeros((self.num_envs, 2), device=self.device, dtype=torch.float32)
+        self.manual_goal_yaw_rel = torch.zeros((self.num_envs, 1), device=self.device, dtype=torch.float32)
+        self.base_goal_object_pos_w = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
+        self.base_goal_object_rot6d_w = identity_rot6d.unsqueeze(0).repeat(self.num_envs, 1)
+        self.base_goal_is_external = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
         self.manual_goal_is_external = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
         self.clip_goal_object_pos_w = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
         self.clip_goal_object_rot6d_w = identity_rot6d.unsqueeze(0).repeat(self.num_envs, 1)
@@ -1730,6 +1755,7 @@ class MotionCommand(CommandTermBase):
                 root_quat_w=target_root_rot,
                 object_pos_w=target_obj_pos,
             )
+            self._update_manual_goal_override(env_ids)
 
         self._update_future_target_poses()
 
@@ -1806,6 +1832,7 @@ class MotionCommand(CommandTermBase):
 
         self._update_future_target_poses()
         self._update_pickup_anchor_state()
+        self._update_manual_goal_override()
 
     def _current_clip_lengths(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         clip_ids = self.clip_ids if env_ids is None else self.clip_ids[env_ids]
@@ -2087,6 +2114,12 @@ class MotionCommand(CommandTermBase):
             self.clip_goal_object_pos_w[env_ids] = clip_goal_pos_w
         if self.clip_goal_object_rot6d_w is not None:
             self.clip_goal_object_rot6d_w[env_ids] = clip_goal_rot6d_w
+        if self.base_goal_object_pos_w is not None:
+            self.base_goal_object_pos_w[env_ids] = goal_pos_w
+        if self.base_goal_object_rot6d_w is not None:
+            self.base_goal_object_rot6d_w[env_ids] = goal_rot6d_w
+        if self.base_goal_is_external is not None:
+            self.base_goal_is_external[env_ids] = external_mask
         self.manual_goal_object_pos_w[env_ids] = goal_pos_w
         self.manual_goal_object_rot6d_w[env_ids] = goal_rot6d_w
         if self.manual_goal_is_external is not None:
@@ -2122,6 +2155,109 @@ class MotionCommand(CommandTermBase):
             torch.abs(self.manual_goal_object_rot6d_w - self.clip_goal_object_rot6d_w) > 1.0e-6, dim=-1
         )
         return external_mask | pos_diff | rot_diff
+
+    def _manual_goal_anchor_pose_w(
+        self,
+        env_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if (
+            self.pickup_anchor_set is None
+            or self.pickup_anchor_root_pos_w is None
+            or self.pickup_anchor_root_quat_w is None
+        ):
+            return self.robot_root_pos_w[env_ids], self.robot_root_quat_w[env_ids]
+
+        anchor_pos_w = self.pickup_anchor_root_pos_w[env_ids].clone()
+        anchor_quat_w = self.pickup_anchor_root_quat_w[env_ids].clone()
+        missing_anchor = ~self.pickup_anchor_set[env_ids]
+        if missing_anchor.any():
+            anchor_pos_w[missing_anchor] = self.robot_root_pos_w[env_ids][missing_anchor]
+            anchor_quat_w[missing_anchor] = self.robot_root_quat_w[env_ids][missing_anchor]
+        return anchor_pos_w, anchor_quat_w
+
+    def _ground_resting_object_center_z(self, env_ids: torch.Tensor) -> torch.Tensor:
+        env_offsets = self._get_env_offsets(env_ids)
+        object_size = self._resolved_object_size_for_env_ids(env_ids)
+        if object_size.ndim == 1:
+            object_size = object_size.unsqueeze(0)
+        return env_offsets[:, 2] + 0.5 * object_size[:, 2]
+
+    def _default_object_urdf_path(self) -> str:
+        obj_cfg = getattr(self._env.robot_config, "object", None)
+        if obj_cfg is None:
+            return ""
+        urdf_path = str(getattr(obj_cfg, "object_urdf_path", "") or "").strip()
+        if not urdf_path.lower().endswith(".urdf"):
+            return ""
+        return urdf_path
+
+    def _resolved_object_size_for_env_ids(self, env_ids: torch.Tensor) -> torch.Tensor:
+        object_size = self.object_size[env_ids].clone()
+        if object_size.numel() == 0:
+            return object_size
+
+        clip_object_urdfs = list(getattr(self.motion, "clip_object_urdf_paths", []))
+        default_urdf = self._default_object_urdf_path()
+        if not clip_object_urdfs and not default_urdf:
+            return object_size
+
+        env_ids_cpu = env_ids.detach().cpu().tolist()
+        for local_idx, env_id in enumerate(env_ids_cpu):
+            try:
+                clip_idx = int(self.clip_ids[int(env_id)].item())
+            except Exception:
+                clip_idx = -1
+            object_urdf = ""
+            if 0 <= clip_idx < len(clip_object_urdfs):
+                object_urdf = str(clip_object_urdfs[clip_idx]).strip()
+            if not object_urdf:
+                object_urdf = default_urdf
+            if not object_urdf:
+                continue
+            extents = load_urdf_geometry_extents(object_urdf)
+            if extents is None:
+                continue
+            object_size[local_idx] = torch.tensor(extents, device=self.device, dtype=object_size.dtype)
+        return object_size
+
+    def _update_manual_goal_override(self, env_ids: torch.Tensor | None = None) -> None:
+        if not self.manual_goal_override_enabled:
+            return
+        if (
+            self.manual_goal_object_pos_w is None
+            or self.manual_goal_object_rot6d_w is None
+            or self.manual_goal_xy_rel is None
+            or self.manual_goal_yaw_rel is None
+        ):
+            return
+
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+        if env_ids.numel() == 0:
+            return
+
+        anchor_pos_w, anchor_quat_w = self._manual_goal_anchor_pose_w(env_ids)
+        anchor_heading_quat = yaw_quat(anchor_quat_w, w_last=True)
+        rel_goal_xy = self.manual_goal_xy_rel[env_ids]
+        rel_goal_yaw = self.manual_goal_yaw_rel[env_ids, 0]
+
+        rel_goal_pos = torch.zeros((env_ids.numel(), 3), device=self.device, dtype=torch.float32)
+        rel_goal_pos[:, :2] = rel_goal_xy
+        goal_pos_w = anchor_pos_w + quat_apply(anchor_heading_quat, rel_goal_pos, w_last=True)
+        goal_pos_w[:, 2] = self._ground_resting_object_center_z(env_ids)
+
+        _, _, anchor_heading = get_euler_xyz(anchor_heading_quat, w_last=True)
+        goal_heading = anchor_heading + rel_goal_yaw
+        zeros = torch.zeros_like(goal_heading)
+        goal_quat_w = quat_from_euler_xyz(zeros, zeros, goal_heading)
+        goal_rot_mat_w = quaternion_to_matrix(goal_quat_w, w_last=True)
+        goal_rot6d_w = goal_rot_mat_w[..., :2].reshape(goal_rot_mat_w.shape[0], 6)
+
+        self.manual_goal_enabled = True
+        self.manual_goal_object_pos_w[env_ids] = goal_pos_w
+        self.manual_goal_object_rot6d_w[env_ids] = goal_rot6d_w
+        if self.manual_goal_is_external is not None:
+            self.manual_goal_is_external[env_ids] = True
 
     def _get_env_offsets(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         base = self._env.simulator.scene.env_origins
@@ -2419,6 +2555,12 @@ class MotionCommand(CommandTermBase):
             self.clip_goal_object_pos_w.zero_()
         if self.clip_goal_object_rot6d_w is not None:
             self.clip_goal_object_rot6d_w.zero_()
+        if self.base_goal_object_pos_w is not None:
+            self.base_goal_object_pos_w.zero_()
+        if self.base_goal_object_rot6d_w is not None:
+            self.base_goal_object_rot6d_w.zero_()
+        if self.base_goal_is_external is not None:
+            self.base_goal_is_external.zero_()
         if self.pickup_anchor_set is not None:
             self.pickup_anchor_set.zero_()
         if self.pickup_anchor_root_pos_w is not None:

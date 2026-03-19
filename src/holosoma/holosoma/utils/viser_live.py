@@ -13,6 +13,7 @@ import numpy as np
 from loguru import logger
 
 from holosoma.utils.module_utils import get_holosoma_root
+from holosoma.utils.object_geometry import load_urdf_geometry_extents
 from holosoma.utils.path import resolve_data_file_path
 from holosoma.utils.rotations import (
     matrix_to_quaternion,
@@ -31,6 +32,7 @@ SIM_OBJECT_POINTS_COLOR = np.array([130, 180, 235], dtype=np.uint8)
 HEIGHTMAP_MARKER_COLOR = (255, 165, 0)
 CAMERA_MARKER_COLOR = (0, 255, 255)
 COMMAND_ARROW_COLOR = np.array([255, 165, 0], dtype=np.uint8)
+TARGET_BOX_COLOR = (255, 140, 0)
 SENSOR_MARKER_RADIUS = 0.03
 _VIRIDIS_LUT = np.array(
     [
@@ -338,6 +340,19 @@ def _make_marker_mesh(color: tuple[int, int, int], radius: float):
     return mesh
 
 
+def _make_box_mesh(color: tuple[int, int, int], extents: np.ndarray, alpha: int = 120):
+    try:
+        import trimesh  # type: ignore[import-not-found]
+    except Exception:
+        return None
+    extents = np.asarray(extents, dtype=np.float32).reshape(3)
+    extents = np.maximum(extents, 1.0e-3)
+    mesh = trimesh.creation.box(extents=extents)
+    rgba = np.array([color[0], color[1], color[2], alpha], dtype=np.uint8)
+    mesh.visual.face_colors = np.tile(rgba, (len(mesh.faces), 1))
+    return mesh
+
+
 def _import_viser() -> tuple[Any | None, Any | None, str | None]:
     ensure_viser_on_path()
     try:
@@ -568,6 +583,11 @@ class ViserLiveViewer:
             "false",
             "no",
         )
+        self._show_target_box = os.environ.get("VISER_SHOW_TARGET_BOX", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
         self._start_paused = os.environ.get("VISER_START_PAUSED", "0").lower() in (
             "1",
             "true",
@@ -734,6 +754,12 @@ class ViserLiveViewer:
         self._manual_root_pos_x_slider = None
         self._manual_root_pos_y_slider = None
         self._manual_root_yaw_slider = None
+        self._manual_goal_override_cb = None
+        self._manual_goal_zero_button = None
+        self._manual_goal_pos_x_slider = None
+        self._manual_goal_pos_y_slider = None
+        self._manual_goal_yaw_slider = None
+        self._manual_goal_status = None
         self._object_reset_override_cb = None
         self._object_reset_zero_button = None
         self._object_reset_pos_x_slider = None
@@ -780,6 +806,8 @@ class ViserLiveViewer:
         self._perception_last_mode: str | None = None
         self._perception_last_fov: float | None = None
         self._perception_last_aspect: float | None = None
+        self._target_box_handle = None
+        self._target_box_last_dimensions: tuple[float, float, float] | None = None
         self._scene_prefix = ""
         self._global_root = None
         self._global_frame_wxyz: tuple[float, float, float, float] | None = None
@@ -1182,6 +1210,7 @@ class ViserLiveViewer:
         if not self._enabled:
             return
         self._update_manual_root_command()
+        self._update_manual_goal_override()
         self._update_manual_object_reset_override()
         if self._reset_requested:
             self._reset_requested = False
@@ -1424,6 +1453,190 @@ class ViserLiveViewer:
         if isinstance(manual_yaw, torch.Tensor) and manual_yaw.ndim >= 2 and self._env_id < int(manual_yaw.shape[0]):
             cmd_yaw = float(manual_yaw[self._env_id, 0].item())
         return cmd_x, cmd_y, cmd_yaw
+
+    def _clear_manual_goal_override(self) -> None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is not None:
+            setattr(motion_cmd, "manual_goal_override_enabled", False)
+            manual_goal_xy = getattr(motion_cmd, "manual_goal_xy_rel", None)
+            if isinstance(manual_goal_xy, torch.Tensor) and manual_goal_xy.numel() > 0:
+                manual_goal_xy.zero_()
+            manual_goal_yaw = getattr(motion_cmd, "manual_goal_yaw_rel", None)
+            if isinstance(manual_goal_yaw, torch.Tensor) and manual_goal_yaw.numel() > 0:
+                manual_goal_yaw.zero_()
+            if bool(getattr(motion_cmd, "_sparse_goal_curriculum_enabled", False)):
+                base_goal_pos = getattr(motion_cmd, "base_goal_object_pos_w", None)
+                base_goal_rot6d = getattr(motion_cmd, "base_goal_object_rot6d_w", None)
+                base_goal_is_external = getattr(motion_cmd, "base_goal_is_external", None)
+                if isinstance(base_goal_pos, torch.Tensor) and isinstance(getattr(motion_cmd, "manual_goal_object_pos_w", None), torch.Tensor):
+                    motion_cmd.manual_goal_object_pos_w.copy_(base_goal_pos)
+                if isinstance(base_goal_rot6d, torch.Tensor) and isinstance(getattr(motion_cmd, "manual_goal_object_rot6d_w", None), torch.Tensor):
+                    motion_cmd.manual_goal_object_rot6d_w.copy_(base_goal_rot6d)
+                if isinstance(base_goal_is_external, torch.Tensor) and isinstance(getattr(motion_cmd, "manual_goal_is_external", None), torch.Tensor):
+                    motion_cmd.manual_goal_is_external.copy_(base_goal_is_external)
+                setattr(motion_cmd, "manual_goal_enabled", True)
+            else:
+                setattr(motion_cmd, "manual_goal_enabled", False)
+        self._update_manual_goal_status()
+
+    def _sync_manual_goal_target_from_reference(self) -> None:
+        if (
+            self._manual_goal_pos_x_slider is None
+            or self._manual_goal_pos_y_slider is None
+            or self._manual_goal_yaw_slider is None
+        ):
+            return
+
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            return
+
+        try:
+            if bool(getattr(motion_cmd, "manual_goal_override_enabled", False)):
+                goal_xy = getattr(motion_cmd, "manual_goal_xy_rel", None)
+                goal_yaw = getattr(motion_cmd, "manual_goal_yaw_rel", None)
+                if isinstance(goal_xy, torch.Tensor) and goal_xy.ndim >= 2:
+                    self._manual_goal_pos_x_slider.value = float(goal_xy[self._env_id, 0].item())
+                    self._manual_goal_pos_y_slider.value = float(goal_xy[self._env_id, 1].item())
+                if isinstance(goal_yaw, torch.Tensor) and goal_yaw.ndim >= 2:
+                    self._manual_goal_yaw_slider.value = self._wrap_to_pi(float(goal_yaw[self._env_id, 0].item()))
+                return
+        except Exception:
+            pass
+
+        goal_xy_yaw = self._current_effective_goal_xy_yaw()
+        if goal_xy_yaw is None:
+            return
+        try:
+            self._manual_goal_pos_x_slider.value = float(goal_xy_yaw[0])
+            self._manual_goal_pos_y_slider.value = float(goal_xy_yaw[1])
+            self._manual_goal_yaw_slider.value = self._wrap_to_pi(float(goal_xy_yaw[2]))
+        except Exception:
+            pass
+
+    def _current_effective_goal_xy_yaw(self) -> np.ndarray | None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            return None
+
+        try:
+            if bool(getattr(motion_cmd, "manual_goal_override_enabled", False)):
+                goal_xy = getattr(motion_cmd, "manual_goal_xy_rel", None)
+                goal_yaw = getattr(motion_cmd, "manual_goal_yaw_rel", None)
+                if isinstance(goal_xy, torch.Tensor) and goal_xy.ndim >= 2:
+                    yaw_val = 0.0
+                    if isinstance(goal_yaw, torch.Tensor) and goal_yaw.ndim >= 2:
+                        yaw_val = float(goal_yaw[self._env_id, 0].item())
+                    return np.array(
+                        [
+                            float(goal_xy[self._env_id, 0].item()),
+                            float(goal_xy[self._env_id, 1].item()),
+                            yaw_val,
+                        ],
+                        dtype=np.float32,
+                    )
+        except Exception:
+            pass
+
+        obs_mgr = getattr(self._env, "observation_manager", None)
+        if obs_mgr is None:
+            return None
+
+        if hasattr(obs_mgr, "compute_group"):
+            sparse_goal_enabled = bool(getattr(motion_cmd, "_sparse_goal_curriculum_enabled", False))
+            group_names = ("actor_obs_drop_mixed", "actor_obs_drop") if sparse_goal_enabled else ("actor_obs_drop",)
+            for group_name in group_names:
+                try:
+                    obs = obs_mgr.compute_group(group_name)
+                except Exception:
+                    continue
+                if isinstance(obs, torch.Tensor) and obs.ndim >= 2 and int(obs.shape[1]) >= 3:
+                    return obs[self._env_id, :3].detach().float().cpu().numpy()
+        return None
+
+    def _update_manual_goal_status(self) -> None:
+        if self._manual_goal_status is None:
+            return
+
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            self._manual_goal_status.content = "Mode: `idle`\n\nTarget cmd(box): n/a"
+            return
+
+        enabled = bool(getattr(motion_cmd, "manual_goal_override_enabled", False))
+        goal_xy_yaw = self._current_effective_goal_xy_yaw()
+        goal_pose = self._get_effective_target_box_pose()
+        picked = False
+        if hasattr(motion_cmd, "pickup_anchor_set"):
+            try:
+                picked = bool(motion_cmd.pickup_anchor_set[self._env_id].item())
+            except Exception:
+                picked = False
+
+        if goal_xy_yaw is None:
+            self._manual_goal_status.content = "Mode: `idle`\n\nTarget cmd(box): unavailable"
+            return
+
+        mode = "manual(goal)" if enabled else "reference(goal)"
+        content = (
+            f"Mode: `{mode}`\n\n"
+            "Frame: `pickup-time root-heading [dx, dy, dyaw]`\n\n"
+            f"Picked anchor latched: `{picked}`\n\n"
+            f"Target cmd(box): `dx={float(goal_xy_yaw[0]):+.2f}` `dy={float(goal_xy_yaw[1]):+.2f}` `dyaw={float(goal_xy_yaw[2]):+.2f}`"
+        )
+        if goal_pose is not None:
+            goal_pos_w, goal_quat_wxyz, _goal_size = goal_pose
+            goal_yaw_w = self._yaw_from_quat_wxyz(goal_quat_wxyz)
+            content += (
+                "\n\n"
+                f"Goal world: `({float(goal_pos_w[0]):+.2f}, {float(goal_pos_w[1]):+.2f}, {float(goal_pos_w[2]):+.2f})` "
+                f"yaw=`{goal_yaw_w:+.2f}`"
+            )
+        self._manual_goal_status.content = content
+
+    def _update_manual_goal_override(self) -> None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            self._update_manual_goal_status()
+            return
+
+        enabled = bool(self._manual_goal_override_cb.value) if self._manual_goal_override_cb is not None else False
+        setattr(motion_cmd, "manual_goal_override_enabled", enabled)
+        manual_goal_xy = getattr(motion_cmd, "manual_goal_xy_rel", None)
+        manual_goal_yaw = getattr(motion_cmd, "manual_goal_yaw_rel", None)
+        if not isinstance(manual_goal_xy, torch.Tensor) or not isinstance(manual_goal_yaw, torch.Tensor):
+            self._update_manual_goal_status()
+            return
+
+        if not enabled:
+            self._clear_manual_goal_override()
+            return
+
+        device = self._env.device
+        cmd_xy = torch.tensor(
+            [[
+                float(self._manual_goal_pos_x_slider.value) if self._manual_goal_pos_x_slider is not None else 0.0,
+                float(self._manual_goal_pos_y_slider.value) if self._manual_goal_pos_y_slider is not None else 0.0,
+            ]],
+            device=device,
+            dtype=torch.float32,
+        ).repeat(self._env.num_envs, 1)
+        cmd_yaw = torch.tensor(
+            [[
+                self._wrap_to_pi(float(self._manual_goal_yaw_slider.value)) if self._manual_goal_yaw_slider is not None else 0.0
+            ]],
+            device=device,
+            dtype=torch.float32,
+        ).repeat(self._env.num_envs, 1)
+        motion_cmd.manual_goal_xy_rel = cmd_xy
+        motion_cmd.manual_goal_yaw_rel = cmd_yaw
+        update_goal_fn = getattr(motion_cmd, "_update_manual_goal_override", None)
+        if callable(update_goal_fn):
+            try:
+                update_goal_fn()
+            except Exception:
+                pass
+        self._update_manual_goal_status()
 
     def _zero_object_reset_overrides(self) -> None:
         controls = (
@@ -1885,11 +2098,13 @@ class ViserLiveViewer:
             if self._scandots_enabled:
                 self._update_scandots(offset)
             self._update_target_keypoints(offset)
+            self._update_target_box(offset)
             self._update_manual_command_arrow(root_pos, root_quat_wxyz, offset)
             self._update_manual_root_status(
                 current_root_pos=root_pos,
                 current_root_quat_wxyz=root_quat_wxyz,
             )
+            self._update_manual_goal_status()
             if self._perception_enabled:
                 self._update_perception_visuals(offset)
             if not self._disable_contact_force_viz:
@@ -2380,6 +2595,11 @@ class ViserLiveViewer:
             "false",
             "no",
         )
+        manual_goal_gui_enabled = os.environ.get("VISER_ENABLE_MANUAL_GOAL_GUI", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
         if manual_gui_enabled:
             with self._server.gui.add_folder("Manual Control", expand_by_default=False):
                 self._manual_control_cb = self._server.gui.add_checkbox(
@@ -2435,6 +2655,67 @@ class ViserLiveViewer:
                     def _(_evt) -> None:
                         self.apply_pending_controls()
                 self._sync_manual_root_target_from_robot()
+
+                if manual_goal_gui_enabled:
+                    with self._server.gui.add_folder("Manual Goal"):
+                        self._manual_goal_override_cb = self._server.gui.add_checkbox(
+                            "Enable Manual Goal Override",
+                            initial_value=False,
+                            hint=(
+                                "Override the drop target with a user command in the same "
+                                "pickup-time root-heading [dx, dy, dyaw] frame used by box-drop distillation."
+                            ),
+                        )
+                        self._manual_goal_zero_button = self._server.gui.add_button(
+                            "Zero / Sync From Goal",
+                            hint="Load the current target command into the sliders, or zero if unavailable.",
+                        )
+                        self._manual_goal_pos_x_slider = self._server.gui.add_slider(
+                            "Target Box dX (forward, m)",
+                            min=-2.5,
+                            max=2.5,
+                            step=0.02,
+                            initial_value=0.0,
+                        )
+                        self._manual_goal_pos_y_slider = self._server.gui.add_slider(
+                            "Target Box dY (left, m)",
+                            min=-2.5,
+                            max=2.5,
+                            step=0.02,
+                            initial_value=0.0,
+                        )
+                        self._manual_goal_yaw_slider = self._server.gui.add_slider(
+                            "Target Box dYaw (rad)",
+                            min=-np.pi,
+                            max=np.pi,
+                            step=0.02,
+                            initial_value=0.0,
+                        )
+                        self._manual_goal_status = self._server.gui.add_markdown("Mode: `idle`\n\nTarget cmd(box): n/a")
+
+                    @self._manual_goal_zero_button.on_click
+                    def _(_evt) -> None:
+                        self._sync_manual_goal_target_from_reference()
+                        self.apply_pending_controls()
+
+                    @self._manual_goal_override_cb.on_update
+                    def _(_evt) -> None:
+                        if self._manual_goal_override_cb is not None and bool(self._manual_goal_override_cb.value):
+                            self._sync_manual_goal_target_from_reference()
+                        self.apply_pending_controls()
+
+                    for control in (
+                        self._manual_goal_pos_x_slider,
+                        self._manual_goal_pos_y_slider,
+                        self._manual_goal_yaw_slider,
+                    ):
+
+                        @control.on_update
+                        def _(_evt) -> None:
+                            self.apply_pending_controls()
+
+                    self._sync_manual_goal_target_from_reference()
+                    self._update_manual_goal_status()
 
         sim_cfg = getattr(self._env.simulator, "simulator_config", None)
         if (not self._disable_contact_force_viz) and sim_cfg is not None and hasattr(sim_cfg, "contact_force_viz"):
@@ -4089,6 +4370,174 @@ class ViserLiveViewer:
                     self._target_keypoints_handle.colors = colors.astype(np.uint8, copy=False)
                 except Exception:
                     pass
+
+    @staticmethod
+    def _rot6d_to_quat_wxyz(rot6d: torch.Tensor) -> np.ndarray:
+        rot6d = rot6d.reshape(-1, 6)
+        first_col = torch.nn.functional.normalize(rot6d[:, 0:3], dim=-1)
+        second_col_raw = rot6d[:, 3:6]
+        second_col = torch.nn.functional.normalize(
+            second_col_raw - torch.sum(first_col * second_col_raw, dim=-1, keepdim=True) * first_col,
+            dim=-1,
+        )
+        third_col = torch.cross(first_col, second_col, dim=-1)
+        rot_mat = torch.stack((first_col, second_col, third_col), dim=-1)
+        quat_wxyz = matrix_to_quaternion(rot_mat)
+        return quat_wxyz[0].detach().cpu().numpy()
+
+    @staticmethod
+    def _quat_wxyz_from_yaw(yaw: float) -> np.ndarray:
+        half = 0.5 * float(yaw)
+        return np.asarray([np.cos(half), 0.0, 0.0, np.sin(half)], dtype=np.float32)
+
+    def _resolve_target_box_dimensions(self) -> np.ndarray | None:
+        object_urdf = self._resolve_object_urdf_for_env(self._env_id)
+        if object_urdf:
+            extents = load_urdf_geometry_extents(object_urdf)
+            if extents is not None:
+                return np.asarray(extents, dtype=np.float32)
+
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            return None
+        try:
+            return motion_cmd.object_size[self._env_id].detach().float().cpu().numpy().astype(np.float32)
+        except Exception:
+            return None
+
+    def _target_box_resting_center_z(self, box_size: np.ndarray) -> float:
+        try:
+            env_origin_z = float(self._env.simulator.scene.env_origins[self._env_id, 2].item())
+        except Exception:
+            env_origin_z = 0.0
+        return env_origin_z + 0.5 * float(box_size[2])
+
+    def _target_box_pose_from_command(self, goal_xy_yaw: np.ndarray, box_size: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            return None
+
+        try:
+            env_ids = torch.tensor([self._env_id], device=motion_cmd.device, dtype=torch.long)
+            anchor_fn = getattr(motion_cmd, "_manual_goal_anchor_pose_w", None)
+            if callable(anchor_fn):
+                anchor_pos_t, anchor_quat_t = anchor_fn(env_ids)
+            else:
+                anchor_pos_t = motion_cmd.robot_root_pos_w[env_ids]
+                anchor_quat_t = motion_cmd.robot_root_quat_w[env_ids]
+            anchor_pos_w = anchor_pos_t[0].detach().float().cpu().numpy()
+            anchor_quat_xyzw = anchor_quat_t[0].detach().float().cpu().numpy()
+        except Exception:
+            return None
+
+        anchor_quat_wxyz = anchor_quat_xyzw[[3, 0, 1, 2]]
+        anchor_yaw = self._yaw_from_quat_wxyz(anchor_quat_wxyz)
+        dx, dy, dyaw = [float(v) for v in np.asarray(goal_xy_yaw, dtype=np.float32).reshape(3)]
+        cos_yaw = float(np.cos(anchor_yaw))
+        sin_yaw = float(np.sin(anchor_yaw))
+        world_xy = np.asarray(
+            [
+                anchor_pos_w[0] + cos_yaw * dx - sin_yaw * dy,
+                anchor_pos_w[1] + sin_yaw * dx + cos_yaw * dy,
+            ],
+            dtype=np.float32,
+        )
+        goal_pos_w = np.asarray(
+            [world_xy[0], world_xy[1], self._target_box_resting_center_z(box_size)],
+            dtype=np.float32,
+        )
+        goal_quat_wxyz = self._quat_wxyz_from_yaw(anchor_yaw + dyaw)
+        return goal_pos_w, goal_quat_wxyz
+
+    def _get_effective_target_box_pose(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None or not hasattr(motion_cmd, "motion") or not bool(getattr(motion_cmd.motion, "has_object", False)):
+            return None
+
+        object_size = self._resolve_target_box_dimensions()
+        if object_size is None:
+            return None
+
+        manual_goal_pos_w = getattr(motion_cmd, "manual_goal_object_pos_w", None)
+        manual_goal_rot6d_w = getattr(motion_cmd, "manual_goal_object_rot6d_w", None)
+        manual_override_enabled = bool(getattr(motion_cmd, "manual_goal_override_enabled", False))
+        sparse_goal_enabled = bool(getattr(motion_cmd, "_sparse_goal_curriculum_enabled", False))
+
+        if (
+            (manual_override_enabled or (sparse_goal_enabled and bool(getattr(motion_cmd, "manual_goal_enabled", False))))
+            and isinstance(manual_goal_pos_w, torch.Tensor)
+            and isinstance(manual_goal_rot6d_w, torch.Tensor)
+            and manual_goal_pos_w.ndim >= 2
+            and manual_goal_rot6d_w.ndim >= 2
+        ):
+            try:
+                goal_pos_w = manual_goal_pos_w[self._env_id].detach().float().cpu().numpy()
+                goal_quat_wxyz = self._rot6d_to_quat_wxyz(manual_goal_rot6d_w[self._env_id : self._env_id + 1])
+                goal_pos_w[2] = self._target_box_resting_center_z(np.asarray(object_size, dtype=np.float32))
+                goal_yaw = self._yaw_from_quat_wxyz(goal_quat_wxyz)
+                return goal_pos_w, self._quat_wxyz_from_yaw(goal_yaw), np.asarray(object_size, dtype=np.float32)
+            except Exception:
+                pass
+
+        goal_xy_yaw = self._current_effective_goal_xy_yaw()
+        if goal_xy_yaw is None:
+            return None
+        goal_pose = self._target_box_pose_from_command(goal_xy_yaw, np.asarray(object_size, dtype=np.float32))
+        if goal_pose is None:
+            return None
+        goal_pos_w, goal_quat_wxyz = goal_pose
+        return goal_pos_w, goal_quat_wxyz, np.asarray(object_size, dtype=np.float32)
+
+    def _update_target_box(self, offset: np.ndarray) -> None:
+        if not self._server:
+            return
+        if not self._show_target_box:
+            if self._target_box_handle is not None:
+                try:
+                    self._target_box_handle.visible = False
+                except Exception:
+                    pass
+            return
+
+        target_pose = self._get_effective_target_box_pose()
+        if target_pose is None:
+            if self._target_box_handle is not None:
+                try:
+                    self._target_box_handle.visible = False
+                except Exception:
+                    pass
+            return
+
+        goal_pos_w, goal_quat_wxyz, goal_size = target_pose
+        dimensions = tuple(float(max(1.0e-3, v)) for v in np.asarray(goal_size, dtype=np.float32).reshape(3))
+        if self._target_box_handle is None:
+            self._target_box_handle = self._server.scene.add_box(
+                self._scene_path("/target_box"),
+                color=TARGET_BOX_COLOR,
+                dimensions=dimensions,
+                wireframe=False,
+                opacity=0.25,
+                flat_shading=True,
+                cast_shadow=False,
+                receive_shadow=False,
+                wxyz=goal_quat_wxyz,
+                position=goal_pos_w - offset,
+                visible=True,
+            )
+            self._target_box_last_dimensions = dimensions
+        else:
+            if self._target_box_last_dimensions != dimensions:
+                try:
+                    self._target_box_handle.dimensions = dimensions
+                except Exception:
+                    pass
+                self._target_box_last_dimensions = dimensions
+            try:
+                self._target_box_handle.visible = True
+            except Exception:
+                pass
+            self._target_box_handle.position = goal_pos_w - offset
+            self._target_box_handle.wxyz = goal_quat_wxyz
 
     def _ensure_marker_handle(
         self,

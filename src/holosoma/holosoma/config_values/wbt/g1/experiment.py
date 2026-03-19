@@ -368,6 +368,7 @@ g1_29dof_wbt_w_object_generalist = replace(
         g1_29dof_wbt_w_object.training,
         name="g1_29dof_wbt_w_object_generalist",
     ),
+    reward=reward.g1_29dof_wbt_reward_w_object_generalist,
     command=command.g1_29dof_wbt_command_w_object_generalist,
 )
 

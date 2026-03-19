@@ -223,6 +223,9 @@ class BadTracking(TerminationTermBase):
             f"termination.params['body_names_to_track']: {self.body_names_to_track}"
         )
 
+        if os.environ.get("HOLOSOMA_DISABLE_BAD_TRACKING_RESET", "0").lower() in ("1", "true", "yes", "on"):
+            return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
         # During evaluation, disable BadTracking-based termination entirely.
         if self.env.is_evaluating:
             return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)

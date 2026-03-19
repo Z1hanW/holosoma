@@ -234,6 +234,19 @@ def _manual_goal_xy_yaw_pick_root_heading(motion_command: MotionCommand) -> torc
     return goal_xy_yaw
 
 
+def _manual_goal_override_xy_yaw(motion_command: MotionCommand) -> torch.Tensor:
+    goal_xy_yaw = torch.zeros((motion_command.num_envs, 3), device=motion_command.device, dtype=torch.float32)
+    if (
+        not getattr(motion_command, "manual_goal_override_enabled", False)
+        or motion_command.manual_goal_xy_rel is None
+        or motion_command.manual_goal_yaw_rel is None
+    ):
+        return goal_xy_yaw
+    goal_xy_yaw[:, :2] = motion_command.manual_goal_xy_rel
+    goal_xy_yaw[:, 2] = motion_command.manual_goal_yaw_rel.squeeze(-1)
+    return goal_xy_yaw
+
+
 def _first_sustained_true_index(mask: torch.Tensor, consecutive_steps: int) -> int | None:
     """Return the earliest index where `mask` stays true for `consecutive_steps` frames."""
     if mask.numel() == 0:
@@ -626,6 +639,8 @@ def obj_goal_xy_yaw_pick_root_heading(
     motion_command = _get_motion_command_and_assert_type(env)
     if not motion_command.motion.has_object:
         return torch.zeros(env.num_envs, 3, device=env.device, dtype=torch.float32)
+    if getattr(motion_command, "manual_goal_override_enabled", False):
+        return _manual_goal_override_xy_yaw(motion_command)
 
     goal_xy_yaw_by_clip, _ = _clip_pickup_goal_xy_yaw_root_heading(
         motion_command,
@@ -639,6 +654,8 @@ def obj_goal_xy_yaw_pick_root_heading(
 def obj_sparse_goal_xy_yaw_pick_root_heading(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Sparse/manual object goal [dx, dy, dyaw] in the runtime pickup-time root-heading frame."""
     motion_command = _get_motion_command_and_assert_type(env)
+    if getattr(motion_command, "manual_goal_override_enabled", False):
+        return _manual_goal_override_xy_yaw(motion_command)
     return _manual_goal_xy_yaw_pick_root_heading(motion_command)
 
 
