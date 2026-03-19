@@ -70,7 +70,7 @@ class ZEDCamera:
         self.init_params.coordinate_units = sl.UNIT.METER
         self.init_params.set_from_serial_number(self.config.serial_number)
         self.init_params.camera_resolution = self._get_zed_resolution_enum(self.config.img_shape)
-        self.init_params.sdk_verbose = True
+        self.init_params.sdk_verbose = 1
         self.init_params.depth_mode = self._get_depth_mode_enum()
 
         print(f"[ZED Camera] Init parameters: {self.init_params.depth_mode}")
@@ -133,7 +133,7 @@ class ZEDCamera:
         depth_mode_map = {
             "NONE": sl.DEPTH_MODE.NONE,
             "NEURAL": sl.DEPTH_MODE.NEURAL,
-            "NEURAL_LIGHT": sl.DEPTH_MODE.NEURAL_LIGHT,
+            # "NEURAL_LIGHT": sl.DEPTH_MODE.NEURAL_LIGHT,  # Not available in SDK 4.2
             "PERFORMANCE": sl.DEPTH_MODE.PERFORMANCE,
             "QUALITY": sl.DEPTH_MODE.QUALITY,
             "ULTRA": sl.DEPTH_MODE.ULTRA,
@@ -173,9 +173,9 @@ class ZEDCamera:
     def _get_rgb_data(self):
         """Get RGB data from ZED camera."""
         sl = self.sl
-        self.zed.retrieve_image(self.rgb_mat_side_by_side, sl.VIEW.SIDE_BY_SIDE_BGR)
+        self.zed.retrieve_image(self.rgb_mat_side_by_side, sl.VIEW.SIDE_BY_SIDE)
         image_data = self.rgb_mat_side_by_side.get_data()
-        return image_data
+        return image_data[:, :, :3]
 
     def capture(self):
         """Capture rgb and depth data from ZED camera."""
@@ -205,7 +205,7 @@ DUAL_ZED_CAMERA_CONFIGS: dict[str, ZEDCameraConfig] = {
 
 # Single front ZED 2i for depth distillation (G1FlatZed2iConfig)
 SINGLE_FRONT_ZED_CAMERA_CONFIGS: dict[str, ZEDCameraConfig] = {
-    "front": ZEDCameraConfig(serial_number=36920975),
+    "front": ZEDCameraConfig(serial_number=35996713),
 }
 
 DEFAULT_ZED_CAMERA_CONFIGS: dict[str, ZEDCameraConfig] = SINGLE_FRONT_ZED_CAMERA_CONFIGS
