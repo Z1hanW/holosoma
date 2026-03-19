@@ -32,6 +32,8 @@ _SUPPORTED_OBJECT_SCENE_SPECS: dict[str, dict[str, tuple[str, str]]] = {
     }
 }
 
+HOLOSOMA_PERCEPTION_CAMERA_NAME = "holosoma_perception_camera"
+
 
 class MujocoSceneManager:
     """Compositional world builder using MjSpec for MuJoCo simulations.
@@ -56,6 +58,7 @@ class MujocoSceneManager:
         self.world_spec = mujoco.MjSpec()
         self.world_spec.copy_during_attach = True
         self._setup_world_options(simulator_config)
+        self._add_perception_camera_placeholder()
         self.robot_config: RobotConfig | None = None  # Set when adding robot
         self._object_urdf_by_name: dict[str, str] = {}
         self._object_body_name_by_name: dict[str, str] = {}
@@ -71,6 +74,15 @@ class MujocoSceneManager:
         # TODO: expose to Mujoco-specific config
         self.world_spec.option.gravity = [0, 0, -9.81]
         self.world_spec.option.timestep = 1.0 / simulator_config.sim.fps  # type: ignore[attr-defined]
+
+    def _add_perception_camera_placeholder(self) -> None:
+        """Add a dedicated camera slot for runtime MuJoCo perception rendering."""
+        self.world_spec.worldbody.add_camera(
+            name=HOLOSOMA_PERCEPTION_CAMERA_NAME,
+            pos=[0.0, 0.0, 1.0],
+            quat=[1.0, 0.0, 0.0, 0.0],
+            fovy=60.0,
+        )
 
     def add_materials(self) -> None:
         """Add standard materials and textures to the world specification.
@@ -413,6 +425,11 @@ class MujocoSceneManager:
             using_composite_object_scene=using_composite_object_scene,
         )
         self._maybe_copy_collision_geoms_from_reference_robot_xml(
+            robot_spec,
+            robot_config,
+            using_composite_object_scene=using_composite_object_scene,
+        )
+        self._maybe_replace_composite_collision_geoms_with_reference_robot_xml(
             robot_spec,
             robot_config,
             using_composite_object_scene=using_composite_object_scene,
@@ -845,6 +862,108 @@ class MujocoSceneManager:
             "Copied {} MuJoCo collision geom(s) from '{}' into composite scene",
             copied_geom_count,
             reference_xml_path,
+        )
+
+    def _maybe_replace_composite_collision_geoms_with_reference_robot_xml(
+        self,
+        robot_spec: mujoco.MjSpec,
+        robot_config: RobotConfig,
+        *,
+        using_composite_object_scene: bool,
+    ) -> None:
+        """Replace composite-scene robot collisions with the simplified reference MuJoCo set.
+
+        The retargeting composite ``g1_29dof_w_*.xml`` scenes expose per-link mesh geoms as
+        active collisions. Training uses the simplified robot collision set from
+        ``g1_29dof.xml`` plus the half-sphere hand colliders from
+        ``main_mesh_collision_halfspherehand.urdf``. When we keep the composite mesh collisions
+        active, MuJoCo gets much denser contacts than training, which destabilizes carry rollouts.
+        """
+
+        if not using_composite_object_scene:
+            return
+
+        urdf_file = str(getattr(robot_config.asset, "urdf_file", "") or "")
+        if not urdf_file.endswith("main_mesh_collision_halfspherehand.urdf"):
+            return
+
+        asset_root = robot_config.asset.asset_root
+        if asset_root.startswith("@holosoma/"):
+            asset_root = asset_root.replace("@holosoma", get_holosoma_root())
+        reference_xml_path = os.path.join(asset_root, robot_config.asset.xml_file)
+        reference_spec = mujoco.MjSpec.from_file(reference_xml_path)
+
+        target_bodies = {body.name: body for body in robot_spec.bodies if body.name}
+        object_body_names = set(getattr(self, "_object_body_name_by_name", {}).values())
+        existing_geom_names = {geom.name for body in robot_spec.bodies for geom in body.geoms if geom.name}
+
+        disabled_geom_count = 0
+        for body in robot_spec.bodies:
+            if not body.name or body.name in object_body_names:
+                continue
+            for geom in body.geoms:
+                if int(geom.contype) == 0 and int(geom.conaffinity) == 0:
+                    continue
+                geom.contype = 0
+                geom.conaffinity = 0
+                disabled_geom_count += 1
+
+        copied_geom_count = 0
+
+        def _seq(values: Any, *, allow_zero: bool = True) -> list[float] | None:
+            arr = np.asarray(values, dtype=np.float64)
+            if arr.size == 0:
+                return None
+            if not allow_zero and np.allclose(arr, 0.0):
+                return None
+            return arr.tolist()
+
+        for reference_body in reference_spec.bodies:
+            if not reference_body.name or reference_body.name not in target_bodies:
+                continue
+            if reference_body.name in object_body_names:
+                continue
+
+            target_body = target_bodies[reference_body.name]
+            for reference_geom in reference_body.geoms:
+                if int(reference_geom.contype) == 0 and int(reference_geom.conaffinity) == 0:
+                    continue
+                if reference_geom.name and reference_geom.name in existing_geom_names:
+                    continue
+
+                kwargs = {
+                    "name": reference_geom.name or None,
+                    "type": reference_geom.type,
+                    "size": _seq(reference_geom.size),
+                    "pos": _seq(reference_geom.pos),
+                    "quat": _seq(reference_geom.quat),
+                    "fromto": _seq(reference_geom.fromto, allow_zero=False),
+                    "contype": int(reference_geom.contype),
+                    "conaffinity": int(reference_geom.conaffinity),
+                    "condim": int(reference_geom.condim),
+                    "group": int(reference_geom.group),
+                    "density": float(reference_geom.density),
+                    "friction": _seq(reference_geom.friction),
+                    "solref": _seq(reference_geom.solref),
+                    "solimp": _seq(reference_geom.solimp),
+                    "rgba": _seq(reference_geom.rgba),
+                    "meshname": reference_geom.meshname or None,
+                    "material": reference_geom.material or None,
+                    "priority": int(reference_geom.priority),
+                    "margin": float(reference_geom.margin),
+                    "gap": float(reference_geom.gap),
+                }
+                kwargs = {key: value for key, value in kwargs.items() if value is not None}
+                target_body.add_geom(**kwargs)
+                copied_geom_count += 1
+                if reference_geom.name:
+                    existing_geom_names.add(reference_geom.name)
+
+        logger.info(
+            "Replaced composite robot collisions with {} simplified geom(s) from '{}'; disabled {} composite geom(s)",
+            copied_geom_count,
+            reference_xml_path,
+            disabled_geom_count,
         )
 
     def _maybe_align_composite_body_inertials_with_training_urdf(
@@ -1353,25 +1472,37 @@ class MujocoSceneManager:
         robot_config: RobotConfig,
     ) -> set[str] | None:
         object_cfg = getattr(robot_config, "object", None)
-        if object_cfg is None or not getattr(object_cfg, "mujoco_limit_object_contacts_to_carry_bodies", False):
+        if object_cfg is None:
             return None
 
-        carry_body_markers = (
-            "waist",
-            "torso",
-            "shoulder",
-            "elbow",
-            "wrist",
-            "hand",
-        )
+        configured_markers = getattr(object_cfg, "mujoco_object_contact_body_name_markers", None)
+        if configured_markers is not None:
+            carry_body_markers = tuple(
+                str(marker).strip().lower() for marker in configured_markers if str(marker).strip()
+            )
+            if not carry_body_markers:
+                return None
+        elif getattr(object_cfg, "mujoco_limit_object_contacts_to_carry_bodies", False):
+            carry_body_markers = (
+                "waist",
+                "torso",
+                "shoulder",
+                "elbow",
+                "wrist",
+                "hand",
+            )
+        else:
+            return None
+
         allowed_body_names = {
             str(body.name)
             for body in robot_spec.bodies
             if body.name and any(marker in str(body.name).lower() for marker in carry_body_markers)
         }
         logger.info(
-            "Limiting MuJoCo object contacts to {} carry body(ies): {}",
+            "Limiting MuJoCo object contacts to {} carry body(ies) using markers {}: {}",
             len(allowed_body_names),
+            list(carry_body_markers),
             sorted(allowed_body_names),
         )
         return allowed_body_names

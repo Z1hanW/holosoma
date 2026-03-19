@@ -1,0 +1,608 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# IsaacSim + Viser evaluation for box-drop student policies.
+#
+# Branches:
+# - clip:  clip-conditioned drop student (default run: oitf644a)
+# - mixed: sparse-goal mixed drop student (default run: hw5jbitz)
+#
+# Usage:
+#   bash infer_box_drop.sh <clip|mixed> [checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
+#
+# Examples:
+#   bash infer_box_drop.sh clip
+#   bash infer_box_drop.sh mixed
+#   bash infer_box_drop.sh mixed https://wandb.ai/zihanw22/boxer/runs/hw5jbitz
+#   MOTION_CLIP_NAME=sub3_largebox_003_mj_w_obj bash infer_box_drop.sh clip
+
+usage() {
+  cat <<'EOF'
+Usage:
+  bash infer_box_drop.sh <clip|mixed> [checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
+
+Modes:
+  clip   Evaluate the clip-conditioned drop student (oitf644a by default)
+  mixed  Evaluate the sparse-goal mixed drop student (hw5jbitz by default)
+
+Default W&B runs:
+  clip   https://wandb.ai/zihanw22/boxer/runs/oitf644a
+  mixed  https://wandb.ai/zihanw22/boxer/runs/hw5jbitz
+
+Optional env vars:
+  CKPT / CHECKPOINT        (optional checkpoint override)
+  WANDB_MODEL_FILE         (optional; used when checkpoint is a W&B run URL without /files/<checkpoint>)
+  INFER_DATASET            (default: omomo; options: omomo|behave|mixed)
+  MOTION_DIR               (optional override)
+  MOTION_CLIP_NAME         (optional single clip name)
+  MOTION_CLIP_ID           (optional single clip id)
+  OBJECT_URDF              (optional override)
+  OBJECT_SCALE             (optional scalar or x,y,z)
+  GEOMETRY_DIR             (optional OBJ file/dir for terrain visualization)
+  NUM_ENVS                 (default: 1)
+  HEADLESS                 (default: True)
+  VISER_PORT               (default: random)
+  VISER_ENV_ID             (default: 0)
+  VISER_UPDATE_HZ          (default: 30)
+  VISER_RECENTER           (default: True)
+  VIS_GPU                  (default: auto)
+  PAIR_TERRAIN_WITH_MOTION (default: False)
+  DISABLE_RANDOMIZATION    (default: True)
+  START_AT_TIMESTEP_ZERO_PROB (default: 1.0)
+  FREEZE_AT_TIMESTEP_ZERO_PROB (default: 0.0)
+  RESET_NOISE_SCALE        (default: 0.0)
+  MAX_EPISODE_LENGTH_S     (default: 1000000)
+  MAX_EVAL_STEPS           (optional; if set, overrides training.max_eval_steps)
+  PHYSX_GPU_COLLISION_STACK_SIZE (default: 268435456)
+  DEPTH_PERCEPTION_PRESET  (default: checkpoint; options: checkpoint|d435i_17x17)
+  EVAL_EXTERNAL_GOAL_PROB  (mixed mode default: 1.0; clip mode leaves checkpoint logic unchanged)
+  DRY_RUN                  (default: 0; set 1/true to print the command without launching)
+EOF
+}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 1
+fi
+
+MODE_INPUT="$1"
+shift
+
+case "${MODE_INPUT}" in
+  clip|drop|oitf644a)
+    MODE="clip"
+    ;;
+  mixed|sparse_goal|sparse-goal|hw5jbitz)
+    MODE="mixed"
+    ;;
+  -h|--help|help)
+    usage
+    exit 0
+    ;;
+  *)
+    echo "[ERROR] mode must be one of: clip|mixed. Got: ${MODE_INPUT}" >&2
+    exit 2
+    ;;
+esac
+
+DEFAULT_CLIP_RUN_URL="${DEFAULT_CLIP_RUN_URL:-https://wandb.ai/zihanw22/boxer/runs/oitf644a}"
+DEFAULT_MIXED_RUN_URL="${DEFAULT_MIXED_RUN_URL:-https://wandb.ai/zihanw22/boxer/runs/hw5jbitz}"
+
+parse_wandb_run_url() {
+  local ref="$1"
+  local clean_ref="${ref%%\?*}"
+  if [[ "${clean_ref}" != https://wandb.ai/*/runs/* ]]; then
+    return 1
+  fi
+
+  local trimmed="${clean_ref#https://wandb.ai/}"
+  local entity=""
+  local project=""
+  local run_id=""
+  local explicit_file=""
+  IFS='/' read -r -a parts <<< "${trimmed}"
+  if [[ "${#parts[@]}" -lt 4 || "${parts[2]}" != "runs" ]]; then
+    return 1
+  fi
+
+  entity="${parts[0]}"
+  project="${parts[1]}"
+  run_id="${parts[3]}"
+  if [[ -z "${entity}" || -z "${project}" || -z "${run_id}" ]]; then
+    return 1
+  fi
+
+  if [[ "${#parts[@]}" -ge 6 && "${parts[4]}" == "files" ]]; then
+    explicit_file="${trimmed#${entity}/${project}/runs/${run_id}/files/}"
+  fi
+
+  printf '%s\t%s\t%s\t%s\n' "${entity}" "${project}" "${run_id}" "${explicit_file}"
+}
+
+resolve_remote_wandb_checkpoint_name() {
+  local entity="$1"
+  local project="$2"
+  local run_id="$3"
+
+  "$PYTHON_BIN" - "${entity}" "${project}" "${run_id}" <<'PY' 2>/dev/null || true
+import re
+import sys
+from pathlib import Path
+
+repo_root = Path.cwd().resolve()
+sanitized_sys_path: list[str] = []
+for path_entry in sys.path:
+    if path_entry in {"", "."}:
+        continue
+    try:
+        if Path(path_entry).resolve() == repo_root:
+            continue
+    except Exception:
+        pass
+    sanitized_sys_path.append(path_entry)
+sys.path = sanitized_sys_path
+
+try:
+    import wandb
+except Exception:
+    sys.exit(0)
+
+entity, project, run_id = sys.argv[1:4]
+api = wandb.Api(timeout=30)
+run = api.run(f"{entity}/{project}/{run_id}")
+model_pattern = re.compile(r"^model_(\d+)\.pt$")
+latest_step = -1
+latest_name = ""
+for file_obj in run.files():
+    name = getattr(file_obj, "name", "")
+    match = model_pattern.match(name)
+    if not match:
+        continue
+    step = int(match.group(1))
+    if step >= latest_step:
+        latest_step = step
+        latest_name = name
+if latest_name:
+    print(latest_name)
+PY
+}
+
+normalize_checkpoint_ref() {
+  local ref="$1"
+  if [[ "${ref}" != https://wandb.ai/*/runs/* ]]; then
+    echo "${ref}"
+    return 0
+  fi
+
+  local parsed=""
+  local entity=""
+  local project=""
+  local run_id=""
+  local explicit_file=""
+  local model_file="${WANDB_MODEL_FILE:-}"
+
+  parsed="$(parse_wandb_run_url "${ref}" || true)"
+  if [[ -z "${parsed}" ]]; then
+    echo "${ref}"
+    return 0
+  fi
+
+  IFS=$'\t' read -r entity project run_id explicit_file <<< "${parsed}"
+  if [[ -n "${explicit_file}" ]]; then
+    model_file="${explicit_file}"
+  elif [[ -z "${model_file}" ]]; then
+    model_file="$(resolve_remote_wandb_checkpoint_name "${entity}" "${project}" "${run_id}")"
+    if [[ -n "${model_file}" ]]; then
+      echo "[INFO] Resolved wandb run URL to latest remote checkpoint: ${model_file}" >&2
+    fi
+  fi
+
+  if [[ -z "${model_file}" ]]; then
+    echo "[ERROR] Could not determine a .pt checkpoint for W&B run URL: ${ref}" >&2
+    echo "[ERROR] Pass a /files/<checkpoint>.pt URL or set WANDB_MODEL_FILE." >&2
+    return 2
+  fi
+
+  echo "wandb://${entity}/${project}/${run_id}/${model_file}"
+}
+
+resolve_local_checkpoint_from_run_url() {
+  local ref="$1"
+  local parsed=""
+  local run_id=""
+  local explicit_file=""
+  local wandb_run_dir=""
+  local run_log_dir=""
+  local local_ckpt=""
+
+  parsed="$(parse_wandb_run_url "${ref}" || true)"
+  if [[ -z "${parsed}" ]]; then
+    echo ""
+    return 0
+  fi
+  IFS=$'\t' read -r _entity _project run_id explicit_file <<< "${parsed}"
+
+  wandb_run_dir=$(find /data/logs_new -maxdepth 8 -type d -name "run-*-${run_id}" 2>/dev/null | head -n 1 || true)
+  if [[ -z "${wandb_run_dir}" ]]; then
+    echo ""
+    return 0
+  fi
+
+  run_log_dir="$(dirname "$(dirname "$(dirname "${wandb_run_dir}")")")"
+  if [[ -n "${explicit_file}" && -f "${run_log_dir}/${explicit_file}" ]]; then
+    local_ckpt="${run_log_dir}/${explicit_file}"
+  else
+    local_ckpt=$(ls -1 "${run_log_dir}"/model_*.pt 2>/dev/null | sort -V | tail -n 1 || true)
+  fi
+  echo "${local_ckpt}"
+}
+
+CKPT="${CHECKPOINT:-${CKPT:-}}"
+if [[ $# -gt 0 ]]; then
+  if [[ "$1" == wandb://* || "$1" == https://wandb.ai/* || "$1" == /* || "$1" == ./* || "$1" == ../* || "$1" == *.pt ]]; then
+    CKPT="$1"
+    shift
+  fi
+fi
+
+if [[ -z "${CKPT}" ]]; then
+  if [[ "${MODE}" == "mixed" ]]; then
+    CKPT="${DEFAULT_MIXED_RUN_URL}"
+  else
+    CKPT="${DEFAULT_CLIP_RUN_URL}"
+  fi
+fi
+
+if [[ "${CKPT}" == https://wandb.ai/*/runs/* ]]; then
+  LOCAL_WANDB_CKPT="$(resolve_local_checkpoint_from_run_url "${CKPT}")"
+  if [[ -n "${LOCAL_WANDB_CKPT}" && -f "${LOCAL_WANDB_CKPT}" ]]; then
+    CKPT="${LOCAL_WANDB_CKPT}"
+    echo "[INFO] Resolved wandb run URL to local checkpoint: ${CKPT}"
+  else
+    CKPT="$(normalize_checkpoint_ref "${CKPT}")"
+  fi
+fi
+
+if [[ "${CKPT}" != wandb://* ]] && [[ ! -f "${CKPT}" ]]; then
+  echo "[ERROR] checkpoint not found: ${CKPT}" >&2
+  exit 1
+fi
+
+pick_first_existing_path() {
+  local candidate=""
+  for candidate in "$@"; do
+    if [[ -e "${candidate}" ]]; then
+      echo "${candidate}"
+      return 0
+    fi
+  done
+  if [[ $# -gt 0 ]]; then
+    echo "$1"
+  fi
+}
+
+INFER_DATASET=${INFER_DATASET:-omomo}
+INFER_DATASET=$(echo "${INFER_DATASET}" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
+case "${INFER_DATASET}" in
+  omomo|behave|mixed) ;;
+  *)
+    echo "[ERROR] INFER_DATASET must be one of: omomo|behave|mixed. Got: ${INFER_DATASET}" >&2
+    exit 2
+    ;;
+esac
+
+DEFAULT_OMOMO_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"
+DEFAULT_BEHAVE_MOTION_DIR="$(pick_first_existing_path \
+  "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_carry" \
+  "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_sq_carry")"
+DEFAULT_MIXED_MOTION_DIR="$(pick_first_existing_path \
+  "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_carry_aug_mix_ml" \
+  "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_carry_aug_mix_ml")"
+DEFAULT_OMOMO_URDF="${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
+DEFAULT_BEHAVE_MAP_FILE="${DEFAULT_BEHAVE_MOTION_DIR}/_clip_object_urdf_map.json"
+DEFAULT_MIXED_MAP_FILE="${DEFAULT_MIXED_MOTION_DIR}/_clip_object_urdf_map.json"
+
+if [[ -z "${MOTION_DIR+x}" ]]; then
+  case "${INFER_DATASET}" in
+    omomo) MOTION_DIR="${DEFAULT_OMOMO_MOTION_DIR}" ;;
+    behave) MOTION_DIR="${DEFAULT_BEHAVE_MOTION_DIR}" ;;
+    mixed) MOTION_DIR="${DEFAULT_MIXED_MOTION_DIR}" ;;
+  esac
+fi
+
+if [[ -z "${OBJECT_URDF+x}" ]]; then
+  case "${INFER_DATASET}" in
+    omomo) OBJECT_URDF="${DEFAULT_OMOMO_URDF}" ;;
+    behave) OBJECT_URDF="${DEFAULT_BEHAVE_MAP_FILE}" ;;
+    mixed) OBJECT_URDF="${DEFAULT_MIXED_MAP_FILE}" ;;
+  esac
+fi
+
+MOTION_CLIP_NAME=${MOTION_CLIP_NAME:-}
+MOTION_CLIP_ID=${MOTION_CLIP_ID:-}
+GEOMETRY_DIR=${GEOMETRY_DIR:-}
+PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
+NUM_ENVS=${NUM_ENVS:-1}
+HEADLESS_RAW=${HEADLESS:-True}
+VISER_PORT=${VISER_PORT:-$((RANDOM % 8976 + 1024))}
+VISER_ENV_ID=${VISER_ENV_ID:-0}
+VISER_UPDATE_HZ=${VISER_UPDATE_HZ:-30}
+VISER_RECENTER=${VISER_RECENTER:-True}
+VIS_GPU=${VIS_GPU:-auto}
+START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-1.0}
+FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
+RESET_NOISE_SCALE=${RESET_NOISE_SCALE:-0.0}
+MAX_EPISODE_LENGTH_S=${MAX_EPISODE_LENGTH_S:-1000000}
+PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-268435456}
+DISABLE_RANDOMIZATION=${DISABLE_RANDOMIZATION:-True}
+DEPTH_PERCEPTION_PRESET=${DEPTH_PERCEPTION_PRESET:-checkpoint}
+IMAGE_WIDTH=${IMAGE_WIDTH:-17}
+IMAGE_HEIGHT=${IMAGE_HEIGHT:-17}
+CAMERA_NEAR=${CAMERA_NEAR:-0.001}
+CAMERA_FAR=${CAMERA_FAR:-3.0}
+CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-3.0}
+MAX_EVAL_STEPS=${MAX_EVAL_STEPS:-}
+EVAL_EXTERNAL_GOAL_PROB=${EVAL_EXTERNAL_GOAL_PROB:-}
+DRY_RUN_RAW=${DRY_RUN:-0}
+
+HEADLESS_NORM=$(echo "${HEADLESS_RAW}" | tr '[:upper:]' '[:lower:]')
+case "${HEADLESS_NORM}" in
+  1|true|yes|on)
+    HEADLESS_FLAG=True
+    export HEADLESS=1
+    ;;
+  0|false|no|off|"")
+    HEADLESS_FLAG=False
+    export HEADLESS=0
+    ;;
+  *)
+    echo "[ERROR] HEADLESS must be one of: 0/1/true/false/yes/no/on/off. Got: ${HEADLESS_RAW}" >&2
+    exit 2
+    ;;
+esac
+
+DRY_RUN_NORM=$(echo "${DRY_RUN_RAW}" | tr '[:upper:]' '[:lower:]')
+case "${DRY_RUN_NORM}" in
+  1|true|yes|on) DRY_RUN_FLAG=1 ;;
+  0|false|no|off|"") DRY_RUN_FLAG=0 ;;
+  *)
+    echo "[ERROR] DRY_RUN must be one of: 0/1/true/false/yes/no/on/off. Got: ${DRY_RUN_RAW}" >&2
+    exit 2
+    ;;
+esac
+
+if [[ ! -e "${MOTION_DIR}" ]]; then
+  echo "[ERROR] MOTION_DIR not found: ${MOTION_DIR}" >&2
+  exit 1
+fi
+if [[ ! -f "${OBJECT_URDF}" ]]; then
+  echo "[ERROR] OBJECT_URDF not found: ${OBJECT_URDF}" >&2
+  exit 1
+fi
+if [[ -n "${GEOMETRY_DIR}" && ! -e "${GEOMETRY_DIR}" ]]; then
+  echo "[ERROR] GEOMETRY_DIR not found: ${GEOMETRY_DIR}" >&2
+  exit 1
+fi
+if [[ -n "${MOTION_CLIP_NAME}" && -d "${MOTION_DIR}" && ! -f "${MOTION_DIR}/${MOTION_CLIP_NAME}.npz" ]]; then
+  echo "[ERROR] MOTION_CLIP_NAME not found in MOTION_DIR: ${MOTION_CLIP_NAME}.npz" >&2
+  exit 1
+fi
+
+normalize_object_scale() {
+  local raw="$1"
+  local compact="${raw//[\[\]\(\)[:space:]]/}"
+  local values=()
+  if [[ -z "${compact}" ]]; then
+    echo ""
+    return 0
+  fi
+  IFS=',' read -r -a values <<< "${compact}"
+  if [[ "${#values[@]}" -eq 1 ]]; then
+    printf '[%s,%s,%s]' "${values[0]}" "${values[0]}" "${values[0]}"
+    return 0
+  fi
+  if [[ "${#values[@]}" -eq 3 ]]; then
+    printf '[%s,%s,%s]' "${values[0]}" "${values[1]}" "${values[2]}"
+    return 0
+  fi
+  echo "[ERROR] OBJECT_SCALE must be a scalar or comma-separated x,y,z triple. Got: ${raw}" >&2
+  exit 2
+}
+
+OBJECT_SCALE_ARG=""
+if [[ -n "${OBJECT_SCALE+x}" && -n "${OBJECT_SCALE}" ]]; then
+  OBJECT_SCALE_ARG="$(normalize_object_scale "${OBJECT_SCALE}")"
+fi
+
+if [[ -z "${CUDA_VISIBLE_DEVICES+x}" || -z "${CUDA_VISIBLE_DEVICES}" ]]; then
+  if [[ "${VIS_GPU}" == "auto" ]]; then
+    if command -v nvidia-smi >/dev/null 2>&1; then
+      AUTO_GPU="$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits | sort -t, -k2,2n | head -n1 | cut -d, -f1 | tr -d ' ')"
+      if [[ -n "${AUTO_GPU}" ]]; then
+        export CUDA_VISIBLE_DEVICES="${AUTO_GPU}"
+      fi
+    fi
+  elif [[ "${VIS_GPU}" =~ ^[0-9]+$ ]]; then
+    export CUDA_VISIBLE_DEVICES="${VIS_GPU}"
+  fi
+fi
+
+export VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI:-1}
+export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-0}
+export VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-1}
+export VISER_PERCEPTION_IMAGE_MODE=${VISER_PERCEPTION_IMAGE_MODE:-depth}
+export VISER_SHOW_PERCEPTION_FRUSTUM=${VISER_SHOW_PERCEPTION_FRUSTUM:-1}
+export LOGURU_LEVEL=${LOGURU_LEVEL:-WARNING}
+export PY_LOG_LEVEL=${PY_LOG_LEVEL:-WARNING}
+
+SIMULATOR_SUBCOMMAND=""
+EXTRA_ARGS=()
+for arg in "$@"; do
+  case "${arg}" in
+    simulator:*)
+      if [[ -n "${SIMULATOR_SUBCOMMAND}" && "${SIMULATOR_SUBCOMMAND}" != "${arg}" ]]; then
+        echo "[ERROR] Multiple simulator subcommands requested: ${SIMULATOR_SUBCOMMAND} and ${arg}" >&2
+        exit 2
+      fi
+      SIMULATOR_SUBCOMMAND="${arg}"
+      ;;
+    *)
+      EXTRA_ARGS+=("${arg}")
+      ;;
+  esac
+done
+
+cmd=(
+  "$PYTHON_BIN" -m holosoma.visualize physics
+)
+
+if [[ -n "${SIMULATOR_SUBCOMMAND}" ]]; then
+  cmd+=("${SIMULATOR_SUBCOMMAND}")
+fi
+
+cmd+=(
+  --checkpoint "${CKPT}"
+  --motion-dir "${MOTION_DIR}"
+  --num-envs "${NUM_ENVS}"
+  --headless "${HEADLESS_FLAG}"
+  --pair-terrain-with-motion "${PAIR_TERRAIN_WITH_MOTION}"
+  --viser-port "${VISER_PORT}"
+  --viser-env-id "${VISER_ENV_ID}"
+  --viser-update-hz "${VISER_UPDATE_HZ}"
+  --viser-recenter "${VISER_RECENTER}"
+  --simulator.config.sim.max_episode_length_s "${MAX_EPISODE_LENGTH_S}"
+  --robot.object.enabled True
+  --robot.object.object_urdf_path "${OBJECT_URDF}"
+  --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob "${START_AT_TIMESTEP_ZERO_PROB}"
+  --command.setup_terms.motion_command.params.motion_config.freeze_at_timestep_zero_prob "${FREEZE_AT_TIMESTEP_ZERO_PROB}"
+  --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale "${RESET_NOISE_SCALE}"
+  --algo.config.distill.bc_loss_coef 0.0
+  --algo.config.distill.loss_coef 0.0
+  --algo.config.distill.switch_to_rl_after -1
+  --algo.config.distill.take_teacher_actions False
+  --algo.config.distill.teacher_action_mix_ratio 0.0
+  --algo.config.distill.enabled False
+  --algo.config.distill.mode mse
+  --algo.config.distill.ppo_start_epoch -1
+  --algo.config.distill.dagger_end_epoch -1
+)
+
+if [[ "${SIMULATOR_SUBCOMMAND}" != "simulator:mujoco" ]]; then
+  cmd+=(--simulator.config.sim.physx.gpu_collision_stack_size "${PHYSX_GPU_COLLISION_STACK_SIZE}")
+else
+  cmd+=(--randomization.ignore_unsupported True)
+fi
+
+if [[ -n "${MOTION_CLIP_NAME}" ]]; then
+  cmd+=(--command.setup_terms.motion_command.params.motion_config.motion_clip_name "${MOTION_CLIP_NAME}")
+fi
+if [[ -n "${MOTION_CLIP_ID}" ]]; then
+  cmd+=(--command.setup_terms.motion_command.params.motion_config.motion_clip_id "${MOTION_CLIP_ID}")
+fi
+if [[ -n "${OBJECT_SCALE_ARG}" ]]; then
+  cmd+=(--robot.object.scale "${OBJECT_SCALE_ARG}")
+fi
+if [[ -n "${GEOMETRY_DIR}" ]]; then
+  cmd+=(--geometry-dir "${GEOMETRY_DIR}")
+fi
+if [[ -n "${MAX_EVAL_STEPS}" ]]; then
+  cmd+=(--training.max_eval_steps "${MAX_EVAL_STEPS}")
+fi
+
+if [[ "${DISABLE_RANDOMIZATION}" == "True" || "${DISABLE_RANDOMIZATION}" == "true" ]]; then
+  cmd+=(
+    --randomization.setup_terms.push_randomizer_state.params.enabled False
+    --randomization.reset_terms.randomize_push_schedule.params.enabled False
+    --randomization.step_terms.apply_pushes.params.enabled False
+    --randomization.setup_terms.actuator_randomizer_state.params.enable_pd_gain False
+    --randomization.setup_terms.actuator_randomizer_state.params.enable_rfi_lim False
+    --randomization.setup_terms.setup_action_delay_buffers.params.enabled False
+    --randomization.reset_terms.randomize_action_delay.params.enabled False
+    --randomization.setup_terms.randomize_robot_rigid_body_material_startup.params.enabled False
+    --randomization.setup_terms.randomize_base_com_startup.params.enabled False
+    --randomization.setup_terms.setup_dof_pos_bias.params.enabled False
+    --randomization.reset_terms.randomize_dof_state.params.randomize_dof_pos_bias False
+    --randomization.setup_terms.setup_camera_raycast_randomization.params.enabled False
+    --randomization.reset_terms.randomize_camera_raycast.params.enabled False
+    --randomization.setup_terms.randomize_object_rigid_body_material_startup.params.enabled False
+    --randomization.setup_terms.randomize_object_rigid_body_mass_startup.params.enabled False
+    --randomization.setup_terms.randomize_object_rigid_body_inertia_startup.params.enabled False
+  )
+fi
+
+case "$(echo "${DEPTH_PERCEPTION_PRESET}" | tr '[:upper:]' '[:lower:]')" in
+  checkpoint|auto|"")
+    ;;
+  d435i_17x17|d435i)
+    cmd+=(
+      perception:camera_depth_d435i_17x17
+      --perception.camera_width "${IMAGE_WIDTH}"
+      --perception.camera_height "${IMAGE_HEIGHT}"
+      --perception.camera_near "${CAMERA_NEAR}"
+      --perception.camera_far "${CAMERA_FAR}"
+      --perception.max_distance "${CAMERA_MAX_DISTANCE}"
+    )
+    ;;
+  *)
+    echo "[ERROR] DEPTH_PERCEPTION_PRESET must be one of: checkpoint|d435i_17x17. Got: ${DEPTH_PERCEPTION_PRESET}" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "${MODE}" == "mixed" ]]; then
+  if [[ -z "${EVAL_EXTERNAL_GOAL_PROB}" ]]; then
+    EVAL_EXTERNAL_GOAL_PROB="1.0"
+  fi
+  cmd+=(
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.enabled True
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.eval_external_goal_prob "${EVAL_EXTERNAL_GOAL_PROB}"
+  )
+fi
+
+if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
+  cmd+=("${EXTRA_ARGS[@]}")
+fi
+
+echo "[INFO] mode_input=${MODE_INPUT} runtime_mode=${MODE}"
+echo "[INFO] checkpoint=${CKPT}"
+echo "[INFO] infer_dataset=${INFER_DATASET}"
+echo "[INFO] motion_dir=${MOTION_DIR}"
+echo "[INFO] object_urdf=${OBJECT_URDF}"
+echo "[INFO] preserving checkpoint actor/critic observation history"
+echo "[INFO] headless=${HEADLESS_FLAG} (env HEADLESS=${HEADLESS})"
+echo "[INFO] viser=http://localhost:${VISER_PORT}"
+echo "[INFO] clip_gui=${VISER_ENABLE_CLIP_GUI} manual_gui=${VISER_ENABLE_MANUAL_GUI}"
+if [[ -n "${MOTION_CLIP_NAME}" ]]; then
+  echo "[INFO] motion_clip_name=${MOTION_CLIP_NAME}"
+fi
+if [[ -n "${MOTION_CLIP_ID}" ]]; then
+  echo "[INFO] motion_clip_id=${MOTION_CLIP_ID}"
+fi
+if [[ -n "${OBJECT_SCALE_ARG}" ]]; then
+  echo "[INFO] object_scale=${OBJECT_SCALE_ARG}"
+fi
+if [[ -n "${GEOMETRY_DIR}" ]]; then
+  echo "[INFO] geometry_dir=${GEOMETRY_DIR}"
+fi
+if [[ "${MODE}" == "mixed" ]]; then
+  echo "[INFO] eval_external_goal_prob=${EVAL_EXTERNAL_GOAL_PROB}"
+fi
+if command -v hostname >/dev/null 2>&1; then
+  HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  if [[ -n "${HOST_IP}" ]]; then
+    echo "[INFO] Remote URL: http://${HOST_IP}:${VISER_PORT}"
+  fi
+fi
+
+if [[ "${DRY_RUN_FLAG}" == "1" ]]; then
+  printf '[DRY_RUN] '
+  printf '%q ' "${cmd[@]}"
+  printf '\n'
+  exit 0
+fi
+
+"${cmd[@]}"

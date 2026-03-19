@@ -48,6 +48,65 @@ Each workflow guide includes:
 - Deployment options (offboard/onboard/Docker)
 - Troubleshooting tips
 
+## Split MuJoCo Sim2Sim Notes
+
+The main lessons from debugging G1 object-tracking on MuJoCo split sim2sim are:
+
+1. Treat split MuJoCo as the source of truth. Debug `run_sim.py + run_policy.py + sim-state` before trusting web or `viser` views.
+2. If the robot does not move, first verify the simulator actually receives ZMQ lowcmd over the split `sim-control` channel. A running policy alone is not evidence that MuJoCo is actuated.
+3. Object-tracking inference must stay aligned with training semantics: use simulator clock, simulator state, simulator-measured ref body when available, and training-aligned per-joint action scales from ONNX metadata.
+4. If G1 moves but the object does not move with it, inspect authoritative split sim traces first. This is usually a MuJoCo contact/material issue, not a frontend rendering issue.
+5. Reset should mean `sim-control reset -> simulator reset -> clock rewind -> motion clip restarts from frame 0`. If reset takes seconds, you are probably restarting the whole split sim pipeline rather than resetting the simulator.
+6. Keep ports `5655/5657/5659` clean. Stale split sim processes can make new viewers or tools read old `sim-state`, which looks like broken reset behavior.
+
+Useful entry points in this repo:
+
+- `./sim2sim_box_split_tracking.sh <motion.npz> <model.onnx>`: authoritative split sim launcher
+- `./run_wobj_tracking_validated.sh`: validated G1 w-obj tracking launcher
+- `./vis_mujoco_sim_state.sh`: `viser` viewer that reads split MuJoCo `sim-state` and can trigger reset over `sim-control`
+
+### Training-Aligned Invariants
+
+For current G1 WBT/object-tracking split sim2sim, the minimum configuration baseline is:
+
+- Simulator side:
+  `use_zmq_lowcmd=True` must also start the split `sim-control` subscriber, not just the lowcmd publisher path.
+- Inference side:
+  `use_sim_time=True`, `use_sim_state=True`, `prefer_sim_ref_from_sim_state=True`, and `restart_motion_on_clock_reset=True`.
+- Action scaling:
+  per-joint policy action scales must be restored from ONNX metadata, not replaced with a flat fallback.
+- Startup behavior:
+  prefer `freeze_until_first_command=1` over long startup holds so rollout semantics match training more closely.
+- Object carry:
+  when carry quality is wrong, debug `sim-state` traces and contact bodies before changing web or `viser` rendering.
+
+### Reset Semantics And Timing
+
+Correct reset means:
+
+1. send `{"action": "reset"}` over split `sim-control`
+2. simulator rewinds to motion-init state and resets its clock
+3. policy sees the clock jump backwards and restarts the motion clip from frame `0`
+4. viewers only declare reset complete after seeing a rewound `sim_time_ms`
+
+Measured reference sequence for the fixed path on March 19, 2026:
+
+- `mujoco.log`: reset queued at `01:06:51.909`
+- `mujoco.log`: simulator reset at `01:06:51.917`
+- `policy.log`: motion clip restart triggered by clock rewind at `01:06:51.930`
+- `viser`: first post-reset rewound state at `01:06:51.944`
+
+That is about `35.5 ms` end to end. Multi-second reset behavior indicates whole-process restart, not a real simulator reset.
+
+### Practical Debug Order
+
+1. Kill stale split sim processes on ports `5655/5657/5659`.
+2. Run `./run_wobj_tracking_validated.sh` and confirm authoritative MuJoCo behavior first.
+3. Check `logs/sim2sim_runs/.../mujoco.log` for first lowcmd reception and reset handling.
+4. Check `logs/sim2sim_runs/.../policy.log` for motion timestep progress and clock-rewind restart.
+5. If carry looks wrong, enable `HOLOSOMA_SPLIT_SIM_STATE_TRACE_PATH` and inspect `object_robot_contact_count` and contact bodies.
+6. Only after split sim looks correct, debug web or `viser` presentation layers.
+
 ---
 
 # Policy Controls

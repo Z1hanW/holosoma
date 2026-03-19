@@ -15,6 +15,8 @@
 # Keep these
 !.gitignore
 !README*
+!skills/**/SKILL.md
+!skills/**/agents/openai.yaml
 !LICENSE*
 !src/holosoma_inference/docs/workflows/sim2sim.md
 

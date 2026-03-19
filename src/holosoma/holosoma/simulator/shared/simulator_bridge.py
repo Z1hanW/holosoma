@@ -6,6 +6,8 @@ with different simulators (MuJoCo, IsaacGym, IsaacSim, etc.).
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -68,6 +70,8 @@ class SimulatorBridge:
         self._default_hold_kp: np.ndarray | None = None
         self._default_hold_kd: np.ndarray | None = None
         self._initial_hold_q: np.ndarray | None = None
+        self._sim_state_trace_path = os.environ.get("HOLOSOMA_SPLIT_SIM_STATE_TRACE_PATH", "").strip() or None
+        self._sim_state_trace_handle = None
 
         # Initialize clock publisher for WBT motion synchronization
         self.clock_pub: ClockPub = ClockPub(port=self.bridge_config.clock_port)
@@ -87,7 +91,7 @@ class SimulatorBridge:
             if self.bridge_config.publish_sim_state:
                 self.sim_state_pub = SimStatePub(port=self.bridge_config.sim_state_port)
                 self.sim_state_pub.start()
-            if self.bridge_config.listen_control:
+            if self.bridge_config.listen_control or self._use_zmq_lowcmd:
                 self.sim_control_sub = SimControlPull(port=self.bridge_config.control_port)
                 self.sim_control_sub.start()
             if self.bridge_config.publish_perception_obs:
@@ -385,6 +389,14 @@ class SimulatorBridge:
                     payload.update(extra_payload)
 
             self.sim_state_pub.publish(payload)
+            if self._sim_state_trace_path is not None:
+                if self._sim_state_trace_handle is None:
+                    trace_dir = os.path.dirname(self._sim_state_trace_path)
+                    if trace_dir:
+                        os.makedirs(trace_dir, exist_ok=True)
+                    self._sim_state_trace_handle = open(self._sim_state_trace_path, "a", encoding="utf-8")
+                self._sim_state_trace_handle.write(json.dumps(payload) + "\n")
+                self._sim_state_trace_handle.flush()
         except Exception as exc:  # pragma: no cover - best effort side-channel
             logger.debug("Failed to publish sim state: {}", exc)
 

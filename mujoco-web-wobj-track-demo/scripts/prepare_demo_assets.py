@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace as dataclass_replace
 import json
+import math
 import re
 import shutil
 import sys
@@ -13,8 +15,10 @@ from pathlib import Path
 
 import numpy as np
 import onnx
+import onnxruntime
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "src" / "holosoma"))
 sys.path.insert(0, str(REPO_ROOT / "src" / "holosoma_inference"))
 
 from holosoma_inference.tools.patch_motion_onnx import patch_model
@@ -30,8 +34,6 @@ DEFAULT_MOTION = Path(
 DEFAULT_MOTION_DIR = Path(
     "/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"
 )
-DEFAULT_SCENE = Path("/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/models/g1/g1_29dof_w_largebox.xml")
-DEFAULT_ACTUATOR_SOURCE = Path("/home/ubuntu/FAR/holosoma/src/holosoma/holosoma/data/robots/g1/g1_29dof.xml")
 DEFAULT_MAX_CLIPS = 1
 
 
@@ -153,6 +155,125 @@ def _extract_control_cfg(metadata: dict) -> dict:
     }
 
 
+def _extract_observation_cfg(metadata: dict) -> dict:
+    exp_cfg = metadata.get("experiment_config", {})
+    actor_group = exp_cfg.get("observation", {}).get("groups", {}).get("actor_obs", {})
+    terms = actor_group.get("terms", {})
+    actor_obs_terms_sorted = sorted(terms.keys()) if isinstance(terms, dict) else []
+    return {
+        "actor_obs_terms_sorted": actor_obs_terms_sorted,
+        "actor_obs_history_length": int(actor_group.get("history_length", 1)),
+        "actor_obs_concatenate": bool(actor_group.get("concatenate", True)),
+    }
+
+
+def _extract_terrain_cfg(metadata: dict) -> dict:
+    terrain_term = metadata.get("experiment_config", {}).get("terrain", {}).get("terrain_term", {})
+    if not isinstance(terrain_term, dict):
+        terrain_term = {}
+    return {
+        "name": str(terrain_term.get("name", "floor")),
+        "static_friction": float(terrain_term.get("static_friction", 1.0)),
+        "dynamic_friction": float(terrain_term.get("dynamic_friction", terrain_term.get("static_friction", 1.0))),
+        "restitution": float(terrain_term.get("restitution", 0.0)),
+    }
+
+
+def _extract_control_dt_s(metadata: dict) -> float | None:
+    exp_cfg = metadata.get("experiment_config", {})
+    sim_cfg = exp_cfg.get("simulator", {}).get("config", {}).get("sim", {})
+    fps = float(sim_cfg.get("fps", 0.0) or 0.0)
+    control_decimation = float(sim_cfg.get("control_decimation", 0.0) or 0.0)
+    if fps <= 0.0 or control_decimation <= 0.0:
+        return None
+    return control_decimation / fps
+
+
+def _transition_step_counts(metadata: dict) -> tuple[int, int]:
+    motion_cfg = _extract_motion_cfg(metadata)
+    if not motion_cfg:
+        return 0, 0
+    control_dt_s = _extract_control_dt_s(metadata)
+    if control_dt_s is None or control_dt_s <= 0.0:
+        return 0, 0
+
+    prepend_steps = 0
+    append_steps = 0
+    if bool(motion_cfg.get("enable_default_pose_prepend", False)):
+        prepend_steps = max(0, round(float(motion_cfg.get("default_pose_prepend_duration_s", 0.0) or 0.0) / control_dt_s))
+    if bool(motion_cfg.get("enable_default_pose_append", False)):
+        append_steps = max(0, round(float(motion_cfg.get("default_pose_append_duration_s", 0.0) or 0.0) / control_dt_s))
+    return prepend_steps, append_steps
+
+
+def _quat_wxyz_to_rpy(quat_wxyz: np.ndarray) -> tuple[float, float, float]:
+    w, x, y, z = [float(value) for value in np.asarray(quat_wxyz, dtype=np.float64)]
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+
+    sinp = 2.0 * (w * y - z * x)
+    if abs(sinp) >= 1.0:
+        pitch = math.copysign(math.pi / 2.0, sinp)
+    else:
+        pitch = math.asin(sinp)
+
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    return roll, pitch, yaw
+
+
+def _quat_from_rpy_wxyz(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    cr = math.cos(roll * 0.5)
+    sr = math.sin(roll * 0.5)
+    cp = math.cos(pitch * 0.5)
+    sp = math.sin(pitch * 0.5)
+    cy = math.cos(yaw * 0.5)
+    sy = math.sin(yaw * 0.5)
+    return np.asarray(
+        [
+            cr * cp * cy + sr * sp * sy,
+            sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy,
+        ],
+        dtype=np.float32,
+    )
+
+
+def _repeat_endpoints(sequence: np.ndarray | None, prepend_steps: int, append_steps: int) -> np.ndarray | None:
+    if sequence is None:
+        return None
+    arr = np.asarray(sequence, dtype=np.float32)
+    parts: list[np.ndarray] = []
+    if prepend_steps > 0:
+        parts.append(np.repeat(arr[:1], prepend_steps, axis=0))
+    parts.append(arr)
+    if append_steps > 0:
+        parts.append(np.repeat(arr[-1:], append_steps, axis=0))
+    return np.concatenate(parts, axis=0)
+
+
+def _run_onnx_bootstrap(patched_model_path: Path, obs_dim: int) -> dict[str, np.ndarray]:
+    session = onnxruntime.InferenceSession(str(patched_model_path))
+    outputs = session.run(
+        None,
+        {
+            "obs": np.zeros((1, obs_dim), dtype=np.float32),
+            "time_step": np.zeros((1, 1), dtype=np.float32),
+        },
+    )
+    output_names = [item.name for item in session.get_outputs()]
+    output_map = {name: value for name, value in zip(output_names, outputs, strict=False)}
+    return {
+        "joint_pos": np.asarray(output_map["joint_pos"], dtype=np.float32).reshape(-1),
+        "joint_vel": np.asarray(output_map["joint_vel"], dtype=np.float32).reshape(-1),
+        "ref_pos_xyz": np.asarray(output_map["ref_pos_xyz"], dtype=np.float32).reshape(-1),
+        "ref_quat_xyzw": np.asarray(output_map["ref_quat_xyzw"], dtype=np.float32).reshape(-1),
+    }
+
+
 def _extract_effort_limits(scene_xml_path: Path) -> dict[str, float]:
     root = ET.parse(scene_xml_path).getroot()
     actuator_root = root.find("actuator")
@@ -160,9 +281,9 @@ def _extract_effort_limits(scene_xml_path: Path) -> dict[str, float]:
         return {}
 
     limits: dict[str, float] = {}
-    for motor in actuator_root.findall("motor"):
-        joint_name = motor.attrib.get("joint")
-        ctrlrange = motor.attrib.get("ctrlrange")
+    for actuator in actuator_root:
+        joint_name = actuator.attrib.get("joint")
+        ctrlrange = actuator.attrib.get("ctrlrange")
         if not joint_name or not ctrlrange:
             continue
         parts = [float(value) for value in ctrlrange.split()]
@@ -190,7 +311,16 @@ def _resolve_policy_action_scales(
     return scales
 
 
-def _read_motion_summary(motion_path: Path, dof_names: list[str], ref_body_name: str) -> dict:
+def _read_motion_summary(
+    motion_path: Path,
+    dof_names: list[str],
+    ref_body_name: str,
+    *,
+    metadata: dict,
+    patched_model_path: Path,
+    obs_dim: int,
+    apply_training_motion_transitions: bool,
+) -> dict:
     with np.load(motion_path, allow_pickle=True) as data:
         body_names = _decode_names(np.asarray(data["body_names"]))
         joint_names = _decode_names(np.asarray(data["joint_names"]))
@@ -198,10 +328,14 @@ def _read_motion_summary(motion_path: Path, dof_names: list[str], ref_body_name:
         ref_idx = body_names.index(ref_body_name)
         body_pos_w = np.asarray(data["body_pos_w"], dtype=np.float32)
         body_quat_w = np.asarray(data["body_quat_w"], dtype=np.float32)
+        body_lin_vel_w = np.asarray(data["body_lin_vel_w"], dtype=np.float32)
+        body_ang_vel_w = np.asarray(data["body_ang_vel_w"], dtype=np.float32)
         joint_pos = np.asarray(data["joint_pos"], dtype=np.float32)
         joint_vel = np.asarray(data["joint_vel"], dtype=np.float32)
         object_pos_w = np.asarray(data["object_pos_w"], dtype=np.float32) if "object_pos_w" in data else None
         object_quat_w = np.asarray(data["object_quat_w"], dtype=np.float32) if "object_quat_w" in data else None
+        object_lin_vel_w = np.asarray(data["object_lin_vel_w"], dtype=np.float32) if "object_lin_vel_w" in data else None
+        object_ang_vel_w = np.asarray(data["object_ang_vel_w"], dtype=np.float32) if "object_ang_vel_w" in data else None
         raw_object_size = None
         for key in ("object_size", "box_size", "object_scale", "box_scale"):
             if key in data:
@@ -218,55 +352,77 @@ def _read_motion_summary(motion_path: Path, dof_names: list[str], ref_body_name:
     joint_pos = joint_pos[:, joint_indices]
     joint_vel = joint_vel[:, joint_indices]
     object_size = _normalize_object_size_array(raw_object_size, joint_pos.shape[0])
+    bootstrap = _run_onnx_bootstrap(patched_model_path, obs_dim)
+
+    prepend_steps = 0
+    append_steps = 0
+    if apply_training_motion_transitions:
+        prepend_steps, append_steps = _transition_step_counts(metadata)
+
+    init_state = _extract_robot_init_state(metadata)
+    if prepend_steps > 0 and init_state:
+        init_root_pos = np.asarray(init_state.get("pos", [0.0, 0.0, body_pos_w[0, root_idx, 2]]), dtype=np.float32)
+        init_root_rot_xyzw = np.asarray(init_state.get("rot", [0.0, 0.0, 0.0, 1.0]), dtype=np.float32)
+        init_root_quat_wxyz = np.asarray(
+            [init_root_rot_xyzw[3], init_root_rot_xyzw[0], init_root_rot_xyzw[1], init_root_rot_xyzw[2]],
+            dtype=np.float32,
+        )
+        init_roll, init_pitch, _ = _quat_wxyz_to_rpy(init_root_quat_wxyz)
+        _, _, motion_yaw = _quat_wxyz_to_rpy(body_quat_w[0, root_idx, :])
+        initial_root_pos_w = np.asarray([body_pos_w[0, root_idx, 0], body_pos_w[0, root_idx, 1], init_root_pos[2]], dtype=np.float32)
+        initial_root_quat_wxyz = _quat_from_rpy_wxyz(init_roll, init_pitch, motion_yaw)
+        initial_root_lin_vel_w = np.asarray(init_state.get("lin_vel", [0.0, 0.0, 0.0]), dtype=np.float32)
+        initial_root_ang_vel_w = np.asarray(init_state.get("ang_vel", [0.0, 0.0, 0.0]), dtype=np.float32)
+    else:
+        initial_root_pos_w = body_pos_w[0, root_idx, :].astype(np.float32, copy=True)
+        initial_root_quat_wxyz = body_quat_w[0, root_idx, :].astype(np.float32, copy=True)
+        initial_root_lin_vel_w = body_lin_vel_w[0, root_idx, :].astype(np.float32, copy=True)
+        initial_root_ang_vel_w = body_ang_vel_w[0, root_idx, :].astype(np.float32, copy=True)
+
+    object_pos_aug = _repeat_endpoints(object_pos_w, prepend_steps, append_steps)
+    object_quat_aug = _repeat_endpoints(object_quat_w, prepend_steps, append_steps)
+    object_lin_vel_aug = _repeat_endpoints(object_lin_vel_w, prepend_steps, append_steps)
+    object_ang_vel_aug = _repeat_endpoints(object_ang_vel_w, prepend_steps, append_steps)
+    object_size_aug = _repeat_endpoints(object_size, prepend_steps, append_steps)
+    frame_count = int(joint_pos.shape[0] + prepend_steps + append_steps)
 
     return {
         "fps": fps,
-        "frame_count": int(body_pos_w.shape[0]),
-        "duration_s": float(body_pos_w.shape[0] / fps) if fps > 0.0 else 0.0,
-        "initial_root_pos_w": body_pos_w[0, root_idx, :].astype(np.float32).tolist(),
-        "initial_root_quat_wxyz": body_quat_w[0, root_idx, :].astype(np.float32).tolist(),
-        "initial_ref_pos_w": body_pos_w[0, ref_idx, :].astype(np.float32).tolist(),
-        "initial_ref_quat_wxyz": body_quat_w[0, ref_idx, :].astype(np.float32).tolist(),
-        "initial_joint_pos": joint_pos[0].astype(np.float32).tolist(),
-        "initial_joint_vel": joint_vel[0].astype(np.float32).tolist(),
-        "object_pos_w": object_pos_w.astype(np.float32).tolist() if object_pos_w is not None else None,
-        "object_quat_wxyz": object_quat_w.astype(np.float32).tolist() if object_quat_w is not None else None,
-        "object_size": object_size.astype(np.float32).tolist(),
-        "initial_object_pos_w": object_pos_w[0].astype(np.float32).tolist() if object_pos_w is not None else None,
-        "initial_object_quat_wxyz": object_quat_w[0].astype(np.float32).tolist() if object_quat_w is not None else None,
-        "initial_object_size": object_size[0].astype(np.float32).tolist(),
+        "frame_count": frame_count,
+        "duration_s": float(frame_count / fps) if fps > 0.0 else 0.0,
+        "transition_prepend_steps": prepend_steps,
+        "transition_append_steps": append_steps,
+        "initial_root_pos_w": initial_root_pos_w.astype(np.float32).tolist(),
+        "initial_root_quat_wxyz": initial_root_quat_wxyz.astype(np.float32).tolist(),
+        "initial_root_lin_vel_w": initial_root_lin_vel_w.astype(np.float32).tolist(),
+        "initial_root_ang_vel_w": initial_root_ang_vel_w.astype(np.float32).tolist(),
+        # MuJoCo split sim initializes robot DOFs from the raw clip frame, while the
+        # policy-side motion command / ref outputs come from an ONNX zero-obs bootstrap.
+        "reset_joint_pos": joint_pos[0].astype(np.float32).tolist(),
+        "reset_joint_vel": joint_vel[0].astype(np.float32).tolist(),
+        "initial_ref_pos_w": bootstrap["ref_pos_xyz"].astype(np.float32).tolist(),
+        "initial_ref_quat_wxyz": np.asarray(
+            [
+                bootstrap["ref_quat_xyzw"][3],
+                bootstrap["ref_quat_xyzw"][0],
+                bootstrap["ref_quat_xyzw"][1],
+                bootstrap["ref_quat_xyzw"][2],
+            ],
+            dtype=np.float32,
+        ).tolist(),
+        "initial_joint_pos": bootstrap["joint_pos"].astype(np.float32).tolist(),
+        "initial_joint_vel": bootstrap["joint_vel"].astype(np.float32).tolist(),
+        "object_pos_w": object_pos_aug.astype(np.float32).tolist() if object_pos_aug is not None else None,
+        "object_quat_wxyz": object_quat_aug.astype(np.float32).tolist() if object_quat_aug is not None else None,
+        "object_lin_vel_w": object_lin_vel_aug.astype(np.float32).tolist() if object_lin_vel_aug is not None else None,
+        "object_ang_vel_w": object_ang_vel_aug.astype(np.float32).tolist() if object_ang_vel_aug is not None else None,
+        "object_size": object_size_aug.astype(np.float32).tolist() if object_size_aug is not None else None,
+        "initial_object_pos_w": object_pos_aug[0].astype(np.float32).tolist() if object_pos_aug is not None else None,
+        "initial_object_quat_wxyz": object_quat_aug[0].astype(np.float32).tolist() if object_quat_aug is not None else None,
+        "initial_object_lin_vel_w": object_lin_vel_aug[0].astype(np.float32).tolist() if object_lin_vel_aug is not None else None,
+        "initial_object_ang_vel_w": object_ang_vel_aug[0].astype(np.float32).tolist() if object_ang_vel_aug is not None else None,
+        "initial_object_size": object_size_aug[0].astype(np.float32).tolist() if object_size_aug is not None else [1.0, 1.0, 1.0],
     }
-
-
-def _copy_tree(src: Path, dst: Path) -> None:
-    if dst.exists():
-        shutil.rmtree(dst)
-    shutil.copytree(src, dst)
-
-
-def _patch_scene_xml(scene_path: Path, output_scene_path: Path, actuator_source_path: Path) -> None:
-    scene_tree = ET.parse(scene_path)
-    scene_root = scene_tree.getroot()
-
-    compiler = scene_root.find("compiler")
-    if compiler is None:
-        compiler = ET.SubElement(scene_root, "compiler")
-    compiler.set("meshdir", "assets")
-
-    for mesh in scene_root.findall(".//mesh"):
-        file_path = mesh.attrib.get("file")
-        if file_path == "../../largebox/largebox.obj":
-            mesh.set("file", "largebox/largebox.obj")
-
-    if scene_root.find("actuator") is None:
-        actuator_tree = ET.parse(actuator_source_path)
-        actuator_root = actuator_tree.getroot().find("actuator")
-        if actuator_root is None:
-            raise RuntimeError(f"Actuator source is missing <actuator>: {actuator_source_path}")
-        scene_root.append(actuator_root)
-
-    ET.indent(scene_tree, space="  ")
-    scene_tree.write(output_scene_path, encoding="utf-8", xml_declaration=False)
 
 
 def _slugify(value: str) -> str:
@@ -333,17 +489,126 @@ def _collect_motion_paths(args: argparse.Namespace) -> tuple[list[Path], Path | 
 
 
 def _write_shared_scene_assets(
-    *,
-    scene_path: Path,
-    actuator_source_path: Path,
     output_dir: Path,
+    model_path: Path,
 ) -> Path:
-    assets_src = scene_path.parent / "assets"
-    largebox_src = scene_path.parent.parent / "largebox"
-    _copy_tree(assets_src, output_dir / "assets")
-    _copy_tree(largebox_src, output_dir / "assets" / "largebox")
+    from holosoma.config_values import robot as robot_values
+    from holosoma.config_values import simulator as sim_values
+    from holosoma.simulator.mujoco.scene_manager import MujocoSceneManager
+
+    metadata = _read_onnx_metadata(model_path)
+    control_cfg = _extract_control_cfg(metadata)
+    terrain_cfg = _extract_terrain_cfg(metadata)
+    simulator_cfg = dataclass_replace(
+        sim_values.mujoco.config,
+        sim=dataclass_replace(sim_values.mujoco.config.sim, fps=int(control_cfg["sim_fps"])),
+        robot_mjcf_filter=dataclass_replace(sim_values.mujoco.config.robot_mjcf_filter, enable=True),
+    )
+
+    class _PlaneTerrain:
+        name = str(terrain_cfg["name"])
+        mesh_type = "plane"
+        static_friction = float(terrain_cfg["static_friction"])
+        dynamic_friction = float(terrain_cfg["dynamic_friction"])
+        restitution = float(terrain_cfg["restitution"])
+
+    output_assets_dir = output_dir / "assets"
+    output_assets_dir.mkdir(parents=True, exist_ok=True)
+
+    robot_cfg = dataclass_replace(
+        robot_values.g1_29dof_w_object,
+        object=dataclass_replace(
+            robot_values.g1_29dof_w_object.object,
+            enabled=True,
+            object_urdf_path="holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf",
+            mujoco_use_training_urdf_scene=True,
+            mujoco_object_contact_body_name_markers=["wrist", "hand"],
+            mujoco_add_default_actuators=True,
+            mujoco_copy_joint_defaults_from_robot_xml=True,
+            mujoco_copy_tendons_from_robot_xml=True,
+            mujoco_copy_collision_geoms_from_robot_xml=True,
+            mujoco_copy_contact_pairs_from_robot_xml=True,
+        ),
+    )
+
+    scene_manager = MujocoSceneManager(simulator_cfg)
+    terrain = _PlaneTerrain()
+    scene_manager.add_materials()
+    scene_manager.add_lighting()
+    scene_manager.add_terrain(terrain, num_envs=1)
+    scene_manager.add_robot(terrain, robot_cfg, xml_filter=simulator_cfg.robot_mjcf_filter, prefix="")
+
     scene_xml_path = output_dir / "scene.xml"
-    _patch_scene_xml(scene_path.resolve(), scene_xml_path, actuator_source_path.resolve())
+    composite_scene_path = Path(scene_manager.robot_model_path).resolve()
+    composite_scene_root = ET.parse(composite_scene_path).getroot()
+    composite_meshdir_raw = composite_scene_root.find("compiler")
+    composite_meshdir = (
+        composite_meshdir_raw.attrib.get("meshdir", "") if composite_meshdir_raw is not None else ""
+    ).replace("\\", "/")
+    composite_mesh_root = (composite_scene_path.parent / composite_meshdir).resolve()
+
+    scene_root = ET.fromstring(scene_manager.world_spec.to_xml())
+    compiler = scene_root.find("compiler")
+    if compiler is None:
+        compiler = ET.SubElement(scene_root, "compiler")
+    compiler.set("meshdir", "assets")
+
+    def _remove_empty_default_nodes(node: ET.Element) -> None:
+        for child in list(node):
+            _remove_empty_default_nodes(child)
+            if child.tag != "default":
+                continue
+            has_text = bool((child.text or "").strip())
+            if len(child) == 0 and not child.attrib and not has_text:
+                node.remove(child)
+
+    _remove_empty_default_nodes(scene_root)
+    top_default = scene_root.find("default")
+    if top_default is not None and len(top_default) == 0 and not top_default.attrib and not (top_default.text or "").strip():
+        scene_root.remove(top_default)
+
+    staged_mesh_sources: dict[str, Path] = {}
+
+    def _resolve_source_mesh(raw_path: str) -> Path:
+        candidate = Path(raw_path)
+        if candidate.is_absolute():
+            resolved = candidate.resolve()
+        else:
+            resolved = (composite_mesh_root / raw_path).resolve()
+        if not resolved.is_file():
+            raise FileNotFoundError(f"Generated MuJoCo scene referenced missing mesh: {raw_path} -> {resolved}")
+        return resolved
+
+    def _stage_mesh_path(raw_path: str) -> str:
+        candidate = Path(raw_path)
+        if candidate.is_absolute():
+            rel_path = Path(candidate.name)
+        else:
+            rel_parts = [part for part in candidate.parts if part not in ("", ".", "..")]
+            rel_path = Path(*rel_parts) if rel_parts else Path(candidate.name)
+        if not rel_path.suffix:
+            rel_path = rel_path.with_suffix(Path(raw_path).suffix)
+        rel_posix = rel_path.as_posix()
+        source_path = _resolve_source_mesh(raw_path)
+        previous_source = staged_mesh_sources.get(rel_posix)
+        if previous_source is not None and previous_source != source_path:
+            rel_posix = f"{_slugify(source_path.parent.name)}__{source_path.name}"
+        staged_mesh_sources[rel_posix] = source_path
+        return rel_posix
+
+    for mesh in scene_root.findall(".//mesh[@file]"):
+        raw_path = mesh.attrib["file"]
+        staged_relpath = _stage_mesh_path(raw_path)
+        mesh.set("file", staged_relpath)
+
+    for rel_path, source_path in staged_mesh_sources.items():
+        destination = output_assets_dir / rel_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_path, destination)
+
+    scene_tree = ET.ElementTree(scene_root)
+    ET.indent(scene_tree, space="  ")
+    scene_tree.write(scene_xml_path, encoding="utf-8", xml_declaration=False)
     return scene_xml_path
 
 
@@ -369,9 +634,19 @@ def _stage_clip_bundle(
     onnx_inputs, onnx_outputs = _read_onnx_io(patched_model_path)
     dof_names = list(metadata["dof_names"])
     motion_cfg = _extract_motion_cfg(metadata)
+    observation_cfg = _extract_observation_cfg(metadata)
     ref_body_names = motion_cfg.get("body_name_ref", ["torso_link"])
     ref_body_name = ref_body_names[0] if isinstance(ref_body_names, list) and ref_body_names else "torso_link"
-    motion_summary = _read_motion_summary(motion_path.resolve(), dof_names, ref_body_name)
+    obs_shape = next((entry["shape"] for entry in onnx_inputs if entry["name"] in {"obs", "actor_obs"}), None)
+    motion_summary = _read_motion_summary(
+        motion_path.resolve(),
+        dof_names,
+        ref_body_name,
+        metadata=metadata,
+        patched_model_path=patched_model_path,
+        obs_dim=int(obs_shape[1]) if obs_shape and len(obs_shape) > 1 else 0,
+        apply_training_motion_transitions=apply_training_motion_transitions,
+    )
     control_cfg = _extract_control_cfg(metadata)
     policy_action_scales = _resolve_policy_action_scales(
         dof_names=dof_names,
@@ -379,7 +654,6 @@ def _stage_clip_bundle(
         base_action_scale=float(control_cfg["action_scale"]),
         effort_limits=effort_limits,
     )
-    obs_shape = next((entry["shape"] for entry in onnx_inputs if entry["name"] in {"obs", "actor_obs"}), None)
 
     clip_config = {
         "model_path": str(patched_model_path.relative_to(bundle_dir.parents[1])),
@@ -403,6 +677,11 @@ def _stage_clip_bundle(
         "ref_body_name": ref_body_name,
         "object_body_name": "largebox_link",
         "motion_alignment_enabled": bool(motion_cfg.get("align_motion_to_init_yaw", False)),
+        # Match the split MuJoCo tracking launcher defaults in sim2sim_box_split_tracking.sh.
+        "use_root_reference_at_clip_start": True,
+        "prefer_sim_ref_from_sim_state": True,
+        "apply_training_motion_transitions": bool(apply_training_motion_transitions),
+        "observation": observation_cfg,
         "control": {
             **control_cfg,
             "effort_limits": effort_limits,
@@ -434,8 +713,6 @@ def stage_assets(
     model_path: Path,
     motion_paths: list[Path],
     motion_root: Path | None,
-    scene_path: Path,
-    actuator_source_path: Path,
     output_dir: Path,
     apply_training_motion_transitions: bool,
 ) -> dict:
@@ -444,11 +721,7 @@ def stage_assets(
         shutil.rmtree(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-    scene_xml_path = _write_shared_scene_assets(
-        scene_path=scene_path,
-        actuator_source_path=actuator_source_path,
-        output_dir=output_dir,
-    )
+    scene_xml_path = _write_shared_scene_assets(output_dir, model_path)
     effort_limits = _extract_effort_limits(scene_xml_path)
 
     clips_dir = output_dir / "clips"
@@ -503,9 +776,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recursive", action="store_true")
     parser.add_argument("--max-clips", type=int, default=DEFAULT_MAX_CLIPS)
     parser.add_argument("--preferred-clip-stem", type=str, default=DEFAULT_MOTION.stem)
-    parser.add_argument("--scene-xml", type=Path, default=DEFAULT_SCENE)
-    parser.add_argument("--actuator-source-xml", type=Path, default=DEFAULT_ACTUATOR_SOURCE)
-    parser.add_argument("--apply-training-motion-transitions", action="store_true")
+    parser.set_defaults(apply_training_motion_transitions=False)
+    parser.add_argument(
+        "--apply-training-motion-transitions",
+        dest="apply_training_motion_transitions",
+        action="store_true",
+        help="Patch motion outputs with the training-time default-pose prepend/append transitions.",
+    )
+    parser.add_argument(
+        "--no-apply-training-motion-transitions",
+        dest="apply_training_motion_transitions",
+        action="store_false",
+        help="Use the raw motion clip without training-time prepend/append transitions (default).",
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -521,8 +804,6 @@ def main() -> None:
         model_path=args.model_path.expanduser().resolve(),
         motion_paths=motion_paths,
         motion_root=motion_root,
-        scene_path=args.scene_xml.expanduser().resolve(),
-        actuator_source_path=args.actuator_source_xml.expanduser().resolve(),
         output_dir=args.output_dir.expanduser().resolve(),
         apply_training_motion_transitions=bool(args.apply_training_motion_transitions),
     )

@@ -59,6 +59,7 @@ EOF
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 
 if [[ $# -lt 1 ]]; then
   usage
@@ -151,7 +152,7 @@ resolve_remote_wandb_checkpoint_name() {
   local project="$2"
   local run_id="$3"
 
-  python - "${entity}" "${project}" "${run_id}" <<'PY' 2>/dev/null || true
+  "$PYTHON_BIN" - "${entity}" "${project}" "${run_id}" <<'PY' 2>/dev/null || true
 import re
 import sys
 from pathlib import Path
@@ -453,10 +454,32 @@ export VISER_MANUAL_HW_TYPE=${VISER_MANUAL_HW_TYPE:-xbox}
 export LOGURU_LEVEL=${LOGURU_LEVEL:-WARNING}
 export PY_LOG_LEVEL=${PY_LOG_LEVEL:-WARNING}
 
-EXTRA_ARGS=("$@")
+SIMULATOR_SUBCOMMAND=""
+EXTRA_ARGS=()
+for arg in "$@"; do
+  case "${arg}" in
+    simulator:*)
+      if [[ -n "${SIMULATOR_SUBCOMMAND}" && "${SIMULATOR_SUBCOMMAND}" != "${arg}" ]]; then
+        echo "[ERROR] Multiple simulator subcommands requested: ${SIMULATOR_SUBCOMMAND} and ${arg}" >&2
+        exit 2
+      fi
+      SIMULATOR_SUBCOMMAND="${arg}"
+      ;;
+    *)
+      EXTRA_ARGS+=("${arg}")
+      ;;
+  esac
+done
 
 cmd=(
-  python -m holosoma.visualize physics
+  "$PYTHON_BIN" -m holosoma.visualize physics
+)
+
+if [[ -n "${SIMULATOR_SUBCOMMAND}" ]]; then
+  cmd+=("${SIMULATOR_SUBCOMMAND}")
+fi
+
+cmd+=(
   --checkpoint "${CKPT}"
   --motion-dir "${MOTION_DIR}"
   --num-envs "${NUM_ENVS}"
@@ -466,7 +489,6 @@ cmd=(
   --viser-env-id "${VISER_ENV_ID}"
   --viser-update-hz "${VISER_UPDATE_HZ}"
   --viser-recenter "${VISER_RECENTER}"
-  --simulator.config.sim.physx.gpu_collision_stack_size "${PHYSX_GPU_COLLISION_STACK_SIZE}"
   --simulator.config.sim.max_episode_length_s "${MAX_EPISODE_LENGTH_S}"
   --robot.object.enabled True
   --robot.object.object_urdf_path "${OBJECT_URDF}"
@@ -487,6 +509,12 @@ cmd=(
   --algo.config.distill.ppo_start_epoch -1
   --algo.config.distill.dagger_end_epoch -1
 )
+
+if [[ "${SIMULATOR_SUBCOMMAND}" != "simulator:mujoco" ]]; then
+  cmd+=(--simulator.config.sim.physx.gpu_collision_stack_size "${PHYSX_GPU_COLLISION_STACK_SIZE}")
+else
+  cmd+=(--randomization.ignore_unsupported True)
+fi
 
 if [[ -n "${OBJECT_SCALE_ARG}" ]]; then
   cmd+=(--robot.object.scale "${OBJECT_SCALE_ARG}")
@@ -572,6 +600,7 @@ if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
 fi
 
 echo "[INFO] mode_input=${MODE_INPUT} runtime_mode=${MODE}"
+echo "[INFO] simulator_subcommand=${SIMULATOR_SUBCOMMAND:-<default>}"
 echo "[INFO] infer_dataset=${INFER_DATASET}"
 echo "[INFO] checkpoint=${CKPT}"
 echo "[INFO] motion_dir=${MOTION_DIR}"

@@ -413,6 +413,24 @@ g1_29dof_wbt_w_object_distill_sparse_root_cmd = replace(
     ),
 )
 
+g1_29dof_wbt_w_object_distill_sparse_goal_mixed = replace(
+    g1_29dof_wbt_w_object_generalist,
+    training=replace(
+        g1_29dof_wbt_w_object_generalist.training,
+        name="g1_29dof_wbt_w_object_distill_sparse_goal_mixed",
+    ),
+    observation=observation.g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
+    reward=reward.g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed,
+    termination=termination.g1_29dof_wbt_termination_distill_sparse_goal_mixed,
+    algo=replace(
+        g1_29dof_wbt_w_object_generalist.algo,
+        config=replace(
+            g1_29dof_wbt_w_object_generalist.algo.config,
+            module_dict=_w_object_distill_sparse_root_cmd_module_dict,
+        ),
+    ),
+)
+
 # Legacy variant that keeps clip_phase in actor_obs_root.
 # Use only for backward compatibility / old checkpoint reproduction.
 g1_29dof_wbt_w_object_distill_sparse_root_cmd_legacy = replace(
@@ -466,6 +484,7 @@ __all__ = [
     "g1_29dof_wbt_w_object_generalist",
     "g1_29dof_wbt_w_object_generalist_legacy_obs",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd",
+    "g1_29dof_wbt_w_object_distill_sparse_goal_mixed",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_legacy",
 ]
 

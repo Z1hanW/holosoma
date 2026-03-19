@@ -195,6 +195,85 @@ g1_29dof_wbt_reward_w_object = RewardManagerCfg(
     }
 )
 
+g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed = RewardManagerCfg(
+    terms={
+        "motion_relative_body_position_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_relative_body_position_error_exp",
+            params={"sigma": 0.3},
+            weight=1.5,
+        ),
+        "motion_relative_body_orientation_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_relative_body_orientation_error_exp",
+            params={"sigma": 0.4},
+            weight=0.75,
+        ),
+        "motion_global_body_lin_vel": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_global_body_lin_vel",
+            params={"sigma": 1.0},
+            weight=0.2,
+        ),
+        "motion_global_body_ang_vel": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_global_body_ang_vel",
+            params={"sigma": 3.14},
+            weight=0.1,
+        ),
+        "action_rate_l2": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:penalty_action_rate",
+            weight=-0.05,
+        ),
+        "limits_dof_pos": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:limits_dof_pos",
+            params={"soft_dof_pos_limit": 0.9},
+            weight=-100.0,
+        ),
+        "undesired_contacts": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:UndesiredContacts",
+            params={
+                "threshold": 1.0,
+                "undesired_contacts_body_names": (
+                    "^(?!left_foot_contact_point$)(?!right_foot_contact_point$)"
+                    "(?!left_wrist_yaw_link$)(?!right_wrist_yaw_link$)"
+                    "(?!left_ankle_roll_link$)(?!right_ankle_roll_link$)"
+                    "(?!left_wrist_roll_link$)(?!right_wrist_roll_link$)"
+                    "(?!left_wrist_pitch_link$)(?!right_wrist_pitch_link$)"
+                    "(?!left_elbow_link$)(?!right_elbow_link$)"
+                    "(?!torso_link$)"
+                    "(?!left_shoulder_pitch_link$)(?!left_shoulder_roll_link$)(?!left_shoulder_yaw_link$)"
+                    "(?!right_shoulder_pitch_link$)(?!right_shoulder_roll_link$)(?!right_shoulder_yaw_link$).+$"
+                ),
+            },
+            weight=-0.5,
+        ),
+        "sparse_goal_pickup_height_reward": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:sparse_goal_pickup_height_reward",
+            params={"target_height_delta": 0.12, "only_external": True},
+            weight=1.0,
+        ),
+        "sparse_goal_object_xy_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:sparse_goal_object_xy_error_exp",
+            params={"sigma": 0.25, "only_external": True, "picked_only": True},
+            weight=2.0,
+        ),
+        "sparse_goal_object_yaw_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:sparse_goal_object_yaw_error_exp",
+            params={"sigma": 0.6, "only_external": True, "picked_only": True},
+            weight=0.75,
+        ),
+        "sparse_goal_success_bonus": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:sparse_goal_success_bonus",
+            params={
+                "only_external": True,
+                "xy_threshold": 0.10,
+                "yaw_threshold": 0.35,
+                "z_threshold": 0.06,
+                "lin_vel_threshold": 0.30,
+                "ang_vel_threshold": 1.50,
+            },
+            weight=8.0,
+        ),
+    }
+)
+
 g1_29dof_wbt_reward_w_object_extend = RewardManagerCfg(
     terms={
         **g1_29dof_wbt_reward_w_object.terms,

@@ -194,6 +194,9 @@ class DistillationConfig:
     dagger_ignore_zero_teacher_actions: bool = True
     """Ignore samples where teacher action is exactly zero across all dims."""
 
+    dagger_ignore_external_goal_samples: bool = False
+    """Ignore BC samples collected under external sparse-goal episodes."""
+
     dagger_match_std: bool = False
     """Match policy std against teacher std in BC loss (legacy behavior)."""
 

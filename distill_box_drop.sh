@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Distill object-carry generalist -> non-goal student with depth perception access.
+# Distill an OMOMO box-drop student with depth perception.
 #
 # Student policy observation (actor):
-# - actor_obs_root: sparse root command
-# - actor_obs_proprio (base_lin_vel, base_ang_vel, dof_pos, dof_vel, actions)
-# - perception_obs (camera depth)
-# - No actor box state is used by student actor.
+# - actor_obs_root: sparse root command history
+# - actor_obs_proprio: proprio history
+# - actor_obs_drop: final clip object target [dx, dy, dyaw] in the pickup-time pelvis-heading frame
+# - perception_obs: camera depth
 #
 # Teacher policy observation:
 # - actor_obs_legacy + perception_obs (single-frame legacy teacher state + perception)
@@ -35,45 +35,43 @@ if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
 fi
 
 # Sim2real default: sparse root-command distill without clip_phase in student torso observation.
-# Legacy option (old behavior with clip_phase):
-#   EXP=g1-29dof-wbt-w-object-distill-sparse-root-cmd-legacy
 EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd}
-RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_perception}
-TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_perception_access_to_depth}
+RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_drop}
+TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_drop_depth}
 TRAINING_PROJECT=${TRAINING_PROJECT:-boxer}
 
 if [[ -n "${POSITIONAL_RUN_NAME}" ]]; then
   RUN_NAME="${POSITIONAL_RUN_NAME}"
 fi
 
-# Keep launcher self-contained: direct `bash ./distill_box_perception.sh` works out of box.
+# Keep launcher self-contained: direct `bash ./distill_box_drop.sh` works out of box.
 HSSIM_BIN_DIR=${HSSIM_BIN_DIR:-/home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin}
 if [[ -d "${HSSIM_BIN_DIR}" ]]; then
   export PATH="${HSSIM_BIN_DIR}:${PATH}"
 fi
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4,5,6,7}
-# CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 if [[ -z "${NPROC:-}" ]]; then
   IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
   NPROC=${#_visible_gpus[@]}
 fi
 
-# Default teacher (5vlz6pj8/model_24000.pt) uses single-frame actor_obs_legacy + perception_obs
-# with dimensions 175 + 289. Runtime must keep history_length=1 for teacher alignment.
+DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"
+MOTION_DIR=${MOTION_DIR:-"${DEFAULT_MOTION_DIR}"}
+
+# Teacher alignment for 5vlz6pj8/model_24000.pt.
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs_legacy,perception_obs}
 TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
 NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-3000}
 PPO_START_EPOCH=${PPO_START_EPOCH:-0}
-# Perception distill benefits from a shorter curriculum and a stronger PPO tail.
 DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-2000}
 DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-5.0}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.7}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i_17x17}
+STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_proprio','actor_obs_drop']"}
 
-# The selected teacher expects a 289-d perception input. Default to a dedicated 17x17
-# depth preset so runtime perception_obs matches the teacher's encoder input width.
+# Runtime perception must stay 17x17 to match the teacher's 289-d encoder input.
 IMAGE_WIDTH=${IMAGE_WIDTH:-17}
 IMAGE_HEIGHT=${IMAGE_HEIGHT:-17}
 CAMERA_NEAR=${CAMERA_NEAR:-0.001}
@@ -81,15 +79,22 @@ CAMERA_FAR=${CAMERA_FAR:-3.0}
 CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-3.0}
 PERCEPTION_WARP_PREPROCESS=${PERCEPTION_WARP_PREPROCESS:-True}
 
+if [[ ! -e "${MOTION_DIR}" ]]; then
+  echo "MOTION_DIR not found: ${MOTION_DIR}" >&2
+  exit 1
+fi
+
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
 echo "[INFO] run_name=${RUN_NAME} training_name=${TRAINING_NAME}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
+echo "[INFO] motion_dir=${MOTION_DIR}"
+echo "[INFO] student_actor_inputs=${STUDENT_ACTOR_INPUTS}"
 echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC}"
 echo "[INFO] num_learning_iterations=${NUM_LEARNING_ITERATIONS}"
 echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} dagger_loss_coef=${DAGGER_LOSS_COEF} teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
 echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
-echo "[INFO] student actor history=default teacher groups=single-frame"
+echo "[INFO] student actor history=root/proprio default, drop target single-frame; teacher groups=single-frame"
 
 exec env \
   EXP="${EXP}" \
@@ -98,6 +103,7 @@ exec env \
   TRAINING_PROJECT="${TRAINING_PROJECT}" \
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
   NPROC="${NPROC}" \
+  MOTION_DIR="${MOTION_DIR}" \
   TEACHER_OBS_KEYS="${TEACHER_OBS_KEYS}" \
   TEACHER_ACTION_MIX_RATIO="${TEACHER_ACTION_MIX_RATIO}" \
   BC_LOSS_COEF="${BC_LOSS_COEF}" \
@@ -109,7 +115,7 @@ exec env \
   PAIR_TERRAIN_WITH_MOTION="${PAIR_TERRAIN_WITH_MOTION}" \
   bash "${SCRIPT_DIR}/distill_root_box.sh" "${TEACHER_CHECKPOINT}" \
     "perception:${PERCEPTION_PRESET}" \
-    --algo.config.module-dict.actor.input-dim "['actor_obs_root','actor_obs_proprio']" \
+    --algo.config.module-dict.actor.input-dim "${STUDENT_ACTOR_INPUTS}" \
     --perception.camera-width="${IMAGE_WIDTH}" \
     --perception.camera-height="${IMAGE_HEIGHT}" \
     --perception.camera-near="${CAMERA_NEAR}" \

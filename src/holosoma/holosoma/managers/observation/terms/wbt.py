@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
+import torch.nn.functional as F
 
 from holosoma.managers.command.terms.wbt import MotionCommand
 from holosoma.utils.rotations import (
@@ -188,6 +189,151 @@ def _object_goal_pose_size_w(motion_command: MotionCommand) -> tuple[torch.Tenso
     if not motion_command.motion.has_object:
         return None
     return _clip_final_object_goal_pose_size_w(motion_command)
+
+
+def _rot6d_to_matrix(rot6d: torch.Tensor) -> torch.Tensor:
+    first_col = F.normalize(rot6d[..., 0:3], dim=-1)
+    second_col_raw = rot6d[..., 3:6]
+    second_col = F.normalize(
+        second_col_raw - torch.sum(first_col * second_col_raw, dim=-1, keepdim=True) * first_col,
+        dim=-1,
+    )
+    third_col = torch.cross(first_col, second_col, dim=-1)
+    return torch.stack((first_col, second_col, third_col), dim=-1)
+
+
+def _manual_goal_xy_yaw_pick_root_heading(motion_command: MotionCommand) -> torch.Tensor:
+    goal_xy_yaw = torch.zeros((motion_command.num_envs, 3), device=motion_command.device, dtype=torch.float32)
+    if (
+        not motion_command.motion.has_object
+        or not motion_command.manual_goal_enabled
+        or motion_command.manual_goal_object_pos_w is None
+        or motion_command.manual_goal_object_rot6d_w is None
+        or motion_command.pickup_anchor_set is None
+        or motion_command.pickup_anchor_root_pos_w is None
+        or motion_command.pickup_anchor_root_quat_w is None
+    ):
+        return goal_xy_yaw
+
+    anchor_mask = motion_command.pickup_anchor_set
+    if not anchor_mask.any():
+        return goal_xy_yaw
+
+    anchor_pos_w = motion_command.pickup_anchor_root_pos_w[anchor_mask]
+    anchor_quat_w = motion_command.pickup_anchor_root_quat_w[anchor_mask]
+    goal_pos_w = motion_command.manual_goal_object_pos_w[anchor_mask]
+    goal_rot_mat_w = _rot6d_to_matrix(motion_command.manual_goal_object_rot6d_w[anchor_mask])
+
+    anchor_heading_inv = calc_heading_quat_inv(anchor_quat_w, w_last=True)
+    goal_pos_heading = quat_apply(anchor_heading_inv, goal_pos_w - anchor_pos_w, w_last=True)
+    goal_heading = torch.atan2(goal_rot_mat_w[:, 1, 0], goal_rot_mat_w[:, 0, 0])
+    anchor_heading = calc_heading(anchor_quat_w)
+
+    goal_xy_yaw[anchor_mask, :2] = goal_pos_heading[:, :2]
+    goal_xy_yaw[anchor_mask, 2] = normalize_angle(goal_heading - anchor_heading)
+    return goal_xy_yaw
+
+
+def _first_sustained_true_index(mask: torch.Tensor, consecutive_steps: int) -> int | None:
+    """Return the earliest index where `mask` stays true for `consecutive_steps` frames."""
+    if mask.numel() == 0:
+        return None
+    if consecutive_steps <= 1:
+        true_indices = torch.nonzero(mask, as_tuple=False)
+        if true_indices.numel() == 0:
+            return None
+        return int(true_indices[0, 0].item())
+
+    run_length = 0
+    for idx, flag in enumerate(mask.detach().cpu().tolist()):
+        run_length = run_length + 1 if flag else 0
+        if run_length >= consecutive_steps:
+            return idx - consecutive_steps + 1
+    return None
+
+
+def _clip_pickup_goal_xy_yaw_root_heading(
+    motion_command: MotionCommand,
+    *,
+    lift_height_threshold: float,
+    lift_ratio_threshold: float,
+    consecutive_steps: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Cache per-clip final object goal in the pickup-time root-heading frame."""
+    height_key = f"{lift_height_threshold:.4f}".replace(".", "p")
+    ratio_key = f"{lift_ratio_threshold:.4f}".replace(".", "p")
+    cache_name = (
+        "_clip_pickup_goal_xy_yaw_root_heading_"
+        f"h{height_key}_r{ratio_key}_c{consecutive_steps:d}"
+    )
+    cached = getattr(motion_command, cache_name, None)
+    if cached is not None:
+        return cached
+
+    num_clips = motion_command.motion.num_clips
+    goal_xy_yaw_by_clip = torch.zeros((num_clips, 3), device=motion_command.device, dtype=torch.float32)
+    pickup_steps_by_clip = torch.zeros((num_clips,), device=motion_command.device, dtype=torch.long)
+
+    if not motion_command.motion.has_object:
+        cached = (goal_xy_yaw_by_clip, pickup_steps_by_clip)
+        setattr(motion_command, cache_name, cached)
+        return cached
+
+    clip_offsets = motion_command.motion.clip_offsets
+    clip_lengths = motion_command.motion.clip_lengths
+    root_pos_w = motion_command.motion.body_pos_w[:, 0]
+    root_quat_w = motion_command.motion.body_quat_w[:, 0]
+    object_pos_w = motion_command.motion.object_pos_w
+    object_quat_w = motion_command.motion.object_quat_w
+
+    for clip_idx in range(num_clips):
+        clip_start = int(clip_offsets[clip_idx].item())
+        clip_length = int(clip_lengths[clip_idx].item())
+        if clip_length <= 0:
+            continue
+
+        clip_end = clip_start + clip_length
+        clip_root_pos_w = root_pos_w[clip_start:clip_end]
+        clip_root_quat_w = root_quat_w[clip_start:clip_end]
+        clip_object_pos_w = object_pos_w[clip_start:clip_end]
+        clip_object_quat_w = object_quat_w[clip_start:clip_end]
+
+        clip_heading_inv = calc_heading_quat_inv(clip_root_quat_w, w_last=True)
+        clip_object_pos_heading = quat_apply(clip_heading_inv, clip_object_pos_w - clip_root_pos_w, w_last=True)
+        clip_object_z = clip_object_pos_heading[:, 2]
+
+        z_min = clip_object_z.min()
+        z_range = torch.clamp(clip_object_z.max() - z_min, min=0.0)
+        pickup_threshold = z_min + torch.maximum(
+            z_min.new_tensor(float(lift_height_threshold)),
+            z_range * float(lift_ratio_threshold),
+        )
+
+        lifted_mask = clip_object_z >= pickup_threshold
+        pickup_step = _first_sustained_true_index(lifted_mask, consecutive_steps)
+        if pickup_step is None:
+            lifted_indices = torch.nonzero(lifted_mask, as_tuple=False)
+            if lifted_indices.numel() > 0:
+                pickup_step = int(lifted_indices[0, 0].item())
+            else:
+                pickup_step = int(torch.argmax(clip_object_z).item())
+        pickup_steps_by_clip[clip_idx] = pickup_step
+
+        anchor_root_pos_w = clip_root_pos_w[pickup_step : pickup_step + 1]
+        anchor_root_quat_w = clip_root_quat_w[pickup_step : pickup_step + 1]
+        goal_object_pos_w = clip_object_pos_w[-1:]
+        goal_object_quat_w = clip_object_quat_w[-1:]
+
+        anchor_heading_inv = calc_heading_quat_inv(anchor_root_quat_w, w_last=True)
+        goal_pos_heading = quat_apply(anchor_heading_inv, goal_object_pos_w - anchor_root_pos_w, w_last=True)
+        goal_heading = calc_heading(goal_object_quat_w)
+        anchor_heading = calc_heading(anchor_root_quat_w)
+        goal_xy_yaw_by_clip[clip_idx, :2] = goal_pos_heading[0, :2]
+        goal_xy_yaw_by_clip[clip_idx, 2] = normalize_angle(goal_heading - anchor_heading)[0]
+
+    cached = (goal_xy_yaw_by_clip, pickup_steps_by_clip)
+    setattr(motion_command, cache_name, cached)
+    return cached
 
 
 def motion_command(env: WholeBodyTrackingManager) -> torch.Tensor:
@@ -464,3 +610,41 @@ def obj_goal_pose_size_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     goal_rot_mat_b = quaternion_to_matrix(goal_quat_b, w_last=True)
     goal_rot6d_b = goal_rot_mat_b[..., :2].reshape(goal_rot_mat_b.shape[0], -1)
     return torch.cat([goal_pos_b.view(env.num_envs, -1), goal_rot6d_b, goal_size], dim=-1)
+
+
+def obj_goal_xy_yaw_pick_root_heading(
+    env: WholeBodyTrackingManager,
+    lift_height_threshold: float = 0.10,
+    lift_ratio_threshold: float = 0.35,
+    consecutive_steps: int = 5,
+) -> torch.Tensor:
+    """Final clip object [dx, dy, dyaw] in the pickup-time root-heading frame.
+
+    The pickup anchor is derived per clip from the earliest sustained object lift in the
+    mocap reference, using the object height expressed in the clip's root-heading frame.
+    """
+    motion_command = _get_motion_command_and_assert_type(env)
+    if not motion_command.motion.has_object:
+        return torch.zeros(env.num_envs, 3, device=env.device, dtype=torch.float32)
+
+    goal_xy_yaw_by_clip, _ = _clip_pickup_goal_xy_yaw_root_heading(
+        motion_command,
+        lift_height_threshold=lift_height_threshold,
+        lift_ratio_threshold=lift_ratio_threshold,
+        consecutive_steps=consecutive_steps,
+    )
+    return goal_xy_yaw_by_clip[motion_command.clip_ids]
+
+
+def obj_sparse_goal_xy_yaw_pick_root_heading(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Sparse/manual object goal [dx, dy, dyaw] in the runtime pickup-time root-heading frame."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    return _manual_goal_xy_yaw_pick_root_heading(motion_command)
+
+
+def obj_picked_flag(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Binary pickup-phase flag for mixed sparse-goal distillation."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    if motion_command.pickup_anchor_set is None:
+        return torch.zeros((env.num_envs, 1), device=env.device, dtype=torch.float32)
+    return motion_command.pickup_anchor_set.to(dtype=torch.float32).unsqueeze(-1)

@@ -68,6 +68,8 @@ g1_29dof_wbt_object_generalist = replace(
         use_sim_time=True,
         auto_start_motion=True,
         use_sim_state=True,
+        prefer_sim_ref_from_sim_state=True,
+        restart_motion_on_clock_reset=True,
     ),
 )
 

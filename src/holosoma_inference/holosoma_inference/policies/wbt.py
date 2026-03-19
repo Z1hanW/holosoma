@@ -197,6 +197,123 @@ class MotionData:
         return decoded
 
 
+def _extract_motion_cfg_from_metadata(metadata: dict[str, object]) -> dict | None:
+    experiment_config = metadata.get("experiment_config")
+    if not isinstance(experiment_config, dict):
+        return None
+    motion_cfg = (
+        experiment_config.get("command", {})
+        .get("setup_terms", {})
+        .get("motion_command", {})
+        .get("params", {})
+        .get("motion_config", {})
+    )
+    return motion_cfg if isinstance(motion_cfg, dict) else None
+
+
+def _extract_robot_init_state_from_metadata(metadata: dict[str, object]) -> dict | None:
+    experiment_config = metadata.get("experiment_config")
+    if not isinstance(experiment_config, dict):
+        return None
+    robot_cfg = experiment_config.get("robot", {})
+    if not isinstance(robot_cfg, dict):
+        return None
+    init_state = robot_cfg.get("init_state")
+    return init_state if isinstance(init_state, dict) else None
+
+
+def _extract_control_dt_from_metadata(metadata: dict[str, object]) -> float | None:
+    experiment_config = metadata.get("experiment_config")
+    if not isinstance(experiment_config, dict):
+        return None
+    sim_cfg = experiment_config.get("simulator", {}).get("config", {}).get("sim", {})
+    if not isinstance(sim_cfg, dict):
+        return None
+    fps = float(sim_cfg.get("fps", 0.0) or 0.0)
+    control_decimation = float(sim_cfg.get("control_decimation", 0.0) or 0.0)
+    if fps <= 0.0 or control_decimation <= 0.0:
+        return None
+    return control_decimation / fps
+
+
+def _normalize_quat_wxyz_np(quat: np.ndarray) -> np.ndarray:
+    quat = np.asarray(quat, dtype=np.float32)
+    norm = np.linalg.norm(quat, axis=-1, keepdims=True)
+    return np.divide(quat, norm, out=quat, where=norm > 0)
+
+
+def _slerp_quat_wxyz_np(start: np.ndarray, end: np.ndarray, alphas: np.ndarray) -> np.ndarray:
+    start = _normalize_quat_wxyz_np(np.asarray(start, dtype=np.float32).reshape(4))
+    end = _normalize_quat_wxyz_np(np.asarray(end, dtype=np.float32).reshape(4))
+    alphas = np.asarray(alphas, dtype=np.float32).reshape(-1)
+    if alphas.size == 0:
+        return np.zeros((0, 4), dtype=np.float32)
+
+    dot = float(np.dot(start, end))
+    if dot < 0.0:
+        end = -end
+        dot = -dot
+
+    if dot > 0.9995:
+        blended = start[None, :] + (end - start)[None, :] * alphas[:, None]
+        return _normalize_quat_wxyz_np(blended)
+
+    theta_0 = np.arccos(np.clip(dot, -1.0, 1.0))
+    sin_theta_0 = np.sin(theta_0)
+    theta = theta_0 * alphas
+    sin_theta = np.sin(theta)
+    s0 = np.cos(theta) - dot * sin_theta / sin_theta_0
+    s1 = sin_theta / sin_theta_0
+    return (s0[:, None] * start[None, :]) + (s1[:, None] * end[None, :])
+
+
+def _apply_transition_segment_np(
+    motion: dict[str, np.ndarray],
+    *,
+    start_state: dict[str, np.ndarray],
+    target_state: dict[str, np.ndarray],
+    num_steps: int,
+    prepend: bool,
+    drop_first: bool,
+    drop_last: bool,
+) -> None:
+    if num_steps <= 0:
+        return
+
+    alphas = np.linspace(0.0, 1.0, num_steps + 1, dtype=np.float32)
+    if drop_first:
+        alphas = alphas[1:]
+    if drop_last:
+        alphas = alphas[:-1]
+    if alphas.size == 0:
+        return
+
+    def _lerp(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        a = np.asarray(a, dtype=np.float32)
+        b = np.asarray(b, dtype=np.float32)
+        view = alphas.reshape(-1, *([1] * a.ndim))
+        return a + view * (b - a)
+
+    segments = {
+        "joint_pos": _lerp(start_state["joint_pos"], target_state["joint_pos"]),
+        "joint_vel": _lerp(start_state["joint_vel"], target_state["joint_vel"]),
+        "root_pos_w": _lerp(start_state["root_pos"], target_state["root_pos"]),
+        "ref_pos_w": _lerp(start_state["ref_pos"], target_state["ref_pos"]),
+        "root_quat_w": _slerp_quat_wxyz_np(start_state["root_quat"], target_state["root_quat"], alphas),
+        "ref_quat_w": _slerp_quat_wxyz_np(start_state["ref_quat"], target_state["ref_quat"], alphas),
+    }
+    if "object_pos" in start_state and "object_pos" in target_state:
+        segments["object_pos_w"] = _lerp(start_state["object_pos"], target_state["object_pos"])
+        segments["object_quat_w"] = _slerp_quat_wxyz_np(start_state["object_quat"], target_state["object_quat"], alphas)
+        segments["object_size"] = _lerp(start_state["object_size"], target_state["object_size"])
+
+    for key, segment in segments.items():
+        if prepend:
+            motion[key] = np.concatenate([segment, motion[key]], axis=0)
+        else:
+            motion[key] = np.concatenate([motion[key], segment], axis=0)
+
+
 class WholeBodyTrackingPolicy(BasePolicy):
     def __init__(self, config: InferenceConfig):
         # initialize timestep
@@ -325,10 +442,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if self.config.task.auto_start_motion:
             self._handle_start_motion_clip()
         elif self.config.task.auto_start_motion_clip:
-            if self.use_policy_action:
-                self._handle_start_motion_clip()
-            else:
-                self._auto_start_motion_clip_pending = True
+            self._auto_start_motion_clip_pending = True
 
     def _get_ref_body_pose_in_world(self, robot_state_data) -> tuple[np.ndarray, np.ndarray]:
         if bool(getattr(self.config.task, "prefer_sim_ref_from_sim_state", False)):
@@ -459,8 +573,140 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         robot_dof_names = metadata.get("dof_names") or list(self.config.robot.dof_names)
         self._motion_data = MotionData(motion_path, list(robot_dof_names), ref_name)
+        self._maybe_apply_training_motion_transitions_to_motion_data(metadata, ref_name)
         self._motion_cfg = motion_cfg or {}
         self._motion_alignment_enabled = bool((motion_cfg or {}).get("align_motion_to_init_yaw", False))
+
+    def _maybe_apply_training_motion_transitions_to_motion_data(self, metadata: dict, ref_name: str) -> None:
+        if self._motion_data is None or not bool(self.config.task.apply_training_motion_transitions):
+            return
+
+        motion_cfg = _extract_motion_cfg_from_metadata(metadata)
+        init_state = _extract_robot_init_state_from_metadata(metadata)
+        control_dt = _extract_control_dt_from_metadata(metadata)
+        if not isinstance(motion_cfg, dict) or not isinstance(init_state, dict) or control_dt is None or control_dt <= 0.0:
+            return
+
+        needs_prepend = bool(motion_cfg.get("enable_default_pose_prepend", False))
+        needs_append = bool(motion_cfg.get("enable_default_pose_append", False))
+        if not needs_prepend and not needs_append:
+            return
+
+        motion_data = self._motion_data
+        robot_dof_names = list(metadata.get("dof_names") or self.config.robot.dof_names)
+        default_dof = np.zeros((len(robot_dof_names),), dtype=np.float32)
+        default_joint_angles = init_state.get("default_joint_angles")
+        if isinstance(default_joint_angles, dict):
+            for i, name in enumerate(robot_dof_names):
+                if name in default_joint_angles:
+                    default_dof[i] = float(default_joint_angles[name])
+        else:
+            default_dof = motion_data.joint_pos[0].astype(np.float32, copy=True)
+
+        def _build_default_state(use_motion_end: bool) -> dict[str, np.ndarray]:
+            motion_idx = -1 if use_motion_end else 0
+            motion_root_pos = motion_data.root_pos_w[motion_idx]
+            motion_root_quat = motion_data.root_quat_w[motion_idx]
+            _, _, motion_yaw = quat_to_rpy(motion_root_quat)
+
+            init_pos = np.asarray(init_state.get("pos", [0.0, 0.0, motion_root_pos[2]]), dtype=np.float32)
+            init_rot_xyzw = np.asarray(init_state.get("rot", [0.0, 0.0, 0.0, 1.0]), dtype=np.float32).reshape(1, 4)
+            init_rot_wxyz = xyzw_to_wxyz(init_rot_xyzw)[0]
+            init_roll, init_pitch, _ = quat_to_rpy(init_rot_wxyz)
+
+            default_root_pos = np.asarray([motion_root_pos[0], motion_root_pos[1], init_pos[2]], dtype=np.float32)
+            default_root_quat = rpy_to_quat((float(init_roll), float(init_pitch), float(motion_yaw))).astype(np.float32)
+
+            root_quat_xyzw = wxyz_to_xyzw(default_root_quat.reshape(1, 4))[0]
+            dof_pos_pin = default_dof[self.pinocchio_robot.real2pinocchio_index]
+            configuration = np.concatenate([default_root_pos, root_quat_xyzw, dof_pos_pin], axis=0)
+            ref_pos, ref_quat_xyzw = self.pinocchio_robot.fk_and_get_ref_body_pose_in_world(configuration)
+            state = {
+                "joint_pos": default_dof.astype(np.float32, copy=True),
+                "joint_vel": np.zeros_like(default_dof, dtype=np.float32),
+                "root_pos": default_root_pos.astype(np.float32, copy=False),
+                "root_quat": default_root_quat.astype(np.float32, copy=False),
+                "ref_pos": ref_pos.astype(np.float32, copy=False),
+                "ref_quat": xyzw_to_wxyz(ref_quat_xyzw.reshape(1, 4))[0].astype(np.float32, copy=False),
+            }
+            if motion_data.has_object:
+                state["object_pos"] = motion_data.object_pos_w[motion_idx].astype(np.float32, copy=False)
+                state["object_quat"] = motion_data.object_quat_w[motion_idx].astype(np.float32, copy=False)
+                state["object_size"] = motion_data.object_size[motion_idx].astype(np.float32, copy=False)
+            return state
+
+        def _motion_state(idx: int) -> dict[str, np.ndarray]:
+            state = {
+                "joint_pos": motion_data.joint_pos[idx].astype(np.float32, copy=False),
+                "joint_vel": motion_data.joint_vel[idx].astype(np.float32, copy=False),
+                "root_pos": motion_data.root_pos_w[idx].astype(np.float32, copy=False),
+                "root_quat": motion_data.root_quat_w[idx].astype(np.float32, copy=False),
+                "ref_pos": motion_data.ref_pos_w[idx].astype(np.float32, copy=False),
+                "ref_quat": motion_data.ref_quat_w[idx].astype(np.float32, copy=False),
+            }
+            if motion_data.has_object:
+                state["object_pos"] = motion_data.object_pos_w[idx].astype(np.float32, copy=False)
+                state["object_quat"] = motion_data.object_quat_w[idx].astype(np.float32, copy=False)
+                state["object_size"] = motion_data.object_size[idx].astype(np.float32, copy=False)
+            return state
+
+        motion = {
+            "joint_pos": motion_data.joint_pos.astype(np.float32, copy=True),
+            "joint_vel": motion_data.joint_vel.astype(np.float32, copy=True),
+            "root_pos_w": motion_data.root_pos_w.astype(np.float32, copy=True),
+            "root_quat_w": motion_data.root_quat_w.astype(np.float32, copy=True),
+            "ref_pos_w": motion_data.ref_pos_w.astype(np.float32, copy=True),
+            "ref_quat_w": motion_data.ref_quat_w.astype(np.float32, copy=True),
+        }
+        if motion_data.has_object:
+            motion["object_pos_w"] = motion_data.object_pos_w.astype(np.float32, copy=True)
+            motion["object_quat_w"] = motion_data.object_quat_w.astype(np.float32, copy=True)
+            motion["object_size"] = motion_data.object_size.astype(np.float32, copy=True)
+
+        if needs_prepend:
+            prepend_duration = float(motion_cfg.get("default_pose_prepend_duration_s", 0.0) or 0.0)
+            prepend_steps = round(prepend_duration / control_dt)
+            if prepend_steps > 1:
+                _apply_transition_segment_np(
+                    motion,
+                    start_state=_build_default_state(use_motion_end=False),
+                    target_state=_motion_state(0),
+                    num_steps=prepend_steps,
+                    prepend=True,
+                    drop_first=False,
+                    drop_last=True,
+                )
+
+        if needs_append:
+            append_duration = float(motion_cfg.get("default_pose_append_duration_s", 0.0) or 0.0)
+            append_steps = round(append_duration / control_dt)
+            if append_steps > 1:
+                _apply_transition_segment_np(
+                    motion,
+                    start_state=_motion_state(-1),
+                    target_state=_build_default_state(use_motion_end=True),
+                    num_steps=append_steps,
+                    prepend=False,
+                    drop_first=True,
+                    drop_last=False,
+                )
+
+        motion_data.joint_pos = motion["joint_pos"]
+        motion_data.joint_vel = motion["joint_vel"]
+        motion_data.root_pos_w = motion["root_pos_w"]
+        motion_data.root_quat_w = motion["root_quat_w"]
+        motion_data.ref_pos_w = motion["ref_pos_w"]
+        motion_data.ref_quat_w = motion["ref_quat_w"]
+        if motion_data.has_object:
+            motion_data.object_pos_w = motion["object_pos_w"]
+            motion_data.object_quat_w = motion["object_quat_w"]
+            motion_data.object_size = motion["object_size"]
+        motion_data.frame_count = motion_data.joint_pos.shape[0]
+        logger.info(
+            "Applied training motion transitions to inference motion data for '{}': frame_count={}",
+            ref_name,
+            motion_data.frame_count,
+        )
 
     def setup_policy(self, model_path):
         self.onnx_policy_session = onnxruntime.InferenceSession(model_path)
@@ -472,6 +718,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         metadata = {}
         for prop in onnx_model.metadata_props:
             metadata[prop.key] = json.loads(prop.value)
+        self._onnx_metadata = metadata
         self._onnx_obs_dim = self._get_onnx_obs_dim()
 
         # Extract URDF text from ONNX metadata
@@ -480,6 +727,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         self.onnx_kp = np.array(metadata["kp"]) if "kp" in metadata else None
         self.onnx_kd = np.array(metadata["kd"]) if "kd" in metadata else None
+
+        # Keep WBT rollout aligned with training-time action scaling semantics.
+        self._set_policy_action_scales_from_metadata(metadata)
 
         if self.onnx_kp is not None:
             from pathlib import Path
@@ -929,6 +1179,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
         return current_obs_buffer_dict
 
     def rl_inference(self, robot_state_data):
+        if self._auto_start_motion_clip_pending and self.use_policy_action and not self.motion_clip_progressing:
+            self._auto_start_motion_clip_pending = False
+            self._handle_start_motion_clip()
+
         # prepare obs, run policy inference
         if not self.motion_clip_progressing:
             # Keep motion index pinned at the start while waiting to trigger the clip.
@@ -957,7 +1211,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         # store last policy action
         self.last_policy_action = policy_action.copy()
         # scale policy action
-        self.scaled_policy_action = policy_action * self.policy_action_scale
+        self.scaled_policy_action = policy_action * self.policy_action_scales
 
         # update motion timestep
         if self.motion_clip_progressing:
@@ -1000,10 +1254,17 @@ class WholeBodyTrackingPolicy(BasePolicy):
             # Motion just started; anchor to the first received clock tick.
             self.motion_start_timestep = current_clock
         elif self._last_clock_reading is not None and current_clock < self._last_clock_reading:
-            # Simulator clock jumped backwards (e.g., reset). Re-anchor start time while preserving progress.
-            offset_ms = round(self.motion_timestep * self.timestep_interval_ms)
-            self.logger.warning("Clock sync returned earlier timestamp; adjusting motion timing anchor.")
-            self.motion_start_timestep = current_clock - offset_ms
+            if bool(getattr(self.config.task, "restart_motion_on_clock_reset", False)):
+                self.logger.warning("Clock sync returned earlier timestamp; restarting motion clip from frame 0.")
+                self._handle_start_motion_clip()
+                current_clock = self.clock_sub.get_clock()
+            else:
+                # Simulator clock jumped backwards (e.g., reset). Re-anchor start time while preserving progress.
+                offset_ms = round(self.motion_timestep * self.timestep_interval_ms)
+                self.logger.warning("Clock sync returned earlier timestamp; adjusting motion timing anchor.")
+                self.motion_start_timestep = current_clock - offset_ms
+        if self.motion_start_timestep is None:
+            self.motion_start_timestep = current_clock
         self._last_clock_reading = current_clock
         elapsed_ms = current_clock - self.motion_start_timestep
         if self.motion_timestep == 0 and int(elapsed_ms // self.timestep_interval_ms) > 1:

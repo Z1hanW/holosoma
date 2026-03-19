@@ -93,6 +93,9 @@ class TaskConfig:
     prefer_sim_ref_from_sim_state: bool = False
     """Prefer simulator-measured ref-body pose from split sim-state when available."""
 
+    restart_motion_on_clock_reset: bool = False
+    """When split sim clock jumps backwards after a simulator reset, restart the motion clip from frame 0."""
+
     wandb_download_dir: str = "/tmp"
     """Directory for downloading W&B checkpoints."""
 

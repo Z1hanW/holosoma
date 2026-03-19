@@ -31,6 +31,9 @@ from holosoma.utils.rotations import (
 )
 from holosoma.utils.simulator_config import SimulatorType
 
+_RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD = 0.10
+_RUNTIME_PICKUP_CONSECUTIVE_STEPS = 5
+
 
 #########################################################################################################
 ## MotionLoader and AdaptiveTimestepsSampler
@@ -1156,11 +1159,19 @@ class MotionCommand(CommandTermBase):
         self.manual_goal_enabled = False
         self.manual_goal_object_pos_w: torch.Tensor | None = None
         self.manual_goal_object_rot6d_w: torch.Tensor | None = None
+        self.manual_goal_is_external: torch.Tensor | None = None
+        self.clip_goal_object_pos_w: torch.Tensor | None = None
+        self.clip_goal_object_rot6d_w: torch.Tensor | None = None
         self._sparse_goal_cfg: SparseObjectGoalConfig | None = None
         self._sparse_goal_curriculum_enabled = False
         self._sparse_goal_reset_counter = 0
         self._sparse_goal_external_prob = 0.0
         self._sparse_goal_external_fraction_last_reset = 0.0
+        self.pickup_anchor_set: torch.Tensor | None = None
+        self.pickup_anchor_root_pos_w: torch.Tensor | None = None
+        self.pickup_anchor_root_quat_w: torch.Tensor | None = None
+        self.pickup_object_rel_z_baseline: torch.Tensor | None = None
+        self.pickup_consecutive_counter: torch.Tensor | None = None
         self._multi_object_enabled = False
         self._sim_object_names: list[str] = []
         self._clip_object_ids: torch.Tensor | None = None
@@ -1191,11 +1202,20 @@ class MotionCommand(CommandTermBase):
         self.manual_goal_object_pos_w = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
         identity_rot6d = torch.tensor([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], device=self.device, dtype=torch.float32)
         self.manual_goal_object_rot6d_w = identity_rot6d.unsqueeze(0).repeat(self.num_envs, 1)
+        self.manual_goal_is_external = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
+        self.clip_goal_object_pos_w = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
+        self.clip_goal_object_rot6d_w = identity_rot6d.unsqueeze(0).repeat(self.num_envs, 1)
         self._sparse_goal_cfg = self.motion_cfg.sparse_object_goal
         self._sparse_goal_curriculum_enabled = bool(self._sparse_goal_cfg.enabled)
         self._sparse_goal_reset_counter = 0
         self._sparse_goal_external_prob = 0.0
         self._sparse_goal_external_fraction_last_reset = 0.0
+        self.pickup_anchor_set = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
+        self.pickup_anchor_root_pos_w = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
+        self.pickup_anchor_root_quat_w = torch.zeros((self.num_envs, 4), device=self.device, dtype=torch.float32)
+        self.pickup_anchor_root_quat_w[:, 3] = 1.0
+        self.pickup_object_rel_z_baseline = torch.zeros((self.num_envs,), device=self.device, dtype=torch.float32)
+        self.pickup_consecutive_counter = torch.zeros((self.num_envs,), device=self.device, dtype=torch.long)
 
         init_state = self._env.robot_config.init_state
         self._reset_to_default_pose = os.environ.get("HOLOSOMA_RESET_TO_DEFAULT_POSE", "0").lower() in (
@@ -1578,6 +1598,8 @@ class MotionCommand(CommandTermBase):
 
         if self.motion_cfg.align_motion_to_init_yaw:
             self._update_motion_alignment(env_ids)
+        if self.manual_goal_is_external is not None:
+            self.manual_goal_is_external[env_ids] = False
         self._update_sparse_object_goals_on_reset(env_ids, clip_lengths)
 
         # 1. Get the reference root/body poses
@@ -1673,6 +1695,7 @@ class MotionCommand(CommandTermBase):
         self._env.simulator.robot_root_states[env_ids, 3:7] = target_root_rot
         self._env.simulator.robot_root_states[env_ids, 7:10] = target_root_lin_vel
         self._env.simulator.robot_root_states[env_ids, 10:13] = target_root_ang_vel
+        self._reset_pickup_anchor_state(env_ids, root_pos_w=target_root_pos, root_quat_w=target_root_rot)
 
         # 4. Set the object states in simulator
         if self.motion.has_object:
@@ -1701,6 +1724,12 @@ class MotionCommand(CommandTermBase):
             )  # (num_envs, 13), xyzw
             # 4.3 set active object states; inactive objects are parked away for multi-URDF banks.
             self._set_simulator_object_states(env_ids, object_states)
+            self._reset_pickup_anchor_state(
+                env_ids,
+                root_pos_w=target_root_pos,
+                root_quat_w=target_root_rot,
+                object_pos_w=target_obj_pos,
+            )
 
         self._update_future_target_poses()
 
@@ -1776,6 +1805,7 @@ class MotionCommand(CommandTermBase):
             self.adaptive_timesteps_sampler.update_bin_failed_count()
 
         self._update_future_target_poses()
+        self._update_pickup_anchor_state()
 
     def _current_clip_lengths(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         clip_ids = self.clip_ids if env_ids is None else self.clip_ids[env_ids]
@@ -1888,6 +1918,64 @@ class MotionCommand(CommandTermBase):
             raise ValueError(f"{name} must provide exactly 3 values, got {len(values)}")
         return torch.tensor(values, device=self.device, dtype=torch.float32)
 
+    def _reset_pickup_anchor_state(
+        self,
+        env_ids: torch.Tensor,
+        *,
+        root_pos_w: torch.Tensor | None = None,
+        root_quat_w: torch.Tensor | None = None,
+        object_pos_w: torch.Tensor | None = None,
+    ) -> None:
+        if (
+            self.pickup_anchor_set is None
+            or self.pickup_anchor_root_pos_w is None
+            or self.pickup_anchor_root_quat_w is None
+            or self.pickup_object_rel_z_baseline is None
+            or self.pickup_consecutive_counter is None
+        ):
+            return
+
+        self.pickup_anchor_set[env_ids] = False
+        self.pickup_consecutive_counter[env_ids] = 0
+        self.pickup_anchor_root_pos_w[env_ids] = 0.0
+        self.pickup_anchor_root_quat_w[env_ids] = 0.0
+        self.pickup_anchor_root_quat_w[env_ids, 3] = 1.0
+        self.pickup_object_rel_z_baseline[env_ids] = 0.0
+
+        if root_pos_w is None or root_quat_w is None or object_pos_w is None:
+            return
+        self.pickup_anchor_root_pos_w[env_ids] = root_pos_w
+        self.pickup_anchor_root_quat_w[env_ids] = root_quat_w
+        self.pickup_object_rel_z_baseline[env_ids] = object_pos_w[:, 2] - root_pos_w[:, 2]
+
+    def _update_pickup_anchor_state(self) -> None:
+        if (
+            not self.motion.has_object
+            or self.pickup_anchor_set is None
+            or self.pickup_anchor_root_pos_w is None
+            or self.pickup_anchor_root_quat_w is None
+            or self.pickup_object_rel_z_baseline is None
+            or self.pickup_consecutive_counter is None
+        ):
+            return
+
+        current_rel_z = self.simulator_object_pos_w[:, 2] - self.robot_root_pos_w[:, 2]
+        lifted = (current_rel_z - self.pickup_object_rel_z_baseline) >= _RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD
+        self.pickup_consecutive_counter = torch.where(
+            lifted,
+            self.pickup_consecutive_counter + 1,
+            torch.zeros_like(self.pickup_consecutive_counter),
+        )
+        newly_picked = (~self.pickup_anchor_set) & (
+            self.pickup_consecutive_counter >= _RUNTIME_PICKUP_CONSECUTIVE_STEPS
+        )
+        if not newly_picked.any():
+            return
+
+        self.pickup_anchor_set[newly_picked] = True
+        self.pickup_anchor_root_pos_w[newly_picked] = self.robot_root_pos_w[newly_picked]
+        self.pickup_anchor_root_quat_w[newly_picked] = self.robot_root_quat_w[newly_picked]
+
     def _apply_motion_alignment_pos_subset(self, pos: torch.Tensor, env_ids: torch.Tensor) -> torch.Tensor:
         align_quat = self._align_quat[env_ids]
         align_pos = self._align_pos[env_ids]
@@ -1980,6 +2068,8 @@ class MotionCommand(CommandTermBase):
 
         self.manual_goal_enabled = True
         goal_pos_w, goal_quat_w = self._sample_clip_based_object_goal_pose_w(env_ids, clip_lengths)
+        clip_goal_pos_w = goal_pos_w.clone()
+        clip_goal_quat_w = goal_quat_w.clone()
 
         p_ext = self._current_external_goal_prob()
         self._sparse_goal_external_prob = p_ext
@@ -1989,10 +2079,18 @@ class MotionCommand(CommandTermBase):
             goal_pos_w = torch.where(external_mask.unsqueeze(1), ext_pos_w, goal_pos_w)
             goal_quat_w = torch.where(external_mask.unsqueeze(1), ext_quat_w, goal_quat_w)
 
+        clip_goal_rot_mat = quaternion_to_matrix(clip_goal_quat_w, w_last=True)
+        clip_goal_rot6d_w = clip_goal_rot_mat[..., :2].reshape(clip_goal_rot_mat.shape[0], 6)
         goal_rot_mat = quaternion_to_matrix(goal_quat_w, w_last=True)
         goal_rot6d_w = goal_rot_mat[..., :2].reshape(goal_rot_mat.shape[0], 6)
+        if self.clip_goal_object_pos_w is not None:
+            self.clip_goal_object_pos_w[env_ids] = clip_goal_pos_w
+        if self.clip_goal_object_rot6d_w is not None:
+            self.clip_goal_object_rot6d_w[env_ids] = clip_goal_rot6d_w
         self.manual_goal_object_pos_w[env_ids] = goal_pos_w
         self.manual_goal_object_rot6d_w[env_ids] = goal_rot6d_w
+        if self.manual_goal_is_external is not None:
+            self.manual_goal_is_external[env_ids] = external_mask
         self._sparse_goal_external_fraction_last_reset = float(external_mask.float().mean().item())
 
         if not self._env.is_evaluating:
@@ -2001,6 +2099,29 @@ class MotionCommand(CommandTermBase):
     @property
     def command(self) -> torch.Tensor:
         return torch.cat([self.joint_pos, self.joint_vel], dim=1)
+
+    def get_sparse_goal_external_mask(self) -> torch.Tensor:
+        if (
+            not self.motion.has_object
+            or not self.manual_goal_enabled
+            or self.manual_goal_object_pos_w is None
+            or self.manual_goal_object_rot6d_w is None
+        ):
+            return torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
+
+        if self.manual_goal_is_external is not None:
+            external_mask = self.manual_goal_is_external.clone()
+        else:
+            external_mask = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
+
+        if self.clip_goal_object_pos_w is None or self.clip_goal_object_rot6d_w is None:
+            return external_mask
+
+        pos_diff = torch.any(torch.abs(self.manual_goal_object_pos_w - self.clip_goal_object_pos_w) > 1.0e-6, dim=-1)
+        rot_diff = torch.any(
+            torch.abs(self.manual_goal_object_rot6d_w - self.clip_goal_object_rot6d_w) > 1.0e-6, dim=-1
+        )
+        return external_mask | pos_diff | rot_diff
 
     def _get_env_offsets(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         base = self._env.simulator.scene.env_origins
@@ -2292,6 +2413,23 @@ class MotionCommand(CommandTermBase):
         self._sparse_goal_reset_counter = 0
         self._sparse_goal_external_prob = 0.0
         self._sparse_goal_external_fraction_last_reset = 0.0
+        if self.manual_goal_is_external is not None:
+            self.manual_goal_is_external.zero_()
+        if self.clip_goal_object_pos_w is not None:
+            self.clip_goal_object_pos_w.zero_()
+        if self.clip_goal_object_rot6d_w is not None:
+            self.clip_goal_object_rot6d_w.zero_()
+        if self.pickup_anchor_set is not None:
+            self.pickup_anchor_set.zero_()
+        if self.pickup_anchor_root_pos_w is not None:
+            self.pickup_anchor_root_pos_w.zero_()
+        if self.pickup_anchor_root_quat_w is not None:
+            self.pickup_anchor_root_quat_w.zero_()
+            self.pickup_anchor_root_quat_w[:, 3] = 1.0
+        if self.pickup_object_rel_z_baseline is not None:
+            self.pickup_object_rel_z_baseline.zero_()
+        if self.pickup_consecutive_counter is not None:
+            self.pickup_consecutive_counter.zero_()
 
     def _update_motion_alignment(self, env_ids: torch.Tensor) -> None:
         if env_ids.numel() == 0:

@@ -598,6 +598,11 @@ class ViserLiveViewer:
             "true",
             "yes",
         )
+        self._enable_object_reset_override = os.environ.get("VISER_ENABLE_OBJECT_RESET_OVERRIDE", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
         self._clip_lock_default = os.environ.get("VISER_CLIP_LOCK_DEFAULT", "1").lower() in (
             "1",
             "true",
@@ -680,6 +685,10 @@ class ViserLiveViewer:
         if self._faithful_mode and "VISER_PERCEPTION_IMAGE_MODE" not in os.environ:
             perception_image_mode = "depth"
         self._perception_image_mode = perception_image_mode
+        perception_depth_source = os.environ.get("VISER_PERCEPTION_DEPTH_SOURCE", "obs").strip().lower()
+        if perception_depth_source not in ("obs", "raw"):
+            perception_depth_source = "obs"
+        self._perception_depth_source = perception_depth_source
         if self._faithful_mode:
             self._strict_camera_rays = True
             self._disable_perception_image_pipeline = False
@@ -758,6 +767,7 @@ class ViserLiveViewer:
         self._perception_show_depth_cb = None
         self._perception_show_frustum_cb = None
         self._perception_show_points_cb = None
+        self._perception_depth_source_dropdown = None
         self._perception_show_heightmap_joint_cb = None
         self._perception_show_camera_joint_cb = None
         self._perception_frustum = None
@@ -2131,6 +2141,22 @@ class ViserLiveViewer:
             return None
         output_mode = getattr(cfg, "output_mode", None)
         if output_mode == "camera_depth":
+            depth_source = self._get_perception_depth_source()
+            if depth_source == "obs":
+                width = int(getattr(perception_mgr, "_camera_obs_width", 0) or 0)
+                height = int(getattr(perception_mgr, "_camera_obs_height", 0) or 0)
+                if width > 0 and height > 0:
+                    return height, width
+                resize_cfg = getattr(cfg, "camera_warp_resize", None)
+                if resize_cfg is not None:
+                    try:
+                        resize_h, resize_w = resize_cfg
+                        resize_h = int(resize_h)
+                        resize_w = int(resize_w)
+                        if resize_h > 0 and resize_w > 0:
+                            return resize_h, resize_w
+                    except Exception:
+                        pass
             width = int(getattr(perception_mgr, "_camera_width", 0) or 0)
             height = int(getattr(perception_mgr, "_camera_height", 0) or 0)
             if width > 0 and height > 0:
@@ -2152,6 +2178,16 @@ class ViserLiveViewer:
             if grid_x > 0 and grid_y > 0:
                 return grid_x, grid_y
         return None
+
+    def _get_perception_depth_source(self) -> str:
+        if self._perception_depth_source_dropdown is not None:
+            try:
+                value = str(self._perception_depth_source_dropdown.value).strip().lower()
+            except Exception:
+                value = self._perception_depth_source
+            if value in ("obs", "raw"):
+                return value
+        return self._perception_depth_source
 
     def _resolve_heightmap_fov_aspect(self, perception_mgr) -> tuple[float, float]:
         grid_x = int(getattr(perception_mgr, "_heightmap_grid_x", 0) or 0)
@@ -2197,6 +2233,15 @@ class ViserLiveViewer:
                 initial_value=True,
                 hint=show_image_hint,
             )
+            if output_mode == "camera_depth":
+                self._perception_depth_source_dropdown = self._server.gui.add_dropdown(
+                    "Depth Source",
+                    options=("obs", "raw"),
+                    initial_value=self._perception_depth_source,
+                    hint="obs = policy input after crop/resize/normalize; raw = sensor/render output",
+                )
+            else:
+                self._perception_depth_source_dropdown = None
             if not self._disable_perception_frustum:
                 self._perception_show_frustum_cb = self._server.gui.add_checkbox(
                     "Show Frustum",
@@ -2470,7 +2515,7 @@ class ViserLiveViewer:
                 and hasattr(motion_cmd, "motion")
                 and bool(getattr(motion_cmd.motion, "has_object", False))
             )
-            if has_resettable_object:
+            if has_resettable_object and self._enable_object_reset_override:
                 with self._server.gui.add_folder("Reset Object"):
                     self._object_reset_override_cb = self._server.gui.add_checkbox(
                         "Enable Reset Box Override",
@@ -3727,13 +3772,20 @@ class ViserLiveViewer:
         strict_depth_suffix = ""
 
         if output_mode == "camera_depth":
+            depth_source = self._get_perception_depth_source()
             if not self._disable_perception_image_pipeline:
                 try:
-                    depth = perception_mgr.get_camera_depth_map()
+                    if depth_source == "obs":
+                        depth = perception_mgr.get_camera_depth_obs_map()
+                    else:
+                        depth = perception_mgr.get_camera_depth_map()
                 except Exception:
                     depth = None
                 if isinstance(depth, torch.Tensor) and depth.numel() > 0:
                     depth_map = depth[self._env_id].detach().cpu().numpy()
+                    if depth_source == "obs" and bool(getattr(cfg, "camera_warp_normalize", False)):
+                        denom = max(1.0e-6, far - near)
+                        depth_map = np.clip(depth_map + 0.5, 0.0, 1.0) * denom + near
                     if self._perception_flip_vertical:
                         depth_map = np.flipud(depth_map)
                 strict_depth_map, strict_depth_suffix = self._depth_map_from_strict_camera_rays(
@@ -3742,7 +3794,7 @@ class ViserLiveViewer:
                     near=near,
                     far=far,
                 )
-                if strict_depth_map is not None:
+                if strict_depth_map is not None and depth_source == "raw":
                     depth_map = strict_depth_map
             try:
                 cam_pos_t, cam_quat_t = perception_mgr.get_camera_pose(
@@ -3818,7 +3870,10 @@ class ViserLiveViewer:
         display_img = depth_img
         image_mode = "depth" if self._disable_perception_image_pipeline else self._perception_image_mode
         source_mode = str(getattr(cfg, "camera_source", ""))
-        can_show_rendered_rgb = output_mode == "camera_depth" and source_mode in {"rendered", "rendered_depth_sensor"}
+        can_show_rendered_rgb = output_mode == "camera_depth" and source_mode in {
+            "rendered",
+            "rendered_depth_sensor",
+        }
         if image_mode == "rgb":
             if not can_show_rendered_rgb:
                 raise RuntimeError(
@@ -3871,10 +3926,12 @@ class ViserLiveViewer:
             else:
                 min_d, max_d, count = _valid_depth_stats(depth_map, near, far)
                 frame_crc = _depth_crc32(depth_map, far)
+                depth_source = self._get_perception_depth_source() if output_mode == "camera_depth" else "raw"
                 if count == 0:
                     self._perception_stats.content = (
                         "Depth range (valid): n/a (no hits)"
                         f" | crc32={frame_crc}"
+                        f" | src={depth_source}"
                         f" | map={self._depth_colormap}"
                         f" | flip_v={int(self._perception_flip_vertical)}"
                         f" | tx={self._perception_transport_format}"
@@ -3885,6 +3942,7 @@ class ViserLiveViewer:
                     self._perception_stats.content = (
                         f"Depth range (valid): {min_d:.3f} - {max_d:.3f} m | valid: {count}/{total}"
                         f" | crc32={frame_crc}"
+                        f" | src={depth_source}"
                         f" | map={self._depth_colormap}"
                         f" | flip_v={int(self._perception_flip_vertical)}"
                         f" | tx={self._perception_transport_format}"

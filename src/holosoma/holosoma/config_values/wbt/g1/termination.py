@@ -100,4 +100,46 @@ g1_29dof_wbt_termination_distill = TerminationManagerCfg(
     }
 )
 
-__all__ = ["g1_29dof_wbt_termination", "g1_29dof_wbt_termination_distill"]
+g1_29dof_wbt_termination_distill_sparse_goal_mixed = TerminationManagerCfg(
+    terms={
+        "timeout": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.common:timeout_exceeded",
+            is_timeout=True,
+        ),
+        "motion_ends_clip_goal": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:motion_ends_if_clip_goal",
+            params={"only_clip_goal": True},
+        ),
+        "robot_fallen": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:drop_task_base_height_below_threshold",
+            params={"min_height": 0.45},
+        ),
+        "sparse_goal_success": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:SparseGoalSuccess",
+            params={
+                "only_external": True,
+                "xy_threshold": 0.10,
+                "yaw_threshold": 0.35,
+                "z_threshold": 0.06,
+                "lin_vel_threshold": 0.30,
+                "ang_vel_threshold": 1.50,
+                "hold_steps": 10,
+            },
+        ),
+        "sparse_goal_dropped_away": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:SparseGoalDroppedAway",
+            params={
+                "only_external": True,
+                "xy_fail_threshold": 0.35,
+                "release_height_margin": 0.08,
+                "hold_steps": 2,
+            },
+        ),
+    }
+)
+
+__all__ = [
+    "g1_29dof_wbt_termination",
+    "g1_29dof_wbt_termination_distill",
+    "g1_29dof_wbt_termination_distill_sparse_goal_mixed",
+]

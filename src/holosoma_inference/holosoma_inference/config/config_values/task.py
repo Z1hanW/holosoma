@@ -35,6 +35,7 @@ locomotion = TaskConfig(
     sim_object_name="object",
     use_root_reference_at_clip_start=False,
     prefer_sim_ref_from_sim_state=False,
+    restart_motion_on_clock_reset=False,
     use_ros=False,
     wandb_download_dir="/tmp",
 )
@@ -71,6 +72,7 @@ wbt = TaskConfig(
     sim_object_name="object",
     use_root_reference_at_clip_start=False,
     prefer_sim_ref_from_sim_state=False,
+    restart_motion_on_clock_reset=False,
     use_ros=False,
     wandb_download_dir="/tmp",
 )

@@ -15,6 +15,8 @@ from loguru import logger
 
 import mujoco
 
+from holosoma.simulator.mujoco.tensor_views import quat_rotate_inverse_mujoco
+
 from .base import IMujocoBackend
 
 if TYPE_CHECKING:
@@ -109,8 +111,12 @@ class ClassicBackend(IMujocoBackend):
         contact_history_tensor : torch.Tensor
             Contact force history buffer [num_envs, history_len, num_bodies, 3]
         """
-        # Reset force accumulator
-        self._force_tensor.fill_(0.0)
+        target_body_count = int(contact_history_tensor.shape[2])
+        if target_body_count <= 0:
+            return
+
+        # Reset only the portion that maps to holosoma body tensors.
+        self._force_tensor[:, :target_body_count].fill_(0.0)
 
         # Pre-allocate force/torque buffer for mj_contactForce
         forcetorque = np.zeros(6, dtype=np.float64)
@@ -130,14 +136,14 @@ class ClassicBackend(IMujocoBackend):
             b2 = self.model.geom_bodyid[contact.geom2]
 
             # Apply Newton's 3rd law: body1 gets -force, body2 gets +force
-            if 0 < b1 < self.model.nbody:
+            if 0 < b1 <= target_body_count:
                 self._force_tensor[0, b1 - 1] -= force
-            if 0 < b2 < self.model.nbody:
+            if 0 < b2 <= target_body_count:
                 self._force_tensor[0, b2 - 1] += force
 
         # Update history: shift old values right, add current at position 0
         contact_history_tensor[:] = torch.cat(
-            [self._force_tensor.clone().unsqueeze(1), contact_history_tensor[:, :-1]], dim=1
+            [self._force_tensor[:, :target_body_count].clone().unsqueeze(1), contact_history_tensor[:, :-1]], dim=1
         )
 
     def create_root_view(self, addrs: dict) -> BaseMujocoView:
@@ -352,10 +358,11 @@ class ClassicBackend(IMujocoBackend):
         pos = state[:3].detach().cpu().numpy()
         quat_holo = state[3:7].detach().cpu().numpy()  # [qx, qy, qz, qw]
         lin_vel = state[7:10].detach().cpu().numpy()
-        ang_vel = state[10:13].detach().cpu().numpy()
+        ang_vel_world = state[10:13].detach().cpu().numpy()
 
         # Convert quaternion: holosoma [qx,qy,qz,qw] -> MuJoCo [qw,qx,qy,qz]
         quat_mj = np.array([quat_holo[3], quat_holo[0], quat_holo[1], quat_holo[2]])
+        ang_vel_local = quat_rotate_inverse_mujoco(quat_mj, ang_vel_world)
 
         # Get addresses
         qpos_addr = root_addrs["robot_qpos_addr"]
@@ -365,7 +372,7 @@ class ClassicBackend(IMujocoBackend):
         self.data.qpos[qpos_addr : qpos_addr + 3] = pos
         self.data.qpos[qpos_addr + 3 : qpos_addr + 7] = quat_mj
         self.data.qvel[qvel_addr : qvel_addr + 3] = lin_vel
-        self.data.qvel[qvel_addr + 3 : qvel_addr + 6] = ang_vel
+        self.data.qvel[qvel_addr + 3 : qvel_addr + 6] = ang_vel_local
 
         # Update derived quantities
         mujoco.mj_forward(self.model, self.data)

@@ -135,8 +135,8 @@ def _set_state(
     init_state = config["robot_init_state"]
     root_pos = np.asarray(motion["initial_root_pos_w"], dtype=np.float64)
     root_quat_wxyz = np.asarray(motion["initial_root_quat_wxyz"], dtype=np.float64)
-    raw_joint_pos = np.asarray(motion["initial_joint_pos"], dtype=np.float64)
-    raw_joint_vel = np.asarray(motion["initial_joint_vel"], dtype=np.float64)
+    raw_joint_pos = np.asarray(motion.get("reset_joint_pos", motion["initial_joint_pos"]), dtype=np.float64)
+    raw_joint_vel = np.asarray(motion.get("reset_joint_vel", motion["initial_joint_vel"]), dtype=np.float64)
 
     if mode == "demo_raw":
         set_root_pos = root_pos.copy()

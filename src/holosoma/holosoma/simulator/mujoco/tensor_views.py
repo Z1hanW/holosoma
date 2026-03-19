@@ -30,6 +30,24 @@ def quat_holosoma_to_mujoco(quat_holosoma: np.ndarray) -> np.ndarray:
     return quat_holosoma[..., [3, 0, 1, 2]]
 
 
+def quat_apply_mujoco(quat_mujoco: np.ndarray, vec: np.ndarray) -> np.ndarray:
+    """Rotate vectors by MuJoCo-format quaternions [w, x, y, z]."""
+    quat = np.asarray(quat_mujoco, dtype=np.float64)
+    vec = np.asarray(vec, dtype=np.float64)
+    xyz = quat[..., 1:]
+    w = quat[..., :1]
+    t = np.cross(xyz, vec, axis=-1) * 2.0
+    return vec + w * t + np.cross(xyz, t, axis=-1)
+
+
+def quat_rotate_inverse_mujoco(quat_mujoco: np.ndarray, vec: np.ndarray) -> np.ndarray:
+    """Rotate world-frame vectors into the local frame of MuJoCo-format quaternions."""
+    quat = np.asarray(quat_mujoco, dtype=np.float64)
+    inv = quat.copy()
+    inv[..., 1:] *= -1.0
+    return quat_apply_mujoco(inv, vec)
+
+
 class BaseMujocoView(Protocol):
     """
     Protocol defining the interface for MuJoCo view objects.
@@ -281,10 +299,11 @@ class MujocoRootStateView:
         pos = self.qpos_array[self.pos_indices].reshape(self.num_envs, 3)
         quat_mujoco = self.qpos_array[self.quat_indices].reshape(self.num_envs, 4)
         lin_vel = self.qvel_array[self.vel_indices].reshape(self.num_envs, 3)
-        ang_vel = self.qvel_array[self.ang_vel_indices].reshape(self.num_envs, 3)
+        ang_vel_local = self.qvel_array[self.ang_vel_indices].reshape(self.num_envs, 3)
+        ang_vel_world = quat_apply_mujoco(quat_mujoco, ang_vel_local)
 
         quat_holosoma = quat_mujoco_to_holosoma(quat_mujoco)
-        root_state = np.column_stack([pos, quat_holosoma, lin_vel, ang_vel])
+        root_state = np.column_stack([pos, quat_holosoma, lin_vel, ang_vel_world])
 
         tensor_data = torch.from_numpy(root_state).to(self.device, dtype=torch.float32)
 
@@ -304,14 +323,15 @@ class MujocoRootStateView:
             pos = np_value[:, 0:3]
             quat_holosoma = np_value[:, 3:7]
             lin_vel = np_value[:, 7:10]
-            ang_vel = np_value[:, 10:13]
+            ang_vel_world = np_value[:, 10:13]
 
             quat_mujoco = quat_holosoma_to_mujoco(quat_holosoma)
+            ang_vel_local = quat_rotate_inverse_mujoco(quat_mujoco, ang_vel_world)
 
             self.qpos_array[self.pos_indices] = pos.flatten()
             self.qpos_array[self.quat_indices] = quat_mujoco.flatten()
             self.qvel_array[self.vel_indices] = lin_vel.flatten()
-            self.qvel_array[self.ang_vel_indices] = ang_vel.flatten()
+            self.qvel_array[self.ang_vel_indices] = ang_vel_local.flatten()
         else:
             # Partial indexing: Read-modify-write is inefficient but safe.
             current_root_state = self[:]  # Gets full state as a tensor

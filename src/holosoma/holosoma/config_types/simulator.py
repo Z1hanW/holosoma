@@ -592,6 +592,12 @@ class SimulatorInitConfig:
         --simulator.config.mujoco-warp.njmax-per-env=1024
     """
 
+    mujoco_show_object_collision: bool = False
+    """Highlight object collision geoms in the MuJoCo viewer."""
+
+    mujoco_hide_object_visuals_when_showing_collision: bool = False
+    """When object collision highlighting is enabled, dim object visual geoms to expose the collision shape."""
+
     bridge: BridgeConfig = field(default_factory=BridgeConfig)
     """Robot SDK bridge configuration."""
 

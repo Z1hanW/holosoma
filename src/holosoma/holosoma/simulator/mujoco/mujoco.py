@@ -6,6 +6,7 @@ implementations for terrain rendering, contact detection, and physics simulation
 
 from __future__ import annotations
 
+import json
 import os
 
 import mujoco
@@ -25,6 +26,8 @@ from holosoma.simulator.mujoco.fields import prepare_fields, prepare_manager_fie
 from holosoma.simulator.mujoco.scene_manager import MujocoSceneManager
 from holosoma.simulator.mujoco.tensor_views import (
     create_base_linear_acceleration_view,
+    quat_apply_mujoco,
+    quat_rotate_inverse_mujoco,
 )
 from holosoma.simulator.mujoco.video_recorder import MuJoCoVideoRecorder
 from holosoma.simulator.shared.object_registry import ObjectType
@@ -153,6 +156,18 @@ class MuJoCo(BaseSimulator):
         # Text overlay visibility toggle
         self.show_text_overlay: bool = True
         self._pending_reset: bool = False
+        self.show_object_collision_geoms: bool = bool(
+            getattr(self.simulator_config, "mujoco_show_object_collision", False)
+        )
+        self.hide_object_visuals_when_showing_collision: bool = bool(
+            getattr(self.simulator_config, "mujoco_hide_object_visuals_when_showing_collision", False)
+        )
+        self._original_geom_rgba: np.ndarray | None = None
+        self._object_collision_geom_ids = np.zeros((0,), dtype=np.int32)
+        self._object_visual_geom_ids = np.zeros((0,), dtype=np.int32)
+        snapshot_path = os.getenv("HOLOSOMA_MUJOCO_OBJECT_GEOM_SNAPSHOT_PATH", "").strip()
+        self._mujoco_object_geom_snapshot_path: str | None = snapshot_path or None
+        self._mujoco_object_geom_snapshot_written: bool = False
 
         # Command system for keyboard/joystick controls
         # Initialize commands tensor matching IsaacGym format:
@@ -334,6 +349,7 @@ class MuJoCo(BaseSimulator):
         # Compile once at the end
         self.root_model = self.scene_manager.compile()
         self.root_data = mujoco.MjData(self.root_model)
+        self._initialize_object_collision_view_state()
 
         # Apply post-compilation settings
         self.root_model.opt.timestep = self.sim_dt
@@ -675,6 +691,7 @@ class MuJoCo(BaseSimulator):
 
         # Convert quaternion: holosoma [x,y,z,w] → MuJoCo [w,x,y,z]
         initial_rot_mj = [initial_rot[3], initial_rot[0], initial_rot[1], initial_rot[2]]
+        initial_ang_vel_local = quat_rotate_inverse_mujoco(np.asarray(initial_rot_mj, dtype=np.float64), initial_ang_vel)
 
         # Use the existing _set_robot_joint_addressing() results
         # Set position: [x, y, z, qw, qx, qy, qz] (7 elements)
@@ -683,7 +700,7 @@ class MuJoCo(BaseSimulator):
 
         # Set velocity: [vx, vy, vz, wx, wy, wz] (6 elements)
         self.root_data.qvel[self.robot_qvel_addr : self.robot_qvel_addr + 3] = initial_lin_vel
-        self.root_data.qvel[self.robot_qvel_addr + 3 : self.robot_qvel_addr + 6] = initial_ang_vel
+        self.root_data.qvel[self.robot_qvel_addr + 3 : self.robot_qvel_addr + 6] = initial_ang_vel_local
 
     def _register_actor_root_metadata(self, name: str, body_name: str, qpos_addr: int, qvel_addr: int) -> None:
         assert self.root_model
@@ -739,11 +756,9 @@ class MuJoCo(BaseSimulator):
         quat_mj = self.root_data.qpos[qpos_addr + 3 : qpos_addr + 7]
         quat = torch.tensor([quat_mj[1], quat_mj[2], quat_mj[3], quat_mj[0]], device=self.sim_device, dtype=torch.float32)
         lin_vel = torch.tensor(self.root_data.qvel[qvel_addr : qvel_addr + 3], device=self.sim_device, dtype=torch.float32)
-        ang_vel = torch.tensor(
-            self.root_data.qvel[qvel_addr + 3 : qvel_addr + 6],
-            device=self.sim_device,
-            dtype=torch.float32,
-        )
+        ang_vel_local = self.root_data.qvel[qvel_addr + 3 : qvel_addr + 6]
+        ang_vel_world = quat_apply_mujoco(quat_mj, ang_vel_local)
+        ang_vel = torch.tensor(ang_vel_world, device=self.sim_device, dtype=torch.float32)
         return torch.cat([pos, quat, lin_vel, ang_vel], dim=0)
 
     def _actor_pose_from_qpos(self, name: str) -> torch.Tensor:
@@ -772,22 +787,150 @@ class MuJoCo(BaseSimulator):
         pos = state[:3].detach().cpu().numpy()
         quat_holosoma = state[3:7].detach().cpu().numpy()
         lin_vel = state[7:10].detach().cpu().numpy()
-        ang_vel = state[10:13].detach().cpu().numpy()
+        ang_vel_world = state[10:13].detach().cpu().numpy()
         quat_mj = np.array([quat_holosoma[3], quat_holosoma[0], quat_holosoma[1], quat_holosoma[2]], dtype=np.float64)
+        ang_vel_local = quat_rotate_inverse_mujoco(quat_mj, ang_vel_world)
 
         self.root_data.qpos[qpos_addr : qpos_addr + 3] = pos
         self.root_data.qpos[qpos_addr + 3 : qpos_addr + 7] = quat_mj
         self.root_data.qvel[qvel_addr : qvel_addr + 3] = lin_vel
-        self.root_data.qvel[qvel_addr + 3 : qvel_addr + 6] = ang_vel
+        self.root_data.qvel[qvel_addr + 3 : qvel_addr + 6] = ang_vel_local
 
     def _has_registered_dynamic_objects(self) -> bool:
         return bool(self._object_urdf_by_name)
+
+    @staticmethod
+    def _geom_type_name(geom_type: int) -> str:
+        geom_type_map = {
+            int(mujoco.mjtGeom.mjGEOM_PLANE): "plane",
+            int(mujoco.mjtGeom.mjGEOM_SPHERE): "sphere",
+            int(mujoco.mjtGeom.mjGEOM_CAPSULE): "capsule",
+            int(mujoco.mjtGeom.mjGEOM_ELLIPSOID): "ellipsoid",
+            int(mujoco.mjtGeom.mjGEOM_CYLINDER): "cylinder",
+            int(mujoco.mjtGeom.mjGEOM_BOX): "box",
+            int(mujoco.mjtGeom.mjGEOM_MESH): "mesh",
+            int(mujoco.mjtGeom.mjGEOM_SDF): "sdf",
+        }
+        return geom_type_map.get(int(geom_type), f"geom_{int(geom_type)}")
+
+    def _body_belongs_to_root(self, body_id: int, root_body_id: int) -> bool:
+        assert self.root_model is not None
+        current_body_id = int(body_id)
+        root_body_id = int(root_body_id)
+        while current_body_id > 0:
+            if current_body_id == root_body_id:
+                return True
+            current_body_id = int(self.root_model.body_parentid[current_body_id])
+        return root_body_id == 0
+
+    def _extract_mesh_payload(self, geom_id: int) -> dict[str, object] | None:
+        assert self.root_model is not None
+        mesh_id = int(self.root_model.geom_dataid[geom_id])
+        if mesh_id < 0:
+            return None
+
+        vert_start = int(self.root_model.mesh_vertadr[mesh_id])
+        vert_count = int(self.root_model.mesh_vertnum[mesh_id])
+        face_start = int(self.root_model.mesh_faceadr[mesh_id])
+        face_count = int(self.root_model.mesh_facenum[mesh_id])
+        if vert_count <= 0 or face_count <= 0:
+            return None
+
+        vertices = np.asarray(self.root_model.mesh_vert[vert_start : vert_start + vert_count], dtype=np.float32)
+        faces = np.asarray(self.root_model.mesh_face[face_start : face_start + face_count], dtype=np.int32)
+        if faces.size > 0:
+            face_min = int(np.min(faces))
+            face_max = int(np.max(faces))
+            if face_min >= vert_start and face_max < vert_start + vert_count:
+                faces = faces - vert_start
+
+        return {
+            "mesh_id": mesh_id,
+            "vertices": vertices.tolist(),
+            "faces": faces.tolist(),
+        }
+
+    def _maybe_write_object_geom_snapshot(self) -> str | None:
+        if self._mujoco_object_geom_snapshot_written or not self._mujoco_object_geom_snapshot_path:
+            return self._mujoco_object_geom_snapshot_path
+
+        assert self.root_model is not None
+        assert self.root_data is not None
+        if not self._object_body_name_by_name:
+            return None
+
+        actors_payload: dict[str, object] = {}
+        for actor_name, body_name in self._object_body_name_by_name.items():
+            prefixed_root_body_name = self._get_prefixed_name(body_name)
+            root_body_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_BODY, prefixed_root_body_name)
+            if root_body_id == -1:
+                continue
+
+            root_world_pos = np.asarray(self.root_data.xpos[root_body_id], dtype=np.float64)
+            root_world_rot = np.asarray(self.root_data.xmat[root_body_id], dtype=np.float64).reshape(3, 3)
+            root_world_rot_inv = root_world_rot.T
+            geoms_payload: list[dict[str, object]] = []
+            for geom_id in range(int(self.root_model.ngeom)):
+                geom_body_id = int(self.root_model.geom_bodyid[geom_id])
+                if not self._body_belongs_to_root(geom_body_id, root_body_id):
+                    continue
+
+                geom_world_pos = np.asarray(self.root_data.geom_xpos[geom_id], dtype=np.float64)
+                geom_world_rot = np.asarray(self.root_data.geom_xmat[geom_id], dtype=np.float64).reshape(3, 3)
+                geom_rel_pos = root_world_rot_inv @ (geom_world_pos - root_world_pos)
+                geom_rel_rot = root_world_rot_inv @ geom_world_rot
+                geom_rel_quat = np.zeros(4, dtype=np.float64)
+                mujoco.mju_mat2Quat(geom_rel_quat, geom_rel_rot.reshape(-1))
+                geom_rgba = np.asarray(self.root_model.geom_rgba[geom_id], dtype=np.float32)
+                geom_entry: dict[str, object] = {
+                    "id": int(geom_id),
+                    "name": str(mujoco.mj_id2name(self.root_model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or f"geom_{geom_id}"),
+                    "body_name": str(
+                        mujoco.mj_id2name(self.root_model, mujoco.mjtObj.mjOBJ_BODY, geom_body_id) or f"body_{geom_body_id}"
+                    ),
+                    "type": self._geom_type_name(int(self.root_model.geom_type[geom_id])),
+                    "relative_pos": [float(v) for v in geom_rel_pos],
+                    "relative_quat_wxyz": [float(v) for v in geom_rel_quat],
+                    "size": [float(v) for v in self.root_model.geom_size[geom_id]],
+                    "rgba": [float(v) for v in geom_rgba],
+                    "is_collision": bool(
+                        int(self.root_model.geom_contype[geom_id]) != 0 and int(self.root_model.geom_conaffinity[geom_id]) != 0
+                    ),
+                    "contype": int(self.root_model.geom_contype[geom_id]),
+                    "conaffinity": int(self.root_model.geom_conaffinity[geom_id]),
+                }
+                if int(self.root_model.geom_type[geom_id]) == int(mujoco.mjtGeom.mjGEOM_MESH):
+                    mesh_payload = self._extract_mesh_payload(geom_id)
+                    if mesh_payload is not None:
+                        geom_entry["mesh"] = mesh_payload
+                geoms_payload.append(geom_entry)
+
+            actors_payload[str(actor_name)] = {
+                "root_body_name": body_name,
+                "root_body_name_prefixed": prefixed_root_body_name,
+                "geoms": geoms_payload,
+            }
+
+        if not actors_payload:
+            return None
+
+        snapshot_dir = os.path.dirname(self._mujoco_object_geom_snapshot_path)
+        if snapshot_dir:
+            os.makedirs(snapshot_dir, exist_ok=True)
+        tmp_path = f"{self._mujoco_object_geom_snapshot_path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "actors": actors_payload}, f, ensure_ascii=True, separators=(",", ":"))
+        os.replace(tmp_path, self._mujoco_object_geom_snapshot_path)
+        self._mujoco_object_geom_snapshot_written = True
+        logger.info("Wrote MuJoCo object geom snapshot to {}", self._mujoco_object_geom_snapshot_path)
+        return self._mujoco_object_geom_snapshot_path
 
     def _get_split_sim_state_extra_payload(self) -> dict[str, object]:
         """Publish MuJoCo-measured reference-body pose for split sim2sim alignment."""
         assert self.root_model is not None
         assert self.root_data is not None
         include_object_contact_details = os.getenv("HOLOSOMA_SIM_STATE_INCLUDE_OBJECT_CONTACT_DETAILS", "0") == "1"
+        include_key_body_states = os.getenv("HOLOSOMA_SIM_STATE_INCLUDE_KEY_BODY_STATES", "0") == "1"
 
         ref_body_name = getattr(self.robot_config, "torso_name", None) or (self.body_names[0] if self.body_names else None)
         if ref_body_name is None:
@@ -813,12 +956,11 @@ class MuJoCo(BaseSimulator):
             if object_body_id != -1:
                 object_body_ids.add(int(object_body_id))
 
-        robot_body_ids: set[int] = set()
-        for robot_body_name in getattr(self, "body_names", []):
-            prefixed_body = self._get_prefixed_name(robot_body_name)
-            robot_body_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_BODY, prefixed_body)
-            if robot_body_id != -1:
-                robot_body_ids.add(int(robot_body_id))
+        robot_body_ids: set[int] = {
+            int(body_id)
+            for body_id in range(1, int(self.root_model.nbody))
+            if int(body_id) not in object_body_ids
+        }
 
         for geom_id in range(int(self.root_model.ngeom)):
             body_for_geom = int(self.root_model.geom_bodyid[geom_id])
@@ -884,9 +1026,46 @@ class MuJoCo(BaseSimulator):
             "object_robot_max_pen": float(object_robot_max_pen),
             "object_scene_max_pen": float(object_scene_max_pen),
         }
+        object_geom_snapshot_path = self._maybe_write_object_geom_snapshot()
+        if object_geom_snapshot_path:
+            payload["mujoco_object_geom_snapshot_path"] = object_geom_snapshot_path
         if include_object_contact_details:
             payload["object_robot_contact_bodies"] = sorted(object_robot_contact_bodies)
             payload["object_robot_contact_geoms"] = sorted(object_robot_contact_geoms)
+        if include_key_body_states:
+            key_body_states: dict[str, list[float]] = {}
+            raw_key_names = os.getenv("HOLOSOMA_SIM_STATE_KEY_BODY_NAMES", "").strip()
+            if raw_key_names:
+                key_body_names = [name.strip() for name in raw_key_names.split(",") if name.strip()]
+            else:
+                key_body_names = [
+                    "torso_link",
+                    "left_shoulder_roll_link",
+                    "right_shoulder_roll_link",
+                    "left_elbow_link",
+                    "right_elbow_link",
+                    "left_wrist_yaw_link",
+                    "right_wrist_yaw_link",
+                    "left_sphere_hand_link",
+                    "right_sphere_hand_link",
+                ]
+            for body_name in key_body_names:
+                prefixed_name = self._get_prefixed_name(body_name)
+                key_body_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_BODY, prefixed_name)
+                if key_body_id == -1:
+                    continue
+                key_pos = self.root_data.xpos[key_body_id]
+                key_quat_mj = self.root_data.xquat[key_body_id]
+                key_body_states[body_name] = [
+                    float(key_pos[0]),
+                    float(key_pos[1]),
+                    float(key_pos[2]),
+                    float(key_quat_mj[1]),
+                    float(key_quat_mj[2]),
+                    float(key_quat_mj[3]),
+                    float(key_quat_mj[0]),
+                ]
+            payload["key_body_states"] = key_body_states
         return payload
 
     def _sync_robot_rows_into_all_root_states(self, env_ids: torch.Tensor) -> None:
@@ -1636,7 +1815,66 @@ class MuJoCo(BaseSimulator):
             return
 
         self.viewer = mujoco.viewer.launch_passive(self.root_model, self.root_data, key_callback=self._key_callback)
+        self._apply_object_collision_view()
+        self._update_text_overlay()
         logger.info("=== Viewer setup completed with keyboard callback ===")
+
+    def _initialize_object_collision_view_state(self) -> None:
+        if self.root_model is None:
+            return
+
+        self._original_geom_rgba = np.array(self.root_model.geom_rgba, dtype=np.float32, copy=True)
+        object_body_ids: set[int] = set()
+        for body_name in self._object_body_name_by_name.values():
+            prefixed_body = self._get_prefixed_name(body_name)
+            body_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_BODY, prefixed_body)
+            if body_id != -1:
+                object_body_ids.add(int(body_id))
+
+        collision_geom_ids: list[int] = []
+        visual_geom_ids: list[int] = []
+        for geom_id in range(int(self.root_model.ngeom)):
+            body_id = int(self.root_model.geom_bodyid[geom_id])
+            if body_id not in object_body_ids:
+                continue
+            contype = int(self.root_model.geom_contype[geom_id])
+            conaffinity = int(self.root_model.geom_conaffinity[geom_id])
+            if contype != 0 and conaffinity != 0:
+                collision_geom_ids.append(geom_id)
+            else:
+                visual_geom_ids.append(geom_id)
+
+        self._object_collision_geom_ids = np.asarray(collision_geom_ids, dtype=np.int32)
+        self._object_visual_geom_ids = np.asarray(visual_geom_ids, dtype=np.int32)
+        if collision_geom_ids:
+            logger.info(
+                "Detected {} object collision geom(s) and {} object visual geom(s) for MuJoCo collision view",
+                len(collision_geom_ids),
+                len(visual_geom_ids),
+            )
+        self._apply_object_collision_view()
+
+    def _apply_object_collision_view(self) -> None:
+        if self.root_model is None or self._original_geom_rgba is None:
+            return
+
+        if self._object_collision_geom_ids.size > 0:
+            self.root_model.geom_rgba[self._object_collision_geom_ids] = self._original_geom_rgba[
+                self._object_collision_geom_ids
+            ]
+        if self._object_visual_geom_ids.size > 0:
+            self.root_model.geom_rgba[self._object_visual_geom_ids] = self._original_geom_rgba[self._object_visual_geom_ids]
+
+        if not self.show_object_collision_geoms or self._object_collision_geom_ids.size == 0:
+            return
+
+        highlight_rgba = np.array([1.0, 0.15, 0.15, 0.45], dtype=np.float32)
+        self.root_model.geom_rgba[self._object_collision_geom_ids] = highlight_rgba
+
+        if self.hide_object_visuals_when_showing_collision and self._object_visual_geom_ids.size > 0:
+            visual_rgba = np.array(self._original_geom_rgba[self._object_visual_geom_ids], copy=True)
+            visual_rgba[:, 3] = np.minimum(visual_rgba[:, 3], 0.05)
+            self.root_model.geom_rgba[self._object_visual_geom_ids] = visual_rgba
 
     def _add_text_overlay(
         self,
@@ -1754,16 +1992,24 @@ class MuJoCo(BaseSimulator):
         else:
             gantry_status = "inactive"
 
-        # Build text overlay content
-        text = (
-            f"Virtual gantry is {gantry_status} \n"
-            "Press '7' to raise it \n"
-            "Press '8' to lower it \n"
-            "Press '9' to toggle it \n"
-            "Use arrow keys to move gantry (XY) \n"
-            "Press backspace to reset the environment \n"
-            "Press 'g' to hide this menu"
-        )
+        text_lines = [
+            f"Virtual gantry is {gantry_status}",
+            "Press '7' to raise it",
+            "Press '8' to lower it",
+            "Press '9' to toggle it",
+            "Use arrow keys to move gantry (XY)",
+            "Press backspace to reset the environment",
+        ]
+        if self._object_collision_geom_ids.size > 0:
+            text_lines.append(
+                f"Press 'c' to toggle object collision view ({'on' if self.show_object_collision_geoms else 'off'})"
+            )
+            text_lines.append(
+                "Press 'h' to toggle object visual dimming "
+                f"({'on' if self.hide_object_visuals_when_showing_collision else 'off'})"
+            )
+        text_lines.append("Press 'g' to hide this menu")
+        text = " \n".join(text_lines)
 
         # Use default font and position (None values will use MuJoCo defaults)
         self._add_text_overlay(text)
@@ -1786,6 +2032,23 @@ class MuJoCo(BaseSimulator):
             status = "ON" if self.show_text_overlay else "OFF"
             logger.info(f"Text overlay: {status}")
             # Update overlay immediately when toggled
+            self._update_text_overlay()
+            return
+
+        if keycode == glfw.KEY_C and self._object_collision_geom_ids.size > 0:
+            self.show_object_collision_geoms = not self.show_object_collision_geoms
+            self._apply_object_collision_view()
+            logger.info("Object collision view: {}", "ON" if self.show_object_collision_geoms else "OFF")
+            self._update_text_overlay()
+            return
+
+        if keycode == glfw.KEY_H and self._object_collision_geom_ids.size > 0:
+            self.hide_object_visuals_when_showing_collision = not self.hide_object_visuals_when_showing_collision
+            self._apply_object_collision_view()
+            logger.info(
+                "Object visual dimming while showing collisions: {}",
+                "ON" if self.hide_object_visuals_when_showing_collision else "OFF",
+            )
             self._update_text_overlay()
             return
 

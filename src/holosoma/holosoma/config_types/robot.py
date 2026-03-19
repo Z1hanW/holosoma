@@ -78,6 +78,7 @@ class ObjectConfig:
     scale: list[float] | None = None
     mujoco_use_training_urdf_scene: bool = False
     mujoco_limit_object_contacts_to_carry_bodies: bool = False
+    mujoco_object_contact_body_name_markers: list[str] | None = None
     mujoco_add_default_actuators: bool = False
     mujoco_copy_joint_defaults_from_robot_xml: bool = False
     mujoco_copy_tendons_from_robot_xml: bool = False

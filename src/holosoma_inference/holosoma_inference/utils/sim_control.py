@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 import zmq
 from loguru import logger
@@ -40,7 +41,19 @@ class SimControlPush:
             logger.warning("Sim control publish failed: {}", exc)
 
     def request_reset(self, reason: str) -> None:
-        self.publish({"action": "reset", "reason": str(reason)})
+        if not self.enabled or self.socket is None:
+            return
+        payload = json.dumps({"action": "reset", "reason": str(reason)})
+        for _ in range(20):
+            try:
+                self.socket.send_string(payload, zmq.NOBLOCK)
+                return
+            except zmq.Again:
+                time.sleep(0.01)
+            except Exception as exc:
+                logger.warning("Sim control reset publish failed: {}", exc)
+                return
+        logger.warning("Sim control reset publish dropped after retries")
 
     def close(self) -> None:
         socket = self.socket

@@ -181,6 +181,7 @@ class PPO(BaseAlgo):
         self.ppo_coeff = 1.0
         self.distill_loss_fn = F.mse_loss
         self.dagger_ignore_zero_teacher_actions = True
+        self.dagger_ignore_external_goal_samples = False
         self.dagger_match_std = False
         self.strict_teacher_load = True
         self.teacher_actor = None
@@ -505,6 +506,9 @@ class PPO(BaseAlgo):
         self.dagger_ignore_zero_teacher_actions = bool(
             getattr(distill_cfg, "dagger_ignore_zero_teacher_actions", True)
         )
+        self.dagger_ignore_external_goal_samples = bool(
+            getattr(distill_cfg, "dagger_ignore_external_goal_samples", False)
+        )
         self.dagger_match_std = bool(getattr(distill_cfg, "dagger_match_std", False))
         self.strict_teacher_load = bool(getattr(distill_cfg, "strict_teacher_load", True))
 
@@ -627,6 +631,8 @@ class PPO(BaseAlgo):
             self.storage.register("teacher_actions", shape=(self.num_act,), dtype=torch.float)
             if self.use_multi_teacher:
                 self.storage.register("teacher_indices", shape=(1,), dtype=torch.long)
+            if self.dagger_ignore_external_goal_samples:
+                self.storage.register("teacher_bc_mask", shape=(1,), dtype=torch.bool)
         perception_keys = {key for key in [self.actor_perception_key, self.critic_perception_key] if key}
         for key in perception_keys:
             self.storage.register(key, shape=(self.algo_obs_dim_dict[key],), dtype=torch.float)
@@ -780,17 +786,34 @@ class PPO(BaseAlgo):
                 actor_obs = self._normalize_actor_obs(actor_obs_raw, update=True)
                 critic_obs = self._normalize_critic_obs(critic_obs_raw, update=True)
 
+                # Keep perception aligned with the same pre-step state/action sample.
+                actor_perception_obs_current = (
+                    obs_dict[self.actor_perception_key] if self.actor_perception_key else None
+                )
+                critic_perception_obs_current = None
+                if self.critic_perception_key:
+                    critic_perception_obs_current = obs_dict[self.critic_perception_key]
+
                 actor_policy_state = {"actor_obs": actor_obs}
-                if self.actor_perception_key:
-                    actor_policy_state[self.actor_perception_key] = obs_dict[self.actor_perception_key]
+                if actor_perception_obs_current is not None:
+                    actor_policy_state[self.actor_perception_key] = actor_perception_obs_current
                 actions = self.actor.act(actor_policy_state)
                 if self._use_deterministic_student_actions():
                     actions = self.actor.action_mean.detach()
 
                 critic_policy_state = {"critic_obs": critic_obs}
-                if self.critic_perception_key:
-                    critic_policy_state[self.critic_perception_key] = obs_dict[self.critic_perception_key]
+                if critic_perception_obs_current is not None:
+                    critic_policy_state[self.critic_perception_key] = critic_perception_obs_current
                 values = self.critic.evaluate(critic_policy_state).detach()
+
+                teacher_bc_mask_current = None
+                if self.dagger_ignore_external_goal_samples:
+                    teacher_bc_mask_current = torch.ones((actions.shape[0], 1), device=actions.device, dtype=torch.bool)
+                    motion_command = None
+                    if self.env.command_manager is not None:
+                        motion_command = self.env.command_manager.get_state("motion_command")
+                    if motion_command is not None and hasattr(motion_command, "get_sparse_goal_external_mask"):
+                        teacher_bc_mask_current = (~motion_command.get_sparse_goal_external_mask()).unsqueeze(1)
 
                 teacher_actions = None
                 teacher_indices = None
@@ -850,10 +873,15 @@ class PPO(BaseAlgo):
                     if teacher_indices is not None
                     else torch.zeros(actions.shape[0], 1, device=actions.device, dtype=torch.long),
                 }
-                if self.actor_perception_key:
-                    storage_kwargs[self.actor_perception_key] = obs_dict[self.actor_perception_key]
-                if self.critic_perception_key and self.critic_perception_key != self.actor_perception_key:
-                    storage_kwargs[self.critic_perception_key] = obs_dict[self.critic_perception_key]
+                if teacher_bc_mask_current is not None:
+                    storage_kwargs["teacher_bc_mask"] = teacher_bc_mask_current
+                if actor_perception_obs_current is not None:
+                    storage_kwargs[self.actor_perception_key] = actor_perception_obs_current
+                if (
+                    critic_perception_obs_current is not None
+                    and self.critic_perception_key != self.actor_perception_key
+                ):
+                    storage_kwargs[self.critic_perception_key] = critic_perception_obs_current
                 self.storage.add(**storage_kwargs)
 
                 # Reset actor and critic for completed envs
@@ -931,6 +959,11 @@ class PPO(BaseAlgo):
         num_updates = self.config.num_learning_epochs * self.config.num_mini_batches
         for key in loss_dict:
             loss_dict[key] /= num_updates
+        if self.dagger_ignore_external_goal_samples:
+            try:
+                loss_dict["teacher_bc_mask_fraction"] = float(self.storage["teacher_bc_mask"].float().mean().item())
+            except KeyError:
+                pass
         self.storage.clear()
         return loss_dict
 
@@ -1170,14 +1203,20 @@ class PPO(BaseAlgo):
             else:
                 distill_per_sample = distill_per_elem
 
+            valid_mask = torch.ones_like(distill_per_sample, dtype=torch.bool)
+            if self.dagger_ignore_external_goal_samples:
+                teacher_bc_mask = minibatch.get("teacher_bc_mask")
+                if teacher_bc_mask is not None:
+                    valid_mask &= teacher_bc_mask[:original_batch_size].view(-1).to(dtype=torch.bool)
+
             if self.dagger_ignore_zero_teacher_actions:
                 expert_terminate = torch.all(teacher_actions_batch == 0.0, dim=-1)
-                if (~expert_terminate).any():
-                    bc_loss = distill_per_sample[~expert_terminate].mean()
-                else:
-                    bc_loss = torch.tensor(0.0, device=self.device)
+                valid_mask &= ~expert_terminate
+
+            if valid_mask.any():
+                bc_loss = distill_per_sample[valid_mask].mean()
             else:
-                bc_loss = distill_per_sample.mean()
+                bc_loss = torch.tensor(0.0, device=self.device)
 
             if self.dagger_match_std:
                 if self.use_multi_teacher:
@@ -1194,7 +1233,11 @@ class PPO(BaseAlgo):
                     assert self.teacher_actor is not None, "Teacher actor is not initialized."
                     sigma_teacher = self._get_actor_std_for_loss(self.teacher_actor).detach()
                     sigma_teacher = sigma_teacher.unsqueeze(0).expand_as(sigma_batch)
-                bc_loss = bc_loss + (sigma_batch - sigma_teacher).pow(2).sum(dim=-1).mean()
+                sigma_loss = (sigma_batch - sigma_teacher).pow(2).sum(dim=-1)
+                if valid_mask.any():
+                    bc_loss = bc_loss + sigma_loss[valid_mask].mean()
+                else:
+                    bc_loss = bc_loss + torch.tensor(0.0, device=self.device)
 
             # In DAgger mode, distillation objective is the BC term.
             distill_loss = bc_loss
@@ -1555,6 +1598,10 @@ class PPO(BaseAlgo):
             motion_total = float(motion_command.motion.time_step_total)
             train_logs["mean_episode_length_motion_total"] = motion_total
             train_logs["mean_episode_length_motion_total/time"] = motion_total
+            if hasattr(motion_command, "get_sparse_goal_external_mask"):
+                train_logs["manual_goal_is_external_fraction"] = float(
+                    motion_command.get_sparse_goal_external_mask().float().mean().item()
+                )
         loss_dict["actor_learning_rate"] = self.actor_learning_rate
         loss_dict["critic_learning_rate"] = self.critic_learning_rate
         # Use logging helper

@@ -20,6 +20,7 @@ from holosoma.utils import warp_utils
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.path import resolve_data_file_path
 from holosoma.utils.rotations import (
+    matrix_to_quaternion,
     quat_apply,
     quat_apply_yaw,
     quat_from_euler_xyz,
@@ -161,10 +162,11 @@ class PerceptionManager:
 
         if cfg.output_mode not in {"heightmap", "camera_depth"}:
             raise ValueError(f"Unsupported output_mode: {cfg.output_mode}")
-        if cfg.output_mode == "camera_depth" and self._camera_source != "far_tracking_warp":
+        supported_camera_sources = {"far_tracking_warp", "rendered", "rendered_depth_sensor"}
+        if cfg.output_mode == "camera_depth" and self._camera_source not in supported_camera_sources:
             raise ValueError(
                 "Unsupported camera_source. Supported camera_depth sources: "
-                "'far_tracking_warp'."
+                "'far_tracking_warp', 'rendered', 'rendered_depth_sensor'."
             )
 
         self._camera_width, self._camera_height = self._resolve_camera_resolution()
@@ -273,6 +275,15 @@ class PerceptionManager:
         )
         self._camera_depth_buffer_ready = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
         self._warned_invalid_rendered_depth = False
+        self._debug_dump_dir = os.environ.get("HOLOSOMA_PERCEPTION_DEBUG_DUMP_DIR", "").strip()
+        try:
+            self._debug_dump_after_updates = max(
+                1, int(os.environ.get("HOLOSOMA_PERCEPTION_DEBUG_DUMP_AFTER_UPDATES", "1"))
+            )
+        except Exception:
+            self._debug_dump_after_updates = 1
+        self._debug_update_counter = 0
+        self._debug_dump_done = False
 
         self._ray_hits_world = torch.zeros(self.num_envs, self._num_points, 3, device=self.device)
 
@@ -353,6 +364,7 @@ class PerceptionManager:
     def update(self, env_ids: torch.Tensor | None = None) -> None:
         if not self.enabled:
             return
+        self._debug_update_counter += 1
         if env_ids is None and self._update_interval > 0.0:
             self._time_since_update += float(self.env.dt)
             if self._time_since_update + 1.0e-8 < self._update_interval:
@@ -390,6 +402,7 @@ class PerceptionManager:
                 camera_depth,
                 refresh=self._consume_camera_obs_refresh_flag(),
             )
+            self._maybe_dump_camera_debug(source_label="rendered", env_ids=env_id)
             self._maybe_log_runtime_camera_alignment()
             return
 
@@ -403,6 +416,7 @@ class PerceptionManager:
                 camera_depth,
                 refresh=self._consume_camera_obs_refresh_flag(),
             )
+            self._maybe_dump_camera_debug(source_label="pytorch3d", env_ids=idx)
             self._maybe_log_runtime_camera_alignment()
             return
 
@@ -416,6 +430,7 @@ class PerceptionManager:
                 camera_depth,
                 refresh=self._consume_camera_obs_refresh_flag(),
             )
+            self._maybe_dump_camera_debug(source_label="far_tracking_warp", env_ids=idx)
             self._maybe_log_runtime_camera_alignment()
             return
 
@@ -429,6 +444,7 @@ class PerceptionManager:
                 camera_depth,
                 refresh=self._consume_camera_obs_refresh_flag(),
             )
+            self._maybe_dump_camera_debug(source_label="scandots", env_ids=idx)
             self._maybe_log_runtime_camera_alignment()
             return
 
@@ -442,6 +458,7 @@ class PerceptionManager:
                 camera_depth,
                 refresh=self._consume_camera_obs_refresh_flag(),
             )
+            self._maybe_dump_camera_debug(source_label="raycast", env_ids=idx)
             self._maybe_log_runtime_camera_alignment()
             return
 
@@ -463,6 +480,7 @@ class PerceptionManager:
                 camera_depth,
                 refresh=self._consume_camera_obs_refresh_flag(),
             )
+            self._maybe_dump_camera_debug(source_label="projected", env_ids=idx)
             self._maybe_log_runtime_camera_alignment()
 
     def get_obs(self) -> torch.Tensor:
@@ -486,6 +504,74 @@ class PerceptionManager:
         if not self.enabled or self.cfg.output_mode != "camera_depth":
             raise RuntimeError("Camera depth observation map requested but camera_depth output is disabled.")
         return self._camera_depth_obs
+
+    def _maybe_dump_camera_debug(self, *, source_label: str, env_ids: torch.Tensor | slice | None) -> None:
+        if self.cfg.output_mode != "camera_depth":
+            return
+        if not self._debug_dump_dir or self._debug_dump_done:
+            return
+        if self._debug_update_counter < self._debug_dump_after_updates:
+            return
+
+        if isinstance(env_ids, torch.Tensor) and env_ids.numel() > 0:
+            env_index = int(env_ids.view(-1)[0].item())
+        else:
+            env_index = 0
+        if env_index < 0 or env_index >= self.num_envs:
+            env_index = 0
+
+        dump_dir = Path(self._debug_dump_dir).expanduser().resolve()
+        dump_dir.mkdir(parents=True, exist_ok=True)
+
+        raw_depth = self._camera_depth[env_index].detach().cpu().to(torch.float32).numpy()
+        obs_depth = self._camera_depth_obs[env_index].detach().cpu().to(torch.float32).numpy()
+        np.save(dump_dir / "camera_depth_raw.npy", raw_depth)
+        np.save(dump_dir / "camera_depth_obs.npy", obs_depth)
+
+        stats = {
+            "source_label": source_label,
+            "camera_source": str(self._camera_source),
+            "update_counter": int(self._debug_update_counter),
+            "env_index": int(env_index),
+            "raw_shape": [int(v) for v in raw_depth.shape],
+            "obs_shape": [int(v) for v in obs_depth.shape],
+            "camera_width": int(self._camera_width),
+            "camera_height": int(self._camera_height),
+            "camera_obs_width": int(self._camera_obs_width),
+            "camera_obs_height": int(self._camera_obs_height),
+            "camera_warp_preprocess": bool(self._camera_warp_preprocess),
+            "camera_warp_resize": list(self._camera_warp_resize) if self._camera_warp_resize is not None else None,
+            "camera_warp_crop_top": int(self._camera_warp_crop_top),
+            "camera_warp_crop_bottom": int(self._camera_warp_crop_bottom),
+            "camera_warp_crop_left": int(self._camera_warp_crop_left),
+            "camera_warp_crop_right": int(self._camera_warp_crop_right),
+            "camera_warp_normalize": bool(self._camera_warp_normalize),
+            "raw_min": float(np.nanmin(raw_depth)),
+            "raw_max": float(np.nanmax(raw_depth)),
+            "obs_min": float(np.nanmin(obs_depth)),
+            "obs_max": float(np.nanmax(obs_depth)),
+        }
+        env_id_t = torch.tensor([env_index], device=self.device, dtype=torch.long)
+        try:
+            cam_pos_t, cam_quat_t = self.get_camera_pose(env_id_t, apply_sensor_offset=True, apply_pitch=True)
+            stats["camera_pose_pos"] = [float(v) for v in cam_pos_t[0].detach().cpu().tolist()]
+            stats["camera_pose_quat_xyzw"] = [float(v) for v in cam_quat_t[0].detach().cpu().tolist()]
+        except Exception:
+            stats["camera_pose_pos"] = None
+            stats["camera_pose_quat_xyzw"] = None
+        if hasattr(self, "get_mujoco_render_camera_pose"):
+            try:
+                render_pos_t, render_quat_t = self.get_mujoco_render_camera_pose(env_id_t)
+                stats["mujoco_render_camera_pose_pos"] = [float(v) for v in render_pos_t[0].detach().cpu().tolist()]
+                stats["mujoco_render_camera_pose_quat_xyzw"] = [
+                    float(v) for v in render_quat_t[0].detach().cpu().tolist()
+                ]
+            except Exception:
+                stats["mujoco_render_camera_pose_pos"] = None
+                stats["mujoco_render_camera_pose_quat_xyzw"] = None
+        (dump_dir / "camera_depth_debug.json").write_text(__import__("json").dumps(stats, indent=2))
+        self._debug_dump_done = True
+        (self.logger or logger).info("Perception camera debug dump written to {}", dump_dir)
 
     def get_heightmap_map(self, env_ids: torch.Tensor | None = None) -> torch.Tensor | None:
         if not self.enabled or self.cfg.output_mode != "heightmap":
@@ -1782,18 +1868,27 @@ class PerceptionManager:
         return torch.clamp(depth, min=-0.5, max=0.5)
 
     def _setup_rendered_camera(self) -> None:
-        if get_simulator_type() != SimulatorType.ISAACSIM:
-            raise RuntimeError(
-                "Rendered camera requires IsaacSim. Use camera_source=far_tracking_warp or pytorch3d "
-                "for other simulators."
+        simulator_type = get_simulator_type()
+        if simulator_type == SimulatorType.ISAACSIM:
+            from holosoma.simulator.isaacsim.perception_camera import (
+                IsaacSimDepthCamera,
+                IsaacSimDepthSensorCamera,
             )
-        from holosoma.simulator.isaacsim.perception_camera import (
-            IsaacSimDepthCamera,
-            IsaacSimDepthSensorCamera,
-        )
 
-        camera_cls = IsaacSimDepthSensorCamera if self._camera_source == "rendered_depth_sensor" else IsaacSimDepthCamera
-        self._rendered_camera = camera_cls(
+            camera_cls = (
+                IsaacSimDepthSensorCamera if self._camera_source == "rendered_depth_sensor" else IsaacSimDepthCamera
+            )
+        elif simulator_type == SimulatorType.MUJOCO:
+            if self._camera_source == "rendered_depth_sensor":
+                raise RuntimeError("camera_source=rendered_depth_sensor is IsaacSim-only. Use camera_source=rendered.")
+            from holosoma.simulator.mujoco.perception_camera import MuJoCoDepthCamera  # noqa: PLC0415
+
+            camera_cls = MuJoCoDepthCamera
+        else:
+            raise RuntimeError(
+                "Rendered camera requires IsaacSim or MuJoCo. Use camera_source=far_tracking_warp for other simulators."
+            )
+        camera_kwargs = dict(
             env=self.env,
             config=self.cfg,
             width=self._camera_width,
@@ -1801,6 +1896,15 @@ class PerceptionManager:
             vfov_deg=self._camera_vfov_deg,
             device=getattr(self.env.simulator, "device", self.device),
         )
+        if simulator_type == SimulatorType.MUJOCO:
+            camera_kwargs["pose_provider"] = self.get_mujoco_render_camera_pose
+            camera_kwargs["intrinsics"] = (
+                float(self._camera_fx.item()),
+                float(self._camera_fy.item()),
+                float(self._camera_cx.item()),
+                float(self._camera_cy.item()),
+            )
+        self._rendered_camera = camera_cls(**camera_kwargs)
         self._rendered_camera.setup()
 
     @staticmethod
@@ -2172,7 +2276,65 @@ class PerceptionManager:
         return False
 
     def _uses_rendered_camera(self) -> bool:
-        return False
+        return self.cfg.output_mode == "camera_depth" and self._camera_source in {"rendered", "rendered_depth_sensor"}
+
+    def get_mujoco_render_camera_pose(self, env_ids: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return camera world pose in MuJoCo camera convention.
+
+        MuJoCo cameras use local axes: +x right, +y up, -z forward.
+        The returned quaternion uses holosoma xyzw ordering.
+        """
+        if not self.enabled or self.cfg.output_mode != "camera_depth":
+            raise RuntimeError("MuJoCo rendered camera pose requested but camera_depth output is disabled.")
+
+        idx = env_ids if env_ids is not None else slice(None)
+        body_pos, body_quat = self._get_camera_body_pose(idx)
+        num_envs = body_quat.shape[0]
+
+        offset_world = quat_apply(body_quat, self._sensor_offset.expand(num_envs, -1), w_last=True)
+        camera_pos = body_pos + offset_world
+
+        center_u = float(int(self._camera_width / 2))
+        center_v = float(int(self._camera_height / 2))
+        right_u = float(min(self._camera_width - 1, int(self._camera_width / 2) + 1))
+        down_v = float(min(self._camera_height - 1, int(self._camera_height / 2) + 1))
+
+        u_coords = torch.tensor([center_u, right_u], device=self.device, dtype=torch.float32)
+        v_coords = torch.tensor([center_v, down_v], device=self.device, dtype=torch.float32)
+        dirs_base = self._build_camera_rays_from_coords(u_coords, v_coords).view(2, 2, 3)
+
+        center_base = dirs_base[0, 0]
+        right_base = dirs_base[0, 1]
+        down_base = dirs_base[1, 0]
+
+        center_world = quat_apply(body_quat, center_base.unsqueeze(0).expand(num_envs, -1), w_last=True)
+        right_world = quat_apply(body_quat, right_base.unsqueeze(0).expand(num_envs, -1), w_last=True)
+        down_world = quat_apply(body_quat, down_base.unsqueeze(0).expand(num_envs, -1), w_last=True)
+
+        forward_world = center_world / torch.norm(center_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
+
+        right_world = right_world - torch.sum(right_world * forward_world, dim=-1, keepdim=True) * forward_world
+        right_world = right_world / torch.norm(right_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
+
+        down_world = down_world - torch.sum(down_world * forward_world, dim=-1, keepdim=True) * forward_world
+        down_world = down_world / torch.norm(down_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
+
+        up_world = -down_world
+        up_world = up_world - torch.sum(up_world * forward_world, dim=-1, keepdim=True) * forward_world
+        up_world = up_world / torch.norm(up_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
+
+        right_world = torch.cross(forward_world, up_world, dim=-1)
+        right_world = right_world / torch.norm(right_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
+        up_world = torch.cross(right_world, forward_world, dim=-1)
+        up_world = up_world / torch.norm(up_world, dim=-1, keepdim=True).clamp(min=1.0e-6)
+
+        # MuJoCo cameras use local axes (+x right, +y up, -z forward). Keep the same
+        # camera pose as the training-side ray builder; only the render-buffer readback
+        # needs a vertical flip in MuJoCoDepthCamera.
+        rot_world_from_cam = torch.stack((right_world, up_world, -forward_world), dim=-1)
+        quat_wxyz = matrix_to_quaternion(rot_world_from_cam)
+        quat_xyzw = quat_wxyz[..., [1, 2, 3, 0]]
+        return camera_pos, quat_xyzw
 
     def _resolve_heightmap_body_index(self) -> None:
         if self._heightmap_body_name is None:

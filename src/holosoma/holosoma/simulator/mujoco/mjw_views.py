@@ -52,6 +52,21 @@ from typing import Tuple
 import torch
 
 
+def quat_apply_wxyz_torch(quat_wxyz: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+    """Rotate vectors by wxyz quaternions."""
+    xyz = quat_wxyz[..., 1:]
+    w = quat_wxyz[..., :1]
+    t = torch.cross(xyz, vec, dim=-1) * 2.0
+    return vec + w * t + torch.cross(xyz, t, dim=-1)
+
+
+def quat_rotate_inverse_wxyz_torch(quat_wxyz: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
+    """Rotate world-frame vectors into the local frame of wxyz quaternions."""
+    inv = quat_wxyz.clone()
+    inv[..., 1:] *= -1.0
+    return quat_apply_wxyz_torch(inv, vec)
+
+
 class MjwDofStateView:
     """Zero-copy view for DOF states in IsaacGym flattened format.
 
@@ -413,7 +428,7 @@ class MjwAngularVelocityView:
         torch.Tensor
             Angular velocity [num_envs, 3]
         """
-        ang_vel = self.qvel[:, self.ang_vel_slice]  # [N, 3]
+        ang_vel_local = self.qvel[:, self.ang_vel_slice]  # [N, 3]
         return ang_vel[key]
 
     def __setitem__(self, key, value):
@@ -558,7 +573,8 @@ class MjwRootStateView:
         quat_holo = quat_mj[:, [1, 2, 3, 0]]
 
         # Assemble full state
-        root_state = torch.cat([pos, quat_holo, lin_vel, ang_vel], dim=1)
+        ang_vel_world = quat_apply_wxyz_torch(quat_mj, ang_vel_local)
+        root_state = torch.cat([pos, quat_holo, lin_vel, ang_vel_world], dim=1)
 
         return root_state[key]
 
@@ -586,16 +602,17 @@ class MjwRootStateView:
             pos = val[:, 0:3]
             quat_holo = val[:, 3:7]  # [x, y, z, w]
             lin_vel = val[:, 7:10]
-            ang_vel = val[:, 10:13]
+            ang_vel_world = val[:, 10:13]
 
             # Convert quaternion: [x, y, z, w] -> [w, x, y, z]
             quat_mj = quat_holo[:, [3, 0, 1, 2]]
+            ang_vel_local = quat_rotate_inverse_wxyz_torch(quat_mj, ang_vel_world)
 
             # Write to underlying tensors (modifies Warp arrays via zero-copy)
             self.qpos[:, self.pos_slice] = pos
             self.qpos[:, self.quat_slice] = quat_mj
             self.qvel[:, self.vel_slice] = lin_vel
-            self.qvel[:, self.ang_vel_slice] = ang_vel
+            self.qvel[:, self.ang_vel_slice] = ang_vel_local
         else:
             # Partial indexing requires read-modify-write
             current = self[:]

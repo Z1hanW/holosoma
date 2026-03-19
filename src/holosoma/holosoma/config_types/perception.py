@@ -22,7 +22,7 @@ class PerceptionConfig:
     """Perception output type: 'heightmap' or 'camera_depth'."""
 
     camera_source: str = "far_tracking_warp"
-    """Camera source for camera_depth output. Supported: 'far_tracking_warp'."""
+    """Camera source for camera_depth output. Supported: 'far_tracking_warp', 'rendered', 'rendered_depth_sensor'."""
 
     camera_strict_warp: bool | None = None
     """When set, force strict warp camera ray convention instead of env-var defaults."""

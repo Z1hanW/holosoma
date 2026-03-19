@@ -701,7 +701,9 @@ class DirectSimulation:
                     dtype=np.float32,
                 )
                 object_lin_vel = np.asarray(data["object_lin_vel_w"][frame_idx], dtype=np.float32)
-                object_ang_vel = np.asarray(data["object_ang_vel_w"][frame_idx], dtype=np.float32)
+                # Match WBT training resets, which keep the clip's object linear velocity
+                # but zero angular velocity on reset.
+                object_ang_vel = np.zeros(3, dtype=np.float32)
                 object_state = torch.tensor(
                     [[*object_pos.tolist(), *object_quat_xyzw.tolist(), *object_lin_vel.tolist(), *object_ang_vel.tolist()]],
                     device=self.device,

@@ -1,5 +1,7 @@
 """Whole Body Tracking observation presets for the G1 robot."""
 
+from dataclasses import replace
+
 from holosoma.config_types.observation import ObservationManagerCfg, ObsGroupCfg, ObsTermCfg
 
 DEFAULT_WBT_POLICY_HISTORY_LENGTH = 10
@@ -324,12 +326,38 @@ object_distill_box_terms = {
     ),
 }
 
+object_distill_drop_terms = {
+    "obj_goal_xy_yaw_pick_root_heading": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:obj_goal_xy_yaw_pick_root_heading",
+        params={
+            "lift_height_threshold": 0.10,
+            "lift_ratio_threshold": 0.35,
+            "consecutive_steps": 5,
+        },
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
+object_distill_drop_mixed_terms = {
+    "obj_sparse_goal_xy_yaw_pick_root_heading": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:obj_sparse_goal_xy_yaw_pick_root_heading",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "obj_picked_flag": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:obj_picked_flag",
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
 g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCfg(
     groups={
         # Keep full teacher actor observation available for teacher policy queries.
-        "actor_obs": actor_obs_w_object,
+        "actor_obs": replace(actor_obs_w_object, history_length=1),
         # Legacy teacher observation group (without object velocities).
-        "actor_obs_legacy": actor_obs_w_object_legacy,
+        "actor_obs_legacy": replace(actor_obs_w_object_legacy, history_length=1),
         # Student sparse root-trajectory command.
         "actor_obs_root": ObsGroupCfg(
             concatenate=True,
@@ -358,6 +386,20 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
             history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
             terms=object_distill_box_terms,
         ),
+        # Student drop target: final object [dx, dy, dyaw] in pickup-time pelvis-heading frame.
+        # Keep this single-frame because it is already a frozen command.
+        "actor_obs_drop": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_distill_drop_terms,
+        ),
+        "actor_obs_drop_mixed": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_distill_drop_mixed_terms,
+        ),
         "critic_obs": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
@@ -370,9 +412,9 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
 g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy = ObservationManagerCfg(
     groups={
         # Keep full teacher actor observation available for teacher policy queries.
-        "actor_obs": actor_obs_w_object,
+        "actor_obs": replace(actor_obs_w_object, history_length=1),
         # Legacy teacher observation group (without object velocities).
-        "actor_obs_legacy": actor_obs_w_object_legacy,
+        "actor_obs_legacy": replace(actor_obs_w_object_legacy, history_length=1),
         # Student sparse root-trajectory command (legacy includes clip_phase).
         "actor_obs_root": ObsGroupCfg(
             concatenate=True,
@@ -400,6 +442,12 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy = ObservationMa
             enable_noise=False,
             history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
             terms=object_distill_box_terms,
+        ),
+        "actor_obs_drop": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_distill_drop_terms,
         ),
         "critic_obs": ObsGroupCfg(
             concatenate=True,

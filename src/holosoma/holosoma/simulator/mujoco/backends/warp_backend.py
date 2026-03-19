@@ -38,6 +38,8 @@ import mujoco
 import torch
 from loguru import logger
 
+from holosoma.simulator.mujoco.mjw_views import quat_rotate_inverse_wxyz_torch
+
 from .base import IMujocoBackend
 from .warp_bridge import WarpBridge
 
@@ -522,10 +524,11 @@ class WarpBackend(IMujocoBackend):
         pos = root_states[:, :3]  # [N, 3]
         quat_holo = root_states[:, 3:7]  # [N, 4] [qx, qy, qz, qw]
         lin_vel = root_states[:, 7:10]  # [N, 3]
-        ang_vel = root_states[:, 10:13]  # [N, 3]
+        ang_vel_world = root_states[:, 10:13]  # [N, 3]
 
         # Convert quaternion: holosoma [qx,qy,qz,qw] -> MuJoCo [qw,qx,qy,qz]
         quat_mj = quat_holo[:, [3, 0, 1, 2]]
+        ang_vel_local = quat_rotate_inverse_wxyz_torch(quat_mj, ang_vel_world)
 
         # Get addresses
         qpos_addr = root_addrs["robot_qpos_addr"]
@@ -556,7 +559,7 @@ class WarpBackend(IMujocoBackend):
         col_idx_ang = torch.arange(3, device=env_ids.device) + qvel_addr + 3
         env_idx = env_ids.unsqueeze(1).expand(N, 3)  # [N, 3]
         col_idx = col_idx_ang.unsqueeze(0).expand(N, 3)  # [N, 3]
-        self.qvel_t[env_idx, col_idx] = ang_vel
+        self.qvel_t[env_idx, col_idx] = ang_vel_local
 
         # No mj_forward call - next step() will handle forward kinematics
 
