@@ -16,7 +16,7 @@ class ZEDCameraConfig:
     fps: int = 10
     """Frames per second."""
 
-    serial_number: int = 32658215
+    serial_number: int = 36920975
     """Camera serial number."""
 
     resolution: Literal["2K", "FHD", "HD", "VGA"] = "HD"
@@ -197,11 +197,18 @@ class ZEDCamera:
 # ZED Cameras Wrapper
 #########################################################
 
-DEFAULT_ZED_CAMERA_CONFIGS: dict[str, ZEDCameraConfig] = {
+# Dual ZED setup (front + back) for the original robot
+DUAL_ZED_CAMERA_CONFIGS: dict[str, ZEDCameraConfig] = {
     "front": ZEDCameraConfig(serial_number=35996713),
     "back": ZEDCameraConfig(serial_number=33082869),
-    # "test": ZEDCameraConfig(serial_number=31224262),
 }
+
+# Single front ZED 2i for depth distillation (G1FlatZed2iConfig)
+SINGLE_FRONT_ZED_CAMERA_CONFIGS: dict[str, ZEDCameraConfig] = {
+    "front": ZEDCameraConfig(serial_number=36920975),
+}
+
+DEFAULT_ZED_CAMERA_CONFIGS: dict[str, ZEDCameraConfig] = SINGLE_FRONT_ZED_CAMERA_CONFIGS
 
 
 @dataclass(frozen=True)

@@ -86,7 +86,7 @@ g1_wbt_distillation = InferenceConfig(
     ),
     observation=observation.wbt_distillation_g1,
     task=task.wbt_distillation,
-    camera=camera.single_d435i_depth,
+    camera=camera.single_zed2i_depth,
 )
 
 DEFAULTS = {
