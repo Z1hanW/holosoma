@@ -68,6 +68,7 @@ PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i_17x17}
 STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_proprio','actor_obs_drop_mixed']"}
 DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES=${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES:-True}
+MAX_EPISODE_LENGTH_S=${MAX_EPISODE_LENGTH_S:-8.0}
 
 SPARSE_GOAL_ENABLED=${SPARSE_GOAL_ENABLED:-True}
 CLIP_GOAL_DELTA_MIN_STEPS=${CLIP_GOAL_DELTA_MIN_STEPS:-45}
@@ -102,6 +103,7 @@ echo "[INFO] sparse_goal_enabled=${SPARSE_GOAL_ENABLED} ext_prob=${EXTERNAL_GOAL
 echo "[INFO] clip_goal_delta_steps=${CLIP_GOAL_DELTA_MIN_STEPS}-${CLIP_GOAL_DELTA_MAX_STEPS}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
 echo "[INFO] dagger_ignore_external_goal_samples=${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES}"
+echo "[INFO] max_episode_length_s=${MAX_EPISODE_LENGTH_S}"
 
 exec env \
   EXP="${EXP}" \
@@ -135,6 +137,7 @@ exec env \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-pos-local-max "${EXTERNAL_GOAL_POS_LOCAL_MAX}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-rpy-min "${EXTERNAL_GOAL_RPY_MIN}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-rpy-max "${EXTERNAL_GOAL_RPY_MAX}" \
+    --simulator.config.sim.max_episode_length_s "${MAX_EPISODE_LENGTH_S}" \
     --perception.camera-width="${IMAGE_WIDTH}" \
     --perception.camera-height="${IMAGE_HEIGHT}" \
     --perception.camera-near="${CAMERA_NEAR}" \

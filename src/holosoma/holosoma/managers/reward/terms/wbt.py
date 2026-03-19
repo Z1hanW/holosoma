@@ -322,6 +322,41 @@ def _manual_goal_heading(motion_command: MotionCommand) -> torch.Tensor:
     return torch.atan2(goal_rot_mat_w[:, 1, 0], goal_rot_mat_w[:, 0, 0])
 
 
+def _sparse_goal_errors(
+    motion_command: MotionCommand,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    assert motion_command.manual_goal_object_pos_w is not None
+    goal_pos_w = motion_command.manual_goal_object_pos_w
+    goal_heading = _manual_goal_heading(motion_command)
+    current_heading = calc_heading(motion_command.simulator_object_quat_w)
+
+    xy_error = torch.norm(goal_pos_w[:, :2] - motion_command.simulator_object_pos_w[:, :2], dim=-1)
+    yaw_error = torch.abs(normalize_angle(goal_heading - current_heading))
+    z_error = torch.abs(goal_pos_w[:, 2] - motion_command.simulator_object_pos_w[:, 2])
+    return xy_error, yaw_error, z_error
+
+
+def _near_goal_mask(
+    motion_command: MotionCommand,
+    *,
+    only_external: bool,
+    picked_only: bool,
+    xy_threshold: float,
+    yaw_threshold: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    active_mask = _goal_episode_mask(motion_command, only_external=only_external)
+    if picked_only:
+        active_mask &= _picked_mask(motion_command)
+    if not active_mask.any() or motion_command.manual_goal_object_pos_w is None:
+        zeros = torch.zeros(motion_command.num_envs, device=motion_command.device, dtype=torch.float32)
+        false_mask = torch.zeros(motion_command.num_envs, device=motion_command.device, dtype=torch.bool)
+        return false_mask, zeros, zeros, zeros
+
+    xy_error, yaw_error, z_error = _sparse_goal_errors(motion_command)
+    near_goal = active_mask & (xy_error <= xy_threshold) & (yaw_error <= yaw_threshold)
+    return near_goal, xy_error, yaw_error, z_error
+
+
 def _sparse_goal_success_mask(
     motion_command: MotionCommand,
     *,
@@ -336,14 +371,7 @@ def _sparse_goal_success_mask(
     if not active_mask.any():
         return active_mask
 
-    assert motion_command.manual_goal_object_pos_w is not None
-    goal_pos_w = motion_command.manual_goal_object_pos_w
-    goal_heading = _manual_goal_heading(motion_command)
-    current_heading = calc_heading(motion_command.simulator_object_quat_w)
-
-    xy_error = torch.norm(goal_pos_w[:, :2] - motion_command.simulator_object_pos_w[:, :2], dim=-1)
-    yaw_error = torch.abs(normalize_angle(goal_heading - current_heading))
-    z_error = torch.abs(goal_pos_w[:, 2] - motion_command.simulator_object_pos_w[:, 2])
+    xy_error, yaw_error, z_error = _sparse_goal_errors(motion_command)
     lin_speed = torch.norm(motion_command.simulator_object_lin_vel_w, dim=-1)
     ang_speed = torch.norm(motion_command.simulator_object_ang_vel_w, dim=-1)
 
@@ -361,9 +389,12 @@ def sparse_goal_pickup_height_reward(
     env: WholeBodyTrackingManager,
     target_height_delta: float = 0.12,
     only_external: bool = True,
+    stop_after_pick: bool = False,
 ) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     active_mask = _goal_episode_mask(motion_command, only_external=only_external)
+    if stop_after_pick:
+        active_mask &= ~_picked_mask(motion_command)
     if not active_mask.any() or motion_command.pickup_object_rel_z_baseline is None:
         return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
 
@@ -412,6 +443,55 @@ def sparse_goal_object_yaw_error_exp(
     error = torch.square(normalize_angle(goal_heading - current_heading))
     reward = torch.exp(-error / sigma**2)
     return reward * active_mask.to(dtype=torch.float32)
+
+
+def sparse_goal_object_z_error_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+    only_external: bool = True,
+    picked_only: bool = True,
+    near_goal_xy_threshold: float = 0.25,
+    near_goal_yaw_threshold: float = 0.70,
+) -> torch.Tensor:
+    motion_command = _get_motion_command_and_assert_type(env)
+    near_goal, _, _, z_error = _near_goal_mask(
+        motion_command,
+        only_external=only_external,
+        picked_only=picked_only,
+        xy_threshold=near_goal_xy_threshold,
+        yaw_threshold=near_goal_yaw_threshold,
+    )
+    if not near_goal.any():
+        return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+
+    reward = torch.exp(-torch.square(z_error) / sigma**2)
+    return reward * near_goal.to(dtype=torch.float32)
+
+
+def sparse_goal_hover_height_penalty(
+    env: WholeBodyTrackingManager,
+    only_external: bool = True,
+    picked_only: bool = True,
+    near_goal_xy_threshold: float = 0.20,
+    near_goal_yaw_threshold: float = 0.60,
+    target_height_margin: float = 0.10,
+    height_scale: float = 0.12,
+) -> torch.Tensor:
+    motion_command = _get_motion_command_and_assert_type(env)
+    near_goal, _, _, _ = _near_goal_mask(
+        motion_command,
+        only_external=only_external,
+        picked_only=picked_only,
+        xy_threshold=near_goal_xy_threshold,
+        yaw_threshold=near_goal_yaw_threshold,
+    )
+    if not near_goal.any() or motion_command.manual_goal_object_pos_w is None:
+        return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+
+    target_height = motion_command.manual_goal_object_pos_w[:, 2] + float(target_height_margin)
+    height_excess = torch.clamp(motion_command.simulator_object_pos_w[:, 2] - target_height, min=0.0)
+    penalty = torch.clamp(height_excess / max(float(height_scale), 1.0e-6), min=0.0, max=1.0)
+    return penalty * near_goal.to(dtype=torch.float32)
 
 
 def sparse_goal_success_bonus(

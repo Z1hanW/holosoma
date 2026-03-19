@@ -246,8 +246,8 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed = RewardManagerCfg(
         ),
         "sparse_goal_pickup_height_reward": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:sparse_goal_pickup_height_reward",
-            params={"target_height_delta": 0.12, "only_external": True},
-            weight=1.0,
+            params={"target_height_delta": 0.12, "only_external": True, "stop_after_pick": True},
+            weight=0.5,
         ),
         "sparse_goal_object_xy_error_exp": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:sparse_goal_object_xy_error_exp",
@@ -259,6 +259,29 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed = RewardManagerCfg(
             params={"sigma": 0.6, "only_external": True, "picked_only": True},
             weight=0.75,
         ),
+        "sparse_goal_object_z_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:sparse_goal_object_z_error_exp",
+            params={
+                "sigma": 0.08,
+                "only_external": True,
+                "picked_only": True,
+                "near_goal_xy_threshold": 0.25,
+                "near_goal_yaw_threshold": 0.70,
+            },
+            weight=2.5,
+        ),
+        "sparse_goal_hover_height_penalty": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:sparse_goal_hover_height_penalty",
+            params={
+                "only_external": True,
+                "picked_only": True,
+                "near_goal_xy_threshold": 0.20,
+                "near_goal_yaw_threshold": 0.60,
+                "target_height_margin": 0.10,
+                "height_scale": 0.12,
+            },
+            weight=-2.0,
+        ),
         "sparse_goal_success_bonus": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:sparse_goal_success_bonus",
             params={
@@ -269,7 +292,7 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed = RewardManagerCfg(
                 "lin_vel_threshold": 0.30,
                 "ang_vel_threshold": 1.50,
             },
-            weight=8.0,
+            weight=20.0,
         ),
     }
 )
