@@ -36,8 +36,8 @@ class BlindFallRecoveryPolicy(BasePolicy):
     """
 
     # Push injection config
-    MAX_PUSH_TORQUE = 30.0  # Nm, max torque applied per hip joint
-    PUSH_TORQUE_STEP = 5.0  # Nm, increment per U/M keypress
+    MAX_PUSH_TORQUE = 5000.0  # Nm, default torque applied per waist joint
+    PUSH_TORQUE_STEP = 50.0  # Nm, increment per U/M keypress
 
     def __init__(self, config: InferenceConfig):
         self._stiff_hold_active = True
@@ -64,11 +64,11 @@ class BlindFallRecoveryPolicy(BasePolicy):
         if self._stiff_hold_q.shape[1] != self.num_dofs:
             raise ValueError("Stiff startup pose dimension mismatch with robot DOFs")
 
-        # Waist joint indices for push injection on the robot's head/torso.
-        # Waist joints are the mechanical path to the head on G1 (no neck joints).
+        # Waist joint indices for push injection on the head/torso.
+        # G1 has no neck joints — torso_link (head) sits atop the waist chain.
         # These go directly to motors (cmd_tau), not through the policy.
-        self._push_pitch_index = self.dof_names.index("waist_pitch_joint")
-        self._push_roll_index = self.dof_names.index("waist_roll_joint")
+        self._push_pitch_indices = [self.dof_names.index("waist_pitch_joint")]
+        self._push_roll_indices = [self.dof_names.index("waist_roll_joint")]
 
         # Keyboard push injection state (thread-safe via lock)
         self._push_lock = threading.Lock()
@@ -367,7 +367,7 @@ class BlindFallRecoveryPolicy(BasePolicy):
     def handle_keyboard_button(self, keycode):
         """Extend base handler with push magnitude controls."""
         if keycode == "u":
-            self._push_magnitude = min(self._push_magnitude + self.PUSH_TORQUE_STEP, 100.0)
+            self._push_magnitude = min(self._push_magnitude + self.PUSH_TORQUE_STEP, 100000.0)
             logger.info(f"Push magnitude: {self._push_magnitude:.0f} Nm")
         elif keycode == "m":
             self._push_magnitude = max(self._push_magnitude - self.PUSH_TORQUE_STEP, 5.0)
@@ -380,9 +380,11 @@ class BlindFallRecoveryPolicy(BasePolicy):
             super().handle_keyboard_button(keycode)
 
     def _apply_push(self, pitch_torque: float, roll_torque: float):
-        """Apply push torques on waist joints and store for visualization."""
-        self.cmd_tau[self._push_pitch_index] = pitch_torque
-        self.cmd_tau[self._push_roll_index] = roll_torque
+        """Apply push torques on hip joints and store for visualization."""
+        for idx in self._push_pitch_indices:
+            self.cmd_tau[idx] = pitch_torque
+        for idx in self._push_roll_indices:
+            self.cmd_tau[idx] = roll_torque
         self._last_push_pitch = pitch_torque
         self._last_push_roll = roll_torque
 
