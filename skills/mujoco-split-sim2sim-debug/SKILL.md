@@ -13,9 +13,8 @@ Treat split MuJoCo as the authoritative path.
 
 ## Primary Entry Points
 
-- `./run_wobj_tracking_validated.sh`
+- `./mj_track.sh [motion.npz] [model.onnx]`
 - `./vis_mujoco_sim_state.sh`
-- `./sim2sim_box_split_tracking.sh <motion.npz> <model.onnx>`
 
 ## Required Invariants
 
@@ -76,7 +75,7 @@ When G1 moves but the object does not move with it:
 
 Relevant files:
 
-- `sim2sim_box_split_tracking.sh`
+- `mj_track.sh`
 - `src/holosoma/holosoma/simulator/shared/simulator_bridge.py`
 - `src/holosoma/holosoma/simulator/mujoco/scene_manager.py`
 
@@ -118,7 +117,7 @@ Relevant files:
 ## Practical Workflow
 
 1. Kill stale split sim processes.
-2. Run `./run_wobj_tracking_validated.sh` and confirm authoritative behavior.
+2. Run `./mj_track.sh [motion.npz] [model.onnx]` and confirm authoritative behavior.
 3. If needed, attach `./vis_mujoco_sim_state.sh` to inspect `robot / robot_ref / object`.
 4. If carry looks wrong, enable `HOLOSOMA_SPLIT_SIM_STATE_TRACE_PATH` and debug contacts before changing frontend code.
 5. Only after split sim looks correct, debug the browser or `viser` presentation layer.

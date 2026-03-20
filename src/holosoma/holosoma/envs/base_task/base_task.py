@@ -715,6 +715,8 @@ class BaseTask:
     def _check_termination(self):
         self.reset_buf[:] = 0
         self.time_out_buf[:] = 0
+        if os.environ.get("HOLOSOMA_DISABLE_AUTO_RESET", "0").lower() in ("1", "true", "yes", "on"):
+            return
         if self.termination_manager is None:
             return
 

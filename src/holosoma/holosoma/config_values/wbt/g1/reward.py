@@ -199,22 +199,22 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed = RewardManagerCfg(
     terms={
         "motion_relative_body_position_error_exp": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:motion_relative_body_position_error_exp",
-            params={"sigma": 0.3},
+            params={"sigma": 0.3, "only_clip_goal": True},
             weight=1.5,
         ),
         "motion_relative_body_orientation_error_exp": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:motion_relative_body_orientation_error_exp",
-            params={"sigma": 0.4},
+            params={"sigma": 0.4, "only_clip_goal": True},
             weight=0.75,
         ),
         "motion_global_body_lin_vel": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:motion_global_body_lin_vel",
-            params={"sigma": 1.0},
+            params={"sigma": 1.0, "only_clip_goal": True},
             weight=0.2,
         ),
         "motion_global_body_ang_vel": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:motion_global_body_ang_vel",
-            params={"sigma": 3.14},
+            params={"sigma": 3.14, "only_clip_goal": True},
             weight=0.1,
         ),
         "action_rate_l2": RewardTermCfg(
@@ -244,43 +244,16 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed = RewardManagerCfg(
             },
             weight=-0.5,
         ),
-        "sparse_goal_pickup_height_reward": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:sparse_goal_pickup_height_reward",
-            params={"target_height_delta": 0.12, "only_external": True, "stop_after_pick": True},
-            weight=0.5,
-        ),
-        "sparse_goal_object_xy_error_exp": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:sparse_goal_object_xy_error_exp",
-            params={"sigma": 0.25, "only_external": True, "picked_only": True},
-            weight=2.0,
-        ),
-        "sparse_goal_object_yaw_error_exp": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:sparse_goal_object_yaw_error_exp",
-            params={"sigma": 0.6, "only_external": True, "picked_only": True},
-            weight=0.75,
-        ),
-        "sparse_goal_object_z_error_exp": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:sparse_goal_object_z_error_exp",
+        "sparse_goal_object_pose_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:sparse_goal_object_pose_error_exp",
             params={
-                "sigma": 0.08,
+                "sigma_xy": 0.35,
+                "sigma_yaw": 1.0,
+                "sigma_z": 0.10,
                 "only_external": True,
-                "picked_only": True,
-                "near_goal_xy_threshold": 0.25,
-                "near_goal_yaw_threshold": 0.70,
+                "picked_only": False,
             },
-            weight=2.5,
-        ),
-        "sparse_goal_hover_height_penalty": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:sparse_goal_hover_height_penalty",
-            params={
-                "only_external": True,
-                "picked_only": True,
-                "near_goal_xy_threshold": 0.20,
-                "near_goal_yaw_threshold": 0.60,
-                "target_height_margin": 0.10,
-                "height_scale": 0.12,
-            },
-            weight=-2.0,
+            weight=4.0,
         ),
         "sparse_goal_success_bonus": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:sparse_goal_success_bonus",
@@ -413,6 +386,155 @@ g1_29dof_wbt_reward_w_object_extend = RewardManagerCfg(
     }
 )
 
+g1_29dof_wbt_reward_w_object_command_curriculum = RewardManagerCfg(
+    terms={
+        **g1_29dof_wbt_reward_w_object_extend.terms,
+        "motion_global_ref_position_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_global_ref_position_error_exp",
+            params={"sigma": 0.3, "only_clip_goal": True},
+            weight=0.5,
+        ),
+        "motion_global_ref_orientation_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_global_ref_orientation_error_exp",
+            params={"sigma": 0.4, "only_clip_goal": True},
+            weight=0.5,
+        ),
+        "motion_relative_body_position_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_relative_body_position_error_exp",
+            params={"sigma": 0.3, "only_clip_goal": True},
+            weight=1.0,
+        ),
+        "motion_relative_body_orientation_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_relative_body_orientation_error_exp",
+            params={"sigma": 0.4, "only_clip_goal": True},
+            weight=1.0,
+        ),
+        "motion_global_body_lin_vel": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_global_body_lin_vel",
+            params={"sigma": 1.0, "only_clip_goal": True},
+            weight=1.0,
+        ),
+        "motion_global_body_ang_vel": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_global_body_ang_vel",
+            params={"sigma": 3.14, "only_clip_goal": True},
+            weight=1.0,
+        ),
+        "object_global_ref_position_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:object_global_ref_position_error_exp",
+            params={"sigma": 0.3, "only_clip_goal": True},
+            weight=1.0,
+        ),
+        "object_global_ref_orientation_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:object_global_ref_orientation_error_exp",
+            params={"sigma": 0.4, "only_clip_goal": True},
+            weight=1.0,
+        ),
+        "motion_relative_body_position_error_lower": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_relative_body_position_error_exp",
+            params={"sigma": 0.3, "body_names": _LOWER_TRACKED_BODY_NAMES, "only_clip_goal": True},
+            weight=0.0,
+        ),
+        "motion_relative_body_orientation_error_lower": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_relative_body_orientation_error_exp",
+            params={"sigma": 0.4, "body_names": _LOWER_TRACKED_BODY_NAMES, "only_clip_goal": True},
+            weight=0.0,
+        ),
+        "motion_global_body_lin_vel_lower": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_global_body_lin_vel",
+            params={"sigma": 1.0, "body_names": _LOWER_TRACKED_BODY_NAMES, "only_clip_goal": True},
+            weight=0.0,
+        ),
+        "motion_global_body_ang_vel_lower": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_global_body_ang_vel",
+            params={"sigma": 3.14, "body_names": _LOWER_TRACKED_BODY_NAMES, "only_clip_goal": True},
+            weight=0.0,
+        ),
+        "motion_relative_body_position_error_torso": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_relative_body_position_error_exp",
+            params={"sigma": 0.25, "body_names": _TORSO_TRACKED_BODY_NAMES, "only_clip_goal": True},
+            weight=0.0,
+        ),
+        "motion_relative_body_orientation_error_torso": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_relative_body_orientation_error_exp",
+            params={"sigma": 0.3, "body_names": _TORSO_TRACKED_BODY_NAMES, "only_clip_goal": True},
+            weight=0.0,
+        ),
+        "motion_relative_body_position_error_upper": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_relative_body_position_error_exp",
+            params={"sigma": 0.3, "body_names": _UPPER_TRACKED_BODY_NAMES, "only_clip_goal": True},
+            weight=0.0,
+        ),
+        "motion_relative_body_orientation_error_upper": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_relative_body_orientation_error_exp",
+            params={"sigma": 0.4, "body_names": _UPPER_TRACKED_BODY_NAMES, "only_clip_goal": True},
+            weight=0.0,
+        ),
+        "motion_global_body_lin_vel_upper": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_global_body_lin_vel",
+            params={"sigma": 1.0, "body_names": _UPPER_TRACKED_BODY_NAMES, "only_clip_goal": True},
+            weight=0.0,
+        ),
+        "motion_global_body_ang_vel_upper": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_global_body_ang_vel",
+            params={"sigma": 3.14, "body_names": _UPPER_TRACKED_BODY_NAMES, "only_clip_goal": True},
+            weight=0.0,
+        ),
+        "motion_joint_position_error_lower": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_joint_position_error_exp",
+            params={"sigma": 0.3, "dof_names": _LOWER_DOF_NAMES, "only_clip_goal": True},
+            weight=0.0,
+        ),
+        "motion_joint_velocity_error_lower": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_joint_velocity_error_exp",
+            params={"sigma": 2.0, "dof_names": _LOWER_DOF_NAMES, "only_clip_goal": True},
+            weight=0.0,
+        ),
+        "motion_joint_position_error_waist": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_joint_position_error_exp",
+            params={"sigma": 0.25, "dof_names": _WAIST_DOF_NAMES, "only_clip_goal": True},
+            weight=0.0,
+        ),
+        "motion_joint_velocity_error_waist": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_joint_velocity_error_exp",
+            params={"sigma": 2.0, "dof_names": _WAIST_DOF_NAMES, "only_clip_goal": True},
+            weight=0.0,
+        ),
+        "motion_joint_position_error_upper": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_joint_position_error_exp",
+            params={"sigma": 0.35, "dof_names": _UPPER_DOF_NAMES, "only_clip_goal": True},
+            weight=0.0,
+        ),
+        "motion_joint_velocity_error_upper": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_joint_velocity_error_exp",
+            params={"sigma": 2.5, "dof_names": _UPPER_DOF_NAMES, "only_clip_goal": True},
+            weight=0.0,
+        ),
+        "sparse_goal_object_pose_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:sparse_goal_object_pose_error_exp",
+            params={
+                "sigma_xy": 0.35,
+                "sigma_yaw": 1.0,
+                "sigma_z": 0.10,
+                "only_external": True,
+                "picked_only": False,
+            },
+            weight=4.0,
+        ),
+        "sparse_goal_success_bonus": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:sparse_goal_success_bonus",
+            params={
+                "only_external": True,
+                "xy_threshold": 0.10,
+                "yaw_threshold": 0.35,
+                "z_threshold": 0.06,
+                "lin_vel_threshold": 0.30,
+                "ang_vel_threshold": 1.50,
+            },
+            weight=20.0,
+        ),
+    }
+)
+
 g1_29dof_wbt_reward_w_object_generalist = RewardManagerCfg(
     terms={
         **g1_29dof_wbt_reward_w_object_extend.terms,
@@ -453,6 +575,8 @@ __all__ = [
     "g1_29dof_wbt_fast_sac_reward",
     "g1_29dof_wbt_reward",
     "g1_29dof_wbt_reward_w_object",
+    "g1_29dof_wbt_reward_w_object_command_curriculum",
+    "g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed",
     "g1_29dof_wbt_reward_w_object_generalist",
     "g1_29dof_wbt_reward_w_object_extend",
 ]

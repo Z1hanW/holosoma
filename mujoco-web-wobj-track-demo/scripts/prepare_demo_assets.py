@@ -677,7 +677,7 @@ def _stage_clip_bundle(
         "ref_body_name": ref_body_name,
         "object_body_name": "largebox_link",
         "motion_alignment_enabled": bool(motion_cfg.get("align_motion_to_init_yaw", False)),
-        # Match the split MuJoCo tracking launcher defaults in sim2sim_box_split_tracking.sh.
+        # Match the split MuJoCo tracking launcher defaults in mj_track.sh.
         "use_root_reference_at_clip_start": True,
         "prefer_sim_ref_from_sim_state": True,
         "apply_training_motion_transitions": bool(apply_training_motion_transitions),

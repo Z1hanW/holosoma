@@ -19,6 +19,10 @@ from loguru import logger
 SRC_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INFER_SRC_ROOT = Path(__file__).resolve().parents[3] / "src" / "holosoma_inference"
+DEFAULT_TRACKING_MOTION_FILE = REPO_ROOT / "src" / "holosoma" / "holosoma" / "data" / "motions" / "g1_29dof" / "whole_body_tracking" / "sub3_largebox_003_mj_w_obj.npz"
+DEFAULT_TRACKING_MODEL_PATH = Path(
+    "/data/logs_new/boxer/20260316_200048-g1_29dof_wbt_w_object_extend_20260316_200027_s01_scale_1p0-g1_29dof_wbt_w_object_extend_20260316_200027/model_23500.onnx"
+)
 for path in (SRC_ROOT, INFER_SRC_ROOT):
     if path.exists() and str(path) not in sys.path:
         sys.path.insert(0, str(path))
@@ -54,9 +58,9 @@ class MujocoSimStateViewerConfig:
     show_ref_body: bool = True
     grid_size: float = 8.0
     launch_rollout: bool = False
-    run_script: str = str(REPO_ROOT / "run_wobj_tracking_validated.sh")
-    motion_file: str = ""
-    model_path: str = ""
+    run_script: str = str(REPO_ROOT / "mj_track_core.sh")
+    motion_file: str = str(DEFAULT_TRACKING_MOTION_FILE)
+    model_path: str = str(DEFAULT_TRACKING_MODEL_PATH)
     launch_run_seconds: int = 0
     training_headless: bool = True
     rollout_log_path: str = str(REPO_ROOT / "logs" / "live_debug" / "viser_mujoco_sim_state.log")

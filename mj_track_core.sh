@@ -3,18 +3,37 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_MOTION_FILE="${DEFAULT_MOTION_FILE:-$ROOT_DIR/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz}"
-DEFAULT_MODEL_INPUT="${DEFAULT_MODEL_INPUT:-/tmp/opq0wbyq_latest/model_07500.onnx}"
+DEFAULT_MODEL_INPUT="${DEFAULT_MODEL_INPUT:-/data/logs_new/boxer/20260316_200048-g1_29dof_wbt_w_object_extend_20260316_200027_s01_scale_1p0-g1_29dof_wbt_w_object_extend_20260316_200027/model_23500.onnx}"
+
+usage() {
+  cat <<EOF
+Usage:
+  bash mj_track_core.sh [motion.npz] [checkpoint.pt|model.onnx]
+
+Defaults:
+  motion = ${DEFAULT_MOTION_FILE}
+  model  = ${DEFAULT_MODEL_INPUT}
+EOF
+}
+
 if [[ $# -gt 2 ]]; then
-  echo "usage: sim2sim_box_split.sh [motion.npz] [checkpoint.pt|model.onnx]" >&2
+  usage >&2
   exit 1
 fi
+
+case "${1:-}" in
+  -h|--help|help)
+    usage
+    exit 0
+    ;;
+esac
+
 MOTION_FILE="${1:-$DEFAULT_MOTION_FILE}"
 MODEL_INPUT="${2:-$DEFAULT_MODEL_INPUT}"
 
 MUJOCO_PY="${MUJOCO_PY:-}"
 INFER_PY="${INFER_PY:-}"
 MUJOCO_CPUSET="${MUJOCO_CPUSET:-0}"
-SIM_DEVICE="${SIM_DEVICE:-cpu}"
 SIM_FPS="${SIM_FPS:-200}"
 SIM_CONTROL_DECIMATION="${SIM_CONTROL_DECIMATION:-4}"
 SIM_SUBSTEPS="${SIM_SUBSTEPS:-}"
@@ -22,52 +41,41 @@ MUJOCO_BACKEND="${MUJOCO_BACKEND:-}"
 TERRAIN_STATIC_FRICTION="${TERRAIN_STATIC_FRICTION:-}"
 TERRAIN_DYNAMIC_FRICTION="${TERRAIN_DYNAMIC_FRICTION:-}"
 SIM_VIRTUAL_GANTRY_ENABLED="${SIM_VIRTUAL_GANTRY_ENABLED:-False}"
-SIM_MOTION_INIT_MODE_RAW="${SIM_MOTION_INIT_MODE-__unset__}"
 SIM_MOTION_INIT_MODE="${SIM_MOTION_INIT_MODE:-raw_motion}"
-APPLY_TRAINING_MOTION_TRANSITIONS_RAW="${APPLY_TRAINING_MOTION_TRANSITIONS-__unset__}"
 APPLY_TRAINING_MOTION_TRANSITIONS="${APPLY_TRAINING_MOTION_TRANSITIONS:-0}"
 USE_TRAINING_SIM_CONFIG="${USE_TRAINING_SIM_CONFIG:-1}"
 SIM_IGNORE_DEFAULT_IDLE_COMMAND="${SIM_IGNORE_DEFAULT_IDLE_COMMAND:-1}"
 SIM_HOLD_DEFAULT_POSE_UNTIL_FIRST_COMMAND="${SIM_HOLD_DEFAULT_POSE_UNTIL_FIRST_COMMAND:-}"
 SIM_HOLD_INITIAL_POSE_UNTIL_FIRST_COMMAND="${SIM_HOLD_INITIAL_POSE_UNTIL_FIRST_COMMAND:-}"
 SIM_FREEZE_UNTIL_FIRST_COMMAND="${SIM_FREEZE_UNTIL_FIRST_COMMAND:-}"
-SIM_LOG_FIRST_COMMAND_SUMMARY="${SIM_LOG_FIRST_COMMAND_SUMMARY:-0}"
-SIM_PORT_BASE="${SIM_PORT_BASE:-}"
-if [[ -z "$SIM_PORT_BASE" ]]; then
-  SIM_PORT_BASE="$((RANDOM % 20000 + 30000))"
-fi
-SIM_CLOCK_PORT="${SIM_CLOCK_PORT:-$SIM_PORT_BASE}"
-SIM_STATE_PORT="${SIM_STATE_PORT:-$((SIM_PORT_BASE + 2))}"
-SIM_CONTROL_PORT="${SIM_CONTROL_PORT:-$((SIM_PORT_BASE + 4))}"
+SIM_CLOCK_PORT="${SIM_CLOCK_PORT:-5655}"
+SIM_STATE_PORT="${SIM_STATE_PORT:-5657}"
+SIM_CONTROL_PORT="${SIM_CONTROL_PORT:-5659}"
+SIM_USE_ZMQ_LOWCMD="${SIM_USE_ZMQ_LOWCMD:-1}"
 INTERFACE_NAME="${INTERFACE_NAME:-lo}"
 RUN_SECONDS="${RUN_SECONDS:-20}"
-HEADLESS="${HEADLESS:-1}"
-VISER_ENABLED="${VISER_ENABLED:-}"
-VISER_PORT="${VISER_PORT:-$((RANDOM % 8976 + 1024))}"
-VISER_UPDATE_INTERVAL="${VISER_UPDATE_INTERVAL:-1}"
-VISER_AUTO_RESET_ON_MOTION_END="${VISER_AUTO_RESET_ON_MOTION_END:-0}"
-RAW_CLIP_PLAYBACK="${RAW_CLIP_PLAYBACK:-0}"
+TRAINING_HEADLESS="${TRAINING_HEADLESS:-True}"
+SIM_DEBUG_VIZ="${SIM_DEBUG_VIZ:-True}"
+MUJOCO_SHOW_OBJECT_COLLISION="${MUJOCO_SHOW_OBJECT_COLLISION:-0}"
+MUJOCO_HIDE_OBJECT_VISUALS_WHEN_SHOWING_COLLISION="${MUJOCO_HIDE_OBJECT_VISUALS_WHEN_SHOWING_COLLISION:-0}"
 SIM_READY_TIMEOUT="${SIM_READY_TIMEOUT:-45}"
 SIM_READY_PATTERN="${SIM_READY_PATTERN:-Starting direct simulation loop...}"
 SIM_STARTUP_WAIT="${SIM_STARTUP_WAIT:-0}"
 DEFAULT_OBJECT_URDF="$ROOT_DIR/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
 OBJECT_URDF="${OBJECT_URDF:-}"
 PATCH_DIR="${PATCH_DIR:-$ROOT_DIR/logs/sim2sim_exports}"
-RUN_DIR_SUFFIX="${RUN_DIR_SUFFIX:-}"
 POLICY_ACTION_SCALE="${POLICY_ACTION_SCALE:-}"
-POLICY_ACTION_SCALE_CAP="${POLICY_ACTION_SCALE_CAP:-}"
-SIM_USE_MOTION_COMMAND_AS_Q_TARGET="${SIM_USE_MOTION_COMMAND_AS_Q_TARGET:-1}"
+POLICY_DEFER_UNTIL_VALID_STATE="${POLICY_DEFER_UNTIL_VALID_STATE:-0}"
+SIM_LOG_FIRST_COMMAND_SUMMARY="${SIM_LOG_FIRST_COMMAND_SUMMARY:-0}"
+HOLOSOMA_ONNX_ALIGN_MAX_STEPS="${HOLOSOMA_ONNX_ALIGN_MAX_STEPS:-0}"
+HOLOSOMA_ONNX_ALIGN_POSE_TOL="${HOLOSOMA_ONNX_ALIGN_POSE_TOL:-5e-3}"
+HOLOSOMA_ONNX_OFFSET_APPLIES_TO_MOTION_INDEX="${HOLOSOMA_ONNX_OFFSET_APPLIES_TO_MOTION_INDEX:-1}"
+HOLOSOMA_CLIP_JOINT_TARGETS="${HOLOSOMA_CLIP_JOINT_TARGETS:-0}"
 AUTO_START_STIFF_HOLD_SEC_RAW="${AUTO_START_STIFF_HOLD_SEC-__unset__}"
 AUTO_START_STIFF_HOLD_SEC="${AUTO_START_STIFF_HOLD_SEC:-}"
 AUTO_START_STIFF_MAX_WAIT_SEC_RAW="${AUTO_START_STIFF_MAX_WAIT_SEC-__unset__}"
 AUTO_START_STIFF_MAX_WAIT_SEC="${AUTO_START_STIFF_MAX_WAIT_SEC:-}"
 AUTO_START_STIFF_POSE_TOL="${AUTO_START_STIFF_POSE_TOL:-0.12}"
-POLICY_DEFER_UNTIL_VALID_STATE="${POLICY_DEFER_UNTIL_VALID_STATE:-0}"
-SIM_RESET_RESTART_DELAY_SEC="${SIM_RESET_RESTART_DELAY_SEC:-0.0}"
-HOLOSOMA_ONNX_ALIGN_MAX_STEPS="${HOLOSOMA_ONNX_ALIGN_MAX_STEPS:-0}"
-HOLOSOMA_ONNX_ALIGN_POSE_TOL="${HOLOSOMA_ONNX_ALIGN_POSE_TOL:-5e-3}"
-HOLOSOMA_ONNX_OFFSET_APPLIES_TO_MOTION_INDEX="${HOLOSOMA_ONNX_OFFSET_APPLIES_TO_MOTION_INDEX:-1}"
-HOLOSOMA_CLIP_JOINT_TARGETS="${HOLOSOMA_CLIP_JOINT_TARGETS:-0}"
 USE_ROOT_REFERENCE_AT_CLIP_START_RAW="${USE_ROOT_REFERENCE_AT_CLIP_START-__unset__}"
 USE_ROOT_REFERENCE_AT_CLIP_START="${USE_ROOT_REFERENCE_AT_CLIP_START:-}"
 SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML="${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML:-1}"
@@ -75,37 +83,26 @@ SIM_COPY_TENDONS_FROM_ROBOT_XML="${SIM_COPY_TENDONS_FROM_ROBOT_XML:-1}"
 SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML="${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML:-1}"
 SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML="${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML:-1}"
 SIM_USE_TRAINING_URDF_OBJECT_SCENE="${SIM_USE_TRAINING_URDF_OBJECT_SCENE:-1}"
-SIM_USE_ZMQ_LOWCMD="${SIM_USE_ZMQ_LOWCMD:-1}"
-SIM_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES="${SIM_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES:-0}"
-SIM_ENABLE_XML_FILTER="${SIM_ENABLE_XML_FILTER:-1}"
-SIM_REMOVE_COMPOSITE_LIGHTS="${SIM_REMOVE_COMPOSITE_LIGHTS:-1}"
-SIM_REMOVE_COMPOSITE_GROUND="${SIM_REMOVE_COMPOSITE_GROUND:-1}"
 MUJOCO_OBJECT_MASS_SCALE="${MUJOCO_OBJECT_MASS_SCALE:-}"
 MUJOCO_OBJECT_MASS_OVERRIDE="${MUJOCO_OBJECT_MASS_OVERRIDE:-}"
 MUJOCO_OBJECT_GEOM_FRICTION="${MUJOCO_OBJECT_GEOM_FRICTION:-}"
 MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION="${MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION:-}"
-PREFER_SIM_REF_FROM_SIM_STATE="${PREFER_SIM_REF_FROM_SIM_STATE:-}"
+MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES="${MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES:-0}"
+MUJOCO_OBJECT_CONTACT_BODY_MARKERS="${MUJOCO_OBJECT_CONTACT_BODY_MARKERS:-[\"torso\",\"shoulder\",\"elbow\",\"wrist\",\"hand\"]}"
+PREFER_SIM_REF_FROM_SIM_STATE="${PREFER_SIM_REF_FROM_SIM_STATE:-1}"
 USE_SIM_TIME="${USE_SIM_TIME:-}"
 INFERENCE_CONFIG="${INFERENCE_CONFIG:-}"
+ROBOT_INIT_STATE_POS="${ROBOT_INIT_STATE_POS:-}"
+ROBOT_INIT_STATE_ROT="${ROBOT_INIT_STATE_ROT:-}"
+ROBOT_ENABLE_SELF_COLLISIONS="${ROBOT_ENABLE_SELF_COLLISIONS:-}"
 MOTION_METADATA_TOOL="$ROOT_DIR/src/holosoma_inference/holosoma_inference/tools/read_motion_clip_metadata.py"
 
 mkdir -p "$PATCH_DIR"
 
-if [[ -z "$VISER_ENABLED" ]]; then
-  if [[ "$HEADLESS" == "1" ]]; then
-    VISER_ENABLED=1
-  else
-    VISER_ENABLED=0
-  fi
-fi
-
 MOTION_STEM="$(basename "${MOTION_FILE%.*}")"
 MODEL_STEM="$(basename "${MODEL_INPUT%.*}")"
 PATCHED_ONNX="$PATCH_DIR/${MODEL_STEM}__${MOTION_STEM}.onnx"
-RUN_DIR="$ROOT_DIR/logs/sim2sim_runs/${MOTION_STEM}"
-if [[ -n "$RUN_DIR_SUFFIX" ]]; then
-  RUN_DIR="${RUN_DIR}__${RUN_DIR_SUFFIX}"
-fi
+RUN_DIR="$ROOT_DIR/logs/sim2sim_runs/${MOTION_STEM}__tracking"
 mkdir -p "$RUN_DIR"
 
 export PYTHONPATH="$ROOT_DIR/src/holosoma:$ROOT_DIR/src/holosoma_inference${PYTHONPATH:+:$PYTHONPATH}"
@@ -113,7 +110,6 @@ export HOLOSOMA_ONNX_ALIGN_MAX_STEPS
 export HOLOSOMA_ONNX_ALIGN_POSE_TOL
 export HOLOSOMA_ONNX_OFFSET_APPLIES_TO_MOTION_INDEX
 export HOLOSOMA_CLIP_JOINT_TARGETS
-export HOLOSOMA_USE_MOTION_COMMAND_AS_Q_TARGET="$SIM_USE_MOTION_COMMAND_AS_Q_TARGET"
 
 resolve_python() {
   local configured="$1"
@@ -145,82 +141,40 @@ resolve_python() {
   exit 1
 }
 
-python_has_modules() {
+python_has_module() {
   local python_bin="$1"
-  shift
-  "$python_bin" - <<'PY' "$@" >/dev/null 2>&1
+  local module_name="$2"
+  "$python_bin" - <<'PY' "$module_name" >/dev/null 2>&1
 import importlib.util
 import sys
 
-sys.exit(0 if all(importlib.util.find_spec(mod) is not None for mod in sys.argv[1:]) else 1)
+sys.exit(0 if importlib.util.find_spec(sys.argv[1]) is not None else 1)
 PY
 }
 
-resolve_python_with_modules() {
-  local configured="$1"
+resolve_python_with_module() {
+  local module_name="$1"
   shift
-  local -a required_modules=()
-  while (( $# > 0 )); do
-    if [[ "$1" == "--" ]]; then
-      shift
-      break
-    fi
-    required_modules+=("$1")
-    shift
-  done
-
   local candidate
-  if [[ -n "$configured" ]]; then
-    if [[ ! -x "$configured" ]]; then
-      echo "Configured python is not executable: $configured" >&2
-      exit 1
-    fi
-    if python_has_modules "$configured" "${required_modules[@]}"; then
-      printf '%s\n' "$configured"
-      return
-    fi
-    echo "Configured python is missing required modules (${required_modules[*]}): $configured" >&2
-    exit 1
-  fi
-
   for candidate in "$@"; do
     [[ -n "$candidate" && -x "$candidate" ]] || continue
-    if python_has_modules "$candidate" "${required_modules[@]}"; then
+    if python_has_module "$candidate" "$module_name"; then
       printf '%s\n' "$candidate"
       return
     fi
   done
-
-  local fallback
-  for fallback in python python3; do
-    if command -v "$fallback" >/dev/null 2>&1; then
-      candidate="$(command -v "$fallback")"
-      if python_has_modules "$candidate" "${required_modules[@]}"; then
-        printf '%s\n' "$candidate"
-        return
-      fi
-    fi
-  done
-
-  echo "No usable python interpreter with required modules (${required_modules[*]}) found for split sim2sim launcher" >&2
+  echo "No usable python interpreter with module '$module_name' found for split sim2sim launcher" >&2
   exit 1
 }
 
-MUJOCO_PY="$(resolve_python_with_modules "$MUJOCO_PY" mujoco -- \
+MUJOCO_PY="$(resolve_python_with_module mujoco \
+  "$(resolve_python "$MUJOCO_PY")" \
   /home/ubuntu/.holosoma_deps/miniconda3/envs/hsmujoco/bin/python \
   /home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin/python \
   /home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python)"
-if [[ "$VISER_ENABLED" == "1" ]]; then
-  INFER_PY="$(resolve_python_with_modules "$INFER_PY" onnx onnxruntime viser.extras -- \
-    /home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python \
-    /home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python \
-    /home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin/python)"
-else
-  INFER_PY="$(resolve_python_with_modules "$INFER_PY" onnx onnxruntime -- \
-    /home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python \
-    /home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin/python \
-    /home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python)"
-fi
+INFER_PY="$(resolve_python "$INFER_PY" \
+  /home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python \
+  /home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python)"
 
 apply_motion_clip_object_defaults() {
   if [[ -f "$MOTION_METADATA_TOOL" ]]; then
@@ -232,96 +186,6 @@ apply_motion_clip_object_defaults() {
   if [[ -z "$OBJECT_URDF" ]]; then
     OBJECT_URDF="$DEFAULT_OBJECT_URDF"
   fi
-}
-
-apply_training_motion_launch_defaults() {
-  local model_path="$1"
-  local default_lines
-  default_lines="$(
-    "$INFER_PY" - <<'PY' "$model_path"
-import json
-import sys
-from pathlib import Path
-
-import onnx
-
-
-def resolve_model_path(path_str: str) -> Path:
-    path = Path(path_str).expanduser().resolve()
-    if path.suffix == ".pt":
-        candidate = path.with_suffix(".onnx")
-        if not candidate.is_file():
-            raise FileNotFoundError(f"Expected sibling ONNX next to checkpoint: {candidate}")
-        return candidate
-    return path
-
-
-model = onnx.load(resolve_model_path(sys.argv[1]))
-metadata = {}
-for prop in model.metadata_props:
-    try:
-        metadata[prop.key] = json.loads(prop.value)
-    except Exception:
-        metadata[prop.key] = prop.value
-
-motion_cfg = (
-    metadata.get("experiment_config", {})
-    .get("command", {})
-    .get("setup_terms", {})
-    .get("motion_command", {})
-    .get("params", {})
-    .get("motion_config", {})
-)
-motion_cfg = motion_cfg if isinstance(motion_cfg, dict) else {}
-
-needs_default_pose_transition = bool(
-    (motion_cfg.get("enable_default_pose_prepend") and float(motion_cfg.get("default_pose_prepend_duration_s", 0.0) or 0.0) > 0.0)
-    or (motion_cfg.get("enable_default_pose_append") and float(motion_cfg.get("default_pose_append_duration_s", 0.0) or 0.0) > 0.0)
-)
-
-if needs_default_pose_transition:
-    print("APPLY_TRAINING_MOTION_TRANSITIONS=1")
-    print("SIM_MOTION_INIT_MODE=training_default_pose")
-    print("USE_ROOT_REFERENCE_AT_CLIP_START=1")
-    print("AUTO_START_STIFF_HOLD_SEC=1.0")
-    print("AUTO_START_STIFF_MAX_WAIT_SEC=1.0")
-PY
-  )"
-
-  if [[ -z "$default_lines" ]]; then
-    return
-  fi
-
-  while IFS='=' read -r key value; do
-    [[ -z "${key:-}" ]] && continue
-    case "$key" in
-      APPLY_TRAINING_MOTION_TRANSITIONS)
-        if [[ "$APPLY_TRAINING_MOTION_TRANSITIONS_RAW" == "__unset__" ]]; then
-          APPLY_TRAINING_MOTION_TRANSITIONS="$value"
-        fi
-        ;;
-      SIM_MOTION_INIT_MODE)
-        if [[ "$SIM_MOTION_INIT_MODE_RAW" == "__unset__" ]]; then
-          SIM_MOTION_INIT_MODE="$value"
-        fi
-        ;;
-      USE_ROOT_REFERENCE_AT_CLIP_START)
-        if [[ "$USE_ROOT_REFERENCE_AT_CLIP_START_RAW" == "__unset__" ]]; then
-          USE_ROOT_REFERENCE_AT_CLIP_START="$value"
-        fi
-        ;;
-      AUTO_START_STIFF_HOLD_SEC)
-        if [[ "$AUTO_START_STIFF_HOLD_SEC_RAW" == "__unset__" ]]; then
-          AUTO_START_STIFF_HOLD_SEC="$value"
-        fi
-        ;;
-      AUTO_START_STIFF_MAX_WAIT_SEC)
-        if [[ "$AUTO_START_STIFF_MAX_WAIT_SEC_RAW" == "__unset__" ]]; then
-          AUTO_START_STIFF_MAX_WAIT_SEC="$value"
-        fi
-        ;;
-    esac
-  done <<< "$default_lines"
 }
 
 apply_training_sim_overrides() {
@@ -399,6 +263,188 @@ PY
   done <<< "$override_lines"
 }
 
+apply_training_robot_init_overrides() {
+  local model_path="$1"
+  local override_lines
+  override_lines="$(
+    "$INFER_PY" - <<'PY' "$model_path"
+import json
+import sys
+
+import onnx
+
+model = onnx.load(sys.argv[1])
+metadata = {}
+for prop in model.metadata_props:
+    try:
+        metadata[prop.key] = json.loads(prop.value)
+    except Exception:
+        metadata[prop.key] = prop.value
+
+init_state = metadata.get("experiment_config", {}).get("robot", {}).get("init_state", {})
+if not isinstance(init_state, dict):
+    raise SystemExit(0)
+
+pos = init_state.get("pos")
+rot = init_state.get("rot")
+if isinstance(pos, list) and len(pos) == 3:
+    print("ROBOT_INIT_STATE_POS=" + json.dumps(pos, separators=(",", ":")))
+if isinstance(rot, list) and len(rot) == 4:
+    print("ROBOT_INIT_STATE_ROT=" + json.dumps(rot, separators=(",", ":")))
+PY
+  )"
+
+  if [[ -z "$override_lines" ]]; then
+    return
+  fi
+
+  while IFS='=' read -r key value; do
+    [[ -z "${key:-}" ]] && continue
+    case "$key" in
+      ROBOT_INIT_STATE_POS)
+        if [[ -z "$ROBOT_INIT_STATE_POS" ]]; then
+          ROBOT_INIT_STATE_POS="$value"
+        fi
+        ;;
+      ROBOT_INIT_STATE_ROT)
+        if [[ -z "$ROBOT_INIT_STATE_ROT" ]]; then
+          ROBOT_INIT_STATE_ROT="$value"
+        fi
+        ;;
+    esac
+  done <<< "$override_lines"
+}
+
+apply_training_robot_asset_overrides() {
+  local model_path="$1"
+  local override_lines
+  override_lines="$(
+    "$INFER_PY" - <<'PY' "$model_path"
+import json
+import sys
+
+import onnx
+
+model = onnx.load(sys.argv[1])
+metadata = {}
+for prop in model.metadata_props:
+    try:
+        metadata[prop.key] = json.loads(prop.value)
+    except Exception:
+        metadata[prop.key] = prop.value
+
+asset_cfg = metadata.get("experiment_config", {}).get("robot", {}).get("asset", {})
+if not isinstance(asset_cfg, dict):
+    raise SystemExit(0)
+
+value = asset_cfg.get("enable_self_collisions")
+if isinstance(value, bool):
+    print("ROBOT_ENABLE_SELF_COLLISIONS=" + ("True" if value else "False"))
+PY
+  )"
+
+  if [[ -z "$override_lines" ]]; then
+    return
+  fi
+
+  while IFS='=' read -r key value; do
+    [[ -z "${key:-}" ]] && continue
+    case "$key" in
+      ROBOT_ENABLE_SELF_COLLISIONS)
+        if [[ -z "$ROBOT_ENABLE_SELF_COLLISIONS" ]]; then
+          ROBOT_ENABLE_SELF_COLLISIONS="$value"
+        fi
+        ;;
+    esac
+  done <<< "$override_lines"
+}
+
+apply_training_motion_launch_defaults() {
+  local model_path="$1"
+  local default_lines
+  default_lines="$(
+    "$INFER_PY" - <<'PY' "$model_path"
+import json
+import sys
+from pathlib import Path
+
+import onnx
+
+
+def resolve_model_path(path_str: str) -> Path:
+    path = Path(path_str).expanduser().resolve()
+    if path.suffix == ".pt":
+        candidate = path.with_suffix(".onnx")
+        if not candidate.is_file():
+            raise FileNotFoundError(f"Expected sibling ONNX next to checkpoint: {candidate}")
+        return candidate
+    return path
+
+
+model = onnx.load(resolve_model_path(sys.argv[1]))
+metadata = {}
+for prop in model.metadata_props:
+    try:
+        metadata[prop.key] = json.loads(prop.value)
+    except Exception:
+        metadata[prop.key] = prop.value
+
+motion_cfg = (
+    metadata.get("experiment_config", {})
+    .get("command", {})
+    .get("setup_terms", {})
+    .get("motion_command", {})
+    .get("params", {})
+    .get("motion_config", {})
+)
+motion_cfg = motion_cfg if isinstance(motion_cfg, dict) else {}
+
+needs_default_pose_transition = bool(
+    (motion_cfg.get("enable_default_pose_prepend") and float(motion_cfg.get("default_pose_prepend_duration_s", 0.0) or 0.0) > 0.0)
+    or (motion_cfg.get("enable_default_pose_append") and float(motion_cfg.get("default_pose_append_duration_s", 0.0) or 0.0) > 0.0)
+)
+
+if needs_default_pose_transition:
+    print("APPLY_TRAINING_MOTION_TRANSITIONS=1")
+    print("SIM_MOTION_INIT_MODE=training_default_pose")
+    print("USE_ROOT_REFERENCE_AT_CLIP_START=1")
+    print("AUTO_START_STIFF_HOLD_SEC=1.0")
+    print("AUTO_START_STIFF_MAX_WAIT_SEC=1.0")
+PY
+  )"
+
+  if [[ -z "$default_lines" ]]; then
+    return
+  fi
+
+  while IFS='=' read -r key value; do
+    [[ -z "${key:-}" ]] && continue
+    case "$key" in
+      APPLY_TRAINING_MOTION_TRANSITIONS)
+        APPLY_TRAINING_MOTION_TRANSITIONS="$value"
+        ;;
+      SIM_MOTION_INIT_MODE)
+        SIM_MOTION_INIT_MODE="$value"
+        ;;
+      USE_ROOT_REFERENCE_AT_CLIP_START)
+        if [[ "$USE_ROOT_REFERENCE_AT_CLIP_START_RAW" == "__unset__" ]]; then
+          USE_ROOT_REFERENCE_AT_CLIP_START="$value"
+        fi
+        ;;
+      AUTO_START_STIFF_HOLD_SEC)
+        if [[ "$AUTO_START_STIFF_HOLD_SEC_RAW" == "__unset__" ]]; then
+          AUTO_START_STIFF_HOLD_SEC="$value"
+        fi
+        ;;
+      AUTO_START_STIFF_MAX_WAIT_SEC)
+        if [[ "$AUTO_START_STIFF_MAX_WAIT_SEC_RAW" == "__unset__" ]]; then
+          AUTO_START_STIFF_MAX_WAIT_SEC="$value"
+        fi
+        ;;
+    esac
+  done <<< "$default_lines"
+}
+
 infer_inference_config() {
   "$INFER_PY" - <<'PY' "$1"
 import json
@@ -413,9 +459,7 @@ for value in model.graph.input:
     input_dims[value.name] = dims
 
 if "perception_obs" in input_dims:
-    raise SystemExit(
-        "Model expects 'perception_obs'; use sim2sim_box_split_depth.sh for this checkpoint."
-    )
+    raise SystemExit("Model expects 'perception_obs'; use the depth rollout path instead.")
 
 obs_dim = None
 obs_shape = input_dims.get("obs")
@@ -475,13 +519,6 @@ PY
 }
 
 apply_training_motion_launch_defaults "$MODEL_INPUT"
-if [[ "$RAW_CLIP_PLAYBACK" == "1" ]]; then
-  APPLY_TRAINING_MOTION_TRANSITIONS="0"
-  SIM_MOTION_INIT_MODE="raw_motion"
-  USE_ROOT_REFERENCE_AT_CLIP_START="0"
-  AUTO_START_STIFF_HOLD_SEC="0.0"
-  AUTO_START_STIFF_MAX_WAIT_SEC="0.0"
-fi
 apply_motion_clip_object_defaults
 
 "$INFER_PY" "$ROOT_DIR/src/holosoma_inference/holosoma_inference/tools/patch_motion_onnx.py" \
@@ -491,6 +528,8 @@ apply_motion_clip_object_defaults
   --output-path "$PATCHED_ONNX"
 
 apply_training_sim_overrides "$PATCHED_ONNX"
+apply_training_robot_init_overrides "$PATCHED_ONNX"
+apply_training_robot_asset_overrides "$PATCHED_ONNX"
 
 if [[ -z "$INFERENCE_CONFIG" ]]; then
   INFERENCE_CONFIG="$(infer_inference_config "$PATCHED_ONNX")"
@@ -516,10 +555,10 @@ if [[ "$INFERENCE_CONFIG" == "g1-29dof-wbt-w-object" || "$INFERENCE_CONFIG" == "
     SIM_HOLD_DEFAULT_POSE_UNTIL_FIRST_COMMAND="0"
   fi
   if [[ -z "$SIM_HOLD_INITIAL_POSE_UNTIL_FIRST_COMMAND" ]]; then
-    SIM_HOLD_INITIAL_POSE_UNTIL_FIRST_COMMAND="1"
+    SIM_HOLD_INITIAL_POSE_UNTIL_FIRST_COMMAND="0"
   fi
   if [[ -z "$SIM_FREEZE_UNTIL_FIRST_COMMAND" ]]; then
-    SIM_FREEZE_UNTIL_FIRST_COMMAND="0"
+    SIM_FREEZE_UNTIL_FIRST_COMMAND="1"
   fi
 else
   if [[ -z "$USE_SIM_TIME" ]]; then
@@ -569,31 +608,17 @@ PY
   )"
 fi
 
-if [[ -n "$POLICY_ACTION_SCALE_CAP" ]]; then
-  POLICY_ACTION_SCALE="$(
-    "$INFER_PY" - <<'PY' "$POLICY_ACTION_SCALE" "$POLICY_ACTION_SCALE_CAP"
-import sys
-
-scale = float(sys.argv[1])
-cap = float(sys.argv[2])
-print(min(scale, cap))
-PY
-  )"
-fi
-
 SIM_LOG="$RUN_DIR/mujoco.log"
 POLICY_LOG="$RUN_DIR/policy.log"
-
-if [[ "$HEADLESS" == "1" ]]; then
-  TRAINING_HEADLESS=True
-else
-  TRAINING_HEADLESS=False
-fi
 
 : >"$SIM_LOG"
 : >"$POLICY_LOG"
 
 cleanup() {
+  if [[ -n "${POLICY_PID:-}" ]] && kill -0 "$POLICY_PID" 2>/dev/null; then
+    kill "$POLICY_PID" 2>/dev/null || true
+    wait "$POLICY_PID" 2>/dev/null || true
+  fi
   if [[ -n "${SIM_PID:-}" ]] && kill -0 "$SIM_PID" 2>/dev/null; then
     kill "$SIM_PID" 2>/dev/null || true
     wait "$SIM_PID" 2>/dev/null || true
@@ -629,42 +654,26 @@ wait_for_sim_ready() {
   return 1
 }
 
-echo "Using inference config: $INFERENCE_CONFIG"
-echo "Using object URDF: $OBJECT_URDF"
-echo "Using policy action scale: $POLICY_ACTION_SCALE"
-echo "Using split sim ports: clock=$SIM_CLOCK_PORT sim_state=$SIM_STATE_PORT control=$SIM_CONTROL_PORT"
-if [[ "$VISER_ENABLED" == "1" ]]; then
-  echo "Using Viser URL: http://localhost:$VISER_PORT"
-  if [[ "$VISER_AUTO_RESET_ON_MOTION_END" == "1" ]]; then
-    echo "Using Viser auto-reset on motion end: enabled"
-  fi
-fi
-if [[ "$RAW_CLIP_PLAYBACK" == "1" ]]; then
-  echo "Using raw clip playback mode: enabled"
-fi
-if [[ "$RUN_SECONDS" == "0" ]]; then
-  echo "Policy timeout disabled; run will stay open until Ctrl+C"
-fi
-
-PYTHONUNBUFFERED=1 "${MUJOCO_LAUNCH_PREFIX[@]}" "$MUJOCO_PY" "$ROOT_DIR/src/holosoma/holosoma/run_sim.py" \
+"${MUJOCO_LAUNCH_PREFIX[@]}" "$MUJOCO_PY" "$ROOT_DIR/src/holosoma/holosoma/run_sim.py" \
   simulator:mujoco \
   robot:g1_29dof_w_object \
   terrain:terrain_locomotion_plane \
-  --device "$SIM_DEVICE" \
-  --training.headless="$TRAINING_HEADLESS" \
+  --training.headless "$TRAINING_HEADLESS" \
+  --simulator.config.debug-viz "$SIM_DEBUG_VIZ" \
+  $( [[ "$MUJOCO_SHOW_OBJECT_COLLISION" == "1" ]] && printf '%s %s' "--simulator.config.mujoco-show-object-collision" "True" ) \
+  $( [[ "$MUJOCO_HIDE_OBJECT_VISUALS_WHEN_SHOWING_COLLISION" == "1" ]] && printf '%s %s' "--simulator.config.mujoco-hide-object-visuals-when-showing-collision" "True" ) \
   --simulator.config.sim.fps "$SIM_FPS" \
   --simulator.config.sim.control-decimation "$SIM_CONTROL_DECIMATION" \
   $( [[ -n "$SIM_SUBSTEPS" ]] && printf '%s %s' "--simulator.config.sim.substeps" "$SIM_SUBSTEPS" ) \
   $( [[ -n "$MUJOCO_BACKEND" ]] && printf '%s %s' "--simulator.config.mujoco-backend" "$MUJOCO_BACKEND" ) \
   --simulator.config.virtual-gantry.enabled "$SIM_VIRTUAL_GANTRY_ENABLED" \
+  $( [[ -n "$ROBOT_INIT_STATE_POS" ]] && printf '%s %s' "--robot.init-state.pos" "$ROBOT_INIT_STATE_POS" ) \
+  $( [[ -n "$ROBOT_INIT_STATE_ROT" ]] && printf '%s %s' "--robot.init-state.rot" "$ROBOT_INIT_STATE_ROT" ) \
+  $( [[ -n "$ROBOT_ENABLE_SELF_COLLISIONS" ]] && printf '%s %s' "--robot.asset.enable-self-collisions" "$ROBOT_ENABLE_SELF_COLLISIONS" ) \
   --robot.object.enabled=True \
   --robot.object.object-urdf-path "$OBJECT_URDF" \
   $( [[ "$SIM_USE_TRAINING_URDF_OBJECT_SCENE" == "1" ]] && printf '%s %s' "--robot.object.mujoco-use-training-urdf-scene" "True" ) \
-  $( [[ "$SIM_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES" == "1" ]] && printf '%s %s' "--robot.object.mujoco-limit-object-contacts-to-carry-bodies" "True" ) \
   --robot.object.mujoco-add-default-actuators=True \
-  $( [[ "$SIM_ENABLE_XML_FILTER" == "1" ]] && printf '%s %s' "--simulator.config.robot-mjcf-filter.enable" "True" ) \
-  $( [[ "$SIM_REMOVE_COMPOSITE_LIGHTS" == "1" ]] && printf '%s %s' "--simulator.config.robot-mjcf-filter.remove-lights" "True" ) \
-  $( [[ "$SIM_REMOVE_COMPOSITE_GROUND" == "1" ]] && printf '%s %s' "--simulator.config.robot-mjcf-filter.remove-ground" "True" ) \
   $( [[ "$SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML" == "1" ]] && printf '%s %s' "--robot.object.mujoco-copy-joint-defaults-from-robot-xml" "True" ) \
   $( [[ "$SIM_COPY_TENDONS_FROM_ROBOT_XML" == "1" ]] && printf '%s %s' "--robot.object.mujoco-copy-tendons-from-robot-xml" "True" ) \
   $( [[ "$SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML" == "1" ]] && printf '%s %s' "--robot.object.mujoco-copy-collision-geoms-from-robot-xml" "True" ) \
@@ -673,13 +682,15 @@ PYTHONUNBUFFERED=1 "${MUJOCO_LAUNCH_PREFIX[@]}" "$MUJOCO_PY" "$ROOT_DIR/src/holo
   $( [[ -n "$MUJOCO_OBJECT_MASS_OVERRIDE" ]] && printf '%s %s' "--robot.object.mujoco-object-mass-override" "$MUJOCO_OBJECT_MASS_OVERRIDE" ) \
   $( [[ -n "$MUJOCO_OBJECT_GEOM_FRICTION" ]] && printf '%s %s' "--robot.object.mujoco-object-geom-friction" "$MUJOCO_OBJECT_GEOM_FRICTION" ) \
   $( [[ -n "$MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION" ]] && printf '%s %s' "--robot.object.mujoco-object-terrain-pair-friction" "$MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION" ) \
+  $( [[ "$MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES" == "1" ]] && printf '%s %s' "--robot.object.mujoco-limit-object-contacts-to-carry-bodies" "True" ) \
+  $( [[ -n "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" ]] && printf '%s %s' "--robot.object.mujoco-object-contact-body-name-markers" "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" ) \
   $( [[ -n "$TERRAIN_STATIC_FRICTION" ]] && printf '%s %s' "--terrain.terrain-term.static-friction" "$TERRAIN_STATIC_FRICTION" ) \
   $( [[ -n "$TERRAIN_DYNAMIC_FRICTION" ]] && printf '%s %s' "--terrain.terrain-term.dynamic-friction" "$TERRAIN_DYNAMIC_FRICTION" ) \
   --simulator.config.bridge.interface "$INTERFACE_NAME" \
   --simulator.config.bridge.clock-port "$SIM_CLOCK_PORT" \
   --simulator.config.bridge.publish-sim-state=True \
-  --simulator.config.bridge.sim-state-port "$SIM_STATE_PORT" \
   --simulator.config.bridge.listen-control=True \
+  --simulator.config.bridge.sim-state-port "$SIM_STATE_PORT" \
   --simulator.config.bridge.control-port "$SIM_CONTROL_PORT" \
   $( [[ "$SIM_USE_ZMQ_LOWCMD" == "1" ]] && printf '%s %s' "--simulator.config.bridge.use-zmq-lowcmd" "True" ) \
   $( [[ "$SIM_IGNORE_DEFAULT_IDLE_COMMAND" == "1" ]] && printf '%s %s' "--simulator.config.bridge.ignore-default-idle-command" "True" ) \
@@ -717,18 +728,14 @@ POLICY_CMD=(
   --task.auto-start-stiff-hold-sec "$AUTO_START_STIFF_HOLD_SEC"
   --task.auto-start-stiff-max-wait-sec "$AUTO_START_STIFF_MAX_WAIT_SEC"
   --task.auto-start-stiff-pose-tolerance "$AUTO_START_STIFF_POSE_TOL"
-  --task.sim-reset-restart-delay-sec "$SIM_RESET_RESTART_DELAY_SEC"
   --task.policy-action-scale "$POLICY_ACTION_SCALE"
   --task.sim-object-name object
 )
-
 if [[ "$SIM_USE_ZMQ_LOWCMD" == "1" ]]; then
   POLICY_CMD+=(--task.use-zmq-lowcmd)
 fi
 if [[ "$USE_SIM_TIME" == "1" ]]; then
   POLICY_CMD+=(--task.use-sim-time)
-else
-  POLICY_CMD+=(--task.no-use-sim-time)
 fi
 if [[ "$USE_ROOT_REFERENCE_AT_CLIP_START" == "1" ]]; then
   POLICY_CMD+=(--task.use-root-reference-at-clip-start)
@@ -742,22 +749,18 @@ fi
 if [[ "$POLICY_DEFER_UNTIL_VALID_STATE" == "1" ]]; then
   POLICY_CMD+=(--task.defer-policy-start-until-valid-state)
 fi
-if [[ "$VISER_ENABLED" == "1" ]]; then
-  POLICY_CMD+=(--viser.port "$VISER_PORT")
-  POLICY_CMD+=(--viser.update-interval "$VISER_UPDATE_INTERVAL")
-  POLICY_CMD+=(--viser.object-urdf-path "$OBJECT_URDF")
-  POLICY_CMD+=(--viser.enabled)
-  if [[ "$VISER_AUTO_RESET_ON_MOTION_END" != "1" ]]; then
-    POLICY_CMD+=(--viser.no-auto-reset-on-motion-end)
-  fi
-fi
 
 set +e
 if [[ "$RUN_SECONDS" == "0" ]]; then
-  PYTHONUNBUFFERED=1 "${POLICY_CMD[@]}" >"$POLICY_LOG" 2>&1
+  "${POLICY_CMD[@]}" >"$POLICY_LOG" 2>&1 &
 else
-  PYTHONUNBUFFERED=1 timeout --signal=INT "${RUN_SECONDS}s" "${POLICY_CMD[@]}" >"$POLICY_LOG" 2>&1
+  timeout --signal=INT "${RUN_SECONDS}s" "${POLICY_CMD[@]}" >"$POLICY_LOG" 2>&1 &
 fi
+POLICY_PID=$!
+set -e
+
+set +e
+wait "$POLICY_PID"
 STATUS=$?
 set -e
 

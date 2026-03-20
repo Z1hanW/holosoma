@@ -26,7 +26,7 @@ Standalone non-Viser browser demo for the `train_object_extend.sh` tracking poli
 - checkpoint: `/data/logs_new/boxer/20260316_200048-g1_29dof_wbt_w_object_extend_20260316_200027_s01_scale_1p0-g1_29dof_wbt_w_object_extend_20260316_200027/model_23500.onnx`
 - W&B run: `https://wandb.ai/zihanw22/boxer/runs/j21xgvcb`
 - default preferred clip: `/home/ubuntu/FAR/holosoma/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz`
-- scene xml: generated at `public/demo-assets/scene.xml` from the same MuJoCo object-scene patch path used by `sim2sim_box_split_tracking.sh`
+- scene xml: generated at `public/demo-assets/scene.xml` from the same MuJoCo object-scene patch path used by `mj_track.sh`
 
 ## Usage
 

@@ -352,6 +352,45 @@ object_distill_drop_mixed_terms = {
     ),
 }
 
+object_command_curriculum_track_terms = {
+    "motion_command": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:command_curriculum_motion_command",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "motion_ref_ori_b": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:command_curriculum_motion_ref_ori_b",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "obj_target_pose_size_b": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:command_curriculum_obj_target_pose_size_b",
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
+object_command_curriculum_goal_terms = {
+    "obj_sparse_goal_xy_yaw_pick_root_heading": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:command_curriculum_obj_sparse_goal_xy_yaw_pick_root_heading",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "obj_picked_flag": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:command_curriculum_obj_picked_flag",
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
+object_command_curriculum_mode_terms = {
+    "command_only_flag": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:command_curriculum_command_only_flag",
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
 g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCfg(
     groups={
         # Keep full teacher actor observation available for teacher policy queries.
@@ -399,6 +438,49 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
             enable_noise=False,
             history_length=1,
             terms=object_distill_drop_mixed_terms,
+        ),
+        "critic_obs": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=critic_obs_w_object_terms,
+        ),
+    },
+)
+
+g1_29dof_wbt_observation_w_object_command_curriculum = ObservationManagerCfg(
+    groups={
+        # Keep the legacy full observation around for debugging/analysis.
+        "actor_obs": replace(actor_obs_w_object, history_length=1),
+        "actor_obs_track": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            terms=object_command_curriculum_track_terms,
+        ),
+        "actor_obs_proprio": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            terms=object_distill_proprio_terms,
+        ),
+        "actor_obs_box": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            terms=object_distill_box_terms,
+        ),
+        "actor_obs_goal": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_command_curriculum_goal_terms,
+        ),
+        "actor_obs_mode": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_command_curriculum_mode_terms,
         ),
         "critic_obs": ObsGroupCfg(
             concatenate=True,
@@ -537,6 +619,7 @@ __all__ = [
     "g1_29dof_wbt_observation_motion_tracking_split",
     "g1_29dof_wbt_observation_w_object",
     "g1_29dof_wbt_observation_w_object_legacy",
+    "g1_29dof_wbt_observation_w_object_command_curriculum",
     "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd",
     "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy",
     "g1_29dof_wbt_observation_videomimic",

@@ -64,6 +64,7 @@ PPO_START_EPOCH=${PPO_START_EPOCH:-0}
 DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-2500}
 DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-5.0}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-1.0}
+FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i_17x17}
 STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_proprio','actor_obs_drop_mixed']"}
@@ -111,6 +112,7 @@ echo "[INFO] external_goal_range_yaw_start=${EXTERNAL_GOAL_RPY_MIN_START} -> ${E
 echo "[INFO] external_goal_range_yaw_end=${EXTERNAL_GOAL_RPY_MIN} -> ${EXTERNAL_GOAL_RPY_MAX}"
 echo "[INFO] clip_goal_delta_steps=${CLIP_GOAL_DELTA_MIN_STEPS}-${CLIP_GOAL_DELTA_MAX_STEPS}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
+echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}"
 echo "[INFO] dagger_ignore_external_goal_samples=${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES}"
 echo "[INFO] max_episode_length_s=${MAX_EPISODE_LENGTH_S}"
 
@@ -130,6 +132,7 @@ exec env \
   DAGGER_END_EPOCH="${DAGGER_END_EPOCH}" \
   DAGGER_LOSS_COEF="${DAGGER_LOSS_COEF}" \
   START_AT_TIMESTEP_ZERO_PROB="${START_AT_TIMESTEP_ZERO_PROB}" \
+  FREEZE_AT_TIMESTEP_ZERO_PROB="${FREEZE_AT_TIMESTEP_ZERO_PROB}" \
   PAIR_TERRAIN_WITH_MOTION="${PAIR_TERRAIN_WITH_MOTION}" \
   bash "${SCRIPT_DIR}/distill_root_box.sh" "${TEACHER_CHECKPOINT}" \
     "perception:${PERCEPTION_PRESET}" \
@@ -151,6 +154,7 @@ exec env \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-rpy-max-start "${EXTERNAL_GOAL_RPY_MAX_START}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-rpy-min "${EXTERNAL_GOAL_RPY_MIN}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-rpy-max "${EXTERNAL_GOAL_RPY_MAX}" \
+    --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob="${FREEZE_AT_TIMESTEP_ZERO_PROB}" \
     --simulator.config.sim.max_episode_length_s "${MAX_EPISODE_LENGTH_S}" \
     --perception.camera-width="${IMAGE_WIDTH}" \
     --perception.camera-height="${IMAGE_HEIGHT}" \

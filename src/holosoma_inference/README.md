@@ -61,8 +61,8 @@ The main lessons from debugging G1 object-tracking on MuJoCo split sim2sim are:
 
 Useful entry points in this repo:
 
-- `./sim2sim_box_split_tracking.sh <motion.npz> <model.onnx>`: authoritative split sim launcher
-- `./run_wobj_tracking_validated.sh`: validated G1 w-obj tracking launcher
+- `./mj_track.sh [motion.npz] [model.onnx]`: tracking launcher with `viser` MuJoCo state visualization
+- `./mj_depth.sh`: MuJoCo joystick/manual-control launcher for the depth box-carry policy
 - `./vis_mujoco_sim_state.sh`: `viser` viewer that reads split MuJoCo `sim-state` and can trigger reset over `sim-control`
 
 ### Training-Aligned Invariants
@@ -101,7 +101,7 @@ That is about `35.5 ms` end to end. Multi-second reset behavior indicates whole-
 ### Practical Debug Order
 
 1. Kill stale split sim processes on ports `5655/5657/5659`.
-2. Run `./run_wobj_tracking_validated.sh` and confirm authoritative MuJoCo behavior first.
+2. Run `./mj_track.sh [motion.npz] [model.onnx]` and confirm authoritative MuJoCo behavior first.
 3. Check `logs/sim2sim_runs/.../mujoco.log` for first lowcmd reception and reset handling.
 4. Check `logs/sim2sim_runs/.../policy.log` for motion timestep progress and clock-rewind restart.
 5. If carry looks wrong, enable `HOLOSOMA_SPLIT_SIM_STATE_TRACE_PATH` and inspect `object_robot_contact_count` and contact bodies.

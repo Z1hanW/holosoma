@@ -1184,8 +1184,11 @@ class MotionCommand(CommandTermBase):
         self._sparse_goal_cfg: SparseObjectGoalConfig | None = None
         self._sparse_goal_curriculum_enabled = False
         self._sparse_goal_reset_counter = 0
+        self._command_only_env_prob = 0.0
+        self._command_only_env_fraction_last_reset = 0.0
         self._sparse_goal_external_prob = 0.0
         self._sparse_goal_external_fraction_last_reset = 0.0
+        self.command_only_env_mask: torch.Tensor | None = None
         self.pickup_anchor_set: torch.Tensor | None = None
         self.pickup_anchor_root_pos_w: torch.Tensor | None = None
         self.pickup_anchor_root_quat_w: torch.Tensor | None = None
@@ -1233,8 +1236,11 @@ class MotionCommand(CommandTermBase):
         self._sparse_goal_cfg = self.motion_cfg.sparse_object_goal
         self._sparse_goal_curriculum_enabled = bool(self._sparse_goal_cfg.enabled)
         self._sparse_goal_reset_counter = 0
+        self._command_only_env_prob = 0.0
+        self._command_only_env_fraction_last_reset = 0.0
         self._sparse_goal_external_prob = 0.0
         self._sparse_goal_external_fraction_last_reset = 0.0
+        self.command_only_env_mask = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
         self.pickup_anchor_set = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
         self.pickup_anchor_root_pos_w = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
         self.pickup_anchor_root_quat_w = torch.zeros((self.num_envs, 4), device=self.device, dtype=torch.float32)
@@ -1625,6 +1631,8 @@ class MotionCommand(CommandTermBase):
             self._update_motion_alignment(env_ids)
         if self.manual_goal_is_external is not None:
             self.manual_goal_is_external[env_ids] = False
+        if self.command_only_env_mask is not None:
+            self.command_only_env_mask[env_ids] = False
         self._update_sparse_object_goals_on_reset(env_ids, clip_lengths)
 
         # 1. Get the reference root/body poses
@@ -1957,6 +1965,30 @@ class MotionCommand(CommandTermBase):
             return 1.0
         return min(float(self._sparse_goal_reset_counter) / float(ramp), 1.0)
 
+    def _carry_extension_curriculum_progress(self) -> float:
+        if self._sparse_goal_cfg is None:
+            return 1.0
+        ramp_cfg = self._sparse_goal_cfg.carry_extension_range_ramp_resets
+        if ramp_cfg is None:
+            ramp_cfg = self._sparse_goal_cfg.carry_extension_prob_ramp_resets
+        if ramp_cfg is None:
+            ramp_cfg = self._sparse_goal_cfg.external_goal_prob_ramp_resets
+        ramp = max(0, int(ramp_cfg))
+        if ramp <= 0:
+            return 1.0
+        return min(float(self._sparse_goal_reset_counter) / float(ramp), 1.0)
+
+    def _command_only_env_curriculum_progress(self) -> float:
+        if self._sparse_goal_cfg is None:
+            return 1.0
+        ramp_cfg = self._sparse_goal_cfg.command_only_env_prob_ramp_resets
+        if ramp_cfg is None:
+            ramp_cfg = self._sparse_goal_cfg.external_goal_prob_ramp_resets
+        ramp = max(0, int(ramp_cfg))
+        if ramp <= 0:
+            return 1.0
+        return min(float(self._sparse_goal_reset_counter) / float(ramp), 1.0)
+
     def _goal_vec3_interp(
         self,
         end_values: list[float],
@@ -2114,6 +2146,56 @@ class MotionCommand(CommandTermBase):
         goal_quat_w = quat_from_euler_xyz(rpy[:, 0], rpy[:, 1], rpy[:, 2])
         return goal_pos_w, goal_quat_w
 
+    def _sample_carry_extension_object_goal_pose_w(
+        self,
+        env_ids: torch.Tensor,
+        clip_lengths: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._sparse_goal_cfg is None:
+            raise RuntimeError("Sparse goal config is not initialized.")
+
+        num_samples = env_ids.numel()
+        base_pos_w, base_quat_w = self._sample_clip_based_object_goal_pose_w(env_ids, clip_lengths)
+        progress = self._carry_extension_curriculum_progress()
+
+        pos_min = self._goal_vec3_interp(
+            self._sparse_goal_cfg.carry_extension_pos_local_min,
+            name="carry_extension_pos_local_min",
+            start_values=self._sparse_goal_cfg.carry_extension_pos_local_min_start,
+            alpha=progress,
+        )
+        pos_max = self._goal_vec3_interp(
+            self._sparse_goal_cfg.carry_extension_pos_local_max,
+            name="carry_extension_pos_local_max",
+            start_values=self._sparse_goal_cfg.carry_extension_pos_local_max_start,
+            alpha=progress,
+        )
+        pos_lo = torch.minimum(pos_min, pos_max)
+        pos_hi = torch.maximum(pos_min, pos_max)
+        local_pos = pos_lo.unsqueeze(0) + (pos_hi - pos_lo).unsqueeze(0) * torch.rand(
+            (num_samples, 3), device=self.device
+        )
+        goal_pos_w = base_pos_w + quat_apply(base_quat_w, local_pos, w_last=True)
+
+        rpy_min = self._goal_vec3_interp(
+            self._sparse_goal_cfg.carry_extension_rpy_min,
+            name="carry_extension_rpy_min",
+            start_values=self._sparse_goal_cfg.carry_extension_rpy_min_start,
+            alpha=progress,
+        )
+        rpy_max = self._goal_vec3_interp(
+            self._sparse_goal_cfg.carry_extension_rpy_max,
+            name="carry_extension_rpy_max",
+            start_values=self._sparse_goal_cfg.carry_extension_rpy_max_start,
+            alpha=progress,
+        )
+        rpy_lo = torch.minimum(rpy_min, rpy_max)
+        rpy_hi = torch.maximum(rpy_min, rpy_max)
+        rpy = rpy_lo.unsqueeze(0) + (rpy_hi - rpy_lo).unsqueeze(0) * torch.rand((num_samples, 3), device=self.device)
+        delta_quat_w = quat_from_euler_xyz(rpy[:, 0], rpy[:, 1], rpy[:, 2])
+        goal_quat_w = quat_mul(base_quat_w, delta_quat_w, w_last=True)
+        return goal_pos_w, goal_quat_w
+
     def _current_external_goal_prob(self) -> float:
         if self._sparse_goal_cfg is None:
             return 0.0
@@ -2125,6 +2207,46 @@ class MotionCommand(CommandTermBase):
         prob_start = float(self._sparse_goal_cfg.external_goal_prob_start)
         prob_end = float(self._sparse_goal_cfg.external_goal_prob_end)
         ramp_resets = max(0, int(self._sparse_goal_cfg.external_goal_prob_ramp_resets))
+        if ramp_resets <= 0:
+            alpha = 1.0
+        else:
+            alpha = min(float(self._sparse_goal_reset_counter) / float(ramp_resets), 1.0)
+        return self._clamp01(prob_start + (prob_end - prob_start) * alpha)
+
+    def _current_carry_extension_prob(self) -> float:
+        if self._sparse_goal_cfg is None:
+            return 0.0
+        if self._env.is_evaluating:
+            if self._sparse_goal_cfg.eval_carry_extension_prob is not None:
+                return self._clamp01(float(self._sparse_goal_cfg.eval_carry_extension_prob))
+            return self._clamp01(float(self._sparse_goal_cfg.carry_extension_prob_end))
+
+        prob_start = float(self._sparse_goal_cfg.carry_extension_prob_start)
+        prob_end = float(self._sparse_goal_cfg.carry_extension_prob_end)
+        ramp_cfg = self._sparse_goal_cfg.carry_extension_prob_ramp_resets
+        if ramp_cfg is None:
+            ramp_cfg = self._sparse_goal_cfg.external_goal_prob_ramp_resets
+        ramp_resets = max(0, int(ramp_cfg))
+        if ramp_resets <= 0:
+            alpha = 1.0
+        else:
+            alpha = min(float(self._sparse_goal_reset_counter) / float(ramp_resets), 1.0)
+        return self._clamp01(prob_start + (prob_end - prob_start) * alpha)
+
+    def _current_command_only_env_prob(self) -> float:
+        if self._sparse_goal_cfg is None:
+            return 0.0
+        if self._env.is_evaluating:
+            if self._sparse_goal_cfg.eval_command_only_env_prob is not None:
+                return self._clamp01(float(self._sparse_goal_cfg.eval_command_only_env_prob))
+            return self._clamp01(float(self._sparse_goal_cfg.command_only_env_prob_end))
+
+        prob_start = float(self._sparse_goal_cfg.command_only_env_prob_start)
+        prob_end = float(self._sparse_goal_cfg.command_only_env_prob_end)
+        ramp_cfg = self._sparse_goal_cfg.command_only_env_prob_ramp_resets
+        if ramp_cfg is None:
+            ramp_cfg = self._sparse_goal_cfg.external_goal_prob_ramp_resets
+        ramp_resets = max(0, int(ramp_cfg))
         if ramp_resets <= 0:
             alpha = 1.0
         else:
@@ -2146,13 +2268,31 @@ class MotionCommand(CommandTermBase):
         clip_goal_pos_w = goal_pos_w.clone()
         clip_goal_quat_w = goal_quat_w.clone()
 
+        p_command = self._current_command_only_env_prob()
+        p_carry = self._current_carry_extension_prob()
         p_ext = self._current_external_goal_prob()
-        self._sparse_goal_external_prob = p_ext
-        external_mask = torch.rand(env_ids.numel(), device=self.device) < p_ext
+        p_command = self._clamp01(p_command)
+        p_carry = min(self._clamp01(p_carry), p_command)
+        p_ext = self._clamp01(min(p_ext, max(p_command - p_carry, 0.0)))
+        self._command_only_env_prob = p_command
+        self._sparse_goal_external_prob = p_carry + p_ext
+        goal_selector = torch.rand(env_ids.numel(), device=self.device)
+        carry_extension_mask = goal_selector < p_carry
+        external_mask = (~carry_extension_mask) & (goal_selector < (p_carry + p_ext))
+        command_clip_mask = (~carry_extension_mask) & (~external_mask) & (goal_selector < p_command)
+        command_only_mask = carry_extension_mask | external_mask | command_clip_mask
+        non_clip_mask = carry_extension_mask | external_mask
+        if carry_extension_mask.any():
+            carry_pos_w, carry_quat_w = self._sample_carry_extension_object_goal_pose_w(
+                env_ids[carry_extension_mask],
+                clip_lengths[carry_extension_mask],
+            )
+            goal_pos_w[carry_extension_mask] = carry_pos_w
+            goal_quat_w[carry_extension_mask] = carry_quat_w
         if external_mask.any():
-            ext_pos_w, ext_quat_w = self._sample_external_object_goal_pose_w(env_ids)
-            goal_pos_w = torch.where(external_mask.unsqueeze(1), ext_pos_w, goal_pos_w)
-            goal_quat_w = torch.where(external_mask.unsqueeze(1), ext_quat_w, goal_quat_w)
+            ext_pos_w, ext_quat_w = self._sample_external_object_goal_pose_w(env_ids[external_mask])
+            goal_pos_w[external_mask] = ext_pos_w
+            goal_quat_w[external_mask] = ext_quat_w
 
         clip_goal_rot_mat = quaternion_to_matrix(clip_goal_quat_w, w_last=True)
         clip_goal_rot6d_w = clip_goal_rot_mat[..., :2].reshape(clip_goal_rot_mat.shape[0], 6)
@@ -2167,12 +2307,15 @@ class MotionCommand(CommandTermBase):
         if self.base_goal_object_rot6d_w is not None:
             self.base_goal_object_rot6d_w[env_ids] = goal_rot6d_w
         if self.base_goal_is_external is not None:
-            self.base_goal_is_external[env_ids] = external_mask
+            self.base_goal_is_external[env_ids] = non_clip_mask
         self.manual_goal_object_pos_w[env_ids] = goal_pos_w
         self.manual_goal_object_rot6d_w[env_ids] = goal_rot6d_w
         if self.manual_goal_is_external is not None:
-            self.manual_goal_is_external[env_ids] = external_mask
-        self._sparse_goal_external_fraction_last_reset = float(external_mask.float().mean().item())
+            self.manual_goal_is_external[env_ids] = non_clip_mask
+        if self.command_only_env_mask is not None:
+            self.command_only_env_mask[env_ids] = command_only_mask
+        self._command_only_env_fraction_last_reset = float(command_only_mask.float().mean().item())
+        self._sparse_goal_external_fraction_last_reset = float(non_clip_mask.float().mean().item())
 
         if not self._env.is_evaluating:
             self._sparse_goal_reset_counter += int(env_ids.numel())
@@ -2203,6 +2346,11 @@ class MotionCommand(CommandTermBase):
             torch.abs(self.manual_goal_object_rot6d_w - self.clip_goal_object_rot6d_w) > 1.0e-6, dim=-1
         )
         return external_mask | pos_diff | rot_diff
+
+    def get_command_only_env_mask(self) -> torch.Tensor:
+        if self.command_only_env_mask is None:
+            return torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
+        return self.command_only_env_mask.clone()
 
     def _manual_goal_anchor_pose_w(
         self,
@@ -2595,8 +2743,12 @@ class MotionCommand(CommandTermBase):
         if self.clip_weighting_strategy == "success_rate_adaptive" and self._base_clip_weights is not None:
             self._clip_sampling_weights = self._base_clip_weights.clone()
         self._sparse_goal_reset_counter = 0
+        self._command_only_env_prob = 0.0
+        self._command_only_env_fraction_last_reset = 0.0
         self._sparse_goal_external_prob = 0.0
         self._sparse_goal_external_fraction_last_reset = 0.0
+        if self.command_only_env_mask is not None:
+            self.command_only_env_mask.zero_()
         if self.manual_goal_is_external is not None:
             self.manual_goal_is_external.zero_()
         if self.clip_goal_object_pos_w is not None:
@@ -2704,6 +2856,18 @@ class MotionCommand(CommandTermBase):
             self.metrics["motion/error_object_ref_lin_vel"] = zeros
 
         if self._sparse_goal_curriculum_enabled:
+            self.metrics["goal/command_only_env_prob"] = torch.full(
+                (self.num_envs,),
+                float(self._command_only_env_prob),
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self.metrics["goal/command_only_env_fraction_last_reset"] = torch.full(
+                (self.num_envs,),
+                float(self._command_only_env_fraction_last_reset),
+                device=self.device,
+                dtype=torch.float32,
+            )
             self.metrics["goal/external_prob"] = torch.full(
                 (self.num_envs,),
                 float(self._sparse_goal_external_prob),
@@ -2720,6 +2884,13 @@ class MotionCommand(CommandTermBase):
             self.metrics["goal/external_prob_curriculum_progress"] = torch.full(
                 (self.num_envs,),
                 float(progress),
+                device=self.device,
+                dtype=torch.float32,
+            )
+            command_progress = self._command_only_env_curriculum_progress()
+            self.metrics["goal/command_only_env_prob_curriculum_progress"] = torch.full(
+                (self.num_envs,),
+                float(command_progress),
                 device=self.device,
                 dtype=torch.float32,
             )

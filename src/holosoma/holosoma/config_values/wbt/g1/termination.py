@@ -138,8 +138,80 @@ g1_29dof_wbt_termination_distill_sparse_goal_mixed = TerminationManagerCfg(
     }
 )
 
+g1_29dof_wbt_termination_command_curriculum = TerminationManagerCfg(
+    terms={
+        "timeout": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.common:timeout_exceeded",
+            is_timeout=True,
+        ),
+        "motion_ends_clip_goal": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:motion_ends_if_clip_goal",
+            params={"only_clip_goal": True},
+        ),
+        "robot_fallen": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:drop_task_base_height_below_threshold",
+            params={"min_height": 0.45},
+        ),
+        "bad_tracking_clip_goal": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:BadTracking",
+            params={
+                "only_clip_goal": True,
+                "bad_ref_pos_threshold": 1.0,
+                "bad_ref_ori_threshold": 1.2,
+                "bad_motion_body_pos_threshold": 0.55,
+                "body_names_to_track": [
+                    "pelvis",
+                    "left_hip_roll_link",
+                    "left_knee_link",
+                    "left_ankle_roll_link",
+                    "right_hip_roll_link",
+                    "right_knee_link",
+                    "right_ankle_roll_link",
+                    "torso_link",
+                    "left_shoulder_roll_link",
+                    "left_elbow_link",
+                    "left_wrist_yaw_link",
+                    "right_shoulder_roll_link",
+                    "right_elbow_link",
+                    "right_wrist_yaw_link",
+                ],
+                "bad_motion_body_pos_body_names": [
+                    "left_ankle_roll_link",
+                    "right_ankle_roll_link",
+                    "left_wrist_yaw_link",
+                    "right_wrist_yaw_link",
+                ],
+                "bad_object_pos_threshold": 0.65,
+                "bad_object_ori_threshold": 1.2,
+            },
+        ),
+        "sparse_goal_success": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:SparseGoalSuccess",
+            params={
+                "only_external": True,
+                "xy_threshold": 0.10,
+                "yaw_threshold": 0.35,
+                "z_threshold": 0.06,
+                "lin_vel_threshold": 0.30,
+                "ang_vel_threshold": 1.50,
+                "hold_steps": 10,
+            },
+        ),
+        "sparse_goal_dropped_away": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:SparseGoalDroppedAway",
+            params={
+                "only_external": True,
+                "xy_fail_threshold": 0.35,
+                "release_height_margin": 0.08,
+                "hold_steps": 2,
+            },
+        ),
+    }
+)
+
 __all__ = [
     "g1_29dof_wbt_termination",
+    "g1_29dof_wbt_termination_command_curriculum",
     "g1_29dof_wbt_termination_distill",
     "g1_29dof_wbt_termination_distill_sparse_goal_mixed",
 ]

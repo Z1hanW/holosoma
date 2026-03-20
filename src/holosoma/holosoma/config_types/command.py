@@ -66,10 +66,22 @@ class NoiseToInitialPoseConfig:
 
 @dataclass(frozen=True)
 class SparseObjectGoalConfig:
-    """Sparse object-goal sampling configuration for distillation."""
+    """Sparse object-goal and command-observation curriculum configuration."""
 
     enabled: bool = False
-    """Enable mixed sparse-goal sampling (clip-based + external random goals)."""
+    """Enable mixed sparse-goal sampling and command-only observation curriculum."""
+
+    command_only_env_prob_start: float = 0.0
+    """Initial probability of sampling command-only observation episodes."""
+
+    command_only_env_prob_end: float = 0.0
+    """Final probability of sampling command-only observation episodes."""
+
+    command_only_env_prob_ramp_resets: int | None = None
+    """Optional ramp horizon for command-only episode probability; defaults to external_goal_prob_ramp_resets."""
+
+    eval_command_only_env_prob: float | None = None
+    """Optional command-only episode probability used during evaluation; defaults to end prob when None."""
 
     clip_goal_delta_min_steps: int = 60
     """Minimum delta steps for clip-based goal: goal_step = min(t + delta, clip_end)."""
@@ -89,8 +101,23 @@ class SparseObjectGoalConfig:
     eval_external_goal_prob: float | None = None
     """Optional external-goal probability used during evaluation; defaults to end prob when None."""
 
+    carry_extension_prob_start: float = 0.0
+    """Initial probability of sampling clip-anchored carry-extension goals."""
+
+    carry_extension_prob_end: float = 0.0
+    """Final probability of sampling clip-anchored carry-extension goals."""
+
+    carry_extension_prob_ramp_resets: int | None = None
+    """Optional ramp horizon for carry-extension goal probability; defaults to external_goal_prob_ramp_resets."""
+
+    eval_carry_extension_prob: float | None = None
+    """Optional carry-extension probability used during evaluation; defaults to end prob when None."""
+
     external_goal_range_ramp_resets: int | None = None
     """Optional ramp horizon for external-goal sampling range; defaults to external_goal_prob_ramp_resets."""
+
+    carry_extension_range_ramp_resets: int | None = None
+    """Optional ramp horizon for carry-extension sampling range; defaults to carry_extension_prob_ramp_resets."""
 
     external_goal_pos_local_min_start: list[float] | None = None
     """Optional initial lower bounds [x, y, z] for external goal position in local frame around env origin."""
@@ -104,6 +131,18 @@ class SparseObjectGoalConfig:
     external_goal_pos_local_max: list[float] = field(default_factory=lambda: [1.2, 0.8, 1.0])
     """External goal position upper bounds [x, y, z] in local frame around env origin."""
 
+    carry_extension_pos_local_min_start: list[float] | None = None
+    """Optional initial lower bounds [x, y, z] for carry-extension goal in the clip-final object frame."""
+
+    carry_extension_pos_local_max_start: list[float] | None = None
+    """Optional initial upper bounds [x, y, z] for carry-extension goal in the clip-final object frame."""
+
+    carry_extension_pos_local_min: list[float] = field(default_factory=lambda: [0.10, -0.10, 0.0])
+    """Carry-extension goal lower bounds [x, y, z] in the clip-final object frame."""
+
+    carry_extension_pos_local_max: list[float] = field(default_factory=lambda: [0.50, 0.10, 0.0])
+    """Carry-extension goal upper bounds [x, y, z] in the clip-final object frame."""
+
     external_goal_rpy_min_start: list[float] | None = None
     """Optional initial orientation lower bounds [roll, pitch, yaw] in radians."""
 
@@ -115,6 +154,18 @@ class SparseObjectGoalConfig:
 
     external_goal_rpy_max: list[float] = field(default_factory=lambda: [0.0, 0.0, 3.1415926])
     """External goal orientation upper bounds [roll, pitch, yaw] in radians."""
+
+    carry_extension_rpy_min_start: list[float] | None = None
+    """Optional initial orientation lower bounds [roll, pitch, yaw] relative to the clip-final object pose."""
+
+    carry_extension_rpy_max_start: list[float] | None = None
+    """Optional initial orientation upper bounds [roll, pitch, yaw] relative to the clip-final object pose."""
+
+    carry_extension_rpy_min: list[float] = field(default_factory=lambda: [0.0, 0.0, -0.35])
+    """Carry-extension orientation lower bounds [roll, pitch, yaw] relative to the clip-final object pose."""
+
+    carry_extension_rpy_max: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.35])
+    """Carry-extension orientation upper bounds [roll, pitch, yaw] relative to the clip-final object pose."""
 
 
 @dataclass(frozen=True)

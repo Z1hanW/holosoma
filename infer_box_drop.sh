@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Branches:
 # - clip:  clip-conditioned drop student (default run: oitf644a)
-# - mixed: sparse-goal mixed drop student (default run: hw5jbitz)
+# - mixed: sparse-goal mixed drop student (default run: q3t3ntf4)
 #
 # Usage:
 #   bash infer_box_drop.sh <clip|mixed> [checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
@@ -13,7 +13,7 @@ set -euo pipefail
 # Examples:
 #   bash infer_box_drop.sh clip
 #   bash infer_box_drop.sh mixed
-#   bash infer_box_drop.sh mixed https://wandb.ai/zihanw22/boxer/runs/hw5jbitz
+#   bash infer_box_drop.sh mixed https://wandb.ai/zihanw22/boxer/runs/q3t3ntf4
 #   MOTION_CLIP_NAME=sub3_largebox_003_mj_w_obj bash infer_box_drop.sh clip
 
 usage() {
@@ -23,11 +23,11 @@ Usage:
 
 Modes:
   clip   Evaluate the clip-conditioned drop student (oitf644a by default)
-  mixed  Evaluate the sparse-goal mixed drop student (hw5jbitz by default)
+  mixed  Evaluate the sparse-goal mixed drop student (q3t3ntf4 by default)
 
 Default W&B runs:
   clip   https://wandb.ai/zihanw22/boxer/runs/oitf644a
-  mixed  https://wandb.ai/zihanw22/boxer/runs/hw5jbitz
+  mixed  https://wandb.ai/zihanw22/boxer/runs/q3t3ntf4
 
 Optional env vars:
   CKPT / CHECKPOINT        (optional checkpoint override)
@@ -57,6 +57,7 @@ Optional env vars:
   DEPTH_PERCEPTION_PRESET  (default: checkpoint; options: checkpoint|d435i_17x17)
   EVAL_EXTERNAL_GOAL_PROB  (mixed mode default: 1.0; clip mode leaves checkpoint logic unchanged)
   HOLOSOMA_DISABLE_BAD_TRACKING_RESET (default: 1 for infer)
+  HOLOSOMA_DISABLE_AUTO_RESET (default: 1 for infer; only GUI/manual reset will reset)
   DRY_RUN                  (default: 0; set 1/true to print the command without launching)
 EOF
 }
@@ -77,7 +78,7 @@ case "${MODE_INPUT}" in
   clip|drop|oitf644a)
     MODE="clip"
     ;;
-  mixed|sparse_goal|sparse-goal|hw5jbitz)
+  mixed|sparse_goal|sparse-goal|hw5jbitz|q3t3ntf4)
     MODE="mixed"
     ;;
   -h|--help|help)
@@ -91,14 +92,15 @@ case "${MODE_INPUT}" in
 esac
 
 DEFAULT_CLIP_RUN_URL="${DEFAULT_CLIP_RUN_URL:-https://wandb.ai/zihanw22/boxer/runs/oitf644a}"
-DEFAULT_MIXED_RUN_URL="${DEFAULT_MIXED_RUN_URL:-https://wandb.ai/zihanw22/boxer/runs/hw5jbitz}"
+DEFAULT_MIXED_RUN_URL="${DEFAULT_MIXED_RUN_URL:-https://wandb.ai/zihanw22/boxer/runs/q3t3ntf4}"
 DEFAULT_CLIP_CHECKPOINT="${DEFAULT_CLIP_CHECKPOINT:-wandb://zihanw22/boxer/oitf644a/model_01600.pt}"
-DEFAULT_MIXED_CHECKPOINT="${DEFAULT_MIXED_CHECKPOINT:-wandb://zihanw22/boxer/hw5jbitz/model_02800.pt}"
+DEFAULT_MIXED_CHECKPOINT="${DEFAULT_MIXED_CHECKPOINT:-wandb://zihanw22/boxer/q3t3ntf4/model_01400.pt}"
 
 default_model_file_for_run_id() {
   local run_id="$1"
   case "${run_id}" in
     oitf644a) echo "model_01600.pt" ;;
+    q3t3ntf4) echo "model_01400.pt" ;;
     hw5jbitz) echo "model_02800.pt" ;;
     *) echo "" ;;
   esac
@@ -196,8 +198,8 @@ normalize_checkpoint_ref() {
   local run_id=""
   local explicit_file=""
   local model_file="${WANDB_MODEL_FILE:-}"
-  local remote_model_file=""
   local builtin_model_file=""
+  local remote_model_file=""
 
   parsed="$(parse_wandb_run_url "${ref}" || true)"
   if [[ -z "${parsed}" ]]; then
@@ -209,15 +211,15 @@ normalize_checkpoint_ref() {
   if [[ -n "${explicit_file}" ]]; then
     model_file="${explicit_file}"
   elif [[ -z "${model_file}" ]]; then
-    remote_model_file="$(resolve_remote_wandb_checkpoint_name "${entity}" "${project}" "${run_id}")"
-    if [[ -n "${remote_model_file}" ]]; then
-      model_file="${remote_model_file}"
-      echo "[INFO] Resolved wandb run URL to latest remote checkpoint: ${model_file}" >&2
+    builtin_model_file="$(default_model_file_for_run_id "${run_id}")"
+    if [[ -n "${builtin_model_file}" ]]; then
+      model_file="${builtin_model_file}"
+      echo "[INFO] Using pinned checkpoint file for run ${run_id}: ${model_file}" >&2
     else
-      builtin_model_file="$(default_model_file_for_run_id "${run_id}")"
-      if [[ -n "${builtin_model_file}" ]]; then
-        model_file="${builtin_model_file}"
-        echo "[INFO] Falling back to built-in checkpoint file for run ${run_id}: ${model_file}" >&2
+      remote_model_file="$(resolve_remote_wandb_checkpoint_name "${entity}" "${project}" "${run_id}")"
+      if [[ -n "${remote_model_file}" ]]; then
+        model_file="${remote_model_file}"
+        echo "[INFO] Resolved wandb run URL to latest remote checkpoint: ${model_file}" >&2
       fi
     fi
   fi
@@ -233,12 +235,14 @@ normalize_checkpoint_ref() {
 
 resolve_local_checkpoint_from_run_url() {
   local ref="$1"
+  local preferred_model_file="${2:-}"
   local parsed=""
   local run_id=""
   local explicit_file=""
   local wandb_run_dir=""
   local run_log_dir=""
   local local_ckpt=""
+  local target_model_file=""
 
   parsed="$(parse_wandb_run_url "${ref}" || true)"
   if [[ -z "${parsed}" ]]; then
@@ -247,6 +251,15 @@ resolve_local_checkpoint_from_run_url() {
   fi
   IFS=$'\t' read -r _entity _project run_id explicit_file <<< "${parsed}"
 
+  target_model_file="${explicit_file}"
+  if [[ -z "${target_model_file}" ]]; then
+    target_model_file="${preferred_model_file}"
+  fi
+  if [[ -z "${target_model_file}" ]]; then
+    echo ""
+    return 0
+  fi
+
   wandb_run_dir=$(find /data/logs_new -maxdepth 8 -type d -name "run-*-${run_id}" 2>/dev/null | head -n 1 || true)
   if [[ -z "${wandb_run_dir}" ]]; then
     echo ""
@@ -254,10 +267,8 @@ resolve_local_checkpoint_from_run_url() {
   fi
 
   run_log_dir="$(dirname "$(dirname "$(dirname "${wandb_run_dir}")")")"
-  if [[ -n "${explicit_file}" && -f "${run_log_dir}/${explicit_file}" ]]; then
-    local_ckpt="${run_log_dir}/${explicit_file}"
-  else
-    local_ckpt=$(ls -1 "${run_log_dir}"/model_*.pt 2>/dev/null | sort -V | tail -n 1 || true)
+  if [[ -f "${run_log_dir}/${target_model_file}" ]]; then
+    local_ckpt="${run_log_dir}/${target_model_file}"
   fi
   echo "${local_ckpt}"
 }
@@ -279,7 +290,7 @@ if [[ -z "${CKPT}" ]]; then
 fi
 
 if [[ "${CKPT}" == https://wandb.ai/*/runs/* ]]; then
-  LOCAL_WANDB_CKPT="$(resolve_local_checkpoint_from_run_url "${CKPT}")"
+  LOCAL_WANDB_CKPT="$(resolve_local_checkpoint_from_run_url "${CKPT}" "${WANDB_MODEL_FILE:-}")"
   if [[ -n "${LOCAL_WANDB_CKPT}" && -f "${LOCAL_WANDB_CKPT}" ]]; then
     CKPT="${LOCAL_WANDB_CKPT}"
     echo "[INFO] Resolved wandb run URL to local checkpoint: ${CKPT}"
@@ -460,6 +471,7 @@ export VISER_SHOW_TARGET_BOX=${VISER_SHOW_TARGET_BOX:-1}
 export VISER_PERCEPTION_IMAGE_MODE=${VISER_PERCEPTION_IMAGE_MODE:-depth}
 export VISER_SHOW_PERCEPTION_FRUSTUM=${VISER_SHOW_PERCEPTION_FRUSTUM:-1}
 export HOLOSOMA_DISABLE_BAD_TRACKING_RESET=${HOLOSOMA_DISABLE_BAD_TRACKING_RESET:-1}
+export HOLOSOMA_DISABLE_AUTO_RESET=${HOLOSOMA_DISABLE_AUTO_RESET:-1}
 export LOGURU_LEVEL=${LOGURU_LEVEL:-WARNING}
 export PY_LOG_LEVEL=${PY_LOG_LEVEL:-WARNING}
 

@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  bash sim_joystick.sh [checkpoint.pt|wandb://...|https://wandb.ai/.../runs/.../files] [extra infer_box_joystick args...]
+  bash mj_depth.sh [checkpoint.pt|wandb://...|https://wandb.ai/.../runs/.../files] [extra infer_box_joystick args...]
 
 Purpose:
   Launch the depth distill box-carry policy in MuJoCo and visualize/control it through the
@@ -34,9 +34,9 @@ Useful env vars:
   VISER_MANUAL_HW_TYPE
 
 Examples:
-  bash sim_joystick.sh
-  VISER_PORT=18080 bash sim_joystick.sh
-  HEADLESS=False bash sim_joystick.sh /abs/path/model_05000.pt
+  bash mj_depth.sh
+  VISER_PORT=18080 bash mj_depth.sh
+  HEADLESS=False bash mj_depth.sh /abs/path/model_05000.pt
 EOF
 }
 
@@ -120,7 +120,7 @@ CMD+=(
   "$@"
 )
 
-echo "[INFO] launcher=sim_joystick.sh"
+echo "[INFO] launcher=mj_depth.sh"
 echo "[INFO] checkpoint_default=${DEPTH_CHECKPOINT_DEFAULT}"
 echo "[INFO] infer_dataset=${INFER_DATASET}"
 echo "[INFO] num_envs=${NUM_ENVS}"

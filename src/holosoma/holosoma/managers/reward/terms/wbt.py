@@ -159,16 +159,57 @@ def limits_dof_pos(env: WholeBodyTrackingManager, soft_dof_pos_limit: float = 0.
 # ================================================================================================
 
 
-def motion_global_ref_position_error_exp(env: WholeBodyTrackingManager, sigma: float) -> torch.Tensor:
+def motion_global_ref_position_error_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+    only_external: bool = False,
+    only_clip_goal: bool = False,
+) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     error = torch.sum(torch.square(motion_command.ref_pos_w - motion_command.robot_ref_pos_w), dim=-1)
-    return torch.exp(-error / sigma**2)
+    reward = torch.exp(-error / sigma**2)
+    active_mask = _reward_episode_mask(
+        motion_command,
+        only_external=only_external,
+        only_clip_goal=only_clip_goal,
+    )
+    return reward * active_mask.to(dtype=torch.float32)
 
 
-def motion_global_ref_orientation_error_exp(env: WholeBodyTrackingManager, sigma: float) -> torch.Tensor:
+def motion_global_ref_orientation_error_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+    only_external: bool = False,
+    only_clip_goal: bool = False,
+) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     error = quat_error_magnitude(motion_command.ref_quat_w, motion_command.robot_ref_quat_w) ** 2
-    return torch.exp(-error / sigma**2)
+    reward = torch.exp(-error / sigma**2)
+    active_mask = _reward_episode_mask(
+        motion_command,
+        only_external=only_external,
+        only_clip_goal=only_clip_goal,
+    )
+    return reward * active_mask.to(dtype=torch.float32)
+
+
+def _reward_episode_mask(
+    motion_command: MotionCommand,
+    *,
+    only_external: bool = False,
+    only_clip_goal: bool = False,
+) -> torch.Tensor:
+    if only_external and only_clip_goal:
+        raise ValueError("only_external and only_clip_goal cannot both be True.")
+    if not only_external and not only_clip_goal:
+        return torch.ones((motion_command.num_envs,), device=motion_command.device, dtype=torch.bool)
+    if not motion_command.motion.has_object or not motion_command.manual_goal_enabled:
+        return torch.zeros((motion_command.num_envs,), device=motion_command.device, dtype=torch.bool)
+
+    external_mask = motion_command.get_sparse_goal_external_mask()
+    if only_external:
+        return external_mask
+    return ~external_mask
 
 
 def motion_relative_body_position_error_exp(
@@ -176,6 +217,8 @@ def motion_relative_body_position_error_exp(
     sigma: float,
     body_names: list[str] | None = None,
     body_name_pattern: str | None = None,
+    only_external: bool = False,
+    only_clip_goal: bool = False,
 ) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     error = torch.sum(torch.square(motion_command.body_pos_relative_w - motion_command.robot_body_pos_w), dim=-1)
@@ -186,7 +229,13 @@ def motion_relative_body_position_error_exp(
         body_name_pattern=body_name_pattern,
     )
     error = error.index_select(1, body_indexes)
-    return torch.exp(-error.mean(-1) / sigma**2)
+    reward = torch.exp(-error.mean(-1) / sigma**2)
+    active_mask = _reward_episode_mask(
+        motion_command,
+        only_external=only_external,
+        only_clip_goal=only_clip_goal,
+    )
+    return reward * active_mask.to(dtype=torch.float32)
 
 
 def motion_relative_body_orientation_error_exp(
@@ -194,6 +243,8 @@ def motion_relative_body_orientation_error_exp(
     sigma: float,
     body_names: list[str] | None = None,
     body_name_pattern: str | None = None,
+    only_external: bool = False,
+    only_clip_goal: bool = False,
 ) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     error = quat_error_magnitude(motion_command.body_quat_relative_w, motion_command.robot_body_quat_w) ** 2
@@ -204,7 +255,13 @@ def motion_relative_body_orientation_error_exp(
         body_name_pattern=body_name_pattern,
     )
     error = error.index_select(1, body_indexes)
-    return torch.exp(-error.mean(-1) / sigma**2)
+    reward = torch.exp(-error.mean(-1) / sigma**2)
+    active_mask = _reward_episode_mask(
+        motion_command,
+        only_external=only_external,
+        only_clip_goal=only_clip_goal,
+    )
+    return reward * active_mask.to(dtype=torch.float32)
 
 
 def motion_global_body_lin_vel(
@@ -212,6 +269,8 @@ def motion_global_body_lin_vel(
     sigma: float,
     body_names: list[str] | None = None,
     body_name_pattern: str | None = None,
+    only_external: bool = False,
+    only_clip_goal: bool = False,
 ) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     error = torch.sum(torch.square(motion_command.body_lin_vel_w - motion_command.robot_body_lin_vel_w), dim=-1)
@@ -222,7 +281,13 @@ def motion_global_body_lin_vel(
         body_name_pattern=body_name_pattern,
     )
     error = error.index_select(1, body_indexes)
-    return torch.exp(-error.mean(-1) / sigma**2)
+    reward = torch.exp(-error.mean(-1) / sigma**2)
+    active_mask = _reward_episode_mask(
+        motion_command,
+        only_external=only_external,
+        only_clip_goal=only_clip_goal,
+    )
+    return reward * active_mask.to(dtype=torch.float32)
 
 
 def motion_global_body_ang_vel(
@@ -230,6 +295,8 @@ def motion_global_body_ang_vel(
     sigma: float,
     body_names: list[str] | None = None,
     body_name_pattern: str | None = None,
+    only_external: bool = False,
+    only_clip_goal: bool = False,
 ) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     error = torch.sum(torch.square(motion_command.body_ang_vel_w - motion_command.robot_body_ang_vel_w), dim=-1)
@@ -240,7 +307,13 @@ def motion_global_body_ang_vel(
         body_name_pattern=body_name_pattern,
     )
     error = error.index_select(1, body_indexes)
-    return torch.exp(-error.mean(-1) / sigma**2)
+    reward = torch.exp(-error.mean(-1) / sigma**2)
+    active_mask = _reward_episode_mask(
+        motion_command,
+        only_external=only_external,
+        only_clip_goal=only_clip_goal,
+    )
+    return reward * active_mask.to(dtype=torch.float32)
 
 
 def motion_joint_position_error_exp(
@@ -248,12 +321,20 @@ def motion_joint_position_error_exp(
     sigma: float,
     dof_names: list[str] | None = None,
     dof_name_pattern: str | None = None,
+    only_external: bool = False,
+    only_clip_goal: bool = False,
 ) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     error = torch.square(motion_command.joint_pos - env.simulator.dof_pos)
     dof_indexes = _get_dof_subset_indexes(env, dof_names=dof_names, dof_name_pattern=dof_name_pattern)
     error = error.index_select(1, dof_indexes)
-    return torch.exp(-error.mean(-1) / sigma**2)
+    reward = torch.exp(-error.mean(-1) / sigma**2)
+    active_mask = _reward_episode_mask(
+        motion_command,
+        only_external=only_external,
+        only_clip_goal=only_clip_goal,
+    )
+    return reward * active_mask.to(dtype=torch.float32)
 
 
 def motion_joint_velocity_error_exp(
@@ -261,12 +342,20 @@ def motion_joint_velocity_error_exp(
     sigma: float,
     dof_names: list[str] | None = None,
     dof_name_pattern: str | None = None,
+    only_external: bool = False,
+    only_clip_goal: bool = False,
 ) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     error = torch.square(motion_command.joint_vel - env.simulator.dof_vel)
     dof_indexes = _get_dof_subset_indexes(env, dof_names=dof_names, dof_name_pattern=dof_name_pattern)
     error = error.index_select(1, dof_indexes)
-    return torch.exp(-error.mean(-1) / sigma**2)
+    reward = torch.exp(-error.mean(-1) / sigma**2)
+    active_mask = _reward_episode_mask(
+        motion_command,
+        only_external=only_external,
+        only_clip_goal=only_clip_goal,
+    )
+    return reward * active_mask.to(dtype=torch.float32)
 
 
 # ================================================================================================
@@ -274,16 +363,38 @@ def motion_joint_velocity_error_exp(
 # ================================================================================================
 
 
-def object_global_ref_position_error_exp(env: WholeBodyTrackingManager, sigma: float) -> torch.Tensor:
+def object_global_ref_position_error_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+    only_external: bool = False,
+    only_clip_goal: bool = False,
+) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     error = torch.sum(torch.square(motion_command.object_pos_w - motion_command.simulator_object_pos_w), dim=-1)
-    return torch.exp(-error / sigma**2)
+    reward = torch.exp(-error / sigma**2)
+    active_mask = _reward_episode_mask(
+        motion_command,
+        only_external=only_external,
+        only_clip_goal=only_clip_goal,
+    )
+    return reward * active_mask.to(dtype=torch.float32)
 
 
-def object_global_ref_orientation_error_exp(env: WholeBodyTrackingManager, sigma: float) -> torch.Tensor:
+def object_global_ref_orientation_error_exp(
+    env: WholeBodyTrackingManager,
+    sigma: float,
+    only_external: bool = False,
+    only_clip_goal: bool = False,
+) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     error = quat_error_magnitude(motion_command.object_quat_w, motion_command.simulator_object_quat_w) ** 2
-    return torch.exp(-error / sigma**2)
+    reward = torch.exp(-error / sigma**2)
+    active_mask = _reward_episode_mask(
+        motion_command,
+        only_external=only_external,
+        only_clip_goal=only_clip_goal,
+    )
+    return reward * active_mask.to(dtype=torch.float32)
 
 
 def _rot6d_to_matrix(rot6d: torch.Tensor) -> torch.Tensor:
@@ -298,16 +409,10 @@ def _rot6d_to_matrix(rot6d: torch.Tensor) -> torch.Tensor:
 
 
 def _goal_episode_mask(motion_command: MotionCommand, *, only_external: bool) -> torch.Tensor:
-    if (
-        not motion_command.motion.has_object
-        or not motion_command.manual_goal_enabled
-        or motion_command.manual_goal_object_pos_w is None
-        or motion_command.manual_goal_object_rot6d_w is None
-    ):
+    active_mask = _reward_episode_mask(motion_command, only_external=only_external)
+    if motion_command.manual_goal_object_pos_w is None or motion_command.manual_goal_object_rot6d_w is None:
         return torch.zeros((motion_command.num_envs,), device=motion_command.device, dtype=torch.bool)
-    if not only_external:
-        return torch.ones((motion_command.num_envs,), device=motion_command.device, dtype=torch.bool)
-    return motion_command.get_sparse_goal_external_mask()
+    return active_mask
 
 
 def _picked_mask(motion_command: MotionCommand) -> torch.Tensor:
@@ -466,6 +571,31 @@ def sparse_goal_object_z_error_exp(
 
     reward = torch.exp(-torch.square(z_error) / sigma**2)
     return reward * near_goal.to(dtype=torch.float32)
+
+
+def sparse_goal_object_pose_error_exp(
+    env: WholeBodyTrackingManager,
+    sigma_xy: float,
+    sigma_yaw: float,
+    sigma_z: float,
+    only_external: bool = True,
+    picked_only: bool = False,
+) -> torch.Tensor:
+    motion_command = _get_motion_command_and_assert_type(env)
+    active_mask = _goal_episode_mask(motion_command, only_external=only_external)
+    if picked_only:
+        active_mask &= _picked_mask(motion_command)
+    if not active_mask.any():
+        return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+
+    xy_error, yaw_error, z_error = _sparse_goal_errors(motion_command)
+    pose_error = (
+        torch.square(xy_error) / max(float(sigma_xy), 1.0e-6) ** 2
+        + torch.square(yaw_error) / max(float(sigma_yaw), 1.0e-6) ** 2
+        + torch.square(z_error) / max(float(sigma_z), 1.0e-6) ** 2
+    )
+    reward = torch.exp(-pose_error)
+    return reward * active_mask.to(dtype=torch.float32)
 
 
 def sparse_goal_hover_height_penalty(

@@ -200,6 +200,7 @@ class BadTracking(TerminationTermBase):
     def __init__(self, cfg: TerminationTermCfg, env: WholeBodyTrackingManager):
         super().__init__(cfg, env)
 
+        self.only_clip_goal = bool(cfg.params.get("only_clip_goal", False))
         self.bad_ref_pos_threshold = cfg.params["bad_ref_pos_threshold"]
         self.bad_ref_ori_threshold = cfg.params["bad_ref_ori_threshold"]
 
@@ -239,6 +240,9 @@ class BadTracking(TerminationTermBase):
             bad_object_pos = self.bad_object_pos(motion_command)
             bad_object_ori = self.bad_object_ori(motion_command)
             bad_tracking |= bad_object_pos | bad_object_ori
+
+        if self.only_clip_goal:
+            bad_tracking &= ~motion_command.get_sparse_goal_external_mask()
 
         if motion_command.use_adaptive_timesteps_sampler and torch.any(bad_tracking):
             failed_at_time_step = motion_command.time_steps[bad_tracking]
