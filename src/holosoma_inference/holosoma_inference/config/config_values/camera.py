@@ -77,6 +77,34 @@ single_d435i_depth = CameraConfig(
 )
 
 
+# Single ZED 2i depth camera setup (for far-tracking G1FlatZed2iConfig distillation)
+# Native: 1280x720, warp raycast: 240x135, policy resize: (58, 87)
+# Training uses "resize": (58, 87) in distillation_env_cfg.py WarpObservationsCfg
+single_zed2i_depth = CameraConfig(
+    poses={
+        "cam_front_depth": CameraPose(
+            parent_link="robot/torso_link",
+            camera_offset=(0.1, 0.0, 0.1),    # x, y, z [m] relative to torso_link
+            camera_rotation=(0.0, 75.0, 0.0),  # warp convention, same as training G1FlatZed2iConfig
+        ),
+    },
+    props=CameraProps(
+        image_type="depth",
+        width=240,
+        height=135,
+        resized_width=87,
+        resized_height=58,
+        horizontal_fov=101.41,
+        vertical_fov=69.00,
+        near_clip=0.1,
+        far_clip=2.0,
+        frame_rate=10,
+        image_show=False,
+        depth_delay=0,
+    ),
+)
+
+
 # =============================================================================
 # Default Configurations Dictionary
 # =============================================================================
@@ -84,6 +112,7 @@ single_d435i_depth = CameraConfig(
 DEFAULTS = {
     "dual-depth": dual_depth_cameras,
     "single-d435i-depth": single_d435i_depth,
+    "single-zed2i-depth": single_zed2i_depth,
 }
 """Dictionary of all available camera configurations.
 
