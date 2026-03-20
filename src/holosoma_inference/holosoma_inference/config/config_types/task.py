@@ -57,3 +57,6 @@ class TaskConfig:
 
     print_observations: bool = False
     """Print observation vectors for debugging."""
+
+    policy_type: str = ""
+    """Policy type override. When set, forces a specific policy class (e.g. 'blind_fall_recovery')."""

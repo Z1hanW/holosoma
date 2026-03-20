@@ -361,7 +361,10 @@ class BasePolicy:
         onnx_model = onnx.load(model_path)
         metadata = {}
         for prop in onnx_model.metadata_props:
-            metadata[prop.key] = json.loads(prop.value)
+            try:
+                metadata[prop.key] = json.loads(prop.value)
+            except json.JSONDecodeError:
+                metadata[prop.key] = prop.value
 
         # Extract KP/KD from metadata (will be None if not present)
         self.onnx_kp = np.array(metadata["kp"]) if "kp" in metadata else None
@@ -714,7 +717,7 @@ class BasePolicy:
         """Handle keyboard button presses."""
         if self._try_switch_policy_key(keycode):
             pass
-        elif keycode == "]":
+        elif keycode in ("]", "p"):
             self._handle_start_policy()
         elif keycode == "o":
             self._handle_stop_policy()

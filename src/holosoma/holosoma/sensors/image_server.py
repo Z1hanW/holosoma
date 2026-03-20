@@ -474,6 +474,8 @@ class ImageServer:
         # resize
         frame = cv2.resize(frame, (self.cfg.resized_width, self.cfg.resized_height), cv2.INTER_CUBIC)
 
+        # treat below-min-range pixels as empty (match training convention)
+        frame[frame < self.cfg.near_clip] = self.cfg.far_clip
         # clip and scale to [-0.5, 0.5] range
         frame = np.clip(frame, self.cfg.near_clip, self.cfg.far_clip)
         frame = (frame - self.cfg.near_clip) / (self.cfg.far_clip - self.cfg.near_clip) - 0.5

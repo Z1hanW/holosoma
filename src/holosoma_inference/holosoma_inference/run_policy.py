@@ -56,8 +56,8 @@ def _print_control_guide(policy_class, use_joystick: bool):
             logger.info("")
             logger.info("Blind Fall Recovery Controls:")
             logger.info("  Start button   - Enter stiff hold mode")
-            logger.info("  R1 + Right stick Y - Push forward/backward (hip pitch torque)")
-            logger.info("  R1 + Right stick X - Push left/right (hip roll torque)")
+            logger.info("  R1 + Right stick Y - Push forward/backward (waist pitch torque)")
+            logger.info("  R1 + Right stick X - Push left/right (waist roll torque)")
             logger.info("  Release R1         - Zero all push torques")
         elif is_wbt:
             logger.info("")
@@ -76,9 +76,19 @@ def _print_control_guide(policy_class, use_joystick: bool):
         logger.info("All commands below must be entered in THIS terminal window.")
         logger.info("")
         logger.info("General Controls:")
-        logger.info("  ]  - Start the policy")
-        logger.info("  o  - Stop the policy")
-        logger.info("  i  - Set robot to default pose")
+        logger.info("  ] or p - Start the policy")
+        logger.info("  o      - Stop the policy")
+        logger.info("  i      - Set robot to default pose")
+
+        if is_blind_fall_recovery:
+            logger.info("")
+            logger.info("Push Injection (hold key to push on torso):")
+            logger.info("  J (hold)   - Push forward    ↑")
+            logger.info("  K (hold)   - Push backward   ↓")
+            logger.info("  H (hold)   - Push left       ←")
+            logger.info("  L (hold)   - Push right      →")
+            logger.info("  U / M      - Increase / decrease push magnitude")
+            logger.info("  N          - Reset push magnitude to default")
 
         if is_wbt:
             logger.info("")

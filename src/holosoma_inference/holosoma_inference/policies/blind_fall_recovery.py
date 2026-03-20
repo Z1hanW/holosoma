@@ -6,14 +6,17 @@ references -- purely reactive balance recovery from proprioceptive observations.
 
 Observations: projected_gravity (3) + base_ang_vel (3) + dof_pos (29) + dof_vel (29) + actions (29) = 93
 
-Push injection: R1 + right joystick applies feedforward torques on hip joints
-to simulate external pushes during testing.
+Push injection:
+  Joystick: R1 + right stick applies feedforward torques on hip joints.
+  Keyboard: Hold J/K (fwd/back) or H/L (left/right) to push.
+            U/M to increase/decrease push magnitude, N to reset.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import threading
 
 import numpy as np
 import onnx
@@ -29,11 +32,12 @@ class BlindFallRecoveryPolicy(BasePolicy):
     """Blind (proprioceptive-only) fall recovery policy.
 
     Single ONNX model architecture -- no depth backbone, no velocity commands.
-    Includes R1 + right joystick push injection for testing robustness.
+    Includes push injection for testing robustness via joystick or keyboard.
     """
 
     # Push injection config
     MAX_PUSH_TORQUE = 30.0  # Nm, max torque applied per hip joint
+    PUSH_TORQUE_STEP = 5.0  # Nm, increment per U/M keypress
 
     def __init__(self, config: InferenceConfig):
         self._stiff_hold_active = True
@@ -60,16 +64,18 @@ class BlindFallRecoveryPolicy(BasePolicy):
         if self._stiff_hold_q.shape[1] != self.num_dofs:
             raise ValueError("Stiff startup pose dimension mismatch with robot DOFs")
 
-        # Hip joint indices in robot order for push injection.
+        # Waist joint indices for push injection on the robot's head/torso.
+        # Waist joints are the mechanical path to the head on G1 (no neck joints).
         # These go directly to motors (cmd_tau), not through the policy.
-        self._hip_pitch_indices = [
-            self.dof_names.index("left_hip_pitch_joint"),
-            self.dof_names.index("right_hip_pitch_joint"),
-        ]
-        self._hip_roll_indices = [
-            self.dof_names.index("left_hip_roll_joint"),
-            self.dof_names.index("right_hip_roll_joint"),
-        ]
+        self._push_pitch_index = self.dof_names.index("waist_pitch_joint")
+        self._push_roll_index = self.dof_names.index("waist_roll_joint")
+
+        # Keyboard push injection state (thread-safe via lock)
+        self._push_lock = threading.Lock()
+        self._push_keys_held: set[str] = set()  # currently held push keys
+        self._push_magnitude = self.MAX_PUSH_TORQUE  # current push torque (Nm)
+        self._last_push_pitch = 0.0
+        self._last_push_roll = 0.0
 
     # ------------------------------------------------------------------
     # Policy components override (single model, joint reordering, waist FK)
@@ -92,6 +98,13 @@ class BlindFallRecoveryPolicy(BasePolicy):
 
         # Joint reordering between ONNX model order and robot order
         self._setup_joint_reordering()
+
+        # Reorder KP/KD from model joint order to robot joint order
+        if self._model2real_index is not None:
+            if self.onnx_kp is not None:
+                self.onnx_kp = self.onnx_kp[self._model2real_index]
+            if self.onnx_kd is not None:
+                self.onnx_kd = self.onnx_kd[self._model2real_index]
 
         # Waist FK for anchor-body projected gravity
         self._init_waist_joint_indices()
@@ -121,11 +134,17 @@ class BlindFallRecoveryPolicy(BasePolicy):
             except (json.JSONDecodeError, ValueError):
                 metadata[prop.key] = prop.value
 
-        self.onnx_kp = np.array(metadata["kp"]) if "kp" in metadata else None
-        self.onnx_kd = np.array(metadata["kd"]) if "kd" in metadata else None
+        # KP/KD: try both "kp"/"kd" and "joint_stiffness"/"joint_damping" (CSV format)
+        self.onnx_kp = self._parse_metadata_array(metadata, "kp", "joint_stiffness")
+        self.onnx_kd = self._parse_metadata_array(metadata, "kd", "joint_damping")
 
         if self.onnx_kp is not None:
             logger.info(f"Loaded KP/KD from ONNX metadata: {os.path.basename(model_path)}")
+
+        # Default joint positions from metadata
+        self._model_default_joint_pos = self._parse_metadata_array(metadata, "default_joint_pos")
+        if self._model_default_joint_pos is not None:
+            logger.info(f"Loaded default_joint_pos from ONNX metadata ({len(self._model_default_joint_pos)} joints)")
 
         # Joint names for reordering
         raw = metadata.get("joint_names", None)
@@ -143,6 +162,10 @@ class BlindFallRecoveryPolicy(BasePolicy):
                 self.policy_action_scale = float(action_scale)
                 logger.info(f"Using action_scale from ONNX metadata: {self.policy_action_scale}")
 
+        # Detect if model needs time_step input (motion-tracking student models)
+        self._needs_time_step = "time_step" in self.onnx_input_names
+        self._time_step = np.zeros((1, 1), dtype=np.float32)
+
         def policy_act(obs_dict):
             input_feed = {name: obs_dict[name] for name in self.onnx_input_names}
             outputs = self.onnx_policy_session.run(self.onnx_output_names, input_feed)
@@ -154,6 +177,24 @@ class BlindFallRecoveryPolicy(BasePolicy):
             f"[BlindFallRecoveryPolicy] Student model loaded: "
             f"inputs={self.onnx_input_names}, outputs={self.onnx_output_names}"
         )
+
+    @staticmethod
+    def _parse_metadata_array(metadata: dict, *keys: str) -> np.ndarray | None:
+        """Try multiple metadata keys, parsing JSON arrays or CSV strings."""
+        for key in keys:
+            val = metadata.get(key)
+            if val is None:
+                continue
+            if isinstance(val, list):
+                return np.array(val, dtype=np.float32)
+            if isinstance(val, str):
+                try:
+                    return np.array([float(x) for x in val.split(",")], dtype=np.float32)
+                except ValueError:
+                    continue
+            if isinstance(val, (int, float)):
+                return np.array([val], dtype=np.float32)
+        return None
 
     # ------------------------------------------------------------------
     # Joint reordering (copied from DepthDistillationPolicy)
@@ -246,14 +287,18 @@ class BlindFallRecoveryPolicy(BasePolicy):
         return current_obs_buffer_dict
 
     def prepare_obs_for_rl(self, robot_state_data):
-        """Build flat observation: [projected_gravity, base_ang_vel, dof_pos, dof_vel, actions].
+        """Build flat observation and map to ONNX input names.
 
-        Returns dict with 'actor_obs' key matching the ONNX input name.
+        Maps 'actor_obs' -> 'obs' for the ONNX model.
+        Includes 'time_step' if the model requires it.
         """
         group_outputs = self._prepare_group_observations(robot_state_data)
         if "actor_obs" not in group_outputs:
             raise KeyError("Observation group 'actor_obs' is not configured for this policy.")
-        return {"actor_obs": group_outputs["actor_obs"].astype(np.float32, copy=False)}
+        result = {"obs": group_outputs["actor_obs"].astype(np.float32, copy=False)}
+        if self._needs_time_step:
+            result["time_step"] = self._time_step.copy()
+        return result
 
     # ------------------------------------------------------------------
     # Inference override
@@ -269,6 +314,10 @@ class BlindFallRecoveryPolicy(BasePolicy):
         policy_action = self.policy(obs_dict)
         policy_action = np.clip(policy_action, -100, 100)
 
+        # Advance time_step for motion-tracking models
+        if self._needs_time_step:
+            self._time_step[0, 0] += 1
+
         # Store in model order for feedback as "actions" observation
         self.last_policy_action = policy_action.copy()
 
@@ -280,8 +329,125 @@ class BlindFallRecoveryPolicy(BasePolicy):
         return self.scaled_policy_action
 
     # ------------------------------------------------------------------
-    # Push injection via R1 + right joystick
+    # Push injection (joystick + keyboard)
     # ------------------------------------------------------------------
+
+    # Keyboard push key mapping:
+    #   J = push forward,  K = push backward  (hip pitch torque)
+    #   H = push left,     L = push right     (hip roll torque)
+    #   U = increase magnitude, M = decrease magnitude, N = reset
+    _PUSH_DIRECTION_KEYS = {"j", "k", "h", "l"}
+
+    def start_key_listener(self):
+        """Override to add on_release tracking for held push keys."""
+        from sshkeyboard import listen_keyboard
+
+        def on_press(keycode):
+            try:
+                if keycode in self._PUSH_DIRECTION_KEYS:
+                    with self._push_lock:
+                        self._push_keys_held.add(keycode)
+                self.handle_keyboard_button(keycode)
+            except AttributeError:
+                pass
+
+        def on_release(keycode):
+            if keycode in self._PUSH_DIRECTION_KEYS:
+                with self._push_lock:
+                    self._push_keys_held.discard(keycode)
+
+        try:
+            listener = listen_keyboard(on_press=on_press, on_release=on_release)
+            listener.start()
+            listener.join()
+        except OSError as e:
+            self.logger.warning("Could not start keyboard listener: %s", e)
+            self.logger.warning("Keyboard input will not be available")
+
+    def handle_keyboard_button(self, keycode):
+        """Extend base handler with push magnitude controls."""
+        if keycode == "u":
+            self._push_magnitude = min(self._push_magnitude + self.PUSH_TORQUE_STEP, 100.0)
+            logger.info(f"Push magnitude: {self._push_magnitude:.0f} Nm")
+        elif keycode == "m":
+            self._push_magnitude = max(self._push_magnitude - self.PUSH_TORQUE_STEP, 5.0)
+            logger.info(f"Push magnitude: {self._push_magnitude:.0f} Nm")
+        elif keycode == "n":
+            self._push_magnitude = self.MAX_PUSH_TORQUE
+            logger.info(f"Push magnitude reset: {self._push_magnitude:.0f} Nm")
+        elif keycode not in self._PUSH_DIRECTION_KEYS:
+            # Direction keys handled via held-state; pass others to base
+            super().handle_keyboard_button(keycode)
+
+    def _apply_push(self, pitch_torque: float, roll_torque: float):
+        """Apply push torques on waist joints and store for visualization."""
+        self.cmd_tau[self._push_pitch_index] = pitch_torque
+        self.cmd_tau[self._push_roll_index] = roll_torque
+        self._last_push_pitch = pitch_torque
+        self._last_push_roll = roll_torque
+
+    def _apply_keyboard_push(self):
+        """Apply feedforward torques based on currently held push keys.
+
+        Called each control loop iteration. Computes net pitch/roll torque
+        from held keys and writes to self.cmd_tau on the waist joints.
+        """
+        with self._push_lock:
+            held = self._push_keys_held.copy()
+
+        if not held:
+            self._last_push_pitch = 0.0
+            self._last_push_roll = 0.0
+            return False
+
+        pitch_torque = 0.0
+        roll_torque = 0.0
+        mag = self._push_magnitude
+
+        if "j" in held:
+            pitch_torque += mag   # forward
+        if "k" in held:
+            pitch_torque -= mag   # backward
+        if "l" in held:
+            roll_torque += mag    # right
+        if "h" in held:
+            roll_torque -= mag    # left
+
+        self._apply_push(pitch_torque, roll_torque)
+        return True
+
+    def _format_push_display(self) -> str:
+        """Format a compact push direction/magnitude display for terminal output.
+
+        Returns a string like:
+          PUSH  ↑  30 Nm        (forward only)
+          PUSH  ↗  42 Nm        (forward + right, diagonal)
+          (no push)              (idle)
+        """
+        p = self._last_push_pitch
+        r = self._last_push_roll
+
+        if abs(p) < 0.1 and abs(r) < 0.1:
+            return ""
+
+        # Direction arrow (pitch=fwd/back, roll=left/right)
+        arrows = {
+            ( 1,  0): "↑",   # forward
+            (-1,  0): "↓",   # backward
+            ( 0,  1): "→",   # right
+            ( 0, -1): "←",   # left
+            ( 1,  1): "↗",   # forward-right
+            ( 1, -1): "↖",   # forward-left
+            (-1,  1): "↘",   # backward-right
+            (-1, -1): "↙",   # backward-left
+        }
+        key = (
+            (1 if p > 0.1 else (-1 if p < -0.1 else 0)),
+            (1 if r > 0.1 else (-1 if r < -0.1 else 0)),
+        )
+        arrow = arrows.get(key, "?")
+        magnitude = (p**2 + r**2) ** 0.5
+        return f"PUSH {arrow}  {magnitude:.0f} Nm (pitch={p:.0f}, roll={r:.0f})"
 
     def process_joystick_input(self):
         """Process joystick, then apply push injection when R1 is held."""
@@ -293,29 +459,18 @@ class BlindFallRecoveryPolicy(BasePolicy):
         if r1_held:
             wc_msg = self.interface.get_joystick_msg()
             if wc_msg is not None:
-                # Right stick axes
                 rx = getattr(wc_msg, "rx", 0.0)
                 ry = getattr(wc_msg, "ry", 0.0)
 
-                # Forward/back push -> hip pitch torques
-                pitch_torque = ry * self.MAX_PUSH_TORQUE
-                # Lateral push -> hip roll torques
-                roll_torque = rx * self.MAX_PUSH_TORQUE
+                pitch_torque = ry * self._push_magnitude
+                roll_torque = rx * self._push_magnitude
 
-                # Apply same-sign torque to both left and right hips
-                # (simulates external force on torso, not a twist)
-                for idx in self._hip_pitch_indices:
-                    self.cmd_tau[idx] = pitch_torque
-                for idx in self._hip_roll_indices:
-                    self.cmd_tau[idx] = roll_torque
-
-                if abs(pitch_torque) > 0.1 or abs(roll_torque) > 0.1:
-                    logger.debug(
-                        f"Push injection: pitch={pitch_torque:.1f} Nm, roll={roll_torque:.1f} Nm"
-                    )
+                self._apply_push(pitch_torque, roll_torque)
         else:
-            # R1 released -> zero feedforward torques
-            self.cmd_tau[:] = 0.0
+            # R1 released -> try keyboard push, else zero
+            if not self._apply_keyboard_push():
+                self._apply_push(0.0, 0.0)
+                self.cmd_tau[:] = 0.0
 
     # ------------------------------------------------------------------
     # Stiff hold / damping modes
@@ -377,3 +532,41 @@ class BlindFallRecoveryPolicy(BasePolicy):
         if hasattr(self.interface, "no_action"):
             self.interface.no_action = 0
         logger.info("Entering damping mode (Kp=0, Kd>0)")
+
+    # ------------------------------------------------------------------
+    # Run loop override (adds keyboard push processing)
+    # ------------------------------------------------------------------
+
+    def run(self):
+        """Main run loop with keyboard push injection."""
+        import itertools
+
+        try:
+            for it in itertools.count():
+                self.latency_tracker.start_cycle()
+
+                if self.use_joystick and self.interface.get_joystick_msg() is not None:
+                    self.process_joystick_input()
+                else:
+                    # Apply keyboard push when joystick is not active
+                    if not self._apply_keyboard_push():
+                        self.cmd_tau[:] = 0.0
+
+                if self.use_phase:
+                    self.update_phase_time()
+
+                self.policy_action()
+
+                self.latency_tracker.end_cycle()
+
+                if it % 50 == 0 and self.use_policy_action:
+                    push_str = self._format_push_display()
+                    debug_str = f"RL FPS: {self.latency_tracker.get_fps():.2f} | {self.latency_tracker.get_stats_str()}"
+                    if push_str:
+                        debug_str += f" | {push_str}"
+                    self.logger.info(debug_str, flush=True)
+
+                self.rate.sleep()
+
+        except KeyboardInterrupt:
+            pass
