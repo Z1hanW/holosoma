@@ -1,4 +1,5 @@
 import configparser
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -180,12 +181,19 @@ class ZEDCamera:
     def capture(self):
         """Capture rgb and depth data from ZED camera."""
         sl = self.sl
+        t_start = time.perf_counter()
         if self.zed.grab(self.runtime_params) == sl.ERROR_CODE.SUCCESS:
+            t_received = time.time() * 1000  # system time in ms when frame arrived
+            frame_ts = self.zed.get_timestamp(sl.TIME_REFERENCE.IMAGE).get_milliseconds()
             depth_data = self._get_depth_data() if self.config.depth_mode != "NONE" else None
             rgb_data = self._get_rgb_data()
-            return {"depth": depth_data, "rgb": rgb_data}
+            t_end = time.perf_counter()
+            hw_latency_ms = t_received - frame_ts
+            process_ms = (t_end - t_start) * 1000
+            total_latency_ms = hw_latency_ms + process_ms
+            return {"depth": depth_data, "rgb": rgb_data, "total_latency_ms": total_latency_ms}
         print("[ZED Camera] Grab error: failed to grab frame")
-        return {"depth": None, "rgb": None}
+        return {"depth": None, "rgb": None, "total_latency_ms": None}
 
     def release(self):
         """Release ZED camera resources."""
@@ -227,9 +235,15 @@ class ZedCamerasWrapper:
         depth_data: dict[str, np.ndarray] = {}
         rgb_data: dict[str, np.ndarray] = {}
         calibration_data: dict[str, dict[str, np.ndarray]] = {}
+        latency_values: list[float] = []
         for name, camera in self.cameras.items():
             frame = camera.capture()
             depth_data[name] = frame["depth"]
             rgb_data[name] = frame["rgb"]
             calibration_data[name] = camera.calibration
-        return {"depth": depth_data, "rgb": rgb_data, "calibration": calibration_data}
+            if frame["total_latency_ms"] is not None:
+                latency_values.append(frame["total_latency_ms"])
+        result = {"depth": depth_data, "rgb": rgb_data, "calibration": calibration_data}
+        if latency_values:
+            result["total_latency_ms"] = sum(latency_values) / len(latency_values)
+        return result

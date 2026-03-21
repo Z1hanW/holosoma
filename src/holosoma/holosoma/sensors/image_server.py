@@ -576,7 +576,7 @@ class ImageServer:
                 print(f"[Image Server] capture stats: {self.capture_profiler.get_stats()}")
                 hw_stats = self.hw_latency_profiler.get_stats()
                 if hw_stats:
-                    print(f"[Image Server] RealSense total latency stats: {hw_stats}")
+                    print(f"[Image Server] hw total latency stats: {hw_stats}")
                 if self.cfg.enable_gum_depth_prediction:
                     print(f"[Image Server] GUM prediction stats: {self.gum_profiler.get_stats()}")
 
