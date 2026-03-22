@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 import importlib.util
+import math
 import os
 import sys
 from pathlib import Path
@@ -92,6 +93,9 @@ class PerceptionManager:
         self._far_tracking_object_slot_indices: torch.Tensor | None = None
         self._far_tracking_object_names: list[str] = []
         self._far_tracking_base_link_indices: torch.Tensor | None = None
+        self._shared_camera_sensor_local_position: torch.Tensor | None = None
+        self._shared_camera_sensor_local_orientation: torch.Tensor | None = None
+        self._shared_camera_sensor_data_frame_quat: torch.Tensor | None = None
         self._registered_object_mesh_cache: dict[str, str] = {}
         self._camera_mount_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device)
         self._use_camera_mount_quat = False
@@ -569,6 +573,16 @@ class PerceptionManager:
             except Exception:
                 stats["mujoco_render_camera_pose_pos"] = None
                 stats["mujoco_render_camera_pose_quat_xyzw"] = None
+        if self._camera_strict_warp:
+            try:
+                strict_pos_t, strict_quat_t = self._get_strict_warp_camera_pose(env_id_t)
+                stats["strict_warp_camera_pose_pos"] = [float(v) for v in strict_pos_t[0].detach().cpu().tolist()]
+                stats["strict_warp_camera_pose_quat_xyzw"] = [
+                    float(v) for v in strict_quat_t[0].detach().cpu().tolist()
+                ]
+            except Exception:
+                stats["strict_warp_camera_pose_pos"] = None
+                stats["strict_warp_camera_pose_quat_xyzw"] = None
         (dump_dir / "camera_depth_debug.json").write_text(__import__("json").dumps(stats, indent=2))
         self._debug_dump_done = True
         (self.logger or logger).info("Perception camera debug dump written to {}", dump_dir)
@@ -724,6 +738,130 @@ class PerceptionManager:
             body_quat = quat_mul(body_quat, combo, w_last=True)
 
         return body_pos, body_quat
+
+    def _ensure_shared_strict_warp_camera_mount(self) -> None:
+        if not self._camera_strict_warp:
+            return
+        if (
+            self._shared_camera_sensor_local_position is not None
+            and self._shared_camera_sensor_local_orientation is not None
+            and self._shared_camera_sensor_data_frame_quat is not None
+        ):
+            return
+
+        num_envs = self.num_envs
+        sensor_offset = self._sensor_offset.to(device=self.device, dtype=torch.float32).view(1, 1, 3)
+        sensor_offset = sensor_offset.expand(num_envs, 1, 3).clone()
+
+        mount_rot_deg = torch.tensor([1.0, 27.0, 1.0], device=self.device, dtype=torch.float32).view(1, 1, 3)
+        mount_rot_deg = mount_rot_deg.expand(num_envs, 1, 3).clone()
+        data_frame_rot_rad = torch.deg2rad(
+            torch.tensor([-90.0, 0.0, -90.0], device=self.device, dtype=torch.float32)
+        )
+        data_frame_quat = quat_from_euler_xyz(
+            data_frame_rot_rad[0],
+            data_frame_rot_rad[1],
+            data_frame_rot_rad[2],
+        ).view(1, 1, 4)
+        data_frame_quat = data_frame_quat.expand(num_envs, 1, 4).clone()
+
+        translation_jitter_min = torch.tensor([-0.025, -0.025, -0.025], device=self.device, dtype=torch.float32)
+        translation_jitter_max = torch.tensor([0.025, 0.025, 0.025], device=self.device, dtype=torch.float32)
+        rotation_jitter_min = torch.tensor([-2.5, -3.0, -2.5], device=self.device, dtype=torch.float32)
+        rotation_jitter_max = torch.tensor([2.5, 3.0, 2.5], device=self.device, dtype=torch.float32)
+        randomize_mount_raw = os.environ.get("HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT", "0").strip().lower()
+        randomize_mount = randomize_mount_raw not in {"0", "false", "no", "off", ""}
+        if randomize_mount:
+            jitter_translation = translation_jitter_min.view(1, 1, 3) + (
+                translation_jitter_max - translation_jitter_min
+            ).view(1, 1, 3) * torch.rand((num_envs, 1, 3), device=self.device, dtype=torch.float32)
+            local_position = sensor_offset + jitter_translation
+
+            jitter_rotation_deg = rotation_jitter_min.view(1, 1, 3) + (
+                rotation_jitter_max - rotation_jitter_min
+            ).view(1, 1, 3) * torch.rand((num_envs, 1, 3), device=self.device, dtype=torch.float32)
+            local_rotation_deg = mount_rot_deg + jitter_rotation_deg
+        else:
+            local_position = sensor_offset
+            local_rotation_deg = mount_rot_deg
+
+        local_rotation_rad = torch.deg2rad(local_rotation_deg)
+        local_orientation = quat_from_euler_xyz(
+            local_rotation_rad[..., 0],
+            local_rotation_rad[..., 1],
+            local_rotation_rad[..., 2],
+        )
+
+        self._shared_camera_sensor_local_position = local_position
+        self._shared_camera_sensor_local_orientation = local_orientation
+        self._shared_camera_sensor_data_frame_quat = data_frame_quat
+
+    def _get_strict_warp_camera_pose(
+        self,
+        env_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        idx = env_ids if env_ids is not None else slice(None)
+        body_pos, body_quat = self._get_camera_body_pose(idx)
+        num_envs = body_quat.shape[0]
+
+        if self._camera_strict_warp:
+            self._ensure_shared_strict_warp_camera_mount()
+            if (
+                self._shared_camera_sensor_local_position is not None
+                and self._shared_camera_sensor_local_orientation is not None
+                and self._shared_camera_sensor_data_frame_quat is not None
+            ):
+                local_position_all = self._shared_camera_sensor_local_position
+                local_orientation_all = self._shared_camera_sensor_local_orientation
+                data_frame_quat_all = self._shared_camera_sensor_data_frame_quat
+                if isinstance(idx, slice):
+                    local_position = local_position_all[:, 0]
+                    local_orientation = local_orientation_all[:, 0]
+                    data_frame_quat = data_frame_quat_all[:, 0]
+                else:
+                    local_position = local_position_all[idx, 0]
+                    local_orientation = local_orientation_all[idx, 0]
+                    data_frame_quat = data_frame_quat_all[idx, 0]
+            else:
+                local_position = self._sensor_offset.expand(num_envs, -1)
+                local_orientation = (
+                    self._camera_mount_quat.to(device=body_quat.device, dtype=body_quat.dtype)
+                    .unsqueeze(0)
+                    .expand(num_envs, -1)
+                )
+                data_frame_quat = (
+                    self._camera_frame_quat.to(device=body_quat.device, dtype=body_quat.dtype)
+                    .unsqueeze(0)
+                    .expand(num_envs, -1)
+                )
+        else:
+            local_position = self._sensor_offset.expand(num_envs, -1)
+            local_orientation = (
+                self._camera_mount_quat.to(device=body_quat.device, dtype=body_quat.dtype)
+                .unsqueeze(0)
+                .expand(num_envs, -1)
+                if self._use_camera_mount_quat
+                else torch.tensor([0.0, 0.0, 0.0, 1.0], device=body_quat.device, dtype=body_quat.dtype)
+                .unsqueeze(0)
+                .expand(num_envs, -1)
+            )
+            data_frame_quat = (
+                self._camera_frame_quat.to(device=body_quat.device, dtype=body_quat.dtype)
+                .unsqueeze(0)
+                .expand(num_envs, -1)
+                if self._use_camera_frame_quat
+                else torch.tensor([0.0, 0.0, 0.0, 1.0], device=body_quat.device, dtype=body_quat.dtype)
+                .unsqueeze(0)
+                .expand(num_envs, -1)
+            )
+
+        local_position = local_position.to(device=body_pos.device, dtype=body_pos.dtype)
+        local_orientation = local_orientation.to(device=body_quat.device, dtype=body_quat.dtype)
+        data_frame_quat = data_frame_quat.to(device=body_quat.device, dtype=body_quat.dtype)
+
+        camera_pos = body_pos + quat_apply(body_quat, local_position, w_last=True)
+        camera_quat = quat_mul(body_quat, quat_mul(local_orientation, data_frame_quat, w_last=True), w_last=True)
+        return camera_pos, camera_quat
 
     def _camera_backward_stats(self, ray_dirs_base: torch.Tensor) -> tuple[float, float]:
         if ray_dirs_base is None or ray_dirs_base.numel() == 0:
@@ -1011,6 +1149,8 @@ class PerceptionManager:
         # far-tracking G1FlatRsD435iConfig defaults for d435i mount rotation.
         offset_rot_deg = (1.0, 27.0, 1.0)
 
+        self._ensure_shared_strict_warp_camera_mount()
+
         sensor_cfg = SimpleNamespace(
             num_sensors=1,
             width=int(self._camera_width),
@@ -1023,7 +1163,7 @@ class PerceptionManager:
             pointcloud_in_world_frame=False,
             segmentation_camera=False,
             dynamic_meshes=True,
-            randomize_placement=True,
+            randomize_placement=False,
             min_translation={"cam_front_depth": [-0.025, -0.025, -0.025]},
             max_translation={"cam_front_depth": [0.025, 0.025, 0.025]},
             min_euler_rotation_deg={"cam_front_depth": [-2.5, -3.0, -2.5]},
@@ -1084,6 +1224,29 @@ class PerceptionManager:
             self._terrain_mesh,
             device=self.device,
         )
+        if (
+            self._shared_camera_sensor_local_position is not None
+            and self._shared_camera_sensor_local_orientation is not None
+            and self._shared_camera_sensor_data_frame_quat is not None
+        ):
+            self._far_tracking_camera_sensor.camera_sensor_local_position[:] = (
+                self._shared_camera_sensor_local_position.to(
+                    device=self._far_tracking_camera_sensor.camera_sensor_local_position.device,
+                    dtype=self._far_tracking_camera_sensor.camera_sensor_local_position.dtype,
+                )
+            )
+            self._far_tracking_camera_sensor.camera_sensor_local_orientation[:] = (
+                self._shared_camera_sensor_local_orientation.to(
+                    device=self._far_tracking_camera_sensor.camera_sensor_local_orientation.device,
+                    dtype=self._far_tracking_camera_sensor.camera_sensor_local_orientation.dtype,
+                )
+            )
+            self._far_tracking_camera_sensor.camera_sensor_data_frame_quat[:] = (
+                self._shared_camera_sensor_data_frame_quat.to(
+                    device=self._far_tracking_camera_sensor.camera_sensor_data_frame_quat.device,
+                    dtype=self._far_tracking_camera_sensor.camera_sensor_data_frame_quat.dtype,
+                )
+            )
         self._far_tracking_tf_apply = ft_tf_apply_xyzw
         self._far_tracking_quat_mul = ft_quat_mul_xyzw
         self._far_tracking_base_link_indices = torch.tensor(base_link_indices, dtype=torch.long, device=self.device)
@@ -1897,13 +2060,27 @@ class PerceptionManager:
             device=getattr(self.env.simulator, "device", self.device),
         )
         if simulator_type == SimulatorType.MUJOCO:
-            camera_kwargs["pose_provider"] = self.get_mujoco_render_camera_pose
-            camera_kwargs["intrinsics"] = (
+            intrinsics = (
                 float(self._camera_fx.item()),
                 float(self._camera_fy.item()),
                 float(self._camera_cx.item()),
                 float(self._camera_cy.item()),
             )
+            vfov_deg = float(self._camera_vfov_deg)
+            pose_provider = self.get_mujoco_render_camera_pose
+            if self._camera_strict_warp:
+                width = float(self._camera_width)
+                height = float(self._camera_height)
+                cx = width / 2.0
+                cy = height / 2.0
+                fx = width / (2.0 * math.tan(math.radians(float(self._camera_hfov_deg)) / 2.0))
+                fy = fx
+                vfov_deg = math.degrees(2.0 * math.atan(height / (2.0 * fx)))
+                intrinsics = (fx, fy, cx, cy)
+                pose_provider = self._get_strict_warp_camera_pose
+            camera_kwargs["pose_provider"] = pose_provider
+            camera_kwargs["vfov_deg"] = vfov_deg
+            camera_kwargs["intrinsics"] = intrinsics
         self._rendered_camera = camera_cls(**camera_kwargs)
         self._rendered_camera.setup()
 
@@ -2286,6 +2463,33 @@ class PerceptionManager:
         """
         if not self.enabled or self.cfg.output_mode != "camera_depth":
             raise RuntimeError("MuJoCo rendered camera pose requested but camera_depth output is disabled.")
+
+        if self._camera_strict_warp:
+            camera_pos, camera_quat = self._get_strict_warp_camera_pose(env_ids)
+            # Match the strict warp_sensors camera frame exactly, then convert into
+            # MuJoCo's render-camera convention (+x right, +y up, -z forward).
+            #
+            # MuJoCo fixed cameras feed the OpenGL renderer with:
+            #   GL forward = model-camera local +x
+            #   GL up      = model-camera local -y
+            #
+            # The strict warp camera uses local axes:
+            #   +x = right, +y = down, +z = forward
+            #
+            # To make MuJoCo GL forward/up match warp forward/up, the model-camera
+            # local frame must satisfy:
+            #   +x_model -> +z_warp
+            #   +y_model -> +y_warp
+            #   +z_model -> -x_warp
+            #
+            # That is exactly a -90 degree rotation about +y.
+            warp_to_mujoco = torch.tensor(
+                [0.0, -0.70710677, 0.0, 0.70710677],
+                device=camera_quat.device,
+                dtype=camera_quat.dtype,
+            )
+            mujoco_from_warp = warp_to_mujoco.unsqueeze(0).expand(camera_quat.shape[0], -1)
+            return camera_pos, quat_mul(camera_quat, mujoco_from_warp, w_last=True)
 
         idx = env_ids if env_ids is not None else slice(None)
         body_pos, body_quat = self._get_camera_body_pose(idx)

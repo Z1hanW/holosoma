@@ -247,7 +247,7 @@ g1_29dof_wbt_observation_w_object = ObservationManagerCfg(
         "critic_obs": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=1,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
             terms=critic_obs_w_object_terms,
         ),
     },
@@ -259,7 +259,7 @@ g1_29dof_wbt_observation_w_object_legacy = ObservationManagerCfg(
         "critic_obs": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=1,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
             terms=critic_obs_w_object_terms,
         ),
     },
@@ -442,7 +442,7 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
         "critic_obs": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=1,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
             terms=critic_obs_w_object_terms,
         ),
     },
@@ -485,7 +485,7 @@ g1_29dof_wbt_observation_w_object_command_curriculum = ObservationManagerCfg(
         "critic_obs": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=1,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
             terms=critic_obs_w_object_terms,
         ),
     },
@@ -534,7 +534,7 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy = ObservationMa
         "critic_obs": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=1,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
             terms=critic_obs_w_object_terms,
         ),
     },

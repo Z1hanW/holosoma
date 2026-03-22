@@ -52,13 +52,14 @@ class MujocoSimStateViewerConfig:
     rate_hz: float = 30.0
     recenter_xy: bool = True
     show_object: bool = True
+    object_mesh_mode: str = ""
     show_robot_collision: bool = False
     show_object_collision: bool = False
     mujoco_object_geom_snapshot_path: str = str(REPO_ROOT / "logs" / "live_debug" / "viser_mujoco_object_geoms.json")
     show_ref_body: bool = True
     grid_size: float = 8.0
     launch_rollout: bool = False
-    run_script: str = str(REPO_ROOT / "mj_track_core.sh")
+    run_script: str = str(REPO_ROOT / "mj_track.sh")
     motion_file: str = str(DEFAULT_TRACKING_MOTION_FILE)
     model_path: str = str(DEFAULT_TRACKING_MODEL_PATH)
     launch_run_seconds: int = 0
@@ -103,6 +104,22 @@ def _normalize_quaternion_wxyz(quat_wxyz: np.ndarray) -> np.ndarray:
     if quat_norm < 1e-8:
         return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
     return quat_wxyz / quat_norm
+
+
+OBJECT_MESH_MODE_OPTIONS = ("visual", "collision")
+
+
+def _resolve_object_mesh_mode(mode_raw: object, *, show_object_collision: bool = False) -> str:
+    mode = str(mode_raw).strip().lower()
+    if mode in OBJECT_MESH_MODE_OPTIONS:
+        return mode
+    return "collision" if show_object_collision else "visual"
+
+
+def _geom_supports_visual_mesh(geom_entry: dict) -> bool:
+    rgba = np.asarray(geom_entry.get("rgba", [0.75, 0.75, 0.75, 1.0]), dtype=np.float32).reshape(-1)
+    alpha = float(rgba[3]) if rgba.shape[0] >= 4 else 1.0
+    return alpha > 1e-4
 
 
 def _mesh_arrays_from_mujoco_geom(geom_entry: dict, collision_view: bool) -> tuple[np.ndarray, np.ndarray, tuple[int, int, int], float] | None:
@@ -269,9 +286,19 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         object_visual_root.visible = False
         object_collision_root.visible = False
 
-    def _set_object_mesh_visibility(*, show_visual: bool, show_collision: bool) -> None:
-        effective_show_visual = bool(show_visual and not object_visual_uses_collision_fallback)
-        effective_show_collision = bool(show_collision or (show_visual and object_visual_uses_collision_fallback))
+    def _set_object_mesh_visibility(*, show_object: bool, mesh_mode: str) -> None:
+        effective_show_visual = False
+        effective_show_collision = False
+        normalized_mesh_mode = _resolve_object_mesh_mode(mesh_mode)
+
+        if show_object:
+            if normalized_mesh_mode == "collision":
+                effective_show_collision = bool(object_collision_handles)
+            else:
+                effective_show_visual = bool(object_visual_handles)
+                if not effective_show_visual and object_visual_uses_collision_fallback:
+                    effective_show_collision = bool(object_collision_handles)
+
         object_visual_root.visible = effective_show_visual
         object_collision_root.visible = effective_show_collision
         for handle in object_visual_handles:
@@ -301,7 +328,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             is_collision = bool(geom_entry_raw.get("is_collision", False))
 
             visual_mesh = _mesh_arrays_from_mujoco_geom(geom_entry_raw, collision_view=False)
-            if visual_mesh is not None and not is_collision:
+            if visual_mesh is not None and (not is_collision or _geom_supports_visual_mesh(geom_entry_raw)):
                 vertices, faces, color, opacity = visual_mesh
                 object_visual_handles.append(
                     server.scene.add_mesh_simple(
@@ -313,7 +340,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
                         side="double",
                         position=tuple(geom_pos.tolist()),
                         wxyz=tuple(geom_quat_wxyz.tolist()),
-                        visible=True,
+                        visible=False,
                     )
                 )
                 visual_count += 1
@@ -332,7 +359,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
                             side="double",
                             position=tuple(geom_pos.tolist()),
                             wxyz=tuple(geom_quat_wxyz.tolist()),
-                            visible=True,
+                            visible=False,
                         )
                     )
                     collision_count += 1
@@ -355,13 +382,17 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     with server.gui.add_folder("Display"):
         recenter_cb = server.gui.add_checkbox("Recenter XY", initial_value=bool(cfg.recenter_xy))
         show_object_cb = server.gui.add_checkbox("Show object (MuJoCo)", initial_value=bool(cfg.show_object))
+        object_mesh_mode_dropdown = server.gui.add_dropdown(
+            "Object mesh",
+            options=OBJECT_MESH_MODE_OPTIONS,
+            initial_value=_resolve_object_mesh_mode(
+                cfg.object_mesh_mode,
+                show_object_collision=bool(cfg.show_object_collision),
+            ),
+        )
         show_robot_collision_cb = server.gui.add_checkbox(
             "Show robot collision (URDF)",
             initial_value=bool(cfg.show_robot_collision),
-        )
-        show_object_collision_cb = server.gui.add_checkbox(
-            "Show object collision (MuJoCo)",
-            initial_value=bool(cfg.show_object_collision),
         )
         show_ref_cb = server.gui.add_checkbox("Show ref body", initial_value=bool(cfg.show_ref_body))
         reset_offset_btn = server.gui.add_button("Reset offset")
@@ -495,19 +526,19 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     @show_object_cb.on_update
     def _(_evt) -> None:
         _set_object_mesh_visibility(
-            show_visual=bool(show_object_cb.value and object_root.visible),
-            show_collision=bool(show_object_collision_cb.value and object_root.visible),
+            show_object=bool(show_object_cb.value and object_root.visible),
+            mesh_mode=str(object_mesh_mode_dropdown.value),
         )
 
     @show_robot_collision_cb.on_update
     def _(_evt) -> None:
         vr.show_collision = bool(show_robot_collision_cb.value)
 
-    @show_object_collision_cb.on_update
+    @object_mesh_mode_dropdown.on_update
     def _(_evt) -> None:
         _set_object_mesh_visibility(
-            show_visual=bool(show_object_cb.value and object_root.visible),
-            show_collision=bool(show_object_collision_cb.value and object_root.visible),
+            show_object=bool(show_object_cb.value and object_root.visible),
+            mesh_mode=str(object_mesh_mode_dropdown.value),
         )
 
     @show_ref_cb.on_update
@@ -631,12 +662,12 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
                     object_root.wxyz = tuple(_xyzw_to_wxyz(object_state[3:7]).tolist())
                     object_root.visible = True
                     _set_object_mesh_visibility(
-                        show_visual=bool(show_object_cb.value and bool(object_visual_handles)),
-                        show_collision=bool(show_object_collision_cb.value and bool(object_collision_handles)),
+                        show_object=bool(show_object_cb.value),
+                        mesh_mode=str(object_mesh_mode_dropdown.value),
                     )
                 else:
                     object_root.visible = False
-                    _set_object_mesh_visibility(show_visual=False, show_collision=False)
+                    _set_object_mesh_visibility(show_object=False, mesh_mode=str(object_mesh_mode_dropdown.value))
 
             ref_body_name = state.get("robot_ref_body_name", "n/a")
             object_robot_contacts = int(state.get("object_robot_contact_count", 0))
@@ -650,14 +681,24 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             )
             actor_label = actor_key if actor_key is not None else "none"
             snapshot_label = str(loaded_object_snapshot_path) if loaded_object_snapshot_path is not None else "pending"
+            requested_mesh_mode = _resolve_object_mesh_mode(str(object_mesh_mode_dropdown.value))
+            resolved_mesh_mode = requested_mesh_mode
+            if requested_mesh_mode == "visual" and object_visual_uses_collision_fallback:
+                resolved_mesh_mode = "visual -> collision fallback"
+            available_mesh_modes = []
+            if object_visual_handles:
+                available_mesh_modes.append("visual")
+            if object_collision_handles:
+                available_mesh_modes.append("collision")
             object_geom_mode = (
-                "MuJoCo collision geom"
-                if object_visual_uses_collision_fallback
-                else "MuJoCo visual geom + collision geom"
+                ", ".join(available_mesh_modes)
+                if available_mesh_modes
+                else "pending"
             )
             actor_md.content = (
                 f"object_actor: `{actor_label}`\n\n"
                 f"object_geom_source: `MuJoCo geom snapshot`\n\n"
+                f"object_mesh_view: `{resolved_mesh_mode}`\n\n"
                 f"object_geom_mode: `{object_geom_mode}`\n\n"
                 f"snapshot_path: `{snapshot_label}`"
             )

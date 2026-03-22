@@ -33,6 +33,8 @@ _SUPPORTED_OBJECT_SCENE_SPECS: dict[str, dict[str, tuple[str, str]]] = {
 }
 
 HOLOSOMA_PERCEPTION_CAMERA_NAME = "holosoma_perception_camera"
+_CAMERA_TERRAIN_PROXY_ENV = "HOLOSOMA_ENABLE_CAMERA_TERRAIN_PROXY"
+_CAMERA_TERRAIN_PROXY_SUFFIX = "_camera_proxy"
 
 
 class MujocoSceneManager:
@@ -189,6 +191,7 @@ class MujocoSceneManager:
         geom: mujoco.MjSpec.Geom | None = None
         if terrain_state.mesh_type == "plane":
             geom = self._create_ground_plane(terrain_state)
+            self._maybe_add_camera_render_proxy_geom(terrain_state)
         elif terrain_state.mesh_type in ["trimesh"]:
             # Use heightfield to reduce penetrations (vs. trimesh/geom mesh)
             geom = self._create_hfield(terrain_state)
@@ -208,6 +211,10 @@ class MujocoSceneManager:
             terrain_state.geom.contype = 2  # type: ignore[attr-defined]
             # Only collide with robot (class 1)
             terrain_state.geom.conaffinity = 1  # type: ignore[attr-defined]
+
+    def _camera_render_proxy_enabled(self) -> bool:
+        raw = os.environ.get(_CAMERA_TERRAIN_PROXY_ENV, "0").strip().lower()
+        return raw not in {"", "0", "false", "no", "off"}
 
     def _create_ground_plane(self, terrain_state: TerrainTermBase) -> mujoco.MjSpec.Geom:
         """Create a ground plane terrain geometry.
@@ -230,6 +237,52 @@ class MujocoSceneManager:
             friction=self._terrain_friction_triplet_from_state(terrain_state),
             solimp=[0.99, 0.99, 0.01, 0.5, 2],  # 5 elements: [dmin, dmax, width, midpoint, power]
             solref=[0.001, 1],  # 2 elements: [timeconst, dampratio]
+        )
+
+    def _maybe_add_camera_render_proxy_geom(self, terrain_state: TerrainTermBase) -> None:
+        setattr(terrain_state, "camera_render_proxy_geom_name", None)
+        if not self._camera_render_proxy_enabled():
+            return
+        if terrain_state.mesh is None:
+            logger.warning("Camera terrain proxy requested but terrain mesh is unavailable.")
+            return
+
+        bounds = np.asarray(terrain_state.mesh.bounds, dtype=np.float64)
+        if bounds.shape != (2, 3):
+            logger.warning("Camera terrain proxy skipped: unexpected terrain bounds shape {}", bounds.shape)
+            return
+
+        mins = bounds[0]
+        maxs = bounds[1]
+        half_x = 0.5 * float(maxs[0] - mins[0])
+        half_y = 0.5 * float(maxs[1] - mins[1])
+        if half_x <= 0.0 or half_y <= 0.0:
+            logger.warning(
+                "Camera terrain proxy skipped: invalid terrain extents half_x={} half_y={}",
+                half_x,
+                half_y,
+            )
+            return
+
+        top_z = float(maxs[2])
+        thickness = 0.002
+        geom = self.world_spec.worldbody.add_geom(
+            name=f"{terrain_state.name}{_CAMERA_TERRAIN_PROXY_SUFFIX}",
+            type=mujoco.mjtGeom.mjGEOM_BOX,
+            size=[half_x, half_y, thickness],
+            pos=[0.5 * float(mins[0] + maxs[0]), 0.5 * float(mins[1] + maxs[1]), top_z - thickness],
+            material="grid",
+            friction=self._terrain_friction_triplet_from_state(terrain_state),
+            contype=0,
+            conaffinity=0,
+        )
+        setattr(terrain_state, "camera_render_proxy_geom_name", geom.name)
+        logger.info(
+            "Added MuJoCo camera terrain proxy geom '{}' with size=({}, {}, {})",
+            geom.name,
+            half_x,
+            half_y,
+            thickness,
         )
 
     def _create_trimesh(self, terrain_state: TerrainTermBase) -> mujoco.MjSpec.Geom:

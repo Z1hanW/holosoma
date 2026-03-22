@@ -40,12 +40,14 @@ class MuJoCoDepthCamera:
         self._env_id = int(getattr(config, "camera_env_id", 0))
         self._pose_provider = pose_provider
         self._intrinsics = intrinsics
+        self._use_user_gl_camera = bool(getattr(config, "camera_strict_warp", False))
 
         self._renderer: mujoco.Renderer | None = None
         self._camera_name = HOLOSOMA_PERCEPTION_CAMERA_NAME
         self._camera_id: int | None = None
         self._scene_option: mujoco.MjvOption | None = None
         self._masked_robot_geom_ids: list[int] = []
+        self._masked_object_geom_ids: list[int] = []
         self._warned_multi_env = False
         self._warned_invalid_depth = False
         self._warned_invalid_rgb = False
@@ -96,9 +98,7 @@ class MuJoCoDepthCamera:
         renderer, render_data = self._prepare_renderer(depth=True)
         depth = renderer.render()
         depth_array = self._sanitize_depth_array(depth)
-        # MuJoCo/OpenGL render buffers are bottom-up; align to the top-down pixel order
-        # used by the legacy far_tracking_warp pipeline and policy preprocessing.
-        depth_array = np.flipud(depth_array).copy()
+        depth_array = self._orient_render_array(depth_array)
         self._maybe_dump_debug(render_data, depth=depth_array)
         return torch.as_tensor(depth_array, device=self._device, dtype=torch.float32).unsqueeze(0)
 
@@ -106,7 +106,7 @@ class MuJoCoDepthCamera:
         renderer, _render_data = self._prepare_renderer(depth=False)
         rgb = renderer.render()
         rgb_array = self._sanitize_rgb_array(rgb)
-        rgb_array = np.flipud(rgb_array).copy()
+        rgb_array = self._orient_render_array(rgb_array)
         self._maybe_dump_debug(None, rgb=rgb_array)
         return rgb_array
 
@@ -125,17 +125,16 @@ class MuJoCoDepthCamera:
         if model is None:
             raise RuntimeError("MuJoCo simulator model is not initialized.")
         render_data = self._env.simulator.backend.get_render_data(world_id=self._env_id)
-        self._update_camera_pose(render_data)
+        if self._use_user_gl_camera:
+            self._apply_user_gl_camera(render_data)
+        else:
+            self._update_camera_pose(render_data)
 
         if depth:
             self._renderer.enable_depth_rendering()
         else:
             self._renderer.disable_depth_rendering()
-        self._renderer.update_scene(
-            render_data,
-            camera=self._camera_name,
-            scene_option=self._scene_option,
-        )
+        self._update_scene_with_active_camera(self._renderer, render_data)
         return self._renderer, render_data
 
     def _configure_intrinsics(self) -> None:
@@ -165,6 +164,93 @@ class MuJoCoDepthCamera:
         model.cam_quat[self._camera_id, :] = camera_quat_wxyz_np
         mujoco.mj_forward(model, render_data)
 
+    @staticmethod
+    def _quat_rotate_xyzw_np(quat_xyzw: np.ndarray, vec: np.ndarray) -> np.ndarray:
+        x, y, z, w = quat_xyzw.astype(np.float64)
+        q_vec = np.array([x, y, z], dtype=np.float64)
+        uv = np.cross(q_vec, vec)
+        uuv = np.cross(q_vec, uv)
+        return vec + 2.0 * (w * uv + uuv)
+
+    def _apply_user_gl_camera(self, render_data: mujoco.MjData, *, renderer: mujoco.Renderer | None = None) -> None:
+        target_renderer = renderer if renderer is not None else self._renderer
+        if target_renderer is None:
+            raise RuntimeError("MuJoCoDepthCamera.setup() must be called before capture.")
+        model = self._env.simulator.root_model
+        if model is None:
+            raise RuntimeError("MuJoCo simulator model is not initialized.")
+
+        env_ids = torch.tensor([self._env_id], device=self._device, dtype=torch.long)
+        camera_pos, camera_quat_xyzw = self._pose_provider(env_ids)
+        camera_pos_np = camera_pos[0].detach().cpu().numpy().astype(np.float64)
+        camera_quat_xyzw_np = camera_quat_xyzw[0].detach().cpu().numpy().astype(np.float64)
+
+        if self._camera_id is not None:
+            model.cam_pos[self._camera_id, :] = camera_pos_np
+            model.cam_quat[self._camera_id, :] = camera_quat_xyzw_np[[3, 0, 1, 2]]
+            mujoco.mj_forward(model, render_data)
+
+        fx, fy, cx, cy = self._intrinsics
+        extent = float(model.stat.extent)
+        near = float(model.vis.map.znear) * extent
+        far = float(model.vis.map.zfar) * extent
+        # Match the legacy warp sensor's integer pixel-center convention:
+        # rays are generated from pixel centers at integer (x, y), so the GL
+        # frustum has to extend an extra half-pixel beyond the first/last center.
+        left = -(float(cx) + 0.5) * near / float(fx)
+        right = (float(self._width) - 0.5 - float(cx)) * near / float(fx)
+        bottom = -(float(self._height) - 0.5 - float(cy)) * near / float(fy)
+        top = (float(cy) + 0.5) * near / float(fy)
+        center = 0.5 * (left + right)
+        frustum_width = right - left
+
+        forward_world = self._quat_rotate_xyzw_np(camera_quat_xyzw_np, np.array([0.0, 0.0, 1.0], dtype=np.float64))
+        up_world = self._quat_rotate_xyzw_np(camera_quat_xyzw_np, np.array([0.0, -1.0, 0.0], dtype=np.float64))
+        forward_world /= max(np.linalg.norm(forward_world), 1.0e-8)
+        up_world /= max(np.linalg.norm(up_world), 1.0e-8)
+
+        for eye in range(2):
+            gl_cam = target_renderer.scene.camera[eye]
+            gl_cam.pos[:] = camera_pos_np.astype(np.float32)
+            gl_cam.forward[:] = forward_world.astype(np.float32)
+            gl_cam.up[:] = up_world.astype(np.float32)
+            gl_cam.frustum_center = float(center)
+            gl_cam.frustum_width = float(frustum_width)
+            gl_cam.frustum_bottom = float(bottom)
+            gl_cam.frustum_top = float(top)
+            gl_cam.frustum_near = float(near)
+            gl_cam.frustum_far = float(far)
+            gl_cam.orthographic = 0
+
+    def _make_user_camera(self) -> mujoco.MjvCamera:
+        user_camera = mujoco.MjvCamera()
+        mujoco.mjv_defaultCamera(user_camera)
+        user_camera.type = mujoco.mjtCamera.mjCAMERA_USER
+        return user_camera
+
+    def _update_scene_with_active_camera(self, renderer: mujoco.Renderer, render_data: mujoco.MjData) -> None:
+        if self._use_user_gl_camera:
+            self._apply_user_gl_camera(render_data, renderer=renderer)
+            renderer.update_scene(
+                render_data,
+                camera=self._make_user_camera(),
+                scene_option=self._scene_option,
+            )
+            self._apply_user_gl_camera(render_data, renderer=renderer)
+            return
+        renderer.update_scene(
+            render_data,
+            camera=self._camera_name,
+            scene_option=self._scene_option,
+        )
+
+    def _orient_render_array(self, array: np.ndarray) -> np.ndarray:
+        if self._use_user_gl_camera:
+            return np.ascontiguousarray(array)
+        # Fixed-camera MuJoCo/OpenGL render buffers are bottom-up; align them to
+        # the top-down pixel order used by far_tracking_warp and policy preprocessing.
+        return np.flipud(array).copy()
+
     def _configure_scene_mask(self) -> None:
         model = self._env.simulator.root_model
         if model is None:
@@ -175,27 +261,87 @@ class MuJoCoDepthCamera:
         self._scene_option.geomgroup[_DEPTH_HIDDEN_GEOM_GROUP] = 0
 
         allowlist = set(getattr(self._cfg, "camera_mesh_allowlist", None) or [])
+        explicit_robot_mesh_map = getattr(self._cfg, "camera_mesh_file_map", None) or {}
         prefix = getattr(getattr(self._env.simulator, "scene_manager", None), "robot_prefix", "robot_")
+        object_body_name_by_name = getattr(self._env.simulator, "_object_body_name_by_name", None)
+        object_root_body_names = {
+            str(body_name)
+            for body_name in getattr(object_body_name_by_name, "values", lambda: [])()
+            if body_name
+        }
+        object_root_body_ids: set[int] = set()
+        for body_name in object_root_body_names:
+            body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+            if body_id >= 0:
+                object_root_body_ids.add(int(body_id))
+        terrain_state = None
+        terrain_geom_name = None
+        terrain_proxy_geom_name = None
+        terrain_manager = getattr(self._env, "terrain_manager", None)
+        if terrain_manager is not None:
+            try:
+                terrain_state = terrain_manager.get_state("locomotion_terrain")
+            except Exception:
+                terrain_state = getattr(terrain_manager, "terrain_term", None)
+        if terrain_state is not None:
+            terrain_geom_name = str(getattr(terrain_state, "name", "") or "")
+            terrain_proxy_geom_name = str(getattr(terrain_state, "camera_render_proxy_geom_name", "") or "")
+
+        def _is_descendant_of_any(body_id: int, ancestors: set[int]) -> bool:
+            current = int(body_id)
+            while current >= 0:
+                if current in ancestors:
+                    return True
+                parent = int(model.body_parentid[current])
+                if parent == current:
+                    break
+                current = parent
+            return False
+
         if not allowlist:
-            return
+            allowlist = set()
 
         masked_geom_ids: list[int] = []
+        masked_object_geom_ids: list[int] = []
         for geom_id in range(model.ngeom):
             body_id = int(model.geom_bodyid[geom_id])
             body_name = str(model.body(body_id).name or "")
-            if not body_name.startswith(prefix):
+            geom_name = str(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or "")
+            if terrain_proxy_geom_name and geom_name == terrain_proxy_geom_name:
+                model.geom_group[geom_id] = 0
                 continue
-            clean_body_name = body_name[len(prefix) :]
-            if clean_body_name in allowlist:
+            if (
+                terrain_proxy_geom_name
+                and terrain_geom_name
+                and geom_name == terrain_geom_name
+                and int(model.geom_type[geom_id]) == int(mujoco.mjtGeom.mjGEOM_PLANE)
+            ):
+                model.geom_group[geom_id] = _DEPTH_HIDDEN_GEOM_GROUP
                 continue
-            model.geom_group[geom_id] = _DEPTH_HIDDEN_GEOM_GROUP
-            masked_geom_ids.append(int(geom_id))
+            if body_name.startswith(prefix):
+                clean_body_name = body_name[len(prefix) :]
+                keep_robot_geom = clean_body_name in allowlist
+                if keep_robot_geom and explicit_robot_mesh_map:
+                    keep_robot_geom = int(model.geom_type[geom_id]) == int(mujoco.mjtGeom.mjGEOM_MESH)
+                if not keep_robot_geom:
+                    model.geom_group[geom_id] = _DEPTH_HIDDEN_GEOM_GROUP
+                    masked_geom_ids.append(int(geom_id))
+                continue
+            if object_root_body_ids and body_name.startswith("object_") and not _is_descendant_of_any(body_id, object_root_body_ids):
+                model.geom_group[geom_id] = _DEPTH_HIDDEN_GEOM_GROUP
+                masked_object_geom_ids.append(int(geom_id))
 
         self._masked_robot_geom_ids = masked_geom_ids
+        self._masked_object_geom_ids = masked_object_geom_ids
         if masked_geom_ids:
             logger.info(
                 "MuJoCo rendered depth masked {} robot geom(s) outside camera_mesh_allowlist.",
                 len(masked_geom_ids),
+            )
+        if masked_object_geom_ids:
+            logger.info(
+                "MuJoCo rendered depth masked {} object geom(s) outside registered object subtree(s).",
+                len(masked_object_geom_ids),
             )
 
     def _sanitize_depth_array(self, depth_array: np.ndarray) -> np.ndarray:
@@ -290,12 +436,8 @@ class MuJoCoDepthCamera:
                     self._renderer.disable_depth_rendering()
                     self._renderer.disable_segmentation_rendering()
                     render_data_rgb = render_data if render_data is not None else self._env.simulator.backend.get_render_data(world_id=self._env_id)
-                    self._renderer.update_scene(
-                        render_data_rgb,
-                        camera=self._camera_name,
-                        scene_option=self._scene_option,
-                    )
-                    rgb = self._sanitize_rgb_array(self._renderer.render())
+                    self._update_scene_with_active_camera(self._renderer, render_data_rgb)
+                    rgb = self._orient_render_array(self._sanitize_rgb_array(self._renderer.render()))
                 except Exception:
                     rgb = None
 
@@ -307,14 +449,10 @@ class MuJoCoDepthCamera:
             try:
                 self._renderer.disable_depth_rendering()
                 self._renderer.enable_segmentation_rendering()
-                self._renderer.update_scene(
-                    render_data,
-                    camera=self._camera_name,
-                    scene_option=self._scene_option,
-                )
+                self._update_scene_with_active_camera(self._renderer, render_data)
                 rendered_primary_segmentation = self._renderer.render()
                 if isinstance(rendered_primary_segmentation, np.ndarray):
-                    primary_segmentation = rendered_primary_segmentation.copy()
+                    primary_segmentation = self._orient_render_array(rendered_primary_segmentation)
                     np.save(dump_dir / "mujoco_segmentation_raw.npy", primary_segmentation)
                     self._save_image(
                         dump_dir / "mujoco_segmentation_vis.png",
@@ -346,8 +484,10 @@ class MuJoCoDepthCamera:
             object_body_pos = None
             object_forward_dot = None
             object_geom_debug: list[dict[str, object]] = []
+            visible_geom_debug: list[dict[str, object]] = []
             object_segmentation_pixels: dict[str, int] = {}
             object_primary_segmentation_pixels: dict[str, int] = {}
+            visible_primary_segmentation_pixels: dict[str, int] = {}
             object_pose_sweep_pixels: dict[str, dict[str, int]] = {}
             if self._camera_id is not None and self._env.simulator.root_model is not None:
                 model = self._env.simulator.root_model
@@ -406,6 +546,27 @@ class MuJoCoDepthCamera:
                     for geom_info in object_geom_debug:
                         geom_id = int(geom_info["id"])
                         object_primary_segmentation_pixels[str(geom_id)] = int(np.count_nonzero(seg_geom_ids == geom_id))
+                if primary_segmentation is not None:
+                    seg_geom_ids = self._extract_segmentation_geom_ids(primary_segmentation)
+                    visible_ids = sorted(int(geom_id) for geom_id in np.unique(seg_geom_ids) if int(geom_id) >= 0)
+                    for geom_id in visible_ids:
+                        body_id = int(model.geom_bodyid[geom_id])
+                        body_name = str(model.body(body_id).name or "")
+                        geom_name = str(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or f"geom_{geom_id}")
+                        visible_primary_segmentation_pixels[str(geom_id)] = int(np.count_nonzero(seg_geom_ids == geom_id))
+                        visible_geom_debug.append(
+                            {
+                                "id": int(geom_id),
+                                "name": geom_name,
+                                "body_name": body_name,
+                                "type": int(model.geom_type[geom_id]),
+                                "group": int(model.geom_group[geom_id]),
+                                "rgba": [float(v) for v in model.geom_rgba[geom_id].tolist()],
+                                "contype": int(model.geom_contype[geom_id]),
+                                "conaffinity": int(model.geom_conaffinity[geom_id]),
+                                "dataid": int(model.geom_dataid[geom_id]),
+                            }
+                        )
                 if object_geom_debug:
                     object_pose_sweep_pixels = self._sweep_camera_quat_object_pixels(
                         render_data,
@@ -422,13 +583,70 @@ class MuJoCoDepthCamera:
                 "camera_quat_wxyz": self._env.simulator.root_model.cam_quat[self._camera_id].tolist()
                 if self._camera_id is not None and self._env.simulator.root_model is not None
                 else None,
+                "camera_intrinsic": self._env.simulator.root_model.cam_intrinsic[self._camera_id].tolist()
+                if self._camera_id is not None and self._env.simulator.root_model is not None
+                else None,
+                "camera_resolution": self._env.simulator.root_model.cam_resolution[self._camera_id].tolist()
+                if self._camera_id is not None and self._env.simulator.root_model is not None
+                else None,
+                "camera_sensorsize": self._env.simulator.root_model.cam_sensorsize[self._camera_id].tolist()
+                if self._camera_id is not None and self._env.simulator.root_model is not None
+                else None,
+                "camera_fovy": float(self._env.simulator.root_model.cam_fovy[self._camera_id])
+                if self._camera_id is not None and self._env.simulator.root_model is not None
+                else None,
+                "gl_camera_0_forward": (
+                    [float(v) for v in self._renderer._scene.camera[0].forward]
+                    if self._renderer is not None and hasattr(self._renderer, "_scene")
+                    else None
+                ),
+                "gl_camera_0_up": (
+                    [float(v) for v in self._renderer._scene.camera[0].up]
+                    if self._renderer is not None and hasattr(self._renderer, "_scene")
+                    else None
+                ),
+                "gl_camera_0_frustum": (
+                    {
+                        "center": float(self._renderer._scene.camera[0].frustum_center),
+                        "bottom": float(self._renderer._scene.camera[0].frustum_bottom),
+                        "top": float(self._renderer._scene.camera[0].frustum_top),
+                        "near": float(self._renderer._scene.camera[0].frustum_near),
+                        "far": float(self._renderer._scene.camera[0].frustum_far),
+                    }
+                    if self._renderer is not None and hasattr(self._renderer, "_scene")
+                    else None
+                ),
+                "gl_camera_1_forward": (
+                    [float(v) for v in self._renderer._scene.camera[1].forward]
+                    if self._renderer is not None and hasattr(self._renderer, "_scene")
+                    else None
+                ),
+                "gl_camera_1_up": (
+                    [float(v) for v in self._renderer._scene.camera[1].up]
+                    if self._renderer is not None and hasattr(self._renderer, "_scene")
+                    else None
+                ),
+                "gl_camera_1_frustum": (
+                    {
+                        "center": float(self._renderer._scene.camera[1].frustum_center),
+                        "bottom": float(self._renderer._scene.camera[1].frustum_bottom),
+                        "top": float(self._renderer._scene.camera[1].frustum_top),
+                        "near": float(self._renderer._scene.camera[1].frustum_near),
+                        "far": float(self._renderer._scene.camera[1].frustum_far),
+                    }
+                    if self._renderer is not None and hasattr(self._renderer, "_scene")
+                    else None
+                ),
                 "masked_robot_geom_count": len(self._masked_robot_geom_ids),
+                "masked_object_geom_count": len(self._masked_object_geom_ids),
                 "capture_counter": int(self._capture_counter),
                 "object_body_pos": object_body_pos,
                 "object_forward_dot": object_forward_dot,
                 "object_geom_debug": object_geom_debug,
+                "visible_geom_debug": visible_geom_debug,
                 "object_segmentation_pixels": object_segmentation_pixels,
                 "object_primary_segmentation_pixels": object_primary_segmentation_pixels,
+                "visible_primary_segmentation_pixels": visible_primary_segmentation_pixels,
                 "object_pose_sweep_pixels": object_pose_sweep_pixels,
             }
             (dump_dir / "mujoco_depth_debug.json").write_text(__import__("json").dumps(stats, indent=2))
@@ -454,39 +672,31 @@ class MuJoCoDepthCamera:
         try:
             debug_renderer.disable_depth_rendering()
             debug_renderer.disable_segmentation_rendering()
-            debug_renderer.update_scene(
-                render_data,
-                camera=self._camera_name,
-                scene_option=self._scene_option,
-            )
-            rgb = self._sanitize_rgb_array_with_shape(
-                debug_renderer.render(),
-                self._debug_dump_render_height,
-                self._debug_dump_render_width,
-            )
-            debug_renderer.enable_depth_rendering()
-            debug_renderer.update_scene(
-                render_data,
-                camera=self._camera_name,
-                scene_option=self._scene_option,
-            )
-            depth = debug_renderer.render()
-            if isinstance(depth, np.ndarray):
-                depth = self._sanitize_depth_array_with_shape(
-                    depth,
+            self._update_scene_with_active_camera(debug_renderer, render_data)
+            rgb = self._orient_render_array(
+                self._sanitize_rgb_array_with_shape(
+                    debug_renderer.render(),
                     self._debug_dump_render_height,
                     self._debug_dump_render_width,
                 )
+            )
+            debug_renderer.enable_depth_rendering()
+            self._update_scene_with_active_camera(debug_renderer, render_data)
+            depth = debug_renderer.render()
+            if isinstance(depth, np.ndarray):
+                depth = self._orient_render_array(
+                    self._sanitize_depth_array_with_shape(
+                        depth,
+                        self._debug_dump_render_height,
+                        self._debug_dump_render_width,
+                    )
+                )
             debug_renderer.disable_depth_rendering()
             debug_renderer.enable_segmentation_rendering()
-            debug_renderer.update_scene(
-                render_data,
-                camera=self._camera_name,
-                scene_option=self._scene_option,
-            )
+            self._update_scene_with_active_camera(debug_renderer, render_data)
             rendered_segmentation = debug_renderer.render()
             if isinstance(rendered_segmentation, np.ndarray):
-                segmentation = rendered_segmentation.copy()
+                segmentation = self._orient_render_array(rendered_segmentation)
         except Exception:
             rgb = None
             depth = None
