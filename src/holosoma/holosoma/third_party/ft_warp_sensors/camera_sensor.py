@@ -124,7 +124,9 @@ class CameraSensor(BaseSensor):
             torch.tensor(euler_sensor_frame_rot, device=self.device, requires_grad=False)
         )
         sensor_quat = quat_from_euler_xyz_tensor(sensor_frame_rot_rad)
-        self.camera_sensor_data_frame_quat = sensor_quat.expand(self.num_envs, self.num_sensors, -1)
+        # This tensor is updated later by the perception manager, so it must own
+        # its storage instead of being an expanded view with overlapping memory.
+        self.camera_sensor_data_frame_quat = sensor_quat.expand(self.num_envs, self.num_sensors, -1).clone()
         self.camera_sensor_local_position = torch.zeros(
             (self.num_envs, self.num_sensors, 3),
             device=self.device,

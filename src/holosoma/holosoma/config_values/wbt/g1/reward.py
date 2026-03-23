@@ -67,6 +67,12 @@ _ARM_SUPPORT_CONTACT_BODY_NAMES = [
 # On the current G1 object-carry asset, chest/trunk bracing against the box
 # is represented by torso_link contact.
 _TORSO_SUPPORT_CONTACT_BODY_NAMES = ["torso_link"]
+_FOOT_OBJECT_CONTACT_BODY_NAMES = [
+    "left_foot_contact_point",
+    "right_foot_contact_point",
+    "left_ankle_roll_link",
+    "right_ankle_roll_link",
+]
 
 g1_29dof_wbt_reward = RewardManagerCfg(
     terms={
@@ -162,22 +168,12 @@ g1_29dof_wbt_fast_sac_reward = RewardManagerCfg(
 g1_29dof_wbt_reward_w_object = RewardManagerCfg(
     terms={
         **g1_29dof_wbt_reward.terms,
-        # Allow expected upper-body contacts during box carrying.
+        # Penalize only foot/ankle contacts with the box itself. Floor contacts are handled elsewhere.
         "undesired_contacts": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:UndesiredContacts",
+            func="holosoma.managers.reward.terms.wbt:ObjectUndesiredContacts",
             params={
                 "threshold": 1.0,
-                "undesired_contacts_body_names": (
-                    "^(?!left_foot_contact_point$)(?!right_foot_contact_point$)"
-                    "(?!left_wrist_yaw_link$)(?!right_wrist_yaw_link$)"
-                    "(?!left_ankle_roll_link$)(?!right_ankle_roll_link$)"
-                    "(?!left_wrist_roll_link$)(?!right_wrist_roll_link$)"
-                    "(?!left_wrist_pitch_link$)(?!right_wrist_pitch_link$)"
-                    "(?!left_elbow_link$)(?!right_elbow_link$)"
-                    "(?!torso_link$)"
-                    "(?!left_shoulder_pitch_link$)(?!left_shoulder_roll_link$)(?!left_shoulder_yaw_link$)"
-                    "(?!right_shoulder_pitch_link$)(?!right_shoulder_roll_link$)(?!right_shoulder_yaw_link$).+$"
-                ),
+                "body_names": _FOOT_OBJECT_CONTACT_BODY_NAMES,
             },
             weight=-0.5,
         ),
@@ -227,22 +223,42 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed = RewardManagerCfg(
             weight=-100.0,
         ),
         "undesired_contacts": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:UndesiredContacts",
+            func="holosoma.managers.reward.terms.wbt:ObjectUndesiredContacts",
             params={
                 "threshold": 1.0,
-                "undesired_contacts_body_names": (
-                    "^(?!left_foot_contact_point$)(?!right_foot_contact_point$)"
-                    "(?!left_wrist_yaw_link$)(?!right_wrist_yaw_link$)"
-                    "(?!left_ankle_roll_link$)(?!right_ankle_roll_link$)"
-                    "(?!left_wrist_roll_link$)(?!right_wrist_roll_link$)"
-                    "(?!left_wrist_pitch_link$)(?!right_wrist_pitch_link$)"
-                    "(?!left_elbow_link$)(?!right_elbow_link$)"
-                    "(?!torso_link$)"
-                    "(?!left_shoulder_pitch_link$)(?!left_shoulder_roll_link$)(?!left_shoulder_yaw_link$)"
-                    "(?!right_shoulder_pitch_link$)(?!right_shoulder_roll_link$)(?!right_shoulder_yaw_link$).+$"
-                ),
+                "body_names": _FOOT_OBJECT_CONTACT_BODY_NAMES,
             },
             weight=-0.5,
+        ),
+        "body_contact_reward_palms": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
+            params={
+                "threshold": 1.0,
+                "force_scale": 25.0,
+                "reward_mode": "tanh",
+                "body_names": _PALM_CONTACT_BODY_NAMES,
+            },
+            weight=0.10,
+        ),
+        "body_contact_reward_arms": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
+            params={
+                "threshold": 1.0,
+                "force_scale": 25.0,
+                "reward_mode": "tanh",
+                "body_names": _ARM_SUPPORT_CONTACT_BODY_NAMES,
+            },
+            weight=0.20,
+        ),
+        "body_contact_reward_torso": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
+            params={
+                "threshold": 1.0,
+                "force_scale": 25.0,
+                "reward_mode": "tanh",
+                "body_names": _TORSO_SUPPORT_CONTACT_BODY_NAMES,
+            },
+            weight=0.30,
         ),
         "sparse_goal_object_pose_error_exp": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:sparse_goal_object_pose_error_exp",
@@ -354,7 +370,7 @@ g1_29dof_wbt_reward_w_object_extend = RewardManagerCfg(
             weight=0.0,
         ),
         "body_contact_reward_palms": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:body_contact_reward",
+            func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
             params={
                 "threshold": 1.0,
                 "force_scale": 25.0,
@@ -364,7 +380,7 @@ g1_29dof_wbt_reward_w_object_extend = RewardManagerCfg(
             weight=0.0,
         ),
         "body_contact_reward_arms": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:body_contact_reward",
+            func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
             params={
                 "threshold": 1.0,
                 "force_scale": 25.0,
@@ -374,7 +390,7 @@ g1_29dof_wbt_reward_w_object_extend = RewardManagerCfg(
             weight=0.0,
         ),
         "body_contact_reward_torso": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:body_contact_reward",
+            func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
             params={
                 "threshold": 1.0,
                 "force_scale": 25.0,
@@ -539,7 +555,7 @@ g1_29dof_wbt_reward_w_object_generalist = RewardManagerCfg(
     terms={
         **g1_29dof_wbt_reward_w_object_extend.terms,
         "body_contact_reward_palms": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:body_contact_reward",
+            func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
             params={
                 "threshold": 1.0,
                 "force_scale": 25.0,
@@ -549,7 +565,7 @@ g1_29dof_wbt_reward_w_object_generalist = RewardManagerCfg(
             weight=0.10,
         ),
         "body_contact_reward_arms": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:body_contact_reward",
+            func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
             params={
                 "threshold": 1.0,
                 "force_scale": 25.0,
@@ -559,7 +575,7 @@ g1_29dof_wbt_reward_w_object_generalist = RewardManagerCfg(
             weight=0.20,
         ),
         "body_contact_reward_torso": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:body_contact_reward",
+            func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
             params={
                 "threshold": 1.0,
                 "force_scale": 25.0,

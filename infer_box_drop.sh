@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Branches:
 # - clip:  clip-conditioned drop student (default run: oitf644a)
-# - mixed: sparse-goal mixed drop student (default run: q3t3ntf4)
+# - mixed: sparse-goal mixed drop student (default run: s221l5eo)
 #
 # Usage:
 #   bash infer_box_drop.sh <clip|mixed> [checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
@@ -13,7 +13,7 @@ set -euo pipefail
 # Examples:
 #   bash infer_box_drop.sh clip
 #   bash infer_box_drop.sh mixed
-#   bash infer_box_drop.sh mixed https://wandb.ai/zihanw22/boxer/runs/q3t3ntf4
+#   bash infer_box_drop.sh mixed https://wandb.ai/zihanw22/boxer/runs/s221l5eo
 #   MOTION_CLIP_NAME=sub3_largebox_003_mj_w_obj bash infer_box_drop.sh clip
 
 usage() {
@@ -23,11 +23,11 @@ Usage:
 
 Modes:
   clip   Evaluate the clip-conditioned drop student (oitf644a by default)
-  mixed  Evaluate the sparse-goal mixed drop student (q3t3ntf4 by default)
+  mixed  Evaluate the sparse-goal mixed drop student (s221l5eo by default)
 
 Default W&B runs:
   clip   https://wandb.ai/zihanw22/boxer/runs/oitf644a
-  mixed  https://wandb.ai/zihanw22/boxer/runs/q3t3ntf4
+  mixed  https://wandb.ai/zihanw22/boxer/runs/s221l5eo
 
 Optional env vars:
   CKPT / CHECKPOINT        (optional checkpoint override)
@@ -50,11 +50,13 @@ Optional env vars:
   DISABLE_RANDOMIZATION    (default: True)
   START_AT_TIMESTEP_ZERO_PROB (default: 1.0)
   FREEZE_AT_TIMESTEP_ZERO_PROB (default: 0.0)
-  RESET_NOISE_SCALE        (default: 0.0)
+  RESET_NOISE_SCALE        (default: 0.0; s221l5eo mixed profile defaults to 1.0)
   MAX_EPISODE_LENGTH_S     (default: 1000000)
   MAX_EVAL_STEPS           (optional; if set, overrides training.max_eval_steps)
   PHYSX_GPU_COLLISION_STACK_SIZE (default: 268435456)
   DEPTH_PERCEPTION_PRESET  (default: checkpoint; options: checkpoint|d435i_17x17)
+  MIXED_PROFILE            (default: auto; options: auto|none|s221l5eo)
+  EVAL_COMMAND_ONLY_ENV_PROB (mixed mode default: 1.0 for s221l5eo; clip mode leaves checkpoint logic unchanged)
   EVAL_EXTERNAL_GOAL_PROB  (mixed mode default: 1.0; clip mode leaves checkpoint logic unchanged)
   HOLOSOMA_DISABLE_BAD_TRACKING_RESET (default: 1 for infer)
   HOLOSOMA_DISABLE_AUTO_RESET (default: 1 for infer; only GUI/manual reset will reset)
@@ -78,7 +80,7 @@ case "${MODE_INPUT}" in
   clip|drop|oitf644a)
     MODE="clip"
     ;;
-  mixed|sparse_goal|sparse-goal|hw5jbitz|q3t3ntf4)
+  mixed|sparse_goal|sparse-goal|hw5jbitz|q3t3ntf4|s221l5eo)
     MODE="mixed"
     ;;
   -h|--help|help)
@@ -92,9 +94,9 @@ case "${MODE_INPUT}" in
 esac
 
 DEFAULT_CLIP_RUN_URL="${DEFAULT_CLIP_RUN_URL:-https://wandb.ai/zihanw22/boxer/runs/oitf644a}"
-DEFAULT_MIXED_RUN_URL="${DEFAULT_MIXED_RUN_URL:-https://wandb.ai/zihanw22/boxer/runs/q3t3ntf4}"
+DEFAULT_MIXED_RUN_URL="${DEFAULT_MIXED_RUN_URL:-https://wandb.ai/zihanw22/boxer/runs/s221l5eo}"
 DEFAULT_CLIP_CHECKPOINT="${DEFAULT_CLIP_CHECKPOINT:-wandb://zihanw22/boxer/oitf644a/model_01600.pt}"
-DEFAULT_MIXED_CHECKPOINT="${DEFAULT_MIXED_CHECKPOINT:-wandb://zihanw22/boxer/8qa7xfdf/model_09000.pt}"
+DEFAULT_MIXED_CHECKPOINT="${DEFAULT_MIXED_CHECKPOINT:-wandb://zihanw22/boxer/s221l5eo/model_03600.pt}"
 
 default_model_file_for_run_id() {
   local run_id="$1"
@@ -102,6 +104,7 @@ default_model_file_for_run_id() {
     oitf644a) echo "model_01600.pt" ;;
     q3t3ntf4) echo "model_01400.pt" ;;
     hw5jbitz) echo "model_02800.pt" ;;
+    s221l5eo) echo "model_03600.pt" ;;
     *) echo "" ;;
   esac
 }
@@ -304,6 +307,43 @@ if [[ "${CKPT}" != wandb://* ]] && [[ ! -f "${CKPT}" ]]; then
   exit 1
 fi
 
+MIXED_PROFILE=${MIXED_PROFILE:-auto}
+INFER_DATASET_EXPLICIT=0
+[[ -n "${INFER_DATASET+x}" ]] && INFER_DATASET_EXPLICIT=1
+MOTION_DIR_EXPLICIT=0
+[[ -n "${MOTION_DIR+x}" ]] && MOTION_DIR_EXPLICIT=1
+OBJECT_URDF_EXPLICIT=0
+[[ -n "${OBJECT_URDF+x}" ]] && OBJECT_URDF_EXPLICIT=1
+PAIR_TERRAIN_WITH_MOTION_EXPLICIT=0
+[[ -n "${PAIR_TERRAIN_WITH_MOTION+x}" ]] && PAIR_TERRAIN_WITH_MOTION_EXPLICIT=1
+START_AT_TIMESTEP_ZERO_PROB_EXPLICIT=0
+[[ -n "${START_AT_TIMESTEP_ZERO_PROB+x}" ]] && START_AT_TIMESTEP_ZERO_PROB_EXPLICIT=1
+FREEZE_AT_TIMESTEP_ZERO_PROB_EXPLICIT=0
+[[ -n "${FREEZE_AT_TIMESTEP_ZERO_PROB+x}" ]] && FREEZE_AT_TIMESTEP_ZERO_PROB_EXPLICIT=1
+RESET_NOISE_SCALE_EXPLICIT=0
+[[ -n "${RESET_NOISE_SCALE+x}" ]] && RESET_NOISE_SCALE_EXPLICIT=1
+MAX_EPISODE_LENGTH_S_EXPLICIT=0
+[[ -n "${MAX_EPISODE_LENGTH_S+x}" ]] && MAX_EPISODE_LENGTH_S_EXPLICIT=1
+DEPTH_PERCEPTION_PRESET_EXPLICIT=0
+[[ -n "${DEPTH_PERCEPTION_PRESET+x}" ]] && DEPTH_PERCEPTION_PRESET_EXPLICIT=1
+EVAL_COMMAND_ONLY_ENV_PROB_EXPLICIT=0
+[[ -n "${EVAL_COMMAND_ONLY_ENV_PROB+x}" ]] && EVAL_COMMAND_ONLY_ENV_PROB_EXPLICIT=1
+EVAL_EXTERNAL_GOAL_PROB_EXPLICIT=0
+[[ -n "${EVAL_EXTERNAL_GOAL_PROB+x}" ]] && EVAL_EXTERNAL_GOAL_PROB_EXPLICIT=1
+
+MIXED_PROFILE_RESOLVED="none"
+if [[ "${MODE}" == "mixed" ]]; then
+  if [[ "${MIXED_PROFILE}" == "auto" ]]; then
+    if [[ "${CKPT}" == *"s221l5eo"* ]]; then
+      MIXED_PROFILE_RESOLVED="s221l5eo"
+    else
+      MIXED_PROFILE_RESOLVED="none"
+    fi
+  else
+    MIXED_PROFILE_RESOLVED="${MIXED_PROFILE}"
+  fi
+fi
+
 pick_first_existing_path() {
   local candidate=""
   for candidate in "$@"; do
@@ -378,8 +418,50 @@ CAMERA_NEAR=${CAMERA_NEAR:-0.001}
 CAMERA_FAR=${CAMERA_FAR:-3.0}
 CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-3.0}
 MAX_EVAL_STEPS=${MAX_EVAL_STEPS:-}
+EVAL_COMMAND_ONLY_ENV_PROB=${EVAL_COMMAND_ONLY_ENV_PROB:-}
 EVAL_EXTERNAL_GOAL_PROB=${EVAL_EXTERNAL_GOAL_PROB:-}
 DRY_RUN_RAW=${DRY_RUN:-0}
+
+case "${MIXED_PROFILE_RESOLVED}" in
+  none)
+    ;;
+  s221l5eo)
+    if [[ "${INFER_DATASET_EXPLICIT}" -eq 0 ]]; then
+      INFER_DATASET="omomo"
+    fi
+    if [[ "${MOTION_DIR_EXPLICIT}" -eq 0 ]]; then
+      MOTION_DIR="${DEFAULT_OMOMO_MOTION_DIR}"
+    fi
+    if [[ "${OBJECT_URDF_EXPLICIT}" -eq 0 ]]; then
+      OBJECT_URDF="${DEFAULT_OMOMO_URDF}"
+    fi
+    if [[ "${PAIR_TERRAIN_WITH_MOTION_EXPLICIT}" -eq 0 ]]; then
+      PAIR_TERRAIN_WITH_MOTION="False"
+    fi
+    if [[ "${START_AT_TIMESTEP_ZERO_PROB_EXPLICIT}" -eq 0 ]]; then
+      START_AT_TIMESTEP_ZERO_PROB="1.0"
+    fi
+    if [[ "${FREEZE_AT_TIMESTEP_ZERO_PROB_EXPLICIT}" -eq 0 ]]; then
+      FREEZE_AT_TIMESTEP_ZERO_PROB="0.0"
+    fi
+    if [[ "${RESET_NOISE_SCALE_EXPLICIT}" -eq 0 ]]; then
+      RESET_NOISE_SCALE="1.0"
+    fi
+    if [[ "${DEPTH_PERCEPTION_PRESET_EXPLICIT}" -eq 0 ]]; then
+      DEPTH_PERCEPTION_PRESET="checkpoint"
+    fi
+    if [[ "${EVAL_COMMAND_ONLY_ENV_PROB_EXPLICIT}" -eq 0 ]]; then
+      EVAL_COMMAND_ONLY_ENV_PROB="1.0"
+    fi
+    if [[ "${EVAL_EXTERNAL_GOAL_PROB_EXPLICIT}" -eq 0 ]]; then
+      EVAL_EXTERNAL_GOAL_PROB="1.0"
+    fi
+    ;;
+  *)
+    echo "[ERROR] MIXED_PROFILE must be one of: auto|none|s221l5eo. Got: ${MIXED_PROFILE_RESOLVED}" >&2
+    exit 2
+    ;;
+esac
 
 HEADLESS_NORM=$(echo "${HEADLESS_RAW}" | tr '[:upper:]' '[:lower:]')
 case "${HEADLESS_NORM}" in
@@ -595,8 +677,17 @@ if [[ "${MODE}" == "mixed" ]]; then
   fi
   cmd+=(
     --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.enabled True
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.eval_external_goal_prob "${EVAL_EXTERNAL_GOAL_PROB}"
   )
+  if [[ -n "${EVAL_COMMAND_ONLY_ENV_PROB}" ]]; then
+    cmd+=(
+      --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.eval_command_only_env_prob "${EVAL_COMMAND_ONLY_ENV_PROB}"
+    )
+  fi
+  if [[ -n "${EVAL_EXTERNAL_GOAL_PROB}" ]]; then
+    cmd+=(
+      --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.eval_external_goal_prob "${EVAL_EXTERNAL_GOAL_PROB}"
+    )
+  fi
 fi
 
 if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
@@ -604,6 +695,9 @@ if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
 fi
 
 echo "[INFO] mode_input=${MODE_INPUT} runtime_mode=${MODE}"
+if [[ "${MODE}" == "mixed" ]]; then
+  echo "[INFO] mixed_profile=${MIXED_PROFILE_RESOLVED}"
+fi
 echo "[INFO] checkpoint=${CKPT}"
 echo "[INFO] infer_dataset=${INFER_DATASET}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
@@ -625,6 +719,7 @@ if [[ -n "${GEOMETRY_DIR}" ]]; then
   echo "[INFO] geometry_dir=${GEOMETRY_DIR}"
 fi
 if [[ "${MODE}" == "mixed" ]]; then
+  echo "[INFO] eval_command_only_env_prob=${EVAL_COMMAND_ONLY_ENV_PROB:-<checkpoint>}"
   echo "[INFO] eval_external_goal_prob=${EVAL_EXTERNAL_GOAL_PROB}"
 fi
 if command -v hostname >/dev/null 2>&1; then

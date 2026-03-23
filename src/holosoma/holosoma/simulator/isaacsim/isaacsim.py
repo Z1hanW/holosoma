@@ -61,6 +61,22 @@ from holosoma.simulator.shared.virtual_gantry import (
 
 from holosoma.simulator.types import ActorNames, ActorIndices, EnvIds, ActorStates, ActorPoses
 
+_OBJECT_CONTACT_MONITOR_BODY_NAMES = (
+    "left_foot_contact_point",
+    "right_foot_contact_point",
+    "left_ankle_roll_link",
+    "right_ankle_roll_link",
+    "left_wrist_yaw_link",
+    "right_wrist_yaw_link",
+    "left_wrist_roll_link",
+    "right_wrist_roll_link",
+    "left_wrist_pitch_link",
+    "right_wrist_pitch_link",
+    "left_elbow_link",
+    "right_elbow_link",
+    "torso_link",
+)
+
 
 class IsaacSim(BaseSimulator):
     def __init__(self, tyro_config: FullSimConfig, terrain_manager: TerrainManager, device: str):
@@ -69,6 +85,8 @@ class IsaacSim(BaseSimulator):
         # Add device attribute for base simulator compatibility
         self.device = device
         self._object_urdf_by_name: dict[str, str] = {}
+        self._object_contact_filter_prim_paths_expr: list[str] = []
+        self._object_contact_sensors: dict[str, ContactSensor] = {}
 
         # Patch buffer overflow in PhysX GPU narrow phase is sensitive to contact density.
         # Keep a safer default than IsaacLab's default for large multi-env object training.
@@ -500,6 +518,7 @@ class IsaacSim(BaseSimulator):
 
             use_single_name = len(object_specs) == 1
             self._object_urdf_by_name = {}
+            self._object_contact_filter_prim_paths_expr = []
             for idx, (raw_name, object_asset_urdf_path) in enumerate(object_specs):
                 object_name = "object" if use_single_name else raw_name
                 prim_suffix = "Object" if use_single_name else f"Object_{idx}_{object_name}"
@@ -536,12 +555,14 @@ class IsaacSim(BaseSimulator):
                 rigid_object = RigidObject(object_cfg)
                 self.scene.rigid_objects[object_name] = rigid_object
                 self._object_urdf_by_name[object_name] = str(pathlib.Path(object_asset_urdf_path).resolve())
+                self._object_contact_filter_prim_paths_expr.append(object_cfg.prim_path)
 
             logger.info(
                 "Loaded {} training object URDF(s): {}",
                 len(self._object_urdf_by_name),
                 list(self._object_urdf_by_name.keys()),
             )
+            self._setup_object_contact_sensors()
 
         # clone, filter, and replicate
         self.scene.clone_environments(copy_from_source=False)
@@ -932,6 +953,74 @@ class IsaacSim(BaseSimulator):
         logger.warning(f"Multiple bodies found for {body_name}.")
         return indices
 
+    def _setup_object_contact_sensors(self) -> None:
+        """Create box-filtered contact sensors for selected robot support bodies."""
+        self._object_contact_sensors = {}
+        filter_prim_paths_expr = list(dict.fromkeys(self._object_contact_filter_prim_paths_expr))
+        if not filter_prim_paths_expr:
+            return
+
+        available_body_names = set(getattr(self.robot_config, "body_names", []))
+        for body_name in _OBJECT_CONTACT_MONITOR_BODY_NAMES:
+            if body_name not in available_body_names:
+                continue
+
+            sensor_cfg = ContactSensorCfg(
+                prim_path=f"/World/envs/env_.*/Robot/{body_name}",
+                history_length=self.simulator_config.contact_sensor_history_length,
+                update_period=0.005,
+                track_air_time=False,
+                force_threshold=10.0,
+                debug_vis=False,
+                filter_prim_paths_expr=filter_prim_paths_expr,
+            )
+            sensor_name = f"object_contact_sensor_{body_name}"
+            sensor = ContactSensor(sensor_cfg)
+            self.scene.sensors[sensor_name] = sensor
+            self._object_contact_sensors[body_name] = sensor
+
+        if self._object_contact_sensors:
+            logger.info(
+                "Created {} object-filtered contact sensor(s): {}",
+                len(self._object_contact_sensors),
+                sorted(self._object_contact_sensors.keys()),
+            )
+
+    def get_object_contact_force_history(self, body_names: list[str] | tuple[str, ...]) -> torch.Tensor:
+        """Return object-only contact force history for requested robot bodies.
+
+        Shape: [num_envs, history_length, len(body_names), 3]
+        """
+        if not self._object_contact_sensors:
+            raise RuntimeError("Object-filtered contact sensors are not available in this IsaacSim scene.")
+
+        first_sensor = next(iter(self._object_contact_sensors.values()))
+        first_history = first_sensor.data.force_matrix_w_history
+        if first_history is None:
+            raise RuntimeError("Filtered object-contact history is unavailable.")
+
+        history_len = int(first_history.shape[1])
+        if not body_names:
+            return torch.zeros((self.num_envs, history_len, 0, 3), device=self.device, dtype=torch.float32)
+
+        result = torch.zeros((self.num_envs, history_len, len(body_names), 3), device=self.device, dtype=torch.float32)
+        for body_idx, body_name in enumerate(body_names):
+            sensor = self._object_contact_sensors.get(body_name)
+            if sensor is None:
+                raise ValueError(
+                    f"Object-filtered contact sensor for body '{body_name}' is unavailable. "
+                    f"Available bodies: {sorted(self._object_contact_sensors.keys())}"
+                )
+
+            matrix_history = sensor.data.force_matrix_w_history
+            if matrix_history is None:
+                raise RuntimeError(f"Filtered object-contact history missing for body '{body_name}'.")
+
+            # Shape: [E, T, 1, M, 3] -> sum across filtered object prims => [E, T, 3]
+            result[:, :, body_idx, :] = matrix_history[:, :, 0, :, :].sum(dim=2)
+
+        return result
+
     def prepare_sim(self):
         # Wait until play so rigid object collections are initialized
         register_objects(self)
@@ -1021,6 +1110,9 @@ class IsaacSim(BaseSimulator):
     def clear_contact_forces_history(self, env_id):
         if len(env_id) > 0:
             self.contact_forces_history[env_id, :, :, :] = 0.0
+            env_reset_ids = env_id.detach().cpu().tolist() if isinstance(env_id, torch.Tensor) else env_id
+            for sensor in self._object_contact_sensors.values():
+                sensor.reset(env_reset_ids)
 
     def apply_torques_at_dof(self, torques):
         self._robot.set_joint_effort_target(torques, joint_ids=self.dof_ids)

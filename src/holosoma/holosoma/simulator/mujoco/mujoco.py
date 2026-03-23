@@ -142,8 +142,11 @@ class MuJoCo(BaseSimulator):
         self.dof_pos = torch.zeros(0, device=device)
         self.dof_vel = torch.zeros(0, device=device)
         self.contact_forces = torch.zeros(0, device=device)
+        self.object_contact_forces = torch.zeros(0, device=device)
+        self.object_contact_forces_history = torch.zeros(0, device=device)
         self._object_urdf_by_name: dict[str, str] = {}
         self._object_body_name_by_name: dict[str, str] = {}
+        self._object_mujoco_body_ids: set[int] = set()
         self._actor_root_metadata: dict[str, dict[str, int | str]] = {}
         self._rigid_body_mujoco_ids: list[int] = []
 
@@ -349,6 +352,7 @@ class MuJoCo(BaseSimulator):
         # Compile once at the end
         self.root_model = self.scene_manager.compile()
         self.root_data = mujoco.MjData(self.root_model)
+        self._cache_object_body_ids()
         self._initialize_object_collision_view_state()
 
         # Apply post-compilation settings
@@ -657,11 +661,15 @@ class MuJoCo(BaseSimulator):
         # Initialize contact forces tensor with correct shape [num_envs, num_bodies, 3]
         # This matches the interface expected by holosoma (IsaacGym/IsaacSim pattern)
         self.contact_forces = torch.zeros(self.num_envs, self.num_bodies, 3, device=self.sim_device)
+        self.object_contact_forces = torch.zeros(self.num_envs, self.num_bodies, 3, device=self.sim_device)
 
         # Initialize contact forces history tensor to match IsaacGym/IsaacSim pattern
         # Shape: [num_envs, history_length, num_bodies, 3]
         history_length = self.simulator_config.contact_sensor_history_length
         self.contact_forces_history = torch.zeros(
+            self.num_envs, history_length, self.num_bodies, 3, device=self.sim_device
+        )
+        self.object_contact_forces_history = torch.zeros(
             self.num_envs, history_length, self.num_bodies, 3, device=self.sim_device
         )
 
@@ -1371,6 +1379,15 @@ class MuJoCo(BaseSimulator):
         # Update contact forces and history via backend delegation
         if hasattr(self, "contact_forces_history") and hasattr(self, "contact_forces"):
             self.backend.refresh_sim_tensors(self.contact_forces_history)
+        if hasattr(self, "object_contact_forces_history") and hasattr(self, "object_contact_forces"):
+            self._update_object_contact_forces()
+            self.object_contact_forces_history[:] = torch.cat(
+                [
+                    self.object_contact_forces.clone().unsqueeze(1),
+                    self.object_contact_forces_history[:, :-1],
+                ],
+                dim=1,
+            )
         if self._has_registered_dynamic_objects():
             self._refresh_all_root_states()
 
@@ -1384,6 +1401,8 @@ class MuJoCo(BaseSimulator):
         """
         if len(env_ids) > 0:
             self.contact_forces_history[env_ids, :, :, :] = 0.0
+            if self.object_contact_forces_history.numel() > 0:
+                self.object_contact_forces_history[env_ids, :, :, :] = 0.0
 
     def apply_torques_at_dof(self, torques: torch.Tensor) -> None:
         """Apply torques with backend-specific optimization.
@@ -2109,6 +2128,70 @@ class MuJoCo(BaseSimulator):
             except Exception as e:
                 logger.warning(f"Error during viewer cleanup: {e}")
         logger.info("=== MuJoCo Simulator Cleanup Completed ===")
+
+    def _cache_object_body_ids(self) -> None:
+        self._object_mujoco_body_ids = set()
+        if self.root_model is None:
+            return
+
+        for body_name in self._object_body_name_by_name.values():
+            prefixed_body_name = self._get_prefixed_name(body_name)
+            body_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_BODY, prefixed_body_name)
+            if body_id != -1:
+                self._object_mujoco_body_ids.add(int(body_id))
+
+    def _update_object_contact_forces(self) -> None:
+        """Accumulate only robot<->object contact forces at the robot-body level."""
+        assert self.root_model is not None
+        assert self.root_data is not None
+
+        if self.object_contact_forces.numel() == 0:
+            return
+
+        self.object_contact_forces.fill_(0.0)
+        if not self._object_mujoco_body_ids or self.root_data.ncon == 0:
+            return
+
+        forcetorque = np.zeros(6, dtype=np.float64)
+        for contact_idx in range(self.root_data.ncon):
+            contact = self.root_data.contact[contact_idx]
+            mujoco.mj_contactForce(self.root_model, self.root_data, contact_idx, forcetorque)
+            contact_force = torch.from_numpy(forcetorque[:3]).float().to(self.sim_device)
+
+            geom1_id = int(contact.geom1)
+            geom2_id = int(contact.geom2)
+            mj_body1_id = int(self.root_model.geom_bodyid[geom1_id])
+            mj_body2_id = int(self.root_model.geom_bodyid[geom2_id])
+
+            body1_is_object = mj_body1_id in self._object_mujoco_body_ids
+            body2_is_object = mj_body2_id in self._object_mujoco_body_ids
+            if body1_is_object == body2_is_object:
+                continue
+
+            holosoma_body1_idx = self.mujoco_to_holosoma_body_map.get(mj_body1_id)
+            holosoma_body2_idx = self.mujoco_to_holosoma_body_map.get(mj_body2_id)
+
+            if body1_is_object and holosoma_body2_idx is not None:
+                self.object_contact_forces[0, holosoma_body2_idx] += contact_force
+            elif body2_is_object and holosoma_body1_idx is not None:
+                self.object_contact_forces[0, holosoma_body1_idx] -= contact_force
+
+    def get_object_contact_force_history(self, body_names: list[str] | tuple[str, ...]) -> torch.Tensor:
+        if self.object_contact_forces_history.numel() == 0:
+            raise RuntimeError("Object-contact history is not initialized for this MuJoCo simulator.")
+
+        if not body_names:
+            history_len = int(self.object_contact_forces_history.shape[1])
+            return torch.zeros((self.num_envs, history_len, 0, 3), device=self.sim_device, dtype=torch.float32)
+
+        body_indexes = []
+        for body_name in body_names:
+            if body_name not in self.body_names:
+                raise ValueError(f"Body '{body_name}' not found in MuJoCo body_names: {self.body_names}")
+            body_indexes.append(self.body_names.index(body_name))
+
+        index_tensor = torch.tensor(body_indexes, dtype=torch.long, device=self.sim_device)
+        return self.object_contact_forces_history.index_select(2, index_tensor)
 
     def _update_contact_forces(self) -> None:
         """Update contact forces tensor using MuJoCo's canonical mj_contactForce() API.

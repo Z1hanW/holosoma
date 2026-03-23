@@ -77,6 +77,12 @@ class SparseObjectGoalConfig:
     command_only_env_prob_end: float = 0.0
     """Final probability of sampling command-only observation episodes."""
 
+    command_only_env_prob_start_iter: int | None = None
+    """Training iteration where the command-only probability schedule activates."""
+
+    command_only_env_prob_end_iter: int | None = None
+    """Training iteration where the command-only probability schedule reaches its final value."""
+
     command_only_env_prob_ramp_resets: int | None = None
     """Optional ramp horizon for command-only episode probability; defaults to external_goal_prob_ramp_resets."""
 
@@ -94,6 +100,12 @@ class SparseObjectGoalConfig:
 
     external_goal_prob_end: float = 1.0
     """Final probability of sampling external random goals."""
+
+    external_goal_prob_start_iter: int | None = None
+    """Training iteration where the external-goal probability schedule activates."""
+
+    external_goal_prob_end_iter: int | None = None
+    """Training iteration where the external-goal probability schedule reaches its final value."""
 
     external_goal_prob_ramp_resets: int = 200000
     """Linear ramp horizon in reset-events (env-wise), from start prob to end prob."""
@@ -115,6 +127,12 @@ class SparseObjectGoalConfig:
 
     external_goal_range_ramp_resets: int | None = None
     """Optional ramp horizon for external-goal sampling range; defaults to external_goal_prob_ramp_resets."""
+
+    external_goal_range_start_iter: int | None = None
+    """Training iteration where the external-goal range curriculum activates."""
+
+    external_goal_range_end_iter: int | None = None
+    """Training iteration where the external-goal range curriculum reaches its final span."""
 
     carry_extension_range_ramp_resets: int | None = None
     """Optional ramp horizon for carry-extension sampling range; defaults to carry_extension_prob_ramp_resets."""

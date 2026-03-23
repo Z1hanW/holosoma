@@ -1189,6 +1189,8 @@ class MotionCommand(CommandTermBase):
         self._sparse_goal_external_prob = 0.0
         self._sparse_goal_external_fraction_last_reset = 0.0
         self.command_only_env_mask: torch.Tensor | None = None
+        self._training_iteration: int | None = None
+        self._training_total_iterations: int | None = None
         self.pickup_anchor_set: torch.Tensor | None = None
         self.pickup_anchor_root_pos_w: torch.Tensor | None = None
         self.pickup_anchor_root_quat_w: torch.Tensor | None = None
@@ -1210,6 +1212,11 @@ class MotionCommand(CommandTermBase):
         if clip_idx < 0 or clip_idx >= self.motion.num_clips:
             raise ValueError(f"clip_idx {clip_idx} out of range for {self.motion.num_clips} clips.")
         self._forced_clip_idx = int(clip_idx)
+
+    def set_training_iteration(self, iteration: int, *, total_iterations: int | None = None) -> None:
+        """Expose the current PPO iteration so command curriculum can follow the training schedule exactly."""
+        self._training_iteration = int(iteration)
+        self._training_total_iterations = None if total_iterations is None else int(total_iterations)
 
     def setup(self) -> None:
         self.num_envs = self._env.num_envs
@@ -1241,6 +1248,8 @@ class MotionCommand(CommandTermBase):
         self._sparse_goal_external_prob = 0.0
         self._sparse_goal_external_fraction_last_reset = 0.0
         self.command_only_env_mask = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
+        self._training_iteration = 0
+        self._training_total_iterations = None
         self.pickup_anchor_set = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
         self.pickup_anchor_root_pos_w = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
         self.pickup_anchor_root_quat_w = torch.zeros((self.num_envs, 4), device=self.device, dtype=torch.float32)
@@ -1953,9 +1962,43 @@ class MotionCommand(CommandTermBase):
             raise ValueError(f"{name} must provide exactly 3 values, got {len(values)}")
         return torch.tensor(values, device=self.device, dtype=torch.float32)
 
+    def _iteration_curriculum_progress(self, start_iter: int | None, end_iter: int | None) -> float | None:
+        if start_iter is None or end_iter is None or self._training_iteration is None:
+            return None
+        if self._training_iteration < start_iter:
+            return 0.0
+        if end_iter <= start_iter:
+            return 1.0
+        return min(max(float(self._training_iteration - start_iter) / float(end_iter - start_iter), 0.0), 1.0)
+
+    def _iteration_schedule_value(
+        self,
+        start_value: float,
+        end_value: float,
+        *,
+        start_iter: int | None,
+        end_iter: int | None,
+    ) -> float | None:
+        if start_iter is None or end_iter is None or self._training_iteration is None:
+            return None
+        if self._training_iteration < start_iter:
+            return 0.0
+        if end_iter <= start_iter:
+            return float(end_value)
+        alpha = self._iteration_curriculum_progress(start_iter, end_iter)
+        if alpha is None:
+            return None
+        return float(start_value + (end_value - start_value) * alpha)
+
     def _sparse_goal_curriculum_progress(self) -> float:
         if self._sparse_goal_cfg is None:
             return 1.0
+        progress = self._iteration_curriculum_progress(
+            self._sparse_goal_cfg.external_goal_range_start_iter,
+            self._sparse_goal_cfg.external_goal_range_end_iter,
+        )
+        if progress is not None:
+            return progress
         ramp_cfg = self._sparse_goal_cfg.external_goal_range_ramp_resets
         if ramp_cfg is None:
             ramp = max(0, int(self._sparse_goal_cfg.external_goal_prob_ramp_resets))
@@ -1981,6 +2024,12 @@ class MotionCommand(CommandTermBase):
     def _command_only_env_curriculum_progress(self) -> float:
         if self._sparse_goal_cfg is None:
             return 1.0
+        progress = self._iteration_curriculum_progress(
+            self._sparse_goal_cfg.command_only_env_prob_start_iter,
+            self._sparse_goal_cfg.command_only_env_prob_end_iter,
+        )
+        if progress is not None:
+            return progress
         ramp_cfg = self._sparse_goal_cfg.command_only_env_prob_ramp_resets
         if ramp_cfg is None:
             ramp_cfg = self._sparse_goal_cfg.external_goal_prob_ramp_resets
@@ -2204,6 +2253,15 @@ class MotionCommand(CommandTermBase):
                 return self._clamp01(float(self._sparse_goal_cfg.eval_external_goal_prob))
             return self._clamp01(float(self._sparse_goal_cfg.external_goal_prob_end))
 
+        iter_value = self._iteration_schedule_value(
+            float(self._sparse_goal_cfg.external_goal_prob_start),
+            float(self._sparse_goal_cfg.external_goal_prob_end),
+            start_iter=self._sparse_goal_cfg.external_goal_prob_start_iter,
+            end_iter=self._sparse_goal_cfg.external_goal_prob_end_iter,
+        )
+        if iter_value is not None:
+            return self._clamp01(iter_value)
+
         prob_start = float(self._sparse_goal_cfg.external_goal_prob_start)
         prob_end = float(self._sparse_goal_cfg.external_goal_prob_end)
         ramp_resets = max(0, int(self._sparse_goal_cfg.external_goal_prob_ramp_resets))
@@ -2240,6 +2298,15 @@ class MotionCommand(CommandTermBase):
             if self._sparse_goal_cfg.eval_command_only_env_prob is not None:
                 return self._clamp01(float(self._sparse_goal_cfg.eval_command_only_env_prob))
             return self._clamp01(float(self._sparse_goal_cfg.command_only_env_prob_end))
+
+        iter_value = self._iteration_schedule_value(
+            float(self._sparse_goal_cfg.command_only_env_prob_start),
+            float(self._sparse_goal_cfg.command_only_env_prob_end),
+            start_iter=self._sparse_goal_cfg.command_only_env_prob_start_iter,
+            end_iter=self._sparse_goal_cfg.command_only_env_prob_end_iter,
+        )
+        if iter_value is not None:
+            return self._clamp01(iter_value)
 
         prob_start = float(self._sparse_goal_cfg.command_only_env_prob_start)
         prob_end = float(self._sparse_goal_cfg.command_only_env_prob_end)
@@ -2856,6 +2923,12 @@ class MotionCommand(CommandTermBase):
             self.metrics["motion/error_object_ref_lin_vel"] = zeros
 
         if self._sparse_goal_curriculum_enabled:
+            self.metrics["goal/training_iteration"] = torch.full(
+                (self.num_envs,),
+                float(self._training_iteration or 0),
+                device=self.device,
+                dtype=torch.float32,
+            )
             self.metrics["goal/command_only_env_prob"] = torch.full(
                 (self.num_envs,),
                 float(self._command_only_env_prob),

@@ -105,6 +105,28 @@ actor_obs_w_object_legacy = ObsGroupCfg(
     terms=actor_obs_w_object_legacy_terms,
 )
 
+# Exact term order used by legacy teacher checkpoints such as 5vlz6pj8/model_24000.pt.
+# Keep this separate from actor_obs_legacy so we can improve teacher compatibility
+# without disturbing the student-facing observation structure.
+actor_obs_w_object_teacher_compat_terms = {
+    "actions": actor_obs_w_object_legacy_terms["actions"],
+    "base_ang_vel": actor_obs_w_object_legacy_terms["base_ang_vel"],
+    "dof_pos": actor_obs_w_object_legacy_terms["dof_pos"],
+    "dof_vel": actor_obs_w_object_legacy_terms["dof_vel"],
+    "motion_command": actor_obs_w_object_legacy_terms["motion_command"],
+    "motion_ref_ori_b": actor_obs_w_object_legacy_terms["motion_ref_ori_b"],
+    "obj_ori_b": actor_obs_w_object_legacy_terms["obj_ori_b"],
+    "obj_pos_b": actor_obs_w_object_legacy_terms["obj_pos_b"],
+    "obj_target_pose_size_b": actor_obs_w_object_legacy_terms["obj_target_pose_size_b"],
+}
+
+actor_obs_w_object_teacher_compat = ObsGroupCfg(
+    concatenate=actor_obs_shared.concatenate,
+    enable_noise=actor_obs_shared.enable_noise,
+    history_length=actor_obs_shared.history_length,
+    terms=actor_obs_w_object_teacher_compat_terms,
+)
+
 motion_future_target_poses_group = ObsGroupCfg(
     concatenate=True,
     enable_noise=False,
@@ -397,6 +419,8 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
         "actor_obs": replace(actor_obs_w_object, history_length=1),
         # Legacy teacher observation group (without object velocities).
         "actor_obs_legacy": replace(actor_obs_w_object_legacy, history_length=1),
+        # Exact-order teacher compatibility group for legacy checkpoints.
+        "actor_obs_teacher_compat": replace(actor_obs_w_object_teacher_compat, history_length=1),
         # Student sparse root-trajectory command.
         "actor_obs_root": ObsGroupCfg(
             concatenate=True,

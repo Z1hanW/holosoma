@@ -169,6 +169,18 @@ class DistillationConfig:
     teacher_action_mix_ratio: float = 0.0
     """Per-step env mix ratio for teacher actions in DAgger rollout (0.0=student only, 1.0=teacher only)."""
 
+    schedule_name: str | None = None
+    """Optional human-readable name for the active distillation schedule."""
+
+    schedule_notes: str | None = None
+    """Optional free-form notes describing the distillation curriculum."""
+
+    teacher_compat_profile: str | None = None
+    """Optional name for the teacher compatibility profile applied by the launcher."""
+
+    teacher_compat_notes: str | None = None
+    """Optional notes describing any teacher compatibility adjustments or remaining mismatches."""
+
     switch_to_rl_after: int = -1
     """Iteration to switch off BC loss (set to 0 or negative to disable)."""
 
@@ -184,6 +196,9 @@ class DistillationConfig:
 
     dagger_end_epoch: int = -1
     """Epoch where PPO contribution saturates in dagger mode (-1 disables schedule)."""
+
+    ppo_target_coeff: float = 0.9
+    """Final PPO blend coefficient reached at ``dagger_end_epoch`` in scheduled PPO+DAgger mode."""
 
     dagger_loss_coef: float = 10.0
     """Scale on dagger/distillation loss term in scheduled PPO+DAgger mode."""

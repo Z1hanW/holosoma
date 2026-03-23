@@ -110,6 +110,29 @@ def _get_sim_body_subset_indexes(
     )
 
 
+def _get_object_contact_force_history(
+    env: WholeBodyTrackingManager,
+    *,
+    body_names: list[str] | tuple[str, ...] | None = None,
+    body_name_pattern: str | None = None,
+) -> torch.Tensor:
+    selected_indexes = _get_sim_body_subset_indexes(
+        env,
+        body_names=body_names,
+        body_name_pattern=body_name_pattern,
+    )
+    selected_names = [env.simulator.body_names[int(idx)] for idx in selected_indexes.detach().cpu().tolist()]  # type: ignore[attr-defined]
+
+    getter = getattr(env.simulator, "get_object_contact_force_history", None)
+    if getter is None:
+        raise RuntimeError(
+            f"Simulator '{type(env.simulator).__name__}' does not expose box-filtered contact forces. "
+            "Object-only contact rewards/penalties require backend support for box-specific contacts."
+        )
+
+    return getter(selected_names)
+
+
 #########################################################################################################
 ## terms same to managers/reward/terms/locomotion.py
 #########################################################################################################
@@ -675,6 +698,34 @@ def body_contact_reward(
     return reward.mean(dim=1)
 
 
+def body_object_contact_reward(
+    env: WholeBodyTrackingManager,
+    threshold: float = 1.0,
+    force_scale: float = 25.0,
+    reward_mode: str = "binary",
+    body_names: list[str] | None = None,
+    body_name_pattern: str | None = None,
+) -> torch.Tensor:
+    object_contact_forces = _get_object_contact_force_history(
+        env,
+        body_names=body_names,
+        body_name_pattern=body_name_pattern,
+    )
+    magnitudes = torch.norm(object_contact_forces, dim=-1)
+    peak_force = torch.max(magnitudes, dim=1)[0]
+
+    if reward_mode == "binary":
+        reward = (peak_force > threshold).to(dtype=torch.float32)
+    elif reward_mode == "linear":
+        reward = torch.clamp((peak_force - threshold) / max(force_scale, 1.0e-6), min=0.0, max=1.0)
+    elif reward_mode == "tanh":
+        reward = torch.tanh(torch.clamp(peak_force - threshold, min=0.0) / max(force_scale, 1.0e-6))
+    else:
+        raise ValueError(f"Unsupported reward_mode '{reward_mode}'. Use one of: binary, linear, tanh.")
+
+    return reward.mean(dim=1)
+
+
 # ================================================================================================
 # Undesired Contacts Rewards
 # ================================================================================================
@@ -717,3 +768,40 @@ class UndesiredContacts(RewardTermBase):
             assert name in b_names, f"The specified name ({name}) doesn't exist: {b_names}"
             indexes.append(b_names.index(name))
         return torch.tensor(indexes, dtype=torch.long, device=device)
+
+
+class ObjectUndesiredContacts(RewardTermBase):
+    def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.env = env
+        self.threshold = cfg.params.get("threshold", 1.0)
+
+        body_names = cfg.params.get("body_names")
+        body_name_pattern = cfg.params.get("body_name_pattern")
+        if body_name_pattern is None:
+            body_name_pattern = cfg.params.get("undesired_contacts_body_names")
+
+        all_body_names = list(self.env.simulator.body_names)  # type: ignore[attr-defined]
+        if body_names is not None:
+            missing = [name for name in body_names if name not in all_body_names]
+            if missing:
+                raise ValueError(f"Requested body names {missing} are not available in {all_body_names}.")
+            self.body_names = list(body_names)
+        elif body_name_pattern:
+            regex = re.compile(body_name_pattern)
+            self.body_names = [body_name for body_name in all_body_names if regex.match(body_name)]
+        else:
+            raise ValueError("ObjectUndesiredContacts requires either 'body_names' or 'body_name_pattern'.")
+
+        if not self.body_names:
+            raise ValueError("ObjectUndesiredContacts resolved an empty body-name set.")
+
+    def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
+        object_contact_forces = _get_object_contact_force_history(env, body_names=self.body_names)
+        is_contact = (torch.max(torch.norm(object_contact_forces, dim=-1), dim=1)[0] > self.threshold).to(
+            dtype=torch.float32
+        )
+        return torch.sum(is_contact, dim=1)
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        pass

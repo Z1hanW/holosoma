@@ -176,6 +176,7 @@ class PPO(BaseAlgo):
         self.multi_teacher_select_obs_var = "teacher_checkpoint_index"
         self.ppo_start_epoch = -1
         self.dagger_end_epoch = -1
+        self.ppo_target_coeff = 0.9
         self.dagger_loss_coef = 10.0
         self.use_ppo_dagger_schedule = False
         self.ppo_coeff = 1.0
@@ -493,6 +494,9 @@ class PPO(BaseAlgo):
         self.multi_teacher_select_obs_var = str(distill_cfg.multi_teacher_select_obs_var)
         self.ppo_start_epoch = int(getattr(distill_cfg, "ppo_start_epoch", -1))
         self.dagger_end_epoch = int(getattr(distill_cfg, "dagger_end_epoch", -1))
+        self.ppo_target_coeff = float(getattr(distill_cfg, "ppo_target_coeff", 0.9))
+        if not (0.0 <= self.ppo_target_coeff <= 1.0):
+            raise ValueError(f"distill.ppo_target_coeff must be in [0.0, 1.0], got {self.ppo_target_coeff}.")
         self.dagger_loss_coef = float(getattr(distill_cfg, "dagger_loss_coef", 10.0))
         self.use_ppo_dagger_schedule = self.ppo_start_epoch >= 0 and self.dagger_end_epoch > self.ppo_start_epoch
         self.ppo_coeff = 0.0 if self.use_ppo_dagger_schedule else 1.0
@@ -685,11 +689,16 @@ class PPO(BaseAlgo):
         for obs_key in obs_dict:
             obs_dict[obs_key] = obs_dict[obs_key].to(self.device)
 
+        run_end_iteration = self.current_learning_iteration + self.config.num_learning_iterations
         for it in range(
             self.current_learning_iteration,
-            self.current_learning_iteration + self.config.num_learning_iterations,
+            run_end_iteration,
         ):
             self.current_learning_iteration = it
+            self._sync_training_curriculum_state(
+                current_iteration=it,
+                total_iterations=run_end_iteration,
+            )
 
             # Synchronize curriculum metrics across GPUs before rollout
             if self.is_multi_gpu:
@@ -750,8 +759,8 @@ class PPO(BaseAlgo):
         """PPO/DAgger curriculum mixing schedule.
 
         - epoch < ppo_start_epoch: ppo_coeff = 0.0
-        - epoch >= dagger_end_epoch: ppo_coeff = 0.9
-        - otherwise: linear ramp to 0.9
+        - epoch >= dagger_end_epoch: ppo_coeff = ppo_target_coeff
+        - otherwise: linear ramp to ppo_target_coeff
         """
         if not self.use_ppo_dagger_schedule:
             self.ppo_coeff = 1.0
@@ -761,12 +770,21 @@ class PPO(BaseAlgo):
             self.ppo_coeff = 0.0
             return
         if current_epoch >= self.dagger_end_epoch:
-            self.ppo_coeff = 0.9
+            self.ppo_coeff = self.ppo_target_coeff
             return
 
         total_epochs = max(1, self.dagger_end_epoch - self.ppo_start_epoch)
         ppo_epochs = max(0, current_epoch - self.ppo_start_epoch)
-        self.ppo_coeff = min(float(ppo_epochs) / float(total_epochs), 0.9)
+        self.ppo_coeff = min(float(ppo_epochs) / float(total_epochs), 1.0) * self.ppo_target_coeff
+
+    def _sync_training_curriculum_state(self, *, current_iteration: int, total_iterations: int) -> None:
+        command_manager = getattr(self.env, "command_manager", None)
+        if command_manager is None:
+            return
+        motion_command = command_manager.get_state("motion_command")
+        if motion_command is None or not hasattr(motion_command, "set_training_iteration"):
+            return
+        motion_command.set_training_iteration(current_iteration, total_iterations=total_iterations)
 
     def _use_deterministic_student_actions(self) -> bool:
         """Use mean actions during pure BC phases to reduce rollout noise drift."""
@@ -1598,10 +1616,18 @@ class PPO(BaseAlgo):
             motion_total = float(motion_command.motion.time_step_total)
             train_logs["mean_episode_length_motion_total"] = motion_total
             train_logs["mean_episode_length_motion_total/time"] = motion_total
+            train_logs["command_goal_training_iteration"] = float(getattr(motion_command, "_training_iteration", it) or it)
+            train_logs["command_only_env_prob"] = float(getattr(motion_command, "_command_only_env_prob", 0.0))
+            train_logs["external_goal_prob"] = float(getattr(motion_command, "_sparse_goal_external_prob", 0.0))
             if hasattr(motion_command, "get_sparse_goal_external_mask"):
                 train_logs["manual_goal_is_external_fraction"] = float(
                     motion_command.get_sparse_goal_external_mask().float().mean().item()
                 )
+        if self.dagger_enabled and self.use_ppo_dagger_schedule:
+            train_logs = extra_log_dicts.setdefault("Train", {})
+            train_logs["ppo_dagger_target_coeff"] = float(self.ppo_target_coeff)
+            train_logs["ppo_dagger_coeff"] = float(self.ppo_coeff)
+            train_logs["ppo_dagger_bc_weight"] = float(self.dagger_loss_coef * max(0.0, 1.0 - float(self.ppo_coeff)))
         loss_dict["actor_learning_rate"] = self.actor_learning_rate
         loss_dict["critic_learning_rate"] = self.critic_learning_rate
         # Use logging helper
