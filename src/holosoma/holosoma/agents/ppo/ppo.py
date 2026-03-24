@@ -185,6 +185,7 @@ class PPO(BaseAlgo):
         self.dagger_ignore_external_goal_samples = False
         self.dagger_match_std = False
         self.strict_teacher_load = True
+        self.teacher_perception_obs_key = ""
         self.teacher_actor = None
         self.teacher_actors: list[nn.Module] = []
         self.teacher_actor_obs_normalizers: dict[str, nn.Module] = {}
@@ -370,9 +371,17 @@ class PPO(BaseAlgo):
         if layer_cfg.encoder_obs_token_name and layer_cfg.encoder_obs_token_name not in obs_keys:
             layer_cfg = dataclasses.replace(layer_cfg, encoder_obs_token_name=None)
         removed_perception_input = False
-        if layer_cfg.perception_input_name and layer_cfg.perception_input_name not in obs_keys:
-            layer_cfg = dataclasses.replace(layer_cfg, perception_input_name="")
-            removed_perception_input = True
+        if layer_cfg.perception_input_name:
+            resolved_perception_key = ""
+            if self.teacher_perception_obs_key:
+                resolved_perception_key = self.teacher_perception_obs_key
+            elif layer_cfg.perception_input_name in self.algo_obs_dim_dict:
+                resolved_perception_key = layer_cfg.perception_input_name
+            if resolved_perception_key:
+                layer_cfg = dataclasses.replace(layer_cfg, perception_input_name=resolved_perception_key)
+            else:
+                layer_cfg = dataclasses.replace(layer_cfg, perception_input_name="")
+                removed_perception_input = True
 
         actor_type = actor_cfg.type
         # In strict mode we do not auto-fallback teacher architecture on obs mismatch.
@@ -515,6 +524,13 @@ class PPO(BaseAlgo):
         )
         self.dagger_match_std = bool(getattr(distill_cfg, "dagger_match_std", False))
         self.strict_teacher_load = bool(getattr(distill_cfg, "strict_teacher_load", True))
+        teacher_perception_obs_key = getattr(distill_cfg, "teacher_perception_obs_key", None)
+        self.teacher_perception_obs_key = str(teacher_perception_obs_key).strip() if teacher_perception_obs_key else ""
+        if self.teacher_perception_obs_key and self.teacher_perception_obs_key not in self.algo_obs_dim_dict:
+            raise ValueError(
+                "Distillation teacher_perception_obs_key not found in observation manager: "
+                f"{self.teacher_perception_obs_key}"
+            )
 
         self.teacher_actor = None
         self.teacher_actors = []
@@ -747,12 +763,28 @@ class PPO(BaseAlgo):
                 if not mask.any():
                     continue
                 teacher_obs = self._normalize_teacher_actor_obs(teacher_obs_raw[mask], normalizers=normalizers)
-                teacher_actions[mask] = teacher_actor.act({"actor_obs": teacher_obs})
+                teacher_policy_state = {"actor_obs": teacher_obs}
+                teacher_perception_key = str(getattr(teacher_actor, "perception_input_name", "") or "")
+                if teacher_perception_key:
+                    if teacher_perception_key not in obs_dict:
+                        raise ValueError(
+                            f"Teacher perception obs '{teacher_perception_key}' not found in current observation dict."
+                        )
+                    teacher_policy_state[teacher_perception_key] = obs_dict[teacher_perception_key][mask]
+                teacher_actions[mask] = teacher_actor.act(teacher_policy_state)
             return teacher_actions, teacher_indices
 
         assert self.teacher_actor is not None, "Teacher actor is not initialized."
         teacher_obs = self._normalize_teacher_actor_obs(teacher_obs_raw)
-        teacher_actions = self.teacher_actor.act({"actor_obs": teacher_obs})
+        teacher_policy_state = {"actor_obs": teacher_obs}
+        teacher_perception_key = str(getattr(self.teacher_actor, "perception_input_name", "") or "")
+        if teacher_perception_key:
+            if teacher_perception_key not in obs_dict:
+                raise ValueError(
+                    f"Teacher perception obs '{teacher_perception_key}' not found in current observation dict."
+                )
+            teacher_policy_state[teacher_perception_key] = obs_dict[teacher_perception_key]
+        teacher_actions = self.teacher_actor.act(teacher_policy_state)
         return teacher_actions, None
 
     def _adjust_ppo_dagger_coeff(self, current_epoch: int) -> None:

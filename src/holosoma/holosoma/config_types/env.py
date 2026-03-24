@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import dataclasses
+
 from pydantic.dataclasses import dataclass
 
+import holosoma.config_values.perception
 from holosoma.config_types.action import ActionManagerCfg
 from holosoma.config_types.command import CommandManagerCfg
 from holosoma.config_types.curriculum import CurriculumManagerCfg
@@ -26,6 +29,7 @@ class EnvConfig:
     simulator: SimulatorConfig
     terrain: TerrainManagerCfg
     perception: PerceptionConfig | None
+    teacher_perception: PerceptionConfig | None
     observation: ObservationManagerCfg | None
     action: ActionManagerCfg | None
     reward: RewardManagerCfg | None
@@ -36,6 +40,22 @@ class EnvConfig:
     robot: RobotConfig
     training: TrainingConfig
     logger: LoggerConfig
+
+
+def _resolve_teacher_perception_config(tyro_config: ExperimentConfig) -> PerceptionConfig | None:
+    algo_wrapper = getattr(tyro_config, "algo", None)
+    algo_config = getattr(algo_wrapper, "config", None)
+    distill_cfg = getattr(algo_config, "distill", None) if algo_config is not None else None
+    preset_name = getattr(distill_cfg, "teacher_perception_preset", None) if distill_cfg is not None else None
+    if preset_name is None:
+        return None
+    preset_name = str(preset_name).strip()
+    if not preset_name or preset_name.lower() == "none":
+        return None
+    defaults = holosoma.config_values.perception.DEFAULTS
+    if preset_name not in defaults:
+        raise ValueError(f"Unknown distill.teacher_perception_preset: {preset_name}")
+    return dataclasses.replace(defaults[preset_name])
 
 
 def get_tyro_env_config(tyro_config: ExperimentConfig) -> EnvConfig:
@@ -57,6 +77,7 @@ def get_tyro_env_config(tyro_config: ExperimentConfig) -> EnvConfig:
         simulator=tyro_config.simulator,
         terrain=tyro_config.terrain,
         perception=tyro_config.perception,
+        teacher_perception=_resolve_teacher_perception_config(tyro_config),
         observation=tyro_config.observation,
         action=tyro_config.action,
         reward=tyro_config.reward,

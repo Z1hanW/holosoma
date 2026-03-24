@@ -386,7 +386,6 @@ _w_object_distill_sparse_root_cmd_critic_inputs = ["critic_obs"]
 _w_object_command_curriculum_actor_inputs = [
     "actor_obs_track",
     "actor_obs_proprio",
-    "actor_obs_box",
     "actor_obs_goal",
     "actor_obs_mode",
 ]

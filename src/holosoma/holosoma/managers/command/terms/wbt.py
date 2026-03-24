@@ -35,6 +35,33 @@ from holosoma.utils.simulator_config import SimulatorType
 
 _RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD = 0.10
 _RUNTIME_PICKUP_CONSECUTIVE_STEPS = 5
+_CLIP_PICKUP_LIFT_RATIO_THRESHOLD = 0.35
+_CONTACT_PRIOR_REGION_NAMES = ("left_palm", "right_palm", "arms", "torso")
+_CONTACT_PRIOR_REGION_FORCE_BODY_NAMES = {
+    "left_palm": ("left_wrist_yaw_link",),
+    "right_palm": ("right_wrist_yaw_link",),
+    "arms": (
+        "left_elbow_link",
+        "right_elbow_link",
+        "left_wrist_roll_link",
+        "right_wrist_roll_link",
+        "left_wrist_pitch_link",
+        "right_wrist_pitch_link",
+    ),
+    "torso": ("torso_link",),
+}
+_CONTACT_PRIOR_REGION_POSITION_BODY_NAMES = {
+    "left_palm": ("left_wrist_yaw_link",),
+    "right_palm": ("right_wrist_yaw_link",),
+    "arms": ("left_elbow_link", "right_elbow_link", "left_wrist_yaw_link", "right_wrist_yaw_link"),
+    "torso": ("torso_link",),
+}
+_CONTACT_PRIOR_PHASE_COUNT = 2
+_CONTACT_PRIOR_FORCE_THRESHOLD = 1.0
+_CONTACT_PRIOR_OBJECT_POS_ERROR_THRESHOLD = 0.20
+_CONTACT_PRIOR_OBJECT_ROT_ERROR_THRESHOLD = 0.80
+_CONTACT_PRIOR_BODY_POS_ERROR_THRESHOLD = 0.35
+_CONTACT_PRIOR_CONFIDENCE_WARMUP_SAMPLES = 2048.0
 
 
 def _rot6d_to_matrix(rot6d: torch.Tensor) -> torch.Tensor:
@@ -46,6 +73,24 @@ def _rot6d_to_matrix(rot6d: torch.Tensor) -> torch.Tensor:
     )
     third_col = torch.cross(first_col, second_col, dim=-1)
     return torch.stack((first_col, second_col, third_col), dim=-1)
+
+
+def _first_sustained_true_index(mask: torch.Tensor, consecutive_steps: int) -> int | None:
+    """Return the earliest index where `mask` stays true for `consecutive_steps` frames."""
+    if mask.numel() == 0:
+        return None
+    if consecutive_steps <= 1:
+        true_indices = torch.nonzero(mask, as_tuple=False)
+        if true_indices.numel() == 0:
+            return None
+        return int(true_indices[0, 0].item())
+
+    run_length = 0
+    for idx, flag in enumerate(mask.detach().cpu().tolist()):
+        run_length = run_length + 1 if flag else 0
+        if run_length >= consecutive_steps:
+            return idx - consecutive_steps + 1
+    return None
 
 
 #########################################################################################################
@@ -1203,6 +1248,16 @@ class MotionCommand(CommandTermBase):
         self.object_name: str = "object"
         self.object_indices_in_simulator: torch.Tensor | None = None
         self._debug_representative_clip_ids: torch.Tensor | None = None
+        self._contact_prior_available = False
+        self._contact_prior_force_body_names_by_region: dict[str, list[str]] = {}
+        self._contact_prior_position_body_names_by_region: dict[str, list[str]] = {}
+        self._contact_prior_position_body_indices_by_region: dict[str, torch.Tensor] = {}
+        self._contact_prior_total_count: torch.Tensor | None = None
+        self._contact_prior_contact_sum: torch.Tensor | None = None
+        self._contact_prior_force_mean: torch.Tensor | None = None
+        self._contact_prior_force_count: torch.Tensor | None = None
+        self._contact_prior_position_mean: torch.Tensor | None = None
+        self._contact_prior_position_count: torch.Tensor | None = None
 
     def set_forced_clip(self, clip_idx: int | None) -> None:
         """Force a specific clip index for resets (None clears the override)."""
@@ -1321,6 +1376,7 @@ class MotionCommand(CommandTermBase):
             logger.warning("Sparse object-goal curriculum requested but motion has no object; disabling curriculum.")
             self._sparse_goal_curriculum_enabled = False
             self.object_indices_in_simulator = None
+        self._configure_contact_prior_regions()
 
         # 4. get the adaptive timesteps sampler
         self.use_adaptive_timesteps_sampler = self.motion_cfg.use_adaptive_timesteps_sampler
@@ -1505,6 +1561,52 @@ class MotionCommand(CommandTermBase):
             self.motion.num_clips,
         )
 
+    def _configure_contact_prior_regions(self) -> None:
+        self._contact_prior_available = False
+        self._contact_prior_force_body_names_by_region = {region: [] for region in _CONTACT_PRIOR_REGION_NAMES}
+        self._contact_prior_position_body_names_by_region = {region: [] for region in _CONTACT_PRIOR_REGION_NAMES}
+        self._contact_prior_position_body_indices_by_region = {
+            region: torch.zeros((0,), device=self.device, dtype=torch.long) for region in _CONTACT_PRIOR_REGION_NAMES
+        }
+        if not self.motion.has_object:
+            return
+
+        getter = getattr(self._env.simulator, "get_object_contact_force_history", None)
+        if getter is None:
+            logger.warning("Online contact prior disabled: simulator does not expose object-only contact force history.")
+            return
+
+        all_body_names = list(self._env.simulator.body_names)  # type: ignore[attr-defined]
+        body_name_to_index = {name: idx for idx, name in enumerate(all_body_names)}
+        self._contact_prior_available = True
+
+        for region_name in _CONTACT_PRIOR_REGION_NAMES:
+            force_names = [
+                body_name
+                for body_name in _CONTACT_PRIOR_REGION_FORCE_BODY_NAMES[region_name]
+                if body_name in body_name_to_index
+            ]
+            position_names = [
+                body_name
+                for body_name in _CONTACT_PRIOR_REGION_POSITION_BODY_NAMES[region_name]
+                if body_name in body_name_to_index
+            ]
+            self._contact_prior_force_body_names_by_region[region_name] = force_names
+            self._contact_prior_position_body_names_by_region[region_name] = position_names
+            position_indices = [body_name_to_index[body_name] for body_name in position_names]
+            self._contact_prior_position_body_indices_by_region[region_name] = torch.tensor(
+                position_indices,
+                dtype=torch.long,
+                device=self.device,
+            )
+            if not force_names or not position_names:
+                logger.warning(
+                    "Contact prior region '{}' is partially unavailable. force_bodies={} position_bodies={}",
+                    region_name,
+                    force_names,
+                    position_names,
+                )
+
     def _get_active_object_indices(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         if self.object_indices_in_simulator is None:
             raise RuntimeError(
@@ -1553,6 +1655,77 @@ class MotionCommand(CommandTermBase):
             delta_quat = quat_from_euler_xyz(rpy[:, 0], rpy[:, 1], rpy[:, 2])
             obj_quat_w = quat_mul(delta_quat, obj_quat_w, w_last=True)
         return obj_pos_w, obj_quat_w
+
+    @staticmethod
+    def contact_prior_region_names() -> tuple[str, ...]:
+        return _CONTACT_PRIOR_REGION_NAMES
+
+    def _current_contact_prior_phase_ids(self) -> torch.Tensor:
+        if self.pickup_anchor_set is None:
+            return torch.zeros((self.num_envs,), device=self.device, dtype=torch.long)
+        return self.pickup_anchor_set.to(dtype=torch.long)
+
+    def _object_contact_force_history_by_names(self, body_names: list[str]) -> torch.Tensor:
+        if not body_names:
+            return torch.zeros((self.num_envs, 1, 0, 3), device=self.device, dtype=torch.float32)
+        getter = getattr(self._env.simulator, "get_object_contact_force_history", None)
+        if getter is None:
+            return torch.zeros((self.num_envs, 1, len(body_names), 3), device=self.device, dtype=torch.float32)
+        return getter(body_names)
+
+    def _body_positions_in_object_frame(self, body_indices: torch.Tensor) -> torch.Tensor:
+        if body_indices.numel() == 0:
+            return torch.zeros((self.num_envs, 0, 3), device=self.device, dtype=torch.float32)
+        body_pos_w = self._env.simulator._rigid_body_pos[:, body_indices, :]
+        object_pos_w = self.simulator_object_pos_w[:, None, :]
+        object_quat_inv = quat_inverse(self.simulator_object_quat_w, w_last=True)[:, None, :].expand(
+            -1, body_indices.numel(), -1
+        )
+        return quat_apply(object_quat_inv, body_pos_w - object_pos_w, w_last=True)
+
+    def get_current_contact_prior_region_measurements(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        num_regions = len(_CONTACT_PRIOR_REGION_NAMES)
+        current_force = torch.zeros((self.num_envs, num_regions), device=self.device, dtype=torch.float32)
+        current_contact = torch.zeros((self.num_envs, num_regions), device=self.device, dtype=torch.bool)
+        current_position = torch.zeros((self.num_envs, num_regions, 3), device=self.device, dtype=torch.float32)
+        if not self.motion.has_object or not self._contact_prior_available:
+            return current_force, current_contact, current_position
+
+        for region_idx, region_name in enumerate(_CONTACT_PRIOR_REGION_NAMES):
+            force_body_names = self._contact_prior_force_body_names_by_region.get(region_name, [])
+            if force_body_names:
+                force_history = self._object_contact_force_history_by_names(force_body_names)
+                per_body_force = torch.max(torch.norm(force_history, dim=-1), dim=1)[0]
+                region_force = torch.max(per_body_force, dim=1)[0]
+                current_force[:, region_idx] = region_force
+                current_contact[:, region_idx] = region_force > _CONTACT_PRIOR_FORCE_THRESHOLD
+
+            position_body_indices = self._contact_prior_position_body_indices_by_region.get(region_name)
+            if position_body_indices is None or position_body_indices.numel() == 0:
+                continue
+
+            position_body_names = self._contact_prior_position_body_names_by_region.get(region_name, [])
+            relative_positions = self._body_positions_in_object_frame(position_body_indices)
+            if position_body_names:
+                position_force_history = self._object_contact_force_history_by_names(position_body_names)
+                position_force_weights = torch.max(torch.norm(position_force_history, dim=-1), dim=1)[0]
+            else:
+                position_force_weights = torch.zeros(
+                    (self.num_envs, position_body_indices.numel()),
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+
+            uniform_weights = torch.full_like(position_force_weights, 1.0 / float(position_body_indices.numel()))
+            weight_denom = position_force_weights.sum(dim=1, keepdim=True)
+            normalized_weights = torch.where(
+                weight_denom > 1.0e-6,
+                position_force_weights / weight_denom.clamp_min(1.0e-6),
+                uniform_weights,
+            )
+            current_position[:, region_idx] = torch.sum(relative_positions * normalized_weights.unsqueeze(-1), dim=1)
+
+        return current_force, current_contact, current_position
 
     def _default_pose_reset_targets(
         self, env_ids: torch.Tensor
@@ -1849,6 +2022,7 @@ class MotionCommand(CommandTermBase):
 
         self._update_future_target_poses()
         self._update_pickup_anchor_state()
+        self._update_contact_prior_state()
         self._update_manual_goal_override()
 
     def _current_clip_lengths(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
@@ -2053,6 +2227,55 @@ class MotionCommand(CommandTermBase):
         mix = float(self._clamp01(self._sparse_goal_curriculum_progress() if alpha is None else alpha))
         return start_tensor + (end_tensor - start_tensor) * mix
 
+    def _get_clip_pickup_steps_by_clip(self) -> torch.Tensor:
+        cache_name = (
+            "_clip_pickup_steps_by_clip_"
+            f"h{_RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD:.4f}_"
+            f"r{_CLIP_PICKUP_LIFT_RATIO_THRESHOLD:.4f}_"
+            f"c{_RUNTIME_PICKUP_CONSECUTIVE_STEPS:d}"
+        ).replace(".", "p")
+        cached = getattr(self, cache_name, None)
+        if cached is not None:
+            return cached
+
+        pickup_steps_by_clip = torch.zeros((self.motion.num_clips,), device=self.device, dtype=torch.long)
+        if not self.motion.has_object:
+            setattr(self, cache_name, pickup_steps_by_clip)
+            return pickup_steps_by_clip
+
+        clip_offsets = self.motion.clip_offsets
+        clip_lengths = self.motion.clip_lengths
+        root_pos_w = self.motion.body_pos_w[:, 0]
+        object_pos_w = self.motion.object_pos_w
+
+        for clip_idx in range(self.motion.num_clips):
+            clip_start = int(clip_offsets[clip_idx].item())
+            clip_length = int(clip_lengths[clip_idx].item())
+            if clip_length <= 0:
+                continue
+
+            clip_end = clip_start + clip_length
+            clip_rel_z = object_pos_w[clip_start:clip_end, 2] - root_pos_w[clip_start:clip_end, 2]
+            z_min = clip_rel_z.min()
+            z_range = torch.clamp(clip_rel_z.max() - z_min, min=0.0)
+            pickup_threshold = z_min + torch.maximum(
+                z_min.new_tensor(float(_RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD)),
+                z_range * float(_CLIP_PICKUP_LIFT_RATIO_THRESHOLD),
+            )
+
+            lifted_mask = clip_rel_z >= pickup_threshold
+            pickup_step = _first_sustained_true_index(lifted_mask, _RUNTIME_PICKUP_CONSECUTIVE_STEPS)
+            if pickup_step is None:
+                lifted_indices = torch.nonzero(lifted_mask, as_tuple=False)
+                if lifted_indices.numel() > 0:
+                    pickup_step = int(lifted_indices[0, 0].item())
+                else:
+                    pickup_step = int(torch.argmax(clip_rel_z).item())
+            pickup_steps_by_clip[clip_idx] = pickup_step
+
+        setattr(self, cache_name, pickup_steps_by_clip)
+        return pickup_steps_by_clip
+
     def _reset_pickup_anchor_state(
         self,
         env_ids: torch.Tensor,
@@ -2083,6 +2306,19 @@ class MotionCommand(CommandTermBase):
         self.pickup_anchor_root_quat_w[env_ids] = root_quat_w
         self.pickup_object_rel_z_baseline[env_ids] = object_pos_w[:, 2] - root_pos_w[:, 2]
 
+        # If reset starts after the clip's pickup phase, treat the object as already
+        # picked at reset time and anchor the sparse goal to the current reset root.
+        clip_pickup_steps = self._get_clip_pickup_steps_by_clip()[self.clip_ids[env_ids]]
+        already_picked_mask = self.time_steps[env_ids] >= clip_pickup_steps
+        if not torch.any(already_picked_mask):
+            return
+
+        prime_env_ids = env_ids[already_picked_mask]
+        self.pickup_anchor_set[prime_env_ids] = True
+        self.pickup_consecutive_counter[prime_env_ids] = _RUNTIME_PICKUP_CONSECUTIVE_STEPS
+        self.pickup_anchor_root_pos_w[prime_env_ids] = root_pos_w[already_picked_mask]
+        self.pickup_anchor_root_quat_w[prime_env_ids] = root_quat_w[already_picked_mask]
+
     def _update_pickup_anchor_state(self) -> None:
         if (
             not self.motion.has_object
@@ -2111,6 +2347,131 @@ class MotionCommand(CommandTermBase):
         self.pickup_anchor_root_pos_w[newly_picked] = self.robot_root_pos_w[newly_picked]
         self.pickup_anchor_root_quat_w[newly_picked] = self.robot_root_quat_w[newly_picked]
 
+    def _update_contact_prior_state(self) -> None:
+        if (
+            not self._sparse_goal_curriculum_enabled
+            or not self.motion.has_object
+            or not self._contact_prior_available
+            or self.command_only_env_mask is None
+            or self._contact_prior_total_count is None
+            or self._contact_prior_contact_sum is None
+            or self._contact_prior_force_mean is None
+            or self._contact_prior_force_count is None
+            or self._contact_prior_position_mean is None
+            or self._contact_prior_position_count is None
+        ):
+            return
+
+        source_mask = ~self.command_only_env_mask
+        source_mask &= self._env.episode_length_buf > 1
+        if not torch.any(source_mask):
+            return
+
+        body_pos_error = torch.norm(self.body_pos_relative_w - self.robot_body_pos_w, dim=-1).mean(dim=-1)
+        object_pos_error = torch.norm(self.object_pos_w - self.simulator_object_pos_w, dim=-1)
+        object_rot_error = quat_error_magnitude(self.object_quat_w, self.simulator_object_quat_w)
+        stable_mask = (
+            source_mask
+            & (body_pos_error <= _CONTACT_PRIOR_BODY_POS_ERROR_THRESHOLD)
+            & (object_pos_error <= _CONTACT_PRIOR_OBJECT_POS_ERROR_THRESHOLD)
+            & (object_rot_error <= _CONTACT_PRIOR_OBJECT_ROT_ERROR_THRESHOLD)
+        )
+        if not torch.any(stable_mask):
+            return
+
+        current_force, current_contact, current_position = self.get_current_contact_prior_region_measurements()
+        stable_clip_ids = self.clip_ids[stable_mask]
+        stable_phase_ids = self._current_contact_prior_phase_ids()[stable_mask]
+        stable_contact = current_contact[stable_mask]
+        stable_force = current_force[stable_mask]
+        stable_position = current_position[stable_mask]
+        clip_phase_pairs = torch.unique(torch.stack((stable_clip_ids, stable_phase_ids), dim=1), dim=0)
+
+        for clip_id, phase_id in clip_phase_pairs.tolist():
+            pair_mask = (stable_clip_ids == clip_id) & (stable_phase_ids == phase_id)
+            if not torch.any(pair_mask):
+                continue
+
+            pair_contact = stable_contact[pair_mask]
+            pair_force = stable_force[pair_mask]
+            pair_position = stable_position[pair_mask]
+            pair_count = float(pair_mask.sum().item())
+            self._contact_prior_total_count[clip_id, phase_id] += pair_count
+            self._contact_prior_contact_sum[clip_id, phase_id] += pair_contact.to(dtype=torch.float32).sum(dim=0)
+
+            for region_idx in range(len(_CONTACT_PRIOR_REGION_NAMES)):
+                region_contact_mask = pair_contact[:, region_idx]
+                region_contact_count = float(region_contact_mask.to(dtype=torch.float32).sum().item())
+                if region_contact_count <= 0.0:
+                    continue
+
+                batch_force_mean = pair_force[region_contact_mask, region_idx].mean()
+                prev_force_count = self._contact_prior_force_count[clip_id, phase_id, region_idx]
+                new_force_count = prev_force_count + region_contact_count
+                self._contact_prior_force_mean[clip_id, phase_id, region_idx] = (
+                    self._contact_prior_force_mean[clip_id, phase_id, region_idx] * prev_force_count
+                    + batch_force_mean * region_contact_count
+                ) / new_force_count.clamp_min(1.0)
+                self._contact_prior_force_count[clip_id, phase_id, region_idx] = new_force_count
+
+                batch_position_mean = pair_position[region_contact_mask, region_idx].mean(dim=0)
+                prev_position_count = self._contact_prior_position_count[clip_id, phase_id, region_idx]
+                new_position_count = prev_position_count + region_contact_count
+                self._contact_prior_position_mean[clip_id, phase_id, region_idx] = (
+                    self._contact_prior_position_mean[clip_id, phase_id, region_idx] * prev_position_count
+                    + batch_position_mean * region_contact_count
+                ) / new_position_count.clamp_min(1.0)
+                self._contact_prior_position_count[clip_id, phase_id, region_idx] = new_position_count
+
+    def get_contact_prior_targets(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        num_regions = len(_CONTACT_PRIOR_REGION_NAMES)
+        occupancy = torch.zeros((self.num_envs, num_regions), device=self.device, dtype=torch.float32)
+        force = torch.zeros((self.num_envs, num_regions), device=self.device, dtype=torch.float32)
+        position = torch.zeros((self.num_envs, num_regions, 3), device=self.device, dtype=torch.float32)
+        confidence = torch.zeros((self.num_envs,), device=self.device, dtype=torch.float32)
+        valid_mask = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
+        if (
+            self._contact_prior_total_count is None
+            or self._contact_prior_contact_sum is None
+            or self._contact_prior_force_mean is None
+            or self._contact_prior_position_mean is None
+        ):
+            return occupancy, force, position, confidence, valid_mask
+
+        phase_ids = self._current_contact_prior_phase_ids()
+        total_count = self._contact_prior_total_count[self.clip_ids, phase_ids]
+        valid_mask = total_count > 0.0
+        if torch.any(valid_mask):
+            occupancy[valid_mask] = self._contact_prior_contact_sum[self.clip_ids[valid_mask], phase_ids[valid_mask]] / (
+                total_count[valid_mask].unsqueeze(-1).clamp_min(1.0)
+            )
+            force[valid_mask] = self._contact_prior_force_mean[self.clip_ids[valid_mask], phase_ids[valid_mask]]
+            position[valid_mask] = self._contact_prior_position_mean[self.clip_ids[valid_mask], phase_ids[valid_mask]]
+            confidence[valid_mask] = torch.clamp(
+                total_count[valid_mask] / float(_CONTACT_PRIOR_CONFIDENCE_WARMUP_SAMPLES),
+                min=0.0,
+                max=1.0,
+            )
+        return occupancy, force, position, confidence, valid_mask
+
+    def get_contact_prior_region_targets(
+        self,
+        region_name: str,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if region_name not in _CONTACT_PRIOR_REGION_NAMES:
+            raise ValueError(f"Unknown contact prior region '{region_name}'.")
+        region_idx = _CONTACT_PRIOR_REGION_NAMES.index(region_name)
+        occupancy, force, position, confidence, valid_mask = self.get_contact_prior_targets()
+        return (
+            occupancy[:, region_idx].unsqueeze(-1),
+            force[:, region_idx].unsqueeze(-1),
+            position[:, region_idx, :],
+            confidence.unsqueeze(-1),
+            valid_mask.unsqueeze(-1).to(dtype=torch.float32),
+        )
+
     def _apply_motion_alignment_pos_subset(self, pos: torch.Tensor, env_ids: torch.Tensor) -> torch.Tensor:
         align_quat = self._align_quat[env_ids]
         align_pos = self._align_pos[env_ids]
@@ -2128,20 +2489,11 @@ class MotionCommand(CommandTermBase):
     def _sample_clip_based_object_goal_pose_w(
         self, env_ids: torch.Tensor, clip_lengths: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self._sparse_goal_cfg is None:
-            raise RuntimeError("Sparse goal config is not initialized.")
-
-        num_samples = env_ids.numel()
-        min_delta = max(0, int(self._sparse_goal_cfg.clip_goal_delta_min_steps))
-        max_delta = max(min_delta, int(self._sparse_goal_cfg.clip_goal_delta_max_steps))
-        if max_delta == min_delta:
-            delta_steps = torch.full((num_samples,), min_delta, device=self.device, dtype=torch.long)
-        else:
-            delta_steps = torch.randint(min_delta, max_delta + 1, (num_samples,), device=self.device)
-
-        max_goal_steps = torch.clamp(clip_lengths - 1, min=0)
-        goal_steps = torch.minimum(self.time_steps[env_ids] + delta_steps, max_goal_steps)
-        goal_motion_idx = self._get_motion_indices(goal_steps, env_ids=env_ids)
+        # Clip goals represent the final placement target of the active clip.
+        # Keep the legacy clip_goal_delta config around for compatibility, but do
+        # not use future-step waypoints here anymore.
+        final_goal_steps = torch.clamp(clip_lengths - 1, min=0)
+        goal_motion_idx = self._get_motion_indices(final_goal_steps, env_ids=env_ids)
 
         goal_pos_w = self.motion.object_pos_w[goal_motion_idx]
         goal_quat_w = self.motion.object_quat_w[goal_motion_idx]
@@ -2792,6 +3144,37 @@ class MotionCommand(CommandTermBase):
         self._align_quat = torch.zeros(self.num_envs, 4, device=self.device)
         self._align_quat[:, 3] = 1.0
         self._align_pos = torch.zeros(self.num_envs, 3, device=self.device)
+        num_regions = len(_CONTACT_PRIOR_REGION_NAMES)
+        self._contact_prior_total_count = torch.zeros(
+            (self.motion.num_clips, _CONTACT_PRIOR_PHASE_COUNT),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self._contact_prior_contact_sum = torch.zeros(
+            (self.motion.num_clips, _CONTACT_PRIOR_PHASE_COUNT, num_regions),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self._contact_prior_force_mean = torch.zeros(
+            (self.motion.num_clips, _CONTACT_PRIOR_PHASE_COUNT, num_regions),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self._contact_prior_force_count = torch.zeros(
+            (self.motion.num_clips, _CONTACT_PRIOR_PHASE_COUNT, num_regions),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self._contact_prior_position_mean = torch.zeros(
+            (self.motion.num_clips, _CONTACT_PRIOR_PHASE_COUNT, num_regions, 3),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self._contact_prior_position_count = torch.zeros(
+            (self.motion.num_clips, _CONTACT_PRIOR_PHASE_COUNT, num_regions),
+            device=self.device,
+            dtype=torch.float32,
+        )
 
         if self.num_future_steps > 0 and self.target_pose_type is not None:
             self.future_target_poses = torch.zeros(
@@ -2967,6 +3350,13 @@ class MotionCommand(CommandTermBase):
                 device=self.device,
                 dtype=torch.float32,
             )
+            prior_occupancy, prior_force, _, prior_confidence, prior_valid = self.get_contact_prior_targets()
+            self.metrics["goal/contact_prior_confidence"] = prior_confidence
+            self.metrics["goal/contact_prior_valid"] = prior_valid.to(dtype=torch.float32)
+            for region_idx, region_name in enumerate(_CONTACT_PRIOR_REGION_NAMES):
+                metric_name = region_name.replace("left_", "l_").replace("right_", "r_")
+                self.metrics[f"goal/contact_prior_{metric_name}_occupancy"] = prior_occupancy[:, region_idx]
+                self.metrics[f"goal/contact_prior_{metric_name}_force"] = prior_force[:, region_idx]
             if self._sparse_goal_cfg is not None:
                 pos_min = self._goal_vec3_interp(
                     self._sparse_goal_cfg.external_goal_pos_local_min,

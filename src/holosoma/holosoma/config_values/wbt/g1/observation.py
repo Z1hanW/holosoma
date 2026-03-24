@@ -6,6 +6,19 @@ from holosoma.config_types.observation import ObservationManagerCfg, ObsGroupCfg
 
 DEFAULT_WBT_POLICY_HISTORY_LENGTH = 10
 
+_PALM_CONTACT_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
+_ARM_SUPPORT_CONTACT_BODY_NAMES = [
+    "left_elbow_link",
+    "right_elbow_link",
+    "left_wrist_roll_link",
+    "right_wrist_roll_link",
+    "left_wrist_pitch_link",
+    "right_wrist_pitch_link",
+]
+_TORSO_SUPPORT_CONTACT_BODY_NAMES = ["torso_link"]
+_FOOT_CONTACT_BODY_NAMES = ["left_foot_contact_point", "right_foot_contact_point"]
+_ANKLE_CONTACT_BODY_NAMES = ["left_ankle_roll_link", "right_ankle_roll_link"]
+
 actor_obs_shared = ObsGroupCfg(
     concatenate=True,
     enable_noise=True,
@@ -226,6 +239,199 @@ critic_obs_w_object_terms.update(
     }
 )
 
+critic_obs_w_object_command_privileged_terms = critic_obs_w_object_terms.copy()
+critic_obs_w_object_command_privileged_terms.update(
+    {
+        "obj_ang_vel_b": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_ang_vel_b",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "obj_sparse_goal_xy_yaw_pick_root_heading": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_sparse_goal_xy_yaw_pick_root_heading",
+            params={"zero_yaw": True},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "obj_picked_flag": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_picked_flag",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "command_only_flag": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:command_only_flag",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "sparse_goal_external_flag": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:sparse_goal_external_flag",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "contact_prior_confidence": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:contact_prior_confidence",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "left_palm_contact_prior_occupancy": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:contact_prior_region_occupancy",
+            params={"region_name": "left_palm"},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "right_palm_contact_prior_occupancy": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:contact_prior_region_occupancy",
+            params={"region_name": "right_palm"},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "arm_contact_prior_occupancy": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:contact_prior_region_occupancy",
+            params={"region_name": "arms"},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "torso_contact_prior_occupancy": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:contact_prior_region_occupancy",
+            params={"region_name": "torso"},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "left_palm_contact_prior_force": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:contact_prior_region_force",
+            params={"region_name": "left_palm"},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "right_palm_contact_prior_force": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:contact_prior_region_force",
+            params={"region_name": "right_palm"},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "arm_contact_prior_force": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:contact_prior_region_force",
+            params={"region_name": "arms"},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "torso_contact_prior_force": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:contact_prior_region_force",
+            params={"region_name": "torso"},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "left_palm_contact_prior_pos_obj": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:contact_prior_region_pos_obj",
+            params={"region_name": "left_palm"},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "right_palm_contact_prior_pos_obj": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:contact_prior_region_pos_obj",
+            params={"region_name": "right_palm"},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "arm_contact_prior_pos_obj": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:contact_prior_region_pos_obj",
+            params={"region_name": "arms"},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "torso_contact_prior_pos_obj": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:contact_prior_region_pos_obj",
+            params={"region_name": "torso"},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "left_palm_object_contact_force": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:body_contact_force_magnitude",
+            params={"body_names": ["left_wrist_yaw_link"], "object_only": True, "reduction": "max"},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "right_palm_object_contact_force": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:body_contact_force_magnitude",
+            params={"body_names": ["right_wrist_yaw_link"], "object_only": True, "reduction": "max"},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "left_palm_object_contact_flag": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:body_contact_binary_flag",
+            params={"body_names": ["left_wrist_yaw_link"], "object_only": True, "threshold": 1.0},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "right_palm_object_contact_flag": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:body_contact_binary_flag",
+            params={"body_names": ["right_wrist_yaw_link"], "object_only": True, "threshold": 1.0},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "arm_object_contact_force": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:body_contact_force_magnitude",
+            params={"body_names": _ARM_SUPPORT_CONTACT_BODY_NAMES, "object_only": True, "reduction": "max"},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "arm_object_contact_flag": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:body_contact_binary_flag",
+            params={"body_names": _ARM_SUPPORT_CONTACT_BODY_NAMES, "object_only": True, "threshold": 1.0},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "torso_object_contact_force": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:body_contact_force_magnitude",
+            params={"body_names": _TORSO_SUPPORT_CONTACT_BODY_NAMES, "object_only": True, "reduction": "max"},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "torso_object_contact_flag": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:body_contact_binary_flag",
+            params={"body_names": _TORSO_SUPPORT_CONTACT_BODY_NAMES, "object_only": True, "threshold": 1.0},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "feet_object_contact_force": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:body_contact_force_magnitude",
+            params={"body_names": _FOOT_CONTACT_BODY_NAMES, "object_only": True, "reduction": "max"},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "feet_object_contact_flag": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:body_contact_binary_flag",
+            params={"body_names": _FOOT_CONTACT_BODY_NAMES, "object_only": True, "threshold": 1.0},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "ankle_object_contact_force": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:body_contact_force_magnitude",
+            params={"body_names": _ANKLE_CONTACT_BODY_NAMES, "object_only": True, "reduction": "max"},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "ankle_object_contact_flag": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:body_contact_binary_flag",
+            params={"body_names": _ANKLE_CONTACT_BODY_NAMES, "object_only": True, "threshold": 1.0},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "feet_support_contact_force": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:body_contact_force_magnitude",
+            params={"body_names": _FOOT_CONTACT_BODY_NAMES, "non_object_only": True, "reduction": "max"},
+            scale=1.0,
+            noise=0.0,
+        ),
+        "feet_support_contact_flag": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:body_contact_binary_flag",
+            params={"body_names": _FOOT_CONTACT_BODY_NAMES, "non_object_only": True, "threshold": 1.0},
+            scale=1.0,
+            noise=0.0,
+        ),
+    }
+)
+
 g1_29dof_wbt_observation = ObservationManagerCfg(
     groups={
         "actor_obs": actor_obs_shared,
@@ -364,6 +570,7 @@ object_distill_drop_terms = {
 object_distill_drop_mixed_terms = {
     "obj_sparse_goal_xy_yaw_pick_root_heading": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:obj_sparse_goal_xy_yaw_pick_root_heading",
+        params={"zero_yaw": True},
         scale=1.0,
         noise=0.0,
     ),
@@ -395,6 +602,7 @@ object_command_curriculum_track_terms = {
 object_command_curriculum_goal_terms = {
     "obj_sparse_goal_xy_yaw_pick_root_heading": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:command_curriculum_obj_sparse_goal_xy_yaw_pick_root_heading",
+        params={"zero_yaw": True},
         scale=1.0,
         noise=0.0,
     ),
@@ -467,7 +675,7 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
             concatenate=True,
             enable_noise=False,
             history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
-            terms=critic_obs_w_object_terms,
+            terms=critic_obs_w_object_command_privileged_terms,
         ),
     },
 )
@@ -510,7 +718,7 @@ g1_29dof_wbt_observation_w_object_command_curriculum = ObservationManagerCfg(
             concatenate=True,
             enable_noise=False,
             history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
-            terms=critic_obs_w_object_terms,
+            terms=critic_obs_w_object_command_privileged_terms,
         ),
     },
 )
@@ -559,7 +767,7 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy = ObservationMa
             concatenate=True,
             enable_noise=False,
             history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
-            terms=critic_obs_w_object_terms,
+            terms=critic_obs_w_object_command_privileged_terms,
         ),
     },
 )

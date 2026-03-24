@@ -77,6 +77,7 @@ def _sparse_goal_success_mask(
     z_threshold: float,
     lin_vel_threshold: float,
     ang_vel_threshold: float,
+    ignore_yaw: bool = False,
 ) -> torch.Tensor:
     active_mask = _goal_episode_mask(motion_command, only_external=only_external) & _picked_mask(motion_command)
     if not active_mask.any():
@@ -84,11 +85,13 @@ def _sparse_goal_success_mask(
 
     assert motion_command.manual_goal_object_pos_w is not None
     goal_pos_w = motion_command.manual_goal_object_pos_w
-    goal_heading = _manual_goal_heading(motion_command)
-    current_heading = calc_heading(motion_command.simulator_object_quat_w)
-
     xy_error = torch.norm(goal_pos_w[:, :2] - motion_command.simulator_object_pos_w[:, :2], dim=-1)
-    yaw_error = torch.abs(normalize_angle(goal_heading - current_heading))
+    if ignore_yaw:
+        yaw_error = torch.zeros_like(xy_error)
+    else:
+        goal_heading = _manual_goal_heading(motion_command)
+        current_heading = calc_heading(motion_command.simulator_object_quat_w)
+        yaw_error = torch.abs(normalize_angle(goal_heading - current_heading))
     z_error = torch.abs(goal_pos_w[:, 2] - motion_command.simulator_object_pos_w[:, 2])
     lin_speed = torch.norm(motion_command.simulator_object_lin_vel_w, dim=-1)
     ang_speed = torch.norm(motion_command.simulator_object_ang_vel_w, dim=-1)
@@ -126,6 +129,7 @@ class SparseGoalSuccess(TerminationTermBase):
         self.z_threshold = float(cfg.params.get("z_threshold", 0.06))
         self.lin_vel_threshold = float(cfg.params.get("lin_vel_threshold", 0.30))
         self.ang_vel_threshold = float(cfg.params.get("ang_vel_threshold", 1.50))
+        self.ignore_yaw = bool(cfg.params.get("ignore_yaw", False))
         self.hold_steps = max(1, int(cfg.params.get("hold_steps", 10)))
         self._success_counter = torch.zeros(self.env.num_envs, dtype=torch.long, device=self.env.device)
 
@@ -139,6 +143,7 @@ class SparseGoalSuccess(TerminationTermBase):
             z_threshold=self.z_threshold,
             lin_vel_threshold=self.lin_vel_threshold,
             ang_vel_threshold=self.ang_vel_threshold,
+            ignore_yaw=self.ignore_yaw,
         )
         self._success_counter = torch.where(success, self._success_counter + 1, torch.zeros_like(self._success_counter))
         return self._success_counter >= self.hold_steps

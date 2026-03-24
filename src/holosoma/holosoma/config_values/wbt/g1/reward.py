@@ -260,6 +260,15 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed = RewardManagerCfg(
             },
             weight=0.30,
         ),
+        "sparse_goal_pickup_height_reward": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:sparse_goal_pickup_height_reward",
+            params={
+                "only_external": True,
+                "stop_after_pick": True,
+                "target_height_delta": 0.12,
+            },
+            weight=0.0,
+        ),
         "sparse_goal_object_pose_error_exp": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:sparse_goal_object_pose_error_exp",
             params={
@@ -267,9 +276,23 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed = RewardManagerCfg(
                 "sigma_yaw": 1.0,
                 "sigma_z": 0.10,
                 "only_external": True,
-                "picked_only": False,
+                "picked_only": True,
+                "ignore_yaw": True,
             },
             weight=4.0,
+        ),
+        "sparse_goal_hover_height_penalty": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:sparse_goal_hover_height_penalty",
+            params={
+                "only_external": True,
+                "picked_only": True,
+                "near_goal_xy_threshold": 0.20,
+                "near_goal_yaw_threshold": 0.60,
+                "target_height_margin": 0.10,
+                "height_scale": 0.12,
+                "ignore_yaw": True,
+            },
+            weight=-2.0,
         ),
         "sparse_goal_success_bonus": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:sparse_goal_success_bonus",
@@ -280,6 +303,7 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed = RewardManagerCfg(
                 "z_threshold": 0.06,
                 "lin_vel_threshold": 0.30,
                 "ang_vel_threshold": 1.50,
+                "ignore_yaw": True,
             },
             weight=20.0,
         ),
@@ -525,6 +549,15 @@ g1_29dof_wbt_reward_w_object_command_curriculum = RewardManagerCfg(
             params={"sigma": 2.5, "dof_names": _UPPER_DOF_NAMES, "only_clip_goal": True},
             weight=0.0,
         ),
+        "sparse_goal_pickup_height_reward": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:sparse_goal_pickup_height_reward",
+            params={
+                "only_external": True,
+                "stop_after_pick": True,
+                "target_height_delta": 0.12,
+            },
+            weight=0.0,
+        ),
         "sparse_goal_object_pose_error_exp": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:sparse_goal_object_pose_error_exp",
             params={
@@ -533,8 +566,22 @@ g1_29dof_wbt_reward_w_object_command_curriculum = RewardManagerCfg(
                 "sigma_z": 0.10,
                 "only_external": True,
                 "picked_only": False,
+                "ignore_yaw": True,
             },
             weight=4.0,
+        ),
+        "sparse_goal_hover_height_penalty": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:sparse_goal_hover_height_penalty",
+            params={
+                "only_external": True,
+                "picked_only": True,
+                "near_goal_xy_threshold": 0.20,
+                "near_goal_yaw_threshold": 0.60,
+                "target_height_margin": 0.10,
+                "height_scale": 0.12,
+                "ignore_yaw": True,
+            },
+            weight=0.0,
         ),
         "sparse_goal_success_bonus": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:sparse_goal_success_bonus",
@@ -545,8 +592,23 @@ g1_29dof_wbt_reward_w_object_command_curriculum = RewardManagerCfg(
                 "z_threshold": 0.06,
                 "lin_vel_threshold": 0.30,
                 "ang_vel_threshold": 1.50,
+                "ignore_yaw": True,
             },
             weight=20.0,
+        ),
+        "command_contact_prior_guidance": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:CommandCurriculumContactPrior",
+            params={
+                "only_command_env": True,
+                "contact_threshold": 1.0,
+                "force_scale": 25.0,
+                "force_match_sigma": 0.25,
+                "position_sigma": 0.18,
+                "force_weight": 0.55,
+                "position_weight": 0.45,
+                "expected_contact_min_occupancy": 0.15,
+            },
+            weight=1.0,
         ),
     }
 )

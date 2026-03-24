@@ -181,6 +181,12 @@ class DistillationConfig:
     teacher_compat_notes: str | None = None
     """Optional notes describing any teacher compatibility adjustments or remaining mismatches."""
 
+    teacher_perception_preset: str | None = None
+    """Optional perception preset name used only for the teacher policy (e.g. heightmap)."""
+
+    teacher_perception_obs_key: str | None = None
+    """Optional observation key used to feed teacher-only perception into the teacher policy."""
+
     switch_to_rl_after: int = -1
     """Iteration to switch off BC loss (set to 0 or negative to disable)."""
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 import torch
@@ -154,6 +155,113 @@ def _get_motion_command_and_assert_type(env: WholeBodyTrackingManager) -> Motion
     return motion_command
 
 
+def _get_cached_name_subset_indexes(
+    env: WholeBodyTrackingManager,
+    *,
+    cache_name: str,
+    all_names: list[str],
+    names: list[str] | tuple[str, ...] | None = None,
+    pattern: str | None = None,
+) -> torch.Tensor:
+    cache = getattr(env, cache_name, None)
+    if cache is None:
+        cache = {}
+        setattr(env, cache_name, cache)
+
+    key = (tuple(names) if names is not None else None, pattern)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    if names is not None:
+        missing = [name for name in names if name not in all_names]
+        if missing:
+            raise ValueError(f"Requested names {missing} are not available in {all_names}.")
+        indexes = [all_names.index(name) for name in names]
+    elif pattern:
+        regex = re.compile(pattern)
+        indexes = [idx for idx, name in enumerate(all_names) if regex.match(name)]
+    else:
+        indexes = list(range(len(all_names)))
+
+    if not indexes:
+        raise ValueError(
+            f"No names matched names={list(names) if names is not None else None} "
+            f"pattern={pattern!r} in {all_names}."
+        )
+
+    tensor = torch.tensor(indexes, dtype=torch.long, device=env.device)
+    cache[key] = tensor
+    return tensor
+
+
+def _get_sim_body_subset_indexes(
+    env: WholeBodyTrackingManager,
+    *,
+    body_names: list[str] | tuple[str, ...] | None = None,
+    body_name_pattern: str | None = None,
+) -> torch.Tensor:
+    return _get_cached_name_subset_indexes(
+        env,
+        cache_name="_wbt_obs_sim_body_subset_cache",
+        all_names=list(env.simulator.body_names),  # type: ignore[attr-defined]
+        names=body_names,
+        pattern=body_name_pattern,
+    )
+
+
+def _get_selected_sim_body_names(
+    env: WholeBodyTrackingManager,
+    selected_indexes: torch.Tensor,
+) -> list[str]:
+    all_names = list(env.simulator.body_names)  # type: ignore[attr-defined]
+    return [all_names[int(idx)] for idx in selected_indexes.detach().cpu().tolist()]
+
+
+def _current_contact_force_subset(
+    env: WholeBodyTrackingManager,
+    *,
+    body_names: list[str] | tuple[str, ...] | None = None,
+    body_name_pattern: str | None = None,
+    object_only: bool = False,
+    non_object_only: bool = False,
+) -> torch.Tensor:
+    if object_only and non_object_only:
+        raise ValueError("object_only and non_object_only cannot both be True.")
+
+    body_indexes = _get_sim_body_subset_indexes(
+        env,
+        body_names=body_names,
+        body_name_pattern=body_name_pattern,
+    )
+    current_contact_forces = env.simulator.contact_forces_history[:, 0, body_indexes, :]
+    if not object_only and not non_object_only:
+        return current_contact_forces
+
+    getter = getattr(env.simulator, "get_object_contact_force_history", None)
+    if getter is None:
+        raise RuntimeError(
+            f"Simulator '{type(env.simulator).__name__}' does not expose box-filtered contact forces. "
+            "Privileged box-contact critic observations require backend support for box-specific contacts."
+        )
+
+    selected_names = _get_selected_sim_body_names(env, body_indexes)
+    object_contact_forces = getter(selected_names)[:, 0, :, :]
+    if object_only:
+        return object_contact_forces
+    return current_contact_forces - object_contact_forces
+
+
+def _reduce_contact_magnitudes(magnitudes: torch.Tensor, reduction: str) -> torch.Tensor:
+    if reduction == "max":
+        return torch.max(magnitudes, dim=1)[0]
+    if reduction == "mean":
+        return torch.mean(magnitudes, dim=1)
+    if reduction == "sum":
+        return torch.sum(magnitudes, dim=1)
+    raise ValueError(f"Unsupported reduction '{reduction}'. Use one of: max, mean, sum.")
+
+
 def _root_relative_xy_yaw_command(motion_command: MotionCommand) -> tuple[torch.Tensor, torch.Tensor]:
     """Root-relative XY/yaw command in the robot root heading frame."""
     rel_pos_w = motion_command.root_pos_w - motion_command.robot_root_pos_w
@@ -215,22 +323,25 @@ def _manual_goal_xy_yaw_pick_root_heading(motion_command: MotionCommand) -> torc
     ):
         return goal_xy_yaw
 
+    # Before pickup, expose the goal in the current root-heading frame instead of
+    # zeroing it out. Once pickup is latched, switch to the frozen pickup anchor.
+    anchor_pos_w = motion_command.robot_root_pos_w.clone()
+    anchor_quat_w = motion_command.robot_root_quat_w.clone()
     anchor_mask = motion_command.pickup_anchor_set
-    if not anchor_mask.any():
-        return goal_xy_yaw
+    if anchor_mask.any():
+        anchor_pos_w[anchor_mask] = motion_command.pickup_anchor_root_pos_w[anchor_mask]
+        anchor_quat_w[anchor_mask] = motion_command.pickup_anchor_root_quat_w[anchor_mask]
 
-    anchor_pos_w = motion_command.pickup_anchor_root_pos_w[anchor_mask]
-    anchor_quat_w = motion_command.pickup_anchor_root_quat_w[anchor_mask]
-    goal_pos_w = motion_command.manual_goal_object_pos_w[anchor_mask]
-    goal_rot_mat_w = _rot6d_to_matrix(motion_command.manual_goal_object_rot6d_w[anchor_mask])
+    goal_pos_w = motion_command.manual_goal_object_pos_w
+    goal_rot_mat_w = _rot6d_to_matrix(motion_command.manual_goal_object_rot6d_w)
 
     anchor_heading_inv = calc_heading_quat_inv(anchor_quat_w, w_last=True)
     goal_pos_heading = quat_apply(anchor_heading_inv, goal_pos_w - anchor_pos_w, w_last=True)
     goal_heading = torch.atan2(goal_rot_mat_w[:, 1, 0], goal_rot_mat_w[:, 0, 0])
     anchor_heading = calc_heading(anchor_quat_w)
 
-    goal_xy_yaw[anchor_mask, :2] = goal_pos_heading[:, :2]
-    goal_xy_yaw[anchor_mask, 2] = normalize_angle(goal_heading - anchor_heading)
+    goal_xy_yaw[:, :2] = goal_pos_heading[:, :2]
+    goal_xy_yaw[:, 2] = normalize_angle(goal_heading - anchor_heading)
     return goal_xy_yaw
 
 
@@ -664,12 +775,20 @@ def obj_goal_xy_yaw_pick_root_heading(
     return goal_xy_yaw_by_clip[motion_command.clip_ids]
 
 
-def obj_sparse_goal_xy_yaw_pick_root_heading(env: WholeBodyTrackingManager) -> torch.Tensor:
+def obj_sparse_goal_xy_yaw_pick_root_heading(
+    env: WholeBodyTrackingManager,
+    zero_yaw: bool = False,
+) -> torch.Tensor:
     """Sparse/manual object goal [dx, dy, dyaw] in the runtime pickup-time root-heading frame."""
     motion_command = _get_motion_command_and_assert_type(env)
     if getattr(motion_command, "manual_goal_override_enabled", False):
-        return _manual_goal_override_xy_yaw(motion_command)
-    return _manual_goal_xy_yaw_pick_root_heading(motion_command)
+        obs = _manual_goal_override_xy_yaw(motion_command)
+    else:
+        obs = _manual_goal_xy_yaw_pick_root_heading(motion_command)
+    if zero_yaw:
+        obs = obs.clone()
+        obs[:, 2] = 0.0
+    return obs
 
 
 def obj_picked_flag(env: WholeBodyTrackingManager) -> torch.Tensor:
@@ -678,6 +797,84 @@ def obj_picked_flag(env: WholeBodyTrackingManager) -> torch.Tensor:
     if motion_command.pickup_anchor_set is None:
         return torch.zeros((env.num_envs, 1), device=env.device, dtype=torch.float32)
     return motion_command.pickup_anchor_set.to(dtype=torch.float32).unsqueeze(-1)
+
+
+def sparse_goal_external_flag(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Binary flag indicating whether the active sparse goal differs from the clip goal."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    return motion_command.get_sparse_goal_external_mask().to(dtype=torch.float32).unsqueeze(-1)
+
+
+def command_only_flag(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Binary flag indicating whether the env is in command-conditioned mode."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    return motion_command.get_command_only_env_mask().to(dtype=torch.float32).unsqueeze(-1)
+
+
+def contact_prior_confidence(env: WholeBodyTrackingManager) -> torch.Tensor:
+    motion_command = _get_motion_command_and_assert_type(env)
+    _, _, _, confidence, valid_mask = motion_command.get_contact_prior_targets()
+    confidence = confidence * valid_mask.to(dtype=torch.float32)
+    return confidence.unsqueeze(-1)
+
+
+def contact_prior_region_occupancy(env: WholeBodyTrackingManager, region_name: str) -> torch.Tensor:
+    motion_command = _get_motion_command_and_assert_type(env)
+    occupancy, _, _, _, valid_mask = motion_command.get_contact_prior_region_targets(region_name)
+    return occupancy * valid_mask
+
+
+def contact_prior_region_force(env: WholeBodyTrackingManager, region_name: str) -> torch.Tensor:
+    motion_command = _get_motion_command_and_assert_type(env)
+    _, force, _, _, valid_mask = motion_command.get_contact_prior_region_targets(region_name)
+    return force * valid_mask
+
+
+def contact_prior_region_pos_obj(env: WholeBodyTrackingManager, region_name: str) -> torch.Tensor:
+    motion_command = _get_motion_command_and_assert_type(env)
+    _, _, position, _, valid_mask = motion_command.get_contact_prior_region_targets(region_name)
+    return position * valid_mask
+
+
+def body_contact_force_magnitude(
+    env: WholeBodyTrackingManager,
+    body_names: list[str] | tuple[str, ...] | None = None,
+    body_name_pattern: str | None = None,
+    object_only: bool = False,
+    non_object_only: bool = False,
+    reduction: str = "max",
+) -> torch.Tensor:
+    """Current-step contact force magnitude aggregated over the selected bodies."""
+    contact_forces = _current_contact_force_subset(
+        env,
+        body_names=body_names,
+        body_name_pattern=body_name_pattern,
+        object_only=object_only,
+        non_object_only=non_object_only,
+    )
+    magnitudes = torch.norm(contact_forces, dim=-1)
+    return _reduce_contact_magnitudes(magnitudes, reduction).unsqueeze(-1)
+
+
+def body_contact_binary_flag(
+    env: WholeBodyTrackingManager,
+    threshold: float = 1.0,
+    body_names: list[str] | tuple[str, ...] | None = None,
+    body_name_pattern: str | None = None,
+    object_only: bool = False,
+    non_object_only: bool = False,
+    reduction: str = "max",
+) -> torch.Tensor:
+    """Binary contact flag aggregated over the selected bodies."""
+    magnitude = body_contact_force_magnitude(
+        env,
+        body_names=body_names,
+        body_name_pattern=body_name_pattern,
+        object_only=object_only,
+        non_object_only=non_object_only,
+        reduction=reduction,
+    )
+    return (magnitude > threshold).to(dtype=torch.float32)
 
 
 def command_curriculum_motion_command(env: WholeBodyTrackingManager) -> torch.Tensor:
@@ -698,9 +895,12 @@ def command_curriculum_obj_target_pose_size_b(env: WholeBodyTrackingManager) -> 
     return _mask_obs_by_episode(obs, _episode_obs_mask(motion_command_state, command_only=False))
 
 
-def command_curriculum_obj_sparse_goal_xy_yaw_pick_root_heading(env: WholeBodyTrackingManager) -> torch.Tensor:
+def command_curriculum_obj_sparse_goal_xy_yaw_pick_root_heading(
+    env: WholeBodyTrackingManager,
+    zero_yaw: bool = False,
+) -> torch.Tensor:
     motion_command_state = _get_motion_command_and_assert_type(env)
-    obs = obj_sparse_goal_xy_yaw_pick_root_heading(env)
+    obs = obj_sparse_goal_xy_yaw_pick_root_heading(env, zero_yaw=zero_yaw)
     return _mask_obs_by_episode(obs, _episode_obs_mask(motion_command_state, command_only=True))
 
 

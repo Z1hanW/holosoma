@@ -37,6 +37,10 @@ fi
 
 TEACHER_OBS_KEYS_EXPLICIT=0
 [[ -n "${TEACHER_OBS_KEYS+x}" ]] && TEACHER_OBS_KEYS_EXPLICIT=1
+TEACHER_PERCEPTION_PRESET_EXPLICIT=0
+[[ -n "${TEACHER_PERCEPTION_PRESET+x}" ]] && TEACHER_PERCEPTION_PRESET_EXPLICIT=1
+TEACHER_PERCEPTION_OBS_KEY_EXPLICIT=0
+[[ -n "${TEACHER_PERCEPTION_OBS_KEY+x}" ]] && TEACHER_PERCEPTION_OBS_KEY_EXPLICIT=1
 START_AT_TIMESTEP_ZERO_PROB_EXPLICIT=0
 [[ -n "${START_AT_TIMESTEP_ZERO_PROB+x}" ]] && START_AT_TIMESTEP_ZERO_PROB_EXPLICIT=1
 FREEZE_AT_TIMESTEP_ZERO_PROB_EXPLICIT=0
@@ -55,16 +59,22 @@ HSSIM_BIN_DIR=${HSSIM_BIN_DIR:-/home/ubuntu/.holosoma_deps/miniconda3/envs/hssim
 if [[ -d "${HSSIM_BIN_DIR}" ]]; then
   export PATH="${HSSIM_BIN_DIR}:${PATH}"
 fi
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4,5,6,7}
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2,3,4,5,6,7}
 if [[ -z "${NPROC:-}" ]]; then
   IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
   NPROC=${#_visible_gpus[@]}
 fi
+DEFAULT_TOTAL_ENVS=${DEFAULT_TOTAL_ENVS:-98304}
+NUM_ENVS=${NUM_ENVS:-${DEFAULT_TOTAL_ENVS}}
 
 DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"
 MOTION_DIR=${MOTION_DIR:-"${DEFAULT_MOTION_DIR}"}
+FILTER_NON_PLACEMENT_CLIPS=${FILTER_NON_PLACEMENT_CLIPS:-True}
+FINAL_PLACEMENT_MAX_DELTA_Z=${FINAL_PLACEMENT_MAX_DELTA_Z:-0.15}
 
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs_legacy,perception_obs}
+TEACHER_PERCEPTION_PRESET=${TEACHER_PERCEPTION_PRESET:-none}
+TEACHER_PERCEPTION_OBS_KEY=${TEACHER_PERCEPTION_OBS_KEY:-teacher_perception_obs}
 TEACHER_COMPAT_PROFILE=${TEACHER_COMPAT_PROFILE:-auto}
 TEACHER_COMPAT_NOTES=${TEACHER_COMPAT_NOTES:-}
 TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
@@ -118,6 +128,7 @@ CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-3.0}
 PERCEPTION_WARP_PREPROCESS=${PERCEPTION_WARP_PREPROCESS:-True}
 
 TEACHER_REF_RUN_ID="5vlz6pj8"
+TEACHER_REF_LOCAL_CHECKPOINT="${SCRIPT_DIR}/.teacher_checkpoints/model_24000.pt"
 TEACHER_REF_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_aug_mix_ml"
 TEACHER_REF_PERCEPTION_PRESET="heightmap"
 TEACHER_COMPAT_PROFILE_RESOLVED="${TEACHER_COMPAT_PROFILE}"
@@ -136,7 +147,7 @@ append_teacher_compat_note() {
 }
 
 if [[ "${TEACHER_COMPAT_PROFILE_RESOLVED}" == "auto" ]]; then
-  if [[ "${TEACHER_CHECKPOINT}" == *"${TEACHER_REF_RUN_ID}"* ]]; then
+  if [[ "${TEACHER_CHECKPOINT}" == *"${TEACHER_REF_RUN_ID}"* || "${TEACHER_CHECKPOINT}" == "${TEACHER_REF_LOCAL_CHECKPOINT}" ]]; then
     TEACHER_COMPAT_PROFILE_RESOLVED="soft_5vlz6pj8"
   else
     TEACHER_COMPAT_PROFILE_RESOLVED="none"
@@ -148,7 +159,13 @@ case "${TEACHER_COMPAT_PROFILE_RESOLVED}" in
     ;;
   soft_5vlz6pj8)
     if [[ "${TEACHER_OBS_KEYS_EXPLICIT}" -eq 0 ]]; then
-      TEACHER_OBS_KEYS="actor_obs_teacher_compat,perception_obs"
+      TEACHER_OBS_KEYS="actor_obs_teacher_compat"
+    fi
+    if [[ "${TEACHER_PERCEPTION_PRESET_EXPLICIT}" -eq 0 ]]; then
+      TEACHER_PERCEPTION_PRESET="${TEACHER_REF_PERCEPTION_PRESET}"
+    fi
+    if [[ "${TEACHER_PERCEPTION_OBS_KEY_EXPLICIT}" -eq 0 ]]; then
+      TEACHER_PERCEPTION_OBS_KEY="teacher_perception_obs"
     fi
     if [[ "${START_AT_TIMESTEP_ZERO_PROB_EXPLICIT}" -eq 0 ]]; then
       START_AT_TIMESTEP_ZERO_PROB=0.2
@@ -156,10 +173,11 @@ case "${TEACHER_COMPAT_PROFILE_RESOLVED}" in
     if [[ "${FREEZE_AT_TIMESTEP_ZERO_PROB_EXPLICIT}" -eq 0 ]]; then
       FREEZE_AT_TIMESTEP_ZERO_PROB=0.95
     fi
-    append_teacher_compat_note "teacher_obs_keys defaulted to actor_obs_teacher_compat,perception_obs for exact legacy ordering"
+    append_teacher_compat_note "teacher_obs_keys defaulted to actor_obs_teacher_compat for exact legacy ordering"
+    append_teacher_compat_note "teacher now consumes ${TEACHER_PERCEPTION_PRESET} via ${TEACHER_PERCEPTION_OBS_KEY} instead of reusing student depth perception"
     append_teacher_compat_note "reset distribution nudged toward teacher defaults (start_at_timestep_zero_prob=0.2, freeze_at_timestep_zero_prob=0.95) when not explicitly overridden"
     if [[ "${PERCEPTION_PRESET}" != "${TEACHER_REF_PERCEPTION_PRESET}" ]]; then
-      append_teacher_compat_note "perception kept at ${PERCEPTION_PRESET} to preserve current student structure; teacher used ${TEACHER_REF_PERCEPTION_PRESET}"
+      append_teacher_compat_note "student perception kept at ${PERCEPTION_PRESET} to preserve current student structure; teacher used ${TEACHER_REF_PERCEPTION_PRESET}"
     fi
     if [[ "${MOTION_DIR}" != "${TEACHER_REF_MOTION_DIR}" ]]; then
       append_teacher_compat_note "motion_dir kept at ${MOTION_DIR}; teacher used ${TEACHER_REF_MOTION_DIR}"
@@ -184,12 +202,74 @@ if [[ ! -e "${MOTION_DIR}" ]]; then
   exit 1
 fi
 
+if [[ "${FILTER_NON_PLACEMENT_CLIPS}" == "True" || "${FILTER_NON_PLACEMENT_CLIPS}" == "true" || "${FILTER_NON_PLACEMENT_CLIPS}" == "1" ]]; then
+  FILTERED_MOTION_DIR=$(
+    MOTION_DIR="${MOTION_DIR}" FINAL_PLACEMENT_MAX_DELTA_Z="${FINAL_PLACEMENT_MAX_DELTA_Z}" python - <<'PY'
+from __future__ import annotations
+
+import hashlib
+import os
+from pathlib import Path
+
+import numpy as np
+
+motion_dir = Path(os.environ["MOTION_DIR"]).expanduser().resolve()
+threshold = float(os.environ["FINAL_PLACEMENT_MAX_DELTA_Z"])
+
+if not motion_dir.is_dir():
+    print(str(motion_dir))
+    raise SystemExit(0)
+
+cache_key = hashlib.sha1(f"{motion_dir}:{threshold:.4f}".encode("utf-8")).hexdigest()[:10]
+cache_dir = motion_dir.parent / f"{motion_dir.name}_drop_final_{cache_key}"
+cache_dir.mkdir(parents=True, exist_ok=True)
+
+kept = 0
+excluded = 0
+for path in sorted(motion_dir.iterdir()):
+    target = cache_dir / path.name
+    if path.suffix != ".npz":
+        if not target.exists():
+            target.symlink_to(path)
+        continue
+
+    data = np.load(path)
+    if "object_pos_w" not in data:
+        keep = True
+    else:
+        object_z = data["object_pos_w"][:, 2]
+        keep = float(object_z[-1] - object_z.min()) <= threshold
+
+    if keep:
+        kept += 1
+        if not target.exists():
+            target.symlink_to(path)
+    else:
+        excluded += 1
+        if target.exists():
+            target.unlink()
+
+print(f"{cache_dir}|{kept}|{excluded}")
+PY
+  )
+  MOTION_DIR_FILTERED_PATH="${FILTERED_MOTION_DIR%%|*}"
+  FILTERED_MOTION_DIR_STATS="${FILTERED_MOTION_DIR#*|}"
+  FILTERED_MOTION_DIR_KEPT="${FILTERED_MOTION_DIR_STATS%%|*}"
+  FILTERED_MOTION_DIR_EXCLUDED="${FILTERED_MOTION_DIR_STATS##*|}"
+  MOTION_DIR="${MOTION_DIR_FILTERED_PATH}"
+fi
+
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
 echo "[INFO] teacher_compat_profile=${TEACHER_COMPAT_PROFILE_RESOLVED}"
 echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS}"
+echo "[INFO] teacher_perception_preset=${TEACHER_PERCEPTION_PRESET} teacher_perception_obs_key=${TEACHER_PERCEPTION_OBS_KEY}"
 echo "[INFO] run_name=${RUN_NAME} training_name=${TRAINING_NAME}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
+echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} num_envs=${NUM_ENVS}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
+if [[ -n "${FILTERED_MOTION_DIR_KEPT:-}" ]]; then
+  echo "[INFO] motion_filter_non_placement_clips=${FILTER_NON_PLACEMENT_CLIPS} final_placement_max_delta_z=${FINAL_PLACEMENT_MAX_DELTA_Z} kept=${FILTERED_MOTION_DIR_KEPT} excluded=${FILTERED_MOTION_DIR_EXCLUDED}"
+fi
 echo "[INFO] student_actor_inputs=${STUDENT_ACTOR_INPUTS}"
 echo "[INFO] schedule_name=${SCHEDULE_NAME}"
 echo "[INFO] schedule_notes=${SCHEDULE_NOTES}"
@@ -202,7 +282,7 @@ echo "[INFO] external_goal_range_xy_end=${EXTERNAL_GOAL_POS_LOCAL_MIN} -> ${EXTE
 echo "[INFO] external_goal_range_yaw_start=${EXTERNAL_GOAL_RPY_MIN_START} -> ${EXTERNAL_GOAL_RPY_MAX_START}"
 echo "[INFO] external_goal_range_yaw_end=${EXTERNAL_GOAL_RPY_MIN} -> ${EXTERNAL_GOAL_RPY_MAX}"
 echo "[INFO] external_goal_range_iter=${EXTERNAL_GOAL_RANGE_START_ITER}->${EXTERNAL_GOAL_RANGE_END_ITER}"
-echo "[INFO] clip_goal_delta_steps=${CLIP_GOAL_DELTA_MIN_STEPS}-${CLIP_GOAL_DELTA_MAX_STEPS}"
+echo "[INFO] clip_goal_delta_steps=${CLIP_GOAL_DELTA_MIN_STEPS}-${CLIP_GOAL_DELTA_MAX_STEPS} (legacy/unused; clip-goal now uses final placement)"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
 echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}"
 echo "[INFO] dagger_ignore_external_goal_samples=${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES}"
@@ -218,6 +298,7 @@ exec env \
   TRAINING_PROJECT="${TRAINING_PROJECT}" \
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
   NPROC="${NPROC}" \
+  NUM_ENVS="${NUM_ENVS}" \
   MOTION_DIR="${MOTION_DIR}" \
   TEACHER_OBS_KEYS="${TEACHER_OBS_KEYS}" \
   TEACHER_ACTION_MIX_RATIO="${TEACHER_ACTION_MIX_RATIO}" \
@@ -237,6 +318,8 @@ exec env \
     --algo.config.distill.schedule-notes="${SCHEDULE_NOTES}" \
     --algo.config.distill.teacher-compat-profile="${TEACHER_COMPAT_PROFILE_RESOLVED}" \
     --algo.config.distill.teacher-compat-notes="${TEACHER_COMPAT_NOTES}" \
+    --algo.config.distill.teacher-perception-preset="${TEACHER_PERCEPTION_PRESET}" \
+    --algo.config.distill.teacher-perception-obs-key="${TEACHER_PERCEPTION_OBS_KEY}" \
     --algo.config.distill.dagger-ignore-external-goal-samples="${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES}" \
     --algo.config.distill.ppo-target-coeff="${PPO_TARGET_COEFF}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.enabled="${SPARSE_GOAL_ENABLED}" \

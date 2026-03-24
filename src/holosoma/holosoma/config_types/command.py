@@ -90,10 +90,10 @@ class SparseObjectGoalConfig:
     """Optional command-only episode probability used during evaluation; defaults to end prob when None."""
 
     clip_goal_delta_min_steps: int = 60
-    """Minimum delta steps for clip-based goal: goal_step = min(t + delta, clip_end)."""
+    """Legacy clip-goal waypoint setting kept for compatibility; final clip-goal placement no longer uses it."""
 
     clip_goal_delta_max_steps: int = 180
-    """Maximum delta steps for clip-based goal."""
+    """Legacy clip-goal waypoint setting kept for compatibility; final clip-goal placement no longer uses it."""
 
     external_goal_prob_start: float = 0.0
     """Initial probability of sampling external random goals."""

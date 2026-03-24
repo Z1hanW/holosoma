@@ -144,6 +144,10 @@ class BaseTask:
         self.perception_manager = None
         if perception_config is not None:
             self.perception_manager = PerceptionManager(perception_config, self, self.device)
+        self.teacher_perception_manager = None
+        teacher_perception_config = getattr(tyro_config, "teacher_perception", None)
+        if teacher_perception_config is not None:
+            self.teacher_perception_manager = PerceptionManager(teacher_perception_config, self, self.device)
 
         # if running with a viewer, set up keyboard shortcuts and camera
         self.viewer = None
@@ -189,6 +193,8 @@ class BaseTask:
             self.terrain_manager.setup()
         if self.perception_manager is not None:
             self.perception_manager.setup()
+        if self.teacher_perception_manager is not None:
+            self.teacher_perception_manager.setup()
         self._init_depth_logging_state()
         self._rollout_recorder = RolloutRecorder(self)
         self._viser_live = ViserLiveViewer(self)
@@ -268,6 +274,8 @@ class BaseTask:
         self.observation_manager.reset(env_ids)
         if self.perception_manager is not None:
             self.perception_manager.reset(env_ids)
+        if self.teacher_perception_manager is not None:
+            self.teacher_perception_manager.reset(env_ids)
 
         self._pending_episode_lengths[env_ids] = self.episode_length_buf[env_ids]
         self._pending_episode_update_mask[env_ids] = False
@@ -729,6 +737,8 @@ class BaseTask:
         """Hook invoked after physics but before observation terms compute (no-op by default)."""
         if self.perception_manager is not None:
             self.perception_manager.update()
+        if self.teacher_perception_manager is not None:
+            self.teacher_perception_manager.update()
 
     def _post_compute_observations_callback(self):
         """Hook invoked after observation buffers are produced (no-op by default)."""
