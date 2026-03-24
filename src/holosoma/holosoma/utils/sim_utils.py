@@ -634,13 +634,10 @@ class DirectSimulation:
             far_clip=props.far_clip,
             resized_height=props.resized_height,
             resized_width=props.resized_width,
-            frame_rate=props.frame_rate,
             crop_y_start=props.crop_y_start,
             crop_y_end=props.crop_y_end,
             crop_x_start=props.crop_x_start,
             crop_x_end=props.crop_x_end,
-            latency_frame=props.latency_frame,
-            buffer_len=props.buffer_len,
         )
 
         # Also sync the visualizer clip range so depth display is correct

@@ -55,7 +55,6 @@ zed2i_depth_props = CameraProps(
     far_clip=2.0,
     image_show=False,
     frame_rate=10,
-    depth_delay=0,
 )
 
 single_zed2i_depth = CameraManagerCfg(terms={
