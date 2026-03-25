@@ -38,6 +38,7 @@ from holosoma.config_types.robot import RobotConfig  # noqa: E402
 from holosoma.config_values import robot as robot_values  # noqa: E402
 from holosoma.utils.module_utils import get_holosoma_root  # noqa: E402
 from holosoma.utils.path import resolve_data_file_path  # noqa: E402
+from holosoma_inference.utils.policy_control import PolicyControlPush  # noqa: E402
 from holosoma_inference.utils.sim_control import SimControlPush  # noqa: E402
 from holosoma_inference.utils.sim_state import SimStateSub  # noqa: E402
 
@@ -45,8 +46,9 @@ from holosoma_inference.utils.sim_state import SimStateSub  # noqa: E402
 @dataclass(frozen=True)
 class MujocoSimStateViewerConfig:
     robot: str = "g1_29dof_w_object"
-    state_port: int = 5657
-    control_port: int = 5659
+    state_port: int = int(os.environ.get("SIM_STATE_PORT", "5657"))
+    control_port: int = int(os.environ.get("SIM_CONTROL_PORT", "5659"))
+    policy_control_port: int = int(os.environ.get("POLICY_CONTROL_PORT", "5660"))
     object_actor_name: str = "object"
     port: int = 0
     rate_hz: float = 30.0
@@ -401,10 +403,27 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         rollout_md = server.gui.add_markdown("Viewer only")
         reset_rollout_btn = server.gui.add_button("Reset rollout")
 
+    manual_gui_enabled = os.environ.get("VISER_ENABLE_MANUAL_GUI", "1").lower() not in ("0", "false", "no")
+    if manual_gui_enabled:
+        with server.gui.add_folder("Manual Control", expand_by_default=False):
+            policy_md = server.gui.add_markdown("Policy control: `idle`")
+            start_policy_btn = server.gui.add_button("Start policy")
+            stop_policy_btn = server.gui.add_button("Stop policy")
+            init_state_btn = server.gui.add_button("Init state")
+            start_motion_clip_btn = server.gui.add_button("Start motion clip")
+    else:
+        policy_md = None
+        start_policy_btn = None
+        stop_policy_btn = None
+        init_state_btn = None
+        start_motion_clip_btn = None
+
     sub = SimStateSub(port=cfg.state_port)
     sub.start()
     control_pub = SimControlPush(port=cfg.control_port)
     control_pub.start()
+    policy_control_pub = PolicyControlPush(port=cfg.policy_control_port)
+    policy_control_pub.start()
     previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
 
     def _handle_sigterm(_signum, _frame) -> None:
@@ -523,6 +542,12 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         else:
             logger.warning("Reset rollout requested, but sim-control is unavailable")
 
+    def _request_policy_action(action: str, label: str) -> None:
+        if policy_md is not None:
+            policy_md.content = f"Policy control: `{label}`"
+        policy_control_pub.request_action(action, source="viser_mujoco_sim_state")
+        logger.info("Requested policy action '{}' over policy-control", action)
+
     @show_object_cb.on_update
     def _(_evt) -> None:
         _set_object_mesh_visibility(
@@ -555,8 +580,29 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     def _(_evt) -> None:
         _request_sim_reset("gui_reset")
 
+    if start_policy_btn is not None:
+        @start_policy_btn.on_click
+        def _(_evt) -> None:
+            _request_policy_action("start_policy", "start_policy")
+
+    if stop_policy_btn is not None:
+        @stop_policy_btn.on_click
+        def _(_evt) -> None:
+            _request_policy_action("stop_policy", "stop_policy")
+
+    if init_state_btn is not None:
+        @init_state_btn.on_click
+        def _(_evt) -> None:
+            _request_policy_action("init_state", "init_state")
+
+    if start_motion_clip_btn is not None:
+        @start_motion_clip_btn.on_click
+        def _(_evt) -> None:
+            _request_policy_action("start_motion_clip", "start_motion_clip")
+
     logger.info("Open viser at http://localhost:{}", port)
     logger.info("Reading split MuJoCo sim-state from tcp://localhost:{}", cfg.state_port)
+    logger.info("Sending split MuJoCo policy-control to tcp://localhost:{}", cfg.policy_control_port)
     _refresh_rollout_md()
 
     try:
@@ -708,6 +754,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         logger.info("Stopping viser MuJoCo sim-state viewer")
     finally:
         _stop_rollout()
+        policy_control_pub.close()
         control_pub.close()
         sub.close()
         signal.signal(signal.SIGTERM, previous_sigterm_handler)

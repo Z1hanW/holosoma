@@ -27,6 +27,7 @@ from holosoma_inference.utils.math.quat import (
     wxyz_to_xyzw,
     xyzw_to_wxyz,
 )
+from holosoma_inference.utils.perception_obs import PerceptionObsSub
 from holosoma_inference.utils.sim_state import SimStateSub
 
 
@@ -361,6 +362,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._uses_motion_command = any(
             term in obs_terms for term in ("motion_command", "motion_ref_ori_b", "motion_future_target_poses")
         )
+        self._uses_sparse_root_distill = "sparse_target_root_trajectory_command" in obs_terms
+        if self._uses_sparse_root_distill:
+            self._uses_motion_command = True
         self._uses_object_generalist = any(
             term in obs_terms
             for term in (
@@ -382,17 +386,30 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._motion_align_pos: np.ndarray | None = None
         self._onnx_obs_dim: int | None = None
         self._obs_input_name: str | None = None
+        self._perception_input_name: str | None = None
+        self._perception_input_dim: int | None = None
         self._time_step_input_name: str | None = None
         self._action_output_name: str | None = None
         self._onnx_output_fetch: list[str] = []
         self._motion_output_names: set[str] = set()
         self._motion_alignment_enabled = False
+        self._perception_obs_sub: PerceptionObsSub | None = None
+        self._last_perception_obs: np.ndarray | None = None
+        self._logged_waiting_for_perception_obs = False
 
         super().__init__(config)
 
         if self.config.task.use_sim_state:
             self._sim_state_sub = SimStateSub(port=self.config.task.sim_state_port)
             self._sim_state_sub.start()
+
+        if self._perception_input_name is not None:
+            if not bool(getattr(self.config.task, "use_split_perception_obs", False)):
+                raise ValueError(
+                    "Model expects 'perception_obs'; enable --task.use-split-perception-obs for split sim2sim inference."
+                )
+            self._perception_obs_sub = PerceptionObsSub(port=self.config.task.perception_obs_port)
+            self._perception_obs_sub.start()
 
         if self.use_policy_action:
             self._handle_start_policy()
@@ -403,6 +420,11 @@ class WholeBodyTrackingPolicy(BasePolicy):
         else:
             # Fallback to default_dof_angles if not specified
             self._stiff_hold_q = np.array(config.robot.default_dof_angles, dtype=np.float32).reshape(1, -1)
+
+        if bool(getattr(self.config.task, "use_zmq_lowcmd", False)) and self.motion_command_0 is not None:
+            # Split sim resets into the clip start pose; holding that pose keeps the carried
+            # object aligned with the robot before the rollout actually begins.
+            self._stiff_hold_q = self.motion_command_0[:, : self.num_dofs].astype(np.float32, copy=True)
 
         if config.robot.stiff_startup_kp is not None:
             self._stiff_hold_kp = np.array(config.robot.stiff_startup_kp, dtype=np.float32)
@@ -736,7 +758,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
             logger.info(f"Loaded KP/KD from ONNX metadata: {Path(model_path).name}")
 
-        if self._uses_videomimic or self._uses_object_generalist or self._uses_legacy_object_obs:
+        if (
+            self._uses_videomimic
+            or self._uses_object_generalist
+            or self._uses_legacy_object_obs
+            or self._uses_sparse_root_distill
+        ):
             self._load_motion_data_from_metadata(metadata, Path(model_path))
 
         if "obs" in self.onnx_input_names:
@@ -746,6 +773,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         else:
             raise ValueError(f"Unsupported ONNX inputs: {self.onnx_input_names}")
 
+        self._perception_input_name = "perception_obs" if "perception_obs" in self.onnx_input_names else None
+        self._perception_input_dim = self._get_onnx_input_dim(self._perception_input_name)
         self._time_step_input_name = "time_step" if "time_step" in self.onnx_input_names else None
 
         if "actions" in self.onnx_output_names:
@@ -779,6 +808,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
             time_step = np.zeros((1, 1), dtype=np.float32)
             obs = self._build_zero_actor_obs()
             input_feed = {self._obs_input_name: obs}
+            if self._perception_input_name:
+                input_feed[self._perception_input_name] = self._build_zero_perception_obs()
             if self._time_step_input_name:
                 input_feed[self._time_step_input_name] = time_step
             outputs = self.policy(input_feed)
@@ -789,7 +820,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self.ref_pos_xyz_t = outputs.get("ref_pos_xyz")
             self.motion_command_0 = self.motion_command_t.copy()
             self.ref_quat_xyzw_0 = self.ref_quat_xyzw_t.copy()
-        elif (self._uses_videomimic or self._uses_object_generalist or self._uses_legacy_object_obs) and self._motion_data is not None:
+        elif (
+            self._uses_videomimic
+            or self._uses_object_generalist
+            or self._uses_legacy_object_obs
+            or self._uses_sparse_root_distill
+        ) and self._motion_data is not None:
             joint_pos = self._motion_data.joint_pos[:1]
             joint_vel = self._motion_data.joint_vel[:1]
             self.motion_command_t = np.concatenate([joint_pos, joint_vel], axis=1)
@@ -828,6 +864,34 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if obs_dim is None:
             obs_dim = int(sum(int(template.shape[1]) for template in self.obs_buf_dict.values()))
         return np.zeros((1, int(obs_dim)), dtype=np.float32)
+
+    def _build_zero_perception_obs(self) -> np.ndarray:
+        return np.zeros((1, int(self._perception_input_dim or 0)), dtype=np.float32)
+
+    def _get_split_perception_obs(self) -> np.ndarray | None:
+        if self._perception_input_name is None:
+            return None
+        if self._perception_obs_sub is None:
+            return self._last_perception_obs
+
+        payload = self._perception_obs_sub.get_payload()
+        if payload is None:
+            return self._last_perception_obs
+
+        raw_obs = payload.get("perception_obs")
+        if raw_obs is None:
+            return self._last_perception_obs
+
+        perception_obs = np.asarray(raw_obs, dtype=np.float32).reshape(1, -1)
+        expected_dim = self._perception_input_dim
+        if expected_dim is not None and perception_obs.shape[1] != expected_dim:
+            raise ValueError(
+                f"Split perception_obs dim mismatch: expected {expected_dim}, got {perception_obs.shape[1]}"
+            )
+
+        self._last_perception_obs = perception_obs
+        self._logged_waiting_for_perception_obs = False
+        return perception_obs
 
     def _capture_policy_state(self):
         state = super()._capture_policy_state()
@@ -1094,6 +1158,51 @@ class WholeBodyTrackingPolicy(BasePolicy):
         obs.pop("obj_ang_vel_b", None)
         return obs
 
+    def _get_sparse_root_distill_obs_buffer_dict(self, robot_state_data: np.ndarray) -> dict[str, np.ndarray]:
+        if self._motion_data is None:
+            raise ValueError("Motion data is required for sparse-root distill observations.")
+
+        self._maybe_update_motion_alignment(robot_state_data)
+        idx = self._get_motion_index()
+
+        motion_root_pos_w = self._motion_data.root_pos_w[idx : idx + 1].copy()
+        motion_root_quat_wxyz = self._motion_data.root_quat_w[idx : idx + 1].copy()
+        if self._motion_align_quat_wxyz is not None:
+            motion_root_pos_w = self._apply_motion_alignment_pos(motion_root_pos_w)
+            motion_root_quat_wxyz = self._apply_motion_alignment_quat(motion_root_quat_wxyz)
+
+        robot_root_pos_w = np.asarray(robot_state_data[:, :3], dtype=np.float32)
+        robot_root_quat_wxyz = np.asarray(robot_state_data[:, 3:7], dtype=np.float32)
+
+        rel_pos_w = motion_root_pos_w - robot_root_pos_w
+        heading_inv = self._calc_heading_quat_inv(robot_root_quat_wxyz)
+        rel_pos_b = quat_apply(heading_inv, rel_pos_w)
+        target_heading = self._quat_yaw(motion_root_quat_wxyz)
+        robot_heading = self._quat_yaw(robot_root_quat_wxyz)
+        rel_yaw = np.array([[self._normalize_angle(target_heading - robot_heading)]], dtype=np.float32)
+
+        sim_root_state = self._get_sim_root_state()
+        if sim_root_state is not None:
+            root_quat_wxyz = xyzw_to_wxyz(sim_root_state[:, 3:7])
+            base_lin_vel = quat_rotate_inverse(root_quat_wxyz, sim_root_state[:, 7:10])
+            base_ang_vel = quat_rotate_inverse(root_quat_wxyz, sim_root_state[:, 10:13])
+        else:
+            base_lin_vel_world = robot_state_data[:, 7 + self.num_dofs : 7 + self.num_dofs + 3]
+            base_ang_vel_world = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
+            base_lin_vel = quat_rotate_inverse(robot_root_quat_wxyz, base_lin_vel_world)
+            base_ang_vel = quat_rotate_inverse(robot_root_quat_wxyz, base_ang_vel_world)
+
+        return {
+            "sparse_target_root_trajectory_command": np.concatenate([rel_pos_b[:, :2], rel_yaw], axis=1).astype(
+                np.float32, copy=False
+            ),
+            "base_lin_vel": base_lin_vel.astype(np.float32, copy=False),
+            "base_ang_vel": base_ang_vel.astype(np.float32, copy=False),
+            "dof_pos": robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles,
+            "dof_vel": robot_state_data[:, 7 + self.num_dofs + 6 : 7 + self.num_dofs + 6 + self.num_dofs],
+            "actions": self.last_policy_action,
+        }
+
     def _get_videomimic_obs_buffer_dict(self, robot_state_data):
         if self._motion_data is None:
             raise ValueError("Motion data is required for VideoMimic observations.")
@@ -1149,6 +1258,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         robot_state_data = self._augment_robot_state_with_sim_state(robot_state_data)
         if self._uses_videomimic:
             return self._get_videomimic_obs_buffer_dict(robot_state_data)
+        if self._uses_sparse_root_distill:
+            return self._get_sparse_root_distill_obs_buffer_dict(robot_state_data)
         if self._uses_object_generalist:
             return self._get_object_generalist_obs_buffer_dict(robot_state_data)
         if self._uses_legacy_object_obs:
@@ -1189,9 +1300,24 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self.motion_timestep = 0
             self.motion_start_timestep = None
             self._last_clock_reading = None
+            hold_q = self.motion_command_0[:, : self.num_dofs].astype(np.float32, copy=False)
+            hold_offset = hold_q - self.default_dof_angles.reshape(1, -1)
+            self.last_policy_action.fill(0.0)
+            self.scaled_policy_action = hold_offset.astype(np.float32, copy=True)
+            return self.scaled_policy_action
 
         obs = self.prepare_obs_for_rl(robot_state_data)
         input_feed = {self._obs_input_name: obs["actor_obs"]}
+        if self._perception_input_name:
+            perception_obs = self._get_split_perception_obs()
+            if perception_obs is None:
+                if not self._logged_waiting_for_perception_obs:
+                    self.logger.info("Waiting for first split perception obs; holding zero action.")
+                    self._logged_waiting_for_perception_obs = True
+                self.last_policy_action.fill(0.0)
+                self.scaled_policy_action.fill(0.0)
+                return self.scaled_policy_action
+            input_feed[self._perception_input_name] = perception_obs
         if self._time_step_input_name:
             input_feed[self._time_step_input_name] = np.array([[self.motion_timestep]], dtype=np.float32)
         outputs = self.policy(input_feed)
@@ -1226,11 +1352,28 @@ class WholeBodyTrackingPolicy(BasePolicy):
         # just use the motor_kp/motor_kd when calling it in _fill_motor_commands
         if not self._stiff_hold_active:
             return None
+        hold_q = self._stiff_hold_q.copy()
+        if (
+            bool(getattr(self.config.task, "use_zmq_lowcmd", False))
+            and self.motion_command_0 is not None
+            and not self.motion_clip_progressing
+        ):
+            hold_q = self.motion_command_0[:, : self.num_dofs].astype(np.float32, copy=True)
         return {
-            "q": self._stiff_hold_q.copy(),
+            "q": hold_q,
             "kp": self._stiff_hold_kp,
             "kd": self._stiff_hold_kd,
         }
+
+    def _can_finish_pending_policy_start(self, robot_state_data: np.ndarray) -> bool:  # noqa: ARG002
+        if self._perception_input_name is None:
+            return True
+        if self._get_split_perception_obs() is not None:
+            return True
+        if not self._logged_waiting_for_perception_obs:
+            self.logger.info("Waiting for split perception obs before enabling policy actions.")
+            self._logged_waiting_for_perception_obs = True
+        return False
 
     def _after_auto_start_policy(self) -> None:
         if self._auto_start_motion_clip_pending:
@@ -1296,9 +1439,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.use_policy_action = False
         self.get_ready_state = False
         self._stiff_hold_active = True
-        self.logger.info("Actions set to stiff startup command")
+        robot_state_data = self.interface.get_low_state()
+        if robot_state_data is not None and robot_state_data.shape[1] >= 7 + self.num_dofs:
+            self._stiff_hold_q = robot_state_data[:, 7 : 7 + self.num_dofs].astype(np.float32, copy=True)
+        self.logger.info("Actions set to hold current pose")
         if hasattr(self.interface, "no_action"):
-            self.interface.no_action = 0
+            self.interface.no_action = 1 if bool(getattr(self.config.task, "use_zmq_lowcmd", False)) else 0
 
         self.motion_clip_progressing = False
         self.motion_timestep = 0

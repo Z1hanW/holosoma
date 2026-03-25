@@ -31,6 +31,7 @@ from holosoma_inference.sdk.interface_wrapper import InterfaceWrapper
 from holosoma_inference.sdk.zmq_interface_wrapper import ZmqSimInterfaceWrapper
 from holosoma_inference.utils.latency import LatencyTracker
 from holosoma_inference.utils.math.quat import quat_rotate_inverse
+from holosoma_inference.utils.policy_control import PolicyControlPull
 from holosoma_inference.utils.rate import RateLimiter
 from holosoma_inference.utils.wandb import load_checkpoint
 
@@ -144,9 +145,11 @@ class BasePolicy:
         self.obs_history_buffers: dict[str, dict[str, deque[np.ndarray]]] = {}
         self.obs_terms_sorted: dict[str, list[str]] = {}
         self.obs_buf_dict: dict[str, np.ndarray] = {}
+        self._obs_group_order: list[str] = list(self.obs_dict.keys())
 
         for group, term_names in self.obs_dict.items():
-            self.obs_terms_sorted[group] = sorted(term_names)
+            # Preserve the declared config order so flattened observations match training.
+            self.obs_terms_sorted[group] = list(term_names)
             history_len = self.history_length_dict.get(group, 1)
             self.obs_history_buffers[group] = {}
             flattened_terms: list[np.ndarray] = []
@@ -174,6 +177,11 @@ class BasePolicy:
                 self.config.task.interface,
                 self.config.task.use_joystick,
             )
+        self._policy_control_sub: PolicyControlPull | None = None
+        policy_control_port = int(getattr(self.config.task, "policy_control_port", 0) or 0)
+        if policy_control_port > 0:
+            self._policy_control_sub = PolicyControlPull(port=policy_control_port)
+            self._policy_control_sub.start()
 
     def _init_policy_components(self, model_path, policy_action_scale, rl_rate):
         """Initialize policy-related components."""
@@ -398,6 +406,13 @@ class BasePolicy:
         if not sys.stdin.isatty():
             self.logger.warning("Not running in a TTY environment - keyboard input disabled")
             self.logger.warning("This is normal for automated tests or non-interactive environments")
+            if int(getattr(self.config.task, "policy_control_port", 0) or 0) > 0:
+                self.logger.info("Policy-control channel is available; waiting for manual viewer actions.")
+                self._pending_noninteractive_policy_start = False
+                self.use_policy_action = False
+                if hasattr(self.interface, "no_action"):
+                    self.interface.no_action = 1
+                return
             if self.config.task.defer_policy_start_until_valid_state:
                 self.logger.info("Deferring policy auto-start until a valid robot state is received")
                 self._pending_noninteractive_policy_start = True
@@ -670,16 +685,13 @@ class BasePolicy:
 
     def _assemble_actor_obs(self, group_outputs: dict[str, np.ndarray]) -> np.ndarray:
         """Concatenate actor observation groups to match training input ordering."""
-        actor_groups: list[str] = []
-        if "actor_obs" in group_outputs:
-            actor_groups.append("actor_obs")
-        for group in ("actor_obs_target", "motion_future_target_poses"):
-            if group in group_outputs:
-                actor_groups.append(group)
-        extra_groups = sorted(
-            group for group in group_outputs if group.startswith("actor_obs") and group not in actor_groups
-        )
-        actor_groups.extend(extra_groups)
+        actor_groups = [
+            group
+            for group in self._obs_group_order
+            if group in group_outputs and (group == "actor_obs" or group.startswith("actor_obs"))
+        ]
+        if "motion_future_target_poses" in group_outputs:
+            actor_groups.append("motion_future_target_poses")
 
         if not actor_groups:
             raise KeyError("Observation group 'actor_obs' is not configured for this policy.")
@@ -945,6 +957,36 @@ class BasePolicy:
             )
             self.logger.info(debug_str)
 
+    def _process_policy_control_requests(self):
+        """Process viewer-driven policy control requests."""
+        if self._policy_control_sub is None:
+            return
+
+        for payload in self._policy_control_sub.drain():
+            action = str(payload.get("action", "")).strip().lower()
+            if not action:
+                continue
+
+            if action == "start_policy":
+                self._handle_start_policy()
+            elif action == "stop_policy":
+                self._handle_stop_policy()
+            elif action == "init_state":
+                self._handle_init_state()
+            elif action == "start_motion_clip":
+                start_motion_handler = getattr(self, "_handle_start_motion_clip", None)
+                if callable(start_motion_handler):
+                    start_motion_handler()
+                else:
+                    self.logger.warning("Policy control action '{}' is not supported by this policy", action)
+                    continue
+            else:
+                self.logger.warning("Ignoring unknown policy control action '{}'", action)
+                continue
+
+            self.logger.info("Applied policy control action '{}'", action)
+            self._print_control_status()
+
     # ============================================================================
     # Main Run Method
     # ============================================================================
@@ -964,6 +1006,7 @@ class BasePolicy:
 
             for it in itertools.count():
                 self.latency_tracker.start_cycle()
+                self._process_policy_control_requests()
 
                 if self.use_joystick and self.interface.get_joystick_msg() is not None:
                     self.process_joystick_input()
@@ -982,3 +1025,6 @@ class BasePolicy:
 
         except KeyboardInterrupt:
             pass
+        finally:
+            if self._policy_control_sub is not None:
+                self._policy_control_sub.close()

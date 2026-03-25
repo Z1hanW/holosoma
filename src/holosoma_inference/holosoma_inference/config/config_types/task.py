@@ -78,8 +78,17 @@ class TaskConfig:
     sim_state_port: int = 5557
     """ZMQ port used to receive split sim2sim simulator state."""
 
+    use_split_perception_obs: bool = False
+    """Subscribe to split simulator perception observations for models that expect perception_obs."""
+
+    perception_obs_port: int = 5558
+    """ZMQ port used to receive split sim2sim perception observations."""
+
     sim_control_port: int = 5559
     """ZMQ port used to send split sim2sim simulator control requests."""
+
+    policy_control_port: int = 0
+    """Optional ZMQ port used to receive split sim2sim policy control requests from viewer tools."""
 
     use_zmq_lowcmd: bool = False
     """Send lowcmd over the split sim-control ZMQ channel instead of Unitree DDS."""

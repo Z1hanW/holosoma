@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import traceback
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -562,6 +563,21 @@ class DirectSimulation:
                 )
             return
 
+        perception_cfg = self.config.perception
+        device_type = torch.device(str(self.device)).type
+        if (
+            get_simulator_type() == SimulatorType.MUJOCO
+            and perception_cfg.output_mode == "camera_depth"
+            and perception_cfg.camera_source == "far_tracking_warp"
+            and device_type != "cuda"
+        ):
+            logger.warning(
+                "Split sim perception requested camera_source=far_tracking_warp on device={} for MuJoCo; "
+                "falling back to camera_source=rendered because the bundled warp sensor requires CUDA.",
+                self.device,
+            )
+            perception_cfg = replace(perception_cfg, camera_source="rendered")
+
         self._perception_env_proxy = _DirectPerceptionEnvProxy(
             simulator=self.simulator,
             terrain_manager=self.simulator.terrain_manager,
@@ -569,14 +585,14 @@ class DirectSimulation:
             dt=float(self.simulator.sim_dt),
             device=self.device,
         )
-        self._perception_manager = PerceptionManager(self.config.perception, self._perception_env_proxy, self.device)
+        self._perception_manager = PerceptionManager(perception_cfg, self._perception_env_proxy, self.device)
         self._perception_manager.setup()
         self._perception_manager.reset()
         self._perception_manager.update()
         logger.info(
             "Split sim perception initialized: mode={} camera_source={}",
-            self.config.perception.output_mode,
-            self.config.perception.camera_source,
+            perception_cfg.output_mode,
+            perception_cfg.camera_source,
         )
 
         if wants_publish:

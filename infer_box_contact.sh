@@ -8,7 +8,8 @@ set -euo pipefail
 # - command-curriculum extend checkpoints (sparse-goal capable)
 #
 # The script is checkpoint-driven:
-# - if no checkpoint is provided, it uses the pinned default checkpoint below
+# - if no checkpoint is provided, it prefers the latest local command-curriculum checkpoint
+# - if none is found, it falls back to the optional pinned checkpoint below
 # - motion/object defaults come from the checkpoint's serialized experiment_config
 # - runtime mode can override sparse-goal eval behavior when the checkpoint supports it
 #
@@ -32,8 +33,9 @@ Examples:
   bash infer_box_contact.sh manual /abs/path/to/model.pt
   bash infer_box_contact.sh goal https://wandb.ai/zihanw22/boxer/runs/abcdef12
 
-Default checkpoint:
-  wandb://zihanw22/boxer/s221l5eo/model_03999.pt
+Default checkpoint resolution:
+  1. Latest local g1_29dof_wbt_w_object_command_curriculum checkpoint
+  2. FALLBACK_CHECKPOINT_REF, if configured
 
 Optional env vars:
   CHECKPOINT / CKPT             Optional checkpoint override
@@ -73,7 +75,7 @@ cd "${SCRIPT_DIR}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 LOGGER_BASE_DIR="${LOGGER_BASE_DIR:-/data/logs_new}"
 WANDB_PROJECT="${WANDB_PROJECT:-boxer}"
-DEFAULT_CHECKPOINT_REF="wandb://zihanw22/boxer/s221l5eo/model_03999.pt"
+FALLBACK_CHECKPOINT_REF="${FALLBACK_CHECKPOINT_REF:-}"
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
@@ -255,7 +257,7 @@ print(str(Path(sys.argv[1]).expanduser().resolve()))
 PY
 }
 
-find_latest_extend_checkpoint() {
+find_latest_command_curriculum_checkpoint() {
   LOGGER_BASE_DIR="${LOGGER_BASE_DIR}" WANDB_PROJECT="${WANDB_PROJECT}" "${PYTHON_BIN}" - <<'PY'
 import os
 import re
@@ -265,13 +267,46 @@ base = Path(os.environ["LOGGER_BASE_DIR"]) / os.environ["WANDB_PROJECT"]
 if not base.is_dir():
     raise SystemExit(0)
 
-name_pattern = re.compile(r"g1_29dof_wbt_w_object_(extend|command_curriculum)")
+name_pattern = re.compile(r"g1_29dof_wbt_w_object_command_curriculum")
 dirs = []
 for path in base.iterdir():
     if not path.is_dir():
         continue
     name = path.name
     if "-eval" in name or "smoke" in name:
+        continue
+    if not name_pattern.search(name):
+        continue
+    models = sorted(path.glob("model_*.pt"))
+    if not models:
+        continue
+    dirs.append((path.stat().st_mtime, path, models))
+
+if not dirs:
+    raise SystemExit(0)
+
+_mtime, run_dir, models = max(dirs, key=lambda item: item[0])
+print(str(models[-1]))
+PY
+}
+
+find_latest_command_curriculum_checkpoint_including_smoke() {
+  LOGGER_BASE_DIR="${LOGGER_BASE_DIR}" WANDB_PROJECT="${WANDB_PROJECT}" "${PYTHON_BIN}" - <<'PY'
+import os
+import re
+from pathlib import Path
+
+base = Path(os.environ["LOGGER_BASE_DIR"]) / os.environ["WANDB_PROJECT"]
+if not base.is_dir():
+    raise SystemExit(0)
+
+name_pattern = re.compile(r"g1_29dof_wbt_w_object_command_curriculum")
+dirs = []
+for path in base.iterdir():
+    if not path.is_dir():
+        continue
+    name = path.name
+    if "-eval" in name:
         continue
     if not name_pattern.search(name):
         continue
@@ -375,6 +410,7 @@ command_capable = sparse_goal_enabled and any(
         "actor_obs_goal",
         "actor_obs_mode",
         "actor_obs_drop",
+        "actor_obs_drop_command",
         "actor_obs_drop_mixed",
         "actor_obs_root",
         "actor_obs_torso",
@@ -416,8 +452,22 @@ if [[ $# -gt 0 ]]; then
 fi
 
 if [[ -z "${CHECKPOINT}" ]]; then
-  CHECKPOINT="${DEFAULT_CHECKPOINT_REF}"
-  echo "[INFO] Using default checkpoint: ${CHECKPOINT}"
+  CHECKPOINT="$(find_latest_command_curriculum_checkpoint || true)"
+  if [[ -n "${CHECKPOINT}" ]]; then
+    echo "[INFO] Using latest local command-curriculum checkpoint: ${CHECKPOINT}"
+  else
+    CHECKPOINT="$(find_latest_command_curriculum_checkpoint_including_smoke || true)"
+    if [[ -n "${CHECKPOINT}" ]]; then
+      echo "[INFO] No non-smoke command-curriculum checkpoint found; using latest local smoke checkpoint: ${CHECKPOINT}"
+    elif [[ -n "${FALLBACK_CHECKPOINT_REF}" ]]; then
+      CHECKPOINT="${FALLBACK_CHECKPOINT_REF}"
+      echo "[INFO] Using fallback checkpoint: ${CHECKPOINT}"
+    else
+      echo "[ERROR] No local command-curriculum checkpoint found under ${LOGGER_BASE_DIR}/${WANDB_PROJECT}." >&2
+      echo "[ERROR] Pass a checkpoint explicitly or set FALLBACK_CHECKPOINT_REF." >&2
+      exit 1
+    fi
+  fi
 fi
 
 if [[ "${CHECKPOINT}" == https://wandb.ai/*/runs/* ]]; then

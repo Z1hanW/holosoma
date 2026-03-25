@@ -1544,7 +1544,11 @@ class ViserLiveViewer:
 
         if hasattr(obs_mgr, "compute_group"):
             sparse_goal_enabled = bool(getattr(motion_cmd, "_sparse_goal_curriculum_enabled", False))
-            group_names = ("actor_obs_drop_mixed", "actor_obs_drop") if sparse_goal_enabled else ("actor_obs_drop",)
+            group_names = (
+                ("actor_obs_drop_command", "actor_obs_drop_mixed", "actor_obs_drop")
+                if sparse_goal_enabled
+                else ("actor_obs_drop",)
+            )
             for group_name in group_names:
                 try:
                     obs = obs_mgr.compute_group(group_name)

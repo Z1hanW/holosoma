@@ -52,10 +52,17 @@ NPROC=${NPROC:-$(awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}")}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
 PHYSX_GPU_MAX_RIGID_PATCH_COUNT=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT:-655360}
 
-DEFAULT_EXP=g1-29dof-wbt-w-object-extend
+LEGACY_DEFAULT_EXP=g1-29dof-wbt-w-object-extend
 COMMAND_CURRICULUM_DEFAULT_EXP=g1-29dof-wbt-w-object-command-curriculum
-DEFAULT_TRAINING_NAME=g1_29dof_wbt_w_object_extend
+DEFAULT_EXP=${DEFAULT_EXP:-${COMMAND_CURRICULUM_DEFAULT_EXP}}
+LEGACY_DEFAULT_TRAINING_NAME=g1_29dof_wbt_w_object_extend
 COMMAND_CURRICULUM_DEFAULT_TRAINING_NAME=g1_29dof_wbt_w_object_command_curriculum
+DEFAULT_TRAINING_NAME=${DEFAULT_TRAINING_NAME:-${COMMAND_CURRICULUM_DEFAULT_TRAINING_NAME}}
+
+EXP_FROM_ENV=0
+[[ -n "${EXP+x}" ]] && EXP_FROM_ENV=1
+TRAINING_NAME_FROM_ENV=0
+[[ -n "${TRAINING_NAME+x}" ]] && TRAINING_NAME_FROM_ENV=1
 
 EXP=${EXP:-${DEFAULT_EXP}}
 WANDB_PROJECT=${WANDB_PROJECT:-boxer}
@@ -93,7 +100,7 @@ SAVE_INTERVAL=${SAVE_INTERVAL:-1500}
 NUM_ITERS=${NUM_ITERS:-""}
 CHECKPOINT=${CHECKPOINT:-""}
 
-COMMAND_CURRICULUM_MODE=${COMMAND_CURRICULUM_MODE:-0}
+COMMAND_CURRICULUM_MODE=${COMMAND_CURRICULUM_MODE:-1}
 COMMAND_CURRICULUM_PERCEPTION_INTO_POLICY_MODULES=${COMMAND_CURRICULUM_PERCEPTION_INTO_POLICY_MODULES:-True}
 COMMAND_CURRICULUM_MAX_EPISODE_LENGTH_S=${COMMAND_CURRICULUM_MAX_EPISODE_LENGTH_S:-12.0}
 COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_START=${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_START:-0.0}
@@ -406,13 +413,23 @@ apply_command_curriculum_defaults() {
     return
   fi
 
-  if [[ "${EXP}" == "${DEFAULT_EXP}" ]]; then
+  if [[ "${EXP_FROM_ENV}" == "1" && "${EXP}" == "${LEGACY_DEFAULT_EXP}" ]]; then
+    echo "[ERROR] COMMAND_CURRICULUM_MODE is enabled, but EXP was explicitly set to legacy extend: '${EXP}'." >&2
+    echo "[ERROR] Remove EXP or set EXP='${COMMAND_CURRICULUM_DEFAULT_EXP}'." >&2
+    exit 2
+  fi
+  if [[ "${EXP}" == "${LEGACY_DEFAULT_EXP}" ]]; then
     EXP="${COMMAND_CURRICULUM_DEFAULT_EXP}"
   fi
-  if [[ "${TRAINING_NAME}" == "${DEFAULT_TRAINING_NAME}" ]]; then
+  if [[ "${TRAINING_NAME_FROM_ENV}" == "1" && "${TRAINING_NAME}" == "${LEGACY_DEFAULT_TRAINING_NAME}" ]]; then
+    echo "[ERROR] COMMAND_CURRICULUM_MODE is enabled, but TRAINING_NAME was explicitly set to legacy extend: '${TRAINING_NAME}'." >&2
+    echo "[ERROR] Remove TRAINING_NAME or use a command-curriculum training name." >&2
+    exit 2
+  fi
+  if [[ "${TRAINING_NAME}" == "${LEGACY_DEFAULT_TRAINING_NAME}" ]]; then
     TRAINING_NAME="${COMMAND_CURRICULUM_DEFAULT_TRAINING_NAME}"
   fi
-  if [[ "${RUN_GROUP}" == "${DEFAULT_TRAINING_NAME}_${RUN_TAG}" ]]; then
+  if [[ "${RUN_GROUP}" == "${LEGACY_DEFAULT_TRAINING_NAME}_${RUN_TAG}" ]]; then
     RUN_GROUP="${TRAINING_NAME}_${RUN_TAG}"
   fi
   if [[ "${PERCEPTION}" == "none" ]]; then
@@ -423,6 +440,12 @@ apply_command_curriculum_defaults() {
 validate_command_curriculum_configuration() {
   if ! is_truthy "${COMMAND_CURRICULUM_MODE}"; then
     return
+  fi
+
+  if [[ "${EXP}" != "${COMMAND_CURRICULUM_DEFAULT_EXP}" ]]; then
+    echo "[ERROR] COMMAND_CURRICULUM_MODE requires EXP='${COMMAND_CURRICULUM_DEFAULT_EXP}'. Got EXP='${EXP}'." >&2
+    echo "[ERROR] Set EXP='${COMMAND_CURRICULUM_DEFAULT_EXP}' or disable COMMAND_CURRICULUM_MODE for legacy extend." >&2
+    exit 2
   fi
 
   if [[ -n "${SCALE_CURRICULUM_STAGES}" || -n "${PROFILE_BLEND_STAGES}" ]]; then

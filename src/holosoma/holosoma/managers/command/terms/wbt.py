@@ -21,6 +21,7 @@ from holosoma.utils.path import resolve_data_file_path
 from holosoma.utils.object_geometry import load_urdf_geometry_extents
 from holosoma.utils.rotations import (
     get_euler_xyz,
+    normalize_angle,
     quat_apply,
     quat_conjugate,
     quat_error_magnitude,
@@ -2318,6 +2319,11 @@ class MotionCommand(CommandTermBase):
         self.pickup_consecutive_counter[prime_env_ids] = _RUNTIME_PICKUP_CONSECUTIVE_STEPS
         self.pickup_anchor_root_pos_w[prime_env_ids] = root_pos_w[already_picked_mask]
         self.pickup_anchor_root_quat_w[prime_env_ids] = root_quat_w[already_picked_mask]
+        self._apply_manual_goal_world_from_command(
+            prime_env_ids,
+            anchor_pos_w=root_pos_w[already_picked_mask],
+            anchor_quat_w=root_quat_w[already_picked_mask],
+        )
 
     def _update_pickup_anchor_state(self) -> None:
         if (
@@ -2346,6 +2352,11 @@ class MotionCommand(CommandTermBase):
         self.pickup_anchor_set[newly_picked] = True
         self.pickup_anchor_root_pos_w[newly_picked] = self.robot_root_pos_w[newly_picked]
         self.pickup_anchor_root_quat_w[newly_picked] = self.robot_root_quat_w[newly_picked]
+        self._apply_manual_goal_world_from_command(
+            torch.nonzero(newly_picked, as_tuple=False).view(-1),
+            anchor_pos_w=self.robot_root_pos_w[newly_picked],
+            anchor_quat_w=self.robot_root_quat_w[newly_picked],
+        )
 
     def _update_contact_prior_state(self) -> None:
         if (
@@ -2504,6 +2515,88 @@ class MotionCommand(CommandTermBase):
             goal_pos_w = goal_pos_w + self._get_env_offsets(env_ids)
         return goal_pos_w, goal_quat_w
 
+    def _sample_clip_pickup_anchor_pose_w(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        pickup_steps = self._get_clip_pickup_steps_by_clip()[self.clip_ids[env_ids]]
+        pickup_motion_idx = self._get_motion_indices(pickup_steps, env_ids=env_ids)
+
+        anchor_pos_w = self.motion.body_pos_w[pickup_motion_idx, 0]
+        anchor_quat_w = self.motion.body_quat_w[pickup_motion_idx, 0]
+        if self.motion_cfg.align_motion_to_init_yaw:
+            anchor_pos_w = self._apply_motion_alignment_pos_subset(anchor_pos_w, env_ids)
+            anchor_quat_w = self._apply_motion_alignment_quat_subset(anchor_quat_w, env_ids)
+        else:
+            anchor_pos_w = anchor_pos_w + self._get_env_offsets(env_ids)
+        return anchor_pos_w, anchor_quat_w
+
+    def _goal_command_from_world(
+        self,
+        goal_pos_w: torch.Tensor,
+        goal_quat_w: torch.Tensor,
+        *,
+        anchor_pos_w: torch.Tensor,
+        anchor_quat_w: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        anchor_heading_quat = yaw_quat(anchor_quat_w, w_last=True)
+        anchor_heading_inv = quat_inverse(anchor_heading_quat, w_last=True)
+        goal_pos_heading = quat_apply(anchor_heading_inv, goal_pos_w - anchor_pos_w, w_last=True)
+        goal_rot_mat_w = quaternion_to_matrix(goal_quat_w, w_last=True)
+        goal_heading = torch.atan2(goal_rot_mat_w[:, 1, 0], goal_rot_mat_w[:, 0, 0])
+        _, _, anchor_heading = get_euler_xyz(anchor_heading_quat, w_last=True)
+        goal_yaw_rel = normalize_angle(goal_heading - anchor_heading)
+        return goal_pos_heading[:, :2], goal_yaw_rel
+
+    def _goal_world_from_command(
+        self,
+        env_ids: torch.Tensor,
+        *,
+        anchor_pos_w: torch.Tensor,
+        anchor_quat_w: torch.Tensor,
+        goal_xy_rel: torch.Tensor | None = None,
+        goal_yaw_rel: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.manual_goal_xy_rel is None or self.manual_goal_yaw_rel is None:
+            raise RuntimeError("Manual goal command buffers are not initialized.")
+        if goal_xy_rel is None:
+            goal_xy_rel = self.manual_goal_xy_rel[env_ids]
+        if goal_yaw_rel is None:
+            goal_yaw_rel = self.manual_goal_yaw_rel[env_ids, 0]
+
+        anchor_heading_quat = yaw_quat(anchor_quat_w, w_last=True)
+        rel_goal_pos = torch.zeros((env_ids.numel(), 3), device=self.device, dtype=torch.float32)
+        rel_goal_pos[:, :2] = goal_xy_rel
+        goal_pos_w = anchor_pos_w + quat_apply(anchor_heading_quat, rel_goal_pos, w_last=True)
+        goal_pos_w[:, 2] = self._ground_resting_object_center_z(env_ids)
+
+        _, _, anchor_heading = get_euler_xyz(anchor_heading_quat, w_last=True)
+        goal_heading = anchor_heading + goal_yaw_rel
+        zeros = torch.zeros_like(goal_heading)
+        goal_quat_w = quat_from_euler_xyz(zeros, zeros, goal_heading)
+        goal_rot_mat_w = quaternion_to_matrix(goal_quat_w, w_last=True)
+        goal_rot6d_w = goal_rot_mat_w[..., :2].reshape(goal_rot_mat_w.shape[0], 6)
+        return goal_pos_w, goal_quat_w, goal_rot6d_w
+
+    def _apply_manual_goal_world_from_command(
+        self,
+        env_ids: torch.Tensor,
+        *,
+        anchor_pos_w: torch.Tensor,
+        anchor_quat_w: torch.Tensor,
+    ) -> None:
+        # Materialize the fixed pickup-frame command into a world-space goal using
+        # the currently latched pickup anchor (or a preview anchor during reset).
+        if self.manual_goal_object_pos_w is None or self.manual_goal_object_rot6d_w is None:
+            return
+        if env_ids.numel() == 0:
+            return
+        goal_pos_w, _goal_quat_w, goal_rot6d_w = self._goal_world_from_command(
+            env_ids,
+            anchor_pos_w=anchor_pos_w,
+            anchor_quat_w=anchor_quat_w,
+        )
+        self.manual_goal_enabled = True
+        self.manual_goal_object_pos_w[env_ids] = goal_pos_w
+        self.manual_goal_object_rot6d_w[env_ids] = goal_rot6d_w
+
     def _sample_external_object_goal_pose_w(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self._sparse_goal_cfg is None:
             raise RuntimeError("Sparse goal config is not initialized.")
@@ -2546,6 +2639,47 @@ class MotionCommand(CommandTermBase):
         rpy = rpy_lo.unsqueeze(0) + (rpy_hi - rpy_lo).unsqueeze(0) * torch.rand((num_samples, 3), device=self.device)
         goal_quat_w = quat_from_euler_xyz(rpy[:, 0], rpy[:, 1], rpy[:, 2])
         return goal_pos_w, goal_quat_w
+
+    def _sample_external_goal_command(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._sparse_goal_cfg is None:
+            raise RuntimeError("Sparse goal config is not initialized.")
+
+        num_samples = env_ids.numel()
+        progress = self._sparse_goal_curriculum_progress()
+        pos_min = self._goal_vec3_interp(
+            self._sparse_goal_cfg.external_goal_pos_local_min,
+            name="external_goal_pos_local_min",
+            start_values=self._sparse_goal_cfg.external_goal_pos_local_min_start,
+            alpha=progress,
+        )
+        pos_max = self._goal_vec3_interp(
+            self._sparse_goal_cfg.external_goal_pos_local_max,
+            name="external_goal_pos_local_max",
+            start_values=self._sparse_goal_cfg.external_goal_pos_local_max_start,
+            alpha=progress,
+        )
+        pos_lo = torch.minimum(pos_min, pos_max)
+        pos_hi = torch.maximum(pos_min, pos_max)
+        goal_xy_rel = pos_lo[:2].unsqueeze(0) + (pos_hi[:2] - pos_lo[:2]).unsqueeze(0) * torch.rand(
+            (num_samples, 2), device=self.device
+        )
+
+        rpy_min = self._goal_vec3_interp(
+            self._sparse_goal_cfg.external_goal_rpy_min,
+            name="external_goal_rpy_min",
+            start_values=self._sparse_goal_cfg.external_goal_rpy_min_start,
+            alpha=progress,
+        )
+        rpy_max = self._goal_vec3_interp(
+            self._sparse_goal_cfg.external_goal_rpy_max,
+            name="external_goal_rpy_max",
+            start_values=self._sparse_goal_cfg.external_goal_rpy_max_start,
+            alpha=progress,
+        )
+        yaw_lo = torch.minimum(rpy_min[2], rpy_max[2])
+        yaw_hi = torch.maximum(rpy_min[2], rpy_max[2])
+        goal_yaw_rel = yaw_lo + (yaw_hi - yaw_lo) * torch.rand((num_samples,), device=self.device)
+        return goal_xy_rel, goal_yaw_rel
 
     def _sample_carry_extension_object_goal_pose_w(
         self,
@@ -2679,13 +2813,27 @@ class MotionCommand(CommandTermBase):
             return
         if not self.motion.has_object:
             return
-        if self.manual_goal_object_pos_w is None or self.manual_goal_object_rot6d_w is None:
+        if (
+            self.manual_goal_object_pos_w is None
+            or self.manual_goal_object_rot6d_w is None
+            or self.manual_goal_xy_rel is None
+            or self.manual_goal_yaw_rel is None
+        ):
             return
 
         self.manual_goal_enabled = True
-        goal_pos_w, goal_quat_w = self._sample_clip_based_object_goal_pose_w(env_ids, clip_lengths)
-        clip_goal_pos_w = goal_pos_w.clone()
-        clip_goal_quat_w = goal_quat_w.clone()
+        clip_goal_pos_w, clip_goal_quat_w = self._sample_clip_based_object_goal_pose_w(env_ids, clip_lengths)
+        clip_pickup_anchor_pos_w, clip_pickup_anchor_quat_w = self._sample_clip_pickup_anchor_pose_w(env_ids)
+        goal_xy_rel, goal_yaw_rel = self._goal_command_from_world(
+            clip_goal_pos_w,
+            clip_goal_quat_w,
+            anchor_pos_w=clip_pickup_anchor_pos_w,
+            anchor_quat_w=clip_pickup_anchor_quat_w,
+        )
+        # Keep a preview world goal for reset/debug buffers; once pickup is latched,
+        # `_apply_manual_goal_world_from_command` rematerializes it from the actual anchor.
+        preview_goal_pos_w = clip_goal_pos_w.clone()
+        preview_goal_quat_w = clip_goal_quat_w.clone()
 
         p_command = self._current_command_only_env_prob()
         p_carry = self._current_carry_extension_prob()
@@ -2706,28 +2854,47 @@ class MotionCommand(CommandTermBase):
                 env_ids[carry_extension_mask],
                 clip_lengths[carry_extension_mask],
             )
-            goal_pos_w[carry_extension_mask] = carry_pos_w
-            goal_quat_w[carry_extension_mask] = carry_quat_w
+            carry_xy_rel, carry_yaw_rel = self._goal_command_from_world(
+                carry_pos_w,
+                carry_quat_w,
+                anchor_pos_w=clip_pickup_anchor_pos_w[carry_extension_mask],
+                anchor_quat_w=clip_pickup_anchor_quat_w[carry_extension_mask],
+            )
+            goal_xy_rel[carry_extension_mask] = carry_xy_rel
+            goal_yaw_rel[carry_extension_mask] = carry_yaw_rel
+            preview_goal_pos_w[carry_extension_mask] = carry_pos_w
+            preview_goal_quat_w[carry_extension_mask] = carry_quat_w
         if external_mask.any():
-            ext_pos_w, ext_quat_w = self._sample_external_object_goal_pose_w(env_ids[external_mask])
-            goal_pos_w[external_mask] = ext_pos_w
-            goal_quat_w[external_mask] = ext_quat_w
+            ext_xy_rel, ext_yaw_rel = self._sample_external_goal_command(env_ids[external_mask])
+            goal_xy_rel[external_mask] = ext_xy_rel
+            goal_yaw_rel[external_mask] = ext_yaw_rel
+            ext_preview_pos_w, ext_preview_quat_w, _ext_preview_rot6d_w = self._goal_world_from_command(
+                env_ids[external_mask],
+                anchor_pos_w=clip_pickup_anchor_pos_w[external_mask],
+                anchor_quat_w=clip_pickup_anchor_quat_w[external_mask],
+                goal_xy_rel=ext_xy_rel,
+                goal_yaw_rel=ext_yaw_rel,
+            )
+            preview_goal_pos_w[external_mask] = ext_preview_pos_w
+            preview_goal_quat_w[external_mask] = ext_preview_quat_w
 
         clip_goal_rot_mat = quaternion_to_matrix(clip_goal_quat_w, w_last=True)
         clip_goal_rot6d_w = clip_goal_rot_mat[..., :2].reshape(clip_goal_rot_mat.shape[0], 6)
-        goal_rot_mat = quaternion_to_matrix(goal_quat_w, w_last=True)
+        goal_rot_mat = quaternion_to_matrix(preview_goal_quat_w, w_last=True)
         goal_rot6d_w = goal_rot_mat[..., :2].reshape(goal_rot_mat.shape[0], 6)
         if self.clip_goal_object_pos_w is not None:
             self.clip_goal_object_pos_w[env_ids] = clip_goal_pos_w
         if self.clip_goal_object_rot6d_w is not None:
             self.clip_goal_object_rot6d_w[env_ids] = clip_goal_rot6d_w
         if self.base_goal_object_pos_w is not None:
-            self.base_goal_object_pos_w[env_ids] = goal_pos_w
+            self.base_goal_object_pos_w[env_ids] = preview_goal_pos_w
         if self.base_goal_object_rot6d_w is not None:
             self.base_goal_object_rot6d_w[env_ids] = goal_rot6d_w
         if self.base_goal_is_external is not None:
             self.base_goal_is_external[env_ids] = non_clip_mask
-        self.manual_goal_object_pos_w[env_ids] = goal_pos_w
+        self.manual_goal_xy_rel[env_ids] = goal_xy_rel
+        self.manual_goal_yaw_rel[env_ids, 0] = goal_yaw_rel
+        self.manual_goal_object_pos_w[env_ids] = preview_goal_pos_w
         self.manual_goal_object_rot6d_w[env_ids] = goal_rot6d_w
         if self.manual_goal_is_external is not None:
             self.manual_goal_is_external[env_ids] = non_clip_mask
@@ -2852,25 +3019,11 @@ class MotionCommand(CommandTermBase):
             return
 
         anchor_pos_w, anchor_quat_w = self._manual_goal_anchor_pose_w(env_ids)
-        anchor_heading_quat = yaw_quat(anchor_quat_w, w_last=True)
-        rel_goal_xy = self.manual_goal_xy_rel[env_ids]
-        rel_goal_yaw = self.manual_goal_yaw_rel[env_ids, 0]
-
-        rel_goal_pos = torch.zeros((env_ids.numel(), 3), device=self.device, dtype=torch.float32)
-        rel_goal_pos[:, :2] = rel_goal_xy
-        goal_pos_w = anchor_pos_w + quat_apply(anchor_heading_quat, rel_goal_pos, w_last=True)
-        goal_pos_w[:, 2] = self._ground_resting_object_center_z(env_ids)
-
-        _, _, anchor_heading = get_euler_xyz(anchor_heading_quat, w_last=True)
-        goal_heading = anchor_heading + rel_goal_yaw
-        zeros = torch.zeros_like(goal_heading)
-        goal_quat_w = quat_from_euler_xyz(zeros, zeros, goal_heading)
-        goal_rot_mat_w = quaternion_to_matrix(goal_quat_w, w_last=True)
-        goal_rot6d_w = goal_rot_mat_w[..., :2].reshape(goal_rot_mat_w.shape[0], 6)
-
-        self.manual_goal_enabled = True
-        self.manual_goal_object_pos_w[env_ids] = goal_pos_w
-        self.manual_goal_object_rot6d_w[env_ids] = goal_rot6d_w
+        self._apply_manual_goal_world_from_command(
+            env_ids,
+            anchor_pos_w=anchor_pos_w,
+            anchor_quat_w=anchor_quat_w,
+        )
         if self.manual_goal_is_external is not None:
             self.manual_goal_is_external[env_ids] = True
 
@@ -3211,6 +3364,10 @@ class MotionCommand(CommandTermBase):
             self.base_goal_object_rot6d_w.zero_()
         if self.base_goal_is_external is not None:
             self.base_goal_is_external.zero_()
+        if self.manual_goal_xy_rel is not None:
+            self.manual_goal_xy_rel.zero_()
+        if self.manual_goal_yaw_rel is not None:
+            self.manual_goal_yaw_rel.zero_()
         if self.pickup_anchor_set is not None:
             self.pickup_anchor_set.zero_()
         if self.pickup_anchor_root_pos_w is not None:

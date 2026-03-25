@@ -581,6 +581,15 @@ object_distill_drop_mixed_terms = {
     ),
 }
 
+object_distill_drop_command_terms = {
+    "obj_sparse_goal_xy_yaw_command": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:obj_sparse_goal_xy_yaw_command",
+        params={"zero_yaw": True},
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
 object_command_curriculum_track_terms = {
     "motion_command": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:command_curriculum_motion_command",
@@ -600,14 +609,9 @@ object_command_curriculum_track_terms = {
 }
 
 object_command_curriculum_goal_terms = {
-    "obj_sparse_goal_xy_yaw_pick_root_heading": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:command_curriculum_obj_sparse_goal_xy_yaw_pick_root_heading",
+    "obj_sparse_goal_xy_yaw_command": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:command_curriculum_obj_sparse_goal_xy_yaw_command",
         params={"zero_yaw": True},
-        scale=1.0,
-        noise=0.0,
-    ),
-    "obj_picked_flag": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:command_curriculum_obj_picked_flag",
         scale=1.0,
         noise=0.0,
     ),
@@ -670,6 +674,14 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
             enable_noise=False,
             history_length=1,
             terms=object_distill_drop_mixed_terms,
+        ),
+        # Student drop target as a fixed pickup-frame command [dx, dy, dyaw].
+        # The env can still materialize a world goal internally after pickup.
+        "actor_obs_drop_command": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_distill_drop_command_terms,
         ),
         "critic_obs": ObsGroupCfg(
             concatenate=True,

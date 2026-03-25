@@ -101,7 +101,9 @@ SIM_HOLD_INITIAL_POSE_UNTIL_FIRST_COMMAND="${SIM_HOLD_INITIAL_POSE_UNTIL_FIRST_C
 SIM_FREEZE_UNTIL_FIRST_COMMAND="${SIM_FREEZE_UNTIL_FIRST_COMMAND:-}"
 SIM_CLOCK_PORT="${SIM_CLOCK_PORT:-5655}"
 SIM_STATE_PORT="${SIM_STATE_PORT:-5657}"
+SIM_PERCEPTION_PORT="${SIM_PERCEPTION_PORT:-5658}"
 SIM_CONTROL_PORT="${SIM_CONTROL_PORT:-5659}"
+POLICY_CONTROL_PORT="${POLICY_CONTROL_PORT:-5660}"
 SIM_USE_ZMQ_LOWCMD="${SIM_USE_ZMQ_LOWCMD:-1}"
 INTERFACE_NAME="${INTERFACE_NAME:-lo}"
 RUN_SECONDS="${RUN_SECONDS:-20}"
@@ -146,6 +148,8 @@ INFERENCE_CONFIG="${INFERENCE_CONFIG:-}"
 ROBOT_INIT_STATE_POS="${ROBOT_INIT_STATE_POS:-}"
 ROBOT_INIT_STATE_ROT="${ROBOT_INIT_STATE_ROT:-}"
 ROBOT_ENABLE_SELF_COLLISIONS="${ROBOT_ENABLE_SELF_COLLISIONS:-}"
+SIM_PERCEPTION_CAMERA_SOURCE_OVERRIDE="${SIM_PERCEPTION_CAMERA_SOURCE_OVERRIDE:-}"
+SIM_RUN_DEVICE="${SIM_RUN_DEVICE:-}"
 MOTION_METADATA_TOOL="$ROOT_DIR/src/holosoma_inference/holosoma_inference/tools/read_motion_clip_metadata.py"
 
 mkdir -p "$PATCH_DIR"
@@ -509,9 +513,6 @@ for value in model.graph.input:
     dims = [dim.dim_value or dim.dim_param for dim in value.type.tensor_type.shape.dim]
     input_dims[value.name] = dims
 
-if "perception_obs" in input_dims:
-    raise SystemExit("Model expects 'perception_obs'; use the depth rollout path instead.")
-
 obs_dim = None
 obs_shape = input_dims.get("obs")
 if obs_shape is not None and len(obs_shape) >= 2 and isinstance(obs_shape[1], int):
@@ -532,7 +533,10 @@ groups = (
 groups = groups if isinstance(groups, dict) else {}
 
 if any(name in groups for name in ("actor_obs_root", "actor_obs_torso", "actor_obs_proprio", "actor_obs_box")):
-    print("g1-29dof-wbt-object-distill")
+    if obs_dim == 96:
+        print("g1-29dof-wbt-depth-distill")
+    else:
+        print("g1-29dof-wbt-object-generalist")
     raise SystemExit(0)
 
 actor_obs = groups.get("actor_obs", {})
@@ -553,7 +557,7 @@ legacy_w_object_terms = {
 }
 
 if obs_dim == 123:
-    print("g1-29dof-wbt-object-distill")
+    print("g1-29dof-wbt-object-generalist")
 elif obs_dim == 175:
     print("g1-29dof-wbt-w-object")
 elif obs_dim == 181:
@@ -569,6 +573,98 @@ else:
 PY
 }
 
+model_uses_perception_obs() {
+  "$INFER_PY" - <<'PY' "$1"
+import sys
+
+import onnx
+
+model = onnx.load(sys.argv[1])
+input_names = {value.name for value in model.graph.input}
+print("1" if "perception_obs" in input_names else "0")
+PY
+}
+
+build_training_perception_args() {
+  "$INFER_PY" - <<'PY' "$1" "$2"
+import json
+import sys
+
+import onnx
+
+model = onnx.load(sys.argv[1])
+camera_source_override = sys.argv[2].strip()
+metadata = {}
+for prop in model.metadata_props:
+    try:
+        metadata[prop.key] = json.loads(prop.value)
+    except Exception:
+        metadata[prop.key] = prop.value
+
+perception_cfg = metadata.get("experiment_config", {}).get("perception", {})
+if not isinstance(perception_cfg, dict) or not bool(perception_cfg.get("enabled", False)):
+    raise SystemExit(0)
+
+perception_cfg = dict(perception_cfg)
+if camera_source_override:
+    perception_cfg["camera_source"] = camera_source_override
+
+output_mode = str(perception_cfg.get("output_mode", "")).strip().lower()
+if output_mode == "camera_depth":
+    print("perception:camera_depth_d435i")
+elif output_mode == "heightmap":
+    print("perception:heightmap")
+else:
+    raise SystemExit(f"Unsupported split sim perception output_mode: {output_mode!r}")
+
+for key, value in perception_cfg.items():
+    if key in {"enabled", "output_mode"} or value is None:
+        continue
+    if isinstance(value, bool):
+        text = "True" if value else "False"
+    elif isinstance(value, (int, float, str)):
+        text = str(value)
+    elif isinstance(value, (list, tuple)):
+        if len(value) == 2 and all(isinstance(item, (int, float)) for item in value):
+            text = f"({value[0]},{value[1]})"
+        else:
+            text = json.dumps(value, separators=(",", ":"))
+    elif isinstance(value, dict):
+        text = json.dumps(value, separators=(",", ":"))
+    else:
+        continue
+    print(f"--perception.{key}")
+    print(text)
+PY
+}
+
+extract_perception_arg_value() {
+  local key="$1"
+  shift
+  local args=("$@")
+  local idx=0
+  local needle="--perception.${key}"
+  while [[ $idx -lt ${#args[@]} ]]; do
+    if [[ "${args[$idx]}" == "$needle" ]]; then
+      local next_idx=$((idx + 1))
+      if [[ $next_idx -lt ${#args[@]} ]]; then
+        printf '%s\n' "${args[$next_idx]}"
+      fi
+      return 0
+    fi
+    idx=$((idx + 1))
+  done
+  return 1
+}
+
+python_cuda_available() {
+  local python_bin="$1"
+  "$python_bin" - <<'PY' >/dev/null 2>&1
+import torch
+raise SystemExit(0 if torch.cuda.is_available() else 1)
+PY
+}
+
 apply_training_motion_launch_defaults "$MODEL_INPUT"
 apply_motion_clip_object_defaults
 
@@ -581,6 +677,25 @@ apply_motion_clip_object_defaults
 apply_training_sim_overrides "$PATCHED_ONNX"
 apply_training_robot_init_overrides "$PATCHED_ONNX"
 apply_training_robot_asset_overrides "$PATCHED_ONNX"
+MODEL_EXPECTS_PERCEPTION_OBS="$(model_uses_perception_obs "$PATCHED_ONNX")"
+PERCEPTION_ARGS=()
+if [[ "$MODEL_EXPECTS_PERCEPTION_OBS" == "1" ]]; then
+  mapfile -t PERCEPTION_ARGS < <(build_training_perception_args "$PATCHED_ONNX" "$SIM_PERCEPTION_CAMERA_SOURCE_OVERRIDE")
+  if [[ "${#PERCEPTION_ARGS[@]}" -eq 0 ]]; then
+    echo "Model expects perception_obs, but no training perception config was found in $PATCHED_ONNX" >&2
+    exit 1
+  fi
+fi
+
+SIM_PERCEPTION_CAMERA_SOURCE=""
+if [[ "${#PERCEPTION_ARGS[@]}" -gt 0 ]]; then
+  SIM_PERCEPTION_CAMERA_SOURCE="$(extract_perception_arg_value "camera_source" "${PERCEPTION_ARGS[@]}" || true)"
+fi
+if [[ -z "$SIM_RUN_DEVICE" && "$SIM_PERCEPTION_CAMERA_SOURCE" == "far_tracking_warp" ]]; then
+  if python_cuda_available "$MUJOCO_PY"; then
+    SIM_RUN_DEVICE="cuda:0"
+  fi
+fi
 
 if [[ -z "$INFERENCE_CONFIG" ]]; then
   INFERENCE_CONFIG="$(infer_inference_config "$PATCHED_ONNX")"
@@ -635,6 +750,12 @@ else
   fi
   if [[ -z "$SIM_FREEZE_UNTIL_FIRST_COMMAND" ]]; then
     SIM_FREEZE_UNTIL_FIRST_COMMAND="1"
+  fi
+fi
+
+if [[ "$MODEL_EXPECTS_PERCEPTION_OBS" == "1" ]]; then
+  if [[ -z "$POLICY_DEFER_UNTIL_VALID_STATE" || "$POLICY_DEFER_UNTIL_VALID_STATE" == "0" ]]; then
+    POLICY_DEFER_UNTIL_VALID_STATE="1"
   fi
 fi
 
@@ -709,6 +830,7 @@ wait_for_sim_ready() {
   simulator:mujoco \
   robot:g1_29dof_w_object \
   terrain:terrain_locomotion_plane \
+  $( [[ -n "$SIM_RUN_DEVICE" ]] && printf '%s %s' "--device" "$SIM_RUN_DEVICE" ) \
   --training.headless "$TRAINING_HEADLESS" \
   --simulator.config.debug-viz "$SIM_DEBUG_VIZ" \
   $( [[ "$MUJOCO_SHOW_OBJECT_COLLISION" == "1" ]] && printf '%s %s' "--simulator.config.mujoco-show-object-collision" "True" ) \
@@ -737,11 +859,14 @@ wait_for_sim_ready() {
   $( [[ -n "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" ]] && printf '%s %s' "--robot.object.mujoco-object-contact-body-name-markers" "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" ) \
   $( [[ -n "$TERRAIN_STATIC_FRICTION" ]] && printf '%s %s' "--terrain.terrain-term.static-friction" "$TERRAIN_STATIC_FRICTION" ) \
   $( [[ -n "$TERRAIN_DYNAMIC_FRICTION" ]] && printf '%s %s' "--terrain.terrain-term.dynamic-friction" "$TERRAIN_DYNAMIC_FRICTION" ) \
+  "${PERCEPTION_ARGS[@]}" \
   --simulator.config.bridge.interface "$INTERFACE_NAME" \
   --simulator.config.bridge.clock-port "$SIM_CLOCK_PORT" \
   --simulator.config.bridge.publish-sim-state=True \
+  $( [[ "$MODEL_EXPECTS_PERCEPTION_OBS" == "1" ]] && printf '%s %s' "--simulator.config.bridge.publish-perception-obs" "True" ) \
   --simulator.config.bridge.listen-control=True \
   --simulator.config.bridge.sim-state-port "$SIM_STATE_PORT" \
+  $( [[ "$MODEL_EXPECTS_PERCEPTION_OBS" == "1" ]] && printf '%s %s' "--simulator.config.bridge.perception-obs-port" "$SIM_PERCEPTION_PORT" ) \
   --simulator.config.bridge.control-port "$SIM_CONTROL_PORT" \
   $( [[ "$SIM_USE_ZMQ_LOWCMD" == "1" ]] && printf '%s %s' "--simulator.config.bridge.use-zmq-lowcmd" "True" ) \
   $( [[ "$SIM_IGNORE_DEFAULT_IDLE_COMMAND" == "1" ]] && printf '%s %s' "--simulator.config.bridge.ignore-default-idle-command" "True" ) \
@@ -774,6 +899,7 @@ POLICY_CMD=(
   --task.sim-clock-port "$SIM_CLOCK_PORT"
   --task.sim-state-port "$SIM_STATE_PORT"
   --task.sim-control-port "$SIM_CONTROL_PORT"
+  --task.policy-control-port "$POLICY_CONTROL_PORT"
   --task.no-auto-start-motion
   --task.auto-start-motion-clip
   --task.auto-start-stiff-hold-sec "$AUTO_START_STIFF_HOLD_SEC"
@@ -784,6 +910,9 @@ POLICY_CMD=(
 )
 if [[ "$SIM_USE_ZMQ_LOWCMD" == "1" ]]; then
   POLICY_CMD+=(--task.use-zmq-lowcmd)
+fi
+if [[ "$MODEL_EXPECTS_PERCEPTION_OBS" == "1" ]]; then
+  POLICY_CMD+=(--task.use-split-perception-obs --task.perception-obs-port "$SIM_PERCEPTION_PORT")
 fi
 if [[ "$USE_SIM_TIME" == "1" ]]; then
   POLICY_CMD+=(--task.use-sim-time)

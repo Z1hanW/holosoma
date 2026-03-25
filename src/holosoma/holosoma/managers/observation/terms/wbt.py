@@ -358,6 +358,15 @@ def _manual_goal_override_xy_yaw(motion_command: MotionCommand) -> torch.Tensor:
     return goal_xy_yaw
 
 
+def _manual_goal_command_xy_yaw(motion_command: MotionCommand) -> torch.Tensor:
+    goal_xy_yaw = torch.zeros((motion_command.num_envs, 3), device=motion_command.device, dtype=torch.float32)
+    if motion_command.manual_goal_xy_rel is not None:
+        goal_xy_yaw[:, :2] = motion_command.manual_goal_xy_rel
+    if motion_command.manual_goal_yaw_rel is not None:
+        goal_xy_yaw[:, 2] = motion_command.manual_goal_yaw_rel.squeeze(-1)
+    return goal_xy_yaw
+
+
 def _episode_obs_mask(motion_command: MotionCommand, *, command_only: bool) -> torch.Tensor:
     mask = motion_command.get_command_only_env_mask()
     if not command_only:
@@ -791,6 +800,19 @@ def obj_sparse_goal_xy_yaw_pick_root_heading(
     return obs
 
 
+def obj_sparse_goal_xy_yaw_command(
+    env: WholeBodyTrackingManager,
+    zero_yaw: bool = False,
+) -> torch.Tensor:
+    """Sparse/manual object goal [dx, dy, dyaw] as a fixed pickup-frame command."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    obs = _manual_goal_command_xy_yaw(motion_command)
+    if zero_yaw:
+        obs = obs.clone()
+        obs[:, 2] = 0.0
+    return obs
+
+
 def obj_picked_flag(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Binary pickup-phase flag for mixed sparse-goal distillation."""
     motion_command = _get_motion_command_and_assert_type(env)
@@ -907,6 +929,15 @@ def command_curriculum_obj_sparse_goal_xy_yaw_pick_root_heading(
 def command_curriculum_obj_picked_flag(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command_state = _get_motion_command_and_assert_type(env)
     obs = obj_picked_flag(env)
+    return _mask_obs_by_episode(obs, _episode_obs_mask(motion_command_state, command_only=True))
+
+
+def command_curriculum_obj_sparse_goal_xy_yaw_command(
+    env: WholeBodyTrackingManager,
+    zero_yaw: bool = False,
+) -> torch.Tensor:
+    motion_command_state = _get_motion_command_and_assert_type(env)
+    obs = obj_sparse_goal_xy_yaw_command(env, zero_yaw=zero_yaw)
     return _mask_obs_by_episode(obs, _episode_obs_mask(motion_command_state, command_only=True))
 
 
