@@ -36,6 +36,7 @@ DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 def _print_control_guide(policy_class, use_joystick: bool):
     """Print control guide for users."""
     is_blind_fall_recovery = issubclass(policy_class, BlindFallRecoveryPolicy)
+    is_depth_distillation = issubclass(policy_class, DepthDistillationPolicy)
     is_wbt = policy_class.__name__ == "WholeBodyTrackingPolicy"
 
     logger.info("=" * 80)
@@ -59,6 +60,13 @@ def _print_control_guide(policy_class, use_joystick: bool):
             logger.info("  R1 + Right stick Y - Push forward/backward (waist pitch torque)")
             logger.info("  R1 + Right stick X - Push left/right (waist roll torque)")
             logger.info("  Release R1         - Zero all push torques")
+        elif is_depth_distillation:
+            logger.info("")
+            logger.info("Depth Distillation Controls:")
+            logger.info("  Start button   - Enter stiff hold mode")
+            logger.info("  L1 + Left stick - Select direction (forward/back/left/right)")
+            logger.info("  L1 + Y button  - Toggle speed mode (low/high)")
+            logger.info("  L1 + X button  - Madmax speed (while in high mode)")
         elif is_wbt:
             logger.info("")
             logger.info("Whole-Body Tracking Controls:")
@@ -94,6 +102,16 @@ def _print_control_guide(policy_class, use_joystick: bool):
             logger.info("")
             logger.info("Whole-Body Tracking Controls:")
             logger.info("  s  - Start motion clip")
+        elif is_depth_distillation:
+            logger.info("")
+            logger.info("Depth Distillation Controls:")
+            logger.info("  w          - Forward")
+            logger.info("  s          - Backward")
+            logger.info("  a/d        - Turn left/right (45 deg)")
+            logger.info("  q/e        - Turn left/right (90 deg)")
+            logger.info("  z          - Stand (stop)")
+            logger.info("  =          - Cycle speed mode (low/high/madmax)")
+            logger.info("  h          - Enter stiff hold mode")
         else:
             logger.info("")
             logger.info("Locomotion Controls:")

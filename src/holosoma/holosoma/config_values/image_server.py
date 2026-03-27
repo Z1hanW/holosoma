@@ -174,10 +174,10 @@ mujoco_zed2i = dataclasses.replace(
     depth_source="depth",
     near_clip=0.1,
     far_clip=2.0,
-    resized_height=27,
-    resized_width=48,
+    resized_height=58,
+    resized_width=87,
     save_images=False,
-    visualize_images=True,
+    visualize_images=False,
     latency_frame=0,
     buffer_len=1,
 )

@@ -23,6 +23,7 @@ import onnxruntime
 from loguru import logger
 
 from holosoma_inference.config.config_types.inference import InferenceConfig
+from holosoma_inference.policies.base import BasePolicy
 from holosoma_inference.policies.locomotion import LocomotionPolicy
 from holosoma_inference.utils.math.quat import quat_from_angle_axis, quat_mul
 
@@ -565,9 +566,58 @@ class DepthDistillationPolicy(LocomotionPolicy):
         if cmd_idx != self.active_velocity_command_idx:
             self.set_velocity_command(cmd_idx)
 
+    # Keyboard key -> discrete velocity command name mapping.
+    # Unlike LocomotionPolicy (continuous lin_vel/ang_vel), this policy uses
+    # discrete one-hot velocity commands selected from CMD_CODES.
+    KEY_TO_CMD = {
+        "w": "forward",
+        "s": "back",
+        "a": "left_45",
+        "d": "right_45",
+        "q": "left_90",
+        "e": "right_90",
+        "z": "stand",
+    }
+
     def handle_keyboard_button(self, keycode):
-        """Handle keyboard button presses."""
-        super().handle_keyboard_button(keycode)
+        """Handle keyboard button presses for depth distillation.
+
+        Overrides LocomotionPolicy's continuous velocity handlers (W/A/S/D/Q/E)
+        with discrete velocity command selection, matching the joystick behavior
+        in process_joystick_input.
+        """
+        # Base policy handles: ]/p (start), o (stop), i (init), v/b/f/g/r (kp), 1-9 (policy switch)
+        # Skip LocomotionPolicy's continuous velocity handlers — they don't apply here.
+        BasePolicy.handle_keyboard_button(self, keycode)
+
+        if keycode in self.KEY_TO_CMD:
+            codes = self.CMD_CODES[self.speed_mode]
+            cmd_idx = codes[self.KEY_TO_CMD[keycode]]
+            if cmd_idx != self.active_velocity_command_idx:
+                self.set_velocity_command(cmd_idx)
+        elif keycode == "=":
+            # Cycle speed mode: low -> high -> madmax -> low
+            self.speed_mode = (self.speed_mode + 1) % 3
+            self.speed_mode_high = self.speed_mode > 0
+            label = ["LOW", "HIGH", "MADMAX"][self.speed_mode]
+            logger.info(f"Speed mode: {label}")
+        elif keycode == "h":
+            self._handle_enter_stiff_hold()
+
+        self._print_control_status()
+
+    def _print_control_status(self):
+        """Print current control status with discrete velocity command info."""
+        super()._print_control_status()
+        label = ["LOW", "HIGH", "MADMAX"][self.speed_mode]
+        # Reverse-lookup active command name from CMD_CODES
+        cmd_name = "?"
+        for name, idx in self.CMD_CODES[self.speed_mode].items():
+            if idx == self.active_velocity_command_idx:
+                cmd_name = name
+                break
+        mode = "stiff_hold" if self._stiff_hold_active else "damping" if self._damping_mode_active else "policy" if self.use_policy_action else "idle"
+        print(f"Command: {cmd_name} (idx={self.active_velocity_command_idx}) | Speed: {label} | Mode: {mode}")
 
     def handle_joystick_button(self, cur_key):
         """Handle joystick button presses."""
