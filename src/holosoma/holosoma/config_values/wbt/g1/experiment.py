@@ -341,11 +341,11 @@ g1_29dof_wbt_videomimic_transformer = replace(
     ),
 )
 
-g1_29dof_wbt_videomimic_terrain_transformer = replace(
+g1_29dof_wbt_terrain_transformer = replace(
     g1_29dof_wbt,
     training=replace(
         g1_29dof_wbt.training,
-        name="g1_29dof_wbt_videomimic_terrain_transformer",
+        name="g1_29dof_wbt_terrain_transformer",
     ),
     observation=observation.g1_29dof_wbt_observation_videomimic,
     algo=replace(
@@ -619,7 +619,7 @@ __all__ = [
     "g1_29dof_wbt_motion_tracking_mlp_encoder",
     "g1_29dof_wbt_motion_tracking_transformer",
     "g1_terrain_transformer",
-    "g1_29dof_wbt_videomimic_terrain_transformer",
+    "g1_29dof_wbt_terrain_transformer",
     "g1_29dof_wbt_fast_sac",
     "g1_29dof_wbt_fast_sac_w_object",
     "g1_29dof_wbt_w_object",
