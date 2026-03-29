@@ -218,6 +218,9 @@ class DistillationConfig:
     dagger_ignore_external_goal_samples: bool = False
     """Ignore BC samples collected under external sparse-goal episodes."""
 
+    dagger_ignore_episode_initial_steps: int = 0
+    """Ignore BC samples from the first N episode steps (useful when reset states are outside teacher distribution)."""
+
     dagger_match_std: bool = False
     """Match policy std against teacher std in BC loss (legacy behavior)."""
 

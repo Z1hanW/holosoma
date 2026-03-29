@@ -272,9 +272,9 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed = RewardManagerCfg(
         "sparse_goal_object_pose_error_exp": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:sparse_goal_object_pose_error_exp",
             params={
-                "sigma_xy": 0.35,
-                "sigma_yaw": 1.0,
-                "sigma_z": 0.10,
+                "sigma_xy": 0.20,
+                "sigma_yaw": 0.50,
+                "sigma_z": 0.05,
                 "only_external": True,
                 "picked_only": True,
                 "ignore_yaw": True,

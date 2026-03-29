@@ -61,8 +61,8 @@ The main lessons from debugging G1 object-tracking on MuJoCo split sim2sim are:
 
 Useful entry points in this repo:
 
-- `./mj_track.sh [motion.npz] [model.onnx]`: tracking launcher with `viser` MuJoCo state visualization
-- `./mj_depth.sh`: MuJoCo joystick/manual-control launcher for the depth box-carry policy
+- `./mj_track.sh [--viewer sim_state|mjviser] [motion.npz] [model.onnx]`: tracking launcher with split MuJoCo visualization
+- `./mj_depth.sh [--viewer sim_state|mjviser]`: MuJoCo joystick/manual-control launcher for the depth box-carry policy
 - `./vis_mujoco_sim_state.sh`: `viser` viewer that reads split MuJoCo `sim-state` and can trigger reset over `sim-control`
 
 ### Training-Aligned Invariants

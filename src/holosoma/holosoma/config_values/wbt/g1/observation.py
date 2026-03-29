@@ -469,6 +469,50 @@ g1_29dof_wbt_observation_motion_tracking_split = ObservationManagerCfg(
     },
 )
 
+g1_29dof_wbt_observation_terrain_transformer = ObservationManagerCfg(
+    groups={
+        "actor_obs_proprio": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            terms={
+                "base_lin_vel": ObsTermCfg(
+                    func="holosoma.managers.observation.terms.wbt:base_lin_vel",
+                    scale=1.0,
+                    noise=0.0,
+                ),
+                "base_ang_vel": ObsTermCfg(
+                    func="holosoma.managers.observation.terms.wbt:base_ang_vel",
+                    scale=1.0,
+                    noise=0.2,
+                ),
+                "dof_pos": ObsTermCfg(
+                    func="holosoma.managers.observation.terms.wbt:dof_pos",
+                    scale=1.0,
+                    noise=0.01,
+                ),
+                "dof_vel": ObsTermCfg(
+                    func="holosoma.managers.observation.terms.wbt:dof_vel",
+                    scale=1.0,
+                    noise=0.5,
+                ),
+                "actions": ObsTermCfg(
+                    func="holosoma.managers.observation.terms.wbt:actions",
+                    scale=1.0,
+                    noise=0.0,
+                ),
+            },
+        ),
+        "critic_obs": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=critic_obs_shared_terms,
+        ),
+        "motion_future_target_poses": motion_future_target_poses_group,
+    },
+)
+
 g1_29dof_wbt_observation_w_object = ObservationManagerCfg(
     groups={
         "actor_obs": actor_obs_w_object,
@@ -861,6 +905,7 @@ __all__ = [
     "g1_29dof_wbt_observation",
     "g1_29dof_wbt_observation_motion_tracking",
     "g1_29dof_wbt_observation_motion_tracking_split",
+    "g1_29dof_wbt_observation_terrain_transformer",
     "g1_29dof_wbt_observation_w_object",
     "g1_29dof_wbt_observation_w_object_legacy",
     "g1_29dof_wbt_observation_w_object_command_curriculum",

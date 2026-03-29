@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from holosoma.agents.modules.modules import BaseModule
+from holosoma.agents.modules.ppo_modules import PPOActorEncoder
 from holosoma.config_types.algo import LayerConfig, ModuleConfig
 
 
@@ -257,6 +258,111 @@ def test_consistency_with_storage_dimensions():
     observation = torch.randn(batch_size, storage_dim)
     output = module.module(observation)
     assert output.shape == (batch_size, 10)
+
+
+def test_terrain_transformer_module_builds():
+    """Terrain transformer should build with proprio, depth, and target-pose inputs."""
+    layer_config = LayerConfig(
+        hidden_dims=[64, 32],
+        activation="ELU",
+        encoder_hidden_dims=[64],
+        encoder_activation="ReLU",
+        encoder_input_name="motion_future_target_poses",
+        encoder_obs_token_name="actor_obs_proprio",
+        encoder_num_steps=10,
+        transformer_latent_dim=32,
+        transformer_num_layers=2,
+        transformer_num_heads=2,
+        transformer_ff_dim=64,
+        transformer_dropout=0.0,
+        transformer_pooling="first",
+        perception_input_name="perception_obs",
+    )
+
+    config = ModuleConfig(
+        type="TerrainTransformerObsTokenEncoder",
+        input_dim=["actor_obs_proprio", "motion_future_target_poses"],
+        output_dim=[12],
+        layer_config=layer_config,
+    )
+
+    obs_dim_dict = {
+        "actor_obs_proprio": 530,
+        "motion_future_target_poses": 1000,
+        "perception_obs": 512,
+    }
+    history_length = {
+        "actor_obs_proprio": 10,
+        "motion_future_target_poses": 1,
+        "perception_obs": 1,
+    }
+
+    module = BaseModule(
+        obs_dim_dict=obs_dim_dict,
+        module_config_dict=config,
+        history_length=history_length,
+    )
+
+    assert module.input_dim == 1530
+    assert hasattr(module, "encoder")
+    assert module.module[0].in_features == 32
+
+
+def test_terrain_transformer_actor_forward():
+    """Terrain transformer actor should consume depth as a token and emit actions."""
+    layer_config = LayerConfig(
+        hidden_dims=[64, 32],
+        activation="ELU",
+        encoder_hidden_dims=[64],
+        encoder_activation="ReLU",
+        encoder_input_name="motion_future_target_poses",
+        encoder_obs_token_name="actor_obs_proprio",
+        encoder_num_steps=10,
+        transformer_latent_dim=32,
+        transformer_num_layers=2,
+        transformer_num_heads=2,
+        transformer_ff_dim=64,
+        transformer_dropout=0.0,
+        transformer_pooling="first",
+        perception_input_name="perception_obs",
+    )
+
+    config = ModuleConfig(
+        type="TerrainTransformerObsTokenEncoder",
+        input_dim=["actor_obs_proprio", "motion_future_target_poses"],
+        output_dim=[6],
+        layer_config=layer_config,
+        min_noise_std=0.05,
+    )
+
+    obs_dim_dict = {
+        "actor_obs_proprio": 530,
+        "motion_future_target_poses": 1000,
+        "perception_obs": 512,
+    }
+    history_length = {
+        "actor_obs_proprio": 10,
+        "motion_future_target_poses": 1,
+        "perception_obs": 1,
+    }
+
+    actor = PPOActorEncoder(
+        obs_dim_dict=obs_dim_dict,
+        module_config_dict=config,
+        num_actions=6,
+        init_noise_std=1.0,
+        history_length=history_length,
+    )
+
+    batch_size = 4
+    actor_obs = torch.randn(batch_size, obs_dim_dict["actor_obs_proprio"] + obs_dim_dict["motion_future_target_poses"])
+    policy_state = {
+        "actor_obs": actor_obs,
+        "perception_obs": torch.randn(batch_size, obs_dim_dict["perception_obs"]),
+    }
+
+    actions = actor.act_inference(policy_state)
+    assert actions.shape == (batch_size, 6)
 
 
 if __name__ == "__main__":

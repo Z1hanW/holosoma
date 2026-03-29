@@ -76,6 +76,7 @@ _OBJECT_CONTACT_MONITOR_BODY_NAMES = (
     "right_elbow_link",
     "torso_link",
 )
+_OBJECT_CONTACT_SENSOR_FORCE_THRESHOLD = 0.0
 
 
 class IsaacSim(BaseSimulator):
@@ -555,7 +556,9 @@ class IsaacSim(BaseSimulator):
                 rigid_object = RigidObject(object_cfg)
                 self.scene.rigid_objects[object_name] = rigid_object
                 self._object_urdf_by_name[object_name] = str(pathlib.Path(object_asset_urdf_path).resolve())
-                self._object_contact_filter_prim_paths_expr.append(object_cfg.prim_path)
+                # The current URDF box assets expose a single rigid body under `baseLink`.
+                # Filter against that rigid body prim instead of the Xform root or collision child.
+                self._object_contact_filter_prim_paths_expr.append(f"{object_cfg.prim_path}/baseLink")
 
             logger.info(
                 "Loaded {} training object URDF(s): {}",
@@ -970,7 +973,10 @@ class IsaacSim(BaseSimulator):
                 history_length=self.simulator_config.contact_sensor_history_length,
                 update_period=0.005,
                 track_air_time=False,
-                force_threshold=10.0,
+                # Let downstream reward/prior code own the thresholding. A high sensor-side
+                # threshold can zero out valid but moderate box-contact forces before they are
+                # ever observed by rewards or online contact-prior estimation.
+                force_threshold=_OBJECT_CONTACT_SENSOR_FORCE_THRESHOLD,
                 debug_vis=False,
                 filter_prim_paths_expr=filter_prim_paths_expr,
             )

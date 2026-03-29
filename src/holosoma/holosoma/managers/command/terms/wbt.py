@@ -63,6 +63,7 @@ _CONTACT_PRIOR_OBJECT_POS_ERROR_THRESHOLD = 0.20
 _CONTACT_PRIOR_OBJECT_ROT_ERROR_THRESHOLD = 0.80
 _CONTACT_PRIOR_BODY_POS_ERROR_THRESHOLD = 0.35
 _CONTACT_PRIOR_CONFIDENCE_WARMUP_SAMPLES = 2048.0
+_OBJECT_CONTACT_PROXY_DISTANCE_THRESHOLD = 0.08
 
 
 def _rot6d_to_matrix(rot6d: torch.Tensor) -> torch.Tensor:
@@ -1259,6 +1260,12 @@ class MotionCommand(CommandTermBase):
         self._contact_prior_force_count: torch.Tensor | None = None
         self._contact_prior_position_mean: torch.Tensor | None = None
         self._contact_prior_position_count: torch.Tensor | None = None
+        self._object_contact_body_indices_cache: dict[tuple[str, ...], torch.Tensor] = {}
+        self._runtime_default_pose_prepend_enabled = False
+        self._runtime_default_pose_prepend_steps = 0
+        self._runtime_default_pose_prepend_active: torch.Tensor | None = None
+        self._runtime_default_pose_prepend_step: torch.Tensor | None = None
+        self._runtime_default_pose_prepend_defaults: dict[str, torch.Tensor] = {}
 
     def set_forced_clip(self, clip_idx: int | None) -> None:
         """Force a specific clip index for resets (None clears the override)."""
@@ -1314,7 +1321,10 @@ class MotionCommand(CommandTermBase):
         self.pickup_consecutive_counter = torch.zeros((self.num_envs,), device=self.device, dtype=torch.long)
 
         init_state = self._env.robot_config.init_state
-        self._reset_to_default_pose = os.environ.get("HOLOSOMA_RESET_TO_DEFAULT_POSE", "0").lower() in (
+        reset_to_default_pose_env = os.environ.get("HOLOSOMA_RESET_TO_DEFAULT_POSE")
+        if reset_to_default_pose_env is None:
+            reset_to_default_pose_env = os.environ.get("HOLOSOMA_DEFAULT_POSE_INIT", "0")
+        self._reset_to_default_pose = reset_to_default_pose_env.lower() in (
             "1",
             "true",
             "yes",
@@ -1377,6 +1387,7 @@ class MotionCommand(CommandTermBase):
             logger.warning("Sparse object-goal curriculum requested but motion has no object; disabling curriculum.")
             self._sparse_goal_curriculum_enabled = False
             self.object_indices_in_simulator = None
+        self._configure_runtime_default_pose_prepend()
         self._configure_contact_prior_regions()
 
         # 4. get the adaptive timesteps sampler
@@ -1667,12 +1678,85 @@ class MotionCommand(CommandTermBase):
         return self.pickup_anchor_set.to(dtype=torch.long)
 
     def _object_contact_force_history_by_names(self, body_names: list[str]) -> torch.Tensor:
+        return self.get_body_object_contact_force_history(body_names)
+
+    def _object_contact_body_indices_by_names(self, body_names: list[str]) -> torch.Tensor:
+        key = tuple(body_names)
+        cached = self._object_contact_body_indices_cache.get(key)
+        if cached is not None:
+            return cached
+
+        simulator_body_names = list(getattr(self._env.simulator, "body_names", []))
+        missing = [name for name in body_names if name not in simulator_body_names]
+        if missing:
+            raise ValueError(f"Requested object-contact bodies {missing} are not available in simulator bodies.")
+
+        indices = torch.tensor(
+            [simulator_body_names.index(name) for name in body_names],
+            device=self.device,
+            dtype=torch.long,
+        )
+        self._object_contact_body_indices_cache[key] = indices
+        return indices
+
+    def _object_contact_proximity_mask_by_indices(
+        self,
+        body_indices: torch.Tensor,
+        *,
+        distance_threshold: float = _OBJECT_CONTACT_PROXY_DISTANCE_THRESHOLD,
+    ) -> torch.Tensor:
+        if body_indices.numel() == 0 or not self.motion.has_object:
+            return torch.zeros((self.num_envs, body_indices.numel()), device=self.device, dtype=torch.bool)
+
+        half_extents = 0.5 * torch.clamp(self.object_size, min=1.0e-4)
+        body_pos_obj = self._body_positions_in_object_frame(body_indices)
+        signed_outside = torch.abs(body_pos_obj) - half_extents.unsqueeze(1)
+        outside = torch.clamp(signed_outside, min=0.0)
+        outside_dist = torch.linalg.norm(outside, dim=-1)
+        return outside_dist <= float(distance_threshold)
+
+    def _proxy_body_object_contact_force_history(self, body_names: list[str]) -> torch.Tensor:
         if not body_names:
             return torch.zeros((self.num_envs, 1, 0, 3), device=self.device, dtype=torch.float32)
+
+        raw_history = getattr(self._env.simulator, "contact_forces_history", None)
+        if raw_history is None:
+            return torch.zeros((self.num_envs, 1, len(body_names), 3), device=self.device, dtype=torch.float32)
+
+        body_indices = self._object_contact_body_indices_by_names(body_names)
+        body_force_history = raw_history[:, :, body_indices, :].to(dtype=torch.float32)
+        proximity_mask = self._object_contact_proximity_mask_by_indices(body_indices).to(dtype=body_force_history.dtype)
+        return body_force_history * proximity_mask.unsqueeze(1).unsqueeze(-1)
+
+    def get_body_object_contact_force_history(self, body_names: list[str]) -> torch.Tensor:
+        if not body_names:
+            return torch.zeros((self.num_envs, 1, 0, 3), device=self.device, dtype=torch.float32)
+
+        proxy_history = self._proxy_body_object_contact_force_history(body_names)
+
         getter = getattr(self._env.simulator, "get_object_contact_force_history", None)
         if getter is None:
-            return torch.zeros((self.num_envs, 1, len(body_names), 3), device=self.device, dtype=torch.float32)
-        return getter(body_names)
+            return proxy_history
+
+        try:
+            filtered_history = getter(body_names).to(dtype=torch.float32)
+        except Exception:
+            return proxy_history
+
+        if filtered_history.shape[1] != proxy_history.shape[1]:
+            if filtered_history.shape[1] == 1:
+                filtered_history = filtered_history.expand(-1, proxy_history.shape[1], -1, -1)
+            elif proxy_history.shape[1] == 1:
+                proxy_history = proxy_history.expand(-1, filtered_history.shape[1], -1, -1)
+            else:
+                history_len = min(filtered_history.shape[1], proxy_history.shape[1])
+                filtered_history = filtered_history[:, :history_len]
+                proxy_history = proxy_history[:, :history_len]
+
+        filtered_norm = torch.linalg.norm(filtered_history, dim=-1)
+        proxy_norm = torch.linalg.norm(proxy_history, dim=-1)
+        use_proxy = proxy_norm > filtered_norm
+        return torch.where(use_proxy.unsqueeze(-1), proxy_history, filtered_history)
 
     def _body_positions_in_object_frame(self, body_indices: torch.Tensor) -> torch.Tensor:
         if body_indices.numel() == 0:
@@ -1752,34 +1836,51 @@ class MotionCommand(CommandTermBase):
         if env_ids.numel() == 0:
             return
 
-        if self._forced_clip_idx is not None:
-            self.clip_ids[env_ids] = int(self._forced_clip_idx)
-        elif self._debug_representative_clip_ids is not None and self._debug_representative_clip_ids.numel() > 0:
-            reps = self._debug_representative_clip_ids
-            self.clip_ids[env_ids] = reps[env_ids % reps.numel()]
-        elif self.multi_clip:
-            self._update_clip_success_stats(env_ids)
-            if self._env.is_evaluating:
-                self.clip_ids[env_ids] = 0
-            else:
-                if self._clip_sampling_weights is None:
-                    self.clip_ids[env_ids] = torch.randint(
-                        0, self.motion.num_clips, (env_ids.numel(),), device=self.device
-                    )
-                else:
-                    self.clip_ids[env_ids] = torch.multinomial(
-                        self._clip_sampling_weights, env_ids.numel(), replacement=True
-                    )
-        else:
-            self.clip_ids[env_ids] = 0
+        debug_tile_layout = os.environ.get("HOLOSOMA_DEBUG_TILE_LAYOUT", "0").lower() in ("1", "true", "yes", "on")
+        use_fixed_tile_layout = (
+            debug_tile_layout
+            and self.multi_clip
+            and self.motion_cfg.pair_terrain_with_motion
+            and self._terrain_row_ids is not None
+            and self._terrain_row_count > 0
+            and self.motion.num_clips > 0
+        )
 
-        if self._terrain_row_ids is not None:
-            if self._env.is_evaluating or self._terrain_row_count <= 1:
-                self._terrain_row_ids[env_ids] = 0
+        if use_fixed_tile_layout:
+            row_count = max(1, int(self._terrain_row_count))
+            tile_capacity = row_count * int(self.motion.num_clips)
+            tile_ids = torch.remainder(env_ids, tile_capacity)
+            self.clip_ids[env_ids] = torch.div(tile_ids, row_count, rounding_mode="floor")
+            self._terrain_row_ids[env_ids] = torch.remainder(tile_ids, row_count)
+        else:
+            if self._forced_clip_idx is not None:
+                self.clip_ids[env_ids] = int(self._forced_clip_idx)
+            elif self._debug_representative_clip_ids is not None and self._debug_representative_clip_ids.numel() > 0:
+                reps = self._debug_representative_clip_ids
+                self.clip_ids[env_ids] = reps[env_ids % reps.numel()]
+            elif self.multi_clip:
+                self._update_clip_success_stats(env_ids)
+                if self._env.is_evaluating:
+                    self.clip_ids[env_ids] = 0
+                else:
+                    if self._clip_sampling_weights is None:
+                        self.clip_ids[env_ids] = torch.randint(
+                            0, self.motion.num_clips, (env_ids.numel(),), device=self.device
+                        )
+                    else:
+                        self.clip_ids[env_ids] = torch.multinomial(
+                            self._clip_sampling_weights, env_ids.numel(), replacement=True
+                        )
             else:
-                self._terrain_row_ids[env_ids] = torch.randint(
-                    0, self._terrain_row_count, (env_ids.numel(),), device=self.device
-                )
+                self.clip_ids[env_ids] = 0
+
+            if self._terrain_row_ids is not None:
+                if self._env.is_evaluating or self._terrain_row_count <= 1:
+                    self._terrain_row_ids[env_ids] = 0
+                else:
+                    self._terrain_row_ids[env_ids] = torch.randint(
+                        0, self._terrain_row_count, (env_ids.numel(),), device=self.device
+                    )
 
         # 0. Sample the time steps
         if self.use_adaptive_timesteps_sampler:
@@ -1817,6 +1918,7 @@ class MotionCommand(CommandTermBase):
         if self.command_only_env_mask is not None:
             self.command_only_env_mask[env_ids] = False
         self._update_sparse_object_goals_on_reset(env_ids, clip_lengths)
+        self._clear_runtime_default_pose_prepend(env_ids)
 
         # 1. Get the reference root/body poses
         root_pos = self.body_pos_w[env_ids, 0].clone()
@@ -1826,9 +1928,19 @@ class MotionCommand(CommandTermBase):
 
         dof_pos = self.joint_pos[env_ids].clone()
         dof_vel = self.joint_vel[env_ids].clone()
+        runtime_prepend_mask = self._runtime_default_pose_prepend_reset_mask(env_ids)
 
         if self._reset_to_default_pose:
             dof_pos, dof_vel, root_pos, root_rot, root_lin_vel, root_ang_vel = self._default_pose_reset_targets(env_ids)
+        elif torch.any(runtime_prepend_mask):
+            prepend_env_ids = env_ids[runtime_prepend_mask]
+            prepend_targets = self._default_pose_reset_targets(prepend_env_ids)
+            dof_pos[runtime_prepend_mask] = prepend_targets[0]
+            dof_vel[runtime_prepend_mask] = prepend_targets[1]
+            root_pos[runtime_prepend_mask] = prepend_targets[2]
+            root_rot[runtime_prepend_mask] = prepend_targets[3]
+            root_lin_vel[runtime_prepend_mask] = prepend_targets[4]
+            root_ang_vel[runtime_prepend_mask] = prepend_targets[5]
 
         # 2. Adding noise
         reset_noise_scale = torch.ones((env_ids.numel(), 1), device=self.device, dtype=torch.float32)
@@ -1948,12 +2060,29 @@ class MotionCommand(CommandTermBase):
             )
             self._update_manual_goal_override(env_ids)
 
+        if torch.any(runtime_prepend_mask):
+            self._activate_runtime_default_pose_prepend(env_ids[runtime_prepend_mask])
+
         self._update_future_target_poses()
 
     def step(self) -> None:
         """called in _update_tasks_callback of the environment. (after compute_reward, before compute_observations)"""
         # 0. update time steps, all motion joint/body poses are updated automatically with the time steps.
         advance_mask = torch.ones_like(self.time_steps, dtype=torch.bool)
+        if (
+            self._runtime_default_pose_prepend_enabled
+            and self._runtime_default_pose_prepend_active is not None
+            and self._runtime_default_pose_prepend_step is not None
+        ):
+            active_mask = self._runtime_default_pose_prepend_active
+            if torch.any(active_mask):
+                advance_mask = advance_mask & ~active_mask
+                last_step_mask = active_mask & (
+                    self._runtime_default_pose_prepend_step >= (self._runtime_default_pose_prepend_steps - 1)
+                )
+                keep_warmup_mask = active_mask & ~last_step_mask
+                self._runtime_default_pose_prepend_step[keep_warmup_mask] += 1
+                self._runtime_default_pose_prepend_active[last_step_mask] = False
 
         # Handle freeze_at_timestep_zero_prob: for envs at timestep 0, randomly decide whether to advance
         freeze_prob = self.motion_cfg.freeze_at_timestep_zero_prob
@@ -2038,6 +2167,138 @@ class MotionCommand(CommandTermBase):
         if steps.ndim > offsets.ndim:
             offsets = offsets.view(-1, *([1] * (steps.ndim - 1)))
         return offsets + steps
+
+    def _clear_runtime_default_pose_prepend(self, env_ids: torch.Tensor) -> None:
+        if (
+            not self._runtime_default_pose_prepend_enabled
+            or self._runtime_default_pose_prepend_active is None
+            or self._runtime_default_pose_prepend_step is None
+        ):
+            return
+        self._runtime_default_pose_prepend_active[env_ids] = False
+        self._runtime_default_pose_prepend_step[env_ids] = 0
+
+    def _runtime_default_pose_prepend_reset_mask(self, env_ids: torch.Tensor) -> torch.Tensor:
+        if not self._runtime_default_pose_prepend_enabled:
+            return torch.zeros((env_ids.numel(),), device=self.device, dtype=torch.bool)
+        return self.time_steps[env_ids] == 0
+
+    def _activate_runtime_default_pose_prepend(self, env_ids: torch.Tensor) -> None:
+        if (
+            env_ids.numel() == 0
+            or not self._runtime_default_pose_prepend_enabled
+            or self._runtime_default_pose_prepend_active is None
+            or self._runtime_default_pose_prepend_step is None
+        ):
+            return
+        self._runtime_default_pose_prepend_active[env_ids] = True
+        self._runtime_default_pose_prepend_step[env_ids] = 0
+
+    def get_runtime_default_pose_prepend_mask(self) -> torch.Tensor:
+        if self._runtime_default_pose_prepend_active is None:
+            return torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
+        return self._runtime_default_pose_prepend_active
+
+    def _runtime_default_pose_prepend_active_env_ids(self) -> torch.Tensor:
+        if not self._runtime_default_pose_prepend_enabled or self._runtime_default_pose_prepend_active is None:
+            return torch.zeros((0,), device=self.device, dtype=torch.long)
+        return torch.nonzero(self._runtime_default_pose_prepend_active, as_tuple=False).flatten()
+
+    def _runtime_default_pose_prepend_alpha(self, env_ids: torch.Tensor) -> torch.Tensor:
+        assert self._runtime_default_pose_prepend_step is not None
+        alpha = self._runtime_default_pose_prepend_step[env_ids].to(dtype=torch.float32)
+        return alpha / float(self._runtime_default_pose_prepend_steps)
+
+    def _blend_runtime_default_pose_prepend_lerp(self, current: torch.Tensor, key: str) -> torch.Tensor:
+        env_ids = self._runtime_default_pose_prepend_active_env_ids()
+        if env_ids.numel() == 0:
+            return current
+        defaults = self._runtime_default_pose_prepend_defaults.get(key)
+        if defaults is None:
+            return current
+        clip_ids = self.clip_ids[env_ids]
+        alpha = self._runtime_default_pose_prepend_alpha(env_ids)
+        alpha_view = alpha.view(-1, *([1] * (current.ndim - 1)))
+        blended = current.clone()
+        blended[env_ids] = defaults[clip_ids] + alpha_view * (current[env_ids] - defaults[clip_ids])
+        return blended
+
+    def _blend_runtime_default_pose_prepend_quat(self, current: torch.Tensor, key: str) -> torch.Tensor:
+        env_ids = self._runtime_default_pose_prepend_active_env_ids()
+        if env_ids.numel() == 0:
+            return current
+        defaults = self._runtime_default_pose_prepend_defaults.get(key)
+        if defaults is None:
+            return current
+        clip_ids = self.clip_ids[env_ids]
+        start = defaults[clip_ids]
+        end = current[env_ids]
+        alpha = self._runtime_default_pose_prepend_alpha(env_ids)
+
+        if current.ndim == 2:
+            blended_env = slerp(start, end, alpha.unsqueeze(-1))
+        elif current.ndim == 3:
+            alpha_flat = alpha.unsqueeze(1).expand(-1, start.shape[1]).reshape(-1, 1)
+            blended_env = slerp(start.reshape(-1, 4), end.reshape(-1, 4), alpha_flat).view_as(start)
+        else:
+            raise ValueError(f"Unsupported quaternion tensor rank {current.ndim}.")
+
+        blended = current.clone()
+        blended[env_ids] = blended_env
+        return blended
+
+    def _raw_motion_joint_pos(self) -> torch.Tensor:
+        motion_idx = self._get_motion_indices(self.time_steps)
+        joint_pos = self.motion.joint_pos[motion_idx]
+        return self._blend_runtime_default_pose_prepend_lerp(joint_pos, "joint_pos")
+
+    def _raw_motion_joint_vel(self) -> torch.Tensor:
+        motion_idx = self._get_motion_indices(self.time_steps)
+        joint_vel = self.motion.joint_vel[motion_idx]
+        return self._blend_runtime_default_pose_prepend_lerp(joint_vel, "joint_vel")
+
+    def _raw_motion_body_pos_w(self) -> torch.Tensor:
+        motion_idx = self._get_motion_indices(self.time_steps)
+        body_pos = self.motion.body_pos_w[motion_idx]
+        return self._blend_runtime_default_pose_prepend_lerp(body_pos, "body_pos")
+
+    def _raw_motion_body_quat_w(self) -> torch.Tensor:
+        motion_idx = self._get_motion_indices(self.time_steps)
+        body_quat = self.motion.body_quat_w[motion_idx]
+        return self._blend_runtime_default_pose_prepend_quat(body_quat, "body_quat")
+
+    def _raw_motion_body_lin_vel_w(self) -> torch.Tensor:
+        motion_idx = self._get_motion_indices(self.time_steps)
+        body_lin_vel = self.motion.body_lin_vel_w[motion_idx]
+        return self._blend_runtime_default_pose_prepend_lerp(body_lin_vel, "body_lin_vel")
+
+    def _raw_motion_body_ang_vel_w(self) -> torch.Tensor:
+        motion_idx = self._get_motion_indices(self.time_steps)
+        body_ang_vel = self.motion.body_ang_vel_w[motion_idx]
+        return self._blend_runtime_default_pose_prepend_lerp(body_ang_vel, "body_ang_vel")
+
+    def _raw_motion_object_pos_w(self) -> torch.Tensor:
+        if not self.motion.has_object:
+            return torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
+        motion_idx = self._get_motion_indices(self.time_steps)
+        object_pos = self.motion.object_pos_w[motion_idx]
+        return self._blend_runtime_default_pose_prepend_lerp(object_pos, "object_pos")
+
+    def _raw_motion_object_quat_w(self) -> torch.Tensor:
+        if not self.motion.has_object:
+            quat = torch.zeros(self.num_envs, 4, device=self.device, dtype=torch.float32)
+            quat[:, 3] = 1.0
+            return quat
+        motion_idx = self._get_motion_indices(self.time_steps)
+        object_quat = self.motion.object_quat_w[motion_idx]
+        return self._blend_runtime_default_pose_prepend_quat(object_quat, "object_quat")
+
+    def _raw_motion_object_lin_vel_w(self) -> torch.Tensor:
+        if not self.motion.has_object:
+            return torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
+        motion_idx = self._get_motion_indices(self.time_steps)
+        object_lin_vel = self.motion.object_lin_vel_w[motion_idx]
+        return self._blend_runtime_default_pose_prepend_lerp(object_lin_vel, "object_lin_vel")
 
     @property
     def current_clip_lengths(self) -> torch.Tensor:
@@ -2186,6 +2447,12 @@ class MotionCommand(CommandTermBase):
     def _carry_extension_curriculum_progress(self) -> float:
         if self._sparse_goal_cfg is None:
             return 1.0
+        progress = self._iteration_curriculum_progress(
+            self._sparse_goal_cfg.carry_extension_range_start_iter,
+            self._sparse_goal_cfg.carry_extension_range_end_iter,
+        )
+        if progress is not None:
+            return progress
         ramp_cfg = self._sparse_goal_cfg.carry_extension_range_ramp_resets
         if ramp_cfg is None:
             ramp_cfg = self._sparse_goal_cfg.carry_extension_prob_ramp_resets
@@ -2453,7 +2720,11 @@ class MotionCommand(CommandTermBase):
 
         phase_ids = self._current_contact_prior_phase_ids()
         total_count = self._contact_prior_total_count[self.clip_ids, phase_ids]
-        valid_mask = total_count > 0.0
+        observed_contact_count = self._contact_prior_contact_sum[self.clip_ids, phase_ids].sum(dim=-1)
+        # A prior should only be considered valid after we have actually observed at least one
+        # supported body-object contact for this clip/phase. Otherwise confidence can rise from
+        # stable co-tracking samples while all contact targets remain identically zero.
+        valid_mask = observed_contact_count > 0.0
         if torch.any(valid_mask):
             occupancy[valid_mask] = self._contact_prior_contact_sum[self.clip_ids[valid_mask], phase_ids[valid_mask]] / (
                 total_count[valid_mask].unsqueeze(-1).clamp_min(1.0)
@@ -2765,6 +3036,15 @@ class MotionCommand(CommandTermBase):
                 return self._clamp01(float(self._sparse_goal_cfg.eval_carry_extension_prob))
             return self._clamp01(float(self._sparse_goal_cfg.carry_extension_prob_end))
 
+        iter_value = self._iteration_schedule_value(
+            float(self._sparse_goal_cfg.carry_extension_prob_start),
+            float(self._sparse_goal_cfg.carry_extension_prob_end),
+            start_iter=self._sparse_goal_cfg.carry_extension_prob_start_iter,
+            end_iter=self._sparse_goal_cfg.carry_extension_prob_end_iter,
+        )
+        if iter_value is not None:
+            return self._clamp01(iter_value)
+
         prob_start = float(self._sparse_goal_cfg.carry_extension_prob_start)
         prob_end = float(self._sparse_goal_cfg.carry_extension_prob_end)
         ramp_cfg = self._sparse_goal_cfg.carry_extension_prob_ramp_resets
@@ -3028,7 +3308,16 @@ class MotionCommand(CommandTermBase):
             self.manual_goal_is_external[env_ids] = True
 
     def _get_env_offsets(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
-        base = self._env.simulator.scene.env_origins
+        terrain_state = None
+        terrain_manager = getattr(self._env, "terrain_manager", None)
+        if terrain_manager is not None:
+            try:
+                terrain_state = terrain_manager.get_state("locomotion_terrain")
+            except Exception:
+                terrain_state = None
+        base = getattr(terrain_state, "env_origins", None)
+        if base is None:
+            base = self._env.simulator.scene.env_origins
         if self._clip_terrain_offsets is None or not hasattr(self, "clip_ids"):
             return base if env_ids is None else base[env_ids]
 
@@ -3055,90 +3344,78 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     @property
     def joint_pos(self) -> torch.Tensor:
-        motion_idx = self._get_motion_indices(self.time_steps)
-        return self.motion.joint_pos[motion_idx]
+        return self._raw_motion_joint_pos()
 
     @property
     def joint_vel(self) -> torch.Tensor:
-        motion_idx = self._get_motion_indices(self.time_steps)
-        return self.motion.joint_vel[motion_idx]
+        return self._raw_motion_joint_vel()
 
     @property
     def body_pos_w(self) -> torch.Tensor:
-        motion_idx = self._get_motion_indices(self.time_steps)
-        pos = self.motion.body_pos_w[motion_idx][:, self.tracked_body_indexes]
+        pos = self._raw_motion_body_pos_w()[:, self.tracked_body_indexes]
         if self.motion_cfg.align_motion_to_init_yaw:
             return self._apply_motion_alignment_pos(pos)
         return pos + self._get_env_offsets()[:, None, :]
 
     @property
     def body_quat_w(self) -> torch.Tensor:
-        motion_idx = self._get_motion_indices(self.time_steps)
-        quat = self.motion.body_quat_w[motion_idx][:, self.tracked_body_indexes]
+        quat = self._raw_motion_body_quat_w()[:, self.tracked_body_indexes]
         if self.motion_cfg.align_motion_to_init_yaw:
             return self._apply_motion_alignment_quat(quat)
         return quat
 
     @property
     def body_lin_vel_w(self) -> torch.Tensor:
-        motion_idx = self._get_motion_indices(self.time_steps)
-        vel = self.motion.body_lin_vel_w[motion_idx][:, self.tracked_body_indexes]
+        vel = self._raw_motion_body_lin_vel_w()[:, self.tracked_body_indexes]
         if self.motion_cfg.align_motion_to_init_yaw:
             return self._apply_motion_alignment_vec(vel)
         return vel
 
     @property
     def body_ang_vel_w(self) -> torch.Tensor:
-        motion_idx = self._get_motion_indices(self.time_steps)
-        vel = self.motion.body_ang_vel_w[motion_idx][:, self.tracked_body_indexes]
+        vel = self._raw_motion_body_ang_vel_w()[:, self.tracked_body_indexes]
         if self.motion_cfg.align_motion_to_init_yaw:
             return self._apply_motion_alignment_vec(vel)
         return vel
 
     @property
     def ref_pos_w(self) -> torch.Tensor:
-        motion_idx = self._get_motion_indices(self.time_steps)
-        pos = self.motion.body_pos_w[motion_idx, self.ref_body_index]
+        pos = self._raw_motion_body_pos_w()[:, self.ref_body_index]
         if self.motion_cfg.align_motion_to_init_yaw:
             return self._apply_motion_alignment_pos(pos)
         return pos + self._get_env_offsets()
 
     @property
     def ref_quat_w(self) -> torch.Tensor:
-        motion_idx = self._get_motion_indices(self.time_steps)
-        quat = self.motion.body_quat_w[motion_idx, self.ref_body_index]
+        quat = self._raw_motion_body_quat_w()[:, self.ref_body_index]
         if self.motion_cfg.align_motion_to_init_yaw:
             return self._apply_motion_alignment_quat(quat)
         return quat
 
     @property
     def root_pos_w(self) -> torch.Tensor:
-        motion_idx = self._get_motion_indices(self.time_steps)
-        pos = self.motion.body_pos_w[motion_idx, 0]
+        pos = self._raw_motion_body_pos_w()[:, 0]
         if self.motion_cfg.align_motion_to_init_yaw:
             return self._apply_motion_alignment_pos(pos)
         return pos + self._get_env_offsets()
 
     @property
     def root_quat_w(self) -> torch.Tensor:
-        motion_idx = self._get_motion_indices(self.time_steps)
-        quat = self.motion.body_quat_w[motion_idx, 0]
+        quat = self._raw_motion_body_quat_w()[:, 0]
         if self.motion_cfg.align_motion_to_init_yaw:
             return self._apply_motion_alignment_quat(quat)
         return quat
 
     @property
     def ref_lin_vel_w(self) -> torch.Tensor:
-        motion_idx = self._get_motion_indices(self.time_steps)
-        vel = self.motion.body_lin_vel_w[motion_idx, self.ref_body_index]
+        vel = self._raw_motion_body_lin_vel_w()[:, self.ref_body_index]
         if self.motion_cfg.align_motion_to_init_yaw:
             return self._apply_motion_alignment_vec(vel)
         return vel
 
     @property
     def ref_ang_vel_w(self) -> torch.Tensor:
-        motion_idx = self._get_motion_indices(self.time_steps)
-        vel = self.motion.body_ang_vel_w[motion_idx, self.ref_body_index]
+        vel = self._raw_motion_body_ang_vel_w()[:, self.ref_body_index]
         if self.motion_cfg.align_motion_to_init_yaw:
             return self._apply_motion_alignment_vec(vel)
         return vel
@@ -3209,9 +3486,7 @@ class MotionCommand(CommandTermBase):
     def object_pos_w(self) -> torch.Tensor:
         if not self.motion.has_object:
             return torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
-        # Applies env origins, but ideally we should rely on the simulator
-        motion_idx = self._get_motion_indices(self.time_steps)
-        pos = self.motion.object_pos_w[motion_idx]
+        pos = self._raw_motion_object_pos_w()
         if self.motion_cfg.align_motion_to_init_yaw:
             return self._apply_motion_alignment_pos(pos)
         return pos + self._get_env_offsets()
@@ -3222,8 +3497,7 @@ class MotionCommand(CommandTermBase):
             quat = torch.zeros(self.num_envs, 4, device=self.device, dtype=torch.float32)
             quat[:, 3] = 1.0
             return quat
-        motion_idx = self._get_motion_indices(self.time_steps)
-        quat = self.motion.object_quat_w[motion_idx]
+        quat = self._raw_motion_object_quat_w()
         if self.motion_cfg.align_motion_to_init_yaw:
             return self._apply_motion_alignment_quat(quat)
         return quat
@@ -3232,8 +3506,7 @@ class MotionCommand(CommandTermBase):
     def object_lin_vel_w(self) -> torch.Tensor:
         if not self.motion.has_object:
             return torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
-        motion_idx = self._get_motion_indices(self.time_steps)
-        vel = self.motion.object_lin_vel_w[motion_idx]
+        vel = self._raw_motion_object_lin_vel_w()
         if self.motion_cfg.align_motion_to_init_yaw:
             return self._apply_motion_alignment_vec(vel)
         return vel
@@ -3379,6 +3652,10 @@ class MotionCommand(CommandTermBase):
             self.pickup_object_rel_z_baseline.zero_()
         if self.pickup_consecutive_counter is not None:
             self.pickup_consecutive_counter.zero_()
+        if self._runtime_default_pose_prepend_active is not None:
+            self._runtime_default_pose_prepend_active.zero_()
+        if self._runtime_default_pose_prepend_step is not None:
+            self._runtime_default_pose_prepend_step.zero_()
 
     def _update_motion_alignment(self, env_ids: torch.Tensor) -> None:
         if env_ids.numel() == 0:
@@ -3840,11 +4117,62 @@ class MotionCommand(CommandTermBase):
                 "Please check that the motion file and robot configuration are compatible."
             ) from exc
 
-    def _build_default_pose_state(self, use_motion_end: bool = False) -> dict[str, torch.Tensor]:
-        """Build the state dict representing the robot's default standing pose.
+    def _configure_runtime_default_pose_prepend(self) -> None:
+        self._runtime_default_pose_prepend_enabled = False
+        self._runtime_default_pose_prepend_steps = 0
+        self._runtime_default_pose_prepend_defaults = {}
+        self._runtime_default_pose_prepend_active = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
+        self._runtime_default_pose_prepend_step = torch.zeros((self.num_envs,), device=self.device, dtype=torch.long)
 
-        By default, anchor root pos/yaw to the motion start; when use_motion_end is True, anchor to motion end.
-        """
+        if not self.multi_clip or not self.motion_cfg.enable_default_pose_prepend:
+            return
+
+        duration = self.motion_cfg.default_pose_prepend_duration_s
+        if duration <= 0.0:
+            return
+
+        if self._env.simulator.get_simulator_type() != SimulatorType.ISAACSIM:
+            logger.warning("Runtime default-pose prepend only supports IsaacSim; disabling multi-clip prepend.")
+            return
+
+        num_steps = round(duration / self._env.dt)
+        if num_steps <= 1:
+            logger.warning(
+                "Runtime default pose prepend duration {}s is too short for dt {}; disabling multi-clip prepend.",
+                duration,
+                self._env.dt,
+            )
+            return
+
+        default_states = [
+            self._build_default_pose_state_robot_order(int(motion_idx.item()))
+            for motion_idx in self.motion.clip_offsets
+        ]
+        if not default_states:
+            return
+
+        self._runtime_default_pose_prepend_defaults = {
+            "joint_pos": torch.stack([state["joint_pos"] for state in default_states], dim=0),
+            "joint_vel": torch.stack([state["joint_vel"] for state in default_states], dim=0),
+            "body_pos": torch.stack([state["body_pos"] for state in default_states], dim=0),
+            "body_quat": torch.stack([state["body_quat"] for state in default_states], dim=0),
+            "body_lin_vel": torch.stack([state["body_lin_vel"] for state in default_states], dim=0),
+            "body_ang_vel": torch.stack([state["body_ang_vel"] for state in default_states], dim=0),
+            "object_pos": torch.stack([state["object_pos"] for state in default_states], dim=0),
+            "object_quat": torch.stack([state["object_quat"] for state in default_states], dim=0),
+            "object_lin_vel": torch.stack([state["object_lin_vel"] for state in default_states], dim=0),
+        }
+        self._runtime_default_pose_prepend_enabled = True
+        self._runtime_default_pose_prepend_steps = num_steps
+        logger.info(
+            "Using runtime default-pose prepend for multi-clip motion bank ({} clips, {} frames, {}s).",
+            self.motion.num_clips,
+            num_steps,
+            duration,
+        )
+
+    def _build_default_pose_state_robot_order(self, motion_idx: int) -> dict[str, torch.Tensor]:
+        """Build the robot default standing pose anchored to a specific motion frame."""
         init_state = self._env.robot_config.init_state
         joint_pos = self._env.default_dof_pos_base.squeeze(0).to(self.device)
         joint_vel = torch.zeros_like(joint_pos)
@@ -3852,20 +4180,15 @@ class MotionCommand(CommandTermBase):
         init_root_quat = torch.tensor(init_state.rot, dtype=torch.float32, device=self.device).unsqueeze(0)
         init_roll, init_pitch, _ = get_euler_xyz(init_root_quat, w_last=True)
 
-        motion_idx = -1 if use_motion_end else 0
-
-        # Assume the pelvis is the first in robot_body_names
         motion_root_pos = self.motion.body_pos_w[motion_idx, 0].to(self.device)
         motion_root_quat = self.motion.body_quat_w[motion_idx, 0].to(self.device).unsqueeze(0)
         _, _, motion_yaw = get_euler_xyz(motion_root_quat, w_last=True)
 
-        # Keep z from init config but adopt the clip's x,y at the chosen anchor frame.
         default_root_pos = torch.tensor(
             [motion_root_pos[0], motion_root_pos[1], init_state.pos[2]],
             dtype=torch.float32,
             device=self.device,
-        ).unsqueeze(0)
-        # Keep roll/pitch from init config but adopt the clip's yaw at the chosen anchor frame.
+        )
         default_root_quat = quat_from_euler_xyz(
             init_roll.squeeze(0),
             init_pitch.squeeze(0),
@@ -3883,21 +4206,17 @@ class MotionCommand(CommandTermBase):
             default_root_ang_vel,
         )
 
-        default_body_pos = self._map_robot_bodies_to_motion_order(body_states["pos"])
-        default_body_quat = self._map_robot_bodies_to_motion_order(body_states["quat"])
-        default_body_lin_vel = self._map_robot_bodies_to_motion_order(body_states["lin_vel"])
-        default_body_ang_vel = self._map_robot_bodies_to_motion_order(body_states["ang_vel"])
-
         if self.motion.has_object:
-            object_pos = self.motion._object_pos_w[motion_idx].to(self.device)
-            object_quat = self.motion._object_quat_w[motion_idx].to(self.device)
-            object_lin_vel = self.motion._object_lin_vel_w[motion_idx].to(self.device)
-            object_size = self.motion._object_size[motion_idx].to(self.device)
+            object_pos = self.motion.object_pos_w[motion_idx].to(self.device)
+            object_quat = self.motion.object_quat_w[motion_idx].to(self.device)
+            object_lin_vel = self.motion.object_lin_vel_w[motion_idx].to(self.device)
+            object_size = self.motion.object_size[motion_idx].to(self.device)
         else:
-            object_pos = torch.zeros(0, 3, device=self.device, dtype=torch.float32)
-            object_quat = torch.zeros(0, 4, device=self.device, dtype=torch.float32)
-            object_lin_vel = torch.zeros(0, 3, device=self.device, dtype=torch.float32)
-            object_size = torch.zeros(0, 3, device=self.device, dtype=torch.float32)
+            object_pos = torch.zeros(3, device=self.device, dtype=torch.float32)
+            object_quat = torch.zeros(4, device=self.device, dtype=torch.float32)
+            object_quat[3] = 1.0
+            object_lin_vel = torch.zeros(3, device=self.device, dtype=torch.float32)
+            object_size = torch.zeros(3, device=self.device, dtype=torch.float32)
 
         return {
             "joint_pos": joint_pos.clone(),
@@ -3906,14 +4225,39 @@ class MotionCommand(CommandTermBase):
             "root_quat": default_root_quat,
             "root_lin_vel": default_root_lin_vel,
             "root_ang_vel": default_root_ang_vel,
-            "body_pos": default_body_pos,
-            "body_quat": default_body_quat,
-            "body_lin_vel": default_body_lin_vel,
-            "body_ang_vel": default_body_ang_vel,
+            "body_pos": body_states["pos"],
+            "body_quat": body_states["quat"],
+            "body_lin_vel": body_states["lin_vel"],
+            "body_ang_vel": body_states["ang_vel"],
             "object_pos": object_pos,
             "object_quat": object_quat,
             "object_lin_vel": object_lin_vel,
             "object_size": object_size,
+        }
+
+    def _build_default_pose_state(self, use_motion_end: bool = False) -> dict[str, torch.Tensor]:
+        """Build the state dict representing the robot's default standing pose.
+
+        By default, anchor root pos/yaw to the motion start; when use_motion_end is True, anchor to motion end.
+        """
+        motion_idx = -1 if use_motion_end else 0
+        default_state = self._build_default_pose_state_robot_order(motion_idx)
+
+        return {
+            "joint_pos": default_state["joint_pos"].clone(),
+            "joint_vel": default_state["joint_vel"],
+            "root_pos": default_state["root_pos"],
+            "root_quat": default_state["root_quat"],
+            "root_lin_vel": default_state["root_lin_vel"],
+            "root_ang_vel": default_state["root_ang_vel"],
+            "body_pos": self._map_robot_bodies_to_motion_order(default_state["body_pos"]),
+            "body_quat": self._map_robot_bodies_to_motion_order(default_state["body_quat"]),
+            "body_lin_vel": self._map_robot_bodies_to_motion_order(default_state["body_lin_vel"]),
+            "body_ang_vel": self._map_robot_bodies_to_motion_order(default_state["body_ang_vel"]),
+            "object_pos": default_state["object_pos"],
+            "object_quat": default_state["object_quat"],
+            "object_lin_vel": default_state["object_lin_vel"],
+            "object_size": default_state["object_size"],
         }
 
     def _add_transition_to_motion(self, default_state: dict[str, torch.Tensor], num_steps: int, prepend: bool) -> None:

@@ -123,8 +123,12 @@ def _update_module_config(
 ) -> ModuleConfig:
     input_dim = [name for name in module_cfg.input_dim if name != "perception_obs"]
 
+    module_type = module_cfg.type
     layer_cfg = module_cfg.layer_config
-    use_extra = config.perception.encoder_type != "time_gru"
+    use_extra = (
+        config.perception.encoder_type != "time_gru"
+        and module_type not in {"TransformerEncoder", "TransformerObsTokenEncoder", "TerrainTransformerObsTokenEncoder"}
+    )
     layer_cfg = dataclasses.replace(
         layer_cfg,
         extra_input_to_hidden=use_extra,
@@ -133,7 +137,6 @@ def _update_module_config(
         perception_encoder_type=config.perception.encoder_type,
     )
 
-    module_type = module_cfg.type
     if module_type == "MLP":
         module_type = "MLPPerceptionEncoder"
         module_inputs = tuple(name for name in input_dim if name != "perception_obs")

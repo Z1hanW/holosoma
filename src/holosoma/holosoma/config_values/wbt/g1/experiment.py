@@ -187,6 +187,58 @@ g1_29dof_wbt_motion_tracking_transformer = replace(
     ),
 )
 
+_terrain_transformer_actor_inputs = ["actor_obs_proprio", "motion_future_target_poses"]
+_terrain_transformer_critic_inputs = ["critic_obs", "motion_future_target_poses"]
+
+_terrain_transformer_actor_layer = replace(
+    algo.ppo.config.module_dict.actor.layer_config,
+    module_input_name=(),
+    encoder_input_name="motion_future_target_poses",
+    encoder_obs_token_name="actor_obs_proprio",
+    encoder_num_steps=10,
+    encoder_hidden_dims=[512, 256],
+    encoder_activation="ReLU",
+    transformer_latent_dim=256,
+    transformer_num_layers=2,
+    transformer_num_heads=2,
+    transformer_ff_dim=512,
+    transformer_dropout=0.0,
+    transformer_pooling="first",
+    hidden_dims=[1024, 512],
+)
+
+_terrain_transformer_module_dict = PPOModuleDictConfig(
+    actor=replace(
+        algo.ppo.config.module_dict.actor,
+        type="TerrainTransformerObsTokenEncoder",
+        input_dim=_terrain_transformer_actor_inputs,
+        layer_config=_terrain_transformer_actor_layer,
+    ),
+    critic=replace(
+        algo.ppo.config.module_dict.critic,
+        type="MLP",
+        input_dim=_terrain_transformer_critic_inputs,
+    ),
+)
+
+g1_terrain_transformer = replace(
+    g1_29dof_wbt_motion_tracking,
+    training=replace(
+        g1_29dof_wbt_motion_tracking.training,
+        name="g1_terrain_transformer",
+    ),
+    observation=observation.g1_29dof_wbt_observation_terrain_transformer,
+    algo=replace(
+        algo.ppo,
+        config=replace(
+            algo.ppo.config,
+            module_dict=_terrain_transformer_module_dict,
+            normalize_actor_obs=False,
+            normalize_critic_obs=False,
+        ),
+    ),
+)
+
 _videomimic_actor_inputs = ["actor_obs", "actor_obs_target"]
 _videomimic_critic_inputs = ["critic_obs", "critic_obs_target"]
 
@@ -232,6 +284,37 @@ _videomimic_transformer_module_dict = PPOModuleDictConfig(
     ),
 )
 
+_videomimic_terrain_transformer_layer = replace(
+    algo.ppo.config.module_dict.actor.layer_config,
+    module_input_name=(),
+    encoder_input_name="actor_obs_target",
+    encoder_obs_token_name="actor_obs",
+    encoder_num_steps=1,
+    encoder_hidden_dims=[512, 256],
+    encoder_activation="ReLU",
+    transformer_latent_dim=256,
+    transformer_num_layers=2,
+    transformer_num_heads=2,
+    transformer_ff_dim=512,
+    transformer_dropout=0.0,
+    transformer_pooling="first",
+    hidden_dims=[1024, 512],
+)
+
+_videomimic_terrain_transformer_module_dict = PPOModuleDictConfig(
+    actor=replace(
+        algo.ppo.config.module_dict.actor,
+        type="TerrainTransformerObsTokenEncoder",
+        input_dim=_videomimic_actor_inputs,
+        layer_config=_videomimic_terrain_transformer_layer,
+    ),
+    critic=replace(
+        algo.ppo.config.module_dict.critic,
+        type="MLP",
+        input_dim=_videomimic_critic_inputs,
+    ),
+)
+
 g1_29dof_wbt_videomimic_mlp = replace(
     g1_29dof_wbt,
     training=replace(
@@ -255,6 +338,25 @@ g1_29dof_wbt_videomimic_transformer = replace(
     algo=replace(
         algo.ppo,
         config=replace(algo.ppo.config, module_dict=_videomimic_transformer_module_dict),
+    ),
+)
+
+g1_29dof_wbt_videomimic_terrain_transformer = replace(
+    g1_29dof_wbt,
+    training=replace(
+        g1_29dof_wbt.training,
+        name="g1_29dof_wbt_videomimic_terrain_transformer",
+    ),
+    observation=observation.g1_29dof_wbt_observation_videomimic,
+    algo=replace(
+        algo.ppo,
+        config=replace(
+            algo.ppo.config,
+            module_dict=_videomimic_terrain_transformer_module_dict,
+            normalize_actor_obs=False,
+            normalize_critic_obs=False,
+            use_symmetry=False,
+        ),
     ),
 )
 
@@ -516,6 +618,8 @@ __all__ = [
     "g1_29dof_wbt_motion_tracking",
     "g1_29dof_wbt_motion_tracking_mlp_encoder",
     "g1_29dof_wbt_motion_tracking_transformer",
+    "g1_terrain_transformer",
+    "g1_29dof_wbt_videomimic_terrain_transformer",
     "g1_29dof_wbt_fast_sac",
     "g1_29dof_wbt_fast_sac_w_object",
     "g1_29dof_wbt_w_object",

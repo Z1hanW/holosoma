@@ -178,6 +178,10 @@ DISTILL_LOSS_TYPE=${DISTILL_LOSS_TYPE:-mse}
 DAGGER_IGNORE_ZERO_TEACHER_ACTIONS=${DAGGER_IGNORE_ZERO_TEACHER_ACTIONS:-True}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.05}
+ENABLE_DEFAULT_POSE_PREPEND=${ENABLE_DEFAULT_POSE_PREPEND:-False}
+DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0.0}
+ENABLE_DEFAULT_POSE_APPEND=${ENABLE_DEFAULT_POSE_APPEND:-False}
+DEFAULT_POSE_APPEND_DURATION_S=${DEFAULT_POSE_APPEND_DURATION_S:-0.0}
 RESET_NOISE_SCALE=${RESET_NOISE_SCALE:-1.0}
 SAVE_INTERVAL=${SAVE_INTERVAL:-200}
 LOGGER=${LOGGER:-logger:wandb}
@@ -206,6 +210,7 @@ echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} dagger_loss_coef=${DAGGER_LOSS_COEF} t
 echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
 echo "[INFO] total_envs=${NUM_ENVS} world_size=${NPROC} envs_per_rank=$((NUM_ENVS / NPROC))"
 echo "[INFO] init_noise_std=${INIT_NOISE_STD} actor_min_noise_std=${ACTOR_MIN_NOISE_STD}"
+echo "[INFO] default_pose_prepend=${ENABLE_DEFAULT_POSE_PREPEND} duration_s=${DEFAULT_POSE_PREPEND_DURATION_S} default_pose_append=${ENABLE_DEFAULT_POSE_APPEND} append_duration_s=${DEFAULT_POSE_APPEND_DURATION_S}"
 
 run_distill_stage() {
   local stage_label="$1"
@@ -266,10 +271,10 @@ run_distill_stage() {
     --command.setup-terms.motion-command.params.motion-config.pair-terrain-with-motion="${PAIR_TERRAIN_WITH_MOTION}"
     --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob="${stage_start_at_timestep_zero_prob}"
     --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.overall-noise-scale="${stage_reset_noise_scale}"
-    --command.setup-terms.motion-command.params.motion-config.enable-default-pose-append=False
-    --command.setup-terms.motion-command.params.motion-config.default-pose-append-duration-s=0
-    --command.setup-terms.motion-command.params.motion-config.enable-default-pose-prepend=False
-    --command.setup-terms.motion-command.params.motion-config.default-pose-prepend-duration-s=0
+    --command.setup-terms.motion-command.params.motion-config.enable-default-pose-append="${ENABLE_DEFAULT_POSE_APPEND}"
+    --command.setup-terms.motion-command.params.motion-config.default-pose-append-duration-s="${DEFAULT_POSE_APPEND_DURATION_S}"
+    --command.setup-terms.motion-command.params.motion-config.enable-default-pose-prepend="${ENABLE_DEFAULT_POSE_PREPEND}"
+    --command.setup-terms.motion-command.params.motion-config.default-pose-prepend-duration-s="${DEFAULT_POSE_PREPEND_DURATION_S}"
     --robot.object.enabled=True
     --robot.object.object-urdf-path "${OBJECT_URDF}"
     "${LOGGER}"

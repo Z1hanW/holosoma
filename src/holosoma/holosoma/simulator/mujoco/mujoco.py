@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import mujoco
 import mujoco.viewer
@@ -171,6 +172,9 @@ class MuJoCo(BaseSimulator):
         snapshot_path = os.getenv("HOLOSOMA_MUJOCO_OBJECT_GEOM_SNAPSHOT_PATH", "").strip()
         self._mujoco_object_geom_snapshot_path: str | None = snapshot_path or None
         self._mujoco_object_geom_snapshot_written: bool = False
+        scene_xml_snapshot_path = os.getenv("HOLOSOMA_MUJOCO_SCENE_XML_SNAPSHOT_PATH", "").strip()
+        self._mujoco_scene_xml_snapshot_path: str | None = scene_xml_snapshot_path or None
+        self._mujoco_scene_xml_snapshot_written: bool = False
 
         # Command system for keyboard/joystick controls
         # Initialize commands tensor matching IsaacGym format:
@@ -933,6 +937,21 @@ class MuJoCo(BaseSimulator):
         logger.info("Wrote MuJoCo object geom snapshot to {}", self._mujoco_object_geom_snapshot_path)
         return self._mujoco_object_geom_snapshot_path
 
+    def _maybe_write_scene_xml_snapshot(self) -> str | None:
+        if self._mujoco_scene_xml_snapshot_written or not self._mujoco_scene_xml_snapshot_path:
+            return self._mujoco_scene_xml_snapshot_path
+        assert self.root_model is not None
+
+        snapshot_path = Path(self._mujoco_scene_xml_snapshot_path).expanduser().resolve()
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = snapshot_path.with_suffix(snapshot_path.suffix + ".tmp")
+        mujoco.mj_saveLastXML(str(tmp_path), self.root_model)
+        os.replace(tmp_path, snapshot_path)
+        self._mujoco_scene_xml_snapshot_path = str(snapshot_path)
+        self._mujoco_scene_xml_snapshot_written = True
+        logger.info("Wrote MuJoCo scene XML snapshot to {}", self._mujoco_scene_xml_snapshot_path)
+        return self._mujoco_scene_xml_snapshot_path
+
     def _get_split_sim_state_extra_payload(self) -> dict[str, object]:
         """Publish MuJoCo-measured reference-body pose for split sim2sim alignment."""
         assert self.root_model is not None
@@ -1037,6 +1056,27 @@ class MuJoCo(BaseSimulator):
         object_geom_snapshot_path = self._maybe_write_object_geom_snapshot()
         if object_geom_snapshot_path:
             payload["mujoco_object_geom_snapshot_path"] = object_geom_snapshot_path
+        scene_xml_snapshot_path = self._maybe_write_scene_xml_snapshot()
+        if scene_xml_snapshot_path:
+            payload["mujoco_scene_xml_snapshot_path"] = scene_xml_snapshot_path
+        if self.robot_qpos_addr is not None:
+            payload["mujoco_robot_qpos_addr"] = int(self.robot_qpos_addr)
+        if self.robot_qvel_addr is not None:
+            payload["mujoco_robot_qvel_addr"] = int(self.robot_qvel_addr)
+        if self.dof_qpos_addrs:
+            payload["mujoco_robot_dof_qpos_addrs"] = [int(value) for value in self.dof_qpos_addrs]
+        if self.dof_qvel_addrs:
+            payload["mujoco_robot_dof_qvel_addrs"] = [int(value) for value in self.dof_qvel_addrs]
+        if self._actor_root_metadata:
+            payload["mujoco_actor_root_metadata"] = {
+                str(name): {
+                    "body_name": str(meta.get("body_name", "")),
+                    "qpos_addr": int(meta["qpos_addr"]),
+                    "qvel_addr": int(meta["qvel_addr"]),
+                }
+                for name, meta in self._actor_root_metadata.items()
+                if "qpos_addr" in meta and "qvel_addr" in meta
+            }
         if include_object_contact_details:
             payload["object_robot_contact_bodies"] = sorted(object_robot_contact_bodies)
             payload["object_robot_contact_geoms"] = sorted(object_robot_contact_geoms)

@@ -5,32 +5,78 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_MOTION_FILE="${DEFAULT_MOTION_FILE:-$ROOT_DIR/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz}"
 DEFAULT_MODEL_INPUT="${DEFAULT_MODEL_INPUT:-/data/logs_new/boxer/20260316_200048-g1_29dof_wbt_w_object_extend_20260316_200027_s01_scale_1p0-g1_29dof_wbt_w_object_extend_20260316_200027/model_23500.onnx}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+DEFAULT_MJVISER_PYTHON="/home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python"
+MJ_VIEWER_DEFAULT="${MJ_VIEWER_DEFAULT:-sim_state}"
 
 if [[ "${HOLOSOMA_MJ_TRACK_INTERNAL_CORE:-0}" != "1" ]]; then
   usage() {
     cat <<EOF
 Usage:
-  bash mj_track.sh [motion.npz] [checkpoint.pt|model.onnx] [viser args...]
+  bash mj_track.sh [--viewer sim_state|mjviser] [--default-pose-init|--no-default-pose-init] [motion.npz] [checkpoint.pt|model.onnx] [viewer args...]
 
 Defaults:
   motion = ${DEFAULT_MOTION_FILE}
   model  = ${DEFAULT_MODEL_INPUT}
+  viewer = ${MJ_VIEWER_DEFAULT}
 EOF
   }
 
-  case "${1:-}" in
-    -h|--help|help)
-      usage
-      exit 0
+  MOTION_FILE="${DEFAULT_MOTION_FILE}"
+  MODEL_INPUT="${DEFAULT_MODEL_INPUT}"
+  VIEWER_KIND="${MJ_VIEWER:-$MJ_VIEWER_DEFAULT}"
+  DEFAULT_POSE_INIT_OVERRIDE=""
+  EXTRA_ARGS=()
+  POSITIONAL_MODE=1
+  FILTERED_ARGS=()
+
+  RAW_ARGS=("$@")
+  idx=0
+  while [[ $idx -lt ${#RAW_ARGS[@]} ]]; do
+    arg="${RAW_ARGS[$idx]}"
+    case "${arg}" in
+      --viewer)
+        idx=$((idx + 1))
+        if [[ $idx -ge ${#RAW_ARGS[@]} ]]; then
+          echo "[ERROR] --viewer requires a value: sim_state|mjviser" >&2
+          exit 2
+        fi
+        VIEWER_KIND="${RAW_ARGS[$idx]}"
+        ;;
+      --viewer=*)
+        VIEWER_KIND="${arg#*=}"
+        ;;
+      --default-pose-init)
+        DEFAULT_POSE_INIT_OVERRIDE="1"
+        ;;
+      --no-default-pose-init)
+        DEFAULT_POSE_INIT_OVERRIDE="0"
+        ;;
+      *)
+        FILTERED_ARGS+=("${arg}")
+        ;;
+    esac
+    idx=$((idx + 1))
+  done
+
+  VIEWER_KIND="$(echo "${VIEWER_KIND}" | tr '[:upper:]' '[:lower:]')"
+  case "${VIEWER_KIND}" in
+    sim_state|mjviser) ;;
+    *)
+      echo "[ERROR] viewer must be one of: sim_state|mjviser. Got: ${VIEWER_KIND}" >&2
+      exit 2
       ;;
   esac
 
-  MOTION_FILE="${DEFAULT_MOTION_FILE}"
-  MODEL_INPUT="${DEFAULT_MODEL_INPUT}"
-  EXTRA_ARGS=()
-  POSITIONAL_MODE=1
+  for arg in "${FILTERED_ARGS[@]}"; do
+    case "${arg}" in
+      -h|--help|help)
+        usage
+        exit 0
+        ;;
+    esac
+  done
 
-  for arg in "$@"; do
+  for arg in "${FILTERED_ARGS[@]}"; do
     if [[ "${POSITIONAL_MODE}" == "1" && "${arg}" != -* ]]; then
       if [[ "${MOTION_FILE}" == "${DEFAULT_MOTION_FILE}" ]]; then
         MOTION_FILE="${arg}"
@@ -45,10 +91,32 @@ EOF
     EXTRA_ARGS+=("${arg}")
   done
 
+  if [[ -n "${DEFAULT_POSE_INIT_OVERRIDE}" ]]; then
+    export HOLOSOMA_DEFAULT_POSE_INIT="${DEFAULT_POSE_INIT_OVERRIDE}"
+    export HOLOSOMA_RESET_TO_DEFAULT_POSE="${DEFAULT_POSE_INIT_OVERRIDE}"
+    if [[ "${DEFAULT_POSE_INIT_OVERRIDE}" == "1" ]]; then
+      export SIM_MOTION_INIT_MODE="training_default_pose"
+    else
+      export SIM_MOTION_INIT_MODE="raw_motion"
+    fi
+  fi
+
   export PYTHONPATH="$ROOT_DIR/src/holosoma:$ROOT_DIR/src/holosoma_inference${PYTHONPATH:+:$PYTHONPATH}"
   export HOLOSOMA_MJ_TRACK_INTERNAL_CORE=1
+  VIEWER_PYTHON_BIN="${VIEWER_PYTHON_BIN:-}"
+  if [[ -z "${VIEWER_PYTHON_BIN}" ]]; then
+    if [[ "${VIEWER_KIND}" == "mjviser" && -x "${DEFAULT_MJVISER_PYTHON}" ]]; then
+      VIEWER_PYTHON_BIN="${DEFAULT_MJVISER_PYTHON}"
+    else
+      VIEWER_PYTHON_BIN="${PYTHON_BIN}"
+    fi
+  fi
+  VIEWER_SCRIPT="$ROOT_DIR/src/holosoma/holosoma/viser_mujoco_sim_state.py"
+  if [[ "${VIEWER_KIND}" == "mjviser" ]]; then
+    VIEWER_SCRIPT="$ROOT_DIR/src/holosoma/holosoma/mjviser_mujoco_sim_state.py"
+  fi
 
-  exec "$PYTHON_BIN" "$ROOT_DIR/src/holosoma/holosoma/viser_mujoco_sim_state.py" \
+  exec "$VIEWER_PYTHON_BIN" "$VIEWER_SCRIPT" \
     --launch-rollout \
     --run-script "$ROOT_DIR/mj_track.sh" \
     --motion-file "$MOTION_FILE" \
@@ -151,6 +219,24 @@ ROBOT_ENABLE_SELF_COLLISIONS="${ROBOT_ENABLE_SELF_COLLISIONS:-}"
 SIM_PERCEPTION_CAMERA_SOURCE_OVERRIDE="${SIM_PERCEPTION_CAMERA_SOURCE_OVERRIDE:-}"
 SIM_RUN_DEVICE="${SIM_RUN_DEVICE:-}"
 MOTION_METADATA_TOOL="$ROOT_DIR/src/holosoma_inference/holosoma_inference/tools/read_motion_clip_metadata.py"
+
+DEFAULT_POSE_INIT_ENV="${HOLOSOMA_DEFAULT_POSE_INIT:-}"
+if [[ -n "${DEFAULT_POSE_INIT_ENV}" ]]; then
+  case "$(echo "${DEFAULT_POSE_INIT_ENV}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      export HOLOSOMA_RESET_TO_DEFAULT_POSE="${HOLOSOMA_RESET_TO_DEFAULT_POSE:-1}"
+      SIM_MOTION_INIT_MODE="training_default_pose"
+      ;;
+    0|false|no|off)
+      export HOLOSOMA_RESET_TO_DEFAULT_POSE="${HOLOSOMA_RESET_TO_DEFAULT_POSE:-0}"
+      SIM_MOTION_INIT_MODE="${SIM_MOTION_INIT_MODE:-raw_motion}"
+      ;;
+    *)
+      echo "[ERROR] HOLOSOMA_DEFAULT_POSE_INIT must be one of: 0/1/true/false/yes/no/on/off. Got: ${DEFAULT_POSE_INIT_ENV}" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 mkdir -p "$PATCH_DIR"
 

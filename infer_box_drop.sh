@@ -29,10 +29,14 @@ Default W&B runs:
   clip   https://wandb.ai/zihanw22/boxer/runs/oitf644a
   mixed  https://wandb.ai/zihanw22/boxer/runs/s221l5eo
 
-Optional env vars:
-  CKPT / CHECKPOINT        (optional checkpoint override)
-  WANDB_MODEL_FILE         (optional; used when checkpoint is a W&B run URL without /files/<checkpoint>)
-  INFER_DATASET            (default: omomo; options: omomo|behave|mixed)
+  Optional env vars:
+    CKPT / CHECKPOINT        (optional checkpoint override)
+    WANDB_MODEL_FILE         (optional; used when checkpoint is a W&B run URL without /files/<checkpoint>)
+    ROBOT_INIT_STATE_POS     (optional absolute robot init-state position override: [x,y,z] or x,y,z)
+    ROBOT_INIT_STATE_XY_OFFSET
+                             (optional relative x,y offset applied to checkpoint default init-state XY
+                              when default-pose init is enabled at launch)
+    INFER_DATASET            (default: omomo; options: omomo|behave|mixed)
   MOTION_DIR               (optional override)
   MOTION_CLIP_NAME         (optional single clip name)
   MOTION_CLIP_ID           (optional single clip id)
@@ -95,10 +99,11 @@ esac
 
 DEFAULT_CLIP_RUN_URL="${DEFAULT_CLIP_RUN_URL:-https://wandb.ai/zihanw22/boxer/runs/oitf644a}"
 DEFAULT_MIXED_RUN_URL="${DEFAULT_MIXED_RUN_URL:-https://wandb.ai/zihanw22/boxer/runs/p489gfq6}"
-DEFAULT_MIXED_RUN_URL="${DEFAULT_MIXED_RUN_URL:-https://wandb.ai/zihanw22/boxer/runs/uophjx0c}"
+DEFAULT_MIXED_RUN_URL="${DEFAULT_MIXED_RUN_URL:-https://wandb.ai/zihanw22/boxer/runs/wzvunfed}"
+# https://wandb.ai/zihanw22/boxer/runs/wzvunfed/files/model_02800.pt
 DEFAULT_CLIP_CHECKPOINT="${DEFAULT_CLIP_CHECKPOINT:-wandb://zihanw22/boxer/oitf644a/model_01600.pt}"
 DEFAULT_MIXED_CHECKPOINT="${DEFAULT_MIXED_CHECKPOINT:-wandb://zihanw22/boxer/p489gfq6/model_03400.pt}"
-DEFAULT_MIXED_CHECKPOINT="${DEFAULT_MIXED_CHECKPOINT:-wandb://zihanw22/boxer/uophjx0c/model_02800.pt}"
+DEFAULT_MIXED_CHECKPOINT="${DEFAULT_MIXED_CHECKPOINT:-wandb://zihanw22/boxer/wzvunfed/model_02800.pt}"
 
 default_model_file_for_run_id() {
   local run_id="$1"
@@ -278,6 +283,60 @@ resolve_local_checkpoint_from_run_url() {
   echo "${local_ckpt}"
 }
 
+normalize_xy_offset() {
+  local raw="$1"
+  local compact="${raw//[\[\]\(\)[:space:]]/}"
+  local values=()
+  if [[ -z "${compact}" ]]; then
+    echo ""
+    return 0
+  fi
+  IFS=',' read -r -a values <<< "${compact}"
+  if [[ "${#values[@]}" -ne 2 ]]; then
+    echo "[ERROR] ROBOT_INIT_STATE_XY_OFFSET must be a comma-separated x,y pair. Got: ${raw}" >&2
+    exit 2
+  fi
+  printf '%s,%s' "${values[0]}" "${values[1]}"
+}
+
+is_truthy() {
+  local raw="${1:-}"
+  case "$(echo "${raw}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+resolve_robot_init_state_pos_with_xy_offset() {
+  local checkpoint_ref="$1"
+  local normalized_xy_offset="$2"
+  "$PYTHON_BIN" - "${checkpoint_ref}" "${normalized_xy_offset}" <<'PY'
+import json
+import sys
+
+from holosoma.utils.eval_utils import CheckpointConfig, load_saved_experiment_config
+
+checkpoint_ref = sys.argv[1]
+dx_str, dy_str = sys.argv[2].split(",", 1)
+dx = float(dx_str)
+dy = float(dy_str)
+
+saved_cfg, _ = load_saved_experiment_config(CheckpointConfig(checkpoint=checkpoint_ref))
+init_pos = list(saved_cfg.robot.init_state.pos)
+if len(init_pos) != 3:
+    raise ValueError(f"Expected robot.init_state.pos to have 3 values, got: {init_pos}")
+
+init_pos[0] = float(init_pos[0]) + dx
+init_pos[1] = float(init_pos[1]) + dy
+init_pos[2] = float(init_pos[2])
+print(json.dumps(init_pos, separators=(",", ":")))
+PY
+}
+
 CKPT="${CHECKPOINT:-${CKPT:-}}"
 if [[ $# -gt 0 ]]; then
   if [[ "$1" == wandb://* || "$1" == https://wandb.ai/* || "$1" == /* || "$1" == ./* || "$1" == ../* || "$1" == *.pt ]]; then
@@ -307,6 +366,33 @@ fi
 if [[ "${CKPT}" != wandb://* ]] && [[ ! -f "${CKPT}" ]]; then
   echo "[ERROR] checkpoint not found: ${CKPT}" >&2
   exit 1
+fi
+
+ROBOT_INIT_STATE_POS_ARG="${ROBOT_INIT_STATE_POS:-}"
+ROBOT_INIT_STATE_XY_OFFSET_RAW="${ROBOT_INIT_STATE_XY_OFFSET:-}"
+ROBOT_INIT_STATE_XY_OFFSET_ARG=""
+if [[ -n "${ROBOT_INIT_STATE_POS_ARG}" && -n "${ROBOT_INIT_STATE_XY_OFFSET_RAW}" ]]; then
+  echo "[ERROR] Set only one of ROBOT_INIT_STATE_POS or ROBOT_INIT_STATE_XY_OFFSET." >&2
+  exit 2
+fi
+if [[ -n "${ROBOT_INIT_STATE_XY_OFFSET_RAW}" ]]; then
+  ROBOT_INIT_STATE_XY_OFFSET_ARG="$(normalize_xy_offset "${ROBOT_INIT_STATE_XY_OFFSET_RAW}")"
+  DEFAULT_POSE_INIT_ENABLED=0
+  if is_truthy "${HOLOSOMA_RESET_TO_DEFAULT_POSE:-}"; then
+    DEFAULT_POSE_INIT_ENABLED=1
+  elif is_truthy "${HOLOSOMA_DEFAULT_POSE_INIT:-}"; then
+    DEFAULT_POSE_INIT_ENABLED=1
+  elif [[ "$(echo "${SIM_MOTION_INIT_MODE:-}" | tr '[:upper:]' '[:lower:]')" == "training_default_pose" ]]; then
+    DEFAULT_POSE_INIT_ENABLED=1
+  fi
+
+  if [[ "${DEFAULT_POSE_INIT_ENABLED}" == "1" ]]; then
+    ROBOT_INIT_STATE_POS_ARG="$(
+      resolve_robot_init_state_pos_with_xy_offset "${CKPT}" "${ROBOT_INIT_STATE_XY_OFFSET_ARG}"
+    )"
+  else
+    echo "[INFO] Ignoring ROBOT_INIT_STATE_XY_OFFSET because default-pose init is not enabled at launch." >&2
+  fi
 fi
 
 MIXED_PROFILE=${MIXED_PROFILE:-auto}
@@ -629,6 +715,9 @@ fi
 if [[ -n "${GEOMETRY_DIR}" ]]; then
   cmd+=(--geometry-dir "${GEOMETRY_DIR}")
 fi
+if [[ -n "${ROBOT_INIT_STATE_POS_ARG}" ]]; then
+  cmd+=(--robot.init-state.pos "${ROBOT_INIT_STATE_POS_ARG}")
+fi
 if [[ -n "${MAX_EVAL_STEPS}" ]]; then
   cmd+=(--training.max_eval_steps "${MAX_EVAL_STEPS}")
 fi
@@ -719,6 +808,12 @@ if [[ -n "${OBJECT_SCALE_ARG}" ]]; then
 fi
 if [[ -n "${GEOMETRY_DIR}" ]]; then
   echo "[INFO] geometry_dir=${GEOMETRY_DIR}"
+fi
+if [[ -n "${ROBOT_INIT_STATE_POS_ARG}" ]]; then
+  echo "[INFO] robot_init_state_pos=${ROBOT_INIT_STATE_POS_ARG}"
+fi
+if [[ -n "${ROBOT_INIT_STATE_XY_OFFSET_ARG}" ]]; then
+  echo "[INFO] robot_init_state_xy_offset=${ROBOT_INIT_STATE_XY_OFFSET_ARG}"
 fi
 if [[ "${MODE}" == "mixed" ]]; then
   echo "[INFO] eval_command_only_env_prob=${EVAL_COMMAND_ONLY_ENV_PROB:-<checkpoint>}"

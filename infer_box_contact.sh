@@ -9,7 +9,8 @@ set -euo pipefail
 #
 # The script is checkpoint-driven:
 # - if no checkpoint is provided, it prefers the latest local command-curriculum checkpoint
-# - if none is found, it falls back to the optional pinned checkpoint below
+# - if none is found, it falls back to the pinned W&B command-curriculum run below
+# - if that cannot be resolved, it falls back to the latest local smoke checkpoint
 # - motion/object defaults come from the checkpoint's serialized experiment_config
 # - runtime mode can override sparse-goal eval behavior when the checkpoint supports it
 #
@@ -34,8 +35,9 @@ Examples:
   bash infer_box_contact.sh goal https://wandb.ai/zihanw22/boxer/runs/abcdef12
 
 Default checkpoint resolution:
-  1. Latest local g1_29dof_wbt_w_object_command_curriculum checkpoint
-  2. FALLBACK_CHECKPOINT_REF, if configured
+  1. Latest local non-smoke g1_29dof_wbt_w_object_command_curriculum checkpoint
+  2. FALLBACK_CHECKPOINT_REF / pinned W&B command-curriculum run
+  3. Latest local smoke g1_29dof_wbt_w_object_command_curriculum checkpoint
 
 Optional env vars:
   CHECKPOINT / CKPT             Optional checkpoint override
@@ -75,7 +77,8 @@ cd "${SCRIPT_DIR}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 LOGGER_BASE_DIR="${LOGGER_BASE_DIR:-/data/logs_new}"
 WANDB_PROJECT="${WANDB_PROJECT:-boxer}"
-FALLBACK_CHECKPOINT_REF="${FALLBACK_CHECKPOINT_REF:-}"
+DEFAULT_FALLBACK_CHECKPOINT_REF="https://wandb.ai/zihanw22/boxer/runs/yoecm2af"
+FALLBACK_CHECKPOINT_REF="${FALLBACK_CHECKPOINT_REF:-${DEFAULT_FALLBACK_CHECKPOINT_REF}}"
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
@@ -455,13 +458,16 @@ if [[ -z "${CHECKPOINT}" ]]; then
   CHECKPOINT="$(find_latest_command_curriculum_checkpoint || true)"
   if [[ -n "${CHECKPOINT}" ]]; then
     echo "[INFO] Using latest local command-curriculum checkpoint: ${CHECKPOINT}"
-  else
+  elif [[ -n "${FALLBACK_CHECKPOINT_REF}" ]]; then
+    CHECKPOINT="$(normalize_checkpoint_ref "${FALLBACK_CHECKPOINT_REF}" 2>/dev/null || true)"
+    if [[ -n "${CHECKPOINT}" ]]; then
+      echo "[INFO] No non-smoke local command-curriculum checkpoint found; using pinned W&B fallback: ${CHECKPOINT}"
+    fi
+  fi
+  if [[ -z "${CHECKPOINT}" ]]; then
     CHECKPOINT="$(find_latest_command_curriculum_checkpoint_including_smoke || true)"
     if [[ -n "${CHECKPOINT}" ]]; then
-      echo "[INFO] No non-smoke command-curriculum checkpoint found; using latest local smoke checkpoint: ${CHECKPOINT}"
-    elif [[ -n "${FALLBACK_CHECKPOINT_REF}" ]]; then
-      CHECKPOINT="${FALLBACK_CHECKPOINT_REF}"
-      echo "[INFO] Using fallback checkpoint: ${CHECKPOINT}"
+      echo "[INFO] No non-smoke command-curriculum checkpoint found and pinned W&B fallback was unavailable; using latest local smoke checkpoint: ${CHECKPOINT}"
     else
       echo "[ERROR] No local command-curriculum checkpoint found under ${LOGGER_BASE_DIR}/${WANDB_PROJECT}." >&2
       echo "[ERROR] Pass a checkpoint explicitly or set FALLBACK_CHECKPOINT_REF." >&2

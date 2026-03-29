@@ -92,7 +92,13 @@ PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i_17x17}
 STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_proprio','actor_obs_drop_command']"}
 DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES=${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES:-True}
+DAGGER_IGNORE_EPISODE_INITIAL_STEPS=${DAGGER_IGNORE_EPISODE_INITIAL_STEPS:-0}
 MAX_EPISODE_LENGTH_S=${MAX_EPISODE_LENGTH_S:-8.0}
+RESET_TO_DEFAULT_POSE=${RESET_TO_DEFAULT_POSE:-True}
+ENABLE_DEFAULT_POSE_PREPEND=${ENABLE_DEFAULT_POSE_PREPEND:-True}
+DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0.5}
+ENABLE_DEFAULT_POSE_APPEND=${ENABLE_DEFAULT_POSE_APPEND:-False}
+DEFAULT_POSE_APPEND_DURATION_S=${DEFAULT_POSE_APPEND_DURATION_S:-0.0}
 
 SPARSE_GOAL_ENABLED=${SPARSE_GOAL_ENABLED:-True}
 CLIP_GOAL_DELTA_MIN_STEPS=${CLIP_GOAL_DELTA_MIN_STEPS:-45}
@@ -167,15 +173,8 @@ case "${TEACHER_COMPAT_PROFILE_RESOLVED}" in
     if [[ "${TEACHER_PERCEPTION_OBS_KEY_EXPLICIT}" -eq 0 ]]; then
       TEACHER_PERCEPTION_OBS_KEY="teacher_perception_obs"
     fi
-    if [[ "${START_AT_TIMESTEP_ZERO_PROB_EXPLICIT}" -eq 0 ]]; then
-      START_AT_TIMESTEP_ZERO_PROB=0.2
-    fi
-    if [[ "${FREEZE_AT_TIMESTEP_ZERO_PROB_EXPLICIT}" -eq 0 ]]; then
-      FREEZE_AT_TIMESTEP_ZERO_PROB=0.95
-    fi
     append_teacher_compat_note "teacher_obs_keys defaulted to actor_obs_teacher_compat for exact legacy ordering"
     append_teacher_compat_note "teacher now consumes ${TEACHER_PERCEPTION_PRESET} via ${TEACHER_PERCEPTION_OBS_KEY} instead of reusing student depth perception"
-    append_teacher_compat_note "reset distribution nudged toward teacher defaults (start_at_timestep_zero_prob=0.2, freeze_at_timestep_zero_prob=0.95) when not explicitly overridden"
     if [[ "${PERCEPTION_PRESET}" != "${TEACHER_REF_PERCEPTION_PRESET}" ]]; then
       append_teacher_compat_note "student perception kept at ${PERCEPTION_PRESET} to preserve current student structure; teacher used ${TEACHER_REF_PERCEPTION_PRESET}"
     fi
@@ -285,7 +284,10 @@ echo "[INFO] external_goal_range_iter=${EXTERNAL_GOAL_RANGE_START_ITER}->${EXTER
 echo "[INFO] clip_goal_delta_steps=${CLIP_GOAL_DELTA_MIN_STEPS}-${CLIP_GOAL_DELTA_MAX_STEPS} (legacy/unused; clip-goal now uses final placement)"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
 echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}"
+echo "[INFO] reset_to_default_pose=${RESET_TO_DEFAULT_POSE}"
+echo "[INFO] default_pose_prepend=${ENABLE_DEFAULT_POSE_PREPEND} duration_s=${DEFAULT_POSE_PREPEND_DURATION_S} default_pose_append=${ENABLE_DEFAULT_POSE_APPEND} append_duration_s=${DEFAULT_POSE_APPEND_DURATION_S}"
 echo "[INFO] dagger_ignore_external_goal_samples=${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES}"
+echo "[INFO] dagger_ignore_episode_initial_steps=${DAGGER_IGNORE_EPISODE_INITIAL_STEPS}"
 echo "[INFO] max_episode_length_s=${MAX_EPISODE_LENGTH_S}"
 if [[ -n "${TEACHER_COMPAT_NOTES}" ]]; then
   echo "[WARN] teacher_compat_notes=${TEACHER_COMPAT_NOTES}"
@@ -310,6 +312,11 @@ exec env \
   DAGGER_LOSS_COEF="${DAGGER_LOSS_COEF}" \
   START_AT_TIMESTEP_ZERO_PROB="${START_AT_TIMESTEP_ZERO_PROB}" \
   FREEZE_AT_TIMESTEP_ZERO_PROB="${FREEZE_AT_TIMESTEP_ZERO_PROB}" \
+  HOLOSOMA_RESET_TO_DEFAULT_POSE="${RESET_TO_DEFAULT_POSE}" \
+  ENABLE_DEFAULT_POSE_PREPEND="${ENABLE_DEFAULT_POSE_PREPEND}" \
+  DEFAULT_POSE_PREPEND_DURATION_S="${DEFAULT_POSE_PREPEND_DURATION_S}" \
+  ENABLE_DEFAULT_POSE_APPEND="${ENABLE_DEFAULT_POSE_APPEND}" \
+  DEFAULT_POSE_APPEND_DURATION_S="${DEFAULT_POSE_APPEND_DURATION_S}" \
   PAIR_TERRAIN_WITH_MOTION="${PAIR_TERRAIN_WITH_MOTION}" \
   bash "${SCRIPT_DIR}/distill_root_box.sh" "${TEACHER_CHECKPOINT}" \
     "perception:${PERCEPTION_PRESET}" \
@@ -321,6 +328,7 @@ exec env \
     --algo.config.distill.teacher-perception-preset="${TEACHER_PERCEPTION_PRESET}" \
     --algo.config.distill.teacher-perception-obs-key="${TEACHER_PERCEPTION_OBS_KEY}" \
     --algo.config.distill.dagger-ignore-external-goal-samples="${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES}" \
+    --algo.config.distill.dagger-ignore-episode-initial-steps="${DAGGER_IGNORE_EPISODE_INITIAL_STEPS}" \
     --algo.config.distill.ppo-target-coeff="${PPO_TARGET_COEFF}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.enabled="${SPARSE_GOAL_ENABLED}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.clip-goal-delta-min-steps="${CLIP_GOAL_DELTA_MIN_STEPS}" \

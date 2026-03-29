@@ -22,7 +22,7 @@ fi
 usage() {
   cat <<EOF
 Usage:
-  bash mj_depth.sh [--depth-source rendered|warp] [--motion-file clip.npz] [checkpoint.pt|model.onnx|wandb://...|https://wandb.ai/.../runs/...]
+  bash mj_depth.sh [--viewer sim_state|mjviser] [--depth-source rendered|warp] [--default-pose-init|--no-default-pose-init] [--motion-file clip.npz] [checkpoint.pt|model.onnx|wandb://...|https://wandb.ai/.../runs/...]
 
 Purpose:
   Launch the depth distill box-carry policy through split MuJoCo sim2sim:
@@ -31,6 +31,7 @@ Purpose:
 Defaults:
   motion       = ${DEFAULT_MOTION_FILE}
   depth_source = warp
+  viewer       = sim_state
   checkpoint   = ${DEPTH_CHECKPOINT_DEFAULT}
                  (if that run exists locally with ONNX, prefer it; otherwise fall back to latest local depth distill ONNX under ${LOG_ROOTS_DEFAULT})
 
@@ -299,13 +300,6 @@ normalize_bool_flag() {
   esac
 }
 
-case "${1:-}" in
-  -h|--help|help)
-    usage
-    exit 0
-    ;;
-esac
-
 if [[ "${HOLOSOMA_MJ_DEPTH_INTERNAL_CORE:-0}" != "1" ]]; then
   export DEPTH_CHECKPOINT_DEFAULT="${DEPTH_CHECKPOINT_DEFAULT:-wandb://zihanw22/boxer/0z2aggr2/model_05000.pt}"
   export INFER_DATASET="${INFER_DATASET:-omomo}"
@@ -335,11 +329,18 @@ if [[ "${HOLOSOMA_MJ_DEPTH_INTERNAL_CORE:-0}" != "1" ]]; then
   esac
 
   DEPTH_SOURCE_RAW="${MJ_DEPTH_CAMERA_SOURCE:-warp}"
+  VIEWER_KIND="${MJ_VIEWER:-sim_state}"
+  DEFAULT_POSE_INIT_OVERRIDE=""
   MOTION_FILE_RAW="${MOTION_FILE:-$DEFAULT_MOTION_FILE}"
   MODEL_REF=""
+  HELP_REQUESTED=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      -h|--help|help)
+        HELP_REQUESTED=1
+        shift
+        ;;
       --depth-source)
         if [[ $# -lt 2 ]]; then
           echo "[ERROR] --depth-source requires a value: rendered|warp" >&2
@@ -350,6 +351,26 @@ if [[ "${HOLOSOMA_MJ_DEPTH_INTERNAL_CORE:-0}" != "1" ]]; then
         ;;
       --depth-source=*)
         DEPTH_SOURCE_RAW="${1#*=}"
+        shift
+        ;;
+      --viewer)
+        if [[ $# -lt 2 ]]; then
+          echo "[ERROR] --viewer requires a value: sim_state|mjviser" >&2
+          exit 2
+        fi
+        VIEWER_KIND="$2"
+        shift 2
+        ;;
+      --viewer=*)
+        VIEWER_KIND="${1#*=}"
+        shift
+        ;;
+      --default-pose-init)
+        DEFAULT_POSE_INIT_OVERRIDE="1"
+        shift
+        ;;
+      --no-default-pose-init)
+        DEFAULT_POSE_INIT_OVERRIDE="0"
         shift
         ;;
       --motion-file)
@@ -388,6 +409,30 @@ if [[ "${HOLOSOMA_MJ_DEPTH_INTERNAL_CORE:-0}" != "1" ]]; then
       ;;
   esac
 
+  VIEWER_KIND="$(echo "${VIEWER_KIND}" | tr '[:upper:]' '[:lower:]')"
+  case "${VIEWER_KIND}" in
+    sim_state|mjviser) ;;
+    *)
+      echo "[ERROR] viewer must be one of: sim_state|mjviser. Got: ${VIEWER_KIND}" >&2
+      exit 2
+      ;;
+  esac
+
+  if [[ "${HELP_REQUESTED}" == "1" ]]; then
+    usage
+    exit 0
+  fi
+
+  if [[ -n "${DEFAULT_POSE_INIT_OVERRIDE}" ]]; then
+    export HOLOSOMA_DEFAULT_POSE_INIT="${DEFAULT_POSE_INIT_OVERRIDE}"
+    export HOLOSOMA_RESET_TO_DEFAULT_POSE="${DEFAULT_POSE_INIT_OVERRIDE}"
+    if [[ "${DEFAULT_POSE_INIT_OVERRIDE}" == "1" ]]; then
+      export SIM_MOTION_INIT_MODE="training_default_pose"
+    else
+      export SIM_MOTION_INIT_MODE="raw_motion"
+    fi
+  fi
+
   MOTION_FILE_RESOLVED="$(resolve_existing_path "${MOTION_FILE_RAW}" || true)"
   if [[ -z "${MOTION_FILE_RESOLVED}" ]]; then
     echo "[ERROR] motion file not found: ${MOTION_FILE_RAW}" >&2
@@ -407,9 +452,13 @@ if [[ "${HOLOSOMA_MJ_DEPTH_INTERNAL_CORE:-0}" != "1" ]]; then
   export MJ_DEPTH_MODEL_INPUT="${MODEL_INPUT_RESOLVED}"
   export HOLOSOMA_MJ_DEPTH_INTERNAL_CORE=1
   export PYTHONPATH="$ROOT_DIR/src/holosoma:$ROOT_DIR/src/holosoma_inference${PYTHONPATH:+:$PYTHONPATH}"
+  VIEWER_SCRIPT="$ROOT_DIR/src/holosoma/holosoma/viser_mujoco_sim_state.py"
+  if [[ "${VIEWER_KIND}" == "mjviser" ]]; then
+    VIEWER_SCRIPT="$ROOT_DIR/src/holosoma/holosoma/mjviser_mujoco_sim_state.py"
+  fi
 
   VIEWER_CMD=(
-    "$PYTHON_BIN" "$ROOT_DIR/src/holosoma/holosoma/viser_mujoco_sim_state.py"
+    "$PYTHON_BIN" "$VIEWER_SCRIPT"
     --launch-rollout
     --run-script "$ROOT_DIR/mj_depth.sh"
   )
@@ -428,6 +477,7 @@ if [[ "${HOLOSOMA_MJ_DEPTH_INTERNAL_CORE:-0}" != "1" ]]; then
   echo "[INFO] model_input=${MODEL_INPUT_RESOLVED}"
   echo "[INFO] motion_file=${MOTION_FILE_RESOLVED}"
   echo "[INFO] depth_source=${DEPTH_SOURCE}"
+  echo "[INFO] viewer=${VIEWER_KIND}"
   echo "[INFO] training_headless=${TRAINING_HEADLESS_FLAG}"
   echo "[INFO] mujoco_backend=${MUJOCO_BACKEND}"
   echo "[INFO] manual_gui=${VISER_ENABLE_MANUAL_GUI}"

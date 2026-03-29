@@ -18,6 +18,7 @@ def setup_ppo_actor_module(
         "CNNEncoder",
         "TransformerEncoder",
         "TransformerObsTokenEncoder",
+        "TerrainTransformerObsTokenEncoder",
     ]:
         return PPOActorEncoder(
             obs_dim_dict=obs_dim_dict,
@@ -51,6 +52,7 @@ def setup_ppo_critic_module(
         "CNNEncoder",
         "TransformerEncoder",
         "TransformerObsTokenEncoder",
+        "TerrainTransformerObsTokenEncoder",
     ]:
         return PPOCriticEncoder(
             obs_dim_dict=obs_dim_dict,

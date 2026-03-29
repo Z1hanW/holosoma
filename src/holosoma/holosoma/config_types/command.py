@@ -119,6 +119,12 @@ class SparseObjectGoalConfig:
     carry_extension_prob_end: float = 0.0
     """Final probability of sampling clip-anchored carry-extension goals."""
 
+    carry_extension_prob_start_iter: int | None = None
+    """Training iteration where the carry-extension probability schedule activates."""
+
+    carry_extension_prob_end_iter: int | None = None
+    """Training iteration where the carry-extension probability schedule reaches its final value."""
+
     carry_extension_prob_ramp_resets: int | None = None
     """Optional ramp horizon for carry-extension goal probability; defaults to external_goal_prob_ramp_resets."""
 
@@ -136,6 +142,12 @@ class SparseObjectGoalConfig:
 
     carry_extension_range_ramp_resets: int | None = None
     """Optional ramp horizon for carry-extension sampling range; defaults to carry_extension_prob_ramp_resets."""
+
+    carry_extension_range_start_iter: int | None = None
+    """Training iteration where the carry-extension range curriculum activates."""
+
+    carry_extension_range_end_iter: int | None = None
+    """Training iteration where the carry-extension range curriculum reaches its final span."""
 
     external_goal_pos_local_min_start: list[float] | None = None
     """Optional initial lower bounds [x, y, z] for external goal position in local frame around env origin."""

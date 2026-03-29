@@ -43,6 +43,13 @@ from holosoma_inference.utils.sim_control import SimControlPush  # noqa: E402
 from holosoma_inference.utils.sim_state import SimStateSub  # noqa: E402
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass(frozen=True)
 class MujocoSimStateViewerConfig:
     robot: str = "g1_29dof_w_object"
@@ -68,6 +75,10 @@ class MujocoSimStateViewerConfig:
     training_headless: bool = True
     rollout_log_path: str = str(REPO_ROOT / "logs" / "live_debug" / "viser_mujoco_sim_state.log")
     auto_reset_after_first_state_sec: float = 0.0
+    default_pose_init: bool = _env_flag(
+        "HOLOSOMA_DEFAULT_POSE_INIT",
+        default=os.environ.get("SIM_MOTION_INIT_MODE", "").strip().lower() == "training_default_pose",
+    )
 
 
 def _resolve_data_path(path: str) -> Path:
@@ -402,6 +413,11 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     with server.gui.add_folder("Rollout"):
         rollout_md = server.gui.add_markdown("Viewer only")
         reset_rollout_btn = server.gui.add_button("Reset rollout")
+        default_pose_init_cb = server.gui.add_checkbox(
+            "Default pose init",
+            initial_value=bool(cfg.default_pose_init),
+            hint="Restart/reset rollout from the robot default pose instead of the motion pose.",
+        )
 
     manual_gui_enabled = os.environ.get("VISER_ENABLE_MANUAL_GUI", "1").lower() not in ("0", "false", "no")
     if manual_gui_enabled:
@@ -463,6 +479,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             f"pid: `{pid}`\n\n"
             f"restart_count: `{rollout_restart_count}`\n\n"
             f"last_reason: `{last_rollout_reason}`\n\n"
+            f"default_pose_init: `{bool(default_pose_init_cb.value)}`\n\n"
             f"reset_mode: `sim-control`\n\n"
             f"log_path: `{rollout_log_path}`"
         )
@@ -486,6 +503,9 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         env["RUN_SECONDS"] = str(cfg.launch_run_seconds)
         env["TRAINING_HEADLESS"] = "True" if cfg.training_headless else "False"
         env["HOLOSOMA_MUJOCO_OBJECT_GEOM_SNAPSHOT_PATH"] = str(snapshot_path_default)
+        env["HOLOSOMA_DEFAULT_POSE_INIT"] = "1" if bool(default_pose_init_cb.value) else "0"
+        env["SIM_MOTION_INIT_MODE"] = "training_default_pose" if bool(default_pose_init_cb.value) else "raw_motion"
+        env["HOLOSOMA_RESET_TO_DEFAULT_POSE"] = "1" if bool(default_pose_init_cb.value) else "0"
         try:
             snapshot_path_default.unlink()
         except FileNotFoundError:
@@ -579,6 +599,16 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     @reset_rollout_btn.on_click
     def _(_evt) -> None:
         _request_sim_reset("gui_reset")
+
+    @default_pose_init_cb.on_update
+    def _(_evt) -> None:
+        nonlocal pending_restart_reason
+        if not cfg.launch_rollout:
+            _refresh_rollout_md()
+            return
+        pending_restart_reason = "default_pose_init_toggle"
+        state_md.content = "Restarting rollout to apply default-pose init preference..."
+        _refresh_rollout_md()
 
     if start_policy_btn is not None:
         @start_policy_btn.on_click

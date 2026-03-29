@@ -122,6 +122,9 @@ def _get_object_contact_force_history(
         body_name_pattern=body_name_pattern,
     )
     selected_names = [env.simulator.body_names[int(idx)] for idx in selected_indexes.detach().cpu().tolist()]  # type: ignore[attr-defined]
+    motion_command = env.command_manager.get_state("motion_command")
+    if isinstance(motion_command, MotionCommand):
+        return motion_command.get_body_object_contact_force_history(selected_names)
 
     getter = getattr(env.simulator, "get_object_contact_force_history", None)
     if getter is None:

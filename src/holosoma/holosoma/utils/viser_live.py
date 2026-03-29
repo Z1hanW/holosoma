@@ -436,6 +436,18 @@ def _is_rank0() -> bool:
         return True
 
 
+def _resolve_obj_paths(path_str: str) -> list[Path]:
+    path = Path(path_str)
+    if path.is_dir():
+        matches = list(path.glob("*.obj")) + list(path.glob("*.OBJ"))
+        return sorted(matches)
+    if any(char in path_str for char in ("*", "?", "[")):
+        import glob
+
+        return sorted(Path(p) for p in glob.glob(path_str))
+    return [path] if path.exists() else []
+
+
 def _load_terrain_mesh(
     obj_path: str | None,
     *,
@@ -464,16 +476,42 @@ def _load_terrain_mesh(
             raise ValueError(f"Loaded terrain is not a trimesh: {type(mesh)}")
         return mesh
 
-    def _resolve_obj_paths(path_str: str) -> list[Path]:
-        path = Path(path_str)
-        if path.is_dir():
-            matches = list(path.glob("*.obj")) + list(path.glob("*.OBJ"))
-            return sorted(matches)
-        if any(char in path_str for char in ("*", "?", "[")):
-            import glob
+    def _tile_single_mesh(base_mesh: trimesh.Trimesh, *, rows: int, cols: int) -> trimesh.Trimesh:
+        if rows * cols <= 1:
+            return base_mesh
+        gap = 1e-4
+        stride = (base_mesh.bounds[1] - base_mesh.bounds[0]) + gap
+        tiles = []
+        for row in range(rows):
+            for col in range(cols):
+                tile = base_mesh.copy()
+                tile.apply_translation([col * stride[0], row * stride[1], 0.0])
+                tiles.append(tile)
+        return trimesh.util.concatenate(tiles)
 
-            return sorted(Path(p) for p in glob.glob(path_str))
-        return [path] if path.exists() else []
+    def _tile_multi_obj_mesh(obj_paths: list[Path], *, rows: int) -> trimesh.Trimesh:
+        meshes = []
+        spans = []
+        for path in obj_paths:
+            mesh = _load_mesh(path)
+            meshes.append(mesh)
+            spans.append(mesh.bounds[1] - mesh.bounds[0])
+        if not meshes:
+            raise ValueError("No terrain OBJ meshes loaded from directory/glob input.")
+        if len(meshes) == 1:
+            return _tile_single_mesh(meshes[0], rows=rows, cols=1)
+
+        spans_arr = np.vstack(spans)
+        gap = 1e-4
+        stride = spans_arr.max(axis=0) + gap
+        tiles = []
+        for col, mesh in enumerate(meshes):
+            base_offset = np.array([col * stride[0], 0.0, 0.0], dtype=np.float64)
+            for row in range(rows):
+                tile = mesh.copy()
+                tile.apply_translation(base_offset + np.array([0.0, row * stride[1], 0.0], dtype=np.float64))
+                tiles.append(tile)
+        return trimesh.util.concatenate(tiles)
 
     def _canonical_pair_key(raw_name: str | None) -> str | None:
         if raw_name is None:
@@ -510,6 +548,24 @@ def _load_terrain_mesh(
         logger.warning("Terrain OBJ input has multiple meshes; no clip provided, using {}.", paths[0].name)
         return paths[0]
 
+    def _metadata_is_local(path_str: str | None) -> bool:
+        if not path_str:
+            return True
+        try:
+            with Path(path_str).open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        tile_offsets = np.asarray(payload.get("tile_offsets", []))
+        tile_rows = int(payload.get("tile_rows", 1) or 1)
+        tile_cols = int(payload.get("tile_cols", 1) or 1)
+        tile_count = int(tile_offsets.shape[0]) if tile_offsets.ndim >= 1 else 0
+        return tile_count <= 1 and tile_rows <= 1 and tile_cols <= 1
+
+    resolved_rows = max(1, int(num_rows or 1))
+    resolved_cols = max(1, int(num_cols or 1))
     terrain_path = Path(_resolve_data_path(obj_path))
     obj_paths = _resolve_obj_paths(str(terrain_path))
     if not obj_paths:
@@ -517,16 +573,22 @@ def _load_terrain_mesh(
 
     if obj_metadata_path and len(obj_paths) == 1:
         selected_path = obj_paths[0]
+        return _load_mesh(selected_path), _metadata_is_local(obj_metadata_path)
     else:
         if obj_metadata_path and len(obj_paths) != 1:
-            logger.warning("OBJ metadata provided with directory/glob input; using clip-based OBJ selection.")
+            logger.warning("OBJ metadata provided with directory/glob input; ignoring metadata and rendering tiled OBJ mesh.")
+        if len(obj_paths) > 1:
+            return _tile_multi_obj_mesh(obj_paths, rows=resolved_rows), False
         try:
             selected_path = _select_obj_path(obj_paths, clip_name)
         except FileNotFoundError as exc:
             logger.error("{}", exc)
             return None
 
-    return _load_mesh(selected_path)
+    base_mesh = _load_mesh(selected_path)
+    if resolved_rows * resolved_cols > 1:
+        return _tile_single_mesh(base_mesh, rows=resolved_rows, cols=resolved_cols), False
+    return base_mesh, True
 
 
 class ViserLiveViewer:
@@ -628,7 +690,10 @@ class ViserLiveViewer:
             "true",
             "yes",
         )
-        self._reset_to_default_pose = os.environ.get("HOLOSOMA_RESET_TO_DEFAULT_POSE", "0").lower() in (
+        reset_to_default_pose_env = os.environ.get("HOLOSOMA_RESET_TO_DEFAULT_POSE")
+        if reset_to_default_pose_env is None:
+            reset_to_default_pose_env = os.environ.get("HOLOSOMA_DEFAULT_POSE_INIT", "0")
+        self._reset_to_default_pose = reset_to_default_pose_env.lower() in (
             "1",
             "true",
             "yes",
@@ -715,6 +780,7 @@ class ViserLiveViewer:
         self._play_control = None
         self._step_button = None
         self._reset_button = None
+        self._default_pose_init_cb = None
         self._step_requested = False
         self._reset_requested = False
         self._clip_dropdown = None
@@ -2270,23 +2336,15 @@ class ViserLiveViewer:
             rows = getattr(terrain_term, "num_rows", None)
             cols = getattr(terrain_term, "num_cols", None)
             if obj_path:
-                mesh = _load_terrain_mesh(
+                terrain_mesh = _load_terrain_mesh(
                     obj_path,
                     obj_metadata_path=obj_meta,
                     num_rows=rows,
                     num_cols=cols,
                     clip_name=clip_name,
                 )
-                if mesh is not None:
-                    mesh_is_local = True
-                    if obj_meta:
-                        terrain_obj = getattr(terrain_state, "terrain", None)
-                        tile_rows = int(getattr(terrain_obj, "obj_tile_rows", 0) or 0)
-                        tile_cols = int(getattr(terrain_obj, "obj_tile_cols", 0) or 0)
-                        tile_offsets = getattr(terrain_obj, "obj_tile_offsets", None)
-                        tile_count = int(np.asarray(tile_offsets).shape[0]) if tile_offsets is not None else 0
-                        if tile_count > 1 or tile_rows > 1 or tile_cols > 1:
-                            mesh_is_local = False
+                if terrain_mesh is not None:
+                    mesh, mesh_is_local = terrain_mesh
 
         if mesh is None:
             mesh = getattr(terrain_state, "mesh", None)
@@ -2785,6 +2843,11 @@ class ViserLiveViewer:
                     "Reset",
                     hint="Reset the selected environment",
                 )
+                self._default_pose_init_cb = self._server.gui.add_checkbox(
+                    "Default Pose Init",
+                    initial_value=bool(self._reset_to_default_pose),
+                    hint="When enabled, reset/clip apply initializes from the robot default pose instead of the motion pose.",
+                )
 
             @self._step_button.on_click
             def _(_evt) -> None:
@@ -2793,6 +2856,10 @@ class ViserLiveViewer:
             @self._reset_button.on_click
             def _(_evt) -> None:
                 self._reset_requested = True
+
+            @self._default_pose_init_cb.on_update
+            def _(_evt) -> None:
+                self._set_default_pose_init_enabled(bool(self._default_pose_init_cb.value))
 
             motion_cmd = self._get_motion_command()
             has_resettable_object = bool(
@@ -3126,6 +3193,19 @@ class ViserLiveViewer:
             return int(lengths[clip_idx])
         except Exception:
             return None
+
+    def _set_default_pose_init_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        self._reset_to_default_pose = enabled
+        os.environ["HOLOSOMA_DEFAULT_POSE_INIT"] = "1" if enabled else "0"
+        os.environ["HOLOSOMA_RESET_TO_DEFAULT_POSE"] = "1" if enabled else "0"
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            return
+        try:
+            motion_cmd._reset_to_default_pose = enabled
+        except Exception:
+            pass
 
     def _reset_env(self) -> None:
         if not hasattr(self._env, "reset_envs_idx"):

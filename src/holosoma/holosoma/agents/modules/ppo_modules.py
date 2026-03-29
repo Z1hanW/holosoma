@@ -166,6 +166,7 @@ class PPOCritic(nn.Module):
 class PPOActorEncoder(PPOActor):
     def __init__(self, obs_dim_dict, module_config_dict, num_actions, init_noise_std, history_length: dict[str, int]):
         super().__init__(obs_dim_dict, module_config_dict, num_actions, init_noise_std, history_length)
+        self.module_type = module_config_dict.type
         self.module_input_name = module_config_dict.layer_config.module_input_name
         self.encoder_input_name = module_config_dict.layer_config.encoder_input_name
         self.encoder_obs_token_name = module_config_dict.layer_config.encoder_obs_token_name
@@ -190,9 +191,61 @@ class PPOActorEncoder(PPOActor):
         if self.perception_time_gru is not None and dones is not None:
             self.perception_time_gru.reset(dones)
 
+    def _get_perception_obs(
+        self,
+        actor_obs: torch.Tensor,
+        policy_state_dict: dict | None = None,
+        *,
+        source: str,
+    ) -> torch.Tensor:
+        if not self.perception_input_name:
+            raise ValueError(f"{source} requested perception obs, but perception_input_name is not configured.")
+        if self.perception_input_name in self.actor_module.input_indices_dict:
+            perception_obs = actor_obs[..., self.actor_module.input_indices_dict[self.perception_input_name]]
+        elif policy_state_dict is not None and self.perception_input_name in policy_state_dict:
+            perception_obs = policy_state_dict[self.perception_input_name]
+        else:
+            raise ValueError(f"Perception obs '{self.perception_input_name}' not provided for actor.")
+        if hasattr(perception_obs, "is_inference") and perception_obs.is_inference():
+            perception_obs = perception_obs.clone()
+        return perception_obs
+
+    def _get_terrain_transformer_input(
+        self, actor_obs: torch.Tensor, policy_state_dict: dict | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self.encoder_obs_token_name is None:
+            raise ValueError("TerrainTransformerObsTokenEncoder requires encoder_obs_token_name.")
+
+        proprio_token = actor_obs[..., self.actor_module.input_indices_dict[self.encoder_obs_token_name]]
+        target_tokens = (
+            actor_obs[..., self.actor_module.input_indices_dict[self.encoder_input_name]]
+            if self.encoder_input_name
+            else None
+        )
+        depth_token = self._get_perception_obs(actor_obs, policy_state_dict, source="TerrainTransformerObsTokenEncoder")
+
+        self.actor_encoder_obs = self.actor_module.encoder(proprio_token, depth_token, target_tokens)
+        parts = [self.actor_encoder_obs]
+
+        if self.module_input_name:
+            self.actor_state_obs = torch.cat(
+                [
+                    actor_obs[..., self.actor_module.input_indices_dict[actor_input_name]]
+                    for actor_input_name in self.module_input_name
+                ],
+                -1,
+            )
+            parts.append(self.actor_state_obs)
+
+        input_actor = parts[0] if len(parts) == 1 else torch.cat(parts, dim=-1)
+        return input_actor, None
+
     def _get_input(self, actor_obs: torch.Tensor, policy_state_dict: dict | None = None) -> tuple[torch.Tensor, torch.Tensor | None]:
         if actor_obs.shape[-1] != self.actor_module.input_dim:
             raise ValueError(f"Actor Obs must be {self.actor_module.input_dim}, got {actor_obs.shape[-1]}")
+        if self.module_type == "TerrainTransformerObsTokenEncoder":
+            return self._get_terrain_transformer_input(actor_obs, policy_state_dict)
+
         self.encoder_obs = (
             actor_obs[..., self.actor_module.input_indices_dict[self.encoder_input_name]]
             if self.encoder_input_name
@@ -233,14 +286,7 @@ class PPOActorEncoder(PPOActor):
                         perception_obs = perception_obs.clone()
                     perception_embed = self.perception_time_gru.step(perception_obs)
             elif perception_encoder is not None:
-                if self.perception_input_name in self.actor_module.input_indices_dict:
-                    perception_obs = actor_obs[..., self.actor_module.input_indices_dict[self.perception_input_name]]
-                elif policy_state_dict is not None and self.perception_input_name in policy_state_dict:
-                    perception_obs = policy_state_dict[self.perception_input_name]
-                else:
-                    raise ValueError(f"Perception obs '{self.perception_input_name}' not provided for actor.")
-                if hasattr(perception_obs, "is_inference") and perception_obs.is_inference():
-                    perception_obs = perception_obs.clone()
+                perception_obs = self._get_perception_obs(actor_obs, policy_state_dict, source="actor")
                 perception_embed = perception_encoder(perception_obs)
                 if hasattr(perception_embed, "is_inference") and perception_embed.is_inference():
                     perception_embed = perception_embed.clone()
@@ -286,6 +332,7 @@ class PPOActorEncoder(PPOActor):
 class PPOCriticEncoder(PPOCritic):
     def __init__(self, obs_dim_dict, module_config_dict, history_length: dict[str, int]):
         super().__init__(obs_dim_dict, module_config_dict, history_length)
+        self.module_type = module_config_dict.type
         self.module_input_name = module_config_dict.layer_config.module_input_name
         self.encoder_input_name = module_config_dict.layer_config.encoder_input_name
         self.encoder_obs_token_name = module_config_dict.layer_config.encoder_obs_token_name
@@ -310,9 +357,61 @@ class PPOCriticEncoder(PPOCritic):
         if self.perception_time_gru is not None and dones is not None:
             self.perception_time_gru.reset(dones)
 
+    def _get_perception_obs(
+        self,
+        critic_obs: torch.Tensor,
+        policy_state_dict: dict | None = None,
+        *,
+        source: str,
+    ) -> torch.Tensor:
+        if not self.perception_input_name:
+            raise ValueError(f"{source} requested perception obs, but perception_input_name is not configured.")
+        if self.perception_input_name in self.critic_module.input_indices_dict:
+            perception_obs = critic_obs[..., self.critic_module.input_indices_dict[self.perception_input_name]]
+        elif policy_state_dict is not None and self.perception_input_name in policy_state_dict:
+            perception_obs = policy_state_dict[self.perception_input_name]
+        else:
+            raise ValueError(f"Perception obs '{self.perception_input_name}' not provided for critic.")
+        if hasattr(perception_obs, "is_inference") and perception_obs.is_inference():
+            perception_obs = perception_obs.clone()
+        return perception_obs
+
+    def _get_terrain_transformer_input(
+        self, critic_obs: torch.Tensor, policy_state_dict: dict | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self.encoder_obs_token_name is None:
+            raise ValueError("TerrainTransformerObsTokenEncoder requires encoder_obs_token_name.")
+
+        proprio_token = critic_obs[..., self.critic_module.input_indices_dict[self.encoder_obs_token_name]]
+        target_tokens = (
+            critic_obs[..., self.critic_module.input_indices_dict[self.encoder_input_name]]
+            if self.encoder_input_name
+            else None
+        )
+        depth_token = self._get_perception_obs(critic_obs, policy_state_dict, source="TerrainTransformerObsTokenEncoder")
+
+        self.critic_encoder_obs = self.critic_module.encoder(proprio_token, depth_token, target_tokens)
+        parts = [self.critic_encoder_obs]
+
+        if self.module_input_name:
+            self.critic_state_obs = torch.cat(
+                [
+                    critic_obs[..., self.critic_module.input_indices_dict[critic_input_name]]
+                    for critic_input_name in self.module_input_name
+                ],
+                -1,
+            )
+            parts.append(self.critic_state_obs)
+
+        input_critic = parts[0] if len(parts) == 1 else torch.cat(parts, dim=-1)
+        return input_critic, None
+
     def _get_input(self, critic_obs: torch.Tensor, policy_state_dict: dict | None = None) -> tuple[torch.Tensor, torch.Tensor | None]:
         if critic_obs.shape[-1] != self.critic_module.input_dim:
             raise ValueError(f"Critic Obs must be {self.critic_module.input_dim}, got {critic_obs.shape[-1]}")
+        if self.module_type == "TerrainTransformerObsTokenEncoder":
+            return self._get_terrain_transformer_input(critic_obs, policy_state_dict)
+
         self.encoder_obs = (
             critic_obs[..., self.critic_module.input_indices_dict[self.encoder_input_name]]
             if self.encoder_input_name
@@ -354,14 +453,7 @@ class PPOCriticEncoder(PPOCritic):
                         perception_obs = perception_obs.clone()
                     perception_embed = self.perception_time_gru.step(perception_obs)
             elif perception_encoder is not None:
-                if self.perception_input_name in self.critic_module.input_indices_dict:
-                    perception_obs = critic_obs[..., self.critic_module.input_indices_dict[self.perception_input_name]]
-                elif policy_state_dict is not None and self.perception_input_name in policy_state_dict:
-                    perception_obs = policy_state_dict[self.perception_input_name]
-                else:
-                    raise ValueError(f"Perception obs '{self.perception_input_name}' not provided for critic.")
-                if hasattr(perception_obs, "is_inference") and perception_obs.is_inference():
-                    perception_obs = perception_obs.clone()
+                perception_obs = self._get_perception_obs(critic_obs, policy_state_dict, source="critic")
                 perception_embed = perception_encoder(perception_obs)
                 if hasattr(perception_embed, "is_inference") and perception_embed.is_inference():
                     perception_embed = perception_embed.clone()

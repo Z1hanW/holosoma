@@ -183,6 +183,7 @@ class PPO(BaseAlgo):
         self.distill_loss_fn = F.mse_loss
         self.dagger_ignore_zero_teacher_actions = True
         self.dagger_ignore_external_goal_samples = False
+        self.dagger_ignore_episode_initial_steps = 0
         self.dagger_match_std = False
         self.strict_teacher_load = True
         self.teacher_perception_obs_key = ""
@@ -522,6 +523,9 @@ class PPO(BaseAlgo):
         self.dagger_ignore_external_goal_samples = bool(
             getattr(distill_cfg, "dagger_ignore_external_goal_samples", False)
         )
+        self.dagger_ignore_episode_initial_steps = max(
+            0, int(getattr(distill_cfg, "dagger_ignore_episode_initial_steps", 0))
+        )
         self.dagger_match_std = bool(getattr(distill_cfg, "dagger_match_std", False))
         self.strict_teacher_load = bool(getattr(distill_cfg, "strict_teacher_load", True))
         teacher_perception_obs_key = getattr(distill_cfg, "teacher_perception_obs_key", None)
@@ -651,7 +655,11 @@ class PPO(BaseAlgo):
             self.storage.register("teacher_actions", shape=(self.num_act,), dtype=torch.float)
             if self.use_multi_teacher:
                 self.storage.register("teacher_indices", shape=(1,), dtype=torch.long)
-            if self.dagger_ignore_external_goal_samples:
+            if (
+                self.dagger_ignore_external_goal_samples
+                or self.dagger_ignore_episode_initial_steps > 0
+                or self._motion_command_supports_runtime_default_pose_prepend_mask()
+            ):
                 self.storage.register("teacher_bc_mask", shape=(1,), dtype=torch.bool)
         perception_keys = {key for key in [self.actor_perception_key, self.critic_perception_key] if key}
         for key in perception_keys:
@@ -818,6 +826,13 @@ class PPO(BaseAlgo):
             return
         motion_command.set_training_iteration(current_iteration, total_iterations=total_iterations)
 
+    def _motion_command_supports_runtime_default_pose_prepend_mask(self) -> bool:
+        command_manager = getattr(self.env, "command_manager", None)
+        if command_manager is None:
+            return False
+        motion_command = command_manager.get_state("motion_command")
+        return motion_command is not None and hasattr(motion_command, "get_runtime_default_pose_prepend_mask")
+
     def _use_deterministic_student_actions(self) -> bool:
         """Use mean actions during pure BC phases to reduce rollout noise drift."""
         if not self.dagger_enabled:
@@ -857,13 +872,26 @@ class PPO(BaseAlgo):
                 values = self.critic.evaluate(critic_policy_state).detach()
 
                 teacher_bc_mask_current = None
-                if self.dagger_ignore_external_goal_samples:
+                if (
+                    self.dagger_ignore_external_goal_samples
+                    or self.dagger_ignore_episode_initial_steps > 0
+                    or self._motion_command_supports_runtime_default_pose_prepend_mask()
+                ):
                     teacher_bc_mask_current = torch.ones((actions.shape[0], 1), device=actions.device, dtype=torch.bool)
                     motion_command = None
                     if self.env.command_manager is not None:
                         motion_command = self.env.command_manager.get_state("motion_command")
-                    if motion_command is not None and hasattr(motion_command, "get_sparse_goal_external_mask"):
-                        teacher_bc_mask_current = (~motion_command.get_sparse_goal_external_mask()).unsqueeze(1)
+                    if self.dagger_ignore_external_goal_samples:
+                        if motion_command is not None and hasattr(motion_command, "get_sparse_goal_external_mask"):
+                            teacher_bc_mask_current &= (~motion_command.get_sparse_goal_external_mask()).unsqueeze(1)
+                    if self.dagger_ignore_episode_initial_steps > 0:
+                        episode_length_buf = getattr(self.env, "episode_length_buf", None)
+                        if episode_length_buf is not None:
+                            teacher_bc_mask_current &= (
+                                episode_length_buf >= self.dagger_ignore_episode_initial_steps
+                            ).unsqueeze(1)
+                    if motion_command is not None and hasattr(motion_command, "get_runtime_default_pose_prepend_mask"):
+                        teacher_bc_mask_current &= (~motion_command.get_runtime_default_pose_prepend_mask()).unsqueeze(1)
 
                 teacher_actions = None
                 teacher_indices = None
@@ -1009,11 +1037,10 @@ class PPO(BaseAlgo):
         num_updates = self.config.num_learning_epochs * self.config.num_mini_batches
         for key in loss_dict:
             loss_dict[key] /= num_updates
-        if self.dagger_ignore_external_goal_samples:
-            try:
-                loss_dict["teacher_bc_mask_fraction"] = float(self.storage["teacher_bc_mask"].float().mean().item())
-            except KeyError:
-                pass
+        try:
+            loss_dict["teacher_bc_mask_fraction"] = float(self.storage["teacher_bc_mask"].float().mean().item())
+        except KeyError:
+            pass
         self.storage.clear()
         return loss_dict
 
@@ -1254,10 +1281,9 @@ class PPO(BaseAlgo):
                 distill_per_sample = distill_per_elem
 
             valid_mask = torch.ones_like(distill_per_sample, dtype=torch.bool)
-            if self.dagger_ignore_external_goal_samples:
-                teacher_bc_mask = minibatch.get("teacher_bc_mask")
-                if teacher_bc_mask is not None:
-                    valid_mask &= teacher_bc_mask[:original_batch_size].view(-1).to(dtype=torch.bool)
+            teacher_bc_mask = minibatch.get("teacher_bc_mask")
+            if teacher_bc_mask is not None:
+                valid_mask &= teacher_bc_mask[:original_batch_size].view(-1).to(dtype=torch.bool)
 
             if self.dagger_ignore_zero_teacher_actions:
                 expert_terminate = torch.all(teacher_actions_batch == 0.0, dim=-1)

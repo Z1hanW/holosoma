@@ -68,7 +68,7 @@ if [[ "${DEPTH_IMPL}" == "raycast" ]]; then
 fi
 
 CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
-  exp:g1-29dof-wbt-motion-tracking-transformer \
+  exp:g1-terrain-transformer \
   "perception:${PERCEPTION_PRESET}" \
   --training.num_envs=128 \
   "${PERCEPTION_OVERRIDES[@]}" \
@@ -76,14 +76,6 @@ CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 --master_port=$((29500 + RAND
   \
   --algo.config.actor_learning_rate=7e-5 \
   --algo.config.critic_learning_rate=7e-5 \
-  --algo.config.normalize_actor_obs=False \
-  --algo.config.normalize_critic_obs=False \
-  --algo.config.module_dict.actor.type=TransformerObsTokenEncoder \
-  --algo.config.module_dict.critic.type=MLP \
-  --algo.config.module_dict.actor.layer_config.encoder_num_steps=10 \
-  --algo.config.module_dict.actor.layer_config.encoder_obs_token_name=actor_obs \
-  --algo.config.module_dict.actor.layer_config.encoder_activation=ReLU \
-  --algo.config.module_dict.actor.layer_config.transformer_pooling=first \
   --algo.config.module_dict.actor.min_noise_std=0.10 \
   --algo.config.save_interval=100 \
   \
