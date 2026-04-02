@@ -242,10 +242,28 @@ class MotionConfig:
     start_at_timestep_zero_prob: float = 0.2
     """Probability of starting at timestep zero."""
 
+    start_at_timestep_zero_prob_end: float | None = None
+    """Optional final probability of starting at timestep zero after curriculum ramp."""
+
+    start_at_timestep_zero_prob_start_iter: int | None = None
+    """Training iteration where the start-at-zero curriculum begins."""
+
+    start_at_timestep_zero_prob_end_iter: int | None = None
+    """Training iteration where the start-at-zero curriculum reaches its final probability."""
+
     freeze_at_timestep_zero_prob: float = 0.95
     """When starting at timestep 0, probability of freezing motion counter at 0 (not advancing).
     This makes the robot practice holding the initial pose. Only applies when episode starts at timestep 0.
     Sampled independently each policy step; expected wait is roughly 1 / (1 - p) steps before unfreezing."""
+
+    freeze_at_timestep_zero_prob_end: float | None = None
+    """Optional final freeze probability after curriculum ramp."""
+
+    freeze_at_timestep_zero_prob_start_iter: int | None = None
+    """Training iteration where the freeze-at-zero curriculum begins."""
+
+    freeze_at_timestep_zero_prob_end_iter: int | None = None
+    """Training iteration where the freeze-at-zero curriculum reaches its final probability."""
 
     clip_weighting_strategy: str = "uniform_clip"
     """Sampling strategy across clips when a motion bank is loaded.

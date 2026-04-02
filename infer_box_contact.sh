@@ -419,8 +419,39 @@ command_capable = sparse_goal_enabled and any(
         "actor_obs_torso",
     )
 )
-start_at_zero_prob = motion_cfg.get("start_at_timestep_zero_prob") if isinstance(motion_cfg, dict) else None
-freeze_at_zero_prob = motion_cfg.get("freeze_at_timestep_zero_prob") if isinstance(motion_cfg, dict) else None
+
+def resolve_scheduled_prob(
+    cfg: dict[str, object] | None,
+    *,
+    base_key: str,
+    end_key: str,
+    start_iter_key: str,
+    end_iter_key: str,
+):
+    if not isinstance(cfg, dict):
+        return None
+    end_value = cfg.get(end_key)
+    start_iter = cfg.get(start_iter_key)
+    end_iter = cfg.get(end_iter_key)
+    if end_value is not None and start_iter is not None and end_iter is not None:
+        return end_value
+    return cfg.get(base_key)
+
+
+start_at_zero_prob = resolve_scheduled_prob(
+    motion_cfg,
+    base_key="start_at_timestep_zero_prob",
+    end_key="start_at_timestep_zero_prob_end",
+    start_iter_key="start_at_timestep_zero_prob_start_iter",
+    end_iter_key="start_at_timestep_zero_prob_end_iter",
+)
+freeze_at_zero_prob = resolve_scheduled_prob(
+    motion_cfg,
+    base_key="freeze_at_timestep_zero_prob",
+    end_key="freeze_at_timestep_zero_prob_end",
+    start_iter_key="freeze_at_timestep_zero_prob_start_iter",
+    end_iter_key="freeze_at_timestep_zero_prob_end_iter",
+)
 noise_cfg = motion_cfg.get("noise_to_initial_pose", {}) if isinstance(motion_cfg, dict) else {}
 reset_noise_scale = noise_cfg.get("overall_noise_scale") if isinstance(noise_cfg, dict) else None
 

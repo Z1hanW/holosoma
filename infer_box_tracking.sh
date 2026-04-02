@@ -8,7 +8,7 @@ set -euo pipefail
 #   bash infer_box_tracking.sh [teacher_checkpoint.pt|wandb://...] [extra tyro args...]
 #
 # Optional env vars:
-#   TEACHER_CHECKPOINT        (default: distill_box teacher default)
+#   TEACHER_CHECKPOINT        (default: wandb://zihanw22/boxer/a5ohxuta/model_09000.pt)
 #   LEGACY_OBS                (default: 0; set 1/true to require legacy checkpoint observation layout)
 #   REQUIRE_HEIGHTMAP         (default: 0; set 1/true to require checkpoint perception.enabled=True and output_mode=heightmap)
 #   DEFAULT_LEGACY_TEACHER_CHECKPOINT
@@ -26,6 +26,10 @@ set -euo pipefail
 #   VISER_SYNC_TO_SIM         (default: True)
 #   VISER_FORCE_DT            (default: True)
 #   VISER_LOAD_URDF           (default: 1; URDF meshes are shown in Viser, but pose/object selection comes from Isaac Sim runtime state)
+#   START_AT_TIMESTEP_ZERO_PROB
+#                             (default: 0.2; matches checkpoint default)
+#   FREEZE_AT_TIMESTEP_ZERO_PROB
+#                             (default: 0.95; matches checkpoint default)
 #   DISABLE_RANDOMIZATION     (default: True)
 #   VIS_GPU                   (default: auto; picks least-used GPU if CUDA_VISIBLE_DEVICES is unset)
 
@@ -58,7 +62,9 @@ if [[ $# -gt 0 ]]; then
       ;;
   esac
 fi
-DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/bie9jcq0/model_09000.pt"}
+
+# https://wandb.ai/zihanw22/boxer/runs/a5ohxuta/files?nw=nwuserz1hanw
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/a5ohxuta/model_09000.pt"}
 DEFAULT_LEGACY_TEACHER_CHECKPOINT="${DEFAULT_LEGACY_TEACHER_CHECKPOINT:-}"
 LEGACY_OBS=${LEGACY_OBS:-0}
 legacy_obs_normalized=$(echo "${LEGACY_OBS}" | tr '[:upper:]' '[:lower:]')
@@ -211,8 +217,8 @@ VISER_FORCE_DT=${VISER_FORCE_DT:-True}
 VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-False}
 VISER_LOAD_URDF=${VISER_LOAD_URDF:-1}
 
-START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-1.0}
-FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
+START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.2}
+FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.95}
 RESET_NOISE_SCALE=${RESET_NOISE_SCALE:-0.0}
 MAX_EPISODE_LENGTH_S=${MAX_EPISODE_LENGTH_S:-1000000}
 SIM_ENV_SPACING=${SIM_ENV_SPACING:-0.0}

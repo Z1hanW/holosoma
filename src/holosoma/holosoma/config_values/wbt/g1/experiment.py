@@ -519,6 +519,22 @@ _w_object_command_curriculum_module_dict = PPOModuleDictConfig(
     ),
 )
 
+_terrain_distill_sparse_root_cmd_actor_inputs = ["actor_obs_root", "actor_obs_proprio"]
+_terrain_distill_sparse_root_cmd_critic_inputs = ["critic_obs"]
+
+_terrain_distill_sparse_root_cmd_module_dict = PPOModuleDictConfig(
+    actor=replace(
+        g1_29dof_wbt_videomimic_mlp.algo.config.module_dict.actor,
+        type="MLP",
+        input_dim=_terrain_distill_sparse_root_cmd_actor_inputs,
+    ),
+    critic=replace(
+        g1_29dof_wbt_videomimic_mlp.algo.config.module_dict.critic,
+        type="MLP",
+        input_dim=_terrain_distill_sparse_root_cmd_critic_inputs,
+    ),
+)
+
 g1_29dof_wbt_w_object_distill_sparse_root_cmd = replace(
     g1_29dof_wbt_w_object_generalist,
     training=replace(
@@ -568,6 +584,23 @@ g1_29dof_wbt_w_object_distill_sparse_goal_mixed = replace(
         config=replace(
             g1_29dof_wbt_w_object_generalist.algo.config,
             module_dict=_w_object_distill_sparse_root_cmd_module_dict,
+        ),
+    ),
+)
+
+g1_29dof_wbt_terrain_distill_sparse_root_cmd = replace(
+    g1_29dof_wbt_videomimic_mlp,
+    training=replace(
+        g1_29dof_wbt_videomimic_mlp.training,
+        name="g1_29dof_wbt_terrain_distill_sparse_root_cmd",
+    ),
+    observation=observation.g1_29dof_wbt_observation_terrain_distill_sparse_root_cmd,
+    termination=termination.g1_29dof_wbt_termination_distill,
+    algo=replace(
+        g1_29dof_wbt_videomimic_mlp.algo,
+        config=replace(
+            g1_29dof_wbt_videomimic_mlp.algo.config,
+            module_dict=_terrain_distill_sparse_root_cmd_module_dict,
         ),
     ),
 )
@@ -629,6 +662,7 @@ __all__ = [
     "g1_29dof_wbt_w_object_command_curriculum",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd",
     "g1_29dof_wbt_w_object_distill_sparse_goal_mixed",
+    "g1_29dof_wbt_terrain_distill_sparse_root_cmd",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_legacy",
 ]
 

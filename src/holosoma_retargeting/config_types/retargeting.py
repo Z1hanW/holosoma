@@ -80,3 +80,9 @@ class ParallelRetargetingConfig(RetargetingConfig):
 
     max_workers: int | None = None
     """Maximum number of parallel workers. Auto-determined if None."""
+
+    augmentation_names_csv: str = ""
+    """Comma-separated augmentation names to run. Empty means run the full built-in set."""
+
+    object_interaction_extra_aggressive: bool = False
+    """Append one stronger object_interaction translation/rotation pair (trans_3 and rot_2)."""

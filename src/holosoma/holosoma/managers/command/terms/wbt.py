@@ -1330,6 +1330,15 @@ class MotionCommand(CommandTermBase):
             "yes",
             "on",
         )
+        if self._reset_to_default_pose:
+            start_probs = [float(self.motion_cfg.start_at_timestep_zero_prob)]
+            if self.motion_cfg.start_at_timestep_zero_prob_end is not None:
+                start_probs.append(float(self.motion_cfg.start_at_timestep_zero_prob_end))
+            if any(prob < 0.999 for prob in start_probs):
+                logger.warning(
+                    "reset_to_default_pose=True applies to every reset, including non-zero motion starts. "
+                    "This can make random clip starts much harder than runtime prepend alone."
+                )
         self._init_root_pos = torch.tensor(init_state.pos, dtype=torch.float32, device=self.device)
         self._init_root_rot = torch.tensor(init_state.rot, dtype=torch.float32, device=self.device)
         self._init_root_lin_vel = torch.tensor(init_state.lin_vel, dtype=torch.float32, device=self.device)
@@ -1897,7 +1906,7 @@ class MotionCommand(CommandTermBase):
         self.time_steps[env_ids] = (phase * valid_starts).long()
 
         # Handle start_at_timestep_zero_prob.
-        base_prob = float(self.motion_cfg.start_at_timestep_zero_prob)
+        base_prob = self._current_start_at_timestep_zero_prob()
         if base_prob > 0.0:
             probs = torch.full((env_ids.numel(),), base_prob, device=self.device, dtype=torch.float32)
             probs = torch.clamp(probs, 0.0, 1.0)
@@ -2085,7 +2094,7 @@ class MotionCommand(CommandTermBase):
                 self._runtime_default_pose_prepend_active[last_step_mask] = False
 
         # Handle freeze_at_timestep_zero_prob: for envs at timestep 0, randomly decide whether to advance
-        freeze_prob = self.motion_cfg.freeze_at_timestep_zero_prob
+        freeze_prob = self._current_freeze_at_timestep_zero_prob()
         if freeze_prob > 0.0:
             zero_mask = self.time_steps == 0
             if zero_mask.any():
@@ -2425,6 +2434,43 @@ class MotionCommand(CommandTermBase):
         if alpha is None:
             return None
         return float(start_value + (end_value - start_value) * alpha)
+
+    def _scheduled_reset_prob(
+        self,
+        start_value: float,
+        *,
+        end_value: float | None,
+        start_iter: int | None,
+        end_iter: int | None,
+    ) -> float:
+        start_value = self._clamp01(float(start_value))
+        if end_value is None or start_iter is None or end_iter is None:
+            return start_value
+
+        end_value = self._clamp01(float(end_value))
+        if self._env.is_evaluating:
+            return end_value
+
+        alpha = self._iteration_curriculum_progress(start_iter, end_iter)
+        if alpha is None:
+            return start_value
+        return self._clamp01(start_value + (end_value - start_value) * alpha)
+
+    def _current_start_at_timestep_zero_prob(self) -> float:
+        return self._scheduled_reset_prob(
+            float(self.motion_cfg.start_at_timestep_zero_prob),
+            end_value=self.motion_cfg.start_at_timestep_zero_prob_end,
+            start_iter=self.motion_cfg.start_at_timestep_zero_prob_start_iter,
+            end_iter=self.motion_cfg.start_at_timestep_zero_prob_end_iter,
+        )
+
+    def _current_freeze_at_timestep_zero_prob(self) -> float:
+        return self._scheduled_reset_prob(
+            float(self.motion_cfg.freeze_at_timestep_zero_prob),
+            end_value=self.motion_cfg.freeze_at_timestep_zero_prob_end,
+            start_iter=self.motion_cfg.freeze_at_timestep_zero_prob_start_iter,
+            end_iter=self.motion_cfg.freeze_at_timestep_zero_prob_end_iter,
+        )
 
     def _sparse_goal_curriculum_progress(self) -> float:
         if self._sparse_goal_cfg is None:
@@ -3738,6 +3784,19 @@ class MotionCommand(CommandTermBase):
             self.metrics["motion/error_object_ref_pos"] = zeros
             self.metrics["motion/error_object_ref_rot"] = zeros
             self.metrics["motion/error_object_ref_lin_vel"] = zeros
+
+        self.metrics["motion/reset_start_at_timestep_zero_prob"] = torch.full(
+            (self.num_envs,),
+            float(self._current_start_at_timestep_zero_prob()),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self.metrics["motion/reset_freeze_at_timestep_zero_prob"] = torch.full(
+            (self.num_envs,),
+            float(self._current_freeze_at_timestep_zero_prob()),
+            device=self.device,
+            dtype=torch.float32,
+        )
 
         if self._sparse_goal_curriculum_enabled:
             self.metrics["goal/training_iteration"] = torch.full(

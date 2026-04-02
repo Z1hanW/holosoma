@@ -872,6 +872,50 @@ videomimic_target_terms = {
     ),
 }
 
+g1_29dof_wbt_observation_terrain_distill_sparse_root_cmd = ObservationManagerCfg(
+    groups={
+        # Keep the teacher videomimic groups available for teacher policy queries.
+        "actor_obs": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            terms=actor_obs_videomimic_terms,
+        ),
+        "actor_obs_target": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=videomimic_target_terms,
+        ),
+        # Student sparse root command [rel_xy(2), rel_yaw(1)] in root-heading frame.
+        "actor_obs_root": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            terms=object_distill_sparse_root_cmd_terms,
+        ),
+        # Student proprioception only; no privileged target poses in the actor.
+        "actor_obs_proprio": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            terms=object_distill_proprio_terms,
+        ),
+        "critic_obs": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=5,
+            terms=critic_obs_videomimic_terms,
+        ),
+        "critic_obs_target": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=videomimic_target_terms,
+        ),
+    },
+)
+
 g1_29dof_wbt_observation_videomimic = ObservationManagerCfg(
     groups={
         "actor_obs": ObsGroupCfg(
@@ -906,6 +950,7 @@ __all__ = [
     "g1_29dof_wbt_observation_motion_tracking",
     "g1_29dof_wbt_observation_motion_tracking_split",
     "g1_29dof_wbt_observation_terrain_transformer",
+    "g1_29dof_wbt_observation_terrain_distill_sparse_root_cmd",
     "g1_29dof_wbt_observation_w_object",
     "g1_29dof_wbt_observation_w_object_legacy",
     "g1_29dof_wbt_observation_w_object_command_curriculum",

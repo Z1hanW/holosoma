@@ -44,13 +44,15 @@ MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
 PHYSX_GPU_MAX_RIGID_PATCH_COUNT=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT:-655360}
 
 TRAIN_DATASETS=${TRAIN_DATASETS:-"omomo,behave"}
-AUTO_PREP_MIXED_BANK=${AUTO_PREP_MIXED_BANK:-0}
+AUTO_PREP_MIXED_BANK=${AUTO_PREP_MIXED_BANK:-1}
 MIXED_CLEAN_OUT=${MIXED_CLEAN_OUT:-1}
 MIXED_LINK_MODE=${MIXED_LINK_MODE:-symlink}
 MIXED_BEHAVE_FILTER=${MIXED_BEHAVE_FILTER:-boxmedium,boxlarge}
 MIXED_OMOMO_DIR=${MIXED_OMOMO_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"}
 MIXED_BEHAVE_DIR=${MIXED_BEHAVE_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_sq_carry"}
 MIXED_BEHAVE_MAP_FILE=${MIXED_BEHAVE_MAP_FILE:-"${MIXED_BEHAVE_DIR}/_clip_object_urdf_map.json"}
+DEFAULT_POSE_PREPEND_ENABLED=${DEFAULT_POSE_PREPEND_ENABLED:-1}
+DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0.2}
 
 VISER_PORT=${VISER_PORT:-$((RANDOM % 8976 + 1024))}
 VISER_ENV_ID=${VISER_ENV_ID:-0}
@@ -608,9 +610,25 @@ if [[ "${GENERALIST_CONTACT_REWARD_ENABLED_FLAG}" != "1" ]]; then
   GENERALIST_PALM_CONTACT_REWARD_WEIGHT=0.0
 fi
 
+default_pose_prepend_enabled_normalized=$(echo "${DEFAULT_POSE_PREPEND_ENABLED}" | tr '[:upper:]' '[:lower:]')
+case "${default_pose_prepend_enabled_normalized}" in
+  1|true|yes|on)
+    DEFAULT_POSE_PREPEND_ENABLED_FLAG=True
+    ;;
+  0|false|no|off)
+    DEFAULT_POSE_PREPEND_ENABLED_FLAG=False
+    ;;
+  *)
+    echo "[ERROR] DEFAULT_POSE_PREPEND_ENABLED must be one of: 0/1/true/false/yes/no/on/off. Got: ${DEFAULT_POSE_PREPEND_ENABLED}" >&2
+    exit 2
+    ;;
+esac
+
 echo "[INFO] Generalist contact reward enabled: ${GENERALIST_CONTACT_REWARD_ENABLED_FLAG}"
 echo "[INFO] Generalist contact reward mode=${GENERALIST_CONTACT_REWARD_MODE} threshold=${GENERALIST_CONTACT_REWARD_THRESHOLD} force_scale=${GENERALIST_CONTACT_REWARD_FORCE_SCALE}"
 echo "[INFO] Generalist contact reward weights torso=${GENERALIST_TORSO_CONTACT_REWARD_WEIGHT} arms=${GENERALIST_ARM_CONTACT_REWARD_WEIGHT} palms=${GENERALIST_PALM_CONTACT_REWARD_WEIGHT}"
+echo "[INFO] Motion default-pose prepend enabled: ${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
+echo "[INFO] Motion default-pose prepend duration: ${DEFAULT_POSE_PREPEND_DURATION_S}s"
 
 train_cmd=(
   src/holosoma/holosoma/train_agent.py
@@ -633,6 +651,8 @@ train_cmd=(
   --reward.terms.body_contact_reward_torso.params.force_scale="${GENERALIST_CONTACT_REWARD_FORCE_SCALE}"
   --reward.terms.body_contact_reward_arms.params.force_scale="${GENERALIST_CONTACT_REWARD_FORCE_SCALE}"
   --reward.terms.body_contact_reward_palms.params.force_scale="${GENERALIST_CONTACT_REWARD_FORCE_SCALE}"
+  --command.setup-terms.motion-command.params.motion-config.enable-default-pose-prepend="${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
+  --command.setup-terms.motion-command.params.motion-config.default-pose-prepend-duration-s="${DEFAULT_POSE_PREPEND_DURATION_S}"
 )
 if [[ "${DEBUG_MODE}" == "replay" || "${DEBUG_MODE}" == "toy" ]]; then
   train_cmd=("${PYTHON_BIN}" "${train_cmd[@]}")

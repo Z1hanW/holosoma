@@ -95,10 +95,28 @@ def load_saved_experiment_config(checkpoint_cfg: CheckpointConfig) -> tuple[Expe
         logger.info(f"Loaded experiment config from checkpoint: {checkpoint_path}")
         return config, stored_wandb_path
 
-    wandb_run_path, _ = _parse_wandb_reference(checkpoint_str)
+    wandb_run_path, artifact_path = _parse_wandb_reference(checkpoint_str)
 
     api = wandb.Api()
     run = api.run(wandb_run_path)
+    if artifact_path:
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                checkpoint_file = run.file(artifact_path)
+                downloaded = checkpoint_file.download(root=temp_dir, replace=True)
+                checkpoint_path = Path(downloaded.name)
+                if not checkpoint_path.is_absolute():
+                    checkpoint_path = (Path.cwd() / checkpoint_path).resolve()
+                config, stored_wandb_path = _load_config_from_checkpoint(checkpoint_path)
+                effective_wandb_path = stored_wandb_path or wandb_run_path
+                logger.info(f"Loaded experiment config from W&B checkpoint payload: {checkpoint_str}")
+                return config, effective_wandb_path
+        except Exception as exc:
+            logger.warning(
+                f"Failed to load experiment config from W&B checkpoint payload {checkpoint_str}; "
+                f"falling back to {CONFIG_NAME}. Error: {exc}"
+            )
+
     config_file = run.file(CONFIG_NAME)
     with tempfile.TemporaryDirectory() as temp_dir, config_file.download(root=temp_dir) as file:
         return ExperimentConfig(**yaml.safe_load(file)), wandb_run_path

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Terrain tracking teacher training entrypoint.
+# Default flow is tracking-only, so perception is disabled unless explicitly set.
+
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 cd "${SCRIPT_DIR}"
 
@@ -15,15 +18,15 @@ else
 fi
 PYTHON_BIN=${PYTHON_BIN:-"${DEFAULT_PYTHON_BIN}"}
 
-PERCEPTION_PRESET=${1:-${PERCEPTION_PRESET:-camera_depth_d435i}}
+PERCEPTION_PRESET=${1:-${PERCEPTION_PRESET:-none}}
 case "${PERCEPTION_PRESET}" in
-  camera_depth_d435i|heightmap)
+  none|camera_depth_d435i|heightmap)
     if [[ $# -gt 0 ]]; then
       shift
     fi
     ;;
   *)
-    echo "[ERROR] Unknown PERCEPTION_PRESET=${PERCEPTION_PRESET}. Use camera_depth_d435i|heightmap." >&2
+    echo "[ERROR] Unknown PERCEPTION_PRESET=${PERCEPTION_PRESET}. Use none|camera_depth_d435i|heightmap." >&2
     exit 1
     ;;
 esac
@@ -49,7 +52,7 @@ RESUME_CKPT=${RESUME_CKPT:-}
 
 ACTOR_LR=${ACTOR_LR:-7e-5}
 CRITIC_LR=${CRITIC_LR:-7e-5}
-SAVE_INTERVAL=${SAVE_INTERVAL:-10000}
+SAVE_INTERVAL=${SAVE_INTERVAL:-1000}
 LOAD_OPTIMIZER=${LOAD_OPTIMIZER:-False}
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-536870912}
 

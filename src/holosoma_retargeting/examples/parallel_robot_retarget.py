@@ -55,6 +55,11 @@ PARALLEL_SAVE_DIRS = {
     "climbing": "demo_results_parallel/{robot}/climbing/mocap_climb",
 }
 
+OBJECT_INTERACTION_EXTRA_AGGRESSIVE_AUGMENTATIONS = (
+    {"name": "trans_3", "translation": np.array([0.35, 0.0, 0.0]), "rotation": 0.0},
+    {"name": "rot_2", "translation": np.array([0.0, 0.35, 0.0]), "rotation": np.pi / 3},
+)
+
 
 def find_files(
     data_dir: Path,
@@ -121,11 +126,19 @@ def find_files(
     return sorted(files)
 
 
-def generate_augmentation_configs(task_type: str, augmentation: bool = True):
+def generate_augmentation_configs(
+    task_type: str,
+    augmentation: bool = True,
+    include_extra_aggressive: bool = False,
+    selected_aug_names: set[str] | None = None,
+):
     """Generate augmentation configurations based on task type."""
     if task_type == "robot_only":
         # No augmentation for robot_only
-        return [{"name": "original"}]
+        augmentations = [{"name": "original"}]
+        if selected_aug_names is not None:
+            augmentations = [aug for aug in augmentations if aug["name"] in selected_aug_names]
+        return augmentations
 
     if task_type == "object_interaction":
         """Generate different augmentation configurations for object interaction."""
@@ -153,6 +166,12 @@ def generate_augmentation_configs(task_type: str, augmentation: bool = True):
                     }
                 )
 
+            if include_extra_aggressive:
+                augmentations.extend(OBJECT_INTERACTION_EXTRA_AGGRESSIVE_AUGMENTATIONS)
+
+        if selected_aug_names is not None:
+            augmentations = [aug for aug in augmentations if aug["name"] in selected_aug_names]
+
         return augmentations
 
     if task_type == "climbing":
@@ -162,6 +181,8 @@ def generate_augmentation_configs(task_type: str, augmentation: bool = True):
             configs.extend(
                 {"name": f"z_scale_{z_scale}", "scale": np.array([1, 1, z_scale])} for z_scale in [0.8, 0.9, 1.1, 1.2]
             )
+        if selected_aug_names is not None:
+            configs = [cfg for cfg in configs if cfg["name"] in selected_aug_names]
         return configs
 
     raise ValueError(f"Invalid task type: {task_type}")
@@ -191,6 +212,8 @@ def process_single_task(args):
         task_config,
         retargeter,
         augmentation,
+        augmentation_names_csv,
+        object_interaction_extra_aggressive,
     ) = args
 
     os.makedirs(save_dir, exist_ok=True)
@@ -222,15 +245,32 @@ def process_single_task(args):
     toe_names = motion_data_config.toe_names
 
     # Process all augmentations
-    augmentations = generate_augmentation_configs(task_type, augmentation)
+    selected_aug_names = {token.strip() for token in augmentation_names_csv.split(",") if token.strip()}
+    augmentations = generate_augmentation_configs(
+        task_type,
+        augmentation,
+        include_extra_aggressive=object_interaction_extra_aggressive,
+        selected_aug_names=selected_aug_names or None,
+    )
+    if not augmentations:
+        raise ValueError(
+            f"No augmentations selected for task '{task_name}'. "
+            f"Requested names: {sorted(selected_aug_names)}"
+        )
     print("The number of augmentations: ", len(augmentations))
 
-    for k, aug_config in enumerate(augmentations):
+    for aug_config in augmentations:
+        aug_name = aug_config["name"]
+        file_name = f"{save_dir}/{task_name}_{aug_name}.npz"
+        is_original_run = aug_name == "original"
+
+        if Path(file_name).exists():
+            print(f"  Skipping existing augmentation: {aug_name}")
+            continue
+
         # Use fresh copies for each iteration
         human_joints = human_joints_original.copy()
         object_poses = object_poses_original.copy()
-        aug_name = aug_config["name"]
-        file_name = f"{save_dir}/{task_name}_{aug_name}.npz"
 
         print(f"  Processing augmentation: {aug_name}")
 
@@ -243,7 +283,7 @@ def process_single_task(args):
                 task_config.object_dir,
                 smpl_scale,
                 task_config,
-                augmentation=(k > 0),
+                augmentation=(not is_original_run),
                 object_scale_augmented=aug_config["scale"],
             )
         else:
@@ -253,7 +293,7 @@ def process_single_task(args):
                 task_config.object_dir,
                 smpl_scale,
                 task_config,
-                augmentation=(k > 0),
+                augmentation=(not is_original_run),
             )
 
         # Create retargeter
@@ -281,8 +321,7 @@ def process_single_task(args):
             foot_sticking_sequences[0][toe_names[0]] = False
             foot_sticking_sequences[0][toe_names[1]] = False
 
-        # Determine if this is an augmentation run (k > 0 means we're augmenting)
-        is_augmentation_run = k > 0
+        is_augmentation_run = not is_original_run
 
         if task_type == "object_interaction":
             # Initialize robot pose
@@ -315,10 +354,6 @@ def process_single_task(args):
                 task_name,
             )
 
-        # Check if file exists and skip retargeting if it does (after setting up conditions)
-        if Path.exists(Path(file_name)):
-            continue
-
         # Retarget motion
         retargeted_motions, _, _, _ = retargeter.retarget_motion(
             human_joint_motions=human_joints,
@@ -329,7 +364,7 @@ def process_single_task(args):
             foot_sticking_sequences=foot_sticking_sequences,
             q_a_init=q_init,
             q_nominal_list=q_nominal,
-            original=(k == 0),
+            original=is_original_run,
             dest_res_path=file_name,
         )
 
@@ -364,6 +399,9 @@ def main(cfg: ParallelRetargetingConfig) -> None:
     else:
         files = find_files(data_dir, data_format, cfg.task_config.object_name, task_type=task_type)
     print(f"Found {len(files)} files for task type: {task_type}")
+    if cfg.augmentation_names_csv:
+        print(f"Selected augmentations: {cfg.augmentation_names_csv}")
+    print(f"Extra aggressive object_interaction augmentations: {cfg.object_interaction_extra_aggressive}")
 
     # Pass configs to worker processes
     process_args = [
@@ -377,6 +415,8 @@ def main(cfg: ParallelRetargetingConfig) -> None:
             cfg.task_config,
             cfg.retargeter,
             cfg.augmentation,
+            cfg.augmentation_names_csv,
+            cfg.object_interaction_extra_aggressive,
         )
         for file_path in files
     ]

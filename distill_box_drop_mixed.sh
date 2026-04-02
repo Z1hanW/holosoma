@@ -43,8 +43,12 @@ TEACHER_PERCEPTION_OBS_KEY_EXPLICIT=0
 [[ -n "${TEACHER_PERCEPTION_OBS_KEY+x}" ]] && TEACHER_PERCEPTION_OBS_KEY_EXPLICIT=1
 START_AT_TIMESTEP_ZERO_PROB_EXPLICIT=0
 [[ -n "${START_AT_TIMESTEP_ZERO_PROB+x}" ]] && START_AT_TIMESTEP_ZERO_PROB_EXPLICIT=1
+START_AT_TIMESTEP_ZERO_PROB_END_EXPLICIT=0
+[[ -n "${START_AT_TIMESTEP_ZERO_PROB_END+x}" ]] && START_AT_TIMESTEP_ZERO_PROB_END_EXPLICIT=1
 FREEZE_AT_TIMESTEP_ZERO_PROB_EXPLICIT=0
 [[ -n "${FREEZE_AT_TIMESTEP_ZERO_PROB+x}" ]] && FREEZE_AT_TIMESTEP_ZERO_PROB_EXPLICIT=1
+FREEZE_AT_TIMESTEP_ZERO_PROB_END_EXPLICIT=0
+[[ -n "${FREEZE_AT_TIMESTEP_ZERO_PROB_END+x}" ]] && FREEZE_AT_TIMESTEP_ZERO_PROB_END_EXPLICIT=1
 
 EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-goal-mixed}
 RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_drop_mixed}
@@ -85,20 +89,34 @@ DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-2000}
 PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.5}
 DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
 SCHEDULE_NAME=${SCHEDULE_NAME:-teacher_anchor_then_goal_curriculum}
-SCHEDULE_NOTES=${SCHEDULE_NOTES:-"0-2000 clip-only with PPO 0->0.5 and DAgger 1->0.5; >=2000 command_only_env_prob=0.5; external_goal_prob 0.10->0.35; external goal range ramps to final span"}
-START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-1.0}
-FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
+SCHEDULE_NOTES=${SCHEDULE_NOTES:-"0-2000 clip-only with PPO 0->0.5 and DAgger 1->0.5; >=2000 command_only_env_prob=0.5; external_goal_prob 0.10->0.35; reset curriculum ramps start_at_zero 0.2->1.0 and freeze_at_zero 0.95->0.0; external goal range ramps to final span"}
+START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.2}
+START_AT_TIMESTEP_ZERO_PROB_END=${START_AT_TIMESTEP_ZERO_PROB_END:-1.0}
+START_AT_TIMESTEP_ZERO_PROB_START_ITER=${START_AT_TIMESTEP_ZERO_PROB_START_ITER:-2000}
+START_AT_TIMESTEP_ZERO_PROB_END_ITER=${START_AT_TIMESTEP_ZERO_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS}}
+FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.95}
+FREEZE_AT_TIMESTEP_ZERO_PROB_END=${FREEZE_AT_TIMESTEP_ZERO_PROB_END:-0.0}
+FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER:-2000}
+FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS}}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i_17x17}
 STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_proprio','actor_obs_drop_command']"}
 DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES=${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES:-True}
 DAGGER_IGNORE_EPISODE_INITIAL_STEPS=${DAGGER_IGNORE_EPISODE_INITIAL_STEPS:-0}
 MAX_EPISODE_LENGTH_S=${MAX_EPISODE_LENGTH_S:-8.0}
-RESET_TO_DEFAULT_POSE=${RESET_TO_DEFAULT_POSE:-True}
+# Keep non-zero clip starts motion-aligned; t=0 starts still train from default pose via runtime prepend.
+RESET_TO_DEFAULT_POSE=${RESET_TO_DEFAULT_POSE:-False}
 ENABLE_DEFAULT_POSE_PREPEND=${ENABLE_DEFAULT_POSE_PREPEND:-True}
 DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0.5}
 ENABLE_DEFAULT_POSE_APPEND=${ENABLE_DEFAULT_POSE_APPEND:-False}
 DEFAULT_POSE_APPEND_DURATION_S=${DEFAULT_POSE_APPEND_DURATION_S:-0.0}
+
+if [[ "${START_AT_TIMESTEP_ZERO_PROB_EXPLICIT}" -eq 1 && "${START_AT_TIMESTEP_ZERO_PROB_END_EXPLICIT}" -eq 0 ]]; then
+  START_AT_TIMESTEP_ZERO_PROB_END="${START_AT_TIMESTEP_ZERO_PROB}"
+fi
+if [[ "${FREEZE_AT_TIMESTEP_ZERO_PROB_EXPLICIT}" -eq 1 && "${FREEZE_AT_TIMESTEP_ZERO_PROB_END_EXPLICIT}" -eq 0 ]]; then
+  FREEZE_AT_TIMESTEP_ZERO_PROB_END="${FREEZE_AT_TIMESTEP_ZERO_PROB}"
+fi
 
 SPARSE_GOAL_ENABLED=${SPARSE_GOAL_ENABLED:-True}
 CLIP_GOAL_DELTA_MIN_STEPS=${CLIP_GOAL_DELTA_MIN_STEPS:-45}
@@ -282,13 +300,16 @@ echo "[INFO] external_goal_range_yaw_start=${EXTERNAL_GOAL_RPY_MIN_START} -> ${E
 echo "[INFO] external_goal_range_yaw_end=${EXTERNAL_GOAL_RPY_MIN} -> ${EXTERNAL_GOAL_RPY_MAX}"
 echo "[INFO] external_goal_range_iter=${EXTERNAL_GOAL_RANGE_START_ITER}->${EXTERNAL_GOAL_RANGE_END_ITER}"
 echo "[INFO] clip_goal_delta_steps=${CLIP_GOAL_DELTA_MIN_STEPS}-${CLIP_GOAL_DELTA_MAX_STEPS} (legacy/unused; clip-goal now uses final placement)"
-echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
-echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}"
+echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}->${START_AT_TIMESTEP_ZERO_PROB_END} iter=${START_AT_TIMESTEP_ZERO_PROB_START_ITER}->${START_AT_TIMESTEP_ZERO_PROB_END_ITER}"
+echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END} iter=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER}"
 echo "[INFO] reset_to_default_pose=${RESET_TO_DEFAULT_POSE}"
 echo "[INFO] default_pose_prepend=${ENABLE_DEFAULT_POSE_PREPEND} duration_s=${DEFAULT_POSE_PREPEND_DURATION_S} default_pose_append=${ENABLE_DEFAULT_POSE_APPEND} append_duration_s=${DEFAULT_POSE_APPEND_DURATION_S}"
 echo "[INFO] dagger_ignore_external_goal_samples=${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES}"
 echo "[INFO] dagger_ignore_episode_initial_steps=${DAGGER_IGNORE_EPISODE_INITIAL_STEPS}"
 echo "[INFO] max_episode_length_s=${MAX_EPISODE_LENGTH_S}"
+if [[ "${RESET_TO_DEFAULT_POSE}" == "True" || "${RESET_TO_DEFAULT_POSE}" == "true" || "${RESET_TO_DEFAULT_POSE}" == "1" ]]; then
+  echo "[WARN] reset_to_default_pose=True applies to every reset, including non-zero motion starts; this is much harder than runtime prepend only."
+fi
 if [[ -n "${TEACHER_COMPAT_NOTES}" ]]; then
   echo "[WARN] teacher_compat_notes=${TEACHER_COMPAT_NOTES}"
 fi
@@ -355,7 +376,13 @@ exec env \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-rpy-max-start "${EXTERNAL_GOAL_RPY_MAX_START}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-rpy-min "${EXTERNAL_GOAL_RPY_MIN}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-rpy-max "${EXTERNAL_GOAL_RPY_MAX}" \
+    --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-end="${START_AT_TIMESTEP_ZERO_PROB_END}" \
+    --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-start-iter="${START_AT_TIMESTEP_ZERO_PROB_START_ITER}" \
+    --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-end-iter="${START_AT_TIMESTEP_ZERO_PROB_END_ITER}" \
     --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob="${FREEZE_AT_TIMESTEP_ZERO_PROB}" \
+    --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-end="${FREEZE_AT_TIMESTEP_ZERO_PROB_END}" \
+    --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-start-iter="${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER}" \
+    --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-end-iter="${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER}" \
     --simulator.config.sim.max_episode_length_s "${MAX_EPISODE_LENGTH_S}" \
     --perception.camera-width="${IMAGE_WIDTH}" \
     --perception.camera-height="${IMAGE_HEIGHT}" \
