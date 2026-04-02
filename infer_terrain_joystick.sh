@@ -355,24 +355,34 @@ run_with_delayed_local_url() {
   local child_pid=""
   local child_status=0
   local announced=0
+  local viewer_disabled=0
   fifo_path="$(mktemp -u "${TMPDIR:-/tmp}/infer_terrain_joystick.XXXXXX.fifo")"
   mkfifo "${fifo_path}"
   "$@" >"${fifo_path}" 2>&1 &
   child_pid=$!
   while IFS= read -r line || [[ -n "${line}" ]]; do
     printf '%s\n' "${line}"
+    case "${line}" in
+      *"Viser live viewer disabled:"*)
+        viewer_disabled=1
+        ;;
+    esac
     if [[ "${announced}" == "0" ]]; then
       case "${line}" in
         *"Registering key:"*)
-          echo "[INFO] Local URL: http://localhost:${port}"
-          announced=1
+          if [[ "${viewer_disabled}" != "1" ]]; then
+            echo "[INFO] Local URL: http://localhost:${port}"
+            announced=1
+          fi
           ;;
       esac
     fi
   done < "${fifo_path}"
   wait "${child_pid}" || child_status=$?
   rm -f "${fifo_path}"
-  if [[ "${announced}" == "0" && "${child_status}" == "0" ]]; then
+  if [[ "${announced}" == "0" && "${viewer_disabled}" == "1" ]]; then
+    echo "[WARN] Viser viewer was disabled during startup; no localhost viewer will be available."
+  elif [[ "${announced}" == "0" && "${child_status}" == "0" ]]; then
     echo "[INFO] Local URL: http://localhost:${port}"
   fi
   return "${child_status}"
