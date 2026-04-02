@@ -30,6 +30,10 @@ set -euo pipefail
 #                             (default: 0.2; matches checkpoint default)
 #   FREEZE_AT_TIMESTEP_ZERO_PROB
 #                             (default: 0.95; matches checkpoint default)
+#   ENABLE_DEFAULT_POSE_PREPEND
+#                             (default: False; disable runtime default-pose warmup for more stable interactive resets)
+#   DEFAULT_POSE_PREPEND_DURATION_S
+#                             (default: 0.0; only used when ENABLE_DEFAULT_POSE_PREPEND=True)
 #   DISABLE_RANDOMIZATION     (default: True)
 #   VIS_GPU                   (default: auto; picks least-used GPU if CUDA_VISIBLE_DEVICES is unset)
 
@@ -219,6 +223,8 @@ VISER_LOAD_URDF=${VISER_LOAD_URDF:-1}
 
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.2}
 FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.95}
+ENABLE_DEFAULT_POSE_PREPEND=${ENABLE_DEFAULT_POSE_PREPEND:-False}
+DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0.0}
 RESET_NOISE_SCALE=${RESET_NOISE_SCALE:-0.0}
 MAX_EPISODE_LENGTH_S=${MAX_EPISODE_LENGTH_S:-1000000}
 SIM_ENV_SPACING=${SIM_ENV_SPACING:-0.0}
@@ -400,6 +406,8 @@ cmd=(
   --robot.object.object_urdf_path "${OBJECT_URDF}"
   --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob "${START_AT_TIMESTEP_ZERO_PROB}"
   --command.setup_terms.motion_command.params.motion_config.freeze_at_timestep_zero_prob "${FREEZE_AT_TIMESTEP_ZERO_PROB}"
+  --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend "${ENABLE_DEFAULT_POSE_PREPEND}"
+  --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s "${DEFAULT_POSE_PREPEND_DURATION_S}"
   --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale "${RESET_NOISE_SCALE}"
 )
 
@@ -446,6 +454,7 @@ echo "[INFO] headless=${HEADLESS_FLAG} (env HEADLESS=${HEADLESS})"
 echo "[INFO] viser=http://localhost:${VISER_PORT}"
 echo "[INFO] viser_sync_to_sim=${VISER_SYNC_TO_SIM} viser_force_dt=${VISER_FORCE_DT}"
 echo "[INFO] viser_load_urdf=${VISER_LOAD_URDF}"
+echo "[INFO] enable_default_pose_prepend=${ENABLE_DEFAULT_POSE_PREPEND} duration_s=${DEFAULT_POSE_PREPEND_DURATION_S}"
 echo "[INFO] disable_randomization=${DISABLE_RANDOMIZATION}"
 
 "${cmd[@]}"

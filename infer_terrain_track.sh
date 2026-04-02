@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Only edit this line. Then run: bash infer_terrain_track.sh
+WANDB_RUN_URL="${WANDB_RUN_URL:-https://wandb.ai/zihanw22/terrain-aware/runs/9pj2qlhs}"
+
 # IsaacSim + Viser inference for terrain tracking teacher policies.
-# Tracking stays perception-free; terrain perception belongs in distillation.
 #
 # Main path:
 #   bash infer_terrain_track.sh [checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] \
@@ -24,14 +26,14 @@ Usage:
   bash infer_terrain_track.sh obj <checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...> <motion_dir_or_file> <object_urdf> [extra tyro args...]
 
 Terrain defaults:
-  checkpoint  latest local terrain tracking teacher checkpoint (or DEFAULT_TERRAIN_CHECKPOINT)
+  checkpoint  WANDB_RUN_URL at top of file (or DEFAULT_TERRAIN_CHECKPOINT)
   motion      /data/terrain/___crisp_clean_motion
   geometry    /data/terrain/___crisp_clean_geometry
 
 Examples:
   bash infer_terrain_track.sh
-  bash infer_terrain_track.sh /abs/path/to/model_01000.pt
-  bash infer_terrain_track.sh https://wandb.ai/zihanw22/terrain-aware/runs/<run_id>
+  # or edit WANDB_RUN_URL at the top, then just run:
+  bash infer_terrain_track.sh
   bash infer_terrain_track.sh /abs/path/model.pt /data/terrain/___crisp_clean_motion /data/terrain/___crisp_clean_geometry
   MOTION_CLIP_NAME=vmm_41 DRY_RUN=1 bash infer_terrain_track.sh
 
@@ -44,9 +46,7 @@ Optional env vars:
   GEOMETRY_DIR              (terrain OBJ file/dir override)
   GEOMETRY_METADATA         (optional metadata .json override)
   OBJECT_URDF               (legacy obj mode only)
-  PERCEPTION_PRESET         (terrain mode default: none; override only for debugging)
-  ALLOW_TRACKING_PERCEPTION_CHECKPOINT
-                           (default: 0; set 1 only to force perception-enabled tracking checkpoints)
+  PERCEPTION_PRESET         (terrain mode default: checkpoint)
   PAIR_TERRAIN_WITH_MOTION  (terrain default: checkpoint value, else True)
   NUM_ENVS                  (default: 1)
   HEADLESS                  (default: True)
@@ -76,7 +76,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
-DEFAULT_TERRAIN_CHECKPOINT="${DEFAULT_TERRAIN_CHECKPOINT:-}"
+DEFAULT_TERRAIN_CHECKPOINT="${DEFAULT_TERRAIN_CHECKPOINT:-${WANDB_RUN_URL:-}}"
 DEFAULT_TERRAIN_MOTION_DIR="${DEFAULT_TERRAIN_MOTION_DIR:-/data/terrain/___crisp_clean_motion}"
 DEFAULT_TERRAIN_GEOMETRY_DIR="${DEFAULT_TERRAIN_GEOMETRY_DIR:-/data/terrain/___crisp_clean_geometry}"
 
@@ -592,29 +592,6 @@ CHECKPOINT_NUM_COLS="$(empty_if_none "${checkpoint_defaults_lines[10]:-}")"
 CHECKPOINT_PERCEPTION_ENABLED="$(empty_if_none "${checkpoint_defaults_lines[11]:-}")"
 CHECKPOINT_PERCEPTION_OUTPUT_MODE="$(empty_if_none "${checkpoint_defaults_lines[12]:-}")"
 
-ALLOW_TRACKING_PERCEPTION_CHECKPOINT_RAW="${ALLOW_TRACKING_PERCEPTION_CHECKPOINT:-0}"
-case "$(echo "${ALLOW_TRACKING_PERCEPTION_CHECKPOINT_RAW}" | tr '[:upper:]' '[:lower:]')" in
-  1|true|yes|on)
-    ALLOW_TRACKING_PERCEPTION_CHECKPOINT_FLAG=1
-    ;;
-  0|false|no|off|"")
-    ALLOW_TRACKING_PERCEPTION_CHECKPOINT_FLAG=0
-    ;;
-  *)
-    echo "[ERROR] ALLOW_TRACKING_PERCEPTION_CHECKPOINT must be one of: 0/1/true/false/yes/no/on/off. Got: ${ALLOW_TRACKING_PERCEPTION_CHECKPOINT_RAW}" >&2
-    exit 2
-    ;;
-esac
-
-if [[ "${MODE}" == "terrain" && "${ALLOW_TRACKING_PERCEPTION_CHECKPOINT_FLAG}" != "1" ]]; then
-  if [[ "$(echo "${CHECKPOINT_PERCEPTION_ENABLED}" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
-    echo "[ERROR] infer_terrain_track.sh expects a tracking-only checkpoint, but checkpoint perception.enabled=True: ${CHECKPOINT}" >&2
-    echo "[ERROR] Tracking should stay perception-free; distillation is the stage that adds perception." >&2
-    echo "[ERROR] If you really need to bypass this, set ALLOW_TRACKING_PERCEPTION_CHECKPOINT=1." >&2
-    exit 2
-  fi
-fi
-
 if [[ -n "${CHECKPOINT_MOTION_DIR}" ]]; then
   CHECKPOINT_MOTION_DIR="$(resolve_data_path "${CHECKPOINT_MOTION_DIR}")"
 fi
@@ -780,20 +757,9 @@ export LOGURU_LEVEL="${LOGURU_LEVEL:-WARNING}"
 export PY_LOG_LEVEL="${PY_LOG_LEVEL:-WARNING}"
 export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 
-PERCEPTION_PRESET="${PERCEPTION_PRESET:-none}"
+PERCEPTION_PRESET="${PERCEPTION_PRESET:-checkpoint}"
 if [[ "${MODE}" == "terrain" ]]; then
-  PERCEPTION_PRESET_LOWER="$(echo "${PERCEPTION_PRESET}" | tr '[:upper:]' '[:lower:]')"
-  if [[ "${ALLOW_TRACKING_PERCEPTION_CHECKPOINT_FLAG}" != "1" ]]; then
-    case "${PERCEPTION_PRESET_LOWER}" in
-      checkpoint|auto|""|none)
-        ;;
-      *)
-        echo "[ERROR] infer_terrain_track.sh is tracking-only. Use PERCEPTION_PRESET=none, or set ALLOW_TRACKING_PERCEPTION_CHECKPOINT=1 for debugging." >&2
-        exit 2
-        ;;
-    esac
-  fi
-  case "${PERCEPTION_PRESET_LOWER}" in
+  case "$(echo "${PERCEPTION_PRESET}" | tr '[:upper:]' '[:lower:]')" in
     checkpoint|auto|"")
       if [[ "$(echo "${CHECKPOINT_PERCEPTION_ENABLED}" | tr '[:upper:]' '[:lower:]')" == "true" && "$(echo "${CHECKPOINT_PERCEPTION_OUTPUT_MODE}" | tr '[:upper:]' '[:lower:]')" == "camera_depth" ]]; then
         export VISER_PERCEPTION_IMAGE_MODE="${VISER_PERCEPTION_IMAGE_MODE:-depth}"
@@ -1004,7 +970,6 @@ else
   echo "[INFO] terrain_num_cols=${TERRAIN_NUM_COLS:-<default>}"
   echo "[INFO] perception_preset=${PERCEPTION_PRESET}"
   echo "[INFO] checkpoint_perception=${CHECKPOINT_PERCEPTION_ENABLED:-<unknown>}/${CHECKPOINT_PERCEPTION_OUTPUT_MODE:-<unknown>}"
-  echo "[INFO] allow_tracking_perception_checkpoint=${ALLOW_TRACKING_PERCEPTION_CHECKPOINT_FLAG}"
 fi
 
 if [[ "${DRY_RUN_FLAG}" == "1" ]]; then

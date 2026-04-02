@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Only edit this line. Then run: bash infer_terrain_joystick.sh
+WANDB_RUN_URL="${WANDB_RUN_URL:-}"
+
 # IsaacSim + Viser manual-control inference for terrain sparse-root distill students.
 # This is the perception-enabled student side of the terrain pipeline.
 #
@@ -11,6 +14,8 @@ usage() {
   cat <<'EOF'
 Usage:
   bash infer_terrain_joystick.sh [checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
+  # or edit WANDB_RUN_URL at the top, then just run:
+  bash infer_terrain_joystick.sh
 
 Optional env vars:
   CHECKPOINT / CKPT
@@ -46,6 +51,7 @@ EOF
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
+DEFAULT_CHECKPOINT="${DEFAULT_CHECKPOINT:-${WANDB_RUN_URL:-}}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" ]]; then
   usage
