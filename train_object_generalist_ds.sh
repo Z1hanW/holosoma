@@ -26,7 +26,7 @@ else
 fi
 PYTHON_BIN=${PYTHON_BIN:-"${DEFAULT_PYTHON_BIN}"}
 
-DEFAULT_CUDA_VISIBLE_DEVICES=4,5,6,7
+DEFAULT_CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-${DEFAULT_CUDA_VISIBLE_DEVICES}}
 WANDB_PROJECT_FROM_ENV=0
 if [[ -n "${WANDB_PROJECT+x}" ]]; then
@@ -45,6 +45,7 @@ DS_DATA_ROOT=${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}
 DEFAULT_DS_RAW_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj"
 DEFAULT_DS_GEOMETRY_DIR="${DS_DATA_ROOT}/train_g1_w_obj_geometry"
 DEFAULT_DS_PREPARED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
+DEFAULT_MIX_NAIVE_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
 DEFAULT_MOTION_DIR="${DEFAULT_DS_PREPARED_MOTION_DIR}"
 MOTION_DIR_FROM_ENV=0
 if [[ -n "${MOTION_DIR+x}" ]]; then
@@ -55,16 +56,18 @@ RAW_MOTION_DIR=${RAW_MOTION_DIR:-"${DEFAULT_DS_RAW_MOTION_DIR}"}
 OBJ_DIR=${OBJ_DIR:-"${DEFAULT_DS_GEOMETRY_DIR}"}
 PREPARED_MOTION_DIR=${PREPARED_MOTION_DIR:-""}
 OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-""}
-NUM_ENVS=${NUM_ENVS:-65536}
+NUM_ENVS=${NUM_ENVS:-114688}
 NPROC=${NPROC:-$(awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}")}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
-PHYSX_GPU_MAX_RIGID_PATCH_COUNT=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT:-655360}
+PHYSX_GPU_MAX_RIGID_PATCH_COUNT=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT:-1310720}
 
 AUTO_PREP_DS_BANK=${AUTO_PREP_DS_BANK:-1}
 DS_PREP_CLEAN_OUT=${DS_PREP_CLEAN_OUT:-1}
 DS_OBJECT_MASS=${DS_OBJECT_MASS:-0.1}
 DS_OBJECT_COLOR_RGBA=${DS_OBJECT_COLOR_RGBA:-"0.7 0.8 0.9 1"}
 PREP_ONLY=${PREP_ONLY:-0}
+DATA_MODE=${DATA_MODE:-pure-sd}
+STRICT_DEFAULT_DS_BANK_VALIDATION=${STRICT_DEFAULT_DS_BANK_VALIDATION:-1}
 DEFAULT_POSE_PREPEND_ENABLED=${DEFAULT_POSE_PREPEND_ENABLED:-1}
 DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0.2}
 
@@ -376,6 +379,120 @@ print(f"[INFO] Validated clip-object URDF map: {path} ({len(payload)} clips)")
 PY
 }
 
+validate_default_ds_bank() {
+  local motion_dir="$1"
+  local expected_count="${2:-43}"
+  "${PYTHON_BIN}" - "${motion_dir}" "${expected_count}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+
+motion_dir = Path(sys.argv[1]).expanduser().resolve()
+expected = int(sys.argv[2])
+npz_files = sorted(motion_dir.glob('*.npz'))
+if len(npz_files) != expected:
+    raise SystemExit(f"[ERROR] Expected {expected} DS motion clips under {motion_dir}, found {len(npz_files)}")
+
+map_path = motion_dir / '_clip_object_urdf_map.json'
+payload = json.loads(map_path.read_text(encoding='utf-8'))
+clips = payload['clips'] if isinstance(payload, dict) and isinstance(payload.get('clips'), dict) else payload
+if not isinstance(clips, dict):
+    raise SystemExit(f"[ERROR] Invalid DS clip-object map payload: {map_path}")
+if len(clips) != expected:
+    raise SystemExit(f"[ERROR] Expected {expected} map entries in {map_path}, found {len(clips)}")
+
+unique_names = set()
+unique_sizes = set()
+missing = []
+for npz_path in npz_files:
+    data = np.load(npz_path, allow_pickle=True)
+    object_name = data['object_name'].item() if 'object_name' in data else ''
+    object_urdf = data['object_urdf_path'].item() if 'object_urdf_path' in data else ''
+    object_size = np.asarray(data['object_size']).reshape(-1).tolist() if 'object_size' in data else None
+    if not object_name or not object_urdf or object_size is None or len(object_size) != 3:
+        missing.append(npz_path.name)
+        continue
+    unique_names.add(str(object_name))
+    unique_sizes.add(tuple(round(float(v), 6) for v in object_size))
+
+if missing:
+    preview = ', '.join(missing[:10])
+    raise SystemExit(f"[ERROR] DS prepared bank is missing object fields in: {preview}")
+if len(unique_names) != expected:
+    raise SystemExit(f"[ERROR] Expected {expected} unique object_name entries, found {len(unique_names)}")
+if len(unique_sizes) != expected:
+    raise SystemExit(f"[ERROR] Expected {expected} unique object_size entries, found {len(unique_sizes)}")
+
+print(
+    f"[INFO] Validated default DS prepared bank: {motion_dir} ({len(npz_files)} clips, {len(unique_sizes)} unique sizes)"
+)
+PY
+}
+
+
+validate_mix_naive_bank() {
+  local motion_dir="$1"
+  local expected_total="${2:-105}"
+  local expected_ds="${3:-43}"
+  local expected_omomo="${4:-62}"
+  "${PYTHON_BIN}" - "${motion_dir}" "${expected_total}" "${expected_ds}" "${expected_omomo}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+
+motion_dir = Path(sys.argv[1]).expanduser().resolve()
+expected_total = int(sys.argv[2])
+expected_ds = int(sys.argv[3])
+expected_omomo = int(sys.argv[4])
+npz_files = sorted(motion_dir.glob('*.npz'))
+if len(npz_files) != expected_total:
+    raise SystemExit(f"[ERROR] Expected {expected_total} mix-naive clips under {motion_dir}, found {len(npz_files)}")
+
+map_path = motion_dir / '_clip_object_urdf_map.json'
+payload = json.loads(map_path.read_text(encoding='utf-8'))
+clips = payload['clips'] if isinstance(payload, dict) and isinstance(payload.get('clips'), dict) else payload
+if not isinstance(clips, dict):
+    raise SystemExit(f"[ERROR] Invalid mix-naive clip-object map payload: {map_path}")
+if len(clips) != expected_total:
+    raise SystemExit(f"[ERROR] Expected {expected_total} map entries in {map_path}, found {len(clips)}")
+
+missing = []
+ds_count = 0
+omomo_count = 0
+unique_names = set()
+for npz_path in npz_files:
+    data = np.load(npz_path, allow_pickle=True)
+    object_name = data['object_name'].item() if 'object_name' in data else ''
+    object_urdf = data['object_urdf_path'].item() if 'object_urdf_path' in data else ''
+    object_size = np.asarray(data['object_size']).reshape(-1).tolist() if 'object_size' in data else None
+    if not object_name or not object_urdf or object_size is None or len(object_size) != 3:
+        missing.append(npz_path.name)
+        continue
+    unique_names.add(str(object_name))
+    if npz_path.stem.startswith('sub'):
+        omomo_count += 1
+    else:
+        ds_count += 1
+
+if missing:
+    preview = ', '.join(missing[:10])
+    raise SystemExit(f"[ERROR] mix-naive bank is missing object fields in: {preview}")
+if ds_count != expected_ds or omomo_count != expected_omomo:
+    raise SystemExit(
+        f"[ERROR] mix-naive bank split mismatch under {motion_dir}: ds={ds_count} omomo={omomo_count} "
+        f"(expected ds={expected_ds}, omomo={expected_omomo})"
+    )
+print(
+    f"[INFO] Validated mix-naive bank: {motion_dir} ({len(npz_files)} clips = {ds_count} ds + {omomo_count} omomo, {len(unique_names)} unique object names)"
+)
+PY
+}
+
+
 prepare_ds_motion_bank() {
   local raw_motion_dir="$1"
   local geometry_dir="$2"
@@ -557,6 +674,24 @@ print(f'[INFO] Wrote clip-object map: {map_path}')
 PY
 }
 
+if [[ "$#" -gt 0 ]]; then
+  first_arg_normalized=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+  case "${first_arg_normalized}" in
+    pure-sd|mix-naive)
+      DATA_MODE="${first_arg_normalized}"
+      shift
+      ;;
+  esac
+fi
+DATA_MODE=$(echo "${DATA_MODE}" | tr '[:upper:]' '[:lower:]')
+case "${DATA_MODE}" in
+  pure-sd|mix-naive)
+    ;;
+  *)
+    echo "[ERROR] Unsupported DATA_MODE='${DATA_MODE}'. Use one of: pure-sd, mix-naive" >&2
+    exit 2
+    ;;
+esac
 SEQUENCE_NAME=${SEQUENCE_NAME:-""}
 if [[ "$#" -gt 0 ]]; then
   if is_checkpoint_ref "$1"; then
@@ -572,6 +707,7 @@ if [[ "$#" -gt 0 ]]; then
   fi
 fi
 EXTRA_ARGS=("$@")
+echo "[INFO] Data mode: ${DATA_MODE}"
 if [[ -n "${SEQUENCE_NAME}" ]]; then
   echo "[INFO] Sequence name: ${SEQUENCE_NAME}"
 fi
@@ -636,6 +772,15 @@ if [[ "${AUTO_ATTACH_WANDB_RUN}" == "1" && -n "${RESUME_WANDB_RUN_ID}" ]]; then
   echo "[INFO] W&B same-run resume enabled: ${WANDB_ENTITY}/${WANDB_PROJECT}/${WANDB_RUN_ID} (resume=${WANDB_RESUME})"
 fi
 
+case "${DATA_MODE}" in
+  pure-sd)
+    MODE_DEFAULT_MOTION_DIR="${DEFAULT_DS_PREPARED_MOTION_DIR}"
+    ;;
+  mix-naive)
+    MODE_DEFAULT_MOTION_DIR="${DEFAULT_MIX_NAIVE_MOTION_DIR}"
+    ;;
+esac
+
 if [[ -z "${PREPARED_MOTION_DIR}" ]]; then
   if [[ "${MOTION_DIR_FROM_ENV}" == "1" ]]; then
     if [[ -d "${MOTION_DIR}" && ! -f "${MOTION_DIR}/_clip_object_urdf_map.json" ]]; then
@@ -644,20 +789,26 @@ if [[ -z "${PREPARED_MOTION_DIR}" ]]; then
       PREPARED_MOTION_DIR="${MOTION_DIR}"
     fi
   else
-    PREPARED_MOTION_DIR="${DEFAULT_DS_PREPARED_MOTION_DIR}"
+    PREPARED_MOTION_DIR="${MODE_DEFAULT_MOTION_DIR}"
   fi
 fi
 
-if [[ "${MOTION_DIR_FROM_ENV}" == "1" && -d "${MOTION_DIR}" && ! -f "${MOTION_DIR}/_clip_object_urdf_map.json" ]]; then
+if [[ "${DATA_MODE}" == "pure-sd" && "${MOTION_DIR_FROM_ENV}" == "1" && -d "${MOTION_DIR}" && ! -f "${MOTION_DIR}/_clip_object_urdf_map.json" ]]; then
   RAW_MOTION_DIR="${MOTION_DIR}"
   echo "[INFO] MOTION_DIR points to a raw DS bank; using it as RAW_MOTION_DIR source: ${RAW_MOTION_DIR}"
 fi
 
-if [[ "${AUTO_PREP_DS_BANK}" != "0" ]]; then
-  prepare_ds_motion_bank "${RAW_MOTION_DIR}" "${OBJ_DIR}" "${PREPARED_MOTION_DIR}" "${DS_PREP_CLEAN_OUT}" "${DS_OBJECT_MASS}" "${DS_OBJECT_COLOR_RGBA}"
-  MOTION_DIR="${PREPARED_MOTION_DIR}"
-elif [[ "${MOTION_DIR_FROM_ENV}" != "1" ]]; then
-  MOTION_DIR="${PREPARED_MOTION_DIR}"
+if [[ "${DATA_MODE}" == "pure-sd" ]]; then
+  if [[ "${AUTO_PREP_DS_BANK}" != "0" ]]; then
+    prepare_ds_motion_bank "${RAW_MOTION_DIR}" "${OBJ_DIR}" "${PREPARED_MOTION_DIR}" "${DS_PREP_CLEAN_OUT}" "${DS_OBJECT_MASS}" "${DS_OBJECT_COLOR_RGBA}"
+    MOTION_DIR="${PREPARED_MOTION_DIR}"
+  elif [[ "${MOTION_DIR_FROM_ENV}" != "1" ]]; then
+    MOTION_DIR="${PREPARED_MOTION_DIR}"
+  fi
+else
+  if [[ "${MOTION_DIR_FROM_ENV}" != "1" ]]; then
+    MOTION_DIR="${MODE_DEFAULT_MOTION_DIR}"
+  fi
 fi
 
 echo "[INFO] RAW_MOTION_DIR: ${RAW_MOTION_DIR}"
@@ -679,6 +830,21 @@ if [[ -z "${OBJECT_SPEC_PATH}" || ! -f "${OBJECT_SPEC_PATH}" ]]; then
   exit 2
 fi
 validate_object_spec_map "${OBJECT_SPEC_PATH}"
+
+if [[ "${STRICT_DEFAULT_DS_BANK_VALIDATION}" != "0" ]]; then
+  case "${DATA_MODE}" in
+    pure-sd)
+      if [[ "$(realpath "${MOTION_DIR}")" == "$(realpath "${DEFAULT_DS_PREPARED_MOTION_DIR}")" ]]; then
+        validate_default_ds_bank "${MOTION_DIR}" 43
+      fi
+      ;;
+    mix-naive)
+      if [[ "$(realpath "${MOTION_DIR}")" == "$(realpath "${DEFAULT_MIX_NAIVE_MOTION_DIR}")" ]]; then
+        validate_mix_naive_bank "${MOTION_DIR}" 105 43 62
+      fi
+      ;;
+  esac
+fi
 
 prep_only_normalized=$(echo "${PREP_ONLY}" | tr '[:upper:]' '[:lower:]')
 case "${prep_only_normalized}" in

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
+import math
 import os
 import sys
 import time
+import xml.etree.ElementTree as ET
 import zlib
 from pathlib import Path
 from typing import Any
@@ -352,6 +355,287 @@ def _make_box_mesh(color: tuple[int, int, int], extents: np.ndarray, alpha: int 
     rgba = np.array([color[0], color[1], color[2], alpha], dtype=np.uint8)
     mesh.visual.face_colors = np.tile(rgba, (len(mesh.faces), 1))
     return mesh
+
+
+def _set_visual_handle_visible(handle: Any, visible: bool) -> None:
+    if handle is None:
+        return
+    try:
+        if hasattr(handle, 'show_visual'):
+            handle.show_visual = bool(visible)
+        else:
+            handle.visible = bool(visible)
+    except Exception:
+        pass
+
+
+def _get_visual_handle_visible(handle: Any, default: bool = True) -> bool:
+    if handle is None:
+        return bool(default)
+    try:
+        if hasattr(handle, 'show_visual'):
+            return bool(handle.show_visual)
+        return bool(getattr(handle, 'visible', default))
+    except Exception:
+        return bool(default)
+
+
+def _parse_urdf_vec3(raw: str | None, default: tuple[float, float, float]) -> np.ndarray:
+    if raw is None:
+        return np.asarray(default, dtype=np.float32)
+    parts = [part for part in str(raw).replace(',', ' ').split() if part]
+    if len(parts) != 3:
+        return np.asarray(default, dtype=np.float32)
+    try:
+        return np.asarray([float(parts[0]), float(parts[1]), float(parts[2])], dtype=np.float32)
+    except Exception:
+        return np.asarray(default, dtype=np.float32)
+
+
+def _urdf_rpy_matrix(rpy: np.ndarray) -> np.ndarray:
+    roll, pitch, yaw = [float(v) for v in rpy]
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]], dtype=np.float32)
+    rot_y = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]], dtype=np.float32)
+    rot_z = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+    return rot_z @ rot_y @ rot_x
+
+
+def _urdf_origin_transform(origin_el: ET.Element | None) -> np.ndarray:
+    transform = np.eye(4, dtype=np.float32)
+    if origin_el is None:
+        return transform
+    transform[:3, :3] = _urdf_rpy_matrix(_parse_urdf_vec3(origin_el.get('rpy'), (0.0, 0.0, 0.0)))
+    transform[:3, 3] = _parse_urdf_vec3(origin_el.get('xyz'), (0.0, 0.0, 0.0))
+    return transform
+
+
+@functools.lru_cache(maxsize=128)
+def _load_combined_urdf_visual_mesh(urdf_path: str):
+    try:
+        import trimesh  # type: ignore[import-not-found]
+    except Exception:
+        return None
+
+    try:
+        urdf_file = Path(urdf_path).expanduser().resolve()
+        root = ET.parse(urdf_file).getroot()
+    except Exception:
+        return None
+
+    meshes: list[Any] = []
+    for link in root.findall('link'):
+        for visual in link.findall('visual'):
+            geometry = visual.find('geometry')
+            if geometry is None:
+                continue
+
+            mesh_obj = None
+            mesh_tag = geometry.find('mesh')
+            if mesh_tag is not None:
+                filename = str(mesh_tag.get('filename', '')).strip()
+                if not filename:
+                    continue
+                mesh_file = Path(filename)
+                if not mesh_file.is_absolute():
+                    mesh_file = (urdf_file.parent / mesh_file).resolve()
+                if not mesh_file.exists():
+                    continue
+                try:
+                    loaded = trimesh.load(str(mesh_file), process=False)
+                except Exception:
+                    continue
+                if isinstance(loaded, trimesh.Scene):
+                    dumped = loaded.dump(concatenate=True)
+                    mesh_obj = dumped if isinstance(dumped, trimesh.Trimesh) else None
+                elif isinstance(loaded, trimesh.Trimesh):
+                    mesh_obj = loaded
+                if mesh_obj is None:
+                    continue
+                scale = _parse_urdf_vec3(mesh_tag.get('scale'), (1.0, 1.0, 1.0)).astype(np.float64)
+                mesh_obj = mesh_obj.copy()
+                mesh_obj.apply_scale(scale)
+            else:
+                box_tag = geometry.find('box')
+                cylinder_tag = geometry.find('cylinder')
+                sphere_tag = geometry.find('sphere')
+                if box_tag is not None:
+                    size = _parse_urdf_vec3(box_tag.get('size'), (1.0, 1.0, 1.0)).astype(np.float64)
+                    mesh_obj = trimesh.creation.box(extents=size)
+                elif cylinder_tag is not None:
+                    radius = float(cylinder_tag.get('radius', '0.0'))
+                    length = float(cylinder_tag.get('length', '0.0'))
+                    if radius <= 0.0 or length <= 0.0:
+                        continue
+                    mesh_obj = trimesh.creation.cylinder(radius=radius, height=length)
+                elif sphere_tag is not None:
+                    radius = float(sphere_tag.get('radius', '0.0'))
+                    if radius <= 0.0:
+                        continue
+                    mesh_obj = trimesh.creation.icosphere(radius=radius)
+                else:
+                    continue
+
+            if mesh_obj is None:
+                continue
+            mesh_obj = mesh_obj.copy()
+            mesh_obj.apply_transform(_urdf_origin_transform(visual.find('origin')).astype(np.float64))
+            meshes.append(mesh_obj)
+
+    if not meshes:
+        return None
+
+    merged = trimesh.util.concatenate(meshes)
+    return merged
+
+
+def _triangulate_face_indices(face_counts, face_indices) -> np.ndarray:
+    triangles: list[tuple[int, int, int]] = []
+    cursor = 0
+    for raw_count in face_counts:
+        count = int(raw_count)
+        if count < 3:
+            cursor += max(count, 0)
+            continue
+        face = [int(face_indices[cursor + idx]) for idx in range(count)]
+        cursor += count
+        for idx in range(1, count - 1):
+            triangles.append((face[0], face[idx], face[idx + 1]))
+    if not triangles:
+        return np.zeros((0, 3), dtype=np.int32)
+    return np.asarray(triangles, dtype=np.int32)
+
+
+def _build_trimesh_from_usd_geom_prim(prim: Any):
+    try:
+        import trimesh  # type: ignore[import-not-found]
+        from pxr import UsdGeom  # type: ignore[import-not-found]
+    except Exception:
+        return None
+
+    if prim.IsA(UsdGeom.Mesh):
+        mesh_geom = UsdGeom.Mesh(prim)
+        points = mesh_geom.GetPointsAttr().Get()
+        face_counts = mesh_geom.GetFaceVertexCountsAttr().Get()
+        face_indices = mesh_geom.GetFaceVertexIndicesAttr().Get()
+        if points is None or face_counts is None or face_indices is None:
+            return None
+        vertices = np.asarray([[float(p[0]), float(p[1]), float(p[2])] for p in points], dtype=np.float64)
+        faces = _triangulate_face_indices(face_counts, face_indices)
+        if vertices.size == 0 or faces.size == 0:
+            return None
+        return trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+
+    if prim.IsA(UsdGeom.Cube):
+        cube = UsdGeom.Cube(prim)
+        size = cube.GetSizeAttr().Get()
+        size = 2.0 if size is None else float(size)
+        return trimesh.creation.box(extents=(size, size, size))
+
+    if prim.IsA(UsdGeom.Sphere):
+        sphere = UsdGeom.Sphere(prim)
+        radius = sphere.GetRadiusAttr().Get()
+        radius = 1.0 if radius is None else float(radius)
+        return trimesh.creation.icosphere(radius=radius)
+
+    if prim.IsA(UsdGeom.Cylinder):
+        cylinder = UsdGeom.Cylinder(prim)
+        radius = cylinder.GetRadiusAttr().Get()
+        height = cylinder.GetHeightAttr().Get()
+        radius = 1.0 if radius is None else float(radius)
+        height = 2.0 if height is None else float(height)
+        if radius <= 0.0 or height <= 0.0:
+            return None
+        return trimesh.creation.cylinder(radius=radius, height=height)
+
+    if prim.IsA(UsdGeom.Capsule):
+        capsule = UsdGeom.Capsule(prim)
+        radius = capsule.GetRadiusAttr().Get()
+        height = capsule.GetHeightAttr().Get()
+        radius = 1.0 if radius is None else float(radius)
+        height = 2.0 if height is None else float(height)
+        if radius <= 0.0 or height <= 0.0:
+            return None
+        return trimesh.creation.capsule(radius=radius, height=height)
+
+    return None
+
+
+def _transform_mesh_vertices_between_usd_frames(vertices: np.ndarray, source_world_tf: Any, target_inv_world_tf: Any) -> np.ndarray:
+    try:
+        from pxr import Gf  # type: ignore[import-not-found]
+    except Exception:
+        return np.asarray(vertices, dtype=np.float32)
+
+    src = np.asarray(vertices, dtype=np.float64)
+    dst = np.zeros_like(src)
+    for idx, vertex in enumerate(src):
+        world_point = source_world_tf.TransformAffined(Gf.Vec3d(float(vertex[0]), float(vertex[1]), float(vertex[2])))
+        local_point = target_inv_world_tf.TransformAffined(world_point)
+        dst[idx, 0] = float(local_point[0])
+        dst[idx, 1] = float(local_point[1])
+        dst[idx, 2] = float(local_point[2])
+    return dst.astype(np.float32, copy=False)
+
+
+@functools.lru_cache(maxsize=256)
+def _load_combined_live_usd_visual_mesh(root_prim_path: str):
+    try:
+        import trimesh  # type: ignore[import-not-found]
+        import omni.usd  # type: ignore[import-not-found]
+        from pxr import Usd, UsdGeom  # type: ignore[import-not-found]
+    except Exception:
+        return None
+
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return None
+
+    root_prim = stage.GetPrimAtPath(root_prim_path)
+    if not root_prim.IsValid():
+        return None
+
+    root_world_tf = UsdGeom.Xformable(root_prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+    root_inv_world_tf = root_world_tf.GetInverse()
+
+    subtree_roots = []
+    for suffix in ('', '/baseLink', '/baseLink/visuals', '/visuals'):
+        candidate = stage.GetPrimAtPath(root_prim_path + suffix)
+        if candidate.IsValid():
+            subtree_roots.append(candidate)
+
+    meshes: list[Any] = []
+    visual_prim_count = 0
+    visited_prim_paths: set[str] = set()
+    for subtree_root in subtree_roots:
+        for prim in Usd.PrimRange(subtree_root):
+            if not prim.IsValid():
+                continue
+            prim_path = str(prim.GetPath())
+            if prim_path in visited_prim_paths:
+                continue
+            visited_prim_paths.add(prim_path)
+            mesh_obj = _build_trimesh_from_usd_geom_prim(prim)
+            if mesh_obj is None:
+                continue
+            prim_world_tf = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            mesh_obj = mesh_obj.copy()
+            mesh_obj.vertices = _transform_mesh_vertices_between_usd_frames(
+                mesh_obj.vertices,
+                prim_world_tf,
+                root_inv_world_tf,
+            )
+            meshes.append(mesh_obj)
+            visual_prim_count += 1
+
+    if not meshes:
+        return None
+
+    merged = trimesh.util.concatenate(meshes)
+    setattr(merged, '_holosoma_visual_prim_count', visual_prim_count)
+    return merged
 
 
 def _import_viser() -> tuple[Any | None, Any | None, str | None]:
@@ -755,7 +1039,7 @@ class ViserLiveViewer:
         self._robot_points_handle = None
         self._object_points_handle = None
         self._primary_object_variants: dict[str, Any] = {}
-        self._active_primary_object_urdf: str | None = None
+        self._active_primary_object_key: str | None = None
         self._robot_root = None
         self._object_root = None
         self._secondary_env_ids: list[int] = []
@@ -766,7 +1050,7 @@ class ViserLiveViewer:
         self._secondary_vo: dict[int, Any] = {}
         self._secondary_robot_points_handles: dict[int, Any] = {}
         self._secondary_object_points_handles: dict[int, Any] = {}
-        self._secondary_object_urdf: dict[int, str] = {}
+        self._secondary_object_visual_key: dict[int, str] = {}
         self._viser_multi_env_spacing = 2.5
         self._viser_multi_env_cols = 1
         self._joint_order: np.ndarray | None = None
@@ -1177,63 +1461,139 @@ class ViserLiveViewer:
             dtype=np.float32,
         )
 
-    def _primary_object_variant_node(self, object_urdf: str) -> str:
-        digest = hashlib.sha1(object_urdf.encode("utf-8")).hexdigest()[:10]
+    def _primary_object_variant_node(self, visual_key: str) -> str:
+        digest = hashlib.sha1(visual_key.encode("utf-8")).hexdigest()[:10]
         return self._scene_path(f"/object/variant_{digest}")
 
-    def _ensure_primary_object_variant(self, object_urdf: str) -> Any | None:
-        if self._server is None or self._viser_urdf_cls is None:
+    def _summarize_object_mesh(self, mesh: Any) -> str:
+        try:
+            bounds = np.asarray(mesh.bounds, dtype=np.float64)
+            extents = bounds[1] - bounds[0]
+            extents_str = f"[{extents[0]:.3f}, {extents[1]:.3f}, {extents[2]:.3f}]"
+        except Exception:
+            extents_str = "unknown"
+        visual_prim_count = getattr(mesh, '_holosoma_visual_prim_count', None)
+        if visual_prim_count is None:
+            return f"extents={extents_str}"
+        return f"extents={extents_str}, visual_prims={int(visual_prim_count)}"
+
+    def _resolve_live_object_root_prim_path(self, env_id: int) -> str | None:
+        sim_object_name = self._resolve_sim_object_name_for_env(int(env_id))
+        if not sim_object_name:
             return None
-        cached = self._primary_object_variants.get(object_urdf)
+
+        try:
+            import omni.usd  # type: ignore[import-not-found]
+            from pxr import Usd  # type: ignore[import-not-found]
+        except Exception:
+            return None
+
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            return None
+
+        simulator = getattr(self._env, 'simulator', None)
+        scene = getattr(simulator, 'scene', None)
+        rigid_objects = getattr(scene, 'rigid_objects', None)
+        rigid_object = rigid_objects.get(sim_object_name) if hasattr(rigid_objects, 'get') else None
+
+        candidate_paths: list[str] = []
+        prim_expr = str(getattr(getattr(rigid_object, 'cfg', None), 'prim_path', '')).strip()
+        if prim_expr:
+            candidate_paths.append(prim_expr.replace('env_.*', f'env_{env_id}'))
+            candidate_paths.append(prim_expr.replace('env_.*/', f'env_{env_id}/'))
+
+        for candidate_path in dict.fromkeys(candidate_paths):
+            prim = stage.GetPrimAtPath(candidate_path)
+            if prim.IsValid():
+                return str(prim.GetPath())
+
+        env_root = stage.GetPrimAtPath(f'/World/envs/env_{env_id}')
+        if not env_root.IsValid():
+            return None
+
+        target_name = sim_object_name.casefold()
+        for prim in Usd.PrimRange(env_root):
+            if not prim.IsValid():
+                continue
+            prim_name = prim.GetName()
+            prim_name_key = prim_name.casefold()
+            if prim_name.startswith('Object') and (prim_name_key == target_name or prim_name_key.endswith(f'_{target_name}')):
+                return str(prim.GetPath())
+        return None
+
+    def _resolve_object_visual_spec_for_env(self, env_id: int) -> tuple[str | None, Any | None, str]:
+        live_root_prim_path = self._resolve_live_object_root_prim_path(env_id)
+        if live_root_prim_path:
+            mesh = _load_combined_live_usd_visual_mesh(live_root_prim_path)
+            if mesh is not None:
+                return live_root_prim_path, mesh, f'live-usd:{live_root_prim_path}'
+
+        object_urdf = self._resolve_object_urdf_for_env(env_id)
+        if object_urdf:
+            mesh = _load_combined_urdf_visual_mesh(object_urdf)
+            if mesh is not None:
+                return object_urdf, mesh, f'urdf-asset:{object_urdf}'
+
+        return None, None, ''
+
+    def _ensure_primary_object_variant(self, env_id: int) -> Any | None:
+        if self._server is None:
+            return None
+
+        visual_key, mesh, source_label = self._resolve_object_visual_spec_for_env(env_id)
+        if not visual_key or mesh is None:
+            logger.warning('Viser object mesh disabled (failed to resolve env {}).', env_id)
+            return None
+
+        cached = self._primary_object_variants.get(visual_key)
         if cached is not None:
             return cached
+
         try:
-            handle = self._viser_urdf_cls(
-                self._server,
-                urdf_or_path=Path(object_urdf),
-                root_node_name=self._primary_object_variant_node(object_urdf),
-                mesh_color_override=LIGHT_BLUE,
+            handle = self._server.scene.add_mesh_simple(
+                self._primary_object_variant_node(visual_key),
+                mesh.vertices,
+                mesh.faces,
+                color=LIGHT_BLUE,
+                side='double',
             )
         except Exception as exc:
-            logger.warning("Viser object URDF disabled (failed to load '{}'): {}", object_urdf, exc)
+            logger.warning('Viser object mesh disabled (failed to create {}): {}', source_label, exc)
             return None
-        try:
-            handle.show_visual = False
-        except Exception:
-            pass
-        self._primary_object_variants[object_urdf] = handle
+
+        _set_visual_handle_visible(handle, False)
+        self._primary_object_variants[visual_key] = handle
+        logger.info(
+            'Viser primary object env {} using {} ({})',
+            env_id,
+            source_label,
+            self._summarize_object_mesh(mesh),
+        )
         return handle
 
-    def _set_primary_object_urdf(self, object_urdf: str | None) -> None:
-        if not object_urdf:
-            self._active_primary_object_urdf = None
+    def _set_primary_object_visual(self, env_id: int) -> None:
+        visual_key, _, _ = self._resolve_object_visual_spec_for_env(env_id)
+        if not visual_key:
+            self._active_primary_object_key = None
             self._vo = None
             for handle in self._primary_object_variants.values():
-                try:
-                    handle.show_visual = False
-                except Exception:
-                    pass
+                _set_visual_handle_visible(handle, False)
             return
-        if object_urdf == self._active_primary_object_urdf and self._vo is not None:
+        if visual_key == self._active_primary_object_key and self._vo is not None:
             return
-        handle = self._ensure_primary_object_variant(object_urdf)
+        handle = self._ensure_primary_object_variant(env_id)
         if handle is None:
             return
-        self._active_primary_object_urdf = object_urdf
+        self._active_primary_object_key = visual_key
         self._vo = handle
         for variant in self._primary_object_variants.values():
-            try:
-                variant.show_visual = False
-            except Exception:
-                pass
-        try:
-            show_object = self._show_object_cb is None or bool(self._show_object_cb.value)
-            handle.show_visual = bool(show_object)
-        except Exception:
-            pass
+            _set_visual_handle_visible(variant, False)
+        show_object = self._show_object_cb is None or bool(self._show_object_cb.value)
+        _set_visual_handle_visible(handle, bool(show_object))
 
     def _refresh_primary_object_handle(self) -> None:
-        self._set_primary_object_urdf(self._resolve_object_urdf_for_env(self._env_id))
+        self._set_primary_object_visual(self._env_id)
 
     def _resolve_sim_object_name_for_env(self, env_id: int) -> str | None:
         motion_cmd = self._get_motion_command()
@@ -1244,14 +1604,29 @@ class ViserLiveViewer:
         sim_object_names = list(getattr(motion_cmd, "_sim_object_names", []))
         clip_object_ids = getattr(motion_cmd, "_clip_object_ids", None)
         clip_ids = getattr(motion_cmd, "clip_ids", None)
-        if sim_object_names and clip_object_ids is not None and clip_ids is not None:
-            try:
-                clip_idx = int(clip_ids[int(env_id)].item())
-                object_id = int(clip_object_ids[int(clip_idx)].item())
-                if 0 <= object_id < len(sim_object_names):
-                    return str(sim_object_names[object_id])
-            except Exception:
-                pass
+        representative_clip_ids = getattr(motion_cmd, "_debug_representative_clip_ids", None)
+        if sim_object_names and clip_object_ids is not None:
+            if representative_clip_ids is not None:
+                try:
+                    rep_count = int(representative_clip_ids.numel())
+                except Exception:
+                    rep_count = 0
+                if rep_count > 0:
+                    try:
+                        clip_idx = int(representative_clip_ids[int(env_id) % rep_count].item())
+                        object_id = int(clip_object_ids[int(clip_idx)].item())
+                        if 0 <= object_id < len(sim_object_names):
+                            return str(sim_object_names[object_id])
+                    except Exception:
+                        pass
+            if clip_ids is not None:
+                try:
+                    clip_idx = int(clip_ids[int(env_id)].item())
+                    object_id = int(clip_object_ids[int(clip_idx)].item())
+                    if 0 <= object_id < len(sim_object_names):
+                        return str(sim_object_names[object_id])
+                except Exception:
+                    pass
 
         # Single-object mapping fallback
         object_name = str(getattr(motion_cmd, "object_name", "")).strip()
@@ -1297,25 +1672,12 @@ class ViserLiveViewer:
                 logger.warning("Failed to initialize secondary robot view for env {}: {}", env_id, exc)
                 continue
 
-            object_urdf = self._resolve_object_urdf_for_env(env_id)
-            if not object_urdf:
-                continue
-            try:
-                self._secondary_object_roots[env_id] = self._server.scene.add_frame(object_node, show_axes=False)
-                self._secondary_vo[env_id] = viser_urdf_cls(
-                    self._server,
-                    urdf_or_path=Path(object_urdf),
-                    root_node_name=object_node,
-                    mesh_color_override=LIGHT_BLUE,
-                )
-                self._secondary_object_urdf[env_id] = object_urdf
-            except Exception as exc:
-                logger.warning(
-                    "Failed to initialize secondary object view for env {} with '{}': {}",
-                    env_id,
-                    object_urdf,
-                    exc,
-                )
+            if env_id not in self._secondary_object_roots:
+                try:
+                    self._secondary_object_roots[env_id] = self._server.scene.add_frame(object_node, show_axes=False)
+                except Exception:
+                    pass
+            self._ensure_secondary_object_handle(env_id)
 
     def _setup_secondary_env_frames_only(self) -> None:
         if not self._secondary_env_ids or self._server is None:
@@ -1331,18 +1693,14 @@ class ViserLiveViewer:
     def _ensure_secondary_object_handle(self, env_id: int) -> None:
         if self._server is None:
             return
-        object_urdf = self._resolve_object_urdf_for_env(env_id)
-        if not object_urdf:
+
+        visual_key, mesh, source_label = self._resolve_object_visual_spec_for_env(env_id)
+        if not visual_key or mesh is None:
+            self._secondary_object_visual_key.pop(env_id, None)
             return
 
-        current_urdf = self._secondary_object_urdf.get(env_id)
-        if env_id in self._secondary_vo and current_urdf == object_urdf:
-            return
-
-        object_node = self._scene_path(f"/env_{env_id}/object")
-        try:
-            from viser.extras import ViserUrdf  # type: ignore[import-not-found]
-        except Exception:
+        current_key = self._secondary_object_visual_key.get(env_id)
+        if env_id in self._secondary_vo and current_key == visual_key:
             return
 
         stale_handle = self._secondary_vo.pop(env_id, None)
@@ -1352,24 +1710,37 @@ class ViserLiveViewer:
             except Exception:
                 pass
 
+        object_node = self._scene_path(f"/env_{env_id}/object/mesh")
         root_handle = self._secondary_object_roots.get(env_id)
         if root_handle is None:
             try:
-                self._secondary_object_roots[env_id] = self._server.scene.add_frame(object_node, show_axes=False)
+                self._secondary_object_roots[env_id] = self._server.scene.add_frame(
+                    self._scene_path(f"/env_{env_id}/object"), show_axes=False
+                )
             except Exception:
                 return
 
         try:
-            self._secondary_vo[env_id] = ViserUrdf(
-                self._server,
-                urdf_or_path=Path(object_urdf),
-                root_node_name=object_node,
-                mesh_color_override=LIGHT_BLUE,
+            handle = self._server.scene.add_mesh_simple(
+                object_node,
+                mesh.vertices,
+                mesh.faces,
+                color=LIGHT_BLUE,
+                side='double',
             )
-            self._secondary_object_urdf[env_id] = object_urdf
-        except Exception:
-            self._secondary_object_urdf.pop(env_id, None)
+        except Exception as exc:
+            self._secondary_object_visual_key.pop(env_id, None)
+            logger.warning('Failed to create secondary object mesh env {} from {}: {}', env_id, source_label, exc)
             return
+
+        self._secondary_vo[env_id] = handle
+        self._secondary_object_visual_key[env_id] = visual_key
+        logger.info(
+            'Viser secondary object env {} using {} ({})',
+            env_id,
+            source_label,
+            self._summarize_object_mesh(mesh),
+        )
 
     def _resolve_root_body_index(self) -> None:
         body_names = getattr(self._env, "body_names", None)
@@ -2377,9 +2748,9 @@ class ViserLiveViewer:
                 obj_pos = None
             if self._vo is not None and self._object_root is not None:
                 if not show_object or obj_state is None:
-                    self._vo.show_visual = False
+                    _set_visual_handle_visible(self._vo, False)
                 else:
-                    self._vo.show_visual = True
+                    _set_visual_handle_visible(self._vo, True)
             if self._vo is None:
                 self._update_object_point(
                     env_id=self._env_id,
@@ -2445,7 +2816,7 @@ class ViserLiveViewer:
                         )
                     continue
                 if not show_object:
-                    secondary_vo.show_visual = False
+                    _set_visual_handle_visible(secondary_vo, False)
                     self._update_object_point(
                         env_id=env_id,
                         object_pos=None,
@@ -2456,7 +2827,7 @@ class ViserLiveViewer:
                     continue
                 secondary_obj_state = self._get_object_state_wxyz_for(env_id)
                 if secondary_obj_state is None:
-                    secondary_vo.show_visual = False
+                    _set_visual_handle_visible(secondary_vo, False)
                     self._update_object_point(
                         env_id=env_id,
                         object_pos=None,
@@ -2468,7 +2839,7 @@ class ViserLiveViewer:
                 secondary_obj_pos, secondary_obj_quat = secondary_obj_state
                 secondary_object_root.position = secondary_obj_pos - secondary_offset + display_shift
                 secondary_object_root.wxyz = secondary_obj_quat
-                secondary_vo.show_visual = True
+                _set_visual_handle_visible(secondary_vo, True)
 
         if self._clip_label is not None:
             motion_cmd = self._get_motion_command()
@@ -3147,7 +3518,7 @@ class ViserLiveViewer:
                 if self._vo is not None or self._secondary_vo or has_object_enabled:
                     self._show_object_cb = self._server.gui.add_checkbox(
                         "Show Object",
-                        initial_value=bool(getattr(self._vo, "show_visual", True))
+                        initial_value=_get_visual_handle_visible(self._vo, True)
                         if self._vo is not None
                         else True,
                         hint="Toggle object mesh visibility",
@@ -3187,14 +3558,14 @@ class ViserLiveViewer:
                             pass
                 if self._show_object_cb is not None and self._vo is not None:
                     try:
-                        self._vo.show_visual = bool(self._show_object_cb.value)
+                        _set_visual_handle_visible(self._vo, bool(self._show_object_cb.value))
                     except Exception:
                         pass
                 if self._show_object_cb is not None:
                     show_object = bool(self._show_object_cb.value)
                     for vo in self._secondary_vo.values():
                         try:
-                            vo.show_visual = show_object
+                            _set_visual_handle_visible(vo, show_object)
                         except Exception:
                             pass
                 if self._show_terrain_cb is not None:

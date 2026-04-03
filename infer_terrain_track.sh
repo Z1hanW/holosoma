@@ -612,8 +612,14 @@ if [[ "${MODE}" == "terrain" ]]; then
   fi
 
   GEOMETRY_DIR_FROM_CHECKPOINT=0
+  GEOMETRY_IGNORED_CHECKPOINT_PATH=""
   if [[ "${GEOMETRY_DIR_SET}" != "1" ]]; then
-    if [[ -n "${CHECKPOINT_GEOMETRY_DIR}" && -e "${CHECKPOINT_GEOMETRY_DIR}" ]]; then
+    if [[ -n "${DEFAULT_TERRAIN_GEOMETRY_DIR}" && -e "${DEFAULT_TERRAIN_GEOMETRY_DIR}" ]]; then
+      GEOMETRY_DIR="${DEFAULT_TERRAIN_GEOMETRY_DIR}"
+      if [[ -n "${CHECKPOINT_GEOMETRY_DIR}" && "${CHECKPOINT_GEOMETRY_DIR}" != "${GEOMETRY_DIR}" ]]; then
+        GEOMETRY_IGNORED_CHECKPOINT_PATH="${CHECKPOINT_GEOMETRY_DIR}"
+      fi
+    elif [[ -n "${CHECKPOINT_GEOMETRY_DIR}" && -e "${CHECKPOINT_GEOMETRY_DIR}" ]]; then
       GEOMETRY_DIR="${CHECKPOINT_GEOMETRY_DIR}"
       GEOMETRY_DIR_FROM_CHECKPOINT=1
     else
@@ -974,6 +980,9 @@ echo "[INFO] reset_noise_scale=${RESET_NOISE_SCALE}"
 if [[ "${MODE}" == "obj" ]]; then
   echo "[INFO] object_urdf=${OBJECT_URDF}"
 else
+  if [[ -n "${GEOMETRY_IGNORED_CHECKPOINT_PATH:-}" ]]; then
+    echo "[INFO] ignoring_checkpoint_geometry=${GEOMETRY_IGNORED_CHECKPOINT_PATH}"
+  fi
   echo "[INFO] geometry_dir=${GEOMETRY_DIR}"
   echo "[INFO] geometry_metadata=${GEOMETRY_METADATA:-<none>}"
   echo "[INFO] terrain_num_rows=${TERRAIN_NUM_ROWS:-<default>}"

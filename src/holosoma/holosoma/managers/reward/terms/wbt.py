@@ -797,6 +797,93 @@ class CommandCurriculumContactPrior(RewardTermBase):
         return reward * active_mask.to(dtype=torch.float32)
 
 
+class _TerrainFootContactBase(RewardTermBase):
+    """Compatibility shim for legacy terrain-contact reward terms stored in old checkpoints."""
+
+    def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.env = env
+        self.contact_threshold = float(cfg.params.get("contact_threshold", 1.0))
+        self.force_mode = str(cfg.params.get("force_mode", "binary")).lower()
+        self.force_scale = float(cfg.params.get("force_scale", 25.0))
+        # Legacy configs used ray_start_offset for explicit ray casts. We use a direct
+        # terrain-height query instead, so this acts as the "good support" clearance.
+        self.clearance_threshold = float(cfg.params.get("clearance_threshold", cfg.params.get("ray_start_offset", 0.25)))
+        self.penalize_invalid = bool(cfg.params.get("penalize_invalid", True))
+
+        self.contact_body_names = list(cfg.params.get("contact_body_names", []))
+        self.query_body_names = list(cfg.params.get("query_body_names", []))
+        if not self.contact_body_names:
+            raise ValueError(f"{type(self).__name__} requires non-empty contact_body_names.")
+        if not self.query_body_names:
+            raise ValueError(f"{type(self).__name__} requires non-empty query_body_names.")
+
+        self.contact_body_indexes = _get_sim_body_subset_indexes(env, body_names=self.contact_body_names)
+        self.query_body_indexes = _get_sim_body_subset_indexes(env, body_names=self.query_body_names)
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        pass
+
+    def _resolve_contact_signal(self) -> torch.Tensor:
+        contact_forces = self.env.simulator.contact_forces_history[:, :, self.contact_body_indexes]
+        magnitudes = torch.norm(contact_forces, dim=-1)
+        peak_force = torch.max(magnitudes, dim=1)[0]
+
+        if self.force_mode == "binary":
+            return (peak_force > self.contact_threshold).to(dtype=torch.float32)
+        if self.force_mode == "linear":
+            return torch.clamp(
+                (peak_force - self.contact_threshold) / max(self.force_scale, 1.0e-6),
+                min=0.0,
+                max=1.0,
+            )
+        if self.force_mode == "tanh":
+            return torch.tanh(torch.clamp(peak_force - self.contact_threshold, min=0.0) / max(self.force_scale, 1.0e-6))
+        raise ValueError(f"Unsupported force_mode '{self.force_mode}'. Use one of: binary, linear, tanh.")
+
+    def _query_clearance(self) -> tuple[torch.Tensor, torch.Tensor]:
+        terrain_state = self.env.terrain_manager.get_state("locomotion_terrain")
+        query_positions = self.env.simulator._rigid_body_pos[:, self.query_body_indexes, :]
+        flat_xy = query_positions[..., :2].reshape(-1, 2)
+        terrain_heights = terrain_state.query_terrain_heights(flat_xy).reshape(query_positions.shape[0], query_positions.shape[1])
+        clearance = query_positions[..., 2] - terrain_heights
+        valid = torch.isfinite(clearance)
+        return clearance, valid
+
+
+class TerrainGreenFootContactReward(_TerrainFootContactBase):
+    """Legacy reward: reward terrain contact only when the queried foot points are close to the ground."""
+
+    def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
+        contact_signal = self._resolve_contact_signal()
+        clearance, valid = self._query_clearance()
+        is_green = (clearance <= self.clearance_threshold) & valid
+        if self.contact_body_indexes.numel() == self.query_body_indexes.numel():
+            per_body = contact_signal * is_green.to(dtype=torch.float32)
+            return per_body.mean(dim=1)
+        green_any = is_green.any(dim=1, keepdim=True).to(dtype=torch.float32)
+        return (contact_signal * green_any).mean(dim=1)
+
+
+class TerrainRedFootContactPenalty(_TerrainFootContactBase):
+    """Legacy penalty: penalize terrain contact when the queried foot points are not near valid support."""
+
+    def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
+        contact_signal = self._resolve_contact_signal()
+        clearance, valid = self._query_clearance()
+        invalid_support = clearance > self.clearance_threshold
+        if self.penalize_invalid:
+            invalid_support = invalid_support | (~valid)
+        else:
+            invalid_support = invalid_support & valid
+
+        if self.contact_body_indexes.numel() == self.query_body_indexes.numel():
+            per_body = contact_signal * invalid_support.to(dtype=torch.float32)
+            return per_body.mean(dim=1)
+        invalid_any = invalid_support.any(dim=1, keepdim=True).to(dtype=torch.float32)
+        return (contact_signal * invalid_any).mean(dim=1)
+
+
 # ================================================================================================
 # Undesired Contacts Rewards
 # ================================================================================================
