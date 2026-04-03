@@ -565,6 +565,10 @@ case "${HEADLESS_NORM}" in
     ;;
 esac
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
+VISER_PORT_FROM_ENV=0
+if [[ -n "${VISER_PORT+x}" && -n "${VISER_PORT}" ]]; then
+  VISER_PORT_FROM_ENV=1
+fi
 VISER_PORT=${VISER_PORT:-$((RANDOM % 8976 + 1024))}
 VISER_ENV_ID=${VISER_ENV_ID:-0}
 VISER_UPDATE_HZ=${VISER_UPDATE_HZ:-30}
@@ -573,6 +577,101 @@ VISER_SYNC_TO_SIM=${VISER_SYNC_TO_SIM:-True}
 VISER_FORCE_DT=${VISER_FORCE_DT:-True}
 VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-False}
 VISER_LOAD_URDF=${VISER_LOAD_URDF:-1}
+
+is_truthy() {
+  local raw="${1:-}"
+  case "$(echo "${raw}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+port_in_use() {
+  local port="$1"
+  "${PYTHON_BIN}" - "${port}" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+port = int(sys.argv[1])
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    sock.bind(("0.0.0.0", port))
+except OSError:
+    sys.exit(0)
+finally:
+    try:
+        sock.close()
+    except Exception:
+        pass
+sys.exit(1)
+PY
+}
+
+if [[ ! "${VISER_PORT}" =~ ^[0-9]+$ ]]; then
+  echo "[ERROR] VISER_PORT must be an integer. Got: ${VISER_PORT}" >&2
+  exit 2
+fi
+if (( VISER_PORT < 1 || VISER_PORT > 65535 )); then
+  echo "[ERROR] VISER_PORT must be in [1, 65535]. Got: ${VISER_PORT}" >&2
+  exit 2
+fi
+if port_in_use "${VISER_PORT}"; then
+  if [[ "${VISER_PORT_FROM_ENV}" == "1" ]]; then
+    echo "[ERROR] VISER_PORT ${VISER_PORT} is already in use. Choose a different VISER_PORT." >&2
+    exit 2
+  fi
+  found_port=0
+  for _attempt in {1..30}; do
+    candidate_port=$((RANDOM % 8976 + 1024))
+    if ! port_in_use "${candidate_port}"; then
+      VISER_PORT="${candidate_port}"
+      found_port=1
+      break
+    fi
+  done
+  if [[ "${found_port}" != "1" ]]; then
+    echo "[ERROR] Could not find a free random VISER_PORT after 30 attempts." >&2
+    exit 2
+  fi
+fi
+export HOLOSOMA_VISER_PORT="${VISER_PORT}"
+
+if [[ -n "${RANK+x}" && "${RANK}" != "0" ]]; then
+  echo "[WARN] RANK=${RANK} would disable Viser (viewer only runs on rank 0). Forcing rank-0 env vars." >&2
+  export RANK=0
+  export LOCAL_RANK=0
+  export WORLD_SIZE=1
+fi
+
+if ! "${PYTHON_BIN}" - <<'PY' >/tmp/holosoma_viser_check.err 2>&1
+import inspect
+import viser
+
+if not hasattr(viser, "ViserServer"):
+    module_file = getattr(viser, "__file__", None)
+    raise RuntimeError(
+        f"Imported 'viser' module does not provide ViserServer "
+        f"(module={module_file!r}, inspect={inspect.getmodule(viser)!r})"
+    )
+PY
+then
+  echo "[ERROR] Invalid/missing Viser runtime in ${PYTHON_BIN}." >&2
+  sed -n '1,6p' /tmp/holosoma_viser_check.err >&2 || true
+  echo "[ERROR] Install the correct 'viser' package in this env (must expose viser.ViserServer), or set PYTHON_BIN to an env that has it." >&2
+  exit 2
+fi
+if is_truthy "${VISER_LOAD_URDF}"; then
+  if ! "${PYTHON_BIN}" - <<'PY' >/tmp/holosoma_viser_urdf_check.err 2>&1
+import viser  # noqa: F401
+from viser.extras import ViserUrdf  # noqa: F401
+PY
+  then
+    echo "[WARN] viser.extras.ViserUrdf unavailable in ${PYTHON_BIN}; falling back to VISER_LOAD_URDF=0." >&2
+    sed -n '1,3p' /tmp/holosoma_viser_urdf_check.err >&2 || true
+    VISER_LOAD_URDF=0
+  fi
+fi
 
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.2}
 FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.95}
@@ -836,11 +935,22 @@ echo "[INFO] object_urdf=${OBJECT_URDF}"
 echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-<unset>}"
 echo "[INFO] headless=${HEADLESS_FLAG} (env HEADLESS=${HEADLESS})"
 echo "[INFO] viser=http://localhost:${VISER_PORT}"
+echo "[INFO] holosoma_viser_port=${HOLOSOMA_VISER_PORT}"
 echo "[INFO] viser_sync_to_sim=${VISER_SYNC_TO_SIM} viser_force_dt=${VISER_FORCE_DT}"
 echo "[INFO] viser_load_urdf=${VISER_LOAD_URDF}"
 echo "[INFO] viser_defer_init=${VISER_DEFER_INIT}"
+if is_truthy "${VISER_DEFER_INIT}"; then
+  echo "[INFO] Viser startup is deferred until the first simulator step."
+fi
 echo "[INFO] simulator_subcommand=${SIMULATOR_SUBCOMMAND:-<default>}"
 echo "[INFO] enable_default_pose_prepend=${ENABLE_DEFAULT_POSE_PREPEND} duration_s=${DEFAULT_POSE_PREPEND_DURATION_S}"
 echo "[INFO] disable_randomization=${DISABLE_RANDOMIZATION}"
+if command -v hostname >/dev/null 2>&1; then
+  HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  if [[ -n "${HOST_IP}" ]]; then
+    echo "[INFO] Remote URL: http://${HOST_IP}:${VISER_PORT}"
+    echo "[INFO] SSH tunnel example: ssh -N -L ${VISER_PORT}:localhost:${VISER_PORT} <user>@<host>"
+  fi
+fi
 
 "${cmd[@]}"

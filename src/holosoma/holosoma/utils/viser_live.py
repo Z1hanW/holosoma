@@ -119,6 +119,116 @@ _VIRIDIS_LUT = np.array(
 )
 
 
+class _ViserSceneCompat:
+    """Compat adapter for Viser versions that expose scene APIs on the server directly."""
+
+    def __init__(self, server: Any) -> None:
+        self._server = server
+        self._scene = getattr(server, "scene", None)
+
+    def __getattr__(self, name: str) -> Any:
+        if self._scene is not None and hasattr(self._scene, name):
+            return getattr(self._scene, name)
+        return getattr(self._server, name)
+
+
+class _ViserGuiCompat:
+    """Compat adapter for Viser versions that use add_gui_* on the server."""
+
+    def __init__(self, server: Any) -> None:
+        self._server = server
+        self._gui = getattr(server, "gui", None)
+
+    def add_image(self, *args, **kwargs) -> Any:
+        if self._gui is not None and hasattr(self._gui, "add_image"):
+            return self._gui.add_image(*args, **kwargs)
+        if hasattr(self._server, "add_gui_image"):
+            return self._server.add_gui_image(*args, **kwargs)
+
+        image = None
+        if args:
+            image = args[0]
+        if image is None:
+            image = kwargs.pop("image", None)
+        if image is None:
+            raise TypeError("add_image requires an image array")
+
+        label = str(kwargs.pop("label", "Perception Image"))
+        image_format = kwargs.pop("format", "jpeg")
+        if image_format not in {"jpeg", "png"}:
+            image_format = "jpeg"
+        jpeg_quality = kwargs.pop("jpeg_quality", None)
+        visible = bool(kwargs.pop("visible", True))
+
+        render_height = float(kwargs.pop("render_height", 0.30))
+        render_width = kwargs.pop("render_width", None)
+        if render_width is None:
+            try:
+                h = int(getattr(image, "shape", [1, 1])[0])
+                w = int(getattr(image, "shape", [1, 1])[1])
+                aspect = float(w) / float(max(1, h))
+                render_width = render_height * aspect
+            except Exception:
+                render_width = render_height
+        render_width = float(render_width)
+
+        node_name = "/viser_gui_compat/" + "".join(ch if ch.isalnum() else "_" for ch in label)
+        return self._server.add_image(
+            node_name,
+            image=image,
+            render_width=render_width,
+            render_height=render_height,
+            format=image_format,
+            jpeg_quality=jpeg_quality,
+            visible=visible,
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        if self._gui is not None and hasattr(self._gui, name):
+            return getattr(self._gui, name)
+        if name.startswith("add_"):
+            legacy_name = f"add_gui_{name[4:]}"
+            if hasattr(self._server, legacy_name):
+                return getattr(self._server, legacy_name)
+        return getattr(self._server, name)
+
+
+def _ensure_viser_api_compat(server: Any) -> None:
+    """Attach scene/gui adapters when running against older Viser APIs."""
+
+    if not hasattr(server, "scene"):
+        server.scene = _ViserSceneCompat(server)  # type: ignore[attr-defined]
+    if not hasattr(server, "gui"):
+        server.gui = _ViserGuiCompat(server)  # type: ignore[attr-defined]
+
+
+def _create_viser_urdf_handle(
+    viser_urdf_cls: Any,
+    target: Any,
+    urdf_path: str | Path,
+    *,
+    root_node_name: str,
+) -> Any:
+    """Create ViserUrdf across API variants."""
+
+    path_obj = Path(urdf_path)
+    constructors = (
+        lambda: viser_urdf_cls(target, urdf_or_path=path_obj, root_node_name=root_node_name),
+        lambda: viser_urdf_cls(target, urdf_path=path_obj, root_node_name=root_node_name),
+        lambda: viser_urdf_cls(target, path_obj, root_node_name=root_node_name),
+    )
+    last_error: Exception | None = None
+    for factory in constructors:
+        try:
+            return factory()
+        except TypeError as exc:
+            last_error = exc
+            continue
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Failed to construct ViserUrdf handle.")
+
+
 def _apply_colormap(values: np.ndarray) -> np.ndarray:
     values = np.clip(values, 0.0, 1.0)
     scaled = values * float(len(_VIRIDIS_LUT) - 1)
@@ -1405,6 +1515,7 @@ class ViserLiveViewer:
         port_cfg = int(getattr(cfg, "viser_port", 0) or 0)
         port = resolve_viser_port(port_cfg)
         self._server = viser_mod.ViserServer(port=port)
+        _ensure_viser_api_compat(self._server)
 
         self._global_frame_wxyz = _parse_quat_wxyz(getattr(cfg, "viser_global_frame_quat_wxyz", None))
         if self._global_frame_wxyz is not None:
@@ -1421,9 +1532,10 @@ class ViserLiveViewer:
 
         if self._load_urdf_visuals:
             robot_urdf = _resolve_robot_urdf_path(env.robot_config)
-            self._vr = self._viser_urdf_cls(
+            self._vr = _create_viser_urdf_handle(
+                self._viser_urdf_cls,
                 self._server,
-                urdf_or_path=Path(robot_urdf),
+                robot_urdf,
                 root_node_name=self._scene_path("/robot"),
             )
             self._refresh_primary_object_handle()
@@ -1675,9 +1787,10 @@ class ViserLiveViewer:
             object_node = self._scene_path(f"/env_{env_id}/object")
             try:
                 self._secondary_robot_roots[env_id] = self._server.scene.add_frame(robot_node, show_axes=False)
-                self._secondary_vr[env_id] = viser_urdf_cls(
+                self._secondary_vr[env_id] = _create_viser_urdf_handle(
+                    viser_urdf_cls,
                     self._server,
-                    urdf_or_path=Path(robot_urdf),
+                    robot_urdf,
                     root_node_name=robot_node,
                 )
             except Exception as exc:
