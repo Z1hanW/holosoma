@@ -5,7 +5,6 @@ from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.config_values.loco.g1.experiment import g1_29dof, g1_29dof_fast_sac
 from holosoma.config_values.loco.t1.experiment import t1_29dof, t1_29dof_fast_sac
 from holosoma.config_values.wbt.g1.experiment import (
-    g1_terrain_transformer,
     g1_29dof_wbt_terrain_transformer,
     g1_29dof_wbt,
     g1_29dof_wbt_fast_sac,
@@ -37,7 +36,6 @@ DEFAULTS = {
     "g1_29dof_wbt_motion_tracking_mlp_encoder": g1_29dof_wbt_motion_tracking_mlp_encoder,
     "g1_29dof_wbt_motion_tracking_transformer": g1_29dof_wbt_motion_tracking_transformer,
     "g1_29dof_wbt_terrain_distill_sparse_root_cmd": g1_29dof_wbt_terrain_distill_sparse_root_cmd,
-    "g1_terrain_transformer": g1_terrain_transformer,
     "g1_29dof_wbt_terrain_transformer": g1_29dof_wbt_terrain_transformer,
     "g1_29dof_wbt_videomimic_mlp": g1_29dof_wbt_videomimic_mlp,
     "w_gru": g1_29dof_wbt_videomimic_mlp_w_gru,

@@ -4,16 +4,26 @@ set -euo pipefail
 # Teacher-policy inference for box tracking on the same motion-box pairs used by
 # train_object_generalist.sh, with Isaac Sim <-> Viser sync enabled.
 #
+# Branches:
+# - omomo:       infer on OMOMO carry clips
+# - real:        infer on behave+omomo mixed clips
+# - pure-sd:     infer on prepared Seedance/DS clips
+# - naive-mixed: infer on OMOMO + Seedance/DS naive-mixed clips
+#
 # Usage:
-#   bash infer_box_tracking.sh [teacher_checkpoint.pt|wandb://...] [extra tyro args...]
+#   bash infer_box_tracking.sh [omomo|real|pure-sd|naive-mixed] [teacher_checkpoint.pt|wandb://...] [extra tyro args...]
 #
 # Optional env vars:
 #   TEACHER_CHECKPOINT        (default: wandb://zihanw22/boxer/a5ohxuta/model_09000.pt)
+#   WANDB_MODEL_FILE          (optional; used when TEACHER_CHECKPOINT is a W&B run URL without /files/<checkpoint>)
 #   LEGACY_OBS                (default: 0; set 1/true to require legacy checkpoint observation layout)
 #   REQUIRE_HEIGHTMAP         (default: 0; set 1/true to require checkpoint perception.enabled=True and output_mode=heightmap)
 #   DEFAULT_LEGACY_TEACHER_CHECKPOINT
 #                             (optional; used as default checkpoint when LEGACY_OBS=1 and no checkpoint is explicitly provided)
-#   INFER_DATASET             (default: mixed; options: omomo|behave|behave_carry|behave_sq_carry|mixed)
+#   PURE_SD_DEFAULT_TEACHER_RUN_URL
+#                             (default: https://wandb.ai/zihanw22/boxer/runs/6pzxdnr6; resolved to latest checkpoint at runtime)
+#   INFER_DATASET             (default: mixed; options: omomo|behave|behave_carry|behave_sq_carry|mixed|real|pure-sd|naive-mixed|mix-naive)
+#   DS_DATA_ROOT              (default: ./data/ds_box_data; used by pure-sd / naive-mixed)
 #   MOTION_DIR                (optional override; if unset, chosen by INFER_DATASET)
 #   MOTION_CLIP_NAME          (optional: pin a single clip)
 #   OBJECT_URDF               (optional override; if unset, chosen by INFER_DATASET)
@@ -40,11 +50,16 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  bash infer_box_tracking.sh [teacher_checkpoint.pt|wandb://...] [extra tyro args...]
+  bash infer_box_tracking.sh [omomo|real|pure-sd|naive-mixed] [teacher_checkpoint.pt|wandb://...] [extra tyro args...]
 
 Examples:
   bash infer_box_tracking.sh
+  bash infer_box_tracking.sh omomo
+  bash infer_box_tracking.sh real
+  bash infer_box_tracking.sh pure-sd
+  bash infer_box_tracking.sh naive-mixed
   bash infer_box_tracking.sh /abs/path/to/model_17000.pt
+  bash infer_box_tracking.sh real /abs/path/to/model_17000.pt
   MOTION_CLIP_NAME=sub3_largebox_003_mj_w_obj bash infer_box_tracking.sh
 
 Dataset selection examples:
@@ -52,11 +67,154 @@ Dataset selection examples:
   INFER_DATASET=behave bash infer_box_tracking.sh
   INFER_DATASET=behave_carry bash infer_box_tracking.sh
   INFER_DATASET=mixed bash infer_box_tracking.sh
+  INFER_DATASET=pure-sd bash infer_box_tracking.sh
+  INFER_DATASET=naive-mixed bash infer_box_tracking.sh
 EOF
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+
+is_checkpoint_ref() {
+  local ref="$1"
+  [[ "${ref}" == wandb://* || "${ref}" == https://wandb.ai/*/runs/* || "${ref}" == /* || "${ref}" == ./* || "${ref}" == ../* || "${ref}" == *.pt ]]
+}
+
+default_model_file_for_run_id() {
+  local run_id="$1"
+  case "${run_id}" in
+    6pzxdnr6) echo "model_00500.pt" ;;
+    *) echo "" ;;
+  esac
+}
+
+parse_wandb_run_url() {
+  local ref="$1"
+  local clean_ref="${ref%%\?*}"
+  if [[ "${clean_ref}" != https://wandb.ai/*/runs/* ]]; then
+    return 1
+  fi
+
+  local trimmed="${clean_ref#https://wandb.ai/}"
+  local entity=""
+  local project=""
+  local run_id=""
+  local explicit_file=""
+  IFS='/' read -r -a parts <<< "${trimmed}"
+  if [[ "${#parts[@]}" -lt 4 || "${parts[2]}" != "runs" ]]; then
+    return 1
+  fi
+
+  entity="${parts[0]}"
+  project="${parts[1]}"
+  run_id="${parts[3]}"
+  if [[ -z "${entity}" || -z "${project}" || -z "${run_id}" ]]; then
+    return 1
+  fi
+
+  if [[ "${#parts[@]}" -ge 6 && "${parts[4]}" == "files" ]]; then
+    explicit_file="${trimmed#${entity}/${project}/runs/${run_id}/files/}"
+  fi
+
+  printf '%s\t%s\t%s\t%s\n' "${entity}" "${project}" "${run_id}" "${explicit_file}"
+}
+
+resolve_remote_wandb_checkpoint_name() {
+  local entity="$1"
+  local project="$2"
+  local run_id="$3"
+
+  "${PYTHON_BIN}" - "${entity}" "${project}" "${run_id}" <<'PY' 2>/dev/null || true
+import re
+import sys
+from pathlib import Path
+
+repo_root = Path.cwd().resolve()
+sanitized_sys_path: list[str] = []
+for path_entry in sys.path:
+    if path_entry in {"", "."}:
+        continue
+    try:
+        if Path(path_entry).resolve() == repo_root:
+            continue
+    except Exception:
+        pass
+    sanitized_sys_path.append(path_entry)
+sys.path = sanitized_sys_path
+
+try:
+    import wandb
+except Exception:
+    sys.exit(0)
+
+entity, project, run_id = sys.argv[1:4]
+api = wandb.Api(timeout=30)
+run = api.run(f"{entity}/{project}/{run_id}")
+model_pattern = re.compile(r"^model_(\d+)\.pt$")
+latest_step = -1
+latest_name = ""
+for file_obj in run.files():
+    name = getattr(file_obj, "name", "")
+    match = model_pattern.match(name)
+    if not match:
+        continue
+    step = int(match.group(1))
+    if step >= latest_step:
+        latest_step = step
+        latest_name = name
+if latest_name:
+    print(latest_name)
+PY
+}
+
+normalize_checkpoint_ref() {
+  local ref="$1"
+  if [[ "${ref}" != https://wandb.ai/*/runs/* ]]; then
+    echo "${ref}"
+    return 0
+  fi
+
+  local parsed=""
+  local entity=""
+  local project=""
+  local run_id=""
+  local explicit_file=""
+  local model_file="${WANDB_MODEL_FILE:-}"
+  local remote_model_file=""
+  local builtin_model_file=""
+
+  parsed="$(parse_wandb_run_url "${ref}" || true)"
+  if [[ -z "${parsed}" ]]; then
+    echo "${ref}"
+    return 0
+  fi
+
+  IFS=$'\t' read -r entity project run_id explicit_file <<< "${parsed}"
+  if [[ -n "${explicit_file}" ]]; then
+    model_file="${explicit_file}"
+  elif [[ -z "${model_file}" ]]; then
+    remote_model_file="$(resolve_remote_wandb_checkpoint_name "${entity}" "${project}" "${run_id}")"
+    if [[ -n "${remote_model_file}" ]]; then
+      model_file="${remote_model_file}"
+      echo "[INFO] Resolved wandb run URL to latest remote checkpoint: ${model_file}" >&2
+    else
+      builtin_model_file="$(default_model_file_for_run_id "${run_id}")"
+      if [[ -n "${builtin_model_file}" ]]; then
+        model_file="${builtin_model_file}"
+        echo "[INFO] Falling back to pinned checkpoint file for run ${run_id}: ${model_file}" >&2
+      fi
+    fi
+  fi
+
+  if [[ -z "${model_file}" ]]; then
+    echo "[ERROR] Could not determine a .pt checkpoint for W&B run URL: ${ref}" >&2
+    echo "[ERROR] Pass a /files/<checkpoint>.pt URL or set WANDB_MODEL_FILE." >&2
+    return 2
+  fi
+
+  echo "wandb://${entity}/${project}/${run_id}/${model_file}"
+}
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
@@ -69,6 +227,7 @@ fi
 
 # https://wandb.ai/zihanw22/boxer/runs/a5ohxuta/files?nw=nwuserz1hanw
 DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/a5ohxuta/model_14000.pt"}
+PURE_SD_DEFAULT_TEACHER_RUN_URL=${PURE_SD_DEFAULT_TEACHER_RUN_URL:-"https://wandb.ai/zihanw22/boxer/runs/6pzxdnr6"}
 DEFAULT_LEGACY_TEACHER_CHECKPOINT="${DEFAULT_LEGACY_TEACHER_CHECKPOINT:-}"
 LEGACY_OBS=${LEGACY_OBS:-0}
 legacy_obs_normalized=$(echo "${LEGACY_OBS}" | tr '[:upper:]' '[:lower:]')
@@ -91,9 +250,36 @@ if [[ -n "${TEACHER_CHECKPOINT+x}" || -n "${CKPT+x}" ]]; then
 fi
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${CKPT:-${DEFAULT_TEACHER_CHECKPOINT}}}"
 TEACHER_CHECKPOINT_FROM_ARG=0
+INFER_DATASET_FROM_ARG=0
 
 if [[ $# -gt 0 ]]; then
-  if [[ "$1" == wandb://* || "$1" == /* || "$1" == ./* || "$1" == ../* || "$1" == *.pt ]]; then
+  first_arg_normalized=$(echo "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
+  case "${first_arg_normalized}" in
+    omomo)
+      INFER_DATASET="omomo"
+      INFER_DATASET_FROM_ARG=1
+      shift
+      ;;
+    real|mixed|behave+omomo|behave-omomo)
+      INFER_DATASET="real"
+      INFER_DATASET_FROM_ARG=1
+      shift
+      ;;
+    pure-sd|seedance|sd)
+      INFER_DATASET="pure-sd"
+      INFER_DATASET_FROM_ARG=1
+      shift
+      ;;
+    naive-mixed|mix-naive)
+      INFER_DATASET="naive-mixed"
+      INFER_DATASET_FROM_ARG=1
+      shift
+      ;;
+  esac
+fi
+
+if [[ $# -gt 0 ]]; then
+  if is_checkpoint_ref "$1"; then
     TEACHER_CHECKPOINT="$1"
     TEACHER_CHECKPOINT_FROM_ARG=1
     shift
@@ -125,26 +311,39 @@ pick_first_existing_path() {
   fi
 }
 
-INFER_DATASET=${INFER_DATASET:-${DATASET:-mixed}}
+if [[ "${INFER_DATASET_FROM_ARG}" != "1" ]]; then
+  INFER_DATASET=${INFER_DATASET:-${DATASET:-mixed}}
+fi
 INFER_DATASET=$(echo "${INFER_DATASET}" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
 case "${INFER_DATASET}" in
-  omomo|behave|behave_carry|behave_sq_carry|mixed) ;;
+  omomo|behave|behave_carry|behave_sq_carry|mixed|real|pure-sd|naive-mixed|mix-naive) ;;
   *)
-    echo "[ERROR] INFER_DATASET must be one of: omomo, behave, behave_carry, behave_sq_carry, mixed. Got: ${INFER_DATASET}" >&2
+    echo "[ERROR] INFER_DATASET must be one of: omomo, behave, behave_carry, behave_sq_carry, mixed, real, pure-sd, naive-mixed, mix-naive. Got: ${INFER_DATASET}" >&2
     exit 2
     ;;
 esac
+
+if [[ "${INFER_DATASET}" == "pure-sd" && "${TEACHER_CHECKPOINT_FROM_ENV}" != "1" && "${TEACHER_CHECKPOINT_FROM_ARG}" != "1" && "${LEGACY_OBS_ENABLED}" != "1" ]]; then
+  TEACHER_CHECKPOINT="${PURE_SD_DEFAULT_TEACHER_RUN_URL}"
+fi
+
+TEACHER_CHECKPOINT="$(normalize_checkpoint_ref "${TEACHER_CHECKPOINT}")"
 
 DEFAULT_OMOMO_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"
 DEFAULT_BEHAVE_MOTION_DIR="$(pick_first_existing_path \
   "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_carry" \
   "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_sq_carry")"
-DEFAULT_MIXED_MOTION_DIR="$(pick_first_existing_path \
+DEFAULT_REAL_MOTION_DIR="$(pick_first_existing_path \
   "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_carry_aug_mix_ml" \
   "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_carry_aug_mix_ml")"
+DS_DATA_ROOT="${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}"
+DEFAULT_PURE_SD_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
+DEFAULT_NAIVE_MIXED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
 DEFAULT_OMOMO_URDF="${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
 DEFAULT_BEHAVE_MAP_FILE="${DEFAULT_BEHAVE_MOTION_DIR}/_clip_object_urdf_map.json"
-DEFAULT_MIXED_MAP_FILE="${DEFAULT_MIXED_MOTION_DIR}/_clip_object_urdf_map.json"
+DEFAULT_REAL_MAP_FILE="${DEFAULT_REAL_MOTION_DIR}/_clip_object_urdf_map.json"
+DEFAULT_PURE_SD_MAP_FILE="${DEFAULT_PURE_SD_MOTION_DIR}/_clip_object_urdf_map.json"
+DEFAULT_NAIVE_MIXED_MAP_FILE="${DEFAULT_NAIVE_MIXED_MOTION_DIR}/_clip_object_urdf_map.json"
 
 MOTION_DIR_FROM_ENV=0
 if [[ -n "${MOTION_DIR+x}" ]]; then
@@ -163,8 +362,14 @@ if [[ "${MOTION_DIR_FROM_ENV}" != "1" ]]; then
     behave|behave_carry|behave_sq_carry)
       MOTION_DIR="${DEFAULT_BEHAVE_MOTION_DIR}"
       ;;
-    mixed)
-      MOTION_DIR="${DEFAULT_MIXED_MOTION_DIR}"
+    mixed|real)
+      MOTION_DIR="${DEFAULT_REAL_MOTION_DIR}"
+      ;;
+    pure-sd)
+      MOTION_DIR="${DEFAULT_PURE_SD_MOTION_DIR}"
+      ;;
+    naive-mixed|mix-naive)
+      MOTION_DIR="${DEFAULT_NAIVE_MIXED_MOTION_DIR}"
       ;;
   esac
 fi
@@ -183,11 +388,27 @@ if [[ "${OBJECT_URDF_FROM_ENV}" != "1" ]]; then
         exit 2
       fi
       ;;
-    mixed)
-      if [[ -f "${DEFAULT_MIXED_MAP_FILE}" ]]; then
-        OBJECT_URDF="${DEFAULT_MIXED_MAP_FILE}"
+    mixed|real)
+      if [[ -f "${DEFAULT_REAL_MAP_FILE}" ]]; then
+        OBJECT_URDF="${DEFAULT_REAL_MAP_FILE}"
       else
-        echo "[ERROR] Mixed map file not found: ${DEFAULT_MIXED_MAP_FILE}" >&2
+        echo "[ERROR] behave+omomo map file not found: ${DEFAULT_REAL_MAP_FILE}" >&2
+        exit 2
+      fi
+      ;;
+    pure-sd)
+      if [[ -f "${DEFAULT_PURE_SD_MAP_FILE}" ]]; then
+        OBJECT_URDF="${DEFAULT_PURE_SD_MAP_FILE}"
+      else
+        echo "[ERROR] Seedance/DS map file not found: ${DEFAULT_PURE_SD_MAP_FILE}" >&2
+        exit 2
+      fi
+      ;;
+    naive-mixed|mix-naive)
+      if [[ -f "${DEFAULT_NAIVE_MIXED_MAP_FILE}" ]]; then
+        OBJECT_URDF="${DEFAULT_NAIVE_MIXED_MAP_FILE}"
+      else
+        echo "[ERROR] OMOMO+Seedance/DS mix map file not found: ${DEFAULT_NAIVE_MIXED_MAP_FILE}" >&2
         exit 2
       fi
       ;;
@@ -195,7 +416,7 @@ if [[ "${OBJECT_URDF_FROM_ENV}" != "1" ]]; then
 fi
 
 NUM_ENVS=${NUM_ENVS:-1}
-HEADLESS_RAW=${HEADLESS:-False}
+HEADLESS_RAW=${HEADLESS:-True}
 HEADLESS_NORM=$(echo "${HEADLESS_RAW}" | tr '[:upper:]' '[:lower:]')
 case "${HEADLESS_NORM}" in
   1|true|yes|on)

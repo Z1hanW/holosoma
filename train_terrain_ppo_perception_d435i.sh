@@ -68,7 +68,7 @@ if [[ "${DEPTH_IMPL}" == "raycast" ]]; then
 fi
 
 CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
-  exp:g1-terrain-transformer \
+  exp:g1-29dof-wbt-terrain-transformer \
   "perception:${PERCEPTION_PRESET}" \
   --training.num_envs=128 \
   "${PERCEPTION_OVERRIDES[@]}" \
@@ -91,9 +91,7 @@ CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 --master_port=$((29500 + RAND
   --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s=0 \
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend=False \
   --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s=0 \
-  --command.setup_terms.motion_command.params.motion_config.num_future_steps=10 \
   --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale=0.77 \
-  --command.setup_terms.motion_command.params.motion_config.target_pose_type=max-coords-future-rel-with-time \
   \
   logger:wandb \
   --logger.video.enabled=False \

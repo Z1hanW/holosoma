@@ -874,16 +874,10 @@ class BaseModule(nn.Module):
                 raise ValueError("perception_input_name must be set for TerrainTransformerObsTokenEncoder modules.")
 
             proprio_dim = self.input_dim_dict[layer_config.encoder_obs_token_name]
-
-            if layer_config.perception_input_name in self.input_dim_dict:
-                depth_dim = self.input_dim_dict[layer_config.perception_input_name]
-            elif layer_config.perception_input_name in self.obs_dim_dict:
-                depth_dim = self.obs_dim_dict[layer_config.perception_input_name]
-            else:
-                raise ValueError(
-                    f"Unknown perception_input_name for TerrainTransformerObsTokenEncoder: "
-                    f"{layer_config.perception_input_name}"
-                )
+            perception_output_dim = self._setup_perception_encoder(layer_config)
+            if perception_output_dim == 0:
+                raise ValueError("perception_input_name must be set for TerrainTransformerObsTokenEncoder modules.")
+            depth_dim = perception_output_dim
 
             target_obs_dim = None
             if layer_config.encoder_input_name:

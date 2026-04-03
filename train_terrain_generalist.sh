@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Terrain tracking teacher training entrypoint.
-# Default flow is tracking-only, so perception is disabled unless explicitly set.
+# Terrain generalist training entrypoint.
+# Default flow uses heightmap perception unless explicitly overridden.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 cd "${SCRIPT_DIR}"
@@ -18,7 +18,7 @@ else
 fi
 PYTHON_BIN=${PYTHON_BIN:-"${DEFAULT_PYTHON_BIN}"}
 
-PERCEPTION_PRESET=${1:-${PERCEPTION_PRESET:-none}}
+PERCEPTION_PRESET=${1:-${PERCEPTION_PRESET:-heightmap}}
 case "${PERCEPTION_PRESET}" in
   none|camera_depth_d435i|heightmap)
     if [[ $# -gt 0 ]]; then

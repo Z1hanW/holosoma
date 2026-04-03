@@ -223,6 +223,15 @@ class PPOActorEncoder(PPOActor):
             else None
         )
         depth_token = self._get_perception_obs(actor_obs, policy_state_dict, source="TerrainTransformerObsTokenEncoder")
+        perception_encoder = getattr(self.actor_module, "perception_encoder", None)
+        if self.perception_encoder_type == "time_gru":
+            if self.perception_time_gru is None:
+                raise ValueError("time_gru enabled but perception_time_gru is not initialized.")
+            depth_token = self.perception_time_gru.step(depth_token)
+        elif perception_encoder is not None:
+            depth_token = perception_encoder(depth_token)
+        if hasattr(depth_token, "is_inference") and depth_token.is_inference():
+            depth_token = depth_token.clone()
 
         self.actor_encoder_obs = self.actor_module.encoder(proprio_token, depth_token, target_tokens)
         parts = [self.actor_encoder_obs]
@@ -389,6 +398,15 @@ class PPOCriticEncoder(PPOCritic):
             else None
         )
         depth_token = self._get_perception_obs(critic_obs, policy_state_dict, source="TerrainTransformerObsTokenEncoder")
+        perception_encoder = getattr(self.critic_module, "perception_encoder", None)
+        if self.perception_encoder_type == "time_gru":
+            if self.perception_time_gru is None:
+                raise ValueError("time_gru enabled but perception_time_gru is not initialized.")
+            depth_token = self.perception_time_gru.step(depth_token)
+        elif perception_encoder is not None:
+            depth_token = perception_encoder(depth_token)
+        if hasattr(depth_token, "is_inference") and depth_token.is_inference():
+            depth_token = depth_token.clone()
 
         self.critic_encoder_obs = self.critic_module.encoder(proprio_token, depth_token, target_tokens)
         parts = [self.critic_encoder_obs]
