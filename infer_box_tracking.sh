@@ -36,6 +36,7 @@ set -euo pipefail
 #   VISER_SYNC_TO_SIM         (default: True)
 #   VISER_FORCE_DT            (default: True)
 #   VISER_LOAD_URDF           (default: 1; URDF meshes are shown in Viser, but pose/object selection comes from Isaac Sim runtime state)
+#   VISER_DEFER_INIT          (default: 1; defer Viser startup until first simulator step)
 #   START_AT_TIMESTEP_ZERO_PROB
 #                             (default: 0.2; matches checkpoint default)
 #   FREEZE_AT_TIMESTEP_ZERO_PROB
@@ -604,6 +605,7 @@ export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-0}
 export VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-1}
 export VISER_START_PAUSED=${VISER_START_PAUSED:-0}
 export VISER_LOAD_URDF
+export VISER_DEFER_INIT=${VISER_DEFER_INIT:-1}
 export LOGURU_LEVEL=${LOGURU_LEVEL:-WARNING}
 export PY_LOG_LEVEL=${PY_LOG_LEVEL:-WARNING}
 export PYTHONUNBUFFERED=${PYTHONUNBUFFERED:-1}
@@ -836,6 +838,7 @@ echo "[INFO] headless=${HEADLESS_FLAG} (env HEADLESS=${HEADLESS})"
 echo "[INFO] viser=http://localhost:${VISER_PORT}"
 echo "[INFO] viser_sync_to_sim=${VISER_SYNC_TO_SIM} viser_force_dt=${VISER_FORCE_DT}"
 echo "[INFO] viser_load_urdf=${VISER_LOAD_URDF}"
+echo "[INFO] viser_defer_init=${VISER_DEFER_INIT}"
 echo "[INFO] simulator_subcommand=${SIMULATOR_SUBCOMMAND:-<default>}"
 echo "[INFO] enable_default_pose_prepend=${ENABLE_DEFAULT_POSE_PREPEND} duration_s=${DEFAULT_POSE_PREPEND_DURATION_S}"
 echo "[INFO] disable_randomization=${DISABLE_RANDOMIZATION}"

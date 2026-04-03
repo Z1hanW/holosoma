@@ -1312,13 +1312,25 @@ class ViserLiveViewer:
         self._root_body_index: int | None = None
         self._root_body_name: str | None = None
         self._root_pose_debug_logged = False
+        self._defer_startup = os.environ.get("VISER_DEFER_INIT", "0").lower() in ("1", "true", "yes", "on")
+        self._startup_initialized = False
 
         if not self._enabled:
             return
         if not _is_rank0():
             self._enabled = False
             return
+        if self._defer_startup:
+            logger.info("Deferring Viser live viewer startup until first simulator step.")
+            return
+        self._initialize_server()
 
+    def _initialize_server(self) -> None:
+        if not self._enabled or self._startup_initialized:
+            return
+        self._startup_initialized = True
+
+        env = self._env
         cfg = env.training_config
         self._env_id = int(getattr(cfg, "viser_env_id", 0))
         if self._env_id < 0 or self._env_id >= getattr(env, "num_envs", 1):
@@ -2664,14 +2676,16 @@ class ViserLiveViewer:
             self._manual_command_arrow_handle.colors = colors
 
     def on_reset(self, env_ids) -> None:
-        if not self._enabled or not self._recenter:
+        if not self._enabled or not getattr(self, "_recenter", True) or self._server is None:
             return
-        if self._env_id not in _normalize_env_ids(env_ids):
+        if getattr(self, "_env_id", 0) not in _normalize_env_ids(env_ids):
             return
         self._offset = self._resolve_env_origin()
         self._reload_terrain_for_clip(self._current_clip_name(self._get_motion_command()))
 
     def record_step(self) -> None:
+        if self._enabled and self._server is None:
+            self._initialize_server()
         if not self._enabled or self._server is None or self._robot_root is None:
             return
 
