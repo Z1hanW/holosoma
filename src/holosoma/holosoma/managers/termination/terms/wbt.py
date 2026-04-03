@@ -251,7 +251,11 @@ class BadTracking(TerminationTermBase):
 
         if motion_command.use_adaptive_timesteps_sampler and torch.any(bad_tracking):
             failed_at_time_step = motion_command.time_steps[bad_tracking]
-            motion_command.adaptive_timesteps_sampler.update_current_bin_failed_count(failed_at_time_step)
+            failed_clip_ids = motion_command.clip_ids[bad_tracking]
+            motion_command.adaptive_timesteps_sampler.update_current_bin_failed_count(
+                failed_at_time_step,
+                clip_ids=failed_clip_ids,
+            )
 
         return bad_tracking
 

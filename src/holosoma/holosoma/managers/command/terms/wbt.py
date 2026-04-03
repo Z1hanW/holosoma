@@ -1091,9 +1091,10 @@ class AdaptiveTimestepsSampler:
 
     def __init__(
         self,
-        motion_time_step_total: int,
+        motion_time_step_total: int | None,
         device: str,
         env_fps: int,
+        clip_lengths: torch.Tensor | None = None,
         bin_size_s: float = 1.0,
         kernel_size: int = 3,
         decay_lambda: float = 0.001,
@@ -1101,10 +1102,23 @@ class AdaptiveTimestepsSampler:
     ):
         # TODO: think better about the decay_lambda, will 0.001 be too small?
         self.device = device
-        # length of the motion in rl environment time steps
-        self.motion_time_step_total = motion_time_step_total
         # fps of the rl environment
         self.env_fps = env_fps
+
+        if clip_lengths is not None:
+            clip_lengths = torch.as_tensor(clip_lengths, dtype=torch.long, device=self.device).reshape(-1)
+            if clip_lengths.numel() == 0:
+                raise ValueError("clip_lengths must contain at least one clip.")
+            self.clip_lengths = torch.clamp(clip_lengths, min=1)
+        else:
+            if motion_time_step_total is None:
+                raise ValueError("motion_time_step_total must be provided when clip_lengths is None.")
+            total_steps = max(int(motion_time_step_total), 1)
+            self.clip_lengths = torch.tensor([total_steps], dtype=torch.long, device=self.device)
+
+        self.num_clips = int(self.clip_lengths.numel())
+        # Keep the longest clip length for backwards-compatible stats/debugging.
+        self.motion_time_step_total = int(self.clip_lengths.max().item())
 
         # size of the bin in seconds
         self.bin_size_s = bin_size_s
@@ -1115,8 +1129,11 @@ class AdaptiveTimestepsSampler:
 
         self.decay_lambda = decay_lambda
 
-        # number of bins in the motion
-        self.num_bins = math.ceil((self.motion_time_step_total / self.env_fps) / self.bin_size_s)
+        clip_duration_s = self.clip_lengths.to(dtype=torch.float32) / float(self.env_fps)
+        self.num_bins_per_clip = torch.clamp(torch.ceil(clip_duration_s / self.bin_size_s).long(), min=1)
+        self.max_num_bins = int(self.num_bins_per_clip.max().item())
+        # Maintain the old attribute for single-clip callers and debug metrics.
+        self.num_bins = self.max_num_bins
 
         # initialize exponential 1d decay kernel, used for smoothing the failure counts over time.
         assert self.kernel_size % 2 == 1, "Kernel size must be odd"
@@ -1132,14 +1149,50 @@ class AdaptiveTimestepsSampler:
         self.metrics: dict[str, torch.Tensor] = {}
 
     def init_buffers(self):
-        self.current_bin_failed_count = torch.zeros(self.num_bins, dtype=torch.float, device=self.device)
-        self.bin_failed_count = torch.zeros(self.num_bins, dtype=torch.float, device=self.device)
+        shape = (self.num_clips, self.max_num_bins)
+        self.current_bin_failed_count = torch.zeros(shape, dtype=torch.float32, device=self.device)
+        self.bin_failed_count = torch.zeros(shape, dtype=torch.float32, device=self.device)
 
-    def update_current_bin_failed_count(self, failed_at_time_step: torch.Tensor):
+    def _resolve_clip_ids(self, clip_ids: torch.Tensor | None, count: int) -> torch.Tensor:
+        if clip_ids is None:
+            if self.num_clips != 1:
+                raise ValueError("clip_ids must be provided for multi-clip adaptive timestep sampling.")
+            return torch.zeros((count,), dtype=torch.long, device=self.device)
+        clip_ids = torch.as_tensor(clip_ids, dtype=torch.long, device=self.device).reshape(-1)
+        if clip_ids.numel() != count:
+            raise ValueError(f"Expected {count} clip ids, got {clip_ids.numel()}.")
+        if torch.any(clip_ids < 0) or torch.any(clip_ids >= self.num_clips):
+            raise ValueError(f"clip_ids must be in [0, {self.num_clips}).")
+        return clip_ids
+
+    def _sampling_probabilities_for_clip(self, clip_id: int) -> torch.Tensor:
+        valid_bins = int(self.num_bins_per_clip[clip_id].item())
+        sampling_probabilities = self.bin_failed_count[clip_id, :valid_bins] + 1e-6
+        sampling_probabilities = F.pad(
+            sampling_probabilities.unsqueeze(0).unsqueeze(0),
+            (0, self.kernel_size - 1),  # Non-causal kernel
+            mode="replicate",
+        )
+        sampling_probabilities = F.conv1d(sampling_probabilities, self.kernel.view(1, 1, -1)).view(-1)
+        sampling_probabilities += 0.01
+        return sampling_probabilities / sampling_probabilities.sum()
+
+    def update_current_bin_failed_count(self, failed_at_time_step: torch.Tensor, clip_ids: torch.Tensor | None = None):
         """Update the current bin failed count with terminated time steps."""
-        failed_bin = torch.floor(failed_at_time_step / self.motion_time_step_total * self.num_bins).long()
-        assert failed_bin.min() >= 0 and failed_bin.max() < self.num_bins, "Failed bin is out of range"
-        self.current_bin_failed_count[:] = torch.bincount(failed_bin, minlength=self.num_bins)
+        failed_at_time_step = torch.as_tensor(failed_at_time_step, dtype=torch.float32, device=self.device).reshape(-1)
+        if failed_at_time_step.numel() == 0:
+            self.current_bin_failed_count.zero_()
+            return
+
+        clip_ids = self._resolve_clip_ids(clip_ids, failed_at_time_step.numel())
+        clip_lengths = self.clip_lengths[clip_ids].to(dtype=torch.float32)
+        num_bins = self.num_bins_per_clip[clip_ids]
+        failed_bin = torch.floor(failed_at_time_step / clip_lengths * num_bins.to(dtype=torch.float32)).long()
+        failed_bin = torch.clamp(failed_bin, min=0)
+        failed_bin = torch.minimum(failed_bin, num_bins - 1)
+        flat_ids = clip_ids * self.max_num_bins + failed_bin
+        counts = torch.bincount(flat_ids, minlength=self.num_clips * self.max_num_bins).to(dtype=torch.float32)
+        self.current_bin_failed_count[:] = counts.view(self.num_clips, self.max_num_bins)
 
     def update_bin_failed_count(self):
         """At every rl environment step, update the failed count with the current bin failed count."""
@@ -1150,30 +1203,52 @@ class AdaptiveTimestepsSampler:
 
     @property
     def sampling_probabilities(self) -> torch.Tensor:
-        sampling_probabilities = self.bin_failed_count + 1e-6
-        sampling_probabilities = torch.nn.functional.pad(
-            sampling_probabilities.unsqueeze(0).unsqueeze(0),
-            (0, self.kernel_size - 1),  # Non-causal kernel
-            mode="replicate",
-        )
-        sampling_probabilities = torch.nn.functional.conv1d(sampling_probabilities, self.kernel.view(1, 1, -1)).view(-1)
-        sampling_probabilities += 0.01
-        return sampling_probabilities / sampling_probabilities.sum()
+        if self.num_clips != 1:
+            raise RuntimeError("sampling_probabilities is only defined for single-clip adaptive timestep sampling.")
+        return self._sampling_probabilities_for_clip(0)
 
-    def sample(self, num_samples: int) -> torch.Tensor:
-        sampled_bins = torch.multinomial(self.sampling_probabilities, num_samples, replacement=True)
-        # inside of each bin, randomly sample a time step, ignoring the borders
-        return (sampled_bins + torch.rand(num_samples, device=self.device)) / self.num_bins
+    def sample(self, clip_ids_or_num_samples: torch.Tensor | int) -> torch.Tensor:
+        if isinstance(clip_ids_or_num_samples, int):
+            clip_ids = self._resolve_clip_ids(None, clip_ids_or_num_samples)
+        else:
+            clip_ids = self._resolve_clip_ids(clip_ids_or_num_samples, int(clip_ids_or_num_samples.numel()))
+
+        phases = torch.zeros((clip_ids.numel(),), dtype=torch.float32, device=self.device)
+        if clip_ids.numel() == 0:
+            return phases
+
+        unique_clip_ids, inverse = torch.unique(clip_ids, return_inverse=True)
+        for local_idx, clip_id_tensor in enumerate(unique_clip_ids):
+            clip_id = int(clip_id_tensor.item())
+            env_mask = inverse == local_idx
+            num_samples = int(env_mask.sum().item())
+            sampled_bins = torch.multinomial(self._sampling_probabilities_for_clip(clip_id), num_samples, replacement=True)
+            num_bins = float(self.num_bins_per_clip[clip_id].item())
+            phases[env_mask] = (sampled_bins.to(dtype=torch.float32) + torch.rand(num_samples, device=self.device)) / num_bins
+        return phases
 
     def get_stats(self):
         # Metrics
-        prob = self.sampling_probabilities
-        H = -(prob * (prob + 1e-12).log()).sum()
-        H_norm = H / np.log(self.num_bins)
-        pmax, imax = prob.max(dim=0)
-        self.metrics["sampling_entropy"] = H_norm
-        self.metrics["sampling_top1_prob"] = pmax
-        self.metrics["sampling_top1_bin"] = imax.float() / self.num_bins
+        entropies: list[torch.Tensor] = []
+        top1_probs: list[torch.Tensor] = []
+        top1_bins: list[torch.Tensor] = []
+        for clip_id in range(self.num_clips):
+            prob = self._sampling_probabilities_for_clip(clip_id)
+            if prob.numel() <= 1:
+                entropies.append(torch.zeros((), device=self.device, dtype=torch.float32))
+                top1_probs.append(torch.ones((), device=self.device, dtype=torch.float32))
+                top1_bins.append(torch.zeros((), device=self.device, dtype=torch.float32))
+                continue
+            H = -(prob * (prob + 1e-12).log()).sum()
+            H_norm = H / np.log(float(prob.numel()))
+            pmax, imax = prob.max(dim=0)
+            entropies.append(H_norm.to(dtype=torch.float32))
+            top1_probs.append(pmax.to(dtype=torch.float32))
+            top1_bins.append(imax.to(dtype=torch.float32) / float(prob.numel()))
+
+        self.metrics["sampling_entropy"] = torch.stack(entropies).mean()
+        self.metrics["sampling_top1_prob"] = torch.stack(top1_probs).mean()
+        self.metrics["sampling_top1_bin"] = torch.stack(top1_bins).mean()
 
 
 #########################################################################################################
@@ -1401,13 +1476,18 @@ class MotionCommand(CommandTermBase):
 
         # 4. get the adaptive timesteps sampler
         self.use_adaptive_timesteps_sampler = self.motion_cfg.use_adaptive_timesteps_sampler
-        if self.multi_clip and self.use_adaptive_timesteps_sampler:
-            logger.warning("Adaptive timestep sampling is disabled for multi-clip motion banks.")
-            self.use_adaptive_timesteps_sampler = False
         if self.use_adaptive_timesteps_sampler:
             self.adaptive_timesteps_sampler = AdaptiveTimestepsSampler(
-                self.motion.time_step_total, self.device, int(1 / (self._env.dt))
+                self.motion.time_step_total,
+                self.device,
+                int(1 / (self._env.dt)),
+                clip_lengths=self.motion.clip_lengths,
             )
+            if self.multi_clip:
+                logger.info(
+                    "Per-clip adaptive timestep sampling enabled for multi-clip motion bank ({} clips).",
+                    self.motion.num_clips,
+                )
 
         # 5. clip sampling configuration
         self.clip_weighting_strategy = self.motion_cfg.clip_weighting_strategy
@@ -1893,7 +1973,7 @@ class MotionCommand(CommandTermBase):
 
         # 0. Sample the time steps
         if self.use_adaptive_timesteps_sampler:
-            phase = self.adaptive_timesteps_sampler.sample(env_ids.numel())
+            phase = self.adaptive_timesteps_sampler.sample(self.clip_ids[env_ids])
         else:
             phase = torch.rand(env_ids.numel(), device=self.device)
 

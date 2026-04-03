@@ -55,8 +55,9 @@ motion_config_w_object = replace(
 
 motion_config_w_object_generalist = replace(
     motion_config_w_object,
-    # Enable adaptive clip sampling by default for generalist training.
+    # Enable adaptive clip sampling and within-clip hard-segment resampling for generalist training.
     clip_weighting_strategy="success_rate_adaptive",
+    use_adaptive_timesteps_sampler=True,
 )
 
 g1_29dof_wbt_command = CommandManagerCfg(

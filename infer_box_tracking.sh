@@ -11,7 +11,7 @@ set -euo pipefail
 # - naive-mixed: infer on OMOMO + Seedance/DS naive-mixed clips
 #
 # Usage:
-#   bash infer_box_tracking.sh [omomo|real|pure-sd|naive-mixed] [teacher_checkpoint.pt|wandb://...] [extra tyro args...]
+#   bash infer_box_tracking.sh [omomo|real|pure-sd|naive-mixed] [teacher_checkpoint.pt|model_XXXXX.pt|wandb://...] [extra tyro args...]
 #
 # Optional env vars:
 #   TEACHER_CHECKPOINT        (default: wandb://zihanw22/boxer/a5ohxuta/model_09000.pt)
@@ -53,13 +53,14 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  bash infer_box_tracking.sh [omomo|real|pure-sd|naive-mixed] [teacher_checkpoint.pt|wandb://...] [extra tyro args...]
+  bash infer_box_tracking.sh [omomo|real|pure-sd|naive-mixed] [teacher_checkpoint.pt|model_XXXXX.pt|wandb://...] [extra tyro args...]
 
 Examples:
   bash infer_box_tracking.sh
   bash infer_box_tracking.sh omomo
   bash infer_box_tracking.sh real
   bash infer_box_tracking.sh pure-sd
+  bash infer_box_tracking.sh pure-sd model_00500.pt
   bash infer_box_tracking.sh naive-mixed
   bash infer_box_tracking.sh /abs/path/to/model_17000.pt
   bash infer_box_tracking.sh real /abs/path/to/model_17000.pt
@@ -83,6 +84,11 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 is_checkpoint_ref() {
   local ref="$1"
   [[ "${ref}" == wandb://* || "${ref}" == https://wandb.ai/*/runs/* || "${ref}" == /* || "${ref}" == ./* || "${ref}" == ../* || "${ref}" == *.pt ]]
+}
+
+is_bare_checkpoint_name() {
+  local ref="$1"
+  [[ "${ref}" == *.pt && "${ref}" != */* && "${ref}" != ./* && "${ref}" != ../* ]]
 }
 
 default_model_file_for_run_id() {
@@ -157,6 +163,27 @@ parse_wandb_uri() {
 parse_wandb_reference() {
   local ref="$1"
   parse_wandb_run_url "${ref}" || parse_wandb_uri "${ref}"
+}
+
+checkpoint_ref_with_model_file() {
+  local base_ref="$1"
+  local model_file="$2"
+  local parsed=""
+  local entity=""
+  local project=""
+  local run_id=""
+
+  parsed="$(parse_wandb_reference "${base_ref}" || true)"
+  if [[ -z "${parsed}" ]]; then
+    return 1
+  fi
+
+  IFS=$'\t' read -r entity project run_id _explicit_file <<< "${parsed}"
+  if [[ -z "${entity}" || -z "${project}" || -z "${run_id}" ]]; then
+    return 1
+  fi
+
+  echo "wandb://${entity}/${project}/${run_id}/${model_file}"
 }
 
 resolve_remote_wandb_checkpoint_name() {
@@ -366,6 +393,8 @@ if [[ -n "${TEACHER_CHECKPOINT+x}" || -n "${CKPT+x}" ]]; then
 fi
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${CKPT:-${DEFAULT_TEACHER_CHECKPOINT}}}"
 TEACHER_CHECKPOINT_FROM_ARG=0
+TEACHER_CHECKPOINT_NAME_FROM_ARG=0
+TEACHER_CHECKPOINT_MODEL_FILE=""
 INFER_DATASET_FROM_ARG=0
 
 if [[ $# -gt 0 ]]; then
@@ -395,7 +424,11 @@ if [[ $# -gt 0 ]]; then
 fi
 
 if [[ $# -gt 0 ]]; then
-  if is_checkpoint_ref "$1"; then
+  if is_bare_checkpoint_name "$1" && [[ ! -f "$1" ]]; then
+    TEACHER_CHECKPOINT_NAME_FROM_ARG=1
+    TEACHER_CHECKPOINT_MODEL_FILE="$1"
+    shift
+  elif is_checkpoint_ref "$1"; then
     TEACHER_CHECKPOINT="$1"
     TEACHER_CHECKPOINT_FROM_ARG=1
     shift
@@ -441,6 +474,16 @@ esac
 
 if [[ "${INFER_DATASET}" == "pure-sd" && "${TEACHER_CHECKPOINT_FROM_ENV}" != "1" && "${TEACHER_CHECKPOINT_FROM_ARG}" != "1" && "${LEGACY_OBS_ENABLED}" != "1" ]]; then
   TEACHER_CHECKPOINT="${PURE_SD_DEFAULT_TEACHER_RUN_URL}"
+fi
+
+if [[ "${TEACHER_CHECKPOINT_NAME_FROM_ARG}" == "1" ]]; then
+  resolved_checkpoint_ref="$(checkpoint_ref_with_model_file "${TEACHER_CHECKPOINT}" "${TEACHER_CHECKPOINT_MODEL_FILE}" || true)"
+  if [[ -z "${resolved_checkpoint_ref}" ]]; then
+    echo "[ERROR] Cannot resolve checkpoint shorthand '${TEACHER_CHECKPOINT_MODEL_FILE}' from base reference: ${TEACHER_CHECKPOINT}" >&2
+    echo "[ERROR] Pass a full checkpoint path / wandb:// ref, or use a W&B run URL as the base teacher checkpoint." >&2
+    exit 2
+  fi
+  TEACHER_CHECKPOINT="${resolved_checkpoint_ref}"
 fi
 
 if [[ "${TEACHER_CHECKPOINT}" == https://wandb.ai/*/runs/* ]]; then
