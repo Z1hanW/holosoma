@@ -26,9 +26,9 @@ from holosoma.utils.rotations import (
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.viser_utils import ensure_viser_on_path, resolve_viser_port
 
-LIGHT_BLUE = (130, 180, 235)
+LIGHT_BLUE = (255, 140, 0)
 SIM_ROBOT_POINTS_COLOR = np.array([70, 190, 120], dtype=np.uint8)
-SIM_OBJECT_POINTS_COLOR = np.array([130, 180, 235], dtype=np.uint8)
+SIM_OBJECT_POINTS_COLOR = np.array([255, 140, 0], dtype=np.uint8)
 HEIGHTMAP_MARKER_COLOR = (255, 165, 0)
 CAMERA_MARKER_COLOR = (0, 255, 255)
 COMMAND_ARROW_COLOR = np.array([255, 165, 0], dtype=np.uint8)
@@ -621,6 +621,7 @@ class ViserLiveViewer:
         self._secondary_object_points_handles: dict[int, Any] = {}
         self._secondary_object_urdf: dict[int, str] = {}
         self._viser_multi_env_spacing = 2.5
+        self._viser_multi_env_cols = 1
         self._joint_order: np.ndarray | None = None
         self._joint_count = 0
         self._offset: np.ndarray | None = None
@@ -896,15 +897,21 @@ class ViserLiveViewer:
         if env_count < 1:
             env_count = 1
         self._viser_multi_env_spacing = float(getattr(cfg, "viser_multi_env_spacing", 2.5))
+        try:
+            self._viser_multi_env_cols = max(1, int(os.environ.get("VISER_MULTI_ENV_COLS", "1")))
+        except Exception:
+            self._viser_multi_env_cols = 1
         max_envs = int(getattr(env, "num_envs", 1))
         end_env = min(max_envs, self._env_id + env_count)
         self._secondary_env_ids = list(range(self._env_id + 1, end_env))
         self._secondary_env_slot = {env_id: idx + 1 for idx, env_id in enumerate(self._secondary_env_ids)}
         if self._secondary_env_ids:
             logger.info(
-                "Viser multi-env view enabled: primary env {} + secondary envs {}",
+                "Viser multi-env view enabled: primary env {} + secondary envs {} (spacing={} cols={})",
                 self._env_id,
                 self._secondary_env_ids,
+                self._viser_multi_env_spacing,
+                self._viser_multi_env_cols,
             )
         self._resolve_root_body_index()
 
@@ -1009,7 +1016,19 @@ class ViserLiveViewer:
         slot = self._secondary_env_slot.get(int(env_id), 0)
         if slot <= 0:
             return np.zeros(3, dtype=np.float32)
-        return np.array([0.0, float(slot) * self._viser_multi_env_spacing, 0.0], dtype=np.float32)
+        cols = max(1, int(self._viser_multi_env_cols))
+        if cols <= 1:
+            return np.array([0.0, float(slot) * self._viser_multi_env_spacing, 0.0], dtype=np.float32)
+        row = slot // cols
+        col = slot % cols
+        return np.array(
+            [
+                float(row) * self._viser_multi_env_spacing,
+                float(col) * self._viser_multi_env_spacing,
+                0.0,
+            ],
+            dtype=np.float32,
+        )
 
     def _primary_object_variant_node(self, object_urdf: str) -> str:
         digest = hashlib.sha1(object_urdf.encode("utf-8")).hexdigest()[:10]

@@ -68,7 +68,7 @@ if [[ $# -gt 0 ]]; then
 fi
 
 # https://wandb.ai/zihanw22/boxer/runs/a5ohxuta/files?nw=nwuserz1hanw
-DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/a5ohxuta/model_09000.pt"}
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/a5ohxuta/model_14000.pt"}
 DEFAULT_LEGACY_TEACHER_CHECKPOINT="${DEFAULT_LEGACY_TEACHER_CHECKPOINT:-}"
 LEGACY_OBS=${LEGACY_OBS:-0}
 legacy_obs_normalized=$(echo "${LEGACY_OBS}" | tr '[:upper:]' '[:lower:]')

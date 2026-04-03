@@ -49,7 +49,7 @@ Optional env vars:
   PERCEPTION_PRESET         (terrain mode default: checkpoint)
   PAIR_TERRAIN_WITH_MOTION  (terrain default: checkpoint value, else True)
   NUM_ENVS                  (default: 1)
-  HEADLESS                  (default: True)
+  HEADLESS                  (default: False)
   VISER_PORT                (default: random)
   VISER_ENV_ID              (default: 0)
   VISER_UPDATE_HZ           (default: 30)
@@ -682,7 +682,7 @@ else
   fi
 fi
 
-HEADLESS_RAW="${HEADLESS:-True}"
+HEADLESS_RAW="${HEADLESS:-False}"
 HEADLESS_FLAG="$(normalize_bool_flag HEADLESS "${HEADLESS_RAW}")"
 export HEADLESS="$(normalize_bool_int HEADLESS "${HEADLESS_RAW}")"
 DISABLE_RANDOMIZATION="${DISABLE_RANDOMIZATION:-True}"
