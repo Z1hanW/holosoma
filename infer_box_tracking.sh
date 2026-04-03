@@ -28,7 +28,7 @@ set -euo pipefail
 #   MOTION_CLIP_NAME          (optional: pin a single clip)
 #   OBJECT_URDF               (optional override; if unset, chosen by INFER_DATASET)
 #   NUM_ENVS                  (default: 1)
-#   HEADLESS                  (default: False; set True for headless eval)
+#   HEADLESS                  (default: True; set False for local interactive eval)
 #   VISER_PORT                (default: random)
 #   VISER_ENV_ID              (default: 0)
 #   VISER_UPDATE_HZ           (default: 30)
@@ -46,6 +46,8 @@ set -euo pipefail
 #                             (default: 0.0; only used when ENABLE_DEFAULT_POSE_PREPEND=True)
 #   DISABLE_RANDOMIZATION     (default: True)
 #   VIS_GPU                   (default: auto; picks least-used GPU if CUDA_VISIBLE_DEVICES is unset)
+#   PYTHON_BIN                (default: python)
+#   WANDB_MODEL_FILE          (optional preferred model file for W&B run URLs)
 
 usage() {
   cat <<'EOF'
@@ -60,6 +62,7 @@ Examples:
   bash infer_box_tracking.sh naive-mixed
   bash infer_box_tracking.sh /abs/path/to/model_17000.pt
   bash infer_box_tracking.sh real /abs/path/to/model_17000.pt
+  bash infer_box_tracking.sh pure-sd simulator:isaacsim
   MOTION_CLIP_NAME=sub3_largebox_003_mj_w_obj bash infer_box_tracking.sh
 
 Dataset selection examples:
@@ -118,6 +121,41 @@ parse_wandb_run_url() {
   fi
 
   printf '%s\t%s\t%s\t%s\n' "${entity}" "${project}" "${run_id}" "${explicit_file}"
+}
+
+parse_wandb_uri() {
+  local ref="$1"
+  if [[ "${ref}" != wandb://* ]]; then
+    return 1
+  fi
+
+  local trimmed="${ref#wandb://}"
+  local entity=""
+  local project=""
+  local run_id=""
+  local explicit_file=""
+  IFS='/' read -r -a parts <<< "${trimmed}"
+  if [[ "${#parts[@]}" -lt 3 ]]; then
+    return 1
+  fi
+
+  entity="${parts[0]}"
+  project="${parts[1]}"
+  run_id="${parts[2]}"
+  if [[ -z "${entity}" || -z "${project}" || -z "${run_id}" ]]; then
+    return 1
+  fi
+
+  if [[ "${#parts[@]}" -gt 3 ]]; then
+    explicit_file="${trimmed#${entity}/${project}/${run_id}/}"
+  fi
+
+  printf '%s\t%s\t%s\t%s\n' "${entity}" "${project}" "${run_id}" "${explicit_file}"
+}
+
+parse_wandb_reference() {
+  local ref="$1"
+  parse_wandb_run_url "${ref}" || parse_wandb_uri "${ref}"
 }
 
 resolve_remote_wandb_checkpoint_name() {
@@ -214,6 +252,83 @@ normalize_checkpoint_ref() {
   fi
 
   echo "wandb://${entity}/${project}/${run_id}/${model_file}"
+}
+
+resolve_local_checkpoint_from_run_url() {
+  local ref="$1"
+  local preferred_model_file="${2:-}"
+  local parsed=""
+  local run_id=""
+  local explicit_file=""
+  local wandb_run_dir=""
+  local run_log_dir=""
+  local local_ckpt=""
+  local target_model_file=""
+
+  parsed="$(parse_wandb_run_url "${ref}" || true)"
+  if [[ -z "${parsed}" ]]; then
+    echo ""
+    return 0
+  fi
+  IFS=$'\t' read -r _entity _project run_id explicit_file <<< "${parsed}"
+
+  target_model_file="${explicit_file}"
+  if [[ -z "${target_model_file}" ]]; then
+    target_model_file="${preferred_model_file}"
+  fi
+  if [[ -z "${target_model_file}" ]]; then
+    target_model_file="$(default_model_file_for_run_id "${run_id}")"
+  fi
+  if [[ -z "${target_model_file}" ]]; then
+    echo ""
+    return 0
+  fi
+
+  wandb_run_dir="$(find /data/logs_new -maxdepth 8 -type d -name "run-*-${run_id}" 2>/dev/null | head -n 1 || true)"
+  if [[ -z "${wandb_run_dir}" ]]; then
+    echo ""
+    return 0
+  fi
+
+  run_log_dir="$(dirname "$(dirname "$(dirname "${wandb_run_dir}")")")"
+  if [[ -f "${run_log_dir}/${target_model_file}" ]]; then
+    local_ckpt="${run_log_dir}/${target_model_file}"
+  fi
+  echo "${local_ckpt}"
+}
+
+resolve_local_checkpoint_from_wandb_ref() {
+  local ref="$1"
+  local parsed=""
+  local run_id=""
+  local explicit_file=""
+  local wandb_run_dir=""
+  local run_log_dir=""
+  local local_ckpt=""
+
+  parsed="$(parse_wandb_uri "${ref}" || true)"
+  if [[ -z "${parsed}" ]]; then
+    echo ""
+    return 0
+  fi
+  IFS=$'\t' read -r _entity _project run_id explicit_file <<< "${parsed}"
+
+  if [[ -z "${explicit_file}" ]]; then
+    echo ""
+    return 0
+  fi
+
+  wandb_run_dir="$(find /data/logs_new -maxdepth 8 -type d -name "run-*-${run_id}" 2>/dev/null | head -n 1 || true)"
+  if [[ -z "${wandb_run_dir}" ]]; then
+    echo ""
+    return 0
+  fi
+
+  run_log_dir="$(dirname "$(dirname "$(dirname "${wandb_run_dir}")")")"
+  if [[ -f "${run_log_dir}/${explicit_file}" ]]; then
+    local_ckpt="${run_log_dir}/${explicit_file}"
+  fi
+  echo "${local_ckpt}"
 }
 
 if [[ $# -gt 0 ]]; then
@@ -327,7 +442,23 @@ if [[ "${INFER_DATASET}" == "pure-sd" && "${TEACHER_CHECKPOINT_FROM_ENV}" != "1"
   TEACHER_CHECKPOINT="${PURE_SD_DEFAULT_TEACHER_RUN_URL}"
 fi
 
-TEACHER_CHECKPOINT="$(normalize_checkpoint_ref "${TEACHER_CHECKPOINT}")"
+if [[ "${TEACHER_CHECKPOINT}" == https://wandb.ai/*/runs/* ]]; then
+  LOCAL_WANDB_CKPT="$(resolve_local_checkpoint_from_run_url "${TEACHER_CHECKPOINT}" "${WANDB_MODEL_FILE:-}")"
+  if [[ -n "${LOCAL_WANDB_CKPT}" && -f "${LOCAL_WANDB_CKPT}" ]]; then
+    TEACHER_CHECKPOINT="${LOCAL_WANDB_CKPT}"
+    echo "[INFO] Resolved wandb run URL to local checkpoint: ${TEACHER_CHECKPOINT}"
+  else
+    TEACHER_CHECKPOINT="$(normalize_checkpoint_ref "${TEACHER_CHECKPOINT}")"
+  fi
+fi
+
+if [[ "${TEACHER_CHECKPOINT}" == wandb://* ]]; then
+  LOCAL_WANDB_CKPT="$(resolve_local_checkpoint_from_wandb_ref "${TEACHER_CHECKPOINT}")"
+  if [[ -n "${LOCAL_WANDB_CKPT}" && -f "${LOCAL_WANDB_CKPT}" ]]; then
+    TEACHER_CHECKPOINT="${LOCAL_WANDB_CKPT}"
+    echo "[INFO] Resolved wandb reference to local checkpoint: ${TEACHER_CHECKPOINT}"
+  fi
+fi
 
 DEFAULT_OMOMO_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"
 DEFAULT_BEHAVE_MOTION_DIR="$(pick_first_existing_path \
@@ -473,6 +604,9 @@ export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-0}
 export VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-1}
 export VISER_START_PAUSED=${VISER_START_PAUSED:-0}
 export VISER_LOAD_URDF
+export LOGURU_LEVEL=${LOGURU_LEVEL:-WARNING}
+export PY_LOG_LEVEL=${PY_LOG_LEVEL:-WARNING}
+export PYTHONUNBUFFERED=${PYTHONUNBUFFERED:-1}
 
 if [[ "${TEACHER_CHECKPOINT}" != wandb://* ]] && [[ ! -f "${TEACHER_CHECKPOINT}" ]]; then
   echo "[ERROR] teacher checkpoint not found: ${TEACHER_CHECKPOINT}" >&2
@@ -493,7 +627,7 @@ if [[ -d "${MOTION_DIR}" && -n "${MOTION_CLIP_NAME}" && ! -f "${MOTION_DIR}/${MO
 fi
 
 if [[ "${LEGACY_OBS_ENABLED}" == "1" || "${HEIGHTMAP_REQUIRED}" == "1" ]]; then
-  python - <<'PY' "${TEACHER_CHECKPOINT}" "${LEGACY_OBS_ENABLED}" "${HEIGHTMAP_REQUIRED}" || exit 2
+  "${PYTHON_BIN}" - <<'PY' "${TEACHER_CHECKPOINT}" "${LEGACY_OBS_ENABLED}" "${HEIGHTMAP_REQUIRED}" || exit 2
 import sys
 import tempfile
 from pathlib import Path
@@ -604,10 +738,32 @@ print(
 PY
 fi
 
-EXTRA_ARGS=("$@")
+SIMULATOR_SUBCOMMAND=""
+EXTRA_ARGS=()
+for arg in "$@"; do
+  case "${arg}" in
+    simulator:*)
+      if [[ -n "${SIMULATOR_SUBCOMMAND}" && "${SIMULATOR_SUBCOMMAND}" != "${arg}" ]]; then
+        echo "[ERROR] Multiple simulator subcommands requested: ${SIMULATOR_SUBCOMMAND} and ${arg}" >&2
+        exit 2
+      fi
+      SIMULATOR_SUBCOMMAND="${arg}"
+      ;;
+    *)
+      EXTRA_ARGS+=("${arg}")
+      ;;
+  esac
+done
 
 cmd=(
-  python -m holosoma.visualize physics
+  "${PYTHON_BIN}" -m holosoma.visualize physics
+)
+
+if [[ -n "${SIMULATOR_SUBCOMMAND}" ]]; then
+  cmd+=("${SIMULATOR_SUBCOMMAND}")
+fi
+
+cmd+=(
   --checkpoint "${TEACHER_CHECKPOINT}"
   --motion-dir "${MOTION_DIR}"
   --num-envs "${NUM_ENVS}"
@@ -622,7 +778,6 @@ cmd=(
   --training.viser_show_scandots "${VISER_SHOW_SCANDOTS}"
   --simulator.config.scene.env_spacing "${SIM_ENV_SPACING}"
   --simulator.config.sim.max_episode_length_s "${MAX_EPISODE_LENGTH_S}"
-  --simulator.config.sim.physx.gpu_collision_stack_size "${PHYSX_GPU_COLLISION_STACK_SIZE}"
   --robot.object.enabled True
   --robot.object.object_urdf_path "${OBJECT_URDF}"
   --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob "${START_AT_TIMESTEP_ZERO_PROB}"
@@ -631,6 +786,12 @@ cmd=(
   --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s "${DEFAULT_POSE_PREPEND_DURATION_S}"
   --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale "${RESET_NOISE_SCALE}"
 )
+
+if [[ "${SIMULATOR_SUBCOMMAND}" != "simulator:mujoco" ]]; then
+  cmd+=(--simulator.config.sim.physx.gpu_collision_stack_size "${PHYSX_GPU_COLLISION_STACK_SIZE}")
+else
+  cmd+=(--randomization.ignore_unsupported True)
+fi
 
 if [[ -n "${MOTION_CLIP_NAME}" ]]; then
   cmd+=(
@@ -675,6 +836,7 @@ echo "[INFO] headless=${HEADLESS_FLAG} (env HEADLESS=${HEADLESS})"
 echo "[INFO] viser=http://localhost:${VISER_PORT}"
 echo "[INFO] viser_sync_to_sim=${VISER_SYNC_TO_SIM} viser_force_dt=${VISER_FORCE_DT}"
 echo "[INFO] viser_load_urdf=${VISER_LOAD_URDF}"
+echo "[INFO] simulator_subcommand=${SIMULATOR_SUBCOMMAND:-<default>}"
 echo "[INFO] enable_default_pose_prepend=${ENABLE_DEFAULT_POSE_PREPEND} duration_s=${DEFAULT_POSE_PREPEND_DURATION_S}"
 echo "[INFO] disable_randomization=${DISABLE_RANDOMIZATION}"
 
