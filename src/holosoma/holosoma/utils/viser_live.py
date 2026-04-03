@@ -27,6 +27,7 @@ from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.viser_utils import ensure_viser_on_path, resolve_viser_port
 
 LIGHT_BLUE = (255, 140, 0)
+DARK_GRAY = (70, 70, 70)
 SIM_ROBOT_POINTS_COLOR = np.array([70, 190, 120], dtype=np.uint8)
 SIM_OBJECT_POINTS_COLOR = np.array([255, 140, 0], dtype=np.uint8)
 HEIGHTMAP_MARKER_COLOR = (255, 165, 0)
@@ -465,6 +466,12 @@ def _load_terrain_mesh(
         logger.warning("Viser terrain disabled (trimesh unavailable): {}", exc)
         return None
 
+    single_clip_only = os.environ.get("VISER_TERRAIN_SINGLE_CLIP_ONLY", "1").lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+
     def _load_mesh(path: Path) -> trimesh.Trimesh:
         mesh = trimesh.load(str(path), process=False)
         if isinstance(mesh, trimesh.Scene):
@@ -564,6 +571,119 @@ def _load_terrain_mesh(
         tile_count = int(tile_offsets.shape[0]) if tile_offsets.ndim >= 1 else 0
         return tile_count <= 1 and tile_rows <= 1 and tile_cols <= 1
 
+    def _load_obj_metadata(path_str: str | None) -> dict[str, Any] | None:
+        if not path_str:
+            return None
+        try:
+            with Path(path_str).open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except Exception as exc:
+            logger.warning("Failed to load terrain OBJ metadata '{}': {}", path_str, exc)
+            return None
+        if not isinstance(payload, dict):
+            logger.warning("Ignoring invalid terrain OBJ metadata '{}': expected JSON object.", path_str)
+            return None
+        return payload
+
+    def _extract_single_tile_mesh(
+        base_mesh: trimesh.Trimesh,
+        metadata: dict[str, Any],
+        selected_clip_name: str | None,
+    ) -> trimesh.Trimesh | None:
+        clip_key = _canonical_pair_key(selected_clip_name)
+        tile_names = list(metadata.get("tile_names", []))
+        tile_offsets = np.asarray(metadata.get("tile_offsets", []), dtype=np.float64)
+        tile_stride = np.asarray(metadata.get("tile_stride", []), dtype=np.float64).reshape(-1)
+        tile_rows = max(1, int(metadata.get("tile_rows", 1) or 1))
+        tile_cols = max(1, int(metadata.get("tile_cols", len(tile_names) or 1) or 1))
+
+        if tile_offsets.size == 0 or tile_offsets.ndim != 2 or tile_offsets.shape[1] < 2:
+            return None
+        if tile_offsets.shape[1] == 2:
+            tile_offsets = np.concatenate(
+                [tile_offsets, np.zeros((tile_offsets.shape[0], 1), dtype=np.float64)],
+                axis=1,
+            )
+        elif tile_offsets.shape[1] > 3:
+            tile_offsets = tile_offsets[:, :3]
+        if tile_stride.size < 2:
+            return None
+        if tile_stride.size == 2:
+            tile_stride = np.array([tile_stride[0], tile_stride[1], 0.0], dtype=np.float64)
+        elif tile_stride.size > 3:
+            tile_stride = tile_stride[:3]
+
+        col_idx = None
+        if tile_names:
+            keyed_indices: dict[str, int] = {}
+            for idx, raw_name in enumerate(tile_names):
+                key = _canonical_pair_key(raw_name)
+                if key is not None and key not in keyed_indices:
+                    keyed_indices[key] = idx
+            if clip_key is not None:
+                col_idx = keyed_indices.get(clip_key)
+                if col_idx is None:
+                    logger.warning("Terrain metadata has no tile matching clip '{}'.", selected_clip_name)
+                    return None
+            elif keyed_indices:
+                col_idx = min(keyed_indices.values())
+        elif tile_cols == 1:
+            col_idx = 0
+        else:
+            col_idx = 0 if clip_key is None else None
+            if col_idx is None:
+                return None
+
+        if tile_offsets.shape[0] == tile_rows * tile_cols:
+            tile_idx = int(col_idx)
+        else:
+            tile_idx = int(col_idx)
+        if not (0 <= tile_idx < tile_offsets.shape[0]):
+            return None
+
+        tile_offset = np.asarray(tile_offsets[tile_idx], dtype=np.float64)
+        x_min = float(tile_offset[0])
+        y_min = float(tile_offset[1])
+        x_max = x_min + float(tile_stride[0])
+        y_max = y_min + float(tile_stride[1])
+        pad = max(1e-4, float(max(abs(tile_stride[0]), abs(tile_stride[1]))) * 1e-4)
+
+        try:
+            face_centroids = np.asarray(base_mesh.triangles_center, dtype=np.float64)
+        except Exception:
+            return None
+        if face_centroids.ndim != 2 or face_centroids.shape[1] < 2:
+            return None
+
+        mask = (
+            (face_centroids[:, 0] >= (x_min - pad))
+            & (face_centroids[:, 0] <= (x_max + pad))
+            & (face_centroids[:, 1] >= (y_min - pad))
+            & (face_centroids[:, 1] <= (y_max + pad))
+        )
+        face_indices = np.flatnonzero(mask)
+        if face_indices.size == 0:
+            logger.warning(
+                "No terrain faces found for clip '{}' in metadata tile {}.",
+                selected_clip_name,
+                tile_idx,
+            )
+            return None
+
+        tile_mesh = base_mesh.submesh([face_indices], append=True, repair=False)
+        if isinstance(tile_mesh, trimesh.Scene):
+            meshes = tile_mesh.dump(concatenate=False)
+            if not meshes:
+                return None
+            tile_mesh = max(meshes, key=lambda m: len(getattr(m, "faces", [])) or len(m.vertices))
+        if not isinstance(tile_mesh, trimesh.Trimesh):
+            return None
+        if len(tile_mesh.faces) == 0:
+            return None
+        tile_mesh = tile_mesh.copy()
+        tile_mesh.apply_translation((-tile_offset).tolist())
+        return tile_mesh
+
     resolved_rows = max(1, int(num_rows or 1))
     resolved_cols = max(1, int(num_cols or 1))
     terrain_path = Path(_resolve_data_path(obj_path))
@@ -573,10 +693,35 @@ def _load_terrain_mesh(
 
     if obj_metadata_path and len(obj_paths) == 1:
         selected_path = obj_paths[0]
-        return _load_mesh(selected_path), _metadata_is_local(obj_metadata_path)
+        base_mesh = _load_mesh(selected_path)
+        metadata_is_local = _metadata_is_local(obj_metadata_path)
+        metadata = _load_obj_metadata(obj_metadata_path) if obj_metadata_path else None
+        if single_clip_only and not metadata_is_local:
+            if metadata is None:
+                logger.warning(
+                    "Viser terrain single-clip mode requires readable metadata for '{}'; hiding terrain mesh.",
+                    obj_metadata_path,
+                )
+                return None
+            tile_mesh = _extract_single_tile_mesh(base_mesh, metadata, clip_name)
+            if tile_mesh is not None:
+                return tile_mesh, True
+            logger.warning(
+                "Viser terrain single-clip mode could not isolate a tile from '{}'; hiding terrain mesh.",
+                obj_metadata_path,
+            )
+            return None
+        return base_mesh, metadata_is_local
     else:
         if obj_metadata_path and len(obj_paths) != 1:
-            logger.warning("OBJ metadata provided with directory/glob input; ignoring metadata and rendering tiled OBJ mesh.")
+            logger.warning("OBJ metadata provided with directory/glob input; ignoring metadata and using OBJ selection rules.")
+        if len(obj_paths) > 1 and single_clip_only:
+            try:
+                selected_path = _select_obj_path(obj_paths, clip_name)
+            except FileNotFoundError as exc:
+                logger.error("{}", exc)
+                return None
+            return _load_mesh(selected_path), True
         if len(obj_paths) > 1:
             return _tile_multi_obj_mesh(obj_paths, rows=resolved_rows), False
         try:
@@ -586,6 +731,8 @@ def _load_terrain_mesh(
             return None
 
     base_mesh = _load_mesh(selected_path)
+    if single_clip_only:
+        return base_mesh, True
     if resolved_rows * resolved_cols > 1:
         return _tile_single_mesh(base_mesh, rows=resolved_rows, cols=resolved_cols), False
     return base_mesh, True
@@ -1182,18 +1329,37 @@ class ViserLiveViewer:
                 self._secondary_object_roots[env_id] = self._server.scene.add_frame(object_node, show_axes=False)
 
     def _ensure_secondary_object_handle(self, env_id: int) -> None:
-        if env_id in self._secondary_vo or self._server is None:
+        if self._server is None:
             return
         object_urdf = self._resolve_object_urdf_for_env(env_id)
         if not object_urdf:
             return
+
+        current_urdf = self._secondary_object_urdf.get(env_id)
+        if env_id in self._secondary_vo and current_urdf == object_urdf:
+            return
+
         object_node = self._scene_path(f"/env_{env_id}/object")
         try:
             from viser.extras import ViserUrdf  # type: ignore[import-not-found]
         except Exception:
             return
+
+        stale_handle = self._secondary_vo.pop(env_id, None)
+        if stale_handle is not None:
+            try:
+                stale_handle.remove()
+            except Exception:
+                pass
+
+        root_handle = self._secondary_object_roots.get(env_id)
+        if root_handle is None:
+            try:
+                self._secondary_object_roots[env_id] = self._server.scene.add_frame(object_node, show_axes=False)
+            except Exception:
+                return
+
         try:
-            self._secondary_object_roots[env_id] = self._server.scene.add_frame(object_node, show_axes=False)
             self._secondary_vo[env_id] = ViserUrdf(
                 self._server,
                 urdf_or_path=Path(object_urdf),
@@ -1202,6 +1368,7 @@ class ViserLiveViewer:
             )
             self._secondary_object_urdf[env_id] = object_urdf
         except Exception:
+            self._secondary_object_urdf.pop(env_id, None)
             return
 
     def _resolve_root_body_index(self) -> None:
@@ -2402,7 +2569,7 @@ class ViserLiveViewer:
                 self._scene_path("/ground"),
                 ground_mesh.vertices,
                 ground_mesh.faces,
-                color=LIGHT_BLUE,
+                color=DARK_GRAY,
                 side="double",
             )
             if self._show_terrain_cb is not None:
@@ -2416,7 +2583,7 @@ class ViserLiveViewer:
             self._scene_path("/terrain"),
             mesh.vertices,
             mesh.faces,
-            color=LIGHT_BLUE,
+            color=DARK_GRAY,
             side="double",
         )
         if self._show_terrain_cb is not None:
