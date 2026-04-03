@@ -84,13 +84,79 @@ DEBUG_MODE=${DEBUG_MODE:-${DEBUG_MODEL:-off}}
 CURRICULUM=${CURRICULUM:-0}
 PERCEPTION=${PERCEPTION:-none}
 LEGACY_OBS=${LEGACY_OBS:-0}
+PURE_SD_REWARD_PROFILE_RAW=${PURE_SD_REWARD_PROFILE:-default}
+PURE_SD_REWARD_PROFILE=$(echo "${PURE_SD_REWARD_PROFILE_RAW}" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
+case "${PURE_SD_REWARD_PROFILE}" in
+  ""|default)
+    DEFAULT_GENERALIST_TORSO_CONTACT_REWARD_WEIGHT=0.30
+    DEFAULT_GENERALIST_ARM_CONTACT_REWARD_WEIGHT=0.20
+    DEFAULT_GENERALIST_PALM_CONTACT_REWARD_WEIGHT=0.10
+    DEFAULT_ROOT_POS_W=0.5
+    DEFAULT_ROOT_ORI_W=0.5
+    DEFAULT_FULL_BODY_POS_W=1.0
+    DEFAULT_FULL_BODY_ORI_W=1.0
+    DEFAULT_FULL_BODY_LIN_VEL_W=1.0
+    DEFAULT_FULL_BODY_ANG_VEL_W=1.0
+    DEFAULT_OBJECT_POS_W=1.0
+    DEFAULT_OBJECT_ORI_W=1.0
+    DEFAULT_ROOT_POS_SIGMA=0.3
+    DEFAULT_ROOT_ORI_SIGMA=0.4
+    DEFAULT_FULL_BODY_POS_SIGMA=0.3
+    DEFAULT_FULL_BODY_ORI_SIGMA=0.4
+    DEFAULT_FULL_BODY_LIN_VEL_SIGMA=1.0
+    DEFAULT_FULL_BODY_ANG_VEL_SIGMA=3.14
+    DEFAULT_OBJECT_POS_SIGMA=0.3
+    DEFAULT_OBJECT_ORI_SIGMA=0.4
+    ;;
+  loose-cotrack|loose-cotracking|cotrack)
+    DEFAULT_GENERALIST_TORSO_CONTACT_REWARD_WEIGHT=0.45
+    DEFAULT_GENERALIST_ARM_CONTACT_REWARD_WEIGHT=0.30
+    DEFAULT_GENERALIST_PALM_CONTACT_REWARD_WEIGHT=0.15
+    DEFAULT_ROOT_POS_W=0.5
+    DEFAULT_ROOT_ORI_W=0.5
+    DEFAULT_FULL_BODY_POS_W=1.0
+    DEFAULT_FULL_BODY_ORI_W=1.0
+    DEFAULT_FULL_BODY_LIN_VEL_W=0.75
+    DEFAULT_FULL_BODY_ANG_VEL_W=0.75
+    DEFAULT_OBJECT_POS_W=1.5
+    DEFAULT_OBJECT_ORI_W=1.25
+    DEFAULT_ROOT_POS_SIGMA=0.45
+    DEFAULT_ROOT_ORI_SIGMA=0.6
+    DEFAULT_FULL_BODY_POS_SIGMA=0.45
+    DEFAULT_FULL_BODY_ORI_SIGMA=0.6
+    DEFAULT_FULL_BODY_LIN_VEL_SIGMA=1.5
+    DEFAULT_FULL_BODY_ANG_VEL_SIGMA=4.5
+    DEFAULT_OBJECT_POS_SIGMA=0.45
+    DEFAULT_OBJECT_ORI_SIGMA=0.6
+    ;;
+  *)
+    echo "[ERROR] PURE_SD_REWARD_PROFILE must be one of: default, loose-cotrack. Got: ${PURE_SD_REWARD_PROFILE_RAW}" >&2
+    exit 2
+    ;;
+esac
 GENERALIST_CONTACT_REWARD_ENABLED=${GENERALIST_CONTACT_REWARD_ENABLED:-1}
 GENERALIST_CONTACT_REWARD_MODE=${GENERALIST_CONTACT_REWARD_MODE:-tanh}
 GENERALIST_CONTACT_REWARD_THRESHOLD=${GENERALIST_CONTACT_REWARD_THRESHOLD:-1.0}
 GENERALIST_CONTACT_REWARD_FORCE_SCALE=${GENERALIST_CONTACT_REWARD_FORCE_SCALE:-25.0}
-GENERALIST_TORSO_CONTACT_REWARD_WEIGHT=${GENERALIST_TORSO_CONTACT_REWARD_WEIGHT:-0.30}
-GENERALIST_ARM_CONTACT_REWARD_WEIGHT=${GENERALIST_ARM_CONTACT_REWARD_WEIGHT:-0.20}
-GENERALIST_PALM_CONTACT_REWARD_WEIGHT=${GENERALIST_PALM_CONTACT_REWARD_WEIGHT:-0.10}
+GENERALIST_TORSO_CONTACT_REWARD_WEIGHT=${GENERALIST_TORSO_CONTACT_REWARD_WEIGHT:-${DEFAULT_GENERALIST_TORSO_CONTACT_REWARD_WEIGHT}}
+GENERALIST_ARM_CONTACT_REWARD_WEIGHT=${GENERALIST_ARM_CONTACT_REWARD_WEIGHT:-${DEFAULT_GENERALIST_ARM_CONTACT_REWARD_WEIGHT}}
+GENERALIST_PALM_CONTACT_REWARD_WEIGHT=${GENERALIST_PALM_CONTACT_REWARD_WEIGHT:-${DEFAULT_GENERALIST_PALM_CONTACT_REWARD_WEIGHT}}
+ROOT_POS_W=${ROOT_POS_W:-${DEFAULT_ROOT_POS_W}}
+ROOT_ORI_W=${ROOT_ORI_W:-${DEFAULT_ROOT_ORI_W}}
+FULL_BODY_POS_W=${FULL_BODY_POS_W:-${DEFAULT_FULL_BODY_POS_W}}
+FULL_BODY_ORI_W=${FULL_BODY_ORI_W:-${DEFAULT_FULL_BODY_ORI_W}}
+FULL_BODY_LIN_VEL_W=${FULL_BODY_LIN_VEL_W:-${DEFAULT_FULL_BODY_LIN_VEL_W}}
+FULL_BODY_ANG_VEL_W=${FULL_BODY_ANG_VEL_W:-${DEFAULT_FULL_BODY_ANG_VEL_W}}
+OBJECT_POS_W=${OBJECT_POS_W:-${DEFAULT_OBJECT_POS_W}}
+OBJECT_ORI_W=${OBJECT_ORI_W:-${DEFAULT_OBJECT_ORI_W}}
+ROOT_POS_SIGMA=${ROOT_POS_SIGMA:-${DEFAULT_ROOT_POS_SIGMA}}
+ROOT_ORI_SIGMA=${ROOT_ORI_SIGMA:-${DEFAULT_ROOT_ORI_SIGMA}}
+FULL_BODY_POS_SIGMA=${FULL_BODY_POS_SIGMA:-${DEFAULT_FULL_BODY_POS_SIGMA}}
+FULL_BODY_ORI_SIGMA=${FULL_BODY_ORI_SIGMA:-${DEFAULT_FULL_BODY_ORI_SIGMA}}
+FULL_BODY_LIN_VEL_SIGMA=${FULL_BODY_LIN_VEL_SIGMA:-${DEFAULT_FULL_BODY_LIN_VEL_SIGMA}}
+FULL_BODY_ANG_VEL_SIGMA=${FULL_BODY_ANG_VEL_SIGMA:-${DEFAULT_FULL_BODY_ANG_VEL_SIGMA}}
+OBJECT_POS_SIGMA=${OBJECT_POS_SIGMA:-${DEFAULT_OBJECT_POS_SIGMA}}
+OBJECT_ORI_SIGMA=${OBJECT_ORI_SIGMA:-${DEFAULT_OBJECT_ORI_SIGMA}}
 
 normalize_resume_step() {
   local raw="$1"
@@ -706,10 +772,24 @@ if [[ "$#" -gt 0 ]]; then
     fi
   fi
 fi
+RUN_NAME_SUFFIX=""
+if [[ "${PURE_SD_REWARD_PROFILE}" != "default" ]]; then
+  RUN_NAME_SUFFIX="${RUN_NAME_SUFFIX}-${PURE_SD_REWARD_PROFILE}"
+fi
+if [[ -n "${SEQUENCE_NAME}" ]]; then
+  EFFECTIVE_SEQUENCE_NAME="${SEQUENCE_NAME}${RUN_NAME_SUFFIX}"
+elif [[ -n "${RUN_NAME_SUFFIX}" ]]; then
+  EFFECTIVE_SEQUENCE_NAME="${EXP}-${DATA_MODE}${RUN_NAME_SUFFIX}"
+else
+  EFFECTIVE_SEQUENCE_NAME=""
+fi
 EXTRA_ARGS=("$@")
 echo "[INFO] Data mode: ${DATA_MODE}"
 if [[ -n "${SEQUENCE_NAME}" ]]; then
   echo "[INFO] Sequence name: ${SEQUENCE_NAME}"
+fi
+if [[ -n "${EFFECTIVE_SEQUENCE_NAME}" ]]; then
+  echo "[INFO] Effective run name: ${EFFECTIVE_SEQUENCE_NAME}"
 fi
 
 RESUME_WANDB_ENTITY=""
@@ -970,8 +1050,13 @@ case "${default_pose_prepend_enabled_normalized}" in
 esac
 
 echo "[INFO] Generalist contact reward enabled: ${GENERALIST_CONTACT_REWARD_ENABLED_FLAG}"
+echo "[INFO] pure_sd_reward_profile=${PURE_SD_REWARD_PROFILE}"
 echo "[INFO] Generalist contact reward mode=${GENERALIST_CONTACT_REWARD_MODE} threshold=${GENERALIST_CONTACT_REWARD_THRESHOLD} force_scale=${GENERALIST_CONTACT_REWARD_FORCE_SCALE}"
 echo "[INFO] Generalist contact reward weights torso=${GENERALIST_TORSO_CONTACT_REWARD_WEIGHT} arms=${GENERALIST_ARM_CONTACT_REWARD_WEIGHT} palms=${GENERALIST_PALM_CONTACT_REWARD_WEIGHT}"
+echo "[INFO] Reference tracking reward weights root_pos=${ROOT_POS_W} root_ori=${ROOT_ORI_W} body_pos=${FULL_BODY_POS_W} body_ori=${FULL_BODY_ORI_W} body_lin_vel=${FULL_BODY_LIN_VEL_W} body_ang_vel=${FULL_BODY_ANG_VEL_W}"
+echo "[INFO] Box tracking reward weights object_pos=${OBJECT_POS_W} object_ori=${OBJECT_ORI_W}"
+echo "[INFO] Reference tracking reward sigmas root_pos=${ROOT_POS_SIGMA} root_ori=${ROOT_ORI_SIGMA} body_pos=${FULL_BODY_POS_SIGMA} body_ori=${FULL_BODY_ORI_SIGMA} body_lin_vel=${FULL_BODY_LIN_VEL_SIGMA} body_ang_vel=${FULL_BODY_ANG_VEL_SIGMA}"
+echo "[INFO] Box tracking reward sigmas object_pos=${OBJECT_POS_SIGMA} object_ori=${OBJECT_ORI_SIGMA}"
 echo "[INFO] Motion default-pose prepend enabled: ${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
 echo "[INFO] Motion default-pose prepend duration: ${DEFAULT_POSE_PREPEND_DURATION_S}s"
 
@@ -984,6 +1069,22 @@ train_cmd=(
   --command.setup-terms.motion-command.params.motion-config.motion-file "${MOTION_DIR}"
   --algo.config.save-interval=500
   --simulator.config.sim.physx.gpu-max-rigid-patch-count="${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}"
+  --reward.terms.motion_global_ref_position_error_exp.weight="${ROOT_POS_W}"
+  --reward.terms.motion_global_ref_orientation_error_exp.weight="${ROOT_ORI_W}"
+  --reward.terms.motion_relative_body_position_error_exp.weight="${FULL_BODY_POS_W}"
+  --reward.terms.motion_relative_body_orientation_error_exp.weight="${FULL_BODY_ORI_W}"
+  --reward.terms.motion_global_body_lin_vel.weight="${FULL_BODY_LIN_VEL_W}"
+  --reward.terms.motion_global_body_ang_vel.weight="${FULL_BODY_ANG_VEL_W}"
+  --reward.terms.object_global_ref_position_error_exp.weight="${OBJECT_POS_W}"
+  --reward.terms.object_global_ref_orientation_error_exp.weight="${OBJECT_ORI_W}"
+  --reward.terms.motion_global_ref_position_error_exp.params.sigma="${ROOT_POS_SIGMA}"
+  --reward.terms.motion_global_ref_orientation_error_exp.params.sigma="${ROOT_ORI_SIGMA}"
+  --reward.terms.motion_relative_body_position_error_exp.params.sigma="${FULL_BODY_POS_SIGMA}"
+  --reward.terms.motion_relative_body_orientation_error_exp.params.sigma="${FULL_BODY_ORI_SIGMA}"
+  --reward.terms.motion_global_body_lin_vel.params.sigma="${FULL_BODY_LIN_VEL_SIGMA}"
+  --reward.terms.motion_global_body_ang_vel.params.sigma="${FULL_BODY_ANG_VEL_SIGMA}"
+  --reward.terms.object_global_ref_position_error_exp.params.sigma="${OBJECT_POS_SIGMA}"
+  --reward.terms.object_global_ref_orientation_error_exp.params.sigma="${OBJECT_ORI_SIGMA}"
   --reward.terms.body_contact_reward_torso.weight="${GENERALIST_TORSO_CONTACT_REWARD_WEIGHT}"
   --reward.terms.body_contact_reward_arms.weight="${GENERALIST_ARM_CONTACT_REWARD_WEIGHT}"
   --reward.terms.body_contact_reward_palms.weight="${GENERALIST_PALM_CONTACT_REWARD_WEIGHT}"
@@ -1026,8 +1127,8 @@ fi
 if [[ -n "${OBJECT_SPEC_PATH}" ]]; then
   train_cmd+=(--robot.object.object-urdf-path "${OBJECT_SPEC_PATH}")
 fi
-if [[ -n "${SEQUENCE_NAME}" ]]; then
-  train_cmd+=(--training.name="${SEQUENCE_NAME}")
+if [[ -n "${EFFECTIVE_SEQUENCE_NAME}" ]]; then
+  train_cmd+=(--training.name="${EFFECTIVE_SEQUENCE_NAME}")
 fi
 if [[ -n "${RESUME_CKPT}" ]]; then
   train_cmd+=(--training.checkpoint="${RESUME_CKPT}")
@@ -1047,8 +1148,8 @@ fi
 if [[ -n "${WANDB_RESUME}" ]]; then
   train_cmd+=(--logger.resume="${WANDB_RESUME}")
 fi
-if [[ -n "${SEQUENCE_NAME}" ]]; then
-  train_cmd+=(--logger.name="${SEQUENCE_NAME}")
+if [[ -n "${EFFECTIVE_SEQUENCE_NAME}" ]]; then
+  train_cmd+=(--logger.name="${EFFECTIVE_SEQUENCE_NAME}")
 fi
 echo "[INFO] Training video recording disabled."
 train_cmd+=(--logger.video.enabled=False)
