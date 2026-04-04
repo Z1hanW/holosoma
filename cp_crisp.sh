@@ -1,2 +1,2 @@
 mkdir -p data
-rsync -avh /nfs/zzzihanw/ds_box_data data
+rsync -avh /nfs/zzzihanw/ds_crisp_data data
