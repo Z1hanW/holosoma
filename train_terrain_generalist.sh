@@ -56,8 +56,8 @@ SAVE_INTERVAL=${SAVE_INTERVAL:-1000}
 LOAD_OPTIMIZER=${LOAD_OPTIMIZER:-False}
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-536870912}
 
-MOTION_DIR=${MOTION_DIR:-/data/terrain/___crisp_clean_motion}
-OBJ_SOURCE=${OBJ_SOURCE:-/data/terrain/___crisp_clean_geometry}
+MOTION_DIR=${MOTION_DIR:-data/terrain/___crisp_clean_motion}
+OBJ_SOURCE=${OBJ_SOURCE:-data/terrain/___crisp_clean_geometry}
 OBJ_META_PATH=${OBJ_META_PATH:-}
 NUM_ROWS=${NUM_ROWS:-}
 NUM_COLS=${NUM_COLS:-}

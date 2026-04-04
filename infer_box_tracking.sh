@@ -11,7 +11,7 @@ set -euo pipefail
 # - naive-mixed: infer on OMOMO + Seedance/DS naive-mixed clips
 #
 # Usage:
-#   bash infer_box_tracking.sh [omomo|real|pure-sd|naive-mixed] [teacher_checkpoint.pt|model_XXXXX.pt|wandb://...] [extra tyro args...]
+#   bash infer_box_tracking.sh [omomo|real|pure-sd|naive-mixed] [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
 #
 # Optional env vars:
 #   TEACHER_CHECKPOINT        (default: wandb://zihanw22/boxer/a5ohxuta/model_09000.pt)
@@ -53,13 +53,15 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  bash infer_box_tracking.sh [omomo|real|pure-sd|naive-mixed] [teacher_checkpoint.pt|model_XXXXX.pt|wandb://...] [extra tyro args...]
+  bash infer_box_tracking.sh [omomo|real|pure-sd|naive-mixed] [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
 
 Examples:
   bash infer_box_tracking.sh
   bash infer_box_tracking.sh omomo
   bash infer_box_tracking.sh real
   bash infer_box_tracking.sh pure-sd
+  bash infer_box_tracking.sh pure-sd wandb://zihanw22/boxer/6pzxdnr6/model_00500.pt
+  bash infer_box_tracking.sh pure-sd https://wandb.ai/zihanw22/boxer/runs/6pzxdnr6
   bash infer_box_tracking.sh pure-sd model_00500.pt
   bash infer_box_tracking.sh naive-mixed
   bash infer_box_tracking.sh /abs/path/to/model_17000.pt
