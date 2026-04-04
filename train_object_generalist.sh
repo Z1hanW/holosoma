@@ -66,7 +66,6 @@ ENABLE_VISER=${ENABLE_VISER:-0}
 DEBUG_MODE=${DEBUG_MODE:-${DEBUG_MODEL:-off}}
 CURRICULUM=${CURRICULUM:-0}
 PERCEPTION=${PERCEPTION:-none}
-LEGACY_OBS=${LEGACY_OBS:-0}
 GENERALIST_CONTACT_REWARD_ENABLED=${GENERALIST_CONTACT_REWARD_ENABLED:-1}
 GENERALIST_CONTACT_REWARD_MODE=${GENERALIST_CONTACT_REWARD_MODE:-tanh}
 GENERALIST_CONTACT_REWARD_THRESHOLD=${GENERALIST_CONTACT_REWARD_THRESHOLD:-1.0}
@@ -579,15 +578,6 @@ if [[ "${ENABLE_VISER}" == "1" ]]; then
   echo "[INFO] Viser runtime source: Isaac Sim state; URDF mesh loading in Viser = ${VISER_LOAD_URDF}"
 else
   echo "[INFO] Starting training without Viser"
-fi
-
-legacy_obs_normalized=$(echo "${LEGACY_OBS}" | tr '[:upper:]' '[:lower:]')
-if [[ "${legacy_obs_normalized}" == "1" || "${legacy_obs_normalized}" == "true" ]]; then
-  if [[ "${EXP}" == "g1-29dof-wbt-w-object-generalist" ]]; then
-    EXP="g1-29dof-wbt-w-object-generalist-legacy-obs"
-  fi
-  echo "[INFO] LEGACY_OBS enabled: using legacy actor observation (175-dim, no object velocity terms)."
-  echo "[INFO] Resolved EXP: ${EXP}"
 fi
 
 contact_reward_enabled_normalized=$(echo "${GENERALIST_CONTACT_REWARD_ENABLED}" | tr '[:upper:]' '[:lower:]')

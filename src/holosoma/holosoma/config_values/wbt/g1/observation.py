@@ -4,7 +4,7 @@ from dataclasses import replace
 
 from holosoma.config_types.observation import ObservationManagerCfg, ObsGroupCfg, ObsTermCfg
 
-DEFAULT_WBT_POLICY_HISTORY_LENGTH = 10
+DEFAULT_WBT_POLICY_HISTORY_LENGTH = 5
 
 _PALM_CONTACT_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
 _ARM_SUPPORT_CONTACT_BODY_NAMES = [
@@ -85,16 +85,6 @@ actor_obs_w_object_terms.update(
         ),
         "obj_ori_b": ObsTermCfg(
             func="holosoma.managers.observation.terms.wbt:obj_ori_b",
-            scale=1.0,
-            noise=0.0,
-        ),
-        "obj_lin_vel_b": ObsTermCfg(
-            func="holosoma.managers.observation.terms.wbt:obj_lin_vel_b",
-            scale=1.0,
-            noise=0.0,
-        ),
-        "obj_ang_vel_b": ObsTermCfg(
-            func="holosoma.managers.observation.terms.wbt:obj_ang_vel_b",
             scale=1.0,
             noise=0.0,
         ),

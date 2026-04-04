@@ -56,7 +56,7 @@ RAW_MOTION_DIR=${RAW_MOTION_DIR:-"${DEFAULT_DS_RAW_MOTION_DIR}"}
 OBJ_DIR=${OBJ_DIR:-"${DEFAULT_DS_GEOMETRY_DIR}"}
 PREPARED_MOTION_DIR=${PREPARED_MOTION_DIR:-""}
 OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-""}
-NUM_ENVS=${NUM_ENVS:-86016}
+NUM_ENVS=${NUM_ENVS:-71680}
 NPROC=${NPROC:-$(awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}")}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
 PHYSX_GPU_MAX_RIGID_PATCH_COUNT=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT:-4194304}
@@ -83,7 +83,6 @@ ENABLE_VISER=${ENABLE_VISER:-0}
 DEBUG_MODE=${DEBUG_MODE:-${DEBUG_MODEL:-off}}
 CURRICULUM=${CURRICULUM:-0}
 PERCEPTION=${PERCEPTION:-none}
-LEGACY_OBS=${LEGACY_OBS:-0}
 PURE_SD_REWARD_PROFILE_RAW=${PURE_SD_REWARD_PROFILE:-default}
 PURE_SD_REWARD_PROFILE=$(echo "${PURE_SD_REWARD_PROFILE_RAW}" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
 GENERALIST_CONTACT_REWARD_ENABLED=${GENERALIST_CONTACT_REWARD_ENABLED:-1}
@@ -863,15 +862,6 @@ if [[ "${AUTO_ATTACH_WANDB_RUN}" == "1" && -n "${RESUME_WANDB_RUN_ID}" ]]; then
     WANDB_RESUME="must"
   fi
   echo "[INFO] W&B same-run resume enabled: ${WANDB_ENTITY}/${WANDB_PROJECT}/${WANDB_RUN_ID} (resume=${WANDB_RESUME})"
-fi
-
-legacy_obs_normalized=$(echo "${LEGACY_OBS}" | tr '[:upper:]' '[:lower:]')
-if [[ "${legacy_obs_normalized}" == "1" || "${legacy_obs_normalized}" == "true" ]]; then
-  if [[ "${EXP}" == "g1-29dof-wbt-w-object-generalist" ]]; then
-    EXP="g1-29dof-wbt-w-object-generalist-legacy-obs"
-  fi
-  echo "[INFO] LEGACY_OBS enabled: using legacy actor observation (175-dim, no object velocity terms)."
-  echo "[INFO] Resolved EXP: ${EXP}"
 fi
 
 refresh_effective_sequence_name
