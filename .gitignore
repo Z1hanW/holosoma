@@ -20,6 +20,10 @@
 !LICENSE*
 !src/holosoma_inference/docs/workflows/sim2sim.md
 
+# Local training / dataset payloads (always ignore)
+/data/
+/data/**
+
 # Local CRISP data packages (always ignore)
 crisp/
 crisp/**
