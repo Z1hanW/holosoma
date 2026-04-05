@@ -302,6 +302,17 @@ class MotionLoader:
         return object_name, object_urdf_path
 
     @staticmethod
+    def _resolve_motion_object_urdf_path(raw_path: str, *, base_dir: Path) -> str:
+        path_str = str(raw_path).strip()
+        if not path_str:
+            return ""
+        candidate = Path(path_str)
+        if not candidate.is_absolute() and not path_str.startswith("holosoma/data"):
+            candidate = (base_dir / path_str).resolve()
+            return str(candidate)
+        return str(Path(resolve_data_file_path(path_str)).resolve())
+
+    @staticmethod
     def _format_motion_file_issues(issues: list[tuple[Path, str]], limit: int = 5) -> str:
         if not issues:
             return ""
@@ -786,6 +797,95 @@ class MotionLoader:
             return np.asarray(h5f[f"/{name}"])
         return None
 
+    def _resolve_h5_clip_metadata_values(
+        self,
+        h5f: Any,
+        *,
+        clip_ids: list[str],
+        selected_clip_indices: list[int],
+        field_names: tuple[str, ...],
+    ) -> list[str]:
+        containers = []
+        if "clips" in h5f:
+            containers.append(h5f["clips"])
+        if "meta" in h5f:
+            containers.append(h5f["meta"])
+        containers.append(h5f)
+
+        raw_values = None
+        for container in containers:
+            for field_name in field_names:
+                raw_values = self._get_h5_attr_or_dataset(container, field_name)
+                if raw_values is not None:
+                    break
+            if raw_values is not None:
+                break
+
+        if raw_values is not None:
+            arr = np.asarray(raw_values)
+            if arr.shape == ():
+                return [self._scalar_str(arr)] * len(selected_clip_indices)
+            flat = arr.reshape(-1)
+            if flat.shape[0] >= max(selected_clip_indices, default=0) + 1:
+                return [self._scalar_str(flat[idx]) for idx in selected_clip_indices]
+
+        clips_group = h5f["clips"] if "clips" in h5f else None
+        if clips_group is not None:
+            nested_values: list[str] = []
+            for clip_idx in selected_clip_indices:
+                clip_id = clip_ids[clip_idx]
+                clip_group = clips_group.get(clip_id, None)
+                if clip_group is None:
+                    return []
+                clip_value = None
+                for field_name in field_names:
+                    clip_value = self._get_h5_attr_or_dataset(clip_group, field_name)
+                    if clip_value is not None:
+                        break
+                if clip_value is None:
+                    return []
+                nested_values.append(self._scalar_str(clip_value))
+            return nested_values
+
+        return []
+
+    def _resolve_h5_clip_object_metadata(
+        self,
+        h5f: Any,
+        *,
+        motion_file: str,
+        clip_ids: list[str],
+        selected_clip_indices: list[int],
+    ) -> tuple[list[str], list[str]]:
+        raw_object_names = self._resolve_h5_clip_metadata_values(
+            h5f,
+            clip_ids=clip_ids,
+            selected_clip_indices=selected_clip_indices,
+            field_names=("object_name", "object_names"),
+        )
+        raw_object_urdfs = self._resolve_h5_clip_metadata_values(
+            h5f,
+            clip_ids=clip_ids,
+            selected_clip_indices=selected_clip_indices,
+            field_names=("object_urdf_path", "object_urdf_paths"),
+        )
+
+        base_dir = Path(motion_file).parent
+        clip_object_names: list[str] = []
+        clip_object_urdfs: list[str] = []
+        for local_idx, clip_idx in enumerate(selected_clip_indices):
+            clip_name = raw_object_names[local_idx].strip() if local_idx < len(raw_object_names) else ""
+            clip_urdf = raw_object_urdfs[local_idx].strip() if local_idx < len(raw_object_urdfs) else ""
+            if clip_urdf:
+                clip_urdf = self._resolve_motion_object_urdf_path(clip_urdf, base_dir=base_dir)
+            if not clip_name and clip_urdf:
+                clip_name = Path(clip_urdf).stem
+            if not clip_name:
+                clip_name = "object"
+            clip_object_names.append(clip_name)
+            clip_object_urdfs.append(clip_urdf)
+        return clip_object_names, clip_object_urdfs
+
     def _load_data_from_motion_h5(
         self,
         motion_file: str,
@@ -814,6 +914,7 @@ class MotionLoader:
             lengths = None
             clip_fps = None
             selected_clip_idx: int | None = None
+            selected_clip_indices: list[int] = [0]
             if clips is not None:
                 clip_ids = self._decode_h5_strings(np.asarray(clips["clip_ids"]))
                 offsets = np.asarray(clips["offsets"], dtype=np.int64)
@@ -829,16 +930,17 @@ class MotionLoader:
                 length = int(data["joint_pos"].shape[0])
                 fps_val = np.asarray(meta["fps"])
                 clip_id = Path(motion_file).stem
-                self._set_clip_metadata([clip_id], np.array([0]), np.array([length]), device)
+                clip_ids = [clip_id]
+                selected_clip_indices = [0]
             elif load_all:
                 start = 0
                 length = int(data["joint_pos"].shape[0])
                 fps_val = np.asarray(meta["fps"])
                 if clip_fps is not None:
                     if not np.allclose(clip_fps, float(np.array(fps_val).reshape(-1)[0])):
-                        raise ValueError("clip_fps must be consistent across clips for multi-clip loading.")
+                            raise ValueError("clip_fps must be consistent across clips for multi-clip loading.")
                 assert offsets is not None and lengths is not None
-                self._set_clip_metadata(clip_ids, offsets, lengths, device)
+                selected_clip_indices = list(range(len(clip_ids)))
             else:
                 if motion_clip_name is not None:
                     if motion_clip_name not in clip_ids:
@@ -851,10 +953,45 @@ class MotionLoader:
                 if clip_idx < 0 or clip_idx >= len(lengths):
                     raise IndexError(f"Clip index {clip_idx} out of range for HDF5 motion file.")
                 selected_clip_idx = clip_idx
+                selected_clip_indices = [clip_idx]
                 start = int(offsets[clip_idx])
                 length = int(lengths[clip_idx])
                 fps_val = clip_fps[clip_idx] if clip_fps is not None else np.asarray(meta["fps"])
-                self._set_clip_metadata([clip_ids[clip_idx]], np.array([0]), np.array([length]), device)
+
+            clip_object_names, clip_object_urdfs = self._resolve_h5_clip_object_metadata(
+                h5f,
+                motion_file=motion_file,
+                clip_ids=clip_ids,
+                selected_clip_indices=selected_clip_indices,
+            )
+            if clips is None:
+                self._set_clip_metadata(
+                    clip_ids,
+                    np.array([0]),
+                    np.array([length]),
+                    device,
+                    clip_object_names=clip_object_names,
+                    clip_object_urdf_paths=clip_object_urdfs,
+                )
+            elif load_all:
+                assert offsets is not None and lengths is not None
+                self._set_clip_metadata(
+                    clip_ids,
+                    offsets,
+                    lengths,
+                    device,
+                    clip_object_names=clip_object_names,
+                    clip_object_urdf_paths=clip_object_urdfs,
+                )
+            else:
+                self._set_clip_metadata(
+                    [clip_ids[selected_clip_idx]],
+                    np.array([0]),
+                    np.array([length]),
+                    device,
+                    clip_object_names=clip_object_names,
+                    clip_object_urdf_paths=clip_object_urdfs,
+                )
 
             fps_arr = np.array(fps_val).reshape(-1)
             self.fps = float(fps_arr[0]) if fps_arr.size > 0 else 30.0
@@ -1332,6 +1469,7 @@ class MotionCommand(CommandTermBase):
         self._sim_object_names: list[str] = []
         self._clip_object_ids: torch.Tensor | None = None
         self._object_indices_matrix: torch.Tensor | None = None
+        self._fixed_clip_ids: torch.Tensor | None = None
         self.object_name: str = "object"
         self.object_indices_in_simulator: torch.Tensor | None = None
         self._debug_representative_clip_ids: torch.Tensor | None = None
@@ -1454,7 +1592,7 @@ class MotionCommand(CommandTermBase):
         )
         self.multi_clip = self.motion.num_clips > 1
         if self.multi_clip:
-            logger.info("Multi-clip motion bank detected ({} clips). Sampling clips per env reset.", self.motion.num_clips)
+            logger.info("Multi-clip motion bank detected ({} clips).", self.motion.num_clips)
 
         self._configure_motion_terrain_pairs()
 
@@ -1481,6 +1619,7 @@ class MotionCommand(CommandTermBase):
                 f"Object carry motions currently support IsaacSim or MuJoCo, got {simulator_type}."
             )
             self._configure_simulator_object_mapping()
+            self._configure_fixed_env_clip_assignment()
             self._configure_debug_representative_clips()
         elif self._sparse_goal_curriculum_enabled:
             logger.warning("Sparse object-goal curriculum requested but motion has no object; disabling curriculum.")
@@ -1595,7 +1734,17 @@ class MotionCommand(CommandTermBase):
             self.object_indices_in_simulator = sim.get_actor_indices(self.object_name, env_ids=None)
             self._multi_object_enabled = False
             self._object_indices_matrix = None
-            logger.info("Using single object '{}' for all {} clips.", self.object_name, self.motion.num_clips)
+            env_object_urdf_paths = getattr(sim, "_env_object_urdf_paths", None)
+            if isinstance(env_object_urdf_paths, list) and env_object_urdf_paths:
+                unique_env_object_count = len({self._normalize_path_key(path) for path in env_object_urdf_paths if path})
+                logger.info(
+                    "Using single simulator object slot '{}' with {} env-specific object assignment(s) across {} clips.",
+                    self.object_name,
+                    unique_env_object_count,
+                    self.motion.num_clips,
+                )
+            else:
+                logger.info("Using single object '{}' for all {} clips.", self.object_name, self.motion.num_clips)
             return
 
         sim_name_by_urdf: dict[str, str] = {}
@@ -1677,6 +1826,82 @@ class MotionCommand(CommandTermBase):
             len(representative_ids),
             self.motion.num_clips,
         )
+
+    def _configure_fixed_env_clip_assignment(self) -> None:
+        self._fixed_clip_ids = None
+        if not self.motion.has_object:
+            return
+
+        env_object_urdf_paths = getattr(self._env.simulator, "_env_object_urdf_paths", None)
+        if not isinstance(env_object_urdf_paths, list) or not env_object_urdf_paths:
+            return
+        if len(env_object_urdf_paths) != self.num_envs:
+            raise RuntimeError(
+                "Fixed env-to-clip assignment requires one simulator object URDF per env. "
+                f"Got {len(env_object_urdf_paths)} entries for {self.num_envs} envs."
+            )
+
+        clip_object_urdfs = self.motion.clip_object_urdf_paths
+        if len(clip_object_urdfs) != self.motion.num_clips:
+            raise RuntimeError(
+                "Fixed env-to-clip assignment requires clip object URDF metadata for every clip. "
+                f"Motion bank exposed {len(clip_object_urdfs)} URDF entries for {self.motion.num_clips} clips."
+            )
+
+        clip_ids_by_urdf: dict[str, list[int]] = {}
+        missing_clip_urdf_ids: list[str] = []
+        for clip_idx, clip_urdf in enumerate(clip_object_urdfs):
+            normalized_urdf = self._normalize_path_key(clip_urdf)
+            if not normalized_urdf:
+                missing_clip_urdf_ids.append(self.motion.clip_ids[clip_idx])
+                continue
+            clip_ids_by_urdf.setdefault(normalized_urdf, []).append(clip_idx)
+
+        if missing_clip_urdf_ids:
+            raise RuntimeError(
+                "Fixed env-to-clip assignment requires object URDF metadata on every clip. "
+                f"Missing clip metadata for {len(missing_clip_urdf_ids)} clip(s): {missing_clip_urdf_ids[:8]}"
+            )
+
+        fixed_clip_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        seen_counts_by_urdf: dict[str, int] = {}
+        unmatched_env_ids: list[int] = []
+        for env_id, env_object_urdf in enumerate(env_object_urdf_paths):
+            normalized_urdf = self._normalize_path_key(env_object_urdf)
+            clip_candidates = clip_ids_by_urdf.get(normalized_urdf)
+            if not clip_candidates:
+                unmatched_env_ids.append(env_id)
+                continue
+            seen_count = seen_counts_by_urdf.get(normalized_urdf, 0)
+            fixed_clip_ids[env_id] = int(clip_candidates[seen_count % len(clip_candidates)])
+            seen_counts_by_urdf[normalized_urdf] = seen_count + 1
+
+        if unmatched_env_ids:
+            sample_env_ids = unmatched_env_ids[:8]
+            sample_urdfs = [env_object_urdf_paths[idx] for idx in sample_env_ids]
+            raise RuntimeError(
+                "Fixed env-to-clip assignment requires every env object URDF to appear in the motion bank. "
+                f"Unmatched env count={len(unmatched_env_ids)} sample env ids={sample_env_ids} "
+                f"sample urdfs={sample_urdfs}"
+            )
+
+        self._fixed_clip_ids = fixed_clip_ids
+        assigned_unique_clip_count = int(torch.unique(fixed_clip_ids).numel())
+        clip_groups_with_multiple_clips = sum(1 for clip_ids in clip_ids_by_urdf.values() if len(clip_ids) > 1)
+        if clip_groups_with_multiple_clips > 0:
+            logger.info(
+                "Configured fixed env-to-clip assignment across {} envs using {} URDF groups and {} active clips. "
+                "URDF groups with multiple clips are assigned round-robin across envs.",
+                self.num_envs,
+                len(clip_ids_by_urdf),
+                assigned_unique_clip_count,
+            )
+        else:
+            logger.info(
+                "Configured fixed env-to-clip assignment across {} envs and {} active clips.",
+                self.num_envs,
+                assigned_unique_clip_count,
+            )
 
     def _configure_contact_prior_regions(self) -> None:
         self._contact_prior_available = False
@@ -1945,6 +2170,7 @@ class MotionCommand(CommandTermBase):
         use_fixed_tile_layout = (
             debug_tile_layout
             and self.multi_clip
+            and self._fixed_clip_ids is None
             and self.motion_cfg.pair_terrain_with_motion
             and self._terrain_row_ids is not None
             and self._terrain_row_count > 0
@@ -1960,6 +2186,8 @@ class MotionCommand(CommandTermBase):
         else:
             if self._forced_clip_idx is not None:
                 self.clip_ids[env_ids] = int(self._forced_clip_idx)
+            elif self._fixed_clip_ids is not None:
+                self.clip_ids[env_ids] = self._fixed_clip_ids[env_ids]
             elif self._debug_representative_clip_ids is not None and self._debug_representative_clip_ids.numel() > 0:
                 reps = self._debug_representative_clip_ids
                 self.clip_ids[env_ids] = reps[env_ids % reps.numel()]

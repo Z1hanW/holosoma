@@ -100,6 +100,7 @@ class BaseTask:
             robot=robot_config,
             training=training_config,
             logger=tyro_config.logger,
+            command=command_config,
             experiment_dir=str(experiment_dir),
         )
 

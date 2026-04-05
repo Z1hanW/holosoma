@@ -1762,6 +1762,13 @@ class ViserLiveViewer:
         fallback = _resolve_object_urdf_path(self._env.robot_config)
 
         sim = getattr(self._env, "simulator", None)
+        env_object_urdf_paths = getattr(sim, "_env_object_urdf_paths", None)
+        if isinstance(env_object_urdf_paths, list) and 0 <= int(env_id) < len(env_object_urdf_paths):
+            env_urdf = str(env_object_urdf_paths[int(env_id)]).strip()
+            candidate = Path(env_urdf)
+            if env_urdf and candidate.exists() and candidate.suffix.lower() == ".urdf":
+                return str(candidate)
+
         object_urdf_by_name = getattr(sim, "_object_urdf_by_name", {})
         if isinstance(object_urdf_by_name, dict) and object_urdf_by_name:
             sim_object_name = self._resolve_sim_object_name_for_env(int(env_id))

@@ -142,17 +142,11 @@ def register_scene_objects(sim):
     # Get base poses from configuration (no env_origins applied yet)
     initial_poses_tensor = sim.get_actor_initial_poses(object_names)  # [num_objects * num_envs, 7]
 
-    # Extract base poses (first environment only, since all envs have same initial pose)
-    base_poses = initial_poses_tensor[:: sim.num_envs]  # [num_objects, 7] - every num_envs-th element
-
     # Register each scene object with ObjectType.SCENE using tensor interface
-    for position, (object_name, base_pose) in enumerate(zip(object_names, base_poses)):
-        # Apply env_origins to get world coordinates for all environments
-        object_world_poses = torch.zeros(sim.num_envs, 7, device=sim.sim_device, dtype=torch.float32)
-        for env_id in range(sim.num_envs):
-            object_world_poses[env_id] = base_pose.clone()
-            # object_world_poses[env_id, :3] += sim.scene.env_origins[env_id]  # Add env_origin to position
-
+    for position, object_name in enumerate(object_names):
+        start = position * sim.num_envs
+        end = start + sim.num_envs
+        object_world_poses = initial_poses_tensor[start:end].clone()
         # Register with tensor-based interface (same as IsaacGym)
         sim.object_registry.register_object(
             name=object_name,
@@ -200,17 +194,11 @@ def register_individual_objects(sim):
     # Get base poses from configuration (no env_origins applied yet)
     initial_poses_tensor = sim.get_actor_initial_poses(individual_objects)  # [num_objects * num_envs, 7]
 
-    # Extract base poses (first environment only, assumes environment cloning)
-    base_poses = initial_poses_tensor[:: sim.num_envs]  # [num_objects, 7]
-
     # Register each individual object with ObjectType.INDIVIDUAL using tensor interface
-    for position, (obj_name, base_pose) in enumerate(zip(individual_objects, base_poses)):
-        # Apply env_origins to get world coordinates for all environments
-        object_world_poses = torch.zeros(sim.num_envs, 7, device=sim.sim_device, dtype=torch.float32)
-        for env_id in range(sim.num_envs):
-            object_world_poses[env_id] = base_pose.clone()
-            # object_world_poses[env_id, :3] += sim.scene.env_origins[env_id]  # Add env_origin to position
-
+    for position, obj_name in enumerate(individual_objects):
+        start = position * sim.num_envs
+        end = start + sim.num_envs
+        object_world_poses = initial_poses_tensor[start:end].clone()
         # Register with tensor-based interface (same as IsaacGym)
         sim.object_registry.register_object(
             name=obj_name,

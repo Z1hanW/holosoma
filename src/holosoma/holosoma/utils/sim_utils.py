@@ -239,6 +239,7 @@ def setup_simulation_environment(
             robot=config.robot,
             training=config.training,
             logger=config.logger,
+            command=None,
             experiment_dir=None,
         )
 

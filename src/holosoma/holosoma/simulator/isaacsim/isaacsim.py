@@ -5,6 +5,7 @@ import json
 import math
 import copy
 import os
+import zipfile
 import xml.etree.ElementTree as ET
 from typing import Any
 
@@ -34,6 +35,7 @@ from omegaconf import DictConfig
 
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.path import resolve_data_file_path
+from holosoma.config_types.command import MotionConfig
 from holosoma.config_types.simulator import SimulatorInitConfig, SceneConfig
 from holosoma.managers.terrain import TerrainManager
 from holosoma.simulator.base_simulator.base_simulator import BaseSimulator
@@ -86,6 +88,9 @@ class IsaacSim(BaseSimulator):
         # Add device attribute for base simulator compatibility
         self.device = device
         self._object_urdf_by_name: dict[str, str] = {}
+        self._resolved_training_object_specs: list[tuple[str, str]] = []
+        self._env_object_urdf_paths: list[str] = []
+        self._heterogeneous_object_env_assignment = False
         self._object_contact_filter_prim_paths_expr: list[str] = []
         self._object_contact_sensors: dict[str, ContactSensor] = {}
 
@@ -168,10 +173,24 @@ class IsaacSim(BaseSimulator):
             )
             logger.warning(msg)
 
+        replicate_physics = self.simulator_config.scene.replicate_physics
+        object_cfg = getattr(self.robot_config, "object", None)
+        object_path_spec = str(getattr(object_cfg, "object_urdf_path", "") or "").strip()
+        if getattr(object_cfg, "enabled", False) and object_path_spec:
+            self._resolved_training_object_specs = self._resolve_training_object_specs(object_path_spec)
+            self._heterogeneous_object_env_assignment = len(self._resolved_training_object_specs) > 1
+            if self._heterogeneous_object_env_assignment and replicate_physics:
+                logger.warning(
+                    "Detected {} training objects for object generalist. "
+                    "Forcing InteractiveScene.replicate_physics=False so each env can keep a single fixed object.",
+                    len(self._resolved_training_object_specs),
+                )
+                replicate_physics = False
+
         scene_config: InteractiveSceneCfg = InteractiveSceneCfg(
             num_envs=self.training_config.num_envs,
             env_spacing=self.simulator_config.scene.env_spacing,
-            replicate_physics=self.simulator_config.scene.replicate_physics,
+            replicate_physics=replicate_physics,
         )
         # generate scene
         with Timer("[INFO]: Time taken for scene creation", "scene_creation"):
@@ -307,6 +326,385 @@ class IsaacSim(BaseSimulator):
             unique_specs.append((name, urdf_key))
 
         return unique_specs
+
+    @staticmethod
+    def _scalar_str(value: Any) -> str:
+        arr = np.asarray(value)
+        if arr.size == 0:
+            return ""
+        if arr.shape == ():
+            item = arr.item()
+        else:
+            item = arr.reshape(-1)[0]
+            if hasattr(item, "item"):
+                item = item.item()
+        return str(item).strip()
+
+    @staticmethod
+    def _decode_h5_strings(values: np.ndarray) -> list[str]:
+        decoded: list[str] = []
+        for item in values:
+            if isinstance(item, (bytes, np.bytes_)):
+                decoded.append(item.decode("utf-8"))
+            else:
+                decoded.append(str(item))
+        return decoded
+
+    @staticmethod
+    def _resolve_motion_object_urdf_path(raw_path: str, *, base_dir: pathlib.Path) -> str:
+        path_str = str(raw_path).strip()
+        if not path_str:
+            return ""
+        candidate = pathlib.Path(path_str)
+        if not candidate.is_absolute() and not path_str.startswith("holosoma/data"):
+            candidate = (base_dir / path_str).resolve()
+            return str(candidate)
+        return str(pathlib.Path(resolve_data_file_path(path_str)).resolve())
+
+    @classmethod
+    def _load_clip_object_metadata_map(cls, motion_dir: pathlib.Path) -> dict[str, dict[str, str]]:
+        candidate_files = (
+            motion_dir / "_clip_object_urdf_map.json",
+            motion_dir / "clip_object_urdf_map.json",
+        )
+        for path in candidate_files:
+            if not path.is_file():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.warning("Failed to parse clip-object metadata map '{}': {}", path, exc)
+                return {}
+
+            if isinstance(payload, dict) and isinstance(payload.get("clips"), dict):
+                payload = payload["clips"]
+            if not isinstance(payload, dict):
+                logger.warning("Invalid clip-object metadata map format in '{}': expected dict.", path)
+                return {}
+
+            normalized: dict[str, dict[str, str]] = {}
+            for clip_id, entry in payload.items():
+                if not isinstance(clip_id, str):
+                    continue
+                if isinstance(entry, str):
+                    normalized[clip_id] = {"object_name": "", "object_urdf_path": entry.strip()}
+                elif isinstance(entry, dict):
+                    normalized[clip_id] = {
+                        "object_name": str(entry.get("object_name", "")).strip(),
+                        "object_urdf_path": str(entry.get("object_urdf_path", "")).strip(),
+                    }
+            logger.info("Loaded clip-object metadata map '{}' ({} entries).", path, len(normalized))
+            return normalized
+        return {}
+
+    @classmethod
+    def _extract_object_clip_metadata(
+        cls,
+        *,
+        data: Any,
+        clip_id: str,
+        clip_map: dict[str, dict[str, str]] | None,
+        base_dir: pathlib.Path,
+    ) -> tuple[str, str]:
+        object_name = cls._scalar_str(data["object_name"]) if "object_name" in data else ""
+        object_urdf_path = cls._scalar_str(data["object_urdf_path"]) if "object_urdf_path" in data else ""
+
+        if clip_map is not None and clip_id in clip_map:
+            mapped = clip_map[clip_id]
+            if not object_name:
+                object_name = mapped.get("object_name", "").strip()
+            if not object_urdf_path:
+                object_urdf_path = mapped.get("object_urdf_path", "").strip()
+
+        if object_urdf_path:
+            object_urdf_path = cls._resolve_motion_object_urdf_path(object_urdf_path, base_dir=base_dir)
+        if not object_name and object_urdf_path:
+            object_name = pathlib.Path(object_urdf_path).stem
+        if not object_name:
+            object_name = "object"
+        return object_name, object_urdf_path
+
+    @staticmethod
+    def _unique_preserve_order(values: list[str]) -> list[str]:
+        return list(dict.fromkeys(value for value in values if value))
+
+    def _resolve_motion_config(self) -> MotionConfig | None:
+        command_cfg = getattr(self, "command_config", None)
+        if command_cfg is None:
+            return None
+        setup_terms = getattr(command_cfg, "setup_terms", None)
+        if not isinstance(setup_terms, dict):
+            return None
+        for term_cfg in setup_terms.values():
+            func = str(getattr(term_cfg, "func", "")).strip()
+            if "MotionCommand" not in func:
+                continue
+            params = getattr(term_cfg, "params", None)
+            if not isinstance(params, dict) or "motion_config" not in params:
+                continue
+            motion_cfg = params["motion_config"]
+            if isinstance(motion_cfg, MotionConfig):
+                return motion_cfg
+            if isinstance(motion_cfg, dict):
+                return MotionConfig(**motion_cfg)
+        return None
+
+    @staticmethod
+    def _resolve_selected_motion_paths(
+        motion_dir: pathlib.Path,
+        *,
+        motion_clip_id: int | None,
+        motion_clip_name: str | None,
+    ) -> list[pathlib.Path]:
+        files = sorted(motion_dir.glob("*.npz"))
+        if not files:
+            raise FileNotFoundError(f"No .npz files found in motion directory: {motion_dir}")
+        if motion_clip_name is not None:
+            matches = [path for path in files if path.stem == motion_clip_name]
+            if not matches:
+                raise ValueError(f"Clip name '{motion_clip_name}' not found in {motion_dir}")
+            return matches
+        if motion_clip_id is not None:
+            clip_idx = int(motion_clip_id)
+            if clip_idx < 0 or clip_idx >= len(files):
+                raise IndexError(f"Clip index {clip_idx} out of range for {motion_dir}")
+            return [files[clip_idx]]
+        return files
+
+    def _resolve_motion_subset_object_urdfs_from_npz(self, motion_path: pathlib.Path, motion_cfg: MotionConfig) -> list[str]:
+        if motion_path.is_dir():
+            selected_paths = self._resolve_selected_motion_paths(
+                motion_path,
+                motion_clip_id=motion_cfg.motion_clip_id,
+                motion_clip_name=motion_cfg.motion_clip_name,
+            )
+            clip_map = self._load_clip_object_metadata_map(motion_path)
+        else:
+            selected_paths = [motion_path]
+            clip_map = self._load_clip_object_metadata_map(motion_path.parent)
+
+        object_urdfs: list[str] = []
+        for clip_path in selected_paths:
+            if not zipfile.is_zipfile(clip_path):
+                if len(selected_paths) == 1:
+                    raise zipfile.BadZipFile(f"Invalid motion npz archive: {clip_path}")
+                logger.warning("Skipping invalid motion npz archive while resolving object metadata: {}", clip_path)
+                continue
+            try:
+                with np.load(clip_path, allow_pickle=True) as data:
+                    _object_name, object_urdf = self._extract_object_clip_metadata(
+                        data=data,
+                        clip_id=clip_path.stem,
+                        clip_map=clip_map,
+                        base_dir=clip_path.parent,
+                    )
+            except Exception as exc:
+                if len(selected_paths) == 1:
+                    raise
+                logger.warning(
+                    "Skipping motion clip '{}' while resolving object metadata: {}",
+                    clip_path,
+                    exc,
+                )
+                continue
+            if object_urdf:
+                object_urdfs.append(object_urdf)
+        return self._unique_preserve_order(object_urdfs)
+
+    @staticmethod
+    def _get_h5_attr_or_dataset(h5f: Any, name: str) -> np.ndarray | None:
+        if name in h5f.attrs:
+            return np.asarray(h5f.attrs[name])
+        if f"/{name}" in h5f.attrs:
+            return np.asarray(h5f.attrs[f"/{name}"])
+        if name in h5f:
+            return np.asarray(h5f[name])
+        if f"/{name}" in h5f:
+            return np.asarray(h5f[f"/{name}"])
+        return None
+
+    @classmethod
+    def _resolve_h5_clip_metadata_values(
+        cls,
+        h5f: Any,
+        *,
+        clip_ids: list[str],
+        selected_clip_indices: list[int],
+        field_names: tuple[str, ...],
+    ) -> list[str]:
+        containers = []
+        if "clips" in h5f:
+            containers.append(h5f["clips"])
+        if "meta" in h5f:
+            containers.append(h5f["meta"])
+        containers.append(h5f)
+
+        raw_values = None
+        for container in containers:
+            for field_name in field_names:
+                raw_values = cls._get_h5_attr_or_dataset(container, field_name)
+                if raw_values is not None:
+                    break
+            if raw_values is not None:
+                break
+
+        if raw_values is not None:
+            arr = np.asarray(raw_values)
+            if arr.shape == ():
+                return [cls._scalar_str(arr)] * len(selected_clip_indices)
+            flat = arr.reshape(-1)
+            if flat.shape[0] >= max(selected_clip_indices, default=0) + 1:
+                return [cls._scalar_str(flat[idx]) for idx in selected_clip_indices]
+
+        clips_group = h5f["clips"] if "clips" in h5f else None
+        if clips_group is not None:
+            nested_values: list[str] = []
+            for clip_idx in selected_clip_indices:
+                clip_id = clip_ids[clip_idx]
+                clip_group = clips_group.get(clip_id, None)
+                if clip_group is None:
+                    return []
+                clip_value = None
+                for field_name in field_names:
+                    clip_value = cls._get_h5_attr_or_dataset(clip_group, field_name)
+                    if clip_value is not None:
+                        break
+                if clip_value is None:
+                    return []
+                nested_values.append(cls._scalar_str(clip_value))
+            return nested_values
+
+        return []
+
+    def _resolve_motion_subset_object_urdfs_from_h5(self, motion_path: pathlib.Path, motion_cfg: MotionConfig) -> list[str] | None:
+        try:
+            import h5py  # type: ignore[import-not-found]
+        except ImportError as exc:  # pragma: no cover - environment dependent
+            raise ImportError("h5py is required to load HDF5 motion metadata.") from exc
+
+        with h5py.File(motion_path, "r") as h5f:
+            clip_ids: list[str]
+            selected_clip_indices: list[int]
+            if "clips" in h5f and "clip_ids" in h5f["clips"]:
+                clip_ids = self._decode_h5_strings(np.asarray(h5f["clips"]["clip_ids"]))
+                if motion_cfg.motion_clip_name is not None:
+                    if motion_cfg.motion_clip_name not in clip_ids:
+                        raise ValueError(f"Clip name '{motion_cfg.motion_clip_name}' not found in HDF5 motion file.")
+                    selected_clip_indices = [clip_ids.index(motion_cfg.motion_clip_name)]
+                elif motion_cfg.motion_clip_id is not None:
+                    clip_idx = int(motion_cfg.motion_clip_id)
+                    if clip_idx < 0 or clip_idx >= len(clip_ids):
+                        raise IndexError(f"Clip index {clip_idx} out of range for HDF5 motion file.")
+                    selected_clip_indices = [clip_idx]
+                else:
+                    selected_clip_indices = list(range(len(clip_ids)))
+            else:
+                clip_ids = [motion_path.stem]
+                selected_clip_indices = [0]
+
+            object_urdfs_raw = self._resolve_h5_clip_metadata_values(
+                h5f,
+                clip_ids=clip_ids,
+                selected_clip_indices=selected_clip_indices,
+                field_names=("object_urdf_path", "object_urdf_paths"),
+            )
+            if not object_urdfs_raw:
+                return None
+
+            resolved_urdfs = [
+                self._resolve_motion_object_urdf_path(raw_urdf, base_dir=motion_path.parent)
+                for raw_urdf in object_urdfs_raw
+                if str(raw_urdf).strip()
+            ]
+            return self._unique_preserve_order(resolved_urdfs)
+
+    def _resolve_motion_subset_object_urdfs(self) -> list[str] | None:
+        motion_cfg = self._resolve_motion_config()
+        if motion_cfg is None:
+            return None
+
+        motion_path = pathlib.Path(resolve_data_file_path(motion_cfg.motion_file))
+        suffix = motion_path.suffix.lower()
+        if motion_path.is_dir() or suffix == ".npz":
+            return self._resolve_motion_subset_object_urdfs_from_npz(motion_path, motion_cfg)
+        if suffix in {".h5", ".hdf5"}:
+            return self._resolve_motion_subset_object_urdfs_from_h5(motion_path, motion_cfg)
+        return None
+
+    def _resolve_training_object_specs(self, object_path_spec: str) -> list[tuple[str, str]]:
+        object_specs = self._resolve_object_specs(object_path_spec)
+        motion_object_urdfs = self._resolve_motion_subset_object_urdfs()
+        if not motion_object_urdfs:
+            return object_specs
+
+        object_spec_by_urdf = {urdf_path: (object_name, urdf_path) for object_name, urdf_path in object_specs}
+        filtered_specs: list[tuple[str, str]] = []
+        used_names: set[str] = set()
+        for urdf_path in motion_object_urdfs:
+            spec = object_spec_by_urdf.get(urdf_path)
+            if spec is None:
+                base_name = self._sanitize_object_name(pathlib.Path(urdf_path).stem)
+                object_name = base_name
+                suffix = 1
+                while object_name in used_names:
+                    suffix += 1
+                    object_name = f"{base_name}_{suffix}"
+                spec = (object_name, urdf_path)
+            used_names.add(spec[0])
+            filtered_specs.append(spec)
+
+        if not filtered_specs:
+            raise RuntimeError(
+                f"Failed to resolve any active training objects from motion metadata for object spec '{object_path_spec}'."
+            )
+        if len(filtered_specs) != len(object_specs):
+            logger.info(
+                "Filtered training object bank from {} to {} URDF(s) using motion-file metadata.",
+                len(object_specs),
+                len(filtered_specs),
+            )
+        return filtered_specs
+
+    @staticmethod
+    def _build_env_object_urdf_assignment(
+        object_specs: list[tuple[str, str]],
+        *,
+        num_envs: int,
+    ) -> list[str]:
+        if not object_specs:
+            return []
+        return [object_specs[env_id % len(object_specs)][1] for env_id in range(num_envs)]
+
+    @staticmethod
+    def _build_object_spawn_cfg(
+        object_asset_urdf_path: str,
+        *,
+        object_scale: tuple[float, float, float] | None,
+    ) -> sim_utils.UrdfFileCfg:
+        return sim_utils.UrdfFileCfg(
+            fix_base=False,
+            replace_cylinders_with_capsules=True,
+            asset_path=object_asset_urdf_path,
+            scale=object_scale,
+            activate_contact_sensors=True,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=False,
+                retain_accelerations=False,
+                linear_damping=0.01,
+                angular_damping=0.01,
+                max_linear_velocity=1000.0,
+                max_angular_velocity=1000.0,
+                max_depenetration_velocity=1.0,
+            ),
+            articulation_props=sim_utils.ArticulationRootPropertiesCfg(
+                enabled_self_collisions=True,
+                solver_position_iteration_count=8,
+                solver_velocity_iteration_count=4,
+            ),
+            joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
+                gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=0, damping=0)
+            ),
+        )
 
     def _setup_scene(self) -> None:
         self._load_scene_config()
@@ -506,7 +904,9 @@ class IsaacSim(BaseSimulator):
 
         # add training object(s) before collision filtering so they are included in env isolation.
         if getattr(self.robot_config.object, "enabled", False) and self.robot_config.object.object_urdf_path:
-            object_specs = self._resolve_object_specs(self.robot_config.object.object_urdf_path)
+            object_specs = self._resolved_training_object_specs
+            if not object_specs:
+                object_specs = self._resolve_object_specs(self.robot_config.object.object_urdf_path)
             if not object_specs:
                 raise ValueError(
                     f"No valid object URDFs resolved from: {self.robot_config.object.object_urdf_path}"
@@ -526,58 +926,67 @@ class IsaacSim(BaseSimulator):
                         f"Got: {object_scale_raw}"
                     )
 
-            use_single_name = len(object_specs) == 1
             self._object_urdf_by_name = {}
             self._object_contact_filter_prim_paths_expr = []
-            for idx, (raw_name, object_asset_urdf_path) in enumerate(object_specs):
-                object_name = "object" if use_single_name else raw_name
-                prim_suffix = "Object" if use_single_name else f"Object_{idx}_{object_name}"
+            if self._heterogeneous_object_env_assignment:
+                object_assets_cfg = [
+                    self._build_object_spawn_cfg(object_asset_urdf_path, object_scale=object_scale)
+                    for _, object_asset_urdf_path in object_specs
+                ]
+                multi_asset_cfg = sim_utils.MultiAssetSpawnerCfg(
+                    assets_cfg=object_assets_cfg,
+                    random_choice=False,
+                    activate_contact_sensors=True,
+                )
                 object_cfg = RigidObjectCfg(
-                    prim_path=f"/World/envs/env_.*/{prim_suffix}",
-                    spawn=sim_utils.UrdfFileCfg(
-                        fix_base=False,
-                        replace_cylinders_with_capsules=True,
-                        asset_path=object_asset_urdf_path,
-                        scale=object_scale,
-                        activate_contact_sensors=True,
-                        rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                            disable_gravity=False,
-                            retain_accelerations=False,
-                            linear_damping=0.01,
-                            angular_damping=0.01,
-                            max_linear_velocity=1000.0,
-                            max_angular_velocity=1000.0,
-                            max_depenetration_velocity=1.0,
-                        ),
-                        articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-                            enabled_self_collisions=True,
-                            solver_position_iteration_count=8,
-                            solver_velocity_iteration_count=4,
-                        ),
-                        joint_drive=sim_utils.UrdfConverterCfg.JointDriveCfg(
-                            gains=sim_utils.UrdfConverterCfg.JointDriveCfg.PDGainsCfg(stiffness=0, damping=0)
-                        ),
-                    ),
+                    prim_path="/World/envs/env_.*/Object",
+                    spawn=multi_asset_cfg,
                     init_state=RigidObjectCfg.InitialStateCfg(
                         pos=(0.0, 0.0, 0.5),
                     ),
                 )
                 rigid_object = RigidObject(object_cfg)
-                self.scene.rigid_objects[object_name] = rigid_object
-                self._object_urdf_by_name[object_name] = str(pathlib.Path(object_asset_urdf_path).resolve())
-                # The current URDF box assets expose a single rigid body under `baseLink`.
-                # Filter against that rigid body prim instead of the Xform root or collision child.
-                self._object_contact_filter_prim_paths_expr.append(f"{object_cfg.prim_path}/baseLink")
+                self.scene.rigid_objects["object"] = rigid_object
+                self._object_urdf_by_name["object"] = ""
+                self._env_object_urdf_paths = self._build_env_object_urdf_assignment(
+                    object_specs,
+                    num_envs=self.training_config.num_envs,
+                )
+                self._object_contact_filter_prim_paths_expr.append("/World/envs/env_.*/Object/baseLink")
+                logger.info(
+                    "Loaded heterogeneous training object bank: {} unique URDF(s) assigned across {} envs.",
+                    len(object_specs),
+                    self.training_config.num_envs,
+                )
+            else:
+                use_single_name = len(object_specs) == 1
+                for idx, (raw_name, object_asset_urdf_path) in enumerate(object_specs):
+                    object_name = "object" if use_single_name else raw_name
+                    prim_suffix = "Object" if use_single_name else f"Object_{idx}_{object_name}"
+                    object_cfg = RigidObjectCfg(
+                        prim_path=f"/World/envs/env_.*/{prim_suffix}",
+                        spawn=self._build_object_spawn_cfg(object_asset_urdf_path, object_scale=object_scale),
+                        init_state=RigidObjectCfg.InitialStateCfg(
+                            pos=(0.0, 0.0, 0.5),
+                        ),
+                    )
+                    rigid_object = RigidObject(object_cfg)
+                    self.scene.rigid_objects[object_name] = rigid_object
+                    self._object_urdf_by_name[object_name] = str(pathlib.Path(object_asset_urdf_path).resolve())
+                    # The current URDF box assets expose a single rigid body under `baseLink`.
+                    # Filter against that rigid body prim instead of the Xform root or collision child.
+                    self._object_contact_filter_prim_paths_expr.append(f"{object_cfg.prim_path}/baseLink")
 
-            logger.info(
-                "Loaded {} training object URDF(s): {}",
-                len(self._object_urdf_by_name),
-                list(self._object_urdf_by_name.keys()),
-            )
+                logger.info(
+                    "Loaded {} training object URDF(s): {}",
+                    len(self._object_urdf_by_name),
+                    list(self._object_urdf_by_name.keys()),
+                )
             self._setup_object_contact_sensors()
 
         # clone, filter, and replicate
-        self.scene.clone_environments(copy_from_source=False)
+        if self.scene.cfg.replicate_physics:
+            self.scene.clone_environments(copy_from_source=False)
 
         if hasattr(self.simulator_config.scene, "usd_file"):
             # Activate collisions with the entire scene
@@ -1420,38 +1829,36 @@ class IsaacSim(BaseSimulator):
             num_envs = getattr(self, "num_envs", self.scene.num_envs)
             env_ids = torch.arange(num_envs, device=self.sim_device)
 
-        # Get base poses for each object (one per object)
-        base_poses = []
+        pose_batches: list[torch.Tensor] = []
         for obj_name in names:
             if obj_name == "robot":
                 # Get robot base pose from configuration
                 pos = torch.tensor(self.robot_config.init_state.pos, device=self.sim_device, dtype=torch.float32)
                 rot = torch.tensor(self.robot_config.init_state.rot, device=self.sim_device, dtype=torch.float32)
                 pose = torch.cat([pos, rot])  # [7] - [x,y,z,qx,qy,qz,qw]
-                base_poses.append(pose)
+                pose_batches.append(pose.unsqueeze(0).expand(len(env_ids), -1).clone())
 
             elif self._is_scene_object(obj_name):
                 # Get scene object pose from scene collection
                 scene_collection = self.scene.rigid_objects["usd_scene_objects"]
-                default_state = self._get_scene_default_object_state(scene_collection, obj_name)
-                pose = default_state[[0, 1, 2, 4, 5, 6, 3]]  # [x,y,z,qx,qy,qz,qw] reorder from wxyz to xyzw
-                base_poses.append(pose)
+                object_index = self._get_object_index_in_collection(obj_name, scene_collection)
+                default_state = scene_collection.data.default_object_state[env_ids, object_index]
+                pose_batches.append(default_state[:, [0, 1, 2, 4, 5, 6, 3]])
 
             elif obj_name in self.scene.rigid_objects:
                 # Get individual object pose from rigid object
                 rigid_object = self.scene.rigid_objects[obj_name]
-                default_state = rigid_object.data.default_root_state[0]  # [13]
-                pose = default_state[[0, 1, 2, 4, 5, 6, 3]]  # [x,y,z,qx,qy,qz,qw] reorder from wxyz to xyzw
-                base_poses.append(pose)
+                default_state = rigid_object.data.default_root_state[env_ids]
+                pose_batches.append(default_state[:, [0, 1, 2, 4, 5, 6, 3]])
 
             else:
                 available_objects = ["robot"] + list(self.scene.rigid_objects.keys())
                 raise KeyError(f"Object '{obj_name}' not found. Available: {available_objects}")
 
-        base_poses_tensor = torch.stack(base_poses)
-
-        # Repeat to match ObjectRegistry index ordering: [obj0_env0, obj0_env1, obj1_env0, obj1_env1, ...]
-        return base_poses_tensor.repeat_interleave(len(env_ids), dim=0)
+        if not pose_batches:
+            return torch.empty(0, 7, device=self.sim_device, dtype=torch.float32)
+        # Object-major flattening: [obj0_env0, obj0_env1, obj1_env0, obj1_env1, ...]
+        return torch.cat(pose_batches, dim=0)
 
     def _is_scene_object(self, object_name: str) -> bool:
         """Check if an object is part of the USD scene collection - IsaacSim implementation.

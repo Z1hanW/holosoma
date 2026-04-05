@@ -145,6 +145,7 @@ class BaseSimulator:
         self.training_config = tyro_config.training
         self.simulator_config = tyro_config.simulator
         self.robot_config = tyro_config.robot
+        self.command_config = tyro_config.command
         self.video_config = tyro_config.logger.video
         self.sim_device = device
         self.headless = False
