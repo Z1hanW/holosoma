@@ -73,6 +73,7 @@ NPROC=${NPROC:-$(detect_nproc)}
 PER_GPU_ENVS=${PER_GPU_ENVS:-8192}
 NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
+PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY:-16777216}
 
 WANDB_PROJECT=${WANDB_PROJECT:-terrain-aware}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_terrain_generalist}
@@ -260,6 +261,7 @@ echo "[INFO] EXP=${EXP_ARG}"
 echo "[INFO] PERCEPTION=${PERCEPTION_PRESET}"
 echo "[INFO] GPU_SELECTION=${GPU_SELECTION_LABEL}"
 echo "[INFO] NPROC=${NPROC} PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
+echo "[INFO] PhysX gpu_collision_stack_size=${PHYSX_GPU_COLLISION_STACK_SIZE} gpu_found_lost_pairs_capacity=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
 echo "[INFO] MOTION_DIR=${MOTION_DIR}"
 echo "[INFO] OBJ_PATH=${OBJ_PATH}"
 if [[ -n "${OBJ_META_PATH}" ]]; then
@@ -285,6 +287,7 @@ cmd=(
   --training.headless="${HEADLESS}"
   --simulator.config.scene.env_spacing=0.0
   --simulator.config.sim.physx.gpu_collision_stack_size="${PHYSX_GPU_COLLISION_STACK_SIZE}"
+  --simulator.config.sim.physx.gpu_found_lost_pairs_capacity="${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
   --terrain.terrain-term.obj-file-path "${OBJ_PATH}"
   --terrain.terrain-term.num-rows "${NUM_ROWS}"
   --terrain.terrain-term.num-cols "${NUM_COLS}"

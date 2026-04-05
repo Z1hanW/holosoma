@@ -90,6 +90,7 @@ PER_GPU_ENVS=${PER_GPU_ENVS:-8192}
 NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
 PHYSX_GPU_MAX_RIGID_PATCH_COUNT=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT:-4194304}
+PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY:-16777216}
 
 AUTO_PREP_DS_BANK=${AUTO_PREP_DS_BANK:-1}
 DS_PREP_CLEAN_OUT=${DS_PREP_CLEAN_OUT:-1}
@@ -1138,6 +1139,7 @@ echo "[INFO] Motion default-pose prepend enabled: ${DEFAULT_POSE_PREPEND_ENABLED
 echo "[INFO] Motion default-pose prepend duration: ${DEFAULT_POSE_PREPEND_DURATION_S}s"
 echo "[INFO] GPU_SELECTION=${GPU_SELECTION_LABEL}"
 echo "[INFO] NPROC=${NPROC} PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
+echo "[INFO] PhysX gpu_max_rigid_patch_count=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT} gpu_found_lost_pairs_capacity=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
 
 train_cmd=(
   src/holosoma/holosoma/train_agent.py
@@ -1148,6 +1150,7 @@ train_cmd=(
   --command.setup-terms.motion-command.params.motion-config.motion-file "${MOTION_DIR}"
   --algo.config.save-interval=500
   --simulator.config.sim.physx.gpu-max-rigid-patch-count="${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}"
+  --simulator.config.sim.physx.gpu-found-lost-pairs-capacity="${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
   --reward.terms.motion_global_ref_position_error_exp.weight="${ROOT_POS_W}"
   --reward.terms.motion_global_ref_orientation_error_exp.weight="${ROOT_ORI_W}"
   --reward.terms.motion_relative_body_position_error_exp.weight="${FULL_BODY_POS_W}"

@@ -92,6 +92,9 @@ class PhysxConfig:
     gpu_max_rigid_patch_count: int | None = None
     """Maximum rigid contact patch count for PhysX GPU narrow phase (IsaacSim only)."""
 
+    gpu_found_lost_pairs_capacity: int | None = None
+    """Capacity of found/lost broadphase pairs in GPU memory for PhysX (IsaacSim only)."""
+
 
 @dataclass(frozen=True)
 class MujocoXMLFilterCfg:
