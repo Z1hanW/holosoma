@@ -26,12 +26,11 @@ else
 fi
 PYTHON_BIN=${PYTHON_BIN:-"${DEFAULT_PYTHON_BIN}"}
 
-detect_nproc() {
-  if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
-    awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}"
-    return 0
-  fi
+if [[ -n "${CUDA_VISIBLE_DEVICES+x}" ]]; then
+  unset CUDA_VISIBLE_DEVICES
+fi
 
+detect_nproc() {
   local gpu_count=""
   if gpu_count="$("${PYTHON_BIN}" - <<'PY' 2>/dev/null
 import torch
@@ -56,7 +55,6 @@ PY
   echo "${gpu_count}"
 }
 
-GPU_SELECTION_LABEL=${CUDA_VISIBLE_DEVICES:-all-visible}
 WANDB_PROJECT_FROM_ENV=0
 if [[ -n "${WANDB_PROJECT+x}" ]]; then
   WANDB_PROJECT_FROM_ENV=1
@@ -1137,7 +1135,7 @@ echo "[INFO] Reference tracking reward sigmas root_pos=${ROOT_POS_SIGMA} root_or
 echo "[INFO] Box tracking reward sigmas object_pos=${OBJECT_POS_SIGMA} object_ori=${OBJECT_ORI_SIGMA}"
 echo "[INFO] Motion default-pose prepend enabled: ${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
 echo "[INFO] Motion default-pose prepend duration: ${DEFAULT_POSE_PREPEND_DURATION_S}s"
-echo "[INFO] GPU_SELECTION=${GPU_SELECTION_LABEL}"
+echo "[INFO] GPU_SELECTION=all-visible"
 echo "[INFO] NPROC=${NPROC} PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
 echo "[INFO] PhysX gpu_max_rigid_patch_count=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT} gpu_found_lost_pairs_capacity=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
 
@@ -1240,8 +1238,4 @@ echo "[INFO] Training video recording disabled."
 train_cmd+=(--logger.video.enabled=False)
 train_cmd+=(--logger.headless_recording=False)
 train_cmd+=(--logger.video.upload_to_wandb=False)
-if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
-  VISER_LOAD_URDF="${VISER_LOAD_URDF}" CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${train_cmd[@]}"
-else
-  VISER_LOAD_URDF="${VISER_LOAD_URDF}" "${train_cmd[@]}"
-fi
+VISER_LOAD_URDF="${VISER_LOAD_URDF}" "${train_cmd[@]}"

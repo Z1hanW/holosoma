@@ -18,12 +18,11 @@ else
 fi
 PYTHON_BIN=${PYTHON_BIN:-"${DEFAULT_PYTHON_BIN}"}
 
-detect_nproc() {
-  if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
-    awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}"
-    return 0
-  fi
+if [[ -n "${CUDA_VISIBLE_DEVICES+x}" ]]; then
+  unset CUDA_VISIBLE_DEVICES
+fi
 
+detect_nproc() {
   local gpu_count=""
   if gpu_count="$("${PYTHON_BIN}" - <<'PY' 2>/dev/null
 import torch
@@ -68,7 +67,6 @@ else
   EXP_ARG="exp:${EXP}"
 fi
 
-GPU_SELECTION_LABEL=${CUDA_VISIBLE_DEVICES:-all-visible}
 NPROC=${NPROC:-$(detect_nproc)}
 PER_GPU_ENVS=${PER_GPU_ENVS:-8192}
 NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
@@ -259,7 +257,7 @@ fi
 
 echo "[INFO] EXP=${EXP_ARG}"
 echo "[INFO] PERCEPTION=${PERCEPTION_PRESET}"
-echo "[INFO] GPU_SELECTION=${GPU_SELECTION_LABEL}"
+echo "[INFO] GPU_SELECTION=all-visible"
 echo "[INFO] NPROC=${NPROC} PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
 echo "[INFO] PhysX gpu_collision_stack_size=${PHYSX_GPU_COLLISION_STACK_SIZE} gpu_found_lost_pairs_capacity=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
 echo "[INFO] MOTION_DIR=${MOTION_DIR}"
@@ -323,8 +321,4 @@ cmd+=(
 )
 cmd+=("$@")
 
-if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
-  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${cmd[@]}"
-else
-  "${cmd[@]}"
-fi
+"${cmd[@]}"
