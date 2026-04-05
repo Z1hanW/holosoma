@@ -18,6 +18,36 @@ else
 fi
 PYTHON_BIN=${PYTHON_BIN:-"${DEFAULT_PYTHON_BIN}"}
 
+detect_nproc() {
+  if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}"
+    return 0
+  fi
+
+  local gpu_count=""
+  if gpu_count="$("${PYTHON_BIN}" - <<'PY' 2>/dev/null
+import torch
+
+print(torch.cuda.device_count() if torch.cuda.is_available() else 0)
+PY
+)"; then
+    gpu_count="${gpu_count//[[:space:]]/}"
+  fi
+
+  if [[ ! "${gpu_count}" =~ ^[0-9]+$ || "${gpu_count}" == "0" ]]; then
+    if command -v nvidia-smi >/dev/null 2>&1; then
+      gpu_count="$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l | tr -d '[:space:]')"
+    fi
+  fi
+
+  if [[ ! "${gpu_count}" =~ ^[0-9]+$ || "${gpu_count}" == "0" ]]; then
+    echo "[ERROR] Failed to detect available CUDA GPUs. Set NPROC explicitly." >&2
+    exit 1
+  fi
+
+  echo "${gpu_count}"
+}
+
 PERCEPTION_PRESET=${1:-${PERCEPTION_PRESET:-heightmap}}
 case "${PERCEPTION_PRESET}" in
   none|camera_depth_d435i|heightmap)
@@ -38,9 +68,8 @@ else
   EXP_ARG="exp:${EXP}"
 fi
 
-DEFAULT_CUDA_VISIBLE_DEVICES=${DEFAULT_CUDA_VISIBLE_DEVICES:-1,2,3,4,5,6,7}
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-${DEFAULT_CUDA_VISIBLE_DEVICES}}
-NPROC=${NPROC:-$(awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}")}
+GPU_SELECTION_LABEL=${CUDA_VISIBLE_DEVICES:-all-visible}
+NPROC=${NPROC:-$(detect_nproc)}
 PER_GPU_ENVS=${PER_GPU_ENVS:-8192}
 NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
@@ -229,7 +258,7 @@ fi
 
 echo "[INFO] EXP=${EXP_ARG}"
 echo "[INFO] PERCEPTION=${PERCEPTION_PRESET}"
-echo "[INFO] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+echo "[INFO] GPU_SELECTION=${GPU_SELECTION_LABEL}"
 echo "[INFO] NPROC=${NPROC} PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
 echo "[INFO] MOTION_DIR=${MOTION_DIR}"
 echo "[INFO] OBJ_PATH=${OBJ_PATH}"
@@ -291,4 +320,8 @@ cmd+=(
 )
 cmd+=("$@")
 
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${cmd[@]}"
+if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${cmd[@]}"
+else
+  "${cmd[@]}"
+fi

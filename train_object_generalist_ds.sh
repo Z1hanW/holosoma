@@ -26,8 +26,37 @@ else
 fi
 PYTHON_BIN=${PYTHON_BIN:-"${DEFAULT_PYTHON_BIN}"}
 
-DEFAULT_CUDA_VISIBLE_DEVICES=1,2,3,4,5,6
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-${DEFAULT_CUDA_VISIBLE_DEVICES}}
+detect_nproc() {
+  if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}"
+    return 0
+  fi
+
+  local gpu_count=""
+  if gpu_count="$("${PYTHON_BIN}" - <<'PY' 2>/dev/null
+import torch
+
+print(torch.cuda.device_count() if torch.cuda.is_available() else 0)
+PY
+)"; then
+    gpu_count="${gpu_count//[[:space:]]/}"
+  fi
+
+  if [[ ! "${gpu_count}" =~ ^[0-9]+$ || "${gpu_count}" == "0" ]]; then
+    if command -v nvidia-smi >/dev/null 2>&1; then
+      gpu_count="$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l | tr -d '[:space:]')"
+    fi
+  fi
+
+  if [[ ! "${gpu_count}" =~ ^[0-9]+$ || "${gpu_count}" == "0" ]]; then
+    echo "[ERROR] Failed to detect available CUDA GPUs. Set NPROC explicitly." >&2
+    exit 1
+  fi
+
+  echo "${gpu_count}"
+}
+
+GPU_SELECTION_LABEL=${CUDA_VISIBLE_DEVICES:-all-visible}
 WANDB_PROJECT_FROM_ENV=0
 if [[ -n "${WANDB_PROJECT+x}" ]]; then
   WANDB_PROJECT_FROM_ENV=1
@@ -56,8 +85,9 @@ RAW_MOTION_DIR=${RAW_MOTION_DIR:-"${DEFAULT_DS_RAW_MOTION_DIR}"}
 OBJ_DIR=${OBJ_DIR:-"${DEFAULT_DS_GEOMETRY_DIR}"}
 PREPARED_MOTION_DIR=${PREPARED_MOTION_DIR:-""}
 OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-""}
-NUM_ENVS=${NUM_ENVS:-49152}
-NPROC=${NPROC:-$(awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}")}
+NPROC=${NPROC:-$(detect_nproc)}
+PER_GPU_ENVS=${PER_GPU_ENVS:-8192}
+NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
 PHYSX_GPU_MAX_RIGID_PATCH_COUNT=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT:-4194304}
 
@@ -1106,6 +1136,8 @@ echo "[INFO] Reference tracking reward sigmas root_pos=${ROOT_POS_SIGMA} root_or
 echo "[INFO] Box tracking reward sigmas object_pos=${OBJECT_POS_SIGMA} object_ori=${OBJECT_ORI_SIGMA}"
 echo "[INFO] Motion default-pose prepend enabled: ${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
 echo "[INFO] Motion default-pose prepend duration: ${DEFAULT_POSE_PREPEND_DURATION_S}s"
+echo "[INFO] GPU_SELECTION=${GPU_SELECTION_LABEL}"
+echo "[INFO] NPROC=${NPROC} PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
 
 train_cmd=(
   src/holosoma/holosoma/train_agent.py
@@ -1205,4 +1237,8 @@ echo "[INFO] Training video recording disabled."
 train_cmd+=(--logger.video.enabled=False)
 train_cmd+=(--logger.headless_recording=False)
 train_cmd+=(--logger.video.upload_to_wandb=False)
-VISER_LOAD_URDF="${VISER_LOAD_URDF}" CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${train_cmd[@]}"
+if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  VISER_LOAD_URDF="${VISER_LOAD_URDF}" CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${train_cmd[@]}"
+else
+  VISER_LOAD_URDF="${VISER_LOAD_URDF}" "${train_cmd[@]}"
+fi
