@@ -934,7 +934,8 @@ if [[ -n "${EFFECTIVE_SEQUENCE_NAME}" ]]; then
 fi
 if [[ "${DATA_MODE}" == "mix-curriculum" ]]; then
   MIX_NAIVE_CLEAN_NOISY_CURRICULUM_FLAG=1
-  echo "[INFO] mix-curriculum enabled: clean=sub* noisy=non-sub* schedule=100/0 -> 90/10@1500 -> 80/20@2000 -> 70/30@2500 -> 60/40@3000 -> 50/50@4000+"
+  echo "[WARN] DATA_MODE=mix-curriculum requested, but fixed env->clip/object assignment disables online clip-group curriculum."
+  echo "[WARN] Proceeding with a mixed bank plus uniform env-to-clip allocation; per-clip timestep curriculum remains enabled."
 fi
 
 case "${DATA_MODE}" in
@@ -1146,7 +1147,7 @@ train_cmd=(
   --training.project="${WANDB_PROJECT}"
   --training.num-envs="${NUM_ENVS}"
   --command.setup-terms.motion-command.params.motion-config.motion-file "${MOTION_DIR}"
-  --algo.config.save-interval=500
+  --algo.config.save-interval=100
   --simulator.config.sim.physx.gpu-max-rigid-patch-count="${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}"
   --simulator.config.sim.physx.gpu-found-lost-pairs-capacity="${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
   --reward.terms.motion_global_ref_position_error_exp.weight="${ROOT_POS_W}"
@@ -1216,9 +1217,6 @@ fi
 if [[ "${CURRICULUM}" == "1" || "${CURRICULUM,,}" == "true" ]]; then
   echo "[INFO] Enabling w-object curriculum."
   train_cmd+=(--curriculum.setup-terms.w-object-difficulty-curriculum.params.enabled=True)
-fi
-if [[ "${DATA_MODE}" == "mix-curriculum" ]]; then
-  train_cmd+=(--command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.enabled=True)
 fi
 train_cmd+=("${EXTRA_ARGS[@]}")
 train_cmd+=(logger:wandb)

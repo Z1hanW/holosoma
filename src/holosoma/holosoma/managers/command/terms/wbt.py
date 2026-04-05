@@ -2757,6 +2757,15 @@ class MotionCommand(CommandTermBase):
     def _init_clip_sampling(self) -> None:
         if not self.multi_clip:
             return
+        if self._fixed_clip_ids is not None:
+            self._clean_noisy_clip_curriculum_enabled = False
+            self._clean_clip_mask = None
+            self._noisy_clip_mask = None
+            logger.info(
+                "Fixed env-to-clip assignment is active; bypassing clip-level weighting curricula. "
+                "Only within-clip timestep curriculum remains enabled."
+            )
+            return
         self._configure_clean_noisy_clip_curriculum()
         strategy = self.clip_weighting_strategy
         if strategy == "uniform_step":
