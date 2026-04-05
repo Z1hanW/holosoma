@@ -56,7 +56,7 @@ RAW_MOTION_DIR=${RAW_MOTION_DIR:-"${DEFAULT_DS_RAW_MOTION_DIR}"}
 OBJ_DIR=${OBJ_DIR:-"${DEFAULT_DS_GEOMETRY_DIR}"}
 PREPARED_MOTION_DIR=${PREPARED_MOTION_DIR:-""}
 OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-""}
-NUM_ENVS=${NUM_ENVS:-71680}
+NUM_ENVS=${NUM_ENVS:-57344}
 NPROC=${NPROC:-$(awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}")}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
 PHYSX_GPU_MAX_RIGID_PATCH_COUNT=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT:-4194304}
@@ -746,21 +746,47 @@ PY
 if [[ "$#" -gt 0 ]]; then
   first_arg_normalized=$(echo "$1" | tr '[:upper:]' '[:lower:]')
   case "${first_arg_normalized}" in
-    pure-sd|mix-naive)
-      DATA_MODE="${first_arg_normalized}"
+    pure-sd|pure-ds)
+      DATA_MODE="pure-sd"
+      shift
+      ;;
+    mix-naive)
+      DATA_MODE="mix-naive"
+      shift
+      ;;
+    mix-curriculum|mix-clean-noisy|mix-curr)
+      DATA_MODE="mix-curriculum"
       shift
       ;;
   esac
 fi
 DATA_MODE=$(echo "${DATA_MODE}" | tr '[:upper:]' '[:lower:]')
 case "${DATA_MODE}" in
-  pure-sd|mix-naive)
+  pure-ds)
+    DATA_MODE="pure-sd"
+    ;;
+  mix-clean-noisy|mix-curr)
+    DATA_MODE="mix-curriculum"
+    ;;
+esac
+case "${DATA_MODE}" in
+  pure-sd|mix-naive|mix-curriculum)
     ;;
   *)
-    echo "[ERROR] Unsupported DATA_MODE='${DATA_MODE}'. Use one of: pure-sd, mix-naive" >&2
+    echo "[ERROR] Unsupported DATA_MODE='${DATA_MODE}'. Use one of: pure-sd, mix-naive, mix-curriculum" >&2
     exit 2
     ;;
 esac
+if [[ "${DATA_MODE}" == "mix-naive" && -n "${MIX_NAIVE_CLEAN_NOISY_CURRICULUM+x}" ]]; then
+  legacy_mix_curriculum_normalized=$(echo "${MIX_NAIVE_CLEAN_NOISY_CURRICULUM}" | tr '[:upper:]' '[:lower:]')
+  case "${legacy_mix_curriculum_normalized}" in
+    1|true|yes|on)
+      echo "[ERROR] MIX_NAIVE_CLEAN_NOISY_CURRICULUM is no longer supported with DATA_MODE=mix-naive." >&2
+      echo "[ERROR] Use the third mode directly instead: bash train_object_generalist_ds.sh mix-curriculum" >&2
+      exit 2
+      ;;
+  esac
+fi
 if [[ "${DATA_MODE}" == "pure-sd" ]]; then
   resolve_reward_profile_defaults "${PURE_SD_REWARD_PROFILE}" "${PURE_SD_REWARD_PROFILE_RAW}"
 else
@@ -826,6 +852,11 @@ if [[ -n "${RESUME_CKPT}" ]]; then
     exit 1
   fi
   echo "[INFO] Resume checkpoint: ${RESUME_CKPT}"
+else
+  echo "[INFO] No resume checkpoint requested; training will start from scratch."
+  if [[ -n "${WANDB_RUN_ID}" || -n "${WANDB_RESUME}" ]]; then
+    echo "[WARN] WANDB_RUN_ID/WANDB_RESUME is set without RESUME_CKPT. Training still starts without a model checkpoint, but W&B may attach to an existing run."
+  fi
 fi
 
 AUTO_ATTACH_WANDB_RUN=0
@@ -872,12 +903,16 @@ fi
 if [[ -n "${EFFECTIVE_SEQUENCE_NAME}" ]]; then
   echo "[INFO] Effective run name: ${EFFECTIVE_SEQUENCE_NAME}"
 fi
+if [[ "${DATA_MODE}" == "mix-curriculum" ]]; then
+  MIX_NAIVE_CLEAN_NOISY_CURRICULUM_FLAG=1
+  echo "[INFO] mix-curriculum enabled: clean=sub* noisy=non-sub* schedule=100/0 -> 90/10@1500 -> 80/20@2000 -> 70/30@2500 -> 60/40@3000 -> 50/50@4000+"
+fi
 
 case "${DATA_MODE}" in
   pure-sd)
     MODE_DEFAULT_MOTION_DIR="${DEFAULT_DS_PREPARED_MOTION_DIR}"
     ;;
-  mix-naive)
+  mix-naive|mix-curriculum)
     MODE_DEFAULT_MOTION_DIR="${DEFAULT_MIX_NAIVE_MOTION_DIR}"
     ;;
 esac
@@ -939,7 +974,7 @@ if [[ "${STRICT_DEFAULT_DS_BANK_VALIDATION}" != "0" ]]; then
         validate_default_ds_bank "${MOTION_DIR}" 43
       fi
       ;;
-    mix-naive)
+    mix-naive|mix-curriculum)
       if [[ "$(realpath "${MOTION_DIR}")" == "$(realpath "${DEFAULT_MIX_NAIVE_MOTION_DIR}")" ]]; then
         validate_mix_naive_bank "${MOTION_DIR}" 105 43 62
       fi
@@ -1148,6 +1183,9 @@ fi
 if [[ "${CURRICULUM}" == "1" || "${CURRICULUM,,}" == "true" ]]; then
   echo "[INFO] Enabling w-object curriculum."
   train_cmd+=(--curriculum.setup-terms.w-object-difficulty-curriculum.params.enabled=True)
+fi
+if [[ "${DATA_MODE}" == "mix-curriculum" ]]; then
+  train_cmd+=(--command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.enabled=True)
 fi
 train_cmd+=("${EXTRA_ARGS[@]}")
 train_cmd+=(logger:wandb)

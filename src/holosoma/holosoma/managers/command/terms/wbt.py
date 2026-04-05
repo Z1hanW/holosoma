@@ -14,9 +14,15 @@ import torch
 import torch.nn.functional as F
 from loguru import logger
 
-from holosoma.config_types.command import MotionConfig, NoiseToInitialPoseConfig, SparseObjectGoalConfig
+from holosoma.config_types.command import (
+    CleanNoisyClipCurriculumConfig,
+    MotionConfig,
+    NoiseToInitialPoseConfig,
+    SparseObjectGoalConfig,
+)
 from holosoma.envs.wbt.wbt_manager import WholeBodyTrackingManager
 from holosoma.managers.command.base import CommandTermBase
+from holosoma.utils.clip_sampling import build_prefix_mask, piecewise_constant_schedule_value, project_group_weights
 from holosoma.utils.path import resolve_data_file_path
 from holosoma.utils.object_geometry import load_urdf_geometry_extents
 from holosoma.utils.rotations import (
@@ -1313,6 +1319,10 @@ class MotionCommand(CommandTermBase):
         self.command_only_env_mask: torch.Tensor | None = None
         self._training_iteration: int | None = None
         self._training_total_iterations: int | None = None
+        self._clean_noisy_clip_curriculum_cfg: CleanNoisyClipCurriculumConfig | None = None
+        self._clean_noisy_clip_curriculum_enabled = False
+        self._clean_clip_mask: torch.Tensor | None = None
+        self._noisy_clip_mask: torch.Tensor | None = None
         self.pickup_anchor_set: torch.Tensor | None = None
         self.pickup_anchor_root_pos_w: torch.Tensor | None = None
         self.pickup_anchor_root_quat_w: torch.Tensor | None = None
@@ -1355,6 +1365,7 @@ class MotionCommand(CommandTermBase):
         """Expose the current PPO iteration so command curriculum can follow the training schedule exactly."""
         self._training_iteration = int(iteration)
         self._training_total_iterations = None if total_iterations is None else int(total_iterations)
+        self._refresh_current_clip_sampling_weights()
 
     def setup(self) -> None:
         self.num_envs = self._env.num_envs
@@ -1388,6 +1399,10 @@ class MotionCommand(CommandTermBase):
         self.command_only_env_mask = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
         self._training_iteration = 0
         self._training_total_iterations = None
+        self._clean_noisy_clip_curriculum_cfg = self.motion_cfg.clean_noisy_clip_curriculum
+        self._clean_noisy_clip_curriculum_enabled = bool(self._clean_noisy_clip_curriculum_cfg.enabled)
+        self._clean_clip_mask = None
+        self._noisy_clip_mask = None
         self.pickup_anchor_set = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
         self.pickup_anchor_root_pos_w = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
         self.pickup_anchor_root_quat_w = torch.zeros((self.num_envs, 4), device=self.device, dtype=torch.float32)
@@ -1494,6 +1509,7 @@ class MotionCommand(CommandTermBase):
         self.min_weight_factor = self.motion_cfg.min_weight_factor
         self.max_weight_factor = self.motion_cfg.max_weight_factor
         self._clip_sampling_weights: torch.Tensor | None = None
+        self._raw_clip_sampling_weights: torch.Tensor | None = None
         self._base_clip_weights: torch.Tensor | None = None
         self._clip_success_counts: torch.Tensor | None = None
         self._clip_total_counts: torch.Tensor | None = None
@@ -2407,9 +2423,113 @@ class MotionCommand(CommandTermBase):
         valid = torch.clamp(valid, min=1)
         return valid.to(dtype=torch.float32)
 
+    def _configure_clean_noisy_clip_curriculum(self) -> None:
+        if not self.multi_clip:
+            self._clean_noisy_clip_curriculum_enabled = False
+            self._clean_clip_mask = None
+            self._noisy_clip_mask = None
+            return
+
+        cfg = self._clean_noisy_clip_curriculum_cfg
+        if cfg is None or not cfg.enabled:
+            self._clean_noisy_clip_curriculum_enabled = False
+            self._clean_clip_mask = None
+            self._noisy_clip_mask = None
+            return
+
+        clean_mask = build_prefix_mask(self.motion.clip_ids, cfg.clean_clip_name_prefixes).to(device=self.device)
+        noisy_mask = ~clean_mask
+        if not torch.any(clean_mask):
+            logger.warning(
+                "clean_noisy_clip_curriculum is enabled but no clips matched clean prefixes {}. Disabling it.",
+                cfg.clean_clip_name_prefixes,
+            )
+            self._clean_noisy_clip_curriculum_enabled = False
+            self._clean_clip_mask = None
+            self._noisy_clip_mask = None
+            return
+        if not torch.any(noisy_mask):
+            logger.warning(
+                "clean_noisy_clip_curriculum is enabled but all clips matched clean prefixes {}. Disabling it.",
+                cfg.clean_clip_name_prefixes,
+            )
+            self._clean_noisy_clip_curriculum_enabled = False
+            self._clean_clip_mask = None
+            self._noisy_clip_mask = None
+            return
+
+        if len(cfg.stage_start_iterations) != len(cfg.clean_group_probabilities):
+            raise ValueError(
+                "clean_noisy_clip_curriculum.stage_start_iterations and clean_group_probabilities "
+                f"must have the same length, got {len(cfg.stage_start_iterations)} and "
+                f"{len(cfg.clean_group_probabilities)}."
+            )
+        if not cfg.stage_start_iterations:
+            raise ValueError("clean_noisy_clip_curriculum requires at least one schedule stage.")
+        if any(value < 0.0 or value > 1.0 for value in cfg.clean_group_probabilities):
+            raise ValueError(
+                "clean_noisy_clip_curriculum.clean_group_probabilities must stay in [0, 1], "
+                f"got {cfg.clean_group_probabilities}."
+            )
+
+        self._clean_clip_mask = clean_mask
+        self._noisy_clip_mask = noisy_mask
+        logger.info(
+            "Enabled clean/noisy clip curriculum: {} clean clips, {} noisy clips, stages={} probs={}.",
+            int(clean_mask.sum().item()),
+            int(noisy_mask.sum().item()),
+            list(cfg.stage_start_iterations),
+            [float(value) for value in cfg.clean_group_probabilities],
+        )
+
+    def _current_clean_group_probability(self) -> float | None:
+        cfg = self._clean_noisy_clip_curriculum_cfg
+        if not self._clean_noisy_clip_curriculum_enabled or cfg is None:
+            return None
+        return piecewise_constant_schedule_value(
+            self._training_iteration,
+            cfg.stage_start_iterations,
+            cfg.clean_group_probabilities,
+        )
+
+    def _refresh_current_clip_sampling_weights(self) -> None:
+        if not self.multi_clip:
+            return
+
+        if self._raw_clip_sampling_weights is None:
+            return
+
+        weights = self._raw_clip_sampling_weights
+        if self._clean_noisy_clip_curriculum_enabled and self._clean_clip_mask is not None:
+            clean_prob = self._current_clean_group_probability()
+            if clean_prob is not None:
+                weights = project_group_weights(
+                    weights,
+                    clean_mask=self._clean_clip_mask,
+                    clean_group_probability=clean_prob,
+                )
+        total = torch.sum(weights)
+        if torch.isfinite(total) and total.item() > 0.0:
+            self._clip_sampling_weights = weights / total
+        else:
+            self._clip_sampling_weights = None
+
+    def get_clean_noisy_clip_curriculum_log_state(self) -> dict[str, float]:
+        """Return scalar clean/noisy curriculum metrics for training logs."""
+        clean_prob = self._current_clean_group_probability()
+        if clean_prob is None or self._clean_clip_mask is None or self._clip_sampling_weights is None:
+            return {}
+        clean_weight = float(self._clip_sampling_weights[self._clean_clip_mask].sum().item())
+        return {
+            "clean_clip_target_prob": float(clean_prob),
+            "clean_clip_sample_weight": clean_weight,
+            "noisy_clip_sample_weight": max(0.0, 1.0 - clean_weight),
+        }
+
     def _init_clip_sampling(self) -> None:
         if not self.multi_clip:
             return
+        self._configure_clean_noisy_clip_curriculum()
         strategy = self.clip_weighting_strategy
         if strategy == "uniform_step":
             weights = self._valid_start_counts()
@@ -2419,12 +2539,13 @@ class MotionCommand(CommandTermBase):
             raise ValueError(f"Unknown clip_weighting_strategy '{strategy}'.")
 
         weights = weights / weights.sum()
-        self._clip_sampling_weights = weights
+        self._raw_clip_sampling_weights = weights
 
         if strategy == "success_rate_adaptive":
             self._base_clip_weights = weights.clone()
             self._clip_success_counts = torch.zeros(self.motion.num_clips, device=self.device)
             self._clip_total_counts = torch.zeros(self.motion.num_clips, device=self.device)
+        self._refresh_current_clip_sampling_weights()
 
     def _update_clip_success_stats(self, env_ids: torch.Tensor) -> None:
         if not self.multi_clip or self.clip_weighting_strategy != "success_rate_adaptive":
@@ -2474,9 +2595,10 @@ class MotionCommand(CommandTermBase):
         factors = torch.clamp(inv_success, self.min_weight_factor, self.max_weight_factor)
         weights = self._base_clip_weights * factors
         if weights.sum() > 1e-9:
-            self._clip_sampling_weights = weights / weights.sum()
+            self._raw_clip_sampling_weights = weights / weights.sum()
         else:
-            self._clip_sampling_weights = self._base_clip_weights.clone()
+            self._raw_clip_sampling_weights = self._base_clip_weights.clone()
+        self._refresh_current_clip_sampling_weights()
 
     @staticmethod
     def _clamp01(value: float) -> float:
@@ -3743,7 +3865,8 @@ class MotionCommand(CommandTermBase):
         if self._clip_total_counts is not None:
             self._clip_total_counts.zero_()
         if self.clip_weighting_strategy == "success_rate_adaptive" and self._base_clip_weights is not None:
-            self._clip_sampling_weights = self._base_clip_weights.clone()
+            self._raw_clip_sampling_weights = self._base_clip_weights.clone()
+        self._refresh_current_clip_sampling_weights()
         self._sparse_goal_reset_counter = 0
         self._command_only_env_prob = 0.0
         self._command_only_env_fraction_last_reset = 0.0
@@ -3877,6 +4000,27 @@ class MotionCommand(CommandTermBase):
             device=self.device,
             dtype=torch.float32,
         )
+        clean_prob = self._current_clean_group_probability()
+        if clean_prob is not None and self._clean_clip_mask is not None and self._clip_sampling_weights is not None:
+            clean_weight = float(self._clip_sampling_weights[self._clean_clip_mask].sum().item())
+            self.metrics["motion/clean_clip_target_prob"] = torch.full(
+                (self.num_envs,),
+                float(clean_prob),
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self.metrics["motion/clean_clip_sample_weight"] = torch.full(
+                (self.num_envs,),
+                clean_weight,
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self.metrics["motion/noisy_clip_sample_weight"] = torch.full(
+                (self.num_envs,),
+                max(0.0, 1.0 - clean_weight),
+                device=self.device,
+                dtype=torch.float32,
+            )
 
         if self._sparse_goal_curriculum_enabled:
             self.metrics["goal/training_iteration"] = torch.full(

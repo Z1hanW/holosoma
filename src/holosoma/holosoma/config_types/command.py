@@ -199,6 +199,23 @@ class SparseObjectGoalConfig:
 
 
 @dataclass(frozen=True)
+class CleanNoisyClipCurriculumConfig:
+    """Iteration-driven clean/noisy clip mixing schedule."""
+
+    enabled: bool = False
+    """Enable clip-group sampling curriculum."""
+
+    clean_clip_name_prefixes: list[str] = field(default_factory=lambda: ["sub"])
+    """Clip-name prefixes treated as clean examples. Other clips are treated as noisy."""
+
+    stage_start_iterations: list[int] = field(default_factory=lambda: [0, 1500, 2000, 2500, 3000, 4000])
+    """Iteration milestones for the piecewise-constant clean/noisy sampling schedule."""
+
+    clean_group_probabilities: list[float] = field(default_factory=lambda: [1.0, 0.9, 0.8, 0.7, 0.6, 0.5])
+    """Target total sampling probability assigned to the clean clip group at each milestone."""
+
+
+@dataclass(frozen=True)
 class MotionConfig:
     """Motion related configuration for Whole Body Tracking.
 
@@ -319,6 +336,9 @@ class MotionConfig:
     ``robot.object.scale`` and observations should expose the scaled dimensions
     instead of the raw motion-bank metadata.
     """
+
+    clean_noisy_clip_curriculum: CleanNoisyClipCurriculumConfig = field(default_factory=CleanNoisyClipCurriculumConfig)
+    """Optional clip-group curriculum for mixed clean/noisy motion banks."""
 
     # noise related
     noise_to_initial_pose: NoiseToInitialPoseConfig = field(default_factory=NoiseToInitialPoseConfig)

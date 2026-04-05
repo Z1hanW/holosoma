@@ -1677,6 +1677,8 @@ class PPO(BaseAlgo):
             train_logs["command_goal_training_iteration"] = float(getattr(motion_command, "_training_iteration", it) or it)
             train_logs["command_only_env_prob"] = float(getattr(motion_command, "_command_only_env_prob", 0.0))
             train_logs["external_goal_prob"] = float(getattr(motion_command, "_sparse_goal_external_prob", 0.0))
+            if hasattr(motion_command, "get_clean_noisy_clip_curriculum_log_state"):
+                train_logs.update(motion_command.get_clean_noisy_clip_curriculum_log_state())
             if hasattr(motion_command, "get_sparse_goal_external_mask"):
                 train_logs["manual_goal_is_external_fraction"] = float(
                     motion_command.get_sparse_goal_external_mask().float().mean().item()
