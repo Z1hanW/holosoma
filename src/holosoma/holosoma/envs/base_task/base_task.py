@@ -446,10 +446,24 @@ class BaseTask:
         if hasattr(self, "_viser_live") and getattr(self._viser_live, "enabled", False):
             self._viser_live.apply_pending_controls()
             self._viser_live.wait_if_paused()
+        debug_heartbeat = os.environ.get("HOLOSOMA_DEBUG_HEARTBEAT", "").lower() not in ("", "0", "false", "no")
         actions = actor_state["actions"]
+        if debug_heartbeat:
+            logger.info(
+                "Heartbeat: BaseTask.step begin (num_envs={}, action_shape={})",
+                self.num_envs,
+                tuple(actions.shape),
+            )
         self._pre_physics_step(actions)
+        if debug_heartbeat:
+            logger.info("Heartbeat: BaseTask.step after _pre_physics_step")
         self._physics_step()
+        if debug_heartbeat:
+            logger.info("Heartbeat: BaseTask.step after _physics_step")
         self._post_physics_step()
+        if debug_heartbeat:
+            reset_count = int(self.reset_buf.sum().item()) if self.reset_buf is not None else 0
+            logger.info("Heartbeat: BaseTask.step after _post_physics_step (reset_envs={})", reset_count)
         return self.obs_buf_dict, self.rew_buf, self.reset_buf, self.extras
 
     def _pre_physics_step(self, actions):

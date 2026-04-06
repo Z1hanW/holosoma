@@ -714,6 +714,7 @@ class PPO(BaseAlgo):
             obs_dict[obs_key] = obs_dict[obs_key].to(self.device)
 
         run_end_iteration = self.current_learning_iteration + self.config.num_learning_iterations
+        debug_heartbeat = os.environ.get("HOLOSOMA_DEBUG_HEARTBEAT", "").lower() not in ("", "0", "false", "no")
         for it in range(
             self.current_learning_iteration,
             run_end_iteration,
@@ -728,11 +729,19 @@ class PPO(BaseAlgo):
             if self.is_multi_gpu:
                 self._synchronize_curriculum_metrics()
 
+            if debug_heartbeat:
+                logger.info("Heartbeat: iter {} starting rollout", it)
             with self.logging_helper.record_collection_time():
                 obs_dict = self._rollout_step(obs_dict)
+            if debug_heartbeat:
+                logger.info("Heartbeat: iter {} finished rollout", it)
 
+            if debug_heartbeat:
+                logger.info("Heartbeat: iter {} starting training_step", it)
             with self.logging_helper.record_learn_time():
                 loss_dict = self._training_step()
+            if debug_heartbeat:
+                logger.info("Heartbeat: iter {} finished training_step", it)
 
             if self.is_main_process:
                 self._post_epoch_logging(it, loss_dict)
@@ -842,8 +851,9 @@ class PPO(BaseAlgo):
         return self.bc_loss_coef >= 1.0
 
     def _rollout_step(self, obs_dict):
+        debug_heartbeat = os.environ.get("HOLOSOMA_DEBUG_HEARTBEAT", "").lower() not in ("", "0", "false", "no")
         with torch.no_grad():
-            for _ in range(self.config.num_steps_per_env):
+            for rollout_step in range(self.config.num_steps_per_env):
                 # Environment step
                 actor_obs_raw = torch.cat([obs_dict[k] for k in self.actor_obs_keys], dim=1)
                 critic_obs_raw = torch.cat([obs_dict[k] for k in self.critic_obs_keys], dim=1)
@@ -910,7 +920,26 @@ class PPO(BaseAlgo):
                     elif self.take_teacher_actions:
                         actions_to_step = teacher_actions
 
+                if debug_heartbeat:
+                    logger.info(
+                        "Heartbeat: iter {} rollout_step {}/{} before env.step",
+                        self.current_learning_iteration,
+                        rollout_step + 1,
+                        self.config.num_steps_per_env,
+                    )
                 obs_dict, rewards, dones, infos = self.env.step({"actions": actions_to_step})
+                if debug_heartbeat:
+                    timeout_count = 0
+                    if isinstance(infos, dict) and "time_outs" in infos and infos["time_outs"] is not None:
+                        timeout_count = int(infos["time_outs"].sum().item())
+                    logger.info(
+                        "Heartbeat: iter {} rollout_step {}/{} after env.step (done_envs={}, timeout_envs={})",
+                        self.current_learning_iteration,
+                        rollout_step + 1,
+                        self.config.num_steps_per_env,
+                        int(dones.sum().item()),
+                        timeout_count,
+                    )
 
                 for obs_key in obs_dict:
                     obs_dict[obs_key] = obs_dict[obs_key].to(self.device)

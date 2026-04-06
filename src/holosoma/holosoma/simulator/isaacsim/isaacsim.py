@@ -710,23 +710,25 @@ class IsaacSim(BaseSimulator):
 
         object_spec_by_urdf = {urdf_path: (object_name, urdf_path) for object_name, urdf_path in object_specs}
         filtered_specs: list[tuple[str, str]] = []
-        used_names: set[str] = set()
+        missing_motion_urdfs: list[str] = []
         for urdf_path in motion_object_urdfs:
             spec = object_spec_by_urdf.get(urdf_path)
             if spec is None:
-                base_name = self._sanitize_object_name(pathlib.Path(urdf_path).stem)
-                object_name = base_name
-                suffix = 1
-                while object_name in used_names:
-                    suffix += 1
-                    object_name = f"{base_name}_{suffix}"
-                spec = (object_name, urdf_path)
-            used_names.add(spec[0])
+                missing_motion_urdfs.append(urdf_path)
+                continue
             filtered_specs.append(spec)
 
         if not filtered_specs:
             raise RuntimeError(
-                f"Failed to resolve any active training objects from motion metadata for object spec '{object_path_spec}'."
+                "Failed to resolve any active training objects from the intersection of "
+                f"object spec '{object_path_spec}' and motion metadata."
+            )
+        if missing_motion_urdfs:
+            logger.warning(
+                "Ignoring {} motion-bank URDF(s) that are absent from object spec '{}'. Sample: {}",
+                len(missing_motion_urdfs),
+                object_path_spec,
+                missing_motion_urdfs[:4],
             )
         if len(filtered_specs) != len(object_specs):
             logger.info(
@@ -1023,7 +1025,7 @@ class IsaacSim(BaseSimulator):
                     object_specs,
                     num_envs=self.training_config.num_envs,
                 )
-                self._object_contact_filter_prim_paths_expr.append("/World/envs/env_.*/Object/baseLink")
+                self._object_contact_filter_prim_paths_expr.append("{ENV_REGEX_NS}/Object/baseLink")
                 logger.info(
                     "Loaded heterogeneous training object bank: {} unique URDF(s) assigned across {} envs.",
                     len(object_specs),
@@ -1046,7 +1048,7 @@ class IsaacSim(BaseSimulator):
                     self._object_urdf_by_name[object_name] = str(pathlib.Path(object_asset_urdf_path).resolve())
                     # The current URDF box assets expose a single rigid body under `baseLink`.
                     # Filter against that rigid body prim instead of the Xform root or collision child.
-                    self._object_contact_filter_prim_paths_expr.append(f"{object_cfg.prim_path}/baseLink")
+                    self._object_contact_filter_prim_paths_expr.append(f"{{ENV_REGEX_NS}}/{prim_suffix}/baseLink")
 
                 logger.info(
                     "Loaded {} training object URDF(s): {}",
@@ -1483,9 +1485,10 @@ class IsaacSim(BaseSimulator):
 
         if self._object_contact_sensors:
             logger.info(
-                "Created {} object-filtered contact sensor(s): {}",
+                "Created {} object-filtered contact sensor(s): {} with filter paths {}",
                 len(self._object_contact_sensors),
                 sorted(self._object_contact_sensors.keys()),
+                filter_prim_paths_expr,
             )
 
     def get_object_contact_force_history(self, body_names: list[str] | tuple[str, ...]) -> torch.Tensor:
@@ -2169,11 +2172,14 @@ class IsaacSim(BaseSimulator):
         - Uses IsaacLab's scene.write_data_to_sim() for efficient batch synchronization
         - Only performs sync if state adapter indicates dirty state (performance optimization)
         """
+        debug_state_sync = os.environ.get("HOLOSOMA_DEBUG_STATE_SYNC", "").lower() not in ("", "0", "false", "no")
         if not self._state_adapter.is_dirty():
-            logger.debug("No object state changes to sync")
+            if debug_state_sync:
+                logger.info("State sync skipped: no object state changes to sync")
             return
 
-        logger.debug("Syncing object state changes to simulation")
+        if debug_state_sync:
+            logger.info("State sync begin")
 
         # Single call to sync all object state changes
         self.scene.write_data_to_sim()
@@ -2181,4 +2187,5 @@ class IsaacSim(BaseSimulator):
         # Clear dirty flag via state adapter
         self._state_adapter.clear_dirty()
 
-        logger.debug("All object state changes synced to simulation")
+        if debug_state_sync:
+            logger.info("State sync end")
