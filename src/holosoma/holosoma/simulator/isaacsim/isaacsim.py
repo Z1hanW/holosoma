@@ -132,6 +132,7 @@ class IsaacSim(BaseSimulator):
         self._resolved_training_object_specs: list[tuple[str, str]] = []
         self._env_object_urdf_paths: list[str] = []
         self._heterogeneous_object_env_assignment = False
+        self._heterogeneous_object_single_slot_enabled = False
         self._object_contact_filter_prim_paths_expr: list[str] = []
         self._object_contact_sensors: dict[str, ContactSensor] = {}
         self._required_object_contact_sensor_body_names = self._resolve_required_object_contact_sensor_body_names(
@@ -250,13 +251,24 @@ class IsaacSim(BaseSimulator):
         if getattr(object_cfg, "enabled", False) and object_path_spec:
             self._resolved_training_object_specs = self._resolve_training_object_specs(object_path_spec)
             self._heterogeneous_object_env_assignment = len(self._resolved_training_object_specs) > 1
-            if self._heterogeneous_object_env_assignment and replicate_physics:
+            self._heterogeneous_object_single_slot_enabled = (
+                self._heterogeneous_object_env_assignment
+                and self._can_use_single_slot_heterogeneous_objects(self._resolved_training_object_specs)
+            )
+            if self._heterogeneous_object_single_slot_enabled and replicate_physics:
                 logger.warning(
                     "Detected {} training objects for object generalist. "
                     "Forcing InteractiveScene.replicate_physics=False so each env can keep a single fixed object.",
                     len(self._resolved_training_object_specs),
                 )
                 replicate_physics = False
+            elif self._heterogeneous_object_env_assignment:
+                logger.info(
+                    "Detected {} training objects for object generalist. "
+                    "Using one object slot per asset across all envs because shared-slot multi-asset spawning "
+                    "is not stable for mixed URDF banks.",
+                    len(self._resolved_training_object_specs),
+                )
 
         scene_config: InteractiveSceneCfg = InteractiveSceneCfg(
             num_envs=self.training_config.num_envs,
@@ -429,6 +441,22 @@ class IsaacSim(BaseSimulator):
         candidate = pathlib.Path(path_str)
         if not candidate.is_absolute() and not path_str.startswith("holosoma/data"):
             candidate = (base_dir / path_str).resolve()
+            if candidate.exists():
+                return str(candidate)
+
+            # OMOMO carry banks may store retargeting asset paths like
+            # "models/largebox/largebox.urdf" relative to the repo retargeting root
+            # instead of the converted clip directory.
+            repo_root = pathlib.Path(__file__).resolve().parents[5]
+            fallback_candidates = (
+                repo_root / "src" / "holosoma_retargeting" / path_str,
+                repo_root / "src" / "holosoma_retargeting_my" / path_str,
+            )
+            for fallback in fallback_candidates:
+                fallback_resolved = fallback.resolve()
+                if fallback_resolved.exists():
+                    return str(fallback_resolved)
+
             return str(candidate)
         return str(pathlib.Path(resolve_data_file_path(path_str)).resolve())
 
@@ -779,6 +807,18 @@ class IsaacSim(BaseSimulator):
             ),
         )
 
+    @staticmethod
+    def _can_use_single_slot_heterogeneous_objects(object_specs: list[tuple[str, str]]) -> bool:
+        """Whether heterogeneous objects can safely share one `RigidObject` slot.
+
+        Mixed URDF banks often expand to different rigid-body prim hierarchies after import. IsaacLab's
+        `RigidObject` view resolution assumes that every matched instance shares the same hierarchy as env_0.
+        When that assumption is false, the resulting PhysX view only binds a subset of environments, which then
+        explodes later as an env/object instance-count mismatch during state reads. Keep the shared-slot path
+        disabled for URDF-based banks and fall back to one slot per asset instead.
+        """
+        return False
+
     def _setup_scene(self) -> None:
         self._load_scene_config()
 
@@ -1000,8 +1040,9 @@ class IsaacSim(BaseSimulator):
                     )
 
             self._object_urdf_by_name = {}
+            self._env_object_urdf_paths = []
             self._object_contact_filter_prim_paths_expr = []
-            if self._heterogeneous_object_env_assignment:
+            if self._heterogeneous_object_env_assignment and self._heterogeneous_object_single_slot_enabled:
                 object_assets_cfg = [
                     self._build_object_spawn_cfg(object_asset_urdf_path, object_scale=object_scale)
                     for _, object_asset_urdf_path in object_specs
@@ -1982,6 +2023,31 @@ class IsaacSim(BaseSimulator):
         self.all_root_states[actor_indices, :13] = states
         self.write_state_updates()
 
+    def _select_env_rows(self, rows: torch.Tensor, env_ids: torch.Tensor, *, label: str) -> torch.Tensor:
+        """Select per-env rows safely from IsaacLab asset tensors.
+
+        Some asset tensors are expected to be shaped `[num_envs, ...]`, but in failure modes we want a
+        synchronous, explicit error instead of a CUDA device-side assert from an out-of-bounds advanced index.
+        """
+        if rows.ndim == 1:
+            rows = rows.unsqueeze(0)
+
+        if rows.shape[0] == 1 and env_ids.numel() > 1:
+            return rows.expand(env_ids.numel(), *rows.shape[1:]).clone()
+
+        if env_ids.numel() == 0:
+            return rows[:0]
+
+        env_ids = env_ids.to(device=rows.device, dtype=torch.long)
+        max_env_id = int(env_ids.max().item())
+        if max_env_id >= rows.shape[0]:
+            raise RuntimeError(
+                f"{label} has only {rows.shape[0]} row(s), but env_ids request index {max_env_id}. "
+                f"This indicates an env/object instance-count mismatch."
+            )
+
+        return rows.index_select(0, env_ids)
+
     def get_actor_initial_poses(self, names: ActorNames, env_ids: EnvIds | None = None) -> ActorPoses:
         """See base class."""
         if not names:
@@ -2005,14 +2071,24 @@ class IsaacSim(BaseSimulator):
                 # Get scene object pose from scene collection
                 scene_collection = self.scene.rigid_objects["usd_scene_objects"]
                 object_index = self._get_object_index_in_collection(obj_name, scene_collection)
-                default_state = scene_collection.data.default_object_state[env_ids, object_index]
-                pose_batches.append(default_state[:, [0, 1, 2, 4, 5, 6, 3]])
+                world_state = self._select_env_rows(
+                    scene_collection.data.object_state_w[:, object_index],
+                    env_ids,
+                    label=f"scene object '{obj_name}' world state",
+                )
+                pose_batches.append(world_state[:, [0, 1, 2, 4, 5, 6, 3]])
 
             elif obj_name in self.scene.rigid_objects:
-                # Get individual object pose from rigid object
+                # Get individual object pose from rigid object.
+                # Use the live world-frame state after simulation reset instead of default_root_state so the
+                # registry reflects the actual instantiated per-env object poses in heterogeneous scenes.
                 rigid_object = self.scene.rigid_objects[obj_name]
-                default_state = rigid_object.data.default_root_state[env_ids]
-                pose_batches.append(default_state[:, [0, 1, 2, 4, 5, 6, 3]])
+                world_state = self._select_env_rows(
+                    rigid_object.data.root_link_state_w,
+                    env_ids,
+                    label=f"individual object '{obj_name}' root state",
+                )
+                pose_batches.append(world_state[:, [0, 1, 2, 4, 5, 6, 3]])
 
             else:
                 available_objects = ["robot"] + list(self.scene.rigid_objects.keys())

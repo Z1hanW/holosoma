@@ -83,8 +83,17 @@ RAW_MOTION_DIR=${RAW_MOTION_DIR:-"${DEFAULT_DS_RAW_MOTION_DIR}"}
 OBJ_DIR=${OBJ_DIR:-"${DEFAULT_DS_GEOMETRY_DIR}"}
 PREPARED_MOTION_DIR=${PREPARED_MOTION_DIR:-""}
 OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-""}
-NPROC=${NPROC:-$(detect_nproc)}
-PER_GPU_ENVS=${PER_GPU_ENVS:-8192}
+AVAILABLE_GPU_COUNT=$(detect_nproc)
+NPROC=${NPROC:-4}
+if [[ ! "${NPROC}" =~ ^[0-9]+$ || "${NPROC}" == "0" ]]; then
+  echo "[ERROR] NPROC must be a positive integer. Got: ${NPROC}" >&2
+  exit 2
+fi
+if (( NPROC > AVAILABLE_GPU_COUNT )); then
+  echo "[ERROR] Requested NPROC=${NPROC}, but only ${AVAILABLE_GPU_COUNT} CUDA GPU(s) are available." >&2
+  exit 2
+fi
+PER_GPU_ENVS=${PER_GPU_ENVS:-4096}
 NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
 PHYSX_GPU_MAX_RIGID_CONTACT_COUNT=${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT:-33554432}
@@ -105,6 +114,10 @@ DATA_MODE=${DATA_MODE:-pure-sd}
 STRICT_DEFAULT_DS_BANK_VALIDATION=${STRICT_DEFAULT_DS_BANK_VALIDATION:-1}
 DEFAULT_POSE_PREPEND_ENABLED=${DEFAULT_POSE_PREPEND_ENABLED:-1}
 DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0.2}
+MIX_CURRICULUM_OMOMO_PREFIXES=${MIX_CURRICULUM_OMOMO_PREFIXES:-'["sub"]'}
+MIX_CURRICULUM_STAGE_START_ITERATIONS=${MIX_CURRICULUM_STAGE_START_ITERATIONS:-'[0, 1500, 2000, 2500, 3000, 3500]'}
+MIX_CURRICULUM_OMOMO_PROBABILITIES=${MIX_CURRICULUM_OMOMO_PROBABILITIES:-'[1.0, 0.9, 0.8, 0.7, 0.6, 0.5]'}
+PURE_REAL_OMOMO_PREFIXES=${PURE_REAL_OMOMO_PREFIXES:-'["sub"]'}
 
 VISER_PORT=${VISER_PORT:-$((RANDOM % 8976 + 1024))}
 VISER_ENV_ID=${VISER_ENV_ID:-0}
@@ -785,6 +798,10 @@ if [[ "$#" -gt 0 ]]; then
       DATA_MODE="pure-sd"
       shift
       ;;
+    pure-real|pure-omomo)
+      DATA_MODE="pure-real"
+      shift
+      ;;
     mix-naive)
       DATA_MODE="mix-naive"
       shift
@@ -800,15 +817,18 @@ case "${DATA_MODE}" in
   pure-ds)
     DATA_MODE="pure-sd"
     ;;
+  pure-omomo)
+    DATA_MODE="pure-real"
+    ;;
   mix-clean-noisy|mix-curr)
     DATA_MODE="mix-curriculum"
     ;;
 esac
 case "${DATA_MODE}" in
-  pure-sd|mix-naive|mix-curriculum)
+  pure-sd|pure-real|mix-naive|mix-curriculum)
     ;;
   *)
-    echo "[ERROR] Unsupported DATA_MODE='${DATA_MODE}'. Use one of: pure-sd, mix-naive, mix-curriculum" >&2
+    echo "[ERROR] Unsupported DATA_MODE='${DATA_MODE}'. Use one of: pure-sd, pure-real, mix-naive, mix-curriculum" >&2
     exit 2
     ;;
 esac
@@ -939,16 +959,20 @@ if [[ -n "${EFFECTIVE_SEQUENCE_NAME}" ]]; then
   echo "[INFO] Effective run name: ${EFFECTIVE_SEQUENCE_NAME}"
 fi
 if [[ "${DATA_MODE}" == "mix-curriculum" ]]; then
-  MIX_NAIVE_CLEAN_NOISY_CURRICULUM_FLAG=1
-  echo "[WARN] DATA_MODE=mix-curriculum requested, but fixed env->clip/object assignment disables online clip-group curriculum."
-  echo "[WARN] Proceeding with a mixed bank plus uniform env-to-clip allocation; per-clip timestep curriculum remains enabled."
+  echo "[INFO] DATA_MODE=mix-curriculum enables OMOMO->SD clip-group curriculum on the mixed bank."
+  echo "[INFO] OMOMO clip prefixes=${MIX_CURRICULUM_OMOMO_PREFIXES}"
+  echo "[INFO] Curriculum stage_start_iterations=${MIX_CURRICULUM_STAGE_START_ITERATIONS}"
+  echo "[INFO] Curriculum omomo_probabilities=${MIX_CURRICULUM_OMOMO_PROBABILITIES}"
+elif [[ "${DATA_MODE}" == "pure-real" ]]; then
+  echo "[INFO] DATA_MODE=pure-real uses the mixed bank but samples only OMOMO clips."
+  echo "[INFO] OMOMO clip prefixes=${PURE_REAL_OMOMO_PREFIXES}"
 fi
 
 case "${DATA_MODE}" in
   pure-sd)
     MODE_DEFAULT_MOTION_DIR="${DEFAULT_DS_PREPARED_MOTION_DIR}"
     ;;
-  mix-naive|mix-curriculum)
+  pure-real|mix-naive|mix-curriculum)
     MODE_DEFAULT_MOTION_DIR="${DEFAULT_MIX_NAIVE_MOTION_DIR}"
     ;;
 esac
@@ -1010,7 +1034,7 @@ if [[ "${STRICT_DEFAULT_DS_BANK_VALIDATION}" != "0" ]]; then
         validate_default_ds_bank "${MOTION_DIR}" 43
       fi
       ;;
-    mix-naive|mix-curriculum)
+    pure-real|mix-naive|mix-curriculum)
       if [[ "$(realpath "${MOTION_DIR}")" == "$(realpath "${DEFAULT_MIX_NAIVE_MOTION_DIR}")" ]]; then
         validate_mix_naive_bank "${MOTION_DIR}" 105 43 62
       fi
@@ -1143,6 +1167,7 @@ echo "[INFO] Box tracking reward sigmas object_pos=${OBJECT_POS_SIGMA} object_or
 echo "[INFO] Motion default-pose prepend enabled: ${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
 echo "[INFO] Motion default-pose prepend duration: ${DEFAULT_POSE_PREPEND_DURATION_S}s"
 echo "[INFO] GPU_SELECTION=all-visible"
+echo "[INFO] AVAILABLE_GPU_COUNT=${AVAILABLE_GPU_COUNT}"
 echo "[INFO] NPROC=${NPROC} PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
 echo "[INFO] PhysX gpu_max_rigid_contact_count=${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT} gpu_max_rigid_patch_count=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT} gpu_found_lost_pairs_capacity=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
 echo "[INFO] PhysX gpu_found_lost_aggregate_pairs_capacity=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY} gpu_total_aggregate_pairs_capacity=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY} gpu_collision_stack_size=${PHYSX_GPU_COLLISION_STACK_SIZE} gpu_heap_capacity=${PHYSX_GPU_HEAP_CAPACITY} gpu_temp_buffer_capacity=${PHYSX_GPU_TEMP_BUFFER_CAPACITY}"
@@ -1230,6 +1255,21 @@ fi
 if [[ "${CURRICULUM}" == "1" || "${CURRICULUM,,}" == "true" ]]; then
   echo "[INFO] Enabling w-object curriculum."
   train_cmd+=(--curriculum.setup-terms.w-object-difficulty-curriculum.params.enabled=True)
+fi
+if [[ "${DATA_MODE}" == "mix-curriculum" ]]; then
+  train_cmd+=(
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.enabled=True
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.clean-clip-name-prefixes="${MIX_CURRICULUM_OMOMO_PREFIXES}"
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.stage-start-iterations="${MIX_CURRICULUM_STAGE_START_ITERATIONS}"
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.clean-group-probabilities="${MIX_CURRICULUM_OMOMO_PROBABILITIES}"
+  )
+elif [[ "${DATA_MODE}" == "pure-real" ]]; then
+  train_cmd+=(
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.enabled=True
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.clean-clip-name-prefixes="${PURE_REAL_OMOMO_PREFIXES}"
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.stage-start-iterations='[0]'
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.clean-group-probabilities='[1.0]'
+  )
 fi
 train_cmd+=("${EXTRA_ARGS[@]}")
 train_cmd+=(logger:wandb)

@@ -2,31 +2,35 @@
 set -euo pipefail
 
 # Teacher-policy inference for box tracking on the same motion-box pairs used by
-# train_object_generalist.sh, with Isaac Sim <-> Viser sync enabled.
+# train_object_generalist_ds.sh, with Isaac Sim <-> Viser sync enabled.
 #
 # Branches:
-# - omomo:       infer on OMOMO carry clips
-# - real:        infer on behave+omomo mixed clips
-# - pure-sd:     infer on prepared Seedance/DS clips
-# - naive-mixed: infer on OMOMO + Seedance/DS naive-mixed clips
+# - omomo-carry: infer on OMOMO carry clips
+# - real:    infer on behave+omomo mixed clips
+# - pure-ds: infer on prepared Seedance/DS clips
+# - mix:     infer on OMOMO-carry + Seedance/DS mixed clips
 #
 # Usage:
-#   bash infer_box_tracking.sh [omomo|real|pure-sd|naive-mixed] [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
+#   bash infer_box_tracking.sh [omomo-carry|real|pure-ds|mix] [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
 #
 # Optional env vars:
-#   TEACHER_CHECKPOINT        (default: wandb://zihanw22/boxer/a5ohxuta/model_09000.pt)
+#   TEACHER_CHECKPOINT        (default: wandb://zihanw22/boxer/a5ohxuta/model_14000.pt)
 #   WANDB_MODEL_FILE          (optional; used when TEACHER_CHECKPOINT is a W&B run URL without /files/<checkpoint>)
 #   LEGACY_OBS                (default: 0; set 1/true to require legacy checkpoint observation layout)
 #   REQUIRE_HEIGHTMAP         (default: 0; set 1/true to require checkpoint perception.enabled=True and output_mode=heightmap)
 #   DEFAULT_LEGACY_TEACHER_CHECKPOINT
 #                             (optional; used as default checkpoint when LEGACY_OBS=1 and no checkpoint is explicitly provided)
-#   PURE_SD_DEFAULT_TEACHER_RUN_URL
+#   PURE_DS_DEFAULT_TEACHER_RUN_URL
 #                             (default: https://wandb.ai/zihanw22/boxer/runs/6pzxdnr6; resolved to latest checkpoint at runtime)
-#   INFER_DATASET             (default: mixed; options: omomo|behave|behave_carry|behave_sq_carry|mixed|real|pure-sd|naive-mixed|mix-naive)
-#   DS_DATA_ROOT              (default: ./data/ds_box_data; used by pure-sd / naive-mixed)
+#   PURE_SD_DEFAULT_TEACHER_RUN_URL
+#                             (legacy alias of PURE_DS_DEFAULT_TEACHER_RUN_URL)
+#   INFER_DATASET             (default: mixed; options: omomo-carry|omomo|behave|behave_carry|behave_sq_carry|mixed|real|pure-ds|pure-sd|mix|naive-mixed|mix-naive|mix-curriculum)
+#   DATA_MODE                 (optional alias of INFER_DATASET; accepts train_object_generalist_ds.sh modes)
+#   DS_DATA_ROOT              (default: ./data/ds_box_data; used by pure-ds / mix)
 #   MOTION_DIR                (optional override; if unset, chosen by INFER_DATASET)
 #   MOTION_CLIP_NAME          (optional: pin a single clip)
 #   OBJECT_URDF               (optional override; if unset, chosen by INFER_DATASET)
+#   OBJECT_SPEC_PATH          (optional alias of OBJECT_URDF for clip->URDF map json)
 #   NUM_ENVS                  (default: 1)
 #   HEADLESS                  (default: True; set False for local interactive eval)
 #   VISER_PORT                (default: random)
@@ -53,29 +57,31 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  bash infer_box_tracking.sh [omomo|real|pure-sd|naive-mixed] [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
+  bash infer_box_tracking.sh [omomo-carry|real|pure-ds|mix] [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
 
 Examples:
   bash infer_box_tracking.sh
-  bash infer_box_tracking.sh omomo
+  bash infer_box_tracking.sh omomo-carry
   bash infer_box_tracking.sh real
-  bash infer_box_tracking.sh pure-sd
-  bash infer_box_tracking.sh pure-sd wandb://zihanw22/boxer/6pzxdnr6/model_00500.pt
-  bash infer_box_tracking.sh pure-sd https://wandb.ai/zihanw22/boxer/runs/6pzxdnr6
-  bash infer_box_tracking.sh pure-sd model_00500.pt
-  bash infer_box_tracking.sh naive-mixed
+  bash infer_box_tracking.sh pure-ds
+  bash infer_box_tracking.sh pure-ds wandb://zihanw22/boxer/6pzxdnr6/model_00500.pt
+  bash infer_box_tracking.sh pure-ds https://wandb.ai/zihanw22/boxer/runs/6pzxdnr6
+  bash infer_box_tracking.sh pure-ds model_00500.pt
+  bash infer_box_tracking.sh mix
   bash infer_box_tracking.sh /abs/path/to/model_17000.pt
+  bash infer_box_tracking.sh /data/logs_new/boxer/20260406_054300-g1_29dof_wbt_w_object_generalist-locomotion/model_02600.pt
   bash infer_box_tracking.sh real /abs/path/to/model_17000.pt
-  bash infer_box_tracking.sh pure-sd simulator:isaacsim
+  bash infer_box_tracking.sh pure-ds simulator:isaacsim
   MOTION_CLIP_NAME=sub3_largebox_003_mj_w_obj bash infer_box_tracking.sh
 
 Dataset selection examples:
-  INFER_DATASET=omomo bash infer_box_tracking.sh
+  INFER_DATASET=omomo-carry bash infer_box_tracking.sh
   INFER_DATASET=behave bash infer_box_tracking.sh
   INFER_DATASET=behave_carry bash infer_box_tracking.sh
   INFER_DATASET=mixed bash infer_box_tracking.sh
-  INFER_DATASET=pure-sd bash infer_box_tracking.sh
-  INFER_DATASET=naive-mixed bash infer_box_tracking.sh
+  INFER_DATASET=pure-ds bash infer_box_tracking.sh
+  INFER_DATASET=mix bash infer_box_tracking.sh
+  DATA_MODE=mix-curriculum bash infer_box_tracking.sh
 EOF
 }
 
@@ -165,6 +171,33 @@ parse_wandb_uri() {
 parse_wandb_reference() {
   local ref="$1"
   parse_wandb_run_url "${ref}" || parse_wandb_uri "${ref}"
+}
+
+canonicalize_infer_dataset() {
+  local raw="${1:-}"
+  local normalized
+  normalized=$(echo "${raw}" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
+
+  case "${normalized}" in
+    omomo|omomo-carry|omomo_carry)
+      echo "omomo"
+      ;;
+    behave|behave_carry|behave_sq_carry)
+      echo "${normalized}"
+      ;;
+    real|mixed|behave+omomo|behave-omomo)
+      echo "real"
+      ;;
+    pure-ds|pure-sd|seedance|sd)
+      echo "pure-ds"
+      ;;
+    mix|naive-mixed|mix-naive|mix-curriculum|mix-clean-noisy|mix-curr)
+      echo "mix"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 checkpoint_ref_with_model_file() {
@@ -372,7 +405,8 @@ fi
 
 # https://wandb.ai/zihanw22/boxer/runs/a5ohxuta/files?nw=nwuserz1hanw
 DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/a5ohxuta/model_14000.pt"}
-PURE_SD_DEFAULT_TEACHER_RUN_URL=${PURE_SD_DEFAULT_TEACHER_RUN_URL:-"https://wandb.ai/zihanw22/boxer/runs/6pzxdnr6"}
+PURE_DS_DEFAULT_TEACHER_RUN_URL=${PURE_DS_DEFAULT_TEACHER_RUN_URL:-${PURE_SD_DEFAULT_TEACHER_RUN_URL:-"https://wandb.ai/zihanw22/boxer/runs/6pzxdnr6"}}
+PURE_SD_DEFAULT_TEACHER_RUN_URL="${PURE_DS_DEFAULT_TEACHER_RUN_URL}"
 DEFAULT_LEGACY_TEACHER_CHECKPOINT="${DEFAULT_LEGACY_TEACHER_CHECKPOINT:-}"
 LEGACY_OBS=${LEGACY_OBS:-0}
 legacy_obs_normalized=$(echo "${LEGACY_OBS}" | tr '[:upper:]' '[:lower:]')
@@ -400,29 +434,12 @@ TEACHER_CHECKPOINT_MODEL_FILE=""
 INFER_DATASET_FROM_ARG=0
 
 if [[ $# -gt 0 ]]; then
-  first_arg_normalized=$(echo "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
-  case "${first_arg_normalized}" in
-    omomo)
-      INFER_DATASET="omomo"
-      INFER_DATASET_FROM_ARG=1
-      shift
-      ;;
-    real|mixed|behave+omomo|behave-omomo)
-      INFER_DATASET="real"
-      INFER_DATASET_FROM_ARG=1
-      shift
-      ;;
-    pure-sd|seedance|sd)
-      INFER_DATASET="pure-sd"
-      INFER_DATASET_FROM_ARG=1
-      shift
-      ;;
-    naive-mixed|mix-naive)
-      INFER_DATASET="naive-mixed"
-      INFER_DATASET_FROM_ARG=1
-      shift
-      ;;
-  esac
+  first_arg_dataset="$(canonicalize_infer_dataset "$1" || true)"
+  if [[ -n "${first_arg_dataset}" ]]; then
+    INFER_DATASET="${first_arg_dataset}"
+    INFER_DATASET_FROM_ARG=1
+    shift
+  fi
 fi
 
 if [[ $# -gt 0 ]]; then
@@ -463,19 +480,20 @@ pick_first_existing_path() {
 }
 
 if [[ "${INFER_DATASET_FROM_ARG}" != "1" ]]; then
-  INFER_DATASET=${INFER_DATASET:-${DATASET:-mixed}}
+  INFER_DATASET=${INFER_DATASET:-${DATA_MODE:-${DATASET:-mixed}}}
 fi
-INFER_DATASET=$(echo "${INFER_DATASET}" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
-case "${INFER_DATASET}" in
-  omomo|behave|behave_carry|behave_sq_carry|mixed|real|pure-sd|naive-mixed|mix-naive) ;;
-  *)
-    echo "[ERROR] INFER_DATASET must be one of: omomo, behave, behave_carry, behave_sq_carry, mixed, real, pure-sd, naive-mixed, mix-naive. Got: ${INFER_DATASET}" >&2
-    exit 2
-    ;;
-esac
+INFER_DATASET_RAW="${INFER_DATASET}"
+INFER_DATASET_RAW_NORMALIZED=$(echo "${INFER_DATASET_RAW}" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
+if ! INFER_DATASET="$(canonicalize_infer_dataset "${INFER_DATASET_RAW}")"; then
+  echo "[ERROR] INFER_DATASET must be one of: omomo-carry, omomo, behave, behave_carry, behave_sq_carry, mixed, real, pure-ds, pure-sd, mix, naive-mixed, mix-naive, mix-curriculum, mix-clean-noisy, mix-curr. Got: ${INFER_DATASET_RAW}" >&2
+  exit 2
+fi
+if [[ "${INFER_DATASET_RAW_NORMALIZED}" != "${INFER_DATASET}" ]]; then
+  echo "[INFO] Normalized infer dataset '${INFER_DATASET_RAW}' -> '${INFER_DATASET}'"
+fi
 
-if [[ "${INFER_DATASET}" == "pure-sd" && "${TEACHER_CHECKPOINT_FROM_ENV}" != "1" && "${TEACHER_CHECKPOINT_FROM_ARG}" != "1" && "${LEGACY_OBS_ENABLED}" != "1" ]]; then
-  TEACHER_CHECKPOINT="${PURE_SD_DEFAULT_TEACHER_RUN_URL}"
+if [[ "${INFER_DATASET}" == "pure-ds" && "${TEACHER_CHECKPOINT_FROM_ENV}" != "1" && "${TEACHER_CHECKPOINT_FROM_ARG}" != "1" && "${LEGACY_OBS_ENABLED}" != "1" ]]; then
+  TEACHER_CHECKPOINT="${PURE_DS_DEFAULT_TEACHER_RUN_URL}"
 fi
 
 if [[ "${TEACHER_CHECKPOINT_NAME_FROM_ARG}" == "1" ]]; then
@@ -514,22 +532,37 @@ DEFAULT_REAL_MOTION_DIR="$(pick_first_existing_path \
   "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_carry_aug_mix_ml" \
   "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_carry_aug_mix_ml")"
 DS_DATA_ROOT="${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}"
-DEFAULT_PURE_SD_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
-DEFAULT_NAIVE_MIXED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
-DEFAULT_OMOMO_URDF="${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
+DEFAULT_PURE_DS_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
+DEFAULT_MIX_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
+DEFAULT_OMOMO_URDF="$(pick_first_existing_path \
+  "${SCRIPT_DIR}/src/holosoma_retargeting/models/largebox/largebox.urdf" \
+  "${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf")"
 DEFAULT_BEHAVE_MAP_FILE="${DEFAULT_BEHAVE_MOTION_DIR}/_clip_object_urdf_map.json"
 DEFAULT_REAL_MAP_FILE="${DEFAULT_REAL_MOTION_DIR}/_clip_object_urdf_map.json"
-DEFAULT_PURE_SD_MAP_FILE="${DEFAULT_PURE_SD_MOTION_DIR}/_clip_object_urdf_map.json"
-DEFAULT_NAIVE_MIXED_MAP_FILE="${DEFAULT_NAIVE_MIXED_MOTION_DIR}/_clip_object_urdf_map.json"
+DEFAULT_PURE_DS_MAP_FILE="${DEFAULT_PURE_DS_MOTION_DIR}/_clip_object_urdf_map.json"
+DEFAULT_MIX_MAP_FILE="${DEFAULT_MIX_MOTION_DIR}/_clip_object_urdf_map.json"
 
 MOTION_DIR_FROM_ENV=0
 if [[ -n "${MOTION_DIR+x}" ]]; then
   MOTION_DIR_FROM_ENV=1
 fi
 OBJECT_URDF_FROM_ENV=0
-if [[ -n "${OBJECT_URDF+x}" ]]; then
+if [[ -n "${OBJECT_URDF+x}" || -n "${OBJECT_SPEC_PATH+x}" ]]; then
   OBJECT_URDF_FROM_ENV=1
 fi
+OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-""}
+OBJECT_URDF=${OBJECT_URDF:-""}
+if [[ -z "${OBJECT_URDF}" && -n "${OBJECT_SPEC_PATH}" ]]; then
+  OBJECT_URDF="${OBJECT_SPEC_PATH}"
+fi
+
+resolve_motion_dir_map_file() {
+  local motion_dir="$1"
+  local candidate="${motion_dir%/}/_clip_object_urdf_map.json"
+  if [[ -f "${candidate}" ]]; then
+    echo "${candidate}"
+  fi
+}
 
 if [[ "${MOTION_DIR_FROM_ENV}" != "1" ]]; then
   case "${INFER_DATASET}" in
@@ -542,50 +575,75 @@ if [[ "${MOTION_DIR_FROM_ENV}" != "1" ]]; then
     mixed|real)
       MOTION_DIR="${DEFAULT_REAL_MOTION_DIR}"
       ;;
-    pure-sd)
-      MOTION_DIR="${DEFAULT_PURE_SD_MOTION_DIR}"
+    pure-ds)
+      MOTION_DIR="${DEFAULT_PURE_DS_MOTION_DIR}"
       ;;
-    naive-mixed|mix-naive)
-      MOTION_DIR="${DEFAULT_NAIVE_MIXED_MOTION_DIR}"
+    mix)
+      MOTION_DIR="${DEFAULT_MIX_MOTION_DIR}"
       ;;
   esac
 fi
 
 MOTION_CLIP_NAME=${MOTION_CLIP_NAME:-}
 if [[ "${OBJECT_URDF_FROM_ENV}" != "1" ]]; then
+  MOTION_DIR_MAP_FILE="$(resolve_motion_dir_map_file "${MOTION_DIR}")"
   case "${INFER_DATASET}" in
     omomo)
       OBJECT_URDF="${DEFAULT_OMOMO_URDF}"
       ;;
     behave|behave_carry|behave_sq_carry)
-      if [[ -f "${DEFAULT_BEHAVE_MAP_FILE}" ]]; then
+      if [[ -n "${MOTION_DIR_MAP_FILE}" ]]; then
+        OBJECT_URDF="${MOTION_DIR_MAP_FILE}"
+      elif [[ -f "${DEFAULT_BEHAVE_MAP_FILE}" ]]; then
         OBJECT_URDF="${DEFAULT_BEHAVE_MAP_FILE}"
+      elif [[ "${MOTION_DIR_FROM_ENV}" == "1" ]]; then
+        echo "[ERROR] No _clip_object_urdf_map.json found under custom MOTION_DIR: ${MOTION_DIR}" >&2
+        echo "[ERROR] Set OBJECT_URDF or OBJECT_SPEC_PATH explicitly for this custom motion bank." >&2
+        exit 2
       else
         echo "[ERROR] BEHAVE map file not found: ${DEFAULT_BEHAVE_MAP_FILE}" >&2
         exit 2
       fi
       ;;
     mixed|real)
-      if [[ -f "${DEFAULT_REAL_MAP_FILE}" ]]; then
+      if [[ -n "${MOTION_DIR_MAP_FILE}" ]]; then
+        OBJECT_URDF="${MOTION_DIR_MAP_FILE}"
+      elif [[ -f "${DEFAULT_REAL_MAP_FILE}" ]]; then
         OBJECT_URDF="${DEFAULT_REAL_MAP_FILE}"
+      elif [[ "${MOTION_DIR_FROM_ENV}" == "1" ]]; then
+        echo "[ERROR] No _clip_object_urdf_map.json found under custom MOTION_DIR: ${MOTION_DIR}" >&2
+        echo "[ERROR] Set OBJECT_URDF or OBJECT_SPEC_PATH explicitly for this custom motion bank." >&2
+        exit 2
       else
         echo "[ERROR] behave+omomo map file not found: ${DEFAULT_REAL_MAP_FILE}" >&2
         exit 2
       fi
       ;;
-    pure-sd)
-      if [[ -f "${DEFAULT_PURE_SD_MAP_FILE}" ]]; then
-        OBJECT_URDF="${DEFAULT_PURE_SD_MAP_FILE}"
+    pure-ds)
+      if [[ -n "${MOTION_DIR_MAP_FILE}" ]]; then
+        OBJECT_URDF="${MOTION_DIR_MAP_FILE}"
+      elif [[ -f "${DEFAULT_PURE_DS_MAP_FILE}" ]]; then
+        OBJECT_URDF="${DEFAULT_PURE_DS_MAP_FILE}"
+      elif [[ "${MOTION_DIR_FROM_ENV}" == "1" ]]; then
+        echo "[ERROR] No _clip_object_urdf_map.json found under custom MOTION_DIR: ${MOTION_DIR}" >&2
+        echo "[ERROR] Set OBJECT_URDF or OBJECT_SPEC_PATH explicitly for this custom motion bank." >&2
+        exit 2
       else
-        echo "[ERROR] Seedance/DS map file not found: ${DEFAULT_PURE_SD_MAP_FILE}" >&2
+        echo "[ERROR] Seedance/DS map file not found: ${DEFAULT_PURE_DS_MAP_FILE}" >&2
         exit 2
       fi
       ;;
-    naive-mixed|mix-naive)
-      if [[ -f "${DEFAULT_NAIVE_MIXED_MAP_FILE}" ]]; then
-        OBJECT_URDF="${DEFAULT_NAIVE_MIXED_MAP_FILE}"
+    mix)
+      if [[ -n "${MOTION_DIR_MAP_FILE}" ]]; then
+        OBJECT_URDF="${MOTION_DIR_MAP_FILE}"
+      elif [[ -f "${DEFAULT_MIX_MAP_FILE}" ]]; then
+        OBJECT_URDF="${DEFAULT_MIX_MAP_FILE}"
+      elif [[ "${MOTION_DIR_FROM_ENV}" == "1" ]]; then
+        echo "[ERROR] No _clip_object_urdf_map.json found under custom MOTION_DIR: ${MOTION_DIR}" >&2
+        echo "[ERROR] Set OBJECT_URDF or OBJECT_SPEC_PATH explicitly for this custom motion bank." >&2
+        exit 2
       else
-        echo "[ERROR] OMOMO+Seedance/DS mix map file not found: ${DEFAULT_NAIVE_MIXED_MAP_FILE}" >&2
+        echo "[ERROR] OMOMO+Seedance/DS mix map file not found: ${DEFAULT_MIX_MAP_FILE}" >&2
         exit 2
       fi
       ;;
