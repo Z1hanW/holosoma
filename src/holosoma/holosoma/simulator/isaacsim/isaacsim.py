@@ -1450,7 +1450,10 @@ class IsaacSim(BaseSimulator):
     def _setup_object_contact_sensors(self) -> None:
         """Create box-filtered contact sensors for selected robot support bodies."""
         self._object_contact_sensors = {}
-        filter_prim_paths_expr = list(dict.fromkeys(self._object_contact_filter_prim_paths_expr))
+        env_regex_ns = getattr(self.scene, "env_regex_ns", "/World/envs/env_.*")
+        filter_prim_paths_expr = [
+            path.format(ENV_REGEX_NS=env_regex_ns) for path in dict.fromkeys(self._object_contact_filter_prim_paths_expr)
+        ]
         if not filter_prim_paths_expr:
             return
 
@@ -1562,6 +1565,18 @@ class IsaacSim(BaseSimulator):
 
         # Initialize robot tensors
         self.refresh_sim_tensors()
+
+        if self._object_contact_sensors:
+            try:
+                first_sensor_name, first_sensor = next(iter(self._object_contact_sensors.items()))
+                logger.info(
+                    "Object contact sensor '{}' initialized with filter_count={} across {} envs.",
+                    first_sensor_name,
+                    int(first_sensor.contact_physx_view.filter_count),
+                    self.num_envs,
+                )
+            except Exception as exc:
+                logger.warning("Failed to inspect object contact sensor filter_count: {}", exc)
 
         # Initialize acceleration tensors ONLY if bridge is enabled
         if self.simulator_config.bridge.enabled:
@@ -2169,8 +2184,8 @@ class IsaacSim(BaseSimulator):
         """See base class.
 
         IsaacSim-specific notes:
-        - Uses IsaacLab's scene.write_data_to_sim() for efficient batch synchronization
-        - Only performs sync if state adapter indicates dirty state (performance optimization)
+        - Root-state writes already call IsaacLab/PhysX setters immediately
+        - This method exists for API compatibility with deferred-update simulators
         """
         debug_state_sync = os.environ.get("HOLOSOMA_DEBUG_STATE_SYNC", "").lower() not in ("", "0", "false", "no")
         if not self._state_adapter.is_dirty():
@@ -2179,12 +2194,10 @@ class IsaacSim(BaseSimulator):
             return
 
         if debug_state_sync:
-            logger.info("State sync begin")
+            logger.info("State sync begin (compatibility no-op)")
 
-        # Single call to sync all object state changes
-        self.scene.write_data_to_sim()
-
-        # Clear dirty flag via state adapter
+        # Root/object state setters already write through to PhysX immediately via IsaacLab views.
+        # Keep only the dirty-flag clear here to avoid redundant whole-scene write passes.
         self._state_adapter.clear_dirty()
 
         if debug_state_sync:
