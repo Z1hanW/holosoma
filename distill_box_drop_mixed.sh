@@ -16,12 +16,136 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
 
-DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/5vlz6pj8/model_24000.pt"}
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"https://wandb.ai/zihanw22/boxer/runs/u5lguxvl"}
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 POSITIONAL_RUN_NAME=""
+DATA_MODE=${DATA_MODE:-mix-naive}
+
+PYTHON_BIN=${PYTHON_BIN:-python}
+
+parse_wandb_run_url() {
+  local ref="$1"
+  local clean_ref="${ref%%\?*}"
+  if [[ "${clean_ref}" != https://wandb.ai/*/runs/* ]]; then
+    return 1
+  fi
+  local trimmed="${clean_ref#https://wandb.ai/}"
+  local entity=""
+  local project=""
+  local run_id=""
+  local explicit_file=""
+  IFS='/' read -r -a parts <<< "${trimmed}"
+  if [[ "${#parts[@]}" -lt 4 || "${parts[2]}" != "runs" ]]; then
+    return 1
+  fi
+  entity="${parts[0]}"
+  project="${parts[1]}"
+  run_id="${parts[3]}"
+  if [[ -z "${entity}" || -z "${project}" || -z "${run_id}" ]]; then
+    return 1
+  fi
+  if [[ "${#parts[@]}" -ge 6 && "${parts[4]}" == "files" ]]; then
+    explicit_file="${trimmed#${entity}/${project}/runs/${run_id}/files/}"
+  fi
+  printf '%s\t%s\t%s\t%s\n' "${entity}" "${project}" "${run_id}" "${explicit_file}"
+}
+
+resolve_remote_wandb_checkpoint_name() {
+  local entity="$1"
+  local project="$2"
+  local run_id="$3"
+  "${PYTHON_BIN}" - "${entity}" "${project}" "${run_id}" <<'PY' 2>/dev/null || true
+import re
+import sys
+
+try:
+    import wandb
+except Exception:
+    sys.exit(0)
+
+entity, project, run_id = sys.argv[1:4]
+api = wandb.Api(timeout=30)
+run = api.run(f"{entity}/{project}/{run_id}")
+pattern = re.compile(r"^model_(\d+)\.pt$")
+latest_step = -1
+latest_name = ""
+for file_obj in run.files():
+    name = getattr(file_obj, "name", "")
+    match = pattern.match(name)
+    if not match:
+        continue
+    step = int(match.group(1))
+    if step >= latest_step:
+        latest_step = step
+        latest_name = name
+if latest_name:
+    print(latest_name)
+PY
+}
+
+normalize_checkpoint_ref() {
+  local ref="$1"
+  if [[ "${ref}" != https://wandb.ai/*/runs/* ]]; then
+    echo "${ref}"
+    return 0
+  fi
+
+  local parsed=""
+  local entity=""
+  local project=""
+  local run_id=""
+  local explicit_file=""
+  local model_file="${WANDB_MODEL_FILE:-}"
+
+  parsed="$(parse_wandb_run_url "${ref}" || true)"
+  if [[ -z "${parsed}" ]]; then
+    echo "${ref}"
+    return 0
+  fi
+
+  IFS=$'\t' read -r entity project run_id explicit_file <<< "${parsed}"
+  if [[ -n "${explicit_file}" ]]; then
+    model_file="${explicit_file}"
+  elif [[ -z "${model_file}" ]]; then
+    model_file="$(resolve_remote_wandb_checkpoint_name "${entity}" "${project}" "${run_id}")"
+    if [[ -n "${model_file}" ]]; then
+      echo "[INFO] Resolved wandb run URL to latest remote checkpoint: ${model_file}" >&2
+    fi
+  fi
+
+  if [[ -z "${model_file}" ]]; then
+    echo "[ERROR] Could not determine checkpoint for W&B run URL: ${ref}" >&2
+    echo "[ERROR] Pass a /files/<checkpoint>.pt URL or set WANDB_MODEL_FILE." >&2
+    return 2
+  fi
+
+  echo "wandb://${entity}/${project}/${run_id}/${model_file}"
+}
 
 if [[ $# -gt 0 ]]; then
-  if [[ "$1" == wandb://* || "$1" == /* || "$1" == ./* || "$1" == ../* || "$1" == *.pt ]]; then
+  first_arg_normalized=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+  case "${first_arg_normalized}" in
+    pure-sd|pure-ds)
+      DATA_MODE="pure-sd"
+      shift
+      ;;
+    pure-real|pure-omomo)
+      DATA_MODE="pure-real"
+      shift
+      ;;
+    mix-naive)
+      DATA_MODE="mix-naive"
+      shift
+      ;;
+    mix-curriculum|mix-clean-noisy|mix-curr)
+      DATA_MODE="mix-curriculum"
+      shift
+      ;;
+  esac
+fi
+
+if [[ $# -gt 0 ]]; then
+  if [[ "$1" == wandb://* || "$1" == https://wandb.ai/*/runs/* || "$1" == /* || "$1" == ./* || "$1" == ../* || "$1" == *.pt ]]; then
     TEACHER_CHECKPOINT="$1"
     shift
   elif [[ "$1" != -* ]]; then
@@ -41,6 +165,8 @@ TEACHER_PERCEPTION_PRESET_EXPLICIT=0
 [[ -n "${TEACHER_PERCEPTION_PRESET+x}" ]] && TEACHER_PERCEPTION_PRESET_EXPLICIT=1
 TEACHER_PERCEPTION_OBS_KEY_EXPLICIT=0
 [[ -n "${TEACHER_PERCEPTION_OBS_KEY+x}" ]] && TEACHER_PERCEPTION_OBS_KEY_EXPLICIT=1
+TEACHER_ACTOR_OBS_HISTORY_LENGTH_EXPLICIT=0
+[[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH+x}" ]] && TEACHER_ACTOR_OBS_HISTORY_LENGTH_EXPLICIT=1
 START_AT_TIMESTEP_ZERO_PROB_EXPLICIT=0
 [[ -n "${START_AT_TIMESTEP_ZERO_PROB+x}" ]] && START_AT_TIMESTEP_ZERO_PROB_EXPLICIT=1
 START_AT_TIMESTEP_ZERO_PROB_END_EXPLICIT=0
@@ -71,14 +197,25 @@ fi
 DEFAULT_TOTAL_ENVS=${DEFAULT_TOTAL_ENVS:-98304}
 NUM_ENVS=${NUM_ENVS:-${DEFAULT_TOTAL_ENVS}}
 
-DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"
-MOTION_DIR=${MOTION_DIR:-"${DEFAULT_MOTION_DIR}"}
+DS_DATA_ROOT=${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}
+DEFAULT_DS_PREPARED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
+DEFAULT_MIX_NAIVE_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
+MOTION_DIR_FROM_ENV=0
+if [[ -n "${MOTION_DIR+x}" ]]; then
+  MOTION_DIR_FROM_ENV=1
+fi
 FILTER_NON_PLACEMENT_CLIPS=${FILTER_NON_PLACEMENT_CLIPS:-True}
 FINAL_PLACEMENT_MAX_DELTA_Z=${FINAL_PLACEMENT_MAX_DELTA_Z:-0.15}
+MIX_CURRICULUM_OMOMO_PREFIXES=${MIX_CURRICULUM_OMOMO_PREFIXES:-'["sub"]'}
+MIX_CURRICULUM_STAGE_START_ITERATIONS=${MIX_CURRICULUM_STAGE_START_ITERATIONS:-'[0, 1500, 2000, 2500, 3000, 3500]'}
+MIX_CURRICULUM_OMOMO_PROBABILITIES=${MIX_CURRICULUM_OMOMO_PROBABILITIES:-'[1.0, 0.9, 0.8, 0.7, 0.6, 0.5]'}
+PURE_REAL_OMOMO_PREFIXES=${PURE_REAL_OMOMO_PREFIXES:-'["sub"]'}
+OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-""}
 
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs_legacy,perception_obs}
 TEACHER_PERCEPTION_PRESET=${TEACHER_PERCEPTION_PRESET:-none}
 TEACHER_PERCEPTION_OBS_KEY=${TEACHER_PERCEPTION_OBS_KEY:-teacher_perception_obs}
+TEACHER_ACTOR_OBS_HISTORY_LENGTH=${TEACHER_ACTOR_OBS_HISTORY_LENGTH:-}
 TEACHER_COMPAT_PROFILE=${TEACHER_COMPAT_PROFILE:-auto}
 TEACHER_COMPAT_NOTES=${TEACHER_COMPAT_NOTES:-}
 TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
@@ -118,6 +255,44 @@ if [[ "${FREEZE_AT_TIMESTEP_ZERO_PROB_EXPLICIT}" -eq 1 && "${FREEZE_AT_TIMESTEP_
   FREEZE_AT_TIMESTEP_ZERO_PROB_END="${FREEZE_AT_TIMESTEP_ZERO_PROB}"
 fi
 
+DATA_MODE=$(echo "${DATA_MODE}" | tr '[:upper:]' '[:lower:]')
+case "${DATA_MODE}" in
+  pure-ds)
+    DATA_MODE="pure-sd"
+    ;;
+  pure-omomo)
+    DATA_MODE="pure-real"
+    ;;
+  mix-clean-noisy|mix-curr)
+    DATA_MODE="mix-curriculum"
+    ;;
+esac
+case "${DATA_MODE}" in
+  pure-sd|pure-real|mix-naive|mix-curriculum)
+    ;;
+  *)
+    echo "[ERROR] Unsupported DATA_MODE='${DATA_MODE}'. Use one of: pure-sd, pure-real, mix-naive, mix-curriculum" >&2
+    exit 2
+    ;;
+esac
+
+case "${DATA_MODE}" in
+  pure-sd)
+    MODE_DEFAULT_MOTION_DIR="${DEFAULT_DS_PREPARED_MOTION_DIR}"
+    ;;
+  pure-real|mix-naive|mix-curriculum)
+    MODE_DEFAULT_MOTION_DIR="${DEFAULT_MIX_NAIVE_MOTION_DIR}"
+    ;;
+esac
+MOTION_DIR=${MOTION_DIR:-"${MODE_DEFAULT_MOTION_DIR}"}
+
+if [[ -z "${OBJECT_SPEC_PATH}" ]]; then
+  default_map="${MOTION_DIR}/_clip_object_urdf_map.json"
+  if [[ -f "${default_map}" ]]; then
+    OBJECT_SPEC_PATH="${default_map}"
+  fi
+fi
+
 SPARSE_GOAL_ENABLED=${SPARSE_GOAL_ENABLED:-True}
 CLIP_GOAL_DELTA_MIN_STEPS=${CLIP_GOAL_DELTA_MIN_STEPS:-45}
 CLIP_GOAL_DELTA_MAX_STEPS=${CLIP_GOAL_DELTA_MAX_STEPS:-120}
@@ -155,8 +330,15 @@ TEACHER_REF_RUN_ID="5vlz6pj8"
 TEACHER_REF_LOCAL_CHECKPOINT="${SCRIPT_DIR}/.teacher_checkpoints/model_24000.pt"
 TEACHER_REF_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_aug_mix_ml"
 TEACHER_REF_PERCEPTION_PRESET="heightmap"
+TEACHER_U5LGUXVL_RUN_ID="u5lguxvl"
+TEACHER_U5LGUXVL_MODEL_FILE="model_06000.pt"
+TEACHER_U5LGUXVL_LOCAL_CHECKPOINT="${SCRIPT_DIR}/.teacher_checkpoints/${TEACHER_U5LGUXVL_MODEL_FILE}"
 TEACHER_COMPAT_PROFILE_RESOLVED="${TEACHER_COMPAT_PROFILE}"
 TEACHER_COMPAT_NOTES_AUTO=""
+
+if [[ "${TEACHER_CHECKPOINT}" == https://wandb.ai/*/runs/* ]]; then
+  TEACHER_CHECKPOINT="$(normalize_checkpoint_ref "${TEACHER_CHECKPOINT}")"
+fi
 
 append_teacher_compat_note() {
   local note="$1"
@@ -173,6 +355,8 @@ append_teacher_compat_note() {
 if [[ "${TEACHER_COMPAT_PROFILE_RESOLVED}" == "auto" ]]; then
   if [[ "${TEACHER_CHECKPOINT}" == *"${TEACHER_REF_RUN_ID}"* || "${TEACHER_CHECKPOINT}" == "${TEACHER_REF_LOCAL_CHECKPOINT}" ]]; then
     TEACHER_COMPAT_PROFILE_RESOLVED="soft_5vlz6pj8"
+  elif [[ "${TEACHER_CHECKPOINT}" == *"${TEACHER_U5LGUXVL_RUN_ID}"* || "${TEACHER_CHECKPOINT}" == "${TEACHER_U5LGUXVL_LOCAL_CHECKPOINT}" ]]; then
+    TEACHER_COMPAT_PROFILE_RESOLVED="u5lguxvl_generalist"
   else
     TEACHER_COMPAT_PROFILE_RESOLVED="none"
   fi
@@ -199,6 +383,20 @@ case "${TEACHER_COMPAT_PROFILE_RESOLVED}" in
     if [[ "${MOTION_DIR}" != "${TEACHER_REF_MOTION_DIR}" ]]; then
       append_teacher_compat_note "motion_dir kept at ${MOTION_DIR}; teacher used ${TEACHER_REF_MOTION_DIR}"
     fi
+    ;;
+  u5lguxvl_generalist)
+    if [[ "${TEACHER_OBS_KEYS_EXPLICIT}" -eq 0 ]]; then
+      TEACHER_OBS_KEYS="actor_obs"
+    fi
+    if [[ "${TEACHER_PERCEPTION_PRESET_EXPLICIT}" -eq 0 ]]; then
+      TEACHER_PERCEPTION_PRESET="none"
+    fi
+    if [[ "${TEACHER_ACTOR_OBS_HISTORY_LENGTH_EXPLICIT}" -eq 0 ]]; then
+      TEACHER_ACTOR_OBS_HISTORY_LENGTH="5"
+    fi
+    append_teacher_compat_note "teacher_obs_keys defaulted to actor_obs to match u5lguxvl teacher"
+    append_teacher_compat_note "teacher perception disabled to match u5lguxvl teacher"
+    append_teacher_compat_note "actor_obs history length set to ${TEACHER_ACTOR_OBS_HISTORY_LENGTH} to match teacher checkpoint"
     ;;
   *)
     echo "Unknown TEACHER_COMPAT_PROFILE: ${TEACHER_COMPAT_PROFILE_RESOLVED}" >&2
@@ -280,10 +478,17 @@ echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
 echo "[INFO] teacher_compat_profile=${TEACHER_COMPAT_PROFILE_RESOLVED}"
 echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS}"
 echo "[INFO] teacher_perception_preset=${TEACHER_PERCEPTION_PRESET} teacher_perception_obs_key=${TEACHER_PERCEPTION_OBS_KEY}"
+if [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH}" ]]; then
+  echo "[INFO] teacher_actor_obs_history_length=${TEACHER_ACTOR_OBS_HISTORY_LENGTH}"
+fi
 echo "[INFO] run_name=${RUN_NAME} training_name=${TRAINING_NAME}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
 echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} num_envs=${NUM_ENVS}"
+echo "[INFO] data_mode=${DATA_MODE}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
+if [[ -n "${OBJECT_SPEC_PATH}" ]]; then
+  echo "[INFO] object_spec_path=${OBJECT_SPEC_PATH}"
+fi
 if [[ -n "${FILTERED_MOTION_DIR_KEPT:-}" ]]; then
   echo "[INFO] motion_filter_non_placement_clips=${FILTER_NON_PLACEMENT_CLIPS} final_placement_max_delta_z=${FINAL_PLACEMENT_MAX_DELTA_Z} kept=${FILTERED_MOTION_DIR_KEPT} excluded=${FILTERED_MOTION_DIR_EXCLUDED}"
 fi
@@ -312,6 +517,29 @@ if [[ "${RESET_TO_DEFAULT_POSE}" == "True" || "${RESET_TO_DEFAULT_POSE}" == "tru
 fi
 if [[ -n "${TEACHER_COMPAT_NOTES}" ]]; then
   echo "[WARN] teacher_compat_notes=${TEACHER_COMPAT_NOTES}"
+fi
+
+EXTRA_DISTILL_ARGS=()
+if [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH}" ]]; then
+  EXTRA_DISTILL_ARGS+=(--observation.groups.actor_obs.history-length="${TEACHER_ACTOR_OBS_HISTORY_LENGTH}")
+fi
+if [[ -n "${OBJECT_SPEC_PATH}" ]]; then
+  EXTRA_DISTILL_ARGS+=(--robot.object.object-urdf-path "${OBJECT_SPEC_PATH}")
+fi
+if [[ "${DATA_MODE}" == "mix-curriculum" ]]; then
+  EXTRA_DISTILL_ARGS+=(
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.enabled=True
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.clean-clip-name-prefixes="${MIX_CURRICULUM_OMOMO_PREFIXES}"
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.stage-start-iterations="${MIX_CURRICULUM_STAGE_START_ITERATIONS}"
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.clean-group-probabilities="${MIX_CURRICULUM_OMOMO_PROBABILITIES}"
+  )
+elif [[ "${DATA_MODE}" == "pure-real" ]]; then
+  EXTRA_DISTILL_ARGS+=(
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.enabled=True
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.clean-clip-name-prefixes="${PURE_REAL_OMOMO_PREFIXES}"
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.stage-start-iterations='[0]'
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.clean-group-probabilities='[1.0]'
+  )
 fi
 
 exec env \
@@ -390,4 +618,5 @@ exec env \
     --perception.camera-far="${CAMERA_FAR}" \
     --perception.max-distance="${CAMERA_MAX_DISTANCE}" \
     --perception.camera-warp-preprocess="${PERCEPTION_WARP_PREPROCESS}" \
+    "${EXTRA_DISTILL_ARGS[@]}" \
     "$@"
