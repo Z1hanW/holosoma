@@ -45,7 +45,14 @@ isaacsim = SimulatorConfig(
                 num_position_iterations=8,
                 num_velocity_iterations=4,
                 bounce_threshold_velocity=0.5,
+                gpu_max_rigid_contact_count=2**25,  # 33554432
                 gpu_max_rigid_patch_count=20 * 2**15,  # 655360
+                gpu_found_lost_pairs_capacity=2**27,  # 134217728
+                gpu_found_lost_aggregate_pairs_capacity=2**27,  # 134217728
+                gpu_total_aggregate_pairs_capacity=2**24,  # 16777216
+                gpu_collision_stack_size=2**26,  # 67108864
+                gpu_heap_capacity=2**26,  # 67108864
+                gpu_temp_buffer_capacity=2**24,  # 16777216
             ),
             render_mode="human",
             render_interval=4,

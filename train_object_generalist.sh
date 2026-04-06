@@ -41,7 +41,14 @@ OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-""}
 NUM_ENVS=${NUM_ENVS:-65536}
 NPROC=${NPROC:-$(awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}")}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
-PHYSX_GPU_MAX_RIGID_PATCH_COUNT=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT:-655360}
+PHYSX_GPU_MAX_RIGID_CONTACT_COUNT=${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT:-33554432}
+PHYSX_GPU_MAX_RIGID_PATCH_COUNT=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT:-4194304}
+PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY:-134217728}
+PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY:-134217728}
+PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY:-16777216}
+PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-67108864}
+PHYSX_GPU_HEAP_CAPACITY=${PHYSX_GPU_HEAP_CAPACITY:-67108864}
+PHYSX_GPU_TEMP_BUFFER_CAPACITY=${PHYSX_GPU_TEMP_BUFFER_CAPACITY:-16777216}
 
 TRAIN_DATASETS=${TRAIN_DATASETS:-"omomo,behave"}
 AUTO_PREP_MIXED_BANK=${AUTO_PREP_MIXED_BANK:-1}
@@ -619,6 +626,8 @@ echo "[INFO] Generalist contact reward mode=${GENERALIST_CONTACT_REWARD_MODE} th
 echo "[INFO] Generalist contact reward weights torso=${GENERALIST_TORSO_CONTACT_REWARD_WEIGHT} arms=${GENERALIST_ARM_CONTACT_REWARD_WEIGHT} palms=${GENERALIST_PALM_CONTACT_REWARD_WEIGHT}"
 echo "[INFO] Motion default-pose prepend enabled: ${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
 echo "[INFO] Motion default-pose prepend duration: ${DEFAULT_POSE_PREPEND_DURATION_S}s"
+echo "[INFO] PhysX gpu_max_rigid_contact_count=${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT} gpu_max_rigid_patch_count=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT} gpu_found_lost_pairs_capacity=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
+echo "[INFO] PhysX gpu_found_lost_aggregate_pairs_capacity=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY} gpu_total_aggregate_pairs_capacity=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY} gpu_collision_stack_size=${PHYSX_GPU_COLLISION_STACK_SIZE} gpu_heap_capacity=${PHYSX_GPU_HEAP_CAPACITY} gpu_temp_buffer_capacity=${PHYSX_GPU_TEMP_BUFFER_CAPACITY}"
 
 train_cmd=(
   src/holosoma/holosoma/train_agent.py
@@ -628,7 +637,14 @@ train_cmd=(
   --training.num-envs="${NUM_ENVS}"
   --command.setup-terms.motion-command.params.motion-config.motion-file "${MOTION_DIR}"
   --algo.config.save-interval=500
+  --simulator.config.sim.physx.gpu-max-rigid-contact-count="${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT}"
   --simulator.config.sim.physx.gpu-max-rigid-patch-count="${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}"
+  --simulator.config.sim.physx.gpu-found-lost-pairs-capacity="${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
+  --simulator.config.sim.physx.gpu-found-lost-aggregate-pairs-capacity="${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY}"
+  --simulator.config.sim.physx.gpu-total-aggregate-pairs-capacity="${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY}"
+  --simulator.config.sim.physx.gpu-collision-stack-size="${PHYSX_GPU_COLLISION_STACK_SIZE}"
+  --simulator.config.sim.physx.gpu-heap-capacity="${PHYSX_GPU_HEAP_CAPACITY}"
+  --simulator.config.sim.physx.gpu-temp-buffer-capacity="${PHYSX_GPU_TEMP_BUFFER_CAPACITY}"
   --reward.terms.body_contact_reward_torso.weight="${GENERALIST_TORSO_CONTACT_REWARD_WEIGHT}"
   --reward.terms.body_contact_reward_arms.weight="${GENERALIST_ARM_CONTACT_REWARD_WEIGHT}"
   --reward.terms.body_contact_reward_palms.weight="${GENERALIST_PALM_CONTACT_REWARD_WEIGHT}"

@@ -50,7 +50,14 @@ DEFAULT_CUDA_VISIBLE_DEVICES=2,3,4,5,6,7
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-${DEFAULT_CUDA_VISIBLE_DEVICES}}
 NPROC=${NPROC:-$(awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}")}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
-PHYSX_GPU_MAX_RIGID_PATCH_COUNT=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT:-655360}
+PHYSX_GPU_MAX_RIGID_CONTACT_COUNT=${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT:-33554432}
+PHYSX_GPU_MAX_RIGID_PATCH_COUNT=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT:-4194304}
+PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY:-134217728}
+PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY:-134217728}
+PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY:-16777216}
+PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-67108864}
+PHYSX_GPU_HEAP_CAPACITY=${PHYSX_GPU_HEAP_CAPACITY:-67108864}
+PHYSX_GPU_TEMP_BUFFER_CAPACITY=${PHYSX_GPU_TEMP_BUFFER_CAPACITY:-16777216}
 
 LEGACY_DEFAULT_EXP=g1-29dof-wbt-w-object-extend
 COMMAND_CURRICULUM_DEFAULT_EXP=g1-29dof-wbt-w-object-command-curriculum
@@ -687,7 +694,14 @@ append_common_training_args() {
     --training.project="${WANDB_PROJECT}"
     --training.name="${stage_name}"
     --training.num_envs="${NUM_ENVS}"
+    --simulator.config.sim.physx.gpu-max-rigid-contact-count="${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT}"
     --simulator.config.sim.physx.gpu-max-rigid-patch-count="${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}"
+    --simulator.config.sim.physx.gpu-found-lost-pairs-capacity="${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
+    --simulator.config.sim.physx.gpu-found-lost-aggregate-pairs-capacity="${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY}"
+    --simulator.config.sim.physx.gpu-total-aggregate-pairs-capacity="${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY}"
+    --simulator.config.sim.physx.gpu-collision-stack-size="${PHYSX_GPU_COLLISION_STACK_SIZE}"
+    --simulator.config.sim.physx.gpu-heap-capacity="${PHYSX_GPU_HEAP_CAPACITY}"
+    --simulator.config.sim.physx.gpu-temp-buffer-capacity="${PHYSX_GPU_TEMP_BUFFER_CAPACITY}"
     --command.setup_terms.motion_command.params.motion_config.motion_file
     "${motion_source}"
     --algo.config.save_interval="${SAVE_INTERVAL}"
@@ -903,7 +917,8 @@ run_stage() {
   train_cmd+=("${EXTRA_ARGS[@]}")
 
   echo "[INFO] Stage ${stage_index}: profile=${stage_profile} scale=${scale_spec} stage_name=${stage_name}"
-  echo "[INFO] Stage ${stage_index}: num_envs=${NUM_ENVS} cuda_visible_devices=${CUDA_VISIBLE_DEVICES} physx_gpu_max_rigid_patch_count=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}"
+  echo "[INFO] Stage ${stage_index}: num_envs=${NUM_ENVS} cuda_visible_devices=${CUDA_VISIBLE_DEVICES} physx_gpu_max_rigid_contact_count=${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT} physx_gpu_max_rigid_patch_count=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT} physx_gpu_found_lost_pairs_capacity=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
+  echo "[INFO] Stage ${stage_index}: physx_gpu_found_lost_aggregate_pairs_capacity=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY} physx_gpu_total_aggregate_pairs_capacity=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY} physx_gpu_collision_stack_size=${PHYSX_GPU_COLLISION_STACK_SIZE} physx_gpu_heap_capacity=${PHYSX_GPU_HEAP_CAPACITY} physx_gpu_temp_buffer_capacity=${PHYSX_GPU_TEMP_BUFFER_CAPACITY}"
   if [[ "${stage_profile}" == "blend" || "${stage_profile}" == "transition" ]]; then
     echo "[INFO] Stage ${stage_index}: profile_blend=${stage_blend} (0=full tracking, 1=decoupled/contact-oriented)"
   fi

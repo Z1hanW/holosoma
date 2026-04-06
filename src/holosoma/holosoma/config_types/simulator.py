@@ -86,6 +86,9 @@ class PhysxConfig:
     bounce_threshold_velocity: float = 0.5
     """Velocity threshold below which bounce responses are suppressed."""
 
+    gpu_max_rigid_contact_count: int | None = None
+    """Maximum rigid contact count for the PhysX GPU contact stream (IsaacSim only)."""
+
     gpu_collision_stack_size: int | None = None
     """GPU collision stack size in bytes for PhysX (IsaacSim only)."""
 
@@ -94,6 +97,18 @@ class PhysxConfig:
 
     gpu_found_lost_pairs_capacity: int | None = None
     """Capacity of found/lost broadphase pairs in GPU memory for PhysX (IsaacSim only)."""
+
+    gpu_found_lost_aggregate_pairs_capacity: int | None = None
+    """Capacity of aggregate found/lost pair buffers in GPU memory for PhysX (IsaacSim only)."""
+
+    gpu_total_aggregate_pairs_capacity: int | None = None
+    """Capacity of aggregate pair tracking buffers in GPU memory for PhysX (IsaacSim only)."""
+
+    gpu_heap_capacity: int | None = None
+    """Initial PhysX GPU heap capacity in bytes (IsaacSim only)."""
+
+    gpu_temp_buffer_capacity: int | None = None
+    """Temporary PhysX GPU buffer capacity in bytes (IsaacSim only)."""
 
 
 @dataclass(frozen=True)
@@ -560,6 +575,9 @@ class SimulatorInitConfig:
 
     contact_sensor_history_length: int = 3
     """Number of frames of contact data retained for sensors."""
+
+    object_filtered_contact_sensor_body_names: list[str] = field(default_factory=list)
+    """Optional list of robot body names that should get object-filtered IsaacSim contact sensors."""
 
     robot_mjcf_filter: MujocoXMLFilterCfg = field(default_factory=MujocoXMLFilterCfg)
     """MuJoCo-specific XML filtering configuration for robot MJCF files."""

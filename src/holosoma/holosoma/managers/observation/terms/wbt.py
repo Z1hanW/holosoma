@@ -218,6 +218,32 @@ def _get_selected_sim_body_names(
     return [all_names[int(idx)] for idx in selected_indexes.detach().cpu().tolist()]
 
 
+def _get_object_contact_force_history(
+    env: WholeBodyTrackingManager,
+    *,
+    body_names: list[str] | tuple[str, ...] | None = None,
+    body_name_pattern: str | None = None,
+) -> torch.Tensor:
+    selected_indexes = _get_sim_body_subset_indexes(
+        env,
+        body_names=body_names,
+        body_name_pattern=body_name_pattern,
+    )
+    selected_names = _get_selected_sim_body_names(env, selected_indexes)
+    motion_command = env.command_manager.get_state("motion_command")
+    if isinstance(motion_command, MotionCommand):
+        return motion_command.get_body_object_contact_force_history(selected_names)
+
+    getter = getattr(env.simulator, "get_object_contact_force_history", None)
+    if getter is None:
+        raise RuntimeError(
+            f"Simulator '{type(env.simulator).__name__}' does not expose box-filtered contact forces. "
+            "Privileged box-contact critic observations require backend support for box-specific contacts."
+        )
+
+    return getter(selected_names)
+
+
 def _current_contact_force_subset(
     env: WholeBodyTrackingManager,
     *,
@@ -238,15 +264,11 @@ def _current_contact_force_subset(
     if not object_only and not non_object_only:
         return current_contact_forces
 
-    getter = getattr(env.simulator, "get_object_contact_force_history", None)
-    if getter is None:
-        raise RuntimeError(
-            f"Simulator '{type(env.simulator).__name__}' does not expose box-filtered contact forces. "
-            "Privileged box-contact critic observations require backend support for box-specific contacts."
-        )
-
-    selected_names = _get_selected_sim_body_names(env, body_indexes)
-    object_contact_forces = getter(selected_names)[:, 0, :, :]
+    object_contact_forces = _get_object_contact_force_history(
+        env,
+        body_names=body_names,
+        body_name_pattern=body_name_pattern,
+    )[:, 0, :, :]
     if object_only:
         return object_contact_forces
     return current_contact_forces - object_contact_forces

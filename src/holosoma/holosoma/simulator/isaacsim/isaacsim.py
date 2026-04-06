@@ -1,26 +1,27 @@
 from __future__ import annotations
 
 import builtins
+import copy
+from dataclasses import fields, is_dataclass
 import json
 import math
-import copy
 import os
+import pathlib
+import re
 import zipfile
 import xml.etree.ElementTree as ET
 from typing import Any
 
-import pathlib
-import trimesh
 import numpy as np
+import trimesh
 
 from holosoma.config_types.full_sim import FullSimConfig
 import isaaclab.sim as sim_utils
-from isaaclab.assets import RigidObject, RigidObjectCfg
 import isaaclab.terrains as terrain_gen
 import omni.log
 import torch
 from isaaclab.actuators import IdealPDActuatorCfg
-from isaaclab.assets import Articulation, ArticulationCfg
+from isaaclab.assets import Articulation, ArticulationCfg, RigidObject, RigidObjectCfg
 from isaaclab.envs import ViewerCfg, mdp
 from isaaclab.managers import EventManager, SceneEntityCfg
 from isaaclab.managers import EventTermCfg as EventTerm
@@ -31,7 +32,7 @@ from isaaclab.terrains import TerrainGeneratorCfg, TerrainImporterCfg
 from isaaclab.terrains.utils import create_prim_from_mesh
 from isaaclab.utils.timer import Timer
 from loguru import logger
-from omegaconf import DictConfig
+from omegaconf import DictConfig, ListConfig
 
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.path import resolve_data_file_path
@@ -79,6 +80,46 @@ _OBJECT_CONTACT_MONITOR_BODY_NAMES = (
     "torso_link",
 )
 _OBJECT_CONTACT_SENSOR_FORCE_THRESHOLD = 0.0
+_OBJECT_CONTACT_OBSERVATION_FUNC_PATHS = frozenset(
+    {
+        "holosoma.managers.observation.terms.wbt:body_contact_force_magnitude",
+        "holosoma.managers.observation.terms.wbt:body_contact_binary_flag",
+    }
+)
+_OBJECT_CONTACT_REWARD_FUNC_PATHS = frozenset(
+    {
+        "holosoma.managers.reward.terms.wbt:body_object_contact_reward",
+        "holosoma.managers.reward.terms.wbt:ObjectUndesiredContacts",
+    }
+)
+
+
+def _iter_config_nodes(config: Any, *, seen: set[int] | None = None):
+    if config is None or isinstance(config, (str, bytes, int, float, bool, pathlib.Path)):
+        return
+
+    if seen is None:
+        seen = set()
+
+    config_id = id(config)
+    if config_id in seen:
+        return
+    seen.add(config_id)
+    yield config
+
+    if is_dataclass(config):
+        for config_field in fields(config):
+            yield from _iter_config_nodes(getattr(config, config_field.name), seen=seen)
+        return
+
+    if isinstance(config, (dict, DictConfig)):
+        for value in config.values():
+            yield from _iter_config_nodes(value, seen=seen)
+        return
+
+    if isinstance(config, (list, tuple, set, ListConfig)):
+        for value in config:
+            yield from _iter_config_nodes(value, seen=seen)
 
 
 class IsaacSim(BaseSimulator):
@@ -93,9 +134,15 @@ class IsaacSim(BaseSimulator):
         self._heterogeneous_object_env_assignment = False
         self._object_contact_filter_prim_paths_expr: list[str] = []
         self._object_contact_sensors: dict[str, ContactSensor] = {}
+        self._required_object_contact_sensor_body_names = self._resolve_required_object_contact_sensor_body_names(
+            tyro_config
+        )
 
         # Patch buffer overflow in PhysX GPU narrow phase is sensitive to contact density.
         # Keep a safer default than IsaacLab's default for large multi-env object training.
+        gpu_max_rigid_contact_count = getattr(self.simulator_config.sim.physx, "gpu_max_rigid_contact_count", None)
+        if gpu_max_rigid_contact_count is None:
+            gpu_max_rigid_contact_count = 2**25  # 33554432
         gpu_max_rigid_patch_count = getattr(self.simulator_config.sim.physx, "gpu_max_rigid_patch_count", None)
         if gpu_max_rigid_patch_count is None:
             gpu_max_rigid_patch_count = 20 * 2**15  # 655360
@@ -105,7 +152,40 @@ class IsaacSim(BaseSimulator):
             None,
         )
         if gpu_found_lost_pairs_capacity is None:
-            gpu_found_lost_pairs_capacity = 2**24  # 16777216
+            gpu_found_lost_pairs_capacity = 2**27  # 134217728
+        gpu_found_lost_aggregate_pairs_capacity = getattr(
+            self.simulator_config.sim.physx,
+            "gpu_found_lost_aggregate_pairs_capacity",
+            None,
+        )
+        if gpu_found_lost_aggregate_pairs_capacity is None:
+            gpu_found_lost_aggregate_pairs_capacity = 2**27  # 134217728
+        gpu_total_aggregate_pairs_capacity = getattr(
+            self.simulator_config.sim.physx,
+            "gpu_total_aggregate_pairs_capacity",
+            None,
+        )
+        if gpu_total_aggregate_pairs_capacity is None:
+            gpu_total_aggregate_pairs_capacity = 2**24  # 16777216
+        gpu_collision_stack_size = getattr(self.simulator_config.sim.physx, "gpu_collision_stack_size", None)
+        if gpu_collision_stack_size is None:
+            gpu_collision_stack_size = 2**26  # 67108864
+        gpu_heap_capacity = getattr(self.simulator_config.sim.physx, "gpu_heap_capacity", None)
+        if gpu_heap_capacity is None:
+            gpu_heap_capacity = 2**26  # 67108864
+        gpu_temp_buffer_capacity = getattr(self.simulator_config.sim.physx, "gpu_temp_buffer_capacity", None)
+        if gpu_temp_buffer_capacity is None:
+            gpu_temp_buffer_capacity = 2**24  # 16777216
+        physx_gpu_buffer_config = {
+            "gpu_max_rigid_contact_count": int(gpu_max_rigid_contact_count),
+            "gpu_max_rigid_patch_count": int(gpu_max_rigid_patch_count),
+            "gpu_found_lost_pairs_capacity": int(gpu_found_lost_pairs_capacity),
+            "gpu_found_lost_aggregate_pairs_capacity": int(gpu_found_lost_aggregate_pairs_capacity),
+            "gpu_total_aggregate_pairs_capacity": int(gpu_total_aggregate_pairs_capacity),
+            "gpu_collision_stack_size": int(gpu_collision_stack_size),
+            "gpu_heap_capacity": int(gpu_heap_capacity),
+            "gpu_temp_buffer_capacity": int(gpu_temp_buffer_capacity),
+        }
 
         sim_config: SimulationCfg = SimulationCfg(
             dt=1.0 / self.simulator_config.sim.fps,
@@ -116,8 +196,16 @@ class IsaacSim(BaseSimulator):
                 solver_type=self.simulator_config.sim.physx.solver_type,
                 max_position_iteration_count=self.simulator_config.sim.physx.num_position_iterations,
                 max_velocity_iteration_count=self.simulator_config.sim.physx.num_velocity_iterations,
-                gpu_max_rigid_patch_count=int(gpu_max_rigid_patch_count),
-                gpu_found_lost_pairs_capacity=int(gpu_found_lost_pairs_capacity),
+                gpu_max_rigid_contact_count=physx_gpu_buffer_config["gpu_max_rigid_contact_count"],
+                gpu_max_rigid_patch_count=physx_gpu_buffer_config["gpu_max_rigid_patch_count"],
+                gpu_found_lost_pairs_capacity=physx_gpu_buffer_config["gpu_found_lost_pairs_capacity"],
+                gpu_found_lost_aggregate_pairs_capacity=physx_gpu_buffer_config[
+                    "gpu_found_lost_aggregate_pairs_capacity"
+                ],
+                gpu_total_aggregate_pairs_capacity=physx_gpu_buffer_config["gpu_total_aggregate_pairs_capacity"],
+                gpu_collision_stack_size=physx_gpu_buffer_config["gpu_collision_stack_size"],
+                gpu_heap_capacity=physx_gpu_buffer_config["gpu_heap_capacity"],
+                gpu_temp_buffer_capacity=physx_gpu_buffer_config["gpu_temp_buffer_capacity"],
             ),
             # Global physics material, can be overridden by the individual articulation
             # Can be inspected by:
@@ -128,25 +216,8 @@ class IsaacSim(BaseSimulator):
                 restitution=0.0,
             ),
         )
-        logger.info("PhysX gpu_max_rigid_patch_count set to {}", int(gpu_max_rigid_patch_count))
-        logger.info("PhysX gpu_found_lost_pairs_capacity set to {}", int(gpu_found_lost_pairs_capacity))
-
-        gpu_stack_size = getattr(self.simulator_config.sim.physx, "gpu_collision_stack_size", None)
-        if gpu_stack_size is not None:
-            if hasattr(sim_config.physx, "gpu_collision_stack_size"):
-                sim_config.physx.gpu_collision_stack_size = int(gpu_stack_size)
-                logger.info(
-                    "PhysX gpu_collision_stack_size configured in SimulationCfg: {}", int(gpu_stack_size)
-                )
-            elif hasattr(sim_config.physx, "gpuCollisionStackSize"):
-                setattr(sim_config.physx, "gpuCollisionStackSize", int(gpu_stack_size))
-                logger.info(
-                    "PhysX gpuCollisionStackSize configured in SimulationCfg: {}", int(gpu_stack_size)
-                )
-            else:
-                logger.warning(
-                    "PhysX GPU collision stack size not supported in SimulationCfg; will set via USD only."
-                )
+        for config_name, config_value in physx_gpu_buffer_config.items():
+            logger.info("PhysX {} set to {}", config_name, config_value)
 
         # create a simulation context to control the simulator
         if SimulationContext.instance() is None:
@@ -1382,9 +1453,16 @@ class IsaacSim(BaseSimulator):
             return
 
         available_body_names = set(getattr(self.robot_config, "body_names", []))
-        for body_name in _OBJECT_CONTACT_MONITOR_BODY_NAMES:
-            if body_name not in available_body_names:
-                continue
+        target_body_names = [
+            body_name
+            for body_name in self._required_object_contact_sensor_body_names
+            if body_name in available_body_names
+        ]
+        if not target_body_names:
+            logger.info("Skipping object-filtered contact sensors; current config does not request any monitored bodies.")
+            return
+
+        for body_name in target_body_names:
 
             sensor_cfg = ContactSensorCfg(
                 prim_path=f"/World/envs/env_.*/Robot/{body_name}",
@@ -1415,15 +1493,12 @@ class IsaacSim(BaseSimulator):
 
         Shape: [num_envs, history_length, len(body_names), 3]
         """
-        if not self._object_contact_sensors:
-            raise RuntimeError("Object-filtered contact sensors are not available in this IsaacSim scene.")
-
-        first_sensor = next(iter(self._object_contact_sensors.values()))
-        first_history = first_sensor.data.force_matrix_w_history
-        if first_history is None:
-            raise RuntimeError("Filtered object-contact history is unavailable.")
-
-        history_len = int(first_history.shape[1])
+        history_len = int(self.simulator_config.contact_sensor_history_length)
+        if self._object_contact_sensors:
+            first_sensor = next(iter(self._object_contact_sensors.values()))
+            first_history = first_sensor.data.force_matrix_w_history
+            if first_history is not None:
+                history_len = int(first_history.shape[1])
         if not body_names:
             return torch.zeros((self.num_envs, history_len, 0, 3), device=self.device, dtype=torch.float32)
 
@@ -1431,14 +1506,11 @@ class IsaacSim(BaseSimulator):
         for body_idx, body_name in enumerate(body_names):
             sensor = self._object_contact_sensors.get(body_name)
             if sensor is None:
-                raise ValueError(
-                    f"Object-filtered contact sensor for body '{body_name}' is unavailable. "
-                    f"Available bodies: {sorted(self._object_contact_sensors.keys())}"
-                )
+                continue
 
             matrix_history = sensor.data.force_matrix_w_history
             if matrix_history is None:
-                raise RuntimeError(f"Filtered object-contact history missing for body '{body_name}'.")
+                continue
 
             # Shape: [E, T, 1, M, 3] -> sum across filtered object prims => [E, T, 3]
             result[:, :, body_idx, :] = matrix_history[:, :, 0, :, :].sum(dim=2)
@@ -1537,6 +1609,79 @@ class IsaacSim(BaseSimulator):
             env_reset_ids = env_id.detach().cpu().tolist() if isinstance(env_id, torch.Tensor) else env_id
             for sensor in self._object_contact_sensors.values():
                 sensor.reset(env_reset_ids)
+
+    def _resolve_required_object_contact_sensor_body_names(self, config_root: Any) -> tuple[str, ...]:
+        available_body_names = list(getattr(self.robot_config, "body_names", []))
+        monitorable_body_names = set(_OBJECT_CONTACT_MONITOR_BODY_NAMES).intersection(available_body_names)
+        if not monitorable_body_names:
+            return ()
+
+        configured_body_names = list(
+            getattr(self.simulator_config, "object_filtered_contact_sensor_body_names", []) or []
+        )
+        if configured_body_names:
+            return tuple(
+                body_name
+                for body_name in _OBJECT_CONTACT_MONITOR_BODY_NAMES
+                if body_name in monitorable_body_names and body_name in configured_body_names
+            )
+
+        command_setup_terms = getattr(self.command_config, "setup_terms", {}) if self.command_config is not None else {}
+        if "motion_command" in command_setup_terms:
+            return ()
+
+        required_body_names: set[str] = set()
+        for node in _iter_config_nodes(config_root):
+            func_path: str | None = None
+            params: dict[str, Any] | DictConfig | None = None
+            reward_weight: Any = None
+
+            if is_dataclass(node):
+                func_path = getattr(node, "func", None)
+                params = getattr(node, "params", None)
+                reward_weight = getattr(node, "weight", None)
+            elif isinstance(node, (dict, DictConfig)):
+                func_path = node.get("func")
+                params = node.get("params")
+                reward_weight = node.get("weight")
+
+            if not isinstance(func_path, str) or not isinstance(params, (dict, DictConfig)):
+                continue
+
+            needs_filtered_sensor = False
+            if func_path in _OBJECT_CONTACT_OBSERVATION_FUNC_PATHS:
+                needs_filtered_sensor = bool(params.get("object_only") or params.get("non_object_only"))
+            elif func_path in _OBJECT_CONTACT_REWARD_FUNC_PATHS:
+                needs_filtered_sensor = reward_weight is None or float(reward_weight) != 0.0
+
+            if not needs_filtered_sensor:
+                continue
+
+            required_body_names.update(
+                monitorable_body_names.intersection(
+                    self._resolve_contact_sensor_body_names_from_params(params, available_body_names)
+                )
+            )
+
+        return tuple(body_name for body_name in _OBJECT_CONTACT_MONITOR_BODY_NAMES if body_name in required_body_names)
+
+    def _resolve_contact_sensor_body_names_from_params(
+        self,
+        params: dict[str, Any] | DictConfig,
+        available_body_names: list[str],
+    ) -> list[str]:
+        body_names = params.get("body_names")
+        if body_names is not None:
+            return [body_name for body_name in body_names if body_name in available_body_names]
+
+        body_name_pattern = params.get("body_name_pattern")
+        if body_name_pattern is None:
+            body_name_pattern = params.get("undesired_contacts_body_names")
+        if body_name_pattern:
+            regex = re.compile(body_name_pattern)
+            return [body_name for body_name in available_body_names if regex.match(body_name)]
+
+        return list(available_body_names)
 
     def apply_torques_at_dof(self, torques):
         self._robot.set_joint_effort_target(torques, joint_ids=self.dof_ids)
