@@ -3828,6 +3828,7 @@ class ViserLiveViewer:
                         @self._clip_apply.on_click
                         def _(_evt) -> None:
                             _queue_clip_change()
+                            self.apply_pending_controls()
 
                         # Force the initial clip so we don't randomize across the bank.
                         self._pending_clip_idx = 0
@@ -3971,6 +3972,23 @@ class ViserLiveViewer:
         self._invalidate_isaac_scandots_payload()
         if hasattr(self._env, "_draw_scandots_in_viewer"):
             self._env._draw_scandots_in_viewer()
+        sim = getattr(self._env, "simulator", None)
+        scene = getattr(sim, "scene", None)
+        if scene is not None and hasattr(scene, "update"):
+            try:
+                fps = float(getattr(getattr(sim, "simulator_config", None), "sim", None).fps)
+                dt = 1.0 / fps if fps > 0.0 else 0.0
+            except Exception:
+                dt = 0.0
+            try:
+                scene.update(dt=dt)
+            except Exception:
+                pass
+            if hasattr(sim, "refresh_sim_tensors"):
+                try:
+                    sim.refresh_sim_tensors()
+                except Exception:
+                    pass
         self.record_step()
 
     def _apply_clip_selection(self) -> None:
@@ -4007,11 +4025,13 @@ class ViserLiveViewer:
                 motion_cmd.set_forced_clip_start(None)
             except Exception:
                 motion_cmd._forced_start_step = None
+        env_ids = torch.tensor([self._env_id], device=self._env.device, dtype=torch.long)
         self._force_clip_state(motion_cmd, int(clip_idx), clip_start)
         active_idx = self._active_clip_index(motion_cmd)
         if active_idx is None:
             active_idx = int(clip_idx)
         self._reload_terrain_for_clip(self._current_clip_name(motion_cmd, int(active_idx)))
+        self._sync_after_reset(env_ids)
 
     def _force_clip_state(self, motion_cmd, clip_idx: int, clip_start: int | None) -> None:
         env_ids = torch.tensor([self._env_id], device=self._env.device, dtype=torch.long)
@@ -4068,6 +4088,18 @@ class ViserLiveViewer:
                 motion_cmd._set_simulator_object_states(env_ids, obj_states)
             else:
                 sim.set_actor_states([motion_cmd.object_name], env_ids, obj_states)
+
+            # Keep sparse-goal anchors and goal materialization aligned with the restored clip frame.
+            if hasattr(motion_cmd, "_reset_pickup_anchor_state"):
+                motion_cmd._reset_pickup_anchor_state(
+                    env_ids,
+                    root_pos_w=root_pos,
+                    root_quat_w=root_rot,
+                    object_pos_w=obj_pos,
+                )
+
+        if hasattr(motion_cmd, "_update_manual_goal_override"):
+            motion_cmd._update_manual_goal_override(env_ids)
 
         if hasattr(sim, "scene") and hasattr(sim.scene, "write_data_to_sim"):
             sim.scene.write_data_to_sim()

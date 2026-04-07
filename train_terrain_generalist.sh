@@ -18,9 +18,10 @@ else
 fi
 PYTHON_BIN=${PYTHON_BIN:-"${DEFAULT_PYTHON_BIN}"}
 
-if [[ -n "${CUDA_VISIBLE_DEVICES+x}" ]]; then
-  unset CUDA_VISIBLE_DEVICES
-fi
+DEFAULT_CUDA_VISIBLE_DEVICES=${DEFAULT_CUDA_VISIBLE_DEVICES:-0,1,2,3}
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-${DEFAULT_CUDA_VISIBLE_DEVICES}}
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES//[[:space:]]/}
+export CUDA_VISIBLE_DEVICES
 
 detect_nproc() {
   local gpu_count=""
@@ -67,11 +68,24 @@ else
   EXP_ARG="exp:${EXP}"
 fi
 
-NPROC=${NPROC:-$(detect_nproc)}
-PER_GPU_ENVS=${PER_GPU_ENVS:-8192}
+AVAILABLE_GPU_COUNT=$(detect_nproc)
+NPROC=${NPROC:-$(awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}")}
+if [[ ! "${NPROC}" =~ ^[0-9]+$ || "${NPROC}" -lt 1 ]]; then
+  echo "[ERROR] NPROC must be a positive integer. Got: ${NPROC}" >&2
+  exit 1
+fi
+if [[ "${NPROC}" -gt "${AVAILABLE_GPU_COUNT}" ]]; then
+  echo "[ERROR] Requested NPROC=${NPROC}, but only ${AVAILABLE_GPU_COUNT} visible CUDA GPU(s) are available." >&2
+  exit 1
+fi
+PER_GPU_ENVS=${PER_GPU_ENVS:-2048}
 NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
-PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY:-16777216}
+PHYSX_GPU_MAX_RIGID_CONTACT_COUNT=${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT:-67108864}
+PHYSX_GPU_MAX_RIGID_PATCH_COUNT=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT:-8388608}
+PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY:-536870912}
+PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY:-1073741824}
+PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY:-134217728}
 
 WANDB_PROJECT=${WANDB_PROJECT:-terrain-aware}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_terrain_generalist}
@@ -82,7 +96,9 @@ ACTOR_LR=${ACTOR_LR:-7e-5}
 CRITIC_LR=${CRITIC_LR:-7e-5}
 SAVE_INTERVAL=${SAVE_INTERVAL:-1000}
 LOAD_OPTIMIZER=${LOAD_OPTIMIZER:-False}
-PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-536870912}
+PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-1073741824}
+PHYSX_GPU_HEAP_CAPACITY=${PHYSX_GPU_HEAP_CAPACITY:-268435456}
+PHYSX_GPU_TEMP_BUFFER_CAPACITY=${PHYSX_GPU_TEMP_BUFFER_CAPACITY:-67108864}
 
 MOTION_DIR=${MOTION_DIR:-data/ds_crisp_data/___crisp_clean_motion}
 OBJ_SOURCE=${OBJ_SOURCE:-data/ds_crisp_data/___crisp_clean_geometry}
@@ -257,9 +273,10 @@ fi
 
 echo "[INFO] EXP=${EXP_ARG}"
 echo "[INFO] PERCEPTION=${PERCEPTION_PRESET}"
-echo "[INFO] GPU_SELECTION=all-visible"
+echo "[INFO] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "[INFO] NPROC=${NPROC} PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
-echo "[INFO] PhysX gpu_collision_stack_size=${PHYSX_GPU_COLLISION_STACK_SIZE} gpu_found_lost_pairs_capacity=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
+echo "[INFO] PhysX gpu_max_rigid_contact_count=${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT} gpu_max_rigid_patch_count=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT} gpu_found_lost_pairs_capacity=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
+echo "[INFO] PhysX gpu_found_lost_aggregate_pairs_capacity=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY} gpu_total_aggregate_pairs_capacity=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY} gpu_collision_stack_size=${PHYSX_GPU_COLLISION_STACK_SIZE} gpu_heap_capacity=${PHYSX_GPU_HEAP_CAPACITY} gpu_temp_buffer_capacity=${PHYSX_GPU_TEMP_BUFFER_CAPACITY}"
 echo "[INFO] MOTION_DIR=${MOTION_DIR}"
 echo "[INFO] OBJ_PATH=${OBJ_PATH}"
 if [[ -n "${OBJ_META_PATH}" ]]; then
@@ -284,8 +301,14 @@ cmd=(
   --training.num_envs="${NUM_ENVS}"
   --training.headless="${HEADLESS}"
   --simulator.config.scene.env_spacing=0.0
+  --simulator.config.sim.physx.gpu_max_rigid_contact_count="${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT}"
+  --simulator.config.sim.physx.gpu_max_rigid_patch_count="${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}"
   --simulator.config.sim.physx.gpu_collision_stack_size="${PHYSX_GPU_COLLISION_STACK_SIZE}"
   --simulator.config.sim.physx.gpu_found_lost_pairs_capacity="${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
+  --simulator.config.sim.physx.gpu_found_lost_aggregate_pairs_capacity="${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY}"
+  --simulator.config.sim.physx.gpu_total_aggregate_pairs_capacity="${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY}"
+  --simulator.config.sim.physx.gpu_heap_capacity="${PHYSX_GPU_HEAP_CAPACITY}"
+  --simulator.config.sim.physx.gpu_temp_buffer_capacity="${PHYSX_GPU_TEMP_BUFFER_CAPACITY}"
   --terrain.terrain-term.obj-file-path "${OBJ_PATH}"
   --terrain.terrain-term.num-rows "${NUM_ROWS}"
   --terrain.terrain-term.num-cols "${NUM_COLS}"

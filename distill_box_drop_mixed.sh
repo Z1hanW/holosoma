@@ -211,6 +211,7 @@ MIX_CURRICULUM_STAGE_START_ITERATIONS=${MIX_CURRICULUM_STAGE_START_ITERATIONS:-'
 MIX_CURRICULUM_OMOMO_PROBABILITIES=${MIX_CURRICULUM_OMOMO_PROBABILITIES:-'[1.0, 0.9, 0.8, 0.7, 0.6, 0.5]'}
 PURE_REAL_OMOMO_PREFIXES=${PURE_REAL_OMOMO_PREFIXES:-'["sub"]'}
 OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-""}
+ASSERT_ACTIVE_MULTI_URDF=${ASSERT_ACTIVE_MULTI_URDF:-auto}
 
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs_legacy,perception_obs}
 TEACHER_PERCEPTION_PRESET=${TEACHER_PERCEPTION_PRESET:-none}
@@ -472,6 +473,92 @@ PY
   FILTERED_MOTION_DIR_KEPT="${FILTERED_MOTION_DIR_STATS%%|*}"
   FILTERED_MOTION_DIR_EXCLUDED="${FILTERED_MOTION_DIR_STATS##*|}"
   MOTION_DIR="${MOTION_DIR_FILTERED_PATH}"
+fi
+
+if [[ -n "${OBJECT_SPEC_PATH}" ]]; then
+  "${PYTHON_BIN}" - "${MOTION_DIR}" "${OBJECT_SPEC_PATH}" "${DATA_MODE}" "${ASSERT_ACTIVE_MULTI_URDF}" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from collections import Counter
+from pathlib import Path
+
+import numpy as np
+
+motion_dir = Path(sys.argv[1]).expanduser().resolve()
+object_spec_path = Path(sys.argv[2]).expanduser().resolve()
+data_mode = sys.argv[3].strip().lower()
+assert_mode_raw = sys.argv[4].strip().lower()
+
+if not motion_dir.is_dir():
+    raise SystemExit(f"[ERROR] Motion dir not found for object-bank validation: {motion_dir}")
+if not object_spec_path.is_file():
+    raise SystemExit(f"[ERROR] Object spec map not found for object-bank validation: {object_spec_path}")
+
+payload = json.loads(object_spec_path.read_text(encoding="utf-8"))
+clips = payload["clips"] if isinstance(payload, dict) and isinstance(payload.get("clips"), dict) else payload
+if not isinstance(clips, dict) or not clips:
+    raise SystemExit(f"[ERROR] Invalid clip-object map payload: {object_spec_path}")
+
+active_clip_ids = [path.stem for path in sorted(motion_dir.glob("*.npz"))]
+if not active_clip_ids:
+    raise SystemExit(f"[ERROR] No .npz clips found under active MOTION_DIR: {motion_dir}")
+
+resolved_urdfs: list[str] = []
+missing: list[str] = []
+for clip_id in active_clip_ids:
+    entry = clips.get(clip_id)
+    urdf = ""
+    if isinstance(entry, str):
+        urdf = entry.strip()
+    elif isinstance(entry, dict):
+        urdf = str(entry.get("object_urdf_path", "")).strip()
+
+    if not urdf:
+        npz_path = motion_dir / f"{clip_id}.npz"
+        data = np.load(npz_path, allow_pickle=True)
+        if "object_urdf_path" in data:
+            arr = np.asarray(data["object_urdf_path"])
+            if arr.size:
+                item = arr.item() if arr.shape == () else arr.reshape(-1)[0]
+                urdf = str(item).strip()
+
+    if not urdf:
+        missing.append(clip_id)
+        continue
+    resolved_urdfs.append(str(Path(urdf).expanduser().resolve()))
+
+if missing:
+    preview = ", ".join(missing[:10])
+    raise SystemExit(
+        f"[ERROR] Active motion clips missing object_urdf_path resolution in {object_spec_path}: {preview}"
+    )
+
+counts = Counter(resolved_urdfs)
+unique_urdfs = sorted(counts)
+top = ", ".join(f"{Path(path).name}:{count}" for path, count in counts.most_common(5))
+print(
+    f"[INFO] active_object_bank={len(active_clip_ids)} clips {len(unique_urdfs)} unique_urdfs "
+    f"(top={top})"
+)
+
+assert_multi = False
+if assert_mode_raw in {"1", "true", "yes", "on"}:
+    assert_multi = True
+elif assert_mode_raw in {"0", "false", "no", "off"}:
+    assert_multi = False
+elif assert_mode_raw == "auto":
+    assert_multi = data_mode in {"mix-naive", "mix-curriculum"}
+
+if assert_multi and len(unique_urdfs) <= 1:
+    only = unique_urdfs[0] if unique_urdfs else "<none>"
+    raise SystemExit(
+        f"[ERROR] Expected multiple active object URDFs for DATA_MODE={data_mode}, "
+        f"but only found {len(unique_urdfs)} under active MOTION_DIR {motion_dir}. "
+        f"Resolved URDF: {only}"
+    )
+PY
 fi
 
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"

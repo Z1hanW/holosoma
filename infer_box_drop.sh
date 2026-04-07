@@ -334,6 +334,122 @@ print(json.dumps(init_pos, separators=(",", ":")))
 PY
 }
 
+load_checkpoint_saved_motion_defaults() {
+  local checkpoint_ref="$1"
+  "$PYTHON_BIN" - "${checkpoint_ref}" "${SCRIPT_DIR}" <<'PY' 2>/dev/null || true
+import json
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+repo_root = Path.cwd().resolve()
+sanitized_sys_path: list[str] = []
+for path_entry in sys.path:
+    if path_entry in {"", "."}:
+        continue
+    try:
+        if Path(path_entry).resolve() == repo_root:
+            continue
+    except Exception:
+        pass
+    sanitized_sys_path.append(path_entry)
+sys.path = sanitized_sys_path
+
+try:
+    import torch
+    from holosoma.utils.eval_utils import load_checkpoint
+except Exception:
+    print(json.dumps({}))
+    sys.exit(0)
+
+checkpoint_ref = sys.argv[1]
+script_dir = Path(sys.argv[2]).resolve()
+retarget_root = script_dir / "src" / "holosoma_retargeting"
+holosoma_root = script_dir / "src" / "holosoma"
+
+
+def resolve_saved_path(raw_path: str | None) -> str | None:
+    if not raw_path:
+        return None
+
+    original = Path(raw_path).expanduser()
+    candidates: list[Path] = [original]
+
+    alias_roots = [
+        (Path("/data/holosoma_moved/src/holosoma_retargeting"), retarget_root),
+        (Path("/home/ubuntu/FAR/holosoma/src/holosoma_retargeting"), retarget_root),
+        (Path("/data/holosoma_moved/src/holosoma"), holosoma_root),
+        (Path("/home/ubuntu/FAR/holosoma/src/holosoma"), holosoma_root),
+    ]
+    for old_root, new_root in alias_roots:
+        try:
+            rel = original.relative_to(old_root)
+        except Exception:
+            continue
+        candidates.append(new_root / rel)
+
+    seen: set[str] = set()
+    deduped: list[Path] = []
+    for candidate in candidates:
+        resolved_key = str(candidate)
+        if resolved_key in seen:
+            continue
+        seen.add(resolved_key)
+        deduped.append(candidate)
+
+    for candidate in deduped:
+        if candidate.exists():
+            return str(candidate)
+
+    stem_match = re.match(r"^(?P<prefix>.+_)[0-9a-f]{8,}$", original.name)
+    if stem_match:
+        prefix = stem_match.group("prefix")
+        for parent in deduped:
+            parent_dir = parent.parent
+            if not parent_dir.is_dir():
+                continue
+            matches = sorted(p for p in parent_dir.glob(f"{prefix}*") if p.exists())
+            if len(matches) == 1:
+                return str(matches[0])
+
+    return None
+
+
+try:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        checkpoint_path = load_checkpoint(checkpoint_ref, temp_dir)
+        blob = torch.load(checkpoint_path, map_location="cpu")
+except Exception:
+    print(json.dumps({}))
+    sys.exit(0)
+
+experiment_config = blob.get("experiment_config", {})
+motion_cfg = (
+    experiment_config.get("command", {})
+    .get("setup_terms", {})
+    .get("motion_command", {})
+    .get("params", {})
+    .get("motion_config", {})
+)
+robot_cfg = experiment_config.get("robot", {}).get("object", {})
+
+motion_path = motion_cfg.get("motion_dir") or motion_cfg.get("motion_file")
+object_urdf_path = robot_cfg.get("object_urdf_path")
+
+print(
+    json.dumps(
+        {
+            "motion_path": resolve_saved_path(motion_path),
+            "saved_motion_path": motion_path,
+            "object_urdf_path": resolve_saved_path(object_urdf_path),
+            "saved_object_urdf_path": object_urdf_path,
+        }
+    )
+)
+PY
+}
+
 CKPT="${CHECKPOINT:-${CKPT:-}}"
 if [[ $# -gt 0 ]]; then
   if [[ "$1" == wandb://* || "$1" == https://wandb.ai/* || "$1" == /* || "$1" == ./* || "$1" == ../* || "$1" == *.pt ]]; then
@@ -415,6 +531,30 @@ EVAL_COMMAND_ONLY_ENV_PROB_EXPLICIT=0
 [[ -n "${EVAL_COMMAND_ONLY_ENV_PROB+x}" ]] && EVAL_COMMAND_ONLY_ENV_PROB_EXPLICIT=1
 EVAL_EXTERNAL_GOAL_PROB_EXPLICIT=0
 [[ -n "${EVAL_EXTERNAL_GOAL_PROB+x}" ]] && EVAL_EXTERNAL_GOAL_PROB_EXPLICIT=1
+CHECKPOINT_SAVED_MOTION_PATH=""
+CHECKPOINT_SAVED_OBJECT_URDF=""
+
+if [[ "${MOTION_DIR_EXPLICIT}" -eq 0 || "${OBJECT_URDF_EXPLICIT}" -eq 0 ]]; then
+  CHECKPOINT_DEFAULTS_JSON="$(load_checkpoint_saved_motion_defaults "${CKPT}")"
+  if [[ -n "${CHECKPOINT_DEFAULTS_JSON}" && "${CHECKPOINT_DEFAULTS_JSON}" != "{}" ]]; then
+    while IFS='=' read -r key value; do
+      case "${key}" in
+        motion_path) CHECKPOINT_SAVED_MOTION_PATH="${value}" ;;
+        object_urdf_path) CHECKPOINT_SAVED_OBJECT_URDF="${value}" ;;
+      esac
+    done < <(
+      CHECKPOINT_DEFAULTS_JSON="${CHECKPOINT_DEFAULTS_JSON}" "$PYTHON_BIN" - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["CHECKPOINT_DEFAULTS_JSON"])
+for key in ("motion_path", "object_urdf_path"):
+    value = payload.get(key) or ""
+    print(f"{key}={value}")
+PY
+    )
+  fi
+fi
 
 MIXED_PROFILE_RESOLVED="none"
 if [[ "${MODE}" == "mixed" ]]; then
@@ -459,9 +599,19 @@ DEFAULT_BEHAVE_MOTION_DIR="$(pick_first_existing_path \
 DEFAULT_MIXED_MOTION_DIR="$(pick_first_existing_path \
   "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_carry_aug_mix_ml" \
   "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_carry_aug_mix_ml")"
-DEFAULT_OMOMO_URDF="${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
+DEFAULT_OMOMO_URDF="$(pick_first_existing_path \
+  "${SCRIPT_DIR}/src/holosoma_retargeting/models/largebox/largebox.urdf" \
+  "${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf")"
 DEFAULT_BEHAVE_MAP_FILE="${DEFAULT_BEHAVE_MOTION_DIR}/_clip_object_urdf_map.json"
 DEFAULT_MIXED_MAP_FILE="${DEFAULT_MIXED_MOTION_DIR}/_clip_object_urdf_map.json"
+
+if [[ "${MOTION_DIR_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_MOTION_PATH}" ]]; then
+  MOTION_DIR="${CHECKPOINT_SAVED_MOTION_PATH}"
+fi
+
+if [[ "${OBJECT_URDF_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_OBJECT_URDF}" ]]; then
+  OBJECT_URDF="${CHECKPOINT_SAVED_OBJECT_URDF}"
+fi
 
 if [[ -z "${MOTION_DIR+x}" ]]; then
   case "${INFER_DATASET}" in
@@ -790,6 +940,12 @@ echo "[INFO] checkpoint=${CKPT}"
 echo "[INFO] infer_dataset=${INFER_DATASET}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
 echo "[INFO] object_urdf=${OBJECT_URDF}"
+if [[ -n "${CHECKPOINT_SAVED_MOTION_PATH}" ]]; then
+  echo "[INFO] checkpoint_saved_motion_path=${CHECKPOINT_SAVED_MOTION_PATH}"
+fi
+if [[ -n "${CHECKPOINT_SAVED_OBJECT_URDF}" ]]; then
+  echo "[INFO] checkpoint_saved_object_urdf=${CHECKPOINT_SAVED_OBJECT_URDF}"
+fi
 echo "[INFO] preserving checkpoint actor/critic observation history"
 echo "[INFO] headless=${HEADLESS_FLAG} (env HEADLESS=${HEADLESS})"
 echo "[INFO] viser=http://localhost:${VISER_PORT}"
