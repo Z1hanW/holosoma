@@ -582,7 +582,11 @@ pick_first_existing_path() {
   fi
 }
 
-INFER_DATASET=${INFER_DATASET:-omomo}
+DEFAULT_INFER_DATASET="omomo"
+if [[ "${MODE}" == "mixed" ]]; then
+  DEFAULT_INFER_DATASET="mixed"
+fi
+INFER_DATASET=${INFER_DATASET:-${DEFAULT_INFER_DATASET}}
 INFER_DATASET=$(echo "${INFER_DATASET}" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
 case "${INFER_DATASET}" in
   omomo|behave|mixed) ;;
@@ -592,11 +596,13 @@ case "${INFER_DATASET}" in
     ;;
 esac
 
+DS_DATA_ROOT="${DS_DATA_ROOT:-${SCRIPT_DIR}/data/ds_box_data}"
 DEFAULT_OMOMO_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"
 DEFAULT_BEHAVE_MOTION_DIR="$(pick_first_existing_path \
   "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_carry" \
   "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_sq_carry")"
 DEFAULT_MIXED_MOTION_DIR="$(pick_first_existing_path \
+  "${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig" \
   "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_carry_aug_mix_ml" \
   "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_carry_aug_mix_ml")"
 DEFAULT_OMOMO_URDF="$(pick_first_existing_path \
@@ -605,11 +611,11 @@ DEFAULT_OMOMO_URDF="$(pick_first_existing_path \
 DEFAULT_BEHAVE_MAP_FILE="${DEFAULT_BEHAVE_MOTION_DIR}/_clip_object_urdf_map.json"
 DEFAULT_MIXED_MAP_FILE="${DEFAULT_MIXED_MOTION_DIR}/_clip_object_urdf_map.json"
 
-if [[ "${MOTION_DIR_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_MOTION_PATH}" ]]; then
+if [[ "${MOTION_DIR_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_MOTION_PATH}" && "${INFER_DATASET}" != "mixed" ]]; then
   MOTION_DIR="${CHECKPOINT_SAVED_MOTION_PATH}"
 fi
 
-if [[ "${OBJECT_URDF_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_OBJECT_URDF}" ]]; then
+if [[ "${OBJECT_URDF_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_OBJECT_URDF}" && "${INFER_DATASET}" != "mixed" ]]; then
   OBJECT_URDF="${CHECKPOINT_SAVED_OBJECT_URDF}"
 fi
 
@@ -661,15 +667,6 @@ case "${MIXED_PROFILE_RESOLVED}" in
   none)
     ;;
   s221l5eo)
-    if [[ "${INFER_DATASET_EXPLICIT}" -eq 0 ]]; then
-      INFER_DATASET="omomo"
-    fi
-    if [[ "${MOTION_DIR_EXPLICIT}" -eq 0 ]]; then
-      MOTION_DIR="${DEFAULT_OMOMO_MOTION_DIR}"
-    fi
-    if [[ "${OBJECT_URDF_EXPLICIT}" -eq 0 ]]; then
-      OBJECT_URDF="${DEFAULT_OMOMO_URDF}"
-    fi
     if [[ "${PAIR_TERRAIN_WITH_MOTION_EXPLICIT}" -eq 0 ]]; then
       PAIR_TERRAIN_WITH_MOTION="False"
     fi

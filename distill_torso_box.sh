@@ -160,6 +160,7 @@ CRITIC_LR=${CRITIC_LR:-7e-5}
 # Distillation is sensitive to exploration noise; keep student near-deterministic by default.
 ACTOR_MIN_NOISE_STD=${ACTOR_MIN_NOISE_STD:-0.01}
 INIT_NOISE_STD=${INIT_NOISE_STD:-0.01}
+ENTROPY_COEF=${ENTROPY_COEF:-0.005}
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-268435456}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
 SWITCH_TO_RL_AFTER=${SWITCH_TO_RL_AFTER:-}
@@ -174,6 +175,7 @@ TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
 PPO_START_EPOCH=${PPO_START_EPOCH:-0}
 DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-10000}
 DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-10.0}
+DAGGER_MATCH_STD=${DAGGER_MATCH_STD:-False}
 DISTILL_LOSS_TYPE=${DISTILL_LOSS_TYPE:-mse}
 DAGGER_IGNORE_ZERO_TEACHER_ACTIONS=${DAGGER_IGNORE_ZERO_TEACHER_ACTIONS:-True}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
@@ -209,7 +211,8 @@ echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS} strict_teacher_load=${STRICT_T
 echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} dagger_loss_coef=${DAGGER_LOSS_COEF} teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
 echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
 echo "[INFO] total_envs=${NUM_ENVS} world_size=${NPROC} envs_per_rank=$((NUM_ENVS / NPROC))"
-echo "[INFO] init_noise_std=${INIT_NOISE_STD} actor_min_noise_std=${ACTOR_MIN_NOISE_STD}"
+echo "[INFO] init_noise_std=${INIT_NOISE_STD} actor_min_noise_std=${ACTOR_MIN_NOISE_STD} entropy_coef=${ENTROPY_COEF}"
+echo "[INFO] dagger_match_std=${DAGGER_MATCH_STD}"
 echo "[INFO] default_pose_prepend=${ENABLE_DEFAULT_POSE_PREPEND} duration_s=${DEFAULT_POSE_PREPEND_DURATION_S} default_pose_append=${ENABLE_DEFAULT_POSE_APPEND} append_duration_s=${DEFAULT_POSE_APPEND_DURATION_S}"
 
 run_distill_stage() {
@@ -252,6 +255,7 @@ run_distill_stage() {
     --algo.config.distill.ppo-start-epoch="${PPO_START_EPOCH}"
     --algo.config.distill.dagger-end-epoch="${DAGGER_END_EPOCH}"
     --algo.config.distill.dagger-loss-coef="${DAGGER_LOSS_COEF}"
+    --algo.config.distill.dagger-match-std="${DAGGER_MATCH_STD}"
     --algo.config.distill.distill-loss-type="${DISTILL_LOSS_TYPE}"
     --algo.config.distill.dagger-ignore-zero-teacher-actions="${DAGGER_IGNORE_ZERO_TEACHER_ACTIONS}"
     --training.num-envs="${NUM_ENVS}"
@@ -262,6 +266,7 @@ run_distill_stage() {
     --algo.config.actor-learning-rate="${ACTOR_LR}"
     --algo.config.critic-learning-rate="${CRITIC_LR}"
     --algo.config.init-noise-std="${INIT_NOISE_STD}"
+    --algo.config.entropy-coef="${ENTROPY_COEF}"
     --algo.config.module-dict.actor.min-noise-std="${ACTOR_MIN_NOISE_STD}"
     --algo.config.normalize-actor-obs=False
     --algo.config.normalize-critic-obs=False
@@ -277,8 +282,16 @@ run_distill_stage() {
     --command.setup-terms.motion-command.params.motion-config.default-pose-prepend-duration-s="${DEFAULT_POSE_PREPEND_DURATION_S}"
     --robot.object.enabled=True
     --robot.object.object-urdf-path "${OBJECT_URDF}"
-    "${LOGGER}"
   )
+
+  if [[ -n "${stage_resume_checkpoint}" ]]; then
+    cmd+=(--training.checkpoint "${stage_resume_checkpoint}")
+  fi
+  if [[ -n "${stage_switch_to_rl_after}" ]]; then
+    cmd+=(--algo.config.distill.switch-to-rl-after="${stage_switch_to_rl_after}")
+  fi
+  cmd+=("${EXTRA_ARGS[@]}")
+  cmd+=("${LOGGER}")
 
   # logger:disabled does not accept logger sub-options such as --logger.name.
   # Keep legacy behavior for all other logger backends, but keep video logging disabled.
@@ -290,14 +303,6 @@ run_distill_stage() {
       --logger.video.upload_to_wandb=False
     )
   fi
-
-  if [[ -n "${stage_resume_checkpoint}" ]]; then
-    cmd+=(--training.checkpoint "${stage_resume_checkpoint}")
-  fi
-  if [[ -n "${stage_switch_to_rl_after}" ]]; then
-    cmd+=(--algo.config.distill.switch-to-rl-after="${stage_switch_to_rl_after}")
-  fi
-  cmd+=("${EXTRA_ARGS[@]}")
 
   HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES="${PERCEPTION_INTO_POLICY_MODULES}" \
   TORCH_DIST_TIMEOUT_SEC="${TORCH_DIST_TIMEOUT_SEC}" \

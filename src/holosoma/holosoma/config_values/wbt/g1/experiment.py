@@ -49,7 +49,7 @@ g1_29dof_wbt = ExperimentConfig(
     ),
     robot=replace(
         robot.g1_29dof,
-        control=replace(robot.g1_29dof.control, action_scale=1.0),
+        control=replace(robot.g1_29dof.control, action_scale=0.25),
         asset=replace(robot.g1_29dof.asset, enable_self_collisions=True),
         init_state=replace(robot.g1_29dof.init_state, pos=[0.0, 0.0, 0.76]),
     ),
@@ -353,7 +353,7 @@ g1_29dof_wbt_fast_sac = ExperimentConfig(
     ),
     robot=replace(
         robot.g1_29dof,
-        control=replace(robot.g1_29dof.control, action_scale=1.0),
+        control=replace(robot.g1_29dof.control, action_scale=0.25),
         asset=replace(robot.g1_29dof.asset, enable_self_collisions=True),
         init_state=replace(robot.g1_29dof.init_state, pos=[0.0, 0.0, 0.76]),
     ),

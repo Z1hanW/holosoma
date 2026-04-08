@@ -210,6 +210,15 @@ class TerrainTermCfg:
     obj_metadata_path: str | None = None
     """Optional JSON metadata for prebuilt OBJ tiles (tile names/offsets/stride)."""
 
+    add_ground_plane_collision: bool = False
+    """For load_obj terrain, also add a flat collision plane at z=0.
+
+    This is useful when the OBJ represents local structure such as stairs but you
+    still want a fallback floor collision outside or underneath the mesh.
+    When enabled in IsaacSim, the extra plane is also exposed to the terrain
+    height scanner so height queries can fall back to the plane where the OBJ
+    mesh has no hit."""
+
     scale_factor: float = 1.0
     """Use for performance to scale border_size, terrain_length, terrain_width, num_ros and num_cols."""
 

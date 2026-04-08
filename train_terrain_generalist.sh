@@ -106,15 +106,27 @@ OBJ_META_PATH=${OBJ_META_PATH:-}
 NUM_ROWS=${NUM_ROWS:-}
 NUM_COLS=${NUM_COLS:-}
 REBUILD_FUSED=${REBUILD_FUSED:-0}
-FUSED_OUT_DIR=${FUSED_OUT_DIR:-${SCRIPT_DIR}/multi-terrain/generated}
+GENERATED_DATA_ROOT=${GENERATED_DATA_ROOT:-${SCRIPT_DIR}/data/ds_crisp_data/_generated}
+FUSED_OUT_DIR=${FUSED_OUT_DIR:-${GENERATED_DATA_ROOT}/fused}
+FUSED_PREFIX_EXPLICIT=0
+if [[ -n "${FUSED_PREFIX+x}" ]]; then
+  FUSED_PREFIX_EXPLICIT=1
+fi
 FUSED_PREFIX=${FUSED_PREFIX:-terrain_generalist}
+PAIRED_MANIFEST_PATH=${PAIRED_MANIFEST_PATH:-${PAIRED_DATA_MANIFEST:-}}
+PAIRED_DS_CRISP_DATA_ROOT=${PAIRED_DS_CRISP_DATA_ROOT:-}
+PAIRED_STAGE_OUT_DIR=${PAIRED_STAGE_OUT_DIR:-${GENERATED_DATA_ROOT}/staged}
 
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-True}
+ADD_GROUND_PLANE_COLLISION=${ADD_GROUND_PLANE_COLLISION:-True}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.05}
+FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.95}
 ENABLE_DEFAULT_POSE_APPEND=${ENABLE_DEFAULT_POSE_APPEND:-False}
 DEFAULT_POSE_APPEND_DURATION_S=${DEFAULT_POSE_APPEND_DURATION_S:-0}
 ENABLE_DEFAULT_POSE_PREPEND=${ENABLE_DEFAULT_POSE_PREPEND:-False}
 DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0}
+ALLOW_TERRAIN_SLOT_OVERLAP=${ALLOW_TERRAIN_SLOT_OVERLAP:-0}
+DRY_RUN=${DRY_RUN:-0}
 
 HEADLESS=${HEADLESS:-True}
 ENABLE_VISER=${ENABLE_VISER:-0}
@@ -148,6 +160,178 @@ print(rows, cols)
 PY
 }
 
+is_true() {
+  case "${1:-}" in
+    1|true|True|TRUE|yes|Yes|YES|on|On|ON)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+preflight_pairing_assets() {
+  local motion_path="$1"
+  local obj_path="$2"
+  local obj_meta_path="${3:-}"
+
+  "${PYTHON_BIN}" - "${motion_path}" "${obj_path}" "${obj_meta_path}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+
+def _decode_strings(values):
+    decoded = []
+    for value in values:
+        if isinstance(value, bytes):
+            decoded.append(value.decode("utf-8"))
+        else:
+            decoded.append(str(value))
+    return decoded
+
+
+def _list_motion_clips(path_str: str) -> list[str]:
+    path = Path(path_str)
+    if path.is_dir():
+        names = []
+        for candidate in sorted(path.iterdir()):
+            if candidate.is_file() and candidate.suffix.lower() in {".npz", ".h5", ".hdf5"}:
+                names.append(candidate.stem)
+        if not names:
+            raise FileNotFoundError(f"No motion clips found under {path}")
+        return names
+    if not path.exists():
+        raise FileNotFoundError(f"Motion path not found: {path}")
+    if path.suffix.lower() == ".npz":
+        return [path.stem]
+    if path.suffix.lower() in {".h5", ".hdf5"}:
+        try:
+            import h5py  # type: ignore[import-not-found]
+        except ImportError as exc:
+            raise ImportError("h5py is required to inspect HDF5 motion clips.") from exc
+        with h5py.File(path, "r") as h5f:
+            clips = h5f.get("clips")
+            if clips is not None and "clip_ids" in clips:
+                clip_ids = _decode_strings(clips["clip_ids"][()])
+                if clip_ids:
+                    return clip_ids
+        return [path.stem]
+    return [path.stem]
+
+
+def _list_tile_names(obj_path_str: str, meta_path_str: str) -> list[str]:
+    if meta_path_str:
+        meta_path = Path(meta_path_str)
+        if not meta_path.exists():
+            raise FileNotFoundError(f"OBJ metadata path not found: {meta_path}")
+        with meta_path.open("r", encoding="utf-8") as handle:
+            meta = json.load(handle)
+        tile_names = [str(name) for name in meta.get("tile_names", [])]
+        if tile_names:
+            return sorted(tile_names)
+
+    obj_path = Path(obj_path_str)
+    if obj_path.is_dir():
+        tile_names = sorted(p.stem for p in obj_path.iterdir() if p.is_file() and p.suffix.lower() == ".obj")
+        if tile_names:
+            return tile_names
+    return []
+
+
+motion_clips = sorted(_list_motion_clips(sys.argv[1]))
+tile_names = _list_tile_names(sys.argv[2], sys.argv[3])
+if not tile_names:
+    print("[INFO] Pairing preflight skipped: no named terrain tile set available.")
+    raise SystemExit(0)
+
+motion_set = set(motion_clips)
+tile_set = set(tile_names)
+missing_tiles = sorted(motion_set - tile_set)
+unused_tiles = sorted(tile_set - motion_set)
+if missing_tiles or unused_tiles:
+    if missing_tiles:
+        print(f"[ERROR] Terrain tiles missing for motion clips: {missing_tiles[:10]}")
+    if unused_tiles:
+        print(f"[ERROR] Terrain tiles without matching motion clips: {unused_tiles[:10]}")
+    raise SystemExit(1)
+
+print(f"[INFO] Pairing preflight passed: {len(motion_clips)} motion clips match {len(tile_names)} terrain tiles.")
+PY
+}
+
+resolve_stage_info() {
+  local source_path="$1"
+  local stage_out_dir="$2"
+
+  "${PYTHON_BIN}" - "${source_path}" "${stage_out_dir}" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import re
+import sys
+from pathlib import Path
+
+source_path = Path(sys.argv[1]).expanduser().resolve()
+stage_out_dir = Path(sys.argv[2]).expanduser().resolve()
+if source_path.is_file():
+    digest = hashlib.sha1(source_path.read_bytes()).hexdigest()[:12]
+else:
+    digest = hashlib.sha1(str(source_path).encode("utf-8")).hexdigest()[:12]
+stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", source_path.stem).strip("._") or "paired"
+print(stage_out_dir / f"{stem}_{digest}")
+print(f"terrain_generalist_{stem}_{digest[:8]}")
+PY
+}
+
+if [[ -n "${PAIRED_MANIFEST_PATH}" && -n "${PAIRED_DS_CRISP_DATA_ROOT}" ]]; then
+  echo "[ERROR] Set at most one of PAIRED_MANIFEST_PATH and PAIRED_DS_CRISP_DATA_ROOT." >&2
+  exit 1
+fi
+
+if [[ -n "${PAIRED_MANIFEST_PATH}" || -n "${PAIRED_DS_CRISP_DATA_ROOT}" ]]; then
+  PAIRED_SOURCE_PATH="${PAIRED_MANIFEST_PATH}"
+  if [[ -z "${PAIRED_SOURCE_PATH}" ]]; then
+    PAIRED_SOURCE_PATH="${PAIRED_DS_CRISP_DATA_ROOT}"
+  fi
+  if [[ ! -e "${PAIRED_SOURCE_PATH}" ]]; then
+    echo "[ERROR] Paired staging source not found: ${PAIRED_SOURCE_PATH}" >&2
+    exit 1
+  fi
+  if [[ -n "${PAIRED_MANIFEST_PATH}" && ! -f "${PAIRED_MANIFEST_PATH}" ]]; then
+    echo "[ERROR] PAIRED_MANIFEST_PATH not found: ${PAIRED_MANIFEST_PATH}" >&2
+    exit 1
+  fi
+  mkdir -p "${PAIRED_STAGE_OUT_DIR}"
+  mapfile -t MANIFEST_STAGE_INFO < <(resolve_stage_info "${PAIRED_SOURCE_PATH}" "${PAIRED_STAGE_OUT_DIR}")
+  PAIRED_STAGE_ROOT="${MANIFEST_STAGE_INFO[0]}"
+  if [[ "${FUSED_PREFIX_EXPLICIT}" -eq 0 ]]; then
+    FUSED_PREFIX="${MANIFEST_STAGE_INFO[1]}"
+  fi
+
+  if [[ -n "${PAIRED_MANIFEST_PATH}" ]]; then
+    "${PYTHON_BIN}" preprocess/stage_paired_motion_terrain_manifest.py \
+      --manifest "${PAIRED_MANIFEST_PATH}" \
+      --out-root "${PAIRED_STAGE_ROOT}"
+  else
+    "${PYTHON_BIN}" preprocess/stage_paired_motion_terrain_manifest.py \
+      --ds-crisp-data-root "${PAIRED_DS_CRISP_DATA_ROOT}" \
+      --out-root "${PAIRED_STAGE_ROOT}"
+  fi
+
+  MOTION_DIR="${PAIRED_STAGE_ROOT}/___crisp_clean_motion"
+  OBJ_SOURCE="${PAIRED_STAGE_ROOT}/___crisp_clean_geometry"
+  OBJ_META_PATH=""
+
+  if [[ -n "${PAIRED_MANIFEST_PATH}" ]]; then
+    echo "[INFO] PAIRED_MANIFEST_PATH=${PAIRED_MANIFEST_PATH}"
+  else
+    echo "[INFO] PAIRED_DS_CRISP_DATA_ROOT=${PAIRED_DS_CRISP_DATA_ROOT}"
+  fi
+  echo "[INFO] PAIRED_STAGE_ROOT=${PAIRED_STAGE_ROOT}"
+fi
+
 if [[ ! -e "${OBJ_SOURCE}" ]]; then
   echo "[ERROR] OBJ_SOURCE not found: ${OBJ_SOURCE}" >&2
   exit 1
@@ -159,7 +343,7 @@ fi
 
 OBJ_PATH="${OBJ_SOURCE}"
 if [[ -d "${OBJ_SOURCE}" ]]; then
-  mapfile -t OBJ_FILES < <(find "${OBJ_SOURCE}" -maxdepth 1 -type f \( -name "*.obj" -o -name "*.OBJ" \) | sort)
+  mapfile -t OBJ_FILES < <(find "${OBJ_SOURCE}" -maxdepth 1 \( -type f -o -type l \) \( -name "*.obj" -o -name "*.OBJ" \) | sort)
   NUM_TILES=${#OBJ_FILES[@]}
   if [[ "${NUM_TILES}" -eq 0 ]]; then
     echo "[ERROR] No OBJ files found in ${OBJ_SOURCE}" >&2
@@ -167,7 +351,16 @@ if [[ -d "${OBJ_SOURCE}" ]]; then
   fi
 
   if [[ -z "${NUM_ROWS}" ]]; then
-    NUM_ROWS=1
+    if [[ "${PAIR_TERRAIN_WITH_MOTION}" == "True" || "${PAIR_TERRAIN_WITH_MOTION}" == "true" ]]; then
+      PER_RANK_ENVS=$(((NUM_ENVS + NPROC - 1) / NPROC))
+      NUM_ROWS=$(((PER_RANK_ENVS + NUM_TILES - 1) / NUM_TILES))
+      if [[ "${NUM_ROWS}" -lt 1 ]]; then
+        NUM_ROWS=1
+      fi
+      echo "[INFO] Auto-selected NUM_ROWS=${NUM_ROWS} so terrain slots cover ${PER_RANK_ENVS} envs/rank across ${NUM_TILES} tiles."
+    else
+      NUM_ROWS=1
+    fi
   fi
 
   mkdir -p "${FUSED_OUT_DIR}"
@@ -212,6 +405,22 @@ fi
 
 NUM_ROWS=${NUM_ROWS:-1}
 NUM_COLS=${NUM_COLS:-1}
+
+if [[ "${PAIR_TERRAIN_WITH_MOTION}" == "True" || "${PAIR_TERRAIN_WITH_MOTION}" == "true" ]]; then
+  PER_RANK_ENVS=$(((NUM_ENVS + NPROC - 1) / NPROC))
+  TERRAIN_SLOT_CAPACITY=$((NUM_ROWS * NUM_COLS))
+  if [[ "${TERRAIN_SLOT_CAPACITY}" -lt "${PER_RANK_ENVS}" ]]; then
+    if is_true "${ALLOW_TERRAIN_SLOT_OVERLAP}"; then
+      echo "[WARN] Terrain slot capacity (${NUM_ROWS}x${NUM_COLS}=${TERRAIN_SLOT_CAPACITY}) is smaller than envs per rank (${PER_RANK_ENVS})." >&2
+      echo "[WARN] Multiple envs will overlap the same paired terrain tile because ALLOW_TERRAIN_SLOT_OVERLAP=${ALLOW_TERRAIN_SLOT_OVERLAP}." >&2
+    else
+      echo "[ERROR] Terrain slot capacity (${NUM_ROWS}x${NUM_COLS}=${TERRAIN_SLOT_CAPACITY}) is smaller than envs per rank (${PER_RANK_ENVS})." >&2
+      echo "[ERROR] Refusing to launch because paired terrain overlap would corrupt the run. Increase NUM_ROWS/NUM_COLS, reduce PER_GPU_ENVS, or set ALLOW_TERRAIN_SLOT_OVERLAP=1 to override." >&2
+      exit 1
+    fi
+  fi
+  preflight_pairing_assets "${MOTION_DIR}" "${OBJ_SOURCE}" "${OBJ_META_PATH}"
+fi
 
 PERCEPTION_OVERRIDES=()
 if [[ "${PERCEPTION_PRESET}" == "camera_depth_d435i" ]]; then
@@ -285,6 +494,9 @@ fi
 echo "[INFO] TERRAIN_GRID=${NUM_ROWS}x${NUM_COLS}"
 echo "[INFO] SCENE_LOAD_MODE=terrain-load-obj(static /World/ground mesh)"
 echo "[INFO] PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION}"
+echo "[INFO] ADD_GROUND_PLANE_COLLISION=${ADD_GROUND_PLANE_COLLISION}"
+echo "[INFO] START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB}"
+echo "[INFO] FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB}"
 if [[ "${ENABLE_VISER}" == "1" ]]; then
   echo "[INFO] VISER=http://localhost:${VISER_PORT}"
 fi
@@ -313,6 +525,7 @@ cmd=(
   --terrain.terrain-term.obj-file-path "${OBJ_PATH}"
   --terrain.terrain-term.num-rows "${NUM_ROWS}"
   --terrain.terrain-term.num-cols "${NUM_COLS}"
+  --terrain.terrain-term.add-ground-plane-collision="${ADD_GROUND_PLANE_COLLISION}"
   --algo.config.actor_learning_rate="${ACTOR_LR}"
   --algo.config.critic_learning_rate="${CRITIC_LR}"
   --algo.config.normalize_actor_obs=False
@@ -322,6 +535,7 @@ cmd=(
   --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_DIR}"
   --command.setup_terms.motion_command.params.motion_config.pair_terrain_with_motion="${PAIR_TERRAIN_WITH_MOTION}"
   --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob="${START_AT_TIMESTEP_ZERO_PROB}"
+  --command.setup_terms.motion_command.params.motion_config.freeze_at_timestep_zero_prob="${FREEZE_AT_TIMESTEP_ZERO_PROB}"
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_append="${ENABLE_DEFAULT_POSE_APPEND}"
   --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s="${DEFAULT_POSE_APPEND_DURATION_S}"
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend="${ENABLE_DEFAULT_POSE_PREPEND}"
@@ -344,5 +558,11 @@ cmd+=(
   --logger.name="${LOGGER_NAME}"
 )
 cmd+=("$@")
+
+if is_true "${DRY_RUN}"; then
+  echo "[INFO] DRY_RUN=${DRY_RUN}; resolved launch command:"
+  printf '  %q\n' "${cmd[@]}"
+  exit 0
+fi
 
 "${cmd[@]}"

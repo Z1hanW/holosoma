@@ -674,23 +674,21 @@ class PerceptionManager:
             raise RuntimeError("PerceptionManager grid buffers are not initialized.")
 
         idx = env_ids if env_ids is not None else slice(None)
-        body_pos, body_quat = self._get_heightmap_body_pose(idx)
-        num_envs = body_quat.shape[0]
+        ray_origin_pos, sample_quat = self._get_heightmap_sampling_pose(
+            idx,
+            apply_offsets=True,
+            apply_heading_only=self.cfg.use_heading_only,
+        )
+        num_envs = sample_quat.shape[0]
 
         grid_points = self._grid_points_base.unsqueeze(0).expand(num_envs, -1, -1)
         ray_dirs = self._ray_dirs_base.unsqueeze(0).expand(num_envs, -1, -1)
 
-        quat_repeat = body_quat.repeat(1, self._num_points)
-        if self.cfg.use_heading_only:
-            grid_world = quat_apply_yaw(quat_repeat, grid_points, w_last=True)
-            ray_dirs_world = quat_apply_yaw(quat_repeat, ray_dirs, w_last=True)
-        else:
-            grid_world = quat_apply(quat_repeat, grid_points, w_last=True)
-            ray_dirs_world = quat_apply(quat_repeat, ray_dirs, w_last=True)
+        quat_repeat = sample_quat.repeat(1, self._num_points)
+        grid_world = quat_apply(quat_repeat, grid_points, w_last=True)
+        ray_dirs_world = quat_apply(quat_repeat, ray_dirs, w_last=True)
 
-        offset_world = torch.zeros_like(body_pos)
-        height_offset = torch.zeros_like(body_pos)
-        ray_starts = grid_world + body_pos.unsqueeze(1)
+        ray_starts = grid_world + ray_origin_pos.unsqueeze(1)
         ray_hits_world = self._ray_hits_world[idx]
         hit_mask = torch.isfinite(ray_hits_world).all(dim=-1)
 
@@ -997,17 +995,11 @@ class PerceptionManager:
             return None
 
         idx = env_ids if env_ids is not None else slice(None)
-        body_pos, body_quat = self._get_heightmap_body_pose(idx)
-
-        if apply_heading_only and self.cfg.use_heading_only:
-            body_quat = yaw_quat(body_quat, w_last=True)
-
-        if apply_offsets:
-            offset_world = quat_apply(body_quat, self._sensor_offset.expand(body_pos.shape[0], -1), w_last=True)
-            height_offset = quat_apply(body_quat, self._ray_start_offset.expand(body_pos.shape[0], -1), w_last=True)
-            body_pos = body_pos + offset_world + height_offset
-
-        return body_pos, body_quat
+        return self._get_heightmap_sampling_pose(
+            idx,
+            apply_offsets=apply_offsets,
+            apply_heading_only=apply_heading_only and self.cfg.use_heading_only,
+        )
 
     def get_camera_parameters(self, extrinsics: torch.Tensor) -> dict[str, torch.Tensor | float | int]:
         """Return camera parameters for supplied extrinsics (batched)."""
@@ -2602,6 +2594,26 @@ class PerceptionManager:
             body_quat = quat_mul(body_quat, offset_quat, w_last=True)
         return body_pos, body_quat
 
+    def _get_heightmap_sampling_pose(
+        self,
+        idx: torch.Tensor | slice,
+        *,
+        apply_offsets: bool = True,
+        apply_heading_only: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        body_pos, body_quat = self._get_heightmap_body_pose(idx)
+
+        if apply_heading_only:
+            body_quat = yaw_quat(body_quat, w_last=True)
+
+        if apply_offsets:
+            sensor_offset = self._sensor_offset.expand(body_pos.shape[0], -1)
+            ray_start_offset = self._ray_start_offset.expand(body_pos.shape[0], -1)
+            body_pos = body_pos + quat_apply(body_quat, sensor_offset, w_last=True)
+            body_pos = body_pos + quat_apply(body_quat, ray_start_offset, w_last=True)
+
+        return body_pos, body_quat
+
     def _get_camera_body_pose(self, idx: torch.Tensor | slice) -> tuple[torch.Tensor, torch.Tensor]:
         if self._camera_body_index is not None:
             body_pos = self.env.simulator._rigid_body_pos[idx, self._camera_body_index]
@@ -2636,26 +2648,26 @@ class PerceptionManager:
             raise RuntimeError("PerceptionManager grid buffers are not initialized.")
 
         idx = env_ids if env_ids is not None else slice(None)
-        body_pos, body_quat = self._get_heightmap_body_pose(idx)
-        num_envs = body_quat.shape[0]
+        body_pos, _body_quat = self._get_heightmap_body_pose(idx)
+        ray_origin_pos, sample_quat = self._get_heightmap_sampling_pose(
+            idx,
+            apply_offsets=True,
+            apply_heading_only=self.cfg.use_heading_only,
+        )
+        num_envs = sample_quat.shape[0]
 
         grid_points = self._grid_points_base.unsqueeze(0).expand(num_envs, -1, -1)
         ray_dirs = self._ray_dirs_base.unsqueeze(0).expand(num_envs, -1, -1)
 
-        quat_repeat = body_quat.repeat(1, self._num_points)
-        if self.cfg.use_heading_only:
-            grid_world = quat_apply_yaw(quat_repeat, grid_points, w_last=True)
-            ray_dirs_world = quat_apply_yaw(quat_repeat, ray_dirs, w_last=True)
-        else:
-            grid_world = quat_apply(quat_repeat, grid_points, w_last=True)
-            ray_dirs_world = quat_apply(quat_repeat, ray_dirs, w_last=True)
+        quat_repeat = sample_quat.repeat(1, self._num_points)
+        grid_world = quat_apply(quat_repeat, grid_points, w_last=True)
+        ray_dirs_world = quat_apply(quat_repeat, ray_dirs, w_last=True)
 
-        offset_world = torch.zeros_like(body_pos)
-        height_offset = torch.zeros_like(body_pos)
-        ray_starts = grid_world + body_pos.unsqueeze(1)
+        offset_world = ray_origin_pos - body_pos
+        ray_starts = grid_world + ray_origin_pos.unsqueeze(1)
         ray_hits_world = warp_utils.ray_cast(ray_starts, ray_dirs_world, self._warp_mesh)
 
-        return ray_starts, ray_dirs_world, ray_hits_world, body_pos, body_quat, offset_world
+        return ray_starts, ray_dirs_world, ray_hits_world, body_pos, sample_quat, offset_world
 
     def _cast_camera_raycast_rays(
         self, env_ids: torch.Tensor | None
@@ -2868,7 +2880,8 @@ class PerceptionManager:
     def _compute_ray_distances(
         self, ray_starts: torch.Tensor, ray_dirs: torch.Tensor, ray_hits_world: torch.Tensor
     ) -> torch.Tensor:
-        delta = ray_starts - ray_hits_world
+        ray_dirs = ray_dirs / torch.norm(ray_dirs, dim=-1, keepdim=True).clamp(min=1.0e-6)
+        delta = ray_hits_world - ray_starts
         distances = torch.sum(delta * ray_dirs, dim=-1)
         distances = torch.where(torch.isfinite(distances), distances, torch.full_like(distances, self.cfg.max_distance))
         return torch.clamp(distances, min=0.0, max=self.cfg.max_distance)

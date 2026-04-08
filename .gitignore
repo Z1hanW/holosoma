@@ -23,7 +23,12 @@
 # Local training / dataset payloads (always ignore)
 /data/
 /data/**
+/multi-terrain/staged/
+/multi-terrain/staged/**
+/multi-terrain/generated/terrain_generalist_*_*.obj
+/multi-terrain/generated/terrain_generalist_*_*.json
 
 # Local CRISP data packages (always ignore)
 crisp/
 crisp/**
+multi-terrain/generated/*.obj

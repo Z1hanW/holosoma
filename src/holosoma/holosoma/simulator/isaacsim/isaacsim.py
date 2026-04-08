@@ -942,9 +942,13 @@ class IsaacSim(BaseSimulator):
             debug_vis=True,
         )
 
-        terrain_prim_path = "/World/ground"
-        height_scanner_config = None
         terrain_state = self.terrain_manager.get_state("locomotion_terrain")
+        terrain_prim_path = "/World/ground"
+        ground_plane_collision_prim_path = "/World/ground_plane_collision"
+        height_scanner_mesh_paths = [terrain_prim_path]
+        if terrain_state.mesh_type == "load_obj" and bool(getattr(terrain_state, "add_ground_plane_collision", False)):
+            height_scanner_mesh_paths.append(ground_plane_collision_prim_path)
+        height_scanner_config = None
         if terrain_state.mesh_type not in ["fake", None]:
             # Add a height scanner to the torso to detect the height of the terrain mesh
             # TODO: Scene USD files need ground mapping
@@ -955,7 +959,7 @@ class IsaacSim(BaseSimulator):
                 # Apply a grid pattern that is smaller than the resolution to only return one height value.
                 pattern_cfg=patterns.GridPatternCfg(resolution=0.1, size=[0.05, 0.05]),
                 debug_vis=False,
-                mesh_prim_paths=[terrain_prim_path],
+                mesh_prim_paths=height_scanner_mesh_paths,
             )
 
         global_collision_prims = []
@@ -997,6 +1001,28 @@ class IsaacSim(BaseSimulator):
             global_collision_prims.append(terrain_prim_path)
             print("[INFO] Successfully created custom terrain mesh")
             self._add_debug_grid(self.terrain.mesh.bounds if self.terrain is not None else None)
+
+            if terrain_state.mesh_type == "load_obj" and bool(
+                getattr(terrain_state, "add_ground_plane_collision", False)
+            ):
+                ground_plane_config = TerrainImporterCfg(
+                    prim_path=ground_plane_collision_prim_path,
+                    terrain_type="plane",
+                    collision_group=-1,
+                    physics_material=sim_utils.RigidBodyMaterialCfg(
+                        friction_combine_mode="multiply",
+                        restitution_combine_mode="multiply",
+                        static_friction=terrain_state.static_friction,
+                        dynamic_friction=terrain_state.dynamic_friction,
+                        restitution=0.0,
+                    ),
+                    debug_vis=False,
+                )
+                ground_plane_config.num_envs = self.scene.cfg.num_envs
+                ground_plane_config.env_spacing = self.scene.cfg.env_spacing
+                ground_plane_config.class_type(ground_plane_config)
+                global_collision_prims.append(ground_plane_collision_prim_path)
+                logger.info("Added fallback ground plane collision under load_obj terrain and exposed it to the height scanner.")
         else:
             raise ValueError(f"Unsupported terrain mesh type: {terrain_state.mesh_type}")
 

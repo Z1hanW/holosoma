@@ -146,8 +146,8 @@ base_reset_terms = {
         params={
             "joint_pos_scale_range": [1.0, 1.0],
             "joint_vel_range": [0.0, 0.0],
-            "joint_pos_bias_range": [-0.025, 0.025],
-            "randomize_dof_pos_bias": True,
+            "joint_pos_bias_range": [-0.01, 0.01],
+            "randomize_dof_pos_bias": False,
         },
     ),
     "randomize_camera_raycast": RandomizationTermCfg(

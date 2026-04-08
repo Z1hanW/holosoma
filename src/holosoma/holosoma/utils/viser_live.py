@@ -30,7 +30,8 @@ from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.viser_utils import ensure_viser_on_path, resolve_viser_port
 
 LIGHT_BLUE = (255, 140, 0)
-DARK_GRAY = (70, 70, 70)
+TERRAIN_GRAY = (70, 70, 70)
+GROUND_DARK_GRAY = (45, 45, 45)
 SIM_ROBOT_POINTS_COLOR = np.array([70, 190, 120], dtype=np.uint8)
 SIM_OBJECT_POINTS_COLOR = np.array([255, 140, 0], dtype=np.uint8)
 HEIGHTMAP_MARKER_COLOR = (255, 165, 0)
@@ -1730,6 +1731,14 @@ class ViserLiveViewer:
         clip_ids = getattr(motion_cmd, "clip_ids", None)
         representative_clip_ids = getattr(motion_cmd, "_debug_representative_clip_ids", None)
         if sim_object_names and clip_object_ids is not None:
+            if clip_ids is not None:
+                try:
+                    clip_idx = int(clip_ids[int(env_id)].item())
+                    object_id = int(clip_object_ids[int(clip_idx)].item())
+                    if 0 <= object_id < len(sim_object_names):
+                        return str(sim_object_names[object_id])
+                except Exception:
+                    pass
             if representative_clip_ids is not None:
                 try:
                     rep_count = int(representative_clip_ids.numel())
@@ -1743,19 +1752,37 @@ class ViserLiveViewer:
                             return str(sim_object_names[object_id])
                     except Exception:
                         pass
-            if clip_ids is not None:
-                try:
-                    clip_idx = int(clip_ids[int(env_id)].item())
-                    object_id = int(clip_object_ids[int(clip_idx)].item())
-                    if 0 <= object_id < len(sim_object_names):
-                        return str(sim_object_names[object_id])
-                except Exception:
-                    pass
 
         # Single-object mapping fallback
         object_name = str(getattr(motion_cmd, "object_name", "")).strip()
         if object_name:
             return object_name
+        return None
+
+    def _get_simulator_object_state_xyzw_for(self, env_id: int) -> tuple[np.ndarray, np.ndarray] | None:
+        sim = getattr(self._env, "simulator", None)
+        if sim is None:
+            return None
+
+        env_ids = torch.tensor([int(env_id)], device=self._env.device, dtype=torch.long)
+        sim_object_name = self._resolve_sim_object_name_for_env(int(env_id))
+        candidate_names: list[str] = []
+        if sim_object_name:
+            candidate_names.append(sim_object_name)
+        if "object" not in candidate_names:
+            candidate_names.append("object")
+
+        for object_name in candidate_names:
+            try:
+                states = sim.get_actor_states([object_name], env_ids)
+            except Exception:
+                states = None
+            if states is None or states.numel() == 0:
+                continue
+            state = states[0]
+            pos = state[0:3].detach().cpu().numpy()
+            quat_xyzw = state[3:7].detach().cpu().numpy()
+            return pos, quat_xyzw
         return None
 
     def _resolve_object_urdf_for_env(self, env_id: int) -> str | None:
@@ -1913,8 +1940,8 @@ class ViserLiveViewer:
         self._ground_handle = None
 
     def _update_terrain_transform(self, viewer_offset: np.ndarray | None = None) -> None:
-        handle = self._terrain_handle or self._ground_handle
-        if handle is None:
+        handles = [handle for handle in (self._terrain_handle, self._ground_handle) if handle is not None]
+        if not handles:
             return
         terrain_offset = np.zeros(3, dtype=np.float32)
         if self._terrain_is_local:
@@ -1926,10 +1953,11 @@ class ViserLiveViewer:
                 viewer_offset = self._offset
             else:
                 viewer_offset = np.zeros(3, dtype=np.float32)
-        try:
-            handle.position = terrain_offset - viewer_offset
-        except Exception:
-            pass
+        for handle in handles:
+            try:
+                handle.position = terrain_offset - viewer_offset
+            except Exception:
+                pass
 
     def _reload_terrain_for_clip(self, clip_name: str | None) -> None:
         if not self._enabled or self._server is None:
@@ -3018,6 +3046,11 @@ class ViserLiveViewer:
         terrain_state = terrain_mgr.get_state("locomotion_terrain")
         terrain_cfg = getattr(terrain_mgr, "cfg", None)
         terrain_term = getattr(terrain_cfg, "terrain_term", None) if terrain_cfg is not None else None
+        show_ground_plane = bool(
+            terrain_term is not None
+            and getattr(terrain_state, "mesh_type", None) == "load_obj"
+            and bool(getattr(terrain_term, "add_ground_plane_collision", False))
+        )
 
         mesh = None
         mesh_is_local = False
@@ -3074,7 +3107,7 @@ class ViserLiveViewer:
                 self._scene_path("/ground"),
                 ground_mesh.vertices,
                 ground_mesh.faces,
-                color=DARK_GRAY,
+                color=GROUND_DARK_GRAY,
                 side="double",
             )
             if self._show_terrain_cb is not None:
@@ -3088,11 +3121,28 @@ class ViserLiveViewer:
             self._scene_path("/terrain"),
             mesh.vertices,
             mesh.faces,
-            color=DARK_GRAY,
+            color=TERRAIN_GRAY,
             side="double",
         )
         if self._show_terrain_cb is not None:
             self._terrain_handle.visible = bool(self._show_terrain_cb.value)
+        if show_ground_plane:
+            try:
+                import trimesh  # type: ignore[import-not-found]
+            except Exception:
+                pass
+            else:
+                ground_mesh = trimesh.creation.box(extents=(8.0, 8.0, 0.01))
+                ground_mesh.apply_translation([0.0, 0.0, -0.005])
+                self._ground_handle = self._server.scene.add_mesh_simple(
+                    self._scene_path("/ground"),
+                    ground_mesh.vertices,
+                    ground_mesh.faces,
+                    color=GROUND_DARK_GRAY,
+                    side="double",
+                )
+                if self._show_terrain_cb is not None:
+                    self._ground_handle.visible = bool(self._show_terrain_cb.value)
         self._terrain_is_local = bool(mesh_is_local)
         self._terrain_clip_name = clip_name
         self._update_terrain_transform()
@@ -3176,6 +3226,28 @@ class ViserLiveViewer:
         aspect = float(max(aspect, 0.1))
         return float(np.deg2rad(fov)), aspect
 
+    def _get_heightmap_visual_start_shift(self, perception_mgr, env_ids: torch.Tensor) -> torch.Tensor | None:
+        try:
+            start_pose = perception_mgr.get_heightmap_pose(
+                env_ids,
+                apply_offsets=True,
+                apply_heading_only=True,
+            )
+            anchor_pose = perception_mgr.get_heightmap_pose(
+                env_ids,
+                apply_offsets=False,
+                apply_heading_only=True,
+            )
+        except Exception:
+            return None
+        if start_pose is None or anchor_pose is None:
+            return None
+        start_pos_t, _ = start_pose
+        anchor_pos_t, _ = anchor_pose
+        if start_pos_t.numel() == 0 or anchor_pos_t.numel() == 0:
+            return None
+        return start_pos_t[0] - anchor_pos_t[0]
+
     def _setup_perception_controls(self) -> None:
         if self._server is None:
             return
@@ -3227,7 +3299,7 @@ class ViserLiveViewer:
                 self._perception_show_heightmap_joint_cb = self._server.gui.add_checkbox(
                     "Show Heightmap Joint",
                     initial_value=True,
-                    hint="Show the body used for heightmap sampling",
+                    hint="Show the joint/body anchor used for heightmap sampling",
                 )
             if getattr(cfg, "camera_body_name", None):
                 self._perception_show_camera_joint_cb = self._server.gui.add_checkbox(
@@ -3703,8 +3775,9 @@ class ViserLiveViewer:
                         except Exception:
                             pass
                 if self._show_terrain_cb is not None:
-                    handle = self._terrain_handle or self._ground_handle
-                    self._set_handle_visible(handle, bool(self._show_terrain_cb.value))
+                    show_terrain = bool(self._show_terrain_cb.value)
+                    self._set_handle_visible(self._terrain_handle, show_terrain)
+                    self._set_handle_visible(self._ground_handle, show_terrain)
                 if self._show_grid_cb is not None:
                     self._set_handle_visible(self._grid_handle, bool(self._show_grid_cb.value))
 
@@ -4232,6 +4305,12 @@ class ViserLiveViewer:
         if not getattr(self._env.robot_config.object, "object_urdf_path", None):
             return None
 
+        sim_state = self._get_simulator_object_state_xyzw_for(int(env_id))
+        if sim_state is not None:
+            pos, quat_xyzw = sim_state
+            quat_wxyz = quat_xyzw[[3, 0, 1, 2]]
+            return pos, quat_wxyz
+
         motion_cmd = self._get_motion_command()
         if motion_cmd is not None and hasattr(motion_cmd, "simulator_object_pos_w"):
             try:
@@ -4242,27 +4321,7 @@ class ViserLiveViewer:
             except Exception:
                 pass
 
-        env_ids = torch.tensor([int(env_id)], device=self._env.device, dtype=torch.long)
-        sim = self._env.simulator
-        states = None
-        if hasattr(sim, "_get_object_states"):
-            try:
-                states = sim._get_object_states("object", env_ids)
-            except Exception:
-                states = None
-        if states is None and hasattr(sim, "get_actor_states") and getattr(sim, "has_scene_objects", False):
-            try:
-                states = sim.get_actor_states(["object"], env_ids)
-            except Exception:
-                states = None
-        if states is None or states.numel() == 0:
-            return None
-
-        state = states[0]
-        pos = state[0:3]
-        quat_xyzw = state[3:7]
-        quat_wxyz = quat_xyzw[[3, 0, 1, 2]]
-        return pos.detach().cpu().numpy(), quat_wxyz.detach().cpu().numpy()
+        return None
 
     def _get_object_state_wxyz(self) -> tuple[np.ndarray, np.ndarray] | None:
         return self._get_object_state_wxyz_for(self._env_id)
@@ -4551,6 +4610,10 @@ class ViserLiveViewer:
             if self._scandots_rays_handle is not None:
                 self._scandots_rays_handle.visible = False
             return
+        if use_heightmap:
+            shift = self._get_heightmap_visual_start_shift(perception_mgr, env_ids)
+            if shift is not None:
+                starts_all_env = starts_all_env - shift.unsqueeze(0)
 
         if output_mode == "camera_depth":
             try:
@@ -4718,6 +4781,13 @@ class ViserLiveViewer:
             if self._scandots_rays_handle is not None:
                 self._scandots_rays_handle.visible = False
             return True
+        perception_mgr = getattr(self._env, "perception_manager", None)
+        output_mode = getattr(getattr(perception_mgr, "cfg", None), "output_mode", None)
+        if output_mode == "heightmap" and perception_mgr is not None:
+            env_ids = torch.tensor([self._env_id], device=self._env.device, dtype=torch.long)
+            shift = self._get_heightmap_visual_start_shift(perception_mgr, env_ids)
+            if shift is not None:
+                starts = starts - shift.detach().cpu().numpy().reshape(1, 3)
 
         lines = np.stack([starts, ends], axis=1).astype(np.float32, copy=False)
         if self._recenter:

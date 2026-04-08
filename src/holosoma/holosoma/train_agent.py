@@ -408,37 +408,6 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
         tyro_config = apply_observation_overrides(tyro_config)
         tyro_config = apply_perception_overrides(tyro_config)
 
-        env_target = tyro_config.env_class
-
-        tyro_env_config = get_tyro_env_config(tyro_config)
-        env = get_class(env_target)(tyro_env_config, device=device)
-
-        # For manager system, pre-process config AFTER env creation
-        # (need managers to compute dims)
-        observation_manager = getattr(env, "observation_manager", None)
-        if observation_manager is None:
-            raise RuntimeError(
-                f"Manager environment {env_target} is missing observation_manager attribute. "
-                "This should not happen if the environment is properly configured."
-            )
-
-        if tyro_config.training.debug:
-            if is_main_process:
-                max_debug_steps = tyro_config.training.max_eval_steps
-                _run_debug_mode_by_perception(
-                    env,
-                    wandb_logging=wandb_enabled,
-                    max_steps=max_debug_steps,
-                )
-            if is_distributed:
-                dist.barrier()
-                logger.info("Shutting down distributed processes...")
-                dist.destroy_process_group()
-            if is_main_process and wandb_enabled:
-                logger.info("Shutting down wandb...")
-                wandb.finish()
-            return
-
         experiment_save_dir = experiment_dir
         experiment_save_dir.mkdir(exist_ok=True, parents=True)
 
@@ -448,17 +417,8 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
             config_path = experiment_save_dir / CONFIG_NAME
             tyro_config.save_config(str(config_path))
 
-        algo_class = get_class(tyro_config.algo._target_)
-        algo: BaseAlgo = algo_class(
-            device=device,
-            env=env,
-            config=tyro_config.algo.config,
-            log_dir=experiment_save_dir,
-            multi_gpu_cfg=distributed_conf,
-        )
-        algo.setup()
-
-        # Configure wandb after distributed model synchronization to avoid rank skew before first collectives.
+        # Initialize wandb on rank0 before expensive sim/env setup so the run
+        # appears immediately in the UI. Keep ranks in sync with a barrier.
         if wandb_enabled and is_main_process:
             from holosoma.config_types.logger import WandbLoggerConfig
 
@@ -510,6 +470,47 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
 
         if is_distributed and dist.is_initialized():
             dist.barrier()
+
+        env_target = tyro_config.env_class
+
+        tyro_env_config = get_tyro_env_config(tyro_config)
+        env = get_class(env_target)(tyro_env_config, device=device)
+
+        # For manager system, pre-process config AFTER env creation
+        # (need managers to compute dims)
+        observation_manager = getattr(env, "observation_manager", None)
+        if observation_manager is None:
+            raise RuntimeError(
+                f"Manager environment {env_target} is missing observation_manager attribute. "
+                "This should not happen if the environment is properly configured."
+            )
+
+        if tyro_config.training.debug:
+            if is_main_process:
+                max_debug_steps = tyro_config.training.max_eval_steps
+                _run_debug_mode_by_perception(
+                    env,
+                    wandb_logging=wandb_enabled,
+                    max_steps=max_debug_steps,
+                )
+            if is_distributed:
+                dist.barrier()
+                logger.info("Shutting down distributed processes...")
+                dist.destroy_process_group()
+            if is_main_process and wandb_enabled:
+                logger.info("Shutting down wandb...")
+                wandb.finish()
+            return
+
+        algo_class = get_class(tyro_config.algo._target_)
+        algo: BaseAlgo = algo_class(
+            device=device,
+            env=env,
+            config=tyro_config.algo.config,
+            log_dir=experiment_save_dir,
+            multi_gpu_cfg=distributed_conf,
+        )
+        algo.setup()
 
         algo.attach_checkpoint_metadata(tyro_config, wandb_run_path)
         if tyro_config.training.checkpoint is not None:

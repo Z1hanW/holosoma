@@ -4416,13 +4416,11 @@ class MotionCommand(CommandTermBase):
 
             capacity = self._terrain_row_count * len(tile_names)
             if self.num_envs > capacity:
-                logger.warning(
-                    "num_envs ({}) exceeds terrain slots (rows={} x cols={} = {}). "
-                    "Multiple envs will overlap tiles; increase terrain num_rows or reduce num_envs.",
-                    self.num_envs,
-                    self._terrain_row_count,
-                    len(tile_names),
-                    capacity,
+                raise ValueError(
+                    "pair_terrain_with_motion requires terrain slots >= envs per rank "
+                    f"(got num_envs={self.num_envs}, rows={self._terrain_row_count}, "
+                    f"cols={len(tile_names)}, capacity={capacity}). "
+                    "Increase terrain num_rows or reduce num_envs."
                 )
 
             unused = [name for name in tile_names if name not in self.motion.clip_ids]
@@ -4465,6 +4463,15 @@ class MotionCommand(CommandTermBase):
         self._clip_terrain_offsets_by_row = torch.tensor(clip_offsets_by_row, device=self.device, dtype=torch.float32)
         self._terrain_row_count = max(1, num_rows)
         self._terrain_row_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+
+        capacity = self._terrain_row_count * num_clips
+        if self.num_envs > capacity:
+            raise ValueError(
+                "pair_terrain_with_motion requires terrain slots >= envs per rank "
+                f"(got num_envs={self.num_envs}, rows={self._terrain_row_count}, "
+                f"clip_paired_cols={num_clips}, capacity={capacity}). "
+                "Increase terrain num_rows or reduce num_envs."
+            )
 
         if num_cols > num_clips:
             logger.warning(
