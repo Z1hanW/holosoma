@@ -27,11 +27,16 @@ from viser.extras import ViserUrdf  # type: ignore[import-not-found]  # noqa: E4
 
 from holosoma.config_types.robot import RobotConfig  # noqa: E402
 from holosoma.config_values import robot as robot_values  # noqa: E402
-from holosoma.managers.command.terms.wbt import FAKE_BODY_NAME_ALIASES, MotionLoader  # noqa: E402
 from holosoma.utils.module_utils import get_holosoma_root  # noqa: E402
 from holosoma.utils.path import resolve_data_file_path  # noqa: E402
 from holosoma.utils.tyro_utils import TYRO_CONIFG  # noqa: E402
 from holosoma.utils.viser_utils import resolve_viser_port  # noqa: E402
+
+
+FAKE_BODY_NAME_ALIASES: dict[str, str] = {
+    "left_foot_contact_point": "left_ankle_roll_link",
+    "right_foot_contact_point": "right_ankle_roll_link",
+}
 
 
 @dataclass(frozen=True)
@@ -236,39 +241,64 @@ def _load_motion_qpos(
     if qpos_payload is not None:
         return qpos_payload
 
-    robot_body_names = [FAKE_BODY_NAME_ALIASES.get(name, name) for name in robot_config.body_names]
-    motion = MotionLoader(
-        str(motion_path),
-        robot_body_names,
-        robot_config.dof_names,
-        device="cpu",
-    )
-
     name_to_robot_idx = {name: idx for idx, name in enumerate(robot_config.dof_names)}
     missing = [name for name in viser_joint_names if name not in name_to_robot_idx]
     if missing:
         raise ValueError(f"Viser URDF joints missing in robot config: {missing}")
     joint_order = [name_to_robot_idx[name] for name in viser_joint_names]
 
-    joint_pos_robot = motion.joint_pos.cpu().numpy()
-    joint_pos = joint_pos_robot[:, joint_order]
+    with np.load(motion_path, allow_pickle=True) as data:
+        required_keys = ("joint_names", "joint_pos", "body_names", "body_pos_w", "body_quat_w")
+        missing_keys = [key for key in required_keys if key not in data]
+        if missing_keys:
+            raise ValueError(f"Motion file missing keys required for viewer fallback: {missing_keys}")
 
-    root_pos = motion.body_pos_w[:, 0].cpu().numpy()
-    root_quat_xyzw = motion.body_quat_w[:, 0].cpu().numpy()
-    root_quat_wxyz = root_quat_xyzw[:, [3, 0, 1, 2]]
+        motion_joint_names = [
+            value.decode("utf-8") if isinstance(value, bytes) else str(value) for value in data["joint_names"]
+        ]
+        motion_body_names = [
+            value.decode("utf-8") if isinstance(value, bytes) else str(value) for value in data["body_names"]
+        ]
+        joint_pos_raw = np.asarray(data["joint_pos"], dtype=np.float32)
+        body_pos_w = np.asarray(data["body_pos_w"], dtype=np.float32)
+        body_quat_w_xyzw = np.asarray(data["body_quat_w"], dtype=np.float32)
 
-    qpos_parts: list[np.ndarray] = [root_pos, root_quat_wxyz, joint_pos]
-    if getattr(motion, "has_object", False):
-        object_pos = motion.object_pos_w.cpu().numpy()
-        object_quat_xyzw = motion.object_quat_w.cpu().numpy()
-        object_quat_wxyz = object_quat_xyzw[:, [3, 0, 1, 2]]
-        qpos_parts.extend([object_pos, object_quat_wxyz])
+        if joint_pos_raw.ndim != 2:
+            raise ValueError(f"Unsupported joint_pos shape in {motion_path}: {joint_pos_raw.shape}")
+        if body_pos_w.ndim != 3 or body_pos_w.shape[2] != 3:
+            raise ValueError(f"Unsupported body_pos_w shape in {motion_path}: {body_pos_w.shape}")
+        if body_quat_w_xyzw.ndim != 3 or body_quat_w_xyzw.shape[2] != 4:
+            raise ValueError(f"Unsupported body_quat_w shape in {motion_path}: {body_quat_w_xyzw.shape}")
 
-    qpos = np.concatenate(qpos_parts, axis=1).astype(np.float32, copy=False)
-    if hasattr(motion, "fps"):
-        fps = int(np.asarray(motion.fps).reshape(-1)[0])
-    else:
-        fps = 30
+        motion_joint_map = {name: idx for idx, name in enumerate(motion_joint_names)}
+        joint_pos_robot = np.zeros((joint_pos_raw.shape[0], len(robot_config.dof_names)), dtype=np.float32)
+        missing_robot_joints = []
+        for robot_idx, joint_name in enumerate(robot_config.dof_names):
+            motion_idx = motion_joint_map.get(joint_name)
+            if motion_idx is None:
+                missing_robot_joints.append(joint_name)
+                continue
+            joint_pos_robot[:, robot_idx] = joint_pos_raw[:, motion_idx]
+        if missing_robot_joints:
+            logger.warning("Missing joints in motion file {}; zero-filling: {}", motion_path, missing_robot_joints)
+        joint_pos = joint_pos_robot[:, joint_order]
+
+        motion_body_map = {name: idx for idx, name in enumerate(motion_body_names)}
+        root_body_name = FAKE_BODY_NAME_ALIASES.get(robot_config.body_names[0], robot_config.body_names[0])
+        if root_body_name not in motion_body_map:
+            raise ValueError(f"Root body '{root_body_name}' not found in motion file: {motion_path}")
+        root_idx = motion_body_map[root_body_name]
+        root_pos = body_pos_w[:, root_idx]
+        root_quat_wxyz = body_quat_w_xyzw[:, root_idx][:, [3, 0, 1, 2]]
+
+        qpos_parts: list[np.ndarray] = [root_pos, root_quat_wxyz, joint_pos]
+        if "object_pos_w" in data and "object_quat_w" in data:
+            object_pos = np.asarray(data["object_pos_w"], dtype=np.float32)
+            object_quat_wxyz = np.asarray(data["object_quat_w"], dtype=np.float32)[:, [3, 0, 1, 2]]
+            qpos_parts.extend([object_pos, object_quat_wxyz])
+
+        qpos = np.concatenate(qpos_parts, axis=1).astype(np.float32, copy=False)
+        fps = int(np.asarray(data["fps"]).reshape(-1)[0]) if "fps" in data else 30
     return qpos, fps
 
 

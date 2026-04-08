@@ -1367,7 +1367,6 @@ class ViserLiveViewer:
         self._manual_goal_zero_button = None
         self._manual_goal_pos_x_slider = None
         self._manual_goal_pos_y_slider = None
-        self._manual_goal_yaw_slider = None
         self._manual_goal_status = None
         self._object_reset_override_cb = None
         self._object_reset_zero_button = None
@@ -2244,9 +2243,6 @@ class ViserLiveViewer:
             manual_goal_xy = getattr(motion_cmd, "manual_goal_xy_rel", None)
             if isinstance(manual_goal_xy, torch.Tensor) and manual_goal_xy.numel() > 0:
                 manual_goal_xy.zero_()
-            manual_goal_yaw = getattr(motion_cmd, "manual_goal_yaw_rel", None)
-            if isinstance(manual_goal_yaw, torch.Tensor) and manual_goal_yaw.numel() > 0:
-                manual_goal_yaw.zero_()
             if bool(getattr(motion_cmd, "_sparse_goal_curriculum_enabled", False)):
                 base_goal_pos = getattr(motion_cmd, "base_goal_object_pos_w", None)
                 base_goal_rot6d = getattr(motion_cmd, "base_goal_object_rot6d_w", None)
@@ -2263,11 +2259,7 @@ class ViserLiveViewer:
         self._update_manual_goal_status()
 
     def _sync_manual_goal_target_from_reference(self) -> None:
-        if (
-            self._manual_goal_pos_x_slider is None
-            or self._manual_goal_pos_y_slider is None
-            or self._manual_goal_yaw_slider is None
-        ):
+        if self._manual_goal_pos_x_slider is None or self._manual_goal_pos_y_slider is None:
             return
 
         motion_cmd = self._get_motion_command()
@@ -2277,27 +2269,23 @@ class ViserLiveViewer:
         try:
             if bool(getattr(motion_cmd, "manual_goal_override_enabled", False)):
                 goal_xy = getattr(motion_cmd, "manual_goal_xy_rel", None)
-                goal_yaw = getattr(motion_cmd, "manual_goal_yaw_rel", None)
                 if isinstance(goal_xy, torch.Tensor) and goal_xy.ndim >= 2:
                     self._manual_goal_pos_x_slider.value = float(goal_xy[self._env_id, 0].item())
                     self._manual_goal_pos_y_slider.value = float(goal_xy[self._env_id, 1].item())
-                if isinstance(goal_yaw, torch.Tensor) and goal_yaw.ndim >= 2:
-                    self._manual_goal_yaw_slider.value = self._wrap_to_pi(float(goal_yaw[self._env_id, 0].item()))
                 return
         except Exception:
             pass
 
-        goal_xy_yaw = self._current_effective_goal_xy_yaw()
-        if goal_xy_yaw is None:
+        goal_xy = self._current_effective_goal_xy()
+        if goal_xy is None:
             return
         try:
-            self._manual_goal_pos_x_slider.value = float(goal_xy_yaw[0])
-            self._manual_goal_pos_y_slider.value = float(goal_xy_yaw[1])
-            self._manual_goal_yaw_slider.value = self._wrap_to_pi(float(goal_xy_yaw[2]))
+            self._manual_goal_pos_x_slider.value = float(goal_xy[0])
+            self._manual_goal_pos_y_slider.value = float(goal_xy[1])
         except Exception:
             pass
 
-    def _current_effective_goal_xy_yaw(self) -> np.ndarray | None:
+    def _current_effective_goal_xy(self) -> np.ndarray | None:
         motion_cmd = self._get_motion_command()
         if motion_cmd is None:
             return None
@@ -2305,16 +2293,11 @@ class ViserLiveViewer:
         try:
             if bool(getattr(motion_cmd, "manual_goal_override_enabled", False)):
                 goal_xy = getattr(motion_cmd, "manual_goal_xy_rel", None)
-                goal_yaw = getattr(motion_cmd, "manual_goal_yaw_rel", None)
                 if isinstance(goal_xy, torch.Tensor) and goal_xy.ndim >= 2:
-                    yaw_val = 0.0
-                    if isinstance(goal_yaw, torch.Tensor) and goal_yaw.ndim >= 2:
-                        yaw_val = float(goal_yaw[self._env_id, 0].item())
                     return np.array(
                         [
                             float(goal_xy[self._env_id, 0].item()),
                             float(goal_xy[self._env_id, 1].item()),
-                            yaw_val,
                         ],
                         dtype=np.float32,
                     )
@@ -2338,10 +2321,8 @@ class ViserLiveViewer:
                 except Exception:
                     continue
                 if isinstance(obs, torch.Tensor) and obs.ndim >= 2 and int(obs.shape[1]) >= 2:
-                    goal_xy_yaw = np.zeros((3,), dtype=np.float32)
-                    width = min(int(obs.shape[1]), 3)
-                    goal_xy_yaw[:width] = obs[self._env_id, :width].detach().float().cpu().numpy()
-                    return goal_xy_yaw
+                    width = min(int(obs.shape[1]), 2)
+                    return obs[self._env_id, :width].detach().float().cpu().numpy()
         return None
 
     def _update_manual_goal_status(self) -> None:
@@ -2354,7 +2335,7 @@ class ViserLiveViewer:
             return
 
         enabled = bool(getattr(motion_cmd, "manual_goal_override_enabled", False))
-        goal_xy_yaw = self._current_effective_goal_xy_yaw()
+        goal_xy = self._current_effective_goal_xy()
         goal_pose = self._get_effective_target_box_pose()
         picked = False
         if hasattr(motion_cmd, "pickup_anchor_set"):
@@ -2363,7 +2344,7 @@ class ViserLiveViewer:
             except Exception:
                 picked = False
 
-        if goal_xy_yaw is None:
+        if goal_xy is None:
             self._manual_goal_status.content = "Mode: `idle`\n\nTarget cmd(box): unavailable"
             return
 
@@ -2372,7 +2353,7 @@ class ViserLiveViewer:
             f"Mode: `{mode}`\n\n"
             "Frame: `pickup-time root-heading [dx, dy]`\n\n"
             f"Picked anchor latched: `{picked}`\n\n"
-            f"Target cmd(box): `dx={float(goal_xy_yaw[0]):+.2f}` `dy={float(goal_xy_yaw[1]):+.2f}`"
+            f"Target cmd(box): `dx={float(goal_xy[0]):+.2f}` `dy={float(goal_xy[1]):+.2f}`"
         )
         if goal_pose is not None:
             goal_pos_w, goal_quat_wxyz, _goal_size = goal_pose
@@ -2393,8 +2374,7 @@ class ViserLiveViewer:
         enabled = bool(self._manual_goal_override_cb.value) if self._manual_goal_override_cb is not None else False
         setattr(motion_cmd, "manual_goal_override_enabled", enabled)
         manual_goal_xy = getattr(motion_cmd, "manual_goal_xy_rel", None)
-        manual_goal_yaw = getattr(motion_cmd, "manual_goal_yaw_rel", None)
-        if not isinstance(manual_goal_xy, torch.Tensor) or not isinstance(manual_goal_yaw, torch.Tensor):
+        if not isinstance(manual_goal_xy, torch.Tensor):
             self._update_manual_goal_status()
             return
 
@@ -2411,15 +2391,7 @@ class ViserLiveViewer:
             device=device,
             dtype=torch.float32,
         ).repeat(self._env.num_envs, 1)
-        cmd_yaw = torch.tensor(
-            [[
-                self._wrap_to_pi(float(self._manual_goal_yaw_slider.value)) if self._manual_goal_yaw_slider is not None else 0.0
-            ]],
-            device=device,
-            dtype=torch.float32,
-        ).repeat(self._env.num_envs, 1)
         motion_cmd.manual_goal_xy_rel = cmd_xy
-        motion_cmd.manual_goal_yaw_rel = cmd_yaw
         update_goal_fn = getattr(motion_cmd, "_update_manual_goal_override", None)
         if callable(update_goal_fn):
             try:
@@ -3512,13 +3484,6 @@ class ViserLiveViewer:
                             step=0.02,
                             initial_value=0.0,
                         )
-                        self._manual_goal_yaw_slider = self._server.gui.add_slider(
-                            "Target Box dYaw (rad)",
-                            min=-np.pi,
-                            max=np.pi,
-                            step=0.02,
-                            initial_value=0.0,
-                        )
                         self._manual_goal_status = self._server.gui.add_markdown("Mode: `idle`\n\nTarget cmd(box): n/a")
 
                     @self._manual_goal_zero_button.on_click
@@ -3535,7 +3500,6 @@ class ViserLiveViewer:
                     for control in (
                         self._manual_goal_pos_x_slider,
                         self._manual_goal_pos_y_slider,
-                        self._manual_goal_yaw_slider,
                     ):
 
                         @control.on_update
@@ -5292,7 +5256,7 @@ class ViserLiveViewer:
             env_origin_z = 0.0
         return env_origin_z + 0.5 * float(box_size[2])
 
-    def _target_box_pose_from_command(self, goal_xy_yaw: np.ndarray, box_size: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    def _target_box_pose_from_command(self, goal_xy: np.ndarray, box_size: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
         motion_cmd = self._get_motion_command()
         if motion_cmd is None:
             return None
@@ -5312,12 +5276,11 @@ class ViserLiveViewer:
 
         anchor_quat_wxyz = anchor_quat_xyzw[[3, 0, 1, 2]]
         anchor_yaw = self._yaw_from_quat_wxyz(anchor_quat_wxyz)
-        goal_xy_yaw = np.asarray(goal_xy_yaw, dtype=np.float32).reshape(-1)
-        if goal_xy_yaw.shape[0] < 2:
+        goal_xy = np.asarray(goal_xy, dtype=np.float32).reshape(-1)
+        if goal_xy.shape[0] < 2:
             return None
-        dx = float(goal_xy_yaw[0])
-        dy = float(goal_xy_yaw[1])
-        dyaw = float(goal_xy_yaw[2]) if goal_xy_yaw.shape[0] >= 3 else 0.0
+        dx = float(goal_xy[0])
+        dy = float(goal_xy[1])
         cos_yaw = float(np.cos(anchor_yaw))
         sin_yaw = float(np.sin(anchor_yaw))
         world_xy = np.asarray(
@@ -5331,7 +5294,7 @@ class ViserLiveViewer:
             [world_xy[0], world_xy[1], self._target_box_resting_center_z(box_size)],
             dtype=np.float32,
         )
-        goal_quat_wxyz = self._quat_wxyz_from_yaw(anchor_yaw + dyaw)
+        goal_quat_wxyz = self._quat_wxyz_from_yaw(anchor_yaw)
         return goal_pos_w, goal_quat_wxyz
 
     def _get_effective_target_box_pose(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
@@ -5364,10 +5327,10 @@ class ViserLiveViewer:
             except Exception:
                 pass
 
-        goal_xy_yaw = self._current_effective_goal_xy_yaw()
-        if goal_xy_yaw is None:
+        goal_xy = self._current_effective_goal_xy()
+        if goal_xy is None:
             return None
-        goal_pose = self._target_box_pose_from_command(goal_xy_yaw, np.asarray(object_size, dtype=np.float32))
+        goal_pose = self._target_box_pose_from_command(goal_xy, np.asarray(object_size, dtype=np.float32))
         if goal_pose is None:
             return None
         goal_pos_w, goal_quat_wxyz = goal_pose

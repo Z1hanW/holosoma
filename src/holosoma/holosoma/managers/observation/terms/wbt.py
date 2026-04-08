@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn.functional as F
 
+from holosoma.managers.observation.base import ObservationTermBase
 from holosoma.managers.command.terms.wbt import MotionCommand
 from holosoma.utils.rotations import (
     calc_heading,
@@ -127,6 +128,49 @@ def actions(env: WholeBodyTrackingManager) -> torch.Tensor:
         env._get_obs_actions()
     """
     return env.action_manager.action
+
+
+class ActionsHistory(ObservationTermBase):
+    """Fixed-length raw action history stored as a single observation term."""
+
+    def __init__(self, cfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        history_steps = int(getattr(cfg, "params", {}).get("history_steps", 1))
+        if history_steps < 1:
+            raise ValueError(f"history_steps must be >= 1, got {history_steps}")
+        self.history_steps = history_steps
+        self.action_dim = int(env.action_manager.total_action_dim)
+        self.device = env.device
+        self._history = torch.zeros(
+            (env.num_envs, self.history_steps, self.action_dim),
+            device=self.device,
+            dtype=torch.float32,
+        )
+        self._last_episode_length = torch.full(
+            (env.num_envs,),
+            fill_value=-1,
+            device=self.device,
+            dtype=torch.long,
+        )
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            self._history.zero_()
+            self._last_episode_length.fill_(-1)
+            return
+        if env_ids.numel() == 0:
+            return
+        self._history[env_ids] = 0.0
+        self._last_episode_length[env_ids] = -1
+
+    def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
+        episode_length = env.episode_length_buf
+        update_mask = episode_length != self._last_episode_length
+        if torch.any(update_mask):
+            self._history[update_mask] = torch.roll(self._history[update_mask], shifts=-1, dims=1)
+            self._history[update_mask, -1, :] = env.action_manager.action[update_mask]
+            self._last_episode_length[update_mask] = episode_length[update_mask]
+        return self._history.reshape(env.num_envs, -1)
 
 
 #########################################################################################################
@@ -813,6 +857,28 @@ def obj_goal_xy_yaw_pick_root_heading(
     return goal_xy_yaw_by_clip[motion_command.clip_ids]
 
 
+def obj_goal_xy_pick_root_heading(
+    env: WholeBodyTrackingManager,
+    lift_height_threshold: float = 0.10,
+    lift_ratio_threshold: float = 0.35,
+    consecutive_steps: int = 5,
+) -> torch.Tensor:
+    """Final clip object [dx, dy] in the pickup-time root-heading frame."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    if not motion_command.motion.has_object:
+        return torch.zeros(env.num_envs, 2, device=env.device, dtype=torch.float32)
+    if getattr(motion_command, "manual_goal_override_enabled", False):
+        return _manual_goal_command_xy(motion_command)
+
+    goal_xy_yaw_by_clip, _ = _clip_pickup_goal_xy_yaw_root_heading(
+        motion_command,
+        lift_height_threshold=lift_height_threshold,
+        lift_ratio_threshold=lift_ratio_threshold,
+        consecutive_steps=consecutive_steps,
+    )
+    return goal_xy_yaw_by_clip[motion_command.clip_ids, :2]
+
+
 def obj_sparse_goal_xy_yaw_pick_root_heading(
     env: WholeBodyTrackingManager,
     zero_yaw: bool = False,
@@ -827,6 +893,12 @@ def obj_sparse_goal_xy_yaw_pick_root_heading(
         obs = obs.clone()
         obs[:, 2] = 0.0
     return obs
+
+
+def obj_sparse_goal_xy_pick_root_heading(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Sparse/manual object goal [dx, dy] in the runtime pickup-time root-heading frame."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    return _manual_goal_command_xy(motion_command)
 
 
 def obj_sparse_goal_xy_yaw_command(
@@ -958,6 +1030,12 @@ def command_curriculum_obj_sparse_goal_xy_yaw_pick_root_heading(
 ) -> torch.Tensor:
     motion_command_state = _get_motion_command_and_assert_type(env)
     obs = obj_sparse_goal_xy_yaw_pick_root_heading(env, zero_yaw=zero_yaw)
+    return _mask_obs_by_episode(obs, _episode_obs_mask(motion_command_state, command_only=True))
+
+
+def command_curriculum_obj_sparse_goal_xy_pick_root_heading(env: WholeBodyTrackingManager) -> torch.Tensor:
+    motion_command_state = _get_motion_command_and_assert_type(env)
+    obs = obj_sparse_goal_xy_pick_root_heading(env)
     return _mask_obs_by_episode(obs, _episode_obs_mask(motion_command_state, command_only=True))
 
 

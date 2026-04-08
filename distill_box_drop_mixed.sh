@@ -66,20 +66,54 @@ except Exception:
 entity, project, run_id = sys.argv[1:4]
 api = wandb.Api(timeout=30)
 run = api.run(f"{entity}/{project}/{run_id}")
+
+def _coerce_int(value):
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+summary = getattr(run, "summary", {}) or {}
+step_hint = _coerce_int(summary.get("_step"))
+if step_hint is None:
+    step_hint = _coerce_int(summary.get("global_step"))
+if step_hint is None:
+    step_hint = _coerce_int(getattr(run, "lastHistoryStep", None))
+if step_hint is None:
+    step_hint = 0
+
+save_interval = None
+cfg = getattr(run, "config", {}) or {}
+algo_cfg = cfg.get("algo") if isinstance(cfg, dict) else None
+if isinstance(algo_cfg, dict):
+    algo_cfg = algo_cfg.get("config")
+if isinstance(algo_cfg, dict):
+    save_interval = _coerce_int(algo_cfg.get("save_interval"))
+if save_interval is None or save_interval <= 0:
+    save_interval = 500
+
 pattern = re.compile(r"^model_(\d+)\.pt$")
-latest_step = -1
-latest_name = ""
-for file_obj in run.files():
-    name = getattr(file_obj, "name", "")
-    match = pattern.match(name)
-    if not match:
+start_step = max(step_hint - (step_hint % save_interval), 0)
+best_step = -1
+best_name = ""
+for step in range(start_step, -1, -save_interval):
+    name = f"model_{step:05d}.pt"
+    try:
+        file_obj = run.file(name)
+    except Exception:
         continue
-    step = int(match.group(1))
-    if step >= latest_step:
-        latest_step = step
-        latest_name = name
-if latest_name:
-    print(latest_name)
+    size = _coerce_int(getattr(file_obj, "size", None))
+    match = pattern.match(getattr(file_obj, "name", ""))
+    if match is None or size is None or size <= 0:
+        continue
+    file_step = int(match.group(1))
+    if file_step >= best_step:
+        best_step = file_step
+        best_name = name
+        break
+
+if best_name:
+    print(best_name)
 PY
 }
 
@@ -317,10 +351,6 @@ EXTERNAL_GOAL_POS_LOCAL_MIN_START=${EXTERNAL_GOAL_POS_LOCAL_MIN_START:-"[0.40, -
 EXTERNAL_GOAL_POS_LOCAL_MAX_START=${EXTERNAL_GOAL_POS_LOCAL_MAX_START:-"[0.65, 0.20, 0.185]"}
 EXTERNAL_GOAL_POS_LOCAL_MIN=${EXTERNAL_GOAL_POS_LOCAL_MIN:-"[0.25, -0.75, 0.185]"}
 EXTERNAL_GOAL_POS_LOCAL_MAX=${EXTERNAL_GOAL_POS_LOCAL_MAX:-"[1.00, 0.75, 0.185]"}
-EXTERNAL_GOAL_RPY_MIN_START=${EXTERNAL_GOAL_RPY_MIN_START:-"[0.0, 0.0, -0.80]"}
-EXTERNAL_GOAL_RPY_MAX_START=${EXTERNAL_GOAL_RPY_MAX_START:-"[0.0, 0.0, 0.80]"}
-EXTERNAL_GOAL_RPY_MIN=${EXTERNAL_GOAL_RPY_MIN:-"[0.0, 0.0, -3.1415926]"}
-EXTERNAL_GOAL_RPY_MAX=${EXTERNAL_GOAL_RPY_MAX:-"[0.0, 0.0, 3.1415926]"}
 
 IMAGE_WIDTH=${IMAGE_WIDTH:-17}
 IMAGE_HEIGHT=${IMAGE_HEIGHT:-17}
@@ -595,8 +625,6 @@ echo "[INFO] sparse_goal_enabled=${SPARSE_GOAL_ENABLED} ext_prob=${EXTERNAL_GOAL
 echo "[INFO] external_goal_prob_iter=${EXTERNAL_GOAL_PROB_START_ITER}->${EXTERNAL_GOAL_PROB_END_ITER}"
 echo "[INFO] external_goal_range_xy_start=${EXTERNAL_GOAL_POS_LOCAL_MIN_START} -> ${EXTERNAL_GOAL_POS_LOCAL_MAX_START}"
 echo "[INFO] external_goal_range_xy_end=${EXTERNAL_GOAL_POS_LOCAL_MIN} -> ${EXTERNAL_GOAL_POS_LOCAL_MAX}"
-echo "[INFO] external_goal_range_yaw_start=${EXTERNAL_GOAL_RPY_MIN_START} -> ${EXTERNAL_GOAL_RPY_MAX_START}"
-echo "[INFO] external_goal_range_yaw_end=${EXTERNAL_GOAL_RPY_MIN} -> ${EXTERNAL_GOAL_RPY_MAX}"
 echo "[INFO] external_goal_range_iter=${EXTERNAL_GOAL_RANGE_START_ITER}->${EXTERNAL_GOAL_RANGE_END_ITER}"
 echo "[INFO] clip_goal_delta_steps=${CLIP_GOAL_DELTA_MIN_STEPS}-${CLIP_GOAL_DELTA_MAX_STEPS} (legacy/unused; clip-goal now uses final placement)"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}->${START_AT_TIMESTEP_ZERO_PROB_END} iter=${START_AT_TIMESTEP_ZERO_PROB_START_ITER}->${START_AT_TIMESTEP_ZERO_PROB_END_ITER}"
@@ -707,10 +735,6 @@ exec env \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-pos-local-max-start "${EXTERNAL_GOAL_POS_LOCAL_MAX_START}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-pos-local-min "${EXTERNAL_GOAL_POS_LOCAL_MIN}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-pos-local-max "${EXTERNAL_GOAL_POS_LOCAL_MAX}" \
-    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-rpy-min-start "${EXTERNAL_GOAL_RPY_MIN_START}" \
-    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-rpy-max-start "${EXTERNAL_GOAL_RPY_MAX_START}" \
-    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-rpy-min "${EXTERNAL_GOAL_RPY_MIN}" \
-    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-rpy-max "${EXTERNAL_GOAL_RPY_MAX}" \
     --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-end="${START_AT_TIMESTEP_ZERO_PROB_END}" \
     --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-start-iter="${START_AT_TIMESTEP_ZERO_PROB_START_ITER}" \
     --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-end-iter="${START_AT_TIMESTEP_ZERO_PROB_END_ITER}" \

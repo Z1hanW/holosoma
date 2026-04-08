@@ -198,7 +198,7 @@ g1_29dof_wbt_motion_tracking_transformer = replace(
 
 _videomimic_actor_inputs = ["actor_obs", "actor_obs_target"]
 _videomimic_critic_inputs = ["critic_obs", "critic_obs_target"]
-_terrain_transformer_actor_inputs = ["actor_obs_proprio", "actor_obs_track", "actor_obs_actions"]
+_terrain_transformer_actor_inputs = ["actor_obs_self", "actor_obs_target"]
 _terrain_transformer_critic_inputs = ["critic_obs"]
 
 _videomimic_mlp_module_dict = PPOModuleDictConfig(
@@ -245,9 +245,9 @@ _videomimic_transformer_module_dict = PPOModuleDictConfig(
 
 _terrain_transformer_layer = replace(
     algo.ppo.config.module_dict.actor.layer_config,
-    module_input_name=("actor_obs_actions",),
-    encoder_input_name="actor_obs_track",
-    encoder_obs_token_name="actor_obs_proprio",
+    module_input_name=(),
+    encoder_input_name="actor_obs_target",
+    encoder_obs_token_name="actor_obs_self",
     encoder_num_steps=1,
     encoder_hidden_dims=[512, 256],
     encoder_activation="ReLU",

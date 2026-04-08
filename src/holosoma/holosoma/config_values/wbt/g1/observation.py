@@ -143,19 +143,36 @@ motion_future_target_poses_group = ObsGroupCfg(
     },
 )
 
-terrain_transformer_track_terms = {
+terrain_transformer_self_terms = {
     "motion_command": actor_obs_shared.terms["motion_command"],
     "motion_ref_ori_b": actor_obs_shared.terms["motion_ref_ori_b"],
-}
-
-terrain_transformer_proprio_terms = {
     "base_ang_vel": actor_obs_shared.terms["base_ang_vel"],
     "dof_pos": actor_obs_shared.terms["dof_pos"],
     "dof_vel": actor_obs_shared.terms["dof_vel"],
+    "actions_history": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:ActionsHistory",
+        params={"history_steps": DEFAULT_WBT_POLICY_HISTORY_LENGTH},
+        scale=1.0,
+        noise=0.0,
+    ),
 }
 
-terrain_transformer_action_terms = {
-    "actions": actor_obs_shared.terms["actions"],
+terrain_transformer_target_terms = {
+    "target_joints": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:target_joints",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "target_root_roll": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:target_root_roll",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "target_root_pitch": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:target_root_pitch",
+        scale=1.0,
+        noise=0.0,
+    ),
 }
 
 critic_obs_shared_terms = {
@@ -252,9 +269,8 @@ critic_obs_w_object_command_privileged_terms.update(
             scale=1.0,
             noise=0.0,
         ),
-        "obj_sparse_goal_xy_yaw_pick_root_heading": ObsTermCfg(
-            func="holosoma.managers.observation.terms.wbt:obj_sparse_goal_xy_yaw_pick_root_heading",
-            params={"zero_yaw": True},
+        "obj_sparse_goal_xy_pick_root_heading": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_sparse_goal_xy_pick_root_heading",
             scale=1.0,
             noise=0.0,
         ),
@@ -476,23 +492,17 @@ g1_29dof_wbt_observation_motion_tracking_split = ObservationManagerCfg(
 
 g1_29dof_wbt_observation_terrain_transformer = ObservationManagerCfg(
     groups={
-        "actor_obs_track": ObsGroupCfg(
+        "actor_obs_self": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
             history_length=1,
-            terms=terrain_transformer_track_terms,
+            terms=terrain_transformer_self_terms,
         ),
-        "actor_obs_proprio": ObsGroupCfg(
+        "actor_obs_target": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
             history_length=1,
-            terms=terrain_transformer_proprio_terms,
-        ),
-        "actor_obs_actions": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
-            terms=terrain_transformer_action_terms,
+            terms=terrain_transformer_target_terms,
         ),
         "critic_obs": ObsGroupCfg(
             concatenate=True,
@@ -589,8 +599,8 @@ object_distill_box_terms = {
 }
 
 object_distill_drop_terms = {
-    "obj_goal_xy_yaw_pick_root_heading": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:obj_goal_xy_yaw_pick_root_heading",
+    "obj_goal_xy_pick_root_heading": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:obj_goal_xy_pick_root_heading",
         params={
             "lift_height_threshold": 0.10,
             "lift_ratio_threshold": 0.35,
@@ -602,9 +612,8 @@ object_distill_drop_terms = {
 }
 
 object_distill_drop_mixed_terms = {
-    "obj_sparse_goal_xy_yaw_pick_root_heading": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:obj_sparse_goal_xy_yaw_pick_root_heading",
-        params={"zero_yaw": True},
+    "obj_sparse_goal_xy_pick_root_heading": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:obj_sparse_goal_xy_pick_root_heading",
         scale=1.0,
         noise=0.0,
     ),
@@ -693,7 +702,7 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
             history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
             terms=object_distill_box_terms,
         ),
-        # Student drop target: final object [dx, dy, dyaw] in pickup-time pelvis-heading frame.
+        # Student drop target: final object [dx, dy] in pickup-time pelvis-heading frame.
         # Keep this single-frame because it is already a frozen command.
         "actor_obs_drop": ObsGroupCfg(
             concatenate=True,

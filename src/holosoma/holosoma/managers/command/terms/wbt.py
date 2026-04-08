@@ -1510,7 +1510,7 @@ class MotionCommand(CommandTermBase):
         self.manual_goal_object_rot6d_w = identity_rot6d.unsqueeze(0).repeat(self.num_envs, 1)
         self.manual_goal_override_enabled = False
         self.manual_goal_xy_rel = torch.zeros((self.num_envs, 2), device=self.device, dtype=torch.float32)
-        self.manual_goal_yaw_rel = torch.zeros((self.num_envs, 1), device=self.device, dtype=torch.float32)
+        self.manual_goal_yaw_rel = None
         self.base_goal_object_pos_w = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
         self.base_goal_object_rot6d_w = identity_rot6d.unsqueeze(0).repeat(self.num_envs, 1)
         self.base_goal_is_external = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
@@ -3293,19 +3293,14 @@ class MotionCommand(CommandTermBase):
     def _goal_command_from_world(
         self,
         goal_pos_w: torch.Tensor,
-        goal_quat_w: torch.Tensor,
         *,
         anchor_pos_w: torch.Tensor,
         anchor_quat_w: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         anchor_heading_quat = yaw_quat(anchor_quat_w, w_last=True)
         anchor_heading_inv = quat_inverse(anchor_heading_quat, w_last=True)
         goal_pos_heading = quat_apply(anchor_heading_inv, goal_pos_w - anchor_pos_w, w_last=True)
-        goal_rot_mat_w = quaternion_to_matrix(goal_quat_w, w_last=True)
-        goal_heading = torch.atan2(goal_rot_mat_w[:, 1, 0], goal_rot_mat_w[:, 0, 0])
-        _, _, anchor_heading = get_euler_xyz(anchor_heading_quat, w_last=True)
-        goal_yaw_rel = normalize_angle(goal_heading - anchor_heading)
-        return goal_pos_heading[:, :2], goal_yaw_rel
+        return goal_pos_heading[:, :2]
 
     def _goal_world_from_command(
         self,
@@ -3314,14 +3309,11 @@ class MotionCommand(CommandTermBase):
         anchor_pos_w: torch.Tensor,
         anchor_quat_w: torch.Tensor,
         goal_xy_rel: torch.Tensor | None = None,
-        goal_yaw_rel: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if self.manual_goal_xy_rel is None or self.manual_goal_yaw_rel is None:
+        if self.manual_goal_xy_rel is None:
             raise RuntimeError("Manual goal command buffers are not initialized.")
         if goal_xy_rel is None:
             goal_xy_rel = self.manual_goal_xy_rel[env_ids]
-        if goal_yaw_rel is None:
-            goal_yaw_rel = self.manual_goal_yaw_rel[env_ids, 0]
 
         anchor_heading_quat = yaw_quat(anchor_quat_w, w_last=True)
         rel_goal_pos = torch.zeros((env_ids.numel(), 3), device=self.device, dtype=torch.float32)
@@ -3329,10 +3321,7 @@ class MotionCommand(CommandTermBase):
         goal_pos_w = anchor_pos_w + quat_apply(anchor_heading_quat, rel_goal_pos, w_last=True)
         goal_pos_w[:, 2] = self._ground_resting_object_center_z(env_ids)
 
-        _, _, anchor_heading = get_euler_xyz(anchor_heading_quat, w_last=True)
-        goal_heading = anchor_heading + goal_yaw_rel
-        zeros = torch.zeros_like(goal_heading)
-        goal_quat_w = quat_from_euler_xyz(zeros, zeros, goal_heading)
+        goal_quat_w = anchor_heading_quat
         goal_rot_mat_w = quaternion_to_matrix(goal_quat_w, w_last=True)
         goal_rot6d_w = goal_rot_mat_w[..., :2].reshape(goal_rot_mat_w.shape[0], 6)
         return goal_pos_w, goal_quat_w, goal_rot6d_w
@@ -3384,25 +3373,11 @@ class MotionCommand(CommandTermBase):
         )
         goal_pos_w = self._get_env_offsets(env_ids) + local_pos
 
-        rpy_min = self._goal_vec3_interp(
-            self._sparse_goal_cfg.external_goal_rpy_min,
-            name="external_goal_rpy_min",
-            start_values=self._sparse_goal_cfg.external_goal_rpy_min_start,
-            alpha=progress,
-        )
-        rpy_max = self._goal_vec3_interp(
-            self._sparse_goal_cfg.external_goal_rpy_max,
-            name="external_goal_rpy_max",
-            start_values=self._sparse_goal_cfg.external_goal_rpy_max_start,
-            alpha=progress,
-        )
-        rpy_lo = torch.minimum(rpy_min, rpy_max)
-        rpy_hi = torch.maximum(rpy_min, rpy_max)
-        rpy = rpy_lo.unsqueeze(0) + (rpy_hi - rpy_lo).unsqueeze(0) * torch.rand((num_samples, 3), device=self.device)
-        goal_quat_w = quat_from_euler_xyz(rpy[:, 0], rpy[:, 1], rpy[:, 2])
+        goal_quat_w = torch.zeros((num_samples, 4), device=self.device, dtype=torch.float32)
+        goal_quat_w[:, 3] = 1.0
         return goal_pos_w, goal_quat_w
 
-    def _sample_external_goal_command(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _sample_external_goal_command(self, env_ids: torch.Tensor) -> torch.Tensor:
         if self._sparse_goal_cfg is None:
             raise RuntimeError("Sparse goal config is not initialized.")
 
@@ -3425,23 +3400,7 @@ class MotionCommand(CommandTermBase):
         goal_xy_rel = pos_lo[:2].unsqueeze(0) + (pos_hi[:2] - pos_lo[:2]).unsqueeze(0) * torch.rand(
             (num_samples, 2), device=self.device
         )
-
-        rpy_min = self._goal_vec3_interp(
-            self._sparse_goal_cfg.external_goal_rpy_min,
-            name="external_goal_rpy_min",
-            start_values=self._sparse_goal_cfg.external_goal_rpy_min_start,
-            alpha=progress,
-        )
-        rpy_max = self._goal_vec3_interp(
-            self._sparse_goal_cfg.external_goal_rpy_max,
-            name="external_goal_rpy_max",
-            start_values=self._sparse_goal_cfg.external_goal_rpy_max_start,
-            alpha=progress,
-        )
-        yaw_lo = torch.minimum(rpy_min[2], rpy_max[2])
-        yaw_hi = torch.maximum(rpy_min[2], rpy_max[2])
-        goal_yaw_rel = yaw_lo + (yaw_hi - yaw_lo) * torch.rand((num_samples,), device=self.device)
-        return goal_xy_rel, goal_yaw_rel
+        return goal_xy_rel
 
     def _sample_carry_extension_object_goal_pose_w(
         self,
@@ -3474,23 +3433,8 @@ class MotionCommand(CommandTermBase):
         )
         goal_pos_w = base_pos_w + quat_apply(base_quat_w, local_pos, w_last=True)
 
-        rpy_min = self._goal_vec3_interp(
-            self._sparse_goal_cfg.carry_extension_rpy_min,
-            name="carry_extension_rpy_min",
-            start_values=self._sparse_goal_cfg.carry_extension_rpy_min_start,
-            alpha=progress,
-        )
-        rpy_max = self._goal_vec3_interp(
-            self._sparse_goal_cfg.carry_extension_rpy_max,
-            name="carry_extension_rpy_max",
-            start_values=self._sparse_goal_cfg.carry_extension_rpy_max_start,
-            alpha=progress,
-        )
-        rpy_lo = torch.minimum(rpy_min, rpy_max)
-        rpy_hi = torch.maximum(rpy_min, rpy_max)
-        rpy = rpy_lo.unsqueeze(0) + (rpy_hi - rpy_lo).unsqueeze(0) * torch.rand((num_samples, 3), device=self.device)
-        delta_quat_w = quat_from_euler_xyz(rpy[:, 0], rpy[:, 1], rpy[:, 2])
-        goal_quat_w = quat_mul(base_quat_w, delta_quat_w, w_last=True)
+        goal_quat_w = torch.zeros((num_samples, 4), device=self.device, dtype=torch.float32)
+        goal_quat_w[:, 3] = 1.0
         return goal_pos_w, goal_quat_w
 
     def _current_external_goal_prob(self) -> float:
@@ -3588,23 +3532,27 @@ class MotionCommand(CommandTermBase):
             self.manual_goal_object_pos_w is None
             or self.manual_goal_object_rot6d_w is None
             or self.manual_goal_xy_rel is None
-            or self.manual_goal_yaw_rel is None
         ):
             return
 
         self.manual_goal_enabled = True
-        clip_goal_pos_w, clip_goal_quat_w = self._sample_clip_based_object_goal_pose_w(env_ids, clip_lengths)
+        clip_goal_pos_w, _clip_goal_quat_w = self._sample_clip_based_object_goal_pose_w(env_ids, clip_lengths)
         clip_pickup_anchor_pos_w, clip_pickup_anchor_quat_w = self._sample_clip_pickup_anchor_pose_w(env_ids)
-        goal_xy_rel, goal_yaw_rel = self._goal_command_from_world(
+        goal_xy_rel = self._goal_command_from_world(
             clip_goal_pos_w,
-            clip_goal_quat_w,
             anchor_pos_w=clip_pickup_anchor_pos_w,
             anchor_quat_w=clip_pickup_anchor_quat_w,
         )
         # Keep a preview world goal for reset/debug buffers; once pickup is latched,
         # `_apply_manual_goal_world_from_command` rematerializes it from the actual anchor.
-        preview_goal_pos_w = clip_goal_pos_w.clone()
-        preview_goal_quat_w = clip_goal_quat_w.clone()
+        clip_goal_preview_pos_w, clip_goal_preview_quat_w, _clip_goal_preview_rot6d_w = self._goal_world_from_command(
+            env_ids,
+            anchor_pos_w=clip_pickup_anchor_pos_w,
+            anchor_quat_w=clip_pickup_anchor_quat_w,
+            goal_xy_rel=goal_xy_rel,
+        )
+        preview_goal_pos_w = clip_goal_preview_pos_w.clone()
+        preview_goal_quat_w = clip_goal_preview_quat_w.clone()
 
         p_command = self._current_command_only_env_prob()
         p_carry = self._current_carry_extension_prob()
@@ -3625,36 +3573,38 @@ class MotionCommand(CommandTermBase):
                 env_ids[carry_extension_mask],
                 clip_lengths[carry_extension_mask],
             )
-            carry_xy_rel, carry_yaw_rel = self._goal_command_from_world(
+            carry_xy_rel = self._goal_command_from_world(
                 carry_pos_w,
-                carry_quat_w,
                 anchor_pos_w=clip_pickup_anchor_pos_w[carry_extension_mask],
                 anchor_quat_w=clip_pickup_anchor_quat_w[carry_extension_mask],
             )
             goal_xy_rel[carry_extension_mask] = carry_xy_rel
-            goal_yaw_rel[carry_extension_mask] = carry_yaw_rel
-            preview_goal_pos_w[carry_extension_mask] = carry_pos_w
-            preview_goal_quat_w[carry_extension_mask] = carry_quat_w
+            carry_preview_pos_w, carry_preview_quat_w, _carry_preview_rot6d_w = self._goal_world_from_command(
+                env_ids[carry_extension_mask],
+                anchor_pos_w=clip_pickup_anchor_pos_w[carry_extension_mask],
+                anchor_quat_w=clip_pickup_anchor_quat_w[carry_extension_mask],
+                goal_xy_rel=carry_xy_rel,
+            )
+            preview_goal_pos_w[carry_extension_mask] = carry_preview_pos_w
+            preview_goal_quat_w[carry_extension_mask] = carry_preview_quat_w
         if external_mask.any():
-            ext_xy_rel, ext_yaw_rel = self._sample_external_goal_command(env_ids[external_mask])
+            ext_xy_rel = self._sample_external_goal_command(env_ids[external_mask])
             goal_xy_rel[external_mask] = ext_xy_rel
-            goal_yaw_rel[external_mask] = ext_yaw_rel
             ext_preview_pos_w, ext_preview_quat_w, _ext_preview_rot6d_w = self._goal_world_from_command(
                 env_ids[external_mask],
                 anchor_pos_w=clip_pickup_anchor_pos_w[external_mask],
                 anchor_quat_w=clip_pickup_anchor_quat_w[external_mask],
                 goal_xy_rel=ext_xy_rel,
-                goal_yaw_rel=ext_yaw_rel,
             )
             preview_goal_pos_w[external_mask] = ext_preview_pos_w
             preview_goal_quat_w[external_mask] = ext_preview_quat_w
 
-        clip_goal_rot_mat = quaternion_to_matrix(clip_goal_quat_w, w_last=True)
+        clip_goal_rot_mat = quaternion_to_matrix(clip_goal_preview_quat_w, w_last=True)
         clip_goal_rot6d_w = clip_goal_rot_mat[..., :2].reshape(clip_goal_rot_mat.shape[0], 6)
         goal_rot_mat = quaternion_to_matrix(preview_goal_quat_w, w_last=True)
         goal_rot6d_w = goal_rot_mat[..., :2].reshape(goal_rot_mat.shape[0], 6)
         if self.clip_goal_object_pos_w is not None:
-            self.clip_goal_object_pos_w[env_ids] = clip_goal_pos_w
+            self.clip_goal_object_pos_w[env_ids] = clip_goal_preview_pos_w
         if self.clip_goal_object_rot6d_w is not None:
             self.clip_goal_object_rot6d_w[env_ids] = clip_goal_rot6d_w
         if self.base_goal_object_pos_w is not None:
@@ -3664,7 +3614,6 @@ class MotionCommand(CommandTermBase):
         if self.base_goal_is_external is not None:
             self.base_goal_is_external[env_ids] = non_clip_mask
         self.manual_goal_xy_rel[env_ids] = goal_xy_rel
-        self.manual_goal_yaw_rel[env_ids, 0] = goal_yaw_rel
         self.manual_goal_object_pos_w[env_ids] = preview_goal_pos_w
         self.manual_goal_object_rot6d_w[env_ids] = goal_rot6d_w
         if self.manual_goal_is_external is not None:
@@ -3699,10 +3648,7 @@ class MotionCommand(CommandTermBase):
             return external_mask
 
         pos_diff = torch.any(torch.abs(self.manual_goal_object_pos_w - self.clip_goal_object_pos_w) > 1.0e-6, dim=-1)
-        rot_diff = torch.any(
-            torch.abs(self.manual_goal_object_rot6d_w - self.clip_goal_object_rot6d_w) > 1.0e-6, dim=-1
-        )
-        return external_mask | pos_diff | rot_diff
+        return external_mask | pos_diff
 
     def get_command_only_env_mask(self) -> torch.Tensor:
         if self.command_only_env_mask is None:
@@ -3780,7 +3726,6 @@ class MotionCommand(CommandTermBase):
             self.manual_goal_object_pos_w is None
             or self.manual_goal_object_rot6d_w is None
             or self.manual_goal_xy_rel is None
-            or self.manual_goal_yaw_rel is None
         ):
             return
 
@@ -4131,8 +4076,6 @@ class MotionCommand(CommandTermBase):
             self.base_goal_is_external.zero_()
         if self.manual_goal_xy_rel is not None:
             self.manual_goal_xy_rel.zero_()
-        if self.manual_goal_yaw_rel is not None:
-            self.manual_goal_yaw_rel.zero_()
         if self.pickup_anchor_set is not None:
             self.pickup_anchor_set.zero_()
         if self.pickup_anchor_root_pos_w is not None:
@@ -4330,20 +4273,7 @@ class MotionCommand(CommandTermBase):
                     start_values=self._sparse_goal_cfg.external_goal_pos_local_max_start,
                     alpha=progress,
                 )
-                rpy_min = self._goal_vec3_interp(
-                    self._sparse_goal_cfg.external_goal_rpy_min,
-                    name="external_goal_rpy_min",
-                    start_values=self._sparse_goal_cfg.external_goal_rpy_min_start,
-                    alpha=progress,
-                )
-                rpy_max = self._goal_vec3_interp(
-                    self._sparse_goal_cfg.external_goal_rpy_max,
-                    name="external_goal_rpy_max",
-                    start_values=self._sparse_goal_cfg.external_goal_rpy_max_start,
-                    alpha=progress,
-                )
                 pos_half_extent = 0.5 * torch.abs(pos_max - pos_min)
-                yaw_half_extent = 0.5 * abs(float(rpy_max[2] - rpy_min[2]))
                 self.metrics["goal/external_pos_range_x_half"] = torch.full(
                     (self.num_envs,),
                     float(pos_half_extent[0]),
@@ -4353,12 +4283,6 @@ class MotionCommand(CommandTermBase):
                 self.metrics["goal/external_pos_range_y_half"] = torch.full(
                     (self.num_envs,),
                     float(pos_half_extent[1]),
-                    device=self.device,
-                    dtype=torch.float32,
-                )
-                self.metrics["goal/external_yaw_range_half"] = torch.full(
-                    (self.num_envs,),
-                    yaw_half_extent,
                     device=self.device,
                     dtype=torch.float32,
                 )
