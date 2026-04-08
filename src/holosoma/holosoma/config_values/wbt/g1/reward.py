@@ -1,5 +1,7 @@
 """Whole Body Tracking reward presets for the G1 robot."""
 
+from dataclasses import replace
+
 from holosoma.config_types.reward import RewardManagerCfg, RewardTermCfg
 
 _LOWER_TRACKED_BODY_NAMES = [
@@ -308,6 +310,23 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed = RewardManagerCfg(
             weight=20.0,
         ),
     }
+)
+
+g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_pickup = replace(
+    g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed,
+    terms={
+        **g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed.terms,
+        "sparse_goal_pickup_height_reward": replace(
+            g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed.terms["sparse_goal_pickup_height_reward"],
+            params={
+                **g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed.terms[
+                    "sparse_goal_pickup_height_reward"
+                ].params,
+                "only_external": False,
+            },
+            weight=0.3,
+        ),
+    },
 )
 
 g1_29dof_wbt_reward_w_object_extend = RewardManagerCfg(
@@ -655,6 +674,7 @@ __all__ = [
     "g1_29dof_wbt_reward_w_object",
     "g1_29dof_wbt_reward_w_object_command_curriculum",
     "g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed",
+    "g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_pickup",
     "g1_29dof_wbt_reward_w_object_generalist",
     "g1_29dof_wbt_reward_w_object_extend",
 ]

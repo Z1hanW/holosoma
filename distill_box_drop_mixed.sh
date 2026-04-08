@@ -21,6 +21,7 @@ TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 POSITIONAL_RUN_NAME=""
 DATA_MODE=${DATA_MODE:-mix-naive}
 SCHEDULE_VARIANT=${SCHEDULE_VARIANT:-default}
+REWARD_VARIANT=${REWARD_VARIANT:-default}
 
 PYTHON_BIN=${PYTHON_BIN:-python}
 
@@ -184,6 +185,10 @@ while [[ $# -gt 0 ]]; do
       SCHEDULE_VARIANT="dag_first"
       shift
       ;;
+    pickup_reward|pickup-reward|pickup)
+      REWARD_VARIANT="pickup_reward"
+      shift
+      ;;
     *)
       break
       ;;
@@ -229,6 +234,12 @@ FREEZE_AT_TIMESTEP_ZERO_PROB_EXPLICIT=0
 [[ -n "${FREEZE_AT_TIMESTEP_ZERO_PROB+x}" ]] && FREEZE_AT_TIMESTEP_ZERO_PROB_EXPLICIT=1
 FREEZE_AT_TIMESTEP_ZERO_PROB_END_EXPLICIT=0
 [[ -n "${FREEZE_AT_TIMESTEP_ZERO_PROB_END+x}" ]] && FREEZE_AT_TIMESTEP_ZERO_PROB_END_EXPLICIT=1
+EXP_EXPLICIT=0
+[[ -n "${EXP+x}" ]] && EXP_EXPLICIT=1
+RUN_NAME_EXPLICIT=0
+[[ -n "${RUN_NAME+x}" ]] && RUN_NAME_EXPLICIT=1
+TRAINING_NAME_EXPLICIT=0
+[[ -n "${TRAINING_NAME+x}" ]] && TRAINING_NAME_EXPLICIT=1
 
 EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-goal-mixed}
 RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_drop_mixed}
@@ -331,6 +342,26 @@ case "${SCHEDULE_VARIANT}" in
     ;;
   *)
     echo "[ERROR] Unsupported SCHEDULE_VARIANT='${SCHEDULE_VARIANT}'. Use one of: default, dag_first" >&2
+    exit 2
+    ;;
+esac
+
+case "${REWARD_VARIANT}" in
+  default)
+    ;;
+  pickup_reward)
+    if [[ "${EXP_EXPLICIT}" -eq 0 ]]; then
+      EXP="g1-29dof-wbt-w-object-distill-sparse-goal-mixed-pickup"
+    fi
+    if [[ "${RUN_NAME_EXPLICIT}" -eq 0 ]]; then
+      RUN_NAME="g1_w_object_distill_box_drop_mixed_pickup"
+    fi
+    if [[ "${TRAINING_NAME_EXPLICIT}" -eq 0 ]]; then
+      TRAINING_NAME="g1_29dof_wbt_w_object_distill_box_drop_mixed_pickup"
+    fi
+    ;;
+  *)
+    echo "[ERROR] Unsupported REWARD_VARIANT='${REWARD_VARIANT}'. Use one of: default, pickup_reward" >&2
     exit 2
     ;;
 esac
@@ -652,6 +683,7 @@ echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
 echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} num_envs=${NUM_ENVS}"
 echo "[INFO] data_mode=${DATA_MODE}"
 echo "[INFO] schedule_variant=${SCHEDULE_VARIANT}"
+echo "[INFO] reward_variant=${REWARD_VARIANT}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
 if [[ -n "${OBJECT_SPEC_PATH}" ]]; then
   echo "[INFO] object_spec_path=${OBJECT_SPEC_PATH}"

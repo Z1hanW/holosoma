@@ -552,6 +552,15 @@ g1_29dof_wbt_w_object_distill_sparse_goal_mixed = replace(
     ),
 )
 
+g1_29dof_wbt_w_object_distill_sparse_goal_mixed_pickup = replace(
+    g1_29dof_wbt_w_object_distill_sparse_goal_mixed,
+    training=replace(
+        g1_29dof_wbt_w_object_distill_sparse_goal_mixed.training,
+        name="g1_29dof_wbt_w_object_distill_sparse_goal_mixed_pickup",
+    ),
+    reward=reward.g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_pickup,
+)
+
 g1_29dof_wbt_terrain_distill_sparse_root_cmd = replace(
     g1_29dof_wbt_videomimic_mlp,
     training=replace(
@@ -625,6 +634,7 @@ __all__ = [
     "g1_29dof_wbt_w_object_command_curriculum",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd",
     "g1_29dof_wbt_w_object_distill_sparse_goal_mixed",
+    "g1_29dof_wbt_w_object_distill_sparse_goal_mixed_pickup",
     "g1_29dof_wbt_terrain_distill_sparse_root_cmd",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_legacy",
 ]

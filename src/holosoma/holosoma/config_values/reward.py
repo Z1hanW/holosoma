@@ -8,6 +8,7 @@ from holosoma.config_values.wbt.g1.reward import (
     g1_29dof_wbt_reward_w_object_command_curriculum,
     g1_29dof_wbt_reward_w_object_generalist,
     g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed,
+    g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_pickup,
     g1_29dof_wbt_reward_w_object_extend,
     g1_29dof_wbt_reward_w_object,
 )
@@ -25,6 +26,7 @@ DEFAULTS = {
     "g1_29dof_wbt_w_object_command_curriculum": g1_29dof_wbt_reward_w_object_command_curriculum,
     "g1_29dof_wbt_w_object_generalist": g1_29dof_wbt_reward_w_object_generalist,
     "g1_29dof_wbt_w_object_distill_sparse_goal_mixed": g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed,
+    "g1_29dof_wbt_w_object_distill_sparse_goal_mixed_pickup": g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_pickup,
     "g1_29dof_wbt_w_object_extend": g1_29dof_wbt_reward_w_object_extend,
     "g1_29dof_wbt_fast_sac": g1_29dof_wbt_fast_sac_reward,
 }
