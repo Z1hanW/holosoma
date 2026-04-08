@@ -20,6 +20,7 @@ DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"https://wandb.ai/zihan
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 POSITIONAL_RUN_NAME=""
 DATA_MODE=${DATA_MODE:-mix-naive}
+SCHEDULE_VARIANT=${SCHEDULE_VARIANT:-default}
 
 PYTHON_BIN=${PYTHON_BIN:-python}
 
@@ -156,7 +157,7 @@ normalize_checkpoint_ref() {
   echo "wandb://${entity}/${project}/${run_id}/${model_file}"
 }
 
-if [[ $# -gt 0 ]]; then
+while [[ $# -gt 0 ]]; do
   first_arg_normalized=$(echo "$1" | tr '[:upper:]' '[:lower:]')
   case "${first_arg_normalized}" in
     pure-sd|pure-ds)
@@ -175,8 +176,19 @@ if [[ $# -gt 0 ]]; then
       DATA_MODE="mix-curriculum"
       shift
       ;;
+    default)
+      SCHEDULE_VARIANT="default"
+      shift
+      ;;
+    dag_first|dag-first|dagger-first)
+      SCHEDULE_VARIANT="dag_first"
+      shift
+      ;;
+    *)
+      break
+      ;;
   esac
-fi
+done
 
 if [[ $# -gt 0 ]]; then
   if [[ "$1" == wandb://* || "$1" == https://wandb.ai/*/runs/* || "$1" == /* || "$1" == ./* || "$1" == ../* || "$1" == *.pt ]]; then
@@ -201,6 +213,14 @@ TEACHER_PERCEPTION_OBS_KEY_EXPLICIT=0
 [[ -n "${TEACHER_PERCEPTION_OBS_KEY+x}" ]] && TEACHER_PERCEPTION_OBS_KEY_EXPLICIT=1
 TEACHER_ACTOR_OBS_HISTORY_LENGTH_EXPLICIT=0
 [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH+x}" ]] && TEACHER_ACTOR_OBS_HISTORY_LENGTH_EXPLICIT=1
+PPO_START_EPOCH_EXPLICIT=0
+[[ -n "${PPO_START_EPOCH+x}" ]] && PPO_START_EPOCH_EXPLICIT=1
+DAGGER_END_EPOCH_EXPLICIT=0
+[[ -n "${DAGGER_END_EPOCH+x}" ]] && DAGGER_END_EPOCH_EXPLICIT=1
+SCHEDULE_NAME_EXPLICIT=0
+[[ -n "${SCHEDULE_NAME+x}" ]] && SCHEDULE_NAME_EXPLICIT=1
+SCHEDULE_NOTES_EXPLICIT=0
+[[ -n "${SCHEDULE_NOTES+x}" ]] && SCHEDULE_NOTES_EXPLICIT=1
 START_AT_TIMESTEP_ZERO_PROB_EXPLICIT=0
 [[ -n "${START_AT_TIMESTEP_ZERO_PROB+x}" ]] && START_AT_TIMESTEP_ZERO_PROB_EXPLICIT=1
 START_AT_TIMESTEP_ZERO_PROB_END_EXPLICIT=0
@@ -291,6 +311,29 @@ fi
 if [[ "${FREEZE_AT_TIMESTEP_ZERO_PROB_EXPLICIT}" -eq 1 && "${FREEZE_AT_TIMESTEP_ZERO_PROB_END_EXPLICIT}" -eq 0 ]]; then
   FREEZE_AT_TIMESTEP_ZERO_PROB_END="${FREEZE_AT_TIMESTEP_ZERO_PROB}"
 fi
+
+case "${SCHEDULE_VARIANT}" in
+  default)
+    ;;
+  dag_first)
+    if [[ "${PPO_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
+      PPO_START_EPOCH=2000
+    fi
+    if [[ "${DAGGER_END_EPOCH_EXPLICIT}" -eq 0 ]]; then
+      DAGGER_END_EPOCH=3000
+    fi
+    if [[ "${SCHEDULE_NAME_EXPLICIT}" -eq 0 ]]; then
+      SCHEDULE_NAME="teacher_anchor_then_goal_curriculum_v2_dag_first"
+    fi
+    if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
+      SCHEDULE_NOTES="0-2000 pure DAgger with PPO disabled. 2000-3000 PPO ramps 0->0.3 while DAgger stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.25 and reset curriculum ramps start_at_zero 0.2->1.0 / freeze_at_zero 0.95->0.0. Goal range ramps with the same delayed schedule."
+    fi
+    ;;
+  *)
+    echo "[ERROR] Unsupported SCHEDULE_VARIANT='${SCHEDULE_VARIANT}'. Use one of: default, dag_first" >&2
+    exit 2
+    ;;
+esac
 
 DATA_MODE=$(echo "${DATA_MODE}" | tr '[:upper:]' '[:lower:]')
 case "${DATA_MODE}" in
@@ -608,6 +651,7 @@ echo "[INFO] run_name=${RUN_NAME} training_name=${TRAINING_NAME}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
 echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} num_envs=${NUM_ENVS}"
 echo "[INFO] data_mode=${DATA_MODE}"
+echo "[INFO] schedule_variant=${SCHEDULE_VARIANT}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
 if [[ -n "${OBJECT_SPEC_PATH}" ]]; then
   echo "[INFO] object_spec_path=${OBJECT_SPEC_PATH}"
