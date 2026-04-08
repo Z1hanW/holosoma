@@ -2337,8 +2337,11 @@ class ViserLiveViewer:
                     obs = obs_mgr.compute_group(group_name)
                 except Exception:
                     continue
-                if isinstance(obs, torch.Tensor) and obs.ndim >= 2 and int(obs.shape[1]) >= 3:
-                    return obs[self._env_id, :3].detach().float().cpu().numpy()
+                if isinstance(obs, torch.Tensor) and obs.ndim >= 2 and int(obs.shape[1]) >= 2:
+                    goal_xy_yaw = np.zeros((3,), dtype=np.float32)
+                    width = min(int(obs.shape[1]), 3)
+                    goal_xy_yaw[:width] = obs[self._env_id, :width].detach().float().cpu().numpy()
+                    return goal_xy_yaw
         return None
 
     def _update_manual_goal_status(self) -> None:
@@ -2367,9 +2370,9 @@ class ViserLiveViewer:
         mode = "manual(goal)" if enabled else "reference(goal)"
         content = (
             f"Mode: `{mode}`\n\n"
-            "Frame: `pickup-time root-heading [dx, dy, dyaw]`\n\n"
+            "Frame: `pickup-time root-heading [dx, dy]`\n\n"
             f"Picked anchor latched: `{picked}`\n\n"
-            f"Target cmd(box): `dx={float(goal_xy_yaw[0]):+.2f}` `dy={float(goal_xy_yaw[1]):+.2f}` `dyaw={float(goal_xy_yaw[2]):+.2f}`"
+            f"Target cmd(box): `dx={float(goal_xy_yaw[0]):+.2f}` `dy={float(goal_xy_yaw[1]):+.2f}`"
         )
         if goal_pose is not None:
             goal_pos_w, goal_quat_wxyz, _goal_size = goal_pose
@@ -3487,8 +3490,8 @@ class ViserLiveViewer:
                             "Enable Manual Goal Override",
                             initial_value=False,
                             hint=(
-                                "Override the drop target with a user command in the same "
-                                "pickup-time root-heading [dx, dy, dyaw] frame used by box-drop distillation."
+                                "Override the drop target in the same pickup-time root-heading frame. "
+                                "The distilled box-drop policy consumes `[dx, dy]`."
                             ),
                         )
                         self._manual_goal_zero_button = self._server.gui.add_button(
@@ -5309,7 +5312,12 @@ class ViserLiveViewer:
 
         anchor_quat_wxyz = anchor_quat_xyzw[[3, 0, 1, 2]]
         anchor_yaw = self._yaw_from_quat_wxyz(anchor_quat_wxyz)
-        dx, dy, dyaw = [float(v) for v in np.asarray(goal_xy_yaw, dtype=np.float32).reshape(3)]
+        goal_xy_yaw = np.asarray(goal_xy_yaw, dtype=np.float32).reshape(-1)
+        if goal_xy_yaw.shape[0] < 2:
+            return None
+        dx = float(goal_xy_yaw[0])
+        dy = float(goal_xy_yaw[1])
+        dyaw = float(goal_xy_yaw[2]) if goal_xy_yaw.shape[0] >= 3 else 0.0
         cos_yaw = float(np.cos(anchor_yaw))
         sin_yaw = float(np.sin(anchor_yaw))
         world_xy = np.asarray(

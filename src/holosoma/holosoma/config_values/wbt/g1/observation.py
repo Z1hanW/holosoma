@@ -143,6 +143,21 @@ motion_future_target_poses_group = ObsGroupCfg(
     },
 )
 
+terrain_transformer_track_terms = {
+    "motion_command": actor_obs_shared.terms["motion_command"],
+    "motion_ref_ori_b": actor_obs_shared.terms["motion_ref_ori_b"],
+}
+
+terrain_transformer_proprio_terms = {
+    "base_ang_vel": actor_obs_shared.terms["base_ang_vel"],
+    "dof_pos": actor_obs_shared.terms["dof_pos"],
+    "dof_vel": actor_obs_shared.terms["dof_vel"],
+}
+
+terrain_transformer_action_terms = {
+    "actions": actor_obs_shared.terms["actions"],
+}
+
 critic_obs_shared_terms = {
     "motion_command": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:motion_command",
@@ -461,37 +476,23 @@ g1_29dof_wbt_observation_motion_tracking_split = ObservationManagerCfg(
 
 g1_29dof_wbt_observation_terrain_transformer = ObservationManagerCfg(
     groups={
+        "actor_obs_track": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=terrain_transformer_track_terms,
+        ),
         "actor_obs_proprio": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
+            history_length=1,
+            terms=terrain_transformer_proprio_terms,
+        ),
+        "actor_obs_actions": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
             history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
-            terms={
-                "base_lin_vel": ObsTermCfg(
-                    func="holosoma.managers.observation.terms.wbt:base_lin_vel",
-                    scale=1.0,
-                    noise=0.0,
-                ),
-                "base_ang_vel": ObsTermCfg(
-                    func="holosoma.managers.observation.terms.wbt:base_ang_vel",
-                    scale=1.0,
-                    noise=0.2,
-                ),
-                "dof_pos": ObsTermCfg(
-                    func="holosoma.managers.observation.terms.wbt:dof_pos",
-                    scale=1.0,
-                    noise=0.01,
-                ),
-                "dof_vel": ObsTermCfg(
-                    func="holosoma.managers.observation.terms.wbt:dof_vel",
-                    scale=1.0,
-                    noise=0.5,
-                ),
-                "actions": ObsTermCfg(
-                    func="holosoma.managers.observation.terms.wbt:actions",
-                    scale=1.0,
-                    noise=0.0,
-                ),
-            },
+            terms=terrain_transformer_action_terms,
         ),
         "critic_obs": ObsGroupCfg(
             concatenate=True,
@@ -499,7 +500,6 @@ g1_29dof_wbt_observation_terrain_transformer = ObservationManagerCfg(
             history_length=1,
             terms=critic_obs_shared_terms,
         ),
-        "motion_future_target_poses": motion_future_target_poses_group,
     },
 )
 
@@ -616,9 +616,8 @@ object_distill_drop_mixed_terms = {
 }
 
 object_distill_drop_command_terms = {
-    "obj_sparse_goal_xy_yaw_command": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:obj_sparse_goal_xy_yaw_command",
-        params={"zero_yaw": True},
+    "obj_sparse_goal_xy_command": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:obj_sparse_goal_xy_command",
         scale=1.0,
         noise=0.0,
     ),
@@ -643,9 +642,8 @@ object_command_curriculum_track_terms = {
 }
 
 object_command_curriculum_goal_terms = {
-    "obj_sparse_goal_xy_yaw_command": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:command_curriculum_obj_sparse_goal_xy_yaw_command",
-        params={"zero_yaw": True},
+    "obj_sparse_goal_xy_command": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:command_curriculum_obj_sparse_goal_xy_command",
         scale=1.0,
         noise=0.0,
     ),
@@ -709,7 +707,7 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
             history_length=1,
             terms=object_distill_drop_mixed_terms,
         ),
-        # Student drop target as a fixed pickup-frame command [dx, dy, dyaw].
+        # Student drop target as a fixed pickup-frame command [dx, dy].
         # The env can still materialize a world goal internally after pickup.
         "actor_obs_drop_command": ObsGroupCfg(
             concatenate=True,

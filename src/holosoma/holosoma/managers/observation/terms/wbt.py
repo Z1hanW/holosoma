@@ -389,6 +389,13 @@ def _manual_goal_command_xy_yaw(motion_command: MotionCommand) -> torch.Tensor:
     return goal_xy_yaw
 
 
+def _manual_goal_command_xy(motion_command: MotionCommand) -> torch.Tensor:
+    goal_xy = torch.zeros((motion_command.num_envs, 2), device=motion_command.device, dtype=torch.float32)
+    if motion_command.manual_goal_xy_rel is not None:
+        goal_xy[:, :2] = motion_command.manual_goal_xy_rel
+    return goal_xy
+
+
 def _episode_obs_mask(motion_command: MotionCommand, *, command_only: bool) -> torch.Tensor:
     mask = motion_command.get_command_only_env_mask()
     if not command_only:
@@ -835,6 +842,12 @@ def obj_sparse_goal_xy_yaw_command(
     return obs
 
 
+def obj_sparse_goal_xy_command(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Sparse/manual object goal [dx, dy] as a fixed pickup-frame command."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    return _manual_goal_command_xy(motion_command)
+
+
 def obj_picked_flag(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Binary pickup-phase flag for mixed sparse-goal distillation."""
     motion_command = _get_motion_command_and_assert_type(env)
@@ -960,6 +973,12 @@ def command_curriculum_obj_sparse_goal_xy_yaw_command(
 ) -> torch.Tensor:
     motion_command_state = _get_motion_command_and_assert_type(env)
     obs = obj_sparse_goal_xy_yaw_command(env, zero_yaw=zero_yaw)
+    return _mask_obs_by_episode(obs, _episode_obs_mask(motion_command_state, command_only=True))
+
+
+def command_curriculum_obj_sparse_goal_xy_command(env: WholeBodyTrackingManager) -> torch.Tensor:
+    motion_command_state = _get_motion_command_and_assert_type(env)
+    obs = obj_sparse_goal_xy_command(env)
     return _mask_obs_by_episode(obs, _episode_obs_mask(motion_command_state, command_only=True))
 
 

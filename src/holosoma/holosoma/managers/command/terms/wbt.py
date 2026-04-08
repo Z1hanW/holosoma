@@ -1238,14 +1238,12 @@ class AdaptiveTimestepsSampler:
         device: str,
         env_fps: int,
         clip_lengths: torch.Tensor | None = None,
-        bin_size_s: float = 1.0,
-        kernel_size: int = 3,
-        decay_lambda: float = 0.001,
-        kernel_lambda: float = 0.8,
+        adaptive_kernel_size: int = 1,
+        adaptive_lambda: float = 0.8,
+        adaptive_uniform_ratio: float = 0.1,
+        adaptive_alpha: float = 0.001,
     ):
-        # TODO: think better about the decay_lambda, will 0.001 be too small?
         self.device = device
-        # fps of the rl environment
         self.env_fps = env_fps
 
         if clip_lengths is not None:
@@ -1260,28 +1258,19 @@ class AdaptiveTimestepsSampler:
             self.clip_lengths = torch.tensor([total_steps], dtype=torch.long, device=self.device)
 
         self.num_clips = int(self.clip_lengths.numel())
-        # Keep the longest clip length for backwards-compatible stats/debugging.
         self.motion_time_step_total = int(self.clip_lengths.max().item())
+        self.adaptive_kernel_size = adaptive_kernel_size
+        self.adaptive_lambda = adaptive_lambda
+        self.adaptive_uniform_ratio = adaptive_uniform_ratio
+        self.adaptive_alpha = adaptive_alpha
 
-        # size of the bin in seconds
-        self.bin_size_s = bin_size_s
-        # size of the kernel for smoothing the sampling probabilities
-        self.kernel_size = kernel_size
-        self.kernel_lambda = kernel_lambda
-        # exponential decay when updating the failure counts over training steps.
-
-        self.decay_lambda = decay_lambda
-
-        clip_duration_s = self.clip_lengths.to(dtype=torch.float32) / float(self.env_fps)
-        self.num_bins_per_clip = torch.clamp(torch.ceil(clip_duration_s / self.bin_size_s).long(), min=1)
+        self.num_bins_per_clip = torch.clamp(self.clip_lengths // max(self.env_fps, 1) + 1, min=1)
         self.max_num_bins = int(self.num_bins_per_clip.max().item())
-        # Maintain the old attribute for single-clip callers and debug metrics.
         self.num_bins = self.max_num_bins
 
-        # initialize exponential 1d decay kernel, used for smoothing the failure counts over time.
-        assert self.kernel_size % 2 == 1, "Kernel size must be odd"
+        # BeyondMimic-style non-causal decay kernel.
         self.kernel = torch.tensor(
-            [self.kernel_lambda ** abs(i) for i in range((-self.kernel_size + 1) // 2, (self.kernel_size + 1) // 2)],
+            [self.adaptive_lambda**i for i in range(self.adaptive_kernel_size)],
             device=self.device,
         )
         self.kernel = self.kernel / self.kernel.sum()
@@ -1310,14 +1299,15 @@ class AdaptiveTimestepsSampler:
 
     def _sampling_probabilities_for_clip(self, clip_id: int) -> torch.Tensor:
         valid_bins = int(self.num_bins_per_clip[clip_id].item())
-        sampling_probabilities = self.bin_failed_count[clip_id, :valid_bins] + 1e-6
+        sampling_probabilities = self.bin_failed_count[clip_id, :valid_bins] + (
+            self.adaptive_uniform_ratio / float(valid_bins)
+        )
         sampling_probabilities = F.pad(
             sampling_probabilities.unsqueeze(0).unsqueeze(0),
-            (0, self.kernel_size - 1),  # Non-causal kernel
+            (0, self.adaptive_kernel_size - 1),
             mode="replicate",
         )
         sampling_probabilities = F.conv1d(sampling_probabilities, self.kernel.view(1, 1, -1)).view(-1)
-        sampling_probabilities += 0.01
         return sampling_probabilities / sampling_probabilities.sum()
 
     def update_current_bin_failed_count(self, failed_at_time_step: torch.Tensor, clip_ids: torch.Tensor | None = None):
@@ -1339,8 +1329,8 @@ class AdaptiveTimestepsSampler:
 
     def update_bin_failed_count(self):
         """At every rl environment step, update the failed count with the current bin failed count."""
-        self.bin_failed_count = (self.decay_lambda * self.current_bin_failed_count) + (
-            1 - self.decay_lambda
+        self.bin_failed_count = (self.adaptive_alpha * self.current_bin_failed_count) + (
+            1 - self.adaptive_alpha
         ) * self.bin_failed_count
         self.current_bin_failed_count.zero_()
 
@@ -2217,6 +2207,14 @@ class MotionCommand(CommandTermBase):
 
         # 0. Sample the time steps
         if self.use_adaptive_timesteps_sampler:
+            episode_failed = self._env.termination_manager.terminated[env_ids]
+            if torch.any(episode_failed):
+                failed_at_time_step = self.time_steps[env_ids][episode_failed]
+                failed_clip_ids = self.clip_ids[env_ids][episode_failed]
+                self.adaptive_timesteps_sampler.update_current_bin_failed_count(
+                    failed_at_time_step,
+                    clip_ids=failed_clip_ids,
+                )
             phase = self.adaptive_timesteps_sampler.sample(self.clip_ids[env_ids])
         else:
             phase = torch.rand(env_ids.numel(), device=self.device)
@@ -2427,8 +2425,16 @@ class MotionCommand(CommandTermBase):
                 advance_mask = advance_mask & ~freeze_mask
 
         self.time_steps += advance_mask.long()
-        max_steps = self._current_clip_lengths() - 1
-        self.time_steps = torch.minimum(self.time_steps, max_steps)
+
+        # Match BeyondMimic-style clip rollover: once a clip ends, reset only the
+        # motion/object state for those envs instead of terminating the episode.
+        ended_env_ids = torch.where(self.time_steps >= self._current_clip_lengths())[0]
+        if ended_env_ids.numel() > 0:
+            self.reset(ended_env_ids)
+            sim = self._env.simulator
+            sim.set_actor_root_state_tensor_robots(ended_env_ids, sim.robot_root_states)
+            sim.set_dof_state_tensor_robots(ended_env_ids, sim.dof_state)
+            sim.refresh_sim_tensors()
 
         # 1. update body_pos_relative_w and body_quat_relative_w
         # definition of body_pos/quat_relative_w:

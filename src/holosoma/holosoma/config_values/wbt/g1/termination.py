@@ -8,11 +8,8 @@ g1_29dof_wbt_termination = TerminationManagerCfg(
             func="holosoma.managers.termination.terms.common:timeout_exceeded",
             is_timeout=True,
         ),
-        "motion_ends": TerminationTermCfg(
-            func="holosoma.managers.termination.terms.wbt:motion_ends",
-        ),
         "bad_tracking": TerminationTermCfg(
-            func="holosoma.managers.termination.terms.wbt:BadTracking",
+            func="holosoma.managers.termination.terms.wbt:BadTrackingZOnly",
             params={
                 # robot tracking
                 "bad_ref_pos_threshold": 0.5,
@@ -56,11 +53,8 @@ g1_29dof_wbt_termination_distill = TerminationManagerCfg(
             func="holosoma.managers.termination.terms.common:timeout_exceeded",
             is_timeout=True,
         ),
-        "motion_ends": TerminationTermCfg(
-            func="holosoma.managers.termination.terms.wbt:motion_ends",
-        ),
         "bad_tracking": TerminationTermCfg(
-            func="holosoma.managers.termination.terms.wbt:BadTracking",
+            func="holosoma.managers.termination.terms.wbt:BadTrackingZOnly",
             params={
                 # Distillation rollouts benefit from more tolerance before early reset
                 # so the student can recover from teacher/student mismatch.
@@ -154,7 +148,7 @@ g1_29dof_wbt_termination_command_curriculum = TerminationManagerCfg(
             params={"min_height": 0.45},
         ),
         "bad_tracking_clip_goal": TerminationTermCfg(
-            func="holosoma.managers.termination.terms.wbt:BadTracking",
+            func="holosoma.managers.termination.terms.wbt:BadTrackingZOnly",
             params={
                 "only_clip_goal": True,
                 "bad_ref_pos_threshold": 1.0,

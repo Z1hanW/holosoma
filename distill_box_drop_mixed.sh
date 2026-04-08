@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Student policy observation (actor):
 # - actor_obs_proprio: proprio history
-# - actor_obs_drop_command: fixed pickup-frame command [goal_dx, goal_dy, goal_dyaw]
+# - actor_obs_drop_command: fixed pickup-frame command [goal_dx, goal_dy]
 # - perception_obs: camera depth
 #
 # Single-run curriculum:

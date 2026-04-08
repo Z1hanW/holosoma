@@ -249,14 +249,6 @@ class BadTracking(TerminationTermBase):
         if self.only_clip_goal:
             bad_tracking &= ~motion_command.get_sparse_goal_external_mask()
 
-        if motion_command.use_adaptive_timesteps_sampler and torch.any(bad_tracking):
-            failed_at_time_step = motion_command.time_steps[bad_tracking]
-            failed_clip_ids = motion_command.clip_ids[bad_tracking]
-            motion_command.adaptive_timesteps_sampler.update_current_bin_failed_count(
-                failed_at_time_step,
-                clip_ids=failed_clip_ids,
-            )
-
         return bad_tracking
 
     def bad_ref_pos(self, motion_command: MotionCommand) -> torch.Tensor:
@@ -309,3 +301,18 @@ class BadTracking(TerminationTermBase):
             assert name in b_names, f"The specified name ({name}) doesn't exist: {b_names}"
             indexes.append(b_names.index(name))
         return torch.tensor(indexes, dtype=torch.long, device=device)
+
+
+class BadTrackingZOnly(BadTracking):
+    """BadTracking variant using z-axis-only position checks."""
+
+    def bad_ref_pos(self, motion_command: MotionCommand) -> torch.Tensor:
+        z_err = torch.abs(motion_command.ref_pos_w[:, -1] - motion_command.robot_ref_pos_w[:, -1])
+        return z_err > self.bad_ref_pos_threshold
+
+    def bad_motion_body_pos(self, motion_command: MotionCommand) -> torch.Tensor:
+        body_idx = self.bad_motion_body_pos_body_indexes
+        error = torch.abs(
+            motion_command.body_pos_relative_w[:, body_idx, -1] - motion_command.robot_body_pos_w[:, body_idx, -1]
+        )
+        return torch.any(error > self.bad_motion_body_pos_threshold, dim=-1)

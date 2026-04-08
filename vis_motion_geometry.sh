@@ -23,12 +23,15 @@ fi
 CLI_DATASET_KNOB=${1:-""}
 CLI_VIS_MODE=${2:-""}
 DATASET_KNOB=${CLI_DATASET_KNOB:-${DATASET_KNOB:-"behave"}}
+REPO_CRISP_DATA_ROOT="${SCRIPT_DIR}/data/ds_crisp_data"
+DEFAULT_CRISP_MOTION_DIR="${REPO_CRISP_DATA_ROOT}/___crisp_clean_motion"
+DEFAULT_CRISP_GEOMETRY_DIR="${REPO_CRISP_DATA_ROOT}/___crisp_clean_geometry"
 
 case "${DATASET_KNOB}" in
   crisp)
-    DEFAULT_MOTION_DIR="/data/terrain/___crisp_clean_motion"
-    DEFAULT_GEOMETRY_DIR="/data/terrain/___crisp_clean_geometry"
-    DEFAULT_OBJECT_URDF_DIR="${SCRIPT_DIR}/crisp/vmm_data/___crisp_object_urdf"
+    DEFAULT_MOTION_DIR="${DEFAULT_CRISP_MOTION_DIR}"
+    DEFAULT_GEOMETRY_DIR="${DEFAULT_CRISP_GEOMETRY_DIR}"
+    DEFAULT_OBJECT_URDF_DIR=""
     DEFAULT_OBJECT_URDF=""
     DEFAULT_OBJECT_URDF_MODE="stem"
     DEFAULT_OBJECT_FILTER=""
@@ -66,6 +69,14 @@ OBJECT_URDF_DIR="${OBJECT_URDF_DIR:-"${DEFAULT_OBJECT_URDF_DIR}"}"
 OBJECT_URDF="${OBJECT_URDF:-"${DEFAULT_OBJECT_URDF}"}"
 OBJECT_URDF_MODE="${OBJECT_URDF_MODE:-"${DEFAULT_OBJECT_URDF_MODE}"}"
 OBJECT_FILTER="${OBJECT_FILTER:-"${DEFAULT_OBJECT_FILTER}"}"
+PAIR_TERRAIN_WITH_MOTION="${PAIR_TERRAIN_WITH_MOTION:-}"
+if [[ -z "${PAIR_TERRAIN_WITH_MOTION}" ]]; then
+  if [[ -n "${GEOMETRY_DIR}" ]]; then
+    PAIR_TERRAIN_WITH_MOTION="True"
+  else
+    PAIR_TERRAIN_WITH_MOTION="False"
+  fi
+fi
 
 VIS_MODE=${CLI_VIS_MODE:-${VIS_MODE:-"kinematic"}}
 EXP=${EXP:-"${DEFAULT_EXP}"}
@@ -251,6 +262,7 @@ cmd=(
   --training.viser-recenter="${VISER_RECENTER}"
   --training.viser-show-scandots="${VISER_SHOW_SCANDOTS}"
   --command.setup-terms.motion-command.params.motion-config.motion-file "${MOTION_DIR}"
+  --command.setup-terms.motion-command.params.motion-config.pair-terrain-with-motion "${PAIR_TERRAIN_WITH_MOTION}"
   --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob "${START_AT_TIMESTEP_ZERO_PROB}"
   --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob "${FREEZE_AT_TIMESTEP_ZERO_PROB}"
   --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.overall-noise-scale "${RESET_NOISE_SCALE}"
@@ -290,6 +302,7 @@ echo "[INFO] Viewer backend: replay"
 echo "[INFO] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<default>}"
 echo "[INFO] DATASET_KNOB=${DATASET_KNOB}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
+echo "[INFO] pair_terrain_with_motion=${PAIR_TERRAIN_WITH_MOTION}"
 echo "[INFO] start_clip=${START_CLIP:-<auto>}"
 echo "[INFO] object_spec=${OBJECT_SPEC:-<none>}"
 echo "[INFO] disable_randomization=${DISABLE_RANDOMIZATION}"
