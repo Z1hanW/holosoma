@@ -169,6 +169,15 @@ class DistillationConfig:
     teacher_action_mix_ratio: float = 0.0
     """Per-step env mix ratio for teacher actions in DAgger rollout (0.0=student only, 1.0=teacher only)."""
 
+    teacher_action_mix_ratio_start: float | None = None
+    """Optional initial teacher-action rollout mix ratio for linear scheduling."""
+
+    teacher_action_mix_ratio_end: float | None = None
+    """Optional final teacher-action rollout mix ratio for linear scheduling."""
+
+    teacher_action_mix_ratio_end_iteration: int = -1
+    """Iteration where teacher-action rollout mix reaches ``teacher_action_mix_ratio_end``."""
+
     schedule_name: str | None = None
     """Optional human-readable name for the active distillation schedule."""
 

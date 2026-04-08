@@ -171,6 +171,10 @@ class PPO(BaseAlgo):
         self.clip_actions_threshold = 0.0
         self.take_teacher_actions = False
         self.teacher_action_mix_ratio = 0.0
+        self.teacher_action_mix_ratio_start: float | None = None
+        self.teacher_action_mix_ratio_end: float | None = None
+        self.teacher_action_mix_ratio_end_iteration = -1
+        self.use_teacher_action_mix_schedule = False
         self.switch_to_rl_after = -1
         self.use_multi_teacher = False
         self.multi_teacher_select_obs_var = "teacher_checkpoint_index"
@@ -499,6 +503,33 @@ class PPO(BaseAlgo):
             raise ValueError(
                 f"distill.teacher_action_mix_ratio must be in [0.0, 1.0], got {self.teacher_action_mix_ratio}."
             )
+        teacher_action_mix_ratio_start = getattr(distill_cfg, "teacher_action_mix_ratio_start", None)
+        teacher_action_mix_ratio_end = getattr(distill_cfg, "teacher_action_mix_ratio_end", None)
+        self.teacher_action_mix_ratio_end_iteration = int(
+            getattr(distill_cfg, "teacher_action_mix_ratio_end_iteration", -1)
+        )
+        if (teacher_action_mix_ratio_start is None) != (teacher_action_mix_ratio_end is None):
+            raise ValueError(
+                "distill.teacher_action_mix_ratio_start and distill.teacher_action_mix_ratio_end must be set together."
+            )
+        if teacher_action_mix_ratio_start is not None and teacher_action_mix_ratio_end is not None:
+            self.teacher_action_mix_ratio_start = float(teacher_action_mix_ratio_start)
+            self.teacher_action_mix_ratio_end = float(teacher_action_mix_ratio_end)
+            if not (0.0 <= self.teacher_action_mix_ratio_start <= 1.0):
+                raise ValueError(
+                    "distill.teacher_action_mix_ratio_start must be in [0.0, 1.0], "
+                    f"got {self.teacher_action_mix_ratio_start}."
+                )
+            if not (0.0 <= self.teacher_action_mix_ratio_end <= 1.0):
+                raise ValueError(
+                    f"distill.teacher_action_mix_ratio_end must be in [0.0, 1.0], got {self.teacher_action_mix_ratio_end}."
+                )
+            if self.teacher_action_mix_ratio_end_iteration < 0:
+                raise ValueError(
+                    "distill.teacher_action_mix_ratio_end_iteration must be >= 0 when teacher-action mix scheduling is enabled."
+                )
+            self.use_teacher_action_mix_schedule = True
+            self.teacher_action_mix_ratio = self.teacher_action_mix_ratio_start
         self.switch_to_rl_after = int(distill_cfg.switch_to_rl_after)
         self.use_multi_teacher = bool(distill_cfg.use_multi_teacher)
         self.multi_teacher_select_obs_var = str(distill_cfg.multi_teacher_select_obs_var)
@@ -720,6 +751,7 @@ class PPO(BaseAlgo):
             run_end_iteration,
         ):
             self.current_learning_iteration = it
+            self._adjust_teacher_action_mix_ratio(it)
             self._sync_training_curriculum_state(
                 current_iteration=it,
                 total_iterations=run_end_iteration,
@@ -825,6 +857,20 @@ class PPO(BaseAlgo):
         total_epochs = max(1, self.dagger_end_epoch - self.ppo_start_epoch)
         ppo_epochs = max(0, current_epoch - self.ppo_start_epoch)
         self.ppo_coeff = min(float(ppo_epochs) / float(total_epochs), 1.0) * self.ppo_target_coeff
+
+    def _adjust_teacher_action_mix_ratio(self, current_iteration: int) -> None:
+        if not self.use_teacher_action_mix_schedule:
+            return
+        assert self.teacher_action_mix_ratio_start is not None
+        assert self.teacher_action_mix_ratio_end is not None
+        if self.teacher_action_mix_ratio_end_iteration <= 0:
+            self.teacher_action_mix_ratio = self.teacher_action_mix_ratio_end
+            return
+        alpha = min(max(float(current_iteration), 0.0) / float(self.teacher_action_mix_ratio_end_iteration), 1.0)
+        self.teacher_action_mix_ratio = (
+            self.teacher_action_mix_ratio_start
+            + (self.teacher_action_mix_ratio_end - self.teacher_action_mix_ratio_start) * alpha
+        )
 
     def _sync_training_curriculum_state(self, *, current_iteration: int, total_iterations: int) -> None:
         command_manager = getattr(self.env, "command_manager", None)
@@ -1717,6 +1763,13 @@ class PPO(BaseAlgo):
             train_logs["ppo_dagger_target_coeff"] = float(self.ppo_target_coeff)
             train_logs["ppo_dagger_coeff"] = float(self.ppo_coeff)
             train_logs["ppo_dagger_bc_weight"] = float(self.dagger_loss_coef * max(0.0, 1.0 - float(self.ppo_coeff)))
+        if self.dagger_enabled:
+            train_logs = extra_log_dicts.setdefault("Train", {})
+            train_logs["teacher_action_mix_ratio"] = float(self.teacher_action_mix_ratio)
+            if self.use_teacher_action_mix_schedule:
+                train_logs["teacher_action_mix_ratio_start"] = float(self.teacher_action_mix_ratio_start)
+                train_logs["teacher_action_mix_ratio_end"] = float(self.teacher_action_mix_ratio_end)
+                train_logs["teacher_action_mix_ratio_end_iteration"] = float(self.teacher_action_mix_ratio_end_iteration)
         loss_dict["actor_learning_rate"] = self.actor_learning_rate
         loss_dict["critic_learning_rate"] = self.critic_learning_rate
         # Use logging helper

@@ -59,6 +59,10 @@ WANDB_PROJECT_FROM_ENV=0
 if [[ -n "${WANDB_PROJECT+x}" ]]; then
   WANDB_PROJECT_FROM_ENV=1
 fi
+WANDB_RESUME_SAME_RUN_FROM_ENV=0
+if [[ -n "${WANDB_RESUME_SAME_RUN+x}" ]]; then
+  WANDB_RESUME_SAME_RUN_FROM_ENV=1
+fi
 EXP=${EXP:-g1-29dof-wbt-w-object-generalist}
 WANDB_PROJECT=${WANDB_PROJECT:-boxer}
 WANDB_ENTITY=${WANDB_ENTITY:-""}
@@ -73,6 +77,9 @@ DEFAULT_DS_RAW_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj"
 DEFAULT_DS_GEOMETRY_DIR="${DS_DATA_ROOT}/train_g1_w_obj_geometry"
 DEFAULT_DS_PREPARED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
 DEFAULT_MIX_NAIVE_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
+DEFAULT_MIX_NAIVE_EXPECTED_TOTAL=155
+DEFAULT_MIX_NAIVE_EXPECTED_DS=93
+DEFAULT_MIX_NAIVE_EXPECTED_OMOMO=62
 DEFAULT_MOTION_DIR="${DEFAULT_DS_PREPARED_MOTION_DIR}"
 MOTION_DIR_FROM_ENV=0
 if [[ -n "${MOTION_DIR+x}" ]]; then
@@ -117,7 +124,14 @@ DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0.2}
 MIX_CURRICULUM_OMOMO_PREFIXES=${MIX_CURRICULUM_OMOMO_PREFIXES:-'["sub"]'}
 MIX_CURRICULUM_STAGE_START_ITERATIONS=${MIX_CURRICULUM_STAGE_START_ITERATIONS:-'[0, 1500, 2000, 2500, 3000, 3500]'}
 MIX_CURRICULUM_OMOMO_PROBABILITIES=${MIX_CURRICULUM_OMOMO_PROBABILITIES:-'[1.0, 0.9, 0.8, 0.7, 0.6, 0.5]'}
+MIX_NAIVE_FIXED_OMOMO_PREFIXES=${MIX_NAIVE_FIXED_OMOMO_PREFIXES:-'["sub"]'}
+MIX_NAIVE_FIXED_STAGE_START_ITERATIONS=${MIX_NAIVE_FIXED_STAGE_START_ITERATIONS:-'[0]'}
+MIX_NAIVE_FIXED_OMOMO_PROBABILITIES=${MIX_NAIVE_FIXED_OMOMO_PROBABILITIES:-""}
 PURE_REAL_OMOMO_PREFIXES=${PURE_REAL_OMOMO_PREFIXES:-'["sub"]'}
+RESUME_PRESET_MODE=""
+RESUME_PRESET_RUN_URL="https://wandb.ai/zihanw22/boxer/runs/uflkljdh"
+RESUME_PRESET_STEP=10000
+RESUME_PRESET_MIX_NAIVE_OMOMO_PROBABILITIES='[0.3]'
 
 VISER_PORT=${VISER_PORT:-$((RANDOM % 8976 + 1024))}
 VISER_ENV_ID=${VISER_ENV_ID:-0}
@@ -440,6 +454,9 @@ normalize_resume_checkpoint_ref() {
     model_file="$(resolve_remote_wandb_checkpoint_name "${entity}" "${project}" "${run_id}" "${RESUME_STEP}")"
     if [[ -n "${model_file}" ]]; then
       echo "[INFO] Resolved wandb reference to step ${RESUME_STEP} checkpoint: ${model_file}" >&2
+    else
+      echo "[ERROR] Could not find checkpoint step ${RESUME_STEP} for W&B reference: ${ref}" >&2
+      exit 1
     fi
   fi
 
@@ -551,9 +568,9 @@ PY
 
 validate_mix_naive_bank() {
   local motion_dir="$1"
-  local expected_total="${2:-105}"
-  local expected_ds="${3:-43}"
-  local expected_omomo="${4:-62}"
+  local expected_total="${2:-${DEFAULT_MIX_NAIVE_EXPECTED_TOTAL}}"
+  local expected_ds="${3:-${DEFAULT_MIX_NAIVE_EXPECTED_DS}}"
+  local expected_omomo="${4:-${DEFAULT_MIX_NAIVE_EXPECTED_OMOMO}}"
   "${PYTHON_BIN}" - "${motion_dir}" "${expected_total}" "${expected_ds}" "${expected_omomo}" <<'PY'
 import json
 import sys
@@ -810,6 +827,11 @@ if [[ "$#" -gt 0 ]]; then
       DATA_MODE="mix-curriculum"
       shift
       ;;
+    resume|resume-mix-naive|mix-naive-resume)
+      RESUME_PRESET_MODE="mix-naive"
+      DATA_MODE="mix-naive"
+      shift
+      ;;
   esac
 fi
 DATA_MODE=$(echo "${DATA_MODE}" | tr '[:upper:]' '[:lower:]')
@@ -841,6 +863,10 @@ if [[ "${DATA_MODE}" == "mix-naive" && -n "${MIX_NAIVE_CLEAN_NOISY_CURRICULUM+x}
       exit 2
       ;;
   esac
+fi
+if [[ "${DATA_MODE}" != "mix-naive" && -n "${MIX_NAIVE_FIXED_OMOMO_PROBABILITIES}" ]]; then
+  echo "[ERROR] MIX_NAIVE_FIXED_OMOMO_PROBABILITIES only applies to DATA_MODE=mix-naive." >&2
+  exit 2
 fi
 if [[ "${DATA_MODE}" == "pure-sd" ]]; then
   resolve_reward_profile_defaults "${PURE_SD_REWARD_PROFILE}" "${PURE_SD_REWARD_PROFILE_RAW}"
@@ -884,6 +910,22 @@ if [[ "$#" -gt 0 ]]; then
   fi
 fi
 EXTRA_ARGS=("$@")
+
+if [[ "${RESUME_PRESET_MODE}" == "mix-naive" ]]; then
+  if [[ -z "${RESUME_CKPT}" ]]; then
+    RESUME_CKPT="${RESUME_PRESET_RUN_URL}"
+    echo "[INFO] Applying resume preset checkpoint source: ${RESUME_PRESET_RUN_URL} (step ${RESUME_PRESET_STEP})"
+  fi
+  if [[ -z "${RESUME_STEP}" ]]; then
+    RESUME_STEP="${RESUME_PRESET_STEP}"
+  fi
+  if [[ -z "${MIX_NAIVE_FIXED_OMOMO_PROBABILITIES}" ]]; then
+    MIX_NAIVE_FIXED_OMOMO_PROBABILITIES="${RESUME_PRESET_MIX_NAIVE_OMOMO_PROBABILITIES}"
+  fi
+  if [[ "${WANDB_RESUME_SAME_RUN_FROM_ENV}" != "1" ]]; then
+    WANDB_RESUME_SAME_RUN=0
+  fi
+fi
 
 RESUME_WANDB_ENTITY=""
 RESUME_WANDB_PROJECT=""
@@ -963,6 +1005,11 @@ if [[ "${DATA_MODE}" == "mix-curriculum" ]]; then
   echo "[INFO] OMOMO clip prefixes=${MIX_CURRICULUM_OMOMO_PREFIXES}"
   echo "[INFO] Curriculum stage_start_iterations=${MIX_CURRICULUM_STAGE_START_ITERATIONS}"
   echo "[INFO] Curriculum omomo_probabilities=${MIX_CURRICULUM_OMOMO_PROBABILITIES}"
+elif [[ "${DATA_MODE}" == "mix-naive" && -n "${MIX_NAIVE_FIXED_OMOMO_PROBABILITIES}" ]]; then
+  echo "[INFO] DATA_MODE=mix-naive with fixed DS/OMOMO clip weighting on the mixed bank."
+  echo "[INFO] OMOMO clip prefixes=${MIX_NAIVE_FIXED_OMOMO_PREFIXES}"
+  echo "[INFO] Fixed stage_start_iterations=${MIX_NAIVE_FIXED_STAGE_START_ITERATIONS}"
+  echo "[INFO] Fixed omomo_probabilities=${MIX_NAIVE_FIXED_OMOMO_PROBABILITIES} (DS probability = 1 - OMOMO)"
 elif [[ "${DATA_MODE}" == "pure-real" ]]; then
   echo "[INFO] DATA_MODE=pure-real uses the mixed bank but samples only OMOMO clips."
   echo "[INFO] OMOMO clip prefixes=${PURE_REAL_OMOMO_PREFIXES}"
@@ -1036,7 +1083,7 @@ if [[ "${STRICT_DEFAULT_DS_BANK_VALIDATION}" != "0" ]]; then
       ;;
     pure-real|mix-naive|mix-curriculum)
       if [[ "$(realpath "${MOTION_DIR}")" == "$(realpath "${DEFAULT_MIX_NAIVE_MOTION_DIR}")" ]]; then
-        validate_mix_naive_bank "${MOTION_DIR}" 105 43 62
+        validate_mix_naive_bank "${MOTION_DIR}" "${DEFAULT_MIX_NAIVE_EXPECTED_TOTAL}" "${DEFAULT_MIX_NAIVE_EXPECTED_DS}" "${DEFAULT_MIX_NAIVE_EXPECTED_OMOMO}"
       fi
       ;;
   esac
@@ -1262,6 +1309,13 @@ if [[ "${DATA_MODE}" == "mix-curriculum" ]]; then
     --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.clean-clip-name-prefixes="${MIX_CURRICULUM_OMOMO_PREFIXES}"
     --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.stage-start-iterations="${MIX_CURRICULUM_STAGE_START_ITERATIONS}"
     --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.clean-group-probabilities="${MIX_CURRICULUM_OMOMO_PROBABILITIES}"
+  )
+elif [[ "${DATA_MODE}" == "mix-naive" && -n "${MIX_NAIVE_FIXED_OMOMO_PROBABILITIES}" ]]; then
+  train_cmd+=(
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.enabled=True
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.clean-clip-name-prefixes="${MIX_NAIVE_FIXED_OMOMO_PREFIXES}"
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.stage-start-iterations="${MIX_NAIVE_FIXED_STAGE_START_ITERATIONS}"
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.clean-group-probabilities="${MIX_NAIVE_FIXED_OMOMO_PROBABILITIES}"
   )
 elif [[ "${DATA_MODE}" == "pure-real" ]]; then
   train_cmd+=(

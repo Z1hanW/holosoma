@@ -172,6 +172,9 @@ TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
 STRICT_TEACHER_LOAD=${STRICT_TEACHER_LOAD:-True}
 PERCEPTION_INTO_POLICY_MODULES=${PERCEPTION_INTO_POLICY_MODULES:-True}
 TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
+TEACHER_ACTION_MIX_RATIO_START=${TEACHER_ACTION_MIX_RATIO_START:-}
+TEACHER_ACTION_MIX_RATIO_END=${TEACHER_ACTION_MIX_RATIO_END:-}
+TEACHER_ACTION_MIX_RATIO_END_ITERATION=${TEACHER_ACTION_MIX_RATIO_END_ITERATION:-}
 PPO_START_EPOCH=${PPO_START_EPOCH:-0}
 DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-10000}
 DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-10.0}
@@ -209,6 +212,9 @@ EXTRA_ARGS=("$@")
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
 echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS} strict_teacher_load=${STRICT_TEACHER_LOAD}"
 echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} dagger_loss_coef=${DAGGER_LOSS_COEF} teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
+if [[ -n "${TEACHER_ACTION_MIX_RATIO_START}" || -n "${TEACHER_ACTION_MIX_RATIO_END}" || -n "${TEACHER_ACTION_MIX_RATIO_END_ITERATION}" ]]; then
+  echo "[INFO] teacher_action_mix_schedule=${TEACHER_ACTION_MIX_RATIO_START}->${TEACHER_ACTION_MIX_RATIO_END} end_iter=${TEACHER_ACTION_MIX_RATIO_END_ITERATION}"
+fi
 echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
 echo "[INFO] total_envs=${NUM_ENVS} world_size=${NPROC} envs_per_rank=$((NUM_ENVS / NPROC))"
 echo "[INFO] init_noise_std=${INIT_NOISE_STD} actor_min_noise_std=${ACTOR_MIN_NOISE_STD} entropy_coef=${ENTROPY_COEF}"
@@ -283,6 +289,16 @@ run_distill_stage() {
     --robot.object.enabled=True
     --robot.object.object-urdf-path "${OBJECT_URDF}"
   )
+
+  if [[ -n "${TEACHER_ACTION_MIX_RATIO_START}" ]]; then
+    cmd+=(--algo.config.distill.teacher-action-mix-ratio-start="${TEACHER_ACTION_MIX_RATIO_START}")
+  fi
+  if [[ -n "${TEACHER_ACTION_MIX_RATIO_END}" ]]; then
+    cmd+=(--algo.config.distill.teacher-action-mix-ratio-end="${TEACHER_ACTION_MIX_RATIO_END}")
+  fi
+  if [[ -n "${TEACHER_ACTION_MIX_RATIO_END_ITERATION}" ]]; then
+    cmd+=(--algo.config.distill.teacher-action-mix-ratio-end-iteration="${TEACHER_ACTION_MIX_RATIO_END_ITERATION}")
+  fi
 
   if [[ -n "${stage_resume_checkpoint}" ]]; then
     cmd+=(--training.checkpoint "${stage_resume_checkpoint}")
