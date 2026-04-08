@@ -108,6 +108,42 @@ g1_29dof_wbt_termination_distill_sparse_goal_mixed = TerminationManagerCfg(
             func="holosoma.managers.termination.terms.wbt:drop_task_base_height_below_threshold",
             params={"min_height": 0.45},
         ),
+        "bad_tracking_non_external_goal": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:BadTrackingZOnly",
+            params={
+                # Keep bad-tracking resets on all non-external episodes so the
+                # student continues to train on the stable motion-tracking
+                # distribution. External-goal episodes remain exempt.
+                "only_clip_goal": True,
+                "bad_ref_pos_threshold": 1.0,
+                "bad_ref_ori_threshold": 1.2,
+                "bad_motion_body_pos_threshold": 0.55,
+                "body_names_to_track": [
+                    "pelvis",
+                    "left_hip_roll_link",
+                    "left_knee_link",
+                    "left_ankle_roll_link",
+                    "right_hip_roll_link",
+                    "right_knee_link",
+                    "right_ankle_roll_link",
+                    "torso_link",
+                    "left_shoulder_roll_link",
+                    "left_elbow_link",
+                    "left_wrist_yaw_link",
+                    "right_shoulder_roll_link",
+                    "right_elbow_link",
+                    "right_wrist_yaw_link",
+                ],
+                "bad_motion_body_pos_body_names": [
+                    "left_ankle_roll_link",
+                    "right_ankle_roll_link",
+                    "left_wrist_yaw_link",
+                    "right_wrist_yaw_link",
+                ],
+                "bad_object_pos_threshold": 0.65,
+                "bad_object_ori_threshold": 1.2,
+            },
+        ),
         "sparse_goal_success": TerminationTermCfg(
             func="holosoma.managers.termination.terms.wbt:SparseGoalSuccess",
             params={

@@ -8,9 +8,11 @@ set -euo pipefail
 # - mixed: sparse-goal mixed drop student (default run: s221l5eo)
 #
 # Usage:
-#   bash infer_box_drop.sh <clip|mixed> [checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
+#   bash infer_box_drop.sh [clip|mixed] [checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
 #
 # Examples:
+#   bash infer_box_drop.sh
+#   bash infer_box_drop.sh https://wandb.ai/zihanw22/boxer/runs/kmux2yeq
 #   bash infer_box_drop.sh clip
 #   bash infer_box_drop.sh mixed
 #   bash infer_box_drop.sh mixed https://wandb.ai/zihanw22/boxer/runs/s221l5eo
@@ -19,11 +21,11 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  bash infer_box_drop.sh <clip|mixed> [checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
+  bash infer_box_drop.sh [clip|mixed] [checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
 
 Modes:
   clip   Evaluate the clip-conditioned drop student (oitf644a by default)
-  mixed  Evaluate the sparse-goal mixed drop student (s221l5eo by default)
+  mixed  Evaluate the sparse-goal mixed drop student (s221l5eo by default; also the default mode if omitted)
 
 Default W&B runs:
   clip   https://wandb.ai/zihanw22/boxer/runs/oitf644a
@@ -72,30 +74,37 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
-if [[ $# -lt 1 ]]; then
-  usage
-  exit 1
+is_checkpoint_arg() {
+  local arg="${1:-}"
+  [[ "${arg}" == wandb://* || "${arg}" == https://wandb.ai/* || "${arg}" == /* || "${arg}" == ./* || "${arg}" == ../* || "${arg}" == *.pt ]]
+}
+
+MODE="mixed"
+MODE_INPUT="<default:mixed>"
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    clip|drop|oitf644a)
+      MODE_INPUT="$1"
+      MODE="clip"
+      shift
+      ;;
+    mixed|sparse_goal|sparse-goal|hw5jbitz|q3t3ntf4|s221l5eo)
+      MODE_INPUT="$1"
+      MODE="mixed"
+      shift
+      ;;
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+    *)
+      if ! is_checkpoint_arg "$1"; then
+        echo "[ERROR] first argument must be mode clip|mixed or a checkpoint/W&B run reference. Got: $1" >&2
+        exit 2
+      fi
+      ;;
+  esac
 fi
-
-MODE_INPUT="$1"
-shift
-
-case "${MODE_INPUT}" in
-  clip|drop|oitf644a)
-    MODE="clip"
-    ;;
-  mixed|sparse_goal|sparse-goal|hw5jbitz|q3t3ntf4|s221l5eo)
-    MODE="mixed"
-    ;;
-  -h|--help|help)
-    usage
-    exit 0
-    ;;
-  *)
-    echo "[ERROR] mode must be one of: clip|mixed. Got: ${MODE_INPUT}" >&2
-    exit 2
-    ;;
-esac
 
 DEFAULT_CLIP_RUN_URL="${DEFAULT_CLIP_RUN_URL:-https://wandb.ai/zihanw22/boxer/runs/oitf644a}"
 DEFAULT_MIXED_RUN_URL="${DEFAULT_MIXED_RUN_URL:-https://wandb.ai/zihanw22/boxer/runs/s221l5eo}"
@@ -152,6 +161,7 @@ resolve_remote_wandb_checkpoint_name() {
   "$PYTHON_BIN" - "${entity}" "${project}" "${run_id}" <<'PY' 2>/dev/null || true
 import re
 import sys
+import time
 from pathlib import Path
 
 repo_root = Path.cwd().resolve()
@@ -173,22 +183,30 @@ except Exception:
     sys.exit(0)
 
 entity, project, run_id = sys.argv[1:4]
-api = wandb.Api(timeout=30)
-run = api.run(f"{entity}/{project}/{run_id}")
 model_pattern = re.compile(r"^model_(\d+)\.pt$")
-latest_step = -1
 latest_name = ""
-for file_obj in run.files():
-    name = getattr(file_obj, "name", "")
-    match = model_pattern.match(name)
-    if not match:
-        continue
-    step = int(match.group(1))
-    if step >= latest_step:
-        latest_step = step
-        latest_name = name
-if latest_name:
-    print(latest_name)
+for attempt in range(3):
+    try:
+        api = wandb.Api(timeout=30)
+        run = api.run(f"{entity}/{project}/{run_id}")
+        latest_step = -1
+        latest_name = ""
+        for file_obj in run.files():
+            name = getattr(file_obj, "name", "")
+            match = model_pattern.match(name)
+            if not match:
+                continue
+            step = int(match.group(1))
+            if step >= latest_step:
+                latest_step = step
+                latest_name = name
+        if latest_name:
+            print(latest_name)
+            break
+    except Exception:
+        if attempt == 2:
+            break
+        time.sleep(1.0)
 PY
 }
 
@@ -452,7 +470,7 @@ PY
 
 CKPT="${CHECKPOINT:-${CKPT:-}}"
 if [[ $# -gt 0 ]]; then
-  if [[ "$1" == wandb://* || "$1" == https://wandb.ai/* || "$1" == /* || "$1" == ./* || "$1" == ../* || "$1" == *.pt ]]; then
+  if is_checkpoint_arg "$1"; then
     CKPT="$1"
     shift
   fi
@@ -611,11 +629,11 @@ DEFAULT_OMOMO_URDF="$(pick_first_existing_path \
 DEFAULT_BEHAVE_MAP_FILE="${DEFAULT_BEHAVE_MOTION_DIR}/_clip_object_urdf_map.json"
 DEFAULT_MIXED_MAP_FILE="${DEFAULT_MIXED_MOTION_DIR}/_clip_object_urdf_map.json"
 
-if [[ "${MOTION_DIR_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_MOTION_PATH}" && "${INFER_DATASET}" != "mixed" ]]; then
+if [[ "${MOTION_DIR_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_MOTION_PATH}" && "${INFER_DATASET_EXPLICIT}" -eq 0 ]]; then
   MOTION_DIR="${CHECKPOINT_SAVED_MOTION_PATH}"
 fi
 
-if [[ "${OBJECT_URDF_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_OBJECT_URDF}" && "${INFER_DATASET}" != "mixed" ]]; then
+if [[ "${OBJECT_URDF_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_OBJECT_URDF}" && "${INFER_DATASET_EXPLICIT}" -eq 0 ]]; then
   OBJECT_URDF="${CHECKPOINT_SAVED_OBJECT_URDF}"
 fi
 

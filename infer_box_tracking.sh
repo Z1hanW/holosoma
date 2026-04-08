@@ -14,7 +14,7 @@ set -euo pipefail
 #   bash infer_box_tracking.sh [omomo-carry|real|pure-ds|mix] [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
 #
 # Optional env vars:
-#   TEACHER_CHECKPOINT        (default: wandb://zihanw22/boxer/a5ohxuta/model_14000.pt)
+#   TEACHER_CHECKPOINT        (default: https://wandb.ai/zihanw22/boxer/runs/u5lguxvl; resolved to latest checkpoint at runtime)
 #   WANDB_MODEL_FILE          (optional; used when TEACHER_CHECKPOINT is a W&B run URL without /files/<checkpoint>)
 #   LEGACY_OBS                (default: 0; set 1/true to require legacy checkpoint observation layout)
 #   REQUIRE_HEIGHTMAP         (default: 0; set 1/true to require checkpoint perception.enabled=True and output_mode=heightmap)
@@ -24,7 +24,7 @@ set -euo pipefail
 #                             (default: https://wandb.ai/zihanw22/boxer/runs/6pzxdnr6; resolved to latest checkpoint at runtime)
 #   PURE_SD_DEFAULT_TEACHER_RUN_URL
 #                             (legacy alias of PURE_DS_DEFAULT_TEACHER_RUN_URL)
-#   INFER_DATASET             (default: mixed; options: omomo-carry|omomo|behave|behave_carry|behave_sq_carry|mixed|real|pure-ds|pure-sd|mix|naive-mixed|mix-naive|mix-curriculum)
+#   INFER_DATASET             (default: mix; options: omomo-carry|omomo|behave|behave_carry|behave_sq_carry|mixed|real|pure-ds|pure-sd|mix|naive-mixed|mix-naive|mix-curriculum)
 #   DATA_MODE                 (optional alias of INFER_DATASET; accepts train_object_generalist_ds.sh modes)
 #   DS_DATA_ROOT              (default: ./data/ds_box_data; used by pure-ds / mix)
 #   MOTION_DIR                (optional override; if unset, chosen by INFER_DATASET)
@@ -78,7 +78,7 @@ Dataset selection examples:
   INFER_DATASET=omomo-carry bash infer_box_tracking.sh
   INFER_DATASET=behave bash infer_box_tracking.sh
   INFER_DATASET=behave_carry bash infer_box_tracking.sh
-  INFER_DATASET=mixed bash infer_box_tracking.sh
+  INFER_DATASET=mix bash infer_box_tracking.sh
   INFER_DATASET=pure-ds bash infer_box_tracking.sh
   INFER_DATASET=mix bash infer_box_tracking.sh
   DATA_MODE=mix-curriculum bash infer_box_tracking.sh
@@ -103,6 +103,7 @@ default_model_file_for_run_id() {
   local run_id="$1"
   case "${run_id}" in
     6pzxdnr6) echo "model_00500.pt" ;;
+    u5lguxvl) echo "model_13000.pt" ;;
     *) echo "" ;;
   esac
 }
@@ -335,18 +336,6 @@ resolve_local_checkpoint_from_run_url() {
   fi
   IFS=$'\t' read -r _entity _project run_id explicit_file <<< "${parsed}"
 
-  target_model_file="${explicit_file}"
-  if [[ -z "${target_model_file}" ]]; then
-    target_model_file="${preferred_model_file}"
-  fi
-  if [[ -z "${target_model_file}" ]]; then
-    target_model_file="$(default_model_file_for_run_id "${run_id}")"
-  fi
-  if [[ -z "${target_model_file}" ]]; then
-    echo ""
-    return 0
-  fi
-
   wandb_run_dir="$(find /data/logs_new -maxdepth 8 -type d -name "run-*-${run_id}" 2>/dev/null | head -n 1 || true)"
   if [[ -z "${wandb_run_dir}" ]]; then
     echo ""
@@ -354,8 +343,23 @@ resolve_local_checkpoint_from_run_url() {
   fi
 
   run_log_dir="$(dirname "$(dirname "$(dirname "${wandb_run_dir}")")")"
-  if [[ -f "${run_log_dir}/${target_model_file}" ]]; then
-    local_ckpt="${run_log_dir}/${target_model_file}"
+  target_model_file="${explicit_file}"
+  if [[ -z "${target_model_file}" ]]; then
+    target_model_file="${preferred_model_file}"
+  fi
+
+  if [[ -n "${target_model_file}" ]]; then
+    if [[ -f "${run_log_dir}/${target_model_file}" ]]; then
+      local_ckpt="${run_log_dir}/${target_model_file}"
+    fi
+  else
+    local_ckpt="$(ls -1 "${run_log_dir}"/model_*.pt 2>/dev/null | sort -V | tail -n 1 || true)"
+    if [[ -z "${local_ckpt}" ]]; then
+      target_model_file="$(default_model_file_for_run_id "${run_id}")"
+      if [[ -n "${target_model_file}" && -f "${run_log_dir}/${target_model_file}" ]]; then
+        local_ckpt="${run_log_dir}/${target_model_file}"
+      fi
+    fi
   fi
   echo "${local_ckpt}"
 }
@@ -403,8 +407,9 @@ if [[ $# -gt 0 ]]; then
   esac
 fi
 
-# https://wandb.ai/zihanw22/boxer/runs/a5ohxuta/files?nw=nwuserz1hanw
-DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/a5ohxuta/model_14000.pt"}
+# https://wandb.ai/zihanw22/boxer/runs/u5lguxvl
+# Latest checkpoint verified on 2026-04-08: model_13000.pt
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"https://wandb.ai/zihanw22/boxer/runs/u5lguxvl"}
 PURE_DS_DEFAULT_TEACHER_RUN_URL=${PURE_DS_DEFAULT_TEACHER_RUN_URL:-${PURE_SD_DEFAULT_TEACHER_RUN_URL:-"https://wandb.ai/zihanw22/boxer/runs/6pzxdnr6"}}
 PURE_SD_DEFAULT_TEACHER_RUN_URL="${PURE_DS_DEFAULT_TEACHER_RUN_URL}"
 DEFAULT_LEGACY_TEACHER_CHECKPOINT="${DEFAULT_LEGACY_TEACHER_CHECKPOINT:-}"
@@ -480,7 +485,7 @@ pick_first_existing_path() {
 }
 
 if [[ "${INFER_DATASET_FROM_ARG}" != "1" ]]; then
-  INFER_DATASET=${INFER_DATASET:-${DATA_MODE:-${DATASET:-mixed}}}
+  INFER_DATASET=${INFER_DATASET:-${DATA_MODE:-${DATASET:-mix}}}
 fi
 INFER_DATASET_RAW="${INFER_DATASET}"
 INFER_DATASET_RAW_NORMALIZED=$(echo "${INFER_DATASET_RAW}" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
@@ -507,12 +512,23 @@ if [[ "${TEACHER_CHECKPOINT_NAME_FROM_ARG}" == "1" ]]; then
 fi
 
 if [[ "${TEACHER_CHECKPOINT}" == https://wandb.ai/*/runs/* ]]; then
-  LOCAL_WANDB_CKPT="$(resolve_local_checkpoint_from_run_url "${TEACHER_CHECKPOINT}" "${WANDB_MODEL_FILE:-}")"
-  if [[ -n "${LOCAL_WANDB_CKPT}" && -f "${LOCAL_WANDB_CKPT}" ]]; then
-    TEACHER_CHECKPOINT="${LOCAL_WANDB_CKPT}"
-    echo "[INFO] Resolved wandb run URL to local checkpoint: ${TEACHER_CHECKPOINT}"
+  if [[ "${TEACHER_CHECKPOINT}" == */files/* || -n "${WANDB_MODEL_FILE:-}" ]]; then
+    LOCAL_WANDB_CKPT="$(resolve_local_checkpoint_from_run_url "${TEACHER_CHECKPOINT}" "${WANDB_MODEL_FILE:-}")"
+    if [[ -n "${LOCAL_WANDB_CKPT}" && -f "${LOCAL_WANDB_CKPT}" ]]; then
+      TEACHER_CHECKPOINT="${LOCAL_WANDB_CKPT}"
+      echo "[INFO] Resolved wandb run URL to local checkpoint: ${TEACHER_CHECKPOINT}"
+    else
+      TEACHER_CHECKPOINT="$(normalize_checkpoint_ref "${TEACHER_CHECKPOINT}")"
+    fi
   else
-    TEACHER_CHECKPOINT="$(normalize_checkpoint_ref "${TEACHER_CHECKPOINT}")"
+    NORMALIZED_WANDB_CKPT="$(normalize_checkpoint_ref "${TEACHER_CHECKPOINT}")"
+    LOCAL_WANDB_CKPT="$(resolve_local_checkpoint_from_wandb_ref "${NORMALIZED_WANDB_CKPT}")"
+    if [[ -n "${LOCAL_WANDB_CKPT}" && -f "${LOCAL_WANDB_CKPT}" ]]; then
+      TEACHER_CHECKPOINT="${LOCAL_WANDB_CKPT}"
+      echo "[INFO] Resolved latest wandb run checkpoint to local file: ${TEACHER_CHECKPOINT}"
+    else
+      TEACHER_CHECKPOINT="${NORMALIZED_WANDB_CKPT}"
+    fi
   fi
 fi
 
