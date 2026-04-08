@@ -394,11 +394,15 @@ case "${TEACHER_COMPAT_PROFILE_RESOLVED}" in
     if [[ "${TEACHER_PERCEPTION_PRESET_EXPLICIT}" -eq 0 ]]; then
       TEACHER_PERCEPTION_PRESET="none"
     fi
+    if [[ "${TEACHER_PERCEPTION_OBS_KEY_EXPLICIT}" -eq 0 ]]; then
+      TEACHER_PERCEPTION_OBS_KEY=""
+    fi
     if [[ "${TEACHER_ACTOR_OBS_HISTORY_LENGTH_EXPLICIT}" -eq 0 ]]; then
       TEACHER_ACTOR_OBS_HISTORY_LENGTH="5"
     fi
     append_teacher_compat_note "teacher_obs_keys defaulted to actor_obs to match u5lguxvl teacher"
     append_teacher_compat_note "teacher perception disabled to match u5lguxvl teacher"
+    append_teacher_compat_note "teacher perception obs key cleared because this teacher does not consume perception input"
     append_teacher_compat_note "actor_obs history length set to ${TEACHER_ACTOR_OBS_HISTORY_LENGTH} to match teacher checkpoint"
     ;;
   *)
@@ -629,6 +633,15 @@ elif [[ "${DATA_MODE}" == "pure-real" ]]; then
   )
 fi
 
+TEACHER_PERCEPTION_ARGS=(
+  --algo.config.distill.teacher-perception-preset="${TEACHER_PERCEPTION_PRESET}"
+)
+if [[ -n "${TEACHER_PERCEPTION_OBS_KEY}" ]]; then
+  TEACHER_PERCEPTION_ARGS+=(
+    --algo.config.distill.teacher-perception-obs-key="${TEACHER_PERCEPTION_OBS_KEY}"
+  )
+fi
+
 OBJECT_URDF_ENV=()
 if [[ -n "${OBJECT_SPEC_PATH}" ]]; then
   OBJECT_URDF_ENV=(OBJECT_URDF="${OBJECT_SPEC_PATH}")
@@ -669,8 +682,7 @@ exec env \
     --algo.config.distill.schedule-notes="${SCHEDULE_NOTES}" \
     --algo.config.distill.teacher-compat-profile="${TEACHER_COMPAT_PROFILE_RESOLVED}" \
     --algo.config.distill.teacher-compat-notes="${TEACHER_COMPAT_NOTES}" \
-    --algo.config.distill.teacher-perception-preset="${TEACHER_PERCEPTION_PRESET}" \
-    --algo.config.distill.teacher-perception-obs-key="${TEACHER_PERCEPTION_OBS_KEY}" \
+    "${TEACHER_PERCEPTION_ARGS[@]}" \
     --algo.config.distill.dagger-ignore-external-goal-samples="${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES}" \
     --algo.config.distill.dagger-ignore-episode-initial-steps="${DAGGER_IGNORE_EPISODE_INITIAL_STEPS}" \
     --algo.config.distill.ppo-target-coeff="${PPO_TARGET_COEFF}" \
