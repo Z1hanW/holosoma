@@ -236,6 +236,12 @@ class DistillationConfig:
     strict_teacher_load: bool = True
     """Fail fast on teacher architecture/obs mismatch instead of fallback loading."""
 
+    fixed_bc_eval_num_samples: int = 4096
+    """Number of fixed teacher-labeled samples to cache for deterministic BC evaluation (0 disables)."""
+
+    fixed_bc_eval_log_interval: int = 1
+    """Log fixed-set BC evaluation metrics every N learning iterations."""
+
 
 
 @dataclass(frozen=True)

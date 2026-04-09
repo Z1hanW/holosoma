@@ -149,6 +149,7 @@ def test_wandb_logging(prefixed_logging_helper, mock_wandb):
     prefixed_logging_helper.raw_ep_infos = [
         {"raw_test_metric": torch.tensor([2.0], device=prefixed_logging_helper.device)}
     ]
+    mock_wandb.run = MagicMock()
 
     # Call post_epoch_logging with some test data
     prefixed_logging_helper.post_epoch_logging(
@@ -165,6 +166,34 @@ def test_wandb_logging(prefixed_logging_helper, mock_wandb):
     assert "test_prefix/Episode/test_metric" in logged_data
     assert "test_prefix/RawEpisode/raw_test_metric" in logged_data
     assert logged_data["global_step"] == 0
+
+
+def test_wandb_hidden_metrics_are_defined(logging_helper, mock_wandb):
+    """Housekeeping scalar metrics should be hidden from W&B auto-plots."""
+    mock_wandb.run = MagicMock()
+    logging_helper.post_epoch_logging(
+        it=3,
+        loss_dict={"teacher_bc_mask_fraction": 0.25},
+        extra_log_dicts={
+            "Train": {
+                "teacher_action_mix_ratio": 0.8,
+            },
+            "Eval": {
+                "fixed_bc_mu_mse": 0.5,
+                "fixed_bc_num_samples": 4096.0,
+            },
+        },
+    )
+
+    define_calls = {
+        call.args[0]: call.kwargs
+        for call in mock_wandb.define_metric.call_args_list
+    }
+    assert define_calls["global_step"]["hidden"] is True
+    assert define_calls["Loss/teacher_bc_mask_fraction"]["hidden"] is True
+    assert define_calls["Train/teacher_action_mix_ratio"]["hidden"] is True
+    assert define_calls["Eval/fixed_bc_num_samples"]["hidden"] is True
+    assert define_calls["Eval/fixed_bc_mu_mse"]["summary"] == "min"
 
 
 def test_save_checkpoint_artifact(prefixed_logging_helper, mock_wandb, tmp_path):

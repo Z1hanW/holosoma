@@ -41,6 +41,35 @@ class TrainLogDict(TypedDict):
 
 
 class LoggingHelper:
+    _WANDB_HIDDEN_METRIC_EXACT = {
+        "Train/num_samples",
+        "Train/command_goal_training_iteration",
+        "Train/command_only_env_prob",
+        "Train/external_goal_prob",
+        "Train/manual_goal_is_external_fraction",
+        "Train/mean_episode_length_motion_total",
+        "Train/mean_episode_length_motion_total/time",
+        "Train/ppo_dagger_target_coeff",
+        "Train/ppo_dagger_coeff",
+        "Train/ppo_dagger_bc_weight",
+        "Train/teacher_action_mix_ratio",
+        "Train/teacher_action_mix_ratio_start",
+        "Train/teacher_action_mix_ratio_end",
+        "Train/teacher_action_mix_ratio_end_iteration",
+        "Loss/teacher_bc_mask_fraction",
+        "Env/goal/command_only_env_prob",
+        "Env/goal/external_prob",
+        "Env/goal/external_prob_curriculum_progress",
+        "Env/goal/command_only_env_prob_curriculum_progress",
+        "Eval/fixed_bc_num_samples",
+    }
+    _WANDB_HIDDEN_METRIC_PREFIXES = (
+        "Perf/",
+    )
+    _WANDB_HIDDEN_METRIC_SUFFIXES = (
+        "/time",
+    )
+
     def __init__(
         self,
         writer: SummaryWriter,
@@ -102,6 +131,7 @@ class LoggingHelper:
         self.cur_reward_sum: torch.Tensor = torch.zeros(num_envs, dtype=torch.float, device=self.device)
         self.cur_episode_length: torch.Tensor = torch.zeros(num_envs, dtype=torch.float, device=self.device)
         self.episode_env_tensors: TensorAverageMeterDict = TensorAverageMeterDict()
+        self._wandb_defined_metrics: set[str] = set()
 
     @contextmanager
     def record_collection_time(self) -> Generator[None, None, None]:
@@ -339,7 +369,38 @@ class LoggingHelper:
         for k, v in scalars_to_log.items():
             self.writer.add_scalar(k, v, global_step=it)
         if wandb.run is not None:
+            self._configure_wandb_metrics(scalars_to_log)
             wandb.log(dict(scalars_to_log, global_step=it), step=it)
+
+    def _strip_prefix(self, metric_name: str) -> str:
+        if self.prefix and metric_name.startswith(self.prefix):
+            return metric_name[len(self.prefix) :]
+        return metric_name
+
+    def _should_hide_wandb_metric(self, metric_name: str) -> bool:
+        metric_name = self._strip_prefix(metric_name)
+        if metric_name in self._WANDB_HIDDEN_METRIC_EXACT:
+            return True
+        if any(metric_name.startswith(prefix) for prefix in self._WANDB_HIDDEN_METRIC_PREFIXES):
+            return True
+        if any(metric_name.endswith(suffix) for suffix in self._WANDB_HIDDEN_METRIC_SUFFIXES):
+            return True
+        return False
+
+    def _configure_wandb_metrics(self, scalars_to_log: dict[str, float]) -> None:
+        if wandb.run is None:
+            return
+        if "global_step" not in self._wandb_defined_metrics:
+            wandb.define_metric("global_step", hidden=True, summary="none")
+            self._wandb_defined_metrics.add("global_step")
+        for metric_name in scalars_to_log:
+            if metric_name in self._wandb_defined_metrics:
+                continue
+            if self._should_hide_wandb_metric(metric_name):
+                wandb.define_metric(metric_name, hidden=True, summary="last")
+            elif metric_name == f"{self.prefix}Eval/fixed_bc_mu_mse":
+                wandb.define_metric(metric_name, summary="min")
+            self._wandb_defined_metrics.add(metric_name)
 
     def _create_console_output(
         self,

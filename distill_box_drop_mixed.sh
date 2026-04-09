@@ -170,6 +170,10 @@ while [[ $# -gt 0 ]]; do
       DATA_MODE="pure-real"
       shift
       ;;
+    omomo-debug|omomo_debug)
+      DATA_MODE="omomo-debug"
+      shift
+      ;;
     mix-naive)
       DATA_MODE="mix-naive"
       shift
@@ -257,6 +261,9 @@ EXP_EXPLICIT=0
 [[ -n "${EXP+x}" ]] && EXP_EXPLICIT=1
 RUN_NAME_EXPLICIT=0
 [[ -n "${RUN_NAME+x}" ]] && RUN_NAME_EXPLICIT=1
+if [[ -n "${POSITIONAL_RUN_NAME}" ]]; then
+  RUN_NAME_EXPLICIT=1
+fi
 TRAINING_NAME_EXPLICIT=0
 [[ -n "${TRAINING_NAME+x}" ]] && TRAINING_NAME_EXPLICIT=1
 
@@ -294,6 +301,7 @@ MIX_CURRICULUM_OMOMO_PREFIXES=${MIX_CURRICULUM_OMOMO_PREFIXES:-'["sub"]'}
 MIX_CURRICULUM_STAGE_START_ITERATIONS=${MIX_CURRICULUM_STAGE_START_ITERATIONS:-'[0, 1500, 2000, 2500, 3000, 3500]'}
 MIX_CURRICULUM_OMOMO_PROBABILITIES=${MIX_CURRICULUM_OMOMO_PROBABILITIES:-'[1.0, 0.9, 0.8, 0.7, 0.6, 0.5]'}
 PURE_REAL_OMOMO_PREFIXES=${PURE_REAL_OMOMO_PREFIXES:-'["sub"]'}
+OMOMO_DEBUG_PREFIXES=${OMOMO_DEBUG_PREFIXES:-'["sub"]'}
 OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-""}
 ASSERT_ACTIVE_MULTI_URDF=${ASSERT_ACTIVE_MULTI_URDF:-auto}
 
@@ -402,15 +410,18 @@ case "${DATA_MODE}" in
   pure-omomo)
     DATA_MODE="pure-real"
     ;;
+  omomo_debug)
+    DATA_MODE="omomo-debug"
+    ;;
   mix-clean-noisy|mix-curr)
     DATA_MODE="mix-curriculum"
     ;;
 esac
 case "${DATA_MODE}" in
-  pure-sd|pure-real|mix-naive|mix-curriculum)
+  pure-sd|pure-real|omomo-debug|mix-naive|mix-curriculum)
     ;;
   *)
-    echo "[ERROR] Unsupported DATA_MODE='${DATA_MODE}'. Use one of: pure-sd, pure-real, mix-naive, mix-curriculum" >&2
+    echo "[ERROR] Unsupported DATA_MODE='${DATA_MODE}'. Use one of: pure-sd, pure-real, omomo-debug, mix-naive, mix-curriculum" >&2
     exit 2
     ;;
 esac
@@ -419,10 +430,28 @@ case "${DATA_MODE}" in
   pure-sd)
     MODE_DEFAULT_MOTION_DIR="${DEFAULT_DS_PREPARED_MOTION_DIR}"
     ;;
+  omomo-debug)
+    MODE_DEFAULT_MOTION_DIR="${DEFAULT_MIX_NAIVE_MOTION_DIR}"
+    ;;
   pure-real|mix-naive|mix-curriculum)
     MODE_DEFAULT_MOTION_DIR="${DEFAULT_MIX_NAIVE_MOTION_DIR}"
     ;;
 esac
+
+if [[ "${DATA_MODE}" == "omomo-debug" ]]; then
+  if [[ "${TRAINING_NAME_EXPLICIT}" -eq 0 ]]; then
+    if [[ "${REWARD_VARIANT}" == "pickup_reward" ]]; then
+      TRAINING_NAME="g1_29dof_wbt_w_object_distill_box_drop_omomo_debug_pickup"
+    else
+      TRAINING_NAME="g1_29dof_wbt_w_object_distill_box_drop_omomo_debug"
+    fi
+  fi
+fi
+
+if [[ "${RUN_NAME_EXPLICIT}" -eq 0 ]]; then
+  RUN_NAME="${DATA_MODE}"
+fi
+
 MOTION_DIR=${MOTION_DIR:-"${MODE_DEFAULT_MOTION_DIR}"}
 
 if [[ -z "${OBJECT_SPEC_PATH}" ]]; then
@@ -608,6 +637,73 @@ if [[ ! -e "${MOTION_DIR}" ]]; then
   exit 1
 fi
 
+if [[ "${DATA_MODE}" == "omomo-debug" ]]; then
+  OMOMO_DEBUG_FILTER_RESULT=$(
+    MOTION_DIR="${MOTION_DIR}" OMOMO_DEBUG_PREFIXES="${OMOMO_DEBUG_PREFIXES}" python - <<'PY'
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+
+motion_dir = Path(os.environ["MOTION_DIR"]).expanduser().resolve()
+prefixes_raw = os.environ.get("OMOMO_DEBUG_PREFIXES", '["sub"]')
+
+if not motion_dir.is_dir():
+    print(str(motion_dir))
+    raise SystemExit(0)
+
+try:
+    parsed = json.loads(prefixes_raw)
+    if isinstance(parsed, str):
+        prefixes = [parsed.strip()]
+    else:
+        prefixes = [str(item).strip() for item in parsed if str(item).strip()]
+except Exception:
+    prefixes = [part.strip() for part in prefixes_raw.split(",") if part.strip()]
+
+if not prefixes:
+    raise SystemExit("[ERROR] OMOMO_DEBUG_PREFIXES resolved to an empty prefix list.")
+
+cache_key = hashlib.sha1(f"{motion_dir}:{prefixes}".encode("utf-8")).hexdigest()[:10]
+cache_dir = motion_dir.parent / f"{motion_dir.name}_omomo_debug_{cache_key}"
+cache_dir.mkdir(parents=True, exist_ok=True)
+
+kept = 0
+excluded = 0
+for path in sorted(motion_dir.iterdir()):
+    target = cache_dir / path.name
+    if path.suffix != ".npz":
+        if not target.exists():
+            target.symlink_to(path)
+        continue
+
+    keep = any(path.stem.startswith(prefix) for prefix in prefixes)
+    if keep:
+        kept += 1
+        if not target.exists():
+            target.symlink_to(path)
+    else:
+        excluded += 1
+        if target.exists():
+            target.unlink()
+
+print(f"{cache_dir}|{kept}|{excluded}|{json.dumps(prefixes)}")
+PY
+  )
+  MOTION_DIR="${OMOMO_DEBUG_FILTER_RESULT%%|*}"
+  OMOMO_DEBUG_FILTER_STATS="${OMOMO_DEBUG_FILTER_RESULT#*|}"
+  OMOMO_DEBUG_FILTER_KEPT="${OMOMO_DEBUG_FILTER_STATS%%|*}"
+  OMOMO_DEBUG_FILTER_REST="${OMOMO_DEBUG_FILTER_STATS#*|}"
+  OMOMO_DEBUG_FILTER_EXCLUDED="${OMOMO_DEBUG_FILTER_REST%%|*}"
+  OMOMO_DEBUG_FILTER_PREFIXES="${OMOMO_DEBUG_FILTER_REST#*|}"
+  if [[ "${OMOMO_DEBUG_FILTER_KEPT}" == "0" ]]; then
+    echo "[ERROR] omomo-debug matched zero clips under ${MOTION_DIR} for prefixes ${OMOMO_DEBUG_FILTER_PREFIXES}" >&2
+    exit 1
+  fi
+fi
+
 if [[ "${FILTER_NON_PLACEMENT_CLIPS}" == "True" || "${FILTER_NON_PLACEMENT_CLIPS}" == "true" || "${FILTER_NON_PLACEMENT_CLIPS}" == "1" ]]; then
   FILTERED_MOTION_DIR=$(
     MOTION_DIR="${MOTION_DIR}" FINAL_PLACEMENT_MAX_DELTA_Z="${FINAL_PLACEMENT_MAX_DELTA_Z}" python - <<'PY'
@@ -665,7 +761,17 @@ PY
   MOTION_DIR="${MOTION_DIR_FILTERED_PATH}"
 fi
 
+OBJECT_SPEC_KIND=""
 if [[ -n "${OBJECT_SPEC_PATH}" ]]; then
+  object_spec_suffix=$(printf '%s' "${OBJECT_SPEC_PATH}" | tr '[:upper:]' '[:lower:]')
+  if [[ "${object_spec_suffix}" == *.json ]]; then
+    OBJECT_SPEC_KIND="clip-map"
+  else
+    OBJECT_SPEC_KIND="single-urdf"
+  fi
+fi
+
+if [[ "${OBJECT_SPEC_KIND}" == "clip-map" ]]; then
   "${PYTHON_BIN}" - "${MOTION_DIR}" "${OBJECT_SPEC_PATH}" "${DATA_MODE}" "${ASSERT_ACTIVE_MULTI_URDF}" <<'PY'
 from __future__ import annotations
 
@@ -749,6 +855,11 @@ if assert_multi and len(unique_urdfs) <= 1:
         f"Resolved URDF: {only}"
     )
 PY
+elif [[ "${OBJECT_SPEC_KIND}" == "single-urdf" ]]; then
+  if [[ ! -f "${OBJECT_SPEC_PATH}" ]]; then
+    echo "[ERROR] Object URDF not found: ${OBJECT_SPEC_PATH}" >&2
+    exit 1
+  fi
 fi
 
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
@@ -766,8 +877,13 @@ echo "[INFO] schedule_variant=${SCHEDULE_VARIANT}"
 echo "[INFO] reward_variant=${REWARD_VARIANT}"
 echo "[INFO] distribution_variant=${DISTRIBUTION_VARIANT}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
-if [[ -n "${OBJECT_SPEC_PATH}" ]]; then
+if [[ -n "${OMOMO_DEBUG_FILTER_KEPT:-}" ]]; then
+  echo "[INFO] omomo_debug_prefixes=${OMOMO_DEBUG_FILTER_PREFIXES} kept=${OMOMO_DEBUG_FILTER_KEPT} excluded=${OMOMO_DEBUG_FILTER_EXCLUDED}"
+fi
+if [[ "${OBJECT_SPEC_KIND}" == "clip-map" ]]; then
   echo "[INFO] object_spec_path=${OBJECT_SPEC_PATH}"
+elif [[ "${OBJECT_SPEC_KIND}" == "single-urdf" ]]; then
+  echo "[INFO] object_urdf_path=${OBJECT_SPEC_PATH}"
 fi
 if [[ -n "${FILTERED_MOTION_DIR_KEPT:-}" ]]; then
   echo "[INFO] motion_filter_non_placement_clips=${FILTER_NON_PLACEMENT_CLIPS} final_placement_max_delta_z=${FINAL_PLACEMENT_MAX_DELTA_Z} kept=${FILTERED_MOTION_DIR_KEPT} excluded=${FILTERED_MOTION_DIR_EXCLUDED}"
