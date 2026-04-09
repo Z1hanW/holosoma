@@ -467,7 +467,7 @@ class GatedLinearEncoder(nn.Module):
 
 
 class AttentionLinearEncoder(nn.Module):
-    """Flatten + linear projection scaled by learned attention."""
+    """Flatten + linear projection scaled by a learned per-channel gate."""
 
     def __init__(self, input_dim: int, output_dim: int):
         super().__init__()
@@ -476,7 +476,8 @@ class AttentionLinearEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         flat = x.view(x.shape[0], -1)
-        return self.proj(flat) * self.attention
+        scale = 1.0 + torch.tanh(self.attention)
+        return self.proj(flat) * scale
 
 
 class FarTrackingDepthSmallEncoder(nn.Module):
@@ -550,8 +551,8 @@ def _load_defm_runtime():
     return create_defm_model, preprocess_depth_batch
 
 
-class DeFMViTS14Encoder(nn.Module):
-    """Frozen-or-trainable DeFM ViT-S/14 depth encoder with metric-aware preprocessing."""
+class DeFMEncoder(nn.Module):
+    """Frozen-or-trainable DeFM depth encoder with metric-aware preprocessing."""
 
     def __init__(
         self,
@@ -559,6 +560,9 @@ class DeFMViTS14Encoder(nn.Module):
         input_width: int,
         output_dim: int,
         *,
+        model_name: str,
+        backbone_dim: int,
+        output_key: str | None = None,
         pretrained: bool = True,
         pretrained_path: str | None = None,
         freeze_backbone: bool = True,
@@ -571,12 +575,14 @@ class DeFMViTS14Encoder(nn.Module):
         self.input_height = int(input_height)
         self.input_width = int(input_width)
         self.expected_input_size = self.input_height * self.input_width
+        self.model_name = model_name
+        self.output_key = output_key
         self.pretrained = bool(pretrained)
         self.pretrained_path = pretrained_path
         self.freeze_backbone = bool(freeze_backbone)
         self.target_size = target_size
         self.patch_size = patch_size
-        self.backbone_dim = 384
+        self.backbone_dim = int(backbone_dim)
         self.backbone: nn.Module | None = None
         self._preprocess_depth_batch = None
         self.proj = nn.Identity() if output_dim == self.backbone_dim else nn.Linear(self.backbone_dim, output_dim)
@@ -585,7 +591,7 @@ class DeFMViTS14Encoder(nn.Module):
         if self.backbone is None:
             create_defm_model, preprocess_depth_batch = _load_defm_runtime()
             backbone = create_defm_model(
-                "defm_vit_s14",
+                self.model_name,
                 pretrained=self.pretrained,
                 pretrained_path=self.pretrained_path,
             )
@@ -620,11 +626,78 @@ class DeFMViTS14Encoder(nn.Module):
         if self.freeze_backbone:
             with torch.no_grad():
                 features = self.backbone(depth_batch)
-            features = features.detach()
         else:
             features = self.backbone(depth_batch)
+        if self.output_key is not None:
+            if not isinstance(features, dict) or self.output_key not in features:
+                raise ValueError(
+                    f"DeFM model {self.model_name} did not return expected output key {self.output_key!r}."
+                )
+            features = features[self.output_key]
+        if self.freeze_backbone:
+            features = features.detach()
         features = features.to(dtype=flat.dtype)
         return self.proj(features)
+
+
+class DeFMViTS14Encoder(DeFMEncoder):
+    """Frozen-or-trainable DeFM ViT-S/14 depth encoder with metric-aware preprocessing."""
+
+    def __init__(
+        self,
+        input_height: int,
+        input_width: int,
+        output_dim: int,
+        *,
+        pretrained: bool = True,
+        pretrained_path: str | None = None,
+        freeze_backbone: bool = True,
+        target_size: int | tuple[int, int] | None = 224,
+        patch_size: int | None = 14,
+    ):
+        super().__init__(
+            input_height=input_height,
+            input_width=input_width,
+            output_dim=output_dim,
+            model_name="defm_vit_s14",
+            backbone_dim=384,
+            output_key=None,
+            pretrained=pretrained,
+            pretrained_path=pretrained_path,
+            freeze_backbone=freeze_backbone,
+            target_size=target_size,
+            patch_size=patch_size,
+        )
+
+
+class DeFMRegNetY800MFEncoder(DeFMEncoder):
+    """Frozen-or-trainable DeFM RegNetY-800MF depth encoder with metric-aware preprocessing."""
+
+    def __init__(
+        self,
+        input_height: int,
+        input_width: int,
+        output_dim: int,
+        *,
+        pretrained: bool = True,
+        pretrained_path: str | None = None,
+        freeze_backbone: bool = True,
+        target_size: int | tuple[int, int] | None = 224,
+        patch_size: int | None = None,
+    ):
+        super().__init__(
+            input_height=input_height,
+            input_width=input_width,
+            output_dim=output_dim,
+            model_name="defm_regnet_y_800mf",
+            backbone_dim=784,
+            output_key="global_backbone",
+            pretrained=pretrained,
+            pretrained_path=pretrained_path,
+            freeze_backbone=freeze_backbone,
+            target_size=target_size,
+            patch_size=patch_size,
+        )
 
 
 class PerceptionTimeGRU(nn.Module):
@@ -863,6 +936,23 @@ class BaseModule(nn.Module):
             if input_height is None or input_width is None:
                 raise ValueError("defm_vit_s14 requires perception_input_height and perception_input_width to be set.")
             self.perception_encoder = DeFMViTS14Encoder(
+                input_height=int(input_height),
+                input_width=int(input_width),
+                output_dim=output_dim,
+                pretrained=bool(getattr(layer_config, "perception_pretrained", True)),
+                pretrained_path=getattr(layer_config, "perception_pretrained_path", None),
+                freeze_backbone=bool(getattr(layer_config, "perception_freeze_backbone", True)),
+                target_size=getattr(layer_config, "perception_target_size", None),
+                patch_size=getattr(layer_config, "perception_patch_size", None),
+            )
+        elif encoder_type == "defm_regnet_y_800mf":
+            input_height = getattr(layer_config, "perception_input_height", None)
+            input_width = getattr(layer_config, "perception_input_width", None)
+            if input_height is None or input_width is None:
+                raise ValueError(
+                    "defm_regnet_y_800mf requires perception_input_height and perception_input_width to be set."
+                )
+            self.perception_encoder = DeFMRegNetY800MFEncoder(
                 input_height=int(input_height),
                 input_width=int(input_width),
                 output_dim=output_dim,

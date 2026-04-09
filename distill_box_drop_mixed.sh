@@ -280,12 +280,12 @@ HSSIM_BIN_DIR=${HSSIM_BIN_DIR:-/home/ubuntu/.holosoma_deps/miniconda3/envs/hssim
 if [[ -d "${HSSIM_BIN_DIR}" ]]; then
   export PATH="${HSSIM_BIN_DIR}:${PATH}"
 fi
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2,3,4,5,6,7}
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,2,3,4,5,6,7}
 if [[ -z "${NPROC:-}" ]]; then
   IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
   NPROC=${#_visible_gpus[@]}
 fi
-DEFAULT_TOTAL_ENVS=${DEFAULT_TOTAL_ENVS:-8192}
+DEFAULT_TOTAL_ENVS=${DEFAULT_TOTAL_ENVS:-7168}
 NUM_ENVS=${NUM_ENVS:-${DEFAULT_TOTAL_ENVS}}
 
 DS_DATA_ROOT=${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}
@@ -334,7 +334,7 @@ FREEZE_AT_TIMESTEP_ZERO_PROB_END=${FREEZE_AT_TIMESTEP_ZERO_PROB_END:-0.0}
 FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER:-2500}
 FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS}}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
-PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
+PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i_defm_regnet_y_800mf}
 STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_proprio','actor_obs_drop_command']"}
 DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES=${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES:-True}
 DAGGER_MATCH_STD=${DAGGER_MATCH_STD:-True}
@@ -541,12 +541,18 @@ case "${DISTRIBUTION_VARIANT}" in
     ;;
 esac
 
-IMAGE_WIDTH=${IMAGE_WIDTH:-17}
-IMAGE_HEIGHT=${IMAGE_HEIGHT:-17}
-CAMERA_NEAR=${CAMERA_NEAR:-0.001}
-CAMERA_FAR=${CAMERA_FAR:-3.0}
-CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-3.0}
-PERCEPTION_WARP_PREPROCESS=${PERCEPTION_WARP_PREPROCESS:-True}
+IMAGE_WIDTH_EXPLICIT=0
+[[ -n "${IMAGE_WIDTH+x}" ]] && IMAGE_WIDTH_EXPLICIT=1
+IMAGE_HEIGHT_EXPLICIT=0
+[[ -n "${IMAGE_HEIGHT+x}" ]] && IMAGE_HEIGHT_EXPLICIT=1
+CAMERA_NEAR_EXPLICIT=0
+[[ -n "${CAMERA_NEAR+x}" ]] && CAMERA_NEAR_EXPLICIT=1
+CAMERA_FAR_EXPLICIT=0
+[[ -n "${CAMERA_FAR+x}" ]] && CAMERA_FAR_EXPLICIT=1
+CAMERA_MAX_DISTANCE_EXPLICIT=0
+[[ -n "${CAMERA_MAX_DISTANCE+x}" ]] && CAMERA_MAX_DISTANCE_EXPLICIT=1
+PERCEPTION_WARP_PREPROCESS_EXPLICIT=0
+[[ -n "${PERCEPTION_WARP_PREPROCESS+x}" ]] && PERCEPTION_WARP_PREPROCESS_EXPLICIT=1
 
 TEACHER_REF_RUN_ID="5vlz6pj8"
 TEACHER_REF_LOCAL_CHECKPOINT="${SCRIPT_DIR}/.teacher_checkpoints/model_24000.pt"
@@ -965,6 +971,26 @@ if [[ -n "${CRITIC_PERCEPTION_OBS_KEY}" ]]; then
   )
 fi
 
+PERCEPTION_OVERRIDE_ARGS=()
+if [[ "${IMAGE_WIDTH_EXPLICIT}" -eq 1 ]]; then
+  PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-width="${IMAGE_WIDTH}")
+fi
+if [[ "${IMAGE_HEIGHT_EXPLICIT}" -eq 1 ]]; then
+  PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-height="${IMAGE_HEIGHT}")
+fi
+if [[ "${CAMERA_NEAR_EXPLICIT}" -eq 1 ]]; then
+  PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-near="${CAMERA_NEAR}")
+fi
+if [[ "${CAMERA_FAR_EXPLICIT}" -eq 1 ]]; then
+  PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-far="${CAMERA_FAR}")
+fi
+if [[ "${CAMERA_MAX_DISTANCE_EXPLICIT}" -eq 1 ]]; then
+  PERCEPTION_OVERRIDE_ARGS+=(--perception.max-distance="${CAMERA_MAX_DISTANCE}")
+fi
+if [[ "${PERCEPTION_WARP_PREPROCESS_EXPLICIT}" -eq 1 ]]; then
+  PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-warp-preprocess="${PERCEPTION_WARP_PREPROCESS}")
+fi
+
 OBJECT_URDF_ENV=()
 if [[ -n "${OBJECT_SPEC_PATH}" ]]; then
   OBJECT_URDF_ENV=(OBJECT_URDF="${OBJECT_SPEC_PATH}")
@@ -1044,11 +1070,6 @@ exec env \
     --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-start-iter="${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER}" \
     --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-end-iter="${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER}" \
     --simulator.config.sim.max_episode_length_s "${MAX_EPISODE_LENGTH_S}" \
-    --perception.camera-width="${IMAGE_WIDTH}" \
-    --perception.camera-height="${IMAGE_HEIGHT}" \
-    --perception.camera-near="${CAMERA_NEAR}" \
-    --perception.camera-far="${CAMERA_FAR}" \
-    --perception.max-distance="${CAMERA_MAX_DISTANCE}" \
-    --perception.camera-warp-preprocess="${PERCEPTION_WARP_PREPROCESS}" \
+    "${PERCEPTION_OVERRIDE_ARGS[@]}" \
     "${EXTRA_DISTILL_ARGS[@]}" \
     "$@"

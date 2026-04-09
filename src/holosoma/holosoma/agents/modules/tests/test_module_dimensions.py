@@ -13,7 +13,13 @@ import pytest
 import torch
 from torch import nn
 
-from holosoma.agents.modules.modules import BaseModule, DeFMViTS14Encoder, FarTrackingDepthSmallEncoder
+from holosoma.agents.modules.modules import (
+    AttentionLinearEncoder,
+    BaseModule,
+    DeFMRegNetY800MFEncoder,
+    DeFMViTS14Encoder,
+    FarTrackingDepthSmallEncoder,
+)
 from holosoma.agents.modules.ppo_modules import PPOActorEncoder, PPOCriticEncoder
 from holosoma.config_types.algo import LayerConfig, ModuleConfig
 from holosoma.config_values import perception as perception_presets
@@ -493,6 +499,59 @@ def test_defm_vit_s14_encoder_forward_with_mock_runtime():
     assert y.shape == (3, 128)
 
 
+def test_defm_regnet_y_800mf_encoder_forward_with_mock_runtime():
+    """DeFM RegNetY-800MF encoder should project the global backbone feature."""
+
+    class DummyDeFM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed_dim = 784
+
+        def forward(self, x):
+            return {"global_backbone": torch.ones((x.shape[0], self.embed_dim), device=x.device, dtype=x.dtype)}
+
+    def fake_create_defm_model(model_name, pretrained=False, pretrained_path=None):
+        assert model_name == "defm_regnet_y_800mf"
+        assert pretrained is True
+        assert pretrained_path is None
+        return DummyDeFM()
+
+    def fake_preprocess_depth_batch(input_batch, target_size=None, patch_size=None, device="cpu", **kwargs):
+        assert tuple(input_batch.shape) == (3, 58, 87)
+        assert target_size == 224
+        assert patch_size is None
+        return torch.ones((input_batch.shape[0], 3, 224, 224), device=device, dtype=torch.float32)
+
+    encoder = DeFMRegNetY800MFEncoder(
+        input_height=58,
+        input_width=87,
+        output_dim=128,
+        pretrained=True,
+        pretrained_path=None,
+        freeze_backbone=True,
+        target_size=224,
+        patch_size=None,
+    )
+
+    with patch(
+        "holosoma.agents.modules.modules._load_defm_runtime",
+        return_value=(fake_create_defm_model, fake_preprocess_depth_batch),
+    ):
+        x = torch.randn(3, 58 * 87)
+        y = encoder(x)
+
+    assert y.shape == (3, 128)
+
+
+def test_attention_linear_encoder_has_live_signal_at_init():
+    encoder = AttentionLinearEncoder(input_dim=17 * 17, output_dim=64)
+    x = torch.randn(4, 17 * 17)
+    y = encoder(x)
+
+    assert y.shape == (4, 64)
+    assert not torch.allclose(y, torch.zeros_like(y))
+
+
 def test_apply_perception_overrides_sets_defm_actor_only_path():
     """DeFM preset should inject actor-only perception with concat fusion."""
     config = replace(
@@ -514,6 +573,32 @@ def test_apply_perception_overrides_sets_defm_actor_only_path():
     assert actor_cfg.layer_config.perception_freeze_backbone is True
     assert actor_cfg.layer_config.perception_target_size == 224
     assert actor_cfg.layer_config.perception_patch_size == 14
+    assert actor_cfg.layer_config.extra_input_to_hidden is False
+    assert critic_cfg.type == "MLP"
+    assert critic_cfg.layer_config.perception_input_name == ""
+
+
+def test_apply_perception_overrides_sets_defm_regnet_actor_only_path():
+    """DeFM RegNet preset should inject actor-only perception with concat fusion."""
+    config = replace(
+        g1_experiments.g1_29dof_wbt_w_object_distill_sparse_goal_mixed,
+        perception=perception_presets.camera_depth_d435i_defm_regnet_y_800mf,
+    )
+
+    updated = apply_perception_overrides(config)
+
+    actor_cfg = updated.algo.config.module_dict.actor
+    critic_cfg = updated.algo.config.module_dict.critic
+
+    assert actor_cfg.type == "MLPPerceptionEncoder"
+    assert actor_cfg.layer_config.perception_encoder_type == "defm_regnet_y_800mf"
+    assert actor_cfg.layer_config.perception_output_dim == 784
+    assert actor_cfg.layer_config.perception_input_height == 58
+    assert actor_cfg.layer_config.perception_input_width == 87
+    assert actor_cfg.layer_config.perception_pretrained is True
+    assert actor_cfg.layer_config.perception_freeze_backbone is True
+    assert actor_cfg.layer_config.perception_target_size == 224
+    assert actor_cfg.layer_config.perception_patch_size is None
     assert actor_cfg.layer_config.extra_input_to_hidden is False
     assert critic_cfg.type == "MLP"
     assert critic_cfg.layer_config.perception_input_name == ""
