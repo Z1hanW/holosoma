@@ -91,6 +91,7 @@ heightmap = PerceptionConfig(
 
 camera_depth_d435i = PerceptionConfig(
     enabled=True,
+    inject_into_critic_modules=False,
     output_mode="camera_depth",
     camera_source="far_tracking_warp",
     camera_strict_warp=True,
@@ -139,12 +140,17 @@ camera_depth_d435i = PerceptionConfig(
     camera_warp_edge_far_depth_thresh=2.5,
     camera_warp_enable_holes=False,
     camera_warp_hole_prob=0.0,
-    encoder_output_dim=512,
-    encoder_type="attention",
+    # Match far-tracking defaults: placement randomization stays on, sensor noise stays off.
+    camera_apply_sensor_noise=False,
+    # Match far-tracking student depth path: 58x87 -> CNN -> 32d, concatenated to actor inputs.
+    encoder_output_dim=32,
+    encoder_type="far_tracking_cnn_small",
+    encoder_fusion="concat",
 )
 
 camera_depth_d435i_17x17 = replace(
     camera_depth_d435i,
+    inject_into_critic_modules=True,
     camera_width=17,
     camera_height=17,
     camera_warp_resize=(17, 17),
@@ -152,6 +158,23 @@ camera_depth_d435i_17x17 = replace(
     camera_warp_crop_bottom=0,
     camera_warp_crop_left=0,
     camera_warp_crop_right=0,
+    camera_apply_sensor_noise=True,
+    encoder_output_dim=512,
+    encoder_type="attention",
+    encoder_fusion="extra_input_to_hidden",
+)
+
+camera_depth_d435i_defm_vit_s14 = replace(
+    camera_depth_d435i,
+    # Keep the same far-tracking-style 58x87 depth preprocessing, but swap the encoder.
+    encoder_output_dim=384,
+    encoder_type="defm_vit_s14",
+    encoder_fusion="concat",
+    encoder_pretrained=True,
+    encoder_pretrained_path=None,
+    encoder_freeze_backbone=True,
+    encoder_target_size=224,
+    encoder_patch_size=14,
 )
 
 DEFAULTS = {
@@ -159,6 +182,7 @@ DEFAULTS = {
     "heightmap": heightmap,
     "camera_depth_d435i": camera_depth_d435i,
     "camera_depth_d435i_17x17": camera_depth_d435i_17x17,
+    "camera_depth_d435i_defm_vit_s14": camera_depth_d435i_defm_vit_s14,
 }
 
 __all__ = [
@@ -166,5 +190,6 @@ __all__ = [
     "heightmap",
     "camera_depth_d435i",
     "camera_depth_d435i_17x17",
+    "camera_depth_d435i_defm_vit_s14",
     "DEFAULTS",
 ]

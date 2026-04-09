@@ -55,7 +55,28 @@ class LayerConfig:
     """Output dimension for perception encoder."""
 
     perception_encoder_type: str = "gated_linear"
-    """Perception encoder type: 'gated_linear', 'attention', or 'time_gru'."""
+    """Perception encoder type: 'gated_linear', 'attention', 'far_tracking_cnn_small', or 'time_gru'."""
+
+    perception_input_height: int | None = None
+    """Optional input height for structured perception encoders."""
+
+    perception_input_width: int | None = None
+    """Optional input width for structured perception encoders."""
+
+    perception_pretrained: bool = True
+    """Whether to load pretrained weights for external perception encoders."""
+
+    perception_pretrained_path: str | None = None
+    """Optional local checkpoint path for external perception encoders."""
+
+    perception_freeze_backbone: bool = True
+    """Freeze external perception backbones and train only projection layers when supported."""
+
+    perception_target_size: int | tuple[int, int] | None = None
+    """Optional target size used by external perception preprocessors."""
+
+    perception_patch_size: int | None = None
+    """Optional patch-size alignment used by external perception preprocessors."""
 
     input_channels: int = 1
     """Number of input channels. Only used for CNN modules."""
@@ -154,6 +175,9 @@ class DistillationConfig:
     teacher_obs_keys: list[str] | str | None = None
     """Observation keys to feed the teacher policy (defaults to actor_obs keys)."""
 
+    teacher_use_stochastic_actions: bool = False
+    """Use sampled teacher actions for DAgger labels/rollout mixing instead of deterministic teacher means."""
+
     bc_loss_coef: float | None = None
     """Behavior cloning loss coefficient for dagger. Defaults to loss_coef if unset."""
 
@@ -195,6 +219,12 @@ class DistillationConfig:
 
     teacher_perception_obs_key: str | None = None
     """Optional observation key used to feed teacher-only perception into the teacher policy."""
+
+    critic_perception_preset: str | None = None
+    """Optional perception preset name used only for the critic policy (e.g. heightmap)."""
+
+    critic_perception_obs_key: str | None = None
+    """Optional observation key used to feed critic-only perception into the critic policy."""
 
     switch_to_rl_after: int = -1
     """Iteration to switch off BC loss (set to 0 or negative to disable)."""

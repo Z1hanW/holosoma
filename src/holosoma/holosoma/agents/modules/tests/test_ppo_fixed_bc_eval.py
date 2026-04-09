@@ -25,6 +25,18 @@ class _DummyActor(nn.Module):
         return policy_state_dict["actor_obs"] + 1.0
 
 
+class _DummyTeacherActor(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.perception_input_name = ""
+
+    def act(self, policy_state_dict):
+        return policy_state_dict["actor_obs"] + 10.0
+
+    def act_inference(self, policy_state_dict):
+        return policy_state_dict["actor_obs"] + 1.0
+
+
 def _make_stub_ppo() -> PPO:
     ppo = object.__new__(PPO)
     ppo.is_main_process = True
@@ -87,3 +99,34 @@ def test_fixed_bc_eval_metrics_use_deterministic_actor_mean():
 
     assert metrics["fixed_bc_num_samples"] == 2.0
     assert metrics["fixed_bc_mu_mse"] == 0.5
+
+
+def test_select_teacher_actions_uses_teacher_mean_by_default():
+    ppo = object.__new__(PPO)
+    ppo.use_multi_teacher = False
+    ppo.teacher_use_stochastic_actions = False
+    ppo.teacher_actor = _DummyTeacherActor()
+    ppo._normalize_teacher_actor_obs = MethodType(lambda self, obs, normalizers=None: obs, ppo)
+
+    teacher_actions, teacher_indices = ppo._select_teacher_actions(
+        teacher_obs_raw=torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+        obs_dict={},
+    )
+
+    assert teacher_indices is None
+    assert torch.equal(teacher_actions, torch.tensor([[2.0, 3.0], [4.0, 5.0]]))
+
+
+def test_select_teacher_actions_can_opt_into_stochastic_teacher_samples():
+    ppo = object.__new__(PPO)
+    ppo.use_multi_teacher = False
+    ppo.teacher_use_stochastic_actions = True
+    ppo.teacher_actor = _DummyTeacherActor()
+    ppo._normalize_teacher_actor_obs = MethodType(lambda self, obs, normalizers=None: obs, ppo)
+
+    teacher_actions, _ = ppo._select_teacher_actions(
+        teacher_obs_raw=torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+        obs_dict={},
+    )
+
+    assert torch.equal(teacher_actions, torch.tensor([[11.0, 12.0], [13.0, 14.0]]))

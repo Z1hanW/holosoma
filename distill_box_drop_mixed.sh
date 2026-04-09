@@ -308,10 +308,12 @@ ASSERT_ACTIVE_MULTI_URDF=${ASSERT_ACTIVE_MULTI_URDF:-auto}
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs_legacy,perception_obs}
 TEACHER_PERCEPTION_PRESET=${TEACHER_PERCEPTION_PRESET:-none}
 TEACHER_PERCEPTION_OBS_KEY=${TEACHER_PERCEPTION_OBS_KEY:-teacher_perception_obs}
+CRITIC_PERCEPTION_PRESET=${CRITIC_PERCEPTION_PRESET:-heightmap}
+CRITIC_PERCEPTION_OBS_KEY=${CRITIC_PERCEPTION_OBS_KEY:-critic_perception_obs}
 TEACHER_ACTOR_OBS_HISTORY_LENGTH=${TEACHER_ACTOR_OBS_HISTORY_LENGTH:-}
 TEACHER_COMPAT_PROFILE=${TEACHER_COMPAT_PROFILE:-auto}
 TEACHER_COMPAT_NOTES=${TEACHER_COMPAT_NOTES:-}
-TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.2}
+TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
 TEACHER_ACTION_MIX_RATIO_START=${TEACHER_ACTION_MIX_RATIO_START:-}
 TEACHER_ACTION_MIX_RATIO_END=${TEACHER_ACTION_MIX_RATIO_END:-}
 TEACHER_ACTION_MIX_RATIO_END_ITERATION=${TEACHER_ACTION_MIX_RATIO_END_ITERATION:-}
@@ -322,7 +324,7 @@ DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-3000}
 PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.3}
 DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
 SCHEDULE_NAME=${SCHEDULE_NAME:-teacher_anchor_then_goal_curriculum_v2}
-SCHEDULE_NOTES=${SCHEDULE_NOTES:-"0-1400 teacher rollout mix decays 0.9->0.2. 0-2500 teacher-anchored clip-only; PPO ramps 0->0.3 over 0-3000 while DAgger weight stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.25 and reset curriculum ramps start_at_zero 0.2->1.0 / freeze_at_zero 0.95->0.0. Goal range ramps with the same delayed schedule."}
+SCHEDULE_NOTES=${SCHEDULE_NOTES:-"0-700 teacher rollout mix decays 0.7->0.0. 0-2500 teacher-anchored clip-only; PPO ramps 0->0.3 over 0-3000 while DAgger weight stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.25 and reset curriculum ramps start_at_zero 0.2->1.0 / freeze_at_zero 0.95->0.0. Goal range ramps with the same delayed schedule."}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.2}
 START_AT_TIMESTEP_ZERO_PROB_END=${START_AT_TIMESTEP_ZERO_PROB_END:-1.0}
 START_AT_TIMESTEP_ZERO_PROB_START_ITER=${START_AT_TIMESTEP_ZERO_PROB_START_ITER:-2500}
@@ -332,7 +334,7 @@ FREEZE_AT_TIMESTEP_ZERO_PROB_END=${FREEZE_AT_TIMESTEP_ZERO_PROB_END:-0.0}
 FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER:-2500}
 FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS}}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
-PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i_17x17}
+PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
 STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_proprio','actor_obs_drop_command']"}
 DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES=${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES:-True}
 DAGGER_MATCH_STD=${DAGGER_MATCH_STD:-True}
@@ -345,6 +347,10 @@ ENABLE_DEFAULT_POSE_PREPEND=${ENABLE_DEFAULT_POSE_PREPEND:-True}
 DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0.5}
 ENABLE_DEFAULT_POSE_APPEND=${ENABLE_DEFAULT_POSE_APPEND:-False}
 DEFAULT_POSE_APPEND_DURATION_S=${DEFAULT_POSE_APPEND_DURATION_S:-0.0}
+# Distill UI: keep only goal/reset-box/clip + essential sim controls by default.
+VISER_DISTILL_MINIMAL_UI=${VISER_DISTILL_MINIMAL_UI:-1}
+# Distill mixed launcher: hide Viser track/target keypoints by default.
+VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-0}
 
 if [[ "${START_AT_TIMESTEP_ZERO_PROB_EXPLICIT}" -eq 1 && "${START_AT_TIMESTEP_ZERO_PROB_END_EXPLICIT}" -eq 0 ]]; then
   START_AT_TIMESTEP_ZERO_PROB_END="${START_AT_TIMESTEP_ZERO_PROB}"
@@ -353,10 +359,10 @@ if [[ "${FREEZE_AT_TIMESTEP_ZERO_PROB_EXPLICIT}" -eq 1 && "${FREEZE_AT_TIMESTEP_
   FREEZE_AT_TIMESTEP_ZERO_PROB_END="${FREEZE_AT_TIMESTEP_ZERO_PROB}"
 fi
 if [[ "${TEACHER_ACTION_MIX_RATIO_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_START_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_END_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_END_ITERATION_EXPLICIT}" -eq 0 ]]; then
-  TEACHER_ACTION_MIX_RATIO="0.2"
-  TEACHER_ACTION_MIX_RATIO_START="0.9"
-  TEACHER_ACTION_MIX_RATIO_END="0.2"
-  TEACHER_ACTION_MIX_RATIO_END_ITERATION="1400"
+  TEACHER_ACTION_MIX_RATIO="0.0"
+  TEACHER_ACTION_MIX_RATIO_START="0.7"
+  TEACHER_ACTION_MIX_RATIO_END="0.0"
+  TEACHER_ACTION_MIX_RATIO_END_ITERATION="700"
 fi
 
 case "${SCHEDULE_VARIANT}" in
@@ -373,7 +379,7 @@ case "${SCHEDULE_VARIANT}" in
       SCHEDULE_NAME="teacher_anchor_then_goal_curriculum_v2_dag_first"
     fi
     if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
-      SCHEDULE_NOTES="0-1400 teacher rollout mix decays 0.9->0.2. 0-2000 pure DAgger with PPO disabled. 2000-3000 PPO ramps 0->0.3 while DAgger stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.25 and reset curriculum ramps start_at_zero 0.2->1.0 / freeze_at_zero 0.95->0.0. Goal range ramps with the same delayed schedule."
+      SCHEDULE_NOTES="0-700 teacher rollout mix decays 0.7->0.0. 0-2000 pure DAgger with PPO disabled. 2000-3000 PPO ramps 0->0.3 while DAgger stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.25 and reset curriculum ramps start_at_zero 0.2->1.0 / freeze_at_zero 0.95->0.0. Goal range ramps with the same delayed schedule."
     fi
     ;;
   *)
@@ -523,9 +529,9 @@ case "${DISTRIBUTION_VARIANT}" in
     fi
     if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
       if [[ "${SCHEDULE_VARIANT}" == "dag_first" ]]; then
-        SCHEDULE_NOTES="0-1400 teacher rollout mix decays 0.9->0.2. 0-2000 pure DAgger with PPO disabled. 2000-3000 PPO ramps 0->0.3 while DAgger stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.5 so half the envs remain on stable clip / motion-tracking distribution while half train external goals. Reset curriculum is frozen at start_at_zero=0.2 and freeze_at_zero=0.95 to preserve copy-style reset distribution."
+        SCHEDULE_NOTES="0-700 teacher rollout mix decays 0.7->0.0. 0-2000 pure DAgger with PPO disabled. 2000-3000 PPO ramps 0->0.3 while DAgger stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.5 so half the envs remain on stable clip / motion-tracking distribution while half train external goals. Reset curriculum is frozen at start_at_zero=0.2 and freeze_at_zero=0.95 to preserve copy-style reset distribution."
       else
-        SCHEDULE_NOTES="0-1400 teacher rollout mix decays 0.9->0.2. 0-2500 teacher-anchored clip-only; PPO ramps 0->0.3 over 0-3000 while DAgger weight stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.5 so half the envs remain on stable clip / motion-tracking distribution while half train external goals. Reset curriculum is frozen at start_at_zero=0.2 and freeze_at_zero=0.95 to preserve copy-style reset distribution."
+        SCHEDULE_NOTES="0-700 teacher rollout mix decays 0.7->0.0. 0-2500 teacher-anchored clip-only; PPO ramps 0->0.3 over 0-3000 while DAgger weight stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.5 so half the envs remain on stable clip / motion-tracking distribution while half train external goals. Reset curriculum is frozen at start_at_zero=0.2 and freeze_at_zero=0.95 to preserve copy-style reset distribution."
       fi
     fi
     ;;
@@ -866,6 +872,7 @@ echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
 echo "[INFO] teacher_compat_profile=${TEACHER_COMPAT_PROFILE_RESOLVED}"
 echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS}"
 echo "[INFO] teacher_perception_preset=${TEACHER_PERCEPTION_PRESET} teacher_perception_obs_key=${TEACHER_PERCEPTION_OBS_KEY}"
+echo "[INFO] critic_perception_preset=${CRITIC_PERCEPTION_PRESET} critic_perception_obs_key=${CRITIC_PERCEPTION_OBS_KEY}"
 if [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH}" ]]; then
   echo "[INFO] teacher_actor_obs_history_length=${TEACHER_ACTOR_OBS_HISTORY_LENGTH}"
 fi
@@ -908,6 +915,8 @@ echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}->${START
 echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END} iter=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER}"
 echo "[INFO] reset_to_default_pose=${RESET_TO_DEFAULT_POSE}"
 echo "[INFO] default_pose_prepend=${ENABLE_DEFAULT_POSE_PREPEND} duration_s=${DEFAULT_POSE_PREPEND_DURATION_S} default_pose_append=${ENABLE_DEFAULT_POSE_APPEND} append_duration_s=${DEFAULT_POSE_APPEND_DURATION_S}"
+echo "[INFO] viser_distill_minimal_ui=${VISER_DISTILL_MINIMAL_UI}"
+echo "[INFO] viser_show_target_keypoints=${VISER_SHOW_TARGET_KEYPOINTS}"
 echo "[INFO] dagger_ignore_external_goal_samples=${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES}"
 echo "[INFO] dagger_ignore_episode_initial_steps=${DAGGER_IGNORE_EPISODE_INITIAL_STEPS}"
 echo "[INFO] max_episode_length_s=${MAX_EPISODE_LENGTH_S}"
@@ -947,6 +956,15 @@ if [[ -n "${TEACHER_PERCEPTION_OBS_KEY}" ]]; then
   )
 fi
 
+CRITIC_PERCEPTION_ARGS=(
+  --algo.config.distill.critic-perception-preset="${CRITIC_PERCEPTION_PRESET}"
+)
+if [[ -n "${CRITIC_PERCEPTION_OBS_KEY}" ]]; then
+  CRITIC_PERCEPTION_ARGS+=(
+    --algo.config.distill.critic-perception-obs-key="${CRITIC_PERCEPTION_OBS_KEY}"
+  )
+fi
+
 OBJECT_URDF_ENV=()
 if [[ -n "${OBJECT_SPEC_PATH}" ]]; then
   OBJECT_URDF_ENV=(OBJECT_URDF="${OBJECT_SPEC_PATH}")
@@ -981,6 +999,8 @@ exec env \
   DEFAULT_POSE_PREPEND_DURATION_S="${DEFAULT_POSE_PREPEND_DURATION_S}" \
   ENABLE_DEFAULT_POSE_APPEND="${ENABLE_DEFAULT_POSE_APPEND}" \
   DEFAULT_POSE_APPEND_DURATION_S="${DEFAULT_POSE_APPEND_DURATION_S}" \
+  VISER_DISTILL_MINIMAL_UI="${VISER_DISTILL_MINIMAL_UI}" \
+  VISER_SHOW_TARGET_KEYPOINTS="${VISER_SHOW_TARGET_KEYPOINTS}" \
   PAIR_TERRAIN_WITH_MOTION="${PAIR_TERRAIN_WITH_MOTION}" \
   "${OBJECT_URDF_ENV[@]}" \
   bash "${SCRIPT_DIR}/distill_root_box.sh" "${TEACHER_CHECKPOINT}" \
@@ -991,6 +1011,7 @@ exec env \
     --algo.config.distill.teacher-compat-profile="${TEACHER_COMPAT_PROFILE_RESOLVED}" \
     --algo.config.distill.teacher-compat-notes="${TEACHER_COMPAT_NOTES}" \
     "${TEACHER_PERCEPTION_ARGS[@]}" \
+    "${CRITIC_PERCEPTION_ARGS[@]}" \
     --algo.config.distill.dagger-ignore-external-goal-samples="${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES}" \
     --algo.config.distill.dagger-ignore-episode-initial-steps="${DAGGER_IGNORE_EPISODE_INITIAL_STEPS}" \
     --algo.config.distill.ppo-target-coeff="${PPO_TARGET_COEFF}" \

@@ -30,6 +30,7 @@ class EnvConfig:
     terrain: TerrainManagerCfg
     perception: PerceptionConfig | None
     teacher_perception: PerceptionConfig | None
+    critic_perception: PerceptionConfig | None
     observation: ObservationManagerCfg | None
     action: ActionManagerCfg | None
     reward: RewardManagerCfg | None
@@ -42,11 +43,11 @@ class EnvConfig:
     logger: LoggerConfig
 
 
-def _resolve_teacher_perception_config(tyro_config: ExperimentConfig) -> PerceptionConfig | None:
+def _resolve_distill_perception_config(tyro_config: ExperimentConfig, preset_attr: str) -> PerceptionConfig | None:
     algo_wrapper = getattr(tyro_config, "algo", None)
     algo_config = getattr(algo_wrapper, "config", None)
     distill_cfg = getattr(algo_config, "distill", None) if algo_config is not None else None
-    preset_name = getattr(distill_cfg, "teacher_perception_preset", None) if distill_cfg is not None else None
+    preset_name = getattr(distill_cfg, preset_attr, None) if distill_cfg is not None else None
     if preset_name is None:
         return None
     preset_name = str(preset_name).strip()
@@ -54,8 +55,16 @@ def _resolve_teacher_perception_config(tyro_config: ExperimentConfig) -> Percept
         return None
     defaults = holosoma.config_values.perception.DEFAULTS
     if preset_name not in defaults:
-        raise ValueError(f"Unknown distill.teacher_perception_preset: {preset_name}")
+        raise ValueError(f"Unknown distill.{preset_attr}: {preset_name}")
     return dataclasses.replace(defaults[preset_name])
+
+
+def _resolve_teacher_perception_config(tyro_config: ExperimentConfig) -> PerceptionConfig | None:
+    return _resolve_distill_perception_config(tyro_config, "teacher_perception_preset")
+
+
+def _resolve_critic_perception_config(tyro_config: ExperimentConfig) -> PerceptionConfig | None:
+    return _resolve_distill_perception_config(tyro_config, "critic_perception_preset")
 
 
 def get_tyro_env_config(tyro_config: ExperimentConfig) -> EnvConfig:
@@ -78,6 +87,7 @@ def get_tyro_env_config(tyro_config: ExperimentConfig) -> EnvConfig:
         terrain=tyro_config.terrain,
         perception=tyro_config.perception,
         teacher_perception=_resolve_teacher_perception_config(tyro_config),
+        critic_perception=_resolve_critic_perception_config(tyro_config),
         observation=tyro_config.observation,
         action=tyro_config.action,
         reward=tyro_config.reward,

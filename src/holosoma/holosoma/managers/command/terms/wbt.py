@@ -101,6 +101,55 @@ def _first_sustained_true_index(mask: torch.Tensor, consecutive_steps: int) -> i
     return None
 
 
+def _pickup_threshold_from_rel_z(
+    rel_z: torch.Tensor,
+    *,
+    lift_height_threshold: float = _RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD,
+    lift_ratio_threshold: float = _CLIP_PICKUP_LIFT_RATIO_THRESHOLD,
+) -> torch.Tensor:
+    """Return the pickup threshold used to define the pickup-frame anchor.
+
+    The threshold is relative-z based and matches the clip-time pickup detection rule:
+    z_min + max(abs_height_threshold, lift_ratio_threshold * z_range).
+    """
+    if rel_z.numel() == 0:
+        return rel_z.new_tensor(float(lift_height_threshold))
+
+    z_min = rel_z.min()
+    z_range = torch.clamp(rel_z.max() - z_min, min=0.0)
+    return z_min + torch.maximum(
+        z_min.new_tensor(float(lift_height_threshold)),
+        z_range * float(lift_ratio_threshold),
+    )
+
+
+def _pickup_step_and_threshold_from_rel_z(
+    rel_z: torch.Tensor,
+    *,
+    lift_height_threshold: float = _RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD,
+    lift_ratio_threshold: float = _CLIP_PICKUP_LIFT_RATIO_THRESHOLD,
+    consecutive_steps: int = _RUNTIME_PICKUP_CONSECUTIVE_STEPS,
+) -> tuple[int, torch.Tensor]:
+    """Return the earliest sustained pickup step and its matching threshold."""
+    pickup_threshold = _pickup_threshold_from_rel_z(
+        rel_z,
+        lift_height_threshold=lift_height_threshold,
+        lift_ratio_threshold=lift_ratio_threshold,
+    )
+    if rel_z.numel() == 0:
+        return 0, pickup_threshold
+
+    lifted_mask = rel_z >= pickup_threshold
+    pickup_step = _first_sustained_true_index(lifted_mask, consecutive_steps)
+    if pickup_step is None:
+        lifted_indices = torch.nonzero(lifted_mask, as_tuple=False)
+        if lifted_indices.numel() > 0:
+            pickup_step = int(lifted_indices[0, 0].item())
+        else:
+            pickup_step = int(torch.argmax(rel_z).item())
+    return pickup_step, pickup_threshold
+
+
 #########################################################################################################
 ## MotionLoader and AdaptiveTimestepsSampler
 #########################################################################################################
@@ -1548,6 +1597,12 @@ class MotionCommand(CommandTermBase):
             "yes",
             "on",
         )
+        self._disable_clip_end_reset = os.environ.get("HOLOSOMA_DISABLE_CLIP_END_RESET", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
         if self._reset_to_default_pose:
             start_probs = [float(self.motion_cfg.start_at_timestep_zero_prob)]
             if self.motion_cfg.start_at_timestep_zero_prob_end is not None:
@@ -2428,13 +2483,17 @@ class MotionCommand(CommandTermBase):
 
         # Match BeyondMimic-style clip rollover: once a clip ends, reset only the
         # motion/object state for those envs instead of terminating the episode.
-        ended_env_ids = torch.where(self.time_steps >= self._current_clip_lengths())[0]
+        current_clip_lengths = self._current_clip_lengths()
+        ended_env_ids = torch.where(self.time_steps >= current_clip_lengths)[0]
         if ended_env_ids.numel() > 0:
-            self.reset(ended_env_ids)
-            sim = self._env.simulator
-            sim.set_actor_root_state_tensor_robots(ended_env_ids, sim.robot_root_states)
-            sim.set_dof_state_tensor_robots(ended_env_ids, sim.dof_state)
-            sim.refresh_sim_tensors()
+            if self._disable_clip_end_reset:
+                self.time_steps[ended_env_ids] = torch.clamp(current_clip_lengths[ended_env_ids] - 1, min=0)
+            else:
+                self.reset(ended_env_ids)
+                sim = self._env.simulator
+                sim.set_actor_root_state_tensor_robots(ended_env_ids, sim.robot_root_states)
+                sim.set_dof_state_tensor_robots(ended_env_ids, sim.dof_state)
+                sim.refresh_sim_tensors()
 
         # 1. update body_pos_relative_w and body_quat_relative_w
         # definition of body_pos/quat_relative_w:
@@ -2986,9 +3045,9 @@ class MotionCommand(CommandTermBase):
         mix = float(self._clamp01(self._sparse_goal_curriculum_progress() if alpha is None else alpha))
         return start_tensor + (end_tensor - start_tensor) * mix
 
-    def _get_clip_pickup_steps_by_clip(self) -> torch.Tensor:
+    def _get_clip_pickup_stats_by_clip(self) -> tuple[torch.Tensor, torch.Tensor]:
         cache_name = (
-            "_clip_pickup_steps_by_clip_"
+            "_clip_pickup_stats_by_clip_"
             f"h{_RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD:.4f}_"
             f"r{_CLIP_PICKUP_LIFT_RATIO_THRESHOLD:.4f}_"
             f"c{_RUNTIME_PICKUP_CONSECUTIVE_STEPS:d}"
@@ -2998,9 +3057,11 @@ class MotionCommand(CommandTermBase):
             return cached
 
         pickup_steps_by_clip = torch.zeros((self.motion.num_clips,), device=self.device, dtype=torch.long)
+        pickup_thresholds_by_clip = torch.zeros((self.motion.num_clips,), device=self.device, dtype=torch.float32)
         if not self.motion.has_object:
-            setattr(self, cache_name, pickup_steps_by_clip)
-            return pickup_steps_by_clip
+            cached = (pickup_steps_by_clip, pickup_thresholds_by_clip)
+            setattr(self, cache_name, cached)
+            return cached
 
         clip_offsets = self.motion.clip_offsets
         clip_lengths = self.motion.clip_lengths
@@ -3015,25 +3076,24 @@ class MotionCommand(CommandTermBase):
 
             clip_end = clip_start + clip_length
             clip_rel_z = object_pos_w[clip_start:clip_end, 2] - root_pos_w[clip_start:clip_end, 2]
-            z_min = clip_rel_z.min()
-            z_range = torch.clamp(clip_rel_z.max() - z_min, min=0.0)
-            pickup_threshold = z_min + torch.maximum(
-                z_min.new_tensor(float(_RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD)),
-                z_range * float(_CLIP_PICKUP_LIFT_RATIO_THRESHOLD),
+            pickup_step, pickup_threshold = _pickup_step_and_threshold_from_rel_z(
+                clip_rel_z,
+                lift_height_threshold=_RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD,
+                lift_ratio_threshold=_CLIP_PICKUP_LIFT_RATIO_THRESHOLD,
+                consecutive_steps=_RUNTIME_PICKUP_CONSECUTIVE_STEPS,
             )
-
-            lifted_mask = clip_rel_z >= pickup_threshold
-            pickup_step = _first_sustained_true_index(lifted_mask, _RUNTIME_PICKUP_CONSECUTIVE_STEPS)
-            if pickup_step is None:
-                lifted_indices = torch.nonzero(lifted_mask, as_tuple=False)
-                if lifted_indices.numel() > 0:
-                    pickup_step = int(lifted_indices[0, 0].item())
-                else:
-                    pickup_step = int(torch.argmax(clip_rel_z).item())
             pickup_steps_by_clip[clip_idx] = pickup_step
+            pickup_thresholds_by_clip[clip_idx] = pickup_threshold
 
-        setattr(self, cache_name, pickup_steps_by_clip)
-        return pickup_steps_by_clip
+        cached = (pickup_steps_by_clip, pickup_thresholds_by_clip)
+        setattr(self, cache_name, cached)
+        return cached
+
+    def _get_clip_pickup_steps_by_clip(self) -> torch.Tensor:
+        return self._get_clip_pickup_stats_by_clip()[0]
+
+    def _get_clip_pickup_thresholds_by_clip(self) -> torch.Tensor:
+        return self._get_clip_pickup_stats_by_clip()[1]
 
     def _reset_pickup_anchor_state(
         self,
@@ -3095,7 +3155,10 @@ class MotionCommand(CommandTermBase):
             return
 
         current_rel_z = self.simulator_object_pos_w[:, 2] - self.robot_root_pos_w[:, 2]
-        lifted = (current_rel_z - self.pickup_object_rel_z_baseline) >= _RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD
+        # Reuse the same clip-derived pickup threshold that defined the fixed pickup-frame
+        # command so runtime anchor latching stays in the same coordinate frame.
+        clip_pickup_thresholds = self._get_clip_pickup_thresholds_by_clip()[self.clip_ids]
+        lifted = current_rel_z >= clip_pickup_thresholds
         self.pickup_consecutive_counter = torch.where(
             lifted,
             self.pickup_consecutive_counter + 1,

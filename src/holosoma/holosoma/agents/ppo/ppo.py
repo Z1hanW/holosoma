@@ -505,6 +505,7 @@ class PPO(BaseAlgo):
         self.clip_teacher_actions = bool(distill_cfg.clip_teacher_actions)
         self.clip_actions_threshold = float(distill_cfg.clip_actions_threshold)
         self.take_teacher_actions = bool(distill_cfg.take_teacher_actions)
+        self.teacher_use_stochastic_actions = bool(getattr(distill_cfg, "teacher_use_stochastic_actions", False))
         self.teacher_action_mix_ratio = float(getattr(distill_cfg, "teacher_action_mix_ratio", 0.0))
         if not (0.0 <= self.teacher_action_mix_ratio <= 1.0):
             raise ValueError(
@@ -910,6 +911,11 @@ class PPO(BaseAlgo):
     def _select_teacher_actions(
         self, teacher_obs_raw: torch.Tensor, obs_dict: dict[str, torch.Tensor]
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        def teacher_act(teacher_actor: nn.Module, policy_state: dict[str, torch.Tensor]) -> torch.Tensor:
+            if self.teacher_use_stochastic_actions:
+                return teacher_actor.act(policy_state)
+            return teacher_actor.act_inference(policy_state)
+
         if self.use_multi_teacher:
             if self.multi_teacher_select_obs_var not in obs_dict:
                 raise ValueError(
@@ -932,7 +938,7 @@ class PPO(BaseAlgo):
                             f"Teacher perception obs '{teacher_perception_key}' not found in current observation dict."
                         )
                     teacher_policy_state[teacher_perception_key] = obs_dict[teacher_perception_key][mask]
-                teacher_actions[mask] = teacher_actor.act(teacher_policy_state)
+                teacher_actions[mask] = teacher_act(teacher_actor, teacher_policy_state)
             return teacher_actions, teacher_indices
 
         assert self.teacher_actor is not None, "Teacher actor is not initialized."
@@ -945,7 +951,7 @@ class PPO(BaseAlgo):
                     f"Teacher perception obs '{teacher_perception_key}' not found in current observation dict."
                 )
             teacher_policy_state[teacher_perception_key] = obs_dict[teacher_perception_key]
-        teacher_actions = self.teacher_actor.act(teacher_policy_state)
+        teacher_actions = teacher_act(self.teacher_actor, teacher_policy_state)
         return teacher_actions, None
 
     def _adjust_ppo_dagger_coeff(self, current_epoch: int) -> None:

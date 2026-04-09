@@ -52,6 +52,8 @@ class BaseTask:
         simulator_config = tyro_config.simulator
         terrain_config = tyro_config.terrain
         perception_config = tyro_config.perception
+        teacher_perception_config = tyro_config.teacher_perception
+        critic_perception_config = tyro_config.critic_perception
         robot_config = tyro_config.robot
         action_config = tyro_config.action
         reward_config = tyro_config.reward
@@ -146,9 +148,16 @@ class BaseTask:
         if perception_config is not None:
             self.perception_manager = PerceptionManager(perception_config, self, self.device)
         self.teacher_perception_manager = None
-        teacher_perception_config = getattr(tyro_config, "teacher_perception", None)
         if teacher_perception_config is not None:
             self.teacher_perception_manager = PerceptionManager(teacher_perception_config, self, self.device)
+        self.critic_perception_manager = None
+        if critic_perception_config is not None:
+            if perception_config is not None and critic_perception_config == perception_config:
+                self.critic_perception_manager = self.perception_manager
+            elif teacher_perception_config is not None and critic_perception_config == teacher_perception_config:
+                self.critic_perception_manager = self.teacher_perception_manager
+            else:
+                self.critic_perception_manager = PerceptionManager(critic_perception_config, self, self.device)
 
         # if running with a viewer, set up keyboard shortcuts and camera
         self.viewer = None
@@ -197,6 +206,12 @@ class BaseTask:
             self.perception_manager.setup()
         if self.teacher_perception_manager is not None:
             self.teacher_perception_manager.setup()
+        if (
+            self.critic_perception_manager is not None
+            and self.critic_perception_manager is not self.perception_manager
+            and self.critic_perception_manager is not self.teacher_perception_manager
+        ):
+            self.critic_perception_manager.setup()
         self._init_depth_logging_state()
         self._rollout_recorder = RolloutRecorder(self)
         self._viser_live = ViserLiveViewer(self)

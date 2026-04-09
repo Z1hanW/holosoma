@@ -448,7 +448,7 @@ g1_29dof_wbt_w_object_generalist_legacy_obs = replace(
 )
 
 _w_object_distill_sparse_root_cmd_actor_inputs = ["actor_obs_root", "actor_obs_proprio", "actor_obs_box"]
-_w_object_distill_sparse_root_cmd_critic_inputs = ["critic_obs"]
+_w_object_distill_sparse_root_cmd_critic_inputs = ["critic_obs", "critic_proprio_history"]
 _w_object_command_curriculum_actor_inputs = [
     "actor_obs_track",
     "actor_obs_proprio",
@@ -456,6 +456,11 @@ _w_object_command_curriculum_actor_inputs = [
     "actor_obs_mode",
 ]
 _w_object_command_curriculum_critic_inputs = ["critic_obs"]
+
+_w_object_distill_sparse_root_cmd_critic_layer = replace(
+    g1_29dof_wbt_w_object_generalist.algo.config.module_dict.critic.layer_config,
+    module_input_name=tuple(_w_object_distill_sparse_root_cmd_critic_inputs),
+)
 
 _w_object_distill_sparse_root_cmd_module_dict = PPOModuleDictConfig(
     actor=replace(
@@ -467,6 +472,7 @@ _w_object_distill_sparse_root_cmd_module_dict = PPOModuleDictConfig(
         g1_29dof_wbt_w_object_generalist.algo.config.module_dict.critic,
         type="MLP",
         input_dim=_w_object_distill_sparse_root_cmd_critic_inputs,
+        layer_config=_w_object_distill_sparse_root_cmd_critic_layer,
     ),
 )
 
