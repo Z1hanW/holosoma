@@ -177,12 +177,26 @@ camera_depth_d435i_defm_vit_s14 = replace(
     encoder_patch_size=14,
 )
 
+camera_depth_d435i_defm_regnet_y_800mf = replace(
+    camera_depth_d435i,
+    # Keep the same far-tracking-style 58x87 depth preprocessing, but swap the encoder.
+    encoder_output_dim=784,
+    encoder_type="defm_regnet_y_800mf",
+    encoder_fusion="concat",
+    encoder_pretrained=True,
+    encoder_pretrained_path=None,
+    encoder_freeze_backbone=True,
+    encoder_target_size=224,
+    encoder_patch_size=None,
+)
+
 DEFAULTS = {
     "none": none,
     "heightmap": heightmap,
     "camera_depth_d435i": camera_depth_d435i,
     "camera_depth_d435i_17x17": camera_depth_d435i_17x17,
     "camera_depth_d435i_defm_vit_s14": camera_depth_d435i_defm_vit_s14,
+    "camera_depth_d435i_defm_regnet_y_800mf": camera_depth_d435i_defm_regnet_y_800mf,
 }
 
 __all__ = [
@@ -191,5 +205,6 @@ __all__ = [
     "camera_depth_d435i",
     "camera_depth_d435i_17x17",
     "camera_depth_d435i_defm_vit_s14",
+    "camera_depth_d435i_defm_regnet_y_800mf",
     "DEFAULTS",
 ]

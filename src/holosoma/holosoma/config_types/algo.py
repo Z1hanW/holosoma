@@ -55,7 +55,7 @@ class LayerConfig:
     """Output dimension for perception encoder."""
 
     perception_encoder_type: str = "gated_linear"
-    """Perception encoder type: 'gated_linear', 'attention', 'far_tracking_cnn_small', or 'time_gru'."""
+    """Perception encoder type: 'gated_linear', 'attention', 'far_tracking_cnn_small', 'defm_vit_s14', 'defm_regnet_y_800mf', or 'time_gru'."""
 
     perception_input_height: int | None = None
     """Optional input height for structured perception encoders."""
