@@ -18,6 +18,9 @@ class PerceptionConfig:
     inject_into_policy_modules: bool = True
     """Whether to inject perception encoder branches into actor/critic modules."""
 
+    inject_into_critic_modules: bool = True
+    """Whether to inject perception into the critic as well as the actor."""
+
     output_mode: str = "heightmap"
     """Perception output type: 'heightmap' or 'camera_depth'."""
 
@@ -172,6 +175,9 @@ class PerceptionConfig:
     camera_warp_hole_prob: float = 0.0
     """Probability threshold for synthetic hole masks when enabled."""
 
+    camera_apply_sensor_noise: bool = True
+    """Apply runtime camera multiplicative/dropout noise when provided by environment randomization."""
+
     camera_scandots_stride: int = 4
     """Pixel stride for legacy scandots depth path (currently unused)."""
 
@@ -206,4 +212,22 @@ class PerceptionConfig:
     """Output dimension for the perception encoder."""
 
     encoder_type: str = "gated_linear"
-    """Perception encoder type: 'gated_linear', 'attention', or 'time_gru'."""
+    """Perception encoder type: 'gated_linear', 'attention', 'far_tracking_cnn_small', or 'time_gru'."""
+
+    encoder_fusion: str = "extra_input_to_hidden"
+    """How encoded perception is fused into policy modules: 'extra_input_to_hidden' or 'concat'."""
+
+    encoder_pretrained: bool = True
+    """Whether to load pretrained weights for external perception backbones when supported."""
+
+    encoder_pretrained_path: str | None = None
+    """Optional local checkpoint path for external perception backbones."""
+
+    encoder_freeze_backbone: bool = True
+    """Freeze external perception backbones and train only the projection head when supported."""
+
+    encoder_target_size: int | tuple[int, int] | None = None
+    """Optional target size used by external perception preprocessors."""
+
+    encoder_patch_size: int | None = None
+    """Optional patch-size alignment used by external perception preprocessors."""

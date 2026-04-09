@@ -453,6 +453,20 @@ critic_obs_w_object_command_privileged_terms.update(
     }
 )
 
+critic_obs_w_object_command_distill_terms = critic_obs_w_object_terms.copy()
+critic_obs_w_object_command_distill_terms.pop("actions")
+critic_obs_w_object_command_distill_terms.update(
+    {
+        "obj_ang_vel_b": critic_obs_w_object_command_privileged_terms["obj_ang_vel_b"],
+        "obj_sparse_goal_xy_pick_root_heading": critic_obs_w_object_command_privileged_terms[
+            "obj_sparse_goal_xy_pick_root_heading"
+        ],
+        "obj_picked_flag": critic_obs_w_object_command_privileged_terms["obj_picked_flag"],
+        "command_only_flag": critic_obs_w_object_command_privileged_terms["command_only_flag"],
+        "sparse_goal_external_flag": critic_obs_w_object_command_privileged_terms["sparse_goal_external_flag"],
+    }
+)
+
 g1_29dof_wbt_observation = ObservationManagerCfg(
     groups={
         "actor_obs": actor_obs_shared,
@@ -727,8 +741,14 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
         "critic_obs": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
+            history_length=1,
+            terms=critic_obs_w_object_command_distill_terms,
+        ),
+        "critic_proprio_history": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
             history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
-            terms=critic_obs_w_object_command_privileged_terms,
+            terms=object_distill_proprio_terms,
         ),
     },
 )

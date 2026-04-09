@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import functools
 import hashlib
 import json
@@ -1193,6 +1194,12 @@ class ViserLiveViewer:
             "false",
             "no",
         )
+        self._distill_minimal_ui = os.environ.get("VISER_DISTILL_MINIMAL_UI", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
         self._start_paused = os.environ.get("VISER_START_PAUSED", "0").lower() in (
             "1",
             "true",
@@ -1368,6 +1375,7 @@ class ViserLiveViewer:
         self._manual_goal_pos_x_slider = None
         self._manual_goal_pos_y_slider = None
         self._manual_goal_status = None
+        self._object_reset_random_button = None
         self._object_reset_override_cb = None
         self._object_reset_zero_button = None
         self._object_reset_pos_x_slider = None
@@ -2417,14 +2425,89 @@ class ViserLiveViewer:
             except Exception:
                 pass
 
+    def _clip_lock_enabled(self) -> bool:
+        if self._clip_lock_cb is not None:
+            return bool(self._clip_lock_cb.value)
+        return bool(self._clip_lock_default)
+
+    def _set_manual_object_reset_override(
+        self,
+        *,
+        enabled: bool,
+        pos_offset_w: np.ndarray | None = None,
+        rpy_offset: np.ndarray | None = None,
+    ) -> None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            self._update_object_reset_status()
+            return
+
+        if pos_offset_w is None:
+            pos_offset_w = np.zeros(3, dtype=np.float32)
+        else:
+            pos_offset_w = np.asarray(pos_offset_w, dtype=np.float32).reshape(3)
+        if rpy_offset is None:
+            rpy_offset = np.zeros(3, dtype=np.float32)
+        else:
+            rpy_offset = np.asarray(rpy_offset, dtype=np.float32).reshape(3)
+
+        if self._object_reset_override_cb is not None:
+            self._object_reset_override_cb.value = bool(enabled)
+        slider_controls = (
+            self._object_reset_pos_x_slider,
+            self._object_reset_pos_y_slider,
+            self._object_reset_pos_z_slider,
+            self._object_reset_roll_slider,
+            self._object_reset_pitch_slider,
+            self._object_reset_yaw_slider,
+        )
+        for control, value in zip(slider_controls, np.concatenate((pos_offset_w, rpy_offset)), strict=False):
+            if control is None:
+                continue
+            control.value = float(value)
+
+        device = self._env.device
+        motion_cmd.manual_object_reset_enabled = bool(enabled)
+        motion_cmd.manual_object_reset_pos_offset_w = torch.tensor(
+            [pos_offset_w],
+            device=device,
+            dtype=torch.float32,
+        ).repeat(self._env.num_envs, 1)
+        motion_cmd.manual_object_reset_rpy_offset = torch.tensor(
+            [rpy_offset],
+            device=device,
+            dtype=torch.float32,
+        ).repeat(self._env.num_envs, 1)
+        self._update_object_reset_status()
+
+    def _clear_manual_object_reset_override(self) -> None:
+        self._set_manual_object_reset_override(enabled=False)
+
+    def _randomize_object_reset_override(self) -> None:
+        xy_range = max(0.0, float(os.environ.get("VISER_RESET_BOX_RANDOM_XY_RANGE", "0.5")))
+        pos_offset_w = np.array(
+            [
+                np.random.uniform(-xy_range, xy_range),
+                np.random.uniform(-xy_range, xy_range),
+                0.0,
+            ],
+            dtype=np.float32,
+        )
+        self._set_manual_object_reset_override(enabled=True, pos_offset_w=pos_offset_w)
+        self._reset_requested = True
+        self.apply_pending_controls()
+
     def _update_object_reset_status(self) -> None:
         if self._object_reset_status is None:
             return
+        motion_cmd = self._get_motion_command()
         enabled = bool(self._object_reset_override_cb.value) if self._object_reset_override_cb is not None else False
+        if self._object_reset_override_cb is None and motion_cmd is not None:
+            enabled = bool(getattr(motion_cmd, "manual_object_reset_enabled", False))
         if not enabled:
             self._object_reset_status.content = (
                 "Mode: `off`\n\n"
-                "Applies on next reset only.\n\n"
+                "Applies on reset while enabled.\n\n"
                 "Runtime size scaling is not supported yet; size still comes from the spawned URDF scale."
             )
             return
@@ -2435,18 +2518,40 @@ class ViserLiveViewer:
         dr = float(self._object_reset_roll_slider.value) if self._object_reset_roll_slider is not None else 0.0
         dp = float(self._object_reset_pitch_slider.value) if self._object_reset_pitch_slider is not None else 0.0
         dyaw = float(self._object_reset_yaw_slider.value) if self._object_reset_yaw_slider is not None else 0.0
+        if motion_cmd is not None and self._object_reset_pos_x_slider is None:
+            pos_offset_w = getattr(motion_cmd, "manual_object_reset_pos_offset_w", None)
+            rpy_offset = getattr(motion_cmd, "manual_object_reset_rpy_offset", None)
+            if isinstance(pos_offset_w, torch.Tensor) and pos_offset_w.ndim >= 2 and pos_offset_w.shape[0] > self._env_id:
+                dx = float(pos_offset_w[self._env_id, 0].item())
+                dy = float(pos_offset_w[self._env_id, 1].item())
+                dz = float(pos_offset_w[self._env_id, 2].item())
+            if isinstance(rpy_offset, torch.Tensor) and rpy_offset.ndim >= 2 and rpy_offset.shape[0] > self._env_id:
+                dr = float(rpy_offset[self._env_id, 0].item())
+                dp = float(rpy_offset[self._env_id, 1].item())
+                dyaw = float(rpy_offset[self._env_id, 2].item())
         self._object_reset_status.content = (
             "Mode: `on`\n\n"
             "Frame: `world offset on reset`\n\n"
             f"Position: `dx={dx:+.2f}` `dy={dy:+.2f}` `dz={dz:+.2f}`\n\n"
             f"Rotation: `droll={dr:+.2f}` `dpitch={dp:+.2f}` `dyaw={dyaw:+.2f}`\n\n"
-            "Applies on next reset only.\n\n"
+            "Applies on reset while enabled.\n\n"
             "Runtime size scaling is not supported yet; size still comes from the spawned URDF scale."
         )
 
     def _update_manual_object_reset_override(self) -> None:
         motion_cmd = self._get_motion_command()
         if motion_cmd is None or not hasattr(motion_cmd, "motion") or not bool(getattr(motion_cmd.motion, "has_object", False)):
+            self._update_object_reset_status()
+            return
+        if (
+            self._object_reset_override_cb is None
+            and self._object_reset_pos_x_slider is None
+            and self._object_reset_pos_y_slider is None
+            and self._object_reset_pos_z_slider is None
+            and self._object_reset_roll_slider is None
+            and self._object_reset_pitch_slider is None
+            and self._object_reset_yaw_slider is None
+        ):
             self._update_object_reset_status()
             return
 
@@ -2600,7 +2705,7 @@ class ViserLiveViewer:
         if not enabled:
             self._clear_manual_commands(clear_gui_toggles=False)
             # If clip-lock is off, release any manual forced-clip override.
-            lock_enabled = bool(self._clip_lock_cb.value) if self._clip_lock_cb is not None else False
+            lock_enabled = self._clip_lock_enabled()
             if not lock_enabled:
                 try:
                     motion_cmd.set_forced_clip(None)
@@ -3357,50 +3462,86 @@ class ViserLiveViewer:
         if self._server is None:
             return
 
-        with self._server.gui.add_folder("Visualization"):
-            self._show_scandots_cb = self._server.gui.add_checkbox(
-                "Show Scandots",
-                initial_value=self._scandots_enabled,
-                hint="Toggle mesh-sampled point cloud",
-            )
-            self._scandots_size_slider = self._server.gui.add_slider(
-                "Scandots Size",
-                min=0.001,
-                max=0.05,
-                step=0.001,
-                initial_value=float(self._scandots_point_size),
-                hint="Point size for scandots visualization",
-            )
+        def _gui_section_enabled(env_name: str, default: bool) -> bool:
+            raw = os.environ.get(env_name)
+            if raw is None:
+                return default
+            return raw.lower() not in ("0", "false", "no", "off")
 
-        @self._show_scandots_cb.on_update
-        def _(_evt) -> None:
-            self._scandots_enabled = bool(self._show_scandots_cb.value)
-            if self._perception_show_points_cb is not None and bool(self._perception_show_points_cb.value) != self._scandots_enabled:
-                self._perception_show_points_cb.value = self._scandots_enabled
-            if not self._scandots_enabled and self._scandots_handle is not None:
-                self._scandots_handle.visible = False
-            if not self._scandots_enabled and self._scandots_rays_handle is not None:
-                self._scandots_rays_handle.visible = False
-
-        @self._scandots_size_slider.on_update
-        def _(_evt) -> None:
-            self._scandots_point_size = float(self._scandots_size_slider.value)
-            if self._scandots_handle is not None:
-                self._scandots_handle.point_size = float(self._scandots_point_size)
-
-        self._setup_perception_controls()
-
-        manual_gui_enabled = os.environ.get("VISER_ENABLE_MANUAL_GUI", "1").lower() not in (
-            "0",
-            "false",
-            "no",
+        visualization_gui_enabled = _gui_section_enabled(
+            "VISER_ENABLE_VISUALIZATION_GUI",
+            not self._distill_minimal_ui,
         )
-        manual_goal_gui_enabled = os.environ.get("VISER_ENABLE_MANUAL_GOAL_GUI", "1").lower() not in (
-            "0",
-            "false",
-            "no",
+        perception_gui_enabled = _gui_section_enabled(
+            "VISER_ENABLE_PERCEPTION_GUI",
+            not self._distill_minimal_ui,
         )
-        if manual_gui_enabled:
+        manual_gui_enabled = _gui_section_enabled("VISER_ENABLE_MANUAL_GUI", True)
+        manual_root_gui_enabled = _gui_section_enabled(
+            "VISER_ENABLE_MANUAL_ROOT_GUI",
+            manual_gui_enabled and not self._distill_minimal_ui,
+        )
+        manual_goal_gui_enabled = _gui_section_enabled(
+            "VISER_ENABLE_MANUAL_GOAL_GUI",
+            manual_gui_enabled,
+        )
+        contact_force_gui_enabled = _gui_section_enabled(
+            "VISER_ENABLE_CONTACT_FORCE_GUI",
+            not self._distill_minimal_ui,
+        )
+        simulation_gui_enabled = _gui_section_enabled(
+            "VISER_ENABLE_SIMULATION_CONTROL_GUI",
+            True,
+        )
+        reset_object_gui_enabled = _gui_section_enabled(
+            "VISER_ENABLE_RESET_OBJECT_GUI",
+            True,
+        )
+        world_viz_gui_enabled = _gui_section_enabled(
+            "VISER_ENABLE_WORLD_VIZ_GUI",
+            not self._distill_minimal_ui,
+        )
+        clip_gui_enabled = _gui_section_enabled("VISER_ENABLE_CLIP_GUI", True)
+
+        if visualization_gui_enabled:
+            with self._server.gui.add_folder("Visualization"):
+                self._show_scandots_cb = self._server.gui.add_checkbox(
+                    "Show Scandots",
+                    initial_value=self._scandots_enabled,
+                    hint="Toggle mesh-sampled point cloud",
+                )
+                self._scandots_size_slider = self._server.gui.add_slider(
+                    "Scandots Size",
+                    min=0.001,
+                    max=0.05,
+                    step=0.001,
+                    initial_value=float(self._scandots_point_size),
+                    hint="Point size for scandots visualization",
+                )
+
+            @self._show_scandots_cb.on_update
+            def _(_evt) -> None:
+                self._scandots_enabled = bool(self._show_scandots_cb.value)
+                if (
+                    self._perception_show_points_cb is not None
+                    and bool(self._perception_show_points_cb.value) != self._scandots_enabled
+                ):
+                    self._perception_show_points_cb.value = self._scandots_enabled
+                if not self._scandots_enabled and self._scandots_handle is not None:
+                    self._scandots_handle.visible = False
+                if not self._scandots_enabled and self._scandots_rays_handle is not None:
+                    self._scandots_rays_handle.visible = False
+
+            @self._scandots_size_slider.on_update
+            def _(_evt) -> None:
+                self._scandots_point_size = float(self._scandots_size_slider.value)
+                if self._scandots_handle is not None:
+                    self._scandots_handle.point_size = float(self._scandots_point_size)
+
+        if perception_gui_enabled:
+            self._setup_perception_controls()
+
+        if manual_root_gui_enabled:
             with self._server.gui.add_folder("Manual Control", expand_by_default=False):
                 self._manual_control_cb = self._server.gui.add_checkbox(
                     "Enable Manual Root Command",
@@ -3456,61 +3597,66 @@ class ViserLiveViewer:
                         self.apply_pending_controls()
                 self._sync_manual_root_target_from_robot()
 
-                if manual_goal_gui_enabled:
-                    with self._server.gui.add_folder("Manual Goal"):
-                        self._manual_goal_override_cb = self._server.gui.add_checkbox(
-                            "Enable Manual Goal Override",
-                            initial_value=False,
-                            hint=(
-                                "Override the drop target in the same pickup-time root-heading frame. "
-                                "The distilled box-drop policy consumes `[dx, dy]`."
-                            ),
-                        )
-                        self._manual_goal_zero_button = self._server.gui.add_button(
-                            "Zero / Sync From Goal",
-                            hint="Load the current target command into the sliders, or zero if unavailable.",
-                        )
-                        self._manual_goal_pos_x_slider = self._server.gui.add_slider(
-                            "Target Box dX (forward, m)",
-                            min=-2.5,
-                            max=2.5,
-                            step=0.02,
-                            initial_value=0.0,
-                        )
-                        self._manual_goal_pos_y_slider = self._server.gui.add_slider(
-                            "Target Box dY (left, m)",
-                            min=-2.5,
-                            max=2.5,
-                            step=0.02,
-                            initial_value=0.0,
-                        )
-                        self._manual_goal_status = self._server.gui.add_markdown("Mode: `idle`\n\nTarget cmd(box): n/a")
+        if manual_goal_gui_enabled:
+            with self._server.gui.add_folder("Goal" if self._distill_minimal_ui else "Manual Goal"):
+                self._manual_goal_override_cb = self._server.gui.add_checkbox(
+                    "Enable Manual Goal Override",
+                    initial_value=False,
+                    hint=(
+                        "Override the drop target in the same pickup-time root-heading frame. "
+                        "The distilled box-drop policy consumes `[dx, dy]`."
+                    ),
+                )
+                self._manual_goal_zero_button = self._server.gui.add_button(
+                    "Zero / Sync From Goal",
+                    hint="Load the current target command into the sliders, or zero if unavailable.",
+                )
+                self._manual_goal_pos_x_slider = self._server.gui.add_slider(
+                    "Target Box dX (forward, m)",
+                    min=-2.5,
+                    max=2.5,
+                    step=0.02,
+                    initial_value=0.0,
+                )
+                self._manual_goal_pos_y_slider = self._server.gui.add_slider(
+                    "Target Box dY (left, m)",
+                    min=-2.5,
+                    max=2.5,
+                    step=0.02,
+                    initial_value=0.0,
+                )
+                self._manual_goal_status = self._server.gui.add_markdown("Mode: `idle`\n\nTarget cmd(box): n/a")
 
-                    @self._manual_goal_zero_button.on_click
-                    def _(_evt) -> None:
-                        self._sync_manual_goal_target_from_reference()
-                        self.apply_pending_controls()
+            @self._manual_goal_zero_button.on_click
+            def _(_evt) -> None:
+                self._sync_manual_goal_target_from_reference()
+                self.apply_pending_controls()
 
-                    @self._manual_goal_override_cb.on_update
-                    def _(_evt) -> None:
-                        if self._manual_goal_override_cb is not None and bool(self._manual_goal_override_cb.value):
-                            self._sync_manual_goal_target_from_reference()
-                        self.apply_pending_controls()
-
-                    for control in (
-                        self._manual_goal_pos_x_slider,
-                        self._manual_goal_pos_y_slider,
-                    ):
-
-                        @control.on_update
-                        def _(_evt) -> None:
-                            self.apply_pending_controls()
-
+            @self._manual_goal_override_cb.on_update
+            def _(_evt) -> None:
+                if self._manual_goal_override_cb is not None and bool(self._manual_goal_override_cb.value):
                     self._sync_manual_goal_target_from_reference()
-                    self._update_manual_goal_status()
+                self.apply_pending_controls()
+
+            for control in (
+                self._manual_goal_pos_x_slider,
+                self._manual_goal_pos_y_slider,
+            ):
+
+                @control.on_update
+                def _(_evt) -> None:
+                    self.apply_pending_controls()
+
+            self._sync_manual_goal_target_from_reference()
+            self._update_manual_goal_status()
 
         sim_cfg = getattr(self._env.simulator, "simulator_config", None)
-        if (not self._disable_contact_force_viz) and sim_cfg is not None and hasattr(sim_cfg, "contact_force_viz"):
+        if (
+            contact_force_gui_enabled
+            and (not self._disable_contact_force_viz)
+            and sim_cfg is not None
+            and hasattr(sim_cfg, "contact_force_viz")
+        ):
             with self._server.gui.add_folder("Contact Forces"):
                 self._contact_force_cb = self._server.gui.add_checkbox(
                     "Show Contact Forces",
@@ -3558,241 +3704,272 @@ class ViserLiveViewer:
             def _(_evt) -> None:
                 _sync_contact_cfg()
 
-        with self._server.gui.add_folder("Advanced", expand_by_default=False):
-            with self._server.gui.add_folder("Simulation Control"):
-                self._play_control = self._server.gui.add_checkbox(
-                    "Play",
-                    initial_value=not self._start_paused,
-                    hint="Toggle simulation play/pause",
-                )
-                self._step_button = self._server.gui.add_button(
-                    "Step",
-                    hint="Step the simulation forward by one frame",
-                )
-                self._reset_button = self._server.gui.add_button(
-                    "Reset",
-                    hint="Reset the selected environment",
-                )
-                self._default_pose_init_cb = self._server.gui.add_checkbox(
-                    "Default Pose Init",
-                    initial_value=bool(self._reset_to_default_pose),
-                    hint="When enabled, reset/clip apply initializes from the robot default pose instead of the motion pose.",
-                )
-
-            @self._step_button.on_click
-            def _(_evt) -> None:
-                self._step_requested = True
-
-            @self._reset_button.on_click
-            def _(_evt) -> None:
-                self._reset_requested = True
-
-            @self._default_pose_init_cb.on_update
-            def _(_evt) -> None:
-                self._set_default_pose_init_enabled(bool(self._default_pose_init_cb.value))
-
+        advanced_gui_ctx = (
+            self._server.gui.add_folder("Advanced", expand_by_default=False)
+            if not self._distill_minimal_ui
+            else nullcontext()
+        )
+        with advanced_gui_ctx:
             motion_cmd = self._get_motion_command()
+            if simulation_gui_enabled:
+                with self._server.gui.add_folder("Simulation Control"):
+                    self._play_control = self._server.gui.add_checkbox(
+                        "Play",
+                        initial_value=not self._start_paused,
+                        hint="Toggle simulation play/pause",
+                    )
+                    self._reset_button = self._server.gui.add_button(
+                        "Reset",
+                        hint="Reset the selected environment",
+                    )
+                    if not self._distill_minimal_ui:
+                        self._step_button = self._server.gui.add_button(
+                            "Step",
+                            hint="Step the simulation forward by one frame",
+                        )
+                        self._default_pose_init_cb = self._server.gui.add_checkbox(
+                            "Default Pose Init",
+                            initial_value=bool(self._reset_to_default_pose),
+                            hint="When enabled, reset/clip apply initializes from the robot default pose instead of the motion pose.",
+                        )
+
+                if self._step_button is not None:
+                    @self._step_button.on_click
+                    def _(_evt) -> None:
+                        self._step_requested = True
+
+                @self._reset_button.on_click
+                def _(_evt) -> None:
+                    self._reset_requested = True
+
+                if self._default_pose_init_cb is not None:
+                    @self._default_pose_init_cb.on_update
+                    def _(_evt) -> None:
+                        self._set_default_pose_init_enabled(bool(self._default_pose_init_cb.value))
+
             has_resettable_object = bool(
                 motion_cmd is not None
                 and hasattr(motion_cmd, "motion")
                 and bool(getattr(motion_cmd.motion, "has_object", False))
             )
-            if has_resettable_object and self._enable_object_reset_override:
-                with self._server.gui.add_folder("Reset Object"):
-                    self._object_reset_override_cb = self._server.gui.add_checkbox(
-                        "Enable Reset Box Override",
-                        initial_value=False,
-                        hint="Apply world-frame box pose offsets on the next reset.",
-                    )
-                    self._object_reset_zero_button = self._server.gui.add_button(
-                        "Zero Reset Box Override",
-                        hint="Reset box position/rotation offsets to zero.",
-                    )
-                    self._object_reset_pos_x_slider = self._server.gui.add_slider(
-                        "Reset Box dX (world m)",
-                        min=-1.0,
-                        max=1.0,
-                        step=0.01,
-                        initial_value=0.0,
-                    )
-                    self._object_reset_pos_y_slider = self._server.gui.add_slider(
-                        "Reset Box dY (world m)",
-                        min=-1.0,
-                        max=1.0,
-                        step=0.01,
-                        initial_value=0.0,
-                    )
-                    self._object_reset_pos_z_slider = self._server.gui.add_slider(
-                        "Reset Box dZ (world m)",
-                        min=-0.5,
-                        max=0.5,
-                        step=0.01,
-                        initial_value=0.0,
-                    )
-                    self._object_reset_roll_slider = self._server.gui.add_slider(
-                        "Reset Box dRoll (rad)",
-                        min=-np.pi,
-                        max=np.pi,
-                        step=0.02,
-                        initial_value=0.0,
-                    )
-                    self._object_reset_pitch_slider = self._server.gui.add_slider(
-                        "Reset Box dPitch (rad)",
-                        min=-np.pi,
-                        max=np.pi,
-                        step=0.02,
-                        initial_value=0.0,
-                    )
-                    self._object_reset_yaw_slider = self._server.gui.add_slider(
-                        "Reset Box dYaw (rad)",
-                        min=-np.pi,
-                        max=np.pi,
-                        step=0.02,
-                        initial_value=0.0,
-                    )
-                    self._object_reset_status = self._server.gui.add_markdown(
-                        "Mode: `off`\n\n"
-                        "Applies on next reset only.\n\n"
-                        "Runtime size scaling is not supported yet; size still comes from the spawned URDF scale."
-                    )
+            if has_resettable_object and self._enable_object_reset_override and reset_object_gui_enabled:
+                with self._server.gui.add_folder("Random Box" if self._distill_minimal_ui else "Reset Object"):
+                    if self._distill_minimal_ui:
+                        self._object_reset_random_button = self._server.gui.add_button(
+                            "Randomize Box + Reset",
+                            hint="Sample a random XY box reset offset and immediately reset the selected environment.",
+                        )
+                        self._object_reset_zero_button = self._server.gui.add_button(
+                            "Clear Box Override",
+                            hint="Disable the box reset override and return to the clip-defined placement.",
+                        )
+                        self._object_reset_status = self._server.gui.add_markdown(
+                            "Mode: `off`\n\n"
+                            "Applies on reset while enabled.\n\n"
+                            "Runtime size scaling is not supported yet; size still comes from the spawned URDF scale."
+                        )
+                    else:
+                        self._object_reset_override_cb = self._server.gui.add_checkbox(
+                            "Enable Reset Box Override",
+                            initial_value=False,
+                            hint="Apply world-frame box pose offsets on reset while enabled.",
+                        )
+                        self._object_reset_zero_button = self._server.gui.add_button(
+                            "Zero Reset Box Override",
+                            hint="Reset box position/rotation offsets to zero.",
+                        )
+                        self._object_reset_pos_x_slider = self._server.gui.add_slider(
+                            "Reset Box dX (world m)",
+                            min=-1.0,
+                            max=1.0,
+                            step=0.01,
+                            initial_value=0.0,
+                        )
+                        self._object_reset_pos_y_slider = self._server.gui.add_slider(
+                            "Reset Box dY (world m)",
+                            min=-1.0,
+                            max=1.0,
+                            step=0.01,
+                            initial_value=0.0,
+                        )
+                        self._object_reset_pos_z_slider = self._server.gui.add_slider(
+                            "Reset Box dZ (world m)",
+                            min=-0.5,
+                            max=0.5,
+                            step=0.01,
+                            initial_value=0.0,
+                        )
+                        self._object_reset_roll_slider = self._server.gui.add_slider(
+                            "Reset Box dRoll (rad)",
+                            min=-np.pi,
+                            max=np.pi,
+                            step=0.02,
+                            initial_value=0.0,
+                        )
+                        self._object_reset_pitch_slider = self._server.gui.add_slider(
+                            "Reset Box dPitch (rad)",
+                            min=-np.pi,
+                            max=np.pi,
+                            step=0.02,
+                            initial_value=0.0,
+                        )
+                        self._object_reset_yaw_slider = self._server.gui.add_slider(
+                            "Reset Box dYaw (rad)",
+                            min=-np.pi,
+                            max=np.pi,
+                            step=0.02,
+                            initial_value=0.0,
+                        )
+                        self._object_reset_status = self._server.gui.add_markdown(
+                            "Mode: `off`\n\n"
+                            "Applies on reset while enabled.\n\n"
+                            "Runtime size scaling is not supported yet; size still comes from the spawned URDF scale."
+                        )
 
-                @self._object_reset_zero_button.on_click
-                def _(_evt) -> None:
-                    self._zero_object_reset_overrides()
-                    self._update_manual_object_reset_override()
+                if self._distill_minimal_ui:
+                    @self._object_reset_random_button.on_click
+                    def _(_evt) -> None:
+                        self._randomize_object_reset_override()
 
-                @self._object_reset_override_cb.on_update
-                def _(_evt) -> None:
-                    self._update_manual_object_reset_override()
+                    @self._object_reset_zero_button.on_click
+                    def _(_evt) -> None:
+                        self._clear_manual_object_reset_override()
 
-                for control in (
-                    self._object_reset_pos_x_slider,
-                    self._object_reset_pos_y_slider,
-                    self._object_reset_pos_z_slider,
-                    self._object_reset_roll_slider,
-                    self._object_reset_pitch_slider,
-                    self._object_reset_yaw_slider,
-                ):
+                    self._update_object_reset_status()
+                else:
+                    @self._object_reset_zero_button.on_click
+                    def _(_evt) -> None:
+                        self._zero_object_reset_overrides()
+                        self._update_manual_object_reset_override()
 
-                    @control.on_update
+                    @self._object_reset_override_cb.on_update
                     def _(_evt) -> None:
                         self._update_manual_object_reset_override()
 
-                self._update_manual_object_reset_override()
+                    for control in (
+                        self._object_reset_pos_x_slider,
+                        self._object_reset_pos_y_slider,
+                        self._object_reset_pos_z_slider,
+                        self._object_reset_roll_slider,
+                        self._object_reset_pitch_slider,
+                        self._object_reset_yaw_slider,
+                    ):
 
-            with self._server.gui.add_folder("World Viz"):
-                self._show_robot_cb = self._server.gui.add_checkbox(
-                    "Show Robot",
-                    initial_value=bool(getattr(self._vr, "show_visual", True)),
-                    hint="Toggle robot mesh visibility",
-                )
-                object_cfg = getattr(self._env.robot_config, "object", None)
-                has_object_enabled = bool(object_cfg is not None and getattr(object_cfg, "enabled", False))
-                if self._vo is not None or self._secondary_vo or has_object_enabled:
-                    self._show_object_cb = self._server.gui.add_checkbox(
-                        "Show Object",
-                        initial_value=_get_visual_handle_visible(self._vo, True)
-                        if self._vo is not None
-                        else True,
-                        hint="Toggle object mesh visibility",
-                    )
-                if self._terrain_handle is not None or self._ground_handle is not None:
-                    self._show_terrain_cb = self._server.gui.add_checkbox(
-                        "Show Terrain",
-                        initial_value=bool(
-                            getattr(self._terrain_handle or self._ground_handle, "visible", True)
-                        ),
-                        hint="Toggle terrain mesh visibility",
-                    )
-                if self._grid_handle is not None:
-                    self._show_grid_cb = self._server.gui.add_checkbox(
-                        "Show Grid",
-                        initial_value=bool(getattr(self._grid_handle, "visible", False)),
-                        hint="Toggle the ground grid",
-                    )
-                self._recenter_cb = self._server.gui.add_checkbox(
-                    "Recenter to Env Origin",
-                    initial_value=bool(self._recenter),
-                    hint="Keep the selected env centered in view",
-                )
+                        @control.on_update
+                        def _(_evt) -> None:
+                            self._update_manual_object_reset_override()
 
-            def _apply_world_vis() -> None:
-                if self._show_robot_cb is not None and self._vr is not None:
-                    try:
-                        self._vr.show_visual = bool(self._show_robot_cb.value)
-                    except Exception:
-                        pass
+                    self._update_manual_object_reset_override()
+
+            if world_viz_gui_enabled:
+                with self._server.gui.add_folder("World Viz"):
+                    self._show_robot_cb = self._server.gui.add_checkbox(
+                        "Show Robot",
+                        initial_value=bool(getattr(self._vr, "show_visual", True)),
+                        hint="Toggle robot mesh visibility",
+                    )
+                    object_cfg = getattr(self._env.robot_config, "object", None)
+                    has_object_enabled = bool(object_cfg is not None and getattr(object_cfg, "enabled", False))
+                    if self._vo is not None or self._secondary_vo or has_object_enabled:
+                        self._show_object_cb = self._server.gui.add_checkbox(
+                            "Show Object",
+                            initial_value=_get_visual_handle_visible(self._vo, True)
+                            if self._vo is not None
+                            else True,
+                            hint="Toggle object mesh visibility",
+                        )
+                    if self._terrain_handle is not None or self._ground_handle is not None:
+                        self._show_terrain_cb = self._server.gui.add_checkbox(
+                            "Show Terrain",
+                            initial_value=bool(
+                                getattr(self._terrain_handle or self._ground_handle, "visible", True)
+                            ),
+                            hint="Toggle terrain mesh visibility",
+                        )
+                    if self._grid_handle is not None:
+                        self._show_grid_cb = self._server.gui.add_checkbox(
+                            "Show Grid",
+                            initial_value=bool(getattr(self._grid_handle, "visible", False)),
+                            hint="Toggle the ground grid",
+                        )
+                    self._recenter_cb = self._server.gui.add_checkbox(
+                        "Recenter to Env Origin",
+                        initial_value=bool(self._recenter),
+                        hint="Keep the selected env centered in view",
+                    )
+
+                def _apply_world_vis() -> None:
+                    if self._show_robot_cb is not None and self._vr is not None:
+                        try:
+                            self._vr.show_visual = bool(self._show_robot_cb.value)
+                        except Exception:
+                            pass
+                    if self._show_robot_cb is not None:
+                        show_robot = bool(self._show_robot_cb.value)
+                        for vr in self._secondary_vr.values():
+                            try:
+                                vr.show_visual = show_robot
+                            except Exception:
+                                pass
+                    if self._show_object_cb is not None and self._vo is not None:
+                        try:
+                            _set_visual_handle_visible(self._vo, bool(self._show_object_cb.value))
+                        except Exception:
+                            pass
+                    if self._show_object_cb is not None:
+                        show_object = bool(self._show_object_cb.value)
+                        for vo in self._secondary_vo.values():
+                            try:
+                                _set_visual_handle_visible(vo, show_object)
+                            except Exception:
+                                pass
+                    if self._show_terrain_cb is not None:
+                        show_terrain = bool(self._show_terrain_cb.value)
+                        self._set_handle_visible(self._terrain_handle, show_terrain)
+                        self._set_handle_visible(self._ground_handle, show_terrain)
+                    if self._show_grid_cb is not None:
+                        self._set_handle_visible(self._grid_handle, bool(self._show_grid_cb.value))
+
                 if self._show_robot_cb is not None:
-                    show_robot = bool(self._show_robot_cb.value)
-                    for vr in self._secondary_vr.values():
-                        try:
-                            vr.show_visual = show_robot
-                        except Exception:
-                            pass
-                if self._show_object_cb is not None and self._vo is not None:
-                    try:
-                        _set_visual_handle_visible(self._vo, bool(self._show_object_cb.value))
-                    except Exception:
-                        pass
+                    @self._show_robot_cb.on_update
+                    def _(_evt) -> None:
+                        _apply_world_vis()
+
                 if self._show_object_cb is not None:
-                    show_object = bool(self._show_object_cb.value)
-                    for vo in self._secondary_vo.values():
-                        try:
-                            _set_visual_handle_visible(vo, show_object)
-                        except Exception:
-                            pass
+                    @self._show_object_cb.on_update
+                    def _(_evt) -> None:
+                        _apply_world_vis()
+
                 if self._show_terrain_cb is not None:
-                    show_terrain = bool(self._show_terrain_cb.value)
-                    self._set_handle_visible(self._terrain_handle, show_terrain)
-                    self._set_handle_visible(self._ground_handle, show_terrain)
+                    @self._show_terrain_cb.on_update
+                    def _(_evt) -> None:
+                        _apply_world_vis()
+
                 if self._show_grid_cb is not None:
-                    self._set_handle_visible(self._grid_handle, bool(self._show_grid_cb.value))
+                    @self._show_grid_cb.on_update
+                    def _(_evt) -> None:
+                        _apply_world_vis()
 
-            if self._show_robot_cb is not None:
-                @self._show_robot_cb.on_update
-                def _(_evt) -> None:
-                    _apply_world_vis()
+                if self._recenter_cb is not None:
+                    @self._recenter_cb.on_update
+                    def _(_evt) -> None:
+                        self._recenter = bool(self._recenter_cb.value)
+                        if self._recenter:
+                            offset = self._resolve_env_origin()
+                            if offset is None:
+                                offset = np.zeros(3, dtype=np.float32)
+                            self._offset = offset
+                        else:
+                            self._offset = np.zeros(3, dtype=np.float32)
+                        self._update_terrain_transform(self._offset)
 
-            if self._show_object_cb is not None:
-                @self._show_object_cb.on_update
-                def _(_evt) -> None:
-                    _apply_world_vis()
-
-            if self._show_terrain_cb is not None:
-                @self._show_terrain_cb.on_update
-                def _(_evt) -> None:
-                    _apply_world_vis()
-
-            if self._show_grid_cb is not None:
-                @self._show_grid_cb.on_update
-                def _(_evt) -> None:
-                    _apply_world_vis()
-
-            if self._recenter_cb is not None:
-                @self._recenter_cb.on_update
-                def _(_evt) -> None:
-                    self._recenter = bool(self._recenter_cb.value)
-                    if self._recenter:
-                        offset = self._resolve_env_origin()
-                        if offset is None:
-                            offset = np.zeros(3, dtype=np.float32)
-                        self._offset = offset
-                    else:
-                        self._offset = np.zeros(3, dtype=np.float32)
-                    self._update_terrain_transform(self._offset)
-
-            clip_gui_enabled = os.environ.get("VISER_ENABLE_CLIP_GUI", "1").lower() not in (
-                "0",
-                "false",
-                "no",
-            )
             if clip_gui_enabled:
                 motion_cmd = self._get_motion_command()
                 if motion_cmd is not None and hasattr(motion_cmd, "motion"):
                     clip_names = list(getattr(motion_cmd.motion, "clip_ids", []))
                     if clip_names:
                         self._clip_names = clip_names
-                        with self._server.gui.add_folder("Clip Playback"):
+                        with self._server.gui.add_folder("Clip" if self._distill_minimal_ui else "Clip Playback"):
                             if len(clip_names) > 1:
                                 self._clip_dropdown = self._server.gui.add_dropdown(
                                     "Clip",
@@ -3805,19 +3982,20 @@ class ViserLiveViewer:
                                 self._clip_label = self._server.gui.add_markdown(
                                     f"Clip: `{clip_names[0]}`"
                                 )
-                            self._clip_start_slider = self._server.gui.add_slider(
-                                "Clip Start Frame",
-                                min=0,
-                                max=10000,
-                                step=1,
-                                initial_value=0,
-                                hint="Select starting frame in the clip",
-                            )
-                            self._clip_lock_cb = self._server.gui.add_checkbox(
-                                "Lock Clip",
-                                initial_value=bool(self._clip_lock_default),
-                                hint="Keep the selected clip fixed across resets",
-                            )
+                            if not self._distill_minimal_ui:
+                                self._clip_start_slider = self._server.gui.add_slider(
+                                    "Clip Start Frame",
+                                    min=0,
+                                    max=10000,
+                                    step=1,
+                                    initial_value=0,
+                                    hint="Select starting frame in the clip",
+                                )
+                                self._clip_lock_cb = self._server.gui.add_checkbox(
+                                    "Lock Clip",
+                                    initial_value=bool(self._clip_lock_default),
+                                    hint="Keep the selected clip fixed across resets",
+                                )
                             self._clip_apply = self._server.gui.add_button("Apply Clip")
                             if self._clip_label is None:
                                 self._clip_label = self._server.gui.add_markdown("")
@@ -3838,8 +4016,9 @@ class ViserLiveViewer:
                             if idx is None:
                                 return
                             self._pending_clip_idx = idx
-                            if self._clip_start_slider is not None:
-                                self._pending_clip_start = int(self._clip_start_slider.value)
+                            self._pending_clip_start = (
+                                int(self._clip_start_slider.value) if self._clip_start_slider is not None else 0
+                            )
                             _update_clip_slider(idx)
 
                         if self._clip_dropdown is not None:
@@ -3847,23 +4026,25 @@ class ViserLiveViewer:
                             def _(_evt) -> None:
                                 _queue_clip_change()
 
-                        @self._clip_start_slider.on_update
-                        def _(_evt) -> None:
-                            _queue_clip_change()
-
-                        @self._clip_lock_cb.on_update
-                        def _(_evt) -> None:
-                            if bool(self._clip_lock_cb.value):
+                        if self._clip_start_slider is not None:
+                            @self._clip_start_slider.on_update
+                            def _(_evt) -> None:
                                 _queue_clip_change()
-                            else:
-                                try:
-                                    motion_cmd.set_forced_clip(None)
-                                except Exception:
-                                    motion_cmd._forced_clip_idx = None
-                                try:
-                                    motion_cmd.set_forced_clip_start(None)
-                                except Exception:
-                                    motion_cmd._forced_start_step = None
+
+                        if self._clip_lock_cb is not None:
+                            @self._clip_lock_cb.on_update
+                            def _(_evt) -> None:
+                                if bool(self._clip_lock_cb.value):
+                                    _queue_clip_change()
+                                else:
+                                    try:
+                                        motion_cmd.set_forced_clip(None)
+                                    except Exception:
+                                        motion_cmd._forced_clip_idx = None
+                                    try:
+                                        motion_cmd.set_forced_clip_start(None)
+                                    except Exception:
+                                        motion_cmd._forced_start_step = None
 
                         @self._clip_apply.on_click
                         def _(_evt) -> None:
@@ -3958,7 +4139,7 @@ class ViserLiveViewer:
                     clip_idx = int(motion_cmd.clip_ids[self._env_id].item())
                 except Exception:
                     clip_idx = None
-            lock_enabled = bool(self._clip_lock_cb.value) if self._clip_lock_cb is not None else False
+            lock_enabled = self._clip_lock_enabled()
             if clip_idx is not None and lock_enabled:
                 try:
                     motion_cmd.set_forced_clip(int(clip_idx))
@@ -4043,9 +4224,7 @@ class ViserLiveViewer:
         self._pending_clip_start = None
         if clip_idx is None:
             return
-        lock_enabled = True
-        if self._clip_lock_cb is not None:
-            lock_enabled = bool(self._clip_lock_cb.value)
+        lock_enabled = self._clip_lock_enabled()
         if lock_enabled:
             try:
                 motion_cmd.set_forced_clip(int(clip_idx))

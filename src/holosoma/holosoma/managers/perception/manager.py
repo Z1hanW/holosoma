@@ -231,6 +231,7 @@ class PerceptionManager:
         )
         self._camera_warp_enable_holes = bool(getattr(self.cfg, "camera_warp_enable_holes", False))
         self._camera_warp_hole_prob = float(getattr(self.cfg, "camera_warp_hole_prob", 0.0) or 0.0)
+        self._camera_apply_sensor_noise = bool(getattr(self.cfg, "camera_apply_sensor_noise", True))
 
         self._camera_obs_height, self._camera_obs_width = self._resolve_camera_obs_resolution()
         self._camera_obs_fill_value = self._camera_obs_default_fill_value()
@@ -1819,6 +1820,8 @@ class PerceptionManager:
         return torch.clamp(depth, min=min_depth, max=max_depth)
 
     def _apply_camera_depth_noise(self, depth: torch.Tensor) -> torch.Tensor:
+        if not self._camera_apply_sensor_noise:
+            return self._clamp_camera_depth_to_sensor_range(depth)
         std_mult = getattr(self.env, "_perception_camera_noise_std_mult", None)
         drop_prob = getattr(self.env, "_perception_camera_noise_drop_prob", None)
         if std_mult is None and drop_prob is None:

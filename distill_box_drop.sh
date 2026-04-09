@@ -70,6 +70,7 @@ START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.7}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i_17x17}
 STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_proprio','actor_obs_drop']"}
+VISER_DISTILL_MINIMAL_UI=${VISER_DISTILL_MINIMAL_UI:-1}
 
 # Runtime perception must stay 17x17 to match the teacher's 289-d encoder input.
 IMAGE_WIDTH=${IMAGE_WIDTH:-17}
@@ -94,6 +95,7 @@ echo "[INFO] num_learning_iterations=${NUM_LEARNING_ITERATIONS}"
 echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} dagger_loss_coef=${DAGGER_LOSS_COEF} teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
 echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
+echo "[INFO] viser_distill_minimal_ui=${VISER_DISTILL_MINIMAL_UI}"
 echo "[INFO] student actor history=root/proprio default, drop target single-frame; teacher groups=single-frame"
 
 exec env \
@@ -112,6 +114,7 @@ exec env \
   DAGGER_END_EPOCH="${DAGGER_END_EPOCH}" \
   DAGGER_LOSS_COEF="${DAGGER_LOSS_COEF}" \
   START_AT_TIMESTEP_ZERO_PROB="${START_AT_TIMESTEP_ZERO_PROB}" \
+  VISER_DISTILL_MINIMAL_UI="${VISER_DISTILL_MINIMAL_UI}" \
   PAIR_TERRAIN_WITH_MOTION="${PAIR_TERRAIN_WITH_MOTION}" \
   bash "${SCRIPT_DIR}/distill_root_box.sh" "${TEACHER_CHECKPOINT}" \
     "perception:${PERCEPTION_PRESET}" \

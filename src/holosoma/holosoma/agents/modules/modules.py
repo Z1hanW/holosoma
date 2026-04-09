@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import inspect
+import os
+import sys
+from functools import lru_cache
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -475,6 +479,154 @@ class AttentionLinearEncoder(nn.Module):
         return self.proj(flat) * self.attention
 
 
+class FarTrackingDepthSmallEncoder(nn.Module):
+    """Small far-tracking-style depth CNN: HxW depth -> 32d-style latent."""
+
+    def __init__(self, input_height: int, input_width: int, output_dim: int):
+        super().__init__()
+        if input_height <= 0 or input_width <= 0:
+            raise ValueError(
+                f"FarTrackingDepthSmallEncoder expects positive input size, got {(input_height, input_width)}."
+            )
+        self.input_height = int(input_height)
+        self.input_width = int(input_width)
+        activation = nn.ELU()
+        self.image_compression = nn.Sequential(
+            nn.Conv2d(in_channels=1, out_channels=16, kernel_size=5, stride=2, padding=2),
+            activation,
+            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, stride=2, padding=1),
+            activation,
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=2, padding=1),
+            activation,
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(64, output_dim),
+        )
+        self.output_activation = activation
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        flat = x.view(x.shape[0], -1)
+        expected_dim = self.input_height * self.input_width
+        if flat.shape[-1] != expected_dim:
+            raise ValueError(
+                f"FarTrackingDepthSmallEncoder expected flattened input dim {expected_dim}, got {flat.shape[-1]}."
+            )
+        images = flat.view(x.shape[0], 1, self.input_height, self.input_width)
+        latent = self.image_compression(images)
+        return self.output_activation(latent)
+
+
+@lru_cache(maxsize=1)
+def _resolve_defm_repo_root() -> Path:
+    env_root = os.environ.get("HOLOSOMA_DEFM_ROOT", "").strip()
+    candidates: list[Path] = []
+    if env_root:
+        candidates.append(Path(env_root).expanduser())
+    this_file = Path(__file__).resolve()
+    candidates.extend(parent / "defm" for parent in this_file.parents)
+    for candidate in candidates:
+        if (candidate / "defm" / "model_factory.py").is_file():
+            return candidate
+    raise FileNotFoundError(
+        "Unable to locate the local DeFM source tree. Set HOLOSOMA_DEFM_ROOT to a directory containing "
+        "'defm/model_factory.py'."
+    )
+
+
+@lru_cache(maxsize=1)
+def _load_defm_runtime():
+    repo_root = _resolve_defm_repo_root()
+    repo_root_str = str(repo_root)
+    if repo_root_str not in sys.path:
+        sys.path.insert(0, repo_root_str)
+    try:
+        from defm.model_factory import create_defm_model
+        from defm.utils.utils import preprocess_depth_batch
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to import DeFM from local source tree at {repo_root}. "
+            "Make sure its Python dependencies are installed."
+        ) from exc
+    return create_defm_model, preprocess_depth_batch
+
+
+class DeFMViTS14Encoder(nn.Module):
+    """Frozen-or-trainable DeFM ViT-S/14 depth encoder with metric-aware preprocessing."""
+
+    def __init__(
+        self,
+        input_height: int,
+        input_width: int,
+        output_dim: int,
+        *,
+        pretrained: bool = True,
+        pretrained_path: str | None = None,
+        freeze_backbone: bool = True,
+        target_size: int | tuple[int, int] | None = 224,
+        patch_size: int | None = 14,
+    ):
+        super().__init__()
+        if input_height <= 0 or input_width <= 0:
+            raise ValueError(f"DeFMViTS14Encoder expects positive input size, got {(input_height, input_width)}.")
+        self.input_height = int(input_height)
+        self.input_width = int(input_width)
+        self.expected_input_size = self.input_height * self.input_width
+        self.pretrained = bool(pretrained)
+        self.pretrained_path = pretrained_path
+        self.freeze_backbone = bool(freeze_backbone)
+        self.target_size = target_size
+        self.patch_size = patch_size
+        self.backbone_dim = 384
+        self.backbone: nn.Module | None = None
+        self._preprocess_depth_batch = None
+        self.proj = nn.Identity() if output_dim == self.backbone_dim else nn.Linear(self.backbone_dim, output_dim)
+
+    def _ensure_backbone(self, device: torch.device) -> None:
+        if self.backbone is None:
+            create_defm_model, preprocess_depth_batch = _load_defm_runtime()
+            backbone = create_defm_model(
+                "defm_vit_s14",
+                pretrained=self.pretrained,
+                pretrained_path=self.pretrained_path,
+            )
+            if self.freeze_backbone:
+                backbone.eval()
+                for param in backbone.parameters():
+                    param.requires_grad_(False)
+            self.backbone = backbone.to(device)
+            self._preprocess_depth_batch = preprocess_depth_batch
+        elif next(self.backbone.parameters()).device != device:
+            self.backbone = self.backbone.to(device)
+        if self.freeze_backbone and self.backbone is not None:
+            self.backbone.eval()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        flat = x.view(x.shape[0], -1)
+        if flat.shape[-1] != self.expected_input_size:
+            raise ValueError(
+                f"DeFMViTS14Encoder expected flattened input dim {self.expected_input_size}, got {flat.shape[-1]}."
+            )
+        device = flat.device
+        self._ensure_backbone(device)
+        assert self.backbone is not None and self._preprocess_depth_batch is not None
+
+        depth = flat.view(x.shape[0], self.input_height, self.input_width)
+        depth_batch = self._preprocess_depth_batch(
+            depth,
+            target_size=self.target_size,
+            patch_size=self.patch_size,
+            device=device,
+        )
+        if self.freeze_backbone:
+            with torch.no_grad():
+                features = self.backbone(depth_batch)
+            features = features.detach()
+        else:
+            features = self.backbone(depth_batch)
+        features = features.to(dtype=flat.dtype)
+        return self.proj(features)
+
+
 class PerceptionTimeGRU(nn.Module):
     """Temporal GRU encoder over per-step perception vectors."""
 
@@ -693,6 +845,33 @@ class BaseModule(nn.Module):
             self.perception_encoder = GatedLinearEncoder(input_dim, output_dim)
         elif encoder_type == "attention":
             self.perception_encoder = AttentionLinearEncoder(input_dim, output_dim)
+        elif encoder_type == "far_tracking_cnn_small":
+            input_height = getattr(layer_config, "perception_input_height", None)
+            input_width = getattr(layer_config, "perception_input_width", None)
+            if input_height is None or input_width is None:
+                raise ValueError(
+                    "far_tracking_cnn_small requires perception_input_height and perception_input_width to be set."
+                )
+            self.perception_encoder = FarTrackingDepthSmallEncoder(
+                input_height=int(input_height),
+                input_width=int(input_width),
+                output_dim=output_dim,
+            )
+        elif encoder_type == "defm_vit_s14":
+            input_height = getattr(layer_config, "perception_input_height", None)
+            input_width = getattr(layer_config, "perception_input_width", None)
+            if input_height is None or input_width is None:
+                raise ValueError("defm_vit_s14 requires perception_input_height and perception_input_width to be set.")
+            self.perception_encoder = DeFMViTS14Encoder(
+                input_height=int(input_height),
+                input_width=int(input_width),
+                output_dim=output_dim,
+                pretrained=bool(getattr(layer_config, "perception_pretrained", True)),
+                pretrained_path=getattr(layer_config, "perception_pretrained_path", None),
+                freeze_backbone=bool(getattr(layer_config, "perception_freeze_backbone", True)),
+                target_size=getattr(layer_config, "perception_target_size", None),
+                patch_size=getattr(layer_config, "perception_patch_size", None),
+            )
         elif encoder_type == "time_gru":
             # Time-GRU is handled at the actor/critic level; no per-step encoder here.
             self.perception_encoder = None
