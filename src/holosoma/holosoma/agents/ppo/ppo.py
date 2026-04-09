@@ -194,6 +194,14 @@ class PPO(BaseAlgo):
         self.teacher_actors: list[nn.Module] = []
         self.teacher_actor_obs_normalizers: dict[str, nn.Module] = {}
         self.teacher_actor_obs_normalizers_list: list[dict[str, nn.Module]] = []
+        self.fixed_bc_eval_num_samples = 0
+        self.fixed_bc_eval_log_interval = 1
+        self._fixed_bc_eval_ready = False
+        self._fixed_bc_eval_size = 0
+        self._fixed_bc_eval_actor_obs_parts: list[torch.Tensor] = []
+        self._fixed_bc_eval_teacher_actions_parts: list[torch.Tensor] = []
+        self._fixed_bc_eval_actor_perception_parts: list[torch.Tensor] = []
+        self._fixed_bc_eval_dataset: dict[str, torch.Tensor] = {}
 
     def _build_obs_slices(self, keys: list[str]) -> dict[str, slice]:
         slices: dict[str, slice] = {}
@@ -558,6 +566,8 @@ class PPO(BaseAlgo):
         )
         self.dagger_match_std = bool(getattr(distill_cfg, "dagger_match_std", False))
         self.strict_teacher_load = bool(getattr(distill_cfg, "strict_teacher_load", True))
+        self.fixed_bc_eval_num_samples = max(0, int(getattr(distill_cfg, "fixed_bc_eval_num_samples", 0)))
+        self.fixed_bc_eval_log_interval = max(1, int(getattr(distill_cfg, "fixed_bc_eval_log_interval", 1)))
         teacher_perception_obs_key = getattr(distill_cfg, "teacher_perception_obs_key", None)
         self.teacher_perception_obs_key = str(teacher_perception_obs_key).strip() if teacher_perception_obs_key else ""
         if self.teacher_perception_obs_key and self.teacher_perception_obs_key not in self.algo_obs_dim_dict:
@@ -641,6 +651,95 @@ class PPO(BaseAlgo):
             # Note: algo_obs_dim_dict from observation_manager.get_obs_dims() already includes history
             obs_dim += key_dim
         return obs_dim
+
+    def _maybe_capture_fixed_bc_eval_samples(
+        self,
+        *,
+        actor_obs_raw: torch.Tensor,
+        actor_perception_obs: torch.Tensor | None,
+        teacher_actions: torch.Tensor | None,
+        teacher_bc_mask: torch.Tensor | None,
+    ) -> None:
+        if not self.is_main_process or self.fixed_bc_eval_num_samples <= 0:
+            return
+        if not self.dagger_enabled or teacher_actions is None or self._fixed_bc_eval_ready:
+            return
+        if self.actor_perception_key and actor_perception_obs is None:
+            return
+
+        valid_mask = torch.ones((teacher_actions.shape[0],), device=teacher_actions.device, dtype=torch.bool)
+        if teacher_bc_mask is not None:
+            valid_mask &= teacher_bc_mask.view(-1).to(dtype=torch.bool)
+        if self.dagger_ignore_zero_teacher_actions:
+            valid_mask &= ~torch.all(teacher_actions == 0.0, dim=-1)
+        valid_indices = torch.nonzero(valid_mask, as_tuple=False).squeeze(-1)
+        if valid_indices.numel() == 0:
+            return
+
+        remaining = self.fixed_bc_eval_num_samples - self._fixed_bc_eval_size
+        if remaining <= 0:
+            return
+        selected = valid_indices[:remaining]
+        self._fixed_bc_eval_actor_obs_parts.append(actor_obs_raw[selected].detach().cpu().clone())
+        self._fixed_bc_eval_teacher_actions_parts.append(teacher_actions[selected].detach().cpu().clone())
+        if self.actor_perception_key:
+            assert actor_perception_obs is not None
+            self._fixed_bc_eval_actor_perception_parts.append(actor_perception_obs[selected].detach().cpu().clone())
+        self._fixed_bc_eval_size += int(selected.numel())
+
+        if self._fixed_bc_eval_size < self.fixed_bc_eval_num_samples:
+            return
+
+        self._fixed_bc_eval_dataset = {
+            "actor_obs_raw": torch.cat(self._fixed_bc_eval_actor_obs_parts, dim=0)[: self.fixed_bc_eval_num_samples],
+            "teacher_actions": torch.cat(self._fixed_bc_eval_teacher_actions_parts, dim=0)[: self.fixed_bc_eval_num_samples],
+        }
+        if self.actor_perception_key:
+            self._fixed_bc_eval_dataset["actor_perception"] = torch.cat(
+                self._fixed_bc_eval_actor_perception_parts, dim=0
+            )[: self.fixed_bc_eval_num_samples]
+        self._fixed_bc_eval_actor_obs_parts.clear()
+        self._fixed_bc_eval_teacher_actions_parts.clear()
+        self._fixed_bc_eval_actor_perception_parts.clear()
+        self._fixed_bc_eval_ready = True
+
+    @torch.no_grad()
+    def _get_fixed_bc_eval_metrics(self, current_iteration: int) -> dict[str, float]:
+        if not self.is_main_process or not self._fixed_bc_eval_ready:
+            return {}
+        if self.fixed_bc_eval_num_samples <= 0 or self.fixed_bc_eval_log_interval <= 0:
+            return {}
+        if current_iteration % self.fixed_bc_eval_log_interval != 0:
+            return {}
+
+        actor_training = self.actor.training
+        normalizer_training = {
+            key: normalizer.training for key, normalizer in self.actor_obs_normalizers.items() if hasattr(normalizer, "training")
+        }
+        self.actor.eval()
+        for normalizer in self.actor_obs_normalizers.values():
+            if hasattr(normalizer, "eval"):
+                normalizer.eval()
+
+        actor_obs_raw = self._fixed_bc_eval_dataset["actor_obs_raw"].to(self.device)
+        actor_obs = self._normalize_actor_obs(actor_obs_raw, update=False)
+        policy_state = {"actor_obs": actor_obs}
+        if self.actor_perception_key and "actor_perception" in self._fixed_bc_eval_dataset:
+            policy_state[self.actor_perception_key] = self._fixed_bc_eval_dataset["actor_perception"].to(self.device)
+        student_actions = self.actor.act_inference(policy_state)
+        teacher_actions = self._fixed_bc_eval_dataset["teacher_actions"].to(self.device)
+        action_error = student_actions - teacher_actions
+
+        if actor_training:
+            self.actor.train()
+        for key, normalizer in self.actor_obs_normalizers.items():
+            if hasattr(normalizer, "train") and normalizer_training.get(key, False):
+                normalizer.train()
+
+        return {
+            "fixed_bc_mu_mse": float(action_error.pow(2).mean().item()),
+            "fixed_bc_num_samples": float(teacher_actions.shape[0]),
+        }
 
     def _get_zero_input(self):
         """
@@ -971,6 +1070,12 @@ class PPO(BaseAlgo):
                     else:
                         teacher_obs_raw = torch.cat([obs_dict[k] for k in self.teacher_obs_keys], dim=1)
                     teacher_actions, teacher_indices = self._select_teacher_actions(teacher_obs_raw, obs_dict)
+                    self._maybe_capture_fixed_bc_eval_samples(
+                        actor_obs_raw=actor_obs_raw,
+                        actor_perception_obs=actor_perception_obs_current,
+                        teacher_actions=teacher_actions,
+                        teacher_bc_mask=teacher_bc_mask_current,
+                    )
                     if self.teacher_action_mix_ratio > 0.0:
                         teacher_mask = (
                             torch.rand((actions.shape[0], 1), device=actions.device) < self.teacher_action_mix_ratio
@@ -1783,6 +1888,9 @@ class PPO(BaseAlgo):
                 train_logs["teacher_action_mix_ratio_start"] = float(self.teacher_action_mix_ratio_start)
                 train_logs["teacher_action_mix_ratio_end"] = float(self.teacher_action_mix_ratio_end)
                 train_logs["teacher_action_mix_ratio_end_iteration"] = float(self.teacher_action_mix_ratio_end_iteration)
+            fixed_bc_eval_metrics = self._get_fixed_bc_eval_metrics(current_iteration=it)
+            if fixed_bc_eval_metrics:
+                extra_log_dicts.setdefault("Eval", {}).update(fixed_bc_eval_metrics)
         loss_dict["actor_learning_rate"] = self.actor_learning_rate
         loss_dict["critic_learning_rate"] = self.critic_learning_rate
         # Use logging helper

@@ -22,8 +22,8 @@
 !src/holosoma_inference/docs/workflows/sim2sim.md
 
 # Local training / dataset payloads (always ignore)
-/data/
-/data/**
+data/
+data/**
 /multi-terrain/staged/
 /multi-terrain/staged/**
 /multi-terrain/generated/terrain_generalist_*_*.obj

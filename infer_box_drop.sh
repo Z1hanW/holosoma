@@ -12,7 +12,7 @@ set -euo pipefail
 #
 # Examples:
 #   bash infer_box_drop.sh
-#   bash infer_box_drop.sh https://wandb.ai/zihanw22/boxer/runs/kmux2yeq
+#   bash infer_box_drop.sh https://wandb.ai/zihanw22/boxer/runs/kmux2yeq/logs
 #   bash infer_box_drop.sh clip
 #   bash infer_box_drop.sh mixed
 #   bash infer_box_drop.sh mixed https://wandb.ai/zihanw22/boxer/runs/s221l5eo
@@ -22,6 +22,11 @@ usage() {
   cat <<'EOF'
 Usage:
   bash infer_box_drop.sh [clip|mixed] [checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
+
+Accepted W&B URLs:
+  https://wandb.ai/<entity>/<project>/runs/<run_id>
+  https://wandb.ai/<entity>/<project>/runs/<run_id>/logs
+  https://wandb.ai/<entity>/<project>/runs/<run_id>/files/<checkpoint>.pt
 
 Modes:
   clip   Evaluate the clip-conditioned drop student (oitf644a by default)
@@ -114,6 +119,7 @@ DEFAULT_MIXED_CHECKPOINT="${DEFAULT_MIXED_CHECKPOINT:-wandb://zihanw22/boxer/s22
 default_model_file_for_run_id() {
   local run_id="$1"
   case "${run_id}" in
+    kmux2yeq) echo "model_01200.pt" ;;
     oitf644a) echo "model_01600.pt" ;;
     q3t3ntf4) echo "model_01400.pt" ;;
     hw5jbitz) echo "model_02800.pt" ;;
@@ -124,7 +130,8 @@ default_model_file_for_run_id() {
 
 parse_wandb_run_url() {
   local ref="$1"
-  local clean_ref="${ref%%\?*}"
+  local clean_ref="${ref%%#*}"
+  clean_ref="${clean_ref%%\?*}"
   if [[ "${clean_ref}" != https://wandb.ai/*/runs/* ]]; then
     return 1
   fi
@@ -236,15 +243,15 @@ normalize_checkpoint_ref() {
   if [[ -n "${explicit_file}" ]]; then
     model_file="${explicit_file}"
   elif [[ -z "${model_file}" ]]; then
-    builtin_model_file="$(default_model_file_for_run_id "${run_id}")"
-    if [[ -n "${builtin_model_file}" ]]; then
-      model_file="${builtin_model_file}"
-      echo "[INFO] Using pinned checkpoint file for run ${run_id}: ${model_file}" >&2
+    remote_model_file="$(resolve_remote_wandb_checkpoint_name "${entity}" "${project}" "${run_id}")"
+    if [[ -n "${remote_model_file}" ]]; then
+      model_file="${remote_model_file}"
+      echo "[INFO] Resolved wandb run URL to latest remote checkpoint: ${model_file}" >&2
     else
-      remote_model_file="$(resolve_remote_wandb_checkpoint_name "${entity}" "${project}" "${run_id}")"
-      if [[ -n "${remote_model_file}" ]]; then
-        model_file="${remote_model_file}"
-        echo "[INFO] Resolved wandb run URL to latest remote checkpoint: ${model_file}" >&2
+      builtin_model_file="$(default_model_file_for_run_id "${run_id}")"
+      if [[ -n "${builtin_model_file}" ]]; then
+        model_file="${builtin_model_file}"
+        echo "[INFO] Falling back to pinned checkpoint file for run ${run_id}: ${model_file}" >&2
       fi
     fi
   fi
