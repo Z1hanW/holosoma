@@ -508,6 +508,9 @@ def test_defm_regnet_y_800mf_encoder_forward_with_mock_runtime():
             self.embed_dim = 784
 
         def forward(self, x):
+            raise AssertionError("RegNet encoder should use forward_no_bifpn().")
+
+        def forward_no_bifpn(self, x):
             return {"global_backbone": torch.ones((x.shape[0], self.embed_dim), device=x.device, dtype=x.dtype)}
 
     def fake_create_defm_model(model_name, pretrained=False, pretrained_path=None):

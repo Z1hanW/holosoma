@@ -568,6 +568,7 @@ class DeFMEncoder(nn.Module):
         freeze_backbone: bool = True,
         target_size: int | tuple[int, int] | None = 224,
         patch_size: int | None = 14,
+        use_no_bifpn: bool = False,
     ):
         super().__init__()
         if input_height <= 0 or input_width <= 0:
@@ -582,6 +583,7 @@ class DeFMEncoder(nn.Module):
         self.freeze_backbone = bool(freeze_backbone)
         self.target_size = target_size
         self.patch_size = patch_size
+        self.use_no_bifpn = bool(use_no_bifpn)
         self.backbone_dim = int(backbone_dim)
         self.backbone: nn.Module | None = None
         self._preprocess_depth_batch = None
@@ -623,11 +625,16 @@ class DeFMEncoder(nn.Module):
             patch_size=self.patch_size,
             device=device,
         )
+        backbone_forward = self.backbone
+        if self.use_no_bifpn:
+            if not hasattr(self.backbone, "forward_no_bifpn"):
+                raise ValueError(f"DeFM model {self.model_name} does not expose forward_no_bifpn().")
+            backbone_forward = self.backbone.forward_no_bifpn
         if self.freeze_backbone:
             with torch.no_grad():
-                features = self.backbone(depth_batch)
+                features = backbone_forward(depth_batch)
         else:
-            features = self.backbone(depth_batch)
+            features = backbone_forward(depth_batch)
         if self.output_key is not None:
             if not isinstance(features, dict) or self.output_key not in features:
                 raise ValueError(
@@ -667,6 +674,7 @@ class DeFMViTS14Encoder(DeFMEncoder):
             freeze_backbone=freeze_backbone,
             target_size=target_size,
             patch_size=patch_size,
+            use_no_bifpn=False,
         )
 
 
@@ -697,6 +705,7 @@ class DeFMRegNetY800MFEncoder(DeFMEncoder):
             freeze_backbone=freeze_backbone,
             target_size=target_size,
             patch_size=patch_size,
+            use_no_bifpn=True,
         )
 
 
