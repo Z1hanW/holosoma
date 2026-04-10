@@ -16,9 +16,10 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
 
-DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"https://wandb.ai/zihanw22/boxer/runs/u5lguxvl"}
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/u5lguxvl/model_17000.pt"}
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 POSITIONAL_RUN_NAME=""
+DATA_MODE=${DATA_MODE:-mix-naive}
 SCHEDULE_VARIANT=${SCHEDULE_VARIANT:-default}
 PYTHON_BIN=${PYTHON_BIN:-python}
 
@@ -163,6 +164,14 @@ is_checkpoint_ref() {
 while [[ $# -gt 0 ]]; do
   first_arg_normalized=$(echo "$1" | tr '[:upper:]' '[:lower:]')
   case "${first_arg_normalized}" in
+    mix-naive)
+      DATA_MODE="mix-naive"
+      shift
+      ;;
+    pure-sd|pure-ds)
+      DATA_MODE="pure-sd"
+      shift
+      ;;
     default)
       SCHEDULE_VARIANT="default"
       shift
@@ -215,6 +224,18 @@ SCHEDULE_NAME_EXPLICIT=0
 [[ -n "${SCHEDULE_NAME+x}" ]] && SCHEDULE_NAME_EXPLICIT=1
 SCHEDULE_NOTES_EXPLICIT=0
 [[ -n "${SCHEDULE_NOTES+x}" ]] && SCHEDULE_NOTES_EXPLICIT=1
+IMAGE_WIDTH_EXPLICIT=0
+[[ -n "${IMAGE_WIDTH+x}" ]] && IMAGE_WIDTH_EXPLICIT=1
+IMAGE_HEIGHT_EXPLICIT=0
+[[ -n "${IMAGE_HEIGHT+x}" ]] && IMAGE_HEIGHT_EXPLICIT=1
+CAMERA_NEAR_EXPLICIT=0
+[[ -n "${CAMERA_NEAR+x}" ]] && CAMERA_NEAR_EXPLICIT=1
+CAMERA_FAR_EXPLICIT=0
+[[ -n "${CAMERA_FAR+x}" ]] && CAMERA_FAR_EXPLICIT=1
+CAMERA_MAX_DISTANCE_EXPLICIT=0
+[[ -n "${CAMERA_MAX_DISTANCE+x}" ]] && CAMERA_MAX_DISTANCE_EXPLICIT=1
+PERCEPTION_WARP_PREPROCESS_EXPLICIT=0
+[[ -n "${PERCEPTION_WARP_PREPROCESS+x}" ]] && PERCEPTION_WARP_PREPROCESS_EXPLICIT=1
 
 # Sim2real default: root-position distill without clip_phase in student torso observation.
 EXP=${EXP:-g1-29dof-wbt-w-object-distill-root-pos-cmd}
@@ -230,15 +251,36 @@ HSSIM_BIN_DIR=${HSSIM_BIN_DIR:-/home/ubuntu/.holosoma_deps/miniconda3/envs/hssim
 if [[ -d "${HSSIM_BIN_DIR}" ]]; then
   export PATH="${HSSIM_BIN_DIR}:${PATH}"
 fi
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4,5,6,7}
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,2,3,4,5,6,7}
 if [[ -z "${NPROC:-}" ]]; then
   IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
   NPROC=${#_visible_gpus[@]}
 fi
+DEFAULT_TOTAL_ENVS=${DEFAULT_TOTAL_ENVS:-7168}
+NUM_ENVS=${NUM_ENVS:-${DEFAULT_TOTAL_ENVS}}
+DS_DATA_ROOT=${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}
+DEFAULT_DS_PREPARED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
+DEFAULT_MIX_NAIVE_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
+
+case "${DATA_MODE}" in
+  default|mix-naive)
+    DATA_MODE="mix-naive"
+    MOTION_DIR=${MOTION_DIR:-"${DEFAULT_MIX_NAIVE_MOTION_DIR}"}
+    ;;
+  pure-sd)
+    MOTION_DIR=${MOTION_DIR:-"${DEFAULT_DS_PREPARED_MOTION_DIR}"}
+    ;;
+  *)
+    echo "[ERROR] Unsupported DATA_MODE='${DATA_MODE}'. Use one of: default, mix-naive, pure-sd" >&2
+    exit 2
+    ;;
+esac
 
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
 TEACHER_PERCEPTION_PRESET=${TEACHER_PERCEPTION_PRESET:-none}
 TEACHER_PERCEPTION_OBS_KEY=${TEACHER_PERCEPTION_OBS_KEY:-teacher_perception_obs}
+CRITIC_PERCEPTION_PRESET=${CRITIC_PERCEPTION_PRESET:-none}
+CRITIC_PERCEPTION_OBS_KEY=${CRITIC_PERCEPTION_OBS_KEY:-critic_perception_obs}
 TEACHER_ACTOR_OBS_HISTORY_LENGTH=${TEACHER_ACTOR_OBS_HISTORY_LENGTH:-}
 TEACHER_COMPAT_PROFILE=${TEACHER_COMPAT_PROFILE:-auto}
 TEACHER_COMPAT_NOTES=${TEACHER_COMPAT_NOTES:-}
@@ -247,25 +289,44 @@ TEACHER_ACTION_MIX_RATIO_START=${TEACHER_ACTION_MIX_RATIO_START:-}
 TEACHER_ACTION_MIX_RATIO_END=${TEACHER_ACTION_MIX_RATIO_END:-}
 TEACHER_ACTION_MIX_RATIO_END_ITERATION=${TEACHER_ACTION_MIX_RATIO_END_ITERATION:-}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
-NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-3000}
+NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-4000}
 PPO_START_EPOCH=${PPO_START_EPOCH:-0}
-# Perception distill benefits from a shorter curriculum and a stronger PPO tail.
-DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-2000}
-DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-5.0}
-SCHEDULE_NAME=${SCHEDULE_NAME:-root_pos_perception_default}
-SCHEDULE_NOTES=${SCHEDULE_NOTES:-"Root-position perception distill. PPO starts immediately; DAgger ends at iteration 2000. Teacher rollout-action mixing disabled by default."}
-START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.7}
+DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-3000}
+PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.3}
+DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
+FIXED_BC_EVAL_LOG_INTERVAL=${FIXED_BC_EVAL_LOG_INTERVAL:-1000}
+SCHEDULE_NAME=${SCHEDULE_NAME:-root_pos_teacher_anchor_v2}
+SCHEDULE_NOTES=${SCHEDULE_NOTES:-"0-700 teacher rollout mix decays 0.7->0.0. PPO starts immediately with target coeff 0.3 while DAgger remains active until iteration 3000. Root-position command replaces the drop-command-specific curricula from distill_box_drop_mixed.sh; other launcher defaults stay aligned."}
+START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.2}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
-PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i_17x17}
+PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
 STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_root','actor_obs_proprio']"}
+DAGGER_MATCH_STD=${DAGGER_MATCH_STD:-True}
+ENTROPY_COEF=${ENTROPY_COEF:-0.0}
+DAGGER_IGNORE_EPISODE_INITIAL_STEPS=${DAGGER_IGNORE_EPISODE_INITIAL_STEPS:-0}
+MAX_EPISODE_LENGTH_S=${MAX_EPISODE_LENGTH_S:-8.0}
+RESET_TO_DEFAULT_POSE=${RESET_TO_DEFAULT_POSE:-False}
+ENABLE_DEFAULT_POSE_PREPEND=${ENABLE_DEFAULT_POSE_PREPEND:-True}
+DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0.5}
+ENABLE_DEFAULT_POSE_APPEND=${ENABLE_DEFAULT_POSE_APPEND:-False}
+DEFAULT_POSE_APPEND_DURATION_S=${DEFAULT_POSE_APPEND_DURATION_S:-0.0}
+VISER_DISTILL_MINIMAL_UI=${VISER_DISTILL_MINIMAL_UI:-1}
+VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-0}
 
-# The selected student depth preset is 17x17 by default.
-IMAGE_WIDTH=${IMAGE_WIDTH:-17}
-IMAGE_HEIGHT=${IMAGE_HEIGHT:-17}
-CAMERA_NEAR=${CAMERA_NEAR:-0.001}
-CAMERA_FAR=${CAMERA_FAR:-3.0}
-CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-3.0}
-PERCEPTION_WARP_PREPROCESS=${PERCEPTION_WARP_PREPROCESS:-True}
+# Use the preset defaults unless the caller explicitly overrides camera settings.
+IMAGE_WIDTH=${IMAGE_WIDTH:-}
+IMAGE_HEIGHT=${IMAGE_HEIGHT:-}
+CAMERA_NEAR=${CAMERA_NEAR:-}
+CAMERA_FAR=${CAMERA_FAR:-}
+CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-}
+PERCEPTION_WARP_PREPROCESS=${PERCEPTION_WARP_PREPROCESS:-}
+
+if [[ "${TEACHER_ACTION_MIX_RATIO_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_START_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_END_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_END_ITERATION_EXPLICIT}" -eq 0 ]]; then
+  TEACHER_ACTION_MIX_RATIO="0.0"
+  TEACHER_ACTION_MIX_RATIO_START="0.7"
+  TEACHER_ACTION_MIX_RATIO_END="0.0"
+  TEACHER_ACTION_MIX_RATIO_END_ITERATION="700"
+fi
 
 case "${SCHEDULE_VARIANT}" in
   default)
@@ -278,10 +339,10 @@ case "${SCHEDULE_VARIANT}" in
       DAGGER_END_EPOCH=3000
     fi
     if [[ "${SCHEDULE_NAME_EXPLICIT}" -eq 0 ]]; then
-      SCHEDULE_NAME="root_pos_perception_dag_first"
+      SCHEDULE_NAME="root_pos_teacher_anchor_v2_dag_first"
     fi
     if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
-      SCHEDULE_NOTES="Root-position perception distill with pure DAgger first. PPO starts at iteration 2000 and DAgger ends at iteration 3000."
+      SCHEDULE_NOTES="0-700 teacher rollout mix decays 0.7->0.0. 0-2000 pure DAgger with PPO disabled. 2000-3000 PPO ramps 0->0.3 while DAgger stays dominant. Root-position command replaces the drop-command-specific curricula from distill_box_drop_mixed.sh; other launcher defaults stay aligned."
     fi
     ;;
   *)
@@ -295,7 +356,7 @@ TEACHER_REF_MODEL_FILE="model_24000.pt"
 TEACHER_REF_LOCAL_CHECKPOINT="${SCRIPT_DIR}/.teacher_checkpoints/${TEACHER_REF_MODEL_FILE}"
 TEACHER_REF_PERCEPTION_PRESET="heightmap"
 TEACHER_U5LGUXVL_RUN_ID="u5lguxvl"
-TEACHER_U5LGUXVL_MODEL_FILE="model_14000.pt"
+TEACHER_U5LGUXVL_MODEL_FILE="model_17000.pt"
 TEACHER_U5LGUXVL_LOCAL_CHECKPOINT="${SCRIPT_DIR}/.teacher_checkpoints/${TEACHER_U5LGUXVL_MODEL_FILE}"
 TEACHER_COMPAT_PROFILE_RESOLVED="${TEACHER_COMPAT_PROFILE}"
 TEACHER_COMPAT_NOTES_AUTO=""
@@ -380,12 +441,17 @@ echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
 echo "[INFO] teacher_compat_profile=${TEACHER_COMPAT_PROFILE_RESOLVED}"
 echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS}"
 echo "[INFO] teacher_perception_preset=${TEACHER_PERCEPTION_PRESET} teacher_perception_obs_key=${TEACHER_PERCEPTION_OBS_KEY}"
+echo "[INFO] critic_perception_preset=${CRITIC_PERCEPTION_PRESET} critic_perception_obs_key=${CRITIC_PERCEPTION_OBS_KEY}"
 if [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH}" ]]; then
   echo "[INFO] teacher_actor_obs_history_length=${TEACHER_ACTOR_OBS_HISTORY_LENGTH}"
 fi
 echo "[INFO] run_name=${RUN_NAME} training_name=${TRAINING_NAME}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
-echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC}"
+echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} num_envs=${NUM_ENVS}"
+echo "[INFO] data_mode=${DATA_MODE}"
+if [[ -n "${MOTION_DIR:-}" ]]; then
+  echo "[INFO] motion_dir=${MOTION_DIR}"
+fi
 echo "[INFO] schedule_variant=${SCHEDULE_VARIANT}"
 echo "[INFO] schedule_name=${SCHEDULE_NAME}"
 echo "[INFO] schedule_notes=${SCHEDULE_NOTES}"
@@ -395,8 +461,15 @@ echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} dagger_loss_coef=${DAGGER_LOSS_COEF} t
 if [[ -n "${TEACHER_ACTION_MIX_RATIO_START}" || -n "${TEACHER_ACTION_MIX_RATIO_END}" || -n "${TEACHER_ACTION_MIX_RATIO_END_ITERATION}" ]]; then
   echo "[INFO] teacher_action_mix_schedule=${TEACHER_ACTION_MIX_RATIO_START}->${TEACHER_ACTION_MIX_RATIO_END} end_iter=${TEACHER_ACTION_MIX_RATIO_END_ITERATION}"
 fi
-echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
+echo "[INFO] ppo_schedule=${PPO_START_EPOCH}->${DAGGER_END_EPOCH} target=${PPO_TARGET_COEFF} dagger_loss_coef=${DAGGER_LOSS_COEF}"
+echo "[INFO] fixed_bc_eval_log_interval=${FIXED_BC_EVAL_LOG_INTERVAL}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
+echo "[INFO] entropy_coef=${ENTROPY_COEF} dagger_match_std=${DAGGER_MATCH_STD}"
+echo "[INFO] default_pose_prepend=${ENABLE_DEFAULT_POSE_PREPEND} duration_s=${DEFAULT_POSE_PREPEND_DURATION_S} default_pose_append=${ENABLE_DEFAULT_POSE_APPEND} append_duration_s=${DEFAULT_POSE_APPEND_DURATION_S}"
+echo "[INFO] viser_distill_minimal_ui=${VISER_DISTILL_MINIMAL_UI}"
+echo "[INFO] viser_show_target_keypoints=${VISER_SHOW_TARGET_KEYPOINTS}"
+echo "[INFO] dagger_ignore_episode_initial_steps=${DAGGER_IGNORE_EPISODE_INITIAL_STEPS}"
+echo "[INFO] max_episode_length_s=${MAX_EPISODE_LENGTH_S}"
 if [[ -n "${TEACHER_COMPAT_NOTES}" ]]; then
   echo "[WARN] teacher_compat_notes=${TEACHER_COMPAT_NOTES}"
 fi
@@ -404,6 +477,26 @@ fi
 EXTRA_DISTILL_ARGS=()
 if [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH}" ]]; then
   EXTRA_DISTILL_ARGS+=(--observation.groups.actor_obs.history-length="${TEACHER_ACTOR_OBS_HISTORY_LENGTH}")
+fi
+
+PERCEPTION_OVERRIDE_ARGS=()
+if [[ "${IMAGE_WIDTH_EXPLICIT}" -eq 1 ]]; then
+  PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-width="${IMAGE_WIDTH}")
+fi
+if [[ "${IMAGE_HEIGHT_EXPLICIT}" -eq 1 ]]; then
+  PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-height="${IMAGE_HEIGHT}")
+fi
+if [[ "${CAMERA_NEAR_EXPLICIT}" -eq 1 ]]; then
+  PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-near="${CAMERA_NEAR}")
+fi
+if [[ "${CAMERA_FAR_EXPLICIT}" -eq 1 ]]; then
+  PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-far="${CAMERA_FAR}")
+fi
+if [[ "${CAMERA_MAX_DISTANCE_EXPLICIT}" -eq 1 ]]; then
+  PERCEPTION_OVERRIDE_ARGS+=(--perception.max-distance="${CAMERA_MAX_DISTANCE}")
+fi
+if [[ "${PERCEPTION_WARP_PREPROCESS_EXPLICIT}" -eq 1 ]]; then
+  PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-warp-preprocess="${PERCEPTION_WARP_PREPROCESS}")
 fi
 
 TEACHER_PERCEPTION_ARGS=(
@@ -415,6 +508,15 @@ if [[ -n "${TEACHER_PERCEPTION_OBS_KEY}" ]]; then
   )
 fi
 
+CRITIC_PERCEPTION_ARGS=(
+  --algo.config.distill.critic-perception-preset="${CRITIC_PERCEPTION_PRESET}"
+)
+if [[ -n "${CRITIC_PERCEPTION_OBS_KEY}" ]]; then
+  CRITIC_PERCEPTION_ARGS+=(
+    --algo.config.distill.critic-perception-obs-key="${CRITIC_PERCEPTION_OBS_KEY}"
+  )
+fi
+
 exec env \
   EXP="${EXP}" \
   RUN_NAME="${RUN_NAME}" \
@@ -422,6 +524,8 @@ exec env \
   TRAINING_PROJECT="${TRAINING_PROJECT}" \
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
   NPROC="${NPROC}" \
+  NUM_ENVS="${NUM_ENVS}" \
+  MOTION_DIR="${MOTION_DIR}" \
   TEACHER_OBS_KEYS="${TEACHER_OBS_KEYS}" \
   TEACHER_ACTION_MIX_RATIO="${TEACHER_ACTION_MIX_RATIO}" \
   TEACHER_ACTION_MIX_RATIO_START="${TEACHER_ACTION_MIX_RATIO_START}" \
@@ -431,8 +535,18 @@ exec env \
   NUM_LEARNING_ITERATIONS="${NUM_LEARNING_ITERATIONS}" \
   PPO_START_EPOCH="${PPO_START_EPOCH}" \
   DAGGER_END_EPOCH="${DAGGER_END_EPOCH}" \
+  PPO_TARGET_COEFF="${PPO_TARGET_COEFF}" \
   DAGGER_LOSS_COEF="${DAGGER_LOSS_COEF}" \
+  DAGGER_MATCH_STD="${DAGGER_MATCH_STD}" \
+  ENTROPY_COEF="${ENTROPY_COEF}" \
   START_AT_TIMESTEP_ZERO_PROB="${START_AT_TIMESTEP_ZERO_PROB}" \
+  HOLOSOMA_RESET_TO_DEFAULT_POSE="${RESET_TO_DEFAULT_POSE}" \
+  ENABLE_DEFAULT_POSE_PREPEND="${ENABLE_DEFAULT_POSE_PREPEND}" \
+  DEFAULT_POSE_PREPEND_DURATION_S="${DEFAULT_POSE_PREPEND_DURATION_S}" \
+  ENABLE_DEFAULT_POSE_APPEND="${ENABLE_DEFAULT_POSE_APPEND}" \
+  DEFAULT_POSE_APPEND_DURATION_S="${DEFAULT_POSE_APPEND_DURATION_S}" \
+  VISER_DISTILL_MINIMAL_UI="${VISER_DISTILL_MINIMAL_UI}" \
+  VISER_SHOW_TARGET_KEYPOINTS="${VISER_SHOW_TARGET_KEYPOINTS}" \
   PAIR_TERRAIN_WITH_MOTION="${PAIR_TERRAIN_WITH_MOTION}" \
   bash "${SCRIPT_DIR}/distill_root_box.sh" "${TEACHER_CHECKPOINT}" \
     "perception:${PERCEPTION_PRESET}" \
@@ -442,11 +556,11 @@ exec env \
     --algo.config.distill.teacher-compat-profile="${TEACHER_COMPAT_PROFILE_RESOLVED}" \
     --algo.config.distill.teacher-compat-notes="${TEACHER_COMPAT_NOTES}" \
     "${TEACHER_PERCEPTION_ARGS[@]}" \
+    "${CRITIC_PERCEPTION_ARGS[@]}" \
+    --algo.config.distill.dagger-ignore-episode-initial-steps="${DAGGER_IGNORE_EPISODE_INITIAL_STEPS}" \
+    --algo.config.distill.fixed-bc-eval-log-interval="${FIXED_BC_EVAL_LOG_INTERVAL}" \
+    --algo.config.distill.ppo-target-coeff="${PPO_TARGET_COEFF}" \
+    --simulator.config.sim.max_episode_length_s "${MAX_EPISODE_LENGTH_S}" \
     "${EXTRA_DISTILL_ARGS[@]}" \
-    --perception.camera-width="${IMAGE_WIDTH}" \
-    --perception.camera-height="${IMAGE_HEIGHT}" \
-    --perception.camera-near="${CAMERA_NEAR}" \
-    --perception.camera-far="${CAMERA_FAR}" \
-    --perception.max-distance="${CAMERA_MAX_DISTANCE}" \
-    --perception.camera-warp-preprocess="${PERCEPTION_WARP_PREPROCESS}" \
+    "${PERCEPTION_OVERRIDE_ARGS[@]}" \
     "$@"
