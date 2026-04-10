@@ -69,5 +69,4 @@ LOGGER_NAME="${LOGGER_NAME}" \
 env -u HEADLESS \
 bash ./train_terrain_generalist.sh heightmap \
   --algo.config.num_learning_iterations="${NUM_ITERS}" \
-  --training.headless="${HEADLESS_BOOL}" \
   "$@"

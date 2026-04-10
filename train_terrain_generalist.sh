@@ -743,6 +743,9 @@ cmd+=("${PERCEPTION_OVERRIDES[@]}")
 cmd+=("${RANDOMIZATION_OVERRIDES[@]}")
 cmd+=("${VISER_OVERRIDES[@]}")
 cmd+=("${CHECKPOINT_OVERRIDES[@]}")
+NORMALIZED_EXTRA_CLI_ARGS=()
+normalize_extra_cli_args "$@"
+cmd+=("${NORMALIZED_EXTRA_CLI_ARGS[@]}")
 cmd+=(
   logger:wandb
   --logger.video.enabled=False
@@ -750,9 +753,6 @@ cmd+=(
   --logger.video.upload_to_wandb=False
   --logger.name="${LOGGER_NAME}"
 )
-NORMALIZED_EXTRA_CLI_ARGS=()
-normalize_extra_cli_args "$@"
-cmd+=("${NORMALIZED_EXTRA_CLI_ARGS[@]}")
 
 if is_true "${DRY_RUN}"; then
   echo "[INFO] DRY_RUN=${DRY_RUN}; resolved launch command:"
