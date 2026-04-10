@@ -701,6 +701,17 @@ def test_distill_critic_obs_keeps_single_frame_state_and_proprio_history():
     assert kept_terms.issubset(critic_group.terms)
 
 
+def test_root_position_distill_observation_uses_absolute_root_target_terms():
+    obs_cfg = g1_observations.g1_29dof_wbt_observation_w_object_distill_root_pos_cmd
+    root_group = obs_cfg.groups["actor_obs_root"]
+    torso_alias_group = obs_cfg.groups["actor_obs_torso"]
+
+    assert root_group.history_length == 5
+    assert torso_alias_group.history_length == 5
+    assert set(root_group.terms) == {"root_position_xy_yaw_command"}
+    assert set(torso_alias_group.terms) == {"root_position_xy_yaw_command"}
+
+
 def test_distill_experiment_critic_inputs_include_proprio_history():
     critic_cfg = g1_experiments.g1_29dof_wbt_w_object_distill_sparse_goal_mixed.algo.config.module_dict.critic
 

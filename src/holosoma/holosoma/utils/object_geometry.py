@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import math
+from dataclasses import dataclass
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -49,21 +50,34 @@ def _normalize_urdf_path(urdf_path: str | Path) -> Path:
     return Path(raw).expanduser().resolve()
 
 
-@functools.lru_cache(maxsize=128)
-def load_urdf_geometry_extents(urdf_path: str | Path) -> tuple[float, float, float] | None:
+def _parse_float(raw: str | None, default: float) -> float:
+    try:
+        return float(raw) if raw is not None else float(default)
+    except Exception:
+        return float(default)
+
+
+def _is_identity_origin(origin_el: ET.Element | None, *, atol: float = 1.0e-6) -> bool:
+    if origin_el is None:
+        return True
+    xyz = _parse_vec3(origin_el.get("xyz"), (0.0, 0.0, 0.0))
+    rpy = _parse_vec3(origin_el.get("rpy"), (0.0, 0.0, 0.0))
+    return bool(np.all(np.abs(xyz) <= atol) and np.all(np.abs(rpy) <= atol))
+
+
+def _build_geometry_meshes(
+    resolved_urdf: Path,
+    root: ET.Element,
+    *,
+    geom_tags: tuple[str, ...],
+):
     try:
         import trimesh  # type: ignore[import-not-found]
     except Exception:
         return None
 
-    try:
-        resolved_urdf = _normalize_urdf_path(urdf_path)
-        root = ET.parse(resolved_urdf).getroot()
-    except Exception:
-        return None
-
     meshes: list["trimesh.Trimesh"] = []
-    for geom_tag in ("collision", "visual"):
+    for geom_tag in geom_tags:
         for geom_parent in root.findall(f".//link/{geom_tag}"):
             geometry_el = geom_parent.find("geometry")
             if geometry_el is None:
@@ -107,6 +121,16 @@ def load_urdf_geometry_extents(urdf_path: str | Path) -> tuple[float, float, flo
             mesh_obj.apply_transform(_origin_transform(geom_parent.find("origin")).astype(np.float64))
             meshes.append(mesh_obj)
 
+    return meshes
+
+
+def _load_urdf_geometry_extents_from_root(
+    resolved_urdf: Path,
+    root: ET.Element,
+    *,
+    geom_tags: tuple[str, ...],
+) -> tuple[float, float, float] | None:
+    meshes = _build_geometry_meshes(resolved_urdf, root, geom_tags=geom_tags)
     if not meshes:
         return None
 
@@ -114,3 +138,160 @@ def load_urdf_geometry_extents(urdf_path: str | Path) -> tuple[float, float, flo
     max_corner = np.max(np.stack([mesh.bounds[1] for mesh in meshes], axis=0), axis=0)
     extents = np.maximum(max_corner - min_corner, 1.0e-4)
     return float(extents[0]), float(extents[1]), float(extents[2])
+
+
+@dataclass(frozen=True)
+class UrdfBoxPrimitiveMetadata:
+    """Subset of URDF properties needed to preserve simple box behavior with a cuboid primitive."""
+
+    extents: tuple[float, float, float]
+    mass: float
+    static_friction: float
+    dynamic_friction: float
+    restitution: float
+    compliant_contact_stiffness: float
+    compliant_contact_damping: float
+    visual_color: tuple[float, float, float] | None
+
+
+@functools.lru_cache(maxsize=128)
+def load_urdf_geometry_extents(urdf_path: str | Path) -> tuple[float, float, float] | None:
+    try:
+        resolved_urdf = _normalize_urdf_path(urdf_path)
+        root = ET.parse(resolved_urdf).getroot()
+    except Exception:
+        return None
+    return _load_urdf_geometry_extents_from_root(resolved_urdf, root, geom_tags=("collision", "visual"))
+
+
+@functools.lru_cache(maxsize=128)
+def load_urdf_box_primitive_metadata(urdf_path: str | Path) -> UrdfBoxPrimitiveMetadata | None:
+    """Resolve cuboid extents for simple box-like URDFs.
+
+    This is intentionally conservative. It only accepts single-link, joint-free URDFs whose geometry is
+    simple enough that replacing the imported mesh with a cuboid primitive should preserve the intended
+    training object semantics.
+    """
+
+    try:
+        resolved_urdf = _normalize_urdf_path(urdf_path)
+        root = ET.parse(resolved_urdf).getroot()
+    except Exception:
+        return None
+
+    links = root.findall("link")
+    joints = root.findall("joint")
+    if len(links) != 1 or joints:
+        return None
+
+    link = links[0]
+    visuals = link.findall("visual")
+    collisions = link.findall("collision")
+    if len(visuals) > 1 or len(collisions) > 1:
+        return None
+    if not visuals and not collisions:
+        return None
+
+    has_explicit_box_geom = False
+    has_only_mesh_or_box_geom = True
+    for geom_tag in ("visual", "collision"):
+        for geom_parent in link.findall(geom_tag):
+            if not _is_identity_origin(geom_parent.find("origin")):
+                return None
+            geometry_el = geom_parent.find("geometry")
+            if geometry_el is None:
+                return None
+            child_tags = [child.tag for child in geometry_el if isinstance(child.tag, str)]
+            if any(tag not in {"mesh", "box"} for tag in child_tags):
+                has_only_mesh_or_box_geom = False
+                break
+            if "box" in child_tags:
+                has_explicit_box_geom = True
+        if not has_only_mesh_or_box_geom:
+            break
+    if not has_only_mesh_or_box_geom:
+        return None
+
+    name_hints = " ".join(
+        [
+            resolved_urdf.stem.lower(),
+            str(root.get("name", "")).strip().lower(),
+            str(link.get("name", "")).strip().lower(),
+        ]
+    )
+    if not has_explicit_box_geom and "box" not in name_hints:
+        return None
+
+    inertial_el = link.find("inertial")
+    if inertial_el is None or not _is_identity_origin(inertial_el.find("origin")):
+        return None
+    mass_el = inertial_el.find("mass")
+    inertia_el = inertial_el.find("inertia")
+    if mass_el is None or inertia_el is None:
+        return None
+    if any(abs(_parse_float(inertia_el.get(attr), 0.0)) > 1.0e-6 for attr in ("ixy", "ixz", "iyz")):
+        return None
+
+    extents = _load_urdf_geometry_extents_from_root(
+        resolved_urdf,
+        root,
+        geom_tags=("collision",) if collisions else ("visual",),
+    )
+    if extents is None:
+        return None
+
+    mass = _parse_float(mass_el.get("value"), -1.0)
+    if not math.isfinite(mass) or mass <= 0.0:
+        return None
+
+    visual_color: tuple[float, float, float] | None = None
+    if visuals:
+        material_el = visuals[0].find("material")
+        color_el = material_el.find("color") if material_el is not None else None
+        if color_el is not None:
+            rgba_raw = [part for part in str(color_el.get("rgba", "")).replace(",", " ").split() if part]
+            if len(rgba_raw) >= 3:
+                try:
+                    visual_color = (
+                        float(rgba_raw[0]),
+                        float(rgba_raw[1]),
+                        float(rgba_raw[2]),
+                    )
+                except Exception:
+                    visual_color = None
+
+    contact_el = link.find("contact")
+    root_dynamics_el = root.find("dynamics")
+
+    lateral_friction_el = contact_el.find("lateral_friction") if contact_el is not None else None
+    restitution_el = contact_el.find("restitution") if contact_el is not None else None
+    stiffness_el = contact_el.find("stiffness") if contact_el is not None else None
+    damping_el = contact_el.find("damping") if contact_el is not None else None
+
+    if lateral_friction_el is not None:
+        lateral_friction = _parse_float(lateral_friction_el.get("value"), 0.5)
+    elif root_dynamics_el is not None:
+        lateral_friction = _parse_float(root_dynamics_el.get("friction"), 0.5)
+    else:
+        lateral_friction = 0.5
+
+    restitution = _parse_float(restitution_el.get("value") if restitution_el is not None else None, 0.0)
+    compliant_contact_stiffness = _parse_float(stiffness_el.get("value") if stiffness_el is not None else None, 0.0)
+    compliant_contact_damping = _parse_float(damping_el.get("value") if damping_el is not None else None, 0.0)
+
+    return UrdfBoxPrimitiveMetadata(
+        extents=extents,
+        mass=mass,
+        static_friction=lateral_friction,
+        dynamic_friction=lateral_friction,
+        restitution=restitution,
+        compliant_contact_stiffness=compliant_contact_stiffness,
+        compliant_contact_damping=compliant_contact_damping,
+        visual_color=visual_color,
+    )
+
+
+@functools.lru_cache(maxsize=128)
+def load_urdf_box_primitive_extents(urdf_path: str | Path) -> tuple[float, float, float] | None:
+    metadata = load_urdf_box_primitive_metadata(urdf_path)
+    return None if metadata is None else metadata.extents

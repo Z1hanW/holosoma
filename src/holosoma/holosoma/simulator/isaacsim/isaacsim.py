@@ -61,6 +61,8 @@ from holosoma.simulator.shared.virtual_gantry import (
     GantryCommand,
     GantryCommandData,
 )
+from holosoma.simulator.shared.urdf_topology import extract_urdf_topology_signature
+from holosoma.utils.object_geometry import UrdfBoxPrimitiveMetadata, load_urdf_box_primitive_metadata
 
 from holosoma.simulator.types import ActorNames, ActorIndices, EnvIds, ActorStates, ActorPoses
 
@@ -133,6 +135,8 @@ class IsaacSim(BaseSimulator):
         self._env_object_urdf_paths: list[str] = []
         self._heterogeneous_object_env_assignment = False
         self._heterogeneous_object_single_slot_enabled = False
+        self._training_object_use_box_primitives = False
+        self._training_object_box_metadata_by_urdf: dict[str, UrdfBoxPrimitiveMetadata] = {}
         self._object_contact_filter_prim_paths_expr: list[str] = []
         self._object_contact_sensors: dict[str, ContactSensor] = {}
         self._required_object_contact_sensor_body_names = self._resolve_required_object_contact_sensor_body_names(
@@ -250,10 +254,16 @@ class IsaacSim(BaseSimulator):
         object_path_spec = str(getattr(object_cfg, "object_urdf_path", "") or "").strip()
         if getattr(object_cfg, "enabled", False) and object_path_spec:
             self._resolved_training_object_specs = self._resolve_training_object_specs(object_path_spec)
+            self._training_object_use_box_primitives = self._should_use_box_primitives(
+                self._resolved_training_object_specs
+            )
             self._heterogeneous_object_env_assignment = len(self._resolved_training_object_specs) > 1
             self._heterogeneous_object_single_slot_enabled = (
                 self._heterogeneous_object_env_assignment
-                and self._can_use_single_slot_heterogeneous_objects(self._resolved_training_object_specs)
+                and (
+                    self._training_object_use_box_primitives
+                    or self._can_use_single_slot_heterogeneous_objects(self._resolved_training_object_specs)
+                )
             )
             if self._heterogeneous_object_single_slot_enabled and replicate_physics:
                 logger.warning(
@@ -777,11 +787,106 @@ class IsaacSim(BaseSimulator):
         return [object_specs[env_id % len(object_specs)][1] for env_id in range(num_envs)]
 
     @staticmethod
-    def _build_object_spawn_cfg(
+    def _resolve_object_spawn_mode() -> tuple[str, bool]:
+        raw_mode = os.environ.get("HOLOSOMA_OBJECT_SPAWN_MODE")
+        raw_mode_normalized = "" if raw_mode is None else raw_mode.strip().lower()
+        if raw_mode_normalized in {"", "primitive", "primitives", "box", "cuboid"}:
+            return "primitive", bool(raw_mode_normalized)
+        if raw_mode_normalized == "auto":
+            return "auto", True
+        if raw_mode_normalized in {"urdf", "mesh", "off", "disable", "disabled"}:
+            return "urdf", True
+        logger.warning(
+            "Unknown HOLOSOMA_OBJECT_SPAWN_MODE='{}'. Falling back to 'primitive'.",
+            raw_mode,
+        )
+        return "primitive", bool(raw_mode_normalized)
+
+    def _should_use_box_primitives(self, object_specs: list[tuple[str, str]]) -> bool:
+        self._training_object_box_metadata_by_urdf = {}
+        spawn_mode, spawn_mode_explicit = self._resolve_object_spawn_mode()
+        if spawn_mode == "urdf" or not object_specs:
+            return False
+
+        metadata_by_urdf: dict[str, UrdfBoxPrimitiveMetadata] = {}
+        for _object_name, object_path in object_specs:
+            metadata = load_urdf_box_primitive_metadata(object_path)
+            if metadata is None:
+                if spawn_mode == "primitive" and spawn_mode_explicit:
+                    raise ValueError(
+                        "HOLOSOMA_OBJECT_SPAWN_MODE=primitive requires every training object URDF to be a "
+                        f"simple box-like asset. Failed on: {object_path}"
+                    )
+                return False
+            metadata_by_urdf[object_path] = metadata
+
+        self._training_object_box_metadata_by_urdf = metadata_by_urdf
+        logger.info(
+            "Using Isaac Sim cuboid primitives for {} training object URDF(s).",
+            len(metadata_by_urdf),
+        )
+        return True
+
+    @staticmethod
+    def _apply_object_scale_to_extents(
+        extents: tuple[float, float, float],
+        object_scale: tuple[float, float, float] | None,
+    ) -> tuple[float, float, float]:
+        if object_scale is None:
+            return extents
+        return tuple(float(extents[idx]) * float(object_scale[idx]) for idx in range(3))
+
+    def _build_box_primitive_spawn_cfg(
+        self,
         object_asset_urdf_path: str,
         *,
         object_scale: tuple[float, float, float] | None,
-    ) -> sim_utils.UrdfFileCfg:
+    ) -> sim_utils.CuboidCfg | None:
+        metadata = self._training_object_box_metadata_by_urdf.get(object_asset_urdf_path)
+        if metadata is None:
+            return None
+        size = self._apply_object_scale_to_extents(metadata.extents, object_scale)
+        visual_color = metadata.visual_color if metadata.visual_color is not None else (0.7, 0.8, 0.9)
+        return sim_utils.CuboidCfg(
+            size=size,
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=visual_color),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=metadata.static_friction,
+                dynamic_friction=metadata.dynamic_friction,
+                restitution=metadata.restitution,
+                compliant_contact_stiffness=metadata.compliant_contact_stiffness,
+                compliant_contact_damping=metadata.compliant_contact_damping,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            mass_props=sim_utils.MassPropertiesCfg(mass=metadata.mass),
+            activate_contact_sensors=True,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=False,
+                retain_accelerations=False,
+                linear_damping=0.01,
+                angular_damping=0.01,
+                max_linear_velocity=1000.0,
+                max_angular_velocity=1000.0,
+                max_depenetration_velocity=1.0,
+                solver_position_iteration_count=8,
+                solver_velocity_iteration_count=4,
+            ),
+        )
+
+    def _build_object_spawn_cfg(
+        self,
+        object_asset_urdf_path: str,
+        *,
+        object_scale: tuple[float, float, float] | None,
+    ) -> sim_utils.UrdfFileCfg | sim_utils.CuboidCfg:
+        if self._training_object_use_box_primitives:
+            primitive_cfg = self._build_box_primitive_spawn_cfg(
+                object_asset_urdf_path,
+                object_scale=object_scale,
+            )
+            if primitive_cfg is not None:
+                return primitive_cfg
+
         return sim_utils.UrdfFileCfg(
             fix_base=False,
             replace_cylinders_with_capsules=True,
@@ -814,10 +919,62 @@ class IsaacSim(BaseSimulator):
         Mixed URDF banks often expand to different rigid-body prim hierarchies after import. IsaacLab's
         `RigidObject` view resolution assumes that every matched instance shares the same hierarchy as env_0.
         When that assumption is false, the resulting PhysX view only binds a subset of environments, which then
-        explodes later as an env/object instance-count mismatch during state reads. Keep the shared-slot path
-        disabled for URDF-based banks and fall back to one slot per asset instead.
+        explodes later as an env/object instance-count mismatch during state reads.
+
+        However, many generated box banks differ only in mesh extents and inertia while keeping the same
+        rigid-body/link hierarchy (for example, a single `baseLink` box URDF). Those banks are safe to spawn
+        through a single shared object slot, which is much cheaper than instantiating every object in every env.
         """
-        return False
+        disable_flag = os.environ.get("HOLOSOMA_DISABLE_HETEROGENEOUS_OBJECT_SINGLE_SLOT", "").strip().lower()
+        if disable_flag in {"1", "true", "yes", "on"}:
+            logger.info("Disabled heterogeneous single-slot object spawning via env override.")
+            return False
+
+        force_flag = os.environ.get("HOLOSOMA_FORCE_HETEROGENEOUS_OBJECT_SINGLE_SLOT", "").strip().lower()
+        if force_flag in {"1", "true", "yes", "on"}:
+            logger.warning("Forcing heterogeneous single-slot object spawning via env override.")
+            return True
+
+        if len(object_specs) <= 1:
+            return False
+
+        reference_name, reference_path = object_specs[0]
+        try:
+            reference_signature = extract_urdf_topology_signature(reference_path)
+        except Exception as exc:
+            logger.warning(
+                "Failed to inspect heterogeneous object URDF '{}' ({}); falling back to per-asset object slots.",
+                reference_path,
+                exc,
+            )
+            return False
+
+        for object_name, object_path in object_specs[1:]:
+            try:
+                current_signature = extract_urdf_topology_signature(object_path)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to inspect heterogeneous object URDF '{}' ({}); falling back to per-asset object slots.",
+                    object_path,
+                    exc,
+                )
+                return False
+
+            if current_signature != reference_signature:
+                logger.info(
+                    "Heterogeneous object bank requires per-asset slots: topology mismatch '{}' ({}) vs '{}' ({}).",
+                    reference_name,
+                    reference_path,
+                    object_name,
+                    object_path,
+                )
+                return False
+
+        logger.info(
+            "Heterogeneous object bank is topology-compatible across {} URDFs; enabling single-slot spawning.",
+            len(object_specs),
+        )
+        return True
 
     def _setup_scene(self) -> None:
         self._load_scene_config()
@@ -1092,7 +1249,10 @@ class IsaacSim(BaseSimulator):
                     object_specs,
                     num_envs=self.training_config.num_envs,
                 )
-                self._object_contact_filter_prim_paths_expr.append("{ENV_REGEX_NS}/Object/baseLink")
+                if self._training_object_use_box_primitives:
+                    self._object_contact_filter_prim_paths_expr.append("{ENV_REGEX_NS}/Object")
+                else:
+                    self._object_contact_filter_prim_paths_expr.append("{ENV_REGEX_NS}/Object/baseLink")
                 logger.info(
                     "Loaded heterogeneous training object bank: {} unique URDF(s) assigned across {} envs.",
                     len(object_specs),
@@ -1113,9 +1273,12 @@ class IsaacSim(BaseSimulator):
                     rigid_object = RigidObject(object_cfg)
                     self.scene.rigid_objects[object_name] = rigid_object
                     self._object_urdf_by_name[object_name] = str(pathlib.Path(object_asset_urdf_path).resolve())
-                    # The current URDF box assets expose a single rigid body under `baseLink`.
-                    # Filter against that rigid body prim instead of the Xform root or collision child.
-                    self._object_contact_filter_prim_paths_expr.append(f"{{ENV_REGEX_NS}}/{prim_suffix}/baseLink")
+                    if self._training_object_use_box_primitives:
+                        self._object_contact_filter_prim_paths_expr.append(f"{{ENV_REGEX_NS}}/{prim_suffix}")
+                    else:
+                        # The current URDF box assets expose a single rigid body under `baseLink`.
+                        # Filter against that rigid body prim instead of the Xform root or collision child.
+                        self._object_contact_filter_prim_paths_expr.append(f"{{ENV_REGEX_NS}}/{prim_suffix}/baseLink")
 
                 logger.info(
                     "Loaded {} training object URDF(s): {}",

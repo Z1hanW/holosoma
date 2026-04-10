@@ -6,7 +6,7 @@ set -euo pipefail
 # Features:
 # - Two branches: mocap | depth
 # - Viser clip selection GUI
-# - Viser manual command GUI (root-frame XY + yaw), VideoMimic-style workflow
+# - Viser manual root-target GUI (root position XY + yaw; converted to distill root-relative command)
 # - Optional hardware joystick via pygame/bridge backend
 #
 # Usage:
@@ -627,8 +627,8 @@ else
 fi
 echo "[INFO] Viser controls:"
 echo "  1) Open 'Manual Control' and enable 'Enable Manual Root Command'."
-echo "  2) Set 'Root Command X/Y/Yaw' in the robot root frame."
-echo "  3) Use 'Zero Root Command' to reset the manual command to zero."
+echo "  2) Set 'Target Root X/Y/Yaw' as the desired root position XY and yaw."
+echo "  3) Use 'Sync Root Target To Robot' to copy the current root pose into the target."
 echo "  4) Use 'Advanced > Reset Object' to add box position/rotation offsets for the next reset."
 echo "  5) Use 'Clip Playback' to select clip/start frame and click 'Apply Clip'."
 echo "  6) Use 'Advanced > Simulation Control' for Play/Step/Reset (Reset returns to the default pose)."

@@ -56,7 +56,8 @@ Default W&B runs:
   VISER_ENV_ID             (default: 0)
   VISER_UPDATE_HZ          (default: 30)
   VISER_RECENTER           (default: True)
-  VIS_GPU                  (default: auto)
+  VIS_GPU                  (default: auto; for IsaacSim selects HOLOSOMA_DEVICE, for MuJoCo sets CUDA_VISIBLE_DEVICES)
+  HOLOSOMA_DEVICE          (optional explicit torch/IsaacSim device override, e.g. cuda:0)
   PAIR_TERRAIN_WITH_MOTION (default: False)
   DISABLE_RANDOMIZATION    (default: True)
   START_AT_TIMESTEP_ZERO_PROB (default: 1.0)
@@ -792,32 +793,6 @@ if [[ -n "${OBJECT_SCALE+x}" && -n "${OBJECT_SCALE}" ]]; then
   OBJECT_SCALE_ARG="$(normalize_object_scale "${OBJECT_SCALE}")"
 fi
 
-if [[ -z "${CUDA_VISIBLE_DEVICES+x}" || -z "${CUDA_VISIBLE_DEVICES}" ]]; then
-  if [[ "${VIS_GPU}" == "auto" ]]; then
-    if command -v nvidia-smi >/dev/null 2>&1; then
-      AUTO_GPU="$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits | sort -t, -k2,2n | head -n1 | cut -d, -f1 | tr -d ' ')"
-      if [[ -n "${AUTO_GPU}" ]]; then
-        export CUDA_VISIBLE_DEVICES="${AUTO_GPU}"
-      fi
-    fi
-  elif [[ "${VIS_GPU}" =~ ^[0-9]+$ ]]; then
-    export CUDA_VISIBLE_DEVICES="${VIS_GPU}"
-  fi
-fi
-
-export VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI:-1}
-export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-1}
-export VISER_ENABLE_MANUAL_GOAL_GUI=${VISER_ENABLE_MANUAL_GOAL_GUI:-1}
-export VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-0}
-export VISER_SHOW_TARGET_BOX=${VISER_SHOW_TARGET_BOX:-1}
-export VISER_PERCEPTION_IMAGE_MODE=${VISER_PERCEPTION_IMAGE_MODE:-depth}
-export VISER_SHOW_PERCEPTION_FRUSTUM=${VISER_SHOW_PERCEPTION_FRUSTUM:-1}
-export HOLOSOMA_DISABLE_BAD_TRACKING_RESET=${HOLOSOMA_DISABLE_BAD_TRACKING_RESET:-1}
-export HOLOSOMA_DISABLE_AUTO_RESET=${HOLOSOMA_DISABLE_AUTO_RESET:-1}
-export HOLOSOMA_DISABLE_CLIP_END_RESET=${HOLOSOMA_DISABLE_CLIP_END_RESET:-1}
-export LOGURU_LEVEL=${LOGURU_LEVEL:-WARNING}
-export PY_LOG_LEVEL=${PY_LOG_LEVEL:-WARNING}
-
 SIMULATOR_SUBCOMMAND=""
 EXTRA_ARGS=()
 for arg in "$@"; do
@@ -834,6 +809,49 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+SELECTED_GPU=""
+if [[ "${VIS_GPU}" == "auto" ]]; then
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    SELECTED_GPU="$(
+      nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \
+        | sort -t, -k2,2n \
+        | head -n1 \
+        | cut -d, -f1 \
+        | tr -d ' '
+    )"
+  fi
+elif [[ "${VIS_GPU}" =~ ^[0-9]+$ ]]; then
+  SELECTED_GPU="${VIS_GPU}"
+fi
+
+if [[ "${SIMULATOR_SUBCOMMAND}" == "simulator:mujoco" ]]; then
+  if [[ -z "${CUDA_VISIBLE_DEVICES+x}" || -z "${CUDA_VISIBLE_DEVICES}" ]]; then
+    if [[ -n "${SELECTED_GPU}" ]]; then
+      export CUDA_VISIBLE_DEVICES="${SELECTED_GPU}"
+    fi
+  fi
+else
+  if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    echo "[WARN] CUDA_VISIBLE_DEVICES is set for an IsaacSim launch; Omniverse may report CUDA bad-state or crash." >&2
+    echo "[WARN] Prefer VIS_GPU or HOLOSOMA_DEVICE instead of pre-setting CUDA_VISIBLE_DEVICES." >&2
+  elif [[ -z "${HOLOSOMA_DEVICE:-}" && -n "${SELECTED_GPU}" ]]; then
+    export HOLOSOMA_DEVICE="cuda:${SELECTED_GPU}"
+  fi
+fi
+
+export VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI:-1}
+export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-1}
+export VISER_ENABLE_MANUAL_GOAL_GUI=${VISER_ENABLE_MANUAL_GOAL_GUI:-1}
+export VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-0}
+export VISER_SHOW_TARGET_BOX=${VISER_SHOW_TARGET_BOX:-1}
+export VISER_PERCEPTION_IMAGE_MODE=${VISER_PERCEPTION_IMAGE_MODE:-depth}
+export VISER_SHOW_PERCEPTION_FRUSTUM=${VISER_SHOW_PERCEPTION_FRUSTUM:-1}
+export HOLOSOMA_DISABLE_BAD_TRACKING_RESET=${HOLOSOMA_DISABLE_BAD_TRACKING_RESET:-1}
+export HOLOSOMA_DISABLE_AUTO_RESET=${HOLOSOMA_DISABLE_AUTO_RESET:-1}
+export HOLOSOMA_DISABLE_CLIP_END_RESET=${HOLOSOMA_DISABLE_CLIP_END_RESET:-1}
+export LOGURU_LEVEL=${LOGURU_LEVEL:-WARNING}
+export PY_LOG_LEVEL=${PY_LOG_LEVEL:-WARNING}
 
 cmd=(
   "$PYTHON_BIN" -m holosoma.visualize physics
@@ -974,6 +992,9 @@ if [[ -n "${CHECKPOINT_SAVED_OBJECT_URDF}" ]]; then
 fi
 echo "[INFO] preserving checkpoint actor/critic observation history"
 echo "[INFO] headless=${HEADLESS_FLAG} (env HEADLESS=${HEADLESS})"
+if [[ -n "${HOLOSOMA_DEVICE:-}" ]]; then
+  echo "[INFO] holosoma_device=${HOLOSOMA_DEVICE}"
+fi
 echo "[INFO] viser=http://localhost:${VISER_PORT}"
 echo "[INFO] clip_gui=${VISER_ENABLE_CLIP_GUI} manual_gui=${VISER_ENABLE_MANUAL_GUI} manual_goal_gui=${VISER_ENABLE_MANUAL_GOAL_GUI}"
 echo "[INFO] viser_show_target_keypoints=${VISER_SHOW_TARGET_KEYPOINTS} disable_auto_reset=${HOLOSOMA_DISABLE_AUTO_RESET} disable_clip_end_reset=${HOLOSOMA_DISABLE_CLIP_END_RESET}"

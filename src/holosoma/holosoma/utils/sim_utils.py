@@ -214,6 +214,8 @@ def setup_simulation_environment(
 
     # Device selection - must happen before IsaacSim launcher setup
     if device is None:
+        device = os.environ.get("HOLOSOMA_DEVICE")
+    if device is None or not str(device).strip():
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
     logger.info(f"Device: {device}")
 
