@@ -508,6 +508,12 @@ elif [[ -n "${SUPPORT_MASK_DIR}" ]]; then
   SUPPORT_MASK_DIR="$(canonicalize_path "${SUPPORT_MASK_DIR}")"
 fi
 
+SUPPORT_MASK_DIR_OPTION_SUPPORTED=0
+TERRAIN_CFG_FILE="${SCRIPT_DIR}/src/holosoma/holosoma/config_types/terrain.py"
+if [[ -f "${TERRAIN_CFG_FILE}" ]] && grep -Eq '^[[:space:]]*support_mask_dir:[[:space:]]' "${TERRAIN_CFG_FILE}"; then
+  SUPPORT_MASK_DIR_OPTION_SUPPORTED=1
+fi
+
 OBJ_PATH="${OBJ_SOURCE}"
 if [[ -d "${OBJ_SOURCE}" ]]; then
   mapfile -t OBJ_FILES < <(find "${OBJ_SOURCE}" -maxdepth 1 \( -type f -o -type l \) \( -name "*.obj" -o -name "*.OBJ" \) | sort)
@@ -679,7 +685,11 @@ if is_true "${TRAIN_DEBUG_VISER}"; then
 fi
 echo "[INFO] BAD_TRACKING_THRESHOLDS ref_pos=${BAD_TRACKING_REF_POS_THRESHOLD} ref_ori=${BAD_TRACKING_REF_ORI_THRESHOLD} body_pos=${BAD_TRACKING_BODY_POS_THRESHOLD}"
 if [[ -n "${SUPPORT_MASK_DIR}" ]]; then
-  echo "[INFO] SUPPORT_MASK_DIR=${SUPPORT_MASK_DIR}"
+  if [[ "${SUPPORT_MASK_DIR_OPTION_SUPPORTED}" == "1" ]]; then
+    echo "[INFO] SUPPORT_MASK_DIR=${SUPPORT_MASK_DIR}"
+  else
+    echo "[WARN] support_mask_dir option is not available in this checkout; ignoring SUPPORT_MASK_DIR=${SUPPORT_MASK_DIR}" >&2
+  fi
 else
   echo "[WARN] SUPPORT_MASK_DIR is empty. Support-aware terrain rewards require support sidecars via support_mask_dir or metadata source_obj_dir." >&2
 fi
@@ -735,7 +745,7 @@ cmd=(
 if [[ -n "${OBJ_META_PATH}" ]]; then
   cmd+=(--terrain.terrain-term.obj-metadata-path "${OBJ_META_PATH}")
 fi
-if [[ -n "${SUPPORT_MASK_DIR}" ]]; then
+if [[ -n "${SUPPORT_MASK_DIR}" && "${SUPPORT_MASK_DIR_OPTION_SUPPORTED}" == "1" ]]; then
   cmd+=(--terrain.terrain-term.support-mask-dir "${SUPPORT_MASK_DIR}")
 fi
 
