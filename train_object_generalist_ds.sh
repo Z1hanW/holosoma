@@ -77,9 +77,11 @@ DEFAULT_DS_RAW_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj"
 DEFAULT_DS_GEOMETRY_DIR="${DS_DATA_ROOT}/train_g1_w_obj_geometry"
 DEFAULT_DS_PREPARED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
 DEFAULT_MIX_NAIVE_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
-DEFAULT_MIX_NAIVE_EXPECTED_TOTAL=155
-DEFAULT_MIX_NAIVE_EXPECTED_DS=93
-DEFAULT_MIX_NAIVE_EXPECTED_OMOMO=62
+# Optional strict mix-naive count checks.
+# Leave unset to validate structure/fields only so newer banks with different clip counts still run.
+MIX_NAIVE_EXPECTED_TOTAL=${MIX_NAIVE_EXPECTED_TOTAL:-""}
+MIX_NAIVE_EXPECTED_DS=${MIX_NAIVE_EXPECTED_DS:-""}
+MIX_NAIVE_EXPECTED_OMOMO=${MIX_NAIVE_EXPECTED_OMOMO:-""}
 DEFAULT_MOTION_DIR="${DEFAULT_DS_PREPARED_MOTION_DIR}"
 MOTION_DIR_FROM_ENV=0
 if [[ -n "${MOTION_DIR+x}" ]]; then
@@ -568,9 +570,9 @@ PY
 
 validate_mix_naive_bank() {
   local motion_dir="$1"
-  local expected_total="${2:-${DEFAULT_MIX_NAIVE_EXPECTED_TOTAL}}"
-  local expected_ds="${3:-${DEFAULT_MIX_NAIVE_EXPECTED_DS}}"
-  local expected_omomo="${4:-${DEFAULT_MIX_NAIVE_EXPECTED_OMOMO}}"
+  local expected_total="${2:-}"
+  local expected_ds="${3:-}"
+  local expected_omomo="${4:-}"
   "${PYTHON_BIN}" - "${motion_dir}" "${expected_total}" "${expected_ds}" "${expected_omomo}" <<'PY'
 import json
 import sys
@@ -579,25 +581,31 @@ from pathlib import Path
 import numpy as np
 
 motion_dir = Path(sys.argv[1]).expanduser().resolve()
-expected_total = int(sys.argv[2])
-expected_ds = int(sys.argv[3])
-expected_omomo = int(sys.argv[4])
+expected_total_raw = sys.argv[2].strip()
+expected_ds_raw = sys.argv[3].strip()
+expected_omomo_raw = sys.argv[4].strip()
+expected_total = int(expected_total_raw) if expected_total_raw else None
+expected_ds = int(expected_ds_raw) if expected_ds_raw else None
+expected_omomo = int(expected_omomo_raw) if expected_omomo_raw else None
 npz_files = sorted(motion_dir.glob('*.npz'))
-if len(npz_files) != expected_total:
+if expected_total is not None and len(npz_files) != expected_total:
     raise SystemExit(f"[ERROR] Expected {expected_total} mix-naive clips under {motion_dir}, found {len(npz_files)}")
+if not npz_files:
+    raise SystemExit(f"[ERROR] No mix-naive clips found under {motion_dir}")
 
 map_path = motion_dir / '_clip_object_urdf_map.json'
 payload = json.loads(map_path.read_text(encoding='utf-8'))
 clips = payload['clips'] if isinstance(payload, dict) and isinstance(payload.get('clips'), dict) else payload
 if not isinstance(clips, dict):
     raise SystemExit(f"[ERROR] Invalid mix-naive clip-object map payload: {map_path}")
-if len(clips) != expected_total:
+if expected_total is not None and len(clips) != expected_total:
     raise SystemExit(f"[ERROR] Expected {expected_total} map entries in {map_path}, found {len(clips)}")
 
 missing = []
 ds_count = 0
 omomo_count = 0
 unique_names = set()
+missing_map_entries = []
 for npz_path in npz_files:
     data = np.load(npz_path, allow_pickle=True)
     object_name = data['object_name'].item() if 'object_name' in data else ''
@@ -607,6 +615,8 @@ for npz_path in npz_files:
         missing.append(npz_path.name)
         continue
     unique_names.add(str(object_name))
+    if npz_path.stem not in clips:
+        missing_map_entries.append(npz_path.stem)
     if npz_path.stem.startswith('sub'):
         omomo_count += 1
     else:
@@ -615,10 +625,20 @@ for npz_path in npz_files:
 if missing:
     preview = ', '.join(missing[:10])
     raise SystemExit(f"[ERROR] mix-naive bank is missing object fields in: {preview}")
-if ds_count != expected_ds or omomo_count != expected_omomo:
+if ds_count == 0 or omomo_count == 0:
     raise SystemExit(
-        f"[ERROR] mix-naive bank split mismatch under {motion_dir}: ds={ds_count} omomo={omomo_count} "
-        f"(expected ds={expected_ds}, omomo={expected_omomo})"
+        f"[ERROR] mix-naive bank must contain both DS and OMOMO clips under {motion_dir}, "
+        f"but found ds={ds_count}, omomo={omomo_count}"
+    )
+if expected_ds is not None and ds_count != expected_ds:
+    raise SystemExit(f"[ERROR] Expected {expected_ds} DS clips under {motion_dir}, found {ds_count}")
+if expected_omomo is not None and omomo_count != expected_omomo:
+    raise SystemExit(f"[ERROR] Expected {expected_omomo} OMOMO clips under {motion_dir}, found {omomo_count}")
+if missing_map_entries:
+    preview = ', '.join(sorted(missing_map_entries)[:10])
+    print(
+        f"[WARN] mix-naive object map is missing {len(missing_map_entries)} clip entries; "
+        f"falling back to per-npz object metadata for: {preview}"
     )
 print(
     f"[INFO] Validated mix-naive bank: {motion_dir} ({len(npz_files)} clips = {ds_count} ds + {omomo_count} omomo, {len(unique_names)} unique object names)"
@@ -1083,7 +1103,7 @@ if [[ "${STRICT_DEFAULT_DS_BANK_VALIDATION}" != "0" ]]; then
       ;;
     pure-real|mix-naive|mix-curriculum)
       if [[ "$(realpath "${MOTION_DIR}")" == "$(realpath "${DEFAULT_MIX_NAIVE_MOTION_DIR}")" ]]; then
-        validate_mix_naive_bank "${MOTION_DIR}" "${DEFAULT_MIX_NAIVE_EXPECTED_TOTAL}" "${DEFAULT_MIX_NAIVE_EXPECTED_DS}" "${DEFAULT_MIX_NAIVE_EXPECTED_OMOMO}"
+        validate_mix_naive_bank "${MOTION_DIR}" "${MIX_NAIVE_EXPECTED_TOTAL}" "${MIX_NAIVE_EXPECTED_DS}" "${MIX_NAIVE_EXPECTED_OMOMO}"
       fi
       ;;
   esac
