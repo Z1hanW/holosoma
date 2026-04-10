@@ -158,7 +158,6 @@ class PPO(BaseAlgo):
 
         # Observation related Config
         self.use_symmetry = self.config.use_symmetry
-        self._init_obs_keys()
         self._init_obs_slices()
         self._setup_obs_normalizers()
         self.distill_enabled = False
@@ -857,6 +856,10 @@ class PPO(BaseAlgo):
             "false",
             "no",
         )
+        training_cfg = getattr(self.env, "training_config", None)
+        export_onnx = bool(getattr(training_cfg, "export_onnx", True))
+        if self.is_main_process and not export_onnx:
+            logger.info("Skipping ONNX export during training because training.export_onnx=False")
         for it in range(
             self.current_learning_iteration,
             run_end_iteration,
@@ -894,7 +897,7 @@ class PPO(BaseAlgo):
                     torch.distributed.barrier()
                 if self.is_main_process:
                     self.save(os.path.join(self.log_dir, f"model_{it:05d}.pt"))
-                    if export_onnx_during_train:
+                    if export_onnx and export_onnx_during_train:
                         self.export(onnx_file_path=os.path.join(self.log_dir, f"model_{it:05d}.onnx"))
                 if self.is_multi_gpu and torch.distributed.is_initialized():
                     torch.distributed.barrier()
@@ -903,7 +906,7 @@ class PPO(BaseAlgo):
             torch.distributed.barrier()
         if self.is_main_process:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration:05d}.pt"))
-            if export_onnx_at_end:
+            if export_onnx and export_onnx_at_end:
                 self.export(onnx_file_path=os.path.join(self.log_dir, f"model_{self.current_learning_iteration:05d}.onnx"))
         if self.is_multi_gpu and torch.distributed.is_initialized():
             torch.distributed.barrier()
