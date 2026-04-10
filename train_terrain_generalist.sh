@@ -92,19 +92,27 @@ TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_terrain_generalist}
 LOGGER_NAME=${LOGGER_NAME:-g1_terrain_generalist}
 RESUME_CKPT=${RESUME_CKPT:-}
 
-ACTOR_LR=${ACTOR_LR:-7e-5}
-CRITIC_LR=${CRITIC_LR:-7e-5}
+ACTOR_LR=${ACTOR_LR:-1e-3}
+CRITIC_LR=${CRITIC_LR:-1e-3}
+NORMALIZE_ACTOR_OBS=${NORMALIZE_ACTOR_OBS:-True}
+NORMALIZE_CRITIC_OBS=${NORMALIZE_CRITIC_OBS:-True}
 SAVE_INTERVAL=${SAVE_INTERVAL:-1000}
 LOAD_OPTIMIZER=${LOAD_OPTIMIZER:-False}
+HOLOSOMA_EXPORT_ONNX_DURING_TRAIN=${HOLOSOMA_EXPORT_ONNX_DURING_TRAIN:-0}
+HOLOSOMA_EXPORT_ONNX_AT_END=${HOLOSOMA_EXPORT_ONNX_AT_END:-1}
+HOLOSOMA_WANDB_SAVE_FILES=${HOLOSOMA_WANDB_SAVE_FILES:-0}
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-67108864}
 PHYSX_GPU_HEAP_CAPACITY=${PHYSX_GPU_HEAP_CAPACITY:-67108864}
 PHYSX_GPU_TEMP_BUFFER_CAPACITY=${PHYSX_GPU_TEMP_BUFFER_CAPACITY:-16777216}
 
-MOTION_DIR=${MOTION_DIR:-data/ds_crisp_data/___crisp_clean_motion}
-OBJ_SOURCE=${OBJ_SOURCE:-data/ds_crisp_data/___crisp_clean_geometry}
+MOTION_DIR=${MOTION_DIR:-${SCRIPT_DIR}/data/ds_crisp_data/___crisp_clean_motion}
+OBJ_SOURCE=${OBJ_SOURCE:-${SCRIPT_DIR}/data/ds_crisp_data/___crisp_clean_geometry}
 OBJ_META_PATH=${OBJ_META_PATH:-}
 NUM_ROWS=${NUM_ROWS:-}
 NUM_COLS=${NUM_COLS:-}
+SINGLE_TERRAIN_ID=${SINGLE_TERRAIN_ID:-}
+SINGLE_TERRAIN_OBJ=${SINGLE_TERRAIN_OBJ:-}
+FORCE_SINGLE_TERRAIN=${FORCE_SINGLE_TERRAIN:-0}
 REBUILD_FUSED=${REBUILD_FUSED:-0}
 GENERATED_DATA_ROOT=${GENERATED_DATA_ROOT:-${SCRIPT_DIR}/data/ds_crisp_data/_generated}
 FUSED_OUT_DIR=${FUSED_OUT_DIR:-${GENERATED_DATA_ROOT}/fused}
@@ -118,27 +126,55 @@ PAIRED_DS_CRISP_DATA_ROOT=${PAIRED_DS_CRISP_DATA_ROOT:-}
 PAIRED_STAGE_OUT_DIR=${PAIRED_STAGE_OUT_DIR:-${GENERATED_DATA_ROOT}/staged}
 
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-True}
+USE_ADAPTIVE_TIMESTEPS_SAMPLER=${USE_ADAPTIVE_TIMESTEPS_SAMPLER:-True}
 ADD_GROUND_PLANE_COLLISION=${ADD_GROUND_PLANE_COLLISION:-True}
-START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.05}
-FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.95}
+START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.0}
+FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
 ENABLE_DEFAULT_POSE_APPEND=${ENABLE_DEFAULT_POSE_APPEND:-False}
 DEFAULT_POSE_APPEND_DURATION_S=${DEFAULT_POSE_APPEND_DURATION_S:-0}
 ENABLE_DEFAULT_POSE_PREPEND=${ENABLE_DEFAULT_POSE_PREPEND:-False}
 DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0}
+
+# Early-termination tolerances for terrain tracking. Relaxed defaults reduce
+# premature resets on uneven terrain and keep episode length stable.
+BAD_TRACKING_REF_POS_THRESHOLD=${BAD_TRACKING_REF_POS_THRESHOLD:-1.0}
+BAD_TRACKING_REF_ORI_THRESHOLD=${BAD_TRACKING_REF_ORI_THRESHOLD:-1.2}
+BAD_TRACKING_BODY_POS_THRESHOLD=${BAD_TRACKING_BODY_POS_THRESHOLD:-0.55}
 ALLOW_TERRAIN_SLOT_OVERLAP=${ALLOW_TERRAIN_SLOT_OVERLAP:-0}
 DRY_RUN=${DRY_RUN:-0}
 
 HEADLESS=${HEADLESS:-True}
 ENABLE_VISER=${ENABLE_VISER:-0}
+VISER_PORT_SET=0
+if [[ -n "${VISER_PORT+x}" ]]; then
+  VISER_PORT_SET=1
+fi
 VISER_PORT=${VISER_PORT:-$((RANDOM % 8976 + 1024))}
 VISER_ENV_ID=${VISER_ENV_ID:-0}
+VISER_ENV_COUNT_SET=0
+if [[ -n "${VISER_ENV_COUNT+x}" ]]; then
+  VISER_ENV_COUNT_SET=1
+fi
 VISER_ENV_COUNT=${VISER_ENV_COUNT:-${NUM_ENVS}}
+VISER_UPDATE_HZ_SET=0
+if [[ -n "${VISER_UPDATE_HZ+x}" ]]; then
+  VISER_UPDATE_HZ_SET=1
+fi
 VISER_UPDATE_HZ=${VISER_UPDATE_HZ:-30}
 VISER_SYNC_TO_SIM=${VISER_SYNC_TO_SIM:-True}
 VISER_FORCE_DT=${VISER_FORCE_DT:-True}
 VISER_RECENTER=${VISER_RECENTER:-True}
 VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-False}
+VISER_MULTI_ENV_SPACING_SET=0
+if [[ -n "${VISER_MULTI_ENV_SPACING+x}" ]]; then
+  VISER_MULTI_ENV_SPACING_SET=1
+fi
 VISER_MULTI_ENV_SPACING=${VISER_MULTI_ENV_SPACING:-0.0}
+TRAIN_DEBUG_VISER=${TRAIN_DEBUG_VISER:-0}
+DEBUG_VISER_ENV_COUNT=${DEBUG_VISER_ENV_COUNT:-4}
+DEBUG_VISER_UPDATE_HZ=${DEBUG_VISER_UPDATE_HZ:-30}
+DEBUG_VISER_MULTI_ENV_COLS=${DEBUG_VISER_MULTI_ENV_COLS:-2}
+DEBUG_VISER_PORT=${DEBUG_VISER_PORT:-}
 
 IMAGE_WIDTH=${IMAGE_WIDTH:-106}
 IMAGE_HEIGHT=${IMAGE_HEIGHT:-60}
@@ -160,6 +196,21 @@ print(rows, cols)
 PY
 }
 
+canonicalize_path() {
+  local path_str="$1"
+  "${PYTHON_BIN}" - "${path_str}" "${SCRIPT_DIR}" <<'PY'
+from pathlib import Path
+import sys
+
+path_str = sys.argv[1]
+script_dir = Path(sys.argv[2]).resolve()
+p = Path(path_str).expanduser()
+if not p.is_absolute():
+    p = script_dir / p
+print(p.resolve())
+PY
+}
+
 is_true() {
   case "${1:-}" in
     1|true|True|TRUE|yes|Yes|YES|on|On|ON)
@@ -170,6 +221,69 @@ is_true() {
       ;;
   esac
 }
+
+normalize_extra_cli_args() {
+  local -a input_args=("$@")
+  local -a output_args=()
+  local expecting_value=0
+  local arg=""
+
+  for arg in "${input_args[@]}"; do
+    if [[ "${expecting_value}" == "1" ]]; then
+      output_args+=("${arg}")
+      expecting_value=0
+      continue
+    fi
+
+    case "${arg}" in
+      --training.healdless=*|--training.headles=*|--training.headlesss=*)
+        echo "[WARN] Normalizing typo option '${arg%%=*}' -> --training.headless" >&2
+        output_args+=(--training.headless="${arg#*=}")
+        ;;
+      --training.healdless|--training.headles|--training.headlesss)
+        echo "[WARN] Normalizing typo option '${arg}' -> --training.headless" >&2
+        output_args+=(--training.headless)
+        expecting_value=1
+        ;;
+      *)
+        output_args+=("${arg}")
+        ;;
+    esac
+  done
+
+  NORMALIZED_EXTRA_CLI_ARGS=("${output_args[@]}")
+}
+
+if is_true "${TRAIN_DEBUG_VISER}"; then
+  ENABLE_VISER=1
+  export HOLOSOMA_DEBUG_TILE_LAYOUT=1
+  if [[ -z "${HOLOSOMA_DEBUG_PAIR_ALIGNMENT+x}" ]]; then
+    export HOLOSOMA_DEBUG_PAIR_ALIGNMENT=1
+  fi
+  if [[ -z "${HOLOSOMA_DEBUG_PAIR_ALIGNMENT_RESETS+x}" ]]; then
+    export HOLOSOMA_DEBUG_PAIR_ALIGNMENT_RESETS=3
+  fi
+  if [[ -z "${VISER_DISABLE_CONTACT_FORCE_VIZ+x}" ]]; then
+    export VISER_DISABLE_CONTACT_FORCE_VIZ=1
+  fi
+  if [[ "${VISER_ENV_COUNT_SET}" -eq 0 ]]; then
+    VISER_ENV_COUNT="${DEBUG_VISER_ENV_COUNT}"
+  fi
+  if [[ "${VISER_UPDATE_HZ_SET}" -eq 0 ]]; then
+    VISER_UPDATE_HZ="${DEBUG_VISER_UPDATE_HZ}"
+  fi
+  if [[ "${VISER_MULTI_ENV_SPACING_SET}" -eq 0 ]]; then
+    VISER_MULTI_ENV_SPACING="0.0"
+  fi
+  if [[ "${VISER_PORT_SET}" -eq 0 ]]; then
+    if [[ -n "${DEBUG_VISER_PORT}" ]]; then
+      VISER_PORT="${DEBUG_VISER_PORT}"
+    else
+      VISER_PORT="$((20000 + RANDOM % 10000))"
+    fi
+  fi
+  export VISER_MULTI_ENV_COLS="${VISER_MULTI_ENV_COLS:-${DEBUG_VISER_MULTI_ENV_COLS}}"
+fi
 
 preflight_pairing_assets() {
   local motion_path="$1"
@@ -332,6 +446,52 @@ if [[ -n "${PAIRED_MANIFEST_PATH}" || -n "${PAIRED_DS_CRISP_DATA_ROOT}" ]]; then
   echo "[INFO] PAIRED_STAGE_ROOT=${PAIRED_STAGE_ROOT}"
 fi
 
+MOTION_DIR="$(canonicalize_path "${MOTION_DIR}")"
+OBJ_SOURCE="$(canonicalize_path "${OBJ_SOURCE}")"
+if [[ -n "${OBJ_META_PATH}" ]]; then
+  OBJ_META_PATH="$(canonicalize_path "${OBJ_META_PATH}")"
+fi
+
+if is_true "${FORCE_SINGLE_TERRAIN}" || [[ -n "${SINGLE_TERRAIN_ID}" || -n "${SINGLE_TERRAIN_OBJ}" ]]; then
+  OBJ_PARENT_DIR="${OBJ_SOURCE}"
+  if [[ -f "${OBJ_PARENT_DIR}" ]]; then
+    OBJ_PARENT_DIR="$(dirname "${OBJ_PARENT_DIR}")"
+  fi
+
+  SELECTED_SINGLE_TERRAIN=""
+  if [[ -n "${SINGLE_TERRAIN_OBJ}" ]]; then
+    SELECTED_SINGLE_TERRAIN="$(canonicalize_path "${SINGLE_TERRAIN_OBJ}")"
+  elif [[ -n "${SINGLE_TERRAIN_ID}" ]]; then
+    SELECTED_SINGLE_TERRAIN="$(canonicalize_path "${OBJ_PARENT_DIR}/${SINGLE_TERRAIN_ID}.obj")"
+  else
+    mapfile -t _single_obj_candidates < <(find "${OBJ_PARENT_DIR}" -maxdepth 1 \( -type f -o -type l \) \( -name "*.obj" -o -name "*.OBJ" \) | sort)
+    if [[ "${#_single_obj_candidates[@]}" -eq 0 ]]; then
+      echo "[ERROR] FORCE_SINGLE_TERRAIN is set but no OBJ files found in ${OBJ_PARENT_DIR}" >&2
+      exit 1
+    fi
+    SELECTED_SINGLE_TERRAIN="${_single_obj_candidates[0]}"
+    SELECTED_SINGLE_TERRAIN="$(canonicalize_path "${SELECTED_SINGLE_TERRAIN}")"
+  fi
+
+  if [[ ! -f "${SELECTED_SINGLE_TERRAIN}" ]]; then
+    echo "[ERROR] Single terrain OBJ not found: ${SELECTED_SINGLE_TERRAIN}" >&2
+    exit 1
+  fi
+
+  OBJ_SOURCE="${SELECTED_SINGLE_TERRAIN}"
+  OBJ_META_PATH=""
+  PAIR_TERRAIN_WITH_MOTION=False
+  NUM_ROWS=1
+  NUM_COLS=1
+
+  if [[ -z "${SUPPORT_MASK_DIR:-}" ]]; then
+    SUPPORT_MASK_DIR="$(dirname "${SELECTED_SINGLE_TERRAIN}")"
+  fi
+
+  echo "[INFO] FORCE_SINGLE_TERRAIN enabled: using ${SELECTED_SINGLE_TERRAIN}"
+  echo "[INFO] FORCE_SINGLE_TERRAIN overrides: PAIR_TERRAIN_WITH_MOTION=False NUM_ROWS=1 NUM_COLS=1"
+fi
+
 if [[ ! -e "${OBJ_SOURCE}" ]]; then
   echo "[ERROR] OBJ_SOURCE not found: ${OBJ_SOURCE}" >&2
   exit 1
@@ -339,6 +499,13 @@ fi
 if [[ ! -e "${MOTION_DIR}" ]]; then
   echo "[ERROR] MOTION_DIR not found: ${MOTION_DIR}" >&2
   exit 1
+fi
+
+SUPPORT_MASK_DIR=${SUPPORT_MASK_DIR:-}
+if [[ -z "${SUPPORT_MASK_DIR}" && -d "${OBJ_SOURCE}" ]]; then
+  SUPPORT_MASK_DIR="${OBJ_SOURCE}"
+elif [[ -n "${SUPPORT_MASK_DIR}" ]]; then
+  SUPPORT_MASK_DIR="$(canonicalize_path "${SUPPORT_MASK_DIR}")"
 fi
 
 OBJ_PATH="${OBJ_SOURCE}"
@@ -494,9 +661,28 @@ fi
 echo "[INFO] TERRAIN_GRID=${NUM_ROWS}x${NUM_COLS}"
 echo "[INFO] SCENE_LOAD_MODE=terrain-load-obj(static /World/ground mesh)"
 echo "[INFO] PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION}"
+echo "[INFO] USE_ADAPTIVE_TIMESTEPS_SAMPLER=${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
 echo "[INFO] ADD_GROUND_PLANE_COLLISION=${ADD_GROUND_PLANE_COLLISION}"
 echo "[INFO] START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB}"
 echo "[INFO] FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB}"
+echo "[INFO] NORMALIZE_ACTOR_OBS=${NORMALIZE_ACTOR_OBS}"
+echo "[INFO] NORMALIZE_CRITIC_OBS=${NORMALIZE_CRITIC_OBS}"
+echo "[INFO] HOLOSOMA_EXPORT_ONNX_DURING_TRAIN=${HOLOSOMA_EXPORT_ONNX_DURING_TRAIN}"
+echo "[INFO] HOLOSOMA_EXPORT_ONNX_AT_END=${HOLOSOMA_EXPORT_ONNX_AT_END}"
+echo "[INFO] HOLOSOMA_WANDB_SAVE_FILES=${HOLOSOMA_WANDB_SAVE_FILES}"
+if is_true "${TRAIN_DEBUG_VISER}"; then
+  echo "[INFO] TRAIN_DEBUG_VISER=1"
+  echo "[INFO] HOLOSOMA_DEBUG_TILE_LAYOUT=${HOLOSOMA_DEBUG_TILE_LAYOUT:-0}"
+  echo "[INFO] HOLOSOMA_DEBUG_PAIR_ALIGNMENT=${HOLOSOMA_DEBUG_PAIR_ALIGNMENT:-0} resets=${HOLOSOMA_DEBUG_PAIR_ALIGNMENT_RESETS:-0}"
+  echo "[INFO] VISER_MULTI_ENV_COLS=${VISER_MULTI_ENV_COLS:-<unset>}"
+  echo "[INFO] VISER_DISABLE_CONTACT_FORCE_VIZ=${VISER_DISABLE_CONTACT_FORCE_VIZ:-0}"
+fi
+echo "[INFO] BAD_TRACKING_THRESHOLDS ref_pos=${BAD_TRACKING_REF_POS_THRESHOLD} ref_ori=${BAD_TRACKING_REF_ORI_THRESHOLD} body_pos=${BAD_TRACKING_BODY_POS_THRESHOLD}"
+if [[ -n "${SUPPORT_MASK_DIR}" ]]; then
+  echo "[INFO] SUPPORT_MASK_DIR=${SUPPORT_MASK_DIR}"
+else
+  echo "[WARN] SUPPORT_MASK_DIR is empty. Support-aware terrain rewards require support sidecars via support_mask_dir or metadata source_obj_dir." >&2
+fi
 if [[ "${ENABLE_VISER}" == "1" ]]; then
   echo "[INFO] VISER=http://localhost:${VISER_PORT}"
 fi
@@ -528,22 +714,29 @@ cmd=(
   --terrain.terrain-term.add-ground-plane-collision="${ADD_GROUND_PLANE_COLLISION}"
   --algo.config.actor_learning_rate="${ACTOR_LR}"
   --algo.config.critic_learning_rate="${CRITIC_LR}"
-  --algo.config.normalize_actor_obs=False
-  --algo.config.normalize_critic_obs=False
+  --algo.config.normalize_actor_obs="${NORMALIZE_ACTOR_OBS}"
+  --algo.config.normalize_critic_obs="${NORMALIZE_CRITIC_OBS}"
   --algo.config.load_optimizer="${LOAD_OPTIMIZER}"
   --algo.config.save_interval="${SAVE_INTERVAL}"
   --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_DIR}"
   --command.setup_terms.motion_command.params.motion_config.pair_terrain_with_motion="${PAIR_TERRAIN_WITH_MOTION}"
+  --command.setup_terms.motion_command.params.motion_config.use_adaptive_timesteps_sampler="${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
   --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob="${START_AT_TIMESTEP_ZERO_PROB}"
   --command.setup_terms.motion_command.params.motion_config.freeze_at_timestep_zero_prob="${FREEZE_AT_TIMESTEP_ZERO_PROB}"
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_append="${ENABLE_DEFAULT_POSE_APPEND}"
   --command.setup_terms.motion_command.params.motion_config.default_pose_append_duration_s="${DEFAULT_POSE_APPEND_DURATION_S}"
   --command.setup_terms.motion_command.params.motion_config.enable_default_pose_prepend="${ENABLE_DEFAULT_POSE_PREPEND}"
   --command.setup_terms.motion_command.params.motion_config.default_pose_prepend_duration_s="${DEFAULT_POSE_PREPEND_DURATION_S}"
+  --termination.terms.bad_tracking.params.bad_ref_pos_threshold="${BAD_TRACKING_REF_POS_THRESHOLD}"
+  --termination.terms.bad_tracking.params.bad_ref_ori_threshold="${BAD_TRACKING_REF_ORI_THRESHOLD}"
+  --termination.terms.bad_tracking.params.bad_motion_body_pos_threshold="${BAD_TRACKING_BODY_POS_THRESHOLD}"
 )
 
 if [[ -n "${OBJ_META_PATH}" ]]; then
   cmd+=(--terrain.terrain-term.obj-metadata-path "${OBJ_META_PATH}")
+fi
+if [[ -n "${SUPPORT_MASK_DIR}" ]]; then
+  cmd+=(--terrain.terrain-term.support-mask-dir "${SUPPORT_MASK_DIR}")
 fi
 
 cmd+=("${PERCEPTION_OVERRIDES[@]}")
@@ -557,12 +750,18 @@ cmd+=(
   --logger.video.upload_to_wandb=False
   --logger.name="${LOGGER_NAME}"
 )
-cmd+=("$@")
+NORMALIZED_EXTRA_CLI_ARGS=()
+normalize_extra_cli_args "$@"
+cmd+=("${NORMALIZED_EXTRA_CLI_ARGS[@]}")
 
 if is_true "${DRY_RUN}"; then
   echo "[INFO] DRY_RUN=${DRY_RUN}; resolved launch command:"
   printf '  %q\n' "${cmd[@]}"
   exit 0
 fi
+
+export HOLOSOMA_EXPORT_ONNX_DURING_TRAIN
+export HOLOSOMA_EXPORT_ONNX_AT_END
+export HOLOSOMA_WANDB_SAVE_FILES
 
 "${cmd[@]}"
