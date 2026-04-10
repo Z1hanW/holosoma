@@ -11,6 +11,7 @@
 !**/*.urdf
 !**/*.xml
 !**/*.obj
+!tests/fixtures/terrain_mini/**
 
 # Keep these
 !.gitignore
