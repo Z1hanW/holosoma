@@ -522,6 +522,15 @@ g1_29dof_wbt_w_object_distill_sparse_root_cmd = replace(
     ),
 )
 
+g1_29dof_wbt_w_object_distill_root_pos_cmd = replace(
+    g1_29dof_wbt_w_object_distill_sparse_root_cmd,
+    training=replace(
+        g1_29dof_wbt_w_object_distill_sparse_root_cmd.training,
+        name="g1_29dof_wbt_w_object_distill_root_pos_cmd",
+    ),
+    observation=observation.g1_29dof_wbt_observation_w_object_distill_root_pos_cmd,
+)
+
 g1_29dof_wbt_w_object_command_curriculum = replace(
     g1_29dof_wbt_w_object_generalist,
     training=replace(
@@ -638,6 +647,7 @@ __all__ = [
     "g1_29dof_wbt_w_object_generalist",
     "g1_29dof_wbt_w_object_generalist_legacy_obs",
     "g1_29dof_wbt_w_object_command_curriculum",
+    "g1_29dof_wbt_w_object_distill_root_pos_cmd",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd",
     "g1_29dof_wbt_w_object_distill_sparse_goal_mixed",
     "g1_29dof_wbt_w_object_distill_sparse_goal_mixed_pickup",

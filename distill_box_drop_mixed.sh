@@ -16,7 +16,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
 
-DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"https://wandb.ai/zihanw22/boxer/runs/u5lguxvl"}
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/u5lguxvl/model_17000.pt"}
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 POSITIONAL_RUN_NAME=""
 DATA_MODE=${DATA_MODE:-mix-naive}
@@ -76,12 +76,34 @@ def _coerce_int(value):
     except Exception:
         return None
 
+pattern = re.compile(r"^model_(\d+)\.pt$")
+best_step = -1
+best_name = ""
+try:
+    for file_obj in run.files():
+        name = getattr(file_obj, "name", "")
+        match = pattern.match(name)
+        size = _coerce_int(getattr(file_obj, "size", None))
+        if match is None or size is None or size <= 0:
+            continue
+        file_step = int(match.group(1))
+        if file_step > best_step:
+            best_step = file_step
+            best_name = name
+except Exception:
+    pass
+
+if best_name:
+    print(best_name)
+    sys.exit(0)
+
 summary = getattr(run, "summary", {}) or {}
-step_hint = _coerce_int(summary.get("_step"))
-if step_hint is None:
-    step_hint = _coerce_int(summary.get("global_step"))
-if step_hint is None:
-    step_hint = _coerce_int(getattr(run, "lastHistoryStep", None))
+step_candidates = [
+    _coerce_int(getattr(run, "lastHistoryStep", None)),
+    _coerce_int(summary.get("_step")),
+    _coerce_int(summary.get("global_step")),
+]
+step_hint = max((step for step in step_candidates if step is not None), default=None)
 if step_hint is None:
     step_hint = 0
 
@@ -95,7 +117,6 @@ if isinstance(algo_cfg, dict):
 if save_interval is None or save_interval <= 0:
     save_interval = 500
 
-pattern = re.compile(r"^model_(\d+)\.pt$")
 start_step = max(step_hint - (step_hint % save_interval), 0)
 best_step = -1
 best_name = ""
@@ -560,7 +581,7 @@ TEACHER_REF_LOCAL_CHECKPOINT="${SCRIPT_DIR}/.teacher_checkpoints/model_24000.pt"
 TEACHER_REF_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_aug_mix_ml"
 TEACHER_REF_PERCEPTION_PRESET="heightmap"
 TEACHER_U5LGUXVL_RUN_ID="u5lguxvl"
-TEACHER_U5LGUXVL_MODEL_FILE="model_14000.pt"
+TEACHER_U5LGUXVL_MODEL_FILE="model_17000.pt"
 TEACHER_U5LGUXVL_LOCAL_CHECKPOINT="${SCRIPT_DIR}/.teacher_checkpoints/${TEACHER_U5LGUXVL_MODEL_FILE}"
 TEACHER_COMPAT_PROFILE_RESOLVED="${TEACHER_COMPAT_PROFILE}"
 TEACHER_COMPAT_NOTES_AUTO=""

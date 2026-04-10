@@ -625,6 +625,59 @@ def sparse_target_root_trajectory_command(env: WholeBodyTrackingManager) -> torc
     return torch.cat([rel_xy, rel_yaw], dim=-1)
 
 
+def root_position_xy_yaw_command(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Absolute root target command for distillation.
+
+    Returns [root_x(1), root_y(1), root_yaw(1)], where XY is expressed in
+    environment-local/world coordinates (terrain offset removed) and yaw is world yaw.
+    """
+
+    motion_command = _get_motion_command_and_assert_type(env)
+    command_device = motion_command.robot_root_pos_w.device
+
+    if getattr(motion_command, "manual_control_enabled", False):
+        manual_root_target_enabled = bool(getattr(motion_command, "manual_root_target_enabled", False))
+        manual_root_pos = getattr(motion_command, "manual_root_pos_target_w", None)
+        manual_root_yaw = getattr(motion_command, "manual_root_yaw_target_w", None)
+        if manual_root_target_enabled and manual_root_pos is not None and manual_root_yaw is not None:
+            if manual_root_pos.device != command_device:
+                manual_root_pos = manual_root_pos.to(command_device)
+            if manual_root_yaw.device != command_device:
+                manual_root_yaw = manual_root_yaw.to(command_device)
+            env_offsets = motion_command._get_env_offsets()
+            target_xy = manual_root_pos[:, :2] - env_offsets[:, :2]
+            target_yaw = normalize_angle(manual_root_yaw.reshape(-1)).unsqueeze(1)
+            return torch.cat([target_xy, target_yaw], dim=-1)
+
+        manual_xy = getattr(motion_command, "manual_xy_rel", None)
+        manual_yaw = getattr(motion_command, "manual_yaw_rel", None)
+        if manual_xy is not None and manual_yaw is not None:
+            if manual_xy.device != command_device:
+                manual_xy = manual_xy.to(command_device)
+            if manual_yaw.device != command_device:
+                manual_yaw = manual_yaw.to(command_device)
+            env_offsets = motion_command._get_env_offsets()
+            current_xy = motion_command.robot_root_pos_w[:, :2] - env_offsets[:, :2]
+            current_yaw = calc_heading(motion_command.robot_root_quat_w)
+            cos_yaw = torch.cos(current_yaw)
+            sin_yaw = torch.sin(current_yaw)
+            delta_world = torch.stack(
+                [
+                    cos_yaw * manual_xy[:, 0] - sin_yaw * manual_xy[:, 1],
+                    sin_yaw * manual_xy[:, 0] + cos_yaw * manual_xy[:, 1],
+                ],
+                dim=-1,
+            )
+            target_xy = current_xy + delta_world
+            target_yaw = normalize_angle(current_yaw + manual_yaw.reshape(-1)).unsqueeze(1)
+            return torch.cat([target_xy, target_yaw], dim=-1)
+
+    env_offsets = motion_command._get_env_offsets()
+    target_xy = motion_command.root_pos_w[:, :2] - env_offsets[:, :2]
+    target_yaw = normalize_angle(calc_heading(motion_command.root_quat_w)).unsqueeze(1)
+    return torch.cat([target_xy, target_yaw], dim=-1)
+
+
 def clip_phase(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Normalized motion progress in current clip, in [0, 1]."""
     motion_command = _get_motion_command_and_assert_type(env)

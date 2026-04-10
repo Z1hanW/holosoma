@@ -1370,6 +1370,8 @@ class ViserLiveViewer:
         self._manual_root_pos_x_slider = None
         self._manual_root_pos_y_slider = None
         self._manual_root_yaw_slider = None
+        self._manual_root_target_pos_w = None
+        self._manual_root_target_yaw = None
         self._manual_goal_override_cb = None
         self._manual_goal_zero_button = None
         self._manual_goal_pos_x_slider = None
@@ -2123,6 +2125,14 @@ class ViserLiveViewer:
             manual_yaw = getattr(motion_cmd, "manual_yaw_rel", None)
             if isinstance(manual_yaw, torch.Tensor) and manual_yaw.numel() > 0:
                 manual_yaw.zero_()
+            if hasattr(motion_cmd, "manual_root_target_enabled"):
+                motion_cmd.manual_root_target_enabled = False
+            manual_root_pos = getattr(motion_cmd, "manual_root_pos_target_w", None)
+            if isinstance(manual_root_pos, torch.Tensor) and manual_root_pos.numel() > 0:
+                manual_root_pos.zero_()
+            manual_root_yaw = getattr(motion_cmd, "manual_root_yaw_target_w", None)
+            if isinstance(manual_root_yaw, torch.Tensor) and manual_root_yaw.numel() > 0:
+                manual_root_yaw.zero_()
         self._hide_manual_command_arrow()
         self._update_manual_root_status()
 
@@ -2146,19 +2156,54 @@ class ViserLiveViewer:
     def _wrap_to_pi(angle: float) -> float:
         return float(np.arctan2(np.sin(angle), np.cos(angle)))
 
-    def _sync_manual_root_target_from_robot(self) -> None:
+    def _set_manual_root_target(
+        self,
+        target_pos_xy: np.ndarray | list[float] | tuple[float, float],
+        target_yaw: float,
+        *,
+        sync_gui: bool,
+    ) -> None:
+        target_xy = np.asarray(target_pos_xy, dtype=np.float32).reshape(-1)
+        if target_xy.size < 2:
+            return
+        self._manual_root_target_pos_w = np.array([float(target_xy[0]), float(target_xy[1])], dtype=np.float32)
+        self._manual_root_target_yaw = self._wrap_to_pi(float(target_yaw))
+        if not sync_gui:
+            return
+        try:
+            if self._manual_root_pos_x_slider is not None:
+                self._manual_root_pos_x_slider.value = float(self._manual_root_target_pos_w[0])
+            if self._manual_root_pos_y_slider is not None:
+                self._manual_root_pos_y_slider.value = float(self._manual_root_target_pos_w[1])
+            if self._manual_root_yaw_slider is not None:
+                self._manual_root_yaw_slider.value = float(self._manual_root_target_yaw)
+        except Exception:
+            pass
+
+    def _sync_manual_root_target_from_gui(self) -> bool:
         if (
             self._manual_root_pos_x_slider is None
             or self._manual_root_pos_y_slider is None
             or self._manual_root_yaw_slider is None
         ):
+            return False
+        self._set_manual_root_target(
+            (
+                float(self._manual_root_pos_x_slider.value),
+                float(self._manual_root_pos_y_slider.value),
+            ),
+            float(self._manual_root_yaw_slider.value),
+            sync_gui=False,
+        )
+        return True
+
+    def _sync_manual_root_target_from_robot(self) -> None:
+        current_pos, current_quat_wxyz = self._get_root_state_wxyz()
+        if current_pos is not None and current_quat_wxyz is not None:
+            current_yaw = self._yaw_from_quat_wxyz(np.asarray(current_quat_wxyz, dtype=np.float32))
+            self._set_manual_root_target(np.asarray(current_pos, dtype=np.float32)[:2], current_yaw, sync_gui=True)
             return
-        try:
-            self._manual_root_pos_x_slider.value = 0.0
-            self._manual_root_pos_y_slider.value = 0.0
-            self._manual_root_yaw_slider.value = 0.0
-        except Exception:
-            pass
+        self._set_manual_root_target((0.0, 0.0), 0.0, sync_gui=True)
 
     def _manual_root_target_payload(
         self,
@@ -2166,60 +2211,53 @@ class ViserLiveViewer:
         current_pos: np.ndarray | None = None,
         current_quat_wxyz: np.ndarray | None = None,
     ) -> dict[str, np.ndarray | float] | None:
-        if (
+        if self._manual_root_target_pos_w is None and (
             self._manual_root_pos_x_slider is None
             or self._manual_root_pos_y_slider is None
             or self._manual_root_yaw_slider is None
         ):
             return None
 
-        cmd_xy = np.array(
-            [
-                float(self._manual_root_pos_x_slider.value),
-                float(self._manual_root_pos_y_slider.value),
-            ],
-            dtype=np.float32,
-        )
-        cmd_yaw = self._wrap_to_pi(float(self._manual_root_yaw_slider.value))
-        payload: dict[str, np.ndarray | float] = {
-            "cmd_xy": cmd_xy,
-            "cmd_yaw": float(cmd_yaw),
-        }
-
         if current_pos is None or current_quat_wxyz is None:
             current_pos, current_quat_wxyz = self._get_root_state_wxyz()
         if current_pos is None or current_quat_wxyz is None:
-            return payload
+            return None
+
+        if self._manual_root_target_pos_w is None or self._manual_root_target_yaw is None:
+            if not self._sync_manual_root_target_from_gui():
+                current_yaw = self._yaw_from_quat_wxyz(np.asarray(current_quat_wxyz, dtype=np.float32))
+                self._set_manual_root_target(np.asarray(current_pos, dtype=np.float32)[:2], current_yaw, sync_gui=False)
 
         current_pos = np.asarray(current_pos, dtype=np.float32)
         current_quat_wxyz = np.asarray(current_quat_wxyz, dtype=np.float32)
         current_yaw = self._yaw_from_quat_wxyz(current_quat_wxyz)
+        target_pos = current_pos.copy()
+        target_pos[:2] = self._manual_root_target_pos_w
+        target_yaw = self._wrap_to_pi(float(self._manual_root_target_yaw))
 
+        delta_world = target_pos - current_pos
+        delta_world[2] = 0.0
         cy = float(np.cos(current_yaw))
         sy = float(np.sin(current_yaw))
-        delta_world = np.array(
+        cmd_xy = np.array(
             [
-                cy * float(cmd_xy[0]) - sy * float(cmd_xy[1]),
-                sy * float(cmd_xy[0]) + cy * float(cmd_xy[1]),
-                0.0,
+                cy * float(delta_world[0]) + sy * float(delta_world[1]),
+                -sy * float(delta_world[0]) + cy * float(delta_world[1]),
             ],
             dtype=np.float32,
         )
-        target_pos = current_pos.copy()
-        target_pos[:2] += delta_world[:2]
-        target_yaw = self._wrap_to_pi(current_yaw + cmd_yaw)
+        cmd_yaw = self._wrap_to_pi(target_yaw - current_yaw)
 
-        payload.update(
-            {
-                "current_pos": current_pos,
-                "target_pos": target_pos,
-                "current_yaw": float(current_yaw),
-                "target_yaw": float(target_yaw),
-                "delta_world": delta_world,
-                "dist_xy": float(np.linalg.norm(delta_world[:2])),
-            }
-        )
-        return payload
+        return {
+            "cmd_xy": cmd_xy,
+            "cmd_yaw": float(cmd_yaw),
+            "current_pos": current_pos,
+            "target_pos": target_pos,
+            "current_yaw": float(current_yaw),
+            "target_yaw": float(target_yaw),
+            "delta_world": delta_world,
+            "dist_xy": float(np.linalg.norm(delta_world[:2])),
+        }
 
     @staticmethod
     def _format_policy_root_command(cmd_x: float, cmd_y: float, cmd_yaw: float) -> str:
@@ -2607,42 +2645,42 @@ class ViserLiveViewer:
                 if manual_cmd is None:
                     cmd_xy = np.asarray(payload["cmd_xy"], dtype=np.float32)
                     manual_cmd = (float(cmd_xy[0]), float(cmd_xy[1]), float(payload["cmd_yaw"]))
-                current_pos = payload.get("current_pos")
-                current_yaw = payload.get("current_yaw")
-                if current_pos is not None and current_yaw is not None:
-                    current_pos_np = np.asarray(current_pos, dtype=np.float32)
-                    self._manual_root_status.content = (
-                        "Mode: `manual(gui)`\n\n"
-                        "Frame: `root-relative (distill actor_obs_root)`\n\n"
-                        f"Current root: `({current_pos_np[0]:+.2f}, {current_pos_np[1]:+.2f}, {current_pos_np[2]:+.2f})` yaw=`{float(current_yaw):+.2f}`\n\n"
-                        f"{self._format_policy_root_command(*manual_cmd)}\n\n"
-                        "Command sliders map directly to the training command frame."
-                    )
-                else:
-                    self._manual_root_status.content = (
-                        "Mode: `manual(gui)`\n\n"
-                        "Frame: `root-relative (distill actor_obs_root)`\n\n"
-                        f"{self._format_policy_root_command(*manual_cmd)}"
-                    )
+                current_pos_np = np.asarray(payload["current_pos"], dtype=np.float32)
+                target_pos_np = np.asarray(payload["target_pos"], dtype=np.float32)
+                delta_world = np.asarray(payload["delta_world"], dtype=np.float32)
+                self._manual_root_status.content = (
+                    "Mode: `manual(gui)`\n\n"
+                    "Input: `root target (world x/y + yaw)`\n\n"
+                    f"Current root: `({current_pos_np[0]:+.2f}, {current_pos_np[1]:+.2f}, {current_pos_np[2]:+.2f})` yaw=`{float(payload['current_yaw']):+.2f}`\n\n"
+                    f"Target root: `({target_pos_np[0]:+.2f}, {target_pos_np[1]:+.2f}, {target_pos_np[2]:+.2f})` yaw=`{float(payload['target_yaw']):+.2f}`\n\n"
+                    f"{self._format_policy_root_command(*manual_cmd)}\n\n"
+                    f"Gap world: `dx={delta_world[0]:+.2f}` `dy={delta_world[1]:+.2f}` `dist={float(payload['dist_xy']):.2f}`"
+                )
                 return
 
         if manual_enabled and hw_enabled:
             manual_cmd = self._manual_policy_root_command()
-            root_pos = current_root_pos
-            if root_pos is None:
-                root_pos, _ = self._get_root_state_wxyz()
-            if root_pos is not None:
+            payload = self._manual_root_target_payload(
+                current_pos=current_root_pos,
+                current_quat_wxyz=current_root_quat_wxyz,
+            )
+            if payload is not None:
                 command_line = (
                     self._format_policy_root_command(*manual_cmd)
                     if manual_cmd is not None
                     else "Policy cmd(root): unavailable"
                 )
+                current_pos_np = np.asarray(payload["current_pos"], dtype=np.float32)
+                target_pos_np = np.asarray(payload["target_pos"], dtype=np.float32)
+                delta_world = np.asarray(payload["delta_world"], dtype=np.float32)
                 self._manual_root_status.content = (
                     "Mode: `manual(hw)`\n\n"
-                    "Frame: `root-relative (distill actor_obs_root)`\n\n"
-                    f"Current root: `({float(root_pos[0]):+.2f}, {float(root_pos[1]):+.2f}, {float(root_pos[2]):+.2f})`\n\n"
+                    "Input: `root target (world x/y + yaw)`\n\n"
+                    f"Current root: `({current_pos_np[0]:+.2f}, {current_pos_np[1]:+.2f}, {current_pos_np[2]:+.2f})` yaw=`{float(payload['current_yaw']):+.2f}`\n\n"
+                    f"Target root: `({target_pos_np[0]:+.2f}, {target_pos_np[1]:+.2f}, {target_pos_np[2]:+.2f})` yaw=`{float(payload['target_yaw']):+.2f}`\n\n"
                     f"{command_line}\n\n"
-                    "Joystick input writes the same root-relative command seen during training."
+                    f"Gap world: `dx={delta_world[0]:+.2f}` `dy={delta_world[1]:+.2f}` `dist={float(payload['dist_xy']):.2f}`\n\n"
+                    "Joystick updates an absolute root target; runtime converts it to the distill root-relative command."
                 )
             else:
                 command_line = (
@@ -2652,9 +2690,9 @@ class ViserLiveViewer:
                 )
                 self._manual_root_status.content = (
                     "Mode: `manual(hw)`\n\n"
-                    "Frame: `root-relative (distill actor_obs_root)`\n\n"
+                    "Input: `root target (world x/y + yaw)`\n\n"
                     f"{command_line}\n\n"
-                    "Joystick input writes the same root-relative command seen during training."
+                    "Joystick updates an absolute root target; runtime converts it to the distill root-relative command."
                 )
             return
 
@@ -2720,12 +2758,55 @@ class ViserLiveViewer:
         device = self._env.device
         lin_scale = float(self._manual_lin_scale_slider.value) if self._manual_lin_scale_slider is not None else 0.5
         yaw_scale = float(self._manual_yaw_scale_slider.value) if self._manual_yaw_scale_slider is not None else 0.3
+        payload = None
         if hw_enabled:
             lx, ly, rx = self._hw_joystick_axes()
-            cmd_x = self._apply_deadzone(ly) * lin_scale
-            cmd_y = self._apply_deadzone(lx) * lin_scale
-            cmd_yaw_val = self._apply_deadzone(rx) * yaw_scale
+            current_pos, current_quat_wxyz = self._get_root_state_wxyz()
+            if current_pos is not None and current_quat_wxyz is not None:
+                current_pos = np.asarray(current_pos, dtype=np.float32)
+                current_quat_wxyz = np.asarray(current_quat_wxyz, dtype=np.float32)
+                current_yaw = self._yaw_from_quat_wxyz(current_quat_wxyz)
+                if self._manual_root_target_pos_w is None or self._manual_root_target_yaw is None:
+                    self._set_manual_root_target(current_pos[:2], current_yaw, sync_gui=False)
+                dt = self._update_period if self._update_period > 0.0 else (1.0 / 30.0)
+                delta_body = np.array(
+                    [
+                        self._apply_deadzone(ly) * lin_scale * dt,
+                        self._apply_deadzone(lx) * lin_scale * dt,
+                    ],
+                    dtype=np.float32,
+                )
+                cy = float(np.cos(current_yaw))
+                sy = float(np.sin(current_yaw))
+                delta_world = np.array(
+                    [
+                        cy * float(delta_body[0]) - sy * float(delta_body[1]),
+                        sy * float(delta_body[0]) + cy * float(delta_body[1]),
+                    ],
+                    dtype=np.float32,
+                )
+                target_xy = np.asarray(self._manual_root_target_pos_w, dtype=np.float32) + delta_world
+                target_yaw = self._wrap_to_pi(float(self._manual_root_target_yaw) + self._apply_deadzone(rx) * yaw_scale * dt)
+                self._set_manual_root_target(target_xy, target_yaw, sync_gui=False)
+                payload = self._manual_root_target_payload(
+                    current_pos=current_pos,
+                    current_quat_wxyz=current_quat_wxyz,
+                )
+                if payload is not None:
+                    cmd_xy = np.asarray(payload["cmd_xy"], dtype=np.float32)
+                    cmd_x = float(cmd_xy[0])
+                    cmd_y = float(cmd_xy[1])
+                    cmd_yaw_val = float(payload["cmd_yaw"])
+                else:
+                    cmd_x = self._apply_deadzone(ly) * lin_scale
+                    cmd_y = self._apply_deadzone(lx) * lin_scale
+                    cmd_yaw_val = self._apply_deadzone(rx) * yaw_scale
+            else:
+                cmd_x = self._apply_deadzone(ly) * lin_scale
+                cmd_y = self._apply_deadzone(lx) * lin_scale
+                cmd_yaw_val = self._apply_deadzone(rx) * yaw_scale
         else:
+            self._sync_manual_root_target_from_gui()
             payload = self._manual_root_target_payload()
             if payload is not None:
                 cmd_xy = np.asarray(payload["cmd_xy"], dtype=np.float32)
@@ -2754,6 +2835,26 @@ class ViserLiveViewer:
         ).repeat(self._env.num_envs, 1)
         motion_cmd.manual_xy_rel = cmd_xy
         motion_cmd.manual_yaw_rel = cmd_yaw
+        motion_cmd.manual_root_target_enabled = False
+        manual_root_pos = getattr(motion_cmd, "manual_root_pos_target_w", None)
+        manual_root_yaw = getattr(motion_cmd, "manual_root_yaw_target_w", None)
+        if payload is not None and isinstance(manual_root_pos, torch.Tensor) and isinstance(manual_root_yaw, torch.Tensor):
+            target_pos = torch.tensor(
+                np.asarray(payload["target_pos"], dtype=np.float32),
+                device=device,
+                dtype=torch.float32,
+            ).reshape(1, 3)
+            target_yaw = torch.tensor(
+                [[float(payload["target_yaw"])]],
+                device=device,
+                dtype=torch.float32,
+            )
+            manual_root_pos.copy_(target_pos.repeat(self._env.num_envs, 1))
+            manual_root_yaw.copy_(target_yaw.repeat(self._env.num_envs, 1))
+            motion_cmd.manual_root_target_enabled = True
+        elif isinstance(manual_root_pos, torch.Tensor) and isinstance(manual_root_yaw, torch.Tensor):
+            manual_root_pos.zero_()
+            manual_root_yaw.zero_()
         self._update_manual_root_status()
 
     def _hide_manual_command_arrow(self) -> None:
@@ -3546,28 +3647,28 @@ class ViserLiveViewer:
                 self._manual_control_cb = self._server.gui.add_checkbox(
                     "Enable Manual Root Command",
                     initial_value=bool(self._manual_control_default),
-                    hint="Override the policy with the same root-relative [dx, dy, dyaw] command used during distillation.",
+                    hint="Set an absolute root target [x, y, yaw]; runtime converts it to the distill root-relative command.",
                 )
                 self._manual_root_sync_button = self._server.gui.add_button(
-                    "Zero Root Command",
-                    hint="Reset the root-relative command sliders to zero.",
+                    "Sync Root Target To Robot",
+                    hint="Copy the current robot root position/yaw into the target controls.",
                 )
                 self._manual_root_pos_x_slider = self._server.gui.add_slider(
-                    "Root Command X (forward, m)",
+                    "Target Root X (world, m)",
                     min=-5.0,
                     max=5.0,
                     step=0.02,
                     initial_value=0.0,
                 )
                 self._manual_root_pos_y_slider = self._server.gui.add_slider(
-                    "Root Command Y (left, m)",
+                    "Target Root Y (world, m)",
                     min=-5.0,
                     max=5.0,
                     step=0.02,
                     initial_value=0.0,
                 )
                 self._manual_root_yaw_slider = self._server.gui.add_slider(
-                    "Root Command Yaw (rad)",
+                    "Target Root Yaw (rad)",
                     min=-np.pi,
                     max=np.pi,
                     step=0.02,
@@ -4210,6 +4311,7 @@ class ViserLiveViewer:
                     sim.refresh_sim_tensors()
                 except Exception:
                     pass
+        self._sync_manual_root_target_from_robot()
         self.record_step()
 
     def _apply_clip_selection(self) -> None:
@@ -4245,14 +4347,21 @@ class ViserLiveViewer:
             except Exception:
                 motion_cmd._forced_start_step = None
         env_ids = torch.tensor([self._env_id], device=self._env.device, dtype=torch.long)
-        self._force_clip_state(motion_cmd, int(clip_idx), clip_start)
+        self._force_clip_state(motion_cmd, int(clip_idx), clip_start, exact_motion_state=True)
         active_idx = self._active_clip_index(motion_cmd)
         if active_idx is None:
             active_idx = int(clip_idx)
         self._reload_terrain_for_clip(self._current_clip_name(motion_cmd, int(active_idx)))
         self._sync_after_reset(env_ids)
 
-    def _force_clip_state(self, motion_cmd, clip_idx: int, clip_start: int | None) -> None:
+    def _force_clip_state(
+        self,
+        motion_cmd,
+        clip_idx: int,
+        clip_start: int | None,
+        *,
+        exact_motion_state: bool = False,
+    ) -> None:
         env_ids = torch.tensor([self._env_id], device=self._env.device, dtype=torch.long)
         self._env.reset_envs_idx(env_ids)
 
@@ -4264,16 +4373,21 @@ class ViserLiveViewer:
         motion_cmd.time_steps[env_ids] = start_frame
         if motion_cmd.motion_cfg.align_motion_to_init_yaw:
             motion_cmd._update_motion_alignment(env_ids)
+        if exact_motion_state and hasattr(motion_cmd, "_clear_runtime_default_pose_prepend"):
+            motion_cmd._clear_runtime_default_pose_prepend(env_ids)
 
         root_pos = motion_cmd.root_pos_w[env_ids].clone()
         root_rot = motion_cmd.root_quat_w[env_ids].clone()
-
-        motion_idx = motion_cmd._get_motion_indices(motion_cmd.time_steps[env_ids], env_ids)
-        root_lin_vel = motion_cmd.motion.body_lin_vel_w[motion_idx, 0].clone()
-        root_ang_vel = motion_cmd.motion.body_ang_vel_w[motion_idx, 0].clone()
-        if motion_cmd.motion_cfg.align_motion_to_init_yaw:
-            root_lin_vel = motion_cmd._apply_motion_alignment_vec(root_lin_vel)
-            root_ang_vel = motion_cmd._apply_motion_alignment_vec(root_ang_vel)
+        if exact_motion_state:
+            root_lin_vel = motion_cmd.body_lin_vel_w[env_ids, 0].clone()
+            root_ang_vel = motion_cmd.body_ang_vel_w[env_ids, 0].clone()
+        else:
+            motion_idx = motion_cmd._get_motion_indices(motion_cmd.time_steps[env_ids], env_ids)
+            root_lin_vel = motion_cmd.motion.body_lin_vel_w[motion_idx, 0].clone()
+            root_ang_vel = motion_cmd.motion.body_ang_vel_w[motion_idx, 0].clone()
+            if motion_cmd.motion_cfg.align_motion_to_init_yaw:
+                root_lin_vel = motion_cmd._apply_motion_alignment_vec(root_lin_vel)
+                root_ang_vel = motion_cmd._apply_motion_alignment_vec(root_ang_vel)
 
         dof_pos = motion_cmd.joint_pos[env_ids].clone()
         dof_vel = motion_cmd.joint_vel[env_ids].clone()
@@ -4297,10 +4411,10 @@ class ViserLiveViewer:
             sim.set_dof_state_tensor(env_ids, sim.dof_state)
 
         if motion_cmd.motion.has_object:
-            obj_pos = motion_cmd.object_pos_w[env_ids]
-            obj_ori = motion_cmd.object_quat_w[env_ids]
-            obj_lin_vel = motion_cmd.object_lin_vel_w[env_ids]
-            if hasattr(motion_cmd, "_apply_manual_object_reset_overrides"):
+            obj_pos = motion_cmd.object_pos_w[env_ids].clone()
+            obj_ori = motion_cmd.object_quat_w[env_ids].clone()
+            obj_lin_vel = motion_cmd.object_lin_vel_w[env_ids].clone()
+            if not exact_motion_state and hasattr(motion_cmd, "_apply_manual_object_reset_overrides"):
                 obj_pos, obj_ori = motion_cmd._apply_manual_object_reset_overrides(obj_pos, obj_ori, env_ids)
             obj_states = torch.cat([obj_pos, obj_ori, obj_lin_vel, torch.zeros_like(obj_lin_vel)], dim=-1)
             if hasattr(motion_cmd, "_set_simulator_object_states"):
