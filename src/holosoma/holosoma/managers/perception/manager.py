@@ -20,6 +20,7 @@ from holosoma.utils.camera_utils import build_camera_parameters, resolve_camera_
 from holosoma.utils import warp_utils
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.path import resolve_data_file_path
+from holosoma.utils.object_geometry import load_urdf_box_primitive_metadata
 from holosoma.utils.rotations import (
     matrix_to_quaternion,
     quat_apply,
@@ -39,6 +40,18 @@ from holosoma.utils.urdf_utils import resolve_fixed_link_offset
 
 class PerceptionManager:
     """Compute terrain-aware perception features (heightmap or camera depth)."""
+
+    @staticmethod
+    def _normalize_object_geometry_mode(raw_value: Any) -> str:
+        normalized = str(raw_value or "").strip().lower()
+        if normalized in {"", "mesh", "urdf", "off", "false", "0", "no"}:
+            return "mesh"
+        if normalized in {"primitive", "primitives", "box", "cuboid", "on", "true", "1", "yes"}:
+            return "primitive"
+        raise ValueError(
+            "Unsupported perception object_geometry_mode. Supported values: 'mesh' or 'primitive'. "
+            f"Got: {raw_value}"
+        )
 
     def __init__(self, cfg: PerceptionConfig | None, env: Any, device: str):
         if cfg is None:
@@ -61,6 +74,12 @@ class PerceptionManager:
         self._sensor_offset = torch.tensor(cfg.sensor_offset, device=self.device)
         self._ray_start_offset = torch.tensor([0.0, 0.0, cfg.ray_start_height], device=self.device)
         self._camera_source = cfg.camera_source
+        object_geometry_mode_raw = (
+            cfg.object_geometry_mode
+            if getattr(cfg, "object_geometry_mode", None) is not None
+            else os.environ.get("HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE", "")
+        )
+        self._object_geometry_mode = self._normalize_object_geometry_mode(object_geometry_mode_raw)
         self._camera_body_name = cfg.camera_body_name
         heightmap_body_name = cfg.heightmap_body_name
         if heightmap_body_name is None:
@@ -91,7 +110,10 @@ class PerceptionManager:
         self._far_tracking_robot_slot_indices: torch.Tensor | None = None
         self._far_tracking_robot_body_indices: torch.Tensor | None = None
         self._far_tracking_object_slot_indices: torch.Tensor | None = None
+        self._far_tracking_object_source_indices: torch.Tensor | None = None
+        self._far_tracking_primitive_source_indices: torch.Tensor | None = None
         self._far_tracking_object_names: list[str] = []
+        self._far_tracking_object_active_env_ids: list[torch.Tensor | None] = []
         self._far_tracking_base_link_indices: torch.Tensor | None = None
         self._shared_camera_sensor_local_position: torch.Tensor | None = None
         self._shared_camera_sensor_local_orientation: torch.Tensor | None = None
@@ -1123,18 +1145,40 @@ class PerceptionManager:
         if not ray_cast_bodies:
             raise RuntimeError(f"No valid far_tracking_warp ray_cast_bodies found under mesh root: {mesh_root}")
 
+        (self.logger or logger).info(
+            "far_tracking_warp object geometry mode: {}",
+            self._object_geometry_mode,
+        )
+
+        registered_object_primitives = self._collect_registered_sim_object_primitives()
         # Include all registered non-robot simulator objects (e.g., training box)
         # so they participate in depth raycasting alongside terrain/robot meshes.
-        registered_object_meshes = self._collect_registered_sim_object_meshes()
-        for object_name, mesh_path in registered_object_meshes.items():
-            if object_name in ray_cast_bodies:
+        registered_object_meshes = self._collect_registered_sim_object_meshes(
+            excluded_object_names=set(registered_object_primitives.keys())
+        )
+        for slot_name, slot_spec in registered_object_meshes.items():
+            if slot_name in ray_cast_bodies:
                 continue
-            ray_cast_bodies[object_name] = mesh_path
-        if registered_object_meshes:
+            ray_cast_bodies[slot_name] = str(slot_spec["mesh_path"])
+        if registered_object_primitives:
+            primitive_source_names = sorted(
+                {str(slot_spec["source_name"]) for slot_spec in registered_object_primitives.values()}
+            )
             (self.logger or logger).info(
-                "far_tracking_warp: added {} registered simulator object(s) to perception raycast: {}",
+                "far_tracking_warp: added {} analytic primitive body(ies) from {} object(s): {}",
+                len(registered_object_primitives),
+                len(primitive_source_names),
+                ", ".join(primitive_source_names),
+            )
+        if registered_object_meshes:
+            registered_source_names = sorted(
+                {str(slot_spec["source_name"]) for slot_spec in registered_object_meshes.values()}
+            )
+            (self.logger or logger).info(
+                "far_tracking_warp: added {} registered simulator object raycast slot(s) from {} object(s): {}",
                 len(registered_object_meshes),
-                ", ".join(sorted(registered_object_meshes.keys())),
+                len(registered_source_names),
+                ", ".join(registered_source_names),
             )
 
         camera_body_name = self._camera_body_name or "torso_link"
@@ -1169,6 +1213,7 @@ class PerceptionManager:
             offpath_obstacle_meshes_root=None,
             offpath_obstacle_bodies={},
             asset_meshes_root=mesh_root,
+            primitive_bodies=list(registered_object_primitives.keys()),
         )
 
         body_names = getattr(self.env, "body_names", None) or getattr(self.env.robot_config, "body_names", None)
@@ -1197,19 +1242,50 @@ class PerceptionManager:
         robot_body_indices: list[int] = []
         object_slot_indices: list[int] = []
         object_names: list[str] = []
+        object_source_indices: list[int] = []
+        object_active_env_ids: list[torch.Tensor | None] = []
+        primitive_source_indices: list[int] = []
+        primitive_half_extents: list[torch.Tensor] = []
+        primitive_active: list[torch.Tensor] = []
+        object_name_to_source_index: dict[str, int] = {}
+
+        def _register_object_source(source_name: str) -> int:
+            source_index = object_name_to_source_index.get(source_name)
+            if source_index is not None:
+                return source_index
+            source_index = len(object_names)
+            object_name_to_source_index[source_name] = source_index
+            object_names.append(source_name)
+            return source_index
+
         for slot_idx, name in enumerate(ray_cast_bodies.keys()):
             body_idx = _resolve_body_index(name)
             if body_idx is not None:
                 robot_slot_indices.append(slot_idx)
                 robot_body_indices.append(body_idx)
                 continue
-            if name in registered_object_meshes:
+            slot_spec = registered_object_meshes.get(name)
+            if slot_spec is not None:
                 object_slot_indices.append(slot_idx)
-                object_names.append(name)
+                source_name = str(slot_spec["source_name"])
+                source_index = _register_object_source(source_name)
+                object_source_indices.append(source_index)
+                active_env_ids = slot_spec.get("env_ids")
+                if active_env_ids is None:
+                    object_active_env_ids.append(None)
+                else:
+                    object_active_env_ids.append(
+                        torch.tensor(active_env_ids, dtype=torch.long, device=self.device)
+                    )
                 continue
             raise RuntimeError(
                 f"ray_cast body '{name}' is neither a robot body nor a registered object with mesh."
             )
+
+        for primitive_name, primitive_spec in registered_object_primitives.items():
+            primitive_source_indices.append(_register_object_source(str(primitive_spec["source_name"])))
+            primitive_half_extents.append(primitive_spec["half_extents"])
+            primitive_active.append(primitive_spec["active"])
 
         self._far_tracking_camera_sensor = FarTrackingCameraSensor(
             self.num_envs,
@@ -1242,6 +1318,17 @@ class PerceptionManager:
             )
         self._far_tracking_tf_apply = ft_tf_apply_xyzw
         self._far_tracking_quat_mul = ft_quat_mul_xyzw
+        if primitive_half_extents:
+            primitive_half_extents_tensor = torch.stack(primitive_half_extents, dim=1).to(
+                device=self._far_tracking_camera_sensor.primitive_body_half_extents_tensor.device,
+                dtype=self._far_tracking_camera_sensor.primitive_body_half_extents_tensor.dtype,
+            )
+            primitive_active_tensor = torch.stack(primitive_active, dim=1).to(
+                device=self._far_tracking_camera_sensor.primitive_body_active_tensor.device,
+                dtype=self._far_tracking_camera_sensor.primitive_body_active_tensor.dtype,
+            )
+            self._far_tracking_camera_sensor.primitive_body_half_extents_tensor[:] = primitive_half_extents_tensor
+            self._far_tracking_camera_sensor.primitive_body_active_tensor[:] = primitive_active_tensor
         self._far_tracking_base_link_indices = torch.tensor(base_link_indices, dtype=torch.long, device=self.device)
         self._far_tracking_robot_slot_indices = torch.tensor(
             robot_slot_indices, dtype=torch.long, device=self.device
@@ -1252,7 +1339,15 @@ class PerceptionManager:
         self._far_tracking_object_slot_indices = torch.tensor(
             object_slot_indices, dtype=torch.long, device=self.device
         )
+        self._far_tracking_object_source_indices = torch.tensor(
+            object_source_indices, dtype=torch.long, device=self.device
+        )
+        self._far_tracking_primitive_source_indices = torch.tensor(
+            primitive_source_indices, dtype=torch.long, device=self.device
+        )
         self._far_tracking_object_names = object_names
+        self._far_tracking_object_active_env_ids = object_active_env_ids
+        self._initialize_far_tracking_object_slots()
 
     def _compute_far_tracking_camera_depth(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         if self._far_tracking_camera_sensor is None:
@@ -1264,6 +1359,8 @@ class PerceptionManager:
             or self._far_tracking_robot_slot_indices is None
             or self._far_tracking_robot_body_indices is None
             or self._far_tracking_object_slot_indices is None
+            or self._far_tracking_object_source_indices is None
+            or self._far_tracking_primitive_source_indices is None
         ):
             raise RuntimeError("far_tracking_warp camera indices are not initialized.")
 
@@ -1282,16 +1379,43 @@ class PerceptionManager:
             )
 
         # Fill registered object slots from simulator actor states.
-        if self._far_tracking_object_slot_indices.numel() > 0:
+        if self._far_tracking_object_names:
             env_ids_all = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
             object_states = self.env.simulator.get_actor_states(self._far_tracking_object_names, env_ids_all)
             object_states = object_states.view(len(self._far_tracking_object_names), self.num_envs, -1).permute(1, 0, 2)
-            self._far_tracking_camera_sensor.ray_cast_body_poses_tensor[:, self._far_tracking_object_slot_indices] = (
-                object_states[:, :, :3]
-            )
-            self._far_tracking_camera_sensor.ray_cast_body_quats_tensor[:, self._far_tracking_object_slot_indices] = (
-                object_states[:, :, 3:7]
-            )
+            if self._far_tracking_primitive_source_indices.numel() > 0:
+                self._far_tracking_camera_sensor.primitive_body_poses_tensor[:] = object_states[
+                    :, self._far_tracking_primitive_source_indices, :3
+                ]
+                self._far_tracking_camera_sensor.primitive_body_quats_tensor[:] = object_states[
+                    :, self._far_tracking_primitive_source_indices, 3:7
+                ]
+            if self._far_tracking_object_slot_indices.numel() == 0:
+                object_states = None
+        else:
+            object_states = None
+
+        if object_states is not None and self._far_tracking_object_slot_indices.numel() > 0:
+            for local_slot_idx in range(int(self._far_tracking_object_slot_indices.numel())):
+                slot_tensor_idx = int(self._far_tracking_object_slot_indices[local_slot_idx].item())
+                source_idx = int(self._far_tracking_object_source_indices[local_slot_idx].item())
+                active_env_ids = self._far_tracking_object_active_env_ids[local_slot_idx]
+                if active_env_ids is None:
+                    self._far_tracking_camera_sensor.ray_cast_body_poses_tensor[:, slot_tensor_idx] = (
+                        object_states[:, source_idx, :3]
+                    )
+                    self._far_tracking_camera_sensor.ray_cast_body_quats_tensor[:, slot_tensor_idx] = (
+                        object_states[:, source_idx, 3:7]
+                    )
+                    continue
+                if active_env_ids.numel() == 0:
+                    continue
+                self._far_tracking_camera_sensor.ray_cast_body_poses_tensor[active_env_ids, slot_tensor_idx] = (
+                    object_states[active_env_ids, source_idx, :3]
+                )
+                self._far_tracking_camera_sensor.ray_cast_body_quats_tensor[active_env_ids, slot_tensor_idx] = (
+                    object_states[active_env_ids, source_idx, 3:7]
+                )
 
         camera_base_link_pos = body_pos[:, self._far_tracking_base_link_indices]
         camera_base_link_quat = body_quat[:, self._far_tracking_base_link_indices]
@@ -1319,9 +1443,55 @@ class PerceptionManager:
             return depth
         return depth[env_ids]
 
-    def _collect_registered_sim_object_meshes(self) -> dict[str, str]:
+    def _initialize_far_tracking_object_slots(self) -> None:
+        """Park inactive heterogeneous-object slots far away so each env still raycasts a single object mesh."""
+        if self._far_tracking_camera_sensor is None or self._far_tracking_object_slot_indices is None:
+            return
+
+        inactive_pos = torch.tensor(
+            [1.0e6, 1.0e6, 1.0e6],
+            device=self.device,
+            dtype=self._far_tracking_camera_sensor.ray_cast_body_poses_tensor.dtype,
+        )
+        inactive_quat = torch.tensor(
+            [0.0, 0.0, 0.0, 1.0],
+            device=self.device,
+            dtype=self._far_tracking_camera_sensor.ray_cast_body_quats_tensor.dtype,
+        )
+        for local_slot_idx in range(int(self._far_tracking_object_slot_indices.numel())):
+            active_env_ids = self._far_tracking_object_active_env_ids[local_slot_idx]
+            if active_env_ids is None:
+                continue
+            slot_tensor_idx = int(self._far_tracking_object_slot_indices[local_slot_idx].item())
+            self._far_tracking_camera_sensor.ray_cast_body_poses_tensor[:, slot_tensor_idx] = inactive_pos
+            self._far_tracking_camera_sensor.ray_cast_body_quats_tensor[:, slot_tensor_idx] = inactive_quat
+
+    def _collect_registered_sim_object_primitives(self) -> dict[str, dict[str, Any]]:
+        """Resolve analytic box specs for registered simulator objects when primitive mode is enabled."""
+        primitive_map: dict[str, dict[str, Any]] = {}
+        if self._object_geometry_mode != "primitive":
+            return primitive_map
+
+        simulator = getattr(self.env, "simulator", None)
+        object_registry = getattr(simulator, "object_registry", None)
+        if object_registry is None:
+            return primitive_map
+
+        for name, obj_type, _position_in_type, _indices, _initial_poses in getattr(object_registry, "objects", []):
+            if obj_type == "robot":
+                continue
+            primitive_spec = self._resolve_registered_object_primitive_spec(name)
+            if primitive_spec is not None:
+                primitive_map[name] = primitive_spec
+        return primitive_map
+
+    def _collect_registered_sim_object_meshes(
+        self,
+        *,
+        excluded_object_names: set[str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
         """Resolve mesh files for all registered non-robot simulator objects."""
-        mesh_map: dict[str, str] = {}
+        mesh_map: dict[str, dict[str, Any]] = {}
         simulator = getattr(self.env, "simulator", None)
         object_registry = getattr(simulator, "object_registry", None)
         if object_registry is None:
@@ -1330,9 +1500,11 @@ class PerceptionManager:
         for name, obj_type, _position_in_type, _indices, _initial_poses in getattr(object_registry, "objects", []):
             if obj_type == "robot":
                 continue
-            mesh_path = self._resolve_registered_object_mesh_path(name)
-            if mesh_path:
-                mesh_map[name] = mesh_path
+            if excluded_object_names and name in excluded_object_names:
+                continue
+            mesh_specs = self._resolve_registered_object_mesh_specs(name)
+            if mesh_specs:
+                mesh_map.update(mesh_specs)
             else:
                 (self.logger or logger).warning(
                     "Skipping registered object '{}' in perception raycast: unable to resolve mesh path.",
@@ -1340,11 +1512,85 @@ class PerceptionManager:
                 )
         return mesh_map
 
-    def _resolve_registered_object_mesh_path(self, object_name: str) -> str | None:
-        """Resolve (and cache) a mesh file path for a registered simulator object."""
-        if object_name in self._registered_object_mesh_cache:
-            return self._registered_object_mesh_cache[object_name]
+    def _resolve_registered_object_primitive_spec(self, object_name: str) -> dict[str, Any] | None:
+        """Resolve per-env analytic box extents for a registered simulator object."""
+        asset_candidates = self._resolve_registered_object_asset_candidates(object_name)
+        if not asset_candidates:
+            return None
 
+        half_extents = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
+        active = torch.zeros((self.num_envs,), device=self.device, dtype=torch.int32)
+        object_scale = self._get_registered_object_scale_xyz()
+
+        for asset_candidate in asset_candidates:
+            candidate_path = str(asset_candidate["asset_path"])
+            candidate_half_extents = self._resolve_registered_object_box_half_extents_from_asset_path(
+                candidate_path,
+                object_scale=object_scale,
+            )
+            if candidate_half_extents is None:
+                return None
+            half_extents_value = torch.tensor(candidate_half_extents, device=self.device, dtype=torch.float32)
+            env_ids = asset_candidate.get("env_ids")
+            if env_ids is None:
+                half_extents[:] = half_extents_value
+                active[:] = 1
+                continue
+            if len(env_ids) == 0:
+                continue
+            env_ids_tensor = torch.tensor(env_ids, dtype=torch.long, device=self.device)
+            half_extents[env_ids_tensor] = half_extents_value
+            active[env_ids_tensor] = 1
+
+        if int(torch.count_nonzero(active).item()) == 0:
+            return None
+        return {
+            "source_name": object_name,
+            "half_extents": half_extents,
+            "active": active,
+        }
+
+    def _resolve_registered_object_box_half_extents_from_asset_path(
+        self,
+        candidate_path: str,
+        *,
+        object_scale: tuple[float, float, float] | None,
+    ) -> tuple[float, float, float] | None:
+        resolved_path = resolve_data_file_path(candidate_path)
+        if os.path.splitext(resolved_path)[1].lower() != ".urdf":
+            return None
+
+        metadata = load_urdf_box_primitive_metadata(resolved_path)
+        if metadata is None:
+            return None
+
+        extents = tuple(float(v) for v in metadata.extents)
+        if object_scale is not None:
+            extents = tuple(float(extents[idx]) * float(object_scale[idx]) for idx in range(3))
+        return tuple(max(0.5 * float(extents[idx]), 5.0e-5) for idx in range(3))
+
+    def _resolve_registered_object_mesh_specs(self, object_name: str) -> dict[str, dict[str, Any]]:
+        """Resolve one or more raycast slots for a registered simulator object."""
+        mesh_specs: dict[str, dict[str, Any]] = {}
+        asset_candidates = self._resolve_registered_object_asset_candidates(object_name)
+        for slot_variant_idx, asset_candidate in enumerate(asset_candidates):
+            candidate_path = str(asset_candidate["asset_path"])
+            env_ids = asset_candidate.get("env_ids")
+            slot_name = object_name if len(asset_candidates) == 1 and env_ids is None else (
+                f"{object_name}__variant_{slot_variant_idx:03d}"
+            )
+            mesh_path = self._resolve_registered_object_mesh_from_asset_path(candidate_path, object_name)
+            if mesh_path is None:
+                continue
+            mesh_specs[slot_name] = {
+                "mesh_path": mesh_path,
+                "source_name": object_name,
+                "env_ids": env_ids,
+            }
+        return mesh_specs
+
+    def _resolve_registered_object_asset_candidates(self, object_name: str) -> list[dict[str, Any]]:
+        """Resolve the simulator asset path(s) backing a registered object."""
         simulator = getattr(self.env, "simulator", None)
         scene = getattr(simulator, "scene", None)
         rigid_objects = getattr(scene, "rigid_objects", None)
@@ -1358,46 +1604,49 @@ class PerceptionManager:
             object_urdf_by_name = getattr(simulator, "_object_urdf_by_name", None)
             if use_mujoco_object_urdf_fallback and isinstance(object_urdf_by_name, dict):
                 candidate_path = object_urdf_by_name.get(object_name)
-            if candidate_path is None:
-                candidate_path = self._resolve_simulator_object_asset_path_fallback(simulator, object_name)
-            if candidate_path is None:
-                return None
+            if candidate_path:
+                return [{"asset_path": str(candidate_path), "env_ids": None}]
+            return self._resolve_simulator_object_asset_candidates_fallback(simulator, object_name)
 
-        if candidate_path is None:
-            rigid_object = rigid_objects.get(object_name, None)
-            if rigid_object is None:
-                # Best-effort fallback for scene collection objects registered by basename.
-                scene_collection = rigid_objects.get("usd_scene_objects", None)
-                scene_cfg = getattr(scene_collection, "cfg", None) if scene_collection is not None else None
-                scene_rigid_cfgs = getattr(scene_cfg, "rigid_objects", None)
-                if isinstance(scene_rigid_cfgs, dict):
-                    for prim_path, cfg in scene_rigid_cfgs.items():
-                        if str(prim_path).split("/")[-1] == object_name:
-                            rigid_object = cfg
-                            break
-            if rigid_object is None:
-                object_urdf_by_name = getattr(simulator, "_object_urdf_by_name", None)
-                if use_mujoco_object_urdf_fallback and isinstance(object_urdf_by_name, dict):
-                    candidate_path = object_urdf_by_name.get(object_name)
-                if candidate_path is None:
-                    candidate_path = self._resolve_simulator_object_asset_path_fallback(simulator, object_name)
-                if candidate_path is None:
-                    return None
-            else:
-                cfg = getattr(rigid_object, "cfg", None)
-                spawn = getattr(cfg, "spawn", None) if cfg is not None else getattr(rigid_object, "spawn", None)
-                if spawn is None:
-                    return None
-
-                for attr_name in ("asset_path", "urdf_path", "usd_path"):
-                    attr_val = getattr(spawn, attr_name, None)
-                    if attr_val:
-                        candidate_path = str(attr_val)
+        rigid_object = rigid_objects.get(object_name, None)
+        if rigid_object is None:
+            # Best-effort fallback for scene collection objects registered by basename.
+            scene_collection = rigid_objects.get("usd_scene_objects", None)
+            scene_cfg = getattr(scene_collection, "cfg", None) if scene_collection is not None else None
+            scene_rigid_cfgs = getattr(scene_cfg, "rigid_objects", None)
+            if isinstance(scene_rigid_cfgs, dict):
+                for prim_path, cfg in scene_rigid_cfgs.items():
+                    if str(prim_path).split("/")[-1] == object_name:
+                        rigid_object = cfg
                         break
-                if candidate_path is None:
-                    candidate_path = self._resolve_simulator_object_asset_path_fallback(simulator, object_name)
-        if candidate_path is None:
-            return None
+        if rigid_object is None:
+            object_urdf_by_name = getattr(simulator, "_object_urdf_by_name", None)
+            if use_mujoco_object_urdf_fallback and isinstance(object_urdf_by_name, dict):
+                candidate_path = object_urdf_by_name.get(object_name)
+            if candidate_path:
+                return [{"asset_path": str(candidate_path), "env_ids": None}]
+            return self._resolve_simulator_object_asset_candidates_fallback(simulator, object_name)
+
+        cfg = getattr(rigid_object, "cfg", None)
+        spawn = getattr(cfg, "spawn", None) if cfg is not None else getattr(rigid_object, "spawn", None)
+        if spawn is None:
+            return self._resolve_simulator_object_asset_candidates_fallback(simulator, object_name)
+
+        for attr_name in ("asset_path", "urdf_path", "usd_path"):
+            attr_val = getattr(spawn, attr_name, None)
+            if attr_val:
+                candidate_path = str(attr_val)
+                break
+        if candidate_path:
+            return [{"asset_path": str(candidate_path), "env_ids": None}]
+        return self._resolve_simulator_object_asset_candidates_fallback(simulator, object_name)
+
+    def _resolve_registered_object_mesh_from_asset_path(self, candidate_path: str, object_name: str) -> str | None:
+        """Resolve (and cache) a mesh file path for a specific simulator asset path."""
+        resolved_path = str(Path(resolve_data_file_path(candidate_path)).resolve())
+        cache_key = f"{object_name}::{self._object_geometry_mode}::{resolved_path}"
+        if cache_key in self._registered_object_mesh_cache:
+            return self._registered_object_mesh_cache[cache_key]
 
         resolved_path = resolve_data_file_path(candidate_path)
         ext = os.path.splitext(resolved_path)[1].lower()
@@ -1411,42 +1660,56 @@ class PerceptionManager:
             mesh_path = self._export_combined_mesh_from_scene_asset(resolved_path, object_name)
 
         if mesh_path and os.path.exists(mesh_path):
-            self._registered_object_mesh_cache[object_name] = mesh_path
+            self._registered_object_mesh_cache[cache_key] = mesh_path
             return mesh_path
         return None
 
-    def _resolve_simulator_object_asset_path_fallback(self, simulator: Any, object_name: str) -> str | None:
+    def _get_registered_object_scale_xyz(self) -> tuple[float, float, float] | None:
+        object_cfg = getattr(getattr(self.env, "robot_config", None), "object", None)
+        object_scale_raw = getattr(object_cfg, "scale", None)
+        if object_scale_raw is None:
+            return None
+        if len(object_scale_raw) == 1:
+            value = float(object_scale_raw[0])
+            return (value, value, value)
+        if len(object_scale_raw) == 3:
+            return tuple(float(v) for v in object_scale_raw)
+        return None
+
+    def _resolve_simulator_object_asset_candidates_fallback(
+        self, simulator: Any, object_name: str
+    ) -> list[dict[str, Any]]:
         """Best-effort fallback for simulators that keep object assets outside the scene spawn cfg."""
         if simulator is None:
-            return None
+            return []
 
         object_urdf_by_name = getattr(simulator, "_object_urdf_by_name", None)
         if isinstance(object_urdf_by_name, dict):
             candidate_path = str(object_urdf_by_name.get(object_name, "") or "").strip()
             if candidate_path:
-                return candidate_path
+                return [{"asset_path": candidate_path, "env_ids": None}]
 
         env_object_urdf_paths = getattr(simulator, "_env_object_urdf_paths", None)
         if not isinstance(env_object_urdf_paths, list):
-            return None
+            return []
 
-        unique_candidates: list[str] = []
-        seen: set[str] = set()
-        for raw_path in env_object_urdf_paths:
+        env_ids_by_candidate: dict[str, list[int]] = {}
+        for env_idx, raw_path in enumerate(env_object_urdf_paths):
             candidate_path = str(raw_path or "").strip()
             if not candidate_path:
                 continue
             normalized_path = str(Path(resolve_data_file_path(candidate_path)).resolve())
-            if normalized_path in seen:
-                continue
-            seen.add(normalized_path)
-            unique_candidates.append(normalized_path)
+            env_ids_by_candidate.setdefault(normalized_path, []).append(env_idx)
 
-        if not unique_candidates:
-            return None
-        if len(unique_candidates) == 1 or self.num_envs == 1:
-            return unique_candidates[0]
-        return None
+        if not env_ids_by_candidate:
+            return []
+        if len(env_ids_by_candidate) == 1 or self.num_envs == 1:
+            only_path = next(iter(env_ids_by_candidate.keys()))
+            return [{"asset_path": only_path, "env_ids": None}]
+        return [
+            {"asset_path": candidate_path, "env_ids": env_ids}
+            for candidate_path, env_ids in sorted(env_ids_by_candidate.items())
+        ]
 
     def _export_combined_urdf_visual_mesh(self, urdf_path: str, object_name: str) -> str | None:
         """Build a single OBJ mesh from URDF visual geometry for dynamic object raycasting."""

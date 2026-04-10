@@ -49,6 +49,8 @@ Default W&B runs:
   MOTION_CLIP_ID           (optional single clip id)
   OBJECT_URDF              (optional override)
   OBJECT_SCALE             (optional scalar or x,y,z)
+  OBJECT_GEOMETRY_MODE     (optional; `on`/`primitive` forces cuboid primitive path,
+                             `off`/`mesh` forces legacy URDF/mesh path)
   GEOMETRY_DIR             (optional OBJ file/dir for terrain visualization)
   NUM_ENVS                 (default: 1)
   HEADLESS                 (default: True)
@@ -687,10 +689,33 @@ IMAGE_HEIGHT=${IMAGE_HEIGHT:-17}
 CAMERA_NEAR=${CAMERA_NEAR:-0.001}
 CAMERA_FAR=${CAMERA_FAR:-3.0}
 CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-3.0}
+OBJECT_GEOMETRY_MODE_RAW=${OBJECT_GEOMETRY_MODE:-}
+OBJECT_GEOMETRY_MODE=""
+HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE=""
+PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE=""
 MAX_EVAL_STEPS=${MAX_EVAL_STEPS:-}
 EVAL_COMMAND_ONLY_ENV_PROB=${EVAL_COMMAND_ONLY_ENV_PROB:-}
 EVAL_EXTERNAL_GOAL_PROB=${EVAL_EXTERNAL_GOAL_PROB:-}
 DRY_RUN_RAW=${DRY_RUN:-0}
+
+if [[ -n "${OBJECT_GEOMETRY_MODE_RAW}" ]]; then
+  case "$(echo "${OBJECT_GEOMETRY_MODE_RAW}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on|primitive|primitives|box|cuboid)
+      OBJECT_GEOMETRY_MODE="primitive"
+      HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE="primitive"
+      PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="primitive"
+      ;;
+    0|false|no|off|mesh|urdf|disable|disabled)
+      OBJECT_GEOMETRY_MODE="mesh"
+      HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE="urdf"
+      PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="mesh"
+      ;;
+    *)
+      echo "[ERROR] OBJECT_GEOMETRY_MODE must be one of: on/off/primitive/mesh. Got: ${OBJECT_GEOMETRY_MODE_RAW}" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 case "${MIXED_PROFILE_RESOLVED}" in
   none)
@@ -852,6 +877,9 @@ export HOLOSOMA_DISABLE_AUTO_RESET=${HOLOSOMA_DISABLE_AUTO_RESET:-1}
 export HOLOSOMA_DISABLE_CLIP_END_RESET=${HOLOSOMA_DISABLE_CLIP_END_RESET:-1}
 export LOGURU_LEVEL=${LOGURU_LEVEL:-WARNING}
 export PY_LOG_LEVEL=${PY_LOG_LEVEL:-WARNING}
+if [[ -n "${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}" ]]; then
+  export HOLOSOMA_OBJECT_SPAWN_MODE="${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}"
+fi
 
 cmd=(
   "$PYTHON_BIN" -m holosoma.visualize physics
@@ -902,6 +930,9 @@ if [[ -n "${MOTION_CLIP_ID}" ]]; then
 fi
 if [[ -n "${OBJECT_SCALE_ARG}" ]]; then
   cmd+=(--robot.object.scale "${OBJECT_SCALE_ARG}")
+fi
+if [[ -n "${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}" ]]; then
+  cmd+=(--perception.object_geometry_mode "${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}")
 fi
 if [[ -n "${GEOMETRY_DIR}" ]]; then
   cmd+=(--geometry-dir "${GEOMETRY_DIR}")
@@ -984,6 +1015,11 @@ echo "[INFO] checkpoint=${CKPT}"
 echo "[INFO] infer_dataset=${INFER_DATASET}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
 echo "[INFO] object_urdf=${OBJECT_URDF}"
+if [[ -n "${OBJECT_GEOMETRY_MODE}" ]]; then
+  echo "[INFO] object_geometry_mode=${OBJECT_GEOMETRY_MODE} simulator_object_spawn_mode=${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}"
+else
+  echo "[INFO] object_geometry_mode=<default>"
+fi
 if [[ -n "${CHECKPOINT_SAVED_MOTION_PATH}" ]]; then
   echo "[INFO] checkpoint_saved_motion_path=${CHECKPOINT_SAVED_MOTION_PATH}"
 fi

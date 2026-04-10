@@ -22,6 +22,7 @@ class BaseSensor(ABC):
         self.num_envs = num_envs
         self.device = device
         self.ray_cast_bodies = list(config.ray_cast_bodies.keys())
+        self.primitive_bodies = list(getattr(config, "primitive_bodies", []) or [])
         
         # Offpath obstacle bodies
         self.add_offpath_obstacle = config.add_offpath_obstacle
@@ -35,6 +36,7 @@ class BaseSensor(ABC):
             config, 
         )
         self.init_ray_cast_body_poses_and_quats()
+        self.init_primitive_body_poses_quats_and_half_extents()
     
     def init_ray_cast_body_poses_and_quats(self):
         self.ray_cast_body_poses_tensor = torch.zeros(
@@ -49,6 +51,34 @@ class BaseSensor(ABC):
         )
         self.ray_cast_body_quats = wp.from_torch(
             self.ray_cast_body_quats_tensor.view(self.num_envs, len(self.ray_cast_bodies), 4), dtype=wp.quat
+        )
+
+    def init_primitive_body_poses_quats_and_half_extents(self):
+        num_primitive_bodies = len(self.primitive_bodies)
+        self.primitive_body_poses_tensor = torch.zeros(
+            self.num_envs, num_primitive_bodies, 3, device=self.device
+        )
+        self.primitive_body_quats_tensor = torch.zeros(
+            self.num_envs, num_primitive_bodies, 4, device=self.device
+        )
+        self.primitive_body_quats_tensor[..., 3] = 1.0
+        self.primitive_body_half_extents_tensor = torch.zeros(
+            self.num_envs, num_primitive_bodies, 3, device=self.device
+        )
+        self.primitive_body_active_tensor = torch.zeros(
+            self.num_envs, num_primitive_bodies, device=self.device, dtype=torch.int32
+        )
+        self.primitive_body_poses = wp.from_torch(
+            self.primitive_body_poses_tensor.view(self.num_envs, num_primitive_bodies, 3), dtype=wp.vec3
+        )
+        self.primitive_body_quats = wp.from_torch(
+            self.primitive_body_quats_tensor.view(self.num_envs, num_primitive_bodies, 4), dtype=wp.quat
+        )
+        self.primitive_body_half_extents = wp.from_torch(
+            self.primitive_body_half_extents_tensor.view(self.num_envs, num_primitive_bodies, 3), dtype=wp.vec3
+        )
+        self.primitive_body_active = wp.from_torch(
+            self.primitive_body_active_tensor.view(self.num_envs, num_primitive_bodies), dtype=wp.int32
         )
 
     def init_warp(self, device):
