@@ -141,11 +141,10 @@ class PPO(BaseAlgo):
     def _init_config(self) -> None:
         self.algo_obs_dim_dict = self.env.observation_manager.get_obs_dims()
 
-        # Observation manager system - history is defined per-module in module_dict
         assert self.env.observation_manager is not None
         self.algo_history_length_dict = {
-            "actor_obs": self.env.observation_manager.cfg.groups["actor_obs"].history_length,
-            "critic_obs": self.env.observation_manager.cfg.groups["critic_obs"].history_length,
+            group_name: group_cfg.history_length
+            for group_name, group_cfg in self.env.observation_manager.cfg.groups.items()
         }
 
         self.num_act = self.env.robot_config.actions_dim
@@ -746,6 +745,18 @@ class PPO(BaseAlgo):
 
         run_end_iteration = self.current_learning_iteration + self.config.num_learning_iterations
         debug_heartbeat = os.environ.get("HOLOSOMA_DEBUG_HEARTBEAT", "").lower() not in ("", "0", "false", "no")
+        export_onnx_during_train = os.environ.get("HOLOSOMA_EXPORT_ONNX_DURING_TRAIN", "1").lower() not in (
+            "",
+            "0",
+            "false",
+            "no",
+        )
+        export_onnx_at_end = os.environ.get("HOLOSOMA_EXPORT_ONNX_AT_END", "1").lower() not in (
+            "",
+            "0",
+            "false",
+            "no",
+        )
         for it in range(
             self.current_learning_iteration,
             run_end_iteration,
@@ -783,7 +794,8 @@ class PPO(BaseAlgo):
                     torch.distributed.barrier()
                 if self.is_main_process:
                     self.save(os.path.join(self.log_dir, f"model_{it:05d}.pt"))
-                    self.export(onnx_file_path=os.path.join(self.log_dir, f"model_{it:05d}.onnx"))
+                    if export_onnx_during_train:
+                        self.export(onnx_file_path=os.path.join(self.log_dir, f"model_{it:05d}.onnx"))
                 if self.is_multi_gpu and torch.distributed.is_initialized():
                     torch.distributed.barrier()
 
@@ -791,7 +803,8 @@ class PPO(BaseAlgo):
             torch.distributed.barrier()
         if self.is_main_process:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration:05d}.pt"))
-            self.export(onnx_file_path=os.path.join(self.log_dir, f"model_{self.current_learning_iteration:05d}.onnx"))
+            if export_onnx_at_end:
+                self.export(onnx_file_path=os.path.join(self.log_dir, f"model_{self.current_learning_iteration:05d}.onnx"))
         if self.is_multi_gpu and torch.distributed.is_initialized():
             torch.distributed.barrier()
 

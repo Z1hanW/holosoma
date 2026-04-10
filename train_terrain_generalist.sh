@@ -18,6 +18,17 @@ else
 fi
 PYTHON_BIN=${PYTHON_BIN:-"${DEFAULT_PYTHON_BIN}"}
 
+if ! "${PYTHON_BIN}" - <<'PY' >/dev/null 2>&1; then
+import numpy
+import torch
+import tyro
+PY
+  echo "[ERROR] Missing required training dependencies in ${PYTHON_BIN}." >&2
+  echo "        Expected at least: numpy, torch, tyro." >&2
+  echo "        Source scripts/source_isaacsim_setup.sh or set PYTHON_BIN to the IsaacSim env python." >&2
+  exit 1
+fi
+
 DEFAULT_CUDA_VISIBLE_DEVICES=${DEFAULT_CUDA_VISIBLE_DEVICES:-0,1,2,3}
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-${DEFAULT_CUDA_VISIBLE_DEVICES}}
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES//[[:space:]]/}
@@ -90,6 +101,11 @@ PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPAC
 WANDB_PROJECT=${WANDB_PROJECT:-terrain-aware}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_terrain_generalist}
 LOGGER_NAME=${LOGGER_NAME:-g1_terrain_generalist}
+LOGGER_BASE_DIR_EXPLICIT=0
+if [[ -n "${LOGGER_BASE_DIR+x}" ]]; then
+  LOGGER_BASE_DIR_EXPLICIT=1
+fi
+LOGGER_BASE_DIR=${LOGGER_BASE_DIR:-/data/logs_new}
 RESUME_CKPT=${RESUME_CKPT:-}
 
 ACTOR_LR=${ACTOR_LR:-1e-3}
@@ -239,6 +255,26 @@ normalize_bool_true_false() {
   esac
 }
 
+ensure_logger_base_dir() {
+  local requested_dir="$1"
+  local explicit="$2"
+  local fallback_dir="${TMPDIR:-/tmp}/holosoma_logs"
+
+  if mkdir -p "${requested_dir}" >/dev/null 2>&1; then
+    echo "${requested_dir}"
+    return 0
+  fi
+
+  if [[ "${explicit}" == "1" ]]; then
+    echo "[ERROR] LOGGER_BASE_DIR is not writable: ${requested_dir}" >&2
+    exit 1
+  fi
+
+  mkdir -p "${fallback_dir}"
+  echo "[WARN] LOGGER_BASE_DIR=${requested_dir} is not writable; falling back to ${fallback_dir}" >&2
+  echo "${fallback_dir}"
+}
+
 HEADLESS_BOOL=""
 if ! HEADLESS_BOOL="$(normalize_bool_true_false "${HEADLESS}")"; then
   echo "[ERROR] HEADLESS must be one of: 0/1/True/False/yes/no/on/off. Got: ${HEADLESS}" >&2
@@ -249,6 +285,8 @@ if [[ "${HEADLESS_BOOL}" == "True" ]]; then
 else
   HEADLESS_ENV_INT=0
 fi
+
+LOGGER_BASE_DIR="$(ensure_logger_base_dir "${LOGGER_BASE_DIR}" "${LOGGER_BASE_DIR_EXPLICIT}")"
 
 normalize_extra_cli_args() {
   local -a input_args=("$@")
@@ -704,6 +742,7 @@ echo "[INFO] NORMALIZE_CRITIC_OBS=${NORMALIZE_CRITIC_OBS}"
 echo "[INFO] HOLOSOMA_EXPORT_ONNX_DURING_TRAIN=${HOLOSOMA_EXPORT_ONNX_DURING_TRAIN}"
 echo "[INFO] HOLOSOMA_EXPORT_ONNX_AT_END=${HOLOSOMA_EXPORT_ONNX_AT_END}"
 echo "[INFO] HOLOSOMA_WANDB_SAVE_FILES=${HOLOSOMA_WANDB_SAVE_FILES}"
+echo "[INFO] LOGGER_BASE_DIR=${LOGGER_BASE_DIR}"
 if is_true "${TRAIN_DEBUG_VISER}"; then
   echo "[INFO] TRAIN_DEBUG_VISER=1"
   echo "[INFO] HOLOSOMA_DEBUG_TILE_LAYOUT=${HOLOSOMA_DEBUG_TILE_LAYOUT:-0}"
@@ -787,6 +826,7 @@ normalize_extra_cli_args "$@"
 cmd+=("${NORMALIZED_EXTRA_CLI_ARGS[@]}")
 cmd+=(
   logger:wandb
+  --logger.base_dir="${LOGGER_BASE_DIR}"
   --logger.video.enabled=False
   --logger.headless_recording=False
   --logger.video.upload_to_wandb=False
