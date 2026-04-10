@@ -737,6 +737,7 @@ cmd=(
   --training.name="${TRAINING_NAME}"
   --training.num_envs="${NUM_ENVS}"
   --training.headless="${HEADLESS_BOOL}"
+  --training.debug=False
   --simulator.config.scene.env_spacing=0.0
   --simulator.config.sim.physx.gpu_max_rigid_contact_count="${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT}"
   --simulator.config.sim.physx.gpu_max_rigid_patch_count="${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}"
@@ -801,6 +802,8 @@ fi
 export HOLOSOMA_EXPORT_ONNX_DURING_TRAIN
 export HOLOSOMA_EXPORT_ONNX_AT_END
 export HOLOSOMA_WANDB_SAVE_FILES
+# Emit per-iteration heartbeat logs unless explicitly disabled.
+export HOLOSOMA_DEBUG_HEARTBEAT="${HOLOSOMA_DEBUG_HEARTBEAT:-1}"
 # IsaacLab AppLauncher reads HEADLESS from environment and expects 0/1.
 export HEADLESS="${HEADLESS_ENV_INT}"
 
