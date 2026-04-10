@@ -1,6 +1,46 @@
 import warp as wp
 
 NO_HIT_RAY_VAL = wp.constant(1000.0)
+RAY_EPS = wp.constant(1.0e-6)
+
+
+@wp.func
+def _intersect_axis_aligned_box(
+    ro: wp.vec3,
+    rd: wp.vec3,
+    half_extents: wp.vec3,
+    max_dist: float,
+) -> float:
+    t_min = wp.float32(0.0)
+    t_max = wp.float32(max_dist)
+
+    for axis in range(3):
+        origin = ro[axis]
+        direction = rd[axis]
+        extent = half_extents[axis]
+        if extent <= wp.float32(0.0):
+            return wp.float32(NO_HIT_RAY_VAL)
+
+        if wp.abs(direction) < wp.float32(RAY_EPS):
+            if origin < -extent or origin > extent:
+                return wp.float32(NO_HIT_RAY_VAL)
+            continue
+
+        inv_direction = wp.float32(1.0) / direction
+        t1 = (-extent - origin) * inv_direction
+        t2 = (extent - origin) * inv_direction
+        t_near = wp.min(t1, t2)
+        t_far = wp.max(t1, t2)
+        t_min = wp.max(t_min, t_near)
+        t_max = wp.min(t_max, t_far)
+        if t_max < t_min:
+            return wp.float32(NO_HIT_RAY_VAL)
+
+    if t_max < wp.float32(0.0):
+        return wp.float32(NO_HIT_RAY_VAL)
+    if t_min >= wp.float32(0.0):
+        return t_min
+    return t_max
 
 
 class DepthCameraWarpKernels:
@@ -117,9 +157,13 @@ class DepthCameraWarpKernels:
         terrain_id: wp.uint64,
         # --- robot bodies: canonical meshes (one per body, shared across envs) ---
         robot_ids: wp.array(dtype=wp.uint64),            # [num_bodies]
+        primitive_active: wp.array(dtype=wp.int32, ndim=2),     # [num_envs, num_primitive_bodies]
+        primitive_half_extents: wp.array(dtype=wp.vec3, ndim=2),  # [num_envs, num_primitive_bodies]
         # --- per-env body poses in world ---
         body_poss: wp.array(dtype=wp.vec3, ndim=2),      # [num_envs, num_bodies]
         body_quats: wp.array(dtype=wp.quat,  ndim=2),    # [num_envs, num_bodies]
+        primitive_poss: wp.array(dtype=wp.vec3, ndim=2),   # [num_envs, num_primitive_bodies]
+        primitive_quats: wp.array(dtype=wp.quat, ndim=2),  # [num_envs, num_primitive_bodies]
         # --- cameras ---
         cam_poss: wp.array(dtype=wp.vec3, ndim=2),       # [num_envs, num_cams]
         cam_quats: wp.array(dtype=wp.quat,  ndim=2),     # [num_envs, num_cams]
@@ -130,6 +174,7 @@ class DepthCameraWarpKernels:
         c_y: int,
         calculate_depth: bool,
         num_bodies: int,
+        num_primitive_bodies: int,
     ):
         env_id, cam_id, x, y = wp.tid()
 
@@ -175,6 +220,24 @@ class DepthCameraWarpKernels:
 
             if wp.mesh_query_ray(robot_ids[b], ro_l, rd_l, far_bound_world / mul, t, u, v, sign, n, f):
                 d = mul * t
+                if (best == NO_HIT_RAY_VAL) or (d < best):
+                    best = d
+                    far_bound_world = best
+
+        # ---------- 2) analytic primitive boxes (per-env pose + half extents) ----------
+        for b in range(num_primitive_bodies):
+            if primitive_active[env_id, b] == 0:
+                continue
+
+            qb = primitive_quats[env_id, b]
+            tb = primitive_poss[env_id, b]
+            half_extents = primitive_half_extents[env_id, b]
+
+            ro_l = wp.quat_rotate_inv(qb, ro - tb)
+            rd_l = wp.quat_rotate_inv(qb, rd)
+            t_box = _intersect_axis_aligned_box(ro_l, rd_l, half_extents, far_bound_world / mul)
+            if t_box != wp.float32(NO_HIT_RAY_VAL):
+                d = mul * t_box
                 if (best == NO_HIT_RAY_VAL) or (d < best):
                     best = d
                     far_bound_world = best

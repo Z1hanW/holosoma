@@ -290,8 +290,12 @@ class CameraSensor(BaseSensor):
                     inputs=[
                         self.terrain_mesh_id,
                         self.robot_mesh_ids,
+                        self.primitive_body_active,
+                        self.primitive_body_half_extents,
                         self.ray_cast_body_poses,
                         self.ray_cast_body_quats,
+                        self.primitive_body_poses,
+                        self.primitive_body_quats,
                         self.camera_position_array,
                         self.camera_orientation_array,
                         self.K_inv,
@@ -301,6 +305,7 @@ class CameraSensor(BaseSensor):
                         self.c_y,
                         self.calculate_depth,
                         self.num_robot_bodies,
+                        len(self.primitive_bodies),
                     ],
                     device=self.device,
                 )

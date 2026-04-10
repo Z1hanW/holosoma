@@ -320,6 +320,29 @@ CAMERA_NEAR=${CAMERA_NEAR:-}
 CAMERA_FAR=${CAMERA_FAR:-}
 CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-}
 PERCEPTION_WARP_PREPROCESS=${PERCEPTION_WARP_PREPROCESS:-}
+OBJECT_GEOMETRY_MODE=${OBJECT_GEOMETRY_MODE:-}
+OBJECT_GEOMETRY_MODE_NORM=""
+HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE=""
+PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE=""
+
+if [[ -n "${OBJECT_GEOMETRY_MODE}" ]]; then
+  case "$(echo "${OBJECT_GEOMETRY_MODE}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on|primitive|primitives|box|cuboid)
+      OBJECT_GEOMETRY_MODE_NORM="primitive"
+      HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE="primitive"
+      PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="primitive"
+      ;;
+    0|false|no|off|mesh|urdf|disable|disabled)
+      OBJECT_GEOMETRY_MODE_NORM="mesh"
+      HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE="urdf"
+      PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="mesh"
+      ;;
+    *)
+      echo "[ERROR] OBJECT_GEOMETRY_MODE must be one of: on/off/primitive/mesh. Got: ${OBJECT_GEOMETRY_MODE}" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 if [[ "${TEACHER_ACTION_MIX_RATIO_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_START_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_END_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_END_ITERATION_EXPLICIT}" -eq 0 ]]; then
   TEACHER_ACTION_MIX_RATIO="0.0"
@@ -447,6 +470,11 @@ if [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH}" ]]; then
 fi
 echo "[INFO] run_name=${RUN_NAME} training_name=${TRAINING_NAME}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
+if [[ -n "${OBJECT_GEOMETRY_MODE_NORM}" ]]; then
+  echo "[INFO] object_geometry_mode=${OBJECT_GEOMETRY_MODE_NORM} simulator_object_spawn_mode=${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}"
+else
+  echo "[INFO] object_geometry_mode=<default>"
+fi
 echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} num_envs=${NUM_ENVS}"
 echo "[INFO] data_mode=${DATA_MODE}"
 if [[ -n "${MOTION_DIR:-}" ]]; then
@@ -498,6 +526,9 @@ fi
 if [[ "${PERCEPTION_WARP_PREPROCESS_EXPLICIT}" -eq 1 ]]; then
   PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-warp-preprocess="${PERCEPTION_WARP_PREPROCESS}")
 fi
+if [[ -n "${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}" ]]; then
+  PERCEPTION_OVERRIDE_ARGS+=(--perception.object-geometry-mode="${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}")
+fi
 
 TEACHER_PERCEPTION_ARGS=(
   --algo.config.distill.teacher-perception-preset="${TEACHER_PERCEPTION_PRESET}"
@@ -515,6 +546,11 @@ if [[ -n "${CRITIC_PERCEPTION_OBS_KEY}" ]]; then
   CRITIC_PERCEPTION_ARGS+=(
     --algo.config.distill.critic-perception-obs-key="${CRITIC_PERCEPTION_OBS_KEY}"
   )
+fi
+
+OBJECT_GEOMETRY_MODE_ENV=()
+if [[ -n "${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}" ]]; then
+  OBJECT_GEOMETRY_MODE_ENV=(HOLOSOMA_OBJECT_SPAWN_MODE="${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}")
 fi
 
 exec env \
@@ -548,6 +584,7 @@ exec env \
   VISER_DISTILL_MINIMAL_UI="${VISER_DISTILL_MINIMAL_UI}" \
   VISER_SHOW_TARGET_KEYPOINTS="${VISER_SHOW_TARGET_KEYPOINTS}" \
   PAIR_TERRAIN_WITH_MOTION="${PAIR_TERRAIN_WITH_MOTION}" \
+  "${OBJECT_GEOMETRY_MODE_ENV[@]}" \
   bash "${SCRIPT_DIR}/distill_root_box.sh" "${TEACHER_CHECKPOINT}" \
     "perception:${PERCEPTION_PRESET}" \
     --algo.config.module-dict.actor.input-dim "${STUDENT_ACTOR_INPUTS}" \
