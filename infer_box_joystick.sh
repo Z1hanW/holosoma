@@ -379,6 +379,7 @@ START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-1.0}
 FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
 RESET_NOISE_SCALE=${RESET_NOISE_SCALE:-0.0}
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-268435456}
+FORCE_SINGLE_FRAME_HISTORY=${FORCE_SINGLE_FRAME_HISTORY:-0}
 
 DISABLE_RANDOMIZATION=${DISABLE_RANDOMIZATION:-True}
 MAX_EPISODE_LENGTH_S=${MAX_EPISODE_LENGTH_S:-1000000}
@@ -495,9 +496,6 @@ cmd+=(
   --command.setup_terms.motion_command.params.motion_config.start_at_timestep_zero_prob "${START_AT_TIMESTEP_ZERO_PROB}"
   --command.setup_terms.motion_command.params.motion_config.freeze_at_timestep_zero_prob "${FREEZE_AT_TIMESTEP_ZERO_PROB}"
   --command.setup_terms.motion_command.params.motion_config.noise_to_initial_pose.overall_noise_scale "${RESET_NOISE_SCALE}"
-  # Joystick inference should stay single-frame even if training defaults use longer history.
-  --observation_overrides.disable_actor_history True
-  --observation_overrides.disable_critic_history True
   --algo.config.distill.bc_loss_coef 0.0
   --algo.config.distill.loss_coef 0.0
   --algo.config.distill.switch_to_rl_after -1
@@ -509,6 +507,21 @@ cmd+=(
   --algo.config.distill.ppo_start_epoch -1
   --algo.config.distill.dagger_end_epoch -1
 )
+
+case "$(echo "${FORCE_SINGLE_FRAME_HISTORY}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    cmd+=(
+      --observation_overrides.disable_actor_history True
+      --observation_overrides.disable_critic_history True
+    )
+    ;;
+  0|false|no|off|"")
+    ;;
+  *)
+    echo "[ERROR] FORCE_SINGLE_FRAME_HISTORY must be one of: 0/1/true/false/yes/no/on/off. Got: ${FORCE_SINGLE_FRAME_HISTORY}" >&2
+    exit 2
+    ;;
+esac
 
 if [[ "${SIMULATOR_SUBCOMMAND}" != "simulator:mujoco" ]]; then
   cmd+=(--simulator.config.sim.physx.gpu_collision_stack_size "${PHYSX_GPU_COLLISION_STACK_SIZE}")

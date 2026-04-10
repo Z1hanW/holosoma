@@ -684,8 +684,8 @@ def _transform_mesh_vertices_between_usd_frames(vertices: np.ndarray, source_wor
     src = np.asarray(vertices, dtype=np.float64)
     dst = np.zeros_like(src)
     for idx, vertex in enumerate(src):
-        world_point = source_world_tf.TransformAffined(Gf.Vec3d(float(vertex[0]), float(vertex[1]), float(vertex[2])))
-        local_point = target_inv_world_tf.TransformAffined(world_point)
+        world_point = source_world_tf.TransformAffine(Gf.Vec3d(float(vertex[0]), float(vertex[1]), float(vertex[2])))
+        local_point = target_inv_world_tf.TransformAffine(world_point)
         dst[idx, 0] = float(local_point[0])
         dst[idx, 1] = float(local_point[1])
         dst[idx, 2] = float(local_point[2])

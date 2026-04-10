@@ -1359,6 +1359,8 @@ class PerceptionManager:
             if use_mujoco_object_urdf_fallback and isinstance(object_urdf_by_name, dict):
                 candidate_path = object_urdf_by_name.get(object_name)
             if candidate_path is None:
+                candidate_path = self._resolve_simulator_object_asset_path_fallback(simulator, object_name)
+            if candidate_path is None:
                 return None
 
         if candidate_path is None:
@@ -1378,6 +1380,8 @@ class PerceptionManager:
                 if use_mujoco_object_urdf_fallback and isinstance(object_urdf_by_name, dict):
                     candidate_path = object_urdf_by_name.get(object_name)
                 if candidate_path is None:
+                    candidate_path = self._resolve_simulator_object_asset_path_fallback(simulator, object_name)
+                if candidate_path is None:
                     return None
             else:
                 cfg = getattr(rigid_object, "cfg", None)
@@ -1390,6 +1394,8 @@ class PerceptionManager:
                     if attr_val:
                         candidate_path = str(attr_val)
                         break
+                if candidate_path is None:
+                    candidate_path = self._resolve_simulator_object_asset_path_fallback(simulator, object_name)
         if candidate_path is None:
             return None
 
@@ -1407,6 +1413,39 @@ class PerceptionManager:
         if mesh_path and os.path.exists(mesh_path):
             self._registered_object_mesh_cache[object_name] = mesh_path
             return mesh_path
+        return None
+
+    def _resolve_simulator_object_asset_path_fallback(self, simulator: Any, object_name: str) -> str | None:
+        """Best-effort fallback for simulators that keep object assets outside the scene spawn cfg."""
+        if simulator is None:
+            return None
+
+        object_urdf_by_name = getattr(simulator, "_object_urdf_by_name", None)
+        if isinstance(object_urdf_by_name, dict):
+            candidate_path = str(object_urdf_by_name.get(object_name, "") or "").strip()
+            if candidate_path:
+                return candidate_path
+
+        env_object_urdf_paths = getattr(simulator, "_env_object_urdf_paths", None)
+        if not isinstance(env_object_urdf_paths, list):
+            return None
+
+        unique_candidates: list[str] = []
+        seen: set[str] = set()
+        for raw_path in env_object_urdf_paths:
+            candidate_path = str(raw_path or "").strip()
+            if not candidate_path:
+                continue
+            normalized_path = str(Path(resolve_data_file_path(candidate_path)).resolve())
+            if normalized_path in seen:
+                continue
+            seen.add(normalized_path)
+            unique_candidates.append(normalized_path)
+
+        if not unique_candidates:
+            return None
+        if len(unique_candidates) == 1 or self.num_envs == 1:
+            return unique_candidates[0]
         return None
 
     def _export_combined_urdf_visual_mesh(self, urdf_path: str, object_name: str) -> str | None:
