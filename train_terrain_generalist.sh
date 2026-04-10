@@ -142,6 +142,7 @@ BAD_TRACKING_REF_ORI_THRESHOLD=${BAD_TRACKING_REF_ORI_THRESHOLD:-1.2}
 BAD_TRACKING_BODY_POS_THRESHOLD=${BAD_TRACKING_BODY_POS_THRESHOLD:-0.55}
 ALLOW_TERRAIN_SLOT_OVERLAP=${ALLOW_TERRAIN_SLOT_OVERLAP:-0}
 DRY_RUN=${DRY_RUN:-0}
+USE_TORCHRUN=${USE_TORCHRUN:-auto}
 
 HEADLESS=${HEADLESS:-True}
 ENABLE_VISER=${ENABLE_VISER:-0}
@@ -221,6 +222,33 @@ is_true() {
       ;;
   esac
 }
+
+normalize_bool_true_false() {
+  case "${1:-}" in
+    1|true|True|TRUE|yes|Yes|YES|on|On|ON)
+      echo "True"
+      return 0
+      ;;
+    0|false|False|FALSE|no|No|NO|off|Off|OFF)
+      echo "False"
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+HEADLESS_BOOL=""
+if ! HEADLESS_BOOL="$(normalize_bool_true_false "${HEADLESS}")"; then
+  echo "[ERROR] HEADLESS must be one of: 0/1/True/False/yes/no/on/off. Got: ${HEADLESS}" >&2
+  exit 1
+fi
+if [[ "${HEADLESS_BOOL}" == "True" ]]; then
+  HEADLESS_ENV_INT=1
+else
+  HEADLESS_ENV_INT=0
+fi
 
 normalize_extra_cli_args() {
   local -a input_args=("$@")
@@ -708,7 +736,7 @@ cmd=(
   --training.project="${WANDB_PROJECT}"
   --training.name="${TRAINING_NAME}"
   --training.num_envs="${NUM_ENVS}"
-  --training.headless="${HEADLESS}"
+  --training.headless="${HEADLESS_BOOL}"
   --simulator.config.scene.env_spacing=0.0
   --simulator.config.sim.physx.gpu_max_rigid_contact_count="${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT}"
   --simulator.config.sim.physx.gpu_max_rigid_patch_count="${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}"
@@ -773,5 +801,14 @@ fi
 export HOLOSOMA_EXPORT_ONNX_DURING_TRAIN
 export HOLOSOMA_EXPORT_ONNX_AT_END
 export HOLOSOMA_WANDB_SAVE_FILES
+# IsaacLab AppLauncher reads HEADLESS from environment and expects 0/1.
+export HEADLESS="${HEADLESS_ENV_INT}"
 
-"${cmd[@]}"
+if [[ "${NPROC}" == "1" && "${USE_TORCHRUN}" != "1" && "${USE_TORCHRUN}" != "true" && "${USE_TORCHRUN}" != "True" ]]; then
+  echo "[INFO] NPROC=1: launching without torchrun for clearer single-process errors."
+  unset WORLD_SIZE RANK LOCAL_RANK LOCAL_WORLD_SIZE MASTER_ADDR MASTER_PORT
+  single_cmd=("${PYTHON_BIN}" "${cmd[@]:3}")
+  "${single_cmd[@]}"
+else
+  "${cmd[@]}"
+fi
