@@ -169,8 +169,8 @@ class BaseTask:
         self._isaac_scandots_warned = False
         self._isaac_scandots_payload: dict[str, object] | None = None
 
-        # Initialize remaining managers. Some observation terms read action
-        # metadata during construction, so action manager must exist first.
+        # Initialize remaining managers
+        # Some observation terms (e.g. action-history encoders) need action_manager during init.
         self.action_manager = ActionManager(action_config, self, self.device)
         self.observation_manager = ObservationManager(observation_config, self, self.device)
         self.reward_manager = RewardManager(reward_config, self, self.device)

@@ -2218,8 +2218,17 @@ class MotionCommand(CommandTermBase):
             return
 
         debug_tile_layout = os.environ.get("HOLOSOMA_DEBUG_TILE_LAYOUT", "0").lower() in ("1", "true", "yes", "on")
+        auto_eval_tile_layout = (
+            self._env.is_evaluating
+            and self.multi_clip
+            and self._fixed_clip_ids is None
+            and self.motion_cfg.pair_terrain_with_motion
+            and self._terrain_row_ids is not None
+            and self._terrain_row_count > 0
+            and self.motion.num_clips > 0
+        )
         use_fixed_tile_layout = (
-            debug_tile_layout
+            (debug_tile_layout or auto_eval_tile_layout)
             and self.multi_clip
             and self._fixed_clip_ids is None
             and self.motion_cfg.pair_terrain_with_motion

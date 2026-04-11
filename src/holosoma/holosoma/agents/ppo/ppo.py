@@ -158,6 +158,7 @@ class PPO(BaseAlgo):
 
         # Observation related Config
         self.use_symmetry = self.config.use_symmetry
+        self._init_obs_keys()
         self._init_obs_slices()
         self._setup_obs_normalizers()
         self.distill_enabled = False

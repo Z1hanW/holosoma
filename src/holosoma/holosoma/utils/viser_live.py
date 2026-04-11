@@ -4636,7 +4636,6 @@ class ViserLiveViewer:
                 colors=np.tile(SIM_ROBOT_POINTS_COLOR, (pts.shape[0], 1)),
                 point_size=0.02,
                 point_shape="circle",
-                precision="float32",
             )
             if env_id == self._env_id:
                 self._robot_points_handle = handle
@@ -4683,7 +4682,6 @@ class ViserLiveViewer:
                 colors=np.tile(SIM_OBJECT_POINTS_COLOR, (1, 1)),
                 point_size=0.045,
                 point_shape="circle",
-                precision="float32",
             )
             if env_id == self._env_id:
                 self._object_points_handle = handle
@@ -5493,7 +5491,6 @@ class ViserLiveViewer:
                 colors=colors.astype(np.uint8, copy=False),
                 point_size=float(self._target_keypoints_point_size),
                 point_shape="circle",
-                precision="float32",
             )
         else:
             try:
@@ -5697,7 +5694,6 @@ class ViserLiveViewer:
                 colors=np.array([color], dtype=np.uint8),
                 point_size=max(0.005, radius * 2.0),
                 point_shape="circle",
-                precision="float32",
             )
             return handle, True
         handle = self._server.scene.add_mesh_trimesh(

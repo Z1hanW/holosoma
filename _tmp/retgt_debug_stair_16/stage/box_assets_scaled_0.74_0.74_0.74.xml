@@ -1,0 +1,21 @@
+<mujocoinclude>
+    <mesh name="piece_part_000" file="/home/ubuntu/FAR/holosoma/_tmp/retgt_debug_stair_16/stage/pieces/part_000.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <mesh name="piece_part_001" file="/home/ubuntu/FAR/holosoma/_tmp/retgt_debug_stair_16/stage/pieces/part_001.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <mesh name="piece_part_002" file="/home/ubuntu/FAR/holosoma/_tmp/retgt_debug_stair_16/stage/pieces/part_002.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <mesh name="piece_part_003" file="/home/ubuntu/FAR/holosoma/_tmp/retgt_debug_stair_16/stage/pieces/part_003.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <mesh name="piece_part_004" file="/home/ubuntu/FAR/holosoma/_tmp/retgt_debug_stair_16/stage/pieces/part_004.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <mesh name="piece_part_005" file="/home/ubuntu/FAR/holosoma/_tmp/retgt_debug_stair_16/stage/pieces/part_005.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <mesh name="piece_part_006" file="/home/ubuntu/FAR/holosoma/_tmp/retgt_debug_stair_16/stage/pieces/part_006.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <mesh name="piece_part_007" file="/home/ubuntu/FAR/holosoma/_tmp/retgt_debug_stair_16/stage/pieces/part_007.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <mesh name="piece_part_008" file="/home/ubuntu/FAR/holosoma/_tmp/retgt_debug_stair_16/stage/pieces/part_008.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <mesh name="piece_part_009" file="/home/ubuntu/FAR/holosoma/_tmp/retgt_debug_stair_16/stage/pieces/part_009.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <mesh name="piece_part_010" file="/home/ubuntu/FAR/holosoma/_tmp/retgt_debug_stair_16/stage/pieces/part_010.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <mesh name="piece_part_011" file="/home/ubuntu/FAR/holosoma/_tmp/retgt_debug_stair_16/stage/pieces/part_011.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <mesh name="piece_part_012" file="/home/ubuntu/FAR/holosoma/_tmp/retgt_debug_stair_16/stage/pieces/part_012.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <mesh name="piece_part_013" file="/home/ubuntu/FAR/holosoma/_tmp/retgt_debug_stair_16/stage/pieces/part_013.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <mesh name="piece_part_014" file="/home/ubuntu/FAR/holosoma/_tmp/retgt_debug_stair_16/stage/pieces/part_014.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <mesh name="piece_part_015" file="/home/ubuntu/FAR/holosoma/_tmp/retgt_debug_stair_16/stage/pieces/part_015.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <mesh name="piece_part_016" file="/home/ubuntu/FAR/holosoma/_tmp/retgt_debug_stair_16/stage/pieces/part_016.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <mesh name="piece_part_017" file="/home/ubuntu/FAR/holosoma/_tmp/retgt_debug_stair_16/stage/pieces/part_017.obj" scale="0.7415730337078652 0.7415730337078652 0.7415730337078652"/>
+    <material name="scene_piece_material" rgba="0.6 0.6 0.6 1"/>
+</mujocoinclude>

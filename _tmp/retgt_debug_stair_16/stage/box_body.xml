@@ -1,0 +1,56 @@
+<mujocoinclude>
+    <body name="scene_mesh_sqs_piece_1" pos="0 0 0" quat="1 0 0 0">
+        <geom name="scene_mesh_sqs_piece_1_geom" type="mesh" mesh="piece_part_000" pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>
+    </body>
+    <body name="scene_mesh_sqs_piece_2" pos="0 0 0" quat="1 0 0 0">
+        <geom name="scene_mesh_sqs_piece_2_geom" type="mesh" mesh="piece_part_001" pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>
+    </body>
+    <body name="scene_mesh_sqs_piece_3" pos="0 0 0" quat="1 0 0 0">
+        <geom name="scene_mesh_sqs_piece_3_geom" type="mesh" mesh="piece_part_002" pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>
+    </body>
+    <body name="scene_mesh_sqs_piece_4" pos="0 0 0" quat="1 0 0 0">
+        <geom name="scene_mesh_sqs_piece_4_geom" type="mesh" mesh="piece_part_003" pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>
+    </body>
+    <body name="scene_mesh_sqs_piece_5" pos="0 0 0" quat="1 0 0 0">
+        <geom name="scene_mesh_sqs_piece_5_geom" type="mesh" mesh="piece_part_004" pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>
+    </body>
+    <body name="scene_mesh_sqs_piece_6" pos="0 0 0" quat="1 0 0 0">
+        <geom name="scene_mesh_sqs_piece_6_geom" type="mesh" mesh="piece_part_005" pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>
+    </body>
+    <body name="scene_mesh_sqs_piece_7" pos="0 0 0" quat="1 0 0 0">
+        <geom name="scene_mesh_sqs_piece_7_geom" type="mesh" mesh="piece_part_006" pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>
+    </body>
+    <body name="scene_mesh_sqs_piece_8" pos="0 0 0" quat="1 0 0 0">
+        <geom name="scene_mesh_sqs_piece_8_geom" type="mesh" mesh="piece_part_007" pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>
+    </body>
+    <body name="scene_mesh_sqs_piece_9" pos="0 0 0" quat="1 0 0 0">
+        <geom name="scene_mesh_sqs_piece_9_geom" type="mesh" mesh="piece_part_008" pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>
+    </body>
+    <body name="scene_mesh_sqs_piece_10" pos="0 0 0" quat="1 0 0 0">
+        <geom name="scene_mesh_sqs_piece_10_geom" type="mesh" mesh="piece_part_009" pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>
+    </body>
+    <body name="scene_mesh_sqs_piece_11" pos="0 0 0" quat="1 0 0 0">
+        <geom name="scene_mesh_sqs_piece_11_geom" type="mesh" mesh="piece_part_010" pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>
+    </body>
+    <body name="scene_mesh_sqs_piece_12" pos="0 0 0" quat="1 0 0 0">
+        <geom name="scene_mesh_sqs_piece_12_geom" type="mesh" mesh="piece_part_011" pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>
+    </body>
+    <body name="scene_mesh_sqs_piece_13" pos="0 0 0" quat="1 0 0 0">
+        <geom name="scene_mesh_sqs_piece_13_geom" type="mesh" mesh="piece_part_012" pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>
+    </body>
+    <body name="scene_mesh_sqs_piece_14" pos="0 0 0" quat="1 0 0 0">
+        <geom name="scene_mesh_sqs_piece_14_geom" type="mesh" mesh="piece_part_013" pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>
+    </body>
+    <body name="scene_mesh_sqs_piece_15" pos="0 0 0" quat="1 0 0 0">
+        <geom name="scene_mesh_sqs_piece_15_geom" type="mesh" mesh="piece_part_014" pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>
+    </body>
+    <body name="scene_mesh_sqs_piece_16" pos="0 0 0" quat="1 0 0 0">
+        <geom name="scene_mesh_sqs_piece_16_geom" type="mesh" mesh="piece_part_015" pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>
+    </body>
+    <body name="scene_mesh_sqs_piece_17" pos="0 0 0" quat="1 0 0 0">
+        <geom name="scene_mesh_sqs_piece_17_geom" type="mesh" mesh="piece_part_016" pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>
+    </body>
+    <body name="scene_mesh_sqs_piece_18" pos="0 0 0" quat="1 0 0 0">
+        <geom name="scene_mesh_sqs_piece_18_geom" type="mesh" mesh="piece_part_017" pos="0 0 0" quat="1 0 0 0" material="scene_piece_material" contype="1" conaffinity="1"/>
+    </body>
+</mujocoinclude>
