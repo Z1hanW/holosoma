@@ -168,6 +168,10 @@ while [[ $# -gt 0 ]]; do
       DATA_MODE="mix-naive"
       shift
       ;;
+    pure-real|pure-omomo)
+      DATA_MODE="pure-real"
+      shift
+      ;;
     pure-sd|pure-ds)
       DATA_MODE="pure-sd"
       shift
@@ -196,7 +200,7 @@ if [[ $# -gt 0 && "$1" != -* ]]; then
 fi
 
 if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
-  echo "Usage: $0 [default|dag_first] [teacher_checkpoint.pt|wandb_run_url] [run_name] [extra train args...]" >&2
+  echo "Usage: $0 [mix-naive|pure-real|pure-sd] [default|dag_first] [teacher_checkpoint.pt|wandb_run_url] [run_name] [extra train args...]" >&2
   exit 1
 fi
 
@@ -261,17 +265,22 @@ NUM_ENVS=${NUM_ENVS:-${DEFAULT_TOTAL_ENVS}}
 DS_DATA_ROOT=${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}
 DEFAULT_DS_PREPARED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
 DEFAULT_MIX_NAIVE_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
+PURE_REAL_OMOMO_PREFIXES=${PURE_REAL_OMOMO_PREFIXES:-'["sub"]'}
 
 case "${DATA_MODE}" in
   default|mix-naive)
     DATA_MODE="mix-naive"
     MOTION_DIR=${MOTION_DIR:-"${DEFAULT_MIX_NAIVE_MOTION_DIR}"}
     ;;
+  pure-real|pure-omomo)
+    DATA_MODE="pure-real"
+    MOTION_DIR=${MOTION_DIR:-"${DEFAULT_MIX_NAIVE_MOTION_DIR}"}
+    ;;
   pure-sd)
     MOTION_DIR=${MOTION_DIR:-"${DEFAULT_DS_PREPARED_MOTION_DIR}"}
     ;;
   *)
-    echo "[ERROR] Unsupported DATA_MODE='${DATA_MODE}'. Use one of: default, mix-naive, pure-sd" >&2
+    echo "[ERROR] Unsupported DATA_MODE='${DATA_MODE}'. Use one of: default, mix-naive, pure-real, pure-sd" >&2
     exit 2
     ;;
 esac
@@ -480,6 +489,10 @@ echo "[INFO] data_mode=${DATA_MODE}"
 if [[ -n "${MOTION_DIR:-}" ]]; then
   echo "[INFO] motion_dir=${MOTION_DIR}"
 fi
+if [[ "${DATA_MODE}" == "pure-real" ]]; then
+  echo "[INFO] DATA_MODE=pure-real uses the mixed bank but samples only OMOMO clips."
+  echo "[INFO] OMOMO clip prefixes=${PURE_REAL_OMOMO_PREFIXES}"
+fi
 echo "[INFO] schedule_variant=${SCHEDULE_VARIANT}"
 echo "[INFO] schedule_name=${SCHEDULE_NAME}"
 echo "[INFO] schedule_notes=${SCHEDULE_NOTES}"
@@ -505,6 +518,14 @@ fi
 EXTRA_DISTILL_ARGS=()
 if [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH}" ]]; then
   EXTRA_DISTILL_ARGS+=(--observation.groups.actor_obs.history-length="${TEACHER_ACTOR_OBS_HISTORY_LENGTH}")
+fi
+if [[ "${DATA_MODE}" == "pure-real" ]]; then
+  EXTRA_DISTILL_ARGS+=(
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.enabled=True
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.clean-clip-name-prefixes="${PURE_REAL_OMOMO_PREFIXES}"
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.stage-start-iterations='[0]'
+    --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.clean-group-probabilities='[1.0]'
+  )
 fi
 
 PERCEPTION_OVERRIDE_ARGS=()
