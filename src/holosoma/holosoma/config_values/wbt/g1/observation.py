@@ -646,14 +646,6 @@ object_distill_drop_command_terms = {
     ),
 }
 
-object_distill_root_pos_cmd_terms = {
-    "root_position_xy_yaw_command": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:root_position_xy_yaw_command",
-        scale=1.0,
-        noise=0.0,
-    ),
-}
-
 object_command_curriculum_track_terms = {
     "motion_command": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:command_curriculum_motion_command",
@@ -759,20 +751,6 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
             terms=object_distill_proprio_terms,
         ),
     },
-)
-
-_object_distill_root_pos_cmd_groups = dict(g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd.groups)
-_object_distill_root_pos_cmd_groups["actor_obs_root"] = replace(
-    _object_distill_root_pos_cmd_groups["actor_obs_root"],
-    terms=object_distill_root_pos_cmd_terms,
-)
-_object_distill_root_pos_cmd_groups["actor_obs_torso"] = replace(
-    _object_distill_root_pos_cmd_groups["actor_obs_torso"],
-    terms=object_distill_root_pos_cmd_terms,
-)
-
-g1_29dof_wbt_observation_w_object_distill_root_pos_cmd = ObservationManagerCfg(
-    groups=_object_distill_root_pos_cmd_groups,
 )
 
 g1_29dof_wbt_observation_w_object_command_curriculum = ObservationManagerCfg(
@@ -993,7 +971,6 @@ __all__ = [
     "g1_29dof_wbt_observation_w_object",
     "g1_29dof_wbt_observation_w_object_legacy",
     "g1_29dof_wbt_observation_w_object_command_curriculum",
-    "g1_29dof_wbt_observation_w_object_distill_root_pos_cmd",
     "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd",
     "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy",
     "g1_29dof_wbt_observation_videomimic",

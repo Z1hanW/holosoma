@@ -6,7 +6,7 @@ set -euo pipefail
 # Features:
 # - Two branches: mocap | depth
 # - Viser clip selection GUI
-# - Viser manual root-target GUI (root position XY + yaw; converted to distill root-relative command)
+# - Viser manual root-command GUI (root-frame relative dx/dy/dyaw)
 # - Optional hardware joystick via pygame/bridge backend
 #
 # Usage:
@@ -36,6 +36,8 @@ Optional env vars:
   MOTION_DIR              (optional override; default chosen by INFER_DATASET)
   OBJECT_URDF             (optional override; default chosen by INFER_DATASET)
   OBJECT_SCALE            (optional; scalar or x,y,z spawn scale for current object URDF)
+  OBJECT_GEOMETRY_MODE    (optional; `on`/`primitive` forces cuboid primitive path,
+                           `off`/`mesh` forces legacy URDF/mesh path)
   GEOMETRY_DIR            (optional; OBJ file/dir for terrain visualization)
   PAIR_TERRAIN_WITH_MOTION (default: False)
   NUM_ENVS                (default: 1)
@@ -47,6 +49,7 @@ Optional env vars:
   WANDB_MODEL_FILE        (default varies by mode; used when checkpoint is a wandb run URL)
   MOCAP_PERCEPTION_PRESET (default: checkpoint; checkpoint|none|heightmap)
   DEPTH_PERCEPTION_PRESET (default: checkpoint; checkpoint|d435i)
+  DRY_RUN                 (default: 0; set 1/true to print the command without launching)
 
 Hardware joystick (optional):
   VISER_MANUAL_USE_HW_JOYSTICK=1
@@ -273,6 +276,254 @@ find_latest_ckpt() {
   echo "${latest_ckpt}"
 }
 
+is_truthy() {
+  local raw="${1:-}"
+  case "$(echo "${raw}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+load_checkpoint_saved_motion_defaults() {
+  local checkpoint_ref="$1"
+  "$PYTHON_BIN" - "${checkpoint_ref}" "${SCRIPT_DIR}" <<'PY' 2>/dev/null || true
+import json
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+repo_root = Path.cwd().resolve()
+sanitized_sys_path: list[str] = []
+for path_entry in sys.path:
+    if path_entry in {"", "."}:
+        continue
+    try:
+        if Path(path_entry).resolve() == repo_root:
+            continue
+    except Exception:
+        pass
+    sanitized_sys_path.append(path_entry)
+sys.path = sanitized_sys_path
+
+try:
+    import torch
+    from holosoma.utils.eval_utils import load_checkpoint
+except Exception:
+    print(json.dumps({}))
+    sys.exit(0)
+
+checkpoint_ref = sys.argv[1]
+script_dir = Path(sys.argv[2]).resolve()
+retarget_root = script_dir / "src" / "holosoma_retargeting"
+holosoma_root = script_dir / "src" / "holosoma"
+
+
+def resolve_saved_path(raw_path: str | None) -> str | None:
+    if not raw_path:
+        return None
+
+    original = Path(raw_path).expanduser()
+    candidates: list[Path] = [original]
+
+    alias_roots = [
+        (Path("/data/holosoma_moved/src/holosoma_retargeting"), retarget_root),
+        (Path("/home/ubuntu/FAR/holosoma/src/holosoma_retargeting"), retarget_root),
+        (Path("/data/holosoma_moved/src/holosoma"), holosoma_root),
+        (Path("/home/ubuntu/FAR/holosoma/src/holosoma"), holosoma_root),
+    ]
+    for old_root, new_root in alias_roots:
+        try:
+            rel = original.relative_to(old_root)
+        except Exception:
+            continue
+        candidates.append(new_root / rel)
+
+    seen: set[str] = set()
+    deduped: list[Path] = []
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+
+    for candidate in deduped:
+        if candidate.exists():
+            return str(candidate)
+
+    stem_match = re.match(r"^(?P<prefix>.+_)[0-9a-f]{8,}$", original.name)
+    if stem_match:
+        prefix = stem_match.group("prefix")
+        for parent in deduped:
+            parent_dir = parent.parent
+            if not parent_dir.is_dir():
+                continue
+            matches = sorted(p for p in parent_dir.glob(f"{prefix}*") if p.exists())
+            if len(matches) == 1:
+                return str(matches[0])
+
+    return None
+
+
+try:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        checkpoint_path = load_checkpoint(checkpoint_ref, temp_dir)
+        blob = torch.load(checkpoint_path, map_location="cpu")
+except Exception:
+    print(json.dumps({}))
+    sys.exit(0)
+
+experiment_config = blob.get("experiment_config", {})
+motion_cfg = (
+    experiment_config.get("command", {})
+    .get("setup_terms", {})
+    .get("motion_command", {})
+    .get("params", {})
+    .get("motion_config", {})
+)
+robot_cfg = experiment_config.get("robot", {}).get("object", {})
+
+motion_path = motion_cfg.get("motion_dir") or motion_cfg.get("motion_file")
+object_urdf_path = robot_cfg.get("object_urdf_path")
+
+print(
+    json.dumps(
+        {
+            "motion_path": resolve_saved_path(motion_path),
+            "saved_motion_path": motion_path,
+            "object_urdf_path": resolve_saved_path(object_urdf_path),
+            "saved_object_urdf_path": object_urdf_path,
+        }
+    )
+)
+PY
+}
+
+augment_object_map_from_motion_metadata() {
+  local motion_dir="$1"
+  local object_spec_path="$2"
+  "$PYTHON_BIN" - "${motion_dir}" "${object_spec_path}" <<'PY' 2>/dev/null || true
+import hashlib
+import json
+import sys
+import zipfile
+from pathlib import Path
+
+try:
+    import numpy as np
+except Exception:
+    print(sys.argv[2])
+    sys.exit(0)
+
+motion_dir = Path(sys.argv[1]).resolve()
+object_spec_path = Path(sys.argv[2]).resolve()
+if object_spec_path.suffix.lower() != ".json" or not motion_dir.is_dir() or not object_spec_path.is_file():
+    print(str(object_spec_path))
+    sys.exit(0)
+
+try:
+    payload = json.loads(object_spec_path.read_text(encoding="utf-8"))
+except Exception:
+    print(str(object_spec_path))
+    sys.exit(0)
+
+if isinstance(payload, dict) and isinstance(payload.get("clips"), dict):
+    clips = payload["clips"]
+else:
+    clips = payload
+if not isinstance(clips, dict):
+    print(str(object_spec_path))
+    sys.exit(0)
+
+retarget_roots = [
+    motion_dir.parents[2] / "src" / "holosoma_retargeting",
+    Path("/home/ubuntu/FAR/holosoma/src/holosoma_retargeting"),
+]
+
+def scalar_str(value) -> str:
+    arr = np.asarray(value)
+    if arr.size == 0:
+        return ""
+    item = arr.item() if arr.shape == () else arr.reshape(-1)[0]
+    if isinstance(item, (bytes, np.bytes_)):
+        return item.decode("utf-8")
+    return str(item)
+
+def resolve_urdf(raw: str, *, base_dir: Path) -> str:
+    raw = str(raw).strip()
+    if not raw:
+        return ""
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return str(candidate)
+    resolved = (base_dir / raw).resolve()
+    if resolved.exists():
+        return str(resolved)
+    for root in retarget_roots:
+        fallback = (root / raw).resolve()
+        if fallback.exists():
+            return str(fallback)
+    return str(resolved)
+
+changed = False
+normalized_clips: dict[str, dict[str, str]] = {}
+
+for clip_id, entry in clips.items():
+    if not isinstance(clip_id, str):
+        continue
+    if isinstance(entry, str):
+        normalized_clips[clip_id] = {"object_name": "", "object_urdf_path": entry.strip()}
+    elif isinstance(entry, dict):
+        normalized_clips[clip_id] = {
+            "object_name": str(entry.get("object_name", "")).strip(),
+            "object_urdf_path": str(entry.get("object_urdf_path", "")).strip(),
+        }
+    else:
+        normalized_clips[clip_id] = {"object_name": "", "object_urdf_path": ""}
+
+for clip_path in sorted(motion_dir.glob("*.npz")):
+    if not zipfile.is_zipfile(clip_path):
+        continue
+    clip_id = clip_path.stem
+    entry = normalized_clips.get(clip_id, {"object_name": "", "object_urdf_path": ""})
+    try:
+        with np.load(clip_path, allow_pickle=True) as data:
+            object_name = scalar_str(data["object_name"]) if "object_name" in data else ""
+            object_urdf_path = scalar_str(data["object_urdf_path"]) if "object_urdf_path" in data else ""
+    except Exception:
+        continue
+    if object_urdf_path:
+        object_urdf_path = resolve_urdf(object_urdf_path, base_dir=clip_path.parent)
+    if not entry.get("object_name") and object_name:
+        entry["object_name"] = object_name
+        changed = True
+    if not entry.get("object_urdf_path") and object_urdf_path:
+        entry["object_urdf_path"] = object_urdf_path
+        changed = True
+    if clip_id not in normalized_clips and (object_name or object_urdf_path):
+        normalized_clips[clip_id] = entry
+        changed = True
+    else:
+        normalized_clips[clip_id] = entry
+
+if not changed:
+    print(str(object_spec_path))
+    sys.exit(0)
+
+out_dir = Path("/tmp/holosoma_object_maps")
+out_dir.mkdir(parents=True, exist_ok=True)
+digest = hashlib.sha1(f"{motion_dir}|{object_spec_path}".encode("utf-8")).hexdigest()[:12]
+out_path = out_dir / f"{object_spec_path.stem}_{digest}.json"
+out_path.write_text(json.dumps({"clips": normalized_clips}, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+print(str(out_path))
+PY
+}
+
 CKPT=""
 if [[ $# -gt 0 ]]; then
   if [[ "$1" == wandb://* || "$1" == https://wandb.ai/* || "$1" == /* || "$1" == ./* || "$1" == ../* || "$1" == *.pt ]]; then
@@ -317,6 +568,39 @@ if [[ "${CKPT}" != wandb://* ]] && [[ ! -f "${CKPT}" ]]; then
   exit 1
 fi
 
+INFER_DATASET_EXPLICIT=0
+[[ -n "${INFER_DATASET+x}" ]] && INFER_DATASET_EXPLICIT=1
+MOTION_DIR_EXPLICIT=0
+[[ -n "${MOTION_DIR+x}" ]] && MOTION_DIR_EXPLICIT=1
+OBJECT_URDF_EXPLICIT=0
+[[ -n "${OBJECT_URDF+x}" ]] && OBJECT_URDF_EXPLICIT=1
+HETEROGENEOUS_OBJECT_SINGLE_SLOT_DISABLE_EXPLICIT=0
+[[ -n "${HOLOSOMA_DISABLE_HETEROGENEOUS_OBJECT_SINGLE_SLOT+x}" ]] && HETEROGENEOUS_OBJECT_SINGLE_SLOT_DISABLE_EXPLICIT=1
+CHECKPOINT_SAVED_MOTION_PATH=""
+CHECKPOINT_SAVED_OBJECT_URDF=""
+
+if [[ "${MOTION_DIR_EXPLICIT}" -eq 0 || "${OBJECT_URDF_EXPLICIT}" -eq 0 ]]; then
+  CHECKPOINT_DEFAULTS_JSON="$(load_checkpoint_saved_motion_defaults "${CKPT}")"
+  if [[ -n "${CHECKPOINT_DEFAULTS_JSON}" && "${CHECKPOINT_DEFAULTS_JSON}" != "{}" ]]; then
+    while IFS='=' read -r key value; do
+      case "${key}" in
+        motion_path) CHECKPOINT_SAVED_MOTION_PATH="${value}" ;;
+        object_urdf_path) CHECKPOINT_SAVED_OBJECT_URDF="${value}" ;;
+      esac
+    done < <(
+      CHECKPOINT_DEFAULTS_JSON="${CHECKPOINT_DEFAULTS_JSON}" "$PYTHON_BIN" - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["CHECKPOINT_DEFAULTS_JSON"])
+for key in ("motion_path", "object_urdf_path"):
+    value = payload.get(key) or ""
+    print(f"{key}={value}")
+PY
+    )
+  fi
+fi
+
 INFER_DATASET_DEFAULT="omomo"
 INFER_DATASET=${INFER_DATASET:-${INFER_DATASET_DEFAULT}}
 INFER_DATASET=$(echo "${INFER_DATASET}" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
@@ -335,6 +619,13 @@ DEFAULT_OMOMO_URDF="${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/wh
 DEFAULT_BEHAVE_MAP_FILE="${DEFAULT_BEHAVE_MOTION_DIR}/_clip_object_urdf_map.json"
 DEFAULT_MIXED_MAP_FILE="${DEFAULT_MIXED_MOTION_DIR}/_clip_object_urdf_map.json"
 
+if [[ "${MOTION_DIR_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_MOTION_PATH}" && "${INFER_DATASET_EXPLICIT}" -eq 0 ]]; then
+  MOTION_DIR="${CHECKPOINT_SAVED_MOTION_PATH}"
+fi
+if [[ "${OBJECT_URDF_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_OBJECT_URDF}" && "${INFER_DATASET_EXPLICIT}" -eq 0 ]]; then
+  OBJECT_URDF="${CHECKPOINT_SAVED_OBJECT_URDF}"
+fi
+
 if [[ -z "${MOTION_DIR+x}" ]]; then
   case "${INFER_DATASET}" in
     omomo) MOTION_DIR="${DEFAULT_OMOMO_MOTION_DIR}" ;;
@@ -348,6 +639,14 @@ if [[ -z "${OBJECT_URDF+x}" ]]; then
     behave) OBJECT_URDF="${DEFAULT_BEHAVE_MAP_FILE}" ;;
     mixed) OBJECT_URDF="${DEFAULT_MIXED_MAP_FILE}" ;;
   esac
+fi
+
+AUGMENTED_OBJECT_URDF_PATH=""
+if [[ "${OBJECT_URDF_EXPLICIT}" -eq 0 ]]; then
+  AUGMENTED_OBJECT_URDF_PATH="$(augment_object_map_from_motion_metadata "${MOTION_DIR}" "${OBJECT_URDF}")"
+  if [[ -n "${AUGMENTED_OBJECT_URDF_PATH}" ]]; then
+    OBJECT_URDF="${AUGMENTED_OBJECT_URDF_PATH}"
+  fi
 fi
 
 GEOMETRY_DIR=${GEOMETRY_DIR:-}
@@ -391,6 +690,30 @@ CAMERA_FAR=${CAMERA_FAR:-3.0}
 CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-3.0}
 MOCAP_PERCEPTION_PRESET=${MOCAP_PERCEPTION_PRESET:-checkpoint}
 DEPTH_PERCEPTION_PRESET=${DEPTH_PERCEPTION_PRESET:-checkpoint}
+OBJECT_GEOMETRY_MODE_RAW=${OBJECT_GEOMETRY_MODE:-}
+OBJECT_GEOMETRY_MODE=""
+HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE=""
+PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE=""
+DRY_RUN_RAW=${DRY_RUN:-0}
+
+if [[ -n "${OBJECT_GEOMETRY_MODE_RAW}" ]]; then
+  case "$(echo "${OBJECT_GEOMETRY_MODE_RAW}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on|primitive|primitives|box|cuboid)
+      OBJECT_GEOMETRY_MODE="primitive"
+      HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE="primitive"
+      PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="primitive"
+      ;;
+    0|false|no|off|mesh|urdf|disable|disabled)
+      OBJECT_GEOMETRY_MODE="mesh"
+      HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE="urdf"
+      PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="mesh"
+      ;;
+    *)
+      echo "[ERROR] OBJECT_GEOMETRY_MODE must be one of: on/off/primitive/mesh. Got: ${OBJECT_GEOMETRY_MODE_RAW}" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 if [[ ! -e "${MOTION_DIR}" ]]; then
   echo "[ERROR] MOTION_DIR not found: ${MOTION_DIR}" >&2
@@ -431,6 +754,16 @@ if [[ -n "${OBJECT_SCALE+x}" && -n "${OBJECT_SCALE}" ]]; then
   OBJECT_SCALE_ARG="$(normalize_object_scale "${OBJECT_SCALE}")"
 fi
 
+DRY_RUN_NORM=$(echo "${DRY_RUN_RAW}" | tr '[:upper:]' '[:lower:]')
+case "${DRY_RUN_NORM}" in
+  1|true|yes|on) DRY_RUN_FLAG=1 ;;
+  0|false|no|off|"") DRY_RUN_FLAG=0 ;;
+  *)
+    echo "[ERROR] DRY_RUN must be one of: 0/1/true/false/yes/no/on/off. Got: ${DRY_RUN_RAW}" >&2
+    exit 2
+    ;;
+esac
+
 # Viser GUI defaults aligned with VideoMimic-style manual + clip control.
 export VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI:-1}
 export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-1}
@@ -454,6 +787,25 @@ export VISER_MANUAL_HW_TYPE=${VISER_MANUAL_HW_TYPE:-xbox}
 # Keep noisy third-party debug logs off by default.
 export LOGURU_LEVEL=${LOGURU_LEVEL:-WARNING}
 export PY_LOG_LEVEL=${PY_LOG_LEVEL:-WARNING}
+
+AUTO_SWITCH_MULTI_OBJECT_MODE=0
+if is_truthy "${VISER_ENABLE_CLIP_GUI}" && [[ "${NUM_ENVS}" == "1" ]] && [[ "${OBJECT_URDF}" == *.json ]]; then
+  # Single-env clip switching with an object-map needs per-asset simulator objects.
+  # Otherwise env_0 keeps its initial object asset while the selected clip metadata changes.
+  if [[ -z "${OBJECT_GEOMETRY_MODE_RAW}" ]]; then
+    OBJECT_GEOMETRY_MODE="mesh"
+    HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE="urdf"
+    PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="mesh"
+    AUTO_SWITCH_MULTI_OBJECT_MODE=1
+  fi
+  if [[ "${HETEROGENEOUS_OBJECT_SINGLE_SLOT_DISABLE_EXPLICIT}" -eq 0 ]]; then
+    export HOLOSOMA_DISABLE_HETEROGENEOUS_OBJECT_SINGLE_SLOT=1
+    AUTO_SWITCH_MULTI_OBJECT_MODE=1
+  fi
+fi
+if [[ -n "${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}" ]]; then
+  export HOLOSOMA_OBJECT_SPAWN_MODE="${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}"
+fi
 
 SIMULATOR_SUBCOMMAND=""
 EXTRA_ARGS=()
@@ -567,6 +919,10 @@ if [[ "${USE_HW_JOYSTICK_BRIDGE}" == "True" || "${USE_HW_JOYSTICK_BRIDGE}" == "t
   )
 fi
 
+if [[ -n "${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}" ]]; then
+  cmd+=(--perception.object_geometry_mode "${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}")
+fi
+
 if [[ "${MODE}" == "mocap" ]]; then
   case "$(echo "${MOCAP_PERCEPTION_PRESET}" | tr '[:upper:]' '[:lower:]')" in
     checkpoint|auto|"")
@@ -614,11 +970,32 @@ fi
 
 echo "[INFO] mode_input=${MODE_INPUT} runtime_mode=${MODE}"
 echo "[INFO] simulator_subcommand=${SIMULATOR_SUBCOMMAND:-<default>}"
-echo "[INFO] infer_dataset=${INFER_DATASET}"
+if [[ -n "${CHECKPOINT_SAVED_MOTION_PATH}" && "${INFER_DATASET_EXPLICIT}" -eq 0 ]]; then
+  echo "[INFO] infer_dataset=${INFER_DATASET} (checkpoint overrides motion/object defaults)"
+else
+  echo "[INFO] infer_dataset=${INFER_DATASET}"
+fi
 echo "[INFO] checkpoint=${CKPT}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
 echo "[INFO] object_urdf=${OBJECT_URDF}"
 echo "[INFO] forced_obs_history=1 (actor/critic observation groups)"
+if [[ -n "${OBJECT_GEOMETRY_MODE}" ]]; then
+  echo "[INFO] object_geometry_mode=${OBJECT_GEOMETRY_MODE} simulator_object_spawn_mode=${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}"
+else
+  echo "[INFO] object_geometry_mode=<default>"
+fi
+if [[ "${AUTO_SWITCH_MULTI_OBJECT_MODE}" == "1" ]]; then
+  echo "[INFO] auto_enabled_per_clip_object_switching=True heterogeneous_single_slot_disabled=${HOLOSOMA_DISABLE_HETEROGENEOUS_OBJECT_SINGLE_SLOT:-0}"
+fi
+if [[ -n "${CHECKPOINT_SAVED_MOTION_PATH}" ]]; then
+  echo "[INFO] checkpoint_saved_motion_path=${CHECKPOINT_SAVED_MOTION_PATH}"
+fi
+if [[ -n "${CHECKPOINT_SAVED_OBJECT_URDF}" ]]; then
+  echo "[INFO] checkpoint_saved_object_urdf=${CHECKPOINT_SAVED_OBJECT_URDF}"
+fi
+if [[ -n "${AUGMENTED_OBJECT_URDF_PATH}" && "${AUGMENTED_OBJECT_URDF_PATH}" != "${CHECKPOINT_SAVED_OBJECT_URDF}" && "${AUGMENTED_OBJECT_URDF_PATH}" != "${DEFAULT_OMOMO_URDF}" ]]; then
+  echo "[INFO] augmented_object_urdf=${AUGMENTED_OBJECT_URDF_PATH}"
+fi
 if [[ -n "${OBJECT_SCALE_ARG}" ]]; then
   echo "[INFO] object_scale=${OBJECT_SCALE_ARG}"
 fi
@@ -640,8 +1017,8 @@ else
 fi
 echo "[INFO] Viser controls:"
 echo "  1) Open 'Manual Control' and enable 'Enable Manual Root Command'."
-echo "  2) Set 'Target Root X/Y/Yaw' as the desired root position XY and yaw."
-echo "  3) Use 'Sync Root Target To Robot' to copy the current root pose into the target."
+echo "  2) Set 'Root dX/dY/dYaw' as the desired root-frame relative command."
+echo "  3) Use 'Zero Root Command' to reset the relative root command to zero."
 echo "  4) Use 'Advanced > Reset Object' to add box position/rotation offsets for the next reset."
 echo "  5) Use 'Clip Playback' to select clip/start frame and click 'Apply Clip'."
 echo "  6) Use 'Advanced > Simulation Control' for Play/Step/Reset (Reset returns to the default pose)."
@@ -651,6 +1028,13 @@ if command -v hostname >/dev/null 2>&1; then
     echo "[INFO] Remote URL: http://${HOST_IP}:${VISER_PORT}"
     echo "[INFO] SSH tunnel example: ssh -N -L ${VISER_PORT}:localhost:${VISER_PORT} <user>@<host>"
   fi
+fi
+
+if [[ "${DRY_RUN_FLAG}" == "1" ]]; then
+  printf '[DRY_RUN] '
+  printf '%q ' "${cmd[@]}"
+  printf '\n'
+  exit 0
 fi
 
 "${cmd[@]}"

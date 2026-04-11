@@ -4,7 +4,7 @@ set -euo pipefail
 # Distill object-carry generalist -> non-goal student with depth perception access.
 #
 # Student policy observation (actor):
-# - actor_obs_root: root-position command [root_x, root_y, root_yaw]
+# - actor_obs_root: root-frame relative command [dx, dy, dyaw]
 # - actor_obs_proprio (base_lin_vel, base_ang_vel, dof_pos, dof_vel, actions)
 # - perception_obs (camera depth)
 # - No actor box state is used by student actor.
@@ -241,10 +241,10 @@ CAMERA_MAX_DISTANCE_EXPLICIT=0
 PERCEPTION_WARP_PREPROCESS_EXPLICIT=0
 [[ -n "${PERCEPTION_WARP_PREPROCESS+x}" ]] && PERCEPTION_WARP_PREPROCESS_EXPLICIT=1
 
-# Sim2real default: root-position distill without clip_phase in student torso observation.
-EXP=${EXP:-g1-29dof-wbt-w-object-distill-root-pos-cmd}
-RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_perception_root_pos_cmd}
-TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_perception_root_pos_cmd_access_to_depth}
+# Sim2real default: sparse root-relative distill without clip_phase in student torso observation.
+EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd}
+RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_perception_sparse_root_cmd}
+TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_perception_sparse_root_cmd_access_to_depth}
 TRAINING_PROJECT=${TRAINING_PROJECT:-boxer}
 if [[ -n "${POSITIONAL_RUN_NAME}" ]]; then
   RUN_NAME="${POSITIONAL_RUN_NAME}"
@@ -304,8 +304,8 @@ DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-3000}
 PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.3}
 DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
 FIXED_BC_EVAL_LOG_INTERVAL=${FIXED_BC_EVAL_LOG_INTERVAL:-1000}
-SCHEDULE_NAME=${SCHEDULE_NAME:-root_pos_teacher_anchor_v2}
-SCHEDULE_NOTES=${SCHEDULE_NOTES:-"0-700 teacher rollout mix decays 0.7->0.0. PPO starts immediately with target coeff 0.3 while DAgger remains active until iteration 3000. Root-position command replaces the drop-command-specific curricula from distill_box_drop_mixed.sh; other launcher defaults stay aligned."}
+SCHEDULE_NAME=${SCHEDULE_NAME:-sparse_root_teacher_anchor_v2}
+SCHEDULE_NOTES=${SCHEDULE_NOTES:-"0-700 teacher rollout mix decays 0.7->0.0. PPO starts immediately with target coeff 0.3 while DAgger remains active until iteration 3000. Root-frame relative command replaces the drop-command-specific curricula from distill_box_drop_mixed.sh; other launcher defaults stay aligned."}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.2}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
@@ -371,10 +371,10 @@ case "${SCHEDULE_VARIANT}" in
       DAGGER_END_EPOCH=3000
     fi
     if [[ "${SCHEDULE_NAME_EXPLICIT}" -eq 0 ]]; then
-      SCHEDULE_NAME="root_pos_teacher_anchor_v2_dag_first"
+      SCHEDULE_NAME="sparse_root_teacher_anchor_v2_dag_first"
     fi
     if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
-      SCHEDULE_NOTES="0-700 teacher rollout mix decays 0.7->0.0. 0-2000 pure DAgger with PPO disabled. 2000-3000 PPO ramps 0->0.3 while DAgger stays dominant. Root-position command replaces the drop-command-specific curricula from distill_box_drop_mixed.sh; other launcher defaults stay aligned."
+      SCHEDULE_NOTES="0-700 teacher rollout mix decays 0.7->0.0. 0-2000 pure DAgger with PPO disabled. 2000-3000 PPO ramps 0->0.3 while DAgger stays dominant. Root-frame relative command replaces the drop-command-specific curricula from distill_box_drop_mixed.sh; other launcher defaults stay aligned."
     fi
     ;;
   *)

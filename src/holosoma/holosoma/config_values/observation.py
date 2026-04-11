@@ -11,7 +11,6 @@ from holosoma.config_values.wbt.g1.observation import (
     g1_29dof_wbt_observation_videomimic,
     g1_29dof_wbt_observation_w_object_command_curriculum,
     g1_29dof_wbt_observation_w_object_legacy,
-    g1_29dof_wbt_observation_w_object_distill_root_pos_cmd,
     g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
     g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy,
     g1_29dof_wbt_observation_w_object,
@@ -32,7 +31,6 @@ DEFAULTS = {
     "g1_29dof_wbt_w_object": g1_29dof_wbt_observation_w_object,
     "g1_29dof_wbt_w_object_command_curriculum": g1_29dof_wbt_observation_w_object_command_curriculum,
     "g1_29dof_wbt_w_object_legacy": g1_29dof_wbt_observation_w_object_legacy,
-    "g1_29dof_wbt_w_object_distill_root_pos_cmd": g1_29dof_wbt_observation_w_object_distill_root_pos_cmd,
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd": g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_legacy": g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy,
 }
