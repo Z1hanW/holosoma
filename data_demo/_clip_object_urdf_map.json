@@ -1,0 +1,13 @@
+{
+  "clips": {
+    "sub10_largebox_032_mj_w_obj": {
+      "object_urdf_path": "/home/ubuntu/FAR/holosoma/data_demo/objects/objects_largebox.urdf"
+    },
+    "box_35": {
+      "object_urdf_path": "/home/ubuntu/FAR/holosoma/data_demo/objects/box_35.urdf"
+    },
+    "box_11": {
+      "object_urdf_path": "/home/ubuntu/FAR/holosoma/data_demo/objects/box_11.urdf"
+    }
+  }
+}
