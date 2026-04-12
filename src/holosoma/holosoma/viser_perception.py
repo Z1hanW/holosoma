@@ -660,15 +660,25 @@ def replay_perception(cfg: ExperimentConfig) -> None:
         cast_shadow=False,
         receive_shadow=False,
     )
-    camera_frustum = server.scene.add_camera_frustum(
-        "/robot/d435_frustum",
-        fov=float(np.deg2rad(cfg.perception.camera_vfov_deg)),
-        aspect=float(width) / float(height),
-        scale=0.2,
-        line_width=2.5,
-        color=(255, 230, 0),
-        variant="wireframe",
-    )
+    try:
+        camera_frustum = server.scene.add_camera_frustum(
+            "/robot/d435_frustum",
+            fov=float(np.deg2rad(cfg.perception.camera_vfov_deg)),
+            aspect=float(width) / float(height),
+            scale=0.2,
+            line_width=2.5,
+            color=(255, 230, 0),
+            variant="wireframe",
+        )
+    except TypeError:
+        camera_frustum = server.scene.add_camera_frustum(
+            "/robot/d435_frustum",
+            fov=float(np.deg2rad(cfg.perception.camera_vfov_deg)),
+            aspect=float(width) / float(height),
+            scale=0.2,
+            line_width=2.5,
+            color=(255, 230, 0),
+        )
     link_marker_specs = [
         ("pelvis", "pelvis", "pelvis", (255, 80, 80, 255)),
         ("waist_yaw_link", "waist_yaw_link", "waist_yaw_link", (80, 255, 80, 255)),

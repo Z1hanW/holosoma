@@ -443,6 +443,8 @@ export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-0}
 export VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-1}
 export VISER_START_PAUSED=${VISER_START_PAUSED:-0}
 export VISER_LOAD_URDF
+export HOLOSOMA_DISABLE_AUTO_RESET=${HOLOSOMA_DISABLE_AUTO_RESET:-1}
+export HOLOSOMA_DISABLE_CLIP_END_RESET=${HOLOSOMA_DISABLE_CLIP_END_RESET:-1}
 
 if [[ "${TEACHER_CHECKPOINT}" != wandb://* ]] && [[ ! -f "${TEACHER_CHECKPOINT}" ]]; then
   echo "[ERROR] teacher checkpoint not found: ${TEACHER_CHECKPOINT}" >&2
@@ -643,5 +645,6 @@ echo "[INFO] viser=http://localhost:${VISER_PORT}"
 echo "[INFO] viser_sync_to_sim=${VISER_SYNC_TO_SIM} viser_force_dt=${VISER_FORCE_DT}"
 echo "[INFO] viser_load_urdf=${VISER_LOAD_URDF}"
 echo "[INFO] disable_randomization=${DISABLE_RANDOMIZATION}"
+echo "[INFO] disable_auto_reset=${HOLOSOMA_DISABLE_AUTO_RESET} disable_clip_end_reset=${HOLOSOMA_DISABLE_CLIP_END_RESET}"
 
 "${cmd[@]}"

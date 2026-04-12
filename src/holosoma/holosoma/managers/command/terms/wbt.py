@@ -1597,12 +1597,19 @@ class MotionCommand(CommandTermBase):
             "yes",
             "on",
         )
-        self._disable_clip_end_reset = os.environ.get("HOLOSOMA_DISABLE_CLIP_END_RESET", "0").lower() in (
+        disable_clip_end_reset_env = os.environ.get("HOLOSOMA_DISABLE_CLIP_END_RESET", "0").lower() in (
             "1",
             "true",
             "yes",
             "on",
         )
+        disable_auto_reset_env = os.environ.get("HOLOSOMA_DISABLE_AUTO_RESET", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        self._disable_clip_end_reset = bool(disable_clip_end_reset_env or disable_auto_reset_env)
         if self._reset_to_default_pose:
             start_probs = [float(self.motion_cfg.start_at_timestep_zero_prob)]
             if self.motion_cfg.start_at_timestep_zero_prob_end is not None:

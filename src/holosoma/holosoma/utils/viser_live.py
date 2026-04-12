@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 import functools
 import hashlib
+import inspect
 import json
 import math
 import os
@@ -40,6 +41,36 @@ CAMERA_MARKER_COLOR = (0, 255, 255)
 COMMAND_ARROW_COLOR = np.array([255, 165, 0], dtype=np.uint8)
 TARGET_BOX_COLOR = (255, 140, 0)
 SENSOR_MARKER_RADIUS = 0.03
+
+
+def _normalize_viser_image_format(image_format: str, *, faithful_mode: bool = False) -> str:
+    normalized = str(image_format).strip().lower()
+    if normalized == "auto":
+        return "png" if faithful_mode else "jpeg"
+    if normalized in {"jpeg", "png"}:
+        return normalized
+    return "png" if faithful_mode else "jpeg"
+
+
+def _call_viser_method_compat(method: Any, *args, **kwargs) -> Any:
+    normalized_kwargs = dict(kwargs)
+    if "format" in normalized_kwargs:
+        normalized_kwargs["format"] = _normalize_viser_image_format(normalized_kwargs["format"])
+
+    try:
+        signature = inspect.signature(method)
+    except (TypeError, ValueError):
+        signature = None
+
+    if signature is not None:
+        params = signature.parameters
+        accepts_var_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values())
+        if not accepts_var_kwargs:
+            normalized_kwargs = {key: value for key, value in normalized_kwargs.items() if key in params}
+
+    return method(*args, **normalized_kwargs)
+
+
 _VIRIDIS_LUT = np.array(
     [
         (68, 1, 84),
@@ -124,28 +155,38 @@ _VIRIDIS_LUT = np.array(
 class _ViserSceneCompat:
     """Compat adapter for Viser versions that expose scene APIs on the server directly."""
 
-    def __init__(self, server: Any) -> None:
+    def __init__(self, server: Any, scene: Any | None = None) -> None:
         self._server = server
-        self._scene = getattr(server, "scene", None)
+        self._scene = scene
 
     def __getattr__(self, name: str) -> Any:
         if self._scene is not None and hasattr(self._scene, name):
-            return getattr(self._scene, name)
-        return getattr(self._server, name)
+            attr = getattr(self._scene, name)
+        else:
+            attr = getattr(self._server, name)
+
+        if callable(attr) and name.startswith("add_"):
+            @functools.wraps(attr)
+            def _wrapped(*args, **kwargs) -> Any:
+                return _call_viser_method_compat(attr, *args, **kwargs)
+
+            return _wrapped
+
+        return attr
 
 
 class _ViserGuiCompat:
     """Compat adapter for Viser versions that use add_gui_* on the server."""
 
-    def __init__(self, server: Any) -> None:
+    def __init__(self, server: Any, gui: Any | None = None) -> None:
         self._server = server
-        self._gui = getattr(server, "gui", None)
+        self._gui = gui
 
     def add_image(self, *args, **kwargs) -> Any:
         if self._gui is not None and hasattr(self._gui, "add_image"):
-            return self._gui.add_image(*args, **kwargs)
+            return _call_viser_method_compat(self._gui.add_image, *args, **kwargs)
         if hasattr(self._server, "add_gui_image"):
-            return self._server.add_gui_image(*args, **kwargs)
+            return _call_viser_method_compat(self._server.add_gui_image, *args, **kwargs)
 
         image = None
         if args:
@@ -156,9 +197,7 @@ class _ViserGuiCompat:
             raise TypeError("add_image requires an image array")
 
         label = str(kwargs.pop("label", "Perception Image"))
-        image_format = kwargs.pop("format", "jpeg")
-        if image_format not in {"jpeg", "png"}:
-            image_format = "jpeg"
+        image_format = _normalize_viser_image_format(kwargs.pop("format", "jpeg"))
         jpeg_quality = kwargs.pop("jpeg_quality", None)
         visible = bool(kwargs.pop("visible", True))
 
@@ -198,10 +237,13 @@ class _ViserGuiCompat:
 def _ensure_viser_api_compat(server: Any) -> None:
     """Attach scene/gui adapters when running against older Viser APIs."""
 
-    if not hasattr(server, "scene"):
-        server.scene = _ViserSceneCompat(server)  # type: ignore[attr-defined]
-    if not hasattr(server, "gui"):
-        server.gui = _ViserGuiCompat(server)  # type: ignore[attr-defined]
+    raw_scene = getattr(server, "scene", None)
+    if not isinstance(raw_scene, _ViserSceneCompat):
+        server.scene = _ViserSceneCompat(server, raw_scene)  # type: ignore[attr-defined]
+
+    raw_gui = getattr(server, "gui", None)
+    if not isinstance(raw_gui, _ViserGuiCompat):
+        server.gui = _ViserGuiCompat(server, raw_gui)  # type: ignore[attr-defined]
 
 
 def _create_viser_urdf_handle(
@@ -1283,12 +1325,11 @@ class ViserLiveViewer:
             "true",
             "yes",
         )
-        perception_transport_format = os.environ.get("VISER_PERCEPTION_IMAGE_FORMAT", "auto").strip().lower()
-        if perception_transport_format not in ("auto", "png", "jpeg"):
-            perception_transport_format = "auto"
-        if self._faithful_mode and "VISER_PERCEPTION_IMAGE_FORMAT" not in os.environ:
-            perception_transport_format = "png"
-        self._perception_transport_format = perception_transport_format
+        perception_transport_format = os.environ.get("VISER_PERCEPTION_IMAGE_FORMAT", "auto")
+        self._perception_transport_format = _normalize_viser_image_format(
+            perception_transport_format,
+            faithful_mode=self._faithful_mode and "VISER_PERCEPTION_IMAGE_FORMAT" not in os.environ,
+        )
 
         perception_jpeg_quality_raw = os.environ.get("VISER_PERCEPTION_JPEG_QUALITY", "90").strip()
         try:
@@ -3593,15 +3634,15 @@ class ViserLiveViewer:
                 )
                 self._manual_root_pos_x_slider = self._server.gui.add_slider(
                     "Root dX (forward, m)",
-                    min=-5.0,
-                    max=5.0,
+                    min=0.0,
+                    max=0.7,
                     step=0.02,
                     initial_value=0.0,
                 )
                 self._manual_root_pos_y_slider = self._server.gui.add_slider(
                     "Root dY (left, m)",
-                    min=-5.0,
-                    max=5.0,
+                    min=0.0,
+                    max=0.7,
                     step=0.02,
                     initial_value=0.0,
                 )
@@ -5590,19 +5631,29 @@ class ViserLiveViewer:
         goal_pos_w, goal_quat_wxyz, goal_size = target_pose
         dimensions = tuple(float(max(1.0e-3, v)) for v in np.asarray(goal_size, dtype=np.float32).reshape(3))
         if self._target_box_handle is None:
-            self._target_box_handle = self._server.scene.add_box(
-                self._scene_path("/target_box"),
-                color=TARGET_BOX_COLOR,
-                dimensions=dimensions,
-                wireframe=False,
-                opacity=0.25,
-                flat_shading=True,
-                cast_shadow=False,
-                receive_shadow=False,
-                wxyz=goal_quat_wxyz,
-                position=goal_pos_w - offset,
-                visible=True,
-            )
+            try:
+                self._target_box_handle = self._server.scene.add_box(
+                    self._scene_path("/target_box"),
+                    color=TARGET_BOX_COLOR,
+                    dimensions=dimensions,
+                    wireframe=False,
+                    opacity=0.25,
+                    flat_shading=True,
+                    cast_shadow=False,
+                    receive_shadow=False,
+                    wxyz=goal_quat_wxyz,
+                    position=goal_pos_w - offset,
+                    visible=True,
+                )
+            except TypeError:
+                self._target_box_handle = self._server.scene.add_box(
+                    self._scene_path("/target_box"),
+                    color=TARGET_BOX_COLOR,
+                    dimensions=dimensions,
+                    wxyz=goal_quat_wxyz,
+                    position=goal_pos_w - offset,
+                    visible=True,
+                )
             self._target_box_last_dimensions = dimensions
         else:
             if self._target_box_last_dimensions != dimensions:
@@ -5638,12 +5689,19 @@ class ViserLiveViewer:
                 precision="float32",
             )
             return handle, True
-        handle = self._server.scene.add_mesh_trimesh(
-            name,
-            mesh,
-            cast_shadow=False,
-            receive_shadow=False,
-        )
+        try:
+            handle = self._server.scene.add_mesh_trimesh(
+                name,
+                mesh,
+                cast_shadow=False,
+                receive_shadow=False,
+            )
+        except TypeError:
+            # Older viser builds do not support shadow-control kwargs here.
+            handle = self._server.scene.add_mesh_trimesh(
+                name,
+                mesh,
+            )
         return handle, False
 
     def _update_perception_markers(

@@ -824,6 +824,8 @@ export VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-1}
 export VISER_START_PAUSED=${VISER_START_PAUSED:-0}
 export VISER_LOAD_URDF
 export VISER_DEFER_INIT=${VISER_DEFER_INIT:-1}
+export HOLOSOMA_DISABLE_AUTO_RESET=${HOLOSOMA_DISABLE_AUTO_RESET:-1}
+export HOLOSOMA_DISABLE_CLIP_END_RESET=${HOLOSOMA_DISABLE_CLIP_END_RESET:-1}
 export LOGURU_LEVEL=${LOGURU_LEVEL:-WARNING}
 export PY_LOG_LEVEL=${PY_LOG_LEVEL:-WARNING}
 export PYTHONUNBUFFERED=${PYTHONUNBUFFERED:-1}
@@ -1064,6 +1066,7 @@ fi
 echo "[INFO] simulator_subcommand=${SIMULATOR_SUBCOMMAND:-<default>}"
 echo "[INFO] enable_default_pose_prepend=${ENABLE_DEFAULT_POSE_PREPEND} duration_s=${DEFAULT_POSE_PREPEND_DURATION_S}"
 echo "[INFO] disable_randomization=${DISABLE_RANDOMIZATION}"
+echo "[INFO] disable_auto_reset=${HOLOSOMA_DISABLE_AUTO_RESET} disable_clip_end_reset=${HOLOSOMA_DISABLE_CLIP_END_RESET}"
 if command -v hostname >/dev/null 2>&1; then
   HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
   if [[ -n "${HOST_IP}" ]]; then

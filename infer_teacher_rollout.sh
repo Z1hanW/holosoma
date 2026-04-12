@@ -292,6 +292,9 @@ VISER_ENABLE_MANUAL_GOAL_GUI="${VISER_ENABLE_MANUAL_GOAL_GUI:-0}"
 export VISER_ENABLE_CLIP_GUI
 export VISER_ENABLE_MANUAL_GUI
 export VISER_ENABLE_MANUAL_GOAL_GUI
+export VISER_SHOW_TARGET_KEYPOINTS="${VISER_SHOW_TARGET_KEYPOINTS:-0}"
+export HOLOSOMA_DISABLE_AUTO_RESET="${HOLOSOMA_DISABLE_AUTO_RESET:-1}"
+export HOLOSOMA_DISABLE_CLIP_END_RESET="${HOLOSOMA_DISABLE_CLIP_END_RESET:-1}"
 
 is_truthy() {
   case "$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')" in
@@ -423,6 +426,7 @@ echo "[INFO] num_envs=${NUM_ENVS}"
 echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-<unset>}"
 echo "[INFO] holosoma_device=${HOLOSOMA_DEVICE:-<unset>}"
 echo "[INFO] disable_randomization=${DISABLE_RANDOMIZATION}"
+echo "[INFO] disable_auto_reset=${HOLOSOMA_DISABLE_AUTO_RESET} disable_clip_end_reset=${HOLOSOMA_DISABLE_CLIP_END_RESET}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB} freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB} reset_noise_scale=${RESET_NOISE_SCALE}"
 if [[ "${AUTO_DISABLE_SINGLE_SLOT}" == "1" ]]; then
   echo "[INFO] auto_disabled_heterogeneous_single_slot=True"
