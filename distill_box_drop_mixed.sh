@@ -12,6 +12,11 @@ set -euo pipefail
 # - 0..2000 iters: clip/training-distribution only, PPO 0->0.5, DAgger 1->0.5
 # - >=2000 iters: keep 50% envs on training distribution, open command curriculum on the other 50%
 # - within the command curriculum, external goals ramp conservatively so training remains teacher-anchored
+#
+# Schedule variants:
+# - default: mixed PPO+DAgger curriculum
+# - dag_first: hold PPO off early, then ramp it in
+# - pure_dagger: keep PPO coeff at 0.0 for the full training horizon (default 10000 iterations)
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
@@ -207,6 +212,10 @@ while [[ $# -gt 0 ]]; do
       SCHEDULE_VARIANT="default"
       shift
       ;;
+    pure_dagger|pure-dagger|dagger_only|dagger-only)
+      SCHEDULE_VARIANT="pure_dagger"
+      shift
+      ;;
     dag_first|dag-first|dagger-first)
       SCHEDULE_VARIANT="dag_first"
       shift
@@ -287,6 +296,10 @@ if [[ -n "${POSITIONAL_RUN_NAME}" ]]; then
 fi
 TRAINING_NAME_EXPLICIT=0
 [[ -n "${TRAINING_NAME+x}" ]] && TRAINING_NAME_EXPLICIT=1
+NUM_LEARNING_ITERATIONS_EXPLICIT=0
+[[ -n "${NUM_LEARNING_ITERATIONS+x}" ]] && NUM_LEARNING_ITERATIONS_EXPLICIT=1
+PPO_TARGET_COEFF_EXPLICIT=0
+[[ -n "${PPO_TARGET_COEFF+x}" ]] && PPO_TARGET_COEFF_EXPLICIT=1
 
 EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-goal-mixed}
 RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_drop_mixed}
@@ -339,6 +352,7 @@ TEACHER_ACTION_MIX_RATIO_START=${TEACHER_ACTION_MIX_RATIO_START:-}
 TEACHER_ACTION_MIX_RATIO_END=${TEACHER_ACTION_MIX_RATIO_END:-}
 TEACHER_ACTION_MIX_RATIO_END_ITERATION=${TEACHER_ACTION_MIX_RATIO_END_ITERATION:-}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
+PURE_DAGGER_ITERATIONS=${PURE_DAGGER_ITERATIONS:-10000}
 NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-4000}
 PPO_START_EPOCH=${PPO_START_EPOCH:-0}
 DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-3000}
@@ -346,12 +360,13 @@ PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.3}
 DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
 FIXED_BC_EVAL_LOG_INTERVAL=${FIXED_BC_EVAL_LOG_INTERVAL:-1000}
 SCHEDULE_NAME=${SCHEDULE_NAME:-teacher_anchor_then_goal_curriculum_v2}
-SCHEDULE_NOTES=${SCHEDULE_NOTES:-"0-700 teacher rollout mix decays 0.7->0.0. 0-2500 teacher-anchored clip-only; PPO ramps 0->0.3 over 0-3000 while DAgger weight stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.25 and reset curriculum ramps start_at_zero 0.2->1.0 / freeze_at_zero 0.95->0.0. Goal range ramps with the same delayed schedule."}
+SCHEDULE_NOTES=${SCHEDULE_NOTES:-"No teacher rollout mix. 0-2500 teacher-anchored clip-only; PPO ramps 0->0.3 over 0-3000 while DAgger weight stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.25 and reset curriculum ramps start_at_zero 0.2->1.0. Goal range ramps with the same delayed schedule."}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.2}
 START_AT_TIMESTEP_ZERO_PROB_END=${START_AT_TIMESTEP_ZERO_PROB_END:-1.0}
 START_AT_TIMESTEP_ZERO_PROB_START_ITER=${START_AT_TIMESTEP_ZERO_PROB_START_ITER:-2500}
 START_AT_TIMESTEP_ZERO_PROB_END_ITER=${START_AT_TIMESTEP_ZERO_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS}}
-FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.95}
+USE_ADAPTIVE_TIMESTEPS_SAMPLER=${USE_ADAPTIVE_TIMESTEPS_SAMPLER:-True}
+FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
 FREEZE_AT_TIMESTEP_ZERO_PROB_END=${FREEZE_AT_TIMESTEP_ZERO_PROB_END:-0.0}
 FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER:-2500}
 FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS}}
@@ -405,13 +420,35 @@ if [[ "${FREEZE_AT_TIMESTEP_ZERO_PROB_EXPLICIT}" -eq 1 && "${FREEZE_AT_TIMESTEP_
 fi
 if [[ "${TEACHER_ACTION_MIX_RATIO_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_START_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_END_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_END_ITERATION_EXPLICIT}" -eq 0 ]]; then
   TEACHER_ACTION_MIX_RATIO="0.0"
-  TEACHER_ACTION_MIX_RATIO_START="0.7"
-  TEACHER_ACTION_MIX_RATIO_END="0.0"
-  TEACHER_ACTION_MIX_RATIO_END_ITERATION="700"
 fi
 
+PURE_DAGGER_ACTIVE=0
 case "${SCHEDULE_VARIANT}" in
   default)
+    ;;
+  pure_dagger)
+    PURE_DAGGER_ACTIVE=1
+    if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
+      NUM_LEARNING_ITERATIONS="${PURE_DAGGER_ITERATIONS}"
+    fi
+    # Keep the PPO/DAgger schedule active so ppo_coeff stays exactly 0.0
+    # for the whole training horizon. Disabling the schedule entirely would
+    # fall back to ppo_coeff=1.0 in the current PPO implementation.
+    if [[ "${PPO_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
+      PPO_START_EPOCH=$((NUM_LEARNING_ITERATIONS + 1))
+    fi
+    if [[ "${DAGGER_END_EPOCH_EXPLICIT}" -eq 0 ]]; then
+      DAGGER_END_EPOCH=$((NUM_LEARNING_ITERATIONS + 2))
+    fi
+    if [[ "${PPO_TARGET_COEFF_EXPLICIT}" -eq 0 ]]; then
+      PPO_TARGET_COEFF="0.0"
+    fi
+    if [[ "${SCHEDULE_NAME_EXPLICIT}" -eq 0 ]]; then
+      SCHEDULE_NAME="pure_dagger_teacher_anchor_then_goal_curriculum"
+    fi
+    if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
+      SCHEDULE_NOTES="Pure DAgger for the full training horizon. PPO remains disabled by holding ppo_coeff=0.0 throughout training; actor updates are dagger_loss_coef * BC only. Mixed sparse-goal curriculum, command-only ramp, and external-goal ramp remain enabled so data coverage stays aligned with distill_box_drop_mixed.sh."
+    fi
     ;;
   dag_first)
     if [[ "${PPO_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
@@ -424,11 +461,11 @@ case "${SCHEDULE_VARIANT}" in
       SCHEDULE_NAME="teacher_anchor_then_goal_curriculum_v2_dag_first"
     fi
     if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
-      SCHEDULE_NOTES="0-700 teacher rollout mix decays 0.7->0.0. 0-2000 pure DAgger with PPO disabled. 2000-3000 PPO ramps 0->0.3 while DAgger stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.25 and reset curriculum ramps start_at_zero 0.2->1.0 / freeze_at_zero 0.95->0.0. Goal range ramps with the same delayed schedule."
+      SCHEDULE_NOTES="No teacher rollout mix. 0-2000 pure DAgger with PPO disabled. 2000-3000 PPO ramps 0->0.3 while DAgger stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.25 and reset curriculum ramps start_at_zero 0.2->1.0. Goal range ramps with the same delayed schedule."
     fi
     ;;
   *)
-    echo "[ERROR] Unsupported SCHEDULE_VARIANT='${SCHEDULE_VARIANT}'. Use one of: default, dag_first" >&2
+    echo "[ERROR] Unsupported SCHEDULE_VARIANT='${SCHEDULE_VARIANT}'. Use one of: default, pure_dagger, dag_first" >&2
     exit 2
     ;;
 esac
@@ -551,7 +588,7 @@ case "${DISTRIBUTION_VARIANT}" in
       START_AT_TIMESTEP_ZERO_PROB_END="${START_AT_TIMESTEP_ZERO_PROB}"
     fi
     if [[ "${FREEZE_AT_TIMESTEP_ZERO_PROB_EXPLICIT}" -eq 0 ]]; then
-      FREEZE_AT_TIMESTEP_ZERO_PROB="0.95"
+      FREEZE_AT_TIMESTEP_ZERO_PROB="0.0"
     fi
     if [[ "${FREEZE_AT_TIMESTEP_ZERO_PROB_END_EXPLICIT}" -eq 0 ]]; then
       FREEZE_AT_TIMESTEP_ZERO_PROB_END="${FREEZE_AT_TIMESTEP_ZERO_PROB}"
@@ -574,9 +611,9 @@ case "${DISTRIBUTION_VARIANT}" in
     fi
     if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
       if [[ "${SCHEDULE_VARIANT}" == "dag_first" ]]; then
-        SCHEDULE_NOTES="0-700 teacher rollout mix decays 0.7->0.0. 0-2000 pure DAgger with PPO disabled. 2000-3000 PPO ramps 0->0.3 while DAgger stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.5 so half the envs remain on stable clip / motion-tracking distribution while half train external goals. Reset curriculum is frozen at start_at_zero=0.2 and freeze_at_zero=0.95 to preserve copy-style reset distribution."
+        SCHEDULE_NOTES="No teacher rollout mix. 0-2000 pure DAgger with PPO disabled. 2000-3000 PPO ramps 0->0.3 while DAgger stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.5 so half the envs remain on stable clip / motion-tracking distribution while half train external goals. Reset curriculum keeps start_at_zero=0.2 to preserve copy-style reset distribution."
       else
-        SCHEDULE_NOTES="0-700 teacher rollout mix decays 0.7->0.0. 0-2500 teacher-anchored clip-only; PPO ramps 0->0.3 over 0-3000 while DAgger weight stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.5 so half the envs remain on stable clip / motion-tracking distribution while half train external goals. Reset curriculum is frozen at start_at_zero=0.2 and freeze_at_zero=0.95 to preserve copy-style reset distribution."
+        SCHEDULE_NOTES="No teacher rollout mix. 0-2500 teacher-anchored clip-only; PPO ramps 0->0.3 over 0-3000 while DAgger weight stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.5 so half the envs remain on stable clip / motion-tracking distribution while half train external goals. Reset curriculum keeps start_at_zero=0.2 to preserve copy-style reset distribution."
       fi
     fi
     ;;
@@ -954,6 +991,7 @@ fi
 echo "[INFO] student_actor_inputs=${STUDENT_ACTOR_INPUTS}"
 echo "[INFO] schedule_name=${SCHEDULE_NAME}"
 echo "[INFO] schedule_notes=${SCHEDULE_NOTES}"
+echo "[INFO] pure_dagger_active=${PURE_DAGGER_ACTIVE}"
 echo "[INFO] ppo_schedule=${PPO_START_EPOCH}->${DAGGER_END_EPOCH} target=${PPO_TARGET_COEFF} dagger_loss_coef=${DAGGER_LOSS_COEF}"
 echo "[INFO] fixed_bc_eval_log_interval=${FIXED_BC_EVAL_LOG_INTERVAL}"
 echo "[INFO] teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
@@ -968,6 +1006,7 @@ echo "[INFO] external_goal_range_xy_start=${EXTERNAL_GOAL_POS_LOCAL_MIN_START} -
 echo "[INFO] external_goal_range_xy_end=${EXTERNAL_GOAL_POS_LOCAL_MIN} -> ${EXTERNAL_GOAL_POS_LOCAL_MAX}"
 echo "[INFO] external_goal_range_iter=${EXTERNAL_GOAL_RANGE_START_ITER}->${EXTERNAL_GOAL_RANGE_END_ITER}"
 echo "[INFO] clip_goal_delta_steps=${CLIP_GOAL_DELTA_MIN_STEPS}-${CLIP_GOAL_DELTA_MAX_STEPS} (legacy/unused; clip-goal now uses final placement)"
+echo "[INFO] use_adaptive_timesteps_sampler=${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}->${START_AT_TIMESTEP_ZERO_PROB_END} iter=${START_AT_TIMESTEP_ZERO_PROB_START_ITER}->${START_AT_TIMESTEP_ZERO_PROB_END_ITER}"
 echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END} iter=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER}"
 echo "[INFO] reset_to_default_pose=${RESET_TO_DEFAULT_POSE}"
@@ -1123,6 +1162,7 @@ exec env \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-pos-local-max-start "${EXTERNAL_GOAL_POS_LOCAL_MAX_START}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-pos-local-min "${EXTERNAL_GOAL_POS_LOCAL_MIN}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-pos-local-max "${EXTERNAL_GOAL_POS_LOCAL_MAX}" \
+    --command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler="${USE_ADAPTIVE_TIMESTEPS_SAMPLER}" \
     --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-end="${START_AT_TIMESTEP_ZERO_PROB_END}" \
     --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-start-iter="${START_AT_TIMESTEP_ZERO_PROB_START_ITER}" \
     --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-end-iter="${START_AT_TIMESTEP_ZERO_PROB_END_ITER}" \

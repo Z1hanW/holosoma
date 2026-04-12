@@ -1338,6 +1338,7 @@ class ViserLiveViewer:
         self._clip_label = None
         self._clip_names: list[str] = []
         self._pending_clip_idx: int | None = None
+        self._pending_control_sync = False
         self._control_sleep_s = 0.02
         self._pending_clip_start: int | None = None
         self._grid_handle = None
@@ -1761,6 +1762,8 @@ class ViserLiveViewer:
                             return str(sim_object_names[object_id])
                     except Exception:
                         pass
+            if bool(getattr(motion_cmd, "_multi_object_enabled", False)):
+                return None
 
         # Single-object mapping fallback
         object_name = str(getattr(motion_cmd, "object_name", "")).strip()
@@ -1795,6 +1798,8 @@ class ViserLiveViewer:
         return None
 
     def _resolve_object_urdf_for_env(self, env_id: int) -> str | None:
+        motion_cmd = self._get_motion_command()
+        multi_object_enabled = bool(getattr(motion_cmd, "_multi_object_enabled", False)) if motion_cmd else False
         fallback = _resolve_object_urdf_path(self._env.robot_config)
 
         sim = getattr(self._env, "simulator", None)
@@ -1820,6 +1825,8 @@ class ViserLiveViewer:
                 if candidate.exists() and candidate.suffix.lower() == ".urdf":
                     return str(candidate)
 
+        if multi_object_enabled:
+            return None
         return fallback
 
     def _setup_secondary_env_handles(self, viser_urdf_cls: Any, robot_urdf: str) -> None:
@@ -1994,13 +2001,22 @@ class ViserLiveViewer:
             if self._step_requested:
                 self._step_requested = False
                 return
-            if self._reset_requested or self._pending_clip_idx is not None or self._pending_clip_start is not None:
+            if (
+                self._pending_control_sync
+                or self._reset_requested
+                or self._pending_clip_idx is not None
+                or self._pending_clip_start is not None
+            ):
                 self.apply_pending_controls()
             time.sleep(self._control_sleep_s)
+
+    def queue_pending_controls(self) -> None:
+        self._pending_control_sync = True
 
     def apply_pending_controls(self) -> None:
         if not self._enabled:
             return
+        self._pending_control_sync = False
         self._update_manual_root_command()
         self._update_manual_goal_override()
         self._update_manual_object_reset_override()
@@ -2520,7 +2536,7 @@ class ViserLiveViewer:
         )
         self._set_manual_object_reset_override(enabled=True, pos_offset_w=pos_offset_w)
         self._reset_requested = True
-        self.apply_pending_controls()
+        self.queue_pending_controls()
 
     def _update_object_reset_status(self) -> None:
         if self._object_reset_status is None:
@@ -3601,13 +3617,13 @@ class ViserLiveViewer:
                 @self._manual_root_sync_button.on_click
                 def _(_evt) -> None:
                     self._sync_manual_root_command_from_robot()
-                    self.apply_pending_controls()
+                    self.queue_pending_controls()
 
                 @self._manual_control_cb.on_update
                 def _(_evt) -> None:
                     if self._manual_control_cb is not None and bool(self._manual_control_cb.value):
                         self._sync_manual_root_command_from_robot()
-                    self.apply_pending_controls()
+                    self.queue_pending_controls()
 
                 for control in (
                     self._manual_root_pos_x_slider,
@@ -3617,7 +3633,7 @@ class ViserLiveViewer:
 
                     @control.on_update
                     def _(_evt) -> None:
-                        self.apply_pending_controls()
+                        self.queue_pending_controls()
                 self._sync_manual_root_command_from_robot()
 
         if manual_goal_gui_enabled:
@@ -3653,13 +3669,13 @@ class ViserLiveViewer:
             @self._manual_goal_zero_button.on_click
             def _(_evt) -> None:
                 self._sync_manual_goal_target_from_reference()
-                self.apply_pending_controls()
+                self.queue_pending_controls()
 
             @self._manual_goal_override_cb.on_update
             def _(_evt) -> None:
                 if self._manual_goal_override_cb is not None and bool(self._manual_goal_override_cb.value):
                     self._sync_manual_goal_target_from_reference()
-                self.apply_pending_controls()
+                self.queue_pending_controls()
 
             for control in (
                 self._manual_goal_pos_x_slider,
@@ -3668,7 +3684,7 @@ class ViserLiveViewer:
 
                 @control.on_update
                 def _(_evt) -> None:
-                    self.apply_pending_controls()
+                    self.queue_pending_controls()
 
             self._sync_manual_goal_target_from_reference()
             self._update_manual_goal_status()
@@ -4072,7 +4088,7 @@ class ViserLiveViewer:
                         @self._clip_apply.on_click
                         def _(_evt) -> None:
                             _queue_clip_change()
-                            self.apply_pending_controls()
+                            self.queue_pending_controls()
 
                         # Force the initial clip so we don't randomize across the bank.
                         self._pending_clip_idx = 0

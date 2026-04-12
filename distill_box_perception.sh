@@ -305,8 +305,13 @@ PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.3}
 DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
 FIXED_BC_EVAL_LOG_INTERVAL=${FIXED_BC_EVAL_LOG_INTERVAL:-1000}
 SCHEDULE_NAME=${SCHEDULE_NAME:-sparse_root_teacher_anchor_v2}
-SCHEDULE_NOTES=${SCHEDULE_NOTES:-"0-700 teacher rollout mix decays 0.7->0.0. PPO starts immediately with target coeff 0.3 while DAgger remains active until iteration 3000. Root-frame relative command replaces the drop-command-specific curricula from distill_box_drop_mixed.sh; other launcher defaults stay aligned."}
+SCHEDULE_NOTES=${SCHEDULE_NOTES:-"No teacher rollout mix. PPO starts immediately with target coeff 0.3 while DAgger remains active until iteration 3000. Root-frame relative command replaces the drop-command-specific curricula from distill_box_drop_mixed.sh; other launcher defaults stay aligned."}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.2}
+FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
+FREEZE_AT_TIMESTEP_ZERO_PROB_END=${FREEZE_AT_TIMESTEP_ZERO_PROB_END:-0.0}
+FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER:-2500}
+FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS}}
+USE_ADAPTIVE_TIMESTEPS_SAMPLER=${USE_ADAPTIVE_TIMESTEPS_SAMPLER:-True}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
 STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_root','actor_obs_proprio']"}
@@ -355,9 +360,6 @@ fi
 
 if [[ "${TEACHER_ACTION_MIX_RATIO_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_START_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_END_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_END_ITERATION_EXPLICIT}" -eq 0 ]]; then
   TEACHER_ACTION_MIX_RATIO="0.0"
-  TEACHER_ACTION_MIX_RATIO_START="0.7"
-  TEACHER_ACTION_MIX_RATIO_END="0.0"
-  TEACHER_ACTION_MIX_RATIO_END_ITERATION="700"
 fi
 
 case "${SCHEDULE_VARIANT}" in
@@ -374,7 +376,7 @@ case "${SCHEDULE_VARIANT}" in
       SCHEDULE_NAME="sparse_root_teacher_anchor_v2_dag_first"
     fi
     if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
-      SCHEDULE_NOTES="0-700 teacher rollout mix decays 0.7->0.0. 0-2000 pure DAgger with PPO disabled. 2000-3000 PPO ramps 0->0.3 while DAgger stays dominant. Root-frame relative command replaces the drop-command-specific curricula from distill_box_drop_mixed.sh; other launcher defaults stay aligned."
+      SCHEDULE_NOTES="No teacher rollout mix. 0-2000 pure DAgger with PPO disabled. 2000-3000 PPO ramps 0->0.3 while DAgger stays dominant. Root-frame relative command replaces the drop-command-specific curricula from distill_box_drop_mixed.sh; other launcher defaults stay aligned."
     fi
     ;;
   *)
@@ -504,7 +506,9 @@ if [[ -n "${TEACHER_ACTION_MIX_RATIO_START}" || -n "${TEACHER_ACTION_MIX_RATIO_E
 fi
 echo "[INFO] ppo_schedule=${PPO_START_EPOCH}->${DAGGER_END_EPOCH} target=${PPO_TARGET_COEFF} dagger_loss_coef=${DAGGER_LOSS_COEF}"
 echo "[INFO] fixed_bc_eval_log_interval=${FIXED_BC_EVAL_LOG_INTERVAL}"
+echo "[INFO] use_adaptive_timesteps_sampler=${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
+echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END} iter=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER}"
 echo "[INFO] entropy_coef=${ENTROPY_COEF} dagger_match_std=${DAGGER_MATCH_STD}"
 echo "[INFO] default_pose_prepend=${ENABLE_DEFAULT_POSE_PREPEND} duration_s=${DEFAULT_POSE_PREPEND_DURATION_S} default_pose_append=${ENABLE_DEFAULT_POSE_APPEND} append_duration_s=${DEFAULT_POSE_APPEND_DURATION_S}"
 echo "[INFO] viser_distill_minimal_ui=${VISER_DISTILL_MINIMAL_UI}"
@@ -618,6 +622,11 @@ exec env \
     --algo.config.distill.dagger-ignore-episode-initial-steps="${DAGGER_IGNORE_EPISODE_INITIAL_STEPS}" \
     --algo.config.distill.fixed-bc-eval-log-interval="${FIXED_BC_EVAL_LOG_INTERVAL}" \
     --algo.config.distill.ppo-target-coeff="${PPO_TARGET_COEFF}" \
+    --command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler="${USE_ADAPTIVE_TIMESTEPS_SAMPLER}" \
+    --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob="${FREEZE_AT_TIMESTEP_ZERO_PROB}" \
+    --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-end="${FREEZE_AT_TIMESTEP_ZERO_PROB_END}" \
+    --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-start-iter="${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER}" \
+    --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-end-iter="${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER}" \
     --simulator.config.sim.max_episode_length_s "${MAX_EPISODE_LENGTH_S}" \
     "${EXTRA_DISTILL_ARGS[@]}" \
     "${PERCEPTION_OVERRIDE_ARGS[@]}" \

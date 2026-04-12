@@ -1746,15 +1746,13 @@ class MotionCommand(CommandTermBase):
                 if key == name_lc or name_lc.endswith(f"_{key}") or name_lc.endswith(key):
                     return name
 
-        logger.warning(
-            "No simulator object matched clip '{}' (object_name='{}', object_urdf='{}'); "
-            "fallback to '{}'.",
-            clip_id,
-            clip_object_name,
-            clip_object_urdf,
-            sim_names[0],
+        available_urdfs = sorted(sim_name_by_urdf.keys())
+        raise RuntimeError(
+            "Failed to resolve simulator object for clip "
+            f"'{clip_id}' (object_name='{clip_object_name}', object_urdf='{clip_object_urdf}'). "
+            f"Available simulator objects: {sim_names}. "
+            f"Available simulator URDFs: {available_urdfs}."
         )
-        return sim_names[0]
 
     def _configure_simulator_object_mapping(self) -> None:
         sim = self._env.simulator
