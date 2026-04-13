@@ -54,23 +54,26 @@ def test_default_clip_object_maps_are_primitive_compatible(map_path: Path):
 
 
 @pytest.mark.parametrize(
-    ("urdf_path", "expected_extents"),
+    ("urdf_path", "expected_extents", "expected_center_offset"),
     [
         (
             Path("/home/ubuntu/FAR/holosoma/data/ds_box_data/train_g1_w_obj_prepared/_generated_urdfs/box_10.urdf"),
             (0.4585591, 0.2551282, 0.22102714),
+            (0.0, 0.0, 0.0),
         ),
         (
             Path(
                 "/home/ubuntu/FAR/holosoma/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
             ),
-            (0.4711539, 0.45873022, 0.4078947),
+            (0.3249185391136043, 0.31860981675930306, 0.326778873323969),
+            (0.000861508081686495, -0.0004369894302321542, -0.0025913614928369986),
         ),
     ],
 )
 def test_known_box_urdfs_resolve_stable_primitive_extents(
     urdf_path: Path,
     expected_extents: tuple[float, float, float],
+    expected_center_offset: tuple[float, float, float],
 ):
     if not urdf_path.is_file():
         pytest.skip(f"URDF asset not present on this node: {urdf_path}")
@@ -78,3 +81,4 @@ def test_known_box_urdfs_resolve_stable_primitive_extents(
     metadata = load_urdf_box_primitive_metadata(urdf_path)
     assert metadata is not None
     assert metadata.extents == pytest.approx(expected_extents, abs=1.0e-6)
+    assert metadata.center_offset == pytest.approx(expected_center_offset, abs=1.0e-6)

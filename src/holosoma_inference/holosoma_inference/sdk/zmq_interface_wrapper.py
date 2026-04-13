@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from holosoma_inference.config.config_types.robot import RobotConfig
+from holosoma_inference.utils.math.quat import quat_rotate_inverse, xyzw_to_wxyz
 from holosoma_inference.utils.sim_control import SimControlPush
 from holosoma_inference.utils.sim_state import SimStateSub
 
@@ -66,10 +67,12 @@ class ZmqSimInterfaceWrapper:
         ):
             return self._last_robot_state_data
 
-        quat_xyzw = root_state[3:7]
-        quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]], dtype=np.float64)
+        quat_xyzw = root_state[3:7].reshape(1, 4)
+        quat_wxyz = xyzw_to_wxyz(quat_xyzw).reshape(-1).astype(np.float64, copy=False)
+        base_lin_vel_b = quat_rotate_inverse(quat_wxyz.reshape(1, 4), root_state[7:10].reshape(1, 3)).reshape(-1)
+        base_ang_vel_b = quat_rotate_inverse(quat_wxyz.reshape(1, 4), root_state[10:13].reshape(1, 3)).reshape(-1)
         q = np.concatenate([root_state[:3], quat_wxyz, dof_pos[: self.robot_config.num_joints]], axis=0)
-        dq = np.concatenate([root_state[7:10], root_state[10:13], dof_vel[: self.robot_config.num_joints]], axis=0)
+        dq = np.concatenate([base_lin_vel_b, base_ang_vel_b, dof_vel[: self.robot_config.num_joints]], axis=0)
         tau_est = np.zeros_like(dq)
         ddq = np.zeros_like(dq)
         robot_state_data = np.concatenate([q, dq, tau_est, ddq], axis=0).reshape(1, -1)

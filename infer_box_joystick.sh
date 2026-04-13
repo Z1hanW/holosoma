@@ -767,6 +767,7 @@ esac
 # Viser GUI defaults aligned with VideoMimic-style manual + clip control.
 export VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI:-1}
 export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-1}
+export VISER_ENABLE_MANUAL_GOAL_GUI=${VISER_ENABLE_MANUAL_GOAL_GUI:-0}
 export VISER_MANUAL_CONTROL_DEFAULT=${VISER_MANUAL_CONTROL_DEFAULT:-1}
 export VISER_FORCE_MANUAL_CONTROL=${VISER_FORCE_MANUAL_CONTROL:-0}
 export VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-0}
@@ -1006,7 +1007,7 @@ if [[ -n "${GEOMETRY_DIR}" ]]; then
 fi
 echo "[INFO] headless=${HEADLESS_FLAG} (env HEADLESS=${HEADLESS})"
 echo "[INFO] viser=http://localhost:${VISER_PORT}"
-echo "[INFO] manual_gui=${VISER_ENABLE_MANUAL_GUI} clip_gui=${VISER_ENABLE_CLIP_GUI}"
+echo "[INFO] manual_gui=${VISER_ENABLE_MANUAL_GUI} manual_goal_gui=${VISER_ENABLE_MANUAL_GOAL_GUI} clip_gui=${VISER_ENABLE_CLIP_GUI}"
 echo "[INFO] manual_control_default=${VISER_MANUAL_CONTROL_DEFAULT} force_manual=${VISER_FORCE_MANUAL_CONTROL}"
 echo "[INFO] hw_joystick=${VISER_MANUAL_USE_HW_JOYSTICK}"
 echo "[INFO] hw_backend=${VISER_MANUAL_HW_BACKEND:-auto} bridge_joystick=${USE_HW_JOYSTICK_BRIDGE}"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import math
+import os
 from dataclasses import dataclass
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -9,6 +10,26 @@ from pathlib import Path
 import numpy as np
 
 from holosoma.utils.path import resolve_data_file_path
+
+
+_LARGEBOX_BEST_IOU_EXTENTS = (
+    0.3249185391136043,
+    0.31860981675930306,
+    0.326778873323969,
+)
+_LARGEBOX_BEST_IOU_CENTER_OFFSET = (
+    0.000861508081686495,
+    -0.0004369894302321542,
+    -0.0025913614928369986,
+)
+
+
+def get_largebox_best_iou_primitive_extents() -> tuple[float, float, float]:
+    return _LARGEBOX_BEST_IOU_EXTENTS
+
+
+def get_largebox_best_iou_primitive_center_offset() -> tuple[float, float, float]:
+    return _LARGEBOX_BEST_IOU_CENTER_OFFSET
 
 
 def _parse_vec3(raw: str | None, default: tuple[float, float, float]) -> np.ndarray:
@@ -145,6 +166,7 @@ class UrdfBoxPrimitiveMetadata:
     """Subset of URDF properties needed to preserve simple box behavior with a cuboid primitive."""
 
     extents: tuple[float, float, float]
+    center_offset: tuple[float, float, float]
     mass: float
     static_friction: float
     dynamic_friction: float
@@ -152,6 +174,16 @@ class UrdfBoxPrimitiveMetadata:
     compliant_contact_stiffness: float
     compliant_contact_damping: float
     visual_color: tuple[float, float, float] | None
+
+
+def _should_use_largebox_best_iou_box_fit(resolved_urdf: Path, root: ET.Element) -> bool:
+    disable_flag = os.environ.get("HOLOSOMA_DISABLE_LARGEBOX_BEST_IOU_BOX_FIT", "").strip().lower()
+    if disable_flag in {"1", "true", "yes", "on"}:
+        return False
+
+    stem = resolved_urdf.stem.lower()
+    robot_name = str(root.get("name", "")).strip().lower()
+    return stem in {"largebox", "objects_largebox"} or robot_name in {"largebox", "largebox.urdf", "objects_largebox"}
 
 
 @functools.lru_cache(maxsize=128)
@@ -239,6 +271,14 @@ def load_urdf_box_primitive_metadata(urdf_path: str | Path) -> UrdfBoxPrimitiveM
     )
     if extents is None:
         return None
+    center_offset = (0.0, 0.0, 0.0)
+    if _should_use_largebox_best_iou_box_fit(resolved_urdf, root):
+        # The OMOMO largebox asset is slanted in its raw object frame. These constants come from
+        # first rotating the mesh into the canonical z-up frame implied by the OMOMO pose correction,
+        # then yaw-aligning the local box frame to the mesh and running a max-IoU cuboid fit in that
+        # primitive-aligned frame. The local yaw alignment itself is applied in object_pose_correction.py.
+        extents = _LARGEBOX_BEST_IOU_EXTENTS
+        center_offset = _LARGEBOX_BEST_IOU_CENTER_OFFSET
 
     mass = _parse_float(mass_el.get("value"), -1.0)
     if not math.isfinite(mass) or mass <= 0.0:
@@ -281,6 +321,7 @@ def load_urdf_box_primitive_metadata(urdf_path: str | Path) -> UrdfBoxPrimitiveM
 
     return UrdfBoxPrimitiveMetadata(
         extents=extents,
+        center_offset=center_offset,
         mass=mass,
         static_friction=lateral_friction,
         dynamic_friction=lateral_friction,

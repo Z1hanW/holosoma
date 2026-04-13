@@ -34,6 +34,8 @@ from holosoma.utils.viser_utils import ensure_viser_on_path, resolve_viser_port
 LIGHT_BLUE = (255, 140, 0)
 TERRAIN_GRAY = (70, 70, 70)
 GROUND_DARK_GRAY = (45, 45, 45)
+SIM_VISUAL_MESH_COLOR = (70, 160, 255)
+SIM_COLLISION_MESH_COLOR = (255, 120, 70)
 SIM_ROBOT_POINTS_COLOR = np.array([70, 190, 120], dtype=np.uint8)
 SIM_OBJECT_POINTS_COLOR = np.array([255, 140, 0], dtype=np.uint8)
 HEIGHTMAP_MARKER_COLOR = (255, 165, 0)
@@ -41,6 +43,7 @@ CAMERA_MARKER_COLOR = (0, 255, 255)
 COMMAND_ARROW_COLOR = np.array([255, 165, 0], dtype=np.uint8)
 TARGET_BOX_COLOR = (255, 140, 0)
 SENSOR_MARKER_RADIUS = 0.03
+SIM_MESH_MODE_OPTIONS = ("visual", "collision", "both", "none")
 
 
 def _normalize_viser_image_format(image_format: str, *, faithful_mode: bool = False) -> str:
@@ -566,13 +569,21 @@ def _urdf_origin_transform(origin_el: ET.Element | None) -> np.ndarray:
     return transform
 
 
+def _normalize_mesh_kind(mesh_kind: str | None) -> str:
+    normalized = str(mesh_kind or "visual").strip().lower()
+    if normalized not in {"visual", "collision"}:
+        normalized = "visual"
+    return normalized
+
+
 @functools.lru_cache(maxsize=128)
-def _load_combined_urdf_visual_mesh(urdf_path: str):
+def _load_combined_urdf_mesh(urdf_path: str, mesh_kind: str = "visual"):
     try:
         import trimesh  # type: ignore[import-not-found]
     except Exception:
         return None
 
+    normalized_kind = _normalize_mesh_kind(mesh_kind)
     try:
         urdf_file = Path(urdf_path).expanduser().resolve()
         root = ET.parse(urdf_file).getroot()
@@ -581,8 +592,8 @@ def _load_combined_urdf_visual_mesh(urdf_path: str):
 
     meshes: list[Any] = []
     for link in root.findall('link'):
-        for visual in link.findall('visual'):
-            geometry = visual.find('geometry')
+        for element in link.findall(normalized_kind):
+            geometry = element.find('geometry')
             if geometry is None:
                 continue
 
@@ -635,7 +646,7 @@ def _load_combined_urdf_visual_mesh(urdf_path: str):
             if mesh_obj is None:
                 continue
             mesh_obj = mesh_obj.copy()
-            mesh_obj.apply_transform(_urdf_origin_transform(visual.find('origin')).astype(np.float64))
+            mesh_obj.apply_transform(_urdf_origin_transform(element.find('origin')).astype(np.float64))
             meshes.append(mesh_obj)
 
     if not meshes:
@@ -643,6 +654,16 @@ def _load_combined_urdf_visual_mesh(urdf_path: str):
 
     merged = trimesh.util.concatenate(meshes)
     return merged
+
+
+@functools.lru_cache(maxsize=128)
+def _load_combined_urdf_visual_mesh(urdf_path: str):
+    return _load_combined_urdf_mesh(urdf_path, "visual")
+
+
+@functools.lru_cache(maxsize=128)
+def _load_combined_urdf_collision_mesh(urdf_path: str):
+    return _load_combined_urdf_mesh(urdf_path, "collision")
 
 
 def _triangulate_face_indices(face_counts, face_indices) -> np.ndarray:
@@ -717,6 +738,36 @@ def _build_trimesh_from_usd_geom_prim(prim: Any):
     return None
 
 
+def _prim_has_collision_hint(prim: Any, root_prim_path: str) -> bool:
+    prim_path = str(prim.GetPath())
+    rel_path = prim_path[len(root_prim_path) :] if prim_path.startswith(root_prim_path) else prim_path
+    rel_path_lc = rel_path.casefold()
+    if "collision" in rel_path_lc or "collider" in rel_path_lc:
+        return True
+
+    try:
+        from pxr import PhysxSchema, UsdPhysics  # type: ignore[import-not-found]
+    except Exception:
+        PhysxSchema = None  # type: ignore[assignment]
+        UsdPhysics = None  # type: ignore[assignment]
+
+    current = prim
+    while current is not None and current.IsValid():
+        current_path = str(current.GetPath())
+        if current_path == root_prim_path:
+            break
+        current_name = current.GetName().casefold()
+        if "collision" in current_name or "collider" in current_name:
+            return True
+        if UsdPhysics is not None and current.HasAPI(UsdPhysics.CollisionAPI):
+            return True
+        physx_collision_api = getattr(PhysxSchema, "PhysxCollisionAPI", None) if PhysxSchema is not None else None
+        if physx_collision_api is not None and current.HasAPI(physx_collision_api):
+            return True
+        current = current.GetParent()
+    return False
+
+
 def _transform_mesh_vertices_between_usd_frames(vertices: np.ndarray, source_world_tf: Any, target_inv_world_tf: Any) -> np.ndarray:
     try:
         from pxr import Gf  # type: ignore[import-not-found]
@@ -734,8 +785,8 @@ def _transform_mesh_vertices_between_usd_frames(vertices: np.ndarray, source_wor
     return dst.astype(np.float32, copy=False)
 
 
-@functools.lru_cache(maxsize=256)
-def _load_combined_live_usd_visual_mesh(root_prim_path: str):
+@functools.lru_cache(maxsize=512)
+def _load_combined_live_usd_mesh(root_prim_path: str, mesh_kind: str = "visual"):
     try:
         import trimesh  # type: ignore[import-not-found]
         import omni.usd  # type: ignore[import-not-found]
@@ -743,6 +794,7 @@ def _load_combined_live_usd_visual_mesh(root_prim_path: str):
     except Exception:
         return None
 
+    normalized_kind = _normalize_mesh_kind(mesh_kind)
     stage = omni.usd.get_context().get_stage()
     if stage is None:
         return None
@@ -755,22 +807,54 @@ def _load_combined_live_usd_visual_mesh(root_prim_path: str):
     root_inv_world_tf = root_world_tf.GetInverse()
 
     subtree_roots = []
-    for suffix in ('', '/baseLink', '/baseLink/visuals', '/visuals'):
+    candidate_suffixes = ['']
+    if normalized_kind == "visual":
+        candidate_suffixes.extend(['/baseLink', '/baseLink/visuals', '/visuals', '/Visuals', '/baseLink/Visuals'])
+    else:
+        candidate_suffixes.extend(
+            [
+                '/baseLink',
+                '/baseLink/collisions',
+                '/collisions',
+                '/collision',
+                '/Collisions',
+                '/Collision',
+                '/baseLink/Collisions',
+                '/baseLink/Collision',
+            ]
+        )
+    for suffix in candidate_suffixes:
         candidate = stage.GetPrimAtPath(root_prim_path + suffix)
         if candidate.IsValid():
             subtree_roots.append(candidate)
 
     meshes: list[Any] = []
-    visual_prim_count = 0
+    matched_prim_count = 0
     visited_prim_paths: set[str] = set()
+    traverse_predicate = None
+    try:
+        traverse_predicate = Usd.TraverseInstanceProxies(getattr(Usd, "PrimAllPrimsPredicate", Usd.PrimDefaultPredicate))
+    except Exception:
+        traverse_predicate = None
+
     for subtree_root in subtree_roots:
-        for prim in Usd.PrimRange(subtree_root):
+        prim_iter = (
+            Usd.PrimRange(subtree_root, traverse_predicate)
+            if traverse_predicate is not None
+            else Usd.PrimRange(subtree_root)
+        )
+        for prim in prim_iter:
             if not prim.IsValid():
                 continue
             prim_path = str(prim.GetPath())
             if prim_path in visited_prim_paths:
                 continue
             visited_prim_paths.add(prim_path)
+            collision_like = _prim_has_collision_hint(prim, root_prim_path)
+            if normalized_kind == "visual" and collision_like:
+                continue
+            if normalized_kind == "collision" and not collision_like:
+                continue
             mesh_obj = _build_trimesh_from_usd_geom_prim(prim)
             if mesh_obj is None:
                 continue
@@ -782,14 +866,24 @@ def _load_combined_live_usd_visual_mesh(root_prim_path: str):
                 root_inv_world_tf,
             )
             meshes.append(mesh_obj)
-            visual_prim_count += 1
+            matched_prim_count += 1
 
     if not meshes:
         return None
 
     merged = trimesh.util.concatenate(meshes)
-    setattr(merged, '_holosoma_visual_prim_count', visual_prim_count)
+    setattr(merged, '_holosoma_visual_prim_count', matched_prim_count)
     return merged
+
+
+@functools.lru_cache(maxsize=256)
+def _load_combined_live_usd_visual_mesh(root_prim_path: str):
+    return _load_combined_live_usd_mesh(root_prim_path, "visual")
+
+
+@functools.lru_cache(maxsize=256)
+def _load_combined_live_usd_collision_mesh(root_prim_path: str):
+    return _load_combined_live_usd_mesh(root_prim_path, "collision")
 
 
 def _import_viser() -> tuple[Any | None, Any | None, str | None]:
@@ -1187,13 +1281,32 @@ class ViserLiveViewer:
         )
         self._server = None
         self._viser_urdf_cls = None
-        self._load_urdf_visuals = os.environ.get("VISER_LOAD_URDF", "1").lower() in ("1", "true", "yes", "on")
+        mesh_source = os.environ.get("VISER_MESH_SOURCE", "").strip().lower()
+        if mesh_source in {"sim", "simulator", "isaacsim", "usd"}:
+            self._mesh_source = "sim"
+        elif mesh_source in {"urdf"}:
+            self._mesh_source = "urdf"
+        else:
+            self._mesh_source = "legacy"
+        self._sim_meshes_enabled = self._mesh_source == "sim"
+        self._load_urdf_visuals = (
+            False
+            if self._sim_meshes_enabled
+            else os.environ.get("VISER_LOAD_URDF", "1").lower() in ("1", "true", "yes", "on")
+        )
+        mesh_mode_default = os.environ.get("VISER_MESH_MODE", "visual").strip().lower()
+        if mesh_mode_default not in SIM_MESH_MODE_OPTIONS:
+            mesh_mode_default = "visual"
+        self._mesh_mode_default = mesh_mode_default
         self._vr = None
         self._vo = None
+        self._vo_collision = None
         self._robot_points_handle = None
         self._object_points_handle = None
         self._primary_object_variants: dict[str, Any] = {}
+        self._primary_object_collision_variants: dict[str, Any] = {}
         self._active_primary_object_key: str | None = None
+        self._active_primary_object_collision_key: str | None = None
         self._robot_root = None
         self._object_root = None
         self._secondary_env_ids: list[int] = []
@@ -1202,9 +1315,17 @@ class ViserLiveViewer:
         self._secondary_object_roots: dict[int, Any] = {}
         self._secondary_vr: dict[int, Any] = {}
         self._secondary_vo: dict[int, Any] = {}
+        self._secondary_vo_collision: dict[int, Any] = {}
         self._secondary_robot_points_handles: dict[int, Any] = {}
         self._secondary_object_points_handles: dict[int, Any] = {}
         self._secondary_object_visual_key: dict[int, str] = {}
+        self._secondary_object_collision_key: dict[int, str] = {}
+        self._robot_mesh_frames: dict[int, dict[str, Any]] = {}
+        self._robot_visual_mesh_handles: dict[int, dict[str, Any]] = {}
+        self._robot_collision_mesh_handles: dict[int, dict[str, Any]] = {}
+        self._robot_mesh_envs_logged: set[int] = set()
+        self._robot_mesh_envs_missing_logged: set[int] = set()
+        self._body_name_to_index = {str(name): idx for idx, name in enumerate(getattr(env, "body_names", []))}
         self._viser_multi_env_spacing = 2.5
         self._viser_multi_env_cols = 1
         self._joint_order: np.ndarray | None = None
@@ -1246,6 +1367,18 @@ class ViserLiveViewer:
             "1",
             "true",
             "yes",
+        )
+        self._play_restarts_visible_replay = os.environ.get("VISER_PLAY_RESTARTS_VISIBLE_REPLAY", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        self._reset_restarts_visible_replay = os.environ.get("VISER_RESET_RESTARTS_VISIBLE_REPLAY", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
         )
         self._disable_perception_image_pipeline = os.environ.get("VISER_DISABLE_PERCEPTION_IMAGE_PIPELINE", "0").lower() in (
             "1",
@@ -1374,6 +1507,8 @@ class ViserLiveViewer:
         self._default_pose_init_cb = None
         self._step_requested = False
         self._reset_requested = False
+        self._reset_visible_requested = False
+        self._play_last_value = not self._start_paused
         self._clip_dropdown = None
         self._clip_apply = None
         self._clip_label = None
@@ -1392,6 +1527,7 @@ class ViserLiveViewer:
         self._show_terrain_cb = None
         self._show_grid_cb = None
         self._show_scandots_cb = None
+        self._mesh_mode_dropdown = None
         self._recenter_cb = None
         self._scandots_size_slider = None
         self._contact_force_cb = None
@@ -1474,6 +1610,7 @@ class ViserLiveViewer:
         self._root_body_index: int | None = None
         self._root_body_name: str | None = None
         self._root_pose_debug_logged = False
+        self._record_step_debug_logged = False
         self._defer_startup = os.environ.get("VISER_DEFER_INIT", "0").lower() in ("1", "true", "yes", "on")
         self._startup_initialized = False
 
@@ -1595,6 +1732,10 @@ class ViserLiveViewer:
             self._setup_secondary_env_handles(self._viser_urdf_cls, robot_urdf)
         else:
             self._setup_secondary_env_frames_only()
+            if self._sim_meshes_enabled:
+                self._refresh_primary_object_handle()
+                for env_id in self._secondary_env_ids:
+                    self._ensure_secondary_object_handle(env_id)
         self._load_terrain()
         self._setup_controls()
 
@@ -1637,9 +1778,185 @@ class ViserLiveViewer:
             dtype=np.float32,
         )
 
-    def _primary_object_variant_node(self, visual_key: str) -> str:
-        digest = hashlib.sha1(visual_key.encode("utf-8")).hexdigest()[:10]
-        return self._scene_path(f"/object/variant_{digest}")
+    def _current_mesh_mode(self) -> str:
+        if self._mesh_mode_dropdown is None:
+            return self._mesh_mode_default
+        value = str(getattr(self._mesh_mode_dropdown, "value", self._mesh_mode_default)).strip().lower()
+        if value not in SIM_MESH_MODE_OPTIONS:
+            return self._mesh_mode_default
+        return value
+
+    def _mesh_mode_shows_visual(self) -> bool:
+        return self._current_mesh_mode() in {"visual", "both"}
+
+    def _mesh_mode_shows_collision(self) -> bool:
+        return self._current_mesh_mode() in {"collision", "both"}
+
+    def _robot_mesh_frame_node(self, env_id: int, body_name: str) -> str:
+        if int(env_id) == self._env_id:
+            return self._scene_path(f"/robot_mesh/{body_name}")
+        return self._scene_path(f"/env_{env_id}/robot_mesh/{body_name}")
+
+    def _resolve_live_robot_body_prim_path(self, env_id: int, body_name: str) -> str | None:
+        try:
+            import omni.usd  # type: ignore[import-not-found]
+            from pxr import Usd, UsdPhysics  # type: ignore[import-not-found]
+        except Exception:
+            return None
+
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            return None
+
+        direct_path = f"/World/envs/env_{env_id}/Robot/{body_name}"
+        prim = stage.GetPrimAtPath(direct_path)
+        if prim.IsValid():
+            return direct_path
+
+        robot_root = stage.GetPrimAtPath(f"/World/envs/env_{env_id}/Robot")
+        if not robot_root.IsValid():
+            return None
+
+        for prim in Usd.PrimRange(robot_root):
+            if not prim.IsValid():
+                continue
+            if prim.GetName() != body_name:
+                continue
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                return str(prim.GetPath())
+        return None
+
+    def _get_robot_body_states_wxyz_for(self, env_id: int) -> tuple[np.ndarray, np.ndarray] | None:
+        sim = getattr(self._env, "simulator", None)
+        rigid_body_pos = getattr(sim, "_rigid_body_pos", None)
+        rigid_body_quat_xyzw = getattr(sim, "_rigid_body_rot", None)
+        env_idx = int(env_id)
+        if rigid_body_pos is None or rigid_body_quat_xyzw is None:
+            return None
+        if env_idx < 0 or env_idx >= int(rigid_body_pos.shape[0]) or env_idx >= int(rigid_body_quat_xyzw.shape[0]):
+            return None
+        try:
+            pos = rigid_body_pos[env_idx].detach().cpu().numpy()
+            quat_xyzw = rigid_body_quat_xyzw[env_idx].detach().cpu().numpy()
+        except Exception:
+            return None
+        if pos.ndim != 2 or quat_xyzw.ndim != 2 or pos.shape[0] != quat_xyzw.shape[0]:
+            return None
+        quat_wxyz = quat_xyzw[:, [3, 0, 1, 2]]
+        return pos, quat_wxyz
+
+    def _ensure_robot_mesh_handles_for_env(self, env_id: int) -> None:
+        if not self._sim_meshes_enabled or self._server is None:
+            return
+
+        body_frames = self._robot_mesh_frames.setdefault(int(env_id), {})
+        visual_handles = self._robot_visual_mesh_handles.setdefault(int(env_id), {})
+        collision_handles = self._robot_collision_mesh_handles.setdefault(int(env_id), {})
+        body_names = list(self._body_name_to_index.keys())
+        unresolved_body_names: list[str] = []
+        for body_name in body_names:
+            if body_name in body_frames:
+                continue
+
+            prim_path = self._resolve_live_robot_body_prim_path(env_id, body_name)
+            if not prim_path:
+                unresolved_body_names.append(body_name)
+                continue
+
+            visual_mesh = _load_combined_live_usd_visual_mesh(prim_path)
+            collision_mesh = _load_combined_live_usd_collision_mesh(prim_path)
+            if visual_mesh is None and collision_mesh is None:
+                continue
+
+            frame_node = self._robot_mesh_frame_node(env_id, body_name)
+            frame = self._server.scene.add_frame(frame_node, show_axes=False)
+            body_frames[body_name] = frame
+
+            if visual_mesh is not None:
+                visual_handles[body_name] = self._server.scene.add_mesh_simple(
+                    f"{frame_node}/visual",
+                    visual_mesh.vertices,
+                    visual_mesh.faces,
+                    color=SIM_VISUAL_MESH_COLOR,
+                    side="double",
+                )
+            if collision_mesh is not None:
+                collision_handles[body_name] = self._server.scene.add_mesh_simple(
+                    f"{frame_node}/collision",
+                    collision_mesh.vertices,
+                    collision_mesh.faces,
+                    color=SIM_COLLISION_MESH_COLOR,
+                    side="double",
+                )
+
+        if body_frames and int(env_id) not in self._robot_mesh_envs_logged:
+            logger.info(
+                "Viser robot env {} registered {} body frames (visual={} collision={})",
+                env_id,
+                len(body_frames),
+                len(visual_handles),
+                len(collision_handles),
+            )
+            self._robot_mesh_envs_logged.add(int(env_id))
+        elif not body_frames and int(env_id) not in self._robot_mesh_envs_missing_logged:
+            logger.warning(
+                "Viser robot env {} found no live USD body meshes under /World/envs/env_{}/Robot. "
+                "Unresolved bodies sample={}",
+                env_id,
+                env_id,
+                unresolved_body_names[:8],
+            )
+            self._robot_mesh_envs_missing_logged.add(int(env_id))
+
+        self._set_robot_mesh_visibility_for_env(env_id, visible=True)
+
+    def _set_robot_mesh_visibility_for_env(self, env_id: int, visible: bool) -> None:
+        show_visual = bool(visible and self._mesh_mode_shows_visual())
+        show_collision = bool(visible and self._mesh_mode_shows_collision())
+        for handle in self._robot_visual_mesh_handles.get(int(env_id), {}).values():
+            _set_visual_handle_visible(handle, show_visual)
+        for handle in self._robot_collision_mesh_handles.get(int(env_id), {}).values():
+            _set_visual_handle_visible(handle, show_collision)
+
+    def _update_robot_mesh_frames_for_env(
+        self,
+        env_id: int,
+        *,
+        offset: np.ndarray,
+        display_shift: np.ndarray | None = None,
+        visible: bool,
+    ) -> bool:
+        if not self._sim_meshes_enabled:
+            return False
+
+        self._ensure_robot_mesh_handles_for_env(env_id)
+        body_frames = self._robot_mesh_frames.get(int(env_id), {})
+        if not body_frames:
+            return False
+
+        body_states = self._get_robot_body_states_wxyz_for(env_id)
+        if body_states is None:
+            self._set_robot_mesh_visibility_for_env(env_id, visible=False)
+            return False
+
+        body_pos, body_quat_wxyz = body_states
+        for body_name, frame in body_frames.items():
+            body_idx = self._body_name_to_index.get(body_name)
+            if body_idx is None or body_idx >= body_pos.shape[0]:
+                continue
+            position = body_pos[body_idx] - offset
+            if display_shift is not None:
+                position = position + display_shift
+            frame.position = position.astype(np.float32, copy=False)
+            frame.wxyz = body_quat_wxyz[body_idx].astype(np.float32, copy=False)
+
+        self._set_robot_mesh_visibility_for_env(env_id, visible=visible)
+        return True
+
+    def _primary_object_variant_node(self, visual_key: str, mesh_kind: str = "visual") -> str:
+        normalized_kind = _normalize_mesh_kind(mesh_kind)
+        digest = hashlib.sha1(f"{normalized_kind}:{visual_key}".encode("utf-8")).hexdigest()[:10]
+        return self._scene_path(f"/object/{normalized_kind}_variant_{digest}")
 
     def _summarize_object_mesh(self, mesh: Any) -> str:
         try:
@@ -1698,78 +2015,93 @@ class ViserLiveViewer:
                 return str(prim.GetPath())
         return None
 
-    def _resolve_object_visual_spec_for_env(self, env_id: int) -> tuple[str | None, Any | None, str]:
+    def _resolve_object_mesh_spec_for_env(self, env_id: int, mesh_kind: str = "visual") -> tuple[str | None, Any | None, str]:
+        normalized_kind = _normalize_mesh_kind(mesh_kind)
         live_root_prim_path = self._resolve_live_object_root_prim_path(env_id)
         if live_root_prim_path:
-            mesh = _load_combined_live_usd_visual_mesh(live_root_prim_path)
+            loader = (
+                _load_combined_live_usd_collision_mesh
+                if normalized_kind == "collision"
+                else _load_combined_live_usd_visual_mesh
+            )
+            mesh = loader(live_root_prim_path)
             if mesh is not None:
                 return live_root_prim_path, mesh, f'live-usd:{live_root_prim_path}'
 
+        if self._mesh_source == "sim":
+            return None, None, ''
+
         object_urdf = self._resolve_object_urdf_for_env(env_id)
         if object_urdf:
-            mesh = _load_combined_urdf_visual_mesh(object_urdf)
+            loader = _load_combined_urdf_collision_mesh if normalized_kind == "collision" else _load_combined_urdf_visual_mesh
+            mesh = loader(object_urdf)
             if mesh is not None:
                 return object_urdf, mesh, f'urdf-asset:{object_urdf}'
 
         return None, None, ''
 
-    def _ensure_primary_object_variant(self, env_id: int) -> Any | None:
+    def _ensure_primary_object_variant(self, env_id: int, mesh_kind: str = "visual") -> Any | None:
         if self._server is None:
             return None
 
-        visual_key, mesh, source_label = self._resolve_object_visual_spec_for_env(env_id)
+        normalized_kind = _normalize_mesh_kind(mesh_kind)
+        variant_cache = (
+            self._primary_object_collision_variants if normalized_kind == "collision" else self._primary_object_variants
+        )
+        visual_key, mesh, source_label = self._resolve_object_mesh_spec_for_env(env_id, normalized_kind)
         if not visual_key or mesh is None:
-            logger.warning('Viser object mesh disabled (failed to resolve env {}).', env_id)
             return None
 
-        cached = self._primary_object_variants.get(visual_key)
+        cached = variant_cache.get(visual_key)
         if cached is not None:
             return cached
 
         try:
             handle = self._server.scene.add_mesh_simple(
-                self._primary_object_variant_node(visual_key),
+                self._primary_object_variant_node(visual_key, normalized_kind),
                 mesh.vertices,
                 mesh.faces,
-                color=LIGHT_BLUE,
+                color=LIGHT_BLUE if normalized_kind == "visual" else SIM_COLLISION_MESH_COLOR,
                 side='double',
             )
         except Exception as exc:
-            logger.warning('Viser object mesh disabled (failed to create {}): {}', source_label, exc)
+            logger.warning('Viser object {} mesh disabled (failed to create {}): {}', normalized_kind, source_label, exc)
             return None
 
         _set_visual_handle_visible(handle, False)
-        self._primary_object_variants[visual_key] = handle
+        variant_cache[visual_key] = handle
         logger.info(
-            'Viser primary object env {} using {} ({})',
+            'Viser primary object env {} using {} {} ({})',
             env_id,
+            normalized_kind,
             source_label,
             self._summarize_object_mesh(mesh),
         )
         return handle
 
-    def _set_primary_object_visual(self, env_id: int) -> None:
-        visual_key, _, _ = self._resolve_object_visual_spec_for_env(env_id)
-        if not visual_key:
-            self._active_primary_object_key = None
-            self._vo = None
-            for handle in self._primary_object_variants.values():
-                _set_visual_handle_visible(handle, False)
-            return
-        if visual_key == self._active_primary_object_key and self._vo is not None:
-            return
-        handle = self._ensure_primary_object_variant(env_id)
-        if handle is None:
-            return
-        self._active_primary_object_key = visual_key
-        self._vo = handle
+    def _apply_primary_object_mesh_visibility(self) -> None:
+        show_object = self._show_object_cb is None or bool(self._show_object_cb.value)
         for variant in self._primary_object_variants.values():
             _set_visual_handle_visible(variant, False)
-        show_object = self._show_object_cb is None or bool(self._show_object_cb.value)
-        _set_visual_handle_visible(handle, bool(show_object))
+        for variant in self._primary_object_collision_variants.values():
+            _set_visual_handle_visible(variant, False)
+        if self._vo is not None:
+            _set_visual_handle_visible(self._vo, bool(show_object and self._mesh_mode_shows_visual()))
+        if self._vo_collision is not None:
+            _set_visual_handle_visible(self._vo_collision, bool(show_object and self._mesh_mode_shows_collision()))
+
+    def _set_primary_object_meshes(self, env_id: int) -> None:
+        visual_key, _, _ = self._resolve_object_mesh_spec_for_env(env_id, "visual")
+        collision_key, _, _ = self._resolve_object_mesh_spec_for_env(env_id, "collision")
+
+        self._active_primary_object_key = visual_key
+        self._active_primary_object_collision_key = collision_key
+        self._vo = self._ensure_primary_object_variant(env_id, "visual") if visual_key else None
+        self._vo_collision = self._ensure_primary_object_variant(env_id, "collision") if collision_key else None
+        self._apply_primary_object_mesh_visibility()
 
     def _refresh_primary_object_handle(self) -> None:
-        self._set_primary_object_visual(self._env_id)
+        self._set_primary_object_meshes(self._env_id)
 
     def _resolve_sim_object_name_for_env(self, env_id: int) -> str | None:
         motion_cmd = self._get_motion_command()
@@ -1906,27 +2238,16 @@ class ViserLiveViewer:
             if env_id not in self._secondary_object_roots:
                 self._secondary_object_roots[env_id] = self._server.scene.add_frame(object_node, show_axes=False)
 
+    def _apply_secondary_object_mesh_visibility(self, env_id: int, visible: bool) -> None:
+        show_visual = bool(visible and self._mesh_mode_shows_visual())
+        show_collision = bool(visible and self._mesh_mode_shows_collision())
+        _set_visual_handle_visible(self._secondary_vo.get(env_id), show_visual)
+        _set_visual_handle_visible(self._secondary_vo_collision.get(env_id), show_collision)
+
     def _ensure_secondary_object_handle(self, env_id: int) -> None:
         if self._server is None:
             return
 
-        visual_key, mesh, source_label = self._resolve_object_visual_spec_for_env(env_id)
-        if not visual_key or mesh is None:
-            self._secondary_object_visual_key.pop(env_id, None)
-            return
-
-        current_key = self._secondary_object_visual_key.get(env_id)
-        if env_id in self._secondary_vo and current_key == visual_key:
-            return
-
-        stale_handle = self._secondary_vo.pop(env_id, None)
-        if stale_handle is not None:
-            try:
-                stale_handle.remove()
-            except Exception:
-                pass
-
-        object_node = self._scene_path(f"/env_{env_id}/object/mesh")
         root_handle = self._secondary_object_roots.get(env_id)
         if root_handle is None:
             try:
@@ -1936,27 +2257,64 @@ class ViserLiveViewer:
             except Exception:
                 return
 
-        try:
-            handle = self._server.scene.add_mesh_simple(
-                object_node,
-                mesh.vertices,
-                mesh.faces,
-                color=LIGHT_BLUE,
-                side='double',
-            )
-        except Exception as exc:
-            self._secondary_object_visual_key.pop(env_id, None)
-            logger.warning('Failed to create secondary object mesh env {} from {}: {}', env_id, source_label, exc)
-            return
-
-        self._secondary_vo[env_id] = handle
-        self._secondary_object_visual_key[env_id] = visual_key
-        logger.info(
-            'Viser secondary object env {} using {} ({})',
-            env_id,
-            source_label,
-            self._summarize_object_mesh(mesh),
+        mesh_configs = (
+            ("visual", self._secondary_vo, self._secondary_object_visual_key, LIGHT_BLUE),
+            ("collision", self._secondary_vo_collision, self._secondary_object_collision_key, SIM_COLLISION_MESH_COLOR),
         )
+        for mesh_kind, handle_map, key_map, color in mesh_configs:
+            visual_key, mesh, source_label = self._resolve_object_mesh_spec_for_env(env_id, mesh_kind)
+            if not visual_key or mesh is None:
+                key_map.pop(env_id, None)
+                stale_handle = handle_map.pop(env_id, None)
+                if stale_handle is not None:
+                    try:
+                        stale_handle.remove()
+                    except Exception:
+                        pass
+                continue
+
+            current_key = key_map.get(env_id)
+            if env_id in handle_map and current_key == visual_key:
+                continue
+
+            stale_handle = handle_map.pop(env_id, None)
+            if stale_handle is not None:
+                try:
+                    stale_handle.remove()
+                except Exception:
+                    pass
+
+            object_node = self._scene_path(f"/env_{env_id}/object/{mesh_kind}")
+            try:
+                handle = self._server.scene.add_mesh_simple(
+                    object_node,
+                    mesh.vertices,
+                    mesh.faces,
+                    color=color,
+                    side='double',
+                )
+            except Exception as exc:
+                key_map.pop(env_id, None)
+                logger.warning(
+                    'Failed to create secondary object {} mesh env {} from {}: {}',
+                    mesh_kind,
+                    env_id,
+                    source_label,
+                    exc,
+                )
+                continue
+
+            handle_map[env_id] = handle
+            key_map[env_id] = visual_key
+            logger.info(
+                'Viser secondary object env {} using {} {} ({})',
+                env_id,
+                mesh_kind,
+                source_label,
+                self._summarize_object_mesh(mesh),
+            )
+
+        self._apply_secondary_object_mesh_visibility(env_id, visible=True)
 
     def _resolve_root_body_index(self) -> None:
         body_names = getattr(self._env, "body_names", None)
@@ -2044,12 +2402,21 @@ class ViserLiveViewer:
                 return
             if (
                 self._pending_control_sync
+                or self._reset_visible_requested
                 or self._reset_requested
                 or self._pending_clip_idx is not None
                 or self._pending_clip_start is not None
             ):
                 self.apply_pending_controls()
             time.sleep(self._control_sleep_s)
+        if (
+            self._pending_control_sync
+            or self._reset_visible_requested
+            or self._reset_requested
+            or self._pending_clip_idx is not None
+            or self._pending_clip_start is not None
+        ):
+            self.apply_pending_controls()
 
     def queue_pending_controls(self) -> None:
         self._pending_control_sync = True
@@ -2061,6 +2428,9 @@ class ViserLiveViewer:
         self._update_manual_root_command()
         self._update_manual_goal_override()
         self._update_manual_object_reset_override()
+        if self._reset_visible_requested:
+            self._reset_visible_requested = False
+            self._reset_visible_envs()
         if self._reset_requested:
             self._reset_requested = False
             self._reset_env()
@@ -2996,6 +3366,14 @@ class ViserLiveViewer:
             self._initialize_server()
         if not self._enabled or self._server is None or self._robot_root is None:
             return
+        if not self._record_step_debug_logged:
+            logger.info(
+                "Viser record_step active: sim_meshes_enabled={} load_urdf_visuals={} body_count={}",
+                self._sim_meshes_enabled,
+                self._load_urdf_visuals,
+                len(self._body_name_to_index),
+            )
+            self._record_step_debug_logged = True
 
         if self._force_dt:
             now = time.perf_counter()
@@ -3042,7 +3420,18 @@ class ViserLiveViewer:
                 except Exception:
                     pass
             else:
-                self._update_robot_points(env_id=self._env_id, offset=offset, visible=bool(show_robot))
+                robot_mesh_updated = self._update_robot_mesh_frames_for_env(
+                    self._env_id,
+                    offset=offset,
+                    visible=bool(show_robot),
+                )
+                if not robot_mesh_updated:
+                    self._update_robot_points(env_id=self._env_id, offset=offset, visible=bool(show_robot))
+                elif self._robot_points_handle is not None:
+                    try:
+                        self._robot_points_handle.visible = False
+                    except Exception:
+                        pass
 
             if self._scandots_enabled:
                 self._update_scandots(offset)
@@ -3059,7 +3448,7 @@ class ViserLiveViewer:
             if not self._disable_contact_force_viz:
                 self._update_contact_forces(offset)
 
-            if self._load_urdf_visuals:
+            if self._load_urdf_visuals or self._sim_meshes_enabled:
                 self._refresh_primary_object_handle()
             obj_state = self._get_object_state_wxyz()
             if obj_state is not None and self._object_root is not None:
@@ -3068,12 +3457,23 @@ class ViserLiveViewer:
                 self._object_root.wxyz = obj_quat_wxyz
             else:
                 obj_pos = None
-            if self._vo is not None and self._object_root is not None:
+            if self._sim_meshes_enabled:
+                if not show_object or obj_state is None:
+                    _set_visual_handle_visible(self._vo, False)
+                    _set_visual_handle_visible(self._vo_collision, False)
+                else:
+                    self._apply_primary_object_mesh_visibility()
+                if self._object_points_handle is not None:
+                    try:
+                        self._object_points_handle.visible = False
+                    except Exception:
+                        pass
+            elif self._vo is not None and self._object_root is not None:
                 if not show_object or obj_state is None:
                     _set_visual_handle_visible(self._vo, False)
                 else:
                     _set_visual_handle_visible(self._vo, True)
-            if self._vo is None:
+            if self._vo is None and self._vo_collision is None:
                 self._update_object_point(
                     env_id=self._env_id,
                     object_pos=obj_pos,
@@ -3112,18 +3512,31 @@ class ViserLiveViewer:
                     except Exception:
                         pass
                 elif vr is None:
-                    self._update_robot_points(
-                        env_id=env_id,
+                    robot_mesh_updated = self._update_robot_mesh_frames_for_env(
+                        env_id,
                         offset=secondary_offset,
                         display_shift=display_shift,
                         visible=bool(show_robot),
                     )
+                    if not robot_mesh_updated:
+                        self._update_robot_points(
+                            env_id=env_id,
+                            offset=secondary_offset,
+                            display_shift=display_shift,
+                            visible=bool(show_robot),
+                        )
+                    elif env_id in self._secondary_robot_points_handles:
+                        try:
+                            self._secondary_robot_points_handles[env_id].visible = False
+                        except Exception:
+                            pass
 
-                if self._load_urdf_visuals:
+                if self._load_urdf_visuals or self._sim_meshes_enabled:
                     self._ensure_secondary_object_handle(env_id)
                 secondary_vo = self._secondary_vo.get(env_id)
+                secondary_vo_collision = self._secondary_vo_collision.get(env_id)
                 secondary_object_root = self._secondary_object_roots.get(env_id)
-                if secondary_vo is None or secondary_object_root is None:
+                if (secondary_vo is None and secondary_vo_collision is None) or secondary_object_root is None:
                     secondary_obj_state = self._get_object_state_wxyz_for(env_id)
                     if secondary_obj_state is not None and secondary_object_root is not None:
                         secondary_obj_pos, secondary_obj_quat = secondary_obj_state
@@ -3138,7 +3551,10 @@ class ViserLiveViewer:
                         )
                     continue
                 if not show_object:
-                    _set_visual_handle_visible(secondary_vo, False)
+                    if self._sim_meshes_enabled:
+                        self._apply_secondary_object_mesh_visibility(env_id, visible=False)
+                    else:
+                        _set_visual_handle_visible(secondary_vo, False)
                     self._update_object_point(
                         env_id=env_id,
                         object_pos=None,
@@ -3149,7 +3565,10 @@ class ViserLiveViewer:
                     continue
                 secondary_obj_state = self._get_object_state_wxyz_for(env_id)
                 if secondary_obj_state is None:
-                    _set_visual_handle_visible(secondary_vo, False)
+                    if self._sim_meshes_enabled:
+                        self._apply_secondary_object_mesh_visibility(env_id, visible=False)
+                    else:
+                        _set_visual_handle_visible(secondary_vo, False)
                     self._update_object_point(
                         env_id=env_id,
                         object_pos=None,
@@ -3161,7 +3580,15 @@ class ViserLiveViewer:
                 secondary_obj_pos, secondary_obj_quat = secondary_obj_state
                 secondary_object_root.position = secondary_obj_pos - secondary_offset + display_shift
                 secondary_object_root.wxyz = secondary_obj_quat
-                _set_visual_handle_visible(secondary_vo, True)
+                if self._sim_meshes_enabled:
+                    self._apply_secondary_object_mesh_visibility(env_id, visible=True)
+                    if env_id in self._secondary_object_points_handles:
+                        try:
+                            self._secondary_object_points_handles[env_id].visible = False
+                        except Exception:
+                            pass
+                else:
+                    _set_visual_handle_visible(secondary_vo, True)
 
         if self._clip_label is not None:
             motion_cmd = self._get_motion_command()
@@ -3820,7 +4247,17 @@ class ViserLiveViewer:
 
                 @self._reset_button.on_click
                 def _(_evt) -> None:
-                    self._reset_requested = True
+                    if self._reset_restarts_visible_replay:
+                        self._reset_visible_requested = True
+                    else:
+                        self._reset_requested = True
+
+                @self._play_control.on_update
+                def _(_evt) -> None:
+                    current_value = bool(self._play_control.value)
+                    if current_value and not self._play_last_value and self._play_restarts_visible_replay:
+                        self._reset_visible_requested = True
+                    self._play_last_value = current_value
 
                 if self._default_pose_init_cb is not None:
                     @self._default_pose_init_cb.on_update
@@ -3958,6 +4395,13 @@ class ViserLiveViewer:
                             else True,
                             hint="Toggle object mesh visibility",
                         )
+                    if self._sim_meshes_enabled:
+                        self._mesh_mode_dropdown = self._server.gui.add_dropdown(
+                            "Mesh Mode",
+                            options=SIM_MESH_MODE_OPTIONS,
+                            initial_value=self._mesh_mode_default,
+                            hint="Switch between simulator visual meshes and collision meshes",
+                        )
                     if self._terrain_handle is not None or self._ground_handle is not None:
                         self._show_terrain_cb = self._server.gui.add_checkbox(
                             "Show Terrain",
@@ -3991,18 +4435,27 @@ class ViserLiveViewer:
                                 vr.show_visual = show_robot
                             except Exception:
                                 pass
-                    if self._show_object_cb is not None and self._vo is not None:
-                        try:
-                            _set_visual_handle_visible(self._vo, bool(self._show_object_cb.value))
-                        except Exception:
-                            pass
+                        if self._sim_meshes_enabled:
+                            self._set_robot_mesh_visibility_for_env(self._env_id, visible=show_robot)
+                            for env_id in self._secondary_env_ids:
+                                self._set_robot_mesh_visibility_for_env(env_id, visible=show_robot)
                     if self._show_object_cb is not None:
                         show_object = bool(self._show_object_cb.value)
-                        for vo in self._secondary_vo.values():
-                            try:
-                                _set_visual_handle_visible(vo, show_object)
-                            except Exception:
-                                pass
+                        if self._sim_meshes_enabled:
+                            self._apply_primary_object_mesh_visibility()
+                            for env_id in self._secondary_env_ids:
+                                self._apply_secondary_object_mesh_visibility(env_id, visible=show_object)
+                        else:
+                            if self._vo is not None:
+                                try:
+                                    _set_visual_handle_visible(self._vo, show_object)
+                                except Exception:
+                                    pass
+                            for vo in self._secondary_vo.values():
+                                try:
+                                    _set_visual_handle_visible(vo, show_object)
+                                except Exception:
+                                    pass
                     if self._show_terrain_cb is not None:
                         show_terrain = bool(self._show_terrain_cb.value)
                         self._set_handle_visible(self._terrain_handle, show_terrain)
@@ -4017,6 +4470,11 @@ class ViserLiveViewer:
 
                 if self._show_object_cb is not None:
                     @self._show_object_cb.on_update
+                    def _(_evt) -> None:
+                        _apply_world_vis()
+
+                if self._mesh_mode_dropdown is not None:
+                    @self._mesh_mode_dropdown.on_update
                     def _(_evt) -> None:
                         _apply_world_vis()
 
@@ -4249,6 +4707,27 @@ class ViserLiveViewer:
                 self._reload_terrain_for_clip(self._current_clip_name(motion_cmd, int(active_idx)))
                 self._sync_after_reset(env_ids)
                 return
+
+        self._env.reset_envs_idx(env_ids)
+        if hasattr(self._env, "reset_buf"):
+            self._env.reset_buf[env_ids] = 0
+        if hasattr(self._env, "time_out_buf"):
+            self._env.time_out_buf[env_ids] = 0
+        self._sync_after_reset(env_ids)
+
+    def _reset_visible_envs(self) -> None:
+        if not hasattr(self._env, "reset_envs_idx"):
+            return
+
+        visible_env_ids = [self._env_id, *self._secondary_env_ids]
+        logger.info("Viser reset visible replay envs: {}", visible_env_ids)
+        env_ids = torch.tensor(visible_env_ids, device=self._env.device, dtype=torch.long)
+        motion_cmd = self._get_motion_command()
+        manual_enabled = bool(getattr(motion_cmd, "manual_control_enabled", False))
+        if self._manual_control_cb is not None:
+            manual_enabled = bool(manual_enabled or bool(self._manual_control_cb.value))
+        if manual_enabled:
+            self._clear_manual_commands(clear_gui_toggles=True)
 
         self._env.reset_envs_idx(env_ids)
         if hasattr(self._env, "reset_buf"):
@@ -4549,6 +5028,9 @@ class ViserLiveViewer:
             pos, quat_xyzw = sim_state
             quat_wxyz = quat_xyzw[[3, 0, 1, 2]]
             return pos, quat_wxyz
+
+        if self._mesh_source == "sim":
+            return None
 
         motion_cmd = self._get_motion_command()
         if motion_cmd is not None and hasattr(motion_cmd, "simulator_object_pos_w"):

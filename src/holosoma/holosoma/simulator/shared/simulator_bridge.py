@@ -64,6 +64,7 @@ class SimulatorBridge:
         self._latest_lowcmd_payload: dict | None = None
         self._received_external_active_command = False
         self._logged_first_command_summary = False
+        self._logged_active_command_summaries = 0
         self._logged_default_pose_hold = False
         self._logged_initial_pose_hold = False
         self._default_hold_q: np.ndarray | None = None
@@ -151,6 +152,7 @@ class SimulatorBridge:
         self._latest_lowcmd_payload = None
         self._received_external_active_command = False
         self._logged_first_command_summary = False
+        self._logged_active_command_summaries = 0
         self._logged_default_pose_hold = False
         self._logged_initial_pose_hold = False
         self._initial_hold_q = None
@@ -341,13 +343,39 @@ class SimulatorBridge:
         if payload is None:
             return np.zeros(self.simulator.num_dof, dtype=np.float32)
 
-        return self._compute_pd_torques(
-            tau_ff=self._payload_array(payload, "tau_ff"),
-            kp=self._payload_array(payload, "kp"),
-            kd=self._payload_array(payload, "kd"),
-            q_target=self._payload_array(payload, "q_target"),
-            dq_target=self._payload_array(payload, "dq_target"),
+        tau_ff = self._payload_array(payload, "tau_ff")
+        kp = self._payload_array(payload, "kp")
+        kd = self._payload_array(payload, "kd")
+        q_target = self._payload_array(payload, "q_target")
+        dq_target = self._payload_array(payload, "dq_target")
+        torques = self._compute_pd_torques(
+            tau_ff=tau_ff,
+            kp=kp,
+            kd=kd,
+            q_target=q_target,
+            dq_target=dq_target,
         )
+        if (
+            bool(getattr(self.bridge_config, "log_first_command_summary", False))
+            and self._payload_is_active(payload)
+            and self._logged_active_command_summaries < 5
+        ):
+            q_actual = self.simulator.dof_pos[0].detach().cpu().numpy()
+            logger.info(
+                "Active ZMQ lowcmd summary #{:d}: |q_target-q_actual|max={:.4f}, |tau|max={:.4f}, "
+                "q_target[:6]={}, q_actual[:6]={}, kp[:6]={}, kd[:6]={}, tau_ff[:6]={}",
+                self._logged_active_command_summaries + 1,
+                float(np.max(np.abs(q_target - q_actual))),
+                float(np.max(np.abs(torques))),
+                np.array2string(q_target[:6], precision=4),
+                np.array2string(q_actual[:6], precision=4),
+                np.array2string(kp[:6], precision=4),
+                np.array2string(kd[:6], precision=4),
+                np.array2string(tau_ff[:6], precision=4),
+            )
+            self._logged_active_command_summaries += 1
+            self._logged_first_command_summary = self._logged_active_command_summaries >= 5
+        return torques
 
     def _publish_sim_state(self) -> None:
         if self.sim_state_pub is None:

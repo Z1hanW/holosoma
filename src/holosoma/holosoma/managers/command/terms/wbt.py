@@ -23,6 +23,15 @@ from holosoma.config_types.command import (
 from holosoma.envs.wbt.wbt_manager import WholeBodyTrackingManager
 from holosoma.managers.command.base import CommandTermBase
 from holosoma.utils.clip_sampling import build_prefix_mask, piecewise_constant_schedule_value, project_group_weights
+from holosoma.utils.object_pose_correction import (
+    compute_box_ground_contact_translation_xyz_wxyz_np,
+    apply_local_quat_correction_xyzw_torch,
+    derive_local_zup_correction_wxyz_from_first_frame,
+    get_omomo_largebox_primitive_local_alignment_wxyz_np,
+    get_omomo_largebox_primitive_center_offset_xyz_np,
+    get_omomo_largebox_primitive_extents_xyz_np,
+    is_omomo_largebox_clip,
+)
 from holosoma.utils.path import resolve_data_file_path
 from holosoma.utils.object_geometry import load_urdf_geometry_extents
 from holosoma.utils.rotations import (
@@ -445,6 +454,78 @@ class MotionLoader:
         self.clip_lengths = torch.tensor(lengths, dtype=torch.long, device=device)
         self.num_clips = len(clip_ids)
 
+    def _apply_omomo_largebox_object_quat_bias_correction(self) -> None:
+        if not getattr(self, "has_object", False):
+            return
+        if not hasattr(self, "_object_quat_w") or self._object_quat_w.numel() == 0:
+            return
+        disable_flag = os.environ.get("HOLOSOMA_DISABLE_OMOMO_LARGEBOX_ZUP_CORRECTION", "").strip().lower()
+        if disable_flag in {"1", "true", "yes", "on"}:
+            return
+
+        center_offset_xyz = torch.tensor(
+            get_omomo_largebox_primitive_center_offset_xyz_np(),
+            dtype=self._object_quat_w.dtype,
+            device=self._object_quat_w.device,
+        ).view(1, 3)
+        primitive_alignment_xyzw = torch.tensor(
+            get_omomo_largebox_primitive_local_alignment_wxyz_np()[[1, 2, 3, 0]],
+            dtype=self._object_quat_w.dtype,
+            device=self._object_quat_w.device,
+        ).view(1, 4)
+        primitive_extents_xyz = torch.tensor(
+            get_omomo_largebox_primitive_extents_xyz_np(),
+            dtype=self._object_quat_w.dtype,
+            device=self._object_quat_w.device,
+        ).view(1, 3)
+        corrected_clip_count = 0
+        for clip_idx, clip_id in enumerate(self.clip_ids):
+            object_name = self.clip_object_names[clip_idx] if clip_idx < len(self.clip_object_names) else ""
+            object_urdf = self.clip_object_urdf_paths[clip_idx] if clip_idx < len(self.clip_object_urdf_paths) else ""
+            if not is_omomo_largebox_clip(clip_id, object_name=object_name, object_urdf_path=object_urdf):
+                continue
+            start = int(self.clip_offsets[clip_idx].item())
+            length = int(self.clip_lengths[clip_idx].item())
+            end = start + length
+            if length <= 0 or end > int(self._object_quat_w.shape[0]):
+                continue
+            quat_slice = self._object_quat_w[start:end]
+            first_quat_wxyz = quat_slice[0, [3, 0, 1, 2]].detach().cpu().numpy()
+            correction_xyzw = torch.tensor(
+                derive_local_zup_correction_wxyz_from_first_frame(first_quat_wxyz)[[1, 2, 3, 0]],
+                dtype=self._object_quat_w.dtype,
+                device=self._object_quat_w.device,
+            ).view(1, 4)
+            corrected_quat_xyzw = apply_local_quat_correction_xyzw_torch(quat_slice, correction_xyzw)
+            corrected_quat_xyzw = apply_local_quat_correction_xyzw_torch(corrected_quat_xyzw, primitive_alignment_xyzw)
+            self._object_quat_w[start:end] = corrected_quat_xyzw
+            if hasattr(self, "_object_pos_w") and end <= int(self._object_pos_w.shape[0]):
+                world_center_offset = quat_apply(
+                    corrected_quat_xyzw,
+                    center_offset_xyz.expand(length, -1),
+                    w_last=True,
+                )
+                corrected_pos_w = self._object_pos_w[start:end] + world_center_offset
+                grounding_translation_xyz = torch.tensor(
+                    compute_box_ground_contact_translation_xyz_wxyz_np(
+                        corrected_pos_w.detach().cpu().numpy(),
+                        corrected_quat_xyzw[:, [3, 0, 1, 2]].detach().cpu().numpy(),
+                        primitive_extents_xyz[0].detach().cpu().numpy(),
+                    ),
+                    dtype=self._object_pos_w.dtype,
+                    device=self._object_pos_w.device,
+                ).view(1, 3)
+                self._object_pos_w[start:end] = corrected_pos_w + grounding_translation_xyz
+            if hasattr(self, "_object_size") and end <= int(self._object_size.shape[0]):
+                self._object_size[start:end] = primitive_extents_xyz.expand(length, -1)
+            corrected_clip_count += 1
+
+        if corrected_clip_count > 0:
+            logger.info(
+                "Applied OMOMO largebox z-up/yaw-aligned/grounded pose correction to {} clip(s).",
+                corrected_clip_count,
+            )
+
     def _load_data_from_motion_npz(self, motion_file: str, device: str) -> tuple[list[str], list[str]]:
         clip_id = Path(motion_file).stem
         clip_object_names: list[str] | None = None
@@ -503,6 +584,7 @@ class MotionLoader:
             clip_object_names=clip_object_names,
             clip_object_urdf_paths=clip_object_urdfs,
         )
+        self._apply_omomo_largebox_object_quat_bias_correction()
         return body_names, joint_names
 
     def _load_data_from_motion_npz_dir(
@@ -753,6 +835,7 @@ class MotionLoader:
             self._object_lin_vel_w = torch.zeros(0, 3, device=device)
             self._object_size = torch.zeros(0, 3, device=device)
 
+        self._apply_omomo_largebox_object_quat_bias_correction()
         return body_names, joint_names
 
     @staticmethod
@@ -1119,6 +1202,7 @@ class MotionLoader:
                 self._object_lin_vel_w = torch.zeros(0, 3, device=device)
                 self._object_size = torch.zeros(0, 3, device=device)
 
+        self._apply_omomo_largebox_object_quat_bias_correction()
         return body_names, joint_names
 
     def _load_data_from_motion_h5_videomimic(

@@ -47,6 +47,59 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _infer_default_pose_init_from_model(model_path: str) -> bool | None:
+    path_str = str(model_path).strip()
+    if not path_str or path_str.startswith("wandb://"):
+        return None
+
+    path = Path(path_str).expanduser()
+    if path.suffix == ".pt":
+        candidate = path.with_suffix(".onnx")
+        if candidate.is_file():
+            path = candidate
+    if not path.is_file():
+        return None
+
+    try:
+        import onnx
+    except Exception:
+        return None
+
+    try:
+        model = onnx.load(path)
+    except Exception:
+        return None
+
+    metadata: dict[str, object] = {}
+    for prop in model.metadata_props:
+        try:
+            metadata[prop.key] = json.loads(prop.value)
+        except Exception:
+            metadata[prop.key] = prop.value
+
+    motion_cfg = (
+        metadata.get("experiment_config", {})
+        .get("command", {})
+        .get("setup_terms", {})
+        .get("motion_command", {})
+        .get("params", {})
+        .get("motion_config", {})
+    )
+    if not isinstance(motion_cfg, dict):
+        return None
+
+    return bool(
+        (
+            motion_cfg.get("enable_default_pose_prepend")
+            and float(motion_cfg.get("default_pose_prepend_duration_s", 0.0) or 0.0) > 0.0
+        )
+        or (
+            motion_cfg.get("enable_default_pose_append")
+            and float(motion_cfg.get("default_pose_append_duration_s", 0.0) or 0.0) > 0.0
+        )
+    )
+
+
 @dataclass(frozen=True)
 class MjviserMujocoSimStateViewerConfig:
     robot: str = "g1_29dof_w_object"
@@ -225,6 +278,16 @@ def view_sim_state(cfg: MjviserMujocoSimStateViewerConfig) -> None:
     robot_config = _resolve_robot_config(cfg.robot)
     port = resolve_viser_port(cfg.port)
     server = viser.ViserServer(port=port)
+    default_pose_init_value = bool(cfg.default_pose_init)
+    if "HOLOSOMA_DEFAULT_POSE_INIT" not in os.environ and "SIM_MOTION_INIT_MODE" not in os.environ:
+        inferred_default_pose_init = _infer_default_pose_init_from_model(cfg.model_path)
+        if inferred_default_pose_init is not None:
+            default_pose_init_value = bool(inferred_default_pose_init)
+            logger.info(
+                "Inferred default-pose init={} from model metadata: {}",
+                default_pose_init_value,
+                cfg.model_path,
+            )
     ref_root = server.scene.add_frame("/holosoma_ref", show_axes=bool(cfg.show_ref_body))
 
     with server.gui.add_folder("Split Sim"):
@@ -234,10 +297,10 @@ def view_sim_state(cfg: MjviserMujocoSimStateViewerConfig) -> None:
 
     with server.gui.add_folder("Rollout"):
         rollout_md = server.gui.add_markdown("Viewer only")
-        reset_rollout_btn = server.gui.add_button("Reset rollout")
+        reset_rollout_btn = server.gui.add_button("Reset sim + motion")
         default_pose_init_cb = server.gui.add_checkbox(
             "Default pose init",
-            initial_value=bool(cfg.default_pose_init),
+            initial_value=default_pose_init_value,
             hint="Restart/reset rollout from the robot default pose instead of the motion pose.",
         )
 
@@ -334,6 +397,9 @@ def view_sim_state(cfg: MjviserMujocoSimStateViewerConfig) -> None:
         env = os.environ.copy()
         env["RUN_SECONDS"] = str(cfg.launch_run_seconds)
         env["TRAINING_HEADLESS"] = "True" if cfg.training_headless else "False"
+        env["SIM_STATE_PORT"] = str(cfg.state_port)
+        env["SIM_CONTROL_PORT"] = str(cfg.control_port)
+        env["POLICY_CONTROL_PORT"] = str(cfg.policy_control_port)
         env["HOLOSOMA_MUJOCO_SCENE_XML_SNAPSHOT_PATH"] = str(scene_xml_snapshot_path_default)
         env["HOLOSOMA_DEFAULT_POSE_INIT"] = "1" if bool(default_pose_init_cb.value) else "0"
         env["SIM_MOTION_INIT_MODE"] = "training_default_pose" if bool(default_pose_init_cb.value) else "raw_motion"

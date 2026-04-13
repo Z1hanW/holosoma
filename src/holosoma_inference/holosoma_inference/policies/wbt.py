@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -9,6 +10,14 @@ import pinocchio as pin
 from defusedxml import ElementTree
 from loguru import logger
 from termcolor import colored
+from holosoma.utils.object_pose_correction import (
+    apply_omomo_largebox_center_offset_wxyz_np,
+    apply_omomo_largebox_ground_contact_wxyz_np,
+    apply_omomo_largebox_primitive_local_alignment_wxyz_np,
+    apply_omomo_largebox_zup_correction_wxyz_np,
+    get_omomo_largebox_primitive_extents_xyz_np,
+    is_omomo_largebox_clip,
+)
 
 from holosoma_inference.config.config_types.inference import InferenceConfig
 from holosoma_inference.config.config_types.robot import RobotConfig
@@ -124,6 +133,10 @@ class MotionData:
             body_quat_w = np.asarray(data["body_quat_w"], dtype=np.float32)
             object_pos_w = np.asarray(data["object_pos_w"], dtype=np.float32) if "object_pos_w" in data else None
             object_quat_w = np.asarray(data["object_quat_w"], dtype=np.float32) if "object_quat_w" in data else None
+            object_name = str(np.asarray(data["object_name"]).item()).strip() if "object_name" in data else ""
+            object_urdf_path = (
+                str(np.asarray(data["object_urdf_path"]).item()).strip() if "object_urdf_path" in data else ""
+            )
             self.object_size = self._extract_object_size_np(data, joint_pos.shape[0], source=str(motion_path))
 
         joint_indices = get_index_of_a_in_b(robot_dof_names, joint_names)
@@ -142,6 +155,21 @@ class MotionData:
         self.root_pos_w = body_pos_w[:, self.root_body_index, :]
         self.has_object = object_pos_w is not None and object_quat_w is not None
         self.object_pos_w = object_pos_w
+        if self.has_object and is_omomo_largebox_clip(
+            motion_path.stem,
+            object_name=object_name,
+            object_urdf_path=object_urdf_path,
+        ):
+            object_quat_w = apply_omomo_largebox_zup_correction_wxyz_np(object_quat_w)
+            object_quat_w = apply_omomo_largebox_primitive_local_alignment_wxyz_np(object_quat_w)
+            object_pos_w = apply_omomo_largebox_center_offset_wxyz_np(object_pos_w, object_quat_w)
+            object_pos_w = apply_omomo_largebox_ground_contact_wxyz_np(object_pos_w, object_quat_w)
+            self.object_size = np.repeat(
+                get_omomo_largebox_primitive_extents_xyz_np().reshape(1, 3),
+                repeats=self.frame_count,
+                axis=0,
+            )
+            self.object_pos_w = object_pos_w
         self.object_quat_w = object_quat_w
 
     @classmethod
@@ -326,6 +354,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_command_0 = None
         self.ref_quat_xyzw_0 = None
         self.ref_pos_xyz_t = None
+        self._last_motion_output_timestep: int | None = None
 
         # Calculate timestep interval from rl_rate (e.g., 50Hz = 20ms intervals)
         self.timestep_interval_ms = 1000.0 / config.task.rl_rate
@@ -346,6 +375,23 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._logged_root_reference_clip_start = False
         self._logged_sim_ref_from_sim_state = False
         self._auto_start_motion_clip_pending = False
+        self._logged_first_policy_step_debug = False
+        self._auto_start_stage: str | None = None
+        self._auto_start_hold_ticks = 0
+        self._auto_start_max_wait_ticks = 0
+        self._auto_start_tick_count = 0
+        self._training_freeze_zero_prob = 0.0
+        self._training_freeze_zero_extra_holds = 0
+        self._training_freeze_zero_remaining_holds = 0
+        self._logged_training_freeze_zero_alignment = False
+        self._auto_start_pose_tolerance = float(getattr(config.task, "auto_start_stiff_pose_tolerance", 0.12))
+        self._auto_start_rearm_requested = False
+        self._auto_start_force_motion_start_pose = False
+        self._preserve_obs_history_on_next_motion_start = False
+        self._suppress_root_reference_at_clip_start = False
+        self._warm_autostart_obs_history = os.getenv("HOLOSOMA_WARM_AUTOSTART_OBS_HISTORY", "1") != "0"
+        self._freeze_autostart_obs_snapshot = os.getenv("HOLOSOMA_FREEZE_AUTOSTART_OBS_SNAPSHOT", "1") != "0"
+        self._auto_start_history_snapshot: dict[str, dict[str, np.ndarray]] | None = None
 
         obs_terms = {term for terms in config.observation.obs_dict.values() for term in terms}
         self._uses_videomimic = any(
@@ -449,7 +495,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 )
             )
 
-        if sys.stdin.isatty():
+        auto_start_enabled = bool(
+            getattr(config.task, "auto_start_policy", False) or getattr(config.task, "auto_start_motion_clip", False)
+        )
+        if auto_start_enabled:
+            logger.info("Auto-start enabled; skipping stiff hold confirmation prompt.")
+        elif sys.stdin.isatty():
             logger.info(colored("\n⚠️  Ready to enter stiff hold mode", "yellow", attrs=["bold"]))
             logger.info(colored("Press Enter to continue...", "yellow"))
             try:
@@ -464,7 +515,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if self.config.task.auto_start_motion:
             self._handle_start_motion_clip()
         elif self.config.task.auto_start_motion_clip:
-            self._auto_start_motion_clip_pending = True
+            self._auto_start_motion_clip_pending = False
 
     def _get_ref_body_pose_in_world(self, robot_state_data) -> tuple[np.ndarray, np.ndarray]:
         if bool(getattr(self.config.task, "prefer_sim_ref_from_sim_state", False)):
@@ -504,6 +555,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
     def _should_use_root_reference_at_clip_start(self) -> bool:
         if not bool(getattr(self.config.task, "use_root_reference_at_clip_start", False)):
             return False
+        if self._suppress_root_reference_at_clip_start:
+            return False
         use_root = int(self._get_motion_index()) == 0
         if use_root and not self._logged_root_reference_clip_start:
             logger.info("Using robot root as observation reference at clip start to match training step-0 semantics.")
@@ -521,6 +574,176 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if self._should_use_root_reference_at_clip_start():
             return np.asarray(robot_state_data[:, 3:7], dtype=np.float32)
         return self._get_ref_body_orientation_in_world(robot_state_data)
+
+    def _should_auto_start_policy_immediately(self) -> bool:
+        return not bool(getattr(self.config.task, "auto_start_motion_clip", False))
+
+    def _set_stiff_hold_target_for_autostart(self) -> None:
+        if self._auto_start_force_motion_start_pose and self.motion_command_0 is not None:
+            target_q = np.asarray(self.motion_command_0[:, : self.num_dofs], dtype=np.float32)
+            if target_q.shape == self._stiff_hold_q.shape:
+                self._stiff_hold_q = target_q.copy()
+                self._auto_start_force_motion_start_pose = False
+                self.logger.info("Auto-start stiff target forced to motion start pose after simulator reset.")
+                return
+
+        state = self._augment_robot_state_with_sim_state(self.interface.get_low_state())
+        if state is not None and state.shape[1] >= 7 + self.num_dofs:
+            target_q = np.asarray(state[:, 7 : 7 + self.num_dofs], dtype=np.float32)
+            if target_q.shape == self._stiff_hold_q.shape:
+                self._stiff_hold_q = target_q.copy()
+                self._auto_start_force_motion_start_pose = False
+                self.logger.info("Auto-start stiff target locked to current initialized robot pose.")
+                return
+
+        if self.motion_command_0 is not None:
+            target_q = np.asarray(self.motion_command_0[:, : self.num_dofs], dtype=np.float32)
+            if target_q.shape == self._stiff_hold_q.shape:
+                self._stiff_hold_q = target_q.copy()
+                self._auto_start_force_motion_start_pose = False
+                self.logger.warning("Auto-start stiff target fallback to ONNX motion start command.")
+
+    def _stiff_hold_pose_error(self) -> float | None:
+        state = self.interface.get_low_state()
+        if not self._has_valid_robot_state(state):
+            return None
+        dof_pos = state[:, 7 : 7 + self.num_dofs]
+        if dof_pos.shape != self._stiff_hold_q.shape:
+            return None
+        return float(np.max(np.abs(dof_pos - self._stiff_hold_q)))
+
+    def _warm_auto_start_observation_history(self, robot_state_data: np.ndarray) -> None:
+        if not self._warm_autostart_obs_history:
+            return
+        if self._obs_input_name is None:
+            return
+        try:
+            self.last_policy_action.fill(0.0)
+            if self._freeze_autostart_obs_snapshot:
+                if self._auto_start_history_snapshot is None:
+                    current_obs_buffer_dict = self.get_current_obs_buffer_dict(
+                        self._augment_robot_state_with_sim_state(robot_state_data)
+                    )
+                    self._auto_start_history_snapshot = self.parse_current_obs_dict(current_obs_buffer_dict)
+                snapshot = {
+                    group: {term: value.copy() for term, value in term_dict.items()}
+                    for group, term_dict in self._auto_start_history_snapshot.items()
+                }
+                self._update_obs_history(snapshot)
+            else:
+                self._prepare_group_observations(self._augment_robot_state_with_sim_state(robot_state_data))
+        except Exception as exc:
+            if not hasattr(self, "_logged_auto_start_history_warmup_error"):
+                self.logger.warning("Failed to warm auto-start observation history: {}", exc)
+                self._logged_auto_start_history_warmup_error = True
+
+    def _maybe_auto_start_rollout(self) -> None:
+        if not getattr(self.config.task, "auto_start_motion_clip", False):
+            return
+
+        self._reset_observation_history_state()
+        self._preserve_obs_history_on_next_motion_start = False
+        self._suppress_root_reference_at_clip_start = False
+        self._auto_start_history_snapshot = None
+        self._auto_start_motion_clip_pending = False
+        self._pending_noninteractive_policy_start = False
+        self.motion_clip_progressing = False
+        self.motion_timestep = 0
+        self.motion_start_timestep = None
+        self._last_clock_reading = None
+        self._last_motion_output_timestep = 0
+        if self.motion_command_0 is not None:
+            self.motion_command_t = self.motion_command_0.copy()
+        if self.ref_quat_xyzw_0 is not None:
+            self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
+        self._set_stiff_hold_target_for_autostart()
+        self._stiff_hold_active = True
+        self.use_policy_action = False
+        self.get_ready_state = False
+        if hasattr(self.interface, "no_action"):
+            self.interface.no_action = 0
+
+        hold_sec = max(0.0, float(getattr(self.config.task, "auto_start_stiff_hold_sec", 0.0)))
+        max_wait_sec = max(hold_sec, float(getattr(self.config.task, "auto_start_stiff_max_wait_sec", hold_sec)))
+        self._auto_start_hold_ticks = max(0, int(round(hold_sec * self.rl_rate)))
+        self._auto_start_max_wait_ticks = max(self._auto_start_hold_ticks, int(round(max_wait_sec * self.rl_rate)))
+        self._auto_start_tick_count = 0
+
+        if self._auto_start_hold_ticks == 0 and self._auto_start_max_wait_ticks == 0:
+            self._auto_start_stage = None
+            self._stiff_hold_active = False
+            self.logger.info("Auto-start enabled: zero stiff-hold requested, starting policy + clip immediately.")
+            self._handle_start_policy()
+            self._handle_start_motion_clip()
+            return
+
+        self._auto_start_stage = "stiff_hold"
+        self.logger.info(
+            "Auto-start enabled: stiff-hold min {:.2f}s ({} ticks), max {:.2f}s ({} ticks), then start policy + clip.",
+            hold_sec,
+            self._auto_start_hold_ticks,
+            max_wait_sec,
+            self._auto_start_max_wait_ticks,
+        )
+
+    def _maybe_advance_auto_start_state(self) -> None:
+        if self._auto_start_stage != "stiff_hold":
+            return
+
+        state = self.interface.get_low_state()
+        if not self._has_valid_robot_state(state):
+            return
+
+        self._warm_auto_start_observation_history(state)
+        self._auto_start_tick_count += 1
+        err = self._stiff_hold_pose_error()
+        at_target = err is not None and err <= self._auto_start_pose_tolerance
+        min_hold_done = self._auto_start_tick_count >= self._auto_start_hold_ticks
+        max_wait_reached = self._auto_start_tick_count >= self._auto_start_max_wait_ticks
+        have_sim_state = not self.config.task.use_sim_state or self._get_sim_root_state() is not None
+
+        progress_every = max(1, int(self.rl_rate // 2))
+        if self._auto_start_tick_count % progress_every == 0:
+            logger.info(
+                "Auto-start stiff-hold progress: tick {}/{}, max_wait={}, max_dof_err={}, have_sim_state={}",
+                self._auto_start_tick_count,
+                self._auto_start_hold_ticks,
+                self._auto_start_max_wait_ticks,
+                "n/a" if err is None else f"{err:.4f}",
+                have_sim_state,
+            )
+
+        if not min_hold_done:
+            return
+        if not have_sim_state and not max_wait_reached:
+            return
+        if not at_target and not max_wait_reached:
+            return
+
+        if not have_sim_state:
+            self.logger.warning(
+                "Auto-start proceeding without sim_state after max wait ({} ticks).",
+                self._auto_start_tick_count,
+            )
+        if at_target:
+            self.logger.info(
+                "Auto-start stiff-hold reached target (max_dof_err={:.4f} rad <= {:.4f} rad).",
+                err,
+                self._auto_start_pose_tolerance,
+            )
+        else:
+            self.logger.warning(
+                "Auto-start stiff-hold max wait reached ({} ticks, max_dof_err={}); proceeding anyway.",
+                self._auto_start_tick_count,
+                "n/a" if err is None else f"{err:.4f}",
+            )
+
+        self._preserve_obs_history_on_next_motion_start = self._warm_autostart_obs_history
+        self._suppress_root_reference_at_clip_start = False
+        self._auto_start_history_snapshot = None
+        self._auto_start_stage = None
+        self._handle_start_policy()
+        self._handle_start_motion_clip()
 
     @staticmethod
     def _extract_motion_config(metadata: dict) -> dict | None:
@@ -598,6 +821,55 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._maybe_apply_training_motion_transitions_to_motion_data(metadata, ref_name)
         self._motion_cfg = motion_cfg or {}
         self._motion_alignment_enabled = bool((motion_cfg or {}).get("align_motion_to_init_yaw", False))
+        freeze_prob_raw = (motion_cfg or {}).get("freeze_at_timestep_zero_prob", 0.0)
+        try:
+            freeze_prob = float(freeze_prob_raw or 0.0)
+        except (TypeError, ValueError):
+            freeze_prob = 0.0
+        self._training_freeze_zero_prob = min(max(freeze_prob, 0.0), 0.999)
+        freeze_holds_override = os.environ.get("HOLOSOMA_TRAINING_FREEZE_ZERO_EXTRA_HOLDS")
+        if freeze_holds_override not in (None, ""):
+            try:
+                self._training_freeze_zero_extra_holds = max(0, int(freeze_holds_override))
+            except ValueError:
+                self._training_freeze_zero_extra_holds = 0
+                logger.warning(
+                    "Ignoring invalid HOLOSOMA_TRAINING_FREEZE_ZERO_EXTRA_HOLDS={!r}",
+                    freeze_holds_override,
+                )
+            else:
+                logger.info(
+                    "Overriding training-like timestep-0 extra holds to {} via environment.",
+                    self._training_freeze_zero_extra_holds,
+                )
+        elif self._training_freeze_zero_prob > 0.0:
+            # Training can keep timestep 0 for multiple actor steps; use the geometric expectation
+            # as a deterministic approximation for sim2sim verification.
+            self._training_freeze_zero_extra_holds = int(
+                min(200, round(self._training_freeze_zero_prob / max(1e-6, 1.0 - self._training_freeze_zero_prob)))
+            )
+        else:
+            self._training_freeze_zero_extra_holds = 0
+        self._training_freeze_zero_remaining_holds = 0
+
+    def _should_source_motion_outputs_from_motion_data(self) -> bool:
+        return bool(
+            self._uses_motion_command
+            and self._motion_data is not None
+            and bool(getattr(self.config.task, "apply_training_motion_transitions", False))
+        )
+
+    def _get_motion_outputs_from_motion_data(self, motion_timestep: int) -> dict[str, np.ndarray] | None:
+        if self._motion_data is None:
+            return None
+
+        idx = max(0, min(int(motion_timestep), self._motion_data.frame_count - 1))
+        return {
+            "joint_pos": self._motion_data.joint_pos[idx : idx + 1].astype(np.float32, copy=False),
+            "joint_vel": self._motion_data.joint_vel[idx : idx + 1].astype(np.float32, copy=False),
+            "ref_quat_xyzw": wxyz_to_xyzw(self._motion_data.ref_quat_w[idx : idx + 1]).astype(np.float32, copy=False),
+            "ref_pos_xyz": self._motion_data.ref_pos_w[idx : idx + 1].astype(np.float32, copy=False),
+        }
 
     def _maybe_apply_training_motion_transitions_to_motion_data(self, metadata: dict, ref_name: str) -> None:
         if self._motion_data is None or not bool(self.config.task.apply_training_motion_transitions):
@@ -763,6 +1035,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             or self._uses_object_generalist
             or self._uses_legacy_object_obs
             or self._uses_sparse_root_distill
+            or bool(getattr(self.config.task, "apply_training_motion_transitions", False))
         ):
             self._load_motion_data_from_metadata(metadata, Path(model_path))
 
@@ -805,14 +1078,19 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.policy = policy_act
 
         if self._uses_motion_command:
-            time_step = np.zeros((1, 1), dtype=np.float32)
-            obs = self._build_zero_actor_obs()
-            input_feed = {self._obs_input_name: obs}
-            if self._perception_input_name:
-                input_feed[self._perception_input_name] = self._build_zero_perception_obs()
-            if self._time_step_input_name:
-                input_feed[self._time_step_input_name] = time_step
-            outputs = self.policy(input_feed)
+            if self._should_source_motion_outputs_from_motion_data():
+                outputs = self._get_motion_outputs_from_motion_data(0)
+                if outputs is None:
+                    raise ValueError("Motion data was expected for training-aligned motion outputs but is unavailable.")
+            else:
+                time_step = np.zeros((1, 1), dtype=np.float32)
+                obs = self._build_zero_actor_obs()
+                input_feed = {self._obs_input_name: obs}
+                if self._perception_input_name:
+                    input_feed[self._perception_input_name] = self._build_zero_perception_obs()
+                if self._time_step_input_name:
+                    input_feed[self._time_step_input_name] = time_step
+                outputs = self.policy(input_feed)
             joint_pos = outputs["joint_pos"]
             joint_vel = outputs["joint_vel"]
             self.motion_command_t = np.concatenate([joint_pos, joint_vel], axis=1)
@@ -820,6 +1098,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self.ref_pos_xyz_t = outputs.get("ref_pos_xyz")
             self.motion_command_0 = self.motion_command_t.copy()
             self.ref_quat_xyzw_0 = self.ref_quat_xyzw_t.copy()
+            self._last_motion_output_timestep = 0
         elif (
             self._uses_videomimic
             or self._uses_object_generalist
@@ -834,6 +1113,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self.ref_quat_xyzw_t = wxyz_to_xyzw(ref_quat_wxyz)
             self.ref_quat_xyzw_0 = self.ref_quat_xyzw_t.copy()
             self.ref_pos_xyz_t = self._motion_data.ref_pos_w[:1]
+            self._last_motion_output_timestep = 0
 
     def _get_onnx_input_dim(self, input_name: str | None) -> int | None:
         if input_name is None:
@@ -867,6 +1147,223 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
     def _build_zero_perception_obs(self) -> np.ndarray:
         return np.zeros((1, int(self._perception_input_dim or 0)), dtype=np.float32)
+
+    def _query_motion_outputs_at(self, motion_timestep: int) -> dict[str, np.ndarray] | None:
+        if self._should_source_motion_outputs_from_motion_data():
+            return self._get_motion_outputs_from_motion_data(motion_timestep)
+
+        if self._obs_input_name is None or "joint_pos" not in self.onnx_output_names or "joint_vel" not in self.onnx_output_names:
+            return None
+
+        input_feed = {self._obs_input_name: self._build_zero_actor_obs()}
+        if self._time_step_input_name:
+            input_feed[self._time_step_input_name] = np.array([[int(motion_timestep)]], dtype=np.float32)
+        if self._perception_input_name:
+            input_feed[self._perception_input_name] = self._build_zero_perception_obs()
+
+        fetch_names = ["joint_pos", "joint_vel"]
+        if "ref_quat_xyzw" in self.onnx_output_names:
+            fetch_names.append("ref_quat_xyzw")
+        if "ref_pos_xyz" in self.onnx_output_names:
+            fetch_names.append("ref_pos_xyz")
+
+        outputs = self.onnx_policy_session.run(fetch_names, input_feed)
+        return dict(zip(fetch_names, outputs))
+
+    def _refresh_motion_outputs_for_current_timestep(self) -> None:
+        if not self._uses_motion_command or self._time_step_input_name is None:
+            return
+
+        motion_timestep = self._get_motion_index()
+        if self._last_motion_output_timestep == motion_timestep and self.motion_command_t is not None:
+            return
+
+        outputs = self._query_motion_outputs_at(motion_timestep)
+        if outputs is None:
+            return
+
+        joint_pos = outputs.get("joint_pos")
+        joint_vel = outputs.get("joint_vel")
+        if joint_pos is None or joint_vel is None:
+            return
+
+        self.motion_command_t = np.concatenate(
+            [np.asarray(joint_pos, dtype=np.float32), np.asarray(joint_vel, dtype=np.float32)],
+            axis=1,
+        )
+        ref_quat_xyzw = outputs.get("ref_quat_xyzw")
+        if ref_quat_xyzw is not None:
+            self.ref_quat_xyzw_t = np.asarray(ref_quat_xyzw, dtype=np.float32)
+        ref_pos_xyz = outputs.get("ref_pos_xyz")
+        if ref_pos_xyz is not None:
+            self.ref_pos_xyz_t = np.asarray(ref_pos_xyz, dtype=np.float32)
+        self._last_motion_output_timestep = int(motion_timestep)
+
+    @staticmethod
+    def _preview_array(values: np.ndarray | None, count: int = 6) -> list[float] | None:
+        if values is None:
+            return None
+        arr = np.asarray(values, dtype=np.float32).reshape(-1)
+        if arr.size == 0:
+            return []
+        return np.round(arr[:count], 4).tolist()
+
+    def _build_first_step_actor_obs_with_overrides(
+        self,
+        robot_state_data: np.ndarray,
+        *,
+        use_root_reference_at_clip_start: bool,
+        prefer_sim_ref_from_sim_state: bool,
+        motion_timestep_override: int | None = None,
+    ) -> np.ndarray:
+        old_use_root_reference = bool(getattr(self.config.task, "use_root_reference_at_clip_start", False))
+        old_prefer_sim_ref = bool(getattr(self.config.task, "prefer_sim_ref_from_sim_state", False))
+        old_motion_timestep = int(self.motion_timestep)
+        old_motion_command_t = None if self.motion_command_t is None else self.motion_command_t.copy()
+        old_ref_quat_xyzw_t = None if self.ref_quat_xyzw_t is None else self.ref_quat_xyzw_t.copy()
+        old_ref_pos_xyz_t = None if self.ref_pos_xyz_t is None else self.ref_pos_xyz_t.copy()
+        old_last_motion_output_timestep = self._last_motion_output_timestep
+        try:
+            object.__setattr__(self.config.task, "use_root_reference_at_clip_start", use_root_reference_at_clip_start)
+            object.__setattr__(self.config.task, "prefer_sim_ref_from_sim_state", prefer_sim_ref_from_sim_state)
+            if motion_timestep_override is not None:
+                self.motion_timestep = int(motion_timestep_override)
+                self._last_motion_output_timestep = None
+                self._refresh_motion_outputs_for_current_timestep()
+            current_obs_buffer_dict = self.get_current_obs_buffer_dict(robot_state_data)
+        finally:
+            object.__setattr__(self.config.task, "use_root_reference_at_clip_start", old_use_root_reference)
+            object.__setattr__(self.config.task, "prefer_sim_ref_from_sim_state", old_prefer_sim_ref)
+            self.motion_timestep = old_motion_timestep
+            self.motion_command_t = old_motion_command_t
+            self.ref_quat_xyzw_t = old_ref_quat_xyzw_t
+            self.ref_pos_xyz_t = old_ref_pos_xyz_t
+            self._last_motion_output_timestep = old_last_motion_output_timestep
+
+        current_obs_dict = self.parse_current_obs_dict(current_obs_buffer_dict)
+        group_outputs: dict[str, np.ndarray] = {}
+        for group, term_dict in current_obs_dict.items():
+            history_len = self.history_length_dict.get(group, 1)
+            flattened_terms: list[np.ndarray] = []
+            for term in self.obs_terms_sorted[group]:
+                obs = np.asarray(term_dict[term], dtype=np.float32, order="C")
+                if obs.ndim == 1:
+                    obs = obs.reshape(1, -1)
+                history = [np.zeros_like(obs) for _ in range(max(history_len - 1, 0))] + [obs]
+                stacked = np.stack(history[-history_len:], axis=1)
+                flattened_terms.append(stacked.reshape(obs.shape[0], -1))
+            group_outputs[group] = (
+                np.concatenate(flattened_terms, axis=1).astype(np.float32, copy=False)
+                if flattened_terms
+                else np.zeros((1, 0), dtype=np.float32)
+            )
+        return self._assemble_actor_obs(group_outputs)
+
+    def _log_first_policy_step_debug(
+        self,
+        robot_state_data: np.ndarray,
+        obs: dict[str, np.ndarray],
+        policy_action: np.ndarray,
+    ) -> None:
+        if self._logged_first_policy_step_debug:
+            return
+
+        actor_obs = obs.get("actor_obs")
+        input_terms = self.get_current_obs_buffer_dict(robot_state_data)
+        q_target = (
+            np.asarray(self.default_dof_angles, dtype=np.float32).reshape(1, -1)
+            + np.asarray(policy_action, dtype=np.float32) * np.asarray(self.policy_action_scales, dtype=np.float32)
+        )
+        sim_root_state = self._get_sim_root_state()
+        sim_ref_state = self._get_sim_ref_state()
+        sim_object_state = self._get_sim_actor_state(self.config.task.sim_object_name)
+
+        self.logger.info(
+            "First active policy step debug: timestep={} actor_obs_dim={} dof_pos[:6]={} motion_q[:6]={} "
+            "base_ang_vel={}",
+            int(self.motion_timestep),
+            0 if actor_obs is None else int(actor_obs.shape[1]),
+            self._preview_array(input_terms.get("dof_pos"), count=6),
+            self._preview_array(self.motion_command_t[:, : self.num_dofs] if self.motion_command_t is not None else None),
+            self._preview_array(input_terms.get("base_ang_vel"), count=3),
+        )
+        self.logger.info(
+            "First active policy step debug: motion_ref_ori_b[:6]={} actions_in[:6]={} "
+            "obj_target_pose_size_b[:12]={} obj_pos_b[:3]={} obj_ori_b[:6]={}",
+            self._preview_array(input_terms.get("motion_ref_ori_b")),
+            self._preview_array(input_terms.get("actions")),
+            self._preview_array(input_terms.get("obj_target_pose_size_b"), count=12),
+            self._preview_array(input_terms.get("obj_pos_b"), count=3),
+            self._preview_array(input_terms.get("obj_ori_b")),
+        )
+        self.logger.info(
+            "First active policy step debug: policy_action[:6]={} scaled_action[:6]={} q_target[:6]={}",
+            self._preview_array(policy_action),
+            self._preview_array(np.asarray(policy_action, dtype=np.float32) * np.asarray(self.policy_action_scales, dtype=np.float32)),
+            self._preview_array(q_target),
+        )
+        self.logger.info(
+            "First active policy step debug: sim_root_pos={} sim_root_quat_xyzw={} sim_ref_pos={} sim_ref_quat_xyzw={} "
+            "sim_object_pos={} sim_object_quat_xyzw={}",
+            self._preview_array(sim_root_state[:, :3] if sim_root_state is not None else None, count=3),
+            self._preview_array(sim_root_state[:, 3:7] if sim_root_state is not None else None, count=4),
+            self._preview_array(sim_ref_state[:, :3] if sim_ref_state is not None else None, count=3),
+            self._preview_array(sim_ref_state[:, 3:7] if sim_ref_state is not None else None, count=4),
+            self._preview_array(sim_object_state[:, :3] if sim_object_state is not None else None, count=3),
+            self._preview_array(sim_object_state[:, 3:7] if sim_object_state is not None else None, count=4),
+        )
+
+        if int(self.motion_timestep) == 0 and self._obs_input_name is not None:
+            alt_cases = [
+                (
+                    "no_root_ref_start_t0",
+                    False,
+                    bool(getattr(self.config.task, "prefer_sim_ref_from_sim_state", False)),
+                    0,
+                ),
+                (
+                    "no_sim_ref_override_t0",
+                    bool(getattr(self.config.task, "use_root_reference_at_clip_start", False)),
+                    False,
+                    0,
+                ),
+                ("ref_body_only_t0", False, False, 0),
+                (
+                    "training_like_t1",
+                    bool(getattr(self.config.task, "use_root_reference_at_clip_start", False)),
+                    bool(getattr(self.config.task, "prefer_sim_ref_from_sim_state", False)),
+                    1,
+                ),
+                ("ref_body_only_t1", False, False, 1),
+            ]
+            for label, use_root_reference, prefer_sim_ref, motion_timestep_override in alt_cases:
+                alt_obs = self._build_first_step_actor_obs_with_overrides(
+                    robot_state_data,
+                    use_root_reference_at_clip_start=use_root_reference,
+                    prefer_sim_ref_from_sim_state=prefer_sim_ref,
+                    motion_timestep_override=motion_timestep_override,
+                )
+                alt_input_feed = {self._obs_input_name: alt_obs}
+                if self._perception_input_name:
+                    perception_obs = self._get_split_perception_obs()
+                    if perception_obs is not None:
+                        alt_input_feed[self._perception_input_name] = perception_obs
+                if self._time_step_input_name:
+                    alt_input_feed[self._time_step_input_name] = np.array([[motion_timestep_override]], dtype=np.float32)
+                alt_outputs = self.policy(alt_input_feed)
+                alt_policy_action = alt_outputs[self._action_output_name]
+                alt_scaled_action = np.asarray(alt_policy_action, dtype=np.float32) * np.asarray(
+                    self.policy_action_scales, dtype=np.float32
+                )
+                alt_q_target = np.asarray(self.default_dof_angles, dtype=np.float32).reshape(1, -1) + alt_scaled_action
+                self.logger.info(
+                    "First active policy step counterfactual [{}]: policy_action[:6]={} scaled_action[:6]={} q_target[:6]={}",
+                    label,
+                    self._preview_array(alt_policy_action),
+                    self._preview_array(alt_scaled_action),
+                    self._preview_array(alt_q_target),
+                )
+        self._logged_first_policy_step_debug = True
 
     def _get_split_perception_obs(self) -> np.ndarray | None:
         if self._perception_input_name is None:
@@ -907,10 +1404,14 @@ class WholeBodyTrackingPolicy(BasePolicy):
         super()._restore_policy_state(state)
         self.motion_command_0 = state["motion_command_0"].copy()
         self.ref_quat_xyzw_0 = state["ref_quat_xyzw_0"].copy()
+        self._reset_observation_history_state()
         self.motion_clip_progressing = False
         self.motion_timestep = 0
         self.motion_start_timestep = None
         self._last_clock_reading = None
+        self._logged_first_policy_step_debug = False
+        self._training_freeze_zero_remaining_holds = 0
+        self._logged_training_freeze_zero_alignment = False
         self.robot_yaw_offset = 0.0
         self._logged_root_reference_clip_start = False
         self._logged_sim_ref_from_sim_state = False
@@ -919,12 +1420,16 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
     def _on_policy_switched(self, model_path: str):
         super()._on_policy_switched(model_path)
+        self._reset_observation_history_state()
         self.motion_command_t = self.motion_command_0.copy()
         self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
         self.motion_clip_progressing = False
         self.motion_timestep = 0
         self.motion_start_timestep = None
         self._last_clock_reading = None
+        self._logged_first_policy_step_debug = False
+        self._training_freeze_zero_remaining_holds = 0
+        self._logged_training_freeze_zero_alignment = False
         self._stiff_hold_active = True
         self.robot_yaw_offset = 0.0
         self._logged_root_reference_clip_start = False
@@ -1069,6 +1574,20 @@ class WholeBodyTrackingPolicy(BasePolicy):
         rel_quat_b = subtract_frame_transforms(robot_ref_quat_wxyz, target_quat_wxyz)
         return rel_pos_b.astype(np.float32, copy=False), rel_quat_b.astype(np.float32, copy=False)
 
+    def _get_base_lin_vel_obs(self, robot_state_data: np.ndarray) -> np.ndarray:
+        sim_root_state = self._get_sim_root_state()
+        if sim_root_state is not None:
+            root_quat_wxyz = xyzw_to_wxyz(sim_root_state[:, 3:7])
+            return quat_rotate_inverse(root_quat_wxyz, sim_root_state[:, 7:10]).astype(np.float32, copy=False)
+        return robot_state_data[:, 7 + self.num_dofs : 7 + self.num_dofs + 3].astype(np.float32, copy=False)
+
+    def _get_base_ang_vel_obs(self, robot_state_data: np.ndarray) -> np.ndarray:
+        sim_root_state = self._get_sim_root_state()
+        if sim_root_state is not None:
+            root_quat_wxyz = xyzw_to_wxyz(sim_root_state[:, 3:7])
+            return quat_rotate_inverse(root_quat_wxyz, sim_root_state[:, 10:13]).astype(np.float32, copy=False)
+        return robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6].astype(np.float32, copy=False)
+
     def _get_motion_ref_ori_b(self, robot_state_data: np.ndarray) -> np.ndarray:
         motion_ref_ori = xyzw_to_wxyz(self.ref_quat_xyzw_t)
         motion_ref_ori = self._remove_yaw_offset(motion_ref_ori, self.motion_yaw_offset)
@@ -1129,17 +1648,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
         obj_ang_vel_b = quat_rotate_inverse(robot_ref_quat_wxyz, current_object_ang_vel_w)
         object_size = self._motion_data.object_size[idx : idx + 1].astype(np.float32, copy=False)
 
-        sim_root_state = self._get_sim_root_state()
-        if sim_root_state is not None:
-            root_quat_wxyz = xyzw_to_wxyz(sim_root_state[:, 3:7])
-            base_ang_vel = quat_rotate_inverse(root_quat_wxyz, sim_root_state[:, 10:13])
-        else:
-            base_ang_vel = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
-
         return {
             "motion_command": self.motion_command_t,
             "motion_ref_ori_b": self._get_motion_ref_ori_b(robot_state_data),
-            "base_ang_vel": base_ang_vel.astype(np.float32, copy=False),
+            "base_ang_vel": self._get_base_ang_vel_obs(robot_state_data),
             "dof_pos": robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles,
             "dof_vel": robot_state_data[:, 7 + self.num_dofs + 6 : 7 + self.num_dofs + 6 + self.num_dofs],
             "actions": self.last_policy_action,
@@ -1153,10 +1665,68 @@ class WholeBodyTrackingPolicy(BasePolicy):
         }
 
     def _get_legacy_object_obs_buffer_dict(self, robot_state_data: np.ndarray) -> dict[str, np.ndarray]:
-        obs = self._get_object_generalist_obs_buffer_dict(robot_state_data)
-        obs.pop("obj_lin_vel_b", None)
-        obs.pop("obj_ang_vel_b", None)
-        return obs
+        current_obs_buffer_dict = {
+            "motion_command": self.motion_command_t,
+            "motion_ref_ori_b": self._get_motion_ref_ori_b(robot_state_data),
+            "base_ang_vel": self._get_base_ang_vel_obs(robot_state_data),
+            "dof_pos": robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles,
+            "dof_vel": robot_state_data[:, 7 + self.num_dofs + 6 : 7 + self.num_dofs + 6 + self.num_dofs],
+            "actions": self.last_policy_action,
+        }
+
+        robot_ref_pos_w, robot_ref_quat_wxyz = self._get_observation_reference_pose_in_world(robot_state_data)
+        sim_object_state = self._get_sim_actor_state(self.config.task.sim_object_name)
+        sim_ref_state = self._get_sim_ref_state()
+        use_root_reference = self._should_use_root_reference_at_clip_start()
+        if (
+            (not use_root_reference)
+            and bool(getattr(self.config.task, "prefer_sim_ref_from_sim_state", False))
+            and sim_ref_state is not None
+            and sim_ref_state.shape[1] >= 7
+        ):
+            robot_ref_pos_w = sim_ref_state[:, :3].astype(np.float32, copy=False)
+            robot_ref_quat_wxyz = xyzw_to_wxyz(sim_ref_state[:, 3:7]).astype(np.float32, copy=False)
+
+        if sim_object_state is None:
+            object_pos_b = np.zeros((1, 3), dtype=np.float32)
+            object_ori_6d = np.zeros((1, 6), dtype=np.float32)
+        else:
+            current_object_pos_w = sim_object_state[:, :3].astype(np.float32, copy=False)
+            current_object_quat_wxyz = xyzw_to_wxyz(sim_object_state[:, 3:7]).astype(np.float32, copy=False)
+            object_pos_b, object_quat_b = self._pose_in_robot_ref_frame(
+                robot_ref_pos_w,
+                robot_ref_quat_wxyz,
+                current_object_pos_w,
+                current_object_quat_wxyz,
+            )
+            object_ori_6d = matrix_from_quat(object_quat_b)[..., :2].reshape(1, -1).astype(np.float32, copy=False)
+
+        if self._motion_data is None or not self._motion_data.has_object:
+            target_pose_size_b = np.zeros((1, 12), dtype=np.float32)
+        else:
+            self._maybe_update_motion_alignment(robot_state_data)
+            idx = self._get_motion_index()
+            target_pos_w = self._motion_data.object_pos_w[idx : idx + 1].copy()
+            target_quat_wxyz = self._motion_data.object_quat_w[idx : idx + 1].copy()
+            target_size = self._motion_data.object_size[idx : idx + 1].astype(np.float32, copy=False)
+            if self._motion_align_quat_wxyz is not None:
+                target_pos_w = self._apply_motion_alignment_pos(target_pos_w)
+                target_quat_wxyz = self._apply_motion_alignment_quat(target_quat_wxyz)
+            target_pos_b, target_quat_b = self._pose_in_robot_ref_frame(
+                robot_ref_pos_w,
+                robot_ref_quat_wxyz,
+                target_pos_w.astype(np.float32, copy=False),
+                target_quat_wxyz.astype(np.float32, copy=False),
+            )
+            target_ori_6d = matrix_from_quat(target_quat_b)[..., :2].reshape(1, -1)
+            target_pose_size_b = np.concatenate([target_pos_b, target_ori_6d, target_size], axis=1).astype(
+                np.float32, copy=False
+            )
+
+        current_obs_buffer_dict["obj_target_pose_size_b"] = target_pose_size_b
+        current_obs_buffer_dict["obj_pos_b"] = object_pos_b.astype(np.float32, copy=False)
+        current_obs_buffer_dict["obj_ori_b"] = object_ori_6d.astype(np.float32, copy=False)
+        return current_obs_buffer_dict
 
     def _get_sparse_root_distill_obs_buffer_dict(self, robot_state_data: np.ndarray) -> dict[str, np.ndarray]:
         if self._motion_data is None:
@@ -1181,23 +1751,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
         robot_heading = self._quat_yaw(robot_root_quat_wxyz)
         rel_yaw = np.array([[self._normalize_angle(target_heading - robot_heading)]], dtype=np.float32)
 
-        sim_root_state = self._get_sim_root_state()
-        if sim_root_state is not None:
-            root_quat_wxyz = xyzw_to_wxyz(sim_root_state[:, 3:7])
-            base_lin_vel = quat_rotate_inverse(root_quat_wxyz, sim_root_state[:, 7:10])
-            base_ang_vel = quat_rotate_inverse(root_quat_wxyz, sim_root_state[:, 10:13])
-        else:
-            base_lin_vel_world = robot_state_data[:, 7 + self.num_dofs : 7 + self.num_dofs + 3]
-            base_ang_vel_world = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
-            base_lin_vel = quat_rotate_inverse(robot_root_quat_wxyz, base_lin_vel_world)
-            base_ang_vel = quat_rotate_inverse(robot_root_quat_wxyz, base_ang_vel_world)
-
         return {
             "sparse_target_root_trajectory_command": np.concatenate([rel_pos_b[:, :2], rel_yaw], axis=1).astype(
                 np.float32, copy=False
             ),
-            "base_lin_vel": base_lin_vel.astype(np.float32, copy=False),
-            "base_ang_vel": base_ang_vel.astype(np.float32, copy=False),
+            "base_lin_vel": self._get_base_lin_vel_obs(robot_state_data),
+            "base_ang_vel": self._get_base_ang_vel_obs(robot_state_data),
             "dof_pos": robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles,
             "dof_vel": robot_state_data[:, 7 + self.num_dofs + 6 : 7 + self.num_dofs + 6 + self.num_dofs],
             "actions": self.last_policy_action,
@@ -1211,7 +1770,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         idx = self._get_motion_index()
 
         base_quat = robot_state_data[:, 3:7]
-        base_ang_vel = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
+        base_ang_vel = self._get_base_ang_vel_obs(robot_state_data)
         dof_pos = robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles
         dof_vel = robot_state_data[:, 7 + self.num_dofs + 6 : 7 + self.num_dofs + 6 + self.num_dofs]
 
@@ -1256,6 +1815,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
     def get_current_obs_buffer_dict(self, robot_state_data):
         robot_state_data = self._augment_robot_state_with_sim_state(robot_state_data)
+        self._refresh_motion_outputs_for_current_timestep()
         if self._uses_videomimic:
             return self._get_videomimic_obs_buffer_dict(robot_state_data)
         if self._uses_sparse_root_distill:
@@ -1274,7 +1834,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         current_obs_buffer_dict["motion_ref_ori_b"] = self._get_motion_ref_ori_b(robot_state_data)
 
         # base_ang_vel
-        current_obs_buffer_dict["base_ang_vel"] = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
+        current_obs_buffer_dict["base_ang_vel"] = self._get_base_ang_vel_obs(robot_state_data)
 
         # dof_pos
         current_obs_buffer_dict["dof_pos"] = robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles
@@ -1293,6 +1853,23 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if self._auto_start_motion_clip_pending and self.use_policy_action and not self.motion_clip_progressing:
             self._auto_start_motion_clip_pending = False
             self._handle_start_motion_clip()
+
+        if (
+            self.motion_clip_progressing
+            and self.use_sim_time
+            and self._last_clock_reading is not None
+            and bool(getattr(self.config.task, "restart_motion_on_clock_reset", False))
+        ):
+            current_clock = self.clock_sub.get_clock()
+            if current_clock < self._last_clock_reading:
+                if bool(getattr(self.config.task, "auto_start_motion_clip", False)):
+                    self.logger.warning(
+                        "Clock sync returned earlier timestamp before inference; skipping actor step and re-arming auto-start stiff-hold."
+                    )
+                    self._rearm_auto_start_after_clock_reset()
+                    return self.scaled_policy_action
+                self.logger.warning("Clock sync returned earlier timestamp before inference; restarting motion clip from frame 0.")
+                self._handle_start_motion_clip()
 
         # prepare obs, run policy inference
         if not self.motion_clip_progressing:
@@ -1323,7 +1900,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
         outputs = self.policy(input_feed)
         policy_action = outputs[self._action_output_name]
 
-        if self._uses_motion_command:
+        self._log_first_policy_step_debug(robot_state_data, obs, policy_action)
+
+        if self._uses_motion_command and not self._should_source_motion_outputs_from_motion_data():
             joint_pos = outputs.get("joint_pos")
             joint_vel = outputs.get("joint_vel")
             if joint_pos is None or joint_vel is None:
@@ -1353,17 +1932,35 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if not self._stiff_hold_active:
             return None
         hold_q = self._stiff_hold_q.copy()
-        if (
-            bool(getattr(self.config.task, "use_zmq_lowcmd", False))
-            and self.motion_command_0 is not None
-            and not self.motion_clip_progressing
-        ):
-            hold_q = self.motion_command_0[:, : self.num_dofs].astype(np.float32, copy=True)
         return {
             "q": hold_q,
             "kp": self._stiff_hold_kp,
             "kd": self._stiff_hold_kd,
         }
+
+    def _rearm_auto_start_after_clock_reset(self) -> None:
+        self._reset_observation_history_state()
+        self.last_policy_action.fill(0.0)
+        self._auto_start_force_motion_start_pose = True
+        if self.motion_command_0 is not None:
+            hold_q = self.motion_command_0[:, : self.num_dofs].astype(np.float32, copy=False)
+            hold_offset = hold_q - self.default_dof_angles.reshape(1, -1)
+            self.scaled_policy_action = hold_offset.astype(np.float32, copy=True)
+            self.motion_command_t = self.motion_command_0.copy()
+        if self.ref_quat_xyzw_0 is not None:
+            self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
+        self._auto_start_rearm_requested = True
+        self.motion_clip_progressing = False
+        self.motion_timestep = 0
+        self.motion_start_timestep = None
+        self._last_clock_reading = None
+        self._last_motion_output_timestep = 0
+        self._logged_first_policy_step_debug = False
+        self._training_freeze_zero_remaining_holds = 0
+        self._logged_training_freeze_zero_alignment = False
+        self._logged_root_reference_clip_start = False
+        self._logged_sim_ref_from_sim_state = False
+        self._suppress_root_reference_at_clip_start = False
 
     def _can_finish_pending_policy_start(self, robot_state_data: np.ndarray) -> bool:  # noqa: ARG002
         if self._perception_input_name is None:
@@ -1393,11 +1990,37 @@ class WholeBodyTrackingPolicy(BasePolicy):
     def _update_clock(self):
         # Use synchronized clock with motion-relative timing
         current_clock = self.clock_sub.get_clock()
+        if self._training_freeze_zero_remaining_holds > 0:
+            self._training_freeze_zero_remaining_holds -= 1
+            if not self._logged_training_freeze_zero_alignment:
+                self.logger.info(
+                    "Applying training-like timestep-0 freeze: prob={:.2f}, extra_holds={}",
+                    self._training_freeze_zero_prob,
+                    self._training_freeze_zero_extra_holds,
+                )
+                self._logged_training_freeze_zero_alignment = True
+            if self._training_freeze_zero_remaining_holds == 0:
+                self.motion_timestep = 1
+                self.motion_start_timestep = current_clock - int(round(self.timestep_interval_ms))
+                self._last_clock_reading = current_clock
+                self.logger.info("Released training-like timestep-0 freeze; next observation will use motion timestep 1.")
+            else:
+                self.motion_timestep = 0
+                self.motion_start_timestep = None
+                self._last_clock_reading = None
+            return
         if self.motion_start_timestep is None:
             # Motion just started; anchor to the first received clock tick.
             self.motion_start_timestep = current_clock
         elif self._last_clock_reading is not None and current_clock < self._last_clock_reading:
             if bool(getattr(self.config.task, "restart_motion_on_clock_reset", False)):
+                if bool(getattr(self.config.task, "auto_start_motion_clip", False)):
+                    self.logger.warning(
+                        "Clock sync returned earlier timestamp; re-arming auto-start stiff-hold before restarting the motion clip."
+                    )
+                    self._rearm_auto_start_after_clock_reset()
+                    return
+
                 self.logger.warning("Clock sync returned earlier timestamp; restarting motion clip from frame 0.")
                 self._handle_start_motion_clip()
                 current_clock = self.clock_sub.get_clock()
@@ -1439,6 +2062,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.use_policy_action = False
         self.get_ready_state = False
         self._stiff_hold_active = True
+        self._reset_observation_history_state()
+        self._preserve_obs_history_on_next_motion_start = False
+        self._suppress_root_reference_at_clip_start = False
+        self._auto_start_history_snapshot = None
         robot_state_data = self.interface.get_low_state()
         if robot_state_data is not None and robot_state_data.shape[1] >= 7 + self.num_dofs:
             self._stiff_hold_q = robot_state_data[:, 7 : 7 + self.num_dofs].astype(np.float32, copy=True)
@@ -1451,7 +2078,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_start_timestep = None  # Reset motion start time
         self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
         self.motion_command_t = self.motion_command_0.copy()
+        self._last_motion_output_timestep = 0
         self._last_clock_reading = None
+        self._training_freeze_zero_remaining_holds = 0
+        self._logged_training_freeze_zero_alignment = False
         self.robot_yaw_offset = 0.0
         self._logged_root_reference_clip_start = False
         self._logged_sim_ref_from_sim_state = False
@@ -1461,12 +2091,26 @@ class WholeBodyTrackingPolicy(BasePolicy):
     def _handle_start_motion_clip(self):
         """Handle start motion clip action."""
         self.clock_sub.reset_origin()
+        if self._preserve_obs_history_on_next_motion_start:
+            self._preserve_obs_history_on_next_motion_start = False
+        else:
+            self._reset_observation_history_state()
+        self._auto_start_history_snapshot = None
         self.motion_clip_progressing = True
         # Capture motion-specific start timestep for policy-level timing control
         self.motion_start_timestep = None  # will be set in rl_inference
         self.motion_timestep = 0  # Reset to start from beginning of motion
+        self._last_motion_output_timestep = None
+        if self.motion_command_0 is not None:
+            self.motion_command_t = self.motion_command_0.copy()
+        if self.ref_quat_xyzw_0 is not None:
+            self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
+        self._refresh_motion_outputs_for_current_timestep()
         self._last_clock_reading = None
+        self._training_freeze_zero_remaining_holds = self._training_freeze_zero_extra_holds
+        self._logged_training_freeze_zero_alignment = False
         self._logged_root_reference_clip_start = False
+        self._logged_first_policy_step_debug = False
         if self._motion_alignment_enabled:
             robot_state_data = self.interface.get_low_state()
             if robot_state_data is not None:
@@ -1523,3 +2167,25 @@ class WholeBodyTrackingPolicy(BasePolicy):
         quat_flat = quat_wxyz.reshape(-1, 4)[0]
         _, _, yaw = quat_to_rpy(quat_flat)
         return float(yaw)
+
+    def policy_action(self):
+        if (
+            self.motion_clip_progressing
+            and self.use_sim_time
+            and self._last_clock_reading is not None
+            and bool(getattr(self.config.task, "restart_motion_on_clock_reset", False))
+            and bool(getattr(self.config.task, "auto_start_motion_clip", False))
+        ):
+            current_clock = self.clock_sub.get_clock()
+            if current_clock < self._last_clock_reading:
+                self.logger.warning(
+                    "Clock sync returned earlier timestamp before control step; re-arming auto-start stiff-hold immediately."
+                )
+                self._rearm_auto_start_after_clock_reset()
+                self._auto_start_rearm_requested = False
+                self._maybe_auto_start_rollout()
+        super().policy_action()
+        if self._auto_start_rearm_requested:
+            self._auto_start_rearm_requested = False
+            self._maybe_auto_start_rollout()
+        self._maybe_advance_auto_start_state()

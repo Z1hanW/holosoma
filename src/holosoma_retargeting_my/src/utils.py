@@ -16,6 +16,13 @@ import trimesh
 from jinja2 import Template
 from scipy.spatial import Delaunay  # type: ignore[import-untyped]
 from scipy.spatial.transform import Rotation as R  # type: ignore[import-untyped]  # noqa: N817
+from holosoma.utils.object_pose_correction import (
+    apply_omomo_largebox_center_offset_wxyz_np,
+    apply_omomo_largebox_ground_contact_wxyz_np,
+    apply_omomo_largebox_primitive_local_alignment_wxyz_np,
+    apply_omomo_largebox_zup_correction_wxyz_np,
+    is_omomo_largebox_clip,
+)
 
 
 def load_intermimic_data(file_path):
@@ -32,6 +39,11 @@ def load_intermimic_data(file_path):
     human_joints = intermimic_data[:, 162 : 162 + 52 * 3].reshape(-1, 52, 3)
     # Reorder quaternion from [qx, qy, qz, qw] to [qw, qx, qy, qz]
     object_poses = intermimic_data[:, 318:325][:, [6, 3, 4, 5, 0, 1, 2]]
+    if is_omomo_largebox_clip(Path(file_path).stem, object_name="largebox"):
+        object_poses[:, :4] = apply_omomo_largebox_zup_correction_wxyz_np(object_poses[:, :4])
+        object_poses[:, :4] = apply_omomo_largebox_primitive_local_alignment_wxyz_np(object_poses[:, :4])
+        object_poses[:, 4:7] = apply_omomo_largebox_center_offset_wxyz_np(object_poses[:, 4:7], object_poses[:, :4])
+        object_poses[:, 4:7] = apply_omomo_largebox_ground_contact_wxyz_np(object_poses[:, 4:7], object_poses[:, :4])
     return human_joints, object_poses
 
 

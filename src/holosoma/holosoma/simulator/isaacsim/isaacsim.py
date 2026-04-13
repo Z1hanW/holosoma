@@ -1446,9 +1446,17 @@ class IsaacSim(BaseSimulator):
         # call super
         super().set_headless(headless)
         if not self.headless:
-            from isaacsim.util.debug_draw import _debug_draw
-
-            self.draw = _debug_draw.acquire_debug_draw_interface()
+            try:
+                from isaacsim.util.debug_draw import _debug_draw
+            except (ImportError, ModuleNotFoundError) as exc:
+                logger.warning(
+                    "Isaac Sim debug draw is unavailable in this environment; "
+                    "continuing without debug draw. Error: {}",
+                    exc,
+                )
+                self.draw = None
+            else:
+                self.draw = _debug_draw.acquire_debug_draw_interface()
         else:
             self.draw = None
 

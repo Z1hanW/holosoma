@@ -57,7 +57,13 @@ g1_29dof_wbt = InferenceConfig(
 g1_29dof_wbt_w_object = replace(
     g1_29dof_wbt,
     observation=observation.wbt_w_object,
-    task=task.wbt,
+    task=replace(
+        task.wbt,
+        use_sim_time=True,
+        use_sim_state=True,
+        prefer_sim_ref_from_sim_state=True,
+        restart_motion_on_clock_reset=True,
+    ),
 )
 
 g1_29dof_wbt_object_generalist = replace(

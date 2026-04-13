@@ -161,6 +161,14 @@ class BasePolicy:
 
             self.obs_buf_dict[group] = np.concatenate(flattened_terms, axis=1) if flattened_terms else np.zeros((1, 0))
 
+    def _reset_observation_history_state(self) -> None:
+        """Reset stacked observation history to the post-reset training state."""
+        self._initialize_history_state()
+        if hasattr(self, "last_policy_action"):
+            self.last_policy_action.fill(0.0)
+        if hasattr(self, "scaled_policy_action"):
+            self.scaled_policy_action.fill(0.0)
+
     def _init_communication_components(self):
         """Initialize state processor and command sender using the wrapper."""
         if bool(getattr(self.config.task, "use_zmq_lowcmd", False)):
@@ -404,9 +412,24 @@ class BasePolicy:
         self.use_joystick = False
         # Check if running in a TTY environment
         if not sys.stdin.isatty():
+            auto_start_requested = bool(
+                getattr(self.config.task, "auto_start_policy", False)
+                or getattr(self.config.task, "auto_start_motion", False)
+                or getattr(self.config.task, "auto_start_motion_clip", False)
+            )
             self.logger.warning("Not running in a TTY environment - keyboard input disabled")
             self.logger.warning("This is normal for automated tests or non-interactive environments")
             if int(getattr(self.config.task, "policy_control_port", 0) or 0) > 0:
+                if auto_start_requested:
+                    self.logger.info(
+                        "Policy-control channel is available; auto-start is enabled, waiting for the first valid "
+                        "robot state before enabling policy actions."
+                    )
+                    self._pending_noninteractive_policy_start = True
+                    self.use_policy_action = False
+                    if hasattr(self.interface, "no_action"):
+                        self.interface.no_action = 1
+                    return
                 self.logger.info("Policy-control channel is available; waiting for manual viewer actions.")
                 self._pending_noninteractive_policy_start = False
                 self.use_policy_action = False
@@ -727,6 +750,16 @@ class BasePolicy:
         # Stage 1: Read State
         with self.latency_tracker.measure("read_state"):
             robot_state_data = self.interface.get_low_state()
+
+        if not self._has_valid_robot_state(robot_state_data):
+            if not getattr(self, "_waiting_for_valid_robot_state_logged", False):
+                self.logger.info("Waiting for first valid robot state before issuing commands.")
+                self._waiting_for_valid_robot_state_logged = True
+            return
+
+        if getattr(self, "_waiting_for_valid_robot_state_logged", False):
+            self.logger.info("Received valid robot state; continuing control loop.")
+            self._waiting_for_valid_robot_state_logged = False
 
         # Stage 2: Pre-processing
         with self.latency_tracker.measure("preprocessing"):

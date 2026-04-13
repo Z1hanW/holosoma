@@ -445,13 +445,29 @@ def replay(tyro_config: ExperimentConfig):
         try:
             while True:
                 viser_live = getattr(env, "_viser_live", None)
-                if viser_live is not None and getattr(viser_live, "enabled", False):
-                    viser_live.apply_pending_controls()
-                    viser_live.wait_if_paused()
+                viewer_enabled = bool(viser_live is not None and getattr(viser_live, "enabled", False))
+                if viewer_enabled and hasattr(env, "step_visualize_motion"):
+                    env.simulator.sim.step()
+                    done = env.step_visualize_motion(None)  # type: ignore[attr-defined]
+                    if getattr(env, "perception_manager", None) is not None:
+                        env.perception_manager.update()
+                    if done:
+                        play_control = getattr(viser_live, "_play_control", None)
+                        if play_control is not None:
+                            try:
+                                play_control.value = False
+                            except Exception:
+                                pass
+                        try:
+                            viser_live._play_last_value = False
+                        except Exception:
+                            pass
+                    continue
+
                 env.simulator.sim.step()
                 if getattr(env, "perception_manager", None) is not None:
                     env.perception_manager.update()
-                if viser_live is not None and getattr(viser_live, "enabled", False):
+                if viewer_enabled:
                     viser_live.record_step()
         except KeyboardInterrupt:
             pass

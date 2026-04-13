@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 import mujoco
 import mujoco.viewer
@@ -35,6 +36,11 @@ from holosoma.simulator.shared.object_registry import ObjectType
 from holosoma.simulator.shared.virtual_gantry import create_virtual_gantry
 from holosoma.simulator.types import ActorIndices, ActorNames, ActorPoses, ActorStates, EnvIds
 from holosoma.utils.adapters import mujoco_draw_adapter
+from holosoma.utils.object_geometry import load_urdf_box_primitive_metadata
+from holosoma.utils.object_pose_correction import (
+    get_omomo_largebox_canonical_local_correction_wxyz_np,
+    uses_omomo_largebox_primitive_semantics,
+)
 
 
 class MuJoCoScene:
@@ -147,6 +153,7 @@ class MuJoCo(BaseSimulator):
         self.object_contact_forces_history = torch.zeros(0, device=device)
         self._object_urdf_by_name: dict[str, str] = {}
         self._object_body_name_by_name: dict[str, str] = {}
+        self._object_state_semantics_by_name: dict[str, dict[str, np.ndarray]] = {}
         self._object_mujoco_body_ids: set[int] = set()
         self._actor_root_metadata: dict[str, dict[str, int | str]] = {}
         self._rigid_body_mujoco_ids: list[int] = []
@@ -183,6 +190,130 @@ class MuJoCo(BaseSimulator):
         self.commands: torch.Tensor | None = None  # Will be initialized in create_envs when num_envs is known
 
         logger.info("=== MuJoCo Simulator Initialization Completed ===")
+
+    @staticmethod
+    def _quat_mul_wxyz_np(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        aw, ax, ay, az = [float(v) for v in a]
+        bw, bx, by, bz = [float(v) for v in b]
+        return np.asarray(
+            [
+                aw * bw - ax * bx - ay * by - az * bz,
+                aw * bx + ax * bw + ay * bz - az * by,
+                aw * by - ax * bz + ay * bw + az * bx,
+                aw * bz + ax * by - ay * bx + az * bw,
+            ],
+            dtype=np.float64,
+        )
+
+    @staticmethod
+    def _quat_inverse_wxyz_np(q: np.ndarray) -> np.ndarray:
+        inv = np.asarray(q, dtype=np.float64).copy()
+        inv[1:] *= -1.0
+        return inv
+
+    @classmethod
+    def _quat_rotate_vec_wxyz_np(cls, quat_wxyz: np.ndarray, vec_xyz: np.ndarray) -> np.ndarray:
+        quat = np.asarray(quat_wxyz, dtype=np.float64)
+        vec = np.asarray(vec_xyz, dtype=np.float64)
+        q_vec = quat[1:]
+        uv = np.cross(q_vec, vec)
+        uuv = np.cross(q_vec, uv)
+        return vec + 2.0 * (quat[:1] * uv + uuv)
+
+    def _initialize_object_state_semantics(self) -> None:
+        self._object_state_semantics_by_name = {}
+        object_cfg = getattr(self.robot_config, "object", None)
+        raw_scale = getattr(object_cfg, "scale", None) if object_cfg is not None else None
+        object_scale = None if raw_scale is None else np.asarray([float(value) for value in raw_scale], dtype=np.float64)
+
+        for object_name, object_urdf in self._object_urdf_by_name.items():
+            metadata = load_urdf_box_primitive_metadata(object_urdf)
+            if metadata is None:
+                continue
+
+            center_offset = np.asarray(metadata.center_offset, dtype=np.float64)
+            if object_scale is not None:
+                center_offset = center_offset * object_scale
+
+            local_quat_wxyz = np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+            if uses_omomo_largebox_primitive_semantics(object_name=object_name, object_urdf_path=object_urdf):
+                local_quat_wxyz = get_omomo_largebox_canonical_local_correction_wxyz_np().astype(np.float64)
+
+            if np.allclose(center_offset, 0.0) and np.allclose(local_quat_wxyz, np.asarray([1.0, 0.0, 0.0, 0.0])):
+                continue
+
+            self._object_state_semantics_by_name[object_name] = {
+                "local_quat_wxyz": local_quat_wxyz,
+                "center_offset_xyz": center_offset,
+            }
+
+        if self._object_state_semantics_by_name:
+            logger.info(
+                "Initialized MuJoCo corrected object state semantics for actor(s): {}",
+                sorted(self._object_state_semantics_by_name.keys()),
+            )
+
+    def _apply_object_state_semantics(
+        self,
+        name: str,
+        pos: np.ndarray,
+        quat_xyzw: np.ndarray,
+        lin_vel: np.ndarray,
+        ang_vel: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        semantics = self._object_state_semantics_by_name.get(name)
+        if semantics is None:
+            return pos, quat_xyzw, lin_vel, ang_vel
+
+        quat_wxyz = np.asarray([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]], dtype=np.float64)
+        corrected_quat_wxyz = self._quat_mul_wxyz_np(quat_wxyz, semantics["local_quat_wxyz"])
+        corrected_quat_wxyz /= max(np.linalg.norm(corrected_quat_wxyz), 1.0e-8)
+
+        offset_world = self._quat_rotate_vec_wxyz_np(corrected_quat_wxyz, semantics["center_offset_xyz"])
+        corrected_pos = np.asarray(pos, dtype=np.float64) + offset_world
+        corrected_lin_vel = np.asarray(lin_vel, dtype=np.float64) + np.cross(np.asarray(ang_vel, dtype=np.float64), offset_world)
+        corrected_quat_xyzw = np.asarray(
+            [
+                corrected_quat_wxyz[1],
+                corrected_quat_wxyz[2],
+                corrected_quat_wxyz[3],
+                corrected_quat_wxyz[0],
+            ],
+            dtype=np.float64,
+        )
+        return corrected_pos, corrected_quat_xyzw, corrected_lin_vel, np.asarray(ang_vel, dtype=np.float64)
+
+    def _remove_object_state_semantics(
+        self,
+        name: str,
+        pos: np.ndarray,
+        quat_xyzw: np.ndarray,
+        lin_vel: np.ndarray,
+        ang_vel: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        semantics = self._object_state_semantics_by_name.get(name)
+        if semantics is None:
+            return pos, quat_xyzw, lin_vel, ang_vel
+
+        quat_wxyz = np.asarray([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]], dtype=np.float64)
+        offset_world = self._quat_rotate_vec_wxyz_np(quat_wxyz, semantics["center_offset_xyz"])
+        raw_pos = np.asarray(pos, dtype=np.float64) - offset_world
+        raw_lin_vel = np.asarray(lin_vel, dtype=np.float64) - np.cross(np.asarray(ang_vel, dtype=np.float64), offset_world)
+        raw_quat_wxyz = self._quat_mul_wxyz_np(
+            quat_wxyz,
+            self._quat_inverse_wxyz_np(semantics["local_quat_wxyz"]),
+        )
+        raw_quat_wxyz /= max(np.linalg.norm(raw_quat_wxyz), 1.0e-8)
+        raw_quat_xyzw = np.asarray(
+            [
+                raw_quat_wxyz[1],
+                raw_quat_wxyz[2],
+                raw_quat_wxyz[3],
+                raw_quat_wxyz[0],
+            ],
+            dtype=np.float64,
+        )
+        return raw_pos, raw_quat_xyzw, raw_lin_vel, np.asarray(ang_vel, dtype=np.float64)
 
     def _build_name_maps(self) -> None:
         """Build bidirectional name maps for clean <-> prefixed name translation.
@@ -352,6 +483,7 @@ class MuJoCo(BaseSimulator):
         self._setup_scene()
         self._object_urdf_by_name = dict(getattr(self.scene_manager, "_object_urdf_by_name", {}))
         self._object_body_name_by_name = dict(getattr(self.scene_manager, "_object_body_name_by_name", {}))
+        self._initialize_object_state_semantics()
 
         # Compile once at the end
         self.root_model = self.scene_manager.compile()
@@ -764,14 +896,24 @@ class MuJoCo(BaseSimulator):
         qpos_addr = int(metadata["qpos_addr"])
         qvel_addr = int(metadata["qvel_addr"])
 
-        pos = torch.tensor(self.root_data.qpos[qpos_addr : qpos_addr + 3], device=self.sim_device, dtype=torch.float32)
+        pos = np.asarray(self.root_data.qpos[qpos_addr : qpos_addr + 3], dtype=np.float64).copy()
         quat_mj = self.root_data.qpos[qpos_addr + 3 : qpos_addr + 7]
-        quat = torch.tensor([quat_mj[1], quat_mj[2], quat_mj[3], quat_mj[0]], device=self.sim_device, dtype=torch.float32)
-        lin_vel = torch.tensor(self.root_data.qvel[qvel_addr : qvel_addr + 3], device=self.sim_device, dtype=torch.float32)
+        quat_xyzw = np.asarray([quat_mj[1], quat_mj[2], quat_mj[3], quat_mj[0]], dtype=np.float64)
+        lin_vel = np.asarray(self.root_data.qvel[qvel_addr : qvel_addr + 3], dtype=np.float64).copy()
         ang_vel_local = self.root_data.qvel[qvel_addr + 3 : qvel_addr + 6]
         ang_vel_world = quat_apply_mujoco(quat_mj, ang_vel_local)
+        pos, quat_xyzw, lin_vel, ang_vel_world = self._apply_object_state_semantics(
+            name,
+            pos,
+            quat_xyzw,
+            lin_vel,
+            np.asarray(ang_vel_world, dtype=np.float64),
+        )
+        quat = torch.tensor(quat_xyzw, device=self.sim_device, dtype=torch.float32)
+        lin_vel_t = torch.tensor(lin_vel, device=self.sim_device, dtype=torch.float32)
         ang_vel = torch.tensor(ang_vel_world, device=self.sim_device, dtype=torch.float32)
-        return torch.cat([pos, quat, lin_vel, ang_vel], dim=0)
+        pos_t = torch.tensor(pos, device=self.sim_device, dtype=torch.float32)
+        return torch.cat([pos_t, quat, lin_vel_t, ang_vel], dim=0)
 
     def _actor_pose_from_qpos(self, name: str) -> torch.Tensor:
         assert self.root_data is not None
@@ -781,10 +923,19 @@ class MuJoCo(BaseSimulator):
             raise KeyError(f"Actor '{name}' is not registered in MuJoCo root metadata")
 
         qpos_addr = int(metadata["qpos_addr"])
-        pos = torch.tensor(self.root_data.qpos[qpos_addr : qpos_addr + 3], device=self.sim_device, dtype=torch.float32)
         quat_mj = self.root_data.qpos[qpos_addr + 3 : qpos_addr + 7]
-        quat = torch.tensor([quat_mj[1], quat_mj[2], quat_mj[3], quat_mj[0]], device=self.sim_device, dtype=torch.float32)
-        return torch.cat([pos, quat], dim=0)
+        pos = np.asarray(self.root_data.qpos[qpos_addr : qpos_addr + 3], dtype=np.float64).copy()
+        quat_xyzw = np.asarray([quat_mj[1], quat_mj[2], quat_mj[3], quat_mj[0]], dtype=np.float64)
+        pos, quat_xyzw, _, _ = self._apply_object_state_semantics(
+            name,
+            pos,
+            quat_xyzw,
+            np.zeros(3, dtype=np.float64),
+            np.zeros(3, dtype=np.float64),
+        )
+        pos_t = torch.tensor(pos, device=self.sim_device, dtype=torch.float32)
+        quat = torch.tensor(quat_xyzw, device=self.sim_device, dtype=torch.float32)
+        return torch.cat([pos_t, quat], dim=0)
 
     def _write_actor_state(self, name: str, state: torch.Tensor) -> None:
         assert self.root_data is not None
@@ -796,10 +947,17 @@ class MuJoCo(BaseSimulator):
         qpos_addr = int(metadata["qpos_addr"])
         qvel_addr = int(metadata["qvel_addr"])
 
-        pos = state[:3].detach().cpu().numpy()
-        quat_holosoma = state[3:7].detach().cpu().numpy()
-        lin_vel = state[7:10].detach().cpu().numpy()
-        ang_vel_world = state[10:13].detach().cpu().numpy()
+        pos = state[:3].detach().cpu().numpy().astype(np.float64, copy=True)
+        quat_holosoma = state[3:7].detach().cpu().numpy().astype(np.float64, copy=True)
+        lin_vel = state[7:10].detach().cpu().numpy().astype(np.float64, copy=True)
+        ang_vel_world = state[10:13].detach().cpu().numpy().astype(np.float64, copy=True)
+        pos, quat_holosoma, lin_vel, ang_vel_world = self._remove_object_state_semantics(
+            name,
+            pos,
+            quat_holosoma,
+            lin_vel,
+            ang_vel_world,
+        )
         quat_mj = np.array([quat_holosoma[3], quat_holosoma[0], quat_holosoma[1], quat_holosoma[2]], dtype=np.float64)
         ang_vel_local = quat_rotate_inverse_mujoco(quat_mj, ang_vel_world)
 
@@ -945,8 +1103,93 @@ class MuJoCo(BaseSimulator):
         snapshot_path = Path(self._mujoco_scene_xml_snapshot_path).expanduser().resolve()
         snapshot_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = snapshot_path.with_suffix(snapshot_path.suffix + ".tmp")
-        mujoco.mj_saveLastXML(str(tmp_path), self.root_model)
-        os.replace(tmp_path, snapshot_path)
+        try:
+            mujoco.mj_saveLastXML(str(tmp_path), self.root_model)
+            os.replace(tmp_path, snapshot_path)
+        except Exception as exc:
+            logger.warning(
+                "mj_saveLastXML failed for MuJoCo scene snapshot '{}': {}. Falling back to MjSpec.to_xml().",
+                snapshot_path,
+                exc,
+            )
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
+            scene_manager = getattr(self, "scene_manager", None)
+            world_spec = getattr(scene_manager, "world_spec", None)
+            if world_spec is None or not hasattr(world_spec, "to_xml"):
+                logger.warning("MjSpec.to_xml fallback unavailable for scene snapshot '{}'", snapshot_path)
+                return None
+            xml_text = world_spec.to_xml()
+            try:
+                root = ET.fromstring(xml_text)
+                candidate_dirs: list[Path] = []
+                robot_model_path = getattr(scene_manager, "robot_model_path", None)
+                if robot_model_path:
+                    robot_model_dir = Path(str(robot_model_path)).expanduser().resolve().parent
+                    candidate_dirs.extend([robot_model_dir, robot_model_dir / "assets"])
+                for object_urdf in getattr(self, "_object_urdf_by_name", {}).values():
+                    object_dir = Path(str(object_urdf)).expanduser().resolve().parent
+                    candidate_dirs.extend([object_dir, object_dir / "assets"])
+
+                dedup_dirs: list[Path] = []
+                for candidate_dir in candidate_dirs:
+                    if candidate_dir not in dedup_dirs:
+                        dedup_dirs.append(candidate_dir)
+
+                changed = False
+                for elem in root.iter():
+                    file_attr = elem.get("file")
+                    if not file_attr:
+                        continue
+                    file_path = Path(file_attr).expanduser()
+                    if file_path.is_absolute() and file_path.is_file():
+                        continue
+
+                    resolved_path: Path | None = None
+                    basename = file_path.name
+                    for candidate_dir in dedup_dirs:
+                        direct_candidate = (candidate_dir / file_path).resolve()
+                        if direct_candidate.is_file():
+                            resolved_path = direct_candidate
+                            break
+                        basename_candidate = (candidate_dir / basename).resolve()
+                        if basename_candidate.is_file():
+                            resolved_path = basename_candidate
+                            break
+
+                    if resolved_path is None:
+                        repo_root = Path(__file__).resolve().parents[4]
+                        repo_matches = list(repo_root.rglob(basename))
+                        if repo_matches:
+                            preferred_match: Path | None = None
+                            preferred_fragments = (
+                                "src/holosoma/holosoma/data/motions",
+                                "src/holosoma_retargeting/models",
+                                "data_demo/objects",
+                            )
+                            for fragment in preferred_fragments:
+                                preferred_match = next(
+                                    (match.resolve() for match in repo_matches if fragment in str(match)),
+                                    None,
+                                )
+                                if preferred_match is not None:
+                                    break
+                            resolved_path = preferred_match or repo_matches[0].resolve()
+
+                    if resolved_path is None:
+                        continue
+                    elem.set("file", str(resolved_path))
+                    changed = True
+
+                if changed:
+                    xml_text = ET.tostring(root, encoding="unicode")
+            except Exception as path_exc:
+                logger.warning("Failed to normalize scene snapshot asset paths for '{}': {}", snapshot_path, path_exc)
+            tmp_path.write_text(xml_text, encoding="utf-8")
+            os.replace(tmp_path, snapshot_path)
         self._mujoco_scene_xml_snapshot_path = str(snapshot_path)
         self._mujoco_scene_xml_snapshot_written = True
         logger.info("Wrote MuJoCo scene XML snapshot to {}", self._mujoco_scene_xml_snapshot_path)

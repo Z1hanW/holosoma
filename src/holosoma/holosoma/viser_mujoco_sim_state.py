@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import os
 import signal
 import subprocess
@@ -48,6 +49,59 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if raw is None:
         return bool(default)
     return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _infer_default_pose_init_from_model(model_path: str) -> bool | None:
+    path_str = str(model_path).strip()
+    if not path_str or path_str.startswith("wandb://"):
+        return None
+
+    path = Path(path_str).expanduser()
+    if path.suffix == ".pt":
+        candidate = path.with_suffix(".onnx")
+        if candidate.is_file():
+            path = candidate
+    if not path.is_file():
+        return None
+
+    try:
+        import onnx
+    except Exception:
+        return None
+
+    try:
+        model = onnx.load(path)
+    except Exception:
+        return None
+
+    metadata: dict[str, object] = {}
+    for prop in model.metadata_props:
+        try:
+            metadata[prop.key] = json.loads(prop.value)
+        except Exception:
+            metadata[prop.key] = prop.value
+
+    motion_cfg = (
+        metadata.get("experiment_config", {})
+        .get("command", {})
+        .get("setup_terms", {})
+        .get("motion_command", {})
+        .get("params", {})
+        .get("motion_config", {})
+    )
+    if not isinstance(motion_cfg, dict):
+        return None
+
+    return bool(
+        (
+            motion_cfg.get("enable_default_pose_prepend")
+            and float(motion_cfg.get("default_pose_prepend_duration_s", 0.0) or 0.0) > 0.0
+        )
+        or (
+            motion_cfg.get("enable_default_pose_append")
+            and float(motion_cfg.get("default_pose_append_duration_s", 0.0) or 0.0) > 0.0
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -262,6 +316,16 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
 
     port = resolve_viser_port(cfg.port)
     server = viser.ViserServer(port=port)
+    default_pose_init_value = bool(cfg.default_pose_init)
+    if "HOLOSOMA_DEFAULT_POSE_INIT" not in os.environ and "SIM_MOTION_INIT_MODE" not in os.environ:
+        inferred_default_pose_init = _infer_default_pose_init_from_model(cfg.model_path)
+        if inferred_default_pose_init is not None:
+            default_pose_init_value = bool(inferred_default_pose_init)
+            logger.info(
+                "Inferred default-pose init={} from model metadata: {}",
+                default_pose_init_value,
+                cfg.model_path,
+            )
     robot_root = server.scene.add_frame("/robot", show_axes=False)
     ref_root = server.scene.add_frame("/robot_ref", show_axes=bool(cfg.show_ref_body))
     object_root = server.scene.add_frame("/object", show_axes=False)
@@ -269,17 +333,21 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     object_collision_root = server.scene.add_frame("/object/collision_geoms", show_axes=False)
     server.scene.add_grid("/grid", width=cfg.grid_size, height=cfg.grid_size, position=(0.0, 0.0, 0.0))
 
-    vr = ViserUrdf(
-        server,
-        urdf_or_path=robot_urdf_path,
-        root_node_name="/robot",
-        load_collision_meshes=True,
-        collision_mesh_color_override=(0.15, 0.7, 1.0, 0.28),
-    )
+    viser_urdf_kwargs = {
+        "urdf_or_path": robot_urdf_path,
+        "root_node_name": "/robot",
+    }
+    viser_urdf_signature = inspect.signature(ViserUrdf)
+    if "load_collision_meshes" in viser_urdf_signature.parameters:
+        viser_urdf_kwargs["load_collision_meshes"] = True
+    if "collision_mesh_color_override" in viser_urdf_signature.parameters:
+        viser_urdf_kwargs["collision_mesh_color_override"] = (0.15, 0.7, 1.0, 0.28)
+    vr = ViserUrdf(server, **viser_urdf_kwargs)
     viser_joint_names = list(vr.get_actuated_joint_names())
     default_joint_viser = _build_default_joint_viser(robot_config, viser_joint_names)
     vr.update_cfg(default_joint_viser)
-    vr.show_collision = bool(cfg.show_robot_collision)
+    if hasattr(vr, "show_collision"):
+        vr.show_collision = bool(cfg.show_robot_collision)
     object_visual_handles: list[object] = []
     object_collision_handles: list[object] = []
     loaded_object_snapshot_path: Path | None = None
@@ -408,14 +476,14 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             initial_value=bool(cfg.show_robot_collision),
         )
         show_ref_cb = server.gui.add_checkbox("Show ref body", initial_value=bool(cfg.show_ref_body))
-        reset_offset_btn = server.gui.add_button("Reset offset")
+        reset_offset_btn = server.gui.add_button("Recenter display only")
 
     with server.gui.add_folder("Rollout"):
         rollout_md = server.gui.add_markdown("Viewer only")
-        reset_rollout_btn = server.gui.add_button("Reset rollout")
+        reset_rollout_btn = server.gui.add_button("Reset sim + motion")
         default_pose_init_cb = server.gui.add_checkbox(
             "Default pose init",
-            initial_value=bool(cfg.default_pose_init),
+            initial_value=default_pose_init_value,
             hint="Restart/reset rollout from the robot default pose instead of the motion pose.",
         )
 
@@ -502,6 +570,9 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         env = os.environ.copy()
         env["RUN_SECONDS"] = str(cfg.launch_run_seconds)
         env["TRAINING_HEADLESS"] = "True" if cfg.training_headless else "False"
+        env["SIM_STATE_PORT"] = str(cfg.state_port)
+        env["SIM_CONTROL_PORT"] = str(cfg.control_port)
+        env["POLICY_CONTROL_PORT"] = str(cfg.policy_control_port)
         env["HOLOSOMA_MUJOCO_OBJECT_GEOM_SNAPSHOT_PATH"] = str(snapshot_path_default)
         env["HOLOSOMA_DEFAULT_POSE_INIT"] = "1" if bool(default_pose_init_cb.value) else "0"
         env["SIM_MOTION_INIT_MODE"] = "training_default_pose" if bool(default_pose_init_cb.value) else "raw_motion"
@@ -577,7 +648,8 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
 
     @show_robot_collision_cb.on_update
     def _(_evt) -> None:
-        vr.show_collision = bool(show_robot_collision_cb.value)
+        if hasattr(vr, "show_collision"):
+            vr.show_collision = bool(show_robot_collision_cb.value)
 
     @object_mesh_mode_dropdown.on_update
     def _(_evt) -> None:
@@ -595,6 +667,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         nonlocal offset_initialized
         offset_xy[:] = 0.0
         offset_initialized = False
+        logger.info("Reset display offset requested (view only)")
 
     @reset_rollout_btn.on_click
     def _(_evt) -> None:
