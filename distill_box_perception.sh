@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Student policy observation (actor):
 # - actor_obs_root: root-frame relative command [dx, dy, dyaw]
-# - actor_obs_proprio (base_lin_vel, base_ang_vel, dof_pos, dof_vel, actions)
+# - actor_obs_proprio_no_linvel (base_ang_vel, dof_pos, dof_vel, actions)
 # - perception_obs (camera depth)
 # - No actor box state is used by student actor.
 #
@@ -20,6 +20,7 @@ DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 POSITIONAL_RUN_NAME=""
 DATA_MODE=${DATA_MODE:-pure-sd}
+TRACKER_PROFILE=${TRACKER_PROFILE:-old-tracker}
 SCHEDULE_VARIANT=${SCHEDULE_VARIANT:-default}
 PYTHON_BIN=${PYTHON_BIN:-python}
 
@@ -248,12 +249,16 @@ CAMERA_MAX_DISTANCE_EXPLICIT=0
 [[ -n "${CAMERA_MAX_DISTANCE+x}" ]] && CAMERA_MAX_DISTANCE_EXPLICIT=1
 PERCEPTION_WARP_PREPROCESS_EXPLICIT=0
 [[ -n "${PERCEPTION_WARP_PREPROCESS+x}" ]] && PERCEPTION_WARP_PREPROCESS_EXPLICIT=1
+MOTION_DIR_EXPLICIT=0
+[[ -n "${MOTION_DIR+x}" ]] && MOTION_DIR_EXPLICIT=1
 
 # Sim2real default: sparse root-relative distill without clip_phase in student torso observation.
 EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd}
 RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_perception_sparse_root_cmd}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_perception_sparse_root_cmd_access_to_depth}
 TRAINING_PROJECT=${TRAINING_PROJECT:-boxer}
+OLD_TRACKER_MAX_BOX_ID=${OLD_TRACKER_MAX_BOX_ID:-92}
+OLD_TRACKER_DAGGER_ITERATIONS=${OLD_TRACKER_DAGGER_ITERATIONS:-10000}
 if [[ -n "${POSITIONAL_RUN_NAME}" ]]; then
   RUN_NAME="${POSITIONAL_RUN_NAME}"
 fi
@@ -273,7 +278,66 @@ NUM_ENVS=${NUM_ENVS:-${DEFAULT_TOTAL_ENVS}}
 DS_DATA_ROOT=${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}
 DEFAULT_DS_PREPARED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
 DEFAULT_MIX_NAIVE_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
+OLD_TRACKER_CACHE_ROOT="${DS_DATA_ROOT}/_motion_subsets"
 PURE_REAL_OMOMO_PREFIXES=${PURE_REAL_OMOMO_PREFIXES:-'["sub"]'}
+
+prepare_old_tracker_motion_subset() {
+  local source_dir="$1"
+  local max_box_id="$2"
+  local subset_dir="${OLD_TRACKER_CACHE_ROOT}/$(basename "${source_dir}")_old_tracker_box_le_${max_box_id}"
+
+  mkdir -p "${subset_dir}"
+  "${PYTHON_BIN}" - "${source_dir}" "${subset_dir}" "${max_box_id}" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+source_dir = Path(sys.argv[1]).expanduser().resolve()
+subset_dir = Path(sys.argv[2]).expanduser().resolve()
+max_box_id = int(sys.argv[3])
+
+subset_dir.mkdir(parents=True, exist_ok=True)
+selected: list[Path] = []
+for clip_path in sorted(source_dir.glob("box_*.npz")):
+    stem = clip_path.stem
+    suffix = stem.split("_", 1)[1] if "_" in stem else ""
+    if not suffix.isdigit():
+        continue
+    if int(suffix) <= max_box_id:
+        selected.append(clip_path)
+
+if not selected:
+    raise SystemExit(f"No numeric box clips <= {max_box_id} found in {source_dir}")
+
+for existing in subset_dir.glob("*.npz"):
+    existing.unlink()
+
+for clip_path in selected:
+    target = subset_dir / clip_path.name
+    if target.exists() or target.is_symlink():
+        target.unlink()
+    os.symlink(clip_path, target)
+
+metadata = {}
+for candidate in (source_dir / "_clip_object_urdf_map.json", source_dir / "clip_object_urdf_map.json"):
+    if candidate.is_file():
+        with candidate.open("r", encoding="utf-8") as f:
+            metadata = json.load(f)
+        break
+
+if metadata:
+    filtered = {key: value for key, value in metadata.items() if (subset_dir / f"{key}.npz").exists()}
+    with (subset_dir / "_clip_object_urdf_map.json").open("w", encoding="utf-8") as f:
+        json.dump(filtered, f, indent=2, sort_keys=True)
+        f.write("\n")
+
+print(str(subset_dir))
+print(len(selected))
+PY
+}
 
 case "${DATA_MODE}" in
   default|pure-sd)
@@ -292,6 +356,13 @@ case "${DATA_MODE}" in
     exit 2
     ;;
 esac
+
+OLD_TRACKER_CLIP_COUNT=""
+if [[ "${TRACKER_PROFILE}" == "old-tracker" && "${DATA_MODE}" == "pure-sd" && "${MOTION_DIR_EXPLICIT}" -eq 0 ]]; then
+  mapfile -t _old_tracker_subset_info < <(prepare_old_tracker_motion_subset "${MOTION_DIR}" "${OLD_TRACKER_MAX_BOX_ID}")
+  MOTION_DIR="${_old_tracker_subset_info[0]}"
+  OLD_TRACKER_CLIP_COUNT="${_old_tracker_subset_info[1]:-}"
+fi
 
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
 TEACHER_PERCEPTION_PRESET=${TEACHER_PERCEPTION_PRESET:-none}
@@ -323,7 +394,7 @@ FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER:-$
 USE_ADAPTIVE_TIMESTEPS_SAMPLER=${USE_ADAPTIVE_TIMESTEPS_SAMPLER:-True}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
-STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_root','actor_obs_proprio']"}
+STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_root','actor_obs_proprio_no_linvel']"}
 DAGGER_MATCH_STD=${DAGGER_MATCH_STD:-True}
 ENTROPY_COEF=${ENTROPY_COEF:-0.0}
 DAGGER_IGNORE_EPISODE_INITIAL_STEPS=${DAGGER_IGNORE_EPISODE_INITIAL_STEPS:-0}
@@ -369,6 +440,30 @@ fi
 
 if [[ "${TEACHER_ACTION_MIX_RATIO_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_START_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_END_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_END_ITERATION_EXPLICIT}" -eq 0 ]]; then
   TEACHER_ACTION_MIX_RATIO="0.0"
+fi
+
+if [[ "${TRACKER_PROFILE}" == "old-tracker" && "${SCHEDULE_VARIANT}" == "default" ]]; then
+  if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
+    NUM_LEARNING_ITERATIONS="${OLD_TRACKER_DAGGER_ITERATIONS}"
+  fi
+  if [[ "${PPO_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
+    PPO_START_EPOCH=$((NUM_LEARNING_ITERATIONS + 1))
+  fi
+  if [[ "${DAGGER_END_EPOCH_EXPLICIT}" -eq 0 ]]; then
+    DAGGER_END_EPOCH=$((NUM_LEARNING_ITERATIONS + 2))
+  fi
+  if [[ "${PPO_TARGET_COEFF_EXPLICIT}" -eq 0 ]]; then
+    PPO_TARGET_COEFF=0.0
+  fi
+  if [[ "${PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT}" -eq 0 ]]; then
+    PPO_SCHEDULE_STEP_EPOCHS=0
+  fi
+  if [[ "${SCHEDULE_NAME_EXPLICIT}" -eq 0 ]]; then
+    SCHEDULE_NAME="old_tracker_pure_dagger_10k"
+  fi
+  if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
+    SCHEDULE_NOTES="Default old-tracker profile: pure DAgger for 10000 iterations with PPO disabled by default. Motion bank is capped to numeric box clips <= 92 to match the old tracker coverage and avoid going beyond it."
+  fi
 fi
 
 case "${SCHEDULE_VARIANT}" in
@@ -509,8 +604,12 @@ else
 fi
 echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} num_envs=${NUM_ENVS}"
 echo "[INFO] data_mode=${DATA_MODE}"
+echo "[INFO] tracker_profile=${TRACKER_PROFILE}"
 if [[ -n "${MOTION_DIR:-}" ]]; then
   echo "[INFO] motion_dir=${MOTION_DIR}"
+fi
+if [[ -n "${OLD_TRACKER_CLIP_COUNT}" ]]; then
+  echo "[INFO] old_tracker_numeric_box_clip_count=${OLD_TRACKER_CLIP_COUNT} max_box_id=${OLD_TRACKER_MAX_BOX_ID}"
 fi
 if [[ "${DATA_MODE}" == "pure-real" ]]; then
   echo "[INFO] DATA_MODE=pure-real uses the mixed bank but samples only OMOMO clips."

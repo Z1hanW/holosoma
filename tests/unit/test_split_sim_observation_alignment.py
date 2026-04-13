@@ -209,3 +209,103 @@ def test_wbt_root_reference_clip_start_is_consumed_after_one_actor_step() -> Non
 
     assert policy._remaining_root_reference_clip_start_obs == 0
     assert policy._should_use_root_reference_at_clip_start() is False
+
+
+def test_wbt_prime_auto_start_policy_history_consumes_root_reference_and_keeps_last_action() -> None:
+    policy = object.__new__(WholeBodyTrackingPolicy)
+    policy._dryrun_autostart_policy_history = True
+    policy._warm_autostart_obs_history = True
+    policy._obs_input_name = "actor_obs"
+    policy._action_output_name = "action"
+    policy._perception_input_name = None
+    policy._time_step_input_name = "time_step"
+    policy._autostart_policy_history_prime_steps_override = "2"
+    policy.history_length_dict = {"actor_obs": 5}
+    policy.config = SimpleNamespace(task=SimpleNamespace(use_root_reference_at_clip_start=True))
+    policy.motion_timestep = 7
+    policy.motion_start_timestep = 123
+    policy._last_clock_reading = 456
+    policy._last_motion_output_timestep = 9
+    policy.motion_command_0 = np.array([[0.1, 0.2]], dtype=np.float32)
+    policy.motion_command_t = policy.motion_command_0.copy()
+    policy.ref_quat_xyzw_0 = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+    policy.ref_quat_xyzw_t = policy.ref_quat_xyzw_0.copy()
+    policy.ref_pos_xyz_t = np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
+    policy.last_policy_action = np.zeros((1, 2), dtype=np.float32)
+    policy.scaled_policy_action = np.zeros((1, 2), dtype=np.float32)
+    policy.policy_action_scales = np.array([[0.5, 2.0]], dtype=np.float32)
+    policy._uses_motion_command = False
+    policy._motion_data = None
+    policy._logged_root_reference_clip_start = False
+    policy._remaining_root_reference_clip_start_obs = 0
+    policy._preserve_obs_history_on_next_motion_start = False
+    policy._preserve_root_reference_state_on_next_motion_start = False
+    policy._auto_start_history_snapshot = {"stale": {}}
+    policy._augment_robot_state_with_sim_state = lambda state: state
+    policy._refresh_motion_outputs_for_current_timestep = lambda: None
+    policy._reset_observation_history_state = lambda: (
+        policy.last_policy_action.fill(0.0),
+        policy.scaled_policy_action.fill(0.0),
+    )
+    policy.prepare_obs_for_rl = lambda state: {"actor_obs": np.array([[1.0, 2.0]], dtype=np.float32)}
+    policy.policy = lambda feed: {"action": np.array([[0.25, -0.5]], dtype=np.float32)}
+    policy.logger = SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None)
+
+    primed = policy._prime_auto_start_policy_history(np.zeros((1, 16), dtype=np.float32))
+
+    assert primed is True
+    np.testing.assert_allclose(policy.last_policy_action, [[0.25, -0.5]])
+    np.testing.assert_allclose(policy.scaled_policy_action, [[0.125, -1.0]])
+    assert policy.motion_timestep == 0
+    assert policy.motion_start_timestep is None
+    assert policy._last_clock_reading is None
+    assert policy._remaining_root_reference_clip_start_obs == 0
+    assert policy._preserve_obs_history_on_next_motion_start is True
+    assert policy._preserve_root_reference_state_on_next_motion_start is True
+    assert policy._auto_start_history_snapshot is None
+
+
+def test_wbt_autostart_policy_history_prime_steps_defaults_to_actor_history_length() -> None:
+    policy = object.__new__(WholeBodyTrackingPolicy)
+    policy._autostart_policy_history_prime_steps_override = ""
+    policy.history_length_dict = {"actor_obs": 5}
+    policy._training_freeze_zero_extra_holds = 19
+
+    assert policy._get_autostart_policy_history_prime_steps() == 4
+
+
+def test_wbt_handle_start_motion_clip_preserves_consumed_root_reference_when_requested() -> None:
+    policy = object.__new__(WholeBodyTrackingPolicy)
+    policy.clock_sub = SimpleNamespace(reset_origin=lambda: None)
+    policy._preserve_obs_history_on_next_motion_start = True
+    policy._preserve_root_reference_state_on_next_motion_start = True
+    policy._reset_observation_history_state = lambda: (_ for _ in ()).throw(AssertionError("history should be preserved"))
+    policy._auto_start_history_snapshot = {"stale": {}}
+    policy.motion_clip_progressing = False
+    policy.motion_start_timestep = 123
+    policy.motion_timestep = 4
+    policy._last_motion_output_timestep = 9
+    policy.motion_command_0 = np.array([[0.1, 0.2]], dtype=np.float32)
+    policy.motion_command_t = np.array([[9.0, 9.0]], dtype=np.float32)
+    policy.ref_quat_xyzw_0 = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+    policy.ref_quat_xyzw_t = np.array([[0.0, 0.0, 1.0, 0.0]], dtype=np.float32)
+    policy._refresh_motion_outputs_for_current_timestep = lambda: None
+    policy._last_clock_reading = 88
+    policy._training_freeze_zero_extra_holds = 3
+    policy._training_freeze_zero_remaining_holds = 0
+    policy._logged_training_freeze_zero_alignment = True
+    policy._logged_root_reference_clip_start = True
+    policy._remaining_root_reference_clip_start_obs = 0
+    policy._logged_first_policy_step_debug = True
+    policy._motion_alignment_enabled = False
+    policy.config = SimpleNamespace(task=SimpleNamespace(use_root_reference_at_clip_start=True))
+    policy.logger = SimpleNamespace(info=lambda *args, **kwargs: None, warning=lambda *args, **kwargs: None)
+
+    policy._handle_start_motion_clip()
+
+    assert policy._preserve_obs_history_on_next_motion_start is False
+    assert policy._preserve_root_reference_state_on_next_motion_start is False
+    assert policy._remaining_root_reference_clip_start_obs == 0
+    assert policy.motion_timestep == 0
+    assert policy.motion_clip_progressing is True
+    assert policy._training_freeze_zero_remaining_holds == 3

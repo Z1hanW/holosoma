@@ -31,17 +31,22 @@ from holosoma.utils.rotations import (
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.viser_utils import ensure_viser_on_path, resolve_viser_port
 
-LIGHT_BLUE = (255, 140, 0)
-TERRAIN_GRAY = (70, 70, 70)
-GROUND_DARK_GRAY = (45, 45, 45)
+# UC Berkeley palette for viewer overrides.
+BERKELEY_BLUE = (0, 38, 118)
+CALIFORNIA_GOLD = (253, 181, 21)
+
+LIGHT_BLUE = CALIFORNIA_GOLD
+TERRAIN_GRAY = BERKELEY_BLUE
+GROUND_DARK_GRAY = BERKELEY_BLUE
+OBJECT_MESH_COLOR = CALIFORNIA_GOLD
 SIM_VISUAL_MESH_COLOR = (70, 160, 255)
 SIM_COLLISION_MESH_COLOR = (255, 120, 70)
 SIM_ROBOT_POINTS_COLOR = np.array([70, 190, 120], dtype=np.uint8)
-SIM_OBJECT_POINTS_COLOR = np.array([255, 140, 0], dtype=np.uint8)
+SIM_OBJECT_POINTS_COLOR = np.array(CALIFORNIA_GOLD, dtype=np.uint8)
 HEIGHTMAP_MARKER_COLOR = (255, 165, 0)
 CAMERA_MARKER_COLOR = (0, 255, 255)
 COMMAND_ARROW_COLOR = np.array([255, 165, 0], dtype=np.uint8)
-TARGET_BOX_COLOR = (255, 140, 0)
+TARGET_BOX_COLOR = CALIFORNIA_GOLD
 SENSOR_MARKER_RADIUS = 0.03
 SIM_MESH_MODE_OPTIONS = ("visual", "collision", "both", "none")
 
@@ -1320,6 +1325,7 @@ class ViserLiveViewer:
         self._secondary_object_points_handles: dict[int, Any] = {}
         self._secondary_object_visual_key: dict[int, str] = {}
         self._secondary_object_collision_key: dict[int, str] = {}
+        self._env_sequence_label_handles: dict[int, Any] = {}
         self._robot_mesh_frames: dict[int, dict[str, Any]] = {}
         self._robot_visual_mesh_handles: dict[int, dict[str, Any]] = {}
         self._robot_collision_mesh_handles: dict[int, dict[str, Any]] = {}
@@ -1332,6 +1338,13 @@ class ViserLiveViewer:
         self._joint_count = 0
         self._offset: np.ndarray | None = None
         self._last_update = 0.0
+        self._show_env_sequence_labels = os.environ.get("VISER_SHOW_ENV_SEQUENCE_LABELS", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        self._env_sequence_label_height = float(os.environ.get("VISER_ENV_SEQUENCE_LABEL_HEIGHT", "1.6"))
         self._scandots_handle = None
         self._scandots_rays_handle = None
         self._scandots_enabled = False
@@ -1778,6 +1791,51 @@ class ViserLiveViewer:
             dtype=np.float32,
         )
 
+    def _env_sequence_label_position(self, env_id: int) -> np.ndarray:
+        display_shift = np.zeros(3, dtype=np.float32)
+        if int(env_id) != self._env_id:
+            display_shift = self._viewer_env_shift(env_id)
+        return display_shift + np.array([0.0, 0.0, self._env_sequence_label_height], dtype=np.float32)
+
+    def _ensure_env_sequence_label_handle(self, env_id: int):
+        if not self._show_env_sequence_labels or self._server is None:
+            return None
+        label_handle = self._env_sequence_label_handles.get(int(env_id))
+        if label_handle is not None:
+            return label_handle
+        try:
+            label_handle = self._server.scene.add_label(
+                self._scene_path(f"/env_sequence_label_{int(env_id)}"),
+                text="",
+                position=self._env_sequence_label_position(env_id),
+                visible=False,
+            )
+        except Exception:
+            return None
+        self._env_sequence_label_handles[int(env_id)] = label_handle
+        return label_handle
+
+    def _update_env_sequence_label(self, env_id: int, clip_name: str | None) -> None:
+        if not self._show_env_sequence_labels:
+            return
+        label_handle = self._ensure_env_sequence_label_handle(env_id)
+        if label_handle is None:
+            return
+        clip_text = "" if clip_name is None else str(clip_name).strip()
+        if not clip_text:
+            try:
+                label_handle.visible = False
+            except Exception:
+                pass
+            return
+        label_handle.position = self._env_sequence_label_position(env_id)
+        try:
+            if getattr(label_handle, "text", "") != clip_text:
+                label_handle.text = clip_text
+            label_handle.visible = True
+        except Exception:
+            pass
+
     def _current_mesh_mode(self) -> str:
         if self._mesh_mode_dropdown is None:
             return self._mesh_mode_default
@@ -2061,7 +2119,7 @@ class ViserLiveViewer:
                 self._primary_object_variant_node(visual_key, normalized_kind),
                 mesh.vertices,
                 mesh.faces,
-                color=LIGHT_BLUE if normalized_kind == "visual" else SIM_COLLISION_MESH_COLOR,
+                color=OBJECT_MESH_COLOR,
                 side='double',
             )
         except Exception as exc:
@@ -2258,8 +2316,8 @@ class ViserLiveViewer:
                 return
 
         mesh_configs = (
-            ("visual", self._secondary_vo, self._secondary_object_visual_key, LIGHT_BLUE),
-            ("collision", self._secondary_vo_collision, self._secondary_object_collision_key, SIM_COLLISION_MESH_COLOR),
+            ("visual", self._secondary_vo, self._secondary_object_visual_key, OBJECT_MESH_COLOR),
+            ("collision", self._secondary_vo_collision, self._secondary_object_collision_key, OBJECT_MESH_COLOR),
         )
         for mesh_kind, handle_map, key_map, color in mesh_configs:
             visual_key, mesh, source_label = self._resolve_object_mesh_spec_for_env(env_id, mesh_kind)
@@ -3403,10 +3461,15 @@ class ViserLiveViewer:
         self._update_terrain_transform(offset)
         show_robot = self._show_robot_cb is None or bool(self._show_robot_cb.value)
         show_object = self._show_object_cb is None or bool(self._show_object_cb.value)
+        motion_cmd = self._get_motion_command()
 
         with self._server.atomic():
             self._robot_root.position = root_pos - offset
             self._robot_root.wxyz = root_quat_wxyz
+            self._update_env_sequence_label(
+                self._env_id,
+                self._current_clip_name(motion_cmd, self._active_clip_index(motion_cmd)),
+            )
 
             if self._vr is not None and dof_pos is not None:
                 joints = dof_pos
@@ -3500,6 +3563,13 @@ class ViserLiveViewer:
                 display_shift = self._viewer_env_shift(env_id)
                 robot_root.position = secondary_root - secondary_offset + display_shift
                 robot_root.wxyz = secondary_quat
+                clip_idx = None
+                if motion_cmd is not None and hasattr(motion_cmd, "clip_ids"):
+                    try:
+                        clip_idx = int(motion_cmd.clip_ids[env_id].item())
+                    except Exception:
+                        clip_idx = None
+                self._update_env_sequence_label(env_id, self._current_clip_name(motion_cmd, clip_idx))
 
                 if vr is not None and secondary_dof is not None:
                     secondary_joints = secondary_dof
@@ -3591,7 +3661,6 @@ class ViserLiveViewer:
                     _set_visual_handle_visible(secondary_vo, True)
 
         if self._clip_label is not None:
-            motion_cmd = self._get_motion_command()
             if motion_cmd is not None and hasattr(motion_cmd, "clip_ids"):
                 try:
                     clip_idx = int(motion_cmd.clip_ids[self._env_id].item())

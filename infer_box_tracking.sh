@@ -14,16 +14,12 @@ set -euo pipefail
 #   bash infer_box_tracking.sh [omomo-carry|real|pure-ds|mix] [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
 #
 # Optional env vars:
-#   TEACHER_CHECKPOINT        (default: https://wandb.ai/zihanw22/boxer/runs/u5lguxvl; resolved to latest checkpoint at runtime)
+#   TEACHER_CHECKPOINT        (default: auto; requires a latest nonzero local generalist checkpoint under LOG_ROOT
+#                             matching INFER_DATASET, otherwise exits instead of falling back)
 #   WANDB_MODEL_FILE          (optional; used when TEACHER_CHECKPOINT is a W&B run URL without /files/<checkpoint>)
 #   LEGACY_OBS                (default: 0; set 1/true to require legacy checkpoint observation layout)
 #   REQUIRE_HEIGHTMAP         (default: 0; set 1/true to require checkpoint perception.enabled=True and output_mode=heightmap)
-#   DEFAULT_LEGACY_TEACHER_CHECKPOINT
-#                             (optional; used as default checkpoint when LEGACY_OBS=1 and no checkpoint is explicitly provided)
-#   PURE_DS_DEFAULT_TEACHER_RUN_URL
-#                             (default: https://wandb.ai/zihanw22/boxer/runs/6pzxdnr6; resolved to latest checkpoint at runtime)
-#   PURE_SD_DEFAULT_TEACHER_RUN_URL
-#                             (legacy alias of PURE_DS_DEFAULT_TEACHER_RUN_URL)
+#   LOG_ROOT                  (default: /data/logs_new/boxer; used for local latest-checkpoint auto-resolution)
 #   INFER_DATASET             (default: mix; options: omomo-carry|omomo|behave|behave_carry|behave_sq_carry|mixed|real|pure-ds|pure-sd|mix|naive-mixed|mix-naive|mix-curriculum)
 #   DATA_MODE                 (optional alias of INFER_DATASET; accepts train_object_generalist_ds.sh modes)
 #   DS_DATA_ROOT              (default: ./data/ds_box_data; used by pure-ds / mix)
@@ -97,15 +93,6 @@ is_checkpoint_ref() {
 is_bare_checkpoint_name() {
   local ref="$1"
   [[ "${ref}" == *.pt && "${ref}" != */* && "${ref}" != ./* && "${ref}" != ../* ]]
-}
-
-default_model_file_for_run_id() {
-  local run_id="$1"
-  case "${run_id}" in
-    6pzxdnr6) echo "model_00500.pt" ;;
-    u5lguxvl) echo "model_13000.pt" ;;
-    *) echo "" ;;
-  esac
 }
 
 parse_wandb_run_url() {
@@ -284,7 +271,6 @@ normalize_checkpoint_ref() {
   local explicit_file=""
   local model_file="${WANDB_MODEL_FILE:-}"
   local remote_model_file=""
-  local builtin_model_file=""
 
   parsed="$(parse_wandb_run_url "${ref}" || true)"
   if [[ -z "${parsed}" ]]; then
@@ -300,18 +286,12 @@ normalize_checkpoint_ref() {
     if [[ -n "${remote_model_file}" ]]; then
       model_file="${remote_model_file}"
       echo "[INFO] Resolved wandb run URL to latest remote checkpoint: ${model_file}" >&2
-    else
-      builtin_model_file="$(default_model_file_for_run_id "${run_id}")"
-      if [[ -n "${builtin_model_file}" ]]; then
-        model_file="${builtin_model_file}"
-        echo "[INFO] Falling back to pinned checkpoint file for run ${run_id}: ${model_file}" >&2
-      fi
     fi
   fi
 
   if [[ -z "${model_file}" ]]; then
     echo "[ERROR] Could not determine a .pt checkpoint for W&B run URL: ${ref}" >&2
-    echo "[ERROR] Pass a /files/<checkpoint>.pt URL or set WANDB_MODEL_FILE." >&2
+    echo "[ERROR] Pass a /files/<checkpoint>.pt URL or set WANDB_MODEL_FILE. No implicit fallback is allowed." >&2
     return 2
   fi
 
@@ -354,12 +334,6 @@ resolve_local_checkpoint_from_run_url() {
     fi
   else
     local_ckpt="$(ls -1 "${run_log_dir}"/model_*.pt 2>/dev/null | sort -V | tail -n 1 || true)"
-    if [[ -z "${local_ckpt}" ]]; then
-      target_model_file="$(default_model_file_for_run_id "${run_id}")"
-      if [[ -n "${target_model_file}" && -f "${run_log_dir}/${target_model_file}" ]]; then
-        local_ckpt="${run_log_dir}/${target_model_file}"
-      fi
-    fi
   fi
   echo "${local_ckpt}"
 }
@@ -398,6 +372,303 @@ resolve_local_checkpoint_from_wandb_ref() {
   echo "${local_ckpt}"
 }
 
+find_latest_generalist_tracking_ckpt() {
+  local log_root="$1"
+  local infer_dataset="$2"
+
+  "${PYTHON_BIN}" - "${log_root}" "${infer_dataset}" <<'PY' 2>/dev/null || true
+import re
+import sys
+from pathlib import Path
+
+log_root = Path(sys.argv[1]).expanduser().resolve()
+infer_dataset = sys.argv[2].strip().lower()
+if not log_root.exists():
+    sys.exit(0)
+
+want_pure_ds = infer_dataset == "pure-ds"
+best_path = ""
+best_score = (-1, "")
+model_pattern = re.compile(r"^model_(\d+)\.pt$")
+
+for ckpt_path in log_root.rglob("model_*.pt"):
+    match = model_pattern.match(ckpt_path.name)
+    if not match:
+        continue
+    parent_name = ckpt_path.parent.name.lower()
+    if "generalist" not in parent_name:
+        continue
+
+    is_pure_ds_run = "pure-sd" in parent_name or "pure_ds" in parent_name or "pureds" in parent_name
+    if want_pure_ds != is_pure_ds_run:
+        continue
+
+    step = int(match.group(1))
+    if step <= 0:
+        continue
+
+    score = (step, ckpt_path.parent.name)
+    if score >= best_score:
+        best_score = score
+        best_path = str(ckpt_path)
+
+if best_path:
+    print(best_path)
+PY
+}
+
+auto_pick_default_teacher_checkpoint() {
+  local infer_dataset="$1"
+  local local_ckpt=""
+
+  local_ckpt="$(find_latest_generalist_tracking_ckpt "${LOG_ROOT}" "${infer_dataset}")"
+  if [[ -n "${local_ckpt}" ]]; then
+    echo "${local_ckpt}"
+    return 0
+  fi
+
+  echo ""
+}
+
+load_checkpoint_saved_motion_defaults() {
+  local checkpoint_ref="$1"
+  "${PYTHON_BIN}" - "${checkpoint_ref}" "${SCRIPT_DIR}" <<'PY' 2>/dev/null || true
+import json
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+repo_root = Path.cwd().resolve()
+sanitized_sys_path: list[str] = []
+for path_entry in sys.path:
+    if path_entry in {"", "."}:
+        continue
+    try:
+        if Path(path_entry).resolve() == repo_root:
+            continue
+    except Exception:
+        pass
+    sanitized_sys_path.append(path_entry)
+sys.path = sanitized_sys_path
+
+try:
+    import torch
+    from holosoma.utils.eval_utils import load_checkpoint
+except Exception:
+    print(json.dumps({}))
+    sys.exit(0)
+
+checkpoint_ref = sys.argv[1]
+script_dir = Path(sys.argv[2]).resolve()
+retarget_root = script_dir / "src" / "holosoma_retargeting"
+holosoma_root = script_dir / "src" / "holosoma"
+
+
+def resolve_saved_path(raw_path: str | None) -> str | None:
+    if not raw_path:
+        return None
+
+    original = Path(raw_path).expanduser()
+    candidates: list[Path] = [original]
+
+    alias_roots = [
+        (Path("/data/holosoma_moved/src/holosoma_retargeting"), retarget_root),
+        (Path("/home/ubuntu/FAR/holosoma/src/holosoma_retargeting"), retarget_root),
+        (Path("/data/holosoma_moved/src/holosoma"), holosoma_root),
+        (Path("/home/ubuntu/FAR/holosoma/src/holosoma"), holosoma_root),
+    ]
+    for old_root, new_root in alias_roots:
+        try:
+            rel = original.relative_to(old_root)
+        except Exception:
+            continue
+        candidates.append(new_root / rel)
+
+    seen: set[str] = set()
+    deduped: list[Path] = []
+    for candidate in candidates:
+        resolved_key = str(candidate)
+        if resolved_key in seen:
+            continue
+        seen.add(resolved_key)
+        deduped.append(candidate)
+
+    for candidate in deduped:
+        if candidate.exists():
+            return str(candidate)
+
+    stem_match = re.match(r"^(?P<prefix>.+_)[0-9a-f]{8,}$", original.name)
+    if stem_match:
+        prefix = stem_match.group("prefix")
+        for parent in deduped:
+            parent_dir = parent.parent
+            if not parent_dir.is_dir():
+                continue
+            matches = sorted(p for p in parent_dir.glob(f"{prefix}*") if p.exists())
+            if len(matches) == 1:
+                return str(matches[0])
+
+    return None
+
+
+try:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        checkpoint_path = load_checkpoint(checkpoint_ref, temp_dir)
+        blob = torch.load(checkpoint_path, map_location="cpu")
+except Exception:
+    print(json.dumps({}))
+    sys.exit(0)
+
+experiment_config = blob.get("experiment_config", {})
+motion_cfg = (
+    experiment_config.get("command", {})
+    .get("setup_terms", {})
+    .get("motion_command", {})
+    .get("params", {})
+    .get("motion_config", {})
+)
+robot_cfg = experiment_config.get("robot", {}).get("object", {})
+
+motion_path = motion_cfg.get("motion_dir") or motion_cfg.get("motion_file")
+object_urdf_path = robot_cfg.get("object_urdf_path")
+
+print(
+    json.dumps(
+        {
+            "motion_path": resolve_saved_path(motion_path),
+            "saved_motion_path": motion_path,
+            "object_urdf_path": resolve_saved_path(object_urdf_path),
+            "saved_object_urdf_path": object_urdf_path,
+        }
+    )
+)
+PY
+}
+
+augment_object_map_from_motion_metadata() {
+  local motion_dir="$1"
+  local object_spec_path="$2"
+  "${PYTHON_BIN}" - "${motion_dir}" "${object_spec_path}" <<'PY' 2>/dev/null || true
+import hashlib
+import json
+import sys
+import zipfile
+from pathlib import Path
+
+try:
+    import numpy as np
+except Exception:
+    print(sys.argv[2])
+    sys.exit(0)
+
+motion_dir = Path(sys.argv[1]).resolve()
+object_spec_path = Path(sys.argv[2]).resolve()
+if object_spec_path.suffix.lower() != ".json" or not motion_dir.is_dir() or not object_spec_path.is_file():
+    print(str(object_spec_path))
+    sys.exit(0)
+
+try:
+    payload = json.loads(object_spec_path.read_text(encoding="utf-8"))
+except Exception:
+    print(str(object_spec_path))
+    sys.exit(0)
+
+if isinstance(payload, dict) and isinstance(payload.get("clips"), dict):
+    clips = payload["clips"]
+else:
+    clips = payload
+if not isinstance(clips, dict):
+    print(str(object_spec_path))
+    sys.exit(0)
+
+retarget_roots = [
+    motion_dir.parents[2] / "src" / "holosoma_retargeting",
+    Path("/home/ubuntu/FAR/holosoma/src/holosoma_retargeting"),
+]
+
+
+def scalar_str(value) -> str:
+    arr = np.asarray(value)
+    if arr.size == 0:
+        return ""
+    item = arr.item() if arr.shape == () else arr.reshape(-1)[0]
+    if isinstance(item, (bytes, np.bytes_)):
+        return item.decode("utf-8")
+    return str(item)
+
+
+def resolve_urdf(raw: str, *, base_dir: Path) -> str:
+    raw = str(raw).strip()
+    if not raw:
+        return ""
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return str(candidate)
+    resolved = (base_dir / raw).resolve()
+    if resolved.exists():
+        return str(resolved)
+    for root in retarget_roots:
+        fallback = (root / raw).resolve()
+        if fallback.exists():
+            return str(fallback)
+    return str(resolved)
+
+
+changed = False
+normalized_clips: dict[str, dict[str, str]] = {}
+
+for clip_id, entry in clips.items():
+    if not isinstance(clip_id, str):
+        continue
+    if isinstance(entry, str):
+        normalized_clips[clip_id] = {"object_name": "", "object_urdf_path": entry.strip()}
+    elif isinstance(entry, dict):
+        normalized_clips[clip_id] = {
+            "object_name": str(entry.get("object_name", "")).strip(),
+            "object_urdf_path": str(entry.get("object_urdf_path", "")).strip(),
+        }
+    else:
+        normalized_clips[clip_id] = {"object_name": "", "object_urdf_path": ""}
+
+for clip_path in sorted(motion_dir.glob("*.npz")):
+    if not zipfile.is_zipfile(clip_path):
+        continue
+    clip_id = clip_path.stem
+    entry = normalized_clips.get(clip_id, {"object_name": "", "object_urdf_path": ""})
+    try:
+        with np.load(clip_path, allow_pickle=True) as data:
+            object_name = scalar_str(data["object_name"]) if "object_name" in data else ""
+            object_urdf_path = scalar_str(data["object_urdf_path"]) if "object_urdf_path" in data else ""
+    except Exception:
+        continue
+    if object_urdf_path:
+        object_urdf_path = resolve_urdf(object_urdf_path, base_dir=clip_path.parent)
+    if not entry.get("object_name") and object_name:
+        entry["object_name"] = object_name
+        changed = True
+    if not entry.get("object_urdf_path") and object_urdf_path:
+        entry["object_urdf_path"] = object_urdf_path
+        changed = True
+    if clip_id not in normalized_clips and (object_name or object_urdf_path):
+        normalized_clips[clip_id] = entry
+        changed = True
+    else:
+        normalized_clips[clip_id] = entry
+
+if not changed:
+    print(str(object_spec_path))
+    sys.exit(0)
+
+out_dir = Path("/tmp/holosoma_object_maps")
+out_dir.mkdir(parents=True, exist_ok=True)
+digest = hashlib.sha1(f"{motion_dir}|{object_spec_path}".encode("utf-8")).hexdigest()[:12]
+out_path = out_dir / f"{object_spec_path.stem}_{digest}.json"
+out_path.write_text(json.dumps({"clips": normalized_clips}, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+print(str(out_path))
+PY
+}
+
 if [[ $# -gt 0 ]]; then
   case "$1" in
     -h|--help|help)
@@ -407,12 +678,7 @@ if [[ $# -gt 0 ]]; then
   esac
 fi
 
-# https://wandb.ai/zihanw22/boxer/runs/u5lguxvl
-# Latest checkpoint verified on 2026-04-08: model_13000.pt
-DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"https://wandb.ai/zihanw22/boxer/runs/u5lguxvl"}
-PURE_DS_DEFAULT_TEACHER_RUN_URL=${PURE_DS_DEFAULT_TEACHER_RUN_URL:-${PURE_SD_DEFAULT_TEACHER_RUN_URL:-"https://wandb.ai/zihanw22/boxer/runs/6pzxdnr6"}}
-PURE_SD_DEFAULT_TEACHER_RUN_URL="${PURE_DS_DEFAULT_TEACHER_RUN_URL}"
-DEFAULT_LEGACY_TEACHER_CHECKPOINT="${DEFAULT_LEGACY_TEACHER_CHECKPOINT:-}"
+LOG_ROOT="${LOG_ROOT:-/data/logs_new/boxer}"
 LEGACY_OBS=${LEGACY_OBS:-0}
 legacy_obs_normalized=$(echo "${LEGACY_OBS}" | tr '[:upper:]' '[:lower:]')
 if [[ "${legacy_obs_normalized}" == "1" || "${legacy_obs_normalized}" == "true" ]]; then
@@ -432,7 +698,11 @@ TEACHER_CHECKPOINT_FROM_ENV=0
 if [[ -n "${TEACHER_CHECKPOINT+x}" || -n "${CKPT+x}" ]]; then
   TEACHER_CHECKPOINT_FROM_ENV=1
 fi
-TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${CKPT:-${DEFAULT_TEACHER_CHECKPOINT}}}"
+INFER_DATASET_FROM_ENV=0
+if [[ -n "${INFER_DATASET+x}" || -n "${DATA_MODE+x}" || -n "${DATASET+x}" ]]; then
+  INFER_DATASET_FROM_ENV=1
+fi
+TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${CKPT:-}}"
 TEACHER_CHECKPOINT_FROM_ARG=0
 TEACHER_CHECKPOINT_NAME_FROM_ARG=0
 TEACHER_CHECKPOINT_MODEL_FILE=""
@@ -461,13 +731,9 @@ fi
 
 if [[ "${LEGACY_OBS_ENABLED}" == "1" ]]; then
   if [[ "${TEACHER_CHECKPOINT_FROM_ENV}" != "1" && "${TEACHER_CHECKPOINT_FROM_ARG}" != "1" ]]; then
-    if [[ -n "${DEFAULT_LEGACY_TEACHER_CHECKPOINT}" ]]; then
-      TEACHER_CHECKPOINT="${DEFAULT_LEGACY_TEACHER_CHECKPOINT}"
-    else
-      echo "[ERROR] LEGACY_OBS=1 requires an explicit legacy checkpoint." >&2
-      echo "[ERROR] Provide TEACHER_CHECKPOINT/CKPT/positional .pt, or set DEFAULT_LEGACY_TEACHER_CHECKPOINT." >&2
-      exit 2
-    fi
+    echo "[ERROR] LEGACY_OBS=1 requires an explicit legacy checkpoint." >&2
+    echo "[ERROR] Provide TEACHER_CHECKPOINT/CKPT/positional .pt. No implicit fallback is allowed." >&2
+    exit 2
   fi
 fi
 
@@ -497,8 +763,22 @@ if [[ "${INFER_DATASET_RAW_NORMALIZED}" != "${INFER_DATASET}" ]]; then
   echo "[INFO] Normalized infer dataset '${INFER_DATASET_RAW}' -> '${INFER_DATASET}'"
 fi
 
-if [[ "${INFER_DATASET}" == "pure-ds" && "${TEACHER_CHECKPOINT_FROM_ENV}" != "1" && "${TEACHER_CHECKPOINT_FROM_ARG}" != "1" && "${LEGACY_OBS_ENABLED}" != "1" ]]; then
-  TEACHER_CHECKPOINT="${PURE_DS_DEFAULT_TEACHER_RUN_URL}"
+if [[ "${TEACHER_CHECKPOINT_FROM_ENV}" != "1" && "${TEACHER_CHECKPOINT_FROM_ARG}" != "1" && "${LEGACY_OBS_ENABLED}" != "1" ]]; then
+  auto_default_teacher_checkpoint="$(auto_pick_default_teacher_checkpoint "${INFER_DATASET}")"
+  if [[ -n "${auto_default_teacher_checkpoint}" ]]; then
+    TEACHER_CHECKPOINT="${auto_default_teacher_checkpoint}"
+    echo "[INFO] Auto-selected local tracking teacher checkpoint: ${TEACHER_CHECKPOINT}"
+  else
+    echo "[ERROR] No local generalist tracking checkpoint found under LOG_ROOT=${LOG_ROOT} for INFER_DATASET=${INFER_DATASET}." >&2
+    echo "[ERROR] Pass TEACHER_CHECKPOINT/CKPT explicitly. infer_box_tracking.sh no longer falls back to default W&B runs." >&2
+    exit 2
+  fi
+fi
+
+if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
+  echo "[ERROR] Missing TEACHER_CHECKPOINT/CKPT." >&2
+  echo "[ERROR] Pass an explicit checkpoint, or keep a local generalist checkpoint under LOG_ROOT=${LOG_ROOT}." >&2
+  exit 2
 fi
 
 if [[ "${TEACHER_CHECKPOINT_NAME_FROM_ARG}" == "1" ]]; then
@@ -666,6 +946,30 @@ if [[ "${OBJECT_URDF_FROM_ENV}" != "1" ]]; then
   esac
 fi
 
+OBJECT_GEOMETRY_MODE_RAW=${OBJECT_GEOMETRY_MODE:-primitive}
+OBJECT_GEOMETRY_MODE=""
+HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE=""
+PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE=""
+case "$(echo "${OBJECT_GEOMETRY_MODE_RAW}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on|primitive|primitives|box|cuboid|"")
+    OBJECT_GEOMETRY_MODE="primitive"
+    HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE="primitive"
+    PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="primitive"
+    ;;
+  0|false|no|off|mesh|urdf|disable|disabled)
+    OBJECT_GEOMETRY_MODE="mesh"
+    HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE="urdf"
+    PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="mesh"
+    ;;
+  *)
+    echo "[ERROR] OBJECT_GEOMETRY_MODE must be one of: on/off/primitive/mesh. Got: ${OBJECT_GEOMETRY_MODE_RAW}" >&2
+    exit 2
+    ;;
+esac
+if [[ -n "${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}" ]]; then
+  export HOLOSOMA_OBJECT_SPAWN_MODE="${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}"
+fi
+
 NUM_ENVS=${NUM_ENVS:-1}
 HEADLESS_RAW=${HEADLESS:-True}
 HEADLESS_NORM=$(echo "${HEADLESS_RAW}" | tr '[:upper:]' '[:lower:]')
@@ -695,7 +999,17 @@ VISER_RECENTER=${VISER_RECENTER:-True}
 VISER_SYNC_TO_SIM=${VISER_SYNC_TO_SIM:-True}
 VISER_FORCE_DT=${VISER_FORCE_DT:-True}
 VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-False}
-VISER_LOAD_URDF=${VISER_LOAD_URDF:-1}
+VISER_LOAD_URDF_FROM_ENV=0
+if [[ -n "${VISER_LOAD_URDF+x}" ]]; then
+  VISER_LOAD_URDF_FROM_ENV=1
+fi
+if [[ "${VISER_LOAD_URDF_FROM_ENV}" == "1" ]]; then
+  VISER_LOAD_URDF=${VISER_LOAD_URDF:-1}
+elif [[ "${OBJECT_GEOMETRY_MODE}" == "primitive" ]]; then
+  VISER_LOAD_URDF=0
+else
+  VISER_LOAD_URDF=1
+fi
 
 is_truthy() {
   local raw="${1:-}"
@@ -786,7 +1100,7 @@ import viser  # noqa: F401
 from viser.extras import ViserUrdf  # noqa: F401
 PY
   then
-    echo "[WARN] viser.extras.ViserUrdf unavailable in ${PYTHON_BIN}; falling back to VISER_LOAD_URDF=0." >&2
+    echo "[WARN] viser.extras.ViserUrdf unavailable in ${PYTHON_BIN}; setting VISER_LOAD_URDF=0." >&2
     sed -n '1,3p' /tmp/holosoma_viser_urdf_check.err >&2 || true
     VISER_LOAD_URDF=0
   fi
@@ -822,6 +1136,8 @@ export VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI:-1}
 export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-0}
 export VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-1}
 export VISER_START_PAUSED=${VISER_START_PAUSED:-0}
+export VISER_MESH_SOURCE=${VISER_MESH_SOURCE:-sim}
+export VISER_MESH_MODE=${VISER_MESH_MODE:-both}
 export VISER_LOAD_URDF
 export VISER_DEFER_INIT=${VISER_DEFER_INIT:-1}
 export HOLOSOMA_DISABLE_AUTO_RESET=${HOLOSOMA_DISABLE_AUTO_RESET:-1}
@@ -829,6 +1145,18 @@ export HOLOSOMA_DISABLE_CLIP_END_RESET=${HOLOSOMA_DISABLE_CLIP_END_RESET:-1}
 export LOGURU_LEVEL=${LOGURU_LEVEL:-WARNING}
 export PY_LOG_LEVEL=${PY_LOG_LEVEL:-WARNING}
 export PYTHONUNBUFFERED=${PYTHONUNBUFFERED:-1}
+
+HETEROGENEOUS_OBJECT_SINGLE_SLOT_DISABLE_EXPLICIT=0
+[[ -n "${HOLOSOMA_DISABLE_HETEROGENEOUS_OBJECT_SINGLE_SLOT+x}" ]] && HETEROGENEOUS_OBJECT_SINGLE_SLOT_DISABLE_EXPLICIT=1
+AUTO_DISABLE_SINGLE_SLOT=0
+if is_truthy "${VISER_ENABLE_CLIP_GUI}" && [[ "${NUM_ENVS}" == "1" ]] && [[ "${OBJECT_URDF}" == *.json ]]; then
+  # Single-env clip switching with an object-map needs per-asset simulator objects.
+  # Otherwise env_0 keeps its initial object asset while the selected clip metadata changes.
+  if [[ "${HETEROGENEOUS_OBJECT_SINGLE_SLOT_DISABLE_EXPLICIT}" -eq 0 ]]; then
+    export HOLOSOMA_DISABLE_HETEROGENEOUS_OBJECT_SINGLE_SLOT=1
+    AUTO_DISABLE_SINGLE_SLOT=1
+  fi
+fi
 
 if [[ "${TEACHER_CHECKPOINT}" != wandb://* ]] && [[ ! -f "${TEACHER_CHECKPOINT}" ]]; then
   echo "[ERROR] teacher checkpoint not found: ${TEACHER_CHECKPOINT}" >&2
@@ -1015,6 +1343,10 @@ else
   cmd+=(--randomization.ignore_unsupported True)
 fi
 
+if [[ -n "${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}" ]]; then
+  cmd+=(--perception.object_geometry_mode "${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}")
+fi
+
 if [[ -n "${MOTION_CLIP_NAME}" ]]; then
   cmd+=(
     --command.setup_terms.motion_command.params.motion_config.motion_clip_name "${MOTION_CLIP_NAME}"
@@ -1053,11 +1385,16 @@ echo "[INFO] infer_dataset=${INFER_DATASET}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
 echo "[INFO] motion_clip_name=${MOTION_CLIP_NAME:-<auto>}"
 echo "[INFO] object_urdf=${OBJECT_URDF}"
+echo "[INFO] object_geometry_mode=${OBJECT_GEOMETRY_MODE} simulator_object_spawn_mode=${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}"
+if [[ "${AUTO_DISABLE_SINGLE_SLOT}" == "1" ]]; then
+  echo "[INFO] auto_disabled_heterogeneous_single_slot=True"
+fi
 echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-<unset>}"
 echo "[INFO] headless=${HEADLESS_FLAG} (env HEADLESS=${HEADLESS})"
 echo "[INFO] viser=http://localhost:${VISER_PORT}"
 echo "[INFO] holosoma_viser_port=${HOLOSOMA_VISER_PORT}"
 echo "[INFO] viser_sync_to_sim=${VISER_SYNC_TO_SIM} viser_force_dt=${VISER_FORCE_DT}"
+echo "[INFO] viser_mesh_source=${VISER_MESH_SOURCE} viser_mesh_mode=${VISER_MESH_MODE}"
 echo "[INFO] viser_load_urdf=${VISER_LOAD_URDF}"
 echo "[INFO] viser_defer_init=${VISER_DEFER_INIT}"
 if is_truthy "${VISER_DEFER_INIT}"; then

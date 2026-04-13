@@ -389,9 +389,14 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._auto_start_rearm_requested = False
         self._auto_start_force_motion_start_pose = False
         self._preserve_obs_history_on_next_motion_start = False
+        self._preserve_root_reference_state_on_next_motion_start = False
         self._suppress_root_reference_at_clip_start = False
         self._warm_autostart_obs_history = os.getenv("HOLOSOMA_WARM_AUTOSTART_OBS_HISTORY", "1") != "0"
         self._freeze_autostart_obs_snapshot = os.getenv("HOLOSOMA_FREEZE_AUTOSTART_OBS_SNAPSHOT", "1") != "0"
+        self._dryrun_autostart_policy_history = os.getenv("HOLOSOMA_DRYRUN_AUTOSTART_POLICY_HISTORY", "1") != "0"
+        self._autostart_policy_history_prime_steps_override = (
+            os.getenv("HOLOSOMA_AUTOSTART_POLICY_DRYRUN_STEPS", "").strip()
+        )
         self._auto_start_history_snapshot: dict[str, dict[str, np.ndarray]] | None = None
 
         obs_terms = {term for terms in config.observation.obs_dict.values() for term in terms}
@@ -624,6 +629,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
     def _warm_auto_start_observation_history(self, robot_state_data: np.ndarray) -> None:
         if not self._warm_autostart_obs_history:
             return
+        if self._dryrun_autostart_policy_history:
+            return
         if self._obs_input_name is None:
             return
         try:
@@ -646,12 +653,102 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 self.logger.warning("Failed to warm auto-start observation history: {}", exc)
                 self._logged_auto_start_history_warmup_error = True
 
+    def _get_autostart_policy_history_prime_steps(self) -> int:
+        override = self._autostart_policy_history_prime_steps_override
+        if override:
+            try:
+                return max(0, int(override))
+            except ValueError:
+                if not hasattr(self, "_logged_invalid_autostart_policy_history_prime_steps", False):
+                    self.logger.warning(
+                        "Ignoring invalid HOLOSOMA_AUTOSTART_POLICY_DRYRUN_STEPS={!r}",
+                        override,
+                    )
+                    self._logged_invalid_autostart_policy_history_prime_steps = True
+                return 0
+        history_len = int(self.history_length_dict.get("actor_obs", 1))
+        return max(0, history_len - 1)
+
+    def _prime_auto_start_policy_history(self, robot_state_data: np.ndarray) -> bool:
+        if not self._dryrun_autostart_policy_history:
+            return False
+        if not self._warm_autostart_obs_history:
+            return False
+        if self._obs_input_name is None or self._action_output_name is None:
+            return False
+
+        prime_steps = self._get_autostart_policy_history_prime_steps()
+        if prime_steps <= 0:
+            return False
+
+        augmented_state = self._augment_robot_state_with_sim_state(robot_state_data)
+        if augmented_state is None:
+            return False
+
+        perception_obs: np.ndarray | None = None
+        if self._perception_input_name is not None:
+            perception_obs = self._get_split_perception_obs()
+            if perception_obs is None:
+                if not hasattr(self, "_logged_auto_start_history_prime_waiting_for_perception_obs"):
+                    self.logger.info("Skipping auto-start policy-history priming until split perception obs is available.")
+                    self._logged_auto_start_history_prime_waiting_for_perception_obs = True
+                return False
+
+        self._reset_observation_history_state()
+        self._auto_start_history_snapshot = None
+        self.motion_timestep = 0
+        self.motion_start_timestep = None
+        self._last_clock_reading = None
+        self._last_motion_output_timestep = None
+        if self.motion_command_0 is not None:
+            self.motion_command_t = self.motion_command_0.copy()
+        if self.ref_quat_xyzw_0 is not None:
+            self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
+        self._refresh_motion_outputs_for_current_timestep()
+        self._logged_root_reference_clip_start = False
+        self._remaining_root_reference_clip_start_obs = (
+            1 if bool(getattr(self.config.task, "use_root_reference_at_clip_start", False)) else 0
+        )
+
+        seed_obs = self.prepare_obs_for_rl(augmented_state)
+        input_feed = {self._obs_input_name: seed_obs["actor_obs"]}
+        if self._perception_input_name is not None and perception_obs is not None:
+            input_feed[self._perception_input_name] = perception_obs
+        if self._time_step_input_name is not None:
+            input_feed[self._time_step_input_name] = np.array([[0]], dtype=np.float32)
+
+        outputs = self.policy(input_feed)
+        seed_action = np.clip(outputs[self._action_output_name], -100, 100)
+        if self._uses_motion_command and not self._should_source_motion_outputs_from_motion_data():
+            joint_pos = outputs.get("joint_pos")
+            joint_vel = outputs.get("joint_vel")
+            if joint_pos is not None and joint_vel is not None:
+                self.motion_command_t = np.concatenate([joint_pos, joint_vel], axis=1)
+                self.ref_quat_xyzw_t = outputs.get("ref_quat_xyzw", self.ref_quat_xyzw_t)
+                self.ref_pos_xyz_t = outputs.get("ref_pos_xyz", self.ref_pos_xyz_t)
+
+        self.last_policy_action = seed_action.copy()
+        self.scaled_policy_action = seed_action * self.policy_action_scales
+        self._consume_root_reference_at_clip_start()
+
+        for _ in range(max(0, prime_steps - 1)):
+            self.prepare_obs_for_rl(augmented_state)
+
+        self._preserve_obs_history_on_next_motion_start = True
+        self._preserve_root_reference_state_on_next_motion_start = True
+        self.logger.info(
+            "Primed auto-start policy history with seeded action over {} actor steps at motion timestep 0.",
+            prime_steps,
+        )
+        return True
+
     def _maybe_auto_start_rollout(self) -> None:
         if not getattr(self.config.task, "auto_start_motion_clip", False):
             return
 
         self._reset_observation_history_state()
         self._preserve_obs_history_on_next_motion_start = False
+        self._preserve_root_reference_state_on_next_motion_start = False
         self._suppress_root_reference_at_clip_start = False
         self._auto_start_history_snapshot = None
         self._auto_start_motion_clip_pending = False
@@ -747,11 +844,15 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 "n/a" if err is None else f"{err:.4f}",
             )
 
-        self._preserve_obs_history_on_next_motion_start = self._warm_autostart_obs_history
+        self._preserve_obs_history_on_next_motion_start = self._warm_autostart_obs_history and (
+            not self._dryrun_autostart_policy_history
+        )
+        self._preserve_root_reference_state_on_next_motion_start = False
         self._suppress_root_reference_at_clip_start = False
         self._auto_start_history_snapshot = None
         self._auto_start_stage = None
         self._handle_start_policy()
+        self._prime_auto_start_policy_history(state)
         self._handle_start_motion_clip()
 
     @staticmethod
@@ -1424,6 +1525,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.robot_yaw_offset = 0.0
         self._logged_root_reference_clip_start = False
         self._remaining_root_reference_clip_start_obs = 0
+        self._preserve_root_reference_state_on_next_motion_start = False
         self._logged_sim_ref_from_sim_state = False
         self._motion_align_quat_wxyz = None
         self._motion_align_pos = None
@@ -1444,6 +1546,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.robot_yaw_offset = 0.0
         self._logged_root_reference_clip_start = False
         self._remaining_root_reference_clip_start_obs = 0
+        self._preserve_root_reference_state_on_next_motion_start = False
         self._logged_sim_ref_from_sim_state = False
         self._motion_align_quat_wxyz = None
         self._motion_align_pos = None
@@ -1972,6 +2075,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._logged_training_freeze_zero_alignment = False
         self._logged_root_reference_clip_start = False
         self._remaining_root_reference_clip_start_obs = 0
+        self._preserve_root_reference_state_on_next_motion_start = False
         self._logged_sim_ref_from_sim_state = False
         self._suppress_root_reference_at_clip_start = False
 
@@ -2077,6 +2181,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._stiff_hold_active = True
         self._reset_observation_history_state()
         self._preserve_obs_history_on_next_motion_start = False
+        self._preserve_root_reference_state_on_next_motion_start = False
         self._suppress_root_reference_at_clip_start = False
         self._auto_start_history_snapshot = None
         robot_state_data = self.interface.get_low_state()
@@ -2098,6 +2203,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.robot_yaw_offset = 0.0
         self._logged_root_reference_clip_start = False
         self._remaining_root_reference_clip_start_obs = 0
+        self._preserve_root_reference_state_on_next_motion_start = False
         self._logged_sim_ref_from_sim_state = False
         self._motion_align_quat_wxyz = None
         self._motion_align_pos = None
@@ -2105,10 +2211,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
     def _handle_start_motion_clip(self):
         """Handle start motion clip action."""
         self.clock_sub.reset_origin()
+        preserve_root_reference_state = False
         if self._preserve_obs_history_on_next_motion_start:
             self._preserve_obs_history_on_next_motion_start = False
+            preserve_root_reference_state = self._preserve_root_reference_state_on_next_motion_start
         else:
             self._reset_observation_history_state()
+        self._preserve_root_reference_state_on_next_motion_start = False
         self._auto_start_history_snapshot = None
         self.motion_clip_progressing = True
         # Capture motion-specific start timestep for policy-level timing control
@@ -2123,10 +2232,11 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._last_clock_reading = None
         self._training_freeze_zero_remaining_holds = self._training_freeze_zero_extra_holds
         self._logged_training_freeze_zero_alignment = False
-        self._logged_root_reference_clip_start = False
-        self._remaining_root_reference_clip_start_obs = (
-            1 if bool(getattr(self.config.task, "use_root_reference_at_clip_start", False)) else 0
-        )
+        if not preserve_root_reference_state:
+            self._logged_root_reference_clip_start = False
+            self._remaining_root_reference_clip_start_obs = (
+                1 if bool(getattr(self.config.task, "use_root_reference_at_clip_start", False)) else 0
+            )
         self._logged_first_policy_step_debug = False
         if self._motion_alignment_enabled:
             robot_state_data = self.interface.get_low_state()

@@ -604,6 +604,9 @@ object_distill_proprio_terms = {
     ),
 }
 
+object_distill_proprio_terms_no_linvel = object_distill_proprio_terms.copy()
+object_distill_proprio_terms_no_linvel.pop("base_lin_vel")
+
 object_distill_box_terms = {
     "obj_current_pose_size_b": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:obj_current_pose_size_b",
@@ -708,6 +711,13 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
             enable_noise=False,
             history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
             terms=object_distill_proprio_terms,
+        ),
+        # Student proprioception state without base linear velocity.
+        "actor_obs_proprio_no_linvel": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            terms=object_distill_proprio_terms_no_linvel,
         ),
         # Student object state: current object [pos(3), rot6d(6), size(3)] only.
         "actor_obs_box": ObsGroupCfg(
@@ -822,6 +832,12 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy = ObservationMa
             enable_noise=False,
             history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
             terms=object_distill_proprio_terms,
+        ),
+        "actor_obs_proprio_no_linvel": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            terms=object_distill_proprio_terms_no_linvel,
         ),
         # Student object state: current object [pos(3), rot6d(6), size(3)] only.
         "actor_obs_box": ObsGroupCfg(

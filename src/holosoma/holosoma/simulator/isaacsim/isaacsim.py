@@ -258,13 +258,19 @@ class IsaacSim(BaseSimulator):
                 self._resolved_training_object_specs
             )
             self._heterogeneous_object_env_assignment = len(self._resolved_training_object_specs) > 1
+            disable_single_slot = os.environ.get(
+                "HOLOSOMA_DISABLE_HETEROGENEOUS_OBJECT_SINGLE_SLOT", ""
+            ).strip().lower() in {"1", "true", "yes", "on"}
             self._heterogeneous_object_single_slot_enabled = (
                 self._heterogeneous_object_env_assignment
+                and not disable_single_slot
                 and (
                     self._training_object_use_box_primitives
                     or self._can_use_single_slot_heterogeneous_objects(self._resolved_training_object_specs)
                 )
             )
+            if disable_single_slot and self._heterogeneous_object_env_assignment:
+                logger.info("Disabled heterogeneous single-slot object spawning via env override.")
             if self._heterogeneous_object_single_slot_enabled and replicate_physics:
                 logger.warning(
                     "Detected {} training objects for object generalist. "

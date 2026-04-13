@@ -712,6 +712,14 @@ def test_sparse_root_distill_observation_uses_root_relative_terms():
     assert set(torso_alias_group.terms) == {"sparse_target_root_trajectory_command"}
 
 
+def test_sparse_root_distill_observation_exposes_no_linvel_proprio_variant():
+    obs_cfg = g1_observations.g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd
+    proprio_group = obs_cfg.groups["actor_obs_proprio_no_linvel"]
+
+    assert proprio_group.history_length == 5
+    assert set(proprio_group.terms) == {"base_ang_vel", "dof_pos", "dof_vel", "actions"}
+
+
 def test_distill_experiment_critic_inputs_include_proprio_history():
     critic_cfg = g1_experiments.g1_29dof_wbt_w_object_distill_sparse_goal_mixed.algo.config.module_dict.critic
 
