@@ -32,12 +32,11 @@ from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.viser_utils import ensure_viser_on_path, resolve_viser_port
 
 # UC Berkeley palette for viewer overrides.
-BERKELEY_BLUE = (0, 38, 118)
 CALIFORNIA_GOLD = (253, 181, 21)
 
 LIGHT_BLUE = CALIFORNIA_GOLD
-TERRAIN_GRAY = BERKELEY_BLUE
-GROUND_DARK_GRAY = BERKELEY_BLUE
+TERRAIN_GRAY = (70, 70, 70)
+GROUND_DARK_GRAY = (45, 45, 45)
 OBJECT_MESH_COLOR = CALIFORNIA_GOLD
 SIM_VISUAL_MESH_COLOR = (70, 160, 255)
 SIM_COLLISION_MESH_COLOR = (255, 120, 70)
@@ -1287,6 +1286,7 @@ class ViserLiveViewer:
         self._server = None
         self._viser_urdf_cls = None
         mesh_source = os.environ.get("VISER_MESH_SOURCE", "").strip().lower()
+        robot_mesh_source = os.environ.get("VISER_ROBOT_MESH_SOURCE", "").strip().lower()
         if mesh_source in {"sim", "simulator", "isaacsim", "usd"}:
             self._mesh_source = "sim"
         elif mesh_source in {"urdf"}:
@@ -1295,9 +1295,12 @@ class ViserLiveViewer:
             self._mesh_source = "legacy"
         self._sim_meshes_enabled = self._mesh_source == "sim"
         self._load_urdf_visuals = (
-            False
-            if self._sim_meshes_enabled
-            else os.environ.get("VISER_LOAD_URDF", "1").lower() in ("1", "true", "yes", "on")
+            robot_mesh_source in {"urdf", "texture", "textured", "rgb"}
+            or (
+                False
+                if self._sim_meshes_enabled
+                else os.environ.get("VISER_LOAD_URDF", "1").lower() in ("1", "true", "yes", "on")
+            )
         )
         mesh_mode_default = os.environ.get("VISER_MESH_MODE", "visual").strip().lower()
         if mesh_mode_default not in SIM_MESH_MODE_OPTIONS:
@@ -1740,15 +1743,14 @@ class ViserLiveViewer:
                 robot_urdf,
                 root_node_name=self._scene_path("/robot"),
             )
-            self._refresh_primary_object_handle()
             self._setup_joint_order()
             self._setup_secondary_env_handles(self._viser_urdf_cls, robot_urdf)
         else:
             self._setup_secondary_env_frames_only()
-            if self._sim_meshes_enabled:
-                self._refresh_primary_object_handle()
-                for env_id in self._secondary_env_ids:
-                    self._ensure_secondary_object_handle(env_id)
+        if self._load_urdf_visuals or self._sim_meshes_enabled:
+            self._refresh_primary_object_handle()
+            for env_id in self._secondary_env_ids:
+                self._ensure_secondary_object_handle(env_id)
         self._load_terrain()
         self._setup_controls()
 

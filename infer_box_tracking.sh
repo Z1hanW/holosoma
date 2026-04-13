@@ -999,12 +999,15 @@ VISER_RECENTER=${VISER_RECENTER:-True}
 VISER_SYNC_TO_SIM=${VISER_SYNC_TO_SIM:-True}
 VISER_FORCE_DT=${VISER_FORCE_DT:-True}
 VISER_SHOW_SCANDOTS=${VISER_SHOW_SCANDOTS:-False}
+VISER_ROBOT_MESH_SOURCE=${VISER_ROBOT_MESH_SOURCE:-urdf}
 VISER_LOAD_URDF_FROM_ENV=0
 if [[ -n "${VISER_LOAD_URDF+x}" ]]; then
   VISER_LOAD_URDF_FROM_ENV=1
 fi
 if [[ "${VISER_LOAD_URDF_FROM_ENV}" == "1" ]]; then
   VISER_LOAD_URDF=${VISER_LOAD_URDF:-1}
+elif [[ "$(echo "${VISER_ROBOT_MESH_SOURCE}" | tr '[:upper:]' '[:lower:]')" == "urdf" ]]; then
+  VISER_LOAD_URDF=1
 elif [[ "${OBJECT_GEOMETRY_MODE}" == "primitive" ]]; then
   VISER_LOAD_URDF=0
 else
@@ -1137,7 +1140,8 @@ export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-0}
 export VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-1}
 export VISER_START_PAUSED=${VISER_START_PAUSED:-0}
 export VISER_MESH_SOURCE=${VISER_MESH_SOURCE:-sim}
-export VISER_MESH_MODE=${VISER_MESH_MODE:-both}
+export VISER_MESH_MODE=${VISER_MESH_MODE:-visual}
+export VISER_ROBOT_MESH_SOURCE
 export VISER_LOAD_URDF
 export VISER_DEFER_INIT=${VISER_DEFER_INIT:-1}
 export HOLOSOMA_DISABLE_AUTO_RESET=${HOLOSOMA_DISABLE_AUTO_RESET:-1}
@@ -1395,6 +1399,7 @@ echo "[INFO] viser=http://localhost:${VISER_PORT}"
 echo "[INFO] holosoma_viser_port=${HOLOSOMA_VISER_PORT}"
 echo "[INFO] viser_sync_to_sim=${VISER_SYNC_TO_SIM} viser_force_dt=${VISER_FORCE_DT}"
 echo "[INFO] viser_mesh_source=${VISER_MESH_SOURCE} viser_mesh_mode=${VISER_MESH_MODE}"
+echo "[INFO] viser_robot_mesh_source=${VISER_ROBOT_MESH_SOURCE}"
 echo "[INFO] viser_load_urdf=${VISER_LOAD_URDF}"
 echo "[INFO] viser_defer_init=${VISER_DEFER_INIT}"
 if is_truthy "${VISER_DEFER_INIT}"; then
