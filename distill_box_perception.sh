@@ -19,7 +19,7 @@ cd "${SCRIPT_DIR}"
 DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/u5lguxvl/model_17000.pt"}
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 POSITIONAL_RUN_NAME=""
-DATA_MODE=${DATA_MODE:-mix-naive}
+DATA_MODE=${DATA_MODE:-pure-sd}
 SCHEDULE_VARIANT=${SCHEDULE_VARIANT:-default}
 PYTHON_BIN=${PYTHON_BIN:-python}
 
@@ -224,6 +224,14 @@ PPO_START_EPOCH_EXPLICIT=0
 [[ -n "${PPO_START_EPOCH+x}" ]] && PPO_START_EPOCH_EXPLICIT=1
 DAGGER_END_EPOCH_EXPLICIT=0
 [[ -n "${DAGGER_END_EPOCH+x}" ]] && DAGGER_END_EPOCH_EXPLICIT=1
+NUM_LEARNING_ITERATIONS_EXPLICIT=0
+[[ -n "${NUM_LEARNING_ITERATIONS+x}" ]] && NUM_LEARNING_ITERATIONS_EXPLICIT=1
+PPO_TARGET_COEFF_EXPLICIT=0
+[[ -n "${PPO_TARGET_COEFF+x}" ]] && PPO_TARGET_COEFF_EXPLICIT=1
+DAGGER_LOSS_COEF_EXPLICIT=0
+[[ -n "${DAGGER_LOSS_COEF+x}" ]] && DAGGER_LOSS_COEF_EXPLICIT=1
+PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT=0
+[[ -n "${PPO_SCHEDULE_STEP_EPOCHS+x}" ]] && PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT=1
 SCHEDULE_NAME_EXPLICIT=0
 [[ -n "${SCHEDULE_NAME+x}" ]] && SCHEDULE_NAME_EXPLICIT=1
 SCHEDULE_NOTES_EXPLICIT=0
@@ -268,16 +276,16 @@ DEFAULT_MIX_NAIVE_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo
 PURE_REAL_OMOMO_PREFIXES=${PURE_REAL_OMOMO_PREFIXES:-'["sub"]'}
 
 case "${DATA_MODE}" in
-  default|mix-naive)
-    DATA_MODE="mix-naive"
-    MOTION_DIR=${MOTION_DIR:-"${DEFAULT_MIX_NAIVE_MOTION_DIR}"}
+  default|pure-sd)
+    DATA_MODE="pure-sd"
+    MOTION_DIR=${MOTION_DIR:-"${DEFAULT_DS_PREPARED_MOTION_DIR}"}
     ;;
   pure-real|pure-omomo)
     DATA_MODE="pure-real"
     MOTION_DIR=${MOTION_DIR:-"${DEFAULT_MIX_NAIVE_MOTION_DIR}"}
     ;;
-  pure-sd)
-    MOTION_DIR=${MOTION_DIR:-"${DEFAULT_DS_PREPARED_MOTION_DIR}"}
+  mix-naive)
+    MOTION_DIR=${MOTION_DIR:-"${DEFAULT_MIX_NAIVE_MOTION_DIR}"}
     ;;
   *)
     echo "[ERROR] Unsupported DATA_MODE='${DATA_MODE}'. Use one of: default, mix-naive, pure-real, pure-sd" >&2
@@ -298,14 +306,15 @@ TEACHER_ACTION_MIX_RATIO_START=${TEACHER_ACTION_MIX_RATIO_START:-}
 TEACHER_ACTION_MIX_RATIO_END=${TEACHER_ACTION_MIX_RATIO_END:-}
 TEACHER_ACTION_MIX_RATIO_END_ITERATION=${TEACHER_ACTION_MIX_RATIO_END_ITERATION:-}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
-NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-4000}
+NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-5000}
 PPO_START_EPOCH=${PPO_START_EPOCH:-0}
-DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-3000}
-PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.3}
+DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-4500}
+PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.9}
+PPO_SCHEDULE_STEP_EPOCHS=${PPO_SCHEDULE_STEP_EPOCHS:-500}
 DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
 FIXED_BC_EVAL_LOG_INTERVAL=${FIXED_BC_EVAL_LOG_INTERVAL:-1000}
-SCHEDULE_NAME=${SCHEDULE_NAME:-sparse_root_teacher_anchor_v2}
-SCHEDULE_NOTES=${SCHEDULE_NOTES:-"No teacher rollout mix. PPO starts immediately with target coeff 0.3 while DAgger remains active until iteration 3000. Root-frame relative command replaces the drop-command-specific curricula from distill_box_drop_mixed.sh; other launcher defaults stay aligned."}
+SCHEDULE_NAME=${SCHEDULE_NAME:-sparse_root_teacher_anchor_v3_step_mix}
+SCHEDULE_NOTES=${SCHEDULE_NOTES:-"No teacher rollout mix. PPO/DAgger use the default staircase blend: PPO starts at 0.0, increases by 0.1 every 500 iterations until capping at 0.9; with dagger_loss_coef=1.0, the effective BC weight drops from 1.0 to 0.1 over the same schedule. Root-frame relative command replaces the drop-command-specific curricula from distill_box_drop_mixed.sh; other launcher defaults stay aligned."}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.2}
 FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
 FREEZE_AT_TIMESTEP_ZERO_PROB_END=${FREEZE_AT_TIMESTEP_ZERO_PROB_END:-0.0}
@@ -366,11 +375,23 @@ case "${SCHEDULE_VARIANT}" in
   default)
     ;;
   dag_first)
+    if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
+      NUM_LEARNING_ITERATIONS=4000
+    fi
     if [[ "${PPO_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
       PPO_START_EPOCH=2000
     fi
     if [[ "${DAGGER_END_EPOCH_EXPLICIT}" -eq 0 ]]; then
       DAGGER_END_EPOCH=3000
+    fi
+    if [[ "${PPO_TARGET_COEFF_EXPLICIT}" -eq 0 ]]; then
+      PPO_TARGET_COEFF=0.3
+    fi
+    if [[ "${PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT}" -eq 0 ]]; then
+      PPO_SCHEDULE_STEP_EPOCHS=0
+    fi
+    if [[ "${DAGGER_LOSS_COEF_EXPLICIT}" -eq 0 ]]; then
+      DAGGER_LOSS_COEF=1.0
     fi
     if [[ "${SCHEDULE_NAME_EXPLICIT}" -eq 0 ]]; then
       SCHEDULE_NAME="sparse_root_teacher_anchor_v2_dag_first"
@@ -504,7 +525,7 @@ echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} dagger_loss_coef=${DAGGER_LOSS_COEF} t
 if [[ -n "${TEACHER_ACTION_MIX_RATIO_START}" || -n "${TEACHER_ACTION_MIX_RATIO_END}" || -n "${TEACHER_ACTION_MIX_RATIO_END_ITERATION}" ]]; then
   echo "[INFO] teacher_action_mix_schedule=${TEACHER_ACTION_MIX_RATIO_START}->${TEACHER_ACTION_MIX_RATIO_END} end_iter=${TEACHER_ACTION_MIX_RATIO_END_ITERATION}"
 fi
-echo "[INFO] ppo_schedule=${PPO_START_EPOCH}->${DAGGER_END_EPOCH} target=${PPO_TARGET_COEFF} dagger_loss_coef=${DAGGER_LOSS_COEF}"
+echo "[INFO] ppo_schedule=${PPO_START_EPOCH}->${DAGGER_END_EPOCH} target=${PPO_TARGET_COEFF} step_epochs=${PPO_SCHEDULE_STEP_EPOCHS} dagger_loss_coef=${DAGGER_LOSS_COEF}"
 echo "[INFO] fixed_bc_eval_log_interval=${FIXED_BC_EVAL_LOG_INTERVAL}"
 echo "[INFO] use_adaptive_timesteps_sampler=${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
@@ -622,6 +643,7 @@ exec env \
     --algo.config.distill.dagger-ignore-episode-initial-steps="${DAGGER_IGNORE_EPISODE_INITIAL_STEPS}" \
     --algo.config.distill.fixed-bc-eval-log-interval="${FIXED_BC_EVAL_LOG_INTERVAL}" \
     --algo.config.distill.ppo-target-coeff="${PPO_TARGET_COEFF}" \
+    --algo.config.distill.ppo-schedule-step-epochs="${PPO_SCHEDULE_STEP_EPOCHS}" \
     --command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler="${USE_ADAPTIVE_TIMESTEPS_SAMPLER}" \
     --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob="${FREEZE_AT_TIMESTEP_ZERO_PROB}" \
     --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-end="${FREEZE_AT_TIMESTEP_ZERO_PROB_END}" \

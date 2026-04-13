@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
 
 from holosoma_inference.config.config_types.robot import RobotConfig
+from holosoma_inference.policies.base import BasePolicy
 from holosoma_inference.policies.wbt import WholeBodyTrackingPolicy
 from holosoma_inference.sdk.zmq_interface_wrapper import ZmqSimInterfaceWrapper
 from holosoma_inference.utils.math.quat import quat_rotate_inverse, xyzw_to_wxyz
@@ -169,3 +171,41 @@ def test_wbt_policy_sources_motion_outputs_from_transitioned_motion_data() -> No
     np.testing.assert_allclose(clamped["joint_vel"], [[0.1, -0.1]])
     np.testing.assert_allclose(clamped["ref_quat_xyzw"], [[0.0, 0.0, 0.70710677, 0.70710677]])
     np.testing.assert_allclose(clamped["ref_pos_xyz"], [[0.7, 0.8, 0.9]])
+
+
+def test_base_policy_forces_active_pd_back_to_training_metadata() -> None:
+    robot_cfg = _make_robot_config(num_joints=2)
+    robot_cfg = replace(robot_cfg, motor_kp=(350.0, 200.0), motor_kd=(5.0, 5.0))
+
+    policy = object.__new__(BasePolicy)
+    policy.onnx_kp = np.array([40.179238, 99.09843], dtype=np.float32)
+    policy.onnx_kd = np.array([2.5578897, 6.308802], dtype=np.float32)
+    policy.robot_config = robot_cfg
+    policy.interface = SimpleNamespace(robot_config=robot_cfg, backend="zmq", kp_level=0.5, kd_level=0.7)
+    policy._logged_training_pd_sync = False
+
+    policy._sync_policy_pd_with_training()
+
+    np.testing.assert_allclose(np.asarray(policy.robot_config.motor_kp), policy.onnx_kp)
+    np.testing.assert_allclose(np.asarray(policy.robot_config.motor_kd), policy.onnx_kd)
+    np.testing.assert_allclose(np.asarray(policy.interface.robot_config.motor_kp), policy.onnx_kp)
+    np.testing.assert_allclose(np.asarray(policy.interface.robot_config.motor_kd), policy.onnx_kd)
+    assert policy.interface.kp_level == 1.0
+    assert policy.interface.kd_level == 1.0
+
+
+def test_wbt_root_reference_clip_start_is_consumed_after_one_actor_step() -> None:
+    policy = object.__new__(WholeBodyTrackingPolicy)
+    policy.config = SimpleNamespace(task=SimpleNamespace(use_root_reference_at_clip_start=True))
+    policy._suppress_root_reference_at_clip_start = False
+    policy._logged_root_reference_clip_start = False
+    policy._remaining_root_reference_clip_start_obs = 1
+    policy._motion_data = None
+    policy.motion_timestep = 0
+
+    assert policy._should_use_root_reference_at_clip_start() is True
+
+    policy._consume_root_reference_at_clip_start()
+
+    assert policy._remaining_root_reference_clip_start_obs == 0
+    assert policy._should_use_root_reference_at_clip_start() is False

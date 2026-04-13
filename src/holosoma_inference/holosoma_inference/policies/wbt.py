@@ -373,6 +373,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._latest_sim_state: dict | None = None
         self._sim_state_sub: SimStateSub | None = None
         self._logged_root_reference_clip_start = False
+        self._remaining_root_reference_clip_start_obs = 0
         self._logged_sim_ref_from_sim_state = False
         self._auto_start_motion_clip_pending = False
         self._logged_first_policy_step_debug = False
@@ -557,11 +558,19 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return False
         if self._suppress_root_reference_at_clip_start:
             return False
-        use_root = int(self._get_motion_index()) == 0
+        use_root = self._remaining_root_reference_clip_start_obs > 0 and int(self._get_motion_index()) == 0
         if use_root and not self._logged_root_reference_clip_start:
             logger.info("Using robot root as observation reference at clip start to match training step-0 semantics.")
             self._logged_root_reference_clip_start = True
         return use_root
+
+    def _consume_root_reference_at_clip_start(self) -> None:
+        if self._remaining_root_reference_clip_start_obs <= 0:
+            return
+        if int(self._get_motion_index()) != 0:
+            self._remaining_root_reference_clip_start_obs = 0
+            return
+        self._remaining_root_reference_clip_start_obs = 0
 
     def _get_observation_reference_pose_in_world(self, robot_state_data) -> tuple[np.ndarray, np.ndarray]:
         if self._should_use_root_reference_at_clip_start():
@@ -1414,6 +1423,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._logged_training_freeze_zero_alignment = False
         self.robot_yaw_offset = 0.0
         self._logged_root_reference_clip_start = False
+        self._remaining_root_reference_clip_start_obs = 0
         self._logged_sim_ref_from_sim_state = False
         self._motion_align_quat_wxyz = None
         self._motion_align_pos = None
@@ -1433,6 +1443,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._stiff_hold_active = True
         self.robot_yaw_offset = 0.0
         self._logged_root_reference_clip_start = False
+        self._remaining_root_reference_clip_start_obs = 0
         self._logged_sim_ref_from_sim_state = False
         self._motion_align_quat_wxyz = None
         self._motion_align_pos = None
@@ -1897,6 +1908,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             input_feed[self._perception_input_name] = perception_obs
         if self._time_step_input_name:
             input_feed[self._time_step_input_name] = np.array([[self.motion_timestep]], dtype=np.float32)
+        self._consume_root_reference_at_clip_start()
         outputs = self.policy(input_feed)
         policy_action = outputs[self._action_output_name]
 
@@ -1959,6 +1971,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._training_freeze_zero_remaining_holds = 0
         self._logged_training_freeze_zero_alignment = False
         self._logged_root_reference_clip_start = False
+        self._remaining_root_reference_clip_start_obs = 0
         self._logged_sim_ref_from_sim_state = False
         self._suppress_root_reference_at_clip_start = False
 
@@ -2084,6 +2097,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._logged_training_freeze_zero_alignment = False
         self.robot_yaw_offset = 0.0
         self._logged_root_reference_clip_start = False
+        self._remaining_root_reference_clip_start_obs = 0
         self._logged_sim_ref_from_sim_state = False
         self._motion_align_quat_wxyz = None
         self._motion_align_pos = None
@@ -2110,6 +2124,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._training_freeze_zero_remaining_holds = self._training_freeze_zero_extra_holds
         self._logged_training_freeze_zero_alignment = False
         self._logged_root_reference_clip_start = False
+        self._remaining_root_reference_clip_start_obs = (
+            1 if bool(getattr(self.config.task, "use_root_reference_at_clip_start", False)) else 0
+        )
         self._logged_first_policy_step_debug = False
         if self._motion_alignment_enabled:
             robot_state_data = self.interface.get_low_state()

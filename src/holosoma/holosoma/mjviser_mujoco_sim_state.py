@@ -306,18 +306,23 @@ def view_sim_state(cfg: MjviserMujocoSimStateViewerConfig) -> None:
 
     manual_gui_enabled = os.environ.get("VISER_ENABLE_MANUAL_GUI", "1").lower() not in ("0", "false", "no")
     if manual_gui_enabled:
-        with server.gui.add_folder("Manual Control", expand_by_default=False):
+        with server.gui.add_folder("Manual Control", expand_by_default=True):
+            server.gui.add_markdown(
+                "Use the buttons below. `Manual Control` is a folder, not an action button."
+            )
             policy_md = server.gui.add_markdown("Policy control: `idle`")
             start_policy_btn = server.gui.add_button("Start policy")
             stop_policy_btn = server.gui.add_button("Stop policy")
             init_state_btn = server.gui.add_button("Init state")
             start_motion_clip_btn = server.gui.add_button("Start motion clip")
+            start_policy_and_motion_btn = server.gui.add_button("Start policy + motion")
     else:
         policy_md = None
         start_policy_btn = None
         stop_policy_btn = None
         init_state_btn = None
         start_motion_clip_btn = None
+        start_policy_and_motion_btn = None
 
     sub = SimStateSub(port=cfg.state_port)
     sub.start()
@@ -434,9 +439,14 @@ def view_sim_state(cfg: MjviserMujocoSimStateViewerConfig) -> None:
         logger.info("Started rollout pid={} reason={}", rollout_proc.pid, reason)
         _refresh_rollout_md()
 
-    def _request_sim_reset(reason: str) -> None:
+    def _request_sim_reset(reason: str, *, stop_policy: bool = False) -> None:
         nonlocal pending_restart_reason, auto_reset_scheduled_at, auto_reset_done
         nonlocal reset_request_time_monotonic, reset_pending_clock_rewind, pre_reset_sim_time_ms, received_first_state
+        if stop_policy:
+            if policy_md is not None:
+                policy_md.content = "Policy control: `stop_policy`"
+            policy_control_pub.request_action("stop_policy", source="mjviser_mujoco_sim_state")
+            logger.info("Requested policy action 'stop_policy' before simulator reset")
         if control_pub.enabled:
             control_pub.request_reset(reason)
             state_md.content = f"Reset requested over sim-control ({reason})..."
@@ -508,7 +518,7 @@ def view_sim_state(cfg: MjviserMujocoSimStateViewerConfig) -> None:
 
     @reset_rollout_btn.on_click
     def _(_evt) -> None:
-        _request_sim_reset("gui_reset")
+        _request_sim_reset("gui_reset", stop_policy=True)
 
     @default_pose_init_cb.on_update
     def _(_evt) -> None:
@@ -538,6 +548,13 @@ def view_sim_state(cfg: MjviserMujocoSimStateViewerConfig) -> None:
     if start_motion_clip_btn is not None:
         @start_motion_clip_btn.on_click
         def _(_evt) -> None:
+            _request_policy_action("start_motion_clip", "start_motion_clip")
+
+    if start_policy_and_motion_btn is not None:
+        @start_policy_and_motion_btn.on_click
+        def _(_evt) -> None:
+            _request_policy_action("start_policy", "start_policy")
+            time.sleep(0.05)
             _request_policy_action("start_motion_clip", "start_motion_clip")
 
     logger.info("Open mjviser at http://localhost:{}", port)

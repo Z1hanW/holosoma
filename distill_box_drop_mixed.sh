@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Single-run sparse-goal box-drop distillation on OMOMO with depth perception.
+# Single-run sparse-goal box-drop distillation with depth perception.
 #
 # Student policy observation (actor):
 # - actor_obs_proprio: proprio history
@@ -9,7 +9,8 @@ set -euo pipefail
 # - perception_obs: camera depth
 #
 # Single-run curriculum:
-# - 0..2000 iters: clip/training-distribution only, PPO 0->0.5, DAgger 1->0.5
+# - default PPO/DAgger mix: PPO starts at 0.0 and increases by 0.1 every 500 iters until 0.9
+#   while effective DAgger weight decreases from 1.0 to 0.1 with dagger_loss_coef=1.0
 # - >=2000 iters: keep 50% envs on training distribution, open command curriculum on the other 50%
 # - within the command curriculum, external goals ramp conservatively so training remains teacher-anchored
 #
@@ -24,7 +25,7 @@ cd "${SCRIPT_DIR}"
 DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/u5lguxvl/model_17000.pt"}
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 POSITIONAL_RUN_NAME=""
-DATA_MODE=${DATA_MODE:-mix-naive}
+DATA_MODE=${DATA_MODE:-pure-sd}
 SCHEDULE_VARIANT=${SCHEDULE_VARIANT:-default}
 REWARD_VARIANT=${REWARD_VARIANT:-default}
 DISTRIBUTION_VARIANT=${DISTRIBUTION_VARIANT:-default}
@@ -300,6 +301,8 @@ NUM_LEARNING_ITERATIONS_EXPLICIT=0
 [[ -n "${NUM_LEARNING_ITERATIONS+x}" ]] && NUM_LEARNING_ITERATIONS_EXPLICIT=1
 PPO_TARGET_COEFF_EXPLICIT=0
 [[ -n "${PPO_TARGET_COEFF+x}" ]] && PPO_TARGET_COEFF_EXPLICIT=1
+PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT=0
+[[ -n "${PPO_SCHEDULE_STEP_EPOCHS+x}" ]] && PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT=1
 
 EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-goal-mixed}
 RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_drop_mixed}
@@ -353,14 +356,15 @@ TEACHER_ACTION_MIX_RATIO_END=${TEACHER_ACTION_MIX_RATIO_END:-}
 TEACHER_ACTION_MIX_RATIO_END_ITERATION=${TEACHER_ACTION_MIX_RATIO_END_ITERATION:-}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
 PURE_DAGGER_ITERATIONS=${PURE_DAGGER_ITERATIONS:-10000}
-NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-4000}
+NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-5000}
 PPO_START_EPOCH=${PPO_START_EPOCH:-0}
-DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-3000}
-PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.3}
+DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-4500}
+PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.9}
+PPO_SCHEDULE_STEP_EPOCHS=${PPO_SCHEDULE_STEP_EPOCHS:-500}
 DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
 FIXED_BC_EVAL_LOG_INTERVAL=${FIXED_BC_EVAL_LOG_INTERVAL:-1000}
-SCHEDULE_NAME=${SCHEDULE_NAME:-teacher_anchor_then_goal_curriculum_v2}
-SCHEDULE_NOTES=${SCHEDULE_NOTES:-"No teacher rollout mix. 0-2500 teacher-anchored clip-only; PPO ramps 0->0.3 over 0-3000 while DAgger weight stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.25 and reset curriculum ramps start_at_zero 0.2->1.0. Goal range ramps with the same delayed schedule."}
+SCHEDULE_NAME=${SCHEDULE_NAME:-teacher_anchor_then_goal_curriculum_v3_step_mix}
+SCHEDULE_NOTES=${SCHEDULE_NOTES:-"No teacher rollout mix. PPO/DAgger use the default staircase blend: PPO starts at 0.0, increases by 0.1 every 500 iterations until capping at 0.9; with dagger_loss_coef=1.0, the effective BC weight drops from 1.0 to 0.1 over the same schedule. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.25 and reset curriculum ramps start_at_zero 0.2->1.0. Goal range ramps with the same delayed schedule."}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.2}
 START_AT_TIMESTEP_ZERO_PROB_END=${START_AT_TIMESTEP_ZERO_PROB_END:-1.0}
 START_AT_TIMESTEP_ZERO_PROB_START_ITER=${START_AT_TIMESTEP_ZERO_PROB_START_ITER:-2500}
@@ -444,6 +448,9 @@ case "${SCHEDULE_VARIANT}" in
     if [[ "${PPO_TARGET_COEFF_EXPLICIT}" -eq 0 ]]; then
       PPO_TARGET_COEFF="0.0"
     fi
+    if [[ "${PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT}" -eq 0 ]]; then
+      PPO_SCHEDULE_STEP_EPOCHS="0"
+    fi
     if [[ "${SCHEDULE_NAME_EXPLICIT}" -eq 0 ]]; then
       SCHEDULE_NAME="pure_dagger_teacher_anchor_then_goal_curriculum"
     fi
@@ -452,11 +459,20 @@ case "${SCHEDULE_VARIANT}" in
     fi
     ;;
   dag_first)
+    if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
+      NUM_LEARNING_ITERATIONS=4000
+    fi
     if [[ "${PPO_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
       PPO_START_EPOCH=2000
     fi
     if [[ "${DAGGER_END_EPOCH_EXPLICIT}" -eq 0 ]]; then
       DAGGER_END_EPOCH=3000
+    fi
+    if [[ "${PPO_TARGET_COEFF_EXPLICIT}" -eq 0 ]]; then
+      PPO_TARGET_COEFF="0.3"
+    fi
+    if [[ "${PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT}" -eq 0 ]]; then
+      PPO_SCHEDULE_STEP_EPOCHS="0"
     fi
     if [[ "${SCHEDULE_NAME_EXPLICIT}" -eq 0 ]]; then
       SCHEDULE_NAME="teacher_anchor_then_goal_curriculum_v2_dag_first"
@@ -493,6 +509,9 @@ esac
 
 DATA_MODE=$(echo "${DATA_MODE}" | tr '[:upper:]' '[:lower:]')
 case "${DATA_MODE}" in
+  default)
+    DATA_MODE="pure-sd"
+    ;;
   pure-ds)
     DATA_MODE="pure-sd"
     ;;
@@ -993,7 +1012,7 @@ echo "[INFO] student_actor_inputs=${STUDENT_ACTOR_INPUTS}"
 echo "[INFO] schedule_name=${SCHEDULE_NAME}"
 echo "[INFO] schedule_notes=${SCHEDULE_NOTES}"
 echo "[INFO] pure_dagger_active=${PURE_DAGGER_ACTIVE}"
-echo "[INFO] ppo_schedule=${PPO_START_EPOCH}->${DAGGER_END_EPOCH} target=${PPO_TARGET_COEFF} dagger_loss_coef=${DAGGER_LOSS_COEF}"
+echo "[INFO] ppo_schedule=${PPO_START_EPOCH}->${DAGGER_END_EPOCH} target=${PPO_TARGET_COEFF} step_epochs=${PPO_SCHEDULE_STEP_EPOCHS} dagger_loss_coef=${DAGGER_LOSS_COEF}"
 echo "[INFO] fixed_bc_eval_log_interval=${FIXED_BC_EVAL_LOG_INTERVAL}"
 echo "[INFO] teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
 if [[ -n "${TEACHER_ACTION_MIX_RATIO_START}" || -n "${TEACHER_ACTION_MIX_RATIO_END}" || -n "${TEACHER_ACTION_MIX_RATIO_END_ITERATION}" ]]; then
@@ -1144,6 +1163,7 @@ exec env \
     --algo.config.distill.dagger-ignore-episode-initial-steps="${DAGGER_IGNORE_EPISODE_INITIAL_STEPS}" \
     --algo.config.distill.fixed-bc-eval-log-interval="${FIXED_BC_EVAL_LOG_INTERVAL}" \
     --algo.config.distill.ppo-target-coeff="${PPO_TARGET_COEFF}" \
+    --algo.config.distill.ppo-schedule-step-epochs="${PPO_SCHEDULE_STEP_EPOCHS}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.enabled="${SPARSE_GOAL_ENABLED}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.clip-goal-delta-min-steps="${CLIP_GOAL_DELTA_MIN_STEPS}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.clip-goal-delta-max-steps="${CLIP_GOAL_DELTA_MAX_STEPS}" \

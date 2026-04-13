@@ -245,6 +245,9 @@ class DistillationConfig:
     ppo_target_coeff: float = 0.9
     """Final PPO blend coefficient reached at ``dagger_end_epoch`` in scheduled PPO+DAgger mode."""
 
+    ppo_schedule_step_epochs: int = 0
+    """Optional PPO/DAgger step interval; values > 0 use staircase blending instead of a linear ramp."""
+
     dagger_loss_coef: float = 10.0
     """Scale on dagger/distillation loss term in scheduled PPO+DAgger mode."""
 

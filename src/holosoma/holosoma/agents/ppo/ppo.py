@@ -547,6 +547,12 @@ class PPO(BaseAlgo):
         self.ppo_target_coeff = float(getattr(distill_cfg, "ppo_target_coeff", 0.9))
         if not (0.0 <= self.ppo_target_coeff <= 1.0):
             raise ValueError(f"distill.ppo_target_coeff must be in [0.0, 1.0], got {self.ppo_target_coeff}.")
+        self.ppo_schedule_step_epochs = int(getattr(distill_cfg, "ppo_schedule_step_epochs", 0))
+        if self.ppo_schedule_step_epochs < 0:
+            raise ValueError(
+                "distill.ppo_schedule_step_epochs must be >= 0, "
+                f"got {self.ppo_schedule_step_epochs}."
+            )
         self.dagger_loss_coef = float(getattr(distill_cfg, "dagger_loss_coef", 10.0))
         self.use_ppo_dagger_schedule = self.ppo_start_epoch >= 0 and self.dagger_end_epoch > self.ppo_start_epoch
         self.ppo_coeff = 0.0 if self.use_ppo_dagger_schedule else 1.0
@@ -946,7 +952,8 @@ class PPO(BaseAlgo):
 
         - epoch < ppo_start_epoch: ppo_coeff = 0.0
         - epoch >= dagger_end_epoch: ppo_coeff = ppo_target_coeff
-        - otherwise: linear ramp to ppo_target_coeff
+        - otherwise: linear ramp to ppo_target_coeff, or staircase updates when
+          ``ppo_schedule_step_epochs > 0``
         """
         if not self.use_ppo_dagger_schedule:
             self.ppo_coeff = 1.0
@@ -961,6 +968,13 @@ class PPO(BaseAlgo):
 
         total_epochs = max(1, self.dagger_end_epoch - self.ppo_start_epoch)
         ppo_epochs = max(0, current_epoch - self.ppo_start_epoch)
+        if self.ppo_schedule_step_epochs > 0:
+            step_epochs = max(1, self.ppo_schedule_step_epochs)
+            total_steps = max(1, (total_epochs + step_epochs - 1) // step_epochs)
+            completed_steps = max(0, ppo_epochs // step_epochs)
+            self.ppo_coeff = min(float(completed_steps) / float(total_steps), 1.0) * self.ppo_target_coeff
+            return
+
         self.ppo_coeff = min(float(ppo_epochs) / float(total_epochs), 1.0) * self.ppo_target_coeff
 
     def _adjust_teacher_action_mix_ratio(self, current_iteration: int) -> None:

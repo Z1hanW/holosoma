@@ -215,6 +215,7 @@ class BasePolicy:
 
         # Determine KP/KD values: config override > ONNX metadata > error
         self._resolve_control_gains()
+        self._logged_training_pd_sync = False
 
     def _collect_model_paths(self, model_path):
         """Normalize model_path into a list of up to nine entries."""
@@ -535,6 +536,49 @@ class BasePolicy:
                 f"KD array length ({len(kd_values)}) does not match num_motors ({self.robot_config.num_motors})"
             )
 
+    def _sync_policy_pd_with_training(self) -> None:
+        """Force active policy PD gains to match ONNX/training metadata exactly."""
+        if self.onnx_kp is None or self.onnx_kd is None:
+            return
+
+        expected_kp = np.asarray(self.onnx_kp, dtype=np.float32)
+        expected_kd = np.asarray(self.onnx_kd, dtype=np.float32)
+        current_kp = getattr(self.robot_config, "motor_kp", None)
+        current_kd = getattr(self.robot_config, "motor_kd", None)
+        needs_cfg_sync = (
+            current_kp is None
+            or current_kd is None
+            or len(current_kp) != expected_kp.shape[0]
+            or len(current_kd) != expected_kd.shape[0]
+            or not np.allclose(np.asarray(current_kp, dtype=np.float32), expected_kp)
+            or not np.allclose(np.asarray(current_kd, dtype=np.float32), expected_kd)
+        )
+
+        if needs_cfg_sync:
+            self.robot_config = replace(
+                self.robot_config,
+                motor_kp=tuple(expected_kp.tolist()),
+                motor_kd=tuple(expected_kd.tolist()),
+            )
+            self.interface.robot_config = self.robot_config
+            if self.interface.backend == "sdk2py":
+                self.interface.command_sender.config = self.robot_config
+                self.interface.state_processor.config = self.robot_config
+
+        kp_level = float(getattr(self.interface, "kp_level", 1.0))
+        kd_level = float(getattr(self.interface, "kd_level", 1.0))
+        levels_reset = abs(kp_level - 1.0) > 1e-6 or abs(kd_level - 1.0) > 1e-6
+        if levels_reset:
+            self.interface.kp_level = 1.0
+            self.interface.kd_level = 1.0
+
+        if needs_cfg_sync or levels_reset:
+            logger.info("Forced active policy PD gains back to ONNX/training values (kp_level=1.0, kd_level=1.0).")
+            self._logged_training_pd_sync = True
+        elif not getattr(self, "_logged_training_pd_sync", False):
+            logger.info("Active policy PD gains match ONNX/training values.")
+            self._logged_training_pd_sync = True
+
     def _calculate_obs_dim_dict(self):
         """Calculate observation dimensions for each observation type."""
         obs_dim_dict = {}
@@ -815,6 +859,8 @@ class BasePolicy:
 
         # Stage 5: Action Pub
         with self.latency_tracker.measure("action_pub"):
+            if self.use_policy_action and not self.get_ready_state and kp_override is None and kd_override is None:
+                self._sync_policy_pd_with_training()
             self.interface.send_low_command(
                 self.cmd_q,
                 self.cmd_dq,
@@ -931,6 +977,7 @@ class BasePolicy:
         """Handle start policy action."""
         self.use_policy_action = True
         self.get_ready_state = False
+        self._sync_policy_pd_with_training()
         self.logger.info(colored("Using policy actions", "blue"))
         self.phase = np.array([[0.0, np.pi]])
         if hasattr(self.interface, "no_action"):
