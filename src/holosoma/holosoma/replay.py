@@ -30,9 +30,7 @@ def _resolve_wandb_registry(tyro_config: ExperimentConfig) -> ExperimentConfig:
 
     from holosoma.utils.multi_motion_helpers import pull_paired_from_wandb_registry
 
-    motion_counts, motion_file, terrain_npy_file, terrain_obj_files = (
-        pull_paired_from_wandb_registry(registry_name)
-    )
+    motion_counts, motion_file, terrain_npy_file, terrain_obj_files = pull_paired_from_wandb_registry(registry_name)
 
     if tyro_config.training.add_onpath_obstacle and terrain_npy_file:
         from holosoma.config_types.terrain import MeshType
@@ -44,7 +42,9 @@ def _resolve_wandb_registry(tyro_config: ExperimentConfig) -> ExperimentConfig:
         )
         import tempfile as _tempfile
 
-        terrain_obj_path = _tempfile.mktemp(suffix=".obj")
+        _terrain_obj_f = _tempfile.NamedTemporaryFile(suffix=".obj", delete=False)
+        terrain_obj_path = _terrain_obj_f.name
+        _terrain_obj_f.close()
         terrain_mesh.export(terrain_obj_path)
         tyro_config = dataclasses.replace(
             tyro_config,
