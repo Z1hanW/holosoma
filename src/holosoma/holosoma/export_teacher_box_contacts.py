@@ -49,10 +49,6 @@ _RIGHT_WRIST_BODY_NAMES = ["right_wrist_yaw_link"]
 _ARM_BODY_NAMES = [
     "left_elbow_link",
     "right_elbow_link",
-    "left_wrist_roll_link",
-    "right_wrist_roll_link",
-    "left_wrist_pitch_link",
-    "right_wrist_pitch_link",
 ]
 _TORSO_BODY_NAMES = ["torso_link"]
 
@@ -116,6 +112,12 @@ _REGION_OVERLAY_STYLE: dict[str, dict[str, Any]] = {
         "label": "torso",
     },
 }
+_REGION_DISPLAY_PRIORITY: dict[str, int] = {
+    "torso": 3,
+    "left_wrist": 2,
+    "right_wrist": 2,
+    "arm": 1,
+}
 
 
 @dataclass(frozen=True)
@@ -144,6 +146,8 @@ class ClipSummary:
     terminated: bool
     timeout: bool
     success: bool
+    stable_contact_success: bool
+    final_position_success: bool
     status: str
     final_object_position_error_m: float
     final_object_rotation_error_rad: float
@@ -171,9 +175,18 @@ class ClipAccumulator:
     region_force_sums: dict[str, float]
     region_force_max: dict[str, float]
     region_contact_frames: dict[str, int]
+    region_contact_interval_start: dict[str, int]
+    region_contact_interval_end: dict[str, int]
     body_force_sums: dict[str, float]
     body_force_max: dict[str, float]
     body_contact_frames: dict[str, int]
+    tracked_body_names: list[str]
+    full_body_names: list[str]
+    joint_names: list[str]
+    ref_body_name: str
+    motion_fps: float
+    rollout_reference: dict[str, np.ndarray]
+    rollout_motion: dict[str, np.ndarray]
 
 
 def _default_output_dir() -> Path:
@@ -206,6 +219,11 @@ def _ensure_motion_command(env: Any) -> MotionCommand:
 
 def _sanitize_name(name: str) -> str:
     return "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in name)
+
+
+def _xyzw_to_wxyz_np(quat_xyzw: np.ndarray) -> np.ndarray:
+    quat_xyzw = np.asarray(quat_xyzw, dtype=np.float32)
+    return np.concatenate([quat_xyzw[..., 3:4], quat_xyzw[..., :3]], axis=-1)
 
 
 def _normalize_path_key(path: str) -> str:
@@ -315,6 +333,48 @@ def _retained_points_from_counts(
     points = np.stack([_dequantize_point(key, voxel_size) for key, _ in retained], axis=0).astype(np.float32)
     counts = np.asarray([count for _, count in retained], dtype=np.int32)
     return points, counts
+
+
+def _contact_interval_from_mask(contact_mask: np.ndarray) -> np.ndarray:
+    mask = np.asarray(contact_mask, dtype=np.bool_).reshape(-1)
+    active_steps = np.flatnonzero(mask)
+    if active_steps.size == 0:
+        return np.asarray([-1, -1], dtype=np.int32)
+    return np.asarray([int(active_steps[0]), int(active_steps[-1]) + 1], dtype=np.int32)
+
+
+def _build_display_points_from_region_counts(
+    overall_point_counts: dict[tuple[int, int, int], int],
+    region_point_counts: dict[str, dict[tuple[int, int, int], int]],
+    *,
+    voxel_size: float,
+    min_frames: int,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    retained = [(key, count) for key, count in overall_point_counts.items() if count >= min_frames]
+    if not retained:
+        return np.zeros((0, 3), dtype=np.float32), np.zeros((0,), dtype=np.int32), []
+    retained.sort(key=lambda item: (-item[1], item[0]))
+
+    points: list[np.ndarray] = []
+    counts: list[int] = []
+    labels: list[str] = []
+    for key, total_count in retained:
+        region_scores = {
+            label: int(point_counts.get(key, 0))
+            for label, point_counts in region_point_counts.items()
+            if int(point_counts.get(key, 0)) > 0
+        }
+        if region_scores:
+            label = max(
+                region_scores,
+                key=lambda name: (region_scores[name], _REGION_DISPLAY_PRIORITY.get(name, 0), name),
+            )
+        else:
+            label = "arm"
+        points.append(_dequantize_point(key, voxel_size))
+        counts.append(int(total_count))
+        labels.append(label)
+    return np.stack(points, axis=0).astype(np.float32), np.asarray(counts, dtype=np.int32), labels
 
 
 def _quat_to_rotmat_wxyz(quat_wxyz: np.ndarray) -> np.ndarray:
@@ -458,7 +518,8 @@ def _save_overlay_assets(
     extents_xyz: np.ndarray,
     retained_points_xyz: np.ndarray,
     retained_counts: np.ndarray,
-    retained_points_by_region: dict[str, np.ndarray],
+    display_points_xyz: np.ndarray,
+    display_point_labels: list[str],
     save_glb: bool,
     save_preview_png: bool,
     save_face_heatmap_png: bool,
@@ -489,17 +550,15 @@ def _save_overlay_assets(
         scene.add_geometry(box_mesh, node_name="primitive_box")
 
         base_radius = max(float(np.max(extents_xyz)) * 0.02, 0.003)
-        for region_name, region_points_xyz in retained_points_by_region.items():
-            if region_points_xyz.size == 0:
-                continue
+        for point_xyz, region_name in zip(display_points_xyz, display_point_labels, strict=True):
             style = _REGION_OVERLAY_STYLE.get(region_name, _REGION_OVERLAY_STYLE["arm"])
             radius = base_radius * float(style["radius_scale"])
             color = np.asarray(style["rgba"], dtype=np.uint8)
-            for point_xyz in region_points_xyz:
-                sphere = trimesh.creation.icosphere(subdivisions=2, radius=radius)
-                sphere.apply_translation(point_xyz.astype(np.float64))
-                sphere.visual.vertex_colors = color
-                scene.add_geometry(sphere, node_name=f"{region_name}_contact")
+            sphere = trimesh.creation.icosphere(subdivisions=2, radius=radius)
+            sphere.apply_translation(point_xyz.astype(np.float64))
+            sphere.visual.vertex_colors = color
+            point_name = "_".join(f"{coord:.3f}" for coord in point_xyz.tolist())
+            scene.add_geometry(sphere, node_name=f"{region_name}_contact_{point_name}")
 
         scene.export(clip_dir / "contact_overlay.glb")
 
@@ -567,7 +626,10 @@ def _save_overlay_assets(
                 ax_3d.add_collection3d(poly)
 
             legend_entries: list[tuple[str, Any]] = []
-            for region_name, region_points_xyz in retained_points_by_region.items():
+            for region_name in ["left_wrist", "right_wrist", "arm", "torso"]:
+                region_points_xyz = display_points_xyz[
+                    [idx for idx, label in enumerate(display_point_labels) if label == region_name]
+                ]
                 if region_points_xyz.size == 0:
                     continue
                 style = _REGION_OVERLAY_STYLE.get(region_name, _REGION_OVERLAY_STYLE["arm"])
@@ -630,7 +692,10 @@ def _save_overlay_assets(
                         s=2.0,
                         linewidths=0.0,
                     )
-                for region_name, region_points_xyz in retained_points_by_region.items():
+                for region_name in ["left_wrist", "right_wrist", "arm", "torso"]:
+                    region_points_xyz = display_points_xyz[
+                        [idx for idx, label in enumerate(display_point_labels) if label == region_name]
+                    ]
                     if region_points_xyz.size == 0:
                         continue
                     style = _REGION_OVERLAY_STYLE.get(region_name, _REGION_OVERLAY_STYLE["arm"])
@@ -821,9 +886,59 @@ def _make_clip_accumulator(
     env_id: int,
     extents_xyz: np.ndarray,
     output_dir: Path,
+    tracked_body_names: list[str],
+    full_body_names: list[str],
+    joint_names: list[str],
+    ref_body_name: str,
+    motion_fps: float,
+    clip_length: int,
+    has_object: bool,
 ) -> ClipAccumulator:
     clip_dir = output_dir / "clips" / f"{clip_idx:04d}_{_sanitize_name(clip_id)}"
     clip_dir.mkdir(parents=True, exist_ok=True)
+    num_bodies = len(tracked_body_names)
+    num_full_bodies = len(full_body_names)
+    num_joints = len(joint_names)
+    rollout_reference: dict[str, np.ndarray] = {
+        "valid_steps": np.zeros((clip_length,), dtype=np.bool_),
+        "body_pos_local": np.zeros((clip_length, num_bodies, 3), dtype=np.float32),
+        "body_quat_w": np.zeros((clip_length, num_bodies, 4), dtype=np.float32),
+        "body_lin_vel_w": np.zeros((clip_length, num_bodies, 3), dtype=np.float32),
+        "body_ang_vel_w": np.zeros((clip_length, num_bodies, 3), dtype=np.float32),
+        "ref_pos_local": np.zeros((clip_length, 3), dtype=np.float32),
+        "ref_quat_w": np.zeros((clip_length, 4), dtype=np.float32),
+        "ref_lin_vel_w": np.zeros((clip_length, 3), dtype=np.float32),
+        "ref_ang_vel_w": np.zeros((clip_length, 3), dtype=np.float32),
+        "root_pos_local": np.zeros((clip_length, 3), dtype=np.float32),
+        "root_quat_w": np.zeros((clip_length, 4), dtype=np.float32),
+        "root_lin_vel_w": np.zeros((clip_length, 3), dtype=np.float32),
+        "root_ang_vel_w": np.zeros((clip_length, 3), dtype=np.float32),
+    }
+    rollout_reference["body_quat_w"][..., 3] = 1.0
+    rollout_reference["ref_quat_w"][..., 3] = 1.0
+    rollout_reference["root_quat_w"][..., 3] = 1.0
+    if has_object:
+        rollout_reference["object_pos_local"] = np.zeros((clip_length, 3), dtype=np.float32)
+        rollout_reference["object_quat_w"] = np.zeros((clip_length, 4), dtype=np.float32)
+        rollout_reference["object_quat_w"][..., 3] = 1.0
+        rollout_reference["object_lin_vel_w"] = np.zeros((clip_length, 3), dtype=np.float32)
+        rollout_reference["object_ang_vel_w"] = np.zeros((clip_length, 3), dtype=np.float32)
+    rollout_motion: dict[str, np.ndarray] = {
+        "valid_steps": np.zeros((clip_length,), dtype=np.bool_),
+        "joint_pos": np.zeros((clip_length, 7 + num_joints), dtype=np.float32),
+        "joint_vel": np.zeros((clip_length, 6 + num_joints), dtype=np.float32),
+        "body_pos_local": np.zeros((clip_length, num_full_bodies, 3), dtype=np.float32),
+        "body_quat_w": np.zeros((clip_length, num_full_bodies, 4), dtype=np.float32),
+        "body_lin_vel_w": np.zeros((clip_length, num_full_bodies, 3), dtype=np.float32),
+        "body_ang_vel_w": np.zeros((clip_length, num_full_bodies, 3), dtype=np.float32),
+    }
+    rollout_motion["body_quat_w"][..., 3] = 1.0
+    if has_object:
+        rollout_motion["object_pos_local"] = np.zeros((clip_length, 3), dtype=np.float32)
+        rollout_motion["object_quat_w"] = np.zeros((clip_length, 4), dtype=np.float32)
+        rollout_motion["object_quat_w"][..., 3] = 1.0
+        rollout_motion["object_lin_vel_w"] = np.zeros((clip_length, 3), dtype=np.float32)
+        rollout_motion["object_ang_vel_w"] = np.zeros((clip_length, 3), dtype=np.float32)
     return ClipAccumulator(
         clip_id=clip_id,
         clip_index=clip_idx,
@@ -837,10 +952,108 @@ def _make_clip_accumulator(
         region_force_sums={spec["label"]: 0.0 for spec in _REGION_SPECS.values()},
         region_force_max={spec["label"]: 0.0 for spec in _REGION_SPECS.values()},
         region_contact_frames={spec["label"]: 0 for spec in _REGION_SPECS.values()},
+        region_contact_interval_start={spec["label"]: -1 for spec in _REGION_SPECS.values()},
+        region_contact_interval_end={spec["label"]: -1 for spec in _REGION_SPECS.values()},
         body_force_sums=defaultdict(float),
         body_force_max=defaultdict(float),
         body_contact_frames=defaultdict(int),
+        tracked_body_names=list(tracked_body_names),
+        full_body_names=list(full_body_names),
+        joint_names=list(joint_names),
+        ref_body_name=str(ref_body_name),
+        motion_fps=float(motion_fps),
+        rollout_reference=rollout_reference,
+        rollout_motion=rollout_motion,
     )
+
+
+def _record_rollout_reference_batch(
+    motion_command: MotionCommand,
+    *,
+    accumulators: dict[int, ClipAccumulator],
+    active_env_ids: list[int],
+) -> None:
+    if not active_env_ids:
+        return
+
+    env_ids_tensor = torch.tensor(active_env_ids, device=motion_command.device, dtype=torch.long)
+    time_steps = motion_command.time_steps.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    env_offsets = motion_command._get_env_offsets(env_ids_tensor)
+
+    body_pos_local = (motion_command.robot_body_pos_w.index_select(0, env_ids_tensor) - env_offsets[:, None, :]).detach().cpu().numpy()
+    body_quat_w = motion_command.robot_body_quat_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    body_lin_vel_w = motion_command.robot_body_lin_vel_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    body_ang_vel_w = motion_command.robot_body_ang_vel_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    ref_pos_local = (motion_command.robot_ref_pos_w.index_select(0, env_ids_tensor) - env_offsets).detach().cpu().numpy()
+    ref_quat_w = motion_command.robot_ref_quat_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    ref_lin_vel_w = motion_command.robot_ref_lin_vel_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    ref_ang_vel_w = motion_command.robot_ref_ang_vel_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    root_pos_local = (motion_command.robot_root_pos_w.index_select(0, env_ids_tensor) - env_offsets).detach().cpu().numpy()
+    root_quat_w = motion_command.robot_root_quat_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    root_lin_vel_w = motion_command.robot_root_lin_vel_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    root_ang_vel_w = motion_command.robot_root_ang_vel_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    simulator = motion_command._env.simulator
+    full_body_pos_local = (simulator._rigid_body_pos.index_select(0, env_ids_tensor) - env_offsets[:, None, :]).detach().cpu().numpy()
+    full_body_quat_w = simulator._rigid_body_rot.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    full_body_lin_vel_w = simulator._rigid_body_vel.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    full_body_ang_vel_w = simulator._rigid_body_ang_vel.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    joint_pos = simulator.dof_pos.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    joint_vel = simulator.dof_vel.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    joint_pos_full = np.concatenate(
+        [root_pos_local, _xyzw_to_wxyz_np(root_quat_w), joint_pos],
+        axis=-1,
+    )
+    joint_vel_full = np.concatenate([root_lin_vel_w, root_ang_vel_w, joint_vel], axis=-1)
+
+    object_pos_local = None
+    object_quat_w = None
+    object_lin_vel_w = None
+    object_ang_vel_w = None
+    if motion_command.motion.has_object:
+        object_pos_local = (
+            motion_command.simulator_object_pos_w.index_select(0, env_ids_tensor) - env_offsets
+        ).detach().cpu().numpy()
+        object_quat_w = motion_command.simulator_object_quat_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+        object_lin_vel_w = motion_command.simulator_object_lin_vel_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+        object_ang_vel_w = motion_command.simulator_object_ang_vel_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+
+    for batch_slot, env_id in enumerate(active_env_ids):
+        accumulator = accumulators[env_id]
+        rollout_reference = accumulator.rollout_reference
+        rollout_motion = accumulator.rollout_motion
+        step_idx = int(time_steps[batch_slot])
+        if step_idx < 0 or step_idx >= int(rollout_reference["valid_steps"].shape[0]):
+            continue
+
+        rollout_reference["valid_steps"][step_idx] = True
+        rollout_reference["body_pos_local"][step_idx] = body_pos_local[batch_slot]
+        rollout_reference["body_quat_w"][step_idx] = body_quat_w[batch_slot]
+        rollout_reference["body_lin_vel_w"][step_idx] = body_lin_vel_w[batch_slot]
+        rollout_reference["body_ang_vel_w"][step_idx] = body_ang_vel_w[batch_slot]
+        rollout_reference["ref_pos_local"][step_idx] = ref_pos_local[batch_slot]
+        rollout_reference["ref_quat_w"][step_idx] = ref_quat_w[batch_slot]
+        rollout_reference["ref_lin_vel_w"][step_idx] = ref_lin_vel_w[batch_slot]
+        rollout_reference["ref_ang_vel_w"][step_idx] = ref_ang_vel_w[batch_slot]
+        rollout_reference["root_pos_local"][step_idx] = root_pos_local[batch_slot]
+        rollout_reference["root_quat_w"][step_idx] = root_quat_w[batch_slot]
+        rollout_reference["root_lin_vel_w"][step_idx] = root_lin_vel_w[batch_slot]
+        rollout_reference["root_ang_vel_w"][step_idx] = root_ang_vel_w[batch_slot]
+        rollout_motion["valid_steps"][step_idx] = True
+        rollout_motion["joint_pos"][step_idx] = joint_pos_full[batch_slot]
+        rollout_motion["joint_vel"][step_idx] = joint_vel_full[batch_slot]
+        rollout_motion["body_pos_local"][step_idx] = full_body_pos_local[batch_slot]
+        rollout_motion["body_quat_w"][step_idx] = full_body_quat_w[batch_slot]
+        rollout_motion["body_lin_vel_w"][step_idx] = full_body_lin_vel_w[batch_slot]
+        rollout_motion["body_ang_vel_w"][step_idx] = full_body_ang_vel_w[batch_slot]
+        if object_pos_local is not None:
+            rollout_reference["object_pos_local"][step_idx] = object_pos_local[batch_slot]
+            rollout_reference["object_quat_w"][step_idx] = object_quat_w[batch_slot]
+            rollout_reference["object_lin_vel_w"][step_idx] = object_lin_vel_w[batch_slot]
+            rollout_reference["object_ang_vel_w"][step_idx] = object_ang_vel_w[batch_slot]
+            rollout_motion["object_pos_local"][step_idx] = object_pos_local[batch_slot]
+            rollout_motion["object_quat_w"][step_idx] = object_quat_w[batch_slot]
+            rollout_motion["object_lin_vel_w"][step_idx] = object_lin_vel_w[batch_slot]
+            rollout_motion["object_ang_vel_w"][step_idx] = object_ang_vel_w[batch_slot]
 
 
 def _collect_region_measurements_batch(
@@ -848,34 +1061,58 @@ def _collect_region_measurements_batch(
     *,
     accumulators: dict[int, ClipAccumulator],
     active_env_ids: list[int],
+    step_idx: int,
     force_threshold: float,
     voxel_size: float,
 ) -> None:
     if not active_env_ids:
         return
-    region_names = motion_command.contact_prior_region_names()
-    current_force, current_contact, current_position = motion_command.get_current_contact_prior_region_measurements()
-    current_force_np = current_force.detach().cpu().numpy()
-    current_contact_np = current_contact.detach().cpu().numpy()
-    current_position_np = current_position.detach().cpu().numpy()
+    simulator_body_names = list(getattr(motion_command._env.simulator, "body_names", []))
+    for region_name, spec in _REGION_SPECS.items():
+        body_names = list(spec["body_names"])
+        if not body_names:
+            continue
+        missing = [name for name in body_names if name not in simulator_body_names]
+        if missing:
+            raise ValueError(f"Requested export contact bodies {missing} are not available in simulator bodies.")
 
-    for env_id in active_env_ids:
-        accumulator = accumulators[env_id]
-        for region_idx, region_name in enumerate(region_names):
-            if region_name not in _REGION_SPECS:
-                continue
-            force_value = float(current_force_np[env_id, region_idx])
-            if not bool(current_contact_np[env_id, region_idx]) and force_value <= force_threshold:
-                continue
+        label = str(spec["label"])
+        force_history = motion_command.get_body_object_contact_force_history(body_names)
+        per_body_force = torch.max(torch.norm(force_history, dim=-1), dim=1)[0]
+        region_force = torch.max(per_body_force, dim=1)[0]
 
-            label = str(_REGION_SPECS[region_name]["label"])
-            point_obj = current_position_np[env_id, region_idx]
-            point_surface = _project_point_to_box_surface(point_obj, accumulator.extents_xyz)
-            key = _quantize_point(point_surface, voxel_size)
-            accumulator.region_point_counts[label][key] += 1
+        body_indices = torch.tensor(
+            [simulator_body_names.index(name) for name in body_names],
+            device=motion_command.device,
+            dtype=torch.long,
+        )
+        body_pos_obj = motion_command._body_positions_in_object_frame(body_indices)
+
+        region_force_np = region_force.detach().cpu().numpy()
+        per_body_force_np = per_body_force.detach().cpu().numpy()
+        body_pos_obj_np = body_pos_obj.detach().cpu().numpy()
+        for env_id in active_env_ids:
+            force_value = float(region_force_np[env_id])
+            accumulator = accumulators[env_id]
+            if force_value <= force_threshold:
+                continue
+            if accumulator.region_contact_interval_start[label] < 0:
+                accumulator.region_contact_interval_start[label] = int(step_idx)
+            accumulator.region_contact_interval_end[label] = max(
+                int(accumulator.region_contact_interval_end[label]),
+                int(step_idx) + 1,
+            )
             accumulator.region_force_sums[label] += force_value
             accumulator.region_force_max[label] = max(accumulator.region_force_max[label], force_value)
             accumulator.region_contact_frames[label] += 1
+            for body_slot in range(len(body_names)):
+                body_force_value = float(per_body_force_np[env_id, body_slot])
+                if body_force_value <= force_threshold:
+                    continue
+                point_obj = body_pos_obj_np[env_id, body_slot]
+                point_surface = _project_point_to_box_surface(point_obj, accumulator.extents_xyz)
+                key = _quantize_point(point_surface, voxel_size)
+                accumulator.region_point_counts[label][key] += 1
 
 
 def _collect_body_force_stats_batch(
@@ -908,6 +1145,14 @@ def _collect_body_force_stats_batch(
                 accumulator.body_contact_frames[body_name] += 1
 
 
+def _valid_step_indices(valid_steps: np.ndarray) -> np.ndarray:
+    valid_steps = np.asarray(valid_steps, dtype=np.bool_).reshape(-1)
+    indices = np.flatnonzero(valid_steps)
+    if indices.size == 0:
+        return np.asarray([0], dtype=np.int64)
+    return indices.astype(np.int64, copy=False)
+
+
 def _finalize_clip_output(
     *,
     accumulator: ClipAccumulator,
@@ -919,18 +1164,6 @@ def _finalize_clip_output(
     final_pos_error: float,
     final_rot_error: float,
 ) -> ClipSummary:
-    success = motion_end_reached and final_pos_error <= float(export_cfg.success_position_threshold)
-    if success:
-        status = "success"
-    elif terminated and not motion_end_reached:
-        status = "failed_early_termination"
-    elif motion_end_reached:
-        status = "failed_final_position"
-    elif timeout:
-        status = "failed_timeout"
-    else:
-        status = "failed_max_steps"
-
     overall_point_counts: dict[tuple[int, int, int], int] = defaultdict(int)
     for per_region_counts in accumulator.region_point_counts.values():
         for key, count in per_region_counts.items():
@@ -944,6 +1177,22 @@ def _finalize_clip_output(
     np.save(accumulator.clip_dir / "primitive_contact_points.npy", retained_points_xyz)
     np.save(accumulator.clip_dir / "primitive_contact_point_counts.npy", retained_counts)
 
+    stable_contact_success = bool(retained_points_xyz.shape[0] > 0)
+    final_position_success = motion_end_reached and final_pos_error <= float(export_cfg.success_position_threshold)
+    success = stable_contact_success
+    if stable_contact_success and final_position_success:
+        status = "success_contact_and_final_position"
+    elif stable_contact_success:
+        status = "success_stable_contact"
+    elif terminated and not motion_end_reached:
+        status = "failed_early_termination"
+    elif timeout:
+        status = "failed_timeout"
+    elif motion_end_reached:
+        status = "failed_no_stable_contact"
+    else:
+        status = "failed_max_steps"
+
     retained_points_by_region: dict[str, np.ndarray] = {}
     for spec in _REGION_SPECS.values():
         label = str(spec["label"])
@@ -955,6 +1204,21 @@ def _finalize_clip_output(
         retained_points_by_region[label] = region_points_xyz
         np.save(accumulator.clip_dir / f"{label}_contact_points.npy", region_points_xyz)
         np.save(accumulator.clip_dir / f"{label}_contact_point_counts.npy", region_counts)
+        start_step = int(accumulator.region_contact_interval_start[label])
+        end_step = int(accumulator.region_contact_interval_end[label])
+        np.save(
+            accumulator.clip_dir / f"{label}_contact_interval_steps.npy",
+            np.asarray([start_step, end_step], dtype=np.int32)
+            if start_step >= 0 and end_step > start_step
+            else np.asarray([-1, -1], dtype=np.int32),
+        )
+
+    display_points_xyz, _, display_point_labels = _build_display_points_from_region_counts(
+        overall_point_counts,
+        accumulator.region_point_counts,
+        voxel_size=export_cfg.contact_voxel_size,
+        min_frames=export_cfg.min_contact_frames,
+    )
 
     region_rows: list[dict[str, Any]] = []
     for spec in _REGION_SPECS.values():
@@ -990,6 +1254,43 @@ def _finalize_clip_output(
         )
     _write_csv(accumulator.clip_dir / "body_contact_stats.csv", body_rows)
 
+    rollout_reference_payload: dict[str, Any] = {
+        "clip_id": np.asarray(accumulator.clip_id),
+        "clip_index": np.asarray(accumulator.clip_index, dtype=np.int32),
+        "tracked_body_names": np.asarray(accumulator.tracked_body_names),
+        "ref_body_name": np.asarray(accumulator.ref_body_name),
+        "trajectory_length": np.asarray(accumulator.rollout_reference["valid_steps"].shape[0], dtype=np.int32),
+    }
+    rollout_reference_payload.update(accumulator.rollout_reference)
+    np.savez_compressed(accumulator.clip_dir / "teacher_rollout_reference.npz", **rollout_reference_payload)
+
+    motion_bank_dir = accumulator.clip_dir.parent.parent / "motion_bank"
+    motion_bank_dir.mkdir(parents=True, exist_ok=True)
+    valid_motion_steps = _valid_step_indices(accumulator.rollout_motion["valid_steps"])
+    rollout_motion_payload: dict[str, Any] = {
+        "fps": np.asarray([accumulator.motion_fps], dtype=np.int32),
+        "body_names": np.asarray(accumulator.full_body_names),
+        "joint_names": np.asarray(accumulator.joint_names),
+        "joint_pos": accumulator.rollout_motion["joint_pos"][valid_motion_steps],
+        "joint_vel": accumulator.rollout_motion["joint_vel"][valid_motion_steps],
+        "body_pos_w": accumulator.rollout_motion["body_pos_local"][valid_motion_steps],
+        "body_quat_w": _xyzw_to_wxyz_np(accumulator.rollout_motion["body_quat_w"][valid_motion_steps]),
+        "body_lin_vel_w": accumulator.rollout_motion["body_lin_vel_w"][valid_motion_steps],
+        "body_ang_vel_w": accumulator.rollout_motion["body_ang_vel_w"][valid_motion_steps],
+        "object_name": np.asarray(accumulator.object_name),
+        "object_urdf_path": np.asarray(accumulator.object_urdf_path),
+        "object_size": np.asarray(accumulator.extents_xyz, dtype=np.float32),
+    }
+    if "object_pos_local" in accumulator.rollout_motion:
+        rollout_motion_payload["object_pos_w"] = accumulator.rollout_motion["object_pos_local"][valid_motion_steps]
+        rollout_motion_payload["object_quat_w"] = _xyzw_to_wxyz_np(
+            accumulator.rollout_motion["object_quat_w"][valid_motion_steps]
+        )
+        rollout_motion_payload["object_lin_vel_w"] = accumulator.rollout_motion["object_lin_vel_w"][valid_motion_steps]
+        rollout_motion_payload["object_ang_vel_w"] = accumulator.rollout_motion["object_ang_vel_w"][valid_motion_steps]
+    motion_bank_path = motion_bank_dir / f"{_sanitize_name(accumulator.clip_id)}.npz"
+    np.savez_compressed(motion_bank_path, **rollout_motion_payload)
+
     metadata = {
         "clip_id": accumulator.clip_id,
         "clip_index": accumulator.clip_index,
@@ -1003,6 +1304,8 @@ def _finalize_clip_output(
         "terminated": terminated,
         "timeout": timeout,
         "success": success,
+        "stable_contact_success": stable_contact_success,
+        "final_position_success": final_position_success,
         "status": status,
         "final_object_position_error_m": final_pos_error,
         "final_object_rotation_error_rad": final_rot_error,
@@ -1010,6 +1313,12 @@ def _finalize_clip_output(
         "contact_force_threshold": float(export_cfg.contact_force_threshold),
         "contact_voxel_size": float(export_cfg.contact_voxel_size),
         "success_position_threshold": float(export_cfg.success_position_threshold),
+        "teacher_rollout_reference_path": "teacher_rollout_reference.npz",
+        "teacher_rollout_ref_body_name": accumulator.ref_body_name,
+        "teacher_rollout_tracked_body_names": accumulator.tracked_body_names,
+        "teacher_rollout_valid_step_count": int(np.count_nonzero(accumulator.rollout_reference["valid_steps"])),
+        "teacher_rollout_motion_bank_path": str(Path("..") / ".." / "motion_bank" / motion_bank_path.name),
+        "teacher_rollout_motion_valid_step_count": int(valid_motion_steps.size),
     }
     (accumulator.clip_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
@@ -1021,7 +1330,8 @@ def _finalize_clip_output(
         extents_xyz=accumulator.extents_xyz,
         retained_points_xyz=retained_points_xyz,
         retained_counts=retained_counts,
-        retained_points_by_region=retained_points_by_region,
+        display_points_xyz=display_points_xyz,
+        display_point_labels=display_point_labels,
         save_glb=export_cfg.save_glb,
         save_preview_png=export_cfg.save_preview_png,
         save_face_heatmap_png=export_cfg.save_face_heatmap_png,
@@ -1039,6 +1349,8 @@ def _finalize_clip_output(
         terminated=terminated,
         timeout=timeout,
         success=success,
+        stable_contact_success=stable_contact_success,
+        final_position_success=final_position_success,
         status=status,
         final_object_position_error_m=final_pos_error,
         final_object_rotation_error_rad=final_rot_error,
@@ -1099,6 +1411,12 @@ def _collect_batch(
 
     clip_object_names = list(getattr(motion_command.motion, "clip_object_names", []))
     clip_object_urdf_paths = list(getattr(motion_command.motion, "clip_object_urdf_paths", []))
+    tracked_body_names = list(motion_command.motion_cfg.body_names_to_track)
+    full_body_names = list(getattr(env.simulator, "_body_list", []))
+    joint_names = list(getattr(env.simulator, "dof_names", []))
+    ref_body_name = str(motion_command.motion_cfg.body_name_ref[0])
+    motion_fps = float(np.asarray(getattr(motion_command.motion, "fps", 0)).reshape(-1)[0])
+    clip_lengths = motion_command.motion.clip_lengths.detach().cpu().numpy()
     for batch_slot, env_id in enumerate(active_env_ids):
         clip_idx = int(batch_assignments[env_id])
         expected_clip_idx = clip_idx
@@ -1124,13 +1442,25 @@ def _collect_batch(
             env_id=env_id,
             extents_xyz=extents_batch[batch_slot],
             output_dir=output_dir,
+            tracked_body_names=tracked_body_names,
+            full_body_names=full_body_names,
+            joint_names=joint_names,
+            ref_body_name=ref_body_name,
+            motion_fps=motion_fps,
+            clip_length=int(clip_lengths[clip_idx]),
+            has_object=bool(motion_command.motion.has_object),
         )
         finished[env_id] = False
 
     max_rollout_steps = export_cfg.max_rollout_steps
     if max_rollout_steps is None or max_rollout_steps <= 0:
-        clip_lengths = motion_command.motion.clip_lengths.detach().cpu().numpy()
         max_rollout_steps = max(int(clip_lengths[int(batch_assignments[env_id])]) for env_id in active_env_ids) + 8
+
+    _record_rollout_reference_batch(
+        motion_command,
+        accumulators=accumulators,
+        active_env_ids=active_env_ids,
+    )
 
     for step_idx in range(int(max_rollout_steps)):
         actions = _policy_step(algo, obs_dict, policy_fn)
@@ -1140,10 +1470,17 @@ def _collect_batch(
         if not still_active:
             break
 
+        _record_rollout_reference_batch(
+            motion_command,
+            accumulators=accumulators,
+            active_env_ids=still_active,
+        )
+
         _collect_region_measurements_batch(
             motion_command,
             accumulators=accumulators,
             active_env_ids=still_active,
+            step_idx=step_idx,
             force_threshold=export_cfg.contact_force_threshold,
             voxel_size=export_cfg.contact_voxel_size,
         )
@@ -1249,59 +1586,84 @@ def run_export_with_tyro(
     summaries: list[ClipSummary] = []
     original_fixed_clip_ids = motion_command._fixed_clip_ids.clone() if motion_command._fixed_clip_ids is not None else None
     try:
-        for batch_index, batch_assignments in enumerate(batches):
-            active_count = sum(clip_idx is not None for clip_idx in batch_assignments)
-            logger.info(
-                "Rollout batch {}/{} with {} active env(s).",
-                batch_index + 1,
-                len(batches),
-                active_count,
-            )
-            summaries.extend(
-                _collect_batch(
-                    env=env,
-                    algo=algo,
-                    motion_command=motion_command,
-                    batch_index=batch_index,
-                    batch_assignments=batch_assignments,
-                    env_keys=env_keys,
-                    export_cfg=export_cfg,
-                    output_dir=output_dir,
-                    policy_fn=policy_fn,
+        try:
+            for batch_index, batch_assignments in enumerate(batches):
+                active_count = sum(clip_idx is not None for clip_idx in batch_assignments)
+                logger.info(
+                    "Rollout batch {}/{} with {} active env(s).",
+                    batch_index + 1,
+                    len(batches),
+                    active_count,
                 )
+                try:
+                    summaries.extend(
+                        _collect_batch(
+                            env=env,
+                            algo=algo,
+                            motion_command=motion_command,
+                            batch_index=batch_index,
+                            batch_assignments=batch_assignments,
+                            env_keys=env_keys,
+                            export_cfg=export_cfg,
+                            output_dir=output_dir,
+                            policy_fn=policy_fn,
+                        )
+                    )
+                except Exception:
+                    logger.exception("Teacher rollout export failed in batch {}/{}.", batch_index + 1, len(batches))
+                    raise
+        finally:
+            motion_command._fixed_clip_ids = original_fixed_clip_ids
+
+        summary_rows = [asdict(summary) for summary in summaries]
+        _write_csv(output_dir / "summary.csv", summary_rows)
+
+        motion_bank_dir = output_dir / "motion_bank"
+        if motion_bank_dir.is_dir():
+            clip_object_map = {
+                summary.clip_id: {
+                    "object_name": summary.object_name,
+                    "object_size": [
+                        float(summary.primitive_extent_x),
+                        float(summary.primitive_extent_y),
+                        float(summary.primitive_extent_z),
+                    ],
+                    "object_urdf_path": summary.object_urdf_path,
+                }
+                for summary in summaries
+            }
+            (motion_bank_dir / "_clip_object_urdf_map.json").write_text(
+                json.dumps({"clips": clip_object_map}, indent=2),
+                encoding="utf-8",
             )
+
+        success_ids = [summary.clip_id for summary in summaries if summary.success]
+        failure_ids = [summary.clip_id for summary in summaries if not summary.success]
+        _write_text_list(output_dir / "success_clips.txt", success_ids)
+        _write_text_list(output_dir / "failure_clips.txt", failure_ids)
+
+        summary_json = {
+            "checkpoint": str(checkpoint_cfg.checkpoint),
+            "saved_wandb_path": saved_wandb_path,
+            "num_clips": len(summaries),
+            "num_success": len(success_ids),
+            "num_failure": len(failure_ids),
+            "num_batches": len(batches),
+            "num_envs": int(env.num_envs),
+            "export_config": asdict(export_cfg),
+        }
+        (output_dir / "summary.json").write_text(json.dumps(summary_json, indent=2), encoding="utf-8")
+
+        logger.info(
+            "Teacher contact export finished: {} success / {} failure. Outputs saved to {}",
+            len(success_ids),
+            len(failure_ids),
+            output_dir,
+        )
+        return output_dir
     finally:
-        motion_command._fixed_clip_ids = original_fixed_clip_ids
         if simulation_app:
             close_simulation_app(simulation_app)
-
-    summary_rows = [asdict(summary) for summary in summaries]
-    _write_csv(output_dir / "summary.csv", summary_rows)
-
-    success_ids = [summary.clip_id for summary in summaries if summary.success]
-    failure_ids = [summary.clip_id for summary in summaries if not summary.success]
-    _write_text_list(output_dir / "success_clips.txt", success_ids)
-    _write_text_list(output_dir / "failure_clips.txt", failure_ids)
-
-    summary_json = {
-        "checkpoint": str(checkpoint_cfg.checkpoint),
-        "saved_wandb_path": saved_wandb_path,
-        "num_clips": len(summaries),
-        "num_success": len(success_ids),
-        "num_failure": len(failure_ids),
-        "num_batches": len(batches),
-        "num_envs": int(env.num_envs),
-        "export_config": asdict(export_cfg),
-    }
-    (output_dir / "summary.json").write_text(json.dumps(summary_json, indent=2), encoding="utf-8")
-
-    logger.info(
-        "Teacher contact export finished: {} success / {} failure. Outputs saved to {}",
-        len(success_ids),
-        len(failure_ids),
-        output_dir,
-    )
-    return output_dir
 
 
 def main() -> None:

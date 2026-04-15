@@ -49,6 +49,8 @@ Optional env vars:
   WANDB_MODEL_FILE        (default varies by mode; used when checkpoint is a wandb run URL)
   MOCAP_PERCEPTION_PRESET (default: checkpoint; checkpoint|none|heightmap)
   DEPTH_PERCEPTION_PRESET (default: checkpoint; checkpoint|d435i)
+  DISTILL_PROPRIO_HISTORY_ONLY (default: 1; keep 5-frame history only on proprio groups, keep actions single-frame)
+  DISTILL_PROPRIO_HISTORY_LENGTH (default: 5)
   DRY_RUN                 (default: 0; set 1/true to print the command without launching)
 
 Hardware joystick (optional):
@@ -679,6 +681,8 @@ FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
 RESET_NOISE_SCALE=${RESET_NOISE_SCALE:-0.0}
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-268435456}
 FORCE_SINGLE_FRAME_HISTORY=${FORCE_SINGLE_FRAME_HISTORY:-0}
+DISTILL_PROPRIO_HISTORY_ONLY=${DISTILL_PROPRIO_HISTORY_ONLY:-1}
+DISTILL_PROPRIO_HISTORY_LENGTH=${DISTILL_PROPRIO_HISTORY_LENGTH:-5}
 
 DISABLE_RANDOMIZATION=${DISABLE_RANDOMIZATION:-True}
 MAX_EPISODE_LENGTH_S=${MAX_EPISODE_LENGTH_S:-1000000}
@@ -878,6 +882,23 @@ case "$(echo "${FORCE_SINGLE_FRAME_HISTORY}" | tr '[:upper:]' '[:lower:]')" in
     ;;
 esac
 
+case "$(echo "${DISTILL_PROPRIO_HISTORY_ONLY}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    if [[ "$(echo "${FORCE_SINGLE_FRAME_HISTORY}" | tr '[:upper:]' '[:lower:]')" != "1" && "$(echo "${FORCE_SINGLE_FRAME_HISTORY}" | tr '[:upper:]' '[:lower:]')" != "true" && "$(echo "${FORCE_SINGLE_FRAME_HISTORY}" | tr '[:upper:]' '[:lower:]')" != "yes" && "$(echo "${FORCE_SINGLE_FRAME_HISTORY}" | tr '[:upper:]' '[:lower:]')" != "on" ]]; then
+      cmd+=(
+        --observation_overrides.distill_proprio_history_only True
+        --observation_overrides.distill_proprio_history_length "${DISTILL_PROPRIO_HISTORY_LENGTH}"
+      )
+    fi
+    ;;
+  0|false|no|off|"")
+    ;;
+  *)
+    echo "[ERROR] DISTILL_PROPRIO_HISTORY_ONLY must be one of: 0/1/true/false/yes/no/on/off. Got: ${DISTILL_PROPRIO_HISTORY_ONLY}" >&2
+    exit 2
+    ;;
+esac
+
 if [[ "${SIMULATOR_SUBCOMMAND}" != "simulator:mujoco" ]]; then
   cmd+=(--simulator.config.sim.physx.gpu_collision_stack_size "${PHYSX_GPU_COLLISION_STACK_SIZE}")
 else
@@ -981,7 +1002,8 @@ fi
 echo "[INFO] checkpoint=${CKPT}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
 echo "[INFO] object_urdf=${OBJECT_URDF}"
-echo "[INFO] forced_obs_history=1 (actor/critic observation groups)"
+echo "[INFO] force_single_frame_history=${FORCE_SINGLE_FRAME_HISTORY}"
+echo "[INFO] distill_proprio_history_only=${DISTILL_PROPRIO_HISTORY_ONLY} distill_proprio_history_length=${DISTILL_PROPRIO_HISTORY_LENGTH}"
 if [[ -n "${OBJECT_GEOMETRY_MODE}" ]]; then
   echo "[INFO] object_geometry_mode=${OBJECT_GEOMETRY_MODE} simulator_object_spawn_mode=${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}"
 else

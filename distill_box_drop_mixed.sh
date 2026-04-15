@@ -29,6 +29,7 @@ DATA_MODE=${DATA_MODE:-pure-sd}
 SCHEDULE_VARIANT=${SCHEDULE_VARIANT:-default}
 REWARD_VARIANT=${REWARD_VARIANT:-default}
 DISTRIBUTION_VARIANT=${DISTRIBUTION_VARIANT:-default}
+TRACKER_PROFILE=${TRACKER_PROFILE:-old-tracker}
 
 PYTHON_BIN=${PYTHON_BIN:-python}
 
@@ -303,11 +304,14 @@ PPO_TARGET_COEFF_EXPLICIT=0
 [[ -n "${PPO_TARGET_COEFF+x}" ]] && PPO_TARGET_COEFF_EXPLICIT=1
 PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT=0
 [[ -n "${PPO_SCHEDULE_STEP_EPOCHS+x}" ]] && PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT=1
+MOTION_DIR_EXPLICIT=0
+[[ -n "${MOTION_DIR+x}" ]] && MOTION_DIR_EXPLICIT=1
 
 EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-goal-mixed}
 RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_drop_mixed}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_drop_mixed}
 TRAINING_PROJECT=${TRAINING_PROJECT:-boxer}
+OLD_TRACKER_MAX_BOX_ID=${OLD_TRACKER_MAX_BOX_ID:-92}
 
 if [[ -n "${POSITIONAL_RUN_NAME}" ]]; then
   RUN_NAME="${POSITIONAL_RUN_NAME}"
@@ -328,10 +332,9 @@ NUM_ENVS=${NUM_ENVS:-${DEFAULT_TOTAL_ENVS}}
 DS_DATA_ROOT=${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}
 DEFAULT_DS_PREPARED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
 DEFAULT_MIX_NAIVE_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
-MOTION_DIR_FROM_ENV=0
-if [[ -n "${MOTION_DIR+x}" ]]; then
-  MOTION_DIR_FROM_ENV=1
-fi
+DEFAULT_TEACHER_ROLLOUT_MOTION_DIR="${SCRIPT_DIR}/outputs/motion_bank"
+OLD_TRACKER_CACHE_ROOT="${DS_DATA_ROOT}/_motion_subsets"
+USING_TEACHER_ROLLOUT_MOTION_BANK=0
 FILTER_NON_PLACEMENT_CLIPS=${FILTER_NON_PLACEMENT_CLIPS:-True}
 FINAL_PLACEMENT_MAX_DELTA_Z=${FINAL_PLACEMENT_MAX_DELTA_Z:-0.15}
 MIX_CURRICULUM_OMOMO_PREFIXES=${MIX_CURRICULUM_OMOMO_PREFIXES:-'["sub"]'}
@@ -341,6 +344,77 @@ PURE_REAL_OMOMO_PREFIXES=${PURE_REAL_OMOMO_PREFIXES:-'["sub"]'}
 OMOMO_DEBUG_PREFIXES=${OMOMO_DEBUG_PREFIXES:-'["sub"]'}
 OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-""}
 ASSERT_ACTIVE_MULTI_URDF=${ASSERT_ACTIVE_MULTI_URDF:-auto}
+
+prepare_old_tracker_motion_subset() {
+  local source_dir="$1"
+  local max_box_id="$2"
+  local subset_dir="${OLD_TRACKER_CACHE_ROOT}/$(basename "${source_dir}")_old_tracker_box_le_${max_box_id}"
+
+  mkdir -p "${subset_dir}"
+  "${PYTHON_BIN}" - "${source_dir}" "${subset_dir}" "${max_box_id}" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+source_dir = Path(sys.argv[1]).expanduser().resolve()
+subset_dir = Path(sys.argv[2]).expanduser().resolve()
+max_box_id = int(sys.argv[3])
+
+subset_dir.mkdir(parents=True, exist_ok=True)
+selected: list[Path] = []
+for clip_path in sorted(source_dir.glob("box_*.npz")):
+    stem = clip_path.stem
+    suffix = stem.split("_", 1)[1] if "_" in stem else ""
+    if not suffix.isdigit():
+        continue
+    if int(suffix) <= max_box_id:
+        selected.append(clip_path)
+
+if not selected:
+    raise SystemExit(f"No numeric box clips <= {max_box_id} found in {source_dir}")
+
+for existing in subset_dir.glob("*.npz"):
+    existing.unlink()
+
+for clip_path in selected:
+    target = subset_dir / clip_path.name
+    if target.exists() or target.is_symlink():
+        target.unlink()
+    os.symlink(clip_path, target)
+
+metadata_payload = {}
+clip_metadata = {}
+metadata_uses_clips_key = False
+for candidate in (source_dir / "_clip_object_urdf_map.json", source_dir / "clip_object_urdf_map.json"):
+    if candidate.is_file():
+        with candidate.open("r", encoding="utf-8") as f:
+            metadata_payload = json.load(f)
+        if isinstance(metadata_payload, dict) and isinstance(metadata_payload.get("clips"), dict):
+            clip_metadata = metadata_payload["clips"]
+            metadata_uses_clips_key = True
+        elif isinstance(metadata_payload, dict):
+            clip_metadata = metadata_payload
+        break
+
+subset_map_path = subset_dir / "_clip_object_urdf_map.json"
+if subset_map_path.exists():
+    subset_map_path.unlink()
+
+if clip_metadata:
+    filtered_clips = {key: value for key, value in clip_metadata.items() if (subset_dir / f"{key}.npz").exists()}
+    if filtered_clips:
+        output_payload = {"clips": filtered_clips} if metadata_uses_clips_key else filtered_clips
+        with subset_map_path.open("w", encoding="utf-8") as f:
+            json.dump(output_payload, f, indent=2, sort_keys=True)
+            f.write("\n")
+
+print(str(subset_dir))
+print(len(selected))
+PY
+}
 
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs_legacy,perception_obs}
 TEACHER_PERCEPTION_PRESET=${TEACHER_PERCEPTION_PRESET:-none}
@@ -561,6 +635,22 @@ if [[ "${RUN_NAME_EXPLICIT}" -eq 0 ]]; then
 fi
 
 MOTION_DIR=${MOTION_DIR:-"${MODE_DEFAULT_MOTION_DIR}"}
+
+if [[ "${EXP}" == "g1-29dof-wbt-w-object-distill-sparse-goal-mixed-r2s-rollout-ref" || "${EXP}" == "g1-29dof-wbt-w-object-distill-sparse-goal-mixed-r2s-rollout-ref-pickup" ]]; then
+  if [[ "${MOTION_DIR_EXPLICIT}" -eq 0 ]] && compgen -G "${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}/box_*.npz" > /dev/null; then
+    MOTION_DIR="${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}"
+    USING_TEACHER_ROLLOUT_MOTION_BANK=1
+  elif [[ "${MOTION_DIR_EXPLICIT}" -eq 0 ]]; then
+    echo "[WARN] rollout-ref experiment requested but no teacher rollout motion bank found at ${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}; falling back to ${MOTION_DIR}" >&2
+  fi
+fi
+
+OLD_TRACKER_CLIP_COUNT=""
+if [[ "${TRACKER_PROFILE}" == "old-tracker" && "${DATA_MODE}" == "pure-sd" && "${MOTION_DIR_EXPLICIT}" -eq 0 && "${USING_TEACHER_ROLLOUT_MOTION_BANK}" -eq 0 ]]; then
+  mapfile -t _old_tracker_subset_info < <(prepare_old_tracker_motion_subset "${MOTION_DIR}" "${OLD_TRACKER_MAX_BOX_ID}")
+  MOTION_DIR="${_old_tracker_subset_info[0]}"
+  OLD_TRACKER_CLIP_COUNT="${_old_tracker_subset_info[1]:-}"
+fi
 
 if [[ -z "${OBJECT_SPEC_PATH}" ]]; then
   default_map="${MOTION_DIR}/_clip_object_urdf_map.json"
@@ -997,6 +1087,12 @@ echo "[INFO] schedule_variant=${SCHEDULE_VARIANT}"
 echo "[INFO] reward_variant=${REWARD_VARIANT}"
 echo "[INFO] distribution_variant=${DISTRIBUTION_VARIANT}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
+if [[ "${USING_TEACHER_ROLLOUT_MOTION_BANK}" -eq 1 ]]; then
+  echo "[INFO] using_teacher_rollout_motion_bank=1"
+fi
+if [[ -n "${OLD_TRACKER_CLIP_COUNT}" ]]; then
+  echo "[INFO] old_tracker_numeric_box_clip_count=${OLD_TRACKER_CLIP_COUNT} max_box_id=${OLD_TRACKER_MAX_BOX_ID}"
+fi
 if [[ -n "${OMOMO_DEBUG_FILTER_KEPT:-}" ]]; then
   echo "[INFO] omomo_debug_prefixes=${OMOMO_DEBUG_FILTER_PREFIXES} kept=${OMOMO_DEBUG_FILTER_KEPT} excluded=${OMOMO_DEBUG_FILTER_EXCLUDED}"
 fi

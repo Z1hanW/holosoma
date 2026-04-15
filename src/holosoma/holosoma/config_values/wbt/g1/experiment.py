@@ -447,11 +447,12 @@ g1_29dof_wbt_w_object_generalist_legacy_obs = replace(
     observation=observation.g1_29dof_wbt_observation_w_object_legacy,
 )
 
-_w_object_distill_sparse_root_cmd_actor_inputs = ["actor_obs_root", "actor_obs_proprio", "actor_obs_box"]
-_w_object_distill_sparse_root_cmd_critic_inputs = ["critic_obs", "critic_proprio_history"]
+_w_object_distill_sparse_root_cmd_actor_inputs = ["actor_obs_root", "actor_obs_proprio", "actor_obs_actions", "actor_obs_box"]
+_w_object_distill_sparse_root_cmd_critic_inputs = ["critic_obs", "critic_proprio_history", "critic_actions"]
 _w_object_command_curriculum_actor_inputs = [
     "actor_obs_track",
     "actor_obs_proprio",
+    "actor_obs_actions",
     "actor_obs_goal",
     "actor_obs_mode",
 ]
@@ -567,6 +568,24 @@ g1_29dof_wbt_w_object_distill_sparse_goal_mixed_pickup = replace(
     reward=reward.g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_pickup,
 )
 
+g1_29dof_wbt_w_object_distill_sparse_goal_mixed_r2s_rollout_ref = replace(
+    g1_29dof_wbt_w_object_distill_sparse_goal_mixed,
+    training=replace(
+        g1_29dof_wbt_w_object_distill_sparse_goal_mixed.training,
+        name="g1_29dof_wbt_w_object_distill_sparse_goal_mixed_r2s_rollout_ref",
+    ),
+    reward=reward.g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_guidance,
+)
+
+g1_29dof_wbt_w_object_distill_sparse_goal_mixed_r2s_rollout_ref_pickup = replace(
+    g1_29dof_wbt_w_object_distill_sparse_goal_mixed_r2s_rollout_ref,
+    training=replace(
+        g1_29dof_wbt_w_object_distill_sparse_goal_mixed_r2s_rollout_ref.training,
+        name="g1_29dof_wbt_w_object_distill_sparse_goal_mixed_r2s_rollout_ref_pickup",
+    ),
+    reward=reward.g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_guidance_pickup,
+)
+
 g1_29dof_wbt_terrain_distill_sparse_root_cmd = replace(
     g1_29dof_wbt_videomimic_mlp,
     training=replace(
@@ -601,6 +620,24 @@ g1_29dof_wbt_w_object_distill_sparse_root_cmd_legacy = replace(
             module_dict=_w_object_distill_sparse_root_cmd_module_dict,
         ),
     ),
+)
+
+g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_contact = replace(
+    g1_29dof_wbt_w_object_distill_sparse_root_cmd,
+    training=replace(
+        g1_29dof_wbt_w_object_distill_sparse_root_cmd.training,
+        name="g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_contact",
+    ),
+    reward=reward.g1_29dof_wbt_reward_w_object_r2s_contact_guidance,
+)
+
+g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref = replace(
+    g1_29dof_wbt_w_object_distill_sparse_root_cmd,
+    training=replace(
+        g1_29dof_wbt_w_object_distill_sparse_root_cmd.training,
+        name="g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref",
+    ),
+    reward=reward.g1_29dof_wbt_reward_w_object_r2s_rollout_reference_guidance,
 )
 
 g1_29dof_wbt_fast_sac_w_object = replace(
@@ -641,6 +678,10 @@ __all__ = [
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd",
     "g1_29dof_wbt_w_object_distill_sparse_goal_mixed",
     "g1_29dof_wbt_w_object_distill_sparse_goal_mixed_pickup",
+    "g1_29dof_wbt_w_object_distill_sparse_goal_mixed_r2s_rollout_ref",
+    "g1_29dof_wbt_w_object_distill_sparse_goal_mixed_r2s_rollout_ref_pickup",
+    "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_contact",
+    "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref",
     "g1_29dof_wbt_terrain_distill_sparse_root_cmd",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_legacy",
 ]

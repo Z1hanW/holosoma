@@ -170,6 +170,12 @@ class ObservationOverridesConfig:
     disable_critic_history: bool = False
     """Force critic_obs history_length=1 when True."""
 
+    distill_proprio_history_only: bool = False
+    """When True, keep multi-frame history only on distillation proprio groups and keep actions single-frame."""
+
+    distill_proprio_history_length: int = 5
+    """History length to use for distillation proprio-only history overrides."""
+
 
 @dataclass(frozen=True)
 class ExperimentConfig:

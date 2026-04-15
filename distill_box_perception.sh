@@ -278,8 +278,10 @@ NUM_ENVS=${NUM_ENVS:-${DEFAULT_TOTAL_ENVS}}
 DS_DATA_ROOT=${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}
 DEFAULT_DS_PREPARED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
 DEFAULT_MIX_NAIVE_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
+DEFAULT_TEACHER_ROLLOUT_MOTION_DIR="${SCRIPT_DIR}/outputs/motion_bank"
 OLD_TRACKER_CACHE_ROOT="${DS_DATA_ROOT}/_motion_subsets"
 PURE_REAL_OMOMO_PREFIXES=${PURE_REAL_OMOMO_PREFIXES:-'["sub"]'}
+USING_TEACHER_ROLLOUT_MOTION_BANK=0
 
 prepare_old_tracker_motion_subset() {
   local source_dir="$1"
@@ -321,18 +323,31 @@ for clip_path in selected:
         target.unlink()
     os.symlink(clip_path, target)
 
-metadata = {}
+metadata_payload = {}
+clip_metadata = {}
+metadata_uses_clips_key = False
 for candidate in (source_dir / "_clip_object_urdf_map.json", source_dir / "clip_object_urdf_map.json"):
     if candidate.is_file():
         with candidate.open("r", encoding="utf-8") as f:
-            metadata = json.load(f)
+            metadata_payload = json.load(f)
+        if isinstance(metadata_payload, dict) and isinstance(metadata_payload.get("clips"), dict):
+            clip_metadata = metadata_payload["clips"]
+            metadata_uses_clips_key = True
+        elif isinstance(metadata_payload, dict):
+            clip_metadata = metadata_payload
         break
 
-if metadata:
-    filtered = {key: value for key, value in metadata.items() if (subset_dir / f"{key}.npz").exists()}
-    with (subset_dir / "_clip_object_urdf_map.json").open("w", encoding="utf-8") as f:
-        json.dump(filtered, f, indent=2, sort_keys=True)
-        f.write("\n")
+subset_map_path = subset_dir / "_clip_object_urdf_map.json"
+if subset_map_path.exists():
+    subset_map_path.unlink()
+
+if clip_metadata:
+    filtered_clips = {key: value for key, value in clip_metadata.items() if (subset_dir / f"{key}.npz").exists()}
+    if filtered_clips:
+        output_payload = {"clips": filtered_clips} if metadata_uses_clips_key else filtered_clips
+        with subset_map_path.open("w", encoding="utf-8") as f:
+            json.dump(output_payload, f, indent=2, sort_keys=True)
+            f.write("\n")
 
 print(str(subset_dir))
 print(len(selected))
@@ -357,8 +372,17 @@ case "${DATA_MODE}" in
     ;;
 esac
 
+if [[ "${EXP}" == "g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref" && "${MOTION_DIR_EXPLICIT}" -eq 0 ]]; then
+  if compgen -G "${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}/box_*.npz" > /dev/null; then
+    MOTION_DIR="${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}"
+    USING_TEACHER_ROLLOUT_MOTION_BANK=1
+  else
+    echo "[WARN] rollout-ref experiment requested but no teacher rollout motion bank found at ${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}; falling back to ${MOTION_DIR}" >&2
+  fi
+fi
+
 OLD_TRACKER_CLIP_COUNT=""
-if [[ "${TRACKER_PROFILE}" == "old-tracker" && "${DATA_MODE}" == "pure-sd" && "${MOTION_DIR_EXPLICIT}" -eq 0 ]]; then
+if [[ "${TRACKER_PROFILE}" == "old-tracker" && "${DATA_MODE}" == "pure-sd" && "${MOTION_DIR_EXPLICIT}" -eq 0 && "${USING_TEACHER_ROLLOUT_MOTION_BANK}" -eq 0 ]]; then
   mapfile -t _old_tracker_subset_info < <(prepare_old_tracker_motion_subset "${MOTION_DIR}" "${OLD_TRACKER_MAX_BOX_ID}")
   MOTION_DIR="${_old_tracker_subset_info[0]}"
   OLD_TRACKER_CLIP_COUNT="${_old_tracker_subset_info[1]:-}"
@@ -607,6 +631,9 @@ echo "[INFO] data_mode=${DATA_MODE}"
 echo "[INFO] tracker_profile=${TRACKER_PROFILE}"
 if [[ -n "${MOTION_DIR:-}" ]]; then
   echo "[INFO] motion_dir=${MOTION_DIR}"
+fi
+if [[ "${USING_TEACHER_ROLLOUT_MOTION_BANK}" -eq 1 ]]; then
+  echo "[INFO] using_teacher_rollout_motion_bank=1"
 fi
 if [[ -n "${OLD_TRACKER_CLIP_COUNT}" ]]; then
   echo "[INFO] old_tracker_numeric_box_clip_count=${OLD_TRACKER_CLIP_COUNT} max_box_id=${OLD_TRACKER_MAX_BOX_ID}"

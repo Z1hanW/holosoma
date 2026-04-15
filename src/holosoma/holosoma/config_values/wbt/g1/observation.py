@@ -5,6 +5,8 @@ from dataclasses import replace
 from holosoma.config_types.observation import ObservationManagerCfg, ObsGroupCfg, ObsTermCfg
 
 DEFAULT_WBT_POLICY_HISTORY_LENGTH = 5
+DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH = 1
+DEFAULT_WBT_DISTILL_PROPRIO_HISTORY_LENGTH = DEFAULT_WBT_POLICY_HISTORY_LENGTH
 
 _PALM_CONTACT_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
 _ARM_SUPPORT_CONTACT_BODY_NAMES = [
@@ -607,6 +609,16 @@ object_distill_proprio_terms = {
 object_distill_proprio_terms_no_linvel = object_distill_proprio_terms.copy()
 object_distill_proprio_terms_no_linvel.pop("base_lin_vel")
 
+object_distill_proprio_history_terms = object_distill_proprio_terms.copy()
+object_distill_proprio_history_terms.pop("actions")
+
+object_distill_proprio_history_terms_no_linvel = object_distill_proprio_terms_no_linvel.copy()
+object_distill_proprio_history_terms_no_linvel.pop("actions")
+
+object_distill_action_terms = {
+    "actions": object_distill_proprio_terms["actions"],
+}
+
 object_distill_box_terms = {
     "obj_current_pose_size_b": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:obj_current_pose_size_b",
@@ -695,35 +707,41 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
         "actor_obs_root": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
             terms=object_distill_sparse_root_cmd_terms,
         ),
         # Backward-compatible alias; semantics are root-relative, not torso-relative.
         "actor_obs_torso": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
             terms=object_distill_sparse_root_cmd_terms,
         ),
         # Student proprioception state.
         "actor_obs_proprio": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
-            terms=object_distill_proprio_terms,
+            history_length=DEFAULT_WBT_DISTILL_PROPRIO_HISTORY_LENGTH,
+            terms=object_distill_proprio_history_terms,
         ),
         # Student proprioception state without base linear velocity.
         "actor_obs_proprio_no_linvel": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
-            terms=object_distill_proprio_terms_no_linvel,
+            history_length=DEFAULT_WBT_DISTILL_PROPRIO_HISTORY_LENGTH,
+            terms=object_distill_proprio_history_terms_no_linvel,
+        ),
+        "actor_obs_actions": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_distill_action_terms,
         ),
         # Student object state: current object [pos(3), rot6d(6), size(3)] only.
         "actor_obs_box": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
             terms=object_distill_box_terms,
         ),
         # Student drop target: final object [dx, dy] in pickup-time pelvis-heading frame.
@@ -757,8 +775,14 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
         "critic_proprio_history": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
-            terms=object_distill_proprio_terms,
+            history_length=DEFAULT_WBT_DISTILL_PROPRIO_HISTORY_LENGTH,
+            terms=object_distill_proprio_history_terms,
+        ),
+        "critic_actions": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_distill_action_terms,
         ),
     },
 )
@@ -770,19 +794,25 @@ g1_29dof_wbt_observation_w_object_command_curriculum = ObservationManagerCfg(
         "actor_obs_track": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
             terms=object_command_curriculum_track_terms,
         ),
         "actor_obs_proprio": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
-            terms=object_distill_proprio_terms,
+            history_length=DEFAULT_WBT_DISTILL_PROPRIO_HISTORY_LENGTH,
+            terms=object_distill_proprio_history_terms,
+        ),
+        "actor_obs_actions": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_distill_action_terms,
         ),
         "actor_obs_box": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
             terms=object_distill_box_terms,
         ),
         "actor_obs_goal": ObsGroupCfg(
@@ -800,7 +830,7 @@ g1_29dof_wbt_observation_w_object_command_curriculum = ObservationManagerCfg(
         "critic_obs": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
             terms=critic_obs_w_object_command_privileged_terms,
         ),
     },
@@ -816,34 +846,40 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy = ObservationMa
         "actor_obs_root": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
             terms=object_distill_sparse_root_cmd_terms_legacy,
         ),
         # Backward-compatible alias; semantics are root-relative, not torso-relative.
         "actor_obs_torso": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
             terms=object_distill_sparse_root_cmd_terms_legacy,
         ),
         # Student proprioception state.
         "actor_obs_proprio": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
-            terms=object_distill_proprio_terms,
+            history_length=DEFAULT_WBT_DISTILL_PROPRIO_HISTORY_LENGTH,
+            terms=object_distill_proprio_history_terms,
         ),
         "actor_obs_proprio_no_linvel": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
-            terms=object_distill_proprio_terms_no_linvel,
+            history_length=DEFAULT_WBT_DISTILL_PROPRIO_HISTORY_LENGTH,
+            terms=object_distill_proprio_history_terms_no_linvel,
+        ),
+        "actor_obs_actions": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_distill_action_terms,
         ),
         # Student object state: current object [pos(3), rot6d(6), size(3)] only.
         "actor_obs_box": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
             terms=object_distill_box_terms,
         ),
         "actor_obs_drop": ObsGroupCfg(
@@ -855,8 +891,20 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy = ObservationMa
         "critic_obs": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
             terms=critic_obs_w_object_command_privileged_terms,
+        ),
+        "critic_proprio_history": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=DEFAULT_WBT_DISTILL_PROPRIO_HISTORY_LENGTH,
+            terms=object_distill_proprio_history_terms,
+        ),
+        "critic_actions": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_distill_action_terms,
         ),
     },
 )

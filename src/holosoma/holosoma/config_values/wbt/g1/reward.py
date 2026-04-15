@@ -329,6 +329,199 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_pickup = replace(
     },
 )
 
+g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_guidance = RewardManagerCfg(
+    terms={
+        "teacher_rollout_global_ref_position_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:teacher_rollout_global_ref_position_error_exp",
+            params={
+                "sigma": 0.3,
+                "rollout_reference_root": "outputs/clips",
+                "only_clip_goal": True,
+            },
+            weight=0.5,
+        ),
+        "teacher_rollout_global_ref_orientation_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:teacher_rollout_global_ref_orientation_error_exp",
+            params={
+                "sigma": 0.4,
+                "rollout_reference_root": "outputs/clips",
+                "only_clip_goal": True,
+            },
+            weight=0.5,
+        ),
+        "teacher_rollout_relative_body_position_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:teacher_rollout_relative_body_position_error_exp",
+            params={
+                "sigma": 0.3,
+                "rollout_reference_root": "outputs/clips",
+                "only_clip_goal": True,
+            },
+            weight=1.0,
+        ),
+        "teacher_rollout_relative_body_orientation_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:teacher_rollout_relative_body_orientation_error_exp",
+            params={
+                "sigma": 0.4,
+                "rollout_reference_root": "outputs/clips",
+                "only_clip_goal": True,
+            },
+            weight=1.0,
+        ),
+        "teacher_rollout_global_body_lin_vel": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:teacher_rollout_global_body_lin_vel",
+            params={
+                "sigma": 1.0,
+                "rollout_reference_root": "outputs/clips",
+                "only_clip_goal": True,
+            },
+            weight=1.0,
+        ),
+        "teacher_rollout_global_body_ang_vel": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:teacher_rollout_global_body_ang_vel",
+            params={
+                "sigma": 3.14,
+                "rollout_reference_root": "outputs/clips",
+                "only_clip_goal": True,
+            },
+            weight=1.0,
+        ),
+        "action_rate_l2": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:penalty_action_rate",
+            weight=-0.1,
+        ),
+        "limits_dof_pos": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:limits_dof_pos",
+            params={"soft_dof_pos_limit": 0.9},
+            weight=-10.0,
+        ),
+        "undesired_contacts": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:ObjectUndesiredContacts",
+            params={
+                "threshold": 1.0,
+                "body_names": _FOOT_OBJECT_CONTACT_BODY_NAMES,
+            },
+            weight=-0.5,
+        ),
+        "teacher_rollout_object_global_ref_position_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:teacher_rollout_object_global_ref_position_error_exp",
+            params={
+                "sigma": 0.3,
+                "rollout_reference_root": "outputs/clips",
+                "only_clip_goal": True,
+            },
+            weight=1.0,
+        ),
+        "teacher_rollout_object_global_ref_orientation_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:teacher_rollout_object_global_ref_orientation_error_exp",
+            params={
+                "sigma": 0.4,
+                "rollout_reference_root": "outputs/clips",
+                "only_clip_goal": True,
+            },
+            weight=1.0,
+        ),
+        "offline_wrist_target_guidance": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
+            params={
+                "contact_export_root": "outputs/clips",
+                "region_names": ["left_palm", "right_palm"],
+                "position_sigma": 0.04,
+                "use_force_term": False,
+                "use_contact_schedule": True,
+                "contact_schedule_missing_mode": "after_pickup",
+                "only_command_env": False,
+                "require_stable_contact": True,
+                "min_target_points": 1,
+            },
+            weight=0.75,
+        ),
+        "offline_contact_guidance": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
+            params={
+                "contact_export_root": "outputs/clips",
+                "region_names": ["left_palm", "right_palm"],
+                "position_sigma": 0.05,
+                "force_threshold": 25.0,
+                "force_sigma": 10.0,
+                "use_force_term": True,
+                "force_gate_mode": "binary",
+                "use_contact_schedule": True,
+                "contact_schedule_missing_mode": "after_pickup",
+                "only_command_env": False,
+                "require_stable_contact": True,
+                "min_target_points": 1,
+            },
+            weight=1.0,
+        ),
+        "sparse_goal_pickup_height_reward": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:sparse_goal_pickup_height_reward",
+            params={
+                "only_external": True,
+                "stop_after_pick": True,
+                "target_height_delta": 0.12,
+            },
+            weight=0.0,
+        ),
+        "sparse_goal_object_pose_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:sparse_goal_object_pose_error_exp",
+            params={
+                "sigma_xy": 0.20,
+                "sigma_yaw": 0.50,
+                "sigma_z": 0.05,
+                "only_external": True,
+                "picked_only": True,
+                "ignore_yaw": True,
+            },
+            weight=4.0,
+        ),
+        "sparse_goal_hover_height_penalty": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:sparse_goal_hover_height_penalty",
+            params={
+                "only_external": True,
+                "picked_only": True,
+                "near_goal_xy_threshold": 0.20,
+                "near_goal_yaw_threshold": 0.60,
+                "target_height_margin": 0.10,
+                "height_scale": 0.12,
+                "ignore_yaw": True,
+            },
+            weight=-2.0,
+        ),
+        "sparse_goal_success_bonus": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:sparse_goal_success_bonus",
+            params={
+                "only_external": True,
+                "xy_threshold": 0.10,
+                "yaw_threshold": 0.35,
+                "z_threshold": 0.06,
+                "lin_vel_threshold": 0.30,
+                "ang_vel_threshold": 1.50,
+                "ignore_yaw": True,
+            },
+            weight=20.0,
+        ),
+    }
+)
+
+g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_guidance_pickup = replace(
+    g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_guidance,
+    terms={
+        **g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_guidance.terms,
+        "sparse_goal_pickup_height_reward": replace(
+            g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_guidance.terms[
+                "sparse_goal_pickup_height_reward"
+            ],
+            params={
+                **g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_guidance.terms[
+                    "sparse_goal_pickup_height_reward"
+                ].params,
+                "only_external": False,
+            },
+            weight=0.3,
+        ),
+    },
+)
+
 g1_29dof_wbt_reward_w_object_extend = RewardManagerCfg(
     terms={
         **g1_29dof_wbt_reward_w_object.terms,
@@ -668,6 +861,200 @@ g1_29dof_wbt_reward_w_object_generalist = RewardManagerCfg(
     }
 )
 
+g1_29dof_wbt_reward_w_object_r2s_contact_guidance = RewardManagerCfg(
+    terms={
+        "motion_relative_body_position_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_relative_body_position_error_exp",
+            params={"sigma": 0.3},
+            weight=0.2,
+        ),
+        "motion_relative_body_orientation_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_relative_body_orientation_error_exp",
+            params={"sigma": 0.4},
+            weight=0.2,
+        ),
+        "action_rate_l2": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:penalty_action_rate",
+            weight=-0.1,
+        ),
+        "limits_dof_pos": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:limits_dof_pos",
+            params={"soft_dof_pos_limit": 0.9},
+            weight=-10.0,
+        ),
+        "undesired_contacts": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:ObjectUndesiredContacts",
+            params={
+                "threshold": 1.0,
+                "body_names": _FOOT_OBJECT_CONTACT_BODY_NAMES,
+            },
+            weight=-0.5,
+        ),
+        "object_global_ref_position_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:object_global_ref_position_error_exp",
+            params={"sigma": 0.7},
+            weight=0.25,
+        ),
+        "object_global_ref_orientation_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:object_global_ref_orientation_error_exp",
+            params={"sigma": 0.7},
+            weight=0.25,
+        ),
+        "offline_wrist_target_guidance": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
+            params={
+                "contact_export_root": "outputs/clips",
+                "region_names": ["left_palm", "right_palm"],
+                "position_sigma": 0.04,
+                "use_force_term": False,
+                "use_contact_schedule": True,
+                "contact_schedule_missing_mode": "after_pickup",
+                "only_command_env": False,
+                "require_stable_contact": True,
+                "min_target_points": 1,
+            },
+            weight=0.75,
+        ),
+        "offline_contact_guidance": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
+            params={
+                "contact_export_root": "outputs/clips",
+                "region_names": ["left_palm", "right_palm"],
+                "position_sigma": 0.05,
+                "force_threshold": 25.0,
+                "force_sigma": 10.0,
+                "use_force_term": True,
+                "force_gate_mode": "binary",
+                "use_contact_schedule": True,
+                "contact_schedule_missing_mode": "after_pickup",
+                "only_command_env": False,
+                "require_stable_contact": True,
+                "min_target_points": 1,
+            },
+            weight=1.0,
+        ),
+    }
+)
+
+g1_29dof_wbt_reward_w_object_r2s_rollout_reference_guidance = RewardManagerCfg(
+    terms={
+        "teacher_rollout_global_ref_position_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:teacher_rollout_global_ref_position_error_exp",
+            params={
+                "sigma": 0.3,
+                "rollout_reference_root": "outputs/clips",
+            },
+            weight=0.5,
+        ),
+        "teacher_rollout_global_ref_orientation_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:teacher_rollout_global_ref_orientation_error_exp",
+            params={
+                "sigma": 0.4,
+                "rollout_reference_root": "outputs/clips",
+            },
+            weight=0.5,
+        ),
+        "teacher_rollout_relative_body_position_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:teacher_rollout_relative_body_position_error_exp",
+            params={
+                "sigma": 0.3,
+                "rollout_reference_root": "outputs/clips",
+            },
+            weight=1.0,
+        ),
+        "teacher_rollout_relative_body_orientation_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:teacher_rollout_relative_body_orientation_error_exp",
+            params={
+                "sigma": 0.4,
+                "rollout_reference_root": "outputs/clips",
+            },
+            weight=1.0,
+        ),
+        "teacher_rollout_global_body_lin_vel": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:teacher_rollout_global_body_lin_vel",
+            params={
+                "sigma": 1.0,
+                "rollout_reference_root": "outputs/clips",
+            },
+            weight=1.0,
+        ),
+        "teacher_rollout_global_body_ang_vel": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:teacher_rollout_global_body_ang_vel",
+            params={
+                "sigma": 3.14,
+                "rollout_reference_root": "outputs/clips",
+            },
+            weight=1.0,
+        ),
+        "action_rate_l2": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:penalty_action_rate",
+            weight=-0.1,
+        ),
+        "limits_dof_pos": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:limits_dof_pos",
+            params={"soft_dof_pos_limit": 0.9},
+            weight=-10.0,
+        ),
+        "undesired_contacts": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:ObjectUndesiredContacts",
+            params={
+                "threshold": 1.0,
+                "body_names": _FOOT_OBJECT_CONTACT_BODY_NAMES,
+            },
+            weight=-0.5,
+        ),
+        "teacher_rollout_object_global_ref_position_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:teacher_rollout_object_global_ref_position_error_exp",
+            params={
+                "sigma": 0.3,
+                "rollout_reference_root": "outputs/clips",
+            },
+            weight=1.0,
+        ),
+        "teacher_rollout_object_global_ref_orientation_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:teacher_rollout_object_global_ref_orientation_error_exp",
+            params={
+                "sigma": 0.4,
+                "rollout_reference_root": "outputs/clips",
+            },
+            weight=1.0,
+        ),
+        "offline_wrist_target_guidance": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
+            params={
+                "contact_export_root": "outputs/clips",
+                "region_names": ["left_palm", "right_palm"],
+                "position_sigma": 0.04,
+                "use_force_term": False,
+                "use_contact_schedule": True,
+                "contact_schedule_missing_mode": "after_pickup",
+                "only_command_env": False,
+                "require_stable_contact": True,
+                "min_target_points": 1,
+            },
+            weight=0.75,
+        ),
+        "offline_contact_guidance": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
+            params={
+                "contact_export_root": "outputs/clips",
+                "region_names": ["left_palm", "right_palm"],
+                "position_sigma": 0.05,
+                "force_threshold": 25.0,
+                "force_sigma": 10.0,
+                "use_force_term": True,
+                "force_gate_mode": "binary",
+                "use_contact_schedule": True,
+                "contact_schedule_missing_mode": "after_pickup",
+                "only_command_env": False,
+                "require_stable_contact": True,
+                "min_target_points": 1,
+            },
+            weight=1.0,
+        ),
+    }
+)
+
 __all__ = [
     "g1_29dof_wbt_fast_sac_reward",
     "g1_29dof_wbt_reward",
@@ -675,6 +1062,10 @@ __all__ = [
     "g1_29dof_wbt_reward_w_object_command_curriculum",
     "g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed",
     "g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_pickup",
+    "g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_guidance",
+    "g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_guidance_pickup",
     "g1_29dof_wbt_reward_w_object_generalist",
+    "g1_29dof_wbt_reward_w_object_r2s_contact_guidance",
+    "g1_29dof_wbt_reward_w_object_r2s_rollout_reference_guidance",
     "g1_29dof_wbt_reward_w_object_extend",
 ]

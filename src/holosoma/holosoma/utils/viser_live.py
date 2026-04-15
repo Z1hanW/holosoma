@@ -48,6 +48,10 @@ COMMAND_ARROW_COLOR = np.array([255, 165, 0], dtype=np.uint8)
 TARGET_BOX_COLOR = CALIFORNIA_GOLD
 SENSOR_MARKER_RADIUS = 0.03
 SIM_MESH_MODE_OPTIONS = ("visual", "collision", "both", "none")
+FAKE_BODY_NAME_ALIASES: dict[str, str] = {
+    "left_foot_contact_point": "left_ankle_roll_link",
+    "right_foot_contact_point": "right_ankle_roll_link",
+}
 
 
 def _normalize_viser_image_format(image_format: str, *, faithful_mode: bool = False) -> str:
@@ -912,6 +916,56 @@ def _resolve_robot_urdf_path(robot_config: Any) -> str:
     return _resolve_data_path(urdf_path)
 
 
+@functools.lru_cache(maxsize=32)
+def _load_target_skeleton_edges(
+    robot_urdf_path: str,
+    tracked_body_names: tuple[str, ...],
+) -> tuple[tuple[int, int], ...]:
+    try:
+        root = ET.parse(robot_urdf_path).getroot()
+    except Exception:
+        return ()
+
+    parent_by_child: dict[str, str] = {}
+    for joint in root.findall("joint"):
+        parent_elem = joint.find("parent")
+        child_elem = joint.find("child")
+        if parent_elem is None or child_elem is None:
+            continue
+        parent_link = str(parent_elem.get("link", "")).strip()
+        child_link = str(child_elem.get("link", "")).strip()
+        if parent_link and child_link:
+            parent_by_child[child_link] = parent_link
+
+    tracked_idx_by_link: dict[str, int] = {}
+    for idx, body_name in enumerate(tracked_body_names):
+        link_name = FAKE_BODY_NAME_ALIASES.get(str(body_name), str(body_name))
+        if link_name:
+            tracked_idx_by_link[link_name] = idx
+
+    edges: list[tuple[int, int]] = []
+    for child_idx, body_name in enumerate(tracked_body_names):
+        current_link = FAKE_BODY_NAME_ALIASES.get(str(body_name), str(body_name))
+        visited: set[str] = set()
+        parent_link = parent_by_child.get(current_link)
+        while parent_link and parent_link not in visited:
+            visited.add(parent_link)
+            parent_idx = tracked_idx_by_link.get(parent_link)
+            if parent_idx is not None and parent_idx != child_idx:
+                edges.append((parent_idx, child_idx))
+                break
+            parent_link = parent_by_child.get(parent_link)
+
+    deduped: list[tuple[int, int]] = []
+    seen_edges: set[tuple[int, int]] = set()
+    for edge in edges:
+        if edge in seen_edges:
+            continue
+        seen_edges.add(edge)
+        deduped.append(edge)
+    return tuple(deduped)
+
+
 def _resolve_object_urdf_path(robot_config: Any) -> str | None:
     obj_cfg = getattr(robot_config, "object", None)
     if not obj_cfg or not getattr(obj_cfg, "enabled", False):
@@ -1348,6 +1402,7 @@ class ViserLiveViewer:
             "on",
         )
         self._env_sequence_label_height = float(os.environ.get("VISER_ENV_SEQUENCE_LABEL_HEIGHT", "1.6"))
+        self._env_sequence_label_debug_logged = False
         self._scandots_handle = None
         self._scandots_rays_handle = None
         self._scandots_enabled = False
@@ -1361,9 +1416,38 @@ class ViserLiveViewer:
             "yes",
         )
         self._target_keypoints_handle = None
+        self._target_keypoint_skeleton_handle = None
+        self._target_skeleton_edges: tuple[tuple[int, int], ...] | None = None
         self._target_keypoints_point_size = 0.03
+        self._target_keypoints_line_width = 2.5
         self._target_keypoints_color = np.array([128, 0, 128], dtype=np.uint8)
         self._show_target_keypoints = os.environ.get("VISER_SHOW_TARGET_KEYPOINTS", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+        self._target_object_center_handle = None
+        self._target_object_trajectory_handle = None
+        self._rollout_object_trajectory_handle = None
+        self._target_object_center_point_size = 0.045
+        self._target_object_trajectory_line_width = 2.5
+        self._rollout_object_trajectory_line_width = 3.0
+        self._target_object_center_color = np.array([0, 255, 0], dtype=np.uint8)
+        self._rollout_object_trajectory_color = np.array([0, 0, 255], dtype=np.uint8)
+        self._rollout_object_trajectory_points_w: list[np.ndarray] = []
+        self._rollout_object_trajectory_last_clip_idx: int | None = None
+        self._rollout_object_trajectory_last_time_step: int | None = None
+        self._show_target_object_center = os.environ.get("VISER_SHOW_TARGET_OBJECT_CENTER", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+        self._show_target_object_trajectory = os.environ.get("VISER_SHOW_TARGET_OBJECT_TRAJECTORY", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+        self._show_rollout_object_trajectory = os.environ.get("VISER_SHOW_ROLLOUT_OBJECT_TRAJECTORY", "1").lower() not in (
             "0",
             "false",
             "no",
@@ -1431,6 +1515,14 @@ class ViserLiveViewer:
             "true",
             "yes",
         )
+        self._clip_group_gui_enabled = os.environ.get("VISER_ENABLE_CLIP_GROUP_GUI", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        self._clip_group_size_override = max(0, int(os.environ.get("VISER_CLIP_GROUP_SIZE", "0") or "0"))
+        self._initial_clip_group_index = max(0, int(os.environ.get("VISER_INITIAL_CLIP_GROUP_INDEX", "0") or "0"))
         reset_to_default_pose_env = os.environ.get("HOLOSOMA_RESET_TO_DEFAULT_POSE")
         if reset_to_default_pose_env is None:
             reset_to_default_pose_env = os.environ.get("HOLOSOMA_DEFAULT_POSE_INIT", "0")
@@ -1530,9 +1622,16 @@ class ViserLiveViewer:
         self._clip_label = None
         self._clip_names: list[str] = []
         self._pending_clip_idx: int | None = None
+        self._pending_visible_group_index: int | None = None
         self._pending_control_sync = False
         self._control_sleep_s = 0.02
         self._pending_clip_start: int | None = None
+        self._clip_group_prev_btn = None
+        self._clip_group_next_btn = None
+        self._clip_group_apply_btn = None
+        self._clip_group_index_in = None
+        self._clip_group_info = None
+        self._clip_group_ui_syncing = False
         self._grid_handle = None
         self._terrain_handle = None
         self._ground_handle = None
@@ -1817,6 +1916,37 @@ class ViserLiveViewer:
         self._env_sequence_label_handles[int(env_id)] = label_handle
         return label_handle
 
+    def _format_env_sequence_label_text(self, env_id: int, clip_name: str) -> str:
+        clip_text = str(clip_name).strip()
+        if not clip_text:
+            return f"env{int(env_id)}"
+
+        parts = [part for part in clip_text.split("_") if part]
+        short_text = clip_text
+        if len(parts) >= 3 and parts[0].startswith("sub") and parts[2].isdigit():
+            short_text = f"{parts[0]}/{parts[2]}"
+        elif len(parts) >= 2 and parts[-1].isdigit():
+            short_text = f"{parts[0]}/{parts[-1]}"
+        elif len(clip_text) > 24:
+            short_text = f"{clip_text[:10]}...{clip_text[-8:]}"
+        return f"env{int(env_id)}: {short_text}"
+
+    def _log_env_sequence_assignments_once(self, motion_cmd) -> None:
+        if self._env_sequence_label_debug_logged or motion_cmd is None or not hasattr(motion_cmd, "clip_ids"):
+            return
+        visible_env_ids = [self._env_id, *self._secondary_env_ids]
+        assignments: list[str] = []
+        for env_id in visible_env_ids:
+            clip_idx = None
+            try:
+                clip_idx = int(motion_cmd.clip_ids[int(env_id)].item())
+            except Exception:
+                clip_idx = None
+            clip_name = self._current_clip_name(motion_cmd, clip_idx)
+            assignments.append(f"env{int(env_id)}={clip_name or 'unknown'}")
+        logger.info("Viser env sequence labels: {}", assignments)
+        self._env_sequence_label_debug_logged = True
+
     def _update_env_sequence_label(self, env_id: int, clip_name: str | None) -> None:
         if not self._show_env_sequence_labels:
             return
@@ -1831,9 +1961,10 @@ class ViserLiveViewer:
                 pass
             return
         label_handle.position = self._env_sequence_label_position(env_id)
+        label_text = self._format_env_sequence_label_text(env_id, clip_text)
         try:
-            if getattr(label_handle, "text", "") != clip_text:
-                label_handle.text = clip_text
+            if getattr(label_handle, "text", "") != label_text:
+                label_handle.text = label_text
             label_handle.visible = True
         except Exception:
             pass
@@ -2141,14 +2272,20 @@ class ViserLiveViewer:
 
     def _apply_primary_object_mesh_visibility(self) -> None:
         show_object = self._show_object_cb is None or bool(self._show_object_cb.value)
+        show_visual = bool(show_object and self._mesh_mode_shows_visual())
+        show_collision = bool(show_object and self._mesh_mode_shows_collision())
+        # Primitive boxes in live Isaac Sim sometimes expose only collision geometry.
+        # In visual-only mode, fall back to collision so the active box remains visible.
+        if show_visual and self._vo is None and self._vo_collision is not None:
+            show_collision = True
         for variant in self._primary_object_variants.values():
             _set_visual_handle_visible(variant, False)
         for variant in self._primary_object_collision_variants.values():
             _set_visual_handle_visible(variant, False)
         if self._vo is not None:
-            _set_visual_handle_visible(self._vo, bool(show_object and self._mesh_mode_shows_visual()))
+            _set_visual_handle_visible(self._vo, show_visual)
         if self._vo_collision is not None:
-            _set_visual_handle_visible(self._vo_collision, bool(show_object and self._mesh_mode_shows_collision()))
+            _set_visual_handle_visible(self._vo_collision, show_collision)
 
     def _set_primary_object_meshes(self, env_id: int) -> None:
         visual_key, _, _ = self._resolve_object_mesh_spec_for_env(env_id, "visual")
@@ -2301,6 +2438,8 @@ class ViserLiveViewer:
     def _apply_secondary_object_mesh_visibility(self, env_id: int, visible: bool) -> None:
         show_visual = bool(visible and self._mesh_mode_shows_visual())
         show_collision = bool(visible and self._mesh_mode_shows_collision())
+        if show_visual and self._secondary_vo.get(env_id) is None and self._secondary_vo_collision.get(env_id) is not None:
+            show_collision = True
         _set_visual_handle_visible(self._secondary_vo.get(env_id), show_visual)
         _set_visual_handle_visible(self._secondary_vo_collision.get(env_id), show_collision)
 
@@ -2466,6 +2605,7 @@ class ViserLiveViewer:
                 or self._reset_requested
                 or self._pending_clip_idx is not None
                 or self._pending_clip_start is not None
+                or self._pending_visible_group_index is not None
             ):
                 self.apply_pending_controls()
             time.sleep(self._control_sleep_s)
@@ -2475,6 +2615,7 @@ class ViserLiveViewer:
             or self._reset_requested
             or self._pending_clip_idx is not None
             or self._pending_clip_start is not None
+            or self._pending_visible_group_index is not None
         ):
             self.apply_pending_controls()
 
@@ -2494,6 +2635,8 @@ class ViserLiveViewer:
         if self._reset_requested:
             self._reset_requested = False
             self._reset_env()
+        if self._pending_visible_group_index is not None:
+            self._apply_visible_group_selection()
         if self._pending_clip_idx is not None or self._pending_clip_start is not None:
             self._apply_clip_selection()
 
@@ -3414,9 +3557,14 @@ class ViserLiveViewer:
             self._manual_command_arrow_handle.colors = colors
 
     def on_reset(self, env_ids) -> None:
-        if not self._enabled or not getattr(self, "_recenter", True) or self._server is None:
+        if not self._enabled:
             return
         if getattr(self, "_env_id", 0) not in _normalize_env_ids(env_ids):
+            return
+        self._clear_rollout_object_trajectory()
+        if self._server is None:
+            return
+        if not getattr(self, "_recenter", True):
             return
         self._offset = self._resolve_env_origin()
         self._reload_terrain_for_clip(self._current_clip_name(self._get_motion_command()))
@@ -3501,6 +3649,9 @@ class ViserLiveViewer:
             if self._scandots_enabled:
                 self._update_scandots(offset)
             self._update_target_keypoints(offset)
+            self._update_target_object_trajectory(offset)
+            self._update_rollout_object_trajectory(offset)
+            self._update_target_object_center(offset)
             self._update_target_box(offset)
             self._update_manual_command_arrow(root_pos, root_quat_wxyz, offset)
             self._update_manual_root_status(
@@ -3672,6 +3823,8 @@ class ViserLiveViewer:
                     self._reload_terrain_for_clip(str(clip_name))
                 except Exception:
                     pass
+        self._update_clip_group_ui(motion_cmd)
+        self._log_env_sequence_assignments_once(motion_cmd)
 
     def _setup_joint_order(self) -> None:
         if self._vr is None:
@@ -4664,6 +4817,50 @@ class ViserLiveViewer:
                         self._pending_clip_idx = 0
                         _update_clip_slider(0)
 
+            if self._clip_group_gui_enabled:
+                motion_cmd = self._get_motion_command()
+                if motion_cmd is not None and hasattr(motion_cmd, "motion"):
+                    clip_names = list(getattr(motion_cmd.motion, "clip_ids", []))
+                    if len(clip_names) > max(1, self._clip_group_size()):
+                        with self._server.gui.add_folder("Group Playback"):
+                            self._clip_group_index_in = self._server.gui.add_number(
+                                "Group Index",
+                                initial_value=float(self._initial_clip_group_index),
+                                min=0,
+                                max=max(0, self._clip_group_total(motion_cmd) - 1),
+                                step=1,
+                            )
+                            self._clip_group_prev_btn = self._server.gui.add_button("Prev Group")
+                            self._clip_group_next_btn = self._server.gui.add_button("Next Group")
+                            self._clip_group_apply_btn = self._server.gui.add_button("Apply Group")
+                            self._clip_group_info = self._server.gui.add_markdown("")
+
+                        @self._clip_group_prev_btn.on_click
+                        def _(_evt) -> None:
+                            active_group = self._active_visible_group_index(motion_cmd) or 0
+                            self._queue_visible_group_index(max(0, active_group - 1))
+
+                        @self._clip_group_next_btn.on_click
+                        def _(_evt) -> None:
+                            active_group = self._active_visible_group_index(motion_cmd) or 0
+                            total_groups = self._clip_group_total(motion_cmd)
+                            self._queue_visible_group_index(min(max(0, total_groups - 1), active_group + 1))
+
+                        @self._clip_group_apply_btn.on_click
+                        def _(_evt) -> None:
+                            if self._clip_group_index_in is None:
+                                return
+                            self._queue_visible_group_index(int(self._clip_group_index_in.value))
+
+                        @self._clip_group_index_in.on_update
+                        def _(_evt) -> None:
+                            if self._clip_group_ui_syncing:
+                                return
+                            self._update_clip_group_ui(motion_cmd)
+
+                        self._update_clip_group_ui(motion_cmd)
+                        self._pending_visible_group_index = int(self._initial_clip_group_index)
+
     def _get_motion_command(self):
         cmd_mgr = getattr(self._env, "command_manager", None)
         if cmd_mgr is None:
@@ -4715,6 +4912,110 @@ class ViserLiveViewer:
             return int(lengths[clip_idx])
         except Exception:
             return None
+
+    def _visible_env_ids(self) -> list[int]:
+        return [self._env_id, *self._secondary_env_ids]
+
+    def _clip_group_size(self) -> int:
+        if self._clip_group_size_override > 0:
+            return int(self._clip_group_size_override)
+        return max(1, len(self._visible_env_ids()))
+
+    def _clip_group_total(self, motion_cmd) -> int:
+        if motion_cmd is None or not hasattr(motion_cmd, "motion"):
+            return 1
+        clip_names = list(getattr(motion_cmd.motion, "clip_ids", []))
+        if not clip_names:
+            return 1
+        group_size = max(1, self._clip_group_size())
+        return max(1, int((len(clip_names) + group_size - 1) // group_size))
+
+    def _active_visible_group_index(self, motion_cmd) -> int | None:
+        if motion_cmd is None:
+            return None
+        clip_idx = None
+        fixed_clip_ids = getattr(motion_cmd, "_fixed_clip_ids", None)
+        if isinstance(fixed_clip_ids, torch.Tensor) and int(fixed_clip_ids.numel()) > int(self._env_id):
+            try:
+                clip_idx = int(fixed_clip_ids[self._env_id].item())
+            except Exception:
+                clip_idx = None
+        if clip_idx is None:
+            clip_idx = self._active_clip_index(motion_cmd)
+        if clip_idx is None:
+            return None
+        return max(0, int(clip_idx) // max(1, self._clip_group_size()))
+
+    def _group_clip_ids(self, motion_cmd, group_index: int) -> list[int]:
+        clip_names = list(getattr(motion_cmd.motion, "clip_ids", [])) if motion_cmd is not None and hasattr(motion_cmd, "motion") else []
+        if not clip_names:
+            return []
+        group_size = max(1, self._clip_group_size())
+        start = max(0, int(group_index)) * group_size
+        last_idx = len(clip_names) - 1
+        return [min(start + slot, last_idx) for slot in range(group_size)]
+
+    def _queue_visible_group_index(self, group_index: int) -> None:
+        self._pending_visible_group_index = max(0, int(group_index))
+        self.queue_pending_controls()
+
+    def _update_clip_group_ui(self, motion_cmd) -> None:
+        if self._clip_group_info is None and self._clip_group_index_in is None:
+            return
+        total_groups = self._clip_group_total(motion_cmd)
+        active_group = self._active_visible_group_index(motion_cmd)
+        if active_group is None:
+            active_group = 0
+        active_group = min(max(0, int(active_group)), max(0, total_groups - 1))
+        if self._clip_group_index_in is not None:
+            self._clip_group_ui_syncing = True
+            try:
+                self._clip_group_index_in.min = 0
+                self._clip_group_index_in.max = max(0, total_groups - 1)
+                if int(self._clip_group_index_in.value) != active_group:
+                    self._clip_group_index_in.value = active_group
+            finally:
+                self._clip_group_ui_syncing = False
+        if self._clip_group_info is not None and motion_cmd is not None and hasattr(motion_cmd, "motion"):
+            env_ids = self._visible_env_ids()
+            assignments: list[str] = []
+            for env_id in env_ids:
+                clip_idx = None
+                try:
+                    clip_idx = int(motion_cmd.clip_ids[int(env_id)].item())
+                except Exception:
+                    clip_idx = None
+                clip_name = self._current_clip_name(motion_cmd, clip_idx) or "unknown"
+                assignments.append(f"`env{int(env_id)}`: `{clip_name}`")
+            self._clip_group_info.content = (
+                f"Group `{active_group}` / `{max(0, total_groups - 1)}`"
+                + "\n\n"
+                + " | ".join(assignments)
+            )
+
+    def _apply_visible_group_selection(self) -> None:
+        motion_cmd = self._get_motion_command()
+        group_index = self._pending_visible_group_index
+        self._pending_visible_group_index = None
+        if motion_cmd is None or group_index is None:
+            return
+        total_groups = self._clip_group_total(motion_cmd)
+        group_index = min(max(0, int(group_index)), max(0, total_groups - 1))
+        env_ids_list = self._visible_env_ids()
+        clip_ids_list = self._group_clip_ids(motion_cmd, group_index)[: len(env_ids_list)]
+        if not env_ids_list or not clip_ids_list:
+            return
+        env_ids = torch.tensor(env_ids_list, device=self._env.device, dtype=torch.long)
+        clip_ids = torch.tensor(clip_ids_list, device=self._env.device, dtype=torch.long)
+        try:
+            motion_cmd.set_fixed_clip_ids_for_envs(env_ids, clip_ids)
+        except Exception:
+            if getattr(motion_cmd, "_fixed_clip_ids", None) is None:
+                motion_cmd._fixed_clip_ids = motion_cmd.clip_ids.clone()
+            motion_cmd._fixed_clip_ids[env_ids] = clip_ids
+        logger.info("Viser switched visible clip group {} -> {}", group_index, clip_ids_list)
+        self._reset_visible_envs()
+        self._update_clip_group_ui(motion_cmd)
 
     def _set_default_pose_init_enabled(self, enabled: bool) -> None:
         enabled = bool(enabled)
@@ -6001,6 +6302,11 @@ class ViserLiveViewer:
                     self._target_keypoints_handle.visible = False
                 except Exception:
                     pass
+            if self._target_keypoint_skeleton_handle is not None:
+                try:
+                    self._target_keypoint_skeleton_handle.visible = False
+                except Exception:
+                    pass
             return
         if motion_cmd is None or not hasattr(motion_cmd, "body_pos_w"):
             return
@@ -6039,6 +6345,287 @@ class ViserLiveViewer:
                     self._target_keypoints_handle.colors = colors.astype(np.uint8, copy=False)
                 except Exception:
                     pass
+
+        if self._target_skeleton_edges is None:
+            tracked_body_names = tuple(getattr(getattr(motion_cmd, "motion_cfg", None), "body_names_to_track", []) or [])
+            if tracked_body_names and len(tracked_body_names) == int(pts.shape[0]):
+                self._target_skeleton_edges = _load_target_skeleton_edges(
+                    _resolve_robot_urdf_path(self._env.robot_config),
+                    tracked_body_names,
+                )
+            else:
+                self._target_skeleton_edges = ()
+
+        if not self._target_skeleton_edges:
+            if self._target_keypoint_skeleton_handle is not None:
+                try:
+                    self._target_keypoint_skeleton_handle.visible = False
+                except Exception:
+                    pass
+            return
+
+        segments = np.asarray(
+            [[pts[parent_idx], pts[child_idx]] for parent_idx, child_idx in self._target_skeleton_edges],
+            dtype=np.float32,
+        )
+        segment_colors = np.full((segments.shape[0], 2, 3), self._target_keypoints_color, dtype=np.uint8)
+        if self._target_keypoint_skeleton_handle is None:
+            self._target_keypoint_skeleton_handle = self._server.scene.add_line_segments(
+                self._scene_path("/target_keypoint_skeleton"),
+                points=segments,
+                colors=segment_colors,
+                line_width=float(self._target_keypoints_line_width),
+            )
+        else:
+            try:
+                self._target_keypoint_skeleton_handle.visible = True
+            except Exception:
+                pass
+            self._target_keypoint_skeleton_handle.points = segments
+            try:
+                self._target_keypoint_skeleton_handle.colors = segment_colors
+            except Exception:
+                pass
+
+    def _update_target_object_center(self, offset: np.ndarray) -> None:
+        if not self._server:
+            return
+        if not self._show_target_object_center:
+            if self._target_object_center_handle is not None:
+                try:
+                    self._target_object_center_handle.visible = False
+                except Exception:
+                    pass
+            return
+
+        ref_positions = self._reference_object_future_trajectory_w()
+        if ref_positions is None or ref_positions.shape[0] == 0:
+            if self._target_object_center_handle is not None:
+                try:
+                    self._target_object_center_handle.visible = False
+                except Exception:
+                    pass
+            return
+
+        center_idx = 1 if ref_positions.shape[0] > 1 else 0
+        center = np.asarray(ref_positions[center_idx], dtype=np.float32).reshape(1, 3)
+        if self._recenter:
+            center = center - offset.reshape(1, 3)
+        colors = self._target_object_center_color.reshape(1, 3).astype(np.uint8, copy=False)
+
+        if self._target_object_center_handle is None:
+            self._target_object_center_handle = self._server.scene.add_point_cloud(
+                self._scene_path("/target_object_center"),
+                points=center,
+                colors=colors,
+                point_size=float(self._target_object_center_point_size),
+                point_shape="circle",
+                precision="float32",
+            )
+        else:
+            try:
+                self._target_object_center_handle.visible = True
+            except Exception:
+                pass
+            self._target_object_center_handle.points = center
+            if getattr(self._target_object_center_handle, "colors", None) is not None:
+                try:
+                    self._target_object_center_handle.colors = colors
+                except Exception:
+                    pass
+
+    def _reference_object_future_trajectory_w(self) -> np.ndarray | None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None or not bool(getattr(getattr(motion_cmd, "motion", None), "has_object", False)):
+            return None
+
+        try:
+            env_ids = torch.tensor([self._env_id], device=motion_cmd.device, dtype=torch.long)
+            current_pos = motion_cmd.object_pos_w[env_ids]
+            num_future_steps = max(1, int(getattr(motion_cmd, "num_future_steps", 1) or 1))
+            time_offsets = torch.arange(1, num_future_steps + 1, device=motion_cmd.device, dtype=torch.long)
+            future_steps = motion_cmd.time_steps[env_ids].unsqueeze(1) + time_offsets.unsqueeze(0)
+            clip_lengths = motion_cmd._current_clip_lengths()[env_ids].unsqueeze(1)
+            future_steps = torch.minimum(future_steps, torch.clamp(clip_lengths - 1, min=0))
+            future_steps_global = motion_cmd._get_motion_indices(future_steps, env_ids=env_ids)
+            future_pos = motion_cmd.motion.object_pos_w[future_steps_global]
+            if bool(getattr(motion_cmd.motion_cfg, "align_motion_to_init_yaw", False)):
+                future_pos = motion_cmd._apply_motion_alignment_pos_subset(future_pos, env_ids)
+            else:
+                future_pos = future_pos + motion_cmd._get_env_offsets(env_ids)[:, None, :]
+            trajectory = torch.cat([current_pos[:, None, :], future_pos], dim=1)
+        except Exception:
+            return None
+
+        return trajectory[0].detach().cpu().numpy().astype(np.float32, copy=False)
+
+    def _reference_object_clip_trajectory_w(self) -> np.ndarray | None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None or not bool(getattr(getattr(motion_cmd, "motion", None), "has_object", False)):
+            return None
+
+        try:
+            env_ids = torch.tensor([self._env_id], device=motion_cmd.device, dtype=torch.long)
+            clip_lengths = motion_cmd._current_clip_lengths(env_ids)
+            clip_length = int(clip_lengths[0].item()) if clip_lengths.numel() > 0 else 0
+            if clip_length <= 0:
+                return None
+            local_steps = torch.arange(clip_length, device=motion_cmd.device, dtype=torch.long).unsqueeze(0)
+            clip_steps_global = motion_cmd._get_motion_indices(local_steps, env_ids=env_ids)
+            clip_pos = motion_cmd.motion.object_pos_w[clip_steps_global]
+            if bool(getattr(motion_cmd.motion_cfg, "align_motion_to_init_yaw", False)):
+                clip_pos = motion_cmd._apply_motion_alignment_pos_subset(clip_pos, env_ids)
+            else:
+                clip_pos = clip_pos + motion_cmd._get_env_offsets(env_ids)[:, None, :]
+        except Exception:
+            return None
+
+        return clip_pos[0].detach().cpu().numpy().astype(np.float32, copy=False)
+
+    def _clear_rollout_object_trajectory(self) -> None:
+        self._rollout_object_trajectory_points_w.clear()
+        self._rollout_object_trajectory_last_clip_idx = None
+        self._rollout_object_trajectory_last_time_step = None
+        if self._rollout_object_trajectory_handle is not None:
+            try:
+                self._rollout_object_trajectory_handle.visible = False
+            except Exception:
+                pass
+
+    def _current_rollout_object_pos_w(self) -> np.ndarray | None:
+        state = self._get_object_state_wxyz()
+        if state is None:
+            return None
+        pos_w, _quat_wxyz = state
+        return np.asarray(pos_w, dtype=np.float32).reshape(3)
+
+    def _update_rollout_object_trajectory(self, offset: np.ndarray) -> None:
+        if not self._server:
+            return
+        if not self._show_rollout_object_trajectory:
+            if self._rollout_object_trajectory_handle is not None:
+                try:
+                    self._rollout_object_trajectory_handle.visible = False
+                except Exception:
+                    pass
+            return
+
+        motion_cmd = self._get_motion_command()
+        clip_idx = self._active_clip_index(motion_cmd)
+        time_step: int | None = None
+        if motion_cmd is not None and hasattr(motion_cmd, "time_steps"):
+            try:
+                time_step = int(motion_cmd.time_steps[self._env_id].item())
+            except Exception:
+                time_step = None
+
+        if (
+            self._rollout_object_trajectory_last_clip_idx is not None
+            and clip_idx is not None
+            and clip_idx != self._rollout_object_trajectory_last_clip_idx
+        ) or (
+            self._rollout_object_trajectory_last_time_step is not None
+            and time_step is not None
+            and time_step < self._rollout_object_trajectory_last_time_step
+        ):
+            self._clear_rollout_object_trajectory()
+
+        pos_w = self._current_rollout_object_pos_w()
+        if pos_w is None:
+            if self._rollout_object_trajectory_handle is not None:
+                try:
+                    self._rollout_object_trajectory_handle.visible = False
+                except Exception:
+                    pass
+            return
+
+        should_append = False
+        if not self._rollout_object_trajectory_points_w:
+            should_append = True
+        elif time_step is not None and time_step != self._rollout_object_trajectory_last_time_step:
+            should_append = True
+        elif not np.allclose(self._rollout_object_trajectory_points_w[-1], pos_w, atol=1.0e-5):
+            should_append = True
+        if should_append:
+            self._rollout_object_trajectory_points_w.append(pos_w.copy())
+
+        self._rollout_object_trajectory_last_clip_idx = clip_idx
+        self._rollout_object_trajectory_last_time_step = time_step
+
+        if len(self._rollout_object_trajectory_points_w) < 2:
+            if self._rollout_object_trajectory_handle is not None:
+                try:
+                    self._rollout_object_trajectory_handle.visible = False
+                except Exception:
+                    pass
+            return
+
+        rollout_positions = np.asarray(self._rollout_object_trajectory_points_w, dtype=np.float32)
+        segments = np.stack([rollout_positions[:-1], rollout_positions[1:]], axis=1).astype(np.float32, copy=False)
+        if self._recenter:
+            segments = segments - offset.reshape(1, 1, 3)
+        colors = np.full((segments.shape[0], 2, 3), self._rollout_object_trajectory_color, dtype=np.uint8)
+
+        if self._rollout_object_trajectory_handle is None:
+            self._rollout_object_trajectory_handle = self._server.scene.add_line_segments(
+                self._scene_path("/rollout_object_trajectory"),
+                points=segments,
+                colors=colors,
+                line_width=float(self._rollout_object_trajectory_line_width),
+            )
+        else:
+            try:
+                self._rollout_object_trajectory_handle.visible = True
+            except Exception:
+                pass
+            self._rollout_object_trajectory_handle.points = segments
+            try:
+                self._rollout_object_trajectory_handle.colors = colors
+            except Exception:
+                pass
+
+    def _update_target_object_trajectory(self, offset: np.ndarray) -> None:
+        if not self._server:
+            return
+        if not self._show_target_object_trajectory:
+            if self._target_object_trajectory_handle is not None:
+                try:
+                    self._target_object_trajectory_handle.visible = False
+                except Exception:
+                    pass
+            return
+
+        ref_positions = self._reference_object_clip_trajectory_w()
+        if ref_positions is None or ref_positions.shape[0] < 2:
+            if self._target_object_trajectory_handle is not None:
+                try:
+                    self._target_object_trajectory_handle.visible = False
+                except Exception:
+                    pass
+            return
+
+        segments = np.stack([ref_positions[:-1], ref_positions[1:]], axis=1).astype(np.float32, copy=False)
+        if self._recenter:
+            segments = segments - offset.reshape(1, 1, 3)
+        colors = np.full((segments.shape[0], 2, 3), self._target_object_center_color, dtype=np.uint8)
+
+        if self._target_object_trajectory_handle is None:
+            self._target_object_trajectory_handle = self._server.scene.add_line_segments(
+                self._scene_path("/target_object_trajectory"),
+                points=segments,
+                colors=colors,
+                line_width=float(self._target_object_trajectory_line_width),
+            )
+        else:
+            try:
+                self._target_object_trajectory_handle.visible = True
+            except Exception:
+                pass
+            self._target_object_trajectory_handle.points = segments
+            try:
+                self._target_object_trajectory_handle.colors = colors
+            except Exception:
+                pass
 
     @staticmethod
     def _rot6d_to_quat_wxyz(rot6d: torch.Tensor) -> np.ndarray:

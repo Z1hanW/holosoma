@@ -12,7 +12,7 @@ Environment overrides:
   OMOMO_CLIP_REGEX          Default: ^sub
   GROUP_INDEX               Default: 0
   CLIP_LIST                 Default: empty
-                            Exactly 4 comma-separated clip ids. Overrides GROUP_INDEX.
+                            Exactly 4 comma-separated clip ids. When set, the bank contains only these 4 clips.
   VISER_PORT                Default: 18085
   VISER_ENV_ID              Default: 0
   VISER_GRID_SPACING        Default: 2.8
@@ -27,8 +27,9 @@ Environment overrides:
   DRY_RUN                   Default: 0
 
 Notes:
-  - Builds a 2x2 replay subset from OMOMO clips matched by OMOMO_CLIP_REGEX.
-  - Default selection is 4 clips per group; use GROUP_INDEX to switch groups.
+  - Builds an OMOMO replay bank from clips matched by OMOMO_CLIP_REGEX.
+  - Default bank contains all matched OMOMO clips; GROUP_INDEX chooses the initial 2x2 group.
+  - Viser GUI exposes Prev/Next Group controls to switch groups in the webpage.
   - Each visible Viser tile is labeled with its current sequence name.
 EOF
 }
@@ -120,7 +121,7 @@ fi
 
 mkdir -p "${REPLAY_SUBSET_DIR}"
 
-SELECTED_CLIPS="$("${PYTHON_BIN}" - <<'PY' "${MOTION_ROOT}" "${REPLAY_SUBSET_DIR}" "${OMOMO_CLIP_REGEX}" "${GROUP_INDEX}" "${CLIP_LIST}"
+BANK_INFO="$("${PYTHON_BIN}" - <<'PY' "${MOTION_ROOT}" "${REPLAY_SUBSET_DIR}" "${OMOMO_CLIP_REGEX}" "${GROUP_INDEX}" "${CLIP_LIST}"
 import json
 import math
 import re
@@ -162,27 +163,32 @@ if len(available) < group_size:
     )
 
 if clip_list_raw:
-    selected = [item.strip() for item in clip_list_raw.split(",") if item.strip()]
-    if len(selected) != group_size:
-        raise SystemExit(f"CLIP_LIST must contain exactly {group_size} comma-separated clip ids, got {len(selected)}")
-    missing = [name for name in selected if name not in clips_map or not (motion_root / f"{name}.npz").is_file()]
+    bank_clips = [item.strip() for item in clip_list_raw.split(",") if item.strip()]
+    if len(bank_clips) != group_size:
+        raise SystemExit(
+            f"CLIP_LIST must contain exactly {group_size} comma-separated clip ids, got {len(bank_clips)}"
+        )
+    missing = [name for name in bank_clips if name not in clips_map or not (motion_root / f"{name}.npz").is_file()]
     if missing:
         raise SystemExit(f"Unknown or missing clip ids in CLIP_LIST: {missing}")
+    total_groups = 1
+    initial_visible = list(bank_clips)
 else:
-    total_groups = int(math.ceil(len(available) / float(group_size)))
+    bank_clips = list(available)
+    total_groups = int(math.ceil(len(bank_clips) / float(group_size)))
     if group_index >= total_groups:
-        raise SystemExit(f"GROUP_INDEX {group_index} out of range for {len(available)} clips ({total_groups} groups)")
+        raise SystemExit(f"GROUP_INDEX {group_index} out of range for {len(bank_clips)} clips ({total_groups} groups)")
     start = group_index * group_size
-    selected = available[start : start + group_size]
-    if len(selected) < group_size:
-        raise SystemExit(f"Group {group_index} has only {len(selected)} clips; expected {group_size}")
+    initial_visible = bank_clips[start : start + group_size]
+    if not initial_visible:
+        raise SystemExit(f"Group {group_index} resolved to an empty initial selection.")
 
 out_dir.mkdir(parents=True, exist_ok=True)
 for old_npz in out_dir.glob("*.npz"):
     old_npz.unlink()
 
 subset_map = {}
-for clip_name in selected:
+for clip_name in bank_clips:
     src = motion_root / f"{clip_name}.npz"
     dst = out_dir / src.name
     if dst.exists() or dst.is_symlink():
@@ -197,16 +203,17 @@ for clip_name in selected:
 
 if clip_list_raw:
     print("mode=manual")
+    print(f"bank_count={len(bank_clips)}")
 else:
-    total_groups = int(math.ceil(len(available) / float(group_size)))
+    print(f"bank_count={len(bank_clips)}")
     print(f"mode=group index={group_index}/{total_groups - 1}")
-for idx, clip_name in enumerate(selected):
+for idx, clip_name in enumerate(initial_visible):
     print(f"{idx}\t{clip_name}")
 PY
 )"
 
-if [[ -z "${SELECTED_CLIPS}" ]]; then
-  echo "[ERROR] No OMOMO clips selected for 2x2 replay." >&2
+if [[ -z "${BANK_INFO}" ]]; then
+  echo "[ERROR] No OMOMO clips prepared for replay." >&2
   exit 1
 fi
 if [[ ! -f "${OBJECT_MAP}" ]]; then
@@ -239,10 +246,15 @@ export VISER_START_PAUSED="${VISER_START_PAUSED}"
 export VISER_PLAY_RESTARTS_VISIBLE_REPLAY="${VISER_PLAY_RESTARTS_VISIBLE_REPLAY:-1}"
 export VISER_RESET_RESTARTS_VISIBLE_REPLAY="${VISER_RESET_RESTARTS_VISIBLE_REPLAY:-1}"
 export VISER_ENABLE_CLIP_GUI="${VISER_ENABLE_CLIP_GUI:-0}"
+export VISER_ENABLE_CLIP_GROUP_GUI="${VISER_ENABLE_CLIP_GROUP_GUI:-1}"
 export VISER_ENABLE_MANUAL_GUI="${VISER_ENABLE_MANUAL_GUI:-0}"
 export VISER_SHOW_TARGET_KEYPOINTS="${VISER_SHOW_TARGET_KEYPOINTS:-0}"
 export VISER_SHOW_ENV_SEQUENCE_LABELS="${VISER_SHOW_ENV_SEQUENCE_LABELS:-1}"
 export VISER_ENV_SEQUENCE_LABEL_HEIGHT="${VISER_ENV_SEQUENCE_LABEL_HEIGHT:-1.6}"
+export VISER_CLIP_GROUP_SIZE="${VISER_CLIP_GROUP_SIZE:-4}"
+export VISER_INITIAL_CLIP_GROUP_INDEX="${VISER_INITIAL_CLIP_GROUP_INDEX:-${GROUP_INDEX}}"
+export HOLOSOMA_FORCE_ROUND_ROBIN_CLIP_ASSIGNMENT="${HOLOSOMA_FORCE_ROUND_ROBIN_CLIP_ASSIGNMENT:-1}"
+export HOLOSOMA_FORCE_ROUND_ROBIN_CLIP_START="${HOLOSOMA_FORCE_ROUND_ROBIN_CLIP_START:-$(( GROUP_INDEX * 4 ))}"
 export HOLOSOMA_REPLAY_KEEP_OPEN="${HOLOSOMA_REPLAY_KEEP_OPEN:-1}"
 
 cmd=(
@@ -277,12 +289,14 @@ cmd=(
 echo "[INFO] motion_root=${MOTION_ROOT}"
 echo "[INFO] replay_subset_dir=${REPLAY_SUBSET_DIR}"
 echo "[INFO] object_map=${OBJECT_MAP}"
-echo "[INFO] selected OMOMO clips:"
-printf '%s\n' "${SELECTED_CLIPS}"
+echo "[INFO] OMOMO bank prepared:"
+printf '%s\n' "${BANK_INFO}"
 echo "[INFO] viser=http://localhost:${VISER_PORT}"
 echo "[INFO] training_headless=${TRAINING_HEADLESS} isaac_app_headless=${HEADLESS_ENV}"
 echo "[INFO] mesh_source=${VISER_MESH_SOURCE} mesh_mode=${VISER_MESH_MODE}"
 echo "[INFO] env_sequence_labels=${VISER_SHOW_ENV_SEQUENCE_LABELS} label_height=${VISER_ENV_SEQUENCE_LABEL_HEIGHT}"
+echo "[INFO] group_gui=${VISER_ENABLE_CLIP_GROUP_GUI} initial_group=${VISER_INITIAL_CLIP_GROUP_INDEX} group_size=${VISER_CLIP_GROUP_SIZE}"
+echo "[INFO] force_round_robin_clip_assignment=${HOLOSOMA_FORCE_ROUND_ROBIN_CLIP_ASSIGNMENT}"
 printf '[INFO] command:'
 printf ' %q' "${cmd[@]}"
 printf '\n'

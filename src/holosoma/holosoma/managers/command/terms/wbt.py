@@ -1622,6 +1622,25 @@ class MotionCommand(CommandTermBase):
             raise ValueError(f"clip_idx {clip_idx} out of range for {self.motion.num_clips} clips.")
         self._forced_clip_idx = int(clip_idx)
 
+    def set_fixed_clip_ids_for_envs(self, env_ids, clip_ids) -> None:
+        """Pin specific envs to specific clips for subsequent resets."""
+        env_ids_t = self._ensure_index_tensor(env_ids)
+        clip_ids_t = torch.as_tensor(clip_ids, device=self.device, dtype=torch.long).reshape(-1)
+        if env_ids_t.numel() != clip_ids_t.numel():
+            raise ValueError(
+                f"env_ids and clip_ids must have the same length, got {env_ids_t.numel()} and {clip_ids_t.numel()}."
+            )
+        if clip_ids_t.numel() == 0:
+            return
+        if torch.any(clip_ids_t < 0) or torch.any(clip_ids_t >= int(self.motion.num_clips)):
+            raise ValueError(f"clip_ids must be within [0, {self.motion.num_clips - 1}].")
+        if self._fixed_clip_ids is None or int(self._fixed_clip_ids.numel()) != int(self.num_envs):
+            if hasattr(self, "clip_ids") and isinstance(self.clip_ids, torch.Tensor) and int(self.clip_ids.numel()) == int(self.num_envs):
+                self._fixed_clip_ids = self.clip_ids.clone()
+            else:
+                self._fixed_clip_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._fixed_clip_ids[env_ids_t] = clip_ids_t
+
     def set_training_iteration(self, iteration: int, *, total_iterations: int | None = None) -> None:
         """Expose the current PPO iteration so command curriculum can follow the training schedule exactly."""
         self._training_iteration = int(iteration)
@@ -1963,6 +1982,27 @@ class MotionCommand(CommandTermBase):
 
     def _configure_fixed_env_clip_assignment(self) -> None:
         self._fixed_clip_ids = None
+        force_round_robin = os.environ.get("HOLOSOMA_FORCE_ROUND_ROBIN_CLIP_ASSIGNMENT", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        if force_round_robin:
+            if self.motion.num_clips <= 0:
+                raise RuntimeError("Round-robin clip assignment requested but motion bank is empty.")
+            clip_start = int(os.environ.get("HOLOSOMA_FORCE_ROUND_ROBIN_CLIP_START", "0") or "0")
+            fixed_clip_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long) + clip_start
+            fixed_clip_ids = torch.remainder(fixed_clip_ids, int(self.motion.num_clips))
+            self._fixed_clip_ids = fixed_clip_ids
+            logger.info(
+                "Configured forced round-robin env-to-clip assignment across {} envs and {} clips (start={}).",
+                self.num_envs,
+                self.motion.num_clips,
+                clip_start,
+            )
+            return
+
         if not self.motion.has_object:
             return
 
