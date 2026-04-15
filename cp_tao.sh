@@ -31,6 +31,8 @@ fi
 SOURCE_MOTION_BANK="${ROLLOUT_ASSET_ROOT}/outputs/motion_bank"
 SOURCE_DROP_FINAL_MOTION_BANK="${ROLLOUT_ASSET_ROOT}/outputs/motion_bank_drop_final_1aaf51f7c2"
 SOURCE_CLIPS="${ROLLOUT_ASSET_ROOT}/outputs/clips"
+SOURCE_OUTPUTS_VIS="${ROLLOUT_ASSET_ROOT}/outputs_vis"
+SOURCE_OUTPUTS_STS="${ROLLOUT_ASSET_ROOT}/outputs_sts"
 
 require_dir "${SOURCE_MOTION_BANK}"
 require_dir "${SOURCE_CLIPS}"
@@ -55,6 +57,17 @@ validate_rollout_assets "${SOURCE_MOTION_BANK}" "${SOURCE_CLIPS}"
 
 mkdir -p outputs/motion_bank
 mkdir -p outputs/clips
+mkdir -p outputs_vis
+mkdir -p outputs_sts
+
+count_npz_in_dir() {
+  local path="$1"
+  if [[ -d "${path}" ]]; then
+    find "${path}" -maxdepth 1 -type f -name '*.npz' ! -name '_clip_object_urdf_map.json' | wc -l | tr -d ' '
+  else
+    echo 0
+  fi
+}
 
 echo "[INFO] Syncing teacher rollout motion bank -> outputs/motion_bank"
 rsync -avh --delete "${SOURCE_MOTION_BANK}/" outputs/motion_bank/
@@ -68,9 +81,25 @@ else
 fi
 
 echo "[INFO] Syncing rollout clip references -> outputs/clips"
-rsync -avh "${SOURCE_CLIPS}/" outputs/clips/
+rsync -avh --delete "${SOURCE_CLIPS}/" outputs/clips/
+
+if [[ -d "${SOURCE_OUTPUTS_VIS}" ]]; then
+  echo "[INFO] Syncing rollout visualizations -> outputs_vis"
+  rsync -avh --delete "${SOURCE_OUTPUTS_VIS}/" outputs_vis/
+else
+  echo "[WARN] Visualization directory not found at ${SOURCE_OUTPUTS_VIS}; skipping outputs_vis sync"
+fi
+
+if [[ -d "${SOURCE_OUTPUTS_STS}" ]]; then
+  echo "[INFO] Syncing rollout statistics -> outputs_sts"
+  rsync -avh --delete "${SOURCE_OUTPUTS_STS}/" outputs_sts/
+else
+  echo "[WARN] Statistics directory not found at ${SOURCE_OUTPUTS_STS}; skipping outputs_sts sync"
+fi
 
 echo "[INFO] Restored rollout assets:"
-echo "  - $(find outputs/motion_bank -maxdepth 1 -name 'box_*.npz' | wc -l | tr -d ' ') clips in outputs/motion_bank"
-echo "  - $(find outputs/motion_bank_drop_final_1aaf51f7c2 -maxdepth 1 -name 'box_*.npz' | wc -l | tr -d ' ') clips in outputs/motion_bank_drop_final_1aaf51f7c2"
-echo "  - $(find outputs/clips -maxdepth 1 -type d -name '*box_*' | wc -l | tr -d ' ') clip dirs in outputs/clips"
+echo "  - $(count_npz_in_dir outputs/motion_bank) clips in outputs/motion_bank"
+echo "  - $(count_npz_in_dir outputs/motion_bank_drop_final_1aaf51f7c2) clips in outputs/motion_bank_drop_final_1aaf51f7c2"
+echo "  - $(find outputs/clips -maxdepth 1 -mindepth 1 -type d | wc -l | tr -d ' ') clip dirs in outputs/clips"
+echo "  - $(find outputs_vis/clips -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ') clip dirs in outputs_vis/clips"
+echo "  - $(find outputs_sts/clips -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ') clip dirs in outputs_sts/clips"
