@@ -1429,6 +1429,7 @@ class OfflineContactPointGuidance(RewardTermBase):
                 f"Unsupported force_gate_mode '{self.force_gate_mode}'. Expected one of: ['soft', 'binary']."
             )
         self.use_contact_schedule = bool(cfg.params.get("use_contact_schedule", False))
+        self.contact_schedule_relax_steps = max(int(cfg.params.get("contact_schedule_relax_steps", 0)), 0)
         self.contact_schedule_missing_mode = str(cfg.params.get("contact_schedule_missing_mode", "always_on")).strip().lower()
         if self.contact_schedule_missing_mode not in {"always_on", "after_pickup", "inactive"}:
             raise ValueError(
@@ -1764,6 +1765,8 @@ class OfflineContactPointGuidance(RewardTermBase):
         if not self.use_contact_schedule:
             return schedule_active
 
+        relax_steps = int(self.contact_schedule_relax_steps)
+
         interval_bank = self._clip_region_contact_intervals
         has_interval_bank = self._clip_region_has_contact_intervals
         if interval_bank is not None and has_interval_bank is not None and bool(has_interval_bank.any().item()):
@@ -1773,6 +1776,9 @@ class OfflineContactPointGuidance(RewardTermBase):
             current_steps = current_steps.expand(-1, num_regions)
             start_steps = interval_steps[..., 0]
             end_steps = interval_steps[..., 1]
+            if relax_steps > 0:
+                start_steps = (start_steps - relax_steps).clamp_min(0)
+                end_steps = end_steps + relax_steps
             interval_active = (current_steps >= start_steps) & (current_steps < end_steps)
             schedule_active = torch.where(has_intervals, interval_active, schedule_active)
             missing_schedule = ~has_intervals
@@ -1792,10 +1798,20 @@ class OfflineContactPointGuidance(RewardTermBase):
             schedule_lengths = schedule_lengths_bank.index_select(0, clip_indices)
             current_steps = self.motion_command.time_steps.to(device=self.env.device, dtype=torch.long).unsqueeze(-1)
             current_steps = current_steps.expand(-1, num_regions)
+            selected_schedule = schedule_bank.index_select(0, clip_indices)
+            if relax_steps > 0:
+                schedule_window_size = 2 * relax_steps + 1
+                relaxed_schedule = F.max_pool1d(
+                    selected_schedule.to(dtype=torch.float32).reshape(-1, 1, selected_schedule.shape[-1]),
+                    kernel_size=schedule_window_size,
+                    stride=1,
+                    padding=relax_steps,
+                ).reshape_as(selected_schedule) > 0.5
+            else:
+                relaxed_schedule = selected_schedule
             valid_schedule_steps = current_steps < schedule_lengths
             safe_schedule_steps = torch.minimum(current_steps, (schedule_lengths - 1).clamp_min(0))
-            selected_schedule = schedule_bank.index_select(0, clip_indices)
-            scheduled_values = torch.gather(selected_schedule, 2, safe_schedule_steps.unsqueeze(-1)).squeeze(-1)
+            scheduled_values = torch.gather(relaxed_schedule, 2, safe_schedule_steps.unsqueeze(-1)).squeeze(-1)
             use_schedule = missing_schedule & has_schedule
             schedule_active = torch.where(use_schedule, valid_schedule_steps & scheduled_values, schedule_active)
             missing_schedule = missing_schedule & ~has_schedule

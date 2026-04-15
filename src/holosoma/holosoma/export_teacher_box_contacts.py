@@ -84,18 +84,18 @@ _BOX_COLOR = np.asarray([180, 180, 190, 72], dtype=np.uint8)
 _MESH_COLOR = np.asarray([175, 185, 200, 210], dtype=np.uint8)
 _REGION_OVERLAY_STYLE: dict[str, dict[str, Any]] = {
     "left_wrist": {
-        "rgba": np.asarray([220, 30, 30, 255], dtype=np.uint8),
-        "mpl_color": "#DC1E1E",
+        "rgba": np.asarray([255, 140, 0, 255], dtype=np.uint8),
+        "mpl_color": "#FF8C00",
         "radius_scale": 1.0,
         "scatter_size": 30.0,
-        "label": "wrist",
+        "label": "left wrist",
     },
     "right_wrist": {
-        "rgba": np.asarray([220, 30, 30, 255], dtype=np.uint8),
-        "mpl_color": "#DC1E1E",
+        "rgba": np.asarray([255, 220, 0, 255], dtype=np.uint8),
+        "mpl_color": "#FFDC00",
         "radius_scale": 1.0,
         "scatter_size": 30.0,
-        "label": "wrist",
+        "label": "right wrist",
     },
     "arm": {
         "rgba": np.asarray([255, 165, 0, 255], dtype=np.uint8),
@@ -520,6 +520,7 @@ def _save_overlay_assets(
     retained_counts: np.ndarray,
     display_points_xyz: np.ndarray,
     display_point_labels: list[str],
+    region_points_by_label: dict[str, np.ndarray] | None = None,
     save_glb: bool,
     save_preview_png: bool,
     save_face_heatmap_png: bool,
@@ -549,16 +550,37 @@ def _save_overlay_assets(
         box_mesh.visual.vertex_colors = _BOX_COLOR
         scene.add_geometry(box_mesh, node_name="primitive_box")
 
+        visual_region_points: dict[str, np.ndarray] = {}
+        if region_points_by_label is not None:
+            for region_name in ["left_wrist", "right_wrist", "arm", "torso"]:
+                points_xyz = np.asarray(
+                    region_points_by_label.get(region_name, np.zeros((0, 3), dtype=np.float32)),
+                    dtype=np.float32,
+                ).reshape(-1, 3)
+                if points_xyz.size > 0:
+                    visual_region_points[region_name] = points_xyz
+        else:
+            for region_name in ["left_wrist", "right_wrist", "arm", "torso"]:
+                region_points_xyz = display_points_xyz[
+                    [idx for idx, label in enumerate(display_point_labels) if label == region_name]
+                ]
+                if region_points_xyz.size > 0:
+                    visual_region_points[region_name] = np.asarray(region_points_xyz, dtype=np.float32).reshape(-1, 3)
+
         base_radius = max(float(np.max(extents_xyz)) * 0.02, 0.003)
-        for point_xyz, region_name in zip(display_points_xyz, display_point_labels, strict=True):
+        for region_name in ["left_wrist", "right_wrist", "arm", "torso"]:
+            region_points_xyz = visual_region_points.get(region_name)
+            if region_points_xyz is None or region_points_xyz.size == 0:
+                continue
             style = _REGION_OVERLAY_STYLE.get(region_name, _REGION_OVERLAY_STYLE["arm"])
             radius = base_radius * float(style["radius_scale"])
             color = np.asarray(style["rgba"], dtype=np.uint8)
-            sphere = trimesh.creation.icosphere(subdivisions=2, radius=radius)
-            sphere.apply_translation(point_xyz.astype(np.float64))
-            sphere.visual.vertex_colors = color
-            point_name = "_".join(f"{coord:.3f}" for coord in point_xyz.tolist())
-            scene.add_geometry(sphere, node_name=f"{region_name}_contact_{point_name}")
+            for point_xyz in region_points_xyz:
+                sphere = trimesh.creation.icosphere(subdivisions=2, radius=radius)
+                sphere.apply_translation(point_xyz.astype(np.float64))
+                sphere.visual.vertex_colors = color
+                point_name = "_".join(f"{coord:.3f}" for coord in point_xyz.tolist())
+                scene.add_geometry(sphere, node_name=f"{region_name}_contact_{point_name}")
 
         scene.export(clip_dir / "contact_overlay.glb")
 
@@ -578,6 +600,22 @@ def _save_overlay_assets(
             ax_xy = fig.add_subplot(222)
             ax_xz = fig.add_subplot(223)
             ax_yz = fig.add_subplot(224)
+            visual_region_points: dict[str, np.ndarray] = {}
+            if region_points_by_label is not None:
+                for region_name in ["left_wrist", "right_wrist", "arm", "torso"]:
+                    points_xyz = np.asarray(
+                        region_points_by_label.get(region_name, np.zeros((0, 3), dtype=np.float32)),
+                        dtype=np.float32,
+                    ).reshape(-1, 3)
+                    if points_xyz.size > 0:
+                        visual_region_points[region_name] = points_xyz
+            else:
+                for region_name in ["left_wrist", "right_wrist", "arm", "torso"]:
+                    region_points_xyz = display_points_xyz[
+                        [idx for idx, label in enumerate(display_point_labels) if label == region_name]
+                    ]
+                    if region_points_xyz.size > 0:
+                        visual_region_points[region_name] = np.asarray(region_points_xyz, dtype=np.float32).reshape(-1, 3)
 
             box_vertices = np.asarray(
                 [
@@ -627,10 +665,8 @@ def _save_overlay_assets(
 
             legend_entries: list[tuple[str, Any]] = []
             for region_name in ["left_wrist", "right_wrist", "arm", "torso"]:
-                region_points_xyz = display_points_xyz[
-                    [idx for idx, label in enumerate(display_point_labels) if label == region_name]
-                ]
-                if region_points_xyz.size == 0:
+                region_points_xyz = visual_region_points.get(region_name)
+                if region_points_xyz is None or region_points_xyz.size == 0:
                     continue
                 style = _REGION_OVERLAY_STYLE.get(region_name, _REGION_OVERLAY_STYLE["arm"])
                 scatter = ax_3d.scatter(
@@ -641,9 +677,7 @@ def _save_overlay_assets(
                     s=float(style["scatter_size"]),
                     depthshade=False,
                 )
-                legend_label = str(style["label"])
-                if not any(existing == legend_label for existing, _ in legend_entries):
-                    legend_entries.append((legend_label, scatter))
+                legend_entries.append((str(style["label"]), scatter))
 
             bound_half = 0.55 * float(np.max(extents_xyz))
             if object_mesh is not None and len(object_mesh.vertices) > 0:
@@ -693,10 +727,8 @@ def _save_overlay_assets(
                         linewidths=0.0,
                     )
                 for region_name in ["left_wrist", "right_wrist", "arm", "torso"]:
-                    region_points_xyz = display_points_xyz[
-                        [idx for idx, label in enumerate(display_point_labels) if label == region_name]
-                    ]
-                    if region_points_xyz.size == 0:
+                    region_points_xyz = visual_region_points.get(region_name)
+                    if region_points_xyz is None or region_points_xyz.size == 0:
                         continue
                     style = _REGION_OVERLAY_STYLE.get(region_name, _REGION_OVERLAY_STYLE["arm"])
                     axis.scatter(
@@ -713,15 +745,14 @@ def _save_overlay_assets(
                 axis.set_ylabel(label_b)
                 handles = []
                 labels = []
-                for region_label in ["wrist", "arm", "torso"]:
-                    if any(entry_label == region_label for entry_label, _ in legend_entries):
-                        color = next(
-                            style["mpl_color"]
-                            for style in _REGION_OVERLAY_STYLE.values()
-                            if str(style["label"]) == region_label
-                        )
-                        handles.append(Line2D([], [], marker="o", linestyle="", color=color, markersize=6))
-                        labels.append(region_label)
+                for region_name in ["left_wrist", "right_wrist", "arm", "torso"]:
+                    if region_name not in visual_region_points:
+                        continue
+                    style = _REGION_OVERLAY_STYLE.get(region_name, _REGION_OVERLAY_STYLE["arm"])
+                    handles.append(
+                        Line2D([], [], marker="o", linestyle="", color=str(style["mpl_color"]), markersize=6)
+                    )
+                    labels.append(str(style["label"]))
                 if handles:
                     axis.legend(handles, labels, loc="upper right", frameon=True)
             plt.tight_layout()
@@ -1194,6 +1225,7 @@ def _finalize_clip_output(
         status = "failed_max_steps"
 
     retained_points_by_region: dict[str, np.ndarray] = {}
+    contact_intervals_by_region: dict[str, np.ndarray] = {}
     for spec in _REGION_SPECS.values():
         label = str(spec["label"])
         region_points_xyz, region_counts = _retained_points_from_counts(
@@ -1206,12 +1238,22 @@ def _finalize_clip_output(
         np.save(accumulator.clip_dir / f"{label}_contact_point_counts.npy", region_counts)
         start_step = int(accumulator.region_contact_interval_start[label])
         end_step = int(accumulator.region_contact_interval_end[label])
-        np.save(
-            accumulator.clip_dir / f"{label}_contact_interval_steps.npy",
+        interval_steps = (
             np.asarray([start_step, end_step], dtype=np.int32)
             if start_step >= 0 and end_step > start_step
-            else np.asarray([-1, -1], dtype=np.int32),
+            else np.asarray([-1, -1], dtype=np.int32)
         )
+        contact_intervals_by_region[label] = interval_steps
+        np.save(accumulator.clip_dir / f"{label}_contact_interval_steps.npy", interval_steps)
+
+    np.savez(
+        accumulator.clip_dir / "contact_intervals.npz",
+        **{label: interval for label, interval in contact_intervals_by_region.items()},
+    )
+    (accumulator.clip_dir / "contact_intervals.json").write_text(
+        json.dumps({label: interval.tolist() for label, interval in contact_intervals_by_region.items()}, indent=2),
+        encoding="utf-8",
+    )
 
     display_points_xyz, _, display_point_labels = _build_display_points_from_region_counts(
         overall_point_counts,
@@ -1314,6 +1356,7 @@ def _finalize_clip_output(
         "contact_voxel_size": float(export_cfg.contact_voxel_size),
         "success_position_threshold": float(export_cfg.success_position_threshold),
         "teacher_rollout_reference_path": "teacher_rollout_reference.npz",
+        "contact_intervals_path": "contact_intervals.json",
         "teacher_rollout_ref_body_name": accumulator.ref_body_name,
         "teacher_rollout_tracked_body_names": accumulator.tracked_body_names,
         "teacher_rollout_valid_step_count": int(np.count_nonzero(accumulator.rollout_reference["valid_steps"])),

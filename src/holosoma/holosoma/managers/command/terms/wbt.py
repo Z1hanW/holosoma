@@ -79,6 +79,23 @@ _CONTACT_PRIOR_OBJECT_ROT_ERROR_THRESHOLD = 0.80
 _CONTACT_PRIOR_BODY_POS_ERROR_THRESHOLD = 0.35
 _CONTACT_PRIOR_CONFIDENCE_WARMUP_SAMPLES = 2048.0
 _OBJECT_CONTACT_PROXY_DISTANCE_THRESHOLD = 0.08
+_ADAPTIVE_SAMPLING_CONTACT_STAGE_PRE_EXTRA_STEPS = 10
+_ADAPTIVE_SAMPLING_CONTACT_STAGE_RELEASE_LEAD_STEPS = 30
+_ADAPTIVE_SAMPLING_CONTACT_INTERVAL_REGION_ALIASES = {
+    "left_palm": "left_wrist",
+    "right_palm": "right_wrist",
+    "arms": "arm",
+}
+_ADAPTIVE_SAMPLING_CONTACT_INTERVAL_PRIMARY_REGION_GROUPS = (
+    ("left_wrist", "right_wrist"),
+    ("arm", "torso"),
+)
+_ADAPTIVE_SAMPLING_CONTACT_INTERVAL_FALLBACK_FILES = {
+    "left_wrist": "left_wrist_contact_interval_steps.npy",
+    "right_wrist": "right_wrist_contact_interval_steps.npy",
+    "arm": "arm_contact_interval_steps.npy",
+    "torso": "torso_contact_interval_steps.npy",
+}
 
 
 def _rot6d_to_matrix(rot6d: torch.Tensor) -> torch.Tensor:
@@ -157,6 +174,111 @@ def _pickup_step_and_threshold_from_rel_z(
         else:
             pickup_step = int(torch.argmax(rel_z).item())
     return pickup_step, pickup_threshold
+
+
+def _normalize_contact_interval_pair(raw_interval: Any) -> tuple[int, int] | None:
+    arr = np.asarray(raw_interval, dtype=np.int64).reshape(-1)
+    if arr.size < 2:
+        return None
+    start_step = int(arr[0])
+    end_step = int(arr[1])
+    if start_step < 0 or end_step <= start_step:
+        return None
+    return start_step, end_step
+
+
+def _canonicalize_contact_interval_region_name(raw_name: str) -> str:
+    name = str(raw_name).strip()
+    if not name:
+        return ""
+    return _ADAPTIVE_SAMPLING_CONTACT_INTERVAL_REGION_ALIASES.get(name, name)
+
+
+def _select_primary_contact_interval(intervals_by_region: dict[str, Any]) -> tuple[int, int] | None:
+    normalized: dict[str, tuple[int, int]] = {}
+    for region_name, raw_interval in intervals_by_region.items():
+        canonical_name = _canonicalize_contact_interval_region_name(region_name)
+        if not canonical_name:
+            continue
+        interval = _normalize_contact_interval_pair(raw_interval)
+        if interval is None:
+            continue
+        normalized[canonical_name] = interval
+
+    for region_group in _ADAPTIVE_SAMPLING_CONTACT_INTERVAL_PRIMARY_REGION_GROUPS:
+        group_intervals = [normalized[name] for name in region_group if name in normalized]
+        if group_intervals:
+            start_step = min(interval[0] for interval in group_intervals)
+            end_step = max(interval[1] for interval in group_intervals)
+            return start_step, end_step
+
+    if normalized:
+        start_step = min(interval[0] for interval in normalized.values())
+        end_step = max(interval[1] for interval in normalized.values())
+        return start_step, end_step
+    return None
+
+
+def _compute_contact_stage_intervals(
+    *,
+    t1: int,
+    t2: int,
+    sample_end_step: float,
+) -> tuple[list[tuple[float, float]], tuple[float, float]]:
+    total_end = max(min(float(t2), float(sample_end_step)), 0.0)
+    if total_end <= 0.0:
+        zero_intervals = [(0.0, 0.0)] * 5
+        return zero_intervals, (0.0, max(float(sample_end_step), 0.0))
+
+    left_anchor = min(max(float(t1 + _ADAPTIVE_SAMPLING_CONTACT_STAGE_PRE_EXTRA_STEPS), 0.0), total_end)
+    right_anchor = min(
+        max(float(t2 - _ADAPTIVE_SAMPLING_CONTACT_STAGE_RELEASE_LEAD_STEPS), 0.0),
+        total_end,
+    )
+    right_anchor = max(right_anchor, left_anchor)
+
+    middle_length = max(right_anchor - left_anchor, 0.0)
+    middle_step = middle_length / 3.0
+    stage_intervals = [
+        (0.0, left_anchor),
+        (left_anchor, left_anchor + middle_step),
+        (left_anchor + middle_step, left_anchor + 2.0 * middle_step),
+        (left_anchor + 2.0 * middle_step, right_anchor),
+        (right_anchor, total_end),
+    ]
+    after_t2_interval = (total_end, max(float(sample_end_step), total_end))
+    return stage_intervals, after_t2_interval
+
+
+def _probability_mass_on_intervals(
+    bin_probabilities: torch.Tensor,
+    *,
+    sample_end_step: float,
+    intervals: list[tuple[float, float]],
+) -> torch.Tensor:
+    masses = torch.zeros((len(intervals),), device=bin_probabilities.device, dtype=torch.float32)
+    if bin_probabilities.numel() == 0:
+        return masses
+    sample_end = float(sample_end_step)
+    if sample_end <= 0.0:
+        return masses
+
+    num_bins = int(bin_probabilities.numel())
+    bin_width = sample_end / float(max(num_bins, 1))
+    if bin_width <= 0.0:
+        return masses
+
+    for bin_idx in range(num_bins):
+        prob_mass = bin_probabilities[bin_idx].to(dtype=torch.float32)
+        if float(prob_mass.item()) <= 0.0:
+            continue
+        bin_start = bin_width * float(bin_idx)
+        bin_end = bin_width * float(bin_idx + 1)
+        for interval_idx, (interval_start, interval_end) in enumerate(intervals):
+            overlap = min(bin_end, interval_end) - max(bin_start, interval_start)
+            if overlap > 0.0:
+                masses[interval_idx] += prob_mass * float(overlap / bin_width)
+    return masses
 
 
 #########################################################################################################
@@ -1607,6 +1729,9 @@ class MotionCommand(CommandTermBase):
         self._contact_prior_position_mean: torch.Tensor | None = None
         self._contact_prior_position_count: torch.Tensor | None = None
         self._object_contact_body_indices_cache: dict[tuple[str, ...], torch.Tensor] = {}
+        self._adaptive_sampling_contact_interval_root: Path | None = None
+        self._adaptive_sampling_contact_window_by_clip: torch.Tensor | None = None
+        self._adaptive_sampling_contact_window_valid_by_clip: torch.Tensor | None = None
         self._runtime_default_pose_prepend_enabled = False
         self._runtime_default_pose_prepend_steps = 0
         self._runtime_default_pose_prepend_active: torch.Tensor | None = None
@@ -1797,6 +1922,9 @@ class MotionCommand(CommandTermBase):
                     "Per-clip adaptive timestep sampling enabled for multi-clip motion bank ({} clips).",
                     self.motion.num_clips,
                 )
+        else:
+            self.adaptive_timesteps_sampler = None
+        self._configure_adaptive_sampling_contact_interval_bank()
 
         # 5. clip sampling configuration
         self.clip_weighting_strategy = self.motion_cfg.clip_weighting_strategy
@@ -3040,6 +3168,13 @@ class MotionCommand(CommandTermBase):
             raise ValueError(f"{name} must provide exactly 3 values, got {len(values)}")
         return torch.tensor(values, device=self.device, dtype=torch.float32)
 
+    @staticmethod
+    def _goal_scalar(value: float, *, name: str) -> float:
+        try:
+            return float(value)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"{name} must be a scalar float-compatible value, got {value!r}") from exc
+
     def _iteration_curriculum_progress(self, start_iter: int | None, end_iter: int | None) -> float | None:
         if start_iter is None or end_iter is None or self._training_iteration is None:
             return None
@@ -3173,6 +3308,75 @@ class MotionCommand(CommandTermBase):
         start_tensor = self._goal_vec3(start_values, name=f"{name}_start")
         mix = float(self._clamp01(self._sparse_goal_curriculum_progress() if alpha is None else alpha))
         return start_tensor + (end_tensor - start_tensor) * mix
+
+    def _goal_scalar_interp(
+        self,
+        end_value: float,
+        *,
+        name: str,
+        start_value: float | None = None,
+        alpha: float | None = None,
+    ) -> float:
+        end_scalar = self._goal_scalar(end_value, name=name)
+        if start_value is None:
+            return end_scalar
+        start_scalar = self._goal_scalar(start_value, name=f"{name}_start")
+        mix = float(self._clamp01(self._sparse_goal_curriculum_progress() if alpha is None else alpha))
+        return start_scalar + (end_scalar - start_scalar) * mix
+
+    def _external_goal_sampling_mode(self) -> str:
+        if self._sparse_goal_cfg is None:
+            return "box"
+        mode = str(getattr(self._sparse_goal_cfg, "external_goal_sampling_mode", "box") or "box").strip().lower()
+        if mode not in {"box", "annulus"}:
+            raise ValueError(f"Unsupported external_goal_sampling_mode '{mode}'. Use 'box' or 'annulus'.")
+        return mode
+
+    def _sample_external_goal_xy(self, num_samples: int, *, progress: float) -> torch.Tensor:
+        if self._sparse_goal_cfg is None:
+            raise RuntimeError("Sparse goal config is not initialized.")
+
+        sampling_mode = self._external_goal_sampling_mode()
+        if sampling_mode == "annulus":
+            radius_min = self._goal_scalar_interp(
+                self._sparse_goal_cfg.external_goal_radius_min,
+                name="external_goal_radius_min",
+                start_value=self._sparse_goal_cfg.external_goal_radius_min_start,
+                alpha=progress,
+            )
+            radius_max = self._goal_scalar_interp(
+                self._sparse_goal_cfg.external_goal_radius_max,
+                name="external_goal_radius_max",
+                start_value=self._sparse_goal_cfg.external_goal_radius_max_start,
+                alpha=progress,
+            )
+            radius_lo = max(0.0, min(radius_min, radius_max))
+            radius_hi = max(radius_lo, max(radius_min, radius_max))
+            theta = (2.0 * math.pi) * torch.rand((num_samples,), device=self.device, dtype=torch.float32) - math.pi
+            if radius_hi <= radius_lo + 1.0e-6:
+                radius = torch.full((num_samples,), float(radius_hi), device=self.device, dtype=torch.float32)
+            else:
+                u = torch.rand((num_samples,), device=self.device, dtype=torch.float32)
+                radius = torch.sqrt(u * (radius_hi**2 - radius_lo**2) + radius_lo**2)
+            return torch.stack((radius * torch.cos(theta), radius * torch.sin(theta)), dim=-1)
+
+        pos_min = self._goal_vec3_interp(
+            self._sparse_goal_cfg.external_goal_pos_local_min,
+            name="external_goal_pos_local_min",
+            start_values=self._sparse_goal_cfg.external_goal_pos_local_min_start,
+            alpha=progress,
+        )
+        pos_max = self._goal_vec3_interp(
+            self._sparse_goal_cfg.external_goal_pos_local_max,
+            name="external_goal_pos_local_max",
+            start_values=self._sparse_goal_cfg.external_goal_pos_local_max_start,
+            alpha=progress,
+        )
+        pos_lo = torch.minimum(pos_min, pos_max)
+        pos_hi = torch.maximum(pos_min, pos_max)
+        return pos_lo[:2].unsqueeze(0) + (pos_hi[:2] - pos_lo[:2]).unsqueeze(0) * torch.rand(
+            (num_samples, 2), device=self.device
+        )
 
     def _get_clip_pickup_stats_by_clip(self) -> tuple[torch.Tensor, torch.Tensor]:
         cache_name = (
@@ -3560,9 +3764,9 @@ class MotionCommand(CommandTermBase):
         )
         pos_lo = torch.minimum(pos_min, pos_max)
         pos_hi = torch.maximum(pos_min, pos_max)
-        local_pos = pos_lo.unsqueeze(0) + (pos_hi - pos_lo).unsqueeze(0) * torch.rand(
-            (num_samples, 3), device=self.device
-        )
+        local_pos = torch.zeros((num_samples, 3), device=self.device, dtype=torch.float32)
+        local_pos[:, :2] = self._sample_external_goal_xy(num_samples, progress=progress)
+        local_pos[:, 2] = pos_lo[2] + (pos_hi[2] - pos_lo[2]) * torch.rand((num_samples,), device=self.device)
         goal_pos_w = self._get_env_offsets(env_ids) + local_pos
 
         goal_quat_w = torch.zeros((num_samples, 4), device=self.device, dtype=torch.float32)
@@ -3575,24 +3779,7 @@ class MotionCommand(CommandTermBase):
 
         num_samples = env_ids.numel()
         progress = self._sparse_goal_curriculum_progress()
-        pos_min = self._goal_vec3_interp(
-            self._sparse_goal_cfg.external_goal_pos_local_min,
-            name="external_goal_pos_local_min",
-            start_values=self._sparse_goal_cfg.external_goal_pos_local_min_start,
-            alpha=progress,
-        )
-        pos_max = self._goal_vec3_interp(
-            self._sparse_goal_cfg.external_goal_pos_local_max,
-            name="external_goal_pos_local_max",
-            start_values=self._sparse_goal_cfg.external_goal_pos_local_max_start,
-            alpha=progress,
-        )
-        pos_lo = torch.minimum(pos_min, pos_max)
-        pos_hi = torch.maximum(pos_min, pos_max)
-        goal_xy_rel = pos_lo[:2].unsqueeze(0) + (pos_hi[:2] - pos_lo[:2]).unsqueeze(0) * torch.rand(
-            (num_samples, 2), device=self.device
-        )
-        return goal_xy_rel
+        return self._sample_external_goal_xy(num_samples, progress=progress)
 
     def _sample_carry_extension_object_goal_pose_w(
         self,
@@ -4323,6 +4510,212 @@ class MotionCommand(CommandTermBase):
             align_quat = align_quat[:, None, :].expand(-1, quat.shape[1], -1)
         return quat_mul(align_quat, quat, w_last=True)
 
+    def _resolve_adaptive_sampling_contact_interval_root(self) -> Path | None:
+        raw_root = getattr(self.motion_cfg, "adaptive_sampling_contact_interval_root", None)
+        if raw_root is None:
+            return None
+        root_str = str(raw_root).strip()
+        if not root_str:
+            return None
+        try:
+            resolved = Path(resolve_data_file_path(root_str)).resolve()
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve adaptive-sampling contact interval root '{}': {}",
+                root_str,
+                exc,
+            )
+            return None
+        if not resolved.is_dir():
+            logger.warning(
+                "Adaptive-sampling contact interval root '{}' does not exist; stage metrics will be skipped.",
+                resolved,
+            )
+            return None
+        return resolved
+
+    @staticmethod
+    def _infer_clip_id_from_contact_export_dir_name(dir_name: str) -> str:
+        if "_" not in dir_name:
+            return dir_name.strip()
+        return dir_name.split("_", 1)[1].strip()
+
+    def _load_adaptive_sampling_contact_window_from_dir(self, clip_dir: Path) -> tuple[int, int] | None:
+        intervals_by_region: dict[str, Any] = {}
+        contact_intervals_path = clip_dir / "contact_intervals.json"
+        if contact_intervals_path.is_file():
+            try:
+                payload = json.loads(contact_intervals_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.warning("Skipping invalid adaptive contact intervals '{}': {}", contact_intervals_path, exc)
+            else:
+                if isinstance(payload, dict):
+                    intervals_by_region.update(payload)
+
+        if not intervals_by_region:
+            for region_name, file_name in _ADAPTIVE_SAMPLING_CONTACT_INTERVAL_FALLBACK_FILES.items():
+                interval_path = clip_dir / file_name
+                if not interval_path.is_file():
+                    continue
+                try:
+                    intervals_by_region[region_name] = np.asarray(np.load(interval_path), dtype=np.int64).reshape(-1)
+                except Exception as exc:
+                    logger.warning("Skipping invalid adaptive contact interval '{}': {}", interval_path, exc)
+
+        return _select_primary_contact_interval(intervals_by_region)
+
+    def _configure_adaptive_sampling_contact_interval_bank(self) -> None:
+        self._adaptive_sampling_contact_interval_root = None
+        self._adaptive_sampling_contact_window_by_clip = torch.full(
+            (self.motion.num_clips, 2),
+            -1,
+            device=self.device,
+            dtype=torch.long,
+        )
+        self._adaptive_sampling_contact_window_valid_by_clip = torch.zeros(
+            (self.motion.num_clips,),
+            device=self.device,
+            dtype=torch.bool,
+        )
+
+        if not self.use_adaptive_timesteps_sampler or not self.motion.has_object:
+            return
+
+        contact_root = self._resolve_adaptive_sampling_contact_interval_root()
+        if contact_root is None:
+            return
+
+        clip_name_to_index = {clip_name: idx for idx, clip_name in enumerate(self.motion.clip_ids)}
+        loaded_count = 0
+        for clip_dir in sorted(contact_root.iterdir()):
+            if not clip_dir.is_dir():
+                continue
+            metadata_path = clip_dir / "metadata.json"
+            clip_id = ""
+            if metadata_path.is_file():
+                try:
+                    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    logger.warning("Skipping invalid adaptive contact metadata '{}': {}", metadata_path, exc)
+                    continue
+                clip_id = str(metadata.get("clip_id", "")).strip()
+            if not clip_id:
+                clip_id = self._infer_clip_id_from_contact_export_dir_name(clip_dir.name)
+            clip_index = clip_name_to_index.get(clip_id)
+            if clip_index is None:
+                continue
+            if bool(self._adaptive_sampling_contact_window_valid_by_clip[clip_index].item()):
+                continue
+            interval = self._load_adaptive_sampling_contact_window_from_dir(clip_dir)
+            if interval is None:
+                continue
+            self._adaptive_sampling_contact_window_by_clip[clip_index, 0] = int(interval[0])
+            self._adaptive_sampling_contact_window_by_clip[clip_index, 1] = int(interval[1])
+            self._adaptive_sampling_contact_window_valid_by_clip[clip_index] = True
+            loaded_count += 1
+
+        if loaded_count > 0:
+            self._adaptive_sampling_contact_interval_root = contact_root
+            logger.info(
+                "Loaded adaptive-sampling contact windows for {} / {} clip(s) from '{}'.",
+                loaded_count,
+                self.motion.num_clips,
+                contact_root,
+            )
+        else:
+            logger.warning(
+                "No matching adaptive-sampling contact windows were found in '{}'; stage metrics will be skipped.",
+                contact_root,
+            )
+
+    def _current_adaptive_sampling_clip_weights(self) -> torch.Tensor:
+        if self.motion.num_clips <= 1:
+            return torch.ones((1,), device=self.device, dtype=torch.float32)
+
+        if self._clip_sampling_weights is not None:
+            return self._clip_sampling_weights.to(device=self.device, dtype=torch.float32)
+
+        if self._fixed_clip_ids is not None and self._fixed_clip_ids.numel() > 0:
+            counts = torch.bincount(self._fixed_clip_ids, minlength=self.motion.num_clips).to(
+                device=self.device, dtype=torch.float32
+            )
+            total = counts.sum()
+            if float(total.item()) > 0.0:
+                return counts / total
+
+        return torch.full(
+            (self.motion.num_clips,),
+            1.0 / float(max(self.motion.num_clips, 1)),
+            device=self.device,
+            dtype=torch.float32,
+        )
+
+    def _compute_adaptive_sampling_contact_stage_metrics(self) -> dict[str, torch.Tensor]:
+        if self.adaptive_timesteps_sampler is None:
+            return {}
+        if self._adaptive_sampling_contact_window_by_clip is None or self._adaptive_sampling_contact_window_valid_by_clip is None:
+            return {}
+
+        valid_mask = self._adaptive_sampling_contact_window_valid_by_clip
+        if not torch.any(valid_mask):
+            return {}
+
+        clip_weights = self._current_adaptive_sampling_clip_weights()
+        valid_clip_prob_mass = clip_weights[valid_mask].sum()
+        if float(valid_clip_prob_mass.item()) <= 0.0:
+            return {}
+
+        stage_prob_masses = torch.zeros((5,), device=self.device, dtype=torch.float32)
+        after_t2_prob_mass = torch.zeros((), device=self.device, dtype=torch.float32)
+        valid_start_counts = self._valid_start_counts()
+
+        valid_clip_indices = torch.nonzero(valid_mask, as_tuple=False).reshape(-1)
+        for clip_idx_tensor in valid_clip_indices:
+            clip_idx = int(clip_idx_tensor.item())
+            clip_weight = clip_weights[clip_idx].to(dtype=torch.float32)
+            if float(clip_weight.item()) <= 0.0:
+                continue
+
+            sampling_probabilities = self.adaptive_timesteps_sampler._sampling_probabilities_for_clip(clip_idx)
+            sample_end_step = float(valid_start_counts[clip_idx].item())
+            t1 = int(self._adaptive_sampling_contact_window_by_clip[clip_idx, 0].item())
+            t2 = int(self._adaptive_sampling_contact_window_by_clip[clip_idx, 1].item())
+            stage_intervals, after_t2_interval = _compute_contact_stage_intervals(
+                t1=t1,
+                t2=t2,
+                sample_end_step=sample_end_step,
+            )
+            stage_masses = _probability_mass_on_intervals(
+                sampling_probabilities,
+                sample_end_step=sample_end_step,
+                intervals=stage_intervals,
+            )
+            after_t2_mass = _probability_mass_on_intervals(
+                sampling_probabilities,
+                sample_end_step=sample_end_step,
+                intervals=[after_t2_interval],
+            )[0]
+            stage_prob_masses += clip_weight * stage_masses
+            after_t2_prob_mass += clip_weight * after_t2_mass
+
+        tracked_prob_mass = stage_prob_masses.sum()
+        missing_clip_prob_mass = torch.clamp(
+            torch.tensor(1.0, device=self.device, dtype=torch.float32) - valid_clip_prob_mass,
+            min=0.0,
+        )
+        return {
+            "contact_interval_valid_clip_fraction": valid_mask.to(dtype=torch.float32).mean(),
+            "contact_interval_valid_clip_prob_mass": valid_clip_prob_mass,
+            "contact_interval_missing_clip_prob_mass": missing_clip_prob_mass,
+            "contact_interval_after_t2_prob_mass": after_t2_prob_mass,
+            "contact_interval_tracked_prob_mass": tracked_prob_mass,
+            "contact_interval_stage_0_to_t1p10_prob_mass": stage_prob_masses[0],
+            "contact_interval_stage_mid1_prob_mass": stage_prob_masses[1],
+            "contact_interval_stage_mid2_prob_mass": stage_prob_masses[2],
+            "contact_interval_stage_mid3_prob_mass": stage_prob_masses[3],
+            "contact_interval_stage_t2m30_to_t2_prob_mass": stage_prob_masses[4],
+        }
+
     def update_metrics(self):
         """Update the metrics. After action, before step() is called."""
         # Human (robot) tracking metrics.
@@ -4453,31 +4846,64 @@ class MotionCommand(CommandTermBase):
                 self.metrics[f"goal/contact_prior_{metric_name}_occupancy"] = prior_occupancy[:, region_idx]
                 self.metrics[f"goal/contact_prior_{metric_name}_force"] = prior_force[:, region_idx]
             if self._sparse_goal_cfg is not None:
-                pos_min = self._goal_vec3_interp(
-                    self._sparse_goal_cfg.external_goal_pos_local_min,
-                    name="external_goal_pos_local_min",
-                    start_values=self._sparse_goal_cfg.external_goal_pos_local_min_start,
-                    alpha=progress,
-                )
-                pos_max = self._goal_vec3_interp(
-                    self._sparse_goal_cfg.external_goal_pos_local_max,
-                    name="external_goal_pos_local_max",
-                    start_values=self._sparse_goal_cfg.external_goal_pos_local_max_start,
-                    alpha=progress,
-                )
-                pos_half_extent = 0.5 * torch.abs(pos_max - pos_min)
-                self.metrics["goal/external_pos_range_x_half"] = torch.full(
+                sampling_mode = self._external_goal_sampling_mode()
+                self.metrics["goal/external_sampling_mode_annulus"] = torch.full(
                     (self.num_envs,),
-                    float(pos_half_extent[0]),
+                    1.0 if sampling_mode == "annulus" else 0.0,
                     device=self.device,
                     dtype=torch.float32,
                 )
-                self.metrics["goal/external_pos_range_y_half"] = torch.full(
-                    (self.num_envs,),
-                    float(pos_half_extent[1]),
-                    device=self.device,
-                    dtype=torch.float32,
-                )
+                if sampling_mode == "annulus":
+                    radius_min = self._goal_scalar_interp(
+                        self._sparse_goal_cfg.external_goal_radius_min,
+                        name="external_goal_radius_min",
+                        start_value=self._sparse_goal_cfg.external_goal_radius_min_start,
+                        alpha=progress,
+                    )
+                    radius_max = self._goal_scalar_interp(
+                        self._sparse_goal_cfg.external_goal_radius_max,
+                        name="external_goal_radius_max",
+                        start_value=self._sparse_goal_cfg.external_goal_radius_max_start,
+                        alpha=progress,
+                    )
+                    self.metrics["goal/external_goal_radius_min"] = torch.full(
+                        (self.num_envs,),
+                        float(min(radius_min, radius_max)),
+                        device=self.device,
+                        dtype=torch.float32,
+                    )
+                    self.metrics["goal/external_goal_radius_max"] = torch.full(
+                        (self.num_envs,),
+                        float(max(radius_min, radius_max)),
+                        device=self.device,
+                        dtype=torch.float32,
+                    )
+                else:
+                    pos_min = self._goal_vec3_interp(
+                        self._sparse_goal_cfg.external_goal_pos_local_min,
+                        name="external_goal_pos_local_min",
+                        start_values=self._sparse_goal_cfg.external_goal_pos_local_min_start,
+                        alpha=progress,
+                    )
+                    pos_max = self._goal_vec3_interp(
+                        self._sparse_goal_cfg.external_goal_pos_local_max,
+                        name="external_goal_pos_local_max",
+                        start_values=self._sparse_goal_cfg.external_goal_pos_local_max_start,
+                        alpha=progress,
+                    )
+                    pos_half_extent = 0.5 * torch.abs(pos_max - pos_min)
+                    self.metrics["goal/external_pos_range_x_half"] = torch.full(
+                        (self.num_envs,),
+                        float(pos_half_extent[0]),
+                        device=self.device,
+                        dtype=torch.float32,
+                    )
+                    self.metrics["goal/external_pos_range_y_half"] = torch.full(
+                        (self.num_envs,),
+                        float(pos_half_extent[1]),
+                        device=self.device,
+                        dtype=torch.float32,
+                    )
 
         if self.use_adaptive_timesteps_sampler:
             self.adaptive_timesteps_sampler.get_stats()
@@ -4490,6 +4916,8 @@ class MotionCommand(CommandTermBase):
             self.metrics["motion/adaptive_timesteps_sampler_top1_bin"] = self.adaptive_timesteps_sampler.metrics[
                 "sampling_top1_bin"
             ]
+            for metric_name, metric_value in self._compute_adaptive_sampling_contact_stage_metrics().items():
+                self.metrics[f"motion/adaptive_timesteps_sampler_{metric_name}"] = metric_value
 
     #########################################################################################
     ## Internal helpers

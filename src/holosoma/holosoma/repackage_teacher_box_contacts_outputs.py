@@ -12,43 +12,7 @@ SRC_ROOT = Path(__file__).resolve().parents[1]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from holosoma.export_teacher_box_contacts import (
-    _REGION_DISPLAY_PRIORITY,
-    _save_overlay_assets,
-)
-
-
-def _point_key(point_xyz: np.ndarray) -> tuple[float, float, float]:
-    point = np.asarray(point_xyz, dtype=np.float64).reshape(3)
-    return tuple(float(v) for v in np.round(point, 6))
-
-
-def _choose_display_label(region_scores: dict[str, int]) -> str:
-    if not region_scores:
-        return "arm"
-    return max(
-        region_scores,
-        key=lambda name: (region_scores[name], _REGION_DISPLAY_PRIORITY.get(name, 0), name),
-    )
-
-
-def _build_display_points_from_saved_arrays(
-    primitive_points_xyz: np.ndarray,
-    region_points_by_label: dict[str, np.ndarray],
-    region_counts_by_label: dict[str, np.ndarray],
-) -> list[str]:
-    region_scores_by_point: dict[tuple[float, float, float], dict[str, int]] = {}
-    for label, points_xyz in region_points_by_label.items():
-        counts = region_counts_by_label.get(label, np.zeros((0,), dtype=np.int32))
-        for point_xyz, count in zip(points_xyz, counts, strict=True):
-            key = _point_key(point_xyz)
-            region_scores_by_point.setdefault(key, {})[label] = int(count)
-
-    labels: list[str] = []
-    for point_xyz in primitive_points_xyz:
-        key = _point_key(point_xyz)
-        labels.append(_choose_display_label(region_scores_by_point.get(key, {})))
-    return labels
+from holosoma.export_teacher_box_contacts import _save_overlay_assets
 
 
 def _copy_matching(src_dir: Path, dst_dir: Path, pattern: str) -> None:
@@ -121,11 +85,6 @@ def repackage_outputs(
             region_counts_by_label[label] = (
                 np.load(counts_path) if counts_path.exists() else np.zeros((0,), dtype=np.int32)
             )
-        display_point_labels = _build_display_points_from_saved_arrays(
-            primitive_points_xyz,
-            region_points_by_label,
-            region_counts_by_label,
-        )
         _save_overlay_assets(
             vis_clip_dir,
             clip_id=str(metadata["clip_id"]),
@@ -135,7 +94,8 @@ def repackage_outputs(
             retained_points_xyz=primitive_points_xyz,
             retained_counts=primitive_counts,
             display_points_xyz=primitive_points_xyz,
-            display_point_labels=display_point_labels,
+            display_point_labels=["arm"] * int(primitive_points_xyz.shape[0]),
+            region_points_by_label=region_points_by_label,
             save_glb=True,
             save_preview_png=True,
             save_face_heatmap_png=True,

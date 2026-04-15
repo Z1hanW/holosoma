@@ -389,6 +389,9 @@ motion_cfg = (
     .get("motion_config", {})
 )
 robot_cfg = experiment_config.get("robot", {}).get("object", {})
+observation_overrides = experiment_config.get("observation_overrides", {})
+if not isinstance(observation_overrides, dict):
+    observation_overrides = {}
 
 motion_path = motion_cfg.get("motion_dir") or motion_cfg.get("motion_file")
 object_urdf_path = robot_cfg.get("object_urdf_path")
@@ -400,6 +403,8 @@ print(
             "saved_motion_path": motion_path,
             "object_urdf_path": resolve_saved_path(object_urdf_path),
             "saved_object_urdf_path": object_urdf_path,
+            "distill_proprio_history_only": observation_overrides.get("distill_proprio_history_only", False),
+            "distill_proprio_history_length": observation_overrides.get("distill_proprio_history_length", 5),
         }
     )
 )
@@ -576,18 +581,26 @@ MOTION_DIR_EXPLICIT=0
 [[ -n "${MOTION_DIR+x}" ]] && MOTION_DIR_EXPLICIT=1
 OBJECT_URDF_EXPLICIT=0
 [[ -n "${OBJECT_URDF+x}" ]] && OBJECT_URDF_EXPLICIT=1
+DISTILL_PROPRIO_HISTORY_ONLY_EXPLICIT=0
+[[ -n "${DISTILL_PROPRIO_HISTORY_ONLY+x}" ]] && DISTILL_PROPRIO_HISTORY_ONLY_EXPLICIT=1
+DISTILL_PROPRIO_HISTORY_LENGTH_EXPLICIT=0
+[[ -n "${DISTILL_PROPRIO_HISTORY_LENGTH+x}" ]] && DISTILL_PROPRIO_HISTORY_LENGTH_EXPLICIT=1
 HETEROGENEOUS_OBJECT_SINGLE_SLOT_DISABLE_EXPLICIT=0
 [[ -n "${HOLOSOMA_DISABLE_HETEROGENEOUS_OBJECT_SINGLE_SLOT+x}" ]] && HETEROGENEOUS_OBJECT_SINGLE_SLOT_DISABLE_EXPLICIT=1
 CHECKPOINT_SAVED_MOTION_PATH=""
 CHECKPOINT_SAVED_OBJECT_URDF=""
+CHECKPOINT_SAVED_DISTILL_PROPRIO_HISTORY_ONLY=""
+CHECKPOINT_SAVED_DISTILL_PROPRIO_HISTORY_LENGTH=""
 
-if [[ "${MOTION_DIR_EXPLICIT}" -eq 0 || "${OBJECT_URDF_EXPLICIT}" -eq 0 ]]; then
+if [[ "${MOTION_DIR_EXPLICIT}" -eq 0 || "${OBJECT_URDF_EXPLICIT}" -eq 0 || "${DISTILL_PROPRIO_HISTORY_ONLY_EXPLICIT}" -eq 0 || "${DISTILL_PROPRIO_HISTORY_LENGTH_EXPLICIT}" -eq 0 ]]; then
   CHECKPOINT_DEFAULTS_JSON="$(load_checkpoint_saved_motion_defaults "${CKPT}")"
   if [[ -n "${CHECKPOINT_DEFAULTS_JSON}" && "${CHECKPOINT_DEFAULTS_JSON}" != "{}" ]]; then
     while IFS='=' read -r key value; do
       case "${key}" in
         motion_path) CHECKPOINT_SAVED_MOTION_PATH="${value}" ;;
         object_urdf_path) CHECKPOINT_SAVED_OBJECT_URDF="${value}" ;;
+        distill_proprio_history_only) CHECKPOINT_SAVED_DISTILL_PROPRIO_HISTORY_ONLY="${value}" ;;
+        distill_proprio_history_length) CHECKPOINT_SAVED_DISTILL_PROPRIO_HISTORY_LENGTH="${value}" ;;
       esac
     done < <(
       CHECKPOINT_DEFAULTS_JSON="${CHECKPOINT_DEFAULTS_JSON}" "$PYTHON_BIN" - <<'PY'
@@ -595,8 +608,15 @@ import json
 import os
 
 payload = json.loads(os.environ["CHECKPOINT_DEFAULTS_JSON"])
-for key in ("motion_path", "object_urdf_path"):
-    value = payload.get(key) or ""
+for key in (
+    "motion_path",
+    "object_urdf_path",
+    "distill_proprio_history_only",
+    "distill_proprio_history_length",
+):
+    value = payload.get(key)
+    if value is None:
+        value = ""
     print(f"{key}={value}")
 PY
     )
@@ -681,15 +701,23 @@ FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
 RESET_NOISE_SCALE=${RESET_NOISE_SCALE:-0.0}
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-268435456}
 FORCE_SINGLE_FRAME_HISTORY=${FORCE_SINGLE_FRAME_HISTORY:-0}
-DISTILL_PROPRIO_HISTORY_ONLY=${DISTILL_PROPRIO_HISTORY_ONLY:-1}
-DISTILL_PROPRIO_HISTORY_LENGTH=${DISTILL_PROPRIO_HISTORY_LENGTH:-5}
+if [[ "${DISTILL_PROPRIO_HISTORY_ONLY_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_DISTILL_PROPRIO_HISTORY_ONLY}" ]]; then
+  DISTILL_PROPRIO_HISTORY_ONLY="${CHECKPOINT_SAVED_DISTILL_PROPRIO_HISTORY_ONLY}"
+else
+  DISTILL_PROPRIO_HISTORY_ONLY=${DISTILL_PROPRIO_HISTORY_ONLY:-1}
+fi
+if [[ "${DISTILL_PROPRIO_HISTORY_LENGTH_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_DISTILL_PROPRIO_HISTORY_LENGTH}" ]]; then
+  DISTILL_PROPRIO_HISTORY_LENGTH="${CHECKPOINT_SAVED_DISTILL_PROPRIO_HISTORY_LENGTH}"
+else
+  DISTILL_PROPRIO_HISTORY_LENGTH=${DISTILL_PROPRIO_HISTORY_LENGTH:-5}
+fi
 
 DISABLE_RANDOMIZATION=${DISABLE_RANDOMIZATION:-True}
 MAX_EPISODE_LENGTH_S=${MAX_EPISODE_LENGTH_S:-1000000}
 
 IMAGE_WIDTH=${IMAGE_WIDTH:-106}
 IMAGE_HEIGHT=${IMAGE_HEIGHT:-60}
-CAMERA_NEAR=${CAMERA_NEAR:-0.001}
+CAMERA_NEAR=${CAMERA_NEAR:-0.1}
 CAMERA_FAR=${CAMERA_FAR:-3.0}
 CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-3.0}
 MOCAP_PERCEPTION_PRESET=${MOCAP_PERCEPTION_PRESET:-checkpoint}
@@ -986,6 +1014,7 @@ else
       exit 2
       ;;
   esac
+  cmd+=(--perception.camera_near "${CAMERA_NEAR}")
 fi
 
 if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
@@ -1017,6 +1046,12 @@ if [[ -n "${CHECKPOINT_SAVED_MOTION_PATH}" ]]; then
 fi
 if [[ -n "${CHECKPOINT_SAVED_OBJECT_URDF}" ]]; then
   echo "[INFO] checkpoint_saved_object_urdf=${CHECKPOINT_SAVED_OBJECT_URDF}"
+fi
+if [[ -n "${CHECKPOINT_SAVED_DISTILL_PROPRIO_HISTORY_ONLY}" ]]; then
+  echo "[INFO] checkpoint_saved_distill_proprio_history_only=${CHECKPOINT_SAVED_DISTILL_PROPRIO_HISTORY_ONLY}"
+fi
+if [[ -n "${CHECKPOINT_SAVED_DISTILL_PROPRIO_HISTORY_LENGTH}" ]]; then
+  echo "[INFO] checkpoint_saved_distill_proprio_history_length=${CHECKPOINT_SAVED_DISTILL_PROPRIO_HISTORY_LENGTH}"
 fi
 if [[ -n "${AUGMENTED_OBJECT_URDF_PATH}" && "${AUGMENTED_OBJECT_URDF_PATH}" != "${CHECKPOINT_SAVED_OBJECT_URDF}" && "${AUGMENTED_OBJECT_URDF_PATH}" != "${DEFAULT_OMOMO_URDF}" ]]; then
   echo "[INFO] augmented_object_urdf=${AUGMENTED_OBJECT_URDF_PATH}"

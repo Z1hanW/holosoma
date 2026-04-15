@@ -9,7 +9,7 @@ set -euo pipefail
 # - perception_obs: camera depth
 #
 # Single-run curriculum:
-# - default PPO/DAgger mix: PPO starts at 0.0 and increases by 0.1 every 500 iters until 0.9
+# - default PPO/DAgger mix: PPO starts at 1000 iters and increases by 0.1 every 500 iters until 0.9
 #   while effective DAgger weight decreases from 1.0 to 0.1 with dagger_loss_coef=1.0
 # - >=2000 iters: keep 50% envs on training distribution, open command curriculum on the other 50%
 # - within the command curriculum, external goals ramp conservatively so training remains teacher-anchored
@@ -307,9 +307,9 @@ PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT=0
 MOTION_DIR_EXPLICIT=0
 [[ -n "${MOTION_DIR+x}" ]] && MOTION_DIR_EXPLICIT=1
 
-EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-goal-mixed}
-RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_drop_mixed}
-TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_drop_mixed}
+EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-goal-mixed-r2s-rollout-ref}
+RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_drop_mixed_r2s_rollout_ref}
+TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_drop_mixed_r2s_rollout_ref}
 TRAINING_PROJECT=${TRAINING_PROJECT:-boxer}
 OLD_TRACKER_MAX_BOX_ID=${OLD_TRACKER_MAX_BOX_ID:-92}
 
@@ -333,15 +333,20 @@ DS_DATA_ROOT=${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}
 DEFAULT_DS_PREPARED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
 DEFAULT_MIX_NAIVE_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
 DEFAULT_TEACHER_ROLLOUT_MOTION_DIR="${SCRIPT_DIR}/outputs/motion_bank"
+DEFAULT_TEACHER_ROLLOUT_CONTACT_DIR="${SCRIPT_DIR}/outputs/clips"
 OLD_TRACKER_CACHE_ROOT="${DS_DATA_ROOT}/_motion_subsets"
 USING_TEACHER_ROLLOUT_MOTION_BANK=0
-FILTER_NON_PLACEMENT_CLIPS=${FILTER_NON_PLACEMENT_CLIPS:-True}
+FILTER_NON_PLACEMENT_CLIPS=${FILTER_NON_PLACEMENT_CLIPS:-False}
 FINAL_PLACEMENT_MAX_DELTA_Z=${FINAL_PLACEMENT_MAX_DELTA_Z:-0.15}
 MIX_CURRICULUM_OMOMO_PREFIXES=${MIX_CURRICULUM_OMOMO_PREFIXES:-'["sub"]'}
 MIX_CURRICULUM_STAGE_START_ITERATIONS=${MIX_CURRICULUM_STAGE_START_ITERATIONS:-'[0, 1500, 2000, 2500, 3000, 3500]'}
 MIX_CURRICULUM_OMOMO_PROBABILITIES=${MIX_CURRICULUM_OMOMO_PROBABILITIES:-'[1.0, 0.9, 0.8, 0.7, 0.6, 0.5]'}
 PURE_REAL_OMOMO_PREFIXES=${PURE_REAL_OMOMO_PREFIXES:-'["sub"]'}
 OMOMO_DEBUG_PREFIXES=${OMOMO_DEBUG_PREFIXES:-'["sub"]'}
+OBJECT_SPEC_PATH_EXPLICIT=0
+if [[ -n "${OBJECT_SPEC_PATH:-}" ]]; then
+  OBJECT_SPEC_PATH_EXPLICIT=1
+fi
 OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-""}
 ASSERT_ACTIVE_MULTI_URDF=${ASSERT_ACTIVE_MULTI_URDF:-auto}
 
@@ -430,20 +435,21 @@ TEACHER_ACTION_MIX_RATIO_END=${TEACHER_ACTION_MIX_RATIO_END:-}
 TEACHER_ACTION_MIX_RATIO_END_ITERATION=${TEACHER_ACTION_MIX_RATIO_END_ITERATION:-}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
 PURE_DAGGER_ITERATIONS=${PURE_DAGGER_ITERATIONS:-10000}
-NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-5000}
-PPO_START_EPOCH=${PPO_START_EPOCH:-0}
+NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-10000}
+PPO_START_EPOCH=${PPO_START_EPOCH:-1000}
 DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-4500}
 PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.9}
 PPO_SCHEDULE_STEP_EPOCHS=${PPO_SCHEDULE_STEP_EPOCHS:-500}
 DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
 FIXED_BC_EVAL_LOG_INTERVAL=${FIXED_BC_EVAL_LOG_INTERVAL:-1000}
 SCHEDULE_NAME=${SCHEDULE_NAME:-teacher_anchor_then_goal_curriculum_v3_step_mix}
-SCHEDULE_NOTES=${SCHEDULE_NOTES:-"No teacher rollout mix. PPO/DAgger use the default staircase blend: PPO starts at 0.0, increases by 0.1 every 500 iterations until capping at 0.9; with dagger_loss_coef=1.0, the effective BC weight drops from 1.0 to 0.1 over the same schedule. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.25 and reset curriculum ramps start_at_zero 0.2->1.0. Goal range ramps with the same delayed schedule."}
+SCHEDULE_NOTES=${SCHEDULE_NOTES:-"No teacher rollout mix. PPO/DAgger use the default staircase blend: PPO starts at 1000, increases by 0.1 every 500 iterations until capping at 0.9; with dagger_loss_coef=1.0, the effective BC weight drops from 1.0 to 0.1 over the same schedule. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.25 and reset curriculum ramps start_at_zero 0.2->1.0. Goal range ramps with the same delayed schedule."}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.2}
 START_AT_TIMESTEP_ZERO_PROB_END=${START_AT_TIMESTEP_ZERO_PROB_END:-1.0}
 START_AT_TIMESTEP_ZERO_PROB_START_ITER=${START_AT_TIMESTEP_ZERO_PROB_START_ITER:-2500}
 START_AT_TIMESTEP_ZERO_PROB_END_ITER=${START_AT_TIMESTEP_ZERO_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS}}
 USE_ADAPTIVE_TIMESTEPS_SAMPLER=${USE_ADAPTIVE_TIMESTEPS_SAMPLER:-True}
+ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT=${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT:-"${SCRIPT_DIR}/outputs/clips"}
 FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
 FREEZE_AT_TIMESTEP_ZERO_PROB_END=${FREEZE_AT_TIMESTEP_ZERO_PROB_END:-0.0}
 FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER:-2500}
@@ -534,7 +540,7 @@ case "${SCHEDULE_VARIANT}" in
     ;;
   dag_first)
     if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
-      NUM_LEARNING_ITERATIONS=4000
+      NUM_LEARNING_ITERATIONS=10000
     fi
     if [[ "${PPO_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
       PPO_START_EPOCH=2000
@@ -566,13 +572,13 @@ case "${REWARD_VARIANT}" in
     ;;
   pickup_reward)
     if [[ "${EXP_EXPLICIT}" -eq 0 ]]; then
-      EXP="g1-29dof-wbt-w-object-distill-sparse-goal-mixed-pickup"
+      EXP="g1-29dof-wbt-w-object-distill-sparse-goal-mixed-r2s-rollout-ref-pickup"
     fi
     if [[ "${RUN_NAME_EXPLICIT}" -eq 0 ]]; then
-      RUN_NAME="g1_w_object_distill_box_drop_mixed_pickup"
+      RUN_NAME="g1_w_object_distill_box_drop_mixed_r2s_rollout_ref_pickup"
     fi
     if [[ "${TRAINING_NAME_EXPLICIT}" -eq 0 ]]; then
-      TRAINING_NAME="g1_29dof_wbt_w_object_distill_box_drop_mixed_pickup"
+      TRAINING_NAME="g1_29dof_wbt_w_object_distill_box_drop_mixed_r2s_rollout_ref_pickup"
     fi
     ;;
   *)
@@ -641,7 +647,16 @@ if [[ "${EXP}" == "g1-29dof-wbt-w-object-distill-sparse-goal-mixed-r2s-rollout-r
     MOTION_DIR="${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}"
     USING_TEACHER_ROLLOUT_MOTION_BANK=1
   elif [[ "${MOTION_DIR_EXPLICIT}" -eq 0 ]]; then
-    echo "[WARN] rollout-ref experiment requested but no teacher rollout motion bank found at ${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}; falling back to ${MOTION_DIR}" >&2
+    echo "[ERROR] rollout-ref experiment requires teacher rollout motion bank at ${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}" >&2
+    exit 2
+  fi
+  if ! compgen -G "${DEFAULT_TEACHER_ROLLOUT_CONTACT_DIR}/*/teacher_rollout_reference.npz" > /dev/null; then
+    echo "[ERROR] rollout-ref experiment requires teacher rollout references under ${DEFAULT_TEACHER_ROLLOUT_CONTACT_DIR}" >&2
+    exit 2
+  fi
+  if ! compgen -G "${DEFAULT_TEACHER_ROLLOUT_CONTACT_DIR}/*/left_wrist_contact_interval_steps.npy" > /dev/null; then
+    echo "[ERROR] rollout-ref experiment requires wrist contact intervals under ${DEFAULT_TEACHER_ROLLOUT_CONTACT_DIR}" >&2
+    exit 2
   fi
 fi
 
@@ -676,10 +691,15 @@ EVAL_EXTERNAL_GOAL_PROB=${EVAL_EXTERNAL_GOAL_PROB:-1.0}
 EXTERNAL_GOAL_RANGE_RAMP_RESETS=${EXTERNAL_GOAL_RANGE_RAMP_RESETS:-${EXTERNAL_GOAL_PROB_RAMP_RESETS}}
 EXTERNAL_GOAL_RANGE_START_ITER=${EXTERNAL_GOAL_RANGE_START_ITER:-2500}
 EXTERNAL_GOAL_RANGE_END_ITER=${EXTERNAL_GOAL_RANGE_END_ITER:-${NUM_LEARNING_ITERATIONS}}
-EXTERNAL_GOAL_POS_LOCAL_MIN_START=${EXTERNAL_GOAL_POS_LOCAL_MIN_START:-"[0.40, -0.20, 0.185]"}
-EXTERNAL_GOAL_POS_LOCAL_MAX_START=${EXTERNAL_GOAL_POS_LOCAL_MAX_START:-"[0.65, 0.20, 0.185]"}
-EXTERNAL_GOAL_POS_LOCAL_MIN=${EXTERNAL_GOAL_POS_LOCAL_MIN:-"[0.25, -0.75, 0.185]"}
-EXTERNAL_GOAL_POS_LOCAL_MAX=${EXTERNAL_GOAL_POS_LOCAL_MAX:-"[1.00, 0.75, 0.185]"}
+EXTERNAL_GOAL_SAMPLING_MODE=${EXTERNAL_GOAL_SAMPLING_MODE:-annulus}
+EXTERNAL_GOAL_RADIUS_MIN_START=${EXTERNAL_GOAL_RADIUS_MIN_START:-1.00}
+EXTERNAL_GOAL_RADIUS_MAX_START=${EXTERNAL_GOAL_RADIUS_MAX_START:-1.70}
+EXTERNAL_GOAL_RADIUS_MIN=${EXTERNAL_GOAL_RADIUS_MIN:-1.00}
+EXTERNAL_GOAL_RADIUS_MAX=${EXTERNAL_GOAL_RADIUS_MAX:-3.40}
+EXTERNAL_GOAL_POS_LOCAL_MIN_START=${EXTERNAL_GOAL_POS_LOCAL_MIN_START:-"[1.00, -0.20, 0.185]"}
+EXTERNAL_GOAL_POS_LOCAL_MAX_START=${EXTERNAL_GOAL_POS_LOCAL_MAX_START:-"[1.25, 0.20, 0.185]"}
+EXTERNAL_GOAL_POS_LOCAL_MIN=${EXTERNAL_GOAL_POS_LOCAL_MIN:-"[1.00, -0.75, 0.185]"}
+EXTERNAL_GOAL_POS_LOCAL_MAX=${EXTERNAL_GOAL_POS_LOCAL_MAX:-"[1.75, 0.75, 0.185]"}
 
 case "${DISTRIBUTION_VARIANT}" in
   default)
@@ -965,6 +985,14 @@ PY
   MOTION_DIR="${MOTION_DIR_FILTERED_PATH}"
 fi
 
+if [[ "${OBJECT_SPEC_PATH_EXPLICIT}" -eq 0 ]]; then
+  OBJECT_SPEC_PATH=""
+  default_map="${MOTION_DIR}/_clip_object_urdf_map.json"
+  if [[ -f "${default_map}" ]]; then
+    OBJECT_SPEC_PATH="${default_map}"
+  fi
+fi
+
 OBJECT_SPEC_KIND=""
 if [[ -n "${OBJECT_SPEC_PATH}" ]]; then
   object_spec_suffix=$(printf '%s' "${OBJECT_SPEC_PATH}" | tr '[:upper:]' '[:lower:]')
@@ -1118,11 +1146,15 @@ echo "[INFO] entropy_coef=${ENTROPY_COEF} dagger_match_std=${DAGGER_MATCH_STD}"
 echo "[INFO] command_only_env_prob=${COMMAND_ONLY_ENV_PROB_START}->${COMMAND_ONLY_ENV_PROB_END} iter=${COMMAND_ONLY_ENV_PROB_START_ITER}->${COMMAND_ONLY_ENV_PROB_END_ITER}"
 echo "[INFO] sparse_goal_enabled=${SPARSE_GOAL_ENABLED} ext_prob=${EXTERNAL_GOAL_PROB_START}->${EXTERNAL_GOAL_PROB_END}"
 echo "[INFO] external_goal_prob_iter=${EXTERNAL_GOAL_PROB_START_ITER}->${EXTERNAL_GOAL_PROB_END_ITER}"
+echo "[INFO] external_goal_sampling_mode=${EXTERNAL_GOAL_SAMPLING_MODE}"
+echo "[INFO] external_goal_radius_start=${EXTERNAL_GOAL_RADIUS_MIN_START} -> ${EXTERNAL_GOAL_RADIUS_MAX_START}"
+echo "[INFO] external_goal_radius_end=${EXTERNAL_GOAL_RADIUS_MIN} -> ${EXTERNAL_GOAL_RADIUS_MAX}"
 echo "[INFO] external_goal_range_xy_start=${EXTERNAL_GOAL_POS_LOCAL_MIN_START} -> ${EXTERNAL_GOAL_POS_LOCAL_MAX_START}"
 echo "[INFO] external_goal_range_xy_end=${EXTERNAL_GOAL_POS_LOCAL_MIN} -> ${EXTERNAL_GOAL_POS_LOCAL_MAX}"
 echo "[INFO] external_goal_range_iter=${EXTERNAL_GOAL_RANGE_START_ITER}->${EXTERNAL_GOAL_RANGE_END_ITER}"
 echo "[INFO] clip_goal_delta_steps=${CLIP_GOAL_DELTA_MIN_STEPS}-${CLIP_GOAL_DELTA_MAX_STEPS} (legacy/unused; clip-goal now uses final placement)"
 echo "[INFO] use_adaptive_timesteps_sampler=${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
+echo "[INFO] adaptive_sampling_contact_interval_root=${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}->${START_AT_TIMESTEP_ZERO_PROB_END} iter=${START_AT_TIMESTEP_ZERO_PROB_START_ITER}->${START_AT_TIMESTEP_ZERO_PROB_END_ITER}"
 echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END} iter=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER}"
 echo "[INFO] reset_to_default_pose=${RESET_TO_DEFAULT_POSE}"
@@ -1277,11 +1309,17 @@ exec env \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-range-ramp-resets="${EXTERNAL_GOAL_RANGE_RAMP_RESETS}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-range-start-iter="${EXTERNAL_GOAL_RANGE_START_ITER}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-range-end-iter="${EXTERNAL_GOAL_RANGE_END_ITER}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-sampling-mode="${EXTERNAL_GOAL_SAMPLING_MODE}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-radius-min-start="${EXTERNAL_GOAL_RADIUS_MIN_START}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-radius-max-start="${EXTERNAL_GOAL_RADIUS_MAX_START}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-radius-min="${EXTERNAL_GOAL_RADIUS_MIN}" \
+    --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-radius-max="${EXTERNAL_GOAL_RADIUS_MAX}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-pos-local-min-start "${EXTERNAL_GOAL_POS_LOCAL_MIN_START}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-pos-local-max-start "${EXTERNAL_GOAL_POS_LOCAL_MAX_START}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-pos-local-min "${EXTERNAL_GOAL_POS_LOCAL_MIN}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-pos-local-max "${EXTERNAL_GOAL_POS_LOCAL_MAX}" \
     --command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler="${USE_ADAPTIVE_TIMESTEPS_SAMPLER}" \
+    --command.setup-terms.motion-command.params.motion-config.adaptive-sampling-contact-interval-root="${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}" \
     --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-end="${START_AT_TIMESTEP_ZERO_PROB_END}" \
     --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-start-iter="${START_AT_TIMESTEP_ZERO_PROB_START_ITER}" \
     --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-end-iter="${START_AT_TIMESTEP_ZERO_PROB_END_ITER}" \

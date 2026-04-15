@@ -140,6 +140,21 @@ class SparseObjectGoalConfig:
     external_goal_range_end_iter: int | None = None
     """Training iteration where the external-goal range curriculum reaches its final span."""
 
+    external_goal_sampling_mode: str = "box"
+    """XY sampling mode for external goals: 'box' or 'annulus'."""
+
+    external_goal_radius_min_start: float | None = None
+    """Optional initial inner radius for annulus external-goal sampling in local XY."""
+
+    external_goal_radius_max_start: float | None = None
+    """Optional initial outer radius for annulus external-goal sampling in local XY."""
+
+    external_goal_radius_min: float = 1.0
+    """Final inner radius for annulus external-goal sampling in local XY."""
+
+    external_goal_radius_max: float = 3.4
+    """Final outer radius for annulus external-goal sampling in local XY."""
+
     carry_extension_range_ramp_resets: int | None = None
     """Optional ramp horizon for carry-extension sampling range; defaults to carry_extension_prob_ramp_resets."""
 
@@ -155,11 +170,11 @@ class SparseObjectGoalConfig:
     external_goal_pos_local_max_start: list[float] | None = None
     """Optional initial upper bounds [x, y, z] for external goal position in local frame around env origin."""
 
-    external_goal_pos_local_min: list[float] = field(default_factory=lambda: [0.3, -0.8, 0.7])
-    """External goal position lower bounds [x, y, z] in local frame around env origin."""
+    external_goal_pos_local_min: list[float] = field(default_factory=lambda: [1.0, -0.8, 0.7])
+    """External goal local position lower bounds [x, y, z]; in annulus mode only z is used for position sampling."""
 
-    external_goal_pos_local_max: list[float] = field(default_factory=lambda: [1.2, 0.8, 1.0])
-    """External goal position upper bounds [x, y, z] in local frame around env origin."""
+    external_goal_pos_local_max: list[float] = field(default_factory=lambda: [1.75, 0.8, 1.0])
+    """External goal local position upper bounds [x, y, z]; in annulus mode only z is used for position sampling."""
 
     carry_extension_pos_local_min_start: list[float] | None = None
     """Optional initial lower bounds [x, y, z] for carry-extension goal in the clip-final object frame."""
@@ -255,6 +270,13 @@ class MotionConfig:
     # motion sampling related
     use_adaptive_timesteps_sampler: bool = False
     """During training, whether to prioritize training on motion segments where the robot fails often."""
+
+    adaptive_sampling_contact_interval_root: str | None = None
+    """Optional root directory of exported per-clip ``contact_intervals.json`` files.
+
+    When set, adaptive timestep sampling logs additional contact-relative probability masses
+    to W&B/TensorBoard. The bank is matched by clip id, so it can live outside the motion bank.
+    """
 
     start_at_timestep_zero_prob: float = 0.2
     """Probability of starting at timestep zero."""

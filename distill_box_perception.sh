@@ -253,9 +253,9 @@ MOTION_DIR_EXPLICIT=0
 [[ -n "${MOTION_DIR+x}" ]] && MOTION_DIR_EXPLICIT=1
 
 # Sim2real default: sparse root-relative distill without clip_phase in student torso observation.
-EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd}
-RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_perception_sparse_root_cmd}
-TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_perception_sparse_root_cmd_access_to_depth}
+EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref}
+RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_perception_sparse_root_cmd_r2s_rollout_ref}
+TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_perception_sparse_root_cmd_r2s_rollout_ref_access_to_depth}
 TRAINING_PROJECT=${TRAINING_PROJECT:-boxer}
 OLD_TRACKER_MAX_BOX_ID=${OLD_TRACKER_MAX_BOX_ID:-92}
 OLD_TRACKER_DAGGER_ITERATIONS=${OLD_TRACKER_DAGGER_ITERATIONS:-10000}
@@ -279,6 +279,7 @@ DS_DATA_ROOT=${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}
 DEFAULT_DS_PREPARED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
 DEFAULT_MIX_NAIVE_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
 DEFAULT_TEACHER_ROLLOUT_MOTION_DIR="${SCRIPT_DIR}/outputs/motion_bank"
+DEFAULT_TEACHER_ROLLOUT_CONTACT_DIR="${SCRIPT_DIR}/outputs/clips"
 OLD_TRACKER_CACHE_ROOT="${DS_DATA_ROOT}/_motion_subsets"
 PURE_REAL_OMOMO_PREFIXES=${PURE_REAL_OMOMO_PREFIXES:-'["sub"]'}
 USING_TEACHER_ROLLOUT_MOTION_BANK=0
@@ -377,7 +378,16 @@ if [[ "${EXP}" == "g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref
     MOTION_DIR="${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}"
     USING_TEACHER_ROLLOUT_MOTION_BANK=1
   else
-    echo "[WARN] rollout-ref experiment requested but no teacher rollout motion bank found at ${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}; falling back to ${MOTION_DIR}" >&2
+    echo "[ERROR] rollout-ref experiment requires teacher rollout motion bank at ${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}" >&2
+    exit 2
+  fi
+  if ! compgen -G "${DEFAULT_TEACHER_ROLLOUT_CONTACT_DIR}/*/teacher_rollout_reference.npz" > /dev/null; then
+    echo "[ERROR] rollout-ref experiment requires teacher rollout references under ${DEFAULT_TEACHER_ROLLOUT_CONTACT_DIR}" >&2
+    exit 2
+  fi
+  if ! compgen -G "${DEFAULT_TEACHER_ROLLOUT_CONTACT_DIR}/*/left_wrist_contact_interval_steps.npy" > /dev/null; then
+    echo "[ERROR] rollout-ref experiment requires wrist contact intervals under ${DEFAULT_TEACHER_ROLLOUT_CONTACT_DIR}" >&2
+    exit 2
   fi
 fi
 
@@ -402,20 +412,21 @@ TEACHER_ACTION_MIX_RATIO_END=${TEACHER_ACTION_MIX_RATIO_END:-}
 TEACHER_ACTION_MIX_RATIO_END_ITERATION=${TEACHER_ACTION_MIX_RATIO_END_ITERATION:-}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
 NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-5000}
-PPO_START_EPOCH=${PPO_START_EPOCH:-0}
+PPO_START_EPOCH=${PPO_START_EPOCH:-1000}
 DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-4500}
 PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.9}
 PPO_SCHEDULE_STEP_EPOCHS=${PPO_SCHEDULE_STEP_EPOCHS:-500}
 DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
 FIXED_BC_EVAL_LOG_INTERVAL=${FIXED_BC_EVAL_LOG_INTERVAL:-1000}
 SCHEDULE_NAME=${SCHEDULE_NAME:-sparse_root_teacher_anchor_v3_step_mix}
-SCHEDULE_NOTES=${SCHEDULE_NOTES:-"No teacher rollout mix. PPO/DAgger use the default staircase blend: PPO starts at 0.0, increases by 0.1 every 500 iterations until capping at 0.9; with dagger_loss_coef=1.0, the effective BC weight drops from 1.0 to 0.1 over the same schedule. Root-frame relative command replaces the drop-command-specific curricula from distill_box_drop_mixed.sh; other launcher defaults stay aligned."}
+SCHEDULE_NOTES=${SCHEDULE_NOTES:-"No teacher rollout mix. PPO/DAgger use the default staircase blend: PPO starts at 1000, increases by 0.1 every 500 iterations until capping at 0.9; with dagger_loss_coef=1.0, the effective BC weight drops from 1.0 to 0.1 over the same schedule. Root-frame relative command replaces the drop-command-specific curricula from distill_box_drop_mixed.sh; other launcher defaults stay aligned."}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.2}
 FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
 FREEZE_AT_TIMESTEP_ZERO_PROB_END=${FREEZE_AT_TIMESTEP_ZERO_PROB_END:-0.0}
 FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER:-2500}
 FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS}}
 USE_ADAPTIVE_TIMESTEPS_SAMPLER=${USE_ADAPTIVE_TIMESTEPS_SAMPLER:-True}
+ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT=${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT:-"${SCRIPT_DIR}/outputs/clips"}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
 STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_root','actor_obs_proprio_no_linvel']"}
@@ -654,6 +665,7 @@ fi
 echo "[INFO] ppo_schedule=${PPO_START_EPOCH}->${DAGGER_END_EPOCH} target=${PPO_TARGET_COEFF} step_epochs=${PPO_SCHEDULE_STEP_EPOCHS} dagger_loss_coef=${DAGGER_LOSS_COEF}"
 echo "[INFO] fixed_bc_eval_log_interval=${FIXED_BC_EVAL_LOG_INTERVAL}"
 echo "[INFO] use_adaptive_timesteps_sampler=${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
+echo "[INFO] adaptive_sampling_contact_interval_root=${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
 echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END} iter=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER}"
 echo "[INFO] entropy_coef=${ENTROPY_COEF} dagger_match_std=${DAGGER_MATCH_STD}"
@@ -771,6 +783,7 @@ exec env \
     --algo.config.distill.ppo-target-coeff="${PPO_TARGET_COEFF}" \
     --algo.config.distill.ppo-schedule-step-epochs="${PPO_SCHEDULE_STEP_EPOCHS}" \
     --command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler="${USE_ADAPTIVE_TIMESTEPS_SAMPLER}" \
+    --command.setup-terms.motion-command.params.motion-config.adaptive-sampling-contact-interval-root="${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}" \
     --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob="${FREEZE_AT_TIMESTEP_ZERO_PROB}" \
     --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-end="${FREEZE_AT_TIMESTEP_ZERO_PROB_END}" \
     --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-start-iter="${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER}" \

@@ -116,7 +116,7 @@ camera_depth_d435i = PerceptionConfig(
     camera_mesh_allowlist=WARP_SENSORS_G1_D435_MESH_ALLOWLIST,
     camera_mesh_file_map=WARP_SENSORS_G1_D435_MESH_FILE_MAP,
     camera_fps=30.0,
-    camera_near=0.3,
+    camera_near=0.1,
     camera_far=3.0,
     camera_distortion=[0.0, 0.0, 0.0, 0.0, 0.0],
     # Align observation preprocessing with far-tracking warp_image_features.

@@ -344,3 +344,50 @@ def test_offline_contact_guidance_falls_back_to_reference_pickup_gate_when_sched
     motion_command.time_steps[0] = 2
     reward = term(env)
     assert reward[0].item() == pytest.approx(1.0, rel=1e-5, abs=1e-5)
+
+
+def test_offline_contact_guidance_relaxes_contact_interval_by_configured_frames(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    env, export_root = _build_test_env(
+        tmp_path,
+        left_force=40.0,
+        right_force=40.0,
+        time_steps=torch.tensor([4, 4], dtype=torch.long),
+        left_contact_interval=(10, 20),
+        right_contact_interval=(10, 20),
+    )
+    motion_command = env.command_manager.get_state("motion_command")
+    monkeypatch.setattr(reward_wbt, "_get_motion_command_and_assert_type", lambda _env: motion_command)
+    term = reward_wbt.OfflineContactPointGuidance(
+        RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
+            params={
+                "contact_export_root": str(export_root),
+                "region_names": ["left_palm", "right_palm"],
+                "position_sigma": 0.05,
+                "use_force_term": False,
+                "use_contact_schedule": True,
+                "contact_schedule_relax_steps": 5,
+                "contact_schedule_missing_mode": "always_on",
+            },
+            weight=1.0,
+        ),
+        env,
+    )
+
+    reward = term(env)
+    assert reward[0].item() == pytest.approx(0.0, rel=1e-5, abs=1e-5)
+
+    motion_command.time_steps[0] = 5
+    reward = term(env)
+    assert reward[0].item() == pytest.approx(1.0, rel=1e-5, abs=1e-5)
+
+    motion_command.time_steps[0] = 24
+    reward = term(env)
+    assert reward[0].item() == pytest.approx(1.0, rel=1e-5, abs=1e-5)
+
+    motion_command.time_steps[0] = 25
+    reward = term(env)
+    assert reward[0].item() == pytest.approx(0.0, rel=1e-5, abs=1e-5)
