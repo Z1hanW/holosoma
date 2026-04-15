@@ -105,8 +105,14 @@ g1_29dof_wbt_termination_distill_sparse_goal_mixed = TerminationManagerCfg(
             params={"only_clip_goal": True},
         ),
         "robot_fallen": TerminationTermCfg(
-            func="holosoma.managers.termination.terms.wbt:drop_task_base_height_below_threshold",
-            params={"min_height": 0.45},
+            func="holosoma.managers.termination.terms.wbt:RobotFallenByTiltAfterIteration",
+            params={
+                "max_tilt_deg": 60.0,
+                "hold_steps": 2,
+                "enable_after_iteration": 2000,
+                "enable_after_iteration_env_var": "PPO_START_EPOCH",
+                "apply_during_evaluation": True,
+            },
         ),
         "bad_tracking_non_external_goal": TerminationTermCfg(
             func="holosoma.managers.termination.terms.wbt:BadTrackingZOnly",
@@ -180,8 +186,14 @@ g1_29dof_wbt_termination_command_curriculum = TerminationManagerCfg(
             params={"only_clip_goal": True},
         ),
         "robot_fallen": TerminationTermCfg(
-            func="holosoma.managers.termination.terms.wbt:drop_task_base_height_below_threshold",
-            params={"min_height": 0.45},
+            func="holosoma.managers.termination.terms.wbt:RobotFallenByTiltAfterIteration",
+            params={
+                "max_tilt_deg": 60.0,
+                "hold_steps": 2,
+                "enable_after_iteration": 2000,
+                "enable_after_iteration_env_var": "PPO_START_EPOCH",
+                "apply_during_evaluation": True,
+            },
         ),
         "bad_tracking_clip_goal": TerminationTermCfg(
             func="holosoma.managers.termination.terms.wbt:BadTrackingZOnly",

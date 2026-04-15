@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Any, List
 
@@ -118,6 +119,66 @@ def motion_ends_if_clip_goal(env, only_clip_goal: bool = True, **_) -> torch.Ten
 def drop_task_base_height_below_threshold(env, min_height: float = 0.45) -> torch.Tensor:
     """Terminate when the robot base collapses below a fixed height."""
     return env.simulator.robot_root_states[:, 2] < min_height
+
+
+class RobotFallenByTiltAfterIteration(TerminationTermBase):
+    """Terminate on large base tilt, optionally only after DAgger ends."""
+
+    def __init__(self, cfg: TerminationTermCfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.max_tilt_deg = float(cfg.params.get("max_tilt_deg", 60.0))
+        if not (0.0 < self.max_tilt_deg < 180.0):
+            raise ValueError(f"max_tilt_deg must be in (0, 180), got {self.max_tilt_deg}.")
+        self.max_projected_gravity_xy = math.sin(math.radians(self.max_tilt_deg))
+        self.hold_steps = max(1, int(cfg.params.get("hold_steps", 1)))
+        self.apply_during_evaluation = bool(cfg.params.get("apply_during_evaluation", True))
+        self.enable_after_iteration = self._resolve_enable_after_iteration(cfg)
+        self._failure_counter = torch.zeros(self.env.num_envs, dtype=torch.long, device=self.env.device)
+
+    def _resolve_enable_after_iteration(self, cfg: TerminationTermCfg) -> int:
+        explicit = cfg.params.get("enable_after_iteration")
+        env_var_name = cfg.params.get("enable_after_iteration_env_var")
+        if env_var_name is not None:
+            env_var_name = str(env_var_name).strip()
+            if env_var_name:
+                env_value = os.environ.get(env_var_name)
+                if env_value is not None and env_value.strip():
+                    try:
+                        return max(0, int(env_value))
+                    except ValueError:
+                        pass
+        if explicit is not None:
+            return max(0, int(explicit))
+        return 0
+
+    def _is_enabled(self) -> bool:
+        if self.env.is_evaluating:
+            return self.apply_during_evaluation
+        motion_command = self.env.command_manager.get_state("motion_command")
+        current_iteration = getattr(motion_command, "_training_iteration", 0)
+        if current_iteration is None:
+            current_iteration = 0
+        return int(current_iteration) >= self.enable_after_iteration
+
+    def __call__(self, env: Any, **kwargs) -> torch.Tensor:
+        if not self._is_enabled():
+            self._failure_counter.zero_()
+            return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+
+        projected_gravity_b = quat_rotate_inverse(self.env.base_quat, gravity_vector(self.env), w_last=True)
+        tilt_exceeded = torch.linalg.norm(projected_gravity_b[:, :2], dim=-1) > self.max_projected_gravity_xy
+        self._failure_counter = torch.where(
+            tilt_exceeded,
+            self._failure_counter + 1,
+            torch.zeros_like(self._failure_counter),
+        )
+        return self._failure_counter >= self.hold_steps
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            self._failure_counter.zero_()
+        else:
+            self._failure_counter[env_ids] = 0
 
 
 class SparseGoalSuccess(TerminationTermBase):
