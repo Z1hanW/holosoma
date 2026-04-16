@@ -1966,10 +1966,10 @@ class PPO(BaseAlgo):
             def __init__(self, actor, normalizers, keys, slices, perception_key):
                 super().__init__()
                 self.actor = actor
-                self.normalizers = normalizers
                 self.keys = keys
                 self.slices = slices
                 self.perception_key = perception_key
+                self.normalizers = nn.ModuleDict({key: normalizers[key] for key in keys})
 
             def forward(self, actor_obs, perception_obs=None):
                 parts = []
