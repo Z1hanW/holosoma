@@ -1180,6 +1180,7 @@ class PPO(BaseAlgo):
 
             # Return / Advantage computation
             last_critic_obs = torch.cat([obs_dict[k] for k in self.critic_obs_keys], dim=1)
+            last_critic_obs = self._normalize_critic_obs(last_critic_obs, update=False)
             last_policy_state = {"critic_obs": last_critic_obs}
             if self.critic_perception_key and self.critic_perception_key in obs_dict:
                 last_policy_state[self.critic_perception_key] = obs_dict[self.critic_perception_key]
