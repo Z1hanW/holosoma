@@ -280,9 +280,15 @@ DEFAULT_DS_PREPARED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
 DEFAULT_MIX_NAIVE_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
 DEFAULT_TEACHER_ROLLOUT_MOTION_DIR="${SCRIPT_DIR}/outputs/motion_bank"
 DEFAULT_TEACHER_ROLLOUT_CONTACT_DIR="${SCRIPT_DIR}/outputs/clips"
+TEACHER_ROLLOUT_FILTER_ENABLED=${TEACHER_ROLLOUT_FILTER_ENABLED:-True}
+TEACHER_ROLLOUT_SUCCESS_CLIPS_FILE=${TEACHER_ROLLOUT_SUCCESS_CLIPS_FILE:-"${SCRIPT_DIR}/outputs_sts/success_clips.txt"}
+TEACHER_ROLLOUT_FILTERED_MOTION_DIR=${TEACHER_ROLLOUT_FILTERED_MOTION_DIR:-"${SCRIPT_DIR}/outputs/motion_bank_success_box_0_92_0p3"}
 OLD_TRACKER_CACHE_ROOT="${DS_DATA_ROOT}/_motion_subsets"
 PURE_REAL_OMOMO_PREFIXES=${PURE_REAL_OMOMO_PREFIXES:-'["sub"]'}
 USING_TEACHER_ROLLOUT_MOTION_BANK=0
+TEACHER_ROLLOUT_FILTER_CLIP_COUNT=""
+TEACHER_ROLLOUT_FILTER_CONTACT_COUNT=""
+TEACHER_ROLLOUT_FILTER_SOURCE_DIR=""
 
 prepare_old_tracker_motion_subset() {
   local source_dir="$1"
@@ -355,6 +361,162 @@ print(len(selected))
 PY
 }
 
+prepare_teacher_rollout_success_motion_subset() {
+  local source_dir="$1"
+  local success_clips_file="$2"
+  local subset_dir="$3"
+
+  mkdir -p "${subset_dir}"
+  "${PYTHON_BIN}" - "${source_dir}" "${subset_dir}" "${success_clips_file}" <<'PY'
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+import numpy as np
+
+source_dir = Path(sys.argv[1]).expanduser().resolve()
+subset_dir = Path(sys.argv[2]).expanduser().resolve()
+success_clips_file = Path(sys.argv[3]).expanduser().resolve()
+
+if not success_clips_file.is_file():
+    raise SystemExit(f"Teacher rollout success clip filter not found: {success_clips_file}")
+
+clip_ids: list[str] = []
+seen: set[str] = set()
+for raw_line in success_clips_file.read_text(encoding="utf-8").splitlines():
+    clip_id = raw_line.strip()
+    if not clip_id or clip_id.startswith("#"):
+        continue
+    if "/" in clip_id or "\\" in clip_id:
+        raise SystemExit(f"Invalid clip id in {success_clips_file}: {clip_id}")
+    if clip_id not in seen:
+        clip_ids.append(clip_id)
+        seen.add(clip_id)
+
+if not clip_ids:
+    raise SystemExit(f"No clip ids found in teacher rollout success filter: {success_clips_file}")
+
+missing = [clip_id for clip_id in clip_ids if not (source_dir / f"{clip_id}.npz").is_file()]
+if missing:
+    preview = ", ".join(missing[:20])
+    raise SystemExit(f"Success-filtered teacher rollout clips missing from {source_dir}: {preview}")
+
+subset_dir.mkdir(parents=True, exist_ok=True)
+for existing in subset_dir.glob("*.npz"):
+    existing.unlink()
+
+for clip_id in clip_ids:
+    source_path = (source_dir / f"{clip_id}.npz").resolve()
+    target = subset_dir / source_path.name
+    if target.exists() or target.is_symlink():
+        target.unlink()
+    os.symlink(source_path, target)
+
+metadata_payload = {}
+clip_metadata = {}
+metadata_uses_clips_key = True
+for candidate in (source_dir / "_clip_object_urdf_map.json", source_dir / "clip_object_urdf_map.json"):
+    if candidate.is_file():
+        with candidate.open("r", encoding="utf-8") as f:
+            metadata_payload = json.load(f)
+        if isinstance(metadata_payload, dict) and isinstance(metadata_payload.get("clips"), dict):
+            clip_metadata = metadata_payload["clips"]
+            metadata_uses_clips_key = True
+        elif isinstance(metadata_payload, dict):
+            clip_metadata = metadata_payload
+            metadata_uses_clips_key = False
+        break
+
+filtered_clips = {}
+missing_metadata: list[str] = []
+for clip_id in clip_ids:
+    entry = clip_metadata.get(clip_id) if isinstance(clip_metadata, dict) else None
+    if entry is not None:
+        filtered_clips[clip_id] = entry
+        continue
+    npz_path = source_dir / f"{clip_id}.npz"
+    try:
+        data = np.load(npz_path, allow_pickle=True)
+        urdf = ""
+        if "object_urdf_path" in data:
+            arr = np.asarray(data["object_urdf_path"])
+            if arr.size:
+                item = arr.item() if arr.shape == () else arr.reshape(-1)[0]
+                urdf = str(item).strip()
+    except Exception:
+        urdf = ""
+    if not urdf:
+        missing_metadata.append(clip_id)
+    else:
+        filtered_clips[clip_id] = {"object_urdf_path": urdf}
+
+if missing_metadata:
+    preview = ", ".join(missing_metadata[:20])
+    raise SystemExit(f"Success-filtered teacher rollout clips missing object metadata: {preview}")
+
+subset_map_path = subset_dir / "_clip_object_urdf_map.json"
+if subset_map_path.exists() or subset_map_path.is_symlink():
+    subset_map_path.unlink()
+
+output_payload = {"clips": filtered_clips} if metadata_uses_clips_key else filtered_clips
+with subset_map_path.open("w", encoding="utf-8") as f:
+    json.dump(output_payload, f, indent=2, sort_keys=True)
+    f.write("\n")
+
+print(str(subset_dir))
+print(len(clip_ids))
+PY
+}
+
+validate_teacher_rollout_success_contact_artifacts() {
+  local contact_root="$1"
+  local success_clips_file="$2"
+
+  "${PYTHON_BIN}" - "${contact_root}" "${success_clips_file}" <<'PY'
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+contact_root = Path(sys.argv[1]).expanduser().resolve()
+success_clips_file = Path(sys.argv[2]).expanduser().resolve()
+
+clip_ids = [
+    line.strip()
+    for line in success_clips_file.read_text(encoding="utf-8").splitlines()
+    if line.strip() and not line.strip().startswith("#")
+]
+required_files = ("teacher_rollout_reference.npz", "left_wrist_contact_interval_steps.npy")
+
+def infer_clip_id(dir_name: str) -> str:
+    return dir_name.split("_", 1)[1].strip() if "_" in dir_name else dir_name.strip()
+
+contact_dirs: dict[str, Path] = {}
+for candidate in sorted(contact_root.iterdir()):
+    if candidate.is_dir():
+        contact_dirs.setdefault(infer_clip_id(candidate.name), candidate)
+
+missing: list[str] = []
+for clip_id in clip_ids:
+    clip_dir = contact_dirs.get(clip_id)
+    if clip_dir is None:
+        missing.append(f"{clip_id}:contact_dir")
+        continue
+    for file_name in required_files:
+        if not (clip_dir / file_name).is_file():
+            missing.append(f"{clip_id}:{file_name}")
+
+if missing:
+    preview = ", ".join(missing[:20])
+    raise SystemExit(f"Success-filtered teacher rollout clips missing contact artifacts in {contact_root}: {preview}")
+
+print(len(clip_ids))
+PY
+}
+
 case "${DATA_MODE}" in
   default|pure-sd)
     DATA_MODE="pure-sd"
@@ -375,7 +537,23 @@ esac
 
 if [[ "${EXP}" == "g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref" && "${MOTION_DIR_EXPLICIT}" -eq 0 ]]; then
   if compgen -G "${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}/box_*.npz" > /dev/null; then
-    MOTION_DIR="${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}"
+    _teacher_rollout_filter_enabled_norm="$(echo "${TEACHER_ROLLOUT_FILTER_ENABLED}" | tr '[:upper:]' '[:lower:]')"
+    case "${_teacher_rollout_filter_enabled_norm}" in
+      1|true|yes|on)
+        mapfile -t _teacher_rollout_subset_info < <(
+          prepare_teacher_rollout_success_motion_subset \
+            "${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}" \
+            "${TEACHER_ROLLOUT_SUCCESS_CLIPS_FILE}" \
+            "${TEACHER_ROLLOUT_FILTERED_MOTION_DIR}"
+        )
+        MOTION_DIR="${_teacher_rollout_subset_info[0]}"
+        TEACHER_ROLLOUT_FILTER_CLIP_COUNT="${_teacher_rollout_subset_info[1]:-}"
+        TEACHER_ROLLOUT_FILTER_SOURCE_DIR="${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}"
+        ;;
+      *)
+        MOTION_DIR="${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}"
+        ;;
+    esac
     USING_TEACHER_ROLLOUT_MOTION_BANK=1
   else
     echo "[ERROR] rollout-ref experiment requires teacher rollout motion bank at ${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}" >&2
@@ -389,6 +567,13 @@ if [[ "${EXP}" == "g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref
     echo "[ERROR] rollout-ref experiment requires wrist contact intervals under ${DEFAULT_TEACHER_ROLLOUT_CONTACT_DIR}" >&2
     exit 2
   fi
+  if [[ -n "${TEACHER_ROLLOUT_FILTER_CLIP_COUNT}" ]]; then
+    TEACHER_ROLLOUT_FILTER_CONTACT_COUNT="$(
+      validate_teacher_rollout_success_contact_artifacts \
+        "${DEFAULT_TEACHER_ROLLOUT_CONTACT_DIR}" \
+        "${TEACHER_ROLLOUT_SUCCESS_CLIPS_FILE}"
+    )"
+  fi
 fi
 
 OLD_TRACKER_CLIP_COUNT=""
@@ -399,6 +584,9 @@ if [[ "${TRACKER_PROFILE}" == "old-tracker" && "${DATA_MODE}" == "pure-sd" && "$
 fi
 
 OBJECT_MAP_PATH="${MOTION_DIR}/_clip_object_urdf_map.json"
+OBJECT_BANK_WANDB_ENV="${MOTION_DIR}/_object_bank_wandb.env"
+rm -f "${OBJECT_BANK_WANDB_ENV}"
+
 if [[ -f "${OBJECT_MAP_PATH}" ]]; then
   ACTIVE_OBJECT_BANK_INFO=$(
     "${PYTHON_BIN}" - "${MOTION_DIR}" "${OBJECT_MAP_PATH}" <<'PY'
@@ -454,11 +642,52 @@ if missing:
 
 counts = Counter(resolved_urdfs)
 top = ", ".join(f"{Path(path).name}:{count}" for path, count in counts.most_common(5))
-print(f"{len(active_clip_ids)}|{len(counts)}|{top}")
+box_clip_count = 0
+omomo_clip_count = 0
+box_urdfs: set[str] = set()
+omomo_urdfs: set[str] = set()
+for clip_id, urdf in zip(active_clip_ids, resolved_urdfs, strict=True):
+    is_omomo = clip_id.startswith("sub") or Path(urdf).name == "objects_largebox.urdf"
+    if is_omomo:
+        omomo_clip_count += 1
+        omomo_urdfs.add(urdf)
+    else:
+        box_clip_count += 1
+        box_urdfs.add(urdf)
+
+env_path = motion_dir / "_object_bank_wandb.env"
+env_path.write_text(
+    "\n".join(
+        [
+            f"HOLOSOMA_OBJECT_BANK_TOTAL_MOTION_COUNT={len(active_clip_ids)}",
+            f"HOLOSOMA_OBJECT_BANK_TOTAL_UNIQUE_URDF_COUNT={len(counts)}",
+            f"HOLOSOMA_OBJECT_BANK_BOX_MOTION_COUNT={box_clip_count}",
+            f"HOLOSOMA_OBJECT_BANK_BOX_UNIQUE_URDF_COUNT={len(box_urdfs)}",
+            f"HOLOSOMA_OBJECT_BANK_OMOMO_MOTION_COUNT={omomo_clip_count}",
+            f"HOLOSOMA_OBJECT_BANK_OMOMO_UNIQUE_URDF_COUNT={len(omomo_urdfs)}",
+            f"HOLOSOMA_OBJECT_BANK_MOTION_DIR={motion_dir}",
+            f"HOLOSOMA_OBJECT_BANK_OBJECT_MAP={object_map}",
+        ]
+    )
+    + "\n",
+    encoding="utf-8",
+)
+
+print(
+    f"{len(active_clip_ids)}|{len(counts)}|{box_clip_count}|{len(box_urdfs)}|"
+    f"{omomo_clip_count}|{len(omomo_urdfs)}|{top}"
+)
 PY
   )
 else
   ACTIVE_OBJECT_BANK_INFO=""
+fi
+
+if [[ -f "${OBJECT_BANK_WANDB_ENV}" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "${OBJECT_BANK_WANDB_ENV}"
+  set +a
 fi
 
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
@@ -709,9 +938,15 @@ fi
 if [[ "${USING_TEACHER_ROLLOUT_MOTION_BANK}" -eq 1 ]]; then
   echo "[INFO] using_teacher_rollout_motion_bank=1"
 fi
+if [[ -n "${TEACHER_ROLLOUT_FILTER_CLIP_COUNT}" ]]; then
+  echo "[INFO] teacher_rollout_success_filter=${TEACHER_ROLLOUT_SUCCESS_CLIPS_FILE} kept=${TEACHER_ROLLOUT_FILTER_CLIP_COUNT} contact_clips=${TEACHER_ROLLOUT_FILTER_CONTACT_COUNT} source=${TEACHER_ROLLOUT_FILTER_SOURCE_DIR}"
+fi
 if [[ -n "${ACTIVE_OBJECT_BANK_INFO}" ]]; then
-  IFS='|' read -r ACTIVE_OBJECT_BANK_CLIPS ACTIVE_OBJECT_BANK_URDFS ACTIVE_OBJECT_BANK_TOP <<< "${ACTIVE_OBJECT_BANK_INFO}"
-  echo "[INFO] active_object_bank=${ACTIVE_OBJECT_BANK_CLIPS} clips ${ACTIVE_OBJECT_BANK_URDFS} unique_urdfs (top=${ACTIVE_OBJECT_BANK_TOP})"
+  IFS='|' read -r ACTIVE_OBJECT_BANK_CLIPS ACTIVE_OBJECT_BANK_URDFS ACTIVE_OBJECT_BANK_BOX_MOTION ACTIVE_OBJECT_BANK_BOX_URDFS ACTIVE_OBJECT_BANK_OMOMO_MOTION ACTIVE_OBJECT_BANK_OMOMO_URDFS ACTIVE_OBJECT_BANK_TOP <<< "${ACTIVE_OBJECT_BANK_INFO}"
+  echo "[INFO] active_object_bank=${ACTIVE_OBJECT_BANK_CLIPS} clips ${ACTIVE_OBJECT_BANK_URDFS} unique_urdfs (box_motion=${ACTIVE_OBJECT_BANK_BOX_MOTION} box_urdfs=${ACTIVE_OBJECT_BANK_BOX_URDFS} omomo_motion=${ACTIVE_OBJECT_BANK_OMOMO_MOTION} omomo_urdfs=${ACTIVE_OBJECT_BANK_OMOMO_URDFS} top=${ACTIVE_OBJECT_BANK_TOP})"
+fi
+if [[ -n "${HOLOSOMA_OBJECT_BANK_TOTAL_MOTION_COUNT:-}" ]]; then
+  echo "[INFO] object_bank_counts total_motion=${HOLOSOMA_OBJECT_BANK_TOTAL_MOTION_COUNT} total_urdfs=${HOLOSOMA_OBJECT_BANK_TOTAL_UNIQUE_URDF_COUNT} box_motion=${HOLOSOMA_OBJECT_BANK_BOX_MOTION_COUNT} box_urdfs=${HOLOSOMA_OBJECT_BANK_BOX_UNIQUE_URDF_COUNT} omomo_motion=${HOLOSOMA_OBJECT_BANK_OMOMO_MOTION_COUNT} omomo_urdfs=${HOLOSOMA_OBJECT_BANK_OMOMO_UNIQUE_URDF_COUNT}"
 fi
 if [[ -n "${OLD_TRACKER_CLIP_COUNT}" ]]; then
   echo "[INFO] old_tracker_numeric_box_clip_count=${OLD_TRACKER_CLIP_COUNT} max_box_id=${OLD_TRACKER_MAX_BOX_ID}"
@@ -835,6 +1070,14 @@ exec env \
   VISER_DISTILL_MINIMAL_UI="${VISER_DISTILL_MINIMAL_UI}" \
   VISER_SHOW_TARGET_KEYPOINTS="${VISER_SHOW_TARGET_KEYPOINTS}" \
   PAIR_TERRAIN_WITH_MOTION="${PAIR_TERRAIN_WITH_MOTION}" \
+  HOLOSOMA_OBJECT_BANK_TOTAL_MOTION_COUNT="${HOLOSOMA_OBJECT_BANK_TOTAL_MOTION_COUNT:-}" \
+  HOLOSOMA_OBJECT_BANK_TOTAL_UNIQUE_URDF_COUNT="${HOLOSOMA_OBJECT_BANK_TOTAL_UNIQUE_URDF_COUNT:-}" \
+  HOLOSOMA_OBJECT_BANK_BOX_MOTION_COUNT="${HOLOSOMA_OBJECT_BANK_BOX_MOTION_COUNT:-}" \
+  HOLOSOMA_OBJECT_BANK_BOX_UNIQUE_URDF_COUNT="${HOLOSOMA_OBJECT_BANK_BOX_UNIQUE_URDF_COUNT:-}" \
+  HOLOSOMA_OBJECT_BANK_OMOMO_MOTION_COUNT="${HOLOSOMA_OBJECT_BANK_OMOMO_MOTION_COUNT:-}" \
+  HOLOSOMA_OBJECT_BANK_OMOMO_UNIQUE_URDF_COUNT="${HOLOSOMA_OBJECT_BANK_OMOMO_UNIQUE_URDF_COUNT:-}" \
+  HOLOSOMA_OBJECT_BANK_MOTION_DIR="${HOLOSOMA_OBJECT_BANK_MOTION_DIR:-}" \
+  HOLOSOMA_OBJECT_BANK_OBJECT_MAP="${HOLOSOMA_OBJECT_BANK_OBJECT_MAP:-}" \
   "${OBJECT_GEOMETRY_MODE_ENV[@]}" \
   bash "${SCRIPT_DIR}/distill_root_box.sh" "${TEACHER_CHECKPOINT}" \
     "perception:${PERCEPTION_PRESET}" \

@@ -65,6 +65,34 @@ class MultGPUConfig(TypedDict):
     world_size: int
 
 
+def _collect_object_bank_wandb_metadata() -> dict[str, int | str]:
+    """Collect launcher-computed object-bank stats for W&B config/summary."""
+    prefix = "HOLOSOMA_OBJECT_BANK_"
+    raw_keys = {
+        "TOTAL_MOTION_COUNT": "object_bank/total_motion_count",
+        "TOTAL_UNIQUE_URDF_COUNT": "object_bank/total_unique_urdf_count",
+        "BOX_MOTION_COUNT": "object_bank/box_motion_count",
+        "BOX_UNIQUE_URDF_COUNT": "object_bank/box_unique_urdf_count",
+        "OMOMO_MOTION_COUNT": "object_bank/omomo_motion_count",
+        "OMOMO_UNIQUE_URDF_COUNT": "object_bank/omomo_unique_urdf_count",
+        "MOTION_DIR": "object_bank/motion_dir",
+        "OBJECT_MAP": "object_bank/object_map",
+    }
+    metadata: dict[str, int | str] = {}
+    for env_suffix, metric_name in raw_keys.items():
+        raw_value = os.environ.get(f"{prefix}{env_suffix}")
+        if raw_value is None or raw_value == "":
+            continue
+        if env_suffix.endswith("_COUNT"):
+            try:
+                metadata[metric_name] = int(raw_value)
+            except ValueError:
+                logger.warning("Ignoring non-integer object-bank metadata {}={}", env_suffix, raw_value)
+        else:
+            metadata[metric_name] = raw_value
+    return metadata
+
+
 def configure_multi_gpu() -> MultGPUConfig | None:
     """Configure multi-gpu training and return configuration dictionary, or `None` if single-GPU training."""
     import torch
@@ -465,6 +493,13 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
 
             if wandb.run is not None:
                 wandb_run_path = f"{wandb.run.entity}/{wandb.run.project}/{wandb.run.id}"
+                object_bank_metadata = _collect_object_bank_wandb_metadata()
+                if object_bank_metadata:
+                    wandb.config.update(object_bank_metadata, allow_val_change=True)
+                    for key, value in object_bank_metadata.items():
+                        wandb.run.summary[key] = value
+                    wandb.log(object_bank_metadata, step=0)
+                    logger.info("Logged object-bank metadata to W&B: {}", object_bank_metadata)
                 if config_path is not None:
                     wandb.save(str(config_path), base_path=experiment_save_dir)
 
