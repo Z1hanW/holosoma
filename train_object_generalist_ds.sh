@@ -78,8 +78,9 @@ DEFAULT_DS_RAW_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj"
 DEFAULT_DS_GEOMETRY_DIR="${DS_DATA_ROOT}/train_g1_w_obj_geometry"
 DEFAULT_DS_PREPARED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
 DEFAULT_MIX_NAIVE_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
-# Optional strict mix-naive count checks.
+# Optional strict count checks.
 # Leave unset to validate structure/fields only so newer banks with different clip counts still run.
+DS_EXPECTED_TOTAL=${DS_EXPECTED_TOTAL:-""}
 MIX_NAIVE_EXPECTED_TOTAL=${MIX_NAIVE_EXPECTED_TOTAL:-""}
 MIX_NAIVE_EXPECTED_DS=${MIX_NAIVE_EXPECTED_DS:-""}
 MIX_NAIVE_EXPECTED_OMOMO=${MIX_NAIVE_EXPECTED_OMOMO:-""}
@@ -517,7 +518,7 @@ PY
 
 validate_default_ds_bank() {
   local motion_dir="$1"
-  local expected_count="${2:-43}"
+  local expected_count="${2:-}"
   "${PYTHON_BIN}" - "${motion_dir}" "${expected_count}" <<'PY'
 import json
 import sys
@@ -526,22 +527,26 @@ from pathlib import Path
 import numpy as np
 
 motion_dir = Path(sys.argv[1]).expanduser().resolve()
-expected = int(sys.argv[2])
+expected_raw = sys.argv[2].strip()
+expected = int(expected_raw) if expected_raw else None
 npz_files = sorted(motion_dir.glob('*.npz'))
-if len(npz_files) != expected:
+if expected is not None and len(npz_files) != expected:
     raise SystemExit(f"[ERROR] Expected {expected} DS motion clips under {motion_dir}, found {len(npz_files)}")
+if not npz_files:
+    raise SystemExit(f"[ERROR] No DS motion clips found under {motion_dir}")
 
 map_path = motion_dir / '_clip_object_urdf_map.json'
 payload = json.loads(map_path.read_text(encoding='utf-8'))
 clips = payload['clips'] if isinstance(payload, dict) and isinstance(payload.get('clips'), dict) else payload
 if not isinstance(clips, dict):
     raise SystemExit(f"[ERROR] Invalid DS clip-object map payload: {map_path}")
-if len(clips) != expected:
+if expected is not None and len(clips) != expected:
     raise SystemExit(f"[ERROR] Expected {expected} map entries in {map_path}, found {len(clips)}")
 
 unique_names = set()
 unique_sizes = set()
 missing = []
+missing_map_entries = []
 for npz_path in npz_files:
     data = np.load(npz_path, allow_pickle=True)
     object_name = data['object_name'].item() if 'object_name' in data else ''
@@ -552,13 +557,18 @@ for npz_path in npz_files:
         continue
     unique_names.add(str(object_name))
     unique_sizes.add(tuple(round(float(v), 6) for v in object_size))
+    if npz_path.stem not in clips:
+        missing_map_entries.append(npz_path.stem)
 
 if missing:
     preview = ', '.join(missing[:10])
     raise SystemExit(f"[ERROR] DS prepared bank is missing object fields in: {preview}")
-if len(unique_names) != expected:
+if missing_map_entries:
+    preview = ', '.join(sorted(missing_map_entries)[:10])
+    raise SystemExit(f"[ERROR] DS prepared bank map is missing {len(missing_map_entries)} active clip entries: {preview}")
+if expected is not None and len(unique_names) != expected:
     raise SystemExit(f"[ERROR] Expected {expected} unique object_name entries, found {len(unique_names)}")
-if len(unique_sizes) != expected:
+if expected is not None and len(unique_sizes) != expected:
     raise SystemExit(f"[ERROR] Expected {expected} unique object_size entries, found {len(unique_sizes)}")
 
 print(
@@ -1098,7 +1108,7 @@ if [[ "${STRICT_DEFAULT_DS_BANK_VALIDATION}" != "0" ]]; then
   case "${DATA_MODE}" in
     pure-sd)
       if [[ "$(realpath "${MOTION_DIR}")" == "$(realpath "${DEFAULT_DS_PREPARED_MOTION_DIR}")" ]]; then
-        validate_default_ds_bank "${MOTION_DIR}" 43
+        validate_default_ds_bank "${MOTION_DIR}" "${DS_EXPECTED_TOTAL}"
       fi
       ;;
     pure-real|mix-naive|mix-curriculum)
