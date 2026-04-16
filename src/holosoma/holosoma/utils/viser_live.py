@@ -884,13 +884,13 @@ def _load_combined_live_usd_mesh(root_prim_path: str, mesh_kind: str = "visual")
     return merged
 
 
-@functools.lru_cache(maxsize=256)
-def _load_combined_live_usd_visual_mesh(root_prim_path: str):
+@functools.lru_cache(maxsize=512)
+def _load_combined_live_usd_visual_mesh(root_prim_path: str, mesh_signature: str = ""):
     return _load_combined_live_usd_mesh(root_prim_path, "visual")
 
 
-@functools.lru_cache(maxsize=256)
-def _load_combined_live_usd_collision_mesh(root_prim_path: str):
+@functools.lru_cache(maxsize=512)
+def _load_combined_live_usd_collision_mesh(root_prim_path: str, mesh_signature: str = ""):
     return _load_combined_live_usd_mesh(root_prim_path, "collision")
 
 
@@ -1369,6 +1369,8 @@ class ViserLiveViewer:
         self._primary_object_collision_variants: dict[str, Any] = {}
         self._active_primary_object_key: str | None = None
         self._active_primary_object_collision_key: str | None = None
+        self._object_visual_mesh_vertices_local: dict[str, np.ndarray] = {}
+        self._object_collision_mesh_vertices_local: dict[str, np.ndarray] = {}
         self._robot_root = None
         self._object_root = None
         self._secondary_env_ids: list[int] = []
@@ -1680,6 +1682,8 @@ class ViserLiveViewer:
         self._object_reset_pitch_slider = None
         self._object_reset_yaw_slider = None
         self._object_reset_status = None
+        self._object_ground_status = None
+        self._object_ground_status_debug_logged = False
         self._manual_command_arrow_handle = None
         self._manual_command_arrow_height = 0.30
         self._manual_command_arrow_head_ratio = 0.30
@@ -2161,6 +2165,146 @@ class ViserLiveViewer:
             return f"extents={extents_str}"
         return f"extents={extents_str}, visual_prims={int(visual_prim_count)}"
 
+    def _object_mesh_vertex_cache(self, mesh_kind: str = "visual") -> dict[str, np.ndarray]:
+        normalized_kind = _normalize_mesh_kind(mesh_kind)
+        if normalized_kind == "collision":
+            return self._object_collision_mesh_vertices_local
+        return self._object_visual_mesh_vertices_local
+
+    def _resolve_object_extents_for_env(self, env_id: int) -> np.ndarray | None:
+        object_urdf = self._resolve_object_urdf_for_env(env_id)
+        if object_urdf:
+            extents = load_urdf_geometry_extents(object_urdf)
+            if extents is not None:
+                return np.asarray(extents, dtype=np.float32)
+
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None or not hasattr(motion_cmd, "object_size"):
+            return None
+        try:
+            return motion_cmd.object_size[int(env_id)].detach().float().cpu().numpy().astype(np.float32)
+        except Exception:
+            return None
+
+    def _compute_box_bottom_z_from_state(
+        self,
+        object_state_wxyz: tuple[np.ndarray, np.ndarray] | None,
+        extents_xyz: np.ndarray | None,
+    ) -> float | None:
+        if object_state_wxyz is None or extents_xyz is None:
+            return None
+        extents = np.asarray(extents_xyz, dtype=np.float32).reshape(-1)
+        if extents.shape[0] != 3 or not np.all(np.isfinite(extents)):
+            return None
+        half_extents = 0.5 * np.maximum(extents, 1.0e-6)
+        pos_w, quat_wxyz = object_state_wxyz
+        try:
+            quat_tensor = torch.as_tensor(quat_wxyz, dtype=torch.float32).reshape(1, 4)
+            rot = quaternion_to_matrix(quat_tensor, w_last=False)[0].detach().cpu().numpy()
+        except Exception:
+            return None
+        z_axis = np.asarray(rot[2], dtype=np.float32)
+        support = float(np.abs(z_axis) @ half_extents)
+        return float(pos_w[2]) - support
+
+    def _invalidate_object_mesh_caches(self, *, remove_handles: bool = True) -> None:
+        self._object_visual_mesh_vertices_local.clear()
+        self._object_collision_mesh_vertices_local.clear()
+        try:
+            _load_combined_live_usd_visual_mesh.cache_clear()
+            _load_combined_live_usd_collision_mesh.cache_clear()
+        except Exception:
+            pass
+        self._active_primary_object_key = None
+        self._active_primary_object_collision_key = None
+        self._secondary_object_visual_key.clear()
+        self._secondary_object_collision_key.clear()
+        if not remove_handles:
+            return
+        for handle in list(self._primary_object_variants.values()) + list(self._primary_object_collision_variants.values()):
+            try:
+                handle.remove()
+            except Exception:
+                pass
+        self._primary_object_variants.clear()
+        self._primary_object_collision_variants.clear()
+        self._vo = None
+        self._vo_collision = None
+        for handle_map in (self._secondary_vo, self._secondary_vo_collision):
+            for handle in list(handle_map.values()):
+                try:
+                    handle.remove()
+                except Exception:
+                    pass
+            handle_map.clear()
+
+    def _get_object_mesh_vertices_local_for_env(
+        self,
+        env_id: int,
+        mesh_kind: str = "visual",
+    ) -> tuple[np.ndarray | None, str | None]:
+        normalized_kind = _normalize_mesh_kind(mesh_kind)
+        cache = self._object_mesh_vertex_cache(normalized_kind)
+
+        if int(env_id) == self._env_id:
+            active_key = (
+                self._active_primary_object_collision_key
+                if normalized_kind == "collision"
+                else self._active_primary_object_key
+            )
+        else:
+            active_key = (
+                self._secondary_object_collision_key.get(int(env_id))
+                if normalized_kind == "collision"
+                else self._secondary_object_visual_key.get(int(env_id))
+            )
+
+        if active_key is not None and active_key in cache:
+            return cache[active_key], active_key
+
+        resolved_key, mesh, _ = self._resolve_object_mesh_spec_for_env(int(env_id), normalized_kind)
+        if resolved_key is None or mesh is None:
+            return None, resolved_key
+
+        try:
+            vertices = np.asarray(mesh.vertices, dtype=np.float32)
+        except Exception:
+            return None, resolved_key
+        if vertices.ndim != 2 or vertices.shape[1] != 3 or vertices.size == 0:
+            return None, resolved_key
+
+        cache[resolved_key] = vertices
+        return vertices, resolved_key
+
+    def _compute_object_bottom_z_from_state(
+        self,
+        env_id: int,
+        object_state_wxyz: tuple[np.ndarray, np.ndarray] | None,
+        mesh_kind: str = "visual",
+    ) -> float | None:
+        if object_state_wxyz is None:
+            return None
+        normalized_kind = _normalize_mesh_kind(mesh_kind)
+        if normalized_kind == "collision":
+            analytic_bottom = self._compute_box_bottom_z_from_state(
+                object_state_wxyz,
+                self._resolve_object_extents_for_env(env_id),
+            )
+            if analytic_bottom is not None:
+                return analytic_bottom
+        vertices_local, _ = self._get_object_mesh_vertices_local_for_env(env_id, mesh_kind)
+        if vertices_local is None:
+            return None
+        pos_w, quat_wxyz = object_state_wxyz
+        try:
+            quat_tensor = torch.as_tensor(quat_wxyz, dtype=torch.float32).reshape(1, 4)
+            rot = quaternion_to_matrix(quat_tensor, w_last=False)[0].detach().cpu().numpy()
+        except Exception:
+            return None
+        z_axis = rot[2].astype(np.float32, copy=False)
+        bottom_z = np.min(vertices_local @ z_axis) + float(pos_w[2])
+        return float(bottom_z)
+
     def _resolve_live_object_root_prim_path(self, env_id: int) -> str | None:
         sim_object_name = self._resolve_sim_object_name_for_env(int(env_id))
         if not sim_object_name:
@@ -2206,18 +2350,41 @@ class ViserLiveViewer:
                 return str(prim.GetPath())
         return None
 
+    def _live_object_mesh_signature_for_env(self, env_id: int) -> str:
+        parts: list[str] = []
+        motion_cmd = self._get_motion_command()
+        clip_idx: int | None = None
+        if motion_cmd is not None and hasattr(motion_cmd, "clip_ids"):
+            try:
+                clip_idx = int(motion_cmd.clip_ids[int(env_id)].item())
+            except Exception:
+                clip_idx = None
+        clip_name = self._current_clip_name(motion_cmd, clip_idx)
+        if clip_name:
+            parts.append(f"clip={clip_name}")
+        object_urdf = self._resolve_object_urdf_for_env(env_id)
+        if object_urdf:
+            parts.append(f"urdf={object_urdf}")
+        sim_object_name = self._resolve_sim_object_name_for_env(env_id)
+        if sim_object_name:
+            parts.append(f"obj={sim_object_name}")
+        if not parts:
+            parts.append(f"env={int(env_id)}")
+        return "|".join(parts)
+
     def _resolve_object_mesh_spec_for_env(self, env_id: int, mesh_kind: str = "visual") -> tuple[str | None, Any | None, str]:
         normalized_kind = _normalize_mesh_kind(mesh_kind)
         live_root_prim_path = self._resolve_live_object_root_prim_path(env_id)
         if live_root_prim_path:
+            live_signature = self._live_object_mesh_signature_for_env(env_id)
             loader = (
                 _load_combined_live_usd_collision_mesh
                 if normalized_kind == "collision"
                 else _load_combined_live_usd_visual_mesh
             )
-            mesh = loader(live_root_prim_path)
+            mesh = loader(live_root_prim_path, live_signature)
             if mesh is not None:
-                return live_root_prim_path, mesh, f'live-usd:{live_root_prim_path}'
+                return f"{live_root_prim_path}::{live_signature}", mesh, f'live-usd:{live_root_prim_path}'
 
         if self._mesh_source == "sim":
             return None, None, ''
@@ -3193,6 +3360,60 @@ class ViserLiveViewer:
             "Runtime size scaling is not supported yet; size still comes from the spawned URDF scale."
         )
 
+    def _update_object_ground_status(self) -> None:
+        if self._object_ground_status is None:
+            return
+
+        ground_top_z = 0.0
+        env_id = int(self._env_id)
+        mesh_source = str(self._mesh_source)
+        mesh_mode = self._current_mesh_mode()
+        sim_state = self._get_object_state_wxyz_for(env_id)
+        ref_state = self._get_reference_object_state_wxyz_for(env_id)
+
+        def _format_bottom(kind: str, state: tuple[np.ndarray, np.ndarray] | None) -> str:
+            bottom_z = self._compute_object_bottom_z_from_state(env_id, state, kind)
+            if bottom_z is None:
+                return "n/a"
+            gap = bottom_z - ground_top_z
+            return f"`{bottom_z:+.4f}` (gap `{gap:+.4f}`)"
+
+        self._object_ground_status.content = (
+            f"Env: `{env_id}`\n\n"
+            f"Mesh source: `{mesh_source}`  Mode: `{mesh_mode}`\n\n"
+            f"Ground top z: `{ground_top_z:+.4f}`\n\n"
+            f"Sim visual bottom: {_format_bottom('visual', sim_state)}\n\n"
+            f"Ref visual bottom: {_format_bottom('visual', ref_state)}\n\n"
+            f"Sim collision bottom: {_format_bottom('collision', sim_state)}\n\n"
+            f"Ref collision bottom: {_format_bottom('collision', ref_state)}"
+        )
+
+    def _log_object_ground_status_once(self, motion_cmd) -> None:
+        if self._object_ground_status_debug_logged or motion_cmd is None:
+            return
+        rows: list[str] = []
+        for env_id in self._visible_env_ids():
+            sim_state = self._get_object_state_wxyz_for(env_id)
+            ref_state = self._get_reference_object_state_wxyz_for(env_id)
+            sim_bottom = self._compute_object_bottom_z_from_state(env_id, sim_state, "collision")
+            ref_bottom = self._compute_object_bottom_z_from_state(env_id, ref_state, "collision")
+            try:
+                clip_idx = int(motion_cmd.clip_ids[int(env_id)].item())
+            except Exception:
+                clip_idx = None
+            clip_name = self._current_clip_name(motion_cmd, clip_idx)
+            rows.append(
+                "env{} clip={} sim_collision_bottom={} ref_collision_bottom={}".format(
+                    int(env_id),
+                    clip_name or "unknown",
+                    "n/a" if sim_bottom is None else f"{float(sim_bottom):+.6f}",
+                    "n/a" if ref_bottom is None else f"{float(ref_bottom):+.6f}",
+                )
+            )
+        if rows:
+            logger.info("Viser object ground status: {}", rows)
+            self._object_ground_status_debug_logged = True
+
     def _update_manual_object_reset_override(self) -> None:
         motion_cmd = self._get_motion_command()
         if motion_cmd is None or not hasattr(motion_cmd, "motion") or not bool(getattr(motion_cmd.motion, "has_object", False)):
@@ -3562,6 +3783,8 @@ class ViserLiveViewer:
         if getattr(self, "_env_id", 0) not in _normalize_env_ids(env_ids):
             return
         self._clear_rollout_object_trajectory()
+        self._invalidate_object_mesh_caches(remove_handles=True)
+        self._object_ground_status_debug_logged = False
         if self._server is None:
             return
         if not getattr(self, "_recenter", True):
@@ -3696,6 +3919,8 @@ class ViserLiveViewer:
                     offset=offset,
                     visible=bool(show_object and obj_pos is not None),
                 )
+            self._update_object_ground_status()
+            self._log_object_ground_status_once(motion_cmd)
 
             for env_id in self._secondary_env_ids:
                 robot_root = self._secondary_robot_roots.get(env_id)
@@ -4645,6 +4870,16 @@ class ViserLiveViewer:
                         initial_value=bool(self._recenter),
                         hint="Keep the selected env centered in view",
                     )
+                    if has_object_enabled:
+                        self._object_ground_status = self._server.gui.add_markdown(
+                            "Env: `0`\n\n"
+                            "Mesh source: n/a  Mode: n/a\n\n"
+                            "Ground top z: `+0.0000`\n\n"
+                            "Sim visual bottom: n/a\n\n"
+                            "Ref visual bottom: n/a\n\n"
+                            "Sim collision bottom: n/a\n\n"
+                            "Ref collision bottom: n/a"
+                        )
 
                 def _apply_world_vis() -> None:
                     if self._show_robot_cb is not None and self._vr is not None:
@@ -5014,6 +5249,7 @@ class ViserLiveViewer:
                 motion_cmd._fixed_clip_ids = motion_cmd.clip_ids.clone()
             motion_cmd._fixed_clip_ids[env_ids] = clip_ids
         logger.info("Viser switched visible clip group {} -> {}", group_index, clip_ids_list)
+        self._object_ground_status_debug_logged = False
         self._reset_visible_envs()
         self._update_clip_group_ui(motion_cmd)
 
@@ -5124,6 +5360,7 @@ class ViserLiveViewer:
         self._invalidate_isaac_scandots_payload()
         if hasattr(self._env, "_draw_scandots_in_viewer"):
             self._env._draw_scandots_in_viewer()
+        self._invalidate_object_mesh_caches(remove_handles=True)
         sim = getattr(self._env, "simulator", None)
         scene = getattr(sim, "scene", None)
         if scene is not None and hasattr(scene, "update"):
@@ -5156,6 +5393,7 @@ class ViserLiveViewer:
         self._pending_clip_start = None
         if clip_idx is None:
             return
+        self._invalidate_object_mesh_caches(remove_handles=True)
         lock_enabled = self._clip_lock_enabled()
         if lock_enabled:
             try:
@@ -5418,6 +5656,26 @@ class ViserLiveViewer:
 
     def _get_object_state_wxyz(self) -> tuple[np.ndarray, np.ndarray] | None:
         return self._get_object_state_wxyz_for(self._env_id)
+
+    def _get_reference_object_state_wxyz_for(self, env_id: int) -> tuple[np.ndarray, np.ndarray] | None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            return None
+        if not hasattr(motion_cmd, "object_pos_w") or not hasattr(motion_cmd, "object_quat_w"):
+            return None
+        try:
+            pos = motion_cmd.object_pos_w[int(env_id)]
+            quat_xyzw = motion_cmd.object_quat_w[int(env_id)]
+        except Exception:
+            return None
+        try:
+            quat_wxyz = quat_xyzw[[3, 0, 1, 2]]
+            return pos.detach().cpu().numpy(), quat_wxyz.detach().cpu().numpy()
+        except Exception:
+            return None
+
+    def _get_reference_object_state_wxyz(self) -> tuple[np.ndarray, np.ndarray] | None:
+        return self._get_reference_object_state_wxyz_for(self._env_id)
 
     def _get_robot_body_points_for(self, env_id: int) -> np.ndarray | None:
         sim = self._env.simulator

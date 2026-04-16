@@ -2123,6 +2123,8 @@ class MotionCommand(CommandTermBase):
             fixed_clip_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long) + clip_start
             fixed_clip_ids = torch.remainder(fixed_clip_ids, int(self.motion.num_clips))
             self._fixed_clip_ids = fixed_clip_ids
+            if hasattr(self, "clip_ids") and isinstance(self.clip_ids, torch.Tensor) and self.clip_ids.numel() == fixed_clip_ids.numel():
+                self.clip_ids[:] = fixed_clip_ids
             logger.info(
                 "Configured forced round-robin env-to-clip assignment across {} envs and {} clips (start={}).",
                 self.num_envs,
@@ -4373,6 +4375,8 @@ class MotionCommand(CommandTermBase):
     def init_buffers(self):
         self.time_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.clip_ids = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        if self._fixed_clip_ids is not None and int(self._fixed_clip_ids.numel()) == int(self.num_envs):
+            self.clip_ids[:] = self._fixed_clip_ids
         if self._terrain_row_ids is not None:
             self._terrain_row_ids.zero_()
         self.body_pos_relative_w = torch.zeros(

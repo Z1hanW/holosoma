@@ -398,6 +398,69 @@ if [[ "${TRACKER_PROFILE}" == "old-tracker" && "${DATA_MODE}" == "pure-sd" && "$
   OLD_TRACKER_CLIP_COUNT="${_old_tracker_subset_info[1]:-}"
 fi
 
+OBJECT_MAP_PATH="${MOTION_DIR}/_clip_object_urdf_map.json"
+if [[ -f "${OBJECT_MAP_PATH}" ]]; then
+  ACTIVE_OBJECT_BANK_INFO=$(
+    "${PYTHON_BIN}" - "${MOTION_DIR}" "${OBJECT_MAP_PATH}" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from collections import Counter
+from pathlib import Path
+
+import numpy as np
+
+motion_dir = Path(sys.argv[1]).expanduser().resolve()
+object_map = Path(sys.argv[2]).expanduser().resolve()
+payload = json.loads(object_map.read_text(encoding="utf-8"))
+clips = payload["clips"] if isinstance(payload, dict) and isinstance(payload.get("clips"), dict) else payload
+if not isinstance(clips, dict) or not clips:
+    raise SystemExit(f"[ERROR] Invalid clip-object map payload: {object_map}")
+
+active_clip_ids = [path.stem for path in sorted(motion_dir.glob("*.npz"))]
+if not active_clip_ids:
+    raise SystemExit(f"[ERROR] No .npz clips found under active MOTION_DIR: {motion_dir}")
+
+resolved_urdfs: list[str] = []
+missing: list[str] = []
+for clip_id in active_clip_ids:
+    entry = clips.get(clip_id)
+    urdf = ""
+    if isinstance(entry, str):
+        urdf = entry.strip()
+    elif isinstance(entry, dict):
+        urdf = str(entry.get("object_urdf_path", "")).strip()
+
+    if not urdf:
+        npz_path = motion_dir / f"{clip_id}.npz"
+        data = np.load(npz_path, allow_pickle=True)
+        if "object_urdf_path" in data:
+            arr = np.asarray(data["object_urdf_path"])
+            if arr.size:
+                item = arr.item() if arr.shape == () else arr.reshape(-1)[0]
+                urdf = str(item).strip()
+
+    if not urdf:
+        missing.append(clip_id)
+        continue
+    resolved_urdfs.append(str(Path(urdf).expanduser().resolve()))
+
+if missing:
+    preview = ", ".join(missing[:10])
+    raise SystemExit(
+        f"[ERROR] Active motion clips missing object_urdf_path resolution in {object_map}: {preview}"
+    )
+
+counts = Counter(resolved_urdfs)
+top = ", ".join(f"{Path(path).name}:{count}" for path, count in counts.most_common(5))
+print(f"{len(active_clip_ids)}|{len(counts)}|{top}")
+PY
+  )
+else
+  ACTIVE_OBJECT_BANK_INFO=""
+fi
+
 TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
 TEACHER_PERCEPTION_PRESET=${TEACHER_PERCEPTION_PRESET:-none}
 TEACHER_PERCEPTION_OBS_KEY=${TEACHER_PERCEPTION_OBS_KEY:-teacher_perception_obs}
@@ -645,6 +708,10 @@ if [[ -n "${MOTION_DIR:-}" ]]; then
 fi
 if [[ "${USING_TEACHER_ROLLOUT_MOTION_BANK}" -eq 1 ]]; then
   echo "[INFO] using_teacher_rollout_motion_bank=1"
+fi
+if [[ -n "${ACTIVE_OBJECT_BANK_INFO}" ]]; then
+  IFS='|' read -r ACTIVE_OBJECT_BANK_CLIPS ACTIVE_OBJECT_BANK_URDFS ACTIVE_OBJECT_BANK_TOP <<< "${ACTIVE_OBJECT_BANK_INFO}"
+  echo "[INFO] active_object_bank=${ACTIVE_OBJECT_BANK_CLIPS} clips ${ACTIVE_OBJECT_BANK_URDFS} unique_urdfs (top=${ACTIVE_OBJECT_BANK_TOP})"
 fi
 if [[ -n "${OLD_TRACKER_CLIP_COUNT}" ]]; then
   echo "[INFO] old_tracker_numeric_box_clip_count=${OLD_TRACKER_CLIP_COUNT} max_box_id=${OLD_TRACKER_MAX_BOX_ID}"

@@ -171,51 +171,29 @@ def _build_qpos(
     clip_path: Path,
     viser_joint_names: list[str],
 ) -> np.ndarray:
+    if "qpos" not in data:
+        raise ValueError(
+            f"{clip_path} does not contain qpos. "
+            "Viewer fallback to reconstruct qpos from raw motion is disabled."
+        )
+
     clip_joint_names = _load_joint_names(data)
-
-    if "qpos" in data:
-        raw_qpos = np.asarray(data["qpos"], dtype=np.float32)
-        if raw_qpos.ndim != 2 or raw_qpos.shape[1] < 7:
-            raise ValueError(f"Invalid qpos array in {clip_path}: shape={raw_qpos.shape}")
-        raw_joint_count = len(clip_joint_names) if clip_joint_names is not None else min(
-            len(viser_joint_names), max(0, raw_qpos.shape[1] - 7)
-        )
-        if raw_qpos.shape[1] < 7 + raw_joint_count:
-            raise ValueError(f"qpos joint slice is invalid in {clip_path}: shape={raw_qpos.shape}")
-        ordered_joints = _order_joint_block(
-            raw_qpos[:, 7 : 7 + raw_joint_count],
-            clip_joint_names,
-            viser_joint_names,
-            clip_path,
-        )
-        tail = raw_qpos[:, 7 + raw_joint_count :]
-        return np.concatenate((raw_qpos[:, :7], ordered_joints, tail), axis=1, dtype=np.float32)
-
-    if "joint_pos" not in data:
-        raise ValueError(f"{clip_path} does not contain qpos or joint_pos.")
-
-    joint_pos = np.asarray(data["joint_pos"], dtype=np.float32)
-    if joint_pos.ndim != 2 or joint_pos.shape[1] < 7:
-        raise ValueError(f"Invalid joint_pos array in {clip_path}: shape={joint_pos.shape}")
-    raw_joint_count = len(clip_joint_names) if clip_joint_names is not None else max(0, joint_pos.shape[1] - 7)
-    if joint_pos.shape[1] < 7 + raw_joint_count:
-        raise ValueError(f"joint_pos joint slice is invalid in {clip_path}: shape={joint_pos.shape}")
+    raw_qpos = np.asarray(data["qpos"], dtype=np.float32)
+    if raw_qpos.ndim != 2 or raw_qpos.shape[1] < 7:
+        raise ValueError(f"Invalid qpos array in {clip_path}: shape={raw_qpos.shape}")
+    raw_joint_count = len(clip_joint_names) if clip_joint_names is not None else min(
+        len(viser_joint_names), max(0, raw_qpos.shape[1] - 7)
+    )
+    if raw_qpos.shape[1] < 7 + raw_joint_count:
+        raise ValueError(f"qpos joint slice is invalid in {clip_path}: shape={raw_qpos.shape}")
     ordered_joints = _order_joint_block(
-        joint_pos[:, 7 : 7 + raw_joint_count],
+        raw_qpos[:, 7 : 7 + raw_joint_count],
         clip_joint_names,
         viser_joint_names,
         clip_path,
     )
-    qpos = np.concatenate((joint_pos[:, :7], ordered_joints), axis=1, dtype=np.float32)
-
-    if "object_pos_w" in data and "object_quat_w" in data:
-        object_pos = np.asarray(data["object_pos_w"], dtype=np.float32)
-        object_quat = np.asarray(data["object_quat_w"], dtype=np.float32)
-        if object_pos.ndim != 2 or object_quat.ndim != 2 or object_pos.shape[0] != qpos.shape[0]:
-            raise ValueError(f"Invalid object pose arrays in {clip_path}")
-        qpos = np.concatenate((qpos, object_pos, object_quat), axis=1, dtype=np.float32)
-
-    return qpos
+    tail = raw_qpos[:, 7 + raw_joint_count :]
+    return np.concatenate((raw_qpos[:, :7], ordered_joints, tail), axis=1, dtype=np.float32)
 
 
 def _align_qpos(qpos: np.ndarray, *, anchor: str, xy_only: bool, has_object: bool) -> np.ndarray:

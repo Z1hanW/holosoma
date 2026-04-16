@@ -14,6 +14,7 @@ set -euo pipefail
 # - `_clip_object_urdf_map.json`
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "${SCRIPT_DIR}/scripts/object_generalist_ds_paths.sh"
 
 SIM_ENV_BIN=/home/ubuntu/miniconda3/envs/sim/bin
 if ! command -v torchrun >/dev/null 2>&1 && [[ -x "${SIM_ENV_BIN}/torchrun" ]]; then
@@ -82,12 +83,11 @@ DEFAULT_MIX_NAIVE_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo
 MIX_NAIVE_EXPECTED_TOTAL=${MIX_NAIVE_EXPECTED_TOTAL:-""}
 MIX_NAIVE_EXPECTED_DS=${MIX_NAIVE_EXPECTED_DS:-""}
 MIX_NAIVE_EXPECTED_OMOMO=${MIX_NAIVE_EXPECTED_OMOMO:-""}
-DEFAULT_MOTION_DIR="${DEFAULT_DS_PREPARED_MOTION_DIR}"
 MOTION_DIR_FROM_ENV=0
 if [[ -n "${MOTION_DIR+x}" ]]; then
   MOTION_DIR_FROM_ENV=1
 fi
-MOTION_DIR=${MOTION_DIR:-"${DEFAULT_MOTION_DIR}"}
+MOTION_DIR=${MOTION_DIR:-""}
 RAW_MOTION_DIR=${RAW_MOTION_DIR:-"${DEFAULT_DS_RAW_MOTION_DIR}"}
 OBJ_DIR=${OBJ_DIR:-"${DEFAULT_DS_GEOMETRY_DIR}"}
 PREPARED_MOTION_DIR=${PREPARED_MOTION_DIR:-""}
@@ -1037,10 +1037,10 @@ fi
 
 case "${DATA_MODE}" in
   pure-sd)
-    MODE_DEFAULT_MOTION_DIR="${DEFAULT_DS_PREPARED_MOTION_DIR}"
+    MODE_DEFAULT_MOTION_DIR="$(ogds_default_motion_dir "${DS_DATA_ROOT}" "${DATA_MODE}")"
     ;;
   pure-real|mix-naive|mix-curriculum)
-    MODE_DEFAULT_MOTION_DIR="${DEFAULT_MIX_NAIVE_MOTION_DIR}"
+    MODE_DEFAULT_MOTION_DIR="$(ogds_default_motion_dir "${DS_DATA_ROOT}" "${DATA_MODE}")"
     ;;
 esac
 
