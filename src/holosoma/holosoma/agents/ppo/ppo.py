@@ -1120,7 +1120,9 @@ class PPO(BaseAlgo):
                 final_rewards = torch.zeros_like(rewards)
                 if infos["time_outs"].any():
                     final_critic_obs = torch.cat([infos["final_observations"][k] for k in self.critic_obs_keys], dim=1)
-                    final_critic_obs = self._normalize_critic_obs(final_critic_obs, update=True)
+                    # Timeout final observations are rank-local and conditional. Updating distributed
+                    # normalizers here would desynchronize all_reduce order across ranks.
+                    final_critic_obs = self._normalize_critic_obs(final_critic_obs, update=False)
                     final_policy_state = {"critic_obs": final_critic_obs}
                     if (
                         self.critic_perception_key
