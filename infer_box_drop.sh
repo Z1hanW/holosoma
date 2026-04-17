@@ -69,6 +69,7 @@ Default W&B runs:
   MAX_EVAL_STEPS           (optional; if set, overrides training.max_eval_steps)
   PHYSX_GPU_COLLISION_STACK_SIZE (default: 268435456)
   DEPTH_PERCEPTION_PRESET  (default: checkpoint; options: checkpoint|d435i_17x17)
+  CAMERA_*                (optional explicit camera overrides; default preserves checkpoint camera config)
   MIXED_PROFILE            (default: auto; options: auto|none|1xugspet|s221l5eo)
   EVAL_COMMAND_ONLY_ENV_PROB (mixed mode default: 1.0 for 1xugspet/s221l5eo; clip mode leaves checkpoint logic unchanged)
   EVAL_EXTERNAL_GOAL_PROB  (mixed mode default: 1.0; clip mode leaves checkpoint logic unchanged)
@@ -558,6 +559,16 @@ MAX_EPISODE_LENGTH_S_EXPLICIT=0
 [[ -n "${MAX_EPISODE_LENGTH_S+x}" ]] && MAX_EPISODE_LENGTH_S_EXPLICIT=1
 DEPTH_PERCEPTION_PRESET_EXPLICIT=0
 [[ -n "${DEPTH_PERCEPTION_PRESET+x}" ]] && DEPTH_PERCEPTION_PRESET_EXPLICIT=1
+IMAGE_WIDTH_EXPLICIT=0
+[[ -n "${IMAGE_WIDTH+x}" ]] && IMAGE_WIDTH_EXPLICIT=1
+IMAGE_HEIGHT_EXPLICIT=0
+[[ -n "${IMAGE_HEIGHT+x}" ]] && IMAGE_HEIGHT_EXPLICIT=1
+CAMERA_NEAR_EXPLICIT=0
+[[ -n "${CAMERA_NEAR+x}" ]] && CAMERA_NEAR_EXPLICIT=1
+CAMERA_FAR_EXPLICIT=0
+[[ -n "${CAMERA_FAR+x}" ]] && CAMERA_FAR_EXPLICIT=1
+CAMERA_MAX_DISTANCE_EXPLICIT=0
+[[ -n "${CAMERA_MAX_DISTANCE+x}" ]] && CAMERA_MAX_DISTANCE_EXPLICIT=1
 EVAL_COMMAND_ONLY_ENV_PROB_EXPLICIT=0
 [[ -n "${EVAL_COMMAND_ONLY_ENV_PROB+x}" ]] && EVAL_COMMAND_ONLY_ENV_PROB_EXPLICIT=1
 EVAL_EXTERNAL_GOAL_PROB_EXPLICIT=0
@@ -686,11 +697,11 @@ MAX_EPISODE_LENGTH_S=${MAX_EPISODE_LENGTH_S:-1000000}
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-268435456}
 DISABLE_RANDOMIZATION=${DISABLE_RANDOMIZATION:-True}
 DEPTH_PERCEPTION_PRESET=${DEPTH_PERCEPTION_PRESET:-checkpoint}
-IMAGE_WIDTH=${IMAGE_WIDTH:-17}
-IMAGE_HEIGHT=${IMAGE_HEIGHT:-17}
-CAMERA_NEAR=${CAMERA_NEAR:-0.001}
-CAMERA_FAR=${CAMERA_FAR:-3.0}
-CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-3.0}
+IMAGE_WIDTH=${IMAGE_WIDTH:-}
+IMAGE_HEIGHT=${IMAGE_HEIGHT:-}
+CAMERA_NEAR=${CAMERA_NEAR:-}
+CAMERA_FAR=${CAMERA_FAR:-}
+CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-}
 OBJECT_GEOMETRY_MODE_RAW=${OBJECT_GEOMETRY_MODE:-}
 OBJECT_GEOMETRY_MODE=""
 HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE=""
@@ -987,17 +998,30 @@ if [[ "${DISABLE_RANDOMIZATION}" == "True" || "${DISABLE_RANDOMIZATION}" == "tru
   )
 fi
 
+append_explicit_camera_overrides() {
+  if [[ "${IMAGE_WIDTH_EXPLICIT}" -eq 1 ]]; then
+    cmd+=(--perception.camera_width "${IMAGE_WIDTH}")
+  fi
+  if [[ "${IMAGE_HEIGHT_EXPLICIT}" -eq 1 ]]; then
+    cmd+=(--perception.camera_height "${IMAGE_HEIGHT}")
+  fi
+  if [[ "${CAMERA_NEAR_EXPLICIT}" -eq 1 ]]; then
+    cmd+=(--perception.camera_near "${CAMERA_NEAR}")
+  fi
+  if [[ "${CAMERA_FAR_EXPLICIT}" -eq 1 ]]; then
+    cmd+=(--perception.camera_far "${CAMERA_FAR}")
+  fi
+  if [[ "${CAMERA_MAX_DISTANCE_EXPLICIT}" -eq 1 ]]; then
+    cmd+=(--perception.max_distance "${CAMERA_MAX_DISTANCE}")
+  fi
+}
+
 case "$(echo "${DEPTH_PERCEPTION_PRESET}" | tr '[:upper:]' '[:lower:]')" in
   checkpoint|auto|"")
     ;;
   d435i_17x17|d435i)
     cmd+=(
       perception:camera_depth_d435i_17x17
-      --perception.camera_width "${IMAGE_WIDTH}"
-      --perception.camera_height "${IMAGE_HEIGHT}"
-      --perception.camera_near "${CAMERA_NEAR}"
-      --perception.camera_far "${CAMERA_FAR}"
-      --perception.max_distance "${CAMERA_MAX_DISTANCE}"
     )
     ;;
   *)
@@ -1005,6 +1029,7 @@ case "$(echo "${DEPTH_PERCEPTION_PRESET}" | tr '[:upper:]' '[:lower:]')" in
     exit 2
     ;;
 esac
+append_explicit_camera_overrides
 
 if [[ "${MODE}" == "mixed" ]]; then
   if [[ -z "${EVAL_EXTERNAL_GOAL_PROB}" ]]; then
@@ -1080,6 +1105,17 @@ fi
 if [[ "${MODE}" == "mixed" ]]; then
   echo "[INFO] eval_command_only_env_prob=${EVAL_COMMAND_ONLY_ENV_PROB:-<checkpoint>}"
   echo "[INFO] eval_external_goal_prob=${EVAL_EXTERNAL_GOAL_PROB}"
+fi
+CAMERA_OVERRIDE_SUMMARY=()
+[[ "${IMAGE_WIDTH_EXPLICIT}" -eq 1 ]] && CAMERA_OVERRIDE_SUMMARY+=("camera_width=${IMAGE_WIDTH}")
+[[ "${IMAGE_HEIGHT_EXPLICIT}" -eq 1 ]] && CAMERA_OVERRIDE_SUMMARY+=("camera_height=${IMAGE_HEIGHT}")
+[[ "${CAMERA_NEAR_EXPLICIT}" -eq 1 ]] && CAMERA_OVERRIDE_SUMMARY+=("camera_near=${CAMERA_NEAR}")
+[[ "${CAMERA_FAR_EXPLICIT}" -eq 1 ]] && CAMERA_OVERRIDE_SUMMARY+=("camera_far=${CAMERA_FAR}")
+[[ "${CAMERA_MAX_DISTANCE_EXPLICIT}" -eq 1 ]] && CAMERA_OVERRIDE_SUMMARY+=("max_distance=${CAMERA_MAX_DISTANCE}")
+if [[ "${#CAMERA_OVERRIDE_SUMMARY[@]}" -gt 0 ]]; then
+  echo "[INFO] explicit_camera_overrides=${CAMERA_OVERRIDE_SUMMARY[*]}"
+else
+  echo "[INFO] explicit_camera_overrides=<none; checkpoint camera preserved>"
 fi
 if command -v hostname >/dev/null 2>&1; then
   HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"

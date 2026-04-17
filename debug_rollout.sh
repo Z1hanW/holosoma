@@ -18,6 +18,9 @@ Environment overrides:
   SEQUENCE            Optional initial clip id or clip directory name.
   VISER_PORT          Default: 18092
   VISER_HOST          Default: 0.0.0.0
+  ROBOT_URDF          G1 URDF rendered in the rollout view.
+                      Default: src/holosoma/holosoma/data/robots/g1/g1_29dof.urdf
+  SHOW_ROBOT          Default: 1; set 0/false to hide the training G1 overlay.
   LIST_ONLY           Default: 0; print available sequences and exit.
   DRY_RUN             Default: 0; print command without running.
 
@@ -39,6 +42,8 @@ cd "${ROOT_DIR}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 VISER_PORT="${VISER_PORT:-18092}"
 VISER_HOST="${VISER_HOST:-0.0.0.0}"
+ROBOT_URDF="${ROBOT_URDF:-${ROOT_DIR}/src/holosoma/holosoma/data/robots/g1/g1_29dof.urdf}"
+SHOW_ROBOT="${SHOW_ROBOT:-1}"
 LIST_ONLY="${LIST_ONLY:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 
@@ -82,6 +87,11 @@ cmd=(
   --port "${VISER_PORT}"
 )
 
+if [[ "${SHOW_ROBOT}" == "0" || "${SHOW_ROBOT,,}" == "false" ]]; then
+  cmd+=(--no-robot)
+else
+  cmd+=(--robot-urdf "${ROBOT_URDF}")
+fi
 if [[ -n "${SEQUENCE:-}" ]]; then
   cmd+=(--sequence "${SEQUENCE}")
 fi
@@ -97,6 +107,7 @@ export PYTHONPATH="${ROOT_DIR}/src:${PYTHONPATH:-}"
 echo "[INFO] DATA_ROOT=${DATA_ROOT}"
 echo "[INFO] VIS_ROOT=${VIS_ROOT}"
 echo "[INFO] STATS_ROOT=${STATS_ROOT}"
+echo "[INFO] ROBOT_URDF=${ROBOT_URDF}"
 echo "[INFO] VISER_URL=http://localhost:${VISER_PORT}"
 
 if [[ "${DRY_RUN}" == "1" || "${DRY_RUN,,}" == "true" ]]; then

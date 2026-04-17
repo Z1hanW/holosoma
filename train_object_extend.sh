@@ -297,10 +297,10 @@ profile_default_value() {
       echo 0.01
       ;;
     decoupled:PALM_CONTACT_W|custom:PALM_CONTACT_W)
-      echo 0.50
+      echo 0.70
       ;;
     decoupled:ARM_CONTACT_W|custom:ARM_CONTACT_W)
-      echo 0.20
+      echo 0.0
       ;;
     decoupled:TORSO_CONTACT_W|custom:TORSO_CONTACT_W)
       # Aggressively favor chest-brace carries in the extend profile.
@@ -853,6 +853,14 @@ append_command_curriculum_args() {
 append_reward_args() {
   local cmd_name=$1
   local -n cmd_ref="${cmd_name}"
+  local wrist_contact_reward_terms=(
+    left_wrist_yaw
+    right_wrist_yaw
+  )
+  local wrist_contact_w
+  wrist_contact_w=$(
+    awk -v palm_weight="${PALM_CONTACT_W}" -v arm_weight="${ARM_CONTACT_W}" -v count="${#wrist_contact_reward_terms[@]}" 'BEGIN { printf "%.12g", (palm_weight + arm_weight) / count }'
+  )
   cmd_ref+=(
     --reward.terms.motion_global_ref_position_error_exp.weight="${ROOT_POS_W}"
     --reward.terms.motion_global_ref_orientation_error_exp.weight="${ROOT_ORI_W}"
@@ -878,19 +886,15 @@ append_reward_args() {
     --reward.terms.motion_joint_velocity_error_upper.weight="${UPPER_JOINT_VEL_W}"
     --reward.terms.object_global_ref_position_error_exp.weight="${OBJECT_POS_W}"
     --reward.terms.object_global_ref_orientation_error_exp.weight="${OBJECT_ORI_W}"
-    --reward.terms.body_contact_reward_palms.weight="${PALM_CONTACT_W}"
-    --reward.terms.body_contact_reward_arms.weight="${ARM_CONTACT_W}"
-    --reward.terms.body_contact_reward_torso.weight="${TORSO_CONTACT_W}"
-    --reward.terms.body_contact_reward_palms.params.threshold="${CONTACT_THRESHOLD}"
-    --reward.terms.body_contact_reward_palms.params.force_scale="${CONTACT_FORCE_SCALE}"
-    --reward.terms.body_contact_reward_palms.params.reward_mode="${CONTACT_MODE}"
-    --reward.terms.body_contact_reward_arms.params.threshold="${CONTACT_THRESHOLD}"
-    --reward.terms.body_contact_reward_arms.params.force_scale="${CONTACT_FORCE_SCALE}"
-    --reward.terms.body_contact_reward_arms.params.reward_mode="${CONTACT_MODE}"
-    --reward.terms.body_contact_reward_torso.params.threshold="${CONTACT_THRESHOLD}"
-    --reward.terms.body_contact_reward_torso.params.force_scale="${CONTACT_FORCE_SCALE}"
-    --reward.terms.body_contact_reward_torso.params.reward_mode="${CONTACT_MODE}"
   )
+  for reward_term in "${wrist_contact_reward_terms[@]}"; do
+    cmd_ref+=(
+      --reward.terms.body_contact_reward_"${reward_term}".weight="${wrist_contact_w}"
+      --reward.terms.body_contact_reward_"${reward_term}".params.threshold="${CONTACT_THRESHOLD}"
+      --reward.terms.body_contact_reward_"${reward_term}".params.force_scale="${CONTACT_FORCE_SCALE}"
+      --reward.terms.body_contact_reward_"${reward_term}".params.reward_mode="${CONTACT_MODE}"
+    )
+  done
 }
 
 run_stage() {

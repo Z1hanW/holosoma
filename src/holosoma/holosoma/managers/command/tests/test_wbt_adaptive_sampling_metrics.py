@@ -14,7 +14,7 @@ def test_select_primary_contact_interval_prefers_wrist_union():
         {
             "left_palm": [40, 120],
             "right_wrist": [45, 135],
-            "arm": [20, 160],
+            "left_elbow": [20, 160],
         }
     )
 

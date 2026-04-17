@@ -18,6 +18,7 @@ from holosoma.managers.command.terms.wbt import (
     _CONTACT_PRIOR_REGION_FORCE_BODY_NAMES,
     _CONTACT_PRIOR_REGION_NAMES,
     _CONTACT_PRIOR_REGION_POSITION_BODY_NAMES,
+    _normalize_contact_prior_region_name,
 )
 from holosoma.managers.reward.base import RewardTermBase
 from holosoma.utils.rotations import (
@@ -35,9 +36,17 @@ if TYPE_CHECKING:
 
 
 _CONTACT_EXPORT_LABEL_BY_REGION = {
+    "left_wrist": "left_wrist",
+    "right_wrist": "right_wrist",
+    # Backward-compatible config aliases. New configs should use left_wrist/right_wrist.
     "left_palm": "left_wrist",
     "right_palm": "right_wrist",
-    "arms": "arm",
+    "left_elbow": "left_elbow",
+    "right_elbow": "right_elbow",
+    "left_wrist_roll": "left_wrist_roll",
+    "right_wrist_roll": "right_wrist_roll",
+    "left_wrist_pitch": "left_wrist_pitch",
+    "right_wrist_pitch": "right_wrist_pitch",
     "torso": "torso",
 }
 
@@ -1420,10 +1429,10 @@ class OfflineContactPointGuidance(RewardTermBase):
         super().__init__(cfg, env)
         self.motion_command: MotionCommand | None = None
         self.position_sigma = float(cfg.params.get("position_sigma", 0.05))
-        self.force_threshold = float(cfg.params.get("force_threshold", 25.0))
+        self.force_threshold = float(cfg.params.get("force_threshold", 1.7))
         self.force_sigma = float(cfg.params.get("force_sigma", 10.0))
         self.use_force_term = bool(cfg.params.get("use_force_term", True))
-        self.force_gate_mode = str(cfg.params.get("force_gate_mode", "soft")).strip().lower()
+        self.force_gate_mode = str(cfg.params.get("force_gate_mode", "binary")).strip().lower()
         if self.force_gate_mode not in {"soft", "binary"}:
             raise ValueError(
                 f"Unsupported force_gate_mode '{self.force_gate_mode}'. Expected one of: ['soft', 'binary']."
@@ -1462,9 +1471,16 @@ class OfflineContactPointGuidance(RewardTermBase):
         if raw_region_names is None:
             return list(_CONTACT_PRIOR_REGION_NAMES)
         if isinstance(raw_region_names, str):
-            region_names = [raw_region_names]
+            raw_names = [raw_region_names]
         else:
-            region_names = [str(name) for name in raw_region_names]
+            raw_names = [str(name) for name in raw_region_names]
+        region_names: list[str] = []
+        seen_region_names: set[str] = set()
+        for raw_name in raw_names:
+            region_name = _normalize_contact_prior_region_name(raw_name)
+            if region_name and region_name not in seen_region_names:
+                region_names.append(region_name)
+                seen_region_names.add(region_name)
         invalid = [name for name in region_names if name not in _CONTACT_PRIOR_REGION_NAMES]
         if invalid:
             raise ValueError(

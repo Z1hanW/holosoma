@@ -14,6 +14,7 @@ import numpy as np
 import tyro
 from loguru import logger
 
+from holosoma.agents.modules.logging_utils import collect_reward_wandb_metadata
 from holosoma.config_types.env import get_tyro_env_config
 from holosoma.config_types.experiment import ExperimentConfig
 from holosoma.config_types.video import CartesianCameraConfig, FixedCameraConfig, SphericalCameraConfig, VideoConfig
@@ -500,6 +501,14 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
                         wandb.run.summary[key] = value
                     wandb.log(object_bank_metadata, step=0)
                     logger.info("Logged object-bank metadata to W&B: {}", object_bank_metadata)
+                reward_config_metadata, reward_summary_metadata = collect_reward_wandb_metadata(tyro_config.reward)
+                if reward_config_metadata:
+                    wandb.config.update(reward_config_metadata, allow_val_change=True)
+                    for key, value in reward_summary_metadata.items():
+                        wandb.run.summary[key] = value
+                    if reward_summary_metadata:
+                        wandb.log(reward_summary_metadata, step=0)
+                    logger.info("Logged grouped reward metadata to W&B.")
                 if config_path is not None:
                     wandb.save(str(config_path), base_path=experiment_save_dir)
 

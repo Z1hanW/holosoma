@@ -78,9 +78,9 @@ GENERALIST_CONTACT_REWARD_ENABLED=${GENERALIST_CONTACT_REWARD_ENABLED:-1}
 GENERALIST_CONTACT_REWARD_MODE=${GENERALIST_CONTACT_REWARD_MODE:-tanh}
 GENERALIST_CONTACT_REWARD_THRESHOLD=${GENERALIST_CONTACT_REWARD_THRESHOLD:-1.0}
 GENERALIST_CONTACT_REWARD_FORCE_SCALE=${GENERALIST_CONTACT_REWARD_FORCE_SCALE:-25.0}
-GENERALIST_TORSO_CONTACT_REWARD_WEIGHT=${GENERALIST_TORSO_CONTACT_REWARD_WEIGHT:-0.30}
-GENERALIST_ARM_CONTACT_REWARD_WEIGHT=${GENERALIST_ARM_CONTACT_REWARD_WEIGHT:-0.20}
-GENERALIST_PALM_CONTACT_REWARD_WEIGHT=${GENERALIST_PALM_CONTACT_REWARD_WEIGHT:-0.10}
+GENERALIST_TORSO_CONTACT_REWARD_WEIGHT=${GENERALIST_TORSO_CONTACT_REWARD_WEIGHT:-0.0}
+GENERALIST_ARM_CONTACT_REWARD_WEIGHT=${GENERALIST_ARM_CONTACT_REWARD_WEIGHT:-0.0}
+GENERALIST_PALM_CONTACT_REWARD_WEIGHT=${GENERALIST_PALM_CONTACT_REWARD_WEIGHT:-0.70}
 
 normalize_resume_step() {
   local raw="$1"
@@ -607,6 +607,13 @@ if [[ "${GENERALIST_CONTACT_REWARD_ENABLED_FLAG}" != "1" ]]; then
   GENERALIST_ARM_CONTACT_REWARD_WEIGHT=0.0
   GENERALIST_PALM_CONTACT_REWARD_WEIGHT=0.0
 fi
+WRIST_CONTACT_REWARD_TERMS=(
+  left_wrist_yaw
+  right_wrist_yaw
+)
+GENERALIST_WRIST_CONTACT_REWARD_WEIGHT=$(
+  awk -v palm_weight="${GENERALIST_PALM_CONTACT_REWARD_WEIGHT}" -v arm_weight="${GENERALIST_ARM_CONTACT_REWARD_WEIGHT}" -v count="${#WRIST_CONTACT_REWARD_TERMS[@]}" 'BEGIN { printf "%.12g", (palm_weight + arm_weight) / count }'
+)
 
 default_pose_prepend_enabled_normalized=$(echo "${DEFAULT_POSE_PREPEND_ENABLED}" | tr '[:upper:]' '[:lower:]')
 case "${default_pose_prepend_enabled_normalized}" in
@@ -624,7 +631,7 @@ esac
 
 echo "[INFO] Generalist contact reward enabled: ${GENERALIST_CONTACT_REWARD_ENABLED_FLAG}"
 echo "[INFO] Generalist contact reward mode=${GENERALIST_CONTACT_REWARD_MODE} threshold=${GENERALIST_CONTACT_REWARD_THRESHOLD} force_scale=${GENERALIST_CONTACT_REWARD_FORCE_SCALE}"
-echo "[INFO] Generalist contact reward weights torso=${GENERALIST_TORSO_CONTACT_REWARD_WEIGHT} arms=${GENERALIST_ARM_CONTACT_REWARD_WEIGHT} palms=${GENERALIST_PALM_CONTACT_REWARD_WEIGHT}"
+echo "[INFO] Generalist wrist contact reward weights total=${GENERALIST_PALM_CONTACT_REWARD_WEIGHT}+${GENERALIST_ARM_CONTACT_REWARD_WEIGHT} each=${GENERALIST_WRIST_CONTACT_REWARD_WEIGHT} torso=disabled"
 echo "[INFO] Motion default-pose prepend enabled: ${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
 echo "[INFO] Motion default-pose prepend duration: ${DEFAULT_POSE_PREPEND_DURATION_S}s"
 echo "[INFO] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} NPROC=${NPROC} PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
@@ -647,21 +654,17 @@ train_cmd=(
   --simulator.config.sim.physx.gpu-collision-stack-size="${PHYSX_GPU_COLLISION_STACK_SIZE}"
   --simulator.config.sim.physx.gpu-heap-capacity="${PHYSX_GPU_HEAP_CAPACITY}"
   --simulator.config.sim.physx.gpu-temp-buffer-capacity="${PHYSX_GPU_TEMP_BUFFER_CAPACITY}"
-  --reward.terms.body_contact_reward_torso.weight="${GENERALIST_TORSO_CONTACT_REWARD_WEIGHT}"
-  --reward.terms.body_contact_reward_arms.weight="${GENERALIST_ARM_CONTACT_REWARD_WEIGHT}"
-  --reward.terms.body_contact_reward_palms.weight="${GENERALIST_PALM_CONTACT_REWARD_WEIGHT}"
-  --reward.terms.body_contact_reward_torso.params.reward_mode="${GENERALIST_CONTACT_REWARD_MODE}"
-  --reward.terms.body_contact_reward_arms.params.reward_mode="${GENERALIST_CONTACT_REWARD_MODE}"
-  --reward.terms.body_contact_reward_palms.params.reward_mode="${GENERALIST_CONTACT_REWARD_MODE}"
-  --reward.terms.body_contact_reward_torso.params.threshold="${GENERALIST_CONTACT_REWARD_THRESHOLD}"
-  --reward.terms.body_contact_reward_arms.params.threshold="${GENERALIST_CONTACT_REWARD_THRESHOLD}"
-  --reward.terms.body_contact_reward_palms.params.threshold="${GENERALIST_CONTACT_REWARD_THRESHOLD}"
-  --reward.terms.body_contact_reward_torso.params.force_scale="${GENERALIST_CONTACT_REWARD_FORCE_SCALE}"
-  --reward.terms.body_contact_reward_arms.params.force_scale="${GENERALIST_CONTACT_REWARD_FORCE_SCALE}"
-  --reward.terms.body_contact_reward_palms.params.force_scale="${GENERALIST_CONTACT_REWARD_FORCE_SCALE}"
   --command.setup-terms.motion-command.params.motion-config.enable-default-pose-prepend="${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
   --command.setup-terms.motion-command.params.motion-config.default-pose-prepend-duration-s="${DEFAULT_POSE_PREPEND_DURATION_S}"
 )
+for reward_term in "${WRIST_CONTACT_REWARD_TERMS[@]}"; do
+  train_cmd+=(
+    --reward.terms.body_contact_reward_"${reward_term}".weight="${GENERALIST_WRIST_CONTACT_REWARD_WEIGHT}"
+    --reward.terms.body_contact_reward_"${reward_term}".params.reward_mode="${GENERALIST_CONTACT_REWARD_MODE}"
+    --reward.terms.body_contact_reward_"${reward_term}".params.threshold="${GENERALIST_CONTACT_REWARD_THRESHOLD}"
+    --reward.terms.body_contact_reward_"${reward_term}".params.force_scale="${GENERALIST_CONTACT_REWARD_FORCE_SCALE}"
+  )
+done
 if [[ "${DEBUG_MODE}" == "replay" || "${DEBUG_MODE}" == "toy" ]]; then
   train_cmd=("${PYTHON_BIN}" "${train_cmd[@]}")
 else

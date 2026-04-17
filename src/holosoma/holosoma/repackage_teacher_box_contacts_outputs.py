@@ -12,7 +12,7 @@ SRC_ROOT = Path(__file__).resolve().parents[1]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from holosoma.export_teacher_box_contacts import _save_overlay_assets
+from holosoma.export_teacher_box_contacts import _EXPORT_REGION_LABELS, _save_overlay_assets
 
 
 def _copy_matching(src_dir: Path, dst_dir: Path, pattern: str) -> None:
@@ -76,7 +76,7 @@ def repackage_outputs(
         primitive_counts = np.load(source_clip_dir / "primitive_contact_point_counts.npy")
         region_points_by_label = {}
         region_counts_by_label = {}
-        for label in ["left_wrist", "right_wrist", "arm", "torso"]:
+        for label in _EXPORT_REGION_LABELS:
             points_path = source_clip_dir / f"{label}_contact_points.npy"
             counts_path = source_clip_dir / f"{label}_contact_point_counts.npy"
             region_points_by_label[label] = (
@@ -94,7 +94,7 @@ def repackage_outputs(
             retained_points_xyz=primitive_points_xyz,
             retained_counts=primitive_counts,
             display_points_xyz=primitive_points_xyz,
-            display_point_labels=["arm"] * int(primitive_points_xyz.shape[0]),
+            display_point_labels=[_EXPORT_REGION_LABELS[0]] * int(primitive_points_xyz.shape[0]),
             region_points_by_label=region_points_by_label,
             save_glb=True,
             save_preview_png=True,

@@ -208,6 +208,15 @@ if [[ ! -f "${OBJECT_URDF}" ]]; then
 fi
 
 EXTRA_ARGS=("$@")
+GLOBAL_EXTRA_ARGS=()
+LOGGER_EXTRA_ARGS=()
+for arg in "${EXTRA_ARGS[@]}"; do
+  if [[ "${arg}" == --logger.* ]]; then
+    LOGGER_EXTRA_ARGS+=("${arg}")
+  else
+    GLOBAL_EXTRA_ARGS+=("${arg}")
+  fi
+done
 
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
 echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS} strict_teacher_load=${STRICT_TEACHER_LOAD}"
@@ -306,7 +315,7 @@ run_distill_stage() {
   if [[ -n "${stage_switch_to_rl_after}" ]]; then
     cmd+=(--algo.config.distill.switch-to-rl-after="${stage_switch_to_rl_after}")
   fi
-  cmd+=("${EXTRA_ARGS[@]}")
+  cmd+=("${GLOBAL_EXTRA_ARGS[@]}")
   cmd+=("${LOGGER}")
 
   # logger:disabled does not accept logger sub-options such as --logger.name.
@@ -319,6 +328,7 @@ run_distill_stage() {
       --logger.video.upload_to_wandb=False
     )
   fi
+  cmd+=("${LOGGER_EXTRA_ARGS[@]}")
 
   HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES="${PERCEPTION_INTO_POLICY_MODULES}" \
   TORCH_DIST_TIMEOUT_SEC="${TORCH_DIST_TIMEOUT_SEC}" \

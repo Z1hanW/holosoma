@@ -91,7 +91,15 @@ def _write_contact_clip(
         (clip_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
     np.save(clip_dir / "left_wrist_contact_points.npy", left_points.astype(np.float32))
     np.save(clip_dir / "right_wrist_contact_points.npy", right_points.astype(np.float32))
-    np.save(clip_dir / "arm_contact_points.npy", np.zeros((0, 3), dtype=np.float32))
+    for region_name in (
+        "left_elbow",
+        "right_elbow",
+        "left_wrist_roll",
+        "right_wrist_roll",
+        "left_wrist_pitch",
+        "right_wrist_pitch",
+    ):
+        np.save(clip_dir / f"{region_name}_contact_points.npy", np.zeros((0, 3), dtype=np.float32))
     np.save(clip_dir / "torso_contact_points.npy", np.zeros((0, 3), dtype=np.float32))
     if left_contact_interval is not None:
         np.save(clip_dir / "left_wrist_contact_interval_steps.npy", np.asarray(left_contact_interval, dtype=np.int32))
@@ -170,7 +178,7 @@ def test_offline_contact_guidance_uses_clip_specific_targets(tmp_path: Path, mon
             func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
             params={
                 "contact_export_root": str(export_root),
-                "region_names": ["left_palm", "right_palm"],
+                "region_names": ["left_wrist", "right_wrist"],
                 "position_sigma": 0.05,
                 "force_threshold": 25.0,
                 "force_sigma": 10.0,
@@ -186,11 +194,11 @@ def test_offline_contact_guidance_uses_clip_specific_targets(tmp_path: Path, mon
     assert reward[1].item() == pytest.approx(0.0, rel=1e-5, abs=1e-5)
 
 
-def test_offline_contact_guidance_force_term_saturates_below_threshold(
+def test_offline_contact_guidance_accepts_legacy_palm_region_aliases(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    env, export_root = _build_test_env(tmp_path, left_force=15.0, right_force=15.0)
+    env, export_root = _build_test_env(tmp_path, left_force=40.0, right_force=40.0)
     motion_command = env.command_manager.get_state("motion_command")
     monkeypatch.setattr(reward_wbt, "_get_motion_command_and_assert_type", lambda _env: motion_command)
     term = reward_wbt.OfflineContactPointGuidance(
@@ -208,8 +216,62 @@ def test_offline_contact_guidance_force_term_saturates_below_threshold(
         env,
     )
 
+    assert term.region_names == ["left_wrist", "right_wrist"]
+    reward = term(env)
+    assert reward[0].item() == pytest.approx(1.0, rel=1e-5, abs=1e-5)
+
+
+def test_offline_contact_guidance_soft_force_term_saturates_below_threshold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    env, export_root = _build_test_env(tmp_path, left_force=15.0, right_force=15.0)
+    motion_command = env.command_manager.get_state("motion_command")
+    monkeypatch.setattr(reward_wbt, "_get_motion_command_and_assert_type", lambda _env: motion_command)
+    term = reward_wbt.OfflineContactPointGuidance(
+        RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
+            params={
+                "contact_export_root": str(export_root),
+                "region_names": ["left_wrist", "right_wrist"],
+                "position_sigma": 0.05,
+                "force_threshold": 25.0,
+                "force_sigma": 10.0,
+                "force_gate_mode": "soft",
+            },
+            weight=1.0,
+        ),
+        env,
+    )
+
     reward = term(env)
     assert reward[0].item() == pytest.approx(float(np.exp(-1.0)), rel=1e-5, abs=1e-5)
+
+
+def test_offline_contact_guidance_default_force_gate_requires_threshold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    env, export_root = _build_test_env(tmp_path, left_force=15.0, right_force=15.0)
+    motion_command = env.command_manager.get_state("motion_command")
+    monkeypatch.setattr(reward_wbt, "_get_motion_command_and_assert_type", lambda _env: motion_command)
+    term = reward_wbt.OfflineContactPointGuidance(
+        RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
+            params={
+                "contact_export_root": str(export_root),
+                "region_names": ["left_wrist", "right_wrist"],
+                "position_sigma": 0.05,
+                "force_threshold": 25.0,
+                "force_sigma": 10.0,
+            },
+            weight=1.0,
+        ),
+        env,
+    )
+
+    reward = term(env)
+    assert reward[0].item() == pytest.approx(0.0, rel=1e-5, abs=1e-5)
 
 
 def test_offline_contact_guidance_supports_outputs_clips_wrist_reach_without_metadata(
@@ -231,7 +293,7 @@ def test_offline_contact_guidance_supports_outputs_clips_wrist_reach_without_met
             func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
             params={
                 "contact_export_root": str(export_root),
-                "region_names": ["left_palm", "right_palm"],
+                "region_names": ["left_wrist", "right_wrist"],
                 "position_sigma": 0.05,
                 "use_force_term": False,
             },
@@ -256,7 +318,7 @@ def test_offline_contact_guidance_binary_force_gate_requires_threshold(
             func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
             params={
                 "contact_export_root": str(export_root),
-                "region_names": ["left_palm", "right_palm"],
+                "region_names": ["left_wrist", "right_wrist"],
                 "position_sigma": 0.05,
                 "force_threshold": 25.0,
                 "use_force_term": True,
@@ -290,7 +352,7 @@ def test_offline_contact_guidance_uses_contact_schedule_mask_when_present(
             func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
             params={
                 "contact_export_root": str(export_root),
-                "region_names": ["left_palm", "right_palm"],
+                "region_names": ["left_wrist", "right_wrist"],
                 "position_sigma": 0.05,
                 "use_force_term": False,
                 "use_contact_schedule": True,
@@ -327,7 +389,7 @@ def test_offline_contact_guidance_falls_back_to_reference_pickup_gate_when_sched
             func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
             params={
                 "contact_export_root": str(export_root),
-                "region_names": ["left_palm", "right_palm"],
+                "region_names": ["left_wrist", "right_wrist"],
                 "position_sigma": 0.05,
                 "use_force_term": False,
                 "use_contact_schedule": True,
@@ -365,7 +427,7 @@ def test_offline_contact_guidance_relaxes_contact_interval_by_configured_frames(
             func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
             params={
                 "contact_export_root": str(export_root),
-                "region_names": ["left_palm", "right_palm"],
+                "region_names": ["left_wrist", "right_wrist"],
                 "position_sigma": 0.05,
                 "use_force_term": False,
                 "use_contact_schedule": True,

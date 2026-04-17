@@ -4,7 +4,8 @@ import pytest
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from holosoma.agents.modules.logging_utils import LoggingHelper
+from holosoma.agents.modules.logging_utils import LoggingHelper, collect_reward_wandb_metadata
+from holosoma.config_types.reward import RewardManagerCfg, RewardTermCfg
 
 
 @pytest.fixture
@@ -166,6 +167,97 @@ def test_wandb_logging(prefixed_logging_helper, mock_wandb):
     assert "test_prefix/Episode/test_metric" in logged_data
     assert "test_prefix/RawEpisode/raw_test_metric" in logged_data
     assert logged_data["global_step"] == 0
+
+
+def test_reward_group_aliases_are_logged(logging_helper, mock_writer, mock_wandb):
+    """Distill reward terms should also appear under grouped W&B Reward panels."""
+    logging_helper.ep_infos = [
+        {
+            "rew_teacher_rollout_global_ref_position_error_exp": torch.tensor([0.5], device=logging_helper.device),
+            "rew_teacher_rollout_object_global_ref_position_error_exp": torch.tensor([1.0], device=logging_helper.device),
+            "rew_offline_contact_guidance": torch.tensor([0.25], device=logging_helper.device),
+            "rew_action_rate_l2": torch.tensor([-0.1], device=logging_helper.device),
+            "rew_sparse_goal_success_bonus": torch.tensor([2.0], device=logging_helper.device),
+        }
+    ]
+    logging_helper.rewbuffer.extend([3.65])
+    logging_helper.lenbuffer.extend([42.0])
+    mock_wandb.run = MagicMock()
+
+    logging_helper.post_epoch_logging(it=7, loss_dict={}, extra_log_dicts={})
+
+    actual_calls = [call[0][0] for call in mock_writer.add_scalar.call_args_list]
+    expected_keys = {
+        "Reward/Track/teacher_rollout_global_ref_position_error_exp",
+        "Reward/Object/teacher_rollout_object_global_ref_position_error_exp",
+        "Reward/Contact/offline_contact_guidance",
+        "Reward/Regularize/action_rate_l2",
+        "Reward/Rest/sparse_goal_success_bonus",
+        "Reward/Track",
+        "Reward/Object",
+        "Reward/Contact",
+        "Reward/Regularize",
+        "Reward/Rest",
+        "Reward/total_episode_terms",
+        "Reward/mean",
+        "Episode Length/mean",
+    }
+    for expected_key in expected_keys:
+        assert expected_key in actual_calls
+
+    logged_data = mock_wandb.log.call_args[0][0]
+    assert logged_data["Reward/Track/teacher_rollout_global_ref_position_error_exp"] == 0.5
+    assert logged_data["Reward/Object/teacher_rollout_object_global_ref_position_error_exp"] == 1.0
+    assert logged_data["Reward/Contact/offline_contact_guidance"] == 0.25
+    assert logged_data["Reward/Regularize/action_rate_l2"] == pytest.approx(-0.1)
+    assert logged_data["Reward/Rest/sparse_goal_success_bonus"] == 2.0
+    assert logged_data["Reward/total_episode_terms"] == pytest.approx(3.65)
+    assert logged_data["Reward/mean"] == pytest.approx(3.65)
+    assert logged_data["Episode Length/mean"] == pytest.approx(42.0)
+
+
+def test_collect_reward_wandb_metadata_groups_weights_and_sigmas():
+    reward_cfg = RewardManagerCfg(
+        terms={
+            "teacher_rollout_global_ref_position_error_exp": RewardTermCfg(
+                func="unused",
+                params={"sigma": 0.3},
+                weight=0.5,
+            ),
+            "teacher_rollout_object_global_ref_position_error_exp": RewardTermCfg(
+                func="unused",
+                params={"sigma": 0.3},
+                weight=1.0,
+            ),
+            "offline_contact_guidance": RewardTermCfg(
+                func="unused",
+                params={"position_sigma": 0.05, "force_threshold": 1.7},
+                weight=1.0,
+            ),
+            "action_rate_l2": RewardTermCfg(func="unused", weight=-0.1),
+            "sparse_goal_success_bonus": RewardTermCfg(func="unused", weight=20.0),
+            "sparse_goal_pickup_height_reward": RewardTermCfg(func="unused", weight=0.0),
+        }
+    )
+
+    config_metadata, summary_metadata = collect_reward_wandb_metadata(reward_cfg)
+    spec = config_metadata["reward_group_spec"]
+
+    assert spec["Track"]["teacher_rollout_global_ref_position_error_exp"]["weight"] == 0.5
+    assert spec["Track"]["teacher_rollout_global_ref_position_error_exp"]["sigma"] == 0.3
+    assert spec["Object"]["teacher_rollout_object_global_ref_position_error_exp"]["weight"] == 1.0
+    assert spec["Contact"]["offline_contact_guidance"]["force_threshold"] == 1.7
+    assert spec["Regularize"]["action_rate_l2"]["weight"] == -0.1
+    assert spec["Rest"]["sparse_goal_success_bonus"]["weight"] == 20.0
+    assert "sparse_goal_pickup_height_reward" not in spec["Rest"]
+    assert (
+        summary_metadata["RewardSpec/Track/teacher_rollout_global_ref_position_error_exp/weight"]
+        == 0.5
+    )
+    assert (
+        summary_metadata["RewardSpec/Contact/offline_contact_guidance/force_threshold"]
+        == 1.7
+    )
 
 
 def test_wandb_hidden_metrics_are_defined(logging_helper, mock_wandb):

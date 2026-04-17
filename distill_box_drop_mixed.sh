@@ -16,6 +16,7 @@ set -euo pipefail
 #
 # Schedule variants:
 # - default: mixed PPO+DAgger curriculum
+# - ppo_first: PPO+DAgger from iteration 0, with PPO 0.1 -> 0.9 in 0.1/500-iter steps
 # - dag_first: hold PPO off early, then ramp it in
 # - pure_dagger: keep PPO coeff at 0.0 for the full training horizon (default 10000 iterations)
 
@@ -222,6 +223,10 @@ while [[ $# -gt 0 ]]; do
       SCHEDULE_VARIANT="dag_first"
       shift
       ;;
+    ppo_first|ppo-first)
+      SCHEDULE_VARIANT="ppo_first"
+      shift
+      ;;
     pickup_reward|pickup-reward|pickup)
       REWARD_VARIANT="pickup_reward"
       shift
@@ -247,7 +252,7 @@ if [[ $# -gt 0 ]]; then
 fi
 
 if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
-  echo "Usage: $0 <teacher_checkpoint.pt> [extra train args...]" >&2
+  echo "Usage: $0 [pure-sd|pure-real|mix-naive] [default|pure_dagger|dag_first|ppo-first] [teacher_checkpoint.pt|wandb_run_url] [run_name] [extra train args...]" >&2
   exit 1
 fi
 
@@ -302,6 +307,8 @@ NUM_LEARNING_ITERATIONS_EXPLICIT=0
 [[ -n "${NUM_LEARNING_ITERATIONS+x}" ]] && NUM_LEARNING_ITERATIONS_EXPLICIT=1
 PPO_TARGET_COEFF_EXPLICIT=0
 [[ -n "${PPO_TARGET_COEFF+x}" ]] && PPO_TARGET_COEFF_EXPLICIT=1
+PPO_START_COEFF_EXPLICIT=0
+[[ -n "${PPO_START_COEFF+x}" ]] && PPO_START_COEFF_EXPLICIT=1
 PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT=0
 [[ -n "${PPO_SCHEDULE_STEP_EPOCHS+x}" ]] && PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT=1
 MOTION_DIR_EXPLICIT=0
@@ -601,6 +608,9 @@ NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-10000}
 PPO_START_EPOCH=${PPO_START_EPOCH:-1000}
 DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-4500}
 PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.9}
+PPO_START_COEFF=${PPO_START_COEFF:-0.0}
+PPO_START_NOISE_STD=${PPO_START_NOISE_STD-0.1}
+PPO_START_NOISE_STD_UNTIL_COEFF=${PPO_START_NOISE_STD_UNTIL_COEFF:-0.1}
 PPO_SCHEDULE_STEP_EPOCHS=${PPO_SCHEDULE_STEP_EPOCHS:-500}
 DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
 FIXED_BC_EVAL_LOG_INTERVAL=${FIXED_BC_EVAL_LOG_INTERVAL:-1000}
@@ -618,6 +628,8 @@ FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITE
 FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS}}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
+# Pitch is intentionally written into the run config by default.
+CAMERA_PITCH_DEG=${CAMERA_PITCH_DEG-10}
 STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_proprio','actor_obs_actions','actor_obs_drop_command']"}
 DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES=${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES:-True}
 DAGGER_MATCH_STD=${DAGGER_MATCH_STD:-True}
@@ -630,7 +642,17 @@ ENABLE_DEFAULT_POSE_PREPEND=${ENABLE_DEFAULT_POSE_PREPEND:-False}
 DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0.0}
 ENABLE_DEFAULT_POSE_APPEND=${ENABLE_DEFAULT_POSE_APPEND:-False}
 DEFAULT_POSE_APPEND_DURATION_S=${DEFAULT_POSE_APPEND_DURATION_S:-0.0}
-RESET_NOISE_SCALE=${RESET_NOISE_SCALE:-0.0}
+RESET_NOISE_SCALE_ENV=()
+if [[ -n "${RESET_NOISE_SCALE+x}" ]]; then
+  RESET_NOISE_SCALE_ENV=(RESET_NOISE_SCALE="${RESET_NOISE_SCALE}")
+fi
+PPO_START_NOISE_STD_ARGS=()
+if [[ -n "${PPO_START_NOISE_STD}" ]]; then
+  PPO_START_NOISE_STD_ARGS=(
+    --algo.config.distill.ppo-start-noise-std="${PPO_START_NOISE_STD}"
+    --algo.config.distill.ppo-start-noise-std-until-coeff="${PPO_START_NOISE_STD_UNTIL_COEFF}"
+  )
+fi
 # Distill UI: keep only goal/reset-box/clip + essential sim controls by default.
 VISER_DISTILL_MINIMAL_UI=${VISER_DISTILL_MINIMAL_UI:-1}
 # Distill mixed launcher: hide Viser track/target keypoints by default.
@@ -723,8 +745,34 @@ case "${SCHEDULE_VARIANT}" in
       SCHEDULE_NOTES="No teacher rollout mix. 0-2000 pure DAgger with PPO disabled. 2000-3000 PPO ramps 0->0.3 while DAgger stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.25 and reset curriculum ramps start_at_zero 0.2->1.0. Goal range ramps with the same delayed schedule."
     fi
     ;;
+  ppo_first)
+    if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
+      NUM_LEARNING_ITERATIONS=10000
+    fi
+    if [[ "${PPO_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
+      PPO_START_EPOCH=0
+    fi
+    if [[ "${DAGGER_END_EPOCH_EXPLICIT}" -eq 0 ]]; then
+      DAGGER_END_EPOCH=4000
+    fi
+    if [[ "${PPO_START_COEFF_EXPLICIT}" -eq 0 ]]; then
+      PPO_START_COEFF="0.1"
+    fi
+    if [[ "${PPO_TARGET_COEFF_EXPLICIT}" -eq 0 ]]; then
+      PPO_TARGET_COEFF="0.9"
+    fi
+    if [[ "${PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT}" -eq 0 ]]; then
+      PPO_SCHEDULE_STEP_EPOCHS="500"
+    fi
+    if [[ "${SCHEDULE_NAME_EXPLICIT}" -eq 0 ]]; then
+      SCHEDULE_NAME="teacher_anchor_then_goal_curriculum_v4_ppo_first_step_mix"
+    fi
+    if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
+      SCHEDULE_NOTES="PPO-first hybrid: PPO and DAgger are both active from iteration 0. PPO starts at 0.1 and increases by 0.1 every 500 iterations until 0.9 at 4000; effective DAgger weight starts at 0.9 and decreases to 0.1. Mixed sparse-goal curriculum, command-only ramp, and external-goal ramp stay aligned with the default drop-mixed launcher."
+    fi
+    ;;
   *)
-    echo "[ERROR] Unsupported SCHEDULE_VARIANT='${SCHEDULE_VARIANT}'. Use one of: default, pure_dagger, dag_first" >&2
+    echo "[ERROR] Unsupported SCHEDULE_VARIANT='${SCHEDULE_VARIANT}'. Use one of: default, pure_dagger, dag_first, ppo_first" >&2
     exit 2
     ;;
 esac
@@ -920,6 +968,8 @@ case "${DISTRIBUTION_VARIANT}" in
     if [[ "${SCHEDULE_NAME_EXPLICIT}" -eq 0 ]]; then
       if [[ "${SCHEDULE_VARIANT}" == "dag_first" ]]; then
         SCHEDULE_NAME="teacher_anchor_then_goal_curriculum_v2_dag_first_stable_half"
+      elif [[ "${SCHEDULE_VARIANT}" == "ppo_first" ]]; then
+        SCHEDULE_NAME="teacher_anchor_then_goal_curriculum_v4_ppo_first_stable_half"
       else
         SCHEDULE_NAME="teacher_anchor_then_goal_curriculum_v2_stable_half"
       fi
@@ -927,6 +977,8 @@ case "${DISTRIBUTION_VARIANT}" in
     if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
       if [[ "${SCHEDULE_VARIANT}" == "dag_first" ]]; then
         SCHEDULE_NOTES="No teacher rollout mix. 0-2000 pure DAgger with PPO disabled. 2000-3000 PPO ramps 0->0.3 while DAgger stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.5 so half the envs remain on stable clip / motion-tracking distribution while half train external goals. Reset curriculum keeps start_at_zero=0.2 to preserve copy-style reset distribution."
+      elif [[ "${SCHEDULE_VARIANT}" == "ppo_first" ]]; then
+        SCHEDULE_NOTES="PPO-first stable-half hybrid: PPO and DAgger are both active from iteration 0. PPO starts at 0.1 and increases by 0.1 every 500 iterations until 0.9 at 4000; effective DAgger weight starts at 0.9 and decreases to 0.1. 2500-end external_goal_prob ramps to 0.5 so half the envs remain on stable clip / motion-tracking distribution."
       else
         SCHEDULE_NOTES="No teacher rollout mix. 0-2500 teacher-anchored clip-only; PPO ramps 0->0.3 over 0-3000 while DAgger weight stays dominant. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.5 so half the envs remain on stable clip / motion-tracking distribution while half train external goals. Reset curriculum keeps start_at_zero=0.2 to preserve copy-style reset distribution."
       fi
@@ -1330,6 +1382,11 @@ if [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH}" ]]; then
 fi
 echo "[INFO] run_name=${RUN_NAME} training_name=${TRAINING_NAME}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
+if [[ -n "${CAMERA_PITCH_DEG}" ]]; then
+  echo "[INFO] camera_pitch_deg=${CAMERA_PITCH_DEG}"
+else
+  echo "[INFO] camera_pitch_deg=<preset default>"
+fi
 if [[ -n "${OBJECT_GEOMETRY_MODE_NORM}" ]]; then
   echo "[INFO] object_geometry_mode=${OBJECT_GEOMETRY_MODE_NORM} simulator_object_spawn_mode=${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}"
 else
@@ -1368,7 +1425,12 @@ echo "[INFO] student_actor_inputs=${STUDENT_ACTOR_INPUTS}"
 echo "[INFO] schedule_name=${SCHEDULE_NAME}"
 echo "[INFO] schedule_notes=${SCHEDULE_NOTES}"
 echo "[INFO] pure_dagger_active=${PURE_DAGGER_ACTIVE}"
-echo "[INFO] ppo_schedule=${PPO_START_EPOCH}->${DAGGER_END_EPOCH} target=${PPO_TARGET_COEFF} step_epochs=${PPO_SCHEDULE_STEP_EPOCHS} dagger_loss_coef=${DAGGER_LOSS_COEF}"
+echo "[INFO] ppo_schedule=${PPO_START_EPOCH}->${DAGGER_END_EPOCH} start=${PPO_START_COEFF} target=${PPO_TARGET_COEFF} step_epochs=${PPO_SCHEDULE_STEP_EPOCHS} dagger_loss_coef=${DAGGER_LOSS_COEF}"
+if [[ -n "${PPO_START_NOISE_STD}" ]]; then
+  echo "[INFO] ppo_start_noise_std=${PPO_START_NOISE_STD} until_coeff=${PPO_START_NOISE_STD_UNTIL_COEFF}"
+else
+  echo "[INFO] ppo_start_noise_std=<disabled>"
+fi
 echo "[INFO] fixed_bc_eval_log_interval=${FIXED_BC_EVAL_LOG_INTERVAL}"
 echo "[INFO] teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
 if [[ -n "${TEACHER_ACTION_MIX_RATIO_START}" || -n "${TEACHER_ACTION_MIX_RATIO_END}" || -n "${TEACHER_ACTION_MIX_RATIO_END_ITERATION}" ]]; then
@@ -1391,7 +1453,11 @@ echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}->${START
 echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END} iter=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER}"
 echo "[INFO] reset_to_default_pose=${RESET_TO_DEFAULT_POSE}"
 echo "[INFO] default_pose_prepend=${ENABLE_DEFAULT_POSE_PREPEND} duration_s=${DEFAULT_POSE_PREPEND_DURATION_S} default_pose_append=${ENABLE_DEFAULT_POSE_APPEND} append_duration_s=${DEFAULT_POSE_APPEND_DURATION_S}"
-echo "[INFO] reset_noise_scale=${RESET_NOISE_SCALE}"
+if [[ -n "${RESET_NOISE_SCALE+x}" ]]; then
+  echo "[INFO] reset_noise_scale=${RESET_NOISE_SCALE}"
+else
+  echo "[INFO] reset_noise_scale=<inherited>"
+fi
 echo "[INFO] viser_distill_minimal_ui=${VISER_DISTILL_MINIMAL_UI}"
 echo "[INFO] viser_show_target_keypoints=${VISER_SHOW_TARGET_KEYPOINTS}"
 echo "[INFO] dagger_ignore_external_goal_samples=${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES}"
@@ -1449,6 +1515,9 @@ fi
 if [[ "${IMAGE_HEIGHT_EXPLICIT}" -eq 1 ]]; then
   PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-height="${IMAGE_HEIGHT}")
 fi
+if [[ -n "${CAMERA_PITCH_DEG}" ]]; then
+  PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-pitch-deg="${CAMERA_PITCH_DEG}")
+fi
 if [[ "${CAMERA_NEAR_EXPLICIT}" -eq 1 ]]; then
   PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-near="${CAMERA_NEAR}")
 fi
@@ -1497,7 +1566,7 @@ exec env \
   DAGGER_LOSS_COEF="${DAGGER_LOSS_COEF}" \
   DAGGER_MATCH_STD="${DAGGER_MATCH_STD}" \
   ENTROPY_COEF="${ENTROPY_COEF}" \
-  RESET_NOISE_SCALE="${RESET_NOISE_SCALE}" \
+  "${RESET_NOISE_SCALE_ENV[@]}" \
   START_AT_TIMESTEP_ZERO_PROB="${START_AT_TIMESTEP_ZERO_PROB}" \
   FREEZE_AT_TIMESTEP_ZERO_PROB="${FREEZE_AT_TIMESTEP_ZERO_PROB}" \
   HOLOSOMA_RESET_TO_DEFAULT_POSE="${RESET_TO_DEFAULT_POSE}" \
@@ -1530,6 +1599,8 @@ exec env \
     --algo.config.distill.dagger-ignore-external-goal-samples="${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES}" \
     --algo.config.distill.dagger-ignore-episode-initial-steps="${DAGGER_IGNORE_EPISODE_INITIAL_STEPS}" \
     --algo.config.distill.fixed-bc-eval-log-interval="${FIXED_BC_EVAL_LOG_INTERVAL}" \
+    --algo.config.distill.ppo-start-coeff="${PPO_START_COEFF}" \
+    "${PPO_START_NOISE_STD_ARGS[@]}" \
     --algo.config.distill.ppo-target-coeff="${PPO_TARGET_COEFF}" \
     --algo.config.distill.ppo-schedule-step-epochs="${PPO_SCHEDULE_STEP_EPOCHS}" \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.enabled="${SPARSE_GOAL_ENABLED}" \

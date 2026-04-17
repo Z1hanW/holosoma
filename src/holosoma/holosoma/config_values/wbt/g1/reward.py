@@ -55,16 +55,13 @@ _UPPER_DOF_NAMES = [
     "right_wrist_yaw_joint",
 ]
 
-# The current whole-body object asset uses a fixed palm joint
-# (left/right_hand_palm_joint) that gets collapsed into wrist_yaw_link.
-_PALM_CONTACT_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
-_ARM_SUPPORT_CONTACT_BODY_NAMES = [
-    "left_elbow_link",
-    "right_elbow_link",
-    "left_wrist_roll_link",
-    "right_wrist_roll_link",
-    "left_wrist_pitch_link",
-    "right_wrist_pitch_link",
+_WRIST_CONTACT_BODY_NAMES = {
+    "left_wrist_yaw": "left_wrist_yaw_link",
+    "right_wrist_yaw": "right_wrist_yaw_link",
+}
+_OFFLINE_CONTACT_GUIDANCE_REGION_NAMES = [
+    "left_wrist",
+    "right_wrist",
 ]
 # On the current G1 object-carry asset, chest/trunk bracing against the box
 # is represented by torso_link contact.
@@ -232,26 +229,19 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed = RewardManagerCfg(
             },
             weight=-0.5,
         ),
-        "body_contact_reward_palms": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
-            params={
-                "threshold": 1.0,
-                "force_scale": 25.0,
-                "reward_mode": "tanh",
-                "body_names": _PALM_CONTACT_BODY_NAMES,
-            },
-            weight=0.10,
-        ),
-        "body_contact_reward_arms": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
-            params={
-                "threshold": 1.0,
-                "force_scale": 25.0,
-                "reward_mode": "tanh",
-                "body_names": _ARM_SUPPORT_CONTACT_BODY_NAMES,
-            },
-            weight=0.20,
-        ),
+        **{
+            f"body_contact_reward_{region_name}": RewardTermCfg(
+                func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
+                params={
+                    "threshold": 1.0,
+                    "force_scale": 25.0,
+                    "reward_mode": "tanh",
+                    "body_names": [body_name],
+                },
+                weight=0.70 / len(_WRIST_CONTACT_BODY_NAMES),
+            )
+            for region_name, body_name in _WRIST_CONTACT_BODY_NAMES.items()
+        },
         "body_contact_reward_torso": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
             params={
@@ -260,7 +250,7 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed = RewardManagerCfg(
                 "reward_mode": "tanh",
                 "body_names": _TORSO_SUPPORT_CONTACT_BODY_NAMES,
             },
-            weight=0.30,
+            weight=0.0,
         ),
         "sparse_goal_pickup_height_reward": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:sparse_goal_pickup_height_reward",
@@ -424,7 +414,7 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_gui
             func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
             params={
                 "contact_export_root": "outputs/clips",
-                "region_names": ["left_palm", "right_palm"],
+                "region_names": ["left_wrist", "right_wrist"],
                 "position_sigma": 0.04,
                 "use_force_term": False,
                 "use_contact_schedule": True,
@@ -440,9 +430,9 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_gui
             func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
             params={
                 "contact_export_root": "outputs/clips",
-                "region_names": ["left_palm", "right_palm"],
+                "region_names": _OFFLINE_CONTACT_GUIDANCE_REGION_NAMES,
                 "position_sigma": 0.05,
-                "force_threshold": 25.0,
+                "force_threshold": 1.7,
                 "force_sigma": 10.0,
                 "use_force_term": True,
                 "force_gate_mode": "binary",
@@ -607,26 +597,19 @@ g1_29dof_wbt_reward_w_object_extend = RewardManagerCfg(
             params={"sigma": 2.5, "dof_names": _UPPER_DOF_NAMES},
             weight=0.0,
         ),
-        "body_contact_reward_palms": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
-            params={
-                "threshold": 1.0,
-                "force_scale": 25.0,
-                "reward_mode": "binary",
-                "body_names": _PALM_CONTACT_BODY_NAMES,
-            },
-            weight=0.0,
-        ),
-        "body_contact_reward_arms": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
-            params={
-                "threshold": 1.0,
-                "force_scale": 25.0,
-                "reward_mode": "binary",
-                "body_names": _ARM_SUPPORT_CONTACT_BODY_NAMES,
-            },
-            weight=0.0,
-        ),
+        **{
+            f"body_contact_reward_{region_name}": RewardTermCfg(
+                func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
+                params={
+                    "threshold": 1.0,
+                    "force_scale": 25.0,
+                    "reward_mode": "binary",
+                    "body_names": [body_name],
+                },
+                weight=0.0,
+            )
+            for region_name, body_name in _WRIST_CONTACT_BODY_NAMES.items()
+        },
         "body_contact_reward_torso": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
             params={
@@ -830,26 +813,19 @@ g1_29dof_wbt_reward_w_object_command_curriculum = RewardManagerCfg(
 g1_29dof_wbt_reward_w_object_generalist = RewardManagerCfg(
     terms={
         **g1_29dof_wbt_reward_w_object_extend.terms,
-        "body_contact_reward_palms": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
-            params={
-                "threshold": 1.0,
-                "force_scale": 25.0,
-                "reward_mode": "tanh",
-                "body_names": _PALM_CONTACT_BODY_NAMES,
-            },
-            weight=0.10,
-        ),
-        "body_contact_reward_arms": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
-            params={
-                "threshold": 1.0,
-                "force_scale": 25.0,
-                "reward_mode": "tanh",
-                "body_names": _ARM_SUPPORT_CONTACT_BODY_NAMES,
-            },
-            weight=0.20,
-        ),
+        **{
+            f"body_contact_reward_{region_name}": RewardTermCfg(
+                func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
+                params={
+                    "threshold": 1.0,
+                    "force_scale": 25.0,
+                    "reward_mode": "tanh",
+                    "body_names": [body_name],
+                },
+                weight=0.70 / len(_WRIST_CONTACT_BODY_NAMES),
+            )
+            for region_name, body_name in _WRIST_CONTACT_BODY_NAMES.items()
+        },
         "body_contact_reward_torso": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
             params={
@@ -858,7 +834,7 @@ g1_29dof_wbt_reward_w_object_generalist = RewardManagerCfg(
                 "reward_mode": "tanh",
                 "body_names": _TORSO_SUPPORT_CONTACT_BODY_NAMES,
             },
-            weight=0.30,
+            weight=0.0,
         ),
     }
 )
@@ -906,7 +882,7 @@ g1_29dof_wbt_reward_w_object_r2s_contact_guidance = RewardManagerCfg(
             func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
             params={
                 "contact_export_root": "outputs/clips",
-                "region_names": ["left_palm", "right_palm"],
+                "region_names": ["left_wrist", "right_wrist"],
                 "position_sigma": 0.04,
                 "use_force_term": False,
                 "use_contact_schedule": True,
@@ -922,9 +898,9 @@ g1_29dof_wbt_reward_w_object_r2s_contact_guidance = RewardManagerCfg(
             func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
             params={
                 "contact_export_root": "outputs/clips",
-                "region_names": ["left_palm", "right_palm"],
+                "region_names": _OFFLINE_CONTACT_GUIDANCE_REGION_NAMES,
                 "position_sigma": 0.05,
-                "force_threshold": 25.0,
+                "force_threshold": 1.7,
                 "force_sigma": 10.0,
                 "use_force_term": True,
                 "force_gate_mode": "binary",
@@ -1027,7 +1003,7 @@ g1_29dof_wbt_reward_w_object_r2s_rollout_reference_guidance = RewardManagerCfg(
             func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
             params={
                 "contact_export_root": "outputs/clips",
-                "region_names": ["left_palm", "right_palm"],
+                "region_names": ["left_wrist", "right_wrist"],
                 "position_sigma": 0.04,
                 "use_force_term": False,
                 "use_contact_schedule": True,
@@ -1043,9 +1019,9 @@ g1_29dof_wbt_reward_w_object_r2s_rollout_reference_guidance = RewardManagerCfg(
             func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
             params={
                 "contact_export_root": "outputs/clips",
-                "region_names": ["left_palm", "right_palm"],
+                "region_names": _OFFLINE_CONTACT_GUIDANCE_REGION_NAMES,
                 "position_sigma": 0.05,
-                "force_threshold": 25.0,
+                "force_threshold": 1.7,
                 "force_sigma": 10.0,
                 "use_force_term": True,
                 "force_gate_mode": "binary",

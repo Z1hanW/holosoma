@@ -20,6 +20,87 @@ from holosoma.utils.average_meters import TensorAverageMeterDict
 
 console = Console()
 
+REWARD_LOG_GROUPS: dict[str, tuple[str, ...]] = {
+    "Track": (
+        "teacher_rollout_global_ref_position_error_exp",
+        "teacher_rollout_global_ref_orientation_error_exp",
+        "teacher_rollout_relative_body_position_error_exp",
+        "teacher_rollout_relative_body_orientation_error_exp",
+        "teacher_rollout_global_body_lin_vel",
+        "teacher_rollout_global_body_ang_vel",
+    ),
+    "Object": (
+        "teacher_rollout_object_global_ref_position_error_exp",
+        "teacher_rollout_object_global_ref_orientation_error_exp",
+    ),
+    "Contact": (
+        "offline_wrist_target_guidance",
+        "offline_contact_guidance",
+    ),
+    "Regularize": (
+        "action_rate_l2",
+        "limits_dof_pos",
+        "undesired_contacts",
+    ),
+}
+REWARD_LOG_GROUP_BY_TERM = {
+    term_name: group_name for group_name, term_names in REWARD_LOG_GROUPS.items() for term_name in term_names
+}
+REWARD_LOG_GROUP_ORDER = ("Track", "Object", "Contact", "Regularize", "Rest")
+REWARD_LOG_PARAM_KEYS = (
+    "sigma",
+    "sigma_xy",
+    "sigma_yaw",
+    "sigma_z",
+    "position_sigma",
+    "force_threshold",
+    "force_sigma",
+)
+
+
+def get_reward_log_group(term_name: str) -> str:
+    """Return the W&B reward panel group for a reward term."""
+    return REWARD_LOG_GROUP_BY_TERM.get(term_name, "Rest")
+
+
+def collect_reward_wandb_metadata(reward_cfg: Any) -> tuple[dict[str, Any], dict[str, float | str]]:
+    """Build W&B config/summary metadata for grouped reward terms."""
+    if reward_cfg is None or not hasattr(reward_cfg, "terms"):
+        return {}, {}
+
+    grouped_spec: dict[str, dict[str, dict[str, Any]]] = {group_name: {} for group_name in REWARD_LOG_GROUP_ORDER}
+    summary: dict[str, float | str] = {}
+
+    for term_name, term_cfg in reward_cfg.terms.items():
+        weight = float(getattr(term_cfg, "weight", 0.0))
+        if weight == 0.0:
+            continue
+
+        group_name = get_reward_log_group(str(term_name))
+        params = dict(getattr(term_cfg, "params", {}) or {})
+        term_spec: dict[str, Any] = {
+            "weight": weight,
+        }
+        summary[f"RewardSpec/{group_name}/{term_name}/weight"] = weight
+
+        for param_key in REWARD_LOG_PARAM_KEYS:
+            if param_key not in params:
+                continue
+            param_value = params[param_key]
+            if isinstance(param_value, (int, float, str, bool)):
+                term_spec[param_key] = param_value
+                if isinstance(param_value, (int, float, bool)):
+                    summary[f"RewardSpec/{group_name}/{term_name}/{param_key}"] = float(param_value)
+                else:
+                    summary[f"RewardSpec/{group_name}/{term_name}/{param_key}"] = str(param_value)
+
+        grouped_spec[group_name][str(term_name)] = term_spec
+
+    grouped_spec = {group_name: terms for group_name, terms in grouped_spec.items() if terms}
+    if not grouped_spec:
+        return {}, {}
+    return {"reward_group_spec": grouped_spec}, summary
+
 
 class LogDict(TypedDict):
     """Dictionary containing iteration info, timing, and buffers for logging."""
@@ -335,6 +416,7 @@ class LoggingHelper:
         """
         if not self.is_main_process:
             return
+
         # Log loss metrics
         scalars_to_log: dict[str, float] = {}
         for loss_key, loss_value in loss_dict.items():
@@ -355,13 +437,18 @@ class LoggingHelper:
 
         # Log reward metrics if available
         if len(self.rewbuffer) > 0:
-            scalars_to_log["Train/mean_reward"] = statistics.mean(self.rewbuffer)
-            scalars_to_log["Train/mean_reward/time"] = statistics.mean(self.rewbuffer)
+            mean_reward = statistics.mean(self.rewbuffer)
+            scalars_to_log["Train/mean_reward"] = mean_reward
+            scalars_to_log["Train/mean_reward/time"] = mean_reward
+            scalars_to_log["Reward/mean"] = mean_reward
         if len(self.lenbuffer) > 0:
-            scalars_to_log["Train/mean_episode_length"] = statistics.mean(self.lenbuffer)
-            scalars_to_log["Train/mean_episode_length/time"] = statistics.mean(self.lenbuffer)
+            mean_episode_length = statistics.mean(self.lenbuffer)
+            scalars_to_log["Train/mean_episode_length"] = mean_episode_length
+            scalars_to_log["Train/mean_episode_length/time"] = mean_episode_length
+            scalars_to_log["Episode Length/mean"] = mean_episode_length
 
         scalars_to_log["Train/num_samples"] = self.tot_timesteps
+        self._add_reward_group_aliases(scalars_to_log)
 
         # Add prefix to all keys
         scalars_to_log = {f"{self.prefix}{k}": v for k, v in scalars_to_log.items()}
@@ -371,6 +458,31 @@ class LoggingHelper:
         if wandb.run is not None:
             self._configure_wandb_metrics(scalars_to_log)
             wandb.log(dict(scalars_to_log, global_step=it), step=it)
+
+    def _add_reward_group_aliases(self, scalars_to_log: dict[str, float]) -> None:
+        """Add W&B-friendly reward panels from existing Episode/rew_* metrics."""
+        group_totals: dict[str, float] = {}
+        reward_total = 0.0
+        found_reward_terms = False
+
+        for metric_name, value in list(scalars_to_log.items()):
+            if not metric_name.startswith("Episode/rew_"):
+                continue
+            term_name = metric_name[len("Episode/rew_") :]
+            group_name = get_reward_log_group(term_name)
+            scalar_value = float(value)
+            scalars_to_log[f"Reward/{group_name}/{term_name}"] = scalar_value
+            group_totals[group_name] = group_totals.get(group_name, 0.0) + scalar_value
+            reward_total += scalar_value
+            found_reward_terms = True
+
+        if not found_reward_terms:
+            return
+
+        for group_name in REWARD_LOG_GROUP_ORDER:
+            if group_name in group_totals:
+                scalars_to_log[f"Reward/{group_name}"] = group_totals[group_name]
+        scalars_to_log["Reward/total_episode_terms"] = reward_total
 
     def _strip_prefix(self, metric_name: str) -> str:
         if self.prefix and metric_name.startswith(self.prefix):

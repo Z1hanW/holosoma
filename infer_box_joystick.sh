@@ -49,8 +49,18 @@ Optional env vars:
   WANDB_MODEL_FILE        (default varies by mode; used when checkpoint is a wandb run URL)
   MOCAP_PERCEPTION_PRESET (default: checkpoint; checkpoint|none|heightmap)
   DEPTH_PERCEPTION_PRESET (default: checkpoint; checkpoint|d435i)
+  CAMERA_*                (optional explicit camera overrides; default preserves checkpoint camera config)
+  CAMERA_PITCH_DEG        (optional explicit camera pitch override; default preserves checkpoint camera pitch)
   DISTILL_PROPRIO_HISTORY_ONLY (default: 1; keep 5-frame history only on proprio groups, keep actions single-frame)
   DISTILL_PROPRIO_HISTORY_LENGTH (default: 5)
+  VISER_ENABLE_EXTERNAL_SPARSE_GOAL
+                          (default: 0; set 1 to enable the same sparse-object-goal
+                           command path used by box-drop distillation and draw that target)
+  EVAL_EXTERNAL_GOAL_PROB (default with VISER_ENABLE_EXTERNAL_SPARSE_GOAL=1: 1.0)
+  EVAL_COMMAND_ONLY_ENV_PROB
+                          (default with VISER_ENABLE_EXTERNAL_SPARSE_GOAL=1: 1.0)
+  EXTERNAL_GOAL_SAMPLING_MODE
+                          (default with VISER_ENABLE_EXTERNAL_SPARSE_GOAL=1: annulus)
   DRY_RUN                 (default: 0; set 1/true to print the command without launching)
 
 Hardware joystick (optional):
@@ -587,6 +597,18 @@ DISTILL_PROPRIO_HISTORY_LENGTH_EXPLICIT=0
 [[ -n "${DISTILL_PROPRIO_HISTORY_LENGTH+x}" ]] && DISTILL_PROPRIO_HISTORY_LENGTH_EXPLICIT=1
 HETEROGENEOUS_OBJECT_SINGLE_SLOT_DISABLE_EXPLICIT=0
 [[ -n "${HOLOSOMA_DISABLE_HETEROGENEOUS_OBJECT_SINGLE_SLOT+x}" ]] && HETEROGENEOUS_OBJECT_SINGLE_SLOT_DISABLE_EXPLICIT=1
+IMAGE_WIDTH_EXPLICIT=0
+[[ -n "${IMAGE_WIDTH+x}" ]] && IMAGE_WIDTH_EXPLICIT=1
+IMAGE_HEIGHT_EXPLICIT=0
+[[ -n "${IMAGE_HEIGHT+x}" ]] && IMAGE_HEIGHT_EXPLICIT=1
+CAMERA_NEAR_EXPLICIT=0
+[[ -n "${CAMERA_NEAR+x}" ]] && CAMERA_NEAR_EXPLICIT=1
+CAMERA_FAR_EXPLICIT=0
+[[ -n "${CAMERA_FAR+x}" ]] && CAMERA_FAR_EXPLICIT=1
+CAMERA_MAX_DISTANCE_EXPLICIT=0
+[[ -n "${CAMERA_MAX_DISTANCE+x}" ]] && CAMERA_MAX_DISTANCE_EXPLICIT=1
+CAMERA_PITCH_DEG_EXPLICIT=0
+[[ -n "${CAMERA_PITCH_DEG+x}" ]] && CAMERA_PITCH_DEG_EXPLICIT=1
 CHECKPOINT_SAVED_MOTION_PATH=""
 CHECKPOINT_SAVED_OBJECT_URDF=""
 CHECKPOINT_SAVED_DISTILL_PROPRIO_HISTORY_ONLY=""
@@ -715,11 +737,12 @@ fi
 DISABLE_RANDOMIZATION=${DISABLE_RANDOMIZATION:-True}
 MAX_EPISODE_LENGTH_S=${MAX_EPISODE_LENGTH_S:-1000000}
 
-IMAGE_WIDTH=${IMAGE_WIDTH:-106}
-IMAGE_HEIGHT=${IMAGE_HEIGHT:-60}
-CAMERA_NEAR=${CAMERA_NEAR:-0.1}
-CAMERA_FAR=${CAMERA_FAR:-3.0}
-CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-3.0}
+IMAGE_WIDTH=${IMAGE_WIDTH:-}
+IMAGE_HEIGHT=${IMAGE_HEIGHT:-}
+CAMERA_NEAR=${CAMERA_NEAR:-}
+CAMERA_FAR=${CAMERA_FAR:-}
+CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-}
+CAMERA_PITCH_DEG=${CAMERA_PITCH_DEG:-}
 MOCAP_PERCEPTION_PRESET=${MOCAP_PERCEPTION_PRESET:-checkpoint}
 DEPTH_PERCEPTION_PRESET=${DEPTH_PERCEPTION_PRESET:-checkpoint}
 OBJECT_GEOMETRY_MODE_RAW=${OBJECT_GEOMETRY_MODE:-}
@@ -727,6 +750,7 @@ OBJECT_GEOMETRY_MODE=""
 HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE=""
 PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE=""
 DRY_RUN_RAW=${DRY_RUN:-0}
+VISER_ENABLE_EXTERNAL_SPARSE_GOAL_RAW=${VISER_ENABLE_EXTERNAL_SPARSE_GOAL:-0}
 
 if [[ -n "${OBJECT_GEOMETRY_MODE_RAW}" ]]; then
   case "$(echo "${OBJECT_GEOMETRY_MODE_RAW}" | tr '[:upper:]' '[:lower:]')" in
@@ -796,10 +820,52 @@ case "${DRY_RUN_NORM}" in
     ;;
 esac
 
+VISER_ENABLE_EXTERNAL_SPARSE_GOAL_NORM=$(echo "${VISER_ENABLE_EXTERNAL_SPARSE_GOAL_RAW}" | tr '[:upper:]' '[:lower:]')
+case "${VISER_ENABLE_EXTERNAL_SPARSE_GOAL_NORM}" in
+  1|true|yes|on) VISER_EXTERNAL_SPARSE_GOAL_FLAG=1 ;;
+  0|false|no|off|"") VISER_EXTERNAL_SPARSE_GOAL_FLAG=0 ;;
+  *)
+    echo "[ERROR] VISER_ENABLE_EXTERNAL_SPARSE_GOAL must be one of: 0/1/true/false/yes/no/on/off. Got: ${VISER_ENABLE_EXTERNAL_SPARSE_GOAL_RAW}" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "${VISER_EXTERNAL_SPARSE_GOAL_FLAG}" -eq 1 ]]; then
+  # Mirror distill_box_drop_mixed.sh defaults for the sparse object-goal command path.
+  SPARSE_GOAL_ENABLED=${SPARSE_GOAL_ENABLED:-True}
+  CLIP_GOAL_DELTA_MIN_STEPS=${CLIP_GOAL_DELTA_MIN_STEPS:-45}
+  CLIP_GOAL_DELTA_MAX_STEPS=${CLIP_GOAL_DELTA_MAX_STEPS:-120}
+  COMMAND_ONLY_ENV_PROB_START=${COMMAND_ONLY_ENV_PROB_START:-0.0}
+  COMMAND_ONLY_ENV_PROB_END=${COMMAND_ONLY_ENV_PROB_END:-0.5}
+  COMMAND_ONLY_ENV_PROB_START_ITER=${COMMAND_ONLY_ENV_PROB_START_ITER:-2500}
+  COMMAND_ONLY_ENV_PROB_END_ITER=${COMMAND_ONLY_ENV_PROB_END_ITER:-3500}
+  EVAL_COMMAND_ONLY_ENV_PROB=${EVAL_COMMAND_ONLY_ENV_PROB:-1.0}
+  EXTERNAL_GOAL_PROB_START=${EXTERNAL_GOAL_PROB_START:-0.0}
+  EXTERNAL_GOAL_PROB_END=${EXTERNAL_GOAL_PROB_END:-0.25}
+  EXTERNAL_GOAL_PROB_START_ITER=${EXTERNAL_GOAL_PROB_START_ITER:-2500}
+  EXTERNAL_GOAL_PROB_END_ITER=${EXTERNAL_GOAL_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS:-10000}}
+  EXTERNAL_GOAL_PROB_RAMP_RESETS=${EXTERNAL_GOAL_PROB_RAMP_RESETS:-150000}
+  EVAL_EXTERNAL_GOAL_PROB=${EVAL_EXTERNAL_GOAL_PROB:-1.0}
+  EVAL_CARRY_EXTENSION_PROB=${EVAL_CARRY_EXTENSION_PROB:-0.0}
+  EXTERNAL_GOAL_RANGE_RAMP_RESETS=${EXTERNAL_GOAL_RANGE_RAMP_RESETS:-${EXTERNAL_GOAL_PROB_RAMP_RESETS}}
+  EXTERNAL_GOAL_RANGE_START_ITER=${EXTERNAL_GOAL_RANGE_START_ITER:-2500}
+  EXTERNAL_GOAL_RANGE_END_ITER=${EXTERNAL_GOAL_RANGE_END_ITER:-${NUM_LEARNING_ITERATIONS:-10000}}
+  EXTERNAL_GOAL_SAMPLING_MODE=${EXTERNAL_GOAL_SAMPLING_MODE:-annulus}
+  EXTERNAL_GOAL_RADIUS_MIN_START=${EXTERNAL_GOAL_RADIUS_MIN_START:-1.00}
+  EXTERNAL_GOAL_RADIUS_MAX_START=${EXTERNAL_GOAL_RADIUS_MAX_START:-1.70}
+  EXTERNAL_GOAL_RADIUS_MIN=${EXTERNAL_GOAL_RADIUS_MIN:-1.00}
+  EXTERNAL_GOAL_RADIUS_MAX=${EXTERNAL_GOAL_RADIUS_MAX:-3.40}
+  EXTERNAL_GOAL_POS_LOCAL_MIN_START=${EXTERNAL_GOAL_POS_LOCAL_MIN_START:-"[1.00, -0.20, 0.185]"}
+  EXTERNAL_GOAL_POS_LOCAL_MAX_START=${EXTERNAL_GOAL_POS_LOCAL_MAX_START:-"[1.25, 0.20, 0.185]"}
+  EXTERNAL_GOAL_POS_LOCAL_MIN=${EXTERNAL_GOAL_POS_LOCAL_MIN:-"[1.00, -0.75, 0.185]"}
+  EXTERNAL_GOAL_POS_LOCAL_MAX=${EXTERNAL_GOAL_POS_LOCAL_MAX:-"[1.75, 0.75, 0.185]"}
+fi
+
 # Viser GUI defaults aligned with VideoMimic-style manual + clip control.
 export VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI:-1}
 export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-1}
 export VISER_ENABLE_MANUAL_GOAL_GUI=${VISER_ENABLE_MANUAL_GOAL_GUI:-0}
+export VISER_TARGET_BOX_REQUIRES_MANUAL_GOAL=${VISER_TARGET_BOX_REQUIRES_MANUAL_GOAL:-1}
 export VISER_MANUAL_CONTROL_DEFAULT=${VISER_MANUAL_CONTROL_DEFAULT:-1}
 export VISER_FORCE_MANUAL_CONTROL=${VISER_FORCE_MANUAL_CONTROL:-0}
 export VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-0}
@@ -895,6 +961,38 @@ cmd+=(
   --algo.config.distill.dagger_end_epoch -1
 )
 
+if [[ "${VISER_EXTERNAL_SPARSE_GOAL_FLAG}" -eq 1 ]]; then
+  cmd+=(
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.enabled "${SPARSE_GOAL_ENABLED}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.clip_goal_delta_min_steps "${CLIP_GOAL_DELTA_MIN_STEPS}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.clip_goal_delta_max_steps "${CLIP_GOAL_DELTA_MAX_STEPS}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.command_only_env_prob_start "${COMMAND_ONLY_ENV_PROB_START}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.command_only_env_prob_end "${COMMAND_ONLY_ENV_PROB_END}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.command_only_env_prob_start_iter "${COMMAND_ONLY_ENV_PROB_START_ITER}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.command_only_env_prob_end_iter "${COMMAND_ONLY_ENV_PROB_END_ITER}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.eval_command_only_env_prob "${EVAL_COMMAND_ONLY_ENV_PROB}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external_goal_prob_start "${EXTERNAL_GOAL_PROB_START}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external_goal_prob_end "${EXTERNAL_GOAL_PROB_END}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external_goal_prob_start_iter "${EXTERNAL_GOAL_PROB_START_ITER}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external_goal_prob_end_iter "${EXTERNAL_GOAL_PROB_END_ITER}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external_goal_prob_ramp_resets "${EXTERNAL_GOAL_PROB_RAMP_RESETS}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.eval_external_goal_prob "${EVAL_EXTERNAL_GOAL_PROB}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.eval_carry_extension_prob "${EVAL_CARRY_EXTENSION_PROB}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external_goal_range_ramp_resets "${EXTERNAL_GOAL_RANGE_RAMP_RESETS}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external_goal_range_start_iter "${EXTERNAL_GOAL_RANGE_START_ITER}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external_goal_range_end_iter "${EXTERNAL_GOAL_RANGE_END_ITER}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external_goal_sampling_mode "${EXTERNAL_GOAL_SAMPLING_MODE}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external_goal_radius_min_start "${EXTERNAL_GOAL_RADIUS_MIN_START}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external_goal_radius_max_start "${EXTERNAL_GOAL_RADIUS_MAX_START}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external_goal_radius_min "${EXTERNAL_GOAL_RADIUS_MIN}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external_goal_radius_max "${EXTERNAL_GOAL_RADIUS_MAX}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external_goal_pos_local_min_start "${EXTERNAL_GOAL_POS_LOCAL_MIN_START}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external_goal_pos_local_max_start "${EXTERNAL_GOAL_POS_LOCAL_MAX_START}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external_goal_pos_local_min "${EXTERNAL_GOAL_POS_LOCAL_MIN}"
+    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external_goal_pos_local_max "${EXTERNAL_GOAL_POS_LOCAL_MAX}"
+  )
+fi
+
 case "$(echo "${FORCE_SINGLE_FRAME_HISTORY}" | tr '[:upper:]' '[:lower:]')" in
   1|true|yes|on)
     cmd+=(
@@ -975,6 +1073,27 @@ if [[ -n "${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}" ]]; then
   cmd+=(--perception.object_geometry_mode "${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}")
 fi
 
+append_explicit_camera_overrides() {
+  if [[ "${IMAGE_WIDTH_EXPLICIT}" -eq 1 ]]; then
+    cmd+=(--perception.camera_width "${IMAGE_WIDTH}")
+  fi
+  if [[ "${IMAGE_HEIGHT_EXPLICIT}" -eq 1 ]]; then
+    cmd+=(--perception.camera_height "${IMAGE_HEIGHT}")
+  fi
+  if [[ "${CAMERA_NEAR_EXPLICIT}" -eq 1 ]]; then
+    cmd+=(--perception.camera_near "${CAMERA_NEAR}")
+  fi
+  if [[ "${CAMERA_FAR_EXPLICIT}" -eq 1 ]]; then
+    cmd+=(--perception.camera_far "${CAMERA_FAR}")
+  fi
+  if [[ "${CAMERA_MAX_DISTANCE_EXPLICIT}" -eq 1 ]]; then
+    cmd+=(--perception.max_distance "${CAMERA_MAX_DISTANCE}")
+  fi
+  if [[ "${CAMERA_PITCH_DEG_EXPLICIT}" -eq 1 ]]; then
+    cmd+=(--perception.camera_pitch_deg "${CAMERA_PITCH_DEG}")
+  fi
+}
+
 if [[ "${MODE}" == "mocap" ]]; then
   case "$(echo "${MOCAP_PERCEPTION_PRESET}" | tr '[:upper:]' '[:lower:]')" in
     checkpoint|auto|"")
@@ -1002,11 +1121,6 @@ else
     d435i)
       cmd+=(
         perception:camera-depth-d435i
-        --perception.camera_width "${IMAGE_WIDTH}"
-        --perception.camera_height "${IMAGE_HEIGHT}"
-        --perception.camera_near "${CAMERA_NEAR}"
-        --perception.camera_far "${CAMERA_FAR}"
-        --perception.max_distance "${CAMERA_MAX_DISTANCE}"
       )
       ;;
     *)
@@ -1014,8 +1128,9 @@ else
       exit 2
       ;;
   esac
-  cmd+=(--perception.camera_near "${CAMERA_NEAR}")
 fi
+
+append_explicit_camera_overrides
 
 if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
   cmd+=("${EXTRA_ARGS[@]}")
@@ -1065,6 +1180,11 @@ fi
 echo "[INFO] headless=${HEADLESS_FLAG} (env HEADLESS=${HEADLESS})"
 echo "[INFO] viser=http://localhost:${VISER_PORT}"
 echo "[INFO] manual_gui=${VISER_ENABLE_MANUAL_GUI} manual_goal_gui=${VISER_ENABLE_MANUAL_GOAL_GUI} clip_gui=${VISER_ENABLE_CLIP_GUI}"
+echo "[INFO] external_sparse_goal_viz=${VISER_EXTERNAL_SPARSE_GOAL_FLAG}"
+if [[ "${VISER_EXTERNAL_SPARSE_GOAL_FLAG}" -eq 1 ]]; then
+  echo "[INFO] sparse_goal_enabled=${SPARSE_GOAL_ENABLED} eval_command_only=${EVAL_COMMAND_ONLY_ENV_PROB} eval_external=${EVAL_EXTERNAL_GOAL_PROB} eval_carry=${EVAL_CARRY_EXTENSION_PROB}"
+  echo "[INFO] external_goal_sampling_mode=${EXTERNAL_GOAL_SAMPLING_MODE} radius_start=${EXTERNAL_GOAL_RADIUS_MIN_START}->${EXTERNAL_GOAL_RADIUS_MAX_START} radius_end=${EXTERNAL_GOAL_RADIUS_MIN}->${EXTERNAL_GOAL_RADIUS_MAX}"
+fi
 echo "[INFO] manual_control_default=${VISER_MANUAL_CONTROL_DEFAULT} force_manual=${VISER_FORCE_MANUAL_CONTROL}"
 echo "[INFO] hw_joystick=${VISER_MANUAL_USE_HW_JOYSTICK}"
 echo "[INFO] hw_backend=${VISER_MANUAL_HW_BACKEND:-auto} bridge_joystick=${USE_HW_JOYSTICK_BRIDGE}"
@@ -1075,6 +1195,18 @@ if [[ "${MODE}" == "mocap" ]]; then
   echo "[INFO] mocap_perception_preset=${MOCAP_PERCEPTION_PRESET}"
 else
   echo "[INFO] depth_perception_preset=${DEPTH_PERCEPTION_PRESET}"
+fi
+CAMERA_OVERRIDE_SUMMARY=()
+[[ "${IMAGE_WIDTH_EXPLICIT}" -eq 1 ]] && CAMERA_OVERRIDE_SUMMARY+=("camera_width=${IMAGE_WIDTH}")
+[[ "${IMAGE_HEIGHT_EXPLICIT}" -eq 1 ]] && CAMERA_OVERRIDE_SUMMARY+=("camera_height=${IMAGE_HEIGHT}")
+[[ "${CAMERA_NEAR_EXPLICIT}" -eq 1 ]] && CAMERA_OVERRIDE_SUMMARY+=("camera_near=${CAMERA_NEAR}")
+[[ "${CAMERA_FAR_EXPLICIT}" -eq 1 ]] && CAMERA_OVERRIDE_SUMMARY+=("camera_far=${CAMERA_FAR}")
+[[ "${CAMERA_MAX_DISTANCE_EXPLICIT}" -eq 1 ]] && CAMERA_OVERRIDE_SUMMARY+=("max_distance=${CAMERA_MAX_DISTANCE}")
+[[ "${CAMERA_PITCH_DEG_EXPLICIT}" -eq 1 ]] && CAMERA_OVERRIDE_SUMMARY+=("camera_pitch_deg=${CAMERA_PITCH_DEG}")
+if [[ "${#CAMERA_OVERRIDE_SUMMARY[@]}" -gt 0 ]]; then
+  echo "[INFO] explicit_camera_overrides=${CAMERA_OVERRIDE_SUMMARY[*]}"
+else
+  echo "[INFO] explicit_camera_overrides=<none; checkpoint camera preserved>"
 fi
 echo "[INFO] Viser controls:"
 echo "  1) Open 'Manual Control' and enable 'Enable Manual Root Command'."

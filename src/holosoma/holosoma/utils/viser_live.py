@@ -46,6 +46,7 @@ HEIGHTMAP_MARKER_COLOR = (255, 165, 0)
 CAMERA_MARKER_COLOR = (0, 255, 255)
 COMMAND_ARROW_COLOR = np.array([255, 165, 0], dtype=np.uint8)
 TARGET_BOX_COLOR = CALIFORNIA_GOLD
+FUTURE_GOAL_BOX_COLOR = (255, 0, 0)
 SENSOR_MARKER_RADIUS = 0.03
 SIM_MESH_MODE_OPTIONS = ("visual", "collision", "both", "none")
 FAKE_BODY_NAME_ALIASES: dict[str, str] = {
@@ -1459,6 +1460,17 @@ class ViserLiveViewer:
             "false",
             "no",
         )
+        self._target_box_requires_manual_goal = os.environ.get("VISER_TARGET_BOX_REQUIRES_MANUAL_GOAL", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        self._show_future_goal_box = os.environ.get("VISER_SHOW_FUTURE_GOAL_BOX", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
         self._distill_minimal_ui = os.environ.get("VISER_DISTILL_MINIMAL_UI", "0").lower() in (
             "1",
             "true",
@@ -1723,6 +1735,8 @@ class ViserLiveViewer:
         self._perception_last_aspect: float | None = None
         self._target_box_handle = None
         self._target_box_last_dimensions: tuple[float, float, float] | None = None
+        self._future_goal_box_handle = None
+        self._future_goal_box_last_dimensions: tuple[float, float, float] | None = None
         self._scene_prefix = ""
         self._global_root = None
         self._global_frame_wxyz: tuple[float, float, float, float] | None = None
@@ -3876,6 +3890,7 @@ class ViserLiveViewer:
             self._update_rollout_object_trajectory(offset)
             self._update_target_object_center(offset)
             self._update_target_box(offset)
+            self._update_future_goal_box(offset)
             self._update_manual_command_arrow(root_pos, root_quat_wxyz, offset)
             self._update_manual_root_status(
                 current_root_pos=root_pos,
@@ -6426,7 +6441,8 @@ class ViserLiveViewer:
         if self._perception_stats is not None:
             direction_stats_suffix = ""
             if output_mode == "camera_depth":
-                direction_stats_suffix = f"{self._ray_direction_stats_suffix}{strict_depth_suffix}"
+                pitch_deg = float(getattr(cfg, "camera_pitch_deg", 0.0) or 0.0)
+                direction_stats_suffix = f" | pitch={pitch_deg:.1f}{self._ray_direction_stats_suffix}{strict_depth_suffix}"
             if self._disable_perception_image_pipeline:
                 self._perception_stats.content = (
                     "Perception image pipeline disabled (VISER_DISABLE_PERCEPTION_IMAGE_PIPELINE=1)"
@@ -6979,10 +6995,9 @@ class ViserLiveViewer:
         manual_goal_pos_w = getattr(motion_cmd, "manual_goal_object_pos_w", None)
         manual_goal_rot6d_w = getattr(motion_cmd, "manual_goal_object_rot6d_w", None)
         manual_override_enabled = bool(getattr(motion_cmd, "manual_goal_override_enabled", False))
-        sparse_goal_enabled = bool(getattr(motion_cmd, "_sparse_goal_curriculum_enabled", False))
 
         if (
-            (manual_override_enabled or (sparse_goal_enabled and bool(getattr(motion_cmd, "manual_goal_enabled", False))))
+            manual_override_enabled
             and isinstance(manual_goal_pos_w, torch.Tensor)
             and isinstance(manual_goal_rot6d_w, torch.Tensor)
             and manual_goal_pos_w.ndim >= 2
@@ -6997,6 +7012,9 @@ class ViserLiveViewer:
             except Exception:
                 pass
 
+        if self._target_box_requires_manual_goal:
+            return None
+
         goal_xy = self._current_effective_goal_xy()
         if goal_xy is None:
             return None
@@ -7005,6 +7023,51 @@ class ViserLiveViewer:
             return None
         goal_pos_w, goal_quat_wxyz = goal_pose
         return goal_pos_w, goal_quat_wxyz, np.asarray(object_size, dtype=np.float32)
+
+    def _get_future_goal_box_pose(self) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None or not hasattr(motion_cmd, "motion") or not bool(getattr(motion_cmd.motion, "has_object", False)):
+            return None
+
+        object_size = self._resolve_target_box_dimensions()
+        if object_size is None:
+            return None
+        object_size = np.asarray(object_size, dtype=np.float32)
+
+        clip_goal_pos_w = getattr(motion_cmd, "clip_goal_object_pos_w", None)
+        clip_goal_rot6d_w = getattr(motion_cmd, "clip_goal_object_rot6d_w", None)
+        if (
+            bool(getattr(motion_cmd, "manual_goal_enabled", False))
+            and isinstance(clip_goal_pos_w, torch.Tensor)
+            and isinstance(clip_goal_rot6d_w, torch.Tensor)
+            and clip_goal_pos_w.ndim >= 2
+            and clip_goal_rot6d_w.ndim >= 2
+        ):
+            try:
+                goal_pos_w = clip_goal_pos_w[self._env_id].detach().float().cpu().numpy().astype(np.float32, copy=True)
+                goal_quat_wxyz = self._rot6d_to_quat_wxyz(clip_goal_rot6d_w[self._env_id : self._env_id + 1])
+                goal_pos_w[2] = self._target_box_resting_center_z(object_size)
+                goal_yaw = self._yaw_from_quat_wxyz(goal_quat_wxyz)
+                return goal_pos_w, self._quat_wxyz_from_yaw(goal_yaw), object_size
+            except Exception:
+                pass
+
+        try:
+            sample_fn = getattr(motion_cmd, "_sample_clip_based_object_goal_pose_w", None)
+            if not callable(sample_fn):
+                return None
+            env_ids = torch.tensor([self._env_id], device=motion_cmd.device, dtype=torch.long)
+            clip_id = int(motion_cmd.clip_ids[self._env_id].item())
+            clip_lengths = motion_cmd.motion.clip_lengths[clip_id : clip_id + 1].to(device=motion_cmd.device)
+            goal_pos_t, goal_quat_xyzw_t = sample_fn(env_ids, clip_lengths)
+            goal_pos_w = goal_pos_t[0].detach().float().cpu().numpy().astype(np.float32, copy=True)
+            goal_quat_xyzw = goal_quat_xyzw_t[0].detach().float().cpu().numpy()
+            goal_quat_wxyz = goal_quat_xyzw[[3, 0, 1, 2]]
+            goal_pos_w[2] = self._target_box_resting_center_z(object_size)
+            goal_yaw = self._yaw_from_quat_wxyz(goal_quat_wxyz)
+            return goal_pos_w, self._quat_wxyz_from_yaw(goal_yaw), object_size
+        except Exception:
+            return None
 
     def _update_target_box(self, offset: np.ndarray) -> None:
         if not self._server:
@@ -7066,6 +7129,67 @@ class ViserLiveViewer:
                 pass
             self._target_box_handle.position = goal_pos_w - offset
             self._target_box_handle.wxyz = goal_quat_wxyz
+
+    def _update_future_goal_box(self, offset: np.ndarray) -> None:
+        if not self._server:
+            return
+        if not self._show_future_goal_box:
+            if self._future_goal_box_handle is not None:
+                try:
+                    self._future_goal_box_handle.visible = False
+                except Exception:
+                    pass
+            return
+
+        future_goal_pose = self._get_future_goal_box_pose()
+        if future_goal_pose is None:
+            if self._future_goal_box_handle is not None:
+                try:
+                    self._future_goal_box_handle.visible = False
+                except Exception:
+                    pass
+            return
+
+        goal_pos_w, goal_quat_wxyz, goal_size = future_goal_pose
+        dimensions = tuple(float(max(1.0e-3, v)) for v in np.asarray(goal_size, dtype=np.float32).reshape(3))
+        if self._future_goal_box_handle is None:
+            try:
+                self._future_goal_box_handle = self._server.scene.add_box(
+                    self._scene_path("/future_goal_box"),
+                    color=FUTURE_GOAL_BOX_COLOR,
+                    dimensions=dimensions,
+                    wireframe=False,
+                    opacity=0.28,
+                    flat_shading=True,
+                    cast_shadow=False,
+                    receive_shadow=False,
+                    wxyz=goal_quat_wxyz,
+                    position=goal_pos_w - offset,
+                    visible=True,
+                )
+            except TypeError:
+                self._future_goal_box_handle = self._server.scene.add_box(
+                    self._scene_path("/future_goal_box"),
+                    color=FUTURE_GOAL_BOX_COLOR,
+                    dimensions=dimensions,
+                    wxyz=goal_quat_wxyz,
+                    position=goal_pos_w - offset,
+                    visible=True,
+                )
+            self._future_goal_box_last_dimensions = dimensions
+        else:
+            if self._future_goal_box_last_dimensions != dimensions:
+                try:
+                    self._future_goal_box_handle.dimensions = dimensions
+                except Exception:
+                    pass
+                self._future_goal_box_last_dimensions = dimensions
+            try:
+                self._future_goal_box_handle.visible = True
+            except Exception:
+                pass
+            self._future_goal_box_handle.position = goal_pos_w - offset
+            self._future_goal_box_handle.wxyz = goal_quat_wxyz
 
     def _ensure_marker_handle(
         self,

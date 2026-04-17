@@ -181,6 +181,10 @@ class PPO(BaseAlgo):
         self.ppo_start_epoch = -1
         self.dagger_end_epoch = -1
         self.ppo_target_coeff = 0.9
+        self.ppo_start_coeff = 0.0
+        self.ppo_start_noise_std: float | None = None
+        self.ppo_start_noise_std_until_coeff = 0.1
+        self._ppo_start_noise_std_cap_announced = False
         self.dagger_loss_coef = 10.0
         self.use_ppo_dagger_schedule = False
         self.ppo_coeff = 1.0
@@ -547,6 +551,29 @@ class PPO(BaseAlgo):
         self.ppo_target_coeff = float(getattr(distill_cfg, "ppo_target_coeff", 0.9))
         if not (0.0 <= self.ppo_target_coeff <= 1.0):
             raise ValueError(f"distill.ppo_target_coeff must be in [0.0, 1.0], got {self.ppo_target_coeff}.")
+        self.ppo_start_coeff = float(getattr(distill_cfg, "ppo_start_coeff", 0.0))
+        if not (0.0 <= self.ppo_start_coeff <= 1.0):
+            raise ValueError(f"distill.ppo_start_coeff must be in [0.0, 1.0], got {self.ppo_start_coeff}.")
+        if self.ppo_start_coeff > self.ppo_target_coeff:
+            raise ValueError(
+                "distill.ppo_start_coeff must be <= distill.ppo_target_coeff, "
+                f"got {self.ppo_start_coeff} > {self.ppo_target_coeff}."
+            )
+        raw_start_noise_std = getattr(distill_cfg, "ppo_start_noise_std", None)
+        self.ppo_start_noise_std = None if raw_start_noise_std is None else float(raw_start_noise_std)
+        if self.ppo_start_noise_std is not None and self.ppo_start_noise_std <= 0.0:
+            raise ValueError(
+                "distill.ppo_start_noise_std must be > 0.0 when set, "
+                f"got {self.ppo_start_noise_std}."
+            )
+        self.ppo_start_noise_std_until_coeff = float(
+            getattr(distill_cfg, "ppo_start_noise_std_until_coeff", 0.1)
+        )
+        if not (0.0 <= self.ppo_start_noise_std_until_coeff <= 1.0):
+            raise ValueError(
+                "distill.ppo_start_noise_std_until_coeff must be in [0.0, 1.0], "
+                f"got {self.ppo_start_noise_std_until_coeff}."
+            )
         self.ppo_schedule_step_epochs = int(getattr(distill_cfg, "ppo_schedule_step_epochs", 0))
         if self.ppo_schedule_step_epochs < 0:
             raise ValueError(
@@ -858,6 +885,7 @@ class PPO(BaseAlgo):
         ):
             self.current_learning_iteration = it
             self._adjust_teacher_action_mix_ratio(it)
+            self._apply_ppo_start_noise_std_cap(it)
             self._sync_training_curriculum_state(
                 current_iteration=it,
                 total_iterations=run_end_iteration,
@@ -947,35 +975,90 @@ class PPO(BaseAlgo):
         teacher_actions = teacher_act(self.teacher_actor, teacher_policy_state)
         return teacher_actions, None
 
+    def _compute_ppo_dagger_coeff_for_epoch(self, current_epoch: int) -> float:
+        if not self.use_ppo_dagger_schedule:
+            return 1.0
+
+        if current_epoch < self.ppo_start_epoch:
+            return 0.0
+        if current_epoch >= self.dagger_end_epoch:
+            return self.ppo_target_coeff
+
+        total_epochs = max(1, self.dagger_end_epoch - self.ppo_start_epoch)
+        ppo_epochs = max(0, current_epoch - self.ppo_start_epoch)
+        coeff_span = self.ppo_target_coeff - self.ppo_start_coeff
+        if self.ppo_schedule_step_epochs > 0:
+            step_epochs = max(1, self.ppo_schedule_step_epochs)
+            total_steps = max(1, (total_epochs + step_epochs - 1) // step_epochs)
+            completed_steps = max(0, ppo_epochs // step_epochs)
+            progress = min(float(completed_steps) / float(total_steps), 1.0)
+            return self.ppo_start_coeff + progress * coeff_span
+
+        progress = min(float(ppo_epochs) / float(total_epochs), 1.0)
+        return self.ppo_start_coeff + progress * coeff_span
+
     def _adjust_ppo_dagger_coeff(self, current_epoch: int) -> None:
         """PPO/DAgger curriculum mixing schedule.
 
         - epoch < ppo_start_epoch: ppo_coeff = 0.0
         - epoch >= dagger_end_epoch: ppo_coeff = ppo_target_coeff
-        - otherwise: linear ramp to ppo_target_coeff, or staircase updates when
-          ``ppo_schedule_step_epochs > 0``
+        - otherwise: linear ramp from ppo_start_coeff to ppo_target_coeff, or
+          staircase updates when ``ppo_schedule_step_epochs > 0``
         """
-        if not self.use_ppo_dagger_schedule:
-            self.ppo_coeff = 1.0
-            return
+        self.ppo_coeff = self._compute_ppo_dagger_coeff_for_epoch(current_epoch)
 
+    def _should_apply_ppo_start_noise_std_cap(self, current_epoch: int) -> bool:
+        if self.ppo_start_noise_std is None or not self.use_ppo_dagger_schedule:
+            return False
         if current_epoch < self.ppo_start_epoch:
-            self.ppo_coeff = 0.0
-            return
-        if current_epoch >= self.dagger_end_epoch:
-            self.ppo_coeff = self.ppo_target_coeff
-            return
+            return False
+        ppo_coeff = self._compute_ppo_dagger_coeff_for_epoch(current_epoch)
+        if ppo_coeff <= self.ppo_start_noise_std_until_coeff + 1e-8:
+            return True
 
-        total_epochs = max(1, self.dagger_end_epoch - self.ppo_start_epoch)
-        ppo_epochs = max(0, current_epoch - self.ppo_start_epoch)
         if self.ppo_schedule_step_epochs > 0:
             step_epochs = max(1, self.ppo_schedule_step_epochs)
-            total_steps = max(1, (total_epochs + step_epochs - 1) // step_epochs)
-            completed_steps = max(0, ppo_epochs // step_epochs)
-            self.ppo_coeff = min(float(completed_steps) / float(total_steps), 1.0) * self.ppo_target_coeff
-            return
+            if self.ppo_start_coeff > 0.0:
+                first_positive_tier_start = self.ppo_start_epoch
+            else:
+                first_positive_tier_start = self.ppo_start_epoch + step_epochs
+            first_positive_tier_end = first_positive_tier_start + step_epochs
+            return current_epoch < first_positive_tier_end
 
-        self.ppo_coeff = min(float(ppo_epochs) / float(total_epochs), 1.0) * self.ppo_target_coeff
+        return False
+
+    def _apply_ppo_start_noise_std_cap(self, current_epoch: int) -> None:
+        if not self._should_apply_ppo_start_noise_std_cap(current_epoch):
+            return
+        if not hasattr(self.actor, "std"):
+            return
+        assert self.ppo_start_noise_std is not None
+        with torch.no_grad():
+            std = torch.nan_to_num(
+                self.actor.std.data,
+                nan=self.config.init_noise_std,
+                posinf=10.0,
+                neginf=0.0,
+            )
+            lower = 1e-6
+            min_noise_std = getattr(self.actor, "min_noise_std", None)
+            if min_noise_std:
+                lower = max(lower, float(min_noise_std))
+            cap = max(float(self.ppo_start_noise_std), lower)
+            capped_std = torch.clamp(std, min=lower, max=cap)
+            did_cap = bool(torch.any(capped_std < std).item())
+            self.actor.std.data.copy_(capped_std)
+
+        if did_cap and not self._ppo_start_noise_std_cap_announced:
+            logger.info(
+                "Capped actor noise std for PPO start: mean {:.6f} -> {:.6f} "
+                "(cap={}, until_ppo_coeff={}).",
+                float(std.mean().item()),
+                float(capped_std.mean().item()),
+                self.ppo_start_noise_std,
+                self.ppo_start_noise_std_until_coeff,
+            )
+            self._ppo_start_noise_std_cap_announced = True
 
     def _adjust_teacher_action_mix_ratio(self, current_iteration: int) -> None:
         if not self.use_teacher_action_mix_schedule:
@@ -1334,6 +1417,7 @@ class PPO(BaseAlgo):
 
         self.actor_optimizer.step()
         self.critic_optimizer.step()
+        self._apply_ppo_start_noise_std_cap(self.current_learning_iteration)
 
         return self._accumulate_loss_dict(loss_dict, ppo_loss_dict)
 
@@ -1775,6 +1859,7 @@ class PPO(BaseAlgo):
                 logger.info("Optimizer loaded from checkpoint")
             self.current_learning_iteration = loaded_dict["iter"]
             self._restore_env_state(loaded_dict.get("env_state"))
+            self._apply_ppo_start_noise_std_cap(self.current_learning_iteration)
             return loaded_dict.get("infos")
         return None
 
@@ -1889,8 +1974,12 @@ class PPO(BaseAlgo):
         if self.dagger_enabled and self.use_ppo_dagger_schedule:
             train_logs = extra_log_dicts.setdefault("Train", {})
             train_logs["ppo_dagger_target_coeff"] = float(self.ppo_target_coeff)
+            train_logs["ppo_dagger_start_coeff"] = float(self.ppo_start_coeff)
             train_logs["ppo_dagger_coeff"] = float(self.ppo_coeff)
             train_logs["ppo_dagger_bc_weight"] = float(self.dagger_loss_coef * max(0.0, 1.0 - float(self.ppo_coeff)))
+            if self.ppo_start_noise_std is not None:
+                train_logs["ppo_start_noise_std"] = float(self.ppo_start_noise_std)
+                train_logs["ppo_start_noise_std_until_coeff"] = float(self.ppo_start_noise_std_until_coeff)
         if self.dagger_enabled:
             train_logs = extra_log_dicts.setdefault("Train", {})
             train_logs["teacher_action_mix_ratio"] = float(self.teacher_action_mix_ratio)

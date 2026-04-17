@@ -46,36 +46,61 @@ from holosoma.utils.tyro_utils import TYRO_CONIFG  # noqa: E402
 
 _LEFT_WRIST_BODY_NAMES = ["left_wrist_yaw_link"]
 _RIGHT_WRIST_BODY_NAMES = ["right_wrist_yaw_link"]
-_ARM_BODY_NAMES = [
-    "left_elbow_link",
-    "right_elbow_link",
-]
 _TORSO_BODY_NAMES = ["torso_link"]
 
+_LINK_REGION_BODY_NAMES = {
+    "left_wrist": "left_wrist_yaw_link",
+    "right_wrist": "right_wrist_yaw_link",
+    "left_elbow": "left_elbow_link",
+    "right_elbow": "right_elbow_link",
+    "left_wrist_roll": "left_wrist_roll_link",
+    "right_wrist_roll": "right_wrist_roll_link",
+    "left_wrist_pitch": "left_wrist_pitch_link",
+    "right_wrist_pitch": "right_wrist_pitch_link",
+    "torso": "torso_link",
+}
+_REGION_EXPORT_LABELS = {
+    "left_wrist": "left_wrist",
+    "right_wrist": "right_wrist",
+    "left_elbow": "left_elbow",
+    "right_elbow": "right_elbow",
+    "left_wrist_roll": "left_wrist_roll",
+    "right_wrist_roll": "right_wrist_roll",
+    "left_wrist_pitch": "left_wrist_pitch",
+    "right_wrist_pitch": "right_wrist_pitch",
+    "torso": "torso",
+}
 _REGION_SPECS: dict[str, dict[str, Any]] = {
-    "left_palm": {
+    "left_wrist": {
         "label": "left_wrist",
         "body_names": _LEFT_WRIST_BODY_NAMES,
     },
-    "right_palm": {
+    "right_wrist": {
         "label": "right_wrist",
         "body_names": _RIGHT_WRIST_BODY_NAMES,
-    },
-    "arms": {
-        "label": "arm",
-        "body_names": _ARM_BODY_NAMES,
     },
     "torso": {
         "label": "torso",
         "body_names": _TORSO_BODY_NAMES,
     },
 }
+_REGION_SPECS.update(
+    {
+        region_name: {
+            "label": _REGION_EXPORT_LABELS[region_name],
+            "body_names": [body_name],
+        }
+        for region_name, body_name in _LINK_REGION_BODY_NAMES.items()
+        if region_name not in _REGION_SPECS
+    }
+)
+_EXPORT_REGION_LABELS = tuple(str(spec["label"]) for spec in _REGION_SPECS.values())
 
 _CONTACT_SENSOR_BODY_NAMES = tuple(
     dict.fromkeys(
         _LEFT_WRIST_BODY_NAMES
         + _RIGHT_WRIST_BODY_NAMES
-        + _ARM_BODY_NAMES
+        + [body_name for region_name, body_name in _LINK_REGION_BODY_NAMES.items() if region_name not in {"left_wrist", "right_wrist"}]
         + _TORSO_BODY_NAMES
     )
 )
@@ -97,12 +122,47 @@ _REGION_OVERLAY_STYLE: dict[str, dict[str, Any]] = {
         "scatter_size": 30.0,
         "label": "right wrist",
     },
-    "arm": {
-        "rgba": np.asarray([255, 165, 0, 255], dtype=np.uint8),
-        "mpl_color": "#FFA500",
+    "left_elbow": {
+        "rgba": np.asarray([255, 105, 180, 255], dtype=np.uint8),
+        "mpl_color": "#FF69B4",
         "radius_scale": 1.15,
         "scatter_size": 36.0,
-        "label": "arm",
+        "label": "left elbow",
+    },
+    "right_elbow": {
+        "rgba": np.asarray([220, 20, 60, 255], dtype=np.uint8),
+        "mpl_color": "#DC143C",
+        "radius_scale": 1.15,
+        "scatter_size": 36.0,
+        "label": "right elbow",
+    },
+    "left_wrist_roll": {
+        "rgba": np.asarray([0, 191, 255, 255], dtype=np.uint8),
+        "mpl_color": "#00BFFF",
+        "radius_scale": 1.0,
+        "scatter_size": 30.0,
+        "label": "left wrist roll",
+    },
+    "right_wrist_roll": {
+        "rgba": np.asarray([30, 144, 255, 255], dtype=np.uint8),
+        "mpl_color": "#1E90FF",
+        "radius_scale": 1.0,
+        "scatter_size": 30.0,
+        "label": "right wrist roll",
+    },
+    "left_wrist_pitch": {
+        "rgba": np.asarray([50, 205, 50, 255], dtype=np.uint8),
+        "mpl_color": "#32CD32",
+        "radius_scale": 1.0,
+        "scatter_size": 30.0,
+        "label": "left wrist pitch",
+    },
+    "right_wrist_pitch": {
+        "rgba": np.asarray([34, 139, 34, 255], dtype=np.uint8),
+        "mpl_color": "#228B22",
+        "radius_scale": 1.0,
+        "scatter_size": 30.0,
+        "label": "right wrist pitch",
     },
     "torso": {
         "rgba": np.asarray([128, 64, 192, 255], dtype=np.uint8),
@@ -116,7 +176,12 @@ _REGION_DISPLAY_PRIORITY: dict[str, int] = {
     "torso": 3,
     "left_wrist": 2,
     "right_wrist": 2,
-    "arm": 1,
+    "left_elbow": 1,
+    "right_elbow": 1,
+    "left_wrist_roll": 1,
+    "right_wrist_roll": 1,
+    "left_wrist_pitch": 1,
+    "right_wrist_pitch": 1,
 }
 
 
@@ -157,7 +222,12 @@ class ClipSummary:
     retained_contact_point_count: int
     left_wrist_contact_frames: int
     right_wrist_contact_frames: int
-    arm_contact_frames: int
+    left_elbow_contact_frames: int
+    right_elbow_contact_frames: int
+    left_wrist_roll_contact_frames: int
+    right_wrist_roll_contact_frames: int
+    left_wrist_pitch_contact_frames: int
+    right_wrist_pitch_contact_frames: int
     torso_contact_frames: int
 
 
@@ -370,7 +440,7 @@ def _build_display_points_from_region_counts(
                 key=lambda name: (region_scores[name], _REGION_DISPLAY_PRIORITY.get(name, 0), name),
             )
         else:
-            label = "arm"
+            label = _EXPORT_REGION_LABELS[0]
         points.append(_dequantize_point(key, voxel_size))
         counts.append(int(total_count))
         labels.append(label)
@@ -552,7 +622,7 @@ def _save_overlay_assets(
 
         visual_region_points: dict[str, np.ndarray] = {}
         if region_points_by_label is not None:
-            for region_name in ["left_wrist", "right_wrist", "arm", "torso"]:
+            for region_name in _EXPORT_REGION_LABELS:
                 points_xyz = np.asarray(
                     region_points_by_label.get(region_name, np.zeros((0, 3), dtype=np.float32)),
                     dtype=np.float32,
@@ -560,7 +630,7 @@ def _save_overlay_assets(
                 if points_xyz.size > 0:
                     visual_region_points[region_name] = points_xyz
         else:
-            for region_name in ["left_wrist", "right_wrist", "arm", "torso"]:
+            for region_name in _EXPORT_REGION_LABELS:
                 region_points_xyz = display_points_xyz[
                     [idx for idx, label in enumerate(display_point_labels) if label == region_name]
                 ]
@@ -568,11 +638,11 @@ def _save_overlay_assets(
                     visual_region_points[region_name] = np.asarray(region_points_xyz, dtype=np.float32).reshape(-1, 3)
 
         base_radius = max(float(np.max(extents_xyz)) * 0.02, 0.003)
-        for region_name in ["left_wrist", "right_wrist", "arm", "torso"]:
+        for region_name in _EXPORT_REGION_LABELS:
             region_points_xyz = visual_region_points.get(region_name)
             if region_points_xyz is None or region_points_xyz.size == 0:
                 continue
-            style = _REGION_OVERLAY_STYLE.get(region_name, _REGION_OVERLAY_STYLE["arm"])
+            style = _REGION_OVERLAY_STYLE.get(region_name, _REGION_OVERLAY_STYLE["left_wrist"])
             radius = base_radius * float(style["radius_scale"])
             color = np.asarray(style["rgba"], dtype=np.uint8)
             for point_xyz in region_points_xyz:
@@ -602,7 +672,7 @@ def _save_overlay_assets(
             ax_yz = fig.add_subplot(224)
             visual_region_points: dict[str, np.ndarray] = {}
             if region_points_by_label is not None:
-                for region_name in ["left_wrist", "right_wrist", "arm", "torso"]:
+                for region_name in _EXPORT_REGION_LABELS:
                     points_xyz = np.asarray(
                         region_points_by_label.get(region_name, np.zeros((0, 3), dtype=np.float32)),
                         dtype=np.float32,
@@ -610,7 +680,7 @@ def _save_overlay_assets(
                     if points_xyz.size > 0:
                         visual_region_points[region_name] = points_xyz
             else:
-                for region_name in ["left_wrist", "right_wrist", "arm", "torso"]:
+                for region_name in _EXPORT_REGION_LABELS:
                     region_points_xyz = display_points_xyz[
                         [idx for idx, label in enumerate(display_point_labels) if label == region_name]
                     ]
@@ -664,11 +734,11 @@ def _save_overlay_assets(
                 ax_3d.add_collection3d(poly)
 
             legend_entries: list[tuple[str, Any]] = []
-            for region_name in ["left_wrist", "right_wrist", "arm", "torso"]:
+            for region_name in _EXPORT_REGION_LABELS:
                 region_points_xyz = visual_region_points.get(region_name)
                 if region_points_xyz is None or region_points_xyz.size == 0:
                     continue
-                style = _REGION_OVERLAY_STYLE.get(region_name, _REGION_OVERLAY_STYLE["arm"])
+                style = _REGION_OVERLAY_STYLE.get(region_name, _REGION_OVERLAY_STYLE["left_wrist"])
                 scatter = ax_3d.scatter(
                     region_points_xyz[:, 0],
                     region_points_xyz[:, 1],
@@ -726,11 +796,11 @@ def _save_overlay_assets(
                         s=2.0,
                         linewidths=0.0,
                     )
-                for region_name in ["left_wrist", "right_wrist", "arm", "torso"]:
+                for region_name in _EXPORT_REGION_LABELS:
                     region_points_xyz = visual_region_points.get(region_name)
                     if region_points_xyz is None or region_points_xyz.size == 0:
                         continue
-                    style = _REGION_OVERLAY_STYLE.get(region_name, _REGION_OVERLAY_STYLE["arm"])
+                    style = _REGION_OVERLAY_STYLE.get(region_name, _REGION_OVERLAY_STYLE["left_wrist"])
                     axis.scatter(
                         region_points_xyz[:, dim_a],
                         region_points_xyz[:, dim_b],
@@ -745,10 +815,10 @@ def _save_overlay_assets(
                 axis.set_ylabel(label_b)
                 handles = []
                 labels = []
-                for region_name in ["left_wrist", "right_wrist", "arm", "torso"]:
+                for region_name in _EXPORT_REGION_LABELS:
                     if region_name not in visual_region_points:
                         continue
-                    style = _REGION_OVERLAY_STYLE.get(region_name, _REGION_OVERLAY_STYLE["arm"])
+                    style = _REGION_OVERLAY_STYLE.get(region_name, _REGION_OVERLAY_STYLE["left_wrist"])
                     handles.append(
                         Line2D([], [], marker="o", linestyle="", color=str(style["mpl_color"]), markersize=6)
                     )
@@ -1403,7 +1473,12 @@ def _finalize_clip_output(
         retained_contact_point_count=int(retained_points_xyz.shape[0]),
         left_wrist_contact_frames=int(accumulator.region_contact_frames["left_wrist"]),
         right_wrist_contact_frames=int(accumulator.region_contact_frames["right_wrist"]),
-        arm_contact_frames=int(accumulator.region_contact_frames["arm"]),
+        left_elbow_contact_frames=int(accumulator.region_contact_frames["left_elbow"]),
+        right_elbow_contact_frames=int(accumulator.region_contact_frames["right_elbow"]),
+        left_wrist_roll_contact_frames=int(accumulator.region_contact_frames["left_wrist_roll"]),
+        right_wrist_roll_contact_frames=int(accumulator.region_contact_frames["right_wrist_roll"]),
+        left_wrist_pitch_contact_frames=int(accumulator.region_contact_frames["left_wrist_pitch"]),
+        right_wrist_pitch_contact_frames=int(accumulator.region_contact_frames["right_wrist_pitch"]),
         torso_contact_frames=int(accumulator.region_contact_frames["torso"]),
     )
 

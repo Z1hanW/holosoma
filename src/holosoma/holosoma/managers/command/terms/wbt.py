@@ -52,26 +52,26 @@ from holosoma.utils.simulator_config import SimulatorType
 _RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD = 0.10
 _RUNTIME_PICKUP_CONSECUTIVE_STEPS = 5
 _CLIP_PICKUP_LIFT_RATIO_THRESHOLD = 0.35
-_CONTACT_PRIOR_REGION_NAMES = ("left_palm", "right_palm", "arms", "torso")
+_CONTACT_PRIOR_REGION_BODY_NAMES = {
+    "left_wrist": "left_wrist_yaw_link",
+    "right_wrist": "right_wrist_yaw_link",
+    "left_elbow": "left_elbow_link",
+    "right_elbow": "right_elbow_link",
+    "left_wrist_roll": "left_wrist_roll_link",
+    "right_wrist_roll": "right_wrist_roll_link",
+    "left_wrist_pitch": "left_wrist_pitch_link",
+    "right_wrist_pitch": "right_wrist_pitch_link",
+    "torso": "torso_link",
+}
+_CONTACT_PRIOR_REGION_NAMES = tuple(_CONTACT_PRIOR_REGION_BODY_NAMES)
+_CONTACT_PRIOR_REGION_ALIASES = {
+    "left_palm": "left_wrist",
+    "right_palm": "right_wrist",
+}
 _CONTACT_PRIOR_REGION_FORCE_BODY_NAMES = {
-    "left_palm": ("left_wrist_yaw_link",),
-    "right_palm": ("right_wrist_yaw_link",),
-    "arms": (
-        "left_elbow_link",
-        "right_elbow_link",
-        "left_wrist_roll_link",
-        "right_wrist_roll_link",
-        "left_wrist_pitch_link",
-        "right_wrist_pitch_link",
-    ),
-    "torso": ("torso_link",),
+    region_name: (body_name,) for region_name, body_name in _CONTACT_PRIOR_REGION_BODY_NAMES.items()
 }
-_CONTACT_PRIOR_REGION_POSITION_BODY_NAMES = {
-    "left_palm": ("left_wrist_yaw_link",),
-    "right_palm": ("right_wrist_yaw_link",),
-    "arms": ("left_elbow_link", "right_elbow_link", "left_wrist_yaw_link", "right_wrist_yaw_link"),
-    "torso": ("torso_link",),
-}
+_CONTACT_PRIOR_REGION_POSITION_BODY_NAMES = _CONTACT_PRIOR_REGION_FORCE_BODY_NAMES
 _CONTACT_PRIOR_PHASE_COUNT = 2
 _CONTACT_PRIOR_FORCE_THRESHOLD = 1.0
 _CONTACT_PRIOR_OBJECT_POS_ERROR_THRESHOLD = 0.20
@@ -84,16 +84,28 @@ _ADAPTIVE_SAMPLING_CONTACT_STAGE_RELEASE_LEAD_STEPS = 30
 _ADAPTIVE_SAMPLING_CONTACT_INTERVAL_REGION_ALIASES = {
     "left_palm": "left_wrist",
     "right_palm": "right_wrist",
-    "arms": "arm",
 }
 _ADAPTIVE_SAMPLING_CONTACT_INTERVAL_PRIMARY_REGION_GROUPS = (
     ("left_wrist", "right_wrist"),
-    ("arm", "torso"),
+    (
+        "left_elbow",
+        "right_elbow",
+        "left_wrist_roll",
+        "right_wrist_roll",
+        "left_wrist_pitch",
+        "right_wrist_pitch",
+        "torso",
+    ),
 )
 _ADAPTIVE_SAMPLING_CONTACT_INTERVAL_FALLBACK_FILES = {
     "left_wrist": "left_wrist_contact_interval_steps.npy",
     "right_wrist": "right_wrist_contact_interval_steps.npy",
-    "arm": "arm_contact_interval_steps.npy",
+    "left_elbow": "left_elbow_contact_interval_steps.npy",
+    "right_elbow": "right_elbow_contact_interval_steps.npy",
+    "left_wrist_roll": "left_wrist_roll_contact_interval_steps.npy",
+    "right_wrist_roll": "right_wrist_roll_contact_interval_steps.npy",
+    "left_wrist_pitch": "left_wrist_pitch_contact_interval_steps.npy",
+    "right_wrist_pitch": "right_wrist_pitch_contact_interval_steps.npy",
     "torso": "torso_contact_interval_steps.npy",
 }
 
@@ -187,11 +199,18 @@ def _normalize_contact_interval_pair(raw_interval: Any) -> tuple[int, int] | Non
     return start_step, end_step
 
 
+def _normalize_contact_prior_region_name(raw_name: str) -> str:
+    name = str(raw_name).strip()
+    if not name:
+        return ""
+    return _CONTACT_PRIOR_REGION_ALIASES.get(name, name)
+
+
 def _canonicalize_contact_interval_region_name(raw_name: str) -> str:
     name = str(raw_name).strip()
     if not name:
         return ""
-    return _ADAPTIVE_SAMPLING_CONTACT_INTERVAL_REGION_ALIASES.get(name, name)
+    return _normalize_contact_prior_region_name(_ADAPTIVE_SAMPLING_CONTACT_INTERVAL_REGION_ALIASES.get(name, name))
 
 
 def _select_primary_contact_interval(intervals_by_region: dict[str, Any]) -> tuple[int, int] | None:
@@ -3631,6 +3650,7 @@ class MotionCommand(CommandTermBase):
         self,
         region_name: str,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        region_name = _normalize_contact_prior_region_name(region_name)
         if region_name not in _CONTACT_PRIOR_REGION_NAMES:
             raise ValueError(f"Unknown contact prior region '{region_name}'.")
         region_idx = _CONTACT_PRIOR_REGION_NAMES.index(region_name)

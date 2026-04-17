@@ -245,6 +245,15 @@ class DistillationConfig:
     ppo_target_coeff: float = 0.9
     """Final PPO blend coefficient reached at ``dagger_end_epoch`` in scheduled PPO+DAgger mode."""
 
+    ppo_start_coeff: float = 0.0
+    """Initial PPO blend coefficient at ``ppo_start_epoch`` in scheduled PPO+DAgger mode."""
+
+    ppo_start_noise_std: float | None = None
+    """Optional max policy noise std enforced while PPO first enters scheduled PPO+DAgger mode."""
+
+    ppo_start_noise_std_until_coeff: float = 0.1
+    """Keep ``ppo_start_noise_std`` active until PPO blend coefficient exceeds this value."""
+
     ppo_schedule_step_epochs: int = 0
     """Optional PPO/DAgger step interval; values > 0 use staircase blending instead of a linear ramp."""
 

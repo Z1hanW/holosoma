@@ -812,6 +812,19 @@ class PerceptionManager:
             local_rotation_rad[..., 1],
             local_rotation_rad[..., 2],
         )
+        pitch_deg = float(getattr(self.cfg, "camera_pitch_deg", 0.0) or 0.0)
+        if abs(pitch_deg) > 1.0e-6:
+            pitch_rad = torch.deg2rad(torch.tensor(pitch_deg, device=self.device, dtype=torch.float32))
+            pitch_quat = quat_from_euler_xyz(
+                torch.tensor(0.0, device=self.device, dtype=torch.float32),
+                pitch_rad,
+                torch.tensor(0.0, device=self.device, dtype=torch.float32),
+            ).view(1, 1, 4)
+            local_orientation = quat_mul(
+                pitch_quat.expand_as(local_orientation),
+                local_orientation,
+                w_last=True,
+            )
 
         self._shared_camera_sensor_local_position = local_position
         self._shared_camera_sensor_local_orientation = local_orientation
