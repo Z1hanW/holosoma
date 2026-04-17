@@ -1751,6 +1751,10 @@ class MotionCommand(CommandTermBase):
         self._adaptive_sampling_contact_interval_root: Path | None = None
         self._adaptive_sampling_contact_window_by_clip: torch.Tensor | None = None
         self._adaptive_sampling_contact_window_valid_by_clip: torch.Tensor | None = None
+        self._uniform_t1_window_last_reset_available_frac = 0.0
+        self._uniform_t1_window_last_reset_sample_frac = 0.0
+        self._uniform_t1_window_last_reset_expected_sample_frac = 0.0
+        self._uniform_t1_window_last_reset_mean_window_len = 0.0
         self._runtime_default_pose_prepend_enabled = False
         self._runtime_default_pose_prepend_steps = 0
         self._runtime_default_pose_prepend_active: torch.Tensor | None = None
@@ -1943,6 +1947,10 @@ class MotionCommand(CommandTermBase):
                 )
         else:
             self.adaptive_timesteps_sampler = None
+        if self.use_adaptive_timesteps_sampler and bool(self.motion_cfg.uniform_t1_window_sampling_enabled):
+            logger.warning(
+                "uniform_t1_window_sampling_enabled=True is ignored while use_adaptive_timesteps_sampler=True."
+            )
         self._configure_adaptive_sampling_contact_interval_bank()
 
         # 5. clip sampling configuration
@@ -2559,6 +2567,8 @@ class MotionCommand(CommandTermBase):
         start_margin = self._min_start_margin_steps()
         valid_starts = torch.clamp(clip_lengths - start_margin, min=1)
         self.time_steps[env_ids] = (phase * valid_starts).long()
+        if self._uniform_t1_window_sampling_active() and not self._env.is_evaluating:
+            self.time_steps[env_ids] = self._sample_uniform_t1_window_time_steps(env_ids, valid_starts)
 
         # Handle start_at_timestep_zero_prob.
         base_prob = self._current_start_at_timestep_zero_prob()
@@ -2574,6 +2584,8 @@ class MotionCommand(CommandTermBase):
         # Otherwise, update_tasks_callback will advance the timestep to the next timestep -> out of bounds error.
         max_valid = torch.clamp(clip_lengths - 2, min=0)
         self.time_steps[env_ids] = torch.minimum(self.time_steps[env_ids], max_valid)
+        if self._uniform_t1_window_sampling_active():
+            self._record_uniform_t1_window_reset_metrics(env_ids, valid_starts)
 
         if self.motion_cfg.align_motion_to_init_yaw:
             self._update_motion_alignment(env_ids)
@@ -3252,6 +3264,104 @@ class MotionCommand(CommandTermBase):
             start_iter=self.motion_cfg.start_at_timestep_zero_prob_start_iter,
             end_iter=self.motion_cfg.start_at_timestep_zero_prob_end_iter,
         )
+
+    def _uniform_t1_window_sampling_active(self) -> bool:
+        return bool(self.motion_cfg.uniform_t1_window_sampling_enabled) and not self.use_adaptive_timesteps_sampler
+
+    def _uniform_t1_window_bounds(
+        self,
+        clip_ids: torch.Tensor,
+        valid_starts: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        num_samples = clip_ids.numel()
+        device = self.device
+        max_step = torch.clamp(valid_starts.to(device=device, dtype=torch.long) - 1, min=0)
+        zeros = torch.zeros((num_samples,), device=device, dtype=torch.long)
+
+        if (
+            self._adaptive_sampling_contact_window_by_clip is None
+            or self._adaptive_sampling_contact_window_valid_by_clip is None
+            or num_samples == 0
+        ):
+            return torch.zeros((num_samples,), device=device, dtype=torch.bool), zeros, zeros, zeros, zeros, max_step
+
+        clip_ids = clip_ids.to(device=device, dtype=torch.long)
+        contact_valid = self._adaptive_sampling_contact_window_valid_by_clip[clip_ids]
+        t1 = self._adaptive_sampling_contact_window_by_clip[clip_ids, 0]
+        half_width = max(0, int(self.motion_cfg.uniform_t1_window_half_width_steps))
+
+        lo = torch.clamp(t1 - half_width, min=1)
+        hi = torch.minimum(t1 + half_width, max_step)
+        window_valid = contact_valid & (max_step >= 1) & (hi >= lo)
+        window_len = torch.where(window_valid, hi - lo + 1, zeros)
+        total_nonzero_len = max_step
+        outside_len = torch.clamp(total_nonzero_len - window_len, min=0)
+        return window_valid, lo, hi, window_len, outside_len, total_nonzero_len
+
+    def _uniform_t1_window_probability(self, window_len: torch.Tensor, outside_len: torch.Tensor) -> torch.Tensor:
+        boost = max(1.0, float(self.motion_cfg.uniform_t1_window_density_boost))
+        window_score = window_len.to(dtype=torch.float32) * boost
+        outside_score = outside_len.to(dtype=torch.float32)
+        denom = window_score + outside_score
+        return torch.where(denom > 0.0, window_score / denom, torch.zeros_like(denom))
+
+    def _sample_uniform_t1_window_time_steps(self, env_ids: torch.Tensor, valid_starts: torch.Tensor) -> torch.Tensor:
+        num_samples = env_ids.numel()
+        device = self.device
+        zeros = torch.zeros((num_samples,), device=device, dtype=torch.long)
+        if num_samples == 0:
+            return zeros
+
+        clip_ids = self.clip_ids[env_ids]
+        window_valid, lo, hi, window_len, outside_len, total_nonzero_len = self._uniform_t1_window_bounds(
+            clip_ids,
+            valid_starts,
+        )
+
+        fallback_count = torch.clamp(total_nonzero_len, min=1)
+        fallback_sample = (torch.rand(num_samples, device=device) * fallback_count.to(dtype=torch.float32)).long() + 1
+        fallback_sample = torch.where(total_nonzero_len > 0, fallback_sample, zeros)
+
+        p_window = self._uniform_t1_window_probability(window_len, outside_len)
+        choose_window = window_valid & (torch.rand(num_samples, device=device) < p_window)
+
+        window_count = torch.clamp(window_len, min=1)
+        window_offset = (torch.rand(num_samples, device=device) * window_count.to(dtype=torch.float32)).long()
+        window_sample = lo + window_offset
+
+        outside_count = torch.clamp(outside_len, min=1)
+        outside_offset = (torch.rand(num_samples, device=device) * outside_count.to(dtype=torch.float32)).long()
+        before_len = torch.clamp(lo - 1, min=0)
+        outside_sample = torch.where(
+            outside_offset < before_len,
+            outside_offset + 1,
+            hi + 1 + (outside_offset - before_len),
+        )
+        outside_sample = torch.minimum(outside_sample, total_nonzero_len)
+
+        weighted_sample = torch.where(choose_window, window_sample, outside_sample)
+        return torch.where(window_valid, weighted_sample, fallback_sample)
+
+    def _record_uniform_t1_window_reset_metrics(self, env_ids: torch.Tensor, valid_starts: torch.Tensor) -> None:
+        if not bool(self.motion_cfg.uniform_t1_window_sampling_enabled) or env_ids.numel() == 0:
+            return
+
+        clip_ids = self.clip_ids[env_ids]
+        window_valid, lo, hi, window_len, outside_len, _ = self._uniform_t1_window_bounds(clip_ids, valid_starts)
+        sampled_steps = self.time_steps[env_ids]
+        sampled_window = window_valid & (sampled_steps >= lo) & (sampled_steps <= hi)
+        p_window = self._uniform_t1_window_probability(window_len, outside_len)
+        nonzero_prob = max(0.0, 1.0 - self._current_start_at_timestep_zero_prob())
+
+        self._uniform_t1_window_last_reset_available_frac = float(window_valid.to(dtype=torch.float32).mean().item())
+        self._uniform_t1_window_last_reset_sample_frac = float(sampled_window.to(dtype=torch.float32).mean().item())
+        self._uniform_t1_window_last_reset_expected_sample_frac = float((p_window * nonzero_prob).mean().item())
+        if torch.any(window_valid):
+            self._uniform_t1_window_last_reset_mean_window_len = float(
+                window_len[window_valid].to(dtype=torch.float32).mean().item()
+            )
+        else:
+            self._uniform_t1_window_last_reset_mean_window_len = 0.0
 
     def _current_freeze_at_timestep_zero_prob(self) -> float:
         return self._scheduled_reset_prob(
@@ -4552,7 +4662,7 @@ class MotionCommand(CommandTermBase):
             return None
         if not resolved.is_dir():
             logger.warning(
-                "Adaptive-sampling contact interval root '{}' does not exist; stage metrics will be skipped.",
+                "Adaptive-sampling contact interval root '{}' does not exist; contact-window sampling and stage metrics will be skipped.",
                 resolved,
             )
             return None
@@ -4602,7 +4712,10 @@ class MotionCommand(CommandTermBase):
             dtype=torch.bool,
         )
 
-        if not self.use_adaptive_timesteps_sampler or not self.motion.has_object:
+        needs_contact_windows = self.use_adaptive_timesteps_sampler or bool(
+            self.motion_cfg.uniform_t1_window_sampling_enabled
+        )
+        if not needs_contact_windows or not self.motion.has_object:
             return
 
         contact_root = self._resolve_adaptive_sampling_contact_interval_root()
@@ -4648,7 +4761,7 @@ class MotionCommand(CommandTermBase):
             )
         else:
             logger.warning(
-                "No matching adaptive-sampling contact windows were found in '{}'; stage metrics will be skipped.",
+                "No matching adaptive-sampling contact windows were found in '{}'; contact-window sampling and stage metrics will be skipped.",
                 contact_root,
             )
 
@@ -4789,6 +4902,23 @@ class MotionCommand(CommandTermBase):
             device=self.device,
             dtype=torch.float32,
         )
+        if bool(self.motion_cfg.uniform_t1_window_sampling_enabled):
+            uniform_t1_stats = {
+                "enabled": 1.0 if self._uniform_t1_window_sampling_active() else 0.0,
+                "density_boost": float(self.motion_cfg.uniform_t1_window_density_boost),
+                "half_width_steps": float(self.motion_cfg.uniform_t1_window_half_width_steps),
+                "last_reset_available_frac": self._uniform_t1_window_last_reset_available_frac,
+                "last_reset_sample_frac": self._uniform_t1_window_last_reset_sample_frac,
+                "last_reset_expected_sample_frac": self._uniform_t1_window_last_reset_expected_sample_frac,
+                "last_reset_mean_window_len": self._uniform_t1_window_last_reset_mean_window_len,
+            }
+            for metric_name, metric_value in uniform_t1_stats.items():
+                self.metrics[f"motion/reset_uniform_t1_window_{metric_name}"] = torch.full(
+                    (self.num_envs,),
+                    float(metric_value),
+                    device=self.device,
+                    dtype=torch.float32,
+                )
         self.metrics["motion/reset_freeze_at_timestep_zero_prob"] = torch.full(
             (self.num_envs,),
             float(self._current_freeze_at_timestep_zero_prob()),

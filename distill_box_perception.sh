@@ -735,13 +735,16 @@ DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_END_ITERATION=${DAGGER_MIX_TEACHER_ACTION_MI
 FIXED_BC_EVAL_LOG_INTERVAL=${FIXED_BC_EVAL_LOG_INTERVAL:-1000}
 SCHEDULE_NAME=${SCHEDULE_NAME:-sparse_root_teacher_anchor_v3_step_mix}
 SCHEDULE_NOTES=${SCHEDULE_NOTES:-"No teacher rollout mix. PPO/DAgger use the default staircase blend: PPO starts at 1000, increases by 0.1 every 500 iterations until capping at 0.9; with dagger_loss_coef=1.0, the effective BC weight drops from 1.0 to 0.1 over the same schedule. Root-frame relative command replaces the drop-command-specific curricula from distill_box_drop_mixed.sh; other launcher defaults stay aligned."}
-START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.2}
+START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.10}
 FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
 FREEZE_AT_TIMESTEP_ZERO_PROB_END=${FREEZE_AT_TIMESTEP_ZERO_PROB_END:-0.0}
 FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER:-2500}
 FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS}}
-USE_ADAPTIVE_TIMESTEPS_SAMPLER=${USE_ADAPTIVE_TIMESTEPS_SAMPLER:-True}
+USE_ADAPTIVE_TIMESTEPS_SAMPLER=${USE_ADAPTIVE_TIMESTEPS_SAMPLER:-False}
 ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT=${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT:-"${SCRIPT_DIR}/outputs/clips"}
+UNIFORM_T1_WINDOW_SAMPLING_ENABLED=${UNIFORM_T1_WINDOW_SAMPLING_ENABLED:-True}
+UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS=${UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS:-50}
+UNIFORM_T1_WINDOW_DENSITY_BOOST=${UNIFORM_T1_WINDOW_DENSITY_BOOST:-7.0}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
 STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_root','actor_obs_proprio_no_linvel']"}
@@ -1080,6 +1083,7 @@ fi
 echo "[INFO] fixed_bc_eval_log_interval=${FIXED_BC_EVAL_LOG_INTERVAL}"
 echo "[INFO] use_adaptive_timesteps_sampler=${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
 echo "[INFO] adaptive_sampling_contact_interval_root=${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}"
+echo "[INFO] uniform_t1_window_sampling=${UNIFORM_T1_WINDOW_SAMPLING_ENABLED} half_width=${UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS} density_boost=${UNIFORM_T1_WINDOW_DENSITY_BOOST}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
 echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END} iter=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER}"
 echo "[INFO] entropy_coef=${ENTROPY_COEF} dagger_match_std=${DAGGER_MATCH_STD}"
@@ -1184,6 +1188,9 @@ exec env \
   DAGGER_MATCH_STD="${DAGGER_MATCH_STD}" \
   ENTROPY_COEF="${ENTROPY_COEF}" \
   START_AT_TIMESTEP_ZERO_PROB="${START_AT_TIMESTEP_ZERO_PROB}" \
+  UNIFORM_T1_WINDOW_SAMPLING_ENABLED="${UNIFORM_T1_WINDOW_SAMPLING_ENABLED}" \
+  UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS="${UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS}" \
+  UNIFORM_T1_WINDOW_DENSITY_BOOST="${UNIFORM_T1_WINDOW_DENSITY_BOOST}" \
   HOLOSOMA_RESET_TO_DEFAULT_POSE="${RESET_TO_DEFAULT_POSE}" \
   ENABLE_DEFAULT_POSE_PREPEND="${ENABLE_DEFAULT_POSE_PREPEND}" \
   DEFAULT_POSE_PREPEND_DURATION_S="${DEFAULT_POSE_PREPEND_DURATION_S}" \
@@ -1217,6 +1224,9 @@ exec env \
     --algo.config.distill.ppo-schedule-step-epochs="${PPO_SCHEDULE_STEP_EPOCHS}" \
     --command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler="${USE_ADAPTIVE_TIMESTEPS_SAMPLER}" \
     --command.setup-terms.motion-command.params.motion-config.adaptive-sampling-contact-interval-root="${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}" \
+    --command.setup-terms.motion-command.params.motion-config.uniform-t1-window-sampling-enabled="${UNIFORM_T1_WINDOW_SAMPLING_ENABLED}" \
+    --command.setup-terms.motion-command.params.motion-config.uniform-t1-window-half-width-steps="${UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS}" \
+    --command.setup-terms.motion-command.params.motion-config.uniform-t1-window-density-boost="${UNIFORM_T1_WINDOW_DENSITY_BOOST}" \
     --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob="${FREEZE_AT_TIMESTEP_ZERO_PROB}" \
     --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-end="${FREEZE_AT_TIMESTEP_ZERO_PROB_END}" \
     --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-start-iter="${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER}" \

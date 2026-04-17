@@ -30,6 +30,7 @@ from viser.extras import ViserUrdf  # type: ignore[import-not-found]  # noqa: E4
 
 
 _DEFAULT_ROBOT_URDF_PATH = SRC_ROOT / "holosoma" / "data" / "robots" / "g1" / "g1_29dof.urdf"
+_ORIGINAL_G1_MESH_COLOR = (150, 80, 255)
 _ARM_LINK_REGION_ORDER = (
     "left_elbow",
     "right_elbow",
@@ -650,6 +651,7 @@ class DebugRolloutViewer:
                 self.server,
                 urdf_or_path=robot_urdf_path,
                 root_node_name="/original_g1",
+                mesh_color_override=_ORIGINAL_G1_MESH_COLOR,
             )
             self.original_robot_joint_names = list(self.original_robot_viser.get_actuated_joint_names())
             self.original_robot_viser.update_cfg(np.zeros((len(self.original_robot_joint_names),), dtype=np.float32))

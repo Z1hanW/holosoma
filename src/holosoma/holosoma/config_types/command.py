@@ -275,8 +275,18 @@ class MotionConfig:
     """Optional root directory of exported per-clip ``contact_intervals.json`` files.
 
     When set, adaptive timestep sampling logs additional contact-relative probability masses
-    to W&B/TensorBoard. The bank is matched by clip id, so it can live outside the motion bank.
+    to W&B/TensorBoard, and uniform ``t1`` window sampling can use the same bank. The bank is
+    matched by clip id, so it can live outside the motion bank.
     """
+
+    uniform_t1_window_sampling_enabled: bool = False
+    """Whether uniform timestep resets should density-boost a window around contact start ``t1``."""
+
+    uniform_t1_window_half_width_steps: int = 50
+    """Half-width, in motion steps, of the density-boosted ``[t1 - width, t1 + width]`` window."""
+
+    uniform_t1_window_density_boost: float = 1.0
+    """Per-timestep density multiplier for the uniform ``t1`` window relative to other nonzero steps."""
 
     start_at_timestep_zero_prob: float = 0.2
     """Probability of starting at timestep zero."""
