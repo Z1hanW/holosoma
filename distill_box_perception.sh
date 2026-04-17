@@ -12,6 +12,12 @@ set -euo pipefail
 # Teacher policy observation:
 # - auto-matched to the selected teacher checkpoint, following the same teacher
 #   compatibility interface pattern as distill_box_drop_mixed.sh
+#
+# Schedule variants:
+# - default: old-tracker profile keeps pure DAgger by default
+# - dagger_mix: pure DAgger with teacher-action rollout mix 0.7 -> 0.0 by default
+# - dag_first: pure DAgger first, then a small PPO blend
+# - ppo_first: PPO+DAgger from iteration 0
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
@@ -181,6 +187,10 @@ while [[ $# -gt 0 ]]; do
       SCHEDULE_VARIANT="default"
       shift
       ;;
+    dagger_mix|dagger-mix|daggermix)
+      SCHEDULE_VARIANT="dagger_mix"
+      shift
+      ;;
     dag_first|dag-first|dagger-first)
       SCHEDULE_VARIANT="dag_first"
       shift
@@ -205,7 +215,7 @@ if [[ $# -gt 0 && "$1" != -* ]]; then
 fi
 
 if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
-  echo "Usage: $0 [mix-naive|pure-real|pure-sd] [default|dag_first|ppo-first] [teacher_checkpoint.pt|wandb_run_url] [run_name] [extra train args...]" >&2
+  echo "Usage: $0 [mix-naive|pure-real|pure-sd] [default|dagger-mix|dag_first|ppo-first] [teacher_checkpoint.pt|wandb_run_url] [run_name] [extra train args...]" >&2
   exit 1
 fi
 
@@ -719,6 +729,9 @@ PPO_START_NOISE_STD=${PPO_START_NOISE_STD-0.1}
 PPO_START_NOISE_STD_UNTIL_COEFF=${PPO_START_NOISE_STD_UNTIL_COEFF:-0.1}
 PPO_SCHEDULE_STEP_EPOCHS=${PPO_SCHEDULE_STEP_EPOCHS:-500}
 DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
+DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_START=${DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_START:-0.7}
+DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_END=${DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_END:-0.0}
+DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_END_ITERATION=${DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_END_ITERATION:-3500}
 FIXED_BC_EVAL_LOG_INTERVAL=${FIXED_BC_EVAL_LOG_INTERVAL:-1000}
 SCHEDULE_NAME=${SCHEDULE_NAME:-sparse_root_teacher_anchor_v3_step_mix}
 SCHEDULE_NOTES=${SCHEDULE_NOTES:-"No teacher rollout mix. PPO/DAgger use the default staircase blend: PPO starts at 1000, increases by 0.1 every 500 iterations until capping at 0.9; with dagger_loss_coef=1.0, the effective BC weight drops from 1.0 to 0.1 over the same schedule. Root-frame relative command replaces the drop-command-specific curricula from distill_box_drop_mixed.sh; other launcher defaults stay aligned."}
@@ -808,6 +821,53 @@ fi
 case "${SCHEDULE_VARIANT}" in
   default)
     ;;
+  dagger_mix)
+    if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
+      NUM_LEARNING_ITERATIONS=10000
+    fi
+    # Keep PPO disabled while using teacher-action rollout mixing. PPO storage
+    # keeps the sampled student action, while the environment may step with the
+    # teacher action, so high teacher-action mix should remain a DAgger-only phase.
+    if [[ "${PPO_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
+      PPO_START_EPOCH=$((NUM_LEARNING_ITERATIONS + 1))
+    fi
+    if [[ "${DAGGER_END_EPOCH_EXPLICIT}" -eq 0 ]]; then
+      DAGGER_END_EPOCH=$((NUM_LEARNING_ITERATIONS + 2))
+    fi
+    if [[ "${PPO_TARGET_COEFF_EXPLICIT}" -eq 0 ]]; then
+      PPO_TARGET_COEFF=0.0
+    fi
+    if [[ "${PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT}" -eq 0 ]]; then
+      PPO_SCHEDULE_STEP_EPOCHS=0
+    fi
+    if [[ "${DAGGER_LOSS_COEF_EXPLICIT}" -eq 0 ]]; then
+      DAGGER_LOSS_COEF=1.0
+    fi
+    if [[ "${TEACHER_ACTION_MIX_RATIO_START_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_END_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_END_ITERATION_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATIO_EXPLICIT}" -eq 0 ]]; then
+      TEACHER_ACTION_MIX_RATIO_START="${DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_START}"
+      TEACHER_ACTION_MIX_RATIO_END="${DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_END}"
+      TEACHER_ACTION_MIX_RATIO_END_ITERATION="${DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_END_ITERATION}"
+    elif [[ "${TEACHER_ACTION_MIX_RATIO_START_EXPLICIT}" -eq 1 || "${TEACHER_ACTION_MIX_RATIO_END_EXPLICIT}" -eq 1 || "${TEACHER_ACTION_MIX_RATIO_END_ITERATION_EXPLICIT}" -eq 1 ]]; then
+      if [[ "${TEACHER_ACTION_MIX_RATIO_START_EXPLICIT}" -eq 0 ]]; then
+        TEACHER_ACTION_MIX_RATIO_START="${DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_START}"
+      fi
+      if [[ "${TEACHER_ACTION_MIX_RATIO_END_EXPLICIT}" -eq 0 ]]; then
+        TEACHER_ACTION_MIX_RATIO_END="${DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_END}"
+      fi
+      if [[ "${TEACHER_ACTION_MIX_RATIO_END_ITERATION_EXPLICIT}" -eq 0 ]]; then
+        TEACHER_ACTION_MIX_RATIO_END_ITERATION="${DAGGER_MIX_TEACHER_ACTION_MIX_RATIO_END_ITERATION}"
+      fi
+    fi
+    if [[ -n "${TEACHER_ACTION_MIX_RATIO_START}" && -n "${TEACHER_ACTION_MIX_RATIO_END}" ]]; then
+      TEACHER_ACTION_MIX_RATIO="${TEACHER_ACTION_MIX_RATIO_START}"
+    fi
+    if [[ "${SCHEDULE_NAME_EXPLICIT}" -eq 0 ]]; then
+      SCHEDULE_NAME="old_tracker_dagger_action_mix"
+    fi
+    if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
+      SCHEDULE_NOTES="Pure DAgger with teacher-action rollout mixing. PPO is disabled by default. Teacher actions step the environment with probability ${TEACHER_ACTION_MIX_RATIO_START:-${TEACHER_ACTION_MIX_RATIO}} and linearly anneal to ${TEACHER_ACTION_MIX_RATIO_END:-${TEACHER_ACTION_MIX_RATIO}} by iteration ${TEACHER_ACTION_MIX_RATIO_END_ITERATION:-0}; this stabilizes early perception rollouts while still returning to student-driven DAgger data."
+    fi
+    ;;
   dag_first)
     if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
       NUM_LEARNING_ITERATIONS=10000
@@ -864,7 +924,7 @@ case "${SCHEDULE_VARIANT}" in
     fi
     ;;
   *)
-    echo "[ERROR] Unsupported SCHEDULE_VARIANT='${SCHEDULE_VARIANT}'. Use one of: default, dag_first, ppo_first" >&2
+    echo "[ERROR] Unsupported SCHEDULE_VARIANT='${SCHEDULE_VARIANT}'. Use one of: default, dagger_mix, dag_first, ppo_first" >&2
     exit 2
     ;;
 esac

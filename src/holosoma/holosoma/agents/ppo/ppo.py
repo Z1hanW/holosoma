@@ -447,6 +447,99 @@ class PPO(BaseAlgo):
             logger.warning(f"Failed to parse teacher actor config from checkpoint; falling back to runtime config. {exc}")
             return None
 
+    def _validate_teacher_checkpoint_runtime_config(
+        self,
+        teacher_state: dict,
+        *,
+        obs_keys: list[str],
+        teacher_actor_cfg: ModuleConfig,
+    ) -> None:
+        if not self.strict_teacher_load:
+            return
+
+        exp_cfg = teacher_state.get("experiment_config")
+        if not isinstance(exp_cfg, dict):
+            return
+
+        checkpoint_groups = exp_cfg.get("observation", {}).get("groups", {})
+        runtime_groups = getattr(getattr(self.env, "observation_manager", None), "cfg", None)
+        runtime_groups = getattr(runtime_groups, "groups", {}) if runtime_groups is not None else {}
+
+        mismatches: list[str] = []
+        matched_groups: list[str] = []
+        for obs_key in obs_keys:
+            checkpoint_group = checkpoint_groups.get(obs_key) if isinstance(checkpoint_groups, dict) else None
+            if not isinstance(checkpoint_group, dict):
+                continue
+
+            runtime_group = runtime_groups.get(obs_key) if isinstance(runtime_groups, dict) else None
+            if runtime_group is None:
+                mismatches.append(f"{obs_key}: missing runtime observation group")
+                continue
+
+            checkpoint_history = checkpoint_group.get("history_length")
+            runtime_history = getattr(runtime_group, "history_length", None)
+            if checkpoint_history != runtime_history:
+                mismatches.append(
+                    f"{obs_key}: history_length checkpoint={checkpoint_history} runtime={runtime_history}"
+                )
+
+            checkpoint_terms = checkpoint_group.get("terms", {})
+            checkpoint_term_names = list(checkpoint_terms.keys()) if isinstance(checkpoint_terms, dict) else []
+            runtime_terms = getattr(runtime_group, "terms", {})
+            runtime_term_names = list(runtime_terms.keys()) if isinstance(runtime_terms, dict) else []
+            if checkpoint_term_names != runtime_term_names:
+                mismatches.append(
+                    f"{obs_key}: terms checkpoint={checkpoint_term_names} runtime={runtime_term_names}"
+                )
+            matched_groups.append(obs_key)
+
+        try:
+            checkpoint_actor_cfg = exp_cfg["algo"]["config"]["module_dict"]["actor"]
+        except (KeyError, TypeError):
+            checkpoint_actor_cfg = {}
+        checkpoint_actor_inputs = (
+            checkpoint_actor_cfg.get("input_dim") if isinstance(checkpoint_actor_cfg, dict) else None
+        )
+        if isinstance(checkpoint_actor_inputs, tuple):
+            checkpoint_actor_inputs = list(checkpoint_actor_inputs)
+        if checkpoint_actor_inputs and list(checkpoint_actor_inputs) != list(obs_keys):
+            logger.warning(
+                "Teacher checkpoint actor input keys differ from runtime teacher_obs_keys: "
+                "checkpoint={} runtime={}. Strict state_dict loading still enforces tensor compatibility; "
+                "use an exact compatibility observation group only when the runtime group preserves the "
+                "checkpoint term order and history.",
+                checkpoint_actor_inputs,
+                obs_keys,
+            )
+
+        checkpoint_layer_cfg = (
+            checkpoint_actor_cfg.get("layer_config", {}) if isinstance(checkpoint_actor_cfg, dict) else {}
+        )
+        checkpoint_perception_key = ""
+        if isinstance(checkpoint_layer_cfg, dict):
+            checkpoint_perception_key = str(checkpoint_layer_cfg.get("perception_input_name", "") or "")
+        runtime_perception_key = str(teacher_actor_cfg.layer_config.perception_input_name or "")
+        if bool(checkpoint_perception_key) != bool(runtime_perception_key):
+            mismatches.append(
+                "teacher perception input presence mismatch: "
+                f"checkpoint={checkpoint_perception_key or '<none>'} "
+                f"runtime={runtime_perception_key or '<none>'}"
+            )
+
+        if mismatches:
+            details = "; ".join(mismatches)
+            raise ValueError(
+                "Teacher checkpoint/runtime observation config mismatch under strict_teacher_load. "
+                f"{details}"
+            )
+
+        if matched_groups:
+            logger.info(
+                "Teacher checkpoint observation config matches runtime for groups: {}",
+                ", ".join(matched_groups),
+            )
+
     def _load_teacher_actor(
         self, ckpt_path: str, obs_keys: list[str] | None = None
     ) -> tuple[nn.Module, dict[str, nn.Module]]:
@@ -460,6 +553,11 @@ class PPO(BaseAlgo):
         teacher_obs_keys = obs_keys if obs_keys is not None else self.actor_obs_keys
         teacher_actor_base_cfg = self._extract_teacher_actor_config(teacher_state)
         teacher_actor_cfg = self._build_teacher_actor_config(teacher_obs_keys, base_actor_cfg=teacher_actor_base_cfg)
+        self._validate_teacher_checkpoint_runtime_config(
+            teacher_state,
+            obs_keys=teacher_obs_keys,
+            teacher_actor_cfg=teacher_actor_cfg,
+        )
         teacher_actor = setup_ppo_actor_module(
             obs_dim_dict=self.algo_obs_dim_dict,
             module_config=teacher_actor_cfg,
