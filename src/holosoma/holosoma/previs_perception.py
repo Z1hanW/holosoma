@@ -35,6 +35,17 @@ def _resolve_stride() -> int:
     return max(1, stride)
 
 
+def _resolve_max_frames() -> int | None:
+    raw = os.environ.get("HOLOSOMA_PREVIS_PERCEPTION_MAX_FRAMES", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return max(1, value)
+
+
 def _resolve_video_enabled() -> bool:
     raw = os.environ.get("HOLOSOMA_PREVIS_PERCEPTION_VIDEO", "")
     return raw.strip().lower() in {"1", "true", "yes", "y"}
@@ -142,6 +153,7 @@ def replay_perception(tyro_config: ExperimentConfig) -> None:
 
     output_dir = _resolve_output_dir()
     stride = _resolve_stride()
+    max_frames = _resolve_max_frames()
     video_enabled = _resolve_video_enabled()
     save_npy = _resolve_save_npy_enabled()
     save_png = _resolve_save_png_enabled()
@@ -213,6 +225,8 @@ def replay_perception(tyro_config: ExperimentConfig) -> None:
                 rgb_video_writer.write(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
 
         frame_idx += 1
+        if max_frames is not None and frame_idx >= max_frames:
+            break
 
     if video_writer is not None:
         video_writer.release()
