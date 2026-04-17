@@ -292,6 +292,12 @@ class BaseTask:
             self.perception_manager.reset(env_ids)
         if self.teacher_perception_manager is not None:
             self.teacher_perception_manager.reset(env_ids)
+        if (
+            self.critic_perception_manager is not None
+            and self.critic_perception_manager is not self.perception_manager
+            and self.critic_perception_manager is not self.teacher_perception_manager
+        ):
+            self.critic_perception_manager.reset(env_ids)
 
         self._pending_episode_lengths[env_ids] = self.episode_length_buf[env_ids]
         self._pending_episode_update_mask[env_ids] = False
@@ -771,6 +777,12 @@ class BaseTask:
             self.perception_manager.update()
         if self.teacher_perception_manager is not None:
             self.teacher_perception_manager.update()
+        if (
+            self.critic_perception_manager is not None
+            and self.critic_perception_manager is not self.perception_manager
+            and self.critic_perception_manager is not self.teacher_perception_manager
+        ):
+            self.critic_perception_manager.update()
 
     def _post_compute_observations_callback(self):
         """Hook invoked after observation buffers are produced (no-op by default)."""
