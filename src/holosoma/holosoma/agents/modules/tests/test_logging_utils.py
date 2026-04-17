@@ -231,8 +231,8 @@ def test_collect_reward_wandb_metadata_groups_weights_and_sigmas():
             ),
             "offline_contact_guidance": RewardTermCfg(
                 func="unused",
-                params={"position_sigma": 0.05, "force_threshold": 1.7},
-                weight=1.0,
+                params={"position_sigma": 0.08, "force_threshold": 1.4},
+                weight=4.0,
             ),
             "action_rate_l2": RewardTermCfg(func="unused", weight=-0.1),
             "sparse_goal_success_bonus": RewardTermCfg(func="unused", weight=20.0),
@@ -246,7 +246,7 @@ def test_collect_reward_wandb_metadata_groups_weights_and_sigmas():
     assert spec["Track"]["teacher_rollout_global_ref_position_error_exp"]["weight"] == 0.5
     assert spec["Track"]["teacher_rollout_global_ref_position_error_exp"]["sigma"] == 0.3
     assert spec["Object"]["teacher_rollout_object_global_ref_position_error_exp"]["weight"] == 1.0
-    assert spec["Contact"]["offline_contact_guidance"]["force_threshold"] == 1.7
+    assert spec["Contact"]["offline_contact_guidance"]["force_threshold"] == 1.4
     assert spec["Regularize"]["action_rate_l2"]["weight"] == -0.1
     assert spec["Rest"]["sparse_goal_success_bonus"]["weight"] == 20.0
     assert "sparse_goal_pickup_height_reward" not in spec["Rest"]
@@ -256,7 +256,7 @@ def test_collect_reward_wandb_metadata_groups_weights_and_sigmas():
     )
     assert (
         summary_metadata["RewardSpec/Contact/offline_contact_guidance/force_threshold"]
-        == 1.7
+        == 1.4
     )
 
 

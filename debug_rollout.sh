@@ -20,6 +20,8 @@ Environment overrides:
   VISER_HOST          Default: 0.0.0.0
   ROBOT_URDF          G1 URDF rendered in the rollout view.
                       Default: src/holosoma/holosoma/data/robots/g1/g1_29dof.urdf
+  ORIGINAL_MOTION_DIR Original input motion directory to compare against rollout.
+                      Default: data/ds_box_data/train_g1_w_obj_prepared
   SHOW_ROBOT          Default: 1; set 0/false to hide the training G1 overlay.
   LIST_ONLY           Default: 0; print available sequences and exit.
   DRY_RUN             Default: 0; print command without running.
@@ -43,6 +45,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 VISER_PORT="${VISER_PORT:-18092}"
 VISER_HOST="${VISER_HOST:-0.0.0.0}"
 ROBOT_URDF="${ROBOT_URDF:-${ROOT_DIR}/src/holosoma/holosoma/data/robots/g1/g1_29dof.urdf}"
+ORIGINAL_MOTION_DIR="${ORIGINAL_MOTION_DIR:-${ROOT_DIR}/data/ds_box_data/train_g1_w_obj_prepared}"
 SHOW_ROBOT="${SHOW_ROBOT:-1}"
 LIST_ONLY="${LIST_ONLY:-0}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -83,6 +86,7 @@ cmd=(
   --data-root "${DATA_ROOT}"
   --vis-root "${VIS_ROOT}"
   --stats-root "${STATS_ROOT}"
+  --original-motion-dir "${ORIGINAL_MOTION_DIR}"
   --host "${VISER_HOST}"
   --port "${VISER_PORT}"
 )
@@ -107,6 +111,7 @@ export PYTHONPATH="${ROOT_DIR}/src:${PYTHONPATH:-}"
 echo "[INFO] DATA_ROOT=${DATA_ROOT}"
 echo "[INFO] VIS_ROOT=${VIS_ROOT}"
 echo "[INFO] STATS_ROOT=${STATS_ROOT}"
+echo "[INFO] ORIGINAL_MOTION_DIR=${ORIGINAL_MOTION_DIR}"
 echo "[INFO] ROBOT_URDF=${ROBOT_URDF}"
 echo "[INFO] VISER_URL=http://localhost:${VISER_PORT}"
 

@@ -9,8 +9,7 @@ set -euo pipefail
 # 3. Run the student DAgger job with 2 envs and live loss logging.
 #
 # Losses to inspect:
-# - TensorBoard: Loss/bc_loss, Loss/distill_loss, Eval/fixed_bc_mu_mse
-# - Console: the same loss keys are printed each learning iteration.
+# - Console: Loss/bc_loss, Loss/distill_loss, Eval/fixed_bc_mu_mse are printed each learning iteration.
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
@@ -82,7 +81,7 @@ VISER_DISTILL_MINIMAL_UI=${VISER_DISTILL_MINIMAL_UI:-1}
 VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-1}
 VISER_SHOW_ENV_SEQUENCE_LABELS=${VISER_SHOW_ENV_SEQUENCE_LABELS:-1}
 
-START_TENSORBOARD=${START_TENSORBOARD:-1}
+START_TENSORBOARD=${START_TENSORBOARD:-0}
 TENSORBOARD_PORT=${TENSORBOARD_PORT:-6007}
 
 is_truthy() {
@@ -337,7 +336,7 @@ student_cmd=(
   "$@"
 )
 
-echo "[INFO] Starting student DAgger. Watch console Loss/bc_loss and TensorBoard Eval/fixed_bc_mu_mse."
+echo "[INFO] Starting student DAgger. Watch console Loss/bc_loss, Loss/distill_loss, and Eval/fixed_bc_mu_mse."
 echo "[INFO] viser_url=http://127.0.0.1:${VISER_PORT}"
 if is_truthy "${DEBUG_DAGGER_DRY_RUN}"; then
   echo "[DRY_RUN] student DAgger command:"

@@ -1735,8 +1735,10 @@ class ViserLiveViewer:
         self._perception_last_aspect: float | None = None
         self._target_box_handle = None
         self._target_box_last_dimensions: tuple[float, float, float] | None = None
+        self._target_box_last_mesh_key: str | None = None
         self._future_goal_box_handle = None
         self._future_goal_box_last_dimensions: tuple[float, float, float] | None = None
+        self._future_goal_box_last_mesh_key: str | None = None
         self._scene_prefix = ""
         self._global_root = None
         self._global_frame_wxyz: tuple[float, float, float, float] | None = None
@@ -7034,6 +7036,20 @@ class ViserLiveViewer:
             return None
         object_size = np.asarray(object_size, dtype=np.float32)
 
+        try:
+            sample_fn = getattr(motion_cmd, "_sample_clip_based_object_goal_pose_w", None)
+            if callable(sample_fn):
+                env_ids = torch.tensor([self._env_id], device=motion_cmd.device, dtype=torch.long)
+                clip_id = int(motion_cmd.clip_ids[self._env_id].item())
+                clip_lengths = motion_cmd.motion.clip_lengths[clip_id : clip_id + 1].to(device=motion_cmd.device)
+                goal_pos_t, goal_quat_xyzw_t = sample_fn(env_ids, clip_lengths)
+                goal_pos_w = goal_pos_t[0].detach().float().cpu().numpy().astype(np.float32, copy=True)
+                goal_quat_xyzw = goal_quat_xyzw_t[0].detach().float().cpu().numpy()
+                goal_quat_wxyz = goal_quat_xyzw[[3, 0, 1, 2]]
+                return goal_pos_w, goal_quat_wxyz, object_size
+        except Exception:
+            pass
+
         clip_goal_pos_w = getattr(motion_cmd, "clip_goal_object_pos_w", None)
         clip_goal_rot6d_w = getattr(motion_cmd, "clip_goal_object_rot6d_w", None)
         if (
@@ -7046,28 +7062,28 @@ class ViserLiveViewer:
             try:
                 goal_pos_w = clip_goal_pos_w[self._env_id].detach().float().cpu().numpy().astype(np.float32, copy=True)
                 goal_quat_wxyz = self._rot6d_to_quat_wxyz(clip_goal_rot6d_w[self._env_id : self._env_id + 1])
-                goal_pos_w[2] = self._target_box_resting_center_z(object_size)
-                goal_yaw = self._yaw_from_quat_wxyz(goal_quat_wxyz)
-                return goal_pos_w, self._quat_wxyz_from_yaw(goal_yaw), object_size
+                return goal_pos_w, goal_quat_wxyz, object_size
             except Exception:
                 pass
 
+        return None
+
+    def _resolve_target_box_mesh(
+        self,
+    ) -> tuple[str | None, np.ndarray | None, np.ndarray | None]:
+        visual_key, mesh, _source_label = self._resolve_object_mesh_spec_for_env(self._env_id, "visual")
+        if not visual_key or mesh is None:
+            return None, None, None
         try:
-            sample_fn = getattr(motion_cmd, "_sample_clip_based_object_goal_pose_w", None)
-            if not callable(sample_fn):
-                return None
-            env_ids = torch.tensor([self._env_id], device=motion_cmd.device, dtype=torch.long)
-            clip_id = int(motion_cmd.clip_ids[self._env_id].item())
-            clip_lengths = motion_cmd.motion.clip_lengths[clip_id : clip_id + 1].to(device=motion_cmd.device)
-            goal_pos_t, goal_quat_xyzw_t = sample_fn(env_ids, clip_lengths)
-            goal_pos_w = goal_pos_t[0].detach().float().cpu().numpy().astype(np.float32, copy=True)
-            goal_quat_xyzw = goal_quat_xyzw_t[0].detach().float().cpu().numpy()
-            goal_quat_wxyz = goal_quat_xyzw[[3, 0, 1, 2]]
-            goal_pos_w[2] = self._target_box_resting_center_z(object_size)
-            goal_yaw = self._yaw_from_quat_wxyz(goal_quat_wxyz)
-            return goal_pos_w, self._quat_wxyz_from_yaw(goal_yaw), object_size
+            vertices = np.asarray(mesh.vertices, dtype=np.float32)
+            faces = np.asarray(mesh.faces, dtype=np.uint32)
         except Exception:
-            return None
+            return None, None, None
+        if vertices.ndim != 2 or vertices.shape[1] != 3 or vertices.size == 0:
+            return None, None, None
+        if faces.ndim != 2 or faces.shape[1] != 3 or faces.size == 0:
+            return None, None, None
+        return str(visual_key), vertices, faces
 
     def _update_target_box(self, offset: np.ndarray) -> None:
         if not self._server:
@@ -7091,38 +7107,57 @@ class ViserLiveViewer:
 
         goal_pos_w, goal_quat_wxyz, goal_size = target_pose
         dimensions = tuple(float(max(1.0e-3, v)) for v in np.asarray(goal_size, dtype=np.float32).reshape(3))
-        if self._target_box_handle is None:
+        mesh_key, mesh_vertices, mesh_faces = self._resolve_target_box_mesh()
+        geometry_changed = self._target_box_last_dimensions != dimensions or self._target_box_last_mesh_key != mesh_key
+        if self._target_box_handle is not None and geometry_changed:
             try:
-                self._target_box_handle = self._server.scene.add_box(
+                self._target_box_handle.remove()
+            except Exception:
+                pass
+            self._target_box_handle = None
+            self._target_box_last_dimensions = None
+            self._target_box_last_mesh_key = None
+        if self._target_box_handle is None:
+            if mesh_key is not None and mesh_vertices is not None and mesh_faces is not None:
+                self._target_box_handle = self._server.scene.add_mesh_simple(
                     self._scene_path("/target_box"),
+                    vertices=mesh_vertices,
+                    faces=mesh_faces,
                     color=TARGET_BOX_COLOR,
-                    dimensions=dimensions,
-                    wireframe=False,
                     opacity=0.25,
                     flat_shading=True,
-                    cast_shadow=False,
-                    receive_shadow=False,
+                    side="double",
                     wxyz=goal_quat_wxyz,
                     position=goal_pos_w - offset,
                     visible=True,
                 )
-            except TypeError:
-                self._target_box_handle = self._server.scene.add_box(
-                    self._scene_path("/target_box"),
-                    color=TARGET_BOX_COLOR,
-                    dimensions=dimensions,
-                    wxyz=goal_quat_wxyz,
-                    position=goal_pos_w - offset,
-                    visible=True,
-                )
-            self._target_box_last_dimensions = dimensions
-        else:
-            if self._target_box_last_dimensions != dimensions:
+            else:
                 try:
-                    self._target_box_handle.dimensions = dimensions
-                except Exception:
-                    pass
-                self._target_box_last_dimensions = dimensions
+                    self._target_box_handle = self._server.scene.add_box(
+                        self._scene_path("/target_box"),
+                        color=TARGET_BOX_COLOR,
+                        dimensions=dimensions,
+                        wireframe=False,
+                        opacity=0.25,
+                        flat_shading=True,
+                        cast_shadow=False,
+                        receive_shadow=False,
+                        wxyz=goal_quat_wxyz,
+                        position=goal_pos_w - offset,
+                        visible=True,
+                    )
+                except TypeError:
+                    self._target_box_handle = self._server.scene.add_box(
+                        self._scene_path("/target_box"),
+                        color=TARGET_BOX_COLOR,
+                        dimensions=dimensions,
+                        wxyz=goal_quat_wxyz,
+                        position=goal_pos_w - offset,
+                        visible=True,
+                    )
+            self._target_box_last_dimensions = dimensions
+            self._target_box_last_mesh_key = mesh_key
+        else:
             try:
                 self._target_box_handle.visible = True
             except Exception:
@@ -7152,38 +7187,57 @@ class ViserLiveViewer:
 
         goal_pos_w, goal_quat_wxyz, goal_size = future_goal_pose
         dimensions = tuple(float(max(1.0e-3, v)) for v in np.asarray(goal_size, dtype=np.float32).reshape(3))
-        if self._future_goal_box_handle is None:
+        mesh_key, mesh_vertices, mesh_faces = self._resolve_target_box_mesh()
+        geometry_changed = self._future_goal_box_last_dimensions != dimensions or self._future_goal_box_last_mesh_key != mesh_key
+        if self._future_goal_box_handle is not None and geometry_changed:
             try:
-                self._future_goal_box_handle = self._server.scene.add_box(
+                self._future_goal_box_handle.remove()
+            except Exception:
+                pass
+            self._future_goal_box_handle = None
+            self._future_goal_box_last_dimensions = None
+            self._future_goal_box_last_mesh_key = None
+        if self._future_goal_box_handle is None:
+            if mesh_key is not None and mesh_vertices is not None and mesh_faces is not None:
+                self._future_goal_box_handle = self._server.scene.add_mesh_simple(
                     self._scene_path("/future_goal_box"),
+                    vertices=mesh_vertices,
+                    faces=mesh_faces,
                     color=FUTURE_GOAL_BOX_COLOR,
-                    dimensions=dimensions,
-                    wireframe=False,
                     opacity=0.28,
                     flat_shading=True,
-                    cast_shadow=False,
-                    receive_shadow=False,
+                    side="double",
                     wxyz=goal_quat_wxyz,
                     position=goal_pos_w - offset,
                     visible=True,
                 )
-            except TypeError:
-                self._future_goal_box_handle = self._server.scene.add_box(
-                    self._scene_path("/future_goal_box"),
-                    color=FUTURE_GOAL_BOX_COLOR,
-                    dimensions=dimensions,
-                    wxyz=goal_quat_wxyz,
-                    position=goal_pos_w - offset,
-                    visible=True,
-                )
-            self._future_goal_box_last_dimensions = dimensions
-        else:
-            if self._future_goal_box_last_dimensions != dimensions:
+            else:
                 try:
-                    self._future_goal_box_handle.dimensions = dimensions
-                except Exception:
-                    pass
-                self._future_goal_box_last_dimensions = dimensions
+                    self._future_goal_box_handle = self._server.scene.add_box(
+                        self._scene_path("/future_goal_box"),
+                        color=FUTURE_GOAL_BOX_COLOR,
+                        dimensions=dimensions,
+                        wireframe=False,
+                        opacity=0.28,
+                        flat_shading=True,
+                        cast_shadow=False,
+                        receive_shadow=False,
+                        wxyz=goal_quat_wxyz,
+                        position=goal_pos_w - offset,
+                        visible=True,
+                    )
+                except TypeError:
+                    self._future_goal_box_handle = self._server.scene.add_box(
+                        self._scene_path("/future_goal_box"),
+                        color=FUTURE_GOAL_BOX_COLOR,
+                        dimensions=dimensions,
+                        wxyz=goal_quat_wxyz,
+                        position=goal_pos_w - offset,
+                        visible=True,
+                    )
+            self._future_goal_box_last_dimensions = dimensions
+            self._future_goal_box_last_mesh_key = mesh_key
+        else:
             try:
                 self._future_goal_box_handle.visible = True
             except Exception:

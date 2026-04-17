@@ -242,6 +242,16 @@ class RobotMotion:
     status: str
 
 
+@dataclass
+class OriginalMotion:
+    path: Path | None
+    joint_pos: np.ndarray | None
+    joint_indices: np.ndarray | None
+    object_pos: np.ndarray | None
+    object_quat_wxyz: np.ndarray | None
+    status: str
+
+
 def _decode_scalar(value: object) -> str:
     if isinstance(value, np.ndarray):
         if value.size == 0:
@@ -360,6 +370,24 @@ def _resolve_motion_bank_path(entry: ClipEntry) -> Path | None:
     return None
 
 
+def _resolve_original_motion_path(entry: ClipEntry, original_motion_dir: Path | None) -> Path | None:
+    if original_motion_dir is None:
+        return None
+    candidates = [
+        original_motion_dir / f"{entry.clip_id}.npz",
+        original_motion_dir / f"{entry.clip_dir_name}.npz",
+    ]
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.exists():
+            return resolved
+    return None
+
+
 def _joint_indices_for_viser(
     *,
     viser_joint_names: list[str],
@@ -389,10 +417,12 @@ class DebugRolloutViewer:
         host: str,
         port: int,
         robot_urdf_path: Path | None,
+        original_motion_dir: Path | None,
     ) -> None:
         self.data_root = data_root
         self.vis_root = vis_root
         self.stats_root = stats_root
+        self.original_motion_dir = original_motion_dir.expanduser().resolve() if original_motion_dir is not None else None
         self.entries = _load_entries(data_root, vis_root, stats_root)
         self.entry_by_label = {entry.label: entry for entry in self.entries}
         self.current_entry: ClipEntry | None = None
@@ -406,6 +436,9 @@ class DebugRolloutViewer:
         self.box_handles: list[Any] = []
         self.point_handles: list[Any] = []
         self.path_handles: list[Any] = []
+        self.original_handles: list[Any] = []
+        self.original_object_handles: list[Any] = []
+        self.original_path_handles: list[Any] = []
         self.dynamic_body_handle: Any | None = None
         self.dynamic_label_handles: list[Any] = []
         self.current_object_handles: list[Any] = []
@@ -413,6 +446,9 @@ class DebugRolloutViewer:
         self.robot_root_handle: Any | None = None
         self.robot_viser: ViserUrdf | None = None
         self.robot_joint_names: list[str] = []
+        self.original_robot_root_handle: Any | None = None
+        self.original_robot_viser: ViserUrdf | None = None
+        self.original_robot_joint_names: list[str] = []
         self.robot_motion = RobotMotion(
             path=None,
             joint_pos=None,
@@ -420,7 +456,16 @@ class DebugRolloutViewer:
             frame_mode="none",
             status="disabled",
         )
+        self.original_motion = OriginalMotion(
+            path=None,
+            joint_pos=None,
+            joint_indices=None,
+            object_pos=None,
+            object_quat_wxyz=None,
+            status="disabled",
+        )
         self.robot_load_error: str | None = None
+        self.original_robot_load_error: str | None = None
 
         self.ref: dict[str, np.ndarray] = {}
         self.valid_indices = np.zeros((0,), dtype=np.int64)
@@ -452,6 +497,7 @@ class DebugRolloutViewer:
             self.show_robot_cb = self.server.gui.add_checkbox("Training G1", initial_value=robot_urdf_path is not None)
             self.show_product_cb = self.server.gui.add_checkbox("Static Product Overlay", initial_value=True)
             self.show_rollout_cb = self.server.gui.add_checkbox("Rollout View", initial_value=True)
+            self.show_original_motion_cb = self.server.gui.add_checkbox("Original Input Motion", initial_value=False)
             self.show_mesh_cb = self.server.gui.add_checkbox("Object Mesh", initial_value=True)
             self.show_box_cb = self.server.gui.add_checkbox("Primitive Box", initial_value=True)
             self.show_points_cb = self.server.gui.add_checkbox("Contact Points", initial_value=True)
@@ -497,6 +543,7 @@ class DebugRolloutViewer:
             self.show_robot_cb,
             self.show_product_cb,
             self.show_rollout_cb,
+            self.show_original_motion_cb,
             self.show_mesh_cb,
             self.show_box_cb,
             self.show_points_cb,
@@ -513,6 +560,9 @@ class DebugRolloutViewer:
             + self.box_handles
             + self.point_handles
             + self.path_handles
+            + self.original_handles
+            + self.original_object_handles
+            + self.original_path_handles
             + self.current_object_handles
             + self.current_contact_handles
             + self.dynamic_label_handles
@@ -538,6 +588,9 @@ class DebugRolloutViewer:
         self.box_handles = []
         self.point_handles = []
         self.path_handles = []
+        self.original_handles = []
+        self.original_object_handles = []
+        self.original_path_handles = []
         self.current_object_handles = []
         self.current_contact_handles = []
         self.dynamic_label_handles = []
@@ -590,6 +643,23 @@ class DebugRolloutViewer:
             frame_mode="reference_root",
             status=f"loaded {robot_urdf_path.name}",
         )
+
+        try:
+            self.original_robot_root_handle = self.server.scene.add_frame("/original_g1", show_axes=False)
+            self.original_robot_viser = ViserUrdf(
+                self.server,
+                urdf_or_path=robot_urdf_path,
+                root_node_name="/original_g1",
+            )
+            self.original_robot_joint_names = list(self.original_robot_viser.get_actuated_joint_names())
+            self.original_robot_viser.update_cfg(np.zeros((len(self.original_robot_joint_names),), dtype=np.float32))
+            self.original_robot_root_handle.visible = False
+            self.original_robot_viser.show_visual = False
+        except Exception as exc:
+            self.original_robot_load_error = f"failed to load original robot URDF: {exc}"
+            self.original_robot_root_handle = None
+            self.original_robot_viser = None
+            self.original_robot_joint_names = []
 
     def _load_robot_motion(self, entry: ClipEntry) -> None:
         if self.robot_viser is None:
@@ -660,6 +730,75 @@ class DebugRolloutViewer:
             status=f"{motion_bank_path.name} ({joint_pos.shape[0]} frames, {num_motion_joints} joints)",
         )
 
+    def _load_original_motion(self, entry: ClipEntry) -> None:
+        original_motion_path = _resolve_original_motion_path(entry, self.original_motion_dir)
+        if original_motion_path is None:
+            root_msg = str(self.original_motion_dir) if self.original_motion_dir is not None else "<disabled>"
+            self.original_motion = OriginalMotion(
+                path=None,
+                joint_pos=None,
+                joint_indices=None,
+                object_pos=None,
+                object_quat_wxyz=None,
+                status=f"missing under {root_msg}",
+            )
+            return
+
+        try:
+            with np.load(original_motion_path, allow_pickle=True) as data:
+                joint_pos = np.asarray(data["joint_pos"], dtype=np.float32) if "joint_pos" in data.files else None
+                object_pos = np.asarray(data["object_pos_w"], dtype=np.float32) if "object_pos_w" in data.files else None
+                object_quat = np.asarray(data["object_quat_w"], dtype=np.float32) if "object_quat_w" in data.files else None
+                motion_joint_names = (
+                    [_decode_scalar(name) for name in np.asarray(data["joint_names"])]
+                    if "joint_names" in data.files
+                    else []
+                )
+        except Exception as exc:
+            self.original_motion = OriginalMotion(
+                path=original_motion_path,
+                joint_pos=None,
+                joint_indices=None,
+                object_pos=None,
+                object_quat_wxyz=None,
+                status=f"failed to load original motion ({exc})",
+            )
+            return
+
+        joint_indices = None
+        if (
+            self.original_robot_viser is not None
+            and joint_pos is not None
+            and joint_pos.ndim == 2
+            and joint_pos.shape[1] >= 7
+        ):
+            num_motion_joints = max(0, int(joint_pos.shape[1]) - 7)
+            joint_indices, error = _joint_indices_for_viser(
+                viser_joint_names=self.original_robot_joint_names,
+                motion_joint_names=motion_joint_names,
+                num_motion_joints=num_motion_joints,
+            )
+            if joint_indices is None:
+                status = f"{original_motion_path.name}: {error}; object-only original overlay"
+            else:
+                status = f"{original_motion_path.name} ({joint_pos.shape[0]} frames, {num_motion_joints} joints)"
+        else:
+            status = f"{original_motion_path.name}: no valid joint_pos; object-only original overlay"
+
+        if object_pos is not None and (object_pos.ndim != 2 or object_pos.shape[1] != 3):
+            object_pos = None
+        if object_quat is not None and (object_quat.ndim != 2 or object_quat.shape[1] != 4):
+            object_quat = None
+
+        self.original_motion = OriginalMotion(
+            path=original_motion_path,
+            joint_pos=joint_pos,
+            joint_indices=joint_indices,
+            object_pos=object_pos,
+            object_quat_wxyz=object_quat,
+            status=status,
+        )
+
     def load_entry(self, label: str) -> None:
         entry = self.entry_by_label[label]
         self.current_entry = entry
@@ -677,6 +816,7 @@ class DebugRolloutViewer:
             self.valid_indices = np.arange(int(self.ref.get("trajectory_length", np.asarray(0)).reshape(-1)[0]))
         self.body_names = [_decode_scalar(name) for name in np.asarray(self.ref.get("tracked_body_names", []))]
         self._load_robot_motion(entry)
+        self._load_original_motion(entry)
 
         self.region_points = {
             region_name: _as_points(entry.data_dir / f"{region_name}_contact_points.npy")
@@ -686,6 +826,7 @@ class DebugRolloutViewer:
 
         self._add_static_product(entry, extents)
         self._add_rollout_view(entry, extents)
+        self._add_original_view(entry, extents)
 
         self.frame_slider.max = max(0, int(self.valid_indices.size - 1))
         self.is_programmatic_slider_update = True
@@ -828,6 +969,68 @@ class DebugRolloutViewer:
             self.rollout_handles.append(handle)
             self.path_handles.append(handle)
 
+    def _add_original_view(self, entry: ClipEntry, extents: np.ndarray) -> None:
+        original_frame = self.server.scene.add_frame(
+            "/original_motion",
+            show_axes=True,
+            axes_length=0.30,
+            axes_radius=0.008,
+            visible=False,
+        )
+        self.original_handles.append(original_frame)
+
+        object_mesh = _load_object_overlay_mesh(
+            clip_id=entry.clip_id,
+            object_name=str(entry.metadata.get("object_name", "")),
+            object_urdf_path=str(entry.metadata.get("object_urdf_path", "")),
+        )
+        if object_mesh is not None:
+            mesh = object_mesh.copy()
+            mesh.visual.vertex_colors = np.tile(
+                np.asarray([255, 175, 45, 145], dtype=np.uint8),
+                (len(mesh.vertices), 1),
+            )
+            handle = self.server.scene.add_mesh_trimesh(
+                "/original_motion/current_object_mesh",
+                mesh,
+                visible=False,
+            )
+            self.original_handles.append(handle)
+            self.original_object_handles.append(handle)
+            self.mesh_handles.append(handle)
+
+        box_handle = self.server.scene.add_box(
+            "/original_motion/current_primitive_box",
+            color=(255, 170, 40),
+            dimensions=extents,
+            visible=False,
+        )
+        self.original_handles.append(box_handle)
+        self.original_object_handles.append(box_handle)
+        self.box_handles.append(box_handle)
+
+        object_pos = self.original_motion.object_pos
+        if object_pos is not None and object_pos.shape[0] >= 2:
+            path = _decimate_path(object_pos)
+            handle = self.server.scene.add_spline_catmull_rom(
+                "/original_motion/object_path",
+                positions=path,
+                line_width=3.0,
+                color=(255, 170, 40),
+                visible=False,
+            )
+            self.original_handles.append(handle)
+            self.original_path_handles.append(handle)
+            self.path_handles.append(handle)
+
+        label = self.server.scene.add_label(
+            "/original_motion/label",
+            text="original input motion",
+            position=np.asarray([0.0, 0.0, float(extents[2]) * 0.75 + 0.18], dtype=np.float32),
+            visible=False,
+        )
+        self.original_handles.append(label)
+
     def _update_info(self) -> None:
         if self.current_entry is None:
             return
@@ -840,12 +1043,16 @@ class DebugRolloutViewer:
         robot_status = self.robot_motion.status
         if self.robot_load_error:
             robot_status = self.robot_load_error
+        original_status = self.original_motion.status
+        if self.original_robot_load_error:
+            original_status = f"{original_status}; {self.original_robot_load_error}"
         points_summary = ", ".join(f"{region} `{counts.get(region, 0)}`" for region in _REGION_ORDER)
         self.info_md.content = (
             f"clip: `{entry.clip_id}`  \n"
             f"dir: `{entry.clip_dir_name}`  \n"
             f"status: `{status}` | valid frames: `{n_valid}`  \n"
             f"training g1: `{robot_status}`  \n"
+            f"original motion: `{original_status}`  \n"
             f"points: {points_summary}  \n"
             f"glb: `{glb_path}`  \n"
             f"png: `{png_path}`"
@@ -860,6 +1067,7 @@ class DebugRolloutViewer:
     def apply_visibility(self) -> None:
         static_ids = {id(handle) for handle in self.static_handles}
         rollout_ids = {id(handle) for handle in self.rollout_handles}
+        original_ids = {id(handle) for handle in self.original_handles}
 
         def _base_visible(handle: Any) -> bool:
             visible = True
@@ -868,12 +1076,16 @@ class DebugRolloutViewer:
                 visible = visible and bool(self.show_product_cb.value)
             if handle_id in rollout_ids:
                 visible = visible and bool(self.show_rollout_cb.value)
+            if handle_id in original_ids:
+                visible = visible and bool(self.show_original_motion_cb.value)
             return visible
 
         for handle in self.static_handles:
             handle.visible = bool(self.show_product_cb.value)
         for handle in self.rollout_handles:
             handle.visible = bool(self.show_rollout_cb.value)
+        for handle in self.original_handles:
+            handle.visible = bool(self.show_original_motion_cb.value)
         for handle in self.mesh_handles:
             handle.visible = bool(_base_visible(handle) and self.show_mesh_cb.value)
         for handle in self.box_handles:
@@ -892,6 +1104,14 @@ class DebugRolloutViewer:
         if self.robot_viser is not None:
             try:
                 self.robot_viser.show_visual = robot_visible
+            except Exception:
+                pass
+        original_visible = bool(self.show_original_motion_cb.value)
+        if self.original_robot_root_handle is not None:
+            self.original_robot_root_handle.visible = original_visible
+        if self.original_robot_viser is not None:
+            try:
+                self.original_robot_viser.show_visual = original_visible
             except Exception:
                 pass
 
@@ -916,8 +1136,13 @@ class DebugRolloutViewer:
                 handle.wxyz = obj_wxyz
 
             self._update_robot_frame(slider_index, raw_idx)
+            original_idx = self._update_original_frame(raw_idx)
             self._update_body_frame(raw_idx)
-            self.frame_md.content = f"slider frame: `{slider_index}` | raw rollout step: `{raw_idx}`"
+            original_text = "n/a" if original_idx is None else str(original_idx)
+            self.frame_md.content = (
+                f"slider frame: `{slider_index}` | raw rollout step: `{raw_idx}` | "
+                f"original motion step: `{original_text}`"
+            )
             self.apply_visibility()
 
     def _update_robot_frame(self, slider_index: int, raw_idx: int) -> None:
@@ -947,6 +1172,41 @@ class DebugRolloutViewer:
         self.robot_root_handle.position = root_pos_arr[raw_idx]
         self.robot_root_handle.wxyz = _xyzw_to_wxyz(root_quat_arr[raw_idx])
         self.robot_viser.update_cfg(np.zeros((len(self.robot_joint_names),), dtype=np.float32))
+
+    def _update_original_frame(self, raw_idx: int) -> int | None:
+        lengths = [
+            arr.shape[0]
+            for arr in (
+                self.original_motion.object_pos,
+                self.original_motion.object_quat_wxyz,
+                self.original_motion.joint_pos,
+            )
+            if arr is not None and arr.ndim >= 1 and arr.shape[0] > 0
+        ]
+        if not lengths:
+            return None
+        original_idx = int(np.clip(raw_idx, 0, min(lengths) - 1))
+
+        object_pos = self.original_motion.object_pos
+        object_quat = self.original_motion.object_quat_wxyz
+        if object_pos is not None and object_quat is not None:
+            for handle in self.original_object_handles:
+                handle.position = object_pos[original_idx]
+                handle.wxyz = object_quat[original_idx]
+
+        if self.original_robot_viser is not None and self.original_robot_root_handle is not None:
+            joint_pos = self.original_motion.joint_pos
+            joint_indices = self.original_motion.joint_indices
+            if joint_pos is not None and joint_indices is not None and joint_pos.shape[0] > 0:
+                q = joint_pos[original_idx]
+                self.original_robot_root_handle.position = q[:3]
+                self.original_robot_root_handle.wxyz = q[3:7]
+                dof = q[7:]
+                max_joint_index = int(joint_indices.max()) if joint_indices.size else -1
+                if dof.shape[0] > max_joint_index:
+                    self.original_robot_viser.update_cfg(dof[joint_indices].astype(np.float32, copy=False))
+
+        return original_idx
 
     def _update_body_frame(self, raw_idx: int) -> None:
         body_pos = np.asarray(self.ref.get("body_pos_local", np.zeros((0, 0, 3))), dtype=np.float32)
@@ -1037,6 +1297,11 @@ def main() -> None:
     parser.add_argument("--data-root", default="outputs", help="Directory containing clips/*.npy and rollout refs.")
     parser.add_argument("--vis-root", default="outputs_vis", help="Directory containing clips/contact_overlay.{glb,png}.")
     parser.add_argument("--stats-root", default="outputs_sts", help="Directory containing clips/metadata.json.")
+    parser.add_argument(
+        "--original-motion-dir",
+        default=None,
+        help="Original input motion directory, e.g. data/ds_box_data/train_g1_w_obj_prepared.",
+    )
     parser.add_argument("--sequence", default=None, help="Initial sequence label, clip id, or clip directory name.")
     parser.add_argument("--host", default="0.0.0.0", help="Viser host.")
     parser.add_argument("--port", type=int, default=None, help="Viser port. Defaults to VISER_PORT or Viser default.")
@@ -1052,6 +1317,9 @@ def main() -> None:
     data_root = Path(args.data_root).expanduser().resolve()
     vis_root = Path(args.vis_root).expanduser().resolve()
     stats_root = Path(args.stats_root).expanduser().resolve()
+    original_motion_dir = (
+        Path(args.original_motion_dir).expanduser().resolve() if args.original_motion_dir is not None else None
+    )
     robot_urdf_path = None if args.no_robot else Path(args.robot_urdf).expanduser().resolve()
     entries = _load_entries(data_root, vis_root, stats_root)
     if args.list_only:
@@ -1068,6 +1336,7 @@ def main() -> None:
         host=str(args.host),
         port=port,
         robot_urdf_path=robot_urdf_path,
+        original_motion_dir=original_motion_dir,
     )
     viewer.run_forever()
 
