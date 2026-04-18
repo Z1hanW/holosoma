@@ -41,11 +41,23 @@ class MuJoCoDepthCamera:
         self._pose_provider = pose_provider
         self._intrinsics = intrinsics
         self._use_user_gl_camera = bool(getattr(config, "camera_strict_warp", False))
+        flip_env = os.environ.get("HOLOSOMA_MUJOCO_RENDERED_DEPTH_FLIPUD", "").strip().lower()
+        # MuJoCo's Python Renderer.render() returns conventional top-down image
+        # rows, while the strict far-tracking warp policy path uses the opposite
+        # row convention. Default to a vertical flip for strict cameras to match
+        # the policy training input, with an env override for diagnostics.
+        self._flip_render_array_vertical = (
+            self._use_user_gl_camera
+            if flip_env == ""
+            else flip_env not in {"0", "false", "no", "off"}
+        )
 
         self._renderer: mujoco.Renderer | None = None
         self._camera_name = HOLOSOMA_PERCEPTION_CAMERA_NAME
         self._camera_id: int | None = None
         self._scene_option: mujoco.MjvOption | None = None
+        self._render_near = 0.1
+        self._render_far = float(max(1.0, float(getattr(config, "max_distance", 1.0) or 1.0)))
         self._masked_robot_geom_ids: list[int] = []
         self._masked_object_geom_ids: list[int] = []
         self._warned_multi_env = False
@@ -62,6 +74,12 @@ class MuJoCoDepthCamera:
         except Exception:
             self._debug_dump_render_width = 212
             self._debug_dump_render_height = 120
+        try:
+            self._debug_dump_min_sim_time_ms = max(
+                0.0, float(os.environ.get("HOLOSOMA_MUJOCO_DEPTH_DEBUG_DUMP_MIN_SIM_TIME_MS", "0"))
+            )
+        except Exception:
+            self._debug_dump_min_sim_time_ms = 0.0
         self._capture_counter = 0
         self._debug_dump_done = False
 
@@ -149,6 +167,21 @@ class MuJoCoDepthCamera:
         model.cam_resolution[cam_id, :] = np.array([self._width, self._height], dtype=np.int32)
         model.cam_sensorsize[cam_id, :] = np.array([float(self._width), float(self._height)], dtype=np.float64)
         model.cam_fovy[cam_id] = self._vfov_deg
+        self._configure_depth_clip_planes(model)
+
+    def _configure_depth_clip_planes(self, model: mujoco.MjModel) -> None:
+        extent = max(float(model.stat.extent), 1.0e-6)
+        near = float(getattr(self._cfg, "camera_near", 0.1) or 0.1)
+        max_distance = float(getattr(self._cfg, "max_distance", 1.0) or 1.0)
+        far = float(getattr(self._cfg, "camera_far", max_distance) or max_distance)
+
+        near = max(near, 1.0e-4)
+        far = max(far, max_distance, near + 1.0e-3)
+        self._render_near = near
+        self._render_far = far
+
+        model.vis.map.znear = near / extent
+        model.vis.map.zfar = far / extent
 
     def _update_camera_pose(self, render_data: mujoco.MjData) -> None:
         model = self._env.simulator.root_model
@@ -191,9 +224,8 @@ class MuJoCoDepthCamera:
             mujoco.mj_forward(model, render_data)
 
         fx, fy, cx, cy = self._intrinsics
-        extent = float(model.stat.extent)
-        near = float(model.vis.map.znear) * extent
-        far = float(model.vis.map.zfar) * extent
+        near = self._render_near
+        far = self._render_far
         # Match the legacy warp sensor's integer pixel-center convention:
         # rays are generated from pixel centers at integer (x, y), so the GL
         # frustum has to extend an extra half-pixel beyond the first/last center.
@@ -245,11 +277,9 @@ class MuJoCoDepthCamera:
         )
 
     def _orient_render_array(self, array: np.ndarray) -> np.ndarray:
-        if self._use_user_gl_camera:
-            return np.ascontiguousarray(array)
-        # Fixed-camera MuJoCo/OpenGL render buffers are bottom-up; align them to
-        # the top-down pixel order used by far_tracking_warp and policy preprocessing.
-        return np.flipud(array).copy()
+        if self._flip_render_array_vertical:
+            return np.flipud(array).copy()
+        return np.ascontiguousarray(array)
 
     def _configure_scene_mask(self) -> None:
         model = self._env.simulator.root_model
@@ -415,6 +445,10 @@ class MuJoCoDepthCamera:
             return
         if self._capture_counter < self._debug_dump_after_captures:
             return
+        if render_data is not None and self._debug_dump_min_sim_time_ms > 0.0:
+            sim_time_ms = float(render_data.time) * 1000.0
+            if sim_time_ms < self._debug_dump_min_sim_time_ms:
+                return
         if depth is None and rgb is None:
             return
 
@@ -501,7 +535,7 @@ class MuJoCoDepthCamera:
                     ],
                     dtype=np.float64,
                 )
-                camera_forward = -rot[:, 2]
+                camera_forward = rot[:, 2] if self._use_user_gl_camera else -rot[:, 2]
                 camera_pos = np.array(model.cam_pos[self._camera_id], dtype=np.float64)
                 object_body_id = None
                 for body_id in range(model.nbody):

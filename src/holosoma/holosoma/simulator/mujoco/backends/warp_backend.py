@@ -221,6 +221,14 @@ class WarpBackend(IMujocoBackend):
             wp.capture_launch(self.step_graph)
             # No wp.synchronize() - let GPU work in parallel with CPU
 
+    def forward(self) -> None:
+        """Update MuJoCo Warp derived state after direct qpos/qvel writes."""
+        import mujoco_warp as mjw
+        import warp as wp
+
+        with wp.ScopedDevice(self.mjw_device):
+            mjw.forward(self.mjw_model, self.mjw_data)
+
     def get_render_data(self, world_id: int = 0) -> mujoco.MjData:
         """Sync GPU data to CPU for rendering.
 

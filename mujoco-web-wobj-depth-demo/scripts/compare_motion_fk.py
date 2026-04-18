@@ -104,7 +104,10 @@ def main() -> None:
         data.qpos[int(model.jnt_qposadr[joint_id])] = joint_pos[frame_idx, joint_name_to_index[joint_name]]
 
     if config["motion"].get("initial_object_pos_w") is not None:
-        object_body_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, "largebox_link")
+        object_body_name = config.get("object_body_name", "object_baseLink")
+        object_body_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, object_body_name)
+        if object_body_id < 0:
+            object_body_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, "largebox_link")
         if object_body_id >= 0 and model.body_jntnum[object_body_id] > 0:
             object_joint_id = int(model.body_jntadr[object_body_id])
             object_qpos_adr = int(model.jnt_qposadr[object_joint_id])

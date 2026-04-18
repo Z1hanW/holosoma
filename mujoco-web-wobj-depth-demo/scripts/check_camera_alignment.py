@@ -138,7 +138,10 @@ def _reset_model_state(model: mj.MjModel, data: mj.MjData, config: dict) -> None
         data.qpos[qpos_adr] = initial_joint_pos[index]
         data.qvel[qvel_adr] = initial_joint_vel[index]
 
-    object_body_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, "largebox_link")
+    object_body_name = config.get("object_body_name", "object_baseLink")
+    object_body_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, object_body_name)
+    if object_body_id < 0:
+        object_body_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, "largebox_link")
     if (
         object_body_id >= 0
         and model.body_jntnum[object_body_id] > 0

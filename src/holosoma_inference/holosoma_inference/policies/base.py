@@ -667,6 +667,9 @@ class BasePolicy:
     def _prepare_group_observations(self, robot_state_data):
         """Return flattened observations per group with history applied per term."""
         current_obs_buffer_dict = self.get_current_obs_buffer_dict(robot_state_data)
+        self._last_current_obs_buffer_dict = {
+            key: np.array(value, dtype=np.float32, copy=True) for key, value in current_obs_buffer_dict.items()
+        }
         current_obs_dict = self.parse_current_obs_dict(current_obs_buffer_dict)
         return self._update_obs_history(current_obs_dict)
 
@@ -754,6 +757,15 @@ class BasePolicy:
         # Stage 1: Read State
         with self.latency_tracker.measure("read_state"):
             robot_state_data = self.interface.get_low_state()
+
+        if not self._has_valid_robot_state(robot_state_data):
+            if not getattr(self, "_logged_waiting_for_robot_state", False):
+                self.logger.info("Waiting for a valid robot state before sending policy commands.")
+                self._logged_waiting_for_robot_state = True
+            return
+        if getattr(self, "_logged_waiting_for_robot_state", False):
+            self.logger.info("Valid robot state received; resuming policy command loop.")
+            self._logged_waiting_for_robot_state = False
 
         # Stage 2: Pre-processing
         with self.latency_tracker.measure("preprocessing"):

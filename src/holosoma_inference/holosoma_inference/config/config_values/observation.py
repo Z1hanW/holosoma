@@ -309,6 +309,7 @@ DEFAULTS = {
     "wbt": wbt,
     "wbt-object-generalist": wbt_object_generalist,
     "wbt-w-object": wbt_w_object,
+    "wbt-depth-distill": wbt_depth_distill,
     "wbt-videomimic": wbt_videomimic,
 }
 """Dictionary of all available observation configurations.

@@ -473,10 +473,12 @@ class DirectSimulation:
 
         # Determine refresh strategy based on simulator type
         # IsaacGym/IsaacSim: need pre-step to refresh tensors to sync simulator state
-        # MuJoCo: no pre-step refresh needed because we are NOT running an envs/tasks requiring
-        #         those tensors e.g, _rigid_body_rot, _rigid_body_vel, etc.
+        # MuJoCo direct split-sim still needs fresh rigid body tensors before the bridge
+        # publishes sim-state/perception observations.
         simulator_type = get_simulator_type()
         if simulator_type in [SimulatorType.ISAACGYM, SimulatorType.ISAACSIM]:
+            pre_step_refresh = self.simulator.refresh_sim_tensors
+        elif simulator_type == SimulatorType.MUJOCO and self._perception_manager is not None:
             pre_step_refresh = self.simulator.refresh_sim_tensors
         else:
             pre_step_refresh = lambda: None  # noqa: E731  (No-op for MuJoCo)
@@ -591,6 +593,7 @@ class DirectSimulation:
         self._perception_manager = PerceptionManager(perception_cfg, self._perception_env_proxy, self.device)
         self._perception_manager.setup()
         self._perception_manager.reset()
+        self.simulator.refresh_sim_tensors()
         self._perception_manager.update()
         logger.info(
             "Split sim perception initialized: mode={} camera_source={}",
@@ -605,6 +608,7 @@ class DirectSimulation:
         if self._perception_manager is None:
             return None
 
+        self.simulator.refresh_sim_tensors()
         self._perception_manager.update()
         perception_obs = self._perception_manager.get_obs()
         if perception_obs.ndim != 2 or perception_obs.shape[0] < 1:

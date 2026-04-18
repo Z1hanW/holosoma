@@ -1,20 +1,27 @@
-# MuJoCo Web W-Obj Depth Demo
+# MuJoCo WASM Box Depth Track
 
-Standalone non-Viser browser demo for the `distill_box_perception.sh` depth student on the `w-obj` scene.
+Browser version of the `mj_box_depth_track.sh` depth-tracking flow for the
+`g1_29dof` w-object large-box scene.
 
 ## What This Folder Does
 
-- stages the shared `w-obj` MuJoCo scene plus a selectable set of `w_obj` motion clips into `public/demo-assets/`
-- runs MuJoCo + ONNX inference in the browser
-- renders the main scene and a side depth panel using the same 17x17 depth observation shape expected by the exported student ONNX
-- exposes a front-end clip selector without using `viser`
+- stages MuJoCo XML scenes, meshes, success rollout motion resets, and patched ONNX policies into `public/demo-assets/`
+- runs official `@mujoco/mujoco` WASM in the browser
+- runs `onnxruntime-web/wasm` policy inference in the browser
+- builds `obs` from sparse root command + proprio history and `perception_obs` as an `87x58` depth observation
+- maps the motion clip root trajectory to the sparse root command, with keyboard offsets:
+  - `W/S`: root target x
+  - `A/D`: root target y
+  - `Q/E`: root target yaw
+  - `Space`: start, then pause/resume
+  - `Backspace`: reset
 
 ## Default Assets
 
-- checkpoint: `/data/logs_new/boxer/20260317_111305-g1_29dof_wbt_w_object_distill_box_perception_access_to_depth-locomotion/model_00800.onnx`
-- default preferred clip: `/home/ubuntu/FAR/holosoma/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz`
-- default clip source dir: `/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry`
-- scene xml: `/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/models/g1/g1_29dof_w_largebox.xml`
+- checkpoint: `/data/logs_new/boxer/20260415_014803-g1_29dof_wbt_w_object_distill_box_perception_sparse_root_cmd_access_to_depth-locomotion/model_03999.onnx`
+- clips: success rollouts from `/home/ubuntu/FAR/holosoma/outputs/motion_bank_success_box_0_92_0p3`
+- default clip: `box_74`
+- scene xml: generated per clip from the G1 training URDF scene and each clip's `object_urdf_path`
 
 ## Usage
 
@@ -25,49 +32,48 @@ npm run prepare-assets
 npm run dev
 ```
 
-Then open `http://localhost:4173`.
+Open `http://localhost:4173`.
 
-`npm run dev` and `npm run build` now auto-copy the ONNX Runtime wasm binary into `public/runtime/ort/` before starting, so the browser no longer depends on ORT's internal path inference.
-
-By default `prepare-assets` stages up to `12` clips from `omomo_carry`, with `sub3_largebox_003_mj_w_obj` forced to the front if present.
+`npm run dev` and `npm run build` copy the MuJoCo WASM runtime and ONNX Runtime
+WASM assets into `public/runtime/` before serving or building.
 
 ## Useful Variants
 
 Stage a single exact clip:
 
 ```bash
-python3 scripts/prepare_demo_assets.py \
-  --motion-file /home/ubuntu/FAR/holosoma/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry/sub3_largebox_003_mj_w_obj.npz
+/home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python scripts/prepare_demo_assets.py \
+  --motion-file /home/ubuntu/FAR/holosoma/data/ds_box_data/train_g1_w_obj_prepared/box_74.npz
 ```
 
-Stage more clips from a directory:
+Stage clips from a directory:
 
 ```bash
-python3 scripts/prepare_demo_assets.py \
-  --motion-dir /home/ubuntu/FAR/holosoma/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry \
-  --max-clips 24
+/home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python scripts/prepare_demo_assets.py \
+  --motion-dir /home/ubuntu/FAR/holosoma/outputs/motion_bank_success_box_0_92_0p3 \
+  --motion-glob "*.npz" \
+  --preferred-clip-stem box_74 \
+  --max-clips 0
 ```
 
-Check the staged strict camera / Three camera alignment:
+Use the Clip dropdown in the browser to switch between staged success rollout
+sequences. Each sequence has its own `clips/<id>/scene.xml`, `demo-config.json`,
+and patched `policy.onnx`, so clips with different object URDFs load the matching
+box geometry and reset state.
+
+Compare browser observations against the Python reference assembly:
 
 ```bash
-npm run check-camera
+npm run compare-obs -- --steps 2
 ```
 
-The `check-camera` npm script uses the repo's MuJoCo-enabled Python env directly, so it does not depend on your currently activated shell env.
-
-Compare the current web-demo reset against Isaac's `training_default_pose` reset:
-
-```bash
-npm run analyze-reset
-```
+The comparer launches the running dev server in Playwright, snapshots the JS
+state, and verifies sparse-root/proprio/action history assembly plus depth
+crop/resize/normalize post-processing.
 
 ## Notes
 
 - this path does not use `viser`
-- the asset prep script writes a shared `scene.xml`, shared meshes, and per-clip `policy.onnx + demo-config.json` bundles under `public/demo-assets/clips/`
-- the front-end selector swaps clip bundles by reloading only the config and ONNX, not the MuJoCo scene
-- before ORT session creation, the browser explicitly loads `/runtime/ort/ort-wasm-simd-threaded.jsep.wasm` and checks the `\0asm` magic bytes, so HTML fallback / wrong static path failures surface immediately
-- the current rollout path is tied to the observation structure of the depth-distill object-carry checkpoint:
-  - `obs = sparse_root_cmd(3) + proprio(93)`
-  - `perception_obs = normalized depth 17x17`
+- MuJoCo uses the official multi-threaded WASM build so XML compile has a pre-warmed worker pool
+- depth observation uses the rendered visual bodies through oriented bounding-box ray hits by default (`web_depth_mesh_mode: "bounds"`), with analytic ground as a fallback; set `web_depth_mesh_mode: "triangles"` only for slow offline checks
+- staged assets are written under `public/demo-assets/`; generated runtime files are written under `public/runtime/`

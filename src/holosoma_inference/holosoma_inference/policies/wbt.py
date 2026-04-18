@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from loguru import logger
 from termcolor import colored
 
 from holosoma_inference.config.config_types.inference import InferenceConfig
+from holosoma_inference.config.config_types.observation import ObservationConfig
 from holosoma_inference.config.config_types.robot import RobotConfig
 from holosoma_inference.policies import BasePolicy
 from holosoma_inference.utils.clock import ClockSub
@@ -333,6 +335,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.clock_sub = ClockSub(port=config.task.sim_clock_port)
         self.clock_sub.start()
         self._last_clock_reading: int | None = None
+        self._last_policy_control_clock_ms: int | None = None
 
         # Read use_sim_time from config
         self.use_sim_time = config.task.use_sim_time
@@ -390,6 +393,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._onnx_output_fetch: list[str] = []
         self._motion_output_names: set[str] = set()
         self._motion_alignment_enabled = False
+        self._policy_debug_path = Path(os.environ["HOLOSOMA_POLICY_DEBUG_INPUT_PATH"]) if os.environ.get("HOLOSOMA_POLICY_DEBUG_INPUT_PATH") else None
+        self._policy_debug_limit = int(os.environ.get("HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT", "12"))
+        self._policy_debug_count = 0
+        self._policy_debug_initialized = False
 
         super().__init__(config)
 
@@ -723,6 +730,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             metadata[prop.key] = json.loads(prop.value)
         self._onnx_metadata = metadata
         self._onnx_obs_dim = self._get_onnx_obs_dim()
+        self._maybe_force_sparse_depth_distill_obs_config()
 
         # Extract URDF text from ONNX metadata
         assert "robot_urdf" in metadata, "Robot urdf text not found in ONNX metadata"
@@ -842,6 +850,45 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 return int(shape[1])
         return None
 
+    def _maybe_force_sparse_depth_distill_obs_config(self) -> None:
+        if not self._uses_sparse_root_command or self._onnx_obs_dim != 308:
+            return
+
+        configured_dim = 0
+        for group, terms in self.obs_dict.items():
+            history_len = int(self.history_length_dict.get(group, 1))
+            configured_dim += sum(int(self.obs_dims[term]) for term in terms) * history_len
+        if configured_dim == 308:
+            return
+
+        logger.warning(
+            "Overriding sparse depth-distill observation config from {} dims to ONNX-aligned 308 dims.",
+            configured_dim,
+        )
+        self.config.observation = ObservationConfig(
+            obs_dict={
+                "actor_obs_root": ["sparse_target_root_trajectory_command"],
+                "actor_obs_proprio_no_linvel": ["base_ang_vel", "dof_pos", "dof_vel"],
+            },
+            obs_dims={
+                "sparse_target_root_trajectory_command": 3,
+                "base_ang_vel": 3,
+                "dof_pos": self.num_dofs,
+                "dof_vel": self.num_dofs,
+            },
+            obs_scales={
+                "sparse_target_root_trajectory_command": 1.0,
+                "base_ang_vel": 1.0,
+                "dof_pos": 1.0,
+                "dof_vel": 1.0,
+            },
+            history_length_dict={
+                "actor_obs_root": 1,
+                "actor_obs_proprio_no_linvel": 5,
+            },
+        )
+        self._init_obs_config()
+
     def _build_zero_actor_obs(self) -> np.ndarray:
         obs_dim = self._onnx_obs_dim
         if obs_dim is None:
@@ -866,6 +913,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_timestep = 0
         self.motion_start_timestep = None
         self._last_clock_reading = None
+        self._last_policy_control_clock_ms = None
         self.robot_yaw_offset = 0.0
         self._logged_root_reference_clip_start = False
         self._logged_sim_ref_from_sim_state = False
@@ -881,6 +929,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_timestep = 0
         self.motion_start_timestep = None
         self._last_clock_reading = None
+        self._last_policy_control_clock_ms = None
         self._stiff_hold_active = True
         self.robot_yaw_offset = 0.0
         self._logged_root_reference_clip_start = False
@@ -1253,15 +1302,22 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self.motion_timestep = 0
             self.motion_start_timestep = None
             self._last_clock_reading = None
+            self._last_policy_control_clock_ms = None
+        elif self._should_skip_sim_time_control_tick():
+            return self.scaled_policy_action.copy()
+        elif self.use_sim_time:
+            self._update_clock()
 
         obs = self.prepare_obs_for_rl(robot_state_data)
         input_feed = {self._obs_input_name: obs["actor_obs"]}
         if self._time_step_input_name:
             input_feed[self._time_step_input_name] = np.array([[self.motion_timestep]], dtype=np.float32)
+        perception_obs = None
         if self._perception_obs_input_name:
-            input_feed[self._perception_obs_input_name] = self._get_split_perception_obs(
+            perception_obs = self._get_split_perception_obs(
                 self._get_onnx_input_dim(self._perception_obs_input_name)
             )
+            input_feed[self._perception_obs_input_name] = perception_obs
         outputs = self.policy(input_feed)
         policy_action = outputs[self._action_output_name]
 
@@ -1280,15 +1336,130 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.last_policy_action = policy_action.copy()
         # scale policy action
         self.scaled_policy_action = policy_action * self.policy_action_scales
+        self._maybe_debug_policy_io(robot_state_data, obs["actor_obs"], perception_obs, policy_action)
 
         # update motion timestep
         if self.motion_clip_progressing:
-            if self.use_sim_time:
-                self._update_clock()
-            else:
+            if not self.use_sim_time:
                 self.motion_timestep += 1
             self._maybe_restart_sim_at_motion_end()
         return self.scaled_policy_action
+
+    @staticmethod
+    def _policy_debug_stats(values: np.ndarray, *, max_values: int = 8) -> dict:
+        arr = np.asarray(values, dtype=np.float32)
+        flat = arr.reshape(-1)
+        finite = np.isfinite(flat)
+        finite_vals = flat[finite]
+        stats = {
+            "shape": list(arr.shape),
+            "finite": int(finite.sum()),
+            "count": int(flat.size),
+            "nonzero": int(np.count_nonzero(np.abs(flat[finite]) > 1.0e-7)) if finite_vals.size else 0,
+            "first": flat[:max_values].astype(float).tolist(),
+        }
+        if finite_vals.size:
+            stats.update(
+                {
+                    "min": float(finite_vals.min()),
+                    "max": float(finite_vals.max()),
+                    "mean": float(finite_vals.mean()),
+                    "std": float(finite_vals.std()),
+                    "p01": float(np.percentile(finite_vals, 1)),
+                    "p50": float(np.percentile(finite_vals, 50)),
+                    "p99": float(np.percentile(finite_vals, 99)),
+                }
+            )
+        return stats
+
+    @staticmethod
+    def _policy_debug_depth_stats(values: np.ndarray | None) -> dict | None:
+        if values is None:
+            return None
+        arr = np.asarray(values, dtype=np.float32).reshape(-1)
+        stats = WholeBodyTrackingPolicy._policy_debug_stats(arr)
+        if arr.size == 58 * 87:
+            image = arr.reshape(58, 87)
+            finite_image = np.where(np.isfinite(image), image, np.nan)
+            min_idx = np.nanargmin(finite_image)
+            max_idx = np.nanargmax(finite_image)
+            row_mean = np.nanmean(finite_image, axis=1)
+            stats.update(
+                {
+                    "image_shape": [58, 87],
+                    "min_rc": [int(min_idx // 87), int(min_idx % 87)],
+                    "max_rc": [int(max_idx // 87), int(max_idx % 87)],
+                    "row_mean_argmin": int(np.nanargmin(row_mean)),
+                    "row_mean_argmax": int(np.nanargmax(row_mean)),
+                    "top_row_mean": float(np.nanmean(finite_image[0])),
+                    "center_row_mean": float(np.nanmean(finite_image[29])),
+                    "bottom_row_mean": float(np.nanmean(finite_image[-1])),
+                    "center_value": float(finite_image[29, 43]),
+                }
+            )
+        return stats
+
+    def _maybe_debug_policy_io(
+        self,
+        robot_state_data: np.ndarray,
+        actor_obs: np.ndarray,
+        perception_obs: np.ndarray | None,
+        policy_action: np.ndarray,
+    ) -> None:
+        if self._policy_debug_path is None or self._policy_debug_count >= self._policy_debug_limit:
+            return
+        if not self._policy_debug_initialized:
+            self._policy_debug_path.parent.mkdir(parents=True, exist_ok=True)
+            self._policy_debug_path.write_text("")
+            self._policy_debug_initialized = True
+
+        q_actual = np.asarray(robot_state_data[:, 7 : 7 + self.num_dofs], dtype=np.float32)
+        q_target = self.default_dof_angles.reshape(1, -1).astype(np.float32) + self.scaled_policy_action.astype(
+            np.float32
+        )
+        q_target_clipped = q_target.copy()
+        if self.q_min_arr is not None and self.q_max_arr is not None:
+            np.clip(q_target_clipped[0], self.q_min_arr, self.q_max_arr, out=q_target_clipped[0])
+        q_error = (q_target_clipped - q_actual).reshape(-1)
+        top_idx = np.argsort(np.abs(q_error))[::-1][:8]
+
+        current_obs = getattr(self, "_last_current_obs_buffer_dict", {})
+        record = {
+            "count": int(self._policy_debug_count),
+            "motion_timestep": int(self.motion_timestep),
+            "motion_index": int(self._get_motion_index()),
+            "motion_clip_progressing": bool(self.motion_clip_progressing),
+            "actor_obs": self._policy_debug_stats(actor_obs),
+            "perception_obs": self._policy_debug_depth_stats(perception_obs),
+            "policy_action_raw": self._policy_debug_stats(policy_action),
+            "policy_action_scaled": self._policy_debug_stats(self.scaled_policy_action),
+            "q_actual_first": q_actual.reshape(-1)[:8].astype(float).tolist(),
+            "q_target_first": q_target_clipped.reshape(-1)[:8].astype(float).tolist(),
+            "q_target_minus_actual": self._policy_debug_stats(q_error),
+            "q_error_top": [
+                {
+                    "joint": self.dof_names[int(idx)],
+                    "actual": float(q_actual.reshape(-1)[idx]),
+                    "target": float(q_target_clipped.reshape(-1)[idx]),
+                    "error": float(q_error[idx]),
+                    "raw_action": float(policy_action.reshape(-1)[idx]),
+                    "scaled_action": float(self.scaled_policy_action.reshape(-1)[idx]),
+                }
+                for idx in top_idx
+            ],
+            "robot_root": np.asarray(robot_state_data[:, :7], dtype=np.float32).reshape(-1).astype(float).tolist(),
+        }
+        if self._motion_data is not None:
+            idx = self._get_motion_index()
+            record["motion_root"] = self._motion_data.root_pos_w[idx].astype(float).tolist()
+            record["motion_q_first"] = self._motion_data.joint_pos[idx, :8].astype(float).tolist()
+        for key in ("sparse_target_root_trajectory_command", "base_ang_vel", "dof_pos", "dof_vel"):
+            if key in current_obs:
+                record[key] = self._policy_debug_stats(current_obs[key])
+
+        with self._policy_debug_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, separators=(",", ":")) + "\n")
+        self._policy_debug_count += 1
 
     def _maybe_restart_sim_at_motion_end(self) -> None:
         if not bool(getattr(self.config.task, "restart_sim_on_motion_end", False)):
@@ -1327,6 +1498,29 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if self._auto_start_motion_clip_pending:
             self._auto_start_motion_clip_pending = False
             self._handle_start_motion_clip()
+
+    def _should_skip_sim_time_control_tick(self) -> bool:
+        """Gate ONNX inference on simulator time when MuJoCo runs slower than wall clock."""
+        if not self.use_sim_time:
+            return False
+
+        current_clock = int(self.clock_sub.get_clock())
+        if self._last_policy_control_clock_ms is None:
+            self._last_policy_control_clock_ms = current_clock
+            return False
+
+        if current_clock < self._last_policy_control_clock_ms:
+            self._last_policy_control_clock_ms = current_clock
+            return False
+
+        interval_ms = max(1, int(round(self.timestep_interval_ms)))
+        elapsed_ms = current_clock - self._last_policy_control_clock_ms
+        if elapsed_ms < interval_ms:
+            return True
+
+        completed_intervals = max(1, elapsed_ms // interval_ms)
+        self._last_policy_control_clock_ms += completed_intervals * interval_ms
+        return False
 
     def _handle_start_policy(self):
         super()._handle_start_policy()
@@ -1397,6 +1591,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
         self.motion_command_t = self.motion_command_0.copy()
         self._last_clock_reading = None
+        self._last_policy_control_clock_ms = None
         self.robot_yaw_offset = 0.0
         self._logged_root_reference_clip_start = False
         self._logged_sim_ref_from_sim_state = False
@@ -1412,6 +1607,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_start_timestep = None  # will be set in rl_inference
         self.motion_timestep = 0  # Reset to start from beginning of motion
         self._last_clock_reading = None
+        self._last_policy_control_clock_ms = None
         self._logged_root_reference_clip_start = False
         self._motion_end_reset_requested = False
         if self._motion_alignment_enabled:

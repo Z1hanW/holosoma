@@ -35,6 +35,7 @@ _SUPPORTED_OBJECT_SCENE_SPECS: dict[str, dict[str, tuple[str, str]]] = {
 HOLOSOMA_PERCEPTION_CAMERA_NAME = "holosoma_perception_camera"
 _CAMERA_TERRAIN_PROXY_ENV = "HOLOSOMA_ENABLE_CAMERA_TERRAIN_PROXY"
 _CAMERA_TERRAIN_PROXY_SUFFIX = "_camera_proxy"
+_LOAD_ROBOT_VISUAL_MESHES_ENV = "HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES"
 
 
 class MujocoSceneManager:
@@ -565,6 +566,53 @@ class MujocoSceneManager:
         spec.compiler.meshdir = str(urdf_path.parent.resolve())
 
     @staticmethod
+    def _env_flag(name: str, default: bool = False) -> bool:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() not in {"", "0", "false", "no", "off"}
+
+    @classmethod
+    def _load_urdf_spec(cls, urdf_path: Path, *, load_visual_meshes: bool = False) -> mujoco.MjSpec:
+        if not load_visual_meshes:
+            return mujoco.MjSpec.from_file(str(urdf_path))
+
+        root = ET.parse(urdf_path).getroot()
+        mujoco_elem = root.find("mujoco")
+        if mujoco_elem is None:
+            mujoco_elem = ET.Element("mujoco")
+            root.insert(0, mujoco_elem)
+        compiler_elem = mujoco_elem.find("compiler")
+        if compiler_elem is None:
+            compiler_elem = ET.SubElement(mujoco_elem, "compiler")
+
+        compiler_elem.set("discardvisual", "false")
+        meshdir_raw = str(compiler_elem.get("meshdir", "") or "").strip()
+        mesh_names = {
+            Path(str(mesh_tag.get("filename") or "")).name
+            for mesh_tag in root.findall(".//mesh")
+            if str(mesh_tag.get("filename") or "").strip()
+        }
+        meshdir_candidates: list[Path] = []
+        if meshdir_raw:
+            meshdir_candidate = Path(meshdir_raw).expanduser()
+            if not meshdir_candidate.is_absolute():
+                meshdir_candidate = urdf_path.parent / meshdir_candidate
+            meshdir_candidates.append(meshdir_candidate)
+        meshdir_candidates += [urdf_path.parent / "meshes", urdf_path.parent]
+        for meshdir_candidate in meshdir_candidates:
+            if meshdir_candidate.is_dir() and (
+                not mesh_names or all((meshdir_candidate / mesh_name).is_file() for mesh_name in mesh_names)
+            ):
+                compiler_elem.set("meshdir", str(meshdir_candidate.resolve()))
+                break
+        else:
+            fallback_meshdir = meshdir_candidates[0] if meshdir_candidates else urdf_path.parent
+            compiler_elem.set("meshdir", str(fallback_meshdir.resolve()))
+
+        return mujoco.MjSpec.from_string(ET.tostring(root, encoding="unicode"))
+
+    @staticmethod
     def _find_spec_body(spec: mujoco.MjSpec, body_name: str) -> mujoco.MjSpec.Body:
         for body in spec.bodies:
             if body.name == body_name:
@@ -597,8 +645,16 @@ class MujocoSceneManager:
         robot_config: RobotConfig,
     ) -> tuple[mujoco.MjSpec, mujoco.MjSpec, str, dict[str, str], dict[str, str], set[str]]:
         robot_urdf = cls._resolve_robot_urdf_path(robot_config)
-        robot_spec = mujoco.MjSpec.from_file(str(robot_urdf))
+        load_robot_visual_meshes = cls._env_flag(_LOAD_ROBOT_VISUAL_MESHES_ENV)
+        robot_spec = cls._load_urdf_spec(robot_urdf, load_visual_meshes=load_robot_visual_meshes)
         cls._configure_urdf_meshdir(robot_spec, robot_urdf)
+        if load_robot_visual_meshes:
+            logger.info(
+                "Loaded robot URDF visual meshes for MuJoCo scene via {}=1: {} geom(s), {} mesh asset(s).",
+                _LOAD_ROBOT_VISUAL_MESHES_ENV,
+                len(robot_spec.geoms),
+                len(robot_spec.meshes),
+            )
 
         robot_root_body_name = str(robot_config.body_names[0])
         robot_root_body = cls._find_spec_body(robot_spec, robot_root_body_name)
@@ -855,16 +911,25 @@ class MujocoSceneManager:
         *,
         using_composite_object_scene: bool,
     ) -> None:
-        """Copy standalone MuJoCo collision geoms into composite object scenes when explicitly requested."""
+        """Copy standalone MuJoCo collision geoms into object scenes when explicitly requested.
+
+        Training-URDF object scenes are assembled from the Isaac-style robot URDF plus a
+        separate object URDF. The URDF foot collision set does not expose the named MuJoCo
+        foot capsules/contact pairs from ``g1_29dof.xml``, so direct MuJoCo replay uses a
+        different support model and can fall before object interaction. For that path we
+        replace the robot's active URDF collision geoms with the reference XML collision set,
+        while preserving rubber-hand geoms that are intentionally added to the URDF.
+        """
 
         object_cfg = getattr(robot_config, "object", None)
         if object_cfg is None or not getattr(object_cfg, "mujoco_copy_collision_geoms_from_robot_xml", False):
             return
-        if not using_composite_object_scene:
-            logger.info("Skipping collision-geom copy because current MuJoCo scene is not a composite object scene")
+        using_training_urdf_object_scene = self._should_use_training_urdf_object_scene(robot_config)
+        if not using_composite_object_scene and not using_training_urdf_object_scene:
+            logger.info("Skipping collision-geom copy because current MuJoCo scene is not an object scene")
             return
         urdf_file = str(getattr(robot_config.asset, "urdf_file", "") or "")
-        if urdf_file.endswith("main_mesh_collision_halfspherehand.urdf"):
+        if using_composite_object_scene and urdf_file.endswith("main_mesh_collision_halfspherehand.urdf"):
             logger.info(
                 "Skipping collision-geom copy from reference MuJoCo XML because training URDF '{}' already "
                 "defines the intended carry colliders and the reference XML uses a mismatched collision set.",
@@ -879,9 +944,39 @@ class MujocoSceneManager:
         reference_spec = mujoco.MjSpec.from_file(reference_xml_path)
 
         target_bodies = {body.name: body for body in robot_spec.bodies if body.name}
+        object_body_names = set(getattr(self, "_object_body_name_by_name", {}).values())
+
+        disabled_geom_count = 0
+        if using_training_urdf_object_scene:
+            for body in robot_spec.bodies:
+                if not body.name or body.name in object_body_names:
+                    continue
+                if "rubber_hand" in str(body.name).lower():
+                    continue
+                for geom in body.geoms:
+                    if int(geom.contype) == 0 and int(geom.conaffinity) == 0:
+                        continue
+                    geom.contype = 0
+                    geom.conaffinity = 0
+                    disabled_geom_count += 1
+
         existing_geom_names = {geom.name for body in robot_spec.bodies for geom in body.geoms if geom.name}
+        skip_reference_hand_collision_names: set[str] = set()
+        if using_training_urdf_object_scene:
+            active_rubber_hand_bodies = {
+                str(body.name)
+                for body in robot_spec.bodies
+                if body.name
+                and "rubber_hand" in str(body.name).lower()
+                and any(int(geom.contype) != 0 and int(geom.conaffinity) != 0 for geom in body.geoms)
+            }
+            if "left_rubber_hand" in active_rubber_hand_bodies:
+                skip_reference_hand_collision_names.add("left_hand_collision")
+            if "right_rubber_hand" in active_rubber_hand_bodies:
+                skip_reference_hand_collision_names.add("right_hand_collision")
 
         copied_geom_count = 0
+        skipped_reference_hand_collision_count = 0
 
         def _seq(values: Any, *, allow_zero: bool = True) -> list[float] | None:
             arr = np.asarray(values, dtype=np.float64)
@@ -898,6 +993,9 @@ class MujocoSceneManager:
             target_body = target_bodies[reference_body.name]
             for reference_geom in reference_body.geoms:
                 if int(reference_geom.contype) == 0 and int(reference_geom.conaffinity) == 0:
+                    continue
+                if reference_geom.name and reference_geom.name in skip_reference_hand_collision_names:
+                    skipped_reference_hand_collision_count += 1
                     continue
                 if reference_geom.name and reference_geom.name in existing_geom_names:
                     continue
@@ -931,9 +1029,12 @@ class MujocoSceneManager:
                     existing_geom_names.add(reference_geom.name)
 
         logger.info(
-            "Copied {} MuJoCo collision geom(s) from '{}' into composite scene",
+            "Copied {} MuJoCo collision geom(s) from '{}' into MuJoCo object scene; disabled {} URDF geom(s); "
+            "skipped {} reference hand geom(s) because rubber-hand collision is active",
             copied_geom_count,
             reference_xml_path,
+            disabled_geom_count,
+            skipped_reference_hand_collision_count,
         )
 
     def _maybe_replace_composite_collision_geoms_with_reference_robot_xml(

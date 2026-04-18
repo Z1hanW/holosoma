@@ -6,7 +6,9 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from io import TextIOWrapper
 from pathlib import Path
@@ -59,7 +61,8 @@ class MujocoSimStateViewerConfig:
     show_robot_collision: bool = False
     show_object_collision: bool = False
     mujoco_object_geom_snapshot_path: str = str(REPO_ROOT / "logs" / "live_debug" / "viser_mujoco_object_geoms.json")
-    show_ref_body: bool = True
+    show_ref_body: bool = False
+    show_motion_overlay: bool = True
     grid_size: float = 8.0
     launch_rollout: bool = False
     run_script: str = str(REPO_ROOT / "mj_track.sh")
@@ -76,6 +79,18 @@ class MujocoSimStateViewerConfig:
     depth_obs_normalized: bool = True
     depth_near: float = 0.1
     depth_far: float = 3.0
+
+
+@dataclass(frozen=True)
+class MotionOverlay:
+    path: Path
+    fps: float
+    root_pos_w: np.ndarray
+    root_quat_wxyz: np.ndarray
+    joint_pos_viser: np.ndarray
+    object_pos_w: np.ndarray | None
+    object_quat_wxyz: np.ndarray | None
+    object_mesh: trimesh.Trimesh | None
 
 
 def _resolve_data_path(path: str) -> Path:
@@ -114,6 +129,25 @@ def _normalize_quaternion_wxyz(quat_wxyz: np.ndarray) -> np.ndarray:
     if quat_norm < 1e-8:
         return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
     return quat_wxyz / quat_norm
+
+
+def _quat_wxyz_to_matrix(quat_wxyz: np.ndarray) -> np.ndarray:
+    w, x, y, z = _normalize_quaternion_wxyz(quat_wxyz).astype(np.float64)
+    return np.array(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ],
+        dtype=np.float32,
+    )
+
+
+def _transform_vertices_local(vertices: np.ndarray, position: np.ndarray, quat_wxyz: np.ndarray) -> np.ndarray:
+    rotation = _quat_wxyz_to_matrix(quat_wxyz)
+    vertices = np.asarray(vertices, dtype=np.float32)
+    position = np.asarray(position, dtype=np.float32).reshape(3)
+    return (vertices @ rotation.T) + position
 
 
 def _valid_depth_stats(depth: np.ndarray, near: float, far: float) -> tuple[float | None, float | None, int]:
@@ -271,6 +305,170 @@ def _build_default_joint_viser(robot_config: RobotConfig, viser_joint_names: lis
     return np.asarray([default_joint_robot[name_to_robot_idx[name]] for name in viser_joint_names], dtype=np.float32)
 
 
+def _decode_npz_names(raw_names: np.ndarray) -> list[str]:
+    return [str(name.decode("utf-8") if isinstance(name, bytes) else name) for name in np.asarray(raw_names).reshape(-1)]
+
+
+def _scalar_str(raw: object) -> str:
+    array = np.asarray(raw)
+    if array.shape == ():
+        return str(array.item())
+    if array.size == 0:
+        return ""
+    return str(array.reshape(-1)[0])
+
+
+def _resolve_motion_root_body_index(body_names: list[str]) -> int:
+    for preferred in ("pelvis", "base_link", "base", "torso_link"):
+        if preferred in body_names:
+            return body_names.index(preferred)
+    for idx, name in enumerate(body_names):
+        if name and name != "world":
+            return idx
+    return 0
+
+
+def _parse_vec3(raw: str | None, default: tuple[float, float, float]) -> np.ndarray:
+    if not raw:
+        return np.asarray(default, dtype=np.float64)
+    parts = [float(part) for part in raw.replace(",", " ").split()]
+    if len(parts) != 3:
+        return np.asarray(default, dtype=np.float64)
+    return np.asarray(parts, dtype=np.float64)
+
+
+def _rpy_to_matrix(rpy: np.ndarray) -> np.ndarray:
+    roll, pitch, yaw = [float(v) for v in rpy.reshape(3)]
+    cr, sr = np.cos(roll), np.sin(roll)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    cy, sy = np.cos(yaw), np.sin(yaw)
+    rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]], dtype=np.float64)
+    rot_y = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]], dtype=np.float64)
+    rot_z = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+    return rot_z @ rot_y @ rot_x
+
+
+def _load_motion_object_mesh(urdf_path: Path, object_size: np.ndarray | None = None) -> trimesh.Trimesh | None:
+    meshes: list[trimesh.Trimesh] = []
+    try:
+        root = ET.parse(urdf_path).getroot()
+    except Exception as exc:
+        logger.warning("Failed to parse motion object URDF {}: {}", urdf_path, exc)
+        root = None
+
+    if root is not None:
+        for geom_parent in root.findall(".//visual") + root.findall(".//collision"):
+            geometry = geom_parent.find("geometry")
+            mesh_tag = geometry.find("mesh") if geometry is not None else None
+            if mesh_tag is None:
+                continue
+            filename = str(mesh_tag.get("filename") or "").strip()
+            if not filename:
+                continue
+            mesh_path = Path(filename).expanduser()
+            if not mesh_path.is_absolute():
+                mesh_path = urdf_path.parent / mesh_path
+            if not mesh_path.is_file():
+                continue
+
+            loaded = trimesh.load(mesh_path, process=False)
+            if isinstance(loaded, trimesh.Scene):
+                loaded = loaded.dump(concatenate=True)
+            if not isinstance(loaded, trimesh.Trimesh):
+                continue
+
+            mesh = loaded.copy()
+            scale = _parse_vec3(mesh_tag.get("scale"), (1.0, 1.0, 1.0))
+            mesh.apply_scale(scale)
+            origin = geom_parent.find("origin")
+            xyz = _parse_vec3(origin.get("xyz") if origin is not None else None, (0.0, 0.0, 0.0))
+            rpy = _parse_vec3(origin.get("rpy") if origin is not None else None, (0.0, 0.0, 0.0))
+            transform = np.eye(4, dtype=np.float64)
+            transform[:3, :3] = _rpy_to_matrix(rpy)
+            transform[:3, 3] = xyz
+            mesh.apply_transform(transform)
+            meshes.append(mesh)
+            break
+
+    if meshes:
+        return trimesh.util.concatenate(meshes) if len(meshes) > 1 else meshes[0]
+
+    if object_size is None:
+        return None
+    size = np.asarray(object_size, dtype=np.float64).reshape(-1)
+    if size.shape[0] < 3 or not np.all(np.isfinite(size[:3])) or np.any(size[:3] <= 0.0):
+        return None
+    return trimesh.creation.box(extents=size[:3])
+
+
+def _load_motion_overlay(
+    motion_path: Path,
+    robot_config: RobotConfig,
+    viser_joint_names: list[str],
+) -> MotionOverlay | None:
+    if not motion_path.is_file() or motion_path.suffix.lower() != ".npz":
+        logger.warning("Motion overlay disabled; motion file is not a readable .npz: {}", motion_path)
+        return None
+
+    try:
+        with np.load(motion_path, allow_pickle=True) as data:
+            body_names = _decode_npz_names(np.asarray(data["body_names"]))
+            joint_names = _decode_npz_names(np.asarray(data["joint_names"]))
+            root_idx = _resolve_motion_root_body_index(body_names)
+            root_pos_w = np.asarray(data["body_pos_w"][:, root_idx], dtype=np.float32)
+            root_quat_wxyz = np.asarray(data["body_quat_w"][:, root_idx], dtype=np.float32)
+            root_quat_wxyz = np.asarray([_normalize_quaternion_wxyz(quat) for quat in root_quat_wxyz], dtype=np.float32)
+
+            joint_pos = np.asarray(data["joint_pos"], dtype=np.float32)
+            if joint_pos.ndim != 2:
+                raise ValueError(f"joint_pos must be 2-D, got {joint_pos.shape}")
+            if joint_pos.shape[1] == len(joint_names) + 7:
+                joint_pos = joint_pos[:, 7:]
+
+            joint_name_to_index = {name: idx for idx, name in enumerate(joint_names)}
+            fallback_joint = _build_default_joint_viser(robot_config, viser_joint_names)
+            joint_pos_viser = np.tile(fallback_joint.reshape(1, -1), (joint_pos.shape[0], 1)).astype(np.float32)
+            for viser_idx, joint_name in enumerate(viser_joint_names):
+                motion_idx = joint_name_to_index.get(joint_name)
+                if motion_idx is not None and motion_idx < joint_pos.shape[1]:
+                    joint_pos_viser[:, viser_idx] = joint_pos[:, motion_idx]
+
+            object_pos_w = np.asarray(data["object_pos_w"], dtype=np.float32) if "object_pos_w" in data.files else None
+            object_quat_wxyz = np.asarray(data["object_quat_w"], dtype=np.float32) if "object_quat_w" in data.files else None
+            if object_quat_wxyz is not None:
+                object_quat_wxyz = np.asarray(
+                    [_normalize_quaternion_wxyz(quat) for quat in object_quat_wxyz],
+                    dtype=np.float32,
+                )
+
+            object_size = np.asarray(data["object_size"], dtype=np.float32).reshape(-1) if "object_size" in data.files else None
+            object_urdf_path = None
+            if "object_urdf_path" in data.files:
+                object_urdf_raw = _scalar_str(data["object_urdf_path"])
+                if object_urdf_raw:
+                    object_urdf_path = Path(object_urdf_raw).expanduser()
+                    if not object_urdf_path.is_absolute():
+                        object_urdf_path = motion_path.parent / object_urdf_path
+                    object_urdf_path = object_urdf_path.resolve()
+
+            fps = float(np.asarray(data["fps"]).reshape(-1)[0]) if "fps" in data.files else 50.0
+    except Exception as exc:
+        logger.warning("Motion overlay disabled; failed to load {}: {}", motion_path, exc)
+        return None
+
+    object_mesh = _load_motion_object_mesh(object_urdf_path, object_size) if object_urdf_path is not None else None
+    return MotionOverlay(
+        path=motion_path,
+        fps=max(float(fps), 1.0),
+        root_pos_w=root_pos_w,
+        root_quat_wxyz=root_quat_wxyz,
+        joint_pos_viser=joint_pos_viser,
+        object_pos_w=object_pos_w,
+        object_quat_wxyz=object_quat_wxyz,
+        object_mesh=object_mesh,
+    )
+
+
 def _terminate_process_group(proc: subprocess.Popen[bytes] | subprocess.Popen[str] | None, timeout_sec: float = 10.0) -> None:
     if proc is None or proc.poll() is not None:
         return
@@ -325,6 +523,43 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     vr.update_cfg(default_joint_viser)
     if hasattr(vr, "show_collision"):
         vr.show_collision = bool(cfg.show_robot_collision)
+
+    motion_overlay = _load_motion_overlay(_resolve_repo_path(cfg.motion_file), robot_config, viser_joint_names)
+    motion_root = server.scene.add_frame("/motion_ref", show_axes=False)
+    motion_robot_root = server.scene.add_frame("/motion_ref/robot", show_axes=False)
+    motion_object_root = server.scene.add_frame("/motion_ref/object", show_axes=False)
+    motion_root.visible = False
+    motion_robot_root.visible = False
+    motion_object_root.visible = False
+    motion_vr = None
+    motion_object_mesh_handle = None
+    if motion_overlay is not None:
+        motion_urdf_kwargs = {
+            "urdf_or_path": robot_urdf_path,
+            "root_node_name": "/motion_ref/robot",
+        }
+        if "load_collision_meshes" in viser_urdf_signature.parameters:
+            motion_urdf_kwargs["load_collision_meshes"] = True
+        if "collision_mesh_color_override" in viser_urdf_signature.parameters:
+            motion_urdf_kwargs["collision_mesh_color_override"] = (1.0, 0.62, 0.05, 0.33)
+        motion_vr = ViserUrdf(server, **motion_urdf_kwargs)
+        motion_vr.update_cfg(motion_overlay.joint_pos_viser[0])
+        if hasattr(motion_vr, "show_visual"):
+            motion_vr.show_visual = False
+        if hasattr(motion_vr, "show_collision"):
+            motion_vr.show_collision = True
+
+        if motion_overlay.object_mesh is not None:
+            motion_object_mesh_handle = server.scene.add_mesh_simple(
+                "/motion_ref/object/mesh",
+                vertices=np.asarray(motion_overlay.object_mesh.vertices, dtype=np.float32),
+                faces=np.asarray(motion_overlay.object_mesh.faces, dtype=np.int32),
+                color=(255, 168, 25),
+                opacity=0.36,
+                side="double",
+                visible=False,
+            )
+
     object_visual_handles: list[object] = []
     object_collision_handles: list[object] = []
     loaded_object_snapshot_path: Path | None = None
@@ -388,6 +623,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             visual_mesh = _mesh_arrays_from_mujoco_geom(geom_entry_raw, collision_view=False)
             if visual_mesh is not None and (not is_collision or _geom_supports_visual_mesh(geom_entry_raw)):
                 vertices, faces, color, opacity = visual_mesh
+                vertices = _transform_vertices_local(vertices, geom_pos, geom_quat_wxyz)
                 object_visual_handles.append(
                     server.scene.add_mesh_simple(
                         f"/object/visual_geoms/{geom_name}_{geom_idx}",
@@ -396,8 +632,6 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
                         color=color,
                         opacity=opacity,
                         side="double",
-                        position=tuple(geom_pos.tolist()),
-                        wxyz=tuple(geom_quat_wxyz.tolist()),
                         visible=False,
                     )
                 )
@@ -407,6 +641,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
                 collision_mesh = _mesh_arrays_from_mujoco_geom(geom_entry_raw, collision_view=True)
                 if collision_mesh is not None:
                     vertices, faces, color, opacity = collision_mesh
+                    vertices = _transform_vertices_local(vertices, geom_pos, geom_quat_wxyz)
                     object_collision_handles.append(
                         server.scene.add_mesh_simple(
                             f"/object/collision_geoms/{geom_name}_{geom_idx}",
@@ -415,8 +650,6 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
                             color=color,
                             opacity=opacity,
                             side="double",
-                            position=tuple(geom_pos.tolist()),
-                            wxyz=tuple(geom_quat_wxyz.tolist()),
                             visible=False,
                         )
                     )
@@ -452,11 +685,21 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             "Show robot collision (URDF)",
             initial_value=bool(cfg.show_robot_collision),
         )
-        show_ref_cb = server.gui.add_checkbox("Show ref body", initial_value=bool(cfg.show_ref_body))
+        show_ref_cb = server.gui.add_checkbox("Show policy ref body", initial_value=bool(cfg.show_ref_body))
         reset_offset_btn = server.gui.add_button("Reset offset")
+
+    with server.gui.add_folder("Motion Overlay"):
+        show_motion_overlay_cb = server.gui.add_checkbox(
+            "Show motion overlay",
+            initial_value=bool(cfg.show_motion_overlay and motion_overlay is not None),
+        )
+        show_motion_robot_cb = server.gui.add_checkbox("Motion robot", initial_value=True)
+        show_motion_object_cb = server.gui.add_checkbox("Motion object", initial_value=True)
+        motion_md = server.gui.add_markdown("Motion overlay unavailable" if motion_overlay is None else "Waiting for sim-state...")
 
     with server.gui.add_folder("Rollout"):
         rollout_md = server.gui.add_markdown("Viewer only")
+        manual_rollout_btn = server.gui.add_button("Manual policy rollout")
         reset_rollout_btn = server.gui.add_button("Reset rollout")
 
     depth_image_shape = (
@@ -492,6 +735,8 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     rollout_proc: subprocess.Popen | None = None
     rollout_log_handle: TextIOWrapper | None = None
     rollout_restart_count = 0
+    last_rollout_skip_policy: bool | None = None
+    rollout_restart_lock = threading.Lock()
     pending_restart_reason = "startup" if cfg.launch_rollout else None
     last_rollout_reason = "idle"
     rollout_log_path = _resolve_repo_path(cfg.rollout_log_path)
@@ -502,10 +747,69 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     pre_reset_sim_time_ms: int | None = None
     last_seen_sim_time_ms: int | None = None
 
-    def _refresh_rollout_md() -> None:
-        if not cfg.launch_rollout:
-            rollout_md.content = "launch_rollout: `False`"
+    def _set_motion_overlay_visibility() -> None:
+        overlay_visible = bool(show_motion_overlay_cb.value and motion_overlay is not None)
+        robot_visible = bool(overlay_visible and show_motion_robot_cb.value)
+        object_visible = bool(overlay_visible and show_motion_object_cb.value)
+        motion_root.visible = overlay_visible
+        motion_robot_root.visible = robot_visible
+        motion_object_root.visible = object_visible
+        if motion_object_mesh_handle is not None:
+            motion_object_mesh_handle.visible = object_visible
+
+    def _motion_frame_index(sim_time_ms: int) -> int:
+        if motion_overlay is None:
+            return 0
+        frame_count = int(motion_overlay.root_pos_w.shape[0])
+        if frame_count <= 0:
+            return 0
+        idx = int(round(max(float(sim_time_ms), 0.0) * motion_overlay.fps / 1000.0))
+        return int(np.clip(idx, 0, frame_count - 1))
+
+    def _update_motion_overlay(sim_time_ms: int, root_state: np.ndarray, object_state: np.ndarray | None) -> None:
+        if motion_overlay is None:
+            _set_motion_overlay_visibility()
             return
+
+        frame_idx = _motion_frame_index(sim_time_ms)
+        motion_root_pos = motion_overlay.root_pos_w[frame_idx].copy()
+        motion_object_pos = (
+            motion_overlay.object_pos_w[frame_idx].copy()
+            if motion_overlay.object_pos_w is not None and motion_overlay.object_pos_w.shape[0] > frame_idx
+            else None
+        )
+        if bool(recenter_cb.value):
+            motion_root_pos[:2] -= offset_xy
+            if motion_object_pos is not None:
+                motion_object_pos[:2] -= offset_xy
+
+        with server.atomic():
+            motion_robot_root.position = tuple(motion_root_pos.tolist())
+            motion_robot_root.wxyz = tuple(motion_overlay.root_quat_wxyz[frame_idx].tolist())
+            if motion_vr is not None:
+                motion_vr.update_cfg(motion_overlay.joint_pos_viser[frame_idx])
+
+            if motion_object_pos is not None and motion_overlay.object_quat_wxyz is not None:
+                motion_object_root.position = tuple(motion_object_pos.tolist())
+                motion_object_root.wxyz = tuple(motion_overlay.object_quat_wxyz[frame_idx].tolist())
+
+            _set_motion_overlay_visibility()
+
+        root_pos_err = float(np.linalg.norm(root_state[:3] - motion_overlay.root_pos_w[frame_idx]))
+        root_xy_err = float(np.linalg.norm(root_state[:2] - motion_overlay.root_pos_w[frame_idx, :2]))
+        object_line = "object_err: `n/a`"
+        if object_state is not None and motion_overlay.object_pos_w is not None and motion_overlay.object_pos_w.shape[0] > frame_idx:
+            object_pos_err = float(np.linalg.norm(object_state[:3] - motion_overlay.object_pos_w[frame_idx]))
+            object_xy_err = float(np.linalg.norm(object_state[:2] - motion_overlay.object_pos_w[frame_idx, :2]))
+            object_line = f"object_err: `{object_pos_err:.5f} m` | object_xy_err: `{object_xy_err:.5f} m`"
+        motion_md.content = (
+            f"motion: `{motion_overlay.path.name}`\n\n"
+            f"frame: `{frame_idx}` / `{motion_overlay.root_pos_w.shape[0] - 1}`\n\n"
+            f"root_err: `{root_pos_err:.5f} m` | root_xy_err: `{root_xy_err:.5f} m`\n\n"
+            f"{object_line}"
+        )
+
+    def _refresh_rollout_md() -> None:
         if rollout_proc is None:
             proc_state = "stopped"
             pid = "n/a"
@@ -513,11 +817,18 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             poll = rollout_proc.poll()
             proc_state = "running" if poll is None else f"exited({poll})"
             pid = str(rollout_proc.pid)
+        if last_rollout_skip_policy is None:
+            policy_state = "env"
+        elif last_rollout_skip_policy:
+            policy_state = "skipped"
+        else:
+            policy_state = "enabled"
         rollout_md.content = (
             f"status: `{proc_state}`\n\n"
             f"pid: `{pid}`\n\n"
             f"restart_count: `{rollout_restart_count}`\n\n"
             f"last_reason: `{last_rollout_reason}`\n\n"
+            f"policy: `{policy_state}`\n\n"
             f"reset_mode: `sim-control`\n\n"
             f"log_path: `{rollout_log_path}`"
         )
@@ -598,46 +909,60 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             rollout_log_handle.close()
             rollout_log_handle = None
 
-    def _restart_rollout(reason: str) -> None:
-        nonlocal rollout_proc, rollout_log_handle, rollout_restart_count, offset_initialized, received_first_state, pending_restart_reason, last_rollout_reason, auto_reset_scheduled_at, auto_reset_done, reset_request_time_monotonic, reset_pending_clock_rewind, pre_reset_sim_time_ms, last_seen_sim_time_ms
-        _stop_rollout()
-        _clear_object_geom_handles()
-        command = _build_rollout_command(cfg)
-        env = os.environ.copy()
-        env["RUN_SECONDS"] = str(cfg.launch_run_seconds)
-        env["TRAINING_HEADLESS"] = "True" if cfg.training_headless else "False"
-        env["HOLOSOMA_MUJOCO_OBJECT_GEOM_SNAPSHOT_PATH"] = str(snapshot_path_default)
+    def _restart_rollout(reason: str, *, skip_policy: bool | None = None) -> None:
+        nonlocal rollout_proc, rollout_log_handle, rollout_restart_count, last_rollout_skip_policy, offset_initialized, received_first_state, pending_restart_reason, last_rollout_reason, auto_reset_scheduled_at, auto_reset_done, reset_request_time_monotonic, reset_pending_clock_rewind, pre_reset_sim_time_ms, last_seen_sim_time_ms
+        if not rollout_restart_lock.acquire(blocking=False):
+            logger.info("Ignoring rollout restart while another restart is in progress ({})", reason)
+            return
         try:
-            snapshot_path_default.unlink()
-        except FileNotFoundError:
-            pass
-        rollout_log_path.parent.mkdir(parents=True, exist_ok=True)
-        rollout_log_handle = rollout_log_path.open("a", encoding="utf-8")
-        rollout_proc = subprocess.Popen(
-            command,
-            cwd=str(REPO_ROOT),
-            env=env,
-            preexec_fn=os.setsid,
-            stdout=rollout_log_handle,
-            stderr=subprocess.STDOUT,
-        )
-        rollout_restart_count += 1
-        last_rollout_reason = reason
-        pending_restart_reason = None
-        offset_xy[:] = 0.0
-        offset_initialized = False
-        received_first_state = False
-        sub.last_state = None
-        auto_reset_scheduled_at = None
-        auto_reset_done = False
-        reset_request_time_monotonic = None
-        reset_pending_clock_rewind = False
-        pre_reset_sim_time_ms = None
-        last_seen_sim_time_ms = None
-        state_md.content = "Waiting for simulator state after reset..."
-        actor_md.content = ""
-        logger.info("Started rollout pid={} reason={}", rollout_proc.pid, reason)
-        _refresh_rollout_md()
+            manual_rollout_btn.disabled = True
+            reset_rollout_btn.disabled = True
+            _stop_rollout()
+            _clear_object_geom_handles()
+            command = _build_rollout_command(cfg)
+            env = os.environ.copy()
+            env["HOLOSOMA_MJ_TRACK_INTERNAL_CORE"] = "1"
+            env["RUN_SECONDS"] = str(cfg.launch_run_seconds)
+            env["TRAINING_HEADLESS"] = "True" if cfg.training_headless else "False"
+            env["HOLOSOMA_MUJOCO_OBJECT_GEOM_SNAPSHOT_PATH"] = str(snapshot_path_default)
+            if skip_policy is not None:
+                env["SKIP_POLICY"] = "1" if skip_policy else "0"
+            last_rollout_skip_policy = str(env.get("SKIP_POLICY", "0")).strip().lower() in {"1", "true", "yes", "on"}
+            try:
+                snapshot_path_default.unlink()
+            except FileNotFoundError:
+                pass
+            rollout_log_path.parent.mkdir(parents=True, exist_ok=True)
+            rollout_log_handle = rollout_log_path.open("a", encoding="utf-8")
+            rollout_proc = subprocess.Popen(
+                command,
+                cwd=str(REPO_ROOT),
+                env=env,
+                preexec_fn=os.setsid,
+                stdout=rollout_log_handle,
+                stderr=subprocess.STDOUT,
+            )
+            rollout_restart_count += 1
+            last_rollout_reason = reason
+            pending_restart_reason = None
+            offset_xy[:] = 0.0
+            offset_initialized = False
+            received_first_state = False
+            sub.last_state = None
+            auto_reset_scheduled_at = None
+            auto_reset_done = False
+            reset_request_time_monotonic = None
+            reset_pending_clock_rewind = False
+            pre_reset_sim_time_ms = None
+            last_seen_sim_time_ms = None
+            state_md.content = "Waiting for simulator state after reset..."
+            actor_md.content = ""
+            logger.info("Started rollout pid={} reason={}", rollout_proc.pid, reason)
+            _refresh_rollout_md()
+        finally:
+            manual_rollout_btn.disabled = False
+            reset_rollout_btn.disabled = False
+            rollout_restart_lock.release()
 
     def _request_sim_reset(reason: str) -> None:
         nonlocal pending_restart_reason, offset_initialized, received_first_state, auto_reset_scheduled_at, auto_reset_done, reset_request_time_monotonic, reset_pending_clock_rewind, pre_reset_sim_time_ms
@@ -686,6 +1011,18 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     def _(_evt) -> None:
         ref_root.visible = bool(show_ref_cb.value)
 
+    @show_motion_overlay_cb.on_update
+    def _(_evt) -> None:
+        _set_motion_overlay_visibility()
+
+    @show_motion_robot_cb.on_update
+    def _(_evt) -> None:
+        _set_motion_overlay_visibility()
+
+    @show_motion_object_cb.on_update
+    def _(_evt) -> None:
+        _set_motion_overlay_visibility()
+
     @reset_offset_btn.on_click
     def _(_evt) -> None:
         nonlocal offset_initialized
@@ -695,6 +1032,13 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     @reset_rollout_btn.on_click
     def _(_evt) -> None:
         _request_sim_reset("gui_reset")
+
+    @manual_rollout_btn.on_click
+    def _(_evt) -> None:
+        if rollout_proc is not None and rollout_proc.poll() is None and last_rollout_skip_policy is False:
+            logger.info("Manual policy rollout requested, but policy rollout is already running pid={}", rollout_proc.pid)
+            return
+        _restart_rollout("manual_policy_rollout", skip_policy=False)
 
     logger.info("Open viser at http://localhost:{}", port)
     logger.info("Reading split MuJoCo sim-state from tcp://localhost:{}", cfg.state_port)
@@ -722,7 +1066,12 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
                 continue
 
             sim_time_ms = int(state.get("sim_time_ms", 0))
-            if reset_pending_clock_rewind and pre_reset_sim_time_ms is not None and sim_time_ms >= pre_reset_sim_time_ms:
+            if (
+                reset_pending_clock_rewind
+                and pre_reset_sim_time_ms is not None
+                and pre_reset_sim_time_ms > 0
+                and sim_time_ms >= pre_reset_sim_time_ms
+            ):
                 time.sleep(1.0 / max(cfg.rate_hz, 1.0))
                 continue
 
@@ -781,6 +1130,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
                 snapshot_path = Path(snapshot_path_raw).expanduser().resolve()
             if loaded_object_snapshot_path is None and snapshot_path.is_file():
                 _load_object_geom_handles(snapshot_path)
+            _update_motion_overlay(sim_time_ms, root_state, object_state)
 
             with server.atomic():
                 robot_root.position = tuple(root_pos.tolist())

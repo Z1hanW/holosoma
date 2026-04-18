@@ -110,6 +110,7 @@ PERCEPTION_CAMERA_SOURCE="${PERCEPTION_CAMERA_SOURCE:-far_tracking_warp}"
 PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-mesh}"
 PERCEPTION_CAMERA_PITCH_DEG="${PERCEPTION_CAMERA_PITCH_DEG:-}"
 SIM_USE_ZMQ_LOWCMD="${SIM_USE_ZMQ_LOWCMD:-1}"
+SKIP_POLICY="${SKIP_POLICY:-0}"
 INTERFACE_NAME="${INTERFACE_NAME:-lo}"
 RUN_SECONDS="${RUN_SECONDS:-20}"
 TRAINING_HEADLESS="${TRAINING_HEADLESS:-True}"
@@ -990,6 +991,16 @@ fi
 
 if [[ "$SIM_STARTUP_WAIT" != "0" ]]; then
   sleep "$SIM_STARTUP_WAIT"
+fi
+
+if [[ "$SKIP_POLICY" == "1" || "$SKIP_POLICY" == "true" || "$SKIP_POLICY" == "True" ]]; then
+  echo "Policy launch skipped (SKIP_POLICY=${SKIP_POLICY}); simulator is running without external lowcmd."
+  if [[ "$RUN_SECONDS" == "0" ]]; then
+    wait "$SIM_PID"
+  else
+    sleep "$RUN_SECONDS"
+  fi
+  exit 0
 fi
 
 POLICY_CMD=(

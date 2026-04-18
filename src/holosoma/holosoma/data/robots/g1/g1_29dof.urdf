@@ -3,6 +3,9 @@
 <!-- G1 model from https://github.com/WhoKnowsssss/tracking_implementation/tree/master -->
 
 <robot name="g1">
+    <mujoco>
+        <compiler fusestatic="false"/>
+    </mujoco>
 
     <link name="pelvis">
         <inertial>
@@ -900,6 +903,12 @@
                 <color rgba="0.7 0.7 0.7 1"/>
             </material>
         </visual>
+        <collision>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <geometry>
+                <mesh filename="meshes/left_rubber_hand.STL"/>
+            </geometry>
+        </collision>
     </link>
     <link name="right_shoulder_pitch_link">
         <inertial>
@@ -1104,6 +1113,12 @@
                 <color rgba="0.7 0.7 0.7 1"/>
             </material>
         </visual>
+        <collision>
+            <origin xyz="0 0 0" rpy="0 0 0"/>
+            <geometry>
+                <mesh filename="meshes/right_rubber_hand.STL"/>
+            </geometry>
+        </collision>
     </link>
 
     <link name="LL_FOOT">

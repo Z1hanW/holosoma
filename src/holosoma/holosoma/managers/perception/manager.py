@@ -87,6 +87,15 @@ class PerceptionManager:
             heightmap_body_name = getattr(robot_cfg, "torso_name", None)
         self._heightmap_body_name = heightmap_body_name
         self._camera_include_robot_mesh = bool(getattr(cfg, "camera_include_robot_mesh", False))
+        include_robot_mesh_env = os.environ.get("HOLOSOMA_PERCEPTION_INCLUDE_ROBOT_MESH")
+        if include_robot_mesh_env is not None:
+            self._camera_include_robot_mesh = include_robot_mesh_env.strip().lower() not in {
+                "",
+                "0",
+                "false",
+                "no",
+                "off",
+            }
         self._camera_robot_mesh_enabled = False
         self._camera_body_index: int | None = None
         self._camera_body_offset_pos = torch.zeros(3, device=self.device)
@@ -309,10 +318,17 @@ class PerceptionManager:
             )
         except Exception:
             self._debug_dump_after_updates = 1
+        try:
+            self._debug_dump_min_sim_time_ms = max(
+                0.0, float(os.environ.get("HOLOSOMA_PERCEPTION_DEBUG_DUMP_MIN_SIM_TIME_MS", "0"))
+            )
+        except Exception:
+            self._debug_dump_min_sim_time_ms = 0.0
         self._debug_update_counter = 0
         self._debug_dump_done = False
 
         self._ray_hits_world = torch.zeros(self.num_envs, self._num_points, 3, device=self.device)
+        self._far_tracking_debug_last: dict[str, torch.Tensor] = {}
 
     def setup(self) -> None:
         if not self.enabled:
@@ -539,6 +555,17 @@ class PerceptionManager:
             return
         if self._debug_update_counter < self._debug_dump_after_updates:
             return
+        sim_time_ms = None
+        try:
+            sim_time_ms = float(self.env.simulator.time()) * 1000.0
+        except Exception:
+            sim_time_ms = None
+        if (
+            self._debug_dump_min_sim_time_ms > 0.0
+            and sim_time_ms is not None
+            and sim_time_ms < self._debug_dump_min_sim_time_ms
+        ):
+            return
 
         if isinstance(env_ids, torch.Tensor) and env_ids.numel() > 0:
             env_index = int(env_ids.view(-1)[0].item())
@@ -558,6 +585,7 @@ class PerceptionManager:
         stats = {
             "source_label": source_label,
             "camera_source": str(self._camera_source),
+            "sim_time_ms": sim_time_ms,
             "update_counter": int(self._debug_update_counter),
             "env_index": int(env_index),
             "raw_shape": [int(v) for v in raw_depth.shape],
@@ -606,6 +634,63 @@ class PerceptionManager:
             except Exception:
                 stats["strict_warp_camera_pose_pos"] = None
                 stats["strict_warp_camera_pose_quat_xyzw"] = None
+        if self._terrain_mesh is not None:
+            try:
+                terrain_bounds = np.asarray(self._terrain_mesh.bounds, dtype=np.float32)
+                stats["terrain_mesh_bounds"] = terrain_bounds.tolist()
+                stats["terrain_mesh_vertices"] = int(len(self._terrain_mesh.vertices))
+                stats["terrain_mesh_faces"] = int(len(self._terrain_mesh.faces))
+            except Exception:
+                stats["terrain_mesh_bounds"] = None
+        if self._far_tracking_camera_sensor is not None:
+            try:
+                sensor = self._far_tracking_camera_sensor
+                stats["far_tracking_sensor_camera_pos"] = [
+                    float(v) for v in sensor.camera_sensor_position[env_index, 0].detach().cpu().tolist()
+                ]
+                stats["far_tracking_sensor_camera_quat_xyzw"] = [
+                    float(v) for v in sensor.camera_sensor_orientation[env_index, 0].detach().cpu().tolist()
+                ]
+                stats["far_tracking_sensor_local_pos"] = [
+                    float(v) for v in sensor.camera_sensor_local_position[env_index, 0].detach().cpu().tolist()
+                ]
+                stats["far_tracking_sensor_local_quat_xyzw"] = [
+                    float(v) for v in sensor.camera_sensor_local_orientation[env_index, 0].detach().cpu().tolist()
+                ]
+                stats["far_tracking_sensor_data_frame_quat_xyzw"] = [
+                    float(v) for v in sensor.camera_sensor_data_frame_quat[env_index, 0].detach().cpu().tolist()
+                ]
+                stats["far_tracking_num_robot_mesh_slots"] = int(getattr(sensor, "num_robot_bodies", 0))
+                stats["far_tracking_ray_cast_bodies"] = list(getattr(sensor, "ray_cast_bodies", []))
+                stats["far_tracking_primitive_bodies"] = list(getattr(sensor, "primitive_bodies", []))
+                if getattr(sensor, "ray_cast_body_poses_tensor", None) is not None:
+                    stats["far_tracking_ray_cast_body_poses"] = (
+                        sensor.ray_cast_body_poses_tensor[env_index].detach().cpu().to(torch.float32).tolist()
+                    )
+                    stats["far_tracking_ray_cast_body_quats_xyzw"] = (
+                        sensor.ray_cast_body_quats_tensor[env_index].detach().cpu().to(torch.float32).tolist()
+                    )
+                if getattr(sensor, "primitive_body_poses_tensor", None) is not None:
+                    stats["far_tracking_primitive_body_poses"] = (
+                        sensor.primitive_body_poses_tensor[env_index].detach().cpu().to(torch.float32).tolist()
+                    )
+                    stats["far_tracking_primitive_body_quats_xyzw"] = (
+                        sensor.primitive_body_quats_tensor[env_index].detach().cpu().to(torch.float32).tolist()
+                    )
+                    stats["far_tracking_primitive_body_half_extents"] = (
+                        sensor.primitive_body_half_extents_tensor[env_index].detach().cpu().to(torch.float32).tolist()
+                    )
+                    stats["far_tracking_primitive_body_active"] = (
+                        sensor.primitive_body_active_tensor[env_index].detach().cpu().to(torch.int32).tolist()
+                    )
+                for debug_key, debug_value in getattr(self, "_far_tracking_debug_last", {}).items():
+                    try:
+                        value = debug_value[env_index]
+                        stats[f"far_tracking_debug_{debug_key}"] = value.detach().cpu().to(torch.float32).tolist()
+                    except Exception:
+                        stats[f"far_tracking_debug_{debug_key}"] = None
+            except Exception:
+                stats["far_tracking_sensor_debug_error"] = True
         (dump_dir / "camera_depth_debug.json").write_text(__import__("json").dumps(stats, indent=2))
         self._debug_dump_done = True
         (self.logger or logger).info("Perception camera debug dump written to {}", dump_dir)
@@ -1124,8 +1209,12 @@ class PerceptionManager:
 
         urdf_path, _asset_root = self._resolve_robot_asset_paths()
         mesh_root = os.path.join(os.path.dirname(urdf_path), "meshes")
-        ray_cast_bodies_raw = dict(getattr(self.cfg, "camera_mesh_file_map", None) or {})
-        if not ray_cast_bodies_raw:
+        ray_cast_bodies_raw = (
+            dict(getattr(self.cfg, "camera_mesh_file_map", None) or {})
+            if self._camera_include_robot_mesh
+            else {}
+        )
+        if self._camera_include_robot_mesh and not ray_cast_bodies_raw:
             raise RuntimeError("far_tracking_warp requires perception.camera_mesh_file_map to be populated.")
         ray_cast_bodies: dict[str, str] = {}
         for link_name, mesh_name in ray_cast_bodies_raw.items():
@@ -1155,9 +1244,6 @@ class PerceptionManager:
                     resolved,
                 )
             ray_cast_bodies[link_name] = resolved
-        if not ray_cast_bodies:
-            raise RuntimeError(f"No valid far_tracking_warp ray_cast_bodies found under mesh root: {mesh_root}")
-
         (self.logger or logger).info(
             "far_tracking_warp object geometry mode: {}",
             self._object_geometry_mode,
@@ -1173,6 +1259,10 @@ class PerceptionManager:
             if slot_name in ray_cast_bodies:
                 continue
             ray_cast_bodies[slot_name] = str(slot_spec["mesh_path"])
+        if self._camera_include_robot_mesh and not ray_cast_bodies:
+            raise RuntimeError(f"No valid far_tracking_warp ray_cast_bodies found under mesh root: {mesh_root}")
+        if not self._camera_include_robot_mesh:
+            (self.logger or logger).info("far_tracking_warp robot visual mesh raycast disabled by configuration.")
         if registered_object_primitives:
             primitive_source_names = sorted(
                 {str(slot_spec["source_name"]) for slot_spec in registered_object_primitives.values()}
@@ -1432,20 +1522,41 @@ class PerceptionManager:
 
         camera_base_link_pos = body_pos[:, self._far_tracking_base_link_indices]
         camera_base_link_quat = body_quat[:, self._far_tracking_base_link_indices]
-        self._far_tracking_camera_sensor.camera_sensor_position[:] = self._far_tracking_tf_apply(
+        updated_camera_pos = self._far_tracking_tf_apply(
             camera_base_link_quat,
             camera_base_link_pos,
             self._far_tracking_camera_sensor.camera_sensor_local_position,
         )
-        self._far_tracking_camera_sensor.camera_sensor_orientation[:] = self._far_tracking_quat_mul(
+        updated_camera_quat = self._far_tracking_quat_mul(
             camera_base_link_quat,
             self._far_tracking_quat_mul(
                 self._far_tracking_camera_sensor.camera_sensor_local_orientation,
                 self._far_tracking_camera_sensor.camera_sensor_data_frame_quat,
             ),
         )
+        self._far_tracking_camera_sensor.camera_sensor_position[:] = updated_camera_pos
+        self._far_tracking_camera_sensor.camera_sensor_orientation[:] = updated_camera_quat
+        self._far_tracking_debug_last = {
+            "base_link_indices": self._far_tracking_base_link_indices.detach().to(torch.float32).view(1, -1).expand(self.num_envs, -1),
+            "base_link_pos": camera_base_link_pos.detach().clone().view(self.num_envs, -1),
+            "base_link_quat_xyzw": camera_base_link_quat.detach().clone().view(self.num_envs, -1),
+            "updated_camera_pos": updated_camera_pos.detach().clone().view(self.num_envs, -1),
+            "updated_camera_quat_xyzw": updated_camera_quat.detach().clone().view(self.num_envs, -1),
+            "sensor_camera_pos_before_capture": self._far_tracking_camera_sensor.camera_sensor_position.detach()
+            .clone()
+            .view(self.num_envs, -1),
+            "sensor_camera_quat_before_capture": self._far_tracking_camera_sensor.camera_sensor_orientation.detach()
+            .clone()
+            .view(self.num_envs, -1),
+        }
 
         depth = self._far_tracking_camera_sensor.capture()
+        self._far_tracking_debug_last["sensor_camera_pos_after_capture"] = (
+            self._far_tracking_camera_sensor.camera_sensor_position.detach().clone().view(self.num_envs, -1)
+        )
+        self._far_tracking_debug_last["sensor_camera_quat_after_capture"] = (
+            self._far_tracking_camera_sensor.camera_sensor_orientation.detach().clone().view(self.num_envs, -1)
+        )
         if depth.ndim == 4:
             depth = depth[:, 0]
         if depth.ndim != 3:
