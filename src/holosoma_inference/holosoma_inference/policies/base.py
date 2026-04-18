@@ -31,7 +31,7 @@ from holosoma_inference.sdk.interface_wrapper import InterfaceWrapper
 from holosoma_inference.sdk.zmq_interface_wrapper import ZmqSimInterfaceWrapper
 from holosoma_inference.utils.latency import LatencyTracker
 from holosoma_inference.utils.math.quat import quat_rotate_inverse
-from holosoma_inference.utils.policy_control import PolicyControlPull
+from holosoma_inference.utils.perception_obs import PerceptionObsSub
 from holosoma_inference.utils.rate import RateLimiter
 from holosoma_inference.utils.wandb import load_checkpoint
 
@@ -148,8 +148,7 @@ class BasePolicy:
         self._obs_group_order: list[str] = list(self.obs_dict.keys())
 
         for group, term_names in self.obs_dict.items():
-            # Preserve the declared config order so flattened observations match training.
-            self.obs_terms_sorted[group] = list(term_names)
+            self.obs_terms_sorted[group] = sorted(term_names)
             history_len = self.history_length_dict.get(group, 1)
             self.obs_history_buffers[group] = {}
             flattened_terms: list[np.ndarray] = []
@@ -160,14 +159,6 @@ class BasePolicy:
                 flattened_terms.append(np.zeros((1, term_dim * history_len), dtype=np.float32))
 
             self.obs_buf_dict[group] = np.concatenate(flattened_terms, axis=1) if flattened_terms else np.zeros((1, 0))
-
-    def _reset_observation_history_state(self) -> None:
-        """Reset stacked observation history to the post-reset training state."""
-        self._initialize_history_state()
-        if hasattr(self, "last_policy_action"):
-            self.last_policy_action.fill(0.0)
-        if hasattr(self, "scaled_policy_action"):
-            self.scaled_policy_action.fill(0.0)
 
     def _init_communication_components(self):
         """Initialize state processor and command sender using the wrapper."""
@@ -185,11 +176,10 @@ class BasePolicy:
                 self.config.task.interface,
                 self.config.task.use_joystick,
             )
-        self._policy_control_sub: PolicyControlPull | None = None
-        policy_control_port = int(getattr(self.config.task, "policy_control_port", 0) or 0)
-        if policy_control_port > 0:
-            self._policy_control_sub = PolicyControlPull(port=policy_control_port)
-            self._policy_control_sub.start()
+        self._perception_obs_sub: PerceptionObsSub | None = None
+        if bool(getattr(self.config.task, "use_split_perception_obs", False)):
+            self._perception_obs_sub = PerceptionObsSub(port=self.config.task.perception_obs_port)
+            self._perception_obs_sub.start()
 
     def _init_policy_components(self, model_path, policy_action_scale, rl_rate):
         """Initialize policy-related components."""
@@ -215,7 +205,6 @@ class BasePolicy:
 
         # Determine KP/KD values: config override > ONNX metadata > error
         self._resolve_control_gains()
-        self._logged_training_pd_sync = False
 
     def _collect_model_paths(self, model_path):
         """Normalize model_path into a list of up to nine entries."""
@@ -413,30 +402,8 @@ class BasePolicy:
         self.use_joystick = False
         # Check if running in a TTY environment
         if not sys.stdin.isatty():
-            auto_start_requested = bool(
-                getattr(self.config.task, "auto_start_policy", False)
-                or getattr(self.config.task, "auto_start_motion", False)
-                or getattr(self.config.task, "auto_start_motion_clip", False)
-            )
             self.logger.warning("Not running in a TTY environment - keyboard input disabled")
             self.logger.warning("This is normal for automated tests or non-interactive environments")
-            if int(getattr(self.config.task, "policy_control_port", 0) or 0) > 0:
-                if auto_start_requested:
-                    self.logger.info(
-                        "Policy-control channel is available; auto-start is enabled, waiting for the first valid "
-                        "robot state before enabling policy actions."
-                    )
-                    self._pending_noninteractive_policy_start = True
-                    self.use_policy_action = False
-                    if hasattr(self.interface, "no_action"):
-                        self.interface.no_action = 1
-                    return
-                self.logger.info("Policy-control channel is available; waiting for manual viewer actions.")
-                self._pending_noninteractive_policy_start = False
-                self.use_policy_action = False
-                if hasattr(self.interface, "no_action"):
-                    self.interface.no_action = 1
-                return
             if self.config.task.defer_policy_start_until_valid_state:
                 self.logger.info("Deferring policy auto-start until a valid robot state is received")
                 self._pending_noninteractive_policy_start = True
@@ -536,49 +503,6 @@ class BasePolicy:
                 f"KD array length ({len(kd_values)}) does not match num_motors ({self.robot_config.num_motors})"
             )
 
-    def _sync_policy_pd_with_training(self) -> None:
-        """Force active policy PD gains to match ONNX/training metadata exactly."""
-        if self.onnx_kp is None or self.onnx_kd is None:
-            return
-
-        expected_kp = np.asarray(self.onnx_kp, dtype=np.float32)
-        expected_kd = np.asarray(self.onnx_kd, dtype=np.float32)
-        current_kp = getattr(self.robot_config, "motor_kp", None)
-        current_kd = getattr(self.robot_config, "motor_kd", None)
-        needs_cfg_sync = (
-            current_kp is None
-            or current_kd is None
-            or len(current_kp) != expected_kp.shape[0]
-            or len(current_kd) != expected_kd.shape[0]
-            or not np.allclose(np.asarray(current_kp, dtype=np.float32), expected_kp)
-            or not np.allclose(np.asarray(current_kd, dtype=np.float32), expected_kd)
-        )
-
-        if needs_cfg_sync:
-            self.robot_config = replace(
-                self.robot_config,
-                motor_kp=tuple(expected_kp.tolist()),
-                motor_kd=tuple(expected_kd.tolist()),
-            )
-            self.interface.robot_config = self.robot_config
-            if self.interface.backend == "sdk2py":
-                self.interface.command_sender.config = self.robot_config
-                self.interface.state_processor.config = self.robot_config
-
-        kp_level = float(getattr(self.interface, "kp_level", 1.0))
-        kd_level = float(getattr(self.interface, "kd_level", 1.0))
-        levels_reset = abs(kp_level - 1.0) > 1e-6 or abs(kd_level - 1.0) > 1e-6
-        if levels_reset:
-            self.interface.kp_level = 1.0
-            self.interface.kd_level = 1.0
-
-        if needs_cfg_sync or levels_reset:
-            logger.info("Forced active policy PD gains back to ONNX/training values (kp_level=1.0, kd_level=1.0).")
-            self._logged_training_pd_sync = True
-        elif not getattr(self, "_logged_training_pd_sync", False):
-            logger.info("Active policy PD gains match ONNX/training values.")
-            self._logged_training_pd_sync = True
-
     def _calculate_obs_dim_dict(self):
         """Calculate observation dimensions for each observation type."""
         obs_dim_dict = {}
@@ -672,6 +596,36 @@ class BasePolicy:
 
         return self.scaled_policy_action
 
+    def _get_split_perception_obs(self, expected_dim: int | None = None) -> np.ndarray:
+        """Return the latest split-sim perception observation for ONNX perception inputs."""
+        if self._perception_obs_sub is None:
+            raise RuntimeError(
+                "Policy expects perception_obs, but split perception subscription is disabled. "
+                "Pass --task.use-split-perception-obs and match --task.perception-obs-port to run_sim."
+            )
+
+        payload = self._perception_obs_sub.get_payload()
+        if payload is None:
+            deadline = time.perf_counter() + 2.0
+            while time.perf_counter() < deadline:
+                payload = self._perception_obs_sub.get_payload()
+                if payload is not None:
+                    break
+                time.sleep(0.01)
+        if payload is None:
+            raise RuntimeError("Timed out waiting for split-sim perception_obs payload.")
+
+        values = payload.get("perception_obs")
+        if values is None:
+            raise RuntimeError(f"Perception payload missing 'perception_obs': keys={sorted(payload.keys())}")
+        obs = np.asarray(values, dtype=np.float32).reshape(1, -1)
+        if expected_dim is not None and obs.shape[1] != int(expected_dim):
+            raise RuntimeError(f"perception_obs dim mismatch: got {obs.shape[1]}, expected {int(expected_dim)}")
+        if not hasattr(self, "_logged_split_perception_obs"):
+            logger.info("Using split sim perception_obs with {} values", obs.shape[1])
+            self._logged_split_perception_obs = True
+        return obs
+
     # ============================================================================
     # Observation Processing Methods
     # ============================================================================
@@ -755,10 +709,16 @@ class BasePolicy:
         actor_groups = [
             group
             for group in self._obs_group_order
-            if group in group_outputs and (group == "actor_obs" or group.startswith("actor_obs"))
+            if group in group_outputs and (group.startswith("actor_obs") or group == "motion_future_target_poses")
         ]
-        if "motion_future_target_poses" in group_outputs:
-            actor_groups.append("motion_future_target_poses")
+        actor_groups.extend(
+            sorted(
+                group
+                for group in group_outputs
+                if (group.startswith("actor_obs") or group == "motion_future_target_poses")
+                and group not in actor_groups
+            )
+        )
 
         if not actor_groups:
             raise KeyError("Observation group 'actor_obs' is not configured for this policy.")
@@ -794,16 +754,6 @@ class BasePolicy:
         # Stage 1: Read State
         with self.latency_tracker.measure("read_state"):
             robot_state_data = self.interface.get_low_state()
-
-        if not self._has_valid_robot_state(robot_state_data):
-            if not getattr(self, "_waiting_for_valid_robot_state_logged", False):
-                self.logger.info("Waiting for first valid robot state before issuing commands.")
-                self._waiting_for_valid_robot_state_logged = True
-            return
-
-        if getattr(self, "_waiting_for_valid_robot_state_logged", False):
-            self.logger.info("Received valid robot state; continuing control loop.")
-            self._waiting_for_valid_robot_state_logged = False
 
         # Stage 2: Pre-processing
         with self.latency_tracker.measure("preprocessing"):
@@ -859,8 +809,6 @@ class BasePolicy:
 
         # Stage 5: Action Pub
         with self.latency_tracker.measure("action_pub"):
-            if self.use_policy_action and not self.get_ready_state and kp_override is None and kd_override is None:
-                self._sync_policy_pd_with_training()
             self.interface.send_low_command(
                 self.cmd_q,
                 self.cmd_dq,
@@ -977,7 +925,6 @@ class BasePolicy:
         """Handle start policy action."""
         self.use_policy_action = True
         self.get_ready_state = False
-        self._sync_policy_pd_with_training()
         self.logger.info(colored("Using policy actions", "blue"))
         self.phase = np.array([[0.0, np.pi]])
         if hasattr(self.interface, "no_action"):
@@ -1037,36 +984,6 @@ class BasePolicy:
             )
             self.logger.info(debug_str)
 
-    def _process_policy_control_requests(self):
-        """Process viewer-driven policy control requests."""
-        if self._policy_control_sub is None:
-            return
-
-        for payload in self._policy_control_sub.drain():
-            action = str(payload.get("action", "")).strip().lower()
-            if not action:
-                continue
-
-            if action == "start_policy":
-                self._handle_start_policy()
-            elif action == "stop_policy":
-                self._handle_stop_policy()
-            elif action == "init_state":
-                self._handle_init_state()
-            elif action == "start_motion_clip":
-                start_motion_handler = getattr(self, "_handle_start_motion_clip", None)
-                if callable(start_motion_handler):
-                    start_motion_handler()
-                else:
-                    self.logger.warning("Policy control action '{}' is not supported by this policy", action)
-                    continue
-            else:
-                self.logger.warning("Ignoring unknown policy control action '{}'", action)
-                continue
-
-            self.logger.info("Applied policy control action '{}'", action)
-            self._print_control_status()
-
     # ============================================================================
     # Main Run Method
     # ============================================================================
@@ -1086,7 +1003,6 @@ class BasePolicy:
 
             for it in itertools.count():
                 self.latency_tracker.start_cycle()
-                self._process_policy_control_requests()
 
                 if self.use_joystick and self.interface.get_joystick_msg() is not None:
                     self.process_joystick_input()
@@ -1105,6 +1021,3 @@ class BasePolicy:
 
         except KeyboardInterrupt:
             pass
-        finally:
-            if self._policy_control_sub is not None:
-                self._policy_control_sub.close()

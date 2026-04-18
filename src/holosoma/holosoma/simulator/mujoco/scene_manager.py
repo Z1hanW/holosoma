@@ -18,11 +18,6 @@ from holosoma.config_types.simulator import MujocoXMLFilterCfg, SimulatorConfig
 from holosoma.managers.terrain.base import TerrainTermBase
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.path import resolve_data_file_path
-from holosoma.utils.object_geometry import load_urdf_box_primitive_metadata
-from holosoma.utils.object_pose_correction import (
-    get_omomo_largebox_canonical_local_correction_wxyz_np,
-    uses_omomo_largebox_primitive_semantics,
-)
 
 
 _SUPPORTED_OBJECT_SCENE_SPECS: dict[str, dict[str, tuple[str, str]]] = {
@@ -468,23 +463,6 @@ class MujocoSceneManager:
         logger.info(f"Adding robot from: {robot_xml_path} with prefix: {prefix}")
         self.robot_model_path = robot_xml_path
 
-        if self._object_urdf_by_name:
-            primary_object_urdf = Path(next(iter(self._object_urdf_by_name.values()))).expanduser().resolve()
-            if object_spec_to_attach is not None:
-                self._maybe_align_object_geoms_with_training_semantics(
-                    object_spec_to_attach,
-                    robot_config,
-                    object_urdf=primary_object_urdf,
-                    target_body_names=external_object_body_names,
-                )
-            elif self._object_body_name_by_name:
-                self._maybe_align_object_geoms_with_training_semantics(
-                    robot_spec,
-                    robot_config,
-                    object_urdf=primary_object_urdf,
-                    target_body_names=set(self._object_body_name_by_name.values()),
-                )
-
         if xml_filter and getattr(xml_filter, "enable", False):
             # Remove worldbody lights and ground|floor|plane geoms because they're added dynamically
             robot_spec = self._filter_robot_worldbody(robot_spec, xml_filter)
@@ -575,11 +553,15 @@ class MujocoSceneManager:
 
     @staticmethod
     def _configure_urdf_meshdir(spec: mujoco.MjSpec, urdf_path: Path) -> None:
-        meshdir_candidates = [urdf_path.parent / "meshes", urdf_path.parent]
+        mesh_files = [Path(str(mesh.file)) for mesh in spec.meshes if str(getattr(mesh, "file", "")).strip()]
+        meshdir_candidates = [urdf_path.parent, urdf_path.parent / "meshes"]
         for candidate in meshdir_candidates:
-            if candidate.is_dir():
-                spec.compiler.meshdir = str(candidate.resolve())
-                return
+            if not candidate.is_dir():
+                continue
+            if mesh_files and not all(mesh_file.is_absolute() or (candidate / mesh_file).is_file() for mesh_file in mesh_files):
+                continue
+            spec.compiler.meshdir = str(candidate.resolve())
+            return
         spec.compiler.meshdir = str(urdf_path.parent.resolve())
 
     @staticmethod
@@ -634,11 +616,7 @@ class MujocoSceneManager:
 
         object_actor_name = "object"
         object_prefix = "object_"
-        # Ignore the implicit MuJoCo world body so object-property overrides target the
-        # actual carried object links rather than failing on the zero-mass worldbody.
-        object_body_names = {
-            str(body.name) for body in object_spec.bodies if body.name and str(body.name).lower() != "world"
-        }
+        object_body_names = {str(body.name) for body in object_spec.bodies if body.name}
         return (
             robot_spec,
             object_spec,
@@ -647,114 +625,6 @@ class MujocoSceneManager:
             {object_actor_name: f"{object_prefix}{object_root_body_name}"},
             object_body_names,
         )
-
-    @staticmethod
-    def _resolve_object_scale(object_cfg: object | None) -> np.ndarray | None:
-        if object_cfg is None:
-            return None
-        raw_scale = getattr(object_cfg, "scale", None)
-        if raw_scale is None:
-            return None
-        values = [float(value) for value in raw_scale]
-        if len(values) != 3:
-            raise ValueError(f"robot.object.scale must provide exactly 3 values, got {values}")
-        return np.asarray(values, dtype=np.float64)
-
-    @classmethod
-    def _maybe_align_object_geoms_with_training_semantics(
-        cls,
-        target_spec: mujoco.MjSpec,
-        robot_config: RobotConfig,
-        *,
-        object_urdf: Path,
-        target_body_names: set[str],
-    ) -> None:
-        if not target_body_names:
-            return
-
-        metadata = load_urdf_box_primitive_metadata(object_urdf)
-        if metadata is None:
-            return
-
-        object_scale = cls._resolve_object_scale(getattr(robot_config, "object", None))
-        extents = np.asarray(metadata.extents, dtype=np.float64)
-        center_offset = np.asarray(metadata.center_offset, dtype=np.float64)
-        if object_scale is not None:
-            extents = extents * object_scale
-            center_offset = center_offset * object_scale
-
-        local_quat_wxyz = np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
-        if uses_omomo_largebox_primitive_semantics(object_urdf_path=str(object_urdf)):
-            local_quat_wxyz = get_omomo_largebox_canonical_local_correction_wxyz_np().astype(np.float64)
-
-        box_half_extents = (extents * 0.5).tolist()
-        box_inertia = np.asarray(
-            [
-                metadata.mass * (extents[1] ** 2 + extents[2] ** 2) / 12.0,
-                metadata.mass * (extents[0] ** 2 + extents[2] ** 2) / 12.0,
-                metadata.mass * (extents[0] ** 2 + extents[1] ** 2) / 12.0,
-            ],
-            dtype=np.float64,
-        )
-        visual_rgba = [
-            float((metadata.visual_color or (0.7, 0.8, 0.9))[0]),
-            float((metadata.visual_color or (0.7, 0.8, 0.9))[1]),
-            float((metadata.visual_color or (0.7, 0.8, 0.9))[2]),
-            1.0,
-        ]
-        collision_friction = [
-            float(metadata.static_friction),
-            0.005,
-            0.001,
-        ]
-
-        updated_body_count = 0
-        for body in target_spec.bodies:
-            if not body.name or body.name not in target_body_names:
-                continue
-
-            for geom in list(body.geoms):
-                target_spec.delete(geom)
-
-            body.ipos = center_offset.tolist()
-            body.iquat = local_quat_wxyz.tolist()
-            body.mass = float(metadata.mass)
-            if hasattr(body, "fullinertia"):
-                body.fullinertia = [float(box_inertia[0]), float(box_inertia[1]), float(box_inertia[2]), 0.0, 0.0, 0.0]
-            else:
-                body.inertia = box_inertia.tolist()
-
-            body.add_geom(
-                name=f"{body.name}_visual_box",
-                type=mujoco.mjtGeom.mjGEOM_BOX,
-                size=box_half_extents,
-                pos=center_offset.tolist(),
-                quat=local_quat_wxyz.tolist(),
-                rgba=visual_rgba,
-                contype=0,
-                conaffinity=0,
-            )
-            body.add_geom(
-                name=f"{body.name}_collision_box",
-                type=mujoco.mjtGeom.mjGEOM_BOX,
-                size=box_half_extents,
-                pos=center_offset.tolist(),
-                quat=local_quat_wxyz.tolist(),
-                friction=collision_friction,
-                contype=1,
-                conaffinity=1,
-            )
-            updated_body_count += 1
-
-        if updated_body_count > 0:
-            logger.info(
-                "Aligned {} MuJoCo object body(ies) with training box semantics from '{}': extents={}, center_offset={}, local_quat={}",
-                updated_body_count,
-                object_urdf,
-                extents.tolist(),
-                center_offset.tolist(),
-                local_quat_wxyz.tolist(),
-            )
 
     def _maybe_add_default_actuators(self, robot_spec: mujoco.MjSpec, robot_config: RobotConfig) -> None:
         """Inject default torque actuators for MuJoCo-only scenes when explicitly requested."""
@@ -821,6 +691,21 @@ class MujocoSceneManager:
         updated_joint_count = 0
         updated_fields_count = 0
         dof_name_set = set(robot_config.dof_names)
+
+        def _copy_numeric_joint_field(joint: Any, reference_joint: Any, field_name: str) -> int:
+            current_value = np.asarray(getattr(joint, field_name), dtype=np.float64)
+            reference_value = np.asarray(getattr(reference_joint, field_name), dtype=np.float64)
+            if current_value.shape == reference_value.shape and np.allclose(current_value, reference_value):
+                return 0
+
+            flattened_reference = reference_value.reshape(-1)
+            setattr(
+                joint,
+                field_name,
+                float(flattened_reference[0]) if reference_value.ndim == 0 or reference_value.size == 1 else reference_value.tolist(),
+            )
+            return 1
+
         for joint in robot_spec.joints:
             if not joint.name or joint.name not in dof_name_set:
                 continue
@@ -831,15 +716,9 @@ class MujocoSceneManager:
                 continue
 
             changed_fields = 0
-            if not np.isclose(float(joint.armature), float(reference_joint.armature)):
-                joint.armature = float(reference_joint.armature)
-                changed_fields += 1
-            if not np.isclose(float(joint.damping), float(reference_joint.damping)):
-                joint.damping = float(reference_joint.damping)
-                changed_fields += 1
-            if not np.isclose(float(joint.frictionloss), float(reference_joint.frictionloss)):
-                joint.frictionloss = float(reference_joint.frictionloss)
-                changed_fields += 1
+            changed_fields += _copy_numeric_joint_field(joint, reference_joint, "armature")
+            changed_fields += _copy_numeric_joint_field(joint, reference_joint, "damping")
+            changed_fields += _copy_numeric_joint_field(joint, reference_joint, "frictionloss")
 
             joint_solimp_limit = np.asarray(joint.solimp_limit, dtype=np.float64)
             reference_solimp_limit = np.asarray(reference_joint.solimp_limit, dtype=np.float64)
@@ -902,12 +781,18 @@ class MujocoSceneManager:
                 return None
             return arr.tolist()
 
+        def _scalar_or_seq_or_none(values: Any) -> float | list[float] | None:
+            arr = np.asarray(values, dtype=np.float64)
+            if arr.size == 0:
+                return None
+            return float(arr.reshape(-1)[0]) if arr.ndim == 0 or arr.size == 1 else arr.tolist()
+
         for tendon_idx, reference_tendon in enumerate(reference_spec.tendons):
             tendon = robot_spec.add_tendon(
                 name=reference_tendon.name or None,
-                stiffness=float(reference_tendon.stiffness),
+                stiffness=_scalar_or_seq_or_none(reference_tendon.stiffness),
                 springlength=_seq_or_none(reference_tendon.springlength),
-                damping=float(reference_tendon.damping),
+                damping=_scalar_or_seq_or_none(reference_tendon.damping),
                 frictionloss=float(reference_tendon.frictionloss),
                 solref_friction=_seq_or_none(reference_tendon.solref_friction),
                 solimp_friction=_seq_or_none(reference_tendon.solimp_friction),

@@ -65,8 +65,8 @@ def test_default_clip_object_maps_are_primitive_compatible(map_path: Path):
             Path(
                 "/home/ubuntu/FAR/holosoma/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
             ),
-            (0.3249185391136043, 0.31860981675930306, 0.326778873323969),
-            (0.000861508081686495, -0.0004369894302321542, -0.0025913614928369986),
+            (0.47115421, 0.45873013, 0.40789548),
+            (0.0, 0.0, 0.0),
         ),
     ],
 )

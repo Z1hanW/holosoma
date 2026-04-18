@@ -87,9 +87,6 @@ class TaskConfig:
     sim_control_port: int = 5559
     """ZMQ port used to send split sim2sim simulator control requests."""
 
-    policy_control_port: int = 0
-    """Optional ZMQ port used to receive split sim2sim policy control requests from viewer tools."""
-
     use_zmq_lowcmd: bool = False
     """Send lowcmd over the split sim-control ZMQ channel instead of Unitree DDS."""
 
@@ -104,6 +101,9 @@ class TaskConfig:
 
     restart_motion_on_clock_reset: bool = False
     """When split sim clock jumps backwards after a simulator reset, restart the motion clip from frame 0."""
+
+    restart_sim_on_motion_end: bool = False
+    """Request a split simulator reset and restart the WBT motion when a single clip reaches its last frame."""
 
     wandb_download_dir: str = "/tmp"
     """Directory for downloading W&B checkpoints."""

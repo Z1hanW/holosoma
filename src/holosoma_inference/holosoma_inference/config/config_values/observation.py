@@ -233,33 +233,30 @@ wbt_w_object = ObservationConfig(
 
 wbt_depth_distill = ObservationConfig(
     obs_dict={
-        "actor_obs": [
+        "actor_obs_root": [
             "sparse_target_root_trajectory_command",
-            "base_lin_vel",
+        ],
+        "actor_obs_proprio_no_linvel": [
             "base_ang_vel",
             "dof_pos",
             "dof_vel",
-            "actions",
-        ]
+        ],
     },
     obs_dims={
         "sparse_target_root_trajectory_command": 3,
-        "base_lin_vel": 3,
         "base_ang_vel": 3,
         "dof_pos": 29,
         "dof_vel": 29,
-        "actions": 29,
     },
     obs_scales={
         "sparse_target_root_trajectory_command": 1.0,
-        "base_lin_vel": 1.0,
         "base_ang_vel": 1.0,
         "dof_pos": 1.0,
         "dof_vel": 1.0,
-        "actions": 1.0,
     },
     history_length_dict={
-        "actor_obs": DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+        "actor_obs_root": 1,
+        "actor_obs_proprio_no_linvel": 5,
     },
 )
 
@@ -312,7 +309,6 @@ DEFAULTS = {
     "wbt": wbt,
     "wbt-object-generalist": wbt_object_generalist,
     "wbt-w-object": wbt_w_object,
-    "wbt-depth-distill": wbt_depth_distill,
     "wbt-videomimic": wbt_videomimic,
 }
 """Dictionary of all available observation configurations.

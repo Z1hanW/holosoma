@@ -17,10 +17,6 @@ SRC_ROOT = Path(__file__).resolve().parents[1]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from holosoma.utils.object_pose_correction import (  # noqa: E402
-    get_omomo_largebox_primitive_fit_local_correction_wxyz_np,
-    is_omomo_largebox_clip,
-)
 from holosoma.utils.viser_utils import ensure_viser_on_path, resolve_viser_port  # noqa: E402
 
 ensure_viser_on_path()
@@ -212,13 +208,6 @@ def _load_object_overlay_mesh(
         mesh = _build_from_geom_tag("collision")
     if mesh is None:
         return None
-
-    if is_omomo_largebox_clip(clip_id, object_name, object_urdf_path):
-        correction_wxyz = get_omomo_largebox_primitive_fit_local_correction_wxyz_np().astype(np.float64)
-        rot_inv = _quat_to_rotmat_wxyz(correction_wxyz).T
-        transformed = mesh.copy()
-        transformed.vertices = np.asarray(transformed.vertices, dtype=np.float64) @ rot_inv.T
-        mesh = transformed
 
     return mesh
 

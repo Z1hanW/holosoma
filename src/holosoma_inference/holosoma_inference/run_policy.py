@@ -127,6 +127,8 @@ def run_policy(config: InferenceConfig):
         policy.run()
         logger.info("✅ Policy execution completed!")
 
+    except KeyboardInterrupt:
+        logger.info("Policy interrupted; shutting down.")
     except Exception as e:
         logger.error(f"❌ Error running policy: {e}")
         traceback.print_exc()

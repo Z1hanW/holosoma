@@ -35,10 +35,6 @@ from holosoma.utils.eval_utils import (  # noqa: E402
 )
 from holosoma.utils.experiment_paths import get_experiment_dir, get_timestamp  # noqa: E402
 from holosoma.utils.helpers import get_class  # noqa: E402
-from holosoma.utils.object_pose_correction import (  # noqa: E402
-    get_omomo_largebox_primitive_fit_local_correction_wxyz_np,
-    is_omomo_largebox_clip,
-)
 from holosoma.utils.rotations import quat_error_magnitude  # noqa: E402
 from holosoma.utils.sim_utils import close_simulation_app, setup_simulation_environment  # noqa: E402
 from holosoma.utils.tyro_utils import TYRO_CONIFG  # noqa: E402
@@ -568,13 +564,6 @@ def _load_object_overlay_mesh(
         mesh = _build_from_geom_tag("collision")
     if mesh is None:
         return None
-
-    if is_omomo_largebox_clip(clip_id, object_name, object_urdf_path):
-        correction_wxyz = get_omomo_largebox_primitive_fit_local_correction_wxyz_np().astype(np.float64)
-        rot_inv = _quat_to_rotmat_wxyz(correction_wxyz).T
-        transformed = mesh.copy()
-        transformed.vertices = np.asarray(transformed.vertices, dtype=np.float64) @ rot_inv.T
-        mesh = transformed
 
     return mesh
 

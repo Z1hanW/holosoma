@@ -39,77 +39,17 @@ from holosoma.config_types.robot import RobotConfig  # noqa: E402
 from holosoma.config_values import robot as robot_values  # noqa: E402
 from holosoma.utils.module_utils import get_holosoma_root  # noqa: E402
 from holosoma.utils.path import resolve_data_file_path  # noqa: E402
-from holosoma_inference.utils.policy_control import PolicyControlPush  # noqa: E402
+from holosoma_inference.utils.perception_obs import PerceptionObsSub  # noqa: E402
 from holosoma_inference.utils.sim_control import SimControlPush  # noqa: E402
 from holosoma_inference.utils.sim_state import SimStateSub  # noqa: E402
-
-
-def _env_flag(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return bool(default)
-    return raw.strip().lower() in ("1", "true", "yes", "on")
-
-
-def _infer_default_pose_init_from_model(model_path: str) -> bool | None:
-    path_str = str(model_path).strip()
-    if not path_str or path_str.startswith("wandb://"):
-        return None
-
-    path = Path(path_str).expanduser()
-    if path.suffix == ".pt":
-        candidate = path.with_suffix(".onnx")
-        if candidate.is_file():
-            path = candidate
-    if not path.is_file():
-        return None
-
-    try:
-        import onnx
-    except Exception:
-        return None
-
-    try:
-        model = onnx.load(path)
-    except Exception:
-        return None
-
-    metadata: dict[str, object] = {}
-    for prop in model.metadata_props:
-        try:
-            metadata[prop.key] = json.loads(prop.value)
-        except Exception:
-            metadata[prop.key] = prop.value
-
-    motion_cfg = (
-        metadata.get("experiment_config", {})
-        .get("command", {})
-        .get("setup_terms", {})
-        .get("motion_command", {})
-        .get("params", {})
-        .get("motion_config", {})
-    )
-    if not isinstance(motion_cfg, dict):
-        return None
-
-    return bool(
-        (
-            motion_cfg.get("enable_default_pose_prepend")
-            and float(motion_cfg.get("default_pose_prepend_duration_s", 0.0) or 0.0) > 0.0
-        )
-        or (
-            motion_cfg.get("enable_default_pose_append")
-            and float(motion_cfg.get("default_pose_append_duration_s", 0.0) or 0.0) > 0.0
-        )
-    )
 
 
 @dataclass(frozen=True)
 class MujocoSimStateViewerConfig:
     robot: str = "g1_29dof_w_object"
-    state_port: int = int(os.environ.get("SIM_STATE_PORT", "5657"))
-    control_port: int = int(os.environ.get("SIM_CONTROL_PORT", "5659"))
-    policy_control_port: int = int(os.environ.get("POLICY_CONTROL_PORT", "5660"))
+    state_port: int = 5657
+    perception_obs_port: int = 5658
+    control_port: int = 5659
     object_actor_name: str = "object"
     port: int = 0
     rate_hz: float = 30.0
@@ -129,10 +69,13 @@ class MujocoSimStateViewerConfig:
     training_headless: bool = True
     rollout_log_path: str = str(REPO_ROOT / "logs" / "live_debug" / "viser_mujoco_sim_state.log")
     auto_reset_after_first_state_sec: float = 0.0
-    default_pose_init: bool = _env_flag(
-        "HOLOSOMA_DEFAULT_POSE_INIT",
-        default=os.environ.get("SIM_MOTION_INIT_MODE", "").strip().lower() == "training_default_pose",
-    )
+    show_depth: bool = True
+    depth_height: int = 58
+    depth_width: int = 87
+    depth_display_scale: int = 4
+    depth_obs_normalized: bool = True
+    depth_near: float = 0.1
+    depth_far: float = 3.0
 
 
 def _resolve_data_path(path: str) -> Path:
@@ -171,6 +114,50 @@ def _normalize_quaternion_wxyz(quat_wxyz: np.ndarray) -> np.ndarray:
     if quat_norm < 1e-8:
         return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
     return quat_wxyz / quat_norm
+
+
+def _valid_depth_stats(depth: np.ndarray, near: float, far: float) -> tuple[float | None, float | None, int]:
+    depth = np.asarray(depth, dtype=np.float32)
+    valid = np.isfinite(depth)
+    valid &= depth >= near
+    valid &= depth < (far - 1.0e-6)
+    if not np.any(valid):
+        return None, None, 0
+    depth_valid = depth[valid]
+    return float(depth_valid.min()), float(depth_valid.max()), int(depth_valid.size)
+
+
+def _depth_obs_to_meters(depth_obs: np.ndarray, *, normalized: bool, near: float, far: float) -> np.ndarray:
+    depth_obs = np.asarray(depth_obs, dtype=np.float32)
+    if not normalized:
+        return depth_obs
+    return (np.clip(depth_obs, -0.5, 0.5) + 0.5) * max(far - near, 1.0e-6) + near
+
+
+def _depth_to_rgb(depth_m: np.ndarray, near: float, far: float) -> np.ndarray:
+    depth_m = np.asarray(depth_m, dtype=np.float32)
+    valid = np.isfinite(depth_m)
+    valid &= depth_m >= near
+    valid &= depth_m < (far - 1.0e-6)
+    rgb = np.zeros(depth_m.shape + (3,), dtype=np.uint8)
+    if not np.any(valid):
+        return rgb
+
+    norm = np.clip((depth_m - near) / max(far - near, 1.0e-6), 0.0, 1.0)
+    close = 1.0 - norm
+    mid = 1.0 - np.abs(norm * 2.0 - 1.0)
+    rgb[..., 0] = np.round(close * 255.0).astype(np.uint8)
+    rgb[..., 1] = np.round(mid * 255.0).astype(np.uint8)
+    rgb[..., 2] = np.round(norm * 255.0).astype(np.uint8)
+    rgb[~valid] = 0
+    return rgb
+
+
+def _scale_image_nearest(image: np.ndarray, scale: int) -> np.ndarray:
+    scale = max(int(scale), 1)
+    if scale == 1:
+        return image
+    return np.repeat(np.repeat(image, scale, axis=0), scale, axis=1)
 
 
 OBJECT_MESH_MODE_OPTIONS = ("visual", "collision")
@@ -316,16 +303,6 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
 
     port = resolve_viser_port(cfg.port)
     server = viser.ViserServer(port=port)
-    default_pose_init_value = bool(cfg.default_pose_init)
-    if "HOLOSOMA_DEFAULT_POSE_INIT" not in os.environ and "SIM_MOTION_INIT_MODE" not in os.environ:
-        inferred_default_pose_init = _infer_default_pose_init_from_model(cfg.model_path)
-        if inferred_default_pose_init is not None:
-            default_pose_init_value = bool(inferred_default_pose_init)
-            logger.info(
-                "Inferred default-pose init={} from model metadata: {}",
-                default_pose_init_value,
-                cfg.model_path,
-            )
     robot_root = server.scene.add_frame("/robot", show_axes=False)
     ref_root = server.scene.add_frame("/robot_ref", show_axes=bool(cfg.show_ref_body))
     object_root = server.scene.add_frame("/object", show_axes=False)
@@ -476,43 +453,32 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             initial_value=bool(cfg.show_robot_collision),
         )
         show_ref_cb = server.gui.add_checkbox("Show ref body", initial_value=bool(cfg.show_ref_body))
-        reset_offset_btn = server.gui.add_button("Recenter display only")
+        reset_offset_btn = server.gui.add_button("Reset offset")
 
     with server.gui.add_folder("Rollout"):
         rollout_md = server.gui.add_markdown("Viewer only")
-        reset_rollout_btn = server.gui.add_button("Reset sim + motion")
-        default_pose_init_cb = server.gui.add_checkbox(
-            "Default pose init",
-            initial_value=default_pose_init_value,
-            hint="Restart/reset rollout from the robot default pose instead of the motion pose.",
-        )
+        reset_rollout_btn = server.gui.add_button("Reset rollout")
 
-    manual_gui_enabled = os.environ.get("VISER_ENABLE_MANUAL_GUI", "1").lower() not in ("0", "false", "no")
-    if manual_gui_enabled:
-        with server.gui.add_folder("Manual Control", expand_by_default=True):
-            server.gui.add_markdown(
-                "Use the buttons below. `Manual Control` is a folder, not an action button."
-            )
-            policy_md = server.gui.add_markdown("Policy control: `idle`")
-            start_policy_btn = server.gui.add_button("Start policy")
-            stop_policy_btn = server.gui.add_button("Stop policy")
-            init_state_btn = server.gui.add_button("Init state")
-            start_motion_clip_btn = server.gui.add_button("Start motion clip")
-            start_policy_and_motion_btn = server.gui.add_button("Start policy + motion")
-    else:
-        policy_md = None
-        start_policy_btn = None
-        stop_policy_btn = None
-        init_state_btn = None
-        start_motion_clip_btn = None
-        start_policy_and_motion_btn = None
+    depth_image_shape = (
+        max(int(cfg.depth_height), 1) * max(int(cfg.depth_display_scale), 1),
+        max(int(cfg.depth_width), 1) * max(int(cfg.depth_display_scale), 1),
+        3,
+    )
+    with server.gui.add_folder("Depth"):
+        show_depth_cb = server.gui.add_checkbox("Show policy depth", initial_value=bool(cfg.show_depth))
+        depth_image = server.gui.add_image(
+            np.zeros(depth_image_shape, dtype=np.uint8),
+            label="perception_obs depth",
+            visible=bool(cfg.show_depth),
+        )
+        depth_md = server.gui.add_markdown("Waiting for perception_obs...")
 
     sub = SimStateSub(port=cfg.state_port)
     sub.start()
+    perception_sub = PerceptionObsSub(port=cfg.perception_obs_port)
+    perception_sub.start()
     control_pub = SimControlPush(port=cfg.control_port)
     control_pub.start()
-    policy_control_pub = PolicyControlPush(port=cfg.policy_control_port)
-    policy_control_pub.start()
     previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
 
     def _handle_sigterm(_signum, _frame) -> None:
@@ -552,9 +518,74 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             f"pid: `{pid}`\n\n"
             f"restart_count: `{rollout_restart_count}`\n\n"
             f"last_reason: `{last_rollout_reason}`\n\n"
-            f"default_pose_init: `{bool(default_pose_init_cb.value)}`\n\n"
             f"reset_mode: `sim-control`\n\n"
             f"log_path: `{rollout_log_path}`"
+        )
+
+    def _refresh_depth_view() -> None:
+        visible = bool(show_depth_cb.value)
+        depth_image.visible = visible
+        if not visible:
+            depth_md.content = "Hidden"
+            return
+
+        payload = perception_sub.get_payload()
+        if payload is None:
+            depth_md.content = f"Waiting for perception_obs on port `{cfg.perception_obs_port}`..."
+            return
+
+        values = payload.get("perception_obs")
+        if values is None:
+            depth_md.content = f"perception_obs missing; payload keys: `{sorted(payload.keys())}`"
+            return
+
+        expected_dim = max(int(cfg.depth_height), 1) * max(int(cfg.depth_width), 1)
+        try:
+            depth_obs_flat = np.asarray(values, dtype=np.float32).reshape(-1)
+        except (TypeError, ValueError) as exc:
+            depth_md.content = f"Failed to parse perception_obs: `{exc}`"
+            return
+
+        if depth_obs_flat.size != expected_dim:
+            depth_md.content = f"perception_obs dim mismatch: got `{depth_obs_flat.size}`, expected `{expected_dim}`"
+            return
+
+        depth_obs = depth_obs_flat.reshape(max(int(cfg.depth_height), 1), max(int(cfg.depth_width), 1))
+        depth_m = _depth_obs_to_meters(
+            depth_obs,
+            normalized=bool(cfg.depth_obs_normalized),
+            near=float(cfg.depth_near),
+            far=float(cfg.depth_far),
+        )
+        depth_image.image = _scale_image_nearest(
+            _depth_to_rgb(depth_m, float(cfg.depth_near), float(cfg.depth_far)),
+            int(cfg.depth_display_scale),
+        )
+
+        obs_finite = depth_obs[np.isfinite(depth_obs)]
+        if obs_finite.size:
+            obs_range = f"[{float(obs_finite.min()):.4f}, {float(obs_finite.max()):.4f}]"
+        else:
+            obs_range = "n/a"
+        depth_min_m, depth_max_m, valid_count = _valid_depth_stats(
+            depth_m,
+            float(cfg.depth_near),
+            float(cfg.depth_far),
+        )
+        if depth_min_m is None or depth_max_m is None:
+            depth_range = "n/a"
+        else:
+            depth_range = f"[{depth_min_m:.3f}, {depth_max_m:.3f}] m"
+        sim_time = payload.get("sim_time_ms", "n/a")
+        depth_md.content = (
+            f"port: `{cfg.perception_obs_port}`\n\n"
+            f"shape: `{cfg.depth_height}x{cfg.depth_width}`\n\n"
+            f"sim_time_ms: `{sim_time}`\n\n"
+            f"obs_normalized: `{bool(cfg.depth_obs_normalized)}`\n\n"
+            f"obs_range: `{obs_range}`\n\n"
+            f"depth_valid: `{valid_count}/{expected_dim}`\n\n"
+            f"depth_range: `{depth_range}`\n\n"
+            "color: close red / mid green / far blue / miss black"
         )
 
     def _stop_rollout() -> None:
@@ -575,13 +606,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         env = os.environ.copy()
         env["RUN_SECONDS"] = str(cfg.launch_run_seconds)
         env["TRAINING_HEADLESS"] = "True" if cfg.training_headless else "False"
-        env["SIM_STATE_PORT"] = str(cfg.state_port)
-        env["SIM_CONTROL_PORT"] = str(cfg.control_port)
-        env["POLICY_CONTROL_PORT"] = str(cfg.policy_control_port)
         env["HOLOSOMA_MUJOCO_OBJECT_GEOM_SNAPSHOT_PATH"] = str(snapshot_path_default)
-        env["HOLOSOMA_DEFAULT_POSE_INIT"] = "1" if bool(default_pose_init_cb.value) else "0"
-        env["SIM_MOTION_INIT_MODE"] = "training_default_pose" if bool(default_pose_init_cb.value) else "raw_motion"
-        env["HOLOSOMA_RESET_TO_DEFAULT_POSE"] = "1" if bool(default_pose_init_cb.value) else "0"
         try:
             snapshot_path_default.unlink()
         except FileNotFoundError:
@@ -614,13 +639,8 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         logger.info("Started rollout pid={} reason={}", rollout_proc.pid, reason)
         _refresh_rollout_md()
 
-    def _request_sim_reset(reason: str, *, stop_policy: bool = False) -> None:
+    def _request_sim_reset(reason: str) -> None:
         nonlocal pending_restart_reason, offset_initialized, received_first_state, auto_reset_scheduled_at, auto_reset_done, reset_request_time_monotonic, reset_pending_clock_rewind, pre_reset_sim_time_ms
-        if stop_policy:
-            if policy_md is not None:
-                policy_md.content = "Policy control: `stop_policy`"
-            policy_control_pub.request_action("stop_policy", source="viser_mujoco_sim_state")
-            logger.info("Requested policy action 'stop_policy' before simulator reset")
         if control_pub.enabled:
             control_pub.request_reset(reason)
             offset_xy[:] = 0.0
@@ -642,12 +662,6 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             state_md.content = "Control channel unavailable, falling back to full restart..."
         else:
             logger.warning("Reset rollout requested, but sim-control is unavailable")
-
-    def _request_policy_action(action: str, label: str) -> None:
-        if policy_md is not None:
-            policy_md.content = f"Policy control: `{label}`"
-        policy_control_pub.request_action(action, source="viser_mujoco_sim_state")
-        logger.info("Requested policy action '{}' over policy-control", action)
 
     @show_object_cb.on_update
     def _(_evt) -> None:
@@ -677,52 +691,14 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         nonlocal offset_initialized
         offset_xy[:] = 0.0
         offset_initialized = False
-        logger.info("Reset display offset requested (view only)")
 
     @reset_rollout_btn.on_click
     def _(_evt) -> None:
-        _request_sim_reset("gui_reset", stop_policy=True)
-
-    @default_pose_init_cb.on_update
-    def _(_evt) -> None:
-        nonlocal pending_restart_reason
-        if not cfg.launch_rollout:
-            _refresh_rollout_md()
-            return
-        pending_restart_reason = "default_pose_init_toggle"
-        state_md.content = "Restarting rollout to apply default-pose init preference..."
-        _refresh_rollout_md()
-
-    if start_policy_btn is not None:
-        @start_policy_btn.on_click
-        def _(_evt) -> None:
-            _request_policy_action("start_policy", "start_policy")
-
-    if stop_policy_btn is not None:
-        @stop_policy_btn.on_click
-        def _(_evt) -> None:
-            _request_policy_action("stop_policy", "stop_policy")
-
-    if init_state_btn is not None:
-        @init_state_btn.on_click
-        def _(_evt) -> None:
-            _request_policy_action("init_state", "init_state")
-
-    if start_motion_clip_btn is not None:
-        @start_motion_clip_btn.on_click
-        def _(_evt) -> None:
-            _request_policy_action("start_motion_clip", "start_motion_clip")
-
-    if start_policy_and_motion_btn is not None:
-        @start_policy_and_motion_btn.on_click
-        def _(_evt) -> None:
-            _request_policy_action("start_policy", "start_policy")
-            time.sleep(0.05)
-            _request_policy_action("start_motion_clip", "start_motion_clip")
+        _request_sim_reset("gui_reset")
 
     logger.info("Open viser at http://localhost:{}", port)
     logger.info("Reading split MuJoCo sim-state from tcp://localhost:{}", cfg.state_port)
-    logger.info("Sending split MuJoCo policy-control to tcp://localhost:{}", cfg.policy_control_port)
+    logger.info("Reading split MuJoCo perception_obs from tcp://localhost:{}", cfg.perception_obs_port)
     _refresh_rollout_md()
 
     try:
@@ -732,6 +708,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             if auto_reset_scheduled_at is not None and time.monotonic() >= auto_reset_scheduled_at:
                 _request_sim_reset("auto_test_reset")
             _refresh_rollout_md()
+            _refresh_depth_view()
 
             state = sub.get_state()
             if state is None:
@@ -874,8 +851,8 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         logger.info("Stopping viser MuJoCo sim-state viewer")
     finally:
         _stop_rollout()
-        policy_control_pub.close()
         control_pub.close()
+        perception_sub.close()
         sub.close()
         signal.signal(signal.SIGTERM, previous_sigterm_handler)
 
