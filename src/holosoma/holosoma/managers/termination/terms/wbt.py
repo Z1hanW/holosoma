@@ -63,6 +63,17 @@ def _picked_mask(motion_command: MotionCommand) -> torch.Tensor:
     return motion_command.pickup_anchor_set
 
 
+def _current_lifted_mask(motion_command: MotionCommand, *, min_lift_delta: float = 0.03) -> torch.Tensor:
+    if motion_command.pickup_object_rel_z_baseline is None:
+        return torch.zeros((motion_command.num_envs,), device=motion_command.device, dtype=torch.bool)
+    if min_lift_delta <= 0.0:
+        return torch.ones((motion_command.num_envs,), device=motion_command.device, dtype=torch.bool)
+
+    current_rel_z = motion_command.simulator_object_pos_w[:, 2] - motion_command.robot_root_pos_w[:, 2]
+    lifted = current_rel_z - motion_command.pickup_object_rel_z_baseline
+    return lifted >= float(min_lift_delta)
+
+
 def _manual_goal_heading(motion_command: MotionCommand) -> torch.Tensor:
     assert motion_command.manual_goal_object_rot6d_w is not None
     goal_rot_mat_w = _rot6d_to_matrix(motion_command.manual_goal_object_rot6d_w)
@@ -205,6 +216,31 @@ class SparseGoalSuccess(TerminationTermBase):
             lin_vel_threshold=self.lin_vel_threshold,
             ang_vel_threshold=self.ang_vel_threshold,
             ignore_yaw=self.ignore_yaw,
+        )
+        self._success_counter = torch.where(success, self._success_counter + 1, torch.zeros_like(self._success_counter))
+        return self._success_counter >= self.hold_steps
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            self._success_counter.zero_()
+        else:
+            self._success_counter[env_ids] = 0
+
+
+class SparseGoalPickupSuccess(TerminationTermBase):
+    def __init__(self, cfg: TerminationTermCfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.only_external = bool(cfg.params.get("only_external", False))
+        self.current_lift_delta = float(cfg.params.get("current_lift_delta", 0.07))
+        self.hold_steps = max(1, int(cfg.params.get("hold_steps", 10)))
+        self._success_counter = torch.zeros(self.env.num_envs, dtype=torch.long, device=self.env.device)
+
+    def __call__(self, env: Any, **kwargs) -> torch.Tensor:
+        motion_command = self.env.command_manager.get_state("motion_command")
+        active_mask = _goal_episode_mask(motion_command, only_external=self.only_external)
+        success = active_mask & _picked_mask(motion_command) & _current_lifted_mask(
+            motion_command,
+            min_lift_delta=self.current_lift_delta,
         )
         self._success_counter = torch.where(success, self._success_counter + 1, torch.zeros_like(self._success_counter))
         return self._success_counter >= self.hold_steps

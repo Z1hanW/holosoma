@@ -49,6 +49,7 @@
     <mesh name="right_wrist_pitch_link" content_type="model/stl" file="right_wrist_pitch_link.STL" />
     <mesh name="right_wrist_yaw_link" content_type="model/stl" file="right_wrist_yaw_link.STL" />
     <mesh name="right_rubber_hand" content_type="model/stl" file="right_rubber_hand.STL" />
+    <mesh name="object_visual_box_74" content_type="model/obj" file="box_74.obj" scale="1 1 1" />
   </asset>
   <worldbody>
     <geom name="floor" size="0 0 0.05" type="plane" contype="2" friction="1 0.005 0.001" solref="0.01 1" material="grid" conaffinity="1" />
@@ -315,7 +316,8 @@
     <body name="object_baseLink">
       <inertial pos="0 0 0" mass="1.4" diaginertia="0.0283257394 0.032590929 0.0463507576" />
       <joint name="object_object_freejoint" type="free" />
-      <geom size="0.232876 0.212348 0.124925" type="box" contype="4" conaffinity="11" rgba="0.95 0.42 0.16 1" name="object_collision" density="0" friction="0.6 0.02 0.005" condim="6" solref="0.01 1" />
+      <geom size="0.232876 0.212348 0.124925" type="box" contype="4" conaffinity="11" rgba="0.95 0.42 0.16 0" name="object_collision" density="0" friction="0.6 0.02 0.005" condim="6" solref="0.01 1" />
+      <geom name="object_visual" type="mesh" mesh="object_visual_box_74" contype="0" conaffinity="0" group="1" density="0" rgba="0.7 0.8 0.9 1" />
     </body>
   </worldbody>
   <contact>

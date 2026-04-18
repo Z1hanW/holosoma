@@ -328,6 +328,30 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_pickup = replace(
             },
             weight=0.3,
         ),
+        "sparse_goal_object_pose_error_exp": replace(
+            g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed.terms["sparse_goal_object_pose_error_exp"],
+            weight=0.0,
+        ),
+        "sparse_goal_object_approach_reward": replace(
+            g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed.terms["sparse_goal_object_approach_reward"],
+            weight=0.0,
+        ),
+        "sparse_goal_hover_height_penalty": replace(
+            g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed.terms["sparse_goal_hover_height_penalty"],
+            weight=0.0,
+        ),
+        "sparse_goal_success_bonus": replace(
+            g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed.terms["sparse_goal_success_bonus"],
+            weight=0.0,
+        ),
+        "sparse_goal_pickup_success_bonus": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:sparse_goal_pickup_success_bonus",
+            params={
+                "only_external": False,
+                "current_lift_delta": 0.07,
+            },
+            weight=10.0,
+        ),
     },
 )
 
@@ -534,6 +558,38 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_gui
                 "only_external": False,
             },
             weight=0.3,
+        ),
+        "sparse_goal_object_pose_error_exp": replace(
+            g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_guidance.terms[
+                "sparse_goal_object_pose_error_exp"
+            ],
+            weight=0.0,
+        ),
+        "sparse_goal_object_approach_reward": replace(
+            g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_guidance.terms[
+                "sparse_goal_object_approach_reward"
+            ],
+            weight=0.0,
+        ),
+        "sparse_goal_hover_height_penalty": replace(
+            g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_guidance.terms[
+                "sparse_goal_hover_height_penalty"
+            ],
+            weight=0.0,
+        ),
+        "sparse_goal_success_bonus": replace(
+            g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_guidance.terms[
+                "sparse_goal_success_bonus"
+            ],
+            weight=0.0,
+        ),
+        "sparse_goal_pickup_success_bonus": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:sparse_goal_pickup_success_bonus",
+            params={
+                "only_external": False,
+                "current_lift_delta": 0.07,
+            },
+            weight=10.0,
         ),
     },
 )

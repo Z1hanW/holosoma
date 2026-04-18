@@ -1170,6 +1170,20 @@ def sparse_goal_pickup_height_reward(
     return reward * active_mask.to(dtype=torch.float32)
 
 
+def sparse_goal_pickup_success_bonus(
+    env: WholeBodyTrackingManager,
+    only_external: bool = False,
+    current_lift_delta: float = 0.07,
+) -> torch.Tensor:
+    motion_command = _get_motion_command_and_assert_type(env)
+    success = (
+        _goal_episode_mask(motion_command, only_external=only_external)
+        & _picked_mask(motion_command)
+        & _current_lifted_mask(motion_command, min_lift_delta=current_lift_delta)
+    )
+    return success.to(dtype=torch.float32)
+
+
 def sparse_goal_object_xy_error_exp(
     env: WholeBodyTrackingManager,
     sigma: float,

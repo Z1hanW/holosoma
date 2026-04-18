@@ -7,6 +7,7 @@ from holosoma.config_values.wbt.g1.termination import (
     g1_29dof_wbt_termination_command_curriculum,
     g1_29dof_wbt_termination_distill,
     g1_29dof_wbt_termination_distill_sparse_goal_mixed,
+    g1_29dof_wbt_termination_distill_sparse_goal_pickup,
 )
 
 none = None
@@ -19,4 +20,5 @@ DEFAULTS = {
     "g1_29dof_wbt_command_curriculum": g1_29dof_wbt_termination_command_curriculum,
     "g1_29dof_wbt_distill": g1_29dof_wbt_termination_distill,
     "g1_29dof_wbt_distill_sparse_goal_mixed": g1_29dof_wbt_termination_distill_sparse_goal_mixed,
+    "g1_29dof_wbt_distill_sparse_goal_pickup": g1_29dof_wbt_termination_distill_sparse_goal_pickup,
 }

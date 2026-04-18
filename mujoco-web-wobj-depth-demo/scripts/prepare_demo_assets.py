@@ -943,8 +943,7 @@ def _write_shared_scene_assets(
     object_bodies = [
         body for body in scene_root.findall(".//body") if _is_object_body_name(body.attrib.get("name", ""))
     ]
-    object_has_mesh_geom = any(geom.attrib.get("mesh") for body in object_bodies for geom in body.findall(".//geom"))
-    if object_visual_spec is not None and object_bodies and not object_has_mesh_geom:
+    if object_visual_spec is not None and object_bodies:
         asset_root = scene_root.find("asset")
         if asset_root is None:
             asset_root = ET.SubElement(scene_root, "asset")

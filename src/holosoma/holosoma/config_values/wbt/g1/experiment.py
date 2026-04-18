@@ -566,6 +566,7 @@ g1_29dof_wbt_w_object_distill_sparse_goal_mixed_pickup = replace(
         name="g1_29dof_wbt_w_object_distill_sparse_goal_mixed_pickup",
     ),
     reward=reward.g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_pickup,
+    termination=termination.g1_29dof_wbt_termination_distill_sparse_goal_pickup,
 )
 
 g1_29dof_wbt_w_object_distill_sparse_goal_mixed_r2s_rollout_ref = replace(
@@ -584,6 +585,7 @@ g1_29dof_wbt_w_object_distill_sparse_goal_mixed_r2s_rollout_ref_pickup = replace
         name="g1_29dof_wbt_w_object_distill_sparse_goal_mixed_r2s_rollout_ref_pickup",
     ),
     reward=reward.g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_guidance_pickup,
+    termination=termination.g1_29dof_wbt_termination_distill_sparse_goal_pickup,
 )
 
 g1_29dof_wbt_terrain_distill_sparse_root_cmd = replace(
