@@ -1064,6 +1064,17 @@ def _picked_mask(motion_command: MotionCommand) -> torch.Tensor:
     return motion_command.pickup_anchor_set
 
 
+def _current_lifted_mask(motion_command: MotionCommand, *, min_lift_delta: float = 0.03) -> torch.Tensor:
+    if motion_command.pickup_object_rel_z_baseline is None:
+        return torch.zeros((motion_command.num_envs,), device=motion_command.device, dtype=torch.bool)
+    if min_lift_delta <= 0.0:
+        return torch.ones((motion_command.num_envs,), device=motion_command.device, dtype=torch.bool)
+
+    current_rel_z = motion_command.simulator_object_pos_w[:, 2] - motion_command.robot_root_pos_w[:, 2]
+    lifted = current_rel_z - motion_command.pickup_object_rel_z_baseline
+    return lifted >= float(min_lift_delta)
+
+
 def _manual_goal_heading(motion_command: MotionCommand) -> torch.Tensor:
     assert motion_command.manual_goal_object_rot6d_w is not None
     goal_rot_mat_w = _rot6d_to_matrix(motion_command.manual_goal_object_rot6d_w)
@@ -1253,6 +1264,57 @@ def sparse_goal_object_pose_error_exp(
     )
     reward = torch.exp(-pose_error)
     return reward * active_mask.to(dtype=torch.float32)
+
+
+class SparseGoalObjectProgressReward(RewardTermBase):
+    def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
+        super().__init__(cfg, env)
+        self.only_external = bool(cfg.params.get("only_external", True))
+        self.picked_only = bool(cfg.params.get("picked_only", True))
+        self.require_current_lift = bool(cfg.params.get("require_current_lift", True))
+        self.current_lift_delta = float(cfg.params.get("current_lift_delta", 0.03))
+        self.near_goal_xy_threshold = float(cfg.params.get("near_goal_xy_threshold", 0.10))
+        self.progress_scale = float(cfg.params.get("progress_scale", 0.05))
+        self._prev_xy_distance = torch.full((env.num_envs,), float("nan"), device=env.device, dtype=torch.float32)
+        self._prev_goal_xy = torch.full((env.num_envs, 2), float("nan"), device=env.device, dtype=torch.float32)
+        self._prev_active = torch.zeros((env.num_envs,), device=env.device, dtype=torch.bool)
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            self._prev_xy_distance.fill_(float("nan"))
+            self._prev_goal_xy.fill_(float("nan"))
+            self._prev_active.zero_()
+        else:
+            self._prev_xy_distance[env_ids] = float("nan")
+            self._prev_goal_xy[env_ids] = float("nan")
+            self._prev_active[env_ids] = False
+
+    def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
+        motion_command = _get_motion_command_and_assert_type(env)
+        active_mask = _goal_episode_mask(motion_command, only_external=self.only_external)
+        if self.picked_only:
+            active_mask &= _picked_mask(motion_command)
+        if self.require_current_lift:
+            active_mask &= _current_lifted_mask(motion_command, min_lift_delta=self.current_lift_delta)
+        if not active_mask.any() or motion_command.manual_goal_object_pos_w is None:
+            self._prev_active.zero_()
+            return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+
+        goal_xy = motion_command.manual_goal_object_pos_w[:, :2]
+        xy_distance = torch.norm(goal_xy - motion_command.simulator_object_pos_w[:, :2], dim=-1)
+        if self.near_goal_xy_threshold > 0.0:
+            active_mask &= xy_distance > self.near_goal_xy_threshold
+
+        goal_changed = torch.norm(goal_xy - self._prev_goal_xy, dim=-1) > 1.0e-4
+        has_prev = torch.isfinite(self._prev_xy_distance) & self._prev_active & (~goal_changed)
+        progress = torch.clamp(self._prev_xy_distance - xy_distance, min=0.0)
+        reward = torch.clamp(progress / max(self.progress_scale, 1.0e-6), min=0.0, max=1.0)
+        reward = torch.where(active_mask & has_prev, reward, torch.zeros_like(reward))
+
+        self._prev_xy_distance = xy_distance.detach()
+        self._prev_goal_xy = goal_xy.detach().clone()
+        self._prev_active = active_mask.detach()
+        return reward
 
 
 def sparse_goal_hover_height_penalty(

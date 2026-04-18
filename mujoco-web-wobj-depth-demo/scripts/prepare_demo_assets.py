@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace as dataclass_replace
 import json
+import math
 import os
 import re
 import shutil
@@ -65,6 +66,33 @@ def _scalar_str(value: np.ndarray | object) -> str:
 
 def _mj_float(value: float) -> str:
     return f"{float(value):.9g}"
+
+
+def _parse_float_triplet(raw: str | None, default: tuple[float, float, float]) -> tuple[float, float, float]:
+    if raw is None:
+        return default
+    try:
+        parts = [float(value) for value in raw.split()]
+    except ValueError:
+        return default
+    if len(parts) != 3:
+        return default
+    return (parts[0], parts[1], parts[2])
+
+
+def _quat_wxyz_from_urdf_rpy(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
+    cr = math.cos(0.5 * roll)
+    sr = math.sin(0.5 * roll)
+    cp = math.cos(0.5 * pitch)
+    sp = math.sin(0.5 * pitch)
+    cy = math.cos(0.5 * yaw)
+    sy = math.sin(0.5 * yaw)
+    return (
+        cy * cp * cr + sy * sp * sr,
+        cy * cp * sr - sy * sp * cr,
+        sy * cp * sr + cy * sp * cr,
+        sy * cp * cr - cy * sp * sr,
+    )
 
 
 def _resolve_root_body_index(body_names: list[str]) -> int:
@@ -162,6 +190,9 @@ def _extract_perception_cfg(metadata: dict, perception_dim: int | None = None) -
         while obs_height > 1 and int(perception_dim) % obs_height != 0:
             obs_height -= 1
         obs_width = int(perception_dim) // max(1, obs_height)
+    resize_cfg = perception.get("camera_warp_resize")
+    if not (isinstance(resize_cfg, list) and len(resize_cfg) == 2):
+        resize_cfg = [obs_height, obs_width]
     return {
         "camera_strict_warp": bool(perception.get("camera_strict_warp", True)),
         "camera_width": camera_width,
@@ -171,17 +202,33 @@ def _extract_perception_cfg(metadata: dict, perception_dim: int | None = None) -
         "observation_dim": int(perception_dim or (obs_width * obs_height)),
         "camera_vfov_deg": float(perception.get("camera_vfov_deg", 58.6)),
         "camera_hfov_deg": float(perception.get("camera_hfov_deg", 89.5)),
+        "camera_fx": perception.get("camera_fx"),
+        "camera_fy": perception.get("camera_fy"),
+        "camera_cx": perception.get("camera_cx"),
+        "camera_cy": perception.get("camera_cy"),
         "camera_near": float(perception.get("camera_near", 0.001)),
         "camera_far": float(perception.get("camera_far", 3.0)),
         "max_distance": float(perception.get("max_distance", 3.0)),
+        "camera_pitch_deg": float(perception.get("camera_pitch_deg", 0.0)),
         "camera_warp_normalize": bool(perception.get("camera_warp_normalize", False)),
         "camera_warp_preprocess": bool(perception.get("camera_warp_preprocess", False)),
+        "camera_warp_resize": list(resize_cfg),
         "camera_warp_crop_top": int(perception.get("camera_warp_crop_top", 0) or 0),
         "camera_warp_crop_bottom": int(perception.get("camera_warp_crop_bottom", 0) or 0),
         "camera_warp_crop_left": int(perception.get("camera_warp_crop_left", 0) or 0),
         "camera_warp_crop_right": int(perception.get("camera_warp_crop_right", 0) or 0),
         "camera_warp_min_valid_depth": float(perception.get("camera_warp_min_valid_depth", 0.15)),
-        "web_depth_include_visual_meshes": bool(perception.get("web_depth_include_visual_meshes", True)),
+        "camera_warp_edge_noise": bool(perception.get("camera_warp_edge_noise", False)),
+        "camera_warp_edge_border": int(perception.get("camera_warp_edge_border", 3) or 0),
+        "camera_warp_edge_shuffle_prob": float(perception.get("camera_warp_edge_shuffle_prob", 0.9) or 0.0),
+        "camera_warp_edge_empty_prob": float(perception.get("camera_warp_edge_empty_prob", 0.7) or 0.0),
+        "camera_warp_edge_thresh_primary": float(perception.get("camera_warp_edge_thresh_primary", 1.0) or 0.0),
+        "camera_warp_edge_thresh_secondary": float(perception.get("camera_warp_edge_thresh_secondary", 0.6) or 0.0),
+        "camera_warp_edge_far_depth_thresh": float(perception.get("camera_warp_edge_far_depth_thresh", 2.5) or 0.0),
+        "camera_warp_enable_holes": bool(perception.get("camera_warp_enable_holes", False)),
+        "camera_apply_sensor_noise": bool(perception.get("camera_apply_sensor_noise", False)),
+        "web_apply_warp_edge_noise": bool(perception.get("web_apply_warp_edge_noise", False)),
+        "web_depth_include_visual_meshes": bool(perception.get("web_depth_include_visual_meshes", False)),
         "web_depth_mesh_mode": str(perception.get("web_depth_mesh_mode", "bounds")),
         "camera_body_name": str(perception.get("camera_body_name", "torso_link")),
         "sensor_offset": list(perception.get("sensor_offset", [0.01, 0.01, 0.44])),
@@ -373,6 +420,44 @@ def _read_object_urdf_physics(object_urdf_path: str | Path) -> dict[str, object]
         "contact_stiffness": _float_attr(stiffness, "value", 0.0),
         "contact_damping": _float_attr(damping, "value", 0.0),
         "restitution": _float_attr(restitution, "value", 0.0),
+    }
+
+
+def _read_object_urdf_visual_mesh(object_urdf_path: str | Path) -> dict[str, object] | None:
+    root = ET.parse(Path(object_urdf_path)).getroot()
+    link = root.find("link")
+    if link is None:
+        return None
+    visual = link.find("visual")
+    if visual is None:
+        return None
+    mesh = visual.find("geometry/mesh")
+    if mesh is None:
+        return None
+    filename = mesh.attrib.get("filename") or mesh.attrib.get("file")
+    if not filename:
+        return None
+    origin = visual.find("origin")
+    xyz = _parse_float_triplet(origin.attrib.get("xyz") if origin is not None else None, (0.0, 0.0, 0.0))
+    rpy = _parse_float_triplet(origin.attrib.get("rpy") if origin is not None else None, (0.0, 0.0, 0.0))
+    scale = _parse_float_triplet(mesh.attrib.get("scale"), (1.0, 1.0, 1.0))
+    color = (0.7, 0.8, 0.9, 1.0)
+    color_el = visual.find("material/color")
+    if color_el is not None:
+        rgba = color_el.attrib.get("rgba")
+        if rgba:
+            try:
+                parts = [float(value) for value in rgba.split()]
+                if len(parts) == 4:
+                    color = (parts[0], parts[1], parts[2], parts[3])
+            except ValueError:
+                pass
+    return {
+        "filename": filename,
+        "scale": scale,
+        "pos": xyz,
+        "quat": _quat_wxyz_from_urdf_rpy(*rpy),
+        "rgba": color,
     }
 
 
@@ -850,6 +935,61 @@ def _write_shared_scene_assets(
         raw_path = mesh.attrib["file"]
         mesh.set("file", _stage_mesh_path(raw_path))
 
+    def _is_object_body_name(body_name: str) -> bool:
+        return body_name.startswith("object_") or body_name in {"object", "object_baseLink"}
+
+    object_visual_geom_names: set[str] = set()
+    object_visual_spec = _read_object_urdf_visual_mesh(object_urdf_path)
+    object_bodies = [
+        body for body in scene_root.findall(".//body") if _is_object_body_name(body.attrib.get("name", ""))
+    ]
+    object_has_mesh_geom = any(geom.attrib.get("mesh") for body in object_bodies for geom in body.findall(".//geom"))
+    if object_visual_spec is not None and object_bodies and not object_has_mesh_geom:
+        asset_root = scene_root.find("asset")
+        if asset_root is None:
+            asset_root = ET.SubElement(scene_root, "asset")
+        filename = str(object_visual_spec["filename"])
+        mesh_stem = _slugify(Path(filename).stem)
+        mesh_name = f"object_visual_{mesh_stem}"
+        existing_mesh_names = {mesh.attrib.get("name", "") for mesh in asset_root.findall("mesh")}
+        if mesh_name in existing_mesh_names:
+            suffix = 2
+            while f"{mesh_name}_{suffix}" in existing_mesh_names:
+                suffix += 1
+            mesh_name = f"{mesh_name}_{suffix}"
+        ET.SubElement(
+            asset_root,
+            "mesh",
+            {
+                "name": mesh_name,
+                "content_type": "model/obj",
+                "file": _stage_mesh_path(filename),
+                "scale": " ".join(_mj_float(value) for value in object_visual_spec["scale"]),
+            },
+        )
+        geom_name = "object_visual"
+        visual_geom_attrib = {
+            "name": geom_name,
+            "type": "mesh",
+            "mesh": mesh_name,
+            "contype": "0",
+            "conaffinity": "0",
+            "group": "1",
+            "density": "0",
+            "rgba": " ".join(_mj_float(value) for value in object_visual_spec["rgba"]),
+        }
+        pos = tuple(float(value) for value in object_visual_spec["pos"])
+        quat = tuple(float(value) for value in object_visual_spec["quat"])
+        if any(abs(value) > 1.0e-9 for value in pos):
+            visual_geom_attrib["pos"] = " ".join(_mj_float(value) for value in pos)
+        if any(
+            abs(value - identity) > 1.0e-9
+            for value, identity in zip(quat, (1.0, 0.0, 0.0, 0.0), strict=True)
+        ):
+            visual_geom_attrib["quat"] = " ".join(_mj_float(value) for value in quat)
+        object_bodies[0].append(ET.Element("geom", visual_geom_attrib))
+        object_visual_geom_names.add(geom_name)
+
     parent_map = {child: parent for parent in scene_root.iter() for child in parent}
     joint_physics = _extract_joint_physics_cfg(metadata)
     object_physics = _resolve_distill_object_physics(metadata, object_urdf_path)
@@ -878,7 +1018,7 @@ def _write_shared_scene_assets(
 
     def _is_object_body(body: ET.Element) -> bool:
         body_name = body.attrib.get("name", "")
-        return body_name.startswith("object_") or body_name in {"object", "object_baseLink"}
+        return _is_object_body_name(body_name)
 
     def _set_object_body_inertial(body: ET.Element) -> None:
         for inertial in list(body.findall("inertial")):
@@ -920,7 +1060,7 @@ def _write_shared_scene_assets(
         while parent is not None:
             if parent.tag == "body":
                 body_name = parent.attrib.get("name", "")
-                if body_name.startswith("object_") or body_name in {"object", "object_baseLink"}:
+                if _is_object_body_name(body_name):
                     return True
             parent = parent_map.get(parent)
         return False
@@ -973,10 +1113,16 @@ def _write_shared_scene_assets(
 
     for geom in scene_root.findall(".//geom"):
         if _is_object_geom(geom):
+            if geom.attrib.get("name", "") in object_visual_geom_names:
+                geom.set("density", "0")
+                geom.set("contype", "0")
+                geom.set("conaffinity", "0")
+                geom.set("group", "1")
+                continue
             if "name" not in geom.attrib:
                 geom.set("name", "object_collision")
             object_geom_names.append(geom.attrib["name"])
-            geom.set("rgba", "0.95 0.42 0.16 1")
+            geom.set("rgba", "0.95 0.42 0.16 0" if object_visual_geom_names else "0.95 0.42 0.16 1")
             geom.set("density", "0")
             geom.set("friction", _format_friction(object_physics["friction"]))
             geom.set("condim", str(MUJOCO_OBJECT_CONDIM))

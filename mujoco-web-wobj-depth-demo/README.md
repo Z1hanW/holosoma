@@ -9,10 +9,10 @@ Browser version of the `mj_box_depth_track.sh` depth-tracking flow for the
 - runs official `@mujoco/mujoco` WASM in the browser
 - runs `onnxruntime-web/wasm` policy inference in the browser
 - builds `obs` from sparse root command + proprio history and `perception_obs` as an `87x58` depth observation
-- maps the motion clip root trajectory to the sparse root command, with keyboard offsets:
-  - `W/S`: root target x
-  - `A/D`: root target y
-  - `Q/E`: root target yaw
+- maps the motion clip root trajectory directly to a sparse root-frame command; keyboard offsets are added in that same root frame:
+  - `W/S`: command forward/back
+  - `A/D`: command left/right
+  - `Q/E`: command yaw
   - `Space`: start, then pause/resume
   - `Backspace`: reset
 
@@ -75,5 +75,5 @@ crop/resize/normalize post-processing.
 
 - this path does not use `viser`
 - MuJoCo uses the official multi-threaded WASM build so XML compile has a pre-warmed worker pool
-- depth observation uses the rendered visual bodies through oriented bounding-box ray hits by default (`web_depth_mesh_mode: "bounds"`), with analytic ground as a fallback; set `web_depth_mesh_mode: "triangles"` only for slow offline checks
+- depth observation defaults to the object proxy plus analytic ground; robot visual bounds are disabled because they self-occlude the torso camera in the browser approximation
 - staged assets are written under `public/demo-assets/`; generated runtime files are written under `public/runtime/`

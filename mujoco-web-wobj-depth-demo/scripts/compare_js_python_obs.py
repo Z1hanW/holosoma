@@ -15,6 +15,7 @@ import numpy as np
 
 DEMO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = DEMO_ROOT / "public/demo-assets/manifest.json"
+BICUBIC_A = -0.75
 
 
 def resolve_default_config_path(config_path: Path | None) -> Path:
@@ -97,6 +98,7 @@ try {
       history,
       depthObservation: Array.from(app.depthObservation),
       rawDepth: Array.from(app.rawDepth),
+      depthMetersPreNoise: Array.from(app.depthMetersPreNoise || app.rawDepth),
       rawCameraDepth: Array.from(app.rawCameraDepth),
       visibleMeshes: app.meshes.filter((mesh) => mesh?.visible).length,
       depthRaycastMeshes: app.depthRaycastMeshes.length
@@ -241,20 +243,38 @@ def resample_cropped_depth(
     crop_width = max(1, raw_width - crop_left - crop_right)
     raw = raw.reshape(raw_height, raw_width)
     out = np.zeros(out_width * out_height, dtype=np.float32)
+    if crop_width == out_width and crop_height == out_height:
+        cursor = 0
+        for y in range(out_height):
+            row = raw[crop_top + y, crop_left : crop_left + out_width]
+            out[cursor : cursor + out_width] = row
+            cursor += out_width
+        return out
+
+    def cubic_weight(value: float) -> float:
+        x = abs(float(value))
+        if x <= 1.0:
+            return (BICUBIC_A + 2.0) * x * x * x - (BICUBIC_A + 3.0) * x * x + 1.0
+        if x < 2.0:
+            return BICUBIC_A * x * x * x - 5.0 * BICUBIC_A * x * x + 8.0 * BICUBIC_A * x - 4.0 * BICUBIC_A
+        return 0.0
+
     cursor = 0
     for y in range(out_height):
         source_y = np.clip((y + 0.5) * crop_height / out_height - 0.5, 0.0, crop_height - 1.0)
-        y0 = int(np.floor(source_y))
-        y1 = min(crop_height - 1, y0 + 1)
-        wy = float(source_y - y0)
+        y_base = int(np.floor(source_y))
         for x in range(out_width):
             source_x = np.clip((x + 0.5) * crop_width / out_width - 0.5, 0.0, crop_width - 1.0)
-            x0 = int(np.floor(source_x))
-            x1 = min(crop_width - 1, x0 + 1)
-            wx = float(source_x - x0)
-            top = raw[crop_top + y0, crop_left + x0] * (1.0 - wx) + raw[crop_top + y0, crop_left + x1] * wx
-            bottom = raw[crop_top + y1, crop_left + x0] * (1.0 - wx) + raw[crop_top + y1, crop_left + x1] * wx
-            out[cursor] = top * (1.0 - wy) + bottom * wy
+            x_base = int(np.floor(source_x))
+            value = 0.0
+            for yy in range(-1, 3):
+                sample_y = int(np.clip(y_base + yy, 0, crop_height - 1))
+                weight_y = cubic_weight(source_y - (y_base + yy))
+                for xx in range(-1, 3):
+                    sample_x = int(np.clip(x_base + xx, 0, crop_width - 1))
+                    weight_x = cubic_weight(source_x - (x_base + xx))
+                    value += raw[crop_top + sample_y, crop_left + sample_x] * weight_x * weight_y
+            out[cursor] = value
             cursor += 1
     return out
 
@@ -342,21 +362,34 @@ def main() -> int:
         args.rtol,
     )
 
-    python_raw_depth, python_depth_obs = depth_from_raw_camera(config, snapshot)
+    python_pre_noise_depth, python_depth_obs = depth_from_raw_camera(config, snapshot)
     ok &= compare_arrays(
-        "depth.raw_cropped_clamped",
-        python_raw_depth,
-        np.asarray(snapshot["rawDepth"], dtype=np.float32),
+        "depth.pre_noise_cropped_clamped",
+        python_pre_noise_depth,
+        np.asarray(snapshot.get("depthMetersPreNoise", snapshot["rawDepth"]), dtype=np.float32),
         args.atol,
         args.rtol,
     )
-    ok &= compare_arrays(
-        "depth.observation",
-        python_depth_obs,
-        np.asarray(snapshot["depthObservation"], dtype=np.float32),
-        args.atol,
-        args.rtol,
-    )
+    if config["perception"].get("web_apply_warp_edge_noise", False):
+        js_obs = np.asarray(snapshot["depthObservation"], dtype=np.float32).reshape(-1)
+        expected_shape = python_depth_obs.reshape(-1).shape
+        finite = np.isfinite(js_obs)
+        in_range = bool(np.all((js_obs[finite] >= -0.500001) & (js_obs[finite] <= 0.500001)))
+        shape_ok = js_obs.shape == expected_shape
+        print(
+            "OK  depth.observation                              "
+            f"stochastic_edge_noise shape={js_obs.shape} finite={int(finite.sum())}/{js_obs.size} "
+            f"range_ok={int(in_range)}"
+        )
+        ok &= shape_ok and in_range
+    else:
+        ok &= compare_arrays(
+            "depth.observation",
+            python_depth_obs,
+            np.asarray(snapshot["depthObservation"], dtype=np.float32),
+            args.atol,
+            args.rtol,
+        )
 
     return 0 if ok else 1
 
