@@ -15,8 +15,12 @@ cd "${ROOT_DIR}"
 
 DEFAULT_MOTION_DIR="${ROOT_DIR}/data/ds_box_data/train_g1_w_obj_prepared"
 DEFAULT_MOTION_CLIP="box_74"
+DEFAULT_MOTION_FILE="${DEFAULT_MOTION_DIR}/${DEFAULT_MOTION_CLIP}.npz"
 DEFAULT_OBJECT_MAP="${DEFAULT_MOTION_DIR}/_clip_object_urdf_map.json"
-DEFAULT_LOCAL_MODEL="${ROOT_DIR}/.teacher_checkpoints/model_07000.onnx"
+DEFAULT_OBJECT_URDF="${DEFAULT_MOTION_DIR}/_generated_urdfs/${DEFAULT_MOTION_CLIP}.urdf"
+DEFAULT_DEPTH_BUNDLE_DIR="${ROOT_DIR}/mujoco-web-wobj-depth-demo/public/demo-assets/clips/${DEFAULT_MOTION_CLIP}"
+DEFAULT_DEPTH_ONNX="${DEFAULT_DEPTH_BUNDLE_DIR}/policy.onnx"
+DEFAULT_TEACHER_MODEL="${ROOT_DIR}/.teacher_checkpoints/model_07000.onnx"
 DEFAULT_WANDB_MODEL="wandb://zihanw22/boxer/shoo7sr1/model_07000.onnx"
 
 usage() {
@@ -32,8 +36,10 @@ Examples:
 
 Environment:
   MOTION_DIR                  default: ${DEFAULT_MOTION_DIR}
-  OBJECT_URDF                 default: ${DEFAULT_OBJECT_MAP}; may be a map json or a single URDF
-  MODEL_INPUT / MODEL_PATH    default: local model_07000.onnx if present, otherwise ${DEFAULT_WANDB_MODEL}
+  OBJECT_URDF                 default: ${DEFAULT_OBJECT_URDF} for box_74, otherwise ${DEFAULT_OBJECT_MAP}
+                              may be a map json or a single URDF
+  MODEL_INPUT / MODEL_PATH    default: ${DEFAULT_DEPTH_ONNX} if present, then ${DEFAULT_TEACHER_MODEL},
+                              otherwise ${DEFAULT_WANDB_MODEL}
   HEADLESS                    default: True; set False to open the native MuJoCo viewer
   RUN_SECONDS                 default: 0; 0 means run until interrupted
   LAUNCH_VISER                default: 0; set 1 for the Viser split-state monitor
@@ -137,9 +143,13 @@ export INFER_PY
 export MUJOCO_PY
 
 MOTION_DIR="${MOTION_DIR:-${DEFAULT_MOTION_DIR}}"
-OBJECT_MAP_INPUT="${OBJECT_URDF:-${DEFAULT_OBJECT_MAP}}"
-if [[ -f "${DEFAULT_LOCAL_MODEL}" ]]; then
-  MODEL_INPUT="${MODEL_INPUT:-${MODEL_PATH:-${DEFAULT_LOCAL_MODEL}}}"
+DEFAULT_SELECTED_MOTION_FILE="${MOTION_DIR}/${DEFAULT_MOTION_CLIP}.npz"
+DEFAULT_SELECTED_OBJECT_URDF="${MOTION_DIR}/_generated_urdfs/${DEFAULT_MOTION_CLIP}.urdf"
+OBJECT_MAP_INPUT="${OBJECT_URDF:-}"
+if [[ -f "${DEFAULT_DEPTH_ONNX}" ]]; then
+  MODEL_INPUT="${MODEL_INPUT:-${MODEL_PATH:-${DEFAULT_DEPTH_ONNX}}}"
+elif [[ -f "${DEFAULT_TEACHER_MODEL}" ]]; then
+  MODEL_INPUT="${MODEL_INPUT:-${MODEL_PATH:-${DEFAULT_TEACHER_MODEL}}}"
 else
   MODEL_INPUT="${MODEL_INPUT:-${MODEL_PATH:-${DEFAULT_WANDB_MODEL}}}"
 fi
@@ -181,8 +191,10 @@ done
 if [[ -z "${MOTION_FILE}" ]]; then
   if [[ -n "${MOTION_CLIP_NAME}" ]]; then
     MOTION_FILE="${MOTION_DIR}/${MOTION_CLIP_NAME%.npz}.npz"
-  elif [[ -f "${MOTION_DIR}/${DEFAULT_MOTION_CLIP}.npz" ]]; then
-    MOTION_FILE="${MOTION_DIR}/${DEFAULT_MOTION_CLIP}.npz"
+  elif [[ -f "${DEFAULT_SELECTED_MOTION_FILE}" ]]; then
+    MOTION_FILE="${DEFAULT_SELECTED_MOTION_FILE}"
+  elif [[ -f "${DEFAULT_MOTION_FILE}" ]]; then
+    MOTION_FILE="${DEFAULT_MOTION_FILE}"
   else
     MOTION_FILE="$(find "${MOTION_DIR}" -maxdepth 1 -name '*.npz' | sort | head -n 1)"
   fi
@@ -193,6 +205,16 @@ if [[ -z "${MOTION_FILE}" || ! -f "${MOTION_FILE}" ]]; then
   exit 1
 fi
 MOTION_FILE="$(cd "$(dirname "${MOTION_FILE}")" && pwd)/$(basename "${MOTION_FILE}")"
+
+if [[ -z "${OBJECT_MAP_INPUT}" ]]; then
+  if [[ "$(basename "${MOTION_FILE}")" == "${DEFAULT_MOTION_CLIP}.npz" && -f "${DEFAULT_SELECTED_OBJECT_URDF}" ]]; then
+    OBJECT_MAP_INPUT="${DEFAULT_SELECTED_OBJECT_URDF}"
+  elif [[ "$(basename "${MOTION_FILE}")" == "${DEFAULT_MOTION_CLIP}.npz" && -f "${DEFAULT_OBJECT_URDF}" ]]; then
+    OBJECT_MAP_INPUT="${DEFAULT_OBJECT_URDF}"
+  else
+    OBJECT_MAP_INPUT="${DEFAULT_OBJECT_MAP}"
+  fi
+fi
 
 if [[ "${MODEL_INPUT}" == wandb://*.pt ]]; then
   MODEL_INPUT="${MODEL_INPUT%.pt}.onnx"
