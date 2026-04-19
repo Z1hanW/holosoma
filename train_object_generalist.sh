@@ -31,7 +31,9 @@ WANDB_RESUME_SAME_RUN=${WANDB_RESUME_SAME_RUN:-auto}
 WANDB_MODEL_FILE=${WANDB_MODEL_FILE:-${RESUME_MODEL_FILE:-""}}
 RESUME_CKPT=${RESUME_CKPT:-${RESUME_CHECKPOINT:-""}}
 RESUME_STEP_RAW=${RESUME_STEP:-""}
-DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_carry_aug_mix_ml"
+DS_DATA_ROOT=${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}
+DEFAULT_DS_PREPARED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
+DEFAULT_MOTION_DIR="${DEFAULT_DS_PREPARED_MOTION_DIR}"
 MOTION_DIR_FROM_ENV=0
 if [[ -n "${MOTION_DIR+x}" ]]; then
   MOTION_DIR_FROM_ENV=1
@@ -50,9 +52,12 @@ PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPAC
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-67108864}
 PHYSX_GPU_HEAP_CAPACITY=${PHYSX_GPU_HEAP_CAPACITY:-67108864}
 PHYSX_GPU_TEMP_BUFFER_CAPACITY=${PHYSX_GPU_TEMP_BUFFER_CAPACITY:-16777216}
+ACTOR_LR=${ACTOR_LR:-1e-05}
+CRITIC_LR=${CRITIC_LR:-1e-05}
+CLIP_WEIGHTING_STRATEGY=${CLIP_WEIGHTING_STRATEGY:-success_rate_adaptive}
 
 TRAIN_DATASETS=${TRAIN_DATASETS:-"omomo,behave"}
-AUTO_PREP_MIXED_BANK=${AUTO_PREP_MIXED_BANK:-1}
+AUTO_PREP_MIXED_BANK=${AUTO_PREP_MIXED_BANK:-0}
 MIXED_CLEAN_OUT=${MIXED_CLEAN_OUT:-1}
 MIXED_LINK_MODE=${MIXED_LINK_MODE:-symlink}
 MIXED_BEHAVE_FILTER=${MIXED_BEHAVE_FILTER:-boxmedium,boxlarge}
@@ -75,7 +80,7 @@ DEBUG_MODE=${DEBUG_MODE:-${DEBUG_MODEL:-off}}
 CURRICULUM=${CURRICULUM:-0}
 PERCEPTION=${PERCEPTION:-none}
 GENERALIST_CONTACT_REWARD_ENABLED=${GENERALIST_CONTACT_REWARD_ENABLED:-1}
-GENERALIST_CONTACT_REWARD_MODE=${GENERALIST_CONTACT_REWARD_MODE:-tanh}
+GENERALIST_CONTACT_REWARD_MODE=${GENERALIST_CONTACT_REWARD_MODE:-binary}
 GENERALIST_CONTACT_REWARD_THRESHOLD=${GENERALIST_CONTACT_REWARD_THRESHOLD:-1.0}
 GENERALIST_CONTACT_REWARD_FORCE_SCALE=${GENERALIST_CONTACT_REWARD_FORCE_SCALE:-25.0}
 GENERALIST_TORSO_CONTACT_REWARD_WEIGHT=${GENERALIST_TORSO_CONTACT_REWARD_WEIGHT:-0.0}
@@ -634,6 +639,9 @@ echo "[INFO] Generalist contact reward mode=${GENERALIST_CONTACT_REWARD_MODE} th
 echo "[INFO] Generalist wrist contact reward weights total=${GENERALIST_PALM_CONTACT_REWARD_WEIGHT}+${GENERALIST_ARM_CONTACT_REWARD_WEIGHT} each=${GENERALIST_WRIST_CONTACT_REWARD_WEIGHT} torso=disabled"
 echo "[INFO] Motion default-pose prepend enabled: ${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
 echo "[INFO] Motion default-pose prepend duration: ${DEFAULT_POSE_PREPEND_DURATION_S}s"
+echo "[INFO] PPO learning rates: actor=${ACTOR_LR} critic=${CRITIC_LR}"
+echo "[INFO] Clip weighting strategy: ${CLIP_WEIGHTING_STRATEGY}"
+echo "[INFO] Termination defaults: BadTracking full 3D + motion_ends"
 echo "[INFO] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} NPROC=${NPROC} PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
 echo "[INFO] PhysX gpu_max_rigid_contact_count=${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT} gpu_max_rigid_patch_count=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT} gpu_found_lost_pairs_capacity=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
 echo "[INFO] PhysX gpu_found_lost_aggregate_pairs_capacity=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY} gpu_total_aggregate_pairs_capacity=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY} gpu_collision_stack_size=${PHYSX_GPU_COLLISION_STACK_SIZE} gpu_heap_capacity=${PHYSX_GPU_HEAP_CAPACITY} gpu_temp_buffer_capacity=${PHYSX_GPU_TEMP_BUFFER_CAPACITY}"
@@ -645,7 +653,13 @@ train_cmd=(
   --training.project="${WANDB_PROJECT}"
   --training.num-envs="${NUM_ENVS}"
   --command.setup-terms.motion-command.params.motion-config.motion-file "${MOTION_DIR}"
+  --command.setup-terms.motion-command.params.motion-config.clip-weighting-strategy="${CLIP_WEIGHTING_STRATEGY}"
+  --algo.config.actor_learning_rate="${ACTOR_LR}"
+  --algo.config.critic_learning_rate="${CRITIC_LR}"
   --algo.config.save-interval=500
+  --termination.terms.bad_tracking.func=holosoma.managers.termination.terms.wbt:BadTracking
+  --termination.terms.motion_ends.func=holosoma.managers.termination.terms.wbt:motion_ends
+  --termination.terms.motion_ends.is_timeout=False
   --simulator.config.sim.physx.gpu-max-rigid-contact-count="${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT}"
   --simulator.config.sim.physx.gpu-max-rigid-patch-count="${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}"
   --simulator.config.sim.physx.gpu-found-lost-pairs-capacity="${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
