@@ -42,7 +42,7 @@ from holosoma.config_values import robot as robot_values  # noqa: E402
 from holosoma.utils.module_utils import get_holosoma_root  # noqa: E402
 from holosoma.utils.path import resolve_data_file_path  # noqa: E402
 from holosoma_inference.utils.perception_obs import PerceptionObsSub  # noqa: E402
-from holosoma_inference.utils.sim_control import SimControlPush  # noqa: E402
+from holosoma_inference.utils.sim_control import ManualRootCommandPub, SimControlPush  # noqa: E402
 from holosoma_inference.utils.sim_state import SimStateSub  # noqa: E402
 
 
@@ -52,6 +52,7 @@ class MujocoSimStateViewerConfig:
     state_port: int = 5657
     perception_obs_port: int = 5658
     control_port: int = 5659
+    sparse_root_command_port: int = 5661
     object_actor_name: str = "object"
     port: int = 0
     rate_hz: float = 30.0
@@ -702,6 +703,19 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         manual_rollout_btn = server.gui.add_button("Manual policy rollout")
         reset_rollout_btn = server.gui.add_button("Reset rollout")
 
+    with server.gui.add_folder("Manual Root Command"):
+        manual_root_enabled_cb = server.gui.add_checkbox("Enable", initial_value=False)
+        manual_root_mode_dropdown = server.gui.add_dropdown(
+            "Mode",
+            options=("manual", "offset"),
+            initial_value="manual",
+        )
+        manual_root_dx = server.gui.add_number("dX", initial_value=0.0, min=-3.0, max=3.0, step=0.01)
+        manual_root_dy = server.gui.add_number("dY", initial_value=0.0, min=-3.0, max=3.0, step=0.01)
+        manual_root_dyaw = server.gui.add_number("dYaw", initial_value=0.0, min=-3.1416, max=3.1416, step=0.01)
+        manual_root_zero_btn = server.gui.add_button("Zero command")
+        manual_root_md = server.gui.add_markdown(f"Publishing disabled on port `{cfg.sparse_root_command_port}`")
+
     depth_image_shape = (
         max(int(cfg.depth_height), 1) * max(int(cfg.depth_display_scale), 1),
         max(int(cfg.depth_width), 1) * max(int(cfg.depth_display_scale), 1),
@@ -722,6 +736,8 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     perception_sub.start()
     control_pub = SimControlPush(port=cfg.control_port)
     control_pub.start()
+    manual_root_pub = ManualRootCommandPub(port=cfg.sparse_root_command_port)
+    manual_root_pub.start()
     previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
 
     def _handle_sigterm(_signum, _frame) -> None:
@@ -899,6 +915,23 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             "color: close red / mid green / far blue / miss black"
         )
 
+    def _publish_manual_root_command() -> None:
+        command = [
+            float(manual_root_dx.value),
+            float(manual_root_dy.value),
+            float(manual_root_dyaw.value),
+        ]
+        enabled = bool(manual_root_enabled_cb.value)
+        mode = str(manual_root_mode_dropdown.value)
+        manual_root_pub.publish(enabled=enabled, mode=mode, command=command)
+        status = "enabled" if enabled else "disabled"
+        manual_root_md.content = (
+            f"status: `{status}`\n\n"
+            f"mode: `{mode}`\n\n"
+            f"command: `[{command[0]:.3f}, {command[1]:.3f}, {command[2]:.3f}]`\n\n"
+            f"port: `{cfg.sparse_root_command_port}`"
+        )
+
     def _stop_rollout() -> None:
         nonlocal rollout_proc, rollout_log_handle
         if rollout_proc is not None:
@@ -924,6 +957,11 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             env["HOLOSOMA_MJ_TRACK_INTERNAL_CORE"] = "1"
             env["RUN_SECONDS"] = str(cfg.launch_run_seconds)
             env["TRAINING_HEADLESS"] = "True" if cfg.training_headless else "False"
+            env["SIM_STATE_PORT"] = str(cfg.state_port)
+            env["PERCEPTION_OBS_PORT"] = str(cfg.perception_obs_port)
+            env["SIM_CONTROL_PORT"] = str(cfg.control_port)
+            env["SPARSE_ROOT_COMMAND_PORT"] = str(cfg.sparse_root_command_port)
+            env["ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND"] = "1"
             env["HOLOSOMA_MUJOCO_OBJECT_GEOM_SNAPSHOT_PATH"] = str(snapshot_path_default)
             if skip_policy is not None:
                 env["SKIP_POLICY"] = "1" if skip_policy else "0"
@@ -1040,10 +1078,38 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             return
         _restart_rollout("manual_policy_rollout", skip_policy=False)
 
+    @manual_root_enabled_cb.on_update
+    def _(_evt) -> None:
+        _publish_manual_root_command()
+
+    @manual_root_mode_dropdown.on_update
+    def _(_evt) -> None:
+        _publish_manual_root_command()
+
+    @manual_root_dx.on_update
+    def _(_evt) -> None:
+        _publish_manual_root_command()
+
+    @manual_root_dy.on_update
+    def _(_evt) -> None:
+        _publish_manual_root_command()
+
+    @manual_root_dyaw.on_update
+    def _(_evt) -> None:
+        _publish_manual_root_command()
+
+    @manual_root_zero_btn.on_click
+    def _(_evt) -> None:
+        manual_root_dx.value = 0.0
+        manual_root_dy.value = 0.0
+        manual_root_dyaw.value = 0.0
+        _publish_manual_root_command()
+
     logger.info("Open viser at http://localhost:{}", port)
     logger.info("Reading split MuJoCo sim-state from tcp://localhost:{}", cfg.state_port)
     logger.info("Reading split MuJoCo perception_obs from tcp://localhost:{}", cfg.perception_obs_port)
     _refresh_rollout_md()
+    _publish_manual_root_command()
 
     try:
         while True:
@@ -1053,6 +1119,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
                 _request_sim_reset("auto_test_reset")
             _refresh_rollout_md()
             _refresh_depth_view()
+            _publish_manual_root_command()
 
             state = sub.get_state()
             if state is None:
@@ -1201,6 +1268,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         logger.info("Stopping viser MuJoCo sim-state viewer")
     finally:
         _stop_rollout()
+        manual_root_pub.close()
         control_pub.close()
         perception_sub.close()
         sub.close()

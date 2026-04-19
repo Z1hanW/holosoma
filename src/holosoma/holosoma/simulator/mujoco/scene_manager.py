@@ -672,7 +672,11 @@ class MujocoSceneManager:
 
         object_actor_name = "object"
         object_prefix = "object_"
-        object_body_names = {str(body.name) for body in object_spec.bodies if body.name}
+        object_body_names = {
+            str(body.name)
+            for body in object_spec.bodies
+            if body.name and str(body.name).lower() not in {"world", "universe"}
+        }
         return (
             robot_spec,
             object_spec,
@@ -1538,12 +1542,14 @@ class MujocoSceneManager:
                 if target_mass <= 0.0:
                     raise ValueError(f"robot.object.mujoco_object_mass_override must be > 0, got {target_mass}")
                 if original_mass <= 0.0:
-                    raise ValueError(
-                        "Cannot override MuJoCo object mass because the target body has non-positive mass: "
-                        f"{body.name} mass={original_mass}"
+                    logger.warning(
+                        "Skipping MuJoCo object mass override for non-positive-mass body '{}': mass={}",
+                        body.name,
+                        original_mass,
                     )
-                body_ratio = target_mass / original_mass
-                body.mass = target_mass
+                else:
+                    body_ratio = target_mass / original_mass
+                    body.mass = target_mass
             elif mass_scale is not None:
                 scale = float(mass_scale)
                 if scale <= 0.0:

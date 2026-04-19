@@ -87,6 +87,12 @@ class TaskConfig:
     sim_control_port: int = 5559
     """ZMQ port used to send split sim2sim simulator control requests."""
 
+    use_external_sparse_root_command: bool = False
+    """Subscribe to external sparse root command overrides for split WBT inference."""
+
+    sparse_root_command_port: int = 5661
+    """ZMQ port used to receive external sparse root command overrides."""
+
     use_zmq_lowcmd: bool = False
     """Send lowcmd over the split sim-control ZMQ channel instead of Unitree DDS."""
 

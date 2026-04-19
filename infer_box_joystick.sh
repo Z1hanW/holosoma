@@ -50,7 +50,7 @@ Optional env vars:
   MOCAP_PERCEPTION_PRESET (default: checkpoint; checkpoint|none|heightmap)
   DEPTH_PERCEPTION_PRESET (default: checkpoint; checkpoint|d435i)
   CAMERA_*                (optional explicit camera overrides; default preserves checkpoint camera config)
-  CAMERA_PITCH_DEG        (optional explicit camera pitch override; default preserves checkpoint camera pitch)
+  CAMERA_PITCH_DEG        (default: 10; explicit override aligned with distill_box_perception.sh)
   DISTILL_PROPRIO_HISTORY_ONLY (default: 1; keep 5-frame history only on proprio groups, keep actions single-frame)
   DISTILL_PROPRIO_HISTORY_LENGTH (default: 5)
   VISER_ENABLE_EXTERNAL_SPARSE_GOAL
@@ -742,7 +742,8 @@ IMAGE_HEIGHT=${IMAGE_HEIGHT:-}
 CAMERA_NEAR=${CAMERA_NEAR:-}
 CAMERA_FAR=${CAMERA_FAR:-}
 CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-}
-CAMERA_PITCH_DEG=${CAMERA_PITCH_DEG:-}
+CAMERA_PITCH_DEG=${CAMERA_PITCH_DEG:-10}
+CAMERA_PITCH_DEG_EXPLICIT=1
 MOCAP_PERCEPTION_PRESET=${MOCAP_PERCEPTION_PRESET:-checkpoint}
 DEPTH_PERCEPTION_PRESET=${DEPTH_PERCEPTION_PRESET:-checkpoint}
 OBJECT_GEOMETRY_MODE_RAW=${OBJECT_GEOMETRY_MODE:-}

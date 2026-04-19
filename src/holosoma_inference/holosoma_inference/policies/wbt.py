@@ -29,6 +29,7 @@ from holosoma_inference.utils.math.quat import (
     wxyz_to_xyzw,
     xyzw_to_wxyz,
 )
+from holosoma_inference.utils.sim_control import ManualRootCommandSub
 from holosoma_inference.utils.sim_state import SimStateSub
 
 
@@ -345,6 +346,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_yaw_offset = 0.0
         self._latest_sim_state: dict | None = None
         self._sim_state_sub: SimStateSub | None = None
+        self._manual_sparse_root_command_sub: ManualRootCommandSub | None = None
+        self._manual_sparse_root_command_log_key: tuple[bool, str] | None = None
         self._logged_root_reference_clip_start = False
         self._logged_sim_ref_from_sim_state = False
         self._auto_start_motion_clip_pending = False
@@ -403,6 +406,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if self.config.task.use_sim_state:
             self._sim_state_sub = SimStateSub(port=self.config.task.sim_state_port)
             self._sim_state_sub.start()
+
+        if self.config.task.use_external_sparse_root_command:
+            self._manual_sparse_root_command_sub = ManualRootCommandSub(
+                port=self.config.task.sparse_root_command_port,
+            )
+            self._manual_sparse_root_command_sub.start()
 
         if self.use_policy_action:
             self._handle_start_policy()
@@ -731,6 +740,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._onnx_metadata = metadata
         self._onnx_obs_dim = self._get_onnx_obs_dim()
         self._maybe_force_sparse_depth_distill_obs_config()
+        self._maybe_force_legacy_object_history_obs_config()
 
         # Extract URDF text from ONNX metadata
         assert "robot_urdf" in metadata, "Robot urdf text not found in ONNX metadata"
@@ -865,7 +875,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             "Overriding sparse depth-distill observation config from {} dims to ONNX-aligned 308 dims.",
             configured_dim,
         )
-        self.config.observation = ObservationConfig(
+        object.__setattr__(self.config, "observation", ObservationConfig(
             obs_dict={
                 "actor_obs_root": ["sparse_target_root_trajectory_command"],
                 "actor_obs_proprio_no_linvel": ["base_ang_vel", "dof_pos", "dof_vel"],
@@ -886,7 +896,37 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 "actor_obs_root": 1,
                 "actor_obs_proprio_no_linvel": 5,
             },
+        ))
+        self._init_obs_config()
+
+    def _maybe_force_legacy_object_history_obs_config(self) -> None:
+        if not self._uses_legacy_object_obs or self._onnx_obs_dim is None:
+            return
+
+        actor_terms = list(self.config.observation.obs_dict.get("actor_obs", []))
+        frame_dim = sum(int(self.config.observation.obs_dims[term]) for term in actor_terms)
+        if frame_dim <= 0 or self._onnx_obs_dim % frame_dim != 0:
+            return
+
+        expected_history = int(self._onnx_obs_dim // frame_dim)
+        current_history = int(self.config.observation.history_length_dict.get("actor_obs", 1))
+        if expected_history <= 1 or current_history == expected_history:
+            return
+
+        logger.warning(
+            "Overriding legacy object observation history from {} to {} to match ONNX obs dim {}.",
+            current_history,
+            expected_history,
+            self._onnx_obs_dim,
         )
+        history_lengths = dict(self.config.observation.history_length_dict)
+        history_lengths["actor_obs"] = expected_history
+        object.__setattr__(self.config, "observation", ObservationConfig(
+            obs_dict=dict(self.config.observation.obs_dict),
+            obs_dims=dict(self.config.observation.obs_dims),
+            obs_scales=dict(self.config.observation.obs_scales),
+            history_length_dict=history_lengths,
+        ))
         self._init_obs_config()
 
     def _build_zero_actor_obs(self) -> np.ndarray:
@@ -1084,6 +1124,50 @@ class WholeBodyTrackingPolicy(BasePolicy):
         motion_ref_ori_b = matrix_from_quat(subtract_frame_transforms(robot_ref_ori, motion_ref_ori))
         return motion_ref_ori_b[..., :2].reshape(1, -1)
 
+    def _apply_external_sparse_root_command(self, motion_command: np.ndarray) -> np.ndarray:
+        sub = self._manual_sparse_root_command_sub
+        if sub is None:
+            return motion_command
+
+        payload = sub.get_payload()
+        enabled = bool(payload.get("enabled", False)) if isinstance(payload, dict) else False
+        mode = str(payload.get("mode", "manual")).strip().lower() if isinstance(payload, dict) else "manual"
+        log_key = (enabled, mode)
+        if log_key != self._manual_sparse_root_command_log_key:
+            logger.info("External sparse root command: enabled={} mode={}", enabled, mode)
+            self._manual_sparse_root_command_log_key = log_key
+        if not enabled:
+            return motion_command
+
+        command_raw = payload.get("command") if isinstance(payload, dict) else None
+        try:
+            manual_command = np.asarray(command_raw, dtype=np.float32).reshape(1, -1)[:, :3]
+        except (TypeError, ValueError):
+            logger.warning("Ignoring malformed external sparse root command: {}", command_raw)
+            return motion_command
+        if manual_command.shape[1] != 3:
+            logger.warning("Ignoring external sparse root command with dim {}", manual_command.shape[1])
+            return motion_command
+        manual_command = np.nan_to_num(manual_command, nan=0.0, posinf=0.0, neginf=0.0).astype(
+            np.float32,
+            copy=False,
+        )
+
+        if mode in {"offset", "add", "motion_plus_manual", "motion+manual"}:
+            command = np.array(motion_command, dtype=np.float32, copy=True)
+            command[:, :2] += manual_command[:, :2]
+            command[:, 2] = np.asarray(
+                [self._normalize_angle(float(value)) for value in command[:, 2] + manual_command[:, 2]],
+                dtype=np.float32,
+            )
+            return command
+
+        manual_command[:, 2] = np.asarray(
+            [self._normalize_angle(float(value)) for value in manual_command[:, 2]],
+            dtype=np.float32,
+        )
+        return manual_command
+
     def _get_sparse_target_root_trajectory_command(self, robot_state_data: np.ndarray) -> np.ndarray:
         if self._motion_data is None:
             raise ValueError("Motion data is required for sparse root trajectory observations.")
@@ -1106,7 +1190,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         target_heading = self._quat_yaw(motion_root_quat_wxyz)
         robot_heading = self._quat_yaw(robot_root_quat_wxyz)
         rel_yaw = np.array([[self._normalize_angle(target_heading - robot_heading)]], dtype=np.float32)
-        return np.concatenate([rel_xy, rel_yaw], axis=1).astype(np.float32, copy=False)
+        motion_command = np.concatenate([rel_xy, rel_yaw], axis=1).astype(np.float32, copy=False)
+        return self._apply_external_sparse_root_command(motion_command)
 
     def _get_depth_distill_obs_buffer_dict(self, robot_state_data: np.ndarray) -> dict[str, np.ndarray]:
         base_lin_vel = robot_state_data[:, 7 + self.num_dofs : 7 + self.num_dofs + 3]

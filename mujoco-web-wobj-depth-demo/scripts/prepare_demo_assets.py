@@ -25,7 +25,7 @@ from holosoma_inference.tools.patch_motion_onnx import patch_model
 
 
 DEFAULT_MODEL = Path(
-    "/data/logs_new/boxer/20260415_014803-g1_29dof_wbt_w_object_distill_box_perception_sparse_root_cmd_access_to_depth-locomotion/model_03999.onnx"
+    "/home/ubuntu/FAR/holosoma/.teacher_checkpoints/model_07000.onnx"
 )
 DEFAULT_MOTION = Path(
     "/home/ubuntu/FAR/holosoma/outputs/motion_bank_success_box_0_92_0p3/box_74.npz"
@@ -37,6 +37,8 @@ DEFAULT_SCENE = Path("/home/ubuntu/FAR/holosoma/src/holosoma_retargeting/models/
 DEFAULT_ACTUATOR_SOURCE = Path("/home/ubuntu/FAR/holosoma/src/holosoma/holosoma/data/robots/g1/g1_29dof.xml")
 DEFAULT_MAX_CLIPS = 0
 DEFAULT_OBJECT_MASS_KG = 1.4
+INFER_DYNAMICS_SOURCE = "infer_box_joystick.sh checkpoint ONNX metadata"
+CAMERA_PITCH_OVERRIDE_DEG = 10.0
 MUJOCO_OBJECT_CONDIM = 6
 MUJOCO_OBJECT_SLIDE_FRICTION_MIN = 0.6
 MUJOCO_OBJECT_SPIN_FRICTION = 0.02
@@ -209,7 +211,9 @@ def _extract_perception_cfg(metadata: dict, perception_dim: int | None = None) -
         "camera_near": float(perception.get("camera_near", 0.001)),
         "camera_far": float(perception.get("camera_far", 3.0)),
         "max_distance": float(perception.get("max_distance", 3.0)),
-        "camera_pitch_deg": float(perception.get("camera_pitch_deg", 0.0)),
+        "camera_pitch_deg": CAMERA_PITCH_OVERRIDE_DEG,
+        "camera_pitch_deg_checkpoint": float(perception.get("camera_pitch_deg", 0.0)),
+        "camera_pitch_deg_source": "explicit_distill_box_perception_override",
         "camera_warp_normalize": bool(perception.get("camera_warp_normalize", False)),
         "camera_warp_preprocess": bool(perception.get("camera_warp_preprocess", False)),
         "camera_warp_resize": list(resize_cfg),
@@ -228,8 +232,8 @@ def _extract_perception_cfg(metadata: dict, perception_dim: int | None = None) -
         "camera_warp_enable_holes": bool(perception.get("camera_warp_enable_holes", False)),
         "camera_apply_sensor_noise": bool(perception.get("camera_apply_sensor_noise", False)),
         "web_apply_warp_edge_noise": bool(perception.get("web_apply_warp_edge_noise", False)),
-        "web_depth_include_visual_meshes": bool(perception.get("web_depth_include_visual_meshes", False)),
-        "web_depth_mesh_mode": str(perception.get("web_depth_mesh_mode", "bounds")),
+        "web_depth_include_visual_meshes": bool(perception.get("web_depth_include_visual_meshes", True)),
+        "web_depth_mesh_mode": str(perception.get("web_depth_mesh_mode", "triangles")),
         "camera_body_name": str(perception.get("camera_body_name", "torso_link")),
         "sensor_offset": list(perception.get("sensor_offset", [0.01, 0.01, 0.44])),
         "camera_mount_quat": list(
@@ -332,12 +336,42 @@ def _extract_control_cfg(metadata: dict) -> dict:
     sim_fps = int(simulator_cfg.get("fps", 200))
     control_decimation = int(simulator_cfg.get("control_decimation", 4))
     return {
+        "source": INFER_DYNAMICS_SOURCE,
+        "control_type": str(control_cfg.get("control_type", "P")),
         "action_scale": action_scale,
         "policy_action_scale": action_scale,
         "policy_hz": float(sim_fps) / float(control_decimation),
         "sim_fps": sim_fps,
         "control_decimation": control_decimation,
         "clip_actions_threshold": action_clip_value,
+        "clip_actions": bool(control_cfg.get("clip_actions", True)),
+        "clip_torques": bool(control_cfg.get("clip_torques", True)),
+        "action_scales_by_effort_limit_over_p_gain": bool(
+            control_cfg.get("action_scales_by_effort_limit_over_p_gain", False)
+        ),
+    }
+
+
+def _extract_simulator_dynamics_cfg(metadata: dict) -> dict:
+    simulator_cfg = metadata.get("experiment_config", {}).get("simulator", {})
+    config = simulator_cfg.get("config", {}) if isinstance(simulator_cfg, dict) else {}
+    sim = config.get("sim", {}) if isinstance(config, dict) else {}
+    physx = sim.get("physx", {}) if isinstance(sim, dict) else {}
+    return {
+        "source": INFER_DYNAMICS_SOURCE,
+        "target": simulator_cfg.get("_target_") if isinstance(simulator_cfg, dict) else None,
+        "name": config.get("name") if isinstance(config, dict) else None,
+        "fps": int(sim.get("fps", 200)),
+        "control_decimation": int(sim.get("control_decimation", 4)),
+        "substeps": int(sim.get("substeps", 1)),
+        "gravity": [0.0, 0.0, -9.81],
+        "physx": {
+            "solver_type": physx.get("solver_type"),
+            "num_position_iterations": physx.get("num_position_iterations"),
+            "num_velocity_iterations": physx.get("num_velocity_iterations"),
+            "bounce_threshold_velocity": physx.get("bounce_threshold_velocity"),
+        },
+        "randomization_disabled_like_infer_box_joystick": True,
     }
 
 
@@ -577,6 +611,63 @@ def _extract_effort_limits(scene_xml_path: Path) -> dict[str, float]:
             continue
         limits[joint_name] = max(abs(parts[0]), abs(parts[1]))
     return limits
+
+
+def _extract_training_effort_limits(metadata: dict, dof_names: list[str] | None = None) -> dict[str, float]:
+    robot_cfg = metadata.get("experiment_config", {}).get("robot", {})
+    names = list(dof_names or robot_cfg.get("dof_names") or metadata.get("dof_names") or [])
+    efforts = list(robot_cfg.get("dof_effort_limit_list") or [])
+    if len(efforts) < len(names):
+        raise RuntimeError(
+            "Checkpoint metadata is missing robot.dof_effort_limit_list values: "
+            f"got {len(efforts)} for {len(names)} dofs"
+        )
+    return {str(name): float(efforts[index]) for index, name in enumerate(names)}
+
+
+def _validate_scene_effort_limits(
+    *,
+    dof_names: list[str],
+    expected: dict[str, float],
+    actual: dict[str, float],
+    scene_xml_path: Path,
+    tolerance: float = 1.0e-6,
+) -> dict:
+    missing: list[str] = []
+    mismatches: list[dict[str, float | str]] = []
+    for name in dof_names:
+        if name not in actual:
+            missing.append(name)
+            continue
+        expected_limit = float(expected[name])
+        actual_limit = float(actual[name])
+        if abs(expected_limit - actual_limit) > tolerance:
+            mismatches.append(
+                {
+                    "joint": name,
+                    "expected": expected_limit,
+                    "actual": actual_limit,
+                }
+            )
+
+    if missing or mismatches:
+        preview = ", ".join(
+            [f"missing {name}" for name in missing[:8]]
+            + [
+                f"{item['joint']}: expected {item['expected']} actual {item['actual']}"
+                for item in mismatches[:8]
+            ]
+        )
+        raise RuntimeError(
+            f"MuJoCo scene actuator ctrlrange does not match checkpoint effort limits in {scene_xml_path}: {preview}"
+        )
+
+    return {
+        "source": INFER_DYNAMICS_SOURCE,
+        "checked_joints": len(dof_names),
+        "tolerance": tolerance,
+        "matches": True,
+    }
 
 
 def _resolve_policy_action_scales(
@@ -1075,6 +1166,24 @@ def _write_shared_scene_assets(
     def _is_enabled_collision_geom(geom: ET.Element) -> bool:
         return geom.attrib.get("contype", "1") != "0" and geom.attrib.get("conaffinity", "1") != "0"
 
+    def _with_alpha_zero(rgba: str | None) -> str:
+        parts = (rgba or "0.7 0.7 0.7 1").split()
+        while len(parts) < 4:
+            parts.append("1")
+        return " ".join([parts[0], parts[1], parts[2], "0"])
+
+    def _hide_disabled_urdf_collision_primitive(geom: ET.Element) -> bool:
+        if geom.attrib.get("group") is not None:
+            return False
+        if geom.attrib.get("mesh"):
+            return False
+        if geom.attrib.get("type", "") in {"mesh", "plane"}:
+            return False
+        if geom.attrib.get("contype") != "0" or geom.attrib.get("conaffinity") != "0":
+            return False
+        geom.set("rgba", _with_alpha_zero(geom.attrib.get("rgba")))
+        return True
+
     def _format_friction(values: object) -> str:
         return " ".join(_mj_float(value) for value in values)
 
@@ -1148,6 +1257,8 @@ def _write_shared_scene_assets(
             if "largebox" in name or "object" in mesh:
                 geom.set("rgba", "0.7 0.8 0.9 0.7")
             continue
+        if _hide_disabled_urdf_collision_primitive(geom):
+            continue
         contype = geom.attrib.get("contype")
         conaffinity = geom.attrib.get("conaffinity")
         if (contype and contype != "0") or (conaffinity and conaffinity != "0"):
@@ -1208,6 +1319,7 @@ def _write_shared_scene_assets(
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_path, destination)
 
+    scene_xml_path.parent.mkdir(parents=True, exist_ok=True)
     scene_tree = ET.ElementTree(scene_root)
     ET.indent(scene_tree, space="  ")
     scene_tree.write(scene_xml_path, encoding="utf-8", xml_declaration=False)
@@ -1220,7 +1332,10 @@ def _stage_clip_bundle(
     motion_path: Path,
     bundle_dir: Path,
     scene_path: Path,
-    effort_limits: dict[str, float],
+    object_urdf_path: str,
+    training_effort_limits: dict[str, float],
+    scene_effort_limits: dict[str, float],
+    effort_validation: dict,
 ) -> tuple[dict, dict]:
     bundle_dir.mkdir(parents=True, exist_ok=True)
     patched_model_path = bundle_dir / "policy.onnx"
@@ -1235,12 +1350,16 @@ def _stage_clip_bundle(
     dof_names = list(metadata["dof_names"])
     motion_summary = _read_motion_summary(motion_path.resolve(), dof_names)
     control_cfg = _extract_control_cfg(metadata)
+    metadata_effort_limits = _extract_training_effort_limits(metadata, dof_names)
+    if metadata_effort_limits != training_effort_limits:
+        raise RuntimeError("Patched ONNX metadata effort limits diverged from the source checkpoint metadata")
     policy_action_scales = _resolve_policy_action_scales(
         dof_names=dof_names,
         kp=list(metadata["kp"]),
         base_action_scale=float(control_cfg["action_scale"]),
-        effort_limits=effort_limits,
+        effort_limits=training_effort_limits,
     )
+    object_physics = _resolve_distill_object_physics(metadata, object_urdf_path)
 
     clip_config = {
         "model_path": str(patched_model_path.relative_to(bundle_dir.parents[1])),
@@ -1254,14 +1373,44 @@ def _stage_clip_bundle(
         "robot_init_state": _extract_robot_init_state(metadata),
         "kp": list(metadata["kp"]),
         "kd": list(metadata["kd"]),
-        "reset_mode_default": "demo_raw",
+        "reset_mode_default": "isaac_training_default_pose",
         "reset_modes": ["demo_raw", "isaac_training_default_pose"],
         "perception": _extract_perception_cfg(metadata, perception_dim=perception_dim),
         "observation": _extract_observation_cfg(metadata, obs_dim=obs_dim),
         "control": {
             **control_cfg,
-            "effort_limits": effort_limits,
+            "effort_limits": training_effort_limits,
+            "effort_limits_source": "onnx_metadata.experiment_config.robot.dof_effort_limit_list",
+            "scene_effort_limits": scene_effort_limits,
+            "scene_effort_limits_validation": effort_validation,
+            "policy_action_scales_source": "action_scale * onnx_metadata_effort_limit / kp",
             "policy_action_scales": policy_action_scales,
+        },
+        "dynamics": {
+            "source": INFER_DYNAMICS_SOURCE,
+            "simulator": _extract_simulator_dynamics_cfg(metadata),
+            "object": {
+                "object_urdf_path": str(Path(object_urdf_path).expanduser().resolve()),
+                "mass": float(object_physics["mass"]),
+                "base_urdf_mass": float(object_physics["base_mass"]),
+                "fixed_mass_kg": object_physics["fixed_mass_kg"],
+                "inertia": object_physics["inertia"],
+                "friction": object_physics["friction"],
+                "condim": MUJOCO_OBJECT_CONDIM,
+                "rubber_hand_friction": [
+                    MUJOCO_RUBBER_HAND_SLIDE_FRICTION,
+                    MUJOCO_RUBBER_HAND_SPIN_FRICTION,
+                    MUJOCO_RUBBER_HAND_ROLL_FRICTION,
+                ],
+                "rubber_hand_object_pair_friction": [
+                    MUJOCO_RUBBER_HAND_SLIDE_FRICTION,
+                    MUJOCO_RUBBER_HAND_SLIDE_FRICTION,
+                    MUJOCO_RUBBER_HAND_SPIN_FRICTION,
+                    MUJOCO_RUBBER_HAND_ROLL_FRICTION,
+                    MUJOCO_RUBBER_HAND_ROLL_FRICTION,
+                ],
+            },
+            "terrain": _extract_terrain_cfg(metadata),
         },
         "onnx": {
             "inputs": onnx_inputs,
@@ -1270,6 +1419,10 @@ def _stage_clip_bundle(
             "perception_obs_dim": perception_dim,
         },
         "web_control": {
+            "command_mode": "manual_root",
+            "reset_mode": "isaac_training_default_pose",
+            "manual_xy_m": 0.5,
+            "manual_yaw_rad": 0.3,
             "xy_speed_mps": 0.7,
             "yaw_speed_radps": 1.0,
         },
@@ -1321,22 +1474,36 @@ def stage_assets(
             suffix += 1
         bundle_ids.add(bundle_id)
         bundle_dir = clips_dir / bundle_id
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        object_urdf_path = _read_motion_object_urdf_path(motion_path)
         scene_xml_path = _write_shared_scene_assets(
             scene_path=scene_path,
             actuator_source_path=actuator_source_path,
             output_dir=output_dir,
             model_path=model_path,
-            object_urdf_path=_read_motion_object_urdf_path(motion_path),
+            object_urdf_path=object_urdf_path,
             scene_xml_path=bundle_dir / "scene.xml",
         )
-        effort_limits = _extract_effort_limits(scene_xml_path)
+        metadata = _read_onnx_metadata(model_path)
+        dof_names = list(metadata["dof_names"])
+        training_effort_limits = _extract_training_effort_limits(metadata, dof_names)
+        scene_effort_limits = _extract_effort_limits(scene_xml_path)
+        effort_validation = _validate_scene_effort_limits(
+            dof_names=dof_names,
+            expected=training_effort_limits,
+            actual=scene_effort_limits,
+            scene_xml_path=scene_xml_path,
+        )
 
         _clip_config, clip_manifest_entry = _stage_clip_bundle(
             model_path=model_path,
             motion_path=motion_path,
             bundle_dir=bundle_dir,
             scene_path=scene_xml_path,
-            effort_limits=effort_limits,
+            object_urdf_path=object_urdf_path,
+            training_effort_limits=training_effort_limits,
+            scene_effort_limits=scene_effort_limits,
+            effort_validation=effort_validation,
         )
         manifest_clips.append(clip_manifest_entry)
         if default_clip_id is None:

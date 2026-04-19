@@ -104,7 +104,9 @@ SIM_CLOCK_PORT="${SIM_CLOCK_PORT:-5655}"
 SIM_STATE_PORT="${SIM_STATE_PORT:-5657}"
 SIM_CONTROL_PORT="${SIM_CONTROL_PORT:-5659}"
 PERCEPTION_OBS_PORT="${PERCEPTION_OBS_PORT:-5658}"
+SPARSE_ROOT_COMMAND_PORT="${SPARSE_ROOT_COMMAND_PORT:-5661}"
 ENABLE_SPLIT_PERCEPTION_OBS="${ENABLE_SPLIT_PERCEPTION_OBS:-auto}"
+ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND="${ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND:-0}"
 PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
 PERCEPTION_CAMERA_SOURCE="${PERCEPTION_CAMERA_SOURCE:-far_tracking_warp}"
 PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-mesh}"
@@ -722,6 +724,8 @@ legacy_w_object_terms = {
 
 if obs_dim == 123:
     print("g1-29dof-wbt-object-distill")
+elif obs_dim == 875:
+    print("g1-29dof-wbt-w-object")
 elif obs_dim == 175:
     print("g1-29dof-wbt-w-object")
 elif obs_dim == 181:
@@ -1026,6 +1030,9 @@ if [[ "$SIM_USE_ZMQ_LOWCMD" == "1" ]]; then
 fi
 if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]]; then
   POLICY_CMD+=(--task.use-split-perception-obs --task.perception-obs-port "$PERCEPTION_OBS_PORT")
+fi
+if [[ "$ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND" == "1" || "$ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND" == "true" || "$ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND" == "True" ]]; then
+  POLICY_CMD+=(--task.use-external-sparse-root-command --task.sparse-root-command-port "$SPARSE_ROOT_COMMAND_PORT")
 fi
 if [[ "$USE_SIM_TIME" == "1" ]]; then
   POLICY_CMD+=(--task.use-sim-time)
