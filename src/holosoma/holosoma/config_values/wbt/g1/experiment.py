@@ -436,6 +436,7 @@ g1_29dof_wbt_w_object_generalist = replace(
     ),
     reward=reward.g1_29dof_wbt_reward_w_object_generalist,
     command=command.g1_29dof_wbt_command_w_object_generalist,
+    termination=termination.g1_29dof_wbt_termination_generalist,
 )
 
 g1_29dof_wbt_w_object_generalist_legacy_obs = replace(

@@ -1,5 +1,7 @@
 """Whole Body Tracking termination presets for the G1 robot."""
 
+from dataclasses import replace
+
 from holosoma.config_types.termination import TerminationManagerCfg, TerminationTermCfg
 
 g1_29dof_wbt_termination = TerminationManagerCfg(
@@ -43,6 +45,20 @@ g1_29dof_wbt_termination = TerminationManagerCfg(
                 "bad_object_pos_threshold": 0.25,
                 "bad_object_ori_threshold": 0.8,
             },
+        ),
+    }
+)
+
+g1_29dof_wbt_termination_generalist = TerminationManagerCfg(
+    terms={
+        **g1_29dof_wbt_termination.terms,
+        "bad_tracking": replace(
+            g1_29dof_wbt_termination.terms["bad_tracking"],
+            func="holosoma.managers.termination.terms.wbt:BadTracking",
+        ),
+        "motion_ends": TerminationTermCfg(
+            func="holosoma.managers.termination.terms.wbt:motion_ends",
+            is_timeout=False,
         ),
     }
 )
@@ -273,6 +289,7 @@ g1_29dof_wbt_termination_command_curriculum = TerminationManagerCfg(
 
 __all__ = [
     "g1_29dof_wbt_termination",
+    "g1_29dof_wbt_termination_generalist",
     "g1_29dof_wbt_termination_command_curriculum",
     "g1_29dof_wbt_termination_distill",
     "g1_29dof_wbt_termination_distill_sparse_goal_mixed",
