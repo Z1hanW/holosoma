@@ -56,14 +56,6 @@ ACTOR_LR=${ACTOR_LR:-1e-05}
 CRITIC_LR=${CRITIC_LR:-1e-05}
 CLIP_WEIGHTING_STRATEGY=${CLIP_WEIGHTING_STRATEGY:-success_rate_adaptive}
 
-TRAIN_DATASETS=${TRAIN_DATASETS:-"omomo,behave"}
-AUTO_PREP_MIXED_BANK=${AUTO_PREP_MIXED_BANK:-0}
-MIXED_CLEAN_OUT=${MIXED_CLEAN_OUT:-1}
-MIXED_LINK_MODE=${MIXED_LINK_MODE:-symlink}
-MIXED_BEHAVE_FILTER=${MIXED_BEHAVE_FILTER:-boxmedium,boxlarge}
-MIXED_OMOMO_DIR=${MIXED_OMOMO_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"}
-MIXED_BEHAVE_DIR=${MIXED_BEHAVE_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_sq_carry"}
-MIXED_BEHAVE_MAP_FILE=${MIXED_BEHAVE_MAP_FILE:-"${MIXED_BEHAVE_DIR}/_clip_object_urdf_map.json"}
 DEFAULT_POSE_PREPEND_ENABLED=${DEFAULT_POSE_PREPEND_ENABLED:-1}
 DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0.2}
 
@@ -416,67 +408,18 @@ if [[ "${AUTO_ATTACH_WANDB_RUN}" == "1" && -n "${RESUME_WANDB_RUN_ID}" ]]; then
   echo "[INFO] W&B same-run resume enabled: ${WANDB_ENTITY}/${WANDB_PROJECT}/${WANDB_RUN_ID} (resume=${WANDB_RESUME})"
 fi
 
-datasets_normalized=$(echo "${TRAIN_DATASETS}" | tr '[:upper:]' '[:lower:]' | tr -d '[]')
-IFS=',' read -r -a dataset_tokens <<< "${datasets_normalized}"
-USE_OMOMO=0
-USE_BEHAVE=0
-for token in "${dataset_tokens[@]}"; do
-  dataset_key=$(echo "${token}" | tr -d '[:space:]')
-  if [[ -z "${dataset_key}" ]]; then
-    continue
-  fi
-  case "${dataset_key}" in
-    omomo)
-      USE_OMOMO=1
-      ;;
-    behave)
-      USE_BEHAVE=1
-      ;;
-    *)
-      echo "[ERROR] Unsupported dataset '${dataset_key}' in TRAIN_DATASETS='${TRAIN_DATASETS}'. Use only omomo,behave." >&2
-      exit 2
-      ;;
-  esac
-done
-if [[ "${USE_OMOMO}" != "1" && "${USE_BEHAVE}" != "1" ]]; then
-  echo "[ERROR] TRAIN_DATASETS='${TRAIN_DATASETS}' selected no datasets. Use omomo and/or behave." >&2
+echo "[INFO] MOTION_DIR: ${MOTION_DIR}"
+
+if [[ "${MOTION_DIR}" == *"/src/holosoma_retargeting/converted_res/"* || "${MOTION_DIR}" == src/holosoma_retargeting/converted_res/* ]]; then
+  echo "[ERROR] Refusing legacy retargeting converted_res motion bank: ${MOTION_DIR}" >&2
+  echo "[ERROR] train_object_generalist.sh should load explicitly prepared data/ds_box_data motion banks." >&2
   exit 2
 fi
 
-selected_datasets=()
-if [[ "${USE_OMOMO}" == "1" ]]; then
-  selected_datasets+=("omomo")
-fi
-if [[ "${USE_BEHAVE}" == "1" ]]; then
-  selected_datasets+=("behave")
-fi
-if [[ "${MOTION_DIR_FROM_ENV}" != "1" ]]; then
-  if [[ "${USE_OMOMO}" == "1" && "${USE_BEHAVE}" == "1" ]]; then
-    MOTION_DIR="${DEFAULT_MOTION_DIR}"
-  elif [[ "${USE_OMOMO}" == "1" ]]; then
-    MOTION_DIR="${MIXED_OMOMO_DIR}"
-  else
-    MOTION_DIR="${MIXED_BEHAVE_DIR}"
-  fi
-fi
-echo "[INFO] TRAIN_DATASETS (resolved): $(IFS=,; echo "${selected_datasets[*]}")"
-echo "[INFO] MOTION_DIR: ${MOTION_DIR}"
-
-if [[ "${AUTO_PREP_MIXED_BANK}" != "0" ]]; then
-  if [[ "${USE_OMOMO}" == "1" && "${USE_BEHAVE}" == "1" ]]; then
-    echo "[INFO] Preparing mixed motion bank into: ${MOTION_DIR}"
-    OMOMO_DIR="${MIXED_OMOMO_DIR}" \
-    BEHAVE_DIR="${MIXED_BEHAVE_DIR}" \
-    OUT_DIR="${MOTION_DIR}" \
-    BEHAVE_FILTER="${MIXED_BEHAVE_FILTER}" \
-    LINK_MODE="${MIXED_LINK_MODE}" \
-    CLEAN_OUT="${MIXED_CLEAN_OUT}" \
-    BEHAVE_MAP_FILE="${MIXED_BEHAVE_MAP_FILE}" \
-    PREFIX_DATASET=1 \
-    bash "${SCRIPT_DIR}/prepare_mixed_object_bank.sh"
-  else
-    echo "[INFO] AUTO_PREP_MIXED_BANK is enabled but skipped for single-dataset training ($(IFS=,; echo "${selected_datasets[*]}"))."
-  fi
+if [[ ! -d "${MOTION_DIR}" ]]; then
+  echo "[ERROR] MOTION_DIR does not exist: ${MOTION_DIR}" >&2
+  echo "[ERROR] Use DS_DATA_ROOT or MOTION_DIR to point at an explicitly prepared data/ds_box_data motion bank." >&2
+  exit 2
 fi
 
 if [[ -z "${OBJECT_SPEC_PATH}" ]]; then
@@ -484,48 +427,53 @@ if [[ -z "${OBJECT_SPEC_PATH}" ]]; then
   if [[ -f "${default_map}" ]]; then
     OBJECT_SPEC_PATH="${default_map}"
     echo "[INFO] Using clip-object URDF map: ${OBJECT_SPEC_PATH}"
-  elif [[ "${USE_BEHAVE}" == "1" && -f "${MIXED_BEHAVE_MAP_FILE}" ]]; then
-    OBJECT_SPEC_PATH="${MIXED_BEHAVE_MAP_FILE}"
-    echo "[INFO] Using BEHAVE clip-object URDF map: ${OBJECT_SPEC_PATH}"
-  elif [[ "${USE_BEHAVE}" == "1" ]]; then
-    echo "[WARN] BEHAVE selected but no clip-object URDF map found. Training may fallback to single-object URDF." >&2
+  else
+    echo "[ERROR] Missing clip-object URDF map: ${default_map}" >&2
+    echo "[ERROR] Set OBJECT_SPEC_PATH explicitly if this motion bank uses a nonstandard map path." >&2
+    exit 2
   fi
 fi
 
-# BEHAVE requires per-clip URDF mapping; do not silently fall back to a single URDF.
-if [[ "${USE_BEHAVE}" == "1" ]]; then
-  if [[ -z "${OBJECT_SPEC_PATH}" || ! -f "${OBJECT_SPEC_PATH}" ]]; then
-    echo "[ERROR] BEHAVE training requires a valid _clip_object_urdf_map.json, but OBJECT_SPEC_PATH is missing." >&2
-    echo "[ERROR] Expected map example: ${MIXED_BEHAVE_DIR}/_clip_object_urdf_map.json" >&2
-    exit 2
-  fi
-  python - <<'PY' "${OBJECT_SPEC_PATH}" || exit 2
+if [[ ! -f "${OBJECT_SPEC_PATH}" ]]; then
+  echo "[ERROR] OBJECT_SPEC_PATH does not exist: ${OBJECT_SPEC_PATH}" >&2
+  exit 2
+fi
+
+python - <<'PY' "${MOTION_DIR}" "${OBJECT_SPEC_PATH}" || exit 2
 import json
 import sys
 from pathlib import Path
 
-path = Path(sys.argv[1])
+motion_dir = Path(sys.argv[1])
+path = Path(sys.argv[2])
+motion_ids = {clip_path.stem for clip_path in motion_dir.glob("*.npz")}
+if not motion_ids:
+    raise SystemExit(f"[ERROR] No .npz clips found under MOTION_DIR: {motion_dir}")
 payload = json.loads(path.read_text(encoding="utf-8"))
 if isinstance(payload, dict) and isinstance(payload.get("clips"), dict):
     payload = payload["clips"]
 if not isinstance(payload, dict) or not payload:
     raise SystemExit(f"[ERROR] Invalid or empty object map: {path}")
-has_urdf = False
-for entry in payload.values():
+missing = sorted(motion_ids.difference(payload.keys()))
+if missing:
+    preview = ", ".join(missing[:10])
+    raise SystemExit(f"[ERROR] Object map is missing {len(missing)} active clips from {motion_dir}: {preview}")
+missing_urdf = []
+for clip_id in sorted(motion_ids):
+    entry = payload[clip_id]
     if isinstance(entry, str):
         urdf = entry.strip()
     elif isinstance(entry, dict):
         urdf = str(entry.get("object_urdf_path", "")).strip()
     else:
         urdf = ""
-    if urdf:
-        has_urdf = True
-        break
-if not has_urdf:
-    raise SystemExit(f"[ERROR] Object map has no valid object_urdf_path entries: {path}")
-print(f"[INFO] Validated BEHAVE object map: {path}")
+    if not urdf:
+        missing_urdf.append(clip_id)
+if missing_urdf:
+    preview = ", ".join(missing_urdf[:10])
+    raise SystemExit(f"[ERROR] Object map has clips without object_urdf_path: {preview}")
+print(f"[INFO] Validated object map: {path} ({len(motion_ids)} active clips)")
 PY
-fi
 
 DEBUG_MODE=$(echo "${DEBUG_MODE}" | tr '[:upper:]' '[:lower:]')
 case "${DEBUG_MODE}" in
