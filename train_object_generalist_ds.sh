@@ -114,6 +114,9 @@ PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPAC
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-67108864}
 PHYSX_GPU_HEAP_CAPACITY=${PHYSX_GPU_HEAP_CAPACITY:-67108864}
 PHYSX_GPU_TEMP_BUFFER_CAPACITY=${PHYSX_GPU_TEMP_BUFFER_CAPACITY:-16777216}
+ACTOR_LR=${ACTOR_LR:-1e-05}
+CRITIC_LR=${CRITIC_LR:-1e-05}
+CLIP_WEIGHTING_STRATEGY=${CLIP_WEIGHTING_STRATEGY:-success_rate_adaptive}
 
 AUTO_PREP_DS_BANK=${AUTO_PREP_DS_BANK:-1}
 DS_PREP_CLEAN_OUT=${DS_PREP_CLEAN_OUT:-1}
@@ -151,9 +154,30 @@ PERCEPTION=${PERCEPTION:-none}
 PURE_SD_REWARD_PROFILE_RAW=${PURE_SD_REWARD_PROFILE:-default}
 PURE_SD_REWARD_PROFILE=$(echo "${PURE_SD_REWARD_PROFILE_RAW}" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
 GENERALIST_CONTACT_REWARD_ENABLED=${GENERALIST_CONTACT_REWARD_ENABLED:-1}
-GENERALIST_CONTACT_REWARD_MODE=${GENERALIST_CONTACT_REWARD_MODE:-tanh}
+GENERALIST_CONTACT_REWARD_MODE=${GENERALIST_CONTACT_REWARD_MODE:-binary}
 GENERALIST_CONTACT_REWARD_THRESHOLD=${GENERALIST_CONTACT_REWARD_THRESHOLD:-1.0}
 GENERALIST_CONTACT_REWARD_FORCE_SCALE=${GENERALIST_CONTACT_REWARD_FORCE_SCALE:-25.0}
+GENERALIST_LIMITS_DOF_POS_WEIGHT=${GENERALIST_LIMITS_DOF_POS_WEIGHT:--100.0}
+
+reject_legacy_converted_res_path() {
+  local name="$1"
+  local path_value="$2"
+  if [[ -z "${path_value}" ]]; then
+    return 0
+  fi
+  case "${path_value}" in
+    *src/holosoma_retargeting/converted_res*)
+      echo "[ERROR] ${name} points to legacy converted_res data: ${path_value}" >&2
+      echo "[ERROR] Use the DS bank under data/ds_box_data instead." >&2
+      exit 2
+      ;;
+  esac
+}
+
+reject_legacy_converted_res_path "MOTION_DIR" "${MOTION_DIR}"
+reject_legacy_converted_res_path "RAW_MOTION_DIR" "${RAW_MOTION_DIR}"
+reject_legacy_converted_res_path "OBJ_DIR" "${OBJ_DIR}"
+reject_legacy_converted_res_path "PREPARED_MOTION_DIR" "${PREPARED_MOTION_DIR}"
 
 normalize_resume_step() {
   local raw="$1"
@@ -1248,8 +1272,12 @@ echo "[INFO] Reference tracking reward weights root_pos=${ROOT_POS_W} root_ori=$
 echo "[INFO] Box tracking reward weights object_pos=${OBJECT_POS_W} object_ori=${OBJECT_ORI_W}"
 echo "[INFO] Reference tracking reward sigmas root_pos=${ROOT_POS_SIGMA} root_ori=${ROOT_ORI_SIGMA} body_pos=${FULL_BODY_POS_SIGMA} body_ori=${FULL_BODY_ORI_SIGMA} body_lin_vel=${FULL_BODY_LIN_VEL_SIGMA} body_ang_vel=${FULL_BODY_ANG_VEL_SIGMA}"
 echo "[INFO] Box tracking reward sigmas object_pos=${OBJECT_POS_SIGMA} object_ori=${OBJECT_ORI_SIGMA}"
+echo "[INFO] limits_dof_pos weight=${GENERALIST_LIMITS_DOF_POS_WEIGHT}"
 echo "[INFO] Motion default-pose prepend enabled: ${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
 echo "[INFO] Motion default-pose prepend duration: ${DEFAULT_POSE_PREPEND_DURATION_S}s"
+echo "[INFO] PPO learning rates: actor=${ACTOR_LR} critic=${CRITIC_LR}"
+echo "[INFO] Clip weighting strategy: ${CLIP_WEIGHTING_STRATEGY}"
+echo "[INFO] Termination defaults: BadTracking full 3D + motion_ends"
 echo "[INFO] GPU_SELECTION=all-visible"
 echo "[INFO] AVAILABLE_GPU_COUNT=${AVAILABLE_GPU_COUNT}"
 echo "[INFO] NPROC=${NPROC} PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
@@ -1263,7 +1291,13 @@ train_cmd=(
   --training.project="${WANDB_PROJECT}"
   --training.num-envs="${NUM_ENVS}"
   --command.setup-terms.motion-command.params.motion-config.motion-file "${MOTION_DIR}"
+  --command.setup-terms.motion-command.params.motion-config.clip-weighting-strategy="${CLIP_WEIGHTING_STRATEGY}"
+  --algo.config.actor_learning_rate="${ACTOR_LR}"
+  --algo.config.critic_learning_rate="${CRITIC_LR}"
   --algo.config.save-interval=100
+  --termination.terms.bad_tracking.func=holosoma.managers.termination.terms.wbt:BadTracking
+  --termination.terms.motion_ends.func=holosoma.managers.termination.terms.wbt:motion_ends
+  --termination.terms.motion_ends.is_timeout=False
   --simulator.config.sim.physx.gpu-max-rigid-contact-count="${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT}"
   --simulator.config.sim.physx.gpu-max-rigid-patch-count="${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}"
   --simulator.config.sim.physx.gpu-found-lost-pairs-capacity="${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
@@ -1280,6 +1314,7 @@ train_cmd=(
   --reward.terms.motion_global_body_ang_vel.weight="${FULL_BODY_ANG_VEL_W}"
   --reward.terms.object_global_ref_position_error_exp.weight="${OBJECT_POS_W}"
   --reward.terms.object_global_ref_orientation_error_exp.weight="${OBJECT_ORI_W}"
+  --reward.terms.limits_dof_pos.weight="${GENERALIST_LIMITS_DOF_POS_WEIGHT}"
   --reward.terms.motion_global_ref_position_error_exp.params.sigma="${ROOT_POS_SIGMA}"
   --reward.terms.motion_global_ref_orientation_error_exp.params.sigma="${ROOT_ORI_SIGMA}"
   --reward.terms.motion_relative_body_position_error_exp.params.sigma="${FULL_BODY_POS_SIGMA}"
