@@ -6,6 +6,17 @@ DEFAULT_MOTION_FILE="${DEFAULT_MOTION_FILE:-$ROOT_DIR/src/holosoma/holosoma/data
 DEFAULT_MODEL_INPUT="${DEFAULT_MODEL_INPUT:-/data/logs_new/boxer/20260316_200048-g1_29dof_wbt_w_object_extend_20260316_200027_s01_scale_1p0-g1_29dof_wbt_w_object_extend_20260316_200027/model_23500.onnx}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
+is_truthy_env() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 if [[ "${HOLOSOMA_MJ_TRACK_INTERNAL_CORE:-0}" != "1" ]]; then
   usage() {
     cat <<EOF
@@ -111,10 +122,18 @@ PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
 PERCEPTION_CAMERA_SOURCE="${PERCEPTION_CAMERA_SOURCE:-far_tracking_warp}"
 PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-mesh}"
 PERCEPTION_CAMERA_PITCH_DEG="${PERCEPTION_CAMERA_PITCH_DEG:-}"
+PERCEPTION_UPDATE_HZ="${PERCEPTION_UPDATE_HZ:-}"
+PERCEPTION_CAMERA_FPS="${PERCEPTION_CAMERA_FPS:-}"
+PERCEPTION_CAMERA_WARP_EDGE_NOISE="${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-}"
+PERCEPTION_CAMERA_WARP_BUFFER_LEN="${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-}"
+PERCEPTION_CAMERA_WARP_LATENCY_FRAME="${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-}"
 SIM_USE_ZMQ_LOWCMD="${SIM_USE_ZMQ_LOWCMD:-1}"
 SKIP_POLICY="${SKIP_POLICY:-0}"
 INTERFACE_NAME="${INTERFACE_NAME:-lo}"
 RUN_SECONDS="${RUN_SECONDS:-20}"
+if is_truthy_env "${HOLOSOMA_MJ_TRACK_RUN_FOREVER:-0}"; then
+  RUN_SECONDS=0
+fi
 TRAINING_HEADLESS="${TRAINING_HEADLESS:-True}"
 SIM_DEBUG_VIZ="${SIM_DEBUG_VIZ:-True}"
 MUJOCO_SHOW_OBJECT_COLLISION="${MUJOCO_SHOW_OBJECT_COLLISION:-0}"
@@ -986,6 +1005,11 @@ wait_for_sim_ready() {
   $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_SOURCE" ]] && printf '%s %s' "--perception.camera-source" "$PERCEPTION_CAMERA_SOURCE" ) \
   $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_OBJECT_GEOMETRY_MODE" ]] && printf '%s %s' "--perception.object-geometry-mode" "$PERCEPTION_OBJECT_GEOMETRY_MODE" ) \
   $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_PITCH_DEG" ]] && printf '%s %s' "--perception.camera-pitch-deg" "$PERCEPTION_CAMERA_PITCH_DEG" ) \
+  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_UPDATE_HZ" ]] && printf '%s %s' "--perception.update-hz" "$PERCEPTION_UPDATE_HZ" ) \
+  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_FPS" ]] && printf '%s %s' "--perception.camera-fps" "$PERCEPTION_CAMERA_FPS" ) \
+  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ]] && printf '%s %s' "--perception.camera-warp-edge-noise" "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ) \
+  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_BUFFER_LEN" ]] && printf '%s %s' "--perception.camera-warp-buffer-len" "$PERCEPTION_CAMERA_WARP_BUFFER_LEN" ) \
+  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_LATENCY_FRAME" ]] && printf '%s %s' "--perception.camera-warp-latency-frame" "$PERCEPTION_CAMERA_WARP_LATENCY_FRAME" ) \
   >"$SIM_LOG" 2>&1 &
 SIM_PID=$!
 

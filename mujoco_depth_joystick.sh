@@ -16,6 +16,7 @@ cd "${ROOT_DIR}"
 DEFAULT_MOTION_DIR="${ROOT_DIR}/data/ds_box_data/train_g1_w_obj_prepared"
 DEFAULT_MOTION_CLIP="box_74"
 DEFAULT_MOTION_FILE="${DEFAULT_MOTION_DIR}/${DEFAULT_MOTION_CLIP}.npz"
+DEFAULT_WEB_MOTION_FILE="${ROOT_DIR}/.tmp_teacher_box_contacts_part2/motion_bank/${DEFAULT_MOTION_CLIP}.npz"
 DEFAULT_OBJECT_MAP="${DEFAULT_MOTION_DIR}/_clip_object_urdf_map.json"
 DEFAULT_OBJECT_URDF="${DEFAULT_MOTION_DIR}/_generated_urdfs/${DEFAULT_MOTION_CLIP}.urdf"
 DEFAULT_DEPTH_BUNDLE_DIR="${ROOT_DIR}/mujoco-web-wobj-depth-demo/public/demo-assets/clips/${DEFAULT_MOTION_CLIP}"
@@ -31,7 +32,6 @@ Usage:
 Examples:
   bash mujoco_depth_joystick.sh
   HEADLESS=False bash mujoco_depth_joystick.sh rendered box_74
-  RUN_SECONDS=10 bash mujoco_depth_joystick.sh warp box_74 wandb://zihanw22/boxer/shoo7sr1/model_07000.onnx
   LAUNCH_VISER=1 VISER_PORT=18080 bash mujoco_depth_joystick.sh rendered box_74
 
 Environment:
@@ -41,7 +41,7 @@ Environment:
   MODEL_INPUT / MODEL_PATH    default: ${DEFAULT_DEPTH_ONNX} if present, then ${DEFAULT_TEACHER_MODEL},
                               otherwise ${DEFAULT_WANDB_MODEL}
   HEADLESS                    default: True; set False to open the native MuJoCo viewer
-  RUN_SECONDS                 default: 0; 0 means run until interrupted
+  WEB_DEMO_MATCH              default: 1; use web-demo motion/reset/manual-command/depth timing
   LAUNCH_VISER                default: 0; set 1 for the Viser split-state monitor
   PERCEPTION_CAMERA_SOURCE    default: rendered; options: rendered, far_tracking_warp
   ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND
@@ -146,6 +146,7 @@ MOTION_DIR="${MOTION_DIR:-${DEFAULT_MOTION_DIR}}"
 DEFAULT_SELECTED_MOTION_FILE="${MOTION_DIR}/${DEFAULT_MOTION_CLIP}.npz"
 DEFAULT_SELECTED_OBJECT_URDF="${MOTION_DIR}/_generated_urdfs/${DEFAULT_MOTION_CLIP}.urdf"
 OBJECT_MAP_INPUT="${OBJECT_URDF:-}"
+WEB_DEMO_MATCH="${WEB_DEMO_MATCH:-1}"
 if [[ -f "${DEFAULT_DEPTH_ONNX}" ]]; then
   MODEL_INPUT="${MODEL_INPUT:-${MODEL_PATH:-${DEFAULT_DEPTH_ONNX}}}"
 elif [[ -f "${DEFAULT_TEACHER_MODEL}" ]]; then
@@ -190,7 +191,13 @@ done
 
 if [[ -z "${MOTION_FILE}" ]]; then
   if [[ -n "${MOTION_CLIP_NAME}" ]]; then
-    MOTION_FILE="${MOTION_DIR}/${MOTION_CLIP_NAME%.npz}.npz"
+    if is_truthy "${WEB_DEMO_MATCH}" && [[ "${MOTION_CLIP_NAME%.npz}" == "${DEFAULT_MOTION_CLIP}" && -f "${DEFAULT_WEB_MOTION_FILE}" ]]; then
+      MOTION_FILE="${DEFAULT_WEB_MOTION_FILE}"
+    else
+      MOTION_FILE="${MOTION_DIR}/${MOTION_CLIP_NAME%.npz}.npz"
+    fi
+  elif is_truthy "${WEB_DEMO_MATCH}" && [[ -f "${DEFAULT_WEB_MOTION_FILE}" ]]; then
+    MOTION_FILE="${DEFAULT_WEB_MOTION_FILE}"
   elif [[ -f "${DEFAULT_SELECTED_MOTION_FILE}" ]]; then
     MOTION_FILE="${DEFAULT_SELECTED_MOTION_FILE}"
   elif [[ -f "${DEFAULT_MOTION_FILE}" ]]; then
@@ -282,7 +289,6 @@ PY
 )"
 
 HEADLESS_FLAG="$(normalize_bool_flag "${HEADLESS:-${headless:-True}}")"
-RUN_SECONDS="${RUN_SECONDS:-0}"
 LAUNCH_VISER="${LAUNCH_VISER:-0}"
 AUTO_PORTS="${AUTO_PORTS:-1}"
 
@@ -298,12 +304,20 @@ export PERCEPTION_OBS_PORT="${PERCEPTION_OBS_PORT:-5658}"
 export SIM_CONTROL_PORT="${SIM_CONTROL_PORT:-5659}"
 export SPARSE_ROOT_COMMAND_PORT="${SPARSE_ROOT_COMMAND_PORT:-5661}"
 export TRAINING_HEADLESS="${HEADLESS_FLAG}"
-export RUN_SECONDS
+export HOLOSOMA_MJ_TRACK_RUN_FOREVER="${HOLOSOMA_MJ_TRACK_RUN_FOREVER:-1}"
 export OBJECT_URDF="${OBJECT_URDF_RESOLVED}"
 export ENABLE_SPLIT_PERCEPTION_OBS="${ENABLE_SPLIT_PERCEPTION_OBS:-1}"
 export PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
 export PERCEPTION_CAMERA_SOURCE
 export PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-mesh}"
+if is_truthy "${WEB_DEMO_MATCH}"; then
+  export SIM_MOTION_INIT_MODE="${SIM_MOTION_INIT_MODE:-training_default_pose}"
+  export PERCEPTION_UPDATE_HZ="${PERCEPTION_UPDATE_HZ:-50.0}"
+  export PERCEPTION_CAMERA_FPS="${PERCEPTION_CAMERA_FPS:-50.0}"
+  export PERCEPTION_CAMERA_WARP_EDGE_NOISE="${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-False}"
+  export PERCEPTION_CAMERA_WARP_BUFFER_LEN="${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-1}"
+  export PERCEPTION_CAMERA_WARP_LATENCY_FRAME="${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-0}"
+fi
 export INFERENCE_CONFIG="${INFERENCE_CONFIG:-g1-29dof-wbt-object-distill}"
 export SIM_USE_TRAINING_URDF_OBJECT_SCENE="${SIM_USE_TRAINING_URDF_OBJECT_SCENE:-1}"
 export SIM_ADD_DEFAULT_OBJECT_ACTUATORS="${SIM_ADD_DEFAULT_OBJECT_ACTUATORS:-1}"
@@ -339,7 +353,8 @@ echo "[INFO] MuJoCo depth joystick split rollout"
 echo "[INFO] motion_file=${MOTION_FILE}"
 echo "[INFO] object_urdf=${OBJECT_URDF}"
 echo "[INFO] model=${MODEL_LOCAL}"
-echo "[INFO] headless=${HEADLESS_FLAG} run_seconds=${RUN_SECONDS}"
+echo "[INFO] headless=${HEADLESS_FLAG}"
+echo "[INFO] web_demo_match=${WEB_DEMO_MATCH} motion_init=${SIM_MOTION_INIT_MODE:-raw_motion}"
 echo "[INFO] perception=${PERCEPTION_PRESET} source=${PERCEPTION_CAMERA_SOURCE}"
 echo "[INFO] ports clock=${SIM_CLOCK_PORT} state=${SIM_STATE_PORT} perception=${PERCEPTION_OBS_PORT} control=${SIM_CONTROL_PORT} sparse_root=${SPARSE_ROOT_COMMAND_PORT}"
 echo "[INFO] external_sparse_root_command=${ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND}"
@@ -353,14 +368,31 @@ if is_truthy "${DRY_RUN:-0}"; then
 fi
 
 if is_truthy "${LAUNCH_VISER}"; then
+  MANUAL_ROOT_ENABLED_FLAG="$(normalize_bool_flag "${MANUAL_ROOT_ENABLED:-${WEB_DEMO_MANUAL_ROOT_ENABLED:-${WEB_DEMO_MATCH}}}")"
+  MANUAL_ROOT_MODE="${MANUAL_ROOT_MODE:-manual}"
+  MANUAL_ROOT_DX="${MANUAL_ROOT_DX:-0.0}"
+  MANUAL_ROOT_DY="${MANUAL_ROOT_DY:-0.0}"
+  MANUAL_ROOT_DYAW="${MANUAL_ROOT_DYAW:-0.0}"
   VISER_ARGS=(
-    --training-headless "${HEADLESS_FLAG}"
-    --launch-run-seconds "${RUN_SECONDS}"
     --state-port "${SIM_STATE_PORT}"
     --perception-obs-port "${PERCEPTION_OBS_PORT}"
     --control-port "${SIM_CONTROL_PORT}"
     --sparse-root-command-port "${SPARSE_ROOT_COMMAND_PORT}"
+    --manual-root-mode "${MANUAL_ROOT_MODE}"
+    --manual-root-dx "${MANUAL_ROOT_DX}"
+    --manual-root-dy "${MANUAL_ROOT_DY}"
+    --manual-root-dyaw "${MANUAL_ROOT_DYAW}"
   )
+  if [[ "${HEADLESS_FLAG}" == "True" ]]; then
+    VISER_ARGS+=(--training-headless)
+  else
+    VISER_ARGS+=(--no-training-headless)
+  fi
+  if [[ "${MANUAL_ROOT_ENABLED_FLAG}" == "True" ]]; then
+    VISER_ARGS+=(--manual-root-enabled)
+  else
+    VISER_ARGS+=(--no-manual-root-enabled)
+  fi
   if [[ -n "${VISER_PORT:-}" ]]; then
     VISER_ARGS+=(--port "${VISER_PORT}")
   fi

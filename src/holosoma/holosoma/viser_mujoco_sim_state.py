@@ -80,6 +80,11 @@ class MujocoSimStateViewerConfig:
     depth_obs_normalized: bool = True
     depth_near: float = 0.1
     depth_far: float = 3.0
+    manual_root_enabled: bool = False
+    manual_root_mode: str = "manual"
+    manual_root_dx: float = 0.0
+    manual_root_dy: float = 0.0
+    manual_root_dyaw: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -704,15 +709,15 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         reset_rollout_btn = server.gui.add_button("Reset rollout")
 
     with server.gui.add_folder("Manual Root Command"):
-        manual_root_enabled_cb = server.gui.add_checkbox("Enable", initial_value=False)
+        manual_root_enabled_cb = server.gui.add_checkbox("Enable", initial_value=bool(cfg.manual_root_enabled))
         manual_root_mode_dropdown = server.gui.add_dropdown(
             "Mode",
             options=("manual", "offset"),
-            initial_value="manual",
+            initial_value=str(cfg.manual_root_mode) if str(cfg.manual_root_mode) in {"manual", "offset"} else "manual",
         )
-        manual_root_dx = server.gui.add_number("dX", initial_value=0.0, min=-3.0, max=3.0, step=0.01)
-        manual_root_dy = server.gui.add_number("dY", initial_value=0.0, min=-3.0, max=3.0, step=0.01)
-        manual_root_dyaw = server.gui.add_number("dYaw", initial_value=0.0, min=-3.1416, max=3.1416, step=0.01)
+        manual_root_dx = server.gui.add_number("dX", initial_value=float(cfg.manual_root_dx), min=-3.0, max=3.0, step=0.01)
+        manual_root_dy = server.gui.add_number("dY", initial_value=float(cfg.manual_root_dy), min=-3.0, max=3.0, step=0.01)
+        manual_root_dyaw = server.gui.add_number("dYaw", initial_value=float(cfg.manual_root_dyaw), min=-3.1416, max=3.1416, step=0.01)
         manual_root_zero_btn = server.gui.add_button("Zero command")
         manual_root_md = server.gui.add_markdown(f"Publishing disabled on port `{cfg.sparse_root_command_port}`")
 
@@ -955,7 +960,12 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             command = _build_rollout_command(cfg)
             env = os.environ.copy()
             env["HOLOSOMA_MJ_TRACK_INTERNAL_CORE"] = "1"
-            env["RUN_SECONDS"] = str(cfg.launch_run_seconds)
+            if cfg.launch_run_seconds > 0:
+                env["RUN_SECONDS"] = str(cfg.launch_run_seconds)
+                env.pop("HOLOSOMA_MJ_TRACK_RUN_FOREVER", None)
+            else:
+                env.pop("RUN_SECONDS", None)
+                env["HOLOSOMA_MJ_TRACK_RUN_FOREVER"] = "1"
             env["TRAINING_HEADLESS"] = "True" if cfg.training_headless else "False"
             env["SIM_STATE_PORT"] = str(cfg.state_port)
             env["PERCEPTION_OBS_PORT"] = str(cfg.perception_obs_port)
