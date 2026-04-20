@@ -38,7 +38,12 @@ DEFAULT_ACTUATOR_SOURCE = Path("/home/ubuntu/FAR/holosoma/src/holosoma/holosoma/
 DEFAULT_MAX_CLIPS = 0
 DEFAULT_OBJECT_MASS_KG = 1.4
 INFER_DYNAMICS_SOURCE = "infer_box_joystick.sh checkpoint ONNX metadata"
+WEB_RUNTIME_SOURCE = "explicit browser MuJoCo runtime; shell env does not affect this web demo"
+WEB_PERCEPTION_UPDATE_HZ = 50.0
+WEB_CAMERA_FPS = 50.0
 CAMERA_PITCH_OVERRIDE_DEG = 10.0
+DEPTH_CLAMP_MIN_METERS = 0.3
+DEPTH_CLAMP_MAX_METERS = 3.0
 MUJOCO_OBJECT_CONDIM = 6
 MUJOCO_OBJECT_SLIDE_FRICTION_MIN = 0.6
 MUJOCO_OBJECT_SPIN_FRICTION = 0.02
@@ -208,9 +213,11 @@ def _extract_perception_cfg(metadata: dict, perception_dim: int | None = None) -
         "camera_fy": perception.get("camera_fy"),
         "camera_cx": perception.get("camera_cx"),
         "camera_cy": perception.get("camera_cy"),
-        "camera_near": float(perception.get("camera_near", 0.001)),
-        "camera_far": float(perception.get("camera_far", 3.0)),
-        "max_distance": float(perception.get("max_distance", 3.0)),
+        "camera_near": DEPTH_CLAMP_MIN_METERS,
+        "camera_far": DEPTH_CLAMP_MAX_METERS,
+        "max_distance": DEPTH_CLAMP_MAX_METERS,
+        "update_hz": WEB_PERCEPTION_UPDATE_HZ,
+        "camera_fps": WEB_CAMERA_FPS,
         "camera_pitch_deg": CAMERA_PITCH_OVERRIDE_DEG,
         "camera_pitch_deg_checkpoint": float(perception.get("camera_pitch_deg", 0.0)),
         "camera_pitch_deg_source": "explicit_distill_box_perception_override",
@@ -221,7 +228,7 @@ def _extract_perception_cfg(metadata: dict, perception_dim: int | None = None) -
         "camera_warp_crop_bottom": int(perception.get("camera_warp_crop_bottom", 0) or 0),
         "camera_warp_crop_left": int(perception.get("camera_warp_crop_left", 0) or 0),
         "camera_warp_crop_right": int(perception.get("camera_warp_crop_right", 0) or 0),
-        "camera_warp_min_valid_depth": float(perception.get("camera_warp_min_valid_depth", 0.15)),
+        "camera_warp_min_valid_depth": DEPTH_CLAMP_MIN_METERS,
         "camera_warp_edge_noise": bool(perception.get("camera_warp_edge_noise", False)),
         "camera_warp_edge_border": int(perception.get("camera_warp_edge_border", 3) or 0),
         "camera_warp_edge_shuffle_prob": float(perception.get("camera_warp_edge_shuffle_prob", 0.9) or 0.0),
@@ -349,6 +356,24 @@ def _extract_control_cfg(metadata: dict) -> dict:
         "action_scales_by_effort_limit_over_p_gain": bool(
             control_cfg.get("action_scales_by_effort_limit_over_p_gain", False)
         ),
+    }
+
+
+def _build_web_runtime_cfg(control_cfg: dict) -> dict:
+    sim_fps = float(control_cfg.get("sim_fps", 200.0))
+    control_decimation = max(1, int(control_cfg.get("control_decimation", 4)))
+    action_hz = float(control_cfg.get("policy_hz", sim_fps / float(control_decimation)))
+    perception_update_hz = WEB_PERCEPTION_UPDATE_HZ
+    camera_fps = WEB_CAMERA_FPS
+    return {
+        "source": WEB_RUNTIME_SOURCE,
+        "sim_fps": sim_fps,
+        "action_hz": action_hz,
+        "control_decimation": control_decimation,
+        "perception_update_hz": perception_update_hz,
+        "camera_fps": camera_fps,
+        "effective_depth_hz": min(action_hz, perception_update_hz, camera_fps),
+        "depth_schedule": "effective_depth_hz=min(action_hz,perception_update_hz,camera_fps)",
     }
 
 
@@ -1426,6 +1451,7 @@ def _stage_clip_bundle(
             "xy_speed_mps": 0.7,
             "yaw_speed_radps": 1.0,
         },
+        "web_runtime": _build_web_runtime_cfg(control_cfg),
         "motion": motion_summary,
     }
     config_path = bundle_dir / "demo-config.json"
@@ -1464,6 +1490,7 @@ def stage_assets(
     default_clip_id: str | None = None
     default_label: str | None = None
     default_scene_path: str | None = None
+    manifest_runtime = _build_web_runtime_cfg(_extract_control_cfg(_read_onnx_metadata(model_path)))
 
     for motion_path in motion_paths:
         base_id = _bundle_id_for_motion_path(motion_path, motion_root)
@@ -1514,6 +1541,7 @@ def stage_assets(
     manifest = {
         "version": 1,
         "scene_path": default_scene_path,
+        "web_runtime": manifest_runtime,
         "clip_count": len(manifest_clips),
         "default_clip_id": default_clip_id,
         "default_clip_label": default_label,

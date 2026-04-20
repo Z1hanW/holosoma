@@ -637,8 +637,8 @@ def test_apply_perception_overrides_adds_heightmap_to_critic_only_path():
     assert actor_cfg.layer_config.perception_input_name == "perception_obs"
     assert actor_cfg.layer_config.perception_encoder_type == "far_tracking_cnn_small"
     assert critic_cfg.type == "MLPPerceptionEncoder"
-    assert critic_cfg.input_dim == ["critic_obs", "critic_proprio_history"]
-    assert critic_cfg.layer_config.module_input_name == ("critic_obs", "critic_proprio_history")
+    assert critic_cfg.input_dim == ["critic_obs", "critic_proprio_history", "critic_actions"]
+    assert critic_cfg.layer_config.module_input_name == ("critic_obs", "critic_proprio_history", "critic_actions")
     assert critic_cfg.layer_config.perception_input_name == "critic_perception_obs"
     assert critic_cfg.layer_config.perception_encoder_type == "attention"
     assert critic_cfg.layer_config.perception_input_height == 17
@@ -646,14 +646,17 @@ def test_apply_perception_overrides_adds_heightmap_to_critic_only_path():
     assert critic_cfg.layer_config.extra_input_to_hidden is True
 
 
-def test_distill_critic_obs_keeps_single_frame_state_and_proprio_history():
+def test_distill_critic_obs_keeps_single_frame_state_and_action():
     obs_cfg = g1_observations.g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd
     critic_group = obs_cfg.groups["critic_obs"]
     proprio_history_group = obs_cfg.groups["critic_proprio_history"]
+    critic_actions_group = obs_cfg.groups["critic_actions"]
 
     assert critic_group.history_length == 1
-    assert proprio_history_group.history_length == 5
-    assert set(proprio_history_group.terms) == {"base_lin_vel", "base_ang_vel", "dof_pos", "dof_vel", "actions"}
+    assert proprio_history_group.history_length == 1
+    assert set(proprio_history_group.terms) == {"base_lin_vel", "base_ang_vel", "dof_pos", "dof_vel"}
+    assert critic_actions_group.history_length == 1
+    assert set(critic_actions_group.terms) == {"actions"}
 
     arm_link_regions = {
         "left_elbow",
@@ -714,8 +717,8 @@ def test_sparse_root_distill_observation_uses_root_relative_terms():
     root_group = obs_cfg.groups["actor_obs_root"]
     torso_alias_group = obs_cfg.groups["actor_obs_torso"]
 
-    assert root_group.history_length == 5
-    assert torso_alias_group.history_length == 5
+    assert root_group.history_length == 1
+    assert torso_alias_group.history_length == 1
     assert set(root_group.terms) == {"sparse_target_root_trajectory_command"}
     assert set(torso_alias_group.terms) == {"sparse_target_root_trajectory_command"}
 
@@ -724,15 +727,15 @@ def test_sparse_root_distill_observation_exposes_no_linvel_proprio_variant():
     obs_cfg = g1_observations.g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd
     proprio_group = obs_cfg.groups["actor_obs_proprio_no_linvel"]
 
-    assert proprio_group.history_length == 5
-    assert set(proprio_group.terms) == {"base_ang_vel", "dof_pos", "dof_vel", "actions"}
+    assert proprio_group.history_length == 1
+    assert set(proprio_group.terms) == {"base_ang_vel", "dof_pos", "dof_vel"}
 
 
 def test_distill_experiment_critic_inputs_include_proprio_history():
     critic_cfg = g1_experiments.g1_29dof_wbt_w_object_distill_sparse_goal_mixed.algo.config.module_dict.critic
 
-    assert critic_cfg.input_dim == ["critic_obs", "critic_proprio_history"]
-    assert critic_cfg.layer_config.module_input_name == ("critic_obs", "critic_proprio_history")
+    assert critic_cfg.input_dim == ["critic_obs", "critic_proprio_history", "critic_actions"]
+    assert critic_cfg.layer_config.module_input_name == ("critic_obs", "critic_proprio_history", "critic_actions")
 
 
 def test_critic_heightmap_encoder_accepts_separate_critic_perception_obs():

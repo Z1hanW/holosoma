@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Student actor observation:
 # - actor_obs_root: sparse root command [rel_xy(2), rel_yaw(1)]
-# - actor_obs_proprio: base_lin_vel, base_ang_vel, dof_pos, dof_vel, actions
+# - actor_obs_proprio: base_lin_vel, base_ang_vel, dof_pos, dof_vel; actor_obs_actions carries single-step action
 # - optional perception_obs: injected automatically when PERCEPTION_PRESET != none
 #
 # Teacher observation defaults:

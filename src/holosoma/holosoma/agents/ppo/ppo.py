@@ -701,6 +701,15 @@ class PPO(BaseAlgo):
         self.strict_teacher_load = bool(getattr(distill_cfg, "strict_teacher_load", True))
         self.fixed_bc_eval_num_samples = max(0, int(getattr(distill_cfg, "fixed_bc_eval_num_samples", 0)))
         self.fixed_bc_eval_log_interval = max(1, int(getattr(distill_cfg, "fixed_bc_eval_log_interval", 1)))
+        teacher_checkpoint = distill_cfg.policy_to_clone or distill_cfg.teacher_checkpoint
+        if self.distill_mode == "dagger":
+            if not teacher_checkpoint:
+                return
+            if self.bc_loss_coef <= 0.0 and self.switch_to_rl_after <= 0 and not self.use_ppo_dagger_schedule:
+                return
+        elif not distill_cfg.enabled:
+            return
+
         teacher_perception_obs_key = getattr(distill_cfg, "teacher_perception_obs_key", None)
         self.teacher_perception_obs_key = str(teacher_perception_obs_key).strip() if teacher_perception_obs_key else ""
         if self.teacher_perception_obs_key and self.teacher_perception_obs_key not in self.algo_obs_dim_dict:
@@ -733,14 +742,7 @@ class PPO(BaseAlgo):
         self.teacher_obs_slices = self._build_obs_slices(self.teacher_obs_keys)
         self.teacher_obs_dim = self._get_obs_dim(self.teacher_obs_keys)
 
-        teacher_checkpoint = distill_cfg.policy_to_clone or distill_cfg.teacher_checkpoint
-
         if self.distill_mode == "dagger":
-            if not teacher_checkpoint:
-                return
-            if self.bc_loss_coef <= 0.0 and self.switch_to_rl_after <= 0 and not self.use_ppo_dagger_schedule:
-                return
-
             teacher_paths = teacher_checkpoint if isinstance(teacher_checkpoint, list) else [teacher_checkpoint]
             if self.use_multi_teacher:
                 if not teacher_paths:

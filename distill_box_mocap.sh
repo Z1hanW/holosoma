@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Student policy observation (actor):
 # - actor_obs_root: sparse root command
-# - actor_obs_proprio (base_lin_vel, base_ang_vel, dof_pos, dof_vel, actions)
+# - actor_obs_proprio (base_lin_vel, base_ang_vel, dof_pos, dof_vel) + actor_obs_actions single-step action
 # - actor_obs_box:
 #   - obj_current_pose_size_b = [obj_pos(3), obj_rot6d(6), obj_scale(3)]
 #
@@ -90,5 +90,5 @@ exec env \
   CRITIC_LR="${CRITIC_LR}" \
   bash "${SCRIPT_DIR}/distill_root_box.sh" "${TEACHER_CHECKPOINT}" \
     "perception:${PERCEPTION_PRESET}" \
-    --algo.config.module-dict.actor.input-dim "['actor_obs_root','actor_obs_proprio','actor_obs_box']" \
+    --algo.config.module-dict.actor.input-dim "['actor_obs_root','actor_obs_proprio','actor_obs_actions','actor_obs_box']" \
     "$@"

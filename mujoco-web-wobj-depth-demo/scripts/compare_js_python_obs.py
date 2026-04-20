@@ -12,6 +12,9 @@ from typing import Any
 
 import numpy as np
 
+DEPTH_CLAMP_MIN_METERS = 0.3
+DEPTH_CLAMP_MAX_METERS = 3.0
+
 
 DEMO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = DEMO_ROOT / "public/demo-assets/manifest.json"
@@ -287,9 +290,9 @@ def depth_from_raw_camera(config: dict[str, Any], snapshot: dict[str, Any]) -> t
     out_height = int(perception["observation_height"])
     raw = np.asarray(snapshot["rawCameraDepth"], dtype=np.float32)
     depth = resample_cropped_depth(raw, raw_width, raw_height, out_width, out_height, perception)
-    near = float(perception.get("camera_near", 0.0))
-    max_distance = float(perception.get("max_distance", perception.get("camera_far", 3.0)))
-    min_valid = float(perception.get("camera_warp_min_valid_depth", 0.0))
+    near = DEPTH_CLAMP_MIN_METERS
+    max_distance = DEPTH_CLAMP_MAX_METERS
+    min_valid = max(near, float(perception.get("camera_warp_min_valid_depth", DEPTH_CLAMP_MIN_METERS)))
     depth = np.clip(depth, near, max_distance).astype(np.float32, copy=False)
     depth[depth < min_valid] = max_distance
     if perception.get("camera_warp_normalize", False):

@@ -72,7 +72,7 @@ Default W&B runs:
   CAMERA_*                (optional explicit camera overrides; default preserves checkpoint camera config)
   MIXED_PROFILE            (default: auto; options: auto|none|1xugspet|s221l5eo)
   EVAL_COMMAND_ONLY_ENV_PROB (mixed mode default: 1.0 for 1xugspet/s221l5eo; clip mode leaves checkpoint logic unchanged)
-  EVAL_EXTERNAL_GOAL_PROB  (mixed mode default: 1.0; clip mode leaves checkpoint logic unchanged)
+  EVAL_EXTERNAL_GOAL_PROB  (mixed mode default: 0.0; clip mode leaves checkpoint logic unchanged)
   HOLOSOMA_DISABLE_BAD_TRACKING_RESET (default: 1 for infer)
   HOLOSOMA_DISABLE_AUTO_RESET (default: 1 for infer; only GUI/manual reset will reset)
   DRY_RUN                  (default: 0; set 1/true to print the command without launching)
@@ -753,7 +753,7 @@ case "${MIXED_PROFILE_RESOLVED}" in
       EVAL_COMMAND_ONLY_ENV_PROB="1.0"
     fi
     if [[ "${EVAL_EXTERNAL_GOAL_PROB_EXPLICIT}" -eq 0 ]]; then
-      EVAL_EXTERNAL_GOAL_PROB="1.0"
+      EVAL_EXTERNAL_GOAL_PROB="0.0"
     fi
     ;;
   *)
@@ -1033,7 +1033,7 @@ append_explicit_camera_overrides
 
 if [[ "${MODE}" == "mixed" ]]; then
   if [[ -z "${EVAL_EXTERNAL_GOAL_PROB}" ]]; then
-    EVAL_EXTERNAL_GOAL_PROB="1.0"
+    EVAL_EXTERNAL_GOAL_PROB="0.0"
   fi
   cmd+=(
     --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.enabled True

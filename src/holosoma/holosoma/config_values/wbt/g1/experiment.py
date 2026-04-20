@@ -491,7 +491,7 @@ _w_object_command_curriculum_module_dict = PPOModuleDictConfig(
     ),
 )
 
-_terrain_distill_sparse_root_cmd_actor_inputs = ["actor_obs_root", "actor_obs_proprio"]
+_terrain_distill_sparse_root_cmd_actor_inputs = ["actor_obs_root", "actor_obs_proprio", "actor_obs_actions"]
 _terrain_distill_sparse_root_cmd_critic_inputs = ["critic_obs"]
 
 _terrain_distill_sparse_root_cmd_module_dict = PPOModuleDictConfig(

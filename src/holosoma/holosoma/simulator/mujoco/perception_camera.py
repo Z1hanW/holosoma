@@ -14,6 +14,14 @@ from holosoma.simulator.mujoco.scene_manager import HOLOSOMA_PERCEPTION_CAMERA_N
 from holosoma.utils.safe_torch_import import torch
 
 _DEPTH_HIDDEN_GEOM_GROUP = 5
+_PREFER_OBJECT_VISUAL_MESHES_ENV = "HOLOSOMA_MUJOCO_DEPTH_PREFER_OBJECT_VISUAL_MESHES"
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 class MuJoCoDepthCamera:
@@ -60,6 +68,7 @@ class MuJoCoDepthCamera:
         self._render_far = float(max(1.0, float(getattr(config, "max_distance", 1.0) or 1.0)))
         self._masked_robot_geom_ids: list[int] = []
         self._masked_object_geom_ids: list[int] = []
+        self._depth_prefers_object_visual_meshes = _env_flag(_PREFER_OBJECT_VISUAL_MESHES_ENV)
         self._warned_multi_env = False
         self._warned_invalid_depth = False
         self._warned_invalid_rgb = False
@@ -333,10 +342,22 @@ class MuJoCoDepthCamera:
 
         masked_geom_ids: list[int] = []
         masked_object_geom_ids: list[int] = []
+        object_collision_geom_ids: list[int] = []
+        object_visual_geom_ids: list[int] = []
         for geom_id in range(model.ngeom):
             body_id = int(model.geom_bodyid[geom_id])
             body_name = str(model.body(body_id).name or "")
             geom_name = str(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or "")
+            is_registered_object_geom = bool(
+                object_root_body_ids and body_name.startswith("object_") and _is_descendant_of_any(body_id, object_root_body_ids)
+            )
+            if is_registered_object_geom:
+                contype = int(model.geom_contype[geom_id])
+                conaffinity = int(model.geom_conaffinity[geom_id])
+                if contype == 0 or conaffinity == 0:
+                    object_visual_geom_ids.append(int(geom_id))
+                else:
+                    object_collision_geom_ids.append(int(geom_id))
             if terrain_proxy_geom_name and geom_name == terrain_proxy_geom_name:
                 model.geom_group[geom_id] = 0
                 continue
@@ -360,6 +381,16 @@ class MuJoCoDepthCamera:
             if object_root_body_ids and body_name.startswith("object_") and not _is_descendant_of_any(body_id, object_root_body_ids):
                 model.geom_group[geom_id] = _DEPTH_HIDDEN_GEOM_GROUP
                 masked_object_geom_ids.append(int(geom_id))
+
+        if self._depth_prefers_object_visual_meshes and object_visual_geom_ids and object_collision_geom_ids:
+            for geom_id in object_collision_geom_ids:
+                model.geom_group[geom_id] = _DEPTH_HIDDEN_GEOM_GROUP
+            masked_object_geom_ids.extend(object_collision_geom_ids)
+            logger.info(
+                "MuJoCo rendered depth prefers object visual mesh: masked {} object collision geom(s), kept {} visual geom(s).",
+                len(object_collision_geom_ids),
+                len(object_visual_geom_ids),
+            )
 
         self._masked_robot_geom_ids = masked_geom_ids
         self._masked_object_geom_ids = masked_object_geom_ids
@@ -399,7 +430,8 @@ class MuJoCoDepthCamera:
         if np.any(invalid):
             depth_array = depth_array.copy()
             depth_array[invalid] = float(self._cfg.max_distance)
-        return np.clip(depth_array, 0.0, float(self._cfg.max_distance))
+        min_depth = float(getattr(self._cfg, "camera_near", 0.0) or 0.0)
+        return np.clip(depth_array, min_depth, float(self._cfg.max_distance))
 
     def _sanitize_rgb_array(self, rgb_array: np.ndarray) -> np.ndarray:
         if rgb_array.size == 0:
@@ -754,7 +786,8 @@ class MuJoCoDepthCamera:
         if np.any(invalid):
             depth_array = depth_array.copy()
             depth_array[invalid] = float(self._cfg.max_distance)
-        return np.clip(depth_array, 0.0, float(self._cfg.max_distance))
+        min_depth = float(getattr(self._cfg, "camera_near", 0.0) or 0.0)
+        return np.clip(depth_array, min_depth, float(self._cfg.max_distance))
 
     def _sanitize_rgb_array_with_shape(self, rgb_array: np.ndarray, height: int, width: int) -> np.ndarray:
         if rgb_array.size == 0:

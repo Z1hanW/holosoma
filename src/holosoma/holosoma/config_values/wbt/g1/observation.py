@@ -6,7 +6,7 @@ from holosoma.config_types.observation import ObservationManagerCfg, ObsGroupCfg
 
 DEFAULT_WBT_POLICY_HISTORY_LENGTH = 5
 DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH = 1
-DEFAULT_WBT_DISTILL_PROPRIO_HISTORY_LENGTH = DEFAULT_WBT_POLICY_HISTORY_LENGTH
+DEFAULT_WBT_DISTILL_PROPRIO_HISTORY_LENGTH = 1
 
 _WRIST_YAW_CONTACT_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
 _ARM_LINK_CONTACT_BODY_NAMES = {
@@ -987,20 +987,26 @@ g1_29dof_wbt_observation_terrain_distill_sparse_root_cmd = ObservationManagerCfg
         "actor_obs_root": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+            history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
             terms=object_distill_sparse_root_cmd_terms,
         ),
         # Student proprioception only; no privileged target poses in the actor.
         "actor_obs_proprio": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=DEFAULT_WBT_POLICY_HISTORY_LENGTH,
-            terms=object_distill_proprio_terms,
+            history_length=DEFAULT_WBT_DISTILL_PROPRIO_HISTORY_LENGTH,
+            terms=object_distill_proprio_history_terms,
+        ),
+        "actor_obs_actions": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_distill_action_terms,
         ),
         "critic_obs": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
-            history_length=5,
+            history_length=1,
             terms=critic_obs_videomimic_terms,
         ),
         "critic_obs_target": ObsGroupCfg(

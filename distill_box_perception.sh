@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Student policy observation (actor):
 # - actor_obs_root: root-frame relative command [dx, dy, dyaw]
-# - actor_obs_proprio_no_linvel (base_ang_vel, dof_pos, dof_vel, actions)
+# - actor_obs_proprio (base_lin_vel, base_ang_vel, dof_pos, dof_vel) + actor_obs_actions single-step action
 # - perception_obs (camera depth)
 # - No actor box state is used by student actor.
 #
@@ -784,7 +784,7 @@ UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS=${UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS:-50}
 UNIFORM_T1_WINDOW_DENSITY_BOOST=${UNIFORM_T1_WINDOW_DENSITY_BOOST:-7.0}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
-STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_root','actor_obs_proprio_no_linvel']"}
+STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_root','actor_obs_proprio','actor_obs_actions']"}
 DAGGER_MATCH_STD=${DAGGER_MATCH_STD:-True}
 ENTROPY_COEF=${ENTROPY_COEF:-0.0}
 DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES=${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES:-True}

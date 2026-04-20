@@ -4,7 +4,7 @@ set -euo pipefail
 # Base launcher for non-goal object distillation.
 # Preferred entrypoint is `distill_root_box.sh`; this file is kept as a compatibility wrapper target.
 # - actor_obs_root: sparse root command [rel_xy(2), rel_yaw(1)]
-# - actor_obs_proprio: base_lin_vel, base_ang_vel, dof_pos, dof_vel, actions
+# - actor_obs_proprio: base_lin_vel, base_ang_vel, dof_pos, dof_vel; actor_obs_actions carries single-step action
 # - actor_obs_box: optional wrapper-specific object state (for mocap variants)
 #
 # Single-stage run:
@@ -163,6 +163,8 @@ INIT_NOISE_STD=${INIT_NOISE_STD:-0.01}
 ENTROPY_COEF=${ENTROPY_COEF:-0.005}
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-268435456}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
+DISTILL_ENABLED=${DISTILL_ENABLED:-True}
+DISTILL_MODE=${DISTILL_MODE:-dagger}
 SWITCH_TO_RL_AFTER=${SWITCH_TO_RL_AFTER:-}
 CLIP_TEACHER_ACTIONS=${CLIP_TEACHER_ACTIONS:-True}
 CLIP_ACTIONS_THRESHOLD=${CLIP_ACTIONS_THRESHOLD:-8.0}
@@ -258,8 +260,8 @@ run_distill_stage() {
     --master_port="${stage_master_port}"
     src/holosoma/holosoma/train_agent.py
     "exp:${EXP}"
-    --algo.config.distill.enabled=True
-    --algo.config.distill.mode=dagger
+    --algo.config.distill.enabled="${DISTILL_ENABLED}"
+    --algo.config.distill.mode="${DISTILL_MODE}"
     --algo.config.distill.policy-to-clone="${TEACHER_CHECKPOINT}"
     --algo.config.distill.bc-loss-coef="${stage_bc_loss_coef}"
     --algo.config.distill.clip-teacher-actions="${CLIP_TEACHER_ACTIONS}"

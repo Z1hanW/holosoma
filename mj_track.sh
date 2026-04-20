@@ -96,7 +96,9 @@ MODEL_INPUT="${2:-$DEFAULT_MODEL_INPUT}"
 MUJOCO_PY="${MUJOCO_PY:-}"
 INFER_PY="${INFER_PY:-}"
 MUJOCO_CPUSET="${MUJOCO_CPUSET:-0}"
-SIM_FPS="${SIM_FPS:-200}"
+SIM_FPS_EXPLICIT=0
+[[ -n "${SIM_FPS+x}" ]] && SIM_FPS_EXPLICIT=1
+SIM_FPS="${SIM_FPS:-500}"
 SIM_CONTROL_DECIMATION="${SIM_CONTROL_DECIMATION:-4}"
 SIM_SUBSTEPS="${SIM_SUBSTEPS:-}"
 SIM_DEVICE="${SIM_DEVICE:-}"
@@ -122,6 +124,10 @@ PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
 PERCEPTION_CAMERA_SOURCE="${PERCEPTION_CAMERA_SOURCE:-far_tracking_warp}"
 PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-mesh}"
 PERCEPTION_CAMERA_PITCH_DEG="${PERCEPTION_CAMERA_PITCH_DEG:-}"
+PERCEPTION_CAMERA_NEAR="${PERCEPTION_CAMERA_NEAR:-}"
+PERCEPTION_CAMERA_FAR="${PERCEPTION_CAMERA_FAR:-}"
+PERCEPTION_MAX_DISTANCE="${PERCEPTION_MAX_DISTANCE:-}"
+PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH="${PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH:-}"
 PERCEPTION_UPDATE_HZ="${PERCEPTION_UPDATE_HZ:-}"
 PERCEPTION_CAMERA_FPS="${PERCEPTION_CAMERA_FPS:-}"
 PERCEPTION_CAMERA_WARP_EDGE_NOISE="${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-}"
@@ -145,6 +151,7 @@ DEFAULT_OBJECT_URDF="$ROOT_DIR/src/holosoma/holosoma/data/motions/g1_29dof/whole
 OBJECT_URDF="${OBJECT_URDF:-}"
 PATCH_DIR="${PATCH_DIR:-$ROOT_DIR/logs/sim2sim_exports}"
 POLICY_ACTION_SCALE="${POLICY_ACTION_SCALE:-}"
+POLICY_RL_RATE="${POLICY_RL_RATE:-50}"
 POLICY_DEFER_UNTIL_VALID_STATE="${POLICY_DEFER_UNTIL_VALID_STATE:-0}"
 SIM_LOG_FIRST_COMMAND_SUMMARY="${SIM_LOG_FIRST_COMMAND_SUMMARY:-0}"
 HOLOSOMA_ONNX_ALIGN_MAX_STEPS="${HOLOSOMA_ONNX_ALIGN_MAX_STEPS:-0}"
@@ -340,7 +347,11 @@ PY
   while IFS='=' read -r key value; do
     [[ -z "${key:-}" ]] && continue
     case "$key" in
-      SIM_FPS) SIM_FPS="$value" ;;
+      SIM_FPS)
+        if [[ "$SIM_FPS_EXPLICIT" != "1" ]]; then
+          SIM_FPS="$value"
+        fi
+        ;;
       SIM_CONTROL_DECIMATION) SIM_CONTROL_DECIMATION="$value" ;;
       SIM_SUBSTEPS) SIM_SUBSTEPS="$value" ;;
       MUJOCO_BACKEND) MUJOCO_BACKEND="$value" ;;
@@ -1005,6 +1016,10 @@ wait_for_sim_ready() {
   $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_SOURCE" ]] && printf '%s %s' "--perception.camera-source" "$PERCEPTION_CAMERA_SOURCE" ) \
   $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_OBJECT_GEOMETRY_MODE" ]] && printf '%s %s' "--perception.object-geometry-mode" "$PERCEPTION_OBJECT_GEOMETRY_MODE" ) \
   $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_PITCH_DEG" ]] && printf '%s %s' "--perception.camera-pitch-deg" "$PERCEPTION_CAMERA_PITCH_DEG" ) \
+  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_NEAR" ]] && printf '%s %s' "--perception.camera-near" "$PERCEPTION_CAMERA_NEAR" ) \
+  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_FAR" ]] && printf '%s %s' "--perception.camera-far" "$PERCEPTION_CAMERA_FAR" ) \
+  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_MAX_DISTANCE" ]] && printf '%s %s' "--perception.max-distance" "$PERCEPTION_MAX_DISTANCE" ) \
+  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH" ]] && printf '%s %s' "--perception.camera-warp-min-valid-depth" "$PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH" ) \
   $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_UPDATE_HZ" ]] && printf '%s %s' "--perception.update-hz" "$PERCEPTION_UPDATE_HZ" ) \
   $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_FPS" ]] && printf '%s %s' "--perception.camera-fps" "$PERCEPTION_CAMERA_FPS" ) \
   $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ]] && printf '%s %s' "--perception.camera-warp-edge-noise" "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ) \
@@ -1047,6 +1062,7 @@ POLICY_CMD=(
   --task.auto-start-stiff-max-wait-sec "$AUTO_START_STIFF_MAX_WAIT_SEC"
   --task.auto-start-stiff-pose-tolerance "$AUTO_START_STIFF_POSE_TOL"
   --task.policy-action-scale "$POLICY_ACTION_SCALE"
+  --task.rl-rate "$POLICY_RL_RATE"
   --task.sim-object-name object
 )
 if [[ "$SIM_USE_ZMQ_LOWCMD" == "1" ]]; then

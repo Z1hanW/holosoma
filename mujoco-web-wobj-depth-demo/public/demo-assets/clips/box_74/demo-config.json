@@ -170,9 +170,11 @@
     "camera_fy": null,
     "camera_cx": null,
     "camera_cy": null,
-    "camera_near": 0.1,
+    "camera_near": 0.3,
     "camera_far": 3.0,
     "max_distance": 3.0,
+    "update_hz": 50.0,
+    "camera_fps": 50.0,
     "camera_pitch_deg": 10.0,
     "camera_pitch_deg_checkpoint": 10.0,
     "camera_pitch_deg_source": "explicit_distill_box_perception_override",
@@ -186,7 +188,7 @@
     "camera_warp_crop_bottom": 0,
     "camera_warp_crop_left": 4,
     "camera_warp_crop_right": 4,
-    "camera_warp_min_valid_depth": 0.15,
+    "camera_warp_min_valid_depth": 0.3,
     "camera_warp_edge_noise": true,
     "camera_warp_edge_border": 3,
     "camera_warp_edge_shuffle_prob": 0.9,
@@ -471,6 +473,16 @@
     "manual_yaw_rad": 0.3,
     "xy_speed_mps": 0.7,
     "yaw_speed_radps": 1.0
+  },
+  "web_runtime": {
+    "source": "explicit browser MuJoCo runtime; shell env does not affect this web demo",
+    "sim_fps": 200.0,
+    "action_hz": 50.0,
+    "control_decimation": 4,
+    "perception_update_hz": 50.0,
+    "camera_fps": 50.0,
+    "effective_depth_hz": 50.0,
+    "depth_schedule": "effective_depth_hz=min(action_hz,perception_update_hz,camera_fps)"
   },
   "motion": {
     "fps": 50.0,

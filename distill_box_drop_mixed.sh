@@ -4,7 +4,7 @@ set -euo pipefail
 # Single-run sparse-goal box-drop distillation with depth perception.
 #
 # Student policy observation (actor):
-# - actor_obs_proprio: proprio history
+# - actor_obs_proprio: single-frame proprio + actor_obs_actions single-step action
 # - actor_obs_drop_command: fixed pickup-frame command [goal_dx, goal_dy]
 # - perception_obs: camera depth
 #

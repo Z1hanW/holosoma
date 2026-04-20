@@ -36,6 +36,8 @@ HOLOSOMA_PERCEPTION_CAMERA_NAME = "holosoma_perception_camera"
 _CAMERA_TERRAIN_PROXY_ENV = "HOLOSOMA_ENABLE_CAMERA_TERRAIN_PROXY"
 _CAMERA_TERRAIN_PROXY_SUFFIX = "_camera_proxy"
 _LOAD_ROBOT_VISUAL_MESHES_ENV = "HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES"
+_LOAD_OBJECT_VISUAL_MESHES_ENV = "HOLOSOMA_MUJOCO_LOAD_OBJECT_VISUAL_MESHES"
+_WEB_DEMO_OBJECT_CONTACTS_ENV = "HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS"
 
 
 class MujocoSceneManager:
@@ -537,6 +539,7 @@ class MujocoSceneManager:
         if object_spec_to_attach is not None:
             object_site = self.world_spec.worldbody.add_site(name="object_spawn", pos=[0, 0, 0.0], quat=[1, 0, 0, 0])
             self.world_spec.attach(object_spec_to_attach, site=object_site, prefix="object_")
+            self._maybe_add_web_demo_object_contact_pairs()
 
         # Store prefix for later use by simulator
         self.robot_prefix = prefix
@@ -663,8 +666,16 @@ class MujocoSceneManager:
         object_cfg = getattr(robot_config, "object", None)
         assert object_cfg is not None
         object_urdf = cls._resolve_single_object_urdf(str(object_cfg.object_urdf_path))
-        object_spec = mujoco.MjSpec.from_file(str(object_urdf))
+        load_object_visual_meshes = cls._env_flag(_LOAD_OBJECT_VISUAL_MESHES_ENV)
+        object_spec = cls._load_urdf_spec(object_urdf, load_visual_meshes=load_object_visual_meshes)
         cls._configure_urdf_meshdir(object_spec, object_urdf)
+        if load_object_visual_meshes:
+            logger.info(
+                "Loaded object URDF visual meshes for MuJoCo scene via {}=1: {} geom(s), {} mesh asset(s).",
+                _LOAD_OBJECT_VISUAL_MESHES_ENV,
+                len(object_spec.geoms),
+                len(object_spec.meshes),
+            )
 
         object_root_body_name = cls._select_object_root_body_name(object_spec)
         object_root_body = cls._find_spec_body(object_spec, object_root_body_name)
@@ -1476,18 +1487,47 @@ class MujocoSceneManager:
         )
 
     def _configure_object_collisions(self, object_spec: mujoco.MjSpec) -> None:
+        web_demo_contacts = self._env_flag(_WEB_DEMO_OBJECT_CONTACTS_ENV)
         object_contype = 4
-        object_conaffinity = 3
+        object_conaffinity = 11 if web_demo_contacts else 3
+        collision_geom_index = 0
+        visual_geom_index = 0
         updated_geoms = 0
+        visual_geoms = 0
         for body in object_spec.bodies:
             for geom in body.geoms:
-                if geom.contype == 0 or geom.conaffinity == 0:
+                geom_contype = int(geom.contype)
+                geom_conaffinity = int(geom.conaffinity)
+                if geom_contype == 0 or geom_conaffinity == 0:
+                    if web_demo_contacts:
+                        visual_geom_index += 1
+                        if not geom.name:
+                            geom.name = "visual" if visual_geom_index == 1 else f"visual_{visual_geom_index}"
+                        geom.contype = 0
+                        geom.conaffinity = 0
+                        geom.group = 1
+                        geom.density = 0.0
+                        visual_geoms += 1
                     continue
-                if geom.contype == 1 and geom.conaffinity == 1:
+
+                if web_demo_contacts or (geom_contype == 1 and geom_conaffinity == 1):
                     geom.contype = object_contype
                     geom.conaffinity = object_conaffinity
+                    if web_demo_contacts:
+                        collision_geom_index += 1
+                        if not geom.name:
+                            geom.name = (
+                                "collision" if collision_geom_index == 1 else f"collision_{collision_geom_index}"
+                            )
+                        geom.condim = 6
+                        geom.solref = [0.01, 1.0]
                     updated_geoms += 1
-        logger.info("Applied MuJoCo object collision settings to {} geom(s)", updated_geoms)
+        logger.info(
+            "Applied MuJoCo object collision settings to {} collision geom(s), {} visual geom(s); web_demo_contacts={}",
+            updated_geoms,
+            visual_geoms,
+            web_demo_contacts,
+        )
 
     def _maybe_override_object_properties(
         self,
@@ -1565,10 +1605,14 @@ class MujocoSceneManager:
 
             if friction_override is not None:
                 for geom in body.geoms:
+                    if int(geom.contype) == 0 or int(geom.conaffinity) == 0:
+                        continue
                     geom.friction = friction_override
                     updated_geoms += 1
             if terrain_pair_friction_override is not None:
                 for geom in body.geoms:
+                    if int(geom.contype) == 0 or int(geom.conaffinity) == 0:
+                        continue
                     if not geom.name:
                         continue
                     pair_name = f"{geom.name}__{terrain_geom_name}__sim2sim"
@@ -1600,6 +1644,104 @@ class MujocoSceneManager:
                 terrain_geom_name,
                 terrain_pair_friction_override,
             )
+
+    def _maybe_add_web_demo_object_contact_pairs(self) -> None:
+        """Match the web demo's rubber-hand/object contact overrides when requested."""
+        if not self._env_flag(_WEB_DEMO_OBJECT_CONTACTS_ENV):
+            return
+
+        def _iter_bodies(container: Any):
+            for body in getattr(container, "bodies", []):
+                yield body
+                yield from _iter_bodies(body)
+
+        existing_geom_names = {
+            str(geom.name)
+            for body in _iter_bodies(self.world_spec.worldbody)
+            for geom in body.geoms
+            if geom.name
+        }
+
+        def _unique_geom_name(base_name: str) -> str:
+            candidate = base_name
+            suffix = 2
+            while candidate in existing_geom_names:
+                candidate = f"{base_name}_{suffix}"
+                suffix += 1
+            existing_geom_names.add(candidate)
+            return candidate
+
+        rubber_hand_geoms: list[str] = []
+        object_collision_geoms: list[str] = []
+        for body in _iter_bodies(self.world_spec.worldbody):
+            body_name = str(body.name or "")
+            for geom in body.geoms:
+                if int(geom.contype) == 0 or int(geom.conaffinity) == 0:
+                    continue
+
+                geom_name = str(geom.name or "")
+                mesh_name = str(getattr(geom, "meshname", "") or "")
+                combined_name = f"{body_name} {geom_name} {mesh_name}".lower()
+                if "rubber_hand" in combined_name:
+                    if not geom_name:
+                        if "left" in combined_name:
+                            geom_name = _unique_geom_name("left_rubber_hand_collision")
+                        elif "right" in combined_name:
+                            geom_name = _unique_geom_name("right_rubber_hand_collision")
+                        else:
+                            geom_name = _unique_geom_name("rubber_hand_collision")
+                        geom.name = geom_name
+                    geom.contype = 1
+                    geom.conaffinity = 6
+                    geom.condim = 6
+                    geom.friction = [0.8, 0.02, 0.005]
+                    geom.solref = [0.01, 1.0]
+                    rubber_hand_geoms.append(geom_name)
+                if body_name.startswith("object_") or geom_name.startswith("object_"):
+                    object_collision_geoms.append(geom_name)
+
+        if not rubber_hand_geoms or not object_collision_geoms:
+            logger.warning(
+                "Could not add web-demo object contact pairs: rubber_hand_geoms={}, object_collision_geoms={}",
+                sorted(rubber_hand_geoms),
+                sorted(object_collision_geoms),
+            )
+            return
+
+        existing_pair_names = {str(pair.name) for pair in self.world_spec.pairs if pair.name}
+        existing_pair_keys = {
+            (str(pair.geomname1), str(pair.geomname2))
+            for pair in self.world_spec.pairs
+            if pair.geomname1 and pair.geomname2
+        }
+        added_pairs = 0
+        for hand_geom_name in sorted(set(rubber_hand_geoms)):
+            for object_geom_name in sorted(set(object_collision_geoms)):
+                pair_name = f"{hand_geom_name}_{object_geom_name}"
+                if pair_name in existing_pair_names:
+                    continue
+                if (hand_geom_name, object_geom_name) in existing_pair_keys:
+                    continue
+                if (object_geom_name, hand_geom_name) in existing_pair_keys:
+                    continue
+                self.world_spec.add_pair(
+                    name=pair_name,
+                    geomname1=hand_geom_name,
+                    geomname2=object_geom_name,
+                    condim=6,
+                    friction=[0.8, 0.8, 0.02, 0.005, 0.005],
+                    solref=[0.01, 1.0],
+                )
+                existing_pair_names.add(pair_name)
+                existing_pair_keys.add((hand_geom_name, object_geom_name))
+                added_pairs += 1
+
+        logger.info(
+            "Added {} web-demo rubber-hand/object contact pair(s): hands={}, objects={}",
+            added_pairs,
+            sorted(set(rubber_hand_geoms)),
+            sorted(set(object_collision_geoms)),
+        )
 
     def _maybe_override_composite_object_properties(
         self,

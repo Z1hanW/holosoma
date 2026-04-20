@@ -4,8 +4,7 @@ set -euo pipefail
 # Distill an OMOMO box-drop student with depth perception.
 #
 # Student policy observation (actor):
-# - actor_obs_root: sparse root command history
-# - actor_obs_proprio: proprio history
+# - actor/student groups are single-frame, plus actor_obs_actions single-step action
 # - actor_obs_drop: final clip object target [dx, dy, dyaw] in the pickup-time pelvis-heading frame
 # - perception_obs: camera depth
 #
@@ -69,7 +68,7 @@ DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-5.0}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.7}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i_17x17}
-STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_proprio','actor_obs_drop']"}
+STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_proprio','actor_obs_actions','actor_obs_drop']"}
 VISER_DISTILL_MINIMAL_UI=${VISER_DISTILL_MINIMAL_UI:-1}
 
 # Runtime perception must stay 17x17 to match the teacher's 289-d encoder input.
@@ -96,7 +95,7 @@ echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} dagger_loss_coef=${DAGGER_LOSS_COEF} t
 echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
 echo "[INFO] viser_distill_minimal_ui=${VISER_DISTILL_MINIMAL_UI}"
-echo "[INFO] student actor history=root/proprio default, drop target single-frame; teacher groups=single-frame"
+echo "[INFO] student actor history=single-frame groups plus explicit actor_obs_actions single-step action; teacher groups=single-frame"
 
 exec env \
   EXP="${EXP}" \
