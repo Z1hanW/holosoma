@@ -20,9 +20,19 @@ Environment:
   PERCEPTION_OBS_PORT             default: 5658
   SIM_CONTROL_PORT                default: 5659
   SPARSE_ROOT_COMMAND_PORT        default: 5661
+  POLICY_CONTROL_PORT             default: 5662; command web start/stop/init channel
   MJ_POLICY_TERMINAL_KEYS=1       use terminal W/S/A/D/Q/E instead of web command
   HOLOSOMA_KEYBOARD_ROOT_COMMAND_VALUE         default: 0.5 for W/S/A/D x/y
   HOLOSOMA_KEYBOARD_ROOT_COMMAND_YAW_DEGREES   default: 17 for Q/E yaw
+  HOLOSOMA_ZMQ_ACTIVE_BEFORE_POLICY_START=1    allow active lowcmd before pressing ] (default: inactive)
+  HOLOSOMA_POLICY_CONTROL_ALLOW_NONINTERACTIVE_AUTOSTART=1
+                                  keep old non-TTY auto-start behavior even with policy control enabled
+
+Interactive keys:
+  Enter                           acknowledge startup prompt
+  ]                               start policy actions
+  o                               stop policy actions
+  i                               move to init state
 EOF
 }
 
@@ -51,6 +61,8 @@ export SIM_STATE_PORT="${SIM_STATE_PORT:-5657}"
 export PERCEPTION_OBS_PORT="${PERCEPTION_OBS_PORT:-5658}"
 export SIM_CONTROL_PORT="${SIM_CONTROL_PORT:-5659}"
 export SPARSE_ROOT_COMMAND_PORT="${SPARSE_ROOT_COMMAND_PORT:-5661}"
+export POLICY_CONTROL_PORT="${POLICY_CONTROL_PORT:-5662}"
+export HOLOSOMA_POLICY_CONTROL_PORT="${HOLOSOMA_POLICY_CONTROL_PORT:-$POLICY_CONTROL_PORT}"
 export ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND="${ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND:-1}"
 export RUN_SECONDS="${RUN_SECONDS:-0}"
 export POLICY_STDIO="${POLICY_STDIO:-inherit}"
@@ -79,8 +91,12 @@ fi
 
 echo "[INFO] launching policy only"
 echo "[INFO] model=${MODEL_INPUT}"
-echo "[INFO] ports clock=${SIM_CLOCK_PORT} state=${SIM_STATE_PORT} perception=${PERCEPTION_OBS_PORT} control=${SIM_CONTROL_PORT} sparse_root=${SPARSE_ROOT_COMMAND_PORT}"
+echo "[INFO] ports clock=${SIM_CLOCK_PORT} state=${SIM_STATE_PORT} perception=${PERCEPTION_OBS_PORT} control=${SIM_CONTROL_PORT} sparse_root=${SPARSE_ROOT_COMMAND_PORT} policy_control=${HOLOSOMA_POLICY_CONTROL_PORT}"
 echo "[INFO] web sparse-root command=${ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND}"
+echo "[INFO] web policy control=${HOLOSOMA_POLICY_CONTROL_PORT}"
+if [[ "${POLICY_STDIO}" == "inherit" ]]; then
+  echo "[INFO] interactive policy keys: press Enter at the prompt, then ] to start policy, o to stop"
+fi
 
 if is_truthy "${DRY_RUN:-0}"; then
   echo "[INFO] DRY_RUN=1; not launching policy."

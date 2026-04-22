@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import sys
 import threading
 import time
@@ -33,6 +34,7 @@ from holosoma_inference.utils.latency import LatencyTracker
 from holosoma_inference.utils.math.quat import quat_rotate_inverse
 from holosoma_inference.utils.perception_obs import PerceptionObsSub
 from holosoma_inference.utils.rate import RateLimiter
+from holosoma_inference.utils.sim_control import PolicyControlPull
 from holosoma_inference.utils.wandb import load_checkpoint
 
 
@@ -338,7 +340,32 @@ class BasePolicy:
     def _init_input_handlers(self):
         """Initialize input handlers (ROS, joystick, keyboard)."""
         self._init_rate_handler()
+        self._init_external_policy_control()
         self._init_input_device()
+
+    def _init_external_policy_control(self):
+        """Initialize optional external start/stop/init controls."""
+        self._policy_control_sub: PolicyControlPull | None = None
+        raw_port = os.environ.get("HOLOSOMA_POLICY_CONTROL_PORT", "").strip()
+        if not raw_port:
+            return
+        try:
+            port = int(raw_port)
+        except ValueError:
+            self.logger.warning("Ignoring invalid HOLOSOMA_POLICY_CONTROL_PORT={}", raw_port)
+            return
+        if port <= 0:
+            return
+        try:
+            self._policy_control_sub = PolicyControlPull(port=port)
+            self._policy_control_sub.start()
+        except Exception as exc:
+            self.logger.warning("Could not start policy control receiver on port {}: {}", port, exc)
+            self._policy_control_sub = None
+
+    def _allow_noninteractive_autostart_with_policy_control(self) -> bool:
+        value = os.environ.get("HOLOSOMA_POLICY_CONTROL_ALLOW_NONINTERACTIVE_AUTOSTART", "")
+        return value.strip().lower() in {"1", "true", "yes", "on"}
 
     def _has_valid_robot_state(self, robot_state_data: np.ndarray) -> bool:
         if robot_state_data is None or robot_state_data.ndim != 2 or robot_state_data.shape[0] < 1:
@@ -404,6 +431,12 @@ class BasePolicy:
         if not sys.stdin.isatty():
             self.logger.warning("Not running in a TTY environment - keyboard input disabled")
             self.logger.warning("This is normal for automated tests or non-interactive environments")
+            if (
+                self._policy_control_sub is not None
+                and not self._allow_noninteractive_autostart_with_policy_control()
+            ):
+                self.logger.info("Policy control is enabled; waiting for external start/stop/init commands.")
+                return
             if self.config.task.defer_policy_start_until_valid_state:
                 self.logger.info("Deferring policy auto-start until a valid robot state is received")
                 self._pending_noninteractive_policy_start = True
@@ -894,6 +927,22 @@ class BasePolicy:
                 self.handle_joystick_button(key)
                 self._print_control_status()
 
+    def _process_external_policy_controls(self):
+        """Apply start/stop/init commands received from the browser command panel."""
+        sub = self._policy_control_sub
+        if sub is None:
+            return
+        for action in sub.get_actions():
+            self.logger.info("Received external policy control action: {}", action)
+            if action == "start":
+                self._handle_start_policy()
+            elif action == "stop":
+                self._handle_stop_policy()
+                if hasattr(self.interface, "no_action"):
+                    self.interface.no_action = 1
+            elif action == "init":
+                self._handle_init_state()
+
     # ============================================================================
     # Button Handler Methods
     # ============================================================================
@@ -1026,6 +1075,7 @@ class BasePolicy:
 
                 if self.use_joystick and self.interface.get_joystick_msg() is not None:
                     self.process_joystick_input()
+                self._process_external_policy_controls()
                 if self.use_phase:
                     self.update_phase_time()
 

@@ -8,6 +8,8 @@ import time
 import zmq
 from loguru import logger
 
+POLICY_CONTROL_ACTIONS = frozenset({"start", "stop", "init"})
+
 
 class SimControlPush:
     """Send control messages such as reset requests to the simulator."""
@@ -146,6 +148,109 @@ class ManualRootCommandSub:
     def get_payload(self) -> dict | None:
         self._drain_messages()
         return self.last_payload
+
+    def close(self) -> None:
+        socket = self.socket
+        context = self.context
+        self.socket = None
+        self.context = None
+        if socket is not None:
+            socket.close(0)
+        if context is not None:
+            context.term()
+
+
+class PolicyControlPush:
+    """Send policy lifecycle commands from the web command panel."""
+
+    def __init__(self, port: int = 5662) -> None:
+        self.port = int(port)
+        self.context: zmq.Context | None = None
+        self.socket: zmq.Socket | None = None
+        self.enabled = False
+
+    def start(self) -> None:
+        try:
+            self.context = zmq.Context()
+            self.socket = self.context.socket(zmq.PUSH)
+            self.socket.setsockopt(zmq.LINGER, 0)
+            self.socket.setsockopt(zmq.SNDHWM, 16)
+            self.socket.bind(f"tcp://*:{self.port}")
+            self.enabled = True
+            logger.info("Policy control publisher bound to port {}", self.port)
+        except Exception as exc:
+            logger.error("Failed to start policy control publisher: {}", exc)
+            self.enabled = False
+
+    def publish(self, action: str, *, source: str = "web") -> bool:
+        if not self.enabled or self.socket is None:
+            return False
+        action = str(action).strip().lower()
+        if action not in POLICY_CONTROL_ACTIONS:
+            raise ValueError(f"Unsupported policy control action: {action}")
+        payload = json.dumps({"action": action, "source": str(source), "time": time.time()})
+        for _ in range(5):
+            try:
+                self.socket.send_string(payload, zmq.NOBLOCK)
+                return True
+            except zmq.Again:
+                time.sleep(0.01)
+            except Exception as exc:
+                logger.warning("Policy control publish failed: {}", exc)
+                return False
+        logger.warning("Policy control publish dropped after retries: {}", action)
+        return False
+
+    def close(self) -> None:
+        socket = self.socket
+        context = self.context
+        self.socket = None
+        self.context = None
+        if socket is not None:
+            socket.close(0)
+        if context is not None:
+            context.term()
+        self.enabled = False
+
+
+class PolicyControlPull:
+    """Receive policy lifecycle commands in a policy process."""
+
+    def __init__(self, port: int = 5662) -> None:
+        self.port = int(port)
+        self.context: zmq.Context | None = None
+        self.socket: zmq.Socket | None = None
+
+    def start(self) -> None:
+        self.context = zmq.Context()
+        self.socket = self.context.socket(zmq.PULL)
+        self.socket.setsockopt(zmq.LINGER, 0)
+        self.socket.connect(f"tcp://localhost:{self.port}")
+        logger.info("Policy control receiver started, connecting to port {}", self.port)
+
+    def get_actions(self) -> list[str]:
+        if self.socket is None:
+            return []
+        actions: list[str] = []
+        while True:
+            try:
+                payload = json.loads(self.socket.recv_string(zmq.NOBLOCK))
+            except zmq.Again:
+                break
+            except json.JSONDecodeError as exc:
+                logger.warning("Policy control ignored invalid JSON: {}", exc)
+                continue
+            except Exception as exc:
+                logger.warning("Policy control receive failed: {}", exc)
+                break
+            if not isinstance(payload, dict):
+                continue
+            action = str(payload.get("action", "")).strip().lower()
+            if action in POLICY_CONTROL_ACTIONS:
+                actions.append(action)
+            elif action:
+                logger.warning("Policy control ignored unsupported action: {}", action)
+        return actions
 
     def close(self) -> None:
         socket = self.socket

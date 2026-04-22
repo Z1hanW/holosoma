@@ -105,6 +105,7 @@ SIM_DEVICE="${SIM_DEVICE:-}"
 MUJOCO_BACKEND="${MUJOCO_BACKEND:-}"
 TERRAIN_STATIC_FRICTION="${TERRAIN_STATIC_FRICTION:-}"
 TERRAIN_DYNAMIC_FRICTION="${TERRAIN_DYNAMIC_FRICTION:-}"
+SIM_TERRAIN_MESH_TYPE="${SIM_TERRAIN_MESH_TYPE:-}"
 SIM_VIRTUAL_GANTRY_ENABLED="${SIM_VIRTUAL_GANTRY_ENABLED:-False}"
 SIM_MOTION_INIT_MODE_EXPLICIT=0
 [[ -n "${SIM_MOTION_INIT_MODE+x}" ]] && SIM_MOTION_INIT_MODE_EXPLICIT=1
@@ -146,6 +147,7 @@ if is_truthy_env "${HOLOSOMA_MJ_TRACK_RUN_FOREVER:-0}"; then
 fi
 TRAINING_HEADLESS="${TRAINING_HEADLESS:-True}"
 SIM_DEBUG_VIZ="${SIM_DEBUG_VIZ:-True}"
+SIM_ROBOT_MJCF_FILTER_ENABLE="${SIM_ROBOT_MJCF_FILTER_ENABLE:-}"
 MUJOCO_SHOW_OBJECT_COLLISION="${MUJOCO_SHOW_OBJECT_COLLISION:-0}"
 MUJOCO_HIDE_OBJECT_VISUALS_WHEN_SHOWING_COLLISION="${MUJOCO_HIDE_OBJECT_VISUALS_WHEN_SHOWING_COLLISION:-0}"
 SIM_READY_TIMEOUT="${SIM_READY_TIMEOUT:-180}"
@@ -899,6 +901,25 @@ apply_training_robot_asset_overrides "$PATCHED_ONNX"
 apply_training_object_overrides "$PATCHED_ONNX"
 apply_training_perception_overrides "$PATCHED_ONNX"
 
+if is_truthy_env "${HOLOSOMA_MUJOCO_USE_GT_BOX_ENV:-0}"; then
+  export HOLOSOMA_MUJOCO_OBJECT_SCENE_XML="${HOLOSOMA_MUJOCO_OBJECT_SCENE_XML:-/home/ubuntu/FAR/holosoma_gt/src/holosoma_retargeting/holosoma_retargeting/models/g1/g1_29dof_w_largebox.xml}"
+  export HOLOSOMA_MUJOCO_SKIP_SCENE_TERRAIN="1"
+  SIM_ROBOT_MJCF_FILTER_ENABLE="False"
+  SIM_USE_TRAINING_URDF_OBJECT_SCENE="0"
+  SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML="0"
+  SIM_COPY_TENDONS_FROM_ROBOT_XML="0"
+  SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML="0"
+  SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML="0"
+  MUJOCO_OBJECT_MASS_OVERRIDE=""
+  MUJOCO_OBJECT_GEOM_FRICTION=""
+  MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION=""
+  MUJOCO_OBJECT_LATERAL_FRICTION=""
+  MUJOCO_OBJECT_ROLLING_FRICTION=""
+  MUJOCO_OBJECT_CONTACT_STIFFNESS=""
+  MUJOCO_OBJECT_CONTACT_DAMPING=""
+  export HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS="0"
+fi
+
 SIM_ADD_DEFAULT_OBJECT_ACTUATORS="${SIM_ADD_DEFAULT_OBJECT_ACTUATORS:-1}"
 SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML="${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML:-1}"
 SIM_COPY_TENDONS_FROM_ROBOT_XML="${SIM_COPY_TENDONS_FROM_ROBOT_XML:-1}"
@@ -1086,6 +1107,7 @@ if [[ "$MJ_TRACK_MODE" != "policy" ]]; then
     $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]] && printf '%s' "perception:${PERCEPTION_PRESET}" ) \
     --training.headless "$TRAINING_HEADLESS" \
     --simulator.config.debug-viz "$SIM_DEBUG_VIZ" \
+    $( [[ -n "$SIM_ROBOT_MJCF_FILTER_ENABLE" ]] && printf '%s %s' "--simulator.config.robot-mjcf-filter.enable" "$SIM_ROBOT_MJCF_FILTER_ENABLE" ) \
     $( [[ "$MUJOCO_SHOW_OBJECT_COLLISION" == "1" ]] && printf '%s %s' "--simulator.config.mujoco-show-object-collision" "True" ) \
     $( [[ "$MUJOCO_HIDE_OBJECT_VISUALS_WHEN_SHOWING_COLLISION" == "1" ]] && printf '%s %s' "--simulator.config.mujoco-hide-object-visuals-when-showing-collision" "True" ) \
     --simulator.config.sim.fps "$SIM_FPS" \
@@ -1115,6 +1137,7 @@ if [[ "$MJ_TRACK_MODE" != "policy" ]]; then
     $( [[ -n "$MUJOCO_OBJECT_CONTACT_DAMPING" ]] && printf '%s %s' "--robot.object.mujoco-object-contact-damping" "$MUJOCO_OBJECT_CONTACT_DAMPING" ) \
     $( [[ "$MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES" == "1" ]] && printf '%s %s' "--robot.object.mujoco-limit-object-contacts-to-carry-bodies" "True" ) \
     $( [[ -n "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" ]] && printf '%s %s' "--robot.object.mujoco-object-contact-body-name-markers" "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" ) \
+    $( [[ -n "$SIM_TERRAIN_MESH_TYPE" ]] && printf '%s %s' "--terrain.terrain-term.mesh-type" "$SIM_TERRAIN_MESH_TYPE" ) \
     $( [[ -n "$TERRAIN_STATIC_FRICTION" ]] && printf '%s %s' "--terrain.terrain-term.static-friction" "$TERRAIN_STATIC_FRICTION" ) \
     $( [[ -n "$TERRAIN_DYNAMIC_FRICTION" ]] && printf '%s %s' "--terrain.terrain-term.dynamic-friction" "$TERRAIN_DYNAMIC_FRICTION" ) \
     --simulator.config.bridge.interface "$INTERFACE_NAME" \

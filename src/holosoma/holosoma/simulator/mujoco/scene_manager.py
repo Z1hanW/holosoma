@@ -38,6 +38,9 @@ _CAMERA_TERRAIN_PROXY_SUFFIX = "_camera_proxy"
 _LOAD_ROBOT_VISUAL_MESHES_ENV = "HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES"
 _LOAD_OBJECT_VISUAL_MESHES_ENV = "HOLOSOMA_MUJOCO_LOAD_OBJECT_VISUAL_MESHES"
 _WEB_DEMO_OBJECT_CONTACTS_ENV = "HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS"
+_GT_GROUND_CONTACTS_ENV = "HOLOSOMA_MUJOCO_GT_GROUND_CONTACTS"
+_USE_GT_BOX_ENV_ENV = "HOLOSOMA_MUJOCO_USE_GT_BOX_ENV"
+_OBJECT_SCENE_XML_ENV = "HOLOSOMA_MUJOCO_OBJECT_SCENE_XML"
 
 
 class MujocoSceneManager:
@@ -219,6 +222,10 @@ class MujocoSceneManager:
         raw = os.environ.get(_CAMERA_TERRAIN_PROXY_ENV, "0").strip().lower()
         return raw not in {"", "0", "false", "no", "off"}
 
+    def _gt_ground_contacts_enabled(self) -> bool:
+        raw = os.environ.get(_GT_GROUND_CONTACTS_ENV, "0").strip().lower()
+        return raw not in {"", "0", "false", "no", "off"}
+
     def _create_ground_plane(self, terrain_state: TerrainTermBase) -> mujoco.MjSpec.Geom:
         """Create a ground plane terrain geometry.
 
@@ -228,19 +235,30 @@ class MujocoSceneManager:
             Ground plane geometry with configured physics properties.
         """
         # Create ground plane with hardcoded parameters and physics properties
-        return self.world_spec.worldbody.add_geom(
-            name=terrain_state.name,
-            type=mujoco.mjtGeom.mjGEOM_PLANE,
+        geom_kwargs: dict[str, Any] = {
+            "name": terrain_state.name,
+            "type": mujoco.mjtGeom.mjGEOM_PLANE,
             # Size=0 is rendered infinitely. Collision plane is always infinite.
             # Note: size.z is actually the rendered spacing betweeh the grid
             #       subdivisions (to improve lighting, shadows).
-            size=[0, 0, 0.05],
-            pos=[0, 0, 0],
-            material="grid",
-            friction=self._terrain_friction_triplet_from_state(terrain_state),
-            solimp=[0.99, 0.99, 0.01, 0.5, 2],  # 5 elements: [dmin, dmax, width, midpoint, power]
-            solref=[0.001, 1],  # 2 elements: [timeconst, dampratio]
-        )
+            "size": [0, 0, 0.05],
+            "pos": [0, 0, 0],
+            "material": "grid",
+            "friction": self._terrain_friction_triplet_from_state(terrain_state),
+            "solimp": [0.99, 0.99, 0.01, 0.5, 2],  # [dmin, dmax, width, midpoint, power]
+            "solref": [0.001, 1],  # [timeconst, dampratio]
+        }
+        if self._gt_ground_contacts_enabled():
+            # Match the ground geom compiled from holosoma_gt's g1_29dof_w_largebox.xml.
+            geom_kwargs.update(
+                condim=1,
+                friction=[1.0, 0.005, 0.0001],
+                solimp=[0.9, 0.95, 0.001, 0.5, 2],
+                solref=[0.02, 1],
+            )
+            logger.info("Using holosoma_gt MuJoCo ground contact profile for plane terrain")
+
+        return self.world_spec.worldbody.add_geom(**geom_kwargs)
 
     def _maybe_add_camera_render_proxy_geom(self, terrain_state: TerrainTermBase) -> None:
         setattr(terrain_state, "camera_render_proxy_geom_name", None)
@@ -470,49 +488,52 @@ class MujocoSceneManager:
             # Remove worldbody lights and ground|floor|plane geoms because they're added dynamically
             robot_spec = self._filter_robot_worldbody(robot_spec, xml_filter)
 
-        self._maybe_align_composite_body_inertials_with_training_urdf(
-            robot_spec,
-            robot_config,
-            using_composite_object_scene=using_composite_object_scene,
-        )
-        self._maybe_copy_joint_defaults_from_reference_robot_xml(
-            robot_spec,
-            robot_config,
-            using_composite_object_scene=using_composite_object_scene,
-        )
-        self._maybe_copy_collision_geoms_from_reference_robot_xml(
-            robot_spec,
-            robot_config,
-            using_composite_object_scene=using_composite_object_scene,
-        )
-        self._maybe_replace_composite_collision_geoms_with_reference_robot_xml(
-            robot_spec,
-            robot_config,
-            using_composite_object_scene=using_composite_object_scene,
-        )
-        self._maybe_align_composite_hand_collision_geoms_with_training_urdf(
-            robot_spec,
-            robot_config,
-            robot_xml_path=robot_xml_path,
-            using_composite_object_scene=using_composite_object_scene,
-        )
-        self._maybe_copy_tendons_from_reference_robot_xml(
-            robot_spec,
-            robot_config,
-            using_composite_object_scene=using_composite_object_scene,
-        )
-        self._maybe_copy_contact_pairs_from_reference_robot_xml(
-            robot_spec,
-            robot_config,
-            terrain_geom_name=str(getattr(terrain_state, "name", "floor")),
-            using_composite_object_scene=using_composite_object_scene,
-        )
-        self._maybe_override_composite_object_properties(
-            robot_spec,
-            robot_config,
-            terrain_geom_name=str(getattr(terrain_state, "name", "floor")),
-            using_composite_object_scene=using_composite_object_scene,
-        )
+        if self._env_flag(_USE_GT_BOX_ENV_ENV):
+            logger.info("Using GT MuJoCo box environment verbatim; skipping composite scene post-processing")
+        else:
+            self._maybe_align_composite_body_inertials_with_training_urdf(
+                robot_spec,
+                robot_config,
+                using_composite_object_scene=using_composite_object_scene,
+            )
+            self._maybe_copy_joint_defaults_from_reference_robot_xml(
+                robot_spec,
+                robot_config,
+                using_composite_object_scene=using_composite_object_scene,
+            )
+            self._maybe_copy_collision_geoms_from_reference_robot_xml(
+                robot_spec,
+                robot_config,
+                using_composite_object_scene=using_composite_object_scene,
+            )
+            self._maybe_replace_composite_collision_geoms_with_reference_robot_xml(
+                robot_spec,
+                robot_config,
+                using_composite_object_scene=using_composite_object_scene,
+            )
+            self._maybe_align_composite_hand_collision_geoms_with_training_urdf(
+                robot_spec,
+                robot_config,
+                robot_xml_path=robot_xml_path,
+                using_composite_object_scene=using_composite_object_scene,
+            )
+            self._maybe_copy_tendons_from_reference_robot_xml(
+                robot_spec,
+                robot_config,
+                using_composite_object_scene=using_composite_object_scene,
+            )
+            self._maybe_copy_contact_pairs_from_reference_robot_xml(
+                robot_spec,
+                robot_config,
+                terrain_geom_name=str(getattr(terrain_state, "name", "floor")),
+                using_composite_object_scene=using_composite_object_scene,
+            )
+            self._maybe_override_composite_object_properties(
+                robot_spec,
+                robot_config,
+                terrain_geom_name=str(getattr(terrain_state, "name", "floor")),
+                using_composite_object_scene=using_composite_object_scene,
+            )
         self._maybe_add_default_actuators(robot_spec, robot_config)
 
         if object_spec_to_attach is not None:
@@ -2133,7 +2154,8 @@ class MujocoSceneManager:
         for candidate in object_candidates:
             for key, (xml_rel_path, object_body_name) in supported_specs.items():
                 if candidate == key or candidate.endswith(f"_{key}") or key in candidate:
-                    xml_path = (cls._repo_root() / xml_rel_path).resolve()
+                    xml_override = os.environ.get(_OBJECT_SCENE_XML_ENV, "").strip()
+                    xml_path = Path(xml_override).expanduser().resolve() if xml_override else (cls._repo_root() / xml_rel_path).resolve()
                     if not xml_path.is_file():
                         raise FileNotFoundError(f"Resolved MuJoCo composite scene not found: {xml_path}")
                     return (

@@ -24,7 +24,7 @@ for path in (REPO_ROOT / "src" / "holosoma", INFER_SRC_ROOT):
     if path.exists() and str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from holosoma_inference.utils.sim_control import ManualRootCommandPub, SimControlPush  # noqa: E402
+from holosoma_inference.utils.sim_control import ManualRootCommandPub, PolicyControlPush, SimControlPush  # noqa: E402
 
 
 CONTROL_KEYS = frozenset({"w", "s", "a", "d", "q", "e"})
@@ -218,6 +218,9 @@ INDEX_HTML = """<!doctype html>
     </label>
     <button id="zero" type="button">Zero</button>
     <button id="reset" type="button">Reset Sim</button>
+    <button id="policyStart" type="button">Start Policy</button>
+    <button id="policyStop" type="button">Stop Policy</button>
+    <button id="policyInit" type="button">Init Pose</button>
   </section>
 </main>
 <script>
@@ -234,12 +237,25 @@ const sceneUrl = __SCENE_URL_JSON__;
 const scenePanel = document.getElementById("scenePanel");
 const sceneFrame = document.getElementById("sceneFrame");
 const sceneLink = document.getElementById("sceneLink");
+let sceneKeyWindow = null;
 enabled.checked = __ENABLED_JSON__;
 mode.value = __MODE_JSON__;
 if (sceneUrl) {
   sceneFrame.src = sceneUrl;
   scenePanel.classList.add("active");
   sceneLink.innerHTML = `scene: <a href="${sceneUrl}" target="_blank" rel="noreferrer">${sceneUrl}</a>`;
+}
+
+function isEditableTarget(event) {
+  const target = event.target;
+  if (!target) return false;
+  const tag = target.tagName ? target.tagName.toLowerCase() : "";
+  return target.isContentEditable || ["input", "select", "textarea", "button"].includes(tag);
+}
+
+function updatePorts(payload) {
+  const policyPort = payload.policy_control_enabled ? ` policy_control_port=${payload.policy_control_port}` : "";
+  ports.textContent = `sparse_root_port=${payload.sparse_root_command_port} control_port=${payload.control_port}${policyPort}`;
 }
 
 function commandVector() {
@@ -276,7 +292,7 @@ async function sendCommand() {
     });
     const payload = await response.json();
     if (payload && payload.command) {
-      ports.textContent = `sparse_root_port=${payload.sparse_root_command_port} control_port=${payload.control_port}`;
+      updatePorts(payload);
       if (!payload.publisher_enabled) {
         message.textContent = "Publisher is not bound.";
       } else if (payload.enabled) {
@@ -290,21 +306,77 @@ async function sendCommand() {
   }
 }
 
-document.addEventListener("keydown", (event) => {
+async function sendPolicy(action) {
+  try {
+    const response = await fetch("/policy", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({action}),
+    });
+    const payload = await response.json();
+    if (payload) updatePorts(payload);
+    if (!response.ok) {
+      message.textContent = payload.error || `policy ${action} failed`;
+    } else if (payload.sent) {
+      message.textContent = `Policy ${action} requested.`;
+    } else {
+      message.textContent = `Policy ${action} was not delivered.`;
+    }
+  } catch (err) {
+    message.textContent = `policy control failed: ${err}`;
+  }
+}
+
+function handleKeyDown(event) {
+  if (isEditableTarget(event)) return;
   const key = event.key.toLowerCase();
+  if (!event.repeat && key === "]") {
+    event.preventDefault();
+    sendPolicy("start");
+    return;
+  }
+  if (!event.repeat && key === "o") {
+    event.preventDefault();
+    sendPolicy("stop");
+    return;
+  }
+  if (!event.repeat && key === "i") {
+    event.preventDefault();
+    sendPolicy("init");
+    return;
+  }
   if (!controlKeys.has(key) || event.repeat) return;
   event.preventDefault();
   pressed.add(key);
   sendCommand();
-});
+}
 
-document.addEventListener("keyup", (event) => {
+function handleKeyUp(event) {
   const key = event.key.toLowerCase();
   if (!controlKeys.has(key)) return;
   event.preventDefault();
   pressed.delete(key);
   sendCommand();
-});
+}
+
+function attachSceneKeyHandlers() {
+  if (!sceneFrame || !sceneFrame.contentWindow || sceneFrame.contentWindow === sceneKeyWindow) return;
+  try {
+    sceneKeyWindow = sceneFrame.contentWindow;
+    sceneKeyWindow.addEventListener("keydown", handleKeyDown, true);
+    sceneKeyWindow.addEventListener("keyup", handleKeyUp, true);
+    sceneKeyWindow.addEventListener("blur", () => {
+      pressed.clear();
+      sendCommand();
+    });
+  } catch (err) {
+    console.debug("scene key handlers unavailable", err);
+  }
+}
+
+document.addEventListener("keydown", handleKeyDown, true);
+document.addEventListener("keyup", handleKeyUp, true);
+sceneFrame.addEventListener("load", attachSceneKeyHandlers);
 
 window.addEventListener("blur", () => {
   pressed.clear();
@@ -328,6 +400,9 @@ document.getElementById("reset").addEventListener("click", async () => {
     body: JSON.stringify({reason: "web_command_reset"}),
   });
 });
+document.getElementById("policyStart").addEventListener("click", () => sendPolicy("start"));
+document.getElementById("policyStop").addEventListener("click", () => sendPolicy("stop"));
+document.getElementById("policyInit").addEventListener("click", () => sendPolicy("init"));
 
 setInterval(sendCommand, 100);
 sendCommand();
@@ -342,6 +417,7 @@ class CommandState:
         self,
         sparse_root_command_port: int,
         control_port: int,
+        policy_control_port: int,
         value: float,
         yaw_value: float,
         mode: str,
@@ -349,6 +425,7 @@ class CommandState:
     ) -> None:
         self.sparse_root_command_port = int(sparse_root_command_port)
         self.control_port = int(control_port)
+        self.policy_control_port = int(policy_control_port)
         self.value = abs(float(value))
         self.yaw_value = abs(float(yaw_value))
         self.mode = str(mode)
@@ -357,15 +434,22 @@ class CommandState:
         self.lock = threading.Lock()
         self.pub = ManualRootCommandPub(port=self.sparse_root_command_port)
         self.control_pub = SimControlPush(port=self.control_port)
+        self.policy_pub = (
+            PolicyControlPush(port=self.policy_control_port) if self.policy_control_port > 0 else None
+        )
 
     def start(self) -> None:
         self.pub.start()
         self.control_pub.start()
+        if self.policy_pub is not None:
+            self.policy_pub.start()
         self.publish_current()
 
     def close(self) -> None:
         self.pub.close()
         self.control_pub.close()
+        if self.policy_pub is not None:
+            self.policy_pub.close()
 
     def _command_locked(self) -> list[float]:
         value = abs(float(self.value))
@@ -426,6 +510,11 @@ class CommandState:
     def request_reset(self, reason: str) -> None:
         self.control_pub.request_reset(reason)
 
+    def request_policy(self, action: str) -> bool:
+        if self.policy_pub is None:
+            return False
+        return self.policy_pub.publish(action, source="web_command")
+
     def snapshot(self, command: list[float] | None = None) -> dict[str, Any]:
         with self.lock:
             if command is None:
@@ -441,6 +530,8 @@ class CommandState:
                 "publisher_enabled": bool(self.pub.enabled),
                 "sparse_root_command_port": self.sparse_root_command_port,
                 "control_port": self.control_port,
+                "policy_control_port": self.policy_control_port,
+                "policy_control_enabled": bool(self.policy_pub and self.policy_pub.enabled),
             }
 
 
@@ -581,6 +672,28 @@ async def _create_app(args: argparse.Namespace, command_state: CommandState, ind
         command_state.request_reset(reason)
         return web.json_response({"ok": True, "reason": reason})
 
+    async def policy(request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        action = str(payload.get("action") or "").strip().lower()
+        if action not in {"start", "stop", "init"}:
+            response = command_state.snapshot()
+            response.update({"ok": False, "error": f"unsupported policy action: {action}"})
+            return web.json_response(response, status=400)
+        try:
+            sent = command_state.request_policy(action)
+        except ValueError as exc:
+            response = command_state.snapshot()
+            response.update({"ok": False, "error": str(exc)})
+            return web.json_response(response, status=400)
+        response = command_state.snapshot()
+        response.update({"ok": bool(sent), "sent": bool(sent), "action": action})
+        return web.json_response(response)
+
     async def zero(_request: web.Request) -> web.Response:
         return web.json_response(command_state.update_from_payload({"keys": []}))
 
@@ -591,6 +704,7 @@ async def _create_app(args: argparse.Namespace, command_state: CommandState, ind
     app.router.add_get("/state", state)
     app.router.add_post("/command", command)
     app.router.add_post("/reset", reset)
+    app.router.add_post("/policy", policy)
     app.router.add_post("/zero", zero)
     app.router.add_route("*", "/scene", _scene_proxy_handler)
     app.router.add_route("*", "/scene/{tail:.*}", _scene_proxy_handler)
@@ -603,6 +717,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--sparse-root-command-port", type=int, default=5661)
     parser.add_argument("--control-port", type=int, default=5659)
+    parser.add_argument("--policy-control-port", type=int, default=5662)
     parser.add_argument("--value", type=float, default=0.5)
     parser.add_argument("--yaw-degrees", type=float, default=17.0)
     parser.add_argument("--yaw-value", type=float, default=None, help="Yaw command step in radians; overrides --yaw-degrees.")
@@ -624,6 +739,7 @@ def main() -> None:
     command_state = CommandState(
         sparse_root_command_port=args.sparse_root_command_port,
         control_port=args.control_port,
+        policy_control_port=args.policy_control_port,
         value=args.value,
         yaw_value=yaw_value,
         mode=args.mode,
@@ -663,9 +779,10 @@ def main() -> None:
     elif scene_url:
         logger.info("Showing MuJoCo scene iframe from {}", scene_url)
     logger.info(
-        "Publishing sparse-root command on port {}, reset control on port {}, manual enabled={}, xy value {:.3f}, yaw {:.3f} rad ({:.1f} deg)",
+        "Publishing sparse-root command on port {}, reset control on port {}, policy control on port {}, manual enabled={}, xy value {:.3f}, yaw {:.3f} rad ({:.1f} deg)",
         args.sparse_root_command_port,
         args.control_port,
+        args.policy_control_port,
         bool(args.enabled),
         abs(float(args.value)),
         yaw_value,

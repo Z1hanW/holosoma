@@ -1229,8 +1229,8 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             env.pop("HOLOSOMA_RESET_TO_DEFAULT_POSE", None)
             env.pop("HOLOSOMA_DEFAULT_POSE_INIT", None)
             env.pop("HOLOSOMA_MOTION_INIT_MANUAL", None)
-            # The wrapper exports the initial clip object. Let mj_track.sh derive it again for the selected motion.
-            env.pop("OBJECT_URDF", None)
+            # Preserve an explicit object URDF from the launcher; without it, mj_track.sh
+            # falls back to per-motion metadata and can drift from the requested MuJoCo scene.
             env.pop("SIM2SIM_CLIP_OBJECT_URDF_PATH", None)
             if motion_init_env is not None:
                 if bool(manual_motion_init_mode_cb.value):

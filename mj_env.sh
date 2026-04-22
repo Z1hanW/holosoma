@@ -25,6 +25,8 @@ Environment:
   COMMAND_VALUE                   default: 0.5 for W/S/A/D x/y
   COMMAND_YAW_DEGREES             default: 17 for Q/E yaw
   COMMAND_MODE                    default: manual when manual mode is enabled
+  POLICY_CONTROL_PORT             default: 5662 for web start/stop/init policy control
+  MJ_ENV_KILL_STALE_POLICY        default: 0; set 1 to terminate same-port policy leftovers before launch
   SIM_MOTION_INIT_MODE            default: raw_motion (first motion init pose)
   VISER_PORT                      default: 2984 when viser is launched
 EOF
@@ -121,6 +123,7 @@ export SIM_STATE_PORT="${SIM_STATE_PORT:-5657}"
 export PERCEPTION_OBS_PORT="${PERCEPTION_OBS_PORT:-5658}"
 export SIM_CONTROL_PORT="${SIM_CONTROL_PORT:-5659}"
 export SPARSE_ROOT_COMMAND_PORT="${SPARSE_ROOT_COMMAND_PORT:-5661}"
+export POLICY_CONTROL_PORT="${POLICY_CONTROL_PORT:-5662}"
 export ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND="${ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND:-1}"
 export RUN_SECONDS="${RUN_SECONDS:-0}"
 export HOLOSOMA_MJ_TRACK_RUN_FOREVER="${HOLOSOMA_MJ_TRACK_RUN_FOREVER:-1}"
@@ -146,7 +149,40 @@ COMMAND_VALUE="${COMMAND_VALUE:-0.5}"
 COMMAND_YAW_DEGREES="${COMMAND_YAW_DEGREES:-${COMMAND_YAW_DEG:-17}}"
 COMMAND_MODE="${COMMAND_MODE:-manual}"
 VISER_PORT_RESOLVED="${VISER_PORT:-2984}"
+MJ_ENV_KILL_STALE_POLICY="${MJ_ENV_KILL_STALE_POLICY:-0}"
 COMMAND_WEB_PID=""
+
+same_port_policy_pids() {
+  ps -eo pid=,args= | awk \
+    -v root="${ROOT_DIR}" \
+    -v state="${SIM_STATE_PORT}" \
+    -v control="${SIM_CONTROL_PORT}" '
+      index($0, root "/src/holosoma_inference/holosoma_inference/run_policy.py") &&
+      index($0, "--task.sim-state-port " state) &&
+      index($0, "--task.sim-control-port " control) {
+        print $1
+      }
+    '
+}
+
+STALE_POLICY_PIDS="$(same_port_policy_pids || true)"
+if [[ -n "$STALE_POLICY_PIDS" ]]; then
+  if is_truthy "$MJ_ENV_KILL_STALE_POLICY"; then
+    echo "[WARN] terminating stale policy process(es) on state=${SIM_STATE_PORT} control=${SIM_CONTROL_PORT}: ${STALE_POLICY_PIDS}" >&2
+    # shellcheck disable=SC2086
+    kill -TERM $STALE_POLICY_PIDS 2>/dev/null || true
+    sleep 1
+    for pid in $STALE_POLICY_PIDS; do
+      if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
+    done
+  else
+    echo "[ERROR] stale policy process(es) already target state=${SIM_STATE_PORT} control=${SIM_CONTROL_PORT}: ${STALE_POLICY_PIDS}" >&2
+    echo "[ERROR] Stop them first, or set MJ_ENV_KILL_STALE_POLICY=1 to terminate them before launching env." >&2
+    exit 1
+  fi
+fi
 
 cleanup() {
   if [[ -n "${COMMAND_WEB_PID:-}" ]] && kill -0 "$COMMAND_WEB_PID" 2>/dev/null; then
@@ -168,6 +204,7 @@ if is_truthy "$COMMAND_WEB" && ! is_truthy "${DRY_RUN:-0}"; then
       --port "$COMMAND_WEB_PORT" \
       --sparse-root-command-port "$SPARSE_ROOT_COMMAND_PORT" \
       --control-port "$SIM_CONTROL_PORT" \
+      --policy-control-port "$POLICY_CONTROL_PORT" \
       --value "$COMMAND_VALUE" \
       --yaw-degrees "$COMMAND_YAW_DEGREES" \
       --mode "$COMMAND_MODE" \
@@ -205,9 +242,10 @@ echo "[INFO] launching MuJoCo environment only"
 echo "[INFO] model=${MODEL_INPUT}"
 echo "[INFO] headless=${TRAINING_HEADLESS} launch_viser=${LAUNCH_VISER_RESOLVED}"
 echo "[INFO] motion init=${SIM_MOTION_INIT_MODE}"
-echo "[INFO] ports clock=${SIM_CLOCK_PORT} state=${SIM_STATE_PORT} perception=${PERCEPTION_OBS_PORT} control=${SIM_CONTROL_PORT} sparse_root=${SPARSE_ROOT_COMMAND_PORT}"
+echo "[INFO] ports clock=${SIM_CLOCK_PORT} state=${SIM_STATE_PORT} perception=${PERCEPTION_OBS_PORT} control=${SIM_CONTROL_PORT} sparse_root=${SPARSE_ROOT_COMMAND_PORT} policy_control=${POLICY_CONTROL_PORT}"
 if is_truthy "$COMMAND_WEB"; then
   echo "[INFO] command+scene web: http://localhost:${COMMAND_WEB_PORT} (log: ${COMMAND_WEB_LOG})"
+  echo "[INFO] web policy controls: Start/Stop/Init via policy_control=${POLICY_CONTROL_PORT}"
   echo "[INFO] command source: motion-derived by default; manual_mode_initial=${COMMAND_MANUAL_ENABLED}"
   echo "[INFO] manual command scale: xy=${COMMAND_VALUE}, yaw=${COMMAND_YAW_DEGREES} deg"
 fi
