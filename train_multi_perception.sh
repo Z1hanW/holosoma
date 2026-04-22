@@ -46,7 +46,7 @@ if [[ "${PERCEPTION_PRESET}" == "camera_depth_d435i" ]]; then
     --perception.camera_warp_crop_bottom=0
     --perception.camera_warp_crop_left=4
     --perception.camera_warp_crop_right=4
-    --perception.camera_warp_min_valid_depth=0.15
+    --perception.camera_warp_min_valid_depth=0.3
     --perception.camera_warp_normalize=True
     --perception.camera_warp_edge_noise=True
     --perception.camera_warp_edge_border=3

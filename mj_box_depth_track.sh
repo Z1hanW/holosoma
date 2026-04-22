@@ -2,9 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_MOTION_DIR="$ROOT_DIR/data/ds_box_data/train_g1_w_obj_prepared"
-DEFAULT_MODEL_INPUT="wandb://zihanw22/boxer/shoo7sr1/model_07500.onnx"
-DEFAULT_OBJECT_MAP="$DEFAULT_MOTION_DIR/_clip_object_urdf_map.json"
+DEFAULT_MOTION_DIR="$ROOT_DIR/outputs/motion_bank_success_box_0_92_0p3"
+DEFAULT_MODEL_INPUT="${ROOT_DIR}/logs/wandb_runs/shoo7sr1/model_18500.onnx"
+DEFAULT_OBJECT_MAP="$ROOT_DIR/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
 DEFAULT_PERCEPTION_CAMERA_SOURCE="${PERCEPTION_CAMERA_SOURCE_DEFAULT:-rendered}"
 
 INFER_PYTHON_BIN="${INFER_PY:-/home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python}"
@@ -15,13 +15,18 @@ fi
 usage() {
   cat <<EOF
 Usage:
-  MOTION_DIR=/path/to/prepared OBJECT_URDF=/path/to/_clip_object_urdf_map.json bash mj_box_depth_track.sh [depth|rendered|warp] [clip_name|motion.npz] [model.onnx|wandb://...] [viser args...]
+  MOTION_DIR=/path/to/rollout_motion_bank OBJECT_URDF=/path/to/object.urdf bash mj_box_depth_track.sh [depth|rendered|warp] [clip_name|motion.npz] [model.onnx|wandb://...] [viser args...]
 
 Defaults:
   motion_dir    = ${DEFAULT_MOTION_DIR}
   object_map    = ${DEFAULT_OBJECT_MAP}
   model         = ${DEFAULT_MODEL_INPUT}
   depth_source  = ${DEFAULT_PERCEPTION_CAMERA_SOURCE}
+  object_mass   = MUJOCO_OBJECT_MASS_OVERRIDE:-<unset>
+  lateral_friction = MUJOCO_OBJECT_LATERAL_FRICTION:-0.9
+  rolling_friction = MUJOCO_OBJECT_ROLLING_FRICTION:-0.5
+  contact_stiffness= MUJOCO_OBJECT_CONTACT_STIFFNESS:-30000
+  contact_damping  = MUJOCO_OBJECT_CONTACT_DAMPING:-1000
 EOF
 }
 
@@ -150,17 +155,33 @@ export ENABLE_SPLIT_PERCEPTION_OBS="${ENABLE_SPLIT_PERCEPTION_OBS:-1}"
 export PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
 export PERCEPTION_CAMERA_SOURCE="${PERCEPTION_CAMERA_SOURCE:-$DEFAULT_PERCEPTION_CAMERA_SOURCE}"
 export PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-mesh}"
-export SIM_USE_TRAINING_URDF_OBJECT_SCENE="${SIM_USE_TRAINING_URDF_OBJECT_SCENE:-1}"
-export HOLOSOMA_W_OBJECT_URDF="${HOLOSOMA_W_OBJECT_URDF:-g1/g1_29dof.urdf}"
-export MUJOCO_OBJECT_CONTACT_BODY_MARKERS="${MUJOCO_OBJECT_CONTACT_BODY_MARKERS:-[\"torso\",\"shoulder\",\"elbow\",\"wrist\",\"hand\",\"rubber_hand\"]}"
+export SIM_USE_TRAINING_URDF_OBJECT_SCENE="${SIM_USE_TRAINING_URDF_OBJECT_SCENE:-0}"
+export HOLOSOMA_W_OBJECT_URDF="${HOLOSOMA_W_OBJECT_URDF:-g1/main_mesh_collision_halfspherehand.urdf}"
+export MUJOCO_OBJECT_CONTACT_BODY_MARKERS="${MUJOCO_OBJECT_CONTACT_BODY_MARKERS:-}"
+export MUJOCO_OBJECT_MASS_OVERRIDE="${MUJOCO_OBJECT_MASS_OVERRIDE:-}"
+export MUJOCO_OBJECT_GEOM_FRICTION="${MUJOCO_OBJECT_GEOM_FRICTION:-}"
+export MUJOCO_OBJECT_LATERAL_FRICTION="${MUJOCO_OBJECT_LATERAL_FRICTION:-0.9}"
+export MUJOCO_OBJECT_ROLLING_FRICTION="${MUJOCO_OBJECT_ROLLING_FRICTION:-0.5}"
+export MUJOCO_OBJECT_CONTACT_STIFFNESS="${MUJOCO_OBJECT_CONTACT_STIFFNESS:-30000}"
+export MUJOCO_OBJECT_CONTACT_DAMPING="${MUJOCO_OBJECT_CONTACT_DAMPING:-1000}"
+export HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS="${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS:-0}"
 if [[ "$PERCEPTION_CAMERA_SOURCE" == "far_tracking_warp" ]]; then
   export SIM_DEVICE="${SIM_DEVICE:-cuda:0}"
 fi
 if [[ "$PERCEPTION_CAMERA_SOURCE" == "rendered" && -z "${MUJOCO_GL:-}" ]]; then
-  export MUJOCO_GL=egl
+  case "$(printf '%s' "${TRAINING_HEADLESS:-${HEADLESS:-True}}" | tr '[:upper:]' '[:lower:]')" in
+    0|false|no|off)
+      export MUJOCO_GL=glfw
+      ;;
+    *)
+      export MUJOCO_GL=egl
+      ;;
+  esac
 fi
 if [[ "$PERCEPTION_CAMERA_SOURCE" == "rendered" ]]; then
   export HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES="${HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES:-1}"
+  export HOLOSOMA_MUJOCO_LOAD_OBJECT_VISUAL_MESHES="${HOLOSOMA_MUJOCO_LOAD_OBJECT_VISUAL_MESHES:-1}"
+  export HOLOSOMA_MUJOCO_DEPTH_PREFER_VISUAL_MESHES="${HOLOSOMA_MUJOCO_DEPTH_PREFER_VISUAL_MESHES:-1}"
   export HOLOSOMA_MUJOCO_RENDERED_DEPTH_FLIPUD="${HOLOSOMA_MUJOCO_RENDERED_DEPTH_FLIPUD:-0}"
 fi
 export INFERENCE_CONFIG="${INFERENCE_CONFIG:-g1-29dof-wbt-object-distill}"
@@ -171,5 +192,7 @@ echo "[INFO] object_urdf=$OBJECT_URDF"
 echo "[INFO] model=$MODEL_LOCAL"
 echo "[INFO] inference_config=$INFERENCE_CONFIG"
 echo "[INFO] perception=${ENABLE_SPLIT_PERCEPTION_OBS} preset=${PERCEPTION_PRESET} camera_source=${PERCEPTION_CAMERA_SOURCE}"
+echo "[INFO] object_contact_body_markers=${MUJOCO_OBJECT_CONTACT_BODY_MARKERS:-<all robot collision bodies>}"
+echo "[INFO] object_mass_override=${MUJOCO_OBJECT_MASS_OVERRIDE} object_geom_friction=${MUJOCO_OBJECT_GEOM_FRICTION:-<none>} lateral_friction=${MUJOCO_OBJECT_LATERAL_FRICTION} rolling_friction=${MUJOCO_OBJECT_ROLLING_FRICTION} contact_stiffness=${MUJOCO_OBJECT_CONTACT_STIFFNESS} contact_damping=${MUJOCO_OBJECT_CONTACT_DAMPING} web_demo_object_contacts=${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS}"
 
 exec bash "$ROOT_DIR/mj_track.sh" "$MOTION_FILE" "$MODEL_LOCAL" "${EXTRA_ARGS[@]}"

@@ -31,7 +31,7 @@ def _capture_depth_frame_rgb(env: Any, env_id: int):
 
     depth = env.perception_manager.get_camera_depth_map()[env_id].detach().cpu().numpy()
     cfg = env.perception_manager.cfg
-    near = float(getattr(cfg, "camera_near", 0.0) or 0.0)
+    near = float(getattr(cfg, "camera_near", 0.3) or 0.3)
     max_distance = float(getattr(cfg, "max_distance", getattr(cfg, "camera_far", 1.0)) or 1.0)
     camera_far = float(getattr(cfg, "camera_far", max_distance) or max_distance)
     far = float(min(max_distance, camera_far))
@@ -226,7 +226,7 @@ def replay(tyro_config: ExperimentConfig):
             try:
                 frame_rgb, depth_map = _capture_depth_frame_rgb(env, depth_env_id)
                 cfg = env.perception_manager.cfg
-                near = float(getattr(cfg, "camera_near", 0.0) or 0.0)
+                near = float(getattr(cfg, "camera_near", 0.3) or 0.3)
                 max_distance = float(getattr(cfg, "max_distance", getattr(cfg, "camera_far", float("nan"))) or float("nan"))
                 camera_far = float(getattr(cfg, "camera_far", max_distance) or max_distance)
                 far = float(min(max_distance, camera_far)) if np.isfinite(max_distance) else float(camera_far)
@@ -274,7 +274,7 @@ def replay(tyro_config: ExperimentConfig):
                     depth_map_t = pm.get_camera_depth_map()[depth_env_id]
 
                     cfg = pm.cfg
-                    near = float(getattr(cfg, "camera_near", 0.0) or 0.0)
+                    near = float(getattr(cfg, "camera_near", 0.3) or 0.3)
                     max_distance = float(getattr(cfg, "max_distance", getattr(cfg, "camera_far", float("nan"))) or float("nan"))
                     camera_far = float(getattr(cfg, "camera_far", max_distance) or max_distance)
                     far = float(min(max_distance, camera_far)) if np.isfinite(max_distance) else float(camera_far)

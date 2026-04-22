@@ -3,6 +3,13 @@
   "scene_path": "clips/box_74/scene.xml",
   "motion_file": "/home/ubuntu/FAR/holosoma/.tmp_teacher_box_contacts_part2/motion_bank/box_74.npz",
   "clip_name": "box_74",
+  "checkpoint": {
+    "display_name": "zihanw22/boxer/shoo7sr1/model_09999.onnx",
+    "wandb_run_path": "zihanw22/boxer/shoo7sr1",
+    "checkpoint_file": "model_09999.onnx",
+    "iteration": 9999,
+    "source_model_path": "/home/ubuntu/FAR/holosoma/logs/wandb_runs/shoo7sr1/model_09999.onnx"
+  },
   "root_body_name": "pelvis",
   "object_body_name": "object_baseLink",
   "dof_names": [

@@ -88,6 +88,10 @@ class ObjectConfig:
     mujoco_object_mass_override: float | None = None
     mujoco_object_geom_friction: list[float] | None = None
     mujoco_object_terrain_pair_friction: list[float] | None = None
+    mujoco_object_lateral_friction: float | None = None
+    mujoco_object_rolling_friction: float | None = None
+    mujoco_object_contact_stiffness: float | None = None
+    mujoco_object_contact_damping: float | None = None
 
 
 @dataclass(frozen=True)

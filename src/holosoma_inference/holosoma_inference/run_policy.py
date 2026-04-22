@@ -10,6 +10,7 @@ Usage:
     python run_policy.py inference:g1-29dof-loco --task.model-path https://wandb-url/files/model.onnx
 """
 
+import os
 import sys
 import traceback
 
@@ -27,6 +28,12 @@ from holosoma_inference.utils.misc import restore_terminal_settings
 def _print_control_guide(policy_class, use_joystick: bool):
     """Print control guide for users."""
     is_wbt = policy_class.__name__ == "WholeBodyTrackingPolicy"
+    keyboard_root_command = str(os.environ.get("HOLOSOMA_KEYBOARD_ROOT_COMMAND", "0")).lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
     logger.info("=" * 80)
     logger.info("🎮 POLICY CONTROLS")
@@ -66,7 +73,13 @@ def _print_control_guide(policy_class, use_joystick: bool):
         if is_wbt:
             logger.info("")
             logger.info("Whole-Body Tracking Controls:")
-            logger.info("  s  - Start motion clip")
+            if keyboard_root_command:
+                logger.info("  w/s        - Command x +/-")
+                logger.info("  a/d        - Command y +/-")
+                logger.info("  q/e        - Command yaw +/-")
+                logger.info("  release    - Command axis returns to zero")
+            else:
+                logger.info("  s  - Start motion clip")
         else:
             logger.info("")
             logger.info("Locomotion Controls:")

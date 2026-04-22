@@ -32,7 +32,13 @@ Modes:
   depth   Distilled policy with camera depth perception (D435i)
 
 Optional env vars:
-  INFER_DATASET           (default: omomo; options: omomo|behave|mixed)
+  INFER_DATASET           (default: rollout-ref; options: rollout-ref|teacher-rollout|omomo|behave|mixed)
+  TEACHER_ROLLOUT_MOTION_DIR
+                          (default: ./outputs/motion_bank; used by rollout-ref)
+  TEACHER_ROLLOUT_FILTER_ENABLED
+                          (default: True; prefer TEACHER_ROLLOUT_FILTERED_MOTION_DIR when available)
+  TEACHER_ROLLOUT_FILTERED_MOTION_DIR
+                          (default: ./outputs/motion_bank_success_box_0_92_0p3)
   MOTION_DIR              (optional override; default chosen by INFER_DATASET)
   OBJECT_URDF             (optional override; default chosen by INFER_DATASET)
   OBJECT_SCALE            (optional; scalar or x,y,z spawn scale for current object URDF)
@@ -645,33 +651,57 @@ PY
   fi
 fi
 
-INFER_DATASET_DEFAULT="omomo"
+INFER_DATASET_DEFAULT="rollout-ref"
 INFER_DATASET=${INFER_DATASET:-${INFER_DATASET_DEFAULT}}
-INFER_DATASET=$(echo "${INFER_DATASET}" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
-case "${INFER_DATASET}" in
-  omomo|behave|mixed) ;;
+INFER_DATASET_RAW=$(echo "${INFER_DATASET}" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
+case "${INFER_DATASET_RAW}" in
+  rollout-ref|rollout_ref|teacher-rollout|teacher_rollout|teacherrollout|rollout)
+    INFER_DATASET="rollout-ref"
+    ;;
+  omomo|behave|mixed)
+    INFER_DATASET="${INFER_DATASET_RAW}"
+    ;;
   *)
-    echo "[ERROR] INFER_DATASET must be one of: omomo|behave|mixed. Got: ${INFER_DATASET}" >&2
+    echo "[ERROR] INFER_DATASET must be one of: rollout-ref|teacher-rollout|omomo|behave|mixed. Got: ${INFER_DATASET}" >&2
     exit 2
     ;;
 esac
 
+TEACHER_ROLLOUT_MOTION_DIR=${TEACHER_ROLLOUT_MOTION_DIR:-"${SCRIPT_DIR}/outputs/motion_bank"}
+TEACHER_ROLLOUT_FILTER_ENABLED=${TEACHER_ROLLOUT_FILTER_ENABLED:-True}
+TEACHER_ROLLOUT_FILTERED_MOTION_DIR=${TEACHER_ROLLOUT_FILTERED_MOTION_DIR:-"${SCRIPT_DIR}/outputs/motion_bank_success_box_0_92_0p3"}
 DEFAULT_OMOMO_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"
 DEFAULT_BEHAVE_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/behave_sq_carry"
 DEFAULT_MIXED_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_carry_aug_mix_ml"
 DEFAULT_OMOMO_URDF="${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
 DEFAULT_BEHAVE_MAP_FILE="${DEFAULT_BEHAVE_MOTION_DIR}/_clip_object_urdf_map.json"
 DEFAULT_MIXED_MAP_FILE="${DEFAULT_MIXED_MOTION_DIR}/_clip_object_urdf_map.json"
+resolve_teacher_rollout_motion_dir() {
+  local filter_norm
+  filter_norm="$(echo "${TEACHER_ROLLOUT_FILTER_ENABLED}" | tr '[:upper:]' '[:lower:]')"
+  case "${filter_norm}" in
+    1|true|yes|on)
+      if compgen -G "${TEACHER_ROLLOUT_FILTERED_MOTION_DIR}/box_*.npz" > /dev/null; then
+        echo "${TEACHER_ROLLOUT_FILTERED_MOTION_DIR}"
+        return 0
+      fi
+      ;;
+  esac
+  echo "${TEACHER_ROLLOUT_MOTION_DIR}"
+}
+DEFAULT_TEACHER_ROLLOUT_MOTION_DIR="$(resolve_teacher_rollout_motion_dir)"
+DEFAULT_TEACHER_ROLLOUT_MAP_FILE="${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}/_clip_object_urdf_map.json"
 
-if [[ "${MOTION_DIR_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_MOTION_PATH}" && "${INFER_DATASET_EXPLICIT}" -eq 0 ]]; then
+if [[ "${MOTION_DIR_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_MOTION_PATH}" && "${INFER_DATASET_EXPLICIT}" -eq 0 && "${INFER_DATASET}" != "rollout-ref" ]]; then
   MOTION_DIR="${CHECKPOINT_SAVED_MOTION_PATH}"
 fi
-if [[ "${OBJECT_URDF_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_OBJECT_URDF}" && "${INFER_DATASET_EXPLICIT}" -eq 0 ]]; then
+if [[ "${OBJECT_URDF_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_OBJECT_URDF}" && "${INFER_DATASET_EXPLICIT}" -eq 0 && "${INFER_DATASET}" != "rollout-ref" ]]; then
   OBJECT_URDF="${CHECKPOINT_SAVED_OBJECT_URDF}"
 fi
 
 if [[ -z "${MOTION_DIR+x}" ]]; then
   case "${INFER_DATASET}" in
+    rollout-ref) MOTION_DIR="${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}" ;;
     omomo) MOTION_DIR="${DEFAULT_OMOMO_MOTION_DIR}" ;;
     behave) MOTION_DIR="${DEFAULT_BEHAVE_MOTION_DIR}" ;;
     mixed) MOTION_DIR="${DEFAULT_MIXED_MOTION_DIR}" ;;
@@ -679,6 +709,7 @@ if [[ -z "${MOTION_DIR+x}" ]]; then
 fi
 if [[ -z "${OBJECT_URDF+x}" ]]; then
   case "${INFER_DATASET}" in
+    rollout-ref) OBJECT_URDF="${DEFAULT_TEACHER_ROLLOUT_MAP_FILE}" ;;
     omomo) OBJECT_URDF="${DEFAULT_OMOMO_URDF}" ;;
     behave) OBJECT_URDF="${DEFAULT_BEHAVE_MAP_FILE}" ;;
     mixed) OBJECT_URDF="${DEFAULT_MIXED_MAP_FILE}" ;;
@@ -775,6 +806,11 @@ fi
 if [[ ! -e "${MOTION_DIR}" ]]; then
   echo "[ERROR] MOTION_DIR not found: ${MOTION_DIR}" >&2
   exit 1
+fi
+if [[ "${INFER_DATASET}" == "rollout-ref" ]] && ! compgen -G "${MOTION_DIR}/box_*.npz" > /dev/null; then
+  echo "[ERROR] rollout-ref requires teacher rollout motion clips under MOTION_DIR=${MOTION_DIR}" >&2
+  echo "[ERROR] Set TEACHER_ROLLOUT_MOTION_DIR, TEACHER_ROLLOUT_FILTERED_MOTION_DIR, or MOTION_DIR explicitly." >&2
+  exit 2
 fi
 if [[ ! -f "${OBJECT_URDF}" ]]; then
   echo "[ERROR] OBJECT_URDF not found: ${OBJECT_URDF}" >&2
@@ -1139,7 +1175,7 @@ fi
 
 echo "[INFO] mode_input=${MODE_INPUT} runtime_mode=${MODE}"
 echo "[INFO] simulator_subcommand=${SIMULATOR_SUBCOMMAND:-<default>}"
-if [[ -n "${CHECKPOINT_SAVED_MOTION_PATH}" && "${INFER_DATASET_EXPLICIT}" -eq 0 ]]; then
+if [[ -n "${CHECKPOINT_SAVED_MOTION_PATH}" && "${INFER_DATASET_EXPLICIT}" -eq 0 && "${MOTION_DIR}" == "${CHECKPOINT_SAVED_MOTION_PATH}" ]]; then
   echo "[INFO] infer_dataset=${INFER_DATASET} (checkpoint overrides motion/object defaults)"
 else
   echo "[INFO] infer_dataset=${INFER_DATASET}"

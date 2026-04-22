@@ -20,7 +20,7 @@ set -euo pipefail
 #   LEGACY_OBS                (default: 0; set 1/true to require legacy checkpoint observation layout)
 #   REQUIRE_HEIGHTMAP         (default: 0; set 1/true to require checkpoint perception.enabled=True and output_mode=heightmap)
 #   LOG_ROOT                  (default: /data/logs_new/boxer; used for local latest-checkpoint auto-resolution)
-#   INFER_DATASET             (default: mix; options: omomo-carry|omomo|behave|behave_carry|behave_sq_carry|mixed|real|pure-ds|pure-sd|mix|naive-mixed|mix-naive|mix-curriculum)
+#   INFER_DATASET             (default: pure-ds; options: omomo-carry|omomo|behave|behave_carry|behave_sq_carry|mixed|real|pure-ds|pure-sd|mix|naive-mixed|mix-naive|mix-curriculum)
 #   DATA_MODE                 (optional alias of INFER_DATASET; accepts train_object_generalist_ds.sh modes)
 #   DS_DATA_ROOT              (default: ./data/ds_box_data; used by pure-ds / mix)
 #   MOTION_DIR                (optional override; if unset, chosen by INFER_DATASET)
@@ -56,7 +56,7 @@ Usage:
   bash infer_box_tracking.sh [omomo-carry|real|pure-ds|mix] [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
 
 Examples:
-  bash infer_box_tracking.sh
+  bash infer_box_tracking.sh  # defaults to pure-ds, matching train_object_generalist_ds.sh default
   bash infer_box_tracking.sh omomo-carry
   bash infer_box_tracking.sh real
   bash infer_box_tracking.sh pure-ds
@@ -68,14 +68,13 @@ Examples:
   bash infer_box_tracking.sh /data/logs_new/boxer/20260406_054300-g1_29dof_wbt_w_object_generalist-locomotion/model_02600.pt
   bash infer_box_tracking.sh real /abs/path/to/model_17000.pt
   bash infer_box_tracking.sh pure-ds simulator:isaacsim
-  MOTION_CLIP_NAME=sub3_largebox_003_mj_w_obj bash infer_box_tracking.sh
+  MOTION_CLIP_NAME=box_10 bash infer_box_tracking.sh
 
 Dataset selection examples:
+  INFER_DATASET=pure-ds bash infer_box_tracking.sh
   INFER_DATASET=omomo-carry bash infer_box_tracking.sh
   INFER_DATASET=behave bash infer_box_tracking.sh
   INFER_DATASET=behave_carry bash infer_box_tracking.sh
-  INFER_DATASET=mix bash infer_box_tracking.sh
-  INFER_DATASET=pure-ds bash infer_box_tracking.sh
   INFER_DATASET=mix bash infer_box_tracking.sh
   DATA_MODE=mix-curriculum bash infer_box_tracking.sh
 EOF
@@ -83,6 +82,7 @@ EOF
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
+source "${SCRIPT_DIR}/scripts/object_generalist_ds_paths.sh"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
 is_checkpoint_ref() {
@@ -751,7 +751,7 @@ pick_first_existing_path() {
 }
 
 if [[ "${INFER_DATASET_FROM_ARG}" != "1" ]]; then
-  INFER_DATASET=${INFER_DATASET:-${DATA_MODE:-${DATASET:-mix}}}
+  INFER_DATASET=${INFER_DATASET:-${DATA_MODE:-${DATASET:-pure-ds}}}
 fi
 INFER_DATASET_RAW="${INFER_DATASET}"
 INFER_DATASET_RAW_NORMALIZED=$(echo "${INFER_DATASET_RAW}" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
@@ -828,8 +828,8 @@ DEFAULT_REAL_MOTION_DIR="$(pick_first_existing_path \
   "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_carry_aug_mix_ml" \
   "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_carry_aug_mix_ml")"
 DS_DATA_ROOT="${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}"
-DEFAULT_PURE_DS_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
-DEFAULT_MIX_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
+DEFAULT_PURE_DS_MOTION_DIR="$(ogds_default_motion_dir "${DS_DATA_ROOT}" pure-sd)"
+DEFAULT_MIX_MOTION_DIR="$(ogds_default_motion_dir "${DS_DATA_ROOT}" mix-naive)"
 DEFAULT_OMOMO_URDF="$(pick_first_existing_path \
   "${SCRIPT_DIR}/src/holosoma_retargeting/models/largebox/largebox.urdf" \
   "${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf")"

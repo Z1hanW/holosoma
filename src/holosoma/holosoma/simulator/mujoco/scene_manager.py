@@ -539,7 +539,7 @@ class MujocoSceneManager:
         if object_spec_to_attach is not None:
             object_site = self.world_spec.worldbody.add_site(name="object_spawn", pos=[0, 0, 0.0], quat=[1, 0, 0, 0])
             self.world_spec.attach(object_spec_to_attach, site=object_site, prefix="object_")
-            self._maybe_add_web_demo_object_contact_pairs()
+            self._maybe_add_web_demo_object_contact_pairs(robot_config)
 
         # Store prefix for later use by simulator
         self.robot_prefix = prefix
@@ -1545,11 +1545,25 @@ class MujocoSceneManager:
         mass_override = getattr(object_cfg, "mujoco_object_mass_override", None)
         geom_friction = getattr(object_cfg, "mujoco_object_geom_friction", None)
         terrain_pair_friction = getattr(object_cfg, "mujoco_object_terrain_pair_friction", None)
-        if mass_scale is None and mass_override is None and geom_friction is None and terrain_pair_friction is None:
+        lateral_friction = getattr(object_cfg, "mujoco_object_lateral_friction", None)
+        rolling_friction = getattr(object_cfg, "mujoco_object_rolling_friction", None)
+        contact_stiffness = getattr(object_cfg, "mujoco_object_contact_stiffness", None)
+        contact_damping = getattr(object_cfg, "mujoco_object_contact_damping", None)
+        if (
+            mass_scale is None
+            and mass_override is None
+            and geom_friction is None
+            and terrain_pair_friction is None
+            and lateral_friction is None
+            and rolling_friction is None
+            and contact_stiffness is None
+            and contact_damping is None
+        ):
             return
         if not target_body_names:
             return
 
+        contact_solref = self._object_contact_solref(contact_stiffness, contact_damping)
         friction_override: list[float] | None = None
         if geom_friction is not None:
             friction_override = [float(value) for value in geom_friction]
@@ -1569,8 +1583,13 @@ class MujocoSceneManager:
 
         updated_bodies = 0
         updated_geoms = 0
+        updated_contact_geoms = 0
         updated_pairs = 0
         existing_pair_names = {pair.name for pair in target_spec.pairs if pair.name}
+        existing_pair_by_key: dict[tuple[str, str], Any] = {}
+        for pair in target_spec.pairs:
+            if pair.geomname1 and pair.geomname2:
+                existing_pair_by_key[(str(pair.geomname1), str(pair.geomname2))] = pair
         for body in target_spec.bodies:
             if not body.name or body.name not in target_body_names:
                 continue
@@ -1603,30 +1622,65 @@ class MujocoSceneManager:
                     body.inertia = (inertia * body_ratio).tolist()
                 updated_bodies += 1
 
-            if friction_override is not None:
-                for geom in body.geoms:
-                    if int(geom.contype) == 0 or int(geom.conaffinity) == 0:
-                        continue
-                    geom.friction = friction_override
+            for geom in body.geoms:
+                if int(geom.contype) == 0 or int(geom.conaffinity) == 0:
+                    continue
+
+                geom_friction_triplet = list(friction_override) if friction_override is not None else None
+                partial_friction_triplet = self._object_contact_friction_triplet(
+                    geom_friction_triplet if geom_friction_triplet is not None else geom.friction,
+                    lateral_friction=lateral_friction,
+                    rolling_friction=rolling_friction,
+                )
+                if partial_friction_triplet is not None:
+                    geom_friction_triplet = partial_friction_triplet
+                if geom_friction_triplet is not None:
+                    geom.friction = geom_friction_triplet
+                    geom.condim = max(int(geom.condim), self._condim_from_friction_triplet(geom_friction_triplet))
                     updated_geoms += 1
-            if terrain_pair_friction_override is not None:
-                for geom in body.geoms:
-                    if int(geom.contype) == 0 or int(geom.conaffinity) == 0:
-                        continue
-                    if not geom.name:
-                        continue
-                    pair_name = f"{geom.name}__{terrain_geom_name}__sim2sim"
-                    if pair_name in existing_pair_names:
-                        continue
-                    target_spec.add_pair(
-                        name=pair_name,
-                        geomname1=str(geom.name),
-                        geomname2=str(terrain_geom_name),
-                        condim=3,
-                        friction=self._expand_pair_friction(terrain_pair_friction_override),
-                    )
-                    existing_pair_names.add(pair_name)
+
+                if contact_solref is not None:
+                    geom.solref = contact_solref
+                    updated_contact_geoms += 1
+
+                pair_friction_triplet = terrain_pair_friction_override
+                if pair_friction_triplet is None and (geom_friction_triplet is not None or contact_solref is not None):
+                    pair_friction_triplet = list(geom.friction)
+                if pair_friction_triplet is None and contact_solref is None:
+                    continue
+                if not geom.name:
+                    continue
+
+                pair_name = f"{geom.name}__{terrain_geom_name}__sim2sim"
+                existing_pair = existing_pair_by_key.get((str(geom.name), str(terrain_geom_name)))
+                if existing_pair is None:
+                    existing_pair = existing_pair_by_key.get((str(terrain_geom_name), str(geom.name)))
+                if existing_pair is not None:
+                    if pair_friction_triplet is not None:
+                        existing_pair.condim = max(
+                            int(existing_pair.condim),
+                            self._condim_from_friction_triplet(pair_friction_triplet),
+                        )
+                        existing_pair.friction = self._expand_pair_friction(pair_friction_triplet)
+                    if contact_solref is not None:
+                        existing_pair.solref = contact_solref
                     updated_pairs += 1
+                    continue
+                if pair_name in existing_pair_names:
+                    continue
+                pair_kwargs: dict[str, Any] = {
+                    "name": pair_name,
+                    "geomname1": str(geom.name),
+                    "geomname2": str(terrain_geom_name),
+                }
+                if pair_friction_triplet is not None:
+                    pair_kwargs["condim"] = self._condim_from_friction_triplet(pair_friction_triplet)
+                    pair_kwargs["friction"] = self._expand_pair_friction(pair_friction_triplet)
+                if contact_solref is not None:
+                    pair_kwargs["solref"] = contact_solref
+                target_spec.add_pair(**pair_kwargs)
+                existing_pair_names.add(pair_name)
+                updated_pairs += 1
 
         if updated_bodies > 0:
             logger.info(
@@ -1636,19 +1690,49 @@ class MujocoSceneManager:
                 mass_override,
             )
         if updated_geoms > 0:
-            logger.info("Overrode MuJoCo object geom friction for {} geom(s): {}", updated_geoms, friction_override)
+            logger.info(
+                "Overrode MuJoCo object geom friction for {} geom(s): geom_friction={}, lateral_friction={}, rolling_friction={}",
+                updated_geoms,
+                friction_override,
+                lateral_friction,
+                rolling_friction,
+            )
+        if updated_contact_geoms > 0:
+            logger.info(
+                "Overrode MuJoCo object contact solref for {} geom(s): stiffness={}, damping={}, solref={}",
+                updated_contact_geoms,
+                contact_stiffness,
+                contact_damping,
+                contact_solref,
+            )
         if updated_pairs > 0:
             logger.info(
-                "Added {} MuJoCo object-terrain pair override(s) against terrain geom '{}': {}",
+                "Added/updated {} MuJoCo object-terrain pair override(s) against terrain geom '{}': terrain_pair_friction={}, lateral_friction={}, rolling_friction={}, solref={}",
                 updated_pairs,
                 terrain_geom_name,
                 terrain_pair_friction_override,
+                lateral_friction,
+                rolling_friction,
+                contact_solref,
             )
 
-    def _maybe_add_web_demo_object_contact_pairs(self) -> None:
+    def _maybe_add_web_demo_object_contact_pairs(self, robot_config: RobotConfig) -> None:
         """Match the web demo's rubber-hand/object contact overrides when requested."""
         if not self._env_flag(_WEB_DEMO_OBJECT_CONTACTS_ENV):
             return
+
+        object_cfg = getattr(robot_config, "object", None)
+        lateral_friction = getattr(object_cfg, "mujoco_object_lateral_friction", None) if object_cfg is not None else None
+        rolling_friction = getattr(object_cfg, "mujoco_object_rolling_friction", None) if object_cfg is not None else None
+        contact_stiffness = getattr(object_cfg, "mujoco_object_contact_stiffness", None) if object_cfg is not None else None
+        contact_damping = getattr(object_cfg, "mujoco_object_contact_damping", None) if object_cfg is not None else None
+        hand_friction = self._object_contact_friction_triplet(
+            [0.8, 0.02, 0.005],
+            lateral_friction=lateral_friction,
+            rolling_friction=rolling_friction,
+        ) or [0.8, 0.02, 0.005]
+        hand_solref = self._object_contact_solref(contact_stiffness, contact_damping) or [0.01, 1.0]
+        pair_friction = self._expand_pair_friction(hand_friction)
 
         def _iter_bodies(container: Any):
             for body in getattr(container, "bodies", []):
@@ -1694,8 +1778,8 @@ class MujocoSceneManager:
                     geom.contype = 1
                     geom.conaffinity = 6
                     geom.condim = 6
-                    geom.friction = [0.8, 0.02, 0.005]
-                    geom.solref = [0.01, 1.0]
+                    geom.friction = hand_friction
+                    geom.solref = hand_solref
                     rubber_hand_geoms.append(geom_name)
                 if body_name.startswith("object_") or geom_name.startswith("object_"):
                     object_collision_geoms.append(geom_name)
@@ -1729,8 +1813,8 @@ class MujocoSceneManager:
                     geomname1=hand_geom_name,
                     geomname2=object_geom_name,
                     condim=6,
-                    friction=[0.8, 0.8, 0.02, 0.005, 0.005],
-                    solref=[0.01, 1.0],
+                    friction=pair_friction,
+                    solref=hand_solref,
                 )
                 existing_pair_names.add(pair_name)
                 existing_pair_keys.add((hand_geom_name, object_geom_name))
@@ -1766,6 +1850,61 @@ class MujocoSceneManager:
         """Expand [slide, spin, roll] into MuJoCo pair.friction's 5D contact basis."""
         slide, spin, roll = [float(value) for value in friction_triplet]
         return [slide, slide, spin, roll, roll]
+
+    @staticmethod
+    def _condim_from_friction_triplet(friction_triplet: list[float]) -> int:
+        """Return the MuJoCo contact dimension needed for [slide, spin, roll]."""
+        _, spin, roll = [abs(float(value)) for value in friction_triplet]
+        if roll > 0.0:
+            return 6
+        if spin > 0.0:
+            return 4
+        return 3
+
+    @staticmethod
+    def _object_contact_friction_triplet(
+        base_friction: Any,
+        *,
+        lateral_friction: float | None,
+        rolling_friction: float | None,
+    ) -> list[float] | None:
+        if lateral_friction is None and rolling_friction is None:
+            return None
+
+        friction = np.asarray(base_friction, dtype=np.float64).reshape(-1)
+        if friction.size < 3:
+            friction = np.pad(friction, (0, 3 - friction.size), mode="constant")
+        friction_triplet = friction[:3].astype(np.float64)
+        if lateral_friction is not None:
+            lateral = float(lateral_friction)
+            if lateral < 0.0:
+                raise ValueError(f"robot.object.mujoco_object_lateral_friction must be >= 0, got {lateral}")
+            friction_triplet[0] = lateral
+        if rolling_friction is not None:
+            rolling = float(rolling_friction)
+            if rolling < 0.0:
+                raise ValueError(f"robot.object.mujoco_object_rolling_friction must be >= 0, got {rolling}")
+            friction_triplet[2] = rolling
+        return friction_triplet.tolist()
+
+    @staticmethod
+    def _object_contact_solref(stiffness: float | None, damping: float | None) -> list[float] | None:
+        if stiffness is None and damping is None:
+            return None
+        if stiffness is None or damping is None:
+            raise ValueError(
+                "robot.object.mujoco_object_contact_stiffness and "
+                "robot.object.mujoco_object_contact_damping must be provided together"
+            )
+        stiffness_value = float(stiffness)
+        damping_value = float(damping)
+        if stiffness_value <= 0.0:
+            raise ValueError(
+                f"robot.object.mujoco_object_contact_stiffness must be > 0, got {stiffness_value}"
+            )
+        if damping_value <= 0.0:
+            raise ValueError(f"robot.object.mujoco_object_contact_damping must be > 0, got {damping_value}")
+        return [-stiffness_value, -damping_value]
 
     def _apply_collision_settings(self, robot_spec: mujoco.MjSpec, robot_config: RobotConfig) -> None:
         """Apply collision settings based on unified self_collisions configuration.

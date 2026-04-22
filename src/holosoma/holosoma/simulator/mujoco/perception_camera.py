@@ -14,6 +14,8 @@ from holosoma.simulator.mujoco.scene_manager import HOLOSOMA_PERCEPTION_CAMERA_N
 from holosoma.utils.safe_torch_import import torch
 
 _DEPTH_HIDDEN_GEOM_GROUP = 5
+_PREFER_VISUAL_MESHES_ENV = "HOLOSOMA_MUJOCO_DEPTH_PREFER_VISUAL_MESHES"
+_PREFER_ROBOT_VISUAL_MESHES_ENV = "HOLOSOMA_MUJOCO_DEPTH_PREFER_ROBOT_VISUAL_MESHES"
 _PREFER_OBJECT_VISUAL_MESHES_ENV = "HOLOSOMA_MUJOCO_DEPTH_PREFER_OBJECT_VISUAL_MESHES"
 
 
@@ -68,7 +70,13 @@ class MuJoCoDepthCamera:
         self._render_far = float(max(1.0, float(getattr(config, "max_distance", 1.0) or 1.0)))
         self._masked_robot_geom_ids: list[int] = []
         self._masked_object_geom_ids: list[int] = []
-        self._depth_prefers_object_visual_meshes = _env_flag(_PREFER_OBJECT_VISUAL_MESHES_ENV)
+        self._depth_prefers_visual_meshes = _env_flag(_PREFER_VISUAL_MESHES_ENV)
+        self._depth_prefers_robot_visual_meshes = self._depth_prefers_visual_meshes or _env_flag(
+            _PREFER_ROBOT_VISUAL_MESHES_ENV
+        )
+        self._depth_prefers_object_visual_meshes = self._depth_prefers_visual_meshes or _env_flag(
+            _PREFER_OBJECT_VISUAL_MESHES_ENV
+        )
         self._warned_multi_env = False
         self._warned_invalid_depth = False
         self._warned_invalid_rgb = False
@@ -340,24 +348,42 @@ class MuJoCoDepthCamera:
         if not allowlist:
             allowlist = set()
 
-        masked_geom_ids: list[int] = []
-        masked_object_geom_ids: list[int] = []
+        mesh_geom_type = int(mujoco.mjtGeom.mjGEOM_MESH)
+        robot_collision_geom_ids: list[int] = []
+        robot_visual_geom_ids: list[int] = []
         object_collision_geom_ids: list[int] = []
         object_visual_geom_ids: list[int] = []
         for geom_id in range(model.ngeom):
             body_id = int(model.geom_bodyid[geom_id])
             body_name = str(model.body(body_id).name or "")
-            geom_name = str(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or "")
+            geom_type = int(model.geom_type[geom_id])
+            contype = int(model.geom_contype[geom_id])
+            conaffinity = int(model.geom_conaffinity[geom_id])
+            is_visual_geom = contype == 0 or conaffinity == 0
+            is_mesh_geom = geom_type == mesh_geom_type
+            if body_name.startswith(prefix):
+                if is_visual_geom and is_mesh_geom:
+                    robot_visual_geom_ids.append(int(geom_id))
+                else:
+                    robot_collision_geom_ids.append(int(geom_id))
+                continue
             is_registered_object_geom = bool(
                 object_root_body_ids and body_name.startswith("object_") and _is_descendant_of_any(body_id, object_root_body_ids)
             )
             if is_registered_object_geom:
-                contype = int(model.geom_contype[geom_id])
-                conaffinity = int(model.geom_conaffinity[geom_id])
-                if contype == 0 or conaffinity == 0:
+                if is_visual_geom:
                     object_visual_geom_ids.append(int(geom_id))
                 else:
                     object_collision_geom_ids.append(int(geom_id))
+
+        robot_visual_geom_id_set = set(robot_visual_geom_ids)
+        masked_geom_ids: list[int] = []
+        masked_object_geom_ids: list[int] = []
+        masked_unregistered_object_geom_ids: list[int] = []
+        for geom_id in range(model.ngeom):
+            body_id = int(model.geom_bodyid[geom_id])
+            body_name = str(model.body(body_id).name or "")
+            geom_name = str(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or "")
             if terrain_proxy_geom_name and geom_name == terrain_proxy_geom_name:
                 model.geom_group[geom_id] = 0
                 continue
@@ -370,10 +396,13 @@ class MuJoCoDepthCamera:
                 model.geom_group[geom_id] = _DEPTH_HIDDEN_GEOM_GROUP
                 continue
             if body_name.startswith(prefix):
-                clean_body_name = body_name[len(prefix) :]
-                keep_robot_geom = clean_body_name in allowlist
-                if keep_robot_geom and explicit_robot_mesh_map:
-                    keep_robot_geom = int(model.geom_type[geom_id]) == int(mujoco.mjtGeom.mjGEOM_MESH)
+                if self._depth_prefers_robot_visual_meshes and robot_visual_geom_ids:
+                    keep_robot_geom = int(geom_id) in robot_visual_geom_id_set
+                else:
+                    clean_body_name = body_name[len(prefix) :]
+                    keep_robot_geom = clean_body_name in allowlist
+                    if keep_robot_geom and explicit_robot_mesh_map:
+                        keep_robot_geom = int(model.geom_type[geom_id]) == mesh_geom_type
                 if not keep_robot_geom:
                     model.geom_group[geom_id] = _DEPTH_HIDDEN_GEOM_GROUP
                     masked_geom_ids.append(int(geom_id))
@@ -381,6 +410,7 @@ class MuJoCoDepthCamera:
             if object_root_body_ids and body_name.startswith("object_") and not _is_descendant_of_any(body_id, object_root_body_ids):
                 model.geom_group[geom_id] = _DEPTH_HIDDEN_GEOM_GROUP
                 masked_object_geom_ids.append(int(geom_id))
+                masked_unregistered_object_geom_ids.append(int(geom_id))
 
         if self._depth_prefers_object_visual_meshes and object_visual_geom_ids and object_collision_geom_ids:
             for geom_id in object_collision_geom_ids:
@@ -395,14 +425,21 @@ class MuJoCoDepthCamera:
         self._masked_robot_geom_ids = masked_geom_ids
         self._masked_object_geom_ids = masked_object_geom_ids
         if masked_geom_ids:
-            logger.info(
-                "MuJoCo rendered depth masked {} robot geom(s) outside camera_mesh_allowlist.",
-                len(masked_geom_ids),
-            )
-        if masked_object_geom_ids:
+            if self._depth_prefers_robot_visual_meshes and robot_visual_geom_ids:
+                logger.info(
+                    "MuJoCo rendered depth prefers robot visual meshes: masked {} robot non-visual geom(s), kept {} visual mesh geom(s).",
+                    len(masked_geom_ids),
+                    len(robot_visual_geom_ids),
+                )
+            else:
+                logger.info(
+                    "MuJoCo rendered depth masked {} robot geom(s) outside camera_mesh_allowlist.",
+                    len(masked_geom_ids),
+                )
+        if masked_unregistered_object_geom_ids:
             logger.info(
                 "MuJoCo rendered depth masked {} object geom(s) outside registered object subtree(s).",
-                len(masked_object_geom_ids),
+                len(masked_unregistered_object_geom_ids),
             )
 
     def _sanitize_depth_array(self, depth_array: np.ndarray) -> np.ndarray:
@@ -426,12 +463,13 @@ class MuJoCoDepthCamera:
             return np.full((self._height, self._width), float(self._cfg.max_distance), dtype=np.float32)
 
         depth_array = depth_array.astype(np.float32, copy=False)
-        invalid = ~np.isfinite(depth_array) | (depth_array <= 0.0)
+        max_depth = float(self._cfg.max_distance)
+        invalid = ~np.isfinite(depth_array) | (depth_array > max_depth)
         if np.any(invalid):
             depth_array = depth_array.copy()
-            depth_array[invalid] = float(self._cfg.max_distance)
-        min_depth = float(getattr(self._cfg, "camera_near", 0.0) or 0.0)
-        return np.clip(depth_array, min_depth, float(self._cfg.max_distance))
+            depth_array[invalid] = max_depth
+        min_depth = float(getattr(self._cfg, "camera_near", 0.1) or 0.1)
+        return np.clip(depth_array, min_depth, max_depth)
 
     def _sanitize_rgb_array(self, rgb_array: np.ndarray) -> np.ndarray:
         if rgb_array.size == 0:
@@ -489,7 +527,7 @@ class MuJoCoDepthCamera:
 
         if depth is not None:
             np.save(dump_dir / "mujoco_depth_raw.npy", depth)
-            depth_near = float(getattr(self._cfg, "camera_near", 0.0) or 0.0)
+            depth_near = float(getattr(self._cfg, "camera_near", 0.1) or 0.1)
             depth_far = float(min(float(getattr(self._cfg, "camera_far", 3.0) or 3.0), float(self._cfg.max_distance)))
             denom = max(depth_far - depth_near, 1.0e-6)
             depth_vis = np.clip((depth - depth_near) / denom, 0.0, 1.0)
@@ -532,7 +570,7 @@ class MuJoCoDepthCamera:
                 self._save_image(dump_dir / "mujoco_debug_rgb.png", debug_rgb)
             if debug_depth is not None:
                 np.save(dump_dir / "mujoco_debug_depth_raw.npy", debug_depth)
-                depth_near = float(getattr(self._cfg, "camera_near", 0.0) or 0.0)
+                depth_near = float(getattr(self._cfg, "camera_near", 0.1) or 0.1)
                 depth_far = float(min(float(getattr(self._cfg, "camera_far", 3.0) or 3.0), float(self._cfg.max_distance)))
                 denom = max(depth_far - depth_near, 1.0e-6)
                 debug_depth_vis = np.clip((debug_depth - depth_near) / denom, 0.0, 1.0)
@@ -782,12 +820,13 @@ class MuJoCoDepthCamera:
         if depth_array.shape != (height, width):
             return np.full((height, width), float(self._cfg.max_distance), dtype=np.float32)
         depth_array = depth_array.astype(np.float32, copy=False)
-        invalid = ~np.isfinite(depth_array) | (depth_array <= 0.0)
+        max_depth = float(self._cfg.max_distance)
+        invalid = ~np.isfinite(depth_array) | (depth_array > max_depth)
         if np.any(invalid):
             depth_array = depth_array.copy()
-            depth_array[invalid] = float(self._cfg.max_distance)
-        min_depth = float(getattr(self._cfg, "camera_near", 0.0) or 0.0)
-        return np.clip(depth_array, min_depth, float(self._cfg.max_distance))
+            depth_array[invalid] = max_depth
+        min_depth = float(getattr(self._cfg, "camera_near", 0.1) or 0.1)
+        return np.clip(depth_array, min_depth, max_depth)
 
     def _sanitize_rgb_array_with_shape(self, rgb_array: np.ndarray, height: int, width: int) -> np.ndarray:
         if rgb_array.size == 0:

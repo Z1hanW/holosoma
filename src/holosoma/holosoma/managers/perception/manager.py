@@ -1297,7 +1297,7 @@ class PerceptionManager:
             height=int(self._camera_height),
             horizontal_fov_deg=float(self._camera_hfov_deg),
             max_range=float(self.cfg.max_distance),
-            min_range=float(getattr(self.cfg, "camera_near", 0.0) or 0.0),
+            min_range=float(getattr(self.cfg, "camera_near", 0.1) or 0.1),
             calculate_depth=True,
             return_pointcloud=False,
             pointcloud_in_world_frame=False,
@@ -2241,8 +2241,13 @@ class PerceptionManager:
         return self.cfg.max_distance / depth_mul
 
     def _clamp_camera_depth_to_sensor_range(self, depth: torch.Tensor) -> torch.Tensor:
-        min_depth = float(getattr(self.cfg, "camera_near", 0.0) or 0.0)
+        min_depth = float(getattr(self.cfg, "camera_near", 0.1) or 0.1)
         max_depth = float(self.cfg.max_distance)
+        depth = torch.where(
+            torch.isfinite(depth) & (depth <= max_depth),
+            depth,
+            torch.full_like(depth, max_depth),
+        )
         return torch.clamp(depth, min=min_depth, max=max_depth)
 
     def _apply_camera_depth_noise(self, depth: torch.Tensor) -> torch.Tensor:
@@ -2355,7 +2360,7 @@ class PerceptionManager:
                 align_corners=False,
             ).squeeze(1)
 
-        min_depth = float(getattr(self.cfg, "camera_near", 0.0) or 0.0)
+        min_depth = float(getattr(self.cfg, "camera_near", 0.1) or 0.1)
         max_depth = float(self.cfg.max_distance)
         depth_obs = torch.clamp(depth_obs, min=min_depth, max=max_depth)
         if self._camera_warp_min_valid_depth > 0.0:
@@ -2446,7 +2451,7 @@ class PerceptionManager:
         return depth
 
     def _normalize_camera_depth_for_obs(self, depth: torch.Tensor, *, max_depth: float) -> torch.Tensor:
-        near = float(getattr(self.cfg, "camera_near", 0.0) or 0.0)
+        near = float(getattr(self.cfg, "camera_near", 0.1) or 0.1)
         denom = max(1.0e-6, max_depth - near)
         depth = (depth - near) / denom - 0.5
         return torch.clamp(depth, min=-0.5, max=0.5)

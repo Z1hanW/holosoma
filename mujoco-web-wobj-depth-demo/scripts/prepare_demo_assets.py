@@ -155,6 +155,27 @@ def _read_onnx_io(model_path: Path) -> tuple[list[dict], list[str]]:
     return inputs, outputs
 
 
+def _extract_checkpoint_cfg(metadata: dict, model_path: Path) -> dict:
+    wandb_run_path = metadata.get("wandb_run_path")
+    if wandb_run_path is not None:
+        wandb_run_path = str(wandb_run_path)
+    iteration = metadata.get("iteration")
+    try:
+        iteration = int(iteration)
+    except (TypeError, ValueError):
+        iteration = None
+
+    checkpoint_file = model_path.name
+    display_name = f"{wandb_run_path}/{checkpoint_file}" if wandb_run_path else str(model_path.expanduser().resolve())
+    return {
+        "display_name": display_name,
+        "wandb_run_path": wandb_run_path,
+        "checkpoint_file": checkpoint_file,
+        "iteration": iteration,
+        "source_model_path": str(model_path.expanduser().resolve()),
+    }
+
+
 def _extract_default_joint_angles(metadata: dict) -> list[float]:
     exp_cfg = metadata.get("experiment_config", {})
     robot_cfg = exp_cfg.get("robot", {})
@@ -1391,6 +1412,7 @@ def _stage_clip_bundle(
         "scene_path": str(scene_path.relative_to(bundle_dir.parents[1])),
         "motion_file": str(motion_path.resolve()),
         "clip_name": motion_path.stem,
+        "checkpoint": _extract_checkpoint_cfg(metadata, model_path),
         "root_body_name": "pelvis",
         "object_body_name": "object_baseLink",
         "dof_names": dof_names,

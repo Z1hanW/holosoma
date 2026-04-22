@@ -106,6 +106,8 @@ MUJOCO_BACKEND="${MUJOCO_BACKEND:-}"
 TERRAIN_STATIC_FRICTION="${TERRAIN_STATIC_FRICTION:-}"
 TERRAIN_DYNAMIC_FRICTION="${TERRAIN_DYNAMIC_FRICTION:-}"
 SIM_VIRTUAL_GANTRY_ENABLED="${SIM_VIRTUAL_GANTRY_ENABLED:-False}"
+SIM_MOTION_INIT_MODE_EXPLICIT=0
+[[ -n "${SIM_MOTION_INIT_MODE+x}" ]] && SIM_MOTION_INIT_MODE_EXPLICIT=1
 SIM_MOTION_INIT_MODE="${SIM_MOTION_INIT_MODE:-raw_motion}"
 APPLY_TRAINING_MOTION_TRANSITIONS="${APPLY_TRAINING_MOTION_TRANSITIONS:-0}"
 USE_TRAINING_SIM_CONFIG="${USE_TRAINING_SIM_CONFIG:-1}"
@@ -135,6 +137,8 @@ PERCEPTION_CAMERA_WARP_BUFFER_LEN="${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-}"
 PERCEPTION_CAMERA_WARP_LATENCY_FRAME="${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-}"
 SIM_USE_ZMQ_LOWCMD="${SIM_USE_ZMQ_LOWCMD:-1}"
 SKIP_POLICY="${SKIP_POLICY:-0}"
+MJ_TRACK_MODE="${MJ_TRACK_MODE:-both}"
+POLICY_STDIO="${POLICY_STDIO:-}"
 INTERFACE_NAME="${INTERFACE_NAME:-lo}"
 RUN_SECONDS="${RUN_SECONDS:-20}"
 if is_truthy_env "${HOLOSOMA_MJ_TRACK_RUN_FOREVER:-0}"; then
@@ -176,8 +180,13 @@ MUJOCO_OBJECT_MASS_SCALE="${MUJOCO_OBJECT_MASS_SCALE:-}"
 MUJOCO_OBJECT_MASS_OVERRIDE="${MUJOCO_OBJECT_MASS_OVERRIDE:-}"
 MUJOCO_OBJECT_GEOM_FRICTION="${MUJOCO_OBJECT_GEOM_FRICTION:-}"
 MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION="${MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION:-}"
+MUJOCO_OBJECT_LATERAL_FRICTION="${MUJOCO_OBJECT_LATERAL_FRICTION:-}"
+MUJOCO_OBJECT_ROLLING_FRICTION="${MUJOCO_OBJECT_ROLLING_FRICTION:-}"
+MUJOCO_OBJECT_CONTACT_STIFFNESS="${MUJOCO_OBJECT_CONTACT_STIFFNESS:-}"
+MUJOCO_OBJECT_CONTACT_DAMPING="${MUJOCO_OBJECT_CONTACT_DAMPING:-}"
 MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES="${MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES:-0}"
-MUJOCO_OBJECT_CONTACT_BODY_MARKERS="${MUJOCO_OBJECT_CONTACT_BODY_MARKERS:-[\"torso\",\"shoulder\",\"elbow\",\"wrist\",\"hand\"]}"
+MUJOCO_OBJECT_CONTACT_BODY_MARKERS="${MUJOCO_OBJECT_CONTACT_BODY_MARKERS:-}"
+USE_TRAINING_OBJECT_CONTACT_MARKERS="${USE_TRAINING_OBJECT_CONTACT_MARKERS:-0}"
 PREFER_SIM_REF_FROM_SIM_STATE="${PREFER_SIM_REF_FROM_SIM_STATE:-1}"
 USE_SIM_TIME="${USE_SIM_TIME:-}"
 INFERENCE_CONFIG="${INFERENCE_CONFIG:-}"
@@ -185,6 +194,26 @@ ROBOT_INIT_STATE_POS="${ROBOT_INIT_STATE_POS:-}"
 ROBOT_INIT_STATE_ROT="${ROBOT_INIT_STATE_ROT:-}"
 ROBOT_ENABLE_SELF_COLLISIONS="${ROBOT_ENABLE_SELF_COLLISIONS:-}"
 MOTION_METADATA_TOOL="$ROOT_DIR/src/holosoma_inference/holosoma_inference/tools/read_motion_clip_metadata.py"
+
+case "$(printf '%s' "$MJ_TRACK_MODE" | tr '[:upper:]' '[:lower:]')" in
+  both|env|policy)
+    MJ_TRACK_MODE="$(printf '%s' "$MJ_TRACK_MODE" | tr '[:upper:]' '[:lower:]')"
+    ;;
+  *)
+    echo "Unsupported MJ_TRACK_MODE=${MJ_TRACK_MODE}; expected both, env, or policy" >&2
+    exit 2
+    ;;
+esac
+if [[ -z "$POLICY_STDIO" ]]; then
+  if [[ "$MJ_TRACK_MODE" == "policy" ]]; then
+    POLICY_STDIO="inherit"
+  else
+    POLICY_STDIO="log"
+  fi
+fi
+if [[ "$MJ_TRACK_MODE" == "env" ]]; then
+  SKIP_POLICY=1
+fi
 
 mkdir -p "$PATCH_DIR"
 
@@ -542,7 +571,7 @@ PY
         fi
         ;;
       MUJOCO_OBJECT_CONTACT_BODY_MARKERS)
-        if [[ -z "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" ]]; then
+        if [[ "$USE_TRAINING_OBJECT_CONTACT_MARKERS" == "1" && -z "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" ]]; then
           MUJOCO_OBJECT_CONTACT_BODY_MARKERS="$value"
         fi
         ;;
@@ -572,9 +601,30 @@ perception_cfg = metadata.get("experiment_config", {}).get("perception", {})
 if not isinstance(perception_cfg, dict):
     raise SystemExit(0)
 
-camera_pitch_deg = perception_cfg.get("camera_pitch_deg")
-if camera_pitch_deg is not None:
-    print(f"PERCEPTION_CAMERA_PITCH_DEG={float(camera_pitch_deg):g}")
+field_map = {
+    "update_hz": "PERCEPTION_UPDATE_HZ",
+    "camera_fps": "PERCEPTION_CAMERA_FPS",
+    "camera_pitch_deg": "PERCEPTION_CAMERA_PITCH_DEG",
+    "camera_near": "PERCEPTION_CAMERA_NEAR",
+    "camera_far": "PERCEPTION_CAMERA_FAR",
+    "max_distance": "PERCEPTION_MAX_DISTANCE",
+    "camera_warp_min_valid_depth": "PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH",
+    "camera_warp_buffer_len": "PERCEPTION_CAMERA_WARP_BUFFER_LEN",
+    "camera_warp_latency_frame": "PERCEPTION_CAMERA_WARP_LATENCY_FRAME",
+    "camera_warp_edge_noise": "PERCEPTION_CAMERA_WARP_EDGE_NOISE",
+}
+for src_key, env_key in field_map.items():
+    value = perception_cfg.get(src_key)
+    if value is None:
+        continue
+    if isinstance(value, bool):
+        print(f"{env_key}={value}")
+    elif isinstance(value, int):
+        print(f"{env_key}={value}")
+    elif isinstance(value, float):
+        print(f"{env_key}={value:g}")
+    else:
+        print(f"{env_key}={value}")
 PY
   )"
 
@@ -585,9 +635,54 @@ PY
   while IFS='=' read -r key value; do
     [[ -z "${key:-}" ]] && continue
     case "$key" in
+      PERCEPTION_UPDATE_HZ)
+        if [[ -z "$PERCEPTION_UPDATE_HZ" ]]; then
+          PERCEPTION_UPDATE_HZ="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_FPS)
+        if [[ -z "$PERCEPTION_CAMERA_FPS" ]]; then
+          PERCEPTION_CAMERA_FPS="$value"
+        fi
+        ;;
       PERCEPTION_CAMERA_PITCH_DEG)
         if [[ -z "$PERCEPTION_CAMERA_PITCH_DEG" ]]; then
           PERCEPTION_CAMERA_PITCH_DEG="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_NEAR)
+        if [[ -z "$PERCEPTION_CAMERA_NEAR" ]]; then
+          PERCEPTION_CAMERA_NEAR="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_FAR)
+        if [[ -z "$PERCEPTION_CAMERA_FAR" ]]; then
+          PERCEPTION_CAMERA_FAR="$value"
+        fi
+        ;;
+      PERCEPTION_MAX_DISTANCE)
+        if [[ -z "$PERCEPTION_MAX_DISTANCE" ]]; then
+          PERCEPTION_MAX_DISTANCE="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH)
+        if [[ -z "$PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH" ]]; then
+          PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_WARP_BUFFER_LEN)
+        if [[ -z "$PERCEPTION_CAMERA_WARP_BUFFER_LEN" ]]; then
+          PERCEPTION_CAMERA_WARP_BUFFER_LEN="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_WARP_LATENCY_FRAME)
+        if [[ -z "$PERCEPTION_CAMERA_WARP_LATENCY_FRAME" ]]; then
+          PERCEPTION_CAMERA_WARP_LATENCY_FRAME="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_WARP_EDGE_NOISE)
+        if [[ -z "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ]]; then
+          PERCEPTION_CAMERA_WARP_EDGE_NOISE="$value"
         fi
         ;;
     esac
@@ -596,6 +691,8 @@ PY
 
 apply_training_motion_launch_defaults() {
   local model_path="$1"
+  local explicit_motion_init_mode
+  explicit_motion_init_mode="$(echo "$SIM_MOTION_INIT_MODE" | tr '[:upper:]-' '[:lower:]_')"
   local default_lines
   default_lines="$(
     "$INFER_PY" - <<'PY' "$model_path"
@@ -656,23 +753,27 @@ PY
     [[ -z "${key:-}" ]] && continue
     case "$key" in
       APPLY_TRAINING_MOTION_TRANSITIONS)
-        APPLY_TRAINING_MOTION_TRANSITIONS="$value"
+        if [[ "$SIM_MOTION_INIT_MODE_EXPLICIT" != "1" || "$explicit_motion_init_mode" == "training_default_pose" ]]; then
+          APPLY_TRAINING_MOTION_TRANSITIONS="$value"
+        fi
         ;;
       SIM_MOTION_INIT_MODE)
-        SIM_MOTION_INIT_MODE="$value"
+        if [[ "$SIM_MOTION_INIT_MODE_EXPLICIT" != "1" ]]; then
+          SIM_MOTION_INIT_MODE="$value"
+        fi
         ;;
       USE_ROOT_REFERENCE_AT_CLIP_START)
-        if [[ "$USE_ROOT_REFERENCE_AT_CLIP_START_RAW" == "__unset__" ]]; then
+        if [[ "$USE_ROOT_REFERENCE_AT_CLIP_START_RAW" == "__unset__" && ( "$SIM_MOTION_INIT_MODE_EXPLICIT" != "1" || "$explicit_motion_init_mode" == "training_default_pose" ) ]]; then
           USE_ROOT_REFERENCE_AT_CLIP_START="$value"
         fi
         ;;
       AUTO_START_STIFF_HOLD_SEC)
-        if [[ "$AUTO_START_STIFF_HOLD_SEC_RAW" == "__unset__" ]]; then
+        if [[ "$AUTO_START_STIFF_HOLD_SEC_RAW" == "__unset__" && ( "$SIM_MOTION_INIT_MODE_EXPLICIT" != "1" || "$explicit_motion_init_mode" == "training_default_pose" ) ]]; then
           AUTO_START_STIFF_HOLD_SEC="$value"
         fi
         ;;
       AUTO_START_STIFF_MAX_WAIT_SEC)
-        if [[ "$AUTO_START_STIFF_MAX_WAIT_SEC_RAW" == "__unset__" ]]; then
+        if [[ "$AUTO_START_STIFF_MAX_WAIT_SEC_RAW" == "__unset__" && ( "$SIM_MOTION_INIT_MODE_EXPLICIT" != "1" || "$explicit_motion_init_mode" == "training_default_pose" ) ]]; then
           AUTO_START_STIFF_MAX_WAIT_SEC="$value"
         fi
         ;;
@@ -828,7 +929,19 @@ if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_CAMERA_SOURCE" == "f
   SIM_DEVICE="cuda:0"
 fi
 if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_CAMERA_SOURCE" == "rendered" && -z "${MUJOCO_GL:-}" ]]; then
-  export MUJOCO_GL=egl
+  case "$(printf '%s' "$TRAINING_HEADLESS" | tr '[:upper:]' '[:lower:]')" in
+    0|false|no|off)
+      export MUJOCO_GL=glfw
+      ;;
+    *)
+      export MUJOCO_GL=egl
+      ;;
+  esac
+fi
+if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_CAMERA_SOURCE" == "rendered" ]]; then
+  export HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES="${HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES:-1}"
+  export HOLOSOMA_MUJOCO_LOAD_OBJECT_VISUAL_MESHES="${HOLOSOMA_MUJOCO_LOAD_OBJECT_VISUAL_MESHES:-1}"
+  export HOLOSOMA_MUJOCO_DEPTH_PREFER_VISUAL_MESHES="${HOLOSOMA_MUJOCO_DEPTH_PREFER_VISUAL_MESHES:-1}"
 fi
 
 if [[ "$INFERENCE_CONFIG" == "g1-29dof-wbt-w-object" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-generalist" ]]; then
@@ -910,6 +1023,10 @@ POLICY_LOG="$RUN_DIR/policy.log"
 : >"$SIM_LOG"
 : >"$POLICY_LOG"
 
+if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]]; then
+  echo "[INFO] perception camera: source=${PERCEPTION_CAMERA_SOURCE} update_hz=${PERCEPTION_UPDATE_HZ:-<default>} camera_fps=${PERCEPTION_CAMERA_FPS:-<default>} pitch_deg=${PERCEPTION_CAMERA_PITCH_DEG:-<default>} near=${PERCEPTION_CAMERA_NEAR:-<default>} far=${PERCEPTION_CAMERA_FAR:-<default>} max_distance=${PERCEPTION_MAX_DISTANCE:-<default>} warp_min_valid_depth=${PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH:-<default>} warp_buffer_len=${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-<default>} warp_latency_frame=${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-<default>} warp_edge_noise=${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-<default>}"
+fi
+
 terminate_pid() {
   local pid="$1"
   [[ -n "${pid:-}" ]] || return
@@ -961,82 +1078,88 @@ wait_for_sim_ready() {
   return 1
 }
 
-"${MUJOCO_LAUNCH_PREFIX[@]}" "$MUJOCO_PY" -u "$ROOT_DIR/src/holosoma/holosoma/run_sim.py" \
-  simulator:mujoco \
-  robot:g1_29dof_w_object \
-  terrain:terrain_locomotion_plane \
-  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]] && printf '%s' "perception:${PERCEPTION_PRESET}" ) \
-  --training.headless "$TRAINING_HEADLESS" \
-  --simulator.config.debug-viz "$SIM_DEBUG_VIZ" \
-  $( [[ "$MUJOCO_SHOW_OBJECT_COLLISION" == "1" ]] && printf '%s %s' "--simulator.config.mujoco-show-object-collision" "True" ) \
-  $( [[ "$MUJOCO_HIDE_OBJECT_VISUALS_WHEN_SHOWING_COLLISION" == "1" ]] && printf '%s %s' "--simulator.config.mujoco-hide-object-visuals-when-showing-collision" "True" ) \
-  --simulator.config.sim.fps "$SIM_FPS" \
-  --simulator.config.sim.control-decimation "$SIM_CONTROL_DECIMATION" \
-  $( [[ -n "$SIM_SUBSTEPS" ]] && printf '%s %s' "--simulator.config.sim.substeps" "$SIM_SUBSTEPS" ) \
-  $( [[ -n "$MUJOCO_BACKEND" ]] && printf '%s %s' "--simulator.config.mujoco-backend" "$MUJOCO_BACKEND" ) \
-  $( [[ -n "$SIM_DEVICE" ]] && printf '%s %s' "--device" "$SIM_DEVICE" ) \
-  --simulator.config.virtual-gantry.enabled "$SIM_VIRTUAL_GANTRY_ENABLED" \
-  $( [[ -n "$ROBOT_INIT_STATE_POS" ]] && printf '%s %s' "--robot.init-state.pos" "$ROBOT_INIT_STATE_POS" ) \
-  $( [[ -n "$ROBOT_INIT_STATE_ROT" ]] && printf '%s %s' "--robot.init-state.rot" "$ROBOT_INIT_STATE_ROT" ) \
-  $( [[ -n "$ROBOT_ENABLE_SELF_COLLISIONS" ]] && printf '%s %s' "--robot.asset.enable-self-collisions" "$ROBOT_ENABLE_SELF_COLLISIONS" ) \
-  --robot.object.enabled=True \
-  --robot.object.object-urdf-path "$OBJECT_URDF" \
-  $( [[ "$SIM_USE_TRAINING_URDF_OBJECT_SCENE" == "1" ]] && printf '%s %s' "--robot.object.mujoco-use-training-urdf-scene" "True" ) \
-  $( [[ "$SIM_ADD_DEFAULT_OBJECT_ACTUATORS" == "1" ]] && printf '%s %s' "--robot.object.mujoco-add-default-actuators" "True" ) \
-  $( [[ "$SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML" == "1" ]] && printf '%s %s' "--robot.object.mujoco-copy-joint-defaults-from-robot-xml" "True" ) \
-  $( [[ "$SIM_COPY_TENDONS_FROM_ROBOT_XML" == "1" ]] && printf '%s %s' "--robot.object.mujoco-copy-tendons-from-robot-xml" "True" ) \
-  $( [[ "$SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML" == "1" ]] && printf '%s %s' "--robot.object.mujoco-copy-collision-geoms-from-robot-xml" "True" ) \
-  $( [[ "$SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML" == "1" ]] && printf '%s %s' "--robot.object.mujoco-copy-contact-pairs-from-robot-xml" "True" ) \
-  $( [[ -n "$MUJOCO_OBJECT_MASS_SCALE" ]] && printf '%s %s' "--robot.object.mujoco-object-mass-scale" "$MUJOCO_OBJECT_MASS_SCALE" ) \
-  $( [[ -n "$MUJOCO_OBJECT_MASS_OVERRIDE" ]] && printf '%s %s' "--robot.object.mujoco-object-mass-override" "$MUJOCO_OBJECT_MASS_OVERRIDE" ) \
-  $( [[ -n "$MUJOCO_OBJECT_GEOM_FRICTION" ]] && printf '%s %s' "--robot.object.mujoco-object-geom-friction" "$MUJOCO_OBJECT_GEOM_FRICTION" ) \
-  $( [[ -n "$MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION" ]] && printf '%s %s' "--robot.object.mujoco-object-terrain-pair-friction" "$MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION" ) \
-  $( [[ "$MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES" == "1" ]] && printf '%s %s' "--robot.object.mujoco-limit-object-contacts-to-carry-bodies" "True" ) \
-  $( [[ -n "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" ]] && printf '%s %s' "--robot.object.mujoco-object-contact-body-name-markers" "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" ) \
-  $( [[ -n "$TERRAIN_STATIC_FRICTION" ]] && printf '%s %s' "--terrain.terrain-term.static-friction" "$TERRAIN_STATIC_FRICTION" ) \
-  $( [[ -n "$TERRAIN_DYNAMIC_FRICTION" ]] && printf '%s %s' "--terrain.terrain-term.dynamic-friction" "$TERRAIN_DYNAMIC_FRICTION" ) \
-  --simulator.config.bridge.interface "$INTERFACE_NAME" \
-  --simulator.config.bridge.clock-port "$SIM_CLOCK_PORT" \
-  --simulator.config.bridge.publish-sim-state=True \
-  --simulator.config.bridge.listen-control=True \
-  --simulator.config.bridge.sim-state-port "$SIM_STATE_PORT" \
-  --simulator.config.bridge.control-port "$SIM_CONTROL_PORT" \
-  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]] && printf '%s %s' "--simulator.config.bridge.publish-perception-obs" "True" ) \
-  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]] && printf '%s %s' "--simulator.config.bridge.perception-obs-port" "$PERCEPTION_OBS_PORT" ) \
-  $( [[ "$SIM_USE_ZMQ_LOWCMD" == "1" ]] && printf '%s %s' "--simulator.config.bridge.use-zmq-lowcmd" "True" ) \
-  $( [[ "$SIM_IGNORE_DEFAULT_IDLE_COMMAND" == "1" ]] && printf '%s %s' "--simulator.config.bridge.ignore-default-idle-command" "True" ) \
-  $( [[ "$SIM_LOG_FIRST_COMMAND_SUMMARY" == "1" ]] && printf '%s %s' "--simulator.config.bridge.log-first-command-summary" "True" ) \
-  $( [[ "$SIM_HOLD_DEFAULT_POSE_UNTIL_FIRST_COMMAND" == "1" ]] && printf '%s %s' "--simulator.config.bridge.hold-default-pose-until-first-command" "True" ) \
-  $( [[ "$SIM_HOLD_INITIAL_POSE_UNTIL_FIRST_COMMAND" == "1" ]] && printf '%s %s' "--simulator.config.bridge.hold-initial-pose-until-first-command" "True" ) \
-  $( [[ "$SIM_FREEZE_UNTIL_FIRST_COMMAND" == "1" ]] && printf '%s %s' "--simulator.config.bridge.freeze-until-first-command" "True" ) \
-  --motion-init.enabled=True \
-  --motion-init.motion-file "$MOTION_FILE" \
-  --motion-init.mode "$SIM_MOTION_INIT_MODE" \
-  --motion-init.object-name object \
-  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_SOURCE" ]] && printf '%s %s' "--perception.camera-source" "$PERCEPTION_CAMERA_SOURCE" ) \
-  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_OBJECT_GEOMETRY_MODE" ]] && printf '%s %s' "--perception.object-geometry-mode" "$PERCEPTION_OBJECT_GEOMETRY_MODE" ) \
-  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_PITCH_DEG" ]] && printf '%s %s' "--perception.camera-pitch-deg" "$PERCEPTION_CAMERA_PITCH_DEG" ) \
-  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_NEAR" ]] && printf '%s %s' "--perception.camera-near" "$PERCEPTION_CAMERA_NEAR" ) \
-  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_FAR" ]] && printf '%s %s' "--perception.camera-far" "$PERCEPTION_CAMERA_FAR" ) \
-  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_MAX_DISTANCE" ]] && printf '%s %s' "--perception.max-distance" "$PERCEPTION_MAX_DISTANCE" ) \
-  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH" ]] && printf '%s %s' "--perception.camera-warp-min-valid-depth" "$PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH" ) \
-  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_UPDATE_HZ" ]] && printf '%s %s' "--perception.update-hz" "$PERCEPTION_UPDATE_HZ" ) \
-  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_FPS" ]] && printf '%s %s' "--perception.camera-fps" "$PERCEPTION_CAMERA_FPS" ) \
-  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ]] && printf '%s %s' "--perception.camera-warp-edge-noise" "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ) \
-  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_BUFFER_LEN" ]] && printf '%s %s' "--perception.camera-warp-buffer-len" "$PERCEPTION_CAMERA_WARP_BUFFER_LEN" ) \
-  $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_LATENCY_FRAME" ]] && printf '%s %s' "--perception.camera-warp-latency-frame" "$PERCEPTION_CAMERA_WARP_LATENCY_FRAME" ) \
-  >"$SIM_LOG" 2>&1 &
-SIM_PID=$!
+if [[ "$MJ_TRACK_MODE" != "policy" ]]; then
+  "${MUJOCO_LAUNCH_PREFIX[@]}" "$MUJOCO_PY" -u "$ROOT_DIR/src/holosoma/holosoma/run_sim.py" \
+    simulator:mujoco \
+    robot:g1_29dof_w_object \
+    terrain:terrain_locomotion_plane \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]] && printf '%s' "perception:${PERCEPTION_PRESET}" ) \
+    --training.headless "$TRAINING_HEADLESS" \
+    --simulator.config.debug-viz "$SIM_DEBUG_VIZ" \
+    $( [[ "$MUJOCO_SHOW_OBJECT_COLLISION" == "1" ]] && printf '%s %s' "--simulator.config.mujoco-show-object-collision" "True" ) \
+    $( [[ "$MUJOCO_HIDE_OBJECT_VISUALS_WHEN_SHOWING_COLLISION" == "1" ]] && printf '%s %s' "--simulator.config.mujoco-hide-object-visuals-when-showing-collision" "True" ) \
+    --simulator.config.sim.fps "$SIM_FPS" \
+    --simulator.config.sim.control-decimation "$SIM_CONTROL_DECIMATION" \
+    $( [[ -n "$SIM_SUBSTEPS" ]] && printf '%s %s' "--simulator.config.sim.substeps" "$SIM_SUBSTEPS" ) \
+    $( [[ -n "$MUJOCO_BACKEND" ]] && printf '%s %s' "--simulator.config.mujoco-backend" "$MUJOCO_BACKEND" ) \
+    $( [[ -n "$SIM_DEVICE" ]] && printf '%s %s' "--device" "$SIM_DEVICE" ) \
+    --simulator.config.virtual-gantry.enabled "$SIM_VIRTUAL_GANTRY_ENABLED" \
+    $( [[ -n "$ROBOT_INIT_STATE_POS" ]] && printf '%s %s' "--robot.init-state.pos" "$ROBOT_INIT_STATE_POS" ) \
+    $( [[ -n "$ROBOT_INIT_STATE_ROT" ]] && printf '%s %s' "--robot.init-state.rot" "$ROBOT_INIT_STATE_ROT" ) \
+    $( [[ -n "$ROBOT_ENABLE_SELF_COLLISIONS" ]] && printf '%s %s' "--robot.asset.enable-self-collisions" "$ROBOT_ENABLE_SELF_COLLISIONS" ) \
+    --robot.object.enabled=True \
+    --robot.object.object-urdf-path "$OBJECT_URDF" \
+    $( [[ "$SIM_USE_TRAINING_URDF_OBJECT_SCENE" == "1" ]] && printf '%s %s' "--robot.object.mujoco-use-training-urdf-scene" "True" ) \
+    $( [[ "$SIM_ADD_DEFAULT_OBJECT_ACTUATORS" == "1" ]] && printf '%s %s' "--robot.object.mujoco-add-default-actuators" "True" ) \
+    $( [[ "$SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML" == "1" ]] && printf '%s %s' "--robot.object.mujoco-copy-joint-defaults-from-robot-xml" "True" ) \
+    $( [[ "$SIM_COPY_TENDONS_FROM_ROBOT_XML" == "1" ]] && printf '%s %s' "--robot.object.mujoco-copy-tendons-from-robot-xml" "True" ) \
+    $( [[ "$SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML" == "1" ]] && printf '%s %s' "--robot.object.mujoco-copy-collision-geoms-from-robot-xml" "True" ) \
+    $( [[ "$SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML" == "1" ]] && printf '%s %s' "--robot.object.mujoco-copy-contact-pairs-from-robot-xml" "True" ) \
+    $( [[ -n "$MUJOCO_OBJECT_MASS_SCALE" ]] && printf '%s %s' "--robot.object.mujoco-object-mass-scale" "$MUJOCO_OBJECT_MASS_SCALE" ) \
+    $( [[ -n "$MUJOCO_OBJECT_MASS_OVERRIDE" ]] && printf '%s %s' "--robot.object.mujoco-object-mass-override" "$MUJOCO_OBJECT_MASS_OVERRIDE" ) \
+    $( [[ -n "$MUJOCO_OBJECT_GEOM_FRICTION" ]] && printf '%s %s' "--robot.object.mujoco-object-geom-friction" "$MUJOCO_OBJECT_GEOM_FRICTION" ) \
+    $( [[ -n "$MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION" ]] && printf '%s %s' "--robot.object.mujoco-object-terrain-pair-friction" "$MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION" ) \
+    $( [[ -n "$MUJOCO_OBJECT_LATERAL_FRICTION" ]] && printf '%s %s' "--robot.object.mujoco-object-lateral-friction" "$MUJOCO_OBJECT_LATERAL_FRICTION" ) \
+    $( [[ -n "$MUJOCO_OBJECT_ROLLING_FRICTION" ]] && printf '%s %s' "--robot.object.mujoco-object-rolling-friction" "$MUJOCO_OBJECT_ROLLING_FRICTION" ) \
+    $( [[ -n "$MUJOCO_OBJECT_CONTACT_STIFFNESS" ]] && printf '%s %s' "--robot.object.mujoco-object-contact-stiffness" "$MUJOCO_OBJECT_CONTACT_STIFFNESS" ) \
+    $( [[ -n "$MUJOCO_OBJECT_CONTACT_DAMPING" ]] && printf '%s %s' "--robot.object.mujoco-object-contact-damping" "$MUJOCO_OBJECT_CONTACT_DAMPING" ) \
+    $( [[ "$MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES" == "1" ]] && printf '%s %s' "--robot.object.mujoco-limit-object-contacts-to-carry-bodies" "True" ) \
+    $( [[ -n "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" ]] && printf '%s %s' "--robot.object.mujoco-object-contact-body-name-markers" "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" ) \
+    $( [[ -n "$TERRAIN_STATIC_FRICTION" ]] && printf '%s %s' "--terrain.terrain-term.static-friction" "$TERRAIN_STATIC_FRICTION" ) \
+    $( [[ -n "$TERRAIN_DYNAMIC_FRICTION" ]] && printf '%s %s' "--terrain.terrain-term.dynamic-friction" "$TERRAIN_DYNAMIC_FRICTION" ) \
+    --simulator.config.bridge.interface "$INTERFACE_NAME" \
+    --simulator.config.bridge.clock-port "$SIM_CLOCK_PORT" \
+    --simulator.config.bridge.publish-sim-state=True \
+    --simulator.config.bridge.listen-control=True \
+    --simulator.config.bridge.sim-state-port "$SIM_STATE_PORT" \
+    --simulator.config.bridge.control-port "$SIM_CONTROL_PORT" \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]] && printf '%s %s' "--simulator.config.bridge.publish-perception-obs" "True" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]] && printf '%s %s' "--simulator.config.bridge.perception-obs-port" "$PERCEPTION_OBS_PORT" ) \
+    $( [[ "$SIM_USE_ZMQ_LOWCMD" == "1" ]] && printf '%s %s' "--simulator.config.bridge.use-zmq-lowcmd" "True" ) \
+    $( [[ "$SIM_IGNORE_DEFAULT_IDLE_COMMAND" == "1" ]] && printf '%s %s' "--simulator.config.bridge.ignore-default-idle-command" "True" ) \
+    $( [[ "$SIM_LOG_FIRST_COMMAND_SUMMARY" == "1" ]] && printf '%s %s' "--simulator.config.bridge.log-first-command-summary" "True" ) \
+    $( [[ "$SIM_HOLD_DEFAULT_POSE_UNTIL_FIRST_COMMAND" == "1" ]] && printf '%s %s' "--simulator.config.bridge.hold-default-pose-until-first-command" "True" ) \
+    $( [[ "$SIM_HOLD_INITIAL_POSE_UNTIL_FIRST_COMMAND" == "1" ]] && printf '%s %s' "--simulator.config.bridge.hold-initial-pose-until-first-command" "True" ) \
+    $( [[ "$SIM_FREEZE_UNTIL_FIRST_COMMAND" == "1" ]] && printf '%s %s' "--simulator.config.bridge.freeze-until-first-command" "True" ) \
+    --motion-init.enabled=True \
+    --motion-init.motion-file "$MOTION_FILE" \
+    --motion-init.mode "$SIM_MOTION_INIT_MODE" \
+    --motion-init.object-name object \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_SOURCE" ]] && printf '%s %s' "--perception.camera-source" "$PERCEPTION_CAMERA_SOURCE" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_OBJECT_GEOMETRY_MODE" ]] && printf '%s %s' "--perception.object-geometry-mode" "$PERCEPTION_OBJECT_GEOMETRY_MODE" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_PITCH_DEG" ]] && printf '%s %s' "--perception.camera-pitch-deg" "$PERCEPTION_CAMERA_PITCH_DEG" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_NEAR" ]] && printf '%s %s' "--perception.camera-near" "$PERCEPTION_CAMERA_NEAR" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_FAR" ]] && printf '%s %s' "--perception.camera-far" "$PERCEPTION_CAMERA_FAR" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_MAX_DISTANCE" ]] && printf '%s %s' "--perception.max-distance" "$PERCEPTION_MAX_DISTANCE" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH" ]] && printf '%s %s' "--perception.camera-warp-min-valid-depth" "$PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_UPDATE_HZ" ]] && printf '%s %s' "--perception.update-hz" "$PERCEPTION_UPDATE_HZ" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_FPS" ]] && printf '%s %s' "--perception.camera-fps" "$PERCEPTION_CAMERA_FPS" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ]] && printf '%s %s' "--perception.camera-warp-edge-noise" "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_BUFFER_LEN" ]] && printf '%s %s' "--perception.camera-warp-buffer-len" "$PERCEPTION_CAMERA_WARP_BUFFER_LEN" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_LATENCY_FRAME" ]] && printf '%s %s' "--perception.camera-warp-latency-frame" "$PERCEPTION_CAMERA_WARP_LATENCY_FRAME" ) \
+    >"$SIM_LOG" 2>&1 &
+  SIM_PID=$!
 
-if ! wait_for_sim_ready; then
-  exit 1
+  if ! wait_for_sim_ready; then
+    exit 1
+  fi
+
+  if [[ "$SIM_STARTUP_WAIT" != "0" ]]; then
+    sleep "$SIM_STARTUP_WAIT"
+  fi
 fi
 
-if [[ "$SIM_STARTUP_WAIT" != "0" ]]; then
-  sleep "$SIM_STARTUP_WAIT"
-fi
-
-if [[ "$SKIP_POLICY" == "1" || "$SKIP_POLICY" == "true" || "$SKIP_POLICY" == "True" ]]; then
+if [[ "$MJ_TRACK_MODE" != "policy" && ( "$SKIP_POLICY" == "1" || "$SKIP_POLICY" == "true" || "$SKIP_POLICY" == "True" ) ]]; then
   echo "Policy launch skipped (SKIP_POLICY=${SKIP_POLICY}); simulator is running without external lowcmd."
   if [[ "$RUN_SECONDS" == "0" ]]; then
     wait "$SIM_PID"
@@ -1091,17 +1214,32 @@ if [[ "$POLICY_DEFER_UNTIL_VALID_STATE" == "1" ]]; then
 fi
 
 set +e
-if [[ "$RUN_SECONDS" == "0" ]]; then
-  "${POLICY_CMD[@]}" >"$POLICY_LOG" 2>&1 &
+if [[ "$POLICY_STDIO" == "inherit" ]]; then
+  if [[ "$RUN_SECONDS" == "0" ]]; then
+    "${POLICY_CMD[@]}"
+    STATUS=$?
+  else
+    timeout --kill-after=5s --signal=INT "${RUN_SECONDS}s" "${POLICY_CMD[@]}"
+    STATUS=$?
+  fi
 else
-  timeout --kill-after=5s --signal=INT "${RUN_SECONDS}s" "${POLICY_CMD[@]}" >"$POLICY_LOG" 2>&1 &
+  if [[ "$RUN_SECONDS" == "0" ]]; then
+    if is_truthy_env "${HOLOSOMA_POLICY_TTY_INPUT:-0}" && [[ -r /dev/tty ]]; then
+      "${POLICY_CMD[@]}" </dev/tty >"$POLICY_LOG" 2>&1 &
+    else
+      "${POLICY_CMD[@]}" >"$POLICY_LOG" 2>&1 &
+    fi
+  else
+    if is_truthy_env "${HOLOSOMA_POLICY_TTY_INPUT:-0}" && [[ -r /dev/tty ]]; then
+      timeout --kill-after=5s --signal=INT "${RUN_SECONDS}s" "${POLICY_CMD[@]}" </dev/tty >"$POLICY_LOG" 2>&1 &
+    else
+      timeout --kill-after=5s --signal=INT "${RUN_SECONDS}s" "${POLICY_CMD[@]}" >"$POLICY_LOG" 2>&1 &
+    fi
+  fi
+  POLICY_PID=$!
+  wait "$POLICY_PID"
+  STATUS=$?
 fi
-POLICY_PID=$!
-set -e
-
-set +e
-wait "$POLICY_PID"
-STATUS=$?
 set -e
 
 if [[ "$STATUS" -ne 0 && "$STATUS" -ne 124 && "$STATUS" -ne 130 ]]; then

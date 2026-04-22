@@ -1096,7 +1096,7 @@ g1_29dof_w_object = replace(
     g1_29dof,
     asset=replace(
         g1_29dof.asset,
-        urdf_file=os.getenv("HOLOSOMA_W_OBJECT_URDF", "g1/g1_29dof.urdf"),
+        urdf_file=os.getenv("HOLOSOMA_W_OBJECT_URDF", "g1/main_mesh_collision_halfspherehand.urdf"),
     ),
     control=replace(
         g1_29dof.control,

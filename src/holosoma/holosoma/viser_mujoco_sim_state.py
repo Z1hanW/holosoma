@@ -66,13 +66,17 @@ class MujocoSimStateViewerConfig:
     show_motion_overlay: bool = True
     grid_size: float = 8.0
     launch_rollout: bool = False
+    launch_env_only: bool = False
     run_script: str = str(REPO_ROOT / "mj_track.sh")
     motion_file: str = str(DEFAULT_TRACKING_MOTION_FILE)
     model_path: str = str(DEFAULT_TRACKING_MODEL_PATH)
     launch_run_seconds: int = 0
     training_headless: bool = True
     rollout_log_path: str = str(REPO_ROOT / "logs" / "live_debug" / "viser_mujoco_sim_state.log")
+    rollout_tty_input: bool = False
     auto_reset_after_first_state_sec: float = 0.0
+    manual_motion_init_mode: bool = False
+    reset_to_default_pose: bool = False
     show_depth: bool = True
     depth_height: int = 58
     depth_width: int = 87
@@ -85,6 +89,10 @@ class MujocoSimStateViewerConfig:
     manual_root_dx: float = 0.0
     manual_root_dy: float = 0.0
     manual_root_dyaw: float = 0.0
+    manual_root_publisher_enabled: bool = True
+    keyboard_root_command: bool = False
+    keyboard_root_command_value: float = 0.5
+    keyboard_root_command_mode: str = "manual"
 
 
 @dataclass(frozen=True)
@@ -117,6 +125,17 @@ def _resolve_repo_path(path: str) -> Path:
     if not candidate.is_absolute():
         candidate = REPO_ROOT / candidate
     return candidate.resolve()
+
+
+def _resolve_repo_path_preserve_symlink(path: str | Path) -> Path:
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        candidate = REPO_ROOT / candidate
+    return Path(os.path.abspath(candidate))
+
+
+def _truthy_env(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _resolve_robot_urdf_path(robot_config: RobotConfig) -> Path:
@@ -475,29 +494,141 @@ def _load_motion_overlay(
     )
 
 
-def _terminate_process_group(proc: subprocess.Popen[bytes] | subprocess.Popen[str] | None, timeout_sec: float = 10.0) -> None:
+def _terminate_rollout_process(
+    proc: subprocess.Popen[bytes] | subprocess.Popen[str] | None,
+    *,
+    process_group: bool,
+    timeout_sec: float = 10.0,
+) -> None:
     if proc is None or proc.poll() is not None:
         return
-    os.killpg(proc.pid, signal.SIGTERM)
+    if process_group:
+        os.killpg(proc.pid, signal.SIGTERM)
+    else:
+        proc.terminate()
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         if proc.poll() is not None:
             return
         time.sleep(0.1)
-    os.killpg(proc.pid, signal.SIGKILL)
+    if process_group:
+        os.killpg(proc.pid, signal.SIGKILL)
+    else:
+        proc.kill()
     proc.wait(timeout=5.0)
 
 
-def _build_rollout_command(cfg: MujocoSimStateViewerConfig) -> list[str]:
+def _build_rollout_command(cfg: MujocoSimStateViewerConfig, motion_path: Path | None = None) -> list[str]:
     run_script = _resolve_repo_path(cfg.run_script)
     if not run_script.is_file():
         raise FileNotFoundError(f"run script not found: {run_script}")
     command = [str(run_script)]
-    if cfg.motion_file:
-        command.append(str(_resolve_repo_path(cfg.motion_file)))
+    if motion_path is not None:
+        command.append(str(_resolve_repo_path_preserve_symlink(motion_path)))
+    elif cfg.motion_file:
+        command.append(str(_resolve_repo_path_preserve_symlink(cfg.motion_file)))
     if cfg.model_path:
         command.append(str(_resolve_repo_path(cfg.model_path)))
     return command
+
+
+def _list_motion_choices(initial_motion_path: Path) -> tuple[tuple[str, ...], dict[str, Path], str, Path]:
+    initial_motion_path = _resolve_repo_path_preserve_symlink(initial_motion_path)
+    motion_dir = initial_motion_path.parent
+    motion_paths = sorted(motion_dir.glob("*.npz")) if motion_dir.is_dir() else []
+    motion_choice_map = {path.stem: _resolve_repo_path_preserve_symlink(path) for path in motion_paths}
+    initial_label = initial_motion_path.stem
+    if initial_label not in motion_choice_map:
+        motion_choice_map[initial_label] = initial_motion_path
+    return tuple(motion_choice_map.keys()), motion_choice_map, initial_label, motion_dir
+
+
+def _resolve_motion_path_input(raw_value: object, *, base_dir: Path, choices: dict[str, Path]) -> Path | None:
+    raw = str(raw_value).strip()
+    if not raw:
+        return None
+    if raw in choices:
+        return choices[raw]
+
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        if not candidate.suffix:
+            base_npz = _resolve_repo_path_preserve_symlink(base_dir / f"{raw}.npz")
+            if base_npz.is_file():
+                return base_npz
+        base_candidate = _resolve_repo_path_preserve_symlink(base_dir / candidate)
+        if base_candidate.is_file():
+            return base_candidate
+        candidate = REPO_ROOT / candidate
+    return _resolve_repo_path_preserve_symlink(candidate)
+
+
+def _motion_path_status(path: Path | None) -> str:
+    if path is None:
+        return "empty"
+    if path.suffix.lower() != ".npz":
+        return "not_npz"
+    if not path.is_file():
+        return "missing"
+    return "ok"
+
+
+def _motion_path_display(path: Path | None) -> str:
+    if path is None:
+        return "n/a"
+    return path.name if path.name else str(path)
+
+
+def _motion_init_mode_from_default_pose(enabled: bool) -> str:
+    return "training_default_pose" if enabled else "raw_motion"
+
+
+def _motion_init_label(*, manual: bool, default_pose: bool) -> str:
+    mode = _motion_init_mode_from_default_pose(default_pose)
+    source = "manual" if manual else "auto"
+    return f"{source}({mode})"
+
+
+def _infer_default_pose_start(cfg: MujocoSimStateViewerConfig) -> bool:
+    env_mode = os.environ.get("SIM_MOTION_INIT_MODE", "").strip().lower().replace("-", "_")
+    if env_mode:
+        return env_mode == "training_default_pose"
+
+    try:
+        import onnx
+
+        model_path = _resolve_repo_path(cfg.model_path)
+        model = onnx.load(str(model_path))
+        metadata = {}
+        for prop in model.metadata_props:
+            try:
+                metadata[prop.key] = json.loads(prop.value)
+            except Exception:
+                metadata[prop.key] = prop.value
+
+        motion_cfg = (
+            metadata.get("experiment_config", {})
+            .get("command", {})
+            .get("setup_terms", {})
+            .get("motion_command", {})
+            .get("params", {})
+            .get("motion_config", {})
+        )
+        if not isinstance(motion_cfg, dict):
+            return False
+        return bool(
+            (
+                motion_cfg.get("enable_default_pose_prepend")
+                and float(motion_cfg.get("default_pose_prepend_duration_s", 0.0) or 0.0) > 0.0
+            )
+            or (
+                motion_cfg.get("enable_default_pose_append")
+                and float(motion_cfg.get("default_pose_append_duration_s", 0.0) or 0.0) > 0.0
+            )
+        )
+    except Exception as exc:
+        logger.debug("Unable to infer default-pose rollout start from model metadata: {}", exc)
+        return False
 
 
 def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
@@ -507,6 +638,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
 
     port = resolve_viser_port(cfg.port)
     server = viser.ViserServer(port=port)
+    rollout_tty_input = bool(cfg.rollout_tty_input or _truthy_env(os.environ.get("HOLOSOMA_ROLLOUT_TTY_INPUT")))
     robot_root = server.scene.add_frame("/robot", show_axes=False)
     ref_root = server.scene.add_frame("/robot_ref", show_axes=bool(cfg.show_ref_body))
     object_root = server.scene.add_frame("/object", show_axes=False)
@@ -530,16 +662,22 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     if hasattr(vr, "show_collision"):
         vr.show_collision = bool(cfg.show_robot_collision)
 
-    motion_overlay = _load_motion_overlay(_resolve_repo_path(cfg.motion_file), robot_config, viser_joint_names)
+    initial_motion_path = _resolve_repo_path_preserve_symlink(cfg.motion_file)
+    motion_choices, motion_choice_map, initial_motion_choice, motion_choices_dir = _list_motion_choices(initial_motion_path)
+    motion_overlay: MotionOverlay | None = None
     motion_root = server.scene.add_frame("/motion_ref", show_axes=False)
     motion_robot_root = server.scene.add_frame("/motion_ref/robot", show_axes=False)
     motion_object_root = server.scene.add_frame("/motion_ref/object", show_axes=False)
     motion_root.visible = False
     motion_robot_root.visible = False
     motion_object_root.visible = False
-    motion_vr = None
+    motion_vr: ViserUrdf | None = None
     motion_object_mesh_handle = None
-    if motion_overlay is not None:
+
+    def _ensure_motion_urdf() -> ViserUrdf:
+        nonlocal motion_vr
+        if motion_vr is not None:
+            return motion_vr
         motion_urdf_kwargs = {
             "urdf_or_path": robot_urdf_path,
             "root_node_name": "/motion_ref/robot",
@@ -549,12 +687,33 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         if "collision_mesh_color_override" in viser_urdf_signature.parameters:
             motion_urdf_kwargs["collision_mesh_color_override"] = (1.0, 0.62, 0.05, 0.33)
         motion_vr = ViserUrdf(server, **motion_urdf_kwargs)
-        motion_vr.update_cfg(motion_overlay.joint_pos_viser[0])
         if hasattr(motion_vr, "show_visual"):
             motion_vr.show_visual = False
         if hasattr(motion_vr, "show_collision"):
             motion_vr.show_collision = True
+        return motion_vr
 
+    def _clear_motion_object_mesh() -> None:
+        nonlocal motion_object_mesh_handle
+        if motion_object_mesh_handle is not None:
+            try:
+                motion_object_mesh_handle.remove()
+            except Exception:
+                pass
+            motion_object_mesh_handle = None
+
+    def _set_motion_overlay_path(motion_path: Path) -> bool:
+        nonlocal motion_overlay, motion_object_mesh_handle
+        motion_overlay = _load_motion_overlay(motion_path, robot_config, viser_joint_names)
+        _clear_motion_object_mesh()
+        if motion_overlay is None:
+            motion_root.visible = False
+            motion_robot_root.visible = False
+            motion_object_root.visible = False
+            return False
+
+        overlay_vr = _ensure_motion_urdf()
+        overlay_vr.update_cfg(motion_overlay.joint_pos_viser[0])
         if motion_overlay.object_mesh is not None:
             motion_object_mesh_handle = server.scene.add_mesh_simple(
                 "/motion_ref/object/mesh",
@@ -565,6 +724,9 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
                 side="double",
                 visible=False,
             )
+        return True
+
+    _set_motion_overlay_path(initial_motion_path)
 
     object_visual_handles: list[object] = []
     object_collision_handles: list[object] = []
@@ -699,17 +861,39 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             "Show motion overlay",
             initial_value=bool(cfg.show_motion_overlay and motion_overlay is not None),
         )
-        show_motion_robot_cb = server.gui.add_checkbox("Motion robot", initial_value=True)
-        show_motion_object_cb = server.gui.add_checkbox("Motion object", initial_value=True)
+        show_motion_robot_cb = server.gui.add_checkbox("Motion robot", initial_value=False)
+        show_motion_object_cb = server.gui.add_checkbox("Motion object", initial_value=False)
         motion_md = server.gui.add_markdown("Motion overlay unavailable" if motion_overlay is None else "Waiting for sim-state...")
 
     with server.gui.add_folder("Rollout"):
         rollout_md = server.gui.add_markdown("Viewer only")
+        motion_clip_dropdown = server.gui.add_dropdown(
+            "Motion clip",
+            options=motion_choices,
+            initial_value=initial_motion_choice,
+        )
+        motion_path_text = server.gui.add_text("Motion path", initial_value=str(initial_motion_path))
+        auto_default_pose_start = _infer_default_pose_start(cfg)
+        initial_manual_motion_init = bool(cfg.manual_motion_init_mode or cfg.reset_to_default_pose)
+        manual_motion_init_mode_cb = server.gui.add_checkbox(
+            "Manual init mode",
+            initial_value=initial_manual_motion_init,
+        )
+        reset_to_default_pose_cb = server.gui.add_checkbox(
+            "Start from default pose",
+            initial_value=bool(cfg.reset_to_default_pose if initial_manual_motion_init else auto_default_pose_start),
+        )
+        reset_to_default_pose_cb.disabled = not initial_manual_motion_init
         manual_rollout_btn = server.gui.add_button("Manual policy rollout")
+        manual_rollout_btn.disabled = bool(cfg.launch_env_only)
         reset_rollout_btn = server.gui.add_button("Reset rollout")
 
+    auto_motion_init_env = os.environ.get("SIM_MOTION_INIT_MODE", "").strip().lower().replace("-", "_")
+    if auto_motion_init_env not in {"raw_motion", "training_default_pose"}:
+        auto_motion_init_env = ""
+
     with server.gui.add_folder("Manual Root Command"):
-        manual_root_enabled_cb = server.gui.add_checkbox("Enable", initial_value=bool(cfg.manual_root_enabled))
+        manual_root_enabled_cb = server.gui.add_checkbox("Manual mode", initial_value=bool(cfg.manual_root_enabled))
         manual_root_mode_dropdown = server.gui.add_dropdown(
             "Mode",
             options=("manual", "offset"),
@@ -741,8 +925,10 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     perception_sub.start()
     control_pub = SimControlPush(port=cfg.control_port)
     control_pub.start()
-    manual_root_pub = ManualRootCommandPub(port=cfg.sparse_root_command_port)
-    manual_root_pub.start()
+    manual_root_pub: ManualRootCommandPub | None = None
+    if bool(cfg.manual_root_publisher_enabled):
+        manual_root_pub = ManualRootCommandPub(port=cfg.sparse_root_command_port)
+        manual_root_pub.start()
     previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
 
     def _handle_sigterm(_signum, _frame) -> None:
@@ -757,6 +943,8 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     rollout_log_handle: TextIOWrapper | None = None
     rollout_restart_count = 0
     last_rollout_skip_policy: bool | None = None
+    last_rollout_motion_init_mode: str | None = None
+    last_rollout_motion_path: Path | None = None
     rollout_restart_lock = threading.Lock()
     pending_restart_reason = "startup" if cfg.launch_rollout else None
     last_rollout_reason = "idle"
@@ -767,6 +955,45 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     reset_pending_clock_rewind = False
     pre_reset_sim_time_ms: int | None = None
     last_seen_sim_time_ms: int | None = None
+
+    def _selected_motion_init() -> tuple[str, str | None]:
+        manual = bool(manual_motion_init_mode_cb.value)
+        if not manual and auto_motion_init_env:
+            default_pose = auto_motion_init_env == "training_default_pose"
+            return _motion_init_label(manual=False, default_pose=default_pose), auto_motion_init_env
+        default_pose = bool(reset_to_default_pose_cb.value) if manual else auto_default_pose_start
+        label = _motion_init_label(manual=manual, default_pose=default_pose)
+        mode = _motion_init_mode_from_default_pose(default_pose) if manual else None
+        return label, mode
+
+    def _selected_motion_path(*, validate: bool = True) -> Path | None:
+        dropdown_motion_path = motion_choice_map.get(str(motion_clip_dropdown.value))
+        if dropdown_motion_path is not None:
+            return dropdown_motion_path if (not validate or _motion_path_status(dropdown_motion_path) == "ok") else None
+        motion_path = _resolve_motion_path_input(
+            motion_path_text.value,
+            base_dir=motion_choices_dir,
+            choices=motion_choice_map,
+        )
+        if not validate:
+            return motion_path
+        return motion_path if _motion_path_status(motion_path) == "ok" else None
+
+    def _motion_choice_for_path(motion_path: Path | None) -> str | None:
+        if motion_path is None:
+            return None
+        for label, choice_path in motion_choice_map.items():
+            if choice_path == motion_path:
+                return label
+        return None
+
+    def _refresh_motion_init_controls(disabled: bool = False) -> None:
+        manual_motion_init_mode_cb.disabled = disabled
+        reset_to_default_pose_cb.disabled = bool(disabled or not manual_motion_init_mode_cb.value)
+
+    def _refresh_motion_selection_controls(disabled: bool = False) -> None:
+        motion_clip_dropdown.disabled = disabled
+        motion_path_text.disabled = disabled
 
     def _set_motion_overlay_visibility() -> None:
         overlay_visible = bool(show_motion_overlay_cb.value and motion_overlay is not None)
@@ -790,6 +1017,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     def _update_motion_overlay(sim_time_ms: int, root_state: np.ndarray, object_state: np.ndarray | None) -> None:
         if motion_overlay is None:
             _set_motion_overlay_visibility()
+            motion_md.content = "Motion overlay unavailable"
             return
 
         frame_idx = _motion_frame_index(sim_time_ms)
@@ -844,13 +1072,25 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             policy_state = "skipped"
         else:
             policy_state = "enabled"
+        selected_motion_init_mode, _selected_motion_init_env = _selected_motion_init()
+        active_motion_init_mode = last_rollout_motion_init_mode or "n/a"
+        selected_motion_path = _selected_motion_path(validate=False)
+        selected_motion_status = _motion_path_status(selected_motion_path)
+        active_motion = _motion_path_display(last_rollout_motion_path)
         rollout_md.content = (
             f"status: `{proc_state}`\n\n"
             f"pid: `{pid}`\n\n"
             f"restart_count: `{rollout_restart_count}`\n\n"
             f"last_reason: `{last_rollout_reason}`\n\n"
+            f"launch_env_only: `{bool(cfg.launch_env_only)}`\n\n"
             f"policy: `{policy_state}`\n\n"
-            f"reset_mode: `sim-control`\n\n"
+            f"selected_motion: `{_motion_path_display(selected_motion_path)}` ({selected_motion_status})\n\n"
+            f"active_motion: `{active_motion}`\n\n"
+            f"selected_init: `{selected_motion_init_mode}`\n\n"
+            f"active_init: `{active_motion_init_mode}`\n\n"
+            f"tty_input: `{rollout_tty_input}`\n\n"
+            f"keyboard_root: `{bool(cfg.keyboard_root_command)}` value=`{float(cfg.keyboard_root_command_value):.3f}`\n\n"
+            f"reset_mode: `button-only sim-control`\n\n"
             f"log_path: `{rollout_log_path}`"
         )
 
@@ -928,12 +1168,15 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         ]
         enabled = bool(manual_root_enabled_cb.value)
         mode = str(manual_root_mode_dropdown.value)
-        manual_root_pub.publish(enabled=enabled, mode=mode, command=command)
-        status = "enabled" if enabled else "disabled"
+        if manual_root_pub is not None:
+            manual_root_pub.publish(enabled=enabled, mode=mode, command=command)
+        status = "manual" if enabled else "motion"
+        publisher_status = "enabled" if manual_root_pub is not None and manual_root_pub.enabled else "disabled"
         manual_root_md.content = (
             f"status: `{status}`\n\n"
             f"mode: `{mode}`\n\n"
             f"command: `[{command[0]:.3f}, {command[1]:.3f}, {command[2]:.3f}]`\n\n"
+            f"publisher: `{publisher_status}`\n\n"
             f"port: `{cfg.sparse_root_command_port}`"
         )
 
@@ -941,25 +1184,61 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         nonlocal rollout_proc, rollout_log_handle
         if rollout_proc is not None:
             logger.info("Stopping rollout pid={}", rollout_proc.pid)
-            _terminate_process_group(rollout_proc)
+            _terminate_rollout_process(rollout_proc, process_group=not rollout_tty_input)
             rollout_proc = None
         if rollout_log_handle is not None:
             rollout_log_handle.close()
             rollout_log_handle = None
 
     def _restart_rollout(reason: str, *, skip_policy: bool | None = None) -> None:
-        nonlocal rollout_proc, rollout_log_handle, rollout_restart_count, last_rollout_skip_policy, offset_initialized, received_first_state, pending_restart_reason, last_rollout_reason, auto_reset_scheduled_at, auto_reset_done, reset_request_time_monotonic, reset_pending_clock_rewind, pre_reset_sim_time_ms, last_seen_sim_time_ms
+        nonlocal rollout_proc, rollout_log_handle, rollout_restart_count, last_rollout_skip_policy, last_rollout_motion_init_mode, last_rollout_motion_path, offset_initialized, received_first_state, pending_restart_reason, last_rollout_reason, auto_reset_scheduled_at, auto_reset_done, reset_request_time_monotonic, reset_pending_clock_rewind, pre_reset_sim_time_ms, last_seen_sim_time_ms
+        if bool(cfg.launch_env_only):
+            skip_policy = True
+        selected_motion_path = _selected_motion_path(validate=True)
+        if selected_motion_path is None:
+            raw_motion_value = str(motion_path_text.value).strip() or "empty"
+            rollout_md.content = f"Invalid motion path `{raw_motion_value}`; rollout was not restarted."
+            logger.warning("Rollout restart requested with invalid motion path: {}", raw_motion_value)
+            return
+
         if not rollout_restart_lock.acquire(blocking=False):
             logger.info("Ignoring rollout restart while another restart is in progress ({})", reason)
             return
         try:
             manual_rollout_btn.disabled = True
             reset_rollout_btn.disabled = True
+            _refresh_motion_init_controls(disabled=True)
+            _refresh_motion_selection_controls(disabled=True)
             _stop_rollout()
             _clear_object_geom_handles()
-            command = _build_rollout_command(cfg)
+            _set_motion_overlay_path(selected_motion_path)
+            if motion_overlay is None:
+                motion_md.content = f"Motion overlay unavailable: `{selected_motion_path.name}`"
+            else:
+                motion_md.content = f"motion: `{selected_motion_path.name}`\n\nWaiting for sim-state..."
+            _set_motion_overlay_visibility()
+            command = _build_rollout_command(cfg, selected_motion_path)
             env = os.environ.copy()
+            motion_init_label, motion_init_env = _selected_motion_init()
             env["HOLOSOMA_MJ_TRACK_INTERNAL_CORE"] = "1"
+            env["HOLOSOMA_DISABLE_AUTO_RESET"] = "1"
+            env["HOLOSOMA_DISABLE_MOTION_END_RESET"] = "1"
+            env["HOLOSOMA_DISABLE_CLIP_END_RESET"] = "1"
+            env["HOLOSOMA_DISABLE_BAD_TRACKING_RESET"] = "1"
+            env.pop("SIM_MOTION_INIT_MODE", None)
+            env.pop("HOLOSOMA_RESET_TO_DEFAULT_POSE", None)
+            env.pop("HOLOSOMA_DEFAULT_POSE_INIT", None)
+            env.pop("HOLOSOMA_MOTION_INIT_MANUAL", None)
+            # The wrapper exports the initial clip object. Let mj_track.sh derive it again for the selected motion.
+            env.pop("OBJECT_URDF", None)
+            env.pop("SIM2SIM_CLIP_OBJECT_URDF_PATH", None)
+            if motion_init_env is not None:
+                if bool(manual_motion_init_mode_cb.value):
+                    env["HOLOSOMA_MOTION_INIT_MANUAL"] = "1"
+                env["SIM_MOTION_INIT_MODE"] = motion_init_env
+                default_pose_enabled = "1" if motion_init_env == "training_default_pose" else "0"
+                env["HOLOSOMA_RESET_TO_DEFAULT_POSE"] = default_pose_enabled
+                env["HOLOSOMA_DEFAULT_POSE_INIT"] = default_pose_enabled
             if cfg.launch_run_seconds > 0:
                 env["RUN_SECONDS"] = str(cfg.launch_run_seconds)
                 env.pop("HOLOSOMA_MJ_TRACK_RUN_FOREVER", None)
@@ -972,6 +1251,18 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             env["SIM_CONTROL_PORT"] = str(cfg.control_port)
             env["SPARSE_ROOT_COMMAND_PORT"] = str(cfg.sparse_root_command_port)
             env["ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND"] = "1"
+            if rollout_tty_input:
+                env["HOLOSOMA_POLICY_TTY_INPUT"] = "1"
+            else:
+                env.pop("HOLOSOMA_POLICY_TTY_INPUT", None)
+            if cfg.keyboard_root_command:
+                env["HOLOSOMA_KEYBOARD_ROOT_COMMAND"] = "1"
+                env["HOLOSOMA_KEYBOARD_ROOT_COMMAND_VALUE"] = str(float(cfg.keyboard_root_command_value))
+                env["HOLOSOMA_KEYBOARD_ROOT_COMMAND_MODE"] = str(cfg.keyboard_root_command_mode)
+            else:
+                env.pop("HOLOSOMA_KEYBOARD_ROOT_COMMAND", None)
+                env.pop("HOLOSOMA_KEYBOARD_ROOT_COMMAND_VALUE", None)
+                env.pop("HOLOSOMA_KEYBOARD_ROOT_COMMAND_MODE", None)
             env["HOLOSOMA_MUJOCO_OBJECT_GEOM_SNAPSHOT_PATH"] = str(snapshot_path_default)
             if skip_policy is not None:
                 env["SKIP_POLICY"] = "1" if skip_policy else "0"
@@ -986,11 +1277,13 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
                 command,
                 cwd=str(REPO_ROOT),
                 env=env,
-                preexec_fn=os.setsid,
+                preexec_fn=None if rollout_tty_input else os.setsid,
                 stdout=rollout_log_handle,
                 stderr=subprocess.STDOUT,
             )
             rollout_restart_count += 1
+            last_rollout_motion_init_mode = motion_init_label
+            last_rollout_motion_path = selected_motion_path
             last_rollout_reason = reason
             pending_restart_reason = None
             offset_xy[:] = 0.0
@@ -1005,11 +1298,19 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             last_seen_sim_time_ms = None
             state_md.content = "Waiting for simulator state after reset..."
             actor_md.content = ""
-            logger.info("Started rollout pid={} reason={}", rollout_proc.pid, reason)
+            logger.info(
+                "Started rollout pid={} reason={} motion={} motion_init={}",
+                rollout_proc.pid,
+                reason,
+                selected_motion_path,
+                motion_init_label,
+            )
             _refresh_rollout_md()
         finally:
-            manual_rollout_btn.disabled = False
+            manual_rollout_btn.disabled = bool(cfg.launch_env_only)
             reset_rollout_btn.disabled = False
+            _refresh_motion_init_controls()
+            _refresh_motion_selection_controls()
             rollout_restart_lock.release()
 
     def _request_sim_reset(reason: str) -> None:
@@ -1071,6 +1372,29 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     def _(_evt) -> None:
         _set_motion_overlay_visibility()
 
+    @motion_clip_dropdown.on_update
+    def _(_evt) -> None:
+        motion_path = motion_choice_map.get(str(motion_clip_dropdown.value))
+        if motion_path is not None and str(motion_path_text.value).strip() != str(motion_path):
+            motion_path_text.value = str(motion_path)
+        _refresh_rollout_md()
+
+    @motion_path_text.on_update
+    def _(_evt) -> None:
+        motion_path = _resolve_motion_path_input(
+            motion_path_text.value,
+            base_dir=motion_choices_dir,
+            choices=motion_choice_map,
+        )
+        motion_choice = _motion_choice_for_path(motion_path)
+        if motion_choice is not None and motion_clip_dropdown.value != motion_choice:
+            motion_clip_dropdown.value = motion_choice
+        elif motion_choice is None:
+            selected_motion_path = motion_choice_map.get(str(motion_clip_dropdown.value))
+            if selected_motion_path is not None and str(motion_path_text.value).strip() != str(selected_motion_path):
+                motion_path_text.value = str(selected_motion_path)
+        _refresh_rollout_md()
+
     @reset_offset_btn.on_click
     def _(_evt) -> None:
         nonlocal offset_initialized
@@ -1079,14 +1403,58 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
 
     @reset_rollout_btn.on_click
     def _(_evt) -> None:
+        selected_motion_init_mode, _selected_motion_init_env = _selected_motion_init()
+        selected_motion_path = _selected_motion_path(validate=True)
+        if selected_motion_path is None:
+            raw_motion_value = str(motion_path_text.value).strip() or "empty"
+            rollout_md.content = f"Invalid motion path `{raw_motion_value}`; reset was not sent."
+            logger.warning("Reset rollout requested with invalid motion path: {}", raw_motion_value)
+            return
+        running_rollout = rollout_proc is not None and rollout_proc.poll() is None
+        if cfg.launch_rollout and not running_rollout:
+            _restart_rollout("gui_reset_start")
+            return
+        motion_changed = last_rollout_motion_path is not None and selected_motion_path != last_rollout_motion_path
+        init_changed = (
+            last_rollout_motion_init_mode is not None
+            and selected_motion_init_mode != last_rollout_motion_init_mode
+        )
+        if (
+            running_rollout
+            and (motion_changed or init_changed)
+        ):
+            logger.info(
+                "Reset rollout requires restart because selected config changed: motion {} -> {}, init {} -> {}",
+                _motion_path_display(last_rollout_motion_path),
+                _motion_path_display(selected_motion_path),
+                last_rollout_motion_init_mode,
+                selected_motion_init_mode,
+            )
+            _restart_rollout(f"gui_reset_{selected_motion_path.stem}_{selected_motion_init_mode}")
+            return
         _request_sim_reset("gui_reset")
 
     @manual_rollout_btn.on_click
     def _(_evt) -> None:
+        if bool(cfg.launch_env_only):
+            rollout_md.content = "Environment-only launch is active; start policy with `mj_policy.sh`."
+            logger.info("Manual policy rollout ignored because launch_env_only is active")
+            return
         if rollout_proc is not None and rollout_proc.poll() is None and last_rollout_skip_policy is False:
             logger.info("Manual policy rollout requested, but policy rollout is already running pid={}", rollout_proc.pid)
             return
         _restart_rollout("manual_policy_rollout", skip_policy=False)
+
+    @manual_motion_init_mode_cb.on_update
+    def _(_evt) -> None:
+        if not bool(manual_motion_init_mode_cb.value):
+            reset_to_default_pose_cb.value = bool(auto_default_pose_start)
+        _refresh_motion_init_controls()
+        _refresh_rollout_md()
+
+    @reset_to_default_pose_cb.on_update
+    def _(_evt) -> None:
+        _refresh_rollout_md()
 
     @manual_root_enabled_cb.on_update
     def _(_evt) -> None:
@@ -1177,8 +1545,6 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
                     reset_pending_clock_rewind = False
                     pre_reset_sim_time_ms = None
                 received_first_state = True
-                if cfg.auto_reset_after_first_state_sec > 0.0 and not auto_reset_done:
-                    auto_reset_scheduled_at = time.monotonic() + float(cfg.auto_reset_after_first_state_sec)
 
             last_seen_sim_time_ms = sim_time_ms
 
@@ -1278,7 +1644,8 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         logger.info("Stopping viser MuJoCo sim-state viewer")
     finally:
         _stop_rollout()
-        manual_root_pub.close()
+        if manual_root_pub is not None:
+            manual_root_pub.close()
         control_pub.close()
         perception_sub.close()
         sub.close()

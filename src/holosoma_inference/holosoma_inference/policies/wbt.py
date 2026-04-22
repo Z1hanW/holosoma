@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,10 @@ from holosoma_inference.utils.math.quat import (
 )
 from holosoma_inference.utils.sim_control import ManualRootCommandSub
 from holosoma_inference.utils.sim_state import SimStateSub
+
+
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "0").lower() in ("1", "true", "yes", "on")
 
 
 class PinocchioRobot:
@@ -348,10 +353,40 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._sim_state_sub: SimStateSub | None = None
         self._manual_sparse_root_command_sub: ManualRootCommandSub | None = None
         self._manual_sparse_root_command_log_key: tuple[bool, str] | None = None
+        self._keyboard_sparse_root_command_enabled = _truthy_env("HOLOSOMA_KEYBOARD_ROOT_COMMAND")
+        self._keyboard_sparse_root_command_mode = os.environ.get("HOLOSOMA_KEYBOARD_ROOT_COMMAND_MODE", "manual").strip().lower()
+        try:
+            self._keyboard_sparse_root_command_value = float(
+                os.environ.get("HOLOSOMA_KEYBOARD_ROOT_COMMAND_VALUE", "0.5")
+            )
+        except ValueError:
+            self._keyboard_sparse_root_command_value = 0.5
+        self._keyboard_sparse_root_command_value = abs(float(self._keyboard_sparse_root_command_value))
+        try:
+            keyboard_yaw_value_env = os.environ.get("HOLOSOMA_KEYBOARD_ROOT_COMMAND_YAW_VALUE")
+            if keyboard_yaw_value_env is not None:
+                self._keyboard_sparse_root_command_yaw_value = float(keyboard_yaw_value_env)
+            else:
+                self._keyboard_sparse_root_command_yaw_value = float(
+                    np.deg2rad(float(os.environ.get("HOLOSOMA_KEYBOARD_ROOT_COMMAND_YAW_DEGREES", "17")))
+                )
+        except ValueError:
+            self._keyboard_sparse_root_command_yaw_value = float(np.deg2rad(17.0))
+        self._keyboard_sparse_root_command_yaw_value = abs(
+            float(self._keyboard_sparse_root_command_yaw_value)
+        )
+        self._keyboard_sparse_root_pressed_keys: set[str] = set()
+        self._keyboard_sparse_root_lock = threading.Lock()
+        self._keyboard_sparse_root_last_command: tuple[float, float, float] | None = None
         self._logged_root_reference_clip_start = False
         self._logged_sim_ref_from_sim_state = False
         self._auto_start_motion_clip_pending = False
         self._motion_end_reset_requested = False
+        self._disable_motion_end_sim_reset = (
+            _truthy_env("HOLOSOMA_DISABLE_AUTO_RESET")
+            or _truthy_env("HOLOSOMA_DISABLE_MOTION_END_RESET")
+            or _truthy_env("HOLOSOMA_DISABLE_CLIP_END_RESET")
+        )
 
         obs_terms = {term for terms in config.observation.obs_dict.values() for term in terms}
         self._uses_videomimic = any(
@@ -402,6 +437,15 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._policy_debug_initialized = False
 
         super().__init__(config)
+
+        if self._keyboard_sparse_root_command_enabled:
+            logger.info(
+                "Keyboard sparse root command enabled: w/s=x, a/d=y, q/e=yaw, xy_value={:.3f}, yaw={:.3f} rad ({:.1f} deg), mode={}",
+                self._keyboard_sparse_root_command_value,
+                self._keyboard_sparse_root_command_yaw_value,
+                float(np.rad2deg(self._keyboard_sparse_root_command_yaw_value)),
+                self._keyboard_sparse_root_command_mode,
+            )
 
         if self.config.task.use_sim_state:
             self._sim_state_sub = SimStateSub(port=self.config.task.sim_state_port)
@@ -1124,7 +1168,57 @@ class WholeBodyTrackingPolicy(BasePolicy):
         motion_ref_ori_b = matrix_from_quat(subtract_frame_transforms(robot_ref_ori, motion_ref_ori))
         return motion_ref_ori_b[..., :2].reshape(1, -1)
 
+    def _get_keyboard_sparse_root_command(self) -> tuple[str, np.ndarray] | None:
+        if not self._keyboard_sparse_root_command_enabled:
+            return None
+
+        value = self._keyboard_sparse_root_command_value
+        yaw_value = self._keyboard_sparse_root_command_yaw_value
+        with self._keyboard_sparse_root_lock:
+            pressed = set(self._keyboard_sparse_root_pressed_keys)
+
+        x = (float("w" in pressed) - float("s" in pressed)) * value
+        y = (float("a" in pressed) - float("d" in pressed)) * value
+        yaw = (float("q" in pressed) - float("e" in pressed)) * yaw_value
+        command_tuple = (float(x), float(y), float(yaw))
+        if command_tuple != self._keyboard_sparse_root_last_command:
+            logger.info(
+                "Keyboard sparse root command: x={:.3f} y={:.3f} yaw={:.3f}",
+                command_tuple[0],
+                command_tuple[1],
+                command_tuple[2],
+            )
+            self._keyboard_sparse_root_last_command = command_tuple
+
+        return self._keyboard_sparse_root_command_mode, np.asarray([command_tuple], dtype=np.float32)
+
+    def _apply_sparse_root_command(
+        self,
+        motion_command: np.ndarray,
+        manual_command: np.ndarray,
+        mode: str,
+    ) -> np.ndarray:
+        if mode in {"offset", "add", "motion_plus_manual", "motion+manual"}:
+            command = np.array(motion_command, dtype=np.float32, copy=True)
+            command[:, :2] += manual_command[:, :2]
+            command[:, 2] = np.asarray(
+                [self._normalize_angle(float(value)) for value in command[:, 2] + manual_command[:, 2]],
+                dtype=np.float32,
+            )
+            return command
+
+        manual_command[:, 2] = np.asarray(
+            [self._normalize_angle(float(value)) for value in manual_command[:, 2]],
+            dtype=np.float32,
+        )
+        return manual_command
+
     def _apply_external_sparse_root_command(self, motion_command: np.ndarray) -> np.ndarray:
+        keyboard_command = self._get_keyboard_sparse_root_command()
+        if keyboard_command is not None:
+            mode, manual_command = keyboard_command
+            return self._apply_sparse_root_command(motion_command, manual_command, mode)
+
         sub = self._manual_sparse_root_command_sub
         if sub is None:
             return motion_command
@@ -1152,21 +1246,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             np.float32,
             copy=False,
         )
-
-        if mode in {"offset", "add", "motion_plus_manual", "motion+manual"}:
-            command = np.array(motion_command, dtype=np.float32, copy=True)
-            command[:, :2] += manual_command[:, :2]
-            command[:, 2] = np.asarray(
-                [self._normalize_angle(float(value)) for value in command[:, 2] + manual_command[:, 2]],
-                dtype=np.float32,
-            )
-            return command
-
-        manual_command[:, 2] = np.asarray(
-            [self._normalize_angle(float(value)) for value in manual_command[:, 2]],
-            dtype=np.float32,
-        )
-        return manual_command
+        return self._apply_sparse_root_command(motion_command, manual_command, mode)
 
     def _get_sparse_target_root_trajectory_command(self, robot_state_data: np.ndarray) -> np.ndarray:
         if self._motion_data is None:
@@ -1556,6 +1636,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if int(self.motion_timestep) < self._motion_data.frame_count - 1:
             return
 
+        if self._disable_motion_end_sim_reset:
+            self.motion_timestep = min(int(self.motion_timestep), max(self._motion_data.frame_count - 1, 0))
+            self._motion_end_reset_requested = True
+            self.logger.info("Motion clip reached the end; automatic simulator reset is disabled.")
+            return
+
         self._motion_end_reset_requested = True
         sim_control_pub = getattr(self.interface, "_sim_control_pub", None)
         if sim_control_pub is not None and hasattr(sim_control_pub, "request_reset"):
@@ -1654,6 +1740,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return
         previous_motion_timestep = self.motion_timestep
         self.motion_timestep = int(elapsed_ms // self.timestep_interval_ms)
+        if self._disable_motion_end_sim_reset and self._motion_data is not None:
+            self.motion_timestep = min(self.motion_timestep, max(self._motion_data.frame_count - 1, 0))
         if self.motion_timestep != previous_motion_timestep and self.motion_timestep % 50 == 0:
             self.logger.info(
                 "Motion timestep advanced from {previous_motion_timestep} to {motion_timestep}",
@@ -1703,11 +1791,24 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
     def handle_keyboard_button(self, keycode):
         """Add new keyboard button to start and end the motion clips"""
+        key = str(keycode).lower()
+        if self._keyboard_sparse_root_command_enabled and key in {"w", "s", "a", "d", "q", "e"}:
+            with self._keyboard_sparse_root_lock:
+                self._keyboard_sparse_root_pressed_keys.add(key)
+            return
         if keycode == "s":
             self.clock_sub.reset_origin()
             self._handle_start_motion_clip()
         else:
             super().handle_keyboard_button(keycode)
+
+    def handle_keyboard_release(self, keycode):
+        key = str(keycode).lower()
+        if self._keyboard_sparse_root_command_enabled and key in {"w", "s", "a", "d", "q", "e"}:
+            with self._keyboard_sparse_root_lock:
+                self._keyboard_sparse_root_pressed_keys.discard(key)
+            return
+        super().handle_keyboard_release(keycode)
 
     def handle_joystick_button(self, cur_key):
         """Handle joystick button presses for WBT-specific controls."""

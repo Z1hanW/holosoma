@@ -6288,7 +6288,7 @@ class ViserLiveViewer:
         output_mode = str(getattr(cfg, "output_mode", ""))
         env_ids = torch.tensor([self._env_id], device=self._env.device, dtype=torch.long)
         depth_map = None
-        near = float(getattr(cfg, "camera_near", 0.0))
+        near = float(getattr(cfg, "camera_near", 0.3) or 0.3)
         max_distance = float(getattr(cfg, "max_distance", 10.0))
         camera_far = float(getattr(cfg, "camera_far", max_distance))
         far = float(min(max_distance, camera_far))

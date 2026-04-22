@@ -770,6 +770,18 @@ class BaseTask:
         self.reset_buf |= reset_flags.to(dtype=self.reset_buf.dtype)
         self.time_out_buf |= timeout_flags
         self.reset_buf |= self.time_out_buf
+        self._log_termination_masks(reset_flags, timeout_flags)
+
+    def _log_termination_masks(self, reset_flags, timeout_flags) -> None:
+        if self.termination_manager is None:
+            return
+        self.log_dict["termination/reset_frac"] = reset_flags.float().mean().detach().cpu()
+        self.log_dict["termination/timeout_frac"] = timeout_flags.float().mean().detach().cpu()
+        for term_name in getattr(self.termination_manager, "_term_names", []):
+            term_result = self.termination_manager.get_last_term_result(term_name)
+            if term_result is None:
+                continue
+            self.log_dict[f"termination/{term_name}_frac"] = term_result.float().mean().detach().cpu()
 
     def _pre_compute_observations_callback(self):
         """Hook invoked after physics but before observation terms compute (no-op by default)."""
