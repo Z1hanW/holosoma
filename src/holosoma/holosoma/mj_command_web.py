@@ -137,6 +137,11 @@ INDEX_HTML = """<!doctype html>
       font-size: 14px;
       overflow-wrap: anywhere;
     }
+    .toolbar-inline {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
     .layout {
       display: grid;
       grid-template-columns: minmax(0, 360px) minmax(260px, 1fr);
@@ -178,6 +183,9 @@ INDEX_HTML = """<!doctype html>
       .layout, .controls {
         grid-template-columns: 1fr;
       }
+      .toolbar-inline {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
     }
   </style>
 </head>
@@ -195,14 +203,21 @@ INDEX_HTML = """<!doctype html>
     </div>
     <div class="status">
       <div id="state">command: [0.000, 0.000, 0.000]</div>
+      <div id="policyStatus">policy: waiting for ]</div>
       <div id="ports"></div>
+      <div class="toolbar-inline">
+        <button id="policyStart" type="button">Policy ]</button>
+        <button id="policySpace" type="button">Policy Space</button>
+        <button id="policyStop" type="button">Stop</button>
+        <button id="policyInit" type="button">Init Pose</button>
+      </div>
       <div id="sceneLink" class="links"></div>
       <div id="message">Using motion command.</div>
     </div>
   </section>
   <section class="panel controls">
     <label>Manual mode
-      <input id="enabled" type="checkbox" checked />
+      <input id="enabled" type="checkbox" />
     </label>
     <label>XY value
       <input id="value" type="number" value="__VALUE_ATTR__" min="0" max="3" step="0.05" />
@@ -218,9 +233,6 @@ INDEX_HTML = """<!doctype html>
     </label>
     <button id="zero" type="button">Zero</button>
     <button id="reset" type="button">Reset Sim</button>
-    <button id="policyStart" type="button">Start Policy</button>
-    <button id="policyStop" type="button">Stop Policy</button>
-    <button id="policyInit" type="button">Init Pose</button>
   </section>
 </main>
 <script>
@@ -231,6 +243,7 @@ const value = document.getElementById("value");
 const yawDegrees = document.getElementById("yawDegrees");
 const mode = document.getElementById("mode");
 const state = document.getElementById("state");
+const policyStatus = document.getElementById("policyStatus");
 const ports = document.getElementById("ports");
 const message = document.getElementById("message");
 const sceneUrl = __SCENE_URL_JSON__;
@@ -307,6 +320,7 @@ async function sendCommand() {
 }
 
 async function sendPolicy(action) {
+  const label = policyActionLabel(action);
   try {
     const response = await fetch("/policy", {
       method: "POST",
@@ -316,33 +330,39 @@ async function sendPolicy(action) {
     const payload = await response.json();
     if (payload) updatePorts(payload);
     if (!response.ok) {
+      policyStatus.textContent = `policy: ${label} failed`;
       message.textContent = payload.error || `policy ${action} failed`;
     } else if (payload.sent) {
-      message.textContent = `Policy ${action} requested.`;
+      policyStatus.textContent = `policy: ${label} requested`;
+      message.textContent = `Policy ${label} requested.`;
     } else {
-      message.textContent = `Policy ${action} was not delivered.`;
+      policyStatus.textContent = `policy: ${label} not delivered`;
+      message.textContent = `Policy ${label} was not delivered.`;
     }
   } catch (err) {
+    policyStatus.textContent = `policy: ${label} failed`;
     message.textContent = `policy control failed: ${err}`;
   }
+}
+
+function policyActionLabel(action) {
+  if (action === "rollout_start") return "Space + ]";
+  if (action === "space") return "Space";
+  if (action === "start") return "]";
+  return action;
 }
 
 function handleKeyDown(event) {
   if (isEditableTarget(event)) return;
   const key = event.key.toLowerCase();
-  if (!event.repeat && key === "]") {
+  if (!event.repeat && (key === "]" || event.code === "BracketRight")) {
     event.preventDefault();
     sendPolicy("start");
     return;
   }
-  if (!event.repeat && key === "o") {
+  if (!event.repeat && (key === " " || key === "spacebar" || event.code === "Space")) {
     event.preventDefault();
-    sendPolicy("stop");
-    return;
-  }
-  if (!event.repeat && key === "i") {
-    event.preventDefault();
-    sendPolicy("init");
+    sendPolicy("space");
     return;
   }
   if (!controlKeys.has(key) || event.repeat) return;
@@ -401,6 +421,7 @@ document.getElementById("reset").addEventListener("click", async () => {
   });
 });
 document.getElementById("policyStart").addEventListener("click", () => sendPolicy("start"));
+document.getElementById("policySpace").addEventListener("click", () => sendPolicy("space"));
 document.getElementById("policyStop").addEventListener("click", () => sendPolicy("stop"));
 document.getElementById("policyInit").addEventListener("click", () => sendPolicy("init"));
 
@@ -434,9 +455,7 @@ class CommandState:
         self.lock = threading.Lock()
         self.pub = ManualRootCommandPub(port=self.sparse_root_command_port)
         self.control_pub = SimControlPush(port=self.control_port)
-        self.policy_pub = (
-            PolicyControlPush(port=self.policy_control_port) if self.policy_control_port > 0 else None
-        )
+        self.policy_pub = PolicyControlPush(port=self.policy_control_port) if self.policy_control_port > 0 else None
 
     def start(self) -> None:
         self.pub.start()
@@ -514,6 +533,14 @@ class CommandState:
         if self.policy_pub is None:
             return False
         return self.policy_pub.publish(action, source="web_command")
+
+    def request_policy_sequence(self, actions: list[str], delay_s: float = 0.05) -> bool:
+        sent_all = True
+        for idx, action in enumerate(actions):
+            sent_all = self.request_policy(action) and sent_all
+            if idx + 1 < len(actions):
+                time.sleep(max(float(delay_s), 0.0))
+        return sent_all
 
     def snapshot(self, command: list[float] | None = None) -> dict[str, Any]:
         with self.lock:
@@ -680,18 +707,30 @@ async def _create_app(args: argparse.Namespace, command_state: CommandState, ind
         if not isinstance(payload, dict):
             payload = {}
         action = str(payload.get("action") or "").strip().lower()
-        if action not in {"start", "stop", "init"}:
+        if action in {"]", "right_bracket", "start"}:
+            canonical_action = "start"
+            sequence = ["start"]
+        elif action in {" ", "spacebar", "motion", "start_motion", "start_motion_clip"}:
+            canonical_action = "space"
+            sequence = ["space"]
+        elif action in {"rollout_start", "start_rollout", "space_start", "start_with_motion"}:
+            canonical_action = "rollout_start"
+            sequence = ["space", "start"]
+        elif action in {"stop", "init", "space"}:
+            canonical_action = action
+            sequence = [action]
+        else:
             response = command_state.snapshot()
             response.update({"ok": False, "error": f"unsupported policy action: {action}"})
             return web.json_response(response, status=400)
         try:
-            sent = command_state.request_policy(action)
+            sent = command_state.request_policy_sequence(sequence)
         except ValueError as exc:
             response = command_state.snapshot()
             response.update({"ok": False, "error": str(exc)})
             return web.json_response(response, status=400)
         response = command_state.snapshot()
-        response.update({"ok": bool(sent), "sent": bool(sent), "action": action})
+        response.update({"ok": bool(sent), "sent": bool(sent), "action": canonical_action, "sequence": sequence})
         return web.json_response(response)
 
     async def zero(_request: web.Request) -> web.Response:

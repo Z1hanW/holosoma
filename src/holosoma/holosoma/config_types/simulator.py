@@ -525,6 +525,12 @@ class BridgeConfig:
     perception_obs_port: int = 5558
     """ZMQ port used for split sim2sim perception observation publishing."""
 
+    publish_perception_obs_shm: bool = False
+    """Publish simulator perception observations through shared memory for depth-policy parity."""
+
+    perception_obs_shm_name: str = "depth_img_shm"
+    """Shared-memory name used for split sim2sim perception observation publishing."""
+
     ignore_default_idle_command: bool = False
     """Ignore backend-provided placeholder low commands when no real command has arrived yet.
 

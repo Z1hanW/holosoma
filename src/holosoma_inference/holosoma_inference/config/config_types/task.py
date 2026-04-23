@@ -84,6 +84,12 @@ class TaskConfig:
     perception_obs_port: int = 5558
     """ZMQ port used to receive split sim2sim perception observations."""
 
+    use_split_perception_obs_shm: bool = False
+    """Read split simulator perception observations from shared memory instead of ZMQ."""
+
+    perception_obs_shm_name: str = "depth_img_shm"
+    """Shared-memory name used to receive split sim2sim perception observations."""
+
     sim_control_port: int = 5559
     """ZMQ port used to send split sim2sim simulator control requests."""
 

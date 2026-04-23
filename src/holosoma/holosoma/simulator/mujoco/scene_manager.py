@@ -38,9 +38,8 @@ _CAMERA_TERRAIN_PROXY_SUFFIX = "_camera_proxy"
 _LOAD_ROBOT_VISUAL_MESHES_ENV = "HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES"
 _LOAD_OBJECT_VISUAL_MESHES_ENV = "HOLOSOMA_MUJOCO_LOAD_OBJECT_VISUAL_MESHES"
 _WEB_DEMO_OBJECT_CONTACTS_ENV = "HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS"
-_GT_GROUND_CONTACTS_ENV = "HOLOSOMA_MUJOCO_GT_GROUND_CONTACTS"
-_USE_GT_BOX_ENV_ENV = "HOLOSOMA_MUJOCO_USE_GT_BOX_ENV"
-_OBJECT_SCENE_XML_ENV = "HOLOSOMA_MUJOCO_OBJECT_SCENE_XML"
+_GT_MUJOCO_PHYSICS_ENV = "GT_MUJOCO_PHYSICS"
+_HOLOSOMA_GT_MUJOCO_PHYSICS_ENV = "HOLOSOMA_GT_MUJOCO_PHYSICS"
 
 
 class MujocoSceneManager:
@@ -152,6 +151,8 @@ class MujocoSceneManager:
         # Add global lighting orientation
         self.world_spec.visual.global_.azimuth = -130
         self.world_spec.visual.global_.elevation = -20
+        self.world_spec.visual.global_.offwidth = 1920
+        self.world_spec.visual.global_.offheight = 1080
 
         # Match our existing scene files
         self.world_spec.visual.rgba.haze = [0.15, 0.25, 0.35, 1.0]
@@ -212,18 +213,18 @@ class MujocoSceneManager:
             # Monkey-patch Mujoco geom into our terrain manager for convenience
             terrain_state.geom = geom  # type: ignore[attr-defined]
 
-            # Set environment collision properties so robot self_collision flag works
-            # Environment collision class
-            terrain_state.geom.contype = 2  # type: ignore[attr-defined]
-            # Only collide with robot (class 1)
-            terrain_state.geom.conaffinity = 1  # type: ignore[attr-defined]
+            if self._gt_mujoco_physics_enabled():
+                terrain_state.geom.contype = 1  # type: ignore[attr-defined]
+                terrain_state.geom.conaffinity = 15  # type: ignore[attr-defined]
+            else:
+                # Set environment collision properties so robot self_collision flag works
+                # Environment collision class
+                terrain_state.geom.contype = 2  # type: ignore[attr-defined]
+                # Only collide with robot (class 1)
+                terrain_state.geom.conaffinity = 1  # type: ignore[attr-defined]
 
     def _camera_render_proxy_enabled(self) -> bool:
         raw = os.environ.get(_CAMERA_TERRAIN_PROXY_ENV, "0").strip().lower()
-        return raw not in {"", "0", "false", "no", "off"}
-
-    def _gt_ground_contacts_enabled(self) -> bool:
-        raw = os.environ.get(_GT_GROUND_CONTACTS_ENV, "0").strip().lower()
         return raw not in {"", "0", "false", "no", "off"}
 
     def _create_ground_plane(self, terrain_state: TerrainTermBase) -> mujoco.MjSpec.Geom:
@@ -235,30 +236,30 @@ class MujocoSceneManager:
             Ground plane geometry with configured physics properties.
         """
         # Create ground plane with hardcoded parameters and physics properties
-        geom_kwargs: dict[str, Any] = {
-            "name": terrain_state.name,
-            "type": mujoco.mjtGeom.mjGEOM_PLANE,
+        if self._gt_mujoco_physics_enabled():
+            friction = [1.0, 0.005, 0.0001]
+            solimp = [0.9, 0.95, 0.001, 0.5, 2]
+            solref = [0.02, 1]
+            condim = 1
+        else:
+            friction = self._terrain_friction_triplet_from_state(terrain_state)
+            solimp = [0.99, 0.99, 0.01, 0.5, 2]
+            solref = [0.001, 1]
+            condim = 3
+        return self.world_spec.worldbody.add_geom(
+            name=terrain_state.name,
+            type=mujoco.mjtGeom.mjGEOM_PLANE,
             # Size=0 is rendered infinitely. Collision plane is always infinite.
             # Note: size.z is actually the rendered spacing betweeh the grid
             #       subdivisions (to improve lighting, shadows).
-            "size": [0, 0, 0.05],
-            "pos": [0, 0, 0],
-            "material": "grid",
-            "friction": self._terrain_friction_triplet_from_state(terrain_state),
-            "solimp": [0.99, 0.99, 0.01, 0.5, 2],  # [dmin, dmax, width, midpoint, power]
-            "solref": [0.001, 1],  # [timeconst, dampratio]
-        }
-        if self._gt_ground_contacts_enabled():
-            # Match the ground geom compiled from holosoma_gt's g1_29dof_w_largebox.xml.
-            geom_kwargs.update(
-                condim=1,
-                friction=[1.0, 0.005, 0.0001],
-                solimp=[0.9, 0.95, 0.001, 0.5, 2],
-                solref=[0.02, 1],
-            )
-            logger.info("Using holosoma_gt MuJoCo ground contact profile for plane terrain")
-
-        return self.world_spec.worldbody.add_geom(**geom_kwargs)
+            size=[0, 0, 0.05],
+            pos=[0, 0, 0],
+            material="grid",
+            condim=condim,
+            friction=friction,
+            solimp=solimp,  # 5 elements: [dmin, dmax, width, midpoint, power]
+            solref=solref,  # 2 elements: [timeconst, dampratio]
+        )
 
     def _maybe_add_camera_render_proxy_geom(self, terrain_state: TerrainTermBase) -> None:
         setattr(terrain_state, "camera_render_proxy_geom_name", None)
@@ -323,15 +324,23 @@ class MujocoSceneManager:
         mesh_spec.userface = faces.flatten(order="C")
         mesh_spec.smoothnormal = False
 
+        if self._gt_mujoco_physics_enabled():
+            friction = [1.0, 0.005, 0.0001]
+            solimp = [0.9, 0.95, 0.001, 0.5, 2]
+            solref = [0.02, 1]
+        else:
+            friction = self._terrain_friction_triplet_from_state(terrain_state)
+            solimp = [0.99, 0.99, 0.01, 0.5, 2]
+            solref = [0.001, 1]
         return self.world_spec.worldbody.add_geom(
             name=terrain_state.name,
             type=mujoco.mjtGeom.mjGEOM_MESH,
             meshname=mesh_spec.name,
             pos=[0.0, 0.0, 0.0],
             material="solid_gray",
-            friction=self._terrain_friction_triplet_from_state(terrain_state),
-            solimp=[0.99, 0.99, 0.01, 0.5, 2],
-            solref=[0.001, 1],
+            friction=friction,
+            solimp=solimp,
+            solref=solref,
         )
 
     def _create_hfield(self, terrain_state: TerrainTermBase) -> mujoco.MjSpec.Geom:
@@ -389,6 +398,15 @@ class MujocoSceneManager:
             " size=[{0.5 * total_length:.2f}, {0.5 * total_width:.2f}, {height_range:.3f}, {min_height_final:.3f}]"
         )
 
+        if self._gt_mujoco_physics_enabled():
+            friction = [1.0, 0.005, 0.0001]
+            solimp = [0.9, 0.95, 0.001, 0.5, 2]
+            solref = [0.02, 1]
+        else:
+            friction = self._terrain_friction_triplet_from_state(terrain_state)
+            solimp = [0.99, 0.99, 0.01, 0.5, 2]
+            solref = [0.001, 1]
+
         # Create heightfield geom, positioned to match terrain coordinate system
         return self.world_spec.worldbody.add_geom(
             name=terrain_state.name,
@@ -399,9 +417,9 @@ class MujocoSceneManager:
                 0.5 * total_width - border_size,
                 z_offset if z_offset < 0 else 0.0,
             ],
-            friction=self._terrain_friction_triplet_from_state(terrain_state),
-            solimp=[0.99, 0.99, 0.01, 0.5, 2],
-            solref=[0.001, 1],
+            friction=friction,
+            solimp=solimp,
+            solref=solref,
         )
 
     def _terrain_friction_triplet_from_state(self, terrain_state: TerrainTermBase) -> list[float]:
@@ -488,52 +506,50 @@ class MujocoSceneManager:
             # Remove worldbody lights and ground|floor|plane geoms because they're added dynamically
             robot_spec = self._filter_robot_worldbody(robot_spec, xml_filter)
 
-        if self._env_flag(_USE_GT_BOX_ENV_ENV):
-            logger.info("Using GT MuJoCo box environment verbatim; skipping composite scene post-processing")
-        else:
-            self._maybe_align_composite_body_inertials_with_training_urdf(
-                robot_spec,
-                robot_config,
-                using_composite_object_scene=using_composite_object_scene,
-            )
-            self._maybe_copy_joint_defaults_from_reference_robot_xml(
-                robot_spec,
-                robot_config,
-                using_composite_object_scene=using_composite_object_scene,
-            )
-            self._maybe_copy_collision_geoms_from_reference_robot_xml(
-                robot_spec,
-                robot_config,
-                using_composite_object_scene=using_composite_object_scene,
-            )
-            self._maybe_replace_composite_collision_geoms_with_reference_robot_xml(
-                robot_spec,
-                robot_config,
-                using_composite_object_scene=using_composite_object_scene,
-            )
-            self._maybe_align_composite_hand_collision_geoms_with_training_urdf(
-                robot_spec,
-                robot_config,
-                robot_xml_path=robot_xml_path,
-                using_composite_object_scene=using_composite_object_scene,
-            )
-            self._maybe_copy_tendons_from_reference_robot_xml(
-                robot_spec,
-                robot_config,
-                using_composite_object_scene=using_composite_object_scene,
-            )
-            self._maybe_copy_contact_pairs_from_reference_robot_xml(
-                robot_spec,
-                robot_config,
-                terrain_geom_name=str(getattr(terrain_state, "name", "floor")),
-                using_composite_object_scene=using_composite_object_scene,
-            )
-            self._maybe_override_composite_object_properties(
-                robot_spec,
-                robot_config,
-                terrain_geom_name=str(getattr(terrain_state, "name", "floor")),
-                using_composite_object_scene=using_composite_object_scene,
-            )
+        self._maybe_align_composite_body_inertials_with_training_urdf(
+            robot_spec,
+            robot_config,
+            using_composite_object_scene=using_composite_object_scene,
+        )
+        self._maybe_copy_joint_defaults_from_reference_robot_xml(
+            robot_spec,
+            robot_config,
+            using_composite_object_scene=using_composite_object_scene,
+        )
+        self._maybe_apply_gt_mujoco_joint_passive_dynamics(robot_spec, robot_config)
+        self._maybe_copy_collision_geoms_from_reference_robot_xml(
+            robot_spec,
+            robot_config,
+            using_composite_object_scene=using_composite_object_scene,
+        )
+        self._maybe_replace_composite_collision_geoms_with_reference_robot_xml(
+            robot_spec,
+            robot_config,
+            using_composite_object_scene=using_composite_object_scene,
+        )
+        self._maybe_align_composite_hand_collision_geoms_with_training_urdf(
+            robot_spec,
+            robot_config,
+            robot_xml_path=robot_xml_path,
+            using_composite_object_scene=using_composite_object_scene,
+        )
+        self._maybe_copy_tendons_from_reference_robot_xml(
+            robot_spec,
+            robot_config,
+            using_composite_object_scene=using_composite_object_scene,
+        )
+        self._maybe_copy_contact_pairs_from_reference_robot_xml(
+            robot_spec,
+            robot_config,
+            terrain_geom_name=str(getattr(terrain_state, "name", "floor")),
+            using_composite_object_scene=using_composite_object_scene,
+        )
+        self._maybe_override_composite_object_properties(
+            robot_spec,
+            robot_config,
+            terrain_geom_name=str(getattr(terrain_state, "name", "floor")),
+            using_composite_object_scene=using_composite_object_scene,
+        )
         self._maybe_add_default_actuators(robot_spec, robot_config)
 
         if object_spec_to_attach is not None:
@@ -595,6 +611,10 @@ class MujocoSceneManager:
         if raw is None:
             return default
         return raw.strip().lower() not in {"", "0", "false", "no", "off"}
+
+    @classmethod
+    def _gt_mujoco_physics_enabled(cls) -> bool:
+        return cls._env_flag(_GT_MUJOCO_PHYSICS_ENV) or cls._env_flag(_HOLOSOMA_GT_MUJOCO_PHYSICS_ENV)
 
     @classmethod
     def _load_urdf_spec(cls, urdf_path: Path, *, load_visual_meshes: bool = False) -> mujoco.MjSpec:
@@ -750,6 +770,36 @@ class MujocoSceneManager:
 
         logger.info("Injected {} default torque actuators into MuJoCo scene for '{}'", len(robot_spec.actuators), robot_config.asset.robot_type)
 
+    def _maybe_apply_gt_mujoco_joint_passive_dynamics(
+        self,
+        robot_spec: mujoco.MjSpec,
+        robot_config: RobotConfig,
+    ) -> None:
+        """Match the GT retargeting MuJoCo G1 scene's passive joint dynamics."""
+        if not self._gt_mujoco_physics_enabled():
+            return
+
+        dof_name_set = set(robot_config.dof_names)
+        updated_joint_count = 0
+        for joint in robot_spec.joints:
+            if not joint.name or joint.name not in dof_name_set:
+                continue
+            changed = False
+            for field_name in ("frictionloss", "damping", "armature"):
+                current_value = np.asarray(getattr(joint, field_name), dtype=np.float64)
+                if current_value.size == 0 or np.allclose(current_value, 0.0):
+                    continue
+                setattr(joint, field_name, 0.0)
+                changed = True
+            if changed:
+                updated_joint_count += 1
+
+        if updated_joint_count > 0:
+            logger.info(
+                "Applied GT MuJoCo passive joint dynamics to {} joint(s): frictionloss=0, damping=0, armature=0",
+                updated_joint_count,
+            )
+
     def _maybe_copy_joint_defaults_from_reference_robot_xml(
         self,
         robot_spec: mujoco.MjSpec,
@@ -763,6 +813,10 @@ class MujocoSceneManager:
         standalone robot XML. This creates a control/dynamics mismatch specific to MuJoCo sim2sim.
         Keep this behind a MuJoCo-only object config flag so Isaac Sim behavior is untouched.
         """
+
+        if self._gt_mujoco_physics_enabled():
+            logger.info("Skipping reference MuJoCo joint-default copy because GT_MUJOCO_PHYSICS is enabled")
+            return
 
         object_cfg = getattr(robot_config, "object", None)
         if object_cfg is None or not getattr(object_cfg, "mujoco_copy_joint_defaults_from_robot_xml", False):
@@ -843,6 +897,10 @@ class MujocoSceneManager:
         using_composite_object_scene: bool,
     ) -> None:
         """Copy standalone MuJoCo tendons into composite object scenes when explicitly requested."""
+
+        if self._gt_mujoco_physics_enabled():
+            logger.info("Skipping reference MuJoCo tendon copy because GT_MUJOCO_PHYSICS is enabled")
+            return
 
         object_cfg = getattr(robot_config, "object", None)
         if object_cfg is None or not getattr(object_cfg, "mujoco_copy_tendons_from_robot_xml", False):
@@ -956,6 +1014,10 @@ class MujocoSceneManager:
         replace the robot's active URDF collision geoms with the reference XML collision set,
         while preserving rubber-hand geoms that are intentionally added to the URDF.
         """
+
+        if self._gt_mujoco_physics_enabled():
+            logger.info("Skipping reference MuJoCo collision-geom copy because GT_MUJOCO_PHYSICS is enabled")
+            return
 
         object_cfg = getattr(robot_config, "object", None)
         if object_cfg is None or not getattr(object_cfg, "mujoco_copy_collision_geoms_from_robot_xml", False):
@@ -1089,6 +1151,10 @@ class MujocoSceneManager:
         active, MuJoCo gets much denser contacts than training, which destabilizes carry rollouts.
         """
 
+        if self._gt_mujoco_physics_enabled():
+            logger.info("Skipping composite collision replacement because GT_MUJOCO_PHYSICS is enabled")
+            return
+
         if not using_composite_object_scene:
             return
 
@@ -1189,6 +1255,10 @@ class MujocoSceneManager:
         materially different body masses/inertias on key carry links (torso, wrists, etc.), so copy
         the inertial parameters from the training URDF into the composite scene before compiling it.
         """
+
+        if self._gt_mujoco_physics_enabled():
+            logger.info("Skipping composite inertial alignment because GT_MUJOCO_PHYSICS is enabled")
+            return
 
         if not using_composite_object_scene:
             return
@@ -1351,6 +1421,10 @@ class MujocoSceneManager:
         composite XML instead, so reconcile the hand colliders here without changing body topology.
         """
 
+        if self._gt_mujoco_physics_enabled():
+            logger.info("Skipping composite hand-collision alignment because GT_MUJOCO_PHYSICS is enabled")
+            return
+
         if not using_composite_object_scene:
             return
 
@@ -1444,6 +1518,10 @@ class MujocoSceneManager:
     ) -> None:
         """Copy standalone MuJoCo contact pairs into composite object scenes when explicitly requested."""
 
+        if self._gt_mujoco_physics_enabled():
+            logger.info("Skipping reference MuJoCo contact-pair copy because GT_MUJOCO_PHYSICS is enabled")
+            return
+
         object_cfg = getattr(robot_config, "object", None)
         if object_cfg is None or not getattr(object_cfg, "mujoco_copy_contact_pairs_from_robot_xml", False):
             return
@@ -1508,9 +1586,10 @@ class MujocoSceneManager:
         )
 
     def _configure_object_collisions(self, object_spec: mujoco.MjSpec) -> None:
-        web_demo_contacts = self._env_flag(_WEB_DEMO_OBJECT_CONTACTS_ENV)
-        object_contype = 4
-        object_conaffinity = 11 if web_demo_contacts else 3
+        gt_mujoco_physics = self._gt_mujoco_physics_enabled()
+        web_demo_contacts = self._env_flag(_WEB_DEMO_OBJECT_CONTACTS_ENV) and not gt_mujoco_physics
+        object_contype = 1 if gt_mujoco_physics else 4
+        object_conaffinity = 1 if gt_mujoco_physics else (11 if web_demo_contacts else 3)
         collision_geom_index = 0
         visual_geom_index = 0
         updated_geoms = 0
@@ -1531,7 +1610,7 @@ class MujocoSceneManager:
                         visual_geoms += 1
                     continue
 
-                if web_demo_contacts or (geom_contype == 1 and geom_conaffinity == 1):
+                if web_demo_contacts or gt_mujoco_physics or (geom_contype == 1 and geom_conaffinity == 1):
                     geom.contype = object_contype
                     geom.conaffinity = object_conaffinity
                     if web_demo_contacts:
@@ -1544,10 +1623,11 @@ class MujocoSceneManager:
                         geom.solref = [0.01, 1.0]
                     updated_geoms += 1
         logger.info(
-            "Applied MuJoCo object collision settings to {} collision geom(s), {} visual geom(s); web_demo_contacts={}",
+            "Applied MuJoCo object collision settings to {} collision geom(s), {} visual geom(s); web_demo_contacts={}, gt_mujoco_physics={}",
             updated_geoms,
             visual_geoms,
             web_demo_contacts,
+            gt_mujoco_physics,
         )
 
     def _maybe_override_object_properties(
@@ -1570,6 +1650,16 @@ class MujocoSceneManager:
         rolling_friction = getattr(object_cfg, "mujoco_object_rolling_friction", None)
         contact_stiffness = getattr(object_cfg, "mujoco_object_contact_stiffness", None)
         contact_damping = getattr(object_cfg, "mujoco_object_contact_damping", None)
+        gt_mujoco_physics = self._gt_mujoco_physics_enabled()
+        if gt_mujoco_physics:
+            mass_scale = None
+            mass_override = 0.1
+            geom_friction = [0.9, 0.5, 0.5]
+            terrain_pair_friction = None
+            lateral_friction = None
+            rolling_friction = None
+            contact_stiffness = None
+            contact_damping = None
         if (
             mass_scale is None
             and mass_override is None
@@ -1657,12 +1747,16 @@ class MujocoSceneManager:
                     geom_friction_triplet = partial_friction_triplet
                 if geom_friction_triplet is not None:
                     geom.friction = geom_friction_triplet
-                    geom.condim = max(int(geom.condim), self._condim_from_friction_triplet(geom_friction_triplet))
+                    if not gt_mujoco_physics:
+                        geom.condim = max(int(geom.condim), self._condim_from_friction_triplet(geom_friction_triplet))
                     updated_geoms += 1
 
                 if contact_solref is not None:
                     geom.solref = contact_solref
                     updated_contact_geoms += 1
+
+                if gt_mujoco_physics:
+                    continue
 
                 pair_friction_triplet = terrain_pair_friction_override
                 if pair_friction_triplet is None and (geom_friction_triplet is not None or contact_solref is not None):
@@ -1739,6 +1833,9 @@ class MujocoSceneManager:
 
     def _maybe_add_web_demo_object_contact_pairs(self, robot_config: RobotConfig) -> None:
         """Match the web demo's rubber-hand/object contact overrides when requested."""
+        if self._gt_mujoco_physics_enabled():
+            logger.info("Skipping web-demo rubber-hand/object contact pairs because GT_MUJOCO_PHYSICS is enabled")
+            return
         if not self._env_flag(_WEB_DEMO_OBJECT_CONTACTS_ENV):
             return
 
@@ -2154,8 +2251,7 @@ class MujocoSceneManager:
         for candidate in object_candidates:
             for key, (xml_rel_path, object_body_name) in supported_specs.items():
                 if candidate == key or candidate.endswith(f"_{key}") or key in candidate:
-                    xml_override = os.environ.get(_OBJECT_SCENE_XML_ENV, "").strip()
-                    xml_path = Path(xml_override).expanduser().resolve() if xml_override else (cls._repo_root() / xml_rel_path).resolve()
+                    xml_path = (cls._repo_root() / xml_rel_path).resolve()
                     if not xml_path.is_file():
                         raise FileNotFoundError(f"Resolved MuJoCo composite scene not found: {xml_path}")
                     return (

@@ -20,19 +20,11 @@ Environment:
   PERCEPTION_OBS_PORT             default: 5658
   SIM_CONTROL_PORT                default: 5659
   SPARSE_ROOT_COMMAND_PORT        default: 5661
-  POLICY_CONTROL_PORT             default: 5662; command web start/stop/init channel
+  POLICY_CONTROL_PORT             default: 5662 for web ]/Space/Stop/Init policy control
+  MJ_POLICY_KILL_STALE            default: 1; terminate same-port policy leftovers before launch
   MJ_POLICY_TERMINAL_KEYS=1       use terminal W/S/A/D/Q/E instead of web command
   HOLOSOMA_KEYBOARD_ROOT_COMMAND_VALUE         default: 0.5 for W/S/A/D x/y
   HOLOSOMA_KEYBOARD_ROOT_COMMAND_YAW_DEGREES   default: 17 for Q/E yaw
-  HOLOSOMA_ZMQ_ACTIVE_BEFORE_POLICY_START=1    allow active lowcmd before pressing ] (default: inactive)
-  HOLOSOMA_POLICY_CONTROL_ALLOW_NONINTERACTIVE_AUTOSTART=1
-                                  keep old non-TTY auto-start behavior even with policy control enabled
-
-Interactive keys:
-  Enter                           acknowledge startup prompt
-  ]                               start policy actions
-  o                               stop policy actions
-  i                               move to init state
 EOF
 }
 
@@ -74,6 +66,53 @@ export HOLOSOMA_DISABLE_AUTO_RESET="${HOLOSOMA_DISABLE_AUTO_RESET:-1}"
 export HOLOSOMA_DISABLE_MOTION_END_RESET="${HOLOSOMA_DISABLE_MOTION_END_RESET:-1}"
 export HOLOSOMA_DISABLE_CLIP_END_RESET="${HOLOSOMA_DISABLE_CLIP_END_RESET:-1}"
 export HOLOSOMA_DISABLE_BAD_TRACKING_RESET="${HOLOSOMA_DISABLE_BAD_TRACKING_RESET:-1}"
+MJ_POLICY_KILL_STALE="${MJ_POLICY_KILL_STALE:-1}"
+
+same_port_policy_pids() {
+  ps -eww -o pid=,args= | awk \
+    -v self="$$" \
+    -v root="${ROOT_DIR}" \
+    -v state="${SIM_STATE_PORT}" \
+    -v control="${SIM_CONTROL_PORT}" '
+      $1 == self { next }
+      (index($0, "python") || index($0, "python3")) &&
+      index($0, root "/src/holosoma_inference/holosoma_inference/run_policy.py") &&
+      index($0, "--task.sim-state-port " state) &&
+      index($0, "--task.sim-control-port " control) {
+        print $1
+      }
+    ' | sort -n -u
+}
+
+terminate_pids() {
+  local pids="$1"
+  # shellcheck disable=SC2086
+  kill -TERM $pids 2>/dev/null || true
+  sleep 1
+  local pid
+  for pid in $pids; do
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+}
+
+format_pids() {
+  printf '%s\n' "$1" | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+}
+
+STALE_POLICY_PIDS="$(same_port_policy_pids || true)"
+if [[ -n "$STALE_POLICY_PIDS" ]]; then
+  STALE_POLICY_PIDS_ONE_LINE="$(format_pids "$STALE_POLICY_PIDS")"
+  if is_truthy "$MJ_POLICY_KILL_STALE"; then
+    echo "[WARN] terminating stale policy process(es) on state=${SIM_STATE_PORT} control=${SIM_CONTROL_PORT}: ${STALE_POLICY_PIDS_ONE_LINE}" >&2
+    terminate_pids "$STALE_POLICY_PIDS"
+  else
+    echo "[ERROR] stale policy process(es) already target state=${SIM_STATE_PORT} control=${SIM_CONTROL_PORT}: ${STALE_POLICY_PIDS_ONE_LINE}" >&2
+    echo "[ERROR] Stop them first, or set MJ_POLICY_KILL_STALE=1." >&2
+    exit 1
+  fi
+fi
 
 if is_truthy "${MJ_POLICY_TERMINAL_KEYS:-0}"; then
   export HOLOSOMA_POLICY_TTY_INPUT="${HOLOSOMA_POLICY_TTY_INPUT:-1}"
@@ -93,10 +132,7 @@ echo "[INFO] launching policy only"
 echo "[INFO] model=${MODEL_INPUT}"
 echo "[INFO] ports clock=${SIM_CLOCK_PORT} state=${SIM_STATE_PORT} perception=${PERCEPTION_OBS_PORT} control=${SIM_CONTROL_PORT} sparse_root=${SPARSE_ROOT_COMMAND_PORT} policy_control=${HOLOSOMA_POLICY_CONTROL_PORT}"
 echo "[INFO] web sparse-root command=${ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND}"
-echo "[INFO] web policy control=${HOLOSOMA_POLICY_CONTROL_PORT}"
-if [[ "${POLICY_STDIO}" == "inherit" ]]; then
-  echo "[INFO] interactive policy keys: press Enter at the prompt, then ] to start policy, o to stop"
-fi
+echo "[INFO] web policy controls: ] starts policy, Space starts motion clip, Stop, Init"
 
 if is_truthy "${DRY_RUN:-0}"; then
   echo "[INFO] DRY_RUN=1; not launching policy."

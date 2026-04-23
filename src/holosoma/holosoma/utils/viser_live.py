@@ -1595,7 +1595,7 @@ class ViserLiveViewer:
             perception_jpeg_quality = 90
         self._perception_jpeg_quality = perception_jpeg_quality
 
-        self._perception_flip_vertical = os.environ.get("VISER_PERCEPTION_FLIP_VERTICAL", "1").lower() not in (
+        self._perception_flip_vertical = os.environ.get("VISER_PERCEPTION_FLIP_VERTICAL", "0").lower() not in (
             "0",
             "false",
             "no",

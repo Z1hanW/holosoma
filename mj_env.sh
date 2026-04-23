@@ -13,20 +13,24 @@ Usage:
 Examples:
   bash mj_env.sh box_74
   HEADLESS=False LAUNCH_VISER=0 bash mj_env.sh box_74
-  COMMAND_WEB_PORT=8080 VISER_PORT=2984 bash mj_env.sh rendered box_74
+  COMMAND_WEB_PORT=7070 VISER_PORT=2984 bash mj_env.sh rendered box_74
 
 Environment:
   MODEL_INPUT / MODEL_PATH        default: ${DEFAULT_MODEL_INPUT}
   HEADLESS                        auto by default; False opens native MuJoCo GUI when available
   LAUNCH_VISER                    auto by default; enabled when HEADLESS=True or no DISPLAY
   COMMAND_WEB                     default: 1
-  COMMAND_WEB_PORT                default: 8080
+  COMMAND_WEB_PORT                default: first free port in [7070, 7099]
+  COMMAND_WEB_PORT_BASE           default: 7070
+  COMMAND_WEB_PORT_MAX            default: 7099
   COMMAND_MANUAL_ENABLED          default: 0; unchecked uses motion-derived command
   COMMAND_VALUE                   default: 0.5 for W/S/A/D x/y
   COMMAND_YAW_DEGREES             default: 17 for Q/E yaw
   COMMAND_MODE                    default: manual when manual mode is enabled
-  POLICY_CONTROL_PORT             default: 5662 for web start/stop/init policy control
-  MJ_ENV_KILL_STALE_POLICY        default: 0; set 1 to terminate same-port policy leftovers before launch
+  GT_MUJOCO_PHYSICS=1             force GT-style object/G1/floor MuJoCo physics
+  POLICY_CONTROL_PORT             default: 5662 for web start/space/stop/init policy control
+  MJ_ENV_KILL_STALE_ENV           default: 1; terminate same-port env/web/viser leftovers before launch
+  MJ_ENV_KILL_STALE_POLICY        default: 1; terminate same-port policy leftovers before launch
   SIM_MOTION_INIT_MODE            default: raw_motion (first motion init pose)
   VISER_PORT                      default: 2984 when viser is launched
 EOF
@@ -99,6 +103,33 @@ resolve_headless() {
   esac
 }
 
+find_free_port() {
+  local start_port="$1"
+  local end_port="$2"
+  local port
+  for ((port = start_port; port <= end_port; port++)); do
+    if "$COMMAND_WEB_PY" - "$port" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+port = int(sys.argv[1])
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("0.0.0.0", port))
+    except OSError:
+        raise SystemExit(1)
+raise SystemExit(0)
+PY
+    then
+      printf '%s\n' "$port"
+      return 0
+    fi
+  done
+  echo "[ERROR] No free command web port in range ${start_port}-${end_port}" >&2
+  exit 1
+}
+
 case "${1:-}" in
   -h|--help|help)
     usage
@@ -143,43 +174,113 @@ if [[ "$HEADLESS_FLAG" == "False" && "$PERCEPTION_CAMERA_SOURCE" == "rendered" &
 fi
 
 COMMAND_WEB="${COMMAND_WEB:-1}"
-COMMAND_WEB_PORT="${COMMAND_WEB_PORT:-8080}"
+COMMAND_WEB_PORT="${COMMAND_WEB_PORT:-}"
+if [[ -z "$COMMAND_WEB_PORT" ]]; then
+  COMMAND_WEB_PORT_BASE="${COMMAND_WEB_PORT_BASE:-7070}"
+  COMMAND_WEB_PORT_MAX="${COMMAND_WEB_PORT_MAX:-7099}"
+  COMMAND_WEB_PORT="$(find_free_port "$COMMAND_WEB_PORT_BASE" "$COMMAND_WEB_PORT_MAX")"
+fi
 COMMAND_MANUAL_ENABLED="${COMMAND_MANUAL_ENABLED:-0}"
 COMMAND_VALUE="${COMMAND_VALUE:-0.5}"
 COMMAND_YAW_DEGREES="${COMMAND_YAW_DEGREES:-${COMMAND_YAW_DEG:-17}}"
 COMMAND_MODE="${COMMAND_MODE:-manual}"
 VISER_PORT_RESOLVED="${VISER_PORT:-2984}"
-MJ_ENV_KILL_STALE_POLICY="${MJ_ENV_KILL_STALE_POLICY:-0}"
+MJ_ENV_KILL_STALE_ENV="${MJ_ENV_KILL_STALE_ENV:-1}"
+MJ_ENV_KILL_STALE_POLICY="${MJ_ENV_KILL_STALE_POLICY:-1}"
+GT_MUJOCO_PHYSICS="${GT_MUJOCO_PHYSICS:-${HOLOSOMA_GT_MUJOCO_PHYSICS:-0}}"
+if is_truthy "$GT_MUJOCO_PHYSICS"; then
+  export GT_MUJOCO_PHYSICS=1
+  export HOLOSOMA_GT_MUJOCO_PHYSICS=1
+  export HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS=0
+fi
 COMMAND_WEB_PID=""
 
+same_port_env_pids() {
+  ps -eww -o pid=,args= | awk \
+    -v self="$$" \
+    -v root="${ROOT_DIR}" \
+    -v state="${SIM_STATE_PORT}" \
+    -v control="${SIM_CONTROL_PORT}" \
+    -v sparse="${SPARSE_ROOT_COMMAND_PORT}" \
+    -v policy="${POLICY_CONTROL_PORT}" \
+    -v cmdweb="${COMMAND_WEB_PORT}" \
+    -v viser="${VISER_PORT_RESOLVED}" '
+      $1 == self { next }
+      {
+        is_python = index($0, "python") || index($0, "python3")
+        is_sim = index($0, root "/src/holosoma/holosoma/run_sim.py")
+        is_web = index($0, root "/src/holosoma/holosoma/mj_command_web.py")
+        is_viser = index($0, root "/src/holosoma/holosoma/viser_mujoco_sim_state.py")
+        web_port_match = index($0, "--port " cmdweb) || index($0, "--sparse-root-command-port " sparse) || index($0, "--control-port " control) || index($0, "--policy-control-port " policy)
+        viser_port_match = index($0, "--port " viser) || index($0, "--state-port " state) || index($0, "--control-port " control) || index($0, "--sparse-root-command-port " sparse)
+        if (is_python && is_sim && index($0, "--simulator.config.bridge.sim-state-port " state) && index($0, "--simulator.config.bridge.control-port " control)) {
+          print $1
+        }
+        if (is_python && is_web && web_port_match) {
+          print $1
+        }
+        if (is_python && is_viser && viser_port_match) {
+          print $1
+        }
+      }
+    ' | sort -n -u
+}
+
 same_port_policy_pids() {
-  ps -eo pid=,args= | awk \
+  ps -eww -o pid=,args= | awk \
+    -v self="$$" \
     -v root="${ROOT_DIR}" \
     -v state="${SIM_STATE_PORT}" \
     -v control="${SIM_CONTROL_PORT}" '
+      $1 == self { next }
+      (index($0, "python") || index($0, "python3")) &&
       index($0, root "/src/holosoma_inference/holosoma_inference/run_policy.py") &&
       index($0, "--task.sim-state-port " state) &&
       index($0, "--task.sim-control-port " control) {
         print $1
       }
-    '
+    ' | sort -n -u
 }
+
+terminate_pids() {
+  local pids="$1"
+  # shellcheck disable=SC2086
+  kill -TERM $pids 2>/dev/null || true
+  sleep 1
+  local pid
+  for pid in $pids; do
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+}
+
+format_pids() {
+  printf '%s\n' "$1" | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+}
+
+STALE_ENV_PIDS="$(same_port_env_pids || true)"
+if [[ -n "$STALE_ENV_PIDS" ]]; then
+  STALE_ENV_PIDS_ONE_LINE="$(format_pids "$STALE_ENV_PIDS")"
+  if is_truthy "$MJ_ENV_KILL_STALE_ENV"; then
+    echo "[WARN] terminating stale env/web/viser process(es) on matching ports: ${STALE_ENV_PIDS_ONE_LINE}" >&2
+    terminate_pids "$STALE_ENV_PIDS"
+  else
+    echo "[ERROR] stale env/web/viser process(es) already target matching ports: ${STALE_ENV_PIDS_ONE_LINE}" >&2
+    echo "[ERROR] Stop them first, or set MJ_ENV_KILL_STALE_ENV=1." >&2
+    exit 1
+  fi
+fi
 
 STALE_POLICY_PIDS="$(same_port_policy_pids || true)"
 if [[ -n "$STALE_POLICY_PIDS" ]]; then
+  STALE_POLICY_PIDS_ONE_LINE="$(format_pids "$STALE_POLICY_PIDS")"
   if is_truthy "$MJ_ENV_KILL_STALE_POLICY"; then
-    echo "[WARN] terminating stale policy process(es) on state=${SIM_STATE_PORT} control=${SIM_CONTROL_PORT}: ${STALE_POLICY_PIDS}" >&2
-    # shellcheck disable=SC2086
-    kill -TERM $STALE_POLICY_PIDS 2>/dev/null || true
-    sleep 1
-    for pid in $STALE_POLICY_PIDS; do
-      if kill -0 "$pid" 2>/dev/null; then
-        kill -KILL "$pid" 2>/dev/null || true
-      fi
-    done
+    echo "[WARN] terminating stale policy process(es) on state=${SIM_STATE_PORT} control=${SIM_CONTROL_PORT}: ${STALE_POLICY_PIDS_ONE_LINE}" >&2
+    terminate_pids "$STALE_POLICY_PIDS"
   else
-    echo "[ERROR] stale policy process(es) already target state=${SIM_STATE_PORT} control=${SIM_CONTROL_PORT}: ${STALE_POLICY_PIDS}" >&2
-    echo "[ERROR] Stop them first, or set MJ_ENV_KILL_STALE_POLICY=1 to terminate them before launching env." >&2
+    echo "[ERROR] stale policy process(es) already target state=${SIM_STATE_PORT} control=${SIM_CONTROL_PORT}: ${STALE_POLICY_PIDS_ONE_LINE}" >&2
+    echo "[ERROR] Stop them first, or set MJ_ENV_KILL_STALE_POLICY=1." >&2
     exit 1
   fi
 fi
@@ -242,14 +343,15 @@ echo "[INFO] launching MuJoCo environment only"
 echo "[INFO] model=${MODEL_INPUT}"
 echo "[INFO] headless=${TRAINING_HEADLESS} launch_viser=${LAUNCH_VISER_RESOLVED}"
 echo "[INFO] motion init=${SIM_MOTION_INIT_MODE}"
+echo "[INFO] gt_mujoco_physics=${GT_MUJOCO_PHYSICS}"
 echo "[INFO] ports clock=${SIM_CLOCK_PORT} state=${SIM_STATE_PORT} perception=${PERCEPTION_OBS_PORT} control=${SIM_CONTROL_PORT} sparse_root=${SPARSE_ROOT_COMMAND_PORT} policy_control=${POLICY_CONTROL_PORT}"
 if is_truthy "$COMMAND_WEB"; then
   echo "[INFO] command+scene web: http://localhost:${COMMAND_WEB_PORT} (log: ${COMMAND_WEB_LOG})"
-  echo "[INFO] web policy controls: Start/Stop/Init via policy_control=${POLICY_CONTROL_PORT}"
+  echo "[INFO] web policy controls: ] start policy, Space start motion clip, Stop, Init via policy_control=${POLICY_CONTROL_PORT}"
   echo "[INFO] command source: motion-derived by default; manual_mode_initial=${COMMAND_MANUAL_ENABLED}"
   echo "[INFO] manual command scale: xy=${COMMAND_VALUE}, yaw=${COMMAND_YAW_DEGREES} deg"
 fi
-if [[ "$LAUNCH_VISER_RESOLVED" == "1" ]]; then
+if [[ "$LAUNCH_VISER_RESOLVED" == "1" ]] && ! is_truthy "$COMMAND_WEB"; then
   echo "[INFO] raw viser scene: http://localhost:${VISER_PORT_RESOLVED}"
 fi
 echo "[INFO] launch policy with: bash ${ROOT_DIR}/mj_policy.sh $*"
@@ -260,6 +362,13 @@ if is_truthy "${DRY_RUN:-0}"; then
 fi
 
 if [[ "$LAUNCH_VISER_RESOLVED" == "1" ]]; then
+  if is_truthy "$COMMAND_WEB"; then
+    export HOLOSOMA_VISER_ANNOUNCE_URL="http://localhost:${COMMAND_WEB_PORT}"
+    export HOLOSOMA_VISER_SUPPRESS_DIRECT_URL=1
+  else
+    unset HOLOSOMA_VISER_ANNOUNCE_URL
+    unset HOLOSOMA_VISER_SUPPRESS_DIRECT_URL
+  fi
   VISER_ARGS=(
     --launch-env-only
     --manual-root-mode "$COMMAND_MODE"

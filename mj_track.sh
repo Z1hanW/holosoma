@@ -75,6 +75,9 @@ Usage:
 Defaults:
   motion = ${DEFAULT_MOTION_FILE}
   model  = ${DEFAULT_MODEL_INPUT}
+
+Environment:
+  GT_MUJOCO_PHYSICS=1  force GT-style object/G1/floor MuJoCo physics
 EOF
 }
 
@@ -105,7 +108,6 @@ SIM_DEVICE="${SIM_DEVICE:-}"
 MUJOCO_BACKEND="${MUJOCO_BACKEND:-}"
 TERRAIN_STATIC_FRICTION="${TERRAIN_STATIC_FRICTION:-}"
 TERRAIN_DYNAMIC_FRICTION="${TERRAIN_DYNAMIC_FRICTION:-}"
-SIM_TERRAIN_MESH_TYPE="${SIM_TERRAIN_MESH_TYPE:-}"
 SIM_VIRTUAL_GANTRY_ENABLED="${SIM_VIRTUAL_GANTRY_ENABLED:-False}"
 SIM_MOTION_INIT_MODE_EXPLICIT=0
 [[ -n "${SIM_MOTION_INIT_MODE+x}" ]] && SIM_MOTION_INIT_MODE_EXPLICIT=1
@@ -121,11 +123,30 @@ SIM_STATE_PORT="${SIM_STATE_PORT:-5657}"
 SIM_CONTROL_PORT="${SIM_CONTROL_PORT:-5659}"
 PERCEPTION_OBS_PORT="${PERCEPTION_OBS_PORT:-5658}"
 SPARSE_ROOT_COMMAND_PORT="${SPARSE_ROOT_COMMAND_PORT:-5661}"
+POLICY_CONTROL_PORT="${POLICY_CONTROL_PORT:-}"
 ENABLE_SPLIT_PERCEPTION_OBS="${ENABLE_SPLIT_PERCEPTION_OBS:-auto}"
 ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND="${ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND:-0}"
 PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
 PERCEPTION_CAMERA_SOURCE="${PERCEPTION_CAMERA_SOURCE:-far_tracking_warp}"
 PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-mesh}"
+PERCEPTION_CAMERA_WIDTH_EXPLICIT=0
+PERCEPTION_CAMERA_HEIGHT_EXPLICIT=0
+PERCEPTION_CAMERA_WARP_CROP_TOP_EXPLICIT=0
+PERCEPTION_CAMERA_WARP_CROP_BOTTOM_EXPLICIT=0
+PERCEPTION_CAMERA_WARP_CROP_LEFT_EXPLICIT=0
+PERCEPTION_CAMERA_WARP_CROP_RIGHT_EXPLICIT=0
+[[ -n "${PERCEPTION_CAMERA_WIDTH+x}" ]] && PERCEPTION_CAMERA_WIDTH_EXPLICIT=1
+[[ -n "${PERCEPTION_CAMERA_HEIGHT+x}" ]] && PERCEPTION_CAMERA_HEIGHT_EXPLICIT=1
+[[ -n "${PERCEPTION_CAMERA_WARP_CROP_TOP+x}" ]] && PERCEPTION_CAMERA_WARP_CROP_TOP_EXPLICIT=1
+[[ -n "${PERCEPTION_CAMERA_WARP_CROP_BOTTOM+x}" ]] && PERCEPTION_CAMERA_WARP_CROP_BOTTOM_EXPLICIT=1
+[[ -n "${PERCEPTION_CAMERA_WARP_CROP_LEFT+x}" ]] && PERCEPTION_CAMERA_WARP_CROP_LEFT_EXPLICIT=1
+[[ -n "${PERCEPTION_CAMERA_WARP_CROP_RIGHT+x}" ]] && PERCEPTION_CAMERA_WARP_CROP_RIGHT_EXPLICIT=1
+PERCEPTION_CAMERA_WIDTH="${PERCEPTION_CAMERA_WIDTH:-}"
+PERCEPTION_CAMERA_HEIGHT="${PERCEPTION_CAMERA_HEIGHT:-}"
+PERCEPTION_CAMERA_WARP_CROP_TOP="${PERCEPTION_CAMERA_WARP_CROP_TOP:-}"
+PERCEPTION_CAMERA_WARP_CROP_BOTTOM="${PERCEPTION_CAMERA_WARP_CROP_BOTTOM:-}"
+PERCEPTION_CAMERA_WARP_CROP_LEFT="${PERCEPTION_CAMERA_WARP_CROP_LEFT:-}"
+PERCEPTION_CAMERA_WARP_CROP_RIGHT="${PERCEPTION_CAMERA_WARP_CROP_RIGHT:-}"
 PERCEPTION_CAMERA_PITCH_DEG="${PERCEPTION_CAMERA_PITCH_DEG:-}"
 PERCEPTION_CAMERA_NEAR="${PERCEPTION_CAMERA_NEAR:-}"
 PERCEPTION_CAMERA_FAR="${PERCEPTION_CAMERA_FAR:-}"
@@ -136,6 +157,9 @@ PERCEPTION_CAMERA_FPS="${PERCEPTION_CAMERA_FPS:-}"
 PERCEPTION_CAMERA_WARP_EDGE_NOISE="${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-}"
 PERCEPTION_CAMERA_WARP_BUFFER_LEN="${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-}"
 PERCEPTION_CAMERA_WARP_LATENCY_FRAME="${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-}"
+PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN="${PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN:-training}"
+PERCEPTION_OBS_TRANSPORT="${PERCEPTION_OBS_TRANSPORT:-shm}"
+PERCEPTION_OBS_SHM_NAME="${PERCEPTION_OBS_SHM_NAME:-depth_img_shm}"
 SIM_USE_ZMQ_LOWCMD="${SIM_USE_ZMQ_LOWCMD:-1}"
 SKIP_POLICY="${SKIP_POLICY:-0}"
 MJ_TRACK_MODE="${MJ_TRACK_MODE:-both}"
@@ -147,7 +171,6 @@ if is_truthy_env "${HOLOSOMA_MJ_TRACK_RUN_FOREVER:-0}"; then
 fi
 TRAINING_HEADLESS="${TRAINING_HEADLESS:-True}"
 SIM_DEBUG_VIZ="${SIM_DEBUG_VIZ:-True}"
-SIM_ROBOT_MJCF_FILTER_ENABLE="${SIM_ROBOT_MJCF_FILTER_ENABLE:-}"
 MUJOCO_SHOW_OBJECT_COLLISION="${MUJOCO_SHOW_OBJECT_COLLISION:-0}"
 MUJOCO_HIDE_OBJECT_VISUALS_WHEN_SHOWING_COLLISION="${MUJOCO_HIDE_OBJECT_VISUALS_WHEN_SHOWING_COLLISION:-0}"
 SIM_READY_TIMEOUT="${SIM_READY_TIMEOUT:-180}"
@@ -159,6 +182,7 @@ PATCH_DIR="${PATCH_DIR:-$ROOT_DIR/logs/sim2sim_exports}"
 POLICY_ACTION_SCALE="${POLICY_ACTION_SCALE:-}"
 POLICY_RL_RATE="${POLICY_RL_RATE:-50}"
 POLICY_DEFER_UNTIL_VALID_STATE="${POLICY_DEFER_UNTIL_VALID_STATE:-0}"
+POLICY_AUTO_START_MOTION_CLIP="${POLICY_AUTO_START_MOTION_CLIP:-}"
 SIM_LOG_FIRST_COMMAND_SUMMARY="${SIM_LOG_FIRST_COMMAND_SUMMARY:-0}"
 HOLOSOMA_ONNX_ALIGN_MAX_STEPS="${HOLOSOMA_ONNX_ALIGN_MAX_STEPS:-0}"
 HOLOSOMA_ONNX_ALIGN_POSE_TOL="${HOLOSOMA_ONNX_ALIGN_POSE_TOL:-5e-3}"
@@ -189,6 +213,7 @@ MUJOCO_OBJECT_CONTACT_DAMPING="${MUJOCO_OBJECT_CONTACT_DAMPING:-}"
 MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES="${MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES:-0}"
 MUJOCO_OBJECT_CONTACT_BODY_MARKERS="${MUJOCO_OBJECT_CONTACT_BODY_MARKERS:-}"
 USE_TRAINING_OBJECT_CONTACT_MARKERS="${USE_TRAINING_OBJECT_CONTACT_MARKERS:-0}"
+GT_MUJOCO_PHYSICS="${GT_MUJOCO_PHYSICS:-${HOLOSOMA_GT_MUJOCO_PHYSICS:-0}}"
 PREFER_SIM_REF_FROM_SIM_STATE="${PREFER_SIM_REF_FROM_SIM_STATE:-1}"
 USE_SIM_TIME="${USE_SIM_TIME:-}"
 INFERENCE_CONFIG="${INFERENCE_CONFIG:-}"
@@ -230,6 +255,9 @@ export HOLOSOMA_ONNX_ALIGN_MAX_STEPS
 export HOLOSOMA_ONNX_ALIGN_POSE_TOL
 export HOLOSOMA_ONNX_OFFSET_APPLIES_TO_MOTION_INDEX
 export HOLOSOMA_CLIP_JOINT_TARGETS
+if [[ -n "$POLICY_CONTROL_PORT" && -z "${HOLOSOMA_POLICY_CONTROL_PORT:-}" ]]; then
+  export HOLOSOMA_POLICY_CONTROL_PORT="$POLICY_CONTROL_PORT"
+fi
 
 resolve_python() {
   local configured="$1"
@@ -581,6 +609,32 @@ PY
   done <<< "$override_lines"
 }
 
+apply_gt_mujoco_physics_overrides() {
+  if ! is_truthy_env "$GT_MUJOCO_PHYSICS"; then
+    return
+  fi
+
+  GT_MUJOCO_PHYSICS=1
+  export GT_MUJOCO_PHYSICS
+  export HOLOSOMA_GT_MUJOCO_PHYSICS=1
+  export HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS=0
+
+  SIM_USE_TRAINING_URDF_OBJECT_SCENE=1
+  SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML=0
+  SIM_COPY_TENDONS_FROM_ROBOT_XML=0
+  SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML=0
+  SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML=0
+
+  MUJOCO_OBJECT_MASS_SCALE=""
+  MUJOCO_OBJECT_MASS_OVERRIDE="0.1"
+  MUJOCO_OBJECT_GEOM_FRICTION="[0.9,0.5,0.5]"
+  MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION=""
+  MUJOCO_OBJECT_LATERAL_FRICTION=""
+  MUJOCO_OBJECT_ROLLING_FRICTION=""
+  MUJOCO_OBJECT_CONTACT_STIFFNESS=""
+  MUJOCO_OBJECT_CONTACT_DAMPING=""
+}
+
 apply_training_perception_overrides() {
   local model_path="$1"
   local override_lines
@@ -900,25 +954,7 @@ apply_training_robot_init_overrides "$PATCHED_ONNX"
 apply_training_robot_asset_overrides "$PATCHED_ONNX"
 apply_training_object_overrides "$PATCHED_ONNX"
 apply_training_perception_overrides "$PATCHED_ONNX"
-
-if is_truthy_env "${HOLOSOMA_MUJOCO_USE_GT_BOX_ENV:-0}"; then
-  export HOLOSOMA_MUJOCO_OBJECT_SCENE_XML="${HOLOSOMA_MUJOCO_OBJECT_SCENE_XML:-/home/ubuntu/FAR/holosoma_gt/src/holosoma_retargeting/holosoma_retargeting/models/g1/g1_29dof_w_largebox.xml}"
-  export HOLOSOMA_MUJOCO_SKIP_SCENE_TERRAIN="1"
-  SIM_ROBOT_MJCF_FILTER_ENABLE="False"
-  SIM_USE_TRAINING_URDF_OBJECT_SCENE="0"
-  SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML="0"
-  SIM_COPY_TENDONS_FROM_ROBOT_XML="0"
-  SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML="0"
-  SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML="0"
-  MUJOCO_OBJECT_MASS_OVERRIDE=""
-  MUJOCO_OBJECT_GEOM_FRICTION=""
-  MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION=""
-  MUJOCO_OBJECT_LATERAL_FRICTION=""
-  MUJOCO_OBJECT_ROLLING_FRICTION=""
-  MUJOCO_OBJECT_CONTACT_STIFFNESS=""
-  MUJOCO_OBJECT_CONTACT_DAMPING=""
-  export HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS="0"
-fi
+apply_gt_mujoco_physics_overrides
 
 SIM_ADD_DEFAULT_OBJECT_ACTUATORS="${SIM_ADD_DEFAULT_OBJECT_ACTUATORS:-1}"
 SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML="${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML:-1}"
@@ -963,7 +999,45 @@ if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_CAMERA_SOURCE" == "r
   export HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES="${HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES:-1}"
   export HOLOSOMA_MUJOCO_LOAD_OBJECT_VISUAL_MESHES="${HOLOSOMA_MUJOCO_LOAD_OBJECT_VISUAL_MESHES:-1}"
   export HOLOSOMA_MUJOCO_DEPTH_PREFER_VISUAL_MESHES="${HOLOSOMA_MUJOCO_DEPTH_PREFER_VISUAL_MESHES:-1}"
+  case "$(printf '%s' "$PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN" | tr '[:upper:]' '[:lower:]')" in
+    training|distill|shoo7sr1)
+      [[ "$PERCEPTION_CAMERA_WIDTH_EXPLICIT" == "0" ]] && PERCEPTION_CAMERA_WIDTH="106"
+      [[ "$PERCEPTION_CAMERA_HEIGHT_EXPLICIT" == "0" ]] && PERCEPTION_CAMERA_HEIGHT="60"
+      [[ "$PERCEPTION_CAMERA_WARP_CROP_TOP_EXPLICIT" == "0" ]] && PERCEPTION_CAMERA_WARP_CROP_TOP="2"
+      [[ "$PERCEPTION_CAMERA_WARP_CROP_BOTTOM_EXPLICIT" == "0" ]] && PERCEPTION_CAMERA_WARP_CROP_BOTTOM="0"
+      [[ "$PERCEPTION_CAMERA_WARP_CROP_LEFT_EXPLICIT" == "0" ]] && PERCEPTION_CAMERA_WARP_CROP_LEFT="4"
+      [[ "$PERCEPTION_CAMERA_WARP_CROP_RIGHT_EXPLICIT" == "0" ]] && PERCEPTION_CAMERA_WARP_CROP_RIGHT="4"
+      ;;
+    1|true|yes|on|myholosoma)
+      [[ "$PERCEPTION_CAMERA_WIDTH_EXPLICIT" == "0" ]] && PERCEPTION_CAMERA_WIDTH="848"
+      [[ "$PERCEPTION_CAMERA_HEIGHT_EXPLICIT" == "0" ]] && PERCEPTION_CAMERA_HEIGHT="480"
+      [[ "$PERCEPTION_CAMERA_WARP_CROP_TOP_EXPLICIT" == "0" ]] && PERCEPTION_CAMERA_WARP_CROP_TOP="16"
+      [[ "$PERCEPTION_CAMERA_WARP_CROP_BOTTOM_EXPLICIT" == "0" ]] && PERCEPTION_CAMERA_WARP_CROP_BOTTOM="0"
+      [[ "$PERCEPTION_CAMERA_WARP_CROP_LEFT_EXPLICIT" == "0" ]] && PERCEPTION_CAMERA_WARP_CROP_LEFT="32"
+      [[ "$PERCEPTION_CAMERA_WARP_CROP_RIGHT_EXPLICIT" == "0" ]] && PERCEPTION_CAMERA_WARP_CROP_RIGHT="32"
+      ;;
+  esac
 fi
+
+PERCEPTION_OBS_TRANSPORT_NORMALIZED="$(printf '%s' "$PERCEPTION_OBS_TRANSPORT" | tr '[:upper:]' '[:lower:]')"
+PUBLISH_PERCEPTION_OBS_SHM=0
+USE_POLICY_PERCEPTION_OBS_SHM=0
+case "$PERCEPTION_OBS_TRANSPORT_NORMALIZED" in
+  shm|shared_memory|shared-memory|myholosoma)
+    PUBLISH_PERCEPTION_OBS_SHM=1
+    USE_POLICY_PERCEPTION_OBS_SHM=1
+    ;;
+  zmq)
+    ;;
+  both)
+    PUBLISH_PERCEPTION_OBS_SHM=1
+    USE_POLICY_PERCEPTION_OBS_SHM=1
+    ;;
+  *)
+    echo "[ERROR] PERCEPTION_OBS_TRANSPORT must be shm, zmq, or both. Got: ${PERCEPTION_OBS_TRANSPORT}" >&2
+    exit 1
+    ;;
+esac
 
 if [[ "$INFERENCE_CONFIG" == "g1-29dof-wbt-w-object" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-generalist" ]]; then
   if [[ -z "$USE_SIM_TIME" ]]; then
@@ -1037,6 +1111,13 @@ print(scale if scale is not None else 1.0)
 PY
   )"
 fi
+if [[ -z "$POLICY_AUTO_START_MOTION_CLIP" ]]; then
+  if [[ -n "${HOLOSOMA_POLICY_CONTROL_PORT:-}" ]]; then
+    POLICY_AUTO_START_MOTION_CLIP="0"
+  else
+    POLICY_AUTO_START_MOTION_CLIP="1"
+  fi
+fi
 
 SIM_LOG="$RUN_DIR/mujoco.log"
 POLICY_LOG="$RUN_DIR/policy.log"
@@ -1045,7 +1126,14 @@ POLICY_LOG="$RUN_DIR/policy.log"
 : >"$POLICY_LOG"
 
 if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]]; then
-  echo "[INFO] perception camera: source=${PERCEPTION_CAMERA_SOURCE} update_hz=${PERCEPTION_UPDATE_HZ:-<default>} camera_fps=${PERCEPTION_CAMERA_FPS:-<default>} pitch_deg=${PERCEPTION_CAMERA_PITCH_DEG:-<default>} near=${PERCEPTION_CAMERA_NEAR:-<default>} far=${PERCEPTION_CAMERA_FAR:-<default>} max_distance=${PERCEPTION_MAX_DISTANCE:-<default>} warp_min_valid_depth=${PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH:-<default>} warp_buffer_len=${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-<default>} warp_latency_frame=${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-<default>} warp_edge_noise=${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-<default>}"
+  echo "[INFO] perception camera: source=${PERCEPTION_CAMERA_SOURCE} raw=${PERCEPTION_CAMERA_WIDTH:-<default>}x${PERCEPTION_CAMERA_HEIGHT:-<default>} crop_top=${PERCEPTION_CAMERA_WARP_CROP_TOP:-<default>} crop_bottom=${PERCEPTION_CAMERA_WARP_CROP_BOTTOM:-<default>} crop_left=${PERCEPTION_CAMERA_WARP_CROP_LEFT:-<default>} crop_right=${PERCEPTION_CAMERA_WARP_CROP_RIGHT:-<default>} update_hz=${PERCEPTION_UPDATE_HZ:-<default>} camera_fps=${PERCEPTION_CAMERA_FPS:-<default>} pitch_deg=${PERCEPTION_CAMERA_PITCH_DEG:-<default>} near=${PERCEPTION_CAMERA_NEAR:-<default>} far=${PERCEPTION_CAMERA_FAR:-<default>} max_distance=${PERCEPTION_MAX_DISTANCE:-<default>} warp_min_valid_depth=${PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH:-<default>} warp_buffer_len=${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-<default>} warp_latency_frame=${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-<default>} warp_edge_noise=${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-<default>} transport=${PERCEPTION_OBS_TRANSPORT}"
+fi
+if is_truthy_env "$GT_MUJOCO_PHYSICS"; then
+  echo "[INFO] GT MuJoCo physics: object_mass=${MUJOCO_OBJECT_MASS_OVERRIDE} object_friction=${MUJOCO_OBJECT_GEOM_FRICTION} copy_joint_defaults=${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML} copy_tendons=${SIM_COPY_TENDONS_FROM_ROBOT_XML} copy_collision_geoms=${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML} copy_contact_pairs=${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML} web_demo_object_contacts=${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS:-0}"
+fi
+if is_truthy_env "${DRY_RUN:-0}"; then
+  echo "[INFO] DRY_RUN=1; not launching MuJoCo or policy."
+  exit 0
 fi
 
 terminate_pid() {
@@ -1107,7 +1195,6 @@ if [[ "$MJ_TRACK_MODE" != "policy" ]]; then
     $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]] && printf '%s' "perception:${PERCEPTION_PRESET}" ) \
     --training.headless "$TRAINING_HEADLESS" \
     --simulator.config.debug-viz "$SIM_DEBUG_VIZ" \
-    $( [[ -n "$SIM_ROBOT_MJCF_FILTER_ENABLE" ]] && printf '%s %s' "--simulator.config.robot-mjcf-filter.enable" "$SIM_ROBOT_MJCF_FILTER_ENABLE" ) \
     $( [[ "$MUJOCO_SHOW_OBJECT_COLLISION" == "1" ]] && printf '%s %s' "--simulator.config.mujoco-show-object-collision" "True" ) \
     $( [[ "$MUJOCO_HIDE_OBJECT_VISUALS_WHEN_SHOWING_COLLISION" == "1" ]] && printf '%s %s' "--simulator.config.mujoco-hide-object-visuals-when-showing-collision" "True" ) \
     --simulator.config.sim.fps "$SIM_FPS" \
@@ -1137,7 +1224,6 @@ if [[ "$MJ_TRACK_MODE" != "policy" ]]; then
     $( [[ -n "$MUJOCO_OBJECT_CONTACT_DAMPING" ]] && printf '%s %s' "--robot.object.mujoco-object-contact-damping" "$MUJOCO_OBJECT_CONTACT_DAMPING" ) \
     $( [[ "$MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES" == "1" ]] && printf '%s %s' "--robot.object.mujoco-limit-object-contacts-to-carry-bodies" "True" ) \
     $( [[ -n "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" ]] && printf '%s %s' "--robot.object.mujoco-object-contact-body-name-markers" "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" ) \
-    $( [[ -n "$SIM_TERRAIN_MESH_TYPE" ]] && printf '%s %s' "--terrain.terrain-term.mesh-type" "$SIM_TERRAIN_MESH_TYPE" ) \
     $( [[ -n "$TERRAIN_STATIC_FRICTION" ]] && printf '%s %s' "--terrain.terrain-term.static-friction" "$TERRAIN_STATIC_FRICTION" ) \
     $( [[ -n "$TERRAIN_DYNAMIC_FRICTION" ]] && printf '%s %s' "--terrain.terrain-term.dynamic-friction" "$TERRAIN_DYNAMIC_FRICTION" ) \
     --simulator.config.bridge.interface "$INTERFACE_NAME" \
@@ -1148,6 +1234,8 @@ if [[ "$MJ_TRACK_MODE" != "policy" ]]; then
     --simulator.config.bridge.control-port "$SIM_CONTROL_PORT" \
     $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]] && printf '%s %s' "--simulator.config.bridge.publish-perception-obs" "True" ) \
     $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]] && printf '%s %s' "--simulator.config.bridge.perception-obs-port" "$PERCEPTION_OBS_PORT" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PUBLISH_PERCEPTION_OBS_SHM" == "1" ]] && printf '%s %s' "--simulator.config.bridge.publish-perception-obs-shm" "True" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PUBLISH_PERCEPTION_OBS_SHM" == "1" ]] && printf '%s %s' "--simulator.config.bridge.perception-obs-shm-name" "$PERCEPTION_OBS_SHM_NAME" ) \
     $( [[ "$SIM_USE_ZMQ_LOWCMD" == "1" ]] && printf '%s %s' "--simulator.config.bridge.use-zmq-lowcmd" "True" ) \
     $( [[ "$SIM_IGNORE_DEFAULT_IDLE_COMMAND" == "1" ]] && printf '%s %s' "--simulator.config.bridge.ignore-default-idle-command" "True" ) \
     $( [[ "$SIM_LOG_FIRST_COMMAND_SUMMARY" == "1" ]] && printf '%s %s' "--simulator.config.bridge.log-first-command-summary" "True" ) \
@@ -1160,6 +1248,12 @@ if [[ "$MJ_TRACK_MODE" != "policy" ]]; then
     --motion-init.object-name object \
     $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_SOURCE" ]] && printf '%s %s' "--perception.camera-source" "$PERCEPTION_CAMERA_SOURCE" ) \
     $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_OBJECT_GEOMETRY_MODE" ]] && printf '%s %s' "--perception.object-geometry-mode" "$PERCEPTION_OBJECT_GEOMETRY_MODE" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WIDTH" ]] && printf '%s %s' "--perception.camera-width" "$PERCEPTION_CAMERA_WIDTH" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_HEIGHT" ]] && printf '%s %s' "--perception.camera-height" "$PERCEPTION_CAMERA_HEIGHT" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_CROP_TOP" ]] && printf '%s %s' "--perception.camera-warp-crop-top" "$PERCEPTION_CAMERA_WARP_CROP_TOP" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_CROP_BOTTOM" ]] && printf '%s %s' "--perception.camera-warp-crop-bottom" "$PERCEPTION_CAMERA_WARP_CROP_BOTTOM" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_CROP_LEFT" ]] && printf '%s %s' "--perception.camera-warp-crop-left" "$PERCEPTION_CAMERA_WARP_CROP_LEFT" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_CROP_RIGHT" ]] && printf '%s %s' "--perception.camera-warp-crop-right" "$PERCEPTION_CAMERA_WARP_CROP_RIGHT" ) \
     $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_PITCH_DEG" ]] && printf '%s %s' "--perception.camera-pitch-deg" "$PERCEPTION_CAMERA_PITCH_DEG" ) \
     $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_NEAR" ]] && printf '%s %s' "--perception.camera-near" "$PERCEPTION_CAMERA_NEAR" ) \
     $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_FAR" ]] && printf '%s %s' "--perception.camera-far" "$PERCEPTION_CAMERA_FAR" ) \
@@ -1203,7 +1297,6 @@ POLICY_CMD=(
   --task.sim-state-port "$SIM_STATE_PORT"
   --task.sim-control-port "$SIM_CONTROL_PORT"
   --task.no-auto-start-motion
-  --task.auto-start-motion-clip
   --task.auto-start-stiff-hold-sec "$AUTO_START_STIFF_HOLD_SEC"
   --task.auto-start-stiff-max-wait-sec "$AUTO_START_STIFF_MAX_WAIT_SEC"
   --task.auto-start-stiff-pose-tolerance "$AUTO_START_STIFF_POSE_TOL"
@@ -1211,11 +1304,17 @@ POLICY_CMD=(
   --task.rl-rate "$POLICY_RL_RATE"
   --task.sim-object-name object
 )
+if is_truthy_env "$POLICY_AUTO_START_MOTION_CLIP"; then
+  POLICY_CMD+=(--task.auto-start-motion-clip)
+fi
 if [[ "$SIM_USE_ZMQ_LOWCMD" == "1" ]]; then
   POLICY_CMD+=(--task.use-zmq-lowcmd)
 fi
 if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]]; then
   POLICY_CMD+=(--task.use-split-perception-obs --task.perception-obs-port "$PERCEPTION_OBS_PORT")
+  if [[ "$USE_POLICY_PERCEPTION_OBS_SHM" == "1" ]]; then
+    POLICY_CMD+=(--task.use-split-perception-obs-shm --task.perception-obs-shm-name "$PERCEPTION_OBS_SHM_NAME")
+  fi
 fi
 if [[ "$ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND" == "1" || "$ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND" == "true" || "$ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND" == "True" ]]; then
   POLICY_CMD+=(--task.use-external-sparse-root-command --task.sparse-root-command-port "$SPARSE_ROOT_COMMAND_PORT")

@@ -8,7 +8,7 @@ import time
 import zmq
 from loguru import logger
 
-POLICY_CONTROL_ACTIONS = frozenset({"start", "stop", "init"})
+POLICY_CONTROL_ACTIONS = frozenset({"start", "stop", "init", "space"})
 
 
 class SimControlPush:
@@ -161,7 +161,7 @@ class ManualRootCommandSub:
 
 
 class PolicyControlPush:
-    """Send policy lifecycle commands from the web command panel."""
+    """Send policy lifecycle commands from the command web process."""
 
     def __init__(self, port: int = 5662) -> None:
         self.port = int(port)
@@ -186,6 +186,10 @@ class PolicyControlPush:
         if not self.enabled or self.socket is None:
             return False
         action = str(action).strip().lower()
+        if action in {"]", "right_bracket"}:
+            action = "start"
+        elif action in {" ", "spacebar", "motion", "start_motion", "start_motion_clip"}:
+            action = "space"
         if action not in POLICY_CONTROL_ACTIONS:
             raise ValueError(f"Unsupported policy control action: {action}")
         payload = json.dumps({"action": action, "source": str(source), "time": time.time()})
@@ -246,6 +250,10 @@ class PolicyControlPull:
             if not isinstance(payload, dict):
                 continue
             action = str(payload.get("action", "")).strip().lower()
+            if action in {"]", "right_bracket"}:
+                action = "start"
+            elif action in {" ", "spacebar", "motion", "start_motion", "start_motion_clip"}:
+                action = "space"
             if action in POLICY_CONTROL_ACTIONS:
                 actions.append(action)
             elif action:

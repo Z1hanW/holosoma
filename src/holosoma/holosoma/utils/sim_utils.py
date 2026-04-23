@@ -437,7 +437,6 @@ class DirectSimulation:
 
         # Optional clip-driven initialization for split sim2sim verification.
         self._maybe_apply_motion_initial_state()
-        self._maybe_check_mujoco_startup_object_stability()
         self._maybe_setup_split_sim_perception()
 
         # Step 6: Setup viewer if not headless
@@ -558,147 +557,11 @@ class DirectSimulation:
                 return idx
         return 0
 
-    def _maybe_check_mujoco_startup_object_stability(self) -> None:
-        if get_simulator_type() != SimulatorType.MUJOCO:
-            return
-
-        enabled_raw = os.environ.get("HOLOSOMA_MUJOCO_STARTUP_OBJECT_CHECK")
-        if enabled_raw is not None and enabled_raw.strip().lower() in {"", "0", "false", "no", "off"}:
-            return
-
-        model = getattr(self.simulator, "root_model", None)
-        data = getattr(self.simulator, "root_data", None)
-        actor_metadata = dict(getattr(self.simulator, "_actor_root_metadata", {}) or {})
-        if model is None or data is None or not actor_metadata:
-            return
-
-        object_name = str(getattr(self.config.motion_init, "object_name", "") or "object")
-        if object_name not in actor_metadata:
-            object_candidates = [name for name in actor_metadata if name != "robot"]
-            if not object_candidates:
-                return
-            object_name = str(object_candidates[0])
-
-        metadata = actor_metadata.get(object_name)
-        if metadata is None:
-            return
-
-        try:
-            import mujoco  # noqa: PLC0415
-        except Exception as exc:
-            logger.warning("Skipping MuJoCo startup object stability check; mujoco import failed: {}", exc)
-            return
-
-        def _env_float(name: str, default: float) -> float:
-            raw = os.environ.get(name)
-            if raw is None or not raw.strip():
-                return default
-            try:
-                return float(raw)
-            except ValueError:
-                logger.warning("Invalid {}='{}'; using {}", name, raw, default)
-                return default
-
-        def _env_int(name: str, default: int) -> int:
-            raw = os.environ.get(name)
-            if raw is None or not raw.strip():
-                return default
-            try:
-                return max(1, int(raw))
-            except ValueError:
-                logger.warning("Invalid {}='{}'; using {}", name, raw, default)
-                return default
-
-        steps = _env_int("HOLOSOMA_MUJOCO_STARTUP_OBJECT_CHECK_STEPS", 60)
-        max_xy_delta_allowed = _env_float("HOLOSOMA_MUJOCO_STARTUP_OBJECT_MAX_XY_DELTA", 0.50)
-        max_z_delta_allowed = _env_float("HOLOSOMA_MUJOCO_STARTUP_OBJECT_MAX_Z_DELTA", 0.35)
-        max_z_allowed = _env_float("HOLOSOMA_MUJOCO_STARTUP_OBJECT_MAX_Z", 1.50)
-        min_z_allowed = _env_float("HOLOSOMA_MUJOCO_STARTUP_OBJECT_MIN_Z", -0.05)
-        max_speed_allowed = _env_float("HOLOSOMA_MUJOCO_STARTUP_OBJECT_MAX_SPEED", 5.0)
-
-        qpos_addr = int(metadata["qpos_addr"])
-        qvel_addr = int(metadata["qvel_addr"])
-
-        check_data = mujoco.MjData(model)
-        check_data.time = float(data.time)
-        np.copyto(check_data.qpos, data.qpos)
-        np.copyto(check_data.qvel, data.qvel)
-        if model.nu:
-            np.copyto(check_data.ctrl, data.ctrl)
-        if model.na:
-            np.copyto(check_data.act, data.act)
-        if model.nmocap:
-            np.copyto(check_data.mocap_pos, data.mocap_pos)
-            np.copyto(check_data.mocap_quat, data.mocap_quat)
-
-        def _read_pos_vel() -> tuple[np.ndarray, np.ndarray]:
-            pos = np.asarray(check_data.qpos[qpos_addr : qpos_addr + 3], dtype=np.float64).copy()
-            lin_vel = np.asarray(check_data.qvel[qvel_addr : qvel_addr + 3], dtype=np.float64).copy()
-            return pos, lin_vel
-
-        try:
-            mujoco.mj_forward(model, check_data)
-            initial_pos, initial_vel = _read_pos_vel()
-            max_xy_delta = 0.0
-            max_z_delta = 0.0
-            max_z = float(initial_pos[2])
-            min_z = float(initial_pos[2])
-            max_speed = float(np.linalg.norm(initial_vel))
-            final_pos = initial_pos.copy()
-            final_vel = initial_vel.copy()
-
-            for _ in range(steps):
-                mujoco.mj_step(model, check_data)
-                final_pos, final_vel = _read_pos_vel()
-                delta = final_pos - initial_pos
-                max_xy_delta = max(max_xy_delta, float(np.linalg.norm(delta[:2])))
-                max_z_delta = max(max_z_delta, float(abs(delta[2])))
-                max_z = max(max_z, float(final_pos[2]))
-                min_z = min(min_z, float(final_pos[2]))
-                max_speed = max(max_speed, float(np.linalg.norm(final_vel)))
-        except Exception as exc:
-            logger.warning("MuJoCo startup object stability check failed to run: {}", exc)
-            return
-
-        failures = []
-        if max_xy_delta > max_xy_delta_allowed:
-            failures.append(f"xy_delta={max_xy_delta:.4f}>{max_xy_delta_allowed:.4f}")
-        if max_z_delta > max_z_delta_allowed:
-            failures.append(f"z_delta={max_z_delta:.4f}>{max_z_delta_allowed:.4f}")
-        if max_z > max_z_allowed:
-            failures.append(f"max_z={max_z:.4f}>{max_z_allowed:.4f}")
-        if min_z < min_z_allowed:
-            failures.append(f"min_z={min_z:.4f}<{min_z_allowed:.4f}")
-        if max_speed > max_speed_allowed:
-            failures.append(f"speed={max_speed:.4f}>{max_speed_allowed:.4f}")
-
-        message = (
-            "MuJoCo startup object stability check: actor={} steps={} dt={:.6f}s "
-            "initial_pos={} final_pos={} max_xy_delta={:.4f} max_z_delta={:.4f} "
-            "z_range=[{:.4f}, {:.4f}] max_speed={:.4f}"
-        ).format(
-            object_name,
-            steps,
-            float(getattr(model.opt, "timestep", 0.0)),
-            np.array2string(initial_pos, precision=4),
-            np.array2string(final_pos, precision=4),
-            max_xy_delta,
-            max_z_delta,
-            min_z,
-            max_z,
-            max_speed,
-        )
-        if failures:
-            logger.error("{} status=FAILED reason={}", message, ", ".join(failures))
-            fatal_raw = os.environ.get("HOLOSOMA_MUJOCO_STARTUP_OBJECT_CHECK_FATAL", "0").strip().lower()
-            if fatal_raw not in {"", "0", "false", "no", "off"}:
-                raise RuntimeError(f"MuJoCo startup object stability check failed: {', '.join(failures)}")
-        else:
-            logger.info("{} status=OK", message)
-
     def _maybe_setup_split_sim_perception(self) -> None:
         bridge_cfg = self.config.simulator.config.bridge
-        wants_publish = bool(getattr(bridge_cfg, "publish_perception_obs", False))
+        wants_publish = bool(getattr(bridge_cfg, "publish_perception_obs", False)) or bool(
+            getattr(bridge_cfg, "publish_perception_obs_shm", False)
+        )
         if not self.config.perception.enabled:
             if wants_publish:
                 raise ValueError(

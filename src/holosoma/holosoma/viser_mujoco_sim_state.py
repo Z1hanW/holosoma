@@ -9,8 +9,9 @@ import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
-from io import TextIOWrapper
+from io import StringIO, TextIOWrapper
 from pathlib import Path
 
 import numpy as np
@@ -637,7 +638,17 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     snapshot_path_default = _resolve_repo_path(cfg.mujoco_object_geom_snapshot_path)
 
     port = resolve_viser_port(cfg.port)
-    server = viser.ViserServer(port=port)
+    suppress_direct_url = os.environ.get("HOLOSOMA_VISER_SUPPRESS_DIRECT_URL", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if suppress_direct_url:
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            server = viser.ViserServer(port=port, verbose=False)
+    else:
+        server = viser.ViserServer(port=port, verbose=True)
     rollout_tty_input = bool(cfg.rollout_tty_input or _truthy_env(os.environ.get("HOLOSOMA_ROLLOUT_TTY_INPUT")))
     robot_root = server.scene.add_frame("/robot", show_axes=False)
     ref_root = server.scene.add_frame("/robot_ref", show_axes=bool(cfg.show_ref_body))
@@ -834,39 +845,8 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         )
         return True
 
-    with server.gui.add_folder("Sim State"):
-        state_md = server.gui.add_markdown("Waiting for simulator state...")
-        actor_md = server.gui.add_markdown("")
-
-    with server.gui.add_folder("Display"):
-        recenter_cb = server.gui.add_checkbox("Recenter XY", initial_value=bool(cfg.recenter_xy))
-        show_object_cb = server.gui.add_checkbox("Show object (MuJoCo)", initial_value=bool(cfg.show_object))
-        object_mesh_mode_dropdown = server.gui.add_dropdown(
-            "Object mesh",
-            options=OBJECT_MESH_MODE_OPTIONS,
-            initial_value=_resolve_object_mesh_mode(
-                cfg.object_mesh_mode,
-                show_object_collision=bool(cfg.show_object_collision),
-            ),
-        )
-        show_robot_collision_cb = server.gui.add_checkbox(
-            "Show robot collision (URDF)",
-            initial_value=bool(cfg.show_robot_collision),
-        )
-        show_ref_cb = server.gui.add_checkbox("Show policy ref body", initial_value=bool(cfg.show_ref_body))
-        reset_offset_btn = server.gui.add_button("Reset offset")
-
-    with server.gui.add_folder("Motion Overlay"):
-        show_motion_overlay_cb = server.gui.add_checkbox(
-            "Show motion overlay",
-            initial_value=bool(cfg.show_motion_overlay and motion_overlay is not None),
-        )
-        show_motion_robot_cb = server.gui.add_checkbox("Motion robot", initial_value=False)
-        show_motion_object_cb = server.gui.add_checkbox("Motion object", initial_value=False)
-        motion_md = server.gui.add_markdown("Motion overlay unavailable" if motion_overlay is None else "Waiting for sim-state...")
-
-    with server.gui.add_folder("Rollout"):
-        rollout_md = server.gui.add_markdown("Viewer only")
+    with server.gui.add_folder("Rollout", order=10.0):
+        rollout_md = server.gui.add_markdown("Viewer only", visible=False)
         motion_clip_dropdown = server.gui.add_dropdown(
             "Motion clip",
             options=motion_choices,
@@ -892,7 +872,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     if auto_motion_init_env not in {"raw_motion", "training_default_pose"}:
         auto_motion_init_env = ""
 
-    with server.gui.add_folder("Manual Root Command"):
+    with server.gui.add_folder("Manual Root Command", order=20.0):
         manual_root_enabled_cb = server.gui.add_checkbox("Manual mode", initial_value=bool(cfg.manual_root_enabled))
         manual_root_mode_dropdown = server.gui.add_dropdown(
             "Mode",
@@ -910,7 +890,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         max(int(cfg.depth_width), 1) * max(int(cfg.depth_display_scale), 1),
         3,
     )
-    with server.gui.add_folder("Depth"):
+    with server.gui.add_folder("Depth", order=30.0):
         show_depth_cb = server.gui.add_checkbox("Show policy depth", initial_value=bool(cfg.show_depth))
         depth_image = server.gui.add_image(
             np.zeros(depth_image_shape, dtype=np.uint8),
@@ -918,6 +898,40 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             visible=bool(cfg.show_depth),
         )
         depth_md = server.gui.add_markdown("Waiting for perception_obs...")
+
+    with server.gui.add_folder("Viser GUI", order=90.0, expand_by_default=False):
+        with server.gui.add_folder("Sim State", order=10.0, expand_by_default=False):
+            state_md = server.gui.add_markdown("Waiting for simulator state...")
+            actor_md = server.gui.add_markdown("")
+
+        with server.gui.add_folder("Display", order=20.0, expand_by_default=False):
+            recenter_cb = server.gui.add_checkbox("Recenter XY", initial_value=bool(cfg.recenter_xy))
+            show_object_cb = server.gui.add_checkbox("Show object (MuJoCo)", initial_value=bool(cfg.show_object))
+            object_mesh_mode_dropdown = server.gui.add_dropdown(
+                "Object mesh",
+                options=OBJECT_MESH_MODE_OPTIONS,
+                initial_value=_resolve_object_mesh_mode(
+                    cfg.object_mesh_mode,
+                    show_object_collision=bool(cfg.show_object_collision),
+                ),
+            )
+            show_robot_collision_cb = server.gui.add_checkbox(
+                "Show robot collision (URDF)",
+                initial_value=bool(cfg.show_robot_collision),
+            )
+            show_ref_cb = server.gui.add_checkbox("Show policy ref body", initial_value=bool(cfg.show_ref_body))
+            reset_offset_btn = server.gui.add_button("Reset offset")
+
+        with server.gui.add_folder("Motion Overlay", order=30.0, expand_by_default=False):
+            show_motion_overlay_cb = server.gui.add_checkbox(
+                "Show motion overlay",
+                initial_value=bool(cfg.show_motion_overlay and motion_overlay is not None),
+            )
+            show_motion_robot_cb = server.gui.add_checkbox("Motion robot", initial_value=False)
+            show_motion_object_cb = server.gui.add_checkbox("Motion object", initial_value=False)
+            motion_md = server.gui.add_markdown(
+                "Motion overlay unavailable" if motion_overlay is None else "Waiting for sim-state..."
+            )
 
     sub = SimStateSub(port=cfg.state_port)
     sub.start()
@@ -1229,8 +1243,8 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             env.pop("HOLOSOMA_RESET_TO_DEFAULT_POSE", None)
             env.pop("HOLOSOMA_DEFAULT_POSE_INIT", None)
             env.pop("HOLOSOMA_MOTION_INIT_MANUAL", None)
-            # Preserve an explicit object URDF from the launcher; without it, mj_track.sh
-            # falls back to per-motion metadata and can drift from the requested MuJoCo scene.
+            # The wrapper exports the initial clip object. Let mj_track.sh derive it again for the selected motion.
+            env.pop("OBJECT_URDF", None)
             env.pop("SIM2SIM_CLIP_OBJECT_URDF_PATH", None)
             if motion_init_env is not None:
                 if bool(manual_motion_init_mode_cb.value):
@@ -1483,7 +1497,11 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         manual_root_dyaw.value = 0.0
         _publish_manual_root_command()
 
-    logger.info("Open viser at http://localhost:{}", port)
+    announce_url = os.environ.get("HOLOSOMA_VISER_ANNOUNCE_URL", "").strip()
+    if announce_url:
+        logger.info("Open MuJoCo command+scene web at {}", announce_url)
+    if not suppress_direct_url:
+        logger.info("Open viser at http://localhost:{}", port)
     logger.info("Reading split MuJoCo sim-state from tcp://localhost:{}", cfg.state_port)
     logger.info("Reading split MuJoCo perception_obs from tcp://localhost:{}", cfg.perception_obs_port)
     _refresh_rollout_md()

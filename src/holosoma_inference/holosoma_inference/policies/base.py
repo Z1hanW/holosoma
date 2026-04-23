@@ -32,7 +32,7 @@ from holosoma_inference.sdk.interface_wrapper import InterfaceWrapper
 from holosoma_inference.sdk.zmq_interface_wrapper import ZmqSimInterfaceWrapper
 from holosoma_inference.utils.latency import LatencyTracker
 from holosoma_inference.utils.math.quat import quat_rotate_inverse
-from holosoma_inference.utils.perception_obs import PerceptionObsSub
+from holosoma_inference.utils.perception_obs import PerceptionObsShmSub, PerceptionObsSub
 from holosoma_inference.utils.rate import RateLimiter
 from holosoma_inference.utils.sim_control import PolicyControlPull
 from holosoma_inference.utils.wandb import load_checkpoint
@@ -179,9 +179,16 @@ class BasePolicy:
                 self.config.task.use_joystick,
             )
         self._perception_obs_sub: PerceptionObsSub | None = None
+        self._perception_obs_shm_sub: PerceptionObsShmSub | None = None
         if bool(getattr(self.config.task, "use_split_perception_obs", False)):
-            self._perception_obs_sub = PerceptionObsSub(port=self.config.task.perception_obs_port)
-            self._perception_obs_sub.start()
+            if bool(getattr(self.config.task, "use_split_perception_obs_shm", False)):
+                self._perception_obs_shm_sub = PerceptionObsShmSub(
+                    name=getattr(self.config.task, "perception_obs_shm_name", "depth_img_shm")
+                )
+                self._perception_obs_shm_sub.start()
+            else:
+                self._perception_obs_sub = PerceptionObsSub(port=self.config.task.perception_obs_port)
+                self._perception_obs_sub.start()
 
     def _init_policy_components(self, model_path, policy_action_scale, rl_rate):
         """Initialize policy-related components."""
@@ -631,6 +638,24 @@ class BasePolicy:
 
     def _get_split_perception_obs(self, expected_dim: int | None = None) -> np.ndarray:
         """Return the latest split-sim perception observation for ONNX perception inputs."""
+        if self._perception_obs_shm_sub is not None:
+            if expected_dim is None:
+                raise RuntimeError("Shared-memory perception obs requires a known expected dimension.")
+            obs = self._perception_obs_shm_sub.get_obs(int(expected_dim))
+            if obs is None:
+                deadline = time.perf_counter() + 2.0
+                while time.perf_counter() < deadline:
+                    obs = self._perception_obs_shm_sub.get_obs(int(expected_dim))
+                    if obs is not None:
+                        break
+                    time.sleep(0.01)
+            if obs is None:
+                raise RuntimeError("Timed out waiting for split-sim shared-memory perception_obs payload.")
+            if not hasattr(self, "_logged_split_perception_obs_shm"):
+                logger.info("Using split sim shared-memory perception_obs with {} values", obs.shape[1])
+                self._logged_split_perception_obs_shm = True
+            return obs
+
         if self._perception_obs_sub is None:
             raise RuntimeError(
                 "Policy expects perception_obs, but split perception subscription is disabled. "
@@ -800,6 +825,13 @@ class BasePolicy:
             self.logger.info("Valid robot state received; resuming policy command loop.")
             self._logged_waiting_for_robot_state = False
 
+        if self._policy_control_sub is not None and not self.use_policy_action and not self.get_ready_state:
+            if not getattr(self, "_logged_waiting_for_external_policy_start", False):
+                self.logger.info("Policy control is waiting for external start; not sending lowcmd yet.")
+                self._logged_waiting_for_external_policy_start = True
+            return
+        self._logged_waiting_for_external_policy_start = False
+
         # Stage 2: Pre-processing
         with self.latency_tracker.measure("preprocessing"):
             if (
@@ -928,20 +960,21 @@ class BasePolicy:
                 self._print_control_status()
 
     def _process_external_policy_controls(self):
-        """Apply start/stop/init commands received from the browser command panel."""
+        """Apply start/stop/init/space commands received from the command web."""
         sub = self._policy_control_sub
         if sub is None:
             return
+        key_by_action = {
+            "start": "]",
+            "stop": "o",
+            "init": "i",
+            "space": "space",
+        }
         for action in sub.get_actions():
             self.logger.info("Received external policy control action: {}", action)
-            if action == "start":
-                self._handle_start_policy()
-            elif action == "stop":
-                self._handle_stop_policy()
-                if hasattr(self.interface, "no_action"):
-                    self.interface.no_action = 1
-            elif action == "init":
-                self._handle_init_state()
+            key = key_by_action.get(action)
+            if key is not None:
+                self.handle_keyboard_button(key)
 
     # ============================================================================
     # Button Handler Methods

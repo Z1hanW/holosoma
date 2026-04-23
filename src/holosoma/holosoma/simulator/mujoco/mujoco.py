@@ -414,16 +414,7 @@ class MuJoCo(BaseSimulator):
         collision configuration and scene element integration.
         """
         terrain_state = self.terrain_manager.get_state("locomotion_terrain")
-        skip_scene_terrain = os.environ.get("HOLOSOMA_MUJOCO_SKIP_SCENE_TERRAIN", "").strip().lower() not in {
-            "",
-            "0",
-            "false",
-            "no",
-            "off",
-        }
-        if skip_scene_terrain:
-            logger.info("Skipping programmatic MuJoCo terrain scene elements; using robot XML scene contents")
-        elif terrain_state.mesh_type not in ["none", "fake"]:
+        if terrain_state.mesh_type not in ["none", "fake"]:
             # For now, use mesh type to decide whether to programmatically
             # setup scene, terrain, etc. Cannot use "none" since env code relies on none
             # to literally mean none, so we use "fake"

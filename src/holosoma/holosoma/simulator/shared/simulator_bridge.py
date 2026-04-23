@@ -18,7 +18,7 @@ from loguru import logger
 from holosoma.bridge import BasicSdk2Bridge, create_sdk2py_bridge
 from holosoma.config_types.simulator import BridgeConfig
 from holosoma.utils.clock import ClockPub
-from holosoma.utils.perception_obs import PerceptionObsPub
+from holosoma.utils.perception_obs import PerceptionObsPub, PerceptionObsShmPub
 from holosoma.utils.sim_control import SimControlPull
 from holosoma.utils.sim_state import SimStatePub
 from holosoma.utils.safe_torch_import import torch
@@ -58,6 +58,7 @@ class SimulatorBridge:
         self.robot_bridge: BasicSdk2Bridge | None = None
         self.sim_state_pub: SimStatePub | None = None
         self.perception_obs_pub: PerceptionObsPub | None = None
+        self.perception_obs_shm_pub: PerceptionObsShmPub | None = None
         self.sim_control_sub: SimControlPull | None = None
         self._logged_perception_obs_publish = False
         self._use_zmq_lowcmd = bool(getattr(self.bridge_config, "use_zmq_lowcmd", False))
@@ -98,6 +99,11 @@ class SimulatorBridge:
             if self.bridge_config.publish_perception_obs:
                 self.perception_obs_pub = PerceptionObsPub(port=self.bridge_config.perception_obs_port)
                 self.perception_obs_pub.start()
+            if bool(getattr(self.bridge_config, "publish_perception_obs_shm", False)):
+                self.perception_obs_shm_pub = PerceptionObsShmPub(
+                    name=getattr(self.bridge_config, "perception_obs_shm_name", "depth_img_shm")
+                )
+                self.perception_obs_shm_pub.start()
             # Start clock publisher for motion synchronization
             self.clock_pub.start()
             logger.info("Clock publisher initialized for motion synchronization")
@@ -429,7 +435,7 @@ class SimulatorBridge:
             logger.debug("Failed to publish sim state: {}", exc)
 
     def _publish_perception_obs(self) -> None:
-        if self.perception_obs_pub is None:
+        if self.perception_obs_pub is None and self.perception_obs_shm_pub is None:
             return
 
         provider = getattr(self.simulator, "_split_sim_perception_provider", None)
@@ -443,12 +449,15 @@ class SimulatorBridge:
             if not self._logged_perception_obs_publish:
                 logger.info("Publishing split sim perception obs with {} values", len(perception_obs))
                 self._logged_perception_obs_publish = True
-            self.perception_obs_pub.publish(
-                {
-                    "sim_time_ms": int(self.simulator.time() * 1000.0),
-                    "perception_obs": perception_obs,
-                }
-            )
+            if self.perception_obs_pub is not None:
+                self.perception_obs_pub.publish(
+                    {
+                        "sim_time_ms": int(self.simulator.time() * 1000.0),
+                        "perception_obs": perception_obs,
+                    }
+                )
+            if self.perception_obs_shm_pub is not None:
+                self.perception_obs_shm_pub.publish(perception_obs)
         except Exception as exc:  # pragma: no cover - best effort side-channel
             logger.warning("Failed to publish perception obs: {}", exc)
 

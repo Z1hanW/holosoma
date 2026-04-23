@@ -459,13 +459,6 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         if self.use_policy_action:
             self._handle_start_policy()
-        elif (
-            bool(getattr(self.config.task, "use_zmq_lowcmd", False))
-            and not _truthy_env("HOLOSOMA_ZMQ_ACTIVE_BEFORE_POLICY_START")
-            and hasattr(self.interface, "no_action")
-        ):
-            self.interface.no_action = 1
-            logger.info("ZMQ lowcmd will stay inactive until policy start; press ']' to enable policy actions.")
 
         # Load stiff startup parameters from robot config
         if config.robot.stiff_startup_pos is not None:
@@ -1803,7 +1796,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             with self._keyboard_sparse_root_lock:
                 self._keyboard_sparse_root_pressed_keys.add(key)
             return
-        if keycode == "s":
+        if key in {"space", " ", "s"}:
             self.clock_sub.reset_origin()
             self._handle_start_motion_clip()
         else:

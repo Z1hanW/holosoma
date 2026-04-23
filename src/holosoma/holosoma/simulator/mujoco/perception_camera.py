@@ -52,14 +52,10 @@ class MuJoCoDepthCamera:
         self._intrinsics = intrinsics
         self._use_user_gl_camera = bool(getattr(config, "camera_strict_warp", False))
         flip_env = os.environ.get("HOLOSOMA_MUJOCO_RENDERED_DEPTH_FLIPUD", "").strip().lower()
-        # MuJoCo's Python Renderer.render() returns conventional top-down image
-        # rows, while the strict far-tracking warp policy path uses the opposite
-        # row convention. Default to a vertical flip for strict cameras to match
-        # the policy training input, with an env override for diagnostics.
+        # Keep MuJoCo render rows as returned by Renderer.render(); this matches the
+        # far-tracking warp policy input. The env override is kept for diagnostics.
         self._flip_render_array_vertical = (
-            self._use_user_gl_camera
-            if flip_env == ""
-            else flip_env not in {"0", "false", "no", "off"}
+            False if flip_env == "" else flip_env not in {"0", "false", "no", "off"}
         )
 
         self._renderer: mujoco.Renderer | None = None
