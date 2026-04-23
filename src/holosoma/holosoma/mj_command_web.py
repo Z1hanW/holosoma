@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import json
 import math
+import os
 import signal
 import sys
 import threading
@@ -219,6 +220,9 @@ INDEX_HTML = """<!doctype html>
     <label>Manual mode
       <input id="enabled" type="checkbox" />
     </label>
+    <label>Default pose init
+      <input id="resetToDefaultPose" type="checkbox" />
+    </label>
     <label>XY value
       <input id="value" type="number" value="__VALUE_ATTR__" min="0" max="3" step="0.05" />
     </label>
@@ -238,7 +242,9 @@ INDEX_HTML = """<!doctype html>
 <script>
 const pressed = new Set();
 const controlKeys = new Set(["w", "s", "a", "d", "q", "e"]);
+const oppositeKey = {w: "s", s: "w", a: "d", d: "a", q: "e", e: "q"};
 const enabled = document.getElementById("enabled");
+const resetToDefaultPose = document.getElementById("resetToDefaultPose");
 const value = document.getElementById("value");
 const yawDegrees = document.getElementById("yawDegrees");
 const mode = document.getElementById("mode");
@@ -246,12 +252,18 @@ const state = document.getElementById("state");
 const policyStatus = document.getElementById("policyStatus");
 const ports = document.getElementById("ports");
 const message = document.getElementById("message");
-const sceneUrl = __SCENE_URL_JSON__;
+const appBaseUrl = new URL("./", window.location.href);
+function resolveAppUrl(path) {
+  return new URL(path, appBaseUrl).toString();
+}
+const sceneUrlRaw = __SCENE_URL_JSON__;
+const sceneUrl = sceneUrlRaw ? resolveAppUrl(sceneUrlRaw) : "";
 const scenePanel = document.getElementById("scenePanel");
 const sceneFrame = document.getElementById("sceneFrame");
 const sceneLink = document.getElementById("sceneLink");
 let sceneKeyWindow = null;
 enabled.checked = __ENABLED_JSON__;
+resetToDefaultPose.checked = __RESET_TO_DEFAULT_POSE_JSON__;
 mode.value = __MODE_JSON__;
 if (sceneUrl) {
   sceneFrame.src = sceneUrl;
@@ -293,12 +305,13 @@ async function sendCommand() {
   const body = {
     keys: Array.from(pressed),
     enabled: enabled.checked,
+    reset_to_default_pose: resetToDefaultPose.checked,
     value: Math.abs(Number(value.value) || 0),
     yaw_degrees: Math.abs(Number(yawDegrees.value) || 0),
     mode: mode.value,
   };
   try {
-    const response = await fetch("/command", {
+    const response = await fetch(resolveAppUrl("command"), {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify(body),
@@ -319,10 +332,34 @@ async function sendCommand() {
   }
 }
 
+async function sendReset(reason = "web_command_reset") {
+  pressed.clear();
+  await sendCommand();
+  try {
+    const response = await fetch(resolveAppUrl("reset"), {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        reason,
+        reset_to_default_pose: resetToDefaultPose.checked,
+      }),
+    });
+    const payload = await response.json();
+    if (payload) updatePorts(payload);
+    if (!response.ok) {
+      message.textContent = payload.error || "reset failed";
+      return;
+    }
+    message.textContent = `Reset requested (${payload.motion_init_mode || "unknown"}).`;
+  } catch (err) {
+    message.textContent = `reset failed: ${err}`;
+  }
+}
+
 async function sendPolicy(action) {
   const label = policyActionLabel(action);
   try {
-    const response = await fetch("/policy", {
+    const response = await fetch(resolveAppUrl("policy"), {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({action}),
@@ -345,6 +382,16 @@ async function sendPolicy(action) {
   }
 }
 
+function toggleControlKey(key) {
+  const opposite = oppositeKey[key];
+  if (pressed.has(key)) {
+    pressed.delete(key);
+    return;
+  }
+  if (opposite) pressed.delete(opposite);
+  pressed.add(key);
+}
+
 function policyActionLabel(action) {
   if (action === "rollout_start") return "Space + ]";
   if (action === "space") return "Space";
@@ -365,9 +412,14 @@ function handleKeyDown(event) {
     sendPolicy("space");
     return;
   }
+  if (!event.repeat && key === "backspace") {
+    event.preventDefault();
+    sendReset("web_command_backspace_reset");
+    return;
+  }
   if (!controlKeys.has(key) || event.repeat) return;
   event.preventDefault();
-  pressed.add(key);
+  toggleControlKey(key);
   sendCommand();
 }
 
@@ -375,8 +427,6 @@ function handleKeyUp(event) {
   const key = event.key.toLowerCase();
   if (!controlKeys.has(key)) return;
   event.preventDefault();
-  pressed.delete(key);
-  sendCommand();
 }
 
 function attachSceneKeyHandlers() {
@@ -385,10 +435,6 @@ function attachSceneKeyHandlers() {
     sceneKeyWindow = sceneFrame.contentWindow;
     sceneKeyWindow.addEventListener("keydown", handleKeyDown, true);
     sceneKeyWindow.addEventListener("keyup", handleKeyUp, true);
-    sceneKeyWindow.addEventListener("blur", () => {
-      pressed.clear();
-      sendCommand();
-    });
   } catch (err) {
     console.debug("scene key handlers unavailable", err);
   }
@@ -398,12 +444,8 @@ document.addEventListener("keydown", handleKeyDown, true);
 document.addEventListener("keyup", handleKeyUp, true);
 sceneFrame.addEventListener("load", attachSceneKeyHandlers);
 
-window.addEventListener("blur", () => {
-  pressed.clear();
-  sendCommand();
-});
-
 enabled.addEventListener("change", sendCommand);
+resetToDefaultPose.addEventListener("change", sendCommand);
 value.addEventListener("change", sendCommand);
 yawDegrees.addEventListener("change", sendCommand);
 mode.addEventListener("change", sendCommand);
@@ -412,13 +454,7 @@ document.getElementById("zero").addEventListener("click", () => {
   sendCommand();
 });
 document.getElementById("reset").addEventListener("click", async () => {
-  pressed.clear();
-  await sendCommand();
-  await fetch("/reset", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({reason: "web_command_reset"}),
-  });
+  await sendReset("web_command_reset");
 });
 document.getElementById("policyStart").addEventListener("click", () => sendPolicy("start"));
 document.getElementById("policySpace").addEventListener("click", () => sendPolicy("space"));
@@ -443,6 +479,7 @@ class CommandState:
         yaw_value: float,
         mode: str,
         enabled: bool,
+        reset_to_default_pose: bool,
     ) -> None:
         self.sparse_root_command_port = int(sparse_root_command_port)
         self.control_port = int(control_port)
@@ -451,6 +488,7 @@ class CommandState:
         self.yaw_value = abs(float(yaw_value))
         self.mode = str(mode)
         self.enabled = bool(enabled)
+        self.reset_to_default_pose = bool(reset_to_default_pose)
         self.keys: set[str] = set()
         self.lock = threading.Lock()
         self.pub = ManualRootCommandPub(port=self.sparse_root_command_port)
@@ -482,6 +520,8 @@ class CommandState:
         with self.lock:
             if "enabled" in payload:
                 self.enabled = bool(payload["enabled"])
+            if "reset_to_default_pose" in payload:
+                self.reset_to_default_pose = bool(payload["reset_to_default_pose"])
             if "value" in payload:
                 try:
                     self.value = abs(float(payload["value"]))
@@ -526,8 +566,15 @@ class CommandState:
             mode = self.mode
         self.pub.publish(enabled=enabled, mode=mode, command=command)
 
-    def request_reset(self, reason: str) -> None:
-        self.control_pub.request_reset(reason)
+    def request_reset(self, reason: str, *, reset_to_default_pose: bool | None = None) -> dict[str, Any]:
+        with self.lock:
+            if reset_to_default_pose is not None:
+                self.reset_to_default_pose = bool(reset_to_default_pose)
+            motion_init_mode = "training_default_pose" if self.reset_to_default_pose else "raw_motion"
+        self.control_pub.request_reset(reason, motion_init_mode=motion_init_mode)
+        response = self.snapshot()
+        response.update({"ok": True, "reason": str(reason), "motion_init_mode": motion_init_mode})
+        return response
 
     def request_policy(self, action: str) -> bool:
         if self.policy_pub is None:
@@ -554,6 +601,7 @@ class CommandState:
                 "yaw_degrees": math.degrees(self.yaw_value),
                 "keys": sorted(self.keys),
                 "command": command,
+                "reset_to_default_pose": self.reset_to_default_pose,
                 "publisher_enabled": bool(self.pub.enabled),
                 "sparse_root_command_port": self.sparse_root_command_port,
                 "control_port": self.control_port,
@@ -696,8 +744,8 @@ async def _create_app(args: argparse.Namespace, command_state: CommandState, ind
         if not isinstance(payload, dict):
             payload = {}
         reason = str(payload.get("reason") or "web_command_reset")
-        command_state.request_reset(reason)
-        return web.json_response({"ok": True, "reason": reason})
+        reset_to_default_pose = payload.get("reset_to_default_pose")
+        return web.json_response(command_state.request_reset(reason, reset_to_default_pose=reset_to_default_pose))
 
     async def policy(request: web.Request) -> web.Response:
         try:
@@ -763,10 +811,16 @@ def main() -> None:
     parser.add_argument("--mode", choices=("manual", "offset"), default="manual")
     parser.add_argument("--scene-url", default="")
     parser.add_argument("--scene-proxy-url", default="")
+    default_reset_to_default_pose = (
+        os.environ.get("SIM_MOTION_INIT_MODE", "").strip().lower().replace("-", "_") == "training_default_pose"
+    )
+    reset_group = parser.add_mutually_exclusive_group()
+    reset_group.add_argument("--reset-to-default-pose", dest="reset_to_default_pose", action="store_true")
+    reset_group.add_argument("--no-reset-to-default-pose", dest="reset_to_default_pose", action="store_false")
     enabled_group = parser.add_mutually_exclusive_group()
     enabled_group.add_argument("--enabled", dest="enabled", action="store_true", help="Start with manual command enabled.")
     enabled_group.add_argument("--no-enabled", dest="enabled", action="store_false", help="Start with manual command disabled.")
-    parser.set_defaults(enabled=False)
+    parser.set_defaults(enabled=False, reset_to_default_pose=default_reset_to_default_pose)
     parser.add_argument("--publish-rate-hz", type=float, default=20.0)
     args = parser.parse_args()
     yaw_value = (
@@ -783,6 +837,7 @@ def main() -> None:
         yaw_value=yaw_value,
         mode=args.mode,
         enabled=bool(args.enabled),
+        reset_to_default_pose=bool(args.reset_to_default_pose),
     )
     command_state.start()
 
@@ -796,12 +851,13 @@ def main() -> None:
 
     scene_url = str(args.scene_url or "")
     if args.scene_proxy_url and not scene_url:
-        scene_url = "/scene/"
+        scene_url = "scene/"
     index_html = (
         INDEX_HTML.replace("__SCENE_URL_JSON__", json.dumps(scene_url))
         .replace("__VALUE_ATTR__", f"{abs(float(args.value)):.6g}")
         .replace("__YAW_DEGREES_ATTR__", f"{math.degrees(yaw_value):.6g}")
         .replace("__ENABLED_JSON__", json.dumps(bool(args.enabled)))
+        .replace("__RESET_TO_DEFAULT_POSE_JSON__", json.dumps(bool(args.reset_to_default_pose)))
         .replace("__MODE_JSON__", json.dumps(str(args.mode)))
     )
 
@@ -818,11 +874,12 @@ def main() -> None:
     elif scene_url:
         logger.info("Showing MuJoCo scene iframe from {}", scene_url)
     logger.info(
-        "Publishing sparse-root command on port {}, reset control on port {}, policy control on port {}, manual enabled={}, xy value {:.3f}, yaw {:.3f} rad ({:.1f} deg)",
+        "Publishing sparse-root command on port {}, reset control on port {}, policy control on port {}, manual enabled={}, reset_to_default_pose={}, xy value {:.3f}, yaw {:.3f} rad ({:.1f} deg)",
         args.sparse_root_command_port,
         args.control_port,
         args.policy_control_port,
         bool(args.enabled),
+        bool(args.reset_to_default_pose),
         abs(float(args.value)),
         yaw_value,
         math.degrees(yaw_value),

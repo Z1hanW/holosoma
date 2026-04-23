@@ -653,98 +653,148 @@ class DirectSimulation:
             body_lin_vel_w = np.asarray(data["body_lin_vel_w"][frame_idx], dtype=np.float32)
             body_ang_vel_w = np.asarray(data["body_ang_vel_w"][frame_idx], dtype=np.float32)
 
-            root_pos = body_pos_w[root_idx]
-            root_quat_wxyz = body_quat_w[root_idx]
-            root_lin_vel = body_lin_vel_w[root_idx]
-            root_ang_vel = body_ang_vel_w[root_idx]
-
+            base_root_pos = np.asarray(body_pos_w[root_idx], dtype=np.float32)
+            base_root_quat_wxyz = np.asarray(body_quat_w[root_idx], dtype=np.float32)
+            base_root_lin_vel = np.asarray(body_lin_vel_w[root_idx], dtype=np.float32)
+            base_root_ang_vel = np.asarray(body_ang_vel_w[root_idx], dtype=np.float32)
+            has_object_motion = "object_pos_w" in data and motion_init_cfg.object_name
             joint_name_to_index = {name: i for i, name in enumerate(joint_names)}
-            dof_pos = np.array(self.simulator.dof_pos[0].detach().cpu().numpy(), dtype=np.float32, copy=True)
-            dof_vel = np.array(self.simulator.dof_vel[0].detach().cpu().numpy(), dtype=np.float32, copy=True)
-            if init_mode == "raw_motion":
-                for sim_idx, sim_name in enumerate(self.simulator.dof_names):
-                    clip_idx = joint_name_to_index.get(sim_name)
-                    if clip_idx is None:
-                        continue
-                    dof_pos[sim_idx] = float(joint_pos[clip_idx])
-                    dof_vel[sim_idx] = float(joint_vel[clip_idx])
-                root_quat_xyzw = np.array(
-                    [root_quat_wxyz[1], root_quat_wxyz[2], root_quat_wxyz[3], root_quat_wxyz[0]],
-                    dtype=np.float32,
+
+            def _build_motion_init_state(init_mode_name: str) -> dict[str, Any]:
+                root_pos = np.array(base_root_pos, dtype=np.float32, copy=True)
+                root_quat_wxyz = np.array(base_root_quat_wxyz, dtype=np.float32, copy=True)
+                root_lin_vel = np.array(base_root_lin_vel, dtype=np.float32, copy=True)
+                root_ang_vel = np.array(base_root_ang_vel, dtype=np.float32, copy=True)
+                dof_pos = np.array(self.simulator.dof_pos[0].detach().cpu().numpy(), dtype=np.float32, copy=True)
+                dof_vel = np.array(self.simulator.dof_vel[0].detach().cpu().numpy(), dtype=np.float32, copy=True)
+
+                if init_mode_name == "raw_motion":
+                    for sim_idx, sim_name in enumerate(self.simulator.dof_names):
+                        clip_idx = joint_name_to_index.get(sim_name)
+                        if clip_idx is None:
+                            continue
+                        dof_pos[sim_idx] = float(joint_pos[clip_idx])
+                        dof_vel[sim_idx] = float(joint_vel[clip_idx])
+                    root_quat_xyzw = np.array(
+                        [root_quat_wxyz[1], root_quat_wxyz[2], root_quat_wxyz[3], root_quat_wxyz[0]],
+                        dtype=np.float32,
+                    )
+                elif init_mode_name == "training_default_pose":
+                    init_state = self.config.robot.init_state
+                    default_joint_angles = getattr(init_state, "default_joint_angles", {}) or {}
+                    for sim_idx, sim_name in enumerate(self.simulator.dof_names):
+                        if sim_name in default_joint_angles:
+                            dof_pos[sim_idx] = float(default_joint_angles[sim_name])
+                    init_root_quat = torch.tensor(init_state.rot, dtype=torch.float32, device=self.device).unsqueeze(0)
+                    init_roll, init_pitch, _ = get_euler_xyz(init_root_quat, w_last=True)
+                    motion_root_quat = torch.tensor(root_quat_wxyz, dtype=torch.float32, device=self.device).unsqueeze(0)
+                    _, _, motion_yaw = get_euler_xyz(motion_root_quat, w_last=False)
+                    default_root_quat_xyzw = quat_from_euler_xyz(
+                        init_roll.squeeze(0),
+                        init_pitch.squeeze(0),
+                        motion_yaw.squeeze(0),
+                    )
+                    root_pos = np.array([root_pos[0], root_pos[1], init_state.pos[2]], dtype=np.float32)
+                    root_quat_xyzw = (
+                        default_root_quat_xyzw.squeeze(0).detach().cpu().numpy().astype(np.float32, copy=False)
+                    )
+                    root_lin_vel = np.asarray(init_state.lin_vel, dtype=np.float32)
+                    root_ang_vel = np.asarray(init_state.ang_vel, dtype=np.float32)
+                    dof_vel = np.zeros_like(dof_pos, dtype=np.float32)
+                else:
+                    raise ValueError(
+                        f"Unsupported motion-init.mode='{init_mode_name}'. Expected 'raw_motion' or 'training_default_pose'."
+                    )
+
+                root_state = torch.tensor(
+                    [[*root_pos.tolist(), *root_quat_xyzw.tolist(), *root_lin_vel.tolist(), *root_ang_vel.tolist()]],
+                    device=self.device,
+                    dtype=torch.float32,
                 )
-            elif init_mode == "training_default_pose":
-                init_state = self.config.robot.init_state
-                default_joint_angles = getattr(init_state, "default_joint_angles", {}) or {}
-                for sim_idx, sim_name in enumerate(self.simulator.dof_names):
-                    if sim_name in default_joint_angles:
-                        dof_pos[sim_idx] = float(default_joint_angles[sim_name])
-                init_root_quat = torch.tensor(init_state.rot, dtype=torch.float32, device=self.device).unsqueeze(0)
-                init_roll, init_pitch, _ = get_euler_xyz(init_root_quat, w_last=True)
-                motion_root_quat = torch.tensor(root_quat_wxyz, dtype=torch.float32, device=self.device).unsqueeze(0)
-                _, _, motion_yaw = get_euler_xyz(motion_root_quat, w_last=False)
-                default_root_quat_xyzw = quat_from_euler_xyz(
-                    init_roll.squeeze(0),
-                    init_pitch.squeeze(0),
-                    motion_yaw.squeeze(0),
-                )
-                root_pos = np.array([root_pos[0], root_pos[1], init_state.pos[2]], dtype=np.float32)
-                root_quat_xyzw = default_root_quat_xyzw.squeeze(0).detach().cpu().numpy().astype(np.float32, copy=False)
-                root_lin_vel = np.asarray(init_state.lin_vel, dtype=np.float32)
-                root_ang_vel = np.asarray(init_state.ang_vel, dtype=np.float32)
-                dof_vel = np.zeros_like(dof_pos, dtype=np.float32)
-            else:
+                dof_state = torch.stack(
+                    [
+                        torch.tensor(dof_pos, device=self.device, dtype=torch.float32),
+                        torch.tensor(dof_vel, device=self.device, dtype=torch.float32),
+                    ],
+                    dim=-1,
+                ).unsqueeze(0)
+
+                object_state = None
+                desired_object_state = None
+                actor_states: dict[str, torch.Tensor] = {}
+                if has_object_motion:
+                    object_pos = np.asarray(data["object_pos_w"][frame_idx], dtype=np.float32)
+                    object_quat_wxyz = np.asarray(data["object_quat_w"][frame_idx], dtype=np.float32)
+                    object_quat_xyzw = np.array(
+                        [object_quat_wxyz[1], object_quat_wxyz[2], object_quat_wxyz[3], object_quat_wxyz[0]],
+                        dtype=np.float32,
+                    )
+                    object_lin_vel = np.asarray(data["object_lin_vel_w"][frame_idx], dtype=np.float32)
+                    object_ang_vel = np.zeros(3, dtype=np.float32)
+                    object_state = torch.tensor(
+                        [[
+                            *object_pos.tolist(),
+                            *object_quat_xyzw.tolist(),
+                            *object_lin_vel.tolist(),
+                            *object_ang_vel.tolist(),
+                        ]],
+                        device=self.device,
+                        dtype=torch.float32,
+                    )
+                    desired_object_state = object_state[0].detach().cpu().numpy().astype(np.float32, copy=False)
+                    actor_states[str(motion_init_cfg.object_name)] = object_state.detach().clone()
+
+                return {
+                    "root_state": root_state,
+                    "dof_state": dof_state,
+                    "actor_states": actor_states,
+                    "desired_root_state_np": root_state[0].detach().cpu().numpy().astype(np.float32, copy=False),
+                    "desired_dof_pos_np": dof_state[0, :, 0].detach().cpu().numpy().astype(np.float32, copy=False),
+                    "desired_object_state_np": desired_object_state,
+                    "object_state": object_state,
+                }
+
+            reset_states_by_mode = {
+                "raw_motion": _build_motion_init_state("raw_motion"),
+                "training_default_pose": _build_motion_init_state("training_default_pose"),
+            }
+            if init_mode not in reset_states_by_mode:
                 raise ValueError(
                     f"Unsupported motion-init.mode='{motion_init_cfg.mode}'. "
                     "Expected 'raw_motion' or 'training_default_pose'."
                 )
+            active_state = reset_states_by_mode[init_mode]
+            root_state = active_state["root_state"]
+            dof_state = active_state["dof_state"]
+            object_state = active_state["object_state"]
+            desired_root_state_np = active_state["desired_root_state_np"]
+            desired_dof_pos_np = active_state["desired_dof_pos_np"]
+            desired_object_state_np = active_state["desired_object_state_np"]
 
-            root_state = torch.tensor(
-                [[*root_pos.tolist(), *root_quat_xyzw.tolist(), *root_lin_vel.tolist(), *root_ang_vel.tolist()]],
-                device=self.device,
-                dtype=torch.float32,
-            )
-            desired_root_state_np = root_state[0].detach().cpu().numpy().astype(np.float32, copy=False)
             self.simulator.robot_root_states[0] = root_state[0]
-
-            dof_state = torch.stack(
-                [
-                    torch.tensor(dof_pos, device=self.device, dtype=torch.float32),
-                    torch.tensor(dof_vel, device=self.device, dtype=torch.float32),
-                ],
-                dim=-1,
-            ).unsqueeze(0)
-            desired_dof_pos_np = dof_state[0, :, 0].detach().cpu().numpy().astype(np.float32, copy=False)
             self.simulator.set_dof_state_tensor_robots(env_ids, dof_state)
             self.simulator.set_actor_root_state_tensor_robots(env_ids, root_state)
-
-            has_object_motion = "object_pos_w" in data and motion_init_cfg.object_name
-            if has_object_motion:
-                object_pos = np.asarray(data["object_pos_w"][frame_idx], dtype=np.float32)
-                object_quat_wxyz = np.asarray(data["object_quat_w"][frame_idx], dtype=np.float32)
-                object_quat_xyzw = np.array(
-                    [object_quat_wxyz[1], object_quat_wxyz[2], object_quat_wxyz[3], object_quat_wxyz[0]],
-                    dtype=np.float32,
-                )
-                object_lin_vel = np.asarray(data["object_lin_vel_w"][frame_idx], dtype=np.float32)
-                # Match WBT training resets, which keep the clip's object linear velocity
-                # but zero angular velocity on reset.
-                object_ang_vel = np.zeros(3, dtype=np.float32)
-                object_state = torch.tensor(
-                    [[*object_pos.tolist(), *object_quat_xyzw.tolist(), *object_lin_vel.tolist(), *object_ang_vel.tolist()]],
-                    device=self.device,
-                    dtype=torch.float32,
-                )
-                desired_object_state_np = object_state[0].detach().cpu().numpy().astype(np.float32, copy=False)
+            if has_object_motion and object_state is not None:
                 self.simulator.set_actor_states([motion_init_cfg.object_name], env_ids, object_state)
 
-            # Preserve the motion-init state so MuJoCo split sim resets/restarts return to the
-            # same clip start pose instead of the raw URDF default pose.
-            self.simulator._motion_init_reset_root_state = root_state.detach().clone()
-            self.simulator._motion_init_reset_dof_state = dof_state.detach().clone()
-            motion_init_actor_states: dict[str, torch.Tensor] = {}
-            if has_object_motion:
-                motion_init_actor_states[str(motion_init_cfg.object_name)] = object_state.detach().clone()
-            self.simulator._motion_init_reset_actor_states = motion_init_actor_states
+            self.simulator._motion_init_reset_states_by_mode = {
+                str(mode_name): {
+                    "root_state": state["root_state"].detach().clone(),
+                    "dof_state": state["dof_state"].detach().clone(),
+                    "actor_states": {
+                        str(actor_name): actor_state.detach().clone()
+                        for actor_name, actor_state in dict(state["actor_states"]).items()
+                    },
+                }
+                for mode_name, state in reset_states_by_mode.items()
+            }
+            self.simulator._motion_init_reset_mode = init_mode
+            self.simulator._motion_init_reset_root_state = active_state["root_state"].detach().clone()
+            self.simulator._motion_init_reset_dof_state = active_state["dof_state"].detach().clone()
+            self.simulator._motion_init_reset_actor_states = {
+                str(actor_name): actor_state.detach().clone()
+                for actor_name, actor_state in dict(active_state["actor_states"]).items()
+            }
 
         if hasattr(self.simulator, "write_state_updates"):
             self.simulator.write_state_updates()

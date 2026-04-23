@@ -42,10 +42,13 @@ class SimControlPush:
         except Exception as exc:
             logger.warning("Sim control publish failed: {}", exc)
 
-    def request_reset(self, reason: str) -> None:
+    def request_reset(self, reason: str, motion_init_mode: str | None = None) -> None:
         if not self.enabled or self.socket is None:
             return
-        payload = json.dumps({"action": "reset", "reason": str(reason)})
+        payload_dict = {"action": "reset", "reason": str(reason)}
+        if motion_init_mode is not None:
+            payload_dict["motion_init_mode"] = str(motion_init_mode)
+        payload = json.dumps(payload_dict)
         for _ in range(20):
             try:
                 self.socket.send_string(payload, zmq.NOBLOCK)

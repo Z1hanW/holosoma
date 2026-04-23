@@ -250,11 +250,42 @@ class SimulatorBridge:
             action = str(payload.get("action", "")).lower()
             if action == "reset":
                 reason = str(payload.get("reason", "manual"))
+                motion_init_mode = str(payload.get("motion_init_mode", "")).strip().lower().replace("-", "_")
+                if motion_init_mode in {"raw_motion", "training_default_pose"}:
+                    reset_states = getattr(self.simulator, "_motion_init_reset_states_by_mode", None)
+                    if isinstance(reset_states, dict):
+                        state = reset_states.get(motion_init_mode)
+                        if isinstance(state, dict):
+                            root_state = state.get("root_state")
+                            dof_state = state.get("dof_state")
+                            actor_states = state.get("actor_states", {})
+                            if root_state is not None and dof_state is not None:
+                                self.simulator._motion_init_reset_mode = motion_init_mode
+                                self.simulator._motion_init_reset_root_state = root_state.detach().clone()
+                                self.simulator._motion_init_reset_dof_state = dof_state.detach().clone()
+                                self.simulator._motion_init_reset_actor_states = {
+                                    str(name): tensor.detach().clone() for name, tensor in dict(actor_states).items()
+                                }
+                                logger.info("Selected motion-init reset mode from sim-control: {}", motion_init_mode)
+                            else:
+                                logger.warning(
+                                    "Ignoring sim-control motion_init_mode={} because cached reset tensors are incomplete",
+                                    motion_init_mode,
+                                )
+                        else:
+                            logger.warning(
+                                "Ignoring sim-control motion_init_mode={} because no cached reset state was found",
+                                motion_init_mode,
+                            )
                 if hasattr(self.simulator, "_pending_reset"):
                     self.simulator._pending_reset = True
                 if self._use_zmq_lowcmd:
                     self._reset_zmq_lowcmd_runtime_state()
-                logger.info("Queued simulator reset from sim-control channel ({})", reason)
+                logger.info(
+                    "Queued simulator reset from sim-control channel ({}, motion_init_mode={})",
+                    reason,
+                    motion_init_mode or "unchanged",
+                )
                 continue
             if action == "lowcmd" and self._use_zmq_lowcmd:
                 self._latest_lowcmd_payload = payload
