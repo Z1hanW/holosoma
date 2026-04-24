@@ -274,6 +274,48 @@ _terrain_transformer_module_dict = PPOModuleDictConfig(
     ),
 )
 
+_terrain_transformer_future5_layer = replace(
+    _terrain_transformer_layer,
+    encoder_num_steps=5,
+)
+
+_terrain_transformer_future5_module_dict = PPOModuleDictConfig(
+    actor=replace(
+        algo.ppo.config.module_dict.actor,
+        type="TerrainTransformerObsTokenEncoder",
+        input_dim=_terrain_transformer_actor_inputs,
+        layer_config=_terrain_transformer_future5_layer,
+    ),
+    critic=replace(
+        algo.ppo.config.module_dict.critic,
+        type="MLP",
+        input_dim=_terrain_transformer_critic_inputs,
+    ),
+)
+
+_terrain_mlp_future5_layer = replace(
+    algo.ppo.config.module_dict.actor.layer_config,
+    module_input_name=("actor_obs_self",),
+    encoder_input_name="actor_obs_target",
+    encoder_hidden_dims=[512, 256],
+    encoder_output_dim=256,
+    hidden_dims=[1024, 512],
+)
+
+_terrain_mlp_future5_module_dict = PPOModuleDictConfig(
+    actor=replace(
+        algo.ppo.config.module_dict.actor,
+        type="MLPEncoder",
+        input_dim=_terrain_transformer_actor_inputs,
+        layer_config=_terrain_mlp_future5_layer,
+    ),
+    critic=replace(
+        algo.ppo.config.module_dict.critic,
+        type="MLP",
+        input_dim=_terrain_transformer_critic_inputs,
+    ),
+)
+
 g1_29dof_wbt_videomimic_mlp = replace(
     g1_29dof_wbt,
     training=replace(
@@ -316,6 +358,38 @@ g1_29dof_wbt_terrain_transformer = replace(
             normalize_actor_obs=True,
             normalize_critic_obs=True,
             use_symmetry=False,
+        ),
+    ),
+)
+
+g1_29dof_wbt_terrain_transformer_future5 = replace(
+    g1_29dof_wbt_terrain_transformer,
+    training=replace(
+        g1_29dof_wbt_terrain_transformer.training,
+        name="g1_29dof_wbt_terrain_transformer_future5",
+    ),
+    observation=observation.g1_29dof_wbt_observation_terrain_transformer_future_target,
+    command=command.g1_29dof_wbt_command_future5_tracking,
+    algo=replace(
+        g1_29dof_wbt_terrain_transformer.algo,
+        config=replace(
+            g1_29dof_wbt_terrain_transformer.algo.config,
+            module_dict=_terrain_transformer_future5_module_dict,
+        ),
+    ),
+)
+
+g1_29dof_wbt_terrain_mlp_future5 = replace(
+    g1_29dof_wbt_terrain_transformer_future5,
+    training=replace(
+        g1_29dof_wbt_terrain_transformer_future5.training,
+        name="g1_29dof_wbt_terrain_mlp_future5",
+    ),
+    algo=replace(
+        g1_29dof_wbt_terrain_transformer_future5.algo,
+        config=replace(
+            g1_29dof_wbt_terrain_transformer_future5.algo.config,
+            module_dict=_terrain_mlp_future5_module_dict,
         ),
     ),
 )
@@ -639,7 +713,9 @@ __all__ = [
     "g1_29dof_wbt_motion_tracking",
     "g1_29dof_wbt_motion_tracking_mlp_encoder",
     "g1_29dof_wbt_motion_tracking_transformer",
+    "g1_29dof_wbt_terrain_mlp_future5",
     "g1_29dof_wbt_terrain_transformer",
+    "g1_29dof_wbt_terrain_transformer_future5",
     "g1_29dof_wbt_fast_sac",
     "g1_29dof_wbt_fast_sac_w_object",
     "g1_29dof_wbt_w_object",

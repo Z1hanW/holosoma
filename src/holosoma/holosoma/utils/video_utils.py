@@ -116,6 +116,7 @@ def create_video(
     save_dir,
     output_format="mp4",
     wandb_logging=True,
+    keep_local_copy=False,
     episode_id=None,
     wandb_key="Training rollout",
 ):
@@ -136,6 +137,8 @@ def create_video(
         Output format: "mp4" (mp4v codec) or "h264" (H.264 codec).
     wandb_logging : bool, default=True
         Whether to upload to wandb (if available) or save locally.
+    keep_local_copy : bool, default=False
+        Whether to keep the encoded video on disk even when uploading to wandb.
     episode_id : int | None, default=None
         Episode ID for filename generation.
     wandb_key : str, default="Training rollout"
@@ -155,7 +158,9 @@ def create_video(
     timestamp = int(time.time())
     episode_str = f"episode_{episode_id}_" if episode_id is not None else ""
 
-    if wandb_logging and _is_wandb_available():
+    should_upload_to_wandb = wandb_logging and _is_wandb_available()
+
+    if should_upload_to_wandb and not keep_local_copy:
         # Wandb path: use temp files, upload, then cleanup
         temp_id = str(uuid.uuid4())[:8]
         temp_raw = save_dir / f"temp_raw_{timestamp}_{temp_id}.mp4"
@@ -217,8 +222,10 @@ def create_video(
         logger.info(f"Successfully saved video file: {final_video}")
 
         # Step 3: Handle wandb upload if requested
-        if wandb_logging and _is_wandb_available():
-            wandb.log({wandb_key: wandb.Video(str(final_video), format="mp4")})
+        if should_upload_to_wandb:
+            # Keep media attached to the current training step instead of advancing wandb's
+            # global step independently for every recorder.
+            wandb.log({wandb_key: wandb.Video(str(final_video), format="mp4")}, commit=False)
 
         # Step 4: Cleanup temp files if needed
         if cleanup_files:

@@ -480,14 +480,14 @@ if [[ "${MOTION_DIR_SET}" != "1" ]]; then
   if [[ -n "${CHECKPOINT_MOTION_DIR}" && ( "${CHECKPOINT_MOTION_DIR}" == s3://* || -e "${CHECKPOINT_MOTION_DIR}" ) ]]; then
     MOTION_DIR="${CHECKPOINT_MOTION_DIR}"
   else
-    MOTION_DIR="/data/terrain/___crisp_clean_motion"
+    MOTION_DIR="${SCRIPT_DIR}/data/ds_crisp_data/___crisp_clean_motion_gmr_g1"
   fi
 fi
 if [[ "${GEOMETRY_DIR_SET}" != "1" ]]; then
   if [[ -n "${CHECKPOINT_GEOMETRY_DIR}" && -e "${CHECKPOINT_GEOMETRY_DIR}" ]]; then
     GEOMETRY_DIR="${CHECKPOINT_GEOMETRY_DIR}"
   else
-    GEOMETRY_DIR="/data/terrain/___crisp_clean_geometry"
+    GEOMETRY_DIR="${SCRIPT_DIR}/data/ds_crisp_data/___crisp_clean_geometry"
   fi
 fi
 if [[ "${GEOMETRY_METADATA_SET}" != "1" ]]; then

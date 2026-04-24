@@ -120,9 +120,14 @@ HOLOSOMA_WANDB_SAVE_FILES=${HOLOSOMA_WANDB_SAVE_FILES:-0}
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-67108864}
 PHYSX_GPU_HEAP_CAPACITY=${PHYSX_GPU_HEAP_CAPACITY:-67108864}
 PHYSX_GPU_TEMP_BUFFER_CAPACITY=${PHYSX_GPU_TEMP_BUFFER_CAPACITY:-16777216}
+VIDEO_ENABLED=${VIDEO_ENABLED:-0}
+VIDEO_INTERVAL=${VIDEO_INTERVAL:-200}
+VIDEO_SAVE_DIR=${VIDEO_SAVE_DIR:-media}
+VIDEO_RECORD_ENV_ID=${VIDEO_RECORD_ENV_ID:-0}
+VIDEO_UPLOAD_TO_WANDB=${VIDEO_UPLOAD_TO_WANDB:-False}
 
-MOTION_DIR=${MOTION_DIR:-${SCRIPT_DIR}/data/ds_crisp_data/___crisp_clean_motion}
-OBJ_SOURCE=${OBJ_SOURCE:-${SCRIPT_DIR}/data/ds_crisp_data/___crisp_clean_geometry}
+MOTION_DIR=${MOTION_DIR:-${SCRIPT_DIR}/data/ds_crisp_data/_generated/___crisp_clean_motion_gmr_g1_trainready_rebuilt_20260423}
+OBJ_SOURCE=${OBJ_SOURCE:-${SCRIPT_DIR}/data/ds_crisp_data/_generated/___crisp_clean_geometry_s0p7415730337}
 OBJ_META_PATH=${OBJ_META_PATH:-}
 NUM_ROWS=${NUM_ROWS:-}
 NUM_COLS=${NUM_COLS:-}
@@ -137,6 +142,9 @@ if [[ -n "${FUSED_PREFIX+x}" ]]; then
   FUSED_PREFIX_EXPLICIT=1
 fi
 FUSED_PREFIX=${FUSED_PREFIX:-terrain_generalist}
+OBJ_MESH_SCALE_X=${OBJ_MESH_SCALE_X:-1.0}
+OBJ_MESH_SCALE_Y=${OBJ_MESH_SCALE_Y:-${OBJ_MESH_SCALE_X}}
+OBJ_MESH_SCALE_Z=${OBJ_MESH_SCALE_Z:-${OBJ_MESH_SCALE_X}}
 PAIRED_MANIFEST_PATH=${PAIRED_MANIFEST_PATH:-${PAIRED_DATA_MANIFEST:-}}
 PAIRED_DS_CRISP_DATA_ROOT=${PAIRED_DS_CRISP_DATA_ROOT:-}
 PAIRED_STAGE_OUT_DIR=${PAIRED_STAGE_OUT_DIR:-${GENERATED_DATA_ROOT}/staged}
@@ -159,6 +167,7 @@ BAD_TRACKING_BODY_POS_THRESHOLD=${BAD_TRACKING_BODY_POS_THRESHOLD:-0.55}
 ALLOW_TERRAIN_SLOT_OVERLAP=${ALLOW_TERRAIN_SLOT_OVERLAP:-0}
 DRY_RUN=${DRY_RUN:-0}
 USE_TORCHRUN=${USE_TORCHRUN:-auto}
+HEADLESS=${HEADLESS:-True}
 
 ENABLE_VISER=${ENABLE_VISER:-0}
 VISER_PORT_SET=0
@@ -284,6 +293,38 @@ if [[ "${HEADLESS_BOOL}" == "True" ]]; then
 else
   HEADLESS_ENV_INT=0
 fi
+
+mapfile -t MESH_SCALE_INFO < <("${PYTHON_BIN}" - "${OBJ_MESH_SCALE_X}" "${OBJ_MESH_SCALE_Y}" "${OBJ_MESH_SCALE_Z}" <<'PY'
+import math
+import sys
+
+scale_xyz = [float(v) for v in sys.argv[1:4]]
+if len(scale_xyz) != 3:
+    raise SystemExit("Expected three mesh scale values.")
+for idx, value in enumerate(scale_xyz):
+    if not math.isfinite(value) or value <= 0.0:
+        raise SystemExit(f"OBJ_MESH_SCALE axis {idx} must be finite and > 0. Got {value}")
+
+def _tok(value: float) -> str:
+    text = f"{value:.9g}"
+    return text.replace("-", "m").replace(".", "p")
+
+is_unity = all(math.isclose(value, 1.0, rel_tol=0.0, abs_tol=1e-12) for value in scale_xyz)
+suffix = "" if is_unity else f"_s{_tok(scale_xyz[0])}_{_tok(scale_xyz[1])}_{_tok(scale_xyz[2])}"
+
+for value in scale_xyz:
+    print(f"{value:.17g}")
+print(suffix)
+PY
+)
+if [[ "${#MESH_SCALE_INFO[@]}" -ne 4 ]]; then
+  echo "[ERROR] Failed to parse OBJ_MESH_SCALE_{X,Y,Z} values." >&2
+  exit 1
+fi
+OBJ_MESH_SCALE_X="${MESH_SCALE_INFO[0]}"
+OBJ_MESH_SCALE_Y="${MESH_SCALE_INFO[1]}"
+OBJ_MESH_SCALE_Z="${MESH_SCALE_INFO[2]}"
+OBJ_MESH_SCALE_SUFFIX="${MESH_SCALE_INFO[3]}"
 
 LOGGER_BASE_DIR="$(ensure_logger_base_dir "${LOGGER_BASE_DIR}" "${LOGGER_BASE_DIR_EXPLICIT}")"
 
@@ -499,7 +540,14 @@ if [[ -n "${PAIRED_MANIFEST_PATH}" || -n "${PAIRED_DS_CRISP_DATA_ROOT}" ]]; then
       --out-root "${PAIRED_STAGE_ROOT}"
   fi
 
-  MOTION_DIR="${PAIRED_STAGE_ROOT}/___crisp_clean_motion"
+  if [[ -d "${PAIRED_STAGE_ROOT}/___crisp_clean_motion_gmr_g1" ]]; then
+    MOTION_DIR="${PAIRED_STAGE_ROOT}/___crisp_clean_motion_gmr_g1"
+  elif [[ -d "${PAIRED_STAGE_ROOT}/___crisp_clean_motion" ]]; then
+    # Backward-compatible fallback for previously staged manifests.
+    MOTION_DIR="${PAIRED_STAGE_ROOT}/___crisp_clean_motion"
+  else
+    MOTION_DIR="${PAIRED_STAGE_ROOT}/___crisp_clean_motion_gmr_g1"
+  fi
   OBJ_SOURCE="${PAIRED_STAGE_ROOT}/___crisp_clean_geometry"
   OBJ_META_PATH=""
 
@@ -602,8 +650,8 @@ if [[ -d "${OBJ_SOURCE}" ]]; then
   fi
 
   mkdir -p "${FUSED_OUT_DIR}"
-  FUSED_OBJ="${FUSED_OUT_DIR}/${FUSED_PREFIX}_${NUM_ROWS}x${NUM_TILES}.obj"
-  FUSED_META="${FUSED_OUT_DIR}/${FUSED_PREFIX}_${NUM_ROWS}x${NUM_TILES}.json"
+  FUSED_OBJ="${FUSED_OUT_DIR}/${FUSED_PREFIX}${OBJ_MESH_SCALE_SUFFIX}_${NUM_ROWS}x${NUM_TILES}.obj"
+  FUSED_META="${FUSED_OUT_DIR}/${FUSED_PREFIX}${OBJ_MESH_SCALE_SUFFIX}_${NUM_ROWS}x${NUM_TILES}.json"
 
   NEEDS_REBUILD=0
   if [[ ! -f "${FUSED_OBJ}" || ! -f "${FUSED_META}" ]]; then
@@ -620,7 +668,8 @@ if [[ -d "${OBJ_SOURCE}" ]]; then
       --obj-dir "${OBJ_SOURCE}" \
       --out-obj "${FUSED_OBJ}" \
       --out-meta "${FUSED_META}" \
-      --num-rows "${NUM_ROWS}"
+      --num-rows "${NUM_ROWS}" \
+      --mesh-scale "${OBJ_MESH_SCALE_X}" "${OBJ_MESH_SCALE_Y}" "${OBJ_MESH_SCALE_Z}"
   fi
 
   OBJ_PATH="${FUSED_OBJ}"
@@ -726,12 +775,14 @@ echo "[INFO] PhysX gpu_max_rigid_contact_count=${PHYSX_GPU_MAX_RIGID_CONTACT_COU
 echo "[INFO] PhysX gpu_found_lost_aggregate_pairs_capacity=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY} gpu_total_aggregate_pairs_capacity=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY} gpu_collision_stack_size=${PHYSX_GPU_COLLISION_STACK_SIZE} gpu_heap_capacity=${PHYSX_GPU_HEAP_CAPACITY} gpu_temp_buffer_capacity=${PHYSX_GPU_TEMP_BUFFER_CAPACITY}"
 echo "[INFO] MOTION_DIR=${MOTION_DIR}"
 echo "[INFO] OBJ_PATH=${OBJ_PATH}"
+echo "[INFO] OBJ_MESH_SCALE=${OBJ_MESH_SCALE_X},${OBJ_MESH_SCALE_Y},${OBJ_MESH_SCALE_Z}"
 if [[ -n "${OBJ_META_PATH}" ]]; then
   echo "[INFO] OBJ_META_PATH=${OBJ_META_PATH}"
 fi
 echo "[INFO] TERRAIN_GRID=${NUM_ROWS}x${NUM_COLS}"
 echo "[INFO] SCENE_LOAD_MODE=terrain-load-obj(static /World/ground mesh)"
 echo "[INFO] PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION}"
+echo "[INFO] HOLOSOMA_PAIR_TILE_LAYOUT=${HOLOSOMA_PAIR_TILE_LAYOUT:-auto}"
 echo "[INFO] USE_ADAPTIVE_TIMESTEPS_SAMPLER=${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
 echo "[INFO] ADD_GROUND_PLANE_COLLISION=${ADD_GROUND_PLANE_COLLISION}"
 echo "[INFO] START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB}"
@@ -823,14 +874,29 @@ cmd+=("${CHECKPOINT_OVERRIDES[@]}")
 NORMALIZED_EXTRA_CLI_ARGS=()
 normalize_extra_cli_args "$@"
 cmd+=("${NORMALIZED_EXTRA_CLI_ARGS[@]}")
-cmd+=(
+LOGGER_CLI_ARGS=(
   logger:wandb
   --logger.base_dir="${LOGGER_BASE_DIR}"
-  --logger.video.enabled=False
-  --logger.headless_recording=False
-  --logger.video.upload_to_wandb=False
   --logger.name="${LOGGER_NAME}"
 )
+if is_true "${VIDEO_ENABLED}"; then
+  LOGGER_CLI_ARGS+=(
+    --logger.video.enabled=True
+    --logger.video.interval="${VIDEO_INTERVAL}"
+    --logger.video.save_dir="${VIDEO_SAVE_DIR}"
+    --logger.video.record_env_id="${VIDEO_RECORD_ENV_ID}"
+    --logger.video.upload_to_wandb="${VIDEO_UPLOAD_TO_WANDB}"
+  )
+else
+  LOGGER_CLI_ARGS+=(
+    --logger.video.enabled=False
+    --logger.video.upload_to_wandb=False
+  )
+fi
+LOGGER_CLI_ARGS+=(
+  --logger.headless_recording=False
+)
+cmd+=("${LOGGER_CLI_ARGS[@]}")
 
 if is_true "${DRY_RUN}"; then
   echo "[INFO] DRY_RUN=${DRY_RUN}; resolved launch command:"
@@ -841,8 +907,8 @@ fi
 export HOLOSOMA_EXPORT_ONNX_DURING_TRAIN
 export HOLOSOMA_EXPORT_ONNX_AT_END
 export HOLOSOMA_WANDB_SAVE_FILES
-# Emit per-iteration heartbeat logs unless explicitly disabled.
-export HOLOSOMA_DEBUG_HEARTBEAT="${HOLOSOMA_DEBUG_HEARTBEAT:-1}"
+# Keep heartbeat logs disabled by default; enable only for targeted debugging.
+export HOLOSOMA_DEBUG_HEARTBEAT="${HOLOSOMA_DEBUG_HEARTBEAT:-0}"
 # IsaacLab AppLauncher reads HEADLESS from environment and expects 0/1.
 export HEADLESS="${HEADLESS_ENV_INT}"
 

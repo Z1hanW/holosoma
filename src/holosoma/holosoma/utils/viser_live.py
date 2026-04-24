@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
 from contextlib import nullcontext
 import functools
 import hashlib
+import io
 import json
 import math
 import os
@@ -40,6 +42,37 @@ CAMERA_MARKER_COLOR = (0, 255, 255)
 COMMAND_ARROW_COLOR = np.array([255, 165, 0], dtype=np.uint8)
 TARGET_BOX_COLOR = (255, 140, 0)
 SENSOR_MARKER_RADIUS = 0.03
+TARGET_SKELETON_BODY_ORDER = (
+    "pelvis",
+    "left_hip_roll_link",
+    "left_knee_link",
+    "left_ankle_roll_link",
+    "right_hip_roll_link",
+    "right_knee_link",
+    "right_ankle_roll_link",
+    "torso_link",
+    "left_shoulder_roll_link",
+    "left_elbow_link",
+    "left_wrist_yaw_link",
+    "right_shoulder_roll_link",
+    "right_elbow_link",
+    "right_wrist_yaw_link",
+)
+TARGET_SKELETON_EDGE_NAMES = (
+    ("pelvis", "torso_link"),
+    ("pelvis", "left_hip_roll_link"),
+    ("left_hip_roll_link", "left_knee_link"),
+    ("left_knee_link", "left_ankle_roll_link"),
+    ("pelvis", "right_hip_roll_link"),
+    ("right_hip_roll_link", "right_knee_link"),
+    ("right_knee_link", "right_ankle_roll_link"),
+    ("torso_link", "left_shoulder_roll_link"),
+    ("left_shoulder_roll_link", "left_elbow_link"),
+    ("left_elbow_link", "left_wrist_yaw_link"),
+    ("torso_link", "right_shoulder_roll_link"),
+    ("right_shoulder_roll_link", "right_elbow_link"),
+    ("right_elbow_link", "right_wrist_yaw_link"),
+)
 _VIRIDIS_LUT = np.array(
     [
         (68, 1, 84),
@@ -134,6 +167,57 @@ class _ViserSceneCompat:
         return getattr(self._server, name)
 
 
+class _GuiMarkdownImageHandle:
+    """Compat image handle backed by a GUI markdown widget."""
+
+    def __init__(
+        self,
+        markdown_handle: Any,
+        *,
+        label: str,
+        image_format: str,
+        jpeg_quality: int | None,
+        visible: bool,
+        image: Any,
+    ) -> None:
+        self._markdown_handle = markdown_handle
+        self._label = str(label)
+        self._image_format = image_format if image_format in {"jpeg", "png"} else "jpeg"
+        self._jpeg_quality = jpeg_quality
+        self._visible = bool(visible)
+        self._image = None
+        self.image = image
+
+    def _render(self) -> None:
+        if not self._visible or self._image is None:
+            self._markdown_handle.content = f"**{self._label}**"
+            return
+        data_url = _encode_markdown_image_data_url(
+            self._image,
+            image_format=self._image_format,
+            jpeg_quality=self._jpeg_quality,
+        )
+        self._markdown_handle.content = f"**{self._label}**\n\n![]({data_url})"
+
+    @property
+    def image(self) -> Any:
+        return self._image
+
+    @image.setter
+    def image(self, image: Any) -> None:
+        self._image = image
+        self._render()
+
+    @property
+    def visible(self) -> bool:
+        return self._visible
+
+    @visible.setter
+    def visible(self, value: bool) -> None:
+        self._visible = bool(value)
+        self._render()
+
+
 class _ViserGuiCompat:
     """Compat adapter for Viser versions that use add_gui_* on the server."""
 
@@ -144,8 +228,6 @@ class _ViserGuiCompat:
     def add_image(self, *args, **kwargs) -> Any:
         if self._gui is not None and hasattr(self._gui, "add_image"):
             return self._gui.add_image(*args, **kwargs)
-        if hasattr(self._server, "add_gui_image"):
-            return self._server.add_gui_image(*args, **kwargs)
 
         image = None
         if args:
@@ -175,15 +257,46 @@ class _ViserGuiCompat:
         render_width = float(render_width)
 
         node_name = "/viser_gui_compat/" + "".join(ch if ch.isalnum() else "_" for ch in label)
-        return self._server.add_image(
-            node_name,
-            image=image,
-            render_width=render_width,
-            render_height=render_height,
-            format=image_format,
-            jpeg_quality=jpeg_quality,
-            visible=visible,
-        )
+        if self._gui is not None and hasattr(self._gui, "add_markdown"):
+            markdown_handle = self._gui.add_markdown(f"**{label}**")
+            return _GuiMarkdownImageHandle(
+                markdown_handle,
+                label=label,
+                image_format=image_format,
+                jpeg_quality=jpeg_quality,
+                visible=visible,
+                image=image,
+            )
+        scene = getattr(self._server, "scene", None)
+        if scene is not None and hasattr(scene, "add_image"):
+            return scene.add_image(
+                node_name,
+                image=image,
+                render_width=render_width,
+                render_height=render_height,
+                format=image_format,
+                jpeg_quality=jpeg_quality,
+                visible=visible,
+            )
+
+        legacy_add_gui_image = getattr(type(self._server), "add_gui_image", None)
+        if callable(legacy_add_gui_image):
+            return legacy_add_gui_image(self._server, *args, **kwargs)
+
+        legacy_add_image = getattr(type(self._server), "add_image", None)
+        if callable(legacy_add_image):
+            return legacy_add_image(
+                self._server,
+                node_name,
+                image=image,
+                render_width=render_width,
+                render_height=render_height,
+                format=image_format,
+                jpeg_quality=jpeg_quality,
+                visible=visible,
+            )
+
+        raise AttributeError("Viser GUI compatibility layer could not find an image API")
 
     def __getattr__(self, name: str) -> Any:
         if self._gui is not None and hasattr(self._gui, name):
@@ -200,8 +313,36 @@ def _ensure_viser_api_compat(server: Any) -> None:
 
     if not hasattr(server, "scene"):
         server.scene = _ViserSceneCompat(server)  # type: ignore[attr-defined]
-    if not hasattr(server, "gui"):
+    gui = getattr(server, "gui", None)
+    if gui is None or not hasattr(gui, "add_image"):
         server.gui = _ViserGuiCompat(server)  # type: ignore[attr-defined]
+
+
+def _encode_markdown_image_data_url(
+    image: Any,
+    *,
+    image_format: str = "jpeg",
+    jpeg_quality: int | None = None,
+) -> str:
+    array = np.asarray(image)
+    if array.ndim == 2:
+        array = np.repeat(array[:, :, None], 3, axis=2)
+    elif array.ndim == 3 and array.shape[2] == 1:
+        array = np.repeat(array, 3, axis=2)
+    if array.dtype != np.uint8:
+        array = np.clip(array, 0, 255).astype(np.uint8)
+
+    from PIL import Image  # type: ignore[import-not-found]
+
+    fmt = "JPEG" if image_format == "jpeg" else "PNG"
+    mime = "image/jpeg" if image_format == "jpeg" else "image/png"
+    buf = io.BytesIO()
+    save_kwargs: dict[str, Any] = {}
+    if fmt == "JPEG" and jpeg_quality is not None:
+        save_kwargs["quality"] = int(jpeg_quality)
+    Image.fromarray(array).save(buf, format=fmt, **save_kwargs)
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
 
 
 def _create_viser_urdf_handle(
@@ -290,6 +431,23 @@ def _depth_to_rgb_fixed_range(depth: np.ndarray, near: float, far: float) -> np.
         far = near + 1.0
     depth_clipped = np.clip(depth, near, far)
     norm = (depth_clipped - near) / max(far - near, 1.0e-6)
+    norm = np.where(valid, norm, 0.0)
+    colored = _apply_colormap(norm)
+    colored[~valid] = 0
+    return colored
+
+
+def _scalar_map_to_rgb(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float32)
+    valid = np.isfinite(values)
+    if not np.any(valid):
+        return np.zeros(values.shape + (3,), dtype=np.uint8)
+
+    values_valid = values[valid]
+    min_v = float(values_valid.min())
+    max_v = float(values_valid.max())
+    denom = max(max_v - min_v, 1.0e-6)
+    norm = (values - min_v) / denom
     norm = np.where(valid, norm, 0.0)
     colored = _apply_colormap(norm)
     colored[~valid] = 0
@@ -845,6 +1003,17 @@ def _resolve_obj_paths(path_str: str) -> list[Path]:
     return [path] if path.exists() else []
 
 
+def _parse_env_int(name: str) -> int | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except Exception:
+        logger.warning("Ignoring invalid integer env {}={!r}.", name, raw)
+        return None
+
+
 def _load_terrain_mesh(
     obj_path: str | None,
     *,
@@ -1169,6 +1338,7 @@ class ViserLiveViewer:
         self._joint_count = 0
         self._offset: np.ndarray | None = None
         self._last_update = 0.0
+        self._scene_supports_line_segments = True
         self._scandots_handle = None
         self._scandots_rays_handle = None
         self._scandots_enabled = False
@@ -1182,9 +1352,29 @@ class ViserLiveViewer:
             "yes",
         )
         self._target_keypoints_handle = None
+        self._target_skeleton_handle = None
+        self._target_skeleton_spline_handles: list[Any] = []
+        self._relative_target_keypoints_handle = None
+        self._relative_target_skeleton_handle = None
+        self._relative_target_skeleton_spline_handles: list[Any] = []
         self._target_keypoints_point_size = 0.03
+        self._target_skeleton_line_width = 2.0
         self._target_keypoints_color = np.array([128, 0, 128], dtype=np.uint8)
+        self._relative_target_keypoints_color = np.array([0, 180, 255], dtype=np.uint8)
+        self._target_skeleton_edges: np.ndarray | None = None
+        self._target_skeleton_body_names: tuple[str, ...] | None = None
+        self._target_skeleton_warned = False
+        self._target_skeleton_logged = False
+        self._target_keypoints_logged = False
+        self._target_keypoints_source_warned = False
         self._show_target_keypoints = os.environ.get("VISER_SHOW_TARGET_KEYPOINTS", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+        self._show_relative_target_keypoints = os.environ.get(
+            "VISER_SHOW_RELATIVE_TARGET_KEYPOINTS", "0"
+        ).lower() not in (
             "0",
             "false",
             "no",
@@ -1210,6 +1400,11 @@ class ViserLiveViewer:
             "true",
             "yes",
         )
+        self._viewer_terrain_override_path = os.environ.get("VISER_TERRAIN_GEOMETRY_DIR", "").strip() or None
+        self._viewer_terrain_override_meta = os.environ.get("VISER_TERRAIN_GEOMETRY_METADATA", "").strip() or None
+        self._viewer_terrain_override_rows = _parse_env_int("VISER_TERRAIN_NUM_ROWS")
+        self._viewer_terrain_override_cols = _parse_env_int("VISER_TERRAIN_NUM_COLS")
+        self._viewer_terrain_override_logged = False
         self._disable_perception_frustum = os.environ.get("VISER_DISABLE_PERCEPTION_FRUSTUM", "0").lower() in (
             "1",
             "true",
@@ -1334,6 +1529,8 @@ class ViserLiveViewer:
         self._step_requested = False
         self._reset_requested = False
         self._clip_dropdown = None
+        self._clip_prev_button = None
+        self._clip_next_button = None
         self._clip_apply = None
         self._clip_label = None
         self._clip_names: list[str] = []
@@ -1526,6 +1723,15 @@ class ViserLiveViewer:
         port = resolve_viser_port(port_cfg)
         self._server = viser_mod.ViserServer(port=port)
         _ensure_viser_api_compat(self._server)
+        self._scene_supports_line_segments = bool(hasattr(self._server.scene, "add_line_segments"))
+        if not self._scene_supports_line_segments:
+            if self._scandots_enabled:
+                logger.warning(
+                    "Viser scene API lacks add_line_segments; disabling scandots ray lines but keeping point clouds."
+                )
+            if not self._disable_contact_force_viz:
+                logger.warning("Viser scene API lacks add_line_segments; disabling contact force visualization.")
+                self._disable_contact_force_viz = True
 
         self._global_frame_wxyz = _parse_quat_wxyz(getattr(cfg, "viser_global_frame_quat_wxyz", None))
         if self._global_frame_wxyz is not None:
@@ -2878,6 +3084,9 @@ class ViserLiveViewer:
     ) -> None:
         if self._server is None:
             return
+        if not self._scene_supports_line_segments:
+            self._hide_manual_command_arrow()
+            return
         motion_cmd = self._get_motion_command()
         if motion_cmd is None:
             self._hide_manual_command_arrow()
@@ -3235,21 +3444,36 @@ class ViserLiveViewer:
 
         mesh = None
         mesh_is_local = False
-        if terrain_term is not None:
-            obj_path = getattr(terrain_term, "obj_file_path", None) or ""
-            obj_meta = getattr(terrain_term, "obj_metadata_path", None)
-            rows = getattr(terrain_term, "num_rows", None)
-            cols = getattr(terrain_term, "num_cols", None)
-            if obj_path:
-                terrain_mesh = _load_terrain_mesh(
-                    obj_path,
-                    obj_metadata_path=obj_meta,
-                    num_rows=rows,
-                    num_cols=cols,
-                    clip_name=clip_name,
-                )
-                if terrain_mesh is not None:
-                    mesh, mesh_is_local = terrain_mesh
+        obj_path = self._viewer_terrain_override_path or (
+            getattr(terrain_term, "obj_file_path", None) or "" if terrain_term is not None else ""
+        )
+        if self._viewer_terrain_override_path:
+            obj_meta = self._viewer_terrain_override_meta
+            rows = self._viewer_terrain_override_rows
+            cols = self._viewer_terrain_override_cols
+        else:
+            obj_meta = getattr(terrain_term, "obj_metadata_path", None) if terrain_term is not None else None
+            rows = getattr(terrain_term, "num_rows", None) if terrain_term is not None else None
+            cols = getattr(terrain_term, "num_cols", None) if terrain_term is not None else None
+        if self._viewer_terrain_override_path and not self._viewer_terrain_override_logged:
+            logger.info(
+                "Viser terrain override enabled: path='{}' metadata='{}' rows={} cols={}",
+                self._viewer_terrain_override_path,
+                obj_meta or "",
+                rows,
+                cols,
+            )
+            self._viewer_terrain_override_logged = True
+        if obj_path:
+            terrain_mesh = _load_terrain_mesh(
+                obj_path,
+                obj_metadata_path=obj_meta,
+                num_rows=rows,
+                num_cols=cols,
+                clip_name=clip_name,
+            )
+            if terrain_mesh is not None:
+                mesh, mesh_is_local = terrain_mesh
 
         if mesh is None:
             mesh = getattr(terrain_state, "mesh", None)
@@ -3542,19 +3766,31 @@ class ViserLiveViewer:
 
         self._perception_frame = self._server.scene.add_frame(self._scene_path("/perception_camera"), show_axes=False)
         if not self._disable_perception_frustum:
-            self._perception_frustum = self._server.scene.add_camera_frustum(
-                self._scene_path("/perception_frustum"),
+            frustum_image_format = self._perception_transport_format
+            if frustum_image_format == "auto":
+                frustum_image_format = "jpeg"
+            frustum_kwargs = dict(
                 fov=fov,
                 aspect=aspect,
                 scale=0.3,
-                line_width=2.0,
                 color=(0, 0, 0),
                 wxyz=(1.0, 0.0, 0.0, 0.0),
                 position=(0.0, 0.0, 0.0),
                 image=np.zeros((height, width, 3), dtype=np.uint8),
-                format=self._perception_transport_format,
+                format=frustum_image_format,
                 jpeg_quality=self._perception_jpeg_quality,
             )
+            try:
+                self._perception_frustum = self._server.scene.add_camera_frustum(
+                    self._scene_path("/perception_frustum"),
+                    line_width=2.0,
+                    **frustum_kwargs,
+                )
+            except TypeError:
+                self._perception_frustum = self._server.scene.add_camera_frustum(
+                    self._scene_path("/perception_frustum"),
+                    **frustum_kwargs,
+                )
             if self._perception_show_frustum_cb is not None:
                 self._perception_frustum.visible = bool(self._perception_show_frustum_cb.value)
         else:
@@ -4067,11 +4303,13 @@ class ViserLiveViewer:
             if clip_gui_enabled:
                 motion_cmd = self._get_motion_command()
                 if motion_cmd is not None and hasattr(motion_cmd, "motion"):
-                    clip_names = list(getattr(motion_cmd.motion, "clip_ids", []))
+                    clip_names = [str(name) for name in getattr(motion_cmd.motion, "clip_ids", [])]
                     if clip_names:
                         self._clip_names = clip_names
                         with self._server.gui.add_folder("Clip" if self._distill_minimal_ui else "Clip Playback"):
                             if len(clip_names) > 1:
+                                self._clip_prev_button = self._server.gui.add_button("Prev Clip")
+                                self._clip_next_button = self._server.gui.add_button("Next Clip")
                                 self._clip_dropdown = self._server.gui.add_dropdown(
                                     "Clip",
                                     options=clip_names,
@@ -4112,20 +4350,52 @@ class ViserLiveViewer:
                             if int(self._clip_start_slider.value) > max_frame:
                                 self._clip_start_slider.value = max_frame
 
-                        def _queue_clip_change() -> None:
-                            idx = self._current_clip_index(motion_cmd)
+                        def _queue_clip_change(idx: int | None = None, *, apply_now: bool = False) -> None:
+                            if idx is None:
+                                idx = self._current_clip_index(motion_cmd)
+                            if idx is None:
+                                idx = self._active_clip_index(motion_cmd)
                             if idx is None:
                                 return
+                            if self._clip_dropdown is not None:
+                                clip_name = self._clip_names[int(idx)]
+                                try:
+                                    if str(self._clip_dropdown.value) != clip_name:
+                                        self._clip_dropdown.value = clip_name
+                                except Exception:
+                                    pass
                             self._pending_clip_idx = idx
                             self._pending_clip_start = (
                                 int(self._clip_start_slider.value) if self._clip_start_slider is not None else 0
                             )
                             _update_clip_slider(idx)
+                            if apply_now:
+                                self.apply_pending_controls()
+
+                        if self._clip_prev_button is not None:
+                            @self._clip_prev_button.on_click
+                            def _(_evt) -> None:
+                                active_idx = self._active_clip_index(motion_cmd)
+                                if active_idx is None:
+                                    active_idx = self._current_clip_index(motion_cmd)
+                                if active_idx is None:
+                                    return
+                                _queue_clip_change((int(active_idx) - 1) % len(self._clip_names), apply_now=True)
+
+                        if self._clip_next_button is not None:
+                            @self._clip_next_button.on_click
+                            def _(_evt) -> None:
+                                active_idx = self._active_clip_index(motion_cmd)
+                                if active_idx is None:
+                                    active_idx = self._current_clip_index(motion_cmd)
+                                if active_idx is None:
+                                    return
+                                _queue_clip_change((int(active_idx) + 1) % len(self._clip_names), apply_now=True)
 
                         if self._clip_dropdown is not None:
                             @self._clip_dropdown.on_update
                             def _(_evt) -> None:
-                                _queue_clip_change()
+                                _queue_clip_change(apply_now=True)
 
                         if self._clip_start_slider is not None:
                             @self._clip_start_slider.on_update
@@ -4964,6 +5234,11 @@ class ViserLiveViewer:
                 self._scandots_handle.visible = True
                 self._scandots_handle.points = pts.astype(np.float32, copy=False)
 
+        if not self._scene_supports_line_segments:
+            if self._scandots_rays_handle is not None:
+                self._scandots_rays_handle.visible = False
+            return
+
         lines = torch.stack([starts_env, ends_env], dim=1).detach().cpu().numpy()
         if self._recenter:
             lines = lines - offset[None, None, :]
@@ -5046,6 +5321,11 @@ class ViserLiveViewer:
             shift = self._get_heightmap_visual_start_shift(perception_mgr, env_ids)
             if shift is not None:
                 starts = starts - shift.detach().cpu().numpy().reshape(1, 3)
+
+        if not self._scene_supports_line_segments:
+            if self._scandots_rays_handle is not None:
+                self._scandots_rays_handle.visible = False
+            return True
 
         lines = np.stack([starts, ends], axis=1).astype(np.float32, copy=False)
         if self._recenter:
@@ -5279,7 +5559,9 @@ class ViserLiveViewer:
         if depth_map is None:
             return
 
-        if self._depth_colormap == "fixed":
+        if output_mode == "heightmap":
+            depth_img = _scalar_map_to_rgb(depth_map)
+        elif self._depth_colormap == "fixed":
             depth_img = _depth_to_rgb_fixed_range(depth_map, near, far)
         else:
             depth_img = _depth_to_rgb(depth_map, near, far)
@@ -5340,12 +5622,27 @@ class ViserLiveViewer:
                     f"{direction_stats_suffix}"
                 )
             else:
-                min_d, max_d, count = _valid_depth_stats(depth_map, near, far)
+                if output_mode == "heightmap":
+                    valid = np.isfinite(depth_map)
+                    if np.any(valid):
+                        min_d = float(np.min(depth_map[valid]))
+                        max_d = float(np.max(depth_map[valid]))
+                        count = int(np.count_nonzero(valid))
+                    else:
+                        min_d, max_d, count = None, None, 0
+                else:
+                    min_d, max_d, count = _valid_depth_stats(depth_map, near, far)
                 frame_crc = _depth_crc32(depth_map, far)
                 depth_source = self._get_perception_depth_source() if output_mode == "camera_depth" else "raw"
                 if count == 0:
+                    range_summary = (
+                        "Height range (valid): n/a (no finite values)"
+                        if output_mode == "heightmap"
+                        else "Depth range (valid): n/a (no hits)"
+                    )
                     self._perception_stats.content = (
-                        "Depth range (valid): n/a (no hits)"
+                        range_summary
+                        + 
                         f" | crc32={frame_crc}"
                         f" | src={depth_source}"
                         f" | map={self._depth_colormap}"
@@ -5355,8 +5652,14 @@ class ViserLiveViewer:
                     )
                 else:
                     total = depth_map.size
+                    range_summary = (
+                        f"Height range (valid): {min_d:.3f} - {max_d:.3f} | valid: {count}/{total}"
+                        if output_mode == "heightmap"
+                        else f"Depth range (valid): {min_d:.3f} - {max_d:.3f} m | valid: {count}/{total}"
+                    )
                     self._perception_stats.content = (
-                        f"Depth range (valid): {min_d:.3f} - {max_d:.3f} m | valid: {count}/{total}"
+                        range_summary
+                        +
                         f" | crc32={frame_crc}"
                         f" | src={depth_source}"
                         f" | map={self._depth_colormap}"
@@ -5454,6 +5757,207 @@ class ViserLiveViewer:
         if self._perception_show_depth_cb is None or bool(self._perception_show_depth_cb.value):
             self._perception_frustum.image = display_img
 
+    def _hide_target_keypoint_overlays(self) -> None:
+        self._set_handle_visible(self._target_keypoints_handle, False)
+        self._set_handle_visible(self._target_skeleton_handle, False)
+        for handle in self._target_skeleton_spline_handles:
+            self._set_handle_visible(handle, False)
+        self._set_handle_visible(self._relative_target_keypoints_handle, False)
+        self._set_handle_visible(self._relative_target_skeleton_handle, False)
+        for handle in self._relative_target_skeleton_spline_handles:
+            self._set_handle_visible(handle, False)
+
+    def _target_body_names(self, motion_cmd: Any, num_points: int) -> tuple[str, ...] | None:
+        motion_cfg = getattr(motion_cmd, "motion_cfg", None)
+        body_names = getattr(motion_cfg, "body_names_to_track", None)
+        if body_names is not None:
+            try:
+                names = tuple(str(name) for name in body_names)
+            except Exception:
+                names = ()
+            if len(names) == num_points:
+                return names
+
+        if num_points == len(TARGET_SKELETON_BODY_ORDER):
+            return TARGET_SKELETON_BODY_ORDER
+        return None
+
+    def _target_skeleton_indices(self, motion_cmd: Any, num_points: int) -> np.ndarray:
+        names = self._target_body_names(motion_cmd, num_points)
+        if names is None:
+            if not self._target_skeleton_warned:
+                logger.warning(
+                    "Viser target skeleton disabled: cannot resolve {} target body names for {} keypoints.",
+                    len(TARGET_SKELETON_BODY_ORDER),
+                    num_points,
+                )
+                self._target_skeleton_warned = True
+            return np.zeros((0, 2), dtype=np.int64)
+
+        if self._target_skeleton_body_names == names and self._target_skeleton_edges is not None:
+            return self._target_skeleton_edges
+
+        name_to_idx = {name: idx for idx, name in enumerate(names)}
+        edges = [
+            (name_to_idx[parent], name_to_idx[child])
+            for parent, child in TARGET_SKELETON_EDGE_NAMES
+            if parent in name_to_idx and child in name_to_idx
+        ]
+        self._target_skeleton_body_names = names
+        self._target_skeleton_edges = np.asarray(edges, dtype=np.int64).reshape(-1, 2)
+        if not edges and not self._target_skeleton_warned:
+            logger.warning(
+                "Viser target skeleton disabled: target body names do not include expected G1 skeleton links: {}",
+                names,
+            )
+            self._target_skeleton_warned = True
+        return self._target_skeleton_edges
+
+    @staticmethod
+    def _segment_positions_tuple(segment: np.ndarray) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+        start = segment[0].tolist()
+        end = segment[1].tolist()
+        return (
+            (float(start[0]), float(start[1]), float(start[2])),
+            (float(end[0]), float(end[1]), float(end[2])),
+        )
+
+    def _log_target_skeleton_once(self, segments: int, *, fallback: str | None) -> None:
+        if self._target_skeleton_logged:
+            return
+        if fallback:
+            logger.warning(
+                "Viser target skeleton: purple skeleton uses the same raw target points as /target_keypoints, "
+                "segments={}, fallback={}.",
+                segments,
+                fallback,
+            )
+        else:
+            logger.warning(
+                "Viser target skeleton: purple skeleton uses the same raw target points as /target_keypoints, segments={}.",
+                segments,
+            )
+        self._target_skeleton_logged = True
+
+    def _update_target_skeleton_splines(
+        self,
+        *,
+        segments: np.ndarray,
+        handle_attr: str,
+        scene_name: str,
+        color: np.ndarray,
+        line_width: float,
+    ) -> None:
+        handles: list[Any] = getattr(self, handle_attr)
+        color_tuple = tuple(int(v) for v in color.tolist())
+
+        while len(handles) > segments.shape[0]:
+            handle = handles.pop()
+            try:
+                handle.remove()
+            except Exception:
+                self._set_handle_visible(handle, False)
+
+        for idx, segment in enumerate(segments):
+            positions = self._segment_positions_tuple(segment)
+            if idx >= len(handles):
+                handle = self._server.scene.add_spline_catmull_rom(
+                    self._scene_path(f"{scene_name}_{idx:02d}"),
+                    positions=positions,
+                    line_width=float(line_width),
+                    color=color_tuple,
+                    segments=1,
+                )
+                handles.append(handle)
+            else:
+                handle = handles[idx]
+                self._set_handle_visible(handle, True)
+                try:
+                    handle.positions = positions
+                except Exception:
+                    try:
+                        handle.remove()
+                    except Exception:
+                        pass
+                    handles[idx] = self._server.scene.add_spline_catmull_rom(
+                        self._scene_path(f"{scene_name}_{idx:02d}"),
+                        positions=positions,
+                        line_width=float(line_width),
+                        color=color_tuple,
+                        segments=1,
+                    )
+
+    def _update_target_skeleton(
+        self,
+        *,
+        points: np.ndarray,
+        motion_cmd: Any,
+        handle_attr: str,
+        scene_name: str,
+        color: np.ndarray,
+        line_width: float,
+    ) -> None:
+        edges = self._target_skeleton_indices(motion_cmd, int(points.shape[0]))
+        if edges.size == 0:
+            self._set_handle_visible(getattr(self, handle_attr), False)
+            spline_handles = (
+                self._target_skeleton_spline_handles
+                if handle_attr == "_target_skeleton_handle"
+                else self._relative_target_skeleton_spline_handles
+            )
+            for handle in spline_handles:
+                self._set_handle_visible(handle, False)
+            return
+
+        segments = points[edges].astype(np.float32, copy=False)
+        if not self._scene_supports_line_segments:
+            self._set_handle_visible(getattr(self, handle_attr), False)
+            if not hasattr(self._server.scene, "add_spline_catmull_rom"):
+                if not self._target_skeleton_warned:
+                    logger.warning(
+                        "Viser target skeleton disabled: scene API lacks add_line_segments and add_spline_catmull_rom."
+                    )
+                    self._target_skeleton_warned = True
+                return
+            spline_attr = (
+                "_target_skeleton_spline_handles"
+                if handle_attr == "_target_skeleton_handle"
+                else "_relative_target_skeleton_spline_handles"
+            )
+            self._update_target_skeleton_splines(
+                segments=segments,
+                handle_attr=spline_attr,
+                scene_name=scene_name,
+                color=color,
+                line_width=line_width,
+            )
+            if handle_attr == "_target_skeleton_handle":
+                self._log_target_skeleton_once(segments.shape[0], fallback="catmull_rom_splines")
+            return
+
+        colors = np.tile(color.reshape(1, 1, 3), (segments.shape[0], 2, 1)).astype(np.uint8, copy=False)
+        handle = getattr(self, handle_attr)
+        if handle is None:
+            handle = self._server.scene.add_line_segments(
+                self._scene_path(scene_name),
+                points=segments,
+                colors=colors,
+                line_width=float(line_width),
+            )
+            setattr(self, handle_attr, handle)
+            if handle_attr == "_target_skeleton_handle" and not self._target_skeleton_logged:
+                self._log_target_skeleton_once(segments.shape[0], fallback=None)
+            return
+
+        self._set_handle_visible(handle, True)
+        handle.points = segments
+        try:
+            handle.colors = colors
+        except Exception:
+            pass
+        if handle_attr == "_target_skeleton_handle" and not self._target_skeleton_logged:
+            self._log_target_skeleton_once(segments.shape[0], fallback=None)
+
     def _update_target_keypoints(self, offset: np.ndarray) -> None:
         if not self._server:
             return
@@ -5462,15 +5966,19 @@ class ViserLiveViewer:
         if motion_cmd is not None:
             manual_active = bool(getattr(motion_cmd, "manual_control_enabled", False))
         if (not self._show_target_keypoints) or manual_active:
-            if self._target_keypoints_handle is not None:
-                try:
-                    self._target_keypoints_handle.visible = False
-                except Exception:
-                    pass
+            self._hide_target_keypoint_overlays()
             return
         if motion_cmd is None or not hasattr(motion_cmd, "body_pos_w"):
             return
         try:
+            source = os.environ.get("VISER_TARGET_KEYPOINTS_SOURCE", "raw").strip().lower()
+            if source not in ("", "raw", "world", "absolute") and not self._target_keypoints_source_warned:
+                logger.warning(
+                    "Ignoring VISER_TARGET_KEYPOINTS_SOURCE={}; purple target keypoints always use raw motion_cmd.body_pos_w. "
+                    "Use VISER_SHOW_RELATIVE_TARGET_KEYPOINTS=1 for the cyan relative overlay.",
+                    source,
+                )
+                self._target_keypoints_source_warned = True
             points = motion_cmd.body_pos_w
             pts_env = points[self._env_id]
         except Exception:
@@ -5481,7 +5989,16 @@ class ViserLiveViewer:
             pts = pts - offset
 
         if pts.size == 0:
+            self._hide_target_keypoint_overlays()
             return
+
+        if not self._target_keypoints_logged:
+            logger.warning(
+                "Viser target keypoints: purple uses raw/world motion_cmd.body_pos_w, keypoints={}, recenter={}.",
+                pts.shape[0],
+                self._recenter,
+            )
+            self._target_keypoints_logged = True
 
         if self._target_keypoints_handle is None:
             colors = np.tile(self._target_keypoints_color, (pts.shape[0], 1))
@@ -5504,6 +6021,69 @@ class ViserLiveViewer:
                     self._target_keypoints_handle.colors = colors.astype(np.uint8, copy=False)
                 except Exception:
                     pass
+
+        self._update_target_skeleton(
+            points=pts,
+            motion_cmd=motion_cmd,
+            handle_attr="_target_skeleton_handle",
+            scene_name="/target_skeleton",
+            color=self._target_keypoints_color,
+            line_width=self._target_skeleton_line_width,
+        )
+
+        if not self._show_relative_target_keypoints:
+            self._set_handle_visible(self._relative_target_keypoints_handle, False)
+            self._set_handle_visible(self._relative_target_skeleton_handle, False)
+            for handle in self._relative_target_skeleton_spline_handles:
+                self._set_handle_visible(handle, False)
+            return
+
+        try:
+            rel_points = getattr(motion_cmd, "body_pos_relative_w", None)
+            if rel_points is None:
+                return
+            rel_pts = rel_points[self._env_id].detach().cpu().numpy()
+        except Exception:
+            return
+
+        if self._recenter:
+            rel_pts = rel_pts - offset
+        if rel_pts.size == 0:
+            self._set_handle_visible(self._relative_target_keypoints_handle, False)
+            self._set_handle_visible(self._relative_target_skeleton_handle, False)
+            for handle in self._relative_target_skeleton_spline_handles:
+                self._set_handle_visible(handle, False)
+            return
+
+        rel_colors = np.tile(self._relative_target_keypoints_color, (rel_pts.shape[0], 1))
+        if self._relative_target_keypoints_handle is None:
+            self._relative_target_keypoints_handle = self._server.scene.add_point_cloud(
+                self._scene_path("/target_keypoints_relative"),
+                points=rel_pts.astype(np.float32, copy=False),
+                colors=rel_colors.astype(np.uint8, copy=False),
+                point_size=float(self._target_keypoints_point_size * 0.85),
+                point_shape="circle",
+            )
+        else:
+            try:
+                self._relative_target_keypoints_handle.visible = True
+            except Exception:
+                pass
+            self._relative_target_keypoints_handle.points = rel_pts.astype(np.float32, copy=False)
+            if getattr(self._relative_target_keypoints_handle, "colors", None) is not None:
+                try:
+                    self._relative_target_keypoints_handle.colors = rel_colors.astype(np.uint8, copy=False)
+                except Exception:
+                    pass
+
+        self._update_target_skeleton(
+            points=rel_pts,
+            motion_cmd=motion_cmd,
+            handle_attr="_relative_target_skeleton_handle",
+            scene_name="/target_skeleton_relative",
+            color=self._relative_target_keypoints_color,
+            line_width=self._target_skeleton_line_width * 0.75,
+        )
 
     @staticmethod
     def _rot6d_to_quat_wxyz(rot6d: torch.Tensor) -> np.ndarray:
@@ -5649,19 +6229,29 @@ class ViserLiveViewer:
         goal_pos_w, goal_quat_wxyz, goal_size = target_pose
         dimensions = tuple(float(max(1.0e-3, v)) for v in np.asarray(goal_size, dtype=np.float32).reshape(3))
         if self._target_box_handle is None:
-            self._target_box_handle = self._server.scene.add_box(
-                self._scene_path("/target_box"),
-                color=TARGET_BOX_COLOR,
-                dimensions=dimensions,
-                wireframe=False,
-                opacity=0.25,
-                flat_shading=True,
-                cast_shadow=False,
-                receive_shadow=False,
-                wxyz=goal_quat_wxyz,
-                position=goal_pos_w - offset,
-                visible=True,
-            )
+            try:
+                self._target_box_handle = self._server.scene.add_box(
+                    self._scene_path("/target_box"),
+                    color=TARGET_BOX_COLOR,
+                    dimensions=dimensions,
+                    wireframe=False,
+                    opacity=0.25,
+                    flat_shading=True,
+                    cast_shadow=False,
+                    receive_shadow=False,
+                    wxyz=goal_quat_wxyz,
+                    position=goal_pos_w - offset,
+                    visible=True,
+                )
+            except TypeError:
+                self._target_box_handle = self._server.scene.add_box(
+                    self._scene_path("/target_box"),
+                    color=TARGET_BOX_COLOR,
+                    dimensions=dimensions,
+                    wxyz=goal_quat_wxyz,
+                    position=goal_pos_w - offset,
+                    visible=True,
+                )
             self._target_box_last_dimensions = dimensions
         else:
             if self._target_box_last_dimensions != dimensions:
@@ -5696,12 +6286,18 @@ class ViserLiveViewer:
                 point_shape="circle",
             )
             return handle, True
-        handle = self._server.scene.add_mesh_trimesh(
-            name,
-            mesh,
-            cast_shadow=False,
-            receive_shadow=False,
-        )
+        try:
+            handle = self._server.scene.add_mesh_trimesh(
+                name,
+                mesh,
+                cast_shadow=False,
+                receive_shadow=False,
+            )
+        except TypeError:
+            handle = self._server.scene.add_mesh_trimesh(
+                name,
+                mesh,
+            )
         return handle, False
 
     def _update_perception_markers(

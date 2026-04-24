@@ -28,6 +28,13 @@ def _resolve_obj_paths(path_str: str) -> list[Path]:
     return [path] if path.exists() else []
 
 
+def _scale_mesh_xyz(mesh: trimesh.Trimesh, scale_xyz: np.ndarray) -> trimesh.Trimesh:
+    scaled = mesh.copy()
+    if scaled.vertices.size:
+        scaled.vertices *= scale_xyz.reshape(1, 3)
+    return scaled
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--obj-dir", required=True, help="Directory containing per-tile OBJ meshes.")
@@ -35,6 +42,14 @@ def main() -> None:
     parser.add_argument("--out-meta", required=True, help="Output metadata JSON path.")
     parser.add_argument("--num-rows", type=int, default=1, help="Number of rows to repeat the column set.")
     parser.add_argument("--gap", type=float, default=1e-4, help="Gap between tiles to avoid overlap.")
+    parser.add_argument(
+        "--mesh-scale",
+        type=float,
+        nargs=3,
+        metavar=("SX", "SY", "SZ"),
+        default=(1.0, 1.0, 1.0),
+        help="Per-axis XYZ scale applied to each source terrain mesh before tiling.",
+    )
     args = parser.parse_args()
 
     obj_paths = _resolve_obj_paths(args.obj_dir)
@@ -45,11 +60,15 @@ def main() -> None:
     if len(set(tile_names)) != len(tile_names):
         raise ValueError("OBJ stems must be unique for pairing.")
 
+    scale_xyz = np.asarray(args.mesh_scale, dtype=np.float64)
+    if np.any(scale_xyz <= 0.0):
+        raise ValueError(f"--mesh-scale must be strictly positive. Got: {scale_xyz.tolist()}")
+
     meshes = []
     spans = []
     tile_max_z = []
     for path in obj_paths:
-        mesh = _load_mesh(path)
+        mesh = _scale_mesh_xyz(_load_mesh(path), scale_xyz)
         meshes.append(mesh)
         spans.append(mesh.bounds[1] - mesh.bounds[0])
         tile_max_z.append(float(mesh.vertices[:, 2].max() if mesh.vertices.size else 0.0))
@@ -80,6 +99,7 @@ def main() -> None:
         "tile_rows": int(max(1, args.num_rows)),
         "tile_cols": int(len(tile_names)),
         "tile_max_z": np.asarray(tile_max_z, dtype=np.float32).tolist(),
+        "mesh_scale": scale_xyz.astype(np.float32).tolist(),
     }
 
     out_meta = Path(args.out_meta)
@@ -89,6 +109,7 @@ def main() -> None:
 
     print(f"[INFO] Wrote combined mesh: {out_obj}")
     print(f"[INFO] Wrote metadata: {out_meta}")
+    print(f"[INFO] mesh_scale={scale_xyz.tolist()}")
 
 
 if __name__ == "__main__":

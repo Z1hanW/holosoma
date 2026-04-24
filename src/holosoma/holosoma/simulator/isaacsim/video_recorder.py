@@ -88,6 +88,54 @@ class IsaacSimVideoRecorder(VideoRecorderInterface):
         """
         super().setup_recording()
 
+        # Emit a concrete terrain mapping for the selected recording env so
+        # multi-terrain runs cannot silently record the wrong slot.
+        try:
+            terrain_state = self.simulator.terrain_manager.get_state("locomotion_terrain")
+            terrain = getattr(terrain_state, "terrain", None)
+            tile_names = list(getattr(terrain, "obj_tile_names", []) or []) if terrain is not None else []
+            tile_offsets = getattr(terrain, "obj_tile_offsets", None) if terrain is not None else None
+            if tile_names:
+                record_env_id = int(self.config.record_env_id)
+                tile_offsets_arr = np.asarray(tile_offsets) if tile_offsets is not None else None
+                tile_rows = int(getattr(terrain, "obj_tile_rows", 0) or 0) if terrain is not None else 0
+                tile_stride_raw = getattr(terrain, "obj_tile_stride", None) if terrain is not None else None
+                tile_stride = (
+                    np.asarray(tile_stride_raw, dtype=np.float32).reshape(-1)
+                    if tile_stride_raw is not None
+                    else np.zeros((0,), dtype=np.float32)
+                )
+                resolved_idx = record_env_id
+                resolved_row = 0
+                if tile_rows > 0:
+                    capacity = tile_rows * len(tile_names)
+                    if 0 <= record_env_id < capacity:
+                        resolved_idx = record_env_id // tile_rows
+                        resolved_row = record_env_id % tile_rows
+                if 0 <= resolved_idx < len(tile_names):
+                    tile_offset = None
+                    if tile_offsets_arr is not None and tile_offsets_arr.ndim == 2 and resolved_idx < tile_offsets_arr.shape[0]:
+                        tile_offset = tile_offsets_arr[resolved_idx].astype(np.float32).copy()
+                        if resolved_row > 0 and tile_stride.size >= 2:
+                            tile_offset[1] += float(resolved_row) * float(tile_stride[1])
+                        tile_offset = tile_offset.tolist()
+                    logger.info(
+                        "Recording video from terrain tile '{}' (record_env_id={}, tile_row={}, tile_offset={})",
+                        tile_names[resolved_idx],
+                        record_env_id,
+                        resolved_row,
+                        tile_offset,
+                    )
+                else:
+                    logger.warning(
+                        "record_env_id={} could not be resolved to a terrain tile (tile_count={}, tile_rows={}).",
+                        record_env_id,
+                        len(tile_names),
+                        tile_rows,
+                    )
+        except Exception as e:
+            logger.warning(f"Unable to resolve terrain tile mapping for video recording: {e}")
+
         import omni.replicator.core as rep
         import omni.usd
         from pxr import UsdGeom
@@ -215,7 +263,7 @@ class IsaacSimVideoRecorder(VideoRecorderInterface):
             self._view.set_world_poses(
                 position,
                 orientations,
-                torch.tensor([self.config.record_env_id], device=self.simulator.device, dtype=torch.int32),
+                torch.tensor([0], device=self.simulator.device, dtype=torch.int32),
             )
 
         except Exception as e:

@@ -527,7 +527,7 @@ class BaseSimulator:
         if self.video_recorder is not None:
             self.video_recorder.on_episode_end(env_id)
 
-    def capture_video_frame(self, env_id: int = 0) -> None:
+    def capture_video_frame(self, env_id: int | None = None) -> None:
         """Capture a video frame during simulation.
 
         This method should be called during each simulation step when video
@@ -536,10 +536,13 @@ class BaseSimulator:
 
         Parameters
         ----------
-        env_id : int, default=0
-            The environment ID where the frame is being captured.
+        env_id : int | None, default=None
+            The environment ID where the frame is being captured. If omitted,
+            the configured video record environment is used.
         """
         if self.video_recorder is not None:
+            if env_id is None:
+                env_id = int(getattr(self.video_config, "record_env_id", 0))
             self.video_recorder.capture_frame(env_id)
 
     # ----- Actor/Object Access Interface -----

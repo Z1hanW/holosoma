@@ -79,6 +79,33 @@ class WholeBodyTrackingManager(BaseTask):
         motion_command.update_metrics()
         self.log_dict.update(motion_command.metrics)
 
+        # Termination diagnostics: useful to identify which term is killing episodes.
+        if self.termination_manager is not None:
+            term_names = getattr(self.termination_manager, "_term_names", [])
+            for term_name in term_names:
+                term_mask = self.termination_manager.get_last_term_result(term_name)
+                if term_mask is not None:
+                    self.log_dict[f"termination/{term_name}_fraction"] = term_mask.float().mean().detach().cpu()
+
+            self.log_dict["termination/reset_fraction"] = self.reset_buf.float().mean().detach().cpu()
+            self.log_dict["termination/timeout_fraction"] = self.time_out_buf.float().mean().detach().cpu()
+
+            bad_tracking_term = getattr(self.termination_manager, "_term_instances", {}).get("bad_tracking")
+            if bad_tracking_term is not None:
+                try:
+                    self.log_dict["termination/bad_tracking_ref_pos_fraction"] = (
+                        bad_tracking_term.bad_ref_pos(motion_command).float().mean().detach().cpu()
+                    )
+                    self.log_dict["termination/bad_tracking_ref_ori_fraction"] = (
+                        bad_tracking_term.bad_ref_ori(motion_command).float().mean().detach().cpu()
+                    )
+                    self.log_dict["termination/bad_tracking_body_pos_fraction"] = (
+                        bad_tracking_term.bad_motion_body_pos(motion_command).float().mean().detach().cpu()
+                    )
+                except Exception:
+                    # Keep logging robust across custom termination subclasses.
+                    pass
+
     def reset_all(self):
         # If reset_all is called several times, clear buffer in motion_command
         motion_command = self.command_manager.get_state("motion_command")

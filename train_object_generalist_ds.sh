@@ -1364,3 +1364,5 @@ train_cmd+=(--logger.video.enabled=False)
 train_cmd+=(--logger.headless_recording=False)
 train_cmd+=(--logger.video.upload_to_wandb=False)
 VISER_LOAD_URDF="${VISER_LOAD_URDF}" "${train_cmd[@]}"
+# 我看到一个更可疑的信号：IsaacSim 打印出来的关节 Stiffness/
+#   Damping 是 0.000，

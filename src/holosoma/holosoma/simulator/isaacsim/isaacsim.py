@@ -55,6 +55,7 @@ from holosoma.simulator.isaacsim.prim_utils import (
     create_usd_scene_loader,
 )
 from holosoma.simulator.isaacsim.video_recorder import IsaacSimVideoRecorder
+from holosoma.simulator.shared.multi_video_recorder import build_multi_video_recorder_from_spec
 from holosoma.simulator.shared.virtual_gantry import (
     VirtualGantry,
     create_virtual_gantry,
@@ -348,7 +349,11 @@ class IsaacSim(BaseSimulator):
         self._sim_step_counter = 0
 
         if self.video_config.enabled:
-            self.video_recorder = IsaacSimVideoRecorder(self.video_config, self)
+            self.video_recorder = build_multi_video_recorder_from_spec(
+                self.video_config,
+                self,
+                os.environ.get("HOLOSOMA_VIDEO_MULTI_VIEWS_JSON"),
+            )
 
         # debug visualization
         # self.draw = _debug_draw.acquire_debug_draw_interface()
@@ -1103,8 +1108,6 @@ class IsaacSim(BaseSimulator):
         terrain_prim_path = "/World/ground"
         ground_plane_collision_prim_path = "/World/ground_plane_collision"
         height_scanner_mesh_paths = [terrain_prim_path]
-        if terrain_state.mesh_type == "load_obj" and bool(getattr(terrain_state, "add_ground_plane_collision", False)):
-            height_scanner_mesh_paths.append(ground_plane_collision_prim_path)
         height_scanner_config = None
         if terrain_state.mesh_type not in ["fake", None]:
             # Add a height scanner to the torso to detect the height of the terrain mesh
@@ -1179,7 +1182,11 @@ class IsaacSim(BaseSimulator):
                 ground_plane_config.env_spacing = self.scene.cfg.env_spacing
                 ground_plane_config.class_type(ground_plane_config)
                 global_collision_prims.append(ground_plane_collision_prim_path)
-                logger.info("Added fallback ground plane collision under load_obj terrain and exposed it to the height scanner.")
+                self._add_ground_plane_visual(self.terrain.mesh.bounds if self.terrain is not None else None)
+                logger.info(
+                    "Added fallback ground plane collision under load_obj terrain. "
+                    "IsaacLab RayCaster only supports one mesh prim, so the fallback plane is not added to the height scanner."
+                )
         else:
             raise ValueError(f"Unsupported terrain mesh type: {terrain_state.mesh_type}")
 
@@ -1406,6 +1413,65 @@ class IsaacSim(BaseSimulator):
                 gprim.CreateDisplayColorAttr().Set([Gf.Vec3f(*color)])
                 gprim.CreateDisplayOpacityAttr().Set([1.0])
 
+    def _add_ground_plane_visual(self, bounds: np.ndarray | None) -> None:
+        """Add a visual-only orange slab for the fallback ground plane."""
+        if bounds is None:
+            return
+        if self.sim.render_mode < self.sim.RenderMode.PARTIAL_RENDERING:
+            return
+
+        try:
+            import omni.usd
+            from pxr import Gf, UsdGeom
+            from isaaclab.sim.utils import bind_visual_material
+        except Exception:
+            return
+
+        min_corner = np.asarray(bounds[0], dtype=np.float64)
+        max_corner = np.asarray(bounds[1], dtype=np.float64)
+        span = max_corner - min_corner
+        if span[0] <= 0.0 or span[1] <= 0.0:
+            return
+
+        margin = max(2.0, 0.05 * max(span[0], span[1]))
+        size_x = float(span[0] + 2.0 * margin)
+        size_y = float(span[1] + 2.0 * margin)
+        center_x = float((min_corner[0] + max_corner[0]) * 0.5)
+        center_y = float((min_corner[1] + max_corner[1]) * 0.5)
+        thickness = 0.04
+        top_z = 0.015
+        center_z = top_z - thickness * 0.5
+
+        stage = omni.usd.get_context().get_stage()
+        prim_path = "/World/ground_plane_visual"
+        if stage.GetPrimAtPath(prim_path).IsValid():
+            return
+        material_path = f"{prim_path}/Looks/OrangeGround"
+
+        prim = stage.DefinePrim(prim_path, "Cube")
+        xform = UsdGeom.Xformable(prim)
+        xform.AddTranslateOp().Set(Gf.Vec3d(center_x, center_y, center_z))
+        xform.AddScaleOp().Set(Gf.Vec3f(size_x * 0.5, size_y * 0.5, thickness * 0.5))
+        gprim = UsdGeom.Gprim(prim)
+        gprim.CreateDisplayColorAttr().Set([Gf.Vec3f(1.0, 0.45, 0.05)])
+        gprim.CreateDisplayOpacityAttr().Set([1.0])
+        material_cfg = sim_utils.PreviewSurfaceCfg(
+            diffuse_color=(1.0, 0.45, 0.05),
+            emissive_color=(0.25, 0.10, 0.0),
+            roughness=0.9,
+            metallic=0.0,
+            opacity=1.0,
+        )
+        material_cfg.func(material_path, material_cfg)
+        bind_visual_material(prim_path, material_path, stage=stage)
+        logger.info(
+            "Added visual ground plane slab at {} with material {} and size ({:.3f}, {:.3f}, {:.3f}).",
+            prim_path,
+            material_path,
+            size_x,
+            size_y,
+            thickness,
+        )
 
     def _get_base_body_name(self, preference_order: list[str]) -> str:
         """Get the base body name with fallback logic.

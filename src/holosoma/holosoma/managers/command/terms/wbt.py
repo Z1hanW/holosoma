@@ -2218,6 +2218,9 @@ class MotionCommand(CommandTermBase):
             return
 
         debug_tile_layout = os.environ.get("HOLOSOMA_DEBUG_TILE_LAYOUT", "0").lower() in ("1", "true", "yes", "on")
+        pair_tile_layout_mode = os.environ.get("HOLOSOMA_PAIR_TILE_LAYOUT", "auto").strip().lower()
+        force_fixed_tile_layout = pair_tile_layout_mode in ("1", "true", "yes", "on", "fixed")
+        force_random_tile_layout = pair_tile_layout_mode in ("0", "false", "no", "off", "random")
         auto_eval_tile_layout = (
             self._env.is_evaluating
             and self.multi_clip
@@ -2228,7 +2231,8 @@ class MotionCommand(CommandTermBase):
             and self.motion.num_clips > 0
         )
         use_fixed_tile_layout = (
-            (debug_tile_layout or auto_eval_tile_layout)
+            (debug_tile_layout or auto_eval_tile_layout or force_fixed_tile_layout)
+            and not force_random_tile_layout
             and self.multi_clip
             and self._fixed_clip_ids is None
             and self.motion_cfg.pair_terrain_with_motion
@@ -2236,6 +2240,16 @@ class MotionCommand(CommandTermBase):
             and self._terrain_row_count > 0
             and self.motion.num_clips > 0
         )
+
+        if use_fixed_tile_layout and not getattr(self, "_logged_pair_tile_layout_mode", False):
+            logger.info(
+                "pair_terrain_with_motion: using fixed tile layout (mode='{}', evaluating={}, num_clips={}, rows={}).",
+                pair_tile_layout_mode or "auto",
+                self._env.is_evaluating,
+                int(self.motion.num_clips),
+                int(self._terrain_row_count),
+            )
+            self._logged_pair_tile_layout_mode = True
 
         if use_fixed_tile_layout:
             row_count = max(1, int(self._terrain_row_count))

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Only edit this line. Then run: bash infer_terrain_tracking.sh
-WANDB_RUN_URL="${WANDB_RUN_URL:-https://wandb.ai/zihanw22/terrain-aware/runs/cmo0t8ck}"
+WANDB_RUN_URL="${WANDB_RUN_URL:-https://wandb.ai/zihanw22/terrain-aware/runs/9f1aoed8/files/model_02000.pt}"
 
 # IsaacSim + Viser inference for terrain tracking teacher policies.
 #
@@ -27,14 +27,14 @@ Usage:
 
 Terrain defaults:
   checkpoint  WANDB_RUN_URL at top of file (or DEFAULT_TERRAIN_CHECKPOINT)
-  motion      data/ds_crisp_data/___crisp_clean_motion
-  geometry    data/ds_crisp_data/___crisp_clean_geometry
+  motion      data/ds_crisp_data/_generated/___crisp_clean_motion_gmr_g1_trainready_rebuilt_20260423
+  geometry    data/ds_crisp_data/_generated/___crisp_clean_geometry_s0p7415730337
 
 Examples:
   bash infer_terrain_tracking.sh
   # or edit WANDB_RUN_URL at the top, then just run:
   bash infer_terrain_tracking.sh
-  bash infer_terrain_tracking.sh /abs/path/model.pt data/ds_crisp_data/___crisp_clean_motion data/ds_crisp_data/___crisp_clean_geometry
+  bash infer_terrain_tracking.sh /abs/path/model.pt data/ds_crisp_data/_generated/___crisp_clean_motion_gmr_g1_trainready_rebuilt_20260423 data/ds_crisp_data/_generated/___crisp_clean_geometry_s0p7415730337
   MOTION_CLIP_NAME=vmm_41 DRY_RUN=1 bash infer_terrain_tracking.sh
 
 Optional env vars:
@@ -45,6 +45,8 @@ Optional env vars:
   MOTION_CLIP_ID            (optional single clip id override)
   GEOMETRY_DIR              (terrain OBJ file/dir override)
   GEOMETRY_METADATA         (optional metadata .json override)
+  VIEWER_GEOMETRY_DIR       (optional Viser-only terrain OBJ file/dir override)
+  VIEWER_GEOMETRY_METADATA  (optional Viser-only metadata .json override)
   TERRAIN_SINGLE_GEOMETRY   (auto|0|1; when a single clip is pinned, prefer one small OBJ)
   OBJECT_URDF               (legacy obj mode only)
   PERCEPTION_PRESET         (terrain mode default: checkpoint)
@@ -60,11 +62,12 @@ Optional env vars:
   VISER_SHOW_SCANDOTS       (default: True only when perception resolves to heightmap, else False)
   VISER_SCANDOTS_POINT_SIZE (default: 0.03 when sampled points are shown, checkpoint/default otherwise)
   VIS_GPU                   (default: auto)
+  EVAL_SINGLE_PAIR          (default: 0; set 1 to evaluate exactly one motion clip + one terrain OBJ)
   DISABLE_RANDOMIZATION     (default: True)
   START_AT_TIMESTEP_ZERO_PROB
   FREEZE_AT_TIMESTEP_ZERO_PROB
   RESET_NOISE_SCALE
-  USE_CHECKPOINT_RESET_PROFILE (default: 0; set 1 to inherit training-time reset/noise)
+  USE_CHECKPOINT_RESET_PROFILE (default: 1; set 0 to force the debug reset/noise profile)
   MAX_EPISODE_LENGTH_S      (default: 1000000)
   MAX_EVAL_STEPS            (optional; overrides training.max_eval_steps)
   PHYSX_GPU_COLLISION_STACK_SIZE (default: 536870912)
@@ -80,8 +83,9 @@ cd "${SCRIPT_DIR}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
 DEFAULT_TERRAIN_CHECKPOINT="${DEFAULT_TERRAIN_CHECKPOINT:-${WANDB_RUN_URL:-}}"
-DEFAULT_TERRAIN_MOTION_DIR="${DEFAULT_TERRAIN_MOTION_DIR:-${SCRIPT_DIR}/data/ds_crisp_data/___crisp_clean_motion}"
-DEFAULT_TERRAIN_GEOMETRY_DIR="${DEFAULT_TERRAIN_GEOMETRY_DIR:-${SCRIPT_DIR}/data/ds_crisp_data/___crisp_clean_geometry}"
+DEFAULT_TERRAIN_MOTION_DIR="${DEFAULT_TERRAIN_MOTION_DIR:-${SCRIPT_DIR}/data/ds_crisp_data/_generated/___crisp_clean_motion_gmr_g1_trainready_rebuilt_20260423}"
+DEFAULT_TERRAIN_GEOMETRY_DIR="${DEFAULT_TERRAIN_GEOMETRY_DIR:-${SCRIPT_DIR}/data/ds_crisp_data/_generated/___crisp_clean_geometry_s0p7415730337}"
+DEFAULT_TERRAIN_VIEWER_GEOMETRY_DIR="${DEFAULT_TERRAIN_VIEWER_GEOMETRY_DIR:-${SCRIPT_DIR}/data/ds_crisp_data/_generated/___crisp_clean_geometry_s0p7415730337}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" ]]; then
   usage
@@ -409,6 +413,59 @@ if suffix in {".h5", ".hdf5"}:
                 print(values[clip_id])
     except Exception:
         pass
+PY
+}
+
+resolve_single_pair_geometry_obj() {
+  local geometry_root="$1"
+  local viewer_geometry_root="${2:-}"
+  local fallback_geometry_root="${3:-}"
+  local clip_name="$4"
+
+  "${PYTHON_BIN}" - "${geometry_root}" "${viewer_geometry_root}" "${fallback_geometry_root}" "${clip_name}" <<'PY' 2>/dev/null || true
+import sys
+from pathlib import Path
+
+geometry_root = Path(sys.argv[1]).expanduser() if sys.argv[1] else None
+viewer_geometry_root = Path(sys.argv[2]).expanduser() if sys.argv[2] else None
+fallback_geometry_root = Path(sys.argv[3]).expanduser() if sys.argv[3] else None
+clip_name = str(sys.argv[4] or "").strip()
+if not clip_name:
+    raise SystemExit(0)
+
+
+def canonical(raw: str) -> str:
+    name = Path(raw).name
+    lower = name.lower()
+    for suffix in (".npz", ".h5", ".hdf5", ".obj"):
+        if lower.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    return name.casefold()
+
+
+target = canonical(clip_name)
+roots = [geometry_root, viewer_geometry_root, fallback_geometry_root]
+seen: set[Path] = set()
+for root in roots:
+    if root is None:
+        continue
+    try:
+        resolved = root.resolve()
+    except Exception:
+        resolved = root
+    if resolved in seen:
+        continue
+    seen.add(resolved)
+    if root.is_dir():
+        files = sorted(list(root.glob("*.obj")) + list(root.glob("*.OBJ")))
+        for path in files:
+            if canonical(path.name) == target:
+                print(str(path.resolve()))
+                raise SystemExit(0)
+    elif root.is_file() and root.suffix.lower() == ".obj" and canonical(root.name) == target:
+        print(str(root.resolve()))
+        raise SystemExit(0)
 PY
 }
 
@@ -764,6 +821,9 @@ else
   MOTION_CLIP_ID="${MOTION_CLIP_ID:-}"
 fi
 
+EVAL_SINGLE_PAIR_RAW="${EVAL_SINGLE_PAIR:-0}"
+EVAL_SINGLE_PAIR_FLAG="$(normalize_bool_int EVAL_SINGLE_PAIR "${EVAL_SINGLE_PAIR_RAW}")"
+
 if [[ ! -e "${MOTION_DIR}" && "${MOTION_DIR}" != s3://* ]]; then
   echo "[ERROR] MOTION_DIR not found: ${MOTION_DIR}" >&2
   exit 1
@@ -771,6 +831,44 @@ fi
 if [[ -d "${MOTION_DIR}" && -n "${MOTION_CLIP_NAME}" && ! -f "${MOTION_DIR}/${MOTION_CLIP_NAME}.npz" ]]; then
   echo "[ERROR] MOTION_CLIP_NAME not found in MOTION_DIR: ${MOTION_CLIP_NAME}.npz" >&2
   exit 2
+fi
+
+EVAL_SINGLE_PAIR_GEOMETRY_PATH=""
+EVAL_SINGLE_PAIR_CLIP_NAME=""
+if [[ "${MODE}" == "terrain" && "${EVAL_SINGLE_PAIR_FLAG}" == "1" ]]; then
+  EVAL_SINGLE_PAIR_REQUESTED_CLIP=0
+  if [[ -n "${MOTION_CLIP_NAME:-}" || -n "${MOTION_CLIP_ID:-}" ]]; then
+    EVAL_SINGLE_PAIR_REQUESTED_CLIP=1
+  fi
+  EVAL_SINGLE_PAIR_CLIP_NAME="$(resolve_motion_clip_name "${MOTION_DIR}" "${MOTION_CLIP_NAME:-}" "${MOTION_CLIP_ID:-}")"
+  if [[ -z "${EVAL_SINGLE_PAIR_CLIP_NAME}" && "${EVAL_SINGLE_PAIR_REQUESTED_CLIP}" != "1" ]]; then
+    EVAL_SINGLE_PAIR_CLIP_NAME="$(resolve_motion_clip_name "${MOTION_DIR}" "" "0")"
+  fi
+  if [[ -z "${EVAL_SINGLE_PAIR_CLIP_NAME}" ]]; then
+    echo "[ERROR] EVAL_SINGLE_PAIR=1 requires a resolvable motion clip. Set MOTION_CLIP_NAME or MOTION_CLIP_ID." >&2
+    exit 2
+  fi
+  MOTION_CLIP_NAME="${EVAL_SINGLE_PAIR_CLIP_NAME}"
+  MOTION_CLIP_ID=""
+
+  EVAL_SINGLE_PAIR_GEOMETRY_PATH="$(
+    resolve_single_pair_geometry_obj \
+      "${GEOMETRY_DIR:-}" \
+      "${VIEWER_GEOMETRY_DIR:-}" \
+      "${DEFAULT_TERRAIN_VIEWER_GEOMETRY_DIR:-}" \
+      "${EVAL_SINGLE_PAIR_CLIP_NAME}"
+  )"
+  if [[ -z "${EVAL_SINGLE_PAIR_GEOMETRY_PATH}" || ! -f "${EVAL_SINGLE_PAIR_GEOMETRY_PATH}" ]]; then
+    echo "[ERROR] EVAL_SINGLE_PAIR=1 could not resolve a single terrain OBJ for clip '${EVAL_SINGLE_PAIR_CLIP_NAME}'." >&2
+    echo "[ERROR] Checked GEOMETRY_DIR='${GEOMETRY_DIR:-}', VIEWER_GEOMETRY_DIR='${VIEWER_GEOMETRY_DIR:-}', DEFAULT_TERRAIN_VIEWER_GEOMETRY_DIR='${DEFAULT_TERRAIN_VIEWER_GEOMETRY_DIR:-}'." >&2
+    exit 2
+  fi
+  GEOMETRY_DIR="${EVAL_SINGLE_PAIR_GEOMETRY_PATH}"
+  GEOMETRY_METADATA=""
+  VIEWER_GEOMETRY_DIR="${EVAL_SINGLE_PAIR_GEOMETRY_PATH}"
+  VIEWER_GEOMETRY_METADATA=""
+  TERRAIN_NUM_ROWS=1
+  TERRAIN_NUM_COLS=1
 fi
 
 if [[ "${MODE}" == "obj" ]]; then
@@ -818,7 +916,11 @@ esac
 SINGLE_GEOMETRY_ACTIVE=0
 SINGLE_GEOMETRY_CLIP_NAME=""
 SINGLE_GEOMETRY_MESSAGE=""
-if [[ "${MODE}" == "terrain" && -n "${GEOMETRY_DIR:-}" && -d "${GEOMETRY_DIR}" ]]; then
+if [[ "${MODE}" == "terrain" && "${EVAL_SINGLE_PAIR_FLAG}" == "1" ]]; then
+  SINGLE_GEOMETRY_ACTIVE=1
+  SINGLE_GEOMETRY_CLIP_NAME="${EVAL_SINGLE_PAIR_CLIP_NAME}"
+  SINGLE_GEOMETRY_MESSAGE="eval single-pair mode pinned terrain to '${GEOMETRY_DIR}'"
+elif [[ "${MODE}" == "terrain" && -n "${GEOMETRY_DIR:-}" && -d "${GEOMETRY_DIR}" ]]; then
   RESOLVED_CLIP_FOR_GEOMETRY="$(resolve_motion_clip_name "${MOTION_DIR}" "${MOTION_CLIP_NAME:-}" "${MOTION_CLIP_ID:-}")"
   WANT_SINGLE_GEOMETRY=0
   case "${TERRAIN_SINGLE_GEOMETRY_MODE}" in
@@ -859,6 +961,8 @@ DRY_RUN_FLAG="$(normalize_bool_int DRY_RUN "${DRY_RUN_RAW}")"
 
 if [[ -n "${PAIR_TERRAIN_WITH_MOTION+x}" ]]; then
   PAIR_TERRAIN_WITH_MOTION_RAW="${PAIR_TERRAIN_WITH_MOTION}"
+elif [[ "${MODE}" == "terrain" && "${EVAL_SINGLE_PAIR_FLAG}" == "1" ]]; then
+  PAIR_TERRAIN_WITH_MOTION_RAW="False"
 elif [[ "${MODE}" == "terrain" && -n "${CHECKPOINT_PAIR_TERRAIN_WITH_MOTION}" ]]; then
   PAIR_TERRAIN_WITH_MOTION_RAW="${CHECKPOINT_PAIR_TERRAIN_WITH_MOTION}"
 elif [[ "${MODE}" == "terrain" ]]; then
@@ -892,7 +996,7 @@ fi
 VISER_LOAD_URDF="${VISER_LOAD_URDF:-1}"
 VIS_GPU="${VIS_GPU:-auto}"
 
-USE_CHECKPOINT_RESET_PROFILE_RAW="${USE_CHECKPOINT_RESET_PROFILE:-0}"
+USE_CHECKPOINT_RESET_PROFILE_RAW="${USE_CHECKPOINT_RESET_PROFILE:-1}"
 USE_CHECKPOINT_RESET_PROFILE_FLAG="$(normalize_bool_int USE_CHECKPOINT_RESET_PROFILE "${USE_CHECKPOINT_RESET_PROFILE_RAW}")"
 START_AT_TIMESTEP_ZERO_PROB="${START_AT_TIMESTEP_ZERO_PROB:-1.0}"
 FREEZE_AT_TIMESTEP_ZERO_PROB="${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}"
@@ -939,13 +1043,23 @@ if [[ -z "${CUDA_VISIBLE_DEVICES+x}" || -z "${CUDA_VISIBLE_DEVICES}" ]]; then
   fi
 fi
 
-export VISER_ENABLE_CLIP_GUI="${VISER_ENABLE_CLIP_GUI:-1}"
+if [[ "${MODE}" == "terrain" && "${EVAL_SINGLE_PAIR_FLAG}" == "1" ]]; then
+  export VISER_ENABLE_CLIP_GUI=0
+else
+  export VISER_ENABLE_CLIP_GUI="${VISER_ENABLE_CLIP_GUI:-1}"
+fi
 export VISER_ENABLE_MANUAL_GUI="${VISER_ENABLE_MANUAL_GUI:-0}"
 export VISER_SHOW_TARGET_KEYPOINTS="${VISER_SHOW_TARGET_KEYPOINTS:-1}"
 export VISER_START_PAUSED="${VISER_START_PAUSED:-0}"
 export VISER_MANUAL_USE_HW_JOYSTICK="${VISER_MANUAL_USE_HW_JOYSTICK:-0}"
 export VISER_MANUAL_HW_BACKEND="${VISER_MANUAL_HW_BACKEND:-auto}"
 export VISER_LOAD_URDF
+if [[ -n "${VIEWER_GEOMETRY_DIR:-}" ]]; then
+  export VISER_TERRAIN_GEOMETRY_DIR="${VIEWER_GEOMETRY_DIR}"
+fi
+if [[ -n "${VIEWER_GEOMETRY_METADATA+x}" ]]; then
+  export VISER_TERRAIN_GEOMETRY_METADATA="${VIEWER_GEOMETRY_METADATA}"
+fi
 export LOGURU_LEVEL="${LOGURU_LEVEL:-WARNING}"
 export PY_LOG_LEVEL="${PY_LOG_LEVEL:-WARNING}"
 export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
@@ -1191,6 +1305,11 @@ echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-<unset>}"
 echo "[INFO] viser_port=${VISER_PORT}"
 echo "[INFO] viser_sync_to_sim=${VISER_SYNC_TO_SIM} viser_force_dt=${VISER_FORCE_DT}"
 echo "[INFO] clip_gui=${VISER_ENABLE_CLIP_GUI} manual_gui=${VISER_ENABLE_MANUAL_GUI}"
+echo "[INFO] eval_single_pair=${EVAL_SINGLE_PAIR_FLAG}"
+if [[ -n "${VISER_TERRAIN_GEOMETRY_DIR:-}" ]]; then
+  echo "[INFO] viser_terrain_geometry_dir=${VISER_TERRAIN_GEOMETRY_DIR}"
+  echo "[INFO] viser_terrain_geometry_metadata=${VISER_TERRAIN_GEOMETRY_METADATA:-<none>}"
+fi
 echo "[INFO] disable_randomization=${DISABLE_RANDOMIZATION_FLAG}"
 echo "[INFO] pair_terrain_with_motion=${PAIR_TERRAIN_WITH_MOTION_FLAG}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"

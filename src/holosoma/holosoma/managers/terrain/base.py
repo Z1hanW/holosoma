@@ -97,3 +97,7 @@ class TerrainTermBase(ABC):
     @property
     def restitution(self) -> float:
         return self._cfg.restitution
+
+    @property
+    def add_ground_plane_collision(self) -> bool:
+        return bool(getattr(self._cfg, "add_ground_plane_collision", False))

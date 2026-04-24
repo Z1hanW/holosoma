@@ -145,6 +145,11 @@ motion_future_target_poses_group = ObsGroupCfg(
 
 terrain_transformer_self_terms = {
     "motion_command": actor_obs_shared.terms["motion_command"],
+    "motion_ref_pos_b": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:motion_ref_pos_b",
+        scale=1.0,
+        noise=0.25,
+    ),
     "motion_ref_ori_b": actor_obs_shared.terms["motion_ref_ori_b"],
     "base_ang_vel": actor_obs_shared.terms["base_ang_vel"],
     "dof_pos": actor_obs_shared.terms["dof_pos"],
@@ -518,6 +523,24 @@ g1_29dof_wbt_observation_terrain_transformer = ObservationManagerCfg(
             history_length=1,
             terms=terrain_transformer_target_terms,
         ),
+        "critic_obs": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=critic_obs_shared_terms,
+        ),
+    },
+)
+
+g1_29dof_wbt_observation_terrain_transformer_future_target = ObservationManagerCfg(
+    groups={
+        "actor_obs_self": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=terrain_transformer_self_terms,
+        ),
+        "actor_obs_target": motion_future_target_poses_group,
         "critic_obs": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
@@ -989,6 +1012,7 @@ __all__ = [
     "g1_29dof_wbt_observation_motion_tracking",
     "g1_29dof_wbt_observation_motion_tracking_split",
     "g1_29dof_wbt_observation_terrain_transformer",
+    "g1_29dof_wbt_observation_terrain_transformer_future_target",
     "g1_29dof_wbt_observation_terrain_distill_sparse_root_cmd",
     "g1_29dof_wbt_observation_w_object",
     "g1_29dof_wbt_observation_w_object_legacy",

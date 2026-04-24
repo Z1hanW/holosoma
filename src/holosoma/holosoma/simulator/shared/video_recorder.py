@@ -487,7 +487,9 @@ class VideoRecorderInterface(ABC):
                 save_dir=save_dir,
                 output_format=self.config.output_format,
                 wandb_logging=self.config.upload_to_wandb,
+                keep_local_copy=self.config.keep_local_copy,
                 episode_id=self._current_episode,
+                wandb_key=self.config.wandb_key,
             )
 
         except Exception as e:

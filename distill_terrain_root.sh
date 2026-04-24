@@ -25,8 +25,8 @@ Optional env vars:
   ALLOW_TEACHER_PERCEPTION_CHECKPOINT
                                (default: 0; set 1 only to bypass tracking-teacher validation)
   EXP                          (default: g1-29dof-wbt-terrain-distill-sparse-root-cmd)
-  MOTION_DIR                   (default: /data/terrain/___crisp_clean_motion)
-  OBJ_SOURCE                   (default: /data/terrain/___crisp_clean_geometry)
+  MOTION_DIR                   (default: data/ds_crisp_data/_generated/___crisp_clean_motion_gmr_g1_trainready_rebuilt_20260423)
+  OBJ_SOURCE                   (default: data/ds_crisp_data/_generated/___crisp_clean_geometry_s0p7415730337)
   OBJ_META_PATH                (optional metadata override)
   NUM_ROWS / NUM_COLS          (optional terrain layout override)
   PERCEPTION_PRESET            (default: camera_depth_d435i_17x17; options: none|camera_depth_d435i|camera_depth_d435i_17x17|heightmap)
@@ -431,8 +431,8 @@ PERCEPTION_INTO_POLICY_MODULES="${PERCEPTION_INTO_POLICY_MODULES:-True}"
 CLIP_TEACHER_ACTIONS="${CLIP_TEACHER_ACTIONS:-True}"
 CLIP_ACTIONS_THRESHOLD="${CLIP_ACTIONS_THRESHOLD:-8.0}"
 
-MOTION_DIR="${MOTION_DIR:-/data/terrain/___crisp_clean_motion}"
-OBJ_SOURCE="${OBJ_SOURCE:-/data/terrain/___crisp_clean_geometry}"
+MOTION_DIR="${MOTION_DIR:-${SCRIPT_DIR}/data/ds_crisp_data/_generated/___crisp_clean_motion_gmr_g1_trainready_rebuilt_20260423}"
+OBJ_SOURCE="${OBJ_SOURCE:-${SCRIPT_DIR}/data/ds_crisp_data/_generated/___crisp_clean_geometry_s0p7415730337}"
 OBJ_META_PATH="${OBJ_META_PATH:-}"
 NUM_ROWS="${NUM_ROWS:-}"
 NUM_COLS="${NUM_COLS:-}"

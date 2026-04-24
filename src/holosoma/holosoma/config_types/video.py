@@ -106,6 +106,12 @@ class VideoConfig:
     upload_to_wandb: bool = True
     """Whether to upload videos to wandb for logging if wandb is enabled."""
 
+    keep_local_copy: bool = False
+    """Whether to preserve the encoded video on disk after uploading to wandb."""
+
+    wandb_key: str = "Training rollout"
+    """Wandb media key used when uploading this video stream."""
+
     show_command_overlay: bool = True
     """Whether to overlay robot command information on video frames."""
 

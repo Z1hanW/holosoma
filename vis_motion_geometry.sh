@@ -24,7 +24,7 @@ CLI_DATASET_KNOB=${1:-""}
 CLI_VIS_MODE=${2:-""}
 DATASET_KNOB=${CLI_DATASET_KNOB:-${DATASET_KNOB:-"behave"}}
 REPO_CRISP_DATA_ROOT="${SCRIPT_DIR}/data/ds_crisp_data"
-DEFAULT_CRISP_MOTION_DIR="${REPO_CRISP_DATA_ROOT}/___crisp_clean_motion"
+DEFAULT_CRISP_MOTION_DIR="${REPO_CRISP_DATA_ROOT}/___crisp_clean_motion_gmr_g1"
 DEFAULT_CRISP_GEOMETRY_DIR="${REPO_CRISP_DATA_ROOT}/___crisp_clean_geometry"
 
 case "${DATASET_KNOB}" in

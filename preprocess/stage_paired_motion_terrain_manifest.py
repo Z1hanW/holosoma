@@ -16,7 +16,8 @@ import yaml
 
 SUPPORTED_MOTION_SUFFIXES = {".npz"}
 SUPPORTED_TERRAIN_SUFFIXES = {".obj"}
-DEFAULT_MOTION_SUBDIR = "___crisp_clean_motion"
+DEFAULT_MOTION_SUBDIR = "___crisp_clean_motion_gmr_g1"
+LEGACY_MOTION_SUBDIR = "___crisp_clean_motion"
 DEFAULT_GEOMETRY_SUBDIR = "___crisp_clean_geometry"
 
 
@@ -73,17 +74,31 @@ def _iter_ds_crisp_data_entries(entry: dict[str, Any], *, manifest_base_dir: Pat
         entry_base_dir = _resolve_path(str(entry["base_dir"]), base_dir=manifest_base_dir)
 
     ds_root = _resolve_path(str(entry["ds_crisp_data_root"]), base_dir=entry_base_dir)
-    motion_dir = ds_root / str(entry.get("motion_dir_name", DEFAULT_MOTION_SUBDIR))
+    motion_dir_name_raw = entry.get("motion_dir_name")
+    if motion_dir_name_raw is None or str(motion_dir_name_raw).strip() == "":
+        motion_dir = ds_root / DEFAULT_MOTION_SUBDIR
+        if not motion_dir.is_dir():
+            legacy_motion_dir = ds_root / LEGACY_MOTION_SUBDIR
+            if legacy_motion_dir.is_dir():
+                motion_dir = legacy_motion_dir
+    else:
+        motion_dir = ds_root / str(motion_dir_name_raw)
     terrain_dir = ds_root / str(entry.get("geometry_dir_name", DEFAULT_GEOMETRY_SUBDIR))
     if not motion_dir.is_dir():
-        raise FileNotFoundError(f"ds_crisp_data motion dir not found: {motion_dir}")
+        raise FileNotFoundError(
+            f"ds_crisp_data motion dir not found: {motion_dir} "
+            f"(also checked legacy default '{LEGACY_MOTION_SUBDIR}')"
+        )
     if not terrain_dir.is_dir():
         raise FileNotFoundError(f"ds_crisp_data geometry dir not found: {terrain_dir}")
 
-    motion_paths = sorted(path.resolve() for path in motion_dir.glob("*.npz"))
-    terrain_paths = sorted(path.resolve() for path in terrain_dir.glob("*.obj"))
-    motion_map = {path.stem: path for path in motion_paths}
-    terrain_map = {path.stem: path for path in terrain_paths}
+    # Preserve clip_id from the visible filename in the dataset directory.
+    # Some datasets (e.g. gmr_g1) stage symlinks like stair_88.npz -> *_unitree_g1_qpos.npz;
+    # resolving before taking .stem would break motion/terrain name matching.
+    motion_paths = sorted(motion_dir.glob("*.npz"))
+    terrain_paths = sorted(terrain_dir.glob("*.obj"))
+    motion_map = {path.stem: path.resolve() for path in motion_paths}
+    terrain_map = {path.stem: path.resolve() for path in terrain_paths}
 
     include_patterns_raw = entry.get("include")
     if include_patterns_raw is None:
@@ -236,6 +251,75 @@ def _resolve_entry(
     return [(clip_id, motion_path, terrain_path, terrain_support_path)]
 
 
+def _decode_strings(values: Any) -> list[str]:
+    decoded: list[str] = []
+    for value in values:
+        if isinstance(value, bytes):
+            decoded.append(value.decode("utf-8"))
+        else:
+            decoded.append(str(value))
+    return decoded
+
+
+def _validate_motion_terrain_alignment(clip_id: str, motion_path: Path, terrain_path: Path) -> None:
+    """Catch catastrophic motion/terrain mismatches before launching training.
+
+    Some raw motion exports contain world-space offsets that are not aligned to the
+    paired terrain mesh origin. Those cases can silently pass name-based preflight
+    and only show up later as a robot rendered far away from its terrain tile.
+    """
+    if motion_path.suffix.lower() != ".npz" or terrain_path.suffix.lower() != ".obj":
+        return
+
+    try:
+        import numpy as np
+        import trimesh
+    except ImportError:
+        return
+
+    with np.load(motion_path, allow_pickle=True) as payload:
+        body_pos_w = payload.get("body_pos_w")
+        body_names = payload.get("body_names")
+        if body_pos_w is None or body_names is None:
+            return
+
+        body_pos_w = np.asarray(body_pos_w, dtype=np.float32)
+        if body_pos_w.ndim != 3 or body_pos_w.shape[0] == 0 or body_pos_w.shape[2] < 2:
+            return
+
+        names = _decode_strings(np.asarray(body_names).reshape(-1))
+        ref_name_candidates = ("pelvis", "pelvis_link", "base_link", "torso_link")
+        ref_idx = 0
+        for candidate in ref_name_candidates:
+            if candidate in names:
+                ref_idx = names.index(candidate)
+                break
+        ref_xy = body_pos_w[:, ref_idx, :2]
+
+    mesh = trimesh.load(terrain_path, force="mesh")
+    bounds = np.asarray(mesh.bounds, dtype=np.float32)
+    if bounds.shape != (2, 3):
+        return
+
+    lower_xy = bounds[0, :2]
+    upper_xy = bounds[1, :2]
+    inside_xy = np.logical_and(ref_xy >= lower_xy, ref_xy <= upper_xy).all(axis=1)
+    inside_fraction = float(np.mean(inside_xy))
+
+    start_xy = ref_xy[0]
+    clipped_start_xy = np.minimum(np.maximum(start_xy, lower_xy), upper_xy)
+    start_distance = float(np.linalg.norm(start_xy - clipped_start_xy))
+
+    if inside_fraction < 0.25 and start_distance > 2.0:
+        raise ValueError(
+            "Motion/terrain alignment check failed for clip "
+            f"'{clip_id}': reference path is far outside the paired OBJ bounds. "
+            f"start_xy={start_xy.tolist()} bounds_xy={[lower_xy.tolist(), upper_xy.tolist()]} "
+            f"inside_fraction={inside_fraction:.3f} start_distance={start_distance:.3f}. "
+            "This usually means the manifest is pointing at an unnormalized/raw motion export."
+        )
+
+
 def _stage_symlink(source: Path, dest: Path) -> None:
     if dest.exists() or dest.is_symlink():
         dest.unlink()
@@ -248,12 +332,15 @@ def main() -> None:
     source_group.add_argument("--manifest", help="Path to YAML/JSON manifest describing motion-terrain pairs.")
     source_group.add_argument(
         "--ds-crisp-data-root",
-        help="Path to a ds_crisp_data root containing ___crisp_clean_motion/ and ___crisp_clean_geometry/.",
+        help=(
+            "Path to a ds_crisp_data root containing ___crisp_clean_motion_gmr_g1/ "
+            "(or legacy ___crisp_clean_motion/) and ___crisp_clean_geometry/."
+        ),
     )
     parser.add_argument(
         "--out-root",
         required=True,
-        help="Output directory containing staged ___crisp_clean_motion/ and ___crisp_clean_geometry/.",
+        help="Output directory containing staged ___crisp_clean_motion_gmr_g1/ and ___crisp_clean_geometry/.",
     )
     args = parser.parse_args()
 
@@ -297,6 +384,8 @@ def main() -> None:
             if clip_id in seen_clip_ids:
                 raise ValueError(f"Duplicate clip_id '{clip_id}' at manifest entry {idx}.")
             seen_clip_ids.add(clip_id)
+
+            _validate_motion_terrain_alignment(clip_id, motion_path, terrain_path)
 
             staged_motion_path = motion_out_dir / f"{clip_id}{motion_path.suffix.lower()}"
             staged_terrain_path = terrain_out_dir / f"{clip_id}.obj"

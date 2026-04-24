@@ -1123,7 +1123,12 @@ class PPO(BaseAlgo):
                 final_rewards = torch.zeros_like(rewards)
                 if infos["time_outs"].any():
                     final_critic_obs = torch.cat([infos["final_observations"][k] for k in self.critic_obs_keys], dim=1)
-                    final_critic_obs = self._normalize_critic_obs(final_critic_obs, update=True)
+                    # NOTE:
+                    # `infos["time_outs"].any()` can differ across distributed ranks.
+                    # Updating empirical normalizers here would trigger rank-local
+                    # all_reduce calls with divergent call counts and can deadlock NCCL.
+                    # For timeout bootstrap, use inference-time normalization only.
+                    final_critic_obs = self._normalize_critic_obs(final_critic_obs, update=False)
                     final_policy_state = {"critic_obs": final_critic_obs}
                     if (
                         self.critic_perception_key
@@ -1966,10 +1971,12 @@ class PPO(BaseAlgo):
             def __init__(self, actor, normalizers, keys, slices, perception_key):
                 super().__init__()
                 self.actor = actor
-                self.normalizers = normalizers
                 self.keys = keys
                 self.slices = slices
                 self.perception_key = perception_key
+                # Register normalizers as submodules so `.to(device)` during export
+                # moves their buffers/params together with the wrapper.
+                self.normalizers = nn.ModuleDict({key: normalizers[key] for key in keys})
 
             def forward(self, actor_obs, perception_obs=None):
                 parts = []
@@ -2058,9 +2065,7 @@ class PPO(BaseAlgo):
             c.on_post_evaluate_policy()
 
     def _pre_eval_env_step(self, actor_state: dict):
-        actor_obs_raw = torch.cat([actor_state["obs"][k] for k in self.actor_obs_keys], dim=1)
-        actor_obs = actor_obs_raw
-        actor_obs = self._normalize_actor_obs(actor_obs, update=False)
+        actor_obs = torch.cat([actor_state["obs"][k] for k in self.actor_obs_keys], dim=1)
         policy_state = {"actor_obs": actor_obs}
         if self.actor_perception_key and self.actor_perception_key in actor_state["obs"]:
             policy_state[self.actor_perception_key] = actor_state["obs"][self.actor_perception_key]
@@ -2071,9 +2076,124 @@ class PPO(BaseAlgo):
         return actor_state
 
     def _post_eval_env_step(self, actor_state):
+        self._log_eval_tracking_debug(actor_state)
         for c in self.eval_callbacks:
             actor_state = c.on_post_eval_env_step(actor_state)
         return actor_state
+
+    def _log_eval_tracking_debug(self, actor_state: dict) -> None:
+        max_steps = int(os.environ.get("HOLOSOMA_DEBUG_POLICY_TRACKING_STEPS", "0") or 0)
+        if max_steps <= 0:
+            return
+        step = int(actor_state.get("step", -1))
+        if step < 0 or step >= max_steps:
+            return
+        interval = max(1, int(os.environ.get("HOLOSOMA_DEBUG_POLICY_TRACKING_INTERVAL", "1") or 1))
+        if step % interval != 0:
+            return
+
+        actions = actor_state.get("actions")
+        action_summary = "unavailable"
+        if isinstance(actions, torch.Tensor) and actions.numel() > 0:
+            action_summary = (
+                f"mean_abs={actions.abs().mean().item():.4f} "
+                f"max_abs={actions.abs().max().item():.4f} "
+                f"min={actions.min().item():.4f} max={actions.max().item():.4f}"
+            )
+
+        action_term = None
+        try:
+            action_term = self.env.action_manager.get_term("joint_control")
+        except Exception:
+            action_term = None
+        torque_summary = "unavailable"
+        scale_summary = "unavailable"
+        if action_term is not None:
+            torques = getattr(action_term, "torques", None)
+            torque_limits = getattr(self.env, "torque_limits", None)
+            if isinstance(torques, torch.Tensor) and torques.numel() > 0:
+                torque_summary = (
+                    f"mean_abs={torques.abs().mean().item():.3f} "
+                    f"max_abs={torques.abs().max().item():.3f}"
+                )
+                if isinstance(torque_limits, torch.Tensor) and torque_limits.numel() == torques.shape[-1]:
+                    limit = torque_limits.view(1, -1).to(torques.device)
+                    clipped_frac = (torques.abs() >= 0.999 * limit).float().mean().item()
+                    torque_summary += f" clipped_frac={clipped_frac:.3f}"
+            action_scales = getattr(action_term, "action_scales", None)
+            if isinstance(action_scales, torch.Tensor) and action_scales.numel() > 0:
+                scale_summary = (
+                    f"min={action_scales.min().item():.4f} "
+                    f"max={action_scales.max().item():.4f} "
+                    f"mean={action_scales.mean().item():.4f}"
+                )
+
+        tracking_summary = "unavailable"
+        motion_cmd = None
+        try:
+            motion_cmd = self.env.command_manager.get_state("motion_command")
+        except Exception:
+            motion_cmd = None
+        if motion_cmd is not None:
+            parts = []
+            try:
+                root_err = torch.linalg.norm(motion_cmd.robot_root_pos_w - motion_cmd.root_pos_w, dim=-1)
+                parts.append(f"raw_root_err={root_err[0].item():.3f}")
+            except Exception:
+                pass
+            try:
+                body_err = torch.linalg.norm(motion_cmd.body_pos_w - motion_cmd.robot_body_pos_w, dim=-1)
+                parts.append(f"raw_body_err_mean={body_err[0].mean().item():.3f}")
+                parts.append(f"raw_body_err_max={body_err[0].max().item():.3f}")
+            except Exception:
+                pass
+            try:
+                rel_body_err = torch.linalg.norm(
+                    motion_cmd.body_pos_relative_w - motion_cmd.robot_body_pos_w, dim=-1
+                )
+                parts.append(f"rel_body_err_mean={rel_body_err[0].mean().item():.3f}")
+                parts.append(f"rel_body_err_max={rel_body_err[0].max().item():.3f}")
+            except Exception:
+                pass
+            try:
+                joint_err = torch.linalg.norm(motion_cmd.joint_pos - motion_cmd.robot_joint_pos, dim=-1)
+                parts.append(f"joint_err={joint_err[0].item():.3f}")
+            except Exception:
+                pass
+            try:
+                parts.append(f"motion_t={int(motion_cmd.time_steps[0].item())}")
+            except Exception:
+                pass
+            try:
+                clip_idx = int(motion_cmd.clip_ids[0].item())
+                clip_name = motion_cmd.motion.clip_ids[clip_idx]
+                parts.append(f"clip={clip_name}")
+            except Exception:
+                pass
+            if parts:
+                tracking_summary = " ".join(parts)
+
+        perception_summary = "unavailable"
+        obs_dict = actor_state.get("obs", {})
+        perception_key = self.actor_perception_key
+        if perception_key and isinstance(obs_dict, dict) and perception_key in obs_dict:
+            perception = obs_dict[perception_key]
+            if isinstance(perception, torch.Tensor) and perception.numel() > 0:
+                perception_summary = (
+                    f"min={perception.min().item():.3f} "
+                    f"max={perception.max().item():.3f} "
+                    f"mean={perception.mean().item():.3f}"
+                )
+
+        logger.warning(
+            "[policy-debug] step={} actions=({}) scales=({}) torques=({}) tracking=({}) perception=({})",
+            step,
+            action_summary,
+            scale_summary,
+            torque_summary,
+            tracking_summary,
+            perception_summary,
+        )
 
     def get_inference_policy(self, device=None):
         self.actor.eval()  # switch to evaluation mode (dropout for example)

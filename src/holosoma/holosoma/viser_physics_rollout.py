@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +45,126 @@ class PhysicsRolloutInputs:
     viser_env_id: int = 0
     viser_update_hz: float = 30.0
     viser_recenter: bool = True
+
+
+def _debug_enabled(name: str) -> bool:
+    return os.environ.get(name, "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _tensor_preview(value, *, max_items: int = 8):
+    if value is None:
+        return None
+    try:
+        if hasattr(value, "detach"):
+            value = value.detach().cpu().numpy()
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+    except Exception:
+        return repr(value)
+    if isinstance(value, list) and len(value) > max_items:
+        return value[:max_items] + [f"... ({len(value)} total)"]
+    return value
+
+
+def _log_terrain_selection_debug(env) -> None:
+    if not _debug_enabled("HOLOSOMA_DEBUG_TERRAIN_SELECTION"):
+        return
+
+    logger.warning("[terrain-debug] begin terrain/motion selection dump")
+
+    terrain_manager = getattr(env, "terrain_manager", None)
+    terrain_state = None
+    if terrain_manager is not None:
+        try:
+            terrain_state = terrain_manager.get_state("locomotion_terrain")
+        except Exception as exc:
+            logger.warning("[terrain-debug] failed to read terrain state: {}", exc)
+
+    terrain_cfg = getattr(terrain_manager, "cfg", None) if terrain_manager is not None else None
+    terrain_term_cfg = getattr(terrain_cfg, "terrain_term", None) if terrain_cfg is not None else None
+    if terrain_term_cfg is not None:
+        logger.warning(
+            "[terrain-debug] cfg mesh_type={} obj_file_path='{}' obj_metadata_path='{}' rows={} cols={}",
+            getattr(terrain_term_cfg, "mesh_type", None),
+            getattr(terrain_term_cfg, "obj_file_path", None),
+            getattr(terrain_term_cfg, "obj_metadata_path", None),
+            getattr(terrain_term_cfg, "num_rows", None),
+            getattr(terrain_term_cfg, "num_cols", None),
+        )
+
+    terrain = getattr(terrain_state, "terrain", None) if terrain_state is not None else None
+    mesh = getattr(terrain, "mesh", None) if terrain is not None else getattr(terrain_state, "mesh", None)
+    if mesh is not None:
+        try:
+            logger.warning(
+                "[terrain-debug] mesh vertices={} faces={} bounds={}",
+                len(mesh.vertices),
+                len(mesh.faces),
+                _tensor_preview(mesh.bounds),
+            )
+        except Exception as exc:
+            logger.warning("[terrain-debug] failed to summarize terrain mesh: {}", exc)
+
+    if terrain is not None:
+        logger.warning(
+            "[terrain-debug] tile_names={} tile_rows={} tile_cols={} tile_stride={} tile_offsets={} tile_max_z={}",
+            _tensor_preview(getattr(terrain, "obj_tile_names", None)),
+            getattr(terrain, "obj_tile_rows", None),
+            getattr(terrain, "obj_tile_cols", None),
+            _tensor_preview(getattr(terrain, "obj_tile_stride", None)),
+            _tensor_preview(getattr(terrain, "obj_tile_offsets", None)),
+            _tensor_preview(getattr(terrain, "obj_tile_max_z", None)),
+        )
+
+    env_origins = getattr(terrain_state, "env_origins", None) if terrain_state is not None else None
+    if env_origins is not None:
+        logger.warning("[terrain-debug] terrain_state.env_origins={}", _tensor_preview(env_origins))
+    simulator = getattr(env, "simulator", None)
+    scene = getattr(simulator, "scene", None) if simulator is not None else None
+    scene_env_origins = getattr(scene, "env_origins", None) if scene is not None else None
+    if scene_env_origins is not None:
+        logger.warning("[terrain-debug] simulator.scene.env_origins={}", _tensor_preview(scene_env_origins))
+
+    motion_cmd = None
+    command_manager = getattr(env, "command_manager", None)
+    if command_manager is not None:
+        try:
+            motion_cmd = command_manager.get_state("motion_command")
+        except Exception as exc:
+            logger.warning("[terrain-debug] failed to read motion command: {}", exc)
+    if motion_cmd is not None:
+        motion = getattr(motion_cmd, "motion", None)
+        logger.warning(
+            "[terrain-debug] motion_cfg clip_name={} clip_id={} pair_terrain_with_motion={}",
+            getattr(getattr(motion_cmd, "motion_cfg", None), "motion_clip_name", None),
+            getattr(getattr(motion_cmd, "motion_cfg", None), "motion_clip_id", None),
+            getattr(getattr(motion_cmd, "motion_cfg", None), "pair_terrain_with_motion", None),
+        )
+        logger.warning(
+            "[terrain-debug] motion clip_ids={} num_clips={} active_clip_tensor={} terrain_offsets={} terrain_rows={}",
+            getattr(motion, "clip_ids", None),
+            getattr(motion, "num_clips", None),
+            _tensor_preview(getattr(motion_cmd, "clip_ids", None)),
+            _tensor_preview(getattr(motion_cmd, "_clip_terrain_offsets", None)),
+            _tensor_preview(getattr(motion_cmd, "_terrain_row_ids", None)),
+        )
+        try:
+            logger.warning("[terrain-debug] motion env_offsets={}", _tensor_preview(motion_cmd._get_env_offsets()))
+        except Exception as exc:
+            logger.warning("[terrain-debug] failed to compute motion env offsets: {}", exc)
+
+    perception_mgr = getattr(env, "perception_manager", None)
+    if perception_mgr is not None:
+        cfg = getattr(perception_mgr, "cfg", None)
+        logger.warning(
+            "[terrain-debug] perception enabled={} output_mode={} warp_mesh_present={} terrain_mesh_present={}",
+            getattr(perception_mgr, "enabled", None),
+            getattr(cfg, "output_mode", None),
+            getattr(perception_mgr, "_warp_mesh", None) is not None,
+            getattr(perception_mgr, "_terrain_mesh", None) is not None,
+        )
+
+    logger.warning("[terrain-debug] end terrain/motion selection dump")
 
 
 def _resolve_data_path(path: str) -> str:
@@ -325,6 +446,7 @@ def run_physics_rollout(
     saved_wandb_path: str | None,
 ) -> None:
     env, device, simulation_app = setup_simulation_environment(tyro_config)
+    _log_terrain_selection_debug(env)
 
     eval_log_dir = get_experiment_dir(tyro_config.logger, tyro_config.training, get_timestamp(), task_name="eval")
     eval_log_dir.mkdir(parents=True, exist_ok=True)

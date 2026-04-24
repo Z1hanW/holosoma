@@ -93,8 +93,8 @@ elif [[ -n "${STAGE1_CKPT}" && -z "${RESUME_CKPT}" ]]; then
   CHECKPOINT_OVERRIDES+=(--training.checkpoint "${STAGE1_CKPT}")
 fi
 
-OBJ_DIR="/data/terrain/___crisp_clean_geometry"
-MOTION_DIR="/data/terrain/___crisp_clean_motion"
+OBJ_DIR="${OBJ_DIR:-${SCRIPT_DIR}/data/ds_crisp_data/___crisp_clean_geometry}"
+MOTION_DIR="${MOTION_DIR:-${SCRIPT_DIR}/data/ds_crisp_data/___crisp_clean_motion_gmr_g1}"
 NUM_ROWS=${NUM_ROWS:-1}
 NUM_COLS=${NUM_COLS:-}
 FUSED_OBJ="../tmp_fused.obj"
