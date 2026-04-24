@@ -5,6 +5,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_MOTION_FILE="${DEFAULT_MOTION_FILE:-$ROOT_DIR/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz}"
 DEFAULT_MODEL_INPUT="${DEFAULT_MODEL_INPUT:-/data/logs_new/boxer/20260316_200048-g1_29dof_wbt_w_object_extend_20260316_200027_s01_scale_1p0-g1_29dof_wbt_w_object_extend_20260316_200027/model_23500.onnx}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+# A repo-root MuJoCo source checkout (`mujoco/`) can shadow the installed
+# Python binding when cwd is prepended to sys.path. We provide project modules
+# through PYTHONPATH explicitly, so keep cwd out of Python import resolution.
+export PYTHONSAFEPATH="${PYTHONSAFEPATH:-1}"
 
 is_truthy_env() {
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
@@ -102,7 +106,11 @@ MUJOCO_CPUSET="${MUJOCO_CPUSET:-0}"
 SIM_FPS_EXPLICIT=0
 [[ -n "${SIM_FPS+x}" ]] && SIM_FPS_EXPLICIT=1
 SIM_FPS="${SIM_FPS:-500}"
+SIM_CONTROL_DECIMATION_EXPLICIT=0
+[[ -n "${SIM_CONTROL_DECIMATION+x}" ]] && SIM_CONTROL_DECIMATION_EXPLICIT=1
 SIM_CONTROL_DECIMATION="${SIM_CONTROL_DECIMATION:-4}"
+SIM_SUBSTEPS_EXPLICIT=0
+[[ -n "${SIM_SUBSTEPS+x}" ]] && SIM_SUBSTEPS_EXPLICIT=1
 SIM_SUBSTEPS="${SIM_SUBSTEPS:-}"
 SIM_DEVICE="${SIM_DEVICE:-}"
 MUJOCO_BACKEND="${MUJOCO_BACKEND:-}"
@@ -186,11 +194,13 @@ POLICY_ACTION_SCALE="${POLICY_ACTION_SCALE:-}"
 POLICY_RL_RATE="${POLICY_RL_RATE:-50}"
 POLICY_DEFER_UNTIL_VALID_STATE="${POLICY_DEFER_UNTIL_VALID_STATE:-0}"
 POLICY_AUTO_START_MOTION_CLIP="${POLICY_AUTO_START_MOTION_CLIP:-}"
+POLICY_MOTION_INDEX_OFFSET="${POLICY_MOTION_INDEX_OFFSET:-}"
 SIM_LOG_FIRST_COMMAND_SUMMARY="${SIM_LOG_FIRST_COMMAND_SUMMARY:-0}"
 HOLOSOMA_ONNX_ALIGN_MAX_STEPS="${HOLOSOMA_ONNX_ALIGN_MAX_STEPS:-0}"
 HOLOSOMA_ONNX_ALIGN_POSE_TOL="${HOLOSOMA_ONNX_ALIGN_POSE_TOL:-5e-3}"
 HOLOSOMA_ONNX_OFFSET_APPLIES_TO_MOTION_INDEX="${HOLOSOMA_ONNX_OFFSET_APPLIES_TO_MOTION_INDEX:-1}"
 HOLOSOMA_CLIP_JOINT_TARGETS="${HOLOSOMA_CLIP_JOINT_TARGETS:-0}"
+HOLOSOMA_ONNX_ACTION_SCALE_OVERRIDE="${HOLOSOMA_ONNX_ACTION_SCALE_OVERRIDE:-}"
 AUTO_START_STIFF_HOLD_SEC_RAW="${AUTO_START_STIFF_HOLD_SEC-__unset__}"
 AUTO_START_STIFF_HOLD_SEC="${AUTO_START_STIFF_HOLD_SEC:-}"
 AUTO_START_STIFF_MAX_WAIT_SEC_RAW="${AUTO_START_STIFF_MAX_WAIT_SEC-__unset__}"
@@ -250,7 +260,7 @@ mkdir -p "$PATCH_DIR"
 MOTION_STEM="$(basename "${MOTION_FILE%.*}")"
 MODEL_STEM="$(basename "${MODEL_INPUT%.*}")"
 PATCHED_ONNX="$PATCH_DIR/${MODEL_STEM}__${MOTION_STEM}.onnx"
-RUN_DIR="$ROOT_DIR/logs/sim2sim_runs/${MOTION_STEM}__tracking"
+RUN_DIR="${RUN_DIR:-$ROOT_DIR/logs/sim2sim_runs/${MOTION_STEM}__tracking}"
 mkdir -p "$RUN_DIR"
 
 export PYTHONPATH="$ROOT_DIR/src/holosoma:$ROOT_DIR/src/holosoma_inference${PYTHONPATH:+:$PYTHONPATH}"
@@ -296,11 +306,21 @@ python_has_modules() {
   local python_bin="$1"
   shift
   "$python_bin" - "$@" <<'PY' >/dev/null 2>&1
-import importlib.util
+import importlib
 import sys
 
 for module_name in sys.argv[1:]:
-    if importlib.util.find_spec(module_name) is None:
+    try:
+        module = importlib.import_module(module_name)
+    except Exception:
+        raise SystemExit(1)
+    if module_name == "mujoco":
+        # A cloned source tree without the Python extension imports as an empty
+        # namespace package. Require the actual binding APIs used by run_sim.py.
+        required = ("MjModel", "MjData", "MjSpec", "mj_step")
+        if any(not hasattr(module, attr) for attr in required):
+            raise SystemExit(1)
+    if module is None:
         raise SystemExit(1)
 raise SystemExit(0)
 PY
@@ -414,8 +434,16 @@ PY
           SIM_FPS="$value"
         fi
         ;;
-      SIM_CONTROL_DECIMATION) SIM_CONTROL_DECIMATION="$value" ;;
-      SIM_SUBSTEPS) SIM_SUBSTEPS="$value" ;;
+      SIM_CONTROL_DECIMATION)
+        if [[ "$SIM_CONTROL_DECIMATION_EXPLICIT" != "1" ]]; then
+          SIM_CONTROL_DECIMATION="$value"
+        fi
+        ;;
+      SIM_SUBSTEPS)
+        if [[ "$SIM_SUBSTEPS_EXPLICIT" != "1" ]]; then
+          SIM_SUBSTEPS="$value"
+        fi
+        ;;
       MUJOCO_BACKEND) MUJOCO_BACKEND="$value" ;;
       TERRAIN_STATIC_FRICTION) TERRAIN_STATIC_FRICTION="$value" ;;
       TERRAIN_DYNAMIC_FRICTION) TERRAIN_DYNAMIC_FRICTION="$value" ;;
@@ -500,6 +528,10 @@ if not isinstance(asset_cfg, dict):
 value = asset_cfg.get("enable_self_collisions")
 if isinstance(value, bool):
     print("ROBOT_ENABLE_SELF_COLLISIONS=" + ("True" if value else "False"))
+
+urdf_file = asset_cfg.get("urdf_file")
+if isinstance(urdf_file, str) and urdf_file.strip():
+    print("HOLOSOMA_W_OBJECT_URDF=" + urdf_file.strip())
 PY
   )"
 
@@ -513,6 +545,11 @@ PY
       ROBOT_ENABLE_SELF_COLLISIONS)
         if [[ -z "$ROBOT_ENABLE_SELF_COLLISIONS" ]]; then
           ROBOT_ENABLE_SELF_COLLISIONS="$value"
+        fi
+        ;;
+      HOLOSOMA_W_OBJECT_URDF)
+        if [[ -z "${HOLOSOMA_W_OBJECT_URDF:-}" ]]; then
+          export HOLOSOMA_W_OBJECT_URDF="$value"
         fi
         ;;
     esac
@@ -623,8 +660,8 @@ apply_gt_mujoco_physics_overrides() {
   export HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS=0
 
   SIM_USE_TRAINING_URDF_OBJECT_SCENE=1
-  SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML=0
-  SIM_COPY_TENDONS_FROM_ROBOT_XML=0
+  SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML=1
+  SIM_COPY_TENDONS_FROM_ROBOT_XML=1
   SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML=0
   SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML=0
 
@@ -950,6 +987,7 @@ apply_motion_clip_object_defaults
   --model-path "$MODEL_INPUT" \
   --motion-file "$MOTION_FILE" \
   $( [[ "$APPLY_TRAINING_MOTION_TRANSITIONS" == "1" ]] && printf '%s' "--apply-training-motion-transitions" ) \
+  $( [[ -n "$HOLOSOMA_ONNX_ACTION_SCALE_OVERRIDE" ]] && printf '%s %s' "--action-scale-override" "$HOLOSOMA_ONNX_ACTION_SCALE_OVERRIDE" ) \
   --output-path "$PATCHED_ONNX"
 
 apply_training_sim_overrides "$PATCHED_ONNX"
@@ -960,10 +998,10 @@ apply_training_perception_overrides "$PATCHED_ONNX"
 apply_gt_mujoco_physics_overrides
 
 SIM_ADD_DEFAULT_OBJECT_ACTUATORS="${SIM_ADD_DEFAULT_OBJECT_ACTUATORS:-1}"
-SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML="${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML:-1}"
-SIM_COPY_TENDONS_FROM_ROBOT_XML="${SIM_COPY_TENDONS_FROM_ROBOT_XML:-1}"
-SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML="${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML:-1}"
-SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML="${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML:-1}"
+SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML="${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML:-0}"
+SIM_COPY_TENDONS_FROM_ROBOT_XML="${SIM_COPY_TENDONS_FROM_ROBOT_XML:-0}"
+SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML="${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML:-0}"
+SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML="${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML:-0}"
 SIM_USE_TRAINING_URDF_OBJECT_SCENE="${SIM_USE_TRAINING_URDF_OBJECT_SCENE:-1}"
 if [[ "$SIM_USE_TRAINING_URDF_OBJECT_SCENE" == "1" && "$SIM_ADD_DEFAULT_OBJECT_ACTUATORS_RAW" == "__unset__" ]]; then
   # Generated training-URDF object scenes do not contain MuJoCo actuators; the split
@@ -977,6 +1015,14 @@ if [[ -z "$INFERENCE_CONFIG" ]]; then
   INFERENCE_CONFIG="$(infer_inference_config "$PATCHED_ONNX")"
 fi
 
+if [[ -z "${HOLOSOMA_POLICY_MOTION_INDEX_OFFSET:-}" ]]; then
+  if [[ -n "$POLICY_MOTION_INDEX_OFFSET" ]]; then
+    export HOLOSOMA_POLICY_MOTION_INDEX_OFFSET="$POLICY_MOTION_INDEX_OFFSET"
+  elif [[ "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-distill" ]]; then
+    export HOLOSOMA_POLICY_MOTION_INDEX_OFFSET=1
+  fi
+fi
+
 MODEL_EXPECTS_PERCEPTION_OBS="$(onnx_has_input "$PATCHED_ONNX" "perception_obs")"
 if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "auto" ]]; then
   ENABLE_SPLIT_PERCEPTION_OBS="$MODEL_EXPECTS_PERCEPTION_OBS"
@@ -985,8 +1031,14 @@ if [[ "$MODEL_EXPECTS_PERCEPTION_OBS" == "1" && "$ENABLE_SPLIT_PERCEPTION_OBS" !
   echo "Model expects perception_obs but ENABLE_SPLIT_PERCEPTION_OBS=${ENABLE_SPLIT_PERCEPTION_OBS}" >&2
   exit 1
 fi
-if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_CAMERA_SOURCE" == "far_tracking_warp" && -z "$SIM_DEVICE" && -n "${CUDA_VISIBLE_DEVICES:-}" && "${CUDA_VISIBLE_DEVICES:-}" != "-1" ]]; then
-  SIM_DEVICE="cuda:0"
+export HOLOSOMA_STRICT_PERCEPTION_CAMERA_SOURCE="${HOLOSOMA_STRICT_PERCEPTION_CAMERA_SOURCE:-1}"
+if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_CAMERA_SOURCE" == "far_tracking_warp" && -z "$SIM_DEVICE" ]]; then
+  HOLOSOMA_AUTO_CUDA_FOR_TRAINING_DEPTH="${HOLOSOMA_AUTO_CUDA_FOR_TRAINING_DEPTH:-1}"
+  if is_truthy_env "$HOLOSOMA_AUTO_CUDA_FOR_TRAINING_DEPTH" && [[ "${CUDA_VISIBLE_DEVICES:-}" != "-1" ]]; then
+    if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]] || { command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; }; then
+      SIM_DEVICE="${HOLOSOMA_TRAINING_DEPTH_DEVICE:-cuda:0}"
+    fi
+  fi
 fi
 if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_CAMERA_SOURCE" == "rendered" && -z "${MUJOCO_GL:-}" ]]; then
   case "$(printf '%s' "$TRAINING_HEADLESS" | tr '[:upper:]' '[:lower:]')" in
@@ -1001,7 +1053,8 @@ fi
 if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_CAMERA_SOURCE" == "rendered" ]]; then
   export HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES="${HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES:-1}"
   export HOLOSOMA_MUJOCO_LOAD_OBJECT_VISUAL_MESHES="${HOLOSOMA_MUJOCO_LOAD_OBJECT_VISUAL_MESHES:-1}"
-  export HOLOSOMA_MUJOCO_DEPTH_PREFER_VISUAL_MESHES="${HOLOSOMA_MUJOCO_DEPTH_PREFER_VISUAL_MESHES:-1}"
+  export HOLOSOMA_MUJOCO_DEPTH_PREFER_ROBOT_VISUAL_MESHES="${HOLOSOMA_MUJOCO_DEPTH_PREFER_ROBOT_VISUAL_MESHES:-0}"
+  export HOLOSOMA_MUJOCO_DEPTH_PREFER_OBJECT_VISUAL_MESHES="${HOLOSOMA_MUJOCO_DEPTH_PREFER_OBJECT_VISUAL_MESHES:-1}"
   case "$(printf '%s' "$PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN" | tr '[:upper:]' '[:lower:]')" in
     training|distill|shoo7sr1)
       [[ "$PERCEPTION_CAMERA_WIDTH_EXPLICIT" == "0" ]] && PERCEPTION_CAMERA_WIDTH="106"
@@ -1129,10 +1182,17 @@ POLICY_LOG="$RUN_DIR/policy.log"
 : >"$POLICY_LOG"
 
 if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]]; then
+  echo "[INFO] motion_file=${MOTION_FILE}"
+  echo "[INFO] object_urdf=${OBJECT_URDF}"
+  echo "[INFO] robot_urdf=${HOLOSOMA_W_OBJECT_URDF:-g1/main_mesh_collision_halfspherehand.urdf}"
+  echo "[INFO] model=${MODEL_INPUT}"
+  echo "[INFO] inference_config=${INFERENCE_CONFIG}"
+  echo "[INFO] sim_device=${SIM_DEVICE:-<default>}"
+  echo "[INFO] mujoco_object_scene training_urdf=${SIM_USE_TRAINING_URDF_OBJECT_SCENE} default_actuators=${SIM_ADD_DEFAULT_OBJECT_ACTUATORS} copy_joint_defaults=${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML} copy_tendons=${SIM_COPY_TENDONS_FROM_ROBOT_XML} copy_collision_geoms=${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML} copy_contact_pairs=${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML}"
   echo "[INFO] perception camera: source=${PERCEPTION_CAMERA_SOURCE} raw=${PERCEPTION_CAMERA_WIDTH:-<default>}x${PERCEPTION_CAMERA_HEIGHT:-<default>} crop_top=${PERCEPTION_CAMERA_WARP_CROP_TOP:-<default>} crop_bottom=${PERCEPTION_CAMERA_WARP_CROP_BOTTOM:-<default>} crop_left=${PERCEPTION_CAMERA_WARP_CROP_LEFT:-<default>} crop_right=${PERCEPTION_CAMERA_WARP_CROP_RIGHT:-<default>} update_hz=${PERCEPTION_UPDATE_HZ:-<default>} camera_fps=${PERCEPTION_CAMERA_FPS:-<default>} pitch_deg=${PERCEPTION_CAMERA_PITCH_DEG:-<default>} vfov_deg=${PERCEPTION_CAMERA_VFOV_DEG:-<default>} hfov_deg=${PERCEPTION_CAMERA_HFOV_DEG:-<default>} include_robot_mesh=${PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH:-<default>} near=${PERCEPTION_CAMERA_NEAR:-<default>} far=${PERCEPTION_CAMERA_FAR:-<default>} max_distance=${PERCEPTION_MAX_DISTANCE:-<default>} warp_min_valid_depth=${PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH:-<default>} warp_buffer_len=${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-<default>} warp_latency_frame=${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-<default>} warp_edge_noise=${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-<default>} transport=${PERCEPTION_OBS_TRANSPORT}"
 fi
 if is_truthy_env "$GT_MUJOCO_PHYSICS"; then
-  echo "[INFO] GT MuJoCo physics: object_mass=${MUJOCO_OBJECT_MASS_OVERRIDE} object_friction=${MUJOCO_OBJECT_GEOM_FRICTION} copy_joint_defaults=${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML} copy_tendons=${SIM_COPY_TENDONS_FROM_ROBOT_XML} copy_collision_geoms=${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML} copy_contact_pairs=${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML} web_demo_object_contacts=${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS:-0}"
+  echo "[INFO] GT MuJoCo physics: object_mass=${MUJOCO_OBJECT_MASS_OVERRIDE} object_friction=${MUJOCO_OBJECT_GEOM_FRICTION} copy_joint_defaults=${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML} copy_tendons=${SIM_COPY_TENDONS_FROM_ROBOT_XML} copy_collision_geoms=${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML} copy_contact_pairs=${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML} zero_passive_dynamics=${HOLOSOMA_GT_MUJOCO_ZERO_PASSIVE_DYNAMICS:-0} web_demo_object_contacts=${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS:-0}"
 fi
 if is_truthy_env "${DRY_RUN:-0}"; then
   echo "[INFO] DRY_RUN=1; not launching MuJoCo or policy."

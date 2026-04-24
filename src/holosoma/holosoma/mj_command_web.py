@@ -140,7 +140,7 @@ INDEX_HTML = """<!doctype html>
     }
     .toolbar-inline {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
       gap: 8px;
     }
     .layout {
@@ -207,6 +207,7 @@ INDEX_HTML = """<!doctype html>
       <div id="policyStatus">policy: waiting for ]</div>
       <div id="ports"></div>
       <div class="toolbar-inline">
+        <button id="policyRolloutStart" type="button">Space + ]</button>
         <button id="policyStart" type="button">Policy ]</button>
         <button id="policySpace" type="button">Policy Space</button>
         <button id="policyStop" type="button">Stop</button>
@@ -456,6 +457,7 @@ document.getElementById("zero").addEventListener("click", () => {
 document.getElementById("reset").addEventListener("click", async () => {
   await sendReset("web_command_reset");
 });
+document.getElementById("policyRolloutStart").addEventListener("click", () => sendPolicy("rollout_start"));
 document.getElementById("policyStart").addEventListener("click", () => sendPolicy("start"));
 document.getElementById("policySpace").addEventListener("click", () => sendPolicy("space"));
 document.getElementById("policyStop").addEventListener("click", () => sendPolicy("stop"));

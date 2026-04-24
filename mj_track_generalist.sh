@@ -11,7 +11,7 @@ Usage:
   bash mj_track_generalist.sh [clip_name|motion.npz] [model.onnx|wandb://...] [mj_track args...]
 
 Defaults:
-  model      = wandb://zihanw22/boxer/u5lguxvl/model_17000.onnx
+  model      = wandb://zihanw22/boxer/u5lguxvl/latest.onnx
   motion dir = data/ds_box_data/train_g1_w_obj_prepared
   clip       = box_74
   object map = <motion dir>/_clip_object_urdf_map.json
@@ -32,7 +32,7 @@ Useful env vars:
 Examples:
   bash mj_track_generalist.sh
   bash mj_track_generalist.sh box_74
-  bash mj_track_generalist.sh box_74 wandb://zihanw22/boxer/u5lguxvl/model_17000.onnx
+  bash mj_track_generalist.sh box_74 wandb://zihanw22/boxer/u5lguxvl/latest.onnx
   RUN_SECONDS=20 bash mj_track_generalist.sh --clip box_74
   MJ_VIEWER=mjviser bash mj_track_generalist.sh box_74 -- --viewer mjviser
 EOF
@@ -41,7 +41,7 @@ EOF
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-DEFAULT_MODEL_REF="${DEFAULT_MODEL_REF:-wandb://zihanw22/boxer/u5lguxvl/model_17000.onnx}"
+DEFAULT_MODEL_REF="${DEFAULT_MODEL_REF:-wandb://zihanw22/boxer/u5lguxvl/latest.onnx}"
 DEFAULT_MOTION_DIR="${DEFAULT_MOTION_DIR:-${SCRIPT_DIR}/data/ds_box_data/train_g1_w_obj_prepared}"
 DEFAULT_CLIP_NAME="${DEFAULT_CLIP_NAME:-box_74}"
 MODEL_CACHE_DIR="${MODEL_CACHE_DIR:-${SCRIPT_DIR}/logs/sim2sim_remote_models}"
@@ -142,10 +142,11 @@ if [[ -z "${MOTION_FILE}" ]]; then
 fi
 
 MOTION_FILE="$("${INFER_PY}" - "${MOTION_FILE}" <<'PY'
+import os
 from pathlib import Path
 import sys
 
-path = Path(sys.argv[1]).expanduser().resolve()
+path = Path(os.path.abspath(os.path.expanduser(sys.argv[1])))
 if not path.is_file():
     raise SystemExit(f"[ERROR] motion file not found: {path}")
 print(path)
@@ -223,6 +224,9 @@ from pathlib import Path
 import wandb
 
 
+LATEST_SENTINEL = "__LATEST_ONNX__"
+
+
 def parse_ref(ref: str) -> tuple[str, str]:
     if ref.startswith("wandb://"):
         parts = ref[len("wandb://") :].split("/")
@@ -233,8 +237,8 @@ def parse_ref(ref: str) -> tuple[str, str]:
         filename = "/".join(parts[run_idx + 1 :]).strip()
         if not filename:
             filename = os.environ.get("WANDB_MODEL_FILE", "").strip()
-        if not filename:
-            raise SystemExit("[ERROR] Missing W&B model filename. Set WANDB_MODEL_FILE or include it in the URI.")
+        if not filename or filename.lower() in {"latest", "latest.onnx"}:
+            filename = LATEST_SENTINEL
         return f"{entity}/{project}/{run_id}", filename
 
     clean = ref.split("#", 1)[0].split("?", 1)[0]
@@ -247,23 +251,37 @@ def parse_ref(ref: str) -> tuple[str, str]:
     filename = ""
     if len(parts) >= 6 and parts[4] == "files":
         filename = "/".join(parts[5:]).strip()
+    elif len(parts) >= 5:
+        filename = "/".join(parts[4:]).strip()
     if not filename:
         filename = os.environ.get("WANDB_MODEL_FILE", "").strip()
-    if not filename:
-        raise SystemExit("[ERROR] W&B run URL needs /files/<model.onnx> or WANDB_MODEL_FILE.")
+    if not filename or filename.lower() in {"latest", "latest.onnx"}:
+        filename = LATEST_SENTINEL
     return f"{entity}/{project}/{run_id}", filename
 
 
 ref = sys.argv[1]
 cache_root = Path(sys.argv[2]).expanduser().resolve()
 run_path, filename = parse_ref(ref)
-dest = cache_root / run_path / filename
-dest.parent.mkdir(parents=True, exist_ok=True)
 refresh = os.environ.get("REFRESH_MODEL", "0").lower() in {"1", "true", "yes", "on"}
-
-if refresh or not dest.is_file() or dest.stat().st_size == 0:
+api = None
+run = None
+if filename == LATEST_SENTINEL:
     api = wandb.Api(timeout=30)
     run = api.run(run_path)
+    onnx_files = [file_obj for file_obj in run.files() if file_obj.name.endswith(".onnx")]
+    if not onnx_files:
+        raise SystemExit(f"[ERROR] No ONNX files found for W&B run: {run_path}")
+    latest_file = max(onnx_files, key=lambda file_obj: ((file_obj.updated_at or ""), file_obj.name))
+    filename = latest_file.name
+
+dest = cache_root / run_path / filename
+dest.parent.mkdir(parents=True, exist_ok=True)
+
+if refresh or not dest.is_file() or dest.stat().st_size == 0:
+    if run is None:
+        api = wandb.Api(timeout=30)
+        run = api.run(run_path)
     file_obj = run.file(filename)
     downloaded = file_obj.download(root=str(dest.parent), replace=True)
     downloaded_path = Path(downloaded.name)
@@ -288,10 +306,77 @@ export RUN_SECONDS="${RUN_SECONDS:-0}"
 export SIM_READY_TIMEOUT="${SIM_READY_TIMEOUT:-180}"
 export USE_TRAINING_SIM_CONFIG="${USE_TRAINING_SIM_CONFIG:-1}"
 export SIM_USE_TRAINING_URDF_OBJECT_SCENE="${SIM_USE_TRAINING_URDF_OBJECT_SCENE:-1}"
-export HOLOSOMA_W_OBJECT_URDF="${HOLOSOMA_W_OBJECT_URDF:-g1/g1_29dof.urdf}"
+export HOLOSOMA_FORCE_MOTION_ALIGNMENT="${HOLOSOMA_FORCE_MOTION_ALIGNMENT:-1}"
+export HOLOSOMA_W_OBJECT_URDF="${HOLOSOMA_W_OBJECT_URDF:-g1/main_mesh_collision_halfspherehand.urdf}"
 export HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES="${HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES:-1}"
 export MUJOCO_SHOW_OBJECT_COLLISION="${MUJOCO_SHOW_OBJECT_COLLISION:-0}"
 export MUJOCO_HIDE_OBJECT_VISUALS_WHEN_SHOWING_COLLISION="${MUJOCO_HIDE_OBJECT_VISUALS_WHEN_SHOWING_COLLISION:-0}"
+
+MODEL_OBS_SUMMARY="$(
+  PYTHONPATH="${SCRIPT_DIR}/src/holosoma:${SCRIPT_DIR}/src/holosoma_inference${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${INFER_PY}" - "${MODEL_LOCAL}" "${INFERENCE_CONFIG}" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import onnx
+
+from holosoma_inference.config.config_values.inference import DEFAULTS
+
+
+model_path = Path(sys.argv[1]).expanduser().resolve()
+inference_name = sys.argv[2]
+if inference_name not in DEFAULTS:
+    raise SystemExit(f"[ERROR] Unknown inference config for validation: {inference_name}")
+
+cfg = DEFAULTS[inference_name]
+obs_cfg = cfg.observation
+actor_terms = list(obs_cfg.obs_dict.get("actor_obs", ()))
+if not actor_terms:
+    raise SystemExit(f"[ERROR] Inference config '{inference_name}' has no actor_obs terms")
+history_length = int(obs_cfg.history_length_dict.get("actor_obs", 1))
+expected_dim = sum(int(obs_cfg.obs_dims[term]) for term in actor_terms) * history_length
+
+model = onnx.load(str(model_path))
+input_shape = model.graph.input[0].type.tensor_type.shape.dim
+input_dim = int(input_shape[-1].dim_value)
+if input_dim != expected_dim:
+    raise SystemExit(
+        f"[ERROR] Observation dim mismatch for {model_path.name}: model obs={input_dim}, "
+        f"inference:{inference_name} expects actor_obs={expected_dim}"
+    )
+
+metadata = {}
+for prop in model.metadata_props:
+    try:
+        metadata[prop.key] = json.loads(prop.value)
+    except Exception:
+        metadata[prop.key] = prop.value
+
+groups = metadata.get("experiment_config", {}).get("observation", {}).get("groups", {})
+model_actor = groups.get("actor_obs", {}) if isinstance(groups, dict) else {}
+model_terms = list(model_actor.get("terms", {}).keys()) if isinstance(model_actor.get("terms"), dict) else []
+model_history_length = int(model_actor.get("history_length", history_length)) if isinstance(model_actor, dict) else history_length
+
+if model_terms and model_terms != actor_terms:
+    raise SystemExit(
+        f"[ERROR] Observation term mismatch for {model_path.name}: "
+        f"model terms={model_terms}, inference:{inference_name} terms={actor_terms}"
+    )
+if model_history_length != history_length:
+    raise SystemExit(
+        f"[ERROR] Observation history mismatch for {model_path.name}: "
+        f"model history={model_history_length}, inference:{inference_name} history={history_length}"
+    )
+
+print(
+    f"actor_obs_dim={input_dim} history={history_length} "
+    f"terms={','.join(actor_terms)}"
+)
+PY
+)"
 
 CMD=(
   bash
@@ -307,6 +392,7 @@ echo "[INFO] object_urdf      = ${OBJECT_URDF}"
 echo "[INFO] model_ref        = ${MODEL_REF}"
 echo "[INFO] model_onnx       = ${MODEL_LOCAL}"
 echo "[INFO] inference_config = ${INFERENCE_CONFIG}"
+echo "[INFO] observation_ok   = ${MODEL_OBS_SUMMARY}"
 echo "[INFO] split_perception = ${ENABLE_SPLIT_PERCEPTION_OBS}"
 
 if [[ "${DRY_RUN}" == "1" || "${DRY_RUN,,}" == "true" ]]; then

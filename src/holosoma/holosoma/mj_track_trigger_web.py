@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small browser control panel with a single key/button to start tracking."""
+"""Small browser control panel to start/reset a split MuJoCo tracking rollout."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ for path in (REPO_ROOT / "src" / "holosoma", INFER_SRC_ROOT):
     if path.exists() and str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from holosoma_inference.utils.sim_control import PolicyControlPush  # noqa: E402
+from holosoma_inference.utils.sim_control import PolicyControlPush, SimControlPush  # noqa: E402
 
 
 INDEX_HTML = """<!doctype html>
@@ -75,6 +75,12 @@ INDEX_HTML = """<!doctype html>
       color: #b6becd;
       font-size: 15px;
     }
+    .actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 280px));
+      gap: 14px;
+      justify-content: center;
+    }
     .trigger {
       width: min(280px, 100%);
       justify-self: center;
@@ -89,9 +95,17 @@ INDEX_HTML = """<!doctype html>
       transition: transform 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
       box-shadow: 0 14px 34px rgba(17, 28, 46, 0.42);
     }
+    .trigger.reset {
+      border-color: #714437;
+      background:
+        linear-gradient(180deg, rgba(134, 73, 49, 0.9), rgba(75, 41, 32, 0.98));
+    }
     .trigger:hover {
       border-color: #7db2f0;
       transform: translateY(-1px);
+    }
+    .trigger.reset:hover {
+      border-color: #f1a477;
     }
     .trigger:active,
     .trigger.active {
@@ -141,17 +155,31 @@ INDEX_HTML = """<!doctype html>
     a:hover {
       text-decoration: underline;
     }
+    @media (max-width: 640px) {
+      .actions {
+        grid-template-columns: 1fr;
+      }
+    }
   </style>
 </head>
 <body>
 <main>
   <section class="panel hero">
     <h1>MuJoCo Track Trigger</h1>
-    <div class="hint">Press <strong>__TRACK_KEY_LABEL__</strong> or click below to send <code>rollout_start</code>.</div>
-    <button id="triggerButton" class="trigger" type="button">
-      <strong>__TRACK_KEY_LABEL__</strong>
-      <span>Start Track</span>
-    </button>
+    <div class="hint">
+      Press <strong>__TRACK_KEY_LABEL__</strong> to start tracking,
+      or <strong>__RESET_KEY_LABEL__</strong> / <strong>Backspace</strong> to reset the rollout.
+    </div>
+    <div class="actions">
+      <button id="triggerButton" class="trigger" type="button">
+        <strong>__TRACK_KEY_LABEL__</strong>
+        <span>Start Track</span>
+      </button>
+      <button id="resetButton" class="trigger reset" type="button">
+        <strong>__RESET_KEY_LABEL__</strong>
+        <span>Reset Rollout</span>
+      </button>
+    </div>
   </section>
   <section class="panel">
     <div class="status">
@@ -167,9 +195,11 @@ INDEX_HTML = """<!doctype html>
 </main>
 <script>
 const trackKey = __TRACK_KEY_JSON__;
+const resetKey = __RESET_KEY_JSON__;
 const trackAction = __TRACK_ACTION_JSON__;
 const appBaseUrl = new URL("./", window.location.href);
 const triggerButton = document.getElementById("triggerButton");
+const resetButton = document.getElementById("resetButton");
 const policyStatus = document.getElementById("policyStatus");
 const message = document.getElementById("message");
 const ports = document.getElementById("ports");
@@ -178,6 +208,7 @@ const sceneUrl = sceneUrlRaw ? new URL(sceneUrlRaw, appBaseUrl).toString() : "";
 const scenePanel = document.getElementById("scenePanel");
 const sceneFrame = document.getElementById("sceneFrame");
 const sceneLink = document.getElementById("sceneLink");
+let sceneKeyWindow = null;
 
 function resolveAppUrl(path) {
   return new URL(path, appBaseUrl).toString();
@@ -185,7 +216,8 @@ function resolveAppUrl(path) {
 
 function updatePorts(payload) {
   const policyPort = payload.policy_control_enabled ? ` policy_control_port=${payload.policy_control_port}` : "";
-  ports.textContent = `sparse_root_port=${payload.sparse_root_command_port} control_port=${payload.control_port}${policyPort}`;
+  const simControl = payload.sim_control_enabled === false ? " sim_control=unbound" : "";
+  ports.textContent = `sparse_root_port=${payload.sparse_root_command_port} control_port=${payload.control_port}${policyPort}${simControl}`;
 }
 
 function isEditableTarget(event) {
@@ -224,14 +256,61 @@ async function triggerTrack() {
   }
 }
 
-document.addEventListener("keydown", (event) => {
+async function resetRollout(reason = "track_trigger_reset") {
+  resetButton.classList.add("active");
+  setTimeout(() => resetButton.classList.remove("active"), 140);
+  try {
+    const response = await fetch(resolveAppUrl("reset"), {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({reason}),
+    });
+    const payload = await response.json();
+    if (payload) updatePorts(payload);
+    if (!response.ok) {
+      policyStatus.textContent = `reset: ${resetKey.toUpperCase()} failed`;
+      message.textContent = payload.error || "reset request failed";
+      return;
+    }
+    policyStatus.textContent = `reset: ${resetKey.toUpperCase()} requested`;
+    message.textContent = payload.policy_stopped
+      ? "Rollout reset requested; policy stopped. Press S to start again."
+      : "Rollout reset requested. Press S to start again.";
+  } catch (err) {
+    policyStatus.textContent = `reset: ${resetKey.toUpperCase()} failed`;
+    message.textContent = `reset request failed: ${err}`;
+  }
+}
+
+function handleKeyDown(event) {
   if (event.repeat || isEditableTarget(event)) return;
-  if (event.key.toLowerCase() !== trackKey) return;
-  event.preventDefault();
-  triggerTrack();
-}, true);
+  const key = event.key.toLowerCase();
+  if (key === trackKey) {
+    event.preventDefault();
+    triggerTrack();
+    return;
+  }
+  if (key === resetKey || key === "backspace") {
+    event.preventDefault();
+    resetRollout(key === "backspace" ? "track_trigger_backspace_reset" : "track_trigger_reset");
+  }
+}
+
+function attachSceneKeyHandlers() {
+  if (!sceneFrame || !sceneFrame.contentWindow || sceneFrame.contentWindow === sceneKeyWindow) return;
+  try {
+    sceneKeyWindow = sceneFrame.contentWindow;
+    sceneKeyWindow.addEventListener("keydown", handleKeyDown, true);
+  } catch (err) {
+    console.debug("scene key handlers unavailable", err);
+  }
+}
+
+document.addEventListener("keydown", handleKeyDown, true);
 
 triggerButton.addEventListener("click", () => triggerTrack());
+resetButton.addEventListener("click", () => resetRollout("track_trigger_button_reset"));
+sceneFrame.addEventListener("load", attachSceneKeyHandlers);
 
 if (sceneUrl) {
   sceneFrame.src = sceneUrl;
@@ -356,13 +435,16 @@ class TrackTriggerState:
         self.sparse_root_command_port = int(sparse_root_command_port)
         self.control_port = int(control_port)
         self.policy_control_port = int(policy_control_port)
+        self.control_pub = SimControlPush(port=self.control_port)
         self.policy_pub = PolicyControlPush(port=self.policy_control_port) if self.policy_control_port > 0 else None
 
     def start(self) -> None:
+        self.control_pub.start()
         if self.policy_pub is not None:
             self.policy_pub.start()
 
     def close(self) -> None:
+        self.control_pub.close()
         if self.policy_pub is not None:
             self.policy_pub.close()
 
@@ -371,6 +453,7 @@ class TrackTriggerState:
             "sparse_root_command_port": self.sparse_root_command_port,
             "control_port": self.control_port,
             "policy_control_port": self.policy_control_port,
+            "sim_control_enabled": bool(self.control_pub.enabled),
             "policy_control_enabled": bool(self.policy_pub and self.policy_pub.enabled),
         }
 
@@ -383,6 +466,23 @@ class TrackTriggerState:
             if idx + 1 < len(actions):
                 time.sleep(max(float(delay_s), 0.0))
         return sent_all
+
+    def request_reset(self, reason: str, *, delay_s: float = 0.05) -> dict[str, Any]:
+        policy_stopped = False
+        if self.policy_pub is not None:
+            policy_stopped = self.policy_pub.publish("stop", source="track_trigger_web_reset")
+            time.sleep(max(float(delay_s), 0.0))
+        self.control_pub.request_reset(str(reason))
+        response = self.snapshot()
+        response.update(
+            {
+                "ok": bool(self.control_pub.enabled),
+                "sent": bool(self.control_pub.enabled),
+                "reason": str(reason),
+                "policy_stopped": bool(policy_stopped),
+            }
+        )
+        return response
 
 
 async def _create_app(args: argparse.Namespace, state: TrackTriggerState, index_html: str) -> web.Application:
@@ -427,19 +527,31 @@ async def _create_app(args: argparse.Namespace, state: TrackTriggerState, index_
         response.update({"ok": bool(sent), "sent": bool(sent), "action": canonical_action, "sequence": sequence})
         return web.json_response(response)
 
+    async def reset(request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        reason = str(payload.get("reason") or "track_trigger_reset")
+        response = state.request_reset(reason)
+        return web.json_response(response, status=200 if response.get("ok") else 503)
+
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     app.router.add_get("/", index)
     app.router.add_get("/index.html", index)
     app.router.add_get("/state", state_route)
     app.router.add_post("/policy", policy)
+    app.router.add_post("/reset", reset)
     app.router.add_route("*", "/scene", _scene_proxy_handler)
     app.router.add_route("*", "/scene/{tail:.*}", _scene_proxy_handler)
     return app
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Single-button browser trigger for split MuJoCo tracking.")
+    parser = argparse.ArgumentParser(description="Browser start/reset trigger for split MuJoCo tracking.")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--sparse-root-command-port", type=int, default=5661)
@@ -448,12 +560,18 @@ def main() -> None:
     parser.add_argument("--scene-url", default="")
     parser.add_argument("--scene-proxy-url", default="")
     parser.add_argument("--track-key", default="s")
+    parser.add_argument("--reset-key", default="r")
     parser.add_argument("--track-action", default="rollout_start")
     args = parser.parse_args()
 
     track_key = str(args.track_key or "s").strip().lower()
     if len(track_key) != 1:
         raise SystemExit(f"[ERROR] --track-key expects a single character, got: {args.track_key}")
+    reset_key = str(args.reset_key or "r").strip().lower()
+    if len(reset_key) != 1:
+        raise SystemExit(f"[ERROR] --reset-key expects a single character, got: {args.reset_key}")
+    if reset_key == track_key:
+        raise SystemExit(f"[ERROR] --reset-key must differ from --track-key, got: {reset_key}")
 
     state = TrackTriggerState(
         sparse_root_command_port=args.sparse_root_command_port,
@@ -468,8 +586,10 @@ def main() -> None:
     index_html = (
         INDEX_HTML.replace("__SCENE_URL_JSON__", json.dumps(scene_url))
         .replace("__TRACK_KEY_JSON__", json.dumps(track_key))
+        .replace("__RESET_KEY_JSON__", json.dumps(reset_key))
         .replace("__TRACK_ACTION_JSON__", json.dumps(str(args.track_action)))
         .replace("__TRACK_KEY_LABEL__", track_key.upper())
+        .replace("__RESET_KEY_LABEL__", reset_key.upper())
     )
 
     def _shutdown(_signum: int, _frame: object) -> None:
@@ -489,6 +609,7 @@ def main() -> None:
         args.track_action,
         args.policy_control_port,
     )
+    logger.info("Publishing reset rollout on key '{}' via sim-control port {}", reset_key, args.control_port)
     try:
         app = asyncio.run(_create_app(args, state, index_html))
         web.run_app(app, host=args.host, port=int(args.port), print=None, handle_signals=False)

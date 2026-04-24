@@ -30,12 +30,19 @@ from holosoma_inference.utils.math.quat import (
     wxyz_to_xyzw,
     xyzw_to_wxyz,
 )
+from holosoma_inference.utils.policy_overlay import PolicyOverlayPub
 from holosoma_inference.utils.sim_control import ManualRootCommandSub
 from holosoma_inference.utils.sim_state import SimStateSub
 
 
 def _truthy_env(name: str) -> bool:
     return os.environ.get(name, "0").lower() in ("1", "true", "yes", "on")
+
+
+FAKE_BODY_NAME_ALIASES: dict[str, str] = {
+    "left_foot_contact_point": "left_ankle_roll_link",
+    "right_foot_contact_point": "right_ankle_roll_link",
+}
 
 
 class PinocchioRobot:
@@ -57,6 +64,7 @@ class PinocchioRobot:
 
         # get ref body frame id in pinocchio robot
         self.ref_body_frame_id = self.robot_model.getFrameId(robot_cfg.motion["body_name_ref"][0])
+        self.frame_name_to_id = {frame.name: idx for idx, frame in enumerate(self.robot_model.frames)}
 
     def fk_and_get_ref_body_pose_in_world(self, configuration: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         # forward kinematics
@@ -72,6 +80,26 @@ class PinocchioRobot:
     def fk_and_get_ref_body_orientation_in_world(self, configuration: np.ndarray) -> np.ndarray:
         _, quat_xyzw = self.fk_and_get_ref_body_pose_in_world(configuration)
         return np.expand_dims(quat_xyzw, axis=0)  # xyzw, (1, 4)
+
+    def fk_and_get_body_positions_in_world(self, configuration: np.ndarray, body_names: list[str]) -> np.ndarray:
+        pin.framesForwardKinematics(self.robot_model, self.robot_data, configuration)
+        root_pos = np.asarray(configuration[:3], dtype=np.float32)
+        positions = np.zeros((len(body_names), 3), dtype=np.float32)
+        for idx, body_name in enumerate(body_names):
+            frame_id = self._resolve_body_frame_id(str(body_name))
+            if frame_id is None:
+                positions[idx] = root_pos
+                continue
+            positions[idx] = np.asarray(self.robot_data.oMf[frame_id].translation, dtype=np.float32)
+        return positions
+
+    def _resolve_body_frame_id(self, body_name: str) -> int | None:
+        if body_name == "world":
+            return None
+        for candidate in (body_name, FAKE_BODY_NAME_ALIASES.get(body_name, "")):
+            if candidate and candidate in self.frame_name_to_id:
+                return int(self.frame_name_to_id[candidate])
+        return None
 
     @staticmethod
     def _create_xml_from_urdf(urdf_text: str) -> str:
@@ -134,6 +162,8 @@ class MotionData:
             self.object_size = self._extract_object_size_np(data, joint_pos.shape[0], source=str(motion_path))
 
         joint_indices = get_index_of_a_in_b(robot_dof_names, joint_names)
+        self.motion_path = motion_path
+        self.body_names = tuple(body_names)
         self.joint_pos = joint_pos[:, joint_indices]
         self.joint_vel = joint_vel[:, joint_indices]
         self.frame_count = self.joint_pos.shape[0]
@@ -431,6 +461,33 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._onnx_output_fetch: list[str] = []
         self._motion_output_names: set[str] = set()
         self._motion_alignment_enabled = False
+        try:
+            self._motion_index_offset = int(os.environ.get("HOLOSOMA_POLICY_MOTION_INDEX_OFFSET", "0") or "0")
+        except ValueError:
+            self._motion_index_offset = 0
+        self._force_motion_alignment = _truthy_env("HOLOSOMA_FORCE_MOTION_ALIGNMENT")
+        self._skip_stiff_prompt = _truthy_env("HOLOSOMA_SKIP_STIFF_PROMPT")
+        self._target_object_state_assist = _truthy_env("HOLOSOMA_POLICY_TARGET_OBJECT_STATE_ASSIST")
+        self._logged_target_object_state_assist = False
+        self._target_robot_root_state_assist = _truthy_env("HOLOSOMA_POLICY_TARGET_ROBOT_ROOT_STATE_ASSIST")
+        self._logged_target_robot_root_state_assist = False
+        self._use_motion_command_as_q_target = _truthy_env("HOLOSOMA_USE_MOTION_COMMAND_AS_Q_TARGET")
+        self._logged_motion_command_q_target = False
+        self._prefill_obs_history_on_motion_start = (
+            os.environ.get("HOLOSOMA_PREFILL_OBS_HISTORY_ON_MOTION_START", "0").lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self._logged_motion_start_history_prefill = False
+        policy_overlay_port_raw = os.environ.get(
+            "HOLOSOMA_POLICY_OVERLAY_PORT",
+            os.environ.get("POLICY_OVERLAY_PORT", ""),
+        ).strip()
+        try:
+            self._policy_overlay_port = int(policy_overlay_port_raw) if policy_overlay_port_raw else 0
+        except ValueError:
+            self._policy_overlay_port = 0
+        self._policy_overlay_pub: PolicyOverlayPub | None = None
+        self._motion_body_names: tuple[str, ...] = ()
         self._policy_debug_path = Path(os.environ["HOLOSOMA_POLICY_DEBUG_INPUT_PATH"]) if os.environ.get("HOLOSOMA_POLICY_DEBUG_INPUT_PATH") else None
         self._policy_debug_limit = int(os.environ.get("HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT", "12"))
         self._policy_debug_include_values = str(os.environ.get("HOLOSOMA_POLICY_DEBUG_INCLUDE_VALUES", "")).lower() in {
@@ -443,6 +500,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._policy_debug_initialized = False
 
         super().__init__(config)
+        if self._policy_overlay_port > 0:
+            self._policy_overlay_pub = PolicyOverlayPub(port=self._policy_overlay_port)
+            self._policy_overlay_pub.start()
 
         if self._keyboard_sparse_root_command_enabled:
             logger.info(
@@ -452,6 +512,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 float(np.rad2deg(self._keyboard_sparse_root_command_yaw_value)),
                 self._keyboard_sparse_root_command_mode,
             )
+        if self._motion_index_offset != 0:
+            logger.info("Using motion sequence index offset: {}", self._motion_index_offset)
 
         if self.config.task.use_sim_state:
             self._sim_state_sub = SimStateSub(port=self.config.task.sim_state_port)
@@ -496,7 +558,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 )
             )
 
-        if sys.stdin.isatty():
+        if self._skip_stiff_prompt:
+            logger.info("Skipping stiff hold confirmation prompt via HOLOSOMA_SKIP_STIFF_PROMPT.")
+        elif sys.stdin.isatty():
             logger.info(colored("\n⚠️  Ready to enter stiff hold mode", "yellow", attrs=["bold"]))
             logger.info(colored("Press Enter to continue...", "yellow"))
             try:
@@ -642,9 +706,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         robot_dof_names = metadata.get("dof_names") or list(self.config.robot.dof_names)
         self._motion_data = MotionData(motion_path, list(robot_dof_names), ref_name)
+        self._motion_body_names = tuple(self._motion_data.body_names)
         self._maybe_apply_training_motion_transitions_to_motion_data(metadata, ref_name)
         self._motion_cfg = motion_cfg or {}
-        self._motion_alignment_enabled = bool((motion_cfg or {}).get("align_motion_to_init_yaw", False))
+        alignment_from_metadata = bool((motion_cfg or {}).get("align_motion_to_init_yaw", False))
+        self._motion_alignment_enabled = bool(alignment_from_metadata or self._force_motion_alignment)
+        if self._motion_alignment_enabled and not alignment_from_metadata and self._force_motion_alignment:
+            logger.info("Forcing runtime motion alignment for split sim2sim inference.")
 
     def _maybe_apply_training_motion_transitions_to_motion_data(self, metadata: dict, ref_name: str) -> None:
         if self._motion_data is None or not bool(self.config.task.apply_training_motion_transitions):
@@ -985,6 +1053,32 @@ class WholeBodyTrackingPolicy(BasePolicy):
             obs_dim = int(sum(int(template.shape[1]) for template in self.obs_buf_dict.values()))
         return np.zeros((1, int(obs_dim)), dtype=np.float32)
 
+    def _sync_motion_outputs_from_onnx(self, motion_index: int) -> None:
+        """Update motion observation targets before constructing actor observations."""
+        if not self._uses_motion_command or self._time_step_input_name is None:
+            return
+        if not {"joint_pos", "joint_vel", "ref_quat_xyzw"}.issubset(self._motion_output_names):
+            return
+
+        fetch_names = ["joint_pos", "joint_vel", "ref_quat_xyzw"]
+        if "ref_pos_xyz" in self._motion_output_names:
+            fetch_names.append("ref_pos_xyz")
+
+        input_feed = {
+            self._obs_input_name: self._build_zero_actor_obs(),
+            self._time_step_input_name: np.array([[int(motion_index)]], dtype=np.float32),
+        }
+        if self._perception_obs_input_name:
+            perception_dim = self._get_onnx_input_dim(self._perception_obs_input_name)
+            if perception_dim is None:
+                raise ValueError("Unable to infer perception_obs input dimension from ONNX.")
+            input_feed[self._perception_obs_input_name] = np.zeros((1, perception_dim), dtype=np.float32)
+
+        outputs = dict(zip(fetch_names, self.onnx_policy_session.run(fetch_names, input_feed)))
+        self.motion_command_t = np.concatenate([outputs["joint_pos"], outputs["joint_vel"]], axis=1)
+        self.ref_quat_xyzw_t = outputs["ref_quat_xyzw"]
+        self.ref_pos_xyz_t = outputs.get("ref_pos_xyz", self.ref_pos_xyz_t)
+
     def _capture_policy_state(self):
         state = super()._capture_policy_state()
         state.update(
@@ -1043,7 +1137,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
     def _get_motion_index(self) -> int:
         if self._motion_data is None:
             return 0
-        idx = int(self.motion_timestep)
+        idx = int(self.motion_timestep) + int(self._motion_index_offset)
         if idx < 0:
             return 0
         return min(idx, self._motion_data.frame_count - 1)
@@ -1078,6 +1172,116 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if quat_wxyz.ndim == 1:
             quat_wxyz = quat_wxyz.reshape(1, -1)
         return quat_mul(self._motion_align_quat_wxyz, quat_wxyz)
+
+    def _get_current_motion_target_root_pose(self) -> tuple[np.ndarray, np.ndarray, int] | None:
+        if self._motion_data is None:
+            return None
+        idx = self._get_motion_index()
+        root_pos_w = self._motion_data.root_pos_w[idx : idx + 1].copy()
+        root_quat_wxyz = self._motion_data.root_quat_w[idx : idx + 1].copy()
+        if self._motion_align_quat_wxyz is not None:
+            root_pos_w = self._apply_motion_alignment_pos(root_pos_w)
+            root_quat_wxyz = self._apply_motion_alignment_quat(root_quat_wxyz)
+        return root_pos_w, root_quat_wxyz, idx
+
+    def _get_current_motion_target_body_positions(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, int] | None:
+        if self._motion_data is None or not self._motion_body_names:
+            return None
+        root_pose = self._get_current_motion_target_root_pose()
+        if root_pose is None:
+            return None
+        root_pos_w, root_quat_wxyz, idx = root_pose
+        joint_pos = self._motion_data.joint_pos[idx].astype(np.float32, copy=False)
+        dof_pos_in_pinocchio = joint_pos[self.pinocchio_robot.real2pinocchio_index]
+        root_quat_xyzw = wxyz_to_xyzw(root_quat_wxyz)[0]
+        configuration = np.concatenate([root_pos_w[0], root_quat_xyzw, dof_pos_in_pinocchio], axis=0)
+        body_pos_w = self.pinocchio_robot.fk_and_get_body_positions_in_world(
+            configuration,
+            list(self._motion_body_names),
+        )
+        return body_pos_w, root_pos_w, root_quat_wxyz, idx
+
+    def _publish_policy_overlay(self) -> None:
+        pub = self._policy_overlay_pub
+        if pub is None:
+            return
+        target = self._get_current_motion_target_body_positions()
+        if target is None or self._motion_data is None:
+            pub.publish({"clip_active": bool(self.motion_clip_progressing)})
+            return
+
+        body_pos_w, root_pos_w, root_quat_wxyz, idx = target
+        payload: dict[str, object] = {
+            "clip_active": bool(self.motion_clip_progressing),
+            "motion_timestep": int(self.motion_timestep),
+            "frame_idx": int(idx),
+            "motion_path": str(self._motion_data.motion_path),
+            "body_names": list(self._motion_body_names),
+            "body_pos_w": body_pos_w.tolist(),
+            "root_pos_w": root_pos_w.reshape(-1).tolist(),
+            "root_quat_wxyz": root_quat_wxyz.reshape(-1).tolist(),
+        }
+        self._maybe_publish_target_robot_root_state_assist(root_pos_w, root_quat_wxyz)
+        if self._motion_data.has_object and self._motion_data.object_pos_w is not None and self._motion_data.object_quat_w is not None:
+            object_pos_w = self._motion_data.object_pos_w[idx : idx + 1].copy()
+            object_quat_wxyz = self._motion_data.object_quat_w[idx : idx + 1].copy()
+            if self._motion_align_quat_wxyz is not None:
+                object_pos_w = self._apply_motion_alignment_pos(object_pos_w)
+                object_quat_wxyz = self._apply_motion_alignment_quat(object_quat_wxyz)
+            self._maybe_publish_target_object_state_assist(object_pos_w, object_quat_wxyz)
+            payload["object_pos_w"] = object_pos_w.reshape(-1).tolist()
+            payload["object_quat_wxyz"] = object_quat_wxyz.reshape(-1).tolist()
+        pub.publish(payload)
+
+    def _maybe_publish_target_object_state_assist(
+        self,
+        object_pos_w: np.ndarray,
+        object_quat_wxyz: np.ndarray,
+    ) -> None:
+        if not self._target_object_state_assist:
+            return
+        publisher = getattr(self.interface, "publish_actor_state", None)
+        if publisher is None:
+            return
+        object_pos = np.asarray(object_pos_w, dtype=np.float32).reshape(1, 3)
+        object_quat_xyzw = wxyz_to_xyzw(np.asarray(object_quat_wxyz, dtype=np.float32).reshape(1, 4))
+        object_state = np.concatenate(
+            [
+                object_pos,
+                object_quat_xyzw.astype(np.float32, copy=False),
+                np.zeros((1, 6), dtype=np.float32),
+            ],
+            axis=1,
+        )
+        publisher(self.config.task.sim_object_name, object_state[0])
+        if not self._logged_target_object_state_assist:
+            logger.info("Publishing target object state assist to MuJoCo actor '{}'.", self.config.task.sim_object_name)
+            self._logged_target_object_state_assist = True
+
+    def _maybe_publish_target_robot_root_state_assist(
+        self,
+        root_pos_w: np.ndarray,
+        root_quat_wxyz: np.ndarray,
+    ) -> None:
+        if not self._target_robot_root_state_assist:
+            return
+        publisher = getattr(self.interface, "publish_robot_root_state", None)
+        if publisher is None:
+            return
+        root_pos = np.asarray(root_pos_w, dtype=np.float32).reshape(1, 3)
+        root_quat_xyzw = wxyz_to_xyzw(np.asarray(root_quat_wxyz, dtype=np.float32).reshape(1, 4))
+        root_state = np.concatenate(
+            [
+                root_pos,
+                root_quat_xyzw.astype(np.float32, copy=False),
+                np.zeros((1, 6), dtype=np.float32),
+            ],
+            axis=1,
+        )
+        publisher(root_state[0])
+        if not self._logged_target_robot_root_state_assist:
+            logger.info("Publishing target robot root state assist to MuJoCo.")
+            self._logged_target_robot_root_state_assist = True
 
     def _calc_heading_quat_inv(self, quat_wxyz: np.ndarray) -> np.ndarray:
         yaw = self._quat_yaw(quat_wxyz)
@@ -1479,10 +1683,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
         elif self.use_sim_time:
             self._update_clock()
 
+        motion_index = self._get_motion_index()
+        self._sync_motion_outputs_from_onnx(motion_index)
         obs = self.prepare_obs_for_rl(robot_state_data)
         input_feed = {self._obs_input_name: obs["actor_obs"]}
         if self._time_step_input_name:
-            input_feed[self._time_step_input_name] = np.array([[self.motion_timestep]], dtype=np.float32)
+            input_feed[self._time_step_input_name] = np.array([[motion_index]], dtype=np.float32)
         perception_obs = None
         if self._perception_obs_input_name:
             perception_obs = self._get_split_perception_obs(
@@ -1507,7 +1713,14 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.last_policy_action = policy_action.copy()
         # scale policy action
         self.scaled_policy_action = policy_action * self.policy_action_scales
+        if self._use_motion_command_as_q_target and self._uses_motion_command:
+            target_joint_pos = np.asarray(self.motion_command_t[:, : self.num_dofs], dtype=np.float32)
+            self.scaled_policy_action = target_joint_pos - self.default_dof_angles
+            if not self._logged_motion_command_q_target:
+                logger.info("Using motion_command joint_pos directly as MuJoCo q_target for diagnostic rollout.")
+                self._logged_motion_command_q_target = True
         self._maybe_debug_policy_io(robot_state_data, obs["actor_obs"], perception_obs, policy_action)
+        self._publish_policy_overlay()
 
         # update motion timestep
         if self.motion_clip_progressing:
@@ -1866,6 +2079,15 @@ class WholeBodyTrackingPolicy(BasePolicy):
             robot_state_data = self.interface.get_low_state()
             if robot_state_data is not None:
                 self._maybe_update_motion_alignment(self._augment_robot_state_with_sim_state(robot_state_data))
+        if self._prefill_obs_history_on_motion_start:
+            robot_state_data = self.interface.get_low_state()
+            if robot_state_data is not None and self._has_valid_robot_state(robot_state_data):
+                motion_index = self._get_motion_index()
+                self._sync_motion_outputs_from_onnx(motion_index)
+                self._prefill_obs_history(robot_state_data)
+                if not self._logged_motion_start_history_prefill:
+                    self.logger.info("Prefilled observation history at motion start with frame {}.", motion_index)
+                    self._logged_motion_start_history_prefill = True
         self.logger.info(colored("Starting motion clip", "blue"))
 
     def handle_keyboard_button(self, keycode):

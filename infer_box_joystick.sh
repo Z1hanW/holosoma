@@ -80,7 +80,14 @@ EOF
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
+PYTHON_BIN_EXPLICIT=0
+[[ -n "${PYTHON_BIN+x}" ]] && PYTHON_BIN_EXPLICIT=1
 PYTHON_BIN="${PYTHON_BIN:-python}"
+# A repo-root MuJoCo source checkout (`mujoco/`) shadows the installed
+# Python binding when cwd is on sys.path. Use the source tree explicitly and
+# keep cwd out of import resolution so `simulator:mujoco` imports the binding.
+export PYTHONSAFEPATH="${PYTHONSAFEPATH:-1}"
+export PYTHONPATH="${SCRIPT_DIR}/src/holosoma:${SCRIPT_DIR}/src/holosoma_inference${PYTHONPATH:+:${PYTHONPATH}}"
 
 if [[ $# -lt 1 ]]; then
   usage
@@ -107,6 +114,19 @@ case "${MODE_INPUT}" in
 esac
 
 MODE="${MODE_INPUT}"
+REQUESTED_MUJOCO=0
+for arg in "$@"; do
+  if [[ "${arg}" == "simulator:mujoco" ]]; then
+    REQUESTED_MUJOCO=1
+    break
+  fi
+done
+if [[ "${REQUESTED_MUJOCO}" == "1" && "${PYTHON_BIN_EXPLICIT}" == "0" ]]; then
+  MUJOCO_PY_CANDIDATE="/home/ubuntu/.holosoma_deps/miniconda3/envs/hsmujoco/bin/python"
+  if [[ -x "${MUJOCO_PY_CANDIDATE}" ]]; then
+    PYTHON_BIN="${MUJOCO_PY_CANDIDATE}"
+  fi
+fi
 
 LOG_ROOT="/data/logs_new/WholeBodyTracking"
 MOCAP_TRAINING_NAME_DEFAULT="g1_29dof_wbt_w_object_distill_box_mocap_access_to_mocap_data"

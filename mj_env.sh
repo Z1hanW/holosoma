@@ -2,10 +2,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_MODEL_INPUT="${ROOT_DIR}/logs/wandb_runs/shoo7sr1/model_18500.onnx"
+DEFAULT_MODEL_INPUT="${DEFAULT_MODEL_INPUT:-https://wandb.ai/zihanw22/boxer/runs/shoo7sr1/model_29999.onnx}"
 COMMAND_WEB_LOG="${COMMAND_WEB_LOG:-${ROOT_DIR}/logs/live_debug/mj_command_web.log}"
 TRACK_LAUNCHER="${MJ_TRACK_LAUNCHER:-${ROOT_DIR}/mj_box_depth_track.sh}"
 POLICY_HINT_SCRIPT="${MJ_POLICY_HINT_SCRIPT:-${ROOT_DIR}/mj_policy.sh}"
+# Avoid repo-root source checkouts (notably `mujoco/`) shadowing installed
+# Python packages; launchers pass Holosoma sources through PYTHONPATH instead.
+export PYTHONSAFEPATH="${PYTHONSAFEPATH:-1}"
 
 usage() {
   cat <<EOF
@@ -24,6 +27,7 @@ Environment:
   LAUNCH_VISER                    auto by default; enabled when HEADLESS=True or no DISPLAY
   COMMAND_WEB                     default: 1
   COMMAND_WEB_TRACK_ONLY          default: 0; use single-button S rollout-start web UI
+  MJ_ENV_AUTO_LAUNCH_POLICY       default: 1; start policy in the same rollout, gated by web ]
   COMMAND_WEB_PORT                default: first free port in [7070, 7099]
   COMMAND_WEB_PORT_BASE           default: 7070
   COMMAND_WEB_PORT_MAX            default: 7099
@@ -31,12 +35,16 @@ Environment:
   COMMAND_VALUE                   default: 0.5 for W/S/A/D x/y
   COMMAND_YAW_DEGREES             default: 17 for Q/E yaw
   COMMAND_MODE                    default: manual when manual mode is enabled
+  SHOW_MOTION_ROBOT               default: 0; show tracked motion robot overlay in scene
+  SHOW_MOTION_OBJECT              default: 0; show tracked motion object overlay in scene
   GT_MUJOCO_PHYSICS=1             force GT-style object/G1/floor MuJoCo physics
   POLICY_CONTROL_PORT             default: 5662 for web start/space/stop/init policy control
   MJ_ENV_KILL_STALE_ENV           default: 1; terminate same-port env/web/viser leftovers before launch
   MJ_ENV_KILL_STALE_POLICY        default: 1; terminate same-port policy leftovers before launch
   SIM_MOTION_INIT_MODE            default: raw_motion (first motion init pose)
   VISER_PORT                      default: 2984 when viser is launched
+  HOLOSOMA_AUTO_CUDA_FOR_TRAINING_DEPTH
+                                  default: 1; select cuda:0 for far_tracking_warp when SIM_DEVICE is unset
 EOF
 }
 
@@ -152,18 +160,27 @@ COMMAND_WEB_PY="$(resolve_python "${COMMAND_WEB_PY:-}" \
   /home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python)"
 
 export MODEL_INPUT="${MODEL_INPUT:-${MODEL_PATH:-${MODEL_REF:-${DEFAULT_MODEL_INPUT}}}}"
-export PERCEPTION_CAMERA_SOURCE="${PERCEPTION_CAMERA_SOURCE:-rendered}"
+export PERCEPTION_CAMERA_SOURCE="${PERCEPTION_CAMERA_SOURCE:-far_tracking_warp}"
+export HOLOSOMA_STRICT_PERCEPTION_CAMERA_SOURCE="${HOLOSOMA_STRICT_PERCEPTION_CAMERA_SOURCE:-1}"
 export SIM_CLOCK_PORT="${SIM_CLOCK_PORT:-5655}"
 export SIM_STATE_PORT="${SIM_STATE_PORT:-5657}"
 export PERCEPTION_OBS_PORT="${PERCEPTION_OBS_PORT:-5658}"
 export SIM_CONTROL_PORT="${SIM_CONTROL_PORT:-5659}"
 export SPARSE_ROOT_COMMAND_PORT="${SPARSE_ROOT_COMMAND_PORT:-5661}"
 export POLICY_CONTROL_PORT="${POLICY_CONTROL_PORT:-5662}"
+export POLICY_OVERLAY_PORT="${POLICY_OVERLAY_PORT:-5663}"
+export HOLOSOMA_POLICY_OVERLAY_PORT="${HOLOSOMA_POLICY_OVERLAY_PORT:-$POLICY_OVERLAY_PORT}"
 export ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND="${ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND:-1}"
 export RUN_SECONDS="${RUN_SECONDS:-0}"
 export HOLOSOMA_MJ_TRACK_RUN_FOREVER="${HOLOSOMA_MJ_TRACK_RUN_FOREVER:-1}"
-export MJ_TRACK_MODE=env
-export SKIP_POLICY=1
+MJ_ENV_AUTO_LAUNCH_POLICY="${MJ_ENV_AUTO_LAUNCH_POLICY:-1}"
+if is_truthy "$MJ_ENV_AUTO_LAUNCH_POLICY"; then
+  export MJ_TRACK_MODE=both
+  export SKIP_POLICY=0
+else
+  export MJ_TRACK_MODE=env
+  export SKIP_POLICY=1
+fi
 
 export HOLOSOMA_DISABLE_AUTO_RESET="${HOLOSOMA_DISABLE_AUTO_RESET:-1}"
 export HOLOSOMA_DISABLE_MOTION_END_RESET="${HOLOSOMA_DISABLE_MOTION_END_RESET:-1}"
@@ -189,10 +206,12 @@ COMMAND_VALUE="${COMMAND_VALUE:-0.5}"
 COMMAND_YAW_DEGREES="${COMMAND_YAW_DEGREES:-${COMMAND_YAW_DEG:-17}}"
 COMMAND_MODE="${COMMAND_MODE:-manual}"
 COMMAND_WEB_TRACK_ONLY="${COMMAND_WEB_TRACK_ONLY:-0}"
+SHOW_MOTION_ROBOT="${SHOW_MOTION_ROBOT:-0}"
+SHOW_MOTION_OBJECT="${SHOW_MOTION_OBJECT:-0}"
 VISER_PORT_RESOLVED="${VISER_PORT:-2984}"
 MJ_ENV_KILL_STALE_ENV="${MJ_ENV_KILL_STALE_ENV:-1}"
 MJ_ENV_KILL_STALE_POLICY="${MJ_ENV_KILL_STALE_POLICY:-1}"
-GT_MUJOCO_PHYSICS="${GT_MUJOCO_PHYSICS:-${HOLOSOMA_GT_MUJOCO_PHYSICS:-0}}"
+GT_MUJOCO_PHYSICS="${GT_MUJOCO_PHYSICS:-${HOLOSOMA_GT_MUJOCO_PHYSICS:-1}}"
 if is_truthy "$GT_MUJOCO_PHYSICS"; then
   export GT_MUJOCO_PHYSICS=1
   export HOLOSOMA_GT_MUJOCO_PHYSICS=1
@@ -354,26 +373,35 @@ case "$(printf '%s' "$LAUNCH_VISER_RAW" | tr '[:upper:]' '[:lower:]')" in
     ;;
 esac
 
-echo "[INFO] launching MuJoCo environment only"
+if is_truthy "$MJ_ENV_AUTO_LAUNCH_POLICY"; then
+  echo "[INFO] launching MuJoCo environment + policy"
+else
+  echo "[INFO] launching MuJoCo environment only"
+fi
 echo "[INFO] model=${MODEL_INPUT}"
 echo "[INFO] headless=${TRAINING_HEADLESS} launch_viser=${LAUNCH_VISER_RESOLVED}"
 echo "[INFO] motion init=${SIM_MOTION_INIT_MODE}"
-echo "[INFO] gt_mujoco_physics=${GT_MUJOCO_PHYSICS}"
-echo "[INFO] ports clock=${SIM_CLOCK_PORT} state=${SIM_STATE_PORT} perception=${PERCEPTION_OBS_PORT} control=${SIM_CONTROL_PORT} sparse_root=${SPARSE_ROOT_COMMAND_PORT} policy_control=${POLICY_CONTROL_PORT}"
+echo "[INFO] gt_mujoco_physics=${GT_MUJOCO_PHYSICS} zero_passive_dynamics=${HOLOSOMA_GT_MUJOCO_ZERO_PASSIVE_DYNAMICS:-0}"
+echo "[INFO] auto_launch_policy=${MJ_ENV_AUTO_LAUNCH_POLICY} mj_track_mode=${MJ_TRACK_MODE} skip_policy=${SKIP_POLICY}"
+echo "[INFO] ports clock=${SIM_CLOCK_PORT} state=${SIM_STATE_PORT} perception=${PERCEPTION_OBS_PORT} control=${SIM_CONTROL_PORT} sparse_root=${SPARSE_ROOT_COMMAND_PORT} policy_control=${POLICY_CONTROL_PORT} policy_overlay=${HOLOSOMA_POLICY_OVERLAY_PORT}"
 if is_truthy "$COMMAND_WEB"; then
   echo "[INFO] command+scene web: http://localhost:${COMMAND_WEB_PORT} (log: ${COMMAND_WEB_LOG})"
   if is_truthy "$COMMAND_WEB_TRACK_ONLY"; then
-    echo "[INFO] web policy control: S sends rollout_start (Space + ]) via policy_control=${POLICY_CONTROL_PORT}"
+    echo "[INFO] web policy control: S starts rollout (Space + ]), R/Backspace resets rollout via control=${SIM_CONTROL_PORT}, policy_control=${POLICY_CONTROL_PORT}"
   else
     echo "[INFO] web policy controls: ] start policy, Space start motion clip, Stop, Init via policy_control=${POLICY_CONTROL_PORT}"
     echo "[INFO] command source: motion-derived by default; manual_mode_initial=${COMMAND_MANUAL_ENABLED}"
     echo "[INFO] manual command scale: xy=${COMMAND_VALUE}, yaw=${COMMAND_YAW_DEGREES} deg"
   fi
 fi
+if is_truthy "$MJ_ENV_AUTO_LAUNCH_POLICY"; then
+  echo "[INFO] policy is launched by this rollout and waits for web ] before sending lowcmd."
+else
+  echo "[INFO] launch policy with: bash ${POLICY_HINT_SCRIPT} $*"
+fi
 if [[ "$LAUNCH_VISER_RESOLVED" == "1" ]] && ! is_truthy "$COMMAND_WEB"; then
   echo "[INFO] raw viser scene: http://localhost:${VISER_PORT_RESOLVED}"
 fi
-echo "[INFO] launch policy with: bash ${POLICY_HINT_SCRIPT} $*"
 
 if is_truthy "${DRY_RUN:-0}"; then
   echo "[INFO] DRY_RUN=1; not launching MuJoCo."
@@ -389,9 +417,23 @@ if [[ "$LAUNCH_VISER_RESOLVED" == "1" ]]; then
     unset HOLOSOMA_VISER_SUPPRESS_DIRECT_URL
   fi
   VISER_ARGS=(
-    --launch-env-only
     --manual-root-mode "$COMMAND_MODE"
+    --state-port "$SIM_STATE_PORT"
+    --perception-obs-port "$PERCEPTION_OBS_PORT"
+    --perception-obs-shm-name "${PERCEPTION_OBS_SHM_NAME:-depth_img_shm}"
+    --control-port "$SIM_CONTROL_PORT"
+    --sparse-root-command-port "$SPARSE_ROOT_COMMAND_PORT"
+    --policy-overlay-port "$HOLOSOMA_POLICY_OVERLAY_PORT"
   )
+  if ! is_truthy "$MJ_ENV_AUTO_LAUNCH_POLICY"; then
+    VISER_ARGS+=(--launch-env-only)
+  fi
+  if is_truthy "$SHOW_MOTION_ROBOT"; then
+    VISER_ARGS+=(--show-motion-robot)
+  fi
+  if is_truthy "$SHOW_MOTION_OBJECT"; then
+    VISER_ARGS+=(--show-motion-object)
+  fi
   if is_truthy "$COMMAND_WEB"; then
     VISER_ARGS+=(--no-manual-root-publisher-enabled)
   else

@@ -43,8 +43,16 @@ from holosoma.config_values import robot as robot_values  # noqa: E402
 from holosoma.utils.module_utils import get_holosoma_root  # noqa: E402
 from holosoma.utils.path import resolve_data_file_path  # noqa: E402
 from holosoma_inference.utils.perception_obs import PerceptionObsShmSub, PerceptionObsSub  # noqa: E402
+from holosoma_inference.utils.policy_overlay import PolicyOverlaySub  # noqa: E402
 from holosoma_inference.utils.sim_control import ManualRootCommandPub, SimControlPush  # noqa: E402
 from holosoma_inference.utils.sim_state import SimStateSub  # noqa: E402
+
+FAKE_BODY_NAME_ALIASES: dict[str, str] = {
+    "left_foot_contact_point": "left_ankle_roll_link",
+    "right_foot_contact_point": "right_ankle_roll_link",
+}
+MOTION_SKELETON_COLOR = np.array([255, 168, 25], dtype=np.uint8)
+MOTION_OBJECT_COLOR = np.array([255, 168, 25], dtype=np.uint8)
 
 
 @dataclass(frozen=True)
@@ -55,6 +63,9 @@ class MujocoSimStateViewerConfig:
     perception_obs_shm_name: str = "depth_img_shm"
     control_port: int = 5659
     sparse_root_command_port: int = 5661
+    policy_overlay_port: int = int(
+        os.environ.get("HOLOSOMA_POLICY_OVERLAY_PORT", os.environ.get("POLICY_OVERLAY_PORT", "5663"))
+    )
     object_actor_name: str = "object"
     port: int = 0
     rate_hz: float = 30.0
@@ -66,6 +77,8 @@ class MujocoSimStateViewerConfig:
     mujoco_object_geom_snapshot_path: str = str(REPO_ROOT / "logs" / "live_debug" / "viser_mujoco_object_geoms.json")
     show_ref_body: bool = False
     show_motion_overlay: bool = True
+    show_motion_robot: bool = False
+    show_motion_object: bool = False
     grid_size: float = 8.0
     launch_rollout: bool = False
     launch_env_only: bool = False
@@ -101,9 +114,12 @@ class MujocoSimStateViewerConfig:
 class MotionOverlay:
     path: Path
     fps: float
+    body_names: tuple[str, ...]
+    body_pos_w: np.ndarray
     root_pos_w: np.ndarray
     root_quat_wxyz: np.ndarray
     joint_pos_viser: np.ndarray
+    skeleton_edges: tuple[tuple[int, int], ...]
     object_pos_w: np.ndarray | None
     object_quat_wxyz: np.ndarray | None
     object_mesh: trimesh.Trimesh | None
@@ -120,6 +136,55 @@ def _resolve_robot_config(name: str) -> RobotConfig:
     if name not in defaults:
         raise ValueError(f"Unknown robot '{name}'. Available: {sorted(defaults.keys())}")
     return defaults[name]
+
+
+def _load_motion_skeleton_edges(
+    robot_urdf_path: Path,
+    body_names: tuple[str, ...],
+) -> tuple[tuple[int, int], ...]:
+    try:
+        root = ET.parse(robot_urdf_path).getroot()
+    except Exception:
+        return ()
+
+    parent_by_child: dict[str, str] = {}
+    for joint in root.findall("joint"):
+        parent_elem = joint.find("parent")
+        child_elem = joint.find("child")
+        if parent_elem is None or child_elem is None:
+            continue
+        parent_link = str(parent_elem.get("link", "")).strip()
+        child_link = str(child_elem.get("link", "")).strip()
+        if parent_link and child_link:
+            parent_by_child[child_link] = parent_link
+
+    tracked_idx_by_link: dict[str, int] = {}
+    for idx, body_name in enumerate(body_names):
+        link_name = FAKE_BODY_NAME_ALIASES.get(str(body_name), str(body_name))
+        if link_name:
+            tracked_idx_by_link[link_name] = idx
+
+    edges: list[tuple[int, int]] = []
+    for child_idx, body_name in enumerate(body_names):
+        current_link = FAKE_BODY_NAME_ALIASES.get(str(body_name), str(body_name))
+        visited: set[str] = set()
+        parent_link = parent_by_child.get(current_link)
+        while parent_link and parent_link not in visited:
+            visited.add(parent_link)
+            parent_idx = tracked_idx_by_link.get(parent_link)
+            if parent_idx is not None and parent_idx != child_idx:
+                edges.append((parent_idx, child_idx))
+                break
+            parent_link = parent_by_child.get(parent_link)
+
+    deduped: list[tuple[int, int]] = []
+    seen_edges: set[tuple[int, int]] = set()
+    for edge in edges:
+        if edge in seen_edges:
+            continue
+        seen_edges.add(edge)
+        deduped.append(edge)
+    return tuple(deduped)
 
 
 def _resolve_repo_path(path: str) -> Path:
@@ -440,9 +505,11 @@ def _load_motion_overlay(
     try:
         with np.load(motion_path, allow_pickle=True) as data:
             body_names = _decode_npz_names(np.asarray(data["body_names"]))
+            body_names_tuple = tuple(str(name) for name in body_names)
+            body_pos_w = np.asarray(data["body_pos_w"], dtype=np.float32)
             joint_names = _decode_npz_names(np.asarray(data["joint_names"]))
             root_idx = _resolve_motion_root_body_index(body_names)
-            root_pos_w = np.asarray(data["body_pos_w"][:, root_idx], dtype=np.float32)
+            root_pos_w = np.asarray(body_pos_w[:, root_idx], dtype=np.float32)
             root_quat_wxyz = np.asarray(data["body_quat_w"][:, root_idx], dtype=np.float32)
             root_quat_wxyz = np.asarray([_normalize_quaternion_wxyz(quat) for quat in root_quat_wxyz], dtype=np.float32)
 
@@ -483,13 +550,17 @@ def _load_motion_overlay(
         logger.warning("Motion overlay disabled; failed to load {}: {}", motion_path, exc)
         return None
 
+    skeleton_edges = _load_motion_skeleton_edges(_resolve_robot_urdf_path(robot_config), body_names_tuple)
     object_mesh = _load_motion_object_mesh(object_urdf_path, object_size) if object_urdf_path is not None else None
     return MotionOverlay(
         path=motion_path,
         fps=max(float(fps), 1.0),
+        body_names=body_names_tuple,
+        body_pos_w=body_pos_w,
         root_pos_w=root_pos_w,
         root_quat_wxyz=root_quat_wxyz,
         joint_pos_viser=joint_pos_viser,
+        skeleton_edges=skeleton_edges,
         object_pos_w=object_pos_w,
         object_quat_wxyz=object_quat_wxyz,
         object_mesh=object_mesh,
@@ -683,27 +754,10 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     motion_root.visible = False
     motion_robot_root.visible = False
     motion_object_root.visible = False
-    motion_vr: ViserUrdf | None = None
+    motion_joint_handle = None
+    motion_skeleton_handle = None
     motion_object_mesh_handle = None
-
-    def _ensure_motion_urdf() -> ViserUrdf:
-        nonlocal motion_vr
-        if motion_vr is not None:
-            return motion_vr
-        motion_urdf_kwargs = {
-            "urdf_or_path": robot_urdf_path,
-            "root_node_name": "/motion_ref/robot",
-        }
-        if "load_collision_meshes" in viser_urdf_signature.parameters:
-            motion_urdf_kwargs["load_collision_meshes"] = True
-        if "collision_mesh_color_override" in viser_urdf_signature.parameters:
-            motion_urdf_kwargs["collision_mesh_color_override"] = (1.0, 0.62, 0.05, 0.33)
-        motion_vr = ViserUrdf(server, **motion_urdf_kwargs)
-        if hasattr(motion_vr, "show_visual"):
-            motion_vr.show_visual = False
-        if hasattr(motion_vr, "show_collision"):
-            motion_vr.show_collision = True
-        return motion_vr
+    motion_object_center_handle = None
 
     def _clear_motion_object_mesh() -> None:
         nonlocal motion_object_mesh_handle
@@ -715,7 +769,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             motion_object_mesh_handle = None
 
     def _set_motion_overlay_path(motion_path: Path) -> bool:
-        nonlocal motion_overlay, motion_object_mesh_handle
+        nonlocal motion_joint_handle, motion_object_center_handle, motion_overlay, motion_skeleton_handle
         motion_overlay = _load_motion_overlay(motion_path, robot_config, viser_joint_names)
         _clear_motion_object_mesh()
         if motion_overlay is None:
@@ -724,8 +778,51 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             motion_object_root.visible = False
             return False
 
-        overlay_vr = _ensure_motion_urdf()
-        overlay_vr.update_cfg(motion_overlay.joint_pos_viser[0])
+        zero_joint_points = np.zeros((len(motion_overlay.body_names), 3), dtype=np.float32)
+        joint_colors = np.tile(MOTION_SKELETON_COLOR, (len(motion_overlay.body_names), 1)).astype(np.uint8, copy=False)
+        if motion_joint_handle is None:
+            motion_joint_handle = server.scene.add_point_cloud(
+                "/motion_ref/robot/joints",
+                points=zero_joint_points,
+                colors=joint_colors,
+                point_size=0.025,
+                point_shape="circle",
+                visible=False,
+            )
+        else:
+            motion_joint_handle.points = zero_joint_points
+            try:
+                motion_joint_handle.colors = joint_colors
+            except Exception:
+                pass
+
+        if motion_overlay.skeleton_edges:
+            zero_segments = np.zeros((len(motion_overlay.skeleton_edges), 2, 3), dtype=np.float32)
+            segment_colors = np.full((len(motion_overlay.skeleton_edges), 2, 3), MOTION_SKELETON_COLOR, dtype=np.uint8)
+            if motion_skeleton_handle is None:
+                motion_skeleton_handle = server.scene.add_line_segments(
+                    "/motion_ref/robot/skeleton",
+                    points=zero_segments,
+                    colors=segment_colors,
+                    line_width=3.0,
+                    visible=False,
+                )
+            else:
+                motion_skeleton_handle.points = zero_segments
+                try:
+                    motion_skeleton_handle.colors = segment_colors
+                except Exception:
+                    pass
+
+        if motion_object_center_handle is None:
+            motion_object_center_handle = server.scene.add_point_cloud(
+                "/motion_ref/object/center",
+                points=np.zeros((1, 3), dtype=np.float32),
+                colors=MOTION_OBJECT_COLOR.reshape(1, 3).astype(np.uint8, copy=False),
+                point_size=0.04,
+                point_shape="circle",
+                visible=False,
+            )
         if motion_overlay.object_mesh is not None:
             motion_object_mesh_handle = server.scene.add_mesh_simple(
                 "/motion_ref/object/mesh",
@@ -928,8 +1025,14 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
                 "Show motion overlay",
                 initial_value=bool(cfg.show_motion_overlay and motion_overlay is not None),
             )
-            show_motion_robot_cb = server.gui.add_checkbox("Motion robot", initial_value=False)
-            show_motion_object_cb = server.gui.add_checkbox("Motion object", initial_value=False)
+            show_motion_robot_cb = server.gui.add_checkbox(
+                "Motion skeleton",
+                initial_value=bool(cfg.show_motion_robot and motion_overlay is not None),
+            )
+            show_motion_object_cb = server.gui.add_checkbox(
+                "Motion object",
+                initial_value=bool(cfg.show_motion_object and motion_overlay is not None),
+            )
             motion_md = server.gui.add_markdown(
                 "Motion overlay unavailable" if motion_overlay is None else "Waiting for sim-state..."
             )
@@ -940,6 +1043,8 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     perception_sub.start()
     perception_shm_sub = PerceptionObsShmSub(name=cfg.perception_obs_shm_name)
     perception_shm_sub.start()
+    policy_overlay_sub = PolicyOverlaySub(port=cfg.policy_overlay_port)
+    policy_overlay_sub.start()
     control_pub = SimControlPush(port=cfg.control_port)
     control_pub.start()
     manual_root_pub: ManualRootCommandPub | None = None
@@ -1019,8 +1124,14 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         motion_root.visible = overlay_visible
         motion_robot_root.visible = robot_visible
         motion_object_root.visible = object_visible
+        if motion_joint_handle is not None:
+            motion_joint_handle.visible = robot_visible
+        if motion_skeleton_handle is not None:
+            motion_skeleton_handle.visible = bool(robot_visible and motion_overlay and motion_overlay.skeleton_edges)
         if motion_object_mesh_handle is not None:
             motion_object_mesh_handle.visible = object_visible
+        if motion_object_center_handle is not None:
+            motion_object_center_handle.visible = object_visible
 
     def _motion_frame_index(sim_time_ms: int) -> int:
         if motion_overlay is None:
@@ -1031,47 +1142,124 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         idx = int(round(max(float(sim_time_ms), 0.0) * motion_overlay.fps / 1000.0))
         return int(np.clip(idx, 0, frame_count - 1))
 
-    def _update_motion_overlay(sim_time_ms: int, root_state: np.ndarray, object_state: np.ndarray | None) -> None:
+    def _update_motion_overlay(
+        sim_time_ms: int,
+        root_state: np.ndarray,
+        object_state: np.ndarray | None,
+        key_body_states: dict[str, list[float]] | None,
+        policy_overlay_state: dict | None,
+    ) -> None:
         if motion_overlay is None:
             _set_motion_overlay_visibility()
             motion_md.content = "Motion overlay unavailable"
             return
 
-        frame_idx = _motion_frame_index(sim_time_ms)
-        motion_root_pos = motion_overlay.root_pos_w[frame_idx].copy()
+        live_overlay = policy_overlay_state if isinstance(policy_overlay_state, dict) and policy_overlay_state.get("body_pos_w") is not None else None
+        if live_overlay is not None:
+            motion_path_raw = str(live_overlay.get("motion_path", "")).strip()
+            if motion_path_raw:
+                live_motion_path = _resolve_repo_path_preserve_symlink(Path(motion_path_raw).expanduser())
+                if motion_overlay.path != live_motion_path:
+                    if not _set_motion_overlay_path(live_motion_path):
+                        _set_motion_overlay_visibility()
+                        motion_md.content = "Motion overlay unavailable"
+                        return
+
+        frame_idx = int(live_overlay.get("frame_idx", 0)) if live_overlay is not None else _motion_frame_index(sim_time_ms)
+        motion_root_pos = (
+            np.asarray(live_overlay.get("root_pos_w", [0.0, 0.0, 0.0]), dtype=np.float32).reshape(3)
+            if live_overlay is not None
+            else motion_overlay.root_pos_w[frame_idx].copy()
+        )
+        motion_body_points = (
+            np.asarray(live_overlay.get("body_pos_w", []), dtype=np.float32).reshape(-1, 3)
+            if live_overlay is not None
+            else motion_overlay.body_pos_w[frame_idx].copy()
+        )
+        motion_body_names = (
+            tuple(str(name) for name in live_overlay.get("body_names", []))
+            if live_overlay is not None and live_overlay.get("body_names")
+            else motion_overlay.body_names
+        )
         motion_object_pos = (
-            motion_overlay.object_pos_w[frame_idx].copy()
-            if motion_overlay.object_pos_w is not None and motion_overlay.object_pos_w.shape[0] > frame_idx
-            else None
+            np.asarray(live_overlay.get("object_pos_w", [0.0, 0.0, 0.0]), dtype=np.float32).reshape(3)
+            if live_overlay is not None and live_overlay.get("object_pos_w") is not None
+            else (
+                motion_overlay.object_pos_w[frame_idx].copy()
+                if motion_overlay.object_pos_w is not None and motion_overlay.object_pos_w.shape[0] > frame_idx
+                else None
+            )
+        )
+        motion_object_quat_wxyz = (
+            np.asarray(live_overlay.get("object_quat_wxyz", [1.0, 0.0, 0.0, 0.0]), dtype=np.float32).reshape(4)
+            if live_overlay is not None and live_overlay.get("object_quat_wxyz") is not None
+            else (
+                motion_overlay.object_quat_wxyz[frame_idx]
+                if motion_overlay.object_quat_wxyz is not None and motion_overlay.object_quat_wxyz.shape[0] > frame_idx
+                else None
+            )
         )
         if bool(recenter_cb.value):
             motion_root_pos[:2] -= offset_xy
             if motion_object_pos is not None:
                 motion_object_pos[:2] -= offset_xy
+        if bool(recenter_cb.value):
+            motion_body_points[:, :2] -= offset_xy
+        motion_body_points_local = motion_body_points - motion_root_pos[None, :]
 
         with server.atomic():
             motion_robot_root.position = tuple(motion_root_pos.tolist())
-            motion_robot_root.wxyz = tuple(motion_overlay.root_quat_wxyz[frame_idx].tolist())
-            if motion_vr is not None:
-                motion_vr.update_cfg(motion_overlay.joint_pos_viser[frame_idx])
+            motion_robot_root.wxyz = (1.0, 0.0, 0.0, 0.0)
+            if motion_joint_handle is not None:
+                motion_joint_handle.points = motion_body_points_local.astype(np.float32, copy=False)
+            if motion_skeleton_handle is not None and motion_overlay.skeleton_edges:
+                segments = np.asarray(
+                    [
+                        [motion_body_points_local[parent_idx], motion_body_points_local[child_idx]]
+                        for parent_idx, child_idx in motion_overlay.skeleton_edges
+                    ],
+                    dtype=np.float32,
+                )
+                motion_skeleton_handle.points = segments
 
-            if motion_object_pos is not None and motion_overlay.object_quat_wxyz is not None:
+            if motion_object_pos is not None and motion_object_quat_wxyz is not None:
                 motion_object_root.position = tuple(motion_object_pos.tolist())
-                motion_object_root.wxyz = tuple(motion_overlay.object_quat_wxyz[frame_idx].tolist())
+                motion_object_root.wxyz = tuple(motion_object_quat_wxyz.tolist())
 
             _set_motion_overlay_visibility()
 
-        root_pos_err = float(np.linalg.norm(root_state[:3] - motion_overlay.root_pos_w[frame_idx]))
-        root_xy_err = float(np.linalg.norm(root_state[:2] - motion_overlay.root_pos_w[frame_idx, :2]))
+        root_pos_err = float(np.linalg.norm(root_state[:3] - motion_root_pos))
+        root_xy_err = float(np.linalg.norm(root_state[:2] - motion_root_pos[:2]))
         object_line = "object_err: `n/a`"
-        if object_state is not None and motion_overlay.object_pos_w is not None and motion_overlay.object_pos_w.shape[0] > frame_idx:
-            object_pos_err = float(np.linalg.norm(object_state[:3] - motion_overlay.object_pos_w[frame_idx]))
-            object_xy_err = float(np.linalg.norm(object_state[:2] - motion_overlay.object_pos_w[frame_idx, :2]))
+        if object_state is not None and motion_object_pos is not None:
+            object_pos_err = float(np.linalg.norm(object_state[:3] - motion_object_pos))
+            object_xy_err = float(np.linalg.norm(object_state[:2] - motion_object_pos[:2]))
             object_line = f"object_err: `{object_pos_err:.5f} m` | object_xy_err: `{object_xy_err:.5f} m`"
+        key_body_line = "key_body_err: `n/a`"
+        if key_body_states and motion_body_points.size > 0:
+            motion_body_index = {str(name): idx for idx, name in enumerate(motion_body_names)}
+            key_body_errs: list[float] = []
+            for body_name, body_state in key_body_states.items():
+                motion_idx = motion_body_index.get(str(body_name))
+                if motion_idx is None:
+                    continue
+                try:
+                    key_pos = np.asarray(body_state, dtype=np.float32).reshape(-1)[:3]
+                except Exception:
+                    continue
+                key_body_errs.append(float(np.linalg.norm(key_pos - motion_body_points[motion_idx])))
+            if key_body_errs:
+                key_body_line = (
+                    f"key_body_err_mean: `{float(np.mean(key_body_errs)):.5f} m` | "
+                    f"key_body_err_max: `{float(np.max(key_body_errs)):.5f} m`"
+                )
+        overlay_source = "policy" if live_overlay is not None else "sim_time"
         motion_md.content = (
             f"motion: `{motion_overlay.path.name}`\n\n"
+            f"overlay_source: `{overlay_source}`\n\n"
             f"frame: `{frame_idx}` / `{motion_overlay.root_pos_w.shape[0] - 1}`\n\n"
             f"root_err: `{root_pos_err:.5f} m` | root_xy_err: `{root_xy_err:.5f} m`\n\n"
+            f"{key_body_line}\n\n"
             f"{object_line}"
         )
 
@@ -1603,7 +1791,13 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
                 snapshot_path = Path(snapshot_path_raw).expanduser().resolve()
             if loaded_object_snapshot_path is None and snapshot_path.is_file():
                 _load_object_geom_handles(snapshot_path)
-            _update_motion_overlay(sim_time_ms, root_state, object_state)
+            _update_motion_overlay(
+                sim_time_ms,
+                root_state,
+                object_state,
+                state.get("key_body_states") if isinstance(state.get("key_body_states"), dict) else None,
+                policy_overlay_sub.get_payload(),
+            )
 
             with server.atomic():
                 robot_root.position = tuple(root_pos.tolist())
@@ -1677,6 +1871,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         if manual_root_pub is not None:
             manual_root_pub.close()
         control_pub.close()
+        policy_overlay_sub.close()
         perception_shm_sub.close()
         perception_sub.close()
         sub.close()

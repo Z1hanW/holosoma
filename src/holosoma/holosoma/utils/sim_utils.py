@@ -237,10 +237,13 @@ def setup_simulation_environment(
     if get_simulator_type() == SimulatorType.ISAACSIM:
         simulation_app = setup_isaaclab_launcher(config, device)
 
-    # Set random seed if specified (only for ExperimentConfig)
-    if isinstance(config, ExperimentConfig) and config.training.seed is not None:
-        seeding(config.training.seed, torch_deterministic=config.training.torch_deterministic)
-        logger.info(f"Seed: {config.training.seed}")
+    # Set random seed if specified. Direct RunSimConfig also carries a TrainingConfig,
+    # and sim2sim rollouts need deterministic terrain/contact initialization.
+    training_cfg = getattr(config, "training", None)
+    seed = getattr(training_cfg, "seed", None)
+    if seed is not None:
+        seeding(seed, torch_deterministic=getattr(training_cfg, "torch_deterministic", False))
+        logger.info(f"Seed: {seed}")
 
     # For RunSimConfig, we need a different approach since it doesn't have env_class or training configs
     if isinstance(config, RunSimConfig):
@@ -591,6 +594,14 @@ class DirectSimulation:
             and perception_cfg.camera_source == "far_tracking_warp"
             and device_type != "cuda"
         ):
+            strict_source = os.environ.get("HOLOSOMA_STRICT_PERCEPTION_CAMERA_SOURCE", "").strip().lower()
+            if strict_source in {"1", "true", "yes", "on"}:
+                raise RuntimeError(
+                    "MuJoCo split perception requested camera_source=far_tracking_warp, "
+                    f"but the simulator is running on device={self.device}. "
+                    "The bundled far-tracking warp sensor requires CUDA; set SIM_DEVICE=cuda:0 "
+                    "or explicitly choose PERCEPTION_CAMERA_SOURCE=rendered for the approximate renderer path."
+                )
             logger.warning(
                 "Split sim perception requested camera_source=far_tracking_warp on device={} for MuJoCo; "
                 "falling back to camera_source=rendered because the bundled warp sensor requires CUDA.",

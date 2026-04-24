@@ -227,7 +227,7 @@ wbt_w_object = ObservationConfig(
         "obj_ori_b": 1.0,
     },
     history_length_dict={
-        "actor_obs": DEFAULT_WBT_POLICY_HISTORY_LENGTH,
+        "actor_obs": 5,
     },
 )
 

@@ -115,6 +115,25 @@ class ZmqSimInterfaceWrapper:
             }
         )
 
+    def publish_actor_state(self, name: str, state) -> None:
+        state_arr = np.asarray(state, dtype=np.float32).reshape(-1)
+        self._sim_control_pub.publish(
+            {
+                "action": "actor_state",
+                "name": str(name),
+                "state": state_arr.tolist(),
+            }
+        )
+
+    def publish_robot_root_state(self, state) -> None:
+        state_arr = np.asarray(state, dtype=np.float32).reshape(-1)
+        self._sim_control_pub.publish(
+            {
+                "action": "robot_root_state",
+                "state": state_arr.tolist(),
+            }
+        )
+
     def process_joystick_input(self):
         return np.zeros((1, 3), dtype=np.float32)
 

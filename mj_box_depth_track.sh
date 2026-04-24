@@ -3,9 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_MOTION_DIR="$ROOT_DIR/outputs/motion_bank_success_box_0_92_0p3"
-DEFAULT_MODEL_INPUT="${ROOT_DIR}/logs/wandb_runs/shoo7sr1/model_18500.onnx"
-DEFAULT_OBJECT_MAP="$ROOT_DIR/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
-DEFAULT_PERCEPTION_CAMERA_SOURCE="${PERCEPTION_CAMERA_SOURCE_DEFAULT:-rendered}"
+DEFAULT_MODEL_INPUT="${DEFAULT_MODEL_INPUT:-https://wandb.ai/zihanw22/boxer/runs/shoo7sr1/model_29999.onnx}"
+DEFAULT_OBJECT_MAP="$DEFAULT_MOTION_DIR/_clip_object_urdf_map.json"
+DEFAULT_PERCEPTION_CAMERA_SOURCE="${PERCEPTION_CAMERA_SOURCE_DEFAULT:-far_tracking_warp}"
 
 INFER_PYTHON_BIN="${INFER_PY:-/home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python}"
 if [[ ! -x "$INFER_PYTHON_BIN" ]]; then
@@ -28,6 +28,7 @@ Defaults:
   contact_stiffness= MUJOCO_OBJECT_CONTACT_STIFFNESS:-<unset>
   contact_damping  = MUJOCO_OBJECT_CONTACT_DAMPING:-<unset>
   GT_MUJOCO_PHYSICS=1 forces GT-style object/G1/floor MuJoCo physics
+  HOLOSOMA_AUTO_CUDA_FOR_TRAINING_DEPTH=0 disables cuda:0 auto-selection for far_tracking_warp
 EOF
 }
 
@@ -50,7 +51,7 @@ case "${1:-}" in
 esac
 
 MOTION_DIR="${MOTION_DIR:-$DEFAULT_MOTION_DIR}"
-OBJECT_MAP_INPUT="${OBJECT_URDF:-$DEFAULT_OBJECT_MAP}"
+OBJECT_MAP_INPUT="${OBJECT_URDF:-}"
 MODEL_INPUT="${MODEL_INPUT:-${MODEL_PATH:-$DEFAULT_MODEL_INPUT}}"
 MOTION_FILE="${MOTION_FILE:-}"
 MOTION_CLIP_NAME="${MOTION_CLIP_NAME:-${MOTION_CLIP:-}}"
@@ -104,6 +105,9 @@ if [[ -z "$MOTION_FILE" || ! -f "$MOTION_FILE" ]]; then
   exit 1
 fi
 MOTION_FILE="$(cd "$(dirname "$MOTION_FILE")" && pwd)/$(basename "$MOTION_FILE")"
+if [[ -z "$OBJECT_MAP_INPUT" && -f "${MOTION_DIR%/}/_clip_object_urdf_map.json" ]]; then
+  OBJECT_MAP_INPUT="${MOTION_DIR%/}/_clip_object_urdf_map.json"
+fi
 
 if [[ "$MODEL_INPUT" == wandb://*.pt ]]; then
   MODEL_INPUT="${MODEL_INPUT%.pt}.onnx"
@@ -112,6 +116,7 @@ fi
 MODEL_LOCAL="$(
   "$INFER_PYTHON_BIN" - <<'PY' "$MODEL_INPUT" "$ROOT_DIR/logs/wandb_runs"
 import sys
+from urllib.parse import urlparse
 from pathlib import Path
 
 from holosoma_inference.utils.wandb import load_checkpoint
@@ -123,6 +128,10 @@ if model.startswith("wandb://"):
     parts = model[len("wandb://") :].split("/", 3)
     if len(parts) >= 3:
         download_dir = root / parts[2]
+elif model.startswith("https://"):
+    parts = [part for part in urlparse(model).path.split("/") if part]
+    if len(parts) >= 4 and parts[2] == "runs":
+        download_dir = root / parts[3]
 path = load_checkpoint(None, model, str(download_dir))
 print(Path(path).expanduser().resolve())
 PY
@@ -168,7 +177,6 @@ export PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
 export PERCEPTION_CAMERA_SOURCE="${PERCEPTION_CAMERA_SOURCE:-$DEFAULT_PERCEPTION_CAMERA_SOURCE}"
 export PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-mesh}"
 export SIM_USE_TRAINING_URDF_OBJECT_SCENE="${SIM_USE_TRAINING_URDF_OBJECT_SCENE:-1}"
-export HOLOSOMA_W_OBJECT_URDF="${HOLOSOMA_W_OBJECT_URDF:-g1/main_mesh_collision_halfspherehand.urdf}"
 export MUJOCO_OBJECT_CONTACT_BODY_MARKERS="${MUJOCO_OBJECT_CONTACT_BODY_MARKERS:-}"
 export MUJOCO_OBJECT_MASS_OVERRIDE="${MUJOCO_OBJECT_MASS_OVERRIDE:-}"
 export MUJOCO_OBJECT_GEOM_FRICTION="${MUJOCO_OBJECT_GEOM_FRICTION:-}"
@@ -177,14 +185,14 @@ export MUJOCO_OBJECT_ROLLING_FRICTION="${MUJOCO_OBJECT_ROLLING_FRICTION:-}"
 export MUJOCO_OBJECT_CONTACT_STIFFNESS="${MUJOCO_OBJECT_CONTACT_STIFFNESS:-}"
 export MUJOCO_OBJECT_CONTACT_DAMPING="${MUJOCO_OBJECT_CONTACT_DAMPING:-}"
 export HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS="${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS:-0}"
-export GT_MUJOCO_PHYSICS="${GT_MUJOCO_PHYSICS:-${HOLOSOMA_GT_MUJOCO_PHYSICS:-0}}"
+export GT_MUJOCO_PHYSICS="${GT_MUJOCO_PHYSICS:-${HOLOSOMA_GT_MUJOCO_PHYSICS:-1}}"
 if is_truthy_env "$GT_MUJOCO_PHYSICS"; then
   export GT_MUJOCO_PHYSICS=1
   export HOLOSOMA_GT_MUJOCO_PHYSICS=1
   export HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS=0
   export SIM_USE_TRAINING_URDF_OBJECT_SCENE=1
-  export SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML=0
-  export SIM_COPY_TENDONS_FROM_ROBOT_XML=0
+  export SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML=1
+  export SIM_COPY_TENDONS_FROM_ROBOT_XML=1
   export SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML=0
   export SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML=0
   export MUJOCO_OBJECT_MASS_SCALE=""
@@ -196,8 +204,14 @@ if is_truthy_env "$GT_MUJOCO_PHYSICS"; then
   export MUJOCO_OBJECT_CONTACT_STIFFNESS=""
   export MUJOCO_OBJECT_CONTACT_DAMPING=""
 fi
-if [[ "$PERCEPTION_CAMERA_SOURCE" == "far_tracking_warp" ]]; then
-  export SIM_DEVICE="${SIM_DEVICE:-cuda:0}"
+export HOLOSOMA_STRICT_PERCEPTION_CAMERA_SOURCE="${HOLOSOMA_STRICT_PERCEPTION_CAMERA_SOURCE:-1}"
+if [[ "$PERCEPTION_CAMERA_SOURCE" == "far_tracking_warp" && -z "${SIM_DEVICE:-}" ]]; then
+  HOLOSOMA_AUTO_CUDA_FOR_TRAINING_DEPTH="${HOLOSOMA_AUTO_CUDA_FOR_TRAINING_DEPTH:-1}"
+  if is_truthy_env "$HOLOSOMA_AUTO_CUDA_FOR_TRAINING_DEPTH" && [[ "${CUDA_VISIBLE_DEVICES:-}" != "-1" ]]; then
+    if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]] || { command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; }; then
+      export SIM_DEVICE="${HOLOSOMA_TRAINING_DEPTH_DEVICE:-cuda:0}"
+    fi
+  fi
 fi
 if [[ "$PERCEPTION_CAMERA_SOURCE" == "rendered" && -z "${MUJOCO_GL:-}" ]]; then
   case "$(printf '%s' "${TRAINING_HEADLESS:-${HEADLESS:-True}}" | tr '[:upper:]' '[:lower:]')" in
@@ -212,7 +226,8 @@ fi
 if [[ "$PERCEPTION_CAMERA_SOURCE" == "rendered" ]]; then
   export HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES="${HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES:-1}"
   export HOLOSOMA_MUJOCO_LOAD_OBJECT_VISUAL_MESHES="${HOLOSOMA_MUJOCO_LOAD_OBJECT_VISUAL_MESHES:-1}"
-  export HOLOSOMA_MUJOCO_DEPTH_PREFER_VISUAL_MESHES="${HOLOSOMA_MUJOCO_DEPTH_PREFER_VISUAL_MESHES:-1}"
+  export HOLOSOMA_MUJOCO_DEPTH_PREFER_ROBOT_VISUAL_MESHES="${HOLOSOMA_MUJOCO_DEPTH_PREFER_ROBOT_VISUAL_MESHES:-0}"
+  export HOLOSOMA_MUJOCO_DEPTH_PREFER_OBJECT_VISUAL_MESHES="${HOLOSOMA_MUJOCO_DEPTH_PREFER_OBJECT_VISUAL_MESHES:-1}"
   export HOLOSOMA_MUJOCO_RENDERED_DEPTH_FLIPUD="${HOLOSOMA_MUJOCO_RENDERED_DEPTH_FLIPUD:-0}"
 fi
 export INFERENCE_CONFIG="${INFERENCE_CONFIG:-g1-29dof-wbt-object-distill}"
@@ -225,7 +240,7 @@ echo "[INFO] inference_config=$INFERENCE_CONFIG"
 echo "[INFO] perception=${ENABLE_SPLIT_PERCEPTION_OBS} preset=${PERCEPTION_PRESET} camera_source=${PERCEPTION_CAMERA_SOURCE}"
 echo "[INFO] object_contact_body_markers=${MUJOCO_OBJECT_CONTACT_BODY_MARKERS:-<all robot collision bodies>}"
 echo "[INFO] object_mass_override=${MUJOCO_OBJECT_MASS_OVERRIDE:-<none>} object_geom_friction=${MUJOCO_OBJECT_GEOM_FRICTION:-<none>} lateral_friction=${MUJOCO_OBJECT_LATERAL_FRICTION:-<none>} rolling_friction=${MUJOCO_OBJECT_ROLLING_FRICTION:-<none>} contact_stiffness=${MUJOCO_OBJECT_CONTACT_STIFFNESS:-<none>} contact_damping=${MUJOCO_OBJECT_CONTACT_DAMPING:-<none>} web_demo_object_contacts=${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS}"
-echo "[INFO] gt_mujoco_physics=${GT_MUJOCO_PHYSICS}"
+echo "[INFO] gt_mujoco_physics=${GT_MUJOCO_PHYSICS} zero_passive_dynamics=${HOLOSOMA_GT_MUJOCO_ZERO_PASSIVE_DYNAMICS:-0}"
 
 if is_truthy_env "${DRY_RUN:-0}"; then
   export HOLOSOMA_MJ_TRACK_INTERNAL_CORE=1

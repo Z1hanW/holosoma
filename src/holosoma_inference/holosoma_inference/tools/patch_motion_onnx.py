@@ -325,7 +325,7 @@ def _set_constant_tensor(const_node: onnx.NodeProto, value: np.ndarray) -> None:
     raise KeyError(f"Constant node '{const_node.name}' has no 'value' attribute")
 
 
-def _patch_metadata(model: onnx.ModelProto, motion_file: str) -> None:
+def _patch_metadata(model: onnx.ModelProto, motion_file: str, *, action_scale_override: float | None = None) -> None:
     metadata: dict[str, object] = {}
     for prop in model.metadata_props:
         try:
@@ -346,6 +346,10 @@ def _patch_metadata(model: onnx.ModelProto, motion_file: str) -> None:
             motion_cfg["motion_file"] = motion_file
             motion_cfg["motion_clip_id"] = 0
             motion_cfg["motion_clip_name"] = Path(motion_file).stem
+        if action_scale_override is not None:
+            control_cfg = experiment_config.setdefault("robot", {}).setdefault("control", {})
+            if isinstance(control_cfg, dict):
+                control_cfg["action_scale"] = float(action_scale_override)
 
     del model.metadata_props[:]
     for key, value in metadata.items():
@@ -360,6 +364,7 @@ def patch_model(
     output_path: Path,
     *,
     apply_training_motion_transitions: bool = False,
+    action_scale_override: float | None = None,
 ) -> Path:
     model = onnx.load(model_path)
     metadata = {prop.key: json.loads(prop.value) for prop in model.metadata_props}
@@ -388,7 +393,7 @@ def patch_model(
     max_const = _find_constant_node(model, clip_node.input[2])
     _set_constant_tensor(max_const, np.array([motion["joint_pos"].shape[0] - 1], dtype=np.int64))
 
-    _patch_metadata(model, str(motion_path))
+    _patch_metadata(model, str(motion_path), action_scale_override=action_scale_override)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     onnx.save(model, output_path)
     return output_path
@@ -404,6 +409,12 @@ def main() -> None:
         action="store_true",
         help="Apply training-time default-pose prepend/append transitions from ONNX metadata before patching constants.",
     )
+    parser.add_argument(
+        "--action-scale-override",
+        type=float,
+        default=None,
+        help="Override experiment_config.robot.control.action_scale in the patched ONNX metadata.",
+    )
     args = parser.parse_args()
 
     model_path = _resolve_model_path(args.model_path)
@@ -414,6 +425,7 @@ def main() -> None:
         motion_path,
         output_path,
         apply_training_motion_transitions=args.apply_training_motion_transitions,
+        action_scale_override=args.action_scale_override,
     )
     print(patched)
 

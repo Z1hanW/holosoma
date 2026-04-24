@@ -40,6 +40,12 @@ _LOAD_OBJECT_VISUAL_MESHES_ENV = "HOLOSOMA_MUJOCO_LOAD_OBJECT_VISUAL_MESHES"
 _WEB_DEMO_OBJECT_CONTACTS_ENV = "HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS"
 _GT_MUJOCO_PHYSICS_ENV = "GT_MUJOCO_PHYSICS"
 _HOLOSOMA_GT_MUJOCO_PHYSICS_ENV = "HOLOSOMA_GT_MUJOCO_PHYSICS"
+_ZERO_PASSIVE_DYNAMICS_ENV = "HOLOSOMA_MUJOCO_ZERO_PASSIVE_DYNAMICS"
+_GT_ZERO_PASSIVE_DYNAMICS_ENV = "HOLOSOMA_GT_MUJOCO_ZERO_PASSIVE_DYNAMICS"
+_TERRAIN_SOLREF_ENV = "HOLOSOMA_MUJOCO_TERRAIN_SOLREF"
+_OBJECT_CONTACT_SOLREF_ENV = "HOLOSOMA_MUJOCO_OBJECT_CONTACT_SOLREF"
+_HALFSPHERE_HAND_COLLISION_ENV = "HOLOSOMA_MUJOCO_HALFSPHERE_HAND_COLLISION"
+_DISABLE_RUBBER_HAND_COLLISION_ENV = "HOLOSOMA_MUJOCO_DISABLE_RUBBER_HAND_COLLISION"
 
 
 class MujocoSceneManager:
@@ -246,6 +252,7 @@ class MujocoSceneManager:
             solimp = [0.99, 0.99, 0.01, 0.5, 2]
             solref = [0.001, 1]
             condim = 3
+        solref = self._terrain_solref_override(solref)
         return self.world_spec.worldbody.add_geom(
             name=terrain_state.name,
             type=mujoco.mjtGeom.mjGEOM_PLANE,
@@ -332,6 +339,7 @@ class MujocoSceneManager:
             friction = self._terrain_friction_triplet_from_state(terrain_state)
             solimp = [0.99, 0.99, 0.01, 0.5, 2]
             solref = [0.001, 1]
+        solref = self._terrain_solref_override(solref)
         return self.world_spec.worldbody.add_geom(
             name=terrain_state.name,
             type=mujoco.mjtGeom.mjGEOM_MESH,
@@ -406,6 +414,7 @@ class MujocoSceneManager:
             friction = self._terrain_friction_triplet_from_state(terrain_state)
             solimp = [0.99, 0.99, 0.01, 0.5, 2]
             solref = [0.001, 1]
+        solref = self._terrain_solref_override(solref)
 
         # Create heightfield geom, positioned to match terrain coordinate system
         return self.world_spec.worldbody.add_geom(
@@ -434,6 +443,53 @@ class MujocoSceneManager:
                 dynamic_friction,
             )
         return [slide_friction, 0.005, 0.001]
+
+    @classmethod
+    def _terrain_solref_override(cls, default: list[float]) -> list[float]:
+        raw = os.environ.get(_TERRAIN_SOLREF_ENV)
+        if raw is None or not raw.strip():
+            return default
+
+        tokens = [token for token in raw.replace(",", " ").split() if token]
+        if len(tokens) != 2:
+            raise ValueError(
+                f"{_TERRAIN_SOLREF_ENV} must provide exactly 2 floats 'timeconst dampratio', got {raw!r}"
+            )
+        try:
+            parsed = [float(tokens[0]), float(tokens[1])]
+        except ValueError as exc:
+            raise ValueError(f"Failed to parse {_TERRAIN_SOLREF_ENV}={raw!r} as 2 floats") from exc
+
+        logger.info(
+            "Overriding MuJoCo terrain solref via {}: default={} override={}",
+            _TERRAIN_SOLREF_ENV,
+            default,
+            parsed,
+        )
+        return parsed
+
+    @classmethod
+    def _explicit_object_contact_solref_override(cls) -> list[float] | None:
+        raw = os.environ.get(_OBJECT_CONTACT_SOLREF_ENV)
+        if raw is None or not raw.strip():
+            return None
+
+        tokens = [token for token in raw.replace(",", " ").split() if token]
+        if len(tokens) != 2:
+            raise ValueError(
+                f"{_OBJECT_CONTACT_SOLREF_ENV} must provide exactly 2 floats 'timeconst dampratio', got {raw!r}"
+            )
+        try:
+            parsed = [float(tokens[0]), float(tokens[1])]
+        except ValueError as exc:
+            raise ValueError(f"Failed to parse {_OBJECT_CONTACT_SOLREF_ENV}={raw!r} as 2 floats") from exc
+
+        logger.info(
+            "Overriding MuJoCo object contact solref via {}: override={}",
+            _OBJECT_CONTACT_SOLREF_ENV,
+            parsed,
+        )
+        return parsed
 
     def add_robot(
         self,
@@ -533,6 +589,12 @@ class MujocoSceneManager:
             robot_xml_path=robot_xml_path,
             using_composite_object_scene=using_composite_object_scene,
         )
+        self._maybe_add_training_urdf_half_sphere_hand_collisions(
+            robot_spec,
+            robot_config,
+            robot_urdf_path=robot_xml_path,
+            using_composite_object_scene=using_composite_object_scene,
+        )
         self._maybe_copy_tendons_from_reference_robot_xml(
             robot_spec,
             robot_config,
@@ -551,6 +613,7 @@ class MujocoSceneManager:
             using_composite_object_scene=using_composite_object_scene,
         )
         self._maybe_add_default_actuators(robot_spec, robot_config)
+        self._maybe_align_existing_actuator_ctrlranges_with_robot_config(robot_spec, robot_config)
 
         if object_spec_to_attach is not None:
             self._configure_object_collisions(object_spec_to_attach)
@@ -770,13 +833,59 @@ class MujocoSceneManager:
 
         logger.info("Injected {} default torque actuators into MuJoCo scene for '{}'", len(robot_spec.actuators), robot_config.asset.robot_type)
 
+    def _maybe_align_existing_actuator_ctrlranges_with_robot_config(
+        self,
+        robot_spec: mujoco.MjSpec,
+        robot_config: RobotConfig,
+    ) -> None:
+        """Keep pre-existing MuJoCo motor limits aligned with training effort limits."""
+        if os.environ.get("HOLOSOMA_MUJOCO_ALIGN_ACTUATOR_CTRLRANGE", "0").lower() in {"0", "false", "no", "off"}:
+            return
+        if len(robot_spec.actuators) == 0:
+            return
+        if len(robot_config.dof_names) != len(robot_config.dof_effort_limit_list):
+            raise ValueError(
+                "Cannot align MuJoCo actuator ctrlranges because DOF names and effort limits have different lengths: "
+                f"{len(robot_config.dof_names)} vs {len(robot_config.dof_effort_limit_list)}"
+            )
+
+        effort_by_dof = {
+            str(dof_name): float(abs(effort_limit))
+            for dof_name, effort_limit in zip(robot_config.dof_names, robot_config.dof_effort_limit_list)
+        }
+        changed: list[str] = []
+        for actuator in robot_spec.actuators:
+            actuator_name = str(getattr(actuator, "name", "") or "")
+            effort_limit = effort_by_dof.get(actuator_name)
+            if effort_limit is None:
+                continue
+            old_range = np.asarray(getattr(actuator, "ctrlrange", []), dtype=np.float32).reshape(-1)
+            new_range = np.asarray([-effort_limit, effort_limit], dtype=np.float32)
+            actuator.ctrllimited = mujoco.mjtLimited.mjLIMITED_TRUE
+            actuator.ctrlrange = new_range.tolist()
+            if old_range.shape != (2,) or not np.allclose(old_range, new_range, atol=1.0e-5):
+                changed.append(f"{actuator_name}:{old_range.tolist()}->{new_range.tolist()}")
+
+        if changed:
+            preview = ", ".join(changed[:8])
+            suffix = "" if len(changed) <= 8 else f", ... ({len(changed)} total)"
+            logger.info("Aligned MuJoCo actuator ctrlranges with robot effort limits: {}{}", preview, suffix)
+
     def _maybe_apply_gt_mujoco_joint_passive_dynamics(
         self,
         robot_spec: mujoco.MjSpec,
         robot_config: RobotConfig,
     ) -> None:
-        """Match the GT retargeting MuJoCo G1 scene's passive joint dynamics."""
-        if not self._gt_mujoco_physics_enabled():
+        """Optionally apply the old zero-passive-dynamics experiment.
+
+        GT MuJoCo robot XMLs define non-zero joint frictionloss and armature,
+        so this is not part of GT physics alignment. Keep it as an explicit
+        debugging override only.
+        """
+        if not (
+            self._env_flag(_ZERO_PASSIVE_DYNAMICS_ENV)
+            or self._env_flag(_GT_ZERO_PASSIVE_DYNAMICS_ENV)
+        ):
             return
 
         dof_name_set = set(robot_config.dof_names)
@@ -796,7 +905,8 @@ class MujocoSceneManager:
 
         if updated_joint_count > 0:
             logger.info(
-                "Applied GT MuJoCo passive joint dynamics to {} joint(s): frictionloss=0, damping=0, armature=0",
+                "Applied explicit MuJoCo zero-passive-dynamics override to {} joint(s): "
+                "frictionloss=0, damping=0, armature=0",
                 updated_joint_count,
             )
 
@@ -807,16 +917,12 @@ class MujocoSceneManager:
         *,
         using_composite_object_scene: bool,
     ) -> None:
-        """Copy standalone MuJoCo joint defaults into composite object scenes when explicitly requested.
+        """Copy standalone MuJoCo joint defaults into object-carry scenes when requested.
 
-        Composite MuJoCo scenes used for object carry can omit joint defaults that exist in the
-        standalone robot XML. This creates a control/dynamics mismatch specific to MuJoCo sim2sim.
-        Keep this behind a MuJoCo-only object config flag so Isaac Sim behavior is untouched.
+        Training-URDF object scenes omit the armature/frictionloss fields from the standalone
+        G1 MuJoCo XML. Without those fields the first normal PD command can make low-inertia
+        joints numerically unstable, so GT MuJoCo launches request this copy explicitly.
         """
-
-        if self._gt_mujoco_physics_enabled():
-            logger.info("Skipping reference MuJoCo joint-default copy because GT_MUJOCO_PHYSICS is enabled")
-            return
 
         object_cfg = getattr(robot_config, "object", None)
         if object_cfg is None or not getattr(object_cfg, "mujoco_copy_joint_defaults_from_robot_xml", False):
@@ -896,11 +1002,7 @@ class MujocoSceneManager:
         *,
         using_composite_object_scene: bool,
     ) -> None:
-        """Copy standalone MuJoCo tendons into composite object scenes when explicitly requested."""
-
-        if self._gt_mujoco_physics_enabled():
-            logger.info("Skipping reference MuJoCo tendon copy because GT_MUJOCO_PHYSICS is enabled")
-            return
+        """Copy standalone MuJoCo tendons into object-carry scenes when requested."""
 
         object_cfg = getattr(robot_config, "object", None)
         if object_cfg is None or not getattr(object_cfg, "mujoco_copy_tendons_from_robot_xml", False):
@@ -1049,7 +1151,8 @@ class MujocoSceneManager:
             for body in robot_spec.bodies:
                 if not body.name or body.name in object_body_names:
                     continue
-                if "rubber_hand" in str(body.name).lower():
+                body_name_lower = str(body.name).lower()
+                if "rubber_hand" in body_name_lower or "sphere_hand" in body_name_lower:
                     continue
                 for geom in body.geoms:
                     if int(geom.contype) == 0 and int(geom.conaffinity) == 0:
@@ -1060,17 +1163,19 @@ class MujocoSceneManager:
 
         existing_geom_names = {geom.name for body in robot_spec.bodies for geom in body.geoms if geom.name}
         skip_reference_hand_collision_names: set[str] = set()
-        if using_training_urdf_object_scene:
+        if using_training_urdf_object_scene and self._env_flag(
+            "HOLOSOMA_MUJOCO_SKIP_REFERENCE_HAND_COLLISION_WHEN_RUBBER"
+        ):
             active_rubber_hand_bodies = {
                 str(body.name)
                 for body in robot_spec.bodies
                 if body.name
-                and "rubber_hand" in str(body.name).lower()
+                and ("rubber_hand" in str(body.name).lower() or "sphere_hand" in str(body.name).lower())
                 and any(int(geom.contype) != 0 and int(geom.conaffinity) != 0 for geom in body.geoms)
             }
-            if "left_rubber_hand" in active_rubber_hand_bodies:
+            if "left_rubber_hand" in active_rubber_hand_bodies or "left_sphere_hand_link" in active_rubber_hand_bodies:
                 skip_reference_hand_collision_names.add("left_hand_collision")
-            if "right_rubber_hand" in active_rubber_hand_bodies:
+            if "right_rubber_hand" in active_rubber_hand_bodies or "right_sphere_hand_link" in active_rubber_hand_bodies:
                 skip_reference_hand_collision_names.add("right_hand_collision")
 
         copied_geom_count = 0
@@ -1504,6 +1609,84 @@ class MujocoSceneManager:
             "Aligned MuJoCo composite hand collisions with training URDF '{}': added {} half-sphere geom(s), "
             "disabled {} mismatched hand geom(s)",
             urdf_file,
+            added_geom_count,
+            disabled_geom_count,
+        )
+
+    def _maybe_add_training_urdf_half_sphere_hand_collisions(
+        self,
+        robot_spec: mujoco.MjSpec,
+        robot_config: RobotConfig,
+        *,
+        robot_urdf_path: str,
+        using_composite_object_scene: bool,
+    ) -> None:
+        """Add only the half-sphere palm colliders to training-URDF object scenes."""
+
+        if self._gt_mujoco_physics_enabled():
+            return
+        if using_composite_object_scene or not self._should_use_training_urdf_object_scene(robot_config):
+            return
+        if not self._env_flag(_HALFSPHERE_HAND_COLLISION_ENV):
+            return
+
+        half_sphere_asset = Path(robot_urdf_path).resolve().parent / "meshes" / "half_sphere.obj"
+        if not half_sphere_asset.is_file():
+            fallback = Path(get_holosoma_root()) / "data" / "robots" / "g1" / "meshes" / "half_sphere.obj"
+            half_sphere_asset = fallback
+        if not half_sphere_asset.is_file():
+            raise FileNotFoundError(
+                f"Cannot enable {_HALFSPHERE_HAND_COLLISION_ENV}: half_sphere.obj was not found next to "
+                f"'{robot_urdf_path}' or in the default G1 mesh directory."
+            )
+
+        mesh_name = "halfsphere_hand_mesh"
+        existing_mesh_names = {mesh.name for mesh in robot_spec.meshes if mesh.name}
+        if mesh_name not in existing_mesh_names:
+            robot_spec.add_mesh(name=mesh_name, file=str(half_sphere_asset))
+
+        target_bodies = {body.name: body for body in robot_spec.bodies if body.name}
+        existing_geom_names = {geom.name for body in robot_spec.bodies for geom in body.geoms if geom.name}
+        added_geom_count = 0
+        disabled_geom_count = 0
+
+        for body_name, geom_name in (
+            ("left_wrist_yaw_link", "left_sphere_hand"),
+            ("right_wrist_yaw_link", "right_sphere_hand"),
+        ):
+            body = target_bodies.get(body_name)
+            if body is None:
+                raise ValueError(
+                    f"Cannot enable {_HALFSPHERE_HAND_COLLISION_ENV}: body '{body_name}' is missing."
+                )
+            if geom_name not in existing_geom_names:
+                body.add_geom(
+                    name=geom_name,
+                    type=mujoco.mjtGeom.mjGEOM_MESH,
+                    meshname=mesh_name,
+                    pos=[0.029, -0.003, 0.0],
+                    quat=[0.707107, 0.0, 0.707107, 0.0],
+                    contype=1,
+                    conaffinity=1,
+                    friction=[1.0, 0.005, 0.001],
+                )
+                existing_geom_names.add(geom_name)
+                added_geom_count += 1
+
+        if self._env_flag(_DISABLE_RUBBER_HAND_COLLISION_ENV):
+            for body in robot_spec.bodies:
+                if not body.name or "rubber_hand" not in str(body.name).lower():
+                    continue
+                for geom in body.geoms:
+                    if int(geom.contype) == 0 and int(geom.conaffinity) == 0:
+                        continue
+                    geom.contype = 0
+                    geom.conaffinity = 0
+                    disabled_geom_count += 1
+
+        logger.info(
+            "Enabled training-URDF half-sphere hand collision via {}: added {} geom(s), disabled {} rubber-hand geom(s)",
+            _HALFSPHERE_HAND_COLLISION_ENV,
             added_geom_count,
             disabled_geom_count,
         )
@@ -2005,8 +2188,11 @@ class MujocoSceneManager:
             friction_triplet[2] = rolling
         return friction_triplet.tolist()
 
-    @staticmethod
-    def _object_contact_solref(stiffness: float | None, damping: float | None) -> list[float] | None:
+    @classmethod
+    def _object_contact_solref(cls, stiffness: float | None, damping: float | None) -> list[float] | None:
+        explicit_override = cls._explicit_object_contact_solref_override()
+        if explicit_override is not None:
+            return explicit_override
         if stiffness is None and damping is None:
             return None
         if stiffness is None or damping is None:

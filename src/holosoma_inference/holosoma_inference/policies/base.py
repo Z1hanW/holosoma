@@ -592,7 +592,14 @@ class BasePolicy:
             scale_array.fill(self.policy_action_scale)
 
         if not control_cfg.get("action_scales_by_effort_limit_over_p_gain", False):
+            self._apply_debug_action_scale_multipliers(scale_array)
             self.policy_action_scales = scale_array.reshape(1, -1)
+            logger.info(
+                "Using ONNX metadata scalar action scale: base={} final_min={:.6f} final_max={:.6f}",
+                self.policy_action_scale,
+                float(np.min(scale_array)),
+                float(np.max(scale_array)),
+            )
             return
 
         motor_kp = self.onnx_kp
@@ -600,6 +607,7 @@ class BasePolicy:
             motor_kp = self._resolve_motor_kp_from_control_cfg(control_cfg)
         if motor_kp is None:
             logger.warning("Training metadata requested per-joint action scaling, but KP values were unavailable.")
+            self._apply_debug_action_scale_multipliers(scale_array)
             self.policy_action_scales = scale_array.reshape(1, -1)
             return
 
@@ -612,6 +620,7 @@ class BasePolicy:
                 motor_effort.shape,
                 self.robot_config.num_motors,
             )
+            self._apply_debug_action_scale_multipliers(scale_array)
             self.policy_action_scales = scale_array.reshape(1, -1)
             return
 
@@ -622,8 +631,39 @@ class BasePolicy:
             effort = float(motor_effort[motor_idx])
             scale_array[joint_idx] = 0.0 if stiffness == 0.0 else self.policy_action_scale * effort / stiffness
 
+        self._apply_debug_action_scale_multipliers(scale_array)
         self.policy_action_scales = scale_array.reshape(1, -1)
-        logger.info("Using training-aligned per-joint action scales from ONNX metadata")
+        logger.info(
+            "Using training-aligned per-joint action scales from ONNX metadata: "
+            "base={} final_min={:.6f} final_max={:.6f} final_mean={:.6f}",
+            self.policy_action_scale,
+            float(np.min(scale_array)),
+            float(np.max(scale_array)),
+            float(np.mean(scale_array)),
+        )
+
+    def _apply_debug_action_scale_multipliers(self, scale_array: np.ndarray) -> None:
+        """Optional MuJoCo sim2sim diagnostics for separating lower/upper-body scale issues."""
+
+        env_to_markers = (
+            ("HOLOSOMA_POLICY_ACTION_SCALE_LOWER_MULT", ("hip", "knee", "ankle")),
+            ("HOLOSOMA_POLICY_ACTION_SCALE_WAIST_MULT", ("waist",)),
+            ("HOLOSOMA_POLICY_ACTION_SCALE_UPPER_MULT", ("shoulder", "elbow", "wrist")),
+            ("HOLOSOMA_POLICY_ACTION_SCALE_WRIST_MULT", ("wrist",)),
+        )
+        applied: list[str] = []
+        for env_name, markers in env_to_markers:
+            raw_value = os.environ.get(env_name, "").strip()
+            if not raw_value:
+                continue
+            multiplier = float(raw_value)
+            matched = [idx for idx, name in enumerate(self.dof_names) if any(marker in name for marker in markers)]
+            if not matched:
+                continue
+            scale_array[np.asarray(matched, dtype=np.int64)] *= multiplier
+            applied.append(f"{env_name}={multiplier:g}({len(matched)})")
+        if applied:
+            logger.info("Applied debug policy action-scale multipliers: {}", ", ".join(applied))
 
     def rl_inference(self, robot_state_data):
         """Perform RL inference to get policy action."""
@@ -764,6 +804,28 @@ class BasePolicy:
 
         self.obs_buf_dict = {group: value.copy() for group, value in group_outputs.items()}
         return group_outputs
+
+    def _prefill_obs_history(self, robot_state_data, repeats: int | None = None) -> None:
+        """Fill observation history with the current frame before a rollout starts."""
+        current_obs_buffer_dict = self.get_current_obs_buffer_dict(robot_state_data)
+        self._last_current_obs_buffer_dict = {
+            key: np.array(value, dtype=np.float32, copy=True) for key, value in current_obs_buffer_dict.items()
+        }
+        current_obs_dict = self.parse_current_obs_dict(current_obs_buffer_dict)
+
+        for group, term_dict in current_obs_dict.items():
+            history_len = int(self.history_length_dict.get(group, 1))
+            fill_count = history_len if repeats is None else max(0, min(int(repeats), history_len))
+            for term, obs in term_dict.items():
+                if group not in self.obs_history_buffers or term not in self.obs_history_buffers[group]:
+                    continue
+                obs_arr = np.asarray(obs, dtype=np.float32, order="C")
+                if obs_arr.ndim == 1:
+                    obs_arr = obs_arr.reshape(1, -1)
+                buffer = self.obs_history_buffers[group][term]
+                buffer.clear()
+                for _ in range(fill_count):
+                    buffer.append(obs_arr.copy())
 
     def _assemble_actor_obs(self, group_outputs: dict[str, np.ndarray]) -> np.ndarray:
         """Concatenate actor observation groups to match training input ordering."""

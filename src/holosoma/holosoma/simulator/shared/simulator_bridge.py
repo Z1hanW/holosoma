@@ -72,6 +72,11 @@ class SimulatorBridge:
         self._default_hold_kp: np.ndarray | None = None
         self._default_hold_kd: np.ndarray | None = None
         self._initial_hold_q: np.ndarray | None = None
+        self._zmq_lowcmd_kp_scale = float(os.environ.get("HOLOSOMA_ZMQ_LOWCMD_KP_SCALE", "1.0") or "1.0")
+        self._zmq_lowcmd_kd_scale = float(os.environ.get("HOLOSOMA_ZMQ_LOWCMD_KD_SCALE", "1.0") or "1.0")
+        self._zmq_lowcmd_torque_limit_scale = float(
+            os.environ.get("HOLOSOMA_ZMQ_LOWCMD_TORQUE_LIMIT_SCALE", "1.0") or "1.0"
+        )
         self._sim_state_trace_path = os.environ.get("HOLOSOMA_SPLIT_SIM_STATE_TRACE_PATH", "").strip() or None
         self._sim_state_trace_handle = None
 
@@ -88,6 +93,17 @@ class SimulatorBridge:
             if self._use_zmq_lowcmd:
                 self._init_zmq_lowcmd_state()
                 logger.info("Using split sim-control ZMQ lowcmd bridge instead of Unitree DDS")
+                if (
+                    self._zmq_lowcmd_kp_scale != 1.0
+                    or self._zmq_lowcmd_kd_scale != 1.0
+                    or self._zmq_lowcmd_torque_limit_scale != 1.0
+                ):
+                    logger.info(
+                        "Applying ZMQ lowcmd MuJoCo scales: kp_scale={} kd_scale={} torque_limit_scale={}",
+                        self._zmq_lowcmd_kp_scale,
+                        self._zmq_lowcmd_kd_scale,
+                        self._zmq_lowcmd_torque_limit_scale,
+                    )
             else:
                 self._init_robot_bridge()
             if self.bridge_config.publish_sim_state:
@@ -287,6 +303,43 @@ class SimulatorBridge:
                     motion_init_mode or "unchanged",
                 )
                 continue
+            if action == "actor_state":
+                actor_name = str(payload.get("name", "object") or "object")
+                values = payload.get("state")
+                try:
+                    state_np = np.asarray(values, dtype=np.float32).reshape(1, -1)
+                except Exception as exc:
+                    logger.warning("Ignoring invalid actor_state payload for '{}': {}", actor_name, exc)
+                    continue
+                if state_np.shape[1] < 7:
+                    logger.warning("Ignoring actor_state payload for '{}' with shape {}", actor_name, state_np.shape)
+                    continue
+                if state_np.shape[1] < 13:
+                    padded = np.zeros((1, 13), dtype=np.float32)
+                    padded[:, : state_np.shape[1]] = state_np
+                    state_np = padded
+                env_ids = torch.tensor([0], device=self.simulator.device, dtype=torch.long)
+                state = torch.as_tensor(state_np[:, :13], device=self.simulator.device, dtype=torch.float32)
+                self.simulator.set_actor_states([actor_name], env_ids, state)
+                continue
+            if action == "robot_root_state":
+                values = payload.get("state")
+                try:
+                    state_np = np.asarray(values, dtype=np.float32).reshape(1, -1)
+                except Exception as exc:
+                    logger.warning("Ignoring invalid robot_root_state payload: {}", exc)
+                    continue
+                if state_np.shape[1] < 7:
+                    logger.warning("Ignoring robot_root_state payload with shape {}", state_np.shape)
+                    continue
+                if state_np.shape[1] < 13:
+                    padded = np.zeros((1, 13), dtype=np.float32)
+                    padded[:, : state_np.shape[1]] = state_np
+                    state_np = padded
+                env_ids = torch.tensor([0], device=self.simulator.device, dtype=torch.long)
+                state = torch.as_tensor(state_np[:, :13], device=self.simulator.device, dtype=torch.float32)
+                self.simulator.set_actor_root_state_tensor_robots(env_ids, state)
+                continue
             if action == "lowcmd" and self._use_zmq_lowcmd:
                 self._latest_lowcmd_payload = payload
                 if self._payload_is_active(payload):
@@ -344,6 +397,9 @@ class SimulatorBridge:
             device=device,
             dtype=q_actual.dtype,
         )
+        kp_t = kp_t * float(self._zmq_lowcmd_kp_scale)
+        kd_t = kd_t * float(self._zmq_lowcmd_kd_scale)
+        torque_limit = torque_limit * float(self._zmq_lowcmd_torque_limit_scale)
 
         torques = tau + kp_t * (q_des - q_actual) + kd_t * (dq_des - dq_actual)
         torques = torch.clamp(torques, -torque_limit, torque_limit)
