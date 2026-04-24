@@ -340,6 +340,31 @@ class SimulatorBridge:
                 state = torch.as_tensor(state_np[:, :13], device=self.simulator.device, dtype=torch.float32)
                 self.simulator.set_actor_root_state_tensor_robots(env_ids, state)
                 continue
+            if action == "robot_dof_state":
+                values = payload.get("state")
+                try:
+                    state_np = np.asarray(values, dtype=np.float32)
+                except Exception as exc:
+                    logger.warning("Ignoring invalid robot_dof_state payload: {}", exc)
+                    continue
+                try:
+                    state_np = state_np.reshape(1, self.simulator.num_dof, 2)
+                except ValueError:
+                    try:
+                        flat = state_np.reshape(-1)
+                        if flat.shape[0] == self.simulator.num_dof:
+                            padded = np.zeros((1, self.simulator.num_dof, 2), dtype=np.float32)
+                            padded[0, :, 0] = flat
+                            state_np = padded
+                        else:
+                            raise
+                    except ValueError:
+                        logger.warning("Ignoring robot_dof_state payload with shape {}", state_np.shape)
+                        continue
+                env_ids = torch.tensor([0], device=self.simulator.device, dtype=torch.long)
+                state = torch.as_tensor(state_np, device=self.simulator.device, dtype=torch.float32)
+                self.simulator.set_dof_state_tensor_robots(env_ids, state)
+                continue
             if action == "lowcmd" and self._use_zmq_lowcmd:
                 self._latest_lowcmd_payload = payload
                 if self._payload_is_active(payload):

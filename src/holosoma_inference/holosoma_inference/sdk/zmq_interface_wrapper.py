@@ -134,6 +134,15 @@ class ZmqSimInterfaceWrapper:
             }
         )
 
+    def publish_robot_dof_state(self, state) -> None:
+        state_arr = np.asarray(state, dtype=np.float32)
+        self._sim_control_pub.publish(
+            {
+                "action": "robot_dof_state",
+                "state": state_arr.reshape(-1).tolist(),
+            }
+        )
+
     def process_joystick_input(self):
         return np.zeros((1, 3), dtype=np.float32)
 

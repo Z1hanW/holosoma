@@ -471,6 +471,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._logged_target_object_state_assist = False
         self._target_robot_root_state_assist = _truthy_env("HOLOSOMA_POLICY_TARGET_ROBOT_ROOT_STATE_ASSIST")
         self._logged_target_robot_root_state_assist = False
+        self._target_robot_dof_state_assist = _truthy_env("HOLOSOMA_POLICY_TARGET_ROBOT_DOF_STATE_ASSIST")
+        self._logged_target_robot_dof_state_assist = False
         self._use_motion_command_as_q_target = _truthy_env("HOLOSOMA_USE_MOTION_COMMAND_AS_Q_TARGET")
         self._logged_motion_command_q_target = False
         self._prefill_obs_history_on_motion_start = (
@@ -1222,6 +1224,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             "root_quat_wxyz": root_quat_wxyz.reshape(-1).tolist(),
         }
         self._maybe_publish_target_robot_root_state_assist(root_pos_w, root_quat_wxyz)
+        self._maybe_publish_target_robot_dof_state_assist(idx)
         if self._motion_data.has_object and self._motion_data.object_pos_w is not None and self._motion_data.object_quat_w is not None:
             object_pos_w = self._motion_data.object_pos_w[idx : idx + 1].copy()
             object_quat_wxyz = self._motion_data.object_quat_w[idx : idx + 1].copy()
@@ -1282,6 +1285,20 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if not self._logged_target_robot_root_state_assist:
             logger.info("Publishing target robot root state assist to MuJoCo.")
             self._logged_target_robot_root_state_assist = True
+
+    def _maybe_publish_target_robot_dof_state_assist(self, idx: int) -> None:
+        if not self._target_robot_dof_state_assist or self._motion_data is None:
+            return
+        publisher = getattr(self.interface, "publish_robot_dof_state", None)
+        if publisher is None:
+            return
+        joint_pos = self._motion_data.joint_pos[idx].astype(np.float32, copy=False)
+        joint_vel = self._motion_data.joint_vel[idx].astype(np.float32, copy=False)
+        dof_state = np.stack([joint_pos, joint_vel], axis=1)
+        publisher(dof_state)
+        if not self._logged_target_robot_dof_state_assist:
+            logger.info("Publishing target robot dof state assist to MuJoCo.")
+            self._logged_target_robot_dof_state_assist = True
 
     def _calc_heading_quat_inv(self, quat_wxyz: np.ndarray) -> np.ndarray:
         yaw = self._quat_yaw(quat_wxyz)

@@ -46,6 +46,8 @@ _TERRAIN_SOLREF_ENV = "HOLOSOMA_MUJOCO_TERRAIN_SOLREF"
 _OBJECT_CONTACT_SOLREF_ENV = "HOLOSOMA_MUJOCO_OBJECT_CONTACT_SOLREF"
 _HALFSPHERE_HAND_COLLISION_ENV = "HOLOSOMA_MUJOCO_HALFSPHERE_HAND_COLLISION"
 _DISABLE_RUBBER_HAND_COLLISION_ENV = "HOLOSOMA_MUJOCO_DISABLE_RUBBER_HAND_COLLISION"
+_WRIST_ORIGIN_CONTACT_SPHERES_ENV = "HOLOSOMA_MUJOCO_WRIST_ORIGIN_CONTACT_SPHERES"
+_WRIST_ORIGIN_CONTACT_SPHERE_RADIUS_ENV = "HOLOSOMA_MUJOCO_WRIST_ORIGIN_CONTACT_SPHERE_RADIUS"
 
 
 class MujocoSceneManager:
@@ -595,6 +597,7 @@ class MujocoSceneManager:
             robot_urdf_path=robot_xml_path,
             using_composite_object_scene=using_composite_object_scene,
         )
+        self._maybe_add_wrist_origin_contact_spheres(robot_spec, robot_config)
         self._maybe_copy_tendons_from_reference_robot_xml(
             robot_spec,
             robot_config,
