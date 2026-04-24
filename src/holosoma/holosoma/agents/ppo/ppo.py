@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import json
 import os
+from pathlib import Path
 from typing import TypedDict
 
 import torch
@@ -2246,6 +2248,151 @@ class PPO(BaseAlgo):
         for c in self.eval_callbacks:
             c.on_post_evaluate_policy()
 
+    def _maybe_debug_eval_policy_io(
+        self,
+        *,
+        step: int | None,
+        actor_obs_raw: torch.Tensor,
+        actor_obs: torch.Tensor,
+        policy_state: dict[str, torch.Tensor],
+        actions: torch.Tensor,
+    ) -> None:
+        debug_path = os.environ.get("HOLOSOMA_EVAL_DEBUG_PATH", "").strip()
+        if not debug_path:
+            return
+        debug_limit = int(os.environ.get("HOLOSOMA_EVAL_DEBUG_LIMIT", "12"))
+        debug_count = int(getattr(self, "_eval_debug_count", 0))
+        if debug_count >= debug_limit:
+            return
+
+        path = Path(debug_path)
+        if not getattr(self, "_eval_debug_initialized", False):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("")
+            self._eval_debug_initialized = True
+
+        perception_obs = policy_state.get(self.actor_perception_key) if self.actor_perception_key else None
+        torque_record: dict[str, list[float] | float | int] = {}
+        action_term = None
+        action_manager = getattr(self.env, "action_manager", None)
+        if action_manager is not None and hasattr(action_manager, "get_term"):
+            try:
+                action_term = action_manager.get_term("joint_control")
+            except Exception:
+                action_term = None
+        if action_term is not None:
+            with torch.no_grad():
+                actions_scaled = actions * action_term.action_scales
+                control_type = self.env.robot_config.control.control_type
+                if control_type == "P":
+                    torques_unclipped = (
+                        action_term._kp_scale
+                        * action_term.p_gains
+                        * (actions_scaled + self.env.default_dof_pos - self.env.simulator.dof_pos)
+                        - action_term._kd_scale * action_term.d_gains * self.env.simulator.dof_vel
+                    )
+                elif control_type == "V":
+                    torques_unclipped = (
+                        action_term._kp_scale * action_term.p_gains * (actions_scaled - self.env.simulator.dof_vel)
+                        - action_term._kd_scale
+                        * action_term.d_gains
+                        * (self.env.simulator.dof_vel - action_term._prev_dof_vel)
+                        / self.env.sim_dt
+                    )
+                elif control_type == "T":
+                    torques_unclipped = actions_scaled
+                else:
+                    torques_unclipped = None
+
+                if torques_unclipped is not None:
+                    torques_clipped = torques_unclipped
+                    if self.env.robot_config.control.clip_torques:
+                        torques_clipped = torch.clip(torques_clipped, -self.env.torque_limits, self.env.torque_limits)
+                    sat_ratio = torch.abs(torques_clipped) / torch.clamp(self.env.torque_limits, min=1.0e-6)
+                    torque_record = {
+                        "torque_unclipped_values": torques_unclipped.detach().cpu().reshape(-1).to(torch.float32).tolist(),
+                        "torque_clipped_values": torques_clipped.detach().cpu().reshape(-1).to(torch.float32).tolist(),
+                        "torque_sat_ratio_values": sat_ratio.detach().cpu().reshape(-1).to(torch.float32).tolist(),
+                        "torque_saturated_joint_count": int(
+                            torch.count_nonzero(torch.abs(torques_unclipped) >= self.env.torque_limits - 1.0e-5).item()
+                        ),
+                    }
+        record = {
+            "count": debug_count,
+            "step": None if step is None else int(step),
+            "actor_obs_raw_values": actor_obs_raw.detach().cpu().reshape(-1).to(torch.float32).tolist(),
+            "actor_obs_norm_values": actor_obs.detach().cpu().reshape(-1).to(torch.float32).tolist(),
+            "perception_obs_values": (
+                None
+                if perception_obs is None
+                else perception_obs.detach().cpu().reshape(-1).to(torch.float32).tolist()
+            ),
+            "action_values": actions.detach().cpu().reshape(-1).to(torch.float32).tolist(),
+        }
+        simulator = getattr(self.env, "simulator", None)
+        if simulator is not None:
+            try:
+                record["sim_time_ms"] = float(simulator.time()) * 1000.0
+            except Exception:
+                pass
+            try:
+                record["robot_root_state"] = simulator.robot_root_states[0].detach().cpu().reshape(-1).to(torch.float32).tolist()
+                record["robot_dof_pos"] = simulator.dof_pos[0].detach().cpu().reshape(-1).to(torch.float32).tolist()
+                record["robot_dof_vel"] = simulator.dof_vel[0].detach().cpu().reshape(-1).to(torch.float32).tolist()
+            except Exception:
+                pass
+            actor_states: dict[str, list[float]] = {}
+            try:
+                env_ids = torch.tensor([0], device=simulator.device, dtype=torch.long)
+                actor_metadata = getattr(simulator, "_actor_root_metadata", {})
+                if isinstance(actor_metadata, dict) and actor_metadata:
+                    actor_names = [name for name in actor_metadata if name != "robot"]
+                else:
+                    actor_names = list(getattr(simulator, "_object_urdf_by_name", {}).keys())
+                for name in actor_names:
+                    try:
+                        actor_state = simulator.get_actor_states([name], env_ids)
+                    except Exception:
+                        continue
+                    if actor_state.numel() == 0:
+                        continue
+                    actor_states[str(name)] = actor_state[0].detach().cpu().reshape(-1).to(torch.float32).tolist()
+            except Exception:
+                actor_states = {}
+            if actor_states:
+                record["actors"] = actor_states
+        perception_manager = getattr(self.env, "perception_manager", None)
+        if perception_manager is not None and getattr(perception_manager, "enabled", False):
+            try:
+                env_ids = torch.tensor([0], device=perception_manager.device, dtype=torch.long)
+                cam_body_pos, cam_body_quat = perception_manager.get_camera_pose(
+                    env_ids,
+                    apply_sensor_offset=False,
+                    apply_pitch=False,
+                )
+                record["camera_body_pose_pos"] = (
+                    cam_body_pos[0].detach().cpu().reshape(-1).to(torch.float32).tolist()
+                )
+                record["camera_body_pose_quat_xyzw"] = (
+                    cam_body_quat[0].detach().cpu().reshape(-1).to(torch.float32).tolist()
+                )
+            except Exception:
+                pass
+            try:
+                cam_pos, cam_quat = perception_manager.get_camera_pose(
+                    env_ids,
+                    apply_sensor_offset=True,
+                    apply_pitch=True,
+                )
+                record["camera_pose_pos"] = cam_pos[0].detach().cpu().reshape(-1).to(torch.float32).tolist()
+                record["camera_pose_quat_xyzw"] = cam_quat[0].detach().cpu().reshape(-1).to(torch.float32).tolist()
+            except Exception:
+                pass
+        record.update(torque_record)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, separators=(",", ":")) + "\n")
+        self._eval_debug_count = debug_count + 1
+
     def _pre_eval_env_step(self, actor_state: dict):
         actor_obs_raw = torch.cat([actor_state["obs"][k] for k in self.actor_obs_keys], dim=1)
         actor_obs = actor_obs_raw
@@ -2254,6 +2401,13 @@ class PPO(BaseAlgo):
         if self.actor_perception_key and self.actor_perception_key in actor_state["obs"]:
             policy_state[self.actor_perception_key] = actor_state["obs"][self.actor_perception_key]
         actions = self.eval_policy(policy_state)
+        self._maybe_debug_eval_policy_io(
+            step=actor_state.get("step"),
+            actor_obs_raw=actor_obs_raw,
+            actor_obs=actor_obs,
+            policy_state=policy_state,
+            actions=actions,
+        )
         actor_state.update({"actions": actions})
         for c in self.eval_callbacks:
             actor_state = c.on_pre_eval_env_step(actor_state)

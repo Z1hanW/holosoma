@@ -1227,7 +1227,7 @@ def _camera_raycast_enabled(env: Any) -> bool:
     cfg = pm.cfg
     return bool(
         getattr(cfg, "output_mode", "") == "camera_depth"
-        and getattr(cfg, "camera_source", "") == "mesh_raycast"
+        and getattr(cfg, "camera_source", "") in {"mesh_raycast", "far_tracking_warp"}
     )
 
 
@@ -1256,7 +1256,7 @@ def randomize_camera_raycast(
     noise_drop_prob_range: Sequence[float] | float | None = None,
     **_,
 ) -> None:
-    """Randomize camera pose jitter and depth noise for raycast depth cameras."""
+    """Randomize camera pose jitter and depth noise for supported depth-camera paths."""
     if not enabled or not _camera_raycast_enabled(env):
         return
 

@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_MODEL_INPUT="${ROOT_DIR}/logs/wandb_runs/shoo7sr1/model_18500.onnx"
 COMMAND_WEB_LOG="${COMMAND_WEB_LOG:-${ROOT_DIR}/logs/live_debug/mj_command_web.log}"
+TRACK_LAUNCHER="${MJ_TRACK_LAUNCHER:-${ROOT_DIR}/mj_box_depth_track.sh}"
+POLICY_HINT_SCRIPT="${MJ_POLICY_HINT_SCRIPT:-${ROOT_DIR}/mj_policy.sh}"
 
 usage() {
   cat <<EOF
@@ -16,10 +18,12 @@ Examples:
   COMMAND_WEB_PORT=7070 VISER_PORT=2984 bash mj_env.sh rendered box_74
 
 Environment:
-  MODEL_INPUT / MODEL_PATH        default: ${DEFAULT_MODEL_INPUT}
+  MODEL_INPUT / MODEL_PATH / MODEL_REF
+                                  default: ${DEFAULT_MODEL_INPUT}
   HEADLESS                        auto by default; False opens native MuJoCo GUI when available
   LAUNCH_VISER                    auto by default; enabled when HEADLESS=True or no DISPLAY
   COMMAND_WEB                     default: 1
+  COMMAND_WEB_TRACK_ONLY          default: 0; use single-button S rollout-start web UI
   COMMAND_WEB_PORT                default: first free port in [7070, 7099]
   COMMAND_WEB_PORT_BASE           default: 7070
   COMMAND_WEB_PORT_MAX            default: 7099
@@ -147,7 +151,7 @@ COMMAND_WEB_PY="$(resolve_python "${COMMAND_WEB_PY:-}" \
   /home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python \
   /home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python)"
 
-export MODEL_INPUT="${MODEL_INPUT:-${MODEL_PATH:-${DEFAULT_MODEL_INPUT}}}"
+export MODEL_INPUT="${MODEL_INPUT:-${MODEL_PATH:-${MODEL_REF:-${DEFAULT_MODEL_INPUT}}}}"
 export PERCEPTION_CAMERA_SOURCE="${PERCEPTION_CAMERA_SOURCE:-rendered}"
 export SIM_CLOCK_PORT="${SIM_CLOCK_PORT:-5655}"
 export SIM_STATE_PORT="${SIM_STATE_PORT:-5657}"
@@ -184,6 +188,7 @@ COMMAND_MANUAL_ENABLED="${COMMAND_MANUAL_ENABLED:-0}"
 COMMAND_VALUE="${COMMAND_VALUE:-0.5}"
 COMMAND_YAW_DEGREES="${COMMAND_YAW_DEGREES:-${COMMAND_YAW_DEG:-17}}"
 COMMAND_MODE="${COMMAND_MODE:-manual}"
+COMMAND_WEB_TRACK_ONLY="${COMMAND_WEB_TRACK_ONLY:-0}"
 VISER_PORT_RESOLVED="${VISER_PORT:-2984}"
 MJ_ENV_KILL_STALE_ENV="${MJ_ENV_KILL_STALE_ENV:-1}"
 MJ_ENV_KILL_STALE_POLICY="${MJ_ENV_KILL_STALE_POLICY:-1}"
@@ -209,7 +214,7 @@ same_port_env_pids() {
       {
         is_python = index($0, "python") || index($0, "python3")
         is_sim = index($0, root "/src/holosoma/holosoma/run_sim.py")
-        is_web = index($0, root "/src/holosoma/holosoma/mj_command_web.py")
+        is_web = index($0, root "/src/holosoma/holosoma/mj_command_web.py") || index($0, root "/src/holosoma/holosoma/mj_track_trigger_web.py")
         is_viser = index($0, root "/src/holosoma/holosoma/viser_mujoco_sim_state.py")
         web_port_match = index($0, "--port " cmdweb) || index($0, "--sparse-root-command-port " sparse) || index($0, "--control-port " control) || index($0, "--policy-control-port " policy)
         viser_port_match = index($0, "--port " viser) || index($0, "--state-port " state) || index($0, "--control-port " control) || index($0, "--sparse-root-command-port " sparse)
@@ -300,17 +305,27 @@ if is_truthy "$COMMAND_WEB" && ! is_truthy "${DRY_RUN:-0}"; then
   if is_truthy "$COMMAND_MANUAL_ENABLED"; then
     COMMAND_WEB_ENABLED_ARG=(--enabled)
   fi
+  COMMAND_WEB_SCRIPT="${ROOT_DIR}/src/holosoma/holosoma/mj_command_web.py"
+  COMMAND_WEB_ARGS=(
+    --port "$COMMAND_WEB_PORT"
+    --sparse-root-command-port "$SPARSE_ROOT_COMMAND_PORT"
+    --control-port "$SIM_CONTROL_PORT"
+    --policy-control-port "$POLICY_CONTROL_PORT"
+    --scene-proxy-url "http://127.0.0.1:${VISER_PORT_RESOLVED}"
+  )
+  if is_truthy "$COMMAND_WEB_TRACK_ONLY"; then
+    COMMAND_WEB_SCRIPT="${ROOT_DIR}/src/holosoma/holosoma/mj_track_trigger_web.py"
+  else
+    COMMAND_WEB_ARGS+=(
+      --value "$COMMAND_VALUE"
+      --yaw-degrees "$COMMAND_YAW_DEGREES"
+      --mode "$COMMAND_MODE"
+      "${COMMAND_WEB_ENABLED_ARG[@]}"
+    )
+  fi
   PYTHONPATH="${ROOT_DIR}/src/holosoma:${ROOT_DIR}/src/holosoma_inference${PYTHONPATH:+:${PYTHONPATH}}" \
-    "$COMMAND_WEB_PY" -u "$ROOT_DIR/src/holosoma/holosoma/mj_command_web.py" \
-      --port "$COMMAND_WEB_PORT" \
-      --sparse-root-command-port "$SPARSE_ROOT_COMMAND_PORT" \
-      --control-port "$SIM_CONTROL_PORT" \
-      --policy-control-port "$POLICY_CONTROL_PORT" \
-      --value "$COMMAND_VALUE" \
-      --yaw-degrees "$COMMAND_YAW_DEGREES" \
-      --mode "$COMMAND_MODE" \
-      "${COMMAND_WEB_ENABLED_ARG[@]}" \
-      --scene-proxy-url "http://127.0.0.1:${VISER_PORT_RESOLVED}" \
+    "$COMMAND_WEB_PY" -u "$COMMAND_WEB_SCRIPT" \
+      "${COMMAND_WEB_ARGS[@]}" \
       >"$COMMAND_WEB_LOG" 2>&1 &
   COMMAND_WEB_PID=$!
   sleep 0.4
@@ -347,14 +362,18 @@ echo "[INFO] gt_mujoco_physics=${GT_MUJOCO_PHYSICS}"
 echo "[INFO] ports clock=${SIM_CLOCK_PORT} state=${SIM_STATE_PORT} perception=${PERCEPTION_OBS_PORT} control=${SIM_CONTROL_PORT} sparse_root=${SPARSE_ROOT_COMMAND_PORT} policy_control=${POLICY_CONTROL_PORT}"
 if is_truthy "$COMMAND_WEB"; then
   echo "[INFO] command+scene web: http://localhost:${COMMAND_WEB_PORT} (log: ${COMMAND_WEB_LOG})"
-  echo "[INFO] web policy controls: ] start policy, Space start motion clip, Stop, Init via policy_control=${POLICY_CONTROL_PORT}"
-  echo "[INFO] command source: motion-derived by default; manual_mode_initial=${COMMAND_MANUAL_ENABLED}"
-  echo "[INFO] manual command scale: xy=${COMMAND_VALUE}, yaw=${COMMAND_YAW_DEGREES} deg"
+  if is_truthy "$COMMAND_WEB_TRACK_ONLY"; then
+    echo "[INFO] web policy control: S sends rollout_start (Space + ]) via policy_control=${POLICY_CONTROL_PORT}"
+  else
+    echo "[INFO] web policy controls: ] start policy, Space start motion clip, Stop, Init via policy_control=${POLICY_CONTROL_PORT}"
+    echo "[INFO] command source: motion-derived by default; manual_mode_initial=${COMMAND_MANUAL_ENABLED}"
+    echo "[INFO] manual command scale: xy=${COMMAND_VALUE}, yaw=${COMMAND_YAW_DEGREES} deg"
+  fi
 fi
 if [[ "$LAUNCH_VISER_RESOLVED" == "1" ]] && ! is_truthy "$COMMAND_WEB"; then
   echo "[INFO] raw viser scene: http://localhost:${VISER_PORT_RESOLVED}"
 fi
-echo "[INFO] launch policy with: bash ${ROOT_DIR}/mj_policy.sh $*"
+echo "[INFO] launch policy with: bash ${POLICY_HINT_SCRIPT} $*"
 
 if is_truthy "${DRY_RUN:-0}"; then
   echo "[INFO] DRY_RUN=1; not launching MuJoCo."
@@ -386,8 +405,8 @@ if [[ "$LAUNCH_VISER_RESOLVED" == "1" ]]; then
   if [[ -n "${VISER_PORT_RESOLVED}" ]]; then
     VISER_ARGS+=(--port "${VISER_PORT_RESOLVED}")
   fi
-  bash "${ROOT_DIR}/mj_box_depth_track.sh" "$@" "${VISER_ARGS[@]}"
+  bash "${TRACK_LAUNCHER}" "$@" "${VISER_ARGS[@]}"
 else
   export HOLOSOMA_MJ_TRACK_INTERNAL_CORE=1
-  bash "${ROOT_DIR}/mj_box_depth_track.sh" "$@"
+  bash "${TRACK_LAUNCHER}" "$@"
 fi

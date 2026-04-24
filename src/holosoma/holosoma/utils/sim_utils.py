@@ -35,6 +35,19 @@ from holosoma.utils.simulator_config import SimulatorType, get_simulator_type, s
 from holosoma.utils.torch_utils import to_torch
 
 
+def _parse_debug_float_list_env(name: str, *, expected_len: int) -> list[float] | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    text = raw
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    parts = [part.strip() for part in text.split(",") if part.strip()]
+    if len(parts) != expected_len:
+        raise ValueError(f"{name} expected {expected_len} comma-separated floats, got: {raw}")
+    return [float(part) for part in parts]
+
+
 def setup_simulator_imports(config: ExperimentConfig | RunSimConfig) -> None:
     """Setup simulator-specific imports without side effects.
 
@@ -704,6 +717,26 @@ class DirectSimulation:
                 else:
                     raise ValueError(
                         f"Unsupported motion-init.mode='{init_mode_name}'. Expected 'raw_motion' or 'training_default_pose'."
+                    )
+
+                root_pos_delta = _parse_debug_float_list_env(
+                    "HOLOSOMA_MOTION_INIT_ROOT_POS_DELTA",
+                    expected_len=3,
+                )
+                if root_pos_delta is not None:
+                    root_pos = root_pos + np.asarray(root_pos_delta, dtype=np.float32)
+
+                yaw_delta_deg_raw = os.environ.get("HOLOSOMA_MOTION_INIT_YAW_DELTA_DEG", "").strip()
+                if yaw_delta_deg_raw:
+                    yaw_delta_rad = np.deg2rad(float(yaw_delta_deg_raw))
+                    root_quat_t = torch.tensor(root_quat_xyzw, dtype=torch.float32, device=self.device).unsqueeze(0)
+                    roll_t, pitch_t, yaw_t = get_euler_xyz(root_quat_t, w_last=True)
+                    root_quat_xyzw = (
+                        quat_from_euler_xyz(roll_t.squeeze(0), pitch_t.squeeze(0), yaw_t.squeeze(0) + yaw_delta_rad)
+                        .detach()
+                        .cpu()
+                        .numpy()
+                        .astype(np.float32, copy=False)
                     )
 
                 root_state = torch.tensor(

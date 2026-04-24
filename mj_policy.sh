@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_MODEL_INPUT="${ROOT_DIR}/logs/wandb_runs/shoo7sr1/model_18500.onnx"
+TRACK_LAUNCHER="${MJ_TRACK_LAUNCHER:-${ROOT_DIR}/mj_box_depth_track.sh}"
 
 usage() {
   cat <<EOF
@@ -14,7 +15,8 @@ Examples:
   bash mj_policy.sh rendered box_74 ${DEFAULT_MODEL_INPUT}
 
 Environment:
-  MODEL_INPUT / MODEL_PATH        default: ${DEFAULT_MODEL_INPUT}
+  MODEL_INPUT / MODEL_PATH / MODEL_REF
+                                  default: ${DEFAULT_MODEL_INPUT}
   SIM_CLOCK_PORT                  default: 5655
   SIM_STATE_PORT                  default: 5657
   PERCEPTION_OBS_PORT             default: 5658
@@ -46,7 +48,7 @@ case "${1:-}" in
     ;;
 esac
 
-export MODEL_INPUT="${MODEL_INPUT:-${MODEL_PATH:-${DEFAULT_MODEL_INPUT}}}"
+export MODEL_INPUT="${MODEL_INPUT:-${MODEL_PATH:-${MODEL_REF:-${DEFAULT_MODEL_INPUT}}}}"
 export PERCEPTION_CAMERA_SOURCE="${PERCEPTION_CAMERA_SOURCE:-rendered}"
 export SIM_CLOCK_PORT="${SIM_CLOCK_PORT:-5655}"
 export SIM_STATE_PORT="${SIM_STATE_PORT:-5657}"
@@ -139,4 +141,4 @@ if is_truthy "${DRY_RUN:-0}"; then
   exit 0
 fi
 
-exec bash "${ROOT_DIR}/mj_box_depth_track.sh" "$@"
+exec bash "${TRACK_LAUNCHER}" "$@"

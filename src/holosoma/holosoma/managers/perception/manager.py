@@ -42,6 +42,19 @@ class PerceptionManager:
     """Compute terrain-aware perception features (heightmap or camera depth)."""
 
     @staticmethod
+    def _parse_debug_float_list_env(name: str, *, expected_len: int) -> list[float] | None:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return None
+        text = raw
+        if text.startswith("[") and text.endswith("]"):
+            text = text[1:-1]
+        parts = [part.strip() for part in text.split(",") if part.strip()]
+        if len(parts) != expected_len:
+            raise ValueError(f"{name} expected {expected_len} comma-separated floats, got: {raw}")
+        return [float(part) for part in parts]
+
+    @staticmethod
     def _normalize_object_geometry_mode(raw_value: Any) -> str:
         normalized = str(raw_value or "").strip().lower()
         if normalized in {"", "mesh", "urdf", "off", "false", "0", "no"}:
@@ -71,7 +84,20 @@ class PerceptionManager:
         self._camera_scandots_ray_dirs_base: torch.Tensor | None = None
         self._camera_scandots_width: int | None = None
         self._camera_scandots_height: int | None = None
-        self._sensor_offset = torch.tensor(cfg.sensor_offset, device=self.device)
+        sensor_offset = torch.tensor(cfg.sensor_offset, device=self.device)
+        sensor_offset_override = self._parse_debug_float_list_env(
+            "HOLOSOMA_PERCEPTION_SENSOR_OFFSET_OVERRIDE",
+            expected_len=3,
+        )
+        if sensor_offset_override is not None:
+            sensor_offset = torch.tensor(sensor_offset_override, device=self.device, dtype=torch.float32)
+        sensor_offset_delta = self._parse_debug_float_list_env(
+            "HOLOSOMA_PERCEPTION_SENSOR_OFFSET_DELTA",
+            expected_len=3,
+        )
+        if sensor_offset_delta is not None:
+            sensor_offset = sensor_offset + torch.tensor(sensor_offset_delta, device=self.device, dtype=torch.float32)
+        self._sensor_offset = sensor_offset.to(dtype=torch.float32)
         self._ray_start_offset = torch.tensor([0.0, 0.0, cfg.ray_start_height], device=self.device)
         self._camera_source = cfg.camera_source
         object_geometry_mode_raw = (

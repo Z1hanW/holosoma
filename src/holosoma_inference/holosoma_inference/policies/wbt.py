@@ -433,6 +433,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._motion_alignment_enabled = False
         self._policy_debug_path = Path(os.environ["HOLOSOMA_POLICY_DEBUG_INPUT_PATH"]) if os.environ.get("HOLOSOMA_POLICY_DEBUG_INPUT_PATH") else None
         self._policy_debug_limit = int(os.environ.get("HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT", "12"))
+        self._policy_debug_include_values = str(os.environ.get("HOLOSOMA_POLICY_DEBUG_INCLUDE_VALUES", "")).lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         self._policy_debug_count = 0
         self._policy_debug_initialized = False
 
@@ -1564,6 +1570,51 @@ class WholeBodyTrackingPolicy(BasePolicy):
             )
         return stats
 
+    def _policy_debug_torque_stats(
+        self,
+        *,
+        q_actual: np.ndarray,
+        dq_actual: np.ndarray,
+        q_target: np.ndarray,
+    ) -> tuple[dict, dict]:
+        joint2motor = np.asarray(self.robot_config.joint2motor, dtype=np.int64)
+        motor_kp = np.asarray(self.robot_config.motor_kp, dtype=np.float32)
+        motor_kd = np.asarray(self.robot_config.motor_kd, dtype=np.float32)
+        motor_effort = np.asarray(self.robot_config.motor_effort_limit, dtype=np.float32)
+
+        joint_kp = motor_kp[joint2motor].reshape(1, -1)
+        joint_kd = motor_kd[joint2motor].reshape(1, -1)
+        joint_effort = motor_effort[joint2motor].reshape(1, -1)
+
+        unclipped_tau = joint_kp * (q_target - q_actual) - joint_kd * dq_actual
+        clipped_tau = np.clip(unclipped_tau, -joint_effort, joint_effort)
+        sat_ratio = np.abs(clipped_tau) / np.maximum(joint_effort, 1.0e-6)
+
+        top_idx = np.argsort(np.abs(unclipped_tau.reshape(-1)))[::-1][:8]
+        stats = {
+            "estimated_pd_tau_unclipped": self._policy_debug_stats(unclipped_tau),
+            "estimated_pd_tau_clipped": self._policy_debug_stats(clipped_tau),
+            "estimated_pd_tau_sat_ratio": self._policy_debug_stats(sat_ratio),
+            "estimated_pd_tau_saturated_joint_count": int(np.count_nonzero(np.abs(unclipped_tau) >= joint_effort - 1.0e-5)),
+        }
+        top = {
+            "estimated_pd_tau_top": [
+                {
+                    "joint": self.dof_names[int(idx)],
+                    "q_error": float((q_target - q_actual).reshape(-1)[idx]),
+                    "dq_actual": float(dq_actual.reshape(-1)[idx]),
+                    "kp": float(joint_kp.reshape(-1)[idx]),
+                    "kd": float(joint_kd.reshape(-1)[idx]),
+                    "effort_limit": float(joint_effort.reshape(-1)[idx]),
+                    "tau_unclipped": float(unclipped_tau.reshape(-1)[idx]),
+                    "tau_clipped": float(clipped_tau.reshape(-1)[idx]),
+                    "sat_ratio": float(sat_ratio.reshape(-1)[idx]),
+                }
+                for idx in top_idx
+            ]
+        }
+        return stats, top
+
     def _maybe_debug_policy_io(
         self,
         robot_state_data: np.ndarray,
@@ -1579,6 +1630,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self._policy_debug_initialized = True
 
         q_actual = np.asarray(robot_state_data[:, 7 : 7 + self.num_dofs], dtype=np.float32)
+        dq_actual = np.asarray(
+            robot_state_data[:, 7 + self.num_dofs + 6 : 7 + self.num_dofs + 6 + self.num_dofs],
+            dtype=np.float32,
+        )
         q_target = self.default_dof_angles.reshape(1, -1).astype(np.float32) + self.scaled_policy_action.astype(
             np.float32
         )
@@ -1587,6 +1642,11 @@ class WholeBodyTrackingPolicy(BasePolicy):
             np.clip(q_target_clipped[0], self.q_min_arr, self.q_max_arr, out=q_target_clipped[0])
         q_error = (q_target_clipped - q_actual).reshape(-1)
         top_idx = np.argsort(np.abs(q_error))[::-1][:8]
+        torque_stats, torque_top = self._policy_debug_torque_stats(
+            q_actual=q_actual,
+            dq_actual=dq_actual,
+            q_target=q_target_clipped,
+        )
 
         current_obs = getattr(self, "_last_current_obs_buffer_dict", {})
         record = {
@@ -1599,6 +1659,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             "policy_action_raw": self._policy_debug_stats(policy_action),
             "policy_action_scaled": self._policy_debug_stats(self.scaled_policy_action),
             "q_actual_first": q_actual.reshape(-1)[:8].astype(float).tolist(),
+            "dq_actual_first": dq_actual.reshape(-1)[:8].astype(float).tolist(),
             "q_target_first": q_target_clipped.reshape(-1)[:8].astype(float).tolist(),
             "q_target_minus_actual": self._policy_debug_stats(q_error),
             "q_error_top": [
@@ -1614,6 +1675,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
             ],
             "robot_root": np.asarray(robot_state_data[:, :7], dtype=np.float32).reshape(-1).astype(float).tolist(),
         }
+        record.update(torque_stats)
+        record.update(torque_top)
         if self._motion_data is not None:
             idx = self._get_motion_index()
             record["motion_root"] = self._motion_data.root_pos_w[idx].astype(float).tolist()
@@ -1621,6 +1684,22 @@ class WholeBodyTrackingPolicy(BasePolicy):
         for key in ("sparse_target_root_trajectory_command", "base_ang_vel", "dof_pos", "dof_vel"):
             if key in current_obs:
                 record[key] = self._policy_debug_stats(current_obs[key])
+        if self._policy_debug_include_values:
+            record["actor_obs_values"] = np.asarray(actor_obs, dtype=np.float32).reshape(-1).astype(float).tolist()
+            record["perception_obs_values"] = (
+                np.asarray(perception_obs, dtype=np.float32).reshape(-1).astype(float).tolist()
+                if perception_obs is not None
+                else None
+            )
+            record["policy_action_raw_values"] = (
+                np.asarray(policy_action, dtype=np.float32).reshape(-1).astype(float).tolist()
+            )
+            record["policy_action_scaled_values"] = (
+                np.asarray(self.scaled_policy_action, dtype=np.float32).reshape(-1).astype(float).tolist()
+            )
+            record["q_actual_values"] = q_actual.reshape(-1).astype(float).tolist()
+            record["dq_actual_values"] = dq_actual.reshape(-1).astype(float).tolist()
+            record["q_target_values"] = q_target_clipped.reshape(-1).astype(float).tolist()
 
         with self._policy_debug_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, separators=(",", ":")) + "\n")

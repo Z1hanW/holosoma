@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from multiprocessing import resource_tracker
 from multiprocessing import shared_memory
 
 import numpy as np
@@ -73,6 +74,13 @@ class PerceptionObsShmSub:
             self.shm = shared_memory.SharedMemory(name=self.name, create=False)
         except FileNotFoundError:
             return False
+        # Python's resource_tracker registers attached shared-memory segments even
+        # for consumers. When the subscriber process exits, that can unlink the
+        # producer-owned segment and break future attaches after a policy restart.
+        try:
+            resource_tracker.unregister(self.shm._name, "shared_memory")
+        except Exception:
+            pass
 
         expected_bytes = int(expected_dim) * np.dtype(np.float32).itemsize
         if len(self.shm.buf) < expected_bytes:

@@ -42,7 +42,7 @@ from holosoma.config_types.robot import RobotConfig  # noqa: E402
 from holosoma.config_values import robot as robot_values  # noqa: E402
 from holosoma.utils.module_utils import get_holosoma_root  # noqa: E402
 from holosoma.utils.path import resolve_data_file_path  # noqa: E402
-from holosoma_inference.utils.perception_obs import PerceptionObsSub  # noqa: E402
+from holosoma_inference.utils.perception_obs import PerceptionObsShmSub, PerceptionObsSub  # noqa: E402
 from holosoma_inference.utils.sim_control import ManualRootCommandPub, SimControlPush  # noqa: E402
 from holosoma_inference.utils.sim_state import SimStateSub  # noqa: E402
 
@@ -52,6 +52,7 @@ class MujocoSimStateViewerConfig:
     robot: str = "g1_29dof_w_object"
     state_port: int = 5657
     perception_obs_port: int = 5658
+    perception_obs_shm_name: str = "depth_img_shm"
     control_port: int = 5659
     sparse_root_command_port: int = 5661
     object_actor_name: str = "object"
@@ -198,7 +199,7 @@ def _depth_to_rgb(depth_m: np.ndarray, near: float, far: float) -> np.ndarray:
     depth_m = np.asarray(depth_m, dtype=np.float32)
     valid = np.isfinite(depth_m)
     valid &= depth_m >= near
-    valid &= depth_m < (far - 1.0e-6)
+    valid &= depth_m <= (far + 1.0e-6)
     rgb = np.zeros(depth_m.shape + (3,), dtype=np.uint8)
     if not np.any(valid):
         return rgb
@@ -937,6 +938,8 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     sub.start()
     perception_sub = PerceptionObsSub(port=cfg.perception_obs_port)
     perception_sub.start()
+    perception_shm_sub = PerceptionObsShmSub(name=cfg.perception_obs_shm_name)
+    perception_shm_sub.start()
     control_pub = SimControlPush(port=cfg.control_port)
     control_pub.start()
     manual_root_pub: ManualRootCommandPub | None = None
@@ -1115,21 +1118,30 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             depth_md.content = "Hidden"
             return
 
-        payload = perception_sub.get_payload()
-        if payload is None:
-            depth_md.content = f"Waiting for perception_obs on port `{cfg.perception_obs_port}`..."
-            return
-
-        values = payload.get("perception_obs")
-        if values is None:
-            depth_md.content = f"perception_obs missing; payload keys: `{sorted(payload.keys())}`"
-            return
-
         expected_dim = max(int(cfg.depth_height), 1) * max(int(cfg.depth_width), 1)
-        try:
-            depth_obs_flat = np.asarray(values, dtype=np.float32).reshape(-1)
-        except (TypeError, ValueError) as exc:
-            depth_md.content = f"Failed to parse perception_obs: `{exc}`"
+        payload = perception_sub.get_payload()
+        values = payload.get("perception_obs") if payload is not None else None
+        data_source = f"zmq:{cfg.perception_obs_port}"
+
+        depth_obs_flat: np.ndarray | None = None
+        if values is not None:
+            try:
+                depth_obs_flat = np.asarray(values, dtype=np.float32).reshape(-1)
+            except (TypeError, ValueError) as exc:
+                depth_md.content = f"Failed to parse perception_obs: `{exc}`"
+                return
+
+        if depth_obs_flat is None or depth_obs_flat.size != expected_dim:
+            shm_obs = perception_shm_sub.get_obs(expected_dim)
+            if shm_obs is not None:
+                depth_obs_flat = np.asarray(shm_obs, dtype=np.float32).reshape(-1)
+                data_source = f"shm:{cfg.perception_obs_shm_name}"
+
+        if depth_obs_flat is None:
+            depth_md.content = (
+                f"Waiting for perception_obs on port `{cfg.perception_obs_port}` "
+                f"or shared memory `{cfg.perception_obs_shm_name}`..."
+            )
             return
 
         if depth_obs_flat.size != expected_dim:
@@ -1162,16 +1174,16 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             depth_range = "n/a"
         else:
             depth_range = f"[{depth_min_m:.3f}, {depth_max_m:.3f}] m"
-        sim_time = payload.get("sim_time_ms", "n/a")
+        sim_time = payload.get("sim_time_ms", "n/a") if payload is not None else "n/a"
         depth_md.content = (
-            f"port: `{cfg.perception_obs_port}`\n\n"
+            f"source: `{data_source}`\n\n"
             f"shape: `{cfg.depth_height}x{cfg.depth_width}`\n\n"
             f"sim_time_ms: `{sim_time}`\n\n"
             f"obs_normalized: `{bool(cfg.depth_obs_normalized)}`\n\n"
             f"obs_range: `{obs_range}`\n\n"
             f"depth_valid: `{valid_count}/{expected_dim}`\n\n"
             f"depth_range: `{depth_range}`\n\n"
-            "color: close red / mid green / far blue / miss black"
+            "color: close red / mid green / far-or-max blue / nonfinite black"
         )
 
     def _publish_manual_root_command() -> None:
@@ -1665,6 +1677,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         if manual_root_pub is not None:
             manual_root_pub.close()
         control_pub.close()
+        perception_shm_sub.close()
         perception_sub.close()
         sub.close()
         signal.signal(signal.SIGTERM, previous_sigterm_handler)

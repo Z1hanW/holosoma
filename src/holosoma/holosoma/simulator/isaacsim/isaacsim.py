@@ -48,6 +48,7 @@ from holosoma.simulator.isaacsim.usd_file_loader import USDFileLoader
 from holosoma.simulator.isaacsim.registry_utils import register_objects
 from holosoma.simulator.isaacsim.proxy_utils import AllRootStatesProxy, RootStatesProxy
 from holosoma.simulator.isaacsim.state_adapter import IsaacSimStateAdapter
+from holosoma.simulator.isaacsim.state_utils import fullstate_xyzw_to_wxyz
 from holosoma.simulator.isaacsim.prim_utils import (
     log_robot_properties,
     print_prim_tree,
@@ -2159,17 +2160,32 @@ class IsaacSim(BaseSimulator):
             env_ids = torch.arange(getattr(self, "num_envs", self.training_config.num_envs), device=self.sim_device)
 
         if root_states is None:
-            robot_root_states = self.robot_root_states
+            robot_root_states_wxyz = self.robot_root_states._get_wxyz(env_ids)
         elif isinstance(root_states, AllRootStatesProxy):
-            robot_root_states = self.robot_root_states
+            robot_root_states_wxyz = self.robot_root_states._get_wxyz(env_ids)
         elif isinstance(root_states, RootStatesProxy):
             # assumes the user passed in robot_root_states directly
-            robot_root_states = root_states
+            robot_root_states_wxyz = root_states._get_wxyz(env_ids)
+        elif isinstance(root_states, torch.Tensor):
+            root_states = root_states.to(device=self.sim_device, dtype=torch.float32)
+            if root_states.ndim != 2 or root_states.shape[1] != 13:
+                raise ValueError(
+                    f"Expected root_states shape [N, 13], got {tuple(root_states.shape)}"
+                )
+            if root_states.shape[0] == getattr(self, "num_envs", self.training_config.num_envs):
+                root_states = root_states[env_ids]
+            elif root_states.shape[0] != len(env_ids):
+                raise ValueError(
+                    f"Expected root_states batch size to match env_ids ({len(env_ids)}) "
+                    f"or num_envs ({getattr(self, 'num_envs', self.training_config.num_envs)}), "
+                    f"got {root_states.shape[0]}"
+                )
+            robot_root_states_wxyz = fullstate_xyzw_to_wxyz(root_states)
         else:
             raise ValueError(f"Unexpected root states type: {type(root_states)}")
 
-        self._robot.write_root_pose_to_sim(robot_root_states._get_wxyz(env_ids)[:, :7], env_ids)
-        self._robot.write_root_velocity_to_sim(robot_root_states._get_wxyz(env_ids)[:, 7:], env_ids)
+        self._robot.write_root_pose_to_sim(robot_root_states_wxyz[:, :7], env_ids)
+        self._robot.write_root_velocity_to_sim(robot_root_states_wxyz[:, 7:], env_ids)
 
     def set_dof_state_tensor_robots(self, env_ids=None, dof_states=None):
         """See base class.
@@ -2426,6 +2442,74 @@ class IsaacSim(BaseSimulator):
             float: Current simulation time in seconds
         """
         return self.sim.current_time
+
+    def _get_split_sim_state_extra_payload(self) -> dict[str, object]:
+        """Publish IsaacSim-measured reference-body pose for split sim2sim alignment."""
+        if not hasattr(self, "_rigid_body_pos") or not hasattr(self, "_rigid_body_rot"):
+            return {}
+        if len(getattr(self, "body_names", [])) == 0:
+            return {}
+
+        ref_body_name = getattr(self.robot_config, "torso_name", None) or self.body_names[0]
+        try:
+            ref_body_idx = self.body_names.index(ref_body_name)
+        except ValueError:
+            ref_body_idx = 0
+            ref_body_name = self.body_names[0]
+
+        ref_pos = self._rigid_body_pos[0, ref_body_idx].detach().cpu().tolist()
+        ref_quat = self._rigid_body_rot[0, ref_body_idx].detach().cpu().tolist()
+        ref_lin_vel = self._rigid_body_vel[0, ref_body_idx].detach().cpu().tolist()
+        ref_ang_vel = self._rigid_body_ang_vel[0, ref_body_idx].detach().cpu().tolist()
+
+        payload: dict[str, object] = {
+            "robot_ref_body_name": str(ref_body_name),
+            "robot_ref_state": [
+                float(ref_pos[0]),
+                float(ref_pos[1]),
+                float(ref_pos[2]),
+                float(ref_quat[0]),
+                float(ref_quat[1]),
+                float(ref_quat[2]),
+                float(ref_quat[3]),
+                float(ref_lin_vel[0]),
+                float(ref_lin_vel[1]),
+                float(ref_lin_vel[2]),
+                float(ref_ang_vel[0]),
+                float(ref_ang_vel[1]),
+                float(ref_ang_vel[2]),
+            ],
+        }
+
+        include_key_body_states = os.getenv("HOLOSOMA_SIM_STATE_INCLUDE_KEY_BODY_STATES", "0") == "1"
+        if include_key_body_states:
+            requested_names = [
+                name.strip()
+                for name in os.getenv("HOLOSOMA_SIM_STATE_KEY_BODY_NAMES", "").split(",")
+                if name.strip()
+            ]
+            key_body_names = requested_names or [str(ref_body_name)]
+            key_body_states: dict[str, list[float]] = {}
+            for body_name in key_body_names:
+                try:
+                    body_idx = self.body_names.index(body_name)
+                except ValueError:
+                    continue
+                pos = self._rigid_body_pos[0, body_idx].detach().cpu().tolist()
+                quat = self._rigid_body_rot[0, body_idx].detach().cpu().tolist()
+                key_body_states[str(body_name)] = [
+                    float(pos[0]),
+                    float(pos[1]),
+                    float(pos[2]),
+                    float(quat[0]),
+                    float(quat[1]),
+                    float(quat[2]),
+                    float(quat[3]),
+                ]
+            if key_body_states:
+                payload["key_body_states"] = key_body_states
+
+        return payload
 
     def get_dof_forces(self, env_id: int = 0):
         """Get DOF forces for a specific environment.
