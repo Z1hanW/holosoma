@@ -85,6 +85,12 @@ class BasePolicy:
         q_min = self.robot_config.joint_pos_min
         self.q_max_arr: np.array | None = np.array(q_max) if q_max is not None else None
         self.q_min_arr: np.array | None = np.array(q_min) if q_min is not None else None
+        self._clip_joint_targets = os.environ.get("HOLOSOMA_CLIP_JOINT_TARGETS", "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
         # Setup dof names and indices
         self._setup_dof_mappings()
@@ -958,8 +964,8 @@ class BasePolicy:
                         raise NotImplementedError("Upper body controller not implemented")
                 q_target = scaled_policy_action + self.default_dof_angles
 
-            # Clip target positions to motor limits (in-place for speed)
-            if self.q_min_arr is not None and self.q_max_arr is not None:
+            # Training/Isaac clips torques, not q targets. Keep q-target clipping opt-in.
+            if self._clip_joint_targets and self.q_min_arr is not None and self.q_max_arr is not None:
                 np.clip(q_target[0], self.q_min_arr, self.q_max_arr, out=q_target[0])
 
             # Prepare command (reuse pre-allocated arrays)

@@ -704,7 +704,7 @@ class DirectSimulation:
                 dof_pos = np.array(self.simulator.dof_pos[0].detach().cpu().numpy(), dtype=np.float32, copy=True)
                 dof_vel = np.array(self.simulator.dof_vel[0].detach().cpu().numpy(), dtype=np.float32, copy=True)
 
-                if init_mode_name == "raw_motion":
+                if init_mode_name in {"raw_motion", "raw_motion_grounded"}:
                     for sim_idx, sim_name in enumerate(self.simulator.dof_names):
                         clip_idx = joint_name_to_index.get(sim_name)
                         if clip_idx is None:
@@ -715,6 +715,8 @@ class DirectSimulation:
                         [root_quat_wxyz[1], root_quat_wxyz[2], root_quat_wxyz[3], root_quat_wxyz[0]],
                         dtype=np.float32,
                     )
+                    if init_mode_name == "raw_motion_grounded":
+                        root_pos[2] = float(self.config.robot.init_state.pos[2])
                 elif init_mode_name == "training_default_pose":
                     init_state = self.config.robot.init_state
                     default_joint_angles = getattr(init_state, "default_joint_angles", {}) or {}
@@ -739,7 +741,8 @@ class DirectSimulation:
                     dof_vel = np.zeros_like(dof_pos, dtype=np.float32)
                 else:
                     raise ValueError(
-                        f"Unsupported motion-init.mode='{init_mode_name}'. Expected 'raw_motion' or 'training_default_pose'."
+                        f"Unsupported motion-init.mode='{init_mode_name}'. "
+                        "Expected 'raw_motion', 'raw_motion_grounded', or 'training_default_pose'."
                     )
 
                 root_pos_delta = _parse_debug_float_list_env(
@@ -821,12 +824,13 @@ class DirectSimulation:
 
             reset_states_by_mode = {
                 "raw_motion": _build_motion_init_state("raw_motion"),
+                "raw_motion_grounded": _build_motion_init_state("raw_motion_grounded"),
                 "training_default_pose": _build_motion_init_state("training_default_pose"),
             }
             if init_mode not in reset_states_by_mode:
                 raise ValueError(
                     f"Unsupported motion-init.mode='{motion_init_cfg.mode}'. "
-                    "Expected 'raw_motion' or 'training_default_pose'."
+                    "Expected 'raw_motion', 'raw_motion_grounded', or 'training_default_pose'."
                 )
             active_state = reset_states_by_mode[init_mode]
             root_state = active_state["root_state"]

@@ -185,7 +185,6 @@ INDEX_HTML = """<!doctype html>
     <div class="status">
       <div id="policyStatus">policy: waiting for __TRACK_KEY_LABEL__</div>
       <div id="message">Press __TRACK_KEY_LABEL__ to start motion + policy.</div>
-      <div id="ports"></div>
       <div id="sceneLink"></div>
     </div>
   </section>
@@ -202,7 +201,6 @@ const triggerButton = document.getElementById("triggerButton");
 const resetButton = document.getElementById("resetButton");
 const policyStatus = document.getElementById("policyStatus");
 const message = document.getElementById("message");
-const ports = document.getElementById("ports");
 const sceneUrlRaw = __SCENE_URL_JSON__;
 const sceneUrl = sceneUrlRaw ? new URL(sceneUrlRaw, appBaseUrl).toString() : "";
 const scenePanel = document.getElementById("scenePanel");
@@ -215,9 +213,7 @@ function resolveAppUrl(path) {
 }
 
 function updatePorts(payload) {
-  const policyPort = payload.policy_control_enabled ? ` policy_control_port=${payload.policy_control_port}` : "";
-  const simControl = payload.sim_control_enabled === false ? " sim_control=unbound" : "";
-  ports.textContent = `sparse_root_port=${payload.sparse_root_command_port} control_port=${payload.control_port}${policyPort}${simControl}`;
+  void payload;
 }
 
 function isEditableTarget(event) {
@@ -422,7 +418,7 @@ async def _scene_proxy_handler(request: web.Request) -> web.StreamResponse:
 def _resolve_action(action: str) -> tuple[str, list[str]]:
     action = str(action).strip().lower()
     if action in {"s", "track", "rollout_start", "start_rollout", "space_start", "start_with_motion"}:
-        return "rollout_start", ["space", "start"]
+        return "rollout_start", ["start", "space"]
     if action in {"]", "right_bracket", "start"}:
         return "start", ["start"]
     if action in {" ", "spacebar", "motion", "space", "start_motion", "start_motion_clip"}:
@@ -557,6 +553,8 @@ def main() -> None:
     parser.add_argument("--sparse-root-command-port", type=int, default=5661)
     parser.add_argument("--control-port", type=int, default=5659)
     parser.add_argument("--policy-control-port", type=int, default=5662)
+    # Accepted for compatibility with mj_env.sh's shared command-web args.
+    parser.add_argument("--policy-overlay-port", type=int, default=5663)
     parser.add_argument("--scene-url", default="")
     parser.add_argument("--scene-proxy-url", default="")
     parser.add_argument("--track-key", default="s")

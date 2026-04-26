@@ -214,7 +214,7 @@ INDEX_HTML = """<!doctype html>
       <div id="manualCommand">manual command: [0.000, 0.000, 0.000]</div>
       <div id="policyStatus">policy: waiting for ]</div>
       <div class="toolbar-inline">
-        <button id="policyRolloutStart" type="button">Space + ]</button>
+        <button id="policyRolloutStart" type="button">] + Space</button>
         <button id="policyStart" type="button">Policy ]</button>
         <button id="policySpace" type="button">Policy Space</button>
         <button id="policyStop" type="button">Stop</button>
@@ -431,7 +431,7 @@ function toggleControlKey(key) {
 }
 
 function policyActionLabel(action) {
-  if (action === "rollout_start") return "Space + ]";
+  if (action === "rollout_start") return "] + Space";
   if (action === "space") return "Space";
   if (action === "start") return "]";
   return action;
@@ -616,7 +616,10 @@ class CommandState:
         with self.lock:
             if reset_to_default_pose is not None:
                 self.reset_to_default_pose = bool(reset_to_default_pose)
-            motion_init_mode = "training_default_pose" if self.reset_to_default_pose else "raw_motion"
+            env_mode = os.environ.get("SIM_MOTION_INIT_MODE", "raw_motion").strip().lower().replace("-", "_")
+            if env_mode not in {"raw_motion", "raw_motion_grounded", "training_default_pose"}:
+                env_mode = "raw_motion"
+            motion_init_mode = "training_default_pose" if self.reset_to_default_pose else env_mode
         self.control_pub.request_reset(reason, motion_init_mode=motion_init_mode)
         response = self.snapshot()
         response.update({"ok": True, "reason": str(reason), "motion_init_mode": motion_init_mode})
@@ -846,7 +849,7 @@ async def _create_app(args: argparse.Namespace, command_state: CommandState, ind
             sequence = ["space"]
         elif action in {"rollout_start", "start_rollout", "space_start", "start_with_motion"}:
             canonical_action = "rollout_start"
-            sequence = ["space", "start"]
+            sequence = ["start", "space"]
         elif action in {"stop", "init", "space"}:
             canonical_action = action
             sequence = [action]

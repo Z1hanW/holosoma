@@ -2010,7 +2010,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             np.float32
         )
         q_target_clipped = q_target.copy()
-        if self.q_min_arr is not None and self.q_max_arr is not None:
+        if self._clip_joint_targets and self.q_min_arr is not None and self.q_max_arr is not None:
             np.clip(q_target_clipped[0], self.q_min_arr, self.q_max_arr, out=q_target_clipped[0])
         q_error = (q_target_clipped - q_actual).reshape(-1)
         top_idx = np.argsort(np.abs(q_error))[::-1][:8]

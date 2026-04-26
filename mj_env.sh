@@ -28,20 +28,20 @@ Environment:
   COMMAND_WEB                     default: 1
   COMMAND_WEB_TRACK_ONLY          default: 0; use single-button S rollout-start web UI
   MJ_ENV_AUTO_LAUNCH_POLICY       default: 1; start policy in the same rollout, gated by web ]
-  COMMAND_WEB_PORT                default: first free port in [7777, 7799]
-  COMMAND_WEB_PORT_BASE           default: 7777
-  COMMAND_WEB_PORT_MAX            default: 7799
+  COMMAND_WEB_PORT                default: first free port in [4477, 4499]
+  COMMAND_WEB_PORT_BASE           default: 4477
+  COMMAND_WEB_PORT_MAX            default: 4499
   COMMAND_MANUAL_ENABLED          default: 0; unchecked uses motion-derived command
   COMMAND_VALUE                   default: 0.5 for W/S/A/D x/y
   COMMAND_YAW_DEGREES             default: 17 for Q/E yaw
-  COMMAND_MODE                    default: manual when manual mode is enabled
+  COMMAND_MODE                    default: manual; only used when manual mode is enabled
   SHOW_MOTION_ROBOT               default: 0; show tracked motion robot overlay in scene
   SHOW_MOTION_OBJECT              default: 0; show tracked motion object overlay in scene
   GT_MUJOCO_PHYSICS=1             force GT-style object/G1/floor MuJoCo physics
   POLICY_CONTROL_PORT             default: 5662 for web start/space/stop/init policy control
   MJ_ENV_KILL_STALE_ENV           default: 1; terminate same-port env/web/viser leftovers before launch
   MJ_ENV_KILL_STALE_POLICY        default: 1; terminate same-port policy leftovers before launch
-  SIM_MOTION_INIT_MODE            default: raw_motion (first motion init pose)
+  SIM_MOTION_INIT_MODE            default: raw_motion (first motion init pose); raw_motion_grounded keeps motion joints/object and uses training root height
   VISER_PORT                      default: 2984 when viser is launched
   HOLOSOMA_AUTO_CUDA_FOR_TRAINING_DEPTH
                                   default: 1; select cuda:0 for far_tracking_warp when SIM_DEVICE is unset
@@ -204,6 +204,7 @@ export SPARSE_ROOT_COMMAND_PORT="${SPARSE_ROOT_COMMAND_PORT:-5661}"
 export POLICY_CONTROL_PORT="${POLICY_CONTROL_PORT:-5662}"
 export POLICY_OVERLAY_PORT="${POLICY_OVERLAY_PORT:-5663}"
 export HOLOSOMA_POLICY_OVERLAY_PORT="${HOLOSOMA_POLICY_OVERLAY_PORT:-$POLICY_OVERLAY_PORT}"
+export HOLOSOMA_POLICY_CONTROL_ALLOW_NONINTERACTIVE_AUTOSTART="${HOLOSOMA_POLICY_CONTROL_ALLOW_NONINTERACTIVE_AUTOSTART:-0}"
 export ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND="${ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND:-1}"
 export RUN_SECONDS="${RUN_SECONDS:-0}"
 export HOLOSOMA_MJ_TRACK_RUN_FOREVER="${HOLOSOMA_MJ_TRACK_RUN_FOREVER:-1}"
@@ -221,7 +222,22 @@ export HOLOSOMA_DISABLE_MOTION_END_RESET="${HOLOSOMA_DISABLE_MOTION_END_RESET:-1
 export HOLOSOMA_DISABLE_CLIP_END_RESET="${HOLOSOMA_DISABLE_CLIP_END_RESET:-1}"
 export HOLOSOMA_DISABLE_BAD_TRACKING_RESET="${HOLOSOMA_DISABLE_BAD_TRACKING_RESET:-1}"
 export HOLOSOMA_MUJOCO_APPLY_TRAINING_JOINT_DYNAMICS="${HOLOSOMA_MUJOCO_APPLY_TRAINING_JOINT_DYNAMICS:-1}"
+export HOLOSOMA_W_OBJECT_URDF="${HOLOSOMA_W_OBJECT_URDF:-g1/g1_29dof.urdf}"
 export SIM_MOTION_INIT_MODE="${SIM_MOTION_INIT_MODE:-raw_motion}"
+export HOLOSOMA_ZMQ_LOWCMD_KP_SCALE="${HOLOSOMA_ZMQ_LOWCMD_KP_SCALE:-1.0}"
+export HOLOSOMA_ZMQ_LOWCMD_KD_SCALE="${HOLOSOMA_ZMQ_LOWCMD_KD_SCALE:-1.0}"
+export HOLOSOMA_ZMQ_LOWCMD_TORQUE_LIMIT_SCALE="${HOLOSOMA_ZMQ_LOWCMD_TORQUE_LIMIT_SCALE:-1.0}"
+export HOLOSOMA_POLICY_TARGET_ROBOT_ROOT_STATE_ASSIST="0"
+export HOLOSOMA_POLICY_TARGET_ROBOT_DOF_STATE_ASSIST="0"
+export HOLOSOMA_POLICY_TARGET_OBJECT_STATE_ASSIST="0"
+export HOLOSOMA_MUJOCO_WRIST_ORIGIN_CONTACT_SPHERES="0"
+export HOLOSOMA_MUJOCO_PALM_CONTACT_SPHERES="0"
+export HOLOSOMA_MUJOCO_KEEP_REFERENCE_HAND_COLLISION="${HOLOSOMA_MUJOCO_KEEP_REFERENCE_HAND_COLLISION:-0}"
+export HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS="${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS:-0}"
+export HOLOSOMA_MUJOCO_RESET_NOISE="0"
+export PERCEPTION_CAMERA_WARP_EDGE_NOISE="False"
+export PERCEPTION_CAMERA_WARP_ENABLE_HOLES="False"
+export PERCEPTION_CAMERA_APPLY_SENSOR_NOISE="False"
 
 HEADLESS_FLAG="$(resolve_headless)"
 export TRAINING_HEADLESS="$HEADLESS_FLAG"
@@ -232,8 +248,8 @@ fi
 COMMAND_WEB="${COMMAND_WEB:-1}"
 COMMAND_WEB_PORT="${COMMAND_WEB_PORT:-}"
 if [[ -z "$COMMAND_WEB_PORT" ]]; then
-  COMMAND_WEB_PORT_BASE="${COMMAND_WEB_PORT_BASE:-7777}"
-  COMMAND_WEB_PORT_MAX="${COMMAND_WEB_PORT_MAX:-7799}"
+  COMMAND_WEB_PORT_BASE="${COMMAND_WEB_PORT_BASE:-4477}"
+  COMMAND_WEB_PORT_MAX="${COMMAND_WEB_PORT_MAX:-4499}"
   COMMAND_WEB_PORT="$(find_free_port "$COMMAND_WEB_PORT_BASE" "$COMMAND_WEB_PORT_MAX")"
 fi
 COMMAND_MANUAL_ENABLED="${COMMAND_MANUAL_ENABLED:-0}"
@@ -246,11 +262,14 @@ SHOW_MOTION_OBJECT="${SHOW_MOTION_OBJECT:-0}"
 VISER_PORT_RESOLVED="${VISER_PORT:-2984}"
 MJ_ENV_KILL_STALE_ENV="${MJ_ENV_KILL_STALE_ENV:-1}"
 MJ_ENV_KILL_STALE_POLICY="${MJ_ENV_KILL_STALE_POLICY:-1}"
-GT_MUJOCO_PHYSICS="${GT_MUJOCO_PHYSICS:-${HOLOSOMA_GT_MUJOCO_PHYSICS:-1}}"
+GT_MUJOCO_PHYSICS="${GT_MUJOCO_PHYSICS:-${HOLOSOMA_GT_MUJOCO_PHYSICS:-0}}"
 if is_truthy "$GT_MUJOCO_PHYSICS"; then
   export GT_MUJOCO_PHYSICS=1
   export HOLOSOMA_GT_MUJOCO_PHYSICS=1
   export HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS=0
+else
+  export GT_MUJOCO_PHYSICS=0
+  export HOLOSOMA_GT_MUJOCO_PHYSICS=0
 fi
 COMMAND_WEB_PID=""
 
@@ -318,29 +337,31 @@ format_pids() {
   printf '%s\n' "$1" | tr '\n' ' ' | sed 's/[[:space:]]*$//'
 }
 
-STALE_ENV_PIDS="$(same_port_env_pids || true)"
-if [[ -n "$STALE_ENV_PIDS" ]]; then
-  STALE_ENV_PIDS_ONE_LINE="$(format_pids "$STALE_ENV_PIDS")"
-  if is_truthy "$MJ_ENV_KILL_STALE_ENV"; then
-    echo "[WARN] terminating stale env/web/viser process(es) on matching ports: ${STALE_ENV_PIDS_ONE_LINE}" >&2
-    terminate_pids "$STALE_ENV_PIDS"
-  else
-    echo "[ERROR] stale env/web/viser process(es) already target matching ports: ${STALE_ENV_PIDS_ONE_LINE}" >&2
-    echo "[ERROR] Stop them first, or set MJ_ENV_KILL_STALE_ENV=1." >&2
-    exit 1
+if ! is_truthy "${DRY_RUN:-0}"; then
+  STALE_ENV_PIDS="$(same_port_env_pids || true)"
+  if [[ -n "$STALE_ENV_PIDS" ]]; then
+    STALE_ENV_PIDS_ONE_LINE="$(format_pids "$STALE_ENV_PIDS")"
+    if is_truthy "$MJ_ENV_KILL_STALE_ENV"; then
+      echo "[WARN] terminating stale env/web/viser process(es) on matching ports: ${STALE_ENV_PIDS_ONE_LINE}" >&2
+      terminate_pids "$STALE_ENV_PIDS"
+    else
+      echo "[ERROR] stale env/web/viser process(es) already target matching ports: ${STALE_ENV_PIDS_ONE_LINE}" >&2
+      echo "[ERROR] Stop them first, or set MJ_ENV_KILL_STALE_ENV=1." >&2
+      exit 1
+    fi
   fi
-fi
 
-STALE_POLICY_PIDS="$(same_port_policy_pids || true)"
-if [[ -n "$STALE_POLICY_PIDS" ]]; then
-  STALE_POLICY_PIDS_ONE_LINE="$(format_pids "$STALE_POLICY_PIDS")"
-  if is_truthy "$MJ_ENV_KILL_STALE_POLICY"; then
-    echo "[WARN] terminating stale policy process(es) on state=${SIM_STATE_PORT} control=${SIM_CONTROL_PORT}: ${STALE_POLICY_PIDS_ONE_LINE}" >&2
-    terminate_pids "$STALE_POLICY_PIDS"
-  else
-    echo "[ERROR] stale policy process(es) already target state=${SIM_STATE_PORT} control=${SIM_CONTROL_PORT}: ${STALE_POLICY_PIDS_ONE_LINE}" >&2
-    echo "[ERROR] Stop them first, or set MJ_ENV_KILL_STALE_POLICY=1." >&2
-    exit 1
+  STALE_POLICY_PIDS="$(same_port_policy_pids || true)"
+  if [[ -n "$STALE_POLICY_PIDS" ]]; then
+    STALE_POLICY_PIDS_ONE_LINE="$(format_pids "$STALE_POLICY_PIDS")"
+    if is_truthy "$MJ_ENV_KILL_STALE_POLICY"; then
+      echo "[WARN] terminating stale policy process(es) on state=${SIM_STATE_PORT} control=${SIM_CONTROL_PORT}: ${STALE_POLICY_PIDS_ONE_LINE}" >&2
+      terminate_pids "$STALE_POLICY_PIDS"
+    else
+      echo "[ERROR] stale policy process(es) already target state=${SIM_STATE_PORT} control=${SIM_CONTROL_PORT}: ${STALE_POLICY_PIDS_ONE_LINE}" >&2
+      echo "[ERROR] Stop them first, or set MJ_ENV_KILL_STALE_POLICY=1." >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -426,8 +447,12 @@ else
 fi
 echo "[INFO] model=${MODEL_INPUT}"
 echo "[INFO] headless=${TRAINING_HEADLESS} launch_viser=${LAUNCH_VISER_RESOLVED}"
+echo "[INFO] robot_urdf=${HOLOSOMA_W_OBJECT_URDF}"
 echo "[INFO] motion init=${SIM_MOTION_INIT_MODE}"
 echo "[INFO] gt_mujoco_physics=${GT_MUJOCO_PHYSICS} zero_passive_dynamics=${HOLOSOMA_GT_MUJOCO_ZERO_PASSIVE_DYNAMICS:-0}"
+echo "[INFO] lowcmd scales kp=${HOLOSOMA_ZMQ_LOWCMD_KP_SCALE} kd=${HOLOSOMA_ZMQ_LOWCMD_KD_SCALE} torque_limit=${HOLOSOMA_ZMQ_LOWCMD_TORQUE_LIMIT_SCALE}"
+echo "[INFO] disabled assists root=${HOLOSOMA_POLICY_TARGET_ROBOT_ROOT_STATE_ASSIST} dof=${HOLOSOMA_POLICY_TARGET_ROBOT_DOF_STATE_ASSIST} object=${HOLOSOMA_POLICY_TARGET_OBJECT_STATE_ASSIST}; contact_spheres wrist=${HOLOSOMA_MUJOCO_WRIST_ORIGIN_CONTACT_SPHERES} palm=${HOLOSOMA_MUJOCO_PALM_CONTACT_SPHERES}; reset_noise=${HOLOSOMA_MUJOCO_RESET_NOISE}"
+echo "[INFO] rubber_hand_contacts=${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS} keep_reference_hand_collision=${HOLOSOMA_MUJOCO_KEEP_REFERENCE_HAND_COLLISION}"
 echo "[INFO] auto_launch_policy=${MJ_ENV_AUTO_LAUNCH_POLICY} mj_track_mode=${MJ_TRACK_MODE} skip_policy=${SKIP_POLICY}"
 echo "[INFO] ports clock=${SIM_CLOCK_PORT} state=${SIM_STATE_PORT} perception=${PERCEPTION_OBS_PORT} control=${SIM_CONTROL_PORT} sparse_root=${SPARSE_ROOT_COMMAND_PORT} policy_control=${POLICY_CONTROL_PORT} policy_overlay=${HOLOSOMA_POLICY_OVERLAY_PORT}"
 if is_truthy "$COMMAND_WEB"; then

@@ -28,6 +28,7 @@ def _repo_root_data_fallback(path_obj: Path) -> Path | None:
 
         candidate_roots = (
             repo_root / "data" / "ds_box_data",
+            repo_root / "data" / "ds_box_data" / "scale_mix_all",
             repo_root / "data" / "ds_box_data_legacy",
         )
         relative_tail = tail[2:]

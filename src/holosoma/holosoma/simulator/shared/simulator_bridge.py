@@ -391,7 +391,7 @@ class SimulatorBridge:
             if action == "reset":
                 reason = str(payload.get("reason", "manual"))
                 motion_init_mode = str(payload.get("motion_init_mode", "")).strip().lower().replace("-", "_")
-                if motion_init_mode in {"raw_motion", "training_default_pose"}:
+                if motion_init_mode in {"raw_motion", "raw_motion_grounded", "training_default_pose"}:
                     reset_states = getattr(self.simulator, "_motion_init_reset_states_by_mode", None)
                     if isinstance(reset_states, dict):
                         state = reset_states.get(motion_init_mode)

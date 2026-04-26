@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_MODEL_REF="${DEFAULT_MODEL_REF:-wandb://zihanw22/boxer/u5lguxvl/latest.onnx}"
-DEFAULT_MOTION_DIR="${DEFAULT_MOTION_DIR:-${ROOT_DIR}/outputs/motion_bank_success_box_0_92_0p3}"
+DEFAULT_MOTION_DIR="${DEFAULT_MOTION_DIR:-${ROOT_DIR}/data/ds_box_data_legacy/train_g1_w_obj_prepared}"
 
 usage() {
   cat <<EOF
@@ -11,8 +11,9 @@ Usage:
   bash mj_env_generalist_success.sh [clip_name|motion.npz] [model.onnx|wandb://...]
 
 Purpose:
-  Launch the generalist success-rollout MuJoCo env + scene web with a single
-  S trigger. There is no manual Q/W/E/S/A/D root command UI in this mode.
+  Launch the generalist MuJoCo env + scene web on the same prepared legacy
+  motion bank used by infer_box_tracking.sh, with a single S trigger.
+  There is no manual Q/W/E/S/A/D root command UI in this mode.
 
 Defaults:
   model      = ${DEFAULT_MODEL_REF}
@@ -98,7 +99,7 @@ export SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML="${SIM_COPY_CONTACT_PAIRS_FROM_ROBO
 export HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS="${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS:-1}"
 export HOLOSOMA_MUJOCO_KEEP_REFERENCE_HAND_COLLISION="${HOLOSOMA_MUJOCO_KEEP_REFERENCE_HAND_COLLISION:-1}"
 export HOLOSOMA_MUJOCO_CARRY_ARM_OBJECT_CONTACTS="${HOLOSOMA_MUJOCO_CARRY_ARM_OBJECT_CONTACTS:-1}"
-export MUJOCO_OBJECT_MASS_OVERRIDE="${MUJOCO_OBJECT_MASS_OVERRIDE:-1.1}"
+export MUJOCO_OBJECT_MASS_OVERRIDE="${MUJOCO_OBJECT_MASS_OVERRIDE:-}"
 export HOLOSOMA_SIM_STATE_INCLUDE_KEY_BODY_STATES="${HOLOSOMA_SIM_STATE_INCLUDE_KEY_BODY_STATES:-1}"
 export HOLOSOMA_SIM_STATE_KEY_BODY_NAMES="${HOLOSOMA_SIM_STATE_KEY_BODY_NAMES:-torso_link,pelvis,left_shoulder_roll_link,right_shoulder_roll_link,left_elbow_link,right_elbow_link,left_wrist_yaw_link,right_wrist_yaw_link,left_hip_roll_link,right_hip_roll_link,left_knee_link,right_knee_link,left_ankle_roll_link,right_ankle_roll_link}"
 export MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES="${MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES:-0}"

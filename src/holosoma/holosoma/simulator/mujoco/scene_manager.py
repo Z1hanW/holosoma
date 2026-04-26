@@ -2046,7 +2046,10 @@ class MujocoSceneManager:
         limit_to_carry_bodies = self._env_flag(_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES_ENV) or bool(
             os.getenv(_OBJECT_CONTACT_BODY_MARKERS_ENV, "").strip()
         )
-        object_conaffinity = 1 if gt_mujoco_physics else (3 if limit_to_carry_bodies else 11 if web_demo_contacts else 3)
+        # In web-demo/rubber-hand mode non-carry robot geoms use contype=8 so they
+        # can still collide with the terrain without touching the carried object.
+        # Keep the object receptive only to carry geoms (1) and terrain (2).
+        object_conaffinity = 1 if gt_mujoco_physics else 3
         collision_geom_index = 0
         visual_geom_index = 0
         updated_geoms = 0
@@ -2107,6 +2110,11 @@ class MujocoSceneManager:
         rolling_friction = getattr(object_cfg, "mujoco_object_rolling_friction", None)
         contact_stiffness = getattr(object_cfg, "mujoco_object_contact_stiffness", None)
         contact_damping = getattr(object_cfg, "mujoco_object_contact_damping", None)
+        urdf_contact_defaults = self._object_urdf_contact_defaults(object_cfg)
+        if lateral_friction is None:
+            lateral_friction = urdf_contact_defaults.get("lateral_friction")
+        if rolling_friction is None:
+            rolling_friction = urdf_contact_defaults.get("rolling_friction")
         gt_mujoco_physics = self._gt_mujoco_physics_enabled()
         web_demo_contacts = self._env_flag(_WEB_DEMO_OBJECT_CONTACTS_ENV) and not gt_mujoco_physics
         if gt_mujoco_physics:
@@ -2481,6 +2489,11 @@ class MujocoSceneManager:
         rolling_friction = getattr(object_cfg, "mujoco_object_rolling_friction", None) if object_cfg is not None else None
         contact_stiffness = getattr(object_cfg, "mujoco_object_contact_stiffness", None) if object_cfg is not None else None
         contact_damping = getattr(object_cfg, "mujoco_object_contact_damping", None) if object_cfg is not None else None
+        urdf_contact_defaults = self._object_urdf_contact_defaults(object_cfg)
+        if lateral_friction is None:
+            lateral_friction = urdf_contact_defaults.get("lateral_friction")
+        if rolling_friction is None:
+            rolling_friction = urdf_contact_defaults.get("rolling_friction")
         if gt_mujoco_physics:
             lateral_friction = None
             rolling_friction = None
@@ -2686,6 +2699,53 @@ class MujocoSceneManager:
                 raise ValueError(f"robot.object.mujoco_object_rolling_friction must be >= 0, got {rolling}")
             friction_triplet[2] = rolling
         return friction_triplet.tolist()
+
+    @classmethod
+    def _object_urdf_contact_defaults(cls, object_cfg: Any | None) -> dict[str, float]:
+        if object_cfg is None:
+            return {}
+        object_urdf_path = getattr(object_cfg, "object_urdf_path", None)
+        if not object_urdf_path:
+            return {}
+        try:
+            urdf_path = cls._resolve_single_object_urdf(str(object_urdf_path))
+            root = ET.parse(urdf_path).getroot()
+        except Exception as exc:
+            logger.warning("Could not read object URDF contact defaults from '{}': {}", object_urdf_path, exc)
+            return {}
+
+        contact = root.find(".//contact")
+        if contact is None:
+            return {}
+
+        defaults: dict[str, float] = {}
+        # URDF/PhysX contact stiffness and damping are not numerically equivalent
+        # to MuJoCo solref direct format; direct mapping can make MuJoCo unstable.
+        # Auto-import only friction and leave solref at the MuJoCo-safe default
+        # unless the caller explicitly sets a MuJoCo contact override.
+        for xml_name, key in (
+            ("lateral_friction", "lateral_friction"),
+            ("rolling_friction", "rolling_friction"),
+        ):
+            node = contact.find(xml_name)
+            if node is None:
+                continue
+            value = node.get("value")
+            if value is None:
+                continue
+            try:
+                defaults[key] = float(value)
+            except ValueError:
+                logger.warning(
+                    "Ignoring non-float object URDF contact value {}={} in {}",
+                    xml_name,
+                    value,
+                    urdf_path,
+                )
+
+        if defaults:
+            logger.info("Loaded MuJoCo object contact defaults from '{}': {}", urdf_path, defaults)
+        return defaults
 
     @classmethod
     def _object_contact_solref(cls, stiffness: float | None, damping: float | None) -> list[float] | None:

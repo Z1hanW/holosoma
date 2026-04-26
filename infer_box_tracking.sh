@@ -455,6 +455,7 @@ sys.path = sanitized_sys_path
 try:
     import torch
     from holosoma.utils.eval_utils import load_checkpoint
+    from holosoma.utils.path import resolve_data_file_path
 except Exception:
     print(json.dumps({}))
     sys.exit(0)
@@ -495,6 +496,12 @@ def resolve_saved_path(raw_path: str | None) -> str | None:
         deduped.append(candidate)
 
     for candidate in deduped:
+        try:
+            resolved_data_candidate = Path(resolve_data_file_path(str(candidate))).expanduser()
+        except Exception:
+            resolved_data_candidate = candidate
+        if resolved_data_candidate.exists():
+            return str(resolved_data_candidate)
         if candidate.exists():
             return str(candidate)
 
@@ -538,8 +545,18 @@ print(
         {
             "motion_path": resolve_saved_path(motion_path),
             "saved_motion_path": motion_path,
+            "motion_clip_name": motion_cfg.get("motion_clip_name"),
             "object_urdf_path": resolve_saved_path(object_urdf_path),
             "saved_object_urdf_path": object_urdf_path,
+            "start_at_timestep_zero_prob": motion_cfg.get("start_at_timestep_zero_prob"),
+            "freeze_at_timestep_zero_prob": motion_cfg.get("freeze_at_timestep_zero_prob"),
+            "enable_default_pose_prepend": motion_cfg.get("enable_default_pose_prepend"),
+            "default_pose_prepend_duration_s": motion_cfg.get("default_pose_prepend_duration_s"),
+            "reset_noise_scale": (
+                ((motion_cfg.get("noise_to_initial_pose") or {}).get("overall_noise_scale"))
+                if isinstance(motion_cfg.get("noise_to_initial_pose"), dict)
+                else None
+            ),
         }
     )
 )
@@ -853,6 +870,84 @@ if [[ -z "${OBJECT_URDF}" && -n "${OBJECT_SPEC_PATH}" ]]; then
   OBJECT_URDF="${OBJECT_SPEC_PATH}"
 fi
 
+CHECKPOINT_SAVED_MOTION_PATH=""
+CHECKPOINT_SAVED_MOTION_PATH_RAW=""
+CHECKPOINT_SAVED_MOTION_CLIP_NAME=""
+CHECKPOINT_SAVED_OBJECT_URDF=""
+CHECKPOINT_SAVED_OBJECT_URDF_RAW=""
+CHECKPOINT_SAVED_START_AT_TIMESTEP_ZERO_PROB=""
+CHECKPOINT_SAVED_FREEZE_AT_TIMESTEP_ZERO_PROB=""
+CHECKPOINT_SAVED_ENABLE_DEFAULT_POSE_PREPEND=""
+CHECKPOINT_SAVED_DEFAULT_POSE_PREPEND_DURATION_S=""
+CHECKPOINT_SAVED_RESET_NOISE_SCALE=""
+CHECKPOINT_DEFAULTS_JSON="$(load_checkpoint_saved_motion_defaults "${TEACHER_CHECKPOINT}")"
+if [[ -n "${CHECKPOINT_DEFAULTS_JSON}" && "${CHECKPOINT_DEFAULTS_JSON}" != "{}" ]]; then
+  while IFS='=' read -r key value; do
+    case "${key}" in
+      motion_path)
+        CHECKPOINT_SAVED_MOTION_PATH="${value}"
+        ;;
+      saved_motion_path)
+        CHECKPOINT_SAVED_MOTION_PATH_RAW="${value}"
+        ;;
+      motion_clip_name)
+        CHECKPOINT_SAVED_MOTION_CLIP_NAME="${value}"
+        ;;
+      object_urdf_path)
+        CHECKPOINT_SAVED_OBJECT_URDF="${value}"
+        ;;
+      saved_object_urdf_path)
+        CHECKPOINT_SAVED_OBJECT_URDF_RAW="${value}"
+        ;;
+      start_at_timestep_zero_prob)
+        CHECKPOINT_SAVED_START_AT_TIMESTEP_ZERO_PROB="${value}"
+        ;;
+      freeze_at_timestep_zero_prob)
+        CHECKPOINT_SAVED_FREEZE_AT_TIMESTEP_ZERO_PROB="${value}"
+        ;;
+      enable_default_pose_prepend)
+        CHECKPOINT_SAVED_ENABLE_DEFAULT_POSE_PREPEND="${value}"
+        ;;
+      default_pose_prepend_duration_s)
+        CHECKPOINT_SAVED_DEFAULT_POSE_PREPEND_DURATION_S="${value}"
+        ;;
+      reset_noise_scale)
+        CHECKPOINT_SAVED_RESET_NOISE_SCALE="${value}"
+        ;;
+    esac
+  done < <(
+    CHECKPOINT_DEFAULTS_JSON="${CHECKPOINT_DEFAULTS_JSON}" "${PYTHON_BIN}" - <<'PY'
+import json
+import os
+
+try:
+    payload = json.loads(os.environ.get("CHECKPOINT_DEFAULTS_JSON", "{}"))
+except Exception:
+    payload = {}
+
+for key in (
+    "motion_path",
+    "saved_motion_path",
+    "motion_clip_name",
+    "object_urdf_path",
+    "saved_object_urdf_path",
+    "start_at_timestep_zero_prob",
+    "freeze_at_timestep_zero_prob",
+    "enable_default_pose_prepend",
+    "default_pose_prepend_duration_s",
+    "reset_noise_scale",
+):
+    value = payload.get(key)
+    if value is None:
+        value = ""
+    print(f"{key}={value}")
+PY
+  )
+fi
+
+MOTION_SELECTION_SOURCE="infer_dataset_default"
+OBJECT_SELECTION_SOURCE="infer_dataset_default"
+
 resolve_motion_dir_map_file() {
   local motion_dir="$1"
   local candidate="${motion_dir%/}/_clip_object_urdf_map.json"
@@ -879,6 +974,8 @@ if [[ "${MOTION_DIR_FROM_ENV}" != "1" ]]; then
       MOTION_DIR="${DEFAULT_MIX_MOTION_DIR}"
       ;;
   esac
+else
+  MOTION_SELECTION_SOURCE="env_override"
 fi
 
 MOTION_CLIP_NAME=${MOTION_CLIP_NAME:-}
@@ -945,6 +1042,40 @@ if [[ "${OBJECT_URDF_FROM_ENV}" != "1" ]]; then
       fi
       ;;
   esac
+else
+  OBJECT_SELECTION_SOURCE="env_override"
+fi
+
+if [[ "${INFER_DATASET_FROM_ARG}" != "1" && "${INFER_DATASET_FROM_ENV}" != "1" ]]; then
+  if [[ "${MOTION_DIR_FROM_ENV}" != "1" && -n "${CHECKPOINT_SAVED_MOTION_PATH}" ]]; then
+    MOTION_DIR="${CHECKPOINT_SAVED_MOTION_PATH}"
+    MOTION_SELECTION_SOURCE="checkpoint_saved"
+  elif [[ "${MOTION_DIR_FROM_ENV}" != "1" && -n "${CHECKPOINT_SAVED_MOTION_PATH_RAW}" ]]; then
+    echo "[ERROR] Checkpoint saved motion path could not be resolved locally: ${CHECKPOINT_SAVED_MOTION_PATH_RAW}" >&2
+    echo "[ERROR] Refusing to fall back to infer_dataset default because that may change policy input." >&2
+    exit 2
+  fi
+
+  if [[ "${OBJECT_URDF_FROM_ENV}" != "1" ]]; then
+    if [[ -n "${CHECKPOINT_SAVED_OBJECT_URDF}" ]]; then
+      OBJECT_URDF="${CHECKPOINT_SAVED_OBJECT_URDF}"
+      OBJECT_SELECTION_SOURCE="checkpoint_saved"
+    elif [[ -n "${CHECKPOINT_SAVED_OBJECT_URDF_RAW}" ]]; then
+      echo "[ERROR] Checkpoint saved object_urdf_path could not be resolved locally: ${CHECKPOINT_SAVED_OBJECT_URDF_RAW}" >&2
+      echo "[ERROR] Refusing to fall back to infer_dataset default because that may change policy input." >&2
+      exit 2
+    elif [[ "${MOTION_SELECTION_SOURCE}" == "checkpoint_saved" ]]; then
+      MOTION_DIR_MAP_FILE="$(resolve_motion_dir_map_file "${MOTION_DIR}")"
+      if [[ -n "${MOTION_DIR_MAP_FILE}" ]]; then
+        OBJECT_URDF="${MOTION_DIR_MAP_FILE}"
+        OBJECT_SELECTION_SOURCE="checkpoint_motion_dir_map"
+      fi
+    fi
+  fi
+fi
+
+if [[ -z "${MOTION_CLIP_NAME}" && -n "${CHECKPOINT_SAVED_MOTION_CLIP_NAME}" ]]; then
+  MOTION_CLIP_NAME="${CHECKPOINT_SAVED_MOTION_CLIP_NAME}"
 fi
 
 OBJECT_GEOMETRY_MODE_RAW=${OBJECT_GEOMETRY_MODE:-primitive}
@@ -1110,11 +1241,21 @@ PY
   fi
 fi
 
-START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.2}
-FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.95}
-ENABLE_DEFAULT_POSE_PREPEND=${ENABLE_DEFAULT_POSE_PREPEND:-False}
-DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0.0}
-RESET_NOISE_SCALE=${RESET_NOISE_SCALE:-0.0}
+if [[ -z "${START_AT_TIMESTEP_ZERO_PROB+x}" || -z "${START_AT_TIMESTEP_ZERO_PROB}" ]]; then
+  START_AT_TIMESTEP_ZERO_PROB="${CHECKPOINT_SAVED_START_AT_TIMESTEP_ZERO_PROB:-0.2}"
+fi
+if [[ -z "${FREEZE_AT_TIMESTEP_ZERO_PROB+x}" || -z "${FREEZE_AT_TIMESTEP_ZERO_PROB}" ]]; then
+  FREEZE_AT_TIMESTEP_ZERO_PROB="${CHECKPOINT_SAVED_FREEZE_AT_TIMESTEP_ZERO_PROB:-0.95}"
+fi
+if [[ -z "${ENABLE_DEFAULT_POSE_PREPEND+x}" || -z "${ENABLE_DEFAULT_POSE_PREPEND}" ]]; then
+  ENABLE_DEFAULT_POSE_PREPEND="${CHECKPOINT_SAVED_ENABLE_DEFAULT_POSE_PREPEND:-False}"
+fi
+if [[ -z "${DEFAULT_POSE_PREPEND_DURATION_S+x}" || -z "${DEFAULT_POSE_PREPEND_DURATION_S}" ]]; then
+  DEFAULT_POSE_PREPEND_DURATION_S="${CHECKPOINT_SAVED_DEFAULT_POSE_PREPEND_DURATION_S:-0.0}"
+fi
+if [[ -z "${RESET_NOISE_SCALE+x}" || -z "${RESET_NOISE_SCALE}" ]]; then
+  RESET_NOISE_SCALE="${CHECKPOINT_SAVED_RESET_NOISE_SCALE:-0.0}"
+fi
 MAX_EPISODE_LENGTH_S=${MAX_EPISODE_LENGTH_S:-1000000}
 SIM_ENV_SPACING=${SIM_ENV_SPACING:-0.0}
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-67108864}
@@ -1387,8 +1528,20 @@ echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
 echo "[INFO] legacy_obs_enabled=${LEGACY_OBS_ENABLED}"
 echo "[INFO] require_heightmap=${HEIGHTMAP_REQUIRED}"
 echo "[INFO] infer_dataset=${INFER_DATASET}"
+echo "[INFO] checkpoint_saved_motion_path=${CHECKPOINT_SAVED_MOTION_PATH:-<none>}"
+echo "[INFO] checkpoint_saved_motion_path_raw=${CHECKPOINT_SAVED_MOTION_PATH_RAW:-<none>}"
+echo "[INFO] checkpoint_saved_motion_clip_name=${CHECKPOINT_SAVED_MOTION_CLIP_NAME:-<none>}"
+echo "[INFO] checkpoint_saved_object_urdf=${CHECKPOINT_SAVED_OBJECT_URDF:-<none>}"
+echo "[INFO] checkpoint_saved_object_urdf_raw=${CHECKPOINT_SAVED_OBJECT_URDF_RAW:-<none>}"
+echo "[INFO] checkpoint_saved_start_at_timestep_zero_prob=${CHECKPOINT_SAVED_START_AT_TIMESTEP_ZERO_PROB:-<none>}"
+echo "[INFO] checkpoint_saved_freeze_at_timestep_zero_prob=${CHECKPOINT_SAVED_FREEZE_AT_TIMESTEP_ZERO_PROB:-<none>}"
+echo "[INFO] checkpoint_saved_enable_default_pose_prepend=${CHECKPOINT_SAVED_ENABLE_DEFAULT_POSE_PREPEND:-<none>}"
+echo "[INFO] checkpoint_saved_default_pose_prepend_duration_s=${CHECKPOINT_SAVED_DEFAULT_POSE_PREPEND_DURATION_S:-<none>}"
+echo "[INFO] checkpoint_saved_reset_noise_scale=${CHECKPOINT_SAVED_RESET_NOISE_SCALE:-<none>}"
+echo "[INFO] motion_dir_source=${MOTION_SELECTION_SOURCE}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
 echo "[INFO] motion_clip_name=${MOTION_CLIP_NAME:-<auto>}"
+echo "[INFO] object_urdf_source=${OBJECT_SELECTION_SOURCE}"
 echo "[INFO] object_urdf=${OBJECT_URDF}"
 echo "[INFO] object_geometry_mode=${OBJECT_GEOMETRY_MODE} simulator_object_spawn_mode=${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}"
 if [[ "${AUTO_DISABLE_SINGLE_SLOT}" == "1" ]]; then
@@ -1408,6 +1561,7 @@ if is_truthy "${VISER_DEFER_INIT}"; then
 fi
 echo "[INFO] simulator_subcommand=${SIMULATOR_SUBCOMMAND:-<default>}"
 echo "[INFO] enable_default_pose_prepend=${ENABLE_DEFAULT_POSE_PREPEND} duration_s=${DEFAULT_POSE_PREPEND_DURATION_S}"
+echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB} freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB} reset_noise_scale=${RESET_NOISE_SCALE}"
 echo "[INFO] disable_randomization=${DISABLE_RANDOMIZATION}"
 echo "[INFO] disable_auto_reset=${HOLOSOMA_DISABLE_AUTO_RESET} disable_clip_end_reset=${HOLOSOMA_DISABLE_CLIP_END_RESET}"
 if command -v hostname >/dev/null 2>&1; then

@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_MODEL_REF="${DEFAULT_MODEL_REF:-wandb://zihanw22/boxer/u5lguxvl/latest.onnx}"
-DEFAULT_MOTION_DIR="${DEFAULT_MOTION_DIR:-${ROOT_DIR}/outputs/motion_bank_success_box_0_92_0p3}"
+DEFAULT_MOTION_DIR="${DEFAULT_MOTION_DIR:-${ROOT_DIR}/data/ds_box_data_legacy/train_g1_w_obj_prepared}"
 
 usage() {
   cat <<EOF
@@ -11,7 +11,8 @@ Usage:
   bash mj_policy_generalist_success.sh [clip_name|motion.npz] [model.onnx|wandb://...]
 
 Purpose:
-  Launch the policy side for the generalist success-rollout MuJoCo demo.
+  Launch the policy side for the generalist MuJoCo demo on the same prepared
+  legacy motion bank used by infer_box_tracking.sh.
   Pair this with mj_env_generalist_success.sh.
 
 Defaults:
@@ -46,6 +47,6 @@ export POLICY_OVERLAY_PORT="${POLICY_OVERLAY_PORT:-6663}"
 export HOLOSOMA_POLICY_OVERLAY_PORT="${HOLOSOMA_POLICY_OVERLAY_PORT:-${POLICY_OVERLAY_PORT}}"
 export HOLOSOMA_SKIP_STIFF_PROMPT="${HOLOSOMA_SKIP_STIFF_PROMPT:-1}"
 export MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES="${MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES:-1}"
-export HOLOSOMA_ONNX_ACTION_SCALE_OVERRIDE="${HOLOSOMA_ONNX_ACTION_SCALE_OVERRIDE:-1.0}"
+export HOLOSOMA_ONNX_ACTION_SCALE_OVERRIDE="${HOLOSOMA_ONNX_ACTION_SCALE_OVERRIDE:-}"
 
 exec bash "${ROOT_DIR}/mj_policy.sh" "$@"

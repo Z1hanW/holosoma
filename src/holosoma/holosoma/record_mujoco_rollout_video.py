@@ -127,6 +127,13 @@ def _prepare_rollout_start(
             if last_state is not None and bool(last_state.get("clip_active", False)):
                 logger.info("Rollout start confirmed after {} attempt(s): {}", attempt, last_state)
                 return last_state
+            if last_state is not None and "clip_active" not in last_state:
+                logger.info(
+                    "Rollout start sent after {} attempt(s); command web state has no clip_active field: {}",
+                    attempt,
+                    last_state,
+                )
+                return last_state
         else:
             last_state = _json_get(f"{base_url}/state") or last_state
         time.sleep(0.35)
