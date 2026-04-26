@@ -1131,7 +1131,7 @@ case "${TEACHER_COMPAT_PROFILE_RESOLVED}" in
     ;;
   u5lguxvl_generalist)
     if [[ "${TEACHER_OBS_KEYS_EXPLICIT}" -eq 0 ]]; then
-      TEACHER_OBS_KEYS="actor_obs"
+      TEACHER_OBS_KEYS="actor_obs_legacy"
     fi
     if [[ "${TEACHER_PERCEPTION_PRESET_EXPLICIT}" -eq 0 ]]; then
       TEACHER_PERCEPTION_PRESET="none"
@@ -1139,12 +1139,8 @@ case "${TEACHER_COMPAT_PROFILE_RESOLVED}" in
     if [[ "${TEACHER_PERCEPTION_OBS_KEY_EXPLICIT}" -eq 0 ]]; then
       TEACHER_PERCEPTION_OBS_KEY=""
     fi
-    if [[ "${TEACHER_ACTOR_OBS_HISTORY_LENGTH_EXPLICIT}" -eq 0 ]]; then
-      TEACHER_ACTOR_OBS_HISTORY_LENGTH="5"
-    fi
-    append_teacher_compat_note "teacher_obs_keys defaulted to actor_obs to match u5lguxvl teacher"
+    append_teacher_compat_note "teacher_obs_keys defaulted to actor_obs_legacy to match u5lguxvl legacy object-target schema"
     append_teacher_compat_note "teacher perception disabled to match u5lguxvl teacher"
-    append_teacher_compat_note "actor_obs history length set to ${TEACHER_ACTOR_OBS_HISTORY_LENGTH} to match teacher checkpoint"
     ;;
   *)
     echo "Unknown TEACHER_COMPAT_PROFILE: ${TEACHER_COMPAT_PROFILE_RESOLVED}" >&2
