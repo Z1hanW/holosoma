@@ -26,9 +26,15 @@ def _repo_root_data_fallback(path_obj: Path) -> Path | None:
         if len(tail) < 2 or tail[1] != "ds_box_data":
             continue
 
-        candidate = repo_root.joinpath(*tail)
-        if candidate.exists():
-            return candidate
+        candidate_roots = (
+            repo_root / "data" / "ds_box_data",
+            repo_root / "data" / "ds_box_data_legacy",
+        )
+        relative_tail = tail[2:]
+        for candidate_root in candidate_roots:
+            candidate = candidate_root.joinpath(*relative_tail)
+            if candidate.exists():
+                return candidate
 
     return None
 

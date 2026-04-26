@@ -372,6 +372,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.clock_sub.start()
         self._last_clock_reading: int | None = None
         self._last_policy_control_clock_ms: int | None = None
+        self._sim_time_control_schedule_ms = self._load_sim_time_control_schedule()
+        self._sim_time_control_schedule_index = 0
+        self._last_policy_control_target_clock_ms: int | None = None
 
         # Read use_sim_time from config
         self.use_sim_time = config.task.use_sim_time
@@ -1108,6 +1111,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_start_timestep = None
         self._last_clock_reading = None
         self._last_policy_control_clock_ms = None
+        self._sim_time_control_schedule_index = 0
+        self._last_policy_control_target_clock_ms = None
         self.robot_yaw_offset = 0.0
         self._logged_root_reference_clip_start = False
         self._logged_sim_ref_from_sim_state = False
@@ -1124,6 +1129,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_start_timestep = None
         self._last_clock_reading = None
         self._last_policy_control_clock_ms = None
+        self._sim_time_control_schedule_index = 0
+        self._last_policy_control_target_clock_ms = None
         self._stiff_hold_active = True
         self.robot_yaw_offset = 0.0
         self._logged_root_reference_clip_start = False
@@ -1799,13 +1806,15 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self.motion_start_timestep = None
             self._last_clock_reading = None
             self._last_policy_control_clock_ms = None
+            self._sim_time_control_schedule_index = 0
+            self._last_policy_control_target_clock_ms = None
         elif self._should_skip_sim_time_control_tick():
             self._skip_next_lowcmd_publish = (
                 os.environ.get("HOLOSOMA_POLICY_SUPPRESS_DUP_SIM_TIME_LOWCMD", "0").strip().lower()
                 in {"1", "true", "yes", "on"}
             )
             return self.scaled_policy_action.copy()
-        elif self.use_sim_time:
+        elif self.use_sim_time and not self._sim_time_control_schedule_ms:
             self._update_clock()
         self._skip_next_lowcmd_publish = False
 
@@ -1827,6 +1836,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 get_sim_time_ms = getattr(self.interface, "get_sim_time_ms", None)
                 if callable(get_sim_time_ms):
                     perception_target_sim_time_ms = get_sim_time_ms()
+                    try:
+                        perception_target_sim_time_ms += float(
+                            os.environ.get("HOLOSOMA_POLICY_PERCEPTION_TARGET_OFFSET_MS", "0") or "0"
+                        )
+                    except ValueError:
+                        pass
             perception_obs = self._get_split_perception_obs(
                 self._get_onnx_input_dim(self._perception_obs_input_name),
                 target_sim_time_ms=perception_target_sim_time_ms,
@@ -2010,6 +2025,19 @@ class WholeBodyTrackingPolicy(BasePolicy):
             "count": int(self._policy_debug_count),
             "motion_timestep": int(self.motion_timestep),
             "motion_index": int(self._get_motion_index()),
+            "clock_ms": int(self.clock_sub.get_clock()) if self.use_sim_time else None,
+            "control_target_clock_ms": (
+                int(self._last_policy_control_target_clock_ms)
+                if self._last_policy_control_target_clock_ms is not None
+                else None
+            ),
+            "sim_time_ms": (
+                float(self.interface.get_sim_time_ms())
+                if callable(getattr(self.interface, "get_sim_time_ms", None))
+                and self.interface.get_sim_time_ms() is not None
+                else None
+            ),
+            "control_schedule_index": int(self._sim_time_control_schedule_index),
             "motion_clip_progressing": bool(self.motion_clip_progressing),
             "actor_obs": self._policy_debug_stats(actor_obs),
             "perception_obs": self._policy_debug_depth_stats(perception_obs),
@@ -2106,12 +2134,55 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self._auto_start_motion_clip_pending = False
             self._handle_start_motion_clip()
 
+    def _load_sim_time_control_schedule(self) -> list[int]:
+        """Load an optional debug schedule of simulator millisecond ticks for policy inference."""
+        path_raw = os.environ.get("HOLOSOMA_POLICY_CONTROL_SCHEDULE_MS_FILE", "").strip()
+        if not path_raw:
+            return []
+        try:
+            values = json.loads(Path(path_raw).expanduser().read_text())
+            schedule = [int(round(float(value))) for value in values]
+        except Exception as exc:
+            logger.warning("Failed to load policy control schedule '{}': {}", path_raw, exc)
+            return []
+        schedule = [value for value in schedule if value >= 0]
+        if not schedule:
+            logger.warning("Ignoring empty policy control schedule '{}'", path_raw)
+            return []
+        logger.info("Loaded {} sim-time policy control schedule ticks from {}", len(schedule), path_raw)
+        return schedule
+
     def _should_skip_sim_time_control_tick(self) -> bool:
         """Gate ONNX inference on simulator time when MuJoCo runs slower than wall clock."""
         if not self.use_sim_time:
             return False
 
         current_clock = int(self.clock_sub.get_clock())
+        if self._sim_time_control_schedule_ms:
+            get_sim_time_ms = getattr(self.interface, "get_sim_time_ms", None)
+            if callable(get_sim_time_ms):
+                try:
+                    sim_time_ms = get_sim_time_ms()
+                    if sim_time_ms is not None:
+                        current_clock = int(round(float(sim_time_ms)))
+                except (TypeError, ValueError):
+                    pass
+            index = min(self._sim_time_control_schedule_index, len(self._sim_time_control_schedule_ms) - 1)
+            target_clock = int(self._sim_time_control_schedule_ms[index])
+            if current_clock < target_clock:
+                return True
+            motion_timestep = int(self._sim_time_control_schedule_index)
+            if self._disable_motion_end_sim_reset and self._motion_data is not None:
+                motion_timestep = min(motion_timestep, max(self._motion_data.frame_count - 1, 0))
+            self.motion_timestep = motion_timestep
+            self._last_policy_control_target_clock_ms = target_clock
+            self._last_policy_control_clock_ms = current_clock
+            self._last_clock_reading = current_clock
+            if self.motion_start_timestep is None:
+                self.motion_start_timestep = current_clock - int(round(motion_timestep * self.timestep_interval_ms))
+            self._sim_time_control_schedule_index += 1
+            return False
+
         if self._last_policy_control_clock_ms is None:
             self._last_policy_control_clock_ms = current_clock
             return False
@@ -2202,6 +2273,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_command_t = self.motion_command_0.copy()
         self._last_clock_reading = None
         self._last_policy_control_clock_ms = None
+        self._sim_time_control_schedule_index = 0
+        self._last_policy_control_target_clock_ms = None
         self.robot_yaw_offset = 0.0
         self._logged_root_reference_clip_start = False
         self._logged_sim_ref_from_sim_state = False
@@ -2218,6 +2291,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_timestep = 0  # Reset to start from beginning of motion
         self._last_clock_reading = None
         self._last_policy_control_clock_ms = None
+        self._sim_time_control_schedule_index = 0
+        self._last_policy_control_target_clock_ms = None
         self._logged_root_reference_clip_start = False
         self._motion_end_reset_requested = False
         if self._motion_alignment_enabled:

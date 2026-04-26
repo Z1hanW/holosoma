@@ -22,6 +22,10 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
 
+USE_LEGACY_DS=${USE_LEGACY_DS:-auto}
+LEGACY_DS_ROOT=${LEGACY_DS_ROOT:-"${SCRIPT_DIR}/data/ds_box_data_legacy"}
+LEGACY_PREPARE_SCRIPT="${SCRIPT_DIR}/cp_legacy.sh"
+
 DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/u5lguxvl/model_17000.pt"}
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 POSITIONAL_RUN_NAME=""
@@ -219,6 +223,37 @@ if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
   exit 1
 fi
 
+DS_DATA_ROOT_EXPLICIT=0
+[[ -n "${DS_DATA_ROOT+x}" ]] && DS_DATA_ROOT_EXPLICIT=1
+LEGACY_DS_ENABLED=0
+LEGACY_DS_PREPARED=0
+case "$(echo "${USE_LEGACY_DS}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    LEGACY_DS_ENABLED=1
+    ;;
+  0|false|no|off)
+    LEGACY_DS_ENABLED=0
+    ;;
+  auto|"")
+    if [[ "${TRACKER_PROFILE}" == "old-tracker" || "${DATA_MODE}" == "pure-sd" ]]; then
+      LEGACY_DS_ENABLED=1
+    fi
+    ;;
+  *)
+    echo "[ERROR] USE_LEGACY_DS must be one of: auto|0|1|true|false|yes|no|on|off. Got: ${USE_LEGACY_DS}" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "${LEGACY_DS_ENABLED}" == "1" ]]; then
+  if [[ ! -f "${LEGACY_PREPARE_SCRIPT}" ]]; then
+    echo "[ERROR] legacy prepare script not found: ${LEGACY_PREPARE_SCRIPT}" >&2
+    exit 1
+  fi
+  bash "${LEGACY_PREPARE_SCRIPT}"
+  LEGACY_DS_PREPARED=1
+fi
+
 TEACHER_OBS_KEYS_EXPLICIT=0
 [[ -n "${TEACHER_OBS_KEYS+x}" ]] && TEACHER_OBS_KEYS_EXPLICIT=1
 TEACHER_PERCEPTION_PRESET_EXPLICIT=0
@@ -311,7 +346,11 @@ if [[ -z "${NPROC:-}" ]]; then
 fi
 DEFAULT_TOTAL_ENVS=${DEFAULT_TOTAL_ENVS:-7168}
 NUM_ENVS=${NUM_ENVS:-${DEFAULT_TOTAL_ENVS}}
-DS_DATA_ROOT=${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}
+if [[ "${LEGACY_DS_ENABLED}" == "1" && "${TRACKER_PROFILE}" == "old-tracker" && "${DATA_MODE}" == "pure-sd" && "${DS_DATA_ROOT_EXPLICIT}" -eq 0 ]]; then
+  DS_DATA_ROOT="${LEGACY_DS_ROOT}"
+else
+  DS_DATA_ROOT=${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}
+fi
 DEFAULT_DS_PREPARED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
 DEFAULT_MIX_NAIVE_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
 DEFAULT_TEACHER_ROLLOUT_MOTION_DIR="${SCRIPT_DIR}/outputs/motion_bank"
@@ -1146,6 +1185,7 @@ fi
 echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} num_envs=${NUM_ENVS}"
 echo "[INFO] data_mode=${DATA_MODE}"
 echo "[INFO] tracker_profile=${TRACKER_PROFILE}"
+echo "[INFO] use_legacy_ds=${LEGACY_DS_ENABLED} prepared=${LEGACY_DS_PREPARED} ds_data_root=${DS_DATA_ROOT}"
 if [[ -n "${MOTION_DIR:-}" ]]; then
   echo "[INFO] motion_dir=${MOTION_DIR}"
 fi

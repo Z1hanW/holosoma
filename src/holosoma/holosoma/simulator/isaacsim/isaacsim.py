@@ -97,6 +97,46 @@ _OBJECT_CONTACT_REWARD_FUNC_PATHS = frozenset(
 )
 
 
+def _repo_root_from_holosoma_package() -> pathlib.Path:
+    return pathlib.Path(get_holosoma_root()).resolve().parents[2]
+
+
+def _object_urdf_compat_fallbacks(path: pathlib.Path) -> list[pathlib.Path]:
+    """Current-repo fallbacks for object URDF paths embedded in older motion banks."""
+    repo_root = _repo_root_from_holosoma_package()
+    candidates: list[pathlib.Path] = []
+
+    parts = path.expanduser().parts
+    if "data" in parts:
+        data_idx = parts.index("data")
+        candidates.append(repo_root.joinpath(*parts[data_idx:]))
+
+    stem = path.stem
+    if stem:
+        if "__" in stem:
+            names = [stem]
+        else:
+            names = [f"{stem}__eff10", f"{stem}__eff09", f"{stem}__baseline"]
+        base = repo_root / "data/ds_box_data/scale_mix_all/train_g1_w_obj_prepared/_generated_urdfs"
+        candidates.extend(base / f"{name}.urdf" for name in names)
+
+    return candidates
+
+
+def _resolve_existing_object_urdf_path(path_like: str | pathlib.Path) -> pathlib.Path:
+    resolved = pathlib.Path(resolve_data_file_path(str(path_like))).expanduser().resolve()
+    if resolved.is_file():
+        return resolved
+
+    if not resolved.exists():
+        for fallback in _object_urdf_compat_fallbacks(resolved):
+            if fallback.is_file() and fallback.suffix.lower() == ".urdf":
+                logger.warning("Resolved missing object URDF '{}' to compatibility fallback '{}'", resolved, fallback)
+                return fallback.resolve()
+
+    return resolved
+
+
 def _iter_config_nodes(config: Any, *, seen: set[int] | None = None):
     if config is None or isinstance(config, (str, bytes, int, float, bool, pathlib.Path)):
         return
@@ -410,7 +450,7 @@ class IsaacSim(BaseSimulator):
         seen_paths: set[str] = set()
         used_names: set[str] = set()
         for obj_name, urdf_path in raw_specs:
-            urdf_resolved = pathlib.Path(resolve_data_file_path(urdf_path)).resolve()
+            urdf_resolved = _resolve_existing_object_urdf_path(urdf_path).resolve()
             urdf_key = str(urdf_resolved)
             if urdf_key in seen_paths:
                 continue
@@ -474,8 +514,8 @@ class IsaacSim(BaseSimulator):
                 if fallback_resolved.exists():
                     return str(fallback_resolved)
 
-            return str(candidate)
-        return str(pathlib.Path(resolve_data_file_path(path_str)).resolve())
+            return str(_resolve_existing_object_urdf_path(candidate))
+        return str(_resolve_existing_object_urdf_path(path_str))
 
     @classmethod
     def _load_clip_object_metadata_map(cls, motion_dir: pathlib.Path) -> dict[str, dict[str, str]]:
