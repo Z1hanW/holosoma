@@ -74,10 +74,11 @@ WANDB_MODEL_FILE=${WANDB_MODEL_FILE:-${RESUME_MODEL_FILE:-""}}
 RESUME_CKPT=${RESUME_CKPT:-${RESUME_CHECKPOINT:-""}}
 RESUME_STEP_RAW=${RESUME_STEP:-""}
 DS_DATA_ROOT=${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}
-DEFAULT_DS_RAW_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj"
-DEFAULT_DS_GEOMETRY_DIR="${DS_DATA_ROOT}/train_g1_w_obj_geometry"
-DEFAULT_DS_PREPARED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
-DEFAULT_MIX_NAIVE_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
+DS_DATA_ROOT="$(ogds_resolve_data_root "${DS_DATA_ROOT}")"
+DEFAULT_DS_RAW_MOTION_DIR="$(ogds_default_raw_motion_dir "${DS_DATA_ROOT}")"
+DEFAULT_DS_GEOMETRY_DIR="$(ogds_default_geometry_dir "${DS_DATA_ROOT}")"
+DEFAULT_DS_PREPARED_MOTION_DIR="$(ogds_default_motion_dir "${DS_DATA_ROOT}" pure-sd)"
+DEFAULT_MIX_NAIVE_MOTION_DIR="$(ogds_default_motion_dir "${DS_DATA_ROOT}" mix-naive)"
 # Optional strict count checks.
 # Leave unset to validate structure/fields only so newer banks with different clip counts still run.
 DS_EXPECTED_TOTAL=${DS_EXPECTED_TOTAL:-""}
@@ -1294,6 +1295,8 @@ train_cmd=(
   --command.setup-terms.motion-command.params.motion-config.clip-weighting-strategy="${CLIP_WEIGHTING_STRATEGY}"
   --algo.config.actor_learning_rate="${ACTOR_LR}"
   --algo.config.critic_learning_rate="${CRITIC_LR}"
+  --algo.config.normalize-actor-obs=False
+  --algo.config.normalize-critic-obs=False
   --algo.config.save-interval=100
   --simulator.config.sim.physx.gpu-max-rigid-contact-count="${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT}"
   --simulator.config.sim.physx.gpu-max-rigid-patch-count="${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}"

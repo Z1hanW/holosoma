@@ -25,6 +25,7 @@ for path in (REPO_ROOT / "src" / "holosoma", INFER_SRC_ROOT):
     if path.exists() and str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
+from holosoma_inference.utils.policy_overlay import PolicyOverlaySub  # noqa: E402
 from holosoma_inference.utils.sim_control import ManualRootCommandPub, PolicyControlPush, SimControlPush  # noqa: E402
 
 
@@ -138,6 +139,10 @@ INDEX_HTML = """<!doctype html>
       font-size: 14px;
       overflow-wrap: anywhere;
     }
+    .source {
+      color: #f4f4f5;
+      font-weight: 700;
+    }
     .toolbar-inline {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
@@ -203,9 +208,11 @@ INDEX_HTML = """<!doctype html>
       <div class="key" data-key="q">Q</div><div></div><div class="key" data-key="e">E</div>
     </div>
     <div class="status">
-      <div id="state">command: [0.000, 0.000, 0.000]</div>
+      <div id="source" class="source">source: auto(motion)</div>
+      <div id="state">effective command: pending</div>
+      <div id="motionCommand">motion command: pending</div>
+      <div id="manualCommand">manual command: [0.000, 0.000, 0.000]</div>
       <div id="policyStatus">policy: waiting for ]</div>
-      <div id="ports"></div>
       <div class="toolbar-inline">
         <button id="policyRolloutStart" type="button">Space + ]</button>
         <button id="policyStart" type="button">Policy ]</button>
@@ -249,9 +256,11 @@ const resetToDefaultPose = document.getElementById("resetToDefaultPose");
 const value = document.getElementById("value");
 const yawDegrees = document.getElementById("yawDegrees");
 const mode = document.getElementById("mode");
+const source = document.getElementById("source");
 const state = document.getElementById("state");
+const motionCommand = document.getElementById("motionCommand");
+const manualCommand = document.getElementById("manualCommand");
 const policyStatus = document.getElementById("policyStatus");
-const ports = document.getElementById("ports");
 const message = document.getElementById("message");
 const appBaseUrl = new URL("./", window.location.href);
 function resolveAppUrl(path) {
@@ -279,9 +288,7 @@ function isEditableTarget(event) {
   return target.isContentEditable || ["input", "select", "textarea", "button"].includes(tag);
 }
 
-function updatePorts(payload) {
-  const policyPort = payload.policy_control_enabled ? ` policy_control_port=${payload.policy_control_port}` : "";
-  ports.textContent = `sparse_root_port=${payload.sparse_root_command_port} control_port=${payload.control_port}${policyPort}`;
+function updatePorts(_payload) {
 }
 
 function commandVector() {
@@ -297,8 +304,31 @@ function refreshKeys() {
   document.querySelectorAll(".key").forEach((el) => {
     el.classList.toggle("active", pressed.has(el.dataset.key));
   });
-  const cmd = commandVector();
-  state.textContent = `command: [${cmd.map((v) => v.toFixed(3)).join(", ")}]`;
+  manualCommand.textContent = `manual command: ${formatCommand(commandVector())}`;
+}
+
+function formatCommand(command) {
+  if (!Array.isArray(command) || command.length < 3) return "pending";
+  return `[${command.slice(0, 3).map((v) => Number(v || 0).toFixed(3)).join(", ")}]`;
+}
+
+function commandStatus(payload) {
+  if (payload && payload.enabled) return "manual";
+  return "auto(motion)";
+}
+
+function updateCommandDisplay(payload) {
+  const manual = payload && payload.command ? payload.command : commandVector();
+  const motion = payload ? payload.sparse_motion_command : null;
+  const effective = payload ? payload.sparse_effective_command : null;
+  const overlaySource = payload && payload.sparse_command_source ? String(payload.sparse_command_source) : "";
+  const overlayMatchesMode = payload && payload.enabled ? overlaySource.startsWith("manual") : overlaySource === "auto";
+  const displayEffective = (overlayMatchesMode && effective) || (payload && payload.enabled ? manual : motion);
+  const status = commandStatus(payload || {});
+  source.textContent = `source: ${status}`;
+  state.textContent = `effective command: ${formatCommand(displayEffective)}`;
+  motionCommand.textContent = `motion command: ${formatCommand(motion)}`;
+  manualCommand.textContent = `manual command: ${formatCommand(manual)}`;
 }
 
 async function sendCommand() {
@@ -320,12 +350,13 @@ async function sendCommand() {
     const payload = await response.json();
     if (payload && payload.command) {
       updatePorts(payload);
+      updateCommandDisplay(payload);
       if (!payload.publisher_enabled) {
         message.textContent = "Publisher is not bound.";
       } else if (payload.enabled) {
-        message.textContent = "Publishing manual command.";
+        message.textContent = "Manual command is active.";
       } else {
-        message.textContent = "Using motion command.";
+        message.textContent = payload.sparse_motion_command ? "Auto motion command is active." : "Auto motion command pending from policy.";
       }
     }
   } catch (err) {
@@ -346,7 +377,10 @@ async function sendReset(reason = "web_command_reset") {
       }),
     });
     const payload = await response.json();
-    if (payload) updatePorts(payload);
+    if (payload) {
+      updatePorts(payload);
+      updateCommandDisplay(payload);
+    }
     if (!response.ok) {
       message.textContent = payload.error || "reset failed";
       return;
@@ -366,7 +400,10 @@ async function sendPolicy(action) {
       body: JSON.stringify({action}),
     });
     const payload = await response.json();
-    if (payload) updatePorts(payload);
+    if (payload) {
+      updatePorts(payload);
+      updateCommandDisplay(payload);
+    }
     if (!response.ok) {
       policyStatus.textContent = `policy: ${label} failed`;
       message.textContent = payload.error || `policy ${action} failed`;
@@ -477,6 +514,7 @@ class CommandState:
         sparse_root_command_port: int,
         control_port: int,
         policy_control_port: int,
+        policy_overlay_port: int,
         value: float,
         yaw_value: float,
         mode: str,
@@ -486,6 +524,7 @@ class CommandState:
         self.sparse_root_command_port = int(sparse_root_command_port)
         self.control_port = int(control_port)
         self.policy_control_port = int(policy_control_port)
+        self.policy_overlay_port = int(policy_overlay_port)
         self.value = abs(float(value))
         self.yaw_value = abs(float(yaw_value))
         self.mode = str(mode)
@@ -496,12 +535,15 @@ class CommandState:
         self.pub = ManualRootCommandPub(port=self.sparse_root_command_port)
         self.control_pub = SimControlPush(port=self.control_port)
         self.policy_pub = PolicyControlPush(port=self.policy_control_port) if self.policy_control_port > 0 else None
+        self.policy_overlay_sub = PolicyOverlaySub(port=self.policy_overlay_port) if self.policy_overlay_port > 0 else None
 
     def start(self) -> None:
         self.pub.start()
         self.control_pub.start()
         if self.policy_pub is not None:
             self.policy_pub.start()
+        if self.policy_overlay_sub is not None:
+            self.policy_overlay_sub.start()
         self.publish_current()
 
     def close(self) -> None:
@@ -509,6 +551,8 @@ class CommandState:
         self.control_pub.close()
         if self.policy_pub is not None:
             self.policy_pub.close()
+        if self.policy_overlay_sub is not None:
+            self.policy_overlay_sub.close()
 
     def _command_locked(self) -> list[float]:
         value = abs(float(self.value))
@@ -595,7 +639,7 @@ class CommandState:
         with self.lock:
             if command is None:
                 command = self._command_locked()
-            return {
+            snapshot = {
                 "enabled": self.enabled,
                 "mode": self.mode,
                 "value": self.value,
@@ -610,6 +654,34 @@ class CommandState:
                 "policy_control_port": self.policy_control_port,
                 "policy_control_enabled": bool(self.policy_pub and self.policy_pub.enabled),
             }
+        snapshot.update(self._policy_overlay_snapshot())
+        return snapshot
+
+    def _policy_overlay_snapshot(self) -> dict[str, Any]:
+        sub = self.policy_overlay_sub
+        if sub is None:
+            return {"policy_overlay_enabled": False}
+        payload = sub.get_payload()
+        if not isinstance(payload, dict):
+            return {"policy_overlay_enabled": True}
+        result: dict[str, Any] = {
+            "policy_overlay_enabled": True,
+            "clip_active": bool(payload.get("clip_active", False)),
+        }
+        for key in (
+            "sparse_command_source",
+            "sparse_command_mode",
+            "sparse_manual_enabled",
+            "sparse_motion_command",
+            "sparse_effective_command",
+            "sparse_manual_command",
+            "motion_timestep",
+            "frame_idx",
+            "motion_path",
+        ):
+            if key in payload:
+                result[key] = payload[key]
+        return result
 
 
 def _heartbeat(state: CommandState, stop_event: threading.Event, rate_hz: float) -> None:
@@ -643,14 +715,23 @@ def _upstream_url(base_url: str, tail: str, query: str, *, websocket: bool = Fal
     return urlunsplit((scheme, split.netloc, path, query, ""))
 
 
-async def _proxy_websocket(request: web.Request, scene_proxy_url: str, tail: str) -> web.WebSocketResponse:
-    ws_client_response = web.WebSocketResponse()
-    await ws_client_response.prepare(request)
+def _websocket_protocols(request: web.Request) -> tuple[str, ...]:
+    raw = request.headers.get("Sec-WebSocket-Protocol", "")
+    return tuple(protocol.strip() for protocol in raw.split(",") if protocol.strip())
 
+
+async def _proxy_websocket(request: web.Request, scene_proxy_url: str, tail: str) -> web.WebSocketResponse:
     session: ClientSession = request.app["client_session"]
     upstream = _upstream_url(scene_proxy_url, tail, request.query_string, websocket=True)
+    protocols = _websocket_protocols(request)
 
-    async with session.ws_connect(upstream, max_msg_size=0) as ws_upstream:
+    async with session.ws_connect(upstream, max_msg_size=0, protocols=protocols) as ws_upstream:
+        selected_protocol = ws_upstream.protocol
+        ws_client_response = web.WebSocketResponse(
+            protocols=(selected_protocol,) if selected_protocol else protocols,
+        )
+        await ws_client_response.prepare(request)
+
         async def browser_to_upstream() -> None:
             async for msg in ws_client_response:
                 if msg.type == WSMsgType.TEXT:
@@ -807,6 +888,7 @@ def main() -> None:
     parser.add_argument("--sparse-root-command-port", type=int, default=5661)
     parser.add_argument("--control-port", type=int, default=5659)
     parser.add_argument("--policy-control-port", type=int, default=5662)
+    parser.add_argument("--policy-overlay-port", type=int, default=5663)
     parser.add_argument("--value", type=float, default=0.5)
     parser.add_argument("--yaw-degrees", type=float, default=17.0)
     parser.add_argument("--yaw-value", type=float, default=None, help="Yaw command step in radians; overrides --yaw-degrees.")
@@ -835,6 +917,7 @@ def main() -> None:
         sparse_root_command_port=args.sparse_root_command_port,
         control_port=args.control_port,
         policy_control_port=args.policy_control_port,
+        policy_overlay_port=args.policy_overlay_port,
         value=args.value,
         yaw_value=yaw_value,
         mode=args.mode,
@@ -876,10 +959,11 @@ def main() -> None:
     elif scene_url:
         logger.info("Showing MuJoCo scene iframe from {}", scene_url)
     logger.info(
-        "Publishing sparse-root command on port {}, reset control on port {}, policy control on port {}, manual enabled={}, reset_to_default_pose={}, xy value {:.3f}, yaw {:.3f} rad ({:.1f} deg)",
+        "Publishing sparse-root command on port {}, reset control on port {}, policy control on port {}, policy overlay on port {}, manual enabled={}, reset_to_default_pose={}, xy value {:.3f}, yaw {:.3f} rad ({:.1f} deg)",
         args.sparse_root_command_port,
         args.control_port,
         args.policy_control_port,
+        args.policy_overlay_port,
         bool(args.enabled),
         bool(args.reset_to_default_pose),
         abs(float(args.value)),

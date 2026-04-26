@@ -73,6 +73,7 @@ class PerceptionManager:
         self.env = env
         self.device = device
         self.enabled = bool(cfg.enabled)
+        self._is_mujoco_perception = get_simulator_type() == SimulatorType.MUJOCO
         self.num_envs = env.num_envs
         self.logger = getattr(env, "logger", None)
 
@@ -273,7 +274,9 @@ class PerceptionManager:
 
         self._camera_warp_min_valid_depth = float(getattr(self.cfg, "camera_warp_min_valid_depth", 0.15) or 0.15)
         self._camera_warp_normalize = bool(getattr(self.cfg, "camera_warp_normalize", False))
-        self._camera_warp_edge_noise = bool(getattr(self.cfg, "camera_warp_edge_noise", False))
+        self._camera_warp_edge_noise = (
+            False if self._is_mujoco_perception else bool(getattr(self.cfg, "camera_warp_edge_noise", False))
+        )
         self._camera_warp_edge_border = max(0, int(getattr(self.cfg, "camera_warp_edge_border", 3) or 0))
         self._camera_warp_edge_shuffle_prob = float(getattr(self.cfg, "camera_warp_edge_shuffle_prob", 0.9) or 0.0)
         self._camera_warp_edge_empty_prob = float(getattr(self.cfg, "camera_warp_edge_empty_prob", 0.7) or 0.0)
@@ -286,9 +289,15 @@ class PerceptionManager:
         self._camera_warp_edge_far_depth_thresh = float(
             getattr(self.cfg, "camera_warp_edge_far_depth_thresh", 2.5) or 0.0
         )
-        self._camera_warp_enable_holes = bool(getattr(self.cfg, "camera_warp_enable_holes", False))
-        self._camera_warp_hole_prob = float(getattr(self.cfg, "camera_warp_hole_prob", 0.0) or 0.0)
-        self._camera_apply_sensor_noise = bool(getattr(self.cfg, "camera_apply_sensor_noise", True))
+        self._camera_warp_enable_holes = (
+            False if self._is_mujoco_perception else bool(getattr(self.cfg, "camera_warp_enable_holes", False))
+        )
+        self._camera_warp_hole_prob = (
+            0.0 if self._is_mujoco_perception else float(getattr(self.cfg, "camera_warp_hole_prob", 0.0) or 0.0)
+        )
+        self._camera_apply_sensor_noise = (
+            False if self._is_mujoco_perception else bool(getattr(self.cfg, "camera_apply_sensor_noise", True))
+        )
 
         self._camera_obs_height, self._camera_obs_width = self._resolve_camera_obs_resolution()
         self._camera_obs_fill_value = self._camera_obs_default_fill_value()
@@ -1244,11 +1253,23 @@ class PerceptionManager:
             raise RuntimeError("far_tracking_warp requires perception.camera_mesh_file_map to be populated.")
         ray_cast_bodies: dict[str, str] = {}
         for link_name, mesh_name in ray_cast_bodies_raw.items():
-            candidates = [
-                str(mesh_name),
-                f"{link_name}.STL",
-                f"{link_name}.stl",
-            ]
+            disable_combined_meshes = os.environ.get(
+                "HOLOSOMA_FAR_TRACKING_DISABLE_COMBINED_DEPTH_MESHES",
+                "",
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            mesh_name_str = str(mesh_name)
+            if disable_combined_meshes and mesh_name_str.startswith("combined_"):
+                candidates = [
+                    f"{link_name}.STL",
+                    f"{link_name}.stl",
+                    mesh_name_str,
+                ]
+            else:
+                candidates = [
+                    mesh_name_str,
+                    f"{link_name}.STL",
+                    f"{link_name}.stl",
+                ]
             resolved = None
             for candidate in candidates:
                 if os.path.isfile(os.path.join(mesh_root, candidate)):

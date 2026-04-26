@@ -41,6 +41,27 @@ def _normalize_scale(raw: Any) -> list[float] | None:
     return None
 
 
+def _object_urdf_fallbacks(path: Path) -> list[Path]:
+    repo_root = _repo_root()
+    candidates: list[Path] = []
+
+    parts = path.expanduser().parts
+    if "data" in parts:
+        data_idx = parts.index("data")
+        candidates.append(repo_root.joinpath(*parts[data_idx:]))
+
+    stem = path.stem
+    if stem:
+        if "__" in stem:
+            names = [stem]
+        else:
+            names = [f"{stem}__eff10", f"{stem}__eff09", f"{stem}__baseline"]
+        base = repo_root / "data/ds_box_data/scale_mix_all/train_g1_w_obj_prepared/_generated_urdfs"
+        candidates.extend(base / f"{name}.urdf" for name in names)
+
+    return candidates
+
+
 def _resolve_metadata_path(raw_path: str, *, motion_file: Path) -> str:
     raw_path = str(raw_path).strip()
     if not raw_path:
@@ -48,7 +69,14 @@ def _resolve_metadata_path(raw_path: str, *, motion_file: Path) -> str:
 
     candidate = Path(raw_path).expanduser()
     if candidate.is_absolute():
-        return str(candidate.resolve())
+        resolved = candidate.resolve()
+        if resolved.exists():
+            return str(resolved)
+        if resolved.suffix.lower() == ".urdf":
+            for fallback in _object_urdf_fallbacks(resolved):
+                if fallback.is_file():
+                    return str(fallback.resolve())
+        return str(resolved)
 
     repo_root = _repo_root()
     candidates = [
@@ -61,6 +89,10 @@ def _resolve_metadata_path(raw_path: str, *, motion_file: Path) -> str:
     for resolved in candidates:
         if resolved.exists():
             return str(resolved)
+    if candidate.suffix.lower() == ".urdf":
+        for fallback in _object_urdf_fallbacks(candidates[0]):
+            if fallback.is_file():
+                return str(fallback.resolve())
     return str(candidates[0])
 
 

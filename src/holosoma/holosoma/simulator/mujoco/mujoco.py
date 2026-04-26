@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import mujoco
 import mujoco.viewer
@@ -358,6 +359,7 @@ class MuJoCo(BaseSimulator):
 
         # Apply post-compilation settings
         self.root_model.opt.timestep = self.sim_dt
+        self._maybe_export_compiled_model_xml()
 
         # Backend selection based on configuration
         if self.simulator_config.mujoco_backend == MujocoBackend.WARP:
@@ -405,6 +407,22 @@ class MuJoCo(BaseSimulator):
         logger.info(f"Assets loaded - num_dof: {self.num_dof}, num_bodies: {self.num_bodies}")
         logger.info(f"DOF names: {self.dof_names}")
         logger.info(f"Body names: {self.body_names}")
+
+    def _maybe_export_compiled_model_xml(self) -> None:
+        export_path = os.environ.get("HOLOSOMA_MUJOCO_EXPORT_XML_PATH", "").strip()
+        if not export_path:
+            return
+        assert self.root_model is not None
+        path = Path(export_path).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            mujoco.mj_saveLastXML(str(path), self.root_model)
+        except Exception as exc:
+            logger.warning("mj_saveLastXML failed for '{}': {}", path, exc)
+            if getattr(self, "scene_manager", None) is None or not hasattr(self.scene_manager.world_spec, "to_xml"):
+                raise
+            path.write_text(self.scene_manager.world_spec.to_xml(), encoding="utf-8")
+        logger.info("Exported compiled MuJoCo XML to {}", path)
 
     def _setup_scene(self) -> None:
         """Setup scene by composing terrain, lighting, materials, and robot components.
@@ -701,7 +719,6 @@ class MuJoCo(BaseSimulator):
         # Convert quaternion: holosoma [x,y,z,w] → MuJoCo [w,x,y,z]
         initial_rot_mj = [initial_rot[3], initial_rot[0], initial_rot[1], initial_rot[2]]
         initial_ang_vel_local = quat_rotate_inverse_mujoco(np.asarray(initial_rot_mj, dtype=np.float64), initial_ang_vel)
-
         # Use the existing _set_robot_joint_addressing() results
         # Set position: [x, y, z, qw, qx, qy, qz] (7 elements)
         self.root_data.qpos[self.robot_qpos_addr : self.robot_qpos_addr + 3] = initial_pos

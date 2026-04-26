@@ -38,16 +38,84 @@ _CAMERA_TERRAIN_PROXY_SUFFIX = "_camera_proxy"
 _LOAD_ROBOT_VISUAL_MESHES_ENV = "HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES"
 _LOAD_OBJECT_VISUAL_MESHES_ENV = "HOLOSOMA_MUJOCO_LOAD_OBJECT_VISUAL_MESHES"
 _WEB_DEMO_OBJECT_CONTACTS_ENV = "HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS"
+_GT_RUBBER_HAND_OBJECT_CONTACTS_ENV = "HOLOSOMA_MUJOCO_GT_RUBBER_HAND_OBJECT_CONTACTS"
 _GT_MUJOCO_PHYSICS_ENV = "GT_MUJOCO_PHYSICS"
 _HOLOSOMA_GT_MUJOCO_PHYSICS_ENV = "HOLOSOMA_GT_MUJOCO_PHYSICS"
 _ZERO_PASSIVE_DYNAMICS_ENV = "HOLOSOMA_MUJOCO_ZERO_PASSIVE_DYNAMICS"
 _GT_ZERO_PASSIVE_DYNAMICS_ENV = "HOLOSOMA_GT_MUJOCO_ZERO_PASSIVE_DYNAMICS"
+_APPLY_TRAINING_JOINT_DYNAMICS_ENV = "HOLOSOMA_MUJOCO_APPLY_TRAINING_JOINT_DYNAMICS"
 _TERRAIN_SOLREF_ENV = "HOLOSOMA_MUJOCO_TERRAIN_SOLREF"
 _OBJECT_CONTACT_SOLREF_ENV = "HOLOSOMA_MUJOCO_OBJECT_CONTACT_SOLREF"
 _HALFSPHERE_HAND_COLLISION_ENV = "HOLOSOMA_MUJOCO_HALFSPHERE_HAND_COLLISION"
 _DISABLE_RUBBER_HAND_COLLISION_ENV = "HOLOSOMA_MUJOCO_DISABLE_RUBBER_HAND_COLLISION"
+_KEEP_REFERENCE_HAND_COLLISION_ENV = "HOLOSOMA_MUJOCO_KEEP_REFERENCE_HAND_COLLISION"
 _WRIST_ORIGIN_CONTACT_SPHERES_ENV = "HOLOSOMA_MUJOCO_WRIST_ORIGIN_CONTACT_SPHERES"
 _WRIST_ORIGIN_CONTACT_SPHERE_RADIUS_ENV = "HOLOSOMA_MUJOCO_WRIST_ORIGIN_CONTACT_SPHERE_RADIUS"
+_PALM_CONTACT_SPHERES_ENV = "HOLOSOMA_MUJOCO_PALM_CONTACT_SPHERES"
+_PALM_CONTACT_SPHERE_RADIUS_ENV = "HOLOSOMA_MUJOCO_PALM_CONTACT_SPHERE_RADIUS"
+_PALM_CONTACT_SPHERE_POS_ENV = "HOLOSOMA_MUJOCO_PALM_CONTACT_SPHERE_POS"
+_CARRY_ARM_OBJECT_CONTACTS_ENV = "HOLOSOMA_MUJOCO_CARRY_ARM_OBJECT_CONTACTS"
+_ROBOT_GEOM_FRICTION_ENV = "HOLOSOMA_MUJOCO_ROBOT_GEOM_FRICTION"
+_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES_ENV = "MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES"
+_OBJECT_CONTACT_BODY_MARKERS_ENV = "MUJOCO_OBJECT_CONTACT_BODY_MARKERS"
+
+
+def _parse_object_contact_body_markers() -> tuple[str, ...]:
+    raw = os.getenv(_OBJECT_CONTACT_BODY_MARKERS_ENV, "").strip()
+    if not raw:
+        return ()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = [part.strip() for part in raw.split(",")]
+    if isinstance(parsed, str):
+        parsed = [parsed]
+    if not isinstance(parsed, list):
+        logger.warning("Ignoring {}={} because it is not a string/list", _OBJECT_CONTACT_BODY_MARKERS_ENV, raw)
+        return ()
+    return tuple(str(marker).strip().lower() for marker in parsed if str(marker).strip())
+
+
+def _parse_float_triplet_env(env_name: str) -> list[float] | None:
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = [part for part in raw.replace(",", " ").split() if part]
+    if not isinstance(parsed, list) or len(parsed) != 3:
+        raise ValueError(f"{env_name} must provide exactly 3 floats, got {raw!r}")
+    values = [float(value) for value in parsed]
+    if not all(np.isfinite(values)):
+        raise ValueError(f"{env_name} must contain finite floats, got {raw!r}")
+    return values
+
+
+def _repo_root_from_holosoma_package() -> Path:
+    return Path(get_holosoma_root()).resolve().parents[2]
+
+
+def _object_urdf_compat_fallbacks(path: Path) -> list[Path]:
+    """Current-repo fallbacks for object URDF paths embedded in older motion banks."""
+    repo_root = _repo_root_from_holosoma_package()
+    candidates: list[Path] = []
+
+    parts = path.expanduser().parts
+    if "data" in parts:
+        data_idx = parts.index("data")
+        candidates.append(repo_root.joinpath(*parts[data_idx:]))
+
+    stem = path.stem
+    if stem:
+        if "__" in stem:
+            names = [stem]
+        else:
+            names = [f"{stem}__eff10", f"{stem}__eff09", f"{stem}__baseline"]
+        base = repo_root / "data/ds_box_data/scale_mix_all/train_g1_w_obj_prepared/_generated_urdfs"
+        candidates.extend(base / f"{name}.urdf" for name in names)
+
+    return candidates
 
 
 class MujocoSceneManager:
@@ -248,7 +316,12 @@ class MujocoSceneManager:
             friction = [1.0, 0.005, 0.0001]
             solimp = [0.9, 0.95, 0.001, 0.5, 2]
             solref = [0.02, 1]
-            condim = 1
+            condim = 3
+        elif self._env_flag(_WEB_DEMO_OBJECT_CONTACTS_ENV):
+            friction = [1.0, 0.005, 0.001]
+            solimp = [0.9, 0.95, 0.001, 0.5, 2]
+            solref = [0.01, 1]
+            condim = 3
         else:
             friction = self._terrain_friction_triplet_from_state(terrain_state)
             solimp = [0.99, 0.99, 0.01, 0.5, 2]
@@ -574,6 +647,7 @@ class MujocoSceneManager:
             robot_config,
             using_composite_object_scene=using_composite_object_scene,
         )
+        self._maybe_apply_gt_mujoco_joint_dynamics_from_robot_config(robot_spec, robot_config)
         self._maybe_apply_gt_mujoco_joint_passive_dynamics(robot_spec, robot_config)
         self._maybe_copy_collision_geoms_from_reference_robot_xml(
             robot_spec,
@@ -598,6 +672,8 @@ class MujocoSceneManager:
             using_composite_object_scene=using_composite_object_scene,
         )
         self._maybe_add_wrist_origin_contact_spheres(robot_spec, robot_config)
+        self._maybe_add_palm_contact_spheres(robot_spec)
+        self._maybe_override_robot_geom_friction(robot_spec)
         self._maybe_copy_tendons_from_reference_robot_xml(
             robot_spec,
             robot_config,
@@ -642,6 +718,10 @@ class MujocoSceneManager:
         if object_spec_to_attach is not None:
             object_site = self.world_spec.worldbody.add_site(name="object_spawn", pos=[0, 0, 0.0], quat=[1, 0, 0, 0])
             self.world_spec.attach(object_spec_to_attach, site=object_site, prefix="object_")
+            self._maybe_add_attached_object_terrain_contact_pairs(
+                robot_config,
+                terrain_geom_name=str(getattr(terrain_state, "name", "floor")),
+            )
             self._maybe_add_web_demo_object_contact_pairs(robot_config)
 
         # Store prefix for later use by simulator
@@ -873,6 +953,69 @@ class MujocoSceneManager:
             preview = ", ".join(changed[:8])
             suffix = "" if len(changed) <= 8 else f", ... ({len(changed)} total)"
             logger.info("Aligned MuJoCo actuator ctrlranges with robot effort limits: {}{}", preview, suffix)
+
+    def _maybe_apply_gt_mujoco_joint_dynamics_from_robot_config(
+        self,
+        robot_spec: mujoco.MjSpec,
+        robot_config: RobotConfig,
+    ) -> None:
+        """Apply IsaacSim-training joint armature/friction values to GT MuJoCo scenes."""
+        if not (
+            self._gt_mujoco_physics_enabled()
+            or self._env_flag(_APPLY_TRAINING_JOINT_DYNAMICS_ENV)
+        ):
+            return
+
+        armature_values = list(getattr(robot_config, "dof_armature_list", []) or [])
+        friction_values = list(getattr(robot_config, "dof_joint_friction_list", []) or [])
+        if len(armature_values) != len(robot_config.dof_names):
+            logger.warning(
+                "Skipping GT MuJoCo robot-config joint dynamics: expected {} armature values, got {}",
+                len(robot_config.dof_names),
+                len(armature_values),
+            )
+            return
+        if len(friction_values) != len(robot_config.dof_names):
+            logger.warning(
+                "Skipping GT MuJoCo robot-config joint dynamics: expected {} friction values, got {}",
+                len(robot_config.dof_names),
+                len(friction_values),
+            )
+            return
+
+        armature_by_name = {
+            str(name): float(value) for name, value in zip(robot_config.dof_names, armature_values, strict=True)
+        }
+        friction_by_name = {
+            str(name): float(value) for name, value in zip(robot_config.dof_names, friction_values, strict=True)
+        }
+
+        updated_joint_count = 0
+        missing_joint_names: list[str] = []
+        seen_joint_names: set[str] = set()
+        for joint in robot_spec.joints:
+            if not joint.name or joint.name not in armature_by_name:
+                continue
+            joint_name = str(joint.name)
+            joint.armature = armature_by_name[joint_name]
+            joint.frictionloss = friction_by_name[joint_name]
+            joint.damping = np.zeros_like(np.asarray(joint.damping, dtype=np.float64)).tolist()
+            seen_joint_names.add(joint_name)
+            updated_joint_count += 1
+
+        for joint_name in robot_config.dof_names:
+            if str(joint_name) not in seen_joint_names:
+                missing_joint_names.append(str(joint_name))
+        if missing_joint_names:
+            raise ValueError(
+                "Cannot apply GT MuJoCo robot-config joint dynamics because these DOFs are missing: "
+                f"{missing_joint_names}"
+            )
+
+        logger.info(
+            "Applied MuJoCo robot-config joint dynamics to {} joint(s): armature from robot.dof_armature_list, frictionloss from robot.dof_joint_friction_list, damping=0",
+            updated_joint_count,
+        )
 
     def _maybe_apply_gt_mujoco_joint_passive_dynamics(
         self,
@@ -1155,7 +1298,10 @@ class MujocoSceneManager:
                 if not body.name or body.name in object_body_names:
                     continue
                 body_name_lower = str(body.name).lower()
-                if "rubber_hand" in body_name_lower or "sphere_hand" in body_name_lower:
+                if (
+                    ("rubber_hand" in body_name_lower or "sphere_hand" in body_name_lower)
+                    and not self._env_flag(_DISABLE_RUBBER_HAND_COLLISION_ENV)
+                ):
                     continue
                 for geom in body.geoms:
                     if int(geom.contype) == 0 and int(geom.conaffinity) == 0:
@@ -1166,6 +1312,8 @@ class MujocoSceneManager:
 
         existing_geom_names = {geom.name for body in robot_spec.bodies for geom in body.geoms if geom.name}
         skip_reference_hand_collision_names: set[str] = set()
+        if using_training_urdf_object_scene and self._env_flag(_HALFSPHERE_HAND_COLLISION_ENV):
+            skip_reference_hand_collision_names.update({"left_hand_collision", "right_hand_collision"})
         if using_training_urdf_object_scene and self._env_flag(
             "HOLOSOMA_MUJOCO_SKIP_REFERENCE_HAND_COLLISION_WHEN_RUBBER"
         ):
@@ -1199,6 +1347,14 @@ class MujocoSceneManager:
             target_body = target_bodies[reference_body.name]
             for reference_geom in reference_body.geoms:
                 if int(reference_geom.contype) == 0 and int(reference_geom.conaffinity) == 0:
+                    continue
+                reference_geom_name = str(reference_geom.name or "")
+                reference_mesh_name = str(getattr(reference_geom, "meshname", "") or "")
+                reference_material_name = str(getattr(reference_geom, "material", "") or "")
+                reference_combined_name = (
+                    f"{reference_body.name} {reference_geom_name} {reference_mesh_name} {reference_material_name}"
+                ).lower()
+                if "rubber_hand" in reference_combined_name and "hand_collision" not in reference_geom_name.lower():
                     continue
                 if reference_geom.name and reference_geom.name in skip_reference_hand_collision_names:
                     skipped_reference_hand_collision_count += 1
@@ -1626,8 +1782,6 @@ class MujocoSceneManager:
     ) -> None:
         """Add only the half-sphere palm colliders to training-URDF object scenes."""
 
-        if self._gt_mujoco_physics_enabled():
-            return
         if using_composite_object_scene or not self._should_use_training_urdf_object_scene(robot_config):
             return
         if not self._env_flag(_HALFSPHERE_HAND_COLLISION_ENV):
@@ -1692,6 +1846,120 @@ class MujocoSceneManager:
             _HALFSPHERE_HAND_COLLISION_ENV,
             added_geom_count,
             disabled_geom_count,
+        )
+
+    def _maybe_add_wrist_origin_contact_spheres(
+        self,
+        robot_spec: mujoco.MjSpec,
+        robot_config: RobotConfig,
+    ) -> None:
+        """Optionally add small wrist-origin contact spheres for carry experiments."""
+
+        del robot_config
+        if not self._env_flag(_WRIST_ORIGIN_CONTACT_SPHERES_ENV):
+            return
+
+        radius = float(os.environ.get(_WRIST_ORIGIN_CONTACT_SPHERE_RADIUS_ENV, "0.025"))
+        target_bodies = {body.name: body for body in robot_spec.bodies if body.name}
+        existing_geom_names = {geom.name for body in robot_spec.bodies for geom in body.geoms if geom.name}
+        added_geom_count = 0
+
+        for body_name, geom_name in (
+            ("left_wrist_yaw_link", "left_wrist_origin_contact_sphere"),
+            ("right_wrist_yaw_link", "right_wrist_origin_contact_sphere"),
+        ):
+            body = target_bodies.get(body_name)
+            if body is None:
+                logger.warning(
+                    "Cannot enable {} for missing body '{}'",
+                    _WRIST_ORIGIN_CONTACT_SPHERES_ENV,
+                    body_name,
+                )
+                continue
+            if geom_name in existing_geom_names:
+                continue
+            body.add_geom(
+                name=geom_name,
+                type=mujoco.mjtGeom.mjGEOM_SPHERE,
+                size=[radius],
+                contype=1,
+                conaffinity=1,
+                friction=[1.0, 0.005, 0.001],
+            )
+            existing_geom_names.add(geom_name)
+            added_geom_count += 1
+
+        logger.info(
+            "Enabled wrist-origin contact spheres via {}: added {} geom(s), radius={}",
+            _WRIST_ORIGIN_CONTACT_SPHERES_ENV,
+            added_geom_count,
+            radius,
+        )
+
+    def _maybe_add_palm_contact_spheres(self, robot_spec: mujoco.MjSpec) -> None:
+        """Optionally add deterministic palm contact spheres near the rubber-hand center."""
+
+        if not self._env_flag(_PALM_CONTACT_SPHERES_ENV):
+            return
+
+        radius = float(os.environ.get(_PALM_CONTACT_SPHERE_RADIUS_ENV, "0.065"))
+        pos = _parse_float_triplet_env(_PALM_CONTACT_SPHERE_POS_ENV) or [0.075, 0.0, 0.0]
+        target_bodies = {body.name: body for body in robot_spec.bodies if body.name}
+        existing_geom_names = {geom.name for body in robot_spec.bodies for geom in body.geoms if geom.name}
+        added_geom_count = 0
+
+        for body_name, geom_name in (
+            ("left_wrist_yaw_link", "left_palm_contact_sphere"),
+            ("right_wrist_yaw_link", "right_palm_contact_sphere"),
+        ):
+            body = target_bodies.get(body_name)
+            if body is None:
+                logger.warning(
+                    "Cannot enable {} for missing body '{}'",
+                    _PALM_CONTACT_SPHERES_ENV,
+                    body_name,
+                )
+                continue
+            if geom_name in existing_geom_names:
+                continue
+            body.add_geom(
+                name=geom_name,
+                type=mujoco.mjtGeom.mjGEOM_SPHERE,
+                pos=list(pos),
+                size=[radius],
+                contype=1,
+                conaffinity=1,
+                friction=[1.0, 0.005, 0.001],
+            )
+            existing_geom_names.add(geom_name)
+            added_geom_count += 1
+
+        logger.info(
+            "Enabled palm contact spheres via {}: added {} geom(s), radius={}, pos={}",
+            _PALM_CONTACT_SPHERES_ENV,
+            added_geom_count,
+            radius,
+            pos,
+        )
+
+    def _maybe_override_robot_geom_friction(self, robot_spec: mujoco.MjSpec) -> None:
+        friction = _parse_float_triplet_env(_ROBOT_GEOM_FRICTION_ENV)
+        if friction is None:
+            return
+
+        updated_geom_count = 0
+        for body in robot_spec.bodies:
+            for geom in body.geoms:
+                if int(geom.contype) == 0 or int(geom.conaffinity) == 0:
+                    continue
+                geom.friction = list(friction)
+                updated_geom_count += 1
+
+        logger.info(
+            "Overrode MuJoCo robot geom friction via {}: updated {} geom(s), friction={}",
+            _ROBOT_GEOM_FRICTION_ENV,
+            updated_geom_count,
+            friction,
         )
 
     def _maybe_copy_contact_pairs_from_reference_robot_xml(
@@ -1775,7 +2043,10 @@ class MujocoSceneManager:
         gt_mujoco_physics = self._gt_mujoco_physics_enabled()
         web_demo_contacts = self._env_flag(_WEB_DEMO_OBJECT_CONTACTS_ENV) and not gt_mujoco_physics
         object_contype = 1 if gt_mujoco_physics else 4
-        object_conaffinity = 1 if gt_mujoco_physics else (11 if web_demo_contacts else 3)
+        limit_to_carry_bodies = self._env_flag(_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES_ENV) or bool(
+            os.getenv(_OBJECT_CONTACT_BODY_MARKERS_ENV, "").strip()
+        )
+        object_conaffinity = 1 if gt_mujoco_physics else (3 if limit_to_carry_bodies else 11 if web_demo_contacts else 3)
         collision_geom_index = 0
         visual_geom_index = 0
         updated_geoms = 0
@@ -1837,11 +2108,15 @@ class MujocoSceneManager:
         contact_stiffness = getattr(object_cfg, "mujoco_object_contact_stiffness", None)
         contact_damping = getattr(object_cfg, "mujoco_object_contact_damping", None)
         gt_mujoco_physics = self._gt_mujoco_physics_enabled()
+        web_demo_contacts = self._env_flag(_WEB_DEMO_OBJECT_CONTACTS_ENV) and not gt_mujoco_physics
         if gt_mujoco_physics:
             mass_scale = None
-            mass_override = 0.1
-            geom_friction = [0.9, 0.5, 0.5]
-            terrain_pair_friction = None
+            if mass_override is None:
+                mass_override = 1.4
+            if geom_friction is None:
+                geom_friction = [0.6, 0.02, 0.005]
+            if terrain_pair_friction is None:
+                terrain_pair_friction = [0.6, 0.02, 0.005]
             lateral_friction = None
             rolling_friction = None
             contact_stiffness = None
@@ -1887,11 +2162,37 @@ class MujocoSceneManager:
         for pair in target_spec.pairs:
             if pair.geomname1 and pair.geomname2:
                 existing_pair_by_key[(str(pair.geomname1), str(pair.geomname2))] = pair
+
+        def _set_exact_box_inertia(body: Any, target_mass: float) -> bool:
+            for geom in body.geoms:
+                if int(geom.contype) == 0 or int(geom.conaffinity) == 0:
+                    continue
+                if int(geom.type) != int(mujoco.mjtGeom.mjGEOM_BOX):
+                    continue
+                half_extents = np.asarray(geom.size, dtype=np.float64).reshape(-1)
+                if half_extents.size < 3 or not np.all(np.isfinite(half_extents[:3])):
+                    continue
+                sx, sy, sz = (2.0 * half_extents[:3]).tolist()
+                inertia = [
+                    target_mass * (sy * sy + sz * sz) / 12.0,
+                    target_mass * (sx * sx + sz * sz) / 12.0,
+                    target_mass * (sx * sx + sy * sy) / 12.0,
+                ]
+                body.mass = target_mass
+                body.ipos = [0.0, 0.0, 0.0]
+                body.iquat = [1.0, 0.0, 0.0, 0.0]
+                body.inertia = [0.0, 0.0, 0.0]
+                body.fullinertia = [inertia[0], inertia[1], inertia[2], 0.0, 0.0, 0.0]
+                body.explicitinertial = 1
+                return True
+            return False
+
         for body in target_spec.bodies:
             if not body.name or body.name not in target_body_names:
                 continue
 
             body_ratio: float | None = None
+            exact_box_inertia = False
             original_mass = float(body.mass)
             if mass_override is not None:
                 target_mass = float(mass_override)
@@ -1906,6 +2207,8 @@ class MujocoSceneManager:
                 else:
                     body_ratio = target_mass / original_mass
                     body.mass = target_mass
+                    if web_demo_contacts:
+                        exact_box_inertia = _set_exact_box_inertia(body, target_mass)
             elif mass_scale is not None:
                 scale = float(mass_scale)
                 if scale <= 0.0:
@@ -1913,10 +2216,14 @@ class MujocoSceneManager:
                 body_ratio = scale
                 body.mass = original_mass * scale
 
-            if body_ratio is not None:
-                inertia = np.asarray(body.inertia, dtype=np.float64)
-                if inertia.size == 3 and np.all(np.isfinite(inertia)):
-                    body.inertia = (inertia * body_ratio).tolist()
+            if body_ratio is not None and not exact_box_inertia:
+                fullinertia = np.asarray(getattr(body, "fullinertia", []), dtype=np.float64)
+                if fullinertia.size == 6 and np.all(np.isfinite(fullinertia)):
+                    body.fullinertia = (fullinertia * body_ratio).tolist()
+                else:
+                    inertia = np.asarray(body.inertia, dtype=np.float64)
+                    if inertia.size == 3 and np.all(np.isfinite(inertia)):
+                        body.inertia = (inertia * body_ratio).tolist()
                 updated_bodies += 1
 
             for geom in body.geoms:
@@ -1941,7 +2248,9 @@ class MujocoSceneManager:
                     geom.solref = contact_solref
                     updated_contact_geoms += 1
 
-                if gt_mujoco_physics:
+                if gt_mujoco_physics and terrain_pair_friction_override is None and contact_solref is None:
+                    continue
+                if web_demo_contacts and terrain_pair_friction_override is None and contact_solref is None:
                     continue
 
                 pair_friction_triplet = terrain_pair_friction_override
@@ -2017,12 +2326,154 @@ class MujocoSceneManager:
                 contact_solref,
             )
 
-    def _maybe_add_web_demo_object_contact_pairs(self, robot_config: RobotConfig) -> None:
-        """Match the web demo's rubber-hand/object contact overrides when requested."""
-        if self._gt_mujoco_physics_enabled():
-            logger.info("Skipping web-demo rubber-hand/object contact pairs because GT_MUJOCO_PHYSICS is enabled")
+    def _maybe_add_attached_object_terrain_contact_pairs(
+        self,
+        robot_config: RobotConfig,
+        *,
+        terrain_geom_name: str,
+    ) -> None:
+        """Apply object-terrain contact pair overrides after attaching standalone object URDFs."""
+
+        object_cfg = getattr(robot_config, "object", None)
+        if object_cfg is None:
             return
-        if not self._env_flag(_WEB_DEMO_OBJECT_CONTACTS_ENV):
+
+        terrain_pair_friction = getattr(object_cfg, "mujoco_object_terrain_pair_friction", None)
+        lateral_friction = getattr(object_cfg, "mujoco_object_lateral_friction", None)
+        rolling_friction = getattr(object_cfg, "mujoco_object_rolling_friction", None)
+        contact_stiffness = getattr(object_cfg, "mujoco_object_contact_stiffness", None)
+        contact_damping = getattr(object_cfg, "mujoco_object_contact_damping", None)
+        if self._gt_mujoco_physics_enabled():
+            if terrain_pair_friction is None:
+                terrain_pair_friction = [0.6, 0.02, 0.005]
+            lateral_friction = None
+            rolling_friction = None
+            contact_stiffness = None
+            contact_damping = None
+
+        contact_solref = self._object_contact_solref(contact_stiffness, contact_damping)
+        pair_friction_triplet: list[float] | None = None
+        if terrain_pair_friction is not None:
+            pair_friction_triplet = [float(value) for value in terrain_pair_friction]
+            if len(pair_friction_triplet) != 3:
+                raise ValueError(
+                    "robot.object.mujoco_object_terrain_pair_friction must provide exactly 3 values "
+                    f"[slide, spin, roll], got {pair_friction_triplet}"
+                )
+            partial_friction_triplet = self._object_contact_friction_triplet(
+                pair_friction_triplet,
+                lateral_friction=lateral_friction,
+                rolling_friction=rolling_friction,
+            )
+            if partial_friction_triplet is not None:
+                pair_friction_triplet = partial_friction_triplet
+
+        if pair_friction_triplet is None and contact_solref is None:
+            return
+
+        def _iter_bodies(container: Any):
+            for body in getattr(container, "bodies", []):
+                yield body
+                yield from _iter_bodies(body)
+
+        existing_geom_names = {
+            str(geom.name)
+            for body in _iter_bodies(self.world_spec.worldbody)
+            for geom in body.geoms
+            if geom.name
+        }
+
+        def _unique_geom_name(base_name: str) -> str:
+            candidate = base_name
+            suffix = 2
+            while candidate in existing_geom_names:
+                candidate = f"{base_name}_{suffix}"
+                suffix += 1
+            existing_geom_names.add(candidate)
+            return candidate
+
+        object_collision_geoms: list[str] = []
+        for body in _iter_bodies(self.world_spec.worldbody):
+            body_name = str(body.name or "")
+            if not body_name.startswith("object_"):
+                continue
+            for geom in body.geoms:
+                if int(geom.contype) == 0 or int(geom.conaffinity) == 0:
+                    continue
+                geom_name = str(geom.name or "")
+                if not geom_name:
+                    geom_name = _unique_geom_name(f"{body_name}_collision")
+                    geom.name = geom_name
+                object_collision_geoms.append(geom_name)
+
+        if not object_collision_geoms:
+            logger.warning(
+                "Could not add attached object-terrain contact pair: object_collision_geoms=[] terrain_geom='{}'",
+                terrain_geom_name,
+            )
+            return
+
+        existing_pair_names = {str(pair.name) for pair in self.world_spec.pairs if pair.name}
+        existing_pair_by_name = {str(pair.name): pair for pair in self.world_spec.pairs if pair.name}
+        existing_pair_by_key: dict[tuple[str, str], Any] = {}
+        for pair in self.world_spec.pairs:
+            if pair.geomname1 and pair.geomname2:
+                existing_pair_by_key[(str(pair.geomname1), str(pair.geomname2))] = pair
+
+        updated_pairs = 0
+        for object_geom_name in sorted(set(object_collision_geoms)):
+            pair_name = f"{object_geom_name}__{terrain_geom_name}__sim2sim"
+            existing_pair = existing_pair_by_key.get((object_geom_name, terrain_geom_name))
+            if existing_pair is None:
+                existing_pair = existing_pair_by_key.get((terrain_geom_name, object_geom_name))
+            if existing_pair is None and pair_name in existing_pair_names:
+                existing_pair = existing_pair_by_name.get(pair_name)
+
+            if existing_pair is not None:
+                if pair_friction_triplet is not None:
+                    existing_pair.condim = max(
+                        int(existing_pair.condim),
+                        self._condim_from_friction_triplet(pair_friction_triplet),
+                    )
+                    existing_pair.friction = self._expand_pair_friction(pair_friction_triplet)
+                if contact_solref is not None:
+                    existing_pair.solref = contact_solref
+                updated_pairs += 1
+                continue
+
+            pair_kwargs: dict[str, Any] = {
+                "name": pair_name,
+                "geomname1": object_geom_name,
+                "geomname2": terrain_geom_name,
+            }
+            if pair_friction_triplet is not None:
+                pair_kwargs["condim"] = self._condim_from_friction_triplet(pair_friction_triplet)
+                pair_kwargs["friction"] = self._expand_pair_friction(pair_friction_triplet)
+            if contact_solref is not None:
+                pair_kwargs["solref"] = contact_solref
+            self.world_spec.add_pair(**pair_kwargs)
+            existing_pair_names.add(pair_name)
+            updated_pairs += 1
+
+        logger.info(
+            "Added/updated {} attached MuJoCo object-terrain pair override(s) against terrain geom '{}': object_geoms={}, terrain_pair_friction={}, lateral_friction={}, rolling_friction={}, solref={}",
+            updated_pairs,
+            terrain_geom_name,
+            sorted(set(object_collision_geoms)),
+            pair_friction_triplet,
+            lateral_friction,
+            rolling_friction,
+            contact_solref,
+        )
+
+    def _maybe_add_web_demo_object_contact_pairs(self, robot_config: RobotConfig) -> None:
+        """Apply deterministic rubber-hand/object contact overrides when requested."""
+        gt_mujoco_physics = self._gt_mujoco_physics_enabled()
+        gt_rubber_hand_contacts = gt_mujoco_physics and self._env_flag(
+            _GT_RUBBER_HAND_OBJECT_CONTACTS_ENV,
+            default=True,
+        )
+        if not gt_rubber_hand_contacts and not self._env_flag(_WEB_DEMO_OBJECT_CONTACTS_ENV):
             return
 
         object_cfg = getattr(robot_config, "object", None)
@@ -2030,6 +2481,11 @@ class MujocoSceneManager:
         rolling_friction = getattr(object_cfg, "mujoco_object_rolling_friction", None) if object_cfg is not None else None
         contact_stiffness = getattr(object_cfg, "mujoco_object_contact_stiffness", None) if object_cfg is not None else None
         contact_damping = getattr(object_cfg, "mujoco_object_contact_damping", None) if object_cfg is not None else None
+        if gt_mujoco_physics:
+            lateral_friction = None
+            rolling_friction = None
+            contact_stiffness = None
+            contact_damping = None
         hand_friction = self._object_contact_friction_triplet(
             [0.8, 0.02, 0.005],
             lateral_friction=lateral_friction,
@@ -2059,7 +2515,10 @@ class MujocoSceneManager:
             existing_geom_names.add(candidate)
             return candidate
 
+        carry_arm_object_contacts = self._env_flag(_CARRY_ARM_OBJECT_CONTACTS_ENV)
+        carry_body_markers = _parse_object_contact_body_markers()
         rubber_hand_geoms: list[str] = []
+        carry_arm_geoms: list[str] = []
         object_collision_geoms: list[str] = []
         for body in _iter_bodies(self.world_spec.worldbody):
             body_name = str(body.name or "")
@@ -2070,7 +2529,14 @@ class MujocoSceneManager:
                 geom_name = str(geom.name or "")
                 mesh_name = str(getattr(geom, "meshname", "") or "")
                 combined_name = f"{body_name} {geom_name} {mesh_name}".lower()
-                if "rubber_hand" in combined_name:
+                if (
+                    "rubber_hand" in combined_name
+                    or "sphere_hand" in combined_name
+                    or "wrist_origin_contact_sphere" in combined_name
+                    or "palm_contact_sphere" in combined_name
+                    or "left_hand_collision" in combined_name
+                    or "right_hand_collision" in combined_name
+                ):
                     if not geom_name:
                         if "left" in combined_name:
                             geom_name = _unique_geom_name("left_rubber_hand_collision")
@@ -2085,13 +2551,39 @@ class MujocoSceneManager:
                     geom.friction = hand_friction
                     geom.solref = hand_solref
                     rubber_hand_geoms.append(geom_name)
+                elif (carry_arm_object_contacts or carry_body_markers) and (
+                    "elbow_yaw_collision" in combined_name
+                    or "shoulder_yaw_collision" in combined_name
+                    or "forearm" in combined_name
+                    or "upper_arm" in combined_name
+                    or any(marker in combined_name for marker in carry_body_markers)
+                ):
+                    if not geom_name:
+                        side = "left" if "left" in combined_name else "right" if "right" in combined_name else "carry"
+                        body_slug = body_name
+                        if body_slug.startswith("robot_"):
+                            body_slug = body_slug[len("robot_") :]
+                        body_slug = body_slug or side
+                        geom_name = _unique_geom_name(f"{body_slug}_carry_collision")
+                        geom.name = geom_name
+                    geom.contype = 1
+                    geom.conaffinity = 6
+                    geom.condim = 6
+                    geom.friction = hand_friction
+                    geom.solref = hand_solref
+                    carry_arm_geoms.append(geom_name)
                 if body_name.startswith("object_") or geom_name.startswith("object_"):
+                    if not geom_name:
+                        geom_name = _unique_geom_name(f"{body_name}_collision" if body_name else "object_collision")
+                        geom.name = geom_name
                     object_collision_geoms.append(geom_name)
 
-        if not rubber_hand_geoms or not object_collision_geoms:
+        carry_geoms = sorted(set(rubber_hand_geoms + carry_arm_geoms))
+        if not carry_geoms or not object_collision_geoms:
             logger.warning(
-                "Could not add web-demo object contact pairs: rubber_hand_geoms={}, object_collision_geoms={}",
+                "Could not add carry/object contact pairs: rubber_hand_geoms={}, carry_arm_geoms={}, object_collision_geoms={}",
                 sorted(rubber_hand_geoms),
+                sorted(carry_arm_geoms),
                 sorted(object_collision_geoms),
             )
             return
@@ -2103,7 +2595,7 @@ class MujocoSceneManager:
             if pair.geomname1 and pair.geomname2
         }
         added_pairs = 0
-        for hand_geom_name in sorted(set(rubber_hand_geoms)):
+        for hand_geom_name in carry_geoms:
             for object_geom_name in sorted(set(object_collision_geoms)):
                 pair_name = f"{hand_geom_name}_{object_geom_name}"
                 if pair_name in existing_pair_names:
@@ -2125,10 +2617,14 @@ class MujocoSceneManager:
                 added_pairs += 1
 
         logger.info(
-            "Added {} web-demo rubber-hand/object contact pair(s): hands={}, objects={}",
+            "Added {} carry/object contact pair(s): hands={}, arms={}, objects={}, friction={}, solref={}, gt_mujoco_physics={}",
             added_pairs,
             sorted(set(rubber_hand_geoms)),
+            sorted(set(carry_arm_geoms)),
             sorted(set(object_collision_geoms)),
+            hand_friction,
+            hand_solref,
+            gt_mujoco_physics,
         )
 
     def _maybe_override_composite_object_properties(
@@ -2300,6 +2796,10 @@ class MujocoSceneManager:
         - Robot conaffinity must include object class 4 when object bodies are present,
           otherwise robot-object contacts are silently disabled in one direction.
         """
+        if self._env_flag(_WEB_DEMO_OBJECT_CONTACTS_ENV) and not self._gt_mujoco_physics_enabled():
+            self._configure_web_demo_robot_collision_bits(robot_spec, object_body_names=object_body_names or set())
+            return
+
         has_object_bodies = bool(object_body_names)
         carry_robot_contype = 1
         noncarry_robot_contype = 8 if object_contact_body_names else carry_robot_contype
@@ -2361,11 +2861,87 @@ class MujocoSceneManager:
 
         logger.info(f"Applied collision settings to {geoms_processed} geoms across {bodies_processed} bodies")
 
+    def _configure_web_demo_robot_collision_bits(
+        self,
+        robot_spec: mujoco.MjSpec,
+        *,
+        object_body_names: set[str],
+    ) -> None:
+        """Match the packaged web-demo robot collision bitmasks."""
+
+        bodies_processed = 0
+        terrain_only_geoms = 0
+        rubber_hand_geoms = 0
+        reference_hand_geoms = 0
+        disabled_hand_geoms = 0
+        disabled_rubber = self._env_flag(_DISABLE_RUBBER_HAND_COLLISION_ENV)
+        keep_reference_hand = self._env_flag(_KEEP_REFERENCE_HAND_COLLISION_ENV)
+
+        for body in robot_spec.bodies:
+            if not body.name or body.name in object_body_names:
+                continue
+            bodies_processed += 1
+            body_name = str(body.name)
+            for geom in body.geoms:
+                if int(geom.contype) == 0 and int(geom.conaffinity) == 0:
+                    continue
+
+                geom_name = str(geom.name or "")
+                mesh_name = str(getattr(geom, "meshname", "") or "")
+                combined_name = f"{body_name} {geom_name} {mesh_name}".lower()
+
+                if "left_hand_collision" in combined_name or "right_hand_collision" in combined_name:
+                    if keep_reference_hand:
+                        geom.contype = 1
+                        geom.conaffinity = 6
+                        geom.condim = 6
+                        geom.friction = [0.8, 0.02, 0.005]
+                        geom.solref = [0.01, 1.0]
+                        reference_hand_geoms += 1
+                        continue
+                    geom.contype = 0
+                    geom.conaffinity = 0
+                    disabled_hand_geoms += 1
+                    continue
+
+                if "rubber_hand" in combined_name or "sphere_hand" in combined_name:
+                    if disabled_rubber:
+                        geom.contype = 0
+                        geom.conaffinity = 0
+                        disabled_hand_geoms += 1
+                        continue
+                    geom.contype = 1
+                    geom.conaffinity = 6
+                    geom.condim = 6
+                    geom.friction = [0.8, 0.02, 0.005]
+                    geom.solref = [0.01, 1.0]
+                    rubber_hand_geoms += 1
+                    continue
+
+                geom.contype = 8
+                geom.conaffinity = 2
+                terrain_only_geoms += 1
+
+        logger.info(
+            "Applied web-demo robot collision bits across {} body(ies): terrain_only={} rubber_hand={} reference_hand={} disabled_hand={}",
+            bodies_processed,
+            terrain_only_geoms,
+            rubber_hand_geoms,
+            reference_hand_geoms,
+            disabled_hand_geoms,
+        )
+
     @staticmethod
     def _resolve_single_object_urdf(object_path_spec: str) -> Path:
         resolved = Path(resolve_data_file_path(object_path_spec)).expanduser().resolve()
         if resolved.is_file() and resolved.suffix.lower() == ".urdf":
             return resolved
+
+        if not resolved.exists():
+            for fallback in _object_urdf_compat_fallbacks(resolved):
+                if fallback.is_file() and fallback.suffix.lower() == ".urdf":
+                    logger.warning("Resolved missing object URDF '{}' to compatibility fallback '{}'", resolved, fallback)
+                    return fallback.resolve()
 
         if resolved.is_dir():
             urdfs = sorted(list(resolved.rglob("*.urdf")) + list(resolved.rglob("*.URDF")))

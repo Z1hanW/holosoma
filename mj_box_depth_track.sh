@@ -139,16 +139,163 @@ PY
 MODEL_LOCAL="$(printf '%s\n' "$MODEL_LOCAL" | tail -n 1)"
 
 OBJECT_URDF_RESOLVED="$(
-  "$INFER_PYTHON_BIN" - <<'PY' "$OBJECT_MAP_INPUT" "$MOTION_FILE"
+  "$INFER_PYTHON_BIN" - <<'PY' "$OBJECT_MAP_INPUT" "$MOTION_FILE" "$ROOT_DIR"
 import json
 import sys
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 import numpy as np
 
 raw = sys.argv[1]
 motion_path = Path(sys.argv[2]).expanduser().resolve()
+repo_root = Path(sys.argv[3]).expanduser().resolve()
 stem = motion_path.stem
+
+def object_urdf_fallbacks(path: Path):
+    """Yield current-repo fallbacks for older absolute box-object paths."""
+    expanded = path.expanduser()
+    parts = expanded.parts
+    if "data" in parts:
+        data_idx = parts.index("data")
+        yield repo_root.joinpath(*parts[data_idx:])
+
+    name = expanded.stem
+    if name:
+        if "__" in name:
+            names = [name]
+        else:
+            names = [f"{name}__eff10", f"{name}__eff09", f"{name}__baseline"]
+        for candidate_name in names:
+            yield repo_root / "data/ds_box_data/scale_mix_all/train_g1_w_obj_prepared/_generated_urdfs" / f"{candidate_name}.urdf"
+
+
+def resolve_existing_urdf(path_str: str) -> Path:
+    candidate = Path(path_str).expanduser()
+    if candidate.is_file():
+        return maybe_write_motion_sized_urdf(candidate.resolve())
+    for fallback in object_urdf_fallbacks(candidate):
+        if fallback.is_file():
+            return maybe_write_motion_sized_urdf(fallback.resolve())
+    return maybe_write_motion_sized_urdf(candidate.resolve())
+
+
+def _parse_vec(raw: str | None, default: tuple[float, float, float]) -> np.ndarray:
+    if not raw:
+        return np.asarray(default, dtype=np.float64)
+    values = np.asarray([float(part) for part in str(raw).replace(",", " ").split()], dtype=np.float64)
+    if values.size == 1:
+        values = np.repeat(values, 3)
+    if values.size != 3:
+        raise ValueError(f"Expected 3-vector, got {raw!r}")
+    return values
+
+
+def _obj_extents(path: Path) -> np.ndarray | None:
+    vertices: list[list[float]] = []
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if not line.startswith("v "):
+                    continue
+                parts = line.strip().split()
+                if len(parts) < 4:
+                    continue
+                vertices.append([float(parts[1]), float(parts[2]), float(parts[3])])
+    except OSError:
+        return None
+    if not vertices:
+        return None
+    arr = np.asarray(vertices, dtype=np.float64)
+    return arr.max(axis=0) - arr.min(axis=0)
+
+
+def _motion_object_size() -> np.ndarray | None:
+    try:
+        with np.load(motion_path, allow_pickle=True) as data:
+            if "object_size" not in data:
+                return None
+            size = np.asarray(data["object_size"], dtype=np.float64).reshape(-1)
+    except Exception:
+        return None
+    if size.size != 3 or not np.all(np.isfinite(size)) or np.any(size <= 0.0):
+        return None
+    return size
+
+
+def _mesh_path(urdf_path: Path, filename: str) -> Path:
+    mesh_path = Path(filename).expanduser()
+    if mesh_path.is_absolute():
+        return mesh_path
+    return (urdf_path.parent / mesh_path).resolve()
+
+
+def maybe_write_motion_sized_urdf(urdf_path: Path) -> Path:
+    desired_size = _motion_object_size()
+    if desired_size is None or not urdf_path.is_file():
+        return urdf_path
+
+    try:
+        tree = ET.parse(urdf_path)
+    except Exception:
+        return urdf_path
+    root_xml = tree.getroot()
+    mesh_elems = list(root_xml.findall(".//mesh"))
+    if not mesh_elems:
+        return urdf_path
+
+    first_mesh = mesh_elems[0]
+    first_filename = str(first_mesh.get("filename") or "").strip()
+    if not first_filename:
+        return urdf_path
+    first_scale = _parse_vec(first_mesh.get("scale"), (1.0, 1.0, 1.0))
+    first_extents = _obj_extents(_mesh_path(urdf_path, first_filename))
+    if first_extents is None:
+        return urdf_path
+    current_size = first_extents * first_scale
+    if current_size.size != 3 or np.any(current_size <= 0.0):
+        return urdf_path
+    if np.allclose(current_size, desired_size, rtol=0.02, atol=2.0e-3):
+        return urdf_path
+
+    scale_ratio = desired_size / current_size
+    if not np.all(np.isfinite(scale_ratio)) or np.any(scale_ratio <= 0.0):
+        return urdf_path
+
+    for mesh in mesh_elems:
+        filename = str(mesh.get("filename") or "").strip()
+        if filename:
+            mesh.set("filename", str(_mesh_path(urdf_path, filename)))
+        old_scale = _parse_vec(mesh.get("scale"), (1.0, 1.0, 1.0))
+        new_scale = old_scale * scale_ratio
+        mesh.set("scale", " ".join(f"{value:.9g}" for value in new_scale))
+
+    mass_elem = root_xml.find(".//inertial/mass")
+    inertia_elem = root_xml.find(".//inertial/inertia")
+    if mass_elem is not None and inertia_elem is not None:
+        try:
+            mass = float(mass_elem.get("value", "0"))
+        except ValueError:
+            mass = 0.0
+        if mass > 0.0:
+            sx, sy, sz = desired_size.tolist()
+            inertia_elem.set("ixx", f"{(mass / 12.0) * (sy * sy + sz * sz):.9g}")
+            inertia_elem.set("iyy", f"{(mass / 12.0) * (sx * sx + sz * sz):.9g}")
+            inertia_elem.set("izz", f"{(mass / 12.0) * (sx * sx + sy * sy):.9g}")
+            inertia_elem.set("ixy", "0")
+            inertia_elem.set("ixz", "0")
+            inertia_elem.set("iyz", "0")
+
+    out_dir = repo_root / "logs/sim2sim_exports/object_urdfs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{motion_path.stem}__{urdf_path.stem}__motion_size.urdf"
+    tree.write(out_path, encoding="utf-8", xml_declaration=True)
+    print(
+        f"[INFO] generated motion-sized object URDF {out_path}: current_size={current_size.tolist()} desired_size={desired_size.tolist()} scale_ratio={scale_ratio.tolist()}",
+        file=sys.stderr,
+    )
+    return out_path.resolve()
+
 
 candidate = Path(raw).expanduser() if raw else None
 if candidate is not None and candidate.is_file() and candidate.suffix.lower() == ".json":
@@ -160,14 +307,14 @@ if candidate is not None and candidate.is_file() and candidate.suffix.lower() ==
     path = entry.get("object_urdf_path") or entry.get("urdf_path")
     if not path:
         raise SystemExit(f"Object map entry for clip '{stem}' has no object_urdf_path")
-    print(Path(path).expanduser().resolve())
+    print(resolve_existing_urdf(str(path)))
 elif candidate is not None and str(candidate):
-    print(candidate.expanduser().resolve())
+    print(resolve_existing_urdf(str(candidate)))
 else:
     with np.load(motion_path, allow_pickle=True) as data:
         if "object_urdf_path" not in data:
             raise SystemExit(f"No OBJECT_URDF map provided and motion has no object_urdf_path: {motion_path}")
-        print(Path(str(np.asarray(data["object_urdf_path"]).item())).expanduser().resolve())
+        print(resolve_existing_urdf(str(np.asarray(data["object_urdf_path"]).item())))
 PY
 )"
 
@@ -191,14 +338,14 @@ if is_truthy_env "$GT_MUJOCO_PHYSICS"; then
   export HOLOSOMA_GT_MUJOCO_PHYSICS=1
   export HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS=0
   export SIM_USE_TRAINING_URDF_OBJECT_SCENE=1
-  export SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML=1
-  export SIM_COPY_TENDONS_FROM_ROBOT_XML=1
+  export SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML=0
+  export SIM_COPY_TENDONS_FROM_ROBOT_XML=0
   export SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML=0
   export SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML=0
   export MUJOCO_OBJECT_MASS_SCALE=""
-  export MUJOCO_OBJECT_MASS_OVERRIDE=0.1
-  export MUJOCO_OBJECT_GEOM_FRICTION="[0.9,0.5,0.5]"
-  export MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION=""
+  export MUJOCO_OBJECT_MASS_OVERRIDE="${MUJOCO_OBJECT_MASS_OVERRIDE:-1.4}"
+  export MUJOCO_OBJECT_GEOM_FRICTION="${MUJOCO_OBJECT_GEOM_FRICTION:-[0.6,0.02,0.005]}"
+  export MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION="${MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION:-[0.6,0.02,0.005]}"
   export MUJOCO_OBJECT_LATERAL_FRICTION=""
   export MUJOCO_OBJECT_ROLLING_FRICTION=""
   export MUJOCO_OBJECT_CONTACT_STIFFNESS=""
@@ -239,7 +386,7 @@ echo "[INFO] model=$MODEL_LOCAL"
 echo "[INFO] inference_config=$INFERENCE_CONFIG"
 echo "[INFO] perception=${ENABLE_SPLIT_PERCEPTION_OBS} preset=${PERCEPTION_PRESET} camera_source=${PERCEPTION_CAMERA_SOURCE}"
 echo "[INFO] object_contact_body_markers=${MUJOCO_OBJECT_CONTACT_BODY_MARKERS:-<all robot collision bodies>}"
-echo "[INFO] object_mass_override=${MUJOCO_OBJECT_MASS_OVERRIDE:-<none>} object_geom_friction=${MUJOCO_OBJECT_GEOM_FRICTION:-<none>} lateral_friction=${MUJOCO_OBJECT_LATERAL_FRICTION:-<none>} rolling_friction=${MUJOCO_OBJECT_ROLLING_FRICTION:-<none>} contact_stiffness=${MUJOCO_OBJECT_CONTACT_STIFFNESS:-<none>} contact_damping=${MUJOCO_OBJECT_CONTACT_DAMPING:-<none>} web_demo_object_contacts=${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS}"
+echo "[INFO] object_mass_override=${MUJOCO_OBJECT_MASS_OVERRIDE:-<none>} object_geom_friction=${MUJOCO_OBJECT_GEOM_FRICTION:-<none>} object_terrain_pair_friction=${MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION:-<none>} lateral_friction=${MUJOCO_OBJECT_LATERAL_FRICTION:-<none>} rolling_friction=${MUJOCO_OBJECT_ROLLING_FRICTION:-<none>} contact_stiffness=${MUJOCO_OBJECT_CONTACT_STIFFNESS:-<none>} contact_damping=${MUJOCO_OBJECT_CONTACT_DAMPING:-<none>} web_demo_object_contacts=${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS}"
 echo "[INFO] gt_mujoco_physics=${GT_MUJOCO_PHYSICS} zero_passive_dynamics=${HOLOSOMA_GT_MUJOCO_ZERO_PASSIVE_DYNAMICS:-0}"
 
 if is_truthy_env "${DRY_RUN:-0}"; then

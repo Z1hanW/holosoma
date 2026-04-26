@@ -11,6 +11,28 @@ else:
     from importlib_resources import files
 
 
+def _repo_root_data_fallback(path_obj: Path) -> Path | None:
+    """Resolve relocated repo-local DS assets embedded as absolute paths."""
+    parts = path_obj.expanduser().parts
+    try:
+        repo_root = Path(__file__).resolve().parents[4]
+    except IndexError:
+        return None
+
+    for idx, part in enumerate(parts[:-1]):
+        if part != "data":
+            continue
+        tail = parts[idx:]
+        if len(tail) < 2 or tail[1] != "ds_box_data":
+            continue
+
+        candidate = repo_root.joinpath(*tail)
+        if candidate.exists():
+            return candidate
+
+    return None
+
+
 def resolve_data_file_path(file_path: str) -> str:
     """
     Resolve a data file path.
@@ -52,9 +74,14 @@ def resolve_data_file_path(file_path: str) -> str:
         base = files("holosoma.data")
         return str(base / suffix) if suffix else str(base)
 
-    # 3. If it's an absolute path, return as-is
+    # 3. If it's an absolute path, return as-is unless it is a relocated repo-local DS asset.
     path_obj = Path(file_path)
     if path_obj.is_absolute():
+        if path_obj.exists():
+            return file_path
+        fallback = _repo_root_data_fallback(path_obj)
+        if fallback is not None:
+            return str(fallback)
         return file_path
 
     # 4. Otherwise, resolve relative path to absolute (relative to CWD)

@@ -45,9 +45,7 @@ def _origin_transform(origin_el: ET.Element | None) -> np.ndarray:
 
 def _normalize_urdf_path(urdf_path: str | Path) -> Path:
     raw = str(urdf_path)
-    if raw.startswith("@holosoma/") or raw.startswith("holosoma/"):
-        return Path(resolve_data_file_path(raw)).resolve()
-    return Path(raw).expanduser().resolve()
+    return Path(resolve_data_file_path(raw)).expanduser().resolve()
 
 
 def _parse_float(raw: str | None, default: float) -> float:

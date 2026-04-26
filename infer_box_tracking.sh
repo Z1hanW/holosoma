@@ -828,6 +828,7 @@ DEFAULT_REAL_MOTION_DIR="$(pick_first_existing_path \
   "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_carry_aug_mix_ml" \
   "${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_carry_aug_mix_ml")"
 DS_DATA_ROOT="${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}"
+DS_DATA_ROOT="$(ogds_resolve_data_root "${DS_DATA_ROOT}")"
 DEFAULT_PURE_DS_MOTION_DIR="$(ogds_default_motion_dir "${DS_DATA_ROOT}" pure-sd)"
 DEFAULT_MIX_MOTION_DIR="$(ogds_default_motion_dir "${DS_DATA_ROOT}" mix-naive)"
 DEFAULT_OMOMO_URDF="$(pick_first_existing_path \

@@ -526,6 +526,7 @@ class SimulatorBridge:
                 "robot_root_state": robot_root_state,
                 "robot_dof_pos": robot_dof_pos,
                 "robot_dof_vel": robot_dof_vel,
+                "robot_dof_names": list(getattr(self.simulator, "dof_names", [])),
                 "actors": actor_states,
             }
             extra_payload_provider = getattr(self.simulator, "_get_split_sim_state_extra_payload", None)

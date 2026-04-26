@@ -48,6 +48,10 @@ def _parse_debug_float_list_env(name: str, *, expected_len: int) -> list[float] 
     return [float(part) for part in parts]
 
 
+def _truthy_env(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def setup_simulator_imports(config: ExperimentConfig | RunSimConfig) -> None:
     """Setup simulator-specific imports without side effects.
 
@@ -750,6 +754,12 @@ class DirectSimulation:
                         .astype(np.float32, copy=False)
                     )
 
+                zero_init_velocities = _truthy_env("HOLOSOMA_MOTION_INIT_ZERO_VELOCITIES")
+                if zero_init_velocities:
+                    root_lin_vel = np.zeros_like(root_lin_vel, dtype=np.float32)
+                    root_ang_vel = np.zeros_like(root_ang_vel, dtype=np.float32)
+                    dof_vel = np.zeros_like(dof_vel, dtype=np.float32)
+
                 root_state = torch.tensor(
                     [[*root_pos.tolist(), *root_quat_xyzw.tolist(), *root_lin_vel.tolist(), *root_ang_vel.tolist()]],
                     device=self.device,
@@ -775,6 +785,9 @@ class DirectSimulation:
                     )
                     object_lin_vel = np.asarray(data["object_lin_vel_w"][frame_idx], dtype=np.float32)
                     object_ang_vel = np.zeros(3, dtype=np.float32)
+                    if zero_init_velocities:
+                        object_lin_vel = np.zeros_like(object_lin_vel, dtype=np.float32)
+                        object_ang_vel = np.zeros_like(object_ang_vel, dtype=np.float32)
                     object_state = torch.tensor(
                         [[
                             *object_pos.tolist(),

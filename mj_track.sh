@@ -116,6 +116,10 @@ SIM_DEVICE="${SIM_DEVICE:-}"
 MUJOCO_BACKEND="${MUJOCO_BACKEND:-}"
 TERRAIN_STATIC_FRICTION="${TERRAIN_STATIC_FRICTION:-}"
 TERRAIN_DYNAMIC_FRICTION="${TERRAIN_DYNAMIC_FRICTION:-}"
+TERRAIN_STATIC_FRICTION_EXPLICIT=0
+TERRAIN_DYNAMIC_FRICTION_EXPLICIT=0
+[[ -n "${TERRAIN_STATIC_FRICTION+x}" ]] && [[ -n "$TERRAIN_STATIC_FRICTION" ]] && TERRAIN_STATIC_FRICTION_EXPLICIT=1
+[[ -n "${TERRAIN_DYNAMIC_FRICTION+x}" ]] && [[ -n "$TERRAIN_DYNAMIC_FRICTION" ]] && TERRAIN_DYNAMIC_FRICTION_EXPLICIT=1
 SIM_VIRTUAL_GANTRY_ENABLED="${SIM_VIRTUAL_GANTRY_ENABLED:-False}"
 SIM_MOTION_INIT_MODE_EXPLICIT=0
 [[ -n "${SIM_MOTION_INIT_MODE+x}" ]] && SIM_MOTION_INIT_MODE_EXPLICIT=1
@@ -164,13 +168,16 @@ PERCEPTION_MAX_DISTANCE="${PERCEPTION_MAX_DISTANCE:-}"
 PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH="${PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH:-}"
 PERCEPTION_UPDATE_HZ="${PERCEPTION_UPDATE_HZ:-}"
 PERCEPTION_CAMERA_FPS="${PERCEPTION_CAMERA_FPS:-}"
-PERCEPTION_CAMERA_WARP_EDGE_NOISE="${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-}"
 PERCEPTION_CAMERA_WARP_BUFFER_LEN="${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-}"
 PERCEPTION_CAMERA_WARP_LATENCY_FRAME="${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-}"
+PERCEPTION_CAMERA_WARP_EDGE_NOISE="${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-False}"
+PERCEPTION_CAMERA_WARP_ENABLE_HOLES="${PERCEPTION_CAMERA_WARP_ENABLE_HOLES:-False}"
+PERCEPTION_CAMERA_APPLY_SENSOR_NOISE="${PERCEPTION_CAMERA_APPLY_SENSOR_NOISE:-False}"
 PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH="${PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH:-}"
 PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN="${PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN:-training}"
 PERCEPTION_OBS_TRANSPORT="${PERCEPTION_OBS_TRANSPORT:-shm}"
 PERCEPTION_OBS_SHM_NAME="${PERCEPTION_OBS_SHM_NAME:-depth_img_shm}"
+PERCEPTION_OBS_EXTERNAL="${PERCEPTION_OBS_EXTERNAL:-0}"
 SIM_USE_ZMQ_LOWCMD="${SIM_USE_ZMQ_LOWCMD:-1}"
 SKIP_POLICY="${SKIP_POLICY:-0}"
 MJ_TRACK_MODE="${MJ_TRACK_MODE:-both}"
@@ -210,10 +217,10 @@ USE_ROOT_REFERENCE_AT_CLIP_START_RAW="${USE_ROOT_REFERENCE_AT_CLIP_START-__unset
 USE_ROOT_REFERENCE_AT_CLIP_START="${USE_ROOT_REFERENCE_AT_CLIP_START:-}"
 SIM_ADD_DEFAULT_OBJECT_ACTUATORS_RAW="${SIM_ADD_DEFAULT_OBJECT_ACTUATORS-__unset__}"
 SIM_ADD_DEFAULT_OBJECT_ACTUATORS="${SIM_ADD_DEFAULT_OBJECT_ACTUATORS:-1}"
-SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML="${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML:-1}"
-SIM_COPY_TENDONS_FROM_ROBOT_XML="${SIM_COPY_TENDONS_FROM_ROBOT_XML:-1}"
-SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML="${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML:-1}"
-SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML="${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML:-1}"
+SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML="${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML:-}"
+SIM_COPY_TENDONS_FROM_ROBOT_XML="${SIM_COPY_TENDONS_FROM_ROBOT_XML:-}"
+SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML="${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML:-}"
+SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML="${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML:-}"
 SIM_USE_TRAINING_URDF_OBJECT_SCENE="${SIM_USE_TRAINING_URDF_OBJECT_SCENE:-1}"
 MUJOCO_OBJECT_MASS_SCALE="${MUJOCO_OBJECT_MASS_SCALE:-}"
 MUJOCO_OBJECT_MASS_OVERRIDE="${MUJOCO_OBJECT_MASS_OVERRIDE:-}"
@@ -268,6 +275,7 @@ export HOLOSOMA_ONNX_ALIGN_MAX_STEPS
 export HOLOSOMA_ONNX_ALIGN_POSE_TOL
 export HOLOSOMA_ONNX_OFFSET_APPLIES_TO_MOTION_INDEX
 export HOLOSOMA_CLIP_JOINT_TARGETS
+export HOLOSOMA_MUJOCO_APPLY_TRAINING_JOINT_DYNAMICS="${HOLOSOMA_MUJOCO_APPLY_TRAINING_JOINT_DYNAMICS:-1}"
 if [[ -n "$POLICY_CONTROL_PORT" && -z "${HOLOSOMA_POLICY_CONTROL_PORT:-}" ]]; then
   export HOLOSOMA_POLICY_CONTROL_PORT="$POLICY_CONTROL_PORT"
 fi
@@ -343,11 +351,16 @@ resolve_python_with_modules() {
   exit 1
 }
 
-MUJOCO_PY="$(resolve_python_with_modules "mujoco holosoma torch tyro" \
-  "$(resolve_python "$MUJOCO_PY")" \
-  /home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin/python \
-  /home/ubuntu/.holosoma_deps/miniconda3/envs/hsmujoco/bin/python \
-  /home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python)"
+if [[ -n "$MUJOCO_PY" ]]; then
+  MUJOCO_PY="$(resolve_python_with_modules "mujoco holosoma torch tyro typeguard" "$MUJOCO_PY")"
+else
+  MUJOCO_PY="$(resolve_python_with_modules "mujoco holosoma torch tyro typeguard" \
+    /home/ubuntu/.holosoma_deps/miniconda3/envs/hsmujoco/bin/python \
+    /home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin/python \
+    /home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python \
+    "$(command -v python 2>/dev/null || true)" \
+    "$(command -v python3 2>/dev/null || true)")"
+fi
 INFER_PY="$(resolve_python "$INFER_PY" \
   /home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python \
   /home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python)"
@@ -362,6 +375,171 @@ apply_motion_clip_object_defaults() {
   if [[ -z "$OBJECT_URDF" ]]; then
     OBJECT_URDF="$DEFAULT_OBJECT_URDF"
   fi
+}
+
+resolve_motion_sized_object_urdf() {
+  local object_urdf="$1"
+  "$INFER_PY" - <<'PY' "$object_urdf" "$MOTION_FILE" "$ROOT_DIR"
+import sys
+from pathlib import Path
+import xml.etree.ElementTree as ET
+
+import numpy as np
+
+raw_path = sys.argv[1]
+motion_path = Path(sys.argv[2]).expanduser().resolve()
+repo_root = Path(sys.argv[3]).expanduser().resolve()
+
+
+def object_urdf_fallbacks(path):
+    expanded = path.expanduser()
+    parts = expanded.parts
+    if "data" in parts:
+        data_idx = parts.index("data")
+        yield repo_root.joinpath(*parts[data_idx:])
+
+    name = expanded.stem
+    if name:
+        if "__" in name:
+            names = [name]
+        else:
+            names = [f"{name}__eff10", f"{name}__eff09", f"{name}__baseline"]
+        for candidate_name in names:
+            yield repo_root / "data/ds_box_data/scale_mix_all/train_g1_w_obj_prepared/_generated_urdfs" / f"{candidate_name}.urdf"
+
+
+def parse_vec(raw, default):
+    if not raw:
+        return np.asarray(default, dtype=np.float64)
+    values = np.asarray([float(part) for part in str(raw).replace(",", " ").split()], dtype=np.float64)
+    if values.size == 1:
+        values = np.repeat(values, 3)
+    if values.size != 3:
+        raise ValueError(f"Expected 3-vector, got {raw!r}")
+    return values
+
+
+def obj_extents(path):
+    vertices = []
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                if not line.startswith("v "):
+                    continue
+                parts = line.strip().split()
+                if len(parts) < 4:
+                    continue
+                vertices.append([float(parts[1]), float(parts[2]), float(parts[3])])
+    except OSError:
+        return None
+    if not vertices:
+        return None
+    arr = np.asarray(vertices, dtype=np.float64)
+    return arr.max(axis=0) - arr.min(axis=0)
+
+
+def motion_object_size():
+    try:
+        with np.load(motion_path, allow_pickle=True) as data:
+            if "object_size" not in data:
+                return None
+            size = np.asarray(data["object_size"], dtype=np.float64).reshape(-1)
+    except Exception:
+        return None
+    if size.size != 3 or not np.all(np.isfinite(size)) or np.any(size <= 0.0):
+        return None
+    return size
+
+
+def mesh_path(urdf_path, filename):
+    path = Path(filename).expanduser()
+    if path.is_absolute():
+        return path
+    return (urdf_path.parent / path).resolve()
+
+
+def write_motion_sized_urdf(urdf_path):
+    desired_size = motion_object_size()
+    if desired_size is None or not urdf_path.is_file():
+        return urdf_path
+
+    try:
+        tree = ET.parse(urdf_path)
+    except Exception:
+        return urdf_path
+
+    root_xml = tree.getroot()
+    mesh_elems = list(root_xml.findall(".//mesh"))
+    if not mesh_elems:
+        return urdf_path
+
+    first_mesh = mesh_elems[0]
+    first_filename = str(first_mesh.get("filename") or "").strip()
+    if not first_filename:
+        return urdf_path
+
+    first_scale = parse_vec(first_mesh.get("scale"), (1.0, 1.0, 1.0))
+    first_extents = obj_extents(mesh_path(urdf_path, first_filename))
+    if first_extents is None:
+        return urdf_path
+
+    current_size = first_extents * first_scale
+    if current_size.size != 3 or np.any(current_size <= 0.0):
+        return urdf_path
+    if np.allclose(current_size, desired_size, rtol=0.02, atol=2.0e-3):
+        return urdf_path
+
+    scale_ratio = desired_size / current_size
+    if not np.all(np.isfinite(scale_ratio)) or np.any(scale_ratio <= 0.0):
+        return urdf_path
+
+    for mesh in mesh_elems:
+        filename = str(mesh.get("filename") or "").strip()
+        if filename:
+            mesh.set("filename", str(mesh_path(urdf_path, filename)))
+        old_scale = parse_vec(mesh.get("scale"), (1.0, 1.0, 1.0))
+        new_scale = old_scale * scale_ratio
+        mesh.set("scale", " ".join(f"{value:.9g}" for value in new_scale))
+
+    mass_elem = root_xml.find(".//inertial/mass")
+    inertia_elem = root_xml.find(".//inertial/inertia")
+    if mass_elem is not None and inertia_elem is not None:
+        try:
+            mass = float(mass_elem.get("value", "0"))
+        except ValueError:
+            mass = 0.0
+        if mass > 0.0:
+            sx, sy, sz = desired_size.tolist()
+            inertia_elem.set("ixx", f"{(mass / 12.0) * (sy * sy + sz * sz):.9g}")
+            inertia_elem.set("iyy", f"{(mass / 12.0) * (sx * sx + sz * sz):.9g}")
+            inertia_elem.set("izz", f"{(mass / 12.0) * (sx * sx + sy * sy):.9g}")
+            inertia_elem.set("ixy", "0")
+            inertia_elem.set("ixz", "0")
+            inertia_elem.set("iyz", "0")
+
+    out_dir = repo_root / "logs/sim2sim_exports/object_urdfs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{motion_path.stem}__{urdf_path.stem}__motion_size.urdf"
+    tree.write(out_path, encoding="utf-8", xml_declaration=True)
+    print(
+        f"[INFO] generated motion-sized object URDF {out_path}: current_size={current_size.tolist()} desired_size={desired_size.tolist()} scale_ratio={scale_ratio.tolist()}",
+        file=sys.stderr,
+    )
+    return out_path.resolve()
+
+
+candidate = Path(raw_path).expanduser()
+if candidate.is_file():
+    print(write_motion_sized_urdf(candidate.resolve()))
+    raise SystemExit(0)
+
+for fallback in object_urdf_fallbacks(candidate):
+    if fallback.is_file():
+        print(write_motion_sized_urdf(fallback.resolve()))
+        raise SystemExit(0)
+
+print(write_motion_sized_urdf(candidate.resolve()))
+PY
 }
 
 apply_training_sim_overrides() {
@@ -445,8 +623,16 @@ PY
         fi
         ;;
       MUJOCO_BACKEND) MUJOCO_BACKEND="$value" ;;
-      TERRAIN_STATIC_FRICTION) TERRAIN_STATIC_FRICTION="$value" ;;
-      TERRAIN_DYNAMIC_FRICTION) TERRAIN_DYNAMIC_FRICTION="$value" ;;
+      TERRAIN_STATIC_FRICTION)
+        if [[ "$TERRAIN_STATIC_FRICTION_EXPLICIT" != "1" ]]; then
+          TERRAIN_STATIC_FRICTION="$value"
+        fi
+        ;;
+      TERRAIN_DYNAMIC_FRICTION)
+        if [[ "$TERRAIN_DYNAMIC_FRICTION_EXPLICIT" != "1" ]]; then
+          TERRAIN_DYNAMIC_FRICTION="$value"
+        fi
+        ;;
     esac
   done <<< "$override_lines"
 }
@@ -660,15 +846,15 @@ apply_gt_mujoco_physics_overrides() {
   export HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS=0
 
   SIM_USE_TRAINING_URDF_OBJECT_SCENE=1
-  SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML=1
-  SIM_COPY_TENDONS_FROM_ROBOT_XML=1
+  SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML=0
+  SIM_COPY_TENDONS_FROM_ROBOT_XML=0
   SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML=0
   SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML=0
 
   MUJOCO_OBJECT_MASS_SCALE=""
-  MUJOCO_OBJECT_MASS_OVERRIDE="0.1"
-  MUJOCO_OBJECT_GEOM_FRICTION="[0.9,0.5,0.5]"
-  MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION=""
+  MUJOCO_OBJECT_MASS_OVERRIDE="${MUJOCO_OBJECT_MASS_OVERRIDE:-1.4}"
+  MUJOCO_OBJECT_GEOM_FRICTION="${MUJOCO_OBJECT_GEOM_FRICTION:-[0.6,0.02,0.005]}"
+  MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION="${MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION:-[0.6,0.02,0.005]}"
   MUJOCO_OBJECT_LATERAL_FRICTION=""
   MUJOCO_OBJECT_ROLLING_FRICTION=""
   MUJOCO_OBJECT_CONTACT_STIFFNESS=""
@@ -707,7 +893,6 @@ field_map = {
     "camera_warp_min_valid_depth": "PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH",
     "camera_warp_buffer_len": "PERCEPTION_CAMERA_WARP_BUFFER_LEN",
     "camera_warp_latency_frame": "PERCEPTION_CAMERA_WARP_LATENCY_FRAME",
-    "camera_warp_edge_noise": "PERCEPTION_CAMERA_WARP_EDGE_NOISE",
 }
 for src_key, env_key in field_map.items():
     value = perception_cfg.get(src_key)
@@ -774,11 +959,6 @@ PY
       PERCEPTION_CAMERA_WARP_LATENCY_FRAME)
         if [[ -z "$PERCEPTION_CAMERA_WARP_LATENCY_FRAME" ]]; then
           PERCEPTION_CAMERA_WARP_LATENCY_FRAME="$value"
-        fi
-        ;;
-      PERCEPTION_CAMERA_WARP_EDGE_NOISE)
-        if [[ -z "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ]]; then
-          PERCEPTION_CAMERA_WARP_EDGE_NOISE="$value"
         fi
         ;;
     esac
@@ -982,6 +1162,7 @@ PY
 
 apply_training_motion_launch_defaults "$MODEL_INPUT"
 apply_motion_clip_object_defaults
+OBJECT_URDF="$(resolve_motion_sized_object_urdf "$OBJECT_URDF")"
 
 "$INFER_PY" "$ROOT_DIR/src/holosoma_inference/holosoma_inference/tools/patch_motion_onnx.py" \
   --model-path "$MODEL_INPUT" \
@@ -1078,6 +1259,7 @@ fi
 PERCEPTION_OBS_TRANSPORT_NORMALIZED="$(printf '%s' "$PERCEPTION_OBS_TRANSPORT" | tr '[:upper:]' '[:lower:]')"
 PUBLISH_PERCEPTION_OBS_SHM=0
 USE_POLICY_PERCEPTION_OBS_SHM=0
+PERCEPTION_OBS_EXTERNAL_ENABLED=0
 case "$PERCEPTION_OBS_TRANSPORT_NORMALIZED" in
   shm|shared_memory|shared-memory|myholosoma)
     PUBLISH_PERCEPTION_OBS_SHM=1
@@ -1094,6 +1276,10 @@ case "$PERCEPTION_OBS_TRANSPORT_NORMALIZED" in
     exit 1
     ;;
 esac
+if is_truthy_env "$PERCEPTION_OBS_EXTERNAL"; then
+  PERCEPTION_OBS_EXTERNAL_ENABLED=1
+  PUBLISH_PERCEPTION_OBS_SHM=0
+fi
 
 if [[ "$INFERENCE_CONFIG" == "g1-29dof-wbt-w-object" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-generalist" ]]; then
   if [[ -z "$USE_SIM_TIME" ]]; then
@@ -1184,15 +1370,18 @@ POLICY_LOG="$RUN_DIR/policy.log"
 if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]]; then
   echo "[INFO] motion_file=${MOTION_FILE}"
   echo "[INFO] object_urdf=${OBJECT_URDF}"
-  echo "[INFO] robot_urdf=${HOLOSOMA_W_OBJECT_URDF:-g1/main_mesh_collision_halfspherehand.urdf}"
+  echo "[INFO] robot_urdf=${HOLOSOMA_W_OBJECT_URDF:-g1/g1_29dof.urdf}"
   echo "[INFO] model=${MODEL_INPUT}"
   echo "[INFO] inference_config=${INFERENCE_CONFIG}"
   echo "[INFO] sim_device=${SIM_DEVICE:-<default>}"
   echo "[INFO] mujoco_object_scene training_urdf=${SIM_USE_TRAINING_URDF_OBJECT_SCENE} default_actuators=${SIM_ADD_DEFAULT_OBJECT_ACTUATORS} copy_joint_defaults=${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML} copy_tendons=${SIM_COPY_TENDONS_FROM_ROBOT_XML} copy_collision_geoms=${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML} copy_contact_pairs=${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML}"
-  echo "[INFO] perception camera: source=${PERCEPTION_CAMERA_SOURCE} raw=${PERCEPTION_CAMERA_WIDTH:-<default>}x${PERCEPTION_CAMERA_HEIGHT:-<default>} crop_top=${PERCEPTION_CAMERA_WARP_CROP_TOP:-<default>} crop_bottom=${PERCEPTION_CAMERA_WARP_CROP_BOTTOM:-<default>} crop_left=${PERCEPTION_CAMERA_WARP_CROP_LEFT:-<default>} crop_right=${PERCEPTION_CAMERA_WARP_CROP_RIGHT:-<default>} update_hz=${PERCEPTION_UPDATE_HZ:-<default>} camera_fps=${PERCEPTION_CAMERA_FPS:-<default>} pitch_deg=${PERCEPTION_CAMERA_PITCH_DEG:-<default>} vfov_deg=${PERCEPTION_CAMERA_VFOV_DEG:-<default>} hfov_deg=${PERCEPTION_CAMERA_HFOV_DEG:-<default>} include_robot_mesh=${PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH:-<default>} near=${PERCEPTION_CAMERA_NEAR:-<default>} far=${PERCEPTION_CAMERA_FAR:-<default>} max_distance=${PERCEPTION_MAX_DISTANCE:-<default>} warp_min_valid_depth=${PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH:-<default>} warp_buffer_len=${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-<default>} warp_latency_frame=${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-<default>} warp_edge_noise=${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-<default>} transport=${PERCEPTION_OBS_TRANSPORT}"
+  echo "[INFO] perception camera: source=${PERCEPTION_CAMERA_SOURCE} raw=${PERCEPTION_CAMERA_WIDTH:-<default>}x${PERCEPTION_CAMERA_HEIGHT:-<default>} crop_top=${PERCEPTION_CAMERA_WARP_CROP_TOP:-<default>} crop_bottom=${PERCEPTION_CAMERA_WARP_CROP_BOTTOM:-<default>} crop_left=${PERCEPTION_CAMERA_WARP_CROP_LEFT:-<default>} crop_right=${PERCEPTION_CAMERA_WARP_CROP_RIGHT:-<default>} update_hz=${PERCEPTION_UPDATE_HZ:-<default>} camera_fps=${PERCEPTION_CAMERA_FPS:-<default>} pitch_deg=${PERCEPTION_CAMERA_PITCH_DEG:-<default>} vfov_deg=${PERCEPTION_CAMERA_VFOV_DEG:-<default>} hfov_deg=${PERCEPTION_CAMERA_HFOV_DEG:-<default>} include_robot_mesh=${PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH:-<default>} near=${PERCEPTION_CAMERA_NEAR:-<default>} far=${PERCEPTION_CAMERA_FAR:-<default>} max_distance=${PERCEPTION_MAX_DISTANCE:-<default>} warp_min_valid_depth=${PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH:-<default>} warp_buffer_len=${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-<default>} warp_latency_frame=${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-<default>} warp_edge_noise=${PERCEPTION_CAMERA_WARP_EDGE_NOISE} warp_holes=${PERCEPTION_CAMERA_WARP_ENABLE_HOLES} sensor_noise=${PERCEPTION_CAMERA_APPLY_SENSOR_NOISE} transport=${PERCEPTION_OBS_TRANSPORT}"
+  if is_truthy_env "$PERCEPTION_OBS_EXTERNAL"; then
+    echo "[INFO] perception_obs_external=1; MuJoCo will not publish perception_obs. Start an external publisher/relay on port=${PERCEPTION_OBS_PORT} or shm=${PERCEPTION_OBS_SHM_NAME}."
+  fi
 fi
 if is_truthy_env "$GT_MUJOCO_PHYSICS"; then
-  echo "[INFO] GT MuJoCo physics: object_mass=${MUJOCO_OBJECT_MASS_OVERRIDE} object_friction=${MUJOCO_OBJECT_GEOM_FRICTION} copy_joint_defaults=${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML} copy_tendons=${SIM_COPY_TENDONS_FROM_ROBOT_XML} copy_collision_geoms=${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML} copy_contact_pairs=${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML} zero_passive_dynamics=${HOLOSOMA_GT_MUJOCO_ZERO_PASSIVE_DYNAMICS:-0} web_demo_object_contacts=${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS:-0}"
+  echo "[INFO] GT MuJoCo physics: object_mass=${MUJOCO_OBJECT_MASS_OVERRIDE} object_friction=${MUJOCO_OBJECT_GEOM_FRICTION} object_terrain_pair_friction=${MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION:-<none>} copy_joint_defaults=${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML} copy_tendons=${SIM_COPY_TENDONS_FROM_ROBOT_XML} copy_collision_geoms=${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML} copy_contact_pairs=${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML} zero_passive_dynamics=${HOLOSOMA_GT_MUJOCO_ZERO_PASSIVE_DYNAMICS:-0} web_demo_object_contacts=${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS:-0}"
 fi
 if is_truthy_env "${DRY_RUN:-0}"; then
   echo "[INFO] DRY_RUN=1; not launching MuJoCo or policy."
@@ -1255,7 +1444,7 @@ if [[ "$MJ_TRACK_MODE" != "policy" ]]; then
     simulator:mujoco \
     robot:g1_29dof_w_object \
     terrain:terrain_locomotion_plane \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]] && printf '%s' "perception:${PERCEPTION_PRESET}" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_OBS_EXTERNAL_ENABLED" != "1" ]] && printf '%s' "perception:${PERCEPTION_PRESET}" ) \
     --training.headless "$TRAINING_HEADLESS" \
     --simulator.config.debug-viz "$SIM_DEBUG_VIZ" \
     $( [[ "$MUJOCO_SHOW_OBJECT_COLLISION" == "1" ]] && printf '%s %s' "--simulator.config.mujoco-show-object-collision" "True" ) \
@@ -1295,10 +1484,10 @@ if [[ "$MJ_TRACK_MODE" != "policy" ]]; then
     --simulator.config.bridge.listen-control=True \
     --simulator.config.bridge.sim-state-port "$SIM_STATE_PORT" \
     --simulator.config.bridge.control-port "$SIM_CONTROL_PORT" \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]] && printf '%s %s' "--simulator.config.bridge.publish-perception-obs" "True" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]] && printf '%s %s' "--simulator.config.bridge.perception-obs-port" "$PERCEPTION_OBS_PORT" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PUBLISH_PERCEPTION_OBS_SHM" == "1" ]] && printf '%s %s' "--simulator.config.bridge.publish-perception-obs-shm" "True" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PUBLISH_PERCEPTION_OBS_SHM" == "1" ]] && printf '%s %s' "--simulator.config.bridge.perception-obs-shm-name" "$PERCEPTION_OBS_SHM_NAME" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_OBS_EXTERNAL_ENABLED" != "1" ]] && printf '%s %s' "--simulator.config.bridge.publish-perception-obs" "True" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_OBS_EXTERNAL_ENABLED" != "1" ]] && printf '%s %s' "--simulator.config.bridge.perception-obs-port" "$PERCEPTION_OBS_PORT" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_OBS_EXTERNAL_ENABLED" != "1" && "$PUBLISH_PERCEPTION_OBS_SHM" == "1" ]] && printf '%s %s' "--simulator.config.bridge.publish-perception-obs-shm" "True" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_OBS_EXTERNAL_ENABLED" != "1" && "$PUBLISH_PERCEPTION_OBS_SHM" == "1" ]] && printf '%s %s' "--simulator.config.bridge.perception-obs-shm-name" "$PERCEPTION_OBS_SHM_NAME" ) \
     $( [[ "$SIM_USE_ZMQ_LOWCMD" == "1" ]] && printf '%s %s' "--simulator.config.bridge.use-zmq-lowcmd" "True" ) \
     $( [[ "$SIM_IGNORE_DEFAULT_IDLE_COMMAND" == "1" ]] && printf '%s %s' "--simulator.config.bridge.ignore-default-idle-command" "True" ) \
     $( [[ "$SIM_LOG_FIRST_COMMAND_SUMMARY" == "1" ]] && printf '%s %s' "--simulator.config.bridge.log-first-command-summary" "True" ) \
@@ -1327,9 +1516,11 @@ if [[ "$MJ_TRACK_MODE" != "policy" ]]; then
     $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH" ]] && printf '%s %s' "--perception.camera-warp-min-valid-depth" "$PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH" ) \
     $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_UPDATE_HZ" ]] && printf '%s %s' "--perception.update-hz" "$PERCEPTION_UPDATE_HZ" ) \
     $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_FPS" ]] && printf '%s %s' "--perception.camera-fps" "$PERCEPTION_CAMERA_FPS" ) \
-    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ]] && printf '%s %s' "--perception.camera-warp-edge-noise" "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ) \
     $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_BUFFER_LEN" ]] && printf '%s %s' "--perception.camera-warp-buffer-len" "$PERCEPTION_CAMERA_WARP_BUFFER_LEN" ) \
     $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_LATENCY_FRAME" ]] && printf '%s %s' "--perception.camera-warp-latency-frame" "$PERCEPTION_CAMERA_WARP_LATENCY_FRAME" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ]] && printf '%s %s' "--perception.camera-warp-edge-noise" "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_ENABLE_HOLES" ]] && printf '%s %s' "--perception.camera-warp-enable-holes" "$PERCEPTION_CAMERA_WARP_ENABLE_HOLES" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_APPLY_SENSOR_NOISE" ]] && printf '%s %s' "--perception.camera-apply-sensor-noise" "$PERCEPTION_CAMERA_APPLY_SENSOR_NOISE" ) \
     >"$SIM_LOG" 2>&1 &
   SIM_PID=$!
 

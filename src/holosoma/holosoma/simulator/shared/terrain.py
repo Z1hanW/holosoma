@@ -264,7 +264,12 @@ class Terrain(TerrainInterface):
 
         self._height_field_raw: np.ndarray = np.zeros((self._tot_rows, self._tot_cols), dtype=np.int16)
         self._max_slope: float = self._cfg.max_slope
-        self.randomized_terrain()
+        if self._type == "plane":
+            for k in range(self._num_sub_terrains):
+                i, j = np.unravel_index(k, (self._num_rows, self._num_cols))
+                self.add_terrain_to_map(self.make_terrain("flat", 0.0), int(i), int(j))
+        else:
+            self.randomized_terrain()
 
         vertices, triangles = terrain_utils.convert_heightfield_to_trimesh(
             self._height_field_raw, self._horizontal_scale, self._vertical_scale, self._slope_threshold

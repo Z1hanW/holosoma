@@ -2534,78 +2534,85 @@ class MotionCommand(CommandTermBase):
             root_lin_vel[runtime_prepend_mask] = prepend_targets[4]
             root_ang_vel[runtime_prepend_mask] = prepend_targets[5]
 
-        # 2. Adding noise
-        reset_noise_scale = torch.ones((env_ids.numel(), 1), device=self.device, dtype=torch.float32)
-        reset_noise_scale_3 = reset_noise_scale.expand(-1, 3)
-
-        # 2.1 prepare the noise scale
-        dof_pos_noise = self.init_pose_cfg.dof_pos * self.init_pose_cfg.overall_noise_scale  # float
-        root_pos_noise = (
-            torch.tensor(
-                self.init_pose_cfg.root_pos,
-                device=self.device,
-            )
-            * self.init_pose_cfg.overall_noise_scale
-        )  # (3,)
-        root_rot_noise_rpy = (
-            torch.tensor(
-                self.init_pose_cfg.root_rot,
-                device=self.device,
-            )
-            * self.init_pose_cfg.overall_noise_scale
-        )  # (3,)
-        root_vel_noise = (
-            torch.tensor(
-                self.init_pose_cfg.root_lin_vel,
-                device=self.device,
-            )
-            * self.init_pose_cfg.overall_noise_scale
-        )  # (3,)
-        root_ang_vel_noise_rpy = (
-            torch.tensor(
-                self.init_pose_cfg.root_ang_vel,
-                device=self.device,
-            )
-            * self.init_pose_cfg.overall_noise_scale
-        )  # (3,)
-
-        # 2.2 Adding noise to dof_pos, root_pos, root_vel, root_ang_vel, root_rot
-        # 1.2.1 dof_pos
-        target_dof_pos = (
-            dof_pos + (torch.rand(dof_pos.shape, device=self.device) - 0.5) * 2 * dof_pos_noise * reset_noise_scale
-        )  # (num_envs, num_dofs)
         soft_joint_pos_limits = self._env.simulator.dof_pos_limits  # type: ignore[attr-defined]  # (num_dofs, 2)
-        target_dof_pos = torch.clip(target_dof_pos, soft_joint_pos_limits[:, 0], soft_joint_pos_limits[:, 1])
-
-        # 1.2.2 dof_vel no noise
-        target_dof_vel = dof_vel
-
-        # 1.2.3 root_pos
-        target_root_pos = root_pos + (
-            torch.rand(root_pos.shape, device=self.device) - 0.5
-        ) * 2 * root_pos_noise.unsqueeze(0) * reset_noise_scale_3  # (num_envs, 3)
-
-        # 1.2.4 root_rot
-        rand_sample_rpy = (
-            (torch.rand((len(env_ids), 3), device=self.device) - 0.5)
-            * 2
-            * root_rot_noise_rpy.unsqueeze(0)
-            * reset_noise_scale_3
+        mujoco_reset_noise_enabled = os.environ.get("HOLOSOMA_MUJOCO_RESET_NOISE", "0").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
         )
-        orientations_delta = quat_from_euler_xyz(
-            rand_sample_rpy[:, 0], rand_sample_rpy[:, 1], rand_sample_rpy[:, 2]
-        )  # (num_envs, 4), xyzw
-        target_root_rot = quat_mul(orientations_delta, root_rot, w_last=True)  # (num_envs, 4), xyzw
+        disable_reset_noise = (
+            self._env.simulator.get_simulator_type() == SimulatorType.MUJOCO and not mujoco_reset_noise_enabled
+        )
+        if disable_reset_noise:
+            target_dof_pos = torch.clip(dof_pos, soft_joint_pos_limits[:, 0], soft_joint_pos_limits[:, 1])
+            target_dof_vel = dof_vel
+            target_root_pos = root_pos
+            target_root_rot = root_rot
+            target_root_lin_vel = root_lin_vel
+            target_root_ang_vel = root_ang_vel
+        else:
+            reset_noise_scale = torch.ones((env_ids.numel(), 1), device=self.device, dtype=torch.float32)
+            reset_noise_scale_3 = reset_noise_scale.expand(-1, 3)
 
-        # 1.2.5 root_lin_vel
-        target_root_lin_vel = root_lin_vel + (
-            torch.rand(root_lin_vel.shape, device=self.device) - 0.5
-        ) * 2 * root_vel_noise.unsqueeze(0) * reset_noise_scale_3  # (num_envs, 3)
+            dof_pos_noise = self.init_pose_cfg.dof_pos * self.init_pose_cfg.overall_noise_scale
+            root_pos_noise = (
+                torch.tensor(
+                    self.init_pose_cfg.root_pos,
+                    device=self.device,
+                )
+                * self.init_pose_cfg.overall_noise_scale
+            )
+            root_rot_noise_rpy = (
+                torch.tensor(
+                    self.init_pose_cfg.root_rot,
+                    device=self.device,
+                )
+                * self.init_pose_cfg.overall_noise_scale
+            )
+            root_vel_noise = (
+                torch.tensor(
+                    self.init_pose_cfg.root_lin_vel,
+                    device=self.device,
+                )
+                * self.init_pose_cfg.overall_noise_scale
+            )
+            root_ang_vel_noise_rpy = (
+                torch.tensor(
+                    self.init_pose_cfg.root_ang_vel,
+                    device=self.device,
+                )
+                * self.init_pose_cfg.overall_noise_scale
+            )
 
-        # 1.2.6 root_ang_vel
-        target_root_ang_vel = root_ang_vel + (
-            torch.rand(root_ang_vel.shape, device=self.device) - 0.5
-        ) * 2 * root_ang_vel_noise_rpy.unsqueeze(0) * reset_noise_scale_3  # (num_envs, 3)
+            target_dof_pos = dof_pos + (
+                torch.rand(dof_pos.shape, device=self.device) - 0.5
+            ) * 2 * dof_pos_noise * reset_noise_scale
+            target_dof_pos = torch.clip(target_dof_pos, soft_joint_pos_limits[:, 0], soft_joint_pos_limits[:, 1])
+            target_dof_vel = dof_vel
+
+            target_root_pos = root_pos + (
+                torch.rand(root_pos.shape, device=self.device) - 0.5
+            ) * 2 * root_pos_noise.unsqueeze(0) * reset_noise_scale_3
+
+            rand_sample_rpy = (
+                (torch.rand((len(env_ids), 3), device=self.device) - 0.5)
+                * 2
+                * root_rot_noise_rpy.unsqueeze(0)
+                * reset_noise_scale_3
+            )
+            orientations_delta = quat_from_euler_xyz(
+                rand_sample_rpy[:, 0], rand_sample_rpy[:, 1], rand_sample_rpy[:, 2]
+            )
+            target_root_rot = quat_mul(orientations_delta, root_rot, w_last=True)
+
+            target_root_lin_vel = root_lin_vel + (
+                torch.rand(root_lin_vel.shape, device=self.device) - 0.5
+            ) * 2 * root_vel_noise.unsqueeze(0) * reset_noise_scale_3
+
+            target_root_ang_vel = root_ang_vel + (
+                torch.rand(root_ang_vel.shape, device=self.device) - 0.5
+            ) * 2 * root_ang_vel_noise_rpy.unsqueeze(0) * reset_noise_scale_3
 
         # 3. Set the robot states in simulator
         self._env.simulator.dof_pos[env_ids] = target_dof_pos
@@ -2623,18 +2630,20 @@ class MotionCommand(CommandTermBase):
             obj_ori = self.object_quat_w[env_ids]
             obj_lin_vel = self.object_lin_vel_w[env_ids]
 
-            # 4.2 add noise to the object states
-            obj_pos_noise = torch.tensor(
-                [self.init_pose_cfg.object_pos],
-                device=self.device,
-            )
-            obj_pos_noise = obj_pos_noise * self.init_pose_cfg.overall_noise_scale  # (1, 3)
-            target_obj_pos = obj_pos + (
-                (torch.rand(obj_pos.shape, device=self.device) - 0.5)
-                * 2
-                * obj_pos_noise
-                * reset_noise_scale_3
-            )
+            if disable_reset_noise:
+                target_obj_pos = obj_pos
+            else:
+                obj_pos_noise = torch.tensor(
+                    [self.init_pose_cfg.object_pos],
+                    device=self.device,
+                )
+                obj_pos_noise = obj_pos_noise * self.init_pose_cfg.overall_noise_scale
+                target_obj_pos = obj_pos + (
+                    (torch.rand(obj_pos.shape, device=self.device) - 0.5)
+                    * 2
+                    * obj_pos_noise
+                    * reset_noise_scale_3
+                )
             target_obj_pos, target_obj_ori = self._apply_manual_object_reset_overrides(
                 target_obj_pos, obj_ori, env_ids
             )

@@ -887,10 +887,18 @@ class BasePolicy:
             self.logger.info("Valid robot state received; resuming policy command loop.")
             self._logged_waiting_for_robot_state = False
 
-        if self._policy_control_sub is not None and not self.use_policy_action and not self.get_ready_state:
+        if (
+            self._policy_control_sub is not None
+            and not self._allow_noninteractive_autostart_with_policy_control()
+            and not self.use_policy_action
+            and not self.get_ready_state
+        ):
             if not getattr(self, "_logged_waiting_for_external_policy_start", False):
                 self.logger.info("Policy control is waiting for external start; not sending lowcmd yet.")
                 self._logged_waiting_for_external_policy_start = True
+            waiting_overlay_hook = getattr(self, "_publish_waiting_policy_overlay", None)
+            if callable(waiting_overlay_hook):
+                waiting_overlay_hook(robot_state_data)
             return
         self._logged_waiting_for_external_policy_start = False
 

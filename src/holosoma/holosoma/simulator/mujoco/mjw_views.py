@@ -567,7 +567,7 @@ class MjwRootStateView:
         pos = self.qpos[:, self.pos_slice]  # [N, 3]
         quat_mj = self.qpos[:, self.quat_slice]  # [N, 4] - [w, x, y, z]
         lin_vel = self.qvel[:, self.vel_slice]  # [N, 3]
-        ang_vel = self.qvel[:, self.ang_vel_slice]  # [N, 3]
+        ang_vel_local = self.qvel[:, self.ang_vel_slice]  # [N, 3]
 
         # Convert quaternion: [w, x, y, z] -> [x, y, z, w]
         quat_holo = quat_mj[:, [1, 2, 3, 0]]

@@ -18,7 +18,7 @@ Usage:
 Examples:
   bash mj_env.sh box_74
   HEADLESS=False LAUNCH_VISER=0 bash mj_env.sh box_74
-  COMMAND_WEB_PORT=7070 VISER_PORT=2984 bash mj_env.sh rendered box_74
+  COMMAND_WEB_PORT=7777 VISER_PORT=2984 bash mj_env.sh rendered box_74
 
 Environment:
   MODEL_INPUT / MODEL_PATH / MODEL_REF
@@ -28,9 +28,9 @@ Environment:
   COMMAND_WEB                     default: 1
   COMMAND_WEB_TRACK_ONLY          default: 0; use single-button S rollout-start web UI
   MJ_ENV_AUTO_LAUNCH_POLICY       default: 1; start policy in the same rollout, gated by web ]
-  COMMAND_WEB_PORT                default: first free port in [7070, 7099]
-  COMMAND_WEB_PORT_BASE           default: 7070
-  COMMAND_WEB_PORT_MAX            default: 7099
+  COMMAND_WEB_PORT                default: first free port in [7777, 7799]
+  COMMAND_WEB_PORT_BASE           default: 7777
+  COMMAND_WEB_PORT_MAX            default: 7799
   COMMAND_MANUAL_ENABLED          default: 0; unchecked uses motion-derived command
   COMMAND_VALUE                   default: 0.5 for W/S/A/D x/y
   COMMAND_YAW_DEGREES             default: 17 for Q/E yaw
@@ -45,6 +45,10 @@ Environment:
   VISER_PORT                      default: 2984 when viser is launched
   HOLOSOMA_AUTO_CUDA_FOR_TRAINING_DEPTH
                                   default: 1; select cuda:0 for far_tracking_warp when SIM_DEVICE is unset
+  MJ_ENV_RECORD_ROLLOUT_VIDEO     default: 0; after launch, auto reset/start and save a debug mp4
+  MJ_ENV_RECORD_DURATION          default: 12 seconds
+  MJ_ENV_RECORD_OUTPUT            default: logs/live_debug/mujoco_rollout_<timestamp>.mp4
+  MJ_ENV_RECORD_MUJOCO_XML         default: logs/live_debug/mujoco_rollout_<timestamp>.xml for rendered MP4
 EOF
 }
 
@@ -93,6 +97,36 @@ resolve_python() {
     return
   fi
   echo "[ERROR] No usable python3 found." >&2
+  exit 1
+}
+
+python_has_modules() {
+  local python_bin="$1"
+  shift
+  "$python_bin" - "$@" <<'PY' >/dev/null 2>&1
+import importlib
+import sys
+
+for module_name in sys.argv[1:]:
+    importlib.import_module(module_name)
+raise SystemExit(0)
+PY
+}
+
+resolve_python_with_modules() {
+  local modules_csv="$1"
+  local modules=()
+  read -r -a modules <<<"$modules_csv"
+  shift
+  local candidate
+  for candidate in "$@"; do
+    [[ -n "$candidate" && -x "$candidate" ]] || continue
+    if python_has_modules "$candidate" "${modules[@]}"; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  echo "[ERROR] No usable python found with modules: ${modules_csv}" >&2
   exit 1
 }
 
@@ -186,6 +220,7 @@ export HOLOSOMA_DISABLE_AUTO_RESET="${HOLOSOMA_DISABLE_AUTO_RESET:-1}"
 export HOLOSOMA_DISABLE_MOTION_END_RESET="${HOLOSOMA_DISABLE_MOTION_END_RESET:-1}"
 export HOLOSOMA_DISABLE_CLIP_END_RESET="${HOLOSOMA_DISABLE_CLIP_END_RESET:-1}"
 export HOLOSOMA_DISABLE_BAD_TRACKING_RESET="${HOLOSOMA_DISABLE_BAD_TRACKING_RESET:-1}"
+export HOLOSOMA_MUJOCO_APPLY_TRAINING_JOINT_DYNAMICS="${HOLOSOMA_MUJOCO_APPLY_TRAINING_JOINT_DYNAMICS:-1}"
 export SIM_MOTION_INIT_MODE="${SIM_MOTION_INIT_MODE:-raw_motion}"
 
 HEADLESS_FLAG="$(resolve_headless)"
@@ -197,8 +232,8 @@ fi
 COMMAND_WEB="${COMMAND_WEB:-1}"
 COMMAND_WEB_PORT="${COMMAND_WEB_PORT:-}"
 if [[ -z "$COMMAND_WEB_PORT" ]]; then
-  COMMAND_WEB_PORT_BASE="${COMMAND_WEB_PORT_BASE:-7070}"
-  COMMAND_WEB_PORT_MAX="${COMMAND_WEB_PORT_MAX:-7099}"
+  COMMAND_WEB_PORT_BASE="${COMMAND_WEB_PORT_BASE:-7777}"
+  COMMAND_WEB_PORT_MAX="${COMMAND_WEB_PORT_MAX:-7799}"
   COMMAND_WEB_PORT="$(find_free_port "$COMMAND_WEB_PORT_BASE" "$COMMAND_WEB_PORT_MAX")"
 fi
 COMMAND_MANUAL_ENABLED="${COMMAND_MANUAL_ENABLED:-0}"
@@ -330,6 +365,7 @@ if is_truthy "$COMMAND_WEB" && ! is_truthy "${DRY_RUN:-0}"; then
     --sparse-root-command-port "$SPARSE_ROOT_COMMAND_PORT"
     --control-port "$SIM_CONTROL_PORT"
     --policy-control-port "$POLICY_CONTROL_PORT"
+    --policy-overlay-port "$HOLOSOMA_POLICY_OVERLAY_PORT"
     --scene-proxy-url "http://127.0.0.1:${VISER_PORT_RESOLVED}"
   )
   if is_truthy "$COMMAND_WEB_TRACK_ONLY"; then
@@ -373,6 +409,16 @@ case "$(printf '%s' "$LAUNCH_VISER_RAW" | tr '[:upper:]' '[:lower:]')" in
     ;;
 esac
 
+if [[ "$LAUNCH_VISER_RESOLVED" == "1" && -z "${PYTHON_BIN:-}" ]] && ! is_truthy "${DRY_RUN:-0}"; then
+  PYTHON_BIN="$(resolve_python_with_modules "holosoma.viser_mujoco_sim_state" \
+    /home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin/python \
+    /home/ubuntu/.holosoma_deps/miniconda3/envs/hsmujoco/bin/python \
+    /home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python \
+    "$(command -v python3 2>/dev/null || true)" \
+    "$(command -v python 2>/dev/null || true)")"
+  export PYTHON_BIN
+fi
+
 if is_truthy "$MJ_ENV_AUTO_LAUNCH_POLICY"; then
   echo "[INFO] launching MuJoCo environment + policy"
 else
@@ -408,6 +454,7 @@ if is_truthy "${DRY_RUN:-0}"; then
   exit 0
 fi
 
+LAUNCH_CMD=()
 if [[ "$LAUNCH_VISER_RESOLVED" == "1" ]]; then
   if is_truthy "$COMMAND_WEB"; then
     export HOLOSOMA_VISER_ANNOUNCE_URL="http://localhost:${COMMAND_WEB_PORT}"
@@ -447,8 +494,56 @@ if [[ "$LAUNCH_VISER_RESOLVED" == "1" ]]; then
   if [[ -n "${VISER_PORT_RESOLVED}" ]]; then
     VISER_ARGS+=(--port "${VISER_PORT_RESOLVED}")
   fi
-  bash "${TRACK_LAUNCHER}" "$@" "${VISER_ARGS[@]}"
+  LAUNCH_CMD=(bash "${TRACK_LAUNCHER}" "$@" "${VISER_ARGS[@]}")
 else
   export HOLOSOMA_MJ_TRACK_INTERNAL_CORE=1
-  bash "${TRACK_LAUNCHER}" "$@"
+  LAUNCH_CMD=(bash "${TRACK_LAUNCHER}" "$@")
+fi
+
+if is_truthy "${MJ_ENV_RECORD_ROLLOUT_VIDEO:-0}"; then
+  if ! is_truthy "$COMMAND_WEB"; then
+    echo "[ERROR] MJ_ENV_RECORD_ROLLOUT_VIDEO=1 requires COMMAND_WEB=1 for reset/start control." >&2
+    exit 2
+  fi
+  RECORD_PY="$(resolve_python_with_modules "cv2 numpy zmq loguru mujoco" \
+    /home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin/python \
+    /home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python \
+    /home/ubuntu/.holosoma_deps/miniconda3/envs/hsmujoco/bin/python \
+    "$(command -v python3 2>/dev/null || true)" \
+    "$(command -v python 2>/dev/null || true)")"
+  RECORD_STAMP="$(date +%Y%m%d_%H%M%S)"
+  RECORD_OUTPUT="${MJ_ENV_RECORD_OUTPUT:-${ROOT_DIR}/logs/live_debug/mujoco_rollout_$(date +%Y%m%d_%H%M%S).mp4}"
+  RECORD_MUJOCO_XML="${HOLOSOMA_MUJOCO_EXPORT_XML_PATH:-${MJ_ENV_RECORD_MUJOCO_XML:-${ROOT_DIR}/logs/live_debug/mujoco_rollout_${RECORD_STAMP}.xml}}"
+  export HOLOSOMA_MUJOCO_EXPORT_XML_PATH="$RECORD_MUJOCO_XML"
+  RECORD_DURATION="${MJ_ENV_RECORD_DURATION:-12}"
+  RECORD_FPS="${MJ_ENV_RECORD_FPS:-30}"
+  echo "[INFO] auto rollout recording enabled: output=${RECORD_OUTPUT} xml=${RECORD_MUJOCO_XML} duration=${RECORD_DURATION}s fps=${RECORD_FPS}"
+  "${LAUNCH_CMD[@]}" &
+  rollout_pid=$!
+  trap 'kill "$rollout_pid" 2>/dev/null || true' EXIT
+  for _ in $(seq 1 90); do
+    if curl -fsS "http://127.0.0.1:${COMMAND_WEB_PORT}/state" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  for _ in $(seq 1 60); do
+    if [[ -s "$RECORD_MUJOCO_XML" ]]; then
+      break
+    fi
+    sleep 1
+  done
+  "$RECORD_PY" "${ROOT_DIR}/src/holosoma/holosoma/record_mujoco_rollout_video.py" \
+    --web-port "$COMMAND_WEB_PORT" \
+    --state-port "$SIM_STATE_PORT" \
+    --depth-shm-name "${PERCEPTION_OBS_SHM_NAME:-depth_img_shm}" \
+    --duration "$RECORD_DURATION" \
+    --fps "$RECORD_FPS" \
+    --output "$RECORD_OUTPUT" \
+    --mujoco-xml "$RECORD_MUJOCO_XML" \
+    $( [[ "${MJ_ENV_RECORD_NO_AUTO_START:-0}" == "1" ]] && printf '%s' "--no-auto-start" ) || echo "[WARN] rollout video recording failed" >&2
+  echo "[INFO] rollout recording finished: ${RECORD_OUTPUT}"
+  wait "$rollout_pid"
+else
+  "${LAUNCH_CMD[@]}"
 fi

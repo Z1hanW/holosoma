@@ -408,6 +408,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._keyboard_sparse_root_pressed_keys: set[str] = set()
         self._keyboard_sparse_root_lock = threading.Lock()
         self._keyboard_sparse_root_last_command: tuple[float, float, float] | None = None
+        self._last_sparse_motion_command: list[float] | None = None
+        self._last_sparse_effective_command: list[float] | None = None
+        self._last_sparse_manual_command: list[float] | None = None
+        self._last_sparse_command_source = "auto"
+        self._last_sparse_command_mode = "motion"
+        self._last_sparse_manual_enabled = False
         self._logged_root_reference_clip_start = False
         self._logged_sim_ref_from_sim_state = False
         self._auto_start_motion_clip_pending = False
@@ -475,6 +481,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._logged_target_robot_dof_state_assist = False
         self._use_motion_command_as_q_target = _truthy_env("HOLOSOMA_USE_MOTION_COMMAND_AS_Q_TARGET")
         self._logged_motion_command_q_target = False
+        self._use_motion_data_as_q_target = _truthy_env("HOLOSOMA_USE_MOTION_DATA_AS_Q_TARGET")
+        self._logged_motion_data_q_target = False
         self._prefill_obs_history_on_motion_start = (
             os.environ.get("HOLOSOMA_PREFILL_OBS_HISTORY_ON_MOTION_START", "0").lower()
             in {"1", "true", "yes", "on"}
@@ -1209,7 +1217,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return
         target = self._get_current_motion_target_body_positions()
         if target is None or self._motion_data is None:
-            pub.publish({"clip_active": bool(self.motion_clip_progressing)})
+            payload: dict[str, object] = {"clip_active": bool(self.motion_clip_progressing)}
+            payload.update(self._sparse_root_command_overlay_fields())
+            pub.publish(payload)
             return
 
         body_pos_w, root_pos_w, root_quat_wxyz, idx = target
@@ -1223,6 +1233,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             "root_pos_w": root_pos_w.reshape(-1).tolist(),
             "root_quat_wxyz": root_quat_wxyz.reshape(-1).tolist(),
         }
+        payload.update(self._sparse_root_command_overlay_fields())
         self._maybe_publish_target_robot_root_state_assist(root_pos_w, root_quat_wxyz)
         self._maybe_publish_target_robot_dof_state_assist(idx)
         if self._motion_data.has_object and self._motion_data.object_pos_w is not None and self._motion_data.object_quat_w is not None:
@@ -1235,6 +1246,40 @@ class WholeBodyTrackingPolicy(BasePolicy):
             payload["object_pos_w"] = object_pos_w.reshape(-1).tolist()
             payload["object_quat_wxyz"] = object_quat_wxyz.reshape(-1).tolist()
         pub.publish(payload)
+
+    def _command3(self, command: np.ndarray) -> list[float]:
+        return np.asarray(command, dtype=np.float32).reshape(-1)[:3].astype(float).tolist()
+
+    def _record_sparse_root_command(
+        self,
+        motion_command: np.ndarray,
+        effective_command: np.ndarray,
+        *,
+        source: str,
+        mode: str,
+        manual_enabled: bool,
+        manual_command: np.ndarray | None = None,
+    ) -> None:
+        self._last_sparse_motion_command = self._command3(motion_command)
+        self._last_sparse_effective_command = self._command3(effective_command)
+        self._last_sparse_manual_command = self._command3(manual_command) if manual_command is not None else None
+        self._last_sparse_command_source = str(source)
+        self._last_sparse_command_mode = str(mode)
+        self._last_sparse_manual_enabled = bool(manual_enabled)
+
+    def _sparse_root_command_overlay_fields(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "sparse_command_source": self._last_sparse_command_source,
+            "sparse_command_mode": self._last_sparse_command_mode,
+            "sparse_manual_enabled": bool(self._last_sparse_manual_enabled),
+        }
+        if self._last_sparse_motion_command is not None:
+            payload["sparse_motion_command"] = self._last_sparse_motion_command
+        if self._last_sparse_effective_command is not None:
+            payload["sparse_effective_command"] = self._last_sparse_effective_command
+        if self._last_sparse_manual_command is not None:
+            payload["sparse_manual_command"] = self._last_sparse_manual_command
+        return payload
 
     def _maybe_publish_target_object_state_assist(
         self,
@@ -1444,10 +1489,26 @@ class WholeBodyTrackingPolicy(BasePolicy):
         keyboard_command = self._get_keyboard_sparse_root_command()
         if keyboard_command is not None:
             mode, manual_command = keyboard_command
-            return self._apply_sparse_root_command(motion_command, manual_command, mode)
+            effective_command = self._apply_sparse_root_command(motion_command, manual_command, mode)
+            self._record_sparse_root_command(
+                motion_command,
+                effective_command,
+                source="manual_keyboard",
+                mode=mode,
+                manual_enabled=True,
+                manual_command=manual_command,
+            )
+            return effective_command
 
         sub = self._manual_sparse_root_command_sub
         if sub is None:
+            self._record_sparse_root_command(
+                motion_command,
+                motion_command,
+                source="auto",
+                mode="motion",
+                manual_enabled=False,
+            )
             return motion_command
 
         payload = sub.get_payload()
@@ -1458,6 +1519,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
             logger.info("External sparse root command: enabled={} mode={}", enabled, mode)
             self._manual_sparse_root_command_log_key = log_key
         if not enabled:
+            self._record_sparse_root_command(
+                motion_command,
+                motion_command,
+                source="auto",
+                mode="motion",
+                manual_enabled=False,
+            )
             return motion_command
 
         command_raw = payload.get("command") if isinstance(payload, dict) else None
@@ -1465,15 +1533,38 @@ class WholeBodyTrackingPolicy(BasePolicy):
             manual_command = np.asarray(command_raw, dtype=np.float32).reshape(1, -1)[:, :3]
         except (TypeError, ValueError):
             logger.warning("Ignoring malformed external sparse root command: {}", command_raw)
+            self._record_sparse_root_command(
+                motion_command,
+                motion_command,
+                source="auto",
+                mode="motion",
+                manual_enabled=False,
+            )
             return motion_command
         if manual_command.shape[1] != 3:
             logger.warning("Ignoring external sparse root command with dim {}", manual_command.shape[1])
+            self._record_sparse_root_command(
+                motion_command,
+                motion_command,
+                source="auto",
+                mode="motion",
+                manual_enabled=False,
+            )
             return motion_command
         manual_command = np.nan_to_num(manual_command, nan=0.0, posinf=0.0, neginf=0.0).astype(
             np.float32,
             copy=False,
         )
-        return self._apply_sparse_root_command(motion_command, manual_command, mode)
+        effective_command = self._apply_sparse_root_command(motion_command, manual_command, mode)
+        self._record_sparse_root_command(
+            motion_command,
+            effective_command,
+            source="manual",
+            mode=mode,
+            manual_enabled=True,
+            manual_command=manual_command,
+        )
+        return effective_command
 
     def _get_sparse_target_root_trajectory_command(self, robot_state_data: np.ndarray) -> np.ndarray:
         if self._motion_data is None:
@@ -1683,6 +1774,19 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         return current_obs_buffer_dict
 
+    def _publish_waiting_policy_overlay(self, robot_state_data: np.ndarray) -> None:
+        if not self._uses_sparse_root_command:
+            return
+        try:
+            robot_state_data = self._augment_robot_state_with_sim_state(robot_state_data)
+            self._get_sparse_target_root_trajectory_command(robot_state_data)
+            self._publish_policy_overlay()
+            self._logged_waiting_overlay_error = False
+        except Exception as exc:
+            if not getattr(self, "_logged_waiting_overlay_error", False):
+                self.logger.warning("Unable to publish waiting sparse-root command overlay: {}", exc)
+                self._logged_waiting_overlay_error = True
+
     def rl_inference(self, robot_state_data):
         if self._auto_start_motion_clip_pending and self.use_policy_action and not self.motion_clip_progressing:
             self._auto_start_motion_clip_pending = False
@@ -1736,6 +1840,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
             if not self._logged_motion_command_q_target:
                 logger.info("Using motion_command joint_pos directly as MuJoCo q_target for diagnostic rollout.")
                 self._logged_motion_command_q_target = True
+        if self._use_motion_data_as_q_target and self._motion_data is not None:
+            motion_index = self._get_motion_index()
+            target_joint_pos = self._motion_data.joint_pos[motion_index : motion_index + 1].astype(np.float32, copy=False)
+            self.scaled_policy_action = target_joint_pos - self.default_dof_angles
+            if not self._logged_motion_data_q_target:
+                logger.info("Using motion .npz joint_pos directly as MuJoCo q_target for diagnostic rollout.")
+                self._logged_motion_data_q_target = True
         self._maybe_debug_policy_io(robot_state_data, obs["actor_obs"], perception_obs, policy_action)
         self._publish_policy_overlay()
 

@@ -410,6 +410,39 @@ def _scalar_str(raw: object) -> str:
     return str(array.reshape(-1)[0])
 
 
+def _object_urdf_fallbacks(path: Path) -> list[Path]:
+    candidates: list[Path] = []
+
+    parts = path.expanduser().parts
+    if "data" in parts:
+        data_idx = parts.index("data")
+        candidates.append(REPO_ROOT.joinpath(*parts[data_idx:]))
+
+    stem = path.stem
+    if stem:
+        if "__" in stem:
+            names = [stem]
+        else:
+            names = [f"{stem}__eff10", f"{stem}__eff09", f"{stem}__baseline"]
+        base = REPO_ROOT / "data/ds_box_data/scale_mix_all/train_g1_w_obj_prepared/_generated_urdfs"
+        candidates.extend(base / f"{name}.urdf" for name in names)
+
+    return candidates
+
+
+def _resolve_motion_object_urdf_path(raw_path: str, motion_path: Path) -> Path:
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = motion_path.parent / candidate
+    resolved = candidate.resolve()
+    if resolved.is_file():
+        return resolved
+    for fallback in _object_urdf_fallbacks(resolved):
+        if fallback.is_file():
+            return fallback.resolve()
+    return resolved
+
+
 def _resolve_motion_root_body_index(body_names: list[str]) -> int:
     for preferred in ("pelvis", "base_link", "base", "torso_link"):
         if preferred in body_names:
@@ -540,10 +573,7 @@ def _load_motion_overlay(
             if "object_urdf_path" in data.files:
                 object_urdf_raw = _scalar_str(data["object_urdf_path"])
                 if object_urdf_raw:
-                    object_urdf_path = Path(object_urdf_raw).expanduser()
-                    if not object_urdf_path.is_absolute():
-                        object_urdf_path = motion_path.parent / object_urdf_path
-                    object_urdf_path = object_urdf_path.resolve()
+                    object_urdf_path = _resolve_motion_object_urdf_path(object_urdf_raw, motion_path)
 
             fps = float(np.asarray(data["fps"]).reshape(-1)[0]) if "fps" in data.files else 50.0
     except Exception as exc:
@@ -840,10 +870,18 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     object_visual_handles: list[object] = []
     object_collision_handles: list[object] = []
     loaded_object_snapshot_path: Path | None = None
+    loaded_object_snapshot_signature: tuple[Path, int, int] | None = None
     object_visual_uses_collision_fallback = False
 
+    def _object_snapshot_signature(snapshot_path: Path) -> tuple[Path, int, int] | None:
+        try:
+            stat = snapshot_path.stat()
+        except FileNotFoundError:
+            return None
+        return (snapshot_path, int(stat.st_mtime_ns), int(stat.st_size))
+
     def _clear_object_geom_handles() -> None:
-        nonlocal object_visual_handles, object_collision_handles, loaded_object_snapshot_path, object_visual_uses_collision_fallback
+        nonlocal object_visual_handles, object_collision_handles, loaded_object_snapshot_path, loaded_object_snapshot_signature, object_visual_uses_collision_fallback
         for handle in [*object_visual_handles, *object_collision_handles]:
             try:
                 handle.remove()
@@ -852,6 +890,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         object_visual_handles = []
         object_collision_handles = []
         loaded_object_snapshot_path = None
+        loaded_object_snapshot_signature = None
         object_visual_uses_collision_fallback = False
         object_visual_root.visible = False
         object_collision_root.visible = False
@@ -877,7 +916,10 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             handle.visible = effective_show_collision
 
     def _load_object_geom_handles(snapshot_path: Path) -> bool:
-        nonlocal loaded_object_snapshot_path, object_visual_handles, object_collision_handles, object_visual_uses_collision_fallback
+        nonlocal loaded_object_snapshot_path, loaded_object_snapshot_signature, object_visual_handles, object_collision_handles, object_visual_uses_collision_fallback
+        snapshot_signature = _object_snapshot_signature(snapshot_path)
+        if snapshot_signature is None:
+            return False
         actor_payload = _load_mujoco_object_geom_snapshot(snapshot_path, cfg.object_actor_name)
         if actor_payload is None:
             return False
@@ -934,6 +976,7 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
 
         object_visual_uses_collision_fallback = not object_visual_handles and bool(object_collision_handles)
         loaded_object_snapshot_path = snapshot_path
+        loaded_object_snapshot_signature = snapshot_signature
         logger.info(
             "Loaded MuJoCo object geoms from {} (visual={}, collision={}, collision_fallback={})",
             snapshot_path,
@@ -1424,6 +1467,10 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             _refresh_motion_init_controls(disabled=True)
             _refresh_motion_selection_controls(disabled=True)
             _stop_rollout()
+            try:
+                snapshot_path_default.unlink()
+            except FileNotFoundError:
+                pass
             _clear_object_geom_handles()
             _set_motion_overlay_path(selected_motion_path)
             if motion_overlay is None:
@@ -1433,6 +1480,8 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             _set_motion_overlay_visibility()
             command = _build_rollout_command(cfg, selected_motion_path)
             env = os.environ.copy()
+            explicit_object_urdf = str(env.get("OBJECT_URDF", "")).strip()
+            explicit_clip_object_urdf = str(env.get("SIM2SIM_CLIP_OBJECT_URDF_PATH", "")).strip()
             motion_init_label, motion_init_env = _selected_motion_init()
             env["HOLOSOMA_MJ_TRACK_INTERNAL_CORE"] = "1"
             env["HOLOSOMA_DISABLE_AUTO_RESET"] = "1"
@@ -1443,9 +1492,12 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             env.pop("HOLOSOMA_RESET_TO_DEFAULT_POSE", None)
             env.pop("HOLOSOMA_DEFAULT_POSE_INIT", None)
             env.pop("HOLOSOMA_MOTION_INIT_MANUAL", None)
-            # The wrapper exports the initial clip object. Let mj_track.sh derive it again for the selected motion.
             env.pop("OBJECT_URDF", None)
             env.pop("SIM2SIM_CLIP_OBJECT_URDF_PATH", None)
+            if explicit_object_urdf:
+                env["OBJECT_URDF"] = explicit_object_urdf
+            if explicit_clip_object_urdf:
+                env["SIM2SIM_CLIP_OBJECT_URDF_PATH"] = explicit_clip_object_urdf
             if motion_init_env is not None:
                 if bool(manual_motion_init_mode_cb.value):
                     env["HOLOSOMA_MOTION_INIT_MANUAL"] = "1"
@@ -1481,10 +1533,6 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             if skip_policy is not None:
                 env["SKIP_POLICY"] = "1" if skip_policy else "0"
             last_rollout_skip_policy = str(env.get("SKIP_POLICY", "0")).strip().lower() in {"1", "true", "yes", "on"}
-            try:
-                snapshot_path_default.unlink()
-            except FileNotFoundError:
-                pass
             rollout_log_path.parent.mkdir(parents=True, exist_ok=True)
             rollout_log_handle = rollout_log_path.open("a", encoding="utf-8")
             rollout_proc = subprocess.Popen(
@@ -1789,7 +1837,8 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             snapshot_path = snapshot_path_default
             if isinstance(snapshot_path_raw, str) and snapshot_path_raw.strip():
                 snapshot_path = Path(snapshot_path_raw).expanduser().resolve()
-            if loaded_object_snapshot_path is None and snapshot_path.is_file():
+            snapshot_signature = _object_snapshot_signature(snapshot_path)
+            if snapshot_signature is not None and snapshot_signature != loaded_object_snapshot_signature:
                 _load_object_geom_handles(snapshot_path)
             _update_motion_overlay(
                 sim_time_ms,
