@@ -1576,6 +1576,10 @@ class MuJoCo(BaseSimulator):
                 self._logged_freeze_until_first_command = True
             return
 
+        should_hold_physics = getattr(self.bridge, "should_hold_physics", None) if self.bridge is not None else None
+        if callable(should_hold_physics) and should_hold_physics():
+            return
+
         # Delegate simulation step to backend
         self.backend.step()
 

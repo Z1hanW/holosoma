@@ -676,7 +676,12 @@ class BasePolicy:
 
         return self.scaled_policy_action
 
-    def _get_split_perception_obs(self, expected_dim: int | None = None) -> np.ndarray:
+    def _get_split_perception_obs(
+        self,
+        expected_dim: int | None = None,
+        *,
+        target_sim_time_ms: float | int | None = None,
+    ) -> np.ndarray:
         """Return the latest split-sim perception observation for ONNX perception inputs."""
         if self._perception_obs_shm_sub is not None:
             if expected_dim is None:
@@ -702,11 +707,17 @@ class BasePolicy:
                 "Pass --task.use-split-perception-obs and match --task.perception-obs-port to run_sim."
             )
 
-        payload = self._perception_obs_sub.get_payload()
+        if hasattr(self._perception_obs_sub, "get_payload_at_or_before") and target_sim_time_ms is not None:
+            payload = self._perception_obs_sub.get_payload_at_or_before(target_sim_time_ms)
+        else:
+            payload = self._perception_obs_sub.get_payload()
         if payload is None:
             deadline = time.perf_counter() + 2.0
             while time.perf_counter() < deadline:
-                payload = self._perception_obs_sub.get_payload()
+                if hasattr(self._perception_obs_sub, "get_payload_at_or_before") and target_sim_time_ms is not None:
+                    payload = self._perception_obs_sub.get_payload_at_or_before(target_sim_time_ms)
+                else:
+                    payload = self._perception_obs_sub.get_payload()
                 if payload is not None:
                     break
                 time.sleep(0.01)
@@ -956,6 +967,9 @@ class BasePolicy:
 
         # Stage 5: Action Pub
         with self.latency_tracker.measure("action_pub"):
+            if bool(getattr(self, "_skip_next_lowcmd_publish", False)):
+                self._skip_next_lowcmd_publish = False
+                return
             self.interface.send_low_command(
                 self.cmd_q,
                 self.cmd_dq,

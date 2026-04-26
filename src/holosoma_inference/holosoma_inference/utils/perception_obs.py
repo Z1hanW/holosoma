@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 from multiprocessing import resource_tracker
 from multiprocessing import shared_memory
 
@@ -19,6 +20,7 @@ class PerceptionObsSub:
         self.context: zmq.Context | None = None
         self.socket: zmq.Socket | None = None
         self.last_payload: dict | None = None
+        self.payload_buffer: deque[dict] = deque(maxlen=512)
 
     def start(self) -> None:
         self.context = zmq.Context()
@@ -35,12 +37,33 @@ class PerceptionObsSub:
         while True:
             try:
                 self.last_payload = json.loads(self.socket.recv_string(zmq.NOBLOCK))
+                if isinstance(self.last_payload, dict):
+                    self.payload_buffer.append(self.last_payload)
             except zmq.Again:
                 break
 
     def get_payload(self) -> dict | None:
         self._drain_messages()
         return self.last_payload
+
+    def get_payload_at_or_before(self, sim_time_ms: float | int | None) -> dict | None:
+        self._drain_messages()
+        if sim_time_ms is None:
+            return self.last_payload
+        try:
+            target_ms = float(sim_time_ms)
+        except (TypeError, ValueError):
+            return self.last_payload
+        selected: dict | None = None
+        for payload in reversed(self.payload_buffer):
+            try:
+                payload_ms = float(payload.get("sim_time_ms"))
+            except (TypeError, ValueError):
+                continue
+            if payload_ms <= target_ms:
+                selected = payload
+                break
+        return selected if selected is not None else self.last_payload
 
     def close(self) -> None:
         socket = self.socket

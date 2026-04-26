@@ -633,6 +633,7 @@ class DirectSimulation:
 
         if wants_publish:
             self.simulator._split_sim_perception_provider = self._get_split_sim_perception_obs
+            self.simulator._reset_split_sim_perception_provider = self._reset_split_sim_perception
 
     def _get_split_sim_perception_obs(self) -> list[float] | None:
         if self._perception_manager is None:
@@ -644,6 +645,13 @@ class DirectSimulation:
         if perception_obs.ndim != 2 or perception_obs.shape[0] < 1:
             raise RuntimeError(f"Unexpected perception observation shape: {tuple(perception_obs.shape)}")
         return perception_obs[0].detach().cpu().to(torch.float32).tolist()
+
+    def _reset_split_sim_perception(self) -> None:
+        if self._perception_manager is None:
+            return
+        self._perception_manager.reset()
+        self.simulator.refresh_sim_tensors()
+        self._perception_manager.update()
 
     def _maybe_apply_motion_initial_state(self) -> None:
         motion_init_cfg = self.config.motion_init

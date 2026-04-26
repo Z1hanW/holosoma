@@ -64,7 +64,7 @@ class ClockPub:
             return
 
         try:
-            sim_time_ms = int(sim_time * 1000)
+            sim_time_ms = int(round(sim_time * 1000.0))
             self.socket.send_string(str(sim_time_ms), zmq.NOBLOCK)
         except zmq.Again:
             # Non-blocking send failed, skip this publish

@@ -516,8 +516,9 @@ if is_truthy "${MJ_ENV_RECORD_ROLLOUT_VIDEO:-0}"; then
   RECORD_MUJOCO_XML="${HOLOSOMA_MUJOCO_EXPORT_XML_PATH:-${MJ_ENV_RECORD_MUJOCO_XML:-${ROOT_DIR}/logs/live_debug/mujoco_rollout_${RECORD_STAMP}.xml}}"
   export HOLOSOMA_MUJOCO_EXPORT_XML_PATH="$RECORD_MUJOCO_XML"
   RECORD_DURATION="${MJ_ENV_RECORD_DURATION:-12}"
+  RECORD_SIM_DURATION="${MJ_ENV_RECORD_SIM_DURATION:-}"
   RECORD_FPS="${MJ_ENV_RECORD_FPS:-30}"
-  echo "[INFO] auto rollout recording enabled: output=${RECORD_OUTPUT} xml=${RECORD_MUJOCO_XML} duration=${RECORD_DURATION}s fps=${RECORD_FPS}"
+  echo "[INFO] auto rollout recording enabled: output=${RECORD_OUTPUT} xml=${RECORD_MUJOCO_XML} duration=${RECORD_DURATION}s sim_duration=${RECORD_SIM_DURATION:-wall-only}s fps=${RECORD_FPS}"
   "${LAUNCH_CMD[@]}" &
   rollout_pid=$!
   trap 'kill "$rollout_pid" 2>/dev/null || true' EXIT
@@ -538,6 +539,7 @@ if is_truthy "${MJ_ENV_RECORD_ROLLOUT_VIDEO:-0}"; then
     --state-port "$SIM_STATE_PORT" \
     --depth-shm-name "${PERCEPTION_OBS_SHM_NAME:-depth_img_shm}" \
     --duration "$RECORD_DURATION" \
+    $( [[ -n "$RECORD_SIM_DURATION" ]] && printf '%s %s' "--sim-duration" "$RECORD_SIM_DURATION" ) \
     --fps "$RECORD_FPS" \
     --output "$RECORD_OUTPUT" \
     --mujoco-xml "$RECORD_MUJOCO_XML" \

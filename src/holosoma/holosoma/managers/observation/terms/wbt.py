@@ -728,6 +728,45 @@ def obj_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     return mat[..., :2].reshape(mat.shape[0], -1)
 
 
+def obj_target_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Target object position in robot-ref frame."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    if not motion_command.motion.has_object:
+        return torch.zeros(env.num_envs, 3, device=env.device, dtype=torch.float32)
+
+    pos_b, _ = subtract_frame_transforms(
+        motion_command.robot_ref_pos_w,
+        motion_command.robot_ref_quat_w,
+        motion_command.object_pos_w,
+        motion_command.object_quat_w,
+    )
+    return pos_b.view(env.num_envs, -1)
+
+
+def obj_target_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Target object orientation in robot-ref frame as rot6d."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    if not motion_command.motion.has_object:
+        return torch.zeros(env.num_envs, 6, device=env.device, dtype=torch.float32)
+
+    _, ori_b = subtract_frame_transforms(
+        motion_command.robot_ref_pos_w,
+        motion_command.robot_ref_quat_w,
+        motion_command.object_pos_w,
+        motion_command.object_quat_w,
+    )
+    rot_mat = quaternion_to_matrix(ori_b, w_last=True)
+    return rot_mat[..., :2].reshape(rot_mat.shape[0], -1)
+
+
+def obj_size(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Active object size from motion metadata."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    if not motion_command.motion.has_object:
+        return torch.zeros(env.num_envs, 3, device=env.device, dtype=torch.float32)
+    return motion_command.object_size.view(env.num_envs, -1)
+
+
 def obj_lin_vel_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     unit_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=env.device).unsqueeze(0).repeat(env.num_envs, 1)

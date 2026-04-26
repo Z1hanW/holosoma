@@ -173,8 +173,8 @@ class ObservationOverridesConfig:
     distill_proprio_history_only: bool = False
     """When True, keep multi-frame history only on distillation proprio groups and keep actions single-frame."""
 
-    distill_proprio_history_length: int = 5
-    """History length to use for distillation proprio-only history overrides."""
+    distill_proprio_history_length: int = 1
+    """History length to use for distillation proprio-only history overrides; ``1`` keeps only the current frame."""
 
 
 @dataclass(frozen=True)

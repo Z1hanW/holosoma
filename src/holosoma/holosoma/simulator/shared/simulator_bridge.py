@@ -63,6 +63,8 @@ class SimulatorBridge:
         self._logged_perception_obs_publish = False
         self._use_zmq_lowcmd = bool(getattr(self.bridge_config, "use_zmq_lowcmd", False))
         self._latest_lowcmd_payload: dict | None = None
+        self._pending_lowcmd_payload: dict | None = None
+        self._last_applied_lowcmd_seq: int | None = None
         self._received_external_active_command = False
         self._logged_first_command_summary = False
         self._logged_active_command_summaries = 0
@@ -77,6 +79,26 @@ class SimulatorBridge:
         self._zmq_lowcmd_torque_limit_scale = float(
             os.environ.get("HOLOSOMA_ZMQ_LOWCMD_TORQUE_LIMIT_SCALE", "1.0") or "1.0"
         )
+        self._zmq_lowcmd_latch_control_boundary = (
+            os.environ.get("HOLOSOMA_ZMQ_LOWCMD_LATCH_CONTROL_BOUNDARY", "0").strip().lower()
+            not in {"0", "false", "no", "off"}
+        )
+        self._zmq_lowcmd_lockstep_control_boundary = (
+            os.environ.get("HOLOSOMA_ZMQ_LOWCMD_LOCKSTEP_CONTROL_BOUNDARY", "0").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self._zmq_lowcmd_match_tolerance_ms = float(
+            os.environ.get("HOLOSOMA_ZMQ_LOWCMD_MATCH_TOLERANCE_MS", "1.0") or "1.0"
+        )
+        self._reset_perception_on_first_lowcmd = (
+            os.environ.get("HOLOSOMA_RESET_PERCEPTION_ON_FIRST_LOWCMD", "0").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self._zmq_lowcmd_substep = 0
+        self._zmq_lowcmd_hold_physics = False
+        self._logged_lowcmd_latch = False
+        self._logged_lowcmd_lockstep = False
+        self._last_zmq_torque_preview: list[float] | None = None
         self._sim_state_trace_path = os.environ.get("HOLOSOMA_SPLIT_SIM_STATE_TRACE_PATH", "").strip() or None
         self._sim_state_trace_handle = None
 
@@ -172,12 +194,17 @@ class SimulatorBridge:
     def _reset_zmq_lowcmd_runtime_state(self) -> None:
         """Clear runtime lowcmd state so simulator resets do not reuse stale commands."""
         self._latest_lowcmd_payload = None
+        self._pending_lowcmd_payload = None
+        self._last_applied_lowcmd_seq = None
         self._received_external_active_command = False
         self._logged_first_command_summary = False
         self._logged_active_command_summaries = 0
         self._logged_default_pose_hold = False
         self._logged_initial_pose_hold = False
         self._initial_hold_q = None
+        self._zmq_lowcmd_substep = 0
+        self._zmq_lowcmd_hold_physics = False
+        self._last_zmq_torque_preview = None
 
     def _build_default_pose_hold_targets(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         default_joint_angles = getattr(self.simulator.robot_config.init_state, "default_joint_angles", {}) or {}
@@ -216,9 +243,11 @@ class SimulatorBridge:
         if not self.bridge_config.enabled:
             return
 
-        self._process_control_requests()
+        lowcmd_boundary = self._is_zmq_lowcmd_control_boundary()
+        self._process_control_requests(lowcmd_boundary=lowcmd_boundary)
 
         if self._use_zmq_lowcmd:
+            self._prepare_zmq_lowcmd_for_step(lowcmd_boundary=lowcmd_boundary)
             self._publish_sim_state()
             self._publish_perception_obs()
             torques = self._compute_zmq_lowcmd_torques()
@@ -226,6 +255,8 @@ class SimulatorBridge:
                 torques_tensor = torch.from_numpy(torques).to(device=self.simulator.device, dtype=torch.float32)
                 self.simulator.apply_torques_at_dof(torques_tensor)
             self.clock_pub.publish(self.simulator.time())
+            if not self._zmq_lowcmd_hold_physics:
+                self._advance_zmq_lowcmd_substep()
             return
 
         if not self.robot_bridge:
@@ -258,7 +289,100 @@ class SimulatorBridge:
         sim_time = self.simulator.time()
         self.clock_pub.publish(sim_time)
 
-    def _process_control_requests(self) -> None:
+    def _control_decimation(self) -> int:
+        sim_cfg = getattr(getattr(self.simulator, "simulator_config", None), "sim", None)
+        return max(1, int(getattr(sim_cfg, "control_decimation", 1) or 1))
+
+    def _is_zmq_lowcmd_control_boundary(self) -> bool:
+        if not self._use_zmq_lowcmd:
+            return True
+        return (int(self._zmq_lowcmd_substep) % self._control_decimation()) == 0
+
+    def _advance_zmq_lowcmd_substep(self) -> None:
+        if not self._use_zmq_lowcmd:
+            return
+        self._zmq_lowcmd_substep = (int(self._zmq_lowcmd_substep) + 1) % self._control_decimation()
+
+    def _set_latest_lowcmd_payload(self, payload: dict) -> None:
+        self._latest_lowcmd_payload = payload
+        seq = self._payload_seq(payload)
+        if seq is not None:
+            self._last_applied_lowcmd_seq = seq
+        if self._payload_is_active(payload):
+            first_active_command = not self._received_external_active_command
+            self._received_external_active_command = True
+            if first_active_command and self._reset_perception_on_first_lowcmd:
+                reset_perception = getattr(self.simulator, "_reset_split_sim_perception_provider", None)
+                if callable(reset_perception):
+                    try:
+                        reset_perception()
+                        logger.info("Reset split sim perception buffer at first active ZMQ lowcmd")
+                    except Exception as exc:
+                        logger.warning("Failed to reset split sim perception buffer at first lowcmd: {}", exc)
+            if bool(getattr(self.bridge_config, "log_first_command_summary", False)) and not self._logged_first_command_summary:
+                logger.info(
+                    "Received first ZMQ lowcmd: kp_max={:.3f}, kd_max={:.3f}, tau_max={:.3f}",
+                    float(np.max(np.abs(self._payload_array(payload, "kp")))),
+                    float(np.max(np.abs(self._payload_array(payload, "kd")))),
+                    float(np.max(np.abs(self._payload_array(payload, "tau_ff")))),
+                )
+                self._logged_first_command_summary = True
+
+    def _payload_seq(self, payload: dict | None) -> int | None:
+        if not isinstance(payload, dict):
+            return None
+        try:
+            return int(payload.get("seq"))
+        except (TypeError, ValueError):
+            return None
+
+    def _payload_policy_sim_time_ms(self, payload: dict | None) -> float | None:
+        if not isinstance(payload, dict):
+            return None
+        try:
+            return float(payload.get("policy_sim_time_ms"))
+        except (TypeError, ValueError):
+            return None
+
+    def _payload_is_new_for_lockstep(self, payload: dict | None) -> bool:
+        if not self._payload_is_active(payload):
+            return False
+
+        seq = self._payload_seq(payload)
+        if seq is not None and seq == self._last_applied_lowcmd_seq:
+            return False
+
+        payload_sim_time_ms = self._payload_policy_sim_time_ms(payload)
+        if payload_sim_time_ms is not None:
+            current_sim_time_ms = float(round(self.simulator.time() * 1000.0))
+            if payload_sim_time_ms + self._zmq_lowcmd_match_tolerance_ms < current_sim_time_ms:
+                return False
+        return True
+
+    def _queue_lowcmd_payload(self, payload: dict, *, lowcmd_boundary: bool) -> None:
+        if self._zmq_lowcmd_lockstep_control_boundary:
+            self._pending_lowcmd_payload = payload
+            return
+
+        if not self._zmq_lowcmd_latch_control_boundary:
+            self._set_latest_lowcmd_payload(payload)
+            return
+
+        if not self._logged_lowcmd_latch:
+            logger.info(
+                "Latching split ZMQ lowcmd on MuJoCo control boundaries (decimation={})",
+                self._control_decimation(),
+            )
+            self._logged_lowcmd_latch = True
+
+        self._pending_lowcmd_payload = payload
+        if lowcmd_boundary or (not self._received_external_active_command and self._payload_is_active(payload)):
+            self._set_latest_lowcmd_payload(payload)
+            self._pending_lowcmd_payload = None
+            if not lowcmd_boundary:
+                self._zmq_lowcmd_substep = 0
+
+    def _process_control_requests(self, *, lowcmd_boundary: bool = True) -> None:
         if self.sim_control_sub is None:
             return
 
@@ -366,17 +490,41 @@ class SimulatorBridge:
                 self.simulator.set_dof_state_tensor_robots(env_ids, state)
                 continue
             if action == "lowcmd" and self._use_zmq_lowcmd:
-                self._latest_lowcmd_payload = payload
-                if self._payload_is_active(payload):
-                    self._received_external_active_command = True
-                    if bool(getattr(self.bridge_config, "log_first_command_summary", False)) and not self._logged_first_command_summary:
-                        logger.info(
-                            "Received first ZMQ lowcmd: kp_max={:.3f}, kd_max={:.3f}, tau_max={:.3f}",
-                            float(np.max(np.abs(self._payload_array(payload, "kp")))),
-                            float(np.max(np.abs(self._payload_array(payload, "kd")))),
-                            float(np.max(np.abs(self._payload_array(payload, "tau_ff")))),
-                        )
-                        self._logged_first_command_summary = True
+                self._queue_lowcmd_payload(payload, lowcmd_boundary=lowcmd_boundary)
+                continue
+
+        if (
+            self._use_zmq_lowcmd
+            and self._zmq_lowcmd_latch_control_boundary
+            and lowcmd_boundary
+            and self._pending_lowcmd_payload is not None
+        ):
+            self._set_latest_lowcmd_payload(self._pending_lowcmd_payload)
+            self._pending_lowcmd_payload = None
+
+    def _prepare_zmq_lowcmd_for_step(self, *, lowcmd_boundary: bool) -> None:
+        self._zmq_lowcmd_hold_physics = False
+        if not self._zmq_lowcmd_lockstep_control_boundary:
+            return
+
+        if not self._logged_lowcmd_lockstep:
+            logger.info(
+                "Lockstepping split ZMQ lowcmd on MuJoCo control boundaries "
+                "(decimation={}, sim-time tolerance={} ms)",
+                self._control_decimation(),
+                self._zmq_lowcmd_match_tolerance_ms,
+            )
+            self._logged_lowcmd_lockstep = True
+
+        if not lowcmd_boundary:
+            return
+
+        if self._payload_is_new_for_lockstep(self._pending_lowcmd_payload):
+            self._set_latest_lowcmd_payload(self._pending_lowcmd_payload)
+            self._pending_lowcmd_payload = None
+            return
+
+        self._zmq_lowcmd_hold_physics = True
 
     def _payload_array(self, payload: dict | None, key: str) -> np.ndarray:
         if not isinstance(payload, dict):
@@ -473,6 +621,7 @@ class SimulatorBridge:
             q_target=q_target,
             dq_target=dq_target,
         )
+        self._last_zmq_torque_preview = torques[:8].astype(float).tolist()
         if (
             bool(getattr(self.bridge_config, "log_first_command_summary", False))
             and self._payload_is_active(payload)
@@ -522,13 +671,31 @@ class SimulatorBridge:
                     logger.debug("Skipping sim-state actor '{}': {}", name, exc)
 
             payload = {
-                "sim_time_ms": int(self.simulator.time() * 1000.0),
+                "sim_time_ms": int(round(self.simulator.time() * 1000.0)),
                 "robot_root_state": robot_root_state,
                 "robot_dof_pos": robot_dof_pos,
                 "robot_dof_vel": robot_dof_vel,
                 "robot_dof_names": list(getattr(self.simulator, "dof_names", [])),
                 "actors": actor_states,
             }
+            if self._use_zmq_lowcmd:
+                latest = self._latest_lowcmd_payload
+                pending = self._pending_lowcmd_payload
+                payload["lowcmd"] = {
+                    "seq": self._payload_seq(latest),
+                    "pending_seq": self._payload_seq(pending),
+                    "last_applied_seq": self._last_applied_lowcmd_seq,
+                    "policy_sim_time_ms": self._payload_policy_sim_time_ms(latest),
+                    "pending_policy_sim_time_ms": self._payload_policy_sim_time_ms(pending),
+                    "substep": int(self._zmq_lowcmd_substep),
+                    "control_boundary": bool(self._is_zmq_lowcmd_control_boundary()),
+                    "lockstep": bool(self._zmq_lowcmd_lockstep_control_boundary),
+                    "hold_physics": bool(self._zmq_lowcmd_hold_physics),
+                    "q_target_first": self._payload_array(latest, "q_target")[:8].astype(float).tolist(),
+                    "kp_first": self._payload_array(latest, "kp")[:8].astype(float).tolist(),
+                    "kd_first": self._payload_array(latest, "kd")[:8].astype(float).tolist(),
+                    "torque_first": self._last_zmq_torque_preview,
+                }
             extra_payload_provider = getattr(self.simulator, "_get_split_sim_state_extra_payload", None)
             if callable(extra_payload_provider):
                 extra_payload = extra_payload_provider()
@@ -565,7 +732,7 @@ class SimulatorBridge:
             if self.perception_obs_pub is not None:
                 self.perception_obs_pub.publish(
                     {
-                        "sim_time_ms": int(self.simulator.time() * 1000.0),
+                        "sim_time_ms": int(round(self.simulator.time() * 1000.0)),
                         "perception_obs": perception_obs,
                     }
                 )
@@ -580,6 +747,9 @@ class SimulatorBridge:
         if self.robot_bridge is None:
             return False
         return bool(getattr(self.robot_bridge, "received_external_active_command", False))
+
+    def should_hold_physics(self) -> bool:
+        return bool(self._use_zmq_lowcmd and self._zmq_lowcmd_hold_physics)
 
     def is_enabled(self) -> bool:
         """Check if the bridge is enabled and functional.

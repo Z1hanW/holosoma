@@ -681,6 +681,12 @@ def main() -> None:
     parser.add_argument("--depth-height", type=int, default=58)
     parser.add_argument("--depth-width", type=int, default=87)
     parser.add_argument("--duration", type=float, default=12.0)
+    parser.add_argument(
+        "--sim-duration",
+        type=float,
+        default=0.0,
+        help="Optional simulator-time duration in seconds; wall duration remains the safety timeout.",
+    )
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--output", default="")
     parser.add_argument("--mujoco-xml", default="", help="Exported MuJoCo XML to render instead of the schematic view.")
@@ -800,6 +806,8 @@ def main() -> None:
 
     metadata: list[dict[str, Any]] = []
     start = time.monotonic()
+    start_sim_ms: float | None = None
+    sim_duration_s = float(args.sim_duration)
     frame_period = 1.0 / max(float(args.fps), 1.0e-6)
     next_frame = start
     frame_no = 0
@@ -811,6 +819,16 @@ def main() -> None:
             if elapsed >= float(args.duration):
                 break
             state = sub.get()
+            if state is not None and sim_duration_s > 0.0:
+                try:
+                    sim_ms = float(state.get("sim_time_ms"))
+                except (TypeError, ValueError):
+                    sim_ms = math.nan
+                if math.isfinite(sim_ms):
+                    if start_sim_ms is None:
+                        start_sim_ms = sim_ms
+                    elif (sim_ms - start_sim_ms) >= sim_duration_s * 1000.0 and frame_no > 0:
+                        break
             if now >= next_web:
                 web_state = _json_get(f"{base_url}/state") or web_state
                 next_web = now + 0.25
@@ -852,7 +870,18 @@ def main() -> None:
         depth_reader.close()
 
     meta_path = out_path.with_suffix(".json")
-    meta_path.write_text(json.dumps({"video": str(out_path), "samples": metadata}, indent=2), encoding="utf-8")
+    meta_path.write_text(
+        json.dumps(
+            {
+                "video": str(out_path),
+                "wall_duration_limit_s": float(args.duration),
+                "sim_duration_target_s": sim_duration_s,
+                "samples": metadata,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     logger.info("Wrote rollout video: {}", out_path)
     logger.info("Wrote rollout metadata: {}", meta_path)
 

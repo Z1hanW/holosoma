@@ -699,9 +699,11 @@ def test_distill_critic_obs_keeps_single_frame_state_and_action():
 
     kept_terms = {
         "motion_command",
-        "obj_target_pose_size_b",
         "obj_pos_b",
         "obj_ori_b",
+        "obj_target_pos_b",
+        "obj_target_ori_b",
+        "obj_size",
         "obj_lin_vel_b",
         "obj_ang_vel_b",
         "obj_sparse_goal_xy_pick_root_heading",

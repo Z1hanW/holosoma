@@ -75,6 +75,43 @@ actor_obs_motion_tracking = ObsGroupCfg(
 actor_obs_w_object_terms = actor_obs_shared.terms.copy()
 actor_obs_w_object_terms.update(
     {
+        "obj_pos_b": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_pos_b",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "obj_ori_b": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_ori_b",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "obj_target_pos_b": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_target_pos_b",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "obj_target_ori_b": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_target_ori_b",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "obj_size": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_size",
+            scale=1.0,
+            noise=0.0,
+        ),
+    }
+)
+actor_obs_w_object = ObsGroupCfg(
+    concatenate=actor_obs_shared.concatenate,
+    enable_noise=actor_obs_shared.enable_noise,
+    history_length=actor_obs_shared.history_length,
+    terms=actor_obs_w_object_terms,
+)
+
+actor_obs_w_object_legacy_terms = actor_obs_shared.terms.copy()
+actor_obs_w_object_legacy_terms.update(
+    {
         "obj_target_pose_size_b": ObsTermCfg(
             func="holosoma.managers.observation.terms.wbt:obj_target_pose_size_b",
             scale=1.0,
@@ -92,16 +129,6 @@ actor_obs_w_object_terms.update(
         ),
     }
 )
-actor_obs_w_object = ObsGroupCfg(
-    concatenate=actor_obs_shared.concatenate,
-    enable_noise=actor_obs_shared.enable_noise,
-    history_length=actor_obs_shared.history_length,
-    terms=actor_obs_w_object_terms,
-)
-
-actor_obs_w_object_legacy_terms = actor_obs_w_object_terms.copy()
-actor_obs_w_object_legacy_terms.pop("obj_lin_vel_b", None)
-actor_obs_w_object_legacy_terms.pop("obj_ang_vel_b", None)
 
 actor_obs_w_object_legacy = ObsGroupCfg(
     concatenate=actor_obs_shared.concatenate,
@@ -240,11 +267,6 @@ critic_obs_motion_tracking_terms["motion_future_target_poses"] = ObsTermCfg(
 critic_obs_w_object_terms = critic_obs_shared_terms.copy()
 critic_obs_w_object_terms.update(
     {
-        "obj_target_pose_size_b": ObsTermCfg(
-            func="holosoma.managers.observation.terms.wbt:obj_target_pose_size_b",
-            scale=1.0,
-            noise=0.0,
-        ),
         "obj_pos_b": ObsTermCfg(
             func="holosoma.managers.observation.terms.wbt:obj_pos_b",
             scale=1.0,
@@ -252,6 +274,21 @@ critic_obs_w_object_terms.update(
         ),
         "obj_ori_b": ObsTermCfg(
             func="holosoma.managers.observation.terms.wbt:obj_ori_b",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "obj_target_pos_b": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_target_pos_b",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "obj_target_ori_b": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_target_ori_b",
+            scale=1.0,
+            noise=0.0,
+        ),
+        "obj_size": ObsTermCfg(
+            func="holosoma.managers.observation.terms.wbt:obj_size",
             scale=1.0,
             noise=0.0,
         ),

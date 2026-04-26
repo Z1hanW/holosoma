@@ -27,6 +27,8 @@ class ZmqSimInterfaceWrapper:
         self.kd_level = 1.0
         self._wc_key_map: dict[int, str] = {}
         self._last_robot_state_data: np.ndarray | None = None
+        self._last_sim_time_ms: float | None = None
+        self._lowcmd_seq = 0
 
         self._sim_state_sub = SimStateSub(port=sim_state_port)
         self._sim_state_sub.start()
@@ -50,6 +52,10 @@ class ZmqSimInterfaceWrapper:
         state = self._sim_state_sub.get_state()
         if state is None:
             return self._last_robot_state_data
+        try:
+            self._last_sim_time_ms = float(state.get("sim_time_ms"))
+        except (TypeError, ValueError):
+            pass
 
         robot_root_state = state.get("robot_root_state")
         robot_dof_pos = state.get("robot_dof_pos")
@@ -79,6 +85,9 @@ class ZmqSimInterfaceWrapper:
         self._last_robot_state_data = robot_state_data
         return robot_state_data
 
+    def get_sim_time_ms(self) -> float | None:
+        return self._last_sim_time_ms
+
     def send_low_command(
         self,
         cmd_q,
@@ -107,6 +116,8 @@ class ZmqSimInterfaceWrapper:
         self._sim_control_pub.publish(
             {
                 "action": "lowcmd",
+                "seq": int(self._lowcmd_seq),
+                "policy_sim_time_ms": None if self._last_sim_time_ms is None else float(self._last_sim_time_ms),
                 "q_target": q_target.tolist(),
                 "dq_target": dq_target.tolist(),
                 "tau_ff": tau_ff.tolist(),
@@ -114,6 +125,7 @@ class ZmqSimInterfaceWrapper:
                 "kd": kd.tolist(),
             }
         )
+        self._lowcmd_seq += 1
 
     def publish_actor_state(self, name: str, state) -> None:
         state_arr = np.asarray(state, dtype=np.float32).reshape(-1)

@@ -618,6 +618,15 @@ class SymmetryUtils:
     def mirror_obs_obj_ori_b(self, obj_ori_b: torch.Tensor) -> torch.Tensor:
         return self._mirror_mat3x2_flat(obj_ori_b)
 
+    def mirror_obs_obj_target_pos_b(self, obj_target_pos_b: torch.Tensor) -> torch.Tensor:
+        return self._mirror_vec3_flat(obj_target_pos_b)
+
+    def mirror_obs_obj_target_ori_b(self, obj_target_ori_b: torch.Tensor) -> torch.Tensor:
+        return self._mirror_mat3x2_flat(obj_target_ori_b)
+
+    def mirror_obs_obj_size(self, obj_size: torch.Tensor) -> torch.Tensor:
+        return obj_size
+
     def mirror_obs_obj_lin_vel_b(self, obj_lin_vel_b: torch.Tensor) -> torch.Tensor:
         return self._mirror_vec3_flat(obj_lin_vel_b)
 

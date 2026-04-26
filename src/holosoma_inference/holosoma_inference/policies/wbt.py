@@ -1800,9 +1800,14 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self._last_clock_reading = None
             self._last_policy_control_clock_ms = None
         elif self._should_skip_sim_time_control_tick():
+            self._skip_next_lowcmd_publish = (
+                os.environ.get("HOLOSOMA_POLICY_SUPPRESS_DUP_SIM_TIME_LOWCMD", "0").strip().lower()
+                in {"1", "true", "yes", "on"}
+            )
             return self.scaled_policy_action.copy()
         elif self.use_sim_time:
             self._update_clock()
+        self._skip_next_lowcmd_publish = False
 
         motion_index = self._get_motion_index()
         self._sync_motion_outputs_from_onnx(motion_index)
@@ -1812,8 +1817,19 @@ class WholeBodyTrackingPolicy(BasePolicy):
             input_feed[self._time_step_input_name] = np.array([[motion_index]], dtype=np.float32)
         perception_obs = None
         if self._perception_obs_input_name:
+            perception_target_sim_time_ms = None
+            if os.environ.get("HOLOSOMA_POLICY_ALIGN_PERCEPTION_TO_SIM_STATE", "1").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }:
+                get_sim_time_ms = getattr(self.interface, "get_sim_time_ms", None)
+                if callable(get_sim_time_ms):
+                    perception_target_sim_time_ms = get_sim_time_ms()
             perception_obs = self._get_split_perception_obs(
-                self._get_onnx_input_dim(self._perception_obs_input_name)
+                self._get_onnx_input_dim(self._perception_obs_input_name),
+                target_sim_time_ms=perception_target_sim_time_ms,
             )
             input_feed[self._perception_obs_input_name] = perception_obs
         outputs = self.policy(input_feed)
@@ -2106,7 +2122,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         interval_ms = max(1, int(round(self.timestep_interval_ms)))
         elapsed_ms = current_clock - self._last_policy_control_clock_ms
-        if elapsed_ms < interval_ms:
+        tolerance_ms = int(os.environ.get("HOLOSOMA_POLICY_SIM_TIME_TOLERANCE_MS", "1") or "1")
+        if elapsed_ms + max(0, tolerance_ms) < interval_ms:
             return True
 
         completed_intervals = max(1, elapsed_ms // interval_ms)
