@@ -474,6 +474,7 @@ class MotionLoader:
         data: Any,
         clip_id: str,
         clip_map: dict[str, dict[str, str]] | None = None,
+        base_dir: Path,
     ) -> tuple[str, str]:
         object_name = cls._scalar_str(data["object_name"]) if "object_name" in data else ""
         object_urdf_path = cls._scalar_str(data["object_urdf_path"]) if "object_urdf_path" in data else ""
@@ -485,6 +486,8 @@ class MotionLoader:
             if not object_urdf_path:
                 object_urdf_path = mapped.get("object_urdf_path", "").strip()
 
+        if object_urdf_path:
+            object_urdf_path = cls._resolve_motion_object_urdf_path(object_urdf_path, base_dir=base_dir)
         if not object_name and object_urdf_path:
             object_name = Path(object_urdf_path).stem
         if not object_name:
@@ -625,7 +628,12 @@ class MotionLoader:
                     self._object_lin_vel_w = torch.tensor(data["object_lin_vel_w"], dtype=torch.float32, device=device)
                     object_size = self._extract_object_size_np(data, length, source=motion_file)
                     self._object_size = torch.tensor(object_size, dtype=torch.float32, device=device)
-                    obj_name, obj_urdf = self._extract_object_clip_metadata(data=data, clip_id=clip_id, clip_map=None)
+                    obj_name, obj_urdf = self._extract_object_clip_metadata(
+                        data=data,
+                        clip_id=clip_id,
+                        clip_map=None,
+                        base_dir=Path(motion_file).parent,
+                    )
                     clip_object_names = [obj_name]
                     clip_object_urdfs = [obj_urdf]
                 else:
@@ -689,6 +697,8 @@ class MotionLoader:
             if self.has_object and clip_entry:
                 mapped_name = str(clip_entry.get("object_name", "")).strip()
                 mapped_urdf = str(clip_entry.get("object_urdf_path", "")).strip()
+                if mapped_urdf:
+                    mapped_urdf = self._resolve_motion_object_urdf_path(mapped_urdf, base_dir=files[0].parent)
                 if self.clip_object_names:
                     if mapped_name and (not self.clip_object_names[0] or self.clip_object_names[0] == "object"):
                         self.clip_object_names[0] = mapped_name
@@ -823,6 +833,7 @@ class MotionLoader:
                             data=data,
                             clip_id=file_path.stem,
                             clip_map=clip_object_map,
+                            base_dir=file_path.parent,
                         )
                         clip_object_names.append(obj_name)
                         clip_object_urdfs.append(obj_urdf)
@@ -1895,7 +1906,7 @@ class MotionCommand(CommandTermBase):
         if not path:
             return ""
         try:
-            return str(Path(path).resolve())
+            return str(Path(resolve_data_file_path(path)).resolve())
         except Exception:
             return path
 
