@@ -1072,9 +1072,13 @@ case "${TEACHER_COMPAT_PROFILE_RESOLVED}" in
     if [[ "${TEACHER_PERCEPTION_OBS_KEY_EXPLICIT}" -eq 0 ]]; then
       TEACHER_PERCEPTION_OBS_KEY=""
     fi
+    if [[ "${TEACHER_ACTOR_OBS_HISTORY_LENGTH_EXPLICIT}" -eq 0 ]]; then
+      TEACHER_ACTOR_OBS_HISTORY_LENGTH="5"
+    fi
     append_teacher_compat_note "teacher_obs_keys defaulted to actor_obs_legacy to match u5lguxvl legacy object-target schema"
     append_teacher_compat_note "teacher perception disabled to match u5lguxvl teacher"
     append_teacher_compat_note "teacher perception obs key cleared because this teacher does not consume perception input"
+    append_teacher_compat_note "teacher actor observation history length set to ${TEACHER_ACTOR_OBS_HISTORY_LENGTH} for u5lguxvl teacher checkpoint compatibility"
     ;;
   *)
     echo "Unknown TEACHER_COMPAT_PROFILE: ${TEACHER_COMPAT_PROFILE_RESOLVED}" >&2
@@ -1470,7 +1474,15 @@ fi
 
 EXTRA_DISTILL_ARGS=()
 if [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH}" ]]; then
-  EXTRA_DISTILL_ARGS+=(--observation.groups.actor_obs.history-length="${TEACHER_ACTOR_OBS_HISTORY_LENGTH}")
+  IFS=',' read -r -a _teacher_obs_key_list <<< "${TEACHER_OBS_KEYS}"
+  for _raw_teacher_obs_key in "${_teacher_obs_key_list[@]}"; do
+    _teacher_obs_group="$(echo "${_raw_teacher_obs_key}" | tr -d "[]'\"[:space:]")"
+    if [[ -n "${_teacher_obs_group}" && "${_teacher_obs_group}" == actor_obs* ]]; then
+      EXTRA_DISTILL_ARGS+=(
+        --observation.groups."${_teacher_obs_group}".history-length="${TEACHER_ACTOR_OBS_HISTORY_LENGTH}"
+      )
+    fi
+  done
 fi
 if [[ "${DATA_MODE}" == "mix-curriculum" ]]; then
   EXTRA_DISTILL_ARGS+=(

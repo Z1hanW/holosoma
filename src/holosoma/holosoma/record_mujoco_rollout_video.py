@@ -581,8 +581,17 @@ def _depth_panel(depth: np.ndarray | None, *, width: int, height: int, depth_sha
             norm = np.clip((depth_img - vmin) / (vmax - vmin) * 255.0, 0, 255).astype(np.uint8)
         stats = f"min={vmin:.3f} max={vmax:.3f} mean={mean:.3f}"
     color = cv2.applyColorMap(norm, cv2.COLORMAP_VIRIDIS)
-    color = cv2.resize(color, (width - 24, height - 70), interpolation=cv2.INTER_NEAREST)
-    panel[40 : 40 + color.shape[0], 12 : 12 + color.shape[1]] = color
+    available_w = max(1, width - 24)
+    available_h = max(1, height - 70)
+    src_h, src_w = color.shape[:2]
+    scale = min(available_w / max(1, src_w), available_h / max(1, src_h))
+    display_w = max(1, int(round(src_w * scale)))
+    display_h = max(1, int(round(src_h * scale)))
+    color = cv2.resize(color, (display_w, display_h), interpolation=cv2.INTER_NEAREST)
+    top = 40 + max(0, (available_h - display_h) // 2)
+    left = 12 + max(0, (available_w - display_w) // 2)
+    cv2.rectangle(panel, (12, 40), (12 + available_w, 40 + available_h), (225, 225, 225), -1)
+    panel[top : top + color.shape[0], left : left + color.shape[1]] = color
     _put(panel, stats, (12, height - 12), scale=0.45)
     return panel
 
