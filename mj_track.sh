@@ -396,6 +396,11 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
+try:
+    from holosoma.utils.path import resolve_data_file_path
+except Exception:
+    resolve_data_file_path = None
+
 raw_path = sys.argv[1]
 motion_path = Path(sys.argv[2]).expanduser().resolve()
 repo_root = Path(sys.argv[3]).expanduser().resolve()
@@ -403,10 +408,19 @@ repo_root = Path(sys.argv[3]).expanduser().resolve()
 
 def object_urdf_fallbacks(path):
     expanded = path.expanduser()
+    if resolve_data_file_path is not None:
+        try:
+            yield Path(resolve_data_file_path(str(expanded))).expanduser().resolve()
+        except Exception:
+            pass
+
     parts = expanded.parts
     if "data" in parts:
         data_idx = parts.index("data")
         yield repo_root.joinpath(*parts[data_idx:])
+        rel_parts = parts[data_idx:]
+        if len(rel_parts) >= 2 and rel_parts[0] == "data" and rel_parts[1] == "ds_box_data":
+            yield repo_root.joinpath("data", "ds_box_data_legacy", *rel_parts[2:])
 
     name = expanded.stem
     if name:
@@ -476,6 +490,15 @@ def object_collision_mode():
     return str(raw).strip().lower().replace("-", "_")
 
 
+def truthy_env(*names, default=False):
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is None or str(raw).strip() == "":
+            continue
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+    return bool(default)
+
+
 def set_collision_box(root_xml, desired_size):
     size_text = " ".join(str(float(value)) for value in desired_size.tolist())
     collision_elems = list(root_xml.findall(".//collision"))
@@ -512,11 +535,15 @@ def collision_box_matches(root_xml, desired_size):
 
 
 def write_motion_sized_urdf(urdf_path):
-    desired_size = motion_object_size()
-    if desired_size is None or not urdf_path.is_file():
+    if not urdf_path.is_file():
         return urdf_path
     collision_mode = object_collision_mode()
     use_box_collision = collision_mode in {"box", "primitive", "primitive_box", "box_collision", "rollout"}
+    resize_to_motion_size = truthy_env(
+        "MUJOCO_RESIZE_OBJECT_TO_MOTION_SIZE",
+        "HOLOSOMA_MUJOCO_RESIZE_OBJECT_TO_MOTION_SIZE",
+        default=True,
+    )
 
     try:
         tree = ET.parse(urdf_path)
@@ -540,6 +567,9 @@ def write_motion_sized_urdf(urdf_path):
 
     current_size = first_extents * first_scale
     if current_size.size != 3 or np.any(current_size <= 0.0):
+        return urdf_path
+    desired_size = motion_object_size() if resize_to_motion_size else current_size
+    if desired_size is None:
         return urdf_path
     mesh_already_sized = np.allclose(current_size, desired_size, rtol=0.02, atol=2.0e-3)
     box_already_sized = use_box_collision and collision_box_matches(root_xml, desired_size)
@@ -579,11 +609,12 @@ def write_motion_sized_urdf(urdf_path):
 
     out_dir = repo_root / "logs/sim2sim_exports/object_urdfs"
     out_dir.mkdir(parents=True, exist_ok=True)
-    suffix = "motion_size_box_collision" if use_box_collision else "motion_size"
+    size_source = "motion_size" if resize_to_motion_size else "urdf_size"
+    suffix = f"{size_source}_box_collision" if use_box_collision else size_source
     out_path = out_dir / f"{motion_path.stem}__{urdf_path.stem}__{suffix}.urdf"
     tree.write(out_path, encoding="utf-8", xml_declaration=True)
     print(
-        f"[INFO] generated motion-sized object URDF {out_path}: current_size={current_size.tolist()} desired_size={desired_size.tolist()} scale_ratio={scale_ratio.tolist()} collision_mode={collision_mode}",
+        f"[INFO] generated {size_source} object URDF {out_path}: current_size={current_size.tolist()} desired_size={desired_size.tolist()} scale_ratio={scale_ratio.tolist()} collision_mode={collision_mode}",
         file=sys.stderr,
     )
     return out_path.resolve()

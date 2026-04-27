@@ -63,6 +63,8 @@ _TRAINING_OBJECT_CONTACT_PAIRS_ENV = "HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_PA
 _TRAINING_OBJECT_CONTACT_LATERAL_FRICTION_ENV = "HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_LATERAL_FRICTION"
 _TRAINING_OBJECT_CONTACT_SPIN_FRICTION_ENV = "HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_SPIN_FRICTION"
 _TRAINING_OBJECT_CONTACT_ROLLING_FRICTION_ENV = "HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_ROLLING_FRICTION"
+_TRAINING_OBJECT_CONTACT_MARGIN_ENV = "HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_MARGIN"
+_TRAINING_OBJECT_CONTACT_GAP_ENV = "HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_GAP"
 _ROBOT_GEOM_FRICTION_ENV = "HOLOSOMA_MUJOCO_ROBOT_GEOM_FRICTION"
 _LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES_ENV = "MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES"
 _OBJECT_CONTACT_BODY_MARKERS_ENV = "MUJOCO_OBJECT_CONTACT_BODY_MARKERS"
@@ -2597,6 +2599,10 @@ class MujocoSceneManager:
         ) or [0.8, 0.02, 0.005]
         hand_solref = self._object_contact_solref(contact_stiffness, contact_damping) or [0.01, 1.0]
         pair_friction = self._expand_pair_friction(hand_friction)
+        contact_margin_raw = os.environ.get(_TRAINING_OBJECT_CONTACT_MARGIN_ENV, "").strip()
+        contact_gap_raw = os.environ.get(_TRAINING_OBJECT_CONTACT_GAP_ENV, "").strip()
+        contact_margin = float(contact_margin_raw) if contact_margin_raw else None
+        contact_gap = float(contact_gap_raw) if contact_gap_raw else None
 
         def _iter_bodies(container: Any):
             for body in getattr(container, "bodies", []):
@@ -2708,26 +2714,33 @@ class MujocoSceneManager:
                     continue
                 if (object_geom_name, hand_geom_name) in existing_pair_keys:
                     continue
-                self.world_spec.add_pair(
-                    name=pair_name,
-                    geomname1=hand_geom_name,
-                    geomname2=object_geom_name,
-                    condim=6,
-                    friction=pair_friction,
-                    solref=hand_solref,
-                )
+                pair_kwargs = {
+                    "name": pair_name,
+                    "geomname1": hand_geom_name,
+                    "geomname2": object_geom_name,
+                    "condim": 6,
+                    "friction": pair_friction,
+                    "solref": hand_solref,
+                }
+                if contact_margin is not None:
+                    pair_kwargs["margin"] = contact_margin
+                if contact_gap is not None:
+                    pair_kwargs["gap"] = contact_gap
+                self.world_spec.add_pair(**pair_kwargs)
                 existing_pair_names.add(pair_name)
                 existing_pair_keys.add((hand_geom_name, object_geom_name))
                 added_pairs += 1
 
         logger.info(
-            "Added {} carry/object contact pair(s): hands={}, arms={}, objects={}, friction={}, solref={}, gt_mujoco_physics={}",
+            "Added {} carry/object contact pair(s): hands={}, arms={}, objects={}, friction={}, solref={}, margin={}, gap={}, gt_mujoco_physics={}",
             added_pairs,
             sorted(set(rubber_hand_geoms)),
             sorted(set(carry_arm_geoms)),
             sorted(set(object_collision_geoms)),
             hand_friction,
             hand_solref,
+            contact_margin,
+            contact_gap,
             gt_mujoco_physics,
         )
 
@@ -2770,6 +2783,10 @@ class MujocoSceneManager:
             getattr(object_cfg, "mujoco_object_contact_stiffness", None) if object_cfg is not None else None,
             getattr(object_cfg, "mujoco_object_contact_damping", None) if object_cfg is not None else None,
         ) or [0.01, 1.0]
+        contact_margin_raw = os.environ.get(_TRAINING_OBJECT_CONTACT_MARGIN_ENV, "").strip()
+        contact_gap_raw = os.environ.get(_TRAINING_OBJECT_CONTACT_GAP_ENV, "").strip()
+        contact_margin = float(contact_margin_raw) if contact_margin_raw else None
+        contact_gap = float(contact_gap_raw) if contact_gap_raw else None
 
         configured_markers = _parse_object_contact_body_markers()
         carry_markers = configured_markers or (
@@ -2800,21 +2817,24 @@ class MujocoSceneManager:
             body_name = str(body.name or "")
             body_name_lower = body_name.lower()
             is_object_body = body_name in object_body_names
-            is_carry_body = any(marker in body_name_lower for marker in carry_markers)
-            if not is_object_body and not is_carry_body:
-                continue
 
             for geom in body.geoms:
                 if int(geom.contype) == 0 or int(geom.conaffinity) == 0:
                     continue
                 geom_name = str(geom.name or "")
+                mesh_name = str(getattr(geom, "meshname", "") or "")
+                combined_name = f"{body_name} {geom_name} {mesh_name}".lower()
+                is_object_geom = is_object_body or body_name_lower.startswith("object_") or geom_name.startswith("object_")
+                is_carry_geom = any(marker in combined_name for marker in carry_markers)
+                if not is_object_geom and not is_carry_geom:
+                    continue
                 if not geom_name:
-                    if is_object_body:
+                    if is_object_geom:
                         base_name = f"{body_name}_collision" if body_name else "object_collision"
-                    elif "rubber_hand" in body_name_lower:
-                        if "left" in body_name_lower:
+                    elif "rubber_hand" in combined_name:
+                        if "left" in combined_name:
                             base_name = "left_rubber_hand_collision"
-                        elif "right" in body_name_lower:
+                        elif "right" in combined_name:
                             base_name = "right_rubber_hand_collision"
                         else:
                             base_name = "rubber_hand_collision"
@@ -2826,7 +2846,7 @@ class MujocoSceneManager:
                 geom.condim = 6
                 geom.friction = contact_friction
                 geom.solref = contact_solref
-                if is_object_body:
+                if is_object_geom:
                     object_collision_geoms.append(geom_name)
                 else:
                     carry_collision_geoms.append(geom_name)
@@ -2845,25 +2865,32 @@ class MujocoSceneManager:
                 pair_name = f"{carry_geom_name}_{object_geom_name}_training_contact"
                 if pair_name in existing_pair_names:
                     continue
-                self.world_spec.add_pair(
-                    name=pair_name,
-                    geomname1=carry_geom_name,
-                    geomname2=object_geom_name,
-                    condim=6,
-                    friction=pair_friction,
-                    solref=contact_solref,
-                )
+                pair_kwargs = {
+                    "name": pair_name,
+                    "geomname1": carry_geom_name,
+                    "geomname2": object_geom_name,
+                    "condim": 6,
+                    "friction": pair_friction,
+                    "solref": contact_solref,
+                }
+                if contact_margin is not None:
+                    pair_kwargs["margin"] = contact_margin
+                if contact_gap is not None:
+                    pair_kwargs["gap"] = contact_gap
+                self.world_spec.add_pair(**pair_kwargs)
                 existing_pair_names.add(pair_name)
                 added_pairs += 1
 
         logger.info(
-            "Added {} training object contact pair(s): carry_geoms={}, object_geoms={}, friction={}, spin_friction={}, solref={}, markers={}",
+            "Added {} training object contact pair(s): carry_geoms={}, object_geoms={}, friction={}, spin_friction={}, solref={}, margin={}, gap={}, markers={}",
             added_pairs,
             sorted(set(carry_collision_geoms)),
             sorted(set(object_collision_geoms)),
             contact_friction,
             spin_friction,
             contact_solref,
+            contact_margin,
+            contact_gap,
             list(carry_markers),
         )
 

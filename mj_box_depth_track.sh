@@ -154,6 +154,8 @@ MODEL_LOCAL="$(printf '%s\n' "$MODEL_LOCAL" | tail -n 1)"
 
 export MUJOCO_OBJECT_COLLISION_MODE="${MUJOCO_OBJECT_COLLISION_MODE:-box}"
 export HOLOSOMA_MUJOCO_OBJECT_COLLISION_MODE="${HOLOSOMA_MUJOCO_OBJECT_COLLISION_MODE:-$MUJOCO_OBJECT_COLLISION_MODE}"
+export MUJOCO_RESIZE_OBJECT_TO_MOTION_SIZE="${MUJOCO_RESIZE_OBJECT_TO_MOTION_SIZE:-1}"
+export HOLOSOMA_MUJOCO_RESIZE_OBJECT_TO_MOTION_SIZE="${HOLOSOMA_MUJOCO_RESIZE_OBJECT_TO_MOTION_SIZE:-$MUJOCO_RESIZE_OBJECT_TO_MOTION_SIZE}"
 
 OBJECT_URDF_RESOLVED="$(
   "$INFER_PYTHON_BIN" - <<'PY' "$OBJECT_MAP_INPUT" "$MOTION_FILE" "$ROOT_DIR"
@@ -173,16 +175,23 @@ stem = motion_path.stem
 def object_urdf_fallbacks(path: Path):
     """Yield current-repo fallbacks for older absolute box-object paths."""
     expanded = path.expanduser()
+    name = expanded.stem
+
     parts = expanded.parts
     if "data" in parts:
         data_idx = parts.index("data")
-        yield repo_root.joinpath(*parts[data_idx:])
+        tail = parts[data_idx:]
+        yield repo_root.joinpath(*tail)
+        if len(tail) >= 2 and tail[1] == "ds_box_data":
+            relative_tail = tail[2:]
+            yield repo_root / "data/ds_box_data_legacy" / Path(*relative_tail)
+            yield repo_root / "data/ds_box_data/scale_mix_all" / Path(*relative_tail)
 
-    name = expanded.stem
     if name:
         if "__" in name:
             names = [name]
         else:
+            yield repo_root / "data/ds_box_data_legacy/train_g1_w_obj_prepared/_generated_urdfs" / f"{name}.urdf"
             names = [f"{name}__eff10", f"{name}__eff09", f"{name}__baseline"]
         for candidate_name in names:
             yield repo_root / "data/ds_box_data/scale_mix_all/train_g1_w_obj_prepared/_generated_urdfs" / f"{candidate_name}.urdf"
@@ -256,6 +265,15 @@ def _object_collision_mode() -> str:
     return str(raw).strip().lower().replace("-", "_")
 
 
+def _truthy_env(*names: str, default: bool = False) -> bool:
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is None or str(raw).strip() == "":
+            continue
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+    return bool(default)
+
+
 def _set_collision_box(root_xml: ET.Element, desired_size: np.ndarray) -> bool:
     size_text = " ".join(str(float(value)) for value in desired_size.tolist())
     collision_elems = list(root_xml.findall(".//collision"))
@@ -292,11 +310,15 @@ def _collision_box_matches(root_xml: ET.Element, desired_size: np.ndarray) -> bo
 
 
 def maybe_write_motion_sized_urdf(urdf_path: Path) -> Path:
-    desired_size = _motion_object_size()
-    if desired_size is None or not urdf_path.is_file():
+    if not urdf_path.is_file():
         return urdf_path
     collision_mode = _object_collision_mode()
     use_box_collision = collision_mode in {"box", "primitive", "primitive_box", "box_collision", "rollout"}
+    resize_to_motion_size = _truthy_env(
+        "MUJOCO_RESIZE_OBJECT_TO_MOTION_SIZE",
+        "HOLOSOMA_MUJOCO_RESIZE_OBJECT_TO_MOTION_SIZE",
+        default=False,
+    )
 
     try:
         tree = ET.parse(urdf_path)
@@ -317,6 +339,9 @@ def maybe_write_motion_sized_urdf(urdf_path: Path) -> Path:
         return urdf_path
     current_size = first_extents * first_scale
     if current_size.size != 3 or np.any(current_size <= 0.0):
+        return urdf_path
+    desired_size = _motion_object_size() if resize_to_motion_size else current_size
+    if desired_size is None:
         return urdf_path
     mesh_already_sized = np.allclose(current_size, desired_size, rtol=0.02, atol=2.0e-3)
     box_already_sized = use_box_collision and _collision_box_matches(root_xml, desired_size)
@@ -356,11 +381,12 @@ def maybe_write_motion_sized_urdf(urdf_path: Path) -> Path:
 
     out_dir = repo_root / "logs/sim2sim_exports/object_urdfs"
     out_dir.mkdir(parents=True, exist_ok=True)
-    suffix = "motion_size_box_collision" if use_box_collision else "motion_size"
+    size_source = "motion_size" if resize_to_motion_size else "urdf_size"
+    suffix = f"{size_source}_box_collision" if use_box_collision else size_source
     out_path = out_dir / f"{motion_path.stem}__{urdf_path.stem}__{suffix}.urdf"
     tree.write(out_path, encoding="utf-8", xml_declaration=True)
     print(
-        f"[INFO] generated motion-sized object URDF {out_path}: current_size={current_size.tolist()} desired_size={desired_size.tolist()} scale_ratio={scale_ratio.tolist()} collision_mode={collision_mode}",
+        f"[INFO] generated {size_source} object URDF {out_path}: current_size={current_size.tolist()} desired_size={desired_size.tolist()} scale_ratio={scale_ratio.tolist()} collision_mode={collision_mode}",
         file=sys.stderr,
     )
     return out_path.resolve()
@@ -405,7 +431,20 @@ export SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML="${SIM_COPY_JOINT_DEFAULTS_FROM_RO
 export SIM_COPY_TENDONS_FROM_ROBOT_XML="${SIM_COPY_TENDONS_FROM_ROBOT_XML:-0}"
 export SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML="${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML:-0}"
 export SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML="${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML:-0}"
+export SIM_MOTION_INIT_MODE="${SIM_MOTION_INIT_MODE:-raw_motion}"
 export MUJOCO_OBJECT_CONTACT_BODY_MARKERS="${MUJOCO_OBJECT_CONTACT_BODY_MARKERS:-}"
+if [[ -n "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" && "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" != \[* ]]; then
+  MUJOCO_OBJECT_CONTACT_BODY_MARKERS="$(
+    "$INFER_PYTHON_BIN" - <<'PY' "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS"
+import json
+import sys
+
+markers = [part.strip() for part in sys.argv[1].replace(",", " ").split() if part.strip()]
+print(json.dumps(markers, separators=(",", ":")))
+PY
+  )"
+  export MUJOCO_OBJECT_CONTACT_BODY_MARKERS
+fi
 export MUJOCO_OBJECT_MASS_OVERRIDE="${MUJOCO_OBJECT_MASS_OVERRIDE:-}"
 export MUJOCO_OBJECT_GEOM_FRICTION="${MUJOCO_OBJECT_GEOM_FRICTION:-}"
 export MUJOCO_OBJECT_LATERAL_FRICTION="${MUJOCO_OBJECT_LATERAL_FRICTION:-}"
@@ -421,9 +460,12 @@ export HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_SPIN_FRICTION="${HOLOSOMA_MUJOCO_
 export HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_ROLLING_FRICTION="${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_ROLLING_FRICTION:-0.3}"
 export HOLOSOMA_MUJOCO_REPLACE_CYLINDERS_WITH_CAPSULES="${HOLOSOMA_MUJOCO_REPLACE_CYLINDERS_WITH_CAPSULES:-0}"
 export HOLOSOMA_MOTION_INIT_ZERO_VELOCITIES="${HOLOSOMA_MOTION_INIT_ZERO_VELOCITIES:-0}"
+export HOLOSOMA_POLICY_MOTION_INDEX_OFFSET="${HOLOSOMA_POLICY_MOTION_INDEX_OFFSET:-1}"
 export HOLOSOMA_PREFILL_OBS_HISTORY_ON_MOTION_START="${HOLOSOMA_PREFILL_OBS_HISTORY_ON_MOTION_START:-1}"
 export HOLOSOMA_FORCE_MOTION_ALIGNMENT="${HOLOSOMA_FORCE_MOTION_ALIGNMENT:-1}"
 export HOLOSOMA_ZMQ_LOWCMD_LATCH_CONTROL_BOUNDARY="${HOLOSOMA_ZMQ_LOWCMD_LATCH_CONTROL_BOUNDARY:-0}"
+export HOLOSOMA_ZMQ_LOWCMD_LOCKSTEP_CONTROL_BOUNDARY="${HOLOSOMA_ZMQ_LOWCMD_LOCKSTEP_CONTROL_BOUNDARY:-0}"
+export HOLOSOMA_ZMQ_LOWCMD_MATCH_TOLERANCE_MS="${HOLOSOMA_ZMQ_LOWCMD_MATCH_TOLERANCE_MS:-2}"
 export HOLOSOMA_ZMQ_LOWCMD_KP_SCALE="${HOLOSOMA_ZMQ_LOWCMD_KP_SCALE:-1.0}"
 export HOLOSOMA_ZMQ_LOWCMD_KD_SCALE="${HOLOSOMA_ZMQ_LOWCMD_KD_SCALE:-1.0}"
 export HOLOSOMA_ZMQ_LOWCMD_TORQUE_LIMIT_SCALE="${HOLOSOMA_ZMQ_LOWCMD_TORQUE_LIMIT_SCALE:-1.0}"
@@ -489,8 +531,8 @@ echo "[INFO] inference_config=${INFERENCE_CONFIG}"
 echo "[INFO] perception=${ENABLE_SPLIT_PERCEPTION_OBS} preset=${PERCEPTION_PRESET} camera_source=${PERCEPTION_CAMERA_SOURCE} object_geometry_mode=${PERCEPTION_OBJECT_GEOMETRY_MODE:-<default>}"
 echo "[INFO] mujoco_object_scene training_urdf=${SIM_USE_TRAINING_URDF_OBJECT_SCENE} copy_joint_defaults=${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML} copy_tendons=${SIM_COPY_TENDONS_FROM_ROBOT_XML} copy_collision_geoms=${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML} copy_contact_pairs=${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML}"
 echo "[INFO] object_contact_body_markers=${MUJOCO_OBJECT_CONTACT_BODY_MARKERS:-<all robot collision bodies>}"
-echo "[INFO] object_mass_override=${MUJOCO_OBJECT_MASS_OVERRIDE:-<none>} object_geom_friction=${MUJOCO_OBJECT_GEOM_FRICTION:-<none>} object_terrain_pair_friction=${MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION:-<none>} lateral_friction=${MUJOCO_OBJECT_LATERAL_FRICTION:-<none>} rolling_friction=${MUJOCO_OBJECT_ROLLING_FRICTION:-<none>} contact_stiffness=${MUJOCO_OBJECT_CONTACT_STIFFNESS:-<none>} contact_damping=${MUJOCO_OBJECT_CONTACT_DAMPING:-<none>} web_demo_object_contacts=${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS} keep_reference_hand_collision=${HOLOSOMA_MUJOCO_KEEP_REFERENCE_HAND_COLLISION} carry_arm_object_contacts=${HOLOSOMA_MUJOCO_CARRY_ARM_OBJECT_CONTACTS}"
-echo "[INFO] track_alignment sim=${SIM_FPS}Hz decimation=${SIM_CONTROL_DECIMATION} substeps=${SIM_SUBSTEPS} backend=${MUJOCO_BACKEND} terrain_friction=${TERRAIN_STATIC_FRICTION},${TERRAIN_DYNAMIC_FRICTION} prefill_history=${HOLOSOMA_PREFILL_OBS_HISTORY_ON_MOTION_START}"
+echo "[INFO] object_mass_override=${MUJOCO_OBJECT_MASS_OVERRIDE:-<none>} object_geom_friction=${MUJOCO_OBJECT_GEOM_FRICTION:-<none>} object_terrain_pair_friction=${MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION:-<none>} lateral_friction=${MUJOCO_OBJECT_LATERAL_FRICTION:-<none>} rolling_friction=${MUJOCO_OBJECT_ROLLING_FRICTION:-<none>} contact_stiffness=${MUJOCO_OBJECT_CONTACT_STIFFNESS:-<none>} contact_damping=${MUJOCO_OBJECT_CONTACT_DAMPING:-<none>} resize_object_to_motion_size=${MUJOCO_RESIZE_OBJECT_TO_MOTION_SIZE} collision_mode=${MUJOCO_OBJECT_COLLISION_MODE} web_demo_object_contacts=${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS} keep_reference_hand_collision=${HOLOSOMA_MUJOCO_KEEP_REFERENCE_HAND_COLLISION} carry_arm_object_contacts=${HOLOSOMA_MUJOCO_CARRY_ARM_OBJECT_CONTACTS}"
+echo "[INFO] track_alignment sim=${SIM_FPS}Hz decimation=${SIM_CONTROL_DECIMATION} substeps=${SIM_SUBSTEPS} backend=${MUJOCO_BACKEND} terrain_friction=${TERRAIN_STATIC_FRICTION},${TERRAIN_DYNAMIC_FRICTION} motion_index_offset=${HOLOSOMA_POLICY_MOTION_INDEX_OFFSET} prefill_history=${HOLOSOMA_PREFILL_OBS_HISTORY_ON_MOTION_START} lowcmd_lockstep=${HOLOSOMA_ZMQ_LOWCMD_LOCKSTEP_CONTROL_BOUNDARY} lowcmd_match_tolerance_ms=${HOLOSOMA_ZMQ_LOWCMD_MATCH_TOLERANCE_MS}"
 echo "[INFO] contact_alignment training_object_contact_pairs=${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_PAIRS} contact_material=${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_LATERAL_FRICTION},${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_SPIN_FRICTION},${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_ROLLING_FRICTION} assists=root:${HOLOSOMA_POLICY_TARGET_ROBOT_ROOT_STATE_ASSIST},dof:${HOLOSOMA_POLICY_TARGET_ROBOT_DOF_STATE_ASSIST},object:${HOLOSOMA_POLICY_TARGET_OBJECT_STATE_ASSIST} helper_spheres=wrist:${HOLOSOMA_MUJOCO_WRIST_ORIGIN_CONTACT_SPHERES},palm:${HOLOSOMA_MUJOCO_PALM_CONTACT_SPHERES} reset_noise=${HOLOSOMA_MUJOCO_RESET_NOISE} clip_joint_targets=${HOLOSOMA_CLIP_JOINT_TARGETS}"
 echo "[INFO] gt_mujoco_physics=${GT_MUJOCO_PHYSICS} zero_passive_dynamics=${HOLOSOMA_GT_MUJOCO_ZERO_PASSIVE_DYNAMICS:-0}"
 

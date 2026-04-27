@@ -1,5 +1,5 @@
 <?xml version='1.0' encoding='utf-8'?>
-<robot name="box_74_box_collision">
+<robot name="box_74">
   <dynamics damping="0.5" friction="0.9" />
   <link name="baseLink">
     <inertial>
@@ -25,7 +25,8 @@
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <box size="0.46575260162353516 0.42469602823257446 0.24985061585903168" /></geometry>
+        <mesh filename="/home/ubuntu/FAR/holosoma/data/ds_box_data_legacy/train_g1_w_obj_prepared/_generated_urdfs/box_74.obj" scale="1.32193954 1.32193956 1.32193952" />
+      </geometry>
     </collision>
   </link>
 </robot>
