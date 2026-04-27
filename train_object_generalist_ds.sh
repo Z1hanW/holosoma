@@ -115,6 +115,8 @@ PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPAC
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-67108864}
 PHYSX_GPU_HEAP_CAPACITY=${PHYSX_GPU_HEAP_CAPACITY:-67108864}
 PHYSX_GPU_TEMP_BUFFER_CAPACITY=${PHYSX_GPU_TEMP_BUFFER_CAPACITY:-16777216}
+OBJECT_SPAWN_MODE=${OBJECT_SPAWN_MODE:-${HOLOSOMA_OBJECT_SPAWN_MODE:-primitive}}
+export HOLOSOMA_OBJECT_SPAWN_MODE="${OBJECT_SPAWN_MODE}"
 ACTOR_LR=${ACTOR_LR:-1e-05}
 CRITIC_LR=${CRITIC_LR:-1e-05}
 NUM_LEARNING_EPOCHS=${NUM_LEARNING_EPOCHS:-7}
@@ -507,17 +509,34 @@ normalize_resume_checkpoint_ref() {
 
 validate_object_spec_map() {
   local map_path="$1"
-  "${PYTHON_BIN}" - "${map_path}" <<'PY'
+  "${PYTHON_BIN}" - "${map_path}" "${SCRIPT_DIR}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1]).expanduser().resolve()
+repo_root = Path(sys.argv[2]).expanduser().resolve()
 payload = json.loads(path.read_text(encoding="utf-8"))
 if isinstance(payload, dict) and isinstance(payload.get("clips"), dict):
     payload = payload["clips"]
 if not isinstance(payload, dict) or not payload:
     raise SystemExit(f"[ERROR] Invalid or empty object map: {path}")
+
+def resolve_urdf(raw: str) -> Path:
+    raw = raw.strip()
+    candidate = Path(raw).expanduser()
+    candidates = []
+    if candidate.is_absolute():
+        candidates.append(candidate)
+    else:
+        candidates.append(path.parent / candidate)
+        candidates.append(repo_root / candidate)
+        candidates.append(repo_root / "src" / "holosoma" / candidate)
+    for item in candidates:
+        resolved = item.resolve()
+        if resolved.is_file():
+            return resolved
+    return candidates[0].resolve()
 
 missing = []
 for clip_id, entry in payload.items():
@@ -530,7 +549,7 @@ for clip_id, entry in payload.items():
     if not urdf:
         missing.append((clip_id, "<missing>"))
         continue
-    resolved = Path(urdf).expanduser().resolve()
+    resolved = resolve_urdf(urdf)
     if not resolved.is_file():
         missing.append((clip_id, str(resolved)))
 
@@ -539,6 +558,68 @@ if missing:
     raise SystemExit(f"[ERROR] Object map has missing URDFs in {path}: {sample}")
 
 print(f"[INFO] Validated clip-object URDF map: {path} ({len(payload)} clips)")
+PY
+}
+
+validate_object_spec_primitives() {
+  local map_path="$1"
+  PYTHONPATH="${SCRIPT_DIR}/src/holosoma${PYTHONPATH:+:${PYTHONPATH}}" "${PYTHON_BIN}" - "${map_path}" "${SCRIPT_DIR}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+from holosoma.utils.object_geometry import load_urdf_box_primitive_metadata
+
+path = Path(sys.argv[1]).expanduser().resolve()
+repo_root = Path(sys.argv[2]).expanduser().resolve()
+payload = json.loads(path.read_text(encoding="utf-8"))
+if isinstance(payload, dict) and isinstance(payload.get("clips"), dict):
+    payload = payload["clips"]
+if not isinstance(payload, dict) or not payload:
+    raise SystemExit(f"[ERROR] Invalid or empty object map: {path}")
+
+def resolve_urdf(raw: str) -> Path:
+    raw = raw.strip()
+    candidate = Path(raw).expanduser()
+    candidates = []
+    if candidate.is_absolute():
+        candidates.append(candidate)
+    else:
+        candidates.append(path.parent / candidate)
+        candidates.append(repo_root / candidate)
+        candidates.append(repo_root / "src" / "holosoma" / candidate)
+    for item in candidates:
+        resolved = item.resolve()
+        if resolved.is_file():
+            return resolved
+    return candidates[0].resolve()
+
+unique_urdfs: dict[str, str] = {}
+for clip_id, entry in payload.items():
+    if isinstance(entry, str):
+        urdf = entry.strip()
+    elif isinstance(entry, dict):
+        urdf = str(entry.get("object_urdf_path", "")).strip()
+    else:
+        urdf = ""
+    if not urdf:
+        raise SystemExit(f"[ERROR] Object map entry has no URDF: {clip_id}")
+    resolved = resolve_urdf(urdf)
+    unique_urdfs[str(resolved)] = clip_id
+
+bad = []
+for urdf in sorted(unique_urdfs):
+    if load_urdf_box_primitive_metadata(urdf) is None:
+        bad.append(urdf)
+
+if bad:
+    sample = "\n  ".join(bad[:10])
+    raise SystemExit(
+        "[ERROR] HOLOSOMA_OBJECT_SPAWN_MODE=primitive requires every object URDF to be "
+        f"simple box-like. Failed {len(bad)} URDF(s):\n  {sample}"
+    )
+
+print(f"[INFO] Validated primitive object spawning metadata: {len(unique_urdfs)} unique URDF(s)")
 PY
 }
 
@@ -1129,6 +1210,11 @@ if [[ -z "${OBJECT_SPEC_PATH}" || ! -f "${OBJECT_SPEC_PATH}" ]]; then
   exit 2
 fi
 validate_object_spec_map "${OBJECT_SPEC_PATH}"
+case "$(echo "${HOLOSOMA_OBJECT_SPAWN_MODE}" | tr '[:upper:]' '[:lower:]')" in
+  primitive|primitives|box|cuboid)
+    validate_object_spec_primitives "${OBJECT_SPEC_PATH}"
+    ;;
+esac
 
 if [[ "${STRICT_DEFAULT_DS_BANK_VALIDATION}" != "0" ]]; then
   case "${DATA_MODE}" in
@@ -1284,6 +1370,7 @@ echo "[INFO] Termination defaults: BadTracking full 3D + motion_ends"
 echo "[INFO] GPU_SELECTION=all-visible"
 echo "[INFO] AVAILABLE_GPU_COUNT=${AVAILABLE_GPU_COUNT}"
 echo "[INFO] NPROC=${NPROC} PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
+echo "[INFO] HOLOSOMA_OBJECT_SPAWN_MODE=${HOLOSOMA_OBJECT_SPAWN_MODE}"
 echo "[INFO] PhysX gpu_max_rigid_contact_count=${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT} gpu_max_rigid_patch_count=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT} gpu_found_lost_pairs_capacity=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
 echo "[INFO] PhysX gpu_found_lost_aggregate_pairs_capacity=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY} gpu_total_aggregate_pairs_capacity=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY} gpu_collision_stack_size=${PHYSX_GPU_COLLISION_STACK_SIZE} gpu_heap_capacity=${PHYSX_GPU_HEAP_CAPACITY} gpu_temp_buffer_capacity=${PHYSX_GPU_TEMP_BUFFER_CAPACITY}"
 

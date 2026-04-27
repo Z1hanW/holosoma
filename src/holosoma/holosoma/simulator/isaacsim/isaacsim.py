@@ -931,8 +931,12 @@ class IsaacSim(BaseSimulator):
                 object_asset_urdf_path,
                 object_scale=object_scale,
             )
-            if primitive_cfg is not None:
-                return primitive_cfg
+            if primitive_cfg is None:
+                raise ValueError(
+                    "Primitive object spawning was enabled, but no primitive metadata was resolved for "
+                    f"{object_asset_urdf_path}"
+                )
+            return primitive_cfg
 
         return sim_utils.UrdfFileCfg(
             fix_base=False,
