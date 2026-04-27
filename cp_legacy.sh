@@ -17,13 +17,10 @@ DEFAULT_LEGACY_SOURCE_ROOT="${DEFAULT_LEGACY_SOURCE_ROOT:-/nfs/zzzihanw/ds_box_d
 LEGACY_SOURCE_ROOT="${LEGACY_SOURCE_ROOT:-${DEFAULT_LEGACY_SOURCE_ROOT}}"
 LEGACY_SOURCE_DIR_EXPLICIT=0
 [[ -n "${LEGACY_SOURCE_DIR+x}" ]] && LEGACY_SOURCE_DIR_EXPLICIT=1
-LEGACY_SOURCE_DIR="${LEGACY_SOURCE_DIR:-${LEGACY_TARGET_DIR}}"
-ALLOW_NFS_LEGACY_SOURCE="${ALLOW_NFS_LEGACY_SOURCE:-auto}"
+LEGACY_SOURCE_DIR="${LEGACY_SOURCE_DIR:-${LEGACY_SOURCE_ROOT}}"
 
 resolve_legacy_source_dir() {
   local candidate="${1:-}"
-  local resolved_root=""
-  local resolved_dir=""
 
   if [[ -z "${candidate}" ]]; then
     return 1
@@ -35,6 +32,8 @@ resolve_legacy_source_dir() {
   fi
 
   if [[ -d "${candidate}" ]] && declare -F ogds_resolve_data_root >/dev/null 2>&1; then
+    local resolved_root=""
+    local resolved_dir=""
     resolved_root="$(ogds_resolve_data_root "${candidate}")"
     resolved_dir="${resolved_root%/}/${LEGACY_TARGET_NAME}"
     if [[ -f "${resolved_dir}/_generated_urdfs/box_10.urdf" ]]; then
@@ -51,24 +50,6 @@ if resolved_legacy_source_dir="$(resolve_legacy_source_dir "${LEGACY_SOURCE_DIR}
 elif [[ -n "${LEGACY_SOURCE_ROOT}" ]] && resolved_legacy_source_dir="$(resolve_legacy_source_dir "${LEGACY_SOURCE_ROOT}")"; then
   LEGACY_SOURCE_DIR="${resolved_legacy_source_dir}"
 fi
-
-case "$(echo "${ALLOW_NFS_LEGACY_SOURCE}" | tr '[:upper:]' '[:lower:]')" in
-  auto)
-    ;;
-  1|true|yes|on)
-    ;;
-  0|false|no|off)
-    if [[ "${LEGACY_SOURCE_DIR}" == /nfs/* ]]; then
-      echo "[ERROR] legacy source must be local, not NFS: ${LEGACY_SOURCE_DIR}" >&2
-      echo "[ERROR] Set ALLOW_NFS_LEGACY_SOURCE=1, or copy the legacy subset into ${LEGACY_TARGET_DIR} first." >&2
-      exit 1
-    fi
-    ;;
-  *)
-    echo "[ERROR] ALLOW_NFS_LEGACY_SOURCE must be one of: auto|0|1|true|false|yes|no|on|off" >&2
-    exit 2
-    ;;
-esac
 
 if [[ ! -d "${LEGACY_SOURCE_DIR}" ]]; then
   echo "[ERROR] legacy source dir not found: ${LEGACY_SOURCE_DIR}" >&2
