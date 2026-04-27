@@ -88,6 +88,20 @@ g1_29dof_wbt_object_distill = replace(
     ),
 )
 
+g1_29dof_wbt_object_mocap_distill = replace(
+    g1_29dof_wbt,
+    observation=observation.wbt_object_mocap_distill,
+    task=replace(
+        task.wbt,
+        use_sim_time=True,
+        auto_start_motion=True,
+        use_sim_state=True,
+        prefer_sim_ref_from_sim_state=True,
+        restart_motion_on_clock_reset=True,
+        restart_sim_on_motion_end=True,
+    ),
+)
+
 # G1 Whole-Body Tracking (VideoMimic)
 g1_29dof_videomimic = InferenceConfig(
     robot=replace(
@@ -128,6 +142,8 @@ DEFAULTS = {
     "g1-29dof-w-obj": g1_29dof_wbt_object_generalist,
     "g1-29dof-wbt-object-distill": g1_29dof_wbt_object_distill,
     "g1-29dof-wbt-depth-distill": g1_29dof_wbt_object_distill,
+    "g1-29dof-wbt-object-mocap-distill": g1_29dof_wbt_object_mocap_distill,
+    "g1-29dof-wbt-mocap-distill": g1_29dof_wbt_object_mocap_distill,
     "g1-29dof-videomimic": g1_29dof_videomimic,
 }
 

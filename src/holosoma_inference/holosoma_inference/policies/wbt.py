@@ -443,6 +443,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             term in obs_terms for term in ("motion_command", "motion_ref_ori_b", "motion_future_target_poses")
         )
         self._uses_sparse_root_command = "sparse_target_root_trajectory_command" in obs_terms
+        self._uses_object_mocap_distill = "obj_current_pose_size_b" in obs_terms
         self._uses_object_generalist = any(
             term in obs_terms
             for term in (
@@ -906,6 +907,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         if (
             self._uses_videomimic
+            or self._uses_object_mocap_distill
             or self._uses_object_generalist
             or self._uses_legacy_object_obs
             or self._uses_sparse_root_command
@@ -970,6 +972,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self.ref_quat_xyzw_0 = self.ref_quat_xyzw_t.copy()
         elif (
             self._uses_videomimic
+            or self._uses_object_mocap_distill
             or self._uses_object_generalist
             or self._uses_legacy_object_obs
             or self._uses_sparse_root_command
@@ -1711,6 +1714,56 @@ class WholeBodyTrackingPolicy(BasePolicy):
             "actions": self.last_policy_action.astype(np.float32, copy=False),
         }
 
+    def _get_object_mocap_distill_obs_buffer_dict(self, robot_state_data: np.ndarray) -> dict[str, np.ndarray]:
+        if self._motion_data is None:
+            raise ValueError("Motion data is required for mocap object-distill observations.")
+        if not self._motion_data.has_object:
+            raise ValueError("Mocap object-distill observations require a motion clip with object pose data.")
+
+        self._maybe_update_motion_alignment(robot_state_data)
+        idx = self._get_motion_index()
+
+        robot_ref_pos_w, robot_ref_quat_wxyz = self._get_observation_reference_pose_in_world(robot_state_data)
+        sim_object_state = self._get_sim_actor_state(self.config.task.sim_object_name)
+        if sim_object_state is not None:
+            current_object_pos_w = sim_object_state[:, :3]
+            current_object_quat_wxyz = xyzw_to_wxyz(sim_object_state[:, 3:7])
+        else:
+            current_object_pos_w = self._motion_data.object_pos_w[idx : idx + 1]
+            current_object_quat_wxyz = self._motion_data.object_quat_w[idx : idx + 1]
+
+        obj_current_pos_b, obj_current_quat_b = self._pose_in_robot_ref_frame(
+            robot_ref_pos_w,
+            robot_ref_quat_wxyz,
+            current_object_pos_w,
+            current_object_quat_wxyz,
+        )
+        obj_current_rot6d = matrix_from_quat(obj_current_quat_b)[..., :2].reshape(1, -1)
+        obj_current_size = self._motion_data.object_size[idx : idx + 1].astype(np.float32, copy=False)
+
+        sim_root_state = self._get_sim_root_state()
+        if sim_root_state is not None:
+            root_quat_wxyz = xyzw_to_wxyz(sim_root_state[:, 3:7])
+            base_ang_vel = quat_rotate_inverse(root_quat_wxyz, sim_root_state[:, 10:13])
+        else:
+            base_ang_vel = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
+
+        return {
+            "sparse_target_root_trajectory_command": self._get_sparse_target_root_trajectory_command(robot_state_data),
+            "base_ang_vel": base_ang_vel.astype(np.float32, copy=False),
+            "dof_pos": (robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles).astype(
+                np.float32,
+                copy=False,
+            ),
+            "dof_vel": robot_state_data[
+                :, 7 + self.num_dofs + 6 : 7 + self.num_dofs + 6 + self.num_dofs
+            ].astype(np.float32, copy=False),
+            "actions": self.last_policy_action.astype(np.float32, copy=False),
+            "obj_current_pose_size_b": np.concatenate(
+                [obj_current_pos_b, obj_current_rot6d, obj_current_size], axis=1
+            ).astype(np.float32, copy=False),
+        }
+
     def _get_object_generalist_obs_buffer_dict(self, robot_state_data: np.ndarray) -> dict[str, np.ndarray]:
         if self._motion_data is None:
             raise ValueError("Motion data is required for object-generalist observations.")
@@ -1846,6 +1899,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         robot_state_data = self._augment_robot_state_with_sim_state(robot_state_data)
         if self._uses_videomimic:
             return self._get_videomimic_obs_buffer_dict(robot_state_data)
+        if self._uses_object_mocap_distill:
+            return self._get_object_mocap_distill_obs_buffer_dict(robot_state_data)
         if self._uses_object_generalist:
             return self._get_object_generalist_obs_buffer_dict(robot_state_data)
         if self._uses_legacy_object_obs:

@@ -625,6 +625,17 @@ def sparse_target_root_trajectory_command(env: WholeBodyTrackingManager) -> torc
     return torch.cat([rel_xy, rel_yaw], dim=-1)
 
 
+def sparse_target_root_trajectory_command_contact_aware(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Sparse root command that is active only during the clip's carry phase."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    base_command = sparse_target_root_trajectory_command(env)
+    if getattr(motion_command, "manual_control_enabled", False) or not motion_command.motion.has_object:
+        return base_command
+
+    active_mask = motion_command.get_contact_aware_root_command_active_mask()
+    return torch.where(active_mask.unsqueeze(-1), base_command, torch.zeros_like(base_command))
+
+
 def clip_phase(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Normalized motion progress in current clip, in [0, 1]."""
     motion_command = _get_motion_command_and_assert_type(env)

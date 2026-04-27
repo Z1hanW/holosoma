@@ -1236,6 +1236,15 @@ if "perception_obs" in input_dims:
         f"obs_dim={obs_dim!r}, actor_input_dim={actor_input_dim!r}, inputs={sorted(input_dims)}"
     )
 
+if obs_dim == 105 and actor_input_dim == [
+    "actor_obs_root",
+    "actor_obs_proprio_no_linvel",
+    "actor_obs_actions",
+    "actor_obs_box",
+]:
+    print("g1-29dof-wbt-object-mocap-distill")
+    raise SystemExit(0)
+
 if any(name in groups for name in ("actor_obs_root", "actor_obs_torso", "actor_obs_proprio", "actor_obs_box")):
     print("g1-29dof-wbt-object-distill")
     raise SystemExit(0)
@@ -1327,7 +1336,7 @@ fi
 if [[ -z "${HOLOSOMA_POLICY_MOTION_INDEX_OFFSET:-}" ]]; then
   if [[ -n "$POLICY_MOTION_INDEX_OFFSET" ]]; then
     export HOLOSOMA_POLICY_MOTION_INDEX_OFFSET="$POLICY_MOTION_INDEX_OFFSET"
-  elif [[ "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-distill" ]]; then
+  elif [[ "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-distill" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-mocap-distill" ]]; then
     export HOLOSOMA_POLICY_MOTION_INDEX_OFFSET=1
   fi
 fi

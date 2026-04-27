@@ -130,6 +130,18 @@ def _first_sustained_true_index(mask: torch.Tensor, consecutive_steps: int) -> i
     return None
 
 
+def _first_sustained_true_index_from(mask: torch.Tensor, consecutive_steps: int, start_idx: int) -> int | None:
+    """Return the earliest sustained-true index at or after `start_idx`."""
+    if start_idx <= 0:
+        return _first_sustained_true_index(mask, consecutive_steps)
+    if start_idx >= int(mask.numel()):
+        return None
+    relative_idx = _first_sustained_true_index(mask[start_idx:], consecutive_steps)
+    if relative_idx is None:
+        return None
+    return int(start_idx + relative_idx)
+
+
 def _pickup_threshold_from_rel_z(
     rel_z: torch.Tensor,
     *,
@@ -177,6 +189,49 @@ def _pickup_step_and_threshold_from_rel_z(
         else:
             pickup_step = int(torch.argmax(rel_z).item())
     return pickup_step, pickup_threshold
+
+
+def _contact_aware_carry_window_from_rel_z(
+    rel_z: torch.Tensor,
+    *,
+    contact_interval: tuple[int, int] | None = None,
+    lift_height_threshold: float = _RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD,
+    lift_ratio_threshold: float = _CLIP_PICKUP_LIFT_RATIO_THRESHOLD,
+    consecutive_steps: int = _RUNTIME_PICKUP_CONSECUTIVE_STEPS,
+    release_lead_steps: int = _ADAPTIVE_SAMPLING_CONTACT_STAGE_RELEASE_LEAD_STEPS,
+) -> tuple[int, int]:
+    """Return the [start, end) carry window used by contact-aware root commands."""
+    if rel_z.numel() == 0:
+        return 0, 0
+
+    pickup_step, pickup_threshold = _pickup_step_and_threshold_from_rel_z(
+        rel_z,
+        lift_height_threshold=lift_height_threshold,
+        lift_ratio_threshold=lift_ratio_threshold,
+        consecutive_steps=consecutive_steps,
+    )
+
+    total_steps = int(rel_z.shape[0])
+    carry_start = max(0, min(int(pickup_step), total_steps))
+    carry_end = total_steps
+
+    lowered_mask = rel_z < pickup_threshold
+    lowering_step = _first_sustained_true_index_from(
+        lowered_mask,
+        consecutive_steps,
+        start_idx=min(carry_start + 1, total_steps),
+    )
+    if lowering_step is not None:
+        carry_end = min(carry_end, int(lowering_step))
+
+    normalized_interval = _normalize_contact_interval_pair(contact_interval) if contact_interval is not None else None
+    if normalized_interval is not None:
+        _, t2 = normalized_interval
+        release_start = max(0, min(int(t2) - max(int(release_lead_steps), 0), total_steps))
+        carry_end = min(carry_end, release_start)
+
+    carry_end = max(carry_start, min(carry_end, total_steps))
+    return carry_start, carry_end
 
 
 def _normalize_contact_interval_pair(raw_interval: Any) -> tuple[int, int] | None:
@@ -3494,6 +3549,75 @@ class MotionCommand(CommandTermBase):
 
     def _get_clip_pickup_thresholds_by_clip(self) -> torch.Tensor:
         return self._get_clip_pickup_stats_by_clip()[1]
+
+    def _get_contact_aware_carry_window_by_clip(self) -> torch.Tensor:
+        cache_name = (
+            "_contact_aware_carry_window_by_clip_"
+            f"h{_RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD:.4f}_"
+            f"r{_CLIP_PICKUP_LIFT_RATIO_THRESHOLD:.4f}_"
+            f"c{_RUNTIME_PICKUP_CONSECUTIVE_STEPS:d}_"
+            f"release{_ADAPTIVE_SAMPLING_CONTACT_STAGE_RELEASE_LEAD_STEPS:d}"
+        ).replace(".", "p")
+        cached = getattr(self, cache_name, None)
+        if cached is not None:
+            return cached
+
+        carry_window_by_clip = torch.zeros((self.motion.num_clips, 2), device=self.device, dtype=torch.long)
+        carry_window_by_clip[:, 1] = torch.clamp(self.motion.clip_lengths, min=0)
+        if not self.motion.has_object:
+            setattr(self, cache_name, carry_window_by_clip)
+            return carry_window_by_clip
+
+        clip_offsets = self.motion.clip_offsets
+        clip_lengths = self.motion.clip_lengths
+        root_pos_w = self.motion.body_pos_w[:, 0]
+        object_pos_w = self.motion.object_pos_w
+
+        for clip_idx in range(self.motion.num_clips):
+            clip_start = int(clip_offsets[clip_idx].item())
+            clip_length = int(clip_lengths[clip_idx].item())
+            if clip_length <= 0:
+                continue
+
+            clip_end = clip_start + clip_length
+            clip_rel_z = object_pos_w[clip_start:clip_end, 2] - root_pos_w[clip_start:clip_end, 2]
+
+            contact_interval = None
+            if (
+                self._adaptive_sampling_contact_window_by_clip is not None
+                and self._adaptive_sampling_contact_window_valid_by_clip is not None
+                and bool(self._adaptive_sampling_contact_window_valid_by_clip[clip_idx].item())
+            ):
+                contact_interval = (
+                    int(self._adaptive_sampling_contact_window_by_clip[clip_idx, 0].item()),
+                    int(self._adaptive_sampling_contact_window_by_clip[clip_idx, 1].item()),
+                )
+
+            carry_start, carry_end = _contact_aware_carry_window_from_rel_z(
+                clip_rel_z,
+                contact_interval=contact_interval,
+                lift_height_threshold=_RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD,
+                lift_ratio_threshold=_CLIP_PICKUP_LIFT_RATIO_THRESHOLD,
+                consecutive_steps=_RUNTIME_PICKUP_CONSECUTIVE_STEPS,
+                release_lead_steps=_ADAPTIVE_SAMPLING_CONTACT_STAGE_RELEASE_LEAD_STEPS,
+            )
+            carry_window_by_clip[clip_idx, 0] = carry_start
+            carry_window_by_clip[clip_idx, 1] = carry_end
+
+        setattr(self, cache_name, carry_window_by_clip)
+        return carry_window_by_clip
+
+    def get_contact_aware_root_command_active_mask(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        env_ids_t = self._ensure_index_tensor(env_ids)
+        if not self.motion.has_object:
+            return torch.ones((env_ids_t.numel(),), device=self.device, dtype=torch.bool)
+
+        clip_ids = self.clip_ids[env_ids_t]
+        time_steps = self.time_steps[env_ids_t]
+        carry_window_by_clip = self._get_contact_aware_carry_window_by_clip()
+        carry_start = carry_window_by_clip[clip_ids, 0]
+        carry_end = carry_window_by_clip[clip_ids, 1]
+        return (time_steps >= carry_start) & (time_steps < carry_end)
 
     def _reset_pickup_anchor_state(
         self,

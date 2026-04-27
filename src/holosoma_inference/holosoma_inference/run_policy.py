@@ -114,6 +114,7 @@ def _is_wbt_observation(obs_dict: dict[str, list[str]]) -> bool:
         "target_joints",
         "target_root_roll",
         "target_root_pitch",
+        "obj_current_pose_size_b",
     }
     for terms in obs_dict.values():
         if any(term in wbt_terms for term in terms):

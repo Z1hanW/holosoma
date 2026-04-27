@@ -768,6 +768,20 @@ class DirectSimulation:
                 if root_pos_delta is not None:
                     root_pos = root_pos + np.asarray(root_pos_delta, dtype=np.float32)
 
+                root_lin_vel_override = _parse_debug_float_list_env(
+                    "HOLOSOMA_MOTION_INIT_ROOT_LIN_VEL",
+                    expected_len=3,
+                )
+                if root_lin_vel_override is not None:
+                    root_lin_vel = np.asarray(root_lin_vel_override, dtype=np.float32)
+
+                root_ang_vel_override = _parse_debug_float_list_env(
+                    "HOLOSOMA_MOTION_INIT_ROOT_ANG_VEL",
+                    expected_len=3,
+                )
+                if root_ang_vel_override is not None:
+                    root_ang_vel = np.asarray(root_ang_vel_override, dtype=np.float32)
+
                 yaw_delta_deg_raw = os.environ.get("HOLOSOMA_MOTION_INIT_YAW_DELTA_DEG", "").strip()
                 if yaw_delta_deg_raw:
                     yaw_delta_rad = np.deg2rad(float(yaw_delta_deg_raw))

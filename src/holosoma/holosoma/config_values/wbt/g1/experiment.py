@@ -513,6 +513,7 @@ g1_29dof_wbt_w_object_distill_sparse_root_cmd = replace(
         g1_29dof_wbt_w_object_generalist.training,
         name="g1_29dof_wbt_w_object_distill_sparse_root_cmd",
     ),
+    randomization=randomization.g1_29dof_wbt_randomization_w_object_with_action_delay,
     observation=observation.g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
     termination=termination.g1_29dof_wbt_termination_distill,
     algo=replace(
@@ -548,6 +549,7 @@ g1_29dof_wbt_w_object_distill_sparse_goal_mixed = replace(
         g1_29dof_wbt_w_object_generalist.training,
         name="g1_29dof_wbt_w_object_distill_sparse_goal_mixed",
     ),
+    randomization=randomization.g1_29dof_wbt_randomization_w_object_with_action_delay,
     observation=observation.g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
     reward=reward.g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed,
     termination=termination.g1_29dof_wbt_termination_distill_sparse_goal_mixed,
@@ -595,6 +597,7 @@ g1_29dof_wbt_terrain_distill_sparse_root_cmd = replace(
         g1_29dof_wbt_videomimic_mlp.training,
         name="g1_29dof_wbt_terrain_distill_sparse_root_cmd",
     ),
+    randomization=randomization.g1_29dof_wbt_randomization_with_action_delay,
     observation=observation.g1_29dof_wbt_observation_terrain_distill_sparse_root_cmd,
     termination=termination.g1_29dof_wbt_termination_distill,
     algo=replace(
@@ -614,6 +617,7 @@ g1_29dof_wbt_w_object_distill_sparse_root_cmd_legacy = replace(
         g1_29dof_wbt_w_object_generalist.training,
         name="g1_29dof_wbt_w_object_distill_sparse_root_cmd_legacy",
     ),
+    randomization=randomization.g1_29dof_wbt_randomization_w_object_with_action_delay,
     observation=observation.g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy,
     termination=termination.g1_29dof_wbt_termination_distill,
     algo=replace(

@@ -615,11 +615,32 @@ object_distill_sparse_root_cmd_terms = {
     ),
 }
 
+object_distill_sparse_root_cmd_terms_contact_aware = {
+    "sparse_target_root_trajectory_command_contact_aware": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:sparse_target_root_trajectory_command_contact_aware",
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
 # Legacy distill torso observation (kept only for backward compatibility):
 # includes clip_phase and should not be used for sim2real-oriented training.
 object_distill_sparse_root_cmd_terms_legacy = {
     "sparse_target_root_trajectory_command": ObsTermCfg(
         func="holosoma.managers.observation.terms.wbt:sparse_target_root_trajectory_command",
+        scale=1.0,
+        noise=0.0,
+    ),
+    "clip_phase": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:clip_phase",
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
+object_distill_sparse_root_cmd_terms_contact_aware_legacy = {
+    "sparse_target_root_trajectory_command_contact_aware": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:sparse_target_root_trajectory_command_contact_aware",
         scale=1.0,
         noise=0.0,
     ),
@@ -769,6 +790,18 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
             history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
             terms=object_distill_sparse_root_cmd_terms,
         ),
+        "actor_obs_root_contact_aware": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
+            terms=object_distill_sparse_root_cmd_terms_contact_aware,
+        ),
+        "actor_obs_torso_contact_aware": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
+            terms=object_distill_sparse_root_cmd_terms_contact_aware,
+        ),
         # Student proprioception state.
         "actor_obs_proprio": ObsGroupCfg(
             concatenate=True,
@@ -907,6 +940,18 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy = ObservationMa
             enable_noise=False,
             history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
             terms=object_distill_sparse_root_cmd_terms_legacy,
+        ),
+        "actor_obs_root_contact_aware": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
+            terms=object_distill_sparse_root_cmd_terms_contact_aware_legacy,
+        ),
+        "actor_obs_torso_contact_aware": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
+            terms=object_distill_sparse_root_cmd_terms_contact_aware_legacy,
         ),
         # Student proprioception state.
         "actor_obs_proprio": ObsGroupCfg(

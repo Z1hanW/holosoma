@@ -13,11 +13,13 @@ set -euo pipefail
 # - auto-matched to the selected teacher checkpoint, following the same teacher
 #   compatibility interface pattern as distill_box_drop_mixed.sh
 #
-# Schedule variants:
+# Schedule variants / modes:
 # - default: old-tracker profile keeps pure DAgger by default
 # - dagger_mix: pure DAgger with teacher-action rollout mix 0.7 -> 0.0 by default
 # - dag_first: pure DAgger first, then a small PPO blend
 # - ppo_first: PPO+DAgger from iteration 0
+# - contact-aware: ppo-first student whose sparse root command is zeroed before
+#   pickup and during the release/putdown tail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
@@ -32,6 +34,7 @@ POSITIONAL_RUN_NAME=""
 DATA_MODE=${DATA_MODE:-pure-sd}
 TRACKER_PROFILE=${TRACKER_PROFILE:-old-tracker}
 SCHEDULE_VARIANT=${SCHEDULE_VARIANT:-default}
+ROOT_COMMAND_MODE=${ROOT_COMMAND_MODE:-default}
 PYTHON_BIN=${PYTHON_BIN:-python}
 
 parse_wandb_run_url() {
@@ -203,6 +206,10 @@ while [[ $# -gt 0 ]]; do
       SCHEDULE_VARIANT="ppo_first"
       shift
       ;;
+    contact-aware|contact_aware|contactaware)
+      ROOT_COMMAND_MODE="contact-aware"
+      shift
+      ;;
     *)
       break
       ;;
@@ -219,9 +226,12 @@ if [[ $# -gt 0 && "$1" != -* ]]; then
 fi
 
 if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
-  echo "Usage: $0 [mix-naive|pure-real|pure-sd] [default|dagger-mix|dag_first|ppo-first] [teacher_checkpoint.pt|wandb_run_url] [run_name] [extra train args...]" >&2
+  echo "Usage: $0 [mix-naive|pure-real|pure-sd] [default|dagger-mix|dag_first|ppo-first|contact-aware] [teacher_checkpoint.pt|wandb_run_url] [run_name] [extra train args...]" >&2
   exit 1
 fi
+
+STUDENT_ACTOR_INPUTS_EXPLICIT=0
+[[ -n "${STUDENT_ACTOR_INPUTS+x}" ]] && STUDENT_ACTOR_INPUTS_EXPLICIT=1
 
 DS_DATA_ROOT_EXPLICIT=0
 [[ -n "${DS_DATA_ROOT+x}" ]] && DS_DATA_ROOT_EXPLICIT=1
@@ -284,6 +294,8 @@ DAGGER_LOSS_COEF_EXPLICIT=0
 [[ -n "${DAGGER_LOSS_COEF+x}" ]] && DAGGER_LOSS_COEF_EXPLICIT=1
 PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT=0
 [[ -n "${PPO_SCHEDULE_STEP_EPOCHS+x}" ]] && PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT=1
+USE_ADAPTIVE_TIMESTEPS_SAMPLER_EXPLICIT=0
+[[ -n "${USE_ADAPTIVE_TIMESTEPS_SAMPLER+x}" ]] && USE_ADAPTIVE_TIMESTEPS_SAMPLER_EXPLICIT=1
 SCHEDULE_NAME_EXPLICIT=0
 [[ -n "${SCHEDULE_NAME+x}" ]] && SCHEDULE_NAME_EXPLICIT=1
 SCHEDULE_NOTES_EXPLICIT=0
@@ -344,7 +356,8 @@ if [[ -z "${NPROC:-}" ]]; then
   IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
   NPROC=${#_visible_gpus[@]}
 fi
-DEFAULT_TOTAL_ENVS=${DEFAULT_TOTAL_ENVS:-7168}
+DEFAULT_ENVS_PER_GPU=${DEFAULT_ENVS_PER_GPU:-2048}
+DEFAULT_TOTAL_ENVS=${DEFAULT_TOTAL_ENVS:-$((DEFAULT_ENVS_PER_GPU * NPROC))}
 NUM_ENVS=${NUM_ENVS:-${DEFAULT_TOTAL_ENVS}}
 if [[ "${LEGACY_DS_ENABLED}" == "1" && "${TRACKER_PROFILE}" == "old-tracker" && "${DATA_MODE}" == "pure-sd" && "${DS_DATA_ROOT_EXPLICIT}" -eq 0 ]]; then
   DS_DATA_ROOT="${LEGACY_DS_ROOT}"
@@ -839,6 +852,16 @@ DEFAULT_POSE_APPEND_DURATION_S=${DEFAULT_POSE_APPEND_DURATION_S:-0.0}
 VISER_DISTILL_MINIMAL_UI=${VISER_DISTILL_MINIMAL_UI:-1}
 VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-0}
 
+if [[ "${ROOT_COMMAND_MODE}" == "contact-aware" ]]; then
+  SCHEDULE_VARIANT="ppo_first"
+  if [[ "${STUDENT_ACTOR_INPUTS_EXPLICIT}" -eq 0 ]]; then
+    STUDENT_ACTOR_INPUTS="['actor_obs_root_contact_aware','actor_obs_proprio','actor_obs_actions']"
+  fi
+  if [[ "${USE_ADAPTIVE_TIMESTEPS_SAMPLER_EXPLICIT}" -eq 0 ]]; then
+    USE_ADAPTIVE_TIMESTEPS_SAMPLER=True
+  fi
+fi
+
 # Keep camera intrinsics/range on preset defaults unless explicitly overridden.
 # Pitch is intentionally written into the run config by default.
 IMAGE_WIDTH=${IMAGE_WIDTH:-}
@@ -1040,6 +1063,15 @@ case "${SCHEDULE_VARIANT}" in
     ;;
 esac
 
+if [[ "${ROOT_COMMAND_MODE}" == "contact-aware" ]]; then
+  if [[ "${SCHEDULE_NAME_EXPLICIT}" -eq 0 ]]; then
+    SCHEDULE_NAME="${SCHEDULE_NAME}_contact_aware"
+  fi
+  if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
+    SCHEDULE_NOTES="${SCHEDULE_NOTES} Contact-aware student sparse root command stays zero before pickup and during the release/putdown tail; only the mid-carry segment exposes motion command."
+  fi
+fi
+
 START_AT_TIMESTEP_ZERO_PROB_END_ITER=${START_AT_TIMESTEP_ZERO_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS}}
 FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS}}
 
@@ -1185,6 +1217,7 @@ fi
 echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} num_envs=${NUM_ENVS}"
 echo "[INFO] data_mode=${DATA_MODE}"
 echo "[INFO] tracker_profile=${TRACKER_PROFILE}"
+echo "[INFO] root_command_mode=${ROOT_COMMAND_MODE}"
 echo "[INFO] use_legacy_ds=${LEGACY_DS_ENABLED} prepared=${LEGACY_DS_PREPARED} ds_data_root=${DS_DATA_ROOT}"
 if [[ -n "${MOTION_DIR:-}" ]]; then
   echo "[INFO] motion_dir=${MOTION_DIR}"

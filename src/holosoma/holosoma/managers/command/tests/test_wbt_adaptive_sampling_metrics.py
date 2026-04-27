@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from holosoma.managers.command.terms.wbt import (
+    _contact_aware_carry_window_from_rel_z,
     _compute_contact_stage_intervals,
     _probability_mass_on_intervals,
     _select_primary_contact_interval,
@@ -68,3 +69,30 @@ def test_short_contact_window_collapses_middle_stages_without_overlap():
     expected = torch.tensor([0.60, 0.0, 0.0, 0.0, 0.10], dtype=torch.float32)
     assert torch.allclose(stage_masses, expected, atol=1.0e-5)
     assert torch.isclose(after_t2_mass, torch.tensor(0.30, dtype=torch.float32), atol=1.0e-5)
+
+
+def test_contact_aware_carry_window_turns_on_after_pickup_and_off_on_lowering():
+    rel_z = torch.tensor([0.00, 0.00, 0.12, 0.15, 0.18, 0.18, 0.18, 0.16, 0.09, 0.08, 0.08], dtype=torch.float32)
+
+    carry_start, carry_end = _contact_aware_carry_window_from_rel_z(
+        rel_z,
+        consecutive_steps=2,
+        release_lead_steps=30,
+    )
+
+    assert carry_start == 2
+    assert carry_end == 8
+
+
+def test_contact_aware_carry_window_uses_contact_release_tail_when_object_stays_lifted():
+    rel_z = torch.tensor([0.00, 0.00, 0.12, 0.15, 0.18, 0.18, 0.18, 0.18, 0.18, 0.18], dtype=torch.float32)
+
+    carry_start, carry_end = _contact_aware_carry_window_from_rel_z(
+        rel_z,
+        contact_interval=(0, 35),
+        consecutive_steps=2,
+        release_lead_steps=30,
+    )
+
+    assert carry_start == 2
+    assert carry_end == 5

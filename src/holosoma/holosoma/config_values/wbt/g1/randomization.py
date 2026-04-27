@@ -177,6 +177,55 @@ g1_29dof_wbt_randomization = RandomizationManagerCfg(
     step_terms={**base_step_terms},
 )
 
+distill_setup_terms = {
+    **base_setup_terms,
+    "randomize_base_com_startup": RandomizationTermCfg(
+        func="holosoma.managers.randomization.terms.locomotion:randomize_base_com_startup",
+        params={
+            "base_com_range": {"x": [-0.055, 0.055], "y": [-0.08, 0.08], "z": [-0.1, 0.1]},
+            "enabled": True,
+        },
+    ),
+    "setup_torque_rfi": RandomizationTermCfg(
+        func="holosoma.managers.randomization.terms.locomotion:setup_torque_rfi",
+        params={
+            "enabled": True,
+            "rfi_lim": 0.01,
+        },
+    ),
+    "actuator_randomizer_state": RandomizationTermCfg(
+        func="holosoma.managers.randomization.terms.locomotion:ActuatorRandomizerState",
+        params={
+            **base_setup_terms["actuator_randomizer_state"].params,
+            "enable_pd_gain": True,
+            "rfi_lim_range": [0.0, 1.0],
+            "enable_rfi_lim": True,
+        },
+    ),
+    "mass_randomizer": RandomizationTermCfg(
+        func="holosoma.managers.randomization.terms.locomotion:randomize_mass_startup",
+        params={
+            "enable_link_mass": True,
+            "link_mass_range": [0.9, 1.2],
+            "enable_base_mass": True,
+            "added_mass_range": [-1.0, 3.0],
+        },
+    ),
+    "setup_action_delay_buffers": RandomizationTermCfg(
+        func="holosoma.managers.randomization.terms.locomotion:setup_action_delay_buffers",
+        params={
+            **base_setup_terms["setup_action_delay_buffers"].params,
+            "enabled": True,
+        },
+    ),
+}
+
+g1_29dof_wbt_randomization_with_action_delay = RandomizationManagerCfg(
+    setup_terms={**distill_setup_terms},
+    reset_terms={**base_reset_terms},
+    step_terms={**base_step_terms},
+)
+
 g1_29dof_wbt_randomization_w_object = RandomizationManagerCfg(
     setup_terms={
         **base_setup_terms,
@@ -190,4 +239,22 @@ g1_29dof_wbt_randomization_w_object = RandomizationManagerCfg(
     },
 )
 
-__all__ = ["g1_29dof_wbt_randomization", "g1_29dof_wbt_randomization_w_object"]
+g1_29dof_wbt_randomization_w_object_with_action_delay = RandomizationManagerCfg(
+    setup_terms={
+        **distill_setup_terms,
+        **object_state_dr_at_setup,
+    },
+    reset_terms={
+        **base_reset_terms,
+    },
+    step_terms={
+        **base_step_terms,
+    },
+)
+
+__all__ = [
+    "g1_29dof_wbt_randomization",
+    "g1_29dof_wbt_randomization_with_action_delay",
+    "g1_29dof_wbt_randomization_w_object",
+    "g1_29dof_wbt_randomization_w_object_with_action_delay",
+]
