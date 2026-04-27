@@ -9,8 +9,8 @@ set -euo pipefail
 # - perception_obs: camera depth
 #
 # Single-run curriculum:
-# - default PPO/DAgger mix: PPO starts at 1000 iters and increases by 0.1 every 500 iters until 0.9
-#   while effective DAgger weight decreases from 1.0 to 0.1 with dagger_loss_coef=1.0
+# - default PPO-first PPO/DAgger mix: PPO starts at 0.1 from iteration 0 and increases by 0.1
+#   every 500 iters until 0.9, while effective DAgger weight decreases from 0.9 to 0.1
 # - >=2000 iters: keep 50% envs on training distribution, open command curriculum on the other 50%
 # - within the command curriculum, external goals ramp conservatively so training remains teacher-anchored
 #
@@ -27,7 +27,7 @@ DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
 POSITIONAL_RUN_NAME=""
 DATA_MODE=${DATA_MODE:-pure-sd}
-SCHEDULE_VARIANT=${SCHEDULE_VARIANT:-default}
+SCHEDULE_VARIANT=${SCHEDULE_VARIANT:-ppo_first}
 REWARD_VARIANT=${REWARD_VARIANT:-default}
 DISTRIBUTION_VARIANT=${DISTRIBUTION_VARIANT:-default}
 TRACKER_PROFILE=${TRACKER_PROFILE:-old-tracker}
@@ -606,17 +606,17 @@ TEACHER_ACTION_MIX_RATIO_END_ITERATION=${TEACHER_ACTION_MIX_RATIO_END_ITERATION:
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
 PURE_DAGGER_ITERATIONS=${PURE_DAGGER_ITERATIONS:-20000}
 NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-20000}
-PPO_START_EPOCH=${PPO_START_EPOCH:-1000}
-DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-4500}
+PPO_START_EPOCH=${PPO_START_EPOCH:-0}
+DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-4000}
 PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.9}
-PPO_START_COEFF=${PPO_START_COEFF:-0.0}
-PPO_START_NOISE_STD=${PPO_START_NOISE_STD:-}
+PPO_START_COEFF=${PPO_START_COEFF:-0.1}
+PPO_START_NOISE_STD=${PPO_START_NOISE_STD:-0.1}
 PPO_START_NOISE_STD_UNTIL_COEFF=${PPO_START_NOISE_STD_UNTIL_COEFF:-0.1}
 PPO_SCHEDULE_STEP_EPOCHS=${PPO_SCHEDULE_STEP_EPOCHS:-500}
 DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
 FIXED_BC_EVAL_LOG_INTERVAL=${FIXED_BC_EVAL_LOG_INTERVAL:-1000}
-SCHEDULE_NAME=${SCHEDULE_NAME:-teacher_anchor_then_goal_curriculum_v3_step_mix}
-SCHEDULE_NOTES=${SCHEDULE_NOTES:-"No teacher rollout mix. PPO/DAgger use the default staircase blend: PPO starts at 1000, increases by 0.1 every 500 iterations until capping at 0.9; with dagger_loss_coef=1.0, the effective BC weight drops from 1.0 to 0.1 over the same schedule. 2500-3500 command_only_env_prob ramps 0->0.5. 2500-end external_goal_prob ramps 0->0.25 and reset curriculum ramps start_at_zero 0.2->1.0. Goal range ramps with the same delayed schedule."}
+SCHEDULE_NAME=${SCHEDULE_NAME:-teacher_anchor_then_goal_curriculum_v4_ppo_first_step_mix}
+SCHEDULE_NOTES=${SCHEDULE_NOTES:-"PPO-first hybrid: PPO and DAgger are both active from iteration 0. PPO starts at 0.1 and increases by 0.1 every 500 iterations until 0.9 at 4000; effective DAgger weight starts at 0.9 and decreases to 0.1. Mixed sparse-goal curriculum, command-only ramp, and external-goal ramp stay aligned with the default drop-mixed launcher."}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.2}
 START_AT_TIMESTEP_ZERO_PROB_END=${START_AT_TIMESTEP_ZERO_PROB_END:-1.0}
 START_AT_TIMESTEP_ZERO_PROB_START_ITER=${START_AT_TIMESTEP_ZERO_PROB_START_ITER:-2500}
@@ -632,7 +632,7 @@ PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
 # Pitch is intentionally written into the run config by default.
 CAMERA_PITCH_DEG=${CAMERA_PITCH_DEG-10}
 STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_proprio','actor_obs_actions','actor_obs_drop_command']"}
-DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES=${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES:-True}
+DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES=${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES:-False}
 DAGGER_MATCH_STD=${DAGGER_MATCH_STD:-True}
 ENTROPY_COEF=${ENTROPY_COEF:-0.0}
 DAGGER_IGNORE_EPISODE_INITIAL_STEPS=${DAGGER_IGNORE_EPISODE_INITIAL_STEPS:-0}

@@ -52,6 +52,16 @@ def _truthy_env(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got: {raw!r}") from exc
+
+
 def setup_simulator_imports(config: ExperimentConfig | RunSimConfig) -> None:
     """Setup simulator-specific imports without side effects.
 
@@ -109,14 +119,20 @@ def setup_isaaclab_launcher(config: ExperimentConfig | RunSimConfig, device: str
     args_cli.env_spacing = config.simulator.config.scene.env_spacing
     args_cli.output_dir = config.logger.base_dir
     args_cli.headless = config.training.headless
-    if int(os.environ.get("WORLD_SIZE", "1")) > 1:
-        # Distribute simulator across GPUs when using multi-gpu training
-        args_cli.device = f"cuda:{int(os.environ.get('LOCAL_RANK', '0'))}"
+    world_size = _int_env("WORLD_SIZE", 1)
+    if world_size > 1:
+        # AppLauncher's distributed branch also limits per-rank Kit/Carbonite/OpenBLAS threads.
+        args_cli.distributed = True
+        args_cli.device = f"cuda:{_int_env('LOCAL_RANK', 0)}"
     elif device is not None:
         # Use the resolved device
         args_cli.device = device
     else:  # AppLauncher auto-detects
         pass
+
+    kit_args = os.environ.get("HOLOSOMA_ISAACSIM_KIT_ARGS") or os.environ.get("ISAACSIM_KIT_ARGS")
+    if kit_args and not getattr(args_cli, "kit_args", ""):
+        args_cli.kit_args = kit_args
 
     # Check if video recording is enabled and add --enable_cameras flag
     video_enabled = config.logger.video.enabled or config.logger.headless_recording
