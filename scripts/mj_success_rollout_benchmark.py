@@ -53,6 +53,9 @@ class Sample:
     object_pos: tuple[float, float, float] | None = None
     target_object_pos: tuple[float, float, float] | None = None
     key_errors: dict[str, float] = field(default_factory=dict)
+    key_body_pos: dict[str, tuple[float, float, float]] = field(default_factory=dict)
+    target_key_body_pos: dict[str, tuple[float, float, float]] = field(default_factory=dict)
+    key_object_dist: dict[str, float] = field(default_factory=dict)
 
 
 def _yaw_from_xyzw(quat: np.ndarray) -> float | None:
@@ -127,6 +130,33 @@ def _key_body_errors(state: dict[str, Any], overlay: dict[str, Any]) -> dict[str
     return errors
 
 
+def _key_body_positions(
+    state: dict[str, Any],
+    overlay: dict[str, Any],
+) -> tuple[dict[str, tuple[float, float, float]], dict[str, tuple[float, float, float]]]:
+    sim_key_states = state.get("key_body_states")
+    if not isinstance(sim_key_states, dict):
+        return {}, {}
+
+    sim_positions: dict[str, tuple[float, float, float]] = {}
+    for name, sim_payload in sim_key_states.items():
+        sim_pos = np.asarray(sim_payload, dtype=np.float64).reshape(-1)
+        if sim_pos.size >= 3:
+            sim_positions[str(name)] = tuple(float(value) for value in sim_pos[:3])
+
+    body_names = overlay.get("body_names")
+    body_pos_w = overlay.get("body_pos_w")
+    if not isinstance(body_names, list) or body_pos_w is None:
+        return sim_positions, {}
+    target_pos = np.asarray(body_pos_w, dtype=np.float64).reshape(-1, 3)
+    target_positions = {
+        str(name): tuple(float(value) for value in target_pos[idx])
+        for idx, name in enumerate(body_names)
+        if idx < target_pos.shape[0]
+    }
+    return sim_positions, target_positions
+
+
 def _make_sample(state: dict[str, Any], overlay: dict[str, Any]) -> Sample | None:
     if not overlay.get("clip_active"):
         return None
@@ -176,6 +206,13 @@ def _make_sample(state: dict[str, Any], overlay: dict[str, Any]) -> Sample | Non
             sample.target_object_pos = tuple(float(value) for value in target[:3])
 
     sample.key_errors = _key_body_errors(state, overlay)
+    sample.key_body_pos, sample.target_key_body_pos = _key_body_positions(state, overlay)
+    if actor is not None and sample.key_body_pos:
+        object_pos = np.asarray(actor[:3], dtype=np.float64)
+        sample.key_object_dist = {
+            name: float(np.linalg.norm(np.asarray(pos, dtype=np.float64) - object_pos))
+            for name, pos in sample.key_body_pos.items()
+        }
     if sample.key_errors:
         sample.key_mean_err = float(np.mean(list(sample.key_errors.values())))
     sample.object_robot_contacts = int(state.get("object_robot_contact_count", 0))

@@ -991,6 +991,7 @@ def _make_clip_accumulator(
     num_joints = len(joint_names)
     rollout_reference: dict[str, np.ndarray] = {
         "valid_steps": np.zeros((clip_length,), dtype=np.bool_),
+        "actions": np.zeros((clip_length, num_joints), dtype=np.float32),
         "body_pos_local": np.zeros((clip_length, num_bodies, 3), dtype=np.float32),
         "body_quat_w": np.zeros((clip_length, num_bodies, 4), dtype=np.float32),
         "body_lin_vel_w": np.zeros((clip_length, num_bodies, 3), dtype=np.float32),
@@ -1144,6 +1145,85 @@ def _record_rollout_reference_batch(
             rollout_motion["object_quat_w"][step_idx] = object_quat_w[batch_slot]
             rollout_motion["object_lin_vel_w"][step_idx] = object_lin_vel_w[batch_slot]
             rollout_motion["object_ang_vel_w"][step_idx] = object_ang_vel_w[batch_slot]
+
+
+def _record_actions_batch(
+    motion_command: MotionCommand,
+    *,
+    accumulators: dict[int, ClipAccumulator],
+    active_env_ids: list[int],
+    actions: torch.Tensor,
+) -> None:
+    if not active_env_ids:
+        return
+
+    env_ids_tensor = torch.tensor(active_env_ids, device=motion_command.device, dtype=torch.long)
+    time_steps = motion_command.time_steps.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    actions_np = actions.index_select(0, env_ids_tensor).detach().cpu().numpy().astype(np.float32, copy=False)
+
+    for batch_slot, env_id in enumerate(active_env_ids):
+        accumulator = accumulators[env_id]
+        step_idx = int(time_steps[batch_slot])
+        actions_out = accumulator.rollout_reference.get("actions")
+        if actions_out is None or step_idx < 0 or step_idx >= int(actions_out.shape[0]):
+            continue
+        actions_out[step_idx] = actions_np[batch_slot]
+
+
+def _record_policy_io_batch(
+    algo: BaseAlgo,
+    obs_dict: dict[str, torch.Tensor],
+    motion_command: MotionCommand,
+    *,
+    accumulators: dict[int, ClipAccumulator],
+    active_env_ids: list[int],
+) -> None:
+    if not active_env_ids:
+        return
+
+    actor_obs_raw = torch.cat([obs_dict[key] for key in algo.actor_obs_keys], dim=1)
+    if hasattr(algo, "_normalize_actor_obs"):
+        actor_obs_norm = algo._normalize_actor_obs(actor_obs_raw, update=False)
+    else:
+        actor_obs_norm = actor_obs_raw
+
+    actor_perception_key = getattr(algo, "actor_perception_key", "") or ""
+    perception_obs = obs_dict.get(actor_perception_key) if actor_perception_key else None
+
+    env_ids_tensor = torch.tensor(active_env_ids, device=motion_command.device, dtype=torch.long)
+    time_steps = motion_command.time_steps.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    actor_obs_raw_np = actor_obs_raw.index_select(0, env_ids_tensor).detach().cpu().numpy().astype(np.float32, copy=False)
+    actor_obs_norm_np = actor_obs_norm.index_select(0, env_ids_tensor).detach().cpu().numpy().astype(np.float32, copy=False)
+    perception_obs_np = None
+    if perception_obs is not None:
+        perception_obs_np = (
+            perception_obs.index_select(0, env_ids_tensor).detach().cpu().numpy().astype(np.float32, copy=False)
+        )
+
+    for batch_slot, env_id in enumerate(active_env_ids):
+        accumulator = accumulators[env_id]
+        rollout_reference = accumulator.rollout_reference
+        step_idx = int(time_steps[batch_slot])
+        valid_steps = rollout_reference["valid_steps"]
+        if step_idx < 0 or step_idx >= int(valid_steps.shape[0]):
+            continue
+
+        if "actor_obs_raw" not in rollout_reference:
+            rollout_reference["actor_obs_raw"] = np.zeros(
+                (valid_steps.shape[0], actor_obs_raw_np.shape[1]), dtype=np.float32
+            )
+            rollout_reference["actor_obs_norm"] = np.zeros(
+                (valid_steps.shape[0], actor_obs_norm_np.shape[1]), dtype=np.float32
+            )
+        rollout_reference["actor_obs_raw"][step_idx] = actor_obs_raw_np[batch_slot]
+        rollout_reference["actor_obs_norm"][step_idx] = actor_obs_norm_np[batch_slot]
+
+        if perception_obs_np is not None:
+            if "perception_obs" not in rollout_reference:
+                rollout_reference["perception_obs"] = np.zeros(
+                    (valid_steps.shape[0], perception_obs_np.shape[1]), dtype=np.float32
+                )
+            rollout_reference["perception_obs"][step_idx] = perception_obs_np[batch_slot]
 
 
 def _collect_region_measurements_batch(
@@ -1571,6 +1651,19 @@ def _collect_batch(
 
     for step_idx in range(int(max_rollout_steps)):
         actions = _policy_step(algo, obs_dict, policy_fn)
+        _record_policy_io_batch(
+            algo,
+            obs_dict,
+            motion_command,
+            accumulators=accumulators,
+            active_env_ids=[env_id for env_id in active_env_ids if not finished[env_id]],
+        )
+        _record_actions_batch(
+            motion_command,
+            accumulators=accumulators,
+            active_env_ids=[env_id for env_id in active_env_ids if not finished[env_id]],
+            actions=actions,
+        )
         obs_dict, _, _, _ = env.step({"actions": actions})
 
         still_active = [env_id for env_id in active_env_ids if not finished[env_id]]

@@ -772,7 +772,14 @@ VISER_RECENTER=${VISER_RECENTER:-True}
 START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-1.0}
 FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
 RESET_NOISE_SCALE=${RESET_NOISE_SCALE:-0.0}
+PHYSX_GPU_MAX_RIGID_CONTACT_COUNT=${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT:-}
+PHYSX_GPU_MAX_RIGID_PATCH_COUNT=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT:-}
+PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY:-}
+PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY:-}
+PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY:-}
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-268435456}
+PHYSX_GPU_HEAP_CAPACITY=${PHYSX_GPU_HEAP_CAPACITY:-}
+PHYSX_GPU_TEMP_BUFFER_CAPACITY=${PHYSX_GPU_TEMP_BUFFER_CAPACITY:-}
 FORCE_SINGLE_FRAME_HISTORY=${FORCE_SINGLE_FRAME_HISTORY:-0}
 if [[ "${DISTILL_PROPRIO_HISTORY_ONLY_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_DISTILL_PROPRIO_HISTORY_ONLY}" ]]; then
   DISTILL_PROPRIO_HISTORY_ONLY="${CHECKPOINT_SAVED_DISTILL_PROPRIO_HISTORY_ONLY}"
@@ -1082,8 +1089,23 @@ case "$(echo "${DISTILL_PROPRIO_HISTORY_ONLY}" | tr '[:upper:]' '[:lower:]')" in
     ;;
 esac
 
+append_physx_gpu_override() {
+  local value="$1"
+  local field="$2"
+  if [[ -n "${value}" ]]; then
+    cmd+=("--simulator.config.sim.physx.${field}" "${value}")
+  fi
+}
+
 if [[ "${SIMULATOR_SUBCOMMAND}" != "simulator:mujoco" ]]; then
-  cmd+=(--simulator.config.sim.physx.gpu_collision_stack_size "${PHYSX_GPU_COLLISION_STACK_SIZE}")
+  append_physx_gpu_override "${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT}" gpu_max_rigid_contact_count
+  append_physx_gpu_override "${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}" gpu_max_rigid_patch_count
+  append_physx_gpu_override "${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}" gpu_found_lost_pairs_capacity
+  append_physx_gpu_override "${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY}" gpu_found_lost_aggregate_pairs_capacity
+  append_physx_gpu_override "${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY}" gpu_total_aggregate_pairs_capacity
+  append_physx_gpu_override "${PHYSX_GPU_COLLISION_STACK_SIZE}" gpu_collision_stack_size
+  append_physx_gpu_override "${PHYSX_GPU_HEAP_CAPACITY}" gpu_heap_capacity
+  append_physx_gpu_override "${PHYSX_GPU_TEMP_BUFFER_CAPACITY}" gpu_temp_buffer_capacity
 else
   cmd+=(--randomization.ignore_unsupported True)
 fi

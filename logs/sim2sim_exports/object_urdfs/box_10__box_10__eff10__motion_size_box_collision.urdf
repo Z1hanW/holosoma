@@ -1,11 +1,11 @@
 <?xml version='1.0' encoding='utf-8'?>
-<robot name="box_74__eff09_box_collision">
+<robot name="box_10__eff10_box_collision">
   <dynamics damping="0.5" friction="0.9" />
   <link name="baseLink">
     <inertial>
       <mass value="0.1" />
       <origin xyz="0 0 0" />
-      <inertia ixx="0.00202326706" ixy="0" ixz="0" iyy="0.00232792347" iyz="0" izz="0.00331076835" />
+      <inertia ixx="0.000949528297" ixy="0" ixz="0" iyy="0.00215941199" iyz="0" izz="0.00229472371" />
     </inertial>
     <contact>
       <lateral_friction value="0.9" />
@@ -16,7 +16,7 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/ubuntu/FAR/holosoma/data/ds_box_data/scale_mix_all/train_g1_w_obj_geometry/box_74__eff09.obj" scale="1.11111115 1.11111116 1.11111112" />
+        <mesh filename="/home/ubuntu/FAR/holosoma/data/ds_box_data/scale_mix_all/train_g1_w_obj_geometry/box_10__eff10.obj" scale="1 1 1" />
       </geometry>
       <material name="mat">
         <color rgba="0.7 0.8 0.9 1" />
@@ -25,7 +25,7 @@
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <box size="0.46575260162353516 0.42469602823257446 0.24985061585903168" /></geometry>
+        <box size="0.4585590958595276 0.2551282048225403 0.22102713584899902" /></geometry>
     </collision>
   </link>
 </robot>

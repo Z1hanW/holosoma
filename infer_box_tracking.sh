@@ -87,7 +87,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 
 is_checkpoint_ref() {
   local ref="$1"
-  [[ "${ref}" == wandb://* || "${ref}" == https://wandb.ai/*/runs/* || "${ref}" == /* || "${ref}" == ./* || "${ref}" == ../* || "${ref}" == *.pt ]]
+  [[ "${ref}" == wandb://* || "${ref}" == https://wandb.ai/*/runs/* || "${ref}" == http://wandb.ai/*/runs/* || "${ref}" == wandb.ai/*/runs/* || "${ref}" == /* || "${ref}" == ./* || "${ref}" == ../* || "${ref}" == *.pt ]]
 }
 
 is_bare_checkpoint_name() {
@@ -97,7 +97,9 @@ is_bare_checkpoint_name() {
 
 parse_wandb_run_url() {
   local ref="$1"
-  local clean_ref="${ref%%\?*}"
+  local clean_ref
+  clean_ref="$(canonicalize_wandb_run_url_ref "${ref}")"
+  clean_ref="${clean_ref%%\?*}"
   if [[ "${clean_ref}" != https://wandb.ai/*/runs/* ]]; then
     return 1
   fi
@@ -159,6 +161,17 @@ parse_wandb_uri() {
 parse_wandb_reference() {
   local ref="$1"
   parse_wandb_run_url "${ref}" || parse_wandb_uri "${ref}"
+}
+
+canonicalize_wandb_run_url_ref() {
+  local ref="$1"
+  if [[ "${ref}" == wandb.ai/*/runs/* ]]; then
+    echo "https://${ref}"
+  elif [[ "${ref}" == http://wandb.ai/*/runs/* ]]; then
+    echo "https://${ref#http://}"
+  else
+    echo "${ref}"
+  fi
 }
 
 canonicalize_infer_dataset() {
@@ -259,6 +272,7 @@ PY
 
 normalize_checkpoint_ref() {
   local ref="$1"
+  ref="$(canonicalize_wandb_run_url_ref "${ref}")"
   if [[ "${ref}" != https://wandb.ai/*/runs/* ]]; then
     echo "${ref}"
     return 0
@@ -797,6 +811,8 @@ if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
   echo "[ERROR] Pass an explicit checkpoint, or keep a local generalist checkpoint under LOG_ROOT=${LOG_ROOT}." >&2
   exit 2
 fi
+
+TEACHER_CHECKPOINT="$(canonicalize_wandb_run_url_ref "${TEACHER_CHECKPOINT}")"
 
 if [[ "${TEACHER_CHECKPOINT_NAME_FROM_ARG}" == "1" ]]; then
   resolved_checkpoint_ref="$(checkpoint_ref_with_model_file "${TEACHER_CHECKPOINT}" "${TEACHER_CHECKPOINT_MODEL_FILE}" || true)"

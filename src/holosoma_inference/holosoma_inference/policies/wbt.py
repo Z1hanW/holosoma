@@ -511,6 +511,22 @@ class WholeBodyTrackingPolicy(BasePolicy):
         }
         self._policy_debug_count = 0
         self._policy_debug_initialized = False
+        self._perception_obs_file_path = (
+            Path(os.environ["HOLOSOMA_POLICY_PERCEPTION_OBS_FILE"]).expanduser()
+            if os.environ.get("HOLOSOMA_POLICY_PERCEPTION_OBS_FILE")
+            else None
+        )
+        self._perception_obs_file_key = os.environ.get("HOLOSOMA_POLICY_PERCEPTION_OBS_FILE_KEY", "perception_obs")
+        self._perception_obs_file_values: np.ndarray | None = None
+        self._logged_perception_obs_file = False
+        self._policy_action_file_path = (
+            Path(os.environ["HOLOSOMA_POLICY_ACTION_FILE"]).expanduser()
+            if os.environ.get("HOLOSOMA_POLICY_ACTION_FILE")
+            else None
+        )
+        self._policy_action_file_key = os.environ.get("HOLOSOMA_POLICY_ACTION_FILE_KEY", "actions")
+        self._policy_action_file_values: np.ndarray | None = None
+        self._logged_policy_action_file = False
 
         super().__init__(config)
         if self._policy_overlay_port > 0:
@@ -1158,6 +1174,86 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if idx < 0:
             return 0
         return min(idx, self._motion_data.frame_count - 1)
+
+    def _get_file_perception_obs(self, expected_dim: int) -> np.ndarray | None:
+        if self._perception_obs_file_path is None:
+            return None
+        if self._perception_obs_file_values is None:
+            path = self._perception_obs_file_path
+            if path.suffix.lower() == ".npz":
+                with np.load(path) as data:
+                    if self._perception_obs_file_key not in data.files:
+                        raise KeyError(
+                            f"{path} does not contain perception obs key "
+                            f"{self._perception_obs_file_key!r}; available={data.files}"
+                        )
+                    values = np.asarray(data[self._perception_obs_file_key], dtype=np.float32)
+            else:
+                values = np.asarray(np.load(path), dtype=np.float32)
+            values = values.reshape(values.shape[0], -1) if values.ndim > 1 else values.reshape(1, -1)
+            if values.shape[1] != int(expected_dim):
+                raise ValueError(
+                    f"Perception obs file dim mismatch: got {values.shape[1]}, expected {int(expected_dim)}"
+                )
+            self._perception_obs_file_values = values.astype(np.float32, copy=False)
+            if not self._logged_perception_obs_file:
+                logger.info(
+                    "Using file-backed perception_obs from {} key={} frames={} dim={}",
+                    path,
+                    self._perception_obs_file_key,
+                    self._perception_obs_file_values.shape[0],
+                    self._perception_obs_file_values.shape[1],
+                )
+                self._logged_perception_obs_file = True
+
+        index_mode = os.environ.get("HOLOSOMA_POLICY_PERCEPTION_OBS_FILE_INDEX", "motion_timestep").strip().lower()
+        if index_mode == "motion_index":
+            frame_idx = self._get_motion_index()
+        elif index_mode in {"count", "policy_count"}:
+            frame_idx = int(self._policy_debug_count)
+        else:
+            frame_idx = int(self.motion_timestep)
+        frame_idx = max(0, min(int(frame_idx), int(self._perception_obs_file_values.shape[0]) - 1))
+        return self._perception_obs_file_values[frame_idx : frame_idx + 1].copy()
+
+    def _get_file_policy_action(self) -> np.ndarray | None:
+        if self._policy_action_file_path is None:
+            return None
+        if self._policy_action_file_values is None:
+            path = self._policy_action_file_path
+            if path.suffix.lower() == ".npz":
+                with np.load(path) as data:
+                    if self._policy_action_file_key not in data.files:
+                        raise KeyError(
+                            f"{path} does not contain action key {self._policy_action_file_key!r}; "
+                            f"available={data.files}"
+                        )
+                    values = np.asarray(data[self._policy_action_file_key], dtype=np.float32)
+            else:
+                values = np.asarray(np.load(path), dtype=np.float32)
+            values = values.reshape(values.shape[0], -1) if values.ndim > 1 else values.reshape(1, -1)
+            if values.shape[1] != int(self.num_dofs):
+                raise ValueError(f"Policy action file dim mismatch: got {values.shape[1]}, expected {self.num_dofs}")
+            self._policy_action_file_values = values.astype(np.float32, copy=False)
+            if not self._logged_policy_action_file:
+                logger.info(
+                    "Using file-backed raw policy actions from {} key={} frames={} dim={}",
+                    path,
+                    self._policy_action_file_key,
+                    self._policy_action_file_values.shape[0],
+                    self._policy_action_file_values.shape[1],
+                )
+                self._logged_policy_action_file = True
+
+        index_mode = os.environ.get("HOLOSOMA_POLICY_ACTION_FILE_INDEX", "motion_timestep").strip().lower()
+        if index_mode == "motion_index":
+            frame_idx = self._get_motion_index()
+        elif index_mode in {"count", "policy_count"}:
+            frame_idx = int(self._policy_debug_count)
+        else:
+            frame_idx = int(self.motion_timestep)
+        frame_idx = max(0, min(int(frame_idx), int(self._policy_action_file_values.shape[0]) - 1))
+        return self._policy_action_file_values[frame_idx : frame_idx + 1].copy()
 
     def _maybe_update_motion_alignment(self, robot_state_data) -> None:
         if not self._motion_alignment_enabled or self._motion_data is None:
@@ -1826,29 +1922,35 @@ class WholeBodyTrackingPolicy(BasePolicy):
             input_feed[self._time_step_input_name] = np.array([[motion_index]], dtype=np.float32)
         perception_obs = None
         if self._perception_obs_input_name:
-            perception_target_sim_time_ms = None
-            if os.environ.get("HOLOSOMA_POLICY_ALIGN_PERCEPTION_TO_SIM_STATE", "1").strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }:
-                get_sim_time_ms = getattr(self.interface, "get_sim_time_ms", None)
-                if callable(get_sim_time_ms):
-                    perception_target_sim_time_ms = get_sim_time_ms()
-                    try:
-                        perception_target_sim_time_ms += float(
-                            os.environ.get("HOLOSOMA_POLICY_PERCEPTION_TARGET_OFFSET_MS", "0") or "0"
-                        )
-                    except ValueError:
-                        pass
-            perception_obs = self._get_split_perception_obs(
-                self._get_onnx_input_dim(self._perception_obs_input_name),
-                target_sim_time_ms=perception_target_sim_time_ms,
-            )
+            perception_dim = self._get_onnx_input_dim(self._perception_obs_input_name)
+            perception_obs = self._get_file_perception_obs(perception_dim)
+            if perception_obs is None:
+                perception_target_sim_time_ms = None
+                if os.environ.get("HOLOSOMA_POLICY_ALIGN_PERCEPTION_TO_SIM_STATE", "1").strip().lower() in {
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                }:
+                    get_sim_time_ms = getattr(self.interface, "get_sim_time_ms", None)
+                    if callable(get_sim_time_ms):
+                        perception_target_sim_time_ms = get_sim_time_ms()
+                        try:
+                            perception_target_sim_time_ms += float(
+                                os.environ.get("HOLOSOMA_POLICY_PERCEPTION_TARGET_OFFSET_MS", "0") or "0"
+                            )
+                        except ValueError:
+                            pass
+                perception_obs = self._get_split_perception_obs(
+                    perception_dim,
+                    target_sim_time_ms=perception_target_sim_time_ms,
+                )
             input_feed[self._perception_obs_input_name] = perception_obs
         outputs = self.policy(input_feed)
         policy_action = outputs[self._action_output_name]
+        action_override = self._get_file_policy_action()
+        if action_override is not None:
+            policy_action = action_override
 
         if self._uses_motion_command:
             joint_pos = outputs.get("joint_pos")

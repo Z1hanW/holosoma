@@ -95,7 +95,7 @@ OBJ_DIR=${OBJ_DIR:-"${DEFAULT_DS_GEOMETRY_DIR}"}
 PREPARED_MOTION_DIR=${PREPARED_MOTION_DIR:-""}
 OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-""}
 AVAILABLE_GPU_COUNT=$(detect_nproc)
-NPROC=${NPROC:-7}
+NPROC=${NPROC:-8}
 if [[ ! "${NPROC}" =~ ^[0-9]+$ || "${NPROC}" == "0" ]]; then
   echo "[ERROR] NPROC must be a positive integer. Got: ${NPROC}" >&2
   exit 2
@@ -117,6 +117,7 @@ PHYSX_GPU_HEAP_CAPACITY=${PHYSX_GPU_HEAP_CAPACITY:-67108864}
 PHYSX_GPU_TEMP_BUFFER_CAPACITY=${PHYSX_GPU_TEMP_BUFFER_CAPACITY:-16777216}
 ACTOR_LR=${ACTOR_LR:-1e-05}
 CRITIC_LR=${CRITIC_LR:-1e-05}
+NUM_LEARNING_EPOCHS=${NUM_LEARNING_EPOCHS:-7}
 CLIP_WEIGHTING_STRATEGY=${CLIP_WEIGHTING_STRATEGY:-success_rate_adaptive}
 
 AUTO_PREP_DS_BANK=${AUTO_PREP_DS_BANK:-1}
@@ -1277,6 +1278,7 @@ echo "[INFO] limits_dof_pos weight=${GENERALIST_LIMITS_DOF_POS_WEIGHT}"
 echo "[INFO] Motion default-pose prepend enabled: ${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
 echo "[INFO] Motion default-pose prepend duration: ${DEFAULT_POSE_PREPEND_DURATION_S}s"
 echo "[INFO] PPO learning rates: actor=${ACTOR_LR} critic=${CRITIC_LR}"
+echo "[INFO] PPO num_learning_epochs=${NUM_LEARNING_EPOCHS}"
 echo "[INFO] Clip weighting strategy: ${CLIP_WEIGHTING_STRATEGY}"
 echo "[INFO] Termination defaults: BadTracking full 3D + motion_ends"
 echo "[INFO] GPU_SELECTION=all-visible"
@@ -1295,6 +1297,7 @@ train_cmd=(
   --command.setup-terms.motion-command.params.motion-config.clip-weighting-strategy="${CLIP_WEIGHTING_STRATEGY}"
   --algo.config.actor_learning_rate="${ACTOR_LR}"
   --algo.config.critic_learning_rate="${CRITIC_LR}"
+  --algo.config.num_learning_epochs="${NUM_LEARNING_EPOCHS}"
   --algo.config.normalize-actor-obs=False
   --algo.config.normalize-critic-obs=False
   --observation-overrides.disable-actor-history=True
