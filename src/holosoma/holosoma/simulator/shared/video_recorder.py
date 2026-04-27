@@ -208,7 +208,7 @@ class VideoRecorderInterface(ABC):
         self._is_recording = True
         self._start_recording(episode_id)
 
-    def capture_frame(self, env_id: int = 0) -> None:
+    def capture_frame(self, env_id: int = 0, *, respect_decimation: bool = True) -> None:
         """Shared frame capture dispatch logic.
 
         This method is called during each simulation step and handles the logic
@@ -222,6 +222,10 @@ class VideoRecorderInterface(ABC):
         ----------
         env_id : int, default=0
             The environment ID where the frame is being captured.
+        respect_decimation : bool, default=True
+            When True, only capture every ``control_decimation`` physics steps.
+            Set False for replay-style loops that already advance once per
+            command frame and therefore should capture every call.
         """
         # Only capture frames when recording is active and from the correct environment
         if not self._is_recording or env_id != self.config.record_env_id:
@@ -230,10 +234,11 @@ class VideoRecorderInterface(ABC):
         # Increment frame counter for decimation tracking
         self._frame_counter += 1
 
-        # Only capture frame at control frequency (every control_decimation physics steps)
-        control_decimation = self.simulator.simulator_config.sim.control_decimation
-        if self._frame_counter % control_decimation != 0:
-            return
+        if respect_decimation:
+            # Only capture frame at control frequency (every control_decimation physics steps)
+            control_decimation = self.simulator.simulator_config.sim.control_decimation
+            if self._frame_counter % control_decimation != 0:
+                return
 
         if self.config.use_recording_thread:
             # Signal the recording thread to capture a frame

@@ -157,6 +157,13 @@ def replay(tyro_config: ExperimentConfig):
     tyro_env_config = get_tyro_env_config(tyro_config)
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     env = get_class(env_target)(tyro_env_config, device=device)
+    video_recorder = getattr(getattr(env, "simulator", None), "video_recorder", None)
+    record_env_id = 0
+    if video_recorder is not None and video_recorder.enabled:
+        record_env_id = int(getattr(env.simulator.video_config, "record_env_id", 0))
+        if not video_recorder.is_recording:
+            video_recorder.start_recording(episode_id=0)
+
     wandb, wandb_run = _init_replay_wandb(tyro_config)
     if wandb_run is not None:
         print(f"[INFO] W&B enabled: {wandb_run.project}/{wandb_run.name}")
@@ -220,6 +227,10 @@ def replay(tyro_config: ExperimentConfig):
     while not done:
         env.simulator.sim.step()
         done = env.step_visualize_motion(None)  # type: ignore[attr-defined]
+        if video_recorder is not None and video_recorder.enabled:
+            # Replay already advances once per motion-command frame, so applying
+            # control decimation again would under-sample the output video.
+            env.simulator.capture_video_frame(record_env_id, respect_decimation=False)
         if getattr(env, "perception_manager", None) is not None:
             env.perception_manager.update()
         if wandb_run is not None and (step % depth_log_every == 0):
@@ -438,6 +449,9 @@ def replay(tyro_config: ExperimentConfig):
             )
         except Exception as exc:
             print(f"[WARN] Failed to create/log replay depth video: {exc}")
+
+    if video_recorder is not None and video_recorder.enabled and video_recorder.is_recording:
+        video_recorder.stop_recording()
 
     keep_open = _is_truthy(os.environ.get("HOLOSOMA_REPLAY_KEEP_OPEN"), default=False)
     if keep_open:

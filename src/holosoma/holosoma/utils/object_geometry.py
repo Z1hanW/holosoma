@@ -138,6 +138,58 @@ def _load_urdf_geometry_extents_from_root(
     return float(extents[0]), float(extents[1]), float(extents[2])
 
 
+def _load_urdf_geometry_bbox_fill_ratio_from_root(
+    resolved_urdf: Path,
+    root: ET.Element,
+    *,
+    geom_tags: tuple[str, ...],
+) -> float | None:
+    """Return convex-hull volume divided by AABB volume for the selected geometry."""
+    try:
+        import trimesh  # type: ignore[import-not-found]
+    except Exception:
+        return None
+
+    meshes = _build_geometry_meshes(resolved_urdf, root, geom_tags=geom_tags)
+    if not meshes:
+        return None
+
+    try:
+        mesh = trimesh.util.concatenate(meshes) if len(meshes) > 1 else meshes[0]
+        extents = np.asarray(mesh.bounds[1] - mesh.bounds[0], dtype=np.float64)
+        bbox_volume = float(np.prod(np.maximum(extents, 0.0)))
+        if not math.isfinite(bbox_volume) or bbox_volume <= 1.0e-12:
+            return None
+        hull_volume = float(mesh.convex_hull.volume)
+    except Exception:
+        return None
+
+    if not math.isfinite(hull_volume) or hull_volume <= 0.0:
+        return None
+    return hull_volume / bbox_volume
+
+
+def _has_explicit_box_geometry(root: ET.Element, *, geom_tags: tuple[str, ...]) -> bool:
+    for geom_tag in geom_tags:
+        for geom_parent in root.findall(f".//link/{geom_tag}"):
+            geometry_el = geom_parent.find("geometry")
+            if geometry_el is not None and geometry_el.find("box") is not None:
+                return True
+    return False
+
+
+def _geometry_extents_close(
+    first: tuple[float, float, float] | None,
+    second: tuple[float, float, float] | None,
+    *,
+    atol: float = 1.0e-5,
+    rtol: float = 1.0e-4,
+) -> bool:
+    if first is None or second is None:
+        return True
+    return bool(np.allclose(np.asarray(first), np.asarray(second), atol=atol, rtol=rtol))
+
+
 @dataclass(frozen=True)
 class UrdfBoxPrimitiveMetadata:
     """Subset of URDF properties needed to preserve simple box behavior with a cuboid primitive."""
@@ -238,6 +290,26 @@ def load_urdf_box_primitive_metadata(urdf_path: str | Path) -> UrdfBoxPrimitiveM
     )
     if extents is None:
         return None
+
+    if not has_explicit_box_geom:
+        visual_extents = _load_urdf_geometry_extents_from_root(resolved_urdf, root, geom_tags=("visual",))
+        collision_extents = _load_urdf_geometry_extents_from_root(resolved_urdf, root, geom_tags=("collision",))
+        if not _geometry_extents_close(visual_extents, collision_extents):
+            return None
+
+        for geom_tag in ("visual", "collision"):
+            if not root.findall(f".//link/{geom_tag}"):
+                continue
+            if _has_explicit_box_geometry(root, geom_tags=(geom_tag,)):
+                continue
+            fill_ratio = _load_urdf_geometry_bbox_fill_ratio_from_root(
+                resolved_urdf,
+                root,
+                geom_tags=(geom_tag,),
+            )
+            if fill_ratio is None or fill_ratio < 0.95:
+                return None
+
     mass = _parse_float(mass_el.get("value"), -1.0)
     if not math.isfinite(mass) or mass <= 0.0:
         return None

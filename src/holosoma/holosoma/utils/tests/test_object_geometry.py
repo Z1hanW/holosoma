@@ -53,32 +53,42 @@ def test_default_clip_object_maps_are_primitive_compatible(map_path: Path):
     )
 
 
-@pytest.mark.parametrize(
-    ("urdf_path", "expected_extents", "expected_center_offset"),
-    [
-        (
-            Path("/home/ubuntu/FAR/holosoma/data/ds_box_data/train_g1_w_obj_prepared/_generated_urdfs/box_10.urdf"),
-            (0.4585591, 0.2551282, 0.22102714),
-            (0.0, 0.0, 0.0),
-        ),
-        (
-            Path(
-                "/home/ubuntu/FAR/holosoma/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
-            ),
-            (0.47115421, 0.45873013, 0.40789548),
-            (0.0, 0.0, 0.0),
-        ),
-    ],
-)
-def test_known_box_urdfs_resolve_stable_primitive_extents(
-    urdf_path: Path,
-    expected_extents: tuple[float, float, float],
-    expected_center_offset: tuple[float, float, float],
-):
-    if not urdf_path.is_file():
-        pytest.skip(f"URDF asset not present on this node: {urdf_path}")
+def test_explicit_box_urdf_resolves_stable_primitive_extents(tmp_path: Path):
+    urdf_path = tmp_path / "box.urdf"
+    urdf_path.write_text(
+        """<?xml version="1.0"?>
+<robot name="box">
+  <link name="baseLink">
+    <inertial>
+      <mass value="0.1"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.002" ixy="0" ixz="0" iyy="0.002" iyz="0" izz="0.002"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.4 0.2 0.1"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.4 0.2 0.1"/></geometry>
+    </collision>
+  </link>
+</robot>
+""",
+        encoding="utf-8",
+    )
 
     metadata = load_urdf_box_primitive_metadata(urdf_path)
     assert metadata is not None
-    assert metadata.extents == pytest.approx(expected_extents, abs=1.0e-6)
-    assert metadata.center_offset == pytest.approx(expected_center_offset, abs=1.0e-6)
+    assert metadata.extents == pytest.approx((0.4, 0.2, 0.1), abs=1.0e-6)
+    assert metadata.center_offset == pytest.approx((0.0, 0.0, 0.0), abs=1.0e-6)
+
+
+def test_non_cuboid_box_mesh_urdf_is_not_primitive_compatible():
+    urdf_path = Path(
+        "/home/ubuntu/FAR/holosoma/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
+    )
+    if not urdf_path.is_file():
+        pytest.skip(f"URDF asset not present on this node: {urdf_path}")
+
+    assert load_urdf_box_primitive_metadata(urdf_path) is None

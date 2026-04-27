@@ -16,7 +16,7 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/ubuntu/FAR/holosoma/data/ds_box_data_legacy/train_g1_w_obj_prepared/_generated_urdfs/box_74.obj" scale="1.32193954 1.32193956 1.32193952" />
+        <mesh filename="/home/ubuntu/FAR/holosoma/data/ds_box_data/train_g1_w_obj_prepared/_generated_urdfs/box_74.obj" scale="1.32193954 1.32193956 1.32193952" />
       </geometry>
       <material name="mat">
         <color rgba="0.7 0.8 0.9 1" />

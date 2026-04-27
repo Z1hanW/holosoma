@@ -115,7 +115,34 @@ PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPAC
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-67108864}
 PHYSX_GPU_HEAP_CAPACITY=${PHYSX_GPU_HEAP_CAPACITY:-67108864}
 PHYSX_GPU_TEMP_BUFFER_CAPACITY=${PHYSX_GPU_TEMP_BUFFER_CAPACITY:-16777216}
-OBJECT_SPAWN_MODE=${OBJECT_SPAWN_MODE:-${HOLOSOMA_OBJECT_SPAWN_MODE:-primitive}}
+OBJECT_SPAWN_MODE=${OBJECT_SPAWN_MODE:-${HOLOSOMA_OBJECT_SPAWN_MODE:-urdf}}
+OBJECT_GEOMETRY_MODE=${OBJECT_GEOMETRY_MODE:-}
+PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE=""
+if [[ -n "${OBJECT_GEOMETRY_MODE}" ]]; then
+  case "$(echo "${OBJECT_GEOMETRY_MODE}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on|primitive|primitives|box|cuboid)
+      OBJECT_SPAWN_MODE="primitive"
+      PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="primitive"
+      ;;
+    0|false|no|off|mesh|urdf|disable|disabled)
+      OBJECT_SPAWN_MODE="urdf"
+      PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="mesh"
+      ;;
+    *)
+      echo "[ERROR] OBJECT_GEOMETRY_MODE must be one of: on/off/primitive/mesh. Got: ${OBJECT_GEOMETRY_MODE}" >&2
+      exit 2
+      ;;
+  esac
+else
+  case "$(echo "${OBJECT_SPAWN_MODE}" | tr '[:upper:]' '[:lower:]')" in
+    primitive|primitives|box|cuboid)
+      PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="primitive"
+      ;;
+    urdf|mesh|off|disable|disabled)
+      PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="mesh"
+      ;;
+  esac
+fi
 export HOLOSOMA_OBJECT_SPAWN_MODE="${OBJECT_SPAWN_MODE}"
 ACTOR_LR=${ACTOR_LR:-1e-05}
 CRITIC_LR=${CRITIC_LR:-1e-05}
@@ -158,7 +185,7 @@ PERCEPTION=${PERCEPTION:-none}
 PURE_SD_REWARD_PROFILE_RAW=${PURE_SD_REWARD_PROFILE:-default}
 PURE_SD_REWARD_PROFILE=$(echo "${PURE_SD_REWARD_PROFILE_RAW}" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')
 GENERALIST_CONTACT_REWARD_ENABLED=${GENERALIST_CONTACT_REWARD_ENABLED:-1}
-GENERALIST_CONTACT_REWARD_MODE=${GENERALIST_CONTACT_REWARD_MODE:-binary}
+GENERALIST_CONTACT_REWARD_MODE=${GENERALIST_CONTACT_REWARD_MODE:-tanh}
 GENERALIST_CONTACT_REWARD_THRESHOLD=${GENERALIST_CONTACT_REWARD_THRESHOLD:-1.0}
 GENERALIST_CONTACT_REWARD_FORCE_SCALE=${GENERALIST_CONTACT_REWARD_FORCE_SCALE:-25.0}
 GENERALIST_LIMITS_DOF_POS_WEIGHT=${GENERALIST_LIMITS_DOF_POS_WEIGHT:--100.0}
@@ -208,9 +235,9 @@ resolve_reward_profile_defaults() {
   case "${requested_profile}" in
     ""|default)
       ACTIVE_REWARD_PROFILE="default"
-      DEFAULT_GENERALIST_TORSO_CONTACT_REWARD_WEIGHT=0.0
-      DEFAULT_GENERALIST_ARM_CONTACT_REWARD_WEIGHT=0.0
-      DEFAULT_GENERALIST_PALM_CONTACT_REWARD_WEIGHT=0.70
+      DEFAULT_GENERALIST_TORSO_CONTACT_REWARD_WEIGHT=0.30
+      DEFAULT_GENERALIST_ARM_CONTACT_REWARD_WEIGHT=0.20
+      DEFAULT_GENERALIST_PALM_CONTACT_REWARD_WEIGHT=0.10
       DEFAULT_ROOT_POS_W=0.5
       DEFAULT_ROOT_ORI_W=0.5
       DEFAULT_FULL_BODY_POS_W=1.0
@@ -230,9 +257,9 @@ resolve_reward_profile_defaults() {
       ;;
     loose-cotrack|loose-cotracking|cotrack)
       ACTIVE_REWARD_PROFILE="loose-cotrack"
-      DEFAULT_GENERALIST_TORSO_CONTACT_REWARD_WEIGHT=0.0
-      DEFAULT_GENERALIST_ARM_CONTACT_REWARD_WEIGHT=0.0
-      DEFAULT_GENERALIST_PALM_CONTACT_REWARD_WEIGHT=0.70
+      DEFAULT_GENERALIST_TORSO_CONTACT_REWARD_WEIGHT=0.30
+      DEFAULT_GENERALIST_ARM_CONTACT_REWARD_WEIGHT=0.20
+      DEFAULT_GENERALIST_PALM_CONTACT_REWARD_WEIGHT=0.10
       DEFAULT_ROOT_POS_W=0.5
       DEFAULT_ROOT_ORI_W=0.5
       DEFAULT_FULL_BODY_POS_W=1.0
@@ -1330,12 +1357,10 @@ if [[ "${GENERALIST_CONTACT_REWARD_ENABLED_FLAG}" != "1" ]]; then
   GENERALIST_ARM_CONTACT_REWARD_WEIGHT=0.0
   GENERALIST_PALM_CONTACT_REWARD_WEIGHT=0.0
 fi
-WRIST_CONTACT_REWARD_TERMS=(
-  left_wrist_yaw
-  right_wrist_yaw
-)
-GENERALIST_WRIST_CONTACT_REWARD_WEIGHT=$(
-  awk -v palm_weight="${GENERALIST_PALM_CONTACT_REWARD_WEIGHT}" -v arm_weight="${GENERALIST_ARM_CONTACT_REWARD_WEIGHT}" -v count="${#WRIST_CONTACT_REWARD_TERMS[@]}" 'BEGIN { printf "%.12g", (palm_weight + arm_weight) / count }'
+CONTACT_REWARD_TERMS=(
+  "palms:${GENERALIST_PALM_CONTACT_REWARD_WEIGHT}"
+  "arms:${GENERALIST_ARM_CONTACT_REWARD_WEIGHT}"
+  "torso:${GENERALIST_TORSO_CONTACT_REWARD_WEIGHT}"
 )
 
 default_pose_prepend_enabled_normalized=$(echo "${DEFAULT_POSE_PREPEND_ENABLED}" | tr '[:upper:]' '[:lower:]')
@@ -1355,7 +1380,7 @@ esac
 echo "[INFO] Generalist contact reward enabled: ${GENERALIST_CONTACT_REWARD_ENABLED_FLAG}"
 echo "[INFO] pure_sd_reward_profile=${ACTIVE_REWARD_PROFILE}"
 echo "[INFO] Generalist contact reward mode=${GENERALIST_CONTACT_REWARD_MODE} threshold=${GENERALIST_CONTACT_REWARD_THRESHOLD} force_scale=${GENERALIST_CONTACT_REWARD_FORCE_SCALE}"
-echo "[INFO] Generalist wrist contact reward weights total=${GENERALIST_PALM_CONTACT_REWARD_WEIGHT}+${GENERALIST_ARM_CONTACT_REWARD_WEIGHT} each=${GENERALIST_WRIST_CONTACT_REWARD_WEIGHT} torso=disabled"
+echo "[INFO] Generalist contact reward weights palms=${GENERALIST_PALM_CONTACT_REWARD_WEIGHT} arms=${GENERALIST_ARM_CONTACT_REWARD_WEIGHT} torso=${GENERALIST_TORSO_CONTACT_REWARD_WEIGHT}"
 echo "[INFO] Reference tracking reward weights root_pos=${ROOT_POS_W} root_ori=${ROOT_ORI_W} body_pos=${FULL_BODY_POS_W} body_ori=${FULL_BODY_ORI_W} body_lin_vel=${FULL_BODY_LIN_VEL_W} body_ang_vel=${FULL_BODY_ANG_VEL_W}"
 echo "[INFO] Box tracking reward weights object_pos=${OBJECT_POS_W} object_ori=${OBJECT_ORI_W}"
 echo "[INFO] Reference tracking reward sigmas root_pos=${ROOT_POS_SIGMA} root_ori=${ROOT_ORI_SIGMA} body_pos=${FULL_BODY_POS_SIGMA} body_ori=${FULL_BODY_ORI_SIGMA} body_lin_vel=${FULL_BODY_LIN_VEL_SIGMA} body_ang_vel=${FULL_BODY_ANG_VEL_SIGMA}"
@@ -1371,6 +1396,9 @@ echo "[INFO] GPU_SELECTION=all-visible"
 echo "[INFO] AVAILABLE_GPU_COUNT=${AVAILABLE_GPU_COUNT}"
 echo "[INFO] NPROC=${NPROC} PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
 echo "[INFO] HOLOSOMA_OBJECT_SPAWN_MODE=${HOLOSOMA_OBJECT_SPAWN_MODE}"
+if [[ -n "${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}" ]]; then
+  echo "[INFO] perception_object_geometry_mode=${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}"
+fi
 echo "[INFO] PhysX gpu_max_rigid_contact_count=${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT} gpu_max_rigid_patch_count=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT} gpu_found_lost_pairs_capacity=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
 echo "[INFO] PhysX gpu_found_lost_aggregate_pairs_capacity=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY} gpu_total_aggregate_pairs_capacity=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY} gpu_collision_stack_size=${PHYSX_GPU_COLLISION_STACK_SIZE} gpu_heap_capacity=${PHYSX_GPU_HEAP_CAPACITY} gpu_temp_buffer_capacity=${PHYSX_GPU_TEMP_BUFFER_CAPACITY}"
 
@@ -1418,9 +1446,11 @@ train_cmd=(
   --command.setup-terms.motion-command.params.motion-config.enable-default-pose-prepend="${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
   --command.setup-terms.motion-command.params.motion-config.default-pose-prepend-duration-s="${DEFAULT_POSE_PREPEND_DURATION_S}"
 )
-for reward_term in "${WRIST_CONTACT_REWARD_TERMS[@]}"; do
+for reward_spec in "${CONTACT_REWARD_TERMS[@]}"; do
+  reward_term="${reward_spec%%:*}"
+  reward_weight="${reward_spec#*:}"
   train_cmd+=(
-    --reward.terms.body_contact_reward_"${reward_term}".weight="${GENERALIST_WRIST_CONTACT_REWARD_WEIGHT}"
+    --reward.terms.body_contact_reward_"${reward_term}".weight="${reward_weight}"
     --reward.terms.body_contact_reward_"${reward_term}".params.reward_mode="${GENERALIST_CONTACT_REWARD_MODE}"
     --reward.terms.body_contact_reward_"${reward_term}".params.threshold="${GENERALIST_CONTACT_REWARD_THRESHOLD}"
     --reward.terms.body_contact_reward_"${reward_term}".params.force_scale="${GENERALIST_CONTACT_REWARD_FORCE_SCALE}"
@@ -1452,6 +1482,15 @@ if [[ "${ENABLE_VISER}" == "1" ]]; then
 fi
 if [[ -n "${OBJECT_SPEC_PATH}" ]]; then
   train_cmd+=(--robot.object.object-urdf-path "${OBJECT_SPEC_PATH}")
+fi
+if [[ -n "${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}" ]]; then
+  case "$(echo "${PERCEPTION}" | tr '[:upper:]' '[:lower:]')" in
+    ""|none|off|disabled|disable)
+      ;;
+    *)
+      train_cmd+=(--perception.object-geometry-mode="${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}")
+      ;;
+  esac
 fi
 if [[ -n "${EFFECTIVE_SEQUENCE_NAME}" ]]; then
   train_cmd+=(--training.name="${EFFECTIVE_SEQUENCE_NAME}")

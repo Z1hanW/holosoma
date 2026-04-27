@@ -527,7 +527,7 @@ class BaseSimulator:
         if self.video_recorder is not None:
             self.video_recorder.on_episode_end(env_id)
 
-    def capture_video_frame(self, env_id: int = 0) -> None:
+    def capture_video_frame(self, env_id: int = 0, *, respect_decimation: bool = True) -> None:
         """Capture a video frame during simulation.
 
         This method should be called during each simulation step when video
@@ -538,9 +538,13 @@ class BaseSimulator:
         ----------
         env_id : int, default=0
             The environment ID where the frame is being captured.
+        respect_decimation : bool, default=True
+            When False, bypass the video recorder's control-decimation gate and
+            capture on every call. Replay/preview loops that already step at the
+            motion command rate should use this mode.
         """
         if self.video_recorder is not None:
-            self.video_recorder.capture_frame(env_id)
+            self.video_recorder.capture_frame(env_id, respect_decimation=respect_decimation)
 
     # ----- Actor/Object Access Interface -----
     # These methods provide unified access to objects registered with ObjectType enum

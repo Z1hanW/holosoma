@@ -1216,19 +1216,29 @@ class PerceptionManager:
                 searched,
             )
 
-        try:
-            from whole_body_tracking.utils.warp_sensors.camera_sensor import (  # noqa: PLC0415
-                CameraSensor as FarTrackingCameraSensor,
-            )
-            from whole_body_tracking.utils.warp_sensors.sensor_utils import (  # noqa: PLC0415
-                quat_mul_xyzw as ft_quat_mul_xyzw,
-            )
-            from whole_body_tracking.utils.warp_sensors.sensor_utils import (  # noqa: PLC0415
-                tf_apply_xyzw as ft_tf_apply_xyzw,
-            )
-        except ModuleNotFoundError:
+        FarTrackingCameraSensor = None
+        ft_quat_mul_xyzw = None
+        ft_tf_apply_xyzw = None
+        external_import_error: ModuleNotFoundError | None = None
+        if self._object_geometry_mode != "primitive":
+            try:
+                from whole_body_tracking.utils.warp_sensors.camera_sensor import (  # noqa: PLC0415
+                    CameraSensor as FarTrackingCameraSensor,
+                )
+                from whole_body_tracking.utils.warp_sensors.sensor_utils import (  # noqa: PLC0415
+                    quat_mul_xyzw as ft_quat_mul_xyzw,
+                )
+                from whole_body_tracking.utils.warp_sensors.sensor_utils import (  # noqa: PLC0415
+                    tf_apply_xyzw as ft_tf_apply_xyzw,
+                )
+            except ModuleNotFoundError as exc:
+                external_import_error = exc
+
+        if FarTrackingCameraSensor is None:
             # Internal fallback: keep perception runnable even when external far-tracking
-            # package is unavailable on the current node.
+            # package is unavailable on the current node. Primitive object geometry also
+            # uses the fallback because the external package does not include analytic
+            # cuboid raycast support.
             from holosoma.third_party.ft_warp_sensors.camera_sensor import (  # noqa: PLC0415
                 CameraSensor as FarTrackingCameraSensor,
             )
@@ -1238,9 +1248,16 @@ class PerceptionManager:
             from holosoma.third_party.ft_warp_sensors.sensor_utils import (  # noqa: PLC0415
                 tf_apply_xyzw as ft_tf_apply_xyzw,
             )
-            (self.logger or logger).warning(
-                "External far-tracking python package not importable. Using bundled holosoma fallback warp_sensors."
-            )
+            if self._object_geometry_mode == "primitive":
+                (self.logger or logger).info(
+                    "Using bundled holosoma fallback warp_sensors for primitive object geometry."
+                )
+            else:
+                (self.logger or logger).warning(
+                    "External far-tracking python package not importable ({}). "
+                    "Using bundled holosoma fallback warp_sensors.",
+                    external_import_error,
+                )
 
         urdf_path, _asset_root = self._resolve_robot_asset_paths()
         mesh_root = os.path.join(os.path.dirname(urdf_path), "meshes")

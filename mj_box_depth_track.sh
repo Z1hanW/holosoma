@@ -186,13 +186,20 @@ def object_urdf_fallbacks(path: Path):
             relative_tail = tail[2:]
             yield repo_root / "data/ds_box_data_legacy" / Path(*relative_tail)
             yield repo_root / "data/ds_box_data/scale_mix_all" / Path(*relative_tail)
+            if name and "__" not in name:
+                for candidate_name in [f"{name}__baseline", f"{name}__eff10", f"{name}__eff09"]:
+                    yield (
+                        repo_root
+                        / "data/ds_box_data/scale_mix_all/train_g1_w_obj_prepared/_generated_urdfs"
+                        / f"{candidate_name}.urdf"
+                    )
 
     if name:
         if "__" in name:
             names = [name]
         else:
             yield repo_root / "data/ds_box_data_legacy/train_g1_w_obj_prepared/_generated_urdfs" / f"{name}.urdf"
-            names = [f"{name}__eff10", f"{name}__eff09", f"{name}__baseline"]
+            names = [f"{name}__baseline", f"{name}__eff10", f"{name}__eff09"]
         for candidate_name in names:
             yield repo_root / "data/ds_box_data/scale_mix_all/train_g1_w_obj_prepared/_generated_urdfs" / f"{candidate_name}.urdf"
 
@@ -424,7 +431,19 @@ if [[ "$PERCEPTION_CAMERA_SOURCE" == "rendered" ]]; then
 fi
 export PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
 export PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-primitive}"
+export PERCEPTION_CAMERA_NEAR="${PERCEPTION_CAMERA_NEAR:-0.1}"
+export PERCEPTION_CAMERA_FAR="${PERCEPTION_CAMERA_FAR:-3}"
+export PERCEPTION_MAX_DISTANCE="${PERCEPTION_MAX_DISTANCE:-3}"
+export PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH="${PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH:-0.15}"
+export PERCEPTION_CAMERA_PITCH_DEG="${PERCEPTION_CAMERA_PITCH_DEG:-10}"
 export PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH="${PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH:-True}"
+export PERCEPTION_UPDATE_HZ="${PERCEPTION_UPDATE_HZ:-30}"
+export PERCEPTION_CAMERA_FPS="${PERCEPTION_CAMERA_FPS:-30}"
+export PERCEPTION_CAMERA_WARP_BUFFER_LEN="${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-3}"
+export PERCEPTION_CAMERA_WARP_LATENCY_FRAME="${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-0}"
+export PERCEPTION_CAMERA_WARP_EDGE_NOISE="${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-False}"
+export PERCEPTION_CAMERA_WARP_ENABLE_HOLES="${PERCEPTION_CAMERA_WARP_ENABLE_HOLES:-False}"
+export PERCEPTION_CAMERA_APPLY_SENSOR_NOISE="${PERCEPTION_CAMERA_APPLY_SENSOR_NOISE:-False}"
 export HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES="${HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES:-1}"
 export SIM_USE_TRAINING_URDF_OBJECT_SCENE="${SIM_USE_TRAINING_URDF_OBJECT_SCENE:-1}"
 export SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML="${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML:-0}"
@@ -504,6 +523,14 @@ if is_truthy_env "$GT_MUJOCO_PHYSICS"; then
   export MUJOCO_OBJECT_CONTACT_DAMPING=""
 fi
 export HOLOSOMA_STRICT_PERCEPTION_CAMERA_SOURCE="${HOLOSOMA_STRICT_PERCEPTION_CAMERA_SOURCE:-1}"
+if [[ "$PERCEPTION_CAMERA_SOURCE" == "far_tracking_warp" && -z "${SIM_DEVICE:-}" ]]; then
+  HOLOSOMA_AUTO_CUDA_FOR_TRAINING_DEPTH="${HOLOSOMA_AUTO_CUDA_FOR_TRAINING_DEPTH:-1}"
+  if is_truthy_env "$HOLOSOMA_AUTO_CUDA_FOR_TRAINING_DEPTH" && [[ "${CUDA_VISIBLE_DEVICES:-}" != "-1" ]]; then
+    if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]] || { command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; }; then
+      export SIM_DEVICE="${HOLOSOMA_TRAINING_DEPTH_DEVICE:-cuda:0}"
+    fi
+  fi
+fi
 if [[ "$PERCEPTION_CAMERA_SOURCE" == "rendered" && -z "${MUJOCO_GL:-}" ]]; then
   case "$(printf '%s' "${TRAINING_HEADLESS:-${HEADLESS:-True}}" | tr '[:upper:]' '[:lower:]')" in
     0|false|no|off)

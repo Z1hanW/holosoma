@@ -173,7 +173,8 @@ def replay_perception(tyro_config: ExperimentConfig) -> None:
 
     done = False
     while not done:
-        env.simulator.sim.step()
+        # Match the replay/debug path used by train_agent.py so simulator-specific
+        # visualize-motion hooks own state updates and forward/render sequencing.
         done = env.step_visualize_motion(None)  # type: ignore[attr-defined]
 
         env.perception_manager.update()
