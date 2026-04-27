@@ -46,6 +46,9 @@ _GT_ZERO_PASSIVE_DYNAMICS_ENV = "HOLOSOMA_GT_MUJOCO_ZERO_PASSIVE_DYNAMICS"
 _APPLY_TRAINING_JOINT_DYNAMICS_ENV = "HOLOSOMA_MUJOCO_APPLY_TRAINING_JOINT_DYNAMICS"
 _TERRAIN_SOLREF_ENV = "HOLOSOMA_MUJOCO_TERRAIN_SOLREF"
 _OBJECT_CONTACT_SOLREF_ENV = "HOLOSOMA_MUJOCO_OBJECT_CONTACT_SOLREF"
+_OPTION_ITERATIONS_ENV = "HOLOSOMA_MUJOCO_ITERATIONS"
+_OPTION_NOSLIP_ITERATIONS_ENV = "HOLOSOMA_MUJOCO_NOSLIP_ITERATIONS"
+_OPTION_IMPRATIO_ENV = "HOLOSOMA_MUJOCO_IMPRATIO"
 _HALFSPHERE_HAND_COLLISION_ENV = "HOLOSOMA_MUJOCO_HALFSPHERE_HAND_COLLISION"
 _DISABLE_RUBBER_HAND_COLLISION_ENV = "HOLOSOMA_MUJOCO_DISABLE_RUBBER_HAND_COLLISION"
 _KEEP_REFERENCE_HAND_COLLISION_ENV = "HOLOSOMA_MUJOCO_KEEP_REFERENCE_HAND_COLLISION"
@@ -55,6 +58,11 @@ _PALM_CONTACT_SPHERES_ENV = "HOLOSOMA_MUJOCO_PALM_CONTACT_SPHERES"
 _PALM_CONTACT_SPHERE_RADIUS_ENV = "HOLOSOMA_MUJOCO_PALM_CONTACT_SPHERE_RADIUS"
 _PALM_CONTACT_SPHERE_POS_ENV = "HOLOSOMA_MUJOCO_PALM_CONTACT_SPHERE_POS"
 _CARRY_ARM_OBJECT_CONTACTS_ENV = "HOLOSOMA_MUJOCO_CARRY_ARM_OBJECT_CONTACTS"
+_REPLACE_CYLINDER_WITH_CAPSULE_ENV = "HOLOSOMA_MUJOCO_REPLACE_CYLINDERS_WITH_CAPSULES"
+_TRAINING_OBJECT_CONTACT_PAIRS_ENV = "HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_PAIRS"
+_TRAINING_OBJECT_CONTACT_LATERAL_FRICTION_ENV = "HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_LATERAL_FRICTION"
+_TRAINING_OBJECT_CONTACT_SPIN_FRICTION_ENV = "HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_SPIN_FRICTION"
+_TRAINING_OBJECT_CONTACT_ROLLING_FRICTION_ENV = "HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_ROLLING_FRICTION"
 _ROBOT_GEOM_FRICTION_ENV = "HOLOSOMA_MUJOCO_ROBOT_GEOM_FRICTION"
 _LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES_ENV = "MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES"
 _OBJECT_CONTACT_BODY_MARKERS_ENV = "MUJOCO_OBJECT_CONTACT_BODY_MARKERS"
@@ -157,6 +165,47 @@ class MujocoSceneManager:
         # TODO: expose to Mujoco-specific config
         self.world_spec.option.gravity = [0, 0, -9.81]
         self.world_spec.option.timestep = 1.0 / simulator_config.sim.fps  # type: ignore[attr-defined]
+        self._apply_training_solver_options(simulator_config)
+
+    def _apply_training_solver_options(self, simulator_config: SimulatorConfig) -> None:
+        """Map training solver metadata onto MuJoCo options where there is a close analogue."""
+
+        physx_cfg = getattr(getattr(simulator_config, "sim", None), "physx", None)
+        position_iterations = getattr(physx_cfg, "num_position_iterations", None)
+        velocity_iterations = getattr(physx_cfg, "num_velocity_iterations", None)
+
+        iterations_raw = os.environ.get(_OPTION_ITERATIONS_ENV, "").strip()
+        if iterations_raw:
+            iterations = int(iterations_raw)
+        elif position_iterations is not None:
+            # MuJoCo's default Newton iteration count is already high. Keep it at least
+            # as large as the training PhysX position-iteration count.
+            iterations = max(int(getattr(self.world_spec.option, "iterations", 100)), int(position_iterations))
+        else:
+            iterations = int(getattr(self.world_spec.option, "iterations", 100))
+        if iterations > 0:
+            self.world_spec.option.iterations = iterations
+
+        noslip_raw = os.environ.get(_OPTION_NOSLIP_ITERATIONS_ENV, "").strip()
+        if noslip_raw:
+            noslip_iterations = int(noslip_raw)
+        else:
+            # PhysX velocity iterations do not map cleanly to MuJoCo's noslip post-solve
+            # pass. Keep MuJoCo's native default unless explicitly overridden.
+            noslip_iterations = int(getattr(self.world_spec.option, "noslip_iterations", 0))
+        if noslip_iterations >= 0:
+            self.world_spec.option.noslip_iterations = noslip_iterations
+
+        impratio_raw = os.environ.get(_OPTION_IMPRATIO_ENV, "").strip()
+        if impratio_raw:
+            self.world_spec.option.impratio = float(impratio_raw)
+
+        logger.info(
+            "Configured MuJoCo solver options from training metadata/env: iterations={} noslip_iterations={} impratio={}",
+            int(self.world_spec.option.iterations),
+            int(self.world_spec.option.noslip_iterations),
+            float(self.world_spec.option.impratio),
+        )
 
     def _add_perception_camera_placeholder(self) -> None:
         """Add a dedicated camera slot for runtime MuJoCo perception rendering."""
@@ -671,6 +720,7 @@ class MujocoSceneManager:
             robot_urdf_path=robot_xml_path,
             using_composite_object_scene=using_composite_object_scene,
         )
+        self._maybe_replace_cylinder_collisions_with_capsules(robot_spec, robot_config)
         self._maybe_add_wrist_origin_contact_spheres(robot_spec, robot_config)
         self._maybe_add_palm_contact_spheres(robot_spec)
         self._maybe_override_robot_geom_friction(robot_spec)
@@ -722,6 +772,7 @@ class MujocoSceneManager:
                 robot_config,
                 terrain_geom_name=str(getattr(terrain_state, "name", "floor")),
             )
+            self._maybe_add_training_object_contact_pairs(robot_config)
             self._maybe_add_web_demo_object_contact_pairs(robot_config)
 
         # Store prefix for later use by simulator
@@ -1848,6 +1899,46 @@ class MujocoSceneManager:
             disabled_geom_count,
         )
 
+    def _maybe_replace_cylinder_collisions_with_capsules(
+        self,
+        robot_spec: mujoco.MjSpec,
+        robot_config: RobotConfig,
+    ) -> None:
+        """Mirror Isaac's URDF cylinder-to-capsule collision conversion."""
+
+        default_enabled = bool(getattr(getattr(robot_config, "asset", None), "replace_cylinder_with_capsule", False))
+        if not self._env_flag(_REPLACE_CYLINDER_WITH_CAPSULE_ENV, default=default_enabled):
+            return
+
+        updated_geom_count = 0
+        adjusted_size_count = 0
+        for body in robot_spec.bodies:
+            for geom in body.geoms:
+                if int(geom.contype) == 0 and int(geom.conaffinity) == 0:
+                    continue
+                if int(geom.type) != int(mujoco.mjtGeom.mjGEOM_CYLINDER):
+                    continue
+                size = np.asarray(geom.size, dtype=np.float64).reshape(-1)
+                if size.size >= 2:
+                    radius = max(float(size[0]), 0.0)
+                    cylinder_half_length = max(float(size[1]), 0.0)
+                    capsule_half_length = max(cylinder_half_length - radius, 1.0e-6)
+                    if abs(capsule_half_length - cylinder_half_length) > 1.0e-9:
+                        new_size = size.copy()
+                        new_size[1] = capsule_half_length
+                        geom.size = new_size.tolist()
+                        adjusted_size_count += 1
+                geom.type = mujoco.mjtGeom.mjGEOM_CAPSULE
+                updated_geom_count += 1
+
+        if updated_geom_count > 0:
+            logger.info(
+                "Replaced {} MuJoCo cylinder collision geom(s) with capsules to match robot asset replace_cylinder_with_capsule={} (preserved cylinder total length for {} geom(s))",
+                updated_geom_count,
+                default_enabled,
+                adjusted_size_count,
+            )
+
     def _maybe_add_wrist_origin_contact_spheres(
         self,
         robot_spec: mujoco.MjSpec,
@@ -2640,6 +2731,142 @@ class MujocoSceneManager:
             gt_mujoco_physics,
         )
 
+    def _maybe_add_training_object_contact_pairs(self, robot_config: RobotConfig) -> None:
+        """Apply Isaac-training object contact material to existing carry geoms.
+
+        This does not add any helper collision geometry. It only names existing
+        robot/object collision geoms and adds explicit MuJoCo pair parameters so
+        the URDF rubber hand, wrist, elbow, shoulder, and torso carry surfaces use
+        the same high-friction object contact material that the Isaac training
+        setup assigns to the primitive box.
+        """
+
+        if not self._env_flag(_TRAINING_OBJECT_CONTACT_PAIRS_ENV):
+            return
+        if self._gt_mujoco_physics_enabled():
+            logger.info("Skipping training object contact pairs because GT_MUJOCO_PHYSICS is enabled")
+            return
+        if self._env_flag(_WEB_DEMO_OBJECT_CONTACTS_ENV):
+            logger.info("Skipping training object contact pairs because web-demo object contacts are enabled")
+            return
+
+        object_cfg = getattr(robot_config, "object", None)
+        urdf_contact_defaults = self._object_urdf_contact_defaults(object_cfg)
+        lateral_friction = float(
+            os.environ.get(
+                _TRAINING_OBJECT_CONTACT_LATERAL_FRICTION_ENV,
+                urdf_contact_defaults.get("lateral_friction", 1.0),
+            )
+        )
+        spin_friction = float(os.environ.get(_TRAINING_OBJECT_CONTACT_SPIN_FRICTION_ENV, "0.005"))
+        rolling_friction = float(os.environ.get(_TRAINING_OBJECT_CONTACT_ROLLING_FRICTION_ENV, "0.001"))
+        contact_friction = self._object_contact_friction_triplet(
+            [1.0, spin_friction, 0.001],
+            lateral_friction=lateral_friction,
+            rolling_friction=rolling_friction,
+        )
+        pair_friction = self._expand_pair_friction(contact_friction)
+        contact_solref = self._object_contact_solref(
+            getattr(object_cfg, "mujoco_object_contact_stiffness", None) if object_cfg is not None else None,
+            getattr(object_cfg, "mujoco_object_contact_damping", None) if object_cfg is not None else None,
+        ) or [0.01, 1.0]
+
+        configured_markers = _parse_object_contact_body_markers()
+        carry_markers = configured_markers or (
+            "torso",
+            "shoulder",
+            "elbow",
+            "wrist",
+            "rubber_hand",
+            "hand",
+        )
+
+        existing_geom_names = {str(geom.name) for body in self.world_spec.bodies for geom in body.geoms if geom.name}
+        existing_pair_names = {str(pair.name) for pair in self.world_spec.pairs if pair.name}
+        object_body_names = set(self._object_body_name_by_name.values())
+        object_collision_geoms: list[str] = []
+        carry_collision_geoms: list[str] = []
+
+        def _unique_geom_name(base_name: str) -> str:
+            candidate = base_name
+            index = 2
+            while candidate in existing_geom_names:
+                candidate = f"{base_name}_{index}"
+                index += 1
+            existing_geom_names.add(candidate)
+            return candidate
+
+        for body in self.world_spec.bodies:
+            body_name = str(body.name or "")
+            body_name_lower = body_name.lower()
+            is_object_body = body_name in object_body_names
+            is_carry_body = any(marker in body_name_lower for marker in carry_markers)
+            if not is_object_body and not is_carry_body:
+                continue
+
+            for geom in body.geoms:
+                if int(geom.contype) == 0 or int(geom.conaffinity) == 0:
+                    continue
+                geom_name = str(geom.name or "")
+                if not geom_name:
+                    if is_object_body:
+                        base_name = f"{body_name}_collision" if body_name else "object_collision"
+                    elif "rubber_hand" in body_name_lower:
+                        if "left" in body_name_lower:
+                            base_name = "left_rubber_hand_collision"
+                        elif "right" in body_name_lower:
+                            base_name = "right_rubber_hand_collision"
+                        else:
+                            base_name = "rubber_hand_collision"
+                    else:
+                        base_name = f"{body_name}_carry_collision" if body_name else "carry_collision"
+                    geom_name = _unique_geom_name(base_name)
+                    geom.name = geom_name
+
+                geom.condim = 6
+                geom.friction = contact_friction
+                geom.solref = contact_solref
+                if is_object_body:
+                    object_collision_geoms.append(geom_name)
+                else:
+                    carry_collision_geoms.append(geom_name)
+
+        if not carry_collision_geoms or not object_collision_geoms:
+            logger.warning(
+                "Could not add training object contact pairs: carry_geoms={}, object_geoms={}",
+                sorted(set(carry_collision_geoms)),
+                sorted(set(object_collision_geoms)),
+            )
+            return
+
+        added_pairs = 0
+        for carry_geom_name in sorted(set(carry_collision_geoms)):
+            for object_geom_name in sorted(set(object_collision_geoms)):
+                pair_name = f"{carry_geom_name}_{object_geom_name}_training_contact"
+                if pair_name in existing_pair_names:
+                    continue
+                self.world_spec.add_pair(
+                    name=pair_name,
+                    geomname1=carry_geom_name,
+                    geomname2=object_geom_name,
+                    condim=6,
+                    friction=pair_friction,
+                    solref=contact_solref,
+                )
+                existing_pair_names.add(pair_name)
+                added_pairs += 1
+
+        logger.info(
+            "Added {} training object contact pair(s): carry_geoms={}, object_geoms={}, friction={}, spin_friction={}, solref={}, markers={}",
+            added_pairs,
+            sorted(set(carry_collision_geoms)),
+            sorted(set(object_collision_geoms)),
+            contact_friction,
+            spin_friction,
+            contact_solref,
+            list(carry_markers),
+        )
+
     def _maybe_override_composite_object_properties(
         self,
         robot_spec: mujoco.MjSpec,
@@ -2721,8 +2948,9 @@ class MujocoSceneManager:
         defaults: dict[str, float] = {}
         # URDF/PhysX contact stiffness and damping are not numerically equivalent
         # to MuJoCo solref direct format; direct mapping can make MuJoCo unstable.
-        # Auto-import only friction and leave solref at the MuJoCo-safe default
-        # unless the caller explicitly sets a MuJoCo contact override.
+        # Direct PhysX stiffness/damping do not map safely to MuJoCo solref, but
+        # the generated box URDF's lateral/rolling friction are MuJoCo-side contact
+        # knobs and are required to reproduce the stable carry behavior.
         for xml_name, key in (
             ("lateral_friction", "lateral_friction"),
             ("rolling_friction", "rolling_friction"),

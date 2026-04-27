@@ -190,6 +190,23 @@ camera_depth_d435i_defm_regnet_y_800mf = replace(
     encoder_patch_size=None,
 )
 
+camera_depth_d435i_mujoco_render_848x480 = replace(
+    camera_depth_d435i,
+    # Render high-resolution MuJoCo depth, then crop/resize to the same 58x87
+    # policy observation shape used by the d435i depth policy.
+    camera_source="rendered",
+    camera_width=848,
+    camera_height=480,
+    camera_warp_crop_top=16,
+    camera_warp_crop_bottom=0,
+    camera_warp_crop_left=32,
+    camera_warp_crop_right=32,
+    camera_warp_edge_noise=False,
+    camera_warp_enable_holes=False,
+    camera_warp_hole_prob=0.0,
+    camera_apply_sensor_noise=False,
+)
+
 DEFAULTS = {
     "none": none,
     "heightmap": heightmap,
@@ -197,6 +214,7 @@ DEFAULTS = {
     "camera_depth_d435i_17x17": camera_depth_d435i_17x17,
     "camera_depth_d435i_defm_vit_s14": camera_depth_d435i_defm_vit_s14,
     "camera_depth_d435i_defm_regnet_y_800mf": camera_depth_d435i_defm_regnet_y_800mf,
+    "camera_depth_d435i_mujoco_render_848x480": camera_depth_d435i_mujoco_render_848x480,
 }
 
 __all__ = [
@@ -206,5 +224,6 @@ __all__ = [
     "camera_depth_d435i_17x17",
     "camera_depth_d435i_defm_vit_s14",
     "camera_depth_d435i_defm_regnet_y_800mf",
+    "camera_depth_d435i_mujoco_render_848x480",
     "DEFAULTS",
 ]

@@ -21,6 +21,7 @@
     <material name="solid_gray" emission="1" specular="0.2" shininess="0.2" reflectance="0.2" metallic="0.1" rgba="0.3 0.3 0.3 1"/>
     <mesh name="robot_left_rubber_hand" file="meshes/left_rubber_hand.STL"/>
     <mesh name="robot_right_rubber_hand" file="meshes/right_rubber_hand.STL"/>
+    <mesh name="object_box_74__eff09" file="/home/ubuntu/FAR/holosoma/data/ds_box_data/scale_mix_all/train_g1_w_obj_geometry/box_74__eff09.obj" scale="1.11111 1.11111 1.11111"/>
   </asset>
 
   <worldbody>
@@ -214,7 +215,7 @@
     <body name="object_baseLink">
       <inertial pos="0 0 0" quat="0 0.707107 0 0.707107" mass="0.1" diaginertia="0.00331077 0.00232792 0.00202327"/>
       <joint name="object_object_freejoint" type="free"/>
-      <geom name="object_baseLink_collision" size="0.232876 0.212348 0.124925" type="box" contype="4" conaffinity="3" condim="6" friction="1.2 0.005 0.3" solref="0.01" rgba="0.7 0.8 0.9 1"/>
+      <geom name="object_baseLink_collision" type="mesh" contype="4" conaffinity="3" condim="6" friction="1.2 0.005 0.3" solref="0.01" rgba="0.7 0.8 0.9 1" mesh="object_box_74__eff09"/>
     </body>
   </worldbody>
 

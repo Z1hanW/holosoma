@@ -8,11 +8,12 @@ TRACK_LAUNCHER="${MJ_TRACK_LAUNCHER:-${ROOT_DIR}/mj_box_depth_track.sh}"
 usage() {
   cat <<EOF
 Usage:
-  bash mj_policy.sh [rendered|warp] [clip_name|motion.npz] [model.onnx|wandb://...]
+  bash mj_policy.sh [rendered|rendered848|warp] [clip_name|motion.npz] [model.onnx|wandb://...]
 
 Examples:
   bash mj_policy.sh box_74
   bash mj_policy.sh rendered box_74 ${DEFAULT_MODEL_INPUT}
+  bash mj_policy.sh rendered848 box_74 ${DEFAULT_MODEL_INPUT}
 
 Environment:
   MODEL_INPUT / MODEL_PATH / MODEL_REF

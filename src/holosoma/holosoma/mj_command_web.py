@@ -431,7 +431,7 @@ function toggleControlKey(key) {
 }
 
 function policyActionLabel(action) {
-  if (action === "rollout_start") return "] + Space";
+  if (action === "rollout_start") return "Space + ]";
   if (action === "space") return "Space";
   if (action === "start") return "]";
   return action;
@@ -844,27 +844,31 @@ async def _create_app(args: argparse.Namespace, command_state: CommandState, ind
         if action in {"]", "right_bracket", "start"}:
             canonical_action = "start"
             sequence = ["start"]
+            delay_s = 0.05
         elif action in {" ", "spacebar", "motion", "start_motion", "start_motion_clip"}:
             canonical_action = "space"
             sequence = ["space"]
+            delay_s = 0.05
         elif action in {"rollout_start", "start_rollout", "space_start", "start_with_motion"}:
             canonical_action = "rollout_start"
-            sequence = ["start", "space"]
+            sequence = ["space", "start"]
+            delay_s = 0.6
         elif action in {"stop", "init", "space"}:
             canonical_action = action
             sequence = [action]
+            delay_s = 0.05
         else:
             response = command_state.snapshot()
             response.update({"ok": False, "error": f"unsupported policy action: {action}"})
             return web.json_response(response, status=400)
         try:
-            sent = command_state.request_policy_sequence(sequence)
+            sent = command_state.request_policy_sequence(sequence, delay_s=delay_s)
         except ValueError as exc:
             response = command_state.snapshot()
             response.update({"ok": False, "error": str(exc)})
             return web.json_response(response, status=400)
         response = command_state.snapshot()
-        response.update({"ok": bool(sent), "sent": bool(sent), "action": canonical_action, "sequence": sequence})
+        response.update({"ok": bool(sent), "sent": bool(sent), "action": canonical_action, "sequence": sequence, "delay_s": delay_s})
         return web.json_response(response)
 
     async def zero(_request: web.Request) -> web.Response:

@@ -1,94 +1,132 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Distill object-carry generalist -> non-goal student with mocap-access box state.
+# Distill object-carry generalist -> sparse-root student with mocap-access box state.
 #
-# Student policy observation (actor):
-# - actor_obs_root: sparse root command
-# - actor_obs_proprio (base_lin_vel, base_ang_vel, dof_pos, dof_vel) + actor_obs_actions single-step action
-# - actor_obs_box:
-#   - obj_current_pose_size_b = [obj_pos(3), obj_rot6d(6), obj_scale(3)]
+# This launcher intentionally mirrors distill_box_perception.sh for:
+# - teacher compatibility handling
+# - rollout-ref / success-filtered motion-bank selection
+# - PPO+DAgger schedule variants
+# - distributed launch behavior
 #
-# Teacher policy observation defaults to actor_obs; legacy teachers may opt into perception explicitly.
+# The only student-facing difference is observation:
+# - actor_obs_root: root command
+# - actor_obs_proprio_no_linvel: proprioception without base linear velocity
+# - actor_obs_actions: single-step past action only
+# - actor_obs_box: current object [pos(3), rot6d(6), size(3)]
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
 
+DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/u5lguxvl/model_17000.pt"}
+TEACHER_CHECKPOINT=${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}
 
-DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/kge4jozt/model_12000.pt"}
-TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
-
-if [[ $# -gt 0 ]]; then
-  if [[ "$1" == wandb://* || "$1" == /* || "$1" == ./* || "$1" == ../* || "$1" == *.pt ]]; then
-    TEACHER_CHECKPOINT="$1"
-    shift
-  fi
-fi
-
-if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
-  echo "Usage: $0 <teacher_checkpoint.pt> [extra train args...]" >&2
-  exit 1
-fi
-
-# Sim2real default: sparse root-command distill without clip_phase in student torso observation.
-# Legacy option (old behavior with clip_phase):
-#   EXP=g1-29dof-wbt-w-object-distill-sparse-root-cmd-legacy
-EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd}
-RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_mocap}
-TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_mocap_access_to_mocap_data}
-MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_behave_sq_carry_aug_mix_ml"}
-# Default mocap placement: GPUs 0,1,2,3.
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
 if [[ -z "${NPROC:-}" ]]; then
   IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
   NPROC=${#_visible_gpus[@]}
 fi
-# Default teacher (kge4jozt/model_12000.pt) uses actor_obs-only input.
-# For legacy teachers, override TEACHER_OBS_KEYS explicitly (e.g., actor_obs_legacy,perception_obs).
-TEACHER_OBS_KEYS=${TEACHER_OBS_KEYS:-actor_obs}
+PER_GPU_ENVS=${PER_GPU_ENVS:-2048}
+NUM_ENVS=${NUM_ENVS:-$((PER_GPU_ENVS * NPROC))}
+
+DATA_MODE=${DATA_MODE:-pure-sd}
+TRACKER_PROFILE=${TRACKER_PROFILE:-old-tracker}
+SCHEDULE_VARIANT=${SCHEDULE_VARIANT:-ppo_first}
+EXP=${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref}
+RUN_NAME=${RUN_NAME:-g1_w_object_distill_box_mocap_sparse_root_cmd_r2s_rollout_ref}
+TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_mocap_sparse_root_cmd_r2s_rollout_ref_access_to_box_state}
+TRAINING_PROJECT=${TRAINING_PROJECT:-boxer}
+
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-none}
-PERCEPTION_INTO_POLICY_MODULES=${PERCEPTION_INTO_POLICY_MODULES:-False}
-TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
+CRITIC_PERCEPTION_PRESET=${CRITIC_PERCEPTION_PRESET:-none}
+PERCEPTION_INTO_CRITIC_MODULES=${PERCEPTION_INTO_CRITIC_MODULES:-False}
+CAMERA_PITCH_DEG=${CAMERA_PITCH_DEG-}
+STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_root','actor_obs_proprio_no_linvel','actor_obs_actions','actor_obs_box']"}
+
+DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES=${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES:-False}
+DAGGER_IGNORE_EPISODE_INITIAL_STEPS=${DAGGER_IGNORE_EPISODE_INITIAL_STEPS:-0}
+PPO_START_EPOCH=${PPO_START_EPOCH:-0}
+DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-4000}
+PPO_START_COEFF=${PPO_START_COEFF:-0.1}
+PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.9}
+PPO_SCHEDULE_STEP_EPOCHS=${PPO_SCHEDULE_STEP_EPOCHS:-500}
+PPO_START_NOISE_STD=${PPO_START_NOISE_STD:-0.1}
+PPO_START_NOISE_STD_UNTIL_COEFF=${PPO_START_NOISE_STD_UNTIL_COEFF:-0.1}
+DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-1.0}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
-PPO_START_EPOCH=${PPO_START_EPOCH:-1000}
-DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-10000}
-DAGGER_LOSS_COEF=${DAGGER_LOSS_COEF:-10.0}
-PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
-ACTOR_LR=${ACTOR_LR:-5e-5}
-CRITIC_LR=${CRITIC_LR:-5e-5}
+TEACHER_ACTION_MIX_RATIO=${TEACHER_ACTION_MIX_RATIO:-0.0}
+NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-20000}
+SPARSE_GOAL_ENABLED=${SPARSE_GOAL_ENABLED:-False}
+START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-0.2}
+START_AT_TIMESTEP_ZERO_PROB_END=${START_AT_TIMESTEP_ZERO_PROB_END:-1.0}
+START_AT_TIMESTEP_ZERO_PROB_START_ITER=${START_AT_TIMESTEP_ZERO_PROB_START_ITER:-2500}
+FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
+FREEZE_AT_TIMESTEP_ZERO_PROB_END=${FREEZE_AT_TIMESTEP_ZERO_PROB_END:-0.0}
+FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER:-2500}
+ENABLE_DEFAULT_POSE_PREPEND=${ENABLE_DEFAULT_POSE_PREPEND:-False}
+DEFAULT_POSE_PREPEND_DURATION_S=${DEFAULT_POSE_PREPEND_DURATION_S:-0.0}
+RESET_TO_DEFAULT_POSE=${RESET_TO_DEFAULT_POSE:-False}
+VISER_DISTILL_MINIMAL_UI=${VISER_DISTILL_MINIMAL_UI:-1}
+VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-0}
+
+SCHEDULE_NAME=${SCHEDULE_NAME:-sparse_root_teacher_anchor_v4_ppo_first_step_mix_mocap}
+SCHEDULE_NOTES=${SCHEDULE_NOTES:-"Mocap box-state student. PPO and DAgger are both active from iteration 0. PPO starts at 0.1 and increases by 0.1 every 500 iterations until 0.9 at 4000; effective DAgger weight decreases from 0.9 to 0.1. Student observes root command, proprio, past action, and current object pose/scale."}
 
 echo "[INFO] distill mode: mocap-access-to-box"
-echo "[INFO] teacher checkpoint: ${TEACHER_CHECKPOINT}"
-echo "[INFO] exp=${EXP}"
-echo "[INFO] motion_dir=${MOTION_DIR}"
-echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC}"
-echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS}"
-echo "[INFO] perception preset=${PERCEPTION_PRESET} (default none; enable only if teacher_obs_keys needs perception_obs)"
-echo "[INFO] perception.inject_into_policy_modules=${PERCEPTION_INTO_POLICY_MODULES} (student stays non-perception)"
-echo "[INFO] actor box state: obj_current_pose_size_b only"
-echo "[INFO] actor_lr=${ACTOR_LR} critic_lr=${CRITIC_LR}"
-echo "[INFO] hybrid PPO+DAgger curriculum default=True"
-echo "[INFO] teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
-echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} dagger_loss_coef=${DAGGER_LOSS_COEF} ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
+echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
+echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} per_gpu_envs=${PER_GPU_ENVS} total_envs=${NUM_ENVS}"
+echo "[INFO] data_mode=${DATA_MODE} tracker_profile=${TRACKER_PROFILE} schedule_variant=${SCHEDULE_VARIANT}"
+echo "[INFO] student_actor_inputs=${STUDENT_ACTOR_INPUTS}"
+echo "[INFO] perception_preset=${PERCEPTION_PRESET} critic_perception_preset=${CRITIC_PERCEPTION_PRESET}"
+echo "[INFO] ppo_schedule=${PPO_START_EPOCH}->${DAGGER_END_EPOCH} start=${PPO_START_COEFF} target=${PPO_TARGET_COEFF} step_epochs=${PPO_SCHEDULE_STEP_EPOCHS}"
+echo "[INFO] ppo_start_noise_std=${PPO_START_NOISE_STD} until_coeff=${PPO_START_NOISE_STD_UNTIL_COEFF}"
+echo "[INFO] dagger_ignore_external_goal_samples=${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES}"
+echo "[INFO] sparse_goal_enabled=${SPARSE_GOAL_ENABLED}"
 
 exec env \
+  DEFAULT_TEACHER_CHECKPOINT="${DEFAULT_TEACHER_CHECKPOINT}" \
+  TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT}" \
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
+  NPROC="${NPROC}" \
+  PER_GPU_ENVS="${PER_GPU_ENVS}" \
+  NUM_ENVS="${NUM_ENVS}" \
+  DATA_MODE="${DATA_MODE}" \
+  TRACKER_PROFILE="${TRACKER_PROFILE}" \
+  SCHEDULE_VARIANT="${SCHEDULE_VARIANT}" \
   EXP="${EXP}" \
   RUN_NAME="${RUN_NAME}" \
   TRAINING_NAME="${TRAINING_NAME}" \
-  MOTION_DIR="${MOTION_DIR}" \
-  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
-  NPROC="${NPROC}" \
-  PERCEPTION_INTO_POLICY_MODULES="${PERCEPTION_INTO_POLICY_MODULES}" \
-  TEACHER_OBS_KEYS="${TEACHER_OBS_KEYS}" \
-  TEACHER_ACTION_MIX_RATIO="${TEACHER_ACTION_MIX_RATIO}" \
-  BC_LOSS_COEF="${BC_LOSS_COEF}" \
+  TRAINING_PROJECT="${TRAINING_PROJECT}" \
+  PERCEPTION_PRESET="${PERCEPTION_PRESET}" \
+  CRITIC_PERCEPTION_PRESET="${CRITIC_PERCEPTION_PRESET}" \
+  PERCEPTION_INTO_CRITIC_MODULES="${PERCEPTION_INTO_CRITIC_MODULES}" \
+  CAMERA_PITCH_DEG="${CAMERA_PITCH_DEG}" \
+  STUDENT_ACTOR_INPUTS="${STUDENT_ACTOR_INPUTS}" \
+  DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES="${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES}" \
+  DAGGER_IGNORE_EPISODE_INITIAL_STEPS="${DAGGER_IGNORE_EPISODE_INITIAL_STEPS}" \
   PPO_START_EPOCH="${PPO_START_EPOCH}" \
   DAGGER_END_EPOCH="${DAGGER_END_EPOCH}" \
+  PPO_START_COEFF="${PPO_START_COEFF}" \
+  PPO_TARGET_COEFF="${PPO_TARGET_COEFF}" \
+  PPO_SCHEDULE_STEP_EPOCHS="${PPO_SCHEDULE_STEP_EPOCHS}" \
+  PPO_START_NOISE_STD="${PPO_START_NOISE_STD}" \
+  PPO_START_NOISE_STD_UNTIL_COEFF="${PPO_START_NOISE_STD_UNTIL_COEFF}" \
   DAGGER_LOSS_COEF="${DAGGER_LOSS_COEF}" \
-  PAIR_TERRAIN_WITH_MOTION="${PAIR_TERRAIN_WITH_MOTION}" \
-  ACTOR_LR="${ACTOR_LR}" \
-  CRITIC_LR="${CRITIC_LR}" \
-  bash "${SCRIPT_DIR}/distill_root_box.sh" "${TEACHER_CHECKPOINT}" \
-    "perception:${PERCEPTION_PRESET}" \
-    --algo.config.module-dict.actor.input-dim "['actor_obs_root','actor_obs_proprio','actor_obs_actions','actor_obs_box']" \
-    "$@"
+  BC_LOSS_COEF="${BC_LOSS_COEF}" \
+  TEACHER_ACTION_MIX_RATIO="${TEACHER_ACTION_MIX_RATIO}" \
+  NUM_LEARNING_ITERATIONS="${NUM_LEARNING_ITERATIONS}" \
+  SPARSE_GOAL_ENABLED="${SPARSE_GOAL_ENABLED}" \
+  START_AT_TIMESTEP_ZERO_PROB="${START_AT_TIMESTEP_ZERO_PROB}" \
+  START_AT_TIMESTEP_ZERO_PROB_END="${START_AT_TIMESTEP_ZERO_PROB_END}" \
+  START_AT_TIMESTEP_ZERO_PROB_START_ITER="${START_AT_TIMESTEP_ZERO_PROB_START_ITER}" \
+  FREEZE_AT_TIMESTEP_ZERO_PROB="${FREEZE_AT_TIMESTEP_ZERO_PROB}" \
+  FREEZE_AT_TIMESTEP_ZERO_PROB_END="${FREEZE_AT_TIMESTEP_ZERO_PROB_END}" \
+  FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER="${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER}" \
+  ENABLE_DEFAULT_POSE_PREPEND="${ENABLE_DEFAULT_POSE_PREPEND}" \
+  DEFAULT_POSE_PREPEND_DURATION_S="${DEFAULT_POSE_PREPEND_DURATION_S}" \
+  HOLOSOMA_RESET_TO_DEFAULT_POSE="${RESET_TO_DEFAULT_POSE}" \
+  VISER_DISTILL_MINIMAL_UI="${VISER_DISTILL_MINIMAL_UI}" \
+  VISER_SHOW_TARGET_KEYPOINTS="${VISER_SHOW_TARGET_KEYPOINTS}" \
+  SCHEDULE_NAME="${SCHEDULE_NAME}" \
+  SCHEDULE_NOTES="${SCHEDULE_NOTES}" \
+  bash "${SCRIPT_DIR}/distill_box_perception.sh" "$@"

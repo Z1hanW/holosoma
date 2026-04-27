@@ -138,9 +138,10 @@ SPARSE_ROOT_COMMAND_PORT="${SPARSE_ROOT_COMMAND_PORT:-5661}"
 POLICY_CONTROL_PORT="${POLICY_CONTROL_PORT:-}"
 ENABLE_SPLIT_PERCEPTION_OBS="${ENABLE_SPLIT_PERCEPTION_OBS:-auto}"
 ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND="${ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND:-0}"
+MUJOCO_RENDER_848_PERCEPTION_PRESET="${MUJOCO_RENDER_848_PERCEPTION_PRESET:-camera_depth_d435i_mujoco_render_848x480}"
 PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
 PERCEPTION_CAMERA_SOURCE="${PERCEPTION_CAMERA_SOURCE:-far_tracking_warp}"
-PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-mesh}"
+PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-}"
 PERCEPTION_CAMERA_WIDTH_EXPLICIT=0
 PERCEPTION_CAMERA_HEIGHT_EXPLICIT=0
 PERCEPTION_CAMERA_WARP_CROP_TOP_EXPLICIT=0
@@ -174,9 +175,16 @@ PERCEPTION_CAMERA_WARP_EDGE_NOISE="${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-False}"
 PERCEPTION_CAMERA_WARP_ENABLE_HOLES="${PERCEPTION_CAMERA_WARP_ENABLE_HOLES:-False}"
 PERCEPTION_CAMERA_APPLY_SENSOR_NOISE="${PERCEPTION_CAMERA_APPLY_SENSOR_NOISE:-False}"
 PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH="${PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH:-}"
-PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN="${PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN:-training}"
+PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN="${PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN:-}"
+if [[ -z "$PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN" ]]; then
+  if [[ "$PERCEPTION_PRESET" == "$MUJOCO_RENDER_848_PERCEPTION_PRESET" ]]; then
+    PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN="mujoco848"
+  else
+    PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN="training"
+  fi
+fi
 PERCEPTION_OBS_TRANSPORT="${PERCEPTION_OBS_TRANSPORT:-shm}"
-PERCEPTION_OBS_SHM_NAME="${PERCEPTION_OBS_SHM_NAME:-depth_img_shm}"
+PERCEPTION_OBS_SHM_NAME="${PERCEPTION_OBS_SHM_NAME:-depth_img_shm_${SIM_STATE_PORT}}"
 PERCEPTION_OBS_EXTERNAL="${PERCEPTION_OBS_EXTERNAL:-0}"
 SIM_USE_ZMQ_LOWCMD="${SIM_USE_ZMQ_LOWCMD:-1}"
 SKIP_POLICY="${SKIP_POLICY:-0}"
@@ -315,6 +323,7 @@ python_has_modules() {
   shift
   "$python_bin" - "$@" <<'PY' >/dev/null 2>&1
 import importlib
+import os
 import sys
 
 for module_name in sys.argv[1:]:
@@ -380,6 +389,7 @@ apply_motion_clip_object_defaults() {
 resolve_motion_sized_object_urdf() {
   local object_urdf="$1"
   "$INFER_PY" - <<'PY' "$object_urdf" "$MOTION_FILE" "$ROOT_DIR"
+import os
 import sys
 from pathlib import Path
 import xml.etree.ElementTree as ET
@@ -458,10 +468,55 @@ def mesh_path(urdf_path, filename):
     return (urdf_path.parent / path).resolve()
 
 
+def object_collision_mode():
+    raw = os.environ.get(
+        "MUJOCO_OBJECT_COLLISION_MODE",
+        os.environ.get("HOLOSOMA_MUJOCO_OBJECT_COLLISION_MODE", "mesh"),
+    )
+    return str(raw).strip().lower().replace("-", "_")
+
+
+def set_collision_box(root_xml, desired_size):
+    size_text = " ".join(str(float(value)) for value in desired_size.tolist())
+    collision_elems = list(root_xml.findall(".//collision"))
+    if not collision_elems:
+        link = root_xml.find(".//link")
+        if link is None:
+            return False
+        collision = ET.SubElement(link, "collision")
+        ET.SubElement(collision, "origin", {"rpy": "0 0 0", "xyz": "0 0 0"})
+        collision_elems = [collision]
+
+    for collision in collision_elems:
+        geometry = collision.find("geometry")
+        if geometry is None:
+            geometry = ET.SubElement(collision, "geometry")
+        for child in list(geometry):
+            geometry.remove(child)
+        ET.SubElement(geometry, "box", {"size": size_text})
+    name = str(root_xml.get("name") or "").strip()
+    if name and not name.endswith("_box_collision"):
+        root_xml.set("name", f"{name}_box_collision")
+    return True
+
+
+def collision_box_matches(root_xml, desired_size):
+    for box in root_xml.findall(".//collision/geometry/box"):
+        try:
+            size = parse_vec(box.get("size"), (0.0, 0.0, 0.0))
+        except Exception:
+            continue
+        if np.allclose(size, desired_size, rtol=0.02, atol=2.0e-3):
+            return True
+    return False
+
+
 def write_motion_sized_urdf(urdf_path):
     desired_size = motion_object_size()
     if desired_size is None or not urdf_path.is_file():
         return urdf_path
+    collision_mode = object_collision_mode()
+    use_box_collision = collision_mode in {"box", "primitive", "primitive_box", "box_collision", "rollout"}
 
     try:
         tree = ET.parse(urdf_path)
@@ -486,10 +541,12 @@ def write_motion_sized_urdf(urdf_path):
     current_size = first_extents * first_scale
     if current_size.size != 3 or np.any(current_size <= 0.0):
         return urdf_path
-    if np.allclose(current_size, desired_size, rtol=0.02, atol=2.0e-3):
+    mesh_already_sized = np.allclose(current_size, desired_size, rtol=0.02, atol=2.0e-3)
+    box_already_sized = use_box_collision and collision_box_matches(root_xml, desired_size)
+    if mesh_already_sized and (not use_box_collision or box_already_sized):
         return urdf_path
 
-    scale_ratio = desired_size / current_size
+    scale_ratio = np.ones(3, dtype=np.float64) if mesh_already_sized else desired_size / current_size
     if not np.all(np.isfinite(scale_ratio)) or np.any(scale_ratio <= 0.0):
         return urdf_path
 
@@ -517,12 +574,16 @@ def write_motion_sized_urdf(urdf_path):
             inertia_elem.set("ixz", "0")
             inertia_elem.set("iyz", "0")
 
+    if use_box_collision:
+        set_collision_box(root_xml, desired_size)
+
     out_dir = repo_root / "logs/sim2sim_exports/object_urdfs"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{motion_path.stem}__{urdf_path.stem}__motion_size.urdf"
+    suffix = "motion_size_box_collision" if use_box_collision else "motion_size"
+    out_path = out_dir / f"{motion_path.stem}__{urdf_path.stem}__{suffix}.urdf"
     tree.write(out_path, encoding="utf-8", xml_declaration=True)
     print(
-        f"[INFO] generated motion-sized object URDF {out_path}: current_size={current_size.tolist()} desired_size={desired_size.tolist()} scale_ratio={scale_ratio.tolist()}",
+        f"[INFO] generated motion-sized object URDF {out_path}: current_size={current_size.tolist()} desired_size={desired_size.tolist()} scale_ratio={scale_ratio.tolist()} collision_mode={collision_mode}",
         file=sys.stderr,
     )
     return out_path.resolve()
@@ -592,6 +653,10 @@ def emit(key, value):
 emit("SIM_FPS", sim.get("fps"))
 emit("SIM_CONTROL_DECIMATION", sim.get("control_decimation"))
 emit("SIM_SUBSTEPS", sim.get("substeps"))
+physx = sim.get("physx") if isinstance(sim.get("physx"), dict) else {}
+emit("SIM_PHYSX_POSITION_ITERATIONS", physx.get("num_position_iterations"))
+emit("SIM_PHYSX_VELOCITY_ITERATIONS", physx.get("num_velocity_iterations"))
+emit("SIM_PHYSX_BOUNCE_THRESHOLD_VELOCITY", physx.get("bounce_threshold_velocity"))
 backend = sim_cfg.get("mujoco_backend")
 if isinstance(backend, str):
     emit("MUJOCO_BACKEND", backend.upper())
@@ -620,6 +685,21 @@ PY
       SIM_SUBSTEPS)
         if [[ "$SIM_SUBSTEPS_EXPLICIT" != "1" ]]; then
           SIM_SUBSTEPS="$value"
+        fi
+        ;;
+      SIM_PHYSX_POSITION_ITERATIONS)
+        if [[ -z "${SIM_PHYSX_POSITION_ITERATIONS:-}" ]]; then
+          SIM_PHYSX_POSITION_ITERATIONS="$value"
+        fi
+        ;;
+      SIM_PHYSX_VELOCITY_ITERATIONS)
+        if [[ -z "${SIM_PHYSX_VELOCITY_ITERATIONS:-}" ]]; then
+          SIM_PHYSX_VELOCITY_ITERATIONS="$value"
+        fi
+        ;;
+      SIM_PHYSX_BOUNCE_THRESHOLD_VELOCITY)
+        if [[ -z "${SIM_PHYSX_BOUNCE_THRESHOLD_VELOCITY:-}" ]]; then
+          SIM_PHYSX_BOUNCE_THRESHOLD_VELOCITY="$value"
         fi
         ;;
       MUJOCO_BACKEND) MUJOCO_BACKEND="$value" ;;
@@ -852,7 +932,7 @@ apply_gt_mujoco_physics_overrides() {
   SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML=0
 
   MUJOCO_OBJECT_MASS_SCALE=""
-  MUJOCO_OBJECT_MASS_OVERRIDE="${MUJOCO_OBJECT_MASS_OVERRIDE:-1.4}"
+  MUJOCO_OBJECT_MASS_OVERRIDE="${MUJOCO_OBJECT_MASS_OVERRIDE:-}"
   MUJOCO_OBJECT_GEOM_FRICTION="${MUJOCO_OBJECT_GEOM_FRICTION:-[0.6,0.02,0.005]}"
   MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION="${MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION:-[0.6,0.02,0.005]}"
   MUJOCO_OBJECT_LATERAL_FRICTION=""
@@ -886,10 +966,18 @@ if not isinstance(perception_cfg, dict):
 field_map = {
     "update_hz": "PERCEPTION_UPDATE_HZ",
     "camera_fps": "PERCEPTION_CAMERA_FPS",
+    "camera_width": "PERCEPTION_CAMERA_WIDTH",
+    "camera_height": "PERCEPTION_CAMERA_HEIGHT",
     "camera_pitch_deg": "PERCEPTION_CAMERA_PITCH_DEG",
+    "camera_vfov_deg": "PERCEPTION_CAMERA_VFOV_DEG",
+    "camera_hfov_deg": "PERCEPTION_CAMERA_HFOV_DEG",
     "camera_near": "PERCEPTION_CAMERA_NEAR",
     "camera_far": "PERCEPTION_CAMERA_FAR",
     "max_distance": "PERCEPTION_MAX_DISTANCE",
+    "camera_warp_crop_top": "PERCEPTION_CAMERA_WARP_CROP_TOP",
+    "camera_warp_crop_bottom": "PERCEPTION_CAMERA_WARP_CROP_BOTTOM",
+    "camera_warp_crop_left": "PERCEPTION_CAMERA_WARP_CROP_LEFT",
+    "camera_warp_crop_right": "PERCEPTION_CAMERA_WARP_CROP_RIGHT",
     "camera_warp_min_valid_depth": "PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH",
     "camera_warp_buffer_len": "PERCEPTION_CAMERA_WARP_BUFFER_LEN",
     "camera_warp_latency_frame": "PERCEPTION_CAMERA_WARP_LATENCY_FRAME",
@@ -926,9 +1014,29 @@ PY
           PERCEPTION_CAMERA_FPS="$value"
         fi
         ;;
+      PERCEPTION_CAMERA_WIDTH)
+        if [[ "$PERCEPTION_CAMERA_WIDTH_EXPLICIT" != "1" && -z "$PERCEPTION_CAMERA_WIDTH" ]]; then
+          PERCEPTION_CAMERA_WIDTH="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_HEIGHT)
+        if [[ "$PERCEPTION_CAMERA_HEIGHT_EXPLICIT" != "1" && -z "$PERCEPTION_CAMERA_HEIGHT" ]]; then
+          PERCEPTION_CAMERA_HEIGHT="$value"
+        fi
+        ;;
       PERCEPTION_CAMERA_PITCH_DEG)
         if [[ -z "$PERCEPTION_CAMERA_PITCH_DEG" ]]; then
           PERCEPTION_CAMERA_PITCH_DEG="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_VFOV_DEG)
+        if [[ -z "$PERCEPTION_CAMERA_VFOV_DEG" ]]; then
+          PERCEPTION_CAMERA_VFOV_DEG="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_HFOV_DEG)
+        if [[ -z "$PERCEPTION_CAMERA_HFOV_DEG" ]]; then
+          PERCEPTION_CAMERA_HFOV_DEG="$value"
         fi
         ;;
       PERCEPTION_CAMERA_NEAR)
@@ -949,6 +1057,26 @@ PY
       PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH)
         if [[ -z "$PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH" ]]; then
           PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_WARP_CROP_TOP)
+        if [[ "$PERCEPTION_CAMERA_WARP_CROP_TOP_EXPLICIT" != "1" && -z "$PERCEPTION_CAMERA_WARP_CROP_TOP" ]]; then
+          PERCEPTION_CAMERA_WARP_CROP_TOP="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_WARP_CROP_BOTTOM)
+        if [[ "$PERCEPTION_CAMERA_WARP_CROP_BOTTOM_EXPLICIT" != "1" && -z "$PERCEPTION_CAMERA_WARP_CROP_BOTTOM" ]]; then
+          PERCEPTION_CAMERA_WARP_CROP_BOTTOM="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_WARP_CROP_LEFT)
+        if [[ "$PERCEPTION_CAMERA_WARP_CROP_LEFT_EXPLICIT" != "1" && -z "$PERCEPTION_CAMERA_WARP_CROP_LEFT" ]]; then
+          PERCEPTION_CAMERA_WARP_CROP_LEFT="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_WARP_CROP_RIGHT)
+        if [[ "$PERCEPTION_CAMERA_WARP_CROP_RIGHT_EXPLICIT" != "1" && -z "$PERCEPTION_CAMERA_WARP_CROP_RIGHT" ]]; then
+          PERCEPTION_CAMERA_WARP_CROP_RIGHT="$value"
         fi
         ;;
       PERCEPTION_CAMERA_WARP_BUFFER_LEN)
@@ -1245,7 +1373,7 @@ if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && "$PERCEPTION_CAMERA_SOURCE" == "r
       [[ "$PERCEPTION_CAMERA_WARP_CROP_LEFT_EXPLICIT" == "0" ]] && PERCEPTION_CAMERA_WARP_CROP_LEFT="4"
       [[ "$PERCEPTION_CAMERA_WARP_CROP_RIGHT_EXPLICIT" == "0" ]] && PERCEPTION_CAMERA_WARP_CROP_RIGHT="4"
       ;;
-    1|true|yes|on|myholosoma)
+    1|true|yes|on|myholosoma|mujoco848|rendered848|mujoco_render_848x480)
       [[ "$PERCEPTION_CAMERA_WIDTH_EXPLICIT" == "0" ]] && PERCEPTION_CAMERA_WIDTH="848"
       [[ "$PERCEPTION_CAMERA_HEIGHT_EXPLICIT" == "0" ]] && PERCEPTION_CAMERA_HEIGHT="480"
       [[ "$PERCEPTION_CAMERA_WARP_CROP_TOP_EXPLICIT" == "0" ]] && PERCEPTION_CAMERA_WARP_CROP_TOP="16"
@@ -1375,7 +1503,7 @@ if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]]; then
   echo "[INFO] inference_config=${INFERENCE_CONFIG}"
   echo "[INFO] sim_device=${SIM_DEVICE:-<default>}"
   echo "[INFO] mujoco_object_scene training_urdf=${SIM_USE_TRAINING_URDF_OBJECT_SCENE} default_actuators=${SIM_ADD_DEFAULT_OBJECT_ACTUATORS} copy_joint_defaults=${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML} copy_tendons=${SIM_COPY_TENDONS_FROM_ROBOT_XML} copy_collision_geoms=${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML} copy_contact_pairs=${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML}"
-  echo "[INFO] perception camera: source=${PERCEPTION_CAMERA_SOURCE} raw=${PERCEPTION_CAMERA_WIDTH:-<default>}x${PERCEPTION_CAMERA_HEIGHT:-<default>} crop_top=${PERCEPTION_CAMERA_WARP_CROP_TOP:-<default>} crop_bottom=${PERCEPTION_CAMERA_WARP_CROP_BOTTOM:-<default>} crop_left=${PERCEPTION_CAMERA_WARP_CROP_LEFT:-<default>} crop_right=${PERCEPTION_CAMERA_WARP_CROP_RIGHT:-<default>} update_hz=${PERCEPTION_UPDATE_HZ:-<default>} camera_fps=${PERCEPTION_CAMERA_FPS:-<default>} pitch_deg=${PERCEPTION_CAMERA_PITCH_DEG:-<default>} vfov_deg=${PERCEPTION_CAMERA_VFOV_DEG:-<default>} hfov_deg=${PERCEPTION_CAMERA_HFOV_DEG:-<default>} include_robot_mesh=${PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH:-<default>} near=${PERCEPTION_CAMERA_NEAR:-<default>} far=${PERCEPTION_CAMERA_FAR:-<default>} max_distance=${PERCEPTION_MAX_DISTANCE:-<default>} warp_min_valid_depth=${PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH:-<default>} warp_buffer_len=${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-<default>} warp_latency_frame=${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-<default>} warp_edge_noise=${PERCEPTION_CAMERA_WARP_EDGE_NOISE} warp_holes=${PERCEPTION_CAMERA_WARP_ENABLE_HOLES} sensor_noise=${PERCEPTION_CAMERA_APPLY_SENSOR_NOISE} transport=${PERCEPTION_OBS_TRANSPORT}"
+  echo "[INFO] perception camera: source=${PERCEPTION_CAMERA_SOURCE} object_geometry_mode=${PERCEPTION_OBJECT_GEOMETRY_MODE} raw=${PERCEPTION_CAMERA_WIDTH:-<default>}x${PERCEPTION_CAMERA_HEIGHT:-<default>} crop_top=${PERCEPTION_CAMERA_WARP_CROP_TOP:-<default>} crop_bottom=${PERCEPTION_CAMERA_WARP_CROP_BOTTOM:-<default>} crop_left=${PERCEPTION_CAMERA_WARP_CROP_LEFT:-<default>} crop_right=${PERCEPTION_CAMERA_WARP_CROP_RIGHT:-<default>} update_hz=${PERCEPTION_UPDATE_HZ:-<default>} camera_fps=${PERCEPTION_CAMERA_FPS:-<default>} pitch_deg=${PERCEPTION_CAMERA_PITCH_DEG:-<default>} vfov_deg=${PERCEPTION_CAMERA_VFOV_DEG:-<default>} hfov_deg=${PERCEPTION_CAMERA_HFOV_DEG:-<default>} include_robot_mesh=${PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH:-<default>} near=${PERCEPTION_CAMERA_NEAR:-<default>} far=${PERCEPTION_CAMERA_FAR:-<default>} max_distance=${PERCEPTION_MAX_DISTANCE:-<default>} warp_min_valid_depth=${PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH:-<default>} warp_buffer_len=${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-<default>} warp_latency_frame=${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-<default>} warp_edge_noise=${PERCEPTION_CAMERA_WARP_EDGE_NOISE} warp_holes=${PERCEPTION_CAMERA_WARP_ENABLE_HOLES} sensor_noise=${PERCEPTION_CAMERA_APPLY_SENSOR_NOISE} transport=${PERCEPTION_OBS_TRANSPORT}"
   if is_truthy_env "$PERCEPTION_OBS_EXTERNAL"; then
     echo "[INFO] perception_obs_external=1; MuJoCo will not publish perception_obs. Start an external publisher/relay on port=${PERCEPTION_OBS_PORT} or shm=${PERCEPTION_OBS_SHM_NAME}."
   fi
@@ -1452,6 +1580,9 @@ if [[ "$MJ_TRACK_MODE" != "policy" ]]; then
     --simulator.config.sim.fps "$SIM_FPS" \
     --simulator.config.sim.control-decimation "$SIM_CONTROL_DECIMATION" \
     $( [[ -n "$SIM_SUBSTEPS" ]] && printf '%s %s' "--simulator.config.sim.substeps" "$SIM_SUBSTEPS" ) \
+    $( [[ -n "${SIM_PHYSX_POSITION_ITERATIONS:-}" ]] && printf '%s %s' "--simulator.config.sim.physx.num-position-iterations" "$SIM_PHYSX_POSITION_ITERATIONS" ) \
+    $( [[ -n "${SIM_PHYSX_VELOCITY_ITERATIONS:-}" ]] && printf '%s %s' "--simulator.config.sim.physx.num-velocity-iterations" "$SIM_PHYSX_VELOCITY_ITERATIONS" ) \
+    $( [[ -n "${SIM_PHYSX_BOUNCE_THRESHOLD_VELOCITY:-}" ]] && printf '%s %s' "--simulator.config.sim.physx.bounce-threshold-velocity" "$SIM_PHYSX_BOUNCE_THRESHOLD_VELOCITY" ) \
     $( [[ -n "$MUJOCO_BACKEND" ]] && printf '%s %s' "--simulator.config.mujoco-backend" "$MUJOCO_BACKEND" ) \
     $( [[ -n "$SIM_DEVICE" ]] && printf '%s %s' "--device" "$SIM_DEVICE" ) \
     --simulator.config.virtual-gantry.enabled "$SIM_VIRTUAL_GANTRY_ENABLED" \

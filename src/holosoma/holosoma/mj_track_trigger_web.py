@@ -418,7 +418,7 @@ async def _scene_proxy_handler(request: web.Request) -> web.StreamResponse:
 def _resolve_action(action: str) -> tuple[str, list[str]]:
     action = str(action).strip().lower()
     if action in {"s", "track", "rollout_start", "start_rollout", "space_start", "start_with_motion"}:
-        return "rollout_start", ["start", "space"]
+        return "rollout_start", ["space", "start"]
     if action in {"]", "right_bracket", "start"}:
         return "start", ["start"]
     if action in {" ", "spacebar", "motion", "space", "start_motion", "start_motion_clip"}:
@@ -453,7 +453,7 @@ class TrackTriggerState:
             "policy_control_enabled": bool(self.policy_pub and self.policy_pub.enabled),
         }
 
-    def request_policy_sequence(self, actions: list[str], delay_s: float = 0.05) -> bool:
+    def request_policy_sequence(self, actions: list[str], delay_s: float = 0.6) -> bool:
         if self.policy_pub is None:
             return False
         sent_all = True

@@ -162,6 +162,9 @@ ACTOR_MIN_NOISE_STD=${ACTOR_MIN_NOISE_STD:-0.01}
 INIT_NOISE_STD=${INIT_NOISE_STD:-0.01}
 ENTROPY_COEF=${ENTROPY_COEF:-0.005}
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-268435456}
+PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY:-268435456}
+PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY:-268435456}
+PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY:-33554432}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
 DISTILL_ENABLED=${DISTILL_ENABLED:-True}
 DISTILL_MODE=${DISTILL_MODE:-dagger}
@@ -229,6 +232,7 @@ fi
 echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
 echo "[INFO] total_envs=${NUM_ENVS} world_size=${NPROC} envs_per_rank=$((NUM_ENVS / NPROC))"
 echo "[INFO] init_noise_std=${INIT_NOISE_STD} actor_min_noise_std=${ACTOR_MIN_NOISE_STD} entropy_coef=${ENTROPY_COEF}"
+echo "[INFO] physx_gpu_buffers found_lost_pairs=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY} found_lost_aggregate_pairs=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY} total_aggregate_pairs=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY} collision_stack=${PHYSX_GPU_COLLISION_STACK_SIZE}"
 echo "[INFO] dagger_match_std=${DAGGER_MATCH_STD}"
 echo "[INFO] default_pose_prepend=${ENABLE_DEFAULT_POSE_PREPEND} duration_s=${DEFAULT_POSE_PREPEND_DURATION_S} default_pose_append=${ENABLE_DEFAULT_POSE_APPEND} append_duration_s=${DEFAULT_POSE_APPEND_DURATION_S}"
 
@@ -288,6 +292,9 @@ run_distill_stage() {
     --algo.config.normalize-actor-obs=False
     --algo.config.normalize-critic-obs=False
     --algo.config.save-interval="${SAVE_INTERVAL}"
+    --simulator.config.sim.physx.gpu-found-lost-pairs-capacity="${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"
+    --simulator.config.sim.physx.gpu-found-lost-aggregate-pairs-capacity="${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY}"
+    --simulator.config.sim.physx.gpu-total-aggregate-pairs-capacity="${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY}"
     --simulator.config.sim.physx.gpu-collision-stack-size="${PHYSX_GPU_COLLISION_STACK_SIZE}"
     --command.setup-terms.motion-command.params.motion-config.motion-file "${MOTION_DIR}"
     --command.setup-terms.motion-command.params.motion-config.pair-terrain-with-motion="${PAIR_TERRAIN_WITH_MOTION}"

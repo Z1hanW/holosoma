@@ -1278,33 +1278,35 @@ if [[ "${DATA_MODE}" == "pure-real" ]]; then
 fi
 
 PERCEPTION_OVERRIDE_ARGS=()
-if [[ "${IMAGE_WIDTH_EXPLICIT}" -eq 1 ]]; then
-  PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-width="${IMAGE_WIDTH}")
-fi
-if [[ "${IMAGE_HEIGHT_EXPLICIT}" -eq 1 ]]; then
-  PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-height="${IMAGE_HEIGHT}")
-fi
-if [[ -n "${CAMERA_PITCH_DEG}" ]]; then
-  PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-pitch-deg="${CAMERA_PITCH_DEG}")
-fi
-PERCEPTION_OVERRIDE_ARGS+=(--perception.inject-into-critic-modules="${PERCEPTION_INTO_CRITIC_MODULES}")
-if [[ "${CAMERA_NEAR_EXPLICIT}" -eq 1 ]]; then
-  PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-near="${CAMERA_NEAR}")
-fi
-if [[ "${CAMERA_FAR_EXPLICIT}" -eq 1 ]]; then
-  PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-far="${CAMERA_FAR}")
-fi
-if [[ "${CAMERA_MAX_DISTANCE_EXPLICIT}" -eq 1 ]]; then
-  PERCEPTION_OVERRIDE_ARGS+=(--perception.max-distance="${CAMERA_MAX_DISTANCE}")
-fi
-if [[ "${PERCEPTION_WARP_PREPROCESS_EXPLICIT}" -eq 1 ]]; then
-  PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-warp-preprocess="${PERCEPTION_WARP_PREPROCESS}")
-fi
-if [[ "${CAMERA_APPLY_SENSOR_NOISE_EXPLICIT}" -eq 1 || "${PERCEPTION_PRESET}" == camera_depth_* ]]; then
-  PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-apply-sensor-noise="${CAMERA_APPLY_SENSOR_NOISE}")
-fi
-if [[ -n "${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}" ]]; then
-  PERCEPTION_OVERRIDE_ARGS+=(--perception.object-geometry-mode="${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}")
+if [[ "${PERCEPTION_PRESET}" != "none" ]]; then
+  if [[ "${IMAGE_WIDTH_EXPLICIT}" -eq 1 ]]; then
+    PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-width="${IMAGE_WIDTH}")
+  fi
+  if [[ "${IMAGE_HEIGHT_EXPLICIT}" -eq 1 ]]; then
+    PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-height="${IMAGE_HEIGHT}")
+  fi
+  if [[ -n "${CAMERA_PITCH_DEG}" ]]; then
+    PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-pitch-deg="${CAMERA_PITCH_DEG}")
+  fi
+  PERCEPTION_OVERRIDE_ARGS+=(--perception.inject-into-critic-modules="${PERCEPTION_INTO_CRITIC_MODULES}")
+  if [[ "${CAMERA_NEAR_EXPLICIT}" -eq 1 ]]; then
+    PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-near="${CAMERA_NEAR}")
+  fi
+  if [[ "${CAMERA_FAR_EXPLICIT}" -eq 1 ]]; then
+    PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-far="${CAMERA_FAR}")
+  fi
+  if [[ "${CAMERA_MAX_DISTANCE_EXPLICIT}" -eq 1 ]]; then
+    PERCEPTION_OVERRIDE_ARGS+=(--perception.max-distance="${CAMERA_MAX_DISTANCE}")
+  fi
+  if [[ "${PERCEPTION_WARP_PREPROCESS_EXPLICIT}" -eq 1 ]]; then
+    PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-warp-preprocess="${PERCEPTION_WARP_PREPROCESS}")
+  fi
+  if [[ "${CAMERA_APPLY_SENSOR_NOISE_EXPLICIT}" -eq 1 || "${PERCEPTION_PRESET}" == camera_depth_* ]]; then
+    PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-apply-sensor-noise="${CAMERA_APPLY_SENSOR_NOISE}")
+  fi
+  if [[ -n "${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}" ]]; then
+    PERCEPTION_OVERRIDE_ARGS+=(--perception.object-geometry-mode="${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}")
+  fi
 fi
 
 TEACHER_PERCEPTION_ARGS=(

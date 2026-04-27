@@ -66,6 +66,15 @@ def _wait_for_web_state(base_url: str, *, timeout_s: float, poll_s: float = 0.1)
     return last_state
 
 
+def _state_has_active_motion(state: dict[str, Any]) -> bool:
+    if bool(state.get("clip_active", False)):
+        return True
+    try:
+        return int(state.get("motion_timestep") or 0) > 2
+    except (TypeError, ValueError):
+        return False
+
+
 def _wait_for_clip_active(base_url: str, *, timeout_s: float, poll_s: float = 0.1) -> dict[str, Any] | None:
     deadline = time.monotonic() + max(float(timeout_s), 0.0)
     last_state: dict[str, Any] | None = None
@@ -73,7 +82,7 @@ def _wait_for_clip_active(base_url: str, *, timeout_s: float, poll_s: float = 0.
         state = _json_get(f"{base_url}/state")
         if state is not None:
             last_state = state
-            if bool(state.get("clip_active", False)):
+            if _state_has_active_motion(state):
                 return state
         time.sleep(max(float(poll_s), 0.01))
     return last_state
@@ -85,7 +94,8 @@ def _prepare_rollout_start(
     reset_reason: str,
     reset_to_default_pose: bool | None = None,
     timeout_s: float = 45.0,
-    settle_s: float = 0.8,
+    pre_trigger_wait_s: float = 2.0,
+    skip_reset: bool = False,
 ) -> dict[str, Any]:
     """Reset and start only after the policy control path is actually ready."""
 
@@ -106,14 +116,17 @@ def _prepare_rollout_start(
         f"{base_url}/command",
         {"enabled": False, "keys": [], "reset_to_default_pose": bool(reset_to_default_pose), "mode": "manual"},
     )
-    _safe_json_post(f"{base_url}/policy", {"action": "stop"})
-    reset_response = _safe_json_post(
-        f"{base_url}/reset",
-        {"reason": reset_reason, "reset_to_default_pose": bool(reset_to_default_pose)},
-    )
-    if reset_response is None:
-        raise RuntimeError("Failed to request simulator reset through command web")
-    time.sleep(max(float(settle_s), 0.0))
+    if skip_reset:
+        logger.info("Skipping command-web reset before recording; starting from launched motion-init state")
+    else:
+        _safe_json_post(f"{base_url}/policy", {"action": "stop"})
+        reset_response = _safe_json_post(
+            f"{base_url}/reset",
+            {"reason": reset_reason, "reset_to_default_pose": bool(reset_to_default_pose)},
+        )
+        if reset_response is None:
+            raise RuntimeError("Failed to request simulator reset through command web")
+    time.sleep(max(float(pre_trigger_wait_s), 0.0))
 
     deadline = time.monotonic() + max(float(timeout_s), 0.0)
     last_response: dict[str, Any] | None = None
@@ -123,13 +136,29 @@ def _prepare_rollout_start(
         attempt += 1
         last_response = _safe_json_post(f"{base_url}/policy", {"action": "rollout_start"})
         if last_response is not None and bool(last_response.get("sent", False)):
-            last_state = _wait_for_clip_active(base_url, timeout_s=1.5)
-            if last_state is not None and bool(last_state.get("clip_active", False)):
+            last_state = _json_get(f"{base_url}/state") or last_state
+            if (
+                last_state is not None
+                and "clip_active" not in last_state
+                and "motion_timestep" not in last_state
+            ):
+                logger.info(
+                    "Rollout start sent after {} attempt(s); command web state has no motion activity fields: {}",
+                    attempt,
+                    last_state,
+                )
+                return last_state
+            last_state = _wait_for_clip_active(base_url, timeout_s=2.0)
+            if last_state is not None and _state_has_active_motion(last_state):
                 logger.info("Rollout start confirmed after {} attempt(s): {}", attempt, last_state)
                 return last_state
-            if last_state is not None and "clip_active" not in last_state:
+            if (
+                last_state is not None
+                and "clip_active" not in last_state
+                and "motion_timestep" not in last_state
+            ):
                 logger.info(
-                    "Rollout start sent after {} attempt(s); command web state has no clip_active field: {}",
+                    "Rollout start sent after {} attempt(s); command web state has no motion activity fields: {}",
                     attempt,
                     last_state,
                 )
@@ -294,6 +323,13 @@ class MujocoStateRenderer:
             repo_root / "src" / "holosoma" / "holosoma" / "data" / "robots" / "g1",
             repo_root / "src" / "holosoma" / "holosoma" / "data" / "robots" / "t1",
         ]
+        object_roots = [
+            repo_root / "data" / "ds_box_data" / "scale_mix_all" / "train_g1_w_obj_prepared" / "_generated_urdfs",
+            repo_root / "data" / "ds_box_data" / "scale_mix_all" / "train_g1_w_obj_geometry",
+            repo_root / "data" / "ds_box_data_legacy" / "train_g1_w_obj_prepared" / "_generated_urdfs",
+            repo_root / "data" / "ds_box_data_legacy" / "train_g1_w_obj_geometry",
+            repo_root / "logs" / "sim2sim_exports" / "object_urdfs",
+        ]
         tree = ET.parse(xml_path)
         root = tree.getroot()
         changed = False
@@ -306,11 +342,42 @@ class MujocoStateRenderer:
                 continue
             candidates = [repo_root / mesh_path]
             candidates.extend(robot_root / mesh_path for robot_root in robot_roots)
+            candidates.extend(object_root / mesh_path for object_root in object_roots)
+            candidates.extend(object_root / mesh_path.name for object_root in object_roots)
             resolved = next((candidate.resolve() for candidate in candidates if candidate.exists()), None)
             if resolved is None:
                 continue
             mesh.set("file", str(resolved))
             changed = True
+        if os.environ.get("HOLOSOMA_RECORD_HIDE_WRIST_YAW_CYLINDERS", "1").lower() in {"1", "true", "yes", "on"}:
+            hidden_geom_names: set[str] = set()
+            for body in root.findall(".//body"):
+                body_name = str(body.get("name") or "").lower()
+                if not body_name.endswith("wrist_yaw_link"):
+                    continue
+                for geom in body.findall("geom"):
+                    if str(geom.get("type") or "").lower() != "cylinder":
+                        continue
+                    geom_name = geom.get("name")
+                    if geom_name:
+                        hidden_geom_names.add(str(geom_name))
+                    body.remove(geom)
+                    changed = True
+            removed_pairs = 0
+            if hidden_geom_names:
+                for contact in root.findall(".//contact"):
+                    for pair in list(contact.findall("pair")):
+                        if pair.get("geom1") in hidden_geom_names or pair.get("geom2") in hidden_geom_names:
+                            contact.remove(pair)
+                            removed_pairs += 1
+                            changed = True
+            if hidden_geom_names:
+                logger.info(
+                    "Removed {} wrist-yaw cylinder geom(s) and {} contact pair(s) from render-only XML: {}",
+                    len(hidden_geom_names),
+                    removed_pairs,
+                    sorted(hidden_geom_names),
+                )
         if not changed:
             return xml_path
         resolved_xml = xml_path.with_name(f"{xml_path.stem}_resolved{xml_path.suffix}")
@@ -713,6 +780,13 @@ def main() -> None:
         help="Render an existing sim_state JSONL trace offline instead of subscribing to the live simulator.",
     )
     parser.add_argument("--no-auto-start", action="store_true")
+    parser.add_argument("--skip-reset", action="store_true", help="Start from the launched motion-init state instead of resetting through command web.")
+    parser.add_argument(
+        "--pre-trigger-wait-s",
+        type=float,
+        default=float(os.environ.get("MJ_ENV_RECORD_PRE_TRIGGER_WAIT_S", "2.0")),
+        help="Wall-clock delay before Space + ] after state/web readiness.",
+    )
     parser.add_argument("--reset-reason", default="record_mujoco_rollout_video")
     args = parser.parse_args()
 
@@ -802,11 +876,6 @@ def main() -> None:
         logger.info("Wrote rollout metadata: {}", meta_path)
         return
 
-    if not args.no_auto_start:
-        web_state = _prepare_rollout_start(base_url, reset_reason=args.reset_reason)
-    else:
-        web_state = _json_get(f"{base_url}/state")
-
     sub = SimStateSub(args.state_port)
     depth_reader = DepthShmReader(args.depth_shm_name, int(args.depth_height) * int(args.depth_width))
     mujoco_renderer: MujocoStateRenderer | None = None
@@ -819,6 +888,16 @@ def main() -> None:
     writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"), float(args.fps), size)
     if not writer.isOpened():
         raise RuntimeError(f"Failed to open video writer: {out_path}")
+
+    if not args.no_auto_start:
+        web_state = _prepare_rollout_start(
+            base_url,
+            reset_reason=args.reset_reason,
+            pre_trigger_wait_s=args.pre_trigger_wait_s,
+            skip_reset=bool(args.skip_reset),
+        )
+    else:
+        web_state = _json_get(f"{base_url}/state")
 
     metadata: list[dict[str, Any]] = []
     start = time.monotonic()

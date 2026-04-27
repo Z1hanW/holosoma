@@ -6,6 +6,7 @@ DEFAULT_MOTION_DIR="$ROOT_DIR/outputs/motion_bank_success_box_0_92_0p3"
 DEFAULT_MODEL_INPUT="${DEFAULT_MODEL_INPUT:-https://wandb.ai/zihanw22/boxer/runs/shoo7sr1/model_29999.onnx}"
 DEFAULT_OBJECT_MAP="$DEFAULT_MOTION_DIR/_clip_object_urdf_map.json"
 DEFAULT_PERCEPTION_CAMERA_SOURCE="${PERCEPTION_CAMERA_SOURCE_DEFAULT:-far_tracking_warp}"
+MUJOCO_RENDER_848_PERCEPTION_PRESET="${MUJOCO_RENDER_848_PERCEPTION_PRESET:-camera_depth_d435i_mujoco_render_848x480}"
 
 INFER_PYTHON_BIN="${INFER_PY:-/home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python}"
 if [[ ! -x "$INFER_PYTHON_BIN" ]]; then
@@ -15,7 +16,7 @@ fi
 usage() {
   cat <<EOF
 Usage:
-  MOTION_DIR=/path/to/rollout_motion_bank OBJECT_URDF=/path/to/object.urdf bash mj_box_depth_track.sh [depth|rendered|warp] [clip_name|motion.npz] [model.onnx|wandb://...] [viser args...]
+  MOTION_DIR=/path/to/rollout_motion_bank OBJECT_URDF=/path/to/object.urdf bash mj_box_depth_track.sh [depth|rendered|rendered848|warp] [clip_name|motion.npz] [model.onnx|wandb://...] [viser args...]
 
 Defaults:
   motion_dir    = ${DEFAULT_MOTION_DIR}
@@ -27,7 +28,7 @@ Defaults:
   rolling_friction = MUJOCO_OBJECT_ROLLING_FRICTION:-<unset>
   contact_stiffness= MUJOCO_OBJECT_CONTACT_STIFFNESS:-<unset>
   contact_damping  = MUJOCO_OBJECT_CONTACT_DAMPING:-<unset>
-  GT_MUJOCO_PHYSICS=1 forces GT-style object/G1/floor MuJoCo physics
+  GT_MUJOCO_PHYSICS=1 forces GT-style object/G1/floor MuJoCo physics; default keeps training/URDF physics
   HOLOSOMA_AUTO_CUDA_FOR_TRAINING_DEPTH=0 disables cuda:0 auto-selection for far_tracking_warp
 EOF
 }
@@ -55,6 +56,8 @@ OBJECT_MAP_INPUT="${OBJECT_URDF:-}"
 MODEL_INPUT="${MODEL_INPUT:-${MODEL_PATH:-$DEFAULT_MODEL_INPUT}}"
 MOTION_FILE="${MOTION_FILE:-}"
 MOTION_CLIP_NAME="${MOTION_CLIP_NAME:-${MOTION_CLIP:-}}"
+PERCEPTION_PRESET_EXPLICIT=0
+[[ -n "${PERCEPTION_PRESET+x}" ]] && PERCEPTION_PRESET_EXPLICIT=1
 EXTRA_ARGS=()
 POSITIONAL_MODE=1
 
@@ -68,6 +71,17 @@ for arg in "$@"; do
       ;;
     rendered|render|mujoco)
       PERCEPTION_CAMERA_SOURCE="rendered"
+      if [[ "$PERCEPTION_PRESET_EXPLICIT" == "0" ]]; then
+        PERCEPTION_PRESET="$MUJOCO_RENDER_848_PERCEPTION_PRESET"
+      fi
+      PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN="${PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN:-mujoco848}"
+      ;;
+    rendered848|render848|mujoco848|mujoco_render_848x480)
+      PERCEPTION_CAMERA_SOURCE="rendered"
+      if [[ "$PERCEPTION_PRESET_EXPLICIT" == "0" ]]; then
+        PERCEPTION_PRESET="$MUJOCO_RENDER_848_PERCEPTION_PRESET"
+      fi
+      PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN="${PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN:-mujoco848}"
       ;;
     warp|far_tracking_warp)
       PERCEPTION_CAMERA_SOURCE="far_tracking_warp"
@@ -141,6 +155,7 @@ MODEL_LOCAL="$(printf '%s\n' "$MODEL_LOCAL" | tail -n 1)"
 OBJECT_URDF_RESOLVED="$(
   "$INFER_PYTHON_BIN" - <<'PY' "$OBJECT_MAP_INPUT" "$MOTION_FILE" "$ROOT_DIR"
 import json
+import os
 import sys
 from pathlib import Path
 import xml.etree.ElementTree as ET
@@ -230,10 +245,55 @@ def _mesh_path(urdf_path: Path, filename: str) -> Path:
     return (urdf_path.parent / mesh_path).resolve()
 
 
+def _object_collision_mode() -> str:
+    raw = os.environ.get(
+        "MUJOCO_OBJECT_COLLISION_MODE",
+        os.environ.get("HOLOSOMA_MUJOCO_OBJECT_COLLISION_MODE", "mesh"),
+    )
+    return str(raw).strip().lower().replace("-", "_")
+
+
+def _set_collision_box(root_xml: ET.Element, desired_size: np.ndarray) -> bool:
+    size_text = " ".join(str(float(value)) for value in desired_size.tolist())
+    collision_elems = list(root_xml.findall(".//collision"))
+    if not collision_elems:
+        link = root_xml.find(".//link")
+        if link is None:
+            return False
+        collision = ET.SubElement(link, "collision")
+        ET.SubElement(collision, "origin", {"rpy": "0 0 0", "xyz": "0 0 0"})
+        collision_elems = [collision]
+
+    for collision in collision_elems:
+        geometry = collision.find("geometry")
+        if geometry is None:
+            geometry = ET.SubElement(collision, "geometry")
+        for child in list(geometry):
+            geometry.remove(child)
+        ET.SubElement(geometry, "box", {"size": size_text})
+    name = str(root_xml.get("name") or "").strip()
+    if name and not name.endswith("_box_collision"):
+        root_xml.set("name", f"{name}_box_collision")
+    return True
+
+
+def _collision_box_matches(root_xml: ET.Element, desired_size: np.ndarray) -> bool:
+    for box in root_xml.findall(".//collision/geometry/box"):
+        try:
+            size = _parse_vec(box.get("size"), (0.0, 0.0, 0.0))
+        except Exception:
+            continue
+        if np.allclose(size, desired_size, rtol=0.02, atol=2.0e-3):
+            return True
+    return False
+
+
 def maybe_write_motion_sized_urdf(urdf_path: Path) -> Path:
     desired_size = _motion_object_size()
     if desired_size is None or not urdf_path.is_file():
         return urdf_path
+    collision_mode = _object_collision_mode()
+    use_box_collision = collision_mode in {"box", "primitive", "primitive_box", "box_collision", "rollout"}
 
     try:
         tree = ET.parse(urdf_path)
@@ -255,10 +315,12 @@ def maybe_write_motion_sized_urdf(urdf_path: Path) -> Path:
     current_size = first_extents * first_scale
     if current_size.size != 3 or np.any(current_size <= 0.0):
         return urdf_path
-    if np.allclose(current_size, desired_size, rtol=0.02, atol=2.0e-3):
+    mesh_already_sized = np.allclose(current_size, desired_size, rtol=0.02, atol=2.0e-3)
+    box_already_sized = use_box_collision and _collision_box_matches(root_xml, desired_size)
+    if mesh_already_sized and (not use_box_collision or box_already_sized):
         return urdf_path
 
-    scale_ratio = desired_size / current_size
+    scale_ratio = np.ones(3, dtype=np.float64) if mesh_already_sized else desired_size / current_size
     if not np.all(np.isfinite(scale_ratio)) or np.any(scale_ratio <= 0.0):
         return urdf_path
 
@@ -286,12 +348,16 @@ def maybe_write_motion_sized_urdf(urdf_path: Path) -> Path:
             inertia_elem.set("ixz", "0")
             inertia_elem.set("iyz", "0")
 
+    if use_box_collision:
+        _set_collision_box(root_xml, desired_size)
+
     out_dir = repo_root / "logs/sim2sim_exports/object_urdfs"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"{motion_path.stem}__{urdf_path.stem}__motion_size.urdf"
+    suffix = "motion_size_box_collision" if use_box_collision else "motion_size"
+    out_path = out_dir / f"{motion_path.stem}__{urdf_path.stem}__{suffix}.urdf"
     tree.write(out_path, encoding="utf-8", xml_declaration=True)
     print(
-        f"[INFO] generated motion-sized object URDF {out_path}: current_size={current_size.tolist()} desired_size={desired_size.tolist()} scale_ratio={scale_ratio.tolist()}",
+        f"[INFO] generated motion-sized object URDF {out_path}: current_size={current_size.tolist()} desired_size={desired_size.tolist()} scale_ratio={scale_ratio.tolist()} collision_mode={collision_mode}",
         file=sys.stderr,
     )
     return out_path.resolve()
@@ -320,9 +386,15 @@ PY
 
 export OBJECT_URDF="$OBJECT_URDF_RESOLVED"
 export ENABLE_SPLIT_PERCEPTION_OBS="${ENABLE_SPLIT_PERCEPTION_OBS:-1}"
-export PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
 export PERCEPTION_CAMERA_SOURCE="${PERCEPTION_CAMERA_SOURCE:-$DEFAULT_PERCEPTION_CAMERA_SOURCE}"
-export PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-mesh}"
+if [[ "$PERCEPTION_CAMERA_SOURCE" == "rendered" ]]; then
+  if [[ "$PERCEPTION_PRESET_EXPLICIT" == "0" ]]; then
+    PERCEPTION_PRESET="$MUJOCO_RENDER_848_PERCEPTION_PRESET"
+  fi
+  export PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN="${PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN:-mujoco848}"
+fi
+export PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
+export PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-}"
 export SIM_USE_TRAINING_URDF_OBJECT_SCENE="${SIM_USE_TRAINING_URDF_OBJECT_SCENE:-1}"
 export MUJOCO_OBJECT_CONTACT_BODY_MARKERS="${MUJOCO_OBJECT_CONTACT_BODY_MARKERS:-}"
 export MUJOCO_OBJECT_MASS_OVERRIDE="${MUJOCO_OBJECT_MASS_OVERRIDE:-}"
@@ -332,7 +404,7 @@ export MUJOCO_OBJECT_ROLLING_FRICTION="${MUJOCO_OBJECT_ROLLING_FRICTION:-}"
 export MUJOCO_OBJECT_CONTACT_STIFFNESS="${MUJOCO_OBJECT_CONTACT_STIFFNESS:-}"
 export MUJOCO_OBJECT_CONTACT_DAMPING="${MUJOCO_OBJECT_CONTACT_DAMPING:-}"
 export HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS="${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS:-0}"
-export GT_MUJOCO_PHYSICS="${GT_MUJOCO_PHYSICS:-${HOLOSOMA_GT_MUJOCO_PHYSICS:-1}}"
+export GT_MUJOCO_PHYSICS="${GT_MUJOCO_PHYSICS:-${HOLOSOMA_GT_MUJOCO_PHYSICS:-0}}"
 if is_truthy_env "$GT_MUJOCO_PHYSICS"; then
   export GT_MUJOCO_PHYSICS=1
   export HOLOSOMA_GT_MUJOCO_PHYSICS=1
@@ -343,7 +415,7 @@ if is_truthy_env "$GT_MUJOCO_PHYSICS"; then
   export SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML=0
   export SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML=0
   export MUJOCO_OBJECT_MASS_SCALE=""
-  export MUJOCO_OBJECT_MASS_OVERRIDE="${MUJOCO_OBJECT_MASS_OVERRIDE:-1.4}"
+  export MUJOCO_OBJECT_MASS_OVERRIDE="${MUJOCO_OBJECT_MASS_OVERRIDE:-}"
   export MUJOCO_OBJECT_GEOM_FRICTION="${MUJOCO_OBJECT_GEOM_FRICTION:-[0.6,0.02,0.005]}"
   export MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION="${MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION:-[0.6,0.02,0.005]}"
   export MUJOCO_OBJECT_LATERAL_FRICTION=""
@@ -384,7 +456,7 @@ echo "[INFO] motion_file=$MOTION_FILE"
 echo "[INFO] object_urdf=$OBJECT_URDF"
 echo "[INFO] model=$MODEL_LOCAL"
 echo "[INFO] inference_config=$INFERENCE_CONFIG"
-echo "[INFO] perception=${ENABLE_SPLIT_PERCEPTION_OBS} preset=${PERCEPTION_PRESET} camera_source=${PERCEPTION_CAMERA_SOURCE}"
+echo "[INFO] perception=${ENABLE_SPLIT_PERCEPTION_OBS} preset=${PERCEPTION_PRESET} camera_source=${PERCEPTION_CAMERA_SOURCE} object_geometry_mode=${PERCEPTION_OBJECT_GEOMETRY_MODE}"
 echo "[INFO] object_contact_body_markers=${MUJOCO_OBJECT_CONTACT_BODY_MARKERS:-<all robot collision bodies>}"
 echo "[INFO] object_mass_override=${MUJOCO_OBJECT_MASS_OVERRIDE:-<none>} object_geom_friction=${MUJOCO_OBJECT_GEOM_FRICTION:-<none>} object_terrain_pair_friction=${MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION:-<none>} lateral_friction=${MUJOCO_OBJECT_LATERAL_FRICTION:-<none>} rolling_friction=${MUJOCO_OBJECT_ROLLING_FRICTION:-<none>} contact_stiffness=${MUJOCO_OBJECT_CONTACT_STIFFNESS:-<none>} contact_damping=${MUJOCO_OBJECT_CONTACT_DAMPING:-<none>} web_demo_object_contacts=${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS}"
 echo "[INFO] gt_mujoco_physics=${GT_MUJOCO_PHYSICS} zero_passive_dynamics=${HOLOSOMA_GT_MUJOCO_ZERO_PASSIVE_DYNAMICS:-0}"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from multiprocessing import shared_memory
 
 import numpy as np
@@ -62,6 +63,10 @@ class PerceptionObsShmPub:
         self.array: np.ndarray | None = None
         self.dim: int | None = None
         self.enabled = False
+        self._reset_on_first_buffer = os.environ.get(
+            "HOLOSOMA_PERCEPTION_OBS_SHM_RESET_ON_START", "1"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._did_reset_existing = False
 
     def start(self) -> None:
         self.enabled = True
@@ -77,6 +82,23 @@ class PerceptionObsShmPub:
             self.shm = shared_memory.SharedMemory(name=self.name, create=True, size=size)
             logger.info("Created perception obs shared memory: name={} values={}", self.name, dim)
         except FileExistsError:
+            if self._reset_on_first_buffer and not self._did_reset_existing:
+                try:
+                    stale = shared_memory.SharedMemory(name=self.name, create=False)
+                    stale.unlink()
+                    stale.close()
+                    self.shm = shared_memory.SharedMemory(name=self.name, create=True, size=size)
+                    self._did_reset_existing = True
+                    logger.info("Reset perception obs shared memory on publisher start: name={} values={}", self.name, dim)
+                except FileNotFoundError:
+                    self.shm = shared_memory.SharedMemory(name=self.name, create=True, size=size)
+                    self._did_reset_existing = True
+                    logger.info("Created perception obs shared memory after reset race: name={} values={}", self.name, dim)
+                if self.shm is not None:
+                    self.dim = int(dim)
+                    self.array = np.ndarray((self.dim,), dtype=np.float32, buffer=self.shm.buf)
+                    self.array[:] = 0.0
+                    return
             existing = shared_memory.SharedMemory(name=self.name, create=False)
             if len(existing.buf) != size:
                 existing.close()
