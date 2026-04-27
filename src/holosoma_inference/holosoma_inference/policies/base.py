@@ -26,6 +26,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional runtime dependency
     listen_keyboard = None
 
 from holosoma_inference.config.config_types.inference import InferenceConfig
+from holosoma_inference.config.config_types.observation import ObservationConfig
 from holosoma_inference.config.config_types.robot import RobotConfig
 from holosoma_inference.sdk.interface_wrapper import InterfaceWrapper
 from holosoma_inference.sdk.zmq_interface_wrapper import ZmqSimInterfaceWrapper
@@ -160,6 +161,17 @@ class BasePolicy:
                 flattened_terms.append(np.zeros((1, term_dim * history_len), dtype=np.float32))
 
             self.obs_buf_dict[group] = np.concatenate(flattened_terms, axis=1) if flattened_terms else np.zeros((1, 0))
+
+    def _reset_obs_config(self, obs_config: ObservationConfig):
+        """Replace observation config and rebuild observation buffers."""
+        self.obs_config = obs_config
+        self.obs_scales = self.obs_config.obs_scales
+        self.obs_dims = self.obs_config.obs_dims
+        self.obs_dict = self.obs_config.obs_dict
+        self.obs_dim_dict = self._calculate_obs_dim_dict()
+        self.history_length_dict = self.obs_config.history_length_dict
+        self._obs_group_order = list(self.obs_dict.keys())
+        self._initialize_history_state()
 
     def _init_communication_components(self):
         """Initialize state processor and command sender using the wrapper."""
@@ -702,7 +714,9 @@ class BasePolicy:
         """Prepare observations for RL inference."""
         group_outputs = self._prepare_group_observations(robot_state_data)
         actor_obs = self._assemble_actor_obs(group_outputs)
-        return {"actor_obs": actor_obs}
+        prepared = {group_name: value.astype(np.float32, copy=False) for group_name, value in group_outputs.items()}
+        prepared["actor_obs"] = actor_obs.astype(np.float32, copy=False)
+        return prepared
 
     # ============================================================================
     # Control/Command Methods

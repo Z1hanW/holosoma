@@ -183,6 +183,11 @@ parse_wandb_run_url() {
 
   if [[ "${#parts[@]}" -ge 6 && "${parts[4]}" == "files" ]]; then
     explicit_file="${trimmed#${entity}/${project}/runs/${run_id}/files/}"
+  elif [[ "${#parts[@]}" -ge 5 ]]; then
+    explicit_file="${trimmed#${entity}/${project}/runs/${run_id}/}"
+    if [[ "${explicit_file}" != *.pt ]]; then
+      explicit_file=""
+    fi
   fi
 
   printf '%s\t%s\t%s\t%s\n' "${entity}" "${project}" "${run_id}" "${explicit_file}"
@@ -193,7 +198,7 @@ resolve_remote_wandb_checkpoint_name() {
   local project="$2"
   local run_id="$3"
 
-  "${PYTHON_BIN}" - "${entity}" "${project}" "${run_id}" <<'PY' 2>/dev/null || true
+  "${PYTHON_BIN}" - "${entity}" "${project}" "${run_id}" <<'PY' || true
 import re
 import sys
 from pathlib import Path
@@ -217,22 +222,32 @@ except Exception:
     sys.exit(0)
 
 entity, project, run_id = sys.argv[1:4]
-api = wandb.Api(timeout=30)
-run = api.run(f"{entity}/{project}/{run_id}")
+try:
+    api = wandb.Api(timeout=30)
+    run = api.run(f"{entity}/{project}/{run_id}")
+except Exception as exc:
+    print(f"__WANDB_ERROR__ {type(exc).__name__}: {exc}")
+    raise SystemExit(0)
+
+numbered_models: list[tuple[int, str]] = []
+pt_candidates: list[str] = []
 model_pattern = re.compile(r"^model_(\d+)\.pt$")
-latest_step = -1
-latest_name = ""
+
 for file_obj in run.files():
     name = getattr(file_obj, "name", "")
-    match = model_pattern.match(name)
-    if not match:
+    if not name.endswith(".pt"):
         continue
-    step = int(match.group(1))
-    if step >= latest_step:
-        latest_step = step
-        latest_name = name
-if latest_name:
-    print(latest_name)
+    pt_candidates.append(name)
+    match = model_pattern.match(name)
+    if match:
+        numbered_models.append((int(match.group(1)), name))
+
+if numbered_models:
+    print(max(numbered_models, key=lambda item: item[0])[1])
+elif len(pt_candidates) == 1:
+    print(pt_candidates[0])
+elif pt_candidates:
+    print(sorted(pt_candidates)[-1])
 PY
 }
 
@@ -293,6 +308,7 @@ normalize_checkpoint_ref() {
   local explicit_file=""
   local model_file="${WANDB_MODEL_FILE:-}"
   local remote_model_file=""
+  local remote_lookup_output=""
 
   parsed="$(parse_wandb_run_url "${ref}" || true)"
   if [[ -z "${parsed}" ]]; then
@@ -305,9 +321,12 @@ normalize_checkpoint_ref() {
     model_file="${explicit_file}"
   elif [[ -z "${model_file}" ]]; then
     if [[ "${WANDB_MODEL_FILE_FROM_ENV}" != "1" ]]; then
-      remote_model_file="$(resolve_remote_wandb_checkpoint_name "${entity}" "${project}" "${run_id}")"
-      if [[ -n "${remote_model_file}" ]]; then
-        model_file="${remote_model_file}"
+      remote_lookup_output="$(resolve_remote_wandb_checkpoint_name "${entity}" "${project}" "${run_id}")"
+      if [[ "${remote_lookup_output}" == __WANDB_ERROR__* ]]; then
+        echo "[ERROR] Failed to query W&B run ${entity}/${project}/${run_id}: ${remote_lookup_output#__WANDB_ERROR__ }" >&2
+        echo "[ERROR] If the run is private or your environment is not logged in, run 'wandb login' or export WANDB_API_KEY." >&2
+      elif [[ -n "${remote_lookup_output}" ]]; then
+        model_file="${remote_lookup_output}"
         echo "[INFO] Resolved wandb run URL to latest remote checkpoint: ${model_file}" >&2
       fi
     fi

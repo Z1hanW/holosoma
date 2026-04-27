@@ -85,6 +85,20 @@ g1_29dof_wbt_depth_distill = replace(
     ),
 )
 
+g1_29dof_wbt_terrain_aware = replace(
+    g1_29dof_wbt,
+    task=replace(
+        task.wbt,
+        use_sim_time=True,
+        use_sim_state=True,
+        use_split_perception_obs=True,
+        defer_policy_start_until_valid_state=True,
+        prefer_sim_ref_from_sim_state=True,
+        use_root_reference_at_clip_start=True,
+        restart_motion_on_clock_reset=True,
+    ),
+)
+
 # G1 Whole-Body Tracking (VideoMimic)
 g1_29dof_videomimic = InferenceConfig(
     robot=replace(
@@ -119,6 +133,8 @@ DEFAULTS = {
     "g1-29dof-loco": g1_29dof_loco,
     "t1-29dof-loco": t1_29dof_loco,
     "g1-29dof-wbt": g1_29dof_wbt,
+    "g1-29dof-wbt-terrain-aware": g1_29dof_wbt_terrain_aware,
+    "g1-29dof-wbt-terrain": g1_29dof_wbt_terrain_aware,
     "g1-29dof-wbt-depth-distill": g1_29dof_wbt_depth_distill,
     "g1-29dof-wbt-w-object": g1_29dof_wbt_w_object,
     "g1-29dof-wbt-object-generalist": g1_29dof_wbt_object_generalist,

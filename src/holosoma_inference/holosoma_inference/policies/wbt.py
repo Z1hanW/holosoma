@@ -11,6 +11,7 @@ from loguru import logger
 from termcolor import colored
 
 from holosoma_inference.config.config_types.inference import InferenceConfig
+from holosoma_inference.config.config_types.observation import ObservationConfig
 from holosoma_inference.config.config_types.robot import RobotConfig
 from holosoma_inference.policies import BasePolicy
 from holosoma_inference.utils.clock import ClockSub
@@ -315,6 +316,127 @@ def _apply_transition_segment_np(
             motion[key] = np.concatenate([motion[key], segment], axis=0)
 
 
+def _extract_observation_groups_from_metadata(metadata: dict[str, object]) -> dict | None:
+    experiment_config = metadata.get("experiment_config")
+    if not isinstance(experiment_config, dict):
+        return None
+    observation_cfg = experiment_config.get("observation", {})
+    if not isinstance(observation_cfg, dict):
+        return None
+    groups = observation_cfg.get("groups")
+    return groups if isinstance(groups, dict) else None
+
+
+def _infer_metadata_obs_term_dim(
+    term_name: str,
+    term_cfg: dict[str, object] | None,
+    *,
+    num_dofs: int,
+    perception_input_dim: int | None,
+    perception_cfg: dict[str, object] | None,
+) -> int:
+    if term_name == "motion_command":
+        return 2 * num_dofs
+    if term_name in {"dof_pos", "dof_vel", "actions", "target_joints"}:
+        return num_dofs
+    if term_name == "actions_history":
+        params = term_cfg.get("params", {}) if isinstance(term_cfg, dict) else {}
+        if not isinstance(params, dict):
+            params = {}
+        history_steps = int(params.get("history_steps", 1) or 1)
+        return history_steps * num_dofs
+    if term_name in {
+        "base_lin_vel",
+        "base_ang_vel",
+        "motion_ref_pos_b",
+        "obj_pos_b",
+        "obj_lin_vel_b",
+        "obj_ang_vel_b",
+    }:
+        return 3
+    if term_name in {"motion_ref_ori_b", "obj_ori_b"}:
+        return 6
+    if term_name in {"target_root_roll", "target_root_pitch", "torso_yaw_rel"}:
+        return 1
+    if term_name == "torso_xy_rel":
+        return 2
+    if term_name == "torso_real":
+        return (3 + 3) + (3 * num_dofs)
+    if term_name == "sparse_target_root_trajectory_command":
+        return 3
+    if term_name in {"obj_target_pose_size_b", "obj_current_pose_size_b", "obj_goal_pose_size_b"}:
+        return 12
+    if term_name == "perception":
+        if perception_input_dim is not None:
+            return int(perception_input_dim)
+        if isinstance(perception_cfg, dict):
+            grid_size = perception_cfg.get("grid_size")
+            if grid_size is not None:
+                return int(grid_size) * int(grid_size)
+        raise ValueError("Unable to infer perception observation dimension from ONNX metadata.")
+    raise ValueError(f"Unsupported metadata-derived observation term '{term_name}' for WBT inference.")
+
+
+def _build_observation_config_from_metadata(
+    metadata: dict[str, object],
+    *,
+    num_dofs: int,
+    perception_input_dim: int | None,
+) -> ObservationConfig | None:
+    groups = _extract_observation_groups_from_metadata(metadata)
+    if not groups:
+        return None
+
+    experiment_config = metadata.get("experiment_config")
+    perception_cfg = None
+    if isinstance(experiment_config, dict):
+        raw_perception_cfg = experiment_config.get("perception")
+        if isinstance(raw_perception_cfg, dict):
+            perception_cfg = raw_perception_cfg
+
+    obs_dict: dict[str, list[str]] = {}
+    obs_dims: dict[str, int] = {}
+    obs_scales: dict[str, float] = {}
+    history_length_dict: dict[str, int] = {}
+
+    for group_name, group_cfg in groups.items():
+        if not isinstance(group_cfg, dict):
+            continue
+        if not (group_name == "perception_obs" or group_name == "actor_obs" or group_name.startswith("actor_obs")):
+            continue
+
+        terms_cfg = group_cfg.get("terms")
+        if not isinstance(terms_cfg, dict) or not terms_cfg:
+            continue
+
+        obs_dict[group_name] = list(terms_cfg.keys())
+        history_length_dict[group_name] = int(group_cfg.get("history_length", 1) or 1)
+
+        for term_name, raw_term_cfg in terms_cfg.items():
+            term_cfg = raw_term_cfg if isinstance(raw_term_cfg, dict) else {}
+            if term_name not in obs_dims:
+                obs_dims[term_name] = _infer_metadata_obs_term_dim(
+                    term_name,
+                    term_cfg,
+                    num_dofs=num_dofs,
+                    perception_input_dim=perception_input_dim,
+                    perception_cfg=perception_cfg,
+                )
+            if term_name not in obs_scales:
+                scale = term_cfg.get("scale", 1.0) if isinstance(term_cfg, dict) else 1.0
+                obs_scales[term_name] = float(scale)
+
+    if not obs_dict:
+        return None
+
+    return ObservationConfig(
+        obs_dict=obs_dict,
+        obs_dims=obs_dims,
+        obs_scales=obs_scales,
+        history_length_dict=history_length_dict,
+    )
+
+
 class WholeBodyTrackingPolicy(BasePolicy):
     def __init__(self, config: InferenceConfig):
         # initialize timestep
@@ -346,40 +468,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._logged_root_reference_clip_start = False
         self._logged_sim_ref_from_sim_state = False
         self._auto_start_motion_clip_pending = False
-
-        obs_terms = {term for terms in config.observation.obs_dict.values() for term in terms}
-        self._uses_videomimic = any(
-            term in obs_terms
-            for term in (
-                "torso_real",
-                "torso_xy_rel",
-                "torso_yaw_rel",
-                "target_joints",
-                "target_root_roll",
-                "target_root_pitch",
-            )
-        )
-        self._uses_motion_command = any(
-            term in obs_terms for term in ("motion_command", "motion_ref_ori_b", "motion_future_target_poses")
-        )
-        self._uses_sparse_root_distill = "sparse_target_root_trajectory_command" in obs_terms
-        if self._uses_sparse_root_distill:
-            self._uses_motion_command = True
-        self._uses_object_generalist = any(
-            term in obs_terms
-            for term in (
-                "obj_target_pose_size_b",
-                "obj_pos_b",
-                "obj_ori_b",
-                "obj_lin_vel_b",
-                "obj_ang_vel_b",
-            )
-        )
-        self._uses_legacy_object_obs = (
-            all(term in obs_terms for term in ("obj_target_pose_size_b", "obj_pos_b", "obj_ori_b"))
-            and "obj_lin_vel_b" not in obs_terms
-            and "obj_ang_vel_b" not in obs_terms
-        )
+        self._obs_terms: set[str] = set()
+        self._uses_videomimic = False
+        self._uses_motion_command = False
+        self._uses_sparse_root_distill = False
+        self._uses_object_generalist = False
+        self._uses_legacy_object_obs = False
+        self._refresh_observation_mode_flags(config.observation.obs_dict)
         self._motion_data: MotionData | None = None
         self._motion_cfg: dict | None = None
         self._motion_align_quat_wxyz: np.ndarray | None = None
@@ -396,6 +491,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._perception_obs_sub: PerceptionObsSub | None = None
         self._last_perception_obs: np.ndarray | None = None
         self._logged_waiting_for_perception_obs = False
+        self._actions_history_steps = 0
+        self._actions_history_buffer: np.ndarray | None = None
 
         super().__init__(config)
 
@@ -465,6 +562,48 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self._handle_start_motion_clip()
         elif self.config.task.auto_start_motion_clip:
             self._auto_start_motion_clip_pending = True
+
+    def _refresh_observation_mode_flags(self, obs_dict: dict[str, list[str]]) -> None:
+        obs_terms = {term for terms in obs_dict.values() for term in terms}
+        self._obs_terms = obs_terms
+        self._uses_videomimic = any(term in obs_terms for term in ("torso_real", "torso_xy_rel", "torso_yaw_rel"))
+        self._uses_motion_command = any(
+            term in obs_terms
+            for term in (
+                "motion_command",
+                "motion_ref_pos_b",
+                "motion_ref_ori_b",
+                "actions_history",
+                "motion_future_target_poses",
+            )
+        )
+        self._uses_sparse_root_distill = "sparse_target_root_trajectory_command" in obs_terms
+        if self._uses_sparse_root_distill:
+            self._uses_motion_command = True
+        self._uses_object_generalist = any(
+            term in obs_terms
+            for term in (
+                "obj_target_pose_size_b",
+                "obj_pos_b",
+                "obj_ori_b",
+                "obj_lin_vel_b",
+                "obj_ang_vel_b",
+            )
+        )
+        self._uses_legacy_object_obs = (
+            all(term in obs_terms for term in ("obj_target_pose_size_b", "obj_pos_b", "obj_ori_b"))
+            and "obj_lin_vel_b" not in obs_terms
+            and "obj_ang_vel_b" not in obs_terms
+        )
+
+    def _reset_actions_history(self) -> None:
+        if self._actions_history_steps <= 0:
+            self._actions_history_buffer = None
+            return
+        self._actions_history_buffer = np.zeros(
+            (1, self._actions_history_steps, self.num_dofs),
+            dtype=np.float32,
+        )
 
     def _get_ref_body_pose_in_world(self, robot_state_data) -> tuple[np.ndarray, np.ndarray]:
         if bool(getattr(self.config.task, "prefer_sim_ref_from_sim_state", False)):
@@ -734,6 +873,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.onnx_policy_session = onnxruntime.InferenceSession(model_path)
         self.onnx_input_names = [inp.name for inp in self.onnx_policy_session.get_inputs()]
         self.onnx_output_names = [out.name for out in self.onnx_policy_session.get_outputs()]
+        self._perception_input_name = "perception_obs" if "perception_obs" in self.onnx_input_names else None
+        self._perception_input_dim = self._get_onnx_input_dim(self._perception_input_name)
+        self._time_step_input_name = "time_step" if "time_step" in self.onnx_input_names else None
 
         # Extract KP/KD from ONNX metadata (same as base class)
         onnx_model = onnx.load(model_path)
@@ -742,6 +884,22 @@ class WholeBodyTrackingPolicy(BasePolicy):
             metadata[prop.key] = json.loads(prop.value)
         self._onnx_metadata = metadata
         self._onnx_obs_dim = self._get_onnx_obs_dim()
+
+        metadata_obs_config = _build_observation_config_from_metadata(
+            metadata,
+            num_dofs=self.num_dofs,
+            perception_input_dim=self._perception_input_dim,
+        )
+        if metadata_obs_config is not None:
+            self._reset_obs_config(metadata_obs_config)
+            self._refresh_observation_mode_flags(self.obs_dict)
+            logger.info("Loaded WBT observation groups from ONNX metadata: {}", list(self.obs_dict.keys()))
+
+        if "actions_history" in self._obs_terms:
+            self._actions_history_steps = int(self.obs_dims["actions_history"] // self.num_dofs)
+        else:
+            self._actions_history_steps = 0
+        self._reset_actions_history()
 
         # Extract URDF text from ONNX metadata
         assert "robot_urdf" in metadata, "Robot urdf text not found in ONNX metadata"
@@ -758,13 +916,22 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
             logger.info(f"Loaded KP/KD from ONNX metadata: {Path(model_path).name}")
 
+        requires_motion_data = bool(self.config.task.motion_file) or any(
+            term in self._obs_terms for term in ("target_root_roll", "target_root_pitch")
+        )
         if (
             self._uses_videomimic
             or self._uses_object_generalist
             or self._uses_legacy_object_obs
             or self._uses_sparse_root_distill
+            or requires_motion_data
         ):
-            self._load_motion_data_from_metadata(metadata, Path(model_path))
+            try:
+                self._load_motion_data_from_metadata(metadata, Path(model_path))
+            except Exception as exc:
+                if requires_motion_data:
+                    raise
+                logger.warning("Skipping optional motion-data load for WBT inference: {}", exc)
 
         if "obs" in self.onnx_input_names:
             self._obs_input_name = "obs"
@@ -772,10 +939,6 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self._obs_input_name = "actor_obs"
         else:
             raise ValueError(f"Unsupported ONNX inputs: {self.onnx_input_names}")
-
-        self._perception_input_name = "perception_obs" if "perception_obs" in self.onnx_input_names else None
-        self._perception_input_dim = self._get_onnx_input_dim(self._perception_input_name)
-        self._time_step_input_name = "time_step" if "time_step" in self.onnx_input_names else None
 
         if "actions" in self.onnx_output_names:
             self._action_output_name = "actions"
@@ -893,6 +1056,48 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._logged_waiting_for_perception_obs = False
         return perception_obs
 
+    def _get_perception_obs_for_obs_buffer(self) -> np.ndarray:
+        perception_obs = self._get_split_perception_obs()
+        if perception_obs is not None:
+            return perception_obs.astype(np.float32, copy=False)
+        return self._build_zero_perception_obs()
+
+    def _get_actions_history_obs(self) -> np.ndarray:
+        if self._actions_history_steps <= 0:
+            raise ValueError("actions_history was requested but no history size is configured.")
+        if self._actions_history_buffer is None:
+            self._reset_actions_history()
+        assert self._actions_history_buffer is not None
+        self._actions_history_buffer = np.roll(self._actions_history_buffer, shift=-1, axis=1)
+        self._actions_history_buffer[:, -1, :] = self.last_policy_action.astype(np.float32, copy=False)
+        return self._actions_history_buffer.reshape(1, -1)
+
+    def _set_motion_targets_from_motion_data(self, robot_state_data: np.ndarray | None = None) -> None:
+        if self._motion_data is None:
+            return
+        if robot_state_data is not None:
+            self._maybe_update_motion_alignment(robot_state_data)
+        idx = self._get_motion_index()
+        joint_pos = self._motion_data.joint_pos[idx : idx + 1]
+        joint_vel = self._motion_data.joint_vel[idx : idx + 1]
+        ref_pos_w = self._motion_data.ref_pos_w[idx : idx + 1]
+        ref_quat_wxyz = self._motion_data.ref_quat_w[idx : idx + 1]
+        if self._motion_align_quat_wxyz is not None:
+            ref_pos_w = self._apply_motion_alignment_pos(ref_pos_w)
+            ref_quat_wxyz = self._apply_motion_alignment_quat(ref_quat_wxyz)
+        self.motion_command_t = np.concatenate([joint_pos, joint_vel], axis=1).astype(np.float32, copy=False)
+        self.ref_pos_xyz_t = ref_pos_w.astype(np.float32, copy=False)
+        self.ref_quat_xyzw_t = wxyz_to_xyzw(ref_quat_wxyz.astype(np.float32, copy=False))
+
+    def _get_motion_ref_pos_b(self, robot_state_data: np.ndarray) -> np.ndarray:
+        if self.ref_pos_xyz_t is None:
+            return np.zeros((1, 3), dtype=np.float32)
+        motion_ref_pos_w = np.asarray(self.ref_pos_xyz_t, dtype=np.float32).reshape(1, 3)
+        robot_ref_pos_w, robot_ref_quat_wxyz = self._get_observation_reference_pose_in_world(robot_state_data)
+        rel_pos_w = motion_ref_pos_w - robot_ref_pos_w
+        rel_pos_b = quat_apply(quat_inverse(robot_ref_quat_wxyz), rel_pos_w)
+        return rel_pos_b.astype(np.float32, copy=False)
+
     def _capture_policy_state(self):
         state = super()._capture_policy_state()
         state.update(
@@ -916,6 +1121,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._logged_sim_ref_from_sim_state = False
         self._motion_align_quat_wxyz = None
         self._motion_align_pos = None
+        self._reset_actions_history()
 
     def _on_policy_switched(self, model_path: str):
         super()._on_policy_switched(model_path)
@@ -931,6 +1137,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._logged_sim_ref_from_sim_state = False
         self._motion_align_quat_wxyz = None
         self._motion_align_pos = None
+        self._reset_actions_history()
 
     def get_init_target(self, robot_state_data):
         """Get initialization target joint positions."""
@@ -1256,36 +1463,94 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
     def get_current_obs_buffer_dict(self, robot_state_data):
         robot_state_data = self._augment_robot_state_with_sim_state(robot_state_data)
+        if robot_state_data is None:
+            raise ValueError("Robot state is required for WBT observations.")
         if self._uses_videomimic:
-            return self._get_videomimic_obs_buffer_dict(robot_state_data)
+            current_obs_buffer_dict = self._get_videomimic_obs_buffer_dict(robot_state_data)
+            if "perception_obs" in self.obs_dict:
+                current_obs_buffer_dict["perception"] = self._get_perception_obs_for_obs_buffer()
+            return current_obs_buffer_dict
         if self._uses_sparse_root_distill:
-            return self._get_sparse_root_distill_obs_buffer_dict(robot_state_data)
+            current_obs_buffer_dict = self._get_sparse_root_distill_obs_buffer_dict(robot_state_data)
+            if "perception_obs" in self.obs_dict:
+                current_obs_buffer_dict["perception"] = self._get_perception_obs_for_obs_buffer()
+            return current_obs_buffer_dict
         if self._uses_object_generalist:
-            return self._get_object_generalist_obs_buffer_dict(robot_state_data)
+            current_obs_buffer_dict = self._get_object_generalist_obs_buffer_dict(robot_state_data)
+            if "perception_obs" in self.obs_dict:
+                current_obs_buffer_dict["perception"] = self._get_perception_obs_for_obs_buffer()
+            return current_obs_buffer_dict
         if self._uses_legacy_object_obs:
-            return self._get_legacy_object_obs_buffer_dict(robot_state_data)
+            current_obs_buffer_dict = self._get_legacy_object_obs_buffer_dict(robot_state_data)
+            if "perception_obs" in self.obs_dict:
+                current_obs_buffer_dict["perception"] = self._get_perception_obs_for_obs_buffer()
+            return current_obs_buffer_dict
+
+        if self._motion_data is not None:
+            self._set_motion_targets_from_motion_data(robot_state_data)
 
         current_obs_buffer_dict = {}
+        sim_root_state = self._get_sim_root_state()
 
-        # motion_command
-        current_obs_buffer_dict["motion_command"] = self.motion_command_t
+        if "motion_command" in self._obs_terms:
+            current_obs_buffer_dict["motion_command"] = self.motion_command_t
 
-        # motion_ref_ori_b
-        current_obs_buffer_dict["motion_ref_ori_b"] = self._get_motion_ref_ori_b(robot_state_data)
+        if "motion_ref_pos_b" in self._obs_terms:
+            current_obs_buffer_dict["motion_ref_pos_b"] = self._get_motion_ref_pos_b(robot_state_data)
 
-        # base_ang_vel
-        current_obs_buffer_dict["base_ang_vel"] = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
+        if "motion_ref_ori_b" in self._obs_terms:
+            current_obs_buffer_dict["motion_ref_ori_b"] = self._get_motion_ref_ori_b(robot_state_data)
 
-        # dof_pos
-        current_obs_buffer_dict["dof_pos"] = robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles
+        if sim_root_state is not None:
+            root_quat_wxyz = xyzw_to_wxyz(sim_root_state[:, 3:7])
+            base_ang_vel = quat_rotate_inverse(root_quat_wxyz, sim_root_state[:, 10:13])
+        else:
+            base_ang_vel = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
+        if "base_ang_vel" in self._obs_terms:
+            current_obs_buffer_dict["base_ang_vel"] = base_ang_vel.astype(np.float32, copy=False)
 
-        # dof_vel
-        current_obs_buffer_dict["dof_vel"] = robot_state_data[
-            :, 7 + self.num_dofs + 6 : 7 + self.num_dofs + 6 + self.num_dofs
-        ]
+        if "dof_pos" in self._obs_terms:
+            current_obs_buffer_dict["dof_pos"] = robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles
 
-        # actions
-        current_obs_buffer_dict["actions"] = self.last_policy_action
+        if "dof_vel" in self._obs_terms:
+            current_obs_buffer_dict["dof_vel"] = robot_state_data[
+                :, 7 + self.num_dofs + 6 : 7 + self.num_dofs + 6 + self.num_dofs
+            ]
+
+        if "actions" in self._obs_terms:
+            current_obs_buffer_dict["actions"] = self.last_policy_action
+
+        if "actions_history" in self._obs_terms:
+            current_obs_buffer_dict["actions_history"] = self._get_actions_history_obs()
+
+        if "target_joints" in self._obs_terms:
+            if self._motion_data is None:
+                raise ValueError("target_joints requires a single motion clip via --task.motion-file / patched metadata.")
+            current_obs_buffer_dict["target_joints"] = (
+                self._motion_data.joint_pos[self._get_motion_index() : self._get_motion_index() + 1]
+                - self.default_dof_angles
+            ).astype(np.float32, copy=False)
+
+        if "target_root_roll" in self._obs_terms or "target_root_pitch" in self._obs_terms:
+            if self._motion_data is None:
+                raise ValueError(
+                    "target_root_roll/target_root_pitch require a single motion clip via --task.motion-file / patched metadata."
+                )
+            motion_root_quat_w = self._motion_data.root_quat_w[self._get_motion_index() : self._get_motion_index() + 1]
+            if self._motion_align_quat_wxyz is not None:
+                motion_root_quat_w = self._apply_motion_alignment_quat(motion_root_quat_w)
+            roll, pitch, _ = quat_to_rpy(motion_root_quat_w.reshape(-1, 4)[0])
+            if "target_root_roll" in self._obs_terms:
+                current_obs_buffer_dict["target_root_roll"] = np.array(
+                    [[self._normalize_angle(roll)]], dtype=np.float32
+                )
+            if "target_root_pitch" in self._obs_terms:
+                current_obs_buffer_dict["target_root_pitch"] = np.array(
+                    [[self._normalize_angle(pitch)]], dtype=np.float32
+                )
+
+        if "perception_obs" in self.obs_dict:
+            current_obs_buffer_dict["perception"] = self._get_perception_obs_for_obs_buffer()
 
         return current_obs_buffer_dict
 
@@ -1457,6 +1722,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._logged_sim_ref_from_sim_state = False
         self._motion_align_quat_wxyz = None
         self._motion_align_pos = None
+        self._reset_actions_history()
 
     def _handle_start_motion_clip(self):
         """Handle start motion clip action."""
@@ -1467,6 +1733,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_timestep = 0  # Reset to start from beginning of motion
         self._last_clock_reading = None
         self._logged_root_reference_clip_start = False
+        self._reset_actions_history()
         if self._motion_alignment_enabled:
             robot_state_data = self.interface.get_low_state()
             if robot_state_data is not None:

@@ -81,6 +81,12 @@ def setup_isaaclab_launcher(config: ExperimentConfig | RunSimConfig, device: str
     parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
     parser.add_argument("--env_spacing", type=int, default=20, help="Distance between environments in simulator.")
     parser.add_argument("--output_dir", type=str, default="/data/logs_new", help="Directory to store the output.")
+    parser.add_argument(
+        "--distributed",
+        action="store_true",
+        default=False,
+        help="Run simulation with multiple GPUs or nodes.",
+    )
     AppLauncher.add_app_launcher_args(parser)
 
     # Parse known arguments to get argparse params
@@ -92,8 +98,10 @@ def setup_isaaclab_launcher(config: ExperimentConfig | RunSimConfig, device: str
     args_cli.env_spacing = config.simulator.config.scene.env_spacing
     args_cli.output_dir = config.logger.base_dir
     args_cli.headless = config.training.headless
-    if int(os.environ.get("WORLD_SIZE", "1")) > 1:
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size > 1:
         # Distribute simulator across GPUs when using multi-gpu training
+        args_cli.distributed = True
         args_cli.device = f"cuda:{int(os.environ.get('LOCAL_RANK', '0'))}"
     elif device is not None:
         # Use the resolved device
