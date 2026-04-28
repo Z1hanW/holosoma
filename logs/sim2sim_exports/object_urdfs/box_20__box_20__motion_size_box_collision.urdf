@@ -1,0 +1,31 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="box_20_box_collision">
+  <dynamics damping="0.5" friction="0.9" />
+  <link name="baseLink">
+    <inertial>
+      <mass value="0.1" />
+      <origin xyz="0 0 0" />
+      <inertia ixx="0.00233376409" ixy="0" ixz="0" iyy="0.00260876365" iyz="0" izz="0.00373046985" />
+    </inertial>
+    <contact>
+      <lateral_friction value="0.9" />
+      <rolling_friction value="0.5" />
+      <stiffness value="30000" />
+      <damping value="1000" />
+    </contact>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/ubuntu/FAR/holosoma/data/ds_box_data_legacy/train_g1_w_obj_prepared/_generated_urdfs/box_20.obj" scale="1.34018128 1.34018128 1.34018127" />
+      </geometry>
+      <material name="mat">
+        <color rgba="0.7 0.8 0.9 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <box size="0.49023276567459106 0.45533308386802673 0.2696729004383087" /></geometry>
+    </collision>
+  </link>
+</robot>

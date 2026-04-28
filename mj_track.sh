@@ -108,7 +108,7 @@ SIM_FPS_EXPLICIT=0
 SIM_FPS="${SIM_FPS:-500}"
 SIM_CONTROL_DECIMATION_EXPLICIT=0
 [[ -n "${SIM_CONTROL_DECIMATION+x}" ]] && SIM_CONTROL_DECIMATION_EXPLICIT=1
-SIM_CONTROL_DECIMATION="${SIM_CONTROL_DECIMATION:-4}"
+SIM_CONTROL_DECIMATION="${SIM_CONTROL_DECIMATION:-10}"
 SIM_SUBSTEPS_EXPLICIT=0
 [[ -n "${SIM_SUBSTEPS+x}" ]] && SIM_SUBSTEPS_EXPLICIT=1
 SIM_SUBSTEPS="${SIM_SUBSTEPS:-}"
@@ -171,10 +171,21 @@ PERCEPTION_UPDATE_HZ="${PERCEPTION_UPDATE_HZ:-}"
 PERCEPTION_CAMERA_FPS="${PERCEPTION_CAMERA_FPS:-}"
 PERCEPTION_CAMERA_WARP_BUFFER_LEN="${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-}"
 PERCEPTION_CAMERA_WARP_LATENCY_FRAME="${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-}"
-PERCEPTION_CAMERA_WARP_EDGE_NOISE="${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-False}"
-PERCEPTION_CAMERA_WARP_ENABLE_HOLES="${PERCEPTION_CAMERA_WARP_ENABLE_HOLES:-False}"
-PERCEPTION_CAMERA_APPLY_SENSOR_NOISE="${PERCEPTION_CAMERA_APPLY_SENSOR_NOISE:-False}"
+PERCEPTION_CAMERA_WARP_EDGE_NOISE="${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-}"
+PERCEPTION_CAMERA_WARP_EDGE_BORDER="${PERCEPTION_CAMERA_WARP_EDGE_BORDER:-}"
+PERCEPTION_CAMERA_WARP_EDGE_SHUFFLE_PROB="${PERCEPTION_CAMERA_WARP_EDGE_SHUFFLE_PROB:-}"
+PERCEPTION_CAMERA_WARP_EDGE_EMPTY_PROB="${PERCEPTION_CAMERA_WARP_EDGE_EMPTY_PROB:-}"
+PERCEPTION_CAMERA_WARP_EDGE_THRESH_PRIMARY="${PERCEPTION_CAMERA_WARP_EDGE_THRESH_PRIMARY:-}"
+PERCEPTION_CAMERA_WARP_EDGE_THRESH_SECONDARY="${PERCEPTION_CAMERA_WARP_EDGE_THRESH_SECONDARY:-}"
+PERCEPTION_CAMERA_WARP_EDGE_FAR_DEPTH_THRESH="${PERCEPTION_CAMERA_WARP_EDGE_FAR_DEPTH_THRESH:-}"
+PERCEPTION_CAMERA_WARP_ENABLE_HOLES="${PERCEPTION_CAMERA_WARP_ENABLE_HOLES:-}"
+PERCEPTION_CAMERA_WARP_HOLE_PROB="${PERCEPTION_CAMERA_WARP_HOLE_PROB:-}"
+PERCEPTION_CAMERA_APPLY_SENSOR_NOISE="${PERCEPTION_CAMERA_APPLY_SENSOR_NOISE:-}"
 PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH="${PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH:-}"
+HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE_EXPLICIT=0
+[[ -n "${HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE+x}" ]] && HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE_EXPLICIT=1
+HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT_EXPLICIT=0
+[[ -n "${HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT+x}" ]] && HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT_EXPLICIT=1
 PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN="${PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN:-}"
 if [[ -z "$PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN" ]]; then
   if [[ "$PERCEPTION_PRESET" == "$MUJOCO_RENDER_848_PERCEPTION_PRESET" ]]; then
@@ -993,6 +1004,7 @@ for prop in model.metadata_props:
 perception_cfg = metadata.get("experiment_config", {}).get("perception", {})
 if not isinstance(perception_cfg, dict):
     raise SystemExit(0)
+experiment_cfg = metadata.get("experiment_config", {})
 
 field_map = {
     "update_hz": "PERCEPTION_UPDATE_HZ",
@@ -1002,6 +1014,7 @@ field_map = {
     "camera_pitch_deg": "PERCEPTION_CAMERA_PITCH_DEG",
     "camera_vfov_deg": "PERCEPTION_CAMERA_VFOV_DEG",
     "camera_hfov_deg": "PERCEPTION_CAMERA_HFOV_DEG",
+    "camera_include_robot_mesh": "PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH",
     "camera_near": "PERCEPTION_CAMERA_NEAR",
     "camera_far": "PERCEPTION_CAMERA_FAR",
     "max_distance": "PERCEPTION_MAX_DISTANCE",
@@ -1012,6 +1025,16 @@ field_map = {
     "camera_warp_min_valid_depth": "PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH",
     "camera_warp_buffer_len": "PERCEPTION_CAMERA_WARP_BUFFER_LEN",
     "camera_warp_latency_frame": "PERCEPTION_CAMERA_WARP_LATENCY_FRAME",
+    "camera_warp_edge_noise": "PERCEPTION_CAMERA_WARP_EDGE_NOISE",
+    "camera_warp_edge_border": "PERCEPTION_CAMERA_WARP_EDGE_BORDER",
+    "camera_warp_edge_shuffle_prob": "PERCEPTION_CAMERA_WARP_EDGE_SHUFFLE_PROB",
+    "camera_warp_edge_empty_prob": "PERCEPTION_CAMERA_WARP_EDGE_EMPTY_PROB",
+    "camera_warp_edge_thresh_primary": "PERCEPTION_CAMERA_WARP_EDGE_THRESH_PRIMARY",
+    "camera_warp_edge_thresh_secondary": "PERCEPTION_CAMERA_WARP_EDGE_THRESH_SECONDARY",
+    "camera_warp_edge_far_depth_thresh": "PERCEPTION_CAMERA_WARP_EDGE_FAR_DEPTH_THRESH",
+    "camera_warp_enable_holes": "PERCEPTION_CAMERA_WARP_ENABLE_HOLES",
+    "camera_warp_hole_prob": "PERCEPTION_CAMERA_WARP_HOLE_PROB",
+    "camera_apply_sensor_noise": "PERCEPTION_CAMERA_APPLY_SENSOR_NOISE",
 }
 for src_key, env_key in field_map.items():
     value = perception_cfg.get(src_key)
@@ -1025,6 +1048,23 @@ for src_key, env_key in field_map.items():
         print(f"{env_key}={value:g}")
     else:
         print(f"{env_key}={value}")
+
+noise_requested = any(bool(perception_cfg.get(key)) for key in (
+    "camera_warp_edge_noise",
+    "camera_warp_enable_holes",
+    "camera_apply_sensor_noise",
+))
+print(f"HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE={noise_requested}")
+
+randomization_cfg = experiment_cfg.get("randomization", {})
+if isinstance(randomization_cfg, dict):
+    reset_terms = randomization_cfg.get("reset_terms", {})
+    if isinstance(reset_terms, dict):
+        camera_randomizer = reset_terms.get("randomize_camera_raycast", {})
+        if isinstance(camera_randomizer, dict):
+            params = camera_randomizer.get("params", {})
+            if isinstance(params, dict) and params.get("enabled") is not None:
+                print(f"HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT={bool(params.get('enabled'))}")
 PY
   )"
 
@@ -1068,6 +1108,11 @@ PY
       PERCEPTION_CAMERA_HFOV_DEG)
         if [[ -z "$PERCEPTION_CAMERA_HFOV_DEG" ]]; then
           PERCEPTION_CAMERA_HFOV_DEG="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH)
+        if [[ -z "$PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH" ]]; then
+          PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH="$value"
         fi
         ;;
       PERCEPTION_CAMERA_NEAR)
@@ -1118,6 +1163,66 @@ PY
       PERCEPTION_CAMERA_WARP_LATENCY_FRAME)
         if [[ -z "$PERCEPTION_CAMERA_WARP_LATENCY_FRAME" ]]; then
           PERCEPTION_CAMERA_WARP_LATENCY_FRAME="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_WARP_EDGE_NOISE)
+        if [[ -z "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ]]; then
+          PERCEPTION_CAMERA_WARP_EDGE_NOISE="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_WARP_EDGE_BORDER)
+        if [[ -z "$PERCEPTION_CAMERA_WARP_EDGE_BORDER" ]]; then
+          PERCEPTION_CAMERA_WARP_EDGE_BORDER="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_WARP_EDGE_SHUFFLE_PROB)
+        if [[ -z "$PERCEPTION_CAMERA_WARP_EDGE_SHUFFLE_PROB" ]]; then
+          PERCEPTION_CAMERA_WARP_EDGE_SHUFFLE_PROB="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_WARP_EDGE_EMPTY_PROB)
+        if [[ -z "$PERCEPTION_CAMERA_WARP_EDGE_EMPTY_PROB" ]]; then
+          PERCEPTION_CAMERA_WARP_EDGE_EMPTY_PROB="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_WARP_EDGE_THRESH_PRIMARY)
+        if [[ -z "$PERCEPTION_CAMERA_WARP_EDGE_THRESH_PRIMARY" ]]; then
+          PERCEPTION_CAMERA_WARP_EDGE_THRESH_PRIMARY="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_WARP_EDGE_THRESH_SECONDARY)
+        if [[ -z "$PERCEPTION_CAMERA_WARP_EDGE_THRESH_SECONDARY" ]]; then
+          PERCEPTION_CAMERA_WARP_EDGE_THRESH_SECONDARY="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_WARP_EDGE_FAR_DEPTH_THRESH)
+        if [[ -z "$PERCEPTION_CAMERA_WARP_EDGE_FAR_DEPTH_THRESH" ]]; then
+          PERCEPTION_CAMERA_WARP_EDGE_FAR_DEPTH_THRESH="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_WARP_ENABLE_HOLES)
+        if [[ -z "$PERCEPTION_CAMERA_WARP_ENABLE_HOLES" ]]; then
+          PERCEPTION_CAMERA_WARP_ENABLE_HOLES="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_WARP_HOLE_PROB)
+        if [[ -z "$PERCEPTION_CAMERA_WARP_HOLE_PROB" ]]; then
+          PERCEPTION_CAMERA_WARP_HOLE_PROB="$value"
+        fi
+        ;;
+      PERCEPTION_CAMERA_APPLY_SENSOR_NOISE)
+        if [[ -z "$PERCEPTION_CAMERA_APPLY_SENSOR_NOISE" ]]; then
+          PERCEPTION_CAMERA_APPLY_SENSOR_NOISE="$value"
+        fi
+        ;;
+      HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE)
+        if [[ "$HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE_EXPLICIT" != "1" && -z "${HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE:-}" ]]; then
+          export HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE="$value"
+        fi
+        ;;
+      HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT)
+        if [[ "$HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT_EXPLICIT" != "1" && -z "${HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT:-}" ]]; then
+          export HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT="$value"
         fi
         ;;
     esac
@@ -1543,7 +1648,7 @@ if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]]; then
   echo "[INFO] inference_config=${INFERENCE_CONFIG}"
   echo "[INFO] sim_device=${SIM_DEVICE:-<default>}"
   echo "[INFO] mujoco_object_scene training_urdf=${SIM_USE_TRAINING_URDF_OBJECT_SCENE} default_actuators=${SIM_ADD_DEFAULT_OBJECT_ACTUATORS} copy_joint_defaults=${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML} copy_tendons=${SIM_COPY_TENDONS_FROM_ROBOT_XML} copy_collision_geoms=${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML} copy_contact_pairs=${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML}"
-  echo "[INFO] perception camera: source=${PERCEPTION_CAMERA_SOURCE} object_geometry_mode=${PERCEPTION_OBJECT_GEOMETRY_MODE} raw=${PERCEPTION_CAMERA_WIDTH:-<default>}x${PERCEPTION_CAMERA_HEIGHT:-<default>} crop_top=${PERCEPTION_CAMERA_WARP_CROP_TOP:-<default>} crop_bottom=${PERCEPTION_CAMERA_WARP_CROP_BOTTOM:-<default>} crop_left=${PERCEPTION_CAMERA_WARP_CROP_LEFT:-<default>} crop_right=${PERCEPTION_CAMERA_WARP_CROP_RIGHT:-<default>} update_hz=${PERCEPTION_UPDATE_HZ:-<default>} camera_fps=${PERCEPTION_CAMERA_FPS:-<default>} pitch_deg=${PERCEPTION_CAMERA_PITCH_DEG:-<default>} vfov_deg=${PERCEPTION_CAMERA_VFOV_DEG:-<default>} hfov_deg=${PERCEPTION_CAMERA_HFOV_DEG:-<default>} include_robot_mesh=${PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH:-<default>} near=${PERCEPTION_CAMERA_NEAR:-<default>} far=${PERCEPTION_CAMERA_FAR:-<default>} max_distance=${PERCEPTION_MAX_DISTANCE:-<default>} warp_min_valid_depth=${PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH:-<default>} warp_buffer_len=${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-<default>} warp_latency_frame=${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-<default>} warp_edge_noise=${PERCEPTION_CAMERA_WARP_EDGE_NOISE} warp_holes=${PERCEPTION_CAMERA_WARP_ENABLE_HOLES} sensor_noise=${PERCEPTION_CAMERA_APPLY_SENSOR_NOISE} transport=${PERCEPTION_OBS_TRANSPORT}"
+  echo "[INFO] perception camera: source=${PERCEPTION_CAMERA_SOURCE} object_geometry_mode=${PERCEPTION_OBJECT_GEOMETRY_MODE} raw=${PERCEPTION_CAMERA_WIDTH:-<default>}x${PERCEPTION_CAMERA_HEIGHT:-<default>} crop_top=${PERCEPTION_CAMERA_WARP_CROP_TOP:-<default>} crop_bottom=${PERCEPTION_CAMERA_WARP_CROP_BOTTOM:-<default>} crop_left=${PERCEPTION_CAMERA_WARP_CROP_LEFT:-<default>} crop_right=${PERCEPTION_CAMERA_WARP_CROP_RIGHT:-<default>} update_hz=${PERCEPTION_UPDATE_HZ:-<default>} camera_fps=${PERCEPTION_CAMERA_FPS:-<default>} pitch_deg=${PERCEPTION_CAMERA_PITCH_DEG:-<default>} vfov_deg=${PERCEPTION_CAMERA_VFOV_DEG:-<default>} hfov_deg=${PERCEPTION_CAMERA_HFOV_DEG:-<default>} include_robot_mesh=${PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH:-<default>} near=${PERCEPTION_CAMERA_NEAR:-<default>} far=${PERCEPTION_CAMERA_FAR:-<default>} max_distance=${PERCEPTION_MAX_DISTANCE:-<default>} warp_min_valid_depth=${PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH:-<default>} warp_buffer_len=${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-<default>} warp_latency_frame=${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-<default>} warp_edge_noise=${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-<default>} warp_edge_border=${PERCEPTION_CAMERA_WARP_EDGE_BORDER:-<default>} warp_edge_shuffle_prob=${PERCEPTION_CAMERA_WARP_EDGE_SHUFFLE_PROB:-<default>} warp_edge_empty_prob=${PERCEPTION_CAMERA_WARP_EDGE_EMPTY_PROB:-<default>} warp_edge_thresh=${PERCEPTION_CAMERA_WARP_EDGE_THRESH_PRIMARY:-<default>}/${PERCEPTION_CAMERA_WARP_EDGE_THRESH_SECONDARY:-<default>} warp_edge_far_depth_thresh=${PERCEPTION_CAMERA_WARP_EDGE_FAR_DEPTH_THRESH:-<default>} warp_holes=${PERCEPTION_CAMERA_WARP_ENABLE_HOLES:-<default>} warp_hole_prob=${PERCEPTION_CAMERA_WARP_HOLE_PROB:-<default>} sensor_noise=${PERCEPTION_CAMERA_APPLY_SENSOR_NOISE:-<default>} allow_mujoco_noise=${HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE:-<default>} camera_randomize_placement=${HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT:-<default>} transport=${PERCEPTION_OBS_TRANSPORT}"
   if is_truthy_env "$PERCEPTION_OBS_EXTERNAL"; then
     echo "[INFO] perception_obs_external=1; MuJoCo will not publish perception_obs. Start an external publisher/relay on port=${PERCEPTION_OBS_PORT} or shm=${PERCEPTION_OBS_SHM_NAME}."
   fi
@@ -1690,7 +1795,14 @@ if [[ "$MJ_TRACK_MODE" != "policy" ]]; then
     $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_BUFFER_LEN" ]] && printf '%s %s' "--perception.camera-warp-buffer-len" "$PERCEPTION_CAMERA_WARP_BUFFER_LEN" ) \
     $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_LATENCY_FRAME" ]] && printf '%s %s' "--perception.camera-warp-latency-frame" "$PERCEPTION_CAMERA_WARP_LATENCY_FRAME" ) \
     $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ]] && printf '%s %s' "--perception.camera-warp-edge-noise" "$PERCEPTION_CAMERA_WARP_EDGE_NOISE" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_BORDER" ]] && printf '%s %s' "--perception.camera-warp-edge-border" "$PERCEPTION_CAMERA_WARP_EDGE_BORDER" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_SHUFFLE_PROB" ]] && printf '%s %s' "--perception.camera-warp-edge-shuffle-prob" "$PERCEPTION_CAMERA_WARP_EDGE_SHUFFLE_PROB" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_EMPTY_PROB" ]] && printf '%s %s' "--perception.camera-warp-edge-empty-prob" "$PERCEPTION_CAMERA_WARP_EDGE_EMPTY_PROB" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_THRESH_PRIMARY" ]] && printf '%s %s' "--perception.camera-warp-edge-thresh-primary" "$PERCEPTION_CAMERA_WARP_EDGE_THRESH_PRIMARY" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_THRESH_SECONDARY" ]] && printf '%s %s' "--perception.camera-warp-edge-thresh-secondary" "$PERCEPTION_CAMERA_WARP_EDGE_THRESH_SECONDARY" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_EDGE_FAR_DEPTH_THRESH" ]] && printf '%s %s' "--perception.camera-warp-edge-far-depth-thresh" "$PERCEPTION_CAMERA_WARP_EDGE_FAR_DEPTH_THRESH" ) \
     $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_ENABLE_HOLES" ]] && printf '%s %s' "--perception.camera-warp-enable-holes" "$PERCEPTION_CAMERA_WARP_ENABLE_HOLES" ) \
+    $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_WARP_HOLE_PROB" ]] && printf '%s %s' "--perception.camera-warp-hole-prob" "$PERCEPTION_CAMERA_WARP_HOLE_PROB" ) \
     $( [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" && -n "$PERCEPTION_CAMERA_APPLY_SENSOR_NOISE" ]] && printf '%s %s' "--perception.camera-apply-sensor-noise" "$PERCEPTION_CAMERA_APPLY_SENSOR_NOISE" ) \
     >"$SIM_LOG" 2>&1 &
   SIM_PID=$!

@@ -275,9 +275,13 @@ class PerceptionManager:
 
         self._camera_warp_min_valid_depth = float(getattr(self.cfg, "camera_warp_min_valid_depth", 0.15) or 0.15)
         self._camera_warp_normalize = bool(getattr(self.cfg, "camera_warp_normalize", False))
+        allow_mujoco_perception_noise_raw = os.environ.get("HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE", "0").strip().lower()
+        allow_mujoco_perception_noise = allow_mujoco_perception_noise_raw not in {"0", "false", "no", "off", ""}
+        force_mujoco_noise_off = self._is_mujoco_perception and not allow_mujoco_perception_noise
+
         requested_camera_warp_edge_noise = bool(getattr(self.cfg, "camera_warp_edge_noise", False))
         self._camera_warp_edge_noise = (
-            False if self._is_mujoco_perception else requested_camera_warp_edge_noise
+            False if force_mujoco_noise_off else requested_camera_warp_edge_noise
         )
         self._camera_warp_edge_border = max(0, int(getattr(self.cfg, "camera_warp_edge_border", 3) or 0))
         self._camera_warp_edge_shuffle_prob = float(getattr(self.cfg, "camera_warp_edge_shuffle_prob", 0.9) or 0.0)
@@ -293,16 +297,16 @@ class PerceptionManager:
         )
         requested_camera_warp_enable_holes = bool(getattr(self.cfg, "camera_warp_enable_holes", False))
         self._camera_warp_enable_holes = (
-            False if self._is_mujoco_perception else requested_camera_warp_enable_holes
+            False if force_mujoco_noise_off else requested_camera_warp_enable_holes
         )
         self._camera_warp_hole_prob = (
-            0.0 if self._is_mujoco_perception else float(getattr(self.cfg, "camera_warp_hole_prob", 0.0) or 0.0)
+            0.0 if force_mujoco_noise_off else float(getattr(self.cfg, "camera_warp_hole_prob", 0.0) or 0.0)
         )
         requested_camera_apply_sensor_noise = bool(getattr(self.cfg, "camera_apply_sensor_noise", True))
         self._camera_apply_sensor_noise = (
-            False if self._is_mujoco_perception else requested_camera_apply_sensor_noise
+            False if force_mujoco_noise_off else requested_camera_apply_sensor_noise
         )
-        if self._is_mujoco_perception and (
+        if force_mujoco_noise_off and (
             requested_camera_warp_edge_noise
             or requested_camera_warp_enable_holes
             or requested_camera_apply_sensor_noise

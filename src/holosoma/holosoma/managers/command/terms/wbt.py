@@ -16,6 +16,7 @@ from loguru import logger
 
 from holosoma.config_types.command import (
     CleanNoisyClipCurriculumConfig,
+    FixedClipGroupAssignmentConfig,
     MotionConfig,
     NoiseToInitialPoseConfig,
     SparseObjectGoalConfig,
@@ -1706,6 +1707,10 @@ class MotionCommand(CommandTermBase):
         self._clean_noisy_clip_curriculum_enabled = False
         self._clean_clip_mask: torch.Tensor | None = None
         self._noisy_clip_mask: torch.Tensor | None = None
+        self._fixed_clip_group_assignment_cfg: FixedClipGroupAssignmentConfig | None = None
+        self._fixed_clip_group_env_mask: torch.Tensor | None = None
+        self._fixed_clip_group_clip_mask: torch.Tensor | None = None
+        self._fixed_clip_complement_clip_mask: torch.Tensor | None = None
         self.pickup_anchor_set: torch.Tensor | None = None
         self.pickup_anchor_root_pos_w: torch.Tensor | None = None
         self.pickup_anchor_root_quat_w: torch.Tensor | None = None
@@ -1813,6 +1818,10 @@ class MotionCommand(CommandTermBase):
         self._clean_noisy_clip_curriculum_enabled = bool(self._clean_noisy_clip_curriculum_cfg.enabled)
         self._clean_clip_mask = None
         self._noisy_clip_mask = None
+        self._fixed_clip_group_assignment_cfg = self.motion_cfg.fixed_clip_group_assignment
+        self._fixed_clip_group_env_mask = None
+        self._fixed_clip_group_clip_mask = None
+        self._fixed_clip_complement_clip_mask = None
         self.pickup_anchor_set = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
         self.pickup_anchor_root_pos_w = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
         self.pickup_anchor_root_quat_w = torch.zeros((self.num_envs, 4), device=self.device, dtype=torch.float32)
@@ -2119,6 +2128,9 @@ class MotionCommand(CommandTermBase):
 
     def _configure_fixed_env_clip_assignment(self) -> None:
         self._fixed_clip_ids = None
+        self._fixed_clip_group_env_mask = None
+        self._fixed_clip_group_clip_mask = None
+        self._fixed_clip_complement_clip_mask = None
         force_round_robin = os.environ.get("HOLOSOMA_FORCE_ROUND_ROBIN_CLIP_ASSIGNMENT", "0").lower() in (
             "1",
             "true",
@@ -2140,6 +2152,9 @@ class MotionCommand(CommandTermBase):
                 self.motion.num_clips,
                 clip_start,
             )
+            return
+
+        if self._configure_fixed_clip_group_assignment():
             return
 
         if not self.motion.has_object:
@@ -2215,6 +2230,68 @@ class MotionCommand(CommandTermBase):
                 self.num_envs,
                 assigned_unique_clip_count,
             )
+
+    def _configure_fixed_clip_group_assignment(self) -> bool:
+        cfg = self._fixed_clip_group_assignment_cfg
+        if cfg is None or not cfg.enabled:
+            return False
+        if not self.multi_clip:
+            logger.warning("fixed_clip_group_assignment is enabled but the loaded motion is not a multi-clip bank.")
+            return False
+
+        env_object_urdf_paths = getattr(self._env.simulator, "_env_object_urdf_paths", None)
+        if isinstance(env_object_urdf_paths, list) and env_object_urdf_paths:
+            logger.warning(
+                "fixed_clip_group_assignment is enabled but simulator has per-env object URDF assignment. "
+                "Using fixed env-to-clip assignment instead to avoid object/clip mismatches."
+            )
+            return False
+
+        group_env_fraction = float(cfg.group_env_fraction)
+        if group_env_fraction < 0.0 or group_env_fraction > 1.0:
+            raise ValueError(
+                "fixed_clip_group_assignment.group_env_fraction must stay in [0, 1], "
+                f"got {cfg.group_env_fraction}."
+            )
+
+        group_clip_mask = build_prefix_mask(self.motion.clip_ids, cfg.group_clip_name_prefixes).to(device=self.device)
+        complement_clip_mask = ~group_clip_mask
+        if not torch.any(group_clip_mask):
+            raise ValueError(
+                "fixed_clip_group_assignment is enabled but no clips matched prefixes "
+                f"{cfg.group_clip_name_prefixes}."
+            )
+        if not torch.any(complement_clip_mask):
+            raise ValueError(
+                "fixed_clip_group_assignment is enabled but all clips matched prefixes "
+                f"{cfg.group_clip_name_prefixes}; complement group is empty."
+            )
+
+        group_env_count = int(round(float(self.num_envs) * group_env_fraction))
+        group_env_count = max(0, min(int(self.num_envs), group_env_count))
+        group_env_mask = torch.zeros((self.num_envs,), device=self.device, dtype=torch.bool)
+        if group_env_count > 0:
+            spread_ids = torch.floor(
+                (torch.arange(group_env_count, device=self.device, dtype=torch.float32) + 0.5)
+                * float(self.num_envs)
+                / float(group_env_count)
+            ).to(dtype=torch.long)
+            spread_ids = torch.clamp(spread_ids, min=0, max=int(self.num_envs) - 1)
+            group_env_mask[spread_ids] = True
+
+        self._fixed_clip_group_env_mask = group_env_mask
+        self._fixed_clip_group_clip_mask = group_clip_mask
+        self._fixed_clip_complement_clip_mask = complement_clip_mask
+        logger.info(
+            "Enabled fixed clip-group assignment: {} / {} envs sample only group clips matching prefixes {}; "
+            "{} group clips, {} complement clips.",
+            int(group_env_mask.sum().item()),
+            self.num_envs,
+            list(cfg.group_clip_name_prefixes),
+            int(group_clip_mask.sum().item()),
+            int(complement_clip_mask.sum().item()),
+        )
+        return True
 
     def _configure_contact_prior_regions(self) -> None:
         self._contact_prior_available = False
@@ -2508,6 +2585,8 @@ class MotionCommand(CommandTermBase):
                 self._update_clip_success_stats(env_ids)
                 if self._env.is_evaluating:
                     self.clip_ids[env_ids] = 0
+                elif self._fixed_clip_group_env_mask is not None:
+                    self.clip_ids[env_ids] = self._sample_fixed_clip_group_ids(env_ids)
                 else:
                     if self._clip_sampling_weights is None:
                         self.clip_ids[env_ids] = torch.randint(
@@ -3112,7 +3191,17 @@ class MotionCommand(CommandTermBase):
                 "Only within-clip timestep curriculum remains enabled."
             )
             return
-        self._configure_clean_noisy_clip_curriculum()
+        if self._fixed_clip_group_env_mask is not None:
+            self._clean_noisy_clip_curriculum_enabled = False
+            self._clean_clip_mask = None
+            self._noisy_clip_mask = None
+            logger.info(
+                "Fixed clip-group assignment is active; bypassing clean/noisy clip-level weighting curricula. "
+                "Clip weighting strategy '{}' is still applied within each group.",
+                self.clip_weighting_strategy,
+            )
+        else:
+            self._configure_clean_noisy_clip_curriculum()
         strategy = self.clip_weighting_strategy
         if strategy == "uniform_step":
             weights = self._valid_start_counts()
@@ -3129,6 +3218,49 @@ class MotionCommand(CommandTermBase):
             self._clip_success_counts = torch.zeros(self.motion.num_clips, device=self.device)
             self._clip_total_counts = torch.zeros(self.motion.num_clips, device=self.device)
         self._refresh_current_clip_sampling_weights()
+
+    def _sample_clip_ids_from_mask(self, clip_mask: torch.Tensor, num_samples: int) -> torch.Tensor:
+        if num_samples <= 0:
+            return torch.empty((0,), device=self.device, dtype=torch.long)
+        clip_indices = torch.nonzero(clip_mask, as_tuple=False).flatten().to(device=self.device, dtype=torch.long)
+        if clip_indices.numel() == 0:
+            raise RuntimeError("Cannot sample fixed clip group because its clip mask is empty.")
+        if self._clip_sampling_weights is None:
+            sampled_local_ids = torch.randint(0, clip_indices.numel(), (num_samples,), device=self.device)
+            return clip_indices[sampled_local_ids]
+
+        group_weights = self._clip_sampling_weights[clip_indices]
+        total = torch.sum(group_weights)
+        if not torch.isfinite(total) or total.item() <= 0.0:
+            sampled_local_ids = torch.randint(0, clip_indices.numel(), (num_samples,), device=self.device)
+            return clip_indices[sampled_local_ids]
+        sampled_local_ids = torch.multinomial(group_weights / total, num_samples, replacement=True)
+        return clip_indices[sampled_local_ids]
+
+    def _sample_fixed_clip_group_ids(self, env_ids: torch.Tensor) -> torch.Tensor:
+        if (
+            self._fixed_clip_group_env_mask is None
+            or self._fixed_clip_group_clip_mask is None
+            or self._fixed_clip_complement_clip_mask is None
+        ):
+            raise RuntimeError("Fixed clip-group sampling requested before fixed clip-group masks were configured.")
+
+        group_env_mask = self._fixed_clip_group_env_mask[env_ids]
+        sampled_clip_ids = torch.empty((env_ids.numel(),), device=self.device, dtype=torch.long)
+        if torch.any(group_env_mask):
+            group_count = int(group_env_mask.sum().item())
+            sampled_clip_ids[group_env_mask] = self._sample_clip_ids_from_mask(
+                self._fixed_clip_group_clip_mask,
+                group_count,
+            )
+        complement_env_mask = ~group_env_mask
+        if torch.any(complement_env_mask):
+            complement_count = int(complement_env_mask.sum().item())
+            sampled_clip_ids[complement_env_mask] = self._sample_clip_ids_from_mask(
+                self._fixed_clip_complement_clip_mask,
+                complement_count,
+            )
+        return sampled_clip_ids
 
     def _update_clip_success_stats(self, env_ids: torch.Tensor) -> None:
         if not self.multi_clip or self.clip_weighting_strategy != "success_rate_adaptive":

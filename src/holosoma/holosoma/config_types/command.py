@@ -231,6 +231,20 @@ class CleanNoisyClipCurriculumConfig:
 
 
 @dataclass(frozen=True)
+class FixedClipGroupAssignmentConfig:
+    """Fixed env-to-clip-group assignment for mixed motion banks."""
+
+    enabled: bool = False
+    """Enable fixed environment assignment to a named clip group and its complement."""
+
+    group_clip_name_prefixes: list[str] = field(default_factory=lambda: ["sub"])
+    """Clip-name prefixes for the fixed group. Non-matching clips form the complement group."""
+
+    group_env_fraction: float = 0.25
+    """Fraction of environments assigned to the fixed group."""
+
+
+@dataclass(frozen=True)
 class MotionConfig:
     """Motion related configuration for Whole Body Tracking.
 
@@ -371,6 +385,9 @@ class MotionConfig:
 
     clean_noisy_clip_curriculum: CleanNoisyClipCurriculumConfig = field(default_factory=CleanNoisyClipCurriculumConfig)
     """Optional clip-group curriculum for mixed clean/noisy motion banks."""
+
+    fixed_clip_group_assignment: FixedClipGroupAssignmentConfig = field(default_factory=FixedClipGroupAssignmentConfig)
+    """Optional fixed env-to-clip-group assignment for mixed motion banks."""
 
     # noise related
     noise_to_initial_pose: NoiseToInitialPoseConfig = field(default_factory=NoiseToInitialPoseConfig)
