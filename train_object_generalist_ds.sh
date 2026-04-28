@@ -165,8 +165,8 @@ MIX_NAIVE_FIXED_OMOMO_PREFIXES=${MIX_NAIVE_FIXED_OMOMO_PREFIXES:-'["sub"]'}
 MIX_NAIVE_FIXED_STAGE_START_ITERATIONS=${MIX_NAIVE_FIXED_STAGE_START_ITERATIONS:-'[0]'}
 MIX_NAIVE_FIXED_OMOMO_PROBABILITIES=${MIX_NAIVE_FIXED_OMOMO_PROBABILITIES:-""}
 PURE_REAL_OMOMO_PREFIXES=${PURE_REAL_OMOMO_PREFIXES:-'["sub"]'}
-FIX_REAL_OMOMO_PREFIXES=${FIX_REAL_OMOMO_PREFIXES:-'["sub"]'}
-FIX_REAL_OMOMO_ENV_FRACTION=${FIX_REAL_OMOMO_ENV_FRACTION:-0.25}
+FIX_OMOMO_QUATER_PREFIXES=${FIX_OMOMO_QUATER_PREFIXES:-${FIX_REAL_OMOMO_PREFIXES:-'["sub"]'}}
+FIX_OMOMO_QUATER_ENV_FRACTION=${FIX_OMOMO_QUATER_ENV_FRACTION:-${FIX_REAL_OMOMO_ENV_FRACTION:-0.25}}
 RESUME_PRESET_MODE=""
 RESUME_PRESET_RUN_URL="https://wandb.ai/zihanw22/boxer/runs/sw8scopo"
 RESUME_PRESET_STEP=10000
@@ -1016,8 +1016,8 @@ if [[ "$#" -gt 0 ]]; then
       DATA_MODE="mix-curriculum"
       shift
       ;;
-    fix-real|fixed-real|fix_real|fixed_real)
-      DATA_MODE="fix-real"
+    fix-omomo-quater|fix_omomo_quater|fix-real|fixed-real|fix_real|fixed_real)
+      DATA_MODE="fix-omomo-quater"
       shift
       ;;
     resume|resume-mix-naive|mix-naive-resume)
@@ -1038,15 +1038,15 @@ case "${DATA_MODE}" in
   mix-clean-noisy|mix-curr)
     DATA_MODE="mix-curriculum"
     ;;
-  fixed-real|fix_real|fixed_real)
-    DATA_MODE="fix-real"
+  fix_omomo_quater|fix-real|fixed-real|fix_real|fixed_real)
+    DATA_MODE="fix-omomo-quater"
     ;;
 esac
 case "${DATA_MODE}" in
-  pure-sd|pure-real|mix-naive|mix-curriculum|fix-real)
+  pure-sd|pure-real|mix-naive|mix-curriculum|fix-omomo-quater)
     ;;
   *)
-    echo "[ERROR] Unsupported DATA_MODE='${DATA_MODE}'. Use one of: pure-sd, pure-real, mix-naive, mix-curriculum, fix-real" >&2
+    echo "[ERROR] Unsupported DATA_MODE='${DATA_MODE}'. Use one of: pure-sd, pure-real, mix-naive, mix-curriculum, fix-omomo-quater" >&2
     exit 2
     ;;
 esac
@@ -1209,17 +1209,17 @@ elif [[ "${DATA_MODE}" == "mix-naive" && -n "${MIX_NAIVE_FIXED_OMOMO_PROBABILITI
 elif [[ "${DATA_MODE}" == "pure-real" ]]; then
   echo "[INFO] DATA_MODE=pure-real uses the mixed bank but samples only OMOMO clips."
   echo "[INFO] OMOMO clip prefixes=${PURE_REAL_OMOMO_PREFIXES}"
-elif [[ "${DATA_MODE}" == "fix-real" ]]; then
-  echo "[INFO] DATA_MODE=fix-real uses the mixed bank with fixed env groups."
-  echo "[INFO] OMOMO clip prefixes=${FIX_REAL_OMOMO_PREFIXES}"
-  echo "[INFO] OMOMO env fraction=${FIX_REAL_OMOMO_ENV_FRACTION} (remaining envs sample only DS/complement clips)"
+elif [[ "${DATA_MODE}" == "fix-omomo-quater" ]]; then
+  echo "[INFO] DATA_MODE=fix-omomo-quater uses the mixed bank with fixed env groups."
+  echo "[INFO] OMOMO clip prefixes=${FIX_OMOMO_QUATER_PREFIXES}"
+  echo "[INFO] OMOMO env fraction=${FIX_OMOMO_QUATER_ENV_FRACTION} (remaining envs sample only DS/complement clips)"
 fi
 
 case "${DATA_MODE}" in
   pure-sd)
     MODE_DEFAULT_MOTION_DIR="$(ogds_default_motion_dir "${DS_DATA_ROOT}" "${DATA_MODE}")"
     ;;
-  pure-real|mix-naive|mix-curriculum|fix-real)
+  pure-real|mix-naive|mix-curriculum|fix-omomo-quater)
     MODE_DEFAULT_MOTION_DIR="$(ogds_default_motion_dir "${DS_DATA_ROOT}" "${DATA_MODE}")"
     ;;
 esac
@@ -1305,7 +1305,7 @@ if [[ "${STRICT_DEFAULT_DS_BANK_VALIDATION}" != "0" ]]; then
         validate_default_ds_bank "${MOTION_DIR}" "${DS_EXPECTED_TOTAL}"
       fi
       ;;
-    pure-real|mix-naive|mix-curriculum|fix-real)
+    pure-real|mix-naive|mix-curriculum|fix-omomo-quater)
       if [[ "$(realpath "${MOTION_DIR}")" == "$(realpath "${DEFAULT_MIX_NAIVE_MOTION_DIR}")" ]]; then
         validate_mix_naive_bank "${MOTION_DIR}" "${MIX_NAIVE_EXPECTED_TOTAL}" "${MIX_NAIVE_EXPECTED_DS}" "${MIX_NAIVE_EXPECTED_OMOMO}"
       fi
@@ -1578,11 +1578,11 @@ elif [[ "${DATA_MODE}" == "pure-real" ]]; then
     --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.stage-start-iterations='[0]'
     --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.clean-group-probabilities='[1.0]'
   )
-elif [[ "${DATA_MODE}" == "fix-real" ]]; then
+elif [[ "${DATA_MODE}" == "fix-omomo-quater" ]]; then
   train_cmd+=(
     --command.setup-terms.motion-command.params.motion-config.fixed-clip-group-assignment.enabled=True
-    --command.setup-terms.motion-command.params.motion-config.fixed-clip-group-assignment.group-clip-name-prefixes="${FIX_REAL_OMOMO_PREFIXES}"
-    --command.setup-terms.motion-command.params.motion-config.fixed-clip-group-assignment.group-env-fraction="${FIX_REAL_OMOMO_ENV_FRACTION}"
+    --command.setup-terms.motion-command.params.motion-config.fixed-clip-group-assignment.group-clip-name-prefixes="${FIX_OMOMO_QUATER_PREFIXES}"
+    --command.setup-terms.motion-command.params.motion-config.fixed-clip-group-assignment.group-env-fraction="${FIX_OMOMO_QUATER_ENV_FRACTION}"
   )
 fi
 train_cmd+=("${EXTRA_ARGS[@]}")

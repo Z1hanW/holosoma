@@ -17,8 +17,8 @@ ogds_normalize_data_mode() {
     mix-naive)
       printf '%s\n' "mix-naive"
       ;;
-    fix-real|fixed-real|fix_real|fixed_real)
-      printf '%s\n' "fix-real"
+    fix-omomo-quater|fix_omomo_quater|fix-real|fixed-real|fix_real|fixed_real)
+      printf '%s\n' "fix-omomo-quater"
       ;;
     *)
       printf '%s\n' "${mode}"
@@ -61,7 +61,7 @@ ogds_default_motion_dir() {
     pure-sd)
       printf '%s\n' "${resolved_data_root%/}/train_g1_w_obj_prepared"
       ;;
-    pure-real|mix-naive|mix-curriculum|fix-real)
+    pure-real|mix-naive|mix-curriculum|fix-omomo-quater)
       printf '%s\n' "${resolved_data_root%/}/train_g1_w_obj_prepared_plus_omomo_orig"
       ;;
     *)
