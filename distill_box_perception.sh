@@ -23,6 +23,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
+source "${SCRIPT_DIR}/scripts/object_generalist_ds_paths.sh"
 
 USE_LEGACY_DS=${USE_LEGACY_DS:-auto}
 LEGACY_DS_ROOT=${LEGACY_DS_ROOT:-"${SCRIPT_DIR}/data/ds_box_data_legacy"}
@@ -364,8 +365,9 @@ if [[ "${LEGACY_DS_ENABLED}" == "1" && "${TRACKER_PROFILE}" == "old-tracker" && 
 else
   DS_DATA_ROOT=${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}
 fi
-DEFAULT_DS_PREPARED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
-DEFAULT_MIX_NAIVE_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
+DS_DATA_ROOT="$(ogds_resolve_data_root "${DS_DATA_ROOT}")"
+DEFAULT_DS_PREPARED_MOTION_DIR="$(ogds_default_motion_dir "${DS_DATA_ROOT}" pure-sd)"
+DEFAULT_MIX_NAIVE_MOTION_DIR="$(ogds_default_motion_dir "${DS_DATA_ROOT}" mix-naive)"
 DEFAULT_TEACHER_ROLLOUT_MOTION_DIR="${SCRIPT_DIR}/outputs/motion_bank"
 DEFAULT_TEACHER_ROLLOUT_CONTACT_DIR="${SCRIPT_DIR}/outputs/clips"
 TEACHER_ROLLOUT_FILTER_ENABLED=${TEACHER_ROLLOUT_FILTER_ENABLED:-True}
@@ -693,6 +695,9 @@ import numpy as np
 
 motion_dir = Path(sys.argv[1]).expanduser().resolve()
 object_map = Path(sys.argv[2]).expanduser().resolve()
+repo_root = Path.cwd().resolve()
+sys.path.insert(0, str(repo_root / "src" / "holosoma"))
+from holosoma.utils.path import resolve_data_file_path
 payload = json.loads(object_map.read_text(encoding="utf-8"))
 clips = payload["clips"] if isinstance(payload, dict) and isinstance(payload.get("clips"), dict) else payload
 if not isinstance(clips, dict) or not clips:
@@ -724,7 +729,16 @@ for clip_id in active_clip_ids:
     if not urdf:
         missing.append(clip_id)
         continue
-    resolved_urdfs.append(str(Path(urdf).expanduser().resolve()))
+    urdf_candidate = Path(urdf).expanduser()
+    if not urdf_candidate.is_absolute() and not urdf.startswith("holosoma/data"):
+        motion_relative = (motion_dir / urdf).resolve()
+        if motion_relative.is_file():
+            urdf_candidate = motion_relative
+        else:
+            urdf_candidate = Path(resolve_data_file_path(urdf)).expanduser().resolve()
+    else:
+        urdf_candidate = Path(resolve_data_file_path(urdf)).expanduser().resolve()
+    resolved_urdfs.append(str(urdf_candidate))
 
 if missing:
     preview = ", ".join(missing[:10])

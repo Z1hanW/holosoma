@@ -119,6 +119,8 @@ if [[ -z "$MOTION_FILE" || ! -f "$MOTION_FILE" ]]; then
   exit 1
 fi
 MOTION_FILE="$(cd "$(dirname "$MOTION_FILE")" && pwd)/$(basename "$MOTION_FILE")"
+MOTION_CLIP_STEM="$(basename "$MOTION_FILE")"
+MOTION_CLIP_STEM="${MOTION_CLIP_STEM%.npz}"
 if [[ -z "$OBJECT_MAP_INPUT" && -f "${MOTION_DIR%/}/_clip_object_urdf_map.json" ]]; then
   OBJECT_MAP_INPUT="${MOTION_DIR%/}/_clip_object_urdf_map.json"
 fi
@@ -181,10 +183,12 @@ def object_urdf_fallbacks(path: Path):
     if "data" in parts:
         data_idx = parts.index("data")
         tail = parts[data_idx:]
-        yield repo_root.joinpath(*tail)
         if len(tail) >= 2 and tail[1] == "ds_box_data":
             relative_tail = tail[2:]
             yield repo_root / "data/ds_box_data_legacy" / Path(*relative_tail)
+        yield repo_root.joinpath(*tail)
+        if len(tail) >= 2 and tail[1] == "ds_box_data":
+            relative_tail = tail[2:]
             yield repo_root / "data/ds_box_data/scale_mix_all" / Path(*relative_tail)
             if name and "__" not in name:
                 for candidate_name in [f"{name}__baseline", f"{name}__eff10", f"{name}__eff09"]:
@@ -196,6 +200,7 @@ def object_urdf_fallbacks(path: Path):
 
     if name:
         if "__" in name:
+            yield repo_root / "data/ds_box_data_legacy/train_g1_w_obj_prepared/_generated_urdfs" / f"{name}.urdf"
             names = [name]
         else:
             yield repo_root / "data/ds_box_data_legacy/train_g1_w_obj_prepared/_generated_urdfs" / f"{name}.urdf"
@@ -204,8 +209,17 @@ def object_urdf_fallbacks(path: Path):
             yield repo_root / "data/ds_box_data/scale_mix_all/train_g1_w_obj_prepared/_generated_urdfs" / f"{candidate_name}.urdf"
 
 
+def _is_ds_box_data_path(path: Path) -> bool:
+    parts = path.expanduser().parts
+    return "data" in parts and "ds_box_data" in parts
+
+
 def resolve_existing_urdf(path_str: str) -> Path:
     candidate = Path(path_str).expanduser()
+    if _is_ds_box_data_path(candidate):
+        for fallback in object_urdf_fallbacks(candidate):
+            if fallback.is_file():
+                return maybe_write_motion_sized_urdf(fallback.resolve())
     if candidate.is_file():
         return maybe_write_motion_sized_urdf(candidate.resolve())
     for fallback in object_urdf_fallbacks(candidate):
@@ -393,7 +407,7 @@ def maybe_write_motion_sized_urdf(urdf_path: Path) -> Path:
     out_path = out_dir / f"{motion_path.stem}__{urdf_path.stem}__{suffix}.urdf"
     tree.write(out_path, encoding="utf-8", xml_declaration=True)
     print(
-        f"[INFO] generated {size_source} object URDF {out_path}: current_size={current_size.tolist()} desired_size={desired_size.tolist()} scale_ratio={scale_ratio.tolist()} collision_mode={collision_mode}",
+        f"[INFO] generated {size_source} object URDF {out_path}: source={urdf_path} current_size={current_size.tolist()} desired_size={desired_size.tolist()} scale_ratio={scale_ratio.tolist()} collision_mode={collision_mode}",
         file=sys.stderr,
     )
     return out_path.resolve()
@@ -430,7 +444,16 @@ if [[ "$PERCEPTION_CAMERA_SOURCE" == "rendered" ]]; then
   export PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN="${PERCEPTION_RENDER_RAW_RESOLUTION_ALIGN:-mujoco848}"
 fi
 export PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
-export PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-primitive}"
+export PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-mesh}"
+export HOLOSOMA_ALLOW_FILE_BACKED_PERCEPTION="${HOLOSOMA_ALLOW_FILE_BACKED_PERCEPTION:-0}"
+if ! is_truthy_env "$HOLOSOMA_ALLOW_FILE_BACKED_PERCEPTION"; then
+  unset HOLOSOMA_POLICY_PERCEPTION_OBS_FILE
+  unset HOLOSOMA_POLICY_PERCEPTION_OBS_FILE_KEY
+  unset HOLOSOMA_POLICY_PERCEPTION_OBS_FILE_INDEX
+  unset HOLOSOMA_POLICY_ACTION_FILE
+  unset HOLOSOMA_POLICY_ACTION_FILE_KEY
+  unset HOLOSOMA_POLICY_ACTION_FILE_INDEX
+fi
 export PERCEPTION_CAMERA_NEAR="${PERCEPTION_CAMERA_NEAR:-0.1}"
 export PERCEPTION_CAMERA_FAR="${PERCEPTION_CAMERA_FAR:-3}"
 export PERCEPTION_MAX_DISTANCE="${PERCEPTION_MAX_DISTANCE:-3}"
@@ -444,13 +467,20 @@ export PERCEPTION_CAMERA_WARP_LATENCY_FRAME="${PERCEPTION_CAMERA_WARP_LATENCY_FR
 export PERCEPTION_CAMERA_WARP_EDGE_NOISE="${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-False}"
 export PERCEPTION_CAMERA_WARP_ENABLE_HOLES="${PERCEPTION_CAMERA_WARP_ENABLE_HOLES:-False}"
 export PERCEPTION_CAMERA_APPLY_SENSOR_NOISE="${PERCEPTION_CAMERA_APPLY_SENSOR_NOISE:-False}"
+export USE_TRAINING_SIM_CONFIG="${USE_TRAINING_SIM_CONFIG:-1}"
+export HOLOSOMA_SKIP_STIFF_PROMPT="${HOLOSOMA_SKIP_STIFF_PROMPT:-1}"
+export POLICY_DEFER_UNTIL_VALID_STATE="${POLICY_DEFER_UNTIL_VALID_STATE:-1}"
+export USE_ROOT_REFERENCE_AT_CLIP_START="${USE_ROOT_REFERENCE_AT_CLIP_START:-0}"
+export HOLOSOMA_RESET_TO_DEFAULT_POSE="${HOLOSOMA_RESET_TO_DEFAULT_POSE:-1}"
+export HOLOSOMA_DEFAULT_POSE_INIT="${HOLOSOMA_DEFAULT_POSE_INIT:-1}"
+export HOLOSOMA_W_OBJECT_URDF="${HOLOSOMA_W_OBJECT_URDF:-g1/g1_29dof.urdf}"
 export HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES="${HOLOSOMA_MUJOCO_LOAD_ROBOT_VISUAL_MESHES:-1}"
 export SIM_USE_TRAINING_URDF_OBJECT_SCENE="${SIM_USE_TRAINING_URDF_OBJECT_SCENE:-1}"
-export SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML="${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML:-0}"
-export SIM_COPY_TENDONS_FROM_ROBOT_XML="${SIM_COPY_TENDONS_FROM_ROBOT_XML:-0}"
-export SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML="${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML:-0}"
-export SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML="${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML:-0}"
-export SIM_MOTION_INIT_MODE="${SIM_MOTION_INIT_MODE:-raw_motion}"
+export SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML="${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML:-1}"
+export SIM_COPY_TENDONS_FROM_ROBOT_XML="${SIM_COPY_TENDONS_FROM_ROBOT_XML:-1}"
+export SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML="${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML:-1}"
+export SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML="${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML:-1}"
+export SIM_MOTION_INIT_MODE="${SIM_MOTION_INIT_MODE:-training_default_pose}"
 export MUJOCO_OBJECT_CONTACT_BODY_MARKERS="${MUJOCO_OBJECT_CONTACT_BODY_MARKERS:-}"
 if [[ -n "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" && "$MUJOCO_OBJECT_CONTACT_BODY_MARKERS" != \[* ]]; then
   MUJOCO_OBJECT_CONTACT_BODY_MARKERS="$(
@@ -464,7 +494,15 @@ PY
   )"
   export MUJOCO_OBJECT_CONTACT_BODY_MARKERS
 fi
-export MUJOCO_OBJECT_MASS_OVERRIDE="${MUJOCO_OBJECT_MASS_OVERRIDE:-}"
+if [[ -z "${MUJOCO_OBJECT_MASS_OVERRIDE+x}" ]]; then
+  if [[ "$MOTION_CLIP_STEM" == "box_75" ]]; then
+    export MUJOCO_OBJECT_MASS_OVERRIDE=2.0
+  else
+    export MUJOCO_OBJECT_MASS_OVERRIDE=1.0
+  fi
+else
+  export MUJOCO_OBJECT_MASS_OVERRIDE
+fi
 export MUJOCO_OBJECT_GEOM_FRICTION="${MUJOCO_OBJECT_GEOM_FRICTION:-}"
 export MUJOCO_OBJECT_LATERAL_FRICTION="${MUJOCO_OBJECT_LATERAL_FRICTION:-}"
 export MUJOCO_OBJECT_ROLLING_FRICTION="${MUJOCO_OBJECT_ROLLING_FRICTION:-}"
@@ -474,16 +512,30 @@ export HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS="${HOLOSOMA_MUJOCO_WEB_DEMO_OBJE
 export HOLOSOMA_MUJOCO_KEEP_REFERENCE_HAND_COLLISION="${HOLOSOMA_MUJOCO_KEEP_REFERENCE_HAND_COLLISION:-0}"
 export HOLOSOMA_MUJOCO_CARRY_ARM_OBJECT_CONTACTS="${HOLOSOMA_MUJOCO_CARRY_ARM_OBJECT_CONTACTS:-0}"
 export HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_PAIRS="${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_PAIRS:-1}"
-export HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_LATERAL_FRICTION="${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_LATERAL_FRICTION:-1.2}"
-export HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_SPIN_FRICTION="${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_SPIN_FRICTION:-0.005}"
-export HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_ROLLING_FRICTION="${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_ROLLING_FRICTION:-0.3}"
+if [[ -n "${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_LATERAL_FRICTION+x}" ]]; then
+  export HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_LATERAL_FRICTION
+fi
+if [[ -n "${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_SPIN_FRICTION+x}" ]]; then
+  export HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_SPIN_FRICTION
+fi
+if [[ -n "${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_ROLLING_FRICTION+x}" ]]; then
+  export HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_ROLLING_FRICTION
+fi
 export HOLOSOMA_MUJOCO_REPLACE_CYLINDERS_WITH_CAPSULES="${HOLOSOMA_MUJOCO_REPLACE_CYLINDERS_WITH_CAPSULES:-0}"
 export HOLOSOMA_MOTION_INIT_ZERO_VELOCITIES="${HOLOSOMA_MOTION_INIT_ZERO_VELOCITIES:-0}"
-export HOLOSOMA_POLICY_MOTION_INDEX_OFFSET="${HOLOSOMA_POLICY_MOTION_INDEX_OFFSET:-1}"
-export HOLOSOMA_PREFILL_OBS_HISTORY_ON_MOTION_START="${HOLOSOMA_PREFILL_OBS_HISTORY_ON_MOTION_START:-1}"
+if [[ -z "${HOLOSOMA_POLICY_MOTION_INDEX_OFFSET+x}" ]]; then
+  if [[ "$MOTION_CLIP_STEM" == "box_75" ]]; then
+    export HOLOSOMA_POLICY_MOTION_INDEX_OFFSET=5
+  else
+    export HOLOSOMA_POLICY_MOTION_INDEX_OFFSET=0
+  fi
+else
+  export HOLOSOMA_POLICY_MOTION_INDEX_OFFSET
+fi
+export HOLOSOMA_PREFILL_OBS_HISTORY_ON_MOTION_START="${HOLOSOMA_PREFILL_OBS_HISTORY_ON_MOTION_START:-0}"
 export HOLOSOMA_FORCE_MOTION_ALIGNMENT="${HOLOSOMA_FORCE_MOTION_ALIGNMENT:-1}"
 export HOLOSOMA_ZMQ_LOWCMD_LATCH_CONTROL_BOUNDARY="${HOLOSOMA_ZMQ_LOWCMD_LATCH_CONTROL_BOUNDARY:-0}"
-export HOLOSOMA_ZMQ_LOWCMD_LOCKSTEP_CONTROL_BOUNDARY="${HOLOSOMA_ZMQ_LOWCMD_LOCKSTEP_CONTROL_BOUNDARY:-0}"
+export HOLOSOMA_ZMQ_LOWCMD_LOCKSTEP_CONTROL_BOUNDARY="${HOLOSOMA_ZMQ_LOWCMD_LOCKSTEP_CONTROL_BOUNDARY:-1}"
 export HOLOSOMA_ZMQ_LOWCMD_MATCH_TOLERANCE_MS="${HOLOSOMA_ZMQ_LOWCMD_MATCH_TOLERANCE_MS:-2}"
 export HOLOSOMA_ZMQ_LOWCMD_KP_SCALE="${HOLOSOMA_ZMQ_LOWCMD_KP_SCALE:-1.0}"
 export HOLOSOMA_ZMQ_LOWCMD_KD_SCALE="${HOLOSOMA_ZMQ_LOWCMD_KD_SCALE:-1.0}"
@@ -503,7 +555,12 @@ export HOLOSOMA_POLICY_TARGET_OBJECT_STATE_ASSIST=0
 export HOLOSOMA_MUJOCO_WRIST_ORIGIN_CONTACT_SPHERES=0
 export HOLOSOMA_MUJOCO_PALM_CONTACT_SPHERES=0
 export HOLOSOMA_MUJOCO_RESET_NOISE=0
-export GT_MUJOCO_PHYSICS="${GT_MUJOCO_PHYSICS:-${HOLOSOMA_GT_MUJOCO_PHYSICS:-0}}"
+if [[ -z "${GT_MUJOCO_PHYSICS+x}" && -z "${HOLOSOMA_GT_MUJOCO_PHYSICS+x}" ]]; then
+  export GT_MUJOCO_PHYSICS=0
+  export HOLOSOMA_GT_MUJOCO_PHYSICS=0
+else
+  export GT_MUJOCO_PHYSICS="${GT_MUJOCO_PHYSICS:-${HOLOSOMA_GT_MUJOCO_PHYSICS:-0}}"
+fi
 if is_truthy_env "$GT_MUJOCO_PHYSICS"; then
   export GT_MUJOCO_PHYSICS=1
   export HOLOSOMA_GT_MUJOCO_PHYSICS=1
@@ -560,7 +617,7 @@ echo "[INFO] mujoco_object_scene training_urdf=${SIM_USE_TRAINING_URDF_OBJECT_SC
 echo "[INFO] object_contact_body_markers=${MUJOCO_OBJECT_CONTACT_BODY_MARKERS:-<all robot collision bodies>}"
 echo "[INFO] object_mass_override=${MUJOCO_OBJECT_MASS_OVERRIDE:-<none>} object_geom_friction=${MUJOCO_OBJECT_GEOM_FRICTION:-<none>} object_terrain_pair_friction=${MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION:-<none>} lateral_friction=${MUJOCO_OBJECT_LATERAL_FRICTION:-<none>} rolling_friction=${MUJOCO_OBJECT_ROLLING_FRICTION:-<none>} contact_stiffness=${MUJOCO_OBJECT_CONTACT_STIFFNESS:-<none>} contact_damping=${MUJOCO_OBJECT_CONTACT_DAMPING:-<none>} resize_object_to_motion_size=${MUJOCO_RESIZE_OBJECT_TO_MOTION_SIZE} collision_mode=${MUJOCO_OBJECT_COLLISION_MODE} web_demo_object_contacts=${HOLOSOMA_MUJOCO_WEB_DEMO_OBJECT_CONTACTS} keep_reference_hand_collision=${HOLOSOMA_MUJOCO_KEEP_REFERENCE_HAND_COLLISION} carry_arm_object_contacts=${HOLOSOMA_MUJOCO_CARRY_ARM_OBJECT_CONTACTS}"
 echo "[INFO] track_alignment sim=${SIM_FPS}Hz decimation=${SIM_CONTROL_DECIMATION} substeps=${SIM_SUBSTEPS} backend=${MUJOCO_BACKEND} terrain_friction=${TERRAIN_STATIC_FRICTION},${TERRAIN_DYNAMIC_FRICTION} motion_index_offset=${HOLOSOMA_POLICY_MOTION_INDEX_OFFSET} prefill_history=${HOLOSOMA_PREFILL_OBS_HISTORY_ON_MOTION_START} lowcmd_lockstep=${HOLOSOMA_ZMQ_LOWCMD_LOCKSTEP_CONTROL_BOUNDARY} lowcmd_match_tolerance_ms=${HOLOSOMA_ZMQ_LOWCMD_MATCH_TOLERANCE_MS}"
-echo "[INFO] contact_alignment training_object_contact_pairs=${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_PAIRS} contact_material=${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_LATERAL_FRICTION},${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_SPIN_FRICTION},${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_ROLLING_FRICTION} assists=root:${HOLOSOMA_POLICY_TARGET_ROBOT_ROOT_STATE_ASSIST},dof:${HOLOSOMA_POLICY_TARGET_ROBOT_DOF_STATE_ASSIST},object:${HOLOSOMA_POLICY_TARGET_OBJECT_STATE_ASSIST} helper_spheres=wrist:${HOLOSOMA_MUJOCO_WRIST_ORIGIN_CONTACT_SPHERES},palm:${HOLOSOMA_MUJOCO_PALM_CONTACT_SPHERES} reset_noise=${HOLOSOMA_MUJOCO_RESET_NOISE} clip_joint_targets=${HOLOSOMA_CLIP_JOINT_TARGETS}"
+echo "[INFO] contact_alignment training_object_contact_pairs=${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_PAIRS} contact_material=${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_LATERAL_FRICTION:-<object-default>},${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_SPIN_FRICTION:-<scene-default>},${HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_ROLLING_FRICTION:-<scene-default>} assists=root:${HOLOSOMA_POLICY_TARGET_ROBOT_ROOT_STATE_ASSIST},dof:${HOLOSOMA_POLICY_TARGET_ROBOT_DOF_STATE_ASSIST},object:${HOLOSOMA_POLICY_TARGET_OBJECT_STATE_ASSIST} helper_spheres=wrist:${HOLOSOMA_MUJOCO_WRIST_ORIGIN_CONTACT_SPHERES},palm:${HOLOSOMA_MUJOCO_PALM_CONTACT_SPHERES} reset_noise=${HOLOSOMA_MUJOCO_RESET_NOISE} clip_joint_targets=${HOLOSOMA_CLIP_JOINT_TARGETS}"
 echo "[INFO] gt_mujoco_physics=${GT_MUJOCO_PHYSICS} zero_passive_dynamics=${HOLOSOMA_GT_MUJOCO_ZERO_PASSIVE_DYNAMICS:-0}"
 
 if is_truthy_env "${DRY_RUN:-0}"; then

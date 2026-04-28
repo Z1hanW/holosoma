@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from holosoma.utils.object_geometry import load_urdf_box_primitive_metadata
+from holosoma.utils.path import resolve_data_file_path
 
 
 def _iter_unique_urdfs_from_clip_map(map_path: Path) -> list[Path]:
@@ -23,15 +24,19 @@ def _iter_unique_urdfs_from_clip_map(map_path: Path) -> list[Path]:
         else:
             raw_urdf = ""
         if raw_urdf:
-            unique_urdfs.add(Path(raw_urdf).expanduser().resolve())
+            unique_urdfs.add(Path(resolve_data_file_path(raw_urdf)).expanduser().resolve())
     return sorted(unique_urdfs)
 
 
 @pytest.mark.parametrize(
     "map_path",
     [
-        Path("/home/ubuntu/FAR/holosoma/data/ds_box_data/train_g1_w_obj_prepared/_clip_object_urdf_map.json"),
-        Path("/home/ubuntu/FAR/holosoma/data/ds_box_data/train_g1_w_obj_prepared_plus_omomo_orig/_clip_object_urdf_map.json"),
+        Path(
+            "/home/ubuntu/FAR/holosoma/data/ds_box_data/scale_mix_all/train_g1_w_obj_prepared/_clip_object_urdf_map.json"
+        ),
+        Path(
+            "/home/ubuntu/FAR/holosoma/data/ds_box_data/scale_mix_all/train_g1_w_obj_prepared_plus_omomo_orig/_clip_object_urdf_map.json"
+        ),
     ],
 )
 def test_default_clip_object_maps_are_primitive_compatible(map_path: Path):

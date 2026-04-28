@@ -4,8 +4,8 @@ set -euo pipefail
 # DS-box object generalist training.
 #
 # This launcher prepares a trainable motion bank from:
-# - raw motion clips in `data/ds_box_data/train_g1_w_obj`
-# - per-clip box geometry in `data/ds_box_data/train_g1_w_obj_geometry`
+# - raw motion clips in `data/ds_box_data[/scale_mix_all]/train_g1_w_obj`
+# - per-clip box geometry in `data/ds_box_data[/scale_mix_all]/train_g1_w_obj_geometry`
 #
 # The prepared bank augments each clip with:
 # - `object_size`
@@ -147,9 +147,9 @@ export HOLOSOMA_OBJECT_SPAWN_MODE="${OBJECT_SPAWN_MODE}"
 ACTOR_LR=${ACTOR_LR:-1e-05}
 CRITIC_LR=${CRITIC_LR:-1e-05}
 NUM_LEARNING_EPOCHS=${NUM_LEARNING_EPOCHS:-7}
-CLIP_WEIGHTING_STRATEGY=${CLIP_WEIGHTING_STRATEGY:-success_rate_adaptive}
+CLIP_WEIGHTING_STRATEGY=${CLIP_WEIGHTING_STRATEGY:-uniform_clip}
 
-AUTO_PREP_DS_BANK=${AUTO_PREP_DS_BANK:-1}
+AUTO_PREP_DS_BANK=${AUTO_PREP_DS_BANK:-auto}
 DS_PREP_CLEAN_OUT=${DS_PREP_CLEAN_OUT:-1}
 DS_OBJECT_MASS=${DS_OBJECT_MASS:-0.1}
 DS_OBJECT_COLOR_RGBA=${DS_OBJECT_COLOR_RGBA:-"0.7 0.8 0.9 1"}
@@ -541,8 +541,11 @@ import json
 import sys
 from pathlib import Path
 
-path = Path(sys.argv[1]).expanduser().resolve()
 repo_root = Path(sys.argv[2]).expanduser().resolve()
+sys.path.insert(0, str(repo_root / "src" / "holosoma"))
+from holosoma.utils.path import resolve_data_file_path
+
+path = Path(sys.argv[1]).expanduser().resolve()
 payload = json.loads(path.read_text(encoding="utf-8"))
 if isinstance(payload, dict) and isinstance(payload.get("clips"), dict):
     payload = payload["clips"]
@@ -552,6 +555,11 @@ if not isinstance(payload, dict) or not payload:
 def resolve_urdf(raw: str) -> Path:
     raw = raw.strip()
     candidate = Path(raw).expanduser()
+    if candidate.is_absolute() or raw.startswith("holosoma/data"):
+        resolved_data = Path(resolve_data_file_path(raw)).expanduser().resolve()
+        if resolved_data.is_file():
+            return resolved_data
+
     candidates = []
     if candidate.is_absolute():
         candidates.append(candidate)
@@ -595,6 +603,7 @@ import json
 import sys
 from pathlib import Path
 
+from holosoma.utils.path import resolve_data_file_path
 from holosoma.utils.object_geometry import load_urdf_box_primitive_metadata
 
 path = Path(sys.argv[1]).expanduser().resolve()
@@ -608,6 +617,11 @@ if not isinstance(payload, dict) or not payload:
 def resolve_urdf(raw: str) -> Path:
     raw = raw.strip()
     candidate = Path(raw).expanduser()
+    if candidate.is_absolute() or raw.startswith("holosoma/data"):
+        resolved_data = Path(resolve_data_file_path(raw)).expanduser().resolve()
+        if resolved_data.is_file():
+            return resolved_data
+
     candidates = []
     if candidate.is_absolute():
         candidates.append(candidate)
@@ -972,6 +986,13 @@ print(f'[INFO] Wrote clip-object map: {map_path}')
 PY
 }
 
+prepared_motion_bank_ready() {
+  local prepared_dir="$1"
+  [[ -d "${prepared_dir}" ]] || return 1
+  [[ -f "${prepared_dir}/_clip_object_urdf_map.json" ]] || return 1
+  compgen -G "${prepared_dir}/*.npz" >/dev/null
+}
+
 if [[ "$#" -gt 0 ]]; then
   first_arg_normalized=$(echo "$1" | tr '[:upper:]' '[:lower:]')
   case "${first_arg_normalized}" in
@@ -1206,12 +1227,31 @@ if [[ "${DATA_MODE}" == "pure-sd" && "${MOTION_DIR_FROM_ENV}" == "1" && -d "${MO
 fi
 
 if [[ "${DATA_MODE}" == "pure-sd" ]]; then
-  if [[ "${AUTO_PREP_DS_BANK}" != "0" ]]; then
-    prepare_ds_motion_bank "${RAW_MOTION_DIR}" "${OBJ_DIR}" "${PREPARED_MOTION_DIR}" "${DS_PREP_CLEAN_OUT}" "${DS_OBJECT_MASS}" "${DS_OBJECT_COLOR_RGBA}"
-    MOTION_DIR="${PREPARED_MOTION_DIR}"
-  elif [[ "${MOTION_DIR_FROM_ENV}" != "1" ]]; then
-    MOTION_DIR="${PREPARED_MOTION_DIR}"
-  fi
+  auto_prep_ds_bank_normalized=$(echo "${AUTO_PREP_DS_BANK}" | tr '[:upper:]' '[:lower:]')
+  case "${auto_prep_ds_bank_normalized}" in
+    auto|"")
+      if prepared_motion_bank_ready "${PREPARED_MOTION_DIR}"; then
+        echo "[INFO] Reusing existing prepared DS bank: ${PREPARED_MOTION_DIR}"
+        MOTION_DIR="${PREPARED_MOTION_DIR}"
+      else
+        prepare_ds_motion_bank "${RAW_MOTION_DIR}" "${OBJ_DIR}" "${PREPARED_MOTION_DIR}" "${DS_PREP_CLEAN_OUT}" "${DS_OBJECT_MASS}" "${DS_OBJECT_COLOR_RGBA}"
+        MOTION_DIR="${PREPARED_MOTION_DIR}"
+      fi
+      ;;
+    1|true|yes|on)
+      prepare_ds_motion_bank "${RAW_MOTION_DIR}" "${OBJ_DIR}" "${PREPARED_MOTION_DIR}" "${DS_PREP_CLEAN_OUT}" "${DS_OBJECT_MASS}" "${DS_OBJECT_COLOR_RGBA}"
+      MOTION_DIR="${PREPARED_MOTION_DIR}"
+      ;;
+    0|false|no|off)
+      if [[ "${MOTION_DIR_FROM_ENV}" != "1" ]]; then
+        MOTION_DIR="${PREPARED_MOTION_DIR}"
+      fi
+      ;;
+    *)
+      echo "[ERROR] AUTO_PREP_DS_BANK must be one of: auto, 0/1, true/false, yes/no, on/off. Got: ${AUTO_PREP_DS_BANK}" >&2
+      exit 2
+      ;;
+  esac
 else
   if [[ "${MOTION_DIR_FROM_ENV}" != "1" ]]; then
     MOTION_DIR="${MODE_DEFAULT_MOTION_DIR}"
@@ -1233,7 +1273,7 @@ fi
 if [[ -z "${OBJECT_SPEC_PATH}" || ! -f "${OBJECT_SPEC_PATH}" ]]; then
   echo "[ERROR] DS object generalist training requires a valid _clip_object_urdf_map.json." >&2
   echo "[ERROR] Current MOTION_DIR: ${MOTION_DIR}" >&2
-  echo "[ERROR] Either enable AUTO_PREP_DS_BANK=1 or point OBJECT_SPEC_PATH to a valid map." >&2
+  echo "[ERROR] Either enable AUTO_PREP_DS_BANK=1 to rebuild the bank or point OBJECT_SPEC_PATH to a valid map." >&2
   exit 2
 fi
 validate_object_spec_map "${OBJECT_SPEC_PATH}"

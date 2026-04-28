@@ -29,13 +29,6 @@ ogds_resolve_data_root() {
   local nested="${root}/scale_mix_all"
   local marker=""
 
-  for marker in train_g1_w_obj_prepared train_g1_w_obj_prepared_plus_omomo_orig train_g1_w_obj train_g1_w_obj_geometry; do
-    if [[ -e "${root}/${marker}" ]]; then
-      printf '%s\n' "${root}"
-      return 0
-    fi
-  done
-
   if [[ -d "${nested}" ]]; then
     for marker in train_g1_w_obj_prepared train_g1_w_obj_prepared_plus_omomo_orig train_g1_w_obj train_g1_w_obj_geometry; do
       if [[ -e "${nested}/${marker}" ]]; then
@@ -44,6 +37,13 @@ ogds_resolve_data_root() {
       fi
     done
   fi
+
+  for marker in train_g1_w_obj_prepared train_g1_w_obj_prepared_plus_omomo_orig train_g1_w_obj train_g1_w_obj_geometry; do
+    if [[ -e "${root}/${marker}" ]]; then
+      printf '%s\n' "${root}"
+      return 0
+    fi
+  done
 
   printf '%s\n' "${root}"
 }

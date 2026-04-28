@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+import hashlib
 import importlib.util
 import math
 import os
@@ -274,8 +275,9 @@ class PerceptionManager:
 
         self._camera_warp_min_valid_depth = float(getattr(self.cfg, "camera_warp_min_valid_depth", 0.15) or 0.15)
         self._camera_warp_normalize = bool(getattr(self.cfg, "camera_warp_normalize", False))
+        requested_camera_warp_edge_noise = bool(getattr(self.cfg, "camera_warp_edge_noise", False))
         self._camera_warp_edge_noise = (
-            False if self._is_mujoco_perception else bool(getattr(self.cfg, "camera_warp_edge_noise", False))
+            False if self._is_mujoco_perception else requested_camera_warp_edge_noise
         )
         self._camera_warp_edge_border = max(0, int(getattr(self.cfg, "camera_warp_edge_border", 3) or 0))
         self._camera_warp_edge_shuffle_prob = float(getattr(self.cfg, "camera_warp_edge_shuffle_prob", 0.9) or 0.0)
@@ -289,15 +291,29 @@ class PerceptionManager:
         self._camera_warp_edge_far_depth_thresh = float(
             getattr(self.cfg, "camera_warp_edge_far_depth_thresh", 2.5) or 0.0
         )
+        requested_camera_warp_enable_holes = bool(getattr(self.cfg, "camera_warp_enable_holes", False))
         self._camera_warp_enable_holes = (
-            False if self._is_mujoco_perception else bool(getattr(self.cfg, "camera_warp_enable_holes", False))
+            False if self._is_mujoco_perception else requested_camera_warp_enable_holes
         )
         self._camera_warp_hole_prob = (
             0.0 if self._is_mujoco_perception else float(getattr(self.cfg, "camera_warp_hole_prob", 0.0) or 0.0)
         )
+        requested_camera_apply_sensor_noise = bool(getattr(self.cfg, "camera_apply_sensor_noise", True))
         self._camera_apply_sensor_noise = (
-            False if self._is_mujoco_perception else bool(getattr(self.cfg, "camera_apply_sensor_noise", True))
+            False if self._is_mujoco_perception else requested_camera_apply_sensor_noise
         )
+        if self._is_mujoco_perception and (
+            requested_camera_warp_edge_noise
+            or requested_camera_warp_enable_holes
+            or requested_camera_apply_sensor_noise
+        ):
+            (self.logger or logger).warning(
+                "MuJoCo perception forcing camera noise off: "
+                "edge_noise={} holes={} sensor_noise={} -> False/False/False",
+                requested_camera_warp_edge_noise,
+                requested_camera_warp_enable_holes,
+                requested_camera_apply_sensor_noise,
+            )
 
         self._camera_obs_height, self._camera_obs_width = self._resolve_camera_obs_resolution()
         self._camera_obs_fill_value = self._camera_obs_default_fill_value()
@@ -1910,18 +1926,34 @@ class PerceptionManager:
         if not urdf_file.exists():
             return None
 
-        cache_dir = Path("/tmp/holosoma_perception_mesh_cache")
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_mesh_path = cache_dir / f"{object_name}_{urdf_file.stem}_combined.obj"
-        if cache_mesh_path.exists():
-            return str(cache_mesh_path)
-
         try:
             root = ET.parse(str(urdf_file)).getroot()
         except Exception:
             return None
 
         urdf_dir = str(urdf_file.parent)
+        digest = hashlib.sha1()
+        try:
+            digest.update(str(urdf_file.resolve()).encode("utf-8"))
+            digest.update(urdf_file.read_bytes())
+            for mesh_tag in root.findall(".//link/visual/geometry/mesh"):
+                filename = mesh_tag.get("filename")
+                if not filename:
+                    continue
+                mesh_file = Path(self._resolve_urdf_mesh_path(urdf_dir, urdf_dir, filename))
+                if mesh_file.exists():
+                    digest.update(str(mesh_file.resolve()).encode("utf-8"))
+                    digest.update(mesh_file.read_bytes())
+        except Exception:
+            stat = urdf_file.stat()
+            digest.update(f"{urdf_file.resolve()}:{stat.st_mtime_ns}:{stat.st_size}".encode("utf-8"))
+
+        cache_dir = Path("/tmp/holosoma_perception_mesh_cache")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_mesh_path = cache_dir / f"{object_name}_{urdf_file.stem}_{digest.hexdigest()[:12]}_combined.obj"
+        if cache_mesh_path.exists():
+            return str(cache_mesh_path)
+
         meshes: list[Any] = []
 
         for link in root.findall("link"):

@@ -205,7 +205,6 @@ class WholeBodyTrackingManager(BaseTask):
         motion_command = self.command_manager.get_state("motion_command")
         dt = 1.0 / float(motion_command.motion.fps)
         motion_command.step()
-        print("time_steps: ", motion_command.time_steps[0].item())
         self._draw_debug_vis()
 
         # set root_states_from_motion_command
@@ -245,9 +244,19 @@ class WholeBodyTrackingManager(BaseTask):
             else:
                 self.simulator.set_actor_states(["object"], env_ids, object_states)
 
-        self.simulator.scene.write_data_to_sim()
-        self.simulator.sim.forward()
-        self.simulator.sim.render()
+        sim_type = self.simulator.get_simulator_type()
+        if sim_type == SimulatorType.MUJOCO:
+            write_state_updates = getattr(self.simulator, "write_state_updates", None)
+            if callable(write_state_updates):
+                write_state_updates()
+            render = getattr(self.simulator, "render", None)
+            viewer = getattr(self.simulator, "viewer", None)
+            if callable(render) and viewer is not None:
+                render(sync_frame_time=False)
+        else:
+            self.simulator.scene.write_data_to_sim()
+            self.simulator.sim.forward()
+            self.simulator.sim.render()
         self.simulator.refresh_sim_tensors()
         # Keep replay perception outputs in sync with the kinematic state written above.
         # Without this call, ray debug overlays can update while camera depth maps remain stale.
@@ -256,6 +265,7 @@ class WholeBodyTrackingManager(BaseTask):
             self._viser_live.record_step()
         self._draw_scandots_in_viewer()
 
-        time.sleep(dt)
+        if getattr(self.simulator, "viewer", None) is not None:
+            time.sleep(dt)
 
         return bool(motion_command.motion_end_mask()[0].item())

@@ -58,6 +58,13 @@ def _resolve_save_npy_enabled() -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "y"}
 
 
+def _resolve_save_obs_npy_enabled() -> bool:
+    raw = os.environ.get("HOLOSOMA_PREVIS_PERCEPTION_SAVE_OBS_NPY", "")
+    if not raw:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "y"}
+
+
 def _resolve_save_png_enabled() -> bool:
     raw = os.environ.get("HOLOSOMA_PREVIS_PERCEPTION_SAVE_PNG", "")
     if not raw:
@@ -156,6 +163,7 @@ def replay_perception(tyro_config: ExperimentConfig) -> None:
     max_frames = _resolve_max_frames()
     video_enabled = _resolve_video_enabled()
     save_npy = _resolve_save_npy_enabled()
+    save_obs_npy = _resolve_save_obs_npy_enabled()
     save_png = _resolve_save_png_enabled()
     save_rgb_png = _resolve_save_rgb_png_enabled()
     rgb_video_enabled = _resolve_rgb_video_enabled()
@@ -179,8 +187,11 @@ def replay_perception(tyro_config: ExperimentConfig) -> None:
 
         env.perception_manager.update()
         depth = env.perception_manager.get_camera_depth_map()[0].detach().cpu().numpy()
+        depth_obs = env.perception_manager.get_camera_depth_obs_map()[0].detach().cpu().numpy()
         if output_dir is not None and save_npy and frame_idx % stride == 0:
             np.save(output_dir / f"depth_{frame_idx:06d}.npy", depth)
+        if output_dir is not None and save_obs_npy and frame_idx % stride == 0:
+            np.save(output_dir / f"depth_obs_{frame_idx:06d}.npy", depth_obs)
 
         depth_rgb = None
         if save_png or video_enabled:
