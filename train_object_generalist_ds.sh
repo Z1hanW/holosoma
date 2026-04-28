@@ -294,6 +294,8 @@ refresh_effective_sequence_name() {
 
   if [[ -n "${SEQUENCE_NAME:-}" ]]; then
     EFFECTIVE_SEQUENCE_NAME="${SEQUENCE_NAME}${run_name_suffix}"
+  elif [[ -n "${DATA_MODE:-}" && "${AUTO_ATTACH_WANDB_RUN:-0}" != "1" ]]; then
+    EFFECTIVE_SEQUENCE_NAME="${DATA_MODE}${run_name_suffix}"
   elif [[ -n "${run_name_suffix}" && "${AUTO_ATTACH_WANDB_RUN:-0}" != "1" ]]; then
     EFFECTIVE_SEQUENCE_NAME="${EXP}-${DATA_MODE}${run_name_suffix}"
   else
