@@ -182,8 +182,7 @@ class MuJoCoDepthCamera:
         model.cam_fovy[cam_id] = self._vfov_deg
         self._configure_depth_clip_planes(model)
 
-    def _configure_depth_clip_planes(self, model: mujoco.MjModel) -> None:
-        extent = max(float(model.stat.extent), 1.0e-6)
+    def _configure_depth_clip_planes(self, _model: mujoco.MjModel) -> None:
         near = float(getattr(self._cfg, "camera_near", 0.1) or 0.1)
         max_distance = float(getattr(self._cfg, "max_distance", 1.0) or 1.0)
         far = float(getattr(self._cfg, "camera_far", max_distance) or max_distance)
@@ -192,9 +191,10 @@ class MuJoCoDepthCamera:
         far = max(far, max_distance, near + 1.0e-3)
         self._render_near = near
         self._render_far = far
-
-        model.vis.map.znear = near / extent
-        model.vis.map.zfar = far / extent
+        # model.vis.map is global and also drives the interactive MuJoCo viewer.
+        # Keep camera near/far as post-processing limits only; otherwise the
+        # viewer gets clipped to the policy depth range and only shows a small
+        # checkerboard patch surrounded by haze.
 
     def _update_camera_pose(self, render_data: mujoco.MjData) -> None:
         model = self._env.simulator.root_model
