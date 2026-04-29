@@ -1,13 +1,19 @@
 {
   "clips": {
     "sub10_largebox_032_mj_w_obj": {
-      "object_urdf_path": "/home/ubuntu/FAR/holosoma/data_demo/objects/objects_largebox.urdf"
+      "object_urdf_path": "objects/objects_largebox.urdf"
     },
     "box_35": {
-      "object_urdf_path": "/home/ubuntu/FAR/holosoma/data_demo/objects/box_35.urdf"
+      "object_urdf_path": "objects/box_35.urdf"
     },
     "box_11": {
-      "object_urdf_path": "/home/ubuntu/FAR/holosoma/data_demo/objects/box_11.urdf"
+      "object_urdf_path": "objects/box_11.urdf"
+    },
+    "box_74": {
+      "object_urdf_path": "objects/box_74.urdf"
+    },
+    "box_75": {
+      "object_urdf_path": "objects/box_75.urdf"
     }
   }
 }

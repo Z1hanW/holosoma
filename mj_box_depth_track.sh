@@ -173,6 +173,7 @@ raw = sys.argv[1]
 motion_path = Path(sys.argv[2]).expanduser().resolve()
 repo_root = Path(sys.argv[3]).expanduser().resolve()
 stem = motion_path.stem
+relative_urdf_roots: list[Path] = [motion_path.parent, repo_root]
 
 def object_urdf_fallbacks(path: Path):
     """Yield current-repo fallbacks for older absolute box-object paths."""
@@ -216,16 +217,21 @@ def _is_ds_box_data_path(path: Path) -> bool:
 
 def resolve_existing_urdf(path_str: str) -> Path:
     candidate = Path(path_str).expanduser()
-    if _is_ds_box_data_path(candidate):
-        for fallback in object_urdf_fallbacks(candidate):
+    candidates = [candidate]
+    if not candidate.is_absolute():
+        candidates.extend(base / candidate for base in relative_urdf_roots)
+    for current in candidates:
+        if _is_ds_box_data_path(current):
+            for fallback in object_urdf_fallbacks(current):
+                if fallback.is_file():
+                    return maybe_write_motion_sized_urdf(fallback.resolve())
+        if current.is_file():
+            return maybe_write_motion_sized_urdf(current.resolve())
+    for current in candidates:
+        for fallback in object_urdf_fallbacks(current):
             if fallback.is_file():
                 return maybe_write_motion_sized_urdf(fallback.resolve())
-    if candidate.is_file():
-        return maybe_write_motion_sized_urdf(candidate.resolve())
-    for fallback in object_urdf_fallbacks(candidate):
-        if fallback.is_file():
-            return maybe_write_motion_sized_urdf(fallback.resolve())
-    return maybe_write_motion_sized_urdf(candidate.resolve())
+    return maybe_write_motion_sized_urdf(candidates[-1].resolve())
 
 
 def _parse_vec(raw: str | None, default: tuple[float, float, float]) -> np.ndarray:
@@ -415,6 +421,7 @@ def maybe_write_motion_sized_urdf(urdf_path: Path) -> Path:
 
 candidate = Path(raw).expanduser() if raw else None
 if candidate is not None and candidate.is_file() and candidate.suffix.lower() == ".json":
+    relative_urdf_roots.insert(0, candidate.parent.resolve())
     data = json.loads(candidate.read_text())
     clips = data.get("clips", data) if isinstance(data, dict) else {}
     entry = clips.get(stem) if isinstance(clips, dict) else None

@@ -177,6 +177,53 @@ PY
   exit 1
 }
 
+first_motion_clip_arg() {
+  local positional_mode=1
+  local arg
+  for arg in "$@"; do
+    if [[ "$positional_mode" == "0" ]]; then
+      break
+    fi
+    case "$arg" in
+      depth|rendered|render|mujoco|rendered848|render848|mujoco848|mujoco_render_848x480|warp|far_tracking_warp)
+        ;;
+      wandb://*|https://*|*.onnx|*.pt)
+        ;;
+      --*)
+        positional_mode=0
+        ;;
+      *.npz)
+        if [[ "$arg" != */* ]]; then
+          printf '%s\n' "${arg%.npz}"
+          return 0
+        fi
+        ;;
+      *)
+        printf '%s\n' "${arg%.npz}"
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+maybe_use_native_data_demo_motion_dir() {
+  [[ "$LAUNCH_VISER_RESOLVED" == "0" ]] || return 0
+  [[ -z "${MOTION_DIR:-}" && -z "${MOTION_FILE:-}" ]] || return 0
+
+  local demo_dir="$ROOT_DIR/data_demo"
+  local clip_name=""
+  clip_name="$(first_motion_clip_arg "$@" || true)"
+  [[ -n "$clip_name" ]] || return 0
+  [[ -f "$demo_dir/${clip_name}.npz" ]] || return 0
+
+  export MOTION_DIR="$demo_dir"
+  if [[ -z "${OBJECT_URDF:-}" && -f "$demo_dir/_clip_object_urdf_map.json" ]]; then
+    export OBJECT_URDF="$demo_dir/_clip_object_urdf_map.json"
+  fi
+  echo "[INFO] launch_viser=0 using data_demo motion assets for ${clip_name}: ${MOTION_DIR}"
+}
+
 case "${1:-}" in
   -h|--help|help)
     usage
@@ -442,6 +489,8 @@ case "$(printf '%s' "$LAUNCH_VISER_RAW" | tr '[:upper:]' '[:lower:]')" in
     fi
     ;;
 esac
+
+maybe_use_native_data_demo_motion_dir "$@"
 
 if [[ "$LAUNCH_VISER_RESOLVED" == "1" && -z "${PYTHON_BIN:-}" ]] && ! is_truthy "${DRY_RUN:-0}"; then
   PYTHON_BIN="$(resolve_python_with_modules "holosoma.viser_mujoco_sim_state" \
