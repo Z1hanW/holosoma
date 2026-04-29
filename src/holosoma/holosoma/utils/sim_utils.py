@@ -894,6 +894,7 @@ class DirectSimulation:
                 str(actor_name): actor_state.detach().clone()
                 for actor_name, actor_state in dict(active_state["actor_states"]).items()
             }
+            self._maybe_align_virtual_gantry_to_motion_init(root_state, frame_idx=frame_idx)
 
         if hasattr(self.simulator, "write_state_updates"):
             self.simulator.write_state_updates()
@@ -940,6 +941,25 @@ class DirectSimulation:
             frame_idx,
             init_mode,
             motion_path.name,
+        )
+
+    def _maybe_align_virtual_gantry_to_motion_init(self, root_state: torch.Tensor, *, frame_idx: int) -> None:
+        gantry = getattr(self.simulator, "virtual_gantry", None)
+        if gantry is None:
+            return
+        gantry_cfg = getattr(getattr(self.simulator, "simulator_config", None), "virtual_gantry", None)
+        if gantry_cfg is not None and not bool(getattr(gantry_cfg, "follow_robot_on_episode_start", True)):
+            return
+
+        root_pos = root_state[0, :3].detach().cpu().numpy().astype(np.float32, copy=False)
+        height = float(getattr(gantry, "height", root_pos[2]))
+        gantry.point = np.array([float(root_pos[0]), float(root_pos[1]), height], dtype=float)
+        logger.info(
+            "Virtual gantry aligned above motion-init frame {}: [{:.3f}, {:.3f}, {:.3f}]",
+            frame_idx,
+            float(gantry.point[0]),
+            float(gantry.point[1]),
+            float(gantry.point[2]),
         )
 
     def _create_base_init_state(self) -> torch.Tensor:
