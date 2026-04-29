@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 
 import tyro
@@ -88,6 +89,21 @@ g1_29dof_wbt_object_distill = replace(
     ),
 )
 
+g1_29dof_wbt_object_distill_mujoco = replace(
+    g1_29dof_wbt_object_distill,
+    task=replace(
+        g1_29dof_wbt_object_distill.task,
+        motion_file=os.getenv("HOLOSOMA_MJ_MOTION", "data_demo/box_75.npz"),
+        auto_start_motion=False,
+        auto_start_stiff_hold_sec=0.0,
+        auto_start_stiff_max_wait_sec=0.0,
+        use_split_perception_obs_shm=True,
+        use_zmq_lowcmd=True,
+        defer_policy_start_until_valid_state=True,
+        restart_sim_on_motion_end=False,
+    ),
+)
+
 g1_29dof_wbt_object_mocap_distill = replace(
     g1_29dof_wbt,
     observation=observation.wbt_object_mocap_distill,
@@ -142,6 +158,7 @@ DEFAULTS = {
     "g1-29dof-w-obj": g1_29dof_wbt_object_generalist,
     "g1-29dof-wbt-object-distill": g1_29dof_wbt_object_distill,
     "g1-29dof-wbt-depth-distill": g1_29dof_wbt_object_distill,
+    "g1-29dof-wbt-object-distill-mujoco": g1_29dof_wbt_object_distill_mujoco,
     "g1-29dof-wbt-object-mocap-distill": g1_29dof_wbt_object_mocap_distill,
     "g1-29dof-wbt-mocap-distill": g1_29dof_wbt_object_mocap_distill,
     "g1-29dof-videomimic": g1_29dof_videomimic,

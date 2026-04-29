@@ -220,6 +220,8 @@ camera_depth_d435i_mujoco_render_848x480 = replace(
     camera_apply_sensor_noise=False,
 )
 
+camera_depth_d435i_mujoco = camera_depth_d435i_mujoco_render_848x480
+
 DEFAULTS = {
     "none": none,
     "heightmap": heightmap,
@@ -228,6 +230,7 @@ DEFAULTS = {
     "camera_depth_d435i_defm_vit_s14": camera_depth_d435i_defm_vit_s14,
     "camera_depth_d435i_defm_regnet_y_800mf": camera_depth_d435i_defm_regnet_y_800mf,
     "camera_depth_d435i_defm_efficientnet_b2": camera_depth_d435i_defm_efficientnet_b2,
+    "camera_depth_d435i_mujoco": camera_depth_d435i_mujoco,
     "camera_depth_d435i_mujoco_render_848x480": camera_depth_d435i_mujoco_render_848x480,
 }
 
@@ -239,6 +242,7 @@ __all__ = [
     "camera_depth_d435i_defm_vit_s14",
     "camera_depth_d435i_defm_regnet_y_800mf",
     "camera_depth_d435i_defm_efficientnet_b2",
+    "camera_depth_d435i_mujoco",
     "camera_depth_d435i_mujoco_render_848x480",
     "DEFAULTS",
 ]

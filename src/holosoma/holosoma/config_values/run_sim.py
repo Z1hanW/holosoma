@@ -59,6 +59,29 @@ mujoco = dataclasses.replace(
     ),
 )
 
+mujoco_split = dataclasses.replace(
+    mujoco,
+    config=dataclasses.replace(
+        mujoco.config,
+        bridge=BridgeConfig(
+            enabled=True,
+            interface="lo",
+            publish_sim_state=True,
+            listen_control=True,
+            use_zmq_lowcmd=True,
+            publish_perception_obs_shm=True,
+            ignore_default_idle_command=True,
+            freeze_until_first_command=True,
+        ),
+        sim=dataclasses.replace(
+            mujoco.config.sim,
+            fps=500,
+            control_decimation=10,
+            substeps=1,
+        ),
+    ),
+)
+
 # MuJoCo Warp with sim2sim optimizations
 mjwarp = dataclasses.replace(
     holosoma.config_values.simulator.mjwarp,
@@ -77,5 +100,6 @@ DEFAULTS = {
     "isaacgym": isaacgym,
     "isaacsim": isaacsim,
     "mujoco": mujoco,
+    "mujoco_split": mujoco_split,
     "mjwarp": mjwarp,
 }

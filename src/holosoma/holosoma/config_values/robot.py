@@ -2,6 +2,7 @@ import os
 from dataclasses import replace
 
 from holosoma.config_types.robot import (
+    ObjectConfig,
     RobotAssetConfig,
     RobotBridgeConfig,
     RobotConfig,
@@ -1105,6 +1106,21 @@ g1_29dof_w_object = replace(
     ),
 )
 
+g1_29dof_w_object_mujoco = replace(
+    g1_29dof_w_object,
+    object=ObjectConfig(
+        enabled=True,
+        object_urdf_path=os.getenv("HOLOSOMA_MJ_OBJECT_URDF", "data_demo/objects/box_75.urdf"),
+        mujoco_use_training_urdf_scene=True,
+        mujoco_add_default_actuators=True,
+        mujoco_copy_joint_defaults_from_robot_xml=True,
+        mujoco_copy_tendons_from_robot_xml=True,
+        mujoco_copy_collision_geoms_from_robot_xml=True,
+        mujoco_copy_contact_pairs_from_robot_xml=True,
+        mujoco_object_mass_override=float(os.getenv("HOLOSOMA_MJ_OBJECT_MASS", "2.0")),
+    ),
+)
+
 g1_29dof_stairs = replace(
     g1_29dof,
     asset=replace(
@@ -1117,5 +1133,6 @@ DEFAULTS = {
     "g1_29dof": g1_29dof,
     "t1_29dof_waist_wrist": t1_29dof_waist_wrist,
     "g1_29dof_w_object": g1_29dof_w_object,
+    "g1_29dof_w_object_mujoco": g1_29dof_w_object_mujoco,
     "g1_29dof_stairs": g1_29dof_stairs,
 }
