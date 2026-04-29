@@ -7,12 +7,14 @@ This test suite verifies that:
 """
 
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 import torch
 from torch import nn
 
+from holosoma.agents.modules import modules as module_impl
 from holosoma.agents.modules.modules import (
     AttentionLinearEncoder,
     BaseModule,
@@ -497,6 +499,64 @@ def test_defm_vit_s14_encoder_forward_with_mock_runtime():
         y = encoder(x)
 
     assert y.shape == (3, 128)
+
+
+def test_resolve_defm_repo_root_finds_repo_submodule_without_env(monkeypatch):
+    """Local DeFM checkout may live under the repository's submodules directory."""
+    submodule_root = None
+    for parent in Path(__file__).resolve().parents:
+        root_candidate = parent / "defm"
+        if (root_candidate / "defm" / "model_factory.py").is_file():
+            pytest.skip(f"root-level DeFM checkout shadows submodule checkout: {root_candidate}")
+        submodule_candidate = parent / "submodules" / "defm"
+        if (submodule_candidate / "defm" / "model_factory.py").is_file():
+            submodule_root = submodule_candidate
+            break
+
+    if submodule_root is None:
+        pytest.skip("DeFM submodule checkout is not initialized.")
+
+    monkeypatch.delenv("HOLOSOMA_DEFM_ROOT", raising=False)
+    module_impl._resolve_defm_repo_root.cache_clear()
+    try:
+        assert module_impl._resolve_defm_repo_root() == submodule_root
+    finally:
+        module_impl._resolve_defm_repo_root.cache_clear()
+
+
+def test_defm_vit_s14_encoder_chunks_frozen_backbone_forward(monkeypatch):
+    """Frozen ViT backbone should avoid one large PPO minibatch forward."""
+    chunk_shapes = []
+
+    class DummyDeFM(nn.Module):
+        def forward(self, x):
+            chunk_shapes.append(tuple(x.shape))
+            return torch.ones((x.shape[0], 384), device=x.device, dtype=x.dtype)
+
+    def fake_create_defm_model(model_name, pretrained=False, pretrained_path=None):
+        assert model_name == "defm_vit_s14"
+        return DummyDeFM()
+
+    monkeypatch.setenv("HOLOSOMA_DEFM_FORWARD_BATCH_SIZE", "2")
+    encoder = DeFMViTS14Encoder(
+        input_height=58,
+        input_width=87,
+        output_dim=384,
+        pretrained=True,
+        pretrained_path=None,
+        freeze_backbone=True,
+        target_size=224,
+        patch_size=14,
+    )
+
+    with patch(
+        "holosoma.agents.modules.modules._load_defm_runtime",
+        return_value=(fake_create_defm_model, None),
+    ):
+        y = encoder(torch.randn(5, 58 * 87))
+
+    assert y.shape == (5, 384)
+    assert chunk_shapes == [(2, 3, 224, 224), (2, 3, 224, 224), (1, 3, 224, 224)]
 
 
 def test_defm_regnet_y_800mf_encoder_forward_with_mock_runtime():

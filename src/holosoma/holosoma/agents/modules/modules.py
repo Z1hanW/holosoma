@@ -524,7 +524,9 @@ def _resolve_defm_repo_root() -> Path:
     if env_root:
         candidates.append(Path(env_root).expanduser())
     this_file = Path(__file__).resolve()
-    candidates.extend(parent / "defm" for parent in this_file.parents)
+    for parent in this_file.parents:
+        candidates.append(parent / "defm")
+        candidates.append(parent / "submodules" / "defm")
     for candidate in candidates:
         if (candidate / "defm" / "model_factory.py").is_file():
             return candidate
@@ -549,6 +551,21 @@ def _load_defm_runtime():
             "Make sure its Python dependencies are installed."
         ) from exc
     return create_defm_model, preprocess_depth_batch
+
+
+def _resolve_defm_forward_batch_size(model_name: str, freeze_backbone: bool) -> int:
+    raw_value = os.environ.get("HOLOSOMA_DEFM_FORWARD_BATCH_SIZE", "").strip()
+    if raw_value:
+        try:
+            value = int(raw_value)
+        except ValueError as exc:
+            raise ValueError("HOLOSOMA_DEFM_FORWARD_BATCH_SIZE must be an integer.") from exc
+        if value < 0:
+            raise ValueError("HOLOSOMA_DEFM_FORWARD_BATCH_SIZE must be >= 0.")
+        return value
+    if freeze_backbone and "vit" in model_name:
+        return 256
+    return 0
 
 
 class DeFMEncoder(nn.Module):
@@ -587,6 +604,9 @@ class DeFMEncoder(nn.Module):
         self.backbone_dim = int(backbone_dim)
         self.backbone: nn.Module | None = None
         self._preprocess_depth_batch = None
+        self.forward_batch_size = _resolve_defm_forward_batch_size(self.model_name, self.freeze_backbone)
+        self.register_buffer("_defm_mean", torch.tensor([0.248880, 0.495620, 0.492858]).view(1, 3, 1, 1))
+        self.register_buffer("_defm_std", torch.tensor([0.139357, 0.271314, 0.297177]).view(1, 3, 1, 1))
         self.proj = nn.Identity() if output_dim == self.backbone_dim else nn.Linear(self.backbone_dim, output_dim)
 
     def _ensure_backbone(self, device: torch.device) -> None:
@@ -616,20 +636,32 @@ class DeFMEncoder(nn.Module):
             )
         device = flat.device
         self._ensure_backbone(device)
-        assert self.backbone is not None and self._preprocess_depth_batch is not None
+        assert self.backbone is not None
 
-        depth = flat.view(x.shape[0], self.input_height, self.input_width)
-        depth_batch = self._preprocess_depth_batch(
-            depth,
-            target_size=self.target_size,
-            patch_size=self.patch_size,
-            device=device,
-        )
         backbone_forward = self.backbone
         if self.use_no_bifpn:
             if not hasattr(self.backbone, "forward_no_bifpn"):
                 raise ValueError(f"DeFM model {self.model_name} does not expose forward_no_bifpn().")
             backbone_forward = self.backbone.forward_no_bifpn
+        if self.forward_batch_size > 0 and flat.shape[0] > self.forward_batch_size:
+            features = torch.cat(
+                [
+                    self._forward_backbone_chunk(
+                        flat[start : start + self.forward_batch_size],
+                        device,
+                        backbone_forward,
+                    )
+                    for start in range(0, flat.shape[0], self.forward_batch_size)
+                ],
+                dim=0,
+            )
+        else:
+            features = self._forward_backbone_chunk(flat, device, backbone_forward)
+        return self.proj(features)
+
+    def _forward_backbone_chunk(self, flat: torch.Tensor, device: torch.device, backbone_forward) -> torch.Tensor:
+        depth = flat.view(flat.shape[0], self.input_height, self.input_width)
+        depth_batch = self._preprocess_depth_batch_onnx_safe(depth, device=device)
         if self.freeze_backbone:
             with torch.no_grad():
                 features = backbone_forward(depth_batch)
@@ -644,7 +676,44 @@ class DeFMEncoder(nn.Module):
         if self.freeze_backbone:
             features = features.detach()
         features = features.to(dtype=flat.dtype)
-        return self.proj(features)
+        return features
+
+    def _resolve_target_hw(self) -> tuple[int, int]:
+        if self.target_size is None:
+            target_h, target_w = self.input_height, self.input_width
+        elif isinstance(self.target_size, int):
+            target_h, target_w = self.target_size, self.target_size
+        else:
+            target_h, target_w = self.target_size
+        if self.patch_size is not None:
+            target_h = (int(target_h) // self.patch_size) * self.patch_size
+            target_w = (int(target_w) // self.patch_size) * self.patch_size
+        return int(target_h), int(target_w)
+
+    def _preprocess_depth_batch_onnx_safe(self, depth: torch.Tensor, *, device: torch.device) -> torch.Tensor:
+        depth = depth.to(device=device, dtype=torch.float32).unsqueeze(1)
+        if not torch.onnx.is_in_onnx_export():
+            depth = torch.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+        depth = torch.clamp(depth, min=0.0, max=100.0)
+        log_depth = torch.log1p(depth)
+
+        c1 = log_depth / 4.61512051684126
+        c2 = torch.clamp(log_depth / 2.302585092994046, min=0.0, max=1.0)
+
+        log_flat = log_depth.flatten(1)
+        min_log = log_flat.min(dim=1)[0].view(depth.shape[0], 1, 1, 1)
+        max_log = log_flat.max(dim=1)[0].view(depth.shape[0], 1, 1, 1)
+        denom = max_log - min_log
+        denom_safe = torch.where(denom > 0.0, denom, torch.ones_like(denom))
+        c3 = torch.where(denom > 0.0, (log_depth - min_log) / denom_safe, torch.zeros_like(log_depth))
+
+        x = torch.cat([c1, c2, c3], dim=1)
+        target_h, target_w = self._resolve_target_hw()
+        if x.shape[-2:] != (target_h, target_w):
+            x = F.interpolate(x, size=(target_h, target_w), mode="bilinear", align_corners=False)
+        mean = self._defm_mean.to(device=x.device, dtype=x.dtype)
+        std = self._defm_std.to(device=x.device, dtype=x.dtype)
+        return (x - mean) / std
 
 
 class DeFMViTS14Encoder(DeFMEncoder):

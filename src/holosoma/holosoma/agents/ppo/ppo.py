@@ -1019,7 +1019,7 @@ class PPO(BaseAlgo):
                     torch.distributed.barrier()
                 if self.is_main_process:
                     self.save(os.path.join(self.log_dir, f"model_{it:05d}.pt"))
-                    self.export(onnx_file_path=os.path.join(self.log_dir, f"model_{it:05d}.onnx"))
+                    self._export_onnx_checkpoint(os.path.join(self.log_dir, f"model_{it:05d}.onnx"))
                 if self.is_multi_gpu and torch.distributed.is_initialized():
                     torch.distributed.barrier()
 
@@ -1027,9 +1027,26 @@ class PPO(BaseAlgo):
             torch.distributed.barrier()
         if self.is_main_process:
             self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration:05d}.pt"))
-            self.export(onnx_file_path=os.path.join(self.log_dir, f"model_{self.current_learning_iteration:05d}.onnx"))
+            onnx_path = os.path.join(
+                self.log_dir,
+                f"model_{self.current_learning_iteration:05d}.onnx",
+            )
+            self._export_onnx_checkpoint(onnx_path)
         if self.is_multi_gpu and torch.distributed.is_initialized():
             torch.distributed.barrier()
+
+    def _should_export_onnx(self) -> bool:
+        if self._experiment_config is None:
+            return True
+        return bool(getattr(self._experiment_config.training, "export_onnx", True))
+
+    def _export_onnx_checkpoint(self, onnx_file_path: str) -> None:
+        if not self._should_export_onnx():
+            return
+        try:
+            self.export(onnx_file_path=onnx_file_path)
+        except Exception:
+            logger.exception("ONNX export failed for {}; continuing after saving the .pt checkpoint.", onnx_file_path)
 
     def _select_teacher_actions(
         self, teacher_obs_raw: torch.Tensor, obs_dict: dict[str, torch.Tensor]
