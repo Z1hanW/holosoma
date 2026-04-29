@@ -241,14 +241,14 @@ class MujocoSceneManager:
             type=mujoco.mjtTexture.mjTEXTURE_2D,
             builtin=mujoco.mjtBuiltin.mjBUILTIN_CHECKER,
             mark=mujoco.mjtMark.mjMARK_EDGE,
-            markrgb=[0.8, 0.8, 0.8],
+            markrgb=[0.75, 0.88, 1.0],
             width=300,
             height=300,
-            rgb1=[0.2, 0.3, 0.4],
-            rgb2=[0.1, 0.2, 0.3],
+            rgb1=[0.32, 0.48, 0.78],
+            rgb2=[0.12, 0.24, 0.46],
         )
 
-        grid_material = self.world_spec.add_material(name="grid", texrepeat=[5, 5], reflectance=0.2)
+        grid_material = self.world_spec.add_material(name="grid", texrepeat=[5, 5], reflectance=0.35)
         grid_material.textures[mujoco.mjtTextureRole.mjTEXROLE_RGB] = "chequered"
 
         # Add a solid gray material with moderate specular response for meshes without textures
@@ -382,10 +382,12 @@ class MujocoSceneManager:
         return self.world_spec.worldbody.add_geom(
             name=terrain_state.name,
             type=mujoco.mjtGeom.mjGEOM_PLANE,
-            # Size=0 is rendered infinitely. Collision plane is always infinite.
-            # Note: size.z is actually the rendered spacing betweeh the grid
+            # Collision remains an infinite plane; size controls visual rendering.
+            # Keep the viewer finite so zoomed-out scenes show a normal blue grid
+            # instead of an infinite dark checkerboard.
+            # Note: size.z is actually the rendered spacing between the grid
             #       subdivisions (to improve lighting, shadows).
-            size=[0, 0, 0.05],
+            size=[40, 40, 0.05],
             pos=[0, 0, 0],
             material="grid",
             condim=condim,
