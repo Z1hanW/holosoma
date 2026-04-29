@@ -1954,9 +1954,25 @@ class MuJoCo(BaseSimulator):
             return
 
         self.viewer = mujoco.viewer.launch_passive(self.root_model, self.root_data, key_callback=self._key_callback)
+        self._focus_viewer_on_robot()
         self._apply_object_collision_view()
         self._update_text_overlay()
         logger.info("=== Viewer setup completed with keyboard callback ===")
+
+    def _focus_viewer_on_robot(self) -> None:
+        if self.viewer is None or self.root_model is None or self.root_data is None:
+            return
+
+        body_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_BODY, self._get_prefixed_name("pelvis"))
+        if body_id < 0 and self.root_model.nbody > 1:
+            body_id = 1
+        if body_id < 0:
+            return
+
+        self.viewer.cam.lookat[:] = self.root_data.xpos[body_id]
+        self.viewer.cam.distance = 3.0
+        self.viewer.cam.azimuth = 135.0
+        self.viewer.cam.elevation = -20.0
 
     def _initialize_object_collision_view_state(self) -> None:
         if self.root_model is None:

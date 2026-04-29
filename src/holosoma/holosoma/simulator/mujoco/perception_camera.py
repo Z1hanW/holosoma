@@ -66,6 +66,7 @@ class MuJoCoDepthCamera:
         self._render_far = float(max(1.0, float(getattr(config, "max_distance", 1.0) or 1.0)))
         self._masked_robot_geom_ids: list[int] = []
         self._masked_object_geom_ids: list[int] = []
+        self._depth_geom_group_overrides: dict[int, int] = {}
         self._depth_prefers_visual_meshes = _env_flag(_PREFER_VISUAL_MESHES_ENV)
         self._depth_prefers_robot_visual_meshes = self._depth_prefers_visual_meshes or _env_flag(
             _PREFER_ROBOT_VISUAL_MESHES_ENV
@@ -276,18 +277,40 @@ class MuJoCoDepthCamera:
     def _update_scene_with_active_camera(self, renderer: mujoco.Renderer, render_data: mujoco.MjData) -> None:
         if self._use_user_gl_camera:
             self._apply_user_gl_camera(render_data, renderer=renderer)
-            renderer.update_scene(
+            self._update_scene_with_depth_mask(
+                renderer,
                 render_data,
                 camera=self._make_user_camera(),
-                scene_option=self._scene_option,
             )
             self._apply_user_gl_camera(render_data, renderer=renderer)
             return
-        renderer.update_scene(
+        self._update_scene_with_depth_mask(
+            renderer,
             render_data,
             camera=self._camera_name,
-            scene_option=self._scene_option,
         )
+
+    def _update_scene_with_depth_mask(
+        self,
+        renderer: mujoco.Renderer,
+        render_data: mujoco.MjData,
+        *,
+        camera: str | mujoco.MjvCamera,
+    ) -> None:
+        model = self._env.simulator.root_model
+        if model is None or not self._depth_geom_group_overrides:
+            renderer.update_scene(render_data, camera=camera, scene_option=self._scene_option)
+            return
+
+        original_groups: dict[int, int] = {}
+        try:
+            for geom_id, group in self._depth_geom_group_overrides.items():
+                original_groups[geom_id] = int(model.geom_group[geom_id])
+                model.geom_group[geom_id] = int(group)
+            renderer.update_scene(render_data, camera=camera, scene_option=self._scene_option)
+        finally:
+            for geom_id, group in original_groups.items():
+                model.geom_group[geom_id] = group
 
     def _orient_render_array(self, array: np.ndarray) -> np.ndarray:
         if self._flip_render_array_vertical:
@@ -373,6 +396,7 @@ class MuJoCoDepthCamera:
                     object_collision_geom_ids.append(int(geom_id))
 
         robot_visual_geom_id_set = set(robot_visual_geom_ids)
+        self._depth_geom_group_overrides = {}
         masked_geom_ids: list[int] = []
         masked_object_geom_ids: list[int] = []
         masked_unregistered_object_geom_ids: list[int] = []
@@ -381,7 +405,7 @@ class MuJoCoDepthCamera:
             body_name = str(model.body(body_id).name or "")
             geom_name = str(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or "")
             if terrain_proxy_geom_name and geom_name == terrain_proxy_geom_name:
-                model.geom_group[geom_id] = 0
+                self._depth_geom_group_overrides[int(geom_id)] = 0
                 continue
             if (
                 terrain_proxy_geom_name
@@ -389,7 +413,7 @@ class MuJoCoDepthCamera:
                 and geom_name == terrain_geom_name
                 and int(model.geom_type[geom_id]) == int(mujoco.mjtGeom.mjGEOM_PLANE)
             ):
-                model.geom_group[geom_id] = _DEPTH_HIDDEN_GEOM_GROUP
+                self._depth_geom_group_overrides[int(geom_id)] = _DEPTH_HIDDEN_GEOM_GROUP
                 continue
             if body_name.startswith(prefix):
                 if self._depth_prefers_robot_visual_meshes and robot_visual_geom_ids:
@@ -400,17 +424,17 @@ class MuJoCoDepthCamera:
                     if keep_robot_geom and explicit_robot_mesh_map:
                         keep_robot_geom = int(model.geom_type[geom_id]) == mesh_geom_type
                 if not keep_robot_geom:
-                    model.geom_group[geom_id] = _DEPTH_HIDDEN_GEOM_GROUP
+                    self._depth_geom_group_overrides[int(geom_id)] = _DEPTH_HIDDEN_GEOM_GROUP
                     masked_geom_ids.append(int(geom_id))
                 continue
             if object_root_body_ids and body_name.startswith("object_") and not _is_descendant_of_any(body_id, object_root_body_ids):
-                model.geom_group[geom_id] = _DEPTH_HIDDEN_GEOM_GROUP
+                self._depth_geom_group_overrides[int(geom_id)] = _DEPTH_HIDDEN_GEOM_GROUP
                 masked_object_geom_ids.append(int(geom_id))
                 masked_unregistered_object_geom_ids.append(int(geom_id))
 
         if self._depth_prefers_object_visual_meshes and object_visual_geom_ids and object_collision_geom_ids:
             for geom_id in object_collision_geom_ids:
-                model.geom_group[geom_id] = _DEPTH_HIDDEN_GEOM_GROUP
+                self._depth_geom_group_overrides[int(geom_id)] = _DEPTH_HIDDEN_GEOM_GROUP
             masked_object_geom_ids.extend(object_collision_geom_ids)
             logger.info(
                 "MuJoCo rendered depth prefers object visual mesh: masked {} object collision geom(s), kept {} visual geom(s).",
