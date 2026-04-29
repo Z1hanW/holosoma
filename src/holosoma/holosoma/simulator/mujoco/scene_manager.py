@@ -68,6 +68,7 @@ _TRAINING_OBJECT_CONTACT_GAP_ENV = "HOLOSOMA_MUJOCO_TRAINING_OBJECT_CONTACT_GAP"
 _ROBOT_GEOM_FRICTION_ENV = "HOLOSOMA_MUJOCO_ROBOT_GEOM_FRICTION"
 _LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES_ENV = "MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES"
 _OBJECT_CONTACT_BODY_MARKERS_ENV = "MUJOCO_OBJECT_CONTACT_BODY_MARKERS"
+_REFERENCE_ROBOT_COLLISION_GEOM_GROUP = 3
 
 
 def _parse_object_contact_body_markers() -> tuple[str, ...]:
@@ -888,7 +889,7 @@ class MujocoSceneManager:
         robot_config: RobotConfig,
     ) -> tuple[mujoco.MjSpec, mujoco.MjSpec, str, dict[str, str], dict[str, str], set[str]]:
         robot_urdf = cls._resolve_robot_urdf_path(robot_config)
-        load_robot_visual_meshes = cls._env_flag(_LOAD_ROBOT_VISUAL_MESHES_ENV)
+        load_robot_visual_meshes = cls._env_flag(_LOAD_ROBOT_VISUAL_MESHES_ENV, default=True)
         robot_spec = cls._load_urdf_spec(robot_urdf, load_visual_meshes=load_robot_visual_meshes)
         cls._configure_urdf_meshdir(robot_spec, robot_urdf)
         if load_robot_visual_meshes:
@@ -1344,6 +1345,14 @@ class MujocoSceneManager:
 
         target_bodies = {body.name: body for body in robot_spec.bodies if body.name}
         object_body_names = set(getattr(self, "_object_body_name_by_name", {}).values())
+        hide_disabled_collision_geoms = any(
+            int(geom.contype) == 0
+            and int(geom.conaffinity) == 0
+            and int(geom.group) in {1, 2}
+            for body in robot_spec.bodies
+            if body.name and body.name not in object_body_names
+            for geom in body.geoms
+        )
 
         disabled_geom_count = 0
         if using_training_urdf_object_scene:
@@ -1361,6 +1370,8 @@ class MujocoSceneManager:
                         continue
                     geom.contype = 0
                     geom.conaffinity = 0
+                    if hide_disabled_collision_geoms:
+                        geom.group = _REFERENCE_ROBOT_COLLISION_GEOM_GROUP
                     disabled_geom_count += 1
 
         existing_geom_names = {geom.name for body in robot_spec.bodies for geom in body.geoms if geom.name}
