@@ -342,7 +342,7 @@ if [[ -z "${TRAINING_NAME:-}" ]]; then
 fi
 TRAINING_PROJECT=${TRAINING_PROJECT:-boxer}
 OLD_TRACKER_MAX_BOX_ID=${OLD_TRACKER_MAX_BOX_ID:-92}
-OLD_TRACKER_DAGGER_ITERATIONS=${OLD_TRACKER_DAGGER_ITERATIONS:-20000}
+OLD_TRACKER_DAGGER_ITERATIONS=${OLD_TRACKER_DAGGER_ITERATIONS:-40000}
 if [[ -n "${POSITIONAL_RUN_NAME}" ]]; then
   RUN_NAME="${POSITIONAL_RUN_NAME}"
 fi
@@ -810,7 +810,7 @@ TEACHER_ACTION_MIX_RATIO_START=${TEACHER_ACTION_MIX_RATIO_START:-}
 TEACHER_ACTION_MIX_RATIO_END=${TEACHER_ACTION_MIX_RATIO_END:-}
 TEACHER_ACTION_MIX_RATIO_END_ITERATION=${TEACHER_ACTION_MIX_RATIO_END_ITERATION:-}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
-NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-20000}
+NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-40000}
 PPO_START_EPOCH=${PPO_START_EPOCH:-1000}
 DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-4500}
 PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.9}
@@ -939,16 +939,16 @@ if [[ "${TRACKER_PROFILE}" == "old-tracker" && "${SCHEDULE_VARIANT}" == "default
   fi
   if [[ "${SCHEDULE_NAME_EXPLICIT}" -eq 0 ]]; then
     if [[ "${EXP}" == *"sparse-goal-mixed"* ]]; then
-      SCHEDULE_NAME="old_tracker_sparse_goal_pickup_pure_dagger_20k"
+      SCHEDULE_NAME="old_tracker_sparse_goal_pickup_pure_dagger_40k"
     else
-      SCHEDULE_NAME="old_tracker_pure_dagger_20k"
+      SCHEDULE_NAME="old_tracker_pure_dagger_40k"
     fi
   fi
   if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
     if [[ "${EXP}" == *"sparse-goal-mixed"* ]]; then
-      SCHEDULE_NOTES="Default old-tracker profile: sparse-goal pickup pure DAgger for 20000 iterations with PPO disabled by default. Motion bank is capped to numeric box clips <= 92 to match the old tracker coverage and avoid going beyond it."
+      SCHEDULE_NOTES="Default old-tracker profile: sparse-goal pickup pure DAgger for 40000 iterations with PPO disabled by default. Motion bank is capped to numeric box clips <= 92 to match the old tracker coverage and avoid going beyond it."
     else
-      SCHEDULE_NOTES="Default old-tracker profile: pure DAgger for 20000 iterations with PPO disabled by default. Motion bank is capped to numeric box clips <= 92 to match the old tracker coverage and avoid going beyond it."
+      SCHEDULE_NOTES="Default old-tracker profile: pure DAgger for 40000 iterations with PPO disabled by default. Motion bank is capped to numeric box clips <= 92 to match the old tracker coverage and avoid going beyond it."
     fi
   fi
 fi
@@ -958,7 +958,7 @@ case "${SCHEDULE_VARIANT}" in
     ;;
   dagger_mix)
     if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
-      NUM_LEARNING_ITERATIONS=20000
+      NUM_LEARNING_ITERATIONS=40000
     fi
     # Keep PPO disabled while using teacher-action rollout mixing. PPO storage
     # keeps the sampled student action, while the environment may step with the
@@ -1009,7 +1009,7 @@ case "${SCHEDULE_VARIANT}" in
     ;;
   dag_first)
     if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
-      NUM_LEARNING_ITERATIONS=20000
+      NUM_LEARNING_ITERATIONS=40000
     fi
     if [[ "${PPO_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
       PPO_START_EPOCH=2000
@@ -1043,7 +1043,7 @@ case "${SCHEDULE_VARIANT}" in
     ;;
   ppo_first)
     if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
-      NUM_LEARNING_ITERATIONS=20000
+      NUM_LEARNING_ITERATIONS=40000
     fi
     if [[ "${PPO_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
       PPO_START_EPOCH=0

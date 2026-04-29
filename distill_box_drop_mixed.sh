@@ -18,7 +18,7 @@ set -euo pipefail
 # - default: mixed PPO+DAgger curriculum
 # - ppo_first: PPO+DAgger from iteration 0, with PPO 0.1 -> 0.9 in 0.1/500-iter steps
 # - dag_first: hold PPO off early, then ramp it in
-# - pure_dagger: keep PPO coeff at 0.0 for the full training horizon (default 20000 iterations)
+# - pure_dagger: keep PPO coeff at 0.0 for the full training horizon (default 40000 iterations)
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
@@ -604,8 +604,8 @@ TEACHER_ACTION_MIX_RATIO_START=${TEACHER_ACTION_MIX_RATIO_START:-}
 TEACHER_ACTION_MIX_RATIO_END=${TEACHER_ACTION_MIX_RATIO_END:-}
 TEACHER_ACTION_MIX_RATIO_END_ITERATION=${TEACHER_ACTION_MIX_RATIO_END_ITERATION:-}
 BC_LOSS_COEF=${BC_LOSS_COEF:-1.0}
-PURE_DAGGER_ITERATIONS=${PURE_DAGGER_ITERATIONS:-20000}
-NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-20000}
+PURE_DAGGER_ITERATIONS=${PURE_DAGGER_ITERATIONS:-40000}
+NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-40000}
 PPO_START_EPOCH=${PPO_START_EPOCH:-0}
 DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-4000}
 PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.9}
@@ -725,7 +725,7 @@ case "${SCHEDULE_VARIANT}" in
     ;;
   dag_first)
     if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
-      NUM_LEARNING_ITERATIONS=20000
+      NUM_LEARNING_ITERATIONS=40000
     fi
     if [[ "${PPO_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
       PPO_START_EPOCH=2000
@@ -748,7 +748,7 @@ case "${SCHEDULE_VARIANT}" in
     ;;
   ppo_first)
     if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
-      NUM_LEARNING_ITERATIONS=20000
+      NUM_LEARNING_ITERATIONS=40000
     fi
     if [[ "${PPO_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
       PPO_START_EPOCH=0
