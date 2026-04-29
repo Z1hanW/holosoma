@@ -9,7 +9,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-export PERCEPTION="${PERCEPTION:-camera_depth_d435i_defm_vit_s14}"
+export PERCEPTION="${PERCEPTION:-camera_depth_d435i_defm_efficientnet_b2}"
 
 echo "[INFO] train_object_defm.sh -> train_object_generalist_ds.sh"
 echo "[INFO] perception=${PERCEPTION}"

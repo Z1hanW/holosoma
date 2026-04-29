@@ -565,6 +565,8 @@ def _resolve_defm_forward_batch_size(model_name: str, freeze_backbone: bool) -> 
         return value
     if freeze_backbone and "vit" in model_name:
         return 256
+    if freeze_backbone and model_name.startswith("defm_"):
+        return 512
     return 0
 
 
@@ -768,6 +770,37 @@ class DeFMRegNetY800MFEncoder(DeFMEncoder):
             output_dim=output_dim,
             model_name="defm_regnet_y_800mf",
             backbone_dim=784,
+            output_key="global_backbone",
+            pretrained=pretrained,
+            pretrained_path=pretrained_path,
+            freeze_backbone=freeze_backbone,
+            target_size=target_size,
+            patch_size=patch_size,
+            use_no_bifpn=True,
+        )
+
+
+class DeFMEfficientNetB2Encoder(DeFMEncoder):
+    """Frozen-or-trainable DeFM EfficientNet-B2 depth encoder with metric-aware preprocessing."""
+
+    def __init__(
+        self,
+        input_height: int,
+        input_width: int,
+        output_dim: int,
+        *,
+        pretrained: bool = True,
+        pretrained_path: str | None = None,
+        freeze_backbone: bool = True,
+        target_size: int | tuple[int, int] | None = 224,
+        patch_size: int | None = None,
+    ):
+        super().__init__(
+            input_height=input_height,
+            input_width=input_width,
+            output_dim=output_dim,
+            model_name="defm_efficientnet_b2",
+            backbone_dim=208,
             output_key="global_backbone",
             pretrained=pretrained,
             pretrained_path=pretrained_path,
@@ -1031,6 +1064,23 @@ class BaseModule(nn.Module):
                     "defm_regnet_y_800mf requires perception_input_height and perception_input_width to be set."
                 )
             self.perception_encoder = DeFMRegNetY800MFEncoder(
+                input_height=int(input_height),
+                input_width=int(input_width),
+                output_dim=output_dim,
+                pretrained=bool(getattr(layer_config, "perception_pretrained", True)),
+                pretrained_path=getattr(layer_config, "perception_pretrained_path", None),
+                freeze_backbone=bool(getattr(layer_config, "perception_freeze_backbone", True)),
+                target_size=getattr(layer_config, "perception_target_size", None),
+                patch_size=getattr(layer_config, "perception_patch_size", None),
+            )
+        elif encoder_type == "defm_efficientnet_b2":
+            input_height = getattr(layer_config, "perception_input_height", None)
+            input_width = getattr(layer_config, "perception_input_width", None)
+            if input_height is None or input_width is None:
+                raise ValueError(
+                    "defm_efficientnet_b2 requires perception_input_height and perception_input_width to be set."
+                )
+            self.perception_encoder = DeFMEfficientNetB2Encoder(
                 input_height=int(input_height),
                 input_width=int(input_width),
                 output_dim=output_dim,

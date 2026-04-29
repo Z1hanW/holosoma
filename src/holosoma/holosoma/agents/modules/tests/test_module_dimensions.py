@@ -18,6 +18,7 @@ from holosoma.agents.modules import modules as module_impl
 from holosoma.agents.modules.modules import (
     AttentionLinearEncoder,
     BaseModule,
+    DeFMEfficientNetB2Encoder,
     DeFMRegNetY800MFEncoder,
     DeFMViTS14Encoder,
     FarTrackingDepthSmallEncoder,
@@ -559,6 +560,12 @@ def test_defm_vit_s14_encoder_chunks_frozen_backbone_forward(monkeypatch):
     assert chunk_shapes == [(2, 3, 224, 224), (2, 3, 224, 224), (1, 3, 224, 224)]
 
 
+def test_resolve_defm_forward_batch_size_chunks_frozen_cnn(monkeypatch):
+    monkeypatch.delenv("HOLOSOMA_DEFM_FORWARD_BATCH_SIZE", raising=False)
+
+    assert module_impl._resolve_defm_forward_batch_size("defm_efficientnet_b2", freeze_backbone=True) == 512
+
+
 def test_defm_regnet_y_800mf_encoder_forward_with_mock_runtime():
     """DeFM RegNetY-800MF encoder should project the global backbone feature."""
 
@@ -604,6 +611,47 @@ def test_defm_regnet_y_800mf_encoder_forward_with_mock_runtime():
         y = encoder(x)
 
     assert y.shape == (3, 128)
+
+
+def test_defm_efficientnet_b2_encoder_forward_with_mock_runtime():
+    """DeFM EfficientNet-B2 encoder should project the global backbone feature."""
+
+    class DummyDeFM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed_dim = 208
+
+        def forward(self, x):
+            raise AssertionError("EfficientNet-B2 encoder should use forward_no_bifpn().")
+
+        def forward_no_bifpn(self, x):
+            return {"global_backbone": torch.ones((x.shape[0], self.embed_dim), device=x.device, dtype=x.dtype)}
+
+    def fake_create_defm_model(model_name, pretrained=False, pretrained_path=None):
+        assert model_name == "defm_efficientnet_b2"
+        assert pretrained is True
+        assert pretrained_path is None
+        return DummyDeFM()
+
+    encoder = DeFMEfficientNetB2Encoder(
+        input_height=58,
+        input_width=87,
+        output_dim=64,
+        pretrained=True,
+        pretrained_path=None,
+        freeze_backbone=True,
+        target_size=224,
+        patch_size=None,
+    )
+
+    with patch(
+        "holosoma.agents.modules.modules._load_defm_runtime",
+        return_value=(fake_create_defm_model, None),
+    ):
+        x = torch.randn(3, 58 * 87)
+        y = encoder(x)
+
+    assert y.shape == (3, 64)
 
 
 def test_attention_linear_encoder_has_live_signal_at_init():
@@ -656,6 +704,32 @@ def test_apply_perception_overrides_sets_defm_regnet_actor_only_path():
     assert actor_cfg.type == "MLPPerceptionEncoder"
     assert actor_cfg.layer_config.perception_encoder_type == "defm_regnet_y_800mf"
     assert actor_cfg.layer_config.perception_output_dim == 784
+    assert actor_cfg.layer_config.perception_input_height == 58
+    assert actor_cfg.layer_config.perception_input_width == 87
+    assert actor_cfg.layer_config.perception_pretrained is True
+    assert actor_cfg.layer_config.perception_freeze_backbone is True
+    assert actor_cfg.layer_config.perception_target_size == 224
+    assert actor_cfg.layer_config.perception_patch_size is None
+    assert actor_cfg.layer_config.extra_input_to_hidden is False
+    assert critic_cfg.type == "MLP"
+    assert critic_cfg.layer_config.perception_input_name == ""
+
+
+def test_apply_perception_overrides_sets_defm_efficientnet_actor_only_path():
+    """DeFM EfficientNet preset should inject actor-only perception with concat fusion."""
+    config = replace(
+        g1_experiments.g1_29dof_wbt_w_object_distill_sparse_goal_mixed,
+        perception=perception_presets.camera_depth_d435i_defm_efficientnet_b2,
+    )
+
+    updated = apply_perception_overrides(config)
+
+    actor_cfg = updated.algo.config.module_dict.actor
+    critic_cfg = updated.algo.config.module_dict.critic
+
+    assert actor_cfg.type == "MLPPerceptionEncoder"
+    assert actor_cfg.layer_config.perception_encoder_type == "defm_efficientnet_b2"
+    assert actor_cfg.layer_config.perception_output_dim == 208
     assert actor_cfg.layer_config.perception_input_height == 58
     assert actor_cfg.layer_config.perception_input_width == 87
     assert actor_cfg.layer_config.perception_pretrained is True

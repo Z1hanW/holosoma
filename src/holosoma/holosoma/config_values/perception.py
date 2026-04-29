@@ -190,6 +190,19 @@ camera_depth_d435i_defm_regnet_y_800mf = replace(
     encoder_patch_size=None,
 )
 
+camera_depth_d435i_defm_efficientnet_b2 = replace(
+    camera_depth_d435i,
+    # Keep the same far-tracking-style 58x87 depth preprocessing, but use a smaller DeFM CNN.
+    encoder_output_dim=208,
+    encoder_type="defm_efficientnet_b2",
+    encoder_fusion="concat",
+    encoder_pretrained=True,
+    encoder_pretrained_path=None,
+    encoder_freeze_backbone=True,
+    encoder_target_size=224,
+    encoder_patch_size=None,
+)
+
 camera_depth_d435i_mujoco_render_848x480 = replace(
     camera_depth_d435i,
     # Render high-resolution MuJoCo depth, then crop/resize to the same 58x87
@@ -214,6 +227,7 @@ DEFAULTS = {
     "camera_depth_d435i_17x17": camera_depth_d435i_17x17,
     "camera_depth_d435i_defm_vit_s14": camera_depth_d435i_defm_vit_s14,
     "camera_depth_d435i_defm_regnet_y_800mf": camera_depth_d435i_defm_regnet_y_800mf,
+    "camera_depth_d435i_defm_efficientnet_b2": camera_depth_d435i_defm_efficientnet_b2,
     "camera_depth_d435i_mujoco_render_848x480": camera_depth_d435i_mujoco_render_848x480,
 }
 
@@ -224,6 +238,7 @@ __all__ = [
     "camera_depth_d435i_17x17",
     "camera_depth_d435i_defm_vit_s14",
     "camera_depth_d435i_defm_regnet_y_800mf",
+    "camera_depth_d435i_defm_efficientnet_b2",
     "camera_depth_d435i_mujoco_render_848x480",
     "DEFAULTS",
 ]
