@@ -997,6 +997,7 @@ IMAGE_HEIGHT_EXPLICIT=0
 [[ -n "${IMAGE_HEIGHT+x}" ]] && IMAGE_HEIGHT_EXPLICIT=1
 CAMERA_NEAR_EXPLICIT=0
 [[ -n "${CAMERA_NEAR+x}" ]] && CAMERA_NEAR_EXPLICIT=1
+CAMERA_NEAR=${CAMERA_NEAR:-0.3}
 CAMERA_FAR_EXPLICIT=0
 [[ -n "${CAMERA_FAR+x}" ]] && CAMERA_FAR_EXPLICIT=1
 CAMERA_MAX_DISTANCE_EXPLICIT=0
@@ -1529,7 +1530,7 @@ fi
 if [[ -n "${CAMERA_PITCH_DEG}" ]]; then
   PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-pitch-deg="${CAMERA_PITCH_DEG}")
 fi
-if [[ "${CAMERA_NEAR_EXPLICIT}" -eq 1 ]]; then
+if [[ -n "${CAMERA_NEAR}" ]]; then
   PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-near="${CAMERA_NEAR}")
 fi
 if [[ "${CAMERA_FAR_EXPLICIT}" -eq 1 ]]; then

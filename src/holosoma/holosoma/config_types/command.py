@@ -293,6 +293,23 @@ class MotionConfig:
     matched by clip id, so it can live outside the motion bank.
     """
 
+    contact_aware_carry_window_mode: str = "rel_z"
+    """How contact-aware root-command active windows are derived.
+
+    ``rel_z`` preserves the original object-root relative-height rule. ``peak_height`` uses
+    the full object world-height trace and keeps command active only while the object is
+    stably near the clip's peak carry height.
+    """
+
+    contact_aware_peak_height_alpha: float = 0.91
+    """Peak-height fraction used by ``contact_aware_carry_window_mode='peak_height'``.
+
+    The threshold is ``min_height + alpha * (max_height - min_height)``.
+    """
+
+    contact_aware_peak_height_smoothing_steps: int = 5
+    """Centered edge-padded moving-average window for peak-height carry-window detection."""
+
     uniform_t1_window_sampling_enabled: bool = False
     """Whether uniform timestep resets should density-boost a window around contact start ``t1``."""
 

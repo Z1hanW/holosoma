@@ -847,6 +847,9 @@ FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITE
 FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER:-}
 USE_ADAPTIVE_TIMESTEPS_SAMPLER=${USE_ADAPTIVE_TIMESTEPS_SAMPLER:-False}
 ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT=${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT:-"${SCRIPT_DIR}/outputs/clips"}
+CONTACT_AWARE_CARRY_WINDOW_MODE=${CONTACT_AWARE_CARRY_WINDOW_MODE:-rel_z}
+CONTACT_AWARE_PEAK_HEIGHT_ALPHA=${CONTACT_AWARE_PEAK_HEIGHT_ALPHA:-0.91}
+CONTACT_AWARE_PEAK_HEIGHT_SMOOTHING_STEPS=${CONTACT_AWARE_PEAK_HEIGHT_SMOOTHING_STEPS:-5}
 UNIFORM_T1_WINDOW_SAMPLING_ENABLED=${UNIFORM_T1_WINDOW_SAMPLING_ENABLED:-True}
 UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS=${UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS:-50}
 UNIFORM_T1_WINDOW_DENSITY_BOOST=${UNIFORM_T1_WINDOW_DENSITY_BOOST:-7.0}
@@ -874,6 +877,10 @@ if [[ "${ROOT_COMMAND_MODE}" == "contact-aware" ]]; then
   if [[ "${USE_ADAPTIVE_TIMESTEPS_SAMPLER_EXPLICIT}" -eq 0 ]]; then
     USE_ADAPTIVE_TIMESTEPS_SAMPLER=True
   fi
+  CONTACT_AWARE_CARRY_WINDOW_MODE=${CONTACT_AWARE_CARRY_WINDOW_MODE:-peak_height}
+  if [[ "${CONTACT_AWARE_CARRY_WINDOW_MODE}" == "rel_z" ]]; then
+    CONTACT_AWARE_CARRY_WINDOW_MODE=peak_height
+  fi
 fi
 
 # Keep camera intrinsics/range on preset defaults unless explicitly overridden.
@@ -881,7 +888,7 @@ fi
 IMAGE_WIDTH=${IMAGE_WIDTH:-}
 IMAGE_HEIGHT=${IMAGE_HEIGHT:-}
 CAMERA_PITCH_DEG=${CAMERA_PITCH_DEG-10}
-CAMERA_NEAR=${CAMERA_NEAR:-}
+CAMERA_NEAR=${CAMERA_NEAR:-0.3}
 CAMERA_FAR=${CAMERA_FAR:-}
 CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-}
 PERCEPTION_WARP_PREPROCESS=${PERCEPTION_WARP_PREPROCESS:-}
@@ -1082,7 +1089,7 @@ if [[ "${ROOT_COMMAND_MODE}" == "contact-aware" ]]; then
     SCHEDULE_NAME="${SCHEDULE_NAME}_contact_aware"
   fi
   if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
-    SCHEDULE_NOTES="${SCHEDULE_NOTES} Contact-aware student sparse root command stays zero before pickup and during the release/putdown tail; only the mid-carry segment exposes motion command."
+    SCHEDULE_NOTES="${SCHEDULE_NOTES} Contact-aware student sparse root command uses peak-height carry-window detection by default: command stays zero before the object is stably near peak carry height and after it stably drops below that height band."
   fi
 fi
 
@@ -1336,7 +1343,7 @@ if [[ "${PERCEPTION_PRESET}" != "none" ]]; then
     PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-pitch-deg="${CAMERA_PITCH_DEG}")
   fi
   PERCEPTION_OVERRIDE_ARGS+=(--perception.inject-into-critic-modules="${PERCEPTION_INTO_CRITIC_MODULES}")
-  if [[ "${CAMERA_NEAR_EXPLICIT}" -eq 1 ]]; then
+  if [[ -n "${CAMERA_NEAR}" ]]; then
     PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-near="${CAMERA_NEAR}")
   fi
   if [[ "${CAMERA_FAR_EXPLICIT}" -eq 1 ]]; then
@@ -1468,6 +1475,9 @@ exec env \
     --command.setup-terms.motion-command.params.motion-config.sparse-object-goal.external-goal-pos-local-max "${EXTERNAL_GOAL_POS_LOCAL_MAX}" \
     --command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler="${USE_ADAPTIVE_TIMESTEPS_SAMPLER}" \
     --command.setup-terms.motion-command.params.motion-config.adaptive-sampling-contact-interval-root="${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}" \
+    --command.setup-terms.motion-command.params.motion-config.contact-aware-carry-window-mode="${CONTACT_AWARE_CARRY_WINDOW_MODE}" \
+    --command.setup-terms.motion-command.params.motion-config.contact-aware-peak-height-alpha="${CONTACT_AWARE_PEAK_HEIGHT_ALPHA}" \
+    --command.setup-terms.motion-command.params.motion-config.contact-aware-peak-height-smoothing-steps="${CONTACT_AWARE_PEAK_HEIGHT_SMOOTHING_STEPS}" \
     --command.setup-terms.motion-command.params.motion-config.uniform-t1-window-sampling-enabled="${UNIFORM_T1_WINDOW_SAMPLING_ENABLED}" \
     --command.setup-terms.motion-command.params.motion-config.uniform-t1-window-half-width-steps="${UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS}" \
     --command.setup-terms.motion-command.params.motion-config.uniform-t1-window-density-boost="${UNIFORM_T1_WINDOW_DENSITY_BOOST}" \

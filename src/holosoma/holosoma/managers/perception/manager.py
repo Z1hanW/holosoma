@@ -1497,11 +1497,11 @@ class PerceptionManager:
                     dtype=self._far_tracking_camera_sensor.camera_sensor_local_orientation.dtype,
                 )
             )
-            self._far_tracking_camera_sensor.camera_sensor_data_frame_quat[:] = (
+            self._far_tracking_camera_sensor.camera_sensor_data_frame_quat = (
                 self._shared_camera_sensor_data_frame_quat.to(
                     device=self._far_tracking_camera_sensor.camera_sensor_data_frame_quat.device,
                     dtype=self._far_tracking_camera_sensor.camera_sensor_data_frame_quat.dtype,
-                )
+                ).clone()
             )
         self._far_tracking_tf_apply = ft_tf_apply_xyzw
         self._far_tracking_quat_mul = ft_quat_mul_xyzw

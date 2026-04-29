@@ -235,6 +235,69 @@ def _contact_aware_carry_window_from_rel_z(
     return carry_start, carry_end
 
 
+def _smooth_1d_edge_padded(values: torch.Tensor, window_steps: int) -> torch.Tensor:
+    """Return a centered moving average with edge padding, preserving length."""
+    if values.numel() == 0:
+        return values
+
+    window_steps = max(1, int(window_steps))
+    if window_steps <= 1:
+        return values
+
+    left_pad = window_steps // 2
+    right_pad = window_steps - 1 - left_pad
+    padded_parts = []
+    if left_pad > 0:
+        padded_parts.append(values[:1].expand(left_pad))
+    padded_parts.append(values)
+    if right_pad > 0:
+        padded_parts.append(values[-1:].expand(right_pad))
+    padded = torch.cat(padded_parts, dim=0)
+    kernel = torch.full((1, 1, window_steps), 1.0 / float(window_steps), device=values.device, dtype=values.dtype)
+    return F.conv1d(padded.view(1, 1, -1), kernel).view(-1)
+
+
+def _contact_aware_carry_window_from_peak_height(
+    object_height: torch.Tensor,
+    *,
+    peak_height_alpha: float = 0.91,
+    smoothing_steps: int = 5,
+    consecutive_steps: int = _RUNTIME_PICKUP_CONSECUTIVE_STEPS,
+) -> tuple[int, int]:
+    """Return the [start, end) carry window from the high plateau of object world height."""
+    if object_height.numel() == 0:
+        return 0, 0
+
+    height = _smooth_1d_edge_padded(object_height, smoothing_steps)
+    total_steps = int(height.shape[0])
+    alpha = max(0.0, min(float(peak_height_alpha), 1.0))
+
+    h_min = height.min()
+    h_peak = height.max()
+    threshold = h_min + torch.clamp(h_peak - h_min, min=0.0) * alpha
+    high_mask = height >= threshold
+
+    carry_start = _first_sustained_true_index(high_mask, consecutive_steps)
+    if carry_start is None:
+        high_indices = torch.nonzero(high_mask, as_tuple=False)
+        if high_indices.numel() > 0:
+            carry_start = int(high_indices[0, 0].item())
+        else:
+            carry_start = int(torch.argmax(height).item())
+    carry_start = max(0, min(int(carry_start), total_steps))
+
+    peak_step = int(torch.argmax(height).item())
+    carry_end = _first_sustained_true_index_from(
+        ~high_mask,
+        consecutive_steps,
+        start_idx=min(peak_step + 1, total_steps),
+    )
+    if carry_end is None:
+        carry_end = total_steps
+    carry_end = max(carry_start, min(int(carry_end), total_steps))
+    return carry_start, carry_end
+
+
 def _normalize_contact_interval_pair(raw_interval: Any) -> tuple[int, int] | None:
     arr = np.asarray(raw_interval, dtype=np.int64).reshape(-1)
     if arr.size < 2:
@@ -3683,16 +3746,31 @@ class MotionCommand(CommandTermBase):
         return self._get_clip_pickup_stats_by_clip()[1]
 
     def _get_contact_aware_carry_window_by_clip(self) -> torch.Tensor:
+        carry_window_mode = (
+            str(getattr(self.motion_cfg, "contact_aware_carry_window_mode", "rel_z")).strip().lower().replace("-", "_")
+        )
+        peak_height_alpha = float(getattr(self.motion_cfg, "contact_aware_peak_height_alpha", 0.91))
+        peak_height_smoothing_steps = int(getattr(self.motion_cfg, "contact_aware_peak_height_smoothing_steps", 5))
         cache_name = (
             "_contact_aware_carry_window_by_clip_"
+            f"{carry_window_mode}_"
             f"h{_RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD:.4f}_"
             f"r{_CLIP_PICKUP_LIFT_RATIO_THRESHOLD:.4f}_"
+            f"peak{peak_height_alpha:.4f}_"
+            f"smooth{peak_height_smoothing_steps:d}_"
             f"c{_RUNTIME_PICKUP_CONSECUTIVE_STEPS:d}_"
             f"release{_ADAPTIVE_SAMPLING_CONTACT_STAGE_RELEASE_LEAD_STEPS:d}"
         ).replace(".", "p")
         cached = getattr(self, cache_name, None)
         if cached is not None:
             return cached
+
+        if carry_window_mode not in {"rel_z", "peak_height"}:
+            raise ValueError(
+                "Unsupported contact_aware_carry_window_mode="
+                f"'{getattr(self.motion_cfg, 'contact_aware_carry_window_mode', None)}'. "
+                "Expected 'rel_z' or 'peak_height'."
+            )
 
         carry_window_by_clip = torch.zeros((self.motion.num_clips, 2), device=self.device, dtype=torch.long)
         carry_window_by_clip[:, 1] = torch.clamp(self.motion.clip_lengths, min=0)
@@ -3725,14 +3803,22 @@ class MotionCommand(CommandTermBase):
                     int(self._adaptive_sampling_contact_window_by_clip[clip_idx, 1].item()),
                 )
 
-            carry_start, carry_end = _contact_aware_carry_window_from_rel_z(
-                clip_rel_z,
-                contact_interval=contact_interval,
-                lift_height_threshold=_RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD,
-                lift_ratio_threshold=_CLIP_PICKUP_LIFT_RATIO_THRESHOLD,
-                consecutive_steps=_RUNTIME_PICKUP_CONSECUTIVE_STEPS,
-                release_lead_steps=_ADAPTIVE_SAMPLING_CONTACT_STAGE_RELEASE_LEAD_STEPS,
-            )
+            if carry_window_mode == "peak_height":
+                carry_start, carry_end = _contact_aware_carry_window_from_peak_height(
+                    object_pos_w[clip_start:clip_end, 2],
+                    peak_height_alpha=peak_height_alpha,
+                    smoothing_steps=peak_height_smoothing_steps,
+                    consecutive_steps=_RUNTIME_PICKUP_CONSECUTIVE_STEPS,
+                )
+            else:
+                carry_start, carry_end = _contact_aware_carry_window_from_rel_z(
+                    clip_rel_z,
+                    contact_interval=contact_interval,
+                    lift_height_threshold=_RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD,
+                    lift_ratio_threshold=_CLIP_PICKUP_LIFT_RATIO_THRESHOLD,
+                    consecutive_steps=_RUNTIME_PICKUP_CONSECUTIVE_STEPS,
+                    release_lead_steps=_ADAPTIVE_SAMPLING_CONTACT_STAGE_RELEASE_LEAD_STEPS,
+                )
             carry_window_by_clip[clip_idx, 0] = carry_start
             carry_window_by_clip[clip_idx, 1] = carry_end
 
