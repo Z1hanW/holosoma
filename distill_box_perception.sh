@@ -1354,6 +1354,9 @@ if [[ -n "${TEACHER_COMPAT_NOTES_AUTO}" ]]; then
     TEACHER_COMPAT_NOTES="${TEACHER_COMPAT_NOTES_AUTO}"
   fi
 fi
+if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
+  TEACHER_COMPAT_NOTES="teacher_obs_keys defaulted to actor_obs to match u5lguxvl teacher; teacher perception disabled to match u5lguxvl teacher; actor_obs history length set to 5 to match teacher checkpoint"
+fi
 
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
 echo "[INFO] teacher_compat_profile=${TEACHER_COMPAT_PROFILE_RESOLVED}"
