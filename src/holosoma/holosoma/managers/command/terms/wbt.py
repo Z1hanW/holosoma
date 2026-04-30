@@ -2613,6 +2613,21 @@ class MotionCommand(CommandTermBase):
         root_ang_vel = self._init_root_ang_vel.unsqueeze(0).expand(env_ids.numel(), -1).clone()
         return dof_pos, dof_vel, root_pos, root_rot, root_lin_vel, root_ang_vel
 
+    def _update_adaptive_timestep_failure_stats_before_resample(self, env_ids: torch.Tensor) -> None:
+        if not self.use_adaptive_timesteps_sampler:
+            return
+        episode_failed = self._env.termination_manager.terminated[env_ids]
+        if not torch.any(episode_failed):
+            return
+
+        # Must use the previous episode's clip ids before reset samples replacement clips.
+        failed_at_time_step = self.time_steps[env_ids][episode_failed]
+        failed_clip_ids = self.clip_ids[env_ids][episode_failed]
+        self.adaptive_timesteps_sampler.update_current_bin_failed_count(
+            failed_at_time_step,
+            clip_ids=failed_clip_ids,
+        )
+
     def reset(self, env_ids: torch.Tensor | None) -> None:
         """called per reset_idx, reset timesteps and robot/object poses."""
         env_ids = self._ensure_index_tensor(env_ids)
@@ -2629,6 +2644,8 @@ class MotionCommand(CommandTermBase):
             and self._terrain_row_count > 0
             and self.motion.num_clips > 0
         )
+
+        self._update_adaptive_timestep_failure_stats_before_resample(env_ids)
 
         if use_fixed_tile_layout:
             row_count = max(1, int(self._terrain_row_count))
@@ -2672,14 +2689,6 @@ class MotionCommand(CommandTermBase):
 
         # 0. Sample the time steps
         if self.use_adaptive_timesteps_sampler:
-            episode_failed = self._env.termination_manager.terminated[env_ids]
-            if torch.any(episode_failed):
-                failed_at_time_step = self.time_steps[env_ids][episode_failed]
-                failed_clip_ids = self.clip_ids[env_ids][episode_failed]
-                self.adaptive_timesteps_sampler.update_current_bin_failed_count(
-                    failed_at_time_step,
-                    clip_ids=failed_clip_ids,
-                )
             phase = self.adaptive_timesteps_sampler.sample(self.clip_ids[env_ids])
         else:
             phase = torch.rand(env_ids.numel(), device=self.device)

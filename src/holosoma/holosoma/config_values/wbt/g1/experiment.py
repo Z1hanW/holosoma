@@ -647,6 +647,24 @@ g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref = replace(
     reward=reward.g1_29dof_wbt_reward_w_object_r2s_rollout_reference_guidance,
 )
 
+_shoo7sr1_debug_observation_groups = dict(
+    observation.g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd.groups
+)
+_shoo7sr1_debug_observation_groups["actor_obs"] = _shoo7sr1_debug_observation_groups["actor_obs_legacy"]
+_shoo7sr1_debug_observation = replace(
+    observation.g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
+    groups=_shoo7sr1_debug_observation_groups,
+)
+
+g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref_shoo7sr1_debug = replace(
+    g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref,
+    training=replace(
+        g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref.training,
+        name="g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref_shoo7sr1_debug",
+    ),
+    observation=_shoo7sr1_debug_observation,
+)
+
 g1_29dof_wbt_fast_sac_w_object = replace(
     g1_29dof_wbt_fast_sac,
     command=command.g1_29dof_wbt_command_w_object,
@@ -689,6 +707,7 @@ __all__ = [
     "g1_29dof_wbt_w_object_distill_sparse_goal_mixed_r2s_rollout_ref_pickup",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_contact",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref",
+    "g1_29dof_wbt_w_object_distill_sparse_root_cmd_r2s_rollout_ref_shoo7sr1_debug",
     "g1_29dof_wbt_terrain_distill_sparse_root_cmd",
     "g1_29dof_wbt_w_object_distill_sparse_root_cmd_legacy",
 ]

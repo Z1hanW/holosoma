@@ -229,7 +229,7 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   TRACKER_PROFILE="old-tracker"
   SCHEDULE_VARIANT="ppo_first"
   ROOT_COMMAND_MODE="default"
-  EXP="g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref"
+  EXP="g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref-shoo7sr1-debug"
 fi
 
 POSITIONAL_TEACHER_CHECKPOINT_SET=0
@@ -323,6 +323,8 @@ DAGGER_END_EPOCH_EXPLICIT=0
 [[ -n "${DAGGER_END_EPOCH+x}" ]] && DAGGER_END_EPOCH_EXPLICIT=1
 NUM_LEARNING_ITERATIONS_EXPLICIT=0
 [[ -n "${NUM_LEARNING_ITERATIONS+x}" ]] && NUM_LEARNING_ITERATIONS_EXPLICIT=1
+NUM_ENVS_EXPLICIT=0
+[[ -n "${NUM_ENVS+x}" ]] && NUM_ENVS_EXPLICIT=1
 PPO_TARGET_COEFF_EXPLICIT=0
 [[ -n "${PPO_TARGET_COEFF+x}" ]] && PPO_TARGET_COEFF_EXPLICIT=1
 PPO_START_COEFF_EXPLICIT=0
@@ -941,9 +943,7 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   STUDENT_ACTOR_INPUTS="['actor_obs_root','actor_obs_proprio_no_linvel']"
   STUDENT_ACTOR_INPUTS_EXPLICIT=1
   TEACHER_COMPAT_PROFILE="u5lguxvl_generalist"
-  # Current runtime actor_obs has newer object target terms. The u5lguxvl
-  # teacher/shoo7sr1-era actor_obs schema is now exposed as actor_obs_legacy.
-  TEACHER_OBS_KEYS="actor_obs_legacy"
+  TEACHER_OBS_KEYS="actor_obs"
   TEACHER_OBS_KEYS_EXPLICIT=1
   TEACHER_PERCEPTION_PRESET="none"
   TEACHER_PERCEPTION_PRESET_EXPLICIT=1
@@ -951,6 +951,8 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   TEACHER_PERCEPTION_OBS_KEY_EXPLICIT=1
   TEACHER_ACTOR_OBS_HISTORY_LENGTH="5"
   TEACHER_ACTOR_OBS_HISTORY_LENGTH_EXPLICIT=1
+  STUDENT_PROPRIO_HISTORY_LENGTH=5
+  CRITIC_PROPRIO_HISTORY_LENGTH=5
   CRITIC_PERCEPTION_PRESET="none"
   CRITIC_PERCEPTION_OBS_KEY="critic_perception_obs"
   PERCEPTION_INTO_CRITIC_MODULES="False"
@@ -978,8 +980,14 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   USE_ADAPTIVE_TIMESTEPS_SAMPLER_EXPLICIT=1
   SCHEDULE_NAME="sparse_root_teacher_anchor_v4_ppo_first_step_mix"
   SCHEDULE_NAME_EXPLICIT=1
-  SCHEDULE_NOTES="shoo7sr1 debug reproduction with only perception.camera_near changed from 0.1 to 0.3; teacher uses runtime actor_obs_legacy because it is the current name for the shoo7sr1-era actor_obs schema."
+  SCHEDULE_NOTES="PPO-first hybrid: PPO and DAgger are both active from iteration 0. PPO starts at 0.1 and increases by 0.1 every 500 iterations until 0.9 at 4000; effective DAgger weight starts at 0.9 and decreases to 0.1."
   SCHEDULE_NOTES_EXPLICIT=1
+  if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
+    NUM_LEARNING_ITERATIONS=20001
+  fi
+  if [[ "${NUM_ENVS_EXPLICIT}" -eq 0 ]]; then
+    NUM_ENVS=1024
+  fi
   DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES=False
   SPARSE_GOAL_ENABLED=False
   CLIP_GOAL_DELTA_MIN_STEPS=60
@@ -1359,6 +1367,12 @@ fi
 if [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH}" ]]; then
   echo "[INFO] teacher_actor_obs_history_length=${TEACHER_ACTOR_OBS_HISTORY_LENGTH}"
 fi
+if [[ -n "${STUDENT_PROPRIO_HISTORY_LENGTH:-}" ]]; then
+  echo "[INFO] student_proprio_history_length=${STUDENT_PROPRIO_HISTORY_LENGTH}"
+fi
+if [[ -n "${CRITIC_PROPRIO_HISTORY_LENGTH:-}" ]]; then
+  echo "[INFO] critic_proprio_history_length=${CRITIC_PROPRIO_HISTORY_LENGTH}"
+fi
 echo "[INFO] run_name=${RUN_NAME} training_name=${TRAINING_NAME}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
 echo "[INFO] export_onnx=${EXPORT_ONNX}"
@@ -1462,6 +1476,17 @@ if [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH}" ]]; then
       )
     fi
   done
+fi
+if [[ -n "${STUDENT_PROPRIO_HISTORY_LENGTH:-}" ]]; then
+  EXTRA_DISTILL_ARGS+=(
+    --observation.groups.actor_obs_proprio.history-length="${STUDENT_PROPRIO_HISTORY_LENGTH}"
+    --observation.groups.actor_obs_proprio_no_linvel.history-length="${STUDENT_PROPRIO_HISTORY_LENGTH}"
+  )
+fi
+if [[ -n "${CRITIC_PROPRIO_HISTORY_LENGTH:-}" ]]; then
+  EXTRA_DISTILL_ARGS+=(
+    --observation.groups.critic_proprio_history.history-length="${CRITIC_PROPRIO_HISTORY_LENGTH}"
+  )
 fi
 if [[ -n "${PPO_START_NOISE_STD}" ]]; then
   EXTRA_DISTILL_ARGS+=(
