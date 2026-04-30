@@ -343,8 +343,6 @@ IMAGE_WIDTH_EXPLICIT=0
 [[ -n "${IMAGE_WIDTH+x}" ]] && IMAGE_WIDTH_EXPLICIT=1
 IMAGE_HEIGHT_EXPLICIT=0
 [[ -n "${IMAGE_HEIGHT+x}" ]] && IMAGE_HEIGHT_EXPLICIT=1
-CAMERA_NEAR_EXPLICIT=0
-[[ -n "${CAMERA_NEAR+x}" ]] && CAMERA_NEAR_EXPLICIT=1
 CAMERA_FAR_EXPLICIT=0
 [[ -n "${CAMERA_FAR+x}" ]] && CAMERA_FAR_EXPLICIT=1
 CAMERA_MAX_DISTANCE_EXPLICIT=0
@@ -930,7 +928,6 @@ fi
 IMAGE_WIDTH=${IMAGE_WIDTH:-}
 IMAGE_HEIGHT=${IMAGE_HEIGHT:-}
 CAMERA_PITCH_DEG=${CAMERA_PITCH_DEG-10}
-CAMERA_NEAR=${CAMERA_NEAR:-0.3}
 CAMERA_FAR=${CAMERA_FAR:-}
 CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-}
 PERCEPTION_WARP_PREPROCESS=${PERCEPTION_WARP_PREPROCESS:-}
@@ -1029,8 +1026,6 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   IMAGE_HEIGHT=60
   IMAGE_HEIGHT_EXPLICIT=1
   CAMERA_PITCH_DEG=10
-  CAMERA_NEAR=0.3
-  CAMERA_NEAR_EXPLICIT=1
   CAMERA_FAR=3.0
   CAMERA_FAR_EXPLICIT=1
   CAMERA_MAX_DISTANCE=3.0
@@ -1183,6 +1178,9 @@ case "${SCHEDULE_VARIANT}" in
     fi
     ;;
   ppo_first)
+    if [[ "${USE_ADAPTIVE_TIMESTEPS_SAMPLER_EXPLICIT}" -eq 0 ]]; then
+      USE_ADAPTIVE_TIMESTEPS_SAMPLER=True
+    fi
     if [[ "${PPO_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
       PPO_START_EPOCH=0
     fi
@@ -1386,11 +1384,6 @@ if [[ -n "${CAMERA_PITCH_DEG}" ]]; then
 else
   echo "[INFO] camera_pitch_deg=<preset default>"
 fi
-if [[ -n "${CAMERA_NEAR}" ]]; then
-  echo "[INFO] camera_near=${CAMERA_NEAR}"
-else
-  echo "[INFO] camera_near=<preset default>"
-fi
 if [[ -n "${CAMERA_FAR}" || -n "${CAMERA_MAX_DISTANCE}" ]]; then
   echo "[INFO] camera_far=${CAMERA_FAR:-<preset default>} camera_max_distance=${CAMERA_MAX_DISTANCE:-<preset default>}"
 fi
@@ -1523,9 +1516,6 @@ if [[ "${PERCEPTION_PRESET}" != "none" ]]; then
   fi
   if [[ "${PERCEPTION_INTO_CRITIC_MODULES_EXPLICIT}" -eq 1 ]]; then
     PERCEPTION_OVERRIDE_ARGS+=(--perception.inject-into-critic-modules="${PERCEPTION_INTO_CRITIC_MODULES}")
-  fi
-  if [[ -n "${CAMERA_NEAR}" ]]; then
-    PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-near="${CAMERA_NEAR}")
   fi
   if [[ "${CAMERA_FAR_EXPLICIT}" -eq 1 ]]; then
     PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-far="${CAMERA_FAR}")
