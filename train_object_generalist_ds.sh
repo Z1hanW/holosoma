@@ -148,6 +148,9 @@ ACTOR_LR=${ACTOR_LR:-1e-05}
 CRITIC_LR=${CRITIC_LR:-1e-05}
 NUM_LEARNING_EPOCHS=${NUM_LEARNING_EPOCHS:-7}
 CLIP_WEIGHTING_STRATEGY=${CLIP_WEIGHTING_STRATEGY:-uniform_clip}
+TRAINING_SEED=${TRAINING_SEED:-${SEED:-}}
+RANDOMIZATION_PRESET=${RANDOMIZATION_PRESET:-${RANDOMIZATION:-}}
+INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-}
 
 AUTO_PREP_DS_BANK=${AUTO_PREP_DS_BANK:-auto}
 DS_PREP_CLEAN_OUT=${DS_PREP_CLEAN_OUT:-1}
@@ -191,6 +194,41 @@ GENERALIST_CONTACT_REWARD_MODE=${GENERALIST_CONTACT_REWARD_MODE:-tanh}
 GENERALIST_CONTACT_REWARD_THRESHOLD=${GENERALIST_CONTACT_REWARD_THRESHOLD:-1.0}
 GENERALIST_CONTACT_REWARD_FORCE_SCALE=${GENERALIST_CONTACT_REWARD_FORCE_SCALE:-25.0}
 GENERALIST_LIMITS_DOF_POS_WEIGHT=${GENERALIST_LIMITS_DOF_POS_WEIGHT:--100.0}
+
+if [[ -n "${TRAINING_SEED}" ]]; then
+  if [[ ! "${TRAINING_SEED}" =~ ^-?[0-9]+$ ]]; then
+    echo "[ERROR] TRAINING_SEED/SEED must be an integer. Got: ${TRAINING_SEED}" >&2
+    exit 2
+  fi
+fi
+
+if [[ -n "${INIT_AT_RANDOM_EP_LEN}" ]]; then
+  case "$(echo "${INIT_AT_RANDOM_EP_LEN}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      INIT_AT_RANDOM_EP_LEN=True
+      ;;
+    0|false|no|off)
+      INIT_AT_RANDOM_EP_LEN=False
+      ;;
+    *)
+      echo "[ERROR] INIT_AT_RANDOM_EP_LEN must be a boolean. Got: ${INIT_AT_RANDOM_EP_LEN}" >&2
+      exit 2
+      ;;
+  esac
+fi
+
+if [[ -n "${RANDOMIZATION_PRESET}" ]]; then
+  case "${RANDOMIZATION_PRESET}" in
+    none|disabled|t1_29dof|g1_29dof|g1_29dof_wbt|g1_29dof_wbt_with_action_delay|g1_29dof_wbt_w_object|g1_29dof_wbt_w_object_with_action_delay)
+      ;;
+    *)
+      echo "[ERROR] RANDOMIZATION/RANDOMIZATION_PRESET must be one of:" >&2
+      echo "[ERROR]   none, disabled, t1_29dof, g1_29dof, g1_29dof_wbt, g1_29dof_wbt_with_action_delay, g1_29dof_wbt_w_object, g1_29dof_wbt_w_object_with_action_delay" >&2
+      echo "[ERROR] Got: ${RANDOMIZATION_PRESET}" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 reject_legacy_converted_res_path() {
   local name="$1"
@@ -1450,6 +1488,7 @@ echo "[INFO] Termination defaults: BadTracking full 3D + motion_ends"
 echo "[INFO] GPU_SELECTION=all-visible"
 echo "[INFO] AVAILABLE_GPU_COUNT=${AVAILABLE_GPU_COUNT}"
 echo "[INFO] NPROC=${NPROC} PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
+echo "[INFO] TRAINING_SEED=${TRAINING_SEED:-<config-default>} RANDOMIZATION=${RANDOMIZATION_PRESET:-<exp-default>} INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-<algo-default>}"
 echo "[INFO] HOLOSOMA_OBJECT_SPAWN_MODE=${HOLOSOMA_OBJECT_SPAWN_MODE}"
 if [[ -n "${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}" ]]; then
   echo "[INFO] perception_object_geometry_mode=${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}"
@@ -1501,6 +1540,12 @@ train_cmd=(
   --command.setup-terms.motion-command.params.motion-config.enable-default-pose-prepend="${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
   --command.setup-terms.motion-command.params.motion-config.default-pose-prepend-duration-s="${DEFAULT_POSE_PREPEND_DURATION_S}"
 )
+if [[ -n "${TRAINING_SEED}" ]]; then
+  train_cmd+=(--training.seed="${TRAINING_SEED}")
+fi
+if [[ -n "${INIT_AT_RANDOM_EP_LEN}" ]]; then
+  train_cmd+=(--algo.config.init_at_random_ep_len="${INIT_AT_RANDOM_EP_LEN}")
+fi
 for reward_spec in "${CONTACT_REWARD_TERMS[@]}"; do
   reward_term="${reward_spec%%:*}"
   reward_weight="${reward_spec#*:}"
@@ -1584,6 +1629,9 @@ elif [[ "${DATA_MODE}" == "fix-omomo-quater" ]]; then
     --command.setup-terms.motion-command.params.motion-config.fixed-clip-group-assignment.group-clip-name-prefixes="${FIX_OMOMO_QUATER_PREFIXES}"
     --command.setup-terms.motion-command.params.motion-config.fixed-clip-group-assignment.group-env-fraction="${FIX_OMOMO_QUATER_ENV_FRACTION}"
   )
+fi
+if [[ -n "${RANDOMIZATION_PRESET}" ]]; then
+  train_cmd+=("randomization:${RANDOMIZATION_PRESET}")
 fi
 train_cmd+=("${EXTRA_ARGS[@]}")
 train_cmd+=(logger:wandb)

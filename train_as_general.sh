@@ -13,6 +13,14 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 OMOMO_DATA_DIR=${OMOMO_DATA_DIR:-"${SCRIPT_DIR}/data/ds_as_data/omomo"}
 OMOMO_OBJECT_MAP=${OMOMO_OBJECT_MAP:-"${OMOMO_DATA_DIR}/_clip_object_urdf_map.json"}
 OMOMO_EXPECTED_TOTAL=${OMOMO_EXPECTED_TOTAL:-45}
+# Explicit override knobs forwarded to train_object_generalist_ds.sh:
+#   NUM_ENVS / NPROC / PER_GPU_ENVS / MASTER_PORT
+#   TRAINING_SEED or SEED
+#   RANDOMIZATION_PRESET or RANDOMIZATION
+#   INIT_AT_RANDOM_EP_LEN
+TRAINING_SEED=${TRAINING_SEED:-${SEED:-}}
+RANDOMIZATION_PRESET=${RANDOMIZATION_PRESET:-${RANDOMIZATION:-}}
+INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-}
 
 LOCAL_DATA_ROOT=$(realpath -m "${SCRIPT_DIR}/data")
 OMOMO_DATA_DIR=$(realpath -m "${OMOMO_DATA_DIR}")
@@ -183,6 +191,9 @@ export OBJECT_GEOMETRY_MODE
 export HOLOSOMA_OBJECT_SPAWN_MODE="${OBJECT_SPAWN_MODE}"
 export HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE="${OBJECT_GEOMETRY_MODE}"
 export HOLOSOMA_OBJECT_COLLIDER_TYPE=${HOLOSOMA_OBJECT_COLLIDER_TYPE:-convex_decomposition}
+export TRAINING_SEED
+export RANDOMIZATION_PRESET
+export INIT_AT_RANDOM_EP_LEN
 
 export EXP=${EXP:-g1-29dof-wbt-w-object-generalist}
 export SEQUENCE_NAME=${SEQUENCE_NAME:-omomo-real-mesh-cotrack}
@@ -207,11 +218,48 @@ export FULL_BODY_ANG_VEL_SIGMA=${FULL_BODY_ANG_VEL_SIGMA:-4.5}
 export OBJECT_POS_SIGMA=${OBJECT_POS_SIGMA:-0.45}
 export OBJECT_ORI_SIGMA=${OBJECT_ORI_SIGMA:-0.6}
 
+if [[ -n "${TRAINING_SEED}" ]]; then
+  if [[ ! "${TRAINING_SEED}" =~ ^-?[0-9]+$ ]]; then
+    echo "[ERROR] TRAINING_SEED/SEED must be an integer. Got: ${TRAINING_SEED}" >&2
+    exit 2
+  fi
+fi
+
+if [[ -n "${INIT_AT_RANDOM_EP_LEN}" ]]; then
+  case "$(echo "${INIT_AT_RANDOM_EP_LEN}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      INIT_AT_RANDOM_EP_LEN=True
+      ;;
+    0|false|no|off)
+      INIT_AT_RANDOM_EP_LEN=False
+      ;;
+    *)
+      echo "[ERROR] INIT_AT_RANDOM_EP_LEN must be a boolean. Got: ${INIT_AT_RANDOM_EP_LEN}" >&2
+      exit 2
+      ;;
+  esac
+fi
+
+if [[ -n "${RANDOMIZATION_PRESET}" ]]; then
+  case "${RANDOMIZATION_PRESET}" in
+    none|disabled|t1_29dof|g1_29dof|g1_29dof_wbt|g1_29dof_wbt_with_action_delay|g1_29dof_wbt_w_object|g1_29dof_wbt_w_object_with_action_delay)
+      ;;
+    *)
+      echo "[ERROR] RANDOMIZATION/RANDOMIZATION_PRESET must be one of:" >&2
+      echo "[ERROR]   none, disabled, t1_29dof, g1_29dof, g1_29dof_wbt, g1_29dof_wbt_with_action_delay, g1_29dof_wbt_w_object, g1_29dof_wbt_w_object_with_action_delay" >&2
+      echo "[ERROR] Got: ${RANDOMIZATION_PRESET}" >&2
+      exit 2
+      ;;
+  esac
+fi
+
 echo "[INFO] Launching AS/OMOMO real-mesh co-tracking generalist training"
 echo "[INFO] MOTION_DIR=${MOTION_DIR}"
 echo "[INFO] OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH}"
 echo "[INFO] HOLOSOMA_OBJECT_SPAWN_MODE=${HOLOSOMA_OBJECT_SPAWN_MODE}"
 echo "[INFO] HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE=${HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE}"
 echo "[INFO] HOLOSOMA_OBJECT_COLLIDER_TYPE=${HOLOSOMA_OBJECT_COLLIDER_TYPE}"
+echo "[INFO] NPROC=${NPROC:-<auto>} PER_GPU_ENVS=${PER_GPU_ENVS:-2048} NUM_ENVS=${NUM_ENVS:-<NPROC*PER_GPU_ENVS>} MASTER_PORT=${MASTER_PORT:-<random>}"
+echo "[INFO] TRAINING_SEED=${TRAINING_SEED:-<config-default>} RANDOMIZATION=${RANDOMIZATION_PRESET:-<exp-default>} INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-<algo-default>}"
 
 exec bash "${SCRIPT_DIR}/train_object_generalist_ds.sh" pure-real "$@"
