@@ -667,6 +667,7 @@ esac
 
 if [[ (
   "${EXP}" == "g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref" ||
+  "${EXP}" == "g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref-shoo7sr1-debug" ||
   "${EXP}" == "g1-29dof-wbt-w-object-distill-sparse-goal-mixed-r2s-rollout-ref" ||
   "${EXP}" == "g1-29dof-wbt-w-object-distill-sparse-goal-mixed-r2s-rollout-ref-pickup"
 ) && "${MOTION_DIR_EXPLICIT}" -eq 0 ]]; then
