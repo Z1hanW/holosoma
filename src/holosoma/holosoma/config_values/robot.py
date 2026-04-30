@@ -10,6 +10,14 @@ from holosoma.config_types.robot import (
     RobotInitState,
 )
 
+
+def _env_float(name: str, default: float | None = None) -> float | None:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return float(value)
+
+
 g1_29dof = RobotConfig(
     num_bodies=32,
     dof_obs_size=29,
@@ -1117,7 +1125,7 @@ g1_29dof_w_object_mujoco = replace(
         mujoco_copy_tendons_from_robot_xml=True,
         mujoco_copy_collision_geoms_from_robot_xml=True,
         mujoco_copy_contact_pairs_from_robot_xml=True,
-        mujoco_object_mass_override=float(os.getenv("HOLOSOMA_MJ_OBJECT_MASS", "2.0")),
+        mujoco_object_mass_override=_env_float("HOLOSOMA_MJ_OBJECT_MASS"),
     ),
 )
 

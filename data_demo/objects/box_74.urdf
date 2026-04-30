@@ -1,11 +1,11 @@
 <?xml version="1.0" ?>
-<robot name="box_74">
+<robot name="box_74_box_collision">
   <dynamics damping="0.5" friction="0.9"/>
   <link name="baseLink">
     <inertial>
       <mass value="0.1"/>
       <origin xyz="0 0 0"/>
-      <inertia ixx="0.001157790662" ixy="0" ixz="0" iyy="0.001332126716" iyz="0" izz="0.001894548067"/>
+      <inertia ixx="0.00202326706" ixy="0" ixz="0" iyy="0.00232792347" iyz="0" izz="0.00331076835"/>
     </inertial>
     <contact>
       <lateral_friction value="0.9"/>
@@ -16,7 +16,7 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="box_74.obj" scale="1.0 1.0 1.0"/>
+        <mesh filename="box_74.obj" scale="1.32193954 1.32193956 1.32193952"/>
       </geometry>
       <material name="mat">
         <color rgba="0.7 0.8 0.9 1"/>
@@ -25,7 +25,7 @@
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="box_74.obj" scale="1.0 1.0 1.0"/>
+        <box size="0.46575260162353516 0.42469602823257446 0.24985061585903168"/>
       </geometry>
     </collision>
   </link>
