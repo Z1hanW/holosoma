@@ -82,6 +82,14 @@ mujoco_split = dataclasses.replace(
     ),
 )
 
+mujoco_split_debug = dataclasses.replace(
+    mujoco_split,
+    config=dataclasses.replace(
+        mujoco_split.config,
+        virtual_gantry=VirtualGantryCfg(enabled=False),
+    ),
+)
+
 # MuJoCo Warp with sim2sim optimizations
 mjwarp = dataclasses.replace(
     holosoma.config_values.simulator.mjwarp,
@@ -101,5 +109,6 @@ DEFAULTS = {
     "isaacsim": isaacsim,
     "mujoco": mujoco,
     "mujoco_split": mujoco_split,
+    "mujoco_split_debug": mujoco_split_debug,
     "mjwarp": mjwarp,
 }

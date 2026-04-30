@@ -952,8 +952,8 @@ class DirectSimulation:
             return
 
         root_pos = root_state[0, :3].detach().cpu().numpy().astype(np.float32, copy=False)
-        height = float(getattr(gantry, "height", root_pos[2]))
-        gantry.point = np.array([float(root_pos[0]), float(root_pos[1]), height], dtype=float)
+        height = float(getattr(gantry, "height", 0.0))
+        gantry.point = np.array([float(root_pos[0]), float(root_pos[1]), float(root_pos[2]) + height], dtype=float)
         logger.info(
             "Virtual gantry aligned above motion-init frame {}: [{:.3f}, {:.3f}, {:.3f}]",
             frame_idx,
