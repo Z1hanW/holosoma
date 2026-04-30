@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -420,6 +421,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._logged_root_reference_clip_start = False
         self._logged_sim_ref_from_sim_state = False
         self._auto_start_motion_clip_pending = False
+        self._auto_start_motion_clip_hold_start_time: float | None = None
+        self._auto_start_motion_clip_last_log_time = 0.0
         self._motion_end_reset_requested = False
         self._disable_motion_end_sim_reset = (
             _truthy_env("HOLOSOMA_DISABLE_AUTO_RESET")
@@ -1137,6 +1140,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._logged_sim_ref_from_sim_state = False
         self._motion_align_quat_wxyz = None
         self._motion_align_pos = None
+        self._auto_start_motion_clip_hold_start_time = None
+        self._auto_start_motion_clip_last_log_time = 0.0
         self._motion_end_reset_requested = False
 
     def _on_policy_switched(self, model_path: str):
@@ -1156,6 +1161,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._logged_sim_ref_from_sim_state = False
         self._motion_align_quat_wxyz = None
         self._motion_align_pos = None
+        self._auto_start_motion_clip_hold_start_time = None
+        self._auto_start_motion_clip_last_log_time = 0.0
         self._motion_end_reset_requested = False
 
     def get_init_target(self, robot_state_data):
@@ -1946,9 +1953,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 self._logged_waiting_overlay_error = True
 
     def rl_inference(self, robot_state_data):
-        if self._auto_start_motion_clip_pending and self.use_policy_action and not self.motion_clip_progressing:
-            self._auto_start_motion_clip_pending = False
-            self._handle_start_motion_clip()
+        self._maybe_start_pending_auto_motion_clip(robot_state_data)
 
         # prepare obs, run policy inference
         if not self.motion_clip_progressing:
@@ -2288,8 +2293,53 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
     def _after_auto_start_policy(self) -> None:
         if self._auto_start_motion_clip_pending:
+            self._auto_start_motion_clip_hold_start_time = None
+
+    def _maybe_start_pending_auto_motion_clip(self, robot_state_data: np.ndarray) -> None:
+        if not self._auto_start_motion_clip_pending or not self.use_policy_action or self.motion_clip_progressing:
+            return
+
+        hold_sec = max(0.0, float(getattr(self.config.task, "auto_start_stiff_hold_sec", 0.0) or 0.0))
+        max_wait_sec = max(0.0, float(getattr(self.config.task, "auto_start_stiff_max_wait_sec", 0.0) or 0.0))
+        pose_tolerance = max(
+            0.0,
+            float(getattr(self.config.task, "auto_start_stiff_pose_tolerance", 0.0) or 0.0),
+        )
+        now = time.perf_counter()
+        if self._auto_start_motion_clip_hold_start_time is None:
+            self._auto_start_motion_clip_hold_start_time = now
+            self._auto_start_motion_clip_last_log_time = 0.0
+            self.logger.info("Policy auto-started; holding motion frame 0 before starting motion clip.")
+
+        elapsed = now - self._auto_start_motion_clip_hold_start_time
+        motion_index = self._get_motion_index()
+        dof_err = None
+        if self._motion_data is not None:
+            target = self._motion_data.joint_pos[motion_index : motion_index + 1]
+            current = robot_state_data[:, 7 : 7 + self.num_dofs]
+            dof_err = float(np.max(np.abs(current - target)))
+
+        waited_long_enough = elapsed >= hold_sec
+        pose_ready = dof_err is None or dof_err <= pose_tolerance
+        timed_out = max_wait_sec > 0.0 and elapsed >= max_wait_sec
+        if waited_long_enough and (pose_ready or timed_out or max_wait_sec <= 0.0):
             self._auto_start_motion_clip_pending = False
+            self._auto_start_motion_clip_hold_start_time = None
+            self.logger.info(
+                "Starting auto motion clip after policy warmup: elapsed={:.2f}s dof_err={}",
+                elapsed,
+                "n/a" if dof_err is None else f"{dof_err:.4f}",
+            )
             self._handle_start_motion_clip()
+        elif now - self._auto_start_motion_clip_last_log_time >= 1.0:
+            self._auto_start_motion_clip_last_log_time = now
+            self.logger.info(
+                "Waiting before auto motion clip: elapsed={:.2f}s dof_err={} target_hold={:.2f}s max_wait={:.2f}s",
+                elapsed,
+                "n/a" if dof_err is None else f"{dof_err:.4f}",
+                hold_sec,
+                max_wait_sec,
+            )
 
     def _load_sim_time_control_schedule(self) -> list[int]:
         """Load an optional debug schedule of simulator millisecond ticks for policy inference."""
@@ -2451,6 +2501,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._sim_time_control_schedule_index = 0
         self._last_policy_control_target_clock_ms = None
         self._logged_root_reference_clip_start = False
+        self._auto_start_motion_clip_hold_start_time = None
+        self._auto_start_motion_clip_last_log_time = 0.0
         self._motion_end_reset_requested = False
         if self._motion_alignment_enabled:
             robot_state_data = self.interface.get_low_state()

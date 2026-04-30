@@ -95,8 +95,6 @@ g1_29dof_wbt_object_distill_mujoco = replace(
         g1_29dof_wbt_object_distill.task,
         motion_file=os.getenv("HOLOSOMA_MJ_MOTION", "data_demo/box_75.npz"),
         auto_start_motion=False,
-        auto_start_stiff_hold_sec=0.0,
-        auto_start_stiff_max_wait_sec=0.0,
         use_split_perception_obs_shm=True,
         use_zmq_lowcmd=True,
         defer_policy_start_until_valid_state=True,
