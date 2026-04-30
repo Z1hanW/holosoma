@@ -64,9 +64,16 @@ omomo_prepared = Path(sys.argv[3]).resolve()
 largebox_urdf = Path(sys.argv[4]).resolve()
 
 expected_omomo_count = 62
-expected_ds_count = 712
+expected_ds_count = 708
 expected_total = expected_ds_count + expected_omomo_count
 largebox_size = [0.47115421295166016, 0.45873013138771057, 0.4078954756259918]
+bad_clip_ids = {
+    "behave_box_40__baseline",
+    "behave_box_40__eff09",
+    "box_67__eff09",
+    "box_67__eff10",
+}
+max_motion_abs = 100.0
 
 target_map_path = target / "_clip_object_urdf_map.json"
 source_map_path = omomo_prepared / "_clip_object_urdf_map.json"
@@ -103,6 +110,16 @@ def save_npz_exact(path: Path, payload: dict[str, np.ndarray]) -> None:
 target_clips = load_clips(target_map_path)
 source_clips = load_clips(source_map_path)
 
+for clip_id in bad_clip_ids:
+    target_clips.pop(clip_id, None)
+    for path in (
+        target / f"{clip_id}.npz",
+        target / "_generated_urdfs" / f"{clip_id}.urdf",
+        target / "_generated_urdfs" / f"{clip_id}.obj",
+    ):
+        if path.exists() or path.is_symlink():
+            path.unlink()
+
 for stale in target.glob("sub*_mj_w_obj.npz"):
     stale.unlink()
 
@@ -121,6 +138,8 @@ rewritten_ds_npz = 0
 for npz_path in sorted(target.glob("*.npz")):
     if npz_path.stem.startswith("sub"):
         continue
+    if npz_path.stem in bad_clip_ids:
+        continue
 
     urdf_path = target / "_generated_urdfs" / f"{npz_path.stem}.urdf"
     if not urdf_path.is_file():
@@ -128,6 +147,22 @@ for npz_path in sorted(target.glob("*.npz")):
 
     with np.load(npz_path, allow_pickle=True) as data:
         payload = {key: np.asarray(data[key]) for key in data.files}
+
+    for key in ("body_pos_w", "joint_pos", "object_pos_w"):
+        if key not in payload:
+            raise SystemExit(f"[ERROR] Missing {key} in {npz_path}")
+        values = np.asarray(payload[key])
+        if not np.isfinite(values).all():
+            raise SystemExit(f"[ERROR] Non-finite {key} in {npz_path}")
+    motion_abs = max(
+        float(np.max(np.abs(np.asarray(payload["body_pos_w"])))),
+        float(np.max(np.abs(np.asarray(payload["joint_pos"])[:, :3]))),
+    )
+    object_abs = float(np.max(np.abs(np.asarray(payload["object_pos_w"]))))
+    if motion_abs > max_motion_abs:
+        raise SystemExit(f"[ERROR] Implausible motion magnitude in {npz_path}: max_abs={motion_abs:.3f}")
+    if object_abs > max_motion_abs:
+        raise SystemExit(f"[ERROR] Implausible object magnitude in {npz_path}: max_abs={object_abs:.3f}")
 
     desired_urdf = str(urdf_path.resolve())
     current_urdf = ""

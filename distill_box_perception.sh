@@ -20,6 +20,8 @@ set -euo pipefail
 # - ppo_first: PPO+DAgger from iteration 0
 # - contact-aware: ppo-first student whose sparse root command is zeroed before
 #   pickup and during the release/putdown tail
+# - shoo7sr1-near03-debug: shoo7sr1 debug reproduction; only depth near
+#   differs from the saved shoo7sr1 config (0.3 instead of 0.1)
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
@@ -36,6 +38,7 @@ DATA_MODE=${DATA_MODE:-pure-sd}
 TRACKER_PROFILE=${TRACKER_PROFILE:-old-tracker}
 SCHEDULE_VARIANT=${SCHEDULE_VARIANT:-default}
 ROOT_COMMAND_MODE=${ROOT_COMMAND_MODE:-default}
+SHOO7SR1_NEAR03_DEBUG=${SHOO7SR1_NEAR03_DEBUG:-0}
 PYTHON_BIN=${PYTHON_BIN:-python}
 
 parse_wandb_run_url() {
@@ -211,11 +214,23 @@ while [[ $# -gt 0 ]]; do
       ROOT_COMMAND_MODE="contact-aware"
       shift
       ;;
+    shoo7sr1-near03-debug|shoo7sr1_near03_debug|shoo7sr1-debug|shoo7sr1_debug)
+      SHOO7SR1_NEAR03_DEBUG=1
+      shift
+      ;;
     *)
       break
       ;;
   esac
 done
+
+if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
+  DATA_MODE="pure-sd"
+  TRACKER_PROFILE="old-tracker"
+  SCHEDULE_VARIANT="ppo_first"
+  ROOT_COMMAND_MODE="default"
+  EXP="g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref"
+fi
 
 if [[ $# -gt 0 ]] && is_checkpoint_ref "$1"; then
   TEACHER_CHECKPOINT="$1"
@@ -227,7 +242,7 @@ if [[ $# -gt 0 && "$1" != -* ]]; then
 fi
 
 if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
-  echo "Usage: $0 [mix-naive|pure-real|pure-sd] [default|dagger-mix|dag_first|ppo-first|contact-aware] [teacher_checkpoint.pt|wandb_run_url] [run_name] [extra train args...]" >&2
+  echo "Usage: $0 [mix-naive|pure-real|pure-sd] [default|dagger-mix|dag_first|ppo-first|contact-aware|shoo7sr1-near03-debug] [teacher_checkpoint.pt|wandb_run_url] [run_name] [extra train args...]" >&2
   exit 1
 fi
 
@@ -899,12 +914,112 @@ CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-}
 PERCEPTION_WARP_PREPROCESS=${PERCEPTION_WARP_PREPROCESS:-}
 CAMERA_APPLY_SENSOR_NOISE=${CAMERA_APPLY_SENSOR_NOISE:-True}
 OBJECT_GEOMETRY_MODE=${OBJECT_GEOMETRY_MODE:-mesh}
+
+if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
+  # Debug ablation: reproduce shoo7sr1, except depth near is intentionally 0.3.
+  PERCEPTION_PRESET="camera_depth_d435i"
+  EXPORT_ONNX=True
+  STUDENT_ACTOR_INPUTS="['actor_obs_root','actor_obs_proprio_no_linvel']"
+  STUDENT_ACTOR_INPUTS_EXPLICIT=1
+  TEACHER_COMPAT_PROFILE="u5lguxvl_generalist"
+  TEACHER_OBS_KEYS="actor_obs"
+  TEACHER_OBS_KEYS_EXPLICIT=1
+  TEACHER_PERCEPTION_PRESET="none"
+  TEACHER_PERCEPTION_PRESET_EXPLICIT=1
+  TEACHER_PERCEPTION_OBS_KEY=""
+  TEACHER_PERCEPTION_OBS_KEY_EXPLICIT=1
+  TEACHER_ACTOR_OBS_HISTORY_LENGTH="5"
+  TEACHER_ACTOR_OBS_HISTORY_LENGTH_EXPLICIT=1
+  CRITIC_PERCEPTION_PRESET="none"
+  CRITIC_PERCEPTION_OBS_KEY="critic_perception_obs"
+  PERCEPTION_INTO_CRITIC_MODULES="False"
+  PERCEPTION_INTO_CRITIC_MODULES_EXPLICIT=1
+  PPO_START_EPOCH=0
+  PPO_START_EPOCH_EXPLICIT=1
+  DAGGER_END_EPOCH=4000
+  DAGGER_END_EPOCH_EXPLICIT=1
+  PPO_START_COEFF=0.1
+  PPO_START_COEFF_EXPLICIT=1
+  PPO_TARGET_COEFF=0.9
+  PPO_TARGET_COEFF_EXPLICIT=1
+  PPO_SCHEDULE_STEP_EPOCHS=500
+  PPO_SCHEDULE_STEP_EPOCHS_EXPLICIT=1
+  DAGGER_LOSS_COEF=1.0
+  DAGGER_LOSS_COEF_EXPLICIT=1
+  PPO_START_NOISE_STD=0.1
+  PPO_START_NOISE_STD_UNTIL_COEFF=0.1
+  TEACHER_ACTION_MIX_RATIO=0.0
+  TEACHER_ACTION_MIX_RATIO_START=""
+  TEACHER_ACTION_MIX_RATIO_END=""
+  TEACHER_ACTION_MIX_RATIO_END_ITERATION=""
+  BC_LOSS_COEF=1.0
+  USE_ADAPTIVE_TIMESTEPS_SAMPLER=True
+  USE_ADAPTIVE_TIMESTEPS_SAMPLER_EXPLICIT=1
+  SCHEDULE_NAME="sparse_root_teacher_anchor_v4_ppo_first_step_mix"
+  SCHEDULE_NAME_EXPLICIT=1
+  SCHEDULE_NOTES="shoo7sr1 debug reproduction with only perception.camera_near changed from 0.1 to 0.3."
+  SCHEDULE_NOTES_EXPLICIT=1
+  DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES=False
+  SPARSE_GOAL_ENABLED=False
+  CLIP_GOAL_DELTA_MIN_STEPS=60
+  CLIP_GOAL_DELTA_MAX_STEPS=180
+  COMMAND_ONLY_ENV_PROB_START=0.0
+  COMMAND_ONLY_ENV_PROB_END=0.0
+  COMMAND_ONLY_ENV_PROB_START_ITER=None
+  COMMAND_ONLY_ENV_PROB_END_ITER=None
+  EVAL_COMMAND_ONLY_ENV_PROB=None
+  EXTERNAL_GOAL_PROB_START=0.0
+  EXTERNAL_GOAL_PROB_END=1.0
+  EXTERNAL_GOAL_PROB_START_ITER=None
+  EXTERNAL_GOAL_PROB_END_ITER=None
+  EXTERNAL_GOAL_PROB_RAMP_RESETS=200000
+  EVAL_EXTERNAL_GOAL_PROB=None
+  EXTERNAL_GOAL_RANGE_RAMP_RESETS=None
+  EXTERNAL_GOAL_RANGE_START_ITER=None
+  EXTERNAL_GOAL_RANGE_END_ITER=None
+  EXTERNAL_GOAL_SAMPLING_MODE=box
+  EXTERNAL_GOAL_RADIUS_MIN_START=None
+  EXTERNAL_GOAL_RADIUS_MAX_START=None
+  EXTERNAL_GOAL_RADIUS_MIN=1.0
+  EXTERNAL_GOAL_RADIUS_MAX=3.4
+  EXTERNAL_GOAL_POS_LOCAL_MIN_START=None
+  EXTERNAL_GOAL_POS_LOCAL_MAX_START=None
+  EXTERNAL_GOAL_POS_LOCAL_MIN="[1.0, -0.8, 0.7]"
+  EXTERNAL_GOAL_POS_LOCAL_MAX="[1.75, 0.8, 1.0]"
+  START_AT_TIMESTEP_ZERO_PROB=0.2
+  START_AT_TIMESTEP_ZERO_PROB_END=None
+  START_AT_TIMESTEP_ZERO_PROB_START_ITER=None
+  START_AT_TIMESTEP_ZERO_PROB_END_ITER=None
+  FREEZE_AT_TIMESTEP_ZERO_PROB=0.0
+  FREEZE_AT_TIMESTEP_ZERO_PROB_END=0.0
+  FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER=2500
+  FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=10000
+  IMAGE_WIDTH=106
+  IMAGE_WIDTH_EXPLICIT=1
+  IMAGE_HEIGHT=60
+  IMAGE_HEIGHT_EXPLICIT=1
+  CAMERA_PITCH_DEG=10
+  CAMERA_NEAR=0.3
+  CAMERA_NEAR_EXPLICIT=1
+  CAMERA_FAR=3.0
+  CAMERA_FAR_EXPLICIT=1
+  CAMERA_MAX_DISTANCE=3.0
+  CAMERA_MAX_DISTANCE_EXPLICIT=1
+  PERCEPTION_WARP_PREPROCESS=True
+  PERCEPTION_WARP_PREPROCESS_EXPLICIT=1
+  CAMERA_APPLY_SENSOR_NOISE=False
+  CAMERA_APPLY_SENSOR_NOISE_EXPLICIT=1
+  OBJECT_GEOMETRY_MODE=default
+fi
+
 OBJECT_GEOMETRY_MODE_NORM=""
 HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE=""
 PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE=""
 
 if [[ -n "${OBJECT_GEOMETRY_MODE}" ]]; then
   case "$(echo "${OBJECT_GEOMETRY_MODE}" | tr '[:upper:]' '[:lower:]')" in
+    default|preset|null|none)
+      ;;
     1|true|yes|on|primitive|primitives|box|cuboid)
       OBJECT_GEOMETRY_MODE_NORM="primitive"
       HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE="primitive"
@@ -916,7 +1031,7 @@ if [[ -n "${OBJECT_GEOMETRY_MODE}" ]]; then
       PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="mesh"
       ;;
     *)
-      echo "[ERROR] OBJECT_GEOMETRY_MODE must be one of: on/off/primitive/mesh. Got: ${OBJECT_GEOMETRY_MODE}" >&2
+      echo "[ERROR] OBJECT_GEOMETRY_MODE must be one of: default/on/off/primitive/mesh. Got: ${OBJECT_GEOMETRY_MODE}" >&2
       exit 2
       ;;
   esac
@@ -927,9 +1042,6 @@ if [[ "${TEACHER_ACTION_MIX_RATIO_EXPLICIT}" -eq 0 && "${TEACHER_ACTION_MIX_RATI
 fi
 
 if [[ "${TRACKER_PROFILE}" == "old-tracker" && "${SCHEDULE_VARIANT}" == "default" ]]; then
-  if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
-    NUM_LEARNING_ITERATIONS="${OLD_TRACKER_DAGGER_ITERATIONS}"
-  fi
   if [[ "${PPO_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
     PPO_START_EPOCH=$((NUM_LEARNING_ITERATIONS + 1))
   fi
@@ -962,9 +1074,6 @@ case "${SCHEDULE_VARIANT}" in
   default)
     ;;
   dagger_mix)
-    if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
-      NUM_LEARNING_ITERATIONS=40000
-    fi
     # Keep PPO disabled while using teacher-action rollout mixing. PPO storage
     # keeps the sampled student action, while the environment may step with the
     # teacher action, so high teacher-action mix should remain a DAgger-only phase.
@@ -1013,9 +1122,6 @@ case "${SCHEDULE_VARIANT}" in
     fi
     ;;
   dag_first)
-    if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
-      NUM_LEARNING_ITERATIONS=40000
-    fi
     if [[ "${PPO_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
       PPO_START_EPOCH=2000
     fi
@@ -1047,9 +1153,6 @@ case "${SCHEDULE_VARIANT}" in
     fi
     ;;
   ppo_first)
-    if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
-      NUM_LEARNING_ITERATIONS=40000
-    fi
     if [[ "${PPO_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
       PPO_START_EPOCH=0
     fi
@@ -1190,6 +1293,9 @@ case "${TEACHER_COMPAT_PROFILE_RESOLVED}" in
   u5lguxvl_generalist)
     if [[ "${TEACHER_OBS_KEYS_EXPLICIT}" -eq 0 ]]; then
       TEACHER_OBS_KEYS="actor_obs_legacy"
+      append_teacher_compat_note "teacher_obs_keys defaulted to actor_obs_legacy to match u5lguxvl legacy object-target schema"
+    else
+      append_teacher_compat_note "teacher_obs_keys explicitly set to ${TEACHER_OBS_KEYS} for u5lguxvl teacher compatibility"
     fi
     if [[ "${TEACHER_PERCEPTION_PRESET_EXPLICIT}" -eq 0 ]]; then
       TEACHER_PERCEPTION_PRESET="none"
@@ -1199,10 +1305,11 @@ case "${TEACHER_COMPAT_PROFILE_RESOLVED}" in
     fi
     if [[ "${TEACHER_ACTOR_OBS_HISTORY_LENGTH_EXPLICIT}" -eq 0 ]]; then
       TEACHER_ACTOR_OBS_HISTORY_LENGTH="5"
+      append_teacher_compat_note "teacher actor observation history length set to ${TEACHER_ACTOR_OBS_HISTORY_LENGTH} for u5lguxvl teacher checkpoint compatibility"
+    else
+      append_teacher_compat_note "teacher actor observation history length explicitly set to ${TEACHER_ACTOR_OBS_HISTORY_LENGTH} for u5lguxvl teacher checkpoint compatibility"
     fi
-    append_teacher_compat_note "teacher_obs_keys defaulted to actor_obs_legacy to match u5lguxvl legacy object-target schema"
     append_teacher_compat_note "teacher perception disabled to match u5lguxvl teacher"
-    append_teacher_compat_note "teacher actor observation history length set to ${TEACHER_ACTOR_OBS_HISTORY_LENGTH} for u5lguxvl teacher checkpoint compatibility"
     ;;
   *)
     echo "Unknown TEACHER_COMPAT_PROFILE: ${TEACHER_COMPAT_PROFILE_RESOLVED}" >&2
@@ -1234,10 +1341,19 @@ fi
 echo "[INFO] run_name=${RUN_NAME} training_name=${TRAINING_NAME}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
 echo "[INFO] export_onnx=${EXPORT_ONNX}"
+echo "[INFO] shoo7sr1_near03_debug=${SHOO7SR1_NEAR03_DEBUG}"
 if [[ -n "${CAMERA_PITCH_DEG}" ]]; then
   echo "[INFO] camera_pitch_deg=${CAMERA_PITCH_DEG}"
 else
   echo "[INFO] camera_pitch_deg=<preset default>"
+fi
+if [[ -n "${CAMERA_NEAR}" ]]; then
+  echo "[INFO] camera_near=${CAMERA_NEAR}"
+else
+  echo "[INFO] camera_near=<preset default>"
+fi
+if [[ -n "${CAMERA_FAR}" || -n "${CAMERA_MAX_DISTANCE}" ]]; then
+  echo "[INFO] camera_far=${CAMERA_FAR:-<preset default>} camera_max_distance=${CAMERA_MAX_DISTANCE:-<preset default>}"
 fi
 echo "[INFO] camera_apply_sensor_noise=${CAMERA_APPLY_SENSOR_NOISE}"
 if [[ -n "${OBJECT_GEOMETRY_MODE_NORM}" ]]; then

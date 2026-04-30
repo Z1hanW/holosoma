@@ -698,9 +698,6 @@ case "${SCHEDULE_VARIANT}" in
     ;;
   pure_dagger)
     PURE_DAGGER_ACTIVE=1
-    if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
-      NUM_LEARNING_ITERATIONS="${PURE_DAGGER_ITERATIONS}"
-    fi
     # Keep the PPO/DAgger schedule active so ppo_coeff stays exactly 0.0
     # for the whole training horizon. Disabling the schedule entirely would
     # fall back to ppo_coeff=1.0 in the current PPO implementation.
@@ -724,9 +721,6 @@ case "${SCHEDULE_VARIANT}" in
     fi
     ;;
   dag_first)
-    if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
-      NUM_LEARNING_ITERATIONS=40000
-    fi
     if [[ "${PPO_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
       PPO_START_EPOCH=2000
     fi
@@ -747,9 +741,6 @@ case "${SCHEDULE_VARIANT}" in
     fi
     ;;
   ppo_first)
-    if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
-      NUM_LEARNING_ITERATIONS=40000
-    fi
     if [[ "${PPO_START_EPOCH_EXPLICIT}" -eq 0 ]]; then
       PPO_START_EPOCH=0
     fi
