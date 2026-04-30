@@ -215,7 +215,6 @@ SIM_READY_PATTERN="${SIM_READY_PATTERN:-Starting direct simulation loop...}"
 SIM_STARTUP_WAIT="${SIM_STARTUP_WAIT:-0}"
 DEFAULT_OBJECT_URDF="$ROOT_DIR/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
 OBJECT_URDF="${OBJECT_URDF:-}"
-PATCH_DIR="${PATCH_DIR:-$ROOT_DIR/logs/sim2sim_exports}"
 POLICY_ACTION_SCALE="${POLICY_ACTION_SCALE:-}"
 POLICY_RL_RATE="${POLICY_RL_RATE:-50}"
 POLICY_DEFER_UNTIL_VALID_STATE="${POLICY_DEFER_UNTIL_VALID_STATE:-0}"
@@ -281,11 +280,7 @@ if [[ "$MJ_TRACK_MODE" == "env" ]]; then
   SKIP_POLICY=1
 fi
 
-mkdir -p "$PATCH_DIR"
-
 MOTION_STEM="$(basename "${MOTION_FILE%.*}")"
-MODEL_STEM="$(basename "${MODEL_INPUT%.*}")"
-PATCHED_ONNX="$PATCH_DIR/${MODEL_STEM}__${MOTION_STEM}.onnx"
 RUN_DIR="${RUN_DIR:-$ROOT_DIR/logs/sim2sim_runs/${MOTION_STEM}__tracking}"
 mkdir -p "$RUN_DIR"
 
@@ -371,6 +366,20 @@ resolve_python_with_modules() {
   exit 1
 }
 
+resolve_policy_model_path() {
+  "$INFER_PY" - <<'PY' "$1"
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]).expanduser()
+if path.suffix == ".pt":
+    path = path.with_suffix(".onnx")
+if not path.is_file():
+    raise SystemExit(f"Policy model not found: {path}")
+print(path.resolve())
+PY
+}
+
 if [[ -n "$MUJOCO_PY" ]]; then
   MUJOCO_PY="$(resolve_python_with_modules "mujoco holosoma torch tyro typeguard" "$MUJOCO_PY")"
 else
@@ -384,6 +393,7 @@ fi
 INFER_PY="$(resolve_python "$INFER_PY" \
   /home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python \
   /home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python)"
+POLICY_MODEL="$(resolve_policy_model_path "$MODEL_INPUT")"
 
 apply_motion_clip_object_defaults() {
   if [[ -f "$MOTION_METADATA_TOOL" ]]; then
@@ -1364,6 +1374,13 @@ actor_input_dim = (
 actor_input_dim = actor_input_dim if isinstance(actor_input_dim, list) else []
 
 if "perception_obs" in input_dims:
+    if obs_dim == 96 and actor_input_dim == [
+        "actor_obs_root_contact_aware",
+        "actor_obs_proprio",
+        "actor_obs_actions",
+    ]:
+        print("g1-29dof-wbt-object-contact-aware-depth-distill")
+        raise SystemExit(0)
     if obs_dim == 308 and actor_input_dim == ["actor_obs_root", "actor_obs_proprio_no_linvel"]:
         print("g1-29dof-wbt-object-distill")
         raise SystemExit(0)
@@ -1433,22 +1450,15 @@ print("1" if any(value.name == name for value in model.graph.input) else "0")
 PY
 }
 
-apply_training_motion_launch_defaults "$MODEL_INPUT"
+apply_training_motion_launch_defaults "$POLICY_MODEL"
 apply_motion_clip_object_defaults
 OBJECT_URDF="$(resolve_motion_sized_object_urdf "$OBJECT_URDF")"
 
-"$INFER_PY" "$ROOT_DIR/src/holosoma_inference/holosoma_inference/tools/patch_motion_onnx.py" \
-  --model-path "$MODEL_INPUT" \
-  --motion-file "$MOTION_FILE" \
-  $( [[ "$APPLY_TRAINING_MOTION_TRANSITIONS" == "1" ]] && printf '%s' "--apply-training-motion-transitions" ) \
-  $( [[ -n "$HOLOSOMA_ONNX_ACTION_SCALE_OVERRIDE" ]] && printf '%s %s' "--action-scale-override" "$HOLOSOMA_ONNX_ACTION_SCALE_OVERRIDE" ) \
-  --output-path "$PATCHED_ONNX"
-
-apply_training_sim_overrides "$PATCHED_ONNX"
-apply_training_robot_init_overrides "$PATCHED_ONNX"
-apply_training_robot_asset_overrides "$PATCHED_ONNX"
-apply_training_object_overrides "$PATCHED_ONNX"
-apply_training_perception_overrides "$PATCHED_ONNX"
+apply_training_sim_overrides "$POLICY_MODEL"
+apply_training_robot_init_overrides "$POLICY_MODEL"
+apply_training_robot_asset_overrides "$POLICY_MODEL"
+apply_training_object_overrides "$POLICY_MODEL"
+apply_training_perception_overrides "$POLICY_MODEL"
 apply_gt_mujoco_physics_overrides
 
 SIM_ADD_DEFAULT_OBJECT_ACTUATORS="${SIM_ADD_DEFAULT_OBJECT_ACTUATORS:-1}"
@@ -1466,18 +1476,18 @@ MUJOCO_LIMIT_OBJECT_CONTACTS_TO_CARRY_BODIES="${MUJOCO_LIMIT_OBJECT_CONTACTS_TO_
 MUJOCO_OBJECT_CONTACT_BODY_MARKERS="${MUJOCO_OBJECT_CONTACT_BODY_MARKERS:-}"
 
 if [[ -z "$INFERENCE_CONFIG" ]]; then
-  INFERENCE_CONFIG="$(infer_inference_config "$PATCHED_ONNX")"
+  INFERENCE_CONFIG="$(infer_inference_config "$POLICY_MODEL")"
 fi
 
 if [[ -z "${HOLOSOMA_POLICY_MOTION_INDEX_OFFSET:-}" ]]; then
   if [[ -n "$POLICY_MOTION_INDEX_OFFSET" ]]; then
     export HOLOSOMA_POLICY_MOTION_INDEX_OFFSET="$POLICY_MOTION_INDEX_OFFSET"
-  elif [[ "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-distill" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-mocap-distill" ]]; then
+  elif [[ "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-distill" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-contact-aware-depth-distill" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-mocap-distill" ]]; then
     export HOLOSOMA_POLICY_MOTION_INDEX_OFFSET=1
   fi
 fi
 
-MODEL_EXPECTS_PERCEPTION_OBS="$(onnx_has_input "$PATCHED_ONNX" "perception_obs")"
+MODEL_EXPECTS_PERCEPTION_OBS="$(onnx_has_input "$POLICY_MODEL" "perception_obs")"
 if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "auto" ]]; then
   ENABLE_SPLIT_PERCEPTION_OBS="$MODEL_EXPECTS_PERCEPTION_OBS"
 fi
@@ -1607,8 +1617,11 @@ else
 fi
 
 if [[ -z "$POLICY_ACTION_SCALE" ]]; then
-  POLICY_ACTION_SCALE="$(
-    "$INFER_PY" - <<'PY' "$PATCHED_ONNX"
+  if [[ -n "$HOLOSOMA_ONNX_ACTION_SCALE_OVERRIDE" ]]; then
+    POLICY_ACTION_SCALE="$HOLOSOMA_ONNX_ACTION_SCALE_OVERRIDE"
+  else
+    POLICY_ACTION_SCALE="$(
+      "$INFER_PY" - <<'PY' "$POLICY_MODEL"
 import json
 import sys
 
@@ -1624,7 +1637,8 @@ scale = (
 )
 print(scale if scale is not None else 1.0)
 PY
-  )"
+    )"
+  fi
 fi
 if [[ -z "$POLICY_AUTO_START_MOTION_CLIP" ]]; then
   if [[ -n "${HOLOSOMA_POLICY_CONTROL_PORT:-}" ]]; then
@@ -1645,6 +1659,7 @@ if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]]; then
   echo "[INFO] object_urdf=${OBJECT_URDF}"
   echo "[INFO] robot_urdf=${HOLOSOMA_W_OBJECT_URDF:-g1/g1_29dof.urdf}"
   echo "[INFO] model=${MODEL_INPUT}"
+  echo "[INFO] policy_model=${POLICY_MODEL}"
   echo "[INFO] inference_config=${INFERENCE_CONFIG}"
   echo "[INFO] sim_device=${SIM_DEVICE:-<default>}"
   echo "[INFO] mujoco_object_scene training_urdf=${SIM_USE_TRAINING_URDF_OBJECT_SCENE} default_actuators=${SIM_ADD_DEFAULT_OBJECT_ACTUATORS} copy_joint_defaults=${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML} copy_tendons=${SIM_COPY_TENDONS_FROM_ROBOT_XML} copy_collision_geoms=${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML} copy_contact_pairs=${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML}"
@@ -1829,7 +1844,7 @@ fi
 POLICY_CMD=(
   "$INFER_PY" -u "$ROOT_DIR/src/holosoma_inference/holosoma_inference/run_policy.py"
   "inference:${INFERENCE_CONFIG}"
-  --task.model-path "$PATCHED_ONNX"
+  --task.model-path "$POLICY_MODEL"
   --task.motion-file "$MOTION_FILE"
   --task.interface "$INTERFACE_NAME"
   --task.use-sim-state
@@ -1909,6 +1924,6 @@ if [[ "$STATUS" -ne 0 && "$STATUS" -ne 124 && "$STATUS" -ne 130 ]]; then
   exit "$STATUS"
 fi
 
-echo "Patched ONNX: $PATCHED_ONNX"
+echo "Policy model: $POLICY_MODEL"
 echo "MuJoCo log:   $SIM_LOG"
 echo "Policy log:   $POLICY_LOG"

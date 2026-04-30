@@ -55,13 +55,14 @@ The main lessons from debugging G1 object-tracking on MuJoCo split sim2sim are:
 1. Treat split MuJoCo as the source of truth. Debug `run_sim.py + run_policy.py + sim-state` before trusting web or `viser` views.
 2. If the robot does not move, first verify the simulator actually receives ZMQ lowcmd over the split `sim-control` channel. A running policy alone is not evidence that MuJoCo is actuated.
 3. Object-tracking inference must stay aligned with training semantics: use simulator clock, simulator state, simulator-measured ref body when available, and training-aligned per-joint action scales from ONNX metadata.
-4. If G1 moves but the object does not move with it, inspect authoritative split sim traces first. This is usually a MuJoCo contact/material issue, not a frontend rendering issue.
-5. Reset should mean `sim-control reset -> simulator reset -> clock rewind -> motion clip restarts from frame 0`. If reset takes seconds, you are probably restarting the whole split sim pipeline rather than resetting the simulator.
-6. Keep ports `5655/5657/5659` clean. Stale split sim processes can make new viewers or tools read old `sim-state`, which looks like broken reset behavior.
+4. Do not patch the policy ONNX for split MuJoCo sim2sim. `run_policy.py` should load the original exported model and receive the selected motion clip through `--task.motion-file`; do not bake clip data into the model graph.
+5. If G1 moves but the object does not move with it, inspect authoritative split sim traces first. This is usually a MuJoCo contact/material issue, not a frontend rendering issue.
+6. Reset should mean `sim-control reset -> simulator reset -> clock rewind -> motion clip restarts from frame 0`. If reset takes seconds, you are probably restarting the whole split sim pipeline rather than resetting the simulator.
+7. Keep ports `5655/5657/5659` clean. Stale split sim processes can make new viewers or tools read old `sim-state`, which looks like broken reset behavior.
 
 Useful entry points in this repo:
 
-- `./mj_track.sh [--viewer sim_state|mjviser] [motion.npz] [model.onnx]`: tracking launcher with split MuJoCo visualization
+- `./mj_track.sh [--viewer sim_state|mjviser] [motion.npz] [model.onnx]`: tracking launcher with split MuJoCo visualization; pass the original exported ONNX, not a patched copy
 - `./mj_depth.sh [--viewer sim_state|mjviser]`: MuJoCo joystick/manual-control launcher for the depth box-carry policy
 - `./vis_mujoco_sim_state.sh`: `viser` viewer that reads split MuJoCo `sim-state` and can trigger reset over `sim-control`
 

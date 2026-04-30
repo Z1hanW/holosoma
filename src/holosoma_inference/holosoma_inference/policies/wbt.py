@@ -236,6 +236,45 @@ class MotionData:
         return decoded
 
 
+def _first_sustained_true_index(mask: np.ndarray, consecutive_steps: int) -> int | None:
+    mask = np.asarray(mask, dtype=bool).reshape(-1)
+    count = 0
+    needed = max(int(consecutive_steps), 1)
+    for idx, value in enumerate(mask):
+        count = count + 1 if bool(value) else 0
+        if count >= needed:
+            return idx - needed + 1
+    return None
+
+
+def _first_sustained_true_index_from(mask: np.ndarray, consecutive_steps: int, start_idx: int) -> int | None:
+    mask = np.asarray(mask, dtype=bool).reshape(-1)
+    if start_idx <= 0:
+        return _first_sustained_true_index(mask, consecutive_steps)
+    if start_idx >= mask.size:
+        return None
+    relative_idx = _first_sustained_true_index(mask[start_idx:], consecutive_steps)
+    return None if relative_idx is None else int(start_idx + relative_idx)
+
+
+def _smooth_1d_edge_padded(values: np.ndarray, window_steps: int) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float32).reshape(-1)
+    window_steps = max(int(window_steps), 1)
+    if values.size == 0 or window_steps <= 1:
+        return values
+    left_pad = window_steps // 2
+    right_pad = window_steps - 1 - left_pad
+    padded = np.concatenate(
+        [
+            np.repeat(values[:1], left_pad),
+            values,
+            np.repeat(values[-1:], right_pad),
+        ]
+    )
+    kernel = np.full((window_steps,), 1.0 / float(window_steps), dtype=np.float32)
+    return np.convolve(padded, kernel, mode="valid").astype(np.float32, copy=False)
+
+
 def _extract_motion_cfg_from_metadata(metadata: dict[str, object]) -> dict | None:
     experiment_config = metadata.get("experiment_config")
     if not isinstance(experiment_config, dict):
@@ -364,6 +403,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_command_0 = None
         self.ref_quat_xyzw_0 = None
         self.ref_pos_xyz_t = None
+        self._contact_aware_carry_window: tuple[int, int] | None = None
 
         # Calculate timestep interval from rl_rate (e.g., 50Hz = 20ms intervals)
         self.timestep_interval_ms = 1000.0 / config.task.rl_rate
@@ -445,7 +485,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._uses_motion_command = any(
             term in obs_terms for term in ("motion_command", "motion_ref_ori_b", "motion_future_target_poses")
         )
-        self._uses_sparse_root_command = "sparse_target_root_trajectory_command" in obs_terms
+        self._uses_sparse_root_command_contact_aware = (
+            "sparse_target_root_trajectory_command_contact_aware" in obs_terms
+        )
+        self._uses_sparse_root_command = (
+            "sparse_target_root_trajectory_command" in obs_terms
+            or self._uses_sparse_root_command_contact_aware
+        )
         self._uses_object_mocap_distill = "obj_current_pose_size_b" in obs_terms
         self._uses_object_generalist = any(
             term in obs_terms
@@ -742,6 +788,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._motion_body_names = tuple(self._motion_data.body_names)
         self._maybe_apply_training_motion_transitions_to_motion_data(metadata, ref_name)
         self._motion_cfg = motion_cfg or {}
+        self._contact_aware_carry_window = None
         alignment_from_metadata = bool((motion_cfg or {}).get("align_motion_to_init_yaw", False))
         self._motion_alignment_enabled = bool(alignment_from_metadata or self._force_motion_alignment)
         if self._motion_alignment_enabled and not alignment_from_metadata and self._force_motion_alignment:
@@ -1704,11 +1751,99 @@ class WholeBodyTrackingPolicy(BasePolicy):
         motion_command = np.concatenate([rel_xy, rel_yaw], axis=1).astype(np.float32, copy=False)
         return self._apply_external_sparse_root_command(motion_command)
 
+    def _get_contact_aware_carry_window(self) -> tuple[int, int]:
+        if self._contact_aware_carry_window is not None:
+            return self._contact_aware_carry_window
+        if self._motion_data is None or not self._motion_data.has_object or self._motion_data.object_pos_w is None:
+            end = 0 if self._motion_data is None else int(self._motion_data.frame_count)
+            self._contact_aware_carry_window = (0, end)
+            return self._contact_aware_carry_window
+
+        cfg = self._motion_cfg or {}
+        mode = str(cfg.get("contact_aware_carry_window_mode", "rel_z")).strip().lower().replace("-", "_")
+        consecutive_steps = 5
+        total_steps = int(self._motion_data.frame_count)
+        if total_steps <= 0:
+            self._contact_aware_carry_window = (0, 0)
+            return self._contact_aware_carry_window
+
+        if mode == "peak_height":
+            alpha = max(0.0, min(float(cfg.get("contact_aware_peak_height_alpha", 0.91)), 1.0))
+            smoothing_steps = int(cfg.get("contact_aware_peak_height_smoothing_steps", 5))
+            height = _smooth_1d_edge_padded(self._motion_data.object_pos_w[:, 2], smoothing_steps)
+            threshold = float(np.min(height) + max(float(np.max(height) - np.min(height)), 0.0) * alpha)
+            high_mask = height >= threshold
+            carry_start = _first_sustained_true_index(high_mask, consecutive_steps)
+            if carry_start is None:
+                high_indices = np.flatnonzero(high_mask)
+                carry_start = int(high_indices[0]) if high_indices.size else int(np.argmax(height))
+            peak_step = int(np.argmax(height))
+            carry_end = _first_sustained_true_index_from(
+                ~high_mask,
+                consecutive_steps,
+                start_idx=min(peak_step + 1, total_steps),
+            )
+            if carry_end is None:
+                carry_end = total_steps
+        else:
+            rel_z = self._motion_data.object_pos_w[:, 2] - self._motion_data.root_pos_w[:, 2]
+            z_min = float(np.min(rel_z))
+            z_range = max(float(np.max(rel_z) - z_min), 0.0)
+            threshold = z_min + max(0.10, z_range * 0.35)
+            lifted_mask = rel_z >= threshold
+            carry_start = _first_sustained_true_index(lifted_mask, consecutive_steps)
+            if carry_start is None:
+                lifted_indices = np.flatnonzero(lifted_mask)
+                carry_start = int(lifted_indices[0]) if lifted_indices.size else int(np.argmax(rel_z))
+            lowered_mask = rel_z < threshold
+            carry_end = _first_sustained_true_index_from(
+                lowered_mask,
+                consecutive_steps,
+                start_idx=min(int(carry_start) + 1, total_steps),
+            )
+            if carry_end is None:
+                carry_end = total_steps
+
+        carry_start = max(0, min(int(carry_start), total_steps))
+        carry_end = max(carry_start, min(int(carry_end), total_steps))
+        self._contact_aware_carry_window = (carry_start, carry_end)
+        logger.info("Contact-aware sparse root command active window: [{}, {}) mode={}", carry_start, carry_end, mode)
+        return self._contact_aware_carry_window
+
+    def _get_sparse_target_root_trajectory_command_contact_aware(
+        self,
+        robot_state_data: np.ndarray,
+        base_command: np.ndarray | None = None,
+    ) -> np.ndarray:
+        if base_command is None:
+            base_command = self._get_sparse_target_root_trajectory_command(robot_state_data)
+        if self._last_sparse_manual_enabled or self._motion_data is None or not self._motion_data.has_object:
+            return base_command
+        carry_start, carry_end = self._get_contact_aware_carry_window()
+        if carry_start <= self._get_motion_index() < carry_end:
+            return base_command
+        zero_command = np.zeros_like(base_command, dtype=np.float32)
+        self._record_sparse_root_command(
+            base_command,
+            zero_command,
+            source="auto_contact_aware",
+            mode="motion",
+            manual_enabled=False,
+        )
+        return zero_command
+
     def _get_depth_distill_obs_buffer_dict(self, robot_state_data: np.ndarray) -> dict[str, np.ndarray]:
         base_lin_vel = robot_state_data[:, 7 + self.num_dofs : 7 + self.num_dofs + 3]
         base_ang_vel = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
+        sparse_command = self._get_sparse_target_root_trajectory_command(robot_state_data)
+        contact_aware_sparse_command = (
+            self._get_sparse_target_root_trajectory_command_contact_aware(robot_state_data, sparse_command)
+            if self._uses_sparse_root_command_contact_aware
+            else sparse_command
+        )
         return {
-            "sparse_target_root_trajectory_command": self._get_sparse_target_root_trajectory_command(robot_state_data),
+            "sparse_target_root_trajectory_command": sparse_command,
+            "sparse_target_root_trajectory_command_contact_aware": contact_aware_sparse_command,
             "base_lin_vel": base_lin_vel.astype(np.float32, copy=False),
             "base_ang_vel": base_ang_vel.astype(np.float32, copy=False),
             "dof_pos": (robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles).astype(
@@ -1979,7 +2114,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         obs = self.prepare_obs_for_rl(robot_state_data)
         input_feed = {self._obs_input_name: obs["actor_obs"]}
         if self._time_step_input_name:
-            input_feed[self._time_step_input_name] = np.array([[motion_index]], dtype=np.float32)
+            action_time_step = motion_index if self._uses_motion_command else 0
+            input_feed[self._time_step_input_name] = np.array([[action_time_step]], dtype=np.float32)
         perception_obs = None
         if self._perception_obs_input_name:
             perception_dim = self._get_onnx_input_dim(self._perception_obs_input_name)

@@ -313,7 +313,7 @@ function formatCommand(command) {
 }
 
 function commandStatus(payload) {
-  if (payload && payload.enabled) return "manual";
+  if (payload && payload.enabled) return payload.mode === "offset" ? "offset(motion+manual)" : "manual";
   return "auto(motion)";
 }
 

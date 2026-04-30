@@ -85,6 +85,9 @@ DS_EXPECTED_TOTAL=${DS_EXPECTED_TOTAL:-""}
 MIX_NAIVE_EXPECTED_TOTAL=${MIX_NAIVE_EXPECTED_TOTAL:-""}
 MIX_NAIVE_EXPECTED_DS=${MIX_NAIVE_EXPECTED_DS:-""}
 MIX_NAIVE_EXPECTED_OMOMO=${MIX_NAIVE_EXPECTED_OMOMO:-""}
+DATA_SUBSET_MODE=${DATA_SUBSET_MODE:-${SAMPLE_MODE:-}}
+DATA_SUBSET_SEED=${DATA_SUBSET_SEED:-0}
+DATA_SUBSET_BANK_ROOT=${DATA_SUBSET_BANK_ROOT:-""}
 MOTION_DIR_FROM_ENV=0
 if [[ -n "${MOTION_DIR+x}" ]]; then
   MOTION_DIR_FROM_ENV=1
@@ -1035,6 +1038,329 @@ prepared_motion_bank_ready() {
   compgen -G "${prepared_dir}/*.npz" >/dev/null
 }
 
+is_data_subset_mode_alias() {
+  local raw_mode="${1:-}"
+  local mode
+  mode="$(printf '%s' "${raw_mode}" | tr '[:upper:]' '[:lower:]' | tr '_' '-')"
+  case "${mode}" in
+    1|omomo|pure-omomo|pure-omomo-subset|2|omomo+behave|omomo-behave|3|omomo+behave+ds128|omomo-behave-ds128|ds128|4|omomo+behave+ds256|omomo-behave-ds256|ds256|5|64+64+dsall|all|all-data|all-the-data|dsall)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+normalize_data_subset_mode() {
+  local raw_mode="${1:-}"
+  local mode
+  mode="$(printf '%s' "${raw_mode}" | tr '[:upper:]' '[:lower:]' | tr '_' '-')"
+  case "${mode}" in
+    1|omomo|pure-omomo|pure-omomo-subset)
+      printf '%s\n' "omomo"
+      ;;
+    2|omomo+behave|omomo-behave)
+      printf '%s\n' "omomo+behave"
+      ;;
+    3|omomo+behave+ds128|omomo-behave-ds128|ds128)
+      printf '%s\n' "omomo+behave+ds128"
+      ;;
+    4|omomo+behave+ds256|omomo-behave-ds256|ds256)
+      printf '%s\n' "omomo+behave+ds256"
+      ;;
+    5|64+64+dsall|all|all-data|all-the-data|dsall)
+      printf '%s\n' "64+64+dsall"
+      ;;
+    "")
+      printf '%s\n' ""
+      ;;
+    *)
+      echo "[ERROR] Unsupported DATA_SUBSET_MODE='${raw_mode}'." >&2
+      echo "[ERROR] Use one of: omomo, omomo+behave, omomo+behave+ds128, omomo+behave+ds256, 64+64+dsall" >&2
+      return 2
+      ;;
+  esac
+}
+
+data_subset_run_name() {
+  case "$1" in
+    omomo)
+      printf '%s\n' "omomo"
+      ;;
+    omomo+behave)
+      printf '%s\n' "omomo+behave"
+      ;;
+    omomo+behave+ds128)
+      printf '%s\n' "omomo+behave+ds128"
+      ;;
+    omomo+behave+ds256)
+      printf '%s\n' "omomo+behave+ds256"
+      ;;
+    64+64+dsall)
+      printf '%s\n' "64+64+dsall"
+      ;;
+  esac
+}
+
+prepare_data_subset_bank() {
+  local source_dir="$1"
+  local subset_mode="$2"
+  local subset_seed="$3"
+  local subset_bank_root="$4"
+
+  "${PYTHON_BIN}" - "${source_dir}" "${subset_mode}" "${subset_seed}" "${subset_bank_root}" <<'PY'
+import copy
+import json
+import os
+import random
+import shutil
+import sys
+from pathlib import Path
+
+
+source_dir = Path(sys.argv[1]).expanduser().resolve()
+mode = sys.argv[2].strip()
+seed_raw = sys.argv[3].strip()
+bank_root_raw = sys.argv[4].strip()
+
+try:
+    seed = int(seed_raw)
+except ValueError:
+    raise SystemExit(f"[ERROR] DATA_SUBSET_SEED must be an integer. Got: {seed_raw}")
+
+if not source_dir.is_dir():
+    raise SystemExit(f"[ERROR] DATA subset source bank does not exist: {source_dir}")
+map_path = source_dir / "_clip_object_urdf_map.json"
+if not map_path.is_file():
+    raise SystemExit(f"[ERROR] DATA subset source bank is missing _clip_object_urdf_map.json: {source_dir}")
+
+mode_table = {
+    "omomo": {
+        "slug": "omomo",
+        "wandb_name": "omomo",
+        "include_behave": False,
+        "ds_limit": 0,
+        "all_ds": False,
+    },
+    "omomo+behave": {
+        "slug": "omomo_behave",
+        "wandb_name": "omomo+behave",
+        "include_behave": True,
+        "ds_limit": 0,
+        "all_ds": False,
+    },
+    "omomo+behave+ds128": {
+        "slug": f"omomo_behave_ds128_seed{seed}",
+        "wandb_name": "omomo+behave+ds128",
+        "include_behave": True,
+        "ds_limit": 128,
+        "all_ds": False,
+    },
+    "omomo+behave+ds256": {
+        "slug": f"omomo_behave_ds256_seed{seed}",
+        "wandb_name": "omomo+behave+ds256",
+        "include_behave": True,
+        "ds_limit": 256,
+        "all_ds": False,
+    },
+    "64+64+dsall": {
+        "slug": "64_64_dsall",
+        "wandb_name": "64+64+dsall",
+        "include_behave": True,
+        "ds_limit": None,
+        "all_ds": True,
+    },
+}
+spec = mode_table.get(mode)
+if spec is None:
+    raise SystemExit(f"[ERROR] Unsupported normalized DATA_SUBSET_MODE={mode}")
+
+payload = json.loads(map_path.read_text(encoding="utf-8"))
+clips_map = payload["clips"] if isinstance(payload, dict) and isinstance(payload.get("clips"), dict) else payload
+if not isinstance(clips_map, dict) or not clips_map:
+    raise SystemExit(f"[ERROR] Invalid or empty clip-object map: {map_path}")
+
+npz_by_id = {p.stem: p for p in sorted(source_dir.glob("*.npz"))}
+omomo_ids = sorted([clip_id for clip_id in npz_by_id if clip_id.startswith("sub")])
+behave_ids = sorted([clip_id for clip_id in npz_by_id if clip_id.startswith("behave_")])
+ds_ids = sorted([clip_id for clip_id in npz_by_id if clip_id.startswith("box_")])
+other_ids = sorted(set(npz_by_id) - set(omomo_ids) - set(behave_ids) - set(ds_ids))
+
+if not omomo_ids:
+    raise SystemExit(f"[ERROR] DATA subset mode {mode} requires OMOMO sub* clips in {source_dir}")
+if spec["include_behave"] and not behave_ids:
+    raise SystemExit(f"[ERROR] DATA subset mode {mode} requires behave_* clips in {source_dir}")
+
+selected_ds = []
+if spec["all_ds"]:
+    selected_ds = ds_ids
+elif spec["ds_limit"]:
+    limit = int(spec["ds_limit"])
+    if len(ds_ids) < limit:
+        raise SystemExit(f"[ERROR] DATA subset mode {mode} requires {limit} box_* DS clips, found {len(ds_ids)}")
+    shuffled = list(ds_ids)
+    random.Random(seed).shuffle(shuffled)
+    selected_ds = sorted(shuffled[:limit])
+
+selected_ids = list(omomo_ids)
+if spec["include_behave"]:
+    selected_ids.extend(behave_ids)
+selected_ids.extend(selected_ds)
+selected_ids = sorted(selected_ids)
+
+missing_map_entries = [clip_id for clip_id in selected_ids if clip_id not in clips_map]
+if missing_map_entries:
+    preview = ", ".join(missing_map_entries[:10])
+    raise SystemExit(f"[ERROR] Source object map is missing {len(missing_map_entries)} selected entries: {preview}")
+
+if bank_root_raw:
+    out_dir = Path(bank_root_raw).expanduser().resolve() / f"{source_dir.name}_{spec['slug']}"
+else:
+    out_dir = source_dir.parent / f"{source_dir.name}_{spec['slug']}"
+
+expected_metadata = {
+    "mode": mode,
+    "wandb_name": spec["wandb_name"],
+    "source_motion_bank": str(source_dir),
+    "data_subset_seed": seed,
+    "selected_clip_ids": selected_ids,
+}
+existing_map = out_dir / "_clip_object_urdf_map.json"
+if existing_map.is_file():
+    try:
+        existing_payload = json.loads(existing_map.read_text(encoding="utf-8"))
+        existing_meta = existing_payload.get("clip_subset", {}) if isinstance(existing_payload, dict) else {}
+        existing_npz_ids = sorted(p.stem for p in out_dir.glob("*.npz"))
+        if existing_meta.get("selected_clip_ids") == selected_ids and existing_npz_ids == selected_ids:
+            counts = {
+                "omomo": len([x for x in selected_ids if x.startswith("sub")]),
+                "behave": len([x for x in selected_ids if x.startswith("behave_")]),
+                "ds": len([x for x in selected_ids if x.startswith("box_")]),
+                "other": len([x for x in selected_ids if x in other_ids]),
+                "total": len(selected_ids),
+            }
+            print(
+                f"[INFO] Reusing DATA_SUBSET_MODE={mode} bank: {out_dir} "
+                f"({counts['total']} clips = {counts['omomo']} omomo + {counts['behave']} behave + {counts['ds']} ds)",
+                file=sys.stderr,
+            )
+            print(f"{out_dir}\t{existing_map}\t{spec['wandb_name']}\t{json.dumps(counts, sort_keys=True)}")
+            raise SystemExit(0)
+    except json.JSONDecodeError:
+        pass
+
+if out_dir.exists() or out_dir.is_symlink():
+    if out_dir.is_dir() and not out_dir.is_symlink():
+        shutil.rmtree(out_dir)
+    else:
+        out_dir.unlink()
+out_dir.mkdir(parents=True, exist_ok=True)
+
+def symlink_or_copy(src: Path, dst: Path) -> None:
+    try:
+        os.symlink(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+def resolve_entry_paths(entry: dict) -> dict:
+    resolved = copy.deepcopy(entry)
+    for key in ("object_urdf_path", "object_mesh_path"):
+        raw = str(resolved.get(key, "")).strip()
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = (source_dir / path).resolve()
+        resolved[key] = str(path)
+    return resolved
+
+selected_map = {}
+for clip_id in selected_ids:
+    src_npz = npz_by_id[clip_id]
+    symlink_or_copy(src_npz, out_dir / src_npz.name)
+    selected_map[clip_id] = resolve_entry_paths(clips_map[clip_id])
+
+counts = {
+    "omomo": len([x for x in selected_ids if x.startswith("sub")]),
+    "behave": len([x for x in selected_ids if x.startswith("behave_")]),
+    "ds": len([x for x in selected_ids if x.startswith("box_")]),
+    "other": len([x for x in selected_ids if x in other_ids]),
+    "total": len(selected_ids),
+}
+subset_payload = {
+    "clips": selected_map,
+    "clip_subset": {
+        **expected_metadata,
+        "source_total_counts": {
+            "omomo": len(omomo_ids),
+            "behave": len(behave_ids),
+            "ds": len(ds_ids),
+            "other": len(other_ids),
+            "total": len(npz_by_id),
+        },
+        "selected_counts": counts,
+    },
+}
+existing_map.write_text(json.dumps(subset_payload, indent=2, sort_keys=True), encoding="utf-8")
+
+print(
+    f"[INFO] Prepared DATA_SUBSET_MODE={mode} bank: {out_dir} "
+    f"({counts['total']} clips = {counts['omomo']} omomo + {counts['behave']} behave + {counts['ds']} ds)",
+    file=sys.stderr,
+)
+print(f"{out_dir}\t{existing_map}\t{spec['wandb_name']}\t{json.dumps(counts, sort_keys=True)}")
+PY
+}
+
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --data-subset-mode|--sample-mode)
+      if [[ "$#" -lt 2 ]]; then
+        echo "[ERROR] $1 requires a value." >&2
+        exit 2
+      fi
+      DATA_SUBSET_MODE="$2"
+      shift 2
+      ;;
+    --data-subset-mode=*|--sample-mode=*)
+      DATA_SUBSET_MODE="${1#*=}"
+      shift
+      ;;
+    --data-subset-seed)
+      if [[ "$#" -lt 2 ]]; then
+        echo "[ERROR] $1 requires a value." >&2
+        exit 2
+      fi
+      DATA_SUBSET_SEED="$2"
+      shift 2
+      ;;
+    --data-subset-seed=*)
+      DATA_SUBSET_SEED="${1#*=}"
+      shift
+      ;;
+    --data-subset-bank-root)
+      if [[ "$#" -lt 2 ]]; then
+        echo "[ERROR] $1 requires a value." >&2
+        exit 2
+      fi
+      DATA_SUBSET_BANK_ROOT="$2"
+      shift 2
+      ;;
+    --data-subset-bank-root=*)
+      DATA_SUBSET_BANK_ROOT="${1#*=}"
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
 if [[ "$#" -gt 0 ]]; then
   first_arg_normalized=$(echo "$1" | tr '[:upper:]' '[:lower:]')
   case "${first_arg_normalized}" in
@@ -1065,6 +1391,12 @@ if [[ "$#" -gt 0 ]]; then
       ;;
   esac
 fi
+if [[ "$#" -gt 0 ]] && is_data_subset_mode_alias "$1"; then
+  echo "[ERROR] DATA subset modes are not accepted as the first positional argument because that slot is also used for DATA_MODE/run name/checkpoint." >&2
+  echo "[ERROR] Use: bash train_object_generalist_ds.sh --data-subset-mode '$1'" >&2
+  echo "[ERROR] Or:  DATA_SUBSET_MODE='$1' bash train_object_generalist_ds.sh" >&2
+  exit 2
+fi
 DATA_MODE=$(echo "${DATA_MODE}" | tr '[:upper:]' '[:lower:]')
 case "${DATA_MODE}" in
   pure-ds)
@@ -1080,6 +1412,21 @@ case "${DATA_MODE}" in
     DATA_MODE="fix-omomo-quater"
     ;;
 esac
+DATA_SUBSET_WANDB_NAME=""
+DATA_SUBSET_COUNTS_JSON=""
+if [[ -n "${DATA_SUBSET_MODE}" ]]; then
+  DATA_SUBSET_MODE="$(normalize_data_subset_mode "${DATA_SUBSET_MODE}")"
+  DATA_SUBSET_WANDB_NAME="$(data_subset_run_name "${DATA_SUBSET_MODE}")"
+  if [[ ! "${DATA_SUBSET_SEED}" =~ ^-?[0-9]+$ ]]; then
+    echo "[ERROR] DATA_SUBSET_SEED must be an integer. Got: ${DATA_SUBSET_SEED}" >&2
+    exit 2
+  fi
+  DATA_MODE="mix-naive"
+  if [[ -n "${MIX_NAIVE_FIXED_OMOMO_PROBABILITIES}" ]]; then
+    echo "[WARN] Ignoring MIX_NAIVE_FIXED_OMOMO_PROBABILITIES for DATA_SUBSET_MODE=${DATA_SUBSET_MODE}; filtered subset bank controls sampled clips."
+    MIX_NAIVE_FIXED_OMOMO_PROBABILITIES=""
+  fi
+fi
 case "${DATA_MODE}" in
   pure-sd|pure-real|mix-naive|mix-curriculum|fix-omomo-quater)
     ;;
@@ -1142,6 +1489,9 @@ if [[ "$#" -gt 0 ]]; then
       shift
     fi
   fi
+fi
+if [[ -n "${DATA_SUBSET_MODE}" && -z "${SEQUENCE_NAME}" ]]; then
+  SEQUENCE_NAME="${DATA_SUBSET_WANDB_NAME}"
 fi
 EXTRA_ARGS=("$@")
 
@@ -1234,6 +1584,10 @@ fi
 if [[ -n "${EFFECTIVE_SEQUENCE_NAME}" ]]; then
   echo "[INFO] Effective run name: ${EFFECTIVE_SEQUENCE_NAME}"
 fi
+if [[ -n "${DATA_SUBSET_MODE}" ]]; then
+  echo "[INFO] DATA_SUBSET_MODE=${DATA_SUBSET_MODE} DATA_SUBSET_SEED=${DATA_SUBSET_SEED}"
+  echo "[INFO] DATA_SUBSET_MODE builds a filtered bank and trains only on those selected clips."
+fi
 if [[ "${DATA_MODE}" == "mix-curriculum" ]]; then
   echo "[INFO] DATA_MODE=mix-curriculum enables OMOMO->SD clip-group curriculum on the mixed bank."
   echo "[INFO] OMOMO clip prefixes=${MIX_CURRICULUM_OMOMO_PREFIXES}"
@@ -1309,6 +1663,18 @@ else
   if [[ "${MOTION_DIR_FROM_ENV}" != "1" ]]; then
     MOTION_DIR="${MODE_DEFAULT_MOTION_DIR}"
   fi
+fi
+
+if [[ -n "${DATA_SUBSET_MODE}" ]]; then
+  DATA_SUBSET_SOURCE_DIR="${MOTION_DIR}"
+  previous_object_spec_path="${OBJECT_SPEC_PATH}"
+  subset_info="$(prepare_data_subset_bank "${DATA_SUBSET_SOURCE_DIR}" "${DATA_SUBSET_MODE}" "${DATA_SUBSET_SEED}" "${DATA_SUBSET_BANK_ROOT}")"
+  IFS=$'\t' read -r MOTION_DIR OBJECT_SPEC_PATH DATA_SUBSET_WANDB_NAME DATA_SUBSET_COUNTS_JSON <<< "${subset_info}"
+  if [[ -n "${previous_object_spec_path}" && "${previous_object_spec_path}" != "${OBJECT_SPEC_PATH}" ]]; then
+    echo "[WARN] DATA_SUBSET_MODE overrides OBJECT_SPEC_PATH with the filtered subset map: ${OBJECT_SPEC_PATH}"
+  fi
+  echo "[INFO] DATA_SUBSET_SOURCE_DIR: ${DATA_SUBSET_SOURCE_DIR}"
+  echo "[INFO] DATA_SUBSET_COUNTS: ${DATA_SUBSET_COUNTS_JSON}"
 fi
 
 echo "[INFO] RAW_MOTION_DIR: ${RAW_MOTION_DIR}"
