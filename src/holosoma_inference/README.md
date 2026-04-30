@@ -81,6 +81,31 @@ For current G1 WBT/object-tracking split sim2sim, the minimum configuration base
 - Object carry:
   when carry quality is wrong, debug `sim-state` traces and contact bodies before changing web or `viser` rendering.
 
+### Perception Policy Input Audit
+
+When comparing or debugging depth/perception policies, never decide whether the actor uses depth from `module_dict.actor.input_dim` alone. That field only lists the non-visual observation groups that are concatenated into `obs`.
+
+Always check all of the following before reporting actor, critic, or teacher inputs:
+
+1. ONNX graph inputs: list `obs`, `time_step`, and `perception_obs` with shapes.
+2. Actor non-visual inputs: `algo.config.module_dict.actor.input_dim`.
+3. Actor perception path: `algo.config.module_dict.actor.layer_config.perception_input_name`.
+4. Actor perception encoder: `perception_encoder_type`, `perception_input_height`, `perception_input_width`, and `perception_output_dim`.
+5. Critic non-visual inputs: `algo.config.module_dict.critic.input_dim`.
+6. Critic perception path: `algo.config.module_dict.critic.layer_config.perception_input_name`.
+7. Distill teacher inputs: `algo.config.distill.teacher_obs_keys`, `teacher_perception_preset`, and `teacher_perception_obs_key`.
+8. Runtime perception config: `perception.camera_*`, warp/crop settings, and `perception.inject_into_critic_modules`.
+
+Report the result explicitly in this form:
+
+```text
+actor = obs groups + depth/perception_obs or obs groups only
+critic = obs groups + depth/perception_obs or obs groups only
+teacher = obs groups + depth/perception_obs or obs groups only
+```
+
+Example: for `shoo7sr1`, the student actor is `MLPPerceptionEncoder` and consumes both `obs [1,308]` and `perception_obs [1,5046]`. The actor depth encoder is `far_tracking_cnn_small` with `58x87 -> 32`, so the actor MLP sees `308 + 32 = 340` features. The critic is a plain `MLP` with `perception_input_name: ''`, so it does not consume depth. The teacher uses `teacher_obs_keys=actor_obs` and `teacher_perception_preset=none`, so it also does not consume depth.
+
 ### Reset Semantics And Timing
 
 Correct reset means:
