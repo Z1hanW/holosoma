@@ -26,7 +26,7 @@ if [[ -z "${NPROC:-}" ]]; then
   IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
   NPROC=${#_visible_gpus[@]}
 fi
-PER_GPU_ENVS=${PER_GPU_ENVS:-2048}
+PER_GPU_ENVS=${PER_GPU_ENVS:-4096}
 NUM_ENVS=${NUM_ENVS:-$((PER_GPU_ENVS * NPROC))}
 
 DATA_MODE=${DATA_MODE:-pure-sd}

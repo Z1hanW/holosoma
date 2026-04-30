@@ -32,7 +32,7 @@ Optional env vars:
   PERCEPTION_PRESET            (default: camera_depth_d435i_17x17; options: none|camera_depth_d435i|camera_depth_d435i_17x17|heightmap)
   TEACHER_OBS_KEYS             (default: actor_obs,actor_obs_target)
   NUM_ENVS                     (default: NPROC * PER_GPU_ENVS)
-  PER_GPU_ENVS                 (default: 8192)
+  PER_GPU_ENVS                 (default: 4096)
   CUDA_VISIBLE_DEVICES         (default: 0,1,2,3)
   TRAINING_PROJECT             (default: terrain-aware)
   RUN_NAME                     (default: g1_terrain_distill_root_access_to_depth)
@@ -398,7 +398,7 @@ if [[ -z "${NPROC:-}" ]]; then
   NPROC="${#_visible_gpus[@]}"
 fi
 NPROC="${NPROC:-1}"
-PER_GPU_ENVS="${PER_GPU_ENVS:-8192}"
+PER_GPU_ENVS="${PER_GPU_ENVS:-4096}"
 NUM_ENVS="${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}"
 NNODES="${NNODES:-1}"
 NODE_RANK="${NODE_RANK:-0}"

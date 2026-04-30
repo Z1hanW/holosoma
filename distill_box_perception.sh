@@ -232,17 +232,36 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   EXP="g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref"
 fi
 
-if [[ $# -gt 0 ]] && is_checkpoint_ref "$1"; then
-  TEACHER_CHECKPOINT="$1"
-  shift
-fi
-if [[ $# -gt 0 && "$1" != -* ]]; then
-  POSITIONAL_RUN_NAME="$1"
-  shift
-fi
+POSITIONAL_TEACHER_CHECKPOINT_SET=0
+while [[ $# -gt 0 && "$1" != -* ]]; do
+  if is_checkpoint_ref "$1"; then
+    if [[ "${POSITIONAL_TEACHER_CHECKPOINT_SET}" -eq 0 ]]; then
+      TEACHER_CHECKPOINT="$1"
+      POSITIONAL_TEACHER_CHECKPOINT_SET=1
+      shift
+      continue
+    fi
+    break
+  fi
+
+  case "$1" in
+    run:*|run-name:*|run_name:*|name:*)
+      POSITIONAL_RUN_NAME="${1#*:}"
+      shift
+      continue
+      ;;
+  esac
+
+  if [[ -z "${POSITIONAL_RUN_NAME}" ]]; then
+    POSITIONAL_RUN_NAME="$1"
+    shift
+    continue
+  fi
+  break
+done
 
 if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
-  echo "Usage: $0 [mix-naive|pure-real|pure-sd] [default|dagger-mix|dag_first|ppo-first|contact-aware|shoo7sr1-near03-debug] [teacher_checkpoint.pt|wandb_run_url] [run_name] [extra train args...]" >&2
+  echo "Usage: $0 [mix-naive|pure-real|pure-sd] [default|dagger-mix|dag_first|ppo-first|contact-aware|shoo7sr1-near03-debug] [run_name] [teacher_checkpoint.pt|wandb_run_url] [extra train args...]" >&2
   exit 1
 fi
 
