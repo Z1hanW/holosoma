@@ -941,7 +941,9 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   STUDENT_ACTOR_INPUTS="['actor_obs_root','actor_obs_proprio_no_linvel']"
   STUDENT_ACTOR_INPUTS_EXPLICIT=1
   TEACHER_COMPAT_PROFILE="u5lguxvl_generalist"
-  TEACHER_OBS_KEYS="actor_obs"
+  # Current runtime actor_obs has newer object target terms. The u5lguxvl
+  # teacher/shoo7sr1-era actor_obs schema is now exposed as actor_obs_legacy.
+  TEACHER_OBS_KEYS="actor_obs_legacy"
   TEACHER_OBS_KEYS_EXPLICIT=1
   TEACHER_PERCEPTION_PRESET="none"
   TEACHER_PERCEPTION_PRESET_EXPLICIT=1
@@ -976,7 +978,7 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   USE_ADAPTIVE_TIMESTEPS_SAMPLER_EXPLICIT=1
   SCHEDULE_NAME="sparse_root_teacher_anchor_v4_ppo_first_step_mix"
   SCHEDULE_NAME_EXPLICIT=1
-  SCHEDULE_NOTES="shoo7sr1 debug reproduction with only perception.camera_near changed from 0.1 to 0.3."
+  SCHEDULE_NOTES="shoo7sr1 debug reproduction with only perception.camera_near changed from 0.1 to 0.3; teacher uses runtime actor_obs_legacy because it is the current name for the shoo7sr1-era actor_obs schema."
   SCHEDULE_NOTES_EXPLICIT=1
   DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES=False
   SPARSE_GOAL_ENABLED=False
