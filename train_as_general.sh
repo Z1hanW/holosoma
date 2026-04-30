@@ -186,7 +186,7 @@ export HOLOSOMA_OBJECT_COLLIDER_TYPE=${HOLOSOMA_OBJECT_COLLIDER_TYPE:-convex_dec
 
 export EXP=${EXP:-g1-29dof-wbt-w-object-generalist}
 export SEQUENCE_NAME=${SEQUENCE_NAME:-omomo-real-mesh-cotrack}
-export WANDB_PROJECT=${WANDB_PROJECT:-boxer}
+export WANDB_PROJECT=${WANDB_PROJECT:-carry-any}
 export CLIP_WEIGHTING_STRATEGY=${CLIP_WEIGHTING_STRATEGY:-uniform_clip}
 
 # Loose co-tracking defaults: keep the robot feasible while emphasizing object tracking.
