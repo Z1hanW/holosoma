@@ -95,7 +95,7 @@ OBJ_DIR=${OBJ_DIR:-"${DEFAULT_DS_GEOMETRY_DIR}"}
 PREPARED_MOTION_DIR=${PREPARED_MOTION_DIR:-""}
 OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-""}
 AVAILABLE_GPU_COUNT=$(detect_nproc)
-NPROC=${NPROC:-8}
+NPROC=${NPROC:-${AVAILABLE_GPU_COUNT}}
 if [[ ! "${NPROC}" =~ ^[0-9]+$ || "${NPROC}" == "0" ]]; then
   echo "[ERROR] NPROC must be a positive integer. Got: ${NPROC}" >&2
   exit 2
