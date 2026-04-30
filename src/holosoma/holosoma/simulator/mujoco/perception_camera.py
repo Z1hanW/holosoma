@@ -64,6 +64,8 @@ class MuJoCoDepthCamera:
         self._scene_option: mujoco.MjvOption | None = None
         self._render_near = 0.1
         self._render_far = float(max(1.0, float(getattr(config, "max_distance", 1.0) or 1.0)))
+        self._vis_map_znear: float | None = None
+        self._vis_map_zfar: float | None = None
         self._masked_robot_geom_ids: list[int] = []
         self._masked_object_geom_ids: list[int] = []
         self._depth_geom_group_overrides: dict[int, int] = {}
@@ -128,11 +130,26 @@ class MuJoCoDepthCamera:
     def capture_depth(self) -> torch.Tensor:
         self._capture_counter += 1
         renderer, render_data = self._prepare_renderer(depth=True)
-        depth = renderer.render()
+        depth = self._render_depth_with_clip(renderer)
         depth_array = self._sanitize_depth_array(depth)
         depth_array = self._orient_render_array(depth_array)
         self._maybe_dump_debug(render_data, depth=depth_array)
         return torch.as_tensor(depth_array, device=self._device, dtype=torch.float32).unsqueeze(0)
+
+    def _render_depth_with_clip(self, renderer: mujoco.Renderer) -> np.ndarray:
+        model = self._env.simulator.root_model
+        if model is None or self._vis_map_znear is None or self._vis_map_zfar is None:
+            return renderer.render()
+
+        original_znear = float(model.vis.map.znear)
+        original_zfar = float(model.vis.map.zfar)
+        try:
+            model.vis.map.znear = float(self._vis_map_znear)
+            model.vis.map.zfar = float(self._vis_map_zfar)
+            return renderer.render()
+        finally:
+            model.vis.map.znear = original_znear
+            model.vis.map.zfar = original_zfar
 
     def capture_rgb(self) -> np.ndarray:
         renderer, _render_data = self._prepare_renderer(depth=False)
@@ -183,7 +200,7 @@ class MuJoCoDepthCamera:
         model.cam_fovy[cam_id] = self._vfov_deg
         self._configure_depth_clip_planes(model)
 
-    def _configure_depth_clip_planes(self, _model: mujoco.MjModel) -> None:
+    def _configure_depth_clip_planes(self, model: mujoco.MjModel) -> None:
         near = float(getattr(self._cfg, "camera_near", 0.1) or 0.1)
         max_distance = float(getattr(self._cfg, "max_distance", 1.0) or 1.0)
         far = float(getattr(self._cfg, "camera_far", max_distance) or max_distance)
@@ -192,10 +209,9 @@ class MuJoCoDepthCamera:
         far = max(far, max_distance, near + 1.0e-3)
         self._render_near = near
         self._render_far = far
-        # model.vis.map is global and also drives the interactive MuJoCo viewer.
-        # Keep camera near/far as post-processing limits only; otherwise the
-        # viewer gets clipped to the policy depth range and only shows a small
-        # checkerboard patch surrounded by haze.
+        extent = max(float(model.stat.extent), 1.0e-6)
+        self._vis_map_znear = near / extent
+        self._vis_map_zfar = far / extent
 
     def _update_camera_pose(self, render_data: mujoco.MjData) -> None:
         model = self._env.simulator.root_model
@@ -298,17 +314,24 @@ class MuJoCoDepthCamera:
         camera: str | mujoco.MjvCamera,
     ) -> None:
         model = self._env.simulator.root_model
-        if model is None or not self._depth_geom_group_overrides:
+        if model is None:
             renderer.update_scene(render_data, camera=camera, scene_option=self._scene_option)
             return
 
         original_groups: dict[int, int] = {}
+        original_znear = float(model.vis.map.znear)
+        original_zfar = float(model.vis.map.zfar)
         try:
             for geom_id, group in self._depth_geom_group_overrides.items():
                 original_groups[geom_id] = int(model.geom_group[geom_id])
                 model.geom_group[geom_id] = int(group)
+            if self._vis_map_znear is not None and self._vis_map_zfar is not None:
+                model.vis.map.znear = float(self._vis_map_znear)
+                model.vis.map.zfar = float(self._vis_map_zfar)
             renderer.update_scene(render_data, camera=camera, scene_option=self._scene_option)
         finally:
+            model.vis.map.znear = original_znear
+            model.vis.map.zfar = original_zfar
             for geom_id, group in original_groups.items():
                 model.geom_group[geom_id] = group
 
