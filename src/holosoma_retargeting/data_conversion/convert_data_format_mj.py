@@ -365,9 +365,42 @@ def run_simulator(joint_names: list[str]):
         use_omniretarget_data=use_omniretarget_data,
     )
 
+    def _scalar_str(value: Any) -> str:
+        arr = np.asarray(value)
+        if arr.size == 0:
+            return ""
+        if arr.shape == ():
+            item = arr.item()
+        else:
+            item = arr.reshape(-1)[0]
+            if hasattr(item, "item"):
+                item = item.item()
+        return str(item).strip()
+
+    def _infer_omomo_object_name_from_path(path: str) -> str:
+        parts = Path(path).stem.replace("_original", "").split("_")
+        if len(parts) >= 3 and parts[0].startswith("sub"):
+            return "_".join(parts[1:-1])
+        return ""
+
+    def _infer_object_name_from_input(path: str) -> str:
+        input_path = Path(path)
+        if input_path.suffix.lower() == ".npz":
+            try:
+                with np.load(input_path, allow_pickle=True) as src:
+                    if "object_name" in src:
+                        value = _scalar_str(src["object_name"])
+                        if value:
+                            return value
+            except Exception as exc:
+                print(f"[WARN] Failed to infer object_name from input npz '{input_path}': {exc}")
+        return _infer_omomo_object_name_from_path(path)
+
     object_name = args_cli.object_name
     if object_name is None:
-        object_name = "largebox" if has_dynamic_object else None
+        object_name = _infer_object_name_from_input(args_cli.input_file) if has_dynamic_object else None
+        if has_dynamic_object and not object_name:
+            object_name = "largebox"
 
     robot_config = RobotConfig(robot_type=args_cli.robot)
     motion_config = MotionDataConfig(

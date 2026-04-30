@@ -10,6 +10,25 @@ import numpy as np
 
 from holosoma.utils.path import resolve_data_file_path
 
+_LARGEBOX_BEST_IOU_EXTENTS = (
+    0.3249185391136043,
+    0.31860981675930306,
+    0.326778873323969,
+)
+_LARGEBOX_BEST_IOU_CENTER_OFFSET = (
+    0.000861508081686495,
+    -0.0004369894302321542,
+    -0.0025913614928369986,
+)
+
+
+def get_largebox_best_iou_primitive_extents() -> tuple[float, float, float]:
+    return _LARGEBOX_BEST_IOU_EXTENTS
+
+
+def get_largebox_best_iou_primitive_center_offset() -> tuple[float, float, float]:
+    return _LARGEBOX_BEST_IOU_CENTER_OFFSET
+
 
 def _parse_vec3(raw: str | None, default: tuple[float, float, float]) -> np.ndarray:
     if raw is None:

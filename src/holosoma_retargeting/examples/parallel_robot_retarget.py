@@ -14,6 +14,7 @@ import sys
 # Add src to path for direct execution
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -60,6 +61,20 @@ OBJECT_INTERACTION_EXTRA_AGGRESSIVE_AUGMENTATIONS = (
     {"name": "rot_2", "translation": np.array([0.0, 0.35, 0.0]), "rotation": np.pi / 3},
 )
 
+AUTO_OBJECT_NAMES = {"", "all", "auto", "*"}
+
+
+def _is_auto_object_name(object_name: str | None) -> bool:
+    return object_name is None or str(object_name).strip().lower() in AUTO_OBJECT_NAMES
+
+
+def infer_omomo_object_name(task_name: str) -> str:
+    """Infer the OMOMO object token from names like ``sub10_largebox_000``."""
+    parts = Path(task_name).stem.split("_")
+    if len(parts) < 3 or not parts[0].startswith("sub"):
+        raise ValueError(f"Cannot infer OMOMO object name from task name: {task_name!r}")
+    return "_".join(parts[1:-1])
+
 
 def find_files(
     data_dir: Path,
@@ -85,7 +100,7 @@ def find_files(
         return sorted(files)
     if data_format == "smplh":
         # SMPLH/OMOMO: .pt files (optionally filtered by object_name)
-        if object_name:
+        if object_name and not _is_auto_object_name(object_name):
             files = [str(p) for p in data_dir.glob(f"*{object_name}*.pt")]
         else:
             files = [str(p) for p in data_dir.glob("*.pt")]
@@ -226,9 +241,9 @@ def process_single_task(args):
 
     # Task-specific object setup: set default object_dir for climbing if not provided
     if task_type == "climbing" and task_config.object_dir is None:
-        from dataclasses import replace
-
         task_config = replace(task_config, object_dir=Path(file_path))
+    elif task_type == "object_interaction" and data_format == "smplh" and _is_auto_object_name(task_config.object_name):
+        task_config = replace(task_config, object_name=infer_omomo_object_name(task_name))
 
     constants = create_task_constants(robot_config, motion_data_config, task_config, task_type)
 

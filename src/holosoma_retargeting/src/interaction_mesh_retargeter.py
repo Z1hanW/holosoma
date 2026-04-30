@@ -689,10 +689,20 @@ class InteractionMeshRetargeter:
 
         problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
 
-        # -------- Solve with Clarabel --------
+        # -------- Solve with Clarabel, then progressively relax/fallback --------
         solver_kwargs = {"verbose": verbose}
-        problem.solve(solver=cp.CLARABEL, **solver_kwargs)
-        if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+
+        def _solve_with_clarabel(problem_to_solve: cp.Problem, label: str) -> Exception | None:
+            try:
+                problem_to_solve.solve(solver=cp.CLARABEL, **solver_kwargs)
+                return None
+            except Exception as exc:  # Clarabel occasionally raises instead of returning a status.
+                if verbose:
+                    print(f"[WARN] Clarabel solve raised during {label} (init_t={init_t}): {exc}")
+                return exc
+
+        solve_error = _solve_with_clarabel(problem, "primary")
+        if solve_error is not None or problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
             constraints_wo_soc = [c for c in constraints if not isinstance(c, cp.constraints.second_order.SOC)]
             if len(constraints_wo_soc) != len(constraints):
                 if verbose:
@@ -700,7 +710,16 @@ class InteractionMeshRetargeter:
                         f"[WARN] Clarabel status={problem.status} (init_t={init_t}); retrying without SOC step limit."
                     )
                 problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints_wo_soc)
-                problem.solve(solver=cp.CLARABEL, **solver_kwargs)
+                solve_error = _solve_with_clarabel(problem, "without_soc")
+
+        if solve_error is not None or problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+            if verbose:
+                print(f"[WARN] Clarabel status={problem.status} (init_t={init_t}); retrying with SCS.")
+            try:
+                problem.solve(solver=cp.SCS, verbose=verbose, eps=1.0e-4, max_iters=2000)
+            except Exception as exc:
+                if verbose:
+                    print(f"[WARN] SCS solve raised (init_t={init_t}): {exc}")
 
         if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
             raise RuntimeError(f"CVXPY solve failed: {problem.status}")

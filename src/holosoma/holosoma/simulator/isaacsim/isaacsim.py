@@ -938,9 +938,22 @@ class IsaacSim(BaseSimulator):
                 )
             return primitive_cfg
 
+        collider_type_raw = os.environ.get("HOLOSOMA_OBJECT_COLLIDER_TYPE", "convex_hull").strip().lower()
+        if collider_type_raw in {"convex_decomposition", "convex_decomp", "decomposition", "vhacd"}:
+            collider_type = "convex_decomposition"
+        elif collider_type_raw in {"convex_hull", "hull"}:
+            collider_type = "convex_hull"
+        else:
+            logger.warning(
+                "Unknown HOLOSOMA_OBJECT_COLLIDER_TYPE='{}'; falling back to convex_hull",
+                collider_type_raw,
+            )
+            collider_type = "convex_hull"
+
         return sim_utils.UrdfFileCfg(
             fix_base=False,
             replace_cylinders_with_capsules=True,
+            collider_type=collider_type,
             asset_path=object_asset_urdf_path,
             scale=object_scale,
             activate_contact_sensors=True,
