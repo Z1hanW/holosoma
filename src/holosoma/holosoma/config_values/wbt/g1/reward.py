@@ -566,7 +566,7 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_gui
                 ].params,
                 "only_external": False,
             },
-            weight=0.3,
+            weight=0.0,
         ),
         "sparse_goal_object_pose_error_exp": replace(
             g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_guidance.terms[
@@ -598,7 +598,7 @@ g1_29dof_wbt_reward_w_object_distill_sparse_goal_mixed_r2s_rollout_reference_gui
                 "only_external": False,
                 "current_lift_delta": 0.07,
             },
-            weight=10.0,
+            weight=0.0,
         ),
     },
 )

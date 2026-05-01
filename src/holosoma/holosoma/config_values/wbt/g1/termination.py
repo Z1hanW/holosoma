@@ -183,19 +183,9 @@ g1_29dof_wbt_termination_distill_sparse_goal_mixed = TerminationManagerCfg(
 
 g1_29dof_wbt_termination_distill_sparse_goal_pickup = TerminationManagerCfg(
     terms={
-        **{
-            name: term
-            for name, term in g1_29dof_wbt_termination_distill_sparse_goal_mixed.terms.items()
-            if name not in ("sparse_goal_success", "sparse_goal_dropped_away")
-        },
-        "sparse_goal_pickup_success": TerminationTermCfg(
-            func="holosoma.managers.termination.terms.wbt:SparseGoalPickupSuccess",
-            params={
-                "only_external": False,
-                "current_lift_delta": 0.07,
-                "hold_steps": 10,
-            },
-        ),
+        name: term
+        for name, term in g1_29dof_wbt_termination_distill_sparse_goal_mixed.terms.items()
+        if name not in ("sparse_goal_success", "sparse_goal_dropped_away")
     }
 )
 
