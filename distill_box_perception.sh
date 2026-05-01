@@ -20,6 +20,7 @@ set -euo pipefail
 # - ppo_first: PPO+DAgger from iteration 0
 # - contact-aware: ppo-first student whose sparse root command is zeroed before
 #   pickup and during the release/putdown tail
+# - contact-aware-history: contact-aware plus 5-frame student/critic proprio history
 # - shoo7sr1-near03-debug: shoo7sr1 debug reproduction; only depth near
 #   differs from the saved shoo7sr1 config (0.3 instead of 0.1)
 
@@ -38,6 +39,8 @@ DATA_MODE=${DATA_MODE:-pure-sd}
 TRACKER_PROFILE=${TRACKER_PROFILE:-old-tracker}
 SCHEDULE_VARIANT=${SCHEDULE_VARIANT:-default}
 ROOT_COMMAND_MODE=${ROOT_COMMAND_MODE:-default}
+CONTACT_AWARE_HISTORY=${CONTACT_AWARE_HISTORY:-0}
+CONTACT_AWARE_HISTORY_LENGTH=${CONTACT_AWARE_HISTORY_LENGTH:-5}
 SHOO7SR1_NEAR03_DEBUG=${SHOO7SR1_NEAR03_DEBUG:-0}
 PYTHON_BIN=${PYTHON_BIN:-python}
 
@@ -214,6 +217,11 @@ while [[ $# -gt 0 ]]; do
       ROOT_COMMAND_MODE="contact-aware"
       shift
       ;;
+    contact-aware-history|contact_aware_history|contactaware-history|contactaware_history)
+      ROOT_COMMAND_MODE="contact-aware"
+      CONTACT_AWARE_HISTORY=1
+      shift
+      ;;
     shoo7sr1-near03-debug|shoo7sr1_near03_debug|shoo7sr1-debug|shoo7sr1_debug)
       SHOO7SR1_NEAR03_DEBUG=1
       shift
@@ -261,7 +269,7 @@ while [[ $# -gt 0 && "$1" != -* ]]; do
 done
 
 if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
-  echo "Usage: $0 [mix-naive|pure-real|pure-sd] [default|dagger-mix|dag_first|ppo-first|contact-aware|shoo7sr1-near03-debug] [run_name] [teacher_checkpoint.pt|wandb_run_url] [extra train args...]" >&2
+  echo "Usage: $0 [mix-naive|pure-real|pure-sd] [default|dagger-mix|dag_first|ppo-first|contact-aware|contact-aware-history|shoo7sr1-near03-debug] [run_name] [teacher_checkpoint.pt|wandb_run_url] [extra train args...]" >&2
   exit 1
 fi
 
@@ -309,6 +317,10 @@ PERCEPTION_INTO_CRITIC_MODULES_EXPLICIT=0
 [[ -n "${PERCEPTION_INTO_CRITIC_MODULES+x}" ]] && PERCEPTION_INTO_CRITIC_MODULES_EXPLICIT=1
 TEACHER_ACTOR_OBS_HISTORY_LENGTH_EXPLICIT=0
 [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH+x}" ]] && TEACHER_ACTOR_OBS_HISTORY_LENGTH_EXPLICIT=1
+STUDENT_PROPRIO_HISTORY_LENGTH_EXPLICIT=0
+[[ -n "${STUDENT_PROPRIO_HISTORY_LENGTH+x}" ]] && STUDENT_PROPRIO_HISTORY_LENGTH_EXPLICIT=1
+CRITIC_PROPRIO_HISTORY_LENGTH_EXPLICIT=0
+[[ -n "${CRITIC_PROPRIO_HISTORY_LENGTH+x}" ]] && CRITIC_PROPRIO_HISTORY_LENGTH_EXPLICIT=1
 TEACHER_ACTION_MIX_RATIO_EXPLICIT=0
 [[ -n "${TEACHER_ACTION_MIX_RATIO+x}" ]] && TEACHER_ACTION_MIX_RATIO_EXPLICIT=1
 TEACHER_ACTION_MIX_RATIO_START_EXPLICIT=0
@@ -921,6 +933,14 @@ if [[ "${ROOT_COMMAND_MODE}" == "contact-aware" ]]; then
   if [[ "${CONTACT_AWARE_CARRY_WINDOW_MODE}" == "rel_z" ]]; then
     CONTACT_AWARE_CARRY_WINDOW_MODE=peak_height
   fi
+  if [[ "${CONTACT_AWARE_HISTORY}" == "1" ]]; then
+    if [[ "${STUDENT_PROPRIO_HISTORY_LENGTH_EXPLICIT}" -eq 0 ]]; then
+      STUDENT_PROPRIO_HISTORY_LENGTH="${CONTACT_AWARE_HISTORY_LENGTH}"
+    fi
+    if [[ "${CRITIC_PROPRIO_HISTORY_LENGTH_EXPLICIT}" -eq 0 ]]; then
+      CRITIC_PROPRIO_HISTORY_LENGTH="${CONTACT_AWARE_HISTORY_LENGTH}"
+    fi
+  fi
 fi
 
 # Keep camera intrinsics/range on preset defaults unless explicitly overridden.
@@ -1227,6 +1247,14 @@ if [[ "${ROOT_COMMAND_MODE}" == "contact-aware" ]]; then
   if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
     SCHEDULE_NOTES="${SCHEDULE_NOTES} Contact-aware student sparse root command uses peak-height carry-window detection by default: command stays zero before the object is stably near peak carry height and after it stably drops below that height band."
   fi
+  if [[ "${CONTACT_AWARE_HISTORY}" == "1" ]]; then
+    if [[ "${SCHEDULE_NAME_EXPLICIT}" -eq 0 ]]; then
+      SCHEDULE_NAME="${SCHEDULE_NAME}_history${CONTACT_AWARE_HISTORY_LENGTH}"
+    fi
+    if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
+      SCHEDULE_NOTES="${SCHEDULE_NOTES} Contact-aware-history additionally sets student actor proprio history and critic proprio history to ${CONTACT_AWARE_HISTORY_LENGTH} unless explicitly overridden."
+    fi
+  fi
 fi
 
 START_AT_TIMESTEP_ZERO_PROB_END_ITER=${START_AT_TIMESTEP_ZERO_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS}}
@@ -1393,6 +1421,7 @@ echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} num_env
 echo "[INFO] data_mode=${DATA_MODE}"
 echo "[INFO] tracker_profile=${TRACKER_PROFILE}"
 echo "[INFO] root_command_mode=${ROOT_COMMAND_MODE}"
+echo "[INFO] contact_aware_history=${CONTACT_AWARE_HISTORY} history_length=${CONTACT_AWARE_HISTORY_LENGTH}"
 echo "[INFO] use_legacy_ds=${LEGACY_DS_ENABLED} prepared=${LEGACY_DS_PREPARED} ds_data_root=${DS_DATA_ROOT}"
 if [[ -n "${MOTION_DIR:-}" ]]; then
   echo "[INFO] motion_dir=${MOTION_DIR}"
