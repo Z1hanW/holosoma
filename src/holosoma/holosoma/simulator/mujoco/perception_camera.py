@@ -507,7 +507,7 @@ class MuJoCoDepthCamera:
 
         depth_array = depth_array.astype(np.float32, copy=False)
         max_depth = float(self._cfg.max_distance)
-        invalid = ~np.isfinite(depth_array) | (depth_array > max_depth)
+        invalid = ~np.isfinite(depth_array) | (depth_array <= 0.0)
         if np.any(invalid):
             depth_array = depth_array.copy()
             depth_array[invalid] = max_depth

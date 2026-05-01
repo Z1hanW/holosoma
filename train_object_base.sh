@@ -29,7 +29,7 @@ train_cmd=(
   --training.project="${WANDB_PROJECT}"
   --training.num_envs="${NUM_ENVS}"
   --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_FILE}"
-  --algo.config.save_interval=500
+  --algo.config.save_interval=1000
   logger:wandb
   --logger.video.enabled=False
   --logger.headless_recording=False

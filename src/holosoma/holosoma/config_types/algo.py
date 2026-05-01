@@ -358,7 +358,7 @@ class PPOConfig:
     num_steps_per_env: int = 24
     """Number of steps per environment."""
 
-    save_interval: int = 100
+    save_interval: int = 1000
     """Interval for saving model checkpoints."""
 
     load_optimizer: bool = True

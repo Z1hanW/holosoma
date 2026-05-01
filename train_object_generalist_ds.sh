@@ -151,6 +151,9 @@ ACTOR_LR=${ACTOR_LR:-1e-05}
 CRITIC_LR=${CRITIC_LR:-1e-05}
 NUM_LEARNING_EPOCHS=${NUM_LEARNING_EPOCHS:-7}
 CLIP_WEIGHTING_STRATEGY=${CLIP_WEIGHTING_STRATEGY:-success_rate_adaptive}
+SAVE_INTERVAL=${SAVE_INTERVAL:-1000}
+USE_ADAPTIVE_TIMESTEPS_SAMPLER=${USE_ADAPTIVE_TIMESTEPS_SAMPLER:-False}
+FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
 TRAINING_SEED=${TRAINING_SEED:-${SEED:-}}
 RANDOMIZATION_PRESET=${RANDOMIZATION_PRESET:-${RANDOMIZATION:-}}
 INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-}
@@ -1043,7 +1046,7 @@ is_data_subset_mode_alias() {
   local mode
   mode="$(printf '%s' "${raw_mode}" | tr '[:upper:]' '[:lower:]' | tr '_' '-')"
   case "${mode}" in
-    1|omomo|pure-omomo|pure-omomo-subset|2|omomo+behave|omomo-behave|3|omomo+behave+ds128|omomo-behave-ds128|ds128|4|omomo+behave+ds256|omomo-behave-ds256|ds256|5|64+64+dsall|all|all-data|all-the-data|dsall)
+    1|omomo|pure-omomo|pure-omomo-subset|2|omomo+behave|omomo-behave|3|omomo+behave+ds128|omomo-behave-ds128|ds128|4|omomo+behave+ds256|omomo-behave-ds256|ds256|5|64+64+dsall|all|all-data|all-the-data|dsall|6|omomo+ds128|omomo-ds128|omomo+ds-128|omomo-ds-128)
       return 0
       ;;
     *)
@@ -1072,12 +1075,15 @@ normalize_data_subset_mode() {
     5|64+64+dsall|all|all-data|all-the-data|dsall)
       printf '%s\n' "64+64+dsall"
       ;;
+    6|omomo+ds128|omomo-ds128|omomo+ds-128|omomo-ds-128)
+      printf '%s\n' "omomo+ds128"
+      ;;
     "")
       printf '%s\n' ""
       ;;
     *)
       echo "[ERROR] Unsupported DATA_SUBSET_MODE='${raw_mode}'." >&2
-      echo "[ERROR] Use one of: omomo, omomo+behave, omomo+behave+ds128, omomo+behave+ds256, 64+64+dsall" >&2
+      echo "[ERROR] Use one of: omomo, omomo+behave, omomo+ds128, omomo+behave+ds128, omomo+behave+ds256, 64+64+dsall" >&2
       return 2
       ;;
   esac
@@ -1099,6 +1105,9 @@ data_subset_run_name() {
       ;;
     64+64+dsall)
       printf '%s\n' "64+64+dsall"
+      ;;
+    omomo+ds128)
+      printf '%s\n' "omomo+ds128"
       ;;
   esac
 }
@@ -1154,6 +1163,13 @@ mode_table = {
         "slug": f"omomo_behave_ds128_seed{seed}",
         "wandb_name": "omomo+behave+ds128",
         "include_behave": True,
+        "ds_limit": 128,
+        "all_ds": False,
+    },
+    "omomo+ds128": {
+        "slug": f"omomo_ds128_seed{seed}",
+        "wandb_name": "omomo+ds128",
+        "include_behave": False,
         "ds_limit": 128,
         "all_ds": False,
     },
@@ -1849,7 +1865,10 @@ echo "[INFO] Motion default-pose prepend enabled: ${DEFAULT_POSE_PREPEND_ENABLED
 echo "[INFO] Motion default-pose prepend duration: ${DEFAULT_POSE_PREPEND_DURATION_S}s"
 echo "[INFO] PPO learning rates: actor=${ACTOR_LR} critic=${CRITIC_LR}"
 echo "[INFO] PPO num_learning_epochs=${NUM_LEARNING_EPOCHS}"
+echo "[INFO] PPO save_interval=${SAVE_INTERVAL}"
 echo "[INFO] Clip weighting strategy: ${CLIP_WEIGHTING_STRATEGY}"
+echo "[INFO] Within-clip adaptive timestep sampler: ${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
+echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}"
 echo "[INFO] Termination defaults: BadTracking full 3D + motion_ends"
 echo "[INFO] GPU_SELECTION=all-visible"
 echo "[INFO] AVAILABLE_GPU_COUNT=${AVAILABLE_GPU_COUNT}"
@@ -1870,6 +1889,8 @@ train_cmd=(
   --training.num-envs="${NUM_ENVS}"
   --command.setup-terms.motion-command.params.motion-config.motion-file "${MOTION_DIR}"
   --command.setup-terms.motion-command.params.motion-config.clip-weighting-strategy="${CLIP_WEIGHTING_STRATEGY}"
+  --command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler="${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
+  --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob="${FREEZE_AT_TIMESTEP_ZERO_PROB}"
   --algo.config.actor_learning_rate="${ACTOR_LR}"
   --algo.config.critic_learning_rate="${CRITIC_LR}"
   --algo.config.num_learning_epochs="${NUM_LEARNING_EPOCHS}"
@@ -1877,7 +1898,7 @@ train_cmd=(
   --algo.config.normalize-critic-obs=False
   --observation-overrides.disable-actor-history=True
   --observation-overrides.disable-critic-history=True
-  --algo.config.save-interval=100
+  --algo.config.save-interval="${SAVE_INTERVAL}"
   --simulator.config.sim.physx.gpu-max-rigid-contact-count="${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT}"
   --simulator.config.sim.physx.gpu-max-rigid-patch-count="${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}"
   --simulator.config.sim.physx.gpu-found-lost-pairs-capacity="${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY}"

@@ -11,7 +11,7 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 --master_port=$((29500 + RA
   --algo.config.normalize_actor_obs=False \
   --algo.config.normalize_critic_obs=False \
   --algo.config.module_dict.actor.min_noise_std=0.10 \
-  --algo.config.save_interval=100 \
+  --algo.config.save_interval=1000 \
   \
   terrain:terrain-load-obj \
   --terrain.terrain-term.obj-file-path src/holosoma_retargeting/demo_data/far_robot/far_robot/stairs.obj \

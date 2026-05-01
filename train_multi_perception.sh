@@ -215,7 +215,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" torchrun --nproc_per_node="${NUM_
   --algo.config.normalize_actor_obs=False \
   --algo.config.normalize_critic_obs=False \
   --algo.config.load_optimizer=False \
-  --algo.config.save_interval=10000 \
+  --algo.config.save_interval=1000 \
   "${DISTILL_OVERRIDES[@]}" \
   \
   --command.setup_terms.motion_command.params.motion_config.motion_file "${MOTION_DIR}" \

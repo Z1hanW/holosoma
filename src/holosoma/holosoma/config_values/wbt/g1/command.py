@@ -55,10 +55,11 @@ motion_config_w_object = replace(
 
 motion_config_w_object_generalist = replace(
     motion_config_w_object,
-    # With fixed env->clip/object assignment, keep curriculum within each clip rather than
-    # reweighting clips globally across resets.
+    # Keep clip-internal timestep resets uniform; across-clip curriculum is handled by
+    # the clip weighting strategy.
     clip_weighting_strategy="uniform_clip",
-    use_adaptive_timesteps_sampler=True,
+    use_adaptive_timesteps_sampler=False,
+    freeze_at_timestep_zero_prob=0.0,
 )
 
 g1_29dof_wbt_command = CommandManagerCfg(

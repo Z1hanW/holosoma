@@ -18,6 +18,7 @@ OMOMO_EXPECTED_TOTAL=${OMOMO_EXPECTED_TOTAL:-45}
 #   TRAINING_SEED or SEED
 #   RANDOMIZATION_PRESET or RANDOMIZATION
 #   INIT_AT_RANDOM_EP_LEN
+#   SAVE_INTERVAL
 TRAINING_SEED=${TRAINING_SEED:-${SEED:-}}
 RANDOMIZATION_PRESET=${RANDOMIZATION_PRESET:-${RANDOMIZATION:-}}
 INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-}
@@ -199,6 +200,7 @@ export EXP=${EXP:-g1-29dof-wbt-w-object-generalist}
 export SEQUENCE_NAME=${SEQUENCE_NAME:-omomo-real-mesh-cotrack}
 export WANDB_PROJECT=${WANDB_PROJECT:-carry-any}
 export CLIP_WEIGHTING_STRATEGY=${CLIP_WEIGHTING_STRATEGY:-uniform_clip}
+export SAVE_INTERVAL=${SAVE_INTERVAL:-1000}
 
 # Loose co-tracking defaults: keep the robot feasible while emphasizing object tracking.
 export ROOT_POS_W=${ROOT_POS_W:-0.5}
