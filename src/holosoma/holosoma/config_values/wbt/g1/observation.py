@@ -521,6 +521,29 @@ critic_obs_w_object_command_distill_terms.update(
     }
 )
 
+critic_obs_w_object_command_distill_legacy_target_terms = {
+    "dof_pos": critic_obs_shared_terms["dof_pos"],
+    "dof_vel": critic_obs_shared_terms["dof_vel"],
+    "obj_ori_b": critic_obs_w_object_terms["obj_ori_b"],
+    "obj_pos_b": critic_obs_w_object_terms["obj_pos_b"],
+    "base_ang_vel": critic_obs_shared_terms["base_ang_vel"],
+    "base_lin_vel": critic_obs_shared_terms["base_lin_vel"],
+    "obj_ang_vel_b": critic_obs_w_object_command_privileged_terms["obj_ang_vel_b"],
+    "obj_lin_vel_b": critic_obs_w_object_terms["obj_lin_vel_b"],
+    "motion_command": critic_obs_shared_terms["motion_command"],
+    "obj_picked_flag": critic_obs_w_object_command_privileged_terms["obj_picked_flag"],
+    "motion_ref_ori_b": critic_obs_shared_terms["motion_ref_ori_b"],
+    "motion_ref_pos_b": critic_obs_shared_terms["motion_ref_pos_b"],
+    "robot_body_ori_b": critic_obs_shared_terms["robot_body_ori_b"],
+    "robot_body_pos_b": critic_obs_shared_terms["robot_body_pos_b"],
+    "command_only_flag": critic_obs_w_object_command_privileged_terms["command_only_flag"],
+    "obj_target_pose_size_b": actor_obs_w_object_legacy_terms["obj_target_pose_size_b"],
+    "sparse_goal_external_flag": critic_obs_w_object_command_privileged_terms["sparse_goal_external_flag"],
+    "obj_sparse_goal_xy_pick_root_heading": critic_obs_w_object_command_privileged_terms[
+        "obj_sparse_goal_xy_pick_root_heading"
+    ],
+}
+
 g1_29dof_wbt_observation = ObservationManagerCfg(
     groups={
         "actor_obs": actor_obs_shared,

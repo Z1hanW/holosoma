@@ -26,10 +26,10 @@ else
   DEFAULT_PYTHON_BIN="$(command -v python)"
 fi
 PYTHON_BIN=${PYTHON_BIN:-"${DEFAULT_PYTHON_BIN}"}
+source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
 
-if [[ -n "${CUDA_VISIBLE_DEVICES+x}" ]]; then
-  unset CUDA_VISIBLE_DEVICES
-fi
+CUDA_VISIBLE_DEVICES="$(default_cuda_visible_devices_all "${CUDA_VISIBLE_DEVICES:-}")"
+export CUDA_VISIBLE_DEVICES
 
 detect_nproc() {
   local gpu_count=""

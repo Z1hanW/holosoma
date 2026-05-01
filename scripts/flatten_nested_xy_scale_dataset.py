@@ -115,7 +115,6 @@ def main() -> None:
             out_payload["object_name"] = np.array(object_name)
             out_payload["object_urdf_path"] = np.array(str(urdf_path))
             out_payload["object_scale"] = scale_xyz
-            out_payload["object_size"] = scale_xyz
             np.savez(out_path, **out_payload)
 
             clip_map[out_stem] = {

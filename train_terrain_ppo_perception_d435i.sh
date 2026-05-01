@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
+
 DEPTH_IMPL=${DEPTH_IMPL:-raycast}
 if [[ "${DEPTH_IMPL}" == "raycast" ]]; then
   IMAGE_WIDTH=${IMAGE_WIDTH:-106}
@@ -67,10 +70,15 @@ if [[ "${DEPTH_IMPL}" == "raycast" ]]; then
   )
 fi
 
-CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
+CUDA_VISIBLE_DEVICES="$(default_cuda_visible_devices_all "${CUDA_VISIBLE_DEVICES:-}")"
+NPROC=${NPROC:-$(count_cuda_visible_devices "${CUDA_VISIBLE_DEVICES}")}
+PER_GPU_ENVS=${PER_GPU_ENVS:-4096}
+NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
+
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" torchrun --nproc_per_node="${NPROC}" --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-terrain-transformer \
   "perception:${PERCEPTION_PRESET}" \
-  --training.num_envs=128 \
+  --training.num_envs="${NUM_ENVS}" \
   "${PERCEPTION_OVERRIDES[@]}" \
   "${RANDOMIZATION_OVERRIDES[@]}" \
   \

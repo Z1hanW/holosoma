@@ -63,6 +63,19 @@ def normalize_scale(raw: np.ndarray | list[float] | tuple[float, ...] | float) -
     return arr
 
 
+def scale_object_size(raw: np.ndarray | list[float] | tuple[float, ...] | float, scale_xyz: np.ndarray) -> np.ndarray:
+    arr = np.asarray(raw, dtype=np.float32)
+    scale = np.asarray(scale_xyz, dtype=np.float32)
+    if arr.ndim == 0:
+        arr = np.repeat(arr.reshape(1), 3)
+    elif arr.shape[-1] == 1:
+        arr = np.repeat(arr, 3, axis=-1)
+    if arr.shape[-1] != 3:
+        raise ValueError(f"Expected object_size with trailing dim 3, got shape={arr.shape}")
+    scale_shape = (1,) * (arr.ndim - 1) + (3,)
+    return arr * scale.reshape(scale_shape)
+
+
 def to_scalar_str(value: np.ndarray | str | object) -> str:
     arr = np.asarray(value)
     if arr.shape == ():
@@ -197,7 +210,8 @@ def augment_dataset(
             out_payload["object_urdf_path"] = np.array(str(scaled_urdf_path))
             out_payload["object_mesh_scale"] = new_mesh_scale
             out_payload["object_scale"] = scale_xyz.astype(np.float32)
-            out_payload["object_size"] = scale_xyz.astype(np.float32)
+            if "object_size" in payload:
+                out_payload["object_size"] = scale_object_size(payload["object_size"], scale_xyz)
             if "scene_xml_file" not in out_payload:
                 out_payload["scene_xml_file"] = np.array("")
 

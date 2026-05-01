@@ -94,6 +94,44 @@ def _collect_object_bank_wandb_metadata() -> dict[str, int | str]:
     return metadata
 
 
+def _collect_env_count_wandb_metadata(
+    *,
+    requested_total_num_envs: int,
+    effective_total_num_envs: int,
+    per_rank_num_envs: int,
+    world_size: int,
+) -> dict[str, int | str]:
+    """Collect environment-count metadata before W&B config hides distributed splitting."""
+
+    metadata: dict[str, int | str] = {
+        "training/num_envs_requested_total": int(requested_total_num_envs),
+        "training/num_envs_effective_total": int(effective_total_num_envs),
+        "training/num_envs_per_rank": int(per_rank_num_envs),
+        "training/world_size": int(world_size),
+    }
+
+    int_env_keys = {
+        "PER_GPU_ENVS": "launcher/per_gpu_envs",
+        "TOTAL_NUM_ENVS": "launcher/total_num_envs",
+        "NPROC": "launcher/nproc",
+        "LOCAL_WORLD_SIZE": "launcher/local_world_size",
+    }
+    for env_key, metadata_key in int_env_keys.items():
+        raw_value = os.environ.get(env_key)
+        if raw_value is None or raw_value == "":
+            continue
+        try:
+            metadata[metadata_key] = int(raw_value)
+        except ValueError:
+            logger.warning("Ignoring non-integer environment metadata {}={}", env_key, raw_value)
+
+    cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cuda_visible_devices:
+        metadata["launcher/cuda_visible_devices"] = cuda_visible_devices
+
+    return metadata
+
+
 def configure_multi_gpu() -> MultGPUConfig | None:
     """Configure multi-gpu training and return configuration dictionary, or `None` if single-GPU training."""
     import torch
@@ -405,8 +443,10 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
         wandb_run_path: str | None = None
 
         # Distribute environments across GPUs for proper multi-GPU training
+        requested_total_num_envs = int(tyro_config.training.num_envs)
+        world_size = int(distributed_conf["world_size"]) if distributed_conf is not None else 1
         if distributed_conf is not None:
-            original_num_envs = tyro_config.training.num_envs
+            original_num_envs = requested_total_num_envs
             num_envs = original_num_envs // distributed_conf["world_size"]
             if num_envs < 1:
                 raise ValueError(
@@ -427,6 +467,7 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
                 f"Distributed training: GPU {distributed_conf['global_rank']} will run {tyro_config.training.num_envs} "
                 f"environments (total across all GPUs: {original_num_envs})"
             )
+        effective_total_num_envs = int(tyro_config.training.num_envs) * world_size
 
         if tyro_config.training.debug and not tyro_config.training.headless:
             tyro_config = dataclasses.replace(
@@ -494,6 +535,17 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
 
             if wandb.run is not None:
                 wandb_run_path = f"{wandb.run.entity}/{wandb.run.project}/{wandb.run.id}"
+                env_count_metadata = _collect_env_count_wandb_metadata(
+                    requested_total_num_envs=requested_total_num_envs,
+                    effective_total_num_envs=effective_total_num_envs,
+                    per_rank_num_envs=int(tyro_config.training.num_envs),
+                    world_size=world_size,
+                )
+                wandb.config.update(env_count_metadata, allow_val_change=True)
+                for key, value in env_count_metadata.items():
+                    wandb.run.summary[key] = value
+                wandb.log(env_count_metadata, step=0)
+                logger.info("Logged environment-count metadata to W&B: {}", env_count_metadata)
                 object_bank_metadata = _collect_object_bank_wandb_metadata()
                 if object_bank_metadata:
                     wandb.config.update(object_bank_metadata, allow_val_change=True)

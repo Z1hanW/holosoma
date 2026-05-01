@@ -3,12 +3,16 @@ set -euo pipefail
 
 # Base whole-body tracking training with a dynamic object (large box).
 
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
+
+CUDA_VISIBLE_DEVICES="$(default_cuda_visible_devices_all "${CUDA_VISIBLE_DEVICES:-}")"
 EXP=${EXP:-g1-29dof-wbt-w-object}
 WANDB_PROJECT=${WANDB_PROJECT:-boxer}
 MOTION_FILE=${MOTION_FILE:-src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz}
-NUM_ENVS=${NUM_ENVS:-98304}
-NPROC=${NPROC:-$(awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}")}
+NPROC=${NPROC:-$(count_cuda_visible_devices "${CUDA_VISIBLE_DEVICES}")}
+PER_GPU_ENVS=${PER_GPU_ENVS:-4096}
+NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
 ENABLE_VISER=${ENABLE_VISER:-0}
 

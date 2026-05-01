@@ -1,16 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
 
-OBJ_DIR="multi-terrain/test"
-MOTION_DIR="multi-motion/test"
-NUM_ROWS=4
-NUM_COLS=4
+OBJ_DIR=${OBJ_DIR:-multi-terrain/test}
+MOTION_DIR=${MOTION_DIR:-multi-motion/test}
+NUM_ROWS=${NUM_ROWS:-4}
+NUM_COLS=${NUM_COLS:-4}
+CUDA_VISIBLE_DEVICES="$(default_cuda_visible_devices_all "${CUDA_VISIBLE_DEVICES:-}")"
+NPROC=${NPROC:-$(count_cuda_visible_devices "${CUDA_VISIBLE_DEVICES}")}
+PER_GPU_ENVS=${PER_GPU_ENVS:-4096}
+NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
 
-python src/holosoma/holosoma/train_agent.py \
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" torchrun --nproc_per_node="${NPROC}" --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-videomimic-mlp \
   perception:none \
   terrain:terrain-load-obj \
   --training.headless=False \
-  --training.num_envs=16 \
+  --training.num_envs="${NUM_ENVS}" \
   --simulator.config.scene.env_spacing=0.0 \
   --terrain.terrain-term.obj-file-path "${OBJ_DIR}" \
   --terrain.terrain-term.num-rows "${NUM_ROWS}" \

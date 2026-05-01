@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
+
+CUDA_VISIBLE_DEVICES="$(default_cuda_visible_devices_all "${CUDA_VISIBLE_DEVICES:-}")"
+NPROC=${NPROC:-$(count_cuda_visible_devices "${CUDA_VISIBLE_DEVICES}")}
+PER_GPU_ENVS=${PER_GPU_ENVS:-4096}
+NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
+
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" torchrun --nproc_per_node="${NPROC}" --master_port=$((29500 + RANDOM % 1000)) src/holosoma/holosoma/train_agent.py \
   exp:g1-29dof-wbt-videomimic-mlp  \
   perception:none \
-  --training.num_envs=8192 \
+  --training.num_envs="${NUM_ENVS}" \
   \
   --algo.config.actor_learning_rate=7e-5 \
   --algo.config.critic_learning_rate=7e-5 \

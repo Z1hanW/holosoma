@@ -3,6 +3,7 @@
 from holosoma.config_values.loco.g1.observation import g1_29dof_loco_single_wolinvel
 from holosoma.config_values.loco.t1.observation import t1_29dof_loco_single_wolinvel
 from holosoma.config_values.wbt.g1.observation import (
+    critic_obs_w_object_command_distill_legacy_target_terms,
     g1_29dof_wbt_observation,
     g1_29dof_wbt_observation_motion_tracking,
     g1_29dof_wbt_observation_motion_tracking_split,

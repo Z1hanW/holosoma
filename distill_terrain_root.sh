@@ -31,9 +31,10 @@ Optional env vars:
   NUM_ROWS / NUM_COLS          (optional terrain layout override)
   PERCEPTION_PRESET            (default: camera_depth_d435i_17x17; options: none|camera_depth_d435i|camera_depth_d435i_17x17|heightmap)
   TEACHER_OBS_KEYS             (default: actor_obs,actor_obs_target)
-  NUM_ENVS                     (default: NPROC * PER_GPU_ENVS)
+  NUM_ENVS                     (envs per GPU; default: 4096)
   PER_GPU_ENVS                 (default: 4096)
-  CUDA_VISIBLE_DEVICES         (default: 0,1,2,3)
+  TOTAL_NUM_ENVS               (optional exact all-rank total override)
+  CUDA_VISIBLE_DEVICES         (default: all available GPUs)
   TRAINING_PROJECT             (default: terrain-aware)
   RUN_NAME                     (default: g1_terrain_distill_root_access_to_depth)
   TRAINING_NAME                (default: g1_29dof_wbt_terrain_distill_root_access_to_depth)
@@ -42,6 +43,7 @@ EOF
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
+source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
 
 SIM_ENV_BIN=/home/ubuntu/miniconda3/envs/sim/bin
 if ! command -v torchrun >/dev/null 2>&1 && [[ -x "${SIM_ENV_BIN}/torchrun" ]]; then
@@ -391,15 +393,34 @@ else
   EXP_ARG="exp:${EXP}"
 fi
 
-DEFAULT_CUDA_VISIBLE_DEVICES="${DEFAULT_CUDA_VISIBLE_DEVICES:-0,1,2,3}"
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-${DEFAULT_CUDA_VISIBLE_DEVICES}}"
+CUDA_VISIBLE_DEVICES="$(default_cuda_visible_devices_all "${CUDA_VISIBLE_DEVICES:-${DEFAULT_CUDA_VISIBLE_DEVICES:-}}")"
 if [[ -z "${NPROC:-}" ]]; then
-  IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
-  NPROC="${#_visible_gpus[@]}"
+  NPROC="$(count_cuda_visible_devices "${CUDA_VISIBLE_DEVICES}")"
 fi
 NPROC="${NPROC:-1}"
-PER_GPU_ENVS="${PER_GPU_ENVS:-4096}"
-NUM_ENVS="${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}"
+if ! [[ "${NPROC}" =~ ^[0-9]+$ ]] || (( NPROC < 1 )); then
+  echo "[ERROR] NPROC must be a positive integer. Got: ${NPROC}" >&2
+  exit 1
+fi
+if [[ -n "${TOTAL_NUM_ENVS:-}" ]]; then
+  if ! [[ "${TOTAL_NUM_ENVS}" =~ ^[0-9]+$ ]] || (( TOTAL_NUM_ENVS < NPROC )); then
+    echo "[ERROR] TOTAL_NUM_ENVS must be an integer >= NPROC. Got TOTAL_NUM_ENVS=${TOTAL_NUM_ENVS}, NPROC=${NPROC}" >&2
+    exit 1
+  fi
+  if (( TOTAL_NUM_ENVS % NPROC != 0 )); then
+    echo "[ERROR] TOTAL_NUM_ENVS must be divisible by NPROC. Got TOTAL_NUM_ENVS=${TOTAL_NUM_ENVS}, NPROC=${NPROC}" >&2
+    exit 1
+  fi
+  PER_GPU_ENVS=$((TOTAL_NUM_ENVS / NPROC))
+  NUM_ENVS="${TOTAL_NUM_ENVS}"
+else
+  PER_GPU_ENVS="${PER_GPU_ENVS:-${NUM_ENVS:-4096}}"
+  if ! [[ "${PER_GPU_ENVS}" =~ ^[0-9]+$ ]] || (( PER_GPU_ENVS < 1 )); then
+    echo "[ERROR] NUM_ENVS/PER_GPU_ENVS must be a positive per-GPU env count. Got: ${PER_GPU_ENVS:-<empty>}" >&2
+    exit 1
+  fi
+  NUM_ENVS=$((NPROC * PER_GPU_ENVS))
+fi
 NNODES="${NNODES:-1}"
 NODE_RANK="${NODE_RANK:-0}"
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
@@ -545,7 +566,7 @@ if [[ -n "${OBJ_META_PATH}" ]]; then
   echo "[INFO] obj_meta_path=${OBJ_META_PATH}"
 fi
 echo "[INFO] terrain_grid=${NUM_ROWS}x${NUM_COLS}"
-echo "[INFO] total_envs=${NUM_ENVS} world_size=${NPROC} envs_per_rank=$((NUM_ENVS / NPROC))"
+echo "[INFO] total_envs=${NUM_ENVS} world_size=${NPROC} per_gpu_envs=${PER_GPU_ENVS}"
 echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} dagger_loss_coef=${DAGGER_LOSS_COEF} teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
 echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
 

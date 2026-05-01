@@ -17,17 +17,39 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
+source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
 
 DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/u5lguxvl/model_17000.pt"}
 TEACHER_CHECKPOINT=${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}
 
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
+CUDA_VISIBLE_DEVICES="$(default_cuda_visible_devices_all "${CUDA_VISIBLE_DEVICES:-}")"
 if [[ -z "${NPROC:-}" ]]; then
-  IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
-  NPROC=${#_visible_gpus[@]}
+  NPROC="$(count_cuda_visible_devices "${CUDA_VISIBLE_DEVICES}")"
 fi
-PER_GPU_ENVS=${PER_GPU_ENVS:-4096}
-NUM_ENVS=${NUM_ENVS:-$((PER_GPU_ENVS * NPROC))}
+if ! [[ "${NPROC}" =~ ^[0-9]+$ ]] || (( NPROC < 1 )); then
+  echo "[ERROR] NPROC must be a positive integer. Got: ${NPROC}" >&2
+  exit 1
+fi
+if [[ -n "${TOTAL_NUM_ENVS:-}" ]]; then
+  if ! [[ "${TOTAL_NUM_ENVS}" =~ ^[0-9]+$ ]] || (( TOTAL_NUM_ENVS < NPROC )); then
+    echo "[ERROR] TOTAL_NUM_ENVS must be an integer >= NPROC. Got TOTAL_NUM_ENVS=${TOTAL_NUM_ENVS}, NPROC=${NPROC}" >&2
+    exit 1
+  fi
+  if (( TOTAL_NUM_ENVS % NPROC != 0 )); then
+    echo "[ERROR] TOTAL_NUM_ENVS must be divisible by NPROC. Got TOTAL_NUM_ENVS=${TOTAL_NUM_ENVS}, NPROC=${NPROC}" >&2
+    exit 1
+  fi
+  PER_GPU_ENVS=$((TOTAL_NUM_ENVS / NPROC))
+  NUM_ENVS="${TOTAL_NUM_ENVS}"
+else
+  PER_GPU_ENVS=${PER_GPU_ENVS:-${NUM_ENVS:-4096}}
+  if ! [[ "${PER_GPU_ENVS}" =~ ^[0-9]+$ ]] || (( PER_GPU_ENVS < 1 )); then
+    echo "[ERROR] NUM_ENVS/PER_GPU_ENVS must be a positive per-GPU env count. Got: ${PER_GPU_ENVS:-<empty>}" >&2
+    exit 1
+  fi
+  NUM_ENVS=$((PER_GPU_ENVS * NPROC))
+  TOTAL_NUM_ENVS="${NUM_ENVS}"
+fi
 
 DATA_MODE=${DATA_MODE:-pure-sd}
 TRACKER_PROFILE=${TRACKER_PROFILE:-old-tracker}
@@ -89,7 +111,7 @@ exec env \
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
   NPROC="${NPROC}" \
   PER_GPU_ENVS="${PER_GPU_ENVS}" \
-  NUM_ENVS="${NUM_ENVS}" \
+  TOTAL_NUM_ENVS="${TOTAL_NUM_ENVS}" \
   DATA_MODE="${DATA_MODE}" \
   TRACKER_PROFILE="${TRACKER_PROFILE}" \
   SCHEDULE_VARIANT="${SCHEDULE_VARIANT}" \

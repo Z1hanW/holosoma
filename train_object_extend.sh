@@ -11,6 +11,7 @@ set -euo pipefail
 # - Support staged scale curriculum by chaining checkpoints across runs.
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
 
 SIM_ENV_BIN_CANDIDATES=(
   /home/ubuntu/miniconda3/envs/sim/bin
@@ -46,9 +47,8 @@ if [[ -z "${PYTHON_BIN}" ]]; then
   exit 2
 fi
 
-DEFAULT_CUDA_VISIBLE_DEVICES=2,3,4,5,6,7
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-${DEFAULT_CUDA_VISIBLE_DEVICES}}
-NPROC=${NPROC:-$(awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}")}
+CUDA_VISIBLE_DEVICES="$(default_cuda_visible_devices_all "${CUDA_VISIBLE_DEVICES:-}")"
+NPROC=${NPROC:-$(count_cuda_visible_devices "${CUDA_VISIBLE_DEVICES}")}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
 PHYSX_GPU_MAX_RIGID_CONTACT_COUNT=${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT:-33554432}
 PHYSX_GPU_MAX_RIGID_PATCH_COUNT=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT:-4194304}
@@ -102,7 +102,8 @@ fi
 MOTION_CLIP_ID=${MOTION_CLIP_ID:-""}
 MOTION_CLIP_NAME=${MOTION_CLIP_NAME:-""}
 PERCEPTION=${PERCEPTION:-none}
-NUM_ENVS=${NUM_ENVS:-81920}
+PER_GPU_ENVS=${PER_GPU_ENVS:-4096}
+NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
 SAVE_INTERVAL=${SAVE_INTERVAL:-1000}
 NUM_ITERS=${NUM_ITERS:-""}
 CHECKPOINT=${CHECKPOINT:-""}

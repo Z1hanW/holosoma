@@ -6,16 +6,19 @@ set -euo pipefail
 #   - camera_depth_d435i (default, far-tracking aligned)
 #   - heightmap
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
+
 PERCEPTION_PRESET=${1:-${PERCEPTION_PRESET:-camera_depth_d435i}} # camera_depth_d435i|heightmap
 STAGE1_CKPT=${2:-${STAGE1_CKPT:-}}
 RESUME_CKPT=${RESUME_CKPT:-}
 IMAGE_WIDTH=${IMAGE_WIDTH:-106}
 IMAGE_HEIGHT=${IMAGE_HEIGHT:-60}
 PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-268435456}
-NUM_GPUS=${NUM_GPUS:-6}
+CUDA_VISIBLE_DEVICES="$(default_cuda_visible_devices_all "${CUDA_VISIBLE_DEVICES:-}")"
+NUM_GPUS=${NUM_GPUS:-$(count_cuda_visible_devices "${CUDA_VISIBLE_DEVICES}")}
 PER_GPU_ENVS=${PER_GPU_ENVS:-4096}
 NUM_ENVS=${NUM_ENVS:-$((NUM_GPUS * PER_GPU_ENVS))}
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5}
 TTTEST=${TTTEST:-0}
 PPO_START_EPOCH=${PPO_START_EPOCH:-0}
 DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-10000}
@@ -157,7 +160,7 @@ fi
 
 if [[ "${TTTEST}" != "0" ]]; then
   echo "[INFO] TTTEST enabled: launching Viser physics preview with 1 env"
-  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2,3,4,5,6,7} python src/holosoma/holosoma/train_agent.py \
+  CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" python src/holosoma/holosoma/train_agent.py \
     "${EXP_NAME}" \
     "perception:${PERCEPTION_PRESET}" \
     "${PERCEPTION_OVERRIDES[@]}" \

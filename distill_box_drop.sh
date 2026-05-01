@@ -13,6 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
+source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
 
 DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/5vlz6pj8/model_24000.pt"}
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
@@ -48,10 +49,9 @@ HSSIM_BIN_DIR=${HSSIM_BIN_DIR:-/home/ubuntu/.holosoma_deps/miniconda3/envs/hssim
 if [[ -d "${HSSIM_BIN_DIR}" ]]; then
   export PATH="${HSSIM_BIN_DIR}:${PATH}"
 fi
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-4,5,6,7}
+CUDA_VISIBLE_DEVICES="$(default_cuda_visible_devices_all "${CUDA_VISIBLE_DEVICES:-}")"
 if [[ -z "${NPROC:-}" ]]; then
-  IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
-  NPROC=${#_visible_gpus[@]}
+  NPROC="$(count_cuda_visible_devices "${CUDA_VISIBLE_DEVICES}")"
 fi
 
 DEFAULT_MOTION_DIR="${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/object_interaction/omomo_carry"

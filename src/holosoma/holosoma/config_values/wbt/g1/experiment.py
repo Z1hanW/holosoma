@@ -651,6 +651,12 @@ _shoo7sr1_debug_observation_groups = dict(
     observation.g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd.groups
 )
 _shoo7sr1_debug_observation_groups["actor_obs"] = _shoo7sr1_debug_observation_groups["actor_obs_legacy"]
+_shoo7sr1_debug_observation_groups["critic_obs"] = replace(
+    _shoo7sr1_debug_observation_groups["critic_obs"],
+    terms=observation.critic_obs_w_object_command_distill_legacy_target_terms,
+)
+_shoo7sr1_debug_observation_groups.pop("actor_obs_root_contact_aware", None)
+_shoo7sr1_debug_observation_groups.pop("actor_obs_torso_contact_aware", None)
 _shoo7sr1_debug_observation = replace(
     observation.g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
     groups=_shoo7sr1_debug_observation_groups,

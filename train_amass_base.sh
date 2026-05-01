@@ -5,15 +5,15 @@ set -euo pipefail
 # Default experiment: exp:g1-29dof-wbt
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
 
 SIM_ENV_BIN=/home/ubuntu/miniconda3/envs/sim/bin
 if ! command -v torchrun >/dev/null 2>&1 && [[ -x "${SIM_ENV_BIN}/torchrun" ]]; then
   export PATH="${SIM_ENV_BIN}:${PATH}"
 fi
 
-DEFAULT_CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-${DEFAULT_CUDA_VISIBLE_DEVICES}}
-NPROC=${NPROC:-$(awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}")}
+CUDA_VISIBLE_DEVICES="$(default_cuda_visible_devices_all "${CUDA_VISIBLE_DEVICES:-}")"
+NPROC=${NPROC:-$(count_cuda_visible_devices "${CUDA_VISIBLE_DEVICES}")}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
 
 EXP=${EXP:-g1-29dof-wbt}
@@ -24,7 +24,8 @@ MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/src/holosoma_retargeting/converted_res/r
 FLATTEN_IF_NESTED=${FLATTEN_IF_NESTED:-1}
 FLAT_MOTION_DIR=${FLAT_MOTION_DIR:-"${SCRIPT_DIR}/.cache/amass_all_trainready_flat"}
 
-NUM_ENVS=${NUM_ENVS:-131072}
+PER_GPU_ENVS=${PER_GPU_ENVS:-4096}
+NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
 SAVE_INTERVAL=${SAVE_INTERVAL:-1000}
 NUM_ITERS=${NUM_ITERS:-1000000}
 ACTOR_LR=${ACTOR_LR:-7e-5}

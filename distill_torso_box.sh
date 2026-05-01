@@ -38,6 +38,7 @@ if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
 fi
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
 
 # Resolve wandb:// teacher checkpoint once per launcher (node), then pass a local absolute path to all ranks.
 if [[ "${TEACHER_CHECKPOINT}" == wandb://* ]]; then
@@ -76,8 +77,6 @@ PY
   )
 fi
 
-DEFAULT_CUDA_VISIBLE_DEVICES=4,5,6,7
-DEFAULT_TOTAL_ENVS=65536
 FORCE_EIGHT_GPU_CONFIG=${FORCE_EIGHT_GPU_CONFIG:-0}
 if [[ "${FORCE_EIGHT_GPU_CONFIG}" != "0" ]]; then
   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
@@ -90,22 +89,9 @@ if [[ "${FORCE_EIGHT_GPU_CONFIG}" != "0" ]]; then
     fi
   fi
 else
-  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-${DEFAULT_CUDA_VISIBLE_DEVICES}}
+  CUDA_VISIBLE_DEVICES="$(default_cuda_visible_devices_all "${CUDA_VISIBLE_DEVICES:-}")"
   if [[ -z "${NPROC:-}" ]]; then
-    if [[ -n "${CUDA_VISIBLE_DEVICES}" ]]; then
-      if [[ "${CUDA_VISIBLE_DEVICES}" == "all" || "${CUDA_VISIBLE_DEVICES}" == "ALL" ]]; then
-        if command -v nvidia-smi >/dev/null 2>&1; then
-          NPROC=$(nvidia-smi -L | wc -l | tr -d ' ')
-        else
-          NPROC=1
-        fi
-      else
-        IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
-        NPROC=${#_visible_gpus[@]}
-      fi
-    else
-      NPROC=1
-    fi
+    NPROC="$(count_cuda_visible_devices "${CUDA_VISIBLE_DEVICES}")"
   fi
 fi
 
@@ -113,15 +99,31 @@ if [[ "${FORCE_EIGHT_GPU_CONFIG}" != "0" && "${NPROC}" -ne 8 ]]; then
   echo "Expected NPROC=8, got ${NPROC}." >&2
   exit 1
 fi
+if ! [[ "${NPROC}" =~ ^[0-9]+$ ]] || (( NPROC < 1 )); then
+  echo "NPROC must be a positive integer. Got: ${NPROC}" >&2
+  exit 1
+fi
 
-# NUM_ENVS is global (all-ranks total). For backward compatibility, users can still
-# set PER_GPU_ENVS; in that case NUM_ENVS defaults to PER_GPU_ENVS * NPROC.
-if [[ -z "${NUM_ENVS:-}" ]]; then
-  if [[ -n "${PER_GPU_ENVS:-}" ]]; then
-    NUM_ENVS=$((PER_GPU_ENVS * NPROC))
-  else
-    NUM_ENVS=${DEFAULT_TOTAL_ENVS}
+# In distill launchers, NUM_ENVS/PER_GPU_ENVS means envs per GPU. train_agent.py
+# expects a global all-rank total and divides by WORLD_SIZE internally.
+if [[ -n "${TOTAL_NUM_ENVS:-}" ]]; then
+  if ! [[ "${TOTAL_NUM_ENVS}" =~ ^[0-9]+$ ]] || (( TOTAL_NUM_ENVS < NPROC )); then
+    echo "TOTAL_NUM_ENVS must be an integer >= NPROC. Got TOTAL_NUM_ENVS=${TOTAL_NUM_ENVS}, NPROC=${NPROC}." >&2
+    exit 1
   fi
+  if (( TOTAL_NUM_ENVS % NPROC != 0 )); then
+    echo "TOTAL_NUM_ENVS must be divisible by NPROC. Got TOTAL_NUM_ENVS=${TOTAL_NUM_ENVS}, NPROC=${NPROC}." >&2
+    exit 1
+  fi
+  PER_GPU_ENVS=$((TOTAL_NUM_ENVS / NPROC))
+  NUM_ENVS="${TOTAL_NUM_ENVS}"
+else
+  PER_GPU_ENVS=${PER_GPU_ENVS:-${NUM_ENVS:-4096}}
+  if ! [[ "${PER_GPU_ENVS}" =~ ^[0-9]+$ ]] || (( PER_GPU_ENVS < 1 )); then
+    echo "NUM_ENVS/PER_GPU_ENVS must be a positive per-GPU env count. Got: ${PER_GPU_ENVS:-<empty>}." >&2
+    exit 1
+  fi
+  NUM_ENVS=$((PER_GPU_ENVS * NPROC))
 fi
 
 # Sim2real default: sparse root-command distill without clip_phase in student torso observation.
@@ -230,7 +232,7 @@ if [[ -n "${TEACHER_ACTION_MIX_RATIO_START}" || -n "${TEACHER_ACTION_MIX_RATIO_E
   echo "[INFO] teacher_action_mix_schedule=${TEACHER_ACTION_MIX_RATIO_START}->${TEACHER_ACTION_MIX_RATIO_END} end_iter=${TEACHER_ACTION_MIX_RATIO_END_ITERATION}"
 fi
 echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
-echo "[INFO] total_envs=${NUM_ENVS} world_size=${NPROC} envs_per_rank=$((NUM_ENVS / NPROC))"
+echo "[INFO] total_envs=${NUM_ENVS} world_size=${NPROC} per_gpu_envs=${PER_GPU_ENVS}"
 echo "[INFO] init_noise_std=${INIT_NOISE_STD} actor_min_noise_std=${ACTOR_MIN_NOISE_STD} entropy_coef=${ENTROPY_COEF}"
 echo "[INFO] physx_gpu_buffers found_lost_pairs=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY} found_lost_aggregate_pairs=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY} total_aggregate_pairs=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY} collision_stack=${PHYSX_GPU_COLLISION_STACK_SIZE}"
 echo "[INFO] dagger_match_std=${DAGGER_MATCH_STD}"

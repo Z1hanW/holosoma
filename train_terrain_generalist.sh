@@ -17,9 +17,9 @@ else
   DEFAULT_PYTHON_BIN="$(command -v python)"
 fi
 PYTHON_BIN=${PYTHON_BIN:-"${DEFAULT_PYTHON_BIN}"}
+source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
 
-DEFAULT_CUDA_VISIBLE_DEVICES=${DEFAULT_CUDA_VISIBLE_DEVICES:-0,1,2,3}
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-${DEFAULT_CUDA_VISIBLE_DEVICES}}
+CUDA_VISIBLE_DEVICES="$(default_cuda_visible_devices_all "${CUDA_VISIBLE_DEVICES:-${DEFAULT_CUDA_VISIBLE_DEVICES:-}}")"
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES//[[:space:]]/}
 export CUDA_VISIBLE_DEVICES
 
@@ -69,7 +69,7 @@ else
 fi
 
 AVAILABLE_GPU_COUNT=$(detect_nproc)
-NPROC=${NPROC:-$(awk -F, '{print NF}' <<<"${CUDA_VISIBLE_DEVICES}")}
+NPROC=${NPROC:-$(count_cuda_visible_devices "${CUDA_VISIBLE_DEVICES}")}
 if [[ ! "${NPROC}" =~ ^[0-9]+$ || "${NPROC}" -lt 1 ]]; then
   echo "[ERROR] NPROC must be a positive integer. Got: ${NPROC}" >&2
   exit 1

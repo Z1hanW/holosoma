@@ -22,6 +22,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
+source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
 
 DEFAULT_TEACHER_CHECKPOINT=${DEFAULT_TEACHER_CHECKPOINT:-"wandb://zihanw22/boxer/u5lguxvl/model_17000.pt"}
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DEFAULT_TEACHER_CHECKPOINT}}"
@@ -328,13 +329,34 @@ HSSIM_BIN_DIR=${HSSIM_BIN_DIR:-/home/ubuntu/.holosoma_deps/miniconda3/envs/hssim
 if [[ -d "${HSSIM_BIN_DIR}" ]]; then
   export PATH="${HSSIM_BIN_DIR}:${PATH}"
 fi
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,2,3,4,5,6,7}
+CUDA_VISIBLE_DEVICES="$(default_cuda_visible_devices_all "${CUDA_VISIBLE_DEVICES:-}")"
 if [[ -z "${NPROC:-}" ]]; then
-  IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
-  NPROC=${#_visible_gpus[@]}
+  NPROC="$(count_cuda_visible_devices "${CUDA_VISIBLE_DEVICES}")"
 fi
-DEFAULT_TOTAL_ENVS=${DEFAULT_TOTAL_ENVS:-7168}
-NUM_ENVS=${NUM_ENVS:-${DEFAULT_TOTAL_ENVS}}
+if ! [[ "${NPROC}" =~ ^[0-9]+$ ]] || (( NPROC < 1 )); then
+  echo "[ERROR] NPROC must be a positive integer. Got: ${NPROC}" >&2
+  exit 1
+fi
+if [[ -n "${TOTAL_NUM_ENVS:-}" ]]; then
+  if ! [[ "${TOTAL_NUM_ENVS}" =~ ^[0-9]+$ ]] || (( TOTAL_NUM_ENVS < NPROC )); then
+    echo "[ERROR] TOTAL_NUM_ENVS must be an integer >= NPROC. Got TOTAL_NUM_ENVS=${TOTAL_NUM_ENVS}, NPROC=${NPROC}" >&2
+    exit 1
+  fi
+  if (( TOTAL_NUM_ENVS % NPROC != 0 )); then
+    echo "[ERROR] TOTAL_NUM_ENVS must be divisible by NPROC. Got TOTAL_NUM_ENVS=${TOTAL_NUM_ENVS}, NPROC=${NPROC}" >&2
+    exit 1
+  fi
+  PER_GPU_ENVS=$((TOTAL_NUM_ENVS / NPROC))
+  NUM_ENVS="${TOTAL_NUM_ENVS}"
+else
+  PER_GPU_ENVS=${PER_GPU_ENVS:-${NUM_ENVS:-4096}}
+  if ! [[ "${PER_GPU_ENVS}" =~ ^[0-9]+$ ]] || (( PER_GPU_ENVS < 1 )); then
+    echo "[ERROR] NUM_ENVS/PER_GPU_ENVS must be a positive per-GPU env count. Got: ${PER_GPU_ENVS:-<empty>}" >&2
+    exit 1
+  fi
+  NUM_ENVS=$((PER_GPU_ENVS * NPROC))
+  TOTAL_NUM_ENVS="${NUM_ENVS}"
+fi
 
 DS_DATA_ROOT=${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}
 DEFAULT_DS_PREPARED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
@@ -1383,7 +1405,7 @@ if [[ -n "${OBJECT_GEOMETRY_MODE_NORM}" ]]; then
 else
   echo "[INFO] object_geometry_mode=<default>"
 fi
-echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} num_envs=${NUM_ENVS}"
+echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} per_gpu_envs=${PER_GPU_ENVS} total_num_envs=${NUM_ENVS}"
 echo "[INFO] data_mode=${DATA_MODE}"
 echo "[INFO] schedule_variant=${SCHEDULE_VARIANT}"
 echo "[INFO] reward_variant=${REWARD_VARIANT}"
@@ -1548,7 +1570,8 @@ exec env \
   TRAINING_PROJECT="${TRAINING_PROJECT}" \
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
   NPROC="${NPROC}" \
-  NUM_ENVS="${NUM_ENVS}" \
+  PER_GPU_ENVS="${PER_GPU_ENVS}" \
+  TOTAL_NUM_ENVS="${NUM_ENVS}" \
   MOTION_DIR="${MOTION_DIR}" \
   TEACHER_OBS_KEYS="${TEACHER_OBS_KEYS}" \
   TEACHER_ACTION_MIX_RATIO="${TEACHER_ACTION_MIX_RATIO}" \

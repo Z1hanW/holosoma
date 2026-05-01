@@ -27,6 +27,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
 source "${SCRIPT_DIR}/scripts/object_generalist_ds_paths.sh"
+source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
 
 USE_LEGACY_DS=${USE_LEGACY_DS:-auto}
 LEGACY_DS_ROOT=${LEGACY_DS_ROOT:-"${SCRIPT_DIR}/data/ds_box_data_legacy"}
@@ -337,6 +338,10 @@ NUM_LEARNING_ITERATIONS_EXPLICIT=0
 [[ -n "${NUM_LEARNING_ITERATIONS+x}" ]] && NUM_LEARNING_ITERATIONS_EXPLICIT=1
 NUM_ENVS_EXPLICIT=0
 [[ -n "${NUM_ENVS+x}" ]] && NUM_ENVS_EXPLICIT=1
+PER_GPU_ENVS_EXPLICIT=0
+[[ -n "${PER_GPU_ENVS+x}" ]] && PER_GPU_ENVS_EXPLICIT=1
+TOTAL_NUM_ENVS_EXPLICIT=0
+[[ -n "${TOTAL_NUM_ENVS+x}" ]] && TOTAL_NUM_ENVS_EXPLICIT=1
 PPO_TARGET_COEFF_EXPLICIT=0
 [[ -n "${PPO_TARGET_COEFF+x}" ]] && PPO_TARGET_COEFF_EXPLICIT=1
 PPO_START_COEFF_EXPLICIT=0
@@ -402,14 +407,24 @@ HSSIM_BIN_DIR=${HSSIM_BIN_DIR:-/home/ubuntu/.holosoma_deps/miniconda3/envs/hssim
 if [[ -d "${HSSIM_BIN_DIR}" ]]; then
   export PATH="${HSSIM_BIN_DIR}:${PATH}"
 fi
-CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1,2,3,4,5,6,7}
+CUDA_VISIBLE_DEVICES="$(default_cuda_visible_devices_all "${CUDA_VISIBLE_DEVICES:-}")"
 if [[ -z "${NPROC:-}" ]]; then
-  IFS=',' read -r -a _visible_gpus <<< "${CUDA_VISIBLE_DEVICES}"
-  NPROC=${#_visible_gpus[@]}
+  NPROC="$(count_cuda_visible_devices "${CUDA_VISIBLE_DEVICES}")"
 fi
-DEFAULT_ENVS_PER_GPU=${DEFAULT_ENVS_PER_GPU:-512}
-DEFAULT_TOTAL_ENVS=${DEFAULT_TOTAL_ENVS:-$((DEFAULT_ENVS_PER_GPU * NPROC))}
-NUM_ENVS=${NUM_ENVS:-${DEFAULT_TOTAL_ENVS}}
+if ! [[ "${NPROC}" =~ ^[0-9]+$ ]] || (( NPROC < 1 )); then
+  echo "[ERROR] NPROC must be a positive integer. Got: ${NPROC}" >&2
+  exit 1
+fi
+DEFAULT_ENVS_PER_GPU=${DEFAULT_ENVS_PER_GPU:-4096}
+# In this launcher, NUM_ENVS means envs per GPU. train_agent.py expects a global
+# all-rank total and divides by WORLD_SIZE, so we multiply once just before launch.
+if [[ "${TOTAL_NUM_ENVS_EXPLICIT}" -eq 1 ]]; then
+  :
+elif [[ "${PER_GPU_ENVS_EXPLICIT}" -eq 1 ]]; then
+  NUM_ENVS="${PER_GPU_ENVS}"
+elif [[ "${NUM_ENVS_EXPLICIT}" -eq 0 ]]; then
+  NUM_ENVS="${DEFAULT_ENVS_PER_GPU}"
+fi
 if [[ "${LEGACY_DS_ENABLED}" == "1" && "${TRACKER_PROFILE}" == "old-tracker" && "${DATA_MODE}" == "pure-sd" && "${DS_DATA_ROOT_EXPLICIT}" -eq 0 ]]; then
   DS_DATA_ROOT="${LEGACY_DS_ROOT}"
 else
@@ -1003,9 +1018,6 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
     NUM_LEARNING_ITERATIONS=20001
   fi
-  if [[ "${NUM_ENVS_EXPLICIT}" -eq 0 ]]; then
-    NUM_ENVS=1024
-  fi
   DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES=False
   SPARSE_GOAL_ENABLED=False
   CLIP_GOAL_DELTA_MIN_STEPS=60
@@ -1041,6 +1053,8 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   FREEZE_AT_TIMESTEP_ZERO_PROB_END=0.0
   FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER=2500
   FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=10000
+  UNIFORM_T1_WINDOW_SAMPLING_ENABLED=False
+  UNIFORM_T1_WINDOW_DENSITY_BOOST=1.0
   IMAGE_WIDTH=106
   IMAGE_WIDTH_EXPLICIT=1
   IMAGE_HEIGHT=60
@@ -1055,6 +1069,9 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   CAMERA_APPLY_SENSOR_NOISE=False
   CAMERA_APPLY_SENSOR_NOISE_EXPLICIT=1
   OBJECT_GEOMETRY_MODE=default
+  PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY=134217728
+  PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY=134217728
+  PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY=16777216
 fi
 
 OBJECT_GEOMETRY_MODE_NORM=""
@@ -1380,6 +1397,26 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   TEACHER_COMPAT_NOTES="teacher_obs_keys defaulted to actor_obs to match u5lguxvl teacher; teacher perception disabled to match u5lguxvl teacher; actor_obs history length set to 5 to match teacher checkpoint"
 fi
 
+if [[ "${TOTAL_NUM_ENVS_EXPLICIT}" -eq 1 ]]; then
+  if ! [[ "${TOTAL_NUM_ENVS}" =~ ^[0-9]+$ ]] || (( TOTAL_NUM_ENVS < NPROC )); then
+    echo "[ERROR] TOTAL_NUM_ENVS must be an integer >= NPROC. Got TOTAL_NUM_ENVS=${TOTAL_NUM_ENVS:-<empty>} NPROC=${NPROC}" >&2
+    exit 1
+  fi
+  if (( TOTAL_NUM_ENVS % NPROC != 0 )); then
+    echo "[ERROR] TOTAL_NUM_ENVS must be divisible by NPROC so per-GPU envs are exact. Got TOTAL_NUM_ENVS=${TOTAL_NUM_ENVS} NPROC=${NPROC}" >&2
+    exit 1
+  fi
+  PER_GPU_ENVS=$((TOTAL_NUM_ENVS / NPROC))
+  NUM_ENVS="${TOTAL_NUM_ENVS}"
+else
+  PER_GPU_ENVS="${NUM_ENVS}"
+  if ! [[ "${PER_GPU_ENVS}" =~ ^[0-9]+$ ]] || (( PER_GPU_ENVS < 1 )); then
+    echo "[ERROR] NUM_ENVS/PER_GPU_ENVS must be a positive per-GPU env count. Got: ${PER_GPU_ENVS:-<empty>}" >&2
+    exit 1
+  fi
+  NUM_ENVS=$((PER_GPU_ENVS * NPROC))
+fi
+
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
 echo "[INFO] teacher_compat_profile=${TEACHER_COMPAT_PROFILE_RESOLVED}"
 echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS}"
@@ -1417,7 +1454,7 @@ if [[ -n "${OBJECT_GEOMETRY_MODE_NORM}" ]]; then
 else
   echo "[INFO] object_geometry_mode=<default>"
 fi
-echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} num_envs=${NUM_ENVS}"
+echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} per_gpu_envs=${PER_GPU_ENVS} total_num_envs=${NUM_ENVS}"
 echo "[INFO] data_mode=${DATA_MODE}"
 echo "[INFO] tracker_profile=${TRACKER_PROFILE}"
 echo "[INFO] root_command_mode=${ROOT_COMMAND_MODE}"
@@ -1519,6 +1556,12 @@ fi
 if [[ "${EXPORT_ONNX_EXPLICIT}" -eq 1 || "${EXPORT_ONNX}" == "False" || "${EXPORT_ONNX}" == "false" ]]; then
   EXTRA_DISTILL_ARGS+=(--training.export-onnx="${EXPORT_ONNX}")
 fi
+if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
+  EXTRA_DISTILL_ARGS+=(
+    --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.root-lin-vel="[0.5, 0.5, 0.2]"
+    --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.root-ang-vel="[0.52, 0.52, 0.78]"
+  )
+fi
 if [[ "${DATA_MODE}" == "pure-real" ]]; then
   EXTRA_DISTILL_ARGS+=(
     --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.enabled=True
@@ -1589,7 +1632,8 @@ exec env \
   TRAINING_PROJECT="${TRAINING_PROJECT}" \
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
   NPROC="${NPROC}" \
-  NUM_ENVS="${NUM_ENVS}" \
+  PER_GPU_ENVS="${PER_GPU_ENVS}" \
+  TOTAL_NUM_ENVS="${NUM_ENVS}" \
   MOTION_DIR="${MOTION_DIR}" \
   TEACHER_OBS_KEYS="${TEACHER_OBS_KEYS}" \
   TEACHER_ACTION_MIX_RATIO="${TEACHER_ACTION_MIX_RATIO}" \
@@ -1598,6 +1642,9 @@ exec env \
   TEACHER_ACTION_MIX_RATIO_END_ITERATION="${TEACHER_ACTION_MIX_RATIO_END_ITERATION}" \
   BC_LOSS_COEF="${BC_LOSS_COEF}" \
   NUM_LEARNING_ITERATIONS="${NUM_LEARNING_ITERATIONS}" \
+  PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY="${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY:-}" \
+  PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY="${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY:-}" \
+  PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY="${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY:-}" \
   PPO_START_EPOCH="${PPO_START_EPOCH}" \
   DAGGER_END_EPOCH="${DAGGER_END_EPOCH}" \
   PPO_TARGET_COEFF="${PPO_TARGET_COEFF}" \
