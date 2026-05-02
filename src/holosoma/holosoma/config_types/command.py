@@ -319,6 +319,16 @@ class MotionConfig:
     uniform_t1_window_density_boost: float = 1.0
     """Per-timestep density multiplier for the uniform ``t1`` window relative to other nonzero steps."""
 
+    uniform_t1_window_target_sample_frac: float | None = None
+    """Optional target fraction of reset samples that should land in the ``t1`` window.
+
+    When set, this overrides ``uniform_t1_window_density_boost`` for clips with
+    loaded contact windows and accounts for ``start_at_timestep_zero_prob``. The
+    overall reset fraction can be lower if some sampled clips have no loaded contact
+    window. Clips whose valid nonzero range is entirely inside the ``t1`` window may
+    exceed the target because there is no outside window to sample.
+    """
+
     start_at_timestep_zero_prob: float = 0.2
     """Probability of starting at timestep zero."""
 

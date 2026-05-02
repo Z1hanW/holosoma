@@ -1804,6 +1804,8 @@ class MotionCommand(CommandTermBase):
         self._uniform_t1_window_last_reset_available_frac = 0.0
         self._uniform_t1_window_last_reset_sample_frac = 0.0
         self._uniform_t1_window_last_reset_expected_sample_frac = 0.0
+        self._uniform_t1_window_last_reset_sample_frac_valid = 0.0
+        self._uniform_t1_window_last_reset_expected_sample_frac_valid = 0.0
         self._uniform_t1_window_last_reset_mean_window_len = 0.0
         self._runtime_default_pose_prepend_enabled = False
         self._runtime_default_pose_prepend_steps = 0
@@ -3494,6 +3496,22 @@ class MotionCommand(CommandTermBase):
         return window_valid, lo, hi, window_len, outside_len, total_nonzero_len
 
     def _uniform_t1_window_probability(self, window_len: torch.Tensor, outside_len: torch.Tensor) -> torch.Tensor:
+        target_frac = self.motion_cfg.uniform_t1_window_target_sample_frac
+        if target_frac is not None:
+            target = self._clamp01(float(target_frac))
+            nonzero_prob = max(0.0, 1.0 - self._current_start_at_timestep_zero_prob())
+            if nonzero_prob <= 1.0e-6:
+                return torch.zeros_like(window_len, dtype=torch.float32)
+            target_nonzero_window_prob = self._clamp01(target / nonzero_prob)
+            target_prob = torch.full_like(
+                window_len,
+                target_nonzero_window_prob,
+                dtype=torch.float32,
+            )
+            target_prob = torch.where(window_len > 0, target_prob, torch.zeros_like(target_prob))
+            window_covers_all_nonzero_steps = (window_len > 0) & (outside_len <= 0)
+            return torch.where(window_covers_all_nonzero_steps, torch.ones_like(target_prob), target_prob)
+
         boost = max(1.0, float(self.motion_cfg.uniform_t1_window_density_boost))
         window_score = window_len.to(dtype=torch.float32) * boost
         outside_score = outside_len.to(dtype=torch.float32)
@@ -3552,10 +3570,18 @@ class MotionCommand(CommandTermBase):
         self._uniform_t1_window_last_reset_sample_frac = float(sampled_window.to(dtype=torch.float32).mean().item())
         self._uniform_t1_window_last_reset_expected_sample_frac = float((p_window * nonzero_prob).mean().item())
         if torch.any(window_valid):
+            self._uniform_t1_window_last_reset_sample_frac_valid = float(
+                sampled_window[window_valid].to(dtype=torch.float32).mean().item()
+            )
+            self._uniform_t1_window_last_reset_expected_sample_frac_valid = float(
+                (p_window[window_valid] * nonzero_prob).mean().item()
+            )
             self._uniform_t1_window_last_reset_mean_window_len = float(
                 window_len[window_valid].to(dtype=torch.float32).mean().item()
             )
         else:
+            self._uniform_t1_window_last_reset_sample_frac_valid = 0.0
+            self._uniform_t1_window_last_reset_expected_sample_frac_valid = 0.0
             self._uniform_t1_window_last_reset_mean_window_len = 0.0
 
     def _current_freeze_at_timestep_zero_prob(self) -> float:
@@ -5193,10 +5219,17 @@ class MotionCommand(CommandTermBase):
             uniform_t1_stats = {
                 "enabled": 1.0 if self._uniform_t1_window_sampling_active() else 0.0,
                 "density_boost": float(self.motion_cfg.uniform_t1_window_density_boost),
+                "target_sample_frac": (
+                    -1.0
+                    if self.motion_cfg.uniform_t1_window_target_sample_frac is None
+                    else float(self.motion_cfg.uniform_t1_window_target_sample_frac)
+                ),
                 "half_width_steps": float(self.motion_cfg.uniform_t1_window_half_width_steps),
                 "last_reset_available_frac": self._uniform_t1_window_last_reset_available_frac,
                 "last_reset_sample_frac": self._uniform_t1_window_last_reset_sample_frac,
                 "last_reset_expected_sample_frac": self._uniform_t1_window_last_reset_expected_sample_frac,
+                "last_reset_sample_frac_valid": self._uniform_t1_window_last_reset_sample_frac_valid,
+                "last_reset_expected_sample_frac_valid": self._uniform_t1_window_last_reset_expected_sample_frac_valid,
                 "last_reset_mean_window_len": self._uniform_t1_window_last_reset_mean_window_len,
             }
             for metric_name, metric_value in uniform_t1_stats.items():

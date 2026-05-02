@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Current mixed-bank setup, but loosen global reference position tracking.
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+export DATA_MODE=mix-naive
+export AUTO_PREP_DS_BANK=${AUTO_PREP_DS_BANK:-0}
+export STRICT_DEFAULT_DS_BANK_VALIDATION=${STRICT_DEFAULT_DS_BANK_VALIDATION:-0}
+export MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/data/ds_box_data/train_g1_w_obj_prepared_plus_omomo_orig"}
+export OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-"${MOTION_DIR}/_clip_object_urdf_map.json"}
+
+export NPROC=${NPROC:-8}
+export PER_GPU_ENVS=${PER_GPU_ENVS:-4096}
+export NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
+export SAVE_INTERVAL=${SAVE_INTERVAL:-1000}
+
+export CLIP_WEIGHTING_STRATEGY=${CLIP_WEIGHTING_STRATEGY:-success_rate_adaptive}
+export USE_ADAPTIVE_TIMESTEPS_SAMPLER=${USE_ADAPTIVE_TIMESTEPS_SAMPLER:-False}
+export FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
+export GENERALIST_CONTACT_REWARD_MODE=${GENERALIST_CONTACT_REWARD_MODE:-tanh}
+export SEQUENCE_NAME=${SEQUENCE_NAME:-rootpos-w025-sigma06}
+
+ROOT_POS_WEIGHT=${ROOT_POS_WEIGHT:-0.25}
+ROOT_POS_SIGMA_OVERRIDE=${ROOT_POS_SIGMA_OVERRIDE:-0.6}
+
+if [[ ! -d "${MOTION_DIR}" ]]; then
+  echo "[ERROR] MOTION_DIR does not exist: ${MOTION_DIR}" >&2
+  exit 2
+fi
+if [[ ! -f "${OBJECT_SPEC_PATH}" ]]; then
+  echo "[ERROR] OBJECT_SPEC_PATH does not exist: ${OBJECT_SPEC_PATH}" >&2
+  exit 2
+fi
+
+exec bash "${SCRIPT_DIR}/train_object_generalist_ds.sh" mix-naive \
+  --reward.terms.motion_global_ref_position_error_exp.weight="${ROOT_POS_WEIGHT}" \
+  --reward.terms.motion_global_ref_position_error_exp.params.sigma="${ROOT_POS_SIGMA_OVERRIDE}"
