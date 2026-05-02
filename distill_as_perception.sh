@@ -23,7 +23,8 @@ Examples:
   bash distill_as_perception.sh https://wandb.ai/<entity>/carry-any/runs/<run_id>
   bash distill_as_perception.sh /abs/model.pt ppo-first run:as_depth_student
 
-This launcher always uses the repo-local AS/OMOMO real-mesh bank by default:
+This launcher defaults to PPO+DAgger ppo-first distillation and always uses
+the repo-local AS/OMOMO real-mesh bank by default:
   OMOMO_DATA_DIR=./data/ds_as_data/omomo
   OMOMO_OBJECT_MAP=./data/ds_as_data/omomo/_clip_object_urdf_map.json
 EOF
@@ -260,6 +261,7 @@ export TEACHER_OBS_KEYS="${TEACHER_OBS_KEYS:-actor_obs}"
 export TEACHER_PERCEPTION_PRESET="${TEACHER_PERCEPTION_PRESET:-none}"
 export TEACHER_PERCEPTION_OBS_KEY="${TEACHER_PERCEPTION_OBS_KEY:-}"
 export TRACKER_PROFILE="${TRACKER_PROFILE:-as-general}"
+export SCHEDULE_VARIANT="${SCHEDULE_VARIANT:-ppo_first}"
 
 export EXP="${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd}"
 export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_perception}"
@@ -267,8 +269,8 @@ export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_real_mes
 export TRAINING_PROJECT="${TRAINING_PROJECT:-${WANDB_PROJECT}}"
 export PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
 export STUDENT_ACTOR_INPUTS="${STUDENT_ACTOR_INPUTS:-['actor_obs_root','actor_obs_proprio','actor_obs_actions']}"
-export SCHEDULE_NAME="${SCHEDULE_NAME:-as_real_mesh_sparse_root_teacher_anchor_v1}"
-export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS/OMOMO real-mesh perception distill from train_as_general.sh teacher. Teacher consumes actor_obs without perception; student consumes sparse root command, proprio/action history, and depth perception.}"
+export SCHEDULE_NAME="${SCHEDULE_NAME:-as_real_mesh_sparse_root_ppo_first_step_mix}"
+export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS/OMOMO real-mesh perception distill from train_as_general.sh teacher. PPO+DAgger hybrid by default: PPO is active from iteration 0, ramps from 0.1 to 0.9 by iteration 4000, and the effective DAgger BC weight decreases from 0.9 to 0.1. Teacher consumes actor_obs without perception; student consumes sparse root command, proprio/action history, and depth perception.}"
 
 echo "[INFO] Launching AS/OMOMO real-mesh perception distillation"
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
@@ -278,6 +280,7 @@ echo "[INFO] OBJECT_URDF=${OBJECT_URDF}"
 echo "[INFO] EXP=${EXP} perception=${PERCEPTION_PRESET}"
 echo "[INFO] RUN_NAME=${RUN_NAME} TRAINING_PROJECT=${TRAINING_PROJECT}"
 echo "[INFO] student_actor_inputs=${STUDENT_ACTOR_INPUTS}"
+echo "[INFO] schedule_variant=${SCHEDULE_VARIANT} schedule_name=${SCHEDULE_NAME}"
 echo "[INFO] HOLOSOMA_OBJECT_SPAWN_MODE=${HOLOSOMA_OBJECT_SPAWN_MODE}"
 echo "[INFO] HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE=${HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE}"
 

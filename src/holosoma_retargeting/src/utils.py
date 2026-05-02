@@ -344,9 +344,12 @@ def preprocess_motion_data(
     human_joints = human_joints * scale
 
     if object_poses is not None:
-        # Keep object trajectory in the same scaled world as human joints.
-        # Scaling only xy (or only z displacement) leads to severe human/object mismatch.
-        object_poses[:, -3:] = object_poses[:, -3:] * scale
+        # Match holosoma_gt: keep the object's initial height fixed and
+        # scale only xy plus z displacement.
+        object_poses[:, -3:-1] = object_poses[:, -3:-1] * scale
+        object_z0 = object_poses[0, -1]
+        dz_scale = (object_poses[:, -1] - object_z0) * scale
+        object_poses[:, -1] = object_z0 + dz_scale
 
         object_moving_frame_idx = extract_object_first_moving_frame(object_poses)
 
