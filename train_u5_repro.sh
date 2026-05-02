@@ -9,7 +9,38 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5}
 export DATA_MODE=mix-naive
 export AUTO_PREP_DS_BANK=${AUTO_PREP_DS_BANK:-0}
 export STRICT_DEFAULT_DS_BANK_VALIDATION=${STRICT_DEFAULT_DS_BANK_VALIDATION:-0}
-export MOTION_DIR=${MOTION_DIR:-"${SCRIPT_DIR}/data/ds_box_data/train_g1_w_obj_prepared_plus_omomo_orig"}
+
+resolve_motion_dir() {
+  local candidate
+  for candidate in \
+    "${SCRIPT_DIR}/data/ds_box_data/u5_v1/train_g1_w_obj_prepared_plus_omomo_orig" \
+    "${SCRIPT_DIR}/data/ds_box_data/train_g1_w_obj_prepared_plus_omomo_orig" \
+    "/nfs/zzzihanw/ds_box_data_v1/train_g1_w_obj_prepared_plus_omomo_orig"
+  do
+    if [[ -d "${candidate}" && -f "${candidate}/_clip_object_urdf_map.json" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [[ -z "${MOTION_DIR:-}" || ! -d "${MOTION_DIR}" || ! -f "${MOTION_DIR}/_clip_object_urdf_map.json" ]]; then
+  if [[ -n "${MOTION_DIR:-}" ]]; then
+    echo "[WARN] Ignoring unavailable MOTION_DIR=${MOTION_DIR}; searching for an available u5 motion bank." >&2
+  fi
+  if ! MOTION_DIR="$(resolve_motion_dir)"; then
+    echo "[ERROR] Could not find the u5 motion bank." >&2
+    echo "[ERROR] Expected one of:" >&2
+    echo "[ERROR]   ${SCRIPT_DIR}/data/ds_box_data/u5_v1/train_g1_w_obj_prepared_plus_omomo_orig" >&2
+    echo "[ERROR]   ${SCRIPT_DIR}/data/ds_box_data/train_g1_w_obj_prepared_plus_omomo_orig" >&2
+    echo "[ERROR]   /nfs/zzzihanw/ds_box_data_v1/train_g1_w_obj_prepared_plus_omomo_orig" >&2
+    echo "[ERROR] To create the local copy, run:" >&2
+    echo "[ERROR]   mkdir -p ${SCRIPT_DIR}/data/ds_box_data/u5_v1 && rsync -avh /nfs/zzzihanw/ds_box_data_v1/train_g1_w_obj_prepared_plus_omomo_orig ${SCRIPT_DIR}/data/ds_box_data/u5_v1/" >&2
+    exit 2
+  fi
+  export MOTION_DIR
+fi
 export OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH:-"${MOTION_DIR}/_clip_object_urdf_map.json"}
 
 export NPROC=${NPROC:-6}
@@ -41,7 +72,7 @@ if [[ ! -f "${OBJECT_SPEC_PATH}" ]]; then
   exit 2
 fi
 
-exec bash "${SCRIPT_DIR}/train_object_generalist_ds.sh" mix-naive \
+exec bash "${SCRIPT_DIR}/train_object_generalist_ds.sh" "${SEQUENCE_NAME}" \
   --observation-overrides.disable-actor-history=False \
   --observation-overrides.disable-critic-history=False \
   --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob=0.2 \
