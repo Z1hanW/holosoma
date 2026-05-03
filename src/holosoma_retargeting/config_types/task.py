@@ -46,7 +46,6 @@ class TaskConfig:
     object_mesh_root: Path | None = None
     # Optional object mesh filename suffix (e.g., "_sq.obj" or "_f1000.ply")
     object_mesh_suffix: str | None = "_f1000.ply"
-    # Optional object scale augmentation for object_interaction when --augmentation is enabled.
-    # Example: (1.1, 1.1, 1.1) or (0.9, 1.0, 1.1).
-    # If None, object_interaction keeps scale unchanged (translation/rotation-only augmentation).
+    # Retained for CLI/config compatibility. object_interaction now follows
+    # holosoma_gt scale handling and keeps object assets at native scale.
     object_interaction_scale_augmented: tuple[float, float, float] | None = None

@@ -538,8 +538,8 @@ document.getElementById("policySpace").addEventListener("click", () => sendPolic
 document.getElementById("policyStop").addEventListener("click", () => sendPolicy("stop"));
 document.getElementById("policyInit").addEventListener("click", () => sendPolicy("init"));
 
-setInterval(refreshState, 250);
-refreshState();
+setInterval(sendCommand, 100);
+sendCommand();
 </script>
 </body>
 </html>

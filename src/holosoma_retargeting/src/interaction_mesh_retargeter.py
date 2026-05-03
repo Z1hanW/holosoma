@@ -218,6 +218,21 @@ class InteractionMeshRetargeter:
             raise ValueError("object_mesh_scale must be a scalar or a 3-element array.")
         return scale_arr
 
+    def _object_mesh_extents(self) -> np.ndarray | None:
+        if not self.object_mesh_path:
+            return None
+        try:
+            mesh = trimesh.load(self.object_mesh_path, force="mesh", process=False)
+            if isinstance(mesh, trimesh.Scene):
+                mesh = trimesh.util.concatenate(mesh.dump())
+            extents = np.asarray(mesh.extents, dtype=np.float32)
+        except Exception as exc:
+            print(f"[WARN] Failed to compute object mesh extents from {self.object_mesh_path}: {exc}")
+            return None
+        if extents.shape != (3,):
+            return None
+        return extents * np.abs(self.object_mesh_scale.astype(np.float32))
+
     def _setup_visualization(self):
         """Setup Viser visualization components."""
         self.server = viser.ViserServer()
@@ -491,20 +506,23 @@ class InteractionMeshRetargeter:
             robot_kpts_handle_list.clear()
 
         # Save results
-        np.savez(
-            dest_res_path,
-            qpos=np.array(retargeted_motions)[1:],
-            human_joints=human_joint_motions,
-            fps=30,
-            cost=cost,
-            object_name=str(self.object_name) if self.object_name is not None else "",
-            object_contact_name=str(self.object_contact_name) if self.object_contact_name is not None else "",
-            object_urdf_path=str(self.object_model_path) if self.object_model_path is not None else "",
-            scene_xml_file=str(getattr(self.task_constants, "SCENE_XML_FILE", "") or ""),
-            robot_urdf_file=str(getattr(self.task_constants, "ROBOT_URDF_FILE", "") or ""),
-            object_mesh_path=str(self.object_mesh_path) if self.object_mesh_path is not None else "",
-            object_mesh_scale=np.asarray(self.object_mesh_scale, dtype=np.float32),
-        )
+        save_payload = {
+            "qpos": np.array(retargeted_motions)[1:],
+            "human_joints": human_joint_motions,
+            "fps": 30,
+            "cost": cost,
+            "object_name": str(self.object_name) if self.object_name is not None else "",
+            "object_contact_name": str(self.object_contact_name) if self.object_contact_name is not None else "",
+            "object_urdf_path": str(self.object_model_path) if self.object_model_path is not None else "",
+            "scene_xml_file": str(getattr(self.task_constants, "SCENE_XML_FILE", "") or ""),
+            "robot_urdf_file": str(getattr(self.task_constants, "ROBOT_URDF_FILE", "") or ""),
+            "object_mesh_path": str(self.object_mesh_path) if self.object_mesh_path is not None else "",
+            "object_mesh_scale": np.asarray(self.object_mesh_scale, dtype=np.float32),
+        }
+        object_size = self._object_mesh_extents()
+        if object_size is not None:
+            save_payload["object_size"] = object_size
+        np.savez(dest_res_path, **save_payload)
         print("Saving results to path:", dest_res_path)
 
         if self.visualize:

@@ -506,7 +506,7 @@ def mesh_path(urdf_path, filename):
 def object_collision_mode():
     raw = os.environ.get(
         "MUJOCO_OBJECT_COLLISION_MODE",
-        os.environ.get("HOLOSOMA_MUJOCO_OBJECT_COLLISION_MODE", "box"),
+        os.environ.get("HOLOSOMA_MUJOCO_OBJECT_COLLISION_MODE", "mesh"),
     )
     return str(raw).strip().lower().replace("-", "_")
 

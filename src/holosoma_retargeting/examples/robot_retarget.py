@@ -581,8 +581,13 @@ def load_motion_data(
             mujoco_mesh_path = _ensure_mujoco_mesh(obj_name, mesh_path, generated_root, center_mesh=True)
             constants.OBJECT_MESH_FILE = str(mujoco_mesh_path)
 
+            # Keep generated BEHAVE assets at native mesh scale. The demo
+            # object points are smpl-scaled later by load_object_data(), while
+            # the robot-side target object and MuJoCo asset remain native, as
+            # in holosoma_gt object_interaction.
+            native_mesh_scale = np.ones(3, dtype=float)
             urdf_path = generated_root / f"{obj_name}.urdf"
-            _write_object_urdf(obj_name, mujoco_mesh_path, urdf_path, mesh_scale=smpl_scale, overwrite=False)
+            _write_object_urdf(obj_name, mujoco_mesh_path, urdf_path, mesh_scale=native_mesh_scale, overwrite=True)
             constants.OBJECT_URDF_FILE = str(urdf_path)
             constants.OBJECT_URDF_TEMPLATE = ""
 
@@ -611,7 +616,7 @@ def load_motion_data(
                         scene_xml_path,
                         obj_name,
                         mujoco_mesh_path,
-                        mesh_scale=smpl_scale,
+                        mesh_scale=native_mesh_scale,
                         body_name=object_contact_name,
                         overwrite=True,
                     )
@@ -629,7 +634,7 @@ def load_motion_data(
                     robot_xml_out,
                     obj_name,
                     mujoco_mesh_path,
-                    mesh_scale=smpl_scale,
+                    mesh_scale=native_mesh_scale,
                     body_name=obj_name,
                     overwrite=True,
                 )
@@ -702,24 +707,17 @@ def setup_object_data(
         if constants.OBJECT_MESH_FILE is None:
             raise ValueError("OBJECT_MESH_FILE not set for object_interaction task")
 
-        _, object_local_pts_scaled = load_object_data(
+        object_local_pts, object_local_pts_demo = load_object_data(
             constants.OBJECT_MESH_FILE, smpl_scale=smpl_scale, sample_count=100
         )
-        # Keep object geometry consistently scaled in optimization and demo space.
-        # Using unscaled points here causes a mismatch against scaled human/object poses.
-        object_local_pts_demo = np.array(object_local_pts_scaled, copy=True)
-        object_scale = np.ones(3, dtype=float)
-        if task_config.object_interaction_scale_augmented is not None:
-            object_scale = _normalize_scale_vec(task_config.object_interaction_scale_augmented)
-        object_local_pts = np.array(object_local_pts_demo * object_scale.reshape(1, 3), copy=True)
-        object_mesh_scale = np.array(object_scale * smpl_scale, dtype=float)
+        # Match holosoma_gt object_interaction scale handling: the demo points
+        # are smpl-scaled by load_object_data(), while the current object
+        # points and URDF/XML asset stay at native object scale. Keep the
+        # returned scale slot for interface compatibility, but do not request
+        # any additional mesh scaling downstream.
+        object_mesh_scale = np.ones(3, dtype=float)
 
-        object_urdf_file = constants.OBJECT_URDF_FILE
-        if not np.allclose(object_scale, np.ones(3, dtype=float)):
-            object_urdf_file, scaled_scene_xml = _create_scaled_object_interaction_assets(constants, object_mesh_scale)
-            constants.SCENE_XML_FILE = scaled_scene_xml
-
-        return object_local_pts, object_local_pts_demo, object_urdf_file, object_mesh_scale
+        return object_local_pts, object_local_pts_demo, constants.OBJECT_URDF_FILE, object_mesh_scale
 
     if task_type == "climbing":
         if object_dir is None:
