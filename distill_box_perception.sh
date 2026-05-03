@@ -22,7 +22,9 @@ set -euo pipefail
 #   pickup and during the release/putdown tail
 # - contact-aware-history: contact-aware plus 5-frame student/critic proprio history
 # - shoo7sr1-near03-debug: shoo7sr1 debug reproduction; only depth near
-#   differs from the saved shoo7sr1 config (0.3 instead of 0.1)
+#   differs from the saved shoo7sr1 config (0.3 instead of 0.1). Set
+#   SHOO7SR1_OBS_VARIANT to linvel, action_history, or linvel_action_history
+#   for observation ablations on top of that baseline.
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
@@ -43,6 +45,7 @@ ROOT_COMMAND_MODE=${ROOT_COMMAND_MODE:-default}
 CONTACT_AWARE_HISTORY=${CONTACT_AWARE_HISTORY:-0}
 CONTACT_AWARE_HISTORY_LENGTH=${CONTACT_AWARE_HISTORY_LENGTH:-5}
 SHOO7SR1_NEAR03_DEBUG=${SHOO7SR1_NEAR03_DEBUG:-0}
+SHOO7SR1_OBS_VARIANT=${SHOO7SR1_OBS_VARIANT:-baseline}
 PYTHON_BIN=${PYTHON_BIN:-python}
 
 parse_wandb_run_url() {
@@ -227,6 +230,21 @@ while [[ $# -gt 0 ]]; do
       SHOO7SR1_NEAR03_DEBUG=1
       shift
       ;;
+    shoo7sr1-linvel|shoo7sr1_linvel|shoo7sr1-linear-velocity|shoo7sr1_linear_velocity)
+      SHOO7SR1_NEAR03_DEBUG=1
+      SHOO7SR1_OBS_VARIANT=linvel
+      shift
+      ;;
+    shoo7sr1-action-history|shoo7sr1_action_history|shoo7sr1-actions-history|shoo7sr1_actions_history)
+      SHOO7SR1_NEAR03_DEBUG=1
+      SHOO7SR1_OBS_VARIANT=action_history
+      shift
+      ;;
+    shoo7sr1-linvel-action-history|shoo7sr1_linvel_action_history|shoo7sr1-both|shoo7sr1_both)
+      SHOO7SR1_NEAR03_DEBUG=1
+      SHOO7SR1_OBS_VARIANT=linvel_action_history
+      shift
+      ;;
     *)
       break
       ;;
@@ -270,7 +288,7 @@ while [[ $# -gt 0 && "$1" != -* ]]; do
 done
 
 if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
-  echo "Usage: $0 [mix-naive|pure-real|pure-sd] [default|dagger-mix|dag_first|ppo-first|contact-aware|contact-aware-history|shoo7sr1-near03-debug] [run_name] [teacher_checkpoint.pt|wandb_run_url] [extra train args...]" >&2
+  echo "Usage: $0 [mix-naive|pure-real|pure-sd] [default|dagger-mix|dag_first|ppo-first|contact-aware|contact-aware-history|shoo7sr1-near03-debug|shoo7sr1-linvel|shoo7sr1-action-history|shoo7sr1-both] [run_name] [teacher_checkpoint.pt|wandb_run_url] [extra train args...]" >&2
   exit 1
 fi
 
@@ -320,6 +338,8 @@ TEACHER_ACTOR_OBS_HISTORY_LENGTH_EXPLICIT=0
 [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH+x}" ]] && TEACHER_ACTOR_OBS_HISTORY_LENGTH_EXPLICIT=1
 STUDENT_PROPRIO_HISTORY_LENGTH_EXPLICIT=0
 [[ -n "${STUDENT_PROPRIO_HISTORY_LENGTH+x}" ]] && STUDENT_PROPRIO_HISTORY_LENGTH_EXPLICIT=1
+STUDENT_ACTION_HISTORY_LENGTH_EXPLICIT=0
+[[ -n "${STUDENT_ACTION_HISTORY_LENGTH+x}" ]] && STUDENT_ACTION_HISTORY_LENGTH_EXPLICIT=1
 CRITIC_PROPRIO_HISTORY_LENGTH_EXPLICIT=0
 [[ -n "${CRITIC_PROPRIO_HISTORY_LENGTH+x}" ]] && CRITIC_PROPRIO_HISTORY_LENGTH_EXPLICIT=1
 TEACHER_ACTION_MIX_RATIO_EXPLICIT=0
@@ -971,9 +991,41 @@ OBJECT_GEOMETRY_MODE=${OBJECT_GEOMETRY_MODE:-mesh}
 
 if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   # Debug ablation: reproduce shoo7sr1, except depth near is intentionally 0.3.
+  _shoo7_obs_variant="$(echo "${SHOO7SR1_OBS_VARIANT}" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
+  case "${_shoo7_obs_variant}" in
+    baseline|none|no_linvel_no_actions|no_linvel_no_action|proprio_no_linvel)
+      SHOO7SR1_OBS_VARIANT=baseline
+      _shoo7_student_actor_inputs="['actor_obs_root','actor_obs_proprio_no_linvel']"
+      ;;
+    linvel|linear_velocity|base_lin_vel|base_linear_velocity)
+      SHOO7SR1_OBS_VARIANT=linvel
+      _shoo7_student_actor_inputs="['actor_obs_root','actor_obs_proprio']"
+      ;;
+    action_history|actions_history|action_hist|actions_hist)
+      SHOO7SR1_OBS_VARIANT=action_history
+      _shoo7_student_actor_inputs="['actor_obs_root','actor_obs_proprio_no_linvel','actor_obs_actions']"
+      if [[ "${STUDENT_ACTION_HISTORY_LENGTH_EXPLICIT}" -eq 0 ]]; then
+        STUDENT_ACTION_HISTORY_LENGTH=5
+      fi
+      ;;
+    linvel_action_history|linear_velocity_action_history|base_lin_vel_action_history|both)
+      SHOO7SR1_OBS_VARIANT=linvel_action_history
+      _shoo7_student_actor_inputs="['actor_obs_root','actor_obs_proprio','actor_obs_actions']"
+      if [[ "${STUDENT_ACTION_HISTORY_LENGTH_EXPLICIT}" -eq 0 ]]; then
+        STUDENT_ACTION_HISTORY_LENGTH=5
+      fi
+      ;;
+    *)
+      echo "[ERROR] Unsupported SHOO7SR1_OBS_VARIANT='${SHOO7SR1_OBS_VARIANT}'. Use baseline, linvel, action_history, or linvel_action_history." >&2
+      exit 2
+      ;;
+  esac
+
   PERCEPTION_PRESET="camera_depth_d435i"
   EXPORT_ONNX=True
-  STUDENT_ACTOR_INPUTS="['actor_obs_root','actor_obs_proprio_no_linvel']"
+  if [[ "${STUDENT_ACTOR_INPUTS_EXPLICIT}" -eq 0 ]]; then
+    STUDENT_ACTOR_INPUTS="${_shoo7_student_actor_inputs}"
+  fi
   STUDENT_ACTOR_INPUTS_EXPLICIT=1
   TEACHER_COMPAT_PROFILE="u5lguxvl_generalist"
   TEACHER_OBS_KEYS="actor_obs"
@@ -1433,6 +1485,9 @@ fi
 if [[ -n "${STUDENT_PROPRIO_HISTORY_LENGTH:-}" ]]; then
   echo "[INFO] student_proprio_history_length=${STUDENT_PROPRIO_HISTORY_LENGTH}"
 fi
+if [[ -n "${STUDENT_ACTION_HISTORY_LENGTH:-}" ]]; then
+  echo "[INFO] student_action_history_length=${STUDENT_ACTION_HISTORY_LENGTH}"
+fi
 if [[ -n "${CRITIC_PROPRIO_HISTORY_LENGTH:-}" ]]; then
   echo "[INFO] critic_proprio_history_length=${CRITIC_PROPRIO_HISTORY_LENGTH}"
 fi
@@ -1440,6 +1495,9 @@ echo "[INFO] run_name=${RUN_NAME} training_name=${TRAINING_NAME}"
 echo "[INFO] exp=${EXP} perception=${PERCEPTION_PRESET}"
 echo "[INFO] export_onnx=${EXPORT_ONNX}"
 echo "[INFO] shoo7sr1_near03_debug=${SHOO7SR1_NEAR03_DEBUG}"
+if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
+  echo "[INFO] shoo7sr1_obs_variant=${SHOO7SR1_OBS_VARIANT}"
+fi
 if [[ -n "${CAMERA_PITCH_DEG}" ]]; then
   echo "[INFO] camera_pitch_deg=${CAMERA_PITCH_DEG}"
 else
@@ -1540,6 +1598,11 @@ if [[ -n "${STUDENT_PROPRIO_HISTORY_LENGTH:-}" ]]; then
   EXTRA_DISTILL_ARGS+=(
     --observation.groups.actor_obs_proprio.history-length="${STUDENT_PROPRIO_HISTORY_LENGTH}"
     --observation.groups.actor_obs_proprio_no_linvel.history-length="${STUDENT_PROPRIO_HISTORY_LENGTH}"
+  )
+fi
+if [[ -n "${STUDENT_ACTION_HISTORY_LENGTH:-}" ]]; then
+  EXTRA_DISTILL_ARGS+=(
+    --observation.groups.actor_obs_actions.history-length="${STUDENT_ACTION_HISTORY_LENGTH}"
   )
 fi
 if [[ -n "${CRITIC_PROPRIO_HISTORY_LENGTH:-}" ]]; then

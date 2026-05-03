@@ -364,6 +364,36 @@ async function sendCommand() {
   }
 }
 
+function syncControlsFromPayload(payload) {
+  if (!payload) return;
+  enabled.checked = Boolean(payload.enabled);
+  resetToDefaultPose.checked = Boolean(payload.reset_to_default_pose);
+  if (payload.value !== undefined && document.activeElement !== value) {
+    value.value = Number(payload.value || 0);
+  }
+  if (payload.yaw_degrees !== undefined && document.activeElement !== yawDegrees) {
+    yawDegrees.value = Number(payload.yaw_degrees || 0);
+  }
+  if (payload.mode === "manual" || payload.mode === "offset") {
+    mode.value = payload.mode;
+  }
+}
+
+async function refreshState() {
+  refreshKeys();
+  try {
+    const response = await fetch(resolveAppUrl("state"));
+    const payload = await response.json();
+    if (payload) {
+      updatePorts(payload);
+      syncControlsFromPayload(payload);
+      updateCommandDisplay(payload);
+    }
+  } catch (err) {
+    message.textContent = `state refresh failed: ${err}`;
+  }
+}
+
 async function sendReset(reason = "web_command_reset") {
   pressed.clear();
   await sendCommand();
@@ -500,8 +530,8 @@ document.getElementById("policySpace").addEventListener("click", () => sendPolic
 document.getElementById("policyStop").addEventListener("click", () => sendPolicy("stop"));
 document.getElementById("policyInit").addEventListener("click", () => sendPolicy("init"));
 
-setInterval(sendCommand, 100);
-sendCommand();
+setInterval(refreshState, 250);
+refreshState();
 </script>
 </body>
 </html>
