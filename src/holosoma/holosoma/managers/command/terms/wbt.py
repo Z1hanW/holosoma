@@ -4457,6 +4457,7 @@ class MotionCommand(CommandTermBase):
     def get_sparse_goal_external_mask(self) -> torch.Tensor:
         if (
             not self.motion.has_object
+            or not self._sparse_goal_curriculum_enabled
             or not self.manual_goal_enabled
             or self.manual_goal_object_pos_w is None
             or self.manual_goal_object_rot6d_w is None

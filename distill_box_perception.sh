@@ -92,53 +92,25 @@ entity, project, run_id = sys.argv[1:4]
 api = wandb.Api(timeout=30)
 run = api.run(f"{entity}/{project}/{run_id}")
 
-def _coerce_int(value):
-    try:
-        return int(value)
-    except Exception:
-        return None
-
-summary = getattr(run, "summary", {}) or {}
-step_hint = _coerce_int(summary.get("_step"))
-if step_hint is None:
-    step_hint = _coerce_int(summary.get("global_step"))
-if step_hint is None:
-    step_hint = _coerce_int(getattr(run, "lastHistoryStep", None))
-if step_hint is None:
-    step_hint = 0
-
-save_interval = None
-cfg = getattr(run, "config", {}) or {}
-algo_cfg = cfg.get("algo") if isinstance(cfg, dict) else None
-if isinstance(algo_cfg, dict):
-    algo_cfg = algo_cfg.get("config")
-if isinstance(algo_cfg, dict):
-    save_interval = _coerce_int(algo_cfg.get("save_interval"))
-if save_interval is None or save_interval <= 0:
-    save_interval = 500
-
 pattern = re.compile(r"^model_(\d+)\.pt$")
-start_step = max(step_hint - (step_hint % save_interval), 0)
-best_step = -1
-best_name = ""
-for step in range(start_step, -1, -save_interval):
-    name = f"model_{step:05d}.pt"
+best: tuple[int, str] | None = None
+for file_obj in run.files():
+    name = str(getattr(file_obj, "name", "") or "")
+    match = pattern.match(name)
+    if match is None:
+        continue
     try:
-        file_obj = run.file(name)
+        size = int(getattr(file_obj, "size", 0) or 0)
     except Exception:
+        size = 0
+    if size <= 0:
         continue
-    size = _coerce_int(getattr(file_obj, "size", None))
-    match = pattern.match(getattr(file_obj, "name", ""))
-    if match is None or size is None or size <= 0:
-        continue
-    file_step = int(match.group(1))
-    if file_step >= best_step:
-        best_step = file_step
-        best_name = name
-        break
+    candidate = (int(match.group(1)), name)
+    if best is None or candidate[0] > best[0]:
+        best = candidate
 
-if best_name:
-    print(best_name)
+if best is not None:
+    print(best[1])
 PY
 }
 
@@ -350,6 +322,8 @@ TEACHER_ACTION_MIX_RATIO_END_EXPLICIT=0
 [[ -n "${TEACHER_ACTION_MIX_RATIO_END+x}" ]] && TEACHER_ACTION_MIX_RATIO_END_EXPLICIT=1
 TEACHER_ACTION_MIX_RATIO_END_ITERATION_EXPLICIT=0
 [[ -n "${TEACHER_ACTION_MIX_RATIO_END_ITERATION+x}" ]] && TEACHER_ACTION_MIX_RATIO_END_ITERATION_EXPLICIT=1
+DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES_EXPLICIT=0
+[[ -n "${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES+x}" ]] && DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES_EXPLICIT=1
 PPO_START_EPOCH_EXPLICIT=0
 [[ -n "${PPO_START_EPOCH+x}" ]] && PPO_START_EPOCH_EXPLICIT=1
 DAGGER_END_EPOCH_EXPLICIT=0
@@ -1330,6 +1304,16 @@ START_AT_TIMESTEP_ZERO_PROB_END_ITER=${START_AT_TIMESTEP_ZERO_PROB_END_ITER:-${N
 FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS}}
 
 SPARSE_GOAL_ENABLED=${SPARSE_GOAL_ENABLED:-False}
+if [[ "${DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES_EXPLICIT}" -eq 0 ]]; then
+  case "$(echo "${SPARSE_GOAL_ENABLED}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES=True
+      ;;
+    *)
+      DAGGER_IGNORE_EXTERNAL_GOAL_SAMPLES=False
+      ;;
+  esac
+fi
 CLIP_GOAL_DELTA_MIN_STEPS=${CLIP_GOAL_DELTA_MIN_STEPS:-45}
 CLIP_GOAL_DELTA_MAX_STEPS=${CLIP_GOAL_DELTA_MAX_STEPS:-120}
 COMMAND_ONLY_ENV_PROB_START=${COMMAND_ONLY_ENV_PROB_START:-0.0}

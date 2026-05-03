@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import torch
 
 from holosoma.config_types.termination import TerminationTermCfg
+from holosoma.managers.command.terms.wbt import MotionCommand
 from holosoma.managers.termination.terms.wbt import RobotFallenByTiltAfterIteration
 from holosoma.utils.rotations import quat_from_euler_xyz
 
@@ -78,3 +81,22 @@ def test_robot_fallen_by_tilt_applies_during_evaluation_even_before_iteration_ga
     eval_env = _StubEnv(base_quat=_make_quat(pitch_deg=80.0), training_iteration=0, is_evaluating=True)
     term = RobotFallenByTiltAfterIteration(cfg, eval_env)
     assert torch.equal(term(eval_env), torch.tensor([True]))
+
+
+def test_sparse_goal_external_mask_is_disabled_when_curriculum_is_off():
+    motion_command = object.__new__(MotionCommand)
+    motion_command.num_envs = 2
+    motion_command.device = "cpu"
+    motion_command.motion = SimpleNamespace(has_object=True)
+    motion_command._sparse_goal_curriculum_enabled = False
+    motion_command.manual_goal_enabled = True
+    motion_command.manual_goal_object_pos_w = torch.ones((2, 3), dtype=torch.float32)
+    motion_command.manual_goal_object_rot6d_w = torch.ones((2, 6), dtype=torch.float32)
+    motion_command.manual_goal_is_external = torch.ones((2,), dtype=torch.bool)
+    motion_command.clip_goal_object_pos_w = torch.zeros((2, 3), dtype=torch.float32)
+    motion_command.clip_goal_object_rot6d_w = torch.zeros((2, 6), dtype=torch.float32)
+
+    assert torch.equal(
+        motion_command.get_sparse_goal_external_mask(),
+        torch.zeros((2,), dtype=torch.bool),
+    )

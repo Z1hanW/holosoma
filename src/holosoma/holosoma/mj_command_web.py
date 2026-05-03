@@ -212,6 +212,7 @@ INDEX_HTML = """<!doctype html>
       <div id="state">effective command: pending</div>
       <div id="motionCommand">motion command: pending</div>
       <div id="manualCommand">manual command: [0.000, 0.000, 0.000]</div>
+      <div id="depthRange">depth near/far: pending</div>
       <div id="policyStatus">policy: waiting for ]</div>
       <div class="toolbar-inline">
         <button id="policyRolloutStart" type="button">] + Space</button>
@@ -260,6 +261,7 @@ const source = document.getElementById("source");
 const state = document.getElementById("state");
 const motionCommand = document.getElementById("motionCommand");
 const manualCommand = document.getElementById("manualCommand");
+const depthRange = document.getElementById("depthRange");
 const policyStatus = document.getElementById("policyStatus");
 const message = document.getElementById("message");
 const appBaseUrl = new URL("./", window.location.href);
@@ -312,6 +314,11 @@ function formatCommand(command) {
   return `[${command.slice(0, 3).map((v) => Number(v || 0).toFixed(3)).join(", ")}]`;
 }
 
+function formatScalar(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(3) : "pending";
+}
+
 function commandStatus(payload) {
   if (payload && payload.enabled) return payload.mode === "offset" ? "offset(motion+manual)" : "manual";
   return "auto(motion)";
@@ -329,6 +336,7 @@ function updateCommandDisplay(payload) {
   state.textContent = `effective command: ${formatCommand(displayEffective)}`;
   motionCommand.textContent = `motion command: ${formatCommand(motion)}`;
   manualCommand.textContent = `manual command: ${formatCommand(manual)}`;
+  depthRange.textContent = `depth near/far: ${formatScalar(payload && payload.perception_camera_near)} / ${formatScalar(payload && payload.perception_camera_far)}`;
 }
 
 async function sendCommand() {
@@ -668,6 +676,16 @@ class CommandState:
                 time.sleep(max(float(delay_s), 0.0))
         return sent_all
 
+    @staticmethod
+    def _float_env(name: str) -> float | None:
+        raw = os.environ.get(name)
+        if raw is None or str(raw).strip() == "":
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
     def snapshot(self, command: list[float] | None = None) -> dict[str, Any]:
         with self.lock:
             if command is None:
@@ -686,6 +704,8 @@ class CommandState:
                 "control_port": self.control_port,
                 "policy_control_port": self.policy_control_port,
                 "policy_control_enabled": bool(self.policy_pub and self.policy_pub.enabled),
+                "perception_camera_near": self._float_env("PERCEPTION_CAMERA_NEAR"),
+                "perception_camera_far": self._float_env("PERCEPTION_CAMERA_FAR"),
             }
         snapshot.update(self._policy_overlay_snapshot())
         return snapshot

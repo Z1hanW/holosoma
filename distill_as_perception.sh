@@ -8,13 +8,13 @@ set -euo pipefail
 # delegates the actual perception distillation launch to distill_box_perception.sh.
 #
 # Usage:
-#   bash distill_as_perception.sh <teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...> [schedule/run_name/extra args...]
+#   bash distill_as_perception.sh [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [schedule/run_name/extra args...]
 #   TEACHER_CHECKPOINT=<teacher_checkpoint> bash distill_as_perception.sh [schedule/run_name/extra args...]
 
 usage() {
   cat <<'EOF'
 Usage:
-  bash distill_as_perception.sh <teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...> [extra args...]
+  bash distill_as_perception.sh [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra args...]
   TEACHER_CHECKPOINT=<teacher_checkpoint> bash distill_as_perception.sh [extra args...]
 
 Examples:
@@ -27,6 +27,10 @@ This launcher defaults to PPO+DAgger ppo-first distillation and always uses
 the repo-local AS/OMOMO real-mesh bank by default:
   OMOMO_DATA_DIR=./data/ds_as_data/omomo
   OMOMO_OBJECT_MAP=./data/ds_as_data/omomo/_clip_object_urdf_map.json
+
+If no teacher checkpoint is passed, the default teacher is the latest model
+from:
+  https://wandb.ai/zihanw22/carry-any/runs/gml45u7p
 EOF
 }
 
@@ -60,7 +64,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-TEACHER_CHECKPOINT=${TEACHER_CHECKPOINT:-${CKPT:-}}
+DEFAULT_AS_TEACHER_CHECKPOINT=${DEFAULT_AS_TEACHER_CHECKPOINT:-"https://wandb.ai/zihanw22/carry-any/runs/gml45u7p"}
+TEACHER_CHECKPOINT=${TEACHER_CHECKPOINT:-${CKPT:-${DEFAULT_AS_TEACHER_CHECKPOINT}}}
 if [[ $# -gt 0 ]] && is_checkpoint_ref "$1"; then
   TEACHER_CHECKPOINT="$1"
   shift
