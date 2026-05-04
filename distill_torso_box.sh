@@ -341,6 +341,19 @@ run_distill_stage() {
   fi
   cmd+=("${LOGGER_EXTRA_ARGS[@]}")
 
+  if [[ "${PRINT_TRAIN_CMD:-0}" == "1" || "${DRY_RUN:-0}" == "1" ]]; then
+    printf '[INFO] final_train_command:'
+    printf ' %q' \
+      HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES="${PERCEPTION_INTO_POLICY_MODULES}" \
+      TORCH_DIST_TIMEOUT_SEC="${TORCH_DIST_TIMEOUT_SEC}" \
+      CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
+      "${cmd[@]}"
+    printf '\n'
+    if [[ "${DRY_RUN:-0}" == "1" ]]; then
+      return 0
+    fi
+  fi
+
   HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES="${PERCEPTION_INTO_POLICY_MODULES}" \
   TORCH_DIST_TIMEOUT_SEC="${TORCH_DIST_TIMEOUT_SEC}" \
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
