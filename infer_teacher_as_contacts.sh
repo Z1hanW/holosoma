@@ -10,16 +10,19 @@ set -euo pipefail
 #
 # Usage:
 #   bash infer_teacher_as_contacts.sh [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
+#   bash infer_teacher_as_contacts.sh view [existing_output_dir]
 #
 # Examples:
 #   bash infer_teacher_as_contacts.sh
 #   NUM_ENVS=8 bash infer_teacher_as_contacts.sh
 #   DRY_RUN=1 bash infer_teacher_as_contacts.sh https://wandb.ai/zihanw22/carry-any/runs/gml45u7p
+#   bash infer_teacher_as_contacts.sh view
 
 usage() {
   cat <<'EOF'
 Usage:
   bash infer_teacher_as_contacts.sh [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
+  bash infer_teacher_as_contacts.sh view [existing_output_dir]
 
 Optional env vars:
   TEACHER_CHECKPOINT        Default: parsed from distill_as_perception.sh
@@ -29,8 +32,10 @@ Optional env vars:
   OMOMO_EXPECTED_TOTAL      Default: 45; set empty to disable count check
   NUM_ENVS                  Default: 8
   HEADLESS                  Default: True
-  OUTPUT_DIR                Default: outputs/teacher_as_contacts/<utc timestamp>
-  PUBLISH_FOR_INFER_BOX     Default: 1; copy clips/motion_bank into legacy outputs paths
+  OUTPUT_DIR                Export mode default: outputs/teacher_as_contacts/<utc timestamp>.
+                            View mode: existing export dir; default is latest outputs/teacher_as_contacts/*
+  VIEW_ONLY                 Default: 0; set 1 to skip rollout and only launch the viewer
+  PUBLISH_FOR_INFER_BOX     Export default: 1; view default: 0; copy clips/motion_bank into legacy outputs paths
   PUBLISH_CLIPS_DIR         Default: ./outputs/clips
   PUBLISH_MOTION_BANK_DIR   Default: ./outputs/motion_bank
   LAUNCH_VISER              Default: 1; start rollout/contact viewer after export
@@ -39,6 +44,7 @@ Optional env vars:
   VISER_HOST                Default: 0.0.0.0
   VIEWER_SEQUENCE           Optional initial clip id / clip directory name
   VIEWER_SHOW_ORIGINAL_MOTION Default: 1; show input reference motion at startup
+  VIEWER_SHOW_PRIMITIVE_BOX Default: 0; show AABB primitive-box overlay at startup
   VIEWER_SHOW_ROBOT         Default: 1; draw training G1 overlay
   VIEWER_LOG                Default: logs/runtime/infer_teacher_as_contacts_viewer_<timestamp>.log
   MIN_CONTACT_FRAMES        Default: 10
@@ -59,12 +65,33 @@ By default the raw export is kept under OUTPUT_DIR and the generated
 OUTPUT_DIR/clips plus OUTPUT_DIR/motion_bank are also copied into outputs/clips
 and outputs/motion_bank so existing rollout-ref/contact-aware interfaces can
 find the point files without changing their config.
+
+View-only mode never launches IsaacSim or loads the teacher checkpoint. It only
+starts the rollout/contact Viser viewer on an existing export directory.
 EOF
 }
 
 is_checkpoint_ref() {
   local ref="$1"
   [[ "${ref}" == wandb://* || "${ref}" == https://wandb.ai/*/runs/* || "${ref}" == /* || "${ref}" == ./* || "${ref}" == ../* || "${ref}" == *.pt ]]
+}
+
+is_truthy() {
+  case "$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+resolve_latest_teacher_as_contacts_output() {
+  find "${SCRIPT_DIR}/outputs/teacher_as_contacts" -mindepth 1 -maxdepth 1 -type d 2>/dev/null \
+    | while IFS= read -r candidate; do
+        if [[ -d "${candidate}/clips" ]]; then
+          printf '%s\n' "${candidate}"
+        fi
+      done \
+    | sort \
+    | tail -n 1
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -92,6 +119,20 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+VIEW_ONLY="${VIEW_ONLY:-0}"
+if [[ $# -gt 0 ]]; then
+  case "$(echo "$1" | tr '[:upper:]' '[:lower:]')" in
+    view|view-only|view_only|viewer|viser|open)
+      VIEW_ONLY=1
+      shift
+      if [[ $# -gt 0 && "$1" != -* ]]; then
+        OUTPUT_DIR="$1"
+        shift
+      fi
+      ;;
+  esac
+fi
 
 extract_default_teacher_checkpoint_from_distill_as_perception() {
   "${PYTHON_BIN}" - "${SCRIPT_DIR}/distill_as_perception.sh" <<'PY' 2>/dev/null || true
@@ -242,34 +283,30 @@ normalize_bool_flag() {
   esac
 }
 
-is_truthy() {
-  case "$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')" in
-    1|true|yes|on) return 0 ;;
-    *) return 1 ;;
-  esac
-}
+TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${CKPT:-}}"
+if ! is_truthy "${VIEW_ONLY}"; then
+  DISTILL_DEFAULT_TEACHER_CHECKPOINT="$(extract_default_teacher_checkpoint_from_distill_as_perception)"
+  DISTILL_DEFAULT_TEACHER_CHECKPOINT="${DISTILL_DEFAULT_TEACHER_CHECKPOINT:-https://wandb.ai/zihanw22/carry-any/runs/gml45u7p}"
+  TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${DISTILL_DEFAULT_TEACHER_CHECKPOINT}}"
 
-DISTILL_DEFAULT_TEACHER_CHECKPOINT="$(extract_default_teacher_checkpoint_from_distill_as_perception)"
-DISTILL_DEFAULT_TEACHER_CHECKPOINT="${DISTILL_DEFAULT_TEACHER_CHECKPOINT:-https://wandb.ai/zihanw22/carry-any/runs/gml45u7p}"
-TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${CKPT:-${DISTILL_DEFAULT_TEACHER_CHECKPOINT}}}"
+  if [[ $# -gt 0 ]] && is_checkpoint_ref "$1"; then
+    TEACHER_CHECKPOINT="$1"
+    shift
+  fi
 
-if [[ $# -gt 0 ]] && is_checkpoint_ref "$1"; then
-  TEACHER_CHECKPOINT="$1"
-  shift
-fi
+  if [[ "${TEACHER_CHECKPOINT}" == https://wandb.ai/*/runs/* ]]; then
+    TEACHER_CHECKPOINT="$(normalize_checkpoint_ref "${TEACHER_CHECKPOINT}")"
+  fi
 
-if [[ "${TEACHER_CHECKPOINT}" == https://wandb.ai/*/runs/* ]]; then
-  TEACHER_CHECKPOINT="$(normalize_checkpoint_ref "${TEACHER_CHECKPOINT}")"
-fi
-
-if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
-  echo "[ERROR] Missing AS teacher checkpoint." >&2
-  usage >&2
-  exit 2
-fi
-if [[ "${TEACHER_CHECKPOINT}" != wandb://* ]] && [[ ! -f "${TEACHER_CHECKPOINT}" ]]; then
-  echo "[ERROR] checkpoint not found: ${TEACHER_CHECKPOINT}" >&2
-  exit 1
+  if [[ -z "${TEACHER_CHECKPOINT}" ]]; then
+    echo "[ERROR] Missing AS teacher checkpoint." >&2
+    usage >&2
+    exit 2
+  fi
+  if [[ "${TEACHER_CHECKPOINT}" != wandb://* ]] && [[ ! -f "${TEACHER_CHECKPOINT}" ]]; then
+    echo "[ERROR] checkpoint not found: ${TEACHER_CHECKPOINT}" >&2
+    exit 1
+  fi
 fi
 
 WANDB_PROJECT=${WANDB_PROJECT:-carry-any}
@@ -430,7 +467,17 @@ PY
 
 NUM_ENVS="${NUM_ENVS:-8}"
 HEADLESS="${HEADLESS:-True}"
-OUTPUT_DIR="${OUTPUT_DIR:-"${SCRIPT_DIR}/outputs/teacher_as_contacts/$(date -u +%Y%m%d_%H%M%S)"}"
+if is_truthy "${VIEW_ONLY}"; then
+  OUTPUT_DIR="${OUTPUT_DIR:-$(resolve_latest_teacher_as_contacts_output)}"
+  if [[ -z "${OUTPUT_DIR}" ]]; then
+    echo "[ERROR] VIEW_ONLY=1 could not find an existing outputs/teacher_as_contacts/* export." >&2
+    echo "[ERROR] Pass one explicitly: bash infer_teacher_as_contacts.sh view /path/to/export" >&2
+    exit 2
+  fi
+else
+  OUTPUT_DIR="${OUTPUT_DIR:-"${SCRIPT_DIR}/outputs/teacher_as_contacts/$(date -u +%Y%m%d_%H%M%S)"}"
+fi
+OUTPUT_DIR="$(realpath -m "${OUTPUT_DIR}")"
 MIN_CONTACT_FRAMES="${MIN_CONTACT_FRAMES:-10}"
 CONTACT_FORCE_THRESHOLD="${CONTACT_FORCE_THRESHOLD:-1.0}"
 CONTACT_VOXEL_SIZE="${CONTACT_VOXEL_SIZE:-0.01}"
@@ -444,7 +491,13 @@ MAX_EPISODE_LENGTH_S="${MAX_EPISODE_LENGTH_S:-1000000}"
 PHYSX_GPU_COLLISION_STACK_SIZE="${PHYSX_GPU_COLLISION_STACK_SIZE:-268435456}"
 MAX_ROLLOUT_STEPS="${MAX_ROLLOUT_STEPS:-}"
 DRY_RUN="${DRY_RUN:-0}"
-PUBLISH_FOR_INFER_BOX="${PUBLISH_FOR_INFER_BOX:-1}"
+if [[ -z "${PUBLISH_FOR_INFER_BOX+x}" ]]; then
+  if is_truthy "${VIEW_ONLY}"; then
+    PUBLISH_FOR_INFER_BOX=0
+  else
+    PUBLISH_FOR_INFER_BOX=1
+  fi
+fi
 PUBLISH_CLIPS_DIR="${PUBLISH_CLIPS_DIR:-"${SCRIPT_DIR}/outputs/clips"}"
 PUBLISH_MOTION_BANK_DIR="${PUBLISH_MOTION_BANK_DIR:-"${SCRIPT_DIR}/outputs/motion_bank"}"
 LAUNCH_VISER="${LAUNCH_VISER:-1}"
@@ -453,6 +506,7 @@ VISER_HOST="${VISER_HOST:-0.0.0.0}"
 VISER_PORT="${VISER_PORT:-$((RANDOM % 8976 + 1024))}"
 VIEWER_SEQUENCE="${VIEWER_SEQUENCE:-}"
 VIEWER_SHOW_ORIGINAL_MOTION="${VIEWER_SHOW_ORIGINAL_MOTION:-1}"
+VIEWER_SHOW_PRIMITIVE_BOX="${VIEWER_SHOW_PRIMITIVE_BOX:-0}"
 VIEWER_SHOW_ROBOT="${VIEWER_SHOW_ROBOT:-1}"
 VIEWER_LOG="${VIEWER_LOG:-"${SCRIPT_DIR}/logs/runtime/infer_teacher_as_contacts_viewer_$(date -u +%Y%m%d_%H%M%S).log"}"
 ROBOT_URDF="${ROBOT_URDF:-"${SCRIPT_DIR}/src/holosoma/holosoma/data/robots/g1/g1_29dof.urdf"}"
@@ -472,70 +526,85 @@ export HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE="${OBJECT_GEOMETRY_MODE}"
 export HOLOSOMA_OBJECT_COLLIDER_TYPE="${HOLOSOMA_OBJECT_COLLIDER_TYPE:-convex_decomposition}"
 export VISER_LOAD_URDF="${VISER_LOAD_URDF:-1}"
 
-cmd=(
-  "${PYTHON_BIN}" src/holosoma/holosoma/export_teacher_box_contacts.py
-  --checkpoint "${TEACHER_CHECKPOINT}"
-  --output-dir "${OUTPUT_DIR}"
-  --min-contact-frames "${MIN_CONTACT_FRAMES}"
-  --contact-force-threshold "${CONTACT_FORCE_THRESHOLD}"
-  --contact-voxel-size "${CONTACT_VOXEL_SIZE}"
-  --success-position-threshold "${SUCCESS_POSITION_THRESHOLD}"
-  --training.num-envs "${NUM_ENVS}"
-  --training.headless "${HEADLESS_FLAG}"
-  --simulator.config.sim.max_episode_length_s "${MAX_EPISODE_LENGTH_S}"
-  --simulator.config.sim.physx.gpu_collision_stack_size "${PHYSX_GPU_COLLISION_STACK_SIZE}"
-  --robot.object.enabled True
-  --robot.object.object-urdf-path "${OMOMO_OBJECT_MAP}"
-  --command.setup-terms.motion-command.params.motion-config.motion-file "${OMOMO_DATA_DIR}"
-  --command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler "${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
-  --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob "${START_AT_TIMESTEP_ZERO_PROB}"
-  --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob "${FREEZE_AT_TIMESTEP_ZERO_PROB}"
-  --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.overall-noise-scale "${RESET_NOISE_SCALE}"
-  --perception.object-geometry-mode "${OBJECT_GEOMETRY_MODE}"
-)
-
-if [[ -n "${MAX_ROLLOUT_STEPS}" ]]; then
-  cmd+=(--max-rollout-steps "${MAX_ROLLOUT_STEPS}")
-fi
-
-if is_truthy "${DISABLE_RANDOMIZATION}"; then
-  cmd+=(randomization:disabled)
-fi
-
-if [[ $# -gt 0 ]]; then
-  cmd+=("$@")
-fi
-
-echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
-echo "[INFO] motion_dir=${OMOMO_DATA_DIR}"
-echo "[INFO] object_urdf=${OMOMO_OBJECT_MAP}"
-echo "[INFO] num_envs=${NUM_ENVS}"
-echo "[INFO] object_spawn_mode=${HOLOSOMA_OBJECT_SPAWN_MODE}"
-echo "[INFO] object_geometry_mode=${HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE}"
-echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
-echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}"
-echo "[INFO] reset_noise_scale=${RESET_NOISE_SCALE}"
-echo "[INFO] disable_randomization=${DISABLE_RANDOMIZATION}"
-echo "[INFO] output_dir=${OUTPUT_DIR}"
-echo "[INFO] publish_for_infer_box=${PUBLISH_FOR_INFER_BOX}"
-echo "[INFO] launch_viser=${LAUNCH_VISER}"
-
-if is_truthy "${DRY_RUN}"; then
-  printf '%q ' "${cmd[@]}"
-  printf '\n'
-  if is_truthy "${PUBLISH_FOR_INFER_BOX}"; then
-    echo "[INFO] dry_run_publish_clips_dir=${PUBLISH_CLIPS_DIR}"
-    echo "[INFO] dry_run_publish_motion_bank_dir=${PUBLISH_MOTION_BANK_DIR}"
+if is_truthy "${VIEW_ONLY}"; then
+  if [[ ! -d "${OUTPUT_DIR}/clips" ]]; then
+    echo "[ERROR] View-only output dir is missing clips/: ${OUTPUT_DIR}" >&2
+    exit 2
   fi
-  if is_truthy "${LAUNCH_VISER}"; then
-    echo "[INFO] dry_run_viewer_data_root=${OUTPUT_DIR}"
-    echo "[INFO] dry_run_viewer_original_motion_dir=${ORIGINAL_MOTION_DIR}"
-    echo "[INFO] dry_run_viewer_url=http://localhost:${VISER_PORT}"
+  if ! compgen -G "${OUTPUT_DIR}/clips/*/teacher_rollout_reference.npz" >/dev/null; then
+    echo "[ERROR] View-only output dir has no teacher_rollout_reference.npz files under ${OUTPUT_DIR}/clips" >&2
+    exit 2
   fi
-  exit 0
-fi
+  echo "[INFO] view_only=1"
+  echo "[INFO] output_dir=${OUTPUT_DIR}"
+  echo "[INFO] publish_for_infer_box=${PUBLISH_FOR_INFER_BOX}"
+  echo "[INFO] launch_viser=${LAUNCH_VISER}"
+else
+  cmd=(
+    "${PYTHON_BIN}" src/holosoma/holosoma/export_teacher_box_contacts.py
+    --checkpoint "${TEACHER_CHECKPOINT}"
+    --output-dir "${OUTPUT_DIR}"
+    --min-contact-frames "${MIN_CONTACT_FRAMES}"
+    --contact-force-threshold "${CONTACT_FORCE_THRESHOLD}"
+    --contact-voxel-size "${CONTACT_VOXEL_SIZE}"
+    --success-position-threshold "${SUCCESS_POSITION_THRESHOLD}"
+    --training.num-envs "${NUM_ENVS}"
+    --training.headless "${HEADLESS_FLAG}"
+    --simulator.config.sim.max_episode_length_s "${MAX_EPISODE_LENGTH_S}"
+    --simulator.config.sim.physx.gpu_collision_stack_size "${PHYSX_GPU_COLLISION_STACK_SIZE}"
+    --robot.object.enabled True
+    --robot.object.object-urdf-path "${OMOMO_OBJECT_MAP}"
+    --command.setup-terms.motion-command.params.motion-config.motion-file "${OMOMO_DATA_DIR}"
+    --command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler "${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
+    --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob "${START_AT_TIMESTEP_ZERO_PROB}"
+    --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob "${FREEZE_AT_TIMESTEP_ZERO_PROB}"
+    --command.setup-terms.motion-command.params.motion-config.noise-to-initial-pose.overall-noise-scale "${RESET_NOISE_SCALE}"
+    --perception.object-geometry-mode "${OBJECT_GEOMETRY_MODE}"
+  )
 
-"${cmd[@]}"
+  if [[ -n "${MAX_ROLLOUT_STEPS}" ]]; then
+    cmd+=(--max-rollout-steps "${MAX_ROLLOUT_STEPS}")
+  fi
+
+  if is_truthy "${DISABLE_RANDOMIZATION}"; then
+    cmd+=(randomization:disabled)
+  fi
+
+  if [[ $# -gt 0 ]]; then
+    cmd+=("$@")
+  fi
+
+  echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
+  echo "[INFO] motion_dir=${OMOMO_DATA_DIR}"
+  echo "[INFO] object_urdf=${OMOMO_OBJECT_MAP}"
+  echo "[INFO] num_envs=${NUM_ENVS}"
+  echo "[INFO] object_spawn_mode=${HOLOSOMA_OBJECT_SPAWN_MODE}"
+  echo "[INFO] object_geometry_mode=${HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE}"
+  echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
+  echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}"
+  echo "[INFO] reset_noise_scale=${RESET_NOISE_SCALE}"
+  echo "[INFO] disable_randomization=${DISABLE_RANDOMIZATION}"
+  echo "[INFO] output_dir=${OUTPUT_DIR}"
+  echo "[INFO] publish_for_infer_box=${PUBLISH_FOR_INFER_BOX}"
+  echo "[INFO] launch_viser=${LAUNCH_VISER}"
+
+  if is_truthy "${DRY_RUN}"; then
+    printf '%q ' "${cmd[@]}"
+    printf '\n'
+    if is_truthy "${PUBLISH_FOR_INFER_BOX}"; then
+      echo "[INFO] dry_run_publish_clips_dir=${PUBLISH_CLIPS_DIR}"
+      echo "[INFO] dry_run_publish_motion_bank_dir=${PUBLISH_MOTION_BANK_DIR}"
+    fi
+    if is_truthy "${LAUNCH_VISER}"; then
+      echo "[INFO] dry_run_viewer_data_root=${OUTPUT_DIR}"
+      echo "[INFO] dry_run_viewer_original_motion_dir=${ORIGINAL_MOTION_DIR}"
+      echo "[INFO] dry_run_viewer_url=http://localhost:${VISER_PORT}"
+    fi
+    exit 0
+  fi
+
+  "${cmd[@]}"
+fi
 
 if is_truthy "${PUBLISH_FOR_INFER_BOX}"; then
   "${PYTHON_BIN}" - "${OUTPUT_DIR}" "${PUBLISH_CLIPS_DIR}" "${PUBLISH_MOTION_BANK_DIR}" <<'PY'
@@ -609,6 +678,9 @@ if is_truthy "${LAUNCH_VISER}"; then
   if is_truthy "${VIEWER_SHOW_ORIGINAL_MOTION}"; then
     viewer_cmd+=(--show-original-motion)
   fi
+  if is_truthy "${VIEWER_SHOW_PRIMITIVE_BOX}"; then
+    viewer_cmd+=(--show-primitive-box)
+  fi
   if [[ -n "${VIEWER_SEQUENCE}" ]]; then
     viewer_cmd+=(--sequence "${VIEWER_SEQUENCE}")
   fi
@@ -617,6 +689,13 @@ if is_truthy "${LAUNCH_VISER}"; then
   echo "[INFO] viewer_data_root=${OUTPUT_DIR}"
   echo "[INFO] viewer_original_motion_dir=${ORIGINAL_MOTION_DIR}"
   echo "[INFO] viewer_url=http://localhost:${VISER_PORT}"
+
+  if is_truthy "${DRY_RUN}"; then
+    printf '[DRY_RUN] viewer'
+    printf ' %q' "${viewer_cmd[@]}"
+    printf '\n'
+    exit 0
+  fi
 
   if is_truthy "${VIEWER_BACKGROUND}"; then
     mkdir -p "$(dirname "${VIEWER_LOG}")"

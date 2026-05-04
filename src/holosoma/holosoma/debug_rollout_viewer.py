@@ -257,6 +257,13 @@ def _xyzw_to_wxyz(quat_xyzw: np.ndarray) -> np.ndarray:
     return quat_xyzw[[3, 0, 1, 2]]
 
 
+def _xyzw_to_wxyz_array(quat_xyzw: np.ndarray) -> np.ndarray:
+    quat_xyzw = np.asarray(quat_xyzw, dtype=np.float32)
+    if quat_xyzw.ndim != 2 or quat_xyzw.shape[1] != 4:
+        return np.zeros((0, 4), dtype=np.float32)
+    return quat_xyzw[:, [3, 0, 1, 2]]
+
+
 def _rgb_tuple(region_name: str) -> tuple[int, int, int]:
     rgba = np.asarray(_REGION_OVERLAY_STYLE[region_name]["rgba"], dtype=np.uint8)
     return int(rgba[0]), int(rgba[1]), int(rgba[2])
@@ -409,6 +416,7 @@ class DebugRolloutViewer:
         robot_urdf_path: Path | None,
         original_motion_dir: Path | None,
         show_original_motion_initial: bool = False,
+        show_primitive_box_initial: bool = False,
     ) -> None:
         self.data_root = data_root
         self.vis_root = vis_root
@@ -489,11 +497,14 @@ class DebugRolloutViewer:
             self.show_product_cb = self.server.gui.add_checkbox("Static Product Overlay", initial_value=True)
             self.show_rollout_cb = self.server.gui.add_checkbox("Rollout View", initial_value=True)
             self.show_original_motion_cb = self.server.gui.add_checkbox(
-                "Original Input Motion",
+                "Reference Motion",
                 initial_value=show_original_motion_initial,
             )
             self.show_mesh_cb = self.server.gui.add_checkbox("Object Mesh", initial_value=True)
-            self.show_box_cb = self.server.gui.add_checkbox("Primitive Box", initial_value=True)
+            self.show_box_cb = self.server.gui.add_checkbox(
+                "Primitive Box",
+                initial_value=show_primitive_box_initial,
+            )
             self.show_points_cb = self.server.gui.add_checkbox("Contact Points", initial_value=True)
             self.show_paths_cb = self.server.gui.add_checkbox("Object Path", initial_value=True)
             self.show_body_labels_cb = self.server.gui.add_checkbox("Body Labels", initial_value=False)
@@ -726,6 +737,39 @@ class DebugRolloutViewer:
         )
 
     def _load_original_motion(self, entry: ClipEntry) -> None:
+        target_joint_pos = np.asarray(self.ref.get("target_joint_pos", np.zeros((0, 0))), dtype=np.float32)
+        target_object_pos = np.asarray(self.ref.get("target_object_pos_local", np.zeros((0, 3))), dtype=np.float32)
+        target_object_quat = np.asarray(self.ref.get("target_object_quat_w", np.zeros((0, 4))), dtype=np.float32)
+        if target_joint_pos.ndim == 2 and target_joint_pos.shape[1] >= 7 and target_joint_pos.shape[0] > 0:
+            motion_joint_names = [_decode_scalar(name) for name in np.asarray(self.ref.get("joint_names", []))]
+            num_motion_joints = max(0, int(target_joint_pos.shape[1]) - 7)
+            joint_indices = None
+            status = f"MotionCommand target ({target_joint_pos.shape[0]} frames, {num_motion_joints} joints)"
+            if self.original_robot_viser is not None:
+                joint_indices, error = _joint_indices_for_viser(
+                    viser_joint_names=self.original_robot_joint_names,
+                    motion_joint_names=motion_joint_names,
+                    num_motion_joints=num_motion_joints,
+                )
+                if joint_indices is None:
+                    status = f"MotionCommand target: {error}; object-only target overlay"
+
+            object_pos = target_object_pos if target_object_pos.ndim == 2 and target_object_pos.shape[1] == 3 else None
+            object_quat = (
+                _xyzw_to_wxyz_array(target_object_quat)
+                if target_object_quat.ndim == 2 and target_object_quat.shape[1] == 4
+                else None
+            )
+            self.original_motion = OriginalMotion(
+                path=None,
+                joint_pos=target_joint_pos,
+                joint_indices=joint_indices,
+                object_pos=object_pos,
+                object_quat_wxyz=object_quat,
+                status=status,
+            )
+            return
+
         original_motion_path = _resolve_original_motion_path(entry, self.original_motion_dir)
         if original_motion_path is None:
             root_msg = str(self.original_motion_dir) if self.original_motion_dir is not None else "<disabled>"
@@ -1047,7 +1091,7 @@ class DebugRolloutViewer:
             f"dir: `{entry.clip_dir_name}`  \n"
             f"status: `{status}` | valid frames: `{n_valid}`  \n"
             f"training g1: `{robot_status}`  \n"
-            f"original motion: `{original_status}`  \n"
+            f"reference motion: `{original_status}`  \n"
             f"points: {points_summary}  \n"
             f"glb: `{glb_path}`  \n"
             f"png: `{png_path}`"
@@ -1136,7 +1180,7 @@ class DebugRolloutViewer:
             original_text = "n/a" if original_idx is None else str(original_idx)
             self.frame_md.content = (
                 f"slider frame: `{slider_index}` | raw rollout step: `{raw_idx}` | "
-                f"original motion step: `{original_text}`"
+                f"reference motion step: `{original_text}`"
             )
             self.apply_visibility()
 
@@ -1311,6 +1355,11 @@ def main() -> None:
         action="store_true",
         help="Show the original input/reference motion overlay at startup.",
     )
+    parser.add_argument(
+        "--show-primitive-box",
+        action="store_true",
+        help="Show the primitive AABB box overlay at startup.",
+    )
     parser.add_argument("--list-only", action="store_true", help="List available sequences and exit.")
     args = parser.parse_args()
 
@@ -1338,6 +1387,7 @@ def main() -> None:
         robot_urdf_path=robot_urdf_path,
         original_motion_dir=original_motion_dir,
         show_original_motion_initial=bool(args.show_original_motion),
+        show_primitive_box_initial=bool(args.show_primitive_box),
     )
     viewer.run_forever()
 

@@ -834,6 +834,35 @@ class IsaacSim(BaseSimulator):
         return [object_specs[env_id % len(object_specs)][1] for env_id in range(num_envs)]
 
     @staticmethod
+    def _resolve_object_contact_link_names(object_asset_urdf_path: str) -> tuple[str, ...]:
+        """Return rigid-body prim names to use for object-filtered contact sensors."""
+        try:
+            urdf_path = _resolve_existing_object_urdf_path(object_asset_urdf_path)
+            root = ET.parse(urdf_path).getroot()
+        except Exception as exc:
+            logger.warning("Failed to inspect object URDF '{}' for contact filters: {}", object_asset_urdf_path, exc)
+            return ("baseLink",)
+
+        link_names: list[str] = []
+        for link_tag in root.findall("link"):
+            link_name = str(link_tag.get("name", "") or "").strip()
+            if link_name and link_name not in link_names:
+                link_names.append(link_name)
+
+        if not link_names:
+            logger.warning("Object URDF '{}' has no link names; falling back to baseLink contact filter.", urdf_path)
+            return ("baseLink",)
+        return tuple(link_names)
+
+    def _append_object_contact_filter_paths(self, prim_suffix: str, object_asset_urdf_path: str) -> None:
+        if self._training_object_use_box_primitives:
+            self._object_contact_filter_prim_paths_expr.append(f"{{ENV_REGEX_NS}}/{prim_suffix}")
+            return
+
+        for link_name in self._resolve_object_contact_link_names(object_asset_urdf_path):
+            self._object_contact_filter_prim_paths_expr.append(f"{{ENV_REGEX_NS}}/{prim_suffix}/{link_name}")
+
+    @staticmethod
     def _resolve_object_spawn_mode() -> tuple[str, bool]:
         raw_mode = os.environ.get("HOLOSOMA_OBJECT_SPAWN_MODE")
         raw_mode_normalized = "" if raw_mode is None else raw_mode.strip().lower()
@@ -1313,10 +1342,7 @@ class IsaacSim(BaseSimulator):
                     object_specs,
                     num_envs=self.training_config.num_envs,
                 )
-                if self._training_object_use_box_primitives:
-                    self._object_contact_filter_prim_paths_expr.append("{ENV_REGEX_NS}/Object")
-                else:
-                    self._object_contact_filter_prim_paths_expr.append("{ENV_REGEX_NS}/Object/baseLink")
+                self._append_object_contact_filter_paths("Object", object_specs[0][1])
                 logger.info(
                     "Loaded heterogeneous training object bank: {} unique URDF(s) assigned across {} envs.",
                     len(object_specs),
@@ -1337,12 +1363,7 @@ class IsaacSim(BaseSimulator):
                     rigid_object = RigidObject(object_cfg)
                     self.scene.rigid_objects[object_name] = rigid_object
                     self._object_urdf_by_name[object_name] = str(pathlib.Path(object_asset_urdf_path).resolve())
-                    if self._training_object_use_box_primitives:
-                        self._object_contact_filter_prim_paths_expr.append(f"{{ENV_REGEX_NS}}/{prim_suffix}")
-                    else:
-                        # The current URDF box assets expose a single rigid body under `baseLink`.
-                        # Filter against that rigid body prim instead of the Xform root or collision child.
-                        self._object_contact_filter_prim_paths_expr.append(f"{{ENV_REGEX_NS}}/{prim_suffix}/baseLink")
+                    self._append_object_contact_filter_paths(prim_suffix, object_asset_urdf_path)
 
                 logger.info(
                     "Loaded {} training object URDF(s): {}",
@@ -1750,7 +1771,7 @@ class IsaacSim(BaseSimulator):
         return indices
 
     def _setup_object_contact_sensors(self) -> None:
-        """Create box-filtered contact sensors for selected robot support bodies."""
+        """Create object-filtered contact sensors for selected robot support bodies."""
         self._object_contact_sensors = {}
         env_regex_ns = getattr(self.scene, "env_regex_ns", "/World/envs/env_.*")
         filter_prim_paths_expr = [

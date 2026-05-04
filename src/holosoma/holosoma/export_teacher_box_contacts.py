@@ -35,7 +35,7 @@ from holosoma.utils.eval_utils import (  # noqa: E402
 )
 from holosoma.utils.experiment_paths import get_experiment_dir, get_timestamp  # noqa: E402
 from holosoma.utils.helpers import get_class  # noqa: E402
-from holosoma.utils.rotations import quat_error_magnitude  # noqa: E402
+from holosoma.utils.rotations import quat_error_magnitude, quat_inverse, quat_mul  # noqa: E402
 from holosoma.utils.sim_utils import close_simulation_app, setup_simulation_environment  # noqa: E402
 from holosoma.utils.tyro_utils import TYRO_CONIFG  # noqa: E402
 
@@ -236,6 +236,8 @@ class ClipAccumulator:
     batch_index: int
     env_id: int
     extents_xyz: np.ndarray
+    object_surface_mesh: Any | None
+    contact_surface_projection: str
     clip_dir: Path
     region_point_counts: dict[str, dict[tuple[int, int, int], int]]
     region_force_sums: dict[str, float]
@@ -346,6 +348,34 @@ def _project_point_to_box_surface(point_xyz: np.ndarray, extents_xyz: np.ndarray
     return projected.astype(np.float32)
 
 
+def _project_point_to_mesh_surface(point_xyz: np.ndarray, object_mesh: Any) -> np.ndarray:
+    import trimesh  # type: ignore[import-not-found]
+
+    point = np.asarray(point_xyz, dtype=np.float64).reshape(1, 3)
+    closest, _, _ = trimesh.proximity.closest_point(object_mesh, point)
+    return np.asarray(closest[0], dtype=np.float32)
+
+
+def _project_point_to_object_surface(
+    point_xyz: np.ndarray,
+    accumulator: ClipAccumulator,
+) -> np.ndarray:
+    object_mesh = accumulator.object_surface_mesh
+    if object_mesh is not None:
+        try:
+            accumulator.contact_surface_projection = "mesh"
+            return _project_point_to_mesh_surface(point_xyz, object_mesh)
+        except Exception as exc:
+            logger.warning(
+                "Falling back to primitive-box contact projection for clip '{}' because mesh projection failed: {}",
+                accumulator.clip_id,
+                exc,
+            )
+            accumulator.object_surface_mesh = None
+            accumulator.contact_surface_projection = "primitive_box"
+    return _project_point_to_box_surface(point_xyz, accumulator.extents_xyz)
+
+
 def _quantize_point(point_xyz: np.ndarray, voxel_size: float) -> tuple[int, int, int]:
     point = np.asarray(point_xyz, dtype=np.float64).reshape(3)
     denom = max(float(voxel_size), 1.0e-6)
@@ -374,12 +404,84 @@ def _policy_step(algo: BaseAlgo, obs_dict: dict[str, torch.Tensor], policy_fn) -
     return policy_fn(policy_state)
 
 
+def _sync_simulator_after_state_write(env: Any) -> None:
+    sim = getattr(env.simulator, "sim", None)
+    forward = getattr(sim, "forward", None)
+    if callable(forward):
+        forward()
+    env._refresh_sim_tensors()
+
+
 def _reset_envs_without_advancing(env: Any) -> dict[str, torch.Tensor]:
     env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
     env.reset_envs_idx(env_ids)
     env.simulator.set_actor_root_state_tensor_robots(env_ids, env.simulator.robot_root_states)
     env.simulator.set_dof_state_tensor_robots(env_ids, env.simulator.dof_state)
-    env._refresh_sim_tensors()
+    _sync_simulator_after_state_write(env)
+    env._pre_compute_observations_callback()
+    env._compute_observations()
+    env._post_compute_observations_callback()
+    return env.obs_buf_dict
+
+
+def _write_motion_command_targets_to_sim(
+    motion_command: MotionCommand,
+    *,
+    active_env_ids: list[int],
+) -> dict[str, torch.Tensor]:
+    env = motion_command._env
+    env_ids_tensor = torch.tensor(active_env_ids, device=motion_command.device, dtype=torch.long)
+    if env_ids_tensor.numel() == 0:
+        return env.obs_buf_dict
+
+    target_root_pos_w = motion_command.root_pos_w.index_select(0, env_ids_tensor)
+    target_root_quat_w = motion_command.root_quat_w.index_select(0, env_ids_tensor)
+    target_body_lin_vel_w = motion_command.body_lin_vel_w.index_select(0, env_ids_tensor)
+    target_body_ang_vel_w = motion_command.body_ang_vel_w.index_select(0, env_ids_tensor)
+    root_states = env.simulator.robot_root_states[env_ids_tensor].clone()
+    root_states[:, :3] = target_root_pos_w
+    root_states[:, 3:7] = target_root_quat_w
+    root_states[:, 7:10] = target_body_lin_vel_w[:, 0, :]
+    root_states[:, 10:13] = target_body_ang_vel_w[:, 0, :]
+
+    env.simulator.dof_pos[env_ids_tensor] = motion_command.joint_pos.index_select(0, env_ids_tensor)
+    env.simulator.dof_vel[env_ids_tensor] = motion_command.joint_vel.index_select(0, env_ids_tensor)
+    env.simulator.set_actor_root_state_tensor_robots(env_ids_tensor, root_states)
+    env.simulator.set_dof_state_tensor_robots(env_ids_tensor, env.simulator.dof_state)
+
+    if motion_command.motion.has_object:
+        object_pos_w = motion_command.object_pos_w.index_select(0, env_ids_tensor)
+        object_quat_w = motion_command.object_quat_w.index_select(0, env_ids_tensor)
+        object_lin_vel_w = motion_command.object_lin_vel_w.index_select(0, env_ids_tensor)
+        object_states = torch.cat(
+            [object_pos_w, object_quat_w, object_lin_vel_w, torch.zeros_like(object_lin_vel_w)],
+            dim=-1,
+        )
+        if hasattr(motion_command, "_set_simulator_object_states"):
+            motion_command._set_simulator_object_states(env_ids_tensor, object_states)
+        else:
+            env.simulator.set_actor_states(["object"], env_ids_tensor, object_states)
+
+    for _ in range(4):
+        _sync_simulator_after_state_write(env)
+        measured_root_states = env.simulator.robot_root_states[env_ids_tensor].clone()
+        pos_error = target_root_pos_w - measured_root_states[:, :3]
+        quat_error = quat_mul(
+            target_root_quat_w,
+            quat_inverse(measured_root_states[:, 3:7], w_last=True),
+            w_last=True,
+        )
+        max_pos_error = float(torch.linalg.norm(pos_error, dim=-1).max().detach().cpu().item())
+        max_quat_error = float(quat_error_magnitude(target_root_quat_w, measured_root_states[:, 3:7]).max().detach().cpu().item())
+        if max_pos_error <= 1.0e-5 and max_quat_error <= 1.0e-5:
+            break
+        root_states[:, :3] = root_states[:, :3] + pos_error
+        root_states[:, 3:7] = quat_mul(quat_error, root_states[:, 3:7], w_last=True)
+        root_states[:, 3:7] = root_states[:, 3:7] / torch.linalg.norm(root_states[:, 3:7], dim=-1, keepdim=True).clamp_min(1.0e-8)
+        env.simulator.set_actor_root_state_tensor_robots(env_ids_tensor, root_states)
+        env.simulator.set_dof_state_tensor_robots(env_ids_tensor, env.simulator.dof_state)
+
+    _sync_simulator_after_state_write(env)
     env._pre_compute_observations_callback()
     env._compute_observations()
     env._post_compute_observations_callback()
@@ -1014,6 +1116,27 @@ def _make_clip_accumulator(
         rollout_reference["object_quat_w"][..., 3] = 1.0
         rollout_reference["object_lin_vel_w"] = np.zeros((clip_length, 3), dtype=np.float32)
         rollout_reference["object_ang_vel_w"] = np.zeros((clip_length, 3), dtype=np.float32)
+    rollout_reference["target_joint_pos"] = np.zeros((clip_length, 7 + num_joints), dtype=np.float32)
+    rollout_reference["target_joint_vel"] = np.zeros((clip_length, 6 + num_joints), dtype=np.float32)
+    rollout_reference["target_body_pos_local"] = np.zeros((clip_length, num_bodies, 3), dtype=np.float32)
+    rollout_reference["target_body_quat_w"] = np.zeros((clip_length, num_bodies, 4), dtype=np.float32)
+    rollout_reference["target_body_quat_w"][..., 3] = 1.0
+    rollout_reference["target_body_lin_vel_w"] = np.zeros((clip_length, num_bodies, 3), dtype=np.float32)
+    rollout_reference["target_body_ang_vel_w"] = np.zeros((clip_length, num_bodies, 3), dtype=np.float32)
+    rollout_reference["target_ref_pos_local"] = np.zeros((clip_length, 3), dtype=np.float32)
+    rollout_reference["target_ref_quat_w"] = np.zeros((clip_length, 4), dtype=np.float32)
+    rollout_reference["target_ref_quat_w"][..., 3] = 1.0
+    rollout_reference["target_root_pos_local"] = np.zeros((clip_length, 3), dtype=np.float32)
+    rollout_reference["target_root_quat_w"] = np.zeros((clip_length, 4), dtype=np.float32)
+    rollout_reference["target_root_quat_w"][..., 3] = 1.0
+    rollout_reference["target_root_lin_vel_w"] = np.zeros((clip_length, 3), dtype=np.float32)
+    rollout_reference["target_root_ang_vel_w"] = np.zeros((clip_length, 3), dtype=np.float32)
+    if has_object:
+        rollout_reference["target_object_pos_local"] = np.zeros((clip_length, 3), dtype=np.float32)
+        rollout_reference["target_object_quat_w"] = np.zeros((clip_length, 4), dtype=np.float32)
+        rollout_reference["target_object_quat_w"][..., 3] = 1.0
+        rollout_reference["target_object_lin_vel_w"] = np.zeros((clip_length, 3), dtype=np.float32)
+        rollout_reference["target_object_ang_vel_w"] = np.zeros((clip_length, 3), dtype=np.float32)
     rollout_motion: dict[str, np.ndarray] = {
         "valid_steps": np.zeros((clip_length,), dtype=np.bool_),
         "joint_pos": np.zeros((clip_length, 7 + num_joints), dtype=np.float32),
@@ -1030,6 +1153,11 @@ def _make_clip_accumulator(
         rollout_motion["object_quat_w"][..., 3] = 1.0
         rollout_motion["object_lin_vel_w"] = np.zeros((clip_length, 3), dtype=np.float32)
         rollout_motion["object_ang_vel_w"] = np.zeros((clip_length, 3), dtype=np.float32)
+    object_surface_mesh = _load_object_overlay_mesh(
+        clip_id=clip_id,
+        object_name=object_name,
+        object_urdf_path=object_urdf_path,
+    )
     return ClipAccumulator(
         clip_id=clip_id,
         clip_index=clip_idx,
@@ -1038,6 +1166,8 @@ def _make_clip_accumulator(
         batch_index=batch_index,
         env_id=env_id,
         extents_xyz=np.asarray(extents_xyz, dtype=np.float32),
+        object_surface_mesh=object_surface_mesh,
+        contact_surface_projection="mesh" if object_surface_mesh is not None else "primitive_box",
         clip_dir=clip_dir,
         region_point_counts={spec["label"]: defaultdict(int) for spec in _REGION_SPECS.values()},
         region_force_sums={spec["label"]: 0.0 for spec in _REGION_SPECS.values()},
@@ -1100,6 +1230,27 @@ def _record_rollout_reference_batch(
     object_quat_w = None
     object_lin_vel_w = None
     object_ang_vel_w = None
+    target_body_pos_local = (motion_command.body_pos_w.index_select(0, env_ids_tensor) - env_offsets[:, None, :]).detach().cpu().numpy()
+    target_body_quat_w = motion_command.body_quat_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    target_body_lin_vel_w = motion_command.body_lin_vel_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    target_body_ang_vel_w = motion_command.body_ang_vel_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    target_ref_pos_local = (motion_command.ref_pos_w.index_select(0, env_ids_tensor) - env_offsets).detach().cpu().numpy()
+    target_ref_quat_w = motion_command.ref_quat_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    target_root_pos_local = (motion_command.root_pos_w.index_select(0, env_ids_tensor) - env_offsets).detach().cpu().numpy()
+    target_root_quat_w = motion_command.root_quat_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    target_root_lin_vel_w = target_body_lin_vel_w[:, 0, :]
+    target_root_ang_vel_w = target_body_ang_vel_w[:, 0, :]
+    target_joint_pos = motion_command.joint_pos.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    target_joint_vel = motion_command.joint_vel.index_select(0, env_ids_tensor).detach().cpu().numpy()
+    target_joint_pos_full = np.concatenate(
+        [target_root_pos_local, _xyzw_to_wxyz_np(target_root_quat_w), target_joint_pos],
+        axis=-1,
+    )
+    target_joint_vel_full = np.concatenate([target_root_lin_vel_w, target_root_ang_vel_w, target_joint_vel], axis=-1)
+    target_object_pos_local = None
+    target_object_quat_w = None
+    target_object_lin_vel_w = None
+    target_object_ang_vel_w = None
     if motion_command.motion.has_object:
         object_pos_local = (
             motion_command.simulator_object_pos_w.index_select(0, env_ids_tensor) - env_offsets
@@ -1107,6 +1258,12 @@ def _record_rollout_reference_batch(
         object_quat_w = motion_command.simulator_object_quat_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
         object_lin_vel_w = motion_command.simulator_object_lin_vel_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
         object_ang_vel_w = motion_command.simulator_object_ang_vel_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+        target_object_pos_local = (
+            motion_command.object_pos_w.index_select(0, env_ids_tensor) - env_offsets
+        ).detach().cpu().numpy()
+        target_object_quat_w = motion_command.object_quat_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+        target_object_lin_vel_w = motion_command.object_lin_vel_w.index_select(0, env_ids_tensor).detach().cpu().numpy()
+        target_object_ang_vel_w = np.zeros_like(target_object_lin_vel_w)
 
     for batch_slot, env_id in enumerate(active_env_ids):
         accumulator = accumulators[env_id]
@@ -1114,6 +1271,8 @@ def _record_rollout_reference_batch(
         rollout_motion = accumulator.rollout_motion
         step_idx = int(time_steps[batch_slot])
         if step_idx < 0 or step_idx >= int(rollout_reference["valid_steps"].shape[0]):
+            continue
+        if bool(rollout_reference["valid_steps"][step_idx]):
             continue
 
         rollout_reference["valid_steps"][step_idx] = True
@@ -1129,6 +1288,18 @@ def _record_rollout_reference_batch(
         rollout_reference["root_quat_w"][step_idx] = root_quat_w[batch_slot]
         rollout_reference["root_lin_vel_w"][step_idx] = root_lin_vel_w[batch_slot]
         rollout_reference["root_ang_vel_w"][step_idx] = root_ang_vel_w[batch_slot]
+        rollout_reference["target_joint_pos"][step_idx] = target_joint_pos_full[batch_slot]
+        rollout_reference["target_joint_vel"][step_idx] = target_joint_vel_full[batch_slot]
+        rollout_reference["target_body_pos_local"][step_idx] = target_body_pos_local[batch_slot]
+        rollout_reference["target_body_quat_w"][step_idx] = target_body_quat_w[batch_slot]
+        rollout_reference["target_body_lin_vel_w"][step_idx] = target_body_lin_vel_w[batch_slot]
+        rollout_reference["target_body_ang_vel_w"][step_idx] = target_body_ang_vel_w[batch_slot]
+        rollout_reference["target_ref_pos_local"][step_idx] = target_ref_pos_local[batch_slot]
+        rollout_reference["target_ref_quat_w"][step_idx] = target_ref_quat_w[batch_slot]
+        rollout_reference["target_root_pos_local"][step_idx] = target_root_pos_local[batch_slot]
+        rollout_reference["target_root_quat_w"][step_idx] = target_root_quat_w[batch_slot]
+        rollout_reference["target_root_lin_vel_w"][step_idx] = target_root_lin_vel_w[batch_slot]
+        rollout_reference["target_root_ang_vel_w"][step_idx] = target_root_ang_vel_w[batch_slot]
         rollout_motion["valid_steps"][step_idx] = True
         rollout_motion["joint_pos"][step_idx] = joint_pos_full[batch_slot]
         rollout_motion["joint_vel"][step_idx] = joint_vel_full[batch_slot]
@@ -1145,6 +1316,10 @@ def _record_rollout_reference_batch(
             rollout_motion["object_quat_w"][step_idx] = object_quat_w[batch_slot]
             rollout_motion["object_lin_vel_w"][step_idx] = object_lin_vel_w[batch_slot]
             rollout_motion["object_ang_vel_w"][step_idx] = object_ang_vel_w[batch_slot]
+            rollout_reference["target_object_pos_local"][step_idx] = target_object_pos_local[batch_slot]
+            rollout_reference["target_object_quat_w"][step_idx] = target_object_quat_w[batch_slot]
+            rollout_reference["target_object_lin_vel_w"][step_idx] = target_object_lin_vel_w[batch_slot]
+            rollout_reference["target_object_ang_vel_w"][step_idx] = target_object_ang_vel_w[batch_slot]
 
 
 def _record_actions_batch(
@@ -1280,7 +1455,7 @@ def _collect_region_measurements_batch(
                 if body_force_value <= force_threshold:
                     continue
                 point_obj = body_pos_obj_np[env_id, body_slot]
-                point_surface = _project_point_to_box_surface(point_obj, accumulator.extents_xyz)
+                point_surface = _project_point_to_object_surface(point_obj, accumulator)
                 key = _quantize_point(point_surface, voxel_size)
                 accumulator.region_point_counts[label][key] += 1
 
@@ -1480,6 +1655,7 @@ def _finalize_clip_output(
         "batch_index": accumulator.batch_index,
         "env_id": accumulator.env_id,
         "primitive_extents_xyz": accumulator.extents_xyz.tolist(),
+        "contact_surface_projection": accumulator.contact_surface_projection,
         "num_steps": num_steps,
         "motion_end_reached": motion_end_reached,
         "terminated": terminated,
@@ -1638,6 +1814,11 @@ def _collect_batch(
             has_object=bool(motion_command.motion.has_object),
         )
         finished[env_id] = False
+
+    obs_dict = _write_motion_command_targets_to_sim(
+        motion_command,
+        active_env_ids=active_env_ids,
+    )
 
     max_rollout_steps = export_cfg.max_rollout_steps
     if max_rollout_steps is None or max_rollout_steps <= 0:
