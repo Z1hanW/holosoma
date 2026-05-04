@@ -60,5 +60,5 @@ prepare_train_args() {
 prepare_train_args "${DEFAULT_SEQUENCE_NAME}" "$@"
 
 exec bash "${REPO_DIR}/train_object_generalist_ds.sh" "${TRAIN_ARGS[@]}" \
-  --reward.terms.motion_global_ref_position_error_exp.weight="${ROOT_POS_RELAX_WEIGHT}" \
-  --reward.terms.motion_global_ref_position_error_exp.params.sigma="${ROOT_POS_RELAX_SIGMA}"
+  --reward.terms.motion-global-ref-position-error-exp.weight="${ROOT_POS_RELAX_WEIGHT}" \
+  --reward.terms.motion-global-ref-position-error-exp.params.sigma="${ROOT_POS_RELAX_SIGMA}"

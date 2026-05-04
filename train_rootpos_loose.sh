@@ -85,5 +85,5 @@ if [[ -n "${OBJECT_SPEC_PATH:-}" && ! -f "${OBJECT_SPEC_PATH}" ]]; then
 fi
 
 exec bash "${SCRIPT_DIR}/train_object_generalist_ds.sh" "${SEQUENCE_NAME}" \
-  --reward.terms.motion_global_ref_position_error_exp.weight="${ROOT_POS_WEIGHT}" \
-  --reward.terms.motion_global_ref_position_error_exp.params.sigma="${ROOT_POS_SIGMA_OVERRIDE}"
+  --reward.terms.motion-global-ref-position-error-exp.weight="${ROOT_POS_WEIGHT}" \
+  --reward.terms.motion-global-ref-position-error-exp.params.sigma="${ROOT_POS_SIGMA_OVERRIDE}"
