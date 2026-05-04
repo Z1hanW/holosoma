@@ -13,6 +13,7 @@ START_AT_TIMESTEP_ZERO_PROB=${START_AT_TIMESTEP_ZERO_PROB:-1.0}
 START_AT_TIMESTEP_ZERO_PROB_END=${START_AT_TIMESTEP_ZERO_PROB_END:-${START_AT_TIMESTEP_ZERO_PROB}}
 FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
 FREEZE_AT_TIMESTEP_ZERO_PROB_END=${FREEZE_AT_TIMESTEP_ZERO_PROB_END:-${FREEZE_AT_TIMESTEP_ZERO_PROB}}
+export FREEZE_AT_TIMESTEP_ZERO_PROB
 
 TRAIN_ARGS=()
 
@@ -64,5 +65,4 @@ prepare_train_args "${DEFAULT_SEQUENCE_NAME}" "$@"
 exec bash "${REPO_DIR}/train_object_generalist_ds.sh" "${TRAIN_ARGS[@]}" \
   --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob="${START_AT_TIMESTEP_ZERO_PROB}" \
   --command.setup-terms.motion-command.params.motion-config.start-at-timestep-zero-prob-end="${START_AT_TIMESTEP_ZERO_PROB_END}" \
-  --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob="${FREEZE_AT_TIMESTEP_ZERO_PROB}" \
   --command.setup-terms.motion-command.params.motion-config.freeze-at-timestep-zero-prob-end="${FREEZE_AT_TIMESTEP_ZERO_PROB_END}"

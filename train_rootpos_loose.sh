@@ -74,6 +74,8 @@ export SEQUENCE_NAME=${SEQUENCE_NAME:-rootpos-w025-sigma06}
 
 ROOT_POS_WEIGHT=${ROOT_POS_WEIGHT:-0.25}
 ROOT_POS_SIGMA_OVERRIDE=${ROOT_POS_SIGMA_OVERRIDE:-0.6}
+export REFERENCE_ROOT_POS_W="${ROOT_POS_WEIGHT}"
+export REFERENCE_ROOT_POS_SIGMA="${ROOT_POS_SIGMA_OVERRIDE}"
 
 if [[ ! -d "${MOTION_DIR}" ]]; then
   echo "[ERROR] MOTION_DIR does not exist: ${MOTION_DIR}" >&2
@@ -84,6 +86,4 @@ if [[ -n "${OBJECT_SPEC_PATH:-}" && ! -f "${OBJECT_SPEC_PATH}" ]]; then
   exit 2
 fi
 
-exec bash "${SCRIPT_DIR}/train_object_generalist_ds.sh" "${SEQUENCE_NAME}" \
-  --reward.terms.motion-global-ref-position-error-exp.weight="${ROOT_POS_WEIGHT}" \
-  --reward.terms.motion-global-ref-position-error-exp.params.sigma="${ROOT_POS_SIGMA_OVERRIDE}"
+exec bash "${SCRIPT_DIR}/train_object_generalist_ds.sh" "${SEQUENCE_NAME}"

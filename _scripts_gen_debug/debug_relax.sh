@@ -11,6 +11,8 @@ REPO_DIR=$(cd "${SCRIPT_DIR}/.." && pwd)
 DEFAULT_SEQUENCE_NAME=${SEQUENCE_NAME:-debug-relax-rootpos-w025-sigma06}
 ROOT_POS_RELAX_WEIGHT=${ROOT_POS_RELAX_WEIGHT:-${ROOT_POS_WEIGHT:-0.25}}
 ROOT_POS_RELAX_SIGMA=${ROOT_POS_RELAX_SIGMA:-${ROOT_POS_SIGMA:-0.6}}
+export REFERENCE_ROOT_POS_W="${ROOT_POS_RELAX_WEIGHT}"
+export REFERENCE_ROOT_POS_SIGMA="${ROOT_POS_RELAX_SIGMA}"
 
 TRAIN_ARGS=()
 
@@ -59,6 +61,4 @@ prepare_train_args() {
 
 prepare_train_args "${DEFAULT_SEQUENCE_NAME}" "$@"
 
-exec bash "${REPO_DIR}/train_object_generalist_ds.sh" "${TRAIN_ARGS[@]}" \
-  --reward.terms.motion-global-ref-position-error-exp.weight="${ROOT_POS_RELAX_WEIGHT}" \
-  --reward.terms.motion-global-ref-position-error-exp.params.sigma="${ROOT_POS_RELAX_SIGMA}"
+exec bash "${REPO_DIR}/train_object_generalist_ds.sh" "${TRAIN_ARGS[@]}"
