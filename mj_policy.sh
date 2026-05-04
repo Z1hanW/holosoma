@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_MODEL_INPUT="${DEFAULT_MODEL_INPUT:-https://wandb.ai/zihanw22/boxer/runs/shoo7sr1/model_29999.onnx}"
+DEFAULT_MODEL_INPUT="${DEFAULT_MODEL_INPUT:-https://wandb.ai/zihanw22/boxer/runs/w5qostjn}"
 TRACK_LAUNCHER="${MJ_TRACK_LAUNCHER:-${ROOT_DIR}/mj_box_depth_track.sh}"
 
 usage() {
@@ -26,8 +26,9 @@ Environment:
   POLICY_CONTROL_PORT             default: 5662 for web ]/Space/Stop/Init policy control
   MJ_POLICY_KILL_STALE            default: 1; terminate same-port policy leftovers before launch
   MJ_POLICY_TERMINAL_KEYS=1       use terminal W/S/A/D/Q/E instead of web command
-  HOLOSOMA_KEYBOARD_ROOT_COMMAND_VALUE         default: 0.5 for W/S/A/D x/y
+  HOLOSOMA_KEYBOARD_ROOT_COMMAND_VALUE         default: 0.2 for W/S/A/D x/y
   HOLOSOMA_KEYBOARD_ROOT_COMMAND_YAW_DEGREES   default: 17 for Q/E yaw
+  HOLOSOMA_KEYBOARD_ROOT_COMMAND_INPUT_MODE    default: hold; set latch to tap W once and hold command
 EOF
 }
 
@@ -124,21 +125,24 @@ fi
 if is_truthy "${MJ_POLICY_TERMINAL_KEYS:-0}"; then
   export HOLOSOMA_POLICY_TTY_INPUT="${HOLOSOMA_POLICY_TTY_INPUT:-1}"
   export HOLOSOMA_KEYBOARD_ROOT_COMMAND="${HOLOSOMA_KEYBOARD_ROOT_COMMAND:-1}"
-  export HOLOSOMA_KEYBOARD_ROOT_COMMAND_VALUE="${HOLOSOMA_KEYBOARD_ROOT_COMMAND_VALUE:-0.5}"
+  export HOLOSOMA_KEYBOARD_ROOT_COMMAND_VALUE="${HOLOSOMA_KEYBOARD_ROOT_COMMAND_VALUE:-0.2}"
   export HOLOSOMA_KEYBOARD_ROOT_COMMAND_YAW_DEGREES="${HOLOSOMA_KEYBOARD_ROOT_COMMAND_YAW_DEGREES:-${HOLOSOMA_KEYBOARD_ROOT_COMMAND_YAW_DEG:-17}}"
   export HOLOSOMA_KEYBOARD_ROOT_COMMAND_MODE="${HOLOSOMA_KEYBOARD_ROOT_COMMAND_MODE:-manual}"
+  export HOLOSOMA_KEYBOARD_ROOT_COMMAND_INPUT_MODE="${HOLOSOMA_KEYBOARD_ROOT_COMMAND_INPUT_MODE:-hold}"
 else
   unset HOLOSOMA_POLICY_TTY_INPUT
   unset HOLOSOMA_KEYBOARD_ROOT_COMMAND
   unset HOLOSOMA_KEYBOARD_ROOT_COMMAND_VALUE
   unset HOLOSOMA_KEYBOARD_ROOT_COMMAND_YAW_DEGREES
   unset HOLOSOMA_KEYBOARD_ROOT_COMMAND_MODE
+  unset HOLOSOMA_KEYBOARD_ROOT_COMMAND_INPUT_MODE
 fi
 
 echo "[INFO] launching policy only"
 echo "[INFO] model=${MODEL_INPUT}"
 echo "[INFO] ports clock=${SIM_CLOCK_PORT} state=${SIM_STATE_PORT} perception=${PERCEPTION_OBS_PORT} control=${SIM_CONTROL_PORT} sparse_root=${SPARSE_ROOT_COMMAND_PORT} policy_control=${HOLOSOMA_POLICY_CONTROL_PORT} policy_overlay=${HOLOSOMA_POLICY_OVERLAY_PORT}"
 echo "[INFO] web sparse-root command=${ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND}"
+echo "[INFO] terminal sparse-root command=${HOLOSOMA_KEYBOARD_ROOT_COMMAND:-0} input_mode=${HOLOSOMA_KEYBOARD_ROOT_COMMAND_INPUT_MODE:-hold}"
 echo "[INFO] web policy controls: ] starts policy, Space starts motion clip, Stop, Init"
 
 if is_truthy "${DRY_RUN:-0}"; then

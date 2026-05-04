@@ -8,7 +8,7 @@ import time
 import zmq
 from loguru import logger
 
-POLICY_CONTROL_ACTIONS = frozenset({"start", "stop", "init", "space"})
+POLICY_CONTROL_ACTIONS = frozenset({"start", "stop", "init", "space", "reset"})
 
 
 class SimControlPush:

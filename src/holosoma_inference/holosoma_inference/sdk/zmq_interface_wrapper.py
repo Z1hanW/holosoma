@@ -35,6 +35,14 @@ class ZmqSimInterfaceWrapper:
         self._sim_control_pub = SimControlPush(port=sim_control_port)
         self._sim_control_pub.start()
 
+    def reset_runtime_state(self) -> None:
+        """Clear cached split-sim state after a coordinated simulator/policy reset."""
+        self._last_robot_state_data = None
+        self._last_sim_time_ms = None
+        self._lowcmd_seq = 0
+        if hasattr(self._sim_state_sub, "last_state"):
+            self._sim_state_sub.last_state = None
+
     def _joint_gains_from_robot_config(self) -> tuple[np.ndarray, np.ndarray]:
         joint_kp = np.zeros(self.robot_config.num_joints, dtype=np.float32)
         joint_kd = np.zeros(self.robot_config.num_joints, dtype=np.float32)

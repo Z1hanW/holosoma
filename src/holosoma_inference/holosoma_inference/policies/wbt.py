@@ -429,6 +429,16 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._manual_sparse_root_command_log_key: tuple[bool, str] | None = None
         self._keyboard_sparse_root_command_enabled = _truthy_env("HOLOSOMA_KEYBOARD_ROOT_COMMAND")
         self._keyboard_sparse_root_command_mode = os.environ.get("HOLOSOMA_KEYBOARD_ROOT_COMMAND_MODE", "manual").strip().lower()
+        self._keyboard_sparse_root_command_input_mode = (
+            os.environ.get("HOLOSOMA_KEYBOARD_ROOT_COMMAND_INPUT_MODE", "hold").strip().lower()
+        )
+        self._keyboard_sparse_root_command_latched = self._keyboard_sparse_root_command_input_mode in {
+            "latch",
+            "latched",
+            "persistent",
+            "sticky",
+            "toggle",
+        }
         try:
             self._keyboard_sparse_root_command_value = float(
                 os.environ.get("HOLOSOMA_KEYBOARD_ROOT_COMMAND_VALUE", "0.5")
@@ -450,6 +460,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             float(self._keyboard_sparse_root_command_yaw_value)
         )
         self._keyboard_sparse_root_pressed_keys: set[str] = set()
+        self._keyboard_sparse_root_latched_command: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._keyboard_sparse_root_lock = threading.Lock()
         self._keyboard_sparse_root_last_command: tuple[float, float, float] | None = None
         self._last_sparse_motion_command: list[float] | None = None
@@ -585,11 +596,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         if self._keyboard_sparse_root_command_enabled:
             logger.info(
-                "Keyboard sparse root command enabled: w/s=x, a/d=y, q/e=yaw, xy_value={:.3f}, yaw={:.3f} rad ({:.1f} deg), mode={}",
+                "Keyboard sparse root command enabled: w/s=x, a/d=y, q/e=yaw, z=zero, xy_value={:.3f}, yaw={:.3f} rad ({:.1f} deg), mode={}, input_mode={}",
                 self._keyboard_sparse_root_command_value,
                 self._keyboard_sparse_root_command_yaw_value,
                 float(np.rad2deg(self._keyboard_sparse_root_command_yaw_value)),
                 self._keyboard_sparse_root_command_mode,
+                self._keyboard_sparse_root_command_input_mode,
             )
         if self._motion_index_offset != 0:
             logger.info("Using motion sequence index offset: {}", self._motion_index_offset)
@@ -1607,12 +1619,15 @@ class WholeBodyTrackingPolicy(BasePolicy):
         value = self._keyboard_sparse_root_command_value
         yaw_value = self._keyboard_sparse_root_command_yaw_value
         with self._keyboard_sparse_root_lock:
-            pressed = set(self._keyboard_sparse_root_pressed_keys)
+            if self._keyboard_sparse_root_command_latched:
+                command_tuple = tuple(float(v) for v in self._keyboard_sparse_root_latched_command)
+            else:
+                pressed = set(self._keyboard_sparse_root_pressed_keys)
+                x = (float("w" in pressed) - float("s" in pressed)) * value
+                y = (float("a" in pressed) - float("d" in pressed)) * value
+                yaw = (float("q" in pressed) - float("e" in pressed)) * yaw_value
+                command_tuple = (float(x), float(y), float(yaw))
 
-        x = (float("w" in pressed) - float("s" in pressed)) * value
-        y = (float("a" in pressed) - float("d" in pressed)) * value
-        yaw = (float("q" in pressed) - float("e" in pressed)) * yaw_value
-        command_tuple = (float(x), float(y), float(yaw))
         if command_tuple != self._keyboard_sparse_root_last_command:
             logger.info(
                 "Keyboard sparse root command: x={:.3f} y={:.3f} yaw={:.3f}",
@@ -2625,8 +2640,44 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._motion_align_pos = None
         self._motion_end_reset_requested = False
 
+    def _handle_full_reset(self):
+        """Reset WBT runtime state to the beginning of the loaded motion."""
+        super()._handle_full_reset()
+        self._stiff_hold_active = True
+        self.motion_clip_progressing = False
+        self.motion_timestep = 0
+        self.motion_start_timestep = None
+        self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
+        self.motion_command_t = self.motion_command_0.copy()
+        self._last_clock_reading = None
+        self._last_policy_control_clock_ms = None
+        self._sim_time_control_schedule_index = 0
+        self._last_policy_control_target_clock_ms = None
+        self.robot_yaw_offset = 0.0
+        self._logged_root_reference_clip_start = False
+        self._logged_sim_ref_from_sim_state = False
+        self._motion_align_quat_wxyz = None
+        self._motion_align_pos = None
+        reset_rearms_auto_motion = os.environ.get(
+            "HOLOSOMA_POLICY_RESET_REARM_AUTO_MOTION_CLIP", "1"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._auto_start_motion_clip_pending = bool(
+            reset_rearms_auto_motion and getattr(self.config.task, "auto_start_motion_clip", False)
+        )
+        self._auto_start_motion_clip_hold_start_time = None
+        self._auto_start_motion_clip_last_log_time = 0.0
+        self._motion_end_reset_requested = False
+        self.clock_sub.reset_origin()
+        self.logger.info(
+            "WBT runtime reset to motion frame 0 (auto_motion_rearmed={})",
+            self._auto_start_motion_clip_pending,
+        )
+
     def _handle_start_motion_clip(self):
         """Handle start motion clip action."""
+        if self.use_policy_action:
+            self._hold_lowcmd_after_reset = False
+            self._logged_hold_lowcmd_after_reset = False
         self.clock_sub.reset_origin()
         self.motion_clip_progressing = True
         # Capture motion-specific start timestep for policy-level timing control
@@ -2655,12 +2706,40 @@ class WholeBodyTrackingPolicy(BasePolicy):
                     self._logged_motion_start_history_prefill = True
         self.logger.info(colored("Starting motion clip", "blue"))
 
+    def _update_latched_keyboard_sparse_root_command(self, key: str) -> None:
+        x, y, yaw = self._keyboard_sparse_root_latched_command
+        value = self._keyboard_sparse_root_command_value
+        yaw_value = self._keyboard_sparse_root_command_yaw_value
+
+        if key == "z":
+            self._keyboard_sparse_root_latched_command = (0.0, 0.0, 0.0)
+            return
+        if key == "w":
+            x = 0.0 if x > 0.0 else value
+        elif key == "s":
+            x = 0.0 if x < 0.0 else -value
+        elif key == "a":
+            y = 0.0 if y > 0.0 else value
+        elif key == "d":
+            y = 0.0 if y < 0.0 else -value
+        elif key == "q":
+            yaw = 0.0 if yaw > 0.0 else yaw_value
+        elif key == "e":
+            yaw = 0.0 if yaw < 0.0 else -yaw_value
+
+        self._keyboard_sparse_root_latched_command = (float(x), float(y), float(yaw))
+
     def handle_keyboard_button(self, keycode):
         """Add new keyboard button to start and end the motion clips"""
         key = str(keycode).lower()
-        if self._keyboard_sparse_root_command_enabled and key in {"w", "s", "a", "d", "q", "e"}:
+        if self._keyboard_sparse_root_command_enabled and key in {"w", "s", "a", "d", "q", "e", "z"}:
             with self._keyboard_sparse_root_lock:
-                self._keyboard_sparse_root_pressed_keys.add(key)
+                if self._keyboard_sparse_root_command_latched:
+                    if key not in self._keyboard_sparse_root_pressed_keys:
+                        self._update_latched_keyboard_sparse_root_command(key)
+                    self._keyboard_sparse_root_pressed_keys.add(key)
+                else:
+                    self._keyboard_sparse_root_pressed_keys.add(key)
             return
         if key in {"space", " ", "s"}:
             self.clock_sub.reset_origin()
@@ -2670,7 +2749,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
     def handle_keyboard_release(self, keycode):
         key = str(keycode).lower()
-        if self._keyboard_sparse_root_command_enabled and key in {"w", "s", "a", "d", "q", "e"}:
+        if self._keyboard_sparse_root_command_enabled and key in {"w", "s", "a", "d", "q", "e", "z"}:
             with self._keyboard_sparse_root_lock:
                 self._keyboard_sparse_root_pressed_keys.discard(key)
             return

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -96,8 +97,10 @@ class SimulatorBridge:
         )
         self._zmq_lowcmd_substep = 0
         self._zmq_lowcmd_hold_physics = False
+        self._zmq_lowcmd_drop_until_monotonic = 0.0
         self._logged_lowcmd_latch = False
         self._logged_lowcmd_lockstep = False
+        self._logged_lowcmd_reset_drop = False
         self._last_zmq_torque_preview: list[float] | None = None
         self._sim_state_trace_path = os.environ.get("HOLOSOMA_SPLIT_SIM_STATE_TRACE_PATH", "").strip() or None
         self._sim_state_trace_handle = None
@@ -191,7 +194,7 @@ class SimulatorBridge:
         self._default_hold_q, self._default_hold_kp, self._default_hold_kd = self._build_default_pose_hold_targets()
         self._reset_zmq_lowcmd_runtime_state()
 
-    def _reset_zmq_lowcmd_runtime_state(self) -> None:
+    def _reset_zmq_lowcmd_runtime_state(self, *, drop_lowcmd_sec: float | None = None) -> None:
         """Clear runtime lowcmd state so simulator resets do not reuse stale commands."""
         self._latest_lowcmd_payload = None
         self._pending_lowcmd_payload = None
@@ -204,7 +207,23 @@ class SimulatorBridge:
         self._initial_hold_q = None
         self._zmq_lowcmd_substep = 0
         self._zmq_lowcmd_hold_physics = False
+        if drop_lowcmd_sec is not None and float(drop_lowcmd_sec) > 0.0:
+            self._zmq_lowcmd_drop_until_monotonic = max(
+                self._zmq_lowcmd_drop_until_monotonic,
+                time.monotonic() + float(drop_lowcmd_sec),
+            )
+            self._logged_lowcmd_reset_drop = False
         self._last_zmq_torque_preview = None
+
+    def reset_perception_obs_runtime_state(self) -> None:
+        """Reset split perception buffers and immediately publish the reset frame."""
+        reset_provider = getattr(self.simulator, "_reset_split_sim_perception_provider", None)
+        if callable(reset_provider):
+            reset_provider()
+        if self.perception_obs_shm_pub is not None:
+            self.perception_obs_shm_pub.reset()
+        self._logged_perception_obs_publish = False
+        self._publish_perception_obs()
 
     def _build_default_pose_hold_targets(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         default_joint_angles = getattr(self.simulator.robot_config.init_state, "default_joint_angles", {}) or {}
@@ -490,6 +509,11 @@ class SimulatorBridge:
                 self.simulator.set_dof_state_tensor_robots(env_ids, state)
                 continue
             if action == "lowcmd" and self._use_zmq_lowcmd:
+                if time.monotonic() < self._zmq_lowcmd_drop_until_monotonic:
+                    if not self._logged_lowcmd_reset_drop:
+                        logger.info("Dropping split ZMQ lowcmd packets during reset sync window")
+                        self._logged_lowcmd_reset_drop = True
+                    continue
                 self._queue_lowcmd_payload(payload, lowcmd_boundary=lowcmd_boundary)
                 continue
 

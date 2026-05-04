@@ -130,6 +130,10 @@ class PerceptionObsShmPub:
         except Exception as exc:
             logger.warning("Perception obs shared-memory publish failed: {}", exc)
 
+    def reset(self, fill_value: float = 0.0) -> None:
+        if self.array is not None:
+            self.array[:] = np.float32(fill_value)
+
     def close(self, *, unlink: bool = False) -> None:
         shm = self.shm
         self.shm = None

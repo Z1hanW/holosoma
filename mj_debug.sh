@@ -1,9 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")"
-USER_OFFSET="${HOLOSOMA_POLICY_MOTION_INDEX_OFFSET-}"; source scripts/source_inference_setup.sh "${1:-box_75}"
-export HOLOSOMA_KEYBOARD_ROOT_COMMAND=0 HOLOSOMA_POLICY_MOTION_INDEX_OFFSET="${USER_OFFSET:-$HOLOSOMA_POLICY_MOTION_INDEX_OFFSET}"
-MODEL="$(python scripts/mj_resolve_wandb_model.py "${2:-$HOLOSOMA_MJ_MODEL}")"
-CFG="${INFERENCE_CONFIG:-$(python scripts/mj_infer_inference_config.py "$MODEL")}"
-[[ -f "$HOLOSOMA_MJ_MOTION" ]] || { echo "missing data_demo motion: $HOLOSOMA_MJ_MOTION" >&2; exit 1; }
-python3 -u src/holosoma_inference/holosoma_inference/run_policy.py "inference:$CFG" --task.model-path "$MODEL" --task.motion-file "$HOLOSOMA_MJ_MOTION" --task.interface lo --task.use-sim-state --task.use-sim-time --task.sim-clock-port "$SIM_CLOCK_PORT" --task.sim-state-port "$SIM_STATE_PORT" --task.sim-control-port "$SIM_CONTROL_PORT" --task.use-zmq-lowcmd --task.use-split-perception-obs --task.perception-obs-port "$PERCEPTION_OBS_PORT" --task.use-split-perception-obs-shm --task.perception-obs-shm-name "$PERCEPTION_OBS_SHM_NAME" --task.use-external-sparse-root-command --task.sparse-root-command-port "$SPARSE_ROOT_COMMAND_PORT" --task.no-auto-start-motion --task.auto-start-motion-clip --task.auto-start-stiff-hold-sec "$AUTO_START_STIFF_HOLD_SEC" --task.auto-start-stiff-max-wait-sec "$AUTO_START_STIFF_MAX_WAIT_SEC" --task.auto-start-stiff-pose-tolerance "$AUTO_START_STIFF_POSE_TOL" --task.policy-action-scale "$POLICY_ACTION_SCALE" --task.rl-rate "$POLICY_RL_RATE" --task.sim-object-name object $( [[ "$USE_ROOT_REFERENCE_AT_CLIP_START" == "1" ]] && printf '%s' "--task.use-root-reference-at-clip-start" ) --task.prefer-sim-ref-from-sim-state --task.defer-policy-start-until-valid-state
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+if [[ $# -eq 0 ]]; then
+  set -- box_75
+fi
+
+export COMMAND_WEB="${COMMAND_WEB:-0}"
+export MJ_ENV_AUTO_LAUNCH_POLICY="${MJ_ENV_AUTO_LAUNCH_POLICY:-1}"
+export POLICY_AUTO_START_MOTION_CLIP="${POLICY_AUTO_START_MOTION_CLIP:-1}"
+export POLICY_STDIO="${POLICY_STDIO:-log}"
+export HOLOSOMA_POLICY_TTY_INPUT="${HOLOSOMA_POLICY_TTY_INPUT:-0}"
+export HOLOSOMA_POLICY_CONTROL_ALLOW_NONINTERACTIVE_AUTOSTART="${HOLOSOMA_POLICY_CONTROL_ALLOW_NONINTERACTIVE_AUTOSTART:-1}"
+export SIM_MOTION_INIT_MODE="${SIM_MOTION_INIT_MODE:-raw_motion}"
+export HOLOSOMA_MOTION_INIT_ZERO_VELOCITIES="${HOLOSOMA_MOTION_INIT_ZERO_VELOCITIES:-0}"
+export AUTO_START_STIFF_HOLD_SEC="${AUTO_START_STIFF_HOLD_SEC:-0.0}"
+export AUTO_START_STIFF_MAX_WAIT_SEC="${AUTO_START_STIFF_MAX_WAIT_SEC:-0.0}"
+export AUTO_START_STIFF_POSE_TOL="${AUTO_START_STIFF_POSE_TOL:-0.12}"
+export HOLOSOMA_KEYBOARD_ROOT_COMMAND="${HOLOSOMA_KEYBOARD_ROOT_COMMAND:-0}"
+export HOLOSOMA_POLICY_TARGET_ROBOT_ROOT_STATE_ASSIST="${HOLOSOMA_POLICY_TARGET_ROBOT_ROOT_STATE_ASSIST:-0}"
+export HOLOSOMA_POLICY_TARGET_ROBOT_DOF_STATE_ASSIST="${HOLOSOMA_POLICY_TARGET_ROBOT_DOF_STATE_ASSIST:-0}"
+export HOLOSOMA_POLICY_TARGET_OBJECT_STATE_ASSIST="${HOLOSOMA_POLICY_TARGET_OBJECT_STATE_ASSIST:-0}"
+export HOLOSOMA_MUJOCO_BACKSPACE_POLICY_CONTROL="${HOLOSOMA_MUJOCO_BACKSPACE_POLICY_CONTROL:-1}"
+export HOLOSOMA_MUJOCO_BACKSPACE_AUTORESTART_POLICY="${HOLOSOMA_MUJOCO_BACKSPACE_AUTORESTART_POLICY:-1}"
+export HOLOSOMA_MUJOCO_GUARD_DEFAULT_RESET="${HOLOSOMA_MUJOCO_GUARD_DEFAULT_RESET:-1}"
+
+exec bash "$ROOT_DIR/mj_env.sh" "$@"

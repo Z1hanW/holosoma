@@ -430,6 +430,7 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
 
         timestamp = get_timestamp()
         experiment_dir = get_experiment_dir(logger_cfg, tyro_config.training, timestamp, task_name="locomotion")
+        experiment_dir.mkdir(exist_ok=True, parents=True)
 
         # Configure logging with experiment directory
         configure_logging(distributed_conf=distributed_conf, log_dir=experiment_dir)

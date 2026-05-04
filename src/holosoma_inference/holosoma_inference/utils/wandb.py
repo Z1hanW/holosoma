@@ -6,7 +6,7 @@ from pathlib import Path
 import wandb
 
 _WANDB_PREFIX = "wandb://"
-_WANDB_HTTPS_PATTERN = re.compile(r"https://[^/]+/([^/]+)/([^/]+)/runs/([^/]+)/(?:files/)?(.+)")
+_WANDB_HTTPS_PATTERN = re.compile(r"https://[^/]+/([^/]+)/([^/]+)/runs/([^/?#]+)(?:/(?:files/)?([^?#]+))?")
 
 
 def load_checkpoint(
@@ -47,6 +47,11 @@ def load_checkpoint(
     if wandb_run_path is not None:
         api = wandb.Api()
         run = api.run(wandb_run_path)
+        if not checkpoint:
+            onnx_files = [file for file in run.files() if str(file.name).endswith(".onnx")]
+            if not onnx_files:
+                raise FileNotFoundError(f"No ONNX checkpoints found in W&B run {wandb_run_path}")
+            checkpoint = str(max(onnx_files, key=lambda file: ((file.updated_at or ""), file.name)).name)
         # Create log dir
         log_dir_path = Path(log_dir)
         log_dir_path.mkdir(parents=True, exist_ok=True)

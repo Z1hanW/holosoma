@@ -11,7 +11,7 @@ from pathlib import Path
 
 ENTITY = os.environ.get("MJ_WANDB_ENTITY", "zihanw22")
 PROJECT = os.environ.get("MJ_WANDB_PROJECT", "boxer")
-DEFAULT_RUN = os.environ.get("MJ_DEMO_MODEL_RUN", f"{ENTITY}/{PROJECT}/shoo7sr1")
+DEFAULT_RUN = os.environ.get("MJ_DEMO_MODEL_RUN", f"{ENTITY}/{PROJECT}/w5qostjn")
 CACHE_ROOT = Path(os.environ.get("MJ_WANDB_CACHE", "logs/wandb_assets/run_files"))
 
 
@@ -33,7 +33,7 @@ def _parse_ref(ref: str) -> tuple[str, str]:
         raise SystemExit("[ERROR] expected https://wandb.ai/<entity>/<project>/runs/<run_id>[/files/<file>]")
     filename = "/".join(parts[5:] if len(parts) >= 6 and parts[4] == "files" else parts[4:])
     if not filename:
-        raise SystemExit("[ERROR] W&B run URL must include a file")
+        filename = "latest.onnx"
     return f"{parts[0]}/{parts[1]}/{parts[3]}", filename
 
 
@@ -71,7 +71,7 @@ def _download(run_path: str, filename: str, dest: Path) -> Path:
 
 
 def main() -> None:
-    ref = sys.argv[1] if len(sys.argv) > 1 else "logs/wandb_runs/shoo7sr1/model_29999.onnx"
+    ref = sys.argv[1] if len(sys.argv) > 1 else f"wandb://{DEFAULT_RUN}/latest.onnx"
     if _remote(ref):
         run_path, filename = _parse_ref(ref)
         path = CACHE_ROOT.expanduser().resolve() / run_path / filename

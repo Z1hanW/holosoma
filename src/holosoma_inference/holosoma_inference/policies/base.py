@@ -32,7 +32,7 @@ from holosoma_inference.sdk.interface_wrapper import InterfaceWrapper
 from holosoma_inference.sdk.zmq_interface_wrapper import ZmqSimInterfaceWrapper
 from holosoma_inference.utils.latency import LatencyTracker
 from holosoma_inference.utils.math.quat import quat_rotate_inverse
-from holosoma_inference.utils.perception_obs import PerceptionObsShmSub, PerceptionObsSub
+from holosoma_inference.utils.perception_obs import PerceptionObsShmMirror, PerceptionObsShmSub, PerceptionObsSub
 from holosoma_inference.utils.rate import RateLimiter
 from holosoma_inference.utils.sim_control import PolicyControlPull
 from holosoma_inference.utils.wandb import load_checkpoint
@@ -186,6 +186,7 @@ class BasePolicy:
             )
         self._perception_obs_sub: PerceptionObsSub | None = None
         self._perception_obs_shm_sub: PerceptionObsShmSub | None = None
+        self._policy_perception_obs_mirror: PerceptionObsShmMirror | None = None
         if bool(getattr(self.config.task, "use_split_perception_obs", False)):
             if bool(getattr(self.config.task, "use_split_perception_obs_shm", False)):
                 self._perception_obs_shm_sub = PerceptionObsShmSub(
@@ -195,6 +196,10 @@ class BasePolicy:
             else:
                 self._perception_obs_sub = PerceptionObsSub(port=self.config.task.perception_obs_port)
                 self._perception_obs_sub.start()
+            mirror_name = os.environ.get("HOLOSOMA_POLICY_PERCEPTION_OBS_SHM_NAME", "").strip()
+            if mirror_name:
+                self._policy_perception_obs_mirror = PerceptionObsShmMirror(mirror_name)
+                logger.info("Policy perception_obs mirror enabled: name={}", mirror_name)
 
     def _init_policy_components(self, model_path, policy_action_scale, rl_rate):
         """Initialize policy-related components."""
@@ -314,6 +319,8 @@ class BasePolicy:
         """Initialize control-related components and commands."""
         self.use_policy_action = False
         self._pending_noninteractive_policy_start = False
+        self._hold_lowcmd_after_reset = False
+        self._logged_hold_lowcmd_after_reset = False
         self.init_count = 0
         self.get_ready_state = False
         self.desired_base_height = self.config.task.desired_base_height
@@ -705,6 +712,7 @@ class BasePolicy:
             if not hasattr(self, "_logged_split_perception_obs_shm"):
                 logger.info("Using split sim shared-memory perception_obs with {} values", obs.shape[1])
                 self._logged_split_perception_obs_shm = True
+            self._mirror_policy_perception_obs(obs)
             return obs
 
         if self._perception_obs_sub is None:
@@ -739,7 +747,18 @@ class BasePolicy:
         if not hasattr(self, "_logged_split_perception_obs"):
             logger.info("Using split sim perception_obs with {} values", obs.shape[1])
             self._logged_split_perception_obs = True
+        self._mirror_policy_perception_obs(obs)
         return obs
+
+    def _mirror_policy_perception_obs(self, obs: np.ndarray) -> None:
+        if self._policy_perception_obs_mirror is None:
+            return
+        try:
+            self._policy_perception_obs_mirror.publish(obs)
+        except Exception as exc:
+            if not getattr(self, "_logged_policy_perception_obs_mirror_error", False):
+                logger.warning("Failed to mirror policy perception_obs: {}", exc)
+                self._logged_policy_perception_obs_mirror_error = True
 
     # ============================================================================
     # Observation Processing Methods
@@ -919,6 +938,19 @@ class BasePolicy:
             return
         self._logged_waiting_for_external_policy_start = False
 
+        if (
+            self._hold_lowcmd_after_reset
+            and not self.use_policy_action
+            and not self.get_ready_state
+        ):
+            if not self._logged_hold_lowcmd_after_reset:
+                self.logger.info("Policy lowcmd stream is reset-clean and held until policy start/init.")
+                self._logged_hold_lowcmd_after_reset = True
+            waiting_overlay_hook = getattr(self, "_publish_waiting_policy_overlay", None)
+            if callable(waiting_overlay_hook):
+                waiting_overlay_hook(robot_state_data)
+            return
+
         # Stage 2: Pre-processing
         with self.latency_tracker.measure("preprocessing"):
             if (
@@ -1059,6 +1091,7 @@ class BasePolicy:
             "stop": "o",
             "init": "i",
             "space": "space",
+            "reset": "reset",
         }
         for action in sub.get_actions():
             self.logger.info("Received external policy control action: {}", action)
@@ -1080,6 +1113,8 @@ class BasePolicy:
             self._handle_stop_policy()
         elif keycode == "i":
             self._handle_init_state()
+        elif keycode == "reset":
+            self._handle_full_reset()
         elif keycode in ["v", "b", "f", "g", "r"]:
             self._handle_kp_control(keycode)
 
@@ -1117,6 +1152,8 @@ class BasePolicy:
         """Handle start policy action."""
         self.use_policy_action = True
         self.get_ready_state = False
+        self._hold_lowcmd_after_reset = False
+        self._logged_hold_lowcmd_after_reset = False
         self.logger.info(colored("Using policy actions", "blue"))
         self.phase = np.array([[0.0, np.pi]])
         if hasattr(self.interface, "no_action"):
@@ -1134,9 +1171,41 @@ class BasePolicy:
         """Handle initialization state."""
         self.get_ready_state = True
         self.init_count = 0
+        self._hold_lowcmd_after_reset = False
+        self._logged_hold_lowcmd_after_reset = False
         self.logger.info("Setting to init state")
         if hasattr(self.interface, "no_action"):
             self.interface.no_action = 0
+
+    def _handle_full_reset(self):
+        """Reset policy runtime state without reloading the model."""
+        self.use_policy_action = False
+        self.get_ready_state = False
+        self._pending_noninteractive_policy_start = False
+        self._hold_lowcmd_after_reset = True
+        self._logged_hold_lowcmd_after_reset = False
+        self._skip_next_lowcmd_publish = False
+        self.init_count = 0
+        if self.use_phase:
+            self.phase = np.array([[0.0, np.pi]])
+        self._initialize_history_state()
+        self.last_policy_action.fill(0.0)
+        self.scaled_policy_action.fill(0.0)
+        reset_perception_sub = getattr(self._perception_obs_sub, "reset", None)
+        if callable(reset_perception_sub):
+            reset_perception_sub()
+        reset_runtime = getattr(self.interface, "reset_runtime_state", None)
+        if callable(reset_runtime):
+            reset_runtime()
+        if self._policy_perception_obs_mirror is not None:
+            reset_fill = os.environ.get("HOLOSOMA_POLICY_PERCEPTION_OBS_RESET_FILL", "0.5")
+            try:
+                self._policy_perception_obs_mirror.reset(fill_value=float(reset_fill))
+            except ValueError:
+                self._policy_perception_obs_mirror.reset(fill_value=0.5)
+        if hasattr(self.interface, "no_action"):
+            self.interface.no_action = 1
+        self.logger.info("Policy runtime state reset")
 
     def _handle_kp_control(self, keycode):
         """Handle keyboard KP control."""

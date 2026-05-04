@@ -141,7 +141,7 @@ ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND="${ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND:-0}"
 MUJOCO_RENDER_848_PERCEPTION_PRESET="${MUJOCO_RENDER_848_PERCEPTION_PRESET:-camera_depth_d435i_mujoco_render_848x480}"
 PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
 PERCEPTION_CAMERA_SOURCE="${PERCEPTION_CAMERA_SOURCE:-far_tracking_warp}"
-PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-primitive}"
+PERCEPTION_OBJECT_GEOMETRY_MODE="${PERCEPTION_OBJECT_GEOMETRY_MODE:-mesh}"
 PERCEPTION_CAMERA_WIDTH_EXPLICIT=0
 PERCEPTION_CAMERA_HEIGHT_EXPLICIT=0
 PERCEPTION_CAMERA_WARP_CROP_TOP_EXPLICIT=0
@@ -198,6 +198,7 @@ PERCEPTION_OBS_TRANSPORT="${PERCEPTION_OBS_TRANSPORT:-shm}"
 PERCEPTION_OBS_SHM_NAME="${PERCEPTION_OBS_SHM_NAME:-depth_img_shm_${SIM_STATE_PORT}}"
 PERCEPTION_OBS_EXTERNAL="${PERCEPTION_OBS_EXTERNAL:-0}"
 SIM_USE_ZMQ_LOWCMD="${SIM_USE_ZMQ_LOWCMD:-1}"
+export HOLOSOMA_POLICY_SUPPRESS_DUP_SIM_TIME_LOWCMD="${HOLOSOMA_POLICY_SUPPRESS_DUP_SIM_TIME_LOWCMD:-1}"
 SKIP_POLICY="${SKIP_POLICY:-0}"
 MJ_TRACK_MODE="${MJ_TRACK_MODE:-both}"
 POLICY_STDIO="${POLICY_STDIO:-}"
@@ -384,6 +385,9 @@ if [[ -n "$MUJOCO_PY" ]]; then
   MUJOCO_PY="$(resolve_python_with_modules "mujoco holosoma torch tyro typeguard" "$MUJOCO_PY")"
 else
   MUJOCO_PY="$(resolve_python_with_modules "mujoco holosoma torch tyro typeguard" \
+    /home/user/.holosoma_deps/miniconda3/envs/hsmujoco/bin/python \
+    /home/user/.holosoma_deps/miniconda3/envs/hssim/bin/python \
+    /home/user/.holosoma_deps/miniconda3/envs/sim/bin/python \
     /home/ubuntu/.holosoma_deps/miniconda3/envs/hsmujoco/bin/python \
     /home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin/python \
     /home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python \
@@ -391,6 +395,8 @@ else
     "$(command -v python3 2>/dev/null || true)")"
 fi
 INFER_PY="$(resolve_python "$INFER_PY" \
+  /home/user/.holosoma_deps/miniconda3/envs/hsinference/bin/python \
+  /home/user/.holosoma_deps/miniconda3/envs/sim/bin/python \
   /home/ubuntu/.holosoma_deps/miniconda3/envs/hsinference/bin/python \
   /home/ubuntu/.holosoma_deps/miniconda3/envs/sim/bin/python)"
 POLICY_MODEL="$(resolve_policy_model_path "$MODEL_INPUT")"
@@ -1559,6 +1565,13 @@ case "$PERCEPTION_OBS_TRANSPORT_NORMALIZED" in
     exit 1
     ;;
 esac
+if [[ -n "${POLICY_USE_PERCEPTION_OBS_SHM+x}" ]]; then
+  if is_truthy_env "$POLICY_USE_PERCEPTION_OBS_SHM"; then
+    USE_POLICY_PERCEPTION_OBS_SHM=1
+  else
+    USE_POLICY_PERCEPTION_OBS_SHM=0
+  fi
+fi
 if is_truthy_env "$PERCEPTION_OBS_EXTERNAL"; then
   PERCEPTION_OBS_EXTERNAL_ENABLED=1
   PUBLISH_PERCEPTION_OBS_SHM=0
@@ -1663,7 +1676,7 @@ if [[ "$ENABLE_SPLIT_PERCEPTION_OBS" == "1" ]]; then
   echo "[INFO] inference_config=${INFERENCE_CONFIG}"
   echo "[INFO] sim_device=${SIM_DEVICE:-<default>}"
   echo "[INFO] mujoco_object_scene training_urdf=${SIM_USE_TRAINING_URDF_OBJECT_SCENE} default_actuators=${SIM_ADD_DEFAULT_OBJECT_ACTUATORS} copy_joint_defaults=${SIM_COPY_JOINT_DEFAULTS_FROM_ROBOT_XML} copy_tendons=${SIM_COPY_TENDONS_FROM_ROBOT_XML} copy_collision_geoms=${SIM_COPY_COLLISION_GEOMS_FROM_ROBOT_XML} copy_contact_pairs=${SIM_COPY_CONTACT_PAIRS_FROM_ROBOT_XML}"
-  echo "[INFO] perception camera: source=${PERCEPTION_CAMERA_SOURCE} object_geometry_mode=${PERCEPTION_OBJECT_GEOMETRY_MODE} raw=${PERCEPTION_CAMERA_WIDTH:-<default>}x${PERCEPTION_CAMERA_HEIGHT:-<default>} crop_top=${PERCEPTION_CAMERA_WARP_CROP_TOP:-<default>} crop_bottom=${PERCEPTION_CAMERA_WARP_CROP_BOTTOM:-<default>} crop_left=${PERCEPTION_CAMERA_WARP_CROP_LEFT:-<default>} crop_right=${PERCEPTION_CAMERA_WARP_CROP_RIGHT:-<default>} update_hz=${PERCEPTION_UPDATE_HZ:-<default>} camera_fps=${PERCEPTION_CAMERA_FPS:-<default>} pitch_deg=${PERCEPTION_CAMERA_PITCH_DEG:-<default>} vfov_deg=${PERCEPTION_CAMERA_VFOV_DEG:-<default>} hfov_deg=${PERCEPTION_CAMERA_HFOV_DEG:-<default>} include_robot_mesh=${PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH:-<default>} near=${PERCEPTION_CAMERA_NEAR:-<default>} far=${PERCEPTION_CAMERA_FAR:-<default>} max_distance=${PERCEPTION_MAX_DISTANCE:-<default>} warp_min_valid_depth=${PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH:-<default>} warp_buffer_len=${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-<default>} warp_latency_frame=${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-<default>} warp_edge_noise=${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-<default>} warp_edge_border=${PERCEPTION_CAMERA_WARP_EDGE_BORDER:-<default>} warp_edge_shuffle_prob=${PERCEPTION_CAMERA_WARP_EDGE_SHUFFLE_PROB:-<default>} warp_edge_empty_prob=${PERCEPTION_CAMERA_WARP_EDGE_EMPTY_PROB:-<default>} warp_edge_thresh=${PERCEPTION_CAMERA_WARP_EDGE_THRESH_PRIMARY:-<default>}/${PERCEPTION_CAMERA_WARP_EDGE_THRESH_SECONDARY:-<default>} warp_edge_far_depth_thresh=${PERCEPTION_CAMERA_WARP_EDGE_FAR_DEPTH_THRESH:-<default>} warp_holes=${PERCEPTION_CAMERA_WARP_ENABLE_HOLES:-<default>} warp_hole_prob=${PERCEPTION_CAMERA_WARP_HOLE_PROB:-<default>} sensor_noise=${PERCEPTION_CAMERA_APPLY_SENSOR_NOISE:-<default>} allow_mujoco_noise=${HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE:-<default>} camera_randomize_placement=${HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT:-<default>} transport=${PERCEPTION_OBS_TRANSPORT}"
+  echo "[INFO] perception camera: source=${PERCEPTION_CAMERA_SOURCE} object_geometry_mode=${PERCEPTION_OBJECT_GEOMETRY_MODE} raw=${PERCEPTION_CAMERA_WIDTH:-<default>}x${PERCEPTION_CAMERA_HEIGHT:-<default>} crop_top=${PERCEPTION_CAMERA_WARP_CROP_TOP:-<default>} crop_bottom=${PERCEPTION_CAMERA_WARP_CROP_BOTTOM:-<default>} crop_left=${PERCEPTION_CAMERA_WARP_CROP_LEFT:-<default>} crop_right=${PERCEPTION_CAMERA_WARP_CROP_RIGHT:-<default>} update_hz=${PERCEPTION_UPDATE_HZ:-<default>} camera_fps=${PERCEPTION_CAMERA_FPS:-<default>} pitch_deg=${PERCEPTION_CAMERA_PITCH_DEG:-<default>} vfov_deg=${PERCEPTION_CAMERA_VFOV_DEG:-<default>} hfov_deg=${PERCEPTION_CAMERA_HFOV_DEG:-<default>} include_robot_mesh=${PERCEPTION_CAMERA_INCLUDE_ROBOT_MESH:-<default>} near=${PERCEPTION_CAMERA_NEAR:-<default>} far=${PERCEPTION_CAMERA_FAR:-<default>} max_distance=${PERCEPTION_MAX_DISTANCE:-<default>} warp_min_valid_depth=${PERCEPTION_CAMERA_WARP_MIN_VALID_DEPTH:-<default>} warp_buffer_len=${PERCEPTION_CAMERA_WARP_BUFFER_LEN:-<default>} warp_latency_frame=${PERCEPTION_CAMERA_WARP_LATENCY_FRAME:-<default>} warp_edge_noise=${PERCEPTION_CAMERA_WARP_EDGE_NOISE:-<default>} warp_edge_border=${PERCEPTION_CAMERA_WARP_EDGE_BORDER:-<default>} warp_edge_shuffle_prob=${PERCEPTION_CAMERA_WARP_EDGE_SHUFFLE_PROB:-<default>} warp_edge_empty_prob=${PERCEPTION_CAMERA_WARP_EDGE_EMPTY_PROB:-<default>} warp_edge_thresh=${PERCEPTION_CAMERA_WARP_EDGE_THRESH_PRIMARY:-<default>}/${PERCEPTION_CAMERA_WARP_EDGE_THRESH_SECONDARY:-<default>} warp_edge_far_depth_thresh=${PERCEPTION_CAMERA_WARP_EDGE_FAR_DEPTH_THRESH:-<default>} warp_holes=${PERCEPTION_CAMERA_WARP_ENABLE_HOLES:-<default>} warp_hole_prob=${PERCEPTION_CAMERA_WARP_HOLE_PROB:-<default>} sensor_noise=${PERCEPTION_CAMERA_APPLY_SENSOR_NOISE:-<default>} allow_mujoco_noise=${HOLOSOMA_MUJOCO_ALLOW_PERCEPTION_NOISE:-<default>} camera_randomize_placement=${HOLOSOMA_CAMERA_RANDOMIZE_PLACEMENT:-<default>} transport=${PERCEPTION_OBS_TRANSPORT} publish_shm=${PUBLISH_PERCEPTION_OBS_SHM} policy_shm=${USE_POLICY_PERCEPTION_OBS_SHM} policy_mirror=${HOLOSOMA_POLICY_PERCEPTION_OBS_SHM_NAME:-<none>}"
   if is_truthy_env "$PERCEPTION_OBS_EXTERNAL"; then
     echo "[INFO] perception_obs_external=1; MuJoCo will not publish perception_obs. Start an external publisher/relay on port=${PERCEPTION_OBS_PORT} or shm=${PERCEPTION_OBS_SHM_NAME}."
   fi

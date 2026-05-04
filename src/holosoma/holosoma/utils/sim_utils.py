@@ -900,6 +900,38 @@ class DirectSimulation:
             self.simulator.write_state_updates()
         else:
             self.simulator.refresh_sim_tensors()
+        lift_reset_objects = getattr(self.simulator, "_lift_reset_objects_out_of_scene_contact", None)
+        lift_reset_objects_enabled = os.getenv("HOLOSOMA_MUJOCO_RESET_LIFT_OBJECTS", "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if lift_reset_objects_enabled and callable(lift_reset_objects):
+            try:
+                lift_reset_objects()
+                refresh_all_roots = getattr(self.simulator, "_refresh_all_root_states", None)
+                if callable(refresh_all_roots):
+                    refresh_all_roots()
+                else:
+                    self.simulator.refresh_sim_tensors()
+                if has_object_motion:
+                    object_env_ids = torch.tensor([0], device=self.device, dtype=torch.long)
+                    lifted_object_state = self.simulator.get_actor_states(
+                        [motion_init_cfg.object_name], object_env_ids
+                    ).detach().clone()
+                    desired_object_state_np = (
+                        lifted_object_state[0].detach().cpu().numpy().astype(np.float32, copy=False)
+                    )
+                    self.simulator._motion_init_reset_actor_states[str(motion_init_cfg.object_name)] = (
+                        lifted_object_state
+                    )
+                    reset_states_by_mode = getattr(self.simulator, "_motion_init_reset_states_by_mode", None)
+                    if isinstance(reset_states_by_mode, dict) and init_mode in reset_states_by_mode:
+                        actor_states = reset_states_by_mode[init_mode].setdefault("actor_states", {})
+                        actor_states[str(motion_init_cfg.object_name)] = lifted_object_state.detach().clone()
+            except Exception as exc:
+                logger.warning("Failed to align motion-init object clearance state: {}", exc)
         try:
             robot_root_state = self.simulator.robot_root_states[0].detach().cpu().numpy().astype(np.float32, copy=False)
             dof_pos_readback = self.simulator.dof_pos[0].detach().cpu().numpy().astype(np.float32, copy=False)

@@ -157,6 +157,19 @@ FREEZE_AT_TIMESTEP_ZERO_PROB=${FREEZE_AT_TIMESTEP_ZERO_PROB:-0.0}
 TRAINING_SEED=${TRAINING_SEED:-${SEED:-}}
 RANDOMIZATION_PRESET=${RANDOMIZATION_PRESET:-${RANDOMIZATION:-}}
 INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-}
+TRAINING_HEADLESS=${TRAINING_HEADLESS:-${HEADLESS_FLAG:-${HEADLESS:-True}}}
+case "$(printf '%s' "${TRAINING_HEADLESS}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    TRAINING_HEADLESS=True
+    ;;
+  0|false|no|off)
+    TRAINING_HEADLESS=False
+    ;;
+  *)
+    echo "[ERROR] TRAINING_HEADLESS/HEADLESS must be a boolean. Got: ${TRAINING_HEADLESS}" >&2
+    exit 2
+    ;;
+esac
 
 AUTO_PREP_DS_BANK=${AUTO_PREP_DS_BANK:-auto}
 DS_PREP_CLEAN_OUT=${DS_PREP_CLEAN_OUT:-1}
@@ -1887,6 +1900,7 @@ train_cmd=(
   "perception:${PERCEPTION}"
   --training.project="${WANDB_PROJECT}"
   --training.num-envs="${NUM_ENVS}"
+  --training.headless="${TRAINING_HEADLESS}"
   --command.setup-terms.motion-command.params.motion-config.motion-file "${MOTION_DIR}"
   --command.setup-terms.motion-command.params.motion-config.clip-weighting-strategy="${CLIP_WEIGHTING_STRATEGY}"
   --command.setup-terms.motion-command.params.motion-config.use-adaptive-timesteps-sampler="${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
@@ -1943,7 +1957,9 @@ for reward_spec in "${CONTACT_REWARD_TERMS[@]}"; do
     --reward.terms.body_contact_reward_"${reward_term}".params.force_scale="${GENERALIST_CONTACT_REWARD_FORCE_SCALE}"
   )
 done
-if [[ "${DEBUG_MODE}" == "replay" || "${DEBUG_MODE}" == "toy" ]]; then
+if [[ "${FORCE_PYTHON_SINGLE_PROCESS:-0}" == "1" ]]; then
+  train_cmd=("${PYTHON_BIN}" "${train_cmd[@]}")
+elif [[ "${DEBUG_MODE}" == "replay" || "${DEBUG_MODE}" == "toy" ]]; then
   train_cmd=("${PYTHON_BIN}" "${train_cmd[@]}")
 else
   train_cmd=(torchrun --nproc_per_node="${NPROC}" --master_port="${MASTER_PORT}" "${train_cmd[@]}")
@@ -2022,6 +2038,9 @@ if [[ -n "${RANDOMIZATION_PRESET}" ]]; then
 fi
 train_cmd+=("${EXTRA_ARGS[@]}")
 train_cmd+=(logger:wandb)
+if [[ -n "${LOGGER_BASE_DIR:-}" ]]; then
+  train_cmd+=(--logger.base-dir="${LOGGER_BASE_DIR}")
+fi
 if [[ -n "${WANDB_ENTITY}" ]]; then
   train_cmd+=(--logger.entity="${WANDB_ENTITY}")
 fi

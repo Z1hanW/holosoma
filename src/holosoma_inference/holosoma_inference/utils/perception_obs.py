@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import deque
 from multiprocessing import resource_tracker
 from multiprocessing import shared_memory
@@ -54,16 +55,34 @@ class PerceptionObsSub:
             target_ms = float(sim_time_ms)
         except (TypeError, ValueError):
             return self.last_payload
+        try:
+            future_tolerance_ms = float(os.environ.get("HOLOSOMA_PERCEPTION_FUTURE_TOLERANCE_MS", "2") or "2")
+        except ValueError:
+            future_tolerance_ms = 2.0
         selected: dict | None = None
         for payload in reversed(self.payload_buffer):
             try:
                 payload_ms = float(payload.get("sim_time_ms"))
             except (TypeError, ValueError):
                 continue
-            if payload_ms <= target_ms:
+            if payload_ms <= target_ms + max(future_tolerance_ms, 0.0):
                 selected = payload
                 break
-        return selected if selected is not None else self.last_payload
+        if selected is not None:
+            return selected
+        if self.last_payload is None:
+            return None
+        try:
+            last_ms = float(self.last_payload.get("sim_time_ms"))
+        except (TypeError, ValueError, AttributeError):
+            return self.last_payload
+        if last_ms <= target_ms + max(future_tolerance_ms, 0.0):
+            return self.last_payload
+        return None
+
+    def reset(self) -> None:
+        self.last_payload = None
+        self.payload_buffer.clear()
 
     def close(self) -> None:
         socket = self.socket
@@ -134,4 +153,69 @@ class PerceptionObsShmSub:
         self.array = None
         self.dim = None
         if shm is not None:
+            shm.close()
+
+
+class PerceptionObsShmMirror:
+    """Publish the exact policy-consumed perception tensor for debugging/preview."""
+
+    def __init__(self, name: str) -> None:
+        self.name = str(name)
+        self.shm: shared_memory.SharedMemory | None = None
+        self.array: np.ndarray | None = None
+        self.dim: int | None = None
+
+    def _ensure_buffer(self, dim: int) -> None:
+        if self.shm is not None and self.array is not None and self.dim == int(dim):
+            return
+        self.close(unlink=False)
+        size = int(dim) * np.dtype(np.float32).itemsize
+        try:
+            self.shm = shared_memory.SharedMemory(name=self.name, create=True, size=size)
+            logger.info("Created policy perception mirror shared memory: name={} values={}", self.name, dim)
+        except FileExistsError:
+            existing = shared_memory.SharedMemory(name=self.name, create=False)
+            if len(existing.buf) != size:
+                existing.close()
+                try:
+                    stale = shared_memory.SharedMemory(name=self.name, create=False)
+                    stale.unlink()
+                    stale.close()
+                except FileNotFoundError:
+                    pass
+                self.shm = shared_memory.SharedMemory(name=self.name, create=True, size=size)
+                logger.info("Recreated policy perception mirror shared memory: name={} values={}", self.name, dim)
+            else:
+                self.shm = existing
+                logger.info("Connected to policy perception mirror shared memory: name={} values={}", self.name, dim)
+        try:
+            resource_tracker.unregister(self.shm._name, "shared_memory")
+        except Exception:
+            pass
+        self.dim = int(dim)
+        self.array = np.ndarray((self.dim,), dtype=np.float32, buffer=self.shm.buf)
+
+    def publish(self, values: np.ndarray) -> None:
+        obs = np.asarray(values, dtype=np.float32).reshape(-1)
+        if obs.size <= 0:
+            return
+        self._ensure_buffer(int(obs.size))
+        if self.array is not None:
+            self.array[:] = obs
+
+    def reset(self, fill_value: float = 0.0) -> None:
+        if self.array is not None:
+            self.array[:] = np.float32(fill_value)
+
+    def close(self, *, unlink: bool = False) -> None:
+        shm = self.shm
+        self.shm = None
+        self.array = None
+        self.dim = None
+        if shm is not None:
+            if unlink:
+                try:
+                    shm.unlink()
+                except FileNotFoundError:
+                    pass
             shm.close()

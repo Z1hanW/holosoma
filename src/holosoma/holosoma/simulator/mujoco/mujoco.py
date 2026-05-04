@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 import mujoco
@@ -161,6 +162,38 @@ class MuJoCo(BaseSimulator):
         # Text overlay visibility toggle
         self.show_text_overlay: bool = True
         self._pending_reset: bool = False
+        self._pending_delayed_resets: list[float] = []
+        self._pending_policy_control_actions: list[tuple[float, str]] = []
+        self._backspace_policy_control = None
+        self._backspace_policy_control_enabled = os.getenv("HOLOSOMA_MUJOCO_BACKSPACE_POLICY_CONTROL", "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        self._backspace_policy_control_port = int(
+            os.getenv("POLICY_CONTROL_PORT", os.getenv("HOLOSOMA_POLICY_CONTROL_PORT", "5662") or "5662") or "5662"
+        )
+        self._backspace_autorestart_policy = os.getenv(
+            "HOLOSOMA_MUJOCO_BACKSPACE_AUTORESTART_POLICY", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._guard_default_viewer_reset = os.getenv("HOLOSOMA_MUJOCO_GUARD_DEFAULT_RESET", "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        self._last_default_viewer_reset_guard_time = 0.0
+        self._policy_command_overlay_enabled = os.getenv(
+            "HOLOSOMA_MUJOCO_POLICY_COMMAND_OVERLAY", "1"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._policy_overlay_port = int(
+            os.getenv("HOLOSOMA_POLICY_OVERLAY_PORT", os.getenv("POLICY_OVERLAY_PORT", "5663") or "5663") or "5663"
+        )
+        self._policy_overlay_sub = None
+        self._latest_policy_overlay_payload: dict | None = None
+        self._last_policy_command_overlay_text: str | None = None
+        self._last_policy_overlay_poll_time = 0.0
         self.show_object_collision_geoms: bool = bool(
             getattr(self.simulator_config, "mujoco_show_object_collision", False)
         )
@@ -181,6 +214,241 @@ class MuJoCo(BaseSimulator):
         self.commands: torch.Tensor | None = None  # Will be initialized in create_envs when num_envs is known
 
         logger.info("=== MuJoCo Simulator Initialization Completed ===")
+
+    def _ensure_policy_overlay_sub(self):
+        if not self._policy_command_overlay_enabled:
+            return None
+        if self._policy_overlay_sub is not None:
+            return self._policy_overlay_sub
+        if self._policy_overlay_port <= 0:
+            self._policy_command_overlay_enabled = False
+            return None
+        try:
+            from holosoma_inference.utils.policy_overlay import PolicyOverlaySub
+
+            sub = PolicyOverlaySub(port=self._policy_overlay_port)
+            sub.start()
+            self._policy_overlay_sub = sub
+            return sub
+        except Exception as exc:
+            logger.warning("MuJoCo policy-command overlay unavailable: {}", exc)
+            self._policy_command_overlay_enabled = False
+            return None
+
+    @staticmethod
+    def _format_sparse_command(command: object) -> str | None:
+        try:
+            values = np.asarray(command, dtype=np.float32).reshape(-1)
+        except (TypeError, ValueError):
+            return None
+        if values.size < 3:
+            return None
+        return "x={:.3f} y={:.3f} yaw={:.1f}deg".format(
+            float(values[0]),
+            float(values[1]),
+            float(np.rad2deg(float(values[2]))),
+        )
+
+    def _policy_command_overlay_lines(self) -> list[str]:
+        if not self._policy_command_overlay_enabled:
+            return []
+        payload = self._latest_policy_overlay_payload
+        if not isinstance(payload, dict):
+            return [
+                "Policy input cmd: waiting for policy",
+                "Terminal: ] start, Space motion, W/S/A/D/Q/E command",
+            ]
+
+        source = str(payload.get("sparse_command_source", "unknown"))
+        mode = str(payload.get("sparse_command_mode", "unknown"))
+        manual_enabled = bool(payload.get("sparse_manual_enabled", False))
+        effective = self._format_sparse_command(payload.get("sparse_effective_command"))
+        manual = self._format_sparse_command(payload.get("sparse_manual_command"))
+
+        lines = []
+        if effective is not None:
+            lines.append(f"Policy input cmd: {effective}")
+        else:
+            lines.append("Policy input cmd: waiting for command")
+        if manual is not None and manual_enabled:
+            lines.append(f"Manual cmd: {manual} ({source}, {mode})")
+        else:
+            lines.append(f"Command source: {source}, mode={mode}")
+        return lines
+
+    def _poll_policy_overlay_for_text(self) -> None:
+        if self.viewer is None or not self.show_text_overlay or not self._policy_command_overlay_enabled:
+            return
+        now = time.monotonic()
+        if now - self._last_policy_overlay_poll_time < 0.05:
+            return
+        self._last_policy_overlay_poll_time = now
+
+        sub = self._ensure_policy_overlay_sub()
+        if sub is None:
+            return
+        payload = sub.get_payload()
+        if not isinstance(payload, dict):
+            return
+        self._latest_policy_overlay_payload = payload
+        overlay_text = "\n".join(self._policy_command_overlay_lines())
+        if overlay_text != self._last_policy_command_overlay_text:
+            self._last_policy_command_overlay_text = overlay_text
+            self._update_text_overlay()
+
+    def _ensure_backspace_policy_control(self):
+        if not self._backspace_policy_control_enabled:
+            return None
+        if self._backspace_policy_control is not None:
+            return self._backspace_policy_control
+        if self._backspace_policy_control_port <= 0:
+            self._backspace_policy_control_enabled = False
+            return None
+        try:
+            from holosoma_inference.utils.sim_control import PolicyControlPush
+
+            publisher = PolicyControlPush(port=self._backspace_policy_control_port)
+            publisher.start()
+            if not publisher.enabled:
+                self._backspace_policy_control_enabled = False
+                return None
+            self._backspace_policy_control = publisher
+            return publisher
+        except Exception as exc:
+            logger.warning("MuJoCo Backspace policy-control publisher unavailable: {}", exc)
+            self._backspace_policy_control_enabled = False
+            return None
+
+    def _publish_backspace_policy_action(self, action: str) -> bool:
+        publisher = self._ensure_backspace_policy_control()
+        if publisher is None:
+            return False
+        try:
+            return bool(publisher.publish(action, source="mujoco_backspace"))
+        except Exception as exc:
+            logger.warning("MuJoCo Backspace policy-control action '{}' failed: {}", action, exc)
+            return False
+
+    def _queue_backspace_policy_action(self, action: str, delay_s: float) -> None:
+        self._pending_policy_control_actions.append((time.monotonic() + max(float(delay_s), 0.0), str(action)))
+
+    def _queue_delayed_reset(self, delay_s: float) -> None:
+        self._pending_delayed_resets.append(time.monotonic() + max(float(delay_s), 0.0))
+
+    def _publish_due_backspace_policy_actions(self) -> None:
+        if not self._pending_policy_control_actions:
+            return
+        now = time.monotonic()
+        pending: list[tuple[float, str]] = []
+        for due_time, action in self._pending_policy_control_actions:
+            if due_time <= now:
+                self._publish_backspace_policy_action(action)
+            else:
+                pending.append((due_time, action))
+        self._pending_policy_control_actions = pending
+
+    def _reset_bridge_runtime_state(self) -> None:
+        reset_bridge = getattr(self.bridge, "_reset_zmq_lowcmd_runtime_state", None) if self.bridge is not None else None
+        if callable(reset_bridge):
+            drop_sec = float(os.getenv("HOLOSOMA_ZMQ_LOWCMD_DROP_AFTER_RESET_SEC", "0.22") or "0.22")
+            try:
+                reset_bridge(drop_lowcmd_sec=max(drop_sec, 0.0))
+            except TypeError:
+                reset_bridge()
+
+    def _reset_perception_runtime_state(self) -> None:
+        reset_perception = (
+            getattr(self.bridge, "reset_perception_obs_runtime_state", None) if self.bridge is not None else None
+        )
+        if callable(reset_perception):
+            reset_perception()
+
+    def _consume_due_reset_request(self) -> bool:
+        reset_requested = False
+        if self._pending_reset:
+            self._pending_reset = False
+            reset_requested = True
+        if self._pending_delayed_resets:
+            now = time.monotonic()
+            pending: list[float] = []
+            for due_time in self._pending_delayed_resets:
+                if due_time <= now:
+                    reset_requested = True
+                else:
+                    pending.append(due_time)
+            self._pending_delayed_resets = pending
+        return reset_requested
+
+    def _perform_coordinated_reset(self) -> None:
+        self._reset_bridge_runtime_state()
+        self.reset()
+        self._reset_perception_runtime_state()
+        self._reset_bridge_runtime_state()
+        self._update_text_overlay()
+
+    def _looks_like_default_viewer_reset_pose(self) -> bool:
+        if self.root_model is None or self.root_data is None or self.robot_qpos_addr is None:
+            return False
+        motion_init_root_state = getattr(self, "_motion_init_reset_root_state", None)
+        if motion_init_root_state is None:
+            return False
+        current_pos = np.asarray(self.root_data.qpos[self.robot_qpos_addr : self.robot_qpos_addr + 3], dtype=np.float64)
+        default_pos = np.asarray(self.root_model.qpos0[self.robot_qpos_addr : self.robot_qpos_addr + 3], dtype=np.float64)
+        motion_pos = motion_init_root_state[0, :3].detach().cpu().numpy().astype(np.float64, copy=False)
+        return bool(np.linalg.norm(current_pos - default_pos) < 0.08 and np.linalg.norm(current_pos - motion_pos) > 0.25)
+
+    def _guard_default_viewer_reset_pose(self) -> bool:
+        if not self._guard_default_viewer_reset:
+            return False
+        now = time.monotonic()
+        if now - self._last_default_viewer_reset_guard_time < 0.25:
+            return False
+        if not self._looks_like_default_viewer_reset_pose():
+            return False
+        self._last_default_viewer_reset_guard_time = now
+        logger.info("Detected MuJoCo viewer default reset pose; restoring motion-init reset state")
+        self._perform_coordinated_reset()
+        return True
+
+    def _lift_reset_objects_out_of_scene_contact(self) -> None:
+        if os.getenv("HOLOSOMA_MUJOCO_RESET_LIFT_OBJECTS", "0").strip().lower() not in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            return
+        if self.root_model is None or self.root_data is None or not self._object_mujoco_body_ids:
+            return
+        clearance = float(os.getenv("HOLOSOMA_MUJOCO_RESET_OBJECT_GROUND_CLEARANCE", "0.002") or "0.002")
+        max_penetration = 0.0
+        for contact_idx in range(int(self.root_data.ncon)):
+            contact = self.root_data.contact[contact_idx]
+            geom1_id = int(contact.geom1)
+            geom2_id = int(contact.geom2)
+            body1_id = int(self.root_model.geom_bodyid[geom1_id])
+            body2_id = int(self.root_model.geom_bodyid[geom2_id])
+            body1_is_object = body1_id in self._object_mujoco_body_ids
+            body2_is_object = body2_id in self._object_mujoco_body_ids
+            if body1_is_object == body2_is_object:
+                continue
+            penetration = max(0.0, float(-contact.dist))
+            max_penetration = max(max_penetration, penetration)
+        if max_penetration <= 0.0:
+            return
+        lift = max_penetration + max(clearance, 0.0)
+        if lift <= 0.0:
+            return
+        for actor_name in self._object_body_name_by_name:
+            metadata = self._actor_root_metadata.get(str(actor_name))
+            if metadata is None:
+                continue
+            qpos_addr = int(metadata["qpos_addr"])
+            qvel_addr = int(metadata["qvel_addr"])
+            self.root_data.qpos[qpos_addr + 2] += lift
+            self.root_data.qvel[qvel_addr : qvel_addr + 6] = 0.0
+        mujoco.mj_forward(self.root_model, self.root_data)
+        logger.info("Lifted reset object state by {:.6f}m to clear scene contact", lift)
 
     def _build_name_maps(self) -> None:
         """Build bidirectional name maps for clean <-> prefixed name translation.
@@ -1250,6 +1518,9 @@ class MuJoCo(BaseSimulator):
 
         self._zero_commands()
         mujoco.mj_forward(self.root_model, self.root_data)
+        self._lift_reset_objects_out_of_scene_contact()
+        env_ids = torch.arange(self.num_envs, device=self.sim_device, dtype=torch.long)
+        self.clear_contact_forces_history(env_ids)
         if self._has_registered_dynamic_objects():
             self._refresh_all_root_states()
         if snapped_to_gantry:
@@ -1553,10 +1824,13 @@ class MuJoCo(BaseSimulator):
 
     def simulate_at_each_physics_step(self) -> None:
         """Advance simulation by one step."""
-        if self._pending_reset:
-            self._pending_reset = False
-            self.reset()
-            self._update_text_overlay()
+        self._publish_due_backspace_policy_actions()
+
+        if self._consume_due_reset_request():
+            self._perform_coordinated_reset()
+            return
+
+        if self._guard_default_viewer_reset_pose():
             return
 
         if self.virtual_gantry:
@@ -2079,6 +2353,7 @@ class MuJoCo(BaseSimulator):
         # (no-op for ClassicBackend which returns same data)
         self.root_data = self.backend.get_render_data(world_id=self.current_world_id)
 
+        self._poll_policy_overlay_for_text()
         self.viewer.sync()
         if self.debug_viz_enabled:
             self.clear_lines()
@@ -2147,14 +2422,20 @@ class MuJoCo(BaseSimulator):
         else:
             gantry_status = "inactive"
 
-        text_lines = [
+        text_lines = []
+        command_lines = self._policy_command_overlay_lines()
+        if command_lines:
+            text_lines.extend(command_lines)
+            text_lines.append("")
+
+        text_lines.extend([
             f"Virtual gantry is {gantry_status}",
             "Press '7' to raise it",
             "Press '8' to lower it",
             "Press '9' to toggle it",
             "Use arrow keys to move gantry (XY)",
             "Press backspace to reset the environment",
-        ]
+        ])
         if self._object_collision_geom_ids.size > 0:
             text_lines.append(
                 f"Press 'c' to toggle object collision view ({'on' if self.show_object_collision_geoms else 'off'})"
@@ -2207,8 +2488,30 @@ class MuJoCo(BaseSimulator):
             self._update_text_overlay()
             return
 
-        if keycode == glfw.KEY_BACKSPACE:
+        if keycode in {glfw.KEY_BACKSPACE, glfw.KEY_R}:
+            self._pending_policy_control_actions.clear()
+            self._pending_delayed_resets.clear()
+            reset_sent = self._publish_backspace_policy_action("reset")
             self._pending_reset = True
+            # The passive MuJoCo viewer also has built-in Backspace reset behavior.
+            # Re-apply our motion-init reset on later sim ticks so the viewer's
+            # qpos0 reset cannot leave the robot/object at the model default pose.
+            for delay_s in (0.05, 0.15, 0.30):
+                self._queue_delayed_reset(delay_s)
+                self._queue_backspace_policy_action("reset", delay_s + 0.01)
+            if self._backspace_autorestart_policy:
+                self._queue_backspace_policy_action("start", 0.55)
+                policy_auto_motion = os.getenv(
+                    "HOLOSOMA_POLICY_RESET_REARM_AUTO_MOTION_CLIP", "1"
+                ).strip().lower() in {"1", "true", "yes", "on"}
+                if not policy_auto_motion:
+                    self._queue_backspace_policy_action("space", 0.65)
+            logger.info(
+                "MuJoCo key reset requested coordinated reset (keycode={} policy_reset_sent={} policy_autorestart={})",
+                keycode,
+                reset_sent,
+                self._backspace_autorestart_policy,
+            )
             return
 
         # Handle world_id toggling for multi-environment visualization (WarpBackend only)
@@ -2255,6 +2558,18 @@ class MuJoCo(BaseSimulator):
     def __del__(self) -> None:
         """Cleanup viewer on simulator destruction."""
         logger.info("=== MuJoCo Simulator Cleanup Started ===")
+        if getattr(self, "_policy_overlay_sub", None) is not None:
+            try:
+                self._policy_overlay_sub.close()
+                self._policy_overlay_sub = None
+            except Exception as e:
+                logger.warning(f"Error closing policy overlay subscriber: {e}")
+        if getattr(self, "_backspace_policy_control", None) is not None:
+            try:
+                self._backspace_policy_control.close()
+                self._backspace_policy_control = None
+            except Exception as e:
+                logger.warning(f"Error closing Backspace policy-control publisher: {e}")
         if hasattr(self, "viewer") and self.viewer is not None:
             try:
                 logger.info("Closing MuJoCo viewer")

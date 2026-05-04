@@ -143,6 +143,42 @@ def _replay_debug_paths() -> tuple[Path, Path]:
     return csv_path, hits_dir
 
 
+def _get_motion_command(env: Any) -> Any:
+    command_manager = getattr(env, "command_manager", None)
+    if command_manager is None:
+        return None
+    get_state = getattr(command_manager, "get_state", None)
+    if not callable(get_state):
+        return None
+    try:
+        return get_state("motion_command")
+    except Exception:
+        return None
+
+
+def _set_replay_clip(env: Any, clip_idx: int) -> str:
+    import torch
+
+    motion_command = _get_motion_command(env)
+    if motion_command is None:
+        raise RuntimeError("Sequential replay requires a motion_command state.")
+    motion = getattr(motion_command, "motion", None)
+    clip_ids = list(getattr(motion, "clip_ids", []) or [])
+    if clip_idx < 0 or clip_idx >= len(clip_ids):
+        raise IndexError(f"clip_idx {clip_idx} out of range for {len(clip_ids)} clips.")
+
+    set_fixed = getattr(motion_command, "set_fixed_clip_ids_for_envs", None)
+    if callable(set_fixed):
+        set_fixed([0], [clip_idx])
+    elif hasattr(motion_command, "_fixed_clip_ids"):
+        motion_command._fixed_clip_ids = torch.tensor([clip_idx], device=motion_command.device, dtype=torch.long)
+    else:
+        raise RuntimeError("motion_command does not expose a fixed clip assignment API.")
+
+    env.reset_all()
+    return str(clip_ids[clip_idx])
+
+
 def replay(tyro_config: ExperimentConfig):
     simulation_app = init_sim_imports(tyro_config)
 
@@ -157,6 +193,18 @@ def replay(tyro_config: ExperimentConfig):
     tyro_env_config = get_tyro_env_config(tyro_config)
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     env = get_class(env_target)(tyro_env_config, device=device)
+    sequential_clips = _is_truthy(os.environ.get("HOLOSOMA_REPLAY_SEQUENTIAL_CLIPS"), default=False)
+    sequential_loop = _is_truthy(os.environ.get("HOLOSOMA_REPLAY_SEQUENTIAL_LOOP"), default=False)
+    sequential_start_idx = max(0, int(os.environ.get("HOLOSOMA_REPLAY_SEQUENTIAL_START_INDEX", "0") or "0"))
+    sequential_max_clips_raw = os.environ.get("HOLOSOMA_REPLAY_SEQUENTIAL_MAX_CLIPS", "").strip()
+    sequential_max_clips = int(sequential_max_clips_raw) if sequential_max_clips_raw else None
+    sequential_clip_idx = sequential_start_idx
+    sequential_played = 0
+    if sequential_clips:
+        if int(getattr(env, "num_envs", 1)) != 1:
+            raise RuntimeError("HOLOSOMA_REPLAY_SEQUENTIAL_CLIPS requires --training.num-envs=1.")
+        first_clip = _set_replay_clip(env, sequential_clip_idx)
+        print(f"[INFO] Sequential replay clip {sequential_clip_idx}: {first_clip}")
     video_recorder = getattr(getattr(env, "simulator", None), "video_recorder", None)
     record_env_id = 0
     if video_recorder is not None and video_recorder.enabled:
@@ -425,6 +473,26 @@ def replay(tyro_config: ExperimentConfig):
             except Exception as exc:
                 print(f"[WARN] Replay step debug failed at step={step}: {exc}")
         step += 1
+        if sequential_clips and done:
+            sequential_played += 1
+            if sequential_max_clips is not None and sequential_played >= sequential_max_clips:
+                break
+
+            motion_command = _get_motion_command(env)
+            motion = getattr(motion_command, "motion", None)
+            total_clips = int(getattr(motion, "num_clips", 0) or 0)
+            if total_clips <= 0:
+                break
+            next_clip_idx = sequential_clip_idx + 1
+            if next_clip_idx >= total_clips:
+                if not sequential_loop:
+                    break
+                next_clip_idx = 0
+
+            sequential_clip_idx = next_clip_idx
+            clip_name = _set_replay_clip(env, sequential_clip_idx)
+            print(f"[INFO] Sequential replay clip {sequential_clip_idx}: {clip_name}")
+            done = False
 
     if wandb_run is not None and depth_log_video and depth_video_frames:
         control_freq = 30.0
