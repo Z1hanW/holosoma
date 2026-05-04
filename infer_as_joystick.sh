@@ -245,12 +245,13 @@ export HOLOSOMA_OBJECT_COLLIDER_TYPE="${HOLOSOMA_OBJECT_COLLIDER_TYPE:-convex_de
 export VISER_LOAD_URDF="${VISER_LOAD_URDF:-1}"
 
 # distill_as_perception.sh defaults to a single-frame sparse-root/proprio/action
-# student, so do not apply the box joystick launcher's 5-frame compatibility
-# override unless explicitly requested.
-export DISTILL_PROPRIO_HISTORY_ONLY="${DISTILL_PROPRIO_HISTORY_ONLY:-0}"
-export DISTILL_PROPRIO_HISTORY_LENGTH="${DISTILL_PROPRIO_HISTORY_LENGTH:-1}"
+# student. Keep that as the fallback, but do not mark it as an explicit override:
+# infer_box_joystick.sh should prefer the checkpoint-saved observation override
+# whenever it can read one.
+export DEFAULT_DISTILL_PROPRIO_HISTORY_ONLY="${DEFAULT_DISTILL_PROPRIO_HISTORY_ONLY:-0}"
+export DEFAULT_DISTILL_PROPRIO_HISTORY_LENGTH="${DEFAULT_DISTILL_PROPRIO_HISTORY_LENGTH:-1}"
 export DEPTH_PERCEPTION_PRESET="${DEPTH_PERCEPTION_PRESET:-checkpoint}"
-export CAMERA_PITCH_DEG="${CAMERA_PITCH_DEG:-10}"
+export HOLOSOMA_RESET_TO_DEFAULT_POSE="${HOLOSOMA_RESET_TO_DEFAULT_POSE:-0}"
 
 echo "[INFO] Launching AS/OMOMO real-mesh joystick inference"
 echo "[INFO] checkpoint=${POLICY_CHECKPOINT}"
@@ -258,8 +259,9 @@ echo "[INFO] MOTION_DIR=${MOTION_DIR}"
 echo "[INFO] OBJECT_URDF=${OBJECT_URDF}"
 echo "[INFO] INFER_DATASET=${INFER_DATASET}"
 echo "[INFO] DEPTH_PERCEPTION_PRESET=${DEPTH_PERCEPTION_PRESET}"
-echo "[INFO] DISTILL_PROPRIO_HISTORY_ONLY=${DISTILL_PROPRIO_HISTORY_ONLY}"
+echo "[INFO] DEFAULT_DISTILL_PROPRIO_HISTORY_ONLY=${DEFAULT_DISTILL_PROPRIO_HISTORY_ONLY}"
 echo "[INFO] HOLOSOMA_OBJECT_SPAWN_MODE=${HOLOSOMA_OBJECT_SPAWN_MODE}"
 echo "[INFO] HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE=${HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE}"
+echo "[INFO] HOLOSOMA_RESET_TO_DEFAULT_POSE=${HOLOSOMA_RESET_TO_DEFAULT_POSE}"
 
 exec bash "${SCRIPT_DIR}/infer_box_joystick.sh" depth "${POLICY_CHECKPOINT}" "$@"

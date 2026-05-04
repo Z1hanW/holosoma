@@ -56,9 +56,13 @@ Optional env vars:
   MOCAP_PERCEPTION_PRESET (default: checkpoint; checkpoint|none|heightmap)
   DEPTH_PERCEPTION_PRESET (default: checkpoint; checkpoint|d435i)
   CAMERA_*                (optional explicit camera overrides; default preserves checkpoint camera config)
-  CAMERA_PITCH_DEG        (default: 10; explicit override aligned with distill_box_perception.sh)
+  CAMERA_PITCH_DEG        (optional explicit camera pitch override)
   DISTILL_PROPRIO_HISTORY_ONLY (default: 1; keep 5-frame history only on proprio groups, keep actions single-frame)
   DISTILL_PROPRIO_HISTORY_LENGTH (default: 5)
+  DEFAULT_DISTILL_PROPRIO_HISTORY_ONLY
+                          (fallback only when the checkpoint does not save the override)
+  DEFAULT_DISTILL_PROPRIO_HISTORY_LENGTH
+                          (fallback only when the checkpoint does not save the override)
   VISER_ENABLE_EXTERNAL_SPARSE_GOAL
                           (default: 0; set 1 to enable the same sparse-object-goal
                            command path used by box-drop distillation and draw that target)
@@ -784,12 +788,12 @@ FORCE_SINGLE_FRAME_HISTORY=${FORCE_SINGLE_FRAME_HISTORY:-0}
 if [[ "${DISTILL_PROPRIO_HISTORY_ONLY_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_DISTILL_PROPRIO_HISTORY_ONLY}" ]]; then
   DISTILL_PROPRIO_HISTORY_ONLY="${CHECKPOINT_SAVED_DISTILL_PROPRIO_HISTORY_ONLY}"
 else
-  DISTILL_PROPRIO_HISTORY_ONLY=${DISTILL_PROPRIO_HISTORY_ONLY:-1}
+  DISTILL_PROPRIO_HISTORY_ONLY=${DISTILL_PROPRIO_HISTORY_ONLY:-${DEFAULT_DISTILL_PROPRIO_HISTORY_ONLY:-1}}
 fi
 if [[ "${DISTILL_PROPRIO_HISTORY_LENGTH_EXPLICIT}" -eq 0 && -n "${CHECKPOINT_SAVED_DISTILL_PROPRIO_HISTORY_LENGTH}" ]]; then
   DISTILL_PROPRIO_HISTORY_LENGTH="${CHECKPOINT_SAVED_DISTILL_PROPRIO_HISTORY_LENGTH}"
 else
-  DISTILL_PROPRIO_HISTORY_LENGTH=${DISTILL_PROPRIO_HISTORY_LENGTH:-5}
+  DISTILL_PROPRIO_HISTORY_LENGTH=${DISTILL_PROPRIO_HISTORY_LENGTH:-${DEFAULT_DISTILL_PROPRIO_HISTORY_LENGTH:-5}}
 fi
 
 DISABLE_RANDOMIZATION=${DISABLE_RANDOMIZATION:-True}
@@ -800,8 +804,7 @@ IMAGE_HEIGHT=${IMAGE_HEIGHT:-}
 CAMERA_NEAR=${CAMERA_NEAR:-}
 CAMERA_FAR=${CAMERA_FAR:-}
 CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-}
-CAMERA_PITCH_DEG=${CAMERA_PITCH_DEG:-10}
-CAMERA_PITCH_DEG_EXPLICIT=1
+CAMERA_PITCH_DEG=${CAMERA_PITCH_DEG:-}
 MOCAP_PERCEPTION_PRESET=${MOCAP_PERCEPTION_PRESET:-checkpoint}
 DEPTH_PERCEPTION_PRESET=${DEPTH_PERCEPTION_PRESET:-checkpoint}
 OBJECT_GEOMETRY_MODE_RAW=${OBJECT_GEOMETRY_MODE:-}
@@ -1293,7 +1296,11 @@ echo "  2) Set 'Root dX/dY/dYaw' as the desired root-frame relative command."
 echo "  3) Use 'Zero Root Command' to reset the relative root command to zero."
 echo "  4) Use 'Advanced > Reset Object' to add box position/rotation offsets for the next reset."
 echo "  5) Use 'Clip Playback' to select clip/start frame and click 'Apply Clip'."
-echo "  6) Use 'Advanced > Simulation Control' for Play/Step/Reset (Reset returns to the default pose)."
+if is_truthy "${HOLOSOMA_RESET_TO_DEFAULT_POSE:-0}"; then
+  echo "  6) Use 'Advanced > Simulation Control' for Play/Step/Reset (Reset returns to the default pose)."
+else
+  echo "  6) Use 'Advanced > Simulation Control' for Play/Step/Reset (Reset returns to the selected motion state)."
+fi
 if command -v hostname >/dev/null 2>&1; then
   HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
   if [[ -n "${HOST_IP}" ]]; then
