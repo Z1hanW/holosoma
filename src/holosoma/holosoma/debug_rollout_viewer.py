@@ -408,6 +408,7 @@ class DebugRolloutViewer:
         port: int,
         robot_urdf_path: Path | None,
         original_motion_dir: Path | None,
+        show_original_motion_initial: bool = False,
     ) -> None:
         self.data_root = data_root
         self.vis_root = vis_root
@@ -487,7 +488,10 @@ class DebugRolloutViewer:
             self.show_robot_cb = self.server.gui.add_checkbox("Training G1", initial_value=robot_urdf_path is not None)
             self.show_product_cb = self.server.gui.add_checkbox("Static Product Overlay", initial_value=True)
             self.show_rollout_cb = self.server.gui.add_checkbox("Rollout View", initial_value=True)
-            self.show_original_motion_cb = self.server.gui.add_checkbox("Original Input Motion", initial_value=False)
+            self.show_original_motion_cb = self.server.gui.add_checkbox(
+                "Original Input Motion",
+                initial_value=show_original_motion_initial,
+            )
             self.show_mesh_cb = self.server.gui.add_checkbox("Object Mesh", initial_value=True)
             self.show_box_cb = self.server.gui.add_checkbox("Primitive Box", initial_value=True)
             self.show_points_cb = self.server.gui.add_checkbox("Contact Points", initial_value=True)
@@ -1302,6 +1306,11 @@ def main() -> None:
         help="URDF used to draw the training G1 robot. Defaults to the object-generalist training G1.",
     )
     parser.add_argument("--no-robot", action="store_true", help="Disable the training G1 robot overlay.")
+    parser.add_argument(
+        "--show-original-motion",
+        action="store_true",
+        help="Show the original input/reference motion overlay at startup.",
+    )
     parser.add_argument("--list-only", action="store_true", help="List available sequences and exit.")
     args = parser.parse_args()
 
@@ -1328,6 +1337,7 @@ def main() -> None:
         port=port,
         robot_urdf_path=robot_urdf_path,
         original_motion_dir=original_motion_dir,
+        show_original_motion_initial=bool(args.show_original_motion),
     )
     viewer.run_forever()
 

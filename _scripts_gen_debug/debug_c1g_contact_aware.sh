@@ -32,7 +32,7 @@ export DATA_MODE="${DATA_MODE:-pure-sd}"
 export TRACKER_PROFILE="${TRACKER_PROFILE:-old-tracker}"
 export SCHEDULE_VARIANT="${SCHEDULE_VARIANT:-ppo_first}"
 export ROOT_COMMAND_MODE="${ROOT_COMMAND_MODE:-contact-aware}"
-export EXP="${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref-shoo7sr1-debug}"
+export EXP="${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref-shoo7sr1-contact-aware-debug}"
 export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_box_perception_sparse_root_cmd_r2s_rollout_ref_access_to_depth}"
 export TRAINING_PROJECT="${TRAINING_PROJECT:-boxer}"
 
