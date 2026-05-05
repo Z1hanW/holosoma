@@ -32,8 +32,10 @@ single_d435i_depth = CameraManagerCfg(terms={
         params={
             "pose": CameraPose(
                 camera_body_link="torso_link",
-                camera_offset=(0.01, 0.01, 0.44),
-                camera_rotation=(1.0, 45.0, 1.0),   # (1.0, 27.0, 1.0) for other PHP tasks
+                camera_offset=(0.01, 0.01, 0.45),
+                # Equivalent to the trained strict-warp D435i mount:
+                # mount RPY=(1, 27, 1), camera_pitch_deg=10.
+                camera_rotation=(1.2174157243, 36.9983094267, 1.1156500944),
             ),
             "props": d435i_depth_props,
         },
