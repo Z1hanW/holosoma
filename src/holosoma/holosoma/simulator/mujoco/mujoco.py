@@ -812,6 +812,10 @@ class MuJoCo(BaseSimulator):
         mujoco.mj_resetData(self.root_model, self.root_data)
 
         self._set_robot_initial_state()
+        self._set_initial_joint_angles()
+        initialize_backend_state = getattr(self.backend, "initialize_state", None)
+        if callable(initialize_backend_state):
+            initialize_backend_state(self.root_model, self.root_data)
 
         # Setup ObjectRegistry for robot-only (scenes not yet implemented)
         self.object_registry.setup_ranges(self.num_envs, robot_count=1, scene_count=0, individual_count=0)

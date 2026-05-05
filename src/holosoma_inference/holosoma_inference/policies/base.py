@@ -274,7 +274,7 @@ class BasePolicy:
         self.upper_body_controller = None
 
         # Pre-allocate command arrays for postprocessing
-        self.cmd_q = np.zeros(self.num_dofs)
+        self.cmd_q = self.default_dof_angles.copy()
         self.cmd_dq = np.zeros(self.num_dofs)
         self.cmd_tau = np.zeros(self.num_dofs)
 
@@ -782,7 +782,7 @@ class BasePolicy:
         """Handle initialization state."""
         self.get_ready_state = True
         self.init_count = 0
-        self.logger.info("Setting to init state")
+        self.logger.info("Setting to default pose")
         if hasattr(self.interface, "no_action"):
             self.interface.no_action = 0
 

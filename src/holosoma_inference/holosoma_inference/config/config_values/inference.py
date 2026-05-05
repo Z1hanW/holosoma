@@ -25,13 +25,7 @@ t1_29dof_loco = InferenceConfig(
 g1_29dof_wbt = InferenceConfig(
     robot=replace(
         robot.g1_29dof,
-        stiff_startup_pos=(
-            -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,   # left leg
-            -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,   # right leg
-            0.0, 0.0, 0.0,                          # waist
-            0.2, 0.2, 0.0, 0.6, 0.0, 0.0, 0.0,      # left arm
-            0.2, -0.2, 0.0, 0.6, 0.0, 0.0, 0.0,     # right arm
-        ),
+        stiff_startup_pos=None,
         stiff_startup_kp=(
             350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
             350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
@@ -100,13 +94,7 @@ g1_29dof_loco_manip_stand_height_waist = InferenceConfig(
 g1_wbt_distillation = InferenceConfig(
     robot=replace(
         robot.g1_29dof_wbt_distillation,
-        stiff_startup_pos=(
-            -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,   # left leg
-            -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,   # right leg
-            0.0, 0.0, 0.0,                          # waist
-            0.2, 0.2, 0.0, 0.6, 0.0, 0.0, 0.0,      # left arm
-            0.2, -0.2, 0.0, 0.6, 0.0, 0.0, 0.0,     # right arm
-        ),
+        stiff_startup_pos=None,
         stiff_startup_kp=(
             350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
             350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
@@ -131,13 +119,7 @@ g1_wbt_distillation = InferenceConfig(
 g1_blind_fall_recovery = InferenceConfig(
     robot=replace(
         robot.g1_29dof,
-        stiff_startup_pos=(
-            -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,   # left leg
-            -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,   # right leg
-            0.0, 0.0, 0.0,                          # waist
-            0.2, 0.2, 0.0, 0.6, 0.0, 0.0, 0.0,      # left arm
-            0.2, -0.2, 0.0, 0.6, 0.0, 0.0, 0.0,     # right arm
-        ),
+        stiff_startup_pos=None,
         stiff_startup_kp=(
             350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
             350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
