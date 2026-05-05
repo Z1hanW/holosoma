@@ -10,6 +10,7 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
 fi
 
 export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
+export PYTHONPATH="${ROOT_DIR}/src/holosoma${PYTHONPATH:+:${PYTHONPATH}}"
 
 ROBOT_CONFIG="${ROBOT_CONFIG:-g1-29dof-w-object}"
 CAMERA_CONFIG="${CAMERA_CONFIG:-single_d435i_depth}"

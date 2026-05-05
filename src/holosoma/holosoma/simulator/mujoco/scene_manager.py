@@ -549,7 +549,6 @@ class MujocoSceneManager:
         object_spec = mujoco.MjSpec.from_file(str(resolved_object_path))
         self._configure_urdf_meshdir(object_spec, resolved_object_path)
         object_root_body = self._select_object_root_body(object_spec)
-        object_root_body.add_freejoint(name="object_freejoint")
         object_root_body.pos = [0.75, 0.0, 0.18]
 
         object_site = self.world_spec.worldbody.add_site(pos=[0.0, 0.0, 0.0], quat=[1.0, 0.0, 0.0, 0.0])
