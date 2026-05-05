@@ -463,6 +463,58 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._keyboard_sparse_root_latched_command: tuple[float, float, float] = (0.0, 0.0, 0.0)
         self._keyboard_sparse_root_lock = threading.Lock()
         self._keyboard_sparse_root_last_command: tuple[float, float, float] | None = None
+        self._joystick_sparse_root_command_enabled = _truthy_env("HOLOSOMA_JOYSTICK_ROOT_COMMAND")
+        self._joystick_sparse_root_command_mode = os.environ.get("HOLOSOMA_JOYSTICK_ROOT_COMMAND_MODE", "manual").strip().lower()
+        try:
+            self._joystick_sparse_root_command_value = float(
+                os.environ.get("HOLOSOMA_JOYSTICK_ROOT_COMMAND_VALUE", "0.2")
+            )
+        except ValueError:
+            self._joystick_sparse_root_command_value = 0.2
+        self._joystick_sparse_root_command_value = abs(float(self._joystick_sparse_root_command_value))
+        try:
+            self._joystick_sparse_root_xy_max = float(os.environ.get("HOLOSOMA_JOYSTICK_ROOT_COMMAND_XY_MAX", "0.5"))
+        except ValueError:
+            self._joystick_sparse_root_xy_max = 0.5
+        self._joystick_sparse_root_xy_max = abs(float(self._joystick_sparse_root_xy_max))
+        if self._joystick_sparse_root_xy_max > 0.0:
+            self._joystick_sparse_root_command_value = min(
+                self._joystick_sparse_root_command_value,
+                self._joystick_sparse_root_xy_max,
+            )
+        try:
+            joystick_yaw_value_env = os.environ.get("HOLOSOMA_JOYSTICK_ROOT_COMMAND_YAW_VALUE")
+            if joystick_yaw_value_env is not None:
+                self._joystick_sparse_root_command_yaw_value = float(joystick_yaw_value_env)
+            else:
+                self._joystick_sparse_root_command_yaw_value = float(
+                    np.deg2rad(float(os.environ.get("HOLOSOMA_JOYSTICK_ROOT_COMMAND_YAW_DEGREES", "17")))
+                )
+        except ValueError:
+            self._joystick_sparse_root_command_yaw_value = float(np.deg2rad(17.0))
+        self._joystick_sparse_root_command_yaw_value = abs(
+            float(self._joystick_sparse_root_command_yaw_value)
+        )
+        try:
+            self._joystick_sparse_root_deadzone = float(
+                os.environ.get("HOLOSOMA_JOYSTICK_ROOT_COMMAND_DEADZONE", "0.1")
+            )
+        except ValueError:
+            self._joystick_sparse_root_deadzone = 0.1
+        self._joystick_sparse_root_deadzone = max(0.0, min(abs(float(self._joystick_sparse_root_deadzone)), 1.0))
+        try:
+            self._joystick_sparse_root_x_sign = float(os.environ.get("HOLOSOMA_JOYSTICK_ROOT_COMMAND_X_SIGN", "1"))
+        except ValueError:
+            self._joystick_sparse_root_x_sign = 1.0
+        try:
+            self._joystick_sparse_root_y_sign = float(os.environ.get("HOLOSOMA_JOYSTICK_ROOT_COMMAND_Y_SIGN", "-1"))
+        except ValueError:
+            self._joystick_sparse_root_y_sign = -1.0
+        try:
+            self._joystick_sparse_root_yaw_sign = float(os.environ.get("HOLOSOMA_JOYSTICK_ROOT_COMMAND_YAW_SIGN", "-1"))
+        except ValueError:
+            self._joystick_sparse_root_yaw_sign = -1.0
+        self._joystick_sparse_root_last_command: tuple[float, float, float] | None = None
         self._last_sparse_motion_command: list[float] | None = None
         self._last_sparse_effective_command: list[float] | None = None
         self._last_sparse_manual_command: list[float] | None = None
@@ -536,6 +588,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         except ValueError:
             self._motion_index_offset = 0
         self._force_motion_alignment = _truthy_env("HOLOSOMA_FORCE_MOTION_ALIGNMENT")
+        self._sparse_root_without_motion = _truthy_env("HOLOSOMA_SPARSE_ROOT_COMMAND_WITHOUT_MOTION")
         self._skip_stiff_prompt = _truthy_env("HOLOSOMA_SKIP_STIFF_PROMPT")
         self._target_object_state_assist = _truthy_env("HOLOSOMA_POLICY_TARGET_OBJECT_STATE_ASSIST")
         self._logged_target_object_state_assist = False
@@ -603,8 +656,23 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 self._keyboard_sparse_root_command_mode,
                 self._keyboard_sparse_root_command_input_mode,
             )
+        if self._joystick_sparse_root_command_enabled:
+            logger.info(
+                "Joystick sparse root command enabled: left stick=x/y, right stick=yaw, xy_value={:.3f}, xy_max={:.3f}, yaw={:.3f} rad ({:.1f} deg), deadzone={:.3f}, mode={}, signs=({:.1f},{:.1f},{:.1f})",
+                self._joystick_sparse_root_command_value,
+                self._joystick_sparse_root_xy_max,
+                self._joystick_sparse_root_command_yaw_value,
+                float(np.rad2deg(self._joystick_sparse_root_command_yaw_value)),
+                self._joystick_sparse_root_deadzone,
+                self._joystick_sparse_root_command_mode,
+                self._joystick_sparse_root_x_sign,
+                self._joystick_sparse_root_y_sign,
+                self._joystick_sparse_root_yaw_sign,
+            )
         if self._motion_index_offset != 0:
             logger.info("Using motion sequence index offset: {}", self._motion_index_offset)
+        if self._sparse_root_without_motion:
+            logger.info("Sparse-root command will run without an explicit motion file.")
 
         if self.config.task.use_sim_state:
             self._sim_state_sub = SimStateSub(port=self.config.task.sim_state_port)
@@ -967,14 +1035,21 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
             logger.info(f"Loaded KP/KD from ONNX metadata: {Path(model_path).name}")
 
-        if (
+        load_motion_data = (
             self._uses_videomimic
             or self._uses_object_mocap_distill
             or self._uses_object_generalist
             or self._uses_legacy_object_obs
-            or self._uses_sparse_root_command
-        ):
+            or (
+                self._uses_sparse_root_command
+                and (bool(self.config.task.motion_file) or not self._sparse_root_without_motion)
+            )
+        )
+        if load_motion_data:
             self._load_motion_data_from_metadata(metadata, Path(model_path))
+        elif self._uses_sparse_root_command:
+            self._motion_cfg = self._extract_motion_config(metadata) or {}
+            logger.info("Skipping motion-data load for sparse-root-only inference.")
 
         if "obs" in self.onnx_input_names:
             self._obs_input_name = "obs"
@@ -1047,6 +1122,14 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self.ref_quat_xyzw_t = wxyz_to_xyzw(ref_quat_wxyz)
             self.ref_quat_xyzw_0 = self.ref_quat_xyzw_t.copy()
             self.ref_pos_xyz_t = self._motion_data.ref_pos_w[:1]
+        elif self._uses_sparse_root_command and self._sparse_root_without_motion:
+            joint_pos = np.asarray(self.default_dof_angles, dtype=np.float32).reshape(1, self.num_dofs)
+            joint_vel = np.zeros((1, self.num_dofs), dtype=np.float32)
+            self.motion_command_t = np.concatenate([joint_pos, joint_vel], axis=1)
+            self.motion_command_0 = self.motion_command_t.copy()
+            self.ref_quat_xyzw_t = np.asarray([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+            self.ref_quat_xyzw_0 = self.ref_quat_xyzw_t.copy()
+            self.ref_pos_xyz_t = np.zeros((1, 3), dtype=np.float32)
 
     def _get_onnx_input_dim(self, input_name: str | None) -> int | None:
         if input_name is None:
@@ -1639,6 +1722,46 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         return self._keyboard_sparse_root_command_mode, np.asarray([command_tuple], dtype=np.float32)
 
+    def _get_joystick_sparse_root_command(self) -> tuple[str, np.ndarray] | None:
+        if not self._joystick_sparse_root_command_enabled or not self.use_joystick:
+            return None
+        get_msg = getattr(self.interface, "get_joystick_msg", None)
+        if not callable(get_msg):
+            return None
+        wc_msg = get_msg()
+        if wc_msg is None:
+            return None
+
+        deadzone = self._joystick_sparse_root_deadzone
+
+        def _axis(name: str) -> float:
+            try:
+                value = float(getattr(wc_msg, name, 0.0))
+            except (TypeError, ValueError):
+                return 0.0
+            if abs(value) < deadzone:
+                return 0.0
+            return max(-1.0, min(1.0, value))
+
+        x = _axis("ly") * self._joystick_sparse_root_command_value * self._joystick_sparse_root_x_sign
+        y = _axis("lx") * self._joystick_sparse_root_command_value * self._joystick_sparse_root_y_sign
+        yaw = _axis("rx") * self._joystick_sparse_root_command_yaw_value * self._joystick_sparse_root_yaw_sign
+        if self._joystick_sparse_root_xy_max > 0.0:
+            x = float(np.clip(x, -self._joystick_sparse_root_xy_max, self._joystick_sparse_root_xy_max))
+            y = float(np.clip(y, -self._joystick_sparse_root_xy_max, self._joystick_sparse_root_xy_max))
+        command_tuple = (float(x), float(y), float(yaw))
+
+        if command_tuple != self._joystick_sparse_root_last_command:
+            logger.info(
+                "Joystick sparse root command: x={:.3f} y={:.3f} yaw={:.3f}",
+                command_tuple[0],
+                command_tuple[1],
+                command_tuple[2],
+            )
+            self._joystick_sparse_root_last_command = command_tuple
+
+        return self._joystick_sparse_root_command_mode, np.asarray([command_tuple], dtype=np.float32)
+
     def _apply_sparse_root_command(
         self,
         motion_command: np.ndarray,
@@ -1669,6 +1792,20 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 motion_command,
                 effective_command,
                 source="manual_keyboard",
+                mode=mode,
+                manual_enabled=True,
+                manual_command=manual_command,
+            )
+            return effective_command
+
+        joystick_command = self._get_joystick_sparse_root_command()
+        if joystick_command is not None:
+            mode, manual_command = joystick_command
+            effective_command = self._apply_sparse_root_command(motion_command, manual_command, mode)
+            self._record_sparse_root_command(
+                motion_command,
+                effective_command,
+                source="manual_joystick",
                 mode=mode,
                 manual_enabled=True,
                 manual_command=manual_command,
@@ -1743,6 +1880,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
     def _get_sparse_target_root_trajectory_command(self, robot_state_data: np.ndarray) -> np.ndarray:
         if self._motion_data is None:
+            if self._sparse_root_without_motion:
+                motion_command = np.zeros((1, 3), dtype=np.float32)
+                return self._apply_external_sparse_root_command(motion_command)
             raise ValueError("Motion data is required for sparse root trajectory observations.")
 
         self._maybe_update_motion_alignment(robot_state_data)

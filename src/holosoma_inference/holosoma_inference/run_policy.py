@@ -34,6 +34,12 @@ def _print_control_guide(policy_class, use_joystick: bool):
         "yes",
         "on",
     }
+    joystick_root_command = str(os.environ.get("HOLOSOMA_JOYSTICK_ROOT_COMMAND", "0")).lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
     logger.info("=" * 80)
     logger.info("🎮 POLICY CONTROLS")
@@ -53,6 +59,9 @@ def _print_control_guide(policy_class, use_joystick: bool):
             logger.info("")
             logger.info("Whole-Body Tracking Controls:")
             logger.info("  Start button   - Start motion clip")
+            if joystick_root_command:
+                logger.info("  Left stick     - Sparse root command x/y")
+                logger.info("  Right stick    - Sparse root command yaw")
         else:
             logger.info("")
             logger.info("Locomotion Controls:")
