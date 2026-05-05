@@ -260,6 +260,111 @@ wbt_depth_distill = ObservationConfig(
     },
 )
 
+wbt_linvel_depth_distill = ObservationConfig(
+    obs_dict={
+        "actor_obs_root": [
+            "sparse_target_root_trajectory_command",
+        ],
+        "actor_obs_proprio": [
+            "base_lin_vel",
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+        ],
+    },
+    obs_dims={
+        "sparse_target_root_trajectory_command": 3,
+        "base_lin_vel": 3,
+        "base_ang_vel": 3,
+        "dof_pos": 29,
+        "dof_vel": 29,
+    },
+    obs_scales={
+        "sparse_target_root_trajectory_command": 1.0,
+        "base_lin_vel": 1.0,
+        "base_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 1.0,
+    },
+    history_length_dict={
+        "actor_obs_root": 1,
+        "actor_obs_proprio": 5,
+    },
+)
+
+wbt_action_history_depth_distill = ObservationConfig(
+    obs_dict={
+        "actor_obs_root": [
+            "sparse_target_root_trajectory_command",
+        ],
+        "actor_obs_proprio_no_linvel": [
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+        ],
+        "actor_obs_actions": [
+            "actions",
+        ],
+    },
+    obs_dims={
+        "sparse_target_root_trajectory_command": 3,
+        "base_ang_vel": 3,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+    },
+    obs_scales={
+        "sparse_target_root_trajectory_command": 1.0,
+        "base_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 1.0,
+        "actions": 1.0,
+    },
+    history_length_dict={
+        "actor_obs_root": 1,
+        "actor_obs_proprio_no_linvel": 5,
+        "actor_obs_actions": 5,
+    },
+)
+
+wbt_linvel_action_history_depth_distill = ObservationConfig(
+    obs_dict={
+        "actor_obs_root": [
+            "sparse_target_root_trajectory_command",
+        ],
+        "actor_obs_proprio": [
+            "base_lin_vel",
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+        ],
+        "actor_obs_actions": [
+            "actions",
+        ],
+    },
+    obs_dims={
+        "sparse_target_root_trajectory_command": 3,
+        "base_lin_vel": 3,
+        "base_ang_vel": 3,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+    },
+    obs_scales={
+        "sparse_target_root_trajectory_command": 1.0,
+        "base_lin_vel": 1.0,
+        "base_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 1.0,
+        "actions": 1.0,
+    },
+    history_length_dict={
+        "actor_obs_root": 1,
+        "actor_obs_proprio": 5,
+        "actor_obs_actions": 5,
+    },
+)
+
 wbt_contact_aware_depth_distill = ObservationConfig(
     obs_dict={
         "actor_obs_root_contact_aware": [
@@ -295,6 +400,38 @@ wbt_contact_aware_depth_distill = ObservationConfig(
         "actor_obs_root_contact_aware": 1,
         "actor_obs_proprio": 1,
         "actor_obs_actions": 1,
+    },
+)
+
+wbt_linvel_contact_aware_depth_distill = ObservationConfig(
+    obs_dict={
+        "actor_obs_root_contact_aware": [
+            "sparse_target_root_trajectory_command_contact_aware",
+        ],
+        "actor_obs_proprio": [
+            "base_lin_vel",
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+        ],
+    },
+    obs_dims={
+        "sparse_target_root_trajectory_command_contact_aware": 3,
+        "base_lin_vel": 3,
+        "base_ang_vel": 3,
+        "dof_pos": 29,
+        "dof_vel": 29,
+    },
+    obs_scales={
+        "sparse_target_root_trajectory_command_contact_aware": 1.0,
+        "base_lin_vel": 1.0,
+        "base_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 1.0,
+    },
+    history_length_dict={
+        "actor_obs_root_contact_aware": 1,
+        "actor_obs_proprio": 5,
     },
 )
 
@@ -389,7 +526,11 @@ DEFAULTS = {
     "wbt-object-generalist": wbt_object_generalist,
     "wbt-w-object": wbt_w_object,
     "wbt-depth-distill": wbt_depth_distill,
+    "wbt-linvel-depth-distill": wbt_linvel_depth_distill,
+    "wbt-action-history-depth-distill": wbt_action_history_depth_distill,
+    "wbt-linvel-action-history-depth-distill": wbt_linvel_action_history_depth_distill,
     "wbt-contact-aware-depth-distill": wbt_contact_aware_depth_distill,
+    "wbt-linvel-contact-aware-depth-distill": wbt_linvel_contact_aware_depth_distill,
     "wbt-object-mocap-distill": wbt_object_mocap_distill,
     "wbt-videomimic": wbt_videomimic,
 }

@@ -1387,6 +1387,29 @@ if "perception_obs" in input_dims:
     ]:
         print("g1-29dof-wbt-object-contact-aware-depth-distill")
         raise SystemExit(0)
+    if obs_dim == 323 and actor_input_dim == [
+        "actor_obs_root_contact_aware",
+        "actor_obs_proprio",
+    ]:
+        print("g1-29dof-wbt-object-linvel-contact-aware-depth-distill")
+        raise SystemExit(0)
+    if obs_dim == 323 and actor_input_dim == ["actor_obs_root", "actor_obs_proprio"]:
+        print("g1-29dof-wbt-object-linvel-depth-distill")
+        raise SystemExit(0)
+    if obs_dim == 453 and actor_input_dim == [
+        "actor_obs_root",
+        "actor_obs_proprio_no_linvel",
+        "actor_obs_actions",
+    ]:
+        print("g1-29dof-wbt-object-action-history-depth-distill")
+        raise SystemExit(0)
+    if obs_dim == 468 and actor_input_dim == [
+        "actor_obs_root",
+        "actor_obs_proprio",
+        "actor_obs_actions",
+    ]:
+        print("g1-29dof-wbt-object-linvel-action-history-depth-distill")
+        raise SystemExit(0)
     if obs_dim == 308 and actor_input_dim == ["actor_obs_root", "actor_obs_proprio_no_linvel"]:
         print("g1-29dof-wbt-object-distill")
         raise SystemExit(0)

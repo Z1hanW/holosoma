@@ -1,0 +1,31 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="box_35_box_collision">
+  <dynamics damping="0.5" friction="0.9" />
+  <link name="baseLink">
+    <inertial>
+      <mass value="0.1" />
+      <origin xyz="0 0 0" />
+      <inertia ixx="0.000832001662" ixy="0" ixz="0" iyy="0.00139091093" iyz="0" izz="0.00159602414" />
+    </inertial>
+    <contact>
+      <lateral_friction value="0.9" />
+      <rolling_friction value="0.5" />
+      <stiffness value="30000" />
+      <damping value="1000" />
+    </contact>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/holosoma/data_demo/objects/box_35.obj" scale="1 1 1" />
+      </geometry>
+      <material name="mat">
+        <color rgba="0.7 0.8 0.9 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <box size="0.3595775365829468 0.24945318698883057 0.19394150376319885" /></geometry>
+    </collision>
+  </link>
+</robot>

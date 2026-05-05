@@ -107,6 +107,26 @@ g1_29dof_wbt_object_contact_aware_depth_distill = replace(
     observation=observation.wbt_contact_aware_depth_distill,
 )
 
+g1_29dof_wbt_object_linvel_depth_distill = replace(
+    g1_29dof_wbt_object_distill,
+    observation=observation.wbt_linvel_depth_distill,
+)
+
+g1_29dof_wbt_object_action_history_depth_distill = replace(
+    g1_29dof_wbt_object_distill,
+    observation=observation.wbt_action_history_depth_distill,
+)
+
+g1_29dof_wbt_object_linvel_action_history_depth_distill = replace(
+    g1_29dof_wbt_object_distill,
+    observation=observation.wbt_linvel_action_history_depth_distill,
+)
+
+g1_29dof_wbt_object_linvel_contact_aware_depth_distill = replace(
+    g1_29dof_wbt_object_distill,
+    observation=observation.wbt_linvel_contact_aware_depth_distill,
+)
+
 g1_29dof_wbt_object_mocap_distill = replace(
     g1_29dof_wbt,
     observation=observation.wbt_object_mocap_distill,
@@ -164,6 +184,14 @@ DEFAULTS = {
     "g1-29dof-wbt-object-distill-mujoco": g1_29dof_wbt_object_distill_mujoco,
     "g1-29dof-wbt-object-contact-aware-depth-distill": g1_29dof_wbt_object_contact_aware_depth_distill,
     "g1-29dof-wbt-contact-aware-depth-distill": g1_29dof_wbt_object_contact_aware_depth_distill,
+    "g1-29dof-wbt-object-linvel-depth-distill": g1_29dof_wbt_object_linvel_depth_distill,
+    "g1-29dof-wbt-linvel-depth-distill": g1_29dof_wbt_object_linvel_depth_distill,
+    "g1-29dof-wbt-object-action-history-depth-distill": g1_29dof_wbt_object_action_history_depth_distill,
+    "g1-29dof-wbt-action-history-depth-distill": g1_29dof_wbt_object_action_history_depth_distill,
+    "g1-29dof-wbt-object-linvel-action-history-depth-distill": g1_29dof_wbt_object_linvel_action_history_depth_distill,
+    "g1-29dof-wbt-linvel-action-history-depth-distill": g1_29dof_wbt_object_linvel_action_history_depth_distill,
+    "g1-29dof-wbt-object-linvel-contact-aware-depth-distill": g1_29dof_wbt_object_linvel_contact_aware_depth_distill,
+    "g1-29dof-wbt-linvel-contact-aware-depth-distill": g1_29dof_wbt_object_linvel_contact_aware_depth_distill,
     "g1-29dof-wbt-object-mocap-distill": g1_29dof_wbt_object_mocap_distill,
     "g1-29dof-wbt-mocap-distill": g1_29dof_wbt_object_mocap_distill,
     "g1-29dof-videomimic": g1_29dof_videomimic,
