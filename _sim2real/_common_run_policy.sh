@@ -15,7 +15,7 @@ Required:
 
 Common environment:
   UNITREE_DOMAIN_ID          default: 0
-  PERCEPTION_OBS_PORT        default: 5658; real depth/perception_obs ZMQ publisher
+  PERCEPTION_OBS_SHM_NAME    default: depth_img_shm
   MODEL_INPUT                override W&B run URL or local .onnx path
   INFERENCE_CONFIG           override inference config
   HOLOSOMA_JOYSTICK_ROOT_COMMAND_VALUE
@@ -105,7 +105,7 @@ INFERENCE_CONFIG="${INFERENCE_CONFIG:-${SIM2REAL_INFERENCE_CONFIG}}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 UNITREE_INTERFACE_RESOLVED="${UNITREE_INTERFACE:-${INTERFACE_NAME:-${INTERFACE:-}}}"
 UNITREE_DOMAIN_ID="${UNITREE_DOMAIN_ID:-${DOMAIN_ID:-0}}"
-PERCEPTION_OBS_PORT="${PERCEPTION_OBS_PORT:-5658}"
+PERCEPTION_OBS_SHM_NAME="${PERCEPTION_OBS_SHM_NAME:-depth_img_shm}"
 POLICY_RL_RATE="${POLICY_RL_RATE:-50}"
 POLICY_ACTION_SCALE="${POLICY_ACTION_SCALE:-1.0}"
 WANDB_DOWNLOAD_DIR="${WANDB_DOWNLOAD_DIR:-$ROOT_DIR/logs/wandb_runs/sim2real/${SIM2REAL_POLICY_NAME}}"
@@ -162,8 +162,8 @@ CMD=(
   --task.no-restart-sim-on-motion-end
   --task.no-use-zmq-lowcmd
   --task.use-split-perception-obs
-  --task.no-use-split-perception-obs-shm
-  --task.perception-obs-port "$PERCEPTION_OBS_PORT"
+  --task.use-split-perception-obs-shm
+  --task.perception-obs-shm-name "$PERCEPTION_OBS_SHM_NAME"
   --task.no-auto-start-policy
   --task.no-auto-start-motion
   --task.no-auto-start-motion-clip
@@ -187,7 +187,7 @@ echo "[INFO] _sim2real model=${MODEL_INPUT}"
 echo "[INFO] _sim2real inference_config=${INFERENCE_CONFIG}"
 echo "[INFO] _sim2real motion=${MOTION_FILE:-none, sparse-root-only}"
 echo "[INFO] _sim2real interface=${UNITREE_INTERFACE_RESOLVED} domain=${UNITREE_DOMAIN_ID}"
-echo "[INFO] _sim2real perception_obs_port=${PERCEPTION_OBS_PORT}"
+echo "[INFO] _sim2real perception_obs_shm_name=${PERCEPTION_OBS_SHM_NAME}"
 echo "[INFO] _sim2real joystick xy=${HOLOSOMA_JOYSTICK_ROOT_COMMAND_VALUE} xy_max=${HOLOSOMA_JOYSTICK_ROOT_COMMAND_XY_MAX} yaw_deg=${HOLOSOMA_JOYSTICK_ROOT_COMMAND_YAW_DEGREES}"
 print_command "${CMD[@]}"
 

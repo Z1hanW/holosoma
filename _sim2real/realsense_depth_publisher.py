@@ -4,12 +4,70 @@
 from __future__ import annotations
 
 import argparse
-import json
 import time
+from multiprocessing import resource_tracker
+from multiprocessing import shared_memory
 
 import cv2
 import numpy as np
-import zmq
+
+
+class PerceptionObsShmPublisher:
+    """Write the latest flattened perception_obs tensor into POSIX shared memory."""
+
+    def __init__(self, name: str, dim: int, *, fill_value: float = 0.5) -> None:
+        self.name = str(name)
+        self.dim = int(dim)
+        self.size = self.dim * np.dtype(np.float32).itemsize
+        self.shm: shared_memory.SharedMemory | None = None
+        self.array: np.ndarray | None = None
+        self._created = False
+        self._attach_or_create()
+        if self.array is not None:
+            self.array[:] = np.float32(fill_value)
+
+    def _attach_or_create(self) -> None:
+        try:
+            self.shm = shared_memory.SharedMemory(name=self.name, create=True, size=self.size)
+            self._created = True
+            print(f"[INFO] created perception_obs shared memory: name={self.name} values={self.dim}")
+        except FileExistsError:
+            existing = shared_memory.SharedMemory(name=self.name, create=False)
+            if len(existing.buf) != self.size:
+                existing.close()
+                stale = shared_memory.SharedMemory(name=self.name, create=False)
+                stale.unlink()
+                stale.close()
+                self.shm = shared_memory.SharedMemory(name=self.name, create=True, size=self.size)
+                self._created = True
+                print(f"[INFO] recreated perception_obs shared memory: name={self.name} values={self.dim}")
+            else:
+                self.shm = existing
+                try:
+                    resource_tracker.unregister(self.shm._name, "shared_memory")
+                except Exception:
+                    pass
+                print(f"[INFO] connected to perception_obs shared memory: name={self.name} values={self.dim}")
+
+        self.array = np.ndarray((self.dim,), dtype=np.float32, buffer=self.shm.buf)
+
+    def publish(self, obs_img: np.ndarray) -> None:
+        if self.array is None:
+            return
+        self.array[:] = np.asarray(obs_img, dtype=np.float32).reshape(-1)
+
+    def close(self) -> None:
+        shm = self.shm
+        self.shm = None
+        self.array = None
+        if shm is None:
+            return
+        if self._created:
+            try:
+                shm.unlink()
+            except FileNotFoundError:
+                pass
+        shm.close()
 
 
 def _process_depth(
@@ -29,7 +87,7 @@ def _process_depth(
 ) -> np.ndarray:
     depth = np.asarray(depth_m, dtype=np.float32)
     depth = np.where(np.isfinite(depth) & (depth > 0.0), depth, far)
-    depth = np.clip(depth, near, far)
+    depth = np.minimum(depth, far)
 
     # Match training camera preprocessing: camera frame -> crop -> bicubic resize -> normalize.
     depth = cv2.resize(depth, (int(camera_width), int(camera_height)), interpolation=cv2.INTER_AREA)
@@ -40,16 +98,16 @@ def _process_depth(
     right = min(max(int(crop_right), 0), max(w - left - 1, 0))
     depth = depth[top : max(top + 1, h - bottom), left : max(left + 1, w - right)]
     depth = cv2.resize(depth, (int(resize_width), int(resize_height)), interpolation=cv2.INTER_CUBIC)
+    min_depth = max(float(near), float(min_valid_depth))
+    depth = np.where(depth < min_depth, far, depth)
     depth = np.clip(depth, near, far)
-    if min_valid_depth > 0.0:
-        depth = np.where(depth < min_valid_depth, far, depth)
     depth = (depth - near) / max(1.0e-6, far - near) - 0.5
     return np.clip(depth, -0.5, 0.5).astype(np.float32, copy=False)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=5658)
+    parser.add_argument("--shm-name", default="depth_img_shm")
     parser.add_argument("--serial", default="")
     parser.add_argument("--stream-width", type=int, default=640)
     parser.add_argument("--stream-height", type=int, default=480)
@@ -65,6 +123,7 @@ def main() -> int:
     parser.add_argument("--near", type=float, default=0.3)
     parser.add_argument("--far", type=float, default=3.0)
     parser.add_argument("--min-valid-depth", type=float, default=0.15)
+    parser.add_argument("--shm-fill-value", type=float, default=0.5)
     parser.add_argument("--log-every", type=int, default=30)
     parser.add_argument("--preview", action="store_true")
     args = parser.parse_args()
@@ -77,10 +136,12 @@ def main() -> int:
             "Install it in the env used for sim2real, then rerun this publisher."
         ) from exc
 
-    context = zmq.Context()
-    socket = context.socket(zmq.PUB)
-    socket.setsockopt(zmq.LINGER, 0)
-    socket.bind(f"tcp://*:{args.port}")
+    expected_dim = int(args.resize_height) * int(args.resize_width)
+    publisher = PerceptionObsShmPublisher(
+        args.shm_name,
+        expected_dim,
+        fill_value=float(args.shm_fill_value),
+    )
 
     pipeline = rs.pipeline()
     config = rs.config()
@@ -92,7 +153,7 @@ def main() -> int:
     depth_scale = float(depth_sensor.get_depth_scale())
 
     print(
-        f"[INFO] publishing RealSense perception_obs on port {args.port}; "
+        f"[INFO] publishing RealSense perception_obs to shared memory '{args.shm_name}'; "
         f"raw={args.stream_width}x{args.stream_height}@{args.fps}, "
         f"obs={args.resize_height}x{args.resize_width}, depth_scale={depth_scale}"
     )
@@ -120,16 +181,7 @@ def main() -> int:
                 far=args.far,
                 min_valid_depth=args.min_valid_depth,
             )
-            payload = {
-                "source": "realsense_depth_publisher",
-                "frame_idx": int(frame_idx),
-                "time": time.time(),
-                "perception_obs": obs_img.reshape(-1).tolist(),
-            }
-            try:
-                socket.send_string(json.dumps(payload), zmq.NOBLOCK)
-            except zmq.Again:
-                pass
+            publisher.publish(obs_img)
 
             if args.preview:
                 preview = ((obs_img + 0.5) * 255.0).clip(0, 255).astype(np.uint8)
@@ -150,8 +202,7 @@ def main() -> int:
         pass
     finally:
         pipeline.stop()
-        socket.close(0)
-        context.term()
+        publisher.close()
         if args.preview:
             cv2.destroyAllWindows()
     return 0

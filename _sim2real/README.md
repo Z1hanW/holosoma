@@ -4,16 +4,16 @@ These launchers run the same registered box policies as `_sim2sim`, but through 
 
 ## Run
 
-Terminal 1: start the real depth publisher.
+Terminal 1: start the real RealSense depth image server.
 
 ```bash
 bash _sim2real/depth_realsense.sh --preview
 ```
 
-Terminal 2: verify the policy can receive model-ready depth.
+Terminal 2: verify the policy can read model-ready depth from shared memory.
 
 ```bash
-python _sim2real/check_perception_obs.py --port 5658 --once
+python _sim2real/check_perception_obs.py --once
 ```
 
 Terminal 3: start the current policy.
@@ -66,15 +66,21 @@ UNITREE_INTERFACE=eth0 bash _sim2real/current.sh
 
 ## Perception Input
 
-The ONNX policies still consume `perception_obs [5046]`. Before deployment, run the real depth/perception publisher on the same machine and check that the policy can receive it:
+The ONNX policies still consume `perception_obs [5046]`. Before deployment, run the real depth image server on the same machine and check that the policy can receive it:
 
 ```bash
-python _sim2real/check_perception_obs.py --port 5658 --once
+python _sim2real/check_perception_obs.py --once
 ```
 
-The expected tensor is the training-aligned flattened depth observation, shape `58x87 = 5046`, published as JSON key `perception_obs` over ZMQ on `PERCEPTION_OBS_PORT` (default `5658`).
+The expected tensor is the training-aligned flattened depth observation, shape `58x87 = 5046`, written as float32 into POSIX shared memory `depth_img_shm`.
 
-`depth_realsense.sh` uses the current `w5qostjn` training depth defaults: RealSense depth in meters -> `106x60` camera frame -> crop top `2`, left/right `4` -> bicubic resize to `58x87` -> normalize with near `0.3`, far `3.0`.
+`depth_realsense.sh` uses the current `w5qostjn` training depth defaults: RealSense depth in meters -> `106x60` camera frame -> crop top `2`, left/right `4` -> bicubic resize to `58x87` -> treat depth `<0.3m` as far/empty -> normalize with near `0.3`, far `3.0`.
+
+The policy launcher uses the same shared-memory path:
+
+```bash
+PERCEPTION_OBS_SHM_NAME=depth_img_shm
+```
 
 ## Registered Policies
 
