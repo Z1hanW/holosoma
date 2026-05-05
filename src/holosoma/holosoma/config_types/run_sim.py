@@ -37,6 +37,26 @@ def default_logger_config() -> LoggerConfig:
     return DisabledLoggerConfig(video=VideoConfig(enabled=False), base_dir="logs")
 
 
+@dataclass(frozen=True)
+class MotionInitConfig:
+    """Optional clip-driven initialization for direct MuJoCo sim2sim runs."""
+
+    enabled: bool = False
+    """Initialize robot/object states from a motion clip before the loop starts."""
+
+    motion_file: str | None = None
+    """Motion clip (.npz) used to initialize simulator state."""
+
+    frame_idx: int = 0
+    """Motion frame index used for initialization."""
+
+    mode: str = "raw_motion"
+    """Initialization mode: 'raw_motion', 'raw_motion_grounded', or 'training_default_pose'."""
+
+    object_name: str = "object"
+    """Simulator actor name for the initialized object."""
+
+
 # Use sim2sim-optimized configs from config_values.run_sim
 SIMULATOR_DEFAULTS = holosoma.config_values.run_sim.DEFAULTS
 
@@ -90,6 +110,9 @@ class RunSimConfig:
 
     Only used by run_sim.py for real-time display synchronization.
     """
+
+    motion_init: MotionInitConfig = field(default_factory=MotionInitConfig)
+    """Optional clip-driven robot/object initialization."""
 
     device: str | None = "cpu"
     """Device to use for simulation. None auto-detects based on the simulator type.

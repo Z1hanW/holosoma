@@ -48,6 +48,13 @@ g1_29dof = RobotConfig(
         0.2, 0.2, 0.0, 0.6, 0.0, 0.0, 0.0,  # left arm
         0.2, -0.2, 0.0, 0.6, 0.0, 0.0, 0.0,  # right arm
     ),
+    motor_effort_limit=(
+        88.0, 139.0, 88.0, 139.0, 50.0, 50.0,  # left leg
+        88.0, 139.0, 88.0, 139.0, 50.0, 50.0,  # right leg
+        88.0, 50.0, 50.0,  # waist
+        25.0, 25.0, 25.0, 25.0, 25.0, 5.0, 5.0,  # left arm
+        25.0, 25.0, 25.0, 25.0, 25.0, 5.0, 5.0,  # right arm
+    ),
 
     # Mappings
     motor2joint=tuple(range(29)),  # Identity mapping

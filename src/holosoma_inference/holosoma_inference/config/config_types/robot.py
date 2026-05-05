@@ -117,6 +117,9 @@ class RobotConfig:
     If provided, these values override the ONNX metadata.
     """
 
+    motor_effort_limit: tuple[float, ...] | None = None
+    """Torque/effort limits for motors in Nm (length: num_motors)."""
+
     # =========================================================================
     # WBT Stiff Startup Configuration (OPTIONAL - for WBT policies)
     # =========================================================================

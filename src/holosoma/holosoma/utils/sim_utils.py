@@ -12,8 +12,10 @@ import sys
 import threading
 import time
 import traceback
+from pathlib import Path
 from typing import Any
 
+import numpy as np
 from loguru import logger
 from typing_extensions import Self
 from threading import Thread
@@ -28,11 +30,13 @@ from holosoma.sensors.image_server import ImageServer
 from holosoma.utils.common import seeding
 from holosoma.utils.helpers import get_class
 from holosoma.utils.rate import RateLimiter
+from holosoma.utils.rotations import get_euler_xyz, quat_from_euler_xyz
 from holosoma.utils.safe_torch_import import torch
 from holosoma.utils.simulator_config import SimulatorType, get_simulator_type, set_simulator_type
 from holosoma.utils.torch_utils import to_torch
 
 from holosoma.simulator.mujoco.mujoco import MujocoRendererWrapper
+
 
 def setup_simulator_imports(config: ExperimentConfig | RunSimConfig) -> None:
     """Setup simulator-specific imports without side effects.
@@ -413,6 +417,7 @@ class DirectSimulation:
         # Step 3: Load assets (this initializes the bridge!)
         self.simulator.load_assets()
         logger.debug("simulator.load_assets() completed - bridge should now be initialized")
+        self._ignore_virtual_gantry_for_motion_init()
 
         # Step 4: Create environments (need to provide required parameters)
         # Create env_origins (single environment at origin)
@@ -431,6 +436,9 @@ class DirectSimulation:
         # Step 5.5: Initialize episode (positions virtual gantry, etc.)
         self.simulator.on_episode_start(env_id=0)
         logger.debug("simulator.on_episode_start() completed")
+
+        # Optional clip-driven initialization for sim2sim verification.
+        self._maybe_apply_motion_initial_state()
 
         # Step 6: Setup viewer if not headless
         if not self.config.training.headless:
@@ -536,7 +544,271 @@ class DirectSimulation:
         # Cleanup simulation app
         if self.simulation_app:
             close_simulation_app(self.simulation_app)
-        
+
+    def _ignore_virtual_gantry_for_motion_init(self) -> None:
+        motion_init_cfg = getattr(self.config, "motion_init", None)
+        if not getattr(motion_init_cfg, "enabled", False):
+            return
+
+        gantry = getattr(self.simulator, "virtual_gantry", None)
+        if gantry is None:
+            return
+
+        self.simulator.virtual_gantry = None
+        logger.info("Ignoring virtual gantry because motion-init is enabled")
+
+    @staticmethod
+    def _decode_names(values: np.ndarray) -> list[str]:
+        names: list[str] = []
+        for value in values.tolist():
+            if isinstance(value, bytes):
+                names.append(value.decode("utf-8"))
+            else:
+                names.append(str(value))
+        return names
+
+    @staticmethod
+    def _resolve_root_body_index(body_names: list[str]) -> int:
+        for preferred_name in ("pelvis", "base", "torso", "trunk"):
+            if preferred_name in body_names:
+                return body_names.index(preferred_name)
+        return 0
+
+    def _write_freejoint_state(self, qpos_addr: int, qvel_addr: int, state: torch.Tensor) -> None:
+        assert self.simulator.root_data is not None
+
+        state_np = state.detach().cpu().numpy().astype(np.float32, copy=False)
+        pos = state_np[:3]
+        quat_xyzw = state_np[3:7]
+        lin_vel = state_np[7:10]
+        ang_vel = state_np[10:13]
+        quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]], dtype=np.float32)
+
+        self.simulator.root_data.qpos[qpos_addr : qpos_addr + 3] = pos
+        self.simulator.root_data.qpos[qpos_addr + 3 : qpos_addr + 7] = quat_wxyz
+        self.simulator.root_data.qvel[qvel_addr : qvel_addr + 3] = lin_vel
+        self.simulator.root_data.qvel[qvel_addr + 3 : qvel_addr + 6] = ang_vel
+
+    def _write_robot_motion_state(self, root_state: torch.Tensor, dof_state: torch.Tensor) -> None:
+        assert self.simulator.root_model is not None
+        assert self.simulator.root_data is not None
+        assert self.simulator.robot_qpos_addr is not None
+        assert self.simulator.robot_qvel_addr is not None
+
+        self._write_freejoint_state(
+            int(self.simulator.robot_qpos_addr),
+            int(self.simulator.robot_qvel_addr),
+            root_state[0],
+        )
+
+        dof_state_np = dof_state[0].detach().cpu().numpy().astype(np.float32, copy=False)
+        for sim_idx, (qpos_addr, qvel_addr) in enumerate(
+            zip(self.simulator.dof_qpos_addrs, self.simulator.dof_qvel_addrs)
+        ):
+            self.simulator.root_data.qpos[int(qpos_addr)] = float(dof_state_np[sim_idx, 0])
+            self.simulator.root_data.qvel[int(qvel_addr)] = float(dof_state_np[sim_idx, 1])
+
+        import mujoco  # noqa: PLC0415
+
+        mujoco.mj_forward(self.simulator.root_model, self.simulator.root_data)
+        self.simulator.refresh_sim_tensors()
+
+    def _resolve_actor_freejoint(self, actor_name: str) -> tuple[int, int, str] | None:
+        assert self.simulator.root_model is not None
+
+        import mujoco  # noqa: PLC0415
+
+        model = self.simulator.root_model
+        candidates: list[str] = []
+        object_body_names = getattr(self.simulator, "_object_body_name_by_name", {}) or {}
+        if isinstance(object_body_names, dict):
+            body_name = object_body_names.get(actor_name)
+            if body_name:
+                candidates.append(str(body_name))
+
+        candidates.extend(
+            [
+                actor_name,
+                f"{actor_name}_baseLink",
+                f"{actor_name}_base_link",
+                "object_baseLink",
+                "object_base_link",
+            ]
+        )
+
+        for body_id in range(int(model.nbody)):
+            body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id)
+            if body_name and (body_name.startswith(f"{actor_name}_") or body_name.startswith("object_")):
+                candidates.append(body_name)
+
+        seen: set[str] = set()
+        for body_name in candidates:
+            if body_name in seen:
+                continue
+            seen.add(body_name)
+            body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+            if body_id < 0:
+                continue
+            joint_start = int(model.body_jntadr[body_id])
+            joint_count = int(model.body_jntnum[body_id])
+            for joint_id in range(joint_start, joint_start + joint_count):
+                if int(model.jnt_type[joint_id]) != int(mujoco.mjtJoint.mjJNT_FREE):
+                    continue
+                return int(model.jnt_qposadr[joint_id]), int(model.jnt_dofadr[joint_id]), body_name
+
+        return None
+
+    def _write_motion_actor_state(self, actor_name: str, actor_state: torch.Tensor) -> bool:
+        assert self.simulator.root_model is not None
+        assert self.simulator.root_data is not None
+
+        resolved = self._resolve_actor_freejoint(actor_name)
+        if resolved is None:
+            logger.warning("Could not find a freejoint body for motion-init object '{}'", actor_name)
+            return False
+
+        qpos_addr, qvel_addr, body_name = resolved
+        self._write_freejoint_state(qpos_addr, qvel_addr, actor_state[0])
+
+        import mujoco  # noqa: PLC0415
+
+        mujoco.mj_forward(self.simulator.root_model, self.simulator.root_data)
+        self.simulator.refresh_sim_tensors()
+        logger.info("Applied motion-init object state to body '{}'", body_name)
+        return True
+
+    def _maybe_apply_motion_initial_state(self) -> None:
+        motion_init_cfg = self.config.motion_init
+        if not motion_init_cfg.enabled:
+            return
+        if not motion_init_cfg.motion_file:
+            raise ValueError("run_sim.motion_init.enabled=True requires --motion-init.motion-file")
+
+        motion_path = Path(motion_init_cfg.motion_file).expanduser().resolve()
+        if motion_path.suffix.lower() != ".npz":
+            raise ValueError(f"run_sim.motion_init currently supports only .npz clips, got: {motion_path}")
+
+        with np.load(motion_path, allow_pickle=True) as data:
+            body_names = self._decode_names(np.asarray(data["body_names"]))
+            joint_names = self._decode_names(np.asarray(data["joint_names"]))
+            frame_count = int(np.asarray(data["joint_pos"]).shape[0])
+            frame_idx = int(np.clip(motion_init_cfg.frame_idx, 0, max(frame_count - 1, 0)))
+            init_mode = str(motion_init_cfg.mode).strip().lower().replace("-", "_")
+
+            joint_pos = np.asarray(data["joint_pos"][frame_idx], dtype=np.float32)
+            if joint_pos.shape[0] == len(joint_names) + 7:
+                joint_pos = joint_pos[7:]
+            joint_vel = np.asarray(data["joint_vel"][frame_idx], dtype=np.float32)
+            if joint_vel.shape[0] == len(joint_names) + 6:
+                joint_vel = joint_vel[6:]
+
+            root_idx = self._resolve_root_body_index(body_names)
+            body_pos_w = np.asarray(data["body_pos_w"][frame_idx], dtype=np.float32)
+            body_quat_w = np.asarray(data["body_quat_w"][frame_idx], dtype=np.float32)
+            body_lin_vel_w = np.asarray(data["body_lin_vel_w"][frame_idx], dtype=np.float32)
+            body_ang_vel_w = np.asarray(data["body_ang_vel_w"][frame_idx], dtype=np.float32)
+
+            root_pos = np.array(body_pos_w[root_idx], dtype=np.float32, copy=True)
+            root_quat_wxyz = np.array(body_quat_w[root_idx], dtype=np.float32, copy=True)
+            root_lin_vel = np.array(body_lin_vel_w[root_idx], dtype=np.float32, copy=True)
+            root_ang_vel = np.array(body_ang_vel_w[root_idx], dtype=np.float32, copy=True)
+            dof_pos = np.array(self.simulator.dof_pos[0].detach().cpu().numpy(), dtype=np.float32, copy=True)
+            dof_vel = np.array(self.simulator.dof_vel[0].detach().cpu().numpy(), dtype=np.float32, copy=True)
+            joint_name_to_index = {name: i for i, name in enumerate(joint_names)}
+
+            if init_mode in {"raw_motion", "raw_motion_grounded"}:
+                for sim_idx, sim_name in enumerate(self.simulator.dof_names):
+                    clip_idx = joint_name_to_index.get(sim_name)
+                    if clip_idx is None:
+                        continue
+                    dof_pos[sim_idx] = float(joint_pos[clip_idx])
+                    dof_vel[sim_idx] = float(joint_vel[clip_idx])
+                root_quat_xyzw = np.array(
+                    [root_quat_wxyz[1], root_quat_wxyz[2], root_quat_wxyz[3], root_quat_wxyz[0]],
+                    dtype=np.float32,
+                )
+                if init_mode == "raw_motion_grounded":
+                    root_pos[2] = float(self.config.robot.init_state.pos[2])
+            elif init_mode == "training_default_pose":
+                init_state = self.config.robot.init_state
+                default_joint_angles = getattr(init_state, "default_joint_angles", {}) or {}
+                for sim_idx, sim_name in enumerate(self.simulator.dof_names):
+                    if sim_name in default_joint_angles:
+                        dof_pos[sim_idx] = float(default_joint_angles[sim_name])
+                init_root_quat = torch.tensor(init_state.rot, dtype=torch.float32, device=self.device).unsqueeze(0)
+                init_roll, init_pitch, _ = get_euler_xyz(init_root_quat, w_last=True)
+                motion_root_quat = torch.tensor(root_quat_wxyz, dtype=torch.float32, device=self.device).unsqueeze(0)
+                _, _, motion_yaw = get_euler_xyz(motion_root_quat, w_last=False)
+                root_quat_xyzw = (
+                    quat_from_euler_xyz(
+                        init_roll.squeeze(0),
+                        init_pitch.squeeze(0),
+                        motion_yaw.squeeze(0),
+                    )
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32, copy=False)
+                )
+                root_pos = np.array([root_pos[0], root_pos[1], init_state.pos[2]], dtype=np.float32)
+                root_lin_vel = np.asarray(init_state.lin_vel, dtype=np.float32)
+                root_ang_vel = np.asarray(init_state.ang_vel, dtype=np.float32)
+                dof_vel = np.zeros_like(dof_pos, dtype=np.float32)
+            else:
+                raise ValueError(
+                    f"Unsupported motion-init.mode='{motion_init_cfg.mode}'. "
+                    "Expected 'raw_motion', 'raw_motion_grounded', or 'training_default_pose'."
+                )
+
+            root_state = torch.tensor(
+                [[*root_pos.tolist(), *root_quat_xyzw.tolist(), *root_lin_vel.tolist(), *root_ang_vel.tolist()]],
+                device=self.device,
+                dtype=torch.float32,
+            )
+            dof_state = torch.stack(
+                [
+                    torch.tensor(dof_pos, device=self.device, dtype=torch.float32),
+                    torch.tensor(dof_vel, device=self.device, dtype=torch.float32),
+                ],
+                dim=-1,
+            ).unsqueeze(0)
+
+            self._write_robot_motion_state(root_state, dof_state)
+
+            object_applied = False
+            if "object_pos_w" in data and motion_init_cfg.object_name:
+                object_pos = np.asarray(data["object_pos_w"][frame_idx], dtype=np.float32)
+                object_quat_wxyz = np.asarray(data["object_quat_w"][frame_idx], dtype=np.float32)
+                object_quat_xyzw = np.array(
+                    [object_quat_wxyz[1], object_quat_wxyz[2], object_quat_wxyz[3], object_quat_wxyz[0]],
+                    dtype=np.float32,
+                )
+                object_lin_vel = np.asarray(data["object_lin_vel_w"][frame_idx], dtype=np.float32)
+                object_ang_vel = (
+                    np.asarray(data["object_ang_vel_w"][frame_idx], dtype=np.float32)
+                    if "object_ang_vel_w" in data
+                    else np.zeros(3, dtype=np.float32)
+                )
+                object_state = torch.tensor(
+                    [[
+                        *object_pos.tolist(),
+                        *object_quat_xyzw.tolist(),
+                        *object_lin_vel.tolist(),
+                        *object_ang_vel.tolist(),
+                    ]],
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+                object_applied = self._write_motion_actor_state(str(motion_init_cfg.object_name), object_state)
+
+        logger.info(
+            "Applied motion init: file={} frame={} mode={} object_applied={}",
+            motion_path,
+            frame_idx,
+            init_mode,
+            object_applied,
+        )
+
     def _create_base_init_state(self) -> torch.Tensor:
         """Create base initialization state tensor from robot configuration.
 
@@ -638,6 +910,9 @@ class DirectSimulation:
             crop_y_end=props.crop_y_end,
             crop_x_start=props.crop_x_start,
             crop_x_end=props.crop_x_end,
+            frame_rate=props.frame_rate,
+            latency_frame=props.latency_frame,
+            buffer_len=props.buffer_len,
         )
 
         # Also sync the visualizer clip range so depth display is correct
@@ -672,4 +947,3 @@ class DirectSimulation:
         fps = 1000 / elapsed
         logger.info(f"Simulation FPS: {fps:.1f}")
         return time.time()
-

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, List
 
 import mujoco
@@ -12,9 +13,10 @@ from loguru import logger
 
 from holosoma.config_types.robot import RobotConfig
 from holosoma.config_types.simulator import MujocoXMLFilterCfg, SimulatorConfig
+from holosoma.managers.camera import CameraManager
 from holosoma.managers.terrain.base import TerrainTermBase
 from holosoma.utils.module_utils import get_holosoma_root
-from holosoma.managers.camera import CameraManager
+from holosoma.utils.path import resolve_data_file_path
 
 
 def _euler_xyz_to_quat_wxyz(euler_rad: np.ndarray) -> np.ndarray:
@@ -503,9 +505,56 @@ class MujocoSceneManager:
         robot_rot = [1, 0, 0, 0]
         site = self.world_spec.worldbody.add_site(pos=robot_pos, quat=robot_rot)
         self.world_spec.attach(robot_spec, site=site, prefix=prefix)
+        self._add_object_from_robot_config(robot_config)
 
         # Store prefix for later use by simulator
         self.robot_prefix = prefix
+
+    @staticmethod
+    def _configure_urdf_meshdir(spec: mujoco.MjSpec, urdf_path: Path) -> None:
+        mesh_files = [Path(str(mesh.file)) for mesh in spec.meshes if str(getattr(mesh, "file", "")).strip()]
+        meshdir_candidates = [urdf_path.parent, urdf_path.parent / "meshes"]
+        for candidate in meshdir_candidates:
+            if not candidate.is_dir():
+                continue
+            if mesh_files and not all(
+                mesh_file.is_absolute() or (candidate / mesh_file).is_file() for mesh_file in mesh_files
+            ):
+                continue
+            spec.compiler.meshdir = str(candidate.resolve())
+            return
+        spec.compiler.meshdir = str(urdf_path.parent.resolve())
+
+    @staticmethod
+    def _select_object_root_body(object_spec: mujoco.MjSpec) -> mujoco.MjSpec.Body:
+        for preferred_name in ("baseLink", "base_link"):
+            for body in object_spec.bodies:
+                if body.name == preferred_name:
+                    return body
+        for body in object_spec.bodies:
+            if body.name:
+                return body
+        raise ValueError("Could not resolve a named object root body from the MuJoCo object URDF")
+
+    def _add_object_from_robot_config(self, robot_config: RobotConfig) -> None:
+        object_cfg = getattr(robot_config, "object", None)
+        object_urdf_path = getattr(object_cfg, "object_urdf_path", None)
+        if not object_urdf_path:
+            return
+
+        resolved_object_path = Path(resolve_data_file_path(str(object_urdf_path))).expanduser().resolve()
+        if not resolved_object_path.is_file():
+            raise FileNotFoundError(f"MuJoCo object URDF not found: {resolved_object_path}")
+
+        object_spec = mujoco.MjSpec.from_file(str(resolved_object_path))
+        self._configure_urdf_meshdir(object_spec, resolved_object_path)
+        object_root_body = self._select_object_root_body(object_spec)
+        object_root_body.add_freejoint(name="object_freejoint")
+        object_root_body.pos = [0.75, 0.0, 0.18]
+
+        object_site = self.world_spec.worldbody.add_site(pos=[0.0, 0.0, 0.0], quat=[1.0, 0.0, 0.0, 0.0])
+        self.world_spec.attach(object_spec, site=object_site, prefix="object_")
+        logger.info(f"Added MuJoCo object from: {resolved_object_path}")
 
     def _apply_collision_settings(self, robot_spec: mujoco.MjSpec, robot_config: RobotConfig) -> None:
         """Apply collision settings based on unified self_collisions configuration.

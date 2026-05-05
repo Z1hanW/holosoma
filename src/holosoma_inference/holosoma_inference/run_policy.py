@@ -12,6 +12,11 @@ Usage:
 
 import sys
 import traceback
+from pathlib import Path
+
+_SRC_ROOT = Path(__file__).resolve().parents[1]
+if str(_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SRC_ROOT))
 
 import tyro
 from loguru import logger
@@ -21,6 +26,7 @@ from holosoma_inference.config.config_values.inference import AnnotatedInference
 from holosoma_inference.config.utils import TYRO_CONFIG
 from holosoma_inference.policies.blind_fall_recovery import BlindFallRecoveryPolicy
 from holosoma_inference.policies.depth_distillation import DepthDistillationPolicy
+from holosoma_inference.policies.g1_box import G1BoxPolicy
 from holosoma_inference.policies.loco_manip_stand_height_wait_depth import LocoManipStandHeightWaitDepthPolicy
 from holosoma_inference.policies.locomotion import LocomotionPolicy
 from holosoma_inference.policies.wbt import WholeBodyTrackingPolicy
@@ -37,6 +43,7 @@ def _print_control_guide(policy_class, use_joystick: bool):
     """Print control guide for users."""
     is_blind_fall_recovery = issubclass(policy_class, BlindFallRecoveryPolicy)
     is_depth_distillation = issubclass(policy_class, DepthDistillationPolicy)
+    is_g1_box = policy_class.__name__ == "G1BoxPolicy"
     is_wbt = policy_class.__name__ == "WholeBodyTrackingPolicy"
 
     logger.info("=" * 80)
@@ -71,6 +78,11 @@ def _print_control_guide(policy_class, use_joystick: bool):
             logger.info("")
             logger.info("Whole-Body Tracking Controls:")
             logger.info("  Start button   - Start motion clip")
+        elif is_g1_box:
+            logger.info("")
+            logger.info("G1 Box Sparse Root Command:")
+            logger.info("  Left stick     - Sparse root command x/y")
+            logger.info("  Right stick    - Sparse root command yaw")
         else:
             logger.info("")
             logger.info("Locomotion Controls:")
@@ -102,6 +114,13 @@ def _print_control_guide(policy_class, use_joystick: bool):
             logger.info("")
             logger.info("Whole-Body Tracking Controls:")
             logger.info("  s  - Start motion clip")
+        elif is_g1_box:
+            logger.info("")
+            logger.info("G1 Box Sparse Root Command:")
+            logger.info("  w/s        - Set x command forward/back")
+            logger.info("  a/d        - Set y command left/right")
+            logger.info("  q/e        - Set yaw command left/right")
+            logger.info("  z          - Zero sparse root command")
         elif is_depth_distillation:
             logger.info("")
             logger.info("Depth Distillation Controls:")
@@ -150,6 +169,8 @@ def _select_policy_class(config: InferenceConfig):
     policy_type = getattr(config.task, "policy_type", None)
     if policy_type == "blind_fall_recovery":
         return BlindFallRecoveryPolicy
+    if policy_type == "g1_box":
+        return G1BoxPolicy
 
     obs_dict = config.observation.obs_dict
     actor_obs = obs_dict.get("actor_obs", [])

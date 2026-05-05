@@ -576,7 +576,15 @@ class MuJoCo(BaseSimulator):
             "",  # keep named joints only
         ]
 
-        robot_joint_names = [n for n in all_joint_names if n not in exclude_names]
+        robot_joint_names = []
+        for joint_id, joint_name in enumerate(all_joint_names):
+            if not joint_name or joint_name in exclude_names:
+                continue
+            if not joint_name.startswith(prefix):
+                continue
+            if self.root_model.jnt_type[joint_id] == mujoco.mjtJoint.mjJNT_FREE:
+                continue
+            robot_joint_names.append(joint_name)
 
         # Build name maps first
         self._build_name_maps()

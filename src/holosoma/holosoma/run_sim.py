@@ -7,8 +7,15 @@ or evaluation environments.
 """
 
 import dataclasses
+from pathlib import Path
 import sys
 import traceback
+
+_SRC_ROOT = Path(__file__).resolve().parents[1]
+for _source_path in (_SRC_ROOT, _SRC_ROOT.parent / "holosoma_inference"):
+    _source_path_str = str(_source_path)
+    if _source_path.exists() and _source_path_str not in sys.path:
+        sys.path.insert(0, _source_path_str)
 
 import tyro
 from loguru import logger
