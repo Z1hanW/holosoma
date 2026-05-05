@@ -21,6 +21,7 @@ from holosoma_inference.config.config_values.inference import AnnotatedInference
 from holosoma_inference.config.utils import TYRO_CONFIG
 from holosoma_inference.policies.blind_fall_recovery import BlindFallRecoveryPolicy
 from holosoma_inference.policies.depth_distillation import DepthDistillationPolicy
+from holosoma_inference.policies.g1_box import G1BoxPolicy
 from holosoma_inference.policies.loco_manip_stand_height_wait_depth import LocoManipStandHeightWaitDepthPolicy
 from holosoma_inference.policies.locomotion import LocomotionPolicy
 from holosoma_inference.policies.wbt import WholeBodyTrackingPolicy
@@ -37,7 +38,7 @@ def _print_control_guide(policy_class, use_joystick: bool):
     """Print control guide for users."""
     is_blind_fall_recovery = issubclass(policy_class, BlindFallRecoveryPolicy)
     is_depth_distillation = issubclass(policy_class, DepthDistillationPolicy)
-    is_wbt = policy_class.__name__ == "WholeBodyTrackingPolicy"
+    is_wbt = policy_class.__name__ in {"WholeBodyTrackingPolicy", "G1BoxPolicy"}
 
     logger.info("=" * 80)
     logger.info("POLICY CONTROLS")
@@ -150,6 +151,8 @@ def _select_policy_class(config: InferenceConfig):
     policy_type = getattr(config.task, "policy_type", None)
     if policy_type == "blind_fall_recovery":
         return BlindFallRecoveryPolicy
+    if policy_type == "g1_box":
+        return G1BoxPolicy
 
     obs_dict = config.observation.obs_dict
     actor_obs = obs_dict.get("actor_obs", [])

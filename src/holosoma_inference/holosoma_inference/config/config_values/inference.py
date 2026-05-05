@@ -52,6 +52,44 @@ g1_29dof_wbt = InferenceConfig(
     task=task.wbt,
 )
 
+g1_box_task = replace(task.wbt, policy_type="g1_box")
+
+g1_box_distill = replace(
+    g1_29dof_wbt,
+    observation=observation.wbt_depth_distill,
+    task=g1_box_task,
+)
+
+g1_box_contact_aware_depth_distill = replace(
+    g1_29dof_wbt,
+    observation=observation.wbt_contact_aware_depth_distill,
+    task=g1_box_task,
+)
+
+g1_box_linvel_depth_distill = replace(
+    g1_29dof_wbt,
+    observation=observation.wbt_linvel_depth_distill,
+    task=g1_box_task,
+)
+
+g1_box_action_history_depth_distill = replace(
+    g1_29dof_wbt,
+    observation=observation.wbt_action_history_depth_distill,
+    task=g1_box_task,
+)
+
+g1_box_linvel_action_history_depth_distill = replace(
+    g1_29dof_wbt,
+    observation=observation.wbt_linvel_action_history_depth_distill,
+    task=g1_box_task,
+)
+
+g1_box_linvel_contact_aware_depth_distill = replace(
+    g1_29dof_wbt,
+    observation=observation.wbt_linvel_contact_aware_depth_distill,
+    task=g1_box_task,
+)
+
 g1_29dof_loco_manip_stand_height_waist = InferenceConfig(
     robot=robot.g1_29dof_loco_manip_stand_height_waist,
     observation=observation.loco_manip_stand_height_waist,
@@ -124,6 +162,35 @@ DEFAULTS = {
     "g1-29dof-loco": g1_29dof_loco,
     "t1-29dof-loco": t1_29dof_loco,
     "g1-29dof-wbt": g1_29dof_wbt,
+    "g1-29dof-wbt-object-distill": g1_box_distill,
+    "g1-29dof-wbt-depth-distill": g1_box_distill,
+    "g1-29dof-wbt-object-contact-aware-depth-distill": g1_box_contact_aware_depth_distill,
+    "g1-29dof-wbt-contact-aware-depth-distill": g1_box_contact_aware_depth_distill,
+    "g1-29dof-wbt-object-linvel-depth-distill": g1_box_linvel_depth_distill,
+    "g1-29dof-wbt-linvel-depth-distill": g1_box_linvel_depth_distill,
+    "g1-29dof-wbt-object-action-history-depth-distill": g1_box_action_history_depth_distill,
+    "g1-29dof-wbt-action-history-depth-distill": g1_box_action_history_depth_distill,
+    "g1-29dof-wbt-object-linvel-action-history-depth-distill": g1_box_linvel_action_history_depth_distill,
+    "g1-29dof-wbt-linvel-action-history-depth-distill": g1_box_linvel_action_history_depth_distill,
+    "g1-29dof-wbt-object-linvel-contact-aware-depth-distill": g1_box_linvel_contact_aware_depth_distill,
+    "g1-29dof-wbt-linvel-contact-aware-depth-distill": g1_box_linvel_contact_aware_depth_distill,
+    "g1-box-contact-aware-near0p3": g1_box_contact_aware_depth_distill,
+    "g1-box-xxehngzo": g1_box_contact_aware_depth_distill,
+    "g1-box-g1_box_perception_pure_sd_ppo_first_contact14": g1_box_distill,
+    "g1-box-shoo7sr1": g1_box_distill,
+    "g1-box-w5qostjn": g1_box_distill,
+    "g1-box-w5qostjn_linvel_contact_aware": g1_box_linvel_contact_aware_depth_distill,
+    "g1-box-w5qostjn-linvel-contact-aware": g1_box_linvel_contact_aware_depth_distill,
+    "g1-box-tvtwx4to": g1_box_linvel_contact_aware_depth_distill,
+    "g1-box-w5qostjn_linvel_action_history": g1_box_linvel_action_history_depth_distill,
+    "g1-box-w5qostjn-linvel-action-history": g1_box_linvel_action_history_depth_distill,
+    "g1-box-haap1tjl": g1_box_linvel_action_history_depth_distill,
+    "g1-box-w5qostjn_action_history": g1_box_action_history_depth_distill,
+    "g1-box-w5qostjn-action-history": g1_box_action_history_depth_distill,
+    "g1-box-5aotqbdq": g1_box_action_history_depth_distill,
+    "g1-box-w5qostjn_linvel": g1_box_linvel_depth_distill,
+    "g1-box-w5qostjn-linvel": g1_box_linvel_depth_distill,
+    "g1-box-c1gaknfu": g1_box_linvel_depth_distill,
     "g1-29dof-loco-manip-stand-height-waist": g1_29dof_loco_manip_stand_height_waist,
     "g1-wbt-distillation": g1_wbt_distillation,
     "g1-blind-fall-recovery": g1_blind_fall_recovery,

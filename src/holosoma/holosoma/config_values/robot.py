@@ -1,6 +1,7 @@
 from dataclasses import replace
 
 from holosoma.config_types.robot import (
+    ObjectConfig,
     RobotAssetConfig,
     RobotBridgeConfig,
     RobotConfig,
@@ -1095,9 +1096,10 @@ g1_29dof_w_object = replace(
     g1_29dof,
     asset=replace(
         g1_29dof.asset,
-        urdf_file="g1/main_mesh_collision_halfspherehand.urdf",
-        xml_file="g1/g1_29dof_halfspherehand.xml",
+        urdf_file="g1/g1_29dof.urdf",
+        xml_file="g1/g1_29dof.xml",
     ),
+    object=ObjectConfig(object_urdf_path="holosoma/data/objects/box_75.urdf"),
     # control=replace(
     #     g1_29dof.control,
     #     action_scales_by_effort_limit_over_p_gain=True,

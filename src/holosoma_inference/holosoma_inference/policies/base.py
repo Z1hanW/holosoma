@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import sys
 import threading
 import time
@@ -337,8 +338,16 @@ class BasePolicy:
         if not sys.stdin.isatty():
             self.logger.warning("Not running in a TTY environment - keyboard input disabled")
             self.logger.warning("This is normal for automated tests or non-interactive environments")
-            self.logger.info("Auto-starting policy in non-interactive mode")
-            self.use_policy_action = True
+            if os.environ.get("HOLOSOMA_POLICY_ALLOW_NONINTERACTIVE_AUTOSTART", "").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }:
+                self.logger.info("Auto-starting policy in non-interactive mode")
+                self.use_policy_action = True
+            else:
+                self.logger.info("Waiting for an explicit policy start command")
             return
         # Start keyboard listener in a daemon thread
         threading.Thread(target=self.start_key_listener, daemon=True).start()
@@ -642,7 +651,7 @@ class BasePolicy:
                 q_target = scaled_policy_action + self.default_dof_angles
 
             # Prepare command (reuse pre-allocated arrays)
-            self.cmd_q[:] = q_target
+            self.cmd_q[:] = q_target[0]
 
         # Stage 5: Action Pub
         with self.latency_tracker.measure("action_pub"):
