@@ -467,6 +467,9 @@ class BridgeConfig:
     use_ros: bool = False
     """Whether to use ROS for communication."""
 
+    hold_initial_pose_until_first_command: bool = False
+    """Hold the simulator's initialized joint pose until the first real lowcmd arrives."""
+
 
 @dataclass(frozen=True)
 class SimulatorInitConfig:

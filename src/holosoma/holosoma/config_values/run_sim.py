@@ -50,7 +50,7 @@ mujoco = dataclasses.replace(
     holosoma.config_values.simulator.mujoco,
     config=dataclasses.replace(
         holosoma.config_values.simulator.mujoco.config,
-        bridge=BridgeConfig(enabled=True),
+        bridge=BridgeConfig(enabled=True, hold_initial_pose_until_first_command=True),
         virtual_gantry=VirtualGantryCfg(enabled=True),
         sim=dataclasses.replace(
             holosoma.config_values.simulator.mujoco.config.sim,

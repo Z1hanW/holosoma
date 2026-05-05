@@ -277,6 +277,8 @@ class MuJoCo(BaseSimulator):
         # MuJoCo-specific attributes
         self.root_model: mujoco.MjModel | None = None
         self.root_data: mujoco.MjData | None = None
+        self._reset_qpos: np.ndarray | None = None
+        self._reset_qvel: np.ndarray | None = None
 
         # Name mapping for prefix handling, because the robot is placed at a named site within
         # Mujoco.
@@ -502,6 +504,7 @@ class MuJoCo(BaseSimulator):
         self._set_robot_properties()
         self._set_robot_joint_addressing()
         self._set_initial_joint_angles()
+        self._apply_default_pose_reset_state(update_model_default=True)
 
         # Initialize rgb/depth renderer wrapper
         self.renderer_wrapper = MujocoRendererWrapper(self)
@@ -664,14 +667,15 @@ class MuJoCo(BaseSimulator):
         logger.info(f"Setup {len(self.dof_qpos_addrs)} DOF joint addresses")
         logger.info("=== Robot joint addressing setup completed ===")
 
-    def _set_initial_joint_angles(self) -> None:
+    def _set_initial_joint_angles(self, *, verbose: bool = True) -> None:
         """Set initial joint angles from robot configuration.
 
         Applies the default joint angles specified in the robot configuration
         to the MuJoCo model's initial state, then performs forward kinematics
         to update body positions.
         """
-        logger.info("Setting initial joint angles from robot config")
+        if verbose:
+            logger.info("Setting initial joint angles from robot config")
 
         assert self.root_model
         assert self.root_data
@@ -698,10 +702,11 @@ class MuJoCo(BaseSimulator):
                 joint_qposadr = self.root_model.jnt_qposadr[joint_id]
                 self.root_data.qpos[joint_qposadr] = angle
                 joint_angles_set += 1
-                logger.info(
-                    f"Set joint '{joint_name}' -> '{mujoco_joint_name}' (ID: {joint_id}, "
-                    f"qpos_addr: {joint_qposadr}) to angle {angle}"
-                )
+                if verbose:
+                    logger.info(
+                        f"Set joint '{joint_name}' -> '{mujoco_joint_name}' (ID: {joint_id}, "
+                        f"qpos_addr: {joint_qposadr}) to angle {angle}"
+                    )
             except Exception as e:
                 logger.warning(f"Failed to set angle for joint '{joint_name}': {e}")
                 joint_angles_failed += 1
@@ -709,14 +714,65 @@ class MuJoCo(BaseSimulator):
         if joint_angles_failed > 0:
             raise RuntimeError("Failed to set joint angles")
 
-        logger.info(
-            f"Joint angle setting complete: {joint_angles_set} set, {joint_angles_failed} "
-            f"failed out of {len(default_joint_angles)} total"
-        )
+        if verbose:
+            logger.info(
+                f"Joint angle setting complete: {joint_angles_set} set, {joint_angles_failed} "
+                f"failed out of {len(default_joint_angles)} total"
+            )
 
         # Forward kinematics to update body positions based on joint angles
         mujoco.mj_forward(self.root_model, self.root_data)
-        logger.info("Applied forward kinematics with initial joint angles")
+        if verbose:
+            logger.info("Applied forward kinematics with initial joint angles")
+
+    def _apply_default_pose_reset_state(self, *, update_model_default: bool = False) -> None:
+        """Apply the configured robot root and default joint pose to MuJoCo data."""
+        assert self.root_model
+        assert self.root_data
+
+        self._set_robot_initial_state()
+        self._set_initial_joint_angles(verbose=False)
+        self.root_data.qvel[:] = 0.0
+        if self.root_data.ctrl is not None:
+            self.root_data.ctrl[:] = 0.0
+        mujoco.mj_forward(self.root_model, self.root_data)
+
+        if update_model_default:
+            self.root_model.qpos0[:] = self.root_data.qpos
+
+    def capture_current_reset_state(self, *, zero_velocity: bool = True) -> None:
+        """Store the current MuJoCo state as the interactive reset target."""
+        assert self.root_data is not None
+        self._reset_qpos = self.root_data.qpos.copy()
+        self._reset_qvel = self.root_data.qvel.copy()
+        if zero_velocity:
+            self._reset_qvel[:] = 0.0
+        robot_bridge = getattr(getattr(self, "bridge", None), "robot_bridge", None)
+        capture_initial_hold_targets = getattr(robot_bridge, "capture_initial_hold_targets", None)
+        if callable(capture_initial_hold_targets):
+            capture_initial_hold_targets()
+
+    def _reset_to_default_pose(self) -> None:
+        """Reset MuJoCo to the stored initialized pose or configured default pose."""
+        assert self.root_model
+        assert self.root_data
+
+        mujoco.mj_resetData(self.root_model, self.root_data)
+        if self._reset_qpos is not None and self._reset_qvel is not None:
+            self.root_data.qpos[:] = self._reset_qpos
+            self.root_data.qvel[:] = self._reset_qvel
+            if self.root_data.ctrl is not None:
+                self.root_data.ctrl[:] = 0.0
+            mujoco.mj_forward(self.root_model, self.root_data)
+            logger.info("Reset MuJoCo to stored initialized pose")
+        else:
+            self._apply_default_pose_reset_state()
+            logger.info("Reset MuJoCo to configured robot default pose")
+        self._zero_commands()
+        robot_bridge = getattr(getattr(self, "bridge", None), "robot_bridge", None)
+        capture_initial_hold_targets = getattr(robot_bridge, "capture_initial_hold_targets", None)
+        if callable(capture_initial_hold_targets):
+            capture_initial_hold_targets()
 
     def get_supported_scene_formats(self) -> list[str]:
         """Get supported scene formats.
@@ -819,7 +875,7 @@ class MuJoCo(BaseSimulator):
         assert self.root_data
         mujoco.mj_resetData(self.root_model, self.root_data)
 
-        self._set_robot_initial_state()
+        self._apply_default_pose_reset_state()
 
         # Setup ObjectRegistry for robot-only (scenes not yet implemented)
         self.object_registry.setup_ranges(self.num_envs, robot_count=1, scene_count=0, individual_count=0)
@@ -1628,6 +1684,11 @@ class MuJoCo(BaseSimulator):
         keycode : int
             GLFW keycode for the pressed key.
         """
+        # Backspace: reset to configured default joint pose, not the raw XML qpos0/stiff pose.
+        if keycode == 259:
+            self._reset_to_default_pose()
+            return
+
         if self.commands is None:
             return
 

@@ -67,11 +67,13 @@ class G1BoxPolicy(BasePolicy):
         return dof_pos
 
     def _get_manual_command(self, robot_state_data):
-        return {
-            "q": self._stiff_hold_q.copy(),
-            "kp": self._stiff_hold_kp,
-            "kd": self._stiff_hold_kd,
-        }
+        if os.environ.get("HOLOSOMA_BOX_IDLE_STIFF_HOLD", "").strip().lower() in {"1", "true", "yes", "on"}:
+            return {
+                "q": self._stiff_hold_q.copy(),
+                "kp": self._stiff_hold_kp,
+                "kd": self._stiff_hold_kd,
+            }
+        return None
 
     @staticmethod
     def _parse_sparse_root_command(raw: str) -> np.ndarray:

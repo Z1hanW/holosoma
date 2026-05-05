@@ -808,6 +808,9 @@ class DirectSimulation:
             init_mode,
             object_applied,
         )
+        capture_reset_state = getattr(self.simulator, "capture_current_reset_state", None)
+        if callable(capture_reset_state):
+            capture_reset_state()
 
     def _create_base_init_state(self) -> torch.Tensor:
         """Create base initialization state tensor from robot configuration.

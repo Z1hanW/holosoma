@@ -121,7 +121,8 @@ class BasePolicy:
         self.obs_buf_dict: dict[str, np.ndarray] = {}
 
         for group, term_names in self.obs_dict.items():
-            self.obs_terms_sorted[group] = term_names
+            # Training concatenates terms in sorted key order inside each group.
+            self.obs_terms_sorted[group] = sorted(term_names)
             history_len = self.history_length_dict.get(group, 1)
             self.obs_history_buffers[group] = {}
             flattened_terms: list[np.ndarray] = []

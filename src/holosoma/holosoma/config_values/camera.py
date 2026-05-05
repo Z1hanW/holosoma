@@ -91,10 +91,10 @@ def _d435i_camera_rotation() -> tuple[float, float, float]:
     pitch_raw = os.environ.get("PERCEPTION_CAMERA_PITCH_DEG")
     if pitch_raw is not None and pitch_raw != "":
         return _compose_d435i_mount_with_pitch(float(pitch_raw))
-    return (1.0, 37.0, 1.0)
+    return _compose_d435i_mount_with_pitch(10.0)
 
 
-# D435i depth camera props for far-tracking distillation
+# D435i depth camera props for MuJoCo rendered distillation rollout.
 d435i_depth_props = CameraProps(
     image_type="depth",
     width=_env_int("PERCEPTION_CAMERA_WIDTH", 848),
@@ -102,18 +102,18 @@ d435i_depth_props = CameraProps(
     resized_width=87,
     resized_height=58,
     horizontal_fov=_env_float("PERCEPTION_CAMERA_HFOV_DEG", 89.5),
-    vertical_fov=_env_float("PERCEPTION_CAMERA_VFOV_DEG", 89.5 * (60 / 106)),
+    vertical_fov=_env_float("PERCEPTION_CAMERA_VFOV_DEG", 58.6),
     near_clip=_env_float("PERCEPTION_CAMERA_NEAR", 0.3),
     far_clip=_env_float("PERCEPTION_CAMERA_FAR", 3.0),
     image_show=True,
-    frame_rate=_env_int("PERCEPTION_CAMERA_FPS", 50),
+    frame_rate=_env_int("PERCEPTION_CAMERA_FPS", 30),
     depth_delay=0,
     crop_y_start=_env_int("PERCEPTION_CAMERA_WARP_CROP_TOP", 16),
     crop_y_end=_crop_end_from_right("PERCEPTION_CAMERA_WARP_CROP_BOTTOM", None),
     crop_x_start=_env_int("PERCEPTION_CAMERA_WARP_CROP_LEFT", 32),
     crop_x_end=_crop_end_from_right("PERCEPTION_CAMERA_WARP_CROP_RIGHT", -32),
-    latency_frame=_env_latency_frame("PERCEPTION_CAMERA_WARP_LATENCY_FRAME", (7, 8)),
-    buffer_len=_env_int("PERCEPTION_CAMERA_WARP_BUFFER_LEN", 9),
+    latency_frame=_env_latency_frame("PERCEPTION_CAMERA_WARP_LATENCY_FRAME", 0),
+    buffer_len=_env_int("PERCEPTION_CAMERA_WARP_BUFFER_LEN", 3),
 )
 
 single_d435i_depth = CameraManagerCfg(terms={

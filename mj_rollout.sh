@@ -22,94 +22,19 @@ POLICY_PYTHON_BIN="${POLICY_PYTHON_BIN:-/home/user/.holosoma_deps/miniconda3/env
 
 export PYTHONPATH="${ROOT_DIR}/src/holosoma_inference${PYTHONPATH:+:${PYTHONPATH}}"
 
-resolve_metadata_model() {
-  local input="$1"
-  if [[ "$input" == *.onnx && -f "$input" ]]; then
-    readlink -f "$input"
-    return 0
-  fi
-
-  local run_id=""
-  local file_name="model_20000.onnx"
-  if [[ "$input" =~ /runs/([^/?#]+) ]]; then
-    run_id="${BASH_REMATCH[1]}"
-  elif [[ "$input" =~ wandb://[^/]+/[^/]+/([^/]+)/ ]]; then
-    run_id="${BASH_REMATCH[1]}"
-  fi
-  if [[ "$input" =~ /([^/]+\.onnx)(\?.*)?$ ]]; then
-    file_name="${BASH_REMATCH[1]}"
-  fi
-  [[ -n "$run_id" ]] || return 1
-
-  local candidate
-  for candidate in \
-    "$ROOT_DIR/logs/wandb_runs/$run_id/$file_name" \
-    "$ROOT_DIR/logs/wandb_runs/$run_id/model_20000.onnx" \
-    "/home/user/FAR/holosoma/logs/wandb_runs/$run_id/$file_name" \
-    "/home/user/FAR/holosoma/logs/wandb_runs/$run_id/model_20000.onnx"; do
-    if [[ -f "$candidate" ]]; then
-      readlink -f "$candidate"
-      return 0
-    fi
-  done
-  return 1
+clear_split_tracker_env() {
+  unset SIM_CLOCK_PORT SIM_STATE_PORT PERCEPTION_OBS_PORT SIM_CONTROL_PORT
+  unset SPARSE_ROOT_COMMAND_PORT POLICY_CONTROL_PORT POLICY_OVERLAY_PORT
+  unset PERCEPTION_OBS_SHM_NAME HOLOSOMA_POLICY_PERCEPTION_OBS_SHM_NAME
+  unset MJ_TRACK_MODE MJ_ENV_AUTO_LAUNCH_POLICY HOLOSOMA_MJ_TRACK_INTERNAL_CORE
+  unset HOLOSOMA_MJ_TRACK_RUN_FOREVER ENABLE_EXTERNAL_SPARSE_ROOT_COMMAND
+  unset POLICY_USE_PERCEPTION_OBS_SHM PERCEPTION_OBS_TRANSPORT
+  unset HOLOSOMA_MUJOCO_BACKSPACE_POLICY_CONTROL HOLOSOMA_MUJOCO_BACKSPACE_AUTORESTART_POLICY
 }
 
-apply_training_perception_overrides() {
-  local metadata_model
-  metadata_model="$(resolve_metadata_model "$MODEL_INPUT" 2>/dev/null || true)"
-  [[ -n "$metadata_model" ]] || return 0
-
-  local exports
-  exports="$("$POLICY_PYTHON_BIN" - "$metadata_model" <<'PY'
-import json
-import shlex
-import sys
-
-try:
-    import onnx
-except Exception:
-    raise SystemExit(0)
-
-model = onnx.load(sys.argv[1])
-metadata = {}
-for prop in model.metadata_props:
-    try:
-        metadata[prop.key] = json.loads(prop.value)
-    except Exception:
-        metadata[prop.key] = prop.value
-
-perception = (metadata.get("experiment_config") or {}).get("perception") or {}
-field_map = {
-    "camera_width": "PERCEPTION_CAMERA_WIDTH",
-    "camera_height": "PERCEPTION_CAMERA_HEIGHT",
-    "camera_hfov_deg": "PERCEPTION_CAMERA_HFOV_DEG",
-    "camera_vfov_deg": "PERCEPTION_CAMERA_VFOV_DEG",
-    "camera_pitch_deg": "PERCEPTION_CAMERA_PITCH_DEG",
-    "camera_fps": "PERCEPTION_CAMERA_FPS",
-    "camera_near": "PERCEPTION_CAMERA_NEAR",
-    "camera_far": "PERCEPTION_CAMERA_FAR",
-    "camera_warp_crop_top": "PERCEPTION_CAMERA_WARP_CROP_TOP",
-    "camera_warp_crop_bottom": "PERCEPTION_CAMERA_WARP_CROP_BOTTOM",
-    "camera_warp_crop_left": "PERCEPTION_CAMERA_WARP_CROP_LEFT",
-    "camera_warp_crop_right": "PERCEPTION_CAMERA_WARP_CROP_RIGHT",
-    "camera_warp_latency_frame": "PERCEPTION_CAMERA_WARP_LATENCY_FRAME",
-    "camera_warp_buffer_len": "PERCEPTION_CAMERA_WARP_BUFFER_LEN",
-}
-for key, env_name in field_map.items():
-    value = perception.get(key)
-    if value is None:
-        continue
-    if isinstance(value, bool):
-        value = "True" if value else "False"
-    print(f"export {env_name}={shlex.quote(str(value))}")
-PY
-)"
-  [[ -n "$exports" ]] || return 0
-  eval "$exports"
-}
-
-apply_training_perception_overrides
+if [[ "${HOLOSOMA_SIM2SIM_DIRECT_ROLLOUT:-1}" != "0" ]]; then
+  clear_split_tracker_env
+fi
 
 RUN_DIR="${RUN_DIR:-${ROOT_DIR}/logs/sim2sim_runs/${motion%.*}__myholosoma}"
 SIM_LOG="${SIM_LOG:-${RUN_DIR}/mujoco.log}"
