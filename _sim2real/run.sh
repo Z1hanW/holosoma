@@ -21,7 +21,10 @@ case "${1:-}" in
     ;;
 esac
 
-POLICY_NAME="${1:-w5qostjn_linvel}"
+POLICY_NAME="${1:-w5qostjn}"
+if [[ "$POLICY_NAME" == "current" || "$POLICY_NAME" == "default" ]]; then
+  POLICY_NAME="w5qostjn"
+fi
 if [[ $# -gt 0 ]]; then
   shift
 fi

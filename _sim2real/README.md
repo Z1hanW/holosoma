@@ -4,7 +4,19 @@ These launchers run the same registered box policies as `_sim2sim`, but through 
 
 ## Run
 
-Use the current policy:
+Terminal 1: start the real depth publisher.
+
+```bash
+bash _sim2real/depth_realsense.sh --preview
+```
+
+Terminal 2: verify the policy can receive model-ready depth.
+
+```bash
+python _sim2real/check_perception_obs.py --port 5658 --once
+```
+
+Terminal 3: start the current policy.
 
 ```bash
 UNITREE_INTERFACE=eth0 bash _sim2real/current.sh
@@ -61,6 +73,8 @@ python _sim2real/check_perception_obs.py --port 5658 --once
 ```
 
 The expected tensor is the training-aligned flattened depth observation, shape `58x87 = 5046`, published as JSON key `perception_obs` over ZMQ on `PERCEPTION_OBS_PORT` (default `5658`).
+
+`depth_realsense.sh` uses the current `w5qostjn` training depth defaults: RealSense depth in meters -> `106x60` camera frame -> crop top `2`, left/right `4` -> bicubic resize to `58x87` -> normalize with near `0.3`, far `3.0`.
 
 ## Registered Policies
 
