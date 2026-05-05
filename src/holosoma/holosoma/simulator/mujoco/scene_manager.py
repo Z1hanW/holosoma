@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 from pathlib import Path
 from typing import Any, List
@@ -17,6 +18,19 @@ from holosoma.managers.camera import CameraManager
 from holosoma.managers.terrain.base import TerrainTermBase
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.path import resolve_data_file_path
+
+_GT_MUJOCO_PHYSICS_ENV = "GT_MUJOCO_PHYSICS"
+_HOLOSOMA_GT_MUJOCO_PHYSICS_ENV = "HOLOSOMA_GT_MUJOCO_PHYSICS"
+_MUJOCO_OBJECT_MASS_OVERRIDE_ENV = "MUJOCO_OBJECT_MASS_OVERRIDE"
+_MUJOCO_OBJECT_GEOM_FRICTION_ENV = "MUJOCO_OBJECT_GEOM_FRICTION"
+_MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION_ENV = "MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION"
+
+_GT_TERRAIN_FRICTION = [1.0, 0.005, 0.001]
+_GT_TERRAIN_SOLREF = [0.01, 1.0]
+_GT_OBJECT_GEOM_FRICTION = [0.6, 0.02, 0.005]
+_GT_OBJECT_MASS = 1.4
+_GT_HAND_OBJECT_FRICTION = [0.8, 0.02, 0.005]
+_GT_HAND_OBJECT_SOLREF = [0.01, 1.0]
 
 
 def _euler_xyz_to_quat_wxyz(euler_rad: np.ndarray) -> np.ndarray:
@@ -73,6 +87,7 @@ class MujocoSceneManager:
         self.world_spec.copy_during_attach = True
         self._setup_world_options(simulator_config)
         self.robot_config: RobotConfig | None = None  # Set when adding robot
+        self._terrain_geom_name = "floor"
 
     def _setup_world_options(self, simulator_config: SimulatorConfig) -> None:
         """Configure world specification options from simulator config.
@@ -288,6 +303,7 @@ class MujocoSceneManager:
         if geom is not None:
             # Monkey-patch Mujoco geom into our terrain manager for convenience
             terrain_state.geom = geom  # type: ignore[attr-defined]
+            self._terrain_geom_name = str(geom.name or terrain_state.name or "floor")
 
             # Set environment collision properties so robot self_collision flag works
             # Environment collision class
@@ -303,7 +319,12 @@ class MujocoSceneManager:
         mujoco.MjSpec.Geom
             Ground plane geometry with configured physics properties.
         """
-        # Create ground plane with hardcoded parameters and physics properties
+        friction = [0.7, 0.005, 0.001]
+        solref = [0.001, 1.0]
+        if self._gt_mujoco_physics_enabled():
+            friction = list(_GT_TERRAIN_FRICTION)
+            solref = list(_GT_TERRAIN_SOLREF)
+
         return self.world_spec.worldbody.add_geom(
             name=terrain_state.name,
             type=mujoco.mjtGeom.mjGEOM_PLANE,
@@ -313,14 +334,9 @@ class MujocoSceneManager:
             size=[0, 0, 0.05],
             pos=[0, 0, 0],
             material="grid",
-            friction=[
-                # Ignore terrain config until we expose Mujoco-specific parameters
-                0.7,  # reasonable default
-                0.005,  # reasonable default
-                0.001,  # reasonable default
-            ],  # [sliding, torsional, rolling]
+            friction=friction,  # [sliding, torsional, rolling]
             solimp=[0.99, 0.99, 0.01, 0.5, 2],  # 5 elements: [dmin, dmax, width, midpoint, power]
-            solref=[0.001, 1],  # 2 elements: [timeconst, dampratio]
+            solref=solref,  # 2 elements: [timeconst, dampratio]
         )
 
     def _create_trimesh(self, terrain_state: TerrainTermBase) -> mujoco.MjSpec.Geom:
@@ -505,7 +521,7 @@ class MujocoSceneManager:
         robot_rot = [1, 0, 0, 0]
         site = self.world_spec.worldbody.add_site(pos=robot_pos, quat=robot_rot)
         self.world_spec.attach(robot_spec, site=site, prefix=prefix)
-        self._add_object_from_robot_config(robot_config)
+        self._add_object_from_robot_config(robot_config, terrain_geom_name=str(getattr(terrain_state, "name", "floor")))
 
         # Store prefix for later use by simulator
         self.robot_prefix = prefix
@@ -526,6 +542,67 @@ class MujocoSceneManager:
         spec.compiler.meshdir = str(urdf_path.parent.resolve())
 
     @staticmethod
+    def _env_flag(name: str, default: bool = False) -> bool:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() not in {"", "0", "false", "no", "off"}
+
+    @classmethod
+    def _gt_mujoco_physics_enabled(cls) -> bool:
+        return cls._env_flag(_GT_MUJOCO_PHYSICS_ENV) or cls._env_flag(_HOLOSOMA_GT_MUJOCO_PHYSICS_ENV)
+
+    @staticmethod
+    def _parse_float_env(name: str, default: float) -> float:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return float(default)
+        return float(raw)
+
+    @staticmethod
+    def _parse_float_triplet_env(name: str, default: list[float]) -> list[float]:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return [float(value) for value in default]
+
+        try:
+            parsed = ast.literal_eval(raw)
+            values = list(parsed) if isinstance(parsed, (list, tuple)) else [parsed]
+        except (ValueError, SyntaxError):
+            values = raw.strip("[]()").replace(",", " ").split()
+
+        triplet = [float(value) for value in values]
+        if len(triplet) != 3:
+            raise ValueError(f"{name} must provide exactly 3 values [slide, spin, roll], got {triplet}")
+        return triplet
+
+    @staticmethod
+    def _expand_pair_friction(friction_triplet: list[float]) -> list[float]:
+        slide, spin, roll = [float(value) for value in friction_triplet]
+        return [slide, slide, spin, roll, roll]
+
+    @staticmethod
+    def _condim_from_friction_triplet(friction_triplet: list[float]) -> int:
+        _, spin, roll = [abs(float(value)) for value in friction_triplet]
+        if roll > 0.0:
+            return 6
+        if spin > 0.0:
+            return 4
+        return 3
+
+    @staticmethod
+    def _iter_bodies(container: Any):
+        for body in getattr(container, "bodies", []):
+            yield body
+            yield from MujocoSceneManager._iter_bodies(body)
+
+    @staticmethod
+    def _iter_body_geoms(container: Any):
+        for body in MujocoSceneManager._iter_bodies(container):
+            for geom in getattr(body, "geoms", []):
+                yield body, geom
+
+    @staticmethod
     def _select_object_root_body(object_spec: mujoco.MjSpec) -> mujoco.MjSpec.Body:
         for preferred_name in ("baseLink", "base_link"):
             for body in object_spec.bodies:
@@ -536,7 +613,7 @@ class MujocoSceneManager:
                 return body
         raise ValueError("Could not resolve a named object root body from the MuJoCo object URDF")
 
-    def _add_object_from_robot_config(self, robot_config: RobotConfig) -> None:
+    def _add_object_from_robot_config(self, robot_config: RobotConfig, *, terrain_geom_name: str) -> None:
         object_cfg = getattr(robot_config, "object", None)
         object_urdf_path = getattr(object_cfg, "object_urdf_path", None)
         if not object_urdf_path:
@@ -550,10 +627,169 @@ class MujocoSceneManager:
         self._configure_urdf_meshdir(object_spec, resolved_object_path)
         object_root_body = self._select_object_root_body(object_spec)
         object_root_body.pos = [0.75, 0.0, 0.18]
+        self._apply_gt_object_properties(object_spec)
 
         object_site = self.world_spec.worldbody.add_site(pos=[0.0, 0.0, 0.0], quat=[1.0, 0.0, 0.0, 0.0])
         self.world_spec.attach(object_spec, site=object_site, prefix="object_")
+        self._add_gt_object_contact_pairs(terrain_geom_name=terrain_geom_name)
         logger.info(f"Added MuJoCo object from: {resolved_object_path}")
+
+    def _apply_gt_object_properties(self, object_spec: mujoco.MjSpec) -> None:
+        if not self._gt_mujoco_physics_enabled():
+            return
+
+        geom_friction = self._parse_float_triplet_env(_MUJOCO_OBJECT_GEOM_FRICTION_ENV, _GT_OBJECT_GEOM_FRICTION)
+        mass_override = self._parse_float_env(_MUJOCO_OBJECT_MASS_OVERRIDE_ENV, _GT_OBJECT_MASS)
+        condim = self._condim_from_friction_triplet(geom_friction)
+        existing_geom_names = {str(geom.name) for _, geom in self._iter_body_geoms(object_spec) if geom.name}
+
+        def _unique_geom_name(base_name: str) -> str:
+            candidate = base_name
+            suffix = 2
+            while candidate in existing_geom_names:
+                candidate = f"{base_name}_{suffix}"
+                suffix += 1
+            existing_geom_names.add(candidate)
+            return candidate
+
+        updated_bodies = 0
+        updated_geoms = 0
+        for body in object_spec.bodies:
+            if not body.name:
+                continue
+
+            original_mass = float(body.mass)
+            if mass_override > 0.0 and original_mass > 0.0:
+                mass_ratio = mass_override / original_mass
+                body.mass = mass_override
+                fullinertia = np.asarray(getattr(body, "fullinertia", []), dtype=np.float64)
+                if fullinertia.size == 6 and np.all(np.isfinite(fullinertia)):
+                    body.fullinertia = (fullinertia * mass_ratio).tolist()
+                else:
+                    inertia = np.asarray(body.inertia, dtype=np.float64)
+                    if inertia.size == 3 and np.all(np.isfinite(inertia)):
+                        body.inertia = (inertia * mass_ratio).tolist()
+                updated_bodies += 1
+
+            for geom in body.geoms:
+                if int(geom.contype) == 0 or int(geom.conaffinity) == 0:
+                    continue
+                if not geom.name:
+                    geom.name = _unique_geom_name("collision")
+                geom.contype = 4
+                geom.conaffinity = 11
+                geom.condim = max(int(geom.condim), condim)
+                geom.friction = list(geom_friction)
+                geom.solref = list(_GT_HAND_OBJECT_SOLREF)
+                updated_geoms += 1
+
+        logger.info(
+            "Applied GT MuJoCo object material: bodies={}, geoms={}, mass={}, geom_friction={}",
+            updated_bodies,
+            updated_geoms,
+            mass_override,
+            geom_friction,
+        )
+
+    def _add_gt_object_contact_pairs(self, *, terrain_geom_name: str) -> None:
+        if not self._gt_mujoco_physics_enabled():
+            return
+
+        object_terrain_friction = self._parse_float_triplet_env(
+            _MUJOCO_OBJECT_TERRAIN_PAIR_FRICTION_ENV,
+            _GT_OBJECT_GEOM_FRICTION,
+        )
+        object_terrain_pair_friction = self._expand_pair_friction(object_terrain_friction)
+        object_terrain_condim = self._condim_from_friction_triplet(object_terrain_friction)
+        hand_pair_friction = self._expand_pair_friction(list(_GT_HAND_OBJECT_FRICTION))
+
+        existing_pair_keys = {
+            (str(pair.geomname1), str(pair.geomname2))
+            for pair in self.world_spec.pairs
+            if pair.geomname1 and pair.geomname2
+        }
+        existing_pair_names = {str(pair.name) for pair in self.world_spec.pairs if pair.name}
+
+        object_collision_geoms: list[str] = []
+        hand_collision_geoms: list[str] = []
+        for body, geom in self._iter_body_geoms(self.world_spec.worldbody):
+            if int(geom.contype) == 0 or int(geom.conaffinity) == 0:
+                continue
+            body_name = str(body.name or "")
+            geom_name = str(geom.name or "")
+            mesh_name = str(getattr(geom, "meshname", "") or "")
+            combined_name = f"{body_name} {geom_name} {mesh_name}".lower()
+
+            if body_name.startswith("object_") or geom_name.startswith("object_"):
+                object_collision_geoms.append(geom_name)
+            elif (
+                "rubber_hand" in combined_name
+                or "sphere_hand" in combined_name
+                or "left_hand_collision" in combined_name
+                or "right_hand_collision" in combined_name
+            ):
+                geom.contype = 1
+                geom.conaffinity = 6
+                geom.condim = 6
+                geom.friction = list(_GT_HAND_OBJECT_FRICTION)
+                geom.solref = list(_GT_HAND_OBJECT_SOLREF)
+                hand_collision_geoms.append(geom_name)
+
+        added_pairs = 0
+        for object_geom_name in sorted(set(object_collision_geoms)):
+            pair_name = f"{object_geom_name}__{terrain_geom_name}__sim2sim"
+            pair_key = (object_geom_name, terrain_geom_name)
+            reverse_pair_key = (terrain_geom_name, object_geom_name)
+            if (
+                pair_name not in existing_pair_names
+                and pair_key not in existing_pair_keys
+                and reverse_pair_key not in existing_pair_keys
+            ):
+                self.world_spec.add_pair(
+                    name=pair_name,
+                    geomname1=object_geom_name,
+                    geomname2=terrain_geom_name,
+                    condim=object_terrain_condim,
+                    friction=object_terrain_pair_friction,
+                    solref=list(_GT_HAND_OBJECT_SOLREF),
+                )
+                existing_pair_names.add(pair_name)
+                existing_pair_keys.add(pair_key)
+                added_pairs += 1
+
+        for hand_geom_name in sorted(set(hand_collision_geoms)):
+            for object_geom_name in sorted(set(object_collision_geoms)):
+                pair_name = f"{hand_geom_name}_{object_geom_name}"
+                pair_key = (hand_geom_name, object_geom_name)
+                reverse_pair_key = (object_geom_name, hand_geom_name)
+                if (
+                    pair_name in existing_pair_names
+                    or pair_key in existing_pair_keys
+                    or reverse_pair_key in existing_pair_keys
+                ):
+                    continue
+                self.world_spec.add_pair(
+                    name=pair_name,
+                    geomname1=hand_geom_name,
+                    geomname2=object_geom_name,
+                    condim=6,
+                    friction=hand_pair_friction,
+                    solref=list(_GT_HAND_OBJECT_SOLREF),
+                )
+                existing_pair_names.add(pair_name)
+                existing_pair_keys.add(pair_key)
+                added_pairs += 1
+
+        logger.info(
+            "Applied GT MuJoCo object contact pairs: added={}, hands={}, objects={}, terrain={}, "
+            "object_terrain_friction={}, hand_object_friction={}",
+            added_pairs,
+            sorted(set(hand_collision_geoms)),
+            sorted(set(object_collision_geoms)),
+            terrain_geom_name,
+            object_terrain_friction,
+            _GT_HAND_OBJECT_FRICTION,
+        )
 
     def _apply_collision_settings(self, robot_spec: mujoco.MjSpec, robot_config: RobotConfig) -> None:
         """Apply collision settings based on unified self_collisions configuration.
