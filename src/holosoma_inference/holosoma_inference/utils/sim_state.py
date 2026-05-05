@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
-import zmq
 from loguru import logger
 
 
@@ -13,11 +13,15 @@ class SimStateSub:
 
     def __init__(self, port: int = 5557) -> None:
         self.port = int(port)
-        self.context: zmq.Context | None = None
-        self.socket: zmq.Socket | None = None
+        self.context: Any | None = None
+        self.socket: Any | None = None
+        self._zmq: Any | None = None
         self.last_state: dict | None = None
 
     def start(self) -> None:
+        import zmq
+
+        self._zmq = zmq
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.SUB)
         self.socket.setsockopt(zmq.LINGER, 0)
@@ -27,7 +31,8 @@ class SimStateSub:
         logger.info("Sim state subscriber started, connecting to port {}", self.port)
 
     def _drain_messages(self) -> None:
-        if self.socket is None:
+        zmq = self._zmq
+        if self.socket is None or zmq is None:
             return
         while True:
             try:
@@ -44,6 +49,7 @@ class SimStateSub:
         context = self.context
         self.socket = None
         self.context = None
+        self._zmq = None
         if socket is not None:
             socket.close(0)
         if context is not None:

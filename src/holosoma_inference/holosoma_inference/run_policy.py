@@ -34,6 +34,7 @@ def _print_control_guide(policy_class, use_joystick: bool):
         "yes",
         "on",
     }
+    keyboard_root_command_input_mode = os.environ.get("HOLOSOMA_KEYBOARD_ROOT_COMMAND_INPUT_MODE", "hold").lower()
     joystick_root_command = str(os.environ.get("HOLOSOMA_JOYSTICK_ROOT_COMMAND", "0")).lower() in {
         "1",
         "true",
@@ -86,7 +87,10 @@ def _print_control_guide(policy_class, use_joystick: bool):
                 logger.info("  w/s        - Command x +/-")
                 logger.info("  a/d        - Command y +/-")
                 logger.info("  q/e        - Command yaw +/-")
-                logger.info("  release    - Command axis returns to zero")
+                if keyboard_root_command_input_mode in {"latch", "latched", "persistent", "sticky", "toggle"}:
+                    logger.info("  z          - Zero manual command")
+                else:
+                    logger.info("  release    - Command axis returns to zero")
             else:
                 logger.info("  s  - Start motion clip")
         else:

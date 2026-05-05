@@ -160,7 +160,6 @@ CMD=(
   --task.no-prefer-sim-ref-from-sim-state
   --task.no-restart-motion-on-clock-reset
   --task.no-restart-sim-on-motion-end
-  --task.no-use-zmq-lowcmd
   --task.use-split-perception-obs
   --task.use-split-perception-obs-shm
   --task.perception-obs-shm-name "$PERCEPTION_OBS_SHM_NAME"

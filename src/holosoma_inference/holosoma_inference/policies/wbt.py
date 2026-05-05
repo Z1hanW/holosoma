@@ -521,6 +521,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._last_sparse_command_source = "auto"
         self._last_sparse_command_mode = "motion"
         self._last_sparse_manual_enabled = False
+        self._force_manual_sparse_root_command = _truthy_env("HOLOSOMA_FORCE_MANUAL_SPARSE_ROOT_COMMAND")
         self._logged_root_reference_clip_start = False
         self._logged_sim_ref_from_sim_state = False
         self._auto_start_motion_clip_pending = False
@@ -669,6 +670,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 self._joystick_sparse_root_y_sign,
                 self._joystick_sparse_root_yaw_sign,
             )
+        if self._force_manual_sparse_root_command:
+            logger.info("Sparse root command defaults to manual zero command instead of motion target.")
         if self._motion_index_offset != 0:
             logger.info("Using motion sequence index offset: {}", self._motion_index_offset)
         if self._sparse_root_without_motion:
@@ -1783,7 +1786,53 @@ class WholeBodyTrackingPolicy(BasePolicy):
         )
         return manual_command
 
+    def _default_manual_sparse_root_command(self, motion_command: np.ndarray) -> np.ndarray:
+        manual_command = np.zeros_like(motion_command, dtype=np.float32)
+        self._record_sparse_root_command(
+            motion_command,
+            manual_command,
+            source="manual_default",
+            mode="manual",
+            manual_enabled=True,
+            manual_command=manual_command,
+        )
+        return manual_command
+
     def _apply_external_sparse_root_command(self, motion_command: np.ndarray) -> np.ndarray:
+        sub = self._manual_sparse_root_command_sub
+        if sub is not None:
+            payload = sub.get_payload()
+            enabled = bool(payload.get("enabled", False)) if isinstance(payload, dict) else False
+            mode = str(payload.get("mode", "manual")).strip().lower() if isinstance(payload, dict) else "manual"
+            log_key = (enabled, mode)
+            if log_key != self._manual_sparse_root_command_log_key:
+                logger.info("External sparse root command: enabled={} mode={}", enabled, mode)
+                self._manual_sparse_root_command_log_key = log_key
+            if enabled:
+                command_raw = payload.get("command") if isinstance(payload, dict) else None
+                try:
+                    manual_command = np.asarray(command_raw, dtype=np.float32).reshape(1, -1)[:, :3]
+                except (TypeError, ValueError):
+                    logger.warning("Ignoring malformed external sparse root command: {}", command_raw)
+                else:
+                    if manual_command.shape[1] == 3:
+                        manual_command = np.nan_to_num(
+                            manual_command,
+                            nan=0.0,
+                            posinf=0.0,
+                            neginf=0.0,
+                        ).astype(np.float32, copy=False)
+                        effective_command = self._apply_sparse_root_command(motion_command, manual_command, mode)
+                        self._record_sparse_root_command(
+                            motion_command,
+                            effective_command,
+                            source="manual_mujoco",
+                            mode=mode,
+                            manual_enabled=True,
+                            manual_command=manual_command,
+                        )
+                        return effective_command
+
         keyboard_command = self._get_keyboard_sparse_root_command()
         if keyboard_command is not None:
             mode, manual_command = keyboard_command
@@ -1812,8 +1861,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
             )
             return effective_command
 
-        sub = self._manual_sparse_root_command_sub
         if sub is None:
+            if self._force_manual_sparse_root_command:
+                return self._default_manual_sparse_root_command(motion_command)
             self._record_sparse_root_command(
                 motion_command,
                 motion_command,
@@ -1831,6 +1881,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
             logger.info("External sparse root command: enabled={} mode={}", enabled, mode)
             self._manual_sparse_root_command_log_key = log_key
         if not enabled:
+            if self._force_manual_sparse_root_command:
+                return self._default_manual_sparse_root_command(motion_command)
             self._record_sparse_root_command(
                 motion_command,
                 motion_command,
@@ -1845,6 +1897,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
             manual_command = np.asarray(command_raw, dtype=np.float32).reshape(1, -1)[:, :3]
         except (TypeError, ValueError):
             logger.warning("Ignoring malformed external sparse root command: {}", command_raw)
+            if self._force_manual_sparse_root_command:
+                return self._default_manual_sparse_root_command(motion_command)
             self._record_sparse_root_command(
                 motion_command,
                 motion_command,
@@ -1855,6 +1909,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return motion_command
         if manual_command.shape[1] != 3:
             logger.warning("Ignoring external sparse root command with dim {}", manual_command.shape[1])
+            if self._force_manual_sparse_root_command:
+                return self._default_manual_sparse_root_command(motion_command)
             self._record_sparse_root_command(
                 motion_command,
                 motion_command,
@@ -2855,17 +2911,17 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self._keyboard_sparse_root_latched_command = (0.0, 0.0, 0.0)
             return
         if key == "w":
-            x = 0.0 if x > 0.0 else value
+            x += value
         elif key == "s":
-            x = 0.0 if x < 0.0 else -value
+            x -= value
         elif key == "a":
-            y = 0.0 if y > 0.0 else value
+            y += value
         elif key == "d":
-            y = 0.0 if y < 0.0 else -value
+            y -= value
         elif key == "q":
-            yaw = 0.0 if yaw > 0.0 else yaw_value
+            yaw += yaw_value
         elif key == "e":
-            yaw = 0.0 if yaw < 0.0 else -yaw_value
+            yaw -= yaw_value
 
         self._keyboard_sparse_root_latched_command = (float(x), float(y), float(yaw))
 

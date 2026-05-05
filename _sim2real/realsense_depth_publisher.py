@@ -87,7 +87,6 @@ def _process_depth(
 ) -> np.ndarray:
     depth = np.asarray(depth_m, dtype=np.float32)
     depth = np.where(np.isfinite(depth) & (depth > 0.0), depth, far)
-    depth = np.minimum(depth, far)
 
     # Match training camera preprocessing: camera frame -> crop -> bicubic resize -> normalize.
     depth = cv2.resize(depth, (int(camera_width), int(camera_height)), interpolation=cv2.INTER_AREA)
@@ -98,9 +97,9 @@ def _process_depth(
     right = min(max(int(crop_right), 0), max(w - left - 1, 0))
     depth = depth[top : max(top + 1, h - bottom), left : max(left + 1, w - right)]
     depth = cv2.resize(depth, (int(resize_width), int(resize_height)), interpolation=cv2.INTER_CUBIC)
-    min_depth = max(float(near), float(min_valid_depth))
-    depth = np.where(depth < min_depth, far, depth)
     depth = np.clip(depth, near, far)
+    if min_valid_depth > 0.0:
+        depth = np.where(depth < min_valid_depth, far, depth)
     depth = (depth - near) / max(1.0e-6, far - near) - 0.5
     return np.clip(depth, -0.5, 0.5).astype(np.float32, copy=False)
 

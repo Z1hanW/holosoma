@@ -194,6 +194,18 @@ class MuJoCo(BaseSimulator):
         self._latest_policy_overlay_payload: dict | None = None
         self._last_policy_command_overlay_text: str | None = None
         self._last_policy_overlay_poll_time = 0.0
+        self._manual_sparse_root_enabled = os.getenv(
+            "HOLOSOMA_MUJOCO_MANUAL_SPARSE_ROOT_COMMAND", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._manual_sparse_root_port = int(os.getenv("SPARSE_ROOT_COMMAND_PORT", "5661") or "5661")
+        self._manual_sparse_root_pub = None
+        self._manual_sparse_root_command = np.zeros(3, dtype=np.float32)
+        self._manual_sparse_root_value = float(os.getenv("HOLOSOMA_KEYBOARD_ROOT_COMMAND_VALUE", "0.1") or "0.1")
+        self._manual_sparse_root_yaw = float(
+            np.deg2rad(float(os.getenv("HOLOSOMA_KEYBOARD_ROOT_COMMAND_YAW_DEGREES", "17") or "17"))
+        )
+        if self._manual_sparse_root_enabled:
+            self._ensure_manual_sparse_root_pub()
         self.show_object_collision_geoms: bool = bool(
             getattr(self.simulator_config, "mujoco_show_object_collision", False)
         )
@@ -328,6 +340,61 @@ class MuJoCo(BaseSimulator):
         except Exception as exc:
             logger.warning("MuJoCo Backspace policy-control action '{}' failed: {}", action, exc)
             return False
+
+    def _ensure_manual_sparse_root_pub(self):
+        if not self._manual_sparse_root_enabled:
+            return None
+        if self._manual_sparse_root_pub is not None:
+            return self._manual_sparse_root_pub
+        try:
+            from holosoma_inference.utils.sim_control import ManualRootCommandPub
+
+            publisher = ManualRootCommandPub(port=self._manual_sparse_root_port)
+            publisher.start()
+            if not publisher.enabled:
+                self._manual_sparse_root_enabled = False
+                return None
+            self._manual_sparse_root_pub = publisher
+            return publisher
+        except Exception as exc:
+            logger.warning("MuJoCo manual sparse-root publisher unavailable: {}", exc)
+            self._manual_sparse_root_enabled = False
+            return None
+
+    def _publish_manual_sparse_root_command(self) -> None:
+        publisher = self._ensure_manual_sparse_root_pub()
+        if publisher is None:
+            return
+        command = self._manual_sparse_root_command.astype(float).tolist()
+        publisher.publish(enabled=True, mode="manual", command=command)
+        logger.info(
+            "MuJoCo manual sparse root command: x={:.3f} y={:.3f} yaw={:.3f}",
+            command[0],
+            command[1],
+            command[2],
+        )
+
+    def _handle_manual_sparse_root_key(self, keycode: int) -> bool:
+        if not self._manual_sparse_root_enabled:
+            return False
+        if keycode == glfw.KEY_W:
+            self._manual_sparse_root_command[0] += abs(self._manual_sparse_root_value)
+        elif keycode == glfw.KEY_S:
+            self._manual_sparse_root_command[0] -= abs(self._manual_sparse_root_value)
+        elif keycode == glfw.KEY_A:
+            self._manual_sparse_root_command[1] += abs(self._manual_sparse_root_value)
+        elif keycode == glfw.KEY_D:
+            self._manual_sparse_root_command[1] -= abs(self._manual_sparse_root_value)
+        elif keycode == glfw.KEY_Q:
+            self._manual_sparse_root_command[2] += abs(self._manual_sparse_root_yaw)
+        elif keycode == glfw.KEY_E:
+            self._manual_sparse_root_command[2] -= abs(self._manual_sparse_root_yaw)
+        elif keycode == glfw.KEY_Z:
+            self._manual_sparse_root_command[:] = 0.0
+        else:
+            return False
+        self._publish_manual_sparse_root_command()
+        return True
 
     def _queue_backspace_policy_action(self, action: str, delay_s: float) -> None:
         self._pending_policy_control_actions.append((time.monotonic() + max(float(delay_s), 0.0), str(action)))
@@ -2514,6 +2581,9 @@ class MuJoCo(BaseSimulator):
             )
             return
 
+        if self._handle_manual_sparse_root_key(keycode):
+            return
+
         # Handle world_id toggling for multi-environment visualization (WarpBackend only)
         # LEFT ARROW (263): Previous environment
         # RIGHT ARROW (262): Next environment
@@ -2570,6 +2640,12 @@ class MuJoCo(BaseSimulator):
                 self._backspace_policy_control = None
             except Exception as e:
                 logger.warning(f"Error closing Backspace policy-control publisher: {e}")
+        if getattr(self, "_manual_sparse_root_pub", None) is not None:
+            try:
+                self._manual_sparse_root_pub.close()
+                self._manual_sparse_root_pub = None
+            except Exception as e:
+                logger.warning(f"Error closing manual sparse-root publisher: {e}")
         if hasattr(self, "viewer") and self.viewer is not None:
             try:
                 logger.info("Closing MuJoCo viewer")

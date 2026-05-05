@@ -7,9 +7,9 @@ import os
 from collections import deque
 from multiprocessing import resource_tracker
 from multiprocessing import shared_memory
+from typing import Any
 
 import numpy as np
-import zmq
 from loguru import logger
 
 
@@ -18,12 +18,16 @@ class PerceptionObsSub:
 
     def __init__(self, port: int = 5558) -> None:
         self.port = int(port)
-        self.context: zmq.Context | None = None
-        self.socket: zmq.Socket | None = None
+        self.context: Any | None = None
+        self.socket: Any | None = None
+        self._zmq: Any | None = None
         self.last_payload: dict | None = None
         self.payload_buffer: deque[dict] = deque(maxlen=512)
 
     def start(self) -> None:
+        import zmq
+
+        self._zmq = zmq
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.SUB)
         self.socket.setsockopt(zmq.LINGER, 0)
@@ -33,7 +37,8 @@ class PerceptionObsSub:
         logger.info("Perception obs subscriber started, connecting to port {}", self.port)
 
     def _drain_messages(self) -> None:
-        if self.socket is None:
+        zmq = self._zmq
+        if self.socket is None or zmq is None:
             return
         while True:
             try:
@@ -89,6 +94,7 @@ class PerceptionObsSub:
         context = self.context
         self.socket = None
         self.context = None
+        self._zmq = None
         if socket is not None:
             socket.close(0)
         if context is not None:

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
-import zmq
 from loguru import logger
 
 
@@ -13,12 +13,16 @@ class PolicyOverlayPub:
 
     def __init__(self, port: int = 5663) -> None:
         self.port = int(port)
-        self.context: zmq.Context | None = None
-        self.socket: zmq.Socket | None = None
+        self.context: Any | None = None
+        self.socket: Any | None = None
+        self._zmq: Any | None = None
         self.enabled = False
 
     def start(self) -> None:
         try:
+            import zmq
+
+            self._zmq = zmq
             self.context = zmq.Context()
             self.socket = self.context.socket(zmq.PUB)
             self.socket.setsockopt(zmq.LINGER, 0)
@@ -27,10 +31,12 @@ class PolicyOverlayPub:
             logger.info("Policy overlay publisher bound to port {}", self.port)
         except Exception as exc:
             logger.error("Failed to start policy overlay publisher: {}", exc)
+            self._zmq = None
             self.enabled = False
 
     def publish(self, payload: dict) -> None:
-        if not self.enabled or self.socket is None:
+        zmq = self._zmq
+        if not self.enabled or self.socket is None or zmq is None:
             return
         try:
             self.socket.send_string(json.dumps(payload), zmq.NOBLOCK)
@@ -44,6 +50,7 @@ class PolicyOverlayPub:
         context = self.context
         self.socket = None
         self.context = None
+        self._zmq = None
         if socket is not None:
             socket.close(0)
         if context is not None:
@@ -56,11 +63,15 @@ class PolicyOverlaySub:
 
     def __init__(self, port: int = 5663) -> None:
         self.port = int(port)
-        self.context: zmq.Context | None = None
-        self.socket: zmq.Socket | None = None
+        self.context: Any | None = None
+        self.socket: Any | None = None
+        self._zmq: Any | None = None
         self.last_payload: dict | None = None
 
     def start(self) -> None:
+        import zmq
+
+        self._zmq = zmq
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.SUB)
         self.socket.setsockopt(zmq.LINGER, 0)
@@ -70,7 +81,8 @@ class PolicyOverlaySub:
         logger.info("Policy overlay subscriber started, connecting to port {}", self.port)
 
     def _drain_messages(self) -> None:
-        if self.socket is None:
+        zmq = self._zmq
+        if self.socket is None or zmq is None:
             return
         while True:
             try:
@@ -87,6 +99,7 @@ class PolicyOverlaySub:
         context = self.context
         self.socket = None
         self.context = None
+        self._zmq = None
         if socket is not None:
             socket.close(0)
         if context is not None:

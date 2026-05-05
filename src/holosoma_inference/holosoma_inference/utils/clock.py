@@ -7,7 +7,6 @@ and policy inference to resolve timing issues when simulation rates vary.
 
 import time
 
-import zmq
 from loguru import logger
 
 
@@ -26,12 +25,16 @@ class ClockPub:
         self.port = port
         self.context = None
         self.socket = None
+        self._zmq = None
         self.start_time = None
         self.enabled = False
 
     def start(self):
         """Start the clock publisher."""
         try:
+            import zmq
+
+            self._zmq = zmq
             self.context = zmq.Context()
             self.socket = self.context.socket(zmq.PUB)
             self.socket.bind(f"tcp://*:{self.port}")
@@ -40,6 +43,7 @@ class ClockPub:
             logger.info(f"Clock publisher started on port {self.port}")
         except Exception as e:
             logger.error(f"Failed to start clock publisher: {e}")
+            self._zmq = None
             self.enabled = False
 
     def restart(self):
@@ -54,7 +58,8 @@ class ClockPub:
         Args:
             sim_time (float): Current simulation time in seconds
         """
-        if not self.enabled or not self.socket:
+        zmq = self._zmq
+        if not self.enabled or not self.socket or zmq is None:
             return
 
         try:
@@ -72,6 +77,7 @@ class ClockPub:
             self.socket.close()
         if self.context:
             self.context.term()
+        self._zmq = None
         self.enabled = False
 
 
@@ -90,11 +96,15 @@ class ClockSub:
         self.port = port
         self.context = None
         self.socket = None
+        self._zmq = None
         self.last_clock = 0
         self._offset = 0
 
     def start(self):
         """Start the clock subscriber."""
+        import zmq
+
+        self._zmq = zmq
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.SUB)
         self.socket.connect(f"tcp://localhost:{self.port}")
@@ -104,7 +114,8 @@ class ClockSub:
 
     def _drain_messages(self) -> None:
         """Drain all pending clock messages from the socket."""
-        if self.socket is None:
+        zmq = self._zmq
+        if self.socket is None or zmq is None:
             return
 
         while True:
@@ -139,3 +150,4 @@ class ClockSub:
             self.socket.close()
         if self.context:
             self.context.term()
+        self._zmq = None

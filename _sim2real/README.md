@@ -74,7 +74,7 @@ python _sim2real/check_perception_obs.py --once
 
 The expected tensor is the training-aligned flattened depth observation, shape `58x87 = 5046`, written as float32 into POSIX shared memory `depth_img_shm`.
 
-`depth_realsense.sh` uses the current `w5qostjn` training depth defaults: RealSense depth in meters -> `106x60` camera frame -> crop top `2`, left/right `4` -> bicubic resize to `58x87` -> treat depth `<0.3m` as far/empty -> normalize with near `0.3`, far `3.0`.
+`depth_realsense.sh` uses the current `w5qostjn` training depth defaults: RealSense depth in meters -> `106x60` camera frame -> crop top `2`, left/right `4` -> bicubic resize to `58x87` -> clamp to near `0.3`, far `3.0` -> normalize to `[-0.5, 0.5]`.
 
 The policy launcher uses the same shared-memory path:
 

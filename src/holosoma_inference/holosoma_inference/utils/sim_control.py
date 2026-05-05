@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import time
+from typing import Any
 
-import zmq
 from loguru import logger
 
 POLICY_CONTROL_ACTIONS = frozenset({"start", "stop", "init", "space", "reset"})
@@ -16,12 +16,16 @@ class SimControlPush:
 
     def __init__(self, port: int = 5559) -> None:
         self.port = int(port)
-        self.context: zmq.Context | None = None
-        self.socket: zmq.Socket | None = None
+        self.context: Any | None = None
+        self.socket: Any | None = None
+        self._zmq: Any | None = None
         self.enabled = False
 
     def start(self) -> None:
         try:
+            import zmq
+
+            self._zmq = zmq
             self.context = zmq.Context()
             self.socket = self.context.socket(zmq.PUSH)
             self.socket.setsockopt(zmq.LINGER, 0)
@@ -30,10 +34,12 @@ class SimControlPush:
             logger.info("Sim control publisher connected to port {}", self.port)
         except Exception as exc:
             logger.error("Failed to start sim control publisher: {}", exc)
+            self._zmq = None
             self.enabled = False
 
     def publish(self, payload: dict) -> None:
-        if not self.enabled or self.socket is None:
+        zmq = self._zmq
+        if not self.enabled or self.socket is None or zmq is None:
             return
         try:
             self.socket.send_string(json.dumps(payload), zmq.NOBLOCK)
@@ -43,7 +49,8 @@ class SimControlPush:
             logger.warning("Sim control publish failed: {}", exc)
 
     def request_reset(self, reason: str, motion_init_mode: str | None = None) -> None:
-        if not self.enabled or self.socket is None:
+        zmq = self._zmq
+        if not self.enabled or self.socket is None or zmq is None:
             return
         payload_dict = {"action": "reset", "reason": str(reason)}
         if motion_init_mode is not None:
@@ -65,6 +72,7 @@ class SimControlPush:
         context = self.context
         self.socket = None
         self.context = None
+        self._zmq = None
         if socket is not None:
             socket.close(0)
         if context is not None:
@@ -77,12 +85,16 @@ class ManualRootCommandPub:
 
     def __init__(self, port: int = 5661) -> None:
         self.port = int(port)
-        self.context: zmq.Context | None = None
-        self.socket: zmq.Socket | None = None
+        self.context: Any | None = None
+        self.socket: Any | None = None
+        self._zmq: Any | None = None
         self.enabled = False
 
     def start(self) -> None:
         try:
+            import zmq
+
+            self._zmq = zmq
             self.context = zmq.Context()
             self.socket = self.context.socket(zmq.PUB)
             self.socket.setsockopt(zmq.LINGER, 0)
@@ -91,10 +103,12 @@ class ManualRootCommandPub:
             logger.info("Manual root command publisher bound to port {}", self.port)
         except Exception as exc:
             logger.error("Failed to start manual root command publisher: {}", exc)
+            self._zmq = None
             self.enabled = False
 
     def publish(self, *, enabled: bool, mode: str, command: list[float] | tuple[float, float, float]) -> None:
-        if not self.enabled or self.socket is None:
+        zmq = self._zmq
+        if not self.enabled or self.socket is None or zmq is None:
             return
         payload = {
             "enabled": bool(enabled),
@@ -114,6 +128,7 @@ class ManualRootCommandPub:
         context = self.context
         self.socket = None
         self.context = None
+        self._zmq = None
         if socket is not None:
             socket.close(0)
         if context is not None:
@@ -126,11 +141,15 @@ class ManualRootCommandSub:
 
     def __init__(self, port: int = 5661) -> None:
         self.port = int(port)
-        self.context: zmq.Context | None = None
-        self.socket: zmq.Socket | None = None
+        self.context: Any | None = None
+        self.socket: Any | None = None
+        self._zmq: Any | None = None
         self.last_payload: dict | None = None
 
     def start(self) -> None:
+        import zmq
+
+        self._zmq = zmq
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.SUB)
         self.socket.setsockopt(zmq.LINGER, 0)
@@ -140,7 +159,8 @@ class ManualRootCommandSub:
         logger.info("Manual root command subscriber started, connecting to port {}", self.port)
 
     def _drain_messages(self) -> None:
-        if self.socket is None:
+        zmq = self._zmq
+        if self.socket is None or zmq is None:
             return
         while True:
             try:
@@ -157,6 +177,7 @@ class ManualRootCommandSub:
         context = self.context
         self.socket = None
         self.context = None
+        self._zmq = None
         if socket is not None:
             socket.close(0)
         if context is not None:
@@ -168,12 +189,16 @@ class PolicyControlPush:
 
     def __init__(self, port: int = 5662) -> None:
         self.port = int(port)
-        self.context: zmq.Context | None = None
-        self.socket: zmq.Socket | None = None
+        self.context: Any | None = None
+        self.socket: Any | None = None
+        self._zmq: Any | None = None
         self.enabled = False
 
     def start(self) -> None:
         try:
+            import zmq
+
+            self._zmq = zmq
             self.context = zmq.Context()
             self.socket = self.context.socket(zmq.PUSH)
             self.socket.setsockopt(zmq.LINGER, 0)
@@ -183,10 +208,12 @@ class PolicyControlPush:
             logger.info("Policy control publisher bound to port {}", self.port)
         except Exception as exc:
             logger.error("Failed to start policy control publisher: {}", exc)
+            self._zmq = None
             self.enabled = False
 
     def publish(self, action: str, *, source: str = "web") -> bool:
-        if not self.enabled or self.socket is None:
+        zmq = self._zmq
+        if not self.enabled or self.socket is None or zmq is None:
             return False
         action = str(action).strip().lower()
         if action in {"]", "right_bracket"}:
@@ -213,6 +240,7 @@ class PolicyControlPush:
         context = self.context
         self.socket = None
         self.context = None
+        self._zmq = None
         if socket is not None:
             socket.close(0)
         if context is not None:
@@ -225,10 +253,14 @@ class PolicyControlPull:
 
     def __init__(self, port: int = 5662) -> None:
         self.port = int(port)
-        self.context: zmq.Context | None = None
-        self.socket: zmq.Socket | None = None
+        self.context: Any | None = None
+        self.socket: Any | None = None
+        self._zmq: Any | None = None
 
     def start(self) -> None:
+        import zmq
+
+        self._zmq = zmq
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.PULL)
         self.socket.setsockopt(zmq.LINGER, 0)
@@ -236,7 +268,8 @@ class PolicyControlPull:
         logger.info("Policy control receiver started, connecting to port {}", self.port)
 
     def get_actions(self) -> list[str]:
-        if self.socket is None:
+        zmq = self._zmq
+        if self.socket is None or zmq is None:
             return []
         actions: list[str] = []
         while True:
@@ -268,6 +301,7 @@ class PolicyControlPull:
         context = self.context
         self.socket = None
         self.context = None
+        self._zmq = None
         if socket is not None:
             socket.close(0)
         if context is not None:
