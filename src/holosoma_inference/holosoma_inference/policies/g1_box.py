@@ -104,23 +104,24 @@ class G1BoxPolicy(BasePolicy):
     def _set_sparse_root_command_from_key(self, key: str) -> bool:
         value = self._keyboard_command_value
         yaw = self._keyboard_command_yaw
+        command = self._sparse_root_command.copy()
         if key == "z":
-            command = (0.0, 0.0, 0.0)
+            command[:] = 0.0
         elif key == "w":
-            command = (value, 0.0, 0.0)
+            command[0, 0] += value
         elif key == "s":
-            command = (-value, 0.0, 0.0)
+            command[0, 0] -= value
         elif key == "a":
-            command = (0.0, value, 0.0)
+            command[0, 1] += value
         elif key == "d":
-            command = (0.0, -value, 0.0)
+            command[0, 1] -= value
         elif key == "q":
-            command = (0.0, 0.0, yaw)
+            command[0, 2] += yaw
         elif key == "e":
-            command = (0.0, 0.0, -yaw)
+            command[0, 2] -= yaw
         else:
             return False
-        self._sparse_root_command = np.asarray([command], dtype=np.float32)
+        self._sparse_root_command = command.astype(np.float32, copy=False)
         self._log_sparse_root_command()
         return True
 
