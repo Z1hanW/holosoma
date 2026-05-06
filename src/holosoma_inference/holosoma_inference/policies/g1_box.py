@@ -40,7 +40,7 @@ class G1BoxPolicy(BasePolicy):
             float(os.environ.get("HOLOSOMA_BOX_COMMAND_VALUE", os.environ.get("HOLOSOMA_KEYBOARD_ROOT_COMMAND_VALUE", "0.1")))
         )
         self._keyboard_command_max = abs(
-            float(os.environ.get("HOLOSOMA_BOX_COMMAND_MAX", os.environ.get("HOLOSOMA_KEYBOARD_ROOT_COMMAND_MAX", "0.5")))
+            float(os.environ.get("HOLOSOMA_BOX_COMMAND_MAX", os.environ.get("HOLOSOMA_KEYBOARD_ROOT_COMMAND_MAX", "1.0")))
         )
         self._keyboard_command_yaw = abs(
             float(
