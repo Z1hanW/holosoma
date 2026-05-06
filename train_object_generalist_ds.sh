@@ -112,6 +112,7 @@ fi
 PER_GPU_ENVS=${PER_GPU_ENVS:-4096}
 NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
+NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-40000}
 PHYSX_GPU_MAX_RIGID_CONTACT_COUNT=${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT:-33554432}
 PHYSX_GPU_MAX_RIGID_PATCH_COUNT=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT:-4194304}
 PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY:-134217728}
@@ -1086,7 +1087,18 @@ is_data_subset_mode_alias() {
   local mode
   mode="$(printf '%s' "${raw_mode}" | tr '[:upper:]' '[:lower:]' | tr '_' '-')"
   case "${mode}" in
-    1|omomo|pure-omomo|pure-omomo-subset|2|omomo+behave|omomo-behave|3|omomo+behave+ds128|omomo-behave-ds128|ds128|4|omomo+behave+ds256|omomo-behave-ds256|ds256|5|64+64+dsall|all|all-data|all-the-data|dsall|6|omomo+ds128|omomo-ds128|omomo+ds-128|omomo-ds-128)
+    box|pure-box|box128|box-128|ds128|box+ds128|box-ds128|box256|box-256|ds256|box+ds256|box-ds256|box-all|boxall|all|all-data|all-the-data|dsall|1|omomo|pure-omomo|pure-omomo-subset|2|omomo+behave|omomo-behave|3|omomo+behave+ds128|omomo-behave-ds128|4|omomo+behave+ds256|omomo-behave-ds256|5|64+64+dsall|6|omomo+ds64|omomo-ds64|omomo+ds-64|omomo-ds-64|omomo+ds128|omomo-ds128|omomo+ds-128|omomo-ds-128|omomo+ds256|omomo-ds256|omomo+ds-256|omomo-ds-256|omomo+dsall|omomo-dsall|omomo+all|omomo-all|omomo+boxall|omomo-boxall)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_box_data_subset_mode() {
+  case "$1" in
+    box128|box256|box-all)
       return 0
       ;;
     *)
@@ -1100,30 +1112,48 @@ normalize_data_subset_mode() {
   local mode
   mode="$(printf '%s' "${raw_mode}" | tr '[:upper:]' '[:lower:]' | tr '_' '-')"
   case "${mode}" in
+    box128|box-128|ds128|box+ds128|box-ds128)
+      printf '%s\n' "box128"
+      ;;
+    box256|box-256|ds256|box+ds256|box-ds256)
+      printf '%s\n' "box256"
+      ;;
+    box|pure-box|box-all|boxall|all|all-data|all-the-data|dsall)
+      printf '%s\n' "box-all"
+      ;;
     1|omomo|pure-omomo|pure-omomo-subset)
       printf '%s\n' "omomo"
       ;;
     2|omomo+behave|omomo-behave)
       printf '%s\n' "omomo+behave"
       ;;
-    3|omomo+behave+ds128|omomo-behave-ds128|ds128)
+    3|omomo+behave+ds128|omomo-behave-ds128)
       printf '%s\n' "omomo+behave+ds128"
       ;;
-    4|omomo+behave+ds256|omomo-behave-ds256|ds256)
+    4|omomo+behave+ds256|omomo-behave-ds256)
       printf '%s\n' "omomo+behave+ds256"
       ;;
-    5|64+64+dsall|all|all-data|all-the-data|dsall)
+    5|64+64+dsall)
       printf '%s\n' "64+64+dsall"
       ;;
     6|omomo+ds128|omomo-ds128|omomo+ds-128|omomo-ds-128)
       printf '%s\n' "omomo+ds128"
+      ;;
+    omomo+ds64|omomo-ds64|omomo+ds-64|omomo-ds-64)
+      printf '%s\n' "omomo+ds64"
+      ;;
+    omomo+ds256|omomo-ds256|omomo+ds-256|omomo-ds-256)
+      printf '%s\n' "omomo+ds256"
+      ;;
+    omomo+dsall|omomo-dsall|omomo+all|omomo-all|omomo+boxall|omomo-boxall)
+      printf '%s\n' "omomo+dsall"
       ;;
     "")
       printf '%s\n' ""
       ;;
     *)
       echo "[ERROR] Unsupported DATA_SUBSET_MODE='${raw_mode}'." >&2
-      echo "[ERROR] Use one of: omomo, omomo+behave, omomo+ds128, omomo+behave+ds128, omomo+behave+ds256, 64+64+dsall" >&2
+      echo "[ERROR] Use one of: ds128, ds256, all, omomo, omomo+ds64, omomo+ds128, omomo+ds256, omomo+dsall, omomo+behave, omomo+behave+ds128, omomo+behave+ds256, 64+64+dsall" >&2
       return 2
       ;;
   esac
@@ -1131,6 +1161,15 @@ normalize_data_subset_mode() {
 
 data_subset_run_name() {
   case "$1" in
+    box128)
+      printf '%s\n' "box128"
+      ;;
+    box256)
+      printf '%s\n' "box256"
+      ;;
+    box-all)
+      printf '%s\n' "box-all"
+      ;;
     omomo)
       printf '%s\n' "omomo"
       ;;
@@ -1146,8 +1185,17 @@ data_subset_run_name() {
     64+64+dsall)
       printf '%s\n' "64+64+dsall"
       ;;
+    omomo+ds64)
+      printf '%s\n' "omomo+ds64"
+      ;;
     omomo+ds128)
       printf '%s\n' "omomo+ds128"
+      ;;
+    omomo+ds256)
+      printf '%s\n' "omomo+ds256"
+      ;;
+    omomo+dsall)
+      printf '%s\n' "omomo+dsall"
       ;;
   esac
 }
@@ -1185,9 +1233,38 @@ if not map_path.is_file():
     raise SystemExit(f"[ERROR] DATA subset source bank is missing _clip_object_urdf_map.json: {source_dir}")
 
 mode_table = {
+    "box128": {
+        "slug": f"box128_seed{seed}",
+        "wandb_name": "box128",
+        "requires_omomo": False,
+        "include_omomo": False,
+        "include_behave": False,
+        "ds_limit": 128,
+        "all_ds": False,
+    },
+    "box256": {
+        "slug": f"box256_seed{seed}",
+        "wandb_name": "box256",
+        "requires_omomo": False,
+        "include_omomo": False,
+        "include_behave": False,
+        "ds_limit": 256,
+        "all_ds": False,
+    },
+    "box-all": {
+        "slug": "box_all",
+        "wandb_name": "box-all",
+        "requires_omomo": False,
+        "include_omomo": False,
+        "include_behave": False,
+        "ds_limit": None,
+        "all_ds": True,
+    },
     "omomo": {
         "slug": "omomo",
         "wandb_name": "omomo",
+        "requires_omomo": True,
+        "include_omomo": True,
         "include_behave": False,
         "ds_limit": 0,
         "all_ds": False,
@@ -1195,6 +1272,8 @@ mode_table = {
     "omomo+behave": {
         "slug": "omomo_behave",
         "wandb_name": "omomo+behave",
+        "requires_omomo": True,
+        "include_omomo": True,
         "include_behave": True,
         "ds_limit": 0,
         "all_ds": False,
@@ -1202,20 +1281,53 @@ mode_table = {
     "omomo+behave+ds128": {
         "slug": f"omomo_behave_ds128_seed{seed}",
         "wandb_name": "omomo+behave+ds128",
+        "requires_omomo": True,
+        "include_omomo": True,
         "include_behave": True,
         "ds_limit": 128,
+        "all_ds": False,
+    },
+    "omomo+ds64": {
+        "slug": f"omomo_ds64_seed{seed}",
+        "wandb_name": "omomo+ds64",
+        "requires_omomo": True,
+        "include_omomo": True,
+        "include_behave": False,
+        "ds_limit": 64,
         "all_ds": False,
     },
     "omomo+ds128": {
         "slug": f"omomo_ds128_seed{seed}",
         "wandb_name": "omomo+ds128",
+        "requires_omomo": True,
+        "include_omomo": True,
         "include_behave": False,
         "ds_limit": 128,
         "all_ds": False,
     },
+    "omomo+ds256": {
+        "slug": f"omomo_ds256_seed{seed}",
+        "wandb_name": "omomo+ds256",
+        "requires_omomo": True,
+        "include_omomo": True,
+        "include_behave": False,
+        "ds_limit": 256,
+        "all_ds": False,
+    },
+    "omomo+dsall": {
+        "slug": "omomo_dsall",
+        "wandb_name": "omomo+dsall",
+        "requires_omomo": True,
+        "include_omomo": True,
+        "include_behave": False,
+        "ds_limit": None,
+        "all_ds": True,
+    },
     "omomo+behave+ds256": {
         "slug": f"omomo_behave_ds256_seed{seed}",
         "wandb_name": "omomo+behave+ds256",
+        "requires_omomo": True,
+        "include_omomo": True,
         "include_behave": True,
         "ds_limit": 256,
         "all_ds": False,
@@ -1223,6 +1335,8 @@ mode_table = {
     "64+64+dsall": {
         "slug": "64_64_dsall",
         "wandb_name": "64+64+dsall",
+        "requires_omomo": True,
+        "include_omomo": True,
         "include_behave": True,
         "ds_limit": None,
         "all_ds": True,
@@ -1243,7 +1357,7 @@ behave_ids = sorted([clip_id for clip_id in npz_by_id if clip_id.startswith("beh
 ds_ids = sorted([clip_id for clip_id in npz_by_id if clip_id.startswith("box_")])
 other_ids = sorted(set(npz_by_id) - set(omomo_ids) - set(behave_ids) - set(ds_ids))
 
-if not omomo_ids:
+if spec.get("requires_omomo", True) and not omomo_ids:
     raise SystemExit(f"[ERROR] DATA subset mode {mode} requires OMOMO sub* clips in {source_dir}")
 if spec["include_behave"] and not behave_ids:
     raise SystemExit(f"[ERROR] DATA subset mode {mode} requires behave_* clips in {source_dir}")
@@ -1259,7 +1373,7 @@ elif spec["ds_limit"]:
     random.Random(seed).shuffle(shuffled)
     selected_ds = sorted(shuffled[:limit])
 
-selected_ids = list(omomo_ids)
+selected_ids = list(omomo_ids) if spec.get("include_omomo", True) else []
 if spec["include_behave"]:
     selected_ids.extend(behave_ids)
 selected_ids.extend(selected_ds)
@@ -1477,7 +1591,11 @@ if [[ -n "${DATA_SUBSET_MODE}" ]]; then
     echo "[ERROR] DATA_SUBSET_SEED must be an integer. Got: ${DATA_SUBSET_SEED}" >&2
     exit 2
   fi
-  DATA_MODE="mix-naive"
+  if is_box_data_subset_mode "${DATA_SUBSET_MODE}"; then
+    DATA_MODE="pure-sd"
+  else
+    DATA_MODE="mix-naive"
+  fi
   if [[ -n "${MIX_NAIVE_FIXED_OMOMO_PROBABILITIES}" ]]; then
     echo "[WARN] Ignoring MIX_NAIVE_FIXED_OMOMO_PROBABILITIES for DATA_SUBSET_MODE=${DATA_SUBSET_MODE}; filtered subset bank controls sampled clips."
     MIX_NAIVE_FIXED_OMOMO_PROBABILITIES=""
@@ -1908,6 +2026,7 @@ echo "[INFO] Motion default-pose prepend enabled: ${DEFAULT_POSE_PREPEND_ENABLED
 echo "[INFO] Motion default-pose prepend duration: ${DEFAULT_POSE_PREPEND_DURATION_S}s"
 echo "[INFO] PPO learning rates: actor=${ACTOR_LR} critic=${CRITIC_LR}"
 echo "[INFO] PPO num_learning_epochs=${NUM_LEARNING_EPOCHS}"
+echo "[INFO] PPO num_learning_iterations=${NUM_LEARNING_ITERATIONS}"
 echo "[INFO] PPO save_interval=${SAVE_INTERVAL}"
 echo "[INFO] Clip weighting strategy: ${CLIP_WEIGHTING_STRATEGY}"
 echo "[INFO] Within-clip adaptive timestep sampler: ${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
@@ -1939,6 +2058,7 @@ train_cmd=(
   --algo.config.actor_learning_rate="${ACTOR_LR}"
   --algo.config.critic_learning_rate="${CRITIC_LR}"
   --algo.config.num_learning_epochs="${NUM_LEARNING_EPOCHS}"
+  --algo.config.num_learning_iterations="${NUM_LEARNING_ITERATIONS}"
   --algo.config.normalize-actor-obs=False
   --algo.config.normalize-critic-obs=False
   --observation-overrides.disable-actor-history=True
