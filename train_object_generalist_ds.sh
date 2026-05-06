@@ -77,6 +77,18 @@ RESUME_CKPT=${RESUME_CKPT:-${RESUME_CHECKPOINT:-""}}
 RESUME_STEP_RAW=${RESUME_STEP:-""}
 DS_DATA_ROOT=${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}
 DS_DATA_ROOT="$(ogds_resolve_data_root "${DS_DATA_ROOT}")"
+ASSERT_NEW_DS_DATA=${ASSERT_NEW_DS_DATA:-1}
+NEW_DS_DATA_ROOT=${NEW_DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}
+NEW_DS_EXPECTED_PREPARED_TOTAL=${NEW_DS_EXPECTED_PREPARED_TOTAL:-408}
+NEW_DS_EXPECTED_PREPARED_BOX=${NEW_DS_EXPECTED_PREPARED_BOX:-372}
+NEW_DS_EXPECTED_PREPARED_BEHAVE=${NEW_DS_EXPECTED_PREPARED_BEHAVE:-30}
+NEW_DS_EXPECTED_PREPARED_LC=${NEW_DS_EXPECTED_PREPARED_LC:-6}
+NEW_DS_EXPECTED_PREPARED_OMOMO=${NEW_DS_EXPECTED_PREPARED_OMOMO:-0}
+NEW_DS_EXPECTED_MIXED_TOTAL=${NEW_DS_EXPECTED_MIXED_TOTAL:-434}
+NEW_DS_EXPECTED_MIXED_BOX=${NEW_DS_EXPECTED_MIXED_BOX:-372}
+NEW_DS_EXPECTED_MIXED_BEHAVE=${NEW_DS_EXPECTED_MIXED_BEHAVE:-0}
+NEW_DS_EXPECTED_MIXED_LC=${NEW_DS_EXPECTED_MIXED_LC:-0}
+NEW_DS_EXPECTED_MIXED_OMOMO=${NEW_DS_EXPECTED_MIXED_OMOMO:-62}
 DEFAULT_DS_RAW_MOTION_DIR="$(ogds_default_raw_motion_dir "${DS_DATA_ROOT}")"
 DEFAULT_DS_GEOMETRY_DIR="$(ogds_default_geometry_dir "${DS_DATA_ROOT}")"
 DEFAULT_DS_PREPARED_MOTION_DIR="$(ogds_default_motion_dir "${DS_DATA_ROOT}" pure-sd)"
@@ -893,6 +905,142 @@ print(
 PY
 }
 
+assert_new_ds_data_layout() {
+  local enabled_normalized
+  enabled_normalized="$(echo "${ASSERT_NEW_DS_DATA}" | tr '[:upper:]' '[:lower:]')"
+  case "${enabled_normalized}" in
+    0|false|no|off)
+      echo "[WARN] ASSERT_NEW_DS_DATA=0; skipping new DS data guard."
+      return 0
+      ;;
+    1|true|yes|on|"")
+      ;;
+    *)
+      echo "[ERROR] ASSERT_NEW_DS_DATA must be one of: 0/1, true/false, yes/no, on/off. Got: ${ASSERT_NEW_DS_DATA}" >&2
+      exit 2
+      ;;
+  esac
+
+  "${PYTHON_BIN}" - \
+    "${DS_DATA_ROOT}" \
+    "${NEW_DS_DATA_ROOT}" \
+    "${NEW_DS_EXPECTED_PREPARED_TOTAL}" \
+    "${NEW_DS_EXPECTED_PREPARED_BOX}" \
+    "${NEW_DS_EXPECTED_PREPARED_BEHAVE}" \
+    "${NEW_DS_EXPECTED_PREPARED_LC}" \
+    "${NEW_DS_EXPECTED_PREPARED_OMOMO}" \
+    "${NEW_DS_EXPECTED_MIXED_TOTAL}" \
+    "${NEW_DS_EXPECTED_MIXED_BOX}" \
+    "${NEW_DS_EXPECTED_MIXED_BEHAVE}" \
+    "${NEW_DS_EXPECTED_MIXED_LC}" \
+    "${NEW_DS_EXPECTED_MIXED_OMOMO}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+
+def resolve(path: str) -> Path:
+    return Path(path).expanduser().resolve()
+
+
+def count_bank(bank_dir: Path) -> dict[str, int]:
+    if not bank_dir.is_dir():
+        raise SystemExit(f"[ERROR] Expected motion bank directory is missing: {bank_dir}")
+    npz_paths = sorted(bank_dir.glob("*.npz"))
+    if not npz_paths:
+        raise SystemExit(f"[ERROR] Motion bank has no .npz clips: {bank_dir}")
+    counts = {
+        "total": len(npz_paths),
+        "box": 0,
+        "behave": 0,
+        "lc": 0,
+        "omomo": 0,
+        "other": 0,
+    }
+    for path in npz_paths:
+        stem = path.stem
+        if stem.startswith("box_"):
+            counts["box"] += 1
+        elif stem.startswith("behave_"):
+            counts["behave"] += 1
+        elif stem.startswith("lc_"):
+            counts["lc"] += 1
+        elif stem.startswith("sub"):
+            counts["omomo"] += 1
+        else:
+            counts["other"] += 1
+
+    map_path = bank_dir / "_clip_object_urdf_map.json"
+    if not map_path.is_file():
+        raise SystemExit(f"[ERROR] Motion bank is missing _clip_object_urdf_map.json: {bank_dir}")
+    payload = json.loads(map_path.read_text(encoding="utf-8"))
+    clips = payload.get("clips", payload) if isinstance(payload, dict) else {}
+    if not isinstance(clips, dict):
+        raise SystemExit(f"[ERROR] Invalid clip-object map payload: {map_path}")
+    if len(clips) != len(npz_paths):
+        raise SystemExit(
+            f"[ERROR] Clip-object map count does not match .npz count in {bank_dir}: "
+            f"map={len(clips)} npz={len(npz_paths)}"
+        )
+    return counts
+
+
+def assert_counts(label: str, actual: dict[str, int], expected: dict[str, int]) -> None:
+    mismatches = {
+        key: (actual.get(key), expected_value)
+        for key, expected_value in expected.items()
+        if actual.get(key) != expected_value
+    }
+    if mismatches:
+        details = ", ".join(
+            f"{key}: got {got}, expected {expected}"
+            for key, (got, expected) in sorted(mismatches.items())
+        )
+        raise SystemExit(f"[ERROR] New DS data guard failed for {label}: {details}")
+
+
+ds_root = resolve(sys.argv[1])
+expected_root = resolve(sys.argv[2])
+if ds_root != expected_root:
+    raise SystemExit(
+        "[ERROR] New DS data guard failed: training resolved DS_DATA_ROOT to "
+        f"{ds_root}, expected repo-local new data at {expected_root}. "
+        "Run bash cp_box.sh first, or set ASSERT_NEW_DS_DATA=0 only for an intentional old-data run."
+    )
+if "scale_mix_all" in ds_root.parts:
+    raise SystemExit(f"[ERROR] New DS data guard failed: DS_DATA_ROOT points into old scale_mix_all data: {ds_root}")
+
+prepared_expected = {
+    "total": int(sys.argv[3]),
+    "box": int(sys.argv[4]),
+    "behave": int(sys.argv[5]),
+    "lc": int(sys.argv[6]),
+    "omomo": int(sys.argv[7]),
+    "other": 0,
+}
+mixed_expected = {
+    "total": int(sys.argv[8]),
+    "box": int(sys.argv[9]),
+    "behave": int(sys.argv[10]),
+    "lc": int(sys.argv[11]),
+    "omomo": int(sys.argv[12]),
+    "other": 0,
+}
+
+prepared_dir = ds_root / "train_g1_w_obj_prepared"
+mixed_dir = ds_root / "train_g1_w_obj_prepared_plus_omomo_orig"
+prepared_counts = count_bank(prepared_dir)
+mixed_counts = count_bank(mixed_dir)
+assert_counts(str(prepared_dir), prepared_counts, prepared_expected)
+assert_counts(str(mixed_dir), mixed_counts, mixed_expected)
+
+print(
+    "[INFO] New DS data guard passed: "
+    f"root={ds_root}; prepared={prepared_counts}; mixed={mixed_counts}"
+)
+PY
+}
+
 
 prepare_ds_motion_bank() {
   local raw_motion_dir="$1"
@@ -1609,6 +1757,7 @@ case "${DATA_MODE}" in
     exit 2
     ;;
 esac
+assert_new_ds_data_layout
 if [[ "${DATA_MODE}" == "mix-naive" && -n "${MIX_NAIVE_CLEAN_NOISY_CURRICULUM+x}" ]]; then
   legacy_mix_curriculum_normalized=$(echo "${MIX_NAIVE_CLEAN_NOISY_CURRICULUM}" | tr '[:upper:]' '[:lower:]')
   case "${legacy_mix_curriculum_normalized}" in
