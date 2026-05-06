@@ -37,7 +37,10 @@ class G1BoxPolicy(BasePolicy):
         )
         self._last_logged_sparse_root_command: tuple[float, float, float] | None = None
         self._keyboard_command_value = abs(
-            float(os.environ.get("HOLOSOMA_BOX_COMMAND_VALUE", os.environ.get("HOLOSOMA_KEYBOARD_ROOT_COMMAND_VALUE", "0.2")))
+            float(os.environ.get("HOLOSOMA_BOX_COMMAND_VALUE", os.environ.get("HOLOSOMA_KEYBOARD_ROOT_COMMAND_VALUE", "0.1")))
+        )
+        self._keyboard_command_max = abs(
+            float(os.environ.get("HOLOSOMA_BOX_COMMAND_MAX", os.environ.get("HOLOSOMA_KEYBOARD_ROOT_COMMAND_MAX", "0.5")))
         )
         self._keyboard_command_yaw = abs(
             float(
@@ -121,6 +124,7 @@ class G1BoxPolicy(BasePolicy):
             command[0, 2] -= yaw
         else:
             return False
+        command[0, :2] = np.clip(command[0, :2], -self._keyboard_command_max, self._keyboard_command_max)
         self._sparse_root_command = command.astype(np.float32, copy=False)
         self._log_sparse_root_command()
         return True
