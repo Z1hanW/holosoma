@@ -836,6 +836,20 @@ def obj_goal_xy_pick_root_heading(
     return goal_xy_yaw_by_clip[motion_command.clip_ids, :2]
 
 
+def obj_picked_flag(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Legacy mixed object-goal flag backed by the current pickup anchor state."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    pickup_anchor_set = getattr(motion_command, "pickup_anchor_set", None)
+    if pickup_anchor_set is None:
+        return torch.zeros((env.num_envs, 1), device=env.device, dtype=torch.float32)
+    return pickup_anchor_set.to(device=env.device, dtype=torch.float32).unsqueeze(-1)
+
+
+def _legacy_false_flag(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Compatibility flag for removed eval modes that are always inactive now."""
+    return torch.zeros((env.num_envs, 1), device=env.device, dtype=torch.float32)
+
+
 def contact_prior_confidence(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
     _, _, _, confidence, valid_mask = motion_command.get_contact_prior_targets()

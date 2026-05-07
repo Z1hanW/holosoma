@@ -9,6 +9,26 @@ from typing import Any
 def _legacy_callable_name_candidates(callable_name: str) -> tuple[str, ...]:
     """Return current callable names for aliases saved by older checkpoints."""
     object_goal_legacy_prefix = "obj_" + "spa" + "rse_" + "goal_"
+    legacy_object_goal_names = {
+        object_goal_legacy_prefix + "xy_command": "obj_goal_xy_pick_root_heading",
+        object_goal_legacy_prefix + "xy_yaw_command": "obj_goal_xy_yaw_pick_root_heading",
+        object_goal_legacy_prefix + "xy_pick_root_heading": "obj_goal_xy_pick_root_heading",
+        object_goal_legacy_prefix + "xy_yaw_pick_root_heading": "obj_goal_xy_yaw_pick_root_heading",
+    }
+    legacy_flag_names = {
+        "spa" + "rse_" + "goal_external_flag": "_legacy_false_flag",
+        "command_only_flag": "_legacy_false_flag",
+        "command_curriculum_command_only_flag": "_legacy_false_flag",
+        "command_curriculum_obj_picked_flag": "obj_picked_flag",
+        "command_curriculum_" + object_goal_legacy_prefix + "xy_command": "obj_goal_xy_pick_root_heading",
+        "command_curriculum_" + object_goal_legacy_prefix + "xy_yaw_command": "obj_goal_xy_yaw_pick_root_heading",
+        "command_curriculum_" + object_goal_legacy_prefix + "xy_pick_root_heading": "obj_goal_xy_pick_root_heading",
+        "command_curriculum_" + object_goal_legacy_prefix + "xy_yaw_pick_root_heading": "obj_goal_xy_yaw_pick_root_heading",
+    }
+    if callable_name in legacy_object_goal_names:
+        return (legacy_object_goal_names[callable_name],)
+    if callable_name in legacy_flag_names:
+        return (legacy_flag_names[callable_name],)
     object_goal_current_prefix = "obj_goal_"
     if callable_name.startswith(object_goal_legacy_prefix):
         return (object_goal_current_prefix + callable_name[len(object_goal_legacy_prefix) :],)
