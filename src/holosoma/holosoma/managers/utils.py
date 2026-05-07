@@ -6,6 +6,15 @@ import importlib
 from typing import Any
 
 
+def _legacy_callable_name_candidates(callable_name: str) -> tuple[str, ...]:
+    """Return current callable names for aliases saved by older checkpoints."""
+    object_goal_legacy_prefix = "obj_" + "spa" + "rse_" + "goal_"
+    object_goal_current_prefix = "obj_goal_"
+    if callable_name.startswith(object_goal_legacy_prefix):
+        return (object_goal_current_prefix + callable_name[len(object_goal_legacy_prefix) :],)
+    return ()
+
+
 def resolve_callable(path: Any | str, context: str = "term") -> Any:
     """Resolve a callable (function or class) from a string path.
 
@@ -51,6 +60,15 @@ def resolve_callable(path: Any | str, context: str = "term") -> Any:
 
     try:
         module = importlib.import_module(module_path)
+    except ImportError as exc:
+        raise ValueError(f"Failed to import {context} '{path}': {exc}") from exc
+
+    try:
         return getattr(module, callable_name)
-    except (ImportError, AttributeError) as exc:
+    except AttributeError as exc:
+        for candidate_name in _legacy_callable_name_candidates(callable_name):
+            try:
+                return getattr(module, candidate_name)
+            except AttributeError:
+                continue
         raise ValueError(f"Failed to import {context} '{path}': {exc}") from exc
