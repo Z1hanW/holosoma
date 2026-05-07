@@ -191,6 +191,51 @@ def _isaacsim_randomize_rigid_body_material(
     )
 
 
+def _object_physx_view_has_env_rows(
+    simulator: Any,
+    env_ids_cpu: torch.Tensor,
+    asset_cfg: Any,
+    *,
+    randomization_name: str,
+) -> bool:
+    """Return whether an IsaacLab object view can be indexed by the requested env ids."""
+    try:
+        asset = simulator.scene[asset_cfg.name]
+        materials = asset.root_physx_view.get_material_properties()
+    except Exception as exc:
+        logger.warning(
+            "Could not inspect PhysX view for object entity '{}'; skipping {}: {}",
+            getattr(asset_cfg, "name", "<unknown>"),
+            randomization_name,
+            exc,
+        )
+        return False
+
+    if materials.ndim == 0:
+        logger.warning(
+            "Skipping {} for '{}' because object PhysX view is scalar-shaped.",
+            randomization_name,
+            getattr(asset_cfg, "name", "<unknown>"),
+        )
+        return False
+
+    num_material_rows = int(materials.shape[0])
+    if env_ids_cpu.numel() == 0:
+        return False
+    max_requested_env_id = int(torch.max(env_ids_cpu).item())
+    if num_material_rows <= max_requested_env_id:
+        logger.warning(
+            "Skipping {} for '{}' because object PhysX view rows ({}) do not cover "
+            "requested env ids up to {}. This is expected for heterogeneous single-slot object spawning.",
+            randomization_name,
+            getattr(asset_cfg, "name", "<unknown>"),
+            num_material_rows,
+            max_requested_env_id,
+        )
+        return False
+    return True
+
+
 class PushRandomizerState(RandomizationTermBase):
     """Stateful randomizer that owns push scheduling buffers and counters."""
 
@@ -1078,6 +1123,13 @@ def randomize_object_rigid_body_material_startup(
 
     num_buckets = 64
     for asset_cfg in _resolve_object_asset_cfgs(simulator):
+        if not _object_physx_view_has_env_rows(
+            simulator,
+            env_ids_cpu,
+            asset_cfg,
+            randomization_name="object material randomization",
+        ):
+            continue
         _isaacsim_randomize_rigid_body_material(
             simulator,
             env_ids_cpu,
@@ -1116,6 +1168,13 @@ def randomize_object_rigid_body_mass_startup(
         return
 
     for asset_cfg in _resolve_object_asset_cfgs(simulator):
+        if not _object_physx_view_has_env_rows(
+            simulator,
+            env_ids_cpu,
+            asset_cfg,
+            randomization_name="object mass randomization",
+        ):
+            continue
         _isaacsim_randomize_rigid_body_mass(
             simulator,
             env_ids_cpu,
@@ -1159,6 +1218,13 @@ def randomize_object_rigid_body_inertia_startup(
     inertia_distribution_params = (torch.tensor(lower_bounds, device="cpu"), torch.tensor(upper_bounds, device="cpu"))
 
     for asset_cfg in _resolve_object_asset_cfgs(simulator):
+        if not _object_physx_view_has_env_rows(
+            simulator,
+            env_ids_cpu,
+            asset_cfg,
+            randomization_name="object inertia randomization",
+        ):
+            continue
         randomize_rigid_body_inertia(
             simulator,
             env_ids_cpu,

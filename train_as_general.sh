@@ -77,14 +77,17 @@ if [[ ! -f "${OMOMO_OBJECT_MAP}" ]]; then
   exit 2
 fi
 
-OBJECT_SPAWN_MODE=${OBJECT_SPAWN_MODE:-urdf}
+OBJECT_SPAWN_MODE=${OBJECT_SPAWN_MODE:-single_slot_multi_urdf}
 OBJECT_GEOMETRY_MODE=${OBJECT_GEOMETRY_MODE:-mesh}
 case "$(echo "${OBJECT_SPAWN_MODE}" | tr '[:upper:]' '[:lower:]')" in
   urdf|mesh)
     OBJECT_SPAWN_MODE=urdf
     ;;
+  single_slot_multi_urdf|single-slot-multi-urdf|single_slot|single-slot|heterogeneous_single_slot|heterogeneous-single-slot)
+    OBJECT_SPAWN_MODE=single_slot_multi_urdf
+    ;;
   *)
-    echo "[ERROR] train_as_general.sh requires real URDF mesh spawning." >&2
+    echo "[ERROR] train_as_general.sh requires real URDF mesh spawning, preferably single_slot_multi_urdf." >&2
     echo "[ERROR] Do not use primitive/box mode here. Got OBJECT_SPAWN_MODE=${OBJECT_SPAWN_MODE}" >&2
     exit 2
     ;;
@@ -190,6 +193,7 @@ export STRICT_DEFAULT_DS_BANK_VALIDATION=0
 export OBJECT_SPAWN_MODE
 export OBJECT_GEOMETRY_MODE
 export HOLOSOMA_OBJECT_SPAWN_MODE="${OBJECT_SPAWN_MODE}"
+export HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK="${HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK:-1}"
 export HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE="${OBJECT_GEOMETRY_MODE}"
 export HOLOSOMA_OBJECT_COLLIDER_TYPE=${HOLOSOMA_OBJECT_COLLIDER_TYPE:-convex_decomposition}
 export TRAINING_SEED

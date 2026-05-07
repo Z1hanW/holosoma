@@ -850,7 +850,7 @@ class IsaacSim(BaseSimulator):
         object_specs = self._resolve_object_specs(object_path_spec)
         motion_object_urdfs = self._resolve_motion_subset_object_urdfs()
         if not motion_object_urdfs:
-            return object_specs
+            return self._shard_object_specs_by_rank(object_specs)
 
         object_spec_by_urdf = {urdf_path: (object_name, urdf_path) for object_name, urdf_path in object_specs}
         filtered_specs: list[tuple[str, str]] = []
@@ -880,7 +880,37 @@ class IsaacSim(BaseSimulator):
                 len(object_specs),
                 len(filtered_specs),
             )
-        return filtered_specs
+        return self._shard_object_specs_by_rank(filtered_specs)
+
+    @staticmethod
+    def _shard_object_specs_by_rank(object_specs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        shard_enabled = os.environ.get("HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK", "").strip().lower()
+        if shard_enabled not in {"1", "true", "yes", "on"}:
+            return object_specs
+        if len(object_specs) <= 1:
+            return object_specs
+
+        try:
+            rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")) or "0")
+            world_size = int(os.environ.get("WORLD_SIZE", "1") or "1")
+        except ValueError:
+            logger.warning("Invalid distributed rank environment; object asset sharding is disabled.")
+            return object_specs
+
+        if world_size <= 1:
+            return object_specs
+        normalized_rank = rank % world_size
+        sharded_specs = [spec for idx, spec in enumerate(object_specs) if idx % world_size == normalized_rank]
+        if not sharded_specs:
+            sharded_specs = [object_specs[normalized_rank % len(object_specs)]]
+        logger.info(
+            "Sharded object asset bank by rank: rank={} world_size={} using {} / {} URDF(s).",
+            rank,
+            world_size,
+            len(sharded_specs),
+            len(object_specs),
+        )
+        return sharded_specs
 
     @staticmethod
     def _build_env_object_urdf_assignment(
@@ -929,6 +959,15 @@ class IsaacSim(BaseSimulator):
             return "primitive", bool(raw_mode_normalized)
         if raw_mode_normalized == "auto":
             return "auto", True
+        if raw_mode_normalized in {
+            "single_slot_multi_urdf",
+            "single-slot-multi-urdf",
+            "single_slot",
+            "single-slot",
+            "heterogeneous_single_slot",
+            "heterogeneous-single-slot",
+        }:
+            return "auto", True
         if raw_mode_normalized in {"urdf", "mesh", "off", "disable", "disabled"}:
             return "urdf", True
         logger.warning(
@@ -936,6 +975,18 @@ class IsaacSim(BaseSimulator):
             raw_mode,
         )
         return "primitive", bool(raw_mode_normalized)
+
+    @staticmethod
+    def _single_slot_multi_urdf_requested() -> bool:
+        raw_mode = os.environ.get("HOLOSOMA_OBJECT_SPAWN_MODE", "").strip().lower()
+        return raw_mode in {
+            "single_slot_multi_urdf",
+            "single-slot-multi-urdf",
+            "single_slot",
+            "single-slot",
+            "heterogeneous_single_slot",
+            "heterogeneous-single-slot",
+        }
 
     def _should_use_box_primitives(self, object_specs: list[tuple[str, str]]) -> bool:
         self._training_object_box_metadata_by_urdf = {}
@@ -1040,6 +1091,9 @@ class IsaacSim(BaseSimulator):
 
         return sim_utils.UrdfFileCfg(
             fix_base=False,
+            make_instanceable=True,
+            merge_fixed_joints=True,
+            force_usd_conversion=False,
             replace_cylinders_with_capsules=True,
             collider_type=collider_type,
             asset_path=object_asset_urdf_path,
@@ -1083,8 +1137,8 @@ class IsaacSim(BaseSimulator):
             return False
 
         force_flag = os.environ.get("HOLOSOMA_FORCE_HETEROGENEOUS_OBJECT_SINGLE_SLOT", "").strip().lower()
-        if force_flag in {"1", "true", "yes", "on"}:
-            logger.warning("Forcing heterogeneous single-slot object spawning via env override.")
+        if force_flag in {"1", "true", "yes", "on"} or IsaacSim._single_slot_multi_urdf_requested():
+            logger.warning("Forcing heterogeneous single-slot object spawning for mixed-URDF object generalist.")
             return True
 
         if len(object_specs) <= 1:
@@ -1404,6 +1458,13 @@ class IsaacSim(BaseSimulator):
                 )
                 self._append_object_contact_filter_paths("Object", object_specs[0][1])
                 logger.info(
+                    "Object generalist spawning topology: object_slots_per_env=1 unique_urdfs={} "
+                    "object_actors_per_rank={} legacy_object_actors_if_banked={}.",
+                    len(object_specs),
+                    self.training_config.num_envs,
+                    self.training_config.num_envs * len(object_specs),
+                )
+                logger.info(
                     "Loaded heterogeneous training object bank: {} unique URDF(s) assigned across {} envs.",
                     len(object_specs),
                     self.training_config.num_envs,
@@ -1425,6 +1486,13 @@ class IsaacSim(BaseSimulator):
                     self._object_urdf_by_name[object_name] = str(pathlib.Path(object_asset_urdf_path).resolve())
                     self._append_object_contact_filter_paths(prim_suffix, object_asset_urdf_path)
 
+                logger.info(
+                    "Object generalist spawning topology: object_slots_per_env={} unique_urdfs={} "
+                    "object_actors_per_rank={}.",
+                    len(object_specs),
+                    len(object_specs),
+                    self.training_config.num_envs * len(object_specs),
+                )
                 logger.info(
                     "Loaded {} training object URDF(s): {}",
                     len(self._object_urdf_by_name),

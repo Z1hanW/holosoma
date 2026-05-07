@@ -89,11 +89,15 @@ def test_explicit_box_urdf_resolves_stable_primitive_extents(tmp_path: Path):
     assert metadata.center_offset == pytest.approx((0.0, 0.0, 0.0), abs=1.0e-6)
 
 
-def test_non_cuboid_box_mesh_urdf_is_not_primitive_compatible():
+def test_omomo_largebox_mesh_urdf_uses_primitive_override():
     urdf_path = Path(
         "/home/ubuntu/FAR/holosoma/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
     )
     if not urdf_path.is_file():
         pytest.skip(f"URDF asset not present on this node: {urdf_path}")
 
-    assert load_urdf_box_primitive_metadata(urdf_path) is None
+    metadata = load_urdf_box_primitive_metadata(urdf_path)
+    assert metadata is not None
+    assert metadata.extents == pytest.approx((0.47115421, 0.45873013, 0.40789548), abs=1.0e-6)
+    assert metadata.mass == pytest.approx(0.1)
+    assert metadata.static_friction == pytest.approx(0.9)

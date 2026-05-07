@@ -171,6 +171,14 @@ class _ViserSceneCompat:
         self._server = server
         self._scene = scene
 
+    def add_line_segments(self, *args, **kwargs) -> Any:
+        target = self._scene if self._scene is not None and hasattr(self._scene, "add_line_segments") else self._server
+        if hasattr(target, "add_line_segments"):
+            return _call_viser_method_compat(target.add_line_segments, *args, **kwargs)
+
+        logger.debug("Current Viser version has no add_line_segments(); skipping line-segment overlay.")
+        return _NoopViserHandle()
+
     def __getattr__(self, name: str) -> Any:
         if self._scene is not None and hasattr(self._scene, name):
             attr = getattr(self._scene, name)
@@ -185,6 +193,94 @@ class _ViserSceneCompat:
             return _wrapped
 
         return attr
+
+
+class _NoopViserHandle:
+    """Small mutable placeholder for optional Viser overlays unsupported by old Viser."""
+
+    def __init__(self) -> None:
+        self.visible = False
+        self.points = None
+        self.colors = None
+        self.position = None
+        self.wxyz = None
+
+    def remove(self) -> None:
+        return None
+
+
+class _ViserCompatImageHandle:
+    """Image handle for old Viser versions whose add_image() handles are immutable."""
+
+    def __init__(
+        self,
+        server: Any,
+        *,
+        node_name: str,
+        image: np.ndarray,
+        render_width: float,
+        render_height: float,
+        image_format: str,
+        jpeg_quality: int | None,
+        visible: bool,
+    ) -> None:
+        self._server = server
+        self._node_name = node_name
+        self._render_width = float(render_width)
+        self._render_height = float(render_height)
+        self._format = image_format
+        self._jpeg_quality = jpeg_quality
+        self._visible = bool(visible)
+        self._handle = None
+        self._image = np.asarray(image)
+        self._recreate()
+
+    def _recreate(self) -> None:
+        if self._handle is not None:
+            try:
+                self._handle.remove()
+            except Exception:
+                pass
+        kwargs = {
+            "image": self._image,
+            "render_width": self._render_width,
+            "render_height": self._render_height,
+            "format": self._format,
+            "visible": self._visible,
+        }
+        if self._jpeg_quality is not None:
+            kwargs["jpeg_quality"] = self._jpeg_quality
+        self._handle = _call_viser_method_compat(self._server.add_image, self._node_name, **kwargs)
+
+    @property
+    def image(self) -> np.ndarray:
+        return self._image
+
+    @image.setter
+    def image(self, value: np.ndarray) -> None:
+        self._image = np.asarray(value)
+        self._recreate()
+
+    @property
+    def visible(self) -> bool:
+        return self._visible
+
+    @visible.setter
+    def visible(self, value: bool) -> None:
+        self._visible = bool(value)
+        if self._handle is not None:
+            try:
+                self._handle.visible = self._visible
+            except Exception:
+                self._recreate()
+
+    def remove(self) -> None:
+        if self._handle is not None:
+            try:
+                self._handle.remove()
+            except Exception:
+                pass
+            self._handle = None
 
 
 class _ViserGuiCompat:
@@ -226,12 +322,13 @@ class _ViserGuiCompat:
         render_width = float(render_width)
 
         node_name = "/viser_gui_compat/" + "".join(ch if ch.isalnum() else "_" for ch in label)
-        return self._server.add_image(
-            node_name,
+        return _ViserCompatImageHandle(
+            self._server,
+            node_name=node_name,
             image=image,
             render_width=render_width,
             render_height=render_height,
-            format=image_format,
+            image_format=image_format,
             jpeg_quality=jpeg_quality,
             visible=visible,
         )
