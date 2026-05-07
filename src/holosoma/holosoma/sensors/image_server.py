@@ -323,7 +323,10 @@ class ImageVisualizer:
             raw_image: Dictionary with optional image channels
         """
         rgb_by_camera = raw_image.get("rgb", {})
-        names = list(rgb_by_camera.keys())
+        names = []
+        for channel in ("rgb", "depth", "depth_gum"):
+            names.extend(raw_image.get(channel, {}).keys())
+        names = list(dict.fromkeys(names))
         if not names:
             return
 
@@ -332,10 +335,15 @@ class ImageVisualizer:
         ]
         combined_depth_rows = []
         for cam_name in names:
-            rgb_frame = rgb_by_camera.get(cam_name)
-            if rgb_frame is None:
+            reference_frame = rgb_by_camera.get(cam_name)
+            if reference_frame is None:
+                for channel in depth_channels:
+                    reference_frame = raw_image.get(channel, {}).get(cam_name)
+                    if reference_frame is not None:
+                        break
+            if reference_frame is None:
                 continue
-            h, w = rgb_frame.shape[:2]
+            h, w = reference_frame.shape[:2]
 
             depth_tiles = [
                 self._depth_or_placeholder(

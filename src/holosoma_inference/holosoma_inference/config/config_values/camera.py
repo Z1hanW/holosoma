@@ -53,7 +53,8 @@ single_d435i_depth = CameraConfig(
         "cam_d435i_depth": CameraPose(
             parent_link="robot/torso_link",
             camera_offset=(0.01, 0.01, 0.44),  # x, y, z [m]
-            camera_rotation=(1.0, 27.0, 1.0),  # roll, pitch, yaw [deg]
+            # Equivalent to far-tracking mount (1, 27, 1) plus camera_pitch_deg=10.
+            camera_rotation=(1.21741572, 36.99830943, 1.11565009),  # roll, pitch, yaw [deg]
         ),
     },
     props=CameraProps(
@@ -64,7 +65,7 @@ single_d435i_depth = CameraConfig(
         resized_height=58,
         # D435i FOV settings
         horizontal_fov=89.5,
-        vertical_fov=89.5 * (60 / 106),  # estimated from aspect ratio
+        vertical_fov=58.6,
         near_clip=0.3,
         far_clip=3.0,
         frame_rate=50,  # FREQ_RATIO=1 in far-tracking, updates every sim step

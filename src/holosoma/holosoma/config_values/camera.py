@@ -13,7 +13,7 @@ d435i_depth_props = CameraProps(
     resized_width=87,
     resized_height=58,
     horizontal_fov=89.5,
-    vertical_fov=89.5 * (60 / 106),
+    vertical_fov=58.6,
     near_clip=0.3,
     far_clip=3.0,
     image_show=True,
@@ -33,7 +33,8 @@ single_d435i_depth = CameraManagerCfg(terms={
             "pose": CameraPose(
                 camera_body_link="torso_link",
                 camera_offset=(0.01, 0.01, 0.44),
-                camera_rotation=(1.0, 45.0, 1.0),   # (1.0, 27.0, 1.0) for other PHP tasks
+                # Equivalent to far-tracking mount (1, 27, 1) plus camera_pitch_deg=10.
+                camera_rotation=(1.21741572, 36.99830943, 1.11565009),
             ),
             "props": d435i_depth_props,
         },

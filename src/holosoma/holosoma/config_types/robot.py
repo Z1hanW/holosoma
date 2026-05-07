@@ -74,6 +74,11 @@ class RobotForceControlConfig:
 @dataclass(frozen=True)
 class ObjectConfig:
     object_urdf_path: str | None = None
+    init_pos: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.5])
+    """Default object spawn position for direct MuJoCo simulation."""
+
+    init_quat: list[float] = field(default_factory=lambda: [1.0, 0.0, 0.0, 0.0])
+    """Default object spawn orientation in MuJoCo quaternion order [w, x, y, z]."""
 
 
 @dataclass(frozen=True)

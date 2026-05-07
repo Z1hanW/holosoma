@@ -642,7 +642,7 @@ class BasePolicy:
                 q_target = scaled_policy_action + self.default_dof_angles
 
             # Prepare command (reuse pre-allocated arrays)
-            self.cmd_q[:] = q_target
+            self.cmd_q[:] = np.asarray(q_target, dtype=np.float32).reshape(-1)
 
         # Stage 5: Action Pub
         with self.latency_tracker.measure("action_pub"):

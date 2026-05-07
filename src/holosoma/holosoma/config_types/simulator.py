@@ -467,6 +467,15 @@ class BridgeConfig:
     use_ros: bool = False
     """Whether to use ROS for communication."""
 
+    ignore_default_idle_command: bool = False
+    """Ignore backend placeholder low commands before a real command arrives."""
+
+    hold_default_pose_until_first_command: bool = False
+    """Apply a default-pose PD hold until the first active external low command."""
+
+    hold_initial_pose_until_first_command: bool = False
+    """Apply a PD hold at the current initial pose until the first active external low command."""
+
 
 @dataclass(frozen=True)
 class SimulatorInitConfig:

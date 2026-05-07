@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, List
+from xml.etree import ElementTree as ET
 
 import mujoco
 import mujoco.viewer
@@ -14,6 +16,7 @@ from holosoma.config_types.robot import RobotConfig
 from holosoma.config_types.simulator import MujocoXMLFilterCfg, SimulatorConfig
 from holosoma.managers.terrain.base import TerrainTermBase
 from holosoma.utils.module_utils import get_holosoma_root
+from holosoma.utils.path import resolve_data_file_path
 from holosoma.managers.camera import CameraManager
 
 
@@ -506,6 +509,86 @@ class MujocoSceneManager:
 
         # Store prefix for later use by simulator
         self.robot_prefix = prefix
+
+    def add_object_from_robot_config(self, robot_config: RobotConfig) -> None:
+        """Add a single free-body object declared on the robot config.
+
+        PHolosoma's direct MuJoCo path does not run the WBT command manager, so
+        the object must be added to the world spec before compilation.
+        """
+        object_cfg = getattr(robot_config, "object", None)
+        object_urdf_path = getattr(object_cfg, "object_urdf_path", None)
+        if not object_urdf_path:
+            return
+
+        urdf_path = Path(resolve_data_file_path(str(object_urdf_path)))
+        mesh_path, mesh_scale, mass, rgba = self._read_single_mesh_object_urdf(urdf_path)
+
+        mesh_name = "object_largebox_mesh"
+        mesh = self.world_spec.add_mesh(name=mesh_name)
+        mesh.file = str(mesh_path)
+        mesh.scale = mesh_scale
+
+        object_pos = list(getattr(object_cfg, "init_pos", [0.0, 0.0, 0.5]))
+        object_quat = list(getattr(object_cfg, "init_quat", [1.0, 0.0, 0.0, 0.0]))
+
+        body = self.world_spec.worldbody.add_body(name="object", pos=object_pos, quat=object_quat)
+        body.add_freejoint(name="object_freejoint")
+        geom = body.add_geom(
+            name="largebox",
+            type=mujoco.mjtGeom.mjGEOM_MESH,
+            meshname=mesh_name,
+            mass=mass,
+            rgba=rgba,
+            friction=[0.9, 0.005, 0.5],
+            solimp=[0.99, 0.99, 0.01, 0.5, 2],
+            solref=[0.001, 1],
+        )
+        # Collide with robot and terrain classes used by _configure_robot_collisions().
+        geom.contype = 3
+        geom.conaffinity = 3
+
+        logger.info(
+            "Added MuJoCo object from '{}': mesh='{}'",
+            urdf_path,
+            mesh_path,
+        )
+
+    def _read_single_mesh_object_urdf(self, urdf_path: Path) -> tuple[Path, list[float], float, list[float]]:
+        if not urdf_path.exists():
+            raise FileNotFoundError(f"Object URDF not found: {urdf_path}")
+
+        root = ET.parse(urdf_path).getroot()
+        mesh_elem = root.find(".//collision/geometry/mesh")
+        if mesh_elem is None:
+            mesh_elem = root.find(".//visual/geometry/mesh")
+        if mesh_elem is None:
+            raise ValueError(f"Object URDF has no mesh geometry: {urdf_path}")
+
+        filename = mesh_elem.attrib.get("filename")
+        if not filename:
+            raise ValueError(f"Object URDF mesh is missing filename: {urdf_path}")
+
+        mesh_path = Path(filename)
+        if not mesh_path.is_absolute():
+            mesh_path = urdf_path.parent / mesh_path
+        if not mesh_path.exists():
+            raise FileNotFoundError(f"Object mesh not found: {mesh_path}")
+
+        scale_raw = mesh_elem.attrib.get("scale", "1.0 1.0 1.0")
+        mesh_scale = [float(v) for v in scale_raw.split()]
+        if len(mesh_scale) != 3:
+            raise ValueError(f"Object mesh scale must contain three values: {scale_raw}")
+
+        mass_elem = root.find(".//inertial/mass")
+        mass = float(mass_elem.attrib.get("value", 0.1)) if mass_elem is not None else 0.1
+
+        color_elem = root.find(".//visual/material/color")
+        rgba = [0.7, 0.8, 0.9, 1.0]
+        if color_elem is not None and color_elem.attrib.get("rgba"):
+            rgba = [float(v) for v in color_elem.attrib["rgba"].split()]
+
+        return mesh_path, mesh_scale, mass, rgba
 
     def _apply_collision_settings(self, robot_spec: mujoco.MjSpec, robot_config: RobotConfig) -> None:
         """Apply collision settings based on unified self_collisions configuration.

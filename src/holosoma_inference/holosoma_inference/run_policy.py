@@ -161,6 +161,11 @@ def _select_policy_class(config: InferenceConfig):
     if has_depth_obs and has_two_models:
         return DepthDistillationPolicy
 
+    has_sparse_root_obs = any(group.startswith("actor_obs_root") for group in obs_dict)
+    has_proprio_obs = any(group.startswith("actor_obs_proprio") for group in obs_dict)
+    if has_sparse_root_obs and has_proprio_obs:
+        return WholeBodyTrackingPolicy
+
     # Check for WBT policy
     if "motion_command" in actor_obs:
         return WholeBodyTrackingPolicy

@@ -145,6 +145,10 @@ class SimulatorBridge:
         sim_time = self.simulator.time()
         self.clock_pub.publish(sim_time)
 
+    def reset_command_state(self) -> None:
+        if self.robot_bridge is not None and hasattr(self.robot_bridge, "reset_command_state"):
+            self.robot_bridge.reset_command_state()
+
     def is_enabled(self) -> bool:
         """Check if the bridge is enabled and functional.
 

@@ -7,6 +7,8 @@ implementations for terrain rendering, contact detection, and physics simulation
 from __future__ import annotations
 
 import dataclasses
+import os
+from pathlib import Path
 
 import mujoco
 import mujoco.viewer
@@ -31,6 +33,7 @@ from holosoma.simulator.shared.object_registry import ObjectType
 from holosoma.simulator.shared.virtual_gantry import create_virtual_gantry
 from holosoma.simulator.types import ActorIndices, ActorNames, ActorPoses, ActorStates, EnvIds
 from holosoma.utils.adapters import mujoco_draw_adapter
+from holosoma.utils.path import resolve_data_file_path
 
 import threading
 
@@ -189,38 +192,38 @@ class MujocoRendererWrapper:
 
     def get_frames(self):
         """Get depth and rgb frames from the renderer."""
+        with self._simulator._mujoco_lock:
+            # Set znear before every render to prevent other components from overriding it
+            extent = self._simulator.root_model.stat.extent
+            self._simulator.root_model.vis.map.znear = self._znear / extent
 
-        # Set znear before every render to prevent other components from overriding it
-        extent = self._simulator.root_model.stat.extent
-        self._simulator.root_model.vis.map.znear = self._znear / extent
+            # Get render data from the simulator
+            world_id = getattr(self._simulator, "current_world_id", 0)
+            render_data = self._simulator.backend.get_render_data(world_id=world_id)
 
-        # Get render data from the simulator
-        world_id = getattr(self._simulator, "current_world_id", 0)
-        render_data = self._simulator.backend.get_render_data(world_id=world_id)
+            depth_frames = {}
+            rgb_frames = {}
 
-        depth_frames = {}
-        rgb_frames = {}
-
-        for camera_name in self.camera_names:
-            self.depth_renderer.update_scene(
-                render_data, camera=camera_name, scene_option=self.scene_option
-            )
-            depth_frames[camera_name] = self.depth_renderer.render()
-
-            if self._enable_rgb:
-                self.rgb_renderer.update_scene(
+            for camera_name in self.camera_names:
+                self.depth_renderer.update_scene(
                     render_data, camera=camera_name, scene_option=self.scene_option
                 )
-                rgb_frames[camera_name] = self.rgb_renderer.render()
+                depth_frames[camera_name] = self.depth_renderer.render()
 
-        result = {"depth": depth_frames}
-        if rgb_frames:
-            result["rgb"] = rgb_frames
-        if self._calibration is not None:
-            result["calibration"] = {
-                name: self._calibration for name in self.camera_names
-            }
-        return result
+                if self._enable_rgb:
+                    self.rgb_renderer.update_scene(
+                        render_data, camera=camera_name, scene_option=self.scene_option
+                    )
+                    rgb_frames[camera_name] = self.rgb_renderer.render()
+
+            result = {"depth": depth_frames}
+            if rgb_frames:
+                result["rgb"] = rgb_frames
+            if self._calibration is not None:
+                result["calibration"] = {
+                    name: self._calibration for name in self.camera_names
+                }
+            return result
 
 class MuJoCo(BaseSimulator):
     """MuJoCo physics simulator with terrain support.
@@ -290,6 +293,9 @@ class MuJoCo(BaseSimulator):
 
         # Viewer
         self.viewer: mujoco.viewer.Handle | None = None
+        self._mujoco_lock = threading.RLock()
+        self._motion_initial_state: dict[str, np.ndarray] | None = None
+        self._reset_requested = False
 
         # World ID for multi-environment visualization (which environment to view)
         self.current_world_id: int = 0
@@ -501,19 +507,22 @@ class MuJoCo(BaseSimulator):
         # Setup robot indexes, etc
         self._set_robot_properties()
         self._set_robot_joint_addressing()
-        self._set_initial_joint_angles()
+        self._apply_default_reset_state()
 
         # Initialize rgb/depth renderer wrapper
         self.renderer_wrapper = MujocoRendererWrapper(self)
 
         # Initialize virtual gantry after the robot using config
         gantry_cfg = self.simulator_config.virtual_gantry
-        self.virtual_gantry = create_virtual_gantry(
-            sim=self,
-            enable=gantry_cfg.enabled,
-            attachment_body_names=gantry_cfg.attachment_body_names,
-            cfg=gantry_cfg,
-        )
+        if gantry_cfg.enabled:
+            self.virtual_gantry = create_virtual_gantry(
+                sim=self,
+                enable=gantry_cfg.enabled,
+                attachment_body_names=gantry_cfg.attachment_body_names,
+                cfg=gantry_cfg,
+            )
+        else:
+            self.virtual_gantry = None
 
         # Initialize bridge system using base class helper
         self._init_bridge()
@@ -521,9 +530,6 @@ class MuJoCo(BaseSimulator):
         if self.video_config.enabled:
             self.video_recorder = MuJoCoVideoRecorder(self.video_config, self)
             self.video_recorder.setup_recording()
-
-        # For debugging
-        self.print_mujoco_model_tree()
 
         logger.info(f"Assets loaded - num_dof: {self.num_dof}, num_bodies: {self.num_bodies}")
         logger.info(f"DOF names: {self.dof_names}")
@@ -552,6 +558,7 @@ class MuJoCo(BaseSimulator):
         self.scene_manager.add_robot(
             terrain_state, self.robot_config, xml_filter=self.simulator_config.robot_mjcf_filter
         )
+        self.scene_manager.add_object_from_robot_config(self.robot_config)
         # Always add camera after robot, in case it attaches to robot bodies
         self.scene_manager.add_camera(self.camera_manager, self.num_envs)
 
@@ -576,7 +583,7 @@ class MuJoCo(BaseSimulator):
             "",  # keep named joints only
         ]
 
-        robot_joint_names = [n for n in all_joint_names if n not in exclude_names]
+        robot_joint_names = [n for n in all_joint_names if n.startswith(prefix) and n not in exclude_names]
 
         # Build name maps first
         self._build_name_maps()
@@ -663,15 +670,20 @@ class MuJoCo(BaseSimulator):
         to the MuJoCo model's initial state, then performs forward kinematics
         to update body positions.
         """
-        logger.info("Setting initial joint angles from robot config")
-
         assert self.root_model
         assert self.root_data
 
-        default_joint_angles = self.robot_config.init_state.default_joint_angles
+        joint_angles = self.robot_config.init_state.default_joint_angles
+        logger.info("Setting initial joint angles from robot config")
+
         joint_angles_set = 0
         joint_angles_failed = 0
-        for joint_name, angle in default_joint_angles.items():
+        for joint_name in self.dof_names:
+            if joint_name not in joint_angles:
+                logger.warning(f"Joint '{joint_name}' has no initial angle")
+                joint_angles_failed += 1
+                continue
+            angle = joint_angles[joint_name]
             # Add prefix for MuJoCo lookup
             mujoco_joint_name = self._get_prefixed_name(joint_name)
             joint_id = None
@@ -703,12 +715,42 @@ class MuJoCo(BaseSimulator):
 
         logger.info(
             f"Joint angle setting complete: {joint_angles_set} set, {joint_angles_failed} "
-            f"failed out of {len(default_joint_angles)} total"
+            f"failed out of {len(self.dof_names)} total"
         )
 
         # Forward kinematics to update body positions based on joint angles
         mujoco.mj_forward(self.root_model, self.root_data)
         logger.info("Applied forward kinematics with initial joint angles")
+
+    def _get_motion_initial_state(self) -> dict[str, np.ndarray] | None:
+        if self._motion_initial_state is not None:
+            return self._motion_initial_state
+
+        motion_file = os.environ.get("HOLOSOMA_MJ_MOTION", "").strip()
+        if not motion_file:
+            return None
+
+        path = Path(resolve_data_file_path(motion_file))
+        if not path.is_file():
+            raise FileNotFoundError(f"HOLOSOMA_MJ_MOTION does not exist: {motion_file}")
+
+        with np.load(path, allow_pickle=True) as data:
+            state = {}
+            if "object_pos_w" in data:
+                state["object_pos"] = np.asarray(data["object_pos_w"][0], dtype=np.float64)
+            if "object_quat_w" in data:
+                state["object_quat_wxyz"] = np.asarray(data["object_quat_w"][0], dtype=np.float64)
+
+        self._motion_initial_state = state
+        logger.info("Loaded MuJoCo object reset state from motion frame 0: {}", path)
+        return self._motion_initial_state
+
+    def _get_robot_initial_root_state(self) -> tuple[list[float], list[float], list[float], list[float]]:
+        initial_pos = list(self.robot_config.init_state.pos)
+        initial_rot = list(self.robot_config.init_state.rot)  # xyzw
+        initial_lin_vel = list(self.robot_config.init_state.lin_vel)
+        initial_ang_vel = list(self.robot_config.init_state.ang_vel)
+        return initial_pos, initial_rot, initial_lin_vel, initial_ang_vel
 
     def get_supported_scene_formats(self) -> list[str]:
         """Get supported scene formats.
@@ -781,11 +823,7 @@ class MuJoCo(BaseSimulator):
         assert self.robot_qpos_addr is not None
         assert self.robot_qvel_addr is not None
 
-        # Set complete initial robot state (position, orientation, velocities)
-        initial_pos = self.robot_config.init_state.pos
-        initial_rot = self.robot_config.init_state.rot  # [x,y,z,w] quaternion
-        initial_lin_vel = self.robot_config.init_state.lin_vel
-        initial_ang_vel = self.robot_config.init_state.ang_vel
+        initial_pos, initial_rot, initial_lin_vel, initial_ang_vel = self._get_robot_initial_root_state()
 
         # Apply initial state to robot root body if it exists
 
@@ -801,6 +839,57 @@ class MuJoCo(BaseSimulator):
         self.root_data.qvel[self.robot_qvel_addr : self.robot_qvel_addr + 3] = initial_lin_vel
         self.root_data.qvel[self.robot_qvel_addr + 3 : self.robot_qvel_addr + 6] = initial_ang_vel
 
+    def _set_object_initial_state_from_motion(self) -> None:
+        motion_state = self._get_motion_initial_state()
+        if motion_state is None or "object_pos" not in motion_state or "object_quat_wxyz" not in motion_state:
+            return
+
+        object_joint_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_JOINT, "object_freejoint")
+        if object_joint_id == -1:
+            return
+
+        qpos_addr = self.root_model.jnt_qposadr[object_joint_id]
+        qvel_addr = self.root_model.jnt_dofadr[object_joint_id]
+        self.root_data.qpos[qpos_addr : qpos_addr + 3] = motion_state["object_pos"]
+        self.root_data.qpos[qpos_addr + 3 : qpos_addr + 7] = motion_state["object_quat_wxyz"]
+        self.root_data.qvel[qvel_addr : qvel_addr + 6] = 0.0
+
+    def _apply_default_reset_state(self) -> None:
+        self._set_robot_initial_state()
+        self._set_initial_joint_angles()
+        self._set_object_initial_state_from_motion()
+        mujoco.mj_forward(self.root_model, self.root_data)
+        self._log_current_reset_state()
+
+    def _log_current_reset_state(self) -> None:
+        assert self.root_model is not None
+        assert self.root_data is not None
+        assert self.robot_qpos_addr is not None
+
+        root_qpos = self.root_data.qpos[self.robot_qpos_addr : self.robot_qpos_addr + 7].tolist()
+        object_joint_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_JOINT, "object_freejoint")
+        if object_joint_id == -1:
+            logger.info("Applied reset state: robot_root_qpos={}", root_qpos)
+            return
+
+        object_qpos_addr = self.root_model.jnt_qposadr[object_joint_id]
+        object_qpos = self.root_data.qpos[object_qpos_addr : object_qpos_addr + 7].tolist()
+        logger.info(
+            "Applied reset state: robot_root_qpos={}, object_qpos={}",
+            root_qpos,
+            object_qpos,
+        )
+
+    def reset(self) -> None:
+        assert self.root_model is not None
+        assert self.root_data is not None
+        with self._mujoco_lock:
+            mujoco.mj_resetData(self.root_model, self.root_data)
+            self._apply_default_reset_state()
+            self._zero_commands()
+            if self.bridge is not None and hasattr(self.bridge, "reset_command_state"):
+                self.bridge.reset_command_state()
+
     def prepare_sim(self) -> None:
         """Prepare simulation - enhanced implementation with ObjectRegistry integration.
 
@@ -811,16 +900,17 @@ class MuJoCo(BaseSimulator):
         assert self.root_data
         mujoco.mj_resetData(self.root_model, self.root_data)
 
-        self._set_robot_initial_state()
+        self._apply_default_reset_state()
 
         # Setup ObjectRegistry for robot-only (scenes not yet implemented)
         self.object_registry.setup_ranges(self.num_envs, robot_count=1, scene_count=0, individual_count=0)
 
         # Register robot with initial pose
         # TODO: use robot model/data rather than config here?
+        initial_pos, initial_rot, _, _ = self._get_robot_initial_root_state()
         robot_poses = torch.zeros(self.num_envs, 7, device=self.sim_device)
-        robot_poses[:, :3] = torch.tensor(self.robot_config.init_state.pos, device=self.sim_device)
-        robot_poses[:, 3:7] = torch.tensor(self.robot_config.init_state.rot, device=self.sim_device)  # [x,y,z,w]
+        robot_poses[:, :3] = torch.tensor(initial_pos, device=self.sim_device)
+        robot_poses[:, 3:7] = torch.tensor(initial_rot, device=self.sim_device)  # [x,y,z,w]
         self.object_registry.register_object("robot", ObjectType.ROBOT, 0, robot_poses)
         self.object_registry.finalize_registration()
 
@@ -1044,20 +1134,26 @@ class MuJoCo(BaseSimulator):
 
     def simulate_at_each_physics_step(self) -> None:
         """Advance simulation by one step."""
+        with self._mujoco_lock:
+            if self._reset_requested:
+                self._reset_requested = False
+                self.reset()
+                logger.info("Reset MuJoCo state to WBT default root/object pose")
+                return
 
-        if self.virtual_gantry:
-            # Apply virtual gantry forces before step
-            self.virtual_gantry.step()
+            if self.virtual_gantry:
+                # Apply virtual gantry forces before step
+                self.virtual_gantry.step()
 
-        # Step bridge for updated torques before step using base class helper
-        self._step_bridge()
+            # Step bridge for updated torques before step using base class helper
+            self._step_bridge()
 
-        # Delegate simulation step to backend
-        self.backend.step()
+            # Delegate simulation step to backend
+            self.backend.step()
 
-        # Call video recorder capture frame if recording is active
-        if self.video_recorder and self.video_recorder.is_recording:
-            self.capture_video_frame()
+            # Call video recorder capture frame if recording is active
+            if self.video_recorder and self.video_recorder.is_recording:
+                self.capture_video_frame()
         
 
     def get_actor_states_by_index(self, indices: ActorIndices) -> ActorStates:
@@ -1518,18 +1614,19 @@ class MuJoCo(BaseSimulator):
             logger.warning("Cannot render, no viewer")
             return
 
-        # Sync GPU -> CPU for WarpBackend with current world_id
-        # (no-op for ClassicBackend which returns same data)
-        self.root_data = self.backend.get_render_data(world_id=self.current_world_id)
+        with self._mujoco_lock:
+            # Sync GPU -> CPU for WarpBackend with current world_id
+            # (no-op for ClassicBackend which returns same data)
+            self.root_data = self.backend.get_render_data(world_id=self.current_world_id)
 
-        if self.simulator_config.viewer.enable_tracking:
-            robot_body_id = 1
-            self.viewer.cam.lookat[:] = self.root_data.xpos[robot_body_id]
+            if self.simulator_config.viewer.enable_tracking:
+                robot_body_id = 1
+                self.viewer.cam.lookat[:] = self.root_data.xpos[robot_body_id]
 
-        self.viewer.sync()
-        if self.debug_viz_enabled:
-            self.clear_lines()
-            self.draw_debug_viz()
+            self.viewer.sync()
+            if self.debug_viz_enabled:
+                self.clear_lines()
+                self.draw_debug_viz()
 
     def time(self) -> float:
         """Get current simulation time in seconds.
@@ -1644,6 +1741,10 @@ class MuJoCo(BaseSimulator):
             status = "ON" if self.simulator_config.viewer.enable_tracking else "OFF"
             logger.info(f"Camera tracking: {status} (press 'Y' to toggle)")
             self._update_text_overlay()  # Update UI
+            return
+
+        if keycode == 259:  # BACKSPACE
+            self._reset_requested = True
             return
 
         # Handle world_id toggling for multi-environment visualization (WarpBackend only)

@@ -1093,10 +1093,31 @@ t1_29dof_waist_wrist = RobotConfig(
 
 g1_29dof_w_object = replace(
     g1_29dof,
-    asset=replace(
-        g1_29dof.asset,
-        urdf_file="g1/main_mesh_collision_halfspherehand.urdf",
-        xml_file="g1/g1_29dof_halfspherehand.xml",
+    init_state=replace(
+        g1_29dof.init_state,
+        pos=[0.0, 0.0, 0.76],
+        rot=[0.0, 0.0, 0.0, 1.0],
+        default_joint_angles={
+            **g1_29dof.init_state.default_joint_angles,
+            "left_shoulder_pitch_joint": 0.2,
+            "left_shoulder_roll_joint": 0.2,
+            "left_shoulder_yaw_joint": 0.0,
+            "left_elbow_joint": 0.6,
+            "left_wrist_roll_joint": 0.0,
+            "left_wrist_pitch_joint": 0.0,
+            "left_wrist_yaw_joint": 0.0,
+            "right_shoulder_pitch_joint": 0.2,
+            "right_shoulder_roll_joint": -0.2,
+            "right_shoulder_yaw_joint": 0.0,
+            "right_elbow_joint": 0.6,
+            "right_wrist_roll_joint": 0.0,
+            "right_wrist_pitch_joint": 0.0,
+            "right_wrist_yaw_joint": 0.0,
+        },
+    ),
+    object=replace(
+        g1_29dof.object,
+        object_urdf_path="holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf",
     ),
     # control=replace(
     #     g1_29dof.control,

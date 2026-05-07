@@ -42,6 +42,9 @@ class TaskConfig:
     use_sim_time: bool = False
     """Use synchronized simulation time for WBT policies."""
 
+    motion_file: str = ""
+    """Optional motion file used by sparse-root WBT observations."""
+
     wandb_download_dir: str = "/tmp"
     """Directory for downloading W&B checkpoints."""
 
