@@ -5,23 +5,20 @@ set -euo pipefail
 #
 # Branches:
 # - clip:  clip-conditioned drop student (default run: oitf644a)
-# - mixed: sparse-goal mixed drop student (default run: 1xugspet)
 #
 # Usage:
-#   bash infer_box_drop.sh [clip|mixed] [checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
+#   bash infer_box_drop.sh [clip] [checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
 #
 # Examples:
 #   bash infer_box_drop.sh
 #   bash infer_box_drop.sh https://wandb.ai/zihanw22/boxer/runs/kmux2yeq/logs
 #   bash infer_box_drop.sh clip
-#   bash infer_box_drop.sh mixed
-#   bash infer_box_drop.sh mixed https://wandb.ai/zihanw22/boxer/runs/1xugspet
 #   MOTION_CLIP_NAME=box_10 bash infer_box_drop.sh clip
 
 usage() {
   cat <<'EOF'
 Usage:
-  bash infer_box_drop.sh [clip|mixed] [checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
+  bash infer_box_drop.sh [clip] [checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
 
 Accepted W&B URLs:
   https://wandb.ai/<entity>/<project>/runs/<run_id>
@@ -30,11 +27,9 @@ Accepted W&B URLs:
 
 Modes:
   clip   Evaluate the clip-conditioned drop student (oitf644a by default)
-  mixed  Evaluate the sparse-goal mixed drop student (1xugspet by default; also the default mode if omitted)
 
 Default W&B runs:
   clip   https://wandb.ai/zihanw22/boxer/runs/oitf644a
-  mixed  https://wandb.ai/zihanw22/boxer/runs/1xugspet
 
   Optional env vars:
     CKPT / CHECKPOINT        (optional checkpoint override)
@@ -70,15 +65,12 @@ Default W&B runs:
   DISABLE_RANDOMIZATION    (default: True)
   START_AT_TIMESTEP_ZERO_PROB (default: 1.0)
   FREEZE_AT_TIMESTEP_ZERO_PROB (default: 0.0)
-  RESET_NOISE_SCALE        (default: 0.0; 1xugspet/s221l5eo mixed profile defaults to 1.0)
+  RESET_NOISE_SCALE        (default: 0.0)
   MAX_EPISODE_LENGTH_S     (default: 1000000)
   MAX_EVAL_STEPS           (optional; if set, overrides training.max_eval_steps)
   PHYSX_GPU_COLLISION_STACK_SIZE (default: 268435456)
   DEPTH_PERCEPTION_PRESET  (default: checkpoint; options: checkpoint|d435i_17x17)
   CAMERA_*                (optional explicit camera overrides; default preserves checkpoint camera config)
-  MIXED_PROFILE            (default: auto; options: auto|none|1xugspet|s221l5eo)
-  EVAL_COMMAND_ONLY_ENV_PROB (mixed mode default: 1.0 for 1xugspet/s221l5eo; clip mode leaves checkpoint logic unchanged)
-  EVAL_EXTERNAL_GOAL_PROB  (mixed mode default: 0.0; clip mode leaves checkpoint logic unchanged)
   HOLOSOMA_DISABLE_BAD_TRACKING_RESET (default: 1 for infer)
   HOLOSOMA_DISABLE_AUTO_RESET (default: 1 for infer; only GUI/manual reset will reset)
   DRY_RUN                  (default: 0; set 1/true to print the command without launching)
@@ -94,8 +86,8 @@ is_checkpoint_arg() {
   [[ "${arg}" == wandb://* || "${arg}" == https://wandb.ai/* || "${arg}" == /* || "${arg}" == ./* || "${arg}" == ../* || "${arg}" == *.pt ]]
 }
 
-MODE="mixed"
-MODE_INPUT="<default:mixed>"
+MODE="clip"
+MODE_INPUT="<default:clip>"
 if [[ $# -gt 0 ]]; then
   case "$1" in
     clip|drop|oitf644a)
@@ -103,10 +95,9 @@ if [[ $# -gt 0 ]]; then
       MODE="clip"
       shift
       ;;
-    mixed|sparse_goal|sparse-goal|hw5jbitz|q3t3ntf4|s221l5eo|1xugspet)
-      MODE_INPUT="$1"
-      MODE="mixed"
-      shift
+    mixed|hw5jbitz|q3t3ntf4|s221l5eo|1xugspet)
+      echo "[ERROR] mixed drop inference was removed. Use clip mode or infer_box_joystick.sh." >&2
+      exit 2
       ;;
     -h|--help|help)
       usage
@@ -114,7 +105,7 @@ if [[ $# -gt 0 ]]; then
       ;;
     *)
       if ! is_checkpoint_arg "$1"; then
-        echo "[ERROR] first argument must be mode clip|mixed or a checkpoint/W&B run reference. Got: $1" >&2
+        echo "[ERROR] first argument must be mode clip or a checkpoint/W&B run reference. Got: $1" >&2
         exit 2
       fi
       ;;
@@ -122,19 +113,13 @@ if [[ $# -gt 0 ]]; then
 fi
 
 DEFAULT_CLIP_RUN_URL="${DEFAULT_CLIP_RUN_URL:-https://wandb.ai/zihanw22/boxer/runs/oitf644a}"
-DEFAULT_MIXED_RUN_URL="${DEFAULT_MIXED_RUN_URL:-https://wandb.ai/zihanw22/boxer/runs/1xugspet}"
 DEFAULT_CLIP_CHECKPOINT="${DEFAULT_CLIP_CHECKPOINT:-wandb://zihanw22/boxer/oitf644a/model_01600.pt}"
-DEFAULT_MIXED_CHECKPOINT="${DEFAULT_MIXED_CHECKPOINT:-wandb://zihanw22/boxer/1xugspet/model_01600.pt}"
 
 default_model_file_for_run_id() {
   local run_id="$1"
   case "${run_id}" in
     kmux2yeq) echo "model_01200.pt" ;;
-    1xugspet) echo "model_01600.pt" ;;
     oitf644a) echo "model_01600.pt" ;;
-    q3t3ntf4) echo "model_01400.pt" ;;
-    hw5jbitz) echo "model_02800.pt" ;;
-    s221l5eo) echo "model_03600.pt" ;;
     *) echo "" ;;
   esac
 }
@@ -495,11 +480,7 @@ if [[ $# -gt 0 ]]; then
 fi
 
 if [[ -z "${CKPT}" ]]; then
-  if [[ "${MODE}" == "mixed" ]]; then
-    CKPT="${DEFAULT_MIXED_CHECKPOINT}"
-  else
-    CKPT="${DEFAULT_CLIP_CHECKPOINT}"
-  fi
+  CKPT="${DEFAULT_CLIP_CHECKPOINT}"
 fi
 
 if [[ "${CKPT}" == https://wandb.ai/*/runs/* ]]; then
@@ -544,7 +525,6 @@ if [[ -n "${ROBOT_INIT_STATE_XY_OFFSET_RAW}" ]]; then
   fi
 fi
 
-MIXED_PROFILE=${MIXED_PROFILE:-auto}
 INFER_DATASET_EXPLICIT=0
 [[ -n "${INFER_DATASET+x}" ]] && INFER_DATASET_EXPLICIT=1
 MOTION_DIR_EXPLICIT=0
@@ -575,10 +555,6 @@ CAMERA_FAR_EXPLICIT=0
 [[ -n "${CAMERA_FAR+x}" ]] && CAMERA_FAR_EXPLICIT=1
 CAMERA_MAX_DISTANCE_EXPLICIT=0
 [[ -n "${CAMERA_MAX_DISTANCE+x}" ]] && CAMERA_MAX_DISTANCE_EXPLICIT=1
-EVAL_COMMAND_ONLY_ENV_PROB_EXPLICIT=0
-[[ -n "${EVAL_COMMAND_ONLY_ENV_PROB+x}" ]] && EVAL_COMMAND_ONLY_ENV_PROB_EXPLICIT=1
-EVAL_EXTERNAL_GOAL_PROB_EXPLICIT=0
-[[ -n "${EVAL_EXTERNAL_GOAL_PROB+x}" ]] && EVAL_EXTERNAL_GOAL_PROB_EXPLICIT=1
 CHECKPOINT_SAVED_MOTION_PATH=""
 CHECKPOINT_SAVED_OBJECT_URDF=""
 
@@ -601,21 +577,6 @@ for key in ("motion_path", "object_urdf_path"):
     print(f"{key}={value}")
 PY
     )
-  fi
-fi
-
-MIXED_PROFILE_RESOLVED="none"
-if [[ "${MODE}" == "mixed" ]]; then
-  if [[ "${MIXED_PROFILE}" == "auto" ]]; then
-    if [[ "${CKPT}" == *"1xugspet"* ]]; then
-      MIXED_PROFILE_RESOLVED="1xugspet"
-    elif [[ "${CKPT}" == *"s221l5eo"* ]]; then
-      MIXED_PROFILE_RESOLVED="s221l5eo"
-    else
-      MIXED_PROFILE_RESOLVED="none"
-    fi
-  else
-    MIXED_PROFILE_RESOLVED="${MIXED_PROFILE}"
   fi
 fi
 
@@ -735,8 +696,6 @@ OBJECT_GEOMETRY_MODE=""
 HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE=""
 PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE=""
 MAX_EVAL_STEPS=${MAX_EVAL_STEPS:-}
-EVAL_COMMAND_ONLY_ENV_PROB=${EVAL_COMMAND_ONLY_ENV_PROB:-}
-EVAL_EXTERNAL_GOAL_PROB=${EVAL_EXTERNAL_GOAL_PROB:-}
 DRY_RUN_RAW=${DRY_RUN:-0}
 
 if [[ -n "${OBJECT_GEOMETRY_MODE_RAW}" ]]; then
@@ -757,38 +716,6 @@ if [[ -n "${OBJECT_GEOMETRY_MODE_RAW}" ]]; then
       ;;
   esac
 fi
-
-case "${MIXED_PROFILE_RESOLVED}" in
-  none)
-    ;;
-  1xugspet|s221l5eo)
-    if [[ "${PAIR_TERRAIN_WITH_MOTION_EXPLICIT}" -eq 0 ]]; then
-      PAIR_TERRAIN_WITH_MOTION="False"
-    fi
-    if [[ "${START_AT_TIMESTEP_ZERO_PROB_EXPLICIT}" -eq 0 ]]; then
-      START_AT_TIMESTEP_ZERO_PROB="1.0"
-    fi
-    if [[ "${FREEZE_AT_TIMESTEP_ZERO_PROB_EXPLICIT}" -eq 0 ]]; then
-      FREEZE_AT_TIMESTEP_ZERO_PROB="0.0"
-    fi
-    if [[ "${RESET_NOISE_SCALE_EXPLICIT}" -eq 0 ]]; then
-      RESET_NOISE_SCALE="1.0"
-    fi
-    if [[ "${DEPTH_PERCEPTION_PRESET_EXPLICIT}" -eq 0 ]]; then
-      DEPTH_PERCEPTION_PRESET="checkpoint"
-    fi
-    if [[ "${EVAL_COMMAND_ONLY_ENV_PROB_EXPLICIT}" -eq 0 ]]; then
-      EVAL_COMMAND_ONLY_ENV_PROB="1.0"
-    fi
-    if [[ "${EVAL_EXTERNAL_GOAL_PROB_EXPLICIT}" -eq 0 ]]; then
-      EVAL_EXTERNAL_GOAL_PROB="0.0"
-    fi
-    ;;
-  *)
-    echo "[ERROR] MIXED_PROFILE must be one of: auto|none|1xugspet|s221l5eo. Got: ${MIXED_PROFILE_RESOLVED}" >&2
-    exit 2
-    ;;
-esac
 
 HEADLESS_NORM=$(echo "${HEADLESS_RAW}" | tr '[:upper:]' '[:lower:]')
 case "${HEADLESS_NORM}" in
@@ -914,7 +841,6 @@ fi
 export VISER_ENABLE_CLIP_GUI=${VISER_ENABLE_CLIP_GUI:-1}
 export VISER_ENABLE_MANUAL_GUI=${VISER_ENABLE_MANUAL_GUI:-1}
 export VISER_ENABLE_MANUAL_ROOT_GUI=${VISER_ENABLE_MANUAL_ROOT_GUI:-0}
-export VISER_ENABLE_MANUAL_GOAL_GUI=${VISER_ENABLE_MANUAL_GOAL_GUI:-1}
 export VISER_MANUAL_CONTROL_DEFAULT=${VISER_MANUAL_CONTROL_DEFAULT:-0}
 export VISER_FORCE_MANUAL_CONTROL=${VISER_FORCE_MANUAL_CONTROL:-0}
 export VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-0}
@@ -928,9 +854,9 @@ export LOGURU_LEVEL=${LOGURU_LEVEL:-WARNING}
 export PY_LOG_LEVEL=${PY_LOG_LEVEL:-WARNING}
 
 AUTO_SWITCH_MULTI_OBJECT_MODE=0
-if is_truthy "${VISER_ENABLE_CLIP_GUI}" && [[ "${MODE}" == "mixed" ]] && [[ "${NUM_ENVS}" == "1" ]]; then
-  # Clip switching in mixed inference must spawn per-asset simulator objects; the
-  # default single-slot heterogeneous path keeps env_0's initial box asset fixed.
+if is_truthy "${VISER_ENABLE_CLIP_GUI}" && [[ "${NUM_ENVS}" == "1" ]] && [[ "${OBJECT_URDF}" == *.json ]]; then
+  # Single-env clip switching with an object-map needs per-asset simulator objects.
+  # Otherwise env_0 keeps its initial object asset while the selected clip metadata changes.
   if [[ -z "${OBJECT_GEOMETRY_MODE_RAW}" ]]; then
     OBJECT_GEOMETRY_MODE="mesh"
     HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE="urdf"
@@ -942,7 +868,6 @@ if is_truthy "${VISER_ENABLE_CLIP_GUI}" && [[ "${MODE}" == "mixed" ]] && [[ "${N
     AUTO_SWITCH_MULTI_OBJECT_MODE=1
   fi
 fi
-
 if [[ -n "${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}" ]]; then
   export HOLOSOMA_OBJECT_SPAWN_MODE="${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}"
 fi
@@ -1064,33 +989,11 @@ case "$(echo "${DEPTH_PERCEPTION_PRESET}" | tr '[:upper:]' '[:lower:]')" in
 esac
 append_explicit_camera_overrides
 
-if [[ "${MODE}" == "mixed" ]]; then
-  if [[ -z "${EVAL_EXTERNAL_GOAL_PROB}" ]]; then
-    EVAL_EXTERNAL_GOAL_PROB="0.0"
-  fi
-  cmd+=(
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.enabled True
-  )
-  if [[ -n "${EVAL_COMMAND_ONLY_ENV_PROB}" ]]; then
-    cmd+=(
-      --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.eval_command_only_env_prob "${EVAL_COMMAND_ONLY_ENV_PROB}"
-    )
-  fi
-  if [[ -n "${EVAL_EXTERNAL_GOAL_PROB}" ]]; then
-    cmd+=(
-      --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.eval_external_goal_prob "${EVAL_EXTERNAL_GOAL_PROB}"
-    )
-  fi
-fi
-
 if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
   cmd+=("${EXTRA_ARGS[@]}")
 fi
 
 echo "[INFO] mode_input=${MODE_INPUT} runtime_mode=${MODE}"
-if [[ "${MODE}" == "mixed" ]]; then
-  echo "[INFO] mixed_profile=${MIXED_PROFILE_RESOLVED}"
-fi
 echo "[INFO] checkpoint=${CKPT}"
 echo "[INFO] infer_dataset=${INFER_DATASET}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
@@ -1115,7 +1018,7 @@ if [[ -n "${HOLOSOMA_DEVICE:-}" ]]; then
   echo "[INFO] holosoma_device=${HOLOSOMA_DEVICE}"
 fi
 echo "[INFO] viser=http://localhost:${VISER_PORT}"
-echo "[INFO] clip_gui=${VISER_ENABLE_CLIP_GUI} manual_gui=${VISER_ENABLE_MANUAL_GUI} manual_root_gui=${VISER_ENABLE_MANUAL_ROOT_GUI} manual_goal_gui=${VISER_ENABLE_MANUAL_GOAL_GUI}"
+echo "[INFO] clip_gui=${VISER_ENABLE_CLIP_GUI} manual_gui=${VISER_ENABLE_MANUAL_GUI} manual_root_gui=${VISER_ENABLE_MANUAL_ROOT_GUI}"
 echo "[INFO] viser_show_target_keypoints=${VISER_SHOW_TARGET_KEYPOINTS} disable_auto_reset=${HOLOSOMA_DISABLE_AUTO_RESET} disable_clip_end_reset=${HOLOSOMA_DISABLE_CLIP_END_RESET}"
 if [[ -n "${MOTION_CLIP_NAME}" ]]; then
   echo "[INFO] motion_clip_name=${MOTION_CLIP_NAME}"
@@ -1134,10 +1037,6 @@ if [[ -n "${ROBOT_INIT_STATE_POS_ARG}" ]]; then
 fi
 if [[ -n "${ROBOT_INIT_STATE_XY_OFFSET_ARG}" ]]; then
   echo "[INFO] robot_init_state_xy_offset=${ROBOT_INIT_STATE_XY_OFFSET_ARG}"
-fi
-if [[ "${MODE}" == "mixed" ]]; then
-  echo "[INFO] eval_command_only_env_prob=${EVAL_COMMAND_ONLY_ENV_PROB:-<checkpoint>}"
-  echo "[INFO] eval_external_goal_prob=${EVAL_EXTERNAL_GOAL_PROB}"
 fi
 CAMERA_OVERRIDE_SUMMARY=()
 [[ "${IMAGE_WIDTH_EXPLICIT}" -eq 1 ]] && CAMERA_OVERRIDE_SUMMARY+=("camera_width=${IMAGE_WIDTH}")

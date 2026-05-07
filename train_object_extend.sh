@@ -59,17 +59,8 @@ PHYSX_GPU_COLLISION_STACK_SIZE=${PHYSX_GPU_COLLISION_STACK_SIZE:-67108864}
 PHYSX_GPU_HEAP_CAPACITY=${PHYSX_GPU_HEAP_CAPACITY:-67108864}
 PHYSX_GPU_TEMP_BUFFER_CAPACITY=${PHYSX_GPU_TEMP_BUFFER_CAPACITY:-16777216}
 
-LEGACY_DEFAULT_EXP=g1-29dof-wbt-w-object-extend
-COMMAND_CURRICULUM_DEFAULT_EXP=g1-29dof-wbt-w-object-command-curriculum
-DEFAULT_EXP=${DEFAULT_EXP:-${COMMAND_CURRICULUM_DEFAULT_EXP}}
-LEGACY_DEFAULT_TRAINING_NAME=g1_29dof_wbt_w_object_extend
-COMMAND_CURRICULUM_DEFAULT_TRAINING_NAME=g1_29dof_wbt_w_object_command_curriculum
-DEFAULT_TRAINING_NAME=${DEFAULT_TRAINING_NAME:-${COMMAND_CURRICULUM_DEFAULT_TRAINING_NAME}}
-
-EXP_FROM_ENV=0
-[[ -n "${EXP+x}" ]] && EXP_FROM_ENV=1
-TRAINING_NAME_FROM_ENV=0
-[[ -n "${TRAINING_NAME+x}" ]] && TRAINING_NAME_FROM_ENV=1
+DEFAULT_EXP=${DEFAULT_EXP:-g1-29dof-wbt-w-object-extend}
+DEFAULT_TRAINING_NAME=${DEFAULT_TRAINING_NAME:-g1_29dof_wbt_w_object_extend}
 
 EXP=${EXP:-${DEFAULT_EXP}}
 WANDB_PROJECT=${WANDB_PROJECT:-boxer}
@@ -107,53 +98,6 @@ NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
 SAVE_INTERVAL=${SAVE_INTERVAL:-1000}
 NUM_ITERS=${NUM_ITERS:-""}
 CHECKPOINT=${CHECKPOINT:-""}
-
-COMMAND_CURRICULUM_MODE=${COMMAND_CURRICULUM_MODE:-1}
-COMMAND_CURRICULUM_PERCEPTION_INTO_POLICY_MODULES=${COMMAND_CURRICULUM_PERCEPTION_INTO_POLICY_MODULES:-True}
-COMMAND_CURRICULUM_MAX_EPISODE_LENGTH_S=${COMMAND_CURRICULUM_MAX_EPISODE_LENGTH_S:-12.0}
-COMMAND_CURRICULUM_HYBRID_START_ITER=${COMMAND_CURRICULUM_HYBRID_START_ITER:-2000}
-COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_START=${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_START:-0.0}
-COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_END=${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_END:-0.6}
-COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_START_ITER=${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_START_ITER:-${COMMAND_CURRICULUM_HYBRID_START_ITER}}
-COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_END_ITER=${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_END_ITER:-8000}
-COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_RAMP_RESETS=${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_RAMP_RESETS:-120000}
-COMMAND_CURRICULUM_EVAL_COMMAND_ONLY_ENV_PROB=${COMMAND_CURRICULUM_EVAL_COMMAND_ONLY_ENV_PROB:-${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_END}}
-COMMAND_CURRICULUM_CLIP_GOAL_DELTA_MIN_STEPS=${COMMAND_CURRICULUM_CLIP_GOAL_DELTA_MIN_STEPS:-45}
-COMMAND_CURRICULUM_CLIP_GOAL_DELTA_MAX_STEPS=${COMMAND_CURRICULUM_CLIP_GOAL_DELTA_MAX_STEPS:-120}
-COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_START=${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_START:-0.0}
-COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_END=${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_END:-0.25}
-COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_START_ITER=${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_START_ITER:-${COMMAND_CURRICULUM_HYBRID_START_ITER}}
-COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_END_ITER=${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_END_ITER:-9000}
-COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_RAMP_RESETS=${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_RAMP_RESETS:-140000}
-COMMAND_CURRICULUM_EVAL_CARRY_EXTENSION_PROB=${COMMAND_CURRICULUM_EVAL_CARRY_EXTENSION_PROB:-${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_END}}
-COMMAND_CURRICULUM_CARRY_EXTENSION_RANGE_RAMP_RESETS=${COMMAND_CURRICULUM_CARRY_EXTENSION_RANGE_RAMP_RESETS:-${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_RAMP_RESETS}}
-COMMAND_CURRICULUM_CARRY_EXTENSION_RANGE_START_ITER=${COMMAND_CURRICULUM_CARRY_EXTENSION_RANGE_START_ITER:-${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_START_ITER}}
-COMMAND_CURRICULUM_CARRY_EXTENSION_RANGE_END_ITER=${COMMAND_CURRICULUM_CARRY_EXTENSION_RANGE_END_ITER:-${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_END_ITER}}
-COMMAND_CURRICULUM_CARRY_EXTENSION_POS_LOCAL_MIN_START=${COMMAND_CURRICULUM_CARRY_EXTENSION_POS_LOCAL_MIN_START:-"[0.10, -0.05, 0.0]"}
-COMMAND_CURRICULUM_CARRY_EXTENSION_POS_LOCAL_MAX_START=${COMMAND_CURRICULUM_CARRY_EXTENSION_POS_LOCAL_MAX_START:-"[0.25, 0.05, 0.0]"}
-COMMAND_CURRICULUM_CARRY_EXTENSION_POS_LOCAL_MIN=${COMMAND_CURRICULUM_CARRY_EXTENSION_POS_LOCAL_MIN:-"[0.15, -0.20, 0.0]"}
-COMMAND_CURRICULUM_CARRY_EXTENSION_POS_LOCAL_MAX=${COMMAND_CURRICULUM_CARRY_EXTENSION_POS_LOCAL_MAX:-"[0.60, 0.20, 0.0]"}
-COMMAND_CURRICULUM_CARRY_EXTENSION_RPY_MIN_START=${COMMAND_CURRICULUM_CARRY_EXTENSION_RPY_MIN_START:-"[0.0, 0.0, -0.20]"}
-COMMAND_CURRICULUM_CARRY_EXTENSION_RPY_MAX_START=${COMMAND_CURRICULUM_CARRY_EXTENSION_RPY_MAX_START:-"[0.0, 0.0, 0.20]"}
-COMMAND_CURRICULUM_CARRY_EXTENSION_RPY_MIN=${COMMAND_CURRICULUM_CARRY_EXTENSION_RPY_MIN:-"[0.0, 0.0, -0.80]"}
-COMMAND_CURRICULUM_CARRY_EXTENSION_RPY_MAX=${COMMAND_CURRICULUM_CARRY_EXTENSION_RPY_MAX:-"[0.0, 0.0, 0.80]"}
-COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_START=${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_START:-0.0}
-COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_END=${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_END:-0.15}
-COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_START_ITER=${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_START_ITER:-${COMMAND_CURRICULUM_HYBRID_START_ITER}}
-COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_END_ITER=${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_END_ITER:-13000}
-COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_RAMP_RESETS=${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_RAMP_RESETS:-220000}
-COMMAND_CURRICULUM_EVAL_EXTERNAL_GOAL_PROB=${COMMAND_CURRICULUM_EVAL_EXTERNAL_GOAL_PROB:-${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_END}}
-COMMAND_CURRICULUM_EXTERNAL_GOAL_RANGE_RAMP_RESETS=${COMMAND_CURRICULUM_EXTERNAL_GOAL_RANGE_RAMP_RESETS:-${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_RAMP_RESETS}}
-COMMAND_CURRICULUM_EXTERNAL_GOAL_RANGE_START_ITER=${COMMAND_CURRICULUM_EXTERNAL_GOAL_RANGE_START_ITER:-${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_START_ITER}}
-COMMAND_CURRICULUM_EXTERNAL_GOAL_RANGE_END_ITER=${COMMAND_CURRICULUM_EXTERNAL_GOAL_RANGE_END_ITER:-${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_END_ITER}}
-COMMAND_CURRICULUM_EXTERNAL_GOAL_POS_LOCAL_MIN_START=${COMMAND_CURRICULUM_EXTERNAL_GOAL_POS_LOCAL_MIN_START:-"[0.40, -0.20, 0.185]"}
-COMMAND_CURRICULUM_EXTERNAL_GOAL_POS_LOCAL_MAX_START=${COMMAND_CURRICULUM_EXTERNAL_GOAL_POS_LOCAL_MAX_START:-"[0.65, 0.20, 0.185]"}
-COMMAND_CURRICULUM_EXTERNAL_GOAL_POS_LOCAL_MIN=${COMMAND_CURRICULUM_EXTERNAL_GOAL_POS_LOCAL_MIN:-"[0.25, -0.75, 0.185]"}
-COMMAND_CURRICULUM_EXTERNAL_GOAL_POS_LOCAL_MAX=${COMMAND_CURRICULUM_EXTERNAL_GOAL_POS_LOCAL_MAX:-"[1.00, 0.75, 0.185]"}
-COMMAND_CURRICULUM_EXTERNAL_GOAL_RPY_MIN_START=${COMMAND_CURRICULUM_EXTERNAL_GOAL_RPY_MIN_START:-"[0.0, 0.0, -0.80]"}
-COMMAND_CURRICULUM_EXTERNAL_GOAL_RPY_MAX_START=${COMMAND_CURRICULUM_EXTERNAL_GOAL_RPY_MAX_START:-"[0.0, 0.0, 0.80]"}
-COMMAND_CURRICULUM_EXTERNAL_GOAL_RPY_MIN=${COMMAND_CURRICULUM_EXTERNAL_GOAL_RPY_MIN:-"[0.0, 0.0, -3.1415926]"}
-COMMAND_CURRICULUM_EXTERNAL_GOAL_RPY_MAX=${COMMAND_CURRICULUM_EXTERNAL_GOAL_RPY_MAX:-"[0.0, 0.0, 3.1415926]"}
 
 PROFILE=$(echo "${PROFILE:-decoupled}" | tr '[:upper:]' '[:lower:]')
 PROFILE_BLEND=${PROFILE_BLEND:-${TRANSITION_BLEND:-""}}
@@ -397,138 +341,6 @@ validate_profile_configuration() {
 is_truthy() {
   local value="${1,,}"
   [[ "${value}" == "1" || "${value}" == "true" || "${value}" == "yes" || "${value}" == "on" ]]
-}
-
-validate_probability_range() {
-  local label=$1
-  local value=$2
-  if ! awk -v t="${value}" 'BEGIN { exit !(t >= 0.0 && t <= 1.0) }'; then
-    echo "[ERROR] ${label} must be within [0, 1]. Got '${value}'." >&2
-    exit 2
-  fi
-}
-
-validate_nonnegative_integer() {
-  local label=$1
-  local value=$2
-  if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
-    echo "[ERROR] ${label} must be a non-negative integer. Got '${value}'." >&2
-    exit 2
-  fi
-}
-
-validate_iter_schedule() {
-  local label=$1
-  local start_iter=$2
-  local end_iter=$3
-  validate_nonnegative_integer "${label}_start_iter" "${start_iter}"
-  validate_nonnegative_integer "${label}_end_iter" "${end_iter}"
-  if (( end_iter < start_iter )); then
-    echo "[ERROR] ${label} end_iter must be >= start_iter. Got start=${start_iter}, end=${end_iter}." >&2
-    exit 2
-  fi
-}
-
-validate_command_curriculum_probability_budget() {
-  local label=$1
-  local command_prob=$2
-  local carry_prob=$3
-  local external_prob=$4
-  validate_probability_range "${label} command_only_env_prob" "${command_prob}"
-  validate_probability_range "${label} carry_extension_prob" "${carry_prob}"
-  validate_probability_range "${label} external_goal_prob" "${external_prob}"
-  if ! awk -v c="${command_prob}" 'BEGIN { exit !(c <= 0.6) }'; then
-    echo "[ERROR] ${label} command_only_env_prob exceeds 0.60: command=${command_prob}." >&2
-    echo "[ERROR] Command curriculum requires at least 40% co-tracking environments throughout training." >&2
-    exit 2
-  fi
-  if ! awk -v c="${command_prob}" -v a="${carry_prob}" -v b="${external_prob}" 'BEGIN { exit !((a + b) <= c) }'; then
-    echo "[ERROR] ${label} carry/external budget exceeds command-only budget: command=${command_prob}, carry=${carry_prob}, external=${external_prob}." >&2
-    exit 2
-  fi
-}
-
-validate_command_curriculum_iteration_schedule() {
-  validate_nonnegative_integer "command_curriculum_hybrid_start_iter" "${COMMAND_CURRICULUM_HYBRID_START_ITER}"
-  validate_iter_schedule \
-    "command_only_env_prob" \
-    "${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_START_ITER}" \
-    "${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_END_ITER}"
-  validate_iter_schedule \
-    "carry_extension_prob" \
-    "${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_START_ITER}" \
-    "${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_END_ITER}"
-  validate_iter_schedule \
-    "carry_extension_range" \
-    "${COMMAND_CURRICULUM_CARRY_EXTENSION_RANGE_START_ITER}" \
-    "${COMMAND_CURRICULUM_CARRY_EXTENSION_RANGE_END_ITER}"
-  validate_iter_schedule \
-    "external_goal_prob" \
-    "${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_START_ITER}" \
-    "${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_END_ITER}"
-  validate_iter_schedule \
-    "external_goal_range" \
-    "${COMMAND_CURRICULUM_EXTERNAL_GOAL_RANGE_START_ITER}" \
-    "${COMMAND_CURRICULUM_EXTERNAL_GOAL_RANGE_END_ITER}"
-}
-
-apply_command_curriculum_defaults() {
-  if ! is_truthy "${COMMAND_CURRICULUM_MODE}"; then
-    return
-  fi
-
-  if [[ "${EXP_FROM_ENV}" == "1" && "${EXP}" == "${LEGACY_DEFAULT_EXP}" ]]; then
-    echo "[ERROR] COMMAND_CURRICULUM_MODE is enabled, but EXP was explicitly set to legacy extend: '${EXP}'." >&2
-    echo "[ERROR] Remove EXP or set EXP='${COMMAND_CURRICULUM_DEFAULT_EXP}'." >&2
-    exit 2
-  fi
-  if [[ "${EXP}" == "${LEGACY_DEFAULT_EXP}" ]]; then
-    EXP="${COMMAND_CURRICULUM_DEFAULT_EXP}"
-  fi
-  if [[ "${TRAINING_NAME_FROM_ENV}" == "1" && "${TRAINING_NAME}" == "${LEGACY_DEFAULT_TRAINING_NAME}" ]]; then
-    echo "[ERROR] COMMAND_CURRICULUM_MODE is enabled, but TRAINING_NAME was explicitly set to legacy extend: '${TRAINING_NAME}'." >&2
-    echo "[ERROR] Remove TRAINING_NAME or use a command-curriculum training name." >&2
-    exit 2
-  fi
-  if [[ "${TRAINING_NAME}" == "${LEGACY_DEFAULT_TRAINING_NAME}" ]]; then
-    TRAINING_NAME="${COMMAND_CURRICULUM_DEFAULT_TRAINING_NAME}"
-  fi
-  if [[ "${RUN_GROUP}" == "${LEGACY_DEFAULT_TRAINING_NAME}_${RUN_TAG}" ]]; then
-    RUN_GROUP="${TRAINING_NAME}_${RUN_TAG}"
-  fi
-  if [[ "${PERCEPTION}" == "none" ]]; then
-    PERCEPTION="camera_depth_d435i_17x17"
-  fi
-}
-
-validate_command_curriculum_configuration() {
-  if ! is_truthy "${COMMAND_CURRICULUM_MODE}"; then
-    return
-  fi
-
-  if [[ "${EXP}" != "${COMMAND_CURRICULUM_DEFAULT_EXP}" ]]; then
-    echo "[ERROR] COMMAND_CURRICULUM_MODE requires EXP='${COMMAND_CURRICULUM_DEFAULT_EXP}'. Got EXP='${EXP}'." >&2
-    echo "[ERROR] Set EXP='${COMMAND_CURRICULUM_DEFAULT_EXP}' or disable COMMAND_CURRICULUM_MODE for legacy extend." >&2
-    exit 2
-  fi
-
-  if [[ -n "${SCALE_CURRICULUM_STAGES}" || -n "${PROFILE_BLEND_STAGES}" ]]; then
-    echo "[ERROR] COMMAND_CURRICULUM_MODE must run as a single torchrun stage." >&2
-    echo "[ERROR] Leave SCALE_CURRICULUM_STAGES and PROFILE_BLEND_STAGES empty; the curriculum is handled inside the run." >&2
-    exit 2
-  fi
-
-  validate_command_curriculum_probability_budget \
-    "COMMAND_CURRICULUM start" \
-    "${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_START}" \
-    "${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_START}" \
-    "${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_START}"
-  validate_command_curriculum_probability_budget \
-    "COMMAND_CURRICULUM end" \
-    "${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_END}" \
-    "${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_END}" \
-    "${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_END}"
-  validate_command_curriculum_iteration_schedule
 }
 
 append_scalar_arg() {
@@ -776,81 +588,6 @@ append_curriculum_args() {
   fi
 }
 
-append_command_curriculum_args() {
-  local cmd_name=$1
-  local -n cmd_ref="${cmd_name}"
-
-  if ! is_truthy "${COMMAND_CURRICULUM_MODE}"; then
-    return
-  fi
-
-  cmd_ref+=(
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.enabled=True
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.command-only-env-prob-start="${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_START}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.command-only-env-prob-end="${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_END}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.command-only-env-prob-start-iter="${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_START_ITER}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.command-only-env-prob-end-iter="${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_END_ITER}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.command-only-env-prob-ramp-resets="${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_RAMP_RESETS}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.eval-command-only-env-prob="${COMMAND_CURRICULUM_EVAL_COMMAND_ONLY_ENV_PROB}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.clip-goal-delta-min-steps="${COMMAND_CURRICULUM_CLIP_GOAL_DELTA_MIN_STEPS}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.clip-goal-delta-max-steps="${COMMAND_CURRICULUM_CLIP_GOAL_DELTA_MAX_STEPS}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.carry-extension-prob-start="${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_START}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.carry-extension-prob-end="${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_END}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.carry-extension-prob-start-iter="${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_START_ITER}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.carry-extension-prob-end-iter="${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_END_ITER}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.carry-extension-prob-ramp-resets="${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_RAMP_RESETS}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.eval-carry-extension-prob="${COMMAND_CURRICULUM_EVAL_CARRY_EXTENSION_PROB}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.carry-extension-range-start-iter="${COMMAND_CURRICULUM_CARRY_EXTENSION_RANGE_START_ITER}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.carry-extension-range-end-iter="${COMMAND_CURRICULUM_CARRY_EXTENSION_RANGE_END_ITER}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.carry-extension-range-ramp-resets="${COMMAND_CURRICULUM_CARRY_EXTENSION_RANGE_RAMP_RESETS}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external-goal-prob-start="${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_START}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external-goal-prob-end="${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_END}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external-goal-prob-start-iter="${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_START_ITER}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external-goal-prob-end-iter="${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_END_ITER}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external-goal-prob-ramp-resets="${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_RAMP_RESETS}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.eval-external-goal-prob="${COMMAND_CURRICULUM_EVAL_EXTERNAL_GOAL_PROB}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external-goal-range-start-iter="${COMMAND_CURRICULUM_EXTERNAL_GOAL_RANGE_START_ITER}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external-goal-range-end-iter="${COMMAND_CURRICULUM_EXTERNAL_GOAL_RANGE_END_ITER}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external-goal-range-ramp-resets="${COMMAND_CURRICULUM_EXTERNAL_GOAL_RANGE_RAMP_RESETS}"
-    --simulator.config.sim.max_episode_length_s="${COMMAND_CURRICULUM_MAX_EPISODE_LENGTH_S}"
-  )
-
-  cmd_ref+=(
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.carry-extension-pos-local-min-start
-    "${COMMAND_CURRICULUM_CARRY_EXTENSION_POS_LOCAL_MIN_START}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.carry-extension-pos-local-max-start
-    "${COMMAND_CURRICULUM_CARRY_EXTENSION_POS_LOCAL_MAX_START}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.carry-extension-pos-local-min
-    "${COMMAND_CURRICULUM_CARRY_EXTENSION_POS_LOCAL_MIN}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.carry-extension-pos-local-max
-    "${COMMAND_CURRICULUM_CARRY_EXTENSION_POS_LOCAL_MAX}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.carry-extension-rpy-min-start
-    "${COMMAND_CURRICULUM_CARRY_EXTENSION_RPY_MIN_START}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.carry-extension-rpy-max-start
-    "${COMMAND_CURRICULUM_CARRY_EXTENSION_RPY_MAX_START}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.carry-extension-rpy-min
-    "${COMMAND_CURRICULUM_CARRY_EXTENSION_RPY_MIN}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.carry-extension-rpy-max
-    "${COMMAND_CURRICULUM_CARRY_EXTENSION_RPY_MAX}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external-goal-pos-local-min-start
-    "${COMMAND_CURRICULUM_EXTERNAL_GOAL_POS_LOCAL_MIN_START}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external-goal-pos-local-max-start
-    "${COMMAND_CURRICULUM_EXTERNAL_GOAL_POS_LOCAL_MAX_START}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external-goal-pos-local-min
-    "${COMMAND_CURRICULUM_EXTERNAL_GOAL_POS_LOCAL_MIN}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external-goal-pos-local-max
-    "${COMMAND_CURRICULUM_EXTERNAL_GOAL_POS_LOCAL_MAX}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external-goal-rpy-min-start
-    "${COMMAND_CURRICULUM_EXTERNAL_GOAL_RPY_MIN_START}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external-goal-rpy-max-start
-    "${COMMAND_CURRICULUM_EXTERNAL_GOAL_RPY_MAX_START}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external-goal-rpy-min
-    "${COMMAND_CURRICULUM_EXTERNAL_GOAL_RPY_MIN}"
-    --command.setup_terms.motion_command.params.motion_config.sparse_object_goal.external-goal-rpy-max
-    "${COMMAND_CURRICULUM_EXTERNAL_GOAL_RPY_MAX}"
-  )
-}
-
 append_reward_args() {
   local cmd_name=$1
   local -n cmd_ref="${cmd_name}"
@@ -917,7 +654,6 @@ run_stage() {
   append_common_training_args train_cmd "${MOTION_SOURCE}" "${stage_name}" "${stage_iters}" "${checkpoint_path}"
   append_object_scale_args train_cmd "${scale_spec}"
   append_curriculum_args train_cmd
-  append_command_curriculum_args train_cmd
   append_reward_args train_cmd
   train_cmd+=("${EXTRA_ARGS[@]}")
 
@@ -933,19 +669,7 @@ run_stage() {
   if [[ -n "${checkpoint_path}" ]]; then
     echo "[INFO] Stage ${stage_index}: resuming from ${checkpoint_path}"
   fi
-  if is_truthy "${COMMAND_CURRICULUM_MODE}"; then
-    echo "[INFO] Stage ${stage_index}: command_curriculum=True"
-    echo "[INFO] Stage ${stage_index}: co_tracking_fraction schedule 1.00 -> $(awk -v c="${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_END}" 'BEGIN { printf "%.2f", 1.0 - c }')"
-    echo "[INFO] Stage ${stage_index}: hybrid_start_iter=${COMMAND_CURRICULUM_HYBRID_START_ITER}"
-    echo "[INFO] Stage ${stage_index}: command_only_fraction ${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_START} -> ${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_END} iter=${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_START_ITER} -> ${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_END_ITER}"
-    echo "[INFO] Stage ${stage_index}: carry_extension_prob ${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_START} -> ${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_END} iter=${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_START_ITER} -> ${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_END_ITER}"
-    echo "[INFO] Stage ${stage_index}: external_goal_prob ${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_START} -> ${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_END} iter=${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_START_ITER} -> ${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_END_ITER}"
-  fi
-
   local launch_env=(env "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}")
-  if is_truthy "${COMMAND_CURRICULUM_MODE}"; then
-    launch_env+=("HOLOSOMA_PERCEPTION_INJECT_INTO_POLICY_MODULES=${COMMAND_CURRICULUM_PERCEPTION_INTO_POLICY_MODULES}")
-  fi
 
   "${launch_env[@]}" "${TORCHRUN_BIN}" --nproc_per_node="${NPROC}" --master_port="${MASTER_PORT}" \
     "${train_cmd[@]}"
@@ -960,9 +684,7 @@ run_stage() {
   LAST_CHECKPOINT="${latest_ckpt}"
 }
 
-apply_command_curriculum_defaults
 capture_explicit_weight_overrides
-validate_command_curriculum_configuration
 validate_profile_configuration
 
 echo "[INFO] EXP: ${EXP}"
@@ -970,15 +692,6 @@ echo "[INFO] PROFILE: ${PROFILE}"
 echo "[INFO] MOTION_SOURCE: ${MOTION_SOURCE}"
 echo "[INFO] OBJECT_SPEC_PATH: ${OBJECT_SPEC_PATH:-<exp default>}"
 echo "[INFO] RUN_GROUP: ${RUN_GROUP}"
-if is_truthy "${COMMAND_CURRICULUM_MODE}"; then
-  echo "[INFO] COMMAND_CURRICULUM_MODE: True"
-  echo "[INFO] COMMAND_CURRICULUM_PERCEPTION: ${PERCEPTION}"
-  echo "[INFO] COMMAND_CURRICULUM_EPISODE_LENGTH_S: ${COMMAND_CURRICULUM_MAX_EPISODE_LENGTH_S}"
-  echo "[INFO] COMMAND_CURRICULUM_HYBRID_START_ITER: ${COMMAND_CURRICULUM_HYBRID_START_ITER}"
-  echo "[INFO] COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB: ${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_START} -> ${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_END} iter=${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_START_ITER} -> ${COMMAND_CURRICULUM_COMMAND_ONLY_ENV_PROB_END_ITER}"
-  echo "[INFO] COMMAND_CURRICULUM_CARRY_EXTENSION_PROB: ${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_START} -> ${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_END} iter=${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_START_ITER} -> ${COMMAND_CURRICULUM_CARRY_EXTENSION_PROB_END_ITER}"
-  echo "[INFO] COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB: ${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_START} -> ${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_END} iter=${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_START_ITER} -> ${COMMAND_CURRICULUM_EXTERNAL_GOAL_PROB_END_ITER}"
-fi
 if [[ -n "${PROFILE_BLEND}" ]]; then
   echo "[INFO] PROFILE_BLEND: ${PROFILE_BLEND}"
 fi

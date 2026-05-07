@@ -6,7 +6,6 @@ import re
 from typing import TYPE_CHECKING
 
 import torch
-import torch.nn.functional as F
 
 from holosoma.managers.observation.base import ObservationTermBase
 from holosoma.managers.command.terms.wbt import MotionCommand
@@ -363,94 +362,6 @@ def _object_goal_pose_size_w(motion_command: MotionCommand) -> tuple[torch.Tenso
     if not motion_command.motion.has_object:
         return None
     return _clip_final_object_goal_pose_size_w(motion_command)
-
-
-def _rot6d_to_matrix(rot6d: torch.Tensor) -> torch.Tensor:
-    first_col = F.normalize(rot6d[..., 0:3], dim=-1)
-    second_col_raw = rot6d[..., 3:6]
-    second_col = F.normalize(
-        second_col_raw - torch.sum(first_col * second_col_raw, dim=-1, keepdim=True) * first_col,
-        dim=-1,
-    )
-    third_col = torch.cross(first_col, second_col, dim=-1)
-    return torch.stack((first_col, second_col, third_col), dim=-1)
-
-
-def _manual_goal_xy_yaw_pick_root_heading(motion_command: MotionCommand) -> torch.Tensor:
-    goal_xy_yaw = torch.zeros((motion_command.num_envs, 3), device=motion_command.device, dtype=torch.float32)
-    if (
-        not motion_command.motion.has_object
-        or not motion_command.manual_goal_enabled
-        or motion_command.manual_goal_object_pos_w is None
-        or motion_command.manual_goal_object_rot6d_w is None
-        or motion_command.pickup_anchor_set is None
-        or motion_command.pickup_anchor_root_pos_w is None
-        or motion_command.pickup_anchor_root_quat_w is None
-    ):
-        return goal_xy_yaw
-
-    # Before pickup, expose the goal in the current root-heading frame instead of
-    # zeroing it out. Once pickup is latched, switch to the frozen pickup anchor.
-    anchor_pos_w = motion_command.robot_root_pos_w.clone()
-    anchor_quat_w = motion_command.robot_root_quat_w.clone()
-    anchor_mask = motion_command.pickup_anchor_set
-    if anchor_mask.any():
-        anchor_pos_w[anchor_mask] = motion_command.pickup_anchor_root_pos_w[anchor_mask]
-        anchor_quat_w[anchor_mask] = motion_command.pickup_anchor_root_quat_w[anchor_mask]
-
-    goal_pos_w = motion_command.manual_goal_object_pos_w
-    goal_rot_mat_w = _rot6d_to_matrix(motion_command.manual_goal_object_rot6d_w)
-
-    anchor_heading_inv = calc_heading_quat_inv(anchor_quat_w, w_last=True)
-    goal_pos_heading = quat_apply(anchor_heading_inv, goal_pos_w - anchor_pos_w, w_last=True)
-    goal_heading = torch.atan2(goal_rot_mat_w[:, 1, 0], goal_rot_mat_w[:, 0, 0])
-    anchor_heading = calc_heading(anchor_quat_w)
-
-    goal_xy_yaw[:, :2] = goal_pos_heading[:, :2]
-    goal_xy_yaw[:, 2] = normalize_angle(goal_heading - anchor_heading)
-    return goal_xy_yaw
-
-
-def _manual_goal_override_xy_yaw(motion_command: MotionCommand) -> torch.Tensor:
-    goal_xy_yaw = torch.zeros((motion_command.num_envs, 3), device=motion_command.device, dtype=torch.float32)
-    if (
-        not getattr(motion_command, "manual_goal_override_enabled", False)
-        or motion_command.manual_goal_xy_rel is None
-        or motion_command.manual_goal_yaw_rel is None
-    ):
-        return goal_xy_yaw
-    goal_xy_yaw[:, :2] = motion_command.manual_goal_xy_rel
-    goal_xy_yaw[:, 2] = motion_command.manual_goal_yaw_rel.squeeze(-1)
-    return goal_xy_yaw
-
-
-def _manual_goal_command_xy_yaw(motion_command: MotionCommand) -> torch.Tensor:
-    goal_xy_yaw = torch.zeros((motion_command.num_envs, 3), device=motion_command.device, dtype=torch.float32)
-    if motion_command.manual_goal_xy_rel is not None:
-        goal_xy_yaw[:, :2] = motion_command.manual_goal_xy_rel
-    if motion_command.manual_goal_yaw_rel is not None:
-        goal_xy_yaw[:, 2] = motion_command.manual_goal_yaw_rel.squeeze(-1)
-    return goal_xy_yaw
-
-
-def _manual_goal_command_xy(motion_command: MotionCommand) -> torch.Tensor:
-    goal_xy = torch.zeros((motion_command.num_envs, 2), device=motion_command.device, dtype=torch.float32)
-    if motion_command.manual_goal_xy_rel is not None:
-        goal_xy[:, :2] = motion_command.manual_goal_xy_rel
-    return goal_xy
-
-
-def _episode_obs_mask(motion_command: MotionCommand, *, command_only: bool) -> torch.Tensor:
-    mask = motion_command.get_command_only_env_mask()
-    if not command_only:
-        mask = ~mask
-    return mask
-
-
-def _mask_obs_by_episode(obs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    if obs.ndim == 1:
-        return obs * mask.to(dtype=obs.dtype)
-    return obs * mask.unsqueeze(-1).to(dtype=obs.dtype)
 
 
 def _first_sustained_true_index(mask: torch.Tensor, consecutive_steps: int) -> int | None:
@@ -895,8 +806,6 @@ def obj_goal_xy_yaw_pick_root_heading(
     motion_command = _get_motion_command_and_assert_type(env)
     if not motion_command.motion.has_object:
         return torch.zeros(env.num_envs, 3, device=env.device, dtype=torch.float32)
-    if getattr(motion_command, "manual_goal_override_enabled", False):
-        return _manual_goal_override_xy_yaw(motion_command)
 
     goal_xy_yaw_by_clip, _ = _clip_pickup_goal_xy_yaw_root_heading(
         motion_command,
@@ -917,8 +826,6 @@ def obj_goal_xy_pick_root_heading(
     motion_command = _get_motion_command_and_assert_type(env)
     if not motion_command.motion.has_object:
         return torch.zeros(env.num_envs, 2, device=env.device, dtype=torch.float32)
-    if getattr(motion_command, "manual_goal_override_enabled", False):
-        return _manual_goal_command_xy(motion_command)
 
     goal_xy_yaw_by_clip, _ = _clip_pickup_goal_xy_yaw_root_heading(
         motion_command,
@@ -927,67 +834,6 @@ def obj_goal_xy_pick_root_heading(
         consecutive_steps=consecutive_steps,
     )
     return goal_xy_yaw_by_clip[motion_command.clip_ids, :2]
-
-
-def obj_sparse_goal_xy_yaw_pick_root_heading(
-    env: WholeBodyTrackingManager,
-    zero_yaw: bool = False,
-) -> torch.Tensor:
-    """Sparse/manual object goal [dx, dy, dyaw] in the runtime pickup-time root-heading frame."""
-    motion_command = _get_motion_command_and_assert_type(env)
-    if getattr(motion_command, "manual_goal_override_enabled", False):
-        obs = _manual_goal_override_xy_yaw(motion_command)
-    else:
-        obs = _manual_goal_xy_yaw_pick_root_heading(motion_command)
-    if zero_yaw:
-        obs = obs.clone()
-        obs[:, 2] = 0.0
-    return obs
-
-
-def obj_sparse_goal_xy_pick_root_heading(env: WholeBodyTrackingManager) -> torch.Tensor:
-    """Sparse/manual object goal [dx, dy] in the runtime pickup-time root-heading frame."""
-    motion_command = _get_motion_command_and_assert_type(env)
-    return _manual_goal_command_xy(motion_command)
-
-
-def obj_sparse_goal_xy_yaw_command(
-    env: WholeBodyTrackingManager,
-    zero_yaw: bool = False,
-) -> torch.Tensor:
-    """Sparse/manual object goal [dx, dy, dyaw] as a fixed pickup-frame command."""
-    motion_command = _get_motion_command_and_assert_type(env)
-    obs = _manual_goal_command_xy_yaw(motion_command)
-    if zero_yaw:
-        obs = obs.clone()
-        obs[:, 2] = 0.0
-    return obs
-
-
-def obj_sparse_goal_xy_command(env: WholeBodyTrackingManager) -> torch.Tensor:
-    """Sparse/manual object goal [dx, dy] as a fixed pickup-frame command."""
-    motion_command = _get_motion_command_and_assert_type(env)
-    return _manual_goal_command_xy(motion_command)
-
-
-def obj_picked_flag(env: WholeBodyTrackingManager) -> torch.Tensor:
-    """Binary pickup-phase flag for mixed sparse-goal distillation."""
-    motion_command = _get_motion_command_and_assert_type(env)
-    if motion_command.pickup_anchor_set is None:
-        return torch.zeros((env.num_envs, 1), device=env.device, dtype=torch.float32)
-    return motion_command.pickup_anchor_set.to(dtype=torch.float32).unsqueeze(-1)
-
-
-def sparse_goal_external_flag(env: WholeBodyTrackingManager) -> torch.Tensor:
-    """Binary flag indicating whether the active sparse goal differs from the clip goal."""
-    motion_command = _get_motion_command_and_assert_type(env)
-    return motion_command.get_sparse_goal_external_mask().to(dtype=torch.float32).unsqueeze(-1)
-
-
-def command_only_flag(env: WholeBodyTrackingManager) -> torch.Tensor:
-    """Binary flag indicating whether the env is in command-conditioned mode."""
-    motion_command = _get_motion_command_and_assert_type(env)
-    return motion_command.get_command_only_env_mask().to(dtype=torch.float32).unsqueeze(-1)
 
 
 def contact_prior_confidence(env: WholeBodyTrackingManager) -> torch.Tensor:
@@ -1054,62 +900,3 @@ def body_contact_binary_flag(
         reduction=reduction,
     )
     return (magnitude > threshold).to(dtype=torch.float32)
-
-
-def command_curriculum_motion_command(env: WholeBodyTrackingManager) -> torch.Tensor:
-    motion_command_state = _get_motion_command_and_assert_type(env)
-    obs = motion_command(env)
-    return _mask_obs_by_episode(obs, _episode_obs_mask(motion_command_state, command_only=False))
-
-
-def command_curriculum_motion_ref_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
-    motion_command_state = _get_motion_command_and_assert_type(env)
-    obs = motion_ref_ori_b(env)
-    return _mask_obs_by_episode(obs, _episode_obs_mask(motion_command_state, command_only=False))
-
-
-def command_curriculum_obj_target_pose_size_b(env: WholeBodyTrackingManager) -> torch.Tensor:
-    motion_command_state = _get_motion_command_and_assert_type(env)
-    obs = obj_target_pose_size_b(env)
-    return _mask_obs_by_episode(obs, _episode_obs_mask(motion_command_state, command_only=False))
-
-
-def command_curriculum_obj_sparse_goal_xy_yaw_pick_root_heading(
-    env: WholeBodyTrackingManager,
-    zero_yaw: bool = False,
-) -> torch.Tensor:
-    motion_command_state = _get_motion_command_and_assert_type(env)
-    obs = obj_sparse_goal_xy_yaw_pick_root_heading(env, zero_yaw=zero_yaw)
-    return _mask_obs_by_episode(obs, _episode_obs_mask(motion_command_state, command_only=True))
-
-
-def command_curriculum_obj_sparse_goal_xy_pick_root_heading(env: WholeBodyTrackingManager) -> torch.Tensor:
-    motion_command_state = _get_motion_command_and_assert_type(env)
-    obs = obj_sparse_goal_xy_pick_root_heading(env)
-    return _mask_obs_by_episode(obs, _episode_obs_mask(motion_command_state, command_only=True))
-
-
-def command_curriculum_obj_picked_flag(env: WholeBodyTrackingManager) -> torch.Tensor:
-    motion_command_state = _get_motion_command_and_assert_type(env)
-    obs = obj_picked_flag(env)
-    return _mask_obs_by_episode(obs, _episode_obs_mask(motion_command_state, command_only=True))
-
-
-def command_curriculum_obj_sparse_goal_xy_yaw_command(
-    env: WholeBodyTrackingManager,
-    zero_yaw: bool = False,
-) -> torch.Tensor:
-    motion_command_state = _get_motion_command_and_assert_type(env)
-    obs = obj_sparse_goal_xy_yaw_command(env, zero_yaw=zero_yaw)
-    return _mask_obs_by_episode(obs, _episode_obs_mask(motion_command_state, command_only=True))
-
-
-def command_curriculum_obj_sparse_goal_xy_command(env: WholeBodyTrackingManager) -> torch.Tensor:
-    motion_command_state = _get_motion_command_and_assert_type(env)
-    obs = obj_sparse_goal_xy_command(env)
-    return _mask_obs_by_episode(obs, _episode_obs_mask(motion_command_state, command_only=True))
-
-
-def command_curriculum_command_only_flag(env: WholeBodyTrackingManager) -> torch.Tensor:
-    motion_command_state = _get_motion_command_and_assert_type(env)
-    return motion_command_state.get_command_only_env_mask().to(dtype=torch.float32).unsqueeze(-1)

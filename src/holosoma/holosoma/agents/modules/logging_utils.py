@@ -125,9 +125,6 @@ class LoggingHelper:
     _WANDB_HIDDEN_METRIC_EXACT = {
         "Train/num_samples",
         "Train/command_goal_training_iteration",
-        "Train/command_only_env_prob",
-        "Train/external_goal_prob",
-        "Train/manual_goal_is_external_fraction",
         "Train/mean_episode_length_motion_total",
         "Train/mean_episode_length_motion_total/time",
         "Train/ppo_dagger_target_coeff",
@@ -138,10 +135,6 @@ class LoggingHelper:
         "Train/teacher_action_mix_ratio_end",
         "Train/teacher_action_mix_ratio_end_iteration",
         "Loss/teacher_bc_mask_fraction",
-        "Env/goal/command_only_env_prob",
-        "Env/goal/external_prob",
-        "Env/goal/external_prob_curriculum_progress",
-        "Env/goal/command_only_env_prob_curriculum_progress",
         "Eval/fixed_bc_num_samples",
     }
     _WANDB_HIDDEN_METRIC_PREFIXES = (

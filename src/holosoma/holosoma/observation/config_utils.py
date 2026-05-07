@@ -85,11 +85,7 @@ def _apply_distill_proprio_history_only(
         "actor_obs_torso",
         "actor_obs_track",
         "actor_obs_box",
-        "actor_obs_goal",
-        "actor_obs_mode",
         "actor_obs_drop",
-        "actor_obs_drop_mixed",
-        "actor_obs_drop_command",
     ):
         group_cfg = groups.get(group_name)
         if group_cfg is not None:

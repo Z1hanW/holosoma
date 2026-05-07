@@ -56,8 +56,6 @@ class _DummyMotionCommand:
         )
         self.simulator_object_quat_w = identity_quat.view(1, 4).repeat(self.num_envs, 1)
 
-        self.manual_goal_enabled = False
-
     def _get_env_offsets(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         offsets = torch.zeros((self.num_envs, 3), dtype=torch.float32)
         if env_ids is None:

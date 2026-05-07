@@ -39,8 +39,6 @@ def test_runtime_pickup_anchor_state_uses_clip_threshold_not_reset_baseline():
         )
     )
 
-    applied: dict[str, torch.Tensor] = {}
-
     motion_command._get_clip_pickup_thresholds_by_clip = MethodType(
         lambda self: torch.tensor([0.34], dtype=torch.float32),
         motion_command,
@@ -49,19 +47,8 @@ def test_runtime_pickup_anchor_state_uses_clip_threshold_not_reset_baseline():
         lambda self: torch.tensor([0], dtype=torch.long),
         motion_command,
     )
-    motion_command._apply_manual_goal_world_from_command = MethodType(
-        lambda self, env_ids, anchor_pos_w, anchor_quat_w: applied.update(
-            {
-                "env_ids": env_ids.clone(),
-                "anchor_pos_w": anchor_pos_w.clone(),
-                "anchor_quat_w": anchor_quat_w.clone(),
-            }
-        ),
-        motion_command,
-    )
 
     motion_command._update_pickup_anchor_state()
 
     assert bool(motion_command.pickup_anchor_set[0].item()) is True
     assert motion_command.pickup_consecutive_counter[0].item() == 5
-    assert torch.equal(applied["env_ids"], torch.tensor([0], dtype=torch.long))

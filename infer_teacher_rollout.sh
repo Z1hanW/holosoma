@@ -25,11 +25,20 @@ Usage:
 Optional env vars:
   TEACHER_CHECKPOINT        (default: parsed from distill_box_perception.sh, else pinned fallback)
   WANDB_MODEL_FILE          (optional; used when checkpoint is a W&B run URL without /files/<checkpoint>)
-  DATA_MODE                 (default: mix-naive; options: mix-naive|default|pure-sd)
+  INFER_DATASET             (default: rollout-ref; options: rollout-ref|teacher-rollout|mix-naive|default|pure-sd)
+  DATA_MODE                 (legacy alias for INFER_DATASET old DS modes)
+  TEACHER_ROLLOUT_MOTION_DIR
+                            (default: ./outputs/motion_bank; used by rollout-ref)
+  TEACHER_ROLLOUT_FILTER_ENABLED
+                            (default: True; prefer TEACHER_ROLLOUT_FILTERED_MOTION_DIR when available)
+  TEACHER_ROLLOUT_FILTERED_MOTION_DIR
+                            (default: ./outputs/motion_bank_success_box_0_92_0p3)
   MOTION_DIR                (optional override)
   MOTION_CLIP_NAME          (optional single clip name)
   MOTION_CLIP_ID            (optional single clip id)
   OBJECT_URDF               (optional override; default: MOTION_DIR/_clip_object_urdf_map.json when present)
+  OBJECT_GEOMETRY_MODE      (optional; `on`/`primitive` forces cuboid primitive path,
+                             `off`/`mesh` forces legacy URDF/mesh path)
   NUM_ENVS                  (default: 1)
   HEADLESS                  (default: False)
   VISER_PORT                (default: random)
@@ -227,31 +236,58 @@ if [[ "${TEACHER_CHECKPOINT}" != wandb://* ]] && [[ ! -f "${TEACHER_CHECKPOINT}"
   exit 1
 fi
 
-DATA_MODE="${DATA_MODE:-mix-naive}"
-DATA_MODE="$(echo "${DATA_MODE}" | tr '[:upper:]' '[:lower:]')"
+INFER_DATASET="${INFER_DATASET:-${DATA_MODE:-rollout-ref}}"
+INFER_DATASET_RAW="$(echo "${INFER_DATASET}" | tr '[:upper:]' '[:lower:]' | tr -d '[][:space:]')"
 DS_DATA_ROOT="${DS_DATA_ROOT:-${SCRIPT_DIR}/data/ds_box_data}"
+TEACHER_ROLLOUT_MOTION_DIR=${TEACHER_ROLLOUT_MOTION_DIR:-"${SCRIPT_DIR}/outputs/motion_bank"}
+TEACHER_ROLLOUT_FILTER_ENABLED=${TEACHER_ROLLOUT_FILTER_ENABLED:-True}
+TEACHER_ROLLOUT_FILTERED_MOTION_DIR=${TEACHER_ROLLOUT_FILTERED_MOTION_DIR:-"${SCRIPT_DIR}/outputs/motion_bank_success_box_0_92_0p3"}
 DEFAULT_MIX_NAIVE_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared_plus_omomo_orig"
 DEFAULT_DS_PREPARED_MOTION_DIR="${DS_DATA_ROOT}/train_g1_w_obj_prepared"
 DEFAULT_SINGLE_OBJECT_URDF="${SCRIPT_DIR}/src/holosoma/holosoma/data/motions/g1_29dof/whole_body_tracking/objects_largebox.urdf"
 
-case "${DATA_MODE}" in
+resolve_teacher_rollout_motion_dir() {
+  local filter_norm
+  filter_norm="$(echo "${TEACHER_ROLLOUT_FILTER_ENABLED}" | tr '[:upper:]' '[:lower:]')"
+  case "${filter_norm}" in
+    1|true|yes|on)
+      if compgen -G "${TEACHER_ROLLOUT_FILTERED_MOTION_DIR}/box_*.npz" > /dev/null; then
+        echo "${TEACHER_ROLLOUT_FILTERED_MOTION_DIR}"
+        return 0
+      fi
+      ;;
+  esac
+  echo "${TEACHER_ROLLOUT_MOTION_DIR}"
+}
+DEFAULT_TEACHER_ROLLOUT_MOTION_DIR="$(resolve_teacher_rollout_motion_dir)"
+
+case "${INFER_DATASET_RAW}" in
+  rollout-ref|rollout_ref|teacher-rollout|teacher_rollout|teacherrollout|rollout)
+    INFER_DATASET="rollout-ref"
+    DATA_MODE="rollout-ref"
+    MOTION_DIR="${MOTION_DIR:-${DEFAULT_TEACHER_ROLLOUT_MOTION_DIR}}"
+    ;;
   default|mix-naive)
+    INFER_DATASET="mix-naive"
     DATA_MODE="mix-naive"
     MOTION_DIR="${MOTION_DIR:-${DEFAULT_MIX_NAIVE_MOTION_DIR}}"
     ;;
   pure-sd|pure-ds)
+    INFER_DATASET="pure-sd"
     DATA_MODE="pure-sd"
     MOTION_DIR="${MOTION_DIR:-${DEFAULT_DS_PREPARED_MOTION_DIR}}"
     ;;
   *)
-    echo "[ERROR] DATA_MODE must be one of: mix-naive|default|pure-sd. Got: ${DATA_MODE}" >&2
+    echo "[ERROR] INFER_DATASET must be one of: rollout-ref|teacher-rollout|mix-naive|default|pure-sd. Got: ${INFER_DATASET}" >&2
     exit 2
     ;;
 esac
 
 if [[ -z "${OBJECT_URDF+x}" ]]; then
   DEFAULT_OBJECT_MAP="${MOTION_DIR}/_clip_object_urdf_map.json"
-  if [[ -f "${DEFAULT_OBJECT_MAP}" ]]; then
+  if [[ "${INFER_DATASET}" == "rollout-ref" ]]; then
+    OBJECT_URDF="${DEFAULT_OBJECT_MAP}"
+  elif [[ -f "${DEFAULT_OBJECT_MAP}" ]]; then
     OBJECT_URDF="${DEFAULT_OBJECT_MAP}"
   else
     OBJECT_URDF="${DEFAULT_SINGLE_OBJECT_URDF}"
@@ -261,6 +297,11 @@ fi
 if [[ ! -e "${MOTION_DIR}" ]]; then
   echo "[ERROR] MOTION_DIR not found: ${MOTION_DIR}" >&2
   exit 1
+fi
+if [[ "${INFER_DATASET}" == "rollout-ref" ]] && ! compgen -G "${MOTION_DIR}/box_*.npz" > /dev/null; then
+  echo "[ERROR] rollout-ref requires teacher rollout motion clips under MOTION_DIR=${MOTION_DIR}" >&2
+  echo "[ERROR] Set TEACHER_ROLLOUT_MOTION_DIR, TEACHER_ROLLOUT_FILTERED_MOTION_DIR, or MOTION_DIR explicitly." >&2
+  exit 2
 fi
 if [[ ! -f "${OBJECT_URDF}" ]]; then
   echo "[ERROR] OBJECT_URDF not found: ${OBJECT_URDF}" >&2
@@ -282,16 +323,37 @@ MAX_EPISODE_LENGTH_S="${MAX_EPISODE_LENGTH_S:-1000000}"
 PHYSX_GPU_COLLISION_STACK_SIZE="${PHYSX_GPU_COLLISION_STACK_SIZE:-268435456}"
 DRY_RUN="${DRY_RUN:-0}"
 VIS_GPU="${VIS_GPU:-auto}"
+OBJECT_GEOMETRY_MODE_RAW=${OBJECT_GEOMETRY_MODE:-}
+OBJECT_GEOMETRY_MODE=""
+HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE=""
+PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE=""
+
+if [[ -n "${OBJECT_GEOMETRY_MODE_RAW}" ]]; then
+  case "$(echo "${OBJECT_GEOMETRY_MODE_RAW}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on|primitive|primitives|box|cuboid)
+      OBJECT_GEOMETRY_MODE="primitive"
+      HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE="primitive"
+      PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="primitive"
+      ;;
+    0|false|no|off|mesh|urdf|disable|disabled)
+      OBJECT_GEOMETRY_MODE="mesh"
+      HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE="urdf"
+      PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="mesh"
+      ;;
+    *)
+      echo "[ERROR] OBJECT_GEOMETRY_MODE must be one of: on/off/primitive/mesh. Got: ${OBJECT_GEOMETRY_MODE_RAW}" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 MOTION_CLIP_NAME="${MOTION_CLIP_NAME:-}"
 MOTION_CLIP_ID="${MOTION_CLIP_ID:-}"
 
 VISER_ENABLE_CLIP_GUI="${VISER_ENABLE_CLIP_GUI:-1}"
 VISER_ENABLE_MANUAL_GUI="${VISER_ENABLE_MANUAL_GUI:-0}"
-VISER_ENABLE_MANUAL_GOAL_GUI="${VISER_ENABLE_MANUAL_GOAL_GUI:-0}"
 export VISER_ENABLE_CLIP_GUI
 export VISER_ENABLE_MANUAL_GUI
-export VISER_ENABLE_MANUAL_GOAL_GUI
 export VISER_SHOW_TARGET_KEYPOINTS="${VISER_SHOW_TARGET_KEYPOINTS:-0}"
 export HOLOSOMA_DISABLE_AUTO_RESET="${HOLOSOMA_DISABLE_AUTO_RESET:-1}"
 export HOLOSOMA_DISABLE_CLIP_END_RESET="${HOLOSOMA_DISABLE_CLIP_END_RESET:-1}"
@@ -334,12 +396,23 @@ fi
 
 HETEROGENEOUS_OBJECT_SINGLE_SLOT_DISABLE_EXPLICIT=0
 [[ -n "${HOLOSOMA_DISABLE_HETEROGENEOUS_OBJECT_SINGLE_SLOT+x}" ]] && HETEROGENEOUS_OBJECT_SINGLE_SLOT_DISABLE_EXPLICIT=1
-AUTO_DISABLE_SINGLE_SLOT=0
+AUTO_SWITCH_MULTI_OBJECT_MODE=0
 if is_truthy "${VISER_ENABLE_CLIP_GUI}" && [[ "${NUM_ENVS}" == "1" ]] && [[ "${OBJECT_URDF}" == *.json ]]; then
+  # Single-env clip switching with an object-map needs per-asset simulator objects.
+  # Otherwise env_0 keeps its initial object asset while the selected clip metadata changes.
+  if [[ -z "${OBJECT_GEOMETRY_MODE_RAW}" ]]; then
+    OBJECT_GEOMETRY_MODE="mesh"
+    HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE="urdf"
+    PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="mesh"
+    AUTO_SWITCH_MULTI_OBJECT_MODE=1
+  fi
   if [[ "${HETEROGENEOUS_OBJECT_SINGLE_SLOT_DISABLE_EXPLICIT}" -eq 0 ]]; then
     export HOLOSOMA_DISABLE_HETEROGENEOUS_OBJECT_SINGLE_SLOT=1
-    AUTO_DISABLE_SINGLE_SLOT=1
+    AUTO_SWITCH_MULTI_OBJECT_MODE=1
   fi
+fi
+if [[ -n "${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}" ]]; then
+  export HOLOSOMA_OBJECT_SPAWN_MODE="${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}"
 fi
 
 HEADLESS_FLAG="$(normalize_bool_flag "${HEADLESS}")"
@@ -388,6 +461,9 @@ fi
 if [[ -n "${MAX_EVAL_STEPS:-}" ]]; then
   cmd+=(--training.max_eval_steps "${MAX_EVAL_STEPS}")
 fi
+if [[ -n "${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}" ]]; then
+  cmd+=(--perception.object_geometry_mode "${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}")
+fi
 
 if [[ "${DISABLE_RANDOMIZATION}" == "True" || "${DISABLE_RANDOMIZATION}" == "true" ]]; then
   cmd+=(
@@ -416,11 +492,17 @@ fi
 
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
 echo "[INFO] distill_box_perception_default_teacher=${DISTILL_DEFAULT_TEACHER_CHECKPOINT}"
+echo "[INFO] infer_dataset=${INFER_DATASET}"
 echo "[INFO] data_mode=${DATA_MODE}"
 echo "[INFO] motion_dir=${MOTION_DIR}"
 echo "[INFO] motion_clip_name=${MOTION_CLIP_NAME:-<auto>}"
 echo "[INFO] motion_clip_id=${MOTION_CLIP_ID:-<auto>}"
 echo "[INFO] object_urdf=${OBJECT_URDF}"
+if [[ -n "${OBJECT_GEOMETRY_MODE}" ]]; then
+  echo "[INFO] object_geometry_mode=${OBJECT_GEOMETRY_MODE} simulator_object_spawn_mode=${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}"
+else
+  echo "[INFO] object_geometry_mode=<default>"
+fi
 echo "[INFO] headless=${HEADLESS_FLAG}"
 echo "[INFO] num_envs=${NUM_ENVS}"
 echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-<unset>}"
@@ -428,8 +510,8 @@ echo "[INFO] holosoma_device=${HOLOSOMA_DEVICE:-<unset>}"
 echo "[INFO] disable_randomization=${DISABLE_RANDOMIZATION}"
 echo "[INFO] disable_auto_reset=${HOLOSOMA_DISABLE_AUTO_RESET} disable_clip_end_reset=${HOLOSOMA_DISABLE_CLIP_END_RESET}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB} freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB} reset_noise_scale=${RESET_NOISE_SCALE}"
-if [[ "${AUTO_DISABLE_SINGLE_SLOT}" == "1" ]]; then
-  echo "[INFO] auto_disabled_heterogeneous_single_slot=True"
+if [[ "${AUTO_SWITCH_MULTI_OBJECT_MODE}" == "1" ]]; then
+  echo "[INFO] auto_enabled_per_clip_object_switching=True heterogeneous_single_slot_disabled=${HOLOSOMA_DISABLE_HETEROGENEOUS_OBJECT_SINGLE_SLOT:-0}"
 fi
 
 if is_truthy "${DRY_RUN}"; then

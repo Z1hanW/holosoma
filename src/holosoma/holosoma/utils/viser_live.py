@@ -1460,12 +1460,6 @@ class ViserLiveViewer:
             "false",
             "no",
         )
-        self._target_box_requires_manual_goal = os.environ.get("VISER_TARGET_BOX_REQUIRES_MANUAL_GOAL", "0").lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
-        )
         self._show_future_goal_box = os.environ.get("VISER_SHOW_FUTURE_GOAL_BOX", "1").lower() not in (
             "0",
             "false",
@@ -1679,11 +1673,6 @@ class ViserLiveViewer:
         self._manual_root_yaw_slider = None
         self._manual_root_cmd_xy = None
         self._manual_root_cmd_yaw = None
-        self._manual_goal_override_cb = None
-        self._manual_goal_zero_button = None
-        self._manual_goal_pos_x_slider = None
-        self._manual_goal_pos_y_slider = None
-        self._manual_goal_status = None
         self._object_reset_random_button = None
         self._object_reset_override_cb = None
         self._object_reset_zero_button = None
@@ -2810,7 +2799,6 @@ class ViserLiveViewer:
             return
         self._pending_control_sync = False
         self._update_manual_root_command()
-        self._update_manual_goal_override()
         self._update_manual_object_reset_override()
         if self._reset_visible_requested:
             self._reset_visible_requested = False
@@ -3082,169 +3070,24 @@ class ViserLiveViewer:
             cmd_yaw = float(manual_yaw[self._env_id, 0].item())
         return cmd_x, cmd_y, cmd_yaw
 
-    def _clear_manual_goal_override(self) -> None:
-        motion_cmd = self._get_motion_command()
-        if motion_cmd is not None:
-            setattr(motion_cmd, "manual_goal_override_enabled", False)
-            manual_goal_xy = getattr(motion_cmd, "manual_goal_xy_rel", None)
-            if isinstance(manual_goal_xy, torch.Tensor) and manual_goal_xy.numel() > 0:
-                manual_goal_xy.zero_()
-            if bool(getattr(motion_cmd, "_sparse_goal_curriculum_enabled", False)):
-                base_goal_pos = getattr(motion_cmd, "base_goal_object_pos_w", None)
-                base_goal_rot6d = getattr(motion_cmd, "base_goal_object_rot6d_w", None)
-                base_goal_is_external = getattr(motion_cmd, "base_goal_is_external", None)
-                if isinstance(base_goal_pos, torch.Tensor) and isinstance(getattr(motion_cmd, "manual_goal_object_pos_w", None), torch.Tensor):
-                    motion_cmd.manual_goal_object_pos_w.copy_(base_goal_pos)
-                if isinstance(base_goal_rot6d, torch.Tensor) and isinstance(getattr(motion_cmd, "manual_goal_object_rot6d_w", None), torch.Tensor):
-                    motion_cmd.manual_goal_object_rot6d_w.copy_(base_goal_rot6d)
-                if isinstance(base_goal_is_external, torch.Tensor) and isinstance(getattr(motion_cmd, "manual_goal_is_external", None), torch.Tensor):
-                    motion_cmd.manual_goal_is_external.copy_(base_goal_is_external)
-                setattr(motion_cmd, "manual_goal_enabled", True)
-            else:
-                setattr(motion_cmd, "manual_goal_enabled", False)
-        self._update_manual_goal_status()
-
-    def _sync_manual_goal_target_from_reference(self) -> None:
-        if self._manual_goal_pos_x_slider is None or self._manual_goal_pos_y_slider is None:
-            return
-
-        motion_cmd = self._get_motion_command()
-        if motion_cmd is None:
-            return
-
-        try:
-            if bool(getattr(motion_cmd, "manual_goal_override_enabled", False)):
-                goal_xy = getattr(motion_cmd, "manual_goal_xy_rel", None)
-                if isinstance(goal_xy, torch.Tensor) and goal_xy.ndim >= 2:
-                    self._manual_goal_pos_x_slider.value = float(goal_xy[self._env_id, 0].item())
-                    self._manual_goal_pos_y_slider.value = float(goal_xy[self._env_id, 1].item())
-                return
-        except Exception:
-            pass
-
-        goal_xy = self._current_effective_goal_xy()
-        if goal_xy is None:
-            return
-        try:
-            self._manual_goal_pos_x_slider.value = float(goal_xy[0])
-            self._manual_goal_pos_y_slider.value = float(goal_xy[1])
-        except Exception:
-            pass
-
     def _current_effective_goal_xy(self) -> np.ndarray | None:
         motion_cmd = self._get_motion_command()
         if motion_cmd is None:
             return None
-
-        try:
-            if bool(getattr(motion_cmd, "manual_goal_override_enabled", False)):
-                goal_xy = getattr(motion_cmd, "manual_goal_xy_rel", None)
-                if isinstance(goal_xy, torch.Tensor) and goal_xy.ndim >= 2:
-                    return np.array(
-                        [
-                            float(goal_xy[self._env_id, 0].item()),
-                            float(goal_xy[self._env_id, 1].item()),
-                        ],
-                        dtype=np.float32,
-                    )
-        except Exception:
-            pass
 
         obs_mgr = getattr(self._env, "observation_manager", None)
         if obs_mgr is None:
             return None
 
         if hasattr(obs_mgr, "compute_group"):
-            sparse_goal_enabled = bool(getattr(motion_cmd, "_sparse_goal_curriculum_enabled", False))
-            group_names = (
-                ("actor_obs_drop_command", "actor_obs_drop_mixed", "actor_obs_drop")
-                if sparse_goal_enabled
-                else ("actor_obs_drop",)
-            )
-            for group_name in group_names:
-                try:
-                    obs = obs_mgr.compute_group(group_name)
-                except Exception:
-                    continue
-                if isinstance(obs, torch.Tensor) and obs.ndim >= 2 and int(obs.shape[1]) >= 2:
-                    width = min(int(obs.shape[1]), 2)
-                    return obs[self._env_id, :width].detach().float().cpu().numpy()
+            try:
+                obs = obs_mgr.compute_group("actor_obs_drop")
+            except Exception:
+                return None
+            if isinstance(obs, torch.Tensor) and obs.ndim >= 2 and int(obs.shape[1]) >= 2:
+                width = min(int(obs.shape[1]), 2)
+                return obs[self._env_id, :width].detach().float().cpu().numpy()
         return None
-
-    def _update_manual_goal_status(self) -> None:
-        if self._manual_goal_status is None:
-            return
-
-        motion_cmd = self._get_motion_command()
-        if motion_cmd is None:
-            self._manual_goal_status.content = "Mode: `idle`\n\nTarget cmd(box): n/a"
-            return
-
-        enabled = bool(getattr(motion_cmd, "manual_goal_override_enabled", False))
-        goal_xy = self._current_effective_goal_xy()
-        goal_pose = self._get_effective_target_box_pose()
-        picked = False
-        if hasattr(motion_cmd, "pickup_anchor_set"):
-            try:
-                picked = bool(motion_cmd.pickup_anchor_set[self._env_id].item())
-            except Exception:
-                picked = False
-
-        if goal_xy is None:
-            self._manual_goal_status.content = "Mode: `idle`\n\nTarget cmd(box): unavailable"
-            return
-
-        mode = "manual(goal)" if enabled else "reference(goal)"
-        content = (
-            f"Mode: `{mode}`\n\n"
-            "Frame: `pickup-time root-heading [dx, dy]`\n\n"
-            f"Picked anchor latched: `{picked}`\n\n"
-            f"Target cmd(box): `dx={float(goal_xy[0]):+.2f}` `dy={float(goal_xy[1]):+.2f}`"
-        )
-        if goal_pose is not None:
-            goal_pos_w, goal_quat_wxyz, _goal_size = goal_pose
-            goal_yaw_w = self._yaw_from_quat_wxyz(goal_quat_wxyz)
-            content += (
-                "\n\n"
-                f"Goal world: `({float(goal_pos_w[0]):+.2f}, {float(goal_pos_w[1]):+.2f}, {float(goal_pos_w[2]):+.2f})` "
-                f"yaw=`{goal_yaw_w:+.2f}`"
-            )
-        self._manual_goal_status.content = content
-
-    def _update_manual_goal_override(self) -> None:
-        motion_cmd = self._get_motion_command()
-        if motion_cmd is None:
-            self._update_manual_goal_status()
-            return
-
-        enabled = bool(self._manual_goal_override_cb.value) if self._manual_goal_override_cb is not None else False
-        setattr(motion_cmd, "manual_goal_override_enabled", enabled)
-        manual_goal_xy = getattr(motion_cmd, "manual_goal_xy_rel", None)
-        if not isinstance(manual_goal_xy, torch.Tensor):
-            self._update_manual_goal_status()
-            return
-
-        if not enabled:
-            self._clear_manual_goal_override()
-            return
-
-        device = self._env.device
-        cmd_xy = torch.tensor(
-            [[
-                float(self._manual_goal_pos_x_slider.value) if self._manual_goal_pos_x_slider is not None else 0.0,
-                float(self._manual_goal_pos_y_slider.value) if self._manual_goal_pos_y_slider is not None else 0.0,
-            ]],
-            device=device,
-            dtype=torch.float32,
-        ).repeat(self._env.num_envs, 1)
-        motion_cmd.manual_goal_xy_rel = cmd_xy
-        update_goal_fn = getattr(motion_cmd, "_update_manual_goal_override", None)
-        if callable(update_goal_fn):
-            try:
-                update_goal_fn()
-            except Exception:
-                pass
-        self._update_manual_goal_status()
 
     def _zero_object_reset_overrides(self) -> None:
         controls = (
@@ -3898,7 +3741,6 @@ class ViserLiveViewer:
                 current_root_pos=root_pos,
                 current_root_quat_wxyz=root_quat_wxyz,
             )
-            self._update_manual_goal_status()
             if self._perception_enabled:
                 self._update_perception_visuals(offset)
             if not self._disable_contact_force_viz:
@@ -4454,10 +4296,6 @@ class ViserLiveViewer:
             "VISER_ENABLE_MANUAL_ROOT_GUI",
             manual_gui_enabled and not self._distill_minimal_ui,
         )
-        manual_goal_gui_enabled = _gui_section_enabled(
-            "VISER_ENABLE_MANUAL_GOAL_GUI",
-            manual_gui_enabled,
-        )
         contact_force_gui_enabled = _gui_section_enabled(
             "VISER_ENABLE_CONTACT_FORCE_GUI",
             not self._distill_minimal_ui,
@@ -4569,59 +4407,6 @@ class ViserLiveViewer:
                     def _(_evt) -> None:
                         self.queue_pending_controls()
                 self._sync_manual_root_command_from_robot()
-
-        if manual_goal_gui_enabled:
-            with self._server.gui.add_folder("Goal" if self._distill_minimal_ui else "Manual Goal"):
-                self._manual_goal_override_cb = self._server.gui.add_checkbox(
-                    "Enable Manual Goal Override",
-                    initial_value=False,
-                    hint=(
-                        "Override the drop target in the same pickup-time root-heading frame. "
-                        "The distilled box-drop policy consumes `[dx, dy]`."
-                    ),
-                )
-                self._manual_goal_zero_button = self._server.gui.add_button(
-                    "Zero / Sync From Goal",
-                    hint="Load the current target command into the sliders, or zero if unavailable.",
-                )
-                self._manual_goal_pos_x_slider = self._server.gui.add_slider(
-                    "Target Box dX (forward, m)",
-                    min=-2.5,
-                    max=2.5,
-                    step=0.02,
-                    initial_value=0.0,
-                )
-                self._manual_goal_pos_y_slider = self._server.gui.add_slider(
-                    "Target Box dY (left, m)",
-                    min=-2.5,
-                    max=2.5,
-                    step=0.02,
-                    initial_value=0.0,
-                )
-                self._manual_goal_status = self._server.gui.add_markdown("Mode: `idle`\n\nTarget cmd(box): n/a")
-
-            @self._manual_goal_zero_button.on_click
-            def _(_evt) -> None:
-                self._sync_manual_goal_target_from_reference()
-                self.queue_pending_controls()
-
-            @self._manual_goal_override_cb.on_update
-            def _(_evt) -> None:
-                if self._manual_goal_override_cb is not None and bool(self._manual_goal_override_cb.value):
-                    self._sync_manual_goal_target_from_reference()
-                self.queue_pending_controls()
-
-            for control in (
-                self._manual_goal_pos_x_slider,
-                self._manual_goal_pos_y_slider,
-            ):
-
-                @control.on_update
-                def _(_evt) -> None:
-                    self.queue_pending_controls()
-
-            self._sync_manual_goal_target_from_reference()
-            self._update_manual_goal_status()
 
         sim_cfg = getattr(self._env.simulator, "simulator_config", None)
         if (
@@ -5507,7 +5292,6 @@ class ViserLiveViewer:
             else:
                 sim.set_actor_states([motion_cmd.object_name], env_ids, obj_states)
 
-            # Keep sparse-goal anchors and goal materialization aligned with the restored clip frame.
             if hasattr(motion_cmd, "_reset_pickup_anchor_state"):
                 motion_cmd._reset_pickup_anchor_state(
                     env_ids,
@@ -5515,9 +5299,6 @@ class ViserLiveViewer:
                     root_quat_w=root_rot,
                     object_pos_w=obj_pos,
                 )
-
-        if hasattr(motion_cmd, "_update_manual_goal_override"):
-            motion_cmd._update_manual_goal_override(env_ids)
 
         if hasattr(sim, "scene") and hasattr(sim.scene, "write_data_to_sim"):
             sim.scene.write_data_to_sim()
@@ -6951,12 +6732,8 @@ class ViserLiveViewer:
 
         try:
             env_ids = torch.tensor([self._env_id], device=motion_cmd.device, dtype=torch.long)
-            anchor_fn = getattr(motion_cmd, "_manual_goal_anchor_pose_w", None)
-            if callable(anchor_fn):
-                anchor_pos_t, anchor_quat_t = anchor_fn(env_ids)
-            else:
-                anchor_pos_t = motion_cmd.robot_root_pos_w[env_ids]
-                anchor_quat_t = motion_cmd.robot_root_quat_w[env_ids]
+            anchor_pos_t = motion_cmd.robot_root_pos_w[env_ids]
+            anchor_quat_t = motion_cmd.robot_root_quat_w[env_ids]
             anchor_pos_w = anchor_pos_t[0].detach().float().cpu().numpy()
             anchor_quat_xyzw = anchor_quat_t[0].detach().float().cpu().numpy()
         except Exception:
@@ -6994,29 +6771,6 @@ class ViserLiveViewer:
         if object_size is None:
             return None
 
-        manual_goal_pos_w = getattr(motion_cmd, "manual_goal_object_pos_w", None)
-        manual_goal_rot6d_w = getattr(motion_cmd, "manual_goal_object_rot6d_w", None)
-        manual_override_enabled = bool(getattr(motion_cmd, "manual_goal_override_enabled", False))
-
-        if (
-            manual_override_enabled
-            and isinstance(manual_goal_pos_w, torch.Tensor)
-            and isinstance(manual_goal_rot6d_w, torch.Tensor)
-            and manual_goal_pos_w.ndim >= 2
-            and manual_goal_rot6d_w.ndim >= 2
-        ):
-            try:
-                goal_pos_w = manual_goal_pos_w[self._env_id].detach().float().cpu().numpy()
-                goal_quat_wxyz = self._rot6d_to_quat_wxyz(manual_goal_rot6d_w[self._env_id : self._env_id + 1])
-                goal_pos_w[2] = self._target_box_resting_center_z(np.asarray(object_size, dtype=np.float32))
-                goal_yaw = self._yaw_from_quat_wxyz(goal_quat_wxyz)
-                return goal_pos_w, self._quat_wxyz_from_yaw(goal_yaw), np.asarray(object_size, dtype=np.float32)
-            except Exception:
-                pass
-
-        if self._target_box_requires_manual_goal:
-            return None
-
         goal_xy = self._current_effective_goal_xy()
         if goal_xy is None:
             return None
@@ -7049,22 +6803,6 @@ class ViserLiveViewer:
                 return goal_pos_w, goal_quat_wxyz, object_size
         except Exception:
             pass
-
-        clip_goal_pos_w = getattr(motion_cmd, "clip_goal_object_pos_w", None)
-        clip_goal_rot6d_w = getattr(motion_cmd, "clip_goal_object_rot6d_w", None)
-        if (
-            bool(getattr(motion_cmd, "manual_goal_enabled", False))
-            and isinstance(clip_goal_pos_w, torch.Tensor)
-            and isinstance(clip_goal_rot6d_w, torch.Tensor)
-            and clip_goal_pos_w.ndim >= 2
-            and clip_goal_rot6d_w.ndim >= 2
-        ):
-            try:
-                goal_pos_w = clip_goal_pos_w[self._env_id].detach().float().cpu().numpy().astype(np.float32, copy=True)
-                goal_quat_wxyz = self._rot6d_to_quat_wxyz(clip_goal_rot6d_w[self._env_id : self._env_id + 1])
-                return goal_pos_w, goal_quat_wxyz, object_size
-            except Exception:
-                pass
 
         return None
 

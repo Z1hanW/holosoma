@@ -270,6 +270,7 @@ class IsaacSim(BaseSimulator):
             self.sim: SimulationContext = SimulationContext(sim_config)
         else:
             raise RuntimeError("Simulation context already exists. Cannot create a new one.")
+        self._ensure_physics_scene()
 
         self.sim.set_camera_view([2.0, 0.0, 2.5], [-0.5, 0.0, 0.5])
 
@@ -353,6 +354,7 @@ class IsaacSim(BaseSimulator):
         if builtins.ISAAC_LAUNCHED_FROM_TERMINAL is False:  # type: ignore[attr-defined]
             logger.info("Starting the simulation. This may take a few seconds. Please wait...")
             with Timer("[INFO]: Time taken for simulation start", "simulation_start"):
+                self._ensure_physics_scene()
                 self.sim.reset()
 
         self.default_coms = self._robot.root_physx_view.get_coms().clone()
@@ -403,6 +405,63 @@ class IsaacSim(BaseSimulator):
         # print the environment information
 
         logger.info("Completed setting up the environment...")
+
+    def _ensure_physics_scene(self) -> None:
+        """Ensure the active USD stage has a PhysicsScene before PhysX tensor views initialize."""
+        try:
+            import omni.usd  # noqa: PLC0415
+            from isaacsim.core.simulation_manager import SimulationManager  # noqa: PLC0415
+            from pxr import Gf, PhysxSchema, UsdPhysics  # noqa: PLC0415
+        except Exception as exc:
+            logger.warning("Could not verify/create Isaac Sim PhysicsScene: {}", exc)
+            return
+
+        stage = omni.usd.get_context().get_stage()
+        if stage is None and hasattr(self.sim, "get_initial_stage"):
+            stage = self.sim.get_initial_stage()
+        if stage is None:
+            raise RuntimeError("Cannot create Isaac Sim PhysicsScene because the USD stage is unavailable.")
+
+        physics_prim_path = str(getattr(self.sim.cfg, "physics_prim_path", "/physicsScene") or "/physicsScene")
+        scene_prim = stage.GetPrimAtPath(physics_prim_path)
+
+        if not scene_prim.IsValid():
+            for prim in stage.Traverse():
+                if prim.GetTypeName() == "PhysicsScene":
+                    scene_prim = prim
+                    physics_prim_path = str(prim.GetPath())
+                    break
+            else:
+                physics_scene = UsdPhysics.Scene.Define(stage, physics_prim_path)
+                scene_prim = physics_scene.GetPrim()
+                logger.info("Created missing Isaac Sim PhysicsScene at {}", physics_prim_path)
+        elif scene_prim.GetTypeName() != "PhysicsScene":
+            raise RuntimeError(
+                f"Cannot create Isaac Sim PhysicsScene at {physics_prim_path}: "
+                f"existing prim has type '{scene_prim.GetTypeName()}'."
+            )
+
+        physics_scene = UsdPhysics.Scene(scene_prim)
+        physx_scene_api = PhysxSchema.PhysxSceneAPI(scene_prim)
+        if not physx_scene_api:
+            physx_scene_api = PhysxSchema.PhysxSceneAPI.Apply(scene_prim)
+
+        gravity = np.asarray(getattr(self.sim.cfg, "gravity", (0.0, 0.0, -9.81)), dtype=np.float64)
+        gravity_magnitude = float(np.linalg.norm(gravity))
+        gravity_direction = gravity / gravity_magnitude if gravity_magnitude > 0.0 else gravity
+        physics_scene.CreateGravityDirectionAttr(Gf.Vec3f(*gravity_direction.tolist()))
+        physics_scene.CreateGravityMagnitudeAttr(gravity_magnitude)
+
+        physics_context = getattr(self.sim, "_physics_context", None)
+        if physics_context is not None:
+            physics_context._prim_path = physics_prim_path
+            physics_context._physics_scene = physics_scene
+            physics_context._physx_scene_api = physx_scene_api
+
+        try:
+            SimulationManager.set_default_physics_scene(physics_prim_path)
+        except Exception as exc:
+            logger.warning("Could not set default Isaac Sim PhysicsScene '{}': {}", physics_prim_path, exc)
 
     @staticmethod
     def _sanitize_object_name(name: str) -> str:
@@ -1071,6 +1130,7 @@ class IsaacSim(BaseSimulator):
 
     def _setup_scene(self) -> None:
         self._load_scene_config()
+        self._ensure_physics_scene()
 
         robot_asset_cfg = self.robot_config.asset
 

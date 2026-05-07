@@ -192,7 +192,6 @@ class PPO(BaseAlgo):
         self.ppo_coeff = 1.0
         self.distill_loss_fn = F.mse_loss
         self.dagger_ignore_zero_teacher_actions = True
-        self.dagger_ignore_external_goal_samples = False
         self.dagger_ignore_episode_initial_steps = 0
         self.dagger_match_std = False
         self.strict_teacher_load = True
@@ -693,9 +692,6 @@ class PPO(BaseAlgo):
         self.dagger_ignore_zero_teacher_actions = bool(
             getattr(distill_cfg, "dagger_ignore_zero_teacher_actions", True)
         )
-        self.dagger_ignore_external_goal_samples = bool(
-            getattr(distill_cfg, "dagger_ignore_external_goal_samples", False)
-        )
         self.dagger_ignore_episode_initial_steps = max(
             0, int(getattr(distill_cfg, "dagger_ignore_episode_initial_steps", 0))
         )
@@ -922,8 +918,7 @@ class PPO(BaseAlgo):
             if self.use_multi_teacher:
                 self.storage.register("teacher_indices", shape=(1,), dtype=torch.long)
             if (
-                self.dagger_ignore_external_goal_samples
-                or self.dagger_ignore_episode_initial_steps > 0
+                self.dagger_ignore_episode_initial_steps > 0
                 or self._motion_command_supports_runtime_default_pose_prepend_mask()
             ):
                 self.storage.register("teacher_bc_mask", shape=(1,), dtype=torch.bool)
@@ -1209,10 +1204,6 @@ class PPO(BaseAlgo):
         motion_command = command_manager.get_state("motion_command")
         return motion_command is not None and hasattr(motion_command, "get_runtime_default_pose_prepend_mask")
 
-    @staticmethod
-    def _motion_command_sparse_goal_curriculum_enabled(motion_command: object | None) -> bool:
-        return bool(getattr(motion_command, "_sparse_goal_curriculum_enabled", False))
-
     def _use_deterministic_student_actions(self) -> bool:
         """Use mean actions during pure BC phases to reduce rollout noise drift."""
         if not self.dagger_enabled:
@@ -1254,20 +1245,13 @@ class PPO(BaseAlgo):
 
                 teacher_bc_mask_current = None
                 if (
-                    self.dagger_ignore_external_goal_samples
-                    or self.dagger_ignore_episode_initial_steps > 0
+                    self.dagger_ignore_episode_initial_steps > 0
                     or self._motion_command_supports_runtime_default_pose_prepend_mask()
                 ):
                     teacher_bc_mask_current = torch.ones((actions.shape[0], 1), device=actions.device, dtype=torch.bool)
                     motion_command = None
                     if self.env.command_manager is not None:
                         motion_command = self.env.command_manager.get_state("motion_command")
-                    if (
-                        self.dagger_ignore_external_goal_samples
-                        and self._motion_command_sparse_goal_curriculum_enabled(motion_command)
-                    ):
-                        if motion_command is not None and hasattr(motion_command, "get_sparse_goal_external_mask"):
-                            teacher_bc_mask_current &= (~motion_command.get_sparse_goal_external_mask()).unsqueeze(1)
                     if self.dagger_ignore_episode_initial_steps > 0:
                         episode_length_buf = getattr(self.env, "episode_length_buf", None)
                         if episode_length_buf is not None:
@@ -2089,17 +2073,8 @@ class PPO(BaseAlgo):
             train_logs["mean_episode_length_motion_total"] = motion_total
             train_logs["mean_episode_length_motion_total/time"] = motion_total
             train_logs["command_goal_training_iteration"] = float(getattr(motion_command, "_training_iteration", it) or it)
-            train_logs["command_only_env_prob"] = float(getattr(motion_command, "_command_only_env_prob", 0.0))
-            train_logs["external_goal_prob"] = float(getattr(motion_command, "_sparse_goal_external_prob", 0.0))
             if hasattr(motion_command, "get_clean_noisy_clip_curriculum_log_state"):
                 train_logs.update(motion_command.get_clean_noisy_clip_curriculum_log_state())
-            if hasattr(motion_command, "get_sparse_goal_external_mask"):
-                external_fraction = (
-                    motion_command.get_sparse_goal_external_mask().float().mean()
-                    if self._motion_command_sparse_goal_curriculum_enabled(motion_command)
-                    else torch.tensor(0.0, device=self.device)
-                )
-                train_logs["manual_goal_is_external_fraction"] = float(external_fraction.item())
         if self.dagger_enabled and self.use_ppo_dagger_schedule:
             train_logs = extra_log_dicts.setdefault("Train", {})
             train_logs["ppo_dagger_target_coeff"] = float(self.ppo_target_coeff)

@@ -266,9 +266,6 @@ class DistillationConfig:
     dagger_ignore_zero_teacher_actions: bool = True
     """Ignore samples where teacher action is exactly zero across all dims."""
 
-    dagger_ignore_external_goal_samples: bool = False
-    """Ignore BC samples collected under external sparse-goal episodes."""
-
     dagger_ignore_episode_initial_steps: int = 0
     """Ignore BC samples from the first N episode steps (useful when reset states are outside teacher distribution)."""
 

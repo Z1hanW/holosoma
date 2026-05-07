@@ -308,26 +308,6 @@ critic_obs_w_object_command_privileged_terms.update(
             scale=1.0,
             noise=0.0,
         ),
-        "obj_sparse_goal_xy_pick_root_heading": ObsTermCfg(
-            func="holosoma.managers.observation.terms.wbt:obj_sparse_goal_xy_pick_root_heading",
-            scale=1.0,
-            noise=0.0,
-        ),
-        "obj_picked_flag": ObsTermCfg(
-            func="holosoma.managers.observation.terms.wbt:obj_picked_flag",
-            scale=1.0,
-            noise=0.0,
-        ),
-        "command_only_flag": ObsTermCfg(
-            func="holosoma.managers.observation.terms.wbt:command_only_flag",
-            scale=1.0,
-            noise=0.0,
-        ),
-        "sparse_goal_external_flag": ObsTermCfg(
-            func="holosoma.managers.observation.terms.wbt:sparse_goal_external_flag",
-            scale=1.0,
-            noise=0.0,
-        ),
         "contact_prior_confidence": ObsTermCfg(
             func="holosoma.managers.observation.terms.wbt:contact_prior_confidence",
             scale=1.0,
@@ -512,12 +492,6 @@ critic_obs_w_object_command_distill_terms.pop("actions")
 critic_obs_w_object_command_distill_terms.update(
     {
         "obj_ang_vel_b": critic_obs_w_object_command_privileged_terms["obj_ang_vel_b"],
-        "obj_sparse_goal_xy_pick_root_heading": critic_obs_w_object_command_privileged_terms[
-            "obj_sparse_goal_xy_pick_root_heading"
-        ],
-        "obj_picked_flag": critic_obs_w_object_command_privileged_terms["obj_picked_flag"],
-        "command_only_flag": critic_obs_w_object_command_privileged_terms["command_only_flag"],
-        "sparse_goal_external_flag": critic_obs_w_object_command_privileged_terms["sparse_goal_external_flag"],
     }
 )
 
@@ -531,17 +505,11 @@ critic_obs_w_object_command_distill_legacy_target_terms = {
     "obj_ang_vel_b": critic_obs_w_object_command_privileged_terms["obj_ang_vel_b"],
     "obj_lin_vel_b": critic_obs_w_object_terms["obj_lin_vel_b"],
     "motion_command": critic_obs_shared_terms["motion_command"],
-    "obj_picked_flag": critic_obs_w_object_command_privileged_terms["obj_picked_flag"],
     "motion_ref_ori_b": critic_obs_shared_terms["motion_ref_ori_b"],
     "motion_ref_pos_b": critic_obs_shared_terms["motion_ref_pos_b"],
     "robot_body_ori_b": critic_obs_shared_terms["robot_body_ori_b"],
     "robot_body_pos_b": critic_obs_shared_terms["robot_body_pos_b"],
-    "command_only_flag": critic_obs_w_object_command_privileged_terms["command_only_flag"],
     "obj_target_pose_size_b": actor_obs_w_object_legacy_terms["obj_target_pose_size_b"],
-    "sparse_goal_external_flag": critic_obs_w_object_command_privileged_terms["sparse_goal_external_flag"],
-    "obj_sparse_goal_xy_pick_root_heading": critic_obs_w_object_command_privileged_terms[
-        "obj_sparse_goal_xy_pick_root_heading"
-    ],
 }
 
 g1_29dof_wbt_observation = ObservationManagerCfg(
@@ -736,61 +704,6 @@ object_distill_drop_terms = {
     ),
 }
 
-object_distill_drop_mixed_terms = {
-    "obj_sparse_goal_xy_pick_root_heading": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:obj_sparse_goal_xy_pick_root_heading",
-        scale=1.0,
-        noise=0.0,
-    ),
-    "obj_picked_flag": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:obj_picked_flag",
-        scale=1.0,
-        noise=0.0,
-    ),
-}
-
-object_distill_drop_command_terms = {
-    "obj_sparse_goal_xy_command": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:obj_sparse_goal_xy_command",
-        scale=1.0,
-        noise=0.0,
-    ),
-}
-
-object_command_curriculum_track_terms = {
-    "motion_command": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:command_curriculum_motion_command",
-        scale=1.0,
-        noise=0.0,
-    ),
-    "motion_ref_ori_b": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:command_curriculum_motion_ref_ori_b",
-        scale=1.0,
-        noise=0.0,
-    ),
-    "obj_target_pose_size_b": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:command_curriculum_obj_target_pose_size_b",
-        scale=1.0,
-        noise=0.0,
-    ),
-}
-
-object_command_curriculum_goal_terms = {
-    "obj_sparse_goal_xy_command": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:command_curriculum_obj_sparse_goal_xy_command",
-        scale=1.0,
-        noise=0.0,
-    ),
-}
-
-object_command_curriculum_mode_terms = {
-    "command_only_flag": ObsTermCfg(
-        func="holosoma.managers.observation.terms.wbt:command_curriculum_command_only_flag",
-        scale=1.0,
-        noise=0.0,
-    ),
-}
-
 g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCfg(
     groups={
         # Keep full teacher actor observation available for teacher policy queries.
@@ -860,20 +773,6 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
             history_length=1,
             terms=object_distill_drop_terms,
         ),
-        "actor_obs_drop_mixed": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms=object_distill_drop_mixed_terms,
-        ),
-        # Student drop target as a fixed pickup-frame command [dx, dy].
-        # The env can still materialize a world goal internally after pickup.
-        "actor_obs_drop_command": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms=object_distill_drop_command_terms,
-        ),
         "critic_obs": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
@@ -891,55 +790,6 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
             enable_noise=False,
             history_length=1,
             terms=object_distill_action_terms,
-        ),
-    },
-)
-
-g1_29dof_wbt_observation_w_object_command_curriculum = ObservationManagerCfg(
-    groups={
-        # Keep the legacy full observation around for debugging/analysis.
-        "actor_obs": replace(actor_obs_w_object, history_length=1),
-        "actor_obs_track": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
-            terms=object_command_curriculum_track_terms,
-        ),
-        "actor_obs_proprio": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=DEFAULT_WBT_DISTILL_PROPRIO_HISTORY_LENGTH,
-            terms=object_distill_proprio_history_terms,
-        ),
-        "actor_obs_actions": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms=object_distill_action_terms,
-        ),
-        "actor_obs_box": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
-            terms=object_distill_box_terms,
-        ),
-        "actor_obs_goal": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms=object_command_curriculum_goal_terms,
-        ),
-        "actor_obs_mode": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=1,
-            terms=object_command_curriculum_mode_terms,
-        ),
-        "critic_obs": ObsGroupCfg(
-            concatenate=True,
-            enable_noise=False,
-            history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
-            terms=critic_obs_w_object_command_privileged_terms,
         ),
     },
 )
@@ -1160,7 +1010,6 @@ __all__ = [
     "g1_29dof_wbt_observation_terrain_distill_sparse_root_cmd",
     "g1_29dof_wbt_observation_w_object",
     "g1_29dof_wbt_observation_w_object_legacy",
-    "g1_29dof_wbt_observation_w_object_command_curriculum",
     "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd",
     "g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy",
     "g1_29dof_wbt_observation_videomimic",

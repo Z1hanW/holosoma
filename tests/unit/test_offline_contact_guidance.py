@@ -62,9 +62,6 @@ class _DummyMotionCommand:
         forces[..., 0] = magnitudes.unsqueeze(1)
         return forces
 
-    def get_command_only_env_mask(self) -> torch.Tensor:
-        return torch.ones((self.num_envs,), device=self._body_positions_obj.device, dtype=torch.bool)
-
     def _get_clip_pickup_steps_by_clip(self) -> torch.Tensor:
         return self._pickup_steps_by_clip
 

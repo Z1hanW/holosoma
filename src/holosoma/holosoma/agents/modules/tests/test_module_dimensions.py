@@ -438,7 +438,7 @@ def test_far_tracking_perception_encoder_concatenates_into_actor_input():
 def test_apply_perception_overrides_keeps_critic_plain_for_far_tracking_preset():
     """Far-tracking-aligned depth preset should inject depth into actor only, not critic."""
     config = replace(
-        g1_experiments.g1_29dof_wbt_w_object_distill_sparse_goal_mixed,
+        g1_experiments.g1_29dof_wbt_w_object_distill_sparse_root_cmd,
         perception=perception_presets.camera_depth_d435i,
     )
 
@@ -666,7 +666,7 @@ def test_attention_linear_encoder_has_live_signal_at_init():
 def test_apply_perception_overrides_sets_defm_actor_only_path():
     """DeFM preset should inject actor-only perception with concat fusion."""
     config = replace(
-        g1_experiments.g1_29dof_wbt_w_object_distill_sparse_goal_mixed,
+        g1_experiments.g1_29dof_wbt_w_object_distill_sparse_root_cmd,
         perception=perception_presets.camera_depth_d435i_defm_vit_s14,
     )
 
@@ -692,7 +692,7 @@ def test_apply_perception_overrides_sets_defm_actor_only_path():
 def test_apply_perception_overrides_sets_defm_regnet_actor_only_path():
     """DeFM RegNet preset should inject actor-only perception with concat fusion."""
     config = replace(
-        g1_experiments.g1_29dof_wbt_w_object_distill_sparse_goal_mixed,
+        g1_experiments.g1_29dof_wbt_w_object_distill_sparse_root_cmd,
         perception=perception_presets.camera_depth_d435i_defm_regnet_y_800mf,
     )
 
@@ -718,7 +718,7 @@ def test_apply_perception_overrides_sets_defm_regnet_actor_only_path():
 def test_apply_perception_overrides_sets_defm_efficientnet_actor_only_path():
     """DeFM EfficientNet preset should inject actor-only perception with concat fusion."""
     config = replace(
-        g1_experiments.g1_29dof_wbt_w_object_distill_sparse_goal_mixed,
+        g1_experiments.g1_29dof_wbt_w_object_distill_sparse_root_cmd,
         perception=perception_presets.camera_depth_d435i_defm_efficientnet_b2,
     )
 
@@ -744,17 +744,17 @@ def test_apply_perception_overrides_sets_defm_efficientnet_actor_only_path():
 def test_apply_perception_overrides_adds_heightmap_to_critic_only_path():
     """Student depth + critic heightmap should keep actor/critic perception paths separate."""
     distill_cfg = replace(
-        g1_experiments.g1_29dof_wbt_w_object_distill_sparse_goal_mixed.algo.config.distill,
+        g1_experiments.g1_29dof_wbt_w_object_distill_sparse_root_cmd.algo.config.distill,
         critic_perception_preset="heightmap",
         critic_perception_obs_key="critic_perception_obs",
     )
     config = replace(
-        g1_experiments.g1_29dof_wbt_w_object_distill_sparse_goal_mixed,
+        g1_experiments.g1_29dof_wbt_w_object_distill_sparse_root_cmd,
         perception=perception_presets.camera_depth_d435i,
         algo=replace(
-            g1_experiments.g1_29dof_wbt_w_object_distill_sparse_goal_mixed.algo,
+            g1_experiments.g1_29dof_wbt_w_object_distill_sparse_root_cmd.algo,
             config=replace(
-                g1_experiments.g1_29dof_wbt_w_object_distill_sparse_goal_mixed.algo.config,
+                g1_experiments.g1_29dof_wbt_w_object_distill_sparse_root_cmd.algo.config,
                 distill=distill_cfg,
             ),
         ),
@@ -840,10 +840,6 @@ def test_distill_critic_obs_keeps_single_frame_state_and_action():
         "obj_size",
         "obj_lin_vel_b",
         "obj_ang_vel_b",
-        "obj_sparse_goal_xy_pick_root_heading",
-        "obj_picked_flag",
-        "command_only_flag",
-        "sparse_goal_external_flag",
     }
     assert kept_terms.issubset(critic_group.terms)
 
@@ -868,7 +864,7 @@ def test_sparse_root_distill_observation_exposes_no_linvel_proprio_variant():
 
 
 def test_distill_experiment_critic_inputs_include_proprio_history():
-    critic_cfg = g1_experiments.g1_29dof_wbt_w_object_distill_sparse_goal_mixed.algo.config.module_dict.critic
+    critic_cfg = g1_experiments.g1_29dof_wbt_w_object_distill_sparse_root_cmd.algo.config.module_dict.critic
 
     assert critic_cfg.input_dim == ["critic_obs", "critic_proprio_history", "critic_actions"]
     assert critic_cfg.layer_config.module_input_name == ("critic_obs", "critic_proprio_history", "critic_actions")

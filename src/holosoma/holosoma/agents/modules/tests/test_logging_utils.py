@@ -177,7 +177,7 @@ def test_reward_group_aliases_are_logged(logging_helper, mock_writer, mock_wandb
             "rew_teacher_rollout_object_global_ref_position_error_exp": torch.tensor([1.0], device=logging_helper.device),
             "rew_offline_contact_guidance": torch.tensor([0.25], device=logging_helper.device),
             "rew_action_rate_l2": torch.tensor([-0.1], device=logging_helper.device),
-            "rew_sparse_goal_success_bonus": torch.tensor([2.0], device=logging_helper.device),
+            "rew_custom_success_bonus": torch.tensor([2.0], device=logging_helper.device),
         }
     ]
     logging_helper.rewbuffer.extend([3.65])
@@ -192,7 +192,7 @@ def test_reward_group_aliases_are_logged(logging_helper, mock_writer, mock_wandb
         "Reward/Object/teacher_rollout_object_global_ref_position_error_exp",
         "Reward/Contact/offline_contact_guidance",
         "Reward/Regularize/action_rate_l2",
-        "Reward/Rest/sparse_goal_success_bonus",
+        "Reward/Rest/custom_success_bonus",
         "Reward/Track",
         "Reward/Object",
         "Reward/Contact",
@@ -210,7 +210,7 @@ def test_reward_group_aliases_are_logged(logging_helper, mock_writer, mock_wandb
     assert logged_data["Reward/Object/teacher_rollout_object_global_ref_position_error_exp"] == 1.0
     assert logged_data["Reward/Contact/offline_contact_guidance"] == 0.25
     assert logged_data["Reward/Regularize/action_rate_l2"] == pytest.approx(-0.1)
-    assert logged_data["Reward/Rest/sparse_goal_success_bonus"] == 2.0
+    assert logged_data["Reward/Rest/custom_success_bonus"] == 2.0
     assert logged_data["Reward/total_episode_terms"] == pytest.approx(3.65)
     assert logged_data["Reward/mean"] == pytest.approx(3.65)
     assert logged_data["Episode Length/mean"] == pytest.approx(42.0)
@@ -235,8 +235,8 @@ def test_collect_reward_wandb_metadata_groups_weights_and_sigmas():
                 weight=4.0,
             ),
             "action_rate_l2": RewardTermCfg(func="unused", weight=-0.1),
-            "sparse_goal_success_bonus": RewardTermCfg(func="unused", weight=20.0),
-            "sparse_goal_pickup_height_reward": RewardTermCfg(func="unused", weight=0.0),
+            "custom_success_bonus": RewardTermCfg(func="unused", weight=20.0),
+            "custom_zero_reward": RewardTermCfg(func="unused", weight=0.0),
         }
     )
 
@@ -248,8 +248,8 @@ def test_collect_reward_wandb_metadata_groups_weights_and_sigmas():
     assert spec["Object"]["teacher_rollout_object_global_ref_position_error_exp"]["weight"] == 1.0
     assert spec["Contact"]["offline_contact_guidance"]["force_threshold"] == 1.4
     assert spec["Regularize"]["action_rate_l2"]["weight"] == -0.1
-    assert spec["Rest"]["sparse_goal_success_bonus"]["weight"] == 20.0
-    assert "sparse_goal_pickup_height_reward" not in spec["Rest"]
+    assert spec["Rest"]["custom_success_bonus"]["weight"] == 20.0
+    assert "custom_zero_reward" not in spec["Rest"]
     assert (
         summary_metadata["RewardSpec/Track/teacher_rollout_global_ref_position_error_exp/weight"]
         == 0.5
