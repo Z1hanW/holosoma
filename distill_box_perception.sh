@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Student policy observation (actor):
 # - actor_obs_root: root-frame relative command [dx, dy, dyaw]
-# - actor_obs_proprio (base_lin_vel, base_ang_vel, dof_pos, dof_vel) + actor_obs_actions single-step action
+# - actor_obs_proprio_with_actions_no_linvel (base_ang_vel, dof_pos, dof_vel, actions)
 # - perception_obs (camera depth)
 # - No actor box state is used by student actor.
 #
@@ -223,11 +223,16 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
+  _shoo7_root_command_mode="${ROOT_COMMAND_MODE}"
   DATA_MODE="pure-sd"
   TRACKER_PROFILE="old-tracker"
   SCHEDULE_VARIANT="ppo_first"
-  ROOT_COMMAND_MODE="default"
-  EXP="g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref-shoo7sr1-debug"
+  ROOT_COMMAND_MODE="${_shoo7_root_command_mode}"
+  if [[ "${ROOT_COMMAND_MODE}" == "contact-aware" ]]; then
+    EXP="g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref-shoo7sr1-contact-aware-debug"
+  else
+    EXP="g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref-shoo7sr1-debug"
+  fi
 fi
 
 POSITIONAL_TEACHER_CHECKPOINT_SET=0
@@ -897,7 +902,7 @@ UNIFORM_T1_WINDOW_DENSITY_BOOST=${UNIFORM_T1_WINDOW_DENSITY_BOOST:-7.0}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
 EXPORT_ONNX=${EXPORT_ONNX:-True}
-STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_root','actor_obs_proprio','actor_obs_actions']"}
+STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_root','actor_obs_proprio_with_actions_no_linvel']"}
 DAGGER_MATCH_STD=${DAGGER_MATCH_STD:-True}
 ENTROPY_COEF=${ENTROPY_COEF:-0.0}
 DAGGER_IGNORE_EPISODE_INITIAL_STEPS=${DAGGER_IGNORE_EPISODE_INITIAL_STEPS:-0}
@@ -913,7 +918,7 @@ VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-0}
 if [[ "${ROOT_COMMAND_MODE}" == "contact-aware" ]]; then
   SCHEDULE_VARIANT="ppo_first"
   if [[ "${STUDENT_ACTOR_INPUTS_EXPLICIT}" -eq 0 ]]; then
-    STUDENT_ACTOR_INPUTS="['actor_obs_root_contact_aware','actor_obs_proprio','actor_obs_actions']"
+    STUDENT_ACTOR_INPUTS="['actor_obs_root_contact_aware','actor_obs_proprio_with_actions_no_linvel']"
   fi
   if [[ "${USE_ADAPTIVE_TIMESTEPS_SAMPLER_EXPLICIT}" -eq 0 ]]; then
     USE_ADAPTIVE_TIMESTEPS_SAMPLER=True
@@ -940,7 +945,7 @@ CAMERA_PITCH_DEG=${CAMERA_PITCH_DEG-10}
 CAMERA_FAR=${CAMERA_FAR:-}
 CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-}
 PERCEPTION_WARP_PREPROCESS=${PERCEPTION_WARP_PREPROCESS:-}
-CAMERA_APPLY_SENSOR_NOISE=${CAMERA_APPLY_SENSOR_NOISE:-True}
+CAMERA_APPLY_SENSOR_NOISE=${CAMERA_APPLY_SENSOR_NOISE:-False}
 OBJECT_GEOMETRY_MODE=${OBJECT_GEOMETRY_MODE:-mesh}
 
 if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
@@ -949,31 +954,29 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   case "${_shoo7_obs_variant}" in
     baseline|none|no_linvel_no_actions|no_linvel_no_action|proprio_no_linvel)
       SHOO7SR1_OBS_VARIANT=baseline
-      _shoo7_student_actor_inputs="['actor_obs_root','actor_obs_proprio_no_linvel']"
+      _shoo7_student_actor_inputs="['actor_obs_root','actor_obs_proprio_with_actions_no_linvel']"
       ;;
     linvel|linear_velocity|base_lin_vel|base_linear_velocity)
-      SHOO7SR1_OBS_VARIANT=linvel
-      _shoo7_student_actor_inputs="['actor_obs_root','actor_obs_proprio']"
+      echo "[ERROR] SHOO7SR1_OBS_VARIANT='${SHOO7SR1_OBS_VARIANT}' would include base/root linear velocity in student observations. Use baseline or action_history." >&2
+      exit 2
       ;;
     action_history|actions_history|action_hist|actions_hist)
       SHOO7SR1_OBS_VARIANT=action_history
-      _shoo7_student_actor_inputs="['actor_obs_root','actor_obs_proprio_no_linvel','actor_obs_actions']"
-      if [[ "${STUDENT_ACTION_HISTORY_LENGTH_EXPLICIT}" -eq 0 ]]; then
-        STUDENT_ACTION_HISTORY_LENGTH=5
-      fi
+      _shoo7_student_actor_inputs="['actor_obs_root','actor_obs_proprio_with_actions_no_linvel']"
       ;;
     linvel_action_history|linear_velocity_action_history|base_lin_vel_action_history|both)
-      SHOO7SR1_OBS_VARIANT=linvel_action_history
-      _shoo7_student_actor_inputs="['actor_obs_root','actor_obs_proprio','actor_obs_actions']"
-      if [[ "${STUDENT_ACTION_HISTORY_LENGTH_EXPLICIT}" -eq 0 ]]; then
-        STUDENT_ACTION_HISTORY_LENGTH=5
-      fi
+      echo "[ERROR] SHOO7SR1_OBS_VARIANT='${SHOO7SR1_OBS_VARIANT}' would include base/root linear velocity in student observations. Use baseline or action_history." >&2
+      exit 2
       ;;
     *)
-      echo "[ERROR] Unsupported SHOO7SR1_OBS_VARIANT='${SHOO7SR1_OBS_VARIANT}'. Use baseline, linvel, action_history, or linvel_action_history." >&2
+      echo "[ERROR] Unsupported SHOO7SR1_OBS_VARIANT='${SHOO7SR1_OBS_VARIANT}'. Use baseline or action_history." >&2
       exit 2
       ;;
   esac
+
+  if [[ "${ROOT_COMMAND_MODE}" == "contact-aware" ]]; then
+    _shoo7_student_actor_inputs="${_shoo7_student_actor_inputs/actor_obs_root/actor_obs_root_contact_aware}"
+  fi
 
   PERCEPTION_PRESET="camera_depth_d435i"
   EXPORT_ONNX=True
@@ -1021,9 +1024,6 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   SCHEDULE_NAME_EXPLICIT=1
   SCHEDULE_NOTES="PPO-first hybrid: PPO and DAgger are both active from iteration 0. PPO starts at 0.1 and increases by 0.1 every 500 iterations until 0.9 at 4000; effective DAgger weight starts at 0.9 and decreases to 0.1."
   SCHEDULE_NOTES_EXPLICIT=1
-  if [[ "${NUM_LEARNING_ITERATIONS_EXPLICIT}" -eq 0 ]]; then
-    NUM_LEARNING_ITERATIONS=20001
-  fi
   START_AT_TIMESTEP_ZERO_PROB=0.2
   START_AT_TIMESTEP_ZERO_PROB_END=None
   START_AT_TIMESTEP_ZERO_PROB_START_ITER=None
@@ -1463,6 +1463,8 @@ if [[ -n "${STUDENT_PROPRIO_HISTORY_LENGTH:-}" ]]; then
   EXTRA_DISTILL_ARGS+=(
     --observation.groups.actor_obs_proprio.history-length="${STUDENT_PROPRIO_HISTORY_LENGTH}"
     --observation.groups.actor_obs_proprio_no_linvel.history-length="${STUDENT_PROPRIO_HISTORY_LENGTH}"
+    --observation.groups.actor_obs_proprio_with_actions_no_linvel.history-length="${STUDENT_PROPRIO_HISTORY_LENGTH}"
+    --observation.groups.actor_obs_proprio_no_linvel_actions.history-length="${STUDENT_PROPRIO_HISTORY_LENGTH}"
   )
 fi
 if [[ -n "${STUDENT_ACTION_HISTORY_LENGTH:-}" ]]; then

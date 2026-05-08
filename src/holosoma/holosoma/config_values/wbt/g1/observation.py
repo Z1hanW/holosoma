@@ -752,6 +752,19 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
             history_length=DEFAULT_WBT_DISTILL_PROPRIO_HISTORY_LENGTH,
             terms=object_distill_proprio_history_terms_no_linvel,
         ),
+        # Student proprioception state with actions, without base linear velocity.
+        "actor_obs_proprio_with_actions_no_linvel": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=DEFAULT_WBT_DISTILL_PROPRIO_HISTORY_LENGTH,
+            terms=object_distill_proprio_terms_no_linvel,
+        ),
+        "actor_obs_proprio_no_linvel_actions": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=DEFAULT_WBT_DISTILL_PROPRIO_HISTORY_LENGTH,
+            terms=object_distill_proprio_terms_no_linvel,
+        ),
         "actor_obs_actions": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
@@ -838,6 +851,18 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy = ObservationMa
             enable_noise=False,
             history_length=DEFAULT_WBT_DISTILL_PROPRIO_HISTORY_LENGTH,
             terms=object_distill_proprio_history_terms_no_linvel,
+        ),
+        "actor_obs_proprio_with_actions_no_linvel": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=DEFAULT_WBT_DISTILL_PROPRIO_HISTORY_LENGTH,
+            terms=object_distill_proprio_terms_no_linvel,
+        ),
+        "actor_obs_proprio_no_linvel_actions": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=DEFAULT_WBT_DISTILL_PROPRIO_HISTORY_LENGTH,
+            terms=object_distill_proprio_terms_no_linvel,
         ),
         "actor_obs_actions": ObsGroupCfg(
             concatenate=True,

@@ -122,8 +122,8 @@ camera_depth_d435i = PerceptionConfig(
     # Align observation preprocessing with far-tracking warp_image_features.
     camera_warp_preprocess=True,
     camera_warp_freq_ratio=1,
-    camera_warp_latency_frame=0,
-    camera_warp_buffer_len=3,
+    camera_warp_latency_frame=(3, 4),
+    camera_warp_buffer_len=6,
     camera_warp_resize=(58, 87),
     camera_warp_crop_top=2,
     camera_warp_crop_bottom=0,
@@ -138,8 +138,10 @@ camera_depth_d435i = PerceptionConfig(
     camera_warp_edge_thresh_primary=1.0,
     camera_warp_edge_thresh_secondary=0.6,
     camera_warp_edge_far_depth_thresh=2.5,
-    camera_warp_enable_holes=False,
-    camera_warp_hole_prob=0.0,
+    camera_warp_enable_holes=True,
+    camera_warp_hole_prob=0.2,
+    camera_warp_additive_noise_std=0.03,
+    camera_warp_depth_offset_std=0.03,
     # Match far-tracking defaults: placement randomization stays on, sensor noise stays off.
     camera_apply_sensor_noise=False,
     # Match far-tracking student depth path: 58x87 -> CNN -> 32d, concatenated to actor inputs.
@@ -217,6 +219,8 @@ camera_depth_d435i_mujoco_render_848x480 = replace(
     camera_warp_edge_noise=False,
     camera_warp_enable_holes=False,
     camera_warp_hole_prob=0.0,
+    camera_warp_additive_noise_std=0.0,
+    camera_warp_depth_offset_std=0.0,
     camera_apply_sensor_noise=False,
 )
 

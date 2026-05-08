@@ -124,8 +124,8 @@ class PerceptionConfig:
     camera_warp_freq_ratio: int = 1
     """Update preprocessed depth every N perception updates (1 = every update)."""
 
-    camera_warp_latency_frame: int = 0
-    """Return delayed frame index from temporal buffer."""
+    camera_warp_latency_frame: int | tuple[int, int] = 0
+    """Return delayed frame index, or inclusive per-env random latency range, from temporal buffer."""
 
     camera_warp_buffer_len: int = 1
     """Temporal depth buffer length for latency modeling."""
@@ -177,6 +177,12 @@ class PerceptionConfig:
 
     camera_warp_hole_prob: float = 0.0
     """Probability threshold for synthetic hole masks when enabled."""
+
+    camera_warp_additive_noise_std: float = 0.0
+    """Per-pixel additive Gaussian depth noise standard deviation in meters after warp artifacts."""
+
+    camera_warp_depth_offset_std: float = 0.0
+    """Per-environment constant depth offset standard deviation in meters after warp artifacts."""
 
     camera_apply_sensor_noise: bool = True
     """Apply runtime camera multiplicative/dropout noise when provided by environment randomization."""
