@@ -4,30 +4,37 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 clip="${HOLOSOMA_MJ_MOTION:-box_75}"
 motion_init="${HOLOSOMA_MJ_MOTION_INIT:-0}"
+explicit_motion_mode=0
+clip_arg_seen=0
+if [[ -n "${HOLOSOMA_MJ_MOTION_INIT:-}" ]]; then
+  explicit_motion_mode=1
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --motion-init)
       motion_init=1
+      explicit_motion_mode=1
       ;;
     --manual)
       motion_init=0
+      explicit_motion_mode=1
       ;;
     --clip)
       shift
       clip="$1"
+      clip_arg_seen=1
       ;;
     *)
       clip="$1"
+      clip_arg_seen=1
       ;;
   esac
   shift
 done
 
-if [[ "$motion_init" == "1" ]]; then
-  motion_init_bool=True
-else
-  motion_init_bool=False
+if [[ "$explicit_motion_mode" == "0" && "$clip_arg_seen" == "1" ]]; then
+  motion_init=1
 fi
 
 motion_file="$clip"
@@ -51,15 +58,28 @@ fi
 export HOLOSOMA_MJ_MOTION="$motion_file"
 export HOLOSOMA_MJ_MOTION_INIT="$motion_init"
 export HOLOSOMA_MUJOCO_HOLD_MOTION_INIT_UNTIL_COMMAND="${HOLOSOMA_MUJOCO_HOLD_MOTION_INIT_UNTIL_COMMAND:-$motion_init}"
-export HOLOSOMA_PUBLISH_SIM_STATE="${HOLOSOMA_PUBLISH_SIM_STATE:-$motion_init}"
-export SIM_CLOCK_PORT="${SIM_CLOCK_PORT:-5655}"
-export SIM_STATE_PORT="${SIM_STATE_PORT:-5657}"
-export SIM_CONTROL_PORT="${SIM_CONTROL_PORT:-5659}"
-export HOLOSOMA_DDS_DOMAIN_ID="${HOLOSOMA_DDS_DOMAIN_ID:-37}"
+export SIM_CLOCK_PORT="${SIM_CLOCK_PORT:-5555}"
+export SIM_STATE_PORT="${SIM_STATE_PORT:-5557}"
 
 robot_args=()
 if [[ -n "$object_urdf" ]]; then
   robot_args+=(--robot.object.object-urdf-path="$object_urdf")
+fi
+
+bridge_args=(
+  --simulator.config.bridge.enabled=True
+  --simulator.config.bridge.clock-port="$SIM_CLOCK_PORT"
+  --simulator.config.bridge.publish-sim-state=True
+  --simulator.config.bridge.sim-state-port="$SIM_STATE_PORT"
+)
+if [[ -n "${HOLOSOMA_DDS_DOMAIN_ID:-}" ]]; then
+  bridge_args+=(--simulator.config.bridge.domain-id="$HOLOSOMA_DDS_DOMAIN_ID")
+fi
+if [[ "$motion_init" == "1" ]]; then
+  bridge_args+=(
+    --simulator.config.bridge.ignore-default-idle-command=True
+    --simulator.config.bridge.hold-default-pose-until-first-command=True
+  )
 fi
 
 PYTHONPATH="${ROOT_DIR}/src/holosoma${PYTHONPATH:+:${PYTHONPATH}}" \
@@ -67,16 +87,6 @@ PYTHONPATH="${ROOT_DIR}/src/holosoma${PYTHONPATH:+:${PYTHONPATH}}" \
     robot:g1-29dof-w-object \
     camera:single_d435i_depth \
     image_server:mujoco_d435i \
-    --simulator.config.bridge.enabled=True \
-    --simulator.config.bridge.domain-id="$HOLOSOMA_DDS_DOMAIN_ID" \
-    --simulator.config.bridge.clock-port="$SIM_CLOCK_PORT" \
-    --simulator.config.bridge.publish-sim-state="$motion_init_bool" \
-    --simulator.config.bridge.sim-state-port="$SIM_STATE_PORT" \
-    --simulator.config.bridge.listen-control="$motion_init_bool" \
-    --simulator.config.bridge.control-port="$SIM_CONTROL_PORT" \
-    --simulator.config.bridge.use-zmq-lowcmd="$motion_init_bool" \
-    --simulator.config.bridge.log-first-command-summary=True \
-    --simulator.config.bridge.ignore-default-idle-command=True \
-    --simulator.config.bridge.hold-default-pose-until-first-command=True \
     --simulator.config.virtual-gantry.enabled=False \
+    "${bridge_args[@]}" \
     "${robot_args[@]}"

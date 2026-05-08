@@ -805,24 +805,28 @@ class MuJoCo(BaseSimulator):
             state = {}
             if "joint_pos" in data and data["joint_pos"].shape[1] >= 7:
                 root_qpos = np.asarray(data["joint_pos"][0, :7], dtype=np.float64)
-                state["robot_pos"] = root_qpos[:3].copy()
-                state["robot_quat_wxyz"] = root_qpos[3:7].copy()
-                if "joint_names" in data:
-                    joint_names = [
-                        item.decode("utf-8") if isinstance(item, (bytes, bytearray, np.bytes_)) else str(item)
-                        for item in np.asarray(data["joint_names"]).tolist()
-                    ]
-                    motion_dof_pos = np.asarray(data["joint_pos"][0, 7:], dtype=np.float64)
-                    state["joint_angles"] = {
-                        name: float(motion_dof_pos[joint_names.index(name)])
-                        for name in self.dof_names
-                        if name in joint_names
-                    }
+                default_pos = np.asarray(self.robot_config.init_state.pos, dtype=np.float64)
+                default_rot_xyzw = np.asarray(self.robot_config.init_state.rot, dtype=np.float64)
+                default_quat_wxyz = default_rot_xyzw[[3, 0, 1, 2]]
+                default_roll, default_pitch, _ = self._quat_wxyz_to_rpy(default_quat_wxyz)
+                _, _, motion_yaw = self._quat_wxyz_to_rpy(root_qpos[3:7])
+                state["robot_pos"] = np.asarray(
+                    [root_qpos[0], root_qpos[1], default_pos[2]],
+                    dtype=np.float64,
+                )
+                state["robot_quat_wxyz"] = self._quat_wxyz_from_rpy(default_roll, default_pitch, motion_yaw)
             else:
                 if "body_pos_w" in data:
-                    state["robot_pos"] = np.asarray(data["body_pos_w"][0, 0], dtype=np.float64).copy()
+                    motion_pos = np.asarray(data["body_pos_w"][0, 0], dtype=np.float64)
+                    default_pos = np.asarray(self.robot_config.init_state.pos, dtype=np.float64)
+                    state["robot_pos"] = np.asarray([motion_pos[0], motion_pos[1], default_pos[2]], dtype=np.float64)
                 if "body_quat_w" in data:
-                    state["robot_quat_wxyz"] = np.asarray(data["body_quat_w"][0, 0], dtype=np.float64).copy()
+                    motion_quat = np.asarray(data["body_quat_w"][0, 0], dtype=np.float64)
+                    default_rot_xyzw = np.asarray(self.robot_config.init_state.rot, dtype=np.float64)
+                    default_quat_wxyz = default_rot_xyzw[[3, 0, 1, 2]]
+                    default_roll, default_pitch, _ = self._quat_wxyz_to_rpy(default_quat_wxyz)
+                    _, _, motion_yaw = self._quat_wxyz_to_rpy(motion_quat)
+                    state["robot_quat_wxyz"] = self._quat_wxyz_from_rpy(default_roll, default_pitch, motion_yaw)
 
             if "object_pos_w" in data:
                 state["object_pos"] = np.asarray(data["object_pos_w"][0], dtype=np.float64)
@@ -832,11 +836,11 @@ class MuJoCo(BaseSimulator):
         self._motion_initial_state = state
         logger.info(
             "Loaded MuJoCo reset state from motion frame 0: path={}, robot_pos={}, "
-            "robot_quat_wxyz={}, joint_angles={}, object_pos={}, object_quat_wxyz={}",
+            "robot_quat_wxyz={}, robot_pose=default_standing_at_motion_xy_yaw, "
+            "joint_angles=robot_config_default, object_pos={}, object_quat_wxyz={}",
             path,
             state.get("robot_pos").tolist() if "robot_pos" in state else None,
             state.get("robot_quat_wxyz").tolist() if "robot_quat_wxyz" in state else None,
-            len(state.get("joint_angles", {})),
             state.get("object_pos").tolist() if "object_pos" in state else None,
             state.get("object_quat_wxyz").tolist() if "object_quat_wxyz" in state else None,
         )

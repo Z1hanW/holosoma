@@ -493,21 +493,17 @@ class WholeBodyTrackingPolicy(BasePolicy):
         yaw_tolerance_rad: float = 0.05,
         joint_tolerance_rad: float = 0.08,
     ) -> None:
+        if os.environ.get("HOLOSOMA_MJ_MOTION_INIT", "").strip().lower() not in {"1", "true", "yes", "on"}:
+            return
         if self._motion_root_quat_wxyz is None:
             return
 
         expected_yaw = quat_to_rpy(self._motion_root_quat_wxyz[0])[2]
-        if (
-            self._motion_joint_pos is not None
-            and os.environ.get("HOLOSOMA_MJ_MOTION_INIT", "").strip().lower() in {"1", "true", "yes", "on"}
-        ):
-            expected_q = self._motion_joint_pos[:1]
-        else:
-            expected_q = getattr(
-                self,
-                "_stiff_hold_q",
-                np.asarray(self.default_dof_angles, dtype=np.float32).reshape(1, -1),
-            )
+        expected_q = getattr(
+            self,
+            "_stiff_hold_q",
+            np.asarray(self.default_dof_angles, dtype=np.float32).reshape(1, -1),
+        )
         deadline = time.monotonic() + timeout_s
         last_yaw = None
         last_joint_error = None

@@ -4,19 +4,27 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 clip="${HOLOSOMA_MJ_MOTION:-box_75}"
 checkpoint="${HOLOSOMA_WANDB_CHECKPOINT:-}"
-run_ref="${HOLOSOMA_WANDB_RUN:-zihanw22/boxer/tvtwx4to}"
+run_ref="${HOLOSOMA_WANDB_RUN:-zihanw22/boxer/w5qostjn}"
 motion_init="${HOLOSOMA_MJ_MOTION_INIT:-0}"
 auto_start="${HOLOSOMA_RO_AUTO_START:-0}"
 auto_motion="${HOLOSOMA_RO_AUTO_MOTION:-0}"
+use_sim_state="${HOLOSOMA_RO_USE_SIM_STATE:-1}"
+explicit_motion_mode=0
+clip_arg_seen=0
+if [[ -n "${HOLOSOMA_MJ_MOTION_INIT:-}" ]]; then
+  explicit_motion_mode=1
+fi
 positional=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --motion-init)
       motion_init=1
+      explicit_motion_mode=1
       ;;
     --manual)
       motion_init=0
+      explicit_motion_mode=1
       ;;
     --auto-start|--rollout)
       auto_start=1
@@ -25,9 +33,16 @@ while [[ $# -gt 0 ]]; do
       auto_start=1
       auto_motion=1
       ;;
+    --use-sim-state)
+      use_sim_state=1
+      ;;
+    --no-sim-state)
+      use_sim_state=0
+      ;;
     --clip)
       shift
       clip="$1"
+      clip_arg_seen=1
       ;;
     --checkpoint)
       shift
@@ -46,12 +61,17 @@ done
 
 if (( ${#positional[@]} >= 1 )); then
   clip="${positional[0]}"
+  clip_arg_seen=1
 fi
 if (( ${#positional[@]} >= 2 )); then
   checkpoint="${positional[1]}"
 fi
 if (( ${#positional[@]} >= 3 )); then
   run_ref="${positional[2]}"
+fi
+
+if [[ "$explicit_motion_mode" == "0" && "$clip_arg_seen" == "1" ]]; then
+  motion_init=1
 fi
 
 motion_file="$clip"
@@ -69,10 +89,9 @@ export HOLOSOMA_WANDB_RUN="$run_ref"
 export HOLOSOMA_MJ_MOTION_INIT="$motion_init"
 export HOLOSOMA_RO_AUTO_START="$auto_start"
 export HOLOSOMA_RO_AUTO_MOTION="$auto_motion"
-export SIM_CLOCK_PORT="${SIM_CLOCK_PORT:-5655}"
-export SIM_STATE_PORT="${SIM_STATE_PORT:-5657}"
-export SIM_CONTROL_PORT="${SIM_CONTROL_PORT:-5659}"
-export HOLOSOMA_DDS_DOMAIN_ID="${HOLOSOMA_DDS_DOMAIN_ID:-37}"
+export HOLOSOMA_RO_USE_SIM_STATE="$use_sim_state"
+export SIM_CLOCK_PORT="${SIM_CLOCK_PORT:-5555}"
+export SIM_STATE_PORT="${SIM_STATE_PORT:-5557}"
 if [[ -z "${HOLOSOMA_POLICY_MOTION_INDEX_OFFSET:-}" ]]; then
   if [[ "$(basename "$clip" .npz)" == "box_75" ]]; then
     export HOLOSOMA_POLICY_MOTION_INDEX_OFFSET=1
@@ -102,17 +121,16 @@ from holosoma_inference.config.config_values.observation import wbt_object_perce
 from holosoma_inference.run_policy import run_policy
 from holosoma_inference.utils.wandb import load_checkpoint
 
-DEFAULT_RUN_PATH = "zihanw22/boxer/tvtwx4to"
+DEFAULT_RUN_PATH = "zihanw22/boxer/w5qostjn"
 MOTION_FILE = os.environ.get("HOLOSOMA_MJ_MOTION", "data_demo/box_75.npz")
 CHECKPOINT = os.environ.get("HOLOSOMA_WANDB_CHECKPOINT", "").strip()
 RUN_REF = os.environ.get("HOLOSOMA_WANDB_RUN", DEFAULT_RUN_PATH).strip() or DEFAULT_RUN_PATH
 AUTO_START_POLICY = os.environ.get("HOLOSOMA_RO_AUTO_START", "").strip().lower() in {"1", "true", "yes", "on"}
 AUTO_START_MOTION = os.environ.get("HOLOSOMA_RO_AUTO_MOTION", "").strip().lower() in {"1", "true", "yes", "on"}
-MOTION_INIT = os.environ.get("HOLOSOMA_MJ_MOTION_INIT", "").strip().lower() in {"1", "true", "yes", "on"}
-SIM_CLOCK_PORT = int(os.environ.get("SIM_CLOCK_PORT", "5655") or "5655")
-SIM_STATE_PORT = int(os.environ.get("SIM_STATE_PORT", "5657") or "5657")
-SIM_CONTROL_PORT = int(os.environ.get("SIM_CONTROL_PORT", "5659") or "5659")
-DOMAIN_ID = int(os.environ.get("HOLOSOMA_DDS_DOMAIN_ID", "37") or "37")
+USE_SIM_STATE = os.environ.get("HOLOSOMA_RO_USE_SIM_STATE", "1").strip().lower() in {"1", "true", "yes", "on"}
+SIM_CLOCK_PORT = int(os.environ.get("SIM_CLOCK_PORT", "5555") or "5555")
+SIM_STATE_PORT = int(os.environ.get("SIM_STATE_PORT", "5557") or "5557")
+DOMAIN_ID = int(os.environ.get("HOLOSOMA_DDS_DOMAIN_ID", "0") or "0")
 
 
 def normalize_run_path(run_ref: str) -> str:
@@ -153,7 +171,9 @@ RUN_PATH, CHECKPOINT = split_checkpoint_ref(CHECKPOINT, normalize_run_path(RUN_R
 )
 RUN_ID = RUN_PATH.rsplit("/", 1)[-1]
 if RUN_ID == "tvtwx4to":
-    os.environ.setdefault("HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND", "1")
+    os.environ["HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND"] = "1"
+else:
+    os.environ["HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND"] = "0"
 
 run = wandb.Api().run(RUN_PATH)
 onnx_files = [file for file in run.files() if file.name.endswith(".onnx")]
@@ -397,6 +417,18 @@ def observation_for_model(observation: ObservationConfig, expected_obs_dim: int,
             return observation
 
     base_obs_dict = {group: list(terms) for group, terms in observation.obs_dict.items()}
+    obs_dims = dict(observation.obs_dims)
+    obs_scales = dict(observation.obs_scales)
+    if "sparse_target_root_trajectory_command_contact_aware" in obs_dims:
+        obs_dims.setdefault(
+            "sparse_target_root_trajectory_command",
+            obs_dims["sparse_target_root_trajectory_command_contact_aware"],
+        )
+    if "sparse_target_root_trajectory_command_contact_aware" in obs_scales:
+        obs_scales.setdefault(
+            "sparse_target_root_trajectory_command",
+            obs_scales["sparse_target_root_trajectory_command_contact_aware"],
+        )
     candidate_obs_dict = {"perception_obs": base_obs_dict["perception_obs"]}
     candidate_history = {"perception_obs": observation.history_length_dict.get("perception_obs", 1)}
 
@@ -419,6 +451,8 @@ def observation_for_model(observation: ObservationConfig, expected_obs_dim: int,
     candidate = replace(
         observation,
         obs_dict=candidate_obs_dict,
+        obs_dims=obs_dims,
+        obs_scales=obs_scales,
         history_length_dict={
             **observation.history_length_dict,
             **candidate_history,
@@ -462,14 +496,13 @@ config = replace(
         model_path=local_model_path,
         interface="lo",
         domain_id=DOMAIN_ID,
+        rl_rate=50,
         motion_file=MOTION_FILE,
-        use_sim_time=MOTION_INIT,
+        use_sim_time=True,
         sim_clock_port=SIM_CLOCK_PORT,
-        use_sim_state=MOTION_INIT,
+        use_sim_state=USE_SIM_STATE,
         sim_state_port=SIM_STATE_PORT,
-        prefer_sim_ref_from_sim_state=MOTION_INIT,
-        use_zmq_lowcmd=MOTION_INIT,
-        sim_control_port=SIM_CONTROL_PORT,
+        prefer_sim_ref_from_sim_state=USE_SIM_STATE,
         auto_start_policy=AUTO_START_POLICY,
         auto_start_motion_clip=AUTO_START_MOTION,
     ),
@@ -480,16 +513,12 @@ print(f"[mj_ro] Local ONNX: {local_model_path}", flush=True)
 print(f"[mj_ro] Patched ONNX motion: {MOTION_FILE}", flush=True)
 print(f"[mj_ro] ONNX input dims: {input_dims}", flush=True)
 print(f"[mj_ro] DDS domain: {DOMAIN_ID}", flush=True)
+print(f"[mj_ro] Use sim state: {USE_SIM_STATE}", flush=True)
 print(
     f"[mj_ro] Zero sparse root command: {os.environ.get('HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND', '0')}",
     flush=True,
 )
-print(
-    "[mj_ro] Actor obs terms: "
-    f"root={observation.obs_dict.get('actor_obs_root_contact_aware')}, "
-    f"proprio={observation.obs_dict.get('actor_obs_proprio')}",
-    flush=True,
-)
+print(f"[mj_ro] Actor obs terms: {observation.obs_dict}", flush=True)
 print(f"[mj_ro] Auto start: policy={AUTO_START_POLICY}, motion_clip={AUTO_START_MOTION}", flush=True)
 run_policy(config)
 PY
