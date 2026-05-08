@@ -165,6 +165,7 @@ class MujocoRendererWrapper:
         if self._scene_option is None:
             self._scene_option = mujoco.MjvOption()
             self._scene_option.geomgroup[2] = 0
+            self._scene_option.geomgroup[3] = 0
         return self._scene_option
 
     @property
@@ -296,6 +297,24 @@ class MuJoCo(BaseSimulator):
         self._mujoco_lock = threading.RLock()
         self._motion_initial_state: dict[str, np.ndarray] | None = None
         self._reset_requested = False
+        self._hold_motion_init_until_command = os.environ.get(
+            "HOLOSOMA_MUJOCO_HOLD_MOTION_INIT_UNTIL_COMMAND", ""
+        ).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        self._logged_motion_init_hold = False
+        self._lift_debug_enabled = os.environ.get("HOLOSOMA_MJ_DEBUG_LIFT_TELEMETRY", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        self._lift_debug_next_time = 0.0
+        self._lift_debug_initial_object_z: float | None = None
+        self._lift_debug_max_object_z: float | None = None
 
         # World ID for multi-environment visualization (which environment to view)
         self.current_world_id: int = 0
@@ -507,6 +526,7 @@ class MuJoCo(BaseSimulator):
         # Setup robot indexes, etc
         self._set_robot_properties()
         self._set_robot_joint_addressing()
+        self._set_motion_reset_qpos0()
         self._apply_default_reset_state()
 
         # Initialize rgb/depth renderer wrapper
@@ -553,6 +573,8 @@ class MuJoCo(BaseSimulator):
             self.scene_manager.add_terrain(terrain_state, self.training_config.num_envs)
             self.scene_manager.add_lighting()
             self.scene_manager.add_materials()
+
+        self.scene_manager.add_origin_marker()
 
         # Always add robot after terrain, in case it references ground/floor, etc for contacts
         self.scene_manager.add_robot(
@@ -673,8 +695,16 @@ class MuJoCo(BaseSimulator):
         assert self.root_model
         assert self.root_data
 
-        joint_angles = self.robot_config.init_state.default_joint_angles
-        logger.info("Setting initial joint angles from robot config")
+        motion_state = self._get_motion_initial_state()
+        joint_angles = (
+            motion_state.get("joint_angles")
+            if motion_state is not None and "joint_angles" in motion_state
+            else self.robot_config.init_state.default_joint_angles
+        )
+        logger.info(
+            "Setting initial joint angles from {}",
+            "motion frame 0" if motion_state is not None and "joint_angles" in motion_state else "robot config",
+        )
 
         joint_angles_set = 0
         joint_angles_failed = 0
@@ -722,9 +752,46 @@ class MuJoCo(BaseSimulator):
         mujoco.mj_forward(self.root_model, self.root_data)
         logger.info("Applied forward kinematics with initial joint angles")
 
+    @staticmethod
+    def _quat_wxyz_to_rpy(quat: np.ndarray) -> tuple[float, float, float]:
+        w, x, y, z = [float(v) for v in quat]
+        sinr_cosp = 2.0 * (w * x + y * z)
+        cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+        roll = float(np.arctan2(sinr_cosp, cosr_cosp))
+
+        sinp = 2.0 * (w * y - z * x)
+        pitch = float(np.arcsin(np.clip(sinp, -1.0, 1.0)))
+
+        siny_cosp = 2.0 * (w * z + x * y)
+        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+        yaw = float(np.arctan2(siny_cosp, cosy_cosp))
+        return roll, pitch, yaw
+
+    @staticmethod
+    def _quat_wxyz_from_rpy(roll: float, pitch: float, yaw: float) -> np.ndarray:
+        cr = np.cos(roll * 0.5)
+        sr = np.sin(roll * 0.5)
+        cp = np.cos(pitch * 0.5)
+        sp = np.sin(pitch * 0.5)
+        cy = np.cos(yaw * 0.5)
+        sy = np.sin(yaw * 0.5)
+        return np.asarray(
+            [
+                cr * cp * cy + sr * sp * sy,
+                sr * cp * cy - cr * sp * sy,
+                cr * sp * cy + sr * cp * sy,
+                cr * cp * sy - sr * sp * cy,
+            ],
+            dtype=np.float64,
+        )
+
     def _get_motion_initial_state(self) -> dict[str, np.ndarray] | None:
         if self._motion_initial_state is not None:
             return self._motion_initial_state
+
+        motion_init = os.environ.get("HOLOSOMA_MJ_MOTION_INIT", "").strip().lower()
+        if motion_init not in {"1", "true", "yes", "on"}:
+            return None
 
         motion_file = os.environ.get("HOLOSOMA_MJ_MOTION", "").strip()
         if not motion_file:
@@ -736,13 +803,43 @@ class MuJoCo(BaseSimulator):
 
         with np.load(path, allow_pickle=True) as data:
             state = {}
+            if "joint_pos" in data and data["joint_pos"].shape[1] >= 7:
+                root_qpos = np.asarray(data["joint_pos"][0, :7], dtype=np.float64)
+                state["robot_pos"] = root_qpos[:3].copy()
+                state["robot_quat_wxyz"] = root_qpos[3:7].copy()
+                if "joint_names" in data:
+                    joint_names = [
+                        item.decode("utf-8") if isinstance(item, (bytes, bytearray, np.bytes_)) else str(item)
+                        for item in np.asarray(data["joint_names"]).tolist()
+                    ]
+                    motion_dof_pos = np.asarray(data["joint_pos"][0, 7:], dtype=np.float64)
+                    state["joint_angles"] = {
+                        name: float(motion_dof_pos[joint_names.index(name)])
+                        for name in self.dof_names
+                        if name in joint_names
+                    }
+            else:
+                if "body_pos_w" in data:
+                    state["robot_pos"] = np.asarray(data["body_pos_w"][0, 0], dtype=np.float64).copy()
+                if "body_quat_w" in data:
+                    state["robot_quat_wxyz"] = np.asarray(data["body_quat_w"][0, 0], dtype=np.float64).copy()
+
             if "object_pos_w" in data:
                 state["object_pos"] = np.asarray(data["object_pos_w"][0], dtype=np.float64)
             if "object_quat_w" in data:
                 state["object_quat_wxyz"] = np.asarray(data["object_quat_w"][0], dtype=np.float64)
 
         self._motion_initial_state = state
-        logger.info("Loaded MuJoCo object reset state from motion frame 0: {}", path)
+        logger.info(
+            "Loaded MuJoCo reset state from motion frame 0: path={}, robot_pos={}, "
+            "robot_quat_wxyz={}, joint_angles={}, object_pos={}, object_quat_wxyz={}",
+            path,
+            state.get("robot_pos").tolist() if "robot_pos" in state else None,
+            state.get("robot_quat_wxyz").tolist() if "robot_quat_wxyz" in state else None,
+            len(state.get("joint_angles", {})),
+            state.get("object_pos").tolist() if "object_pos" in state else None,
+            state.get("object_quat_wxyz").tolist() if "object_quat_wxyz" in state else None,
+        )
         return self._motion_initial_state
 
     def _get_robot_initial_root_state(self) -> tuple[list[float], list[float], list[float], list[float]]:
@@ -750,6 +847,12 @@ class MuJoCo(BaseSimulator):
         initial_rot = list(self.robot_config.init_state.rot)  # xyzw
         initial_lin_vel = list(self.robot_config.init_state.lin_vel)
         initial_ang_vel = list(self.robot_config.init_state.ang_vel)
+        motion_state = self._get_motion_initial_state()
+        if motion_state is not None and "robot_pos" in motion_state:
+            initial_pos = motion_state["robot_pos"].tolist()
+            if "robot_quat_wxyz" in motion_state:
+                quat_wxyz = motion_state["robot_quat_wxyz"].tolist()
+                initial_rot = [quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]]
         return initial_pos, initial_rot, initial_lin_vel, initial_ang_vel
 
     def get_supported_scene_formats(self) -> list[str]:
@@ -854,6 +957,29 @@ class MuJoCo(BaseSimulator):
         self.root_data.qpos[qpos_addr + 3 : qpos_addr + 7] = motion_state["object_quat_wxyz"]
         self.root_data.qvel[qvel_addr : qvel_addr + 6] = 0.0
 
+    def _set_motion_reset_qpos0(self) -> None:
+        motion_state = self._get_motion_initial_state()
+        if motion_state is None:
+            return
+
+        if (
+            self.robot_qpos_addr is not None
+            and "robot_pos" in motion_state
+            and "robot_quat_wxyz" in motion_state
+        ):
+            self.root_model.qpos0[self.robot_qpos_addr : self.robot_qpos_addr + 3] = motion_state["robot_pos"]
+            self.root_model.qpos0[self.robot_qpos_addr + 3 : self.robot_qpos_addr + 7] = motion_state[
+                "robot_quat_wxyz"
+            ]
+
+        object_joint_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_JOINT, "object_freejoint")
+        if object_joint_id != -1 and "object_pos" in motion_state and "object_quat_wxyz" in motion_state:
+            qpos_addr = self.root_model.jnt_qposadr[object_joint_id]
+            self.root_model.qpos0[qpos_addr : qpos_addr + 3] = motion_state["object_pos"]
+            self.root_model.qpos0[qpos_addr + 3 : qpos_addr + 7] = motion_state["object_quat_wxyz"]
+
+        logger.info("Set MuJoCo qpos0 root/object reset reference from motion frame 0")
+
     def _apply_default_reset_state(self) -> None:
         self._set_robot_initial_state()
         self._set_initial_joint_angles()
@@ -867,18 +993,273 @@ class MuJoCo(BaseSimulator):
         assert self.robot_qpos_addr is not None
 
         root_qpos = self.root_data.qpos[self.robot_qpos_addr : self.robot_qpos_addr + 7].tolist()
+        reset_source = "motion frame 0" if self._motion_initial_state is not None else "robot config"
         object_joint_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_JOINT, "object_freejoint")
         if object_joint_id == -1:
-            logger.info("Applied reset state: robot_root_qpos={}", root_qpos)
+            logger.info("Applied reset state from {}: robot_root_qpos={}", reset_source, root_qpos)
             return
 
         object_qpos_addr = self.root_model.jnt_qposadr[object_joint_id]
         object_qpos = self.root_data.qpos[object_qpos_addr : object_qpos_addr + 7].tolist()
         logger.info(
-            "Applied reset state: robot_root_qpos={}, object_qpos={}",
+            "Applied reset state from {}: robot_root_qpos={}, object_qpos={}",
+            reset_source,
             root_qpos,
             object_qpos,
         )
+        self._reset_lift_debug_reference()
+
+    def _object_freejoint_qpos_addr(self) -> int | None:
+        assert self.root_model is not None
+        object_joint_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_JOINT, "object_freejoint")
+        if object_joint_id == -1:
+            return None
+        return int(self.root_model.jnt_qposadr[object_joint_id])
+
+    def _object_body_id(self) -> int | None:
+        assert self.root_model is not None
+        object_body_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_BODY, "object")
+        if object_body_id != -1:
+            return int(object_body_id)
+        for body_id in range(self.root_model.nbody):
+            body_name = mujoco.mj_id2name(self.root_model, mujoco.mjtObj.mjOBJ_BODY, body_id) or ""
+            if body_name.startswith("object"):
+                return body_id
+        return None
+
+    def _reset_lift_debug_reference(self) -> None:
+        if not self._lift_debug_enabled:
+            return
+        object_qpos_addr = self._object_freejoint_qpos_addr()
+        if object_qpos_addr is None:
+            return
+        object_z = float(self.root_data.qpos[object_qpos_addr + 2])
+        self._lift_debug_initial_object_z = object_z
+        self._lift_debug_max_object_z = object_z
+        self._lift_debug_next_time = float(self.root_data.time)
+
+    def _log_lift_debug_state(self) -> None:
+        if not self._lift_debug_enabled:
+            return
+        assert self.root_model is not None
+        assert self.root_data is not None
+        if float(self.root_data.time) + 1e-9 < self._lift_debug_next_time:
+            return
+
+        object_qpos_addr = self._object_freejoint_qpos_addr()
+        object_body_id = self._object_body_id()
+        if object_qpos_addr is None or object_body_id is None:
+            return
+
+        object_pos = self.root_data.qpos[object_qpos_addr : object_qpos_addr + 3].copy()
+        object_z = float(object_pos[2])
+        if self._lift_debug_initial_object_z is None:
+            self._lift_debug_initial_object_z = object_z
+        self._lift_debug_max_object_z = max(self._lift_debug_max_object_z or object_z, object_z)
+        object_dz = object_z - float(self._lift_debug_initial_object_z)
+
+        object_contact_count = 0
+        robot_contact_count = 0
+        terrain_contact_count = 0
+        contact_names: list[str] = []
+        robot_contact_names: list[str] = []
+        forcetorque = np.zeros(6, dtype=np.float64)
+        object_force_world = np.zeros(3, dtype=np.float64)
+        robot_force_world = np.zeros(3, dtype=np.float64)
+        terrain_force_world = np.zeros(3, dtype=np.float64)
+        max_robot_contact_force = 0.0
+        for contact_idx in range(self.root_data.ncon):
+            contact = self.root_data.contact[contact_idx]
+            geom_ids = (int(contact.geom1), int(contact.geom2))
+            body_ids = [int(self.root_model.geom_bodyid[geom_id]) for geom_id in geom_ids]
+            body_names = [
+                mujoco.mj_id2name(self.root_model, mujoco.mjtObj.mjOBJ_BODY, body_id) or ""
+                for body_id in body_ids
+            ]
+            has_object = object_body_id in body_ids or any(name.startswith("object") for name in body_names)
+            if not has_object:
+                continue
+            object_contact_count += 1
+            other_names = [name for name in body_names if not name.startswith("object")]
+            mujoco.mj_contactForce(self.root_model, self.root_data, contact_idx, forcetorque)
+            contact_force_world = np.asarray(contact.frame, dtype=np.float64).reshape(3, 3).T @ forcetorque[:3]
+            if body_ids[0] == object_body_id:
+                force_on_object_world = -contact_force_world
+            elif body_ids[1] == object_body_id:
+                force_on_object_world = contact_force_world
+            else:
+                force_on_object_world = np.zeros(3, dtype=np.float64)
+            object_force_world += force_on_object_world
+            if any(name == "world" or "terrain" in name or "floor" in name for name in other_names):
+                terrain_contact_count += 1
+                terrain_force_world += force_on_object_world
+            elif other_names:
+                robot_contact_count += 1
+                robot_force_world += force_on_object_world
+                max_robot_contact_force = max(max_robot_contact_force, float(np.linalg.norm(force_on_object_world)))
+                if len(robot_contact_names) < 6:
+                    geom_names = [
+                        mujoco.mj_id2name(self.root_model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or str(geom_id)
+                        for geom_id in geom_ids
+                    ]
+                    robot_contact_names.append("/".join(geom_names))
+            if len(contact_names) < 4:
+                geom_names = [
+                    mujoco.mj_id2name(self.root_model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or str(geom_id)
+                    for geom_id in geom_ids
+                ]
+                contact_names.append("/".join(geom_names))
+
+        object_xpos = self.root_data.xpos[object_body_id]
+        nearest: list[tuple[float, str]] = []
+        for body_id in range(1, self.root_model.nbody):
+            if body_id == object_body_id:
+                continue
+            body_name = mujoco.mj_id2name(self.root_model, mujoco.mjtObj.mjOBJ_BODY, body_id) or ""
+            if body_name.startswith("object") or body_name == "world":
+                continue
+            dist = float(np.linalg.norm(self.root_data.xpos[body_id] - object_xpos))
+            nearest.append((dist, body_name))
+        nearest.sort(key=lambda item: item[0])
+        nearest_summary = ",".join(f"{name}:{dist:.3f}" for dist, name in nearest[:4])
+        contacts_summary = ",".join(contact_names) if contact_names else "none"
+        robot_contacts_summary = ",".join(robot_contact_names) if robot_contact_names else "none"
+        robot_pos_summary = "unknown"
+        robot_yaw = 0.0
+        if self.robot_qpos_addr is not None:
+            robot_root_qpos = self.root_data.qpos[self.robot_qpos_addr : self.robot_qpos_addr + 7]
+            robot_yaw = self._quat_wxyz_to_rpy(robot_root_qpos[3:7])[2]
+            robot_pos_summary = "{:.3f},{:.3f},{:.3f}".format(
+                float(robot_root_qpos[0]),
+                float(robot_root_qpos[1]),
+                float(robot_root_qpos[2]),
+            )
+
+        logger.info(
+            "LiftTelemetry t={:.2f} object_pos=[{:.3f},{:.3f},{:.3f}] dz={:.3f} max_dz={:.3f} "
+            "contacts object={} robot={} terrain={} object_force=[{:.2f},{:.2f},{:.2f}] "
+            "robot_force_z={:.2f} terrain_force_z={:.2f} max_robot_contact_force={:.2f} "
+            "robot_pos=[{}] robot_yaw={:.3f} nearest={} contact_geoms={} robot_contact_geoms={}",
+            float(self.root_data.time),
+            float(object_pos[0]),
+            float(object_pos[1]),
+            object_z,
+            object_dz,
+            float((self._lift_debug_max_object_z or object_z) - float(self._lift_debug_initial_object_z)),
+            object_contact_count,
+            robot_contact_count,
+            terrain_contact_count,
+            float(object_force_world[0]),
+            float(object_force_world[1]),
+            float(object_force_world[2]),
+            float(robot_force_world[2]),
+            float(terrain_force_world[2]),
+            max_robot_contact_force,
+            robot_pos_summary,
+            robot_yaw,
+            nearest_summary,
+            contacts_summary,
+            robot_contacts_summary,
+        )
+        self._lift_debug_next_time = float(self.root_data.time) + 0.5
+
+    def _get_split_sim_state_extra_payload(self) -> dict[str, object]:
+        assert self.root_model is not None
+        assert self.root_data is not None
+
+        payload: dict[str, object] = {}
+        if self.robot_qpos_addr is not None and self.robot_freejoint_id is not None:
+            root_body_id = int(self.root_model.jnt_bodyid[self.robot_freejoint_id])
+            root_qpos = self.root_data.qpos[self.robot_qpos_addr : self.robot_qpos_addr + 7]
+            root_vel = np.zeros(6, dtype=np.float64)
+            mujoco.mj_objectVelocity(
+                self.root_model,
+                self.root_data,
+                mujoco.mjtObj.mjOBJ_BODY,
+                root_body_id,
+                root_vel,
+                0,
+            )
+            payload["robot_root_state"] = [
+                float(root_qpos[0]),
+                float(root_qpos[1]),
+                float(root_qpos[2]),
+                float(root_qpos[4]),
+                float(root_qpos[5]),
+                float(root_qpos[6]),
+                float(root_qpos[3]),
+                float(root_vel[3]),
+                float(root_vel[4]),
+                float(root_vel[5]),
+                float(root_vel[0]),
+                float(root_vel[1]),
+                float(root_vel[2]),
+            ]
+
+        ref_body_name = getattr(self.robot_config, "torso_name", None) or "torso_link"
+        ref_body_id = mujoco.mj_name2id(
+            self.root_model,
+            mujoco.mjtObj.mjOBJ_BODY,
+            self._get_prefixed_name(ref_body_name),
+        )
+        if ref_body_id != -1:
+            ref_pos = self.root_data.xpos[ref_body_id]
+            ref_quat_mj = self.root_data.xquat[ref_body_id]
+            body_vel = np.zeros(6, dtype=np.float64)
+            mujoco.mj_objectVelocity(
+                self.root_model,
+                self.root_data,
+                mujoco.mjtObj.mjOBJ_BODY,
+                ref_body_id,
+                body_vel,
+                0,
+            )
+            payload["robot_ref_body_name"] = ref_body_name
+            payload["robot_ref_state"] = [
+                float(ref_pos[0]),
+                float(ref_pos[1]),
+                float(ref_pos[2]),
+                float(ref_quat_mj[1]),
+                float(ref_quat_mj[2]),
+                float(ref_quat_mj[3]),
+                float(ref_quat_mj[0]),
+                float(body_vel[3]),
+                float(body_vel[4]),
+                float(body_vel[5]),
+                float(body_vel[0]),
+                float(body_vel[1]),
+                float(body_vel[2]),
+            ]
+
+        object_body_id = self._object_body_id()
+        if object_body_id is not None:
+            object_pos = self.root_data.xpos[object_body_id]
+            object_quat_mj = self.root_data.xquat[object_body_id]
+            object_vel = np.zeros(6, dtype=np.float64)
+            mujoco.mj_objectVelocity(
+                self.root_model,
+                self.root_data,
+                mujoco.mjtObj.mjOBJ_BODY,
+                object_body_id,
+                object_vel,
+                0,
+            )
+            payload["object_state"] = [
+                float(object_pos[0]),
+                float(object_pos[1]),
+                float(object_pos[2]),
+                float(object_quat_mj[1]),
+                float(object_quat_mj[2]),
+                float(object_quat_mj[3]),
+                float(object_quat_mj[0]),
+                float(object_vel[3]),
+                float(object_vel[4]),
+                float(object_vel[5]),
+                float(object_vel[0]),
+                float(object_vel[1]),
+                float(object_vel[2]),
+            ]
+        return payload
 
     def reset(self) -> None:
         assert self.root_model is not None
@@ -889,6 +1270,23 @@ class MuJoCo(BaseSimulator):
             self._zero_commands()
             if self.bridge is not None and hasattr(self.bridge, "reset_command_state"):
                 self.bridge.reset_command_state()
+            self._logged_motion_init_hold = False
+
+    def _received_external_active_command(self) -> bool:
+        if self.bridge is None:
+            return False
+        has_received = getattr(self.bridge, "has_received_external_active_command", None)
+        if callable(has_received):
+            return bool(has_received())
+        robot_bridge = getattr(self.bridge, "robot_bridge", None)
+        return bool(getattr(robot_bridge, "received_external_active_command", False))
+
+    def _should_hold_motion_init_until_command(self) -> bool:
+        return (
+            self._hold_motion_init_until_command
+            and self._get_motion_initial_state() is not None
+            and not self._received_external_active_command()
+        )
 
     def prepare_sim(self) -> None:
         """Prepare simulation - enhanced implementation with ObjectRegistry integration.
@@ -1138,7 +1536,7 @@ class MuJoCo(BaseSimulator):
             if self._reset_requested:
                 self._reset_requested = False
                 self.reset()
-                logger.info("Reset MuJoCo state to WBT default root/object pose")
+                logger.info("Reset MuJoCo state")
                 return
 
             if self.virtual_gantry:
@@ -1147,9 +1545,16 @@ class MuJoCo(BaseSimulator):
 
             # Step bridge for updated torques before step using base class helper
             self._step_bridge()
+            if self._should_hold_motion_init_until_command():
+                if not self._logged_motion_init_hold:
+                    logger.info("Holding motion-init frame 0 until first external active lowcmd arrives")
+                    self._logged_motion_init_hold = True
+                self._log_lift_debug_state()
+                return
 
             # Delegate simulation step to backend
             self.backend.step()
+            self._log_lift_debug_state()
 
             # Call video recorder capture frame if recording is active
             if self.video_recorder and self.video_recorder.is_recording:

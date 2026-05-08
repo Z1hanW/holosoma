@@ -20,6 +20,7 @@ from termcolor import colored
 from holosoma_inference.config.config_types.inference import InferenceConfig
 from holosoma_inference.config.config_types.robot import RobotConfig
 from holosoma_inference.sdk import create_interface
+from holosoma_inference.sdk.zmq_interface_wrapper import ZmqSimInterfaceWrapper
 from holosoma_inference.utils.latency import LatencyTracker
 from holosoma_inference.utils.math.quat import quat_rotate_inverse
 from holosoma_inference.utils.rate import RateLimiter
@@ -90,6 +91,8 @@ class BasePolicy:
 
     def _init_sdk_components(self):
         """Additional SDK components initialization based on robot type."""
+        if bool(getattr(self.config.task, "use_zmq_lowcmd", False)):
+            return
         self.sdk_type = self.robot_config.sdk_type
         if self.sdk_type == "booster":
             from booster_robotics_sdk import ChannelFactory
@@ -120,7 +123,7 @@ class BasePolicy:
         self.obs_buf_dict: dict[str, np.ndarray] = {}
 
         for group, term_names in self.obs_dict.items():
-            self.obs_terms_sorted[group] = term_names
+            self.obs_terms_sorted[group] = sorted(term_names)
             history_len = self.history_length_dict.get(group, 1)
             self.obs_history_buffers[group] = {}
             flattened_terms: list[np.ndarray] = []
@@ -135,16 +138,25 @@ class BasePolicy:
     def _init_communication_components(self):
         """Initialize appropriate robot interface."""
 
-        self.interface = create_interface(
-            self.robot_config,
-            self.config.task.domain_id,
-            self.config.task.interface,
-            self.config.task.use_joystick,
-        )
+        if bool(getattr(self.config.task, "use_zmq_lowcmd", False)):
+            self.interface = ZmqSimInterfaceWrapper(
+                self.robot_config,
+                sim_state_port=self.config.task.sim_state_port,
+                sim_control_port=self.config.task.sim_control_port,
+                use_joystick=self.config.task.use_joystick,
+            )
+        else:
+            self.interface = create_interface(
+                self.robot_config,
+                self.config.task.domain_id,
+                self.config.task.interface,
+                self.config.task.use_joystick,
+            )
 
     def _init_policy_components(self, model_path, policy_action_scale, rl_rate):
         """Initialize policy-related components."""
-        self.policy_action_scale = policy_action_scale
+        self.policy_action_scale = float(policy_action_scale)
+        self.policy_action_scales = np.full((1, self.num_dofs), self.policy_action_scale, dtype=np.float32)
         self.rl_rate = rl_rate
         self.model_paths = self._collect_model_paths(model_path)
         self._policy_states: list[dict] = []
@@ -203,6 +215,8 @@ class BasePolicy:
             "policy_callable": self.policy,
             "onnx_kp": self.onnx_kp,
             "onnx_kd": self.onnx_kd,
+            "policy_action_scale": self.policy_action_scale,
+            "policy_action_scales": self.policy_action_scales.copy(),
         }
 
     def _restore_policy_state(self, state: dict):
@@ -213,6 +227,8 @@ class BasePolicy:
         self.policy = state["policy_callable"]
         self.onnx_kp = state["onnx_kp"]
         self.onnx_kd = state["onnx_kd"]
+        self.policy_action_scale = state["policy_action_scale"]
+        self.policy_action_scales = state["policy_action_scales"].copy()
 
     def _activate_policy(self, index: int, announce: bool = True):
         """Activate a preloaded policy."""
@@ -337,8 +353,6 @@ class BasePolicy:
         if not sys.stdin.isatty():
             self.logger.warning("Not running in a TTY environment - keyboard input disabled")
             self.logger.warning("This is normal for automated tests or non-interactive environments")
-            self.logger.info("Auto-starting policy in non-interactive mode")
-            self.use_policy_action = True
             return
         # Start keyboard listener in a daemon thread
         threading.Thread(target=self.start_key_listener, daemon=True).start()
@@ -373,6 +387,8 @@ class BasePolicy:
         if self.onnx_kp is not None:
             logger.info(f"Loaded KP/KD from ONNX metadata: {Path(model_path).name}")
 
+        self._set_policy_action_scales_from_metadata(metadata)
+
         def policy_act(obs_dict):
             # For example,obs_dict contains:
             # {
@@ -385,6 +401,88 @@ class BasePolicy:
             return outputs[0]  # just return outputs[0] as only "action" is needed
 
         self.policy = policy_act
+
+    def _resolve_motor_kp_from_control_cfg(self, control_cfg: dict) -> np.ndarray | None:
+        stiffness_cfg = control_cfg.get("stiffness", {})
+        if not isinstance(stiffness_cfg, dict):
+            return None
+
+        joint_kp = np.zeros(self.num_dofs, dtype=np.float32)
+        for joint_idx, dof_name in enumerate(self.dof_names):
+            matches = [pattern for pattern in stiffness_cfg if pattern in dof_name]
+            if len(matches) != 1:
+                return None
+            joint_kp[joint_idx] = float(stiffness_cfg[matches[0]])
+
+        motor_kp = np.zeros(self.robot_config.num_motors, dtype=np.float32)
+        for joint_idx, motor_idx in enumerate(self.robot_config.joint2motor):
+            motor_kp[int(motor_idx)] = joint_kp[joint_idx]
+        return motor_kp
+
+    def _set_policy_action_scales_from_metadata(self, metadata: dict) -> None:
+        scale_array = np.full((self.num_dofs,), self.policy_action_scale, dtype=np.float32)
+
+        experiment_cfg = metadata.get("experiment_config", {})
+        if not isinstance(experiment_cfg, dict):
+            self.policy_action_scales = scale_array.reshape(1, -1)
+            return
+
+        robot_cfg = experiment_cfg.get("robot", {})
+        control_cfg = robot_cfg.get("control", {}) if isinstance(robot_cfg, dict) else {}
+        if not isinstance(control_cfg, dict):
+            self.policy_action_scales = scale_array.reshape(1, -1)
+            return
+
+        base_scale = control_cfg.get("action_scale")
+        if base_scale is not None:
+            self.policy_action_scale = float(base_scale)
+            scale_array.fill(self.policy_action_scale)
+
+        if not control_cfg.get("action_scales_by_effort_limit_over_p_gain", False):
+            self.policy_action_scales = scale_array.reshape(1, -1)
+            logger.info(
+                "Using ONNX metadata scalar action scale: base={} final_min={:.6f} final_max={:.6f}",
+                self.policy_action_scale,
+                float(np.min(scale_array)),
+                float(np.max(scale_array)),
+            )
+            return
+
+        motor_kp = self.onnx_kp
+        if motor_kp is None:
+            motor_kp = self._resolve_motor_kp_from_control_cfg(control_cfg)
+        effort_limits = robot_cfg.get("dof_effort_limit_list") if isinstance(robot_cfg, dict) else None
+        if motor_kp is None or not isinstance(effort_limits, list):
+            logger.warning("Training metadata requested per-joint action scaling, but KP/effort data was unavailable.")
+            self.policy_action_scales = scale_array.reshape(1, -1)
+            return
+
+        motor_kp = np.asarray(motor_kp, dtype=np.float32)
+        joint_effort = np.asarray(effort_limits, dtype=np.float32)
+        if motor_kp.shape[0] != self.robot_config.num_motors or joint_effort.shape[0] != self.num_dofs:
+            logger.warning(
+                "Skipping per-joint action scaling due to shape mismatch: kp={}, effort={}, num_dofs={}",
+                motor_kp.shape,
+                joint_effort.shape,
+                self.num_dofs,
+            )
+            self.policy_action_scales = scale_array.reshape(1, -1)
+            return
+
+        for joint_idx, motor_idx in enumerate(self.robot_config.joint2motor):
+            stiffness = float(motor_kp[int(motor_idx)])
+            effort = float(joint_effort[joint_idx])
+            scale_array[joint_idx] = 0.0 if stiffness == 0.0 else self.policy_action_scale * effort / stiffness
+
+        self.policy_action_scales = scale_array.reshape(1, -1)
+        logger.info(
+            "Using training-aligned per-joint action scales from ONNX metadata: "
+            "base={} final_min={:.6f} final_max={:.6f} final_mean={:.6f}",
+            self.policy_action_scale,
+            float(np.min(scale_array)),
+            float(np.max(scale_array)),
+            float(np.mean(scale_array)),
+        )
 
     def _resolve_control_gains(self):
         """Resolve KP/KD values with priority: config override > ONNX metadata > error.
@@ -465,10 +563,9 @@ class BasePolicy:
             self._print_observations(obs)
 
         policy_action = self.policy(obs)
-        policy_action = np.clip(policy_action, -100, 100)
 
         self.last_policy_action = policy_action.copy()
-        self.scaled_policy_action = policy_action * self.policy_action_scale
+        self.scaled_policy_action = policy_action * self.policy_action_scales
 
         return self.scaled_policy_action
 
@@ -574,6 +671,26 @@ class BasePolicy:
         # deadcode path: where do we use self.obs_buf_dict?
         self.obs_buf_dict = {group: value.copy() for group, value in group_outputs.items()}
         return group_outputs
+
+    def warm_start_observation_history(self) -> None:
+        """Fill observation history with the current frame before automatic rollout start."""
+        robot_state_data = self.interface.get_low_state()
+        current_obs_buffer_dict = self.get_current_obs_buffer_dict(robot_state_data)
+        current_obs_dict = self.parse_current_obs_dict(current_obs_buffer_dict)
+
+        for group, term_dict in current_obs_dict.items():
+            history_len = self.history_length_dict.get(group, 1)
+            for term in self.obs_terms_sorted[group]:
+                obs = np.asarray(term_dict[term], dtype=np.float32, order="C")
+                if obs.ndim == 1:
+                    obs = obs.reshape(1, -1)
+                buffer = self.obs_history_buffers[group][term]
+                buffer.clear()
+                for _ in range(history_len):
+                    buffer.append(obs.copy())
+
+        self._update_obs_history(current_obs_dict)
+        logger.info("Warm-started observation history from current robot state")
 
     def prepare_obs_for_rl(self, robot_state_data):
         """Prepare observations for RL inference."""

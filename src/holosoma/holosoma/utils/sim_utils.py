@@ -638,6 +638,9 @@ class DirectSimulation:
             crop_y_end=props.crop_y_end,
             crop_x_start=props.crop_x_start,
             crop_x_end=props.crop_x_end,
+            frame_rate=props.frame_rate,
+            latency_frame=props.latency_frame,
+            buffer_len=props.buffer_len,
         )
 
         # Also sync the visualizer clip range so depth display is correct
@@ -672,4 +675,3 @@ class DirectSimulation:
         fps = 1000 / elapsed
         logger.info(f"Simulation FPS: {fps:.1f}")
         return time.time()
-

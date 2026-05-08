@@ -459,6 +459,27 @@ class BridgeConfig:
     interface: str | None = None
     """Network interface for robot communication. Auto-detected if None."""
 
+    clock_port: int = 5555
+    """ZMQ port used to publish simulator clock ticks for policy synchronization."""
+
+    publish_sim_state: bool = False
+    """Publish simulator robot/object state over ZMQ for split sim2sim inference."""
+
+    sim_state_port: int = 5557
+    """ZMQ port used to publish split simulator state."""
+
+    listen_control: bool = False
+    """Listen for split sim2sim control requests and lowcmd payloads."""
+
+    control_port: int = 5559
+    """ZMQ port used to receive split sim2sim control requests."""
+
+    use_zmq_lowcmd: bool = False
+    """Use split sim-control ZMQ lowcmd instead of Unitree DDS."""
+
+    log_first_command_summary: bool = False
+    """Log summaries for the first active split/DDS lowcmd received by the bridge."""
+
     # Rate limiting
     rate_limit_dt: float | None = None
     """Rate limiting timestep. If None, uses simulation timestep."""

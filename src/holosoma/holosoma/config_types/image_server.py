@@ -69,6 +69,7 @@ class ImageServerConfig:
 
     near_clip: float = 0.1
     far_clip: float = 2.0
+    min_valid_depth: float | None = None
 
     resized_height: int = 27
     resized_width: int = 48

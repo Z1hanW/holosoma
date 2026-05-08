@@ -312,7 +312,6 @@ class BlindFallRecoveryPolicy(BasePolicy):
             self._print_observations(obs_dict)
 
         policy_action = self.policy(obs_dict)
-        policy_action = np.clip(policy_action, -100, 100)
 
         # Advance time_step for motion-tracking models
         if self._needs_time_step:

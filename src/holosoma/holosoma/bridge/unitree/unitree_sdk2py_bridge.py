@@ -151,6 +151,16 @@ class UnitreeSdk2Bridge(BasicSdk2Bridge):
             self.torques.fill(0.0)
             return
         if self._is_active_command(incoming_cmd):
+            if not self._received_external_active_command:
+                kp = np.asarray(incoming_cmd.kp, dtype=np.float32)
+                kd = np.asarray(incoming_cmd.kd, dtype=np.float32)
+                q_target = np.asarray(incoming_cmd.q_target, dtype=np.float32)
+                logger.info(
+                    "Received first external active lowcmd: kp_max={:.3f}, kd_max={:.3f}, q0={:.3f}",
+                    float(np.max(np.abs(kp))),
+                    float(np.max(np.abs(kd))),
+                    float(q_target[0]) if q_target.size else 0.0,
+                )
             self._received_external_active_command = True
         self.low_cmd = incoming_cmd
 

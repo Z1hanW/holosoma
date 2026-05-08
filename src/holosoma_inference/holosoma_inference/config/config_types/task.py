@@ -42,6 +42,30 @@ class TaskConfig:
     use_sim_time: bool = False
     """Use synchronized simulation time for WBT policies."""
 
+    sim_clock_port: int = 5555
+    """ZMQ port used to receive MuJoCo simulator clock ticks."""
+
+    use_sim_state: bool = False
+    """Use MuJoCo simulator root state for sim rollout observations."""
+
+    sim_state_port: int = 5557
+    """ZMQ port used to receive MuJoCo simulator state."""
+
+    prefer_sim_ref_from_sim_state: bool = False
+    """Use simulator-measured reference body pose when sim state is available."""
+
+    sim_control_port: int = 5559
+    """ZMQ port used to send split sim2sim lowcmd/control requests."""
+
+    use_zmq_lowcmd: bool = False
+    """Send lowcmd over split sim-control ZMQ instead of Unitree DDS."""
+
+    auto_start_policy: bool = False
+    """Start policy actions immediately after initialization."""
+
+    auto_start_motion_clip: bool = False
+    """Start WBT motion clip immediately after policy start."""
+
     motion_file: str = ""
     """Optional motion file used by sparse-root WBT observations."""
 

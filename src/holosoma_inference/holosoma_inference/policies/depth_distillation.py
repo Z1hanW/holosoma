@@ -466,7 +466,6 @@ class DepthDistillationPolicy(LocomotionPolicy):
 
         # Extract actions (first output) — in model's joint order
         policy_action = outputs[0]
-        policy_action = np.clip(policy_action, -100, 100)
 
         # Store raw action in model order (fed back as the "actions" observation)
         self.last_policy_action = policy_action.copy()

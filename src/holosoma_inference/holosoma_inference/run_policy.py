@@ -193,6 +193,16 @@ def run_policy(config: InferenceConfig):
     logger.info("Policy initialized successfully!")
     _print_control_guide(policy_class, config.task.use_joystick)
 
+    if config.task.auto_start_policy:
+        if hasattr(policy, "wait_for_motion_initial_state"):
+            policy.wait_for_motion_initial_state()
+        policy.warm_start_observation_history()
+        policy._handle_start_policy()
+    if config.task.auto_start_motion_clip:
+        if not hasattr(policy, "_handle_start_motion_clip"):
+            raise ValueError("auto_start_motion_clip is only supported by WBT policies.")
+        policy._handle_start_motion_clip()
+
     if DEBUG:
 
         policy._handle_start_policy()

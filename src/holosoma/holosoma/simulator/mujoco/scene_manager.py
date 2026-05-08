@@ -176,6 +176,18 @@ class MujocoSceneManager:
         #    type=mujoco.mjtLightType.mjLIGHT_DIRECTIONAL,
         # )
 
+    def add_origin_marker(self) -> None:
+        """Add a non-colliding visual marker at the world origin."""
+        marker = self.world_spec.worldbody.add_geom(
+            name="world_origin_marker",
+            type=mujoco.mjtGeom.mjGEOM_SPHERE,
+            size=[0.12],
+            pos=[0.0, 0.0, 0.12],
+            rgba=[1.0, 0.35, 0.0, 1.0],
+        )
+        marker.contype = 0
+        marker.conaffinity = 0
+
     def add_camera(self, camera_manager: CameraManager, num_envs: int) -> None:
         """Add cameras to the world specification from camera manager config.
 
@@ -231,8 +243,8 @@ class MujocoSceneManager:
             #            Final local orientation = q_user * q_base
             #
             # In MuJoCo: camera views along -Z in its local frame.
-            #            We apply Rx(180°) to flip +Z to -Z:
-            #            q_mujoco = q_user * q_base * q_flip
+            # We apply Rx(180°) to flip +Z to -Z:
+            # q_mujoco = q_user * q_base * q_flip
             user_rot_rad = np.deg2rad(list(pose.camera_rotation))  # (roll, pitch, yaw)
             base_rot_rad = np.deg2rad([-90.0, 0.0, -90.0])  # offset_rot_base
 
@@ -522,7 +534,9 @@ class MujocoSceneManager:
             return
 
         urdf_path = Path(resolve_data_file_path(str(object_urdf_path)))
-        mesh_path, mesh_scale, mass, rgba = self._read_single_mesh_object_urdf(urdf_path)
+        mesh_path, mesh_scale, box_size, mass, rgba = self._read_single_object_urdf(urdf_path)
+        mass = self._object_mass_from_env(mass)
+        friction = self._object_friction_from_env([0.9, 0.005, 0.5])
 
         mesh_name = "object_largebox_mesh"
         mesh = self.world_spec.add_mesh(name=mesh_name)
@@ -534,27 +548,58 @@ class MujocoSceneManager:
 
         body = self.world_spec.worldbody.add_body(name="object", pos=object_pos, quat=object_quat)
         body.add_freejoint(name="object_freejoint")
-        geom = body.add_geom(
-            name="largebox",
+        visual_geom = body.add_geom(
+            name="largebox_visual",
             type=mujoco.mjtGeom.mjGEOM_MESH,
             meshname=mesh_name,
-            mass=mass,
+            mass=0.0,
             rgba=rgba,
-            friction=[0.9, 0.005, 0.5],
-            solimp=[0.99, 0.99, 0.01, 0.5, 2],
-            solref=[0.001, 1],
         )
+        visual_geom.contype = 0
+        visual_geom.conaffinity = 0
+
+        if box_size is not None:
+            geom = body.add_geom(
+                name="largebox",
+                type=mujoco.mjtGeom.mjGEOM_BOX,
+                size=(np.asarray(box_size, dtype=np.float64) * 0.5).tolist(),
+                mass=mass,
+                rgba=rgba,
+                friction=friction,
+                solimp=[0.99, 0.99, 0.01, 0.5, 2],
+                solref=[0.001, 1],
+            )
+            collision_shape = f"box size={box_size}"
+        else:
+            geom = body.add_geom(
+                name="largebox",
+                type=mujoco.mjtGeom.mjGEOM_MESH,
+                meshname=mesh_name,
+                mass=mass,
+                rgba=rgba,
+                friction=friction,
+                solimp=[0.99, 0.99, 0.01, 0.5, 2],
+                solref=[0.001, 1],
+            )
+            collision_shape = f"mesh={mesh_path}"
         # Collide with robot and terrain classes used by _configure_robot_collisions().
         geom.contype = 3
         geom.conaffinity = 3
+        self._add_training_object_contact_pairs("largebox", friction)
 
         logger.info(
-            "Added MuJoCo object from '{}': mesh='{}'",
+            "Added MuJoCo object from '{}': visual_mesh='{}', collision={}, mass={}, friction={}",
             urdf_path,
             mesh_path,
+            collision_shape,
+            mass,
+            friction,
         )
 
-    def _read_single_mesh_object_urdf(self, urdf_path: Path) -> tuple[Path, list[float], float, list[float]]:
+    def _read_single_object_urdf(
+        self,
+        urdf_path: Path,
+    ) -> tuple[Path, list[float], list[float] | None, float, list[float]]:
         if not urdf_path.exists():
             raise FileNotFoundError(f"Object URDF not found: {urdf_path}")
 
@@ -580,6 +625,13 @@ class MujocoSceneManager:
         if len(mesh_scale) != 3:
             raise ValueError(f"Object mesh scale must contain three values: {scale_raw}")
 
+        box_elem = root.find(".//collision/geometry/box")
+        box_size = None
+        if box_elem is not None and box_elem.attrib.get("size"):
+            box_size = [float(v) for v in box_elem.attrib["size"].split()]
+            if len(box_size) != 3:
+                raise ValueError(f"Object collision box size must contain three values: {box_size}")
+
         mass_elem = root.find(".//inertial/mass")
         mass = float(mass_elem.attrib.get("value", 0.1)) if mass_elem is not None else 0.1
 
@@ -588,7 +640,91 @@ class MujocoSceneManager:
         if color_elem is not None and color_elem.attrib.get("rgba"):
             rgba = [float(v) for v in color_elem.attrib["rgba"].split()]
 
-        return mesh_path, mesh_scale, mass, rgba
+        return mesh_path, mesh_scale, box_size, mass, rgba
+
+    @staticmethod
+    def _object_mass_from_env(default_mass: float) -> float:
+        raw = os.environ.get("MUJOCO_OBJECT_MASS_OVERRIDE") or os.environ.get("HOLOSOMA_MJ_OBJECT_MASS")
+        if not raw:
+            return float(default_mass)
+        mass = float(raw)
+        if mass <= 0.0:
+            raise ValueError(f"Object mass override must be positive, got {raw}")
+        return mass
+
+    @staticmethod
+    def _object_friction_from_env(default_friction: list[float]) -> list[float]:
+        raw = os.environ.get("MUJOCO_OBJECT_GEOM_FRICTION")
+        if not raw:
+            return list(default_friction)
+        values = [float(value) for value in raw.strip().strip("[]").split(",") if value.strip()]
+        if len(values) != 3:
+            raise ValueError(f"MUJOCO_OBJECT_GEOM_FRICTION must contain 3 values, got {raw}")
+        return values
+
+    def _add_training_object_contact_pairs(self, object_geom_name: str, object_friction: list[float]) -> None:
+        """Add Isaac-style carry contact pairs for the object box."""
+        slide = float(object_friction[0]) if object_friction else 0.9
+        spin = float(object_friction[1]) if len(object_friction) > 1 else 0.005
+        roll = 0.001
+        geom_friction = [slide, spin, roll]
+        pair_friction = [slide, slide, spin, roll, roll]
+        solref = [0.01, 1.0]
+        carry_markers = ("torso", "shoulder", "elbow", "wrist", "rubber_hand", "hand")
+
+        object_geoms: list[str] = []
+        carry_geoms: list[str] = []
+        existing_pair_names = {str(pair.name) for pair in self.world_spec.pairs if pair.name}
+
+        for body in self.world_spec.bodies:
+            body_name = str(body.name or "")
+            body_name_lower = body_name.lower()
+            for geom in body.geoms:
+                if int(geom.contype) == 0 or int(geom.conaffinity) == 0:
+                    continue
+                geom_name = str(geom.name or "")
+                if not geom_name:
+                    continue
+
+                is_object = geom_name == object_geom_name or body_name_lower == "object"
+                combined_name = f"{body_name} {geom_name} {getattr(geom, 'meshname', '')}".lower()
+                is_carry = any(marker in combined_name for marker in carry_markers)
+                if not is_object and not is_carry:
+                    continue
+
+                geom.condim = 6
+                geom.friction = geom_friction
+                geom.solref = solref
+                if is_object:
+                    object_geoms.append(geom_name)
+                else:
+                    carry_geoms.append(geom_name)
+
+        added_pairs = 0
+        for carry_geom_name in sorted(set(carry_geoms)):
+            for object_name in sorted(set(object_geoms)):
+                pair_name = f"{carry_geom_name}_{object_name}_training_contact"
+                if pair_name in existing_pair_names:
+                    continue
+                self.world_spec.add_pair(
+                    name=pair_name,
+                    geomname1=carry_geom_name,
+                    geomname2=object_name,
+                    condim=6,
+                    friction=pair_friction,
+                    solref=solref,
+                )
+                existing_pair_names.add(pair_name)
+                added_pairs += 1
+
+        logger.info(
+            "Added {} training object contact pair(s): carry_geoms={}, object_geoms={}, friction={}, solref={}",
+            added_pairs,
+            sorted(set(carry_geoms)),
+            sorted(set(object_geoms)),
+            geom_friction,
+            solref,
+        )
 
     def _apply_collision_settings(self, robot_spec: mujoco.MjSpec, robot_config: RobotConfig) -> None:
         """Apply collision settings based on unified self_collisions configuration.

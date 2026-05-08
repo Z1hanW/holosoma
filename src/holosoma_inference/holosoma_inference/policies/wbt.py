@@ -1,5 +1,7 @@
 import json
+import os
 import sys
+import time
 from multiprocessing import shared_memory
 from pathlib import Path
 
@@ -21,12 +23,14 @@ from holosoma_inference.utils.math.quat import (
     quat_apply,
     quat_inverse,
     quat_mul,
+    quat_rotate_inverse,
     quat_to_rpy,
     rpy_to_quat,
     subtract_frame_transforms,
     wxyz_to_xyzw,
     xyzw_to_wxyz,
 )
+from holosoma_inference.utils.sim_state import SimStateSub
 
 
 class PinocchioRobot:
@@ -112,12 +116,41 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._motion_joint_vel = None
         self._motion_object_pos_w = None
         self._contact_aware_carry_window = None
+        self._contact_aware_window_mode = "rel_z"
+        self._contact_aware_peak_height_alpha = 0.91
+        self._contact_aware_peak_height_smoothing_steps = 5
+        self._latest_sim_state: dict | None = None
+        self._sim_state_sub: SimStateSub | None = None
+        self._logged_sim_ref_from_sim_state = False
+        self._policy_debug_path = os.environ.get("HOLOSOMA_POLICY_DEBUG_INPUT_PATH", "").strip()
+        try:
+            self._policy_debug_limit = int(os.environ.get("HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT", "200") or "200")
+        except ValueError:
+            self._policy_debug_limit = 200
+        self._policy_debug_count = 0
+        self._policy_debug_file = None
+        self._last_policy_inference_clock_ms: int | None = None
+        self._use_motion_data_as_q_target = os.environ.get("HOLOSOMA_USE_MOTION_DATA_AS_Q_TARGET", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        self._logged_motion_data_q_target = False
+        self._force_zero_sparse_root_command = os.environ.get(
+            "HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND", os.environ.get("HOLOSOMA_FORCE_MANUAL_SPARSE_ROOT_COMMAND", "")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._logged_zero_sparse_root_command = False
+        try:
+            self._motion_index_offset = int(os.environ.get("HOLOSOMA_POLICY_MOTION_INDEX_OFFSET", "0") or "0")
+        except ValueError:
+            self._motion_index_offset = 0
 
         # Calculate timestep interval from rl_rate (e.g., 50Hz = 20ms intervals)
         self.timestep_interval_ms = 1000.0 / config.task.rl_rate
 
         # Initialize clock subscriber for synchronization
-        self.clock_sub = ClockSub()
+        self.clock_sub = ClockSub(port=config.task.sim_clock_port)
         self.clock_sub.start()
         self._last_clock_reading: int | None = None
 
@@ -129,6 +162,11 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_yaw_offset = 0.0
 
         super().__init__(config)
+        if config.task.use_sim_state:
+            self._sim_state_sub = SimStateSub(port=config.task.sim_state_port)
+            self._sim_state_sub.start()
+        if self._motion_index_offset != 0:
+            logger.info("Using motion sequence index offset: {}", self._motion_index_offset)
 
         # Load stiff startup parameters from robot config
         if config.robot.stiff_startup_pos is not None:
@@ -160,7 +198,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 )
             )
 
-        if sys.stdin.isatty():
+        if config.task.auto_start_policy:
+            logger.info("Auto-start policy enabled; skipping stiff hold confirmation prompt")
+        elif sys.stdin.isatty():
             logger.info(colored("\n⚠️  Ready to enter stiff hold mode", "yellow", attrs=["bold"]))
             logger.info(colored("Press Enter to continue...", "yellow"))
             try:
@@ -172,7 +212,83 @@ class WholeBodyTrackingPolicy(BasePolicy):
         else:
             _show_warning()
 
-    def _get_ref_body_orientation_in_world(self, robot_state_data):
+    def _get_latest_sim_state(self) -> dict | None:
+        if self._sim_state_sub is None:
+            return self._latest_sim_state
+        state = self._sim_state_sub.get_state()
+        if state is not None:
+            self._latest_sim_state = state
+        return self._latest_sim_state
+
+    def _get_sim_root_state(self) -> np.ndarray | None:
+        state = self._get_latest_sim_state()
+        if not state:
+            return None
+        root_state = state.get("robot_root_state")
+        if root_state is None:
+            return None
+        root_state_np = np.asarray(root_state, dtype=np.float32).reshape(1, -1)
+        if root_state_np.shape[1] < 13:
+            return None
+        return root_state_np[:, :13]
+
+    def _get_sim_ref_state(self) -> np.ndarray | None:
+        state = self._get_latest_sim_state()
+        if not state:
+            return None
+        ref_state = state.get("robot_ref_state")
+        if ref_state is None:
+            return None
+        ref_state_np = np.asarray(ref_state, dtype=np.float32).reshape(1, -1)
+        if ref_state_np.shape[1] < 13:
+            return None
+        return ref_state_np[:, :13]
+
+    def _augment_robot_state_with_sim_state(self, robot_state_data: np.ndarray | None) -> np.ndarray | None:
+        if robot_state_data is None:
+            return None
+        sim_root_state = self._get_sim_root_state()
+        if sim_root_state is None:
+            return robot_state_data
+
+        augmented = np.array(robot_state_data, dtype=np.float32, copy=True)
+        root_quat_wxyz = xyzw_to_wxyz(sim_root_state[:, 3:7])
+        augmented[:, :3] = sim_root_state[:, :3]
+        augmented[:, 3:7] = root_quat_wxyz
+        augmented[:, 7 + self.num_dofs : 7 + self.num_dofs + 3] = quat_rotate_inverse(
+            root_quat_wxyz,
+            sim_root_state[:, 7:10],
+        )
+        augmented[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6] = quat_rotate_inverse(
+            root_quat_wxyz,
+            sim_root_state[:, 10:13],
+        )
+
+        state = self._get_latest_sim_state()
+        if state:
+            dof_pos = state.get("robot_dof_pos")
+            dof_vel = state.get("robot_dof_vel")
+            if dof_pos is not None:
+                dof_pos_np = np.asarray(dof_pos, dtype=np.float32).reshape(1, -1)
+                if dof_pos_np.shape[1] >= self.num_dofs:
+                    augmented[:, 7 : 7 + self.num_dofs] = dof_pos_np[:, : self.num_dofs]
+            if dof_vel is not None:
+                dof_vel_np = np.asarray(dof_vel, dtype=np.float32).reshape(1, -1)
+                if dof_vel_np.shape[1] >= self.num_dofs:
+                    augmented[:, 7 + self.num_dofs + 6 : 7 + self.num_dofs + 6 + self.num_dofs] = dof_vel_np[
+                        :, : self.num_dofs
+                    ]
+        return augmented
+
+    def _get_ref_body_pose_in_world(self, robot_state_data):
+        if bool(getattr(self.config.task, "prefer_sim_ref_from_sim_state", False)):
+            sim_ref_state = self._get_sim_ref_state()
+            if sim_ref_state is not None:
+                if not self._logged_sim_ref_from_sim_state:
+                    logger.info("Using simulator-measured ref-body pose from sim state")
+                    self._logged_sim_ref_from_sim_state = True
+                return sim_ref_state[:, :3], xyzw_to_wxyz(sim_ref_state[:, 3:7])
+
         # Create configuration for pinocchio robot
         # Note:
         # 1. pinocchio quaternion is in xyzw format, robot_state_data is in wxyz format
@@ -192,7 +308,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
         configuration = np.concatenate([root_pos, root_ori_xyzw, dof_pos_in_pinocchio], axis=0)
 
         ref_ori_xyzw = self.pinocchio_robot.fk_and_get_ref_body_orientation_in_world(configuration)
-        return xyzw_to_wxyz(ref_ori_xyzw)
+        return np.zeros((1, 3), dtype=np.float32), xyzw_to_wxyz(ref_ori_xyzw)
+
+    def _get_ref_body_orientation_in_world(self, robot_state_data):
+        return self._get_ref_body_pose_in_world(robot_state_data)[1]
 
     def setup_policy(self, model_path):
         self.onnx_policy_session = onnxruntime.InferenceSession(model_path)
@@ -215,6 +334,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         if self.onnx_kp is not None:
             logger.info(f"Loaded KP/KD from ONNX metadata: {Path(model_path).name}")
+
+        self._configure_contact_aware_window(metadata)
+        self._set_policy_action_scales_from_metadata(metadata)
 
         # get initial command and ref quat xyzw
         input_feed = self._make_initial_input_feed()
@@ -253,6 +375,43 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return action, motion_command, ref_quat_xyzw, ref_pos_xyz
 
         self.policy = policy_act
+
+    @staticmethod
+    def _extract_motion_config(metadata: dict) -> dict | None:
+        exp_cfg = metadata.get("experiment_config")
+        if not isinstance(exp_cfg, dict):
+            return None
+        motion_cfg = (
+            exp_cfg.get("command", {})
+            .get("setup_terms", {})
+            .get("motion_command", {})
+            .get("params", {})
+            .get("motion_config", {})
+        )
+        return motion_cfg if isinstance(motion_cfg, dict) else None
+
+    def _configure_contact_aware_window(self, metadata: dict) -> None:
+        motion_cfg = self._extract_motion_config(metadata)
+        if not motion_cfg:
+            return
+        self._contact_aware_window_mode = (
+            str(motion_cfg.get("contact_aware_carry_window_mode", "rel_z")).strip().lower().replace("-", "_")
+        )
+        try:
+            self._contact_aware_peak_height_alpha = float(
+                motion_cfg.get("contact_aware_peak_height_alpha", self._contact_aware_peak_height_alpha)
+            )
+        except (TypeError, ValueError):
+            self._contact_aware_peak_height_alpha = 0.91
+        try:
+            self._contact_aware_peak_height_smoothing_steps = int(
+                motion_cfg.get(
+                    "contact_aware_peak_height_smoothing_steps",
+                    self._contact_aware_peak_height_smoothing_steps,
+                )
+            )
+        except (TypeError, ValueError):
+            self._contact_aware_peak_height_smoothing_steps = 5
 
     def _make_initial_input_feed(self) -> dict[str, np.ndarray]:
         """Create zero inputs for WBT model bootstrap outputs."""
@@ -325,7 +484,61 @@ class WholeBodyTrackingPolicy(BasePolicy):
     def _motion_frame_index(self) -> int:
         if self._motion_root_pos_w is None:
             return 0
-        return min(max(int(self.motion_timestep), 0), self._motion_root_pos_w.shape[0] - 1)
+        idx = int(self.motion_timestep) + int(self._motion_index_offset)
+        return min(max(idx, 0), self._motion_root_pos_w.shape[0] - 1)
+
+    def wait_for_motion_initial_state(
+        self,
+        timeout_s: float = 5.0,
+        yaw_tolerance_rad: float = 0.05,
+        joint_tolerance_rad: float = 0.08,
+    ) -> None:
+        if self._motion_root_quat_wxyz is None:
+            return
+
+        expected_yaw = quat_to_rpy(self._motion_root_quat_wxyz[0])[2]
+        if (
+            self._motion_joint_pos is not None
+            and os.environ.get("HOLOSOMA_MJ_MOTION_INIT", "").strip().lower() in {"1", "true", "yes", "on"}
+        ):
+            expected_q = self._motion_joint_pos[:1]
+        else:
+            expected_q = getattr(
+                self,
+                "_stiff_hold_q",
+                np.asarray(self.default_dof_angles, dtype=np.float32).reshape(1, -1),
+            )
+        deadline = time.monotonic() + timeout_s
+        last_yaw = None
+        last_joint_error = None
+        while time.monotonic() < deadline:
+            robot_state_data = self.interface.get_low_state()
+            if robot_state_data is None:
+                time.sleep(0.02)
+                continue
+            sim_state_ready = not self.config.task.use_sim_state or self._get_latest_sim_state() is not None
+            current_yaw = quat_to_rpy(robot_state_data[0, 3:7])[2]
+            dof_pos = robot_state_data[:, 7 : 7 + self.num_dofs]
+            joint_error = float(np.max(np.abs(dof_pos - expected_q)))
+            last_yaw = current_yaw
+            last_joint_error = joint_error
+            yaw_error = (current_yaw - expected_yaw + np.pi) % (2 * np.pi) - np.pi
+            if sim_state_ready and abs(float(yaw_error)) <= yaw_tolerance_rad and joint_error <= joint_tolerance_rad:
+                logger.info(
+                    "Matched motion-init low state: yaw current={:.1f} deg expected={:.1f} deg joint_max_err={:.3f}",
+                    float(np.degrees(current_yaw)),
+                    float(np.degrees(expected_yaw)),
+                    joint_error,
+                )
+                return
+            time.sleep(0.02)
+
+        last_yaw_str = "none" if last_yaw is None else f"{np.degrees(last_yaw):.1f}"
+        raise RuntimeError(
+            "Timed out waiting for motion-init low state yaw: "
+            f"last={last_yaw_str} deg, expected={np.degrees(expected_yaw):.1f} deg, "
+            f"joint_max_err={last_joint_error}"
+        )
 
     def _capture_policy_state(self):
         state = super()._capture_policy_state()
@@ -351,6 +564,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_timestep = 0
         self.motion_start_timestep = None
         self._last_clock_reading = None
+        self._last_policy_inference_clock_ms = None
         self.robot_yaw_offset = 0.0
         self.motion_yaw_offset = 0.0
 
@@ -365,6 +579,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_timestep = 0
         self.motion_start_timestep = None
         self._last_clock_reading = None
+        self._last_policy_inference_clock_ms = None
         self._stiff_hold_active = True
         self.robot_yaw_offset = 0.0
         self.motion_yaw_offset = 0.0
@@ -381,6 +596,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         return dof_pos
 
     def get_current_obs_buffer_dict(self, robot_state_data):
+        robot_state_data = self._augment_robot_state_with_sim_state(robot_state_data)
         current_obs_buffer_dict = {}
 
         # motion_command
@@ -419,10 +635,32 @@ class WholeBodyTrackingPolicy(BasePolicy):
         # actions
         current_obs_buffer_dict["actions"] = self.last_policy_action
         current_obs_buffer_dict["cam_depth"] = self._get_depth_image_obs()
+        if self._policy_debug_path:
+            self._last_current_obs_buffer_dict = {
+                key: np.asarray(value, dtype=np.float32).copy()
+                for key, value in current_obs_buffer_dict.items()
+                if key
+                in {
+                    "sparse_target_root_trajectory_command",
+                    "sparse_target_root_trajectory_command_contact_aware",
+                    "base_lin_vel",
+                    "base_ang_vel",
+                    "dof_pos",
+                    "dof_vel",
+                    "actions",
+                    "cam_depth",
+                }
+            }
 
         return current_obs_buffer_dict
 
     def _get_sparse_target_root_trajectory_command(self, robot_state_data) -> np.ndarray:
+        if self._force_zero_sparse_root_command:
+            if not self._logged_zero_sparse_root_command:
+                logger.info("Using zero sparse root command.")
+                self._logged_zero_sparse_root_command = True
+            return np.zeros((1, 3), dtype=np.float32)
+
         target_pos, target_quat_wxyz = self._get_target_root_pose()
         if target_pos is None or target_quat_wxyz is None:
             return np.zeros((1, 3), dtype=np.float32)
@@ -457,28 +695,76 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self._contact_aware_carry_window = (0, 0)
             return self._contact_aware_carry_window
 
-        rel_z = self._motion_object_pos_w[:, 2] - self._motion_root_pos_w[:, 2]
-        z_min = float(np.min(rel_z))
-        z_range = max(float(np.max(rel_z) - z_min), 0.0)
-        threshold = z_min + max(0.10, z_range * 0.35)
-        lifted_mask = rel_z >= threshold
+        if self._contact_aware_window_mode == "peak_height":
+            height = self._smooth_1d_edge_padded(
+                self._motion_object_pos_w[:, 2],
+                self._contact_aware_peak_height_smoothing_steps,
+            )
+            h_min = float(np.min(height))
+            h_range = max(float(np.max(height) - h_min), 0.0)
+            alpha = max(0.0, min(float(self._contact_aware_peak_height_alpha), 1.0))
+            threshold = h_min + h_range * alpha
+            high_mask = height >= threshold
 
-        carry_start = self._first_sustained_true_index(lifted_mask, 5)
-        if carry_start is None:
-            lifted_indices = np.flatnonzero(lifted_mask)
-            carry_start = int(lifted_indices[0]) if lifted_indices.size else int(np.argmax(rel_z))
+            carry_start = self._first_sustained_true_index(high_mask, 5)
+            if carry_start is None:
+                high_indices = np.flatnonzero(high_mask)
+                carry_start = int(high_indices[0]) if high_indices.size else int(np.argmax(height))
 
-        carry_end = self._first_sustained_true_index_from(~lifted_mask, 5, min(int(carry_start) + 1, rel_z.shape[0]))
-        if carry_end is None:
-            carry_end = rel_z.shape[0]
+            peak_step = int(np.argmax(height))
+            carry_end = self._first_sustained_true_index_from(
+                ~high_mask,
+                5,
+                min(peak_step + 1, height.shape[0]),
+            )
+            if carry_end is None:
+                carry_end = height.shape[0]
+        else:
+            rel_z = self._motion_object_pos_w[:, 2] - self._motion_root_pos_w[:, 2]
+            z_min = float(np.min(rel_z))
+            z_range = max(float(np.max(rel_z) - z_min), 0.0)
+            threshold = z_min + max(0.10, z_range * 0.35)
+            lifted_mask = rel_z >= threshold
+
+            carry_start = self._first_sustained_true_index(lifted_mask, 5)
+            if carry_start is None:
+                lifted_indices = np.flatnonzero(lifted_mask)
+                carry_start = int(lifted_indices[0]) if lifted_indices.size else int(np.argmax(rel_z))
+
+            carry_end = self._first_sustained_true_index_from(
+                ~lifted_mask,
+                5,
+                min(int(carry_start) + 1, rel_z.shape[0]),
+            )
+            if carry_end is None:
+                carry_end = rel_z.shape[0]
 
         self._contact_aware_carry_window = (int(carry_start), int(carry_end))
         logger.info(
-            "[WBT] Contact-aware sparse root active window: [{}, {})",
+            "[WBT] Contact-aware sparse root active window: [{}, {}) mode={}",
             self._contact_aware_carry_window[0],
             self._contact_aware_carry_window[1],
+            self._contact_aware_window_mode,
         )
         return self._contact_aware_carry_window
+
+    @staticmethod
+    def _smooth_1d_edge_padded(values: np.ndarray, window_steps: int) -> np.ndarray:
+        values = np.asarray(values, dtype=np.float32).reshape(-1)
+        window_steps = max(1, int(window_steps))
+        if values.size == 0 or window_steps <= 1:
+            return values
+        left_pad = window_steps // 2
+        right_pad = window_steps - 1 - left_pad
+        padded = np.concatenate(
+            [
+                np.repeat(values[:1], left_pad),
+                values,
+                np.repeat(values[-1:], right_pad),
+            ]
+        )
+        kernel = np.full((window_steps,), 1.0 / float(window_steps), dtype=np.float32)
+        return np.convolve(padded, kernel, mode="valid")
 
     @staticmethod
     def _first_sustained_true_index(mask: np.ndarray, steps: int) -> int | None:
@@ -578,24 +864,38 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self.motion_timestep = 0
             self.motion_start_timestep = None
             self._last_clock_reading = None
+            self._last_policy_inference_clock_ms = None
+        elif self.use_sim_time:
+            current_clock = self.clock_sub.get_clock()
+            if (
+                self._last_policy_inference_clock_ms is not None
+                and current_clock - self._last_policy_inference_clock_ms < self.timestep_interval_ms
+            ):
+                return self.scaled_policy_action
+            self._last_policy_inference_clock_ms = current_clock
 
         obs = self.prepare_obs_for_rl(robot_state_data)
         input_feed = {}
         for name in self.onnx_input_names:
             if name == "time_step":
-                input_feed[name] = np.array([[self.motion_timestep]], dtype=np.float32)
+                input_feed[name] = np.array([[self._motion_frame_index()]], dtype=np.float32)
             elif name == "obs":
                 input_feed[name] = obs["obs"]
             else:
                 input_feed[name] = obs[name]
         policy_action, self.motion_command_t, self.ref_quat_xyzw_t, self.motion_ref_pos_xyz_t = self.policy(input_feed)
 
-        # clip policy action
-        policy_action = np.clip(policy_action, -100, 100)
         # store last policy action
         self.last_policy_action = policy_action.copy()
         # scale policy action
-        self.scaled_policy_action = policy_action * self.policy_action_scale
+        self.scaled_policy_action = policy_action * self.policy_action_scales
+        if self._use_motion_data_as_q_target and self._motion_joint_pos is not None:
+            target_joint_pos = self._motion_joint_pos[self._motion_frame_index() : self._motion_frame_index() + 1]
+            self.scaled_policy_action = target_joint_pos.astype(np.float32, copy=False) - self.default_dof_angles
+            if not self._logged_motion_data_q_target:
+                logger.info("Using motion .npz joint_pos directly as MuJoCo q_target for diagnostic rollout.")
+                self._logged_motion_data_q_target = True
+        self._write_policy_debug(input_feed, obs, policy_action, self.scaled_policy_action, robot_state_data)
 
         # update motion timestep
         if self.motion_clip_progressing:
@@ -604,6 +904,85 @@ class WholeBodyTrackingPolicy(BasePolicy):
             else:
                 self.motion_timestep += 1
         return self.scaled_policy_action
+
+    @staticmethod
+    def _array_stats(value: np.ndarray) -> dict:
+        arr = np.asarray(value, dtype=np.float32)
+        flat = arr.reshape(-1)
+        finite = np.isfinite(flat)
+        if not bool(finite.all()):
+            flat = flat[finite]
+        if flat.size == 0:
+            return {"shape": list(arr.shape), "finite": bool(finite.all()), "count": int(arr.size)}
+        return {
+            "shape": list(arr.shape),
+            "finite": bool(finite.all()),
+            "count": int(arr.size),
+            "min": float(np.min(flat)),
+            "max": float(np.max(flat)),
+            "mean": float(np.mean(flat)),
+            "std": float(np.std(flat)),
+            "absmax": float(np.max(np.abs(flat))),
+            "nonzero": int(np.count_nonzero(np.abs(flat) > 1e-6)),
+        }
+
+    def _write_policy_debug(
+        self,
+        input_feed: dict[str, np.ndarray],
+        obs: dict[str, np.ndarray],
+        policy_action: np.ndarray,
+        scaled_policy_action: np.ndarray,
+        robot_state_data: np.ndarray,
+    ) -> None:
+        if not self._policy_debug_path or self._policy_debug_count >= self._policy_debug_limit:
+            return
+
+        try:
+            if self._policy_debug_file is None:
+                debug_path = Path(self._policy_debug_path)
+                debug_path.parent.mkdir(parents=True, exist_ok=True)
+                self._policy_debug_file = debug_path.open("a", encoding="utf-8", buffering=1)
+
+            q_actual = np.asarray(robot_state_data[:, 7 : 7 + self.num_dofs], dtype=np.float32)
+            q_target = np.asarray(scaled_policy_action, dtype=np.float32) + self.default_dof_angles
+            terms = getattr(self, "_last_current_obs_buffer_dict", {})
+            payload = {
+                "step": int(self._policy_debug_count),
+                "motion_timestep": int(self.motion_timestep),
+                "motion_frame_index": int(self._motion_frame_index()),
+                "clock_ms": self.clock_sub.get_clock(),
+                "motion_clip_progressing": bool(self.motion_clip_progressing),
+                "input": {name: self._array_stats(value) for name, value in input_feed.items()},
+                "obs": {name: self._array_stats(value) for name, value in obs.items()},
+                "terms": {name: self._array_stats(value) for name, value in terms.items()},
+                "policy_action": self._array_stats(policy_action),
+                "scaled_policy_action": self._array_stats(scaled_policy_action),
+                "q_target": self._array_stats(q_target),
+                "q_actual": self._array_stats(q_actual),
+                "q_target_first": q_target.reshape(-1)[:8].astype(float).tolist(),
+                "q_actual_first": q_actual.reshape(-1)[:8].astype(float).tolist(),
+            }
+            for name in (
+                "sparse_target_root_trajectory_command",
+                "sparse_target_root_trajectory_command_contact_aware",
+                "base_lin_vel",
+                "base_ang_vel",
+            ):
+                if name in terms:
+                    payload[name] = np.asarray(terms[name]).reshape(-1).astype(float).tolist()
+
+            depth = terms.get("cam_depth")
+            if depth is not None and depth.size:
+                flat = np.asarray(depth, dtype=np.float32).reshape(-1)
+                payload["cam_depth_quantiles"] = [
+                    float(value) for value in np.quantile(flat, [0.0, 0.01, 0.1, 0.5, 0.9, 0.99, 1.0])
+                ]
+
+            self._policy_debug_file.write(json.dumps(payload, sort_keys=True) + "\n")
+            self._policy_debug_count += 1
+        except Exception as exc:
+            logger.warning("Failed to write policy debug trace: {}", exc)
+            self._policy_debug_path = ""
 
     def _get_manual_command(self, robot_state_data):
         # TODO: instead of adding kp/kd_override in def _set_motor_command,
@@ -674,6 +1053,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.ref_quat_xyzw_t = self.ref_quat_xyzw_0.copy()
         self.motion_command_t = self.motion_command_0.copy()
         self._last_clock_reading = None
+        self._last_policy_inference_clock_ms = None
         self.robot_yaw_offset = 0.0
         self.motion_yaw_offset = 0.0
 
@@ -685,6 +1065,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_start_timestep = None  # will be set in rl_inference
         self.motion_timestep = 0  # Reset to start from beginning of motion
         self._last_clock_reading = None
+        self._last_policy_inference_clock_ms = None
         self.logger.info(colored("Starting motion clip", "blue"))
 
     def handle_keyboard_button(self, keycode):
