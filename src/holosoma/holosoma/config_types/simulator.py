@@ -459,9 +459,6 @@ class BridgeConfig:
     interface: str | None = None
     """Network interface for robot communication. Auto-detected if None."""
 
-    clock_port: int = 5555
-    """ZMQ port used to publish simulator clock ticks for policy synchronization."""
-
     publish_sim_state: bool = False
     """Publish simulator robot/object state over ZMQ for split sim2sim inference."""
 

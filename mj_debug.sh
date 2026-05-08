@@ -89,6 +89,20 @@ bridge_bind_error_pattern="Address already in use|Failed to start (clock publish
 if [[ -z "${HOLOSOMA_DDS_DOMAIN_ID:-}" ]]; then
   export HOLOSOMA_DDS_DOMAIN_ID="$((50 + ($(date +%s) % 100)))"
 fi
+if [[ -z "${SIM_STATE_PORT:-}" ]]; then
+  auto_state_port="$(python3 - <<'PY'
+import socket
+
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.bind(("", 0))
+print(sock.getsockname()[1])
+sock.close()
+PY
+)"
+  export SIM_STATE_PORT="$auto_state_port"
+else
+  export SIM_STATE_PORT
+fi
 
 env_pid=""
 depth_rec_pid=""
@@ -137,7 +151,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "[mj_debug] log_dir=$log_dir"
-echo "[mj_debug] starting env: clip=$clip motion_init=1 use_sim_state=$use_sim_state domain=$HOLOSOMA_DDS_DOMAIN_ID"
+echo "[mj_debug] starting env: clip=$clip motion_init=1 use_sim_state=$use_sim_state domain=$HOLOSOMA_DDS_DOMAIN_ID sim_state_port=$SIM_STATE_PORT"
 env_args=("$clip" --motion-init)
 ro_args=("$clip" "$checkpoint" "$run_ref" --motion-init --auto-start)
 if [[ "$use_sim_state" == "1" ]]; then
@@ -415,14 +429,14 @@ if [[ "$auto_motion" == "1" ]]; then
   ro_args+=(--auto-motion)
 fi
 
-echo "[mj_debug] starting rollout: run=$run_ref checkpoint=$checkpoint auto_motion=$auto_motion use_sim_state=$use_sim_state duration=$duration"
+echo "[mj_debug] starting rollout: run=$run_ref checkpoint=$checkpoint auto_motion=$auto_motion use_sim_state=$use_sim_state duration=$duration sim_state_port=$SIM_STATE_PORT"
 set +e
 (
   source "$conda_sh"
   conda activate hsinference
   export HOLOSOMA_POLICY_DEBUG_INPUT_PATH="${log_dir}/policy_debug.jsonl"
   export HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT="${HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT:-240}"
-  timeout "$duration" bash "${ROOT_DIR}/mj_ro.sh" "${ro_args[@]}"
+  timeout "$duration" bash "${ROOT_DIR}/mj_ro.sh" "${ro_args[@]}" </dev/null
 ) >"$ro_log" 2>&1
 ro_status=$?
 set -e
@@ -476,7 +490,6 @@ metrics["bridge"] = {}
 if bridge_line:
     for key in (
         "domain_id",
-        "clock_port",
         "publish_sim_state",
         "sim_state_port",
         "ignore_default_idle_command",

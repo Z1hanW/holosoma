@@ -42,9 +42,6 @@ class TaskConfig:
     use_sim_time: bool = False
     """Use synchronized simulation time for WBT policies."""
 
-    sim_clock_port: int = 5555
-    """ZMQ port used to receive MuJoCo simulator clock ticks."""
-
     use_sim_state: bool = False
     """Use MuJoCo simulator root state for sim rollout observations."""
 

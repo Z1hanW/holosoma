@@ -1,0 +1,43 @@
+{
+  "bridge": {
+    "domain_id": 134,
+    "hold_default_pose_until_first_command": true,
+    "ignore_default_idle_command": true,
+    "publish_sim_state": true,
+    "sim_state_port": 59449
+  },
+  "checkpoint": "latest",
+  "clip": "box_75",
+  "duration": "120s",
+  "first_lowcmd_received": true,
+  "lift": {
+    "final_dz": 0.628,
+    "final_object_z": 0.795,
+    "initial_object_z": 0.168,
+    "max_dz": 0.797,
+    "max_object_z": 0.964,
+    "robot_drop_from_initial": 0.261,
+    "robot_z_initial": 0.76,
+    "robot_z_min": 0.499,
+    "t_at_max_dz": 2.5
+  },
+  "lift_telemetry_count": 21,
+  "motion_init_match": {
+    "joint_max_err": 0.0,
+    "matched": true,
+    "yaw_current_deg": 17.7,
+    "yaw_expected_deg": 17.7
+  },
+  "policy": {
+    "max_obs_absmax": 14.713947296142578,
+    "max_perception_absmax": 0.5,
+    "max_policy_action_absmax": 5.026943206787109,
+    "max_q_target_absmax": 2.6623470783233643,
+    "max_sparse_root_command_abs": 0.0
+  },
+  "policy_debug_count": 240,
+  "run_ref": "tvtwx4to",
+  "sim_state_subscriber_started": true,
+  "use_sim_state_effective": true,
+  "use_sim_state_requested": true
+}

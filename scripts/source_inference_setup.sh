@@ -6,11 +6,11 @@ elif [ -n "${ZSH_VERSION}" ]; then
 fi
 source ${SCRIPT_DIR}/source_common.sh
 source ${CONDA_ROOT}/bin/activate hsinference
-export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:${CONDA_ROOT}/envs/hsinference/lib/python3.10/site-packages/lib
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}${LD_LIBRARY_PATH:+:}${CONDA_ROOT}/envs/hsinference/lib/python3.10/site-packages/lib"
 
 # Check UFW status if ufw command exists
-if command -v ufw >/dev/null 2>&1; then
-    if sudo ufw status | grep -q "Status: inactive"; then
+if command -v ufw >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    if sudo -n ufw status | grep -q "Status: inactive"; then
         echo "✓ UFW disabled"
     else
         echo "Warning: UFW is currently enabled."

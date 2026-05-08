@@ -72,8 +72,7 @@ class SimulatorBridge:
         self._last_pd_stats: dict[str, object] | None = None
 
         # Initialize clock publisher for WBT motion synchronization
-        clock_port = int(os.environ.get("SIM_CLOCK_PORT", str(getattr(bridge_config, "clock_port", 5555))) or "5555")
-        self.clock_pub: ClockPub = ClockPub(port=clock_port)
+        self.clock_pub: ClockPub = ClockPub()
 
         if self.bridge_config.interface is None and not self._use_zmq_lowcmd:
             interface = self._auto_detect_interface()

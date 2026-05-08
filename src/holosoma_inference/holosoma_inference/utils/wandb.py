@@ -7,6 +7,25 @@ import wandb
 
 _WANDB_PREFIX = "wandb://"
 _WANDB_HTTPS_PATTERN = re.compile(r"https://[^/]+/([^/]+)/([^/]+)/runs/([^/]+)/files/(.+)")
+_MODEL_STEP_PATTERN = re.compile(r"model_(\d+)\.onnx$")
+
+
+def _checkpoint_step(file_name: str) -> int:
+    match = _MODEL_STEP_PATTERN.search(file_name)
+    return int(match.group(1)) if match else -1
+
+
+def _resolve_wandb_checkpoint_name(run, checkpoint: str) -> str:
+    if checkpoint.isdigit():
+        return f"model_{checkpoint}.onnx"
+
+    if checkpoint in {"latest", "model_latest.onnx"}:
+        onnx_files = [file for file in run.files() if file.name.endswith(".onnx")]
+        if not onnx_files:
+            raise RuntimeError(f"No .onnx files found in W&B run {run.path}")
+        return max(onnx_files, key=lambda file: (_checkpoint_step(file.name), file.updated_at or "")).name
+
+    return checkpoint
 
 
 def load_checkpoint(
@@ -47,6 +66,7 @@ def load_checkpoint(
     if wandb_run_path is not None:
         api = wandb.Api()
         run = api.run(wandb_run_path)
+        checkpoint = _resolve_wandb_checkpoint_name(run, checkpoint)
         # Create log dir
         log_dir_path = Path(log_dir)
         log_dir_path.mkdir(parents=True, exist_ok=True)
@@ -55,6 +75,11 @@ def load_checkpoint(
         checkpoint_file.download(root=log_dir, replace=True)
         print(f"Finished downloading checkpoint {checkpoint} to {log_dir} from W&B run {wandb_run_path}")
         checkpoint_path = log_dir_path / checkpoint
+        run_id = wandb_run_path.rsplit("/", 1)[-1]
+        named_checkpoint_path = checkpoint_path.with_name(f"{run_id}_{checkpoint_path.name}")
+        if checkpoint_path != named_checkpoint_path:
+            checkpoint_path.replace(named_checkpoint_path)
+            checkpoint_path = named_checkpoint_path
     else:
         checkpoint_path = Path(checkpoint)
     return checkpoint_path

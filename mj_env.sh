@@ -58,7 +58,6 @@ fi
 export HOLOSOMA_MJ_MOTION="$motion_file"
 export HOLOSOMA_MJ_MOTION_INIT="$motion_init"
 export HOLOSOMA_MUJOCO_HOLD_MOTION_INIT_UNTIL_COMMAND="${HOLOSOMA_MUJOCO_HOLD_MOTION_INIT_UNTIL_COMMAND:-$motion_init}"
-export SIM_CLOCK_PORT="${SIM_CLOCK_PORT:-5555}"
 export SIM_STATE_PORT="${SIM_STATE_PORT:-5557}"
 
 robot_args=()
@@ -68,7 +67,6 @@ fi
 
 bridge_args=(
   --simulator.config.bridge.enabled=True
-  --simulator.config.bridge.clock-port="$SIM_CLOCK_PORT"
   --simulator.config.bridge.publish-sim-state=True
   --simulator.config.bridge.sim-state-port="$SIM_STATE_PORT"
 )

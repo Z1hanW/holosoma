@@ -150,7 +150,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.timestep_interval_ms = 1000.0 / config.task.rl_rate
 
         # Initialize clock subscriber for synchronization
-        self.clock_sub = ClockSub(port=config.task.sim_clock_port)
+        self.clock_sub = ClockSub()
         self.clock_sub.start()
         self._last_clock_reading: int | None = None
 

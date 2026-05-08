@@ -202,7 +202,7 @@ class BasePolicy:
             logger.info(f"Downloading checkpoint from W&B: {model_path}")
             checkpoint_path = load_checkpoint(None, model_path, download_dir)
             resolved_path = str(checkpoint_path)
-            logger.info("Checkpoint downloaded to: %s", resolved_path)
+            logger.info("Checkpoint downloaded to: {}", resolved_path)
             return resolved_path
         return model_path
 
