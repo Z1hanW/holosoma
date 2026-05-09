@@ -184,7 +184,7 @@ print(
 )
 PY
 
-export DATA_MODE=pure-real
+export DATA_MODE=mix-naive
 export DS_DATA_ROOT="data/ds_as_data"
 export MOTION_DIR="${OMOMO_DATA_DIR}"
 export OBJECT_SPEC_PATH="${OMOMO_OBJECT_MAP}"
@@ -202,8 +202,7 @@ export TRAINING_SEED
 export RANDOMIZATION_PRESET
 export INIT_AT_RANDOM_EP_LEN
 
-export SEQUENCE_NAME=${SEQUENCE_NAME:-omomo-real-mesh-cotrack}
-export PURE_REAL_OMOMO_PREFIXES=${PURE_REAL_OMOMO_PREFIXES:-'["sub","any_"]'}
+export SEQUENCE_NAME=${SEQUENCE_NAME:-as-general-real-mesh-cotrack}
 
 if [[ -n "${TRAINING_SEED}" ]]; then
   if [[ ! "${TRAINING_SEED}" =~ ^-?[0-9]+$ ]]; then
@@ -240,7 +239,7 @@ if [[ -n "${RANDOMIZATION_PRESET}" ]]; then
   esac
 fi
 
-echo "[INFO] Launching AS/OMOMO real-mesh co-tracking generalist training"
+echo "[INFO] Launching AS real-mesh co-tracking generalist training"
 echo "[INFO] MOTION_DIR=${MOTION_DIR}"
 echo "[INFO] OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH}"
 echo "[INFO] HOLOSOMA_OBJECT_SPAWN_MODE=${HOLOSOMA_OBJECT_SPAWN_MODE}"
@@ -249,4 +248,4 @@ echo "[INFO] HOLOSOMA_OBJECT_COLLIDER_TYPE=${HOLOSOMA_OBJECT_COLLIDER_TYPE}"
 echo "[INFO] NPROC=${NPROC:-<auto>} PER_GPU_ENVS=${PER_GPU_ENVS:-4096} NUM_ENVS=${NUM_ENVS:-<NPROC*PER_GPU_ENVS>} MASTER_PORT=${MASTER_PORT:-<random>}"
 echo "[INFO] TRAINING_SEED=${TRAINING_SEED:-<config-default>} RANDOMIZATION=${RANDOMIZATION_PRESET:-<exp-default>} INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-<algo-default>}"
 
-exec bash "${SCRIPT_DIR}/train_object_generalist_ds.sh" pure-real "$@"
+exec bash "${SCRIPT_DIR}/train_object_generalist_ds.sh" mix-naive "$@"
