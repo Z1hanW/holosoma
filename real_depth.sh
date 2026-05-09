@@ -1,0 +1,1 @@
+source scripts/source_mujoco_setup.sh && python src/holosoma/holosoma/sensors/image_server.py real_d435i

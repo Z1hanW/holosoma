@@ -124,8 +124,9 @@ The WBT checkpoints expect the D435i depth path.
 
 - The MuJoCo path uses `image_server:mujoco_d435i`.
 - The debug script expects depth shared memory shape `(1, 1, 58, 87)`.
-- `min_valid_depth=0.15` matches training invalid-depth handling.
-- `near_clip` remains the clamp floor and is not used as the invalid-depth threshold.
+- `near_clip=0.3`, `far_clip=3.0`, and `min_valid_depth=0.15` match the checkpoint/distillation depth config.
+- Image-server preprocessing now matches `/home/user/FAR/holosoma` distillation: crop/resize, clamp to `[near_clip, far_clip]`, apply `min_valid_depth`, then normalize to `[-0.5, 0.5]`.
+- With the current `near_clip=0.3` and `min_valid_depth=0.15`, finite depth below `0.3m` becomes near depth (`-0.5`), while invalid/no-hit/far depth becomes far depth (`+0.5`).
 - `mj_debug.sh` fails early if depth shared memory has the wrong byte size, non-finite values, or constant/zero values before rollout.
 
 

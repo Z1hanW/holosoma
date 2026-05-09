@@ -7,7 +7,7 @@ run_ref="${HOLOSOMA_WANDB_RUN:-w5qostjn}"
 checkpoint="${HOLOSOMA_WANDB_CHECKPOINT:-latest}"
 duration="${HOLOSOMA_DEBUG_DURATION:-45s}"
 auto_motion="auto"
-use_sim_state="${HOLOSOMA_RO_USE_SIM_STATE:-1}"
+use_sim_state="${HOLOSOMA_RO_USE_SIM_STATE:-0}"
 record_video="${HOLOSOMA_MJ_DEBUG_RECORD_VIDEO:-0}"
 record_fps="${HOLOSOMA_MJ_DEBUG_RECORD_FPS:-10}"
 positional=()
@@ -151,14 +151,8 @@ cleanup() {
 trap cleanup EXIT
 
 echo "[mj_debug] log_dir=$log_dir"
-echo "[mj_debug] starting env: clip=$clip motion_init=1 use_sim_state=$use_sim_state domain=$HOLOSOMA_DDS_DOMAIN_ID sim_state_port=$SIM_STATE_PORT"
 env_args=("$clip" --motion-init)
-ro_args=("$clip" "$checkpoint" "$run_ref" --motion-init --auto-start)
-if [[ "$use_sim_state" == "1" ]]; then
-  ro_args+=(--use-sim-state)
-else
-  ro_args+=(--no-sim-state)
-fi
+ro_args=("$clip" "$checkpoint" "$run_ref")
 (
   source "$conda_sh"
   conda activate hsmujoco
@@ -220,11 +214,6 @@ while time.monotonic() < deadline:
     time.sleep(0.1)
 else:
     raise AssertionError("depth shm stayed zero or constant before rollout")
-print(
-    f"[mj_debug] depth shm ok: shape={shape}, bytes={actual_bytes}, "
-    f"min={float(depth.min()):.4f}, max={float(depth.max()):.4f}",
-    flush=True,
-)
 PY
 )
 
@@ -426,14 +415,20 @@ PY
 fi
 
 if [[ "$auto_motion" == "1" ]]; then
-  ro_args+=(--auto-motion)
+  ro_auto_motion=1
+else
+  ro_auto_motion=0
 fi
 
-echo "[mj_debug] starting rollout: run=$run_ref checkpoint=$checkpoint auto_motion=$auto_motion use_sim_state=$use_sim_state duration=$duration sim_state_port=$SIM_STATE_PORT"
 set +e
 (
   source "$conda_sh"
   conda activate hsinference
+  export HOLOSOMA_MJ_RO_DEBUG=1
+  export HOLOSOMA_MJ_MOTION_INIT=1
+  export HOLOSOMA_RO_AUTO_START=1
+  export HOLOSOMA_RO_AUTO_MOTION="$ro_auto_motion"
+  export HOLOSOMA_RO_USE_SIM_STATE="$use_sim_state"
   export HOLOSOMA_POLICY_DEBUG_INPUT_PATH="${log_dir}/policy_debug.jsonl"
   export HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT="${HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT:-240}"
   timeout "$duration" bash "${ROOT_DIR}/mj_ro.sh" "${ro_args[@]}" </dev/null
@@ -481,9 +476,7 @@ metrics = {
     ),
 }
 
-use_sim_state_match = re.search(r"\[mj_ro\] Use sim state: (True|False)", ro_text)
-if use_sim_state_match:
-    metrics["use_sim_state_effective"] = use_sim_state_match.group(1) == "True"
+metrics["use_sim_state_effective"] = metrics["sim_state_subscriber_started"]
 
 bridge_line = next((line for line in env_text.splitlines() if "BridgeConfig(" in line), "")
 metrics["bridge"] = {}
@@ -684,4 +677,3 @@ fi
 
 echo "[mj_debug] rollout completed status=$ro_status"
 echo "[mj_debug] metrics=${log_dir}/metrics.json"
-tail -n 40 "$ro_log" || true

@@ -482,11 +482,11 @@ class ImageServer:
         # resize
         frame = cv2.resize(frame, (self.cfg.resized_width, self.cfg.resized_height), cv2.INTER_CUBIC)
 
-        # Match training: invalid returns are below min_valid_depth; near_clip is only the clamp floor.
+        # Match distillation: clamp first, then apply the optional min-valid-depth mask.
+        frame = np.clip(frame, self.cfg.near_clip, self.cfg.far_clip)
         min_valid_depth = self.cfg.near_clip if self.cfg.min_valid_depth is None else self.cfg.min_valid_depth
         frame[frame < min_valid_depth] = self.cfg.far_clip
-        # clip and scale to [-0.5, 0.5] range
-        frame = np.clip(frame, self.cfg.near_clip, self.cfg.far_clip)
+        # scale to [-0.5, 0.5] range
         frame = (frame - self.cfg.near_clip) / (self.cfg.far_clip - self.cfg.near_clip) - 0.5
 
         # [H, W] -> [1, H, W]

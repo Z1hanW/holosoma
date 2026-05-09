@@ -2,77 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-clip="${HOLOSOMA_MJ_MOTION:-box_75}"
-checkpoint="${HOLOSOMA_WANDB_CHECKPOINT:-latest}"
-run_ref="${HOLOSOMA_WANDB_RUN:-zihanw22/boxer/w5qostjn}"
-motion_init="${HOLOSOMA_MJ_MOTION_INIT:-0}"
-auto_start="${HOLOSOMA_RO_AUTO_START:-0}"
-auto_motion="${HOLOSOMA_RO_AUTO_MOTION:-0}"
-use_sim_state="${HOLOSOMA_RO_USE_SIM_STATE:-1}"
-explicit_motion_mode=0
-clip_arg_seen=0
-if [[ -n "${HOLOSOMA_MJ_MOTION_INIT:-}" ]]; then
-  explicit_motion_mode=1
-fi
-positional=()
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --motion-init)
-      motion_init=1
-      explicit_motion_mode=1
-      ;;
-    --manual)
-      motion_init=0
-      explicit_motion_mode=1
-      ;;
-    --auto-start|--rollout)
-      auto_start=1
-      ;;
-    --auto-motion)
-      auto_start=1
-      auto_motion=1
-      ;;
-    --use-sim-state)
-      use_sim_state=1
-      ;;
-    --no-sim-state)
-      use_sim_state=0
-      ;;
-    --clip)
-      shift
-      clip="$1"
-      clip_arg_seen=1
-      ;;
-    --checkpoint)
-      shift
-      checkpoint="$1"
-      ;;
-    --run)
-      shift
-      run_ref="$1"
-      ;;
-    *)
-      positional+=("$1")
-      ;;
-  esac
-  shift
-done
-
-if (( ${#positional[@]} >= 1 )); then
-  clip="${positional[0]}"
-  clip_arg_seen=1
-fi
-if (( ${#positional[@]} >= 2 )); then
-  checkpoint="${positional[1]}"
-fi
-if (( ${#positional[@]} >= 3 )); then
-  run_ref="${positional[2]}"
-fi
-
-if [[ "$explicit_motion_mode" == "0" && "$clip_arg_seen" == "1" ]]; then
-  motion_init=1
-fi
+clip="${1:-${HOLOSOMA_MJ_MOTION:-box_75}}"
+checkpoint="${2:-${HOLOSOMA_WANDB_CHECKPOINT:-latest}}"
+run_ref="${3:-${HOLOSOMA_WANDB_RUN:-zihanw22/boxer/w5qostjn}}"
 
 motion_file="$clip"
 if [[ "$clip" != *.npz && "$clip" != /* ]]; then
@@ -82,27 +14,14 @@ if [[ "$motion_file" != /* ]]; then
   motion_file="${ROOT_DIR}/${motion_file}"
 fi
 
-normalize_run_path() {
-  local ref="$1"
-  ref="${ref#wandb://}"
-  if [[ "$ref" == https://wandb.ai/* ]]; then
-    ref="${ref#https://wandb.ai/}"
-  fi
-  ref="${ref%%/files/*}"
-  if [[ "$ref" == */runs/* ]]; then
-    local entity project _runs run_id rest
-    IFS=/ read -r entity project _runs run_id rest <<< "$ref"
-    printf '%s/%s/%s\n' "$entity" "$project" "$run_id"
-  elif [[ "$ref" != */* ]]; then
-    printf 'zihanw22/boxer/%s\n' "$ref"
-  else
-    local entity project run_id rest
-    IFS=/ read -r entity project run_id rest <<< "$ref"
-    printf '%s/%s/%s\n' "$entity" "$project" "$run_id"
-  fi
-}
-
-run_path="$(normalize_run_path "$run_ref")"
+run_path="${run_ref#wandb://}"
+run_path="${run_path#https://wandb.ai/}"
+run_path="${run_path%%/files/*}"
+run_path="${run_path%/}"
+run_path="${run_path/\/runs\//\/}"
+if [[ "$run_path" != */* ]]; then
+  run_path="zihanw22/boxer/$run_path"
+fi
 run_id="${run_path##*/}"
 
 if [[ "$checkpoint" == /* || "$checkpoint" == ./* || "$checkpoint" == ../* ]]; then
@@ -136,19 +55,7 @@ if [[ -z "$force_zero_sparse" ]]; then
   fi
 fi
 
-if [[ "${HOLOSOMA_SKIP_SOURCE_INFERENCE_SETUP:-0}" != "1" ]]; then
-  source "${ROOT_DIR}/scripts/source_inference_setup.sh"
-fi
-
-export HOLOSOMA_MJ_MOTION="$motion_file"
-export HOLOSOMA_WANDB_CHECKPOINT="$checkpoint"
-export HOLOSOMA_WANDB_RUN="$run_path"
-export HOLOSOMA_MJ_MOTION_INIT="$motion_init"
-export HOLOSOMA_RO_AUTO_START="$auto_start"
-export HOLOSOMA_RO_AUTO_MOTION="$auto_motion"
-export HOLOSOMA_RO_USE_SIM_STATE="$use_sim_state"
 export HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND="$force_zero_sparse"
-export SIM_STATE_PORT="${SIM_STATE_PORT:-5557}"
 if [[ -z "${HOLOSOMA_POLICY_MOTION_INDEX_OFFSET:-}" ]]; then
   if [[ "$(basename "$clip" .npz)" == "box_75" ]]; then
     export HOLOSOMA_POLICY_MOTION_INDEX_OFFSET=1
@@ -157,16 +64,6 @@ if [[ -z "${HOLOSOMA_POLICY_MOTION_INDEX_OFFSET:-}" ]]; then
   fi
 fi
 export PYTHONPATH="${ROOT_DIR}/src/holosoma_inference:${ROOT_DIR}/src/holosoma${PYTHONPATH:+:${PYTHONPATH}}"
-
-echo "[mj_ro] Model path: $model_path"
-echo "[mj_ro] Inference config: $inference_config"
-echo "[mj_ro] Motion file: $motion_file"
-echo "[mj_ro] Zero sparse root command: $HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND"
-if [[ "$use_sim_state" == "1" ]]; then
-  echo "[mj_ro] Use sim state: True"
-else
-  echo "[mj_ro] Use sim state: False"
-fi
 
 run_args=(
   python3 "${ROOT_DIR}/src/holosoma_inference/holosoma_inference/run_policy.py"
@@ -179,13 +76,14 @@ run_args=(
   --task.motion-file "$motion_file"
 )
 
-if [[ "$use_sim_state" == "1" ]]; then
+if [[ "${HOLOSOMA_MJ_RO_DEBUG:-0}" == "1" && "${HOLOSOMA_RO_USE_SIM_STATE:-1}" == "1" ]]; then
+  export SIM_STATE_PORT="${SIM_STATE_PORT:-5557}"
   run_args+=(--task.use-sim-state --task.sim-state-port "$SIM_STATE_PORT" --task.prefer-sim-ref-from-sim-state)
 fi
-if [[ "$auto_start" == "1" ]]; then
+if [[ "${HOLOSOMA_MJ_RO_DEBUG:-0}" == "1" && "${HOLOSOMA_RO_AUTO_START:-0}" == "1" ]]; then
   run_args+=(--task.auto-start-policy)
 fi
-if [[ "$auto_motion" == "1" ]]; then
+if [[ "${HOLOSOMA_MJ_RO_DEBUG:-0}" == "1" && "${HOLOSOMA_RO_AUTO_MOTION:-0}" == "1" ]]; then
   run_args+=(--task.auto-start-motion-clip)
 fi
 

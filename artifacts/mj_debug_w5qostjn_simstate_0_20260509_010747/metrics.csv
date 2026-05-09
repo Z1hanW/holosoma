@@ -1,0 +1,2 @@
+run_ref,checkpoint,use_sim_state_effective,sim_state_subscriber_started,first_lowcmd_received,motion_init_joint_max_err,max_dz,t_at_max_dz,robot_drop_from_initial,max_sparse_root_command_abs
+w5qostjn,latest,False,False,True,0.0,0.01,1.0,0.694,3.1235337257385254

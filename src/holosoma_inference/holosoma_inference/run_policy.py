@@ -71,6 +71,8 @@ def _print_control_guide(policy_class, use_joystick: bool):
             logger.info("")
             logger.info("Whole-Body Tracking Controls:")
             logger.info("  Start button   - Start motion clip")
+            logger.info("  Left stick     - Relative sparse root XY command")
+            logger.info("  Right stick X  - Relative sparse root yaw command")
         else:
             logger.info("")
             logger.info("Locomotion Controls:")
@@ -101,7 +103,10 @@ def _print_control_guide(policy_class, use_joystick: bool):
         if is_wbt:
             logger.info("")
             logger.info("Whole-Body Tracking Controls:")
-            logger.info("  s  - Start motion clip")
+            logger.info("  s or m - Start motion clip")
+            logger.info("  w/s/a/d - Adjust sparse root XY command")
+            logger.info("  q/e     - Adjust sparse root yaw command")
+            logger.info("  z       - Reset sparse root command offset")
         elif is_depth_distillation:
             logger.info("")
             logger.info("Depth Distillation Controls:")

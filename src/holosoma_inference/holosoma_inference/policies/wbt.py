@@ -112,6 +112,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._depth_img_array = None
         self._motion_root_pos_w = None
         self._motion_root_quat_wxyz = None
+        self._motion_root_command_origin_xy = None
         self._motion_joint_pos = None
         self._motion_joint_vel = None
         self._motion_object_pos_w = None
@@ -141,6 +142,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
             "HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND", os.environ.get("HOLOSOMA_FORCE_MANUAL_SPARSE_ROOT_COMMAND", "")
         ).strip().lower() in {"1", "true", "yes", "on"}
         self._logged_zero_sparse_root_command = False
+        self._logged_motion_local_sparse_root_command = False
+        self._manual_sparse_root_command_offset = np.zeros((1, 3), dtype=np.float32)
+        self._joystick_sparse_root_command_offset = np.zeros((1, 3), dtype=np.float32)
         try:
             self._motion_index_offset = int(os.environ.get("HOLOSOMA_POLICY_MOTION_INDEX_OFFSET", "0") or "0")
         except ValueError:
@@ -461,6 +465,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
             self._motion_root_pos_w = np.asarray(data["body_pos_w"][:, root_index, :], dtype=np.float32)
             self._motion_root_quat_wxyz = np.asarray(data["body_quat_w"][:, root_index, :], dtype=np.float32)
+            self._motion_root_command_origin_xy = self._motion_root_pos_w[:1, :2].copy()
             self._motion_joint_pos = np.asarray(data["joint_pos"][:, 7:], dtype=np.float32)[:, joint_indexes]
             self._motion_joint_vel = np.asarray(data["joint_vel"][:, 6:], dtype=np.float32)[:, joint_indexes]
             if "object_pos_w" in data:
@@ -661,8 +666,19 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if target_pos is None or target_quat_wxyz is None:
             return np.zeros((1, 3), dtype=np.float32)
 
-        robot_root_pos = robot_state_data[:, :3]
-        delta_xy_world = target_pos[:, :2] - robot_root_pos[:, :2]
+        robot_root_xy = robot_state_data[:, :2]
+        target_xy = target_pos[:, :2].astype(np.float32, copy=True)
+        if (
+            self._motion_root_command_origin_xy is not None
+            and not self.config.task.use_sim_state
+            and np.linalg.norm(robot_root_xy) < 1e-5
+        ):
+            if not self._logged_motion_local_sparse_root_command:
+                logger.info("Using motion-local sparse root XY command because low-state root XY is zero.")
+                self._logged_motion_local_sparse_root_command = True
+            target_xy = target_xy - self._motion_root_command_origin_xy
+
+        delta_xy_world = target_xy - robot_root_xy
 
         robot_yaw = quat_to_rpy(robot_state_data[0, 3:7])[2]
         target_yaw = quat_to_rpy(target_quat_wxyz[0])[2]
@@ -673,7 +689,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         delta_y_body = s * delta_xy_world[:, 0] + c * delta_xy_world[:, 1]
         yaw_error = (target_yaw - robot_yaw + np.pi) % (2 * np.pi) - np.pi
 
-        return np.array([[delta_x_body[0], delta_y_body[0], yaw_error]], dtype=np.float32)
+        command = np.array([[delta_x_body[0], delta_y_body[0], yaw_error]], dtype=np.float32)
+        return command + self._manual_sparse_root_command_offset + self._joystick_sparse_root_command_offset
 
     def _get_sparse_target_root_trajectory_command_contact_aware(self, base_command: np.ndarray) -> np.ndarray:
         if self._motion_object_pos_w is None or self._motion_root_pos_w is None:
@@ -1064,11 +1081,68 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._last_policy_inference_clock_ms = None
         self.logger.info(colored("Starting motion clip", "blue"))
 
+    def _handle_sparse_root_keyboard_command(self, keycode: str) -> bool:
+        if keycode == "w":
+            self._manual_sparse_root_command_offset[0, 0] += 0.05
+        elif keycode == "s":
+            self._manual_sparse_root_command_offset[0, 0] -= 0.05
+        elif keycode == "a":
+            self._manual_sparse_root_command_offset[0, 1] += 0.05
+        elif keycode == "d":
+            self._manual_sparse_root_command_offset[0, 1] -= 0.05
+        elif keycode == "q":
+            self._manual_sparse_root_command_offset[0, 2] -= 0.05
+        elif keycode == "e":
+            self._manual_sparse_root_command_offset[0, 2] += 0.05
+        elif keycode == "z":
+            self._manual_sparse_root_command_offset.fill(0.0)
+        else:
+            return False
+
+        self.logger.info(
+            colored(
+                "Sparse root command offset: x={:.2f}, y={:.2f}, yaw={:.2f}".format(
+                    float(self._manual_sparse_root_command_offset[0, 0]),
+                    float(self._manual_sparse_root_command_offset[0, 1]),
+                    float(self._manual_sparse_root_command_offset[0, 2]),
+                ),
+                "blue",
+            )
+        )
+        return True
+
+    def _update_sparse_root_joystick_command(self) -> None:
+        wc_msg = self.interface.get_joystick_msg()
+        if wc_msg is None:
+            self._joystick_sparse_root_command_offset.fill(0.0)
+            return
+
+        deadband = 0.1
+        xy_scale = 0.5
+        yaw_scale = 0.6
+
+        def apply_deadband(value: float) -> float:
+            return value if abs(value) > deadband else 0.0
+
+        lx = apply_deadband(float(getattr(wc_msg, "lx", 0.0)))
+        ly = apply_deadband(float(getattr(wc_msg, "ly", 0.0)))
+        rx = apply_deadband(float(getattr(wc_msg, "rx", 0.0)))
+
+        self._joystick_sparse_root_command_offset[0, 0] = ly * xy_scale
+        self._joystick_sparse_root_command_offset[0, 1] = -lx * xy_scale
+        self._joystick_sparse_root_command_offset[0, 2] = -rx * yaw_scale
+
+    def process_joystick_input(self):
+        super().process_joystick_input()
+        self._update_sparse_root_joystick_command()
+
     def handle_keyboard_button(self, keycode):
-        """Add new keyboard button to start and end the motion clips"""
-        if keycode == "s":
+        """Add WBT keyboard controls for motion clips and sparse root command."""
+        if keycode in {"m", "s"} and not self.motion_clip_progressing:
             self.clock_sub.reset_origin()
             self._handle_start_motion_clip()
+        elif self._handle_sparse_root_keyboard_command(keycode):
+            pass
         else:
             super().handle_keyboard_button(keycode)
 
