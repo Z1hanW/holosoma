@@ -30,7 +30,6 @@ from holosoma.envs.base_task.base_task import BaseTask
 from holosoma.utils.helpers import instantiate
 from holosoma.utils.inference_helpers import (
     attach_onnx_metadata,
-    export_motion_and_policy_as_onnx,
     export_policy_as_onnx,
     get_command_ranges_from_env,
     get_control_gains_from_config,
@@ -2008,25 +2007,17 @@ class PPO(BaseAlgo):
         # Set model to evaluation mode for export so we don't affect gradients mid-rollout
         self._eval_mode()
 
-        # Save the .onnx file to filesystem
-        motion_command = self.env.command_manager.get_state("motion_command")
-        if motion_command is not None:
-            export_motion_and_policy_as_onnx(
-                self.actor_onnx_wrapper,
-                motion_command,
-                onnx_file_path,
-                self.device,
-            )
-        else:
-            example_obs_dict = {"actor_obs": self._get_zero_input()}
-            zero_perception = self._get_zero_perception_input()
-            if zero_perception is not None:
-                example_obs_dict[self.actor_perception_key] = zero_perception
-            export_policy_as_onnx(
-                wrapper=self.actor_onnx_wrapper,
-                onnx_file_path=onnx_file_path,
-                example_obs_dict=example_obs_dict,
-            )
+        # Save a pure policy .onnx for deployment. Motion replay/reference
+        # tensors belong in debug/demo tooling, not in the policy artifact.
+        example_obs_dict = {"actor_obs": self._get_zero_input()}
+        zero_perception = self._get_zero_perception_input()
+        if zero_perception is not None:
+            example_obs_dict[self.actor_perception_key] = zero_perception
+        export_policy_as_onnx(
+            wrapper=self.actor_onnx_wrapper,
+            onnx_file_path=onnx_file_path,
+            example_obs_dict=example_obs_dict,
+        )
 
         # Extract control gains and velocity limits & attach to onnx as metadata
         kp_list, kd_list = get_control_gains_from_config(self.env.robot_config)

@@ -9,11 +9,12 @@ set -euo pipefail
 # use the object URDF mesh assets.
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+cd "${SCRIPT_DIR}"
 
-OMOMO_DATA_DIR=${OMOMO_DATA_DIR:-"${SCRIPT_DIR}/data/ds_as_data/omomo"}
+OMOMO_DATA_DIR=${OMOMO_DATA_DIR:-"data/ds_as_data/omomo"}
 OMOMO_OBJECT_MAP=${OMOMO_OBJECT_MAP:-"${OMOMO_DATA_DIR}/_clip_object_urdf_map.json"}
 OMOMO_EXPECTED_TOTAL=${OMOMO_EXPECTED_TOTAL:-63}
-# Explicit override knobs forwarded to train_object_generalist_ds.sh:
+# Optional override knobs forwarded to train_object_generalist_ds.sh:
 #   NUM_ENVS / NPROC / PER_GPU_ENVS / MASTER_PORT
 #   TRAINING_SEED or SEED
 #   RANDOMIZATION_PRESET or RANDOMIZATION
@@ -23,62 +24,62 @@ TRAINING_SEED=${TRAINING_SEED:-${SEED:-}}
 RANDOMIZATION_PRESET=${RANDOMIZATION_PRESET:-${RANDOMIZATION:-}}
 INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-}
 
-LOCAL_DATA_ROOT=$(realpath -m "${SCRIPT_DIR}/data")
-OMOMO_DATA_DIR=$(realpath -m "${OMOMO_DATA_DIR}")
-OMOMO_OBJECT_MAP=$(realpath -m "${OMOMO_OBJECT_MAP}")
+LOCAL_DATA_ROOT=$(realpath -m "data")
+OMOMO_DATA_DIR_ABS=$(realpath -m "${OMOMO_DATA_DIR}")
+OMOMO_OBJECT_MAP_ABS=$(realpath -m "${OMOMO_OBJECT_MAP}")
 
-case "${OMOMO_DATA_DIR}" in
+case "${OMOMO_DATA_DIR_ABS}" in
   /nfs|/nfs/*)
-    echo "[ERROR] OMOMO_DATA_DIR must be local, not NFS: ${OMOMO_DATA_DIR}" >&2
-    echo "[ERROR] Run ./cp_real.sh first and train from ${SCRIPT_DIR}/data/ds_as_data/omomo." >&2
+    echo "[ERROR] OMOMO_DATA_DIR must be local, not NFS: ${OMOMO_DATA_DIR_ABS}" >&2
+    echo "[ERROR] Run ./cp_as.sh first and train from data/ds_as_data/omomo." >&2
     exit 2
     ;;
 esac
-case "${OMOMO_DATA_DIR}" in
+case "${OMOMO_DATA_DIR_ABS}" in
   "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
     ;;
   *)
     echo "[ERROR] OMOMO_DATA_DIR must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
-    echo "[ERROR] Got: ${OMOMO_DATA_DIR}" >&2
+    echo "[ERROR] Got: ${OMOMO_DATA_DIR_ABS}" >&2
     exit 2
     ;;
 esac
-case "${OMOMO_OBJECT_MAP}" in
+case "${OMOMO_OBJECT_MAP_ABS}" in
   /nfs|/nfs/*)
-    echo "[ERROR] OMOMO_OBJECT_MAP must be local, not NFS: ${OMOMO_OBJECT_MAP}" >&2
-    echo "[ERROR] Run ./cp_real.sh first and use the copied map under ${SCRIPT_DIR}/data." >&2
+    echo "[ERROR] OMOMO_OBJECT_MAP must be local, not NFS: ${OMOMO_OBJECT_MAP_ABS}" >&2
+    echo "[ERROR] Run ./cp_as.sh first and use the copied map under data/." >&2
     exit 2
     ;;
 esac
-case "${OMOMO_OBJECT_MAP}" in
+case "${OMOMO_OBJECT_MAP_ABS}" in
   "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
     ;;
   *)
     echo "[ERROR] OMOMO_OBJECT_MAP must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
-    echo "[ERROR] Got: ${OMOMO_OBJECT_MAP}" >&2
+    echo "[ERROR] Got: ${OMOMO_OBJECT_MAP_ABS}" >&2
     exit 2
     ;;
 esac
 
-if [[ ! -d "${OMOMO_DATA_DIR}" ]]; then
+if [[ ! -d "${OMOMO_DATA_DIR_ABS}" ]]; then
   echo "[ERROR] OMOMO_DATA_DIR does not exist: ${OMOMO_DATA_DIR}" >&2
-  echo "[ERROR] Run ./cp_real.sh first, or set OMOMO_DATA_DIR to a prepared motion bank." >&2
+  echo "[ERROR] Run ./cp_as.sh first, or set OMOMO_DATA_DIR to a prepared motion bank under data/." >&2
   exit 2
 fi
 
-if ! compgen -G "${OMOMO_DATA_DIR}/*.npz" >/dev/null; then
+if ! compgen -G "${OMOMO_DATA_DIR_ABS}/*.npz" >/dev/null; then
   echo "[ERROR] No .npz files found in OMOMO_DATA_DIR: ${OMOMO_DATA_DIR}" >&2
-  echo "[ERROR] Run ./cp_real.sh first, or set OMOMO_DATA_DIR to a prepared motion bank." >&2
+  echo "[ERROR] Run ./cp_as.sh first, or set OMOMO_DATA_DIR to a prepared motion bank under data/." >&2
   exit 2
 fi
 
-if [[ ! -f "${OMOMO_OBJECT_MAP}" ]]; then
+if [[ ! -f "${OMOMO_OBJECT_MAP_ABS}" ]]; then
   echo "[ERROR] Missing clip-object URDF map: ${OMOMO_OBJECT_MAP}" >&2
   exit 2
 fi
 
 OBJECT_SPAWN_MODE=${OBJECT_SPAWN_MODE:-single_slot_multi_urdf}
-OBJECT_GEOMETRY_MODE=${OBJECT_GEOMETRY_MODE:-mesh}
+AS_OBJECT_GEOMETRY_MODE=${OBJECT_GEOMETRY_MODE:-mesh}
 case "$(echo "${OBJECT_SPAWN_MODE}" | tr '[:upper:]' '[:lower:]')" in
   urdf|mesh)
     OBJECT_SPAWN_MODE=urdf
@@ -92,18 +93,18 @@ case "$(echo "${OBJECT_SPAWN_MODE}" | tr '[:upper:]' '[:lower:]')" in
     exit 2
     ;;
 esac
-case "$(echo "${OBJECT_GEOMETRY_MODE}" | tr '[:upper:]' '[:lower:]')" in
+case "$(echo "${AS_OBJECT_GEOMETRY_MODE}" | tr '[:upper:]' '[:lower:]')" in
   mesh|urdf|off|disable|disabled|0|false|no)
-    OBJECT_GEOMETRY_MODE=mesh
+    AS_OBJECT_GEOMETRY_MODE=mesh
     ;;
   *)
     echo "[ERROR] train_as_general.sh requires mesh object geometry." >&2
-    echo "[ERROR] Do not use primitive/box geometry here. Got OBJECT_GEOMETRY_MODE=${OBJECT_GEOMETRY_MODE}" >&2
+    echo "[ERROR] Do not use primitive/box geometry here. Got OBJECT_GEOMETRY_MODE=${AS_OBJECT_GEOMETRY_MODE}" >&2
     exit 2
     ;;
 esac
 
-python3 - "${OMOMO_DATA_DIR}" "${OMOMO_OBJECT_MAP}" "${OMOMO_EXPECTED_TOTAL}" <<'PY'
+python3 - "${OMOMO_DATA_DIR_ABS}" "${OMOMO_OBJECT_MAP_ABS}" "${OMOMO_EXPECTED_TOTAL}" <<'PY'
 import json
 import sys
 import xml.etree.ElementTree as ET
@@ -184,7 +185,7 @@ print(
 PY
 
 export DATA_MODE=pure-real
-export DS_DATA_ROOT="${SCRIPT_DIR}/data/ds_as_data"
+export DS_DATA_ROOT="data/ds_as_data"
 export MOTION_DIR="${OMOMO_DATA_DIR}"
 export OBJECT_SPEC_PATH="${OMOMO_OBJECT_MAP}"
 export ASSERT_NEW_DS_DATA=${ASSERT_NEW_DS_DATA:-0}
@@ -192,39 +193,17 @@ export AUTO_PREP_DS_BANK=0
 export STRICT_DEFAULT_DS_BANK_VALIDATION=0
 
 export OBJECT_SPAWN_MODE
-export OBJECT_GEOMETRY_MODE
 export HOLOSOMA_OBJECT_SPAWN_MODE="${OBJECT_SPAWN_MODE}"
 export HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK="${HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK:-1}"
-export HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE="${OBJECT_GEOMETRY_MODE}"
+export HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE="${AS_OBJECT_GEOMETRY_MODE}"
 export HOLOSOMA_OBJECT_COLLIDER_TYPE=${HOLOSOMA_OBJECT_COLLIDER_TYPE:-convex_decomposition}
+unset OBJECT_GEOMETRY_MODE
 export TRAINING_SEED
 export RANDOMIZATION_PRESET
 export INIT_AT_RANDOM_EP_LEN
 
-export EXP=${EXP:-g1-29dof-wbt-w-object-generalist}
 export SEQUENCE_NAME=${SEQUENCE_NAME:-omomo-real-mesh-cotrack}
-export WANDB_PROJECT=${WANDB_PROJECT:-carry-any}
-export CLIP_WEIGHTING_STRATEGY=${CLIP_WEIGHTING_STRATEGY:-uniform_clip}
-export SAVE_INTERVAL=${SAVE_INTERVAL:-1000}
 export PURE_REAL_OMOMO_PREFIXES=${PURE_REAL_OMOMO_PREFIXES:-'["sub","any_"]'}
-
-# GT/u5-aligned tracking defaults.
-export ROOT_POS_W=${ROOT_POS_W:-0.5}
-export ROOT_ORI_W=${ROOT_ORI_W:-0.5}
-export FULL_BODY_POS_W=${FULL_BODY_POS_W:-1.0}
-export FULL_BODY_ORI_W=${FULL_BODY_ORI_W:-1.0}
-export FULL_BODY_LIN_VEL_W=${FULL_BODY_LIN_VEL_W:-1.0}
-export FULL_BODY_ANG_VEL_W=${FULL_BODY_ANG_VEL_W:-1.0}
-export OBJECT_POS_W=${OBJECT_POS_W:-1.0}
-export OBJECT_ORI_W=${OBJECT_ORI_W:-1.0}
-export ROOT_POS_SIGMA=${ROOT_POS_SIGMA:-0.3}
-export ROOT_ORI_SIGMA=${ROOT_ORI_SIGMA:-0.4}
-export FULL_BODY_POS_SIGMA=${FULL_BODY_POS_SIGMA:-0.3}
-export FULL_BODY_ORI_SIGMA=${FULL_BODY_ORI_SIGMA:-0.4}
-export FULL_BODY_LIN_VEL_SIGMA=${FULL_BODY_LIN_VEL_SIGMA:-1.0}
-export FULL_BODY_ANG_VEL_SIGMA=${FULL_BODY_ANG_VEL_SIGMA:-3.14}
-export OBJECT_POS_SIGMA=${OBJECT_POS_SIGMA:-0.3}
-export OBJECT_ORI_SIGMA=${OBJECT_ORI_SIGMA:-0.4}
 
 if [[ -n "${TRAINING_SEED}" ]]; then
   if [[ ! "${TRAINING_SEED}" =~ ^-?[0-9]+$ ]]; then

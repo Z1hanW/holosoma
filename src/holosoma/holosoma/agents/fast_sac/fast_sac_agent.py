@@ -24,7 +24,6 @@ from holosoma.envs.base_task.base_task import BaseTask
 from holosoma.utils.average_meters import TensorAverageMeterDict
 from holosoma.utils.inference_helpers import (
     attach_onnx_metadata,
-    export_motion_and_policy_as_onnx,
     export_policy_as_onnx,
     get_command_ranges_from_env,
     get_control_gains_from_config,
@@ -954,20 +953,11 @@ class FastSACAgent(BaseAlgo):
         # Create dummy all-zero input for ONNX tracing.
         example_input_list = torch.zeros(1, self.actor_obs_dim, device="cpu")
 
-        motion_command = self.unwrapped_env.command_manager.get_state("motion_command")
-        if motion_command is not None:
-            export_motion_and_policy_as_onnx(
-                self.actor_onnx_wrapper,
-                motion_command,
-                onnx_file_path,
-                self.device,
-            )
-        else:
-            export_policy_as_onnx(
-                wrapper=self.actor_onnx_wrapper,
-                onnx_file_path=onnx_file_path,
-                example_obs_dict={"actor_obs": example_input_list},
-            )
+        export_policy_as_onnx(
+            wrapper=self.actor_onnx_wrapper,
+            onnx_file_path=onnx_file_path,
+            example_obs_dict={"actor_obs": example_input_list},
+        )
 
         # Extract control gains and velocity limits & attach to onnx as metadata
         kp_list, kd_list = get_control_gains_from_config(self.env.robot_config)

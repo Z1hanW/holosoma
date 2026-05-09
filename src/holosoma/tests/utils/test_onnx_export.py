@@ -2,6 +2,8 @@
 
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import onnx
 import torch
@@ -9,6 +11,7 @@ from torch import nn
 
 from holosoma.agents.modules.module_utils import setup_ppo_actor_module
 from holosoma.config_types.algo import LayerConfig, ModuleConfig
+from holosoma.agents.ppo.ppo import PPO
 from holosoma.utils.inference_helpers import export_policy_as_onnx
 
 
@@ -77,6 +80,40 @@ def test_export_policy_as_onnx():
 
         assert input_shape.dim[1].dim_value == OBS_DIM
         assert output_shape.dim[1].dim_value == ACT_DIM
+
+
+def test_ppo_export_uses_pure_policy_even_with_motion_command(tmp_path):
+    """PPO export should not add motion replay tensors or a time_step input."""
+
+    ppo = object.__new__(PPO)
+    ppo.actor = nn.Linear(3, 2)
+    ppo.device = "cpu"
+    ppo.current_learning_iteration = 0
+    ppo.actor_perception_key = ""
+    ppo._get_zero_input = mock.MagicMock(return_value=torch.zeros(1, 3))
+    ppo._get_zero_perception_input = mock.MagicMock(return_value=None)
+    ppo._eval_mode = mock.MagicMock()
+    ppo._train_mode = mock.MagicMock()
+    ppo._checkpoint_metadata = mock.MagicMock(return_value={})
+    ppo.logging_helper = SimpleNamespace(save_to_wandb=mock.MagicMock())
+    ppo.env = SimpleNamespace(
+        command_manager=SimpleNamespace(get_state=mock.MagicMock(return_value=object())),
+        robot_config=SimpleNamespace(dof_names=[], control=SimpleNamespace(stiffness={}, damping={})),
+    )
+
+    with (
+        mock.patch.object(PPO, "actor_onnx_wrapper", new_callable=mock.PropertyMock) as actor_onnx_wrapper,
+        mock.patch("holosoma.agents.ppo.ppo.export_policy_as_onnx") as export_policy,
+        mock.patch("holosoma.agents.ppo.ppo.attach_onnx_metadata"),
+        mock.patch("holosoma.agents.ppo.ppo.get_control_gains_from_config", return_value=([], [])),
+        mock.patch("holosoma.agents.ppo.ppo.get_command_ranges_from_env", return_value=None),
+        mock.patch("holosoma.agents.ppo.ppo.get_urdf_text_from_robot_config", return_value=("", "")),
+    ):
+        actor_onnx_wrapper.return_value = nn.Linear(3, 2)
+        ppo.export(str(tmp_path / "policy.onnx"))
+
+    export_policy.assert_called_once()
+    assert export_policy.call_args.kwargs["example_obs_dict"]["actor_obs"].shape == (1, 3)
 
 
 if __name__ == "__main__":

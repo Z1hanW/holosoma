@@ -13,22 +13,29 @@ set -euo pipefail
 # Optional env:
 #   NFS_AS_ROOT=/nfs/zzzihanw/ds_as_data
 #   NFS_AS_SOURCES="omomo_45 retarget_vanilla_w_obj_scale_coacd500_curated18_20260509"
-#   LOCAL_AS_ROOT=/home/ubuntu/FAR/holosoma/data/ds_as_data
+#   LOCAL_AS_ROOT=data/ds_as_data
 #   OUTPUT_BANK_NAME=omomo
 #   DEDUPE_IDENTICAL=0
 #   DRY_RUN=1
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+cd "${SCRIPT_DIR}"
 
 NFS_AS_ROOT=${NFS_AS_ROOT:-/nfs/zzzihanw/ds_as_data}
 NFS_AS_SOURCES=${NFS_AS_SOURCES:-"omomo_45 retarget_vanilla_w_obj_scale_coacd500_curated18_20260509"}
-LOCAL_AS_ROOT=${LOCAL_AS_ROOT:-"${SCRIPT_DIR}/data/ds_as_data"}
+LOCAL_AS_ROOT=${LOCAL_AS_ROOT:-"data/ds_as_data"}
 OUTPUT_BANK_NAME=${OUTPUT_BANK_NAME:-omomo}
 DRY_RUN=${DRY_RUN:-0}
 DEDUPE_IDENTICAL=${DEDUPE_IDENTICAL:-0}
 
-EXPECTED_LOCAL_ROOT="${SCRIPT_DIR}/data/ds_as_data"
-LOCAL_AS_ROOT=$(python3 - "${LOCAL_AS_ROOT}" <<'PY'
+EXPECTED_LOCAL_ROOT=$(python3 - "${SCRIPT_DIR}/data/ds_as_data" <<'PY'
+from pathlib import Path
+import sys
+
+print(Path(sys.argv[1]).expanduser().resolve())
+PY
+)
+LOCAL_AS_ROOT_ABS=$(python3 - "${LOCAL_AS_ROOT}" <<'PY'
 from pathlib import Path
 import sys
 
@@ -36,11 +43,12 @@ print(Path(sys.argv[1]).expanduser().resolve())
 PY
 )
 
-if [[ "${LOCAL_AS_ROOT}" != "${EXPECTED_LOCAL_ROOT}" ]]; then
-  echo "[ERROR] Refusing unexpected LOCAL_AS_ROOT: ${LOCAL_AS_ROOT}" >&2
+if [[ "${LOCAL_AS_ROOT_ABS}" != "${EXPECTED_LOCAL_ROOT}" ]]; then
+  echo "[ERROR] Refusing unexpected LOCAL_AS_ROOT: ${LOCAL_AS_ROOT_ABS}" >&2
   echo "[ERROR] Expected exactly: ${EXPECTED_LOCAL_ROOT}" >&2
   exit 2
 fi
+LOCAL_AS_ROOT="data/ds_as_data"
 if [[ "${OUTPUT_BANK_NAME}" == "" || "${OUTPUT_BANK_NAME}" == "." || "${OUTPUT_BANK_NAME}" == ".." || "${OUTPUT_BANK_NAME}" == */* ]]; then
   echo "[ERROR] Unsafe OUTPUT_BANK_NAME: ${OUTPUT_BANK_NAME}" >&2
   exit 2
@@ -179,7 +187,7 @@ def validate_bank(out_dir: Path, clips: dict[str, dict]) -> None:
 
 nfs_root = Path(sys.argv[1]).expanduser().resolve()
 source_names = [item for item in sys.argv[2].split() if item]
-local_root = Path(sys.argv[3]).expanduser().resolve()
+local_root = Path(sys.argv[3]).expanduser()
 output_bank_name = sys.argv[4]
 dry_run = is_truthy(sys.argv[5])
 dedupe_identical = is_truthy(sys.argv[6])
