@@ -12,7 +12,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 OMOMO_DATA_DIR=${OMOMO_DATA_DIR:-"${SCRIPT_DIR}/data/ds_as_data/omomo"}
 OMOMO_OBJECT_MAP=${OMOMO_OBJECT_MAP:-"${OMOMO_DATA_DIR}/_clip_object_urdf_map.json"}
-OMOMO_EXPECTED_TOTAL=${OMOMO_EXPECTED_TOTAL:-45}
+OMOMO_EXPECTED_TOTAL=${OMOMO_EXPECTED_TOTAL:-63}
 # Explicit override knobs forwarded to train_object_generalist_ds.sh:
 #   NUM_ENVS / NPROC / PER_GPU_ENVS / MASTER_PORT
 #   TRAINING_SEED or SEED
@@ -187,6 +187,7 @@ export DATA_MODE=pure-real
 export DS_DATA_ROOT="${SCRIPT_DIR}/data/ds_as_data"
 export MOTION_DIR="${OMOMO_DATA_DIR}"
 export OBJECT_SPEC_PATH="${OMOMO_OBJECT_MAP}"
+export ASSERT_NEW_DS_DATA=${ASSERT_NEW_DS_DATA:-0}
 export AUTO_PREP_DS_BANK=0
 export STRICT_DEFAULT_DS_BANK_VALIDATION=0
 
@@ -205,6 +206,7 @@ export SEQUENCE_NAME=${SEQUENCE_NAME:-omomo-real-mesh-cotrack}
 export WANDB_PROJECT=${WANDB_PROJECT:-carry-any}
 export CLIP_WEIGHTING_STRATEGY=${CLIP_WEIGHTING_STRATEGY:-uniform_clip}
 export SAVE_INTERVAL=${SAVE_INTERVAL:-1000}
+export PURE_REAL_OMOMO_PREFIXES=${PURE_REAL_OMOMO_PREFIXES:-'["sub","any_"]'}
 
 # GT/u5-aligned tracking defaults.
 export ROOT_POS_W=${ROOT_POS_W:-0.5}
