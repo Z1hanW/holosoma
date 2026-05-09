@@ -4,6 +4,8 @@
 *.log
 * ONNX files
 *.onnx
+!_ckps/
+!_ckps/w5qostjn_model_20000.onnx
 
 # IDE files
 .idea/
