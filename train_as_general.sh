@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# OMOMO/AS real-mesh object generalist training.
+# AS real-mesh object generalist training.
 #
-# This is a thin launcher over train_object_generalist_ds.sh for the real OMOMO
-# bank copied by cp_real.sh. It intentionally disables primitive/box object
+# This is a thin launcher over train_object_generalist_ds.sh for the AS union
+# bank copied by cp_as.sh. It intentionally disables primitive/box object
 # spawning: both Isaac Sim object spawning and optional perception geometry must
 # use the object URDF mesh assets.
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
 
-OMOMO_DATA_DIR=${OMOMO_DATA_DIR:-"data/ds_as_data/omomo"}
-OMOMO_OBJECT_MAP=${OMOMO_OBJECT_MAP:-"${OMOMO_DATA_DIR}/_clip_object_urdf_map.json"}
-OMOMO_EXPECTED_TOTAL=${OMOMO_EXPECTED_TOTAL:-63}
+AS_DATA_DIR=${AS_DATA_DIR:-${OMOMO_DATA_DIR:-"data/ds_as_data/omomo"}}
+AS_OBJECT_MAP=${AS_OBJECT_MAP:-${OMOMO_OBJECT_MAP:-"${AS_DATA_DIR}/_clip_object_urdf_map.json"}}
+AS_EXPECTED_TOTAL=${AS_EXPECTED_TOTAL:-${OMOMO_EXPECTED_TOTAL:-63}}
 # Optional override knobs forwarded to train_object_generalist_ds.sh:
 #   NUM_ENVS / NPROC / PER_GPU_ENVS / MASTER_PORT
 #   TRAINING_SEED or SEED
@@ -25,56 +25,56 @@ RANDOMIZATION_PRESET=${RANDOMIZATION_PRESET:-${RANDOMIZATION:-}}
 INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-}
 
 LOCAL_DATA_ROOT=$(realpath -m "data")
-OMOMO_DATA_DIR_ABS=$(realpath -m "${OMOMO_DATA_DIR}")
-OMOMO_OBJECT_MAP_ABS=$(realpath -m "${OMOMO_OBJECT_MAP}")
+AS_DATA_DIR_ABS=$(realpath -m "${AS_DATA_DIR}")
+AS_OBJECT_MAP_ABS=$(realpath -m "${AS_OBJECT_MAP}")
 
-case "${OMOMO_DATA_DIR_ABS}" in
+case "${AS_DATA_DIR_ABS}" in
   /nfs|/nfs/*)
-    echo "[ERROR] OMOMO_DATA_DIR must be local, not NFS: ${OMOMO_DATA_DIR_ABS}" >&2
+    echo "[ERROR] AS_DATA_DIR must be local, not NFS: ${AS_DATA_DIR_ABS}" >&2
     echo "[ERROR] Run ./cp_as.sh first and train from data/ds_as_data/omomo." >&2
     exit 2
     ;;
 esac
-case "${OMOMO_DATA_DIR_ABS}" in
+case "${AS_DATA_DIR_ABS}" in
   "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
     ;;
   *)
-    echo "[ERROR] OMOMO_DATA_DIR must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
-    echo "[ERROR] Got: ${OMOMO_DATA_DIR_ABS}" >&2
+    echo "[ERROR] AS_DATA_DIR must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
+    echo "[ERROR] Got: ${AS_DATA_DIR_ABS}" >&2
     exit 2
     ;;
 esac
-case "${OMOMO_OBJECT_MAP_ABS}" in
+case "${AS_OBJECT_MAP_ABS}" in
   /nfs|/nfs/*)
-    echo "[ERROR] OMOMO_OBJECT_MAP must be local, not NFS: ${OMOMO_OBJECT_MAP_ABS}" >&2
+    echo "[ERROR] AS_OBJECT_MAP must be local, not NFS: ${AS_OBJECT_MAP_ABS}" >&2
     echo "[ERROR] Run ./cp_as.sh first and use the copied map under data/." >&2
     exit 2
     ;;
 esac
-case "${OMOMO_OBJECT_MAP_ABS}" in
+case "${AS_OBJECT_MAP_ABS}" in
   "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
     ;;
   *)
-    echo "[ERROR] OMOMO_OBJECT_MAP must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
-    echo "[ERROR] Got: ${OMOMO_OBJECT_MAP_ABS}" >&2
+    echo "[ERROR] AS_OBJECT_MAP must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
+    echo "[ERROR] Got: ${AS_OBJECT_MAP_ABS}" >&2
     exit 2
     ;;
 esac
 
-if [[ ! -d "${OMOMO_DATA_DIR_ABS}" ]]; then
-  echo "[ERROR] OMOMO_DATA_DIR does not exist: ${OMOMO_DATA_DIR}" >&2
-  echo "[ERROR] Run ./cp_as.sh first, or set OMOMO_DATA_DIR to a prepared motion bank under data/." >&2
+if [[ ! -d "${AS_DATA_DIR_ABS}" ]]; then
+  echo "[ERROR] AS_DATA_DIR does not exist: ${AS_DATA_DIR}" >&2
+  echo "[ERROR] Run ./cp_as.sh first, or set AS_DATA_DIR to a prepared motion bank under data/." >&2
   exit 2
 fi
 
-if ! compgen -G "${OMOMO_DATA_DIR_ABS}/*.npz" >/dev/null; then
-  echo "[ERROR] No .npz files found in OMOMO_DATA_DIR: ${OMOMO_DATA_DIR}" >&2
-  echo "[ERROR] Run ./cp_as.sh first, or set OMOMO_DATA_DIR to a prepared motion bank under data/." >&2
+if ! compgen -G "${AS_DATA_DIR_ABS}/*.npz" >/dev/null; then
+  echo "[ERROR] No .npz files found in AS_DATA_DIR: ${AS_DATA_DIR}" >&2
+  echo "[ERROR] Run ./cp_as.sh first, or set AS_DATA_DIR to a prepared motion bank under data/." >&2
   exit 2
 fi
 
-if [[ ! -f "${OMOMO_OBJECT_MAP_ABS}" ]]; then
-  echo "[ERROR] Missing clip-object URDF map: ${OMOMO_OBJECT_MAP}" >&2
+if [[ ! -f "${AS_OBJECT_MAP_ABS}" ]]; then
+  echo "[ERROR] Missing clip-object URDF map: ${AS_OBJECT_MAP}" >&2
   exit 2
 fi
 
@@ -104,7 +104,7 @@ case "$(echo "${AS_OBJECT_GEOMETRY_MODE}" | tr '[:upper:]' '[:lower:]')" in
     ;;
 esac
 
-python3 - "${OMOMO_DATA_DIR_ABS}" "${OMOMO_OBJECT_MAP_ABS}" "${OMOMO_EXPECTED_TOTAL}" <<'PY'
+python3 - "${AS_DATA_DIR_ABS}" "${AS_OBJECT_MAP_ABS}" "${AS_EXPECTED_TOTAL}" <<'PY'
 import json
 import sys
 import xml.etree.ElementTree as ET
@@ -176,18 +176,18 @@ for urdf_raw, clip_id in sorted(unique_urdfs.items()):
             bad.append(f"{clip_id}: URDF mesh file missing: {mesh_path}")
 
 if bad:
-    raise SystemExit("[ERROR] Real-mesh OMOMO validation failed:\n  " + "\n  ".join(bad[:20]))
+    raise SystemExit("[ERROR] Real-mesh AS validation failed:\n  " + "\n  ".join(bad[:20]))
 
 print(
-    f"[INFO] Validated real-mesh OMOMO bank: {motion_dir} "
+    f"[INFO] Validated real-mesh AS bank: {motion_dir} "
     f"({len(npz_files)} clips, {len(unique_urdfs)} unique URDF mesh asset(s))"
 )
 PY
 
 export DATA_MODE=mix-naive
 export DS_DATA_ROOT="data/ds_as_data"
-export MOTION_DIR="${OMOMO_DATA_DIR}"
-export OBJECT_SPEC_PATH="${OMOMO_OBJECT_MAP}"
+export MOTION_DIR="${AS_DATA_DIR}"
+export OBJECT_SPEC_PATH="${AS_OBJECT_MAP}"
 export ASSERT_NEW_DS_DATA=${ASSERT_NEW_DS_DATA:-0}
 export AUTO_PREP_DS_BANK=0
 export STRICT_DEFAULT_DS_BANK_VALIDATION=0

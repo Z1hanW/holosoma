@@ -337,7 +337,7 @@ try:
         os.replace(tmp_dir, out_dir)
         tmp_dir = None
         print(f"[INFO] Installed AS bank: {out_dir}")
-        print(f"[INFO] Use: OMOMO_DATA_DIR={out_dir} bash train_as_general.sh")
+        print(f"[INFO] Use: AS_DATA_DIR={out_dir} bash train_as_general.sh")
 finally:
     if tmp_dir is not None and tmp_dir.exists():
         shutil.rmtree(tmp_dir)
