@@ -10,7 +10,7 @@ exec > >(tee -a "${log_dir}/run.log") 2>&1
 
 echo "[real_lk9ocrn6] log_dir=${log_dir}"
 source scripts/source_inference_setup.sh
-HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND=0 \
+HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND=1 \
 HOLOSOMA_POLICY_COMMAND_STATUS_PATH="${log_dir}/latest_command.json" \
 HOLOSOMA_POLICY_DEBUG_INPUT_PATH="${log_dir}/depth_command.jsonl" \
 HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT="${HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT:-100000}" \
