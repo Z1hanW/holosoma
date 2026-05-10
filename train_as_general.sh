@@ -78,8 +78,25 @@ if [[ ! -f "${AS_OBJECT_MAP_ABS}" ]]; then
   exit 2
 fi
 
-OBJECT_SPAWN_MODE=${OBJECT_SPAWN_MODE:-single_slot_multi_urdf}
+OBJECT_SPAWN_MODE_FROM_ENV=0
+if [[ -n "${OBJECT_SPAWN_MODE+x}" ]]; then
+  OBJECT_SPAWN_MODE_FROM_ENV=1
+fi
+OBJECT_SPAWN_MODE=${OBJECT_SPAWN_MODE:-urdf}
 AS_OBJECT_GEOMETRY_MODE=${OBJECT_GEOMETRY_MODE:-mesh}
+case "$(echo "${AS_OBJECT_GEOMETRY_MODE}" | tr '[:upper:]' '[:lower:]')" in
+  mesh|urdf|off|disable|disabled|0|false|no)
+    AS_OBJECT_GEOMETRY_MODE=mesh
+    if [[ "${OBJECT_SPAWN_MODE_FROM_ENV}" != "1" ]]; then
+      OBJECT_SPAWN_MODE=urdf
+    fi
+    ;;
+  *)
+    echo "[ERROR] train_as_general.sh requires mesh object geometry." >&2
+    echo "[ERROR] Do not use primitive/box geometry here. Got OBJECT_GEOMETRY_MODE=${AS_OBJECT_GEOMETRY_MODE}" >&2
+    exit 2
+    ;;
+esac
 case "$(echo "${OBJECT_SPAWN_MODE}" | tr '[:upper:]' '[:lower:]')" in
   urdf|mesh)
     OBJECT_SPAWN_MODE=urdf
@@ -88,18 +105,8 @@ case "$(echo "${OBJECT_SPAWN_MODE}" | tr '[:upper:]' '[:lower:]')" in
     OBJECT_SPAWN_MODE=single_slot_multi_urdf
     ;;
   *)
-    echo "[ERROR] train_as_general.sh requires real URDF mesh spawning, preferably single_slot_multi_urdf." >&2
+    echo "[ERROR] train_as_general.sh requires real URDF mesh spawning." >&2
     echo "[ERROR] Do not use primitive/box mode here. Got OBJECT_SPAWN_MODE=${OBJECT_SPAWN_MODE}" >&2
-    exit 2
-    ;;
-esac
-case "$(echo "${AS_OBJECT_GEOMETRY_MODE}" | tr '[:upper:]' '[:lower:]')" in
-  mesh|urdf|off|disable|disabled|0|false|no)
-    AS_OBJECT_GEOMETRY_MODE=mesh
-    ;;
-  *)
-    echo "[ERROR] train_as_general.sh requires mesh object geometry." >&2
-    echo "[ERROR] Do not use primitive/box geometry here. Got OBJECT_GEOMETRY_MODE=${AS_OBJECT_GEOMETRY_MODE}" >&2
     exit 2
     ;;
 esac
