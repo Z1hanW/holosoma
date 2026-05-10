@@ -1,0 +1,13 @@
+{
+  "clips": {
+    "box_11": {
+      "object_urdf_path": "/home/ANT.AMAZON.COM/zzzihanw/FAR/holosoma/data_demo/objects/box_11.urdf"
+    },
+    "box_35": {
+      "object_urdf_path": "/home/ANT.AMAZON.COM/zzzihanw/FAR/holosoma/data_demo/objects/box_35.urdf"
+    },
+    "sub10_largebox_032_mj_w_obj": {
+      "object_urdf_path": "/home/ANT.AMAZON.COM/zzzihanw/FAR/holosoma/data_demo/objects/objects_largebox.urdf"
+    }
+  }
+}
