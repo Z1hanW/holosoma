@@ -7,7 +7,9 @@ implementations for terrain rendering, contact detection, and physics simulation
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
+import time
 from pathlib import Path
 
 import mujoco
@@ -321,6 +323,16 @@ class MuJoCo(BaseSimulator):
 
         # Text overlay visibility toggle
         self.show_text_overlay: bool = True
+        policy_command_status_path = os.environ.get(
+            "HOLOSOMA_POLICY_COMMAND_STATUS_PATH",
+            "/tmp/holosoma_policy_command_status.json",
+        ).strip()
+        self._policy_command_status_path: Path | None = (
+            Path(policy_command_status_path) if policy_command_status_path else None
+        )
+        self._policy_command_status_text = "Policy command: waiting"
+        self._policy_command_status_next_read = 0.0
+        self._text_overlay_last_text: str | None = None
 
         # Command system for keyboard/joystick controls
         # Initialize commands tensor matching IsaacGym format:
@@ -2032,6 +2044,7 @@ class MuJoCo(BaseSimulator):
                 robot_body_id = 1
                 self.viewer.cam.lookat[:] = self.root_data.xpos[robot_body_id]
 
+            self._update_text_overlay()
             self.viewer.sync()
             if self.debug_viz_enabled:
                 self.clear_lines()
@@ -2079,19 +2092,58 @@ class MuJoCo(BaseSimulator):
         assert self.root_data is not None
         return torch.from_numpy(self.root_data.actuator_force[: self.num_dof]).float().to(self.sim_device)
 
-    def _update_text_overlay(self) -> None:
-        """Update text overlay based on current state (event-driven).
+    def _policy_command_overlay_text(self) -> str:
+        if self._policy_command_status_path is None:
+            return ""
 
-        This method is called only when state changes occur (e.g., key presses),
-        not on every render frame. This prevents the viewer's keyboard input
-        system from being disrupted by frequent set_texts() calls.
-        """
+        now = time.monotonic()
+        if now < self._policy_command_status_next_read:
+            return self._policy_command_status_text
+        self._policy_command_status_next_read = now + 0.1
+
+        try:
+            payload = json.loads(self._policy_command_status_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            self._policy_command_status_text = "Policy command: waiting"
+            return self._policy_command_status_text
+        except (json.JSONDecodeError, OSError):
+            return self._policy_command_status_text
+
+        command = payload.get("command")
+        if not isinstance(command, list) or len(command) < 3:
+            return self._policy_command_status_text
+
+        try:
+            x, y, yaw = (float(command[0]), float(command[1]), float(command[2]))
+        except (TypeError, ValueError):
+            return self._policy_command_status_text
+
+        age = max(0.0, time.time() - float(payload.get("timestamp", 0.0) or 0.0))
+        if age > 2.0:
+            self._policy_command_status_text = "Policy command: waiting"
+            return self._policy_command_status_text
+
+        source = "motion"
+        if payload.get("force_zero_sparse_root_command"):
+            source = "zero"
+        elif payload.get("external_sparse_root_command_mode"):
+            source = "manual"
+
+        self._policy_command_status_text = (
+            f"Policy command ({source}): x={x:+.2f} y={y:+.2f} yaw={yaw:+.2f}"
+        )
+        return self._policy_command_status_text
+
+    def _update_text_overlay(self) -> None:
+        """Update text overlay based on current state."""
         if self.viewer is None:
             return
 
         if not self.show_text_overlay:
             # Clear text overlays when disabled
-            self.viewer.set_texts([])
+            if self._text_overlay_last_text:
+                self.viewer.set_texts([])
+                self._text_overlay_last_text = ""
             return
 
         # Determine virtual gantry status
@@ -2102,9 +2154,12 @@ class MuJoCo(BaseSimulator):
 
         # Determine camera tracking status
         camera_status = "ON" if self.simulator_config.viewer.enable_tracking else "OFF"
+        policy_command_text = self._policy_command_overlay_text()
+        policy_command_prefix = f"{policy_command_text} \n" if policy_command_text else ""
 
         # Build text overlay content
         text = (
+            f"{policy_command_prefix}"
             f"Virtual gantry is {gantry_status} \n"
             "Press '7' to raise it \n"
             "Press '8' to lower it \n"
@@ -2116,7 +2171,9 @@ class MuJoCo(BaseSimulator):
         )
 
         # Use default font and position (None values will use MuJoCo defaults)
-        self._add_text_overlay(text)
+        if text != self._text_overlay_last_text:
+            self._add_text_overlay(text)
+            self._text_overlay_last_text = text
 
     def _key_callback(self, keycode: int) -> None:
         """Handle keyboard input with unified command registry and world_id toggling.

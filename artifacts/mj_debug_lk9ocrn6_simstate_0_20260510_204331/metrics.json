@@ -1,0 +1,43 @@
+{
+  "bridge": {
+    "domain_id": 61,
+    "hold_default_pose_until_first_command": true,
+    "ignore_default_idle_command": true,
+    "publish_sim_state": true,
+    "sim_state_port": 46971
+  },
+  "checkpoint": "latest",
+  "clip": "box_75",
+  "duration": "120s",
+  "first_lowcmd_received": true,
+  "lift": {
+    "final_dz": 0.586,
+    "final_object_z": 0.753,
+    "initial_object_z": 0.168,
+    "max_dz": 1.007,
+    "max_object_z": 1.175,
+    "robot_drop_from_initial": 0.336,
+    "robot_z_initial": 0.76,
+    "robot_z_min": 0.424,
+    "t_at_max_dz": 2.5
+  },
+  "lift_telemetry_count": 8,
+  "motion_init_match": {
+    "joint_max_err": 0.0,
+    "matched": true,
+    "yaw_current_deg": 17.7,
+    "yaw_expected_deg": 17.7
+  },
+  "policy": {
+    "max_obs_absmax": 24.63998794555664,
+    "max_perception_absmax": 0.5,
+    "max_policy_action_absmax": 10.670190811157227,
+    "max_q_target_absmax": 3.660046339035034,
+    "max_sparse_root_command_abs": 1.8877068758010864
+  },
+  "policy_debug_count": 151,
+  "run_ref": "lk9ocrn6",
+  "sim_state_subscriber_started": false,
+  "use_sim_state_effective": false,
+  "use_sim_state_requested": false
+}

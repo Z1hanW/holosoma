@@ -4,11 +4,11 @@ set -eo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-log_dir="${ROOT_DIR}/logs/real_run_$(date +%Y%m%d_%H%M%S)"
+log_dir="${ROOT_DIR}/logs/real_lk9ocrn6_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$log_dir"
 exec > >(tee -a "${log_dir}/run.log") 2>&1
 
-echo "[real_run] log_dir=${log_dir}"
+echo "[real_lk9ocrn6] log_dir=${log_dir}"
 source scripts/source_inference_setup.sh
 HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND=0 \
 HOLOSOMA_POLICY_COMMAND_STATUS_PATH="${log_dir}/latest_command.json" \

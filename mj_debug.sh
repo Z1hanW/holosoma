@@ -82,6 +82,7 @@ fi
 sim_state_label="simstate_${use_sim_state}"
 log_dir="${ROOT_DIR}/artifacts/mj_debug_${run_id}_${sim_state_label}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$log_dir"
+export HOLOSOMA_POLICY_COMMAND_STATUS_PATH="${log_dir}/policy_command_status.json"
 env_log="${log_dir}/env.log"
 ro_log="${log_dir}/ro.log"
 conda_sh="${HOLOSOMA_CONDA_SH:-/home/user/.holosoma_deps/miniconda3/etc/profile.d/conda.sh}"

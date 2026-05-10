@@ -89,16 +89,23 @@ g1_wbt_distillation = InferenceConfig(
     camera=camera.single_zed2i_depth,
 )
 
-g1_wbt_object_perception = InferenceConfig(
+g1_root_pos_object_perception = InferenceConfig(
     robot=g1_wbt_distillation.robot,
     observation=observation.wbt_object_perception_g1,
     task=task.wbt_distillation,
     camera=camera.single_d435i_depth,
 )
 
-g1_wbt_object_perception_no_linvel = InferenceConfig(
+g1_root_pos_object_perception_no_linvel = InferenceConfig(
     robot=g1_wbt_distillation.robot,
     observation=observation.wbt_object_perception_no_linvel_g1,
+    task=task.wbt_distillation,
+    camera=camera.single_d435i_depth,
+)
+
+g1_root_pos_contact_aware_actions_no_linvel = InferenceConfig(
+    robot=g1_wbt_distillation.robot,
+    observation=observation.wbt_object_perception_contact_aware_actions_no_linvel_g1,
     task=task.wbt_distillation,
     camera=camera.single_d435i_depth,
 )
@@ -140,8 +147,9 @@ DEFAULTS = {
     "g1-29dof-wbt": g1_29dof_wbt,
     "g1-29dof-loco-manip-stand-height-waist": g1_29dof_loco_manip_stand_height_waist,
     "g1-wbt-distillation": g1_wbt_distillation,
-    "g1-wbt-object-perception": g1_wbt_object_perception,
-    "g1-wbt-object-perception-no-linvel": g1_wbt_object_perception_no_linvel,
+    "g1-root_pos-object-perception": g1_root_pos_object_perception,
+    "g1-root_pos-object-perception-no-linvel": g1_root_pos_object_perception_no_linvel,
+    "g1-root_pos-contact-aware-actions-no-linvel": g1_root_pos_contact_aware_actions_no_linvel,
     "g1-blind-fall-recovery": g1_blind_fall_recovery,
 }
 

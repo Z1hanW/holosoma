@@ -124,6 +124,14 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._sim_state_sub: SimStateSub | None = None
         self._logged_sim_ref_from_sim_state = False
         self._policy_debug_path = os.environ.get("HOLOSOMA_POLICY_DEBUG_INPUT_PATH", "").strip()
+        policy_command_status_path = os.environ.get(
+            "HOLOSOMA_POLICY_COMMAND_STATUS_PATH",
+            "/tmp/holosoma_policy_command_status.json",
+        ).strip()
+        self._policy_command_status_path = Path(policy_command_status_path) if policy_command_status_path else None
+        self._policy_command_status_next_time = 0.0
+        self._policy_command_status_period = 0.05
+        self._logged_policy_command_status_error = False
         try:
             self._policy_debug_limit = int(os.environ.get("HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT", "200") or "200")
         except ValueError:
@@ -145,6 +153,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._logged_motion_local_sparse_root_command = False
         self._manual_sparse_root_command_offset = np.zeros((1, 3), dtype=np.float32)
         self._joystick_sparse_root_command_offset = np.zeros((1, 3), dtype=np.float32)
+        self._external_sparse_root_command_mode = False
         try:
             self._motion_index_offset = int(os.environ.get("HOLOSOMA_POLICY_MOTION_INDEX_OFFSET", "0") or "0")
         except ValueError:
@@ -341,6 +350,32 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         self._configure_contact_aware_window(metadata)
         self._set_policy_action_scales_from_metadata(metadata)
+
+        self._external_sparse_root_command_mode = (
+            self._motion_root_pos_w is None
+            and (
+                "sparse_target_root_trajectory_command" in self.obs_dims
+                or "sparse_target_root_trajectory_command_contact_aware" in self.obs_dims
+            )
+            and "motion_command" not in self.obs_dims
+        )
+        if self._external_sparse_root_command_mode:
+            logger.info(
+                "Using external sparse-root command mode: command comes from zero/manual/joystick input; "
+                "reference-motion outputs are not used."
+            )
+            self.motion_command_t = np.zeros((1, self.num_dofs * 2), dtype=np.float32)
+            self.ref_quat_xyzw_t = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+            self.motion_ref_pos_xyz_t = np.zeros((1, 3), dtype=np.float32)
+            self.motion_command_0 = self.motion_command_t.copy()
+            self.ref_quat_xyzw_0 = self.ref_quat_xyzw_t.copy()
+            self.motion_ref_pos_xyz_0 = self.motion_ref_pos_xyz_t.copy()
+
+            def policy_act(input_feed):
+                return self.onnx_policy_session.run(["actions"], input_feed)[0]
+
+            self.policy = policy_act
+            return
 
         # get initial command and ref quat xyzw
         input_feed = self._make_initial_input_feed()
@@ -599,43 +634,58 @@ class WholeBodyTrackingPolicy(BasePolicy):
     def get_current_obs_buffer_dict(self, robot_state_data):
         robot_state_data = self._augment_robot_state_with_sim_state(robot_state_data)
         current_obs_buffer_dict = {}
+        required_terms = {term for terms in self.obs_dict.values() for term in terms}
 
-        # motion_command
-        current_obs_buffer_dict["motion_command"] = self.motion_command_t
-        sparse_root_command = self._get_sparse_target_root_trajectory_command(robot_state_data)
-        current_obs_buffer_dict["sparse_target_root_trajectory_command"] = sparse_root_command
-        current_obs_buffer_dict["sparse_target_root_trajectory_command_contact_aware"] = (
-            self._get_sparse_target_root_trajectory_command_contact_aware(sparse_root_command)
-        )
+        if "motion_command" in required_terms:
+            current_obs_buffer_dict["motion_command"] = self.motion_command_t
 
-        # motion_ref_ori_b
-        motion_ref_ori = xyzw_to_wxyz(self.ref_quat_xyzw_t)  # wxyz
-        motion_ref_ori = self._remove_yaw_offset(motion_ref_ori, self.motion_yaw_offset)
+        sparse_terms = {
+            "sparse_target_root_trajectory_command",
+            "sparse_target_root_trajectory_command_contact_aware",
+        }
+        if required_terms & sparse_terms:
+            sparse_root_command = self._get_sparse_target_root_trajectory_command(robot_state_data)
+            if "sparse_target_root_trajectory_command" in required_terms:
+                current_obs_buffer_dict["sparse_target_root_trajectory_command"] = sparse_root_command
+            if "sparse_target_root_trajectory_command_contact_aware" in required_terms:
+                if self._external_sparse_root_command_mode:
+                    current_obs_buffer_dict["sparse_target_root_trajectory_command_contact_aware"] = sparse_root_command
+                else:
+                    current_obs_buffer_dict["sparse_target_root_trajectory_command_contact_aware"] = (
+                        self._get_sparse_target_root_trajectory_command_contact_aware(sparse_root_command)
+                    )
+            self._write_sparse_root_command_status(current_obs_buffer_dict)
 
-        # robot_ref_ori
-        robot_ref_ori = self._get_ref_body_orientation_in_world(robot_state_data)  #  wxyz
-        robot_ref_ori = self._remove_yaw_offset(robot_ref_ori, self.robot_yaw_offset)
+        if "motion_ref_ori_b" in required_terms:
+            motion_ref_ori = xyzw_to_wxyz(self.ref_quat_xyzw_t)  # wxyz
+            motion_ref_ori = self._remove_yaw_offset(motion_ref_ori, self.motion_yaw_offset)
 
-        motion_ref_ori_b = matrix_from_quat(subtract_frame_transforms(robot_ref_ori, motion_ref_ori))
-        current_obs_buffer_dict["motion_ref_ori_b"] = motion_ref_ori_b[..., :2].reshape(1, -1)
+            robot_ref_ori = self._get_ref_body_orientation_in_world(robot_state_data)  #  wxyz
+            robot_ref_ori = self._remove_yaw_offset(robot_ref_ori, self.robot_yaw_offset)
 
-        # base_lin_vel
-        current_obs_buffer_dict["base_lin_vel"] = robot_state_data[:, 7 + self.num_dofs : 7 + self.num_dofs + 3]
+            motion_ref_ori_b = matrix_from_quat(subtract_frame_transforms(robot_ref_ori, motion_ref_ori))
+            current_obs_buffer_dict["motion_ref_ori_b"] = motion_ref_ori_b[..., :2].reshape(1, -1)
 
-        # base_ang_vel
-        current_obs_buffer_dict["base_ang_vel"] = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
+        if "base_lin_vel" in required_terms:
+            current_obs_buffer_dict["base_lin_vel"] = robot_state_data[:, 7 + self.num_dofs : 7 + self.num_dofs + 3]
 
-        # dof_pos
-        current_obs_buffer_dict["dof_pos"] = robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles
+        if "base_ang_vel" in required_terms:
+            current_obs_buffer_dict["base_ang_vel"] = robot_state_data[
+                :, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6
+            ]
 
-        # dof_vel
-        current_obs_buffer_dict["dof_vel"] = robot_state_data[
-            :, 7 + self.num_dofs + 6 : 7 + self.num_dofs + 6 + self.num_dofs
-        ]
+        if "dof_pos" in required_terms:
+            current_obs_buffer_dict["dof_pos"] = robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles
 
-        # actions
-        current_obs_buffer_dict["actions"] = self.last_policy_action
-        current_obs_buffer_dict["cam_depth"] = self._get_depth_image_obs()
+        if "dof_vel" in required_terms:
+            current_obs_buffer_dict["dof_vel"] = robot_state_data[
+                :, 7 + self.num_dofs + 6 : 7 + self.num_dofs + 6 + self.num_dofs
+            ]
+
+        if "actions" in required_terms:
+            current_obs_buffer_dict["actions"] = self.last_policy_action
+        if "cam_depth" in required_terms:
+            current_obs_buffer_dict["cam_depth"] = self._get_depth_image_obs()
         if self._policy_debug_path:
             self._last_current_obs_buffer_dict = {
                 key: np.asarray(value, dtype=np.float32).copy()
@@ -655,12 +705,56 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         return current_obs_buffer_dict
 
+    def _write_sparse_root_command_status(self, current_obs_buffer_dict: dict[str, np.ndarray]) -> None:
+        if self._policy_command_status_path is None:
+            return
+
+        now = time.time()
+        if now < self._policy_command_status_next_time:
+            return
+        self._policy_command_status_next_time = now + self._policy_command_status_period
+
+        term = None
+        if "sparse_target_root_trajectory_command_contact_aware" in current_obs_buffer_dict:
+            term = "sparse_target_root_trajectory_command_contact_aware"
+        elif "sparse_target_root_trajectory_command" in current_obs_buffer_dict:
+            term = "sparse_target_root_trajectory_command"
+        if term is None:
+            return
+
+        command = np.asarray(current_obs_buffer_dict[term], dtype=np.float32).reshape(-1)[:3]
+        payload = {
+            "timestamp": now,
+            "term": term,
+            "command": [float(value) for value in command],
+            "manual_offset": [float(value) for value in self._manual_sparse_root_command_offset.reshape(-1)[:3]],
+            "joystick_offset": [float(value) for value in self._joystick_sparse_root_command_offset.reshape(-1)[:3]],
+            "external_sparse_root_command_mode": bool(self._external_sparse_root_command_mode),
+            "force_zero_sparse_root_command": bool(self._force_zero_sparse_root_command),
+            "motion_clip_progressing": bool(self.motion_clip_progressing),
+            "motion_timestep": int(self.motion_timestep),
+        }
+
+        try:
+            self._policy_command_status_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self._policy_command_status_path.with_name(f".{self._policy_command_status_path.name}.tmp")
+            tmp_path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+            tmp_path.replace(self._policy_command_status_path)
+        except OSError as exc:
+            if not self._logged_policy_command_status_error:
+                logger.warning("Failed to write policy command status HUD file: {}", exc)
+                self._logged_policy_command_status_error = True
+
     def _get_sparse_target_root_trajectory_command(self, robot_state_data) -> np.ndarray:
         if self._force_zero_sparse_root_command:
             if not self._logged_zero_sparse_root_command:
                 logger.info("Using zero sparse root command.")
                 self._logged_zero_sparse_root_command = True
             return np.zeros((1, 3), dtype=np.float32)
+
+        external_sparse_command = self._manual_sparse_root_command_offset + self._joystick_sparse_root_command_offset
+        if self._external_sparse_root_command_mode:
+            return external_sparse_command.astype(np.float32, copy=False)
 
         target_pos, target_quat_wxyz = self._get_target_root_pose()
         if target_pos is None or target_quat_wxyz is None:
@@ -689,8 +783,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         delta_y_body = s * delta_xy_world[:, 0] + c * delta_xy_world[:, 1]
         yaw_error = (target_yaw - robot_yaw + np.pi) % (2 * np.pi) - np.pi
 
-        command = np.array([[delta_x_body[0], delta_y_body[0], yaw_error]], dtype=np.float32)
-        return command + self._manual_sparse_root_command_offset + self._joystick_sparse_root_command_offset
+        return np.array([[delta_x_body[0], delta_y_body[0], yaw_error]], dtype=np.float32)
 
     def _get_sparse_target_root_trajectory_command_contact_aware(self, base_command: np.ndarray) -> np.ndarray:
         if self._motion_object_pos_w is None or self._motion_root_pos_w is None:
@@ -896,7 +989,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 input_feed[name] = obs["obs"]
             else:
                 input_feed[name] = obs[name]
-        policy_action, self.motion_command_t, self.ref_quat_xyzw_t, self.motion_ref_pos_xyz_t = self.policy(input_feed)
+        if self._external_sparse_root_command_mode:
+            policy_action = self.policy(input_feed)
+        else:
+            policy_action, self.motion_command_t, self.ref_quat_xyzw_t, self.motion_ref_pos_xyz_t = self.policy(
+                input_feed
+            )
 
         # store last policy action
         self.last_policy_action = policy_action.copy()

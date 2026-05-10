@@ -37,11 +37,14 @@ fi
 inference_config="${HOLOSOMA_INFERENCE_CONFIG:-}"
 if [[ -z "$inference_config" ]]; then
   case "$run_id" in
+    lk9ocrn6)
+      inference_config="g1-root_pos-contact-aware-actions-no-linvel"
+      ;;
     w5qostjn)
-      inference_config="g1-wbt-object-perception-no-linvel"
+      inference_config="g1-root_pos-object-perception-no-linvel"
       ;;
     *)
-      inference_config="g1-wbt-object-perception"
+      inference_config="g1-root_pos-object-perception"
       ;;
   esac
 fi
@@ -73,8 +76,11 @@ run_args=(
   --task.use-sim-time
   --task.rl-rate 50
   --task.interface lo
-  --task.motion-file "$motion_file"
 )
+
+if [[ "$run_id" != "lk9ocrn6" ]]; then
+  run_args+=(--task.motion-file "$motion_file")
+fi
 
 if [[ "${HOLOSOMA_MJ_RO_DEBUG:-0}" == "1" && "${HOLOSOMA_RO_USE_SIM_STATE:-1}" == "1" ]]; then
   export SIM_STATE_PORT="${SIM_STATE_PORT:-5557}"

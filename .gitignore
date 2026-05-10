@@ -6,6 +6,7 @@
 *.onnx
 !_ckps/
 !_ckps/w5qostjn_model_20000.onnx
+!_ckps/lk9ocrn6_model_11500.onnx
 
 # IDE files
 .idea/
