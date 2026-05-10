@@ -597,10 +597,12 @@ class MotionLoader:
 
         if clip_map is not None and clip_id in clip_map:
             mapped = clip_map[clip_id]
-            if not object_name:
-                object_name = mapped.get("object_name", "").strip()
-            if not object_urdf_path:
-                object_urdf_path = mapped.get("object_urdf_path", "").strip()
+            mapped_name = mapped.get("object_name", "").strip()
+            mapped_urdf = mapped.get("object_urdf_path", "").strip()
+            if mapped_name:
+                object_name = mapped_name
+            if mapped_urdf:
+                object_urdf_path = mapped_urdf
 
         if object_urdf_path:
             object_urdf_path = cls._resolve_motion_object_urdf_path(object_urdf_path, base_dir=base_dir)
@@ -816,10 +818,10 @@ class MotionLoader:
                 if mapped_urdf:
                     mapped_urdf = self._resolve_motion_object_urdf_path(mapped_urdf, base_dir=files[0].parent)
                 if self.clip_object_names:
-                    if mapped_name and (not self.clip_object_names[0] or self.clip_object_names[0] == "object"):
+                    if mapped_name:
                         self.clip_object_names[0] = mapped_name
                 if self.clip_object_urdf_paths:
-                    if mapped_urdf and not self.clip_object_urdf_paths[0]:
+                    if mapped_urdf:
                         self.clip_object_urdf_paths[0] = mapped_urdf
             return body_names, joint_names
 
