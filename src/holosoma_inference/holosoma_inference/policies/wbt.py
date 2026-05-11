@@ -1214,6 +1214,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if wc_msg is None:
             self._joystick_sparse_root_command_offset.fill(0.0)
             return
+        if getattr(wc_msg, "keys", 0) != 0:
+            self._joystick_sparse_root_command_offset.fill(0.0)
+            return
 
         deadband = 0.1
         xy_scale = 0.5

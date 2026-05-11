@@ -389,6 +389,138 @@ wbt_object_perception_contact_aware_actions_no_linvel_g1 = ObservationConfig(
 )
 
 
+wbt_object_perception_contact_aware_actions_no_linvel_h1_g1 = ObservationConfig(
+    obs_intervals={
+        "actor_obs_root_contact_aware": 1,
+        "actor_obs_proprio_with_actions_no_linvel": 1,
+        "perception_obs": 1,
+    },
+    obs_dict={
+        "actor_obs_root_contact_aware": [
+            "sparse_target_root_trajectory_command_contact_aware",
+        ],
+        "actor_obs_proprio_with_actions_no_linvel": [
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+            "actions",
+        ],
+        "perception_obs": [
+            "cam_depth",
+        ],
+    },
+    obs_dims={
+        "sparse_target_root_trajectory_command_contact_aware": 3,
+        "base_ang_vel": 3,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+        "cam_depth": 5046,
+    },
+    obs_scales={
+        "sparse_target_root_trajectory_command_contact_aware": 1.0,
+        "base_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 1.0,
+        "actions": 1.0,
+        "cam_depth": 1.0,
+    },
+    history_length_dict={
+        "actor_obs_root_contact_aware": 1,
+        "actor_obs_proprio_with_actions_no_linvel": 1,
+        "perception_obs": 1,
+    },
+)
+
+
+wbt_object_perception_actions_no_linvel_h1_g1 = ObservationConfig(
+    obs_intervals={
+        "actor_obs_root": 1,
+        "actor_obs_proprio_with_actions_no_linvel": 1,
+        "perception_obs": 1,
+    },
+    obs_dict={
+        "actor_obs_root": [
+            "sparse_target_root_trajectory_command",
+        ],
+        "actor_obs_proprio_with_actions_no_linvel": [
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+            "actions",
+        ],
+        "perception_obs": [
+            "cam_depth",
+        ],
+    },
+    obs_dims={
+        "sparse_target_root_trajectory_command": 3,
+        "base_ang_vel": 3,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+        "cam_depth": 5046,
+    },
+    obs_scales={
+        "sparse_target_root_trajectory_command": 1.0,
+        "base_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 1.0,
+        "actions": 1.0,
+        "cam_depth": 1.0,
+    },
+    history_length_dict={
+        "actor_obs_root": 1,
+        "actor_obs_proprio_with_actions_no_linvel": 1,
+        "perception_obs": 1,
+    },
+)
+
+
+wbt_object_perception_actions_no_linvel_h5_g1 = ObservationConfig(
+    obs_intervals={
+        "actor_obs_root": 1,
+        "actor_obs_proprio_with_actions_no_linvel": 1,
+        "perception_obs": 1,
+    },
+    obs_dict={
+        "actor_obs_root": [
+            "sparse_target_root_trajectory_command",
+        ],
+        "actor_obs_proprio_with_actions_no_linvel": [
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+            "actions",
+        ],
+        "perception_obs": [
+            "cam_depth",
+        ],
+    },
+    obs_dims={
+        "sparse_target_root_trajectory_command": 3,
+        "base_ang_vel": 3,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+        "cam_depth": 5046,
+    },
+    obs_scales={
+        "sparse_target_root_trajectory_command": 1.0,
+        "base_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 1.0,
+        "actions": 1.0,
+        "cam_depth": 1.0,
+    },
+    history_length_dict={
+        "actor_obs_root": 1,
+        "actor_obs_proprio_with_actions_no_linvel": 5,
+        "perception_obs": 1,
+    },
+)
+
+
 # =============================================================================
 # Blind Fall Recovery Observation Configurations
 # =============================================================================
@@ -438,6 +570,11 @@ DEFAULTS = {
     "wbt-object-perception-contact-aware-actions-no-linvel-g1": (
         wbt_object_perception_contact_aware_actions_no_linvel_g1
     ),
+    "wbt-object-perception-contact-aware-actions-no-linvel-h1-g1": (
+        wbt_object_perception_contact_aware_actions_no_linvel_h1_g1
+    ),
+    "wbt-object-perception-actions-no-linvel-h1-g1": wbt_object_perception_actions_no_linvel_h1_g1,
+    "wbt-object-perception-actions-no-linvel-h5-g1": wbt_object_perception_actions_no_linvel_h5_g1,
     "blind-fall-recovery-g1": blind_fall_recovery_g1,
 }
 """Dictionary of all available observation configurations.

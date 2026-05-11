@@ -1,0 +1,37 @@
+{
+  "bridge": {
+    "domain_id": 74,
+    "hold_default_pose_until_first_command": true,
+    "ignore_default_idle_command": true,
+    "publish_sim_state": true,
+    "sim_state_port": 44655
+  },
+  "checkpoint": "latest",
+  "clip": "box_75",
+  "duration": "120s",
+  "first_lowcmd_received": true,
+  "lift": {
+    "final_dz": 0.009,
+    "final_object_z": 0.176,
+    "initial_object_z": 0.168,
+    "max_dz": 0.462,
+    "max_object_z": 0.63,
+    "robot_drop_from_initial": 0.645,
+    "robot_z_initial": 0.76,
+    "robot_z_min": 0.115,
+    "t_at_max_dz": 1.5
+  },
+  "lift_telemetry_count": 14,
+  "policy": {
+    "max_obs_absmax": 36.7690544128418,
+    "max_perception_absmax": 0.5,
+    "max_policy_action_absmax": 11.576360702514648,
+    "max_q_target_absmax": 4.728383541107178,
+    "max_sparse_root_command_abs": 0.0
+  },
+  "policy_debug_count": 75,
+  "run_ref": "lk9ocrn6",
+  "sim_state_subscriber_started": false,
+  "use_sim_state_effective": false,
+  "use_sim_state_requested": false
+}

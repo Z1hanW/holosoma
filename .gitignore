@@ -7,6 +7,9 @@
 !_ckps/
 !_ckps/w5qostjn_model_20000.onnx
 !_ckps/lk9ocrn6_model_11500.onnx
+!_ckps/6c7exbeq_model_06000.onnx
+!_ckps/kxnhgj2v_model_07000.onnx
+!_ckps/iepncc89_model_07000.onnx
 
 # IDE files
 .idea/

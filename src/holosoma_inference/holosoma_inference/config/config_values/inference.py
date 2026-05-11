@@ -110,6 +110,27 @@ g1_root_pos_contact_aware_actions_no_linvel = InferenceConfig(
     camera=camera.single_d435i_depth,
 )
 
+g1_root_pos_contact_aware_actions_no_linvel_h1 = InferenceConfig(
+    robot=g1_wbt_distillation.robot,
+    observation=observation.wbt_object_perception_contact_aware_actions_no_linvel_h1_g1,
+    task=task.wbt_distillation,
+    camera=camera.single_d435i_depth,
+)
+
+g1_root_pos_actions_no_linvel_h1 = InferenceConfig(
+    robot=g1_wbt_distillation.robot,
+    observation=observation.wbt_object_perception_actions_no_linvel_h1_g1,
+    task=task.wbt_distillation,
+    camera=camera.single_d435i_depth,
+)
+
+g1_root_pos_actions_no_linvel_h5 = InferenceConfig(
+    robot=g1_wbt_distillation.robot,
+    observation=observation.wbt_object_perception_actions_no_linvel_h5_g1,
+    task=task.wbt_distillation,
+    camera=camera.single_d435i_depth,
+)
+
 # fmt: off
 g1_blind_fall_recovery = InferenceConfig(
     robot=replace(
@@ -150,6 +171,9 @@ DEFAULTS = {
     "g1-root_pos-object-perception": g1_root_pos_object_perception,
     "g1-root_pos-object-perception-no-linvel": g1_root_pos_object_perception_no_linvel,
     "g1-root_pos-contact-aware-actions-no-linvel": g1_root_pos_contact_aware_actions_no_linvel,
+    "g1-root_pos-contact-aware-actions-no-linvel-h1": g1_root_pos_contact_aware_actions_no_linvel_h1,
+    "g1-root_pos-actions-no-linvel-h1": g1_root_pos_actions_no_linvel_h1,
+    "g1-root_pos-actions-no-linvel-h5": g1_root_pos_actions_no_linvel_h5,
     "g1-blind-fall-recovery": g1_blind_fall_recovery,
 }
 

@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 clip="${HOLOSOMA_MJ_MOTION:-box_75}"
 motion_init="${HOLOSOMA_MJ_MOTION_INIT:-0}"
+object_xy_offset="${HOLOSOMA_MJ_OBJECT_XY_OFFSET:-}"
 explicit_motion_mode=0
 clip_arg_seen=0
 if [[ -n "${HOLOSOMA_MJ_MOTION_INIT:-}" ]]; then
@@ -24,6 +25,17 @@ while [[ $# -gt 0 ]]; do
       shift
       clip="$1"
       clip_arg_seen=1
+      ;;
+    --box-offset|--box-xy|--object-offset|--object-xy)
+      if [[ $# -lt 3 ]]; then
+        echo "mj_env.sh: $1 needs two values: sideways_x away_y" >&2
+        exit 2
+      fi
+      shift
+      object_x="$1"
+      shift
+      object_y="$1"
+      object_xy_offset="${object_x},${object_y}"
       ;;
     *)
       clip="$1"
@@ -57,6 +69,7 @@ fi
 
 export HOLOSOMA_MJ_MOTION="$motion_file"
 export HOLOSOMA_MJ_MOTION_INIT="$motion_init"
+export HOLOSOMA_MJ_OBJECT_XY_OFFSET="$object_xy_offset"
 export HOLOSOMA_MUJOCO_HOLD_MOTION_INIT_UNTIL_COMMAND="${HOLOSOMA_MUJOCO_HOLD_MOTION_INIT_UNTIL_COMMAND:-$motion_init}"
 export SIM_STATE_PORT="${SIM_STATE_PORT:-5557}"
 

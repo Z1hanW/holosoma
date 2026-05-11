@@ -9,6 +9,9 @@ mkdir -p "$log_dir"
 exec > >(tee -a "${log_dir}/run.log") 2>&1
 
 echo "[real_run] log_dir=${log_dir}"
+python3 scripts/show_policy_command.py "${log_dir}/latest_command.json" &
+command_window_pid=$!
+trap 'kill "$command_window_pid" 2>/dev/null || true' EXIT
 source scripts/source_inference_setup.sh
 HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND=0 \
 HOLOSOMA_POLICY_COMMAND_STATUS_PATH="${log_dir}/latest_command.json" \

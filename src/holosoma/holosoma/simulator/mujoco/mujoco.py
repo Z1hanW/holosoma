@@ -797,6 +797,56 @@ class MuJoCo(BaseSimulator):
             dtype=np.float64,
         )
 
+    @staticmethod
+    def _motion_object_xy_offset() -> np.ndarray | None:
+        raw = os.environ.get("HOLOSOMA_MJ_OBJECT_XY_OFFSET", "").strip()
+        if not raw:
+            return None
+        parts = raw.replace(",", " ").split()
+        if len(parts) != 2:
+            raise ValueError(
+                "HOLOSOMA_MJ_OBJECT_XY_OFFSET must contain exactly two floats: '<sideways_x>,<away_y>'"
+            )
+        return np.asarray([float(parts[0]), float(parts[1])], dtype=np.float64)
+
+    def _apply_motion_object_xy_offset(self, state: dict[str, np.ndarray]) -> None:
+        offset = self._motion_object_xy_offset()
+        if offset is None:
+            return
+        if "robot_pos" not in state or "object_pos" not in state:
+            return
+
+        object_pos = np.asarray(state["object_pos"], dtype=np.float64).copy()
+        robot_xy = np.asarray(state["robot_pos"][:2], dtype=np.float64)
+        object_xy = object_pos[:2]
+        away_dir = object_xy - robot_xy
+        norm = float(np.linalg.norm(away_dir))
+        if norm < 1e-8:
+            robot_quat = state.get("robot_quat_wxyz")
+            if robot_quat is not None:
+                yaw = self._quat_wxyz_to_rpy(robot_quat)[2]
+                away_dir = np.asarray([np.cos(yaw), np.sin(yaw)], dtype=np.float64)
+            else:
+                away_dir = np.asarray([1.0, 0.0], dtype=np.float64)
+        else:
+            away_dir = away_dir / norm
+
+        side_dir = np.asarray([-away_dir[1], away_dir[0]], dtype=np.float64)
+        offset_xy = offset[0] * side_dir + offset[1] * away_dir
+        old_object_pos = object_pos.copy()
+        object_pos[:2] = object_xy + offset_xy
+        state["object_pos"] = object_pos
+        logger.info(
+            "Applied motion-init object XY offset: offset=[sideways_x={}, away_y={}], "
+            "old_object_pos={}, new_object_pos={}, away_dir={}, side_dir={}",
+            float(offset[0]),
+            float(offset[1]),
+            old_object_pos.tolist(),
+            object_pos.tolist(),
+            away_dir.tolist(),
+            side_dir.tolist(),
+        )
+
     def _get_motion_initial_state(self) -> dict[str, np.ndarray] | None:
         if self._motion_initial_state is not None:
             return self._motion_initial_state
@@ -845,6 +895,7 @@ class MuJoCo(BaseSimulator):
             if "object_quat_w" in data:
                 state["object_quat_wxyz"] = np.asarray(data["object_quat_w"][0], dtype=np.float64)
 
+        self._apply_motion_object_xy_offset(state)
         self._motion_initial_state = state
         logger.info(
             "Loaded MuJoCo reset state from motion frame 0: path={}, robot_pos={}, "
