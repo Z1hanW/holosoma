@@ -647,111 +647,6 @@ class MotionLoader:
                 invalid_files.append((path, f"{type(exc).__name__}: {exc}"))
         return valid_files, invalid_files
 
-    @staticmethod
-    def _env_flag(name: str) -> bool:
-        return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
-
-    @staticmethod
-    def _distributed_rank_and_world_size() -> tuple[int, int] | None:
-        try:
-            rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")) or "0")
-            world_size = int(os.environ.get("WORLD_SIZE", "1") or "1")
-        except ValueError:
-            logger.warning("Invalid distributed rank environment; motion-bank object-shard filtering is disabled.")
-            return None
-        if world_size <= 1:
-            return None
-        return rank, world_size
-
-    @classmethod
-    def _resolve_npz_clip_object_urdf(
-        cls,
-        file_path: Path,
-        *,
-        clip_map: dict[str, dict[str, str]],
-    ) -> str:
-        with np.load(file_path, allow_pickle=True) as data:
-            _object_name, object_urdf = cls._extract_object_clip_metadata(
-                data=data,
-                clip_id=file_path.stem,
-                clip_map=clip_map,
-                base_dir=file_path.parent,
-            )
-        return object_urdf
-
-    @classmethod
-    def _filter_npz_files_by_object_rank_shard(
-        cls,
-        files: list[Path],
-        *,
-        motion_dir: Path,
-        clip_map: dict[str, dict[str, str]],
-    ) -> list[Path]:
-        if not cls._env_flag("HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK"):
-            return files
-        if not cls._env_flag("HOLOSOMA_FILTER_MOTION_BANK_BY_OBJECT_SHARD"):
-            return files
-        rank_world = cls._distributed_rank_and_world_size()
-        if rank_world is None or len(files) <= 1:
-            return files
-
-        rank, world_size = rank_world
-        normalized_rank = rank % world_size
-        clip_urdfs: list[str] = []
-        metadata_failures: list[tuple[Path, str]] = []
-        for file_path in files:
-            try:
-                clip_urdfs.append(cls._resolve_npz_clip_object_urdf(file_path, clip_map=clip_map))
-            except Exception as exc:
-                clip_urdfs.append("")
-                metadata_failures.append((file_path, f"{type(exc).__name__}: {exc}"))
-
-        if metadata_failures:
-            logger.warning(
-                "Could not resolve object metadata for {} motion clips before object-shard filtering in '{}'. "
-                "Examples: {}",
-                len(metadata_failures),
-                motion_dir,
-                cls._format_motion_file_issues(metadata_failures),
-            )
-
-        unique_urdfs: list[str] = []
-        seen_urdfs: set[str] = set()
-        for object_urdf in clip_urdfs:
-            if not object_urdf or object_urdf in seen_urdfs:
-                continue
-            seen_urdfs.add(object_urdf)
-            unique_urdfs.append(object_urdf)
-        if not unique_urdfs:
-            return files
-
-        sharded_urdfs = {
-            object_urdf for idx, object_urdf in enumerate(unique_urdfs) if idx % world_size == normalized_rank
-        }
-        if not sharded_urdfs:
-            sharded_urdfs = {unique_urdfs[normalized_rank % len(unique_urdfs)]}
-
-        filtered_files = [
-            file_path for file_path, object_urdf in zip(files, clip_urdfs) if object_urdf in sharded_urdfs
-        ]
-        if not filtered_files:
-            raise RuntimeError(
-                "Object-shard motion filtering removed every motion clip for "
-                f"rank={rank} world_size={world_size} in '{motion_dir}'."
-            )
-
-        logger.info(
-            "Filtered motion bank by object rank shard: rank={} world_size={} keeping {} / {} clips "
-            "for {} / {} URDF(s).",
-            rank,
-            world_size,
-            len(filtered_files),
-            len(files),
-            len(sharded_urdfs),
-            len(unique_urdfs),
-        )
-        return filtered_files
-
     def _get_index_of_a_in_b(self, a_names: List[str], b_names: List[str], device: str = "cpu") -> torch.Tensor:
         indexes = []
         for name in a_names:
@@ -913,12 +808,6 @@ class MotionLoader:
                 motion_dir,
                 issue_summary,
             )
-
-        files = self._filter_npz_files_by_object_rank_shard(
-            files,
-            motion_dir=motion_dir,
-            clip_map=clip_object_map,
-        )
 
         if len(files) == 1:
             body_names, joint_names = self._load_data_from_motion_npz(str(files[0]), device)
@@ -2150,7 +2039,6 @@ class MotionCommand(CommandTermBase):
         object_urdf_by_name: dict[str, str] = (
             dict(object_urdf_by_name_raw) if isinstance(object_urdf_by_name_raw, dict) else {}
         )
-
         sim_object_names: list[str] = [name for name in object_urdf_by_name.keys() if name != "usd_scene_objects"]
         if not sim_object_names and hasattr(rigid_objects, "keys"):
             sim_object_names = [name for name in rigid_objects.keys() if name != "usd_scene_objects"]
@@ -2187,7 +2075,6 @@ class MotionCommand(CommandTermBase):
             if normalized:
                 sim_name_by_urdf[normalized] = name
                 sim_name_by_stem[Path(normalized).stem.lower()] = name
-
         clip_object_names = self.motion.clip_object_names
         clip_object_urdfs = self.motion.clip_object_urdf_paths
         if len(clip_object_names) != self.motion.num_clips:
