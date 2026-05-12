@@ -16,7 +16,7 @@ set -euo pipefail
 #   WANDB_PROJECT             Default: carry-any
 #   OMOMO_DATA_DIR            Default: ./data/ds_as_data/omomo
 #   OMOMO_OBJECT_MAP          Default: ${OMOMO_DATA_DIR}/_clip_object_urdf_map.json
-#   OMOMO_EXPECTED_TOTAL      Default: 45
+#   OMOMO_EXPECTED_TOTAL      Optional exact clip count check. Default: auto
 #   MOTION_CLIP_NAME          Optional: pin a single clip
 #   NUM_ENVS                  Default inherited from infer_box_tracking.sh: 1
 #   HEADLESS                  Default inherited from infer_box_tracking.sh: True
@@ -68,7 +68,7 @@ LOG_ROOT=${LOG_ROOT:-"/data/logs_new/${WANDB_PROJECT}"}
 
 OMOMO_DATA_DIR=${OMOMO_DATA_DIR:-"${SCRIPT_DIR}/data/ds_as_data/omomo"}
 OMOMO_OBJECT_MAP=${OMOMO_OBJECT_MAP:-"${OMOMO_DATA_DIR}/_clip_object_urdf_map.json"}
-OMOMO_EXPECTED_TOTAL=${OMOMO_EXPECTED_TOTAL:-45}
+OMOMO_EXPECTED_TOTAL=${OMOMO_EXPECTED_TOTAL:-}
 
 LOCAL_DATA_ROOT=$(realpath -m "${SCRIPT_DIR}/data")
 OMOMO_DATA_DIR=$(realpath -m "${OMOMO_DATA_DIR}")
@@ -77,7 +77,7 @@ OMOMO_OBJECT_MAP=$(realpath -m "${OMOMO_OBJECT_MAP}")
 case "${OMOMO_DATA_DIR}" in
   /nfs|/nfs/*)
     echo "[ERROR] OMOMO_DATA_DIR must be local, not NFS: ${OMOMO_DATA_DIR}" >&2
-    echo "[ERROR] Run ./cp_real.sh first and infer from ${SCRIPT_DIR}/data/ds_as_data/omomo." >&2
+    echo "[ERROR] Run ./cp_as.sh first and infer from ${SCRIPT_DIR}/data/ds_as_data/omomo." >&2
     exit 2
     ;;
 esac
@@ -93,7 +93,7 @@ esac
 case "${OMOMO_OBJECT_MAP}" in
   /nfs|/nfs/*)
     echo "[ERROR] OMOMO_OBJECT_MAP must be local, not NFS: ${OMOMO_OBJECT_MAP}" >&2
-    echo "[ERROR] Run ./cp_real.sh first and use the copied map under ${SCRIPT_DIR}/data." >&2
+    echo "[ERROR] Run ./cp_as.sh first and use the copied map under ${SCRIPT_DIR}/data." >&2
     exit 2
     ;;
 esac
@@ -109,13 +109,13 @@ esac
 
 if [[ ! -d "${OMOMO_DATA_DIR}" ]]; then
   echo "[ERROR] OMOMO_DATA_DIR does not exist: ${OMOMO_DATA_DIR}" >&2
-  echo "[ERROR] Run ./cp_real.sh first, or set OMOMO_DATA_DIR to a prepared motion bank." >&2
+  echo "[ERROR] Run ./cp_as.sh first, or set OMOMO_DATA_DIR to a prepared motion bank." >&2
   exit 2
 fi
 
 if ! compgen -G "${OMOMO_DATA_DIR}/*.npz" >/dev/null; then
   echo "[ERROR] No .npz files found in OMOMO_DATA_DIR: ${OMOMO_DATA_DIR}" >&2
-  echo "[ERROR] Run ./cp_real.sh first, or set OMOMO_DATA_DIR to a prepared motion bank." >&2
+  echo "[ERROR] Run ./cp_as.sh first, or set OMOMO_DATA_DIR to a prepared motion bank." >&2
   exit 2
 fi
 
@@ -175,6 +175,10 @@ missing_entries = [p.stem for p in npz_files if p.stem not in clips]
 if missing_entries:
     preview = ", ".join(missing_entries[:10])
     raise SystemExit(f"[ERROR] Missing object-map entries for {len(missing_entries)} clip(s): {preview}")
+missing_npz = [clip_id for clip_id in sorted(clips) if not (motion_dir / f"{clip_id}.npz").is_file()]
+if missing_npz:
+    preview = ", ".join(missing_npz[:10])
+    raise SystemExit(f"[ERROR] Missing .npz files for {len(missing_npz)} object-map entries: {preview}")
 
 
 def resolve_path(raw: str, base_dir: Path) -> Path:
@@ -221,10 +225,10 @@ for urdf_raw, clip_id in sorted(unique_urdfs.items()):
             bad.append(f"{clip_id}: URDF mesh file missing: {mesh_path}")
 
 if bad:
-    raise SystemExit("[ERROR] Real-mesh OMOMO validation failed:\n  " + "\n  ".join(bad[:20]))
+    raise SystemExit("[ERROR] Real-mesh AS/OMOMO validation failed:\n  " + "\n  ".join(bad[:20]))
 
 print(
-    f"[INFO] Validated real-mesh OMOMO bank: {motion_dir} "
+    f"[INFO] Validated real-mesh AS/OMOMO bank: {motion_dir} "
     f"({len(npz_files)} clips, {len(unique_urdfs)} unique URDF mesh asset(s))"
 )
 PY
