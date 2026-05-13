@@ -29,6 +29,7 @@ data/**
 /multi-terrain/staged/**
 /multi-terrain/generated/terrain_generalist_*_*.obj
 /multi-terrain/generated/terrain_generalist_*_*.json
+/outputs/debug_as_replay_record/
 
 # Local CRISP data packages (always ignore)
 crisp/
