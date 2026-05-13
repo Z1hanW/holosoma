@@ -4,8 +4,8 @@ set -euo pipefail
 # AS real-mesh object generalist training.
 #
 # This is a thin launcher over train_object_generalist_ds.sh for the AS union
-# bank copied by cp_as.sh. It uses the AS+box teacher-rollout union by default,
-# keeps policy history at 5, and enables box teacher-rollout co-tracking rewards.
+# bank copied by cp_as.sh. It trains from scratch on motion/geometry pairs,
+# keeps policy history at 5, and does not require teacher rollout references.
 # It intentionally disables primitive/box object spawning: both Isaac Sim object
 # spawning and optional perception geometry must use the object URDF mesh assets.
 
@@ -17,7 +17,6 @@ AS_DATA_DIR=${AS_DATA_DIR:-${OMOMO_DATA_DIR:-"data/ds_as_data/${DEFAULT_AS_BANK}
 AS_OBJECT_MAP=${AS_OBJECT_MAP:-${OMOMO_OBJECT_MAP:-"${AS_DATA_DIR}/_clip_object_urdf_map.json"}}
 AS_EXPECTED_TOTAL=${AS_EXPECTED_TOTAL:-${OMOMO_EXPECTED_TOTAL:-197}}
 POLICY_HISTORY_LENGTH=${POLICY_HISTORY_LENGTH:-${HISTORY_LENGTH:-5}}
-TEACHER_ROLLOUT_REFERENCE_ROOT=${TEACHER_ROLLOUT_REFERENCE_ROOT:-"${SCRIPT_DIR}/outputs/teacher_box_contacts_rollout_ref_motionbank_20260415b_utc/clips"}
 # Optional override knobs forwarded to train_object_generalist_ds.sh:
 #   NUM_ENVS / NPROC / PER_GPU_ENVS / MASTER_PORT
 #   TRAINING_SEED or SEED
@@ -32,7 +31,6 @@ INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-}
 LOCAL_DATA_ROOT=$(realpath -m "data")
 AS_DATA_DIR_ABS=$(realpath -m "${AS_DATA_DIR}")
 AS_OBJECT_MAP_ABS=$(realpath -m "${AS_OBJECT_MAP}")
-TEACHER_ROLLOUT_REFERENCE_ROOT_ABS=$(realpath -m "${TEACHER_ROLLOUT_REFERENCE_ROOT}")
 
 case "${AS_DATA_DIR_ABS}" in
   /nfs|/nfs/*)
@@ -86,15 +84,6 @@ fi
 
 if [[ ! "${POLICY_HISTORY_LENGTH}" =~ ^[0-9]+$ || "${POLICY_HISTORY_LENGTH}" == "0" ]]; then
   echo "[ERROR] POLICY_HISTORY_LENGTH/HISTORY_LENGTH must be a positive integer. Got: ${POLICY_HISTORY_LENGTH}" >&2
-  exit 2
-fi
-
-if [[ ! -d "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}" ]]; then
-  echo "[ERROR] Missing teacher rollout reference root: ${TEACHER_ROLLOUT_REFERENCE_ROOT}" >&2
-  exit 2
-fi
-if ! find "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}" -maxdepth 2 -name teacher_rollout_reference.npz -print -quit | grep -q .; then
-  echo "[ERROR] Teacher rollout reference root has no teacher_rollout_reference.npz files: ${TEACHER_ROLLOUT_REFERENCE_ROOT}" >&2
   exit 2
 fi
 
@@ -296,11 +285,10 @@ export HOLOSOMA_OBJECT_COLLIDER_TYPE=${HOLOSOMA_OBJECT_COLLIDER_TYPE:-convex_dec
 unset OBJECT_GEOMETRY_MODE
 export EXP=${EXP:-g1-29dof-wbt-w-object-generalist}
 export COMMAND_CONFIG=${COMMAND_CONFIG:-g1-29dof-wbt-w-object-generalist}
-export REWARD_CONFIG=${REWARD_CONFIG:-g1-29dof-wbt-w-object-r2s-rollout-reference-guidance}
+export REWARD_CONFIG=${REWARD_CONFIG:-g1-29dof-wbt-w-object-generalist}
 export DISABLE_ACTOR_HISTORY=False
 export DISABLE_CRITIC_HISTORY=False
 export POLICY_HISTORY_LENGTH
-export TEACHER_ROLLOUT_REFERENCE_ROOT="${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
 export TRAINING_SEED
 export RANDOMIZATION_PRESET
 export INIT_AT_RANDOM_EP_LEN
@@ -347,7 +335,6 @@ echo "[INFO] Launching AS real-mesh co-tracking generalist training"
 echo "[INFO] MOTION_DIR=${MOTION_DIR}"
 echo "[INFO] OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH}"
 echo "[INFO] REWARD_CONFIG=${REWARD_CONFIG}"
-echo "[INFO] TEACHER_ROLLOUT_REFERENCE_ROOT=${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
 echo "[INFO] POLICY_HISTORY_LENGTH=${POLICY_HISTORY_LENGTH}"
 echo "[INFO] HOLOSOMA_OBJECT_SPAWN_MODE=${HOLOSOMA_OBJECT_SPAWN_MODE}"
 echo "[INFO] HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK=${HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK}"
