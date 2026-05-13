@@ -143,6 +143,10 @@ PHYSX_GPU_TEMP_BUFFER_CAPACITY=${PHYSX_GPU_TEMP_BUFFER_CAPACITY:-16777216}
 HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK=${HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK:-1}
 OBJECT_SPAWN_MODE=${OBJECT_SPAWN_MODE:-${HOLOSOMA_OBJECT_SPAWN_MODE:-single_slot_multi_urdf}}
 OBJECT_GEOMETRY_MODE=${OBJECT_GEOMETRY_MODE:-}
+DISABLE_ACTOR_HISTORY=${DISABLE_ACTOR_HISTORY:-True}
+DISABLE_CRITIC_HISTORY=${DISABLE_CRITIC_HISTORY:-True}
+POLICY_HISTORY_LENGTH=${POLICY_HISTORY_LENGTH:-${HISTORY_LENGTH:-}}
+TEACHER_ROLLOUT_REFERENCE_ROOT=${TEACHER_ROLLOUT_REFERENCE_ROOT:-}
 PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE=""
 if [[ -n "${OBJECT_GEOMETRY_MODE}" ]]; then
   case "$(echo "${OBJECT_GEOMETRY_MODE}" | tr '[:upper:]' '[:lower:]')" in
@@ -262,6 +266,35 @@ if [[ -n "${INIT_AT_RANDOM_EP_LEN}" ]]; then
       exit 2
       ;;
   esac
+fi
+
+case "$(echo "${DISABLE_ACTOR_HISTORY}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    DISABLE_ACTOR_HISTORY=True
+    ;;
+  0|false|no|off)
+    DISABLE_ACTOR_HISTORY=False
+    ;;
+  *)
+    echo "[ERROR] DISABLE_ACTOR_HISTORY must be a boolean. Got: ${DISABLE_ACTOR_HISTORY}" >&2
+    exit 2
+    ;;
+esac
+case "$(echo "${DISABLE_CRITIC_HISTORY}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    DISABLE_CRITIC_HISTORY=True
+    ;;
+  0|false|no|off)
+    DISABLE_CRITIC_HISTORY=False
+    ;;
+  *)
+    echo "[ERROR] DISABLE_CRITIC_HISTORY must be a boolean. Got: ${DISABLE_CRITIC_HISTORY}" >&2
+    exit 2
+    ;;
+esac
+if [[ -n "${POLICY_HISTORY_LENGTH}" && ( ! "${POLICY_HISTORY_LENGTH}" =~ ^[0-9]+$ || "${POLICY_HISTORY_LENGTH}" == "0" ) ]]; then
+  echo "[ERROR] POLICY_HISTORY_LENGTH/HISTORY_LENGTH must be a positive integer. Got: ${POLICY_HISTORY_LENGTH}" >&2
+  exit 2
 fi
 
 if [[ -n "${RANDOMIZATION_PRESET}" ]]; then
@@ -2195,6 +2228,10 @@ echo "[INFO] GPU_SELECTION=all-visible"
 echo "[INFO] AVAILABLE_GPU_COUNT=${AVAILABLE_GPU_COUNT}"
 echo "[INFO] NPROC=${NPROC} PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
 echo "[INFO] TRAINING_SEED=${TRAINING_SEED:-<config-default>} RANDOMIZATION=${RANDOMIZATION_PRESET:-<exp-default>} INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-<algo-default>}"
+echo "[INFO] actor_history_disabled=${DISABLE_ACTOR_HISTORY} critic_history_disabled=${DISABLE_CRITIC_HISTORY} policy_history_length=${POLICY_HISTORY_LENGTH:-<config-default>}"
+if [[ -n "${TEACHER_ROLLOUT_REFERENCE_ROOT}" ]]; then
+  echo "[INFO] teacher_rollout_reference_root=${TEACHER_ROLLOUT_REFERENCE_ROOT}"
+fi
 echo "[INFO] HOLOSOMA_OBJECT_SPAWN_MODE=${HOLOSOMA_OBJECT_SPAWN_MODE}"
 echo "[INFO] HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK=${HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK}"
 if [[ -n "${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}" ]]; then
@@ -2221,8 +2258,8 @@ train_cmd=(
   --algo.config.num_learning_iterations="${NUM_LEARNING_ITERATIONS}"
   --algo.config.normalize-actor-obs=False
   --algo.config.normalize-critic-obs=False
-  --observation-overrides.disable-actor-history True
-  --observation-overrides.disable-critic-history True
+  --observation-overrides.disable-actor-history "${DISABLE_ACTOR_HISTORY}"
+  --observation-overrides.disable-critic-history "${DISABLE_CRITIC_HISTORY}"
   --algo.config.save-interval="${SAVE_INTERVAL}"
   --simulator.config.sim.physx.gpu-max-rigid-contact-count="${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT}"
   --simulator.config.sim.physx.gpu-max-rigid-patch-count="${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}"
@@ -2237,6 +2274,12 @@ train_cmd=(
   --command.setup-terms.motion-command.params.motion-config.enable-default-pose-prepend="${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
   --command.setup-terms.motion-command.params.motion-config.default-pose-prepend-duration-s="${DEFAULT_POSE_PREPEND_DURATION_S}"
 )
+if [[ -n "${POLICY_HISTORY_LENGTH}" ]]; then
+  train_cmd+=(
+    --observation.groups.actor_obs.history-length "${POLICY_HISTORY_LENGTH}"
+    --observation.groups.critic_obs.history-length "${POLICY_HISTORY_LENGTH}"
+  )
+fi
 if [[ "${USE_TEACHER_ROLLOUT_REWARD}" == "1" ]]; then
   train_cmd+=(
     --reward.terms.teacher-rollout-global-ref-position-error-exp.weight="${ROOT_POS_W}"
@@ -2256,6 +2299,20 @@ if [[ "${USE_TEACHER_ROLLOUT_REWARD}" == "1" ]]; then
     --reward.terms.teacher-rollout-object-global-ref-position-error-exp.params.sigma="${OBJECT_POS_SIGMA}"
     --reward.terms.teacher-rollout-object-global-ref-orientation-error-exp.params.sigma="${OBJECT_ORI_SIGMA}"
   )
+  if [[ -n "${TEACHER_ROLLOUT_REFERENCE_ROOT}" ]]; then
+    train_cmd+=(
+      --reward.terms.teacher-rollout-global-ref-position-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
+      --reward.terms.teacher-rollout-global-ref-orientation-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
+      --reward.terms.teacher-rollout-relative-body-position-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
+      --reward.terms.teacher-rollout-relative-body-orientation-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
+      --reward.terms.teacher-rollout-global-body-lin-vel.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
+      --reward.terms.teacher-rollout-global-body-ang-vel.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
+      --reward.terms.teacher-rollout-object-global-ref-position-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
+      --reward.terms.teacher-rollout-object-global-ref-orientation-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
+      --reward.terms.offline-wrist-target-guidance.params.contact-export-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
+      --reward.terms.offline-contact-guidance.params.contact-export-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
+    )
+  fi
 else
   train_cmd+=(
     --reward.terms.motion-global-ref-position-error-exp.weight="${ROOT_POS_W}"

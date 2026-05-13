@@ -297,6 +297,10 @@ unset OBJECT_GEOMETRY_MODE
 export EXP=${EXP:-g1-29dof-wbt-w-object-generalist}
 export COMMAND_CONFIG=${COMMAND_CONFIG:-g1-29dof-wbt-w-object-generalist}
 export REWARD_CONFIG=${REWARD_CONFIG:-g1-29dof-wbt-w-object-r2s-rollout-reference-guidance}
+export DISABLE_ACTOR_HISTORY=False
+export DISABLE_CRITIC_HISTORY=False
+export POLICY_HISTORY_LENGTH
+export TEACHER_ROLLOUT_REFERENCE_ROOT="${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
 export TRAINING_SEED
 export RANDOMIZATION_PRESET
 export INIT_AT_RANDOM_EP_LEN
@@ -352,21 +356,4 @@ echo "[INFO] HOLOSOMA_OBJECT_COLLIDER_TYPE=${HOLOSOMA_OBJECT_COLLIDER_TYPE}"
 echo "[INFO] NPROC=${NPROC:-<auto>} PER_GPU_ENVS=${PER_GPU_ENVS:-4096} NUM_ENVS=${NUM_ENVS:-<NPROC*PER_GPU_ENVS>} MASTER_PORT=${MASTER_PORT:-<random>}"
 echo "[INFO] TRAINING_SEED=${TRAINING_SEED:-<config-default>} RANDOMIZATION=${RANDOMIZATION_PRESET:-<exp-default>} INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-<algo-default>}"
 
-AS_TRAIN_ARGS=(
-  --observation-overrides.disable-actor-history False
-  --observation-overrides.disable-critic-history False
-  --observation.groups.actor_obs.history-length "${POLICY_HISTORY_LENGTH}"
-  --observation.groups.critic_obs.history-length "${POLICY_HISTORY_LENGTH}"
-  --reward.terms.teacher-rollout-global-ref-position-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
-  --reward.terms.teacher-rollout-global-ref-orientation-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
-  --reward.terms.teacher-rollout-relative-body-position-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
-  --reward.terms.teacher-rollout-relative-body-orientation-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
-  --reward.terms.teacher-rollout-global-body-lin-vel.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
-  --reward.terms.teacher-rollout-global-body-ang-vel.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
-  --reward.terms.teacher-rollout-object-global-ref-position-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
-  --reward.terms.teacher-rollout-object-global-ref-orientation-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
-  --reward.terms.offline-wrist-target-guidance.params.contact-export-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
-  --reward.terms.offline-contact-guidance.params.contact-export-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
-)
-
-exec bash "${SCRIPT_DIR}/train_object_generalist_ds.sh" mix-naive "${AS_TRAIN_ARGS[@]}" "$@"
+exec bash "${SCRIPT_DIR}/train_object_generalist_ds.sh" mix-naive "$@"
