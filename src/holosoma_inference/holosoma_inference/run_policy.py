@@ -109,6 +109,7 @@ def _is_wbt_observation(obs_dict: dict[str, list[str]]) -> bool:
         "motion_future_target_poses",
         "sparse_target_root_trajectory_command",
         "sparse_target_root_trajectory_command_contact_aware",
+        "drop_button",
         "torso_real",
         "torso_xy_rel",
         "torso_yaw_rel",

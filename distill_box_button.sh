@@ -19,6 +19,8 @@ set -euo pipefail
 # - ppo_first: PPO+DAgger from iteration 0
 # - contact-aware: ppo-first student whose sparse root command is zeroed before
 #   pickup and during the release/putdown tail
+# - contact-aware drop button: adds a binary drop_button observation, 0 before
+#   carry-end t2 and 1 from t2 to clip end. Root command behavior is unchanged.
 # - contact-aware-history: contact-aware plus 5-frame student/critic proprio history
 # - shoo7sr1-near03-debug: shoo7sr1 debug reproduction; only depth near
 #   differs from the saved shoo7sr1 config (0.3 instead of 0.1). Set
@@ -40,7 +42,7 @@ POSITIONAL_RUN_NAME=""
 DATA_MODE=${DATA_MODE:-pure-sd}
 TRACKER_PROFILE=${TRACKER_PROFILE:-old-tracker}
 SCHEDULE_VARIANT=${SCHEDULE_VARIANT:-default}
-ROOT_COMMAND_MODE=${ROOT_COMMAND_MODE:-default}
+ROOT_COMMAND_MODE=${ROOT_COMMAND_MODE:-contact-aware}
 CONTACT_AWARE_HISTORY=${CONTACT_AWARE_HISTORY:-0}
 CONTACT_AWARE_HISTORY_LENGTH=${CONTACT_AWARE_HISTORY_LENGTH:-5}
 SHOO7SR1_NEAR03_DEBUG=${SHOO7SR1_NEAR03_DEBUG:-0}
@@ -235,6 +237,11 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   fi
 fi
 
+if [[ "${ROOT_COMMAND_MODE}" != "contact-aware" ]]; then
+  echo "[ERROR] distill_box_button.sh only supports ROOT_COMMAND_MODE=contact-aware. Got: ${ROOT_COMMAND_MODE}" >&2
+  exit 2
+fi
+
 POSITIONAL_TEACHER_CHECKPOINT_SET=0
 while [[ $# -gt 0 && "$1" != -* ]]; do
   if is_checkpoint_ref "$1"; then
@@ -377,10 +384,10 @@ if [[ -z "${EXP:-}" ]]; then
   EXP="g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref"
 fi
 if [[ -z "${RUN_NAME:-}" ]]; then
-  RUN_NAME="g1_w_object_distill_box_perception_sparse_root_cmd_r2s_rollout_ref"
+  RUN_NAME="g1_w_object_distill_box_button_contact_aware_drop_button"
 fi
 if [[ -z "${TRAINING_NAME:-}" ]]; then
-  TRAINING_NAME="g1_29dof_wbt_w_object_distill_box_perception_sparse_root_cmd_r2s_rollout_ref_access_to_depth"
+  TRAINING_NAME="g1_29dof_wbt_w_object_distill_box_button_contact_aware_drop_button_depth"
 fi
 TRAINING_PROJECT=${TRAINING_PROJECT:-boxer}
 OLD_TRACKER_MAX_BOX_ID=${OLD_TRACKER_MAX_BOX_ID:-92}
@@ -902,7 +909,7 @@ UNIFORM_T1_WINDOW_DENSITY_BOOST=${UNIFORM_T1_WINDOW_DENSITY_BOOST:-7.0}
 PAIR_TERRAIN_WITH_MOTION=${PAIR_TERRAIN_WITH_MOTION:-False}
 PERCEPTION_PRESET=${PERCEPTION_PRESET:-camera_depth_d435i}
 EXPORT_ONNX=${EXPORT_ONNX:-True}
-STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_root','actor_obs_proprio_with_actions_no_linvel']"}
+STUDENT_ACTOR_INPUTS=${STUDENT_ACTOR_INPUTS:-"['actor_obs_root_contact_aware','actor_obs_drop_button','actor_obs_proprio_with_actions_no_linvel']"}
 DAGGER_MATCH_STD=${DAGGER_MATCH_STD:-True}
 ENTROPY_COEF=${ENTROPY_COEF:-0.0}
 DAGGER_IGNORE_EPISODE_INITIAL_STEPS=${DAGGER_IGNORE_EPISODE_INITIAL_STEPS:-0}
@@ -918,7 +925,7 @@ VISER_SHOW_TARGET_KEYPOINTS=${VISER_SHOW_TARGET_KEYPOINTS:-0}
 if [[ "${ROOT_COMMAND_MODE}" == "contact-aware" ]]; then
   SCHEDULE_VARIANT="ppo_first"
   if [[ "${STUDENT_ACTOR_INPUTS_EXPLICIT}" -eq 0 ]]; then
-    STUDENT_ACTOR_INPUTS="['actor_obs_root_contact_aware','actor_obs_proprio_with_actions_no_linvel']"
+    STUDENT_ACTOR_INPUTS="['actor_obs_root_contact_aware','actor_obs_drop_button','actor_obs_proprio_with_actions_no_linvel']"
   fi
   if [[ "${USE_ADAPTIVE_TIMESTEPS_SAMPLER_EXPLICIT}" -eq 0 ]]; then
     USE_ADAPTIVE_TIMESTEPS_SAMPLER=True
@@ -975,7 +982,7 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   esac
 
   if [[ "${ROOT_COMMAND_MODE}" == "contact-aware" ]]; then
-    _shoo7_student_actor_inputs="${_shoo7_student_actor_inputs/actor_obs_root/actor_obs_root_contact_aware}"
+    _shoo7_student_actor_inputs="${_shoo7_student_actor_inputs/actor_obs_root/actor_obs_root_contact_aware','actor_obs_drop_button}"
   fi
 
   PERCEPTION_PRESET="camera_depth_d435i"
@@ -1220,7 +1227,7 @@ if [[ "${ROOT_COMMAND_MODE}" == "contact-aware" ]]; then
     SCHEDULE_NAME="${SCHEDULE_NAME}_contact_aware"
   fi
   if [[ "${SCHEDULE_NOTES_EXPLICIT}" -eq 0 ]]; then
-    SCHEDULE_NOTES="${SCHEDULE_NOTES} Contact-aware student sparse root command uses peak-height carry-window detection by default: command stays zero before the object is stably near peak carry height and after it stably drops below that height band."
+    SCHEDULE_NOTES="${SCHEDULE_NOTES} Contact-aware student sparse root command uses peak-height carry-window detection by default: command stays zero before the object is stably near peak carry height and after it stably drops below that height band. The button interface adds actor_obs_drop_button, which is 0 before carry-end t2 and 1 from t2 through clip end; root command behavior is unchanged."
   fi
   if [[ "${CONTACT_AWARE_HISTORY}" == "1" ]]; then
     if [[ "${SCHEDULE_NAME_EXPLICIT}" -eq 0 ]]; then
@@ -1398,6 +1405,7 @@ echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} per_gpu
 echo "[INFO] data_mode=${DATA_MODE}"
 echo "[INFO] tracker_profile=${TRACKER_PROFILE}"
 echo "[INFO] root_command_mode=${ROOT_COMMAND_MODE}"
+echo "[INFO] drop_button_interface=1 drop_button=0_before_t2_1_from_t2_to_end"
 echo "[INFO] contact_aware_history=${CONTACT_AWARE_HISTORY} history_length=${CONTACT_AWARE_HISTORY_LENGTH}"
 echo "[INFO] use_legacy_ds=${LEGACY_DS_ENABLED} prepared=${LEGACY_DS_PREPARED} ds_data_root=${DS_DATA_ROOT}"
 if [[ -n "${MOTION_DIR:-}" ]]; then

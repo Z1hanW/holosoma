@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from types import MethodType, SimpleNamespace
+
 import torch
 
 from holosoma.managers.command.terms.wbt import (
+    MotionCommand,
     _contact_aware_carry_window_from_rel_z,
     _compute_contact_stage_intervals,
     _probability_mass_on_intervals,
@@ -96,3 +99,20 @@ def test_contact_aware_carry_window_uses_contact_release_tail_when_object_stays_
 
     assert carry_start == 2
     assert carry_end == 5
+
+
+def test_contact_aware_drop_button_turns_on_at_carry_end():
+    motion_command = object.__new__(MotionCommand)
+    motion_command.device = "cpu"
+    motion_command.num_envs = 3
+    motion_command.motion = SimpleNamespace(has_object=True)
+    motion_command.clip_ids = torch.tensor([0, 0, 0], dtype=torch.long)
+    motion_command.time_steps = torch.tensor([1, 5, 8], dtype=torch.long)
+    motion_command._get_contact_aware_carry_window_by_clip = MethodType(
+        lambda self: torch.tensor([[2, 5]], dtype=torch.long),
+        motion_command,
+    )
+
+    drop_button = motion_command.get_contact_aware_drop_button()
+
+    assert drop_button.tolist() == [False, True, True]

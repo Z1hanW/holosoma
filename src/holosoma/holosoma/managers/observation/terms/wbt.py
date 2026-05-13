@@ -547,6 +547,14 @@ def sparse_target_root_trajectory_command_contact_aware(env: WholeBodyTrackingMa
     return torch.where(active_mask.unsqueeze(-1), base_command, torch.zeros_like(base_command))
 
 
+def drop_button(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Binary drop button: 0 before carry-end t2, 1 from t2 to clip end."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    if getattr(motion_command, "manual_control_enabled", False) or not motion_command.motion.has_object:
+        return torch.zeros((env.num_envs, 1), device=env.device, dtype=torch.float32)
+    return motion_command.get_contact_aware_drop_button().to(dtype=torch.float32).unsqueeze(-1)
+
+
 def clip_phase(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Normalized motion progress in current clip, in [0, 1]."""
     motion_command = _get_motion_command_and_assert_type(env)

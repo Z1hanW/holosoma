@@ -640,6 +640,13 @@ actor_input_dim = (
     .get("actor", {})
     .get("input_dim")
 )
+if "perception_obs" in input_dims and obs_dim == 94 and actor_input_dim == [
+    "actor_obs_root_contact_aware",
+    "actor_obs_drop_button",
+    "actor_obs_proprio_with_actions_no_linvel",
+]:
+    print("g1-29dof-wbt-object-contact-aware-drop-button-depth-distill")
+    raise SystemExit(0)
 if "perception_obs" in input_dims and obs_dim == 96 and actor_input_dim == [
     "actor_obs_root_contact_aware",
     "actor_obs_proprio",

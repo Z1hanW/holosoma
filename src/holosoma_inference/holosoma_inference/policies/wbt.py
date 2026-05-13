@@ -1832,6 +1832,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
         )
         return zero_command
 
+    def _get_drop_button(self) -> np.ndarray:
+        if self._motion_data is None or not self._motion_data.has_object:
+            return np.zeros((1, 1), dtype=np.float32)
+        _, carry_end = self._get_contact_aware_carry_window()
+        return np.array([[1.0 if self._get_motion_index() >= carry_end else 0.0]], dtype=np.float32)
+
     def _get_depth_distill_obs_buffer_dict(self, robot_state_data: np.ndarray) -> dict[str, np.ndarray]:
         base_lin_vel = robot_state_data[:, 7 + self.num_dofs : 7 + self.num_dofs + 3]
         base_ang_vel = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
@@ -1844,6 +1850,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         return {
             "sparse_target_root_trajectory_command": sparse_command,
             "sparse_target_root_trajectory_command_contact_aware": contact_aware_sparse_command,
+            "drop_button": self._get_drop_button(),
             "base_lin_vel": base_lin_vel.astype(np.float32, copy=False),
             "base_ang_vel": base_ang_vel.astype(np.float32, copy=False),
             "dof_pos": (robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles).astype(

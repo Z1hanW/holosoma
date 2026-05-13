@@ -3650,6 +3650,17 @@ class MotionCommand(CommandTermBase):
         carry_end = carry_window_by_clip[clip_ids, 1]
         return (time_steps >= carry_start) & (time_steps < carry_end)
 
+    def get_contact_aware_drop_button(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        env_ids_t = self._ensure_index_tensor(env_ids)
+        if not self.motion.has_object:
+            return torch.zeros((env_ids_t.numel(),), device=self.device, dtype=torch.bool)
+
+        clip_ids = self.clip_ids[env_ids_t]
+        time_steps = self.time_steps[env_ids_t]
+        carry_window_by_clip = self._get_contact_aware_carry_window_by_clip()
+        carry_end = carry_window_by_clip[clip_ids, 1]
+        return time_steps >= carry_end
+
     def _reset_pickup_anchor_state(
         self,
         env_ids: torch.Tensor,

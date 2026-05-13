@@ -1374,6 +1374,13 @@ actor_input_dim = (
 actor_input_dim = actor_input_dim if isinstance(actor_input_dim, list) else []
 
 if "perception_obs" in input_dims:
+    if obs_dim == 94 and actor_input_dim == [
+        "actor_obs_root_contact_aware",
+        "actor_obs_drop_button",
+        "actor_obs_proprio_with_actions_no_linvel",
+    ]:
+        print("g1-29dof-wbt-object-contact-aware-drop-button-depth-distill")
+        raise SystemExit(0)
     if obs_dim == 96 and actor_input_dim == [
         "actor_obs_root_contact_aware",
         "actor_obs_proprio",
@@ -1482,7 +1489,7 @@ fi
 if [[ -z "${HOLOSOMA_POLICY_MOTION_INDEX_OFFSET:-}" ]]; then
   if [[ -n "$POLICY_MOTION_INDEX_OFFSET" ]]; then
     export HOLOSOMA_POLICY_MOTION_INDEX_OFFSET="$POLICY_MOTION_INDEX_OFFSET"
-  elif [[ "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-distill" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-contact-aware-depth-distill" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-mocap-distill" ]]; then
+  elif [[ "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-distill" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-contact-aware-depth-distill" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-contact-aware-drop-button-depth-distill" || "$INFERENCE_CONFIG" == "g1-29dof-wbt-object-mocap-distill" ]]; then
     export HOLOSOMA_POLICY_MOTION_INDEX_OFFSET=1
   fi
 fi

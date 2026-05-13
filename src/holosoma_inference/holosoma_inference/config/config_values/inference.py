@@ -107,6 +107,11 @@ g1_29dof_wbt_object_contact_aware_depth_distill = replace(
     observation=observation.wbt_contact_aware_depth_distill,
 )
 
+g1_29dof_wbt_object_contact_aware_drop_button_depth_distill = replace(
+    g1_29dof_wbt_object_distill,
+    observation=observation.wbt_contact_aware_drop_button_depth_distill,
+)
+
 g1_29dof_wbt_object_mocap_distill = replace(
     g1_29dof_wbt,
     observation=observation.wbt_object_mocap_distill,
@@ -164,6 +169,8 @@ DEFAULTS = {
     "g1-29dof-wbt-object-distill-mujoco": g1_29dof_wbt_object_distill_mujoco,
     "g1-29dof-wbt-object-contact-aware-depth-distill": g1_29dof_wbt_object_contact_aware_depth_distill,
     "g1-29dof-wbt-contact-aware-depth-distill": g1_29dof_wbt_object_contact_aware_depth_distill,
+    "g1-29dof-wbt-object-contact-aware-drop-button-depth-distill": g1_29dof_wbt_object_contact_aware_drop_button_depth_distill,
+    "g1-29dof-wbt-contact-aware-drop-button-depth-distill": g1_29dof_wbt_object_contact_aware_drop_button_depth_distill,
     "g1-29dof-wbt-object-mocap-distill": g1_29dof_wbt_object_mocap_distill,
     "g1-29dof-wbt-mocap-distill": g1_29dof_wbt_object_mocap_distill,
     "g1-29dof-videomimic": g1_29dof_videomimic,
