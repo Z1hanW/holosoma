@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Copy and normalize the AS/OMOMO real-mesh training bank from NFS.
+# Copy and normalize an AS real-mesh training bank from NFS.
 #
-# This script builds a local concatenated bank at data/ds_as_data/omomo for
+# This script builds a local bank under data/ds_as_data for
 # train_as_general.sh. Same-named clips from later sources are kept with a
 # source-name prefix so all listed sources train together.
 #
@@ -12,19 +12,23 @@ set -euo pipefail
 #
 # Optional env:
 #   NFS_AS_ROOT=/nfs/zzzihanw/ds_as_data
-#   NFS_AS_SOURCES="omomo_45 retarget_vanilla_w_obj_scale_coacd500_curated18_20260509"
+#   NFS_AS_SOURCES="carryany_filter_scale_noscale_keep169_20260513 /abs/path/to/box_teacher_rollout_motion_bank"
+#     (space-separated bank names under NFS_AS_ROOT, or absolute paths)
 #   LOCAL_AS_ROOT=data/ds_as_data
-#   OUTPUT_BANK_NAME=omomo
+#   OUTPUT_BANK_NAME=carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout
 #   DEDUPE_IDENTICAL=0
 #   DRY_RUN=1
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 cd "${SCRIPT_DIR}"
 
+DEFAULT_AS_BANK=carryany_filter_scale_noscale_keep169_20260513
+DEFAULT_BOX_TEACHER_ROLLOUT_MOTION_BANK="${SCRIPT_DIR}/outputs/teacher_box_contacts_rollout_ref_motionbank_20260415b_utc/motion_bank"
+DEFAULT_OUTPUT_BANK="${DEFAULT_AS_BANK}_plus_box_teacher_rollout"
 NFS_AS_ROOT=${NFS_AS_ROOT:-/nfs/zzzihanw/ds_as_data}
-NFS_AS_SOURCES=${NFS_AS_SOURCES:-"omomo_45 retarget_vanilla_w_obj_scale_coacd500_curated18_20260509"}
+NFS_AS_SOURCES=${NFS_AS_SOURCES:-"${DEFAULT_AS_BANK} ${DEFAULT_BOX_TEACHER_ROLLOUT_MOTION_BANK}"}
 LOCAL_AS_ROOT=${LOCAL_AS_ROOT:-"data/ds_as_data"}
-OUTPUT_BANK_NAME=${OUTPUT_BANK_NAME:-omomo}
+OUTPUT_BANK_NAME=${OUTPUT_BANK_NAME:-"${DEFAULT_OUTPUT_BANK}"}
 DRY_RUN=${DRY_RUN:-0}
 DEDUPE_IDENTICAL=${DEDUPE_IDENTICAL:-0}
 
@@ -140,6 +144,30 @@ def resolve_path(raw: str, base: Path) -> Path:
     return (base / path).resolve()
 
 
+def resolve_source_candidates(name: str, nfs_root: Path) -> list[Path]:
+    raw = Path(name).expanduser()
+    if raw.is_absolute():
+        return [raw.resolve()]
+
+    nfs_home = nfs_root.parent if nfs_root.name == "ds_as_data" else nfs_root
+    bases = [
+        nfs_root,
+        nfs_home,
+        nfs_home / "ds_as_data",
+        nfs_home / "as_raw",
+        nfs_home / "debug_data",
+    ]
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    for base in bases:
+        candidate = (base / raw).resolve()
+        key = str(candidate)
+        if key not in seen:
+            candidates.append(candidate)
+            seen.add(key)
+    return candidates
+
+
 def validate_bank(out_dir: Path, clips: dict[str, dict]) -> None:
     npz_paths = sorted(out_dir.glob("*.npz"))
     if not npz_paths:
@@ -185,6 +213,133 @@ def validate_bank(out_dir: Path, clips: dict[str, dict]) -> None:
         raise SystemExit("[ERROR] AS bank validation failed:\n  " + "\n  ".join(bad[:30]))
 
 
+def copy_external_urdf_bundle(
+    object_urdf: str,
+    object_mesh: str,
+    object_size,
+    *,
+    source: Path,
+    tmp_dir: Path,
+    source_prefix: str,
+    clip_id: str,
+) -> tuple[str, str]:
+    urdf_src = resolve_path(object_urdf, source)
+    bundle_name = sanitize_name(f"{source_prefix}__{clip_id}")
+    bundle_rel = Path("objects") / bundle_name
+    bundle_dir = tmp_dir / bundle_rel
+    if bundle_dir.exists():
+        shutil.rmtree(bundle_dir)
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+
+    if not urdf_src.is_file():
+        size = np.asarray(object_size if object_size is not None else [], dtype=np.float32).reshape(-1)
+        if size.size != 3:
+            raise SystemExit(f"[ERROR] Missing external URDF for {clip_id}: {urdf_src}")
+        x, y, z = [max(float(v), 1.0e-4) for v in size.tolist()]
+        hx, hy, hz = x / 2.0, y / 2.0, z / 2.0
+        mesh_name = f"{bundle_name}.obj"
+        urdf_name = f"{bundle_name}.urdf"
+        (bundle_dir / mesh_name).write_text(
+            "\n".join(
+                [
+                    f"v {-hx:.8g} {-hy:.8g} {-hz:.8g}",
+                    f"v {hx:.8g} {-hy:.8g} {-hz:.8g}",
+                    f"v {hx:.8g} {hy:.8g} {-hz:.8g}",
+                    f"v {-hx:.8g} {hy:.8g} {-hz:.8g}",
+                    f"v {-hx:.8g} {-hy:.8g} {hz:.8g}",
+                    f"v {hx:.8g} {-hy:.8g} {hz:.8g}",
+                    f"v {hx:.8g} {hy:.8g} {hz:.8g}",
+                    f"v {-hx:.8g} {hy:.8g} {hz:.8g}",
+                    "f 1 2 3 4",
+                    "f 5 8 7 6",
+                    "f 1 5 6 2",
+                    "f 2 6 7 3",
+                    "f 3 7 8 4",
+                    "f 4 8 5 1",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        mass = 0.1
+        ixx = mass * (y * y + z * z) / 12.0
+        iyy = mass * (x * x + z * z) / 12.0
+        izz = mass * (x * x + y * y) / 12.0
+        (bundle_dir / urdf_name).write_text(
+            f"""<?xml version="1.0" ?>
+<robot name="{bundle_name}">
+  <link name="{bundle_name}_link">
+    <inertial>
+      <mass value="{mass:.8g}"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="{ixx:.8g}" ixy="0" ixz="0" iyy="{iyy:.8g}" iyz="0" izz="{izz:.8g}"/>
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry><mesh filename="{mesh_name}" scale="1 1 1"/></geometry>
+      <material name="mat"><color rgba="0.7 0.8 0.9 0.7"/></material>
+    </visual>
+    <collision name="{bundle_name}">
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry><mesh filename="{mesh_name}" scale="1 1 1"/></geometry>
+    </collision>
+  </link>
+</robot>
+""",
+            encoding="utf-8",
+        )
+        return str(bundle_rel / urdf_name), str(bundle_rel / mesh_name)
+
+    try:
+        tree = ET.parse(urdf_src)
+        root = tree.getroot()
+    except Exception as exc:
+        raise SystemExit(f"[ERROR] Invalid external URDF for {clip_id}: {urdf_src}: {exc}") from exc
+
+    copied_meshes: dict[Path, str] = {}
+    first_mesh_rel = ""
+
+    def copy_mesh(raw_filename: str) -> str:
+        nonlocal first_mesh_rel
+        mesh_src = resolve_path(raw_filename, urdf_src.parent)
+        if not mesh_src.is_file():
+            raise SystemExit(f"[ERROR] Missing mesh referenced by {urdf_src}: {mesh_src}")
+        mesh_name = sanitize_name(mesh_src.name)
+        if not mesh_name:
+            mesh_name = "mesh.obj"
+        base_name = mesh_name
+        suffix = 1
+        while (bundle_dir / mesh_name).exists() and copied_meshes.get(mesh_src) != mesh_name:
+            stem = Path(base_name).stem
+            ext = Path(base_name).suffix
+            mesh_name = f"{stem}_{suffix}{ext}"
+            suffix += 1
+        if mesh_src not in copied_meshes:
+            shutil.copy2(mesh_src, bundle_dir / mesh_name)
+            copied_meshes[mesh_src] = mesh_name
+        if not first_mesh_rel:
+            first_mesh_rel = str(bundle_rel / copied_meshes[mesh_src])
+        return copied_meshes[mesh_src]
+
+    for tag in root.findall(".//mesh"):
+        filename = str(tag.get("filename", "")).strip()
+        if not filename:
+            continue
+        tag.set("filename", copy_mesh(filename))
+
+    if object_mesh:
+        mesh_src = resolve_path(object_mesh, source)
+        if mesh_src.is_file():
+            copied_name = copy_mesh(str(mesh_src))
+            if not first_mesh_rel:
+                first_mesh_rel = str(bundle_rel / copied_name)
+
+    urdf_name = sanitize_name(urdf_src.name) or f"{bundle_name}.urdf"
+    urdf_dst = bundle_dir / urdf_name
+    tree.write(urdf_dst, encoding="utf-8", xml_declaration=True)
+    return str(bundle_rel / urdf_name), first_mesh_rel
+
+
 nfs_root = Path(sys.argv[1]).expanduser().resolve()
 source_names = [item for item in sys.argv[2].split() if item]
 local_root = Path(sys.argv[3]).expanduser()
@@ -193,12 +348,16 @@ dry_run = is_truthy(sys.argv[5])
 dedupe_identical = is_truthy(sys.argv[6])
 
 sources = []
+source_searches: dict[Path, list[Path]] = {}
 for name in source_names:
-    path = Path(name).expanduser()
-    sources.append(path.resolve() if path.is_absolute() else (nfs_root / path).resolve())
+    candidates = resolve_source_candidates(name, nfs_root)
+    source = next((candidate for candidate in candidates if candidate.is_dir()), candidates[0])
+    sources.append(source)
+    source_searches[source] = candidates
 for source in sources:
     if not source.is_dir():
-        raise SystemExit(f"[ERROR] Missing source directory: {source}")
+        searched = "\n  ".join(str(path) for path in source_searches.get(source, [source]))
+        raise SystemExit(f"[ERROR] Missing source directory: {source}\n[ERROR] Searched candidates:\n  {searched}")
     if not (source / "_clip_object_urdf_map.json").is_file():
         raise SystemExit(f"[ERROR] Missing source object map: {source / '_clip_object_urdf_map.json'}")
     if not list(source.glob("*.npz")):
@@ -261,9 +420,13 @@ try:
             if not object_urdf:
                 raise SystemExit(f"[ERROR] {source}: empty object_urdf_path for {base_clip_id}")
 
+            object_urdf_path_raw = Path(object_urdf).expanduser()
+            object_mesh_path_raw = Path(object_mesh).expanduser() if object_mesh else None
             object_dir_rel = Path(object_urdf).parts[0:2]
             if (
-                len(object_dir_rel) >= 2
+                not object_urdf_path_raw.is_absolute()
+                and not (object_mesh_path_raw is not None and object_mesh_path_raw.is_absolute())
+                and len(object_dir_rel) >= 2
                 and object_dir_rel[0] == "objects"
                 and (source / object_dir_rel[0] / object_dir_rel[1]).is_dir()
             ):
@@ -284,6 +447,19 @@ try:
                         if len(object_mesh_parts) >= 2 and object_mesh_parts[0] == "objects":
                             object_mesh_parts[1] = object_dst_name
                             object_mesh = str(Path(*object_mesh_parts))
+            elif object_urdf_path_raw.is_absolute() or (
+                object_mesh_path_raw is not None and object_mesh_path_raw.is_absolute()
+            ):
+                object_urdf, copied_mesh = copy_external_urdf_bundle(
+                    object_urdf,
+                    object_mesh,
+                    entry.get("object_size"),
+                    source=source,
+                    tmp_dir=tmp_dir,
+                    source_prefix=source_prefix,
+                    clip_id=clip_id,
+                )
+                object_mesh = copied_mesh or object_mesh
             else:
                 for raw in (object_urdf, object_mesh):
                     if not raw:
@@ -301,7 +477,19 @@ try:
             entry["source_bank"] = source_name
             entry["source_clip_id"] = base_clip_id
             clips_out[clip_id] = entry
-            rewrite_npz(npz_path, tmp_dir / f"{clip_id}.npz", clip_id, entry["object_name"], entry)
+            source_object_name = str(raw_entry.get("object_name", "")).strip() if isinstance(raw_entry, dict) else ""
+            source_object_urdf = str(raw_entry.get("object_urdf_path", "")).strip() if isinstance(raw_entry, dict) else ""
+            source_object_mesh = str(raw_entry.get("object_mesh_path", "")).strip() if isinstance(raw_entry, dict) else ""
+            needs_npz_rewrite = (
+                clip_id != base_clip_id
+                or source_object_name != entry["object_name"]
+                or source_object_urdf != entry["object_urdf_path"]
+                or source_object_mesh != str(entry.get("object_mesh_path", "")).strip()
+            )
+            if needs_npz_rewrite:
+                rewrite_npz(npz_path, tmp_dir / f"{clip_id}.npz", clip_id, entry["object_name"], entry)
+            else:
+                shutil.copy2(npz_path, tmp_dir / f"{clip_id}.npz")
             seen_by_name[base_clip_id] = (npz_hash, dedupe_entry, source_name)
 
     if not clips_out:

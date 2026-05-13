@@ -67,6 +67,13 @@ fi
 EXP=${EXP:-g1-29dof-wbt-w-object-generalist}
 COMMAND_CONFIG=${COMMAND_CONFIG:-g1-29dof-wbt-w-object-generalist}
 REWARD_CONFIG=${REWARD_CONFIG:-g1-29dof-wbt-w-object-generalist}
+REWARD_CONFIG_NORMALIZED=$(echo "${REWARD_CONFIG}" | tr '[:upper:]_' '[:lower:]-')
+USE_TEACHER_ROLLOUT_REWARD=0
+case "${REWARD_CONFIG_NORMALIZED}" in
+  *r2s-rollout-reference-guidance*|*r2s-rollout-ref*)
+    USE_TEACHER_ROLLOUT_REWARD=1
+    ;;
+esac
 WANDB_PROJECT=${WANDB_PROJECT:-boxer}
 WANDB_ENTITY=${WANDB_ENTITY:-""}
 WANDB_RUN_ID=${WANDB_RUN_ID:-${RESUME_WANDB_ID:-""}}
@@ -1803,7 +1810,7 @@ OBJECT_POS_SIGMA=${OBJECT_POS_SIGMA:-${DEFAULT_OBJECT_POS_SIGMA}}
 OBJECT_ORI_SIGMA=${OBJECT_ORI_SIGMA:-${DEFAULT_OBJECT_ORI_SIGMA}}
 force_reference_reward_alignment
 SEQUENCE_NAME=${SEQUENCE_NAME:-""}
-if [[ "$#" -gt 0 ]]; then
+if [[ "$#" -gt 0 && "$1" != -* ]]; then
   if is_checkpoint_ref "$1"; then
     RESUME_CKPT="$1"
     shift
@@ -2183,6 +2190,7 @@ echo "[INFO] Clip weighting strategy: ${CLIP_WEIGHTING_STRATEGY}"
 echo "[INFO] Within-clip adaptive timestep sampler: ${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
 echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}"
 echo "[INFO] Termination defaults: BadTracking full 3D + motion_ends"
+echo "[INFO] REWARD_CONFIG=${REWARD_CONFIG} teacher_rollout_reward=${USE_TEACHER_ROLLOUT_REWARD}"
 echo "[INFO] GPU_SELECTION=all-visible"
 echo "[INFO] AVAILABLE_GPU_COUNT=${AVAILABLE_GPU_COUNT}"
 echo "[INFO] NPROC=${NPROC} PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
@@ -2213,8 +2221,8 @@ train_cmd=(
   --algo.config.num_learning_iterations="${NUM_LEARNING_ITERATIONS}"
   --algo.config.normalize-actor-obs=False
   --algo.config.normalize-critic-obs=False
-  --observation-overrides.disable-actor-history=True
-  --observation-overrides.disable-critic-history=True
+  --observation-overrides.disable-actor-history True
+  --observation-overrides.disable-critic-history True
   --algo.config.save-interval="${SAVE_INTERVAL}"
   --simulator.config.sim.physx.gpu-max-rigid-contact-count="${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT}"
   --simulator.config.sim.physx.gpu-max-rigid-patch-count="${PHYSX_GPU_MAX_RIGID_PATCH_COUNT}"
@@ -2224,43 +2232,70 @@ train_cmd=(
   --simulator.config.sim.physx.gpu-collision-stack-size="${PHYSX_GPU_COLLISION_STACK_SIZE}"
   --simulator.config.sim.physx.gpu-heap-capacity="${PHYSX_GPU_HEAP_CAPACITY}"
   --simulator.config.sim.physx.gpu-temp-buffer-capacity="${PHYSX_GPU_TEMP_BUFFER_CAPACITY}"
-  --reward.terms.motion-global-ref-position-error-exp.weight="${ROOT_POS_W}"
-  --reward.terms.motion-global-ref-orientation-error-exp.weight="${ROOT_ORI_W}"
-  --reward.terms.motion-relative-body-position-error-exp.weight="${FULL_BODY_POS_W}"
-  --reward.terms.motion-relative-body-orientation-error-exp.weight="${FULL_BODY_ORI_W}"
-  --reward.terms.motion-global-body-lin-vel.weight="${FULL_BODY_LIN_VEL_W}"
-  --reward.terms.motion-global-body-ang-vel.weight="${FULL_BODY_ANG_VEL_W}"
-  --reward.terms.object-global-ref-position-error-exp.weight="${OBJECT_POS_W}"
-  --reward.terms.object-global-ref-orientation-error-exp.weight="${OBJECT_ORI_W}"
   --reward.terms.action-rate-l2.weight="${ACTION_RATE_L2_W}"
   --reward.terms.limits-dof-pos.weight="${GENERALIST_LIMITS_DOF_POS_WEIGHT}"
-  --reward.terms.motion-global-ref-position-error-exp.params.sigma="${ROOT_POS_SIGMA}"
-  --reward.terms.motion-global-ref-orientation-error-exp.params.sigma="${ROOT_ORI_SIGMA}"
-  --reward.terms.motion-relative-body-position-error-exp.params.sigma="${FULL_BODY_POS_SIGMA}"
-  --reward.terms.motion-relative-body-orientation-error-exp.params.sigma="${FULL_BODY_ORI_SIGMA}"
-  --reward.terms.motion-global-body-lin-vel.params.sigma="${FULL_BODY_LIN_VEL_SIGMA}"
-  --reward.terms.motion-global-body-ang-vel.params.sigma="${FULL_BODY_ANG_VEL_SIGMA}"
-  --reward.terms.object-global-ref-position-error-exp.params.sigma="${OBJECT_POS_SIGMA}"
-  --reward.terms.object-global-ref-orientation-error-exp.params.sigma="${OBJECT_ORI_SIGMA}"
   --command.setup-terms.motion-command.params.motion-config.enable-default-pose-prepend="${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
   --command.setup-terms.motion-command.params.motion-config.default-pose-prepend-duration-s="${DEFAULT_POSE_PREPEND_DURATION_S}"
 )
+if [[ "${USE_TEACHER_ROLLOUT_REWARD}" == "1" ]]; then
+  train_cmd+=(
+    --reward.terms.teacher-rollout-global-ref-position-error-exp.weight="${ROOT_POS_W}"
+    --reward.terms.teacher-rollout-global-ref-orientation-error-exp.weight="${ROOT_ORI_W}"
+    --reward.terms.teacher-rollout-relative-body-position-error-exp.weight="${FULL_BODY_POS_W}"
+    --reward.terms.teacher-rollout-relative-body-orientation-error-exp.weight="${FULL_BODY_ORI_W}"
+    --reward.terms.teacher-rollout-global-body-lin-vel.weight="${FULL_BODY_LIN_VEL_W}"
+    --reward.terms.teacher-rollout-global-body-ang-vel.weight="${FULL_BODY_ANG_VEL_W}"
+    --reward.terms.teacher-rollout-object-global-ref-position-error-exp.weight="${OBJECT_POS_W}"
+    --reward.terms.teacher-rollout-object-global-ref-orientation-error-exp.weight="${OBJECT_ORI_W}"
+    --reward.terms.teacher-rollout-global-ref-position-error-exp.params.sigma="${ROOT_POS_SIGMA}"
+    --reward.terms.teacher-rollout-global-ref-orientation-error-exp.params.sigma="${ROOT_ORI_SIGMA}"
+    --reward.terms.teacher-rollout-relative-body-position-error-exp.params.sigma="${FULL_BODY_POS_SIGMA}"
+    --reward.terms.teacher-rollout-relative-body-orientation-error-exp.params.sigma="${FULL_BODY_ORI_SIGMA}"
+    --reward.terms.teacher-rollout-global-body-lin-vel.params.sigma="${FULL_BODY_LIN_VEL_SIGMA}"
+    --reward.terms.teacher-rollout-global-body-ang-vel.params.sigma="${FULL_BODY_ANG_VEL_SIGMA}"
+    --reward.terms.teacher-rollout-object-global-ref-position-error-exp.params.sigma="${OBJECT_POS_SIGMA}"
+    --reward.terms.teacher-rollout-object-global-ref-orientation-error-exp.params.sigma="${OBJECT_ORI_SIGMA}"
+  )
+else
+  train_cmd+=(
+    --reward.terms.motion-global-ref-position-error-exp.weight="${ROOT_POS_W}"
+    --reward.terms.motion-global-ref-orientation-error-exp.weight="${ROOT_ORI_W}"
+    --reward.terms.motion-relative-body-position-error-exp.weight="${FULL_BODY_POS_W}"
+    --reward.terms.motion-relative-body-orientation-error-exp.weight="${FULL_BODY_ORI_W}"
+    --reward.terms.motion-global-body-lin-vel.weight="${FULL_BODY_LIN_VEL_W}"
+    --reward.terms.motion-global-body-ang-vel.weight="${FULL_BODY_ANG_VEL_W}"
+    --reward.terms.object-global-ref-position-error-exp.weight="${OBJECT_POS_W}"
+    --reward.terms.object-global-ref-orientation-error-exp.weight="${OBJECT_ORI_W}"
+    --reward.terms.motion-global-ref-position-error-exp.params.sigma="${ROOT_POS_SIGMA}"
+    --reward.terms.motion-global-ref-orientation-error-exp.params.sigma="${ROOT_ORI_SIGMA}"
+    --reward.terms.motion-relative-body-position-error-exp.params.sigma="${FULL_BODY_POS_SIGMA}"
+    --reward.terms.motion-relative-body-orientation-error-exp.params.sigma="${FULL_BODY_ORI_SIGMA}"
+    --reward.terms.motion-global-body-lin-vel.params.sigma="${FULL_BODY_LIN_VEL_SIGMA}"
+    --reward.terms.motion-global-body-ang-vel.params.sigma="${FULL_BODY_ANG_VEL_SIGMA}"
+    --reward.terms.object-global-ref-position-error-exp.params.sigma="${OBJECT_POS_SIGMA}"
+    --reward.terms.object-global-ref-orientation-error-exp.params.sigma="${OBJECT_ORI_SIGMA}"
+  )
+fi
 if [[ -n "${TRAINING_SEED}" ]]; then
   train_cmd+=(--training.seed="${TRAINING_SEED}")
 fi
 if [[ -n "${INIT_AT_RANDOM_EP_LEN}" ]]; then
   train_cmd+=(--algo.config.init_at_random_ep_len="${INIT_AT_RANDOM_EP_LEN}")
 fi
-for reward_spec in "${CONTACT_REWARD_TERMS[@]}"; do
-  reward_term="${reward_spec%%:*}"
-  reward_weight="${reward_spec#*:}"
-  train_cmd+=(
-    --reward.terms.body-contact-reward-"${reward_term}".weight="${reward_weight}"
-    --reward.terms.body-contact-reward-"${reward_term}".params.reward-mode="${GENERALIST_CONTACT_REWARD_MODE}"
-    --reward.terms.body-contact-reward-"${reward_term}".params.threshold="${GENERALIST_CONTACT_REWARD_THRESHOLD}"
-    --reward.terms.body-contact-reward-"${reward_term}".params.force-scale="${GENERALIST_CONTACT_REWARD_FORCE_SCALE}"
-  )
-done
+if [[ "${USE_TEACHER_ROLLOUT_REWARD}" == "1" ]]; then
+  echo "[INFO] Teacher-rollout reward config active; skipping body-contact-reward term overrides."
+else
+  for reward_spec in "${CONTACT_REWARD_TERMS[@]}"; do
+    reward_term="${reward_spec%%:*}"
+    reward_weight="${reward_spec#*:}"
+    train_cmd+=(
+      --reward.terms.body-contact-reward-"${reward_term}".weight="${reward_weight}"
+      --reward.terms.body-contact-reward-"${reward_term}".params.reward-mode="${GENERALIST_CONTACT_REWARD_MODE}"
+      --reward.terms.body-contact-reward-"${reward_term}".params.threshold="${GENERALIST_CONTACT_REWARD_THRESHOLD}"
+      --reward.terms.body-contact-reward-"${reward_term}".params.force-scale="${GENERALIST_CONTACT_REWARD_FORCE_SCALE}"
+    )
+  done
+fi
 if [[ "${DEBUG_MODE}" == "replay" || "${DEBUG_MODE}" == "toy" ]]; then
   train_cmd=("${PYTHON_BIN}" "${train_cmd[@]}")
 else

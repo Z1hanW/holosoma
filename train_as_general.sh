@@ -4,22 +4,27 @@ set -euo pipefail
 # AS real-mesh object generalist training.
 #
 # This is a thin launcher over train_object_generalist_ds.sh for the AS union
-# bank copied by cp_as.sh. It intentionally disables primitive/box object
-# spawning: both Isaac Sim object spawning and optional perception geometry must
-# use the object URDF mesh assets.
+# bank copied by cp_as.sh. It uses the AS+box teacher-rollout union by default,
+# keeps policy history at 5, and enables box teacher-rollout co-tracking rewards.
+# It intentionally disables primitive/box object spawning: both Isaac Sim object
+# spawning and optional perception geometry must use the object URDF mesh assets.
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
 
-AS_DATA_DIR=${AS_DATA_DIR:-${OMOMO_DATA_DIR:-"data/ds_as_data/omomo"}}
+DEFAULT_AS_BANK=carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout
+AS_DATA_DIR=${AS_DATA_DIR:-${OMOMO_DATA_DIR:-"data/ds_as_data/${DEFAULT_AS_BANK}"}}
 AS_OBJECT_MAP=${AS_OBJECT_MAP:-${OMOMO_OBJECT_MAP:-"${AS_DATA_DIR}/_clip_object_urdf_map.json"}}
-AS_EXPECTED_TOTAL=${AS_EXPECTED_TOTAL:-${OMOMO_EXPECTED_TOTAL:-63}}
+AS_EXPECTED_TOTAL=${AS_EXPECTED_TOTAL:-${OMOMO_EXPECTED_TOTAL:-197}}
+POLICY_HISTORY_LENGTH=${POLICY_HISTORY_LENGTH:-${HISTORY_LENGTH:-5}}
+TEACHER_ROLLOUT_REFERENCE_ROOT=${TEACHER_ROLLOUT_REFERENCE_ROOT:-"${SCRIPT_DIR}/outputs/teacher_box_contacts_rollout_ref_motionbank_20260415b_utc/clips"}
 # Optional override knobs forwarded to train_object_generalist_ds.sh:
 #   NUM_ENVS / NPROC / PER_GPU_ENVS / MASTER_PORT
 #   TRAINING_SEED or SEED
 #   RANDOMIZATION_PRESET or RANDOMIZATION
 #   INIT_AT_RANDOM_EP_LEN
 #   SAVE_INTERVAL
+#   POLICY_HISTORY_LENGTH / HISTORY_LENGTH
 TRAINING_SEED=${TRAINING_SEED:-${SEED:-}}
 RANDOMIZATION_PRESET=${RANDOMIZATION_PRESET:-${RANDOMIZATION:-}}
 INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-}
@@ -27,6 +32,7 @@ INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-}
 LOCAL_DATA_ROOT=$(realpath -m "data")
 AS_DATA_DIR_ABS=$(realpath -m "${AS_DATA_DIR}")
 AS_OBJECT_MAP_ABS=$(realpath -m "${AS_OBJECT_MAP}")
+TEACHER_ROLLOUT_REFERENCE_ROOT_ABS=$(realpath -m "${TEACHER_ROLLOUT_REFERENCE_ROOT}")
 
 case "${AS_DATA_DIR_ABS}" in
   /nfs|/nfs/*)
@@ -75,6 +81,20 @@ fi
 
 if [[ ! -f "${AS_OBJECT_MAP_ABS}" ]]; then
   echo "[ERROR] Missing clip-object URDF map: ${AS_OBJECT_MAP}" >&2
+  exit 2
+fi
+
+if [[ ! "${POLICY_HISTORY_LENGTH}" =~ ^[0-9]+$ || "${POLICY_HISTORY_LENGTH}" == "0" ]]; then
+  echo "[ERROR] POLICY_HISTORY_LENGTH/HISTORY_LENGTH must be a positive integer. Got: ${POLICY_HISTORY_LENGTH}" >&2
+  exit 2
+fi
+
+if [[ ! -d "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}" ]]; then
+  echo "[ERROR] Missing teacher rollout reference root: ${TEACHER_ROLLOUT_REFERENCE_ROOT}" >&2
+  exit 2
+fi
+if ! find "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}" -maxdepth 2 -name teacher_rollout_reference.npz -print -quit | grep -q .; then
+  echo "[ERROR] Teacher rollout reference root has no teacher_rollout_reference.npz files: ${TEACHER_ROLLOUT_REFERENCE_ROOT}" >&2
   exit 2
 fi
 
@@ -274,6 +294,9 @@ fi
 export HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE="${AS_OBJECT_GEOMETRY_MODE}"
 export HOLOSOMA_OBJECT_COLLIDER_TYPE=${HOLOSOMA_OBJECT_COLLIDER_TYPE:-convex_decomposition}
 unset OBJECT_GEOMETRY_MODE
+export EXP=${EXP:-g1-29dof-wbt-w-object-generalist}
+export COMMAND_CONFIG=${COMMAND_CONFIG:-g1-29dof-wbt-w-object-generalist}
+export REWARD_CONFIG=${REWARD_CONFIG:-g1-29dof-wbt-w-object-r2s-rollout-reference-guidance}
 export TRAINING_SEED
 export RANDOMIZATION_PRESET
 export INIT_AT_RANDOM_EP_LEN
@@ -319,6 +342,9 @@ fi
 echo "[INFO] Launching AS real-mesh co-tracking generalist training"
 echo "[INFO] MOTION_DIR=${MOTION_DIR}"
 echo "[INFO] OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH}"
+echo "[INFO] REWARD_CONFIG=${REWARD_CONFIG}"
+echo "[INFO] TEACHER_ROLLOUT_REFERENCE_ROOT=${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
+echo "[INFO] POLICY_HISTORY_LENGTH=${POLICY_HISTORY_LENGTH}"
 echo "[INFO] HOLOSOMA_OBJECT_SPAWN_MODE=${HOLOSOMA_OBJECT_SPAWN_MODE}"
 echo "[INFO] HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK=${HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK}"
 echo "[INFO] HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE=${HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE}"
@@ -326,4 +352,21 @@ echo "[INFO] HOLOSOMA_OBJECT_COLLIDER_TYPE=${HOLOSOMA_OBJECT_COLLIDER_TYPE}"
 echo "[INFO] NPROC=${NPROC:-<auto>} PER_GPU_ENVS=${PER_GPU_ENVS:-4096} NUM_ENVS=${NUM_ENVS:-<NPROC*PER_GPU_ENVS>} MASTER_PORT=${MASTER_PORT:-<random>}"
 echo "[INFO] TRAINING_SEED=${TRAINING_SEED:-<config-default>} RANDOMIZATION=${RANDOMIZATION_PRESET:-<exp-default>} INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-<algo-default>}"
 
-exec bash "${SCRIPT_DIR}/train_object_generalist_ds.sh" mix-naive "$@"
+AS_TRAIN_ARGS=(
+  --observation-overrides.disable-actor-history False
+  --observation-overrides.disable-critic-history False
+  --observation.groups.actor_obs.history-length "${POLICY_HISTORY_LENGTH}"
+  --observation.groups.critic_obs.history-length "${POLICY_HISTORY_LENGTH}"
+  --reward.terms.teacher-rollout-global-ref-position-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
+  --reward.terms.teacher-rollout-global-ref-orientation-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
+  --reward.terms.teacher-rollout-relative-body-position-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
+  --reward.terms.teacher-rollout-relative-body-orientation-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
+  --reward.terms.teacher-rollout-global-body-lin-vel.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
+  --reward.terms.teacher-rollout-global-body-ang-vel.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
+  --reward.terms.teacher-rollout-object-global-ref-position-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
+  --reward.terms.teacher-rollout-object-global-ref-orientation-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
+  --reward.terms.offline-wrist-target-guidance.params.contact-export-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
+  --reward.terms.offline-contact-guidance.params.contact-export-root "${TEACHER_ROLLOUT_REFERENCE_ROOT_ABS}"
+)
+
+exec bash "${SCRIPT_DIR}/train_object_generalist_ds.sh" mix-naive "${AS_TRAIN_ARGS[@]}" "$@"

@@ -982,7 +982,7 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
   esac
 
   if [[ "${ROOT_COMMAND_MODE}" == "contact-aware" ]]; then
-    _shoo7_student_actor_inputs="${_shoo7_student_actor_inputs/actor_obs_root/actor_obs_root_contact_aware','actor_obs_drop_button}"
+    _shoo7_student_actor_inputs="['actor_obs_root_contact_aware','actor_obs_drop_button','actor_obs_proprio_with_actions_no_linvel']"
   fi
 
   PERCEPTION_PRESET="camera_depth_d435i"
