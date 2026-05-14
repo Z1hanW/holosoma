@@ -219,7 +219,7 @@ class IsaacSim(BaseSimulator):
             None,
         )
         if gpu_total_aggregate_pairs_capacity is None:
-            gpu_total_aggregate_pairs_capacity = 2**24  # 16777216
+            gpu_total_aggregate_pairs_capacity = 2**26  # 67108864
         gpu_collision_stack_size = getattr(self.simulator_config.sim.physx, "gpu_collision_stack_size", None)
         if gpu_collision_stack_size is None:
             gpu_collision_stack_size = 2**26  # 67108864
