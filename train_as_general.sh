@@ -139,6 +139,9 @@ if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
   export POLICY_INIT_CKPT="${BOX_RESUME_CKPT}"
   unset RESUME_CKPT
   unset RESUME_CHECKPOINT
+  unset WANDB_RUN_ID
+  unset RESUME_WANDB_ID
+  unset WANDB_RESUME
   export WANDB_RESUME_SAME_RUN=0
   SEQUENCE_NAME=${SEQUENCE_NAME:-as-general-real-mesh-cotrack-init-box}
 fi
