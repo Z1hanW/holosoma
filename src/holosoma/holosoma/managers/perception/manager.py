@@ -153,6 +153,8 @@ class _InfiniteFractalPerlin3D:
 class PerceptionManager:
     """Compute terrain-aware perception features (heightmap or camera depth)."""
 
+    _PERCEPTION_MESH_CACHE_VERSION = "v2_trimesh_scene_atomic"
+
     @staticmethod
     def _parse_debug_float_list_env(name: str, *, expected_len: int) -> list[float] | None:
         raw = os.environ.get(name, "").strip()
@@ -2142,6 +2144,28 @@ class PerceptionManager:
         require_single_slot = os.environ.get("HOLOSOMA_REQUIRE_SINGLE_SLOT_OBJECTS", "").strip().lower()
         return explicit in {"1", "true", "yes", "on"} or require_single_slot in {"1", "true", "yes", "on"}
 
+    @classmethod
+    def _perception_mesh_cache_dir(cls) -> Path:
+        base_dir = os.environ.get("HOLOSOMA_PERCEPTION_MESH_CACHE_DIR", "/tmp/holosoma_perception_mesh_cache")
+        return Path(base_dir).expanduser() / cls._PERCEPTION_MESH_CACHE_VERSION
+
+    def _export_trimesh_atomic(self, mesh: Any, cache_mesh_path: Path, trimesh_module: Any) -> str:
+        """Export a mesh cache atomically so other ranks never read a partial OBJ."""
+        tmp_path = cache_mesh_path.with_name(
+            f".{cache_mesh_path.stem}.{os.getpid()}.tmp{cache_mesh_path.suffix}"
+        )
+        try:
+            mesh.export(str(tmp_path))
+            self._load_trimesh_file(tmp_path, trimesh_module)
+            os.replace(tmp_path, cache_mesh_path)
+        except Exception:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            raise
+        return str(cache_mesh_path)
+
     def _export_combined_urdf_visual_mesh(self, urdf_path: str, object_name: str) -> str | None:
         """Build a single OBJ mesh from URDF visual geometry for dynamic object raycasting."""
         strict = self._strict_perception_object_meshes()
@@ -2182,7 +2206,7 @@ class PerceptionManager:
             stat = urdf_file.stat()
             digest.update(f"{urdf_file.resolve()}:{stat.st_mtime_ns}:{stat.st_size}".encode("utf-8"))
 
-        cache_dir = Path("/tmp/holosoma_perception_mesh_cache")
+        cache_dir = self._perception_mesh_cache_dir()
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_mesh_path = cache_dir / f"{object_name}_{urdf_file.stem}_{digest.hexdigest()[:12]}_combined.obj"
         if cache_mesh_path.exists():
@@ -2192,8 +2216,8 @@ class PerceptionManager:
             except Exception as exc:
                 if strict:
                     raise RuntimeError(
-                        f"Cached perception mesh is invalid: {cache_mesh_path}. "
-                        "Remove it explicitly if it was produced by an older exporter."
+                        f"Cached perception mesh is invalid for "
+                        f"{self._PERCEPTION_MESH_CACHE_VERSION}: {cache_mesh_path}."
                     ) from exc
                 return None
 
@@ -2287,7 +2311,7 @@ class PerceptionManager:
                 if strict:
                     raise RuntimeError(f"Combined perception mesh is empty for object URDF: {urdf_file}")
                 return None
-            combined.export(str(cache_mesh_path))
+            self._export_trimesh_atomic(combined, cache_mesh_path, trimesh)
         except Exception as exc:
             if strict:
                 raise RuntimeError(f"Failed to export combined perception mesh for object URDF: {urdf_file}") from exc
@@ -2310,9 +2334,17 @@ class PerceptionManager:
                 raise FileNotFoundError(f"Scene asset does not exist for perception mesh export: {source_path}")
             return None
 
-        cache_dir = Path("/tmp/holosoma_perception_mesh_cache")
+        digest = hashlib.sha1()
+        try:
+            digest.update(str(source_path.resolve()).encode("utf-8"))
+            digest.update(source_path.read_bytes())
+        except Exception:
+            stat = source_path.stat()
+            digest.update(f"{source_path.resolve()}:{stat.st_mtime_ns}:{stat.st_size}".encode("utf-8"))
+
+        cache_dir = self._perception_mesh_cache_dir()
         cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_mesh_path = cache_dir / f"{object_name}_{source_path.stem}_combined.obj"
+        cache_mesh_path = cache_dir / f"{object_name}_{source_path.stem}_{digest.hexdigest()[:12]}_combined.obj"
         if cache_mesh_path.exists():
             try:
                 self._load_trimesh_file(cache_mesh_path, trimesh)
@@ -2320,8 +2352,8 @@ class PerceptionManager:
             except Exception as exc:
                 if strict:
                     raise RuntimeError(
-                        f"Cached perception mesh is invalid: {cache_mesh_path}. "
-                        "Remove it explicitly if it was produced by an older exporter."
+                        f"Cached perception mesh is invalid for "
+                        f"{self._PERCEPTION_MESH_CACHE_VERSION}: {cache_mesh_path}."
                     ) from exc
                 return None
 
@@ -2338,7 +2370,7 @@ class PerceptionManager:
             return None
 
         try:
-            mesh.export(str(cache_mesh_path))
+            self._export_trimesh_atomic(mesh, cache_mesh_path, trimesh)
         except Exception as exc:
             if strict:
                 raise RuntimeError(f"Failed to export scene asset perception mesh: {source_path}") from exc
