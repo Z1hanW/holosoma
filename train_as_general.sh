@@ -16,6 +16,10 @@ DEFAULT_AS_BANK=carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_
 AS_DATA_DIR=${AS_DATA_DIR:-${OMOMO_DATA_DIR:-"data/ds_as_data/${DEFAULT_AS_BANK}"}}
 AS_OBJECT_MAP=${AS_OBJECT_MAP:-${OMOMO_OBJECT_MAP:-"${AS_DATA_DIR}/_clip_object_urdf_map.json"}}
 AS_EXPECTED_TOTAL=${AS_EXPECTED_TOTAL:-${OMOMO_EXPECTED_TOTAL:-197}}
+POLICY_HISTORY_LENGTH_FROM_ENV=0
+if [[ -n "${POLICY_HISTORY_LENGTH:-}" || -n "${HISTORY_LENGTH:-}" ]]; then
+  POLICY_HISTORY_LENGTH_FROM_ENV=1
+fi
 POLICY_HISTORY_LENGTH=${POLICY_HISTORY_LENGTH:-${HISTORY_LENGTH:-5}}
 # Optional override knobs forwarded to train_object_generalist_ds.sh:
 #   NUM_ENVS / NPROC / PER_GPU_ENVS / MASTER_PORT
@@ -24,9 +28,17 @@ POLICY_HISTORY_LENGTH=${POLICY_HISTORY_LENGTH:-${HISTORY_LENGTH:-5}}
 #   INIT_AT_RANDOM_EP_LEN
 #   SAVE_INTERVAL
 #   POLICY_HISTORY_LENGTH / HISTORY_LENGTH
+#   RESUME_FROM_BOX=1
+#     Resume from the no-history boxer/omomo+dsall checkpoint, while keeping
+#     this launcher's AS motion/object bank.
+#   BOX_RESUME_CKPT
+#     Explicit .pt checkpoint used by RESUME_FROM_BOX.
 TRAINING_SEED=${TRAINING_SEED:-${SEED:-}}
 RANDOMIZATION_PRESET=${RANDOMIZATION_PRESET:-${RANDOMIZATION:-}}
 INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-}
+RESUME_FROM_BOX=${RESUME_FROM_BOX:-0}
+BOX_RESUME_CKPT=${BOX_RESUME_CKPT:-${RESUME_FROM_BOX_CKPT:-"wandb://zihanw22/boxer/pgjb50yy/model_39999.pt"}}
+BOX_RESUME_HISTORY_LENGTH=${BOX_RESUME_HISTORY_LENGTH:-1}
 
 LOCAL_DATA_ROOT=$(realpath -m "data")
 AS_DATA_DIR_ABS=$(realpath -m "${AS_DATA_DIR}")
@@ -85,6 +97,46 @@ fi
 if [[ ! "${POLICY_HISTORY_LENGTH}" =~ ^[0-9]+$ || "${POLICY_HISTORY_LENGTH}" == "0" ]]; then
   echo "[ERROR] POLICY_HISTORY_LENGTH/HISTORY_LENGTH must be a positive integer. Got: ${POLICY_HISTORY_LENGTH}" >&2
   exit 2
+fi
+case "$(echo "${RESUME_FROM_BOX}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    RESUME_FROM_BOX=1
+    ;;
+  0|false|no|off|"")
+    RESUME_FROM_BOX=0
+    ;;
+  *)
+    echo "[ERROR] RESUME_FROM_BOX must be a boolean. Got: ${RESUME_FROM_BOX}" >&2
+    exit 2
+    ;;
+esac
+if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
+  if [[ ! "${BOX_RESUME_HISTORY_LENGTH}" =~ ^[0-9]+$ || "${BOX_RESUME_HISTORY_LENGTH}" == "0" ]]; then
+    echo "[ERROR] BOX_RESUME_HISTORY_LENGTH must be a positive integer. Got: ${BOX_RESUME_HISTORY_LENGTH}" >&2
+    exit 2
+  fi
+  case "${BOX_RESUME_CKPT}" in
+    *.pt)
+      ;;
+    *)
+      echo "[ERROR] BOX_RESUME_CKPT must point to an explicit .pt checkpoint. Got: ${BOX_RESUME_CKPT}" >&2
+      exit 2
+      ;;
+  esac
+  if [[ "${POLICY_HISTORY_LENGTH_FROM_ENV}" == "0" ]]; then
+    POLICY_HISTORY_LENGTH="${BOX_RESUME_HISTORY_LENGTH}"
+  elif [[ "${POLICY_HISTORY_LENGTH}" != "${BOX_RESUME_HISTORY_LENGTH}" ]]; then
+    echo "[ERROR] RESUME_FROM_BOX checkpoint is no-history and requires POLICY_HISTORY_LENGTH=${BOX_RESUME_HISTORY_LENGTH}." >&2
+    echo "[ERROR] Got POLICY_HISTORY_LENGTH=${POLICY_HISTORY_LENGTH}. Start from scratch for history=${POLICY_HISTORY_LENGTH}, or unset it for RESUME_FROM_BOX." >&2
+    exit 2
+  fi
+  if [[ -n "${RESUME_CKPT:-}" || -n "${RESUME_CHECKPOINT:-}" ]]; then
+    echo "[ERROR] RESUME_FROM_BOX owns the resume checkpoint. Use BOX_RESUME_CKPT to override it." >&2
+    exit 2
+  fi
+  export RESUME_CKPT="${BOX_RESUME_CKPT}"
+  export WANDB_RESUME_SAME_RUN=0
+  SEQUENCE_NAME=${SEQUENCE_NAME:-as-general-real-mesh-cotrack-resume-box}
 fi
 
 OBJECT_SPAWN_MODE_FROM_ENV=0
@@ -335,12 +387,16 @@ echo "[INFO] Launching AS real-mesh co-tracking generalist training"
 echo "[INFO] MOTION_DIR=${MOTION_DIR}"
 echo "[INFO] OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH}"
 echo "[INFO] REWARD_CONFIG=${REWARD_CONFIG}"
+echo "[INFO] RESUME_FROM_BOX=${RESUME_FROM_BOX}"
+if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
+  echo "[INFO] BOX_RESUME_CKPT=${RESUME_CKPT}"
+fi
 echo "[INFO] POLICY_HISTORY_LENGTH=${POLICY_HISTORY_LENGTH}"
 echo "[INFO] HOLOSOMA_OBJECT_SPAWN_MODE=${HOLOSOMA_OBJECT_SPAWN_MODE}"
 echo "[INFO] HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK=${HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK}"
 echo "[INFO] HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE=${HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE}"
 echo "[INFO] HOLOSOMA_OBJECT_COLLIDER_TYPE=${HOLOSOMA_OBJECT_COLLIDER_TYPE}"
-echo "[INFO] NPROC=${NPROC:-<auto>} PER_GPU_ENVS=${PER_GPU_ENVS:-4096} NUM_ENVS=${NUM_ENVS:-<NPROC*PER_GPU_ENVS>} MASTER_PORT=${MASTER_PORT:-<random>}"
+echo "[INFO] NPROC=${NPROC:-<auto>} PER_GPU_ENVS=${PER_GPU_ENVS:-8192} NUM_ENVS=${NUM_ENVS:-<NPROC*PER_GPU_ENVS>} MASTER_PORT=${MASTER_PORT:-<random>}"
 echo "[INFO] TRAINING_SEED=${TRAINING_SEED:-<config-default>} RANDOMIZATION=${RANDOMIZATION_PRESET:-<exp-default>} INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-<algo-default>}"
 
 exec bash "${SCRIPT_DIR}/train_object_generalist_ds.sh" mix-naive "$@"
