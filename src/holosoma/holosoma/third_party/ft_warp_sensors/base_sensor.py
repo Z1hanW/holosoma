@@ -13,32 +13,29 @@ from .sensor_utils import (
 
 def _load_mesh_as_trimesh(mesh_path: str) -> trimesh.Trimesh:
     """Load a mesh file as a single Trimesh, concatenating Scene geometry when needed."""
+    def is_valid(mesh: trimesh.Trimesh) -> bool:
+        return isinstance(mesh, trimesh.Trimesh) and mesh.vertices.size > 0 and mesh.faces.size > 0
+
     def concatenate(meshes: list[trimesh.Trimesh]) -> trimesh.Trimesh:
-        if not meshes:
+        valid_meshes = [mesh for mesh in meshes if is_valid(mesh)]
+        if not valid_meshes:
             raise ValueError(f"no Trimesh geometry found in {mesh_path}")
-        return trimesh.util.concatenate(meshes)
+        return trimesh.util.concatenate(valid_meshes)
 
-    loaded = trimesh.load(mesh_path, process=False, force="mesh")
-    if isinstance(loaded, trimesh.Trimesh):
-        mesh = loaded
-    elif isinstance(loaded, trimesh.Scene):
-        dumped = loaded.dump(concatenate=True)
-        if isinstance(dumped, trimesh.Trimesh):
-            mesh = dumped
-        elif isinstance(dumped, (list, tuple)):
-            mesh = concatenate([geom for geom in dumped if isinstance(geom, trimesh.Trimesh)])
-        else:
-            mesh = concatenate(
-                [geom for geom in loaded.geometry.values() if isinstance(geom, trimesh.Trimesh)]
-            )
-    elif isinstance(loaded, (list, tuple)):
-        mesh = concatenate([geom for geom in loaded if isinstance(geom, trimesh.Trimesh)])
-    else:
-        raise TypeError(f"expected Trimesh/Scene/list, got {type(loaded).__name__}")
+    def coerce(loaded) -> trimesh.Trimesh:
+        if is_valid(loaded):
+            return loaded
+        if isinstance(loaded, trimesh.Scene):
+            dumped = loaded.dump(concatenate=True)
+            if is_valid(dumped):
+                return dumped
+            if isinstance(dumped, (list, tuple)):
+                return concatenate([geom for geom in dumped if isinstance(geom, trimesh.Trimesh)])
+        if isinstance(loaded, (list, tuple)):
+            return concatenate([geom for geom in loaded if isinstance(geom, trimesh.Trimesh)])
+        raise TypeError(f"expected non-empty Trimesh/Scene/list, got {type(loaded).__name__}")
 
-    if not isinstance(mesh, trimesh.Trimesh) or mesh.vertices.size == 0 or mesh.faces.size == 0:
-        raise ValueError(f"loaded mesh has no vertices/faces: {mesh_path}")
-    return mesh
+    return coerce(trimesh.load(mesh_path, process=False))
 
 
 class BaseSensor(ABC):

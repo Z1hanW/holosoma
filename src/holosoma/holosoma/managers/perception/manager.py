@@ -1885,6 +1885,10 @@ class PerceptionManager:
             if mesh_specs:
                 mesh_map.update(mesh_specs)
             else:
+                if self._strict_perception_object_meshes():
+                    raise RuntimeError(
+                        f"Registered simulator object '{name}' has no valid perception raycast mesh."
+                    )
                 (self.logger or logger).warning(
                     "Skipping registered object '{}' in perception raycast: unable to resolve mesh path.",
                     name,
@@ -1960,6 +1964,11 @@ class PerceptionManager:
             )
             mesh_path = self._resolve_registered_object_mesh_from_asset_path(candidate_path, object_name)
             if mesh_path is None:
+                if self._strict_perception_object_meshes():
+                    raise RuntimeError(
+                        "Failed to resolve a valid perception raycast mesh for registered object "
+                        f"'{object_name}' from asset '{candidate_path}'."
+                    )
                 continue
             mesh_specs[slot_name] = {
                 "mesh_path": mesh_path,
@@ -2090,20 +2099,70 @@ class PerceptionManager:
             for candidate_path, env_ids in sorted(env_ids_by_candidate.items())
         ]
 
+    @staticmethod
+    def _is_valid_trimesh(mesh: Any, trimesh_module: Any) -> bool:
+        return (
+            isinstance(mesh, trimesh_module.Trimesh)
+            and getattr(mesh, "vertices", np.empty((0,))).size > 0
+            and getattr(mesh, "faces", np.empty((0,))).size > 0
+        )
+
+    @classmethod
+    def _coerce_loaded_trimesh(cls, loaded: Any, trimesh_module: Any, *, source_path: str) -> Any:
+        if cls._is_valid_trimesh(loaded, trimesh_module):
+            return loaded
+
+        def concatenate(meshes: list[Any]) -> Any:
+            valid_meshes = [mesh for mesh in meshes if cls._is_valid_trimesh(mesh, trimesh_module)]
+            if not valid_meshes:
+                raise ValueError(f"no non-empty mesh geometry found in {source_path}")
+            return trimesh_module.util.concatenate(valid_meshes)
+
+        if isinstance(loaded, trimesh_module.Scene):
+            dumped = loaded.dump(concatenate=True)
+            if cls._is_valid_trimesh(dumped, trimesh_module):
+                return dumped
+            if isinstance(dumped, (list, tuple)):
+                return concatenate(list(dumped))
+
+        if isinstance(loaded, (list, tuple)):
+            return concatenate(list(loaded))
+
+        raise ValueError(f"loaded geometry is not a non-empty mesh: {source_path} ({type(loaded).__name__})")
+
+    @classmethod
+    def _load_trimesh_file(cls, mesh_path: str | Path, trimesh_module: Any) -> Any:
+        mesh_path_str = str(mesh_path)
+        loaded = trimesh_module.load(mesh_path_str, process=False)
+        return cls._coerce_loaded_trimesh(loaded, trimesh_module, source_path=mesh_path_str)
+
+    @staticmethod
+    def _strict_perception_object_meshes() -> bool:
+        explicit = os.environ.get("HOLOSOMA_STRICT_PERCEPTION_OBJECT_MESHES", "").strip().lower()
+        require_single_slot = os.environ.get("HOLOSOMA_REQUIRE_SINGLE_SLOT_OBJECTS", "").strip().lower()
+        return explicit in {"1", "true", "yes", "on"} or require_single_slot in {"1", "true", "yes", "on"}
+
     def _export_combined_urdf_visual_mesh(self, urdf_path: str, object_name: str) -> str | None:
         """Build a single OBJ mesh from URDF visual geometry for dynamic object raycasting."""
+        strict = self._strict_perception_object_meshes()
         try:
             import trimesh  # noqa: PLC0415
         except Exception:
+            if strict:
+                raise
             return None
 
         urdf_file = Path(urdf_path).expanduser()
         if not urdf_file.exists():
+            if strict:
+                raise FileNotFoundError(f"Object URDF does not exist for perception mesh export: {urdf_file}")
             return None
 
         try:
             root = ET.parse(str(urdf_file)).getroot()
-        except Exception:
+        except Exception as exc:
+            if strict:
+                raise RuntimeError(f"Failed to parse object URDF for perception mesh export: {urdf_file}") from exc
             return None
 
         urdf_dir = str(urdf_file.parent)
@@ -2127,7 +2186,16 @@ class PerceptionManager:
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_mesh_path = cache_dir / f"{object_name}_{urdf_file.stem}_{digest.hexdigest()[:12]}_combined.obj"
         if cache_mesh_path.exists():
-            return str(cache_mesh_path)
+            try:
+                self._load_trimesh_file(cache_mesh_path, trimesh)
+                return str(cache_mesh_path)
+            except Exception as exc:
+                if strict:
+                    raise RuntimeError(
+                        f"Cached perception mesh is invalid: {cache_mesh_path}. "
+                        "Remove it explicitly if it was produced by an older exporter."
+                    ) from exc
+                return None
 
         meshes: list[Any] = []
 
@@ -2145,11 +2213,18 @@ class PerceptionManager:
                         continue
                     mesh_file = self._resolve_urdf_mesh_path(urdf_dir, urdf_dir, filename)
                     if not os.path.exists(mesh_file):
+                        if strict:
+                            raise FileNotFoundError(
+                                f"URDF visual mesh file does not exist: {mesh_file} (from {urdf_file})"
+                            )
                         continue
-                    mesh = trimesh.load(mesh_file, process=False)
-                    if isinstance(mesh, trimesh.Scene):
-                        mesh = mesh.dump(concatenate=True)
-                    if not isinstance(mesh, trimesh.Trimesh):
+                    try:
+                        mesh = self._load_trimesh_file(mesh_file, trimesh)
+                    except Exception as exc:
+                        if strict:
+                            raise RuntimeError(
+                                f"Failed to load URDF visual mesh for perception: {mesh_file} (from {urdf_file})"
+                            ) from exc
                         continue
                     scale = self._parse_urdf_vec3(mesh_tag.get("scale"), default=None)
                     if scale is not None:
@@ -2178,6 +2253,12 @@ class PerceptionManager:
                         continue
 
                 if not isinstance(mesh, trimesh.Trimesh):
+                    if strict:
+                        raise RuntimeError(f"URDF visual geometry did not produce a Trimesh: {urdf_file}")
+                    continue
+                if not self._is_valid_trimesh(mesh, trimesh):
+                    if strict:
+                        raise RuntimeError(f"URDF visual geometry produced an empty mesh: {urdf_file}")
                     continue
 
                 origin = visual.find("origin")
@@ -2196,48 +2277,71 @@ class PerceptionManager:
                 meshes.append(mesh)
 
         if not meshes:
+            if strict:
+                raise RuntimeError(f"Object URDF produced no valid visual meshes for perception: {urdf_file}")
             return None
 
         try:
             combined = trimesh.util.concatenate(meshes)
+            if not self._is_valid_trimesh(combined, trimesh):
+                if strict:
+                    raise RuntimeError(f"Combined perception mesh is empty for object URDF: {urdf_file}")
+                return None
             combined.export(str(cache_mesh_path))
-        except Exception:
+        except Exception as exc:
+            if strict:
+                raise RuntimeError(f"Failed to export combined perception mesh for object URDF: {urdf_file}") from exc
             return None
         return str(cache_mesh_path)
 
     def _export_combined_mesh_from_scene_asset(self, asset_path: str, object_name: str) -> str | None:
         """Best-effort mesh export for USD scene assets."""
+        strict = self._strict_perception_object_meshes()
         try:
             import trimesh  # noqa: PLC0415
         except Exception:
+            if strict:
+                raise
             return None
 
         source_path = Path(asset_path).expanduser()
         if not source_path.exists():
+            if strict:
+                raise FileNotFoundError(f"Scene asset does not exist for perception mesh export: {source_path}")
             return None
 
         cache_dir = Path("/tmp/holosoma_perception_mesh_cache")
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_mesh_path = cache_dir / f"{object_name}_{source_path.stem}_combined.obj"
         if cache_mesh_path.exists():
-            return str(cache_mesh_path)
+            try:
+                self._load_trimesh_file(cache_mesh_path, trimesh)
+                return str(cache_mesh_path)
+            except Exception as exc:
+                if strict:
+                    raise RuntimeError(
+                        f"Cached perception mesh is invalid: {cache_mesh_path}. "
+                        "Remove it explicitly if it was produced by an older exporter."
+                    ) from exc
+                return None
 
         try:
-            mesh = trimesh.load(str(source_path), process=False)
-        except Exception:
+            mesh = self._load_trimesh_file(str(source_path), trimesh)
+        except Exception as exc:
+            if strict:
+                raise RuntimeError(f"Failed to load scene asset mesh for perception: {source_path}") from exc
             return None
 
-        if isinstance(mesh, trimesh.Scene):
-            try:
-                mesh = mesh.dump(concatenate=True)
-            except Exception:
-                return None
-        if not hasattr(mesh, "vertices") or not hasattr(mesh, "faces"):
+        if not self._is_valid_trimesh(mesh, trimesh):
+            if strict:
+                raise RuntimeError(f"Scene asset mesh is empty for perception: {source_path}")
             return None
 
         try:
             mesh.export(str(cache_mesh_path))
-        except Exception:
+        except Exception as exc:
+            if strict:
+                raise RuntimeError(f"Failed to export scene asset perception mesh: {source_path}") from exc
             return None
         return str(cache_mesh_path)
 
@@ -2946,10 +3050,9 @@ class PerceptionManager:
                 if not os.path.exists(mesh_path):
                     continue
 
-                mesh = trimesh.load(mesh_path, process=False)
-                if isinstance(mesh, trimesh.Scene):
-                    mesh = mesh.dump(concatenate=True)
-                if not isinstance(mesh, trimesh.Trimesh):
+                try:
+                    mesh = self._load_trimesh_file(mesh_path, trimesh)
+                except Exception:
                     continue
 
                 verts = torch.as_tensor(mesh.vertices, dtype=torch.float32)
@@ -3027,10 +3130,9 @@ class PerceptionManager:
                     mesh_path = self._resolve_urdf_mesh_path(urdf_dir, asset_root, filename)
                     if not os.path.exists(mesh_path):
                         continue
-                    mesh = trimesh.load(mesh_path, process=False)
-                    if isinstance(mesh, trimesh.Scene):
-                        mesh = mesh.dump(concatenate=True)
-                    if not isinstance(mesh, trimesh.Trimesh):
+                    try:
+                        mesh = self._load_trimesh_file(mesh_path, trimesh)
+                    except Exception:
                         continue
                     scale = self._parse_urdf_vec3(mesh_tag.get("scale"), default=None)
                     if scale is not None:
