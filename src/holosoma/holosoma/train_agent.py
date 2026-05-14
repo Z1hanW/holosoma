@@ -609,12 +609,27 @@ def train(tyro_config: ExperimentConfig, training_context: TrainingContext | Non
         algo.setup()
 
         algo.attach_checkpoint_metadata(tyro_config, wandb_run_path)
+        if (
+            tyro_config.training.checkpoint is not None
+            and tyro_config.training.policy_init_checkpoint is not None
+        ):
+            raise ValueError("--training.checkpoint and --training.policy-init-checkpoint are mutually exclusive.")
         if tyro_config.training.checkpoint is not None:
             loaded_checkpoint = load_checkpoint(tyro_config.training.checkpoint, str(experiment_save_dir))
             tyro_config = dataclasses.replace(
                 tyro_config, training=dataclasses.replace(tyro_config.training, checkpoint=str(loaded_checkpoint))
             )
             algo.load(loaded_checkpoint)
+        elif tyro_config.training.policy_init_checkpoint is not None:
+            loaded_checkpoint = load_checkpoint(tyro_config.training.policy_init_checkpoint, str(experiment_save_dir))
+            tyro_config = dataclasses.replace(
+                tyro_config,
+                training=dataclasses.replace(
+                    tyro_config.training,
+                    policy_init_checkpoint=str(loaded_checkpoint),
+                ),
+            )
+            algo.load_policy_init(loaded_checkpoint)
 
         # handle saving config
         algo.learn()

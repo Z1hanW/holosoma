@@ -1972,6 +1972,30 @@ class PPO(BaseAlgo):
             return loaded_dict.get("infos")
         return None
 
+    def load_policy_init(self, ckpt_path: str | None) -> dict | None:
+        """Initialize only actor policy parameters from a checkpoint.
+
+        This intentionally does not restore critic, optimizers, observation
+        normalizers, iteration counters, or environment state.
+        """
+        if ckpt_path is None:
+            return None
+        logger.info(f"Initializing actor policy parameters from checkpoint: {ckpt_path}")
+        loaded_dict = torch.load(ckpt_path, map_location=self.device)
+        actor_state = loaded_dict.get("actor_model_state_dict")
+        if not isinstance(actor_state, dict):
+            raise KeyError(f"Checkpoint does not contain actor_model_state_dict: {ckpt_path}")
+        self.actor.load_state_dict(actor_state)
+        checkpoint_iter = loaded_dict.get("iter", loaded_dict.get("iteration", "<unknown>"))
+        logger.info(
+            "Loaded actor policy parameters from {}; ignored checkpoint iteration={}, critic, optimizers, "
+            "normalizers, and env_state. Training will start from iteration {}.",
+            ckpt_path,
+            checkpoint_iter,
+            self.current_learning_iteration,
+        )
+        return loaded_dict.get("infos")
+
     def save(self, path, infos=None):
         def normalizer_states(normalizers: dict[str, nn.Module]):
             states: dict[str, dict | None] = {}

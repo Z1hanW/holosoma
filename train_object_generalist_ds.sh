@@ -81,6 +81,7 @@ WANDB_RESUME=${WANDB_RESUME:-""}
 WANDB_RESUME_SAME_RUN=${WANDB_RESUME_SAME_RUN:-auto}
 WANDB_MODEL_FILE=${WANDB_MODEL_FILE:-${RESUME_MODEL_FILE:-""}}
 RESUME_CKPT=${RESUME_CKPT:-${RESUME_CHECKPOINT:-""}}
+POLICY_INIT_CKPT=${POLICY_INIT_CKPT:-${POLICY_INIT_CHECKPOINT:-""}}
 RESUME_STEP_RAW=${RESUME_STEP:-""}
 DS_DATA_ROOT=${DS_DATA_ROOT:-"${SCRIPT_DIR}/data/ds_box_data"}
 DS_DATA_ROOT="$(ogds_resolve_data_root "${DS_DATA_ROOT}")"
@@ -1880,6 +1881,10 @@ fi
 RESUME_WANDB_ENTITY=""
 RESUME_WANDB_PROJECT=""
 RESUME_WANDB_RUN_ID=""
+if [[ -n "${RESUME_CKPT}" && -n "${POLICY_INIT_CKPT}" ]]; then
+  echo "[ERROR] RESUME_CKPT and POLICY_INIT_CKPT are mutually exclusive." >&2
+  exit 1
+fi
 if [[ -n "${RESUME_CKPT}" ]]; then
   RESUME_SOURCE_REF="${RESUME_CKPT}"
   parsed_resume_ref="$(parse_wandb_reference "${RESUME_SOURCE_REF}" || true)"
@@ -1904,6 +1909,25 @@ else
   if [[ -n "${WANDB_RUN_ID}" || -n "${WANDB_RESUME}" ]]; then
     echo "[WARN] WANDB_RUN_ID/WANDB_RESUME is set without RESUME_CKPT. Training still starts without a model checkpoint, but W&B may attach to an existing run."
   fi
+fi
+if [[ -n "${POLICY_INIT_CKPT}" ]]; then
+  POLICY_INIT_SOURCE_REF="${POLICY_INIT_CKPT}"
+  parsed_policy_init_ref="$(parse_wandb_reference "${POLICY_INIT_SOURCE_REF}" || true)"
+  if [[ -n "${parsed_policy_init_ref}" ]]; then
+    LOCAL_WANDB_CKPT="$(resolve_local_checkpoint_from_wandb_ref "${POLICY_INIT_SOURCE_REF}")"
+    if [[ -n "${LOCAL_WANDB_CKPT}" && -f "${LOCAL_WANDB_CKPT}" ]]; then
+      POLICY_INIT_CKPT="${LOCAL_WANDB_CKPT}"
+      echo "[INFO] Resolved wandb policy init reference to local checkpoint: ${POLICY_INIT_CKPT}"
+    else
+      POLICY_INIT_CKPT="$(normalize_resume_checkpoint_ref "${POLICY_INIT_SOURCE_REF}")"
+    fi
+  fi
+
+  if [[ "${POLICY_INIT_CKPT}" != wandb://* ]] && [[ ! -f "${POLICY_INIT_CKPT}" ]]; then
+    echo "[ERROR] Policy init checkpoint not found: ${POLICY_INIT_CKPT}" >&2
+    exit 1
+  fi
+  echo "[INFO] Policy init checkpoint: ${POLICY_INIT_CKPT}"
 fi
 
 AUTO_ATTACH_WANDB_RUN=0
@@ -2394,6 +2418,9 @@ if [[ -n "${EFFECTIVE_SEQUENCE_NAME}" ]]; then
 fi
 if [[ -n "${RESUME_CKPT}" ]]; then
   train_cmd+=(--training.checkpoint="${RESUME_CKPT}")
+fi
+if [[ -n "${POLICY_INIT_CKPT}" ]]; then
+  train_cmd+=(--training.policy-init-checkpoint="${POLICY_INIT_CKPT}")
 fi
 if [[ "${CURRICULUM}" == "1" || "${CURRICULUM,,}" == "true" ]]; then
   echo "[INFO] Enabling w-object curriculum."

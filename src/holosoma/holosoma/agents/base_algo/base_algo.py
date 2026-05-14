@@ -38,6 +38,9 @@ class BaseAlgo:
     def load(self, path):
         return NotImplementedError
 
+    def load_policy_init(self, path):
+        return NotImplementedError
+
     @property
     def inference_model(self):
         return NotImplementedError

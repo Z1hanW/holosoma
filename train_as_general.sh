@@ -29,8 +29,9 @@ POLICY_HISTORY_LENGTH=${POLICY_HISTORY_LENGTH:-${HISTORY_LENGTH:-5}}
 #   SAVE_INTERVAL
 #   POLICY_HISTORY_LENGTH / HISTORY_LENGTH
 #   RESUME_FROM_BOX=1
-#     Resume from the no-history boxer/omomo+dsall checkpoint, while keeping
-#     this launcher's AS motion/object bank.
+#     Initialize actor policy parameters from the no-history boxer/omomo+dsall
+#     checkpoint, while keeping this launcher's AS motion/object bank and
+#     starting training from iteration 0.
 #   BOX_RESUME_CKPT
 #     Explicit .pt checkpoint used by RESUME_FROM_BOX.
 TRAINING_SEED=${TRAINING_SEED:-${SEED:-}}
@@ -132,12 +133,14 @@ if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
     exit 2
   fi
   if [[ -n "${RESUME_CKPT:-}" || -n "${RESUME_CHECKPOINT:-}" ]]; then
-    echo "[ERROR] RESUME_FROM_BOX owns the resume checkpoint. Use BOX_RESUME_CKPT to override it." >&2
+    echo "[ERROR] RESUME_FROM_BOX uses BOX_RESUME_CKPT as a policy initializer; do not also set RESUME_CKPT/RESUME_CHECKPOINT." >&2
     exit 2
   fi
-  export RESUME_CKPT="${BOX_RESUME_CKPT}"
+  export POLICY_INIT_CKPT="${BOX_RESUME_CKPT}"
+  unset RESUME_CKPT
+  unset RESUME_CHECKPOINT
   export WANDB_RESUME_SAME_RUN=0
-  SEQUENCE_NAME=${SEQUENCE_NAME:-as-general-real-mesh-cotrack-resume-box}
+  SEQUENCE_NAME=${SEQUENCE_NAME:-as-general-real-mesh-cotrack-init-box}
 fi
 
 OBJECT_SPAWN_MODE=${OBJECT_SPAWN_MODE:-${HOLOSOMA_OBJECT_SPAWN_MODE:-single_slot_multi_urdf}}
@@ -375,7 +378,7 @@ echo "[INFO] OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH}"
 echo "[INFO] REWARD_CONFIG=${REWARD_CONFIG}"
 echo "[INFO] RESUME_FROM_BOX=${RESUME_FROM_BOX}"
 if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
-  echo "[INFO] BOX_RESUME_CKPT=${RESUME_CKPT}"
+  echo "[INFO] BOX_POLICY_INIT_CKPT=${POLICY_INIT_CKPT}"
 fi
 echo "[INFO] POLICY_HISTORY_LENGTH=${POLICY_HISTORY_LENGTH}"
 echo "[INFO] HOLOSOMA_OBJECT_SPAWN_MODE=${HOLOSOMA_OBJECT_SPAWN_MODE}"

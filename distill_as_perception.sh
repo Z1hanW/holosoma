@@ -34,9 +34,12 @@ If no teacher checkpoint is passed, the default teacher is the latest model
 from:
   https://wandb.ai/zihanw22/carry-any/runs/gml45u7p
 
-With RESUME_FROM_BOX=1, the student policy is initialized from the latest
+With RESUME_FROM_BOX=1, the student policy parameters are initialized from the
 checkpoint in:
   https://wandb.ai/zihanw22/boxer/runs/6c7exbeq
+Training still starts from iteration 0 with a new/current run; only actor
+policy parameters are loaded, not optimizer, critic, env state, or W&B resume
+state.
 and the motion/contact bank switches to the repo-local keep169 AS bank with
 retargeted contact sidecars. Run ./cp_as.sh first to copy them from NFS:
   data/ds_as_data/carryany_filter_scale_noscale_keep169_20260513
@@ -282,6 +285,11 @@ if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
       exit 2
       ;;
   esac
+  if [[ -n "${RESUME_CKPT:-}" || -n "${RESUME_CHECKPOINT:-}" ]]; then
+    echo "[ERROR] RESUME_FROM_BOX initializes policy parameters only; do not also set RESUME_CKPT/RESUME_CHECKPOINT." >&2
+    echo "[ERROR] Use BOX_RESUME_CKPT to choose the box policy initializer." >&2
+    exit 2
+  fi
 else
   OMOMO_DATA_DIR=${OMOMO_DATA_DIR:-"${SCRIPT_DIR}/data/ds_as_data/omomo"}
   OMOMO_OBJECT_MAP=${OMOMO_OBJECT_MAP:-"${OMOMO_DATA_DIR}/_clip_object_urdf_map.json"}
@@ -599,7 +607,9 @@ PY
       )
       ;;
   esac
-  export RESUME_CKPT="${BOX_RESUME_CKPT}"
+  export POLICY_INIT_CKPT="${BOX_RESUME_CKPT}"
+  unset RESUME_CKPT
+  unset RESUME_CHECKPOINT
   export CONTACT_EXPORT_ROOT
   export ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT="${CONTACT_EXPORT_CLIPS_ROOT}"
 fi
@@ -639,8 +649,8 @@ export SCHEDULE_VARIANT="${SCHEDULE_VARIANT:-ppo_first}"
 
 if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
   export EXP="${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-contact}"
-  export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_keep169_perception_resume_box}"
-  export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_keep169_perception_resume_box}"
+  export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_keep169_perception_init_box}"
+  export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_keep169_perception_init_box}"
 else
   export EXP="${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd}"
   export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_perception}"
@@ -651,8 +661,8 @@ export PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
 if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
   export ROOT_COMMAND_MODE="${ROOT_COMMAND_MODE:-contact-aware}"
   export STUDENT_ACTOR_INPUTS="${STUDENT_ACTOR_INPUTS:-['actor_obs_root_contact_aware','actor_obs_proprio_with_actions_no_linvel']}"
-  export SCHEDULE_NAME="${SCHEDULE_NAME:-as_keep169_resume_box_sparse_root_ppo_first_contact}"
-  export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS keep169 real-mesh perception distill initialized from the latest zihanw22/boxer/6c7exbeq checkpoint. Keeps the resumed contact-aware student actor inputs, uses retarget-exported left/right wrist contact sidecars for offline contact guidance and adaptive contact-window sampling, and keeps the PPO+DAgger hybrid active from iteration 0.}"
+  export SCHEDULE_NAME="${SCHEDULE_NAME:-as_keep169_init_box_sparse_root_ppo_first_contact}"
+  export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS keep169 real-mesh perception distill initialized from actor policy parameters in zihanw22/boxer/6c7exbeq. Training starts from iteration 0 with current AS data/contact/schedule, uses retarget-exported left/right wrist contact sidecars for offline contact guidance and adaptive contact-window sampling, and keeps the PPO+DAgger hybrid active from iteration 0.}"
 else
   export STUDENT_ACTOR_INPUTS="${STUDENT_ACTOR_INPUTS:-['actor_obs_root','actor_obs_proprio','actor_obs_actions']}"
   export SCHEDULE_NAME="${SCHEDULE_NAME:-as_real_mesh_sparse_root_ppo_first_step_mix}"
@@ -663,7 +673,7 @@ echo "[INFO] Launching AS/OMOMO real-mesh perception distillation"
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
 echo "[INFO] resume_from_box=${RESUME_FROM_BOX}"
 if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
-  echo "[INFO] student_resume_checkpoint=${RESUME_CKPT}"
+  echo "[INFO] student_policy_init_checkpoint=${POLICY_INIT_CKPT}"
   echo "[INFO] contact_export_root=${CONTACT_EXPORT_ROOT}"
   echo "[INFO] adaptive_sampling_contact_interval_root=${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}"
 fi

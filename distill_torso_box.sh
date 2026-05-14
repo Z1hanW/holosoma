@@ -206,13 +206,22 @@ RUN_NAME=${RUN_NAME:-g1_w_object_distill_sparse_root_cmd}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_sparse_root_cmd}
 TRAINING_PROJECT=${TRAINING_PROJECT:-boxer}
 RESUME_CKPT=${RESUME_CKPT:-${RESUME_CHECKPOINT:-}}
+POLICY_INIT_CKPT=${POLICY_INIT_CKPT:-${POLICY_INIT_CHECKPOINT:-}}
 
 if [[ "${TEACHER_CHECKPOINT}" != wandb://* ]] && [[ ! -f "${TEACHER_CHECKPOINT}" ]]; then
   echo "Teacher checkpoint not found: ${TEACHER_CHECKPOINT}" >&2
   exit 1
 fi
+if [[ -n "${RESUME_CKPT}" && -n "${POLICY_INIT_CKPT}" ]]; then
+  echo "RESUME_CKPT and POLICY_INIT_CKPT are mutually exclusive." >&2
+  exit 1
+fi
 if [[ -n "${RESUME_CKPT}" && "${RESUME_CKPT}" != wandb://* && ! -f "${RESUME_CKPT}" ]]; then
   echo "Resume checkpoint not found: ${RESUME_CKPT}" >&2
+  exit 1
+fi
+if [[ -n "${POLICY_INIT_CKPT}" && "${POLICY_INIT_CKPT}" != wandb://* && ! -f "${POLICY_INIT_CKPT}" ]]; then
+  echo "Policy init checkpoint not found: ${POLICY_INIT_CKPT}" >&2
   exit 1
 fi
 if [[ ! -e "${MOTION_DIR}" ]]; then
@@ -238,6 +247,9 @@ done
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
 if [[ -n "${RESUME_CKPT}" ]]; then
   echo "[INFO] resume_checkpoint=${RESUME_CKPT}"
+fi
+if [[ -n "${POLICY_INIT_CKPT}" ]]; then
+  echo "[INFO] policy_init_checkpoint=${POLICY_INIT_CKPT}"
 fi
 echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS} strict_teacher_load=${STRICT_TEACHER_LOAD}"
 echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} dagger_loss_coef=${DAGGER_LOSS_COEF} teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
@@ -335,6 +347,9 @@ run_distill_stage() {
 
   if [[ -n "${stage_resume_checkpoint}" ]]; then
     cmd+=(--training.checkpoint "${stage_resume_checkpoint}")
+  fi
+  if [[ -n "${POLICY_INIT_CKPT}" ]]; then
+    cmd+=(--training.policy-init-checkpoint "${POLICY_INIT_CKPT}")
   fi
   if [[ -n "${stage_switch_to_rl_after}" ]]; then
     cmd+=(--algo.config.distill.switch-to-rl-after="${stage_switch_to_rl_after}")

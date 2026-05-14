@@ -73,6 +73,9 @@ class TrainingConfig:
     checkpoint: str | None = None
     """Path to checkpoint for resuming training."""
 
+    policy_init_checkpoint: str | None = None
+    """Path to checkpoint used only to initialize actor policy parameters before training from iteration 0."""
+
     # Logging settings
     project: str = "default_project"
     """Project name for logging. `logger.project` takes precedence if set."""
