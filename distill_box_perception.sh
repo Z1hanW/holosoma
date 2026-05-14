@@ -893,6 +893,7 @@ FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITE
 FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER:-}
 USE_ADAPTIVE_TIMESTEPS_SAMPLER=${USE_ADAPTIVE_TIMESTEPS_SAMPLER:-False}
 ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT=${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT:-"${SCRIPT_DIR}/outputs/clips"}
+CONTACT_EXPORT_ROOT=${CONTACT_EXPORT_ROOT:-${TEACHER_ROLLOUT_REFERENCE_ROOT:-}}
 CONTACT_AWARE_CARRY_WINDOW_MODE=${CONTACT_AWARE_CARRY_WINDOW_MODE:-rel_z}
 CONTACT_AWARE_PEAK_HEIGHT_ALPHA=${CONTACT_AWARE_PEAK_HEIGHT_ALPHA:-0.91}
 CONTACT_AWARE_PEAK_HEIGHT_SMOOTHING_STEPS=${CONTACT_AWARE_PEAK_HEIGHT_SMOOTHING_STEPS:-5}
@@ -1441,6 +1442,9 @@ fi
 echo "[INFO] fixed_bc_eval_log_interval=${FIXED_BC_EVAL_LOG_INTERVAL}"
 echo "[INFO] use_adaptive_timesteps_sampler=${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
 echo "[INFO] adaptive_sampling_contact_interval_root=${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}"
+if [[ -n "${CONTACT_EXPORT_ROOT}" ]]; then
+  echo "[INFO] contact_export_root=${CONTACT_EXPORT_ROOT}"
+fi
 echo "[INFO] uniform_t1_window_sampling=${UNIFORM_T1_WINDOW_SAMPLING_ENABLED} half_width=${UNIFORM_T1_WINDOW_HALF_WIDTH_STEPS} density_boost=${UNIFORM_T1_WINDOW_DENSITY_BOOST}"
 echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}->${START_AT_TIMESTEP_ZERO_PROB_END} iter=${START_AT_TIMESTEP_ZERO_PROB_START_ITER}->${START_AT_TIMESTEP_ZERO_PROB_END_ITER}"
 echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END} iter=${FREEZE_AT_TIMESTEP_ZERO_PROB_START_ITER}->${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER}"
@@ -1505,6 +1509,12 @@ if [[ "${DATA_MODE}" == "pure-real" ]]; then
     --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.clean-clip-name-prefixes="${PURE_REAL_OMOMO_PREFIXES}"
     --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.stage-start-iterations='[0]'
     --command.setup-terms.motion-command.params.motion-config.clean-noisy-clip-curriculum.clean-group-probabilities='[1.0]'
+  )
+fi
+if [[ -n "${CONTACT_EXPORT_ROOT}" ]]; then
+  EXTRA_DISTILL_ARGS+=(
+    --reward.terms.offline-wrist-target-guidance.params.contact-export-root "${CONTACT_EXPORT_ROOT}"
+    --reward.terms.offline-contact-guidance.params.contact-export-root "${CONTACT_EXPORT_ROOT}"
   )
 fi
 
@@ -1611,6 +1621,7 @@ exec env \
   HOLOSOMA_OBJECT_BANK_OMOMO_UNIQUE_URDF_COUNT="${HOLOSOMA_OBJECT_BANK_OMOMO_UNIQUE_URDF_COUNT:-}" \
   HOLOSOMA_OBJECT_BANK_MOTION_DIR="${HOLOSOMA_OBJECT_BANK_MOTION_DIR:-}" \
   HOLOSOMA_OBJECT_BANK_OBJECT_MAP="${HOLOSOMA_OBJECT_BANK_OBJECT_MAP:-}" \
+  CONTACT_EXPORT_ROOT="${CONTACT_EXPORT_ROOT}" \
   "${OBJECT_GEOMETRY_MODE_ENV[@]}" \
   bash "${SCRIPT_DIR}/distill_root_box.sh" "${TEACHER_CHECKPOINT}" \
     "perception:${PERCEPTION_PRESET}" \

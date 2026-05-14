@@ -200,9 +200,14 @@ LOGGER=${LOGGER:-logger:wandb}
 RUN_NAME=${RUN_NAME:-g1_w_object_distill_sparse_root_cmd}
 TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_sparse_root_cmd}
 TRAINING_PROJECT=${TRAINING_PROJECT:-boxer}
+RESUME_CKPT=${RESUME_CKPT:-${RESUME_CHECKPOINT:-}}
 
 if [[ "${TEACHER_CHECKPOINT}" != wandb://* ]] && [[ ! -f "${TEACHER_CHECKPOINT}" ]]; then
   echo "Teacher checkpoint not found: ${TEACHER_CHECKPOINT}" >&2
+  exit 1
+fi
+if [[ -n "${RESUME_CKPT}" && "${RESUME_CKPT}" != wandb://* && ! -f "${RESUME_CKPT}" ]]; then
+  echo "Resume checkpoint not found: ${RESUME_CKPT}" >&2
   exit 1
 fi
 if [[ ! -e "${MOTION_DIR}" ]]; then
@@ -226,6 +231,9 @@ for arg in "${EXTRA_ARGS[@]}"; do
 done
 
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
+if [[ -n "${RESUME_CKPT}" ]]; then
+  echo "[INFO] resume_checkpoint=${RESUME_CKPT}"
+fi
 echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS} strict_teacher_load=${STRICT_TEACHER_LOAD}"
 echo "[INFO] bc_loss_coef=${BC_LOSS_COEF} dagger_loss_coef=${DAGGER_LOSS_COEF} teacher_action_mix_ratio=${TEACHER_ACTION_MIX_RATIO}"
 if [[ -n "${TEACHER_ACTION_MIX_RATIO_START}" || -n "${TEACHER_ACTION_MIX_RATIO_END}" || -n "${TEACHER_ACTION_MIX_RATIO_END_ITERATION}" ]]; then
@@ -366,7 +374,7 @@ run_distill_stage \
   "${RUN_NAME}" \
   "${TRAINING_NAME}" \
   "${MASTER_PORT}" \
-  "" \
+  "${RESUME_CKPT}" \
   "${SWITCH_TO_RL_AFTER}" \
   "${START_AT_TIMESTEP_ZERO_PROB}" \
   "${RESET_NOISE_SCALE}"

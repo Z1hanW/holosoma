@@ -16,6 +16,10 @@ set -euo pipefail
 #     (space-separated bank names under NFS_AS_ROOT, or absolute paths)
 #   LOCAL_AS_ROOT=data/ds_as_data
 #   OUTPUT_BANK_NAME=carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout
+#   COPY_KEEP_BANK=1
+#     Also install the primary keep bank locally at
+#     data/ds_as_data/carryany_filter_scale_noscale_keep169_20260513, including
+#     contact_export_from_retarget, so training/distillation do not read NFS.
 #   DEDUPE_IDENTICAL=0
 #   DRY_RUN=1
 
@@ -31,6 +35,10 @@ LOCAL_AS_ROOT=${LOCAL_AS_ROOT:-"data/ds_as_data"}
 OUTPUT_BANK_NAME=${OUTPUT_BANK_NAME:-"${DEFAULT_OUTPUT_BANK}"}
 DRY_RUN=${DRY_RUN:-0}
 DEDUPE_IDENTICAL=${DEDUPE_IDENTICAL:-0}
+COPY_KEEP_BANK=${COPY_KEEP_BANK:-1}
+KEEP_BANK_NAME=${KEEP_BANK_NAME:-"${DEFAULT_AS_BANK}"}
+KEEP_CONTACT_EXPORT_NAME=${KEEP_CONTACT_EXPORT_NAME:-contact_export_from_retarget}
+KEEP_EXPECTED_TOTAL=${KEEP_EXPECTED_TOTAL:-169}
 
 EXPECTED_LOCAL_ROOT=$(python3 - "${SCRIPT_DIR}/data/ds_as_data" <<'PY'
 from pathlib import Path
@@ -58,7 +66,7 @@ if [[ "${OUTPUT_BANK_NAME}" == "" || "${OUTPUT_BANK_NAME}" == "." || "${OUTPUT_B
   exit 2
 fi
 
-python3 - "${NFS_AS_ROOT}" "${NFS_AS_SOURCES}" "${LOCAL_AS_ROOT}" "${OUTPUT_BANK_NAME}" "${DRY_RUN}" "${DEDUPE_IDENTICAL}" <<'PY'
+python3 - "${NFS_AS_ROOT}" "${NFS_AS_SOURCES}" "${LOCAL_AS_ROOT}" "${OUTPUT_BANK_NAME}" "${DRY_RUN}" "${DEDUPE_IDENTICAL}" "${COPY_KEEP_BANK}" "${KEEP_BANK_NAME}" "${KEEP_CONTACT_EXPORT_NAME}" "${KEEP_EXPECTED_TOTAL}" <<'PY'
 from __future__ import annotations
 
 import hashlib
@@ -213,6 +221,88 @@ def validate_bank(out_dir: Path, clips: dict[str, dict]) -> None:
         raise SystemExit("[ERROR] AS bank validation failed:\n  " + "\n  ".join(bad[:30]))
 
 
+def validate_keep_bank_copy(
+    out_dir: Path,
+    *,
+    expected_total: int,
+    contact_export_name: str,
+) -> None:
+    map_path = out_dir / "_clip_object_urdf_map.json"
+    if not out_dir.is_dir():
+        raise SystemExit(f"[ERROR] Keep bank copy is not a directory: {out_dir}")
+    if not map_path.is_file():
+        raise SystemExit(f"[ERROR] Keep bank copy missing object map: {map_path}")
+
+    npz_paths = sorted(out_dir.glob("*.npz"))
+    if expected_total > 0 and len(npz_paths) != expected_total:
+        raise SystemExit(f"[ERROR] Expected {expected_total} keep .npz clips in {out_dir}, found {len(npz_paths)}")
+    if not npz_paths:
+        raise SystemExit(f"[ERROR] No .npz clips found in keep bank copy: {out_dir}")
+
+    _, clips = load_clip_map(map_path)
+    clip_ids = {path.stem for path in npz_paths}
+    map_ids = set(clips)
+    if clip_ids != map_ids:
+        raise SystemExit(
+            f"[ERROR] Keep bank map mismatch: missing_map={sorted(clip_ids - map_ids)[:10]} "
+            f"missing_npz={sorted(map_ids - clip_ids)[:10]}"
+        )
+
+    contact_root = out_dir / contact_export_name
+    clips_root = contact_root / "clips"
+    if not clips_root.is_dir():
+        raise SystemExit(f"[ERROR] Keep bank copy missing contact sidecar clips: {clips_root}")
+    contact_clip_dirs = sorted(path for path in clips_root.iterdir() if path.is_dir())
+    if expected_total > 0 and len(contact_clip_dirs) != expected_total:
+        raise SystemExit(
+            f"[ERROR] Expected {expected_total} contact sidecar clip dirs in {clips_root}, "
+            f"found {len(contact_clip_dirs)}"
+        )
+
+    required_contact_files = (
+        "metadata.json",
+        "left_wrist_contact_points.npy",
+        "left_wrist_contact_point_counts.npy",
+        "left_wrist_contact_interval_steps.npy",
+        "right_wrist_contact_points.npy",
+        "right_wrist_contact_point_counts.npy",
+        "right_wrist_contact_interval_steps.npy",
+    )
+    bad: list[str] = []
+    contact_ids: set[str] = set()
+    for clip_dir in contact_clip_dirs:
+        metadata_path = clip_dir / "metadata.json"
+        clip_id = ""
+        if metadata_path.is_file():
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                clip_id = str(metadata.get("clip_id", "")).strip()
+            except Exception as exc:
+                bad.append(f"{clip_dir.name}: invalid metadata.json: {exc}")
+        if not clip_id:
+            clip_id = clip_dir.name.split("_", 1)[1].strip() if "_" in clip_dir.name else clip_dir.name.strip()
+        contact_ids.add(clip_id)
+        for file_name in required_contact_files:
+            if not (clip_dir / file_name).is_file():
+                bad.append(f"{clip_id}: missing {file_name}")
+
+    missing_contacts = sorted(clip_ids.difference(contact_ids))
+    if missing_contacts:
+        bad.append(f"missing contact sidecars for active clips: {', '.join(missing_contacts[:10])}")
+
+    symlink_preview = [str(path) for path in contact_root.rglob("*") if path.is_symlink()][:10]
+    if symlink_preview:
+        bad.append("contact sidecar contains symlinks: " + ", ".join(symlink_preview))
+
+    if bad:
+        raise SystemExit("[ERROR] Keep contact sidecar validation failed:\n  " + "\n  ".join(bad[:30]))
+
+    print(
+        f"[INFO] Validated local keep bank copy: {out_dir} "
+        f"({len(npz_paths)} clips, contact_sidecars={len(contact_clip_dirs)}, no contact symlinks)"
+    )
+
+
 def copy_external_urdf_bundle(
     object_urdf: str,
     object_mesh: str,
@@ -346,6 +436,10 @@ local_root = Path(sys.argv[3]).expanduser()
 output_bank_name = sys.argv[4]
 dry_run = is_truthy(sys.argv[5])
 dedupe_identical = is_truthy(sys.argv[6])
+copy_keep_bank = is_truthy(sys.argv[7])
+keep_bank_name = sys.argv[8]
+keep_contact_export_name = sys.argv[9]
+keep_expected_total = int(sys.argv[10]) if sys.argv[10].strip() else 0
 
 sources = []
 source_searches: dict[Path, list[Path]] = {}
@@ -364,9 +458,11 @@ for source in sources:
         raise SystemExit(f"[ERROR] No .npz clips in source: {source}")
 
 out_dir = local_root / output_bank_name
+keep_out_dir = local_root / keep_bank_name
 tmp_parent = local_root
 tmp_parent.mkdir(parents=True, exist_ok=True)
 tmp_dir = Path(tempfile.mkdtemp(prefix=f".{output_bank_name}.tmp.", dir=tmp_parent))
+keep_tmp_dir: Path | None = None
 
 clips_out: dict[str, dict] = {}
 source_records: list[dict] = []
@@ -374,6 +470,7 @@ seen_by_name: dict[str, tuple[str, dict, str]] = {}
 copied_object_dirs: set[str] = set()
 deduped = 0
 prefixed = 0
+keep_source = next((source for source in sources if source.name == keep_bank_name), None)
 
 try:
     objects_out = tmp_dir / "objects"
@@ -514,10 +611,27 @@ try:
     )
     validate_bank(tmp_dir, clips_out)
 
+    if copy_keep_bank:
+        if keep_source is None:
+            raise SystemExit(
+                f"[ERROR] COPY_KEEP_BANK=1 but keep source '{keep_bank_name}' is not present in NFS_AS_SOURCES"
+            )
+        if keep_out_dir == out_dir:
+            raise SystemExit(f"[ERROR] Keep bank output collides with union bank output: {keep_out_dir}")
+        keep_tmp_dir = Path(tempfile.mkdtemp(prefix=f".{keep_bank_name}.tmp.", dir=tmp_parent))
+        shutil.copytree(keep_source, keep_tmp_dir, symlinks=False, dirs_exist_ok=True)
+        validate_keep_bank_copy(
+            keep_tmp_dir,
+            expected_total=keep_expected_total,
+            contact_export_name=keep_contact_export_name,
+        )
+
     print(f"[INFO] Built AS local union bank: {tmp_dir}")
     print(f"[INFO]   sources={len(sources)} output_clips={len(clips_out)} deduped={deduped} prefixed_conflicts={prefixed}")
     if dry_run:
         print(f"[DRY_RUN] Would replace: {out_dir}")
+        if copy_keep_bank:
+            print(f"[DRY_RUN] Would replace keep bank: {keep_out_dir}")
     else:
         if out_dir.exists():
             shutil.rmtree(out_dir)
@@ -526,7 +640,17 @@ try:
         tmp_dir = None
         print(f"[INFO] Installed AS bank: {out_dir}")
         print(f"[INFO] Use: AS_DATA_DIR={out_dir} bash train_as_general.sh")
+        if copy_keep_bank and keep_tmp_dir is not None:
+            if keep_out_dir.exists():
+                shutil.rmtree(keep_out_dir)
+            keep_out_dir.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(keep_tmp_dir, keep_out_dir)
+            keep_tmp_dir = None
+            print(f"[INFO] Installed local AS keep bank with contacts: {keep_out_dir}")
+            print(f"[INFO] Contact root: {keep_out_dir / keep_contact_export_name}")
 finally:
     if tmp_dir is not None and tmp_dir.exists():
         shutil.rmtree(tmp_dir)
+    if keep_tmp_dir is not None and keep_tmp_dir.exists():
+        shutil.rmtree(keep_tmp_dir)
 PY
