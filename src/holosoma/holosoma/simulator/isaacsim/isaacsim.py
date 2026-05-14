@@ -97,6 +97,13 @@ _OBJECT_CONTACT_REWARD_FUNC_PATHS = frozenset(
 )
 
 
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _repo_root_from_holosoma_package() -> pathlib.Path:
     return pathlib.Path(get_holosoma_root()).resolve().parents[2]
 
@@ -1047,7 +1054,7 @@ class IsaacSim(BaseSimulator):
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(),
             mass_props=sim_utils.MassPropertiesCfg(mass=metadata.mass),
-            activate_contact_sensors=True,
+            activate_contact_sensors=_env_flag("HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS", default=True),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
                 retain_accelerations=False,
@@ -1100,7 +1107,7 @@ class IsaacSim(BaseSimulator):
             collider_type=collider_type,
             asset_path=object_asset_urdf_path,
             scale=object_scale,
-            activate_contact_sensors=True,
+            activate_contact_sensors=_env_flag("HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS", default=True),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
                 retain_accelerations=False,
@@ -1442,7 +1449,7 @@ class IsaacSim(BaseSimulator):
                 multi_asset_cfg = sim_utils.MultiAssetSpawnerCfg(
                     assets_cfg=object_assets_cfg,
                     random_choice=False,
-                    activate_contact_sensors=True,
+                    activate_contact_sensors=_env_flag("HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS", default=True),
                 )
                 object_cfg = RigidObjectCfg(
                     prim_path="/World/envs/env_.*/Object",

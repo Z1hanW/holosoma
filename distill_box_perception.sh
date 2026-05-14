@@ -1076,7 +1076,9 @@ if [[ -n "${OBJECT_GEOMETRY_MODE}" ]]; then
       ;;
     0|false|no|off|mesh|urdf|disable|disabled)
       OBJECT_GEOMETRY_MODE_NORM="mesh"
-      HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE="urdf"
+      if [[ -z "${HOLOSOMA_OBJECT_SPAWN_MODE:-}" ]]; then
+        HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE="urdf"
+      fi
       PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE="mesh"
       ;;
     *)
@@ -1391,7 +1393,8 @@ if [[ -n "${CAMERA_FAR}" || -n "${CAMERA_MAX_DISTANCE}" ]]; then
 fi
 echo "[INFO] camera_apply_sensor_noise=${CAMERA_APPLY_SENSOR_NOISE}"
 if [[ -n "${OBJECT_GEOMETRY_MODE_NORM}" ]]; then
-  echo "[INFO] object_geometry_mode=${OBJECT_GEOMETRY_MODE_NORM} simulator_object_spawn_mode=${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE}"
+  SIMULATOR_OBJECT_SPAWN_MODE="${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE:-${HOLOSOMA_OBJECT_SPAWN_MODE:-<inherited>}}"
+  echo "[INFO] object_geometry_mode=${OBJECT_GEOMETRY_MODE_NORM} simulator_object_spawn_mode=${SIMULATOR_OBJECT_SPAWN_MODE}"
 else
   echo "[INFO] object_geometry_mode=<default>"
 fi
