@@ -1441,6 +1441,19 @@ class IsaacSim(BaseSimulator):
             self._object_urdf_by_name = {}
             self._env_object_urdf_paths = []
             self._object_contact_filter_prim_paths_expr = []
+            require_single_slot_objects = _env_flag("HOLOSOMA_REQUIRE_SINGLE_SLOT_OBJECTS", default=False)
+            if (
+                require_single_slot_objects
+                and len(object_specs) > 1
+                and not (
+                    self._heterogeneous_object_env_assignment
+                    and self._heterogeneous_object_single_slot_enabled
+                )
+            ):
+                raise RuntimeError(
+                    "HOLOSOMA_REQUIRE_SINGLE_SLOT_OBJECTS=1 requires object_slots_per_env=1. "
+                    f"Resolved {len(object_specs)} object URDFs, but heterogeneous single-slot spawning is disabled."
+                )
             if self._heterogeneous_object_env_assignment and self._heterogeneous_object_single_slot_enabled:
                 object_assets_cfg = [
                     self._build_object_spawn_cfg(object_asset_urdf_path, object_scale=object_scale)
@@ -1466,12 +1479,17 @@ class IsaacSim(BaseSimulator):
                     num_envs=self.training_config.num_envs,
                 )
                 self._append_object_contact_filter_paths("Object", object_specs[0][1])
+                rank_sharding = os.environ.get("HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK", "").strip().lower()
+                rank_sharding_enabled = rank_sharding in {"1", "true", "yes", "on"}
                 logger.info(
-                    "Object generalist spawning topology: object_slots_per_env=1 unique_urdfs={} "
-                    "object_actors_per_rank={} legacy_object_actors_if_banked={}.",
+                    "Object generalist spawning topology: object_slots_per_env=1 unique_urdfs_this_rank={} "
+                    "object_actors_per_rank={} legacy_object_actors_if_banked={} replicate_physics={} "
+                    "rank_sharding={}.",
                     len(object_specs),
                     self.training_config.num_envs,
                     self.training_config.num_envs * len(object_specs),
+                    bool(self.scene.cfg.replicate_physics),
+                    rank_sharding_enabled,
                 )
                 logger.info(
                     "Loaded heterogeneous training object bank: {} unique URDF(s) assigned across {} envs.",
@@ -1495,6 +1513,12 @@ class IsaacSim(BaseSimulator):
                     self._object_urdf_by_name[object_name] = str(pathlib.Path(object_asset_urdf_path).resolve())
                     self._append_object_contact_filter_paths(prim_suffix, object_asset_urdf_path)
 
+                if use_single_name:
+                    self._env_object_urdf_paths = self._build_env_object_urdf_assignment(
+                        object_specs,
+                        num_envs=self.training_config.num_envs,
+                    )
+
                 logger.info(
                     "Object generalist spawning topology: object_slots_per_env={} unique_urdfs={} "
                     "object_actors_per_rank={}.",
@@ -1502,6 +1526,15 @@ class IsaacSim(BaseSimulator):
                     len(object_specs),
                     self.training_config.num_envs * len(object_specs),
                 )
+                if len(object_specs) > 8:
+                    logger.warning(
+                        "Legacy per-asset URDF object spawning creates num_envs * num_unique_urdfs actors "
+                        "({} * {} = {}). This can OOM for mixed-object datasets; prefer "
+                        "HOLOSOMA_OBJECT_SPAWN_MODE=single_slot_multi_urdf.",
+                        self.training_config.num_envs,
+                        len(object_specs),
+                        self.training_config.num_envs * len(object_specs),
+                    )
                 logger.info(
                     "Loaded {} training object URDF(s): {}",
                     len(self._object_urdf_by_name),

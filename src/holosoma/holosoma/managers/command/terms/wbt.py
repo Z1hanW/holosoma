@@ -2181,6 +2181,14 @@ class MotionCommand(CommandTermBase):
 
         env_object_urdf_paths = getattr(self._env.simulator, "_env_object_urdf_paths", None)
         if not isinstance(env_object_urdf_paths, list) or not env_object_urdf_paths:
+            require_single_slot_objects = os.environ.get(
+                "HOLOSOMA_REQUIRE_SINGLE_SLOT_OBJECTS", ""
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if require_single_slot_objects:
+                raise RuntimeError(
+                    "HOLOSOMA_REQUIRE_SINGLE_SLOT_OBJECTS=1 requires simulator._env_object_urdf_paths "
+                    "so AS envs can be pinned to matching object clips."
+                )
             return
         if len(env_object_urdf_paths) != self.num_envs:
             raise RuntimeError(
@@ -2230,6 +2238,21 @@ class MotionCommand(CommandTermBase):
                 "Fixed env-to-clip assignment requires every env object URDF to appear in the motion bank. "
                 f"Unmatched env count={len(unmatched_env_ids)} sample env ids={sample_env_ids} "
                 f"sample urdfs={sample_urdfs}"
+            )
+
+        mismatched_envs: list[tuple[int, str, str]] = []
+        fixed_clip_ids_cpu = fixed_clip_ids.detach().to(device="cpu").tolist()
+        for env_id, clip_idx in enumerate(fixed_clip_ids_cpu):
+            env_key = self._normalize_path_key(env_object_urdf_paths[env_id])
+            clip_key = self._normalize_path_key(clip_object_urdfs[int(clip_idx)])
+            if env_key != clip_key:
+                mismatched_envs.append((env_id, env_key, clip_key))
+                if len(mismatched_envs) >= 8:
+                    break
+        if mismatched_envs:
+            raise RuntimeError(
+                "Fixed env-to-clip assignment produced object/clip URDF mismatches. "
+                f"Samples: {mismatched_envs}"
             )
 
         self._fixed_clip_ids = fixed_clip_ids
