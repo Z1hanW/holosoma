@@ -40,6 +40,180 @@ This launcher always uses the repo-local AS/OMOMO real-mesh bank by default:
 EOF
 }
 
+is_checkpoint_ref() {
+  local ref="$1"
+  [[ "${ref}" == wandb://* || "${ref}" == https://wandb.ai/*/runs/* || "${ref}" == http://wandb.ai/*/runs/* || "${ref}" == wandb.ai/*/runs/* || "${ref}" == /* || "${ref}" == ./* || "${ref}" == ../* || "${ref}" == *.pt ]]
+}
+
+canonicalize_wandb_run_url_ref() {
+  local ref="$1"
+  if [[ "${ref}" == wandb.ai/*/runs/* ]]; then
+    echo "https://${ref}"
+  elif [[ "${ref}" == http://wandb.ai/*/runs/* ]]; then
+    echo "https://${ref#http://}"
+  else
+    echo "${ref}"
+  fi
+}
+
+parse_wandb_run_url() {
+  local ref="$1"
+  local clean_ref
+  clean_ref="$(canonicalize_wandb_run_url_ref "${ref}")"
+  clean_ref="${clean_ref%%#*}"
+  clean_ref="${clean_ref%%\?*}"
+  if [[ "${clean_ref}" != https://wandb.ai/*/runs/* ]]; then
+    return 1
+  fi
+
+  local trimmed="${clean_ref#https://wandb.ai/}"
+  local entity=""
+  local project=""
+  local run_id=""
+  local explicit_file=""
+  IFS='/' read -r -a parts <<< "${trimmed}"
+  if [[ "${#parts[@]}" -lt 4 || "${parts[2]}" != "runs" ]]; then
+    return 1
+  fi
+
+  entity="${parts[0]}"
+  project="${parts[1]}"
+  run_id="${parts[3]}"
+  if [[ -z "${entity}" || -z "${project}" || -z "${run_id}" ]]; then
+    return 1
+  fi
+
+  if [[ "${#parts[@]}" -ge 6 && "${parts[4]}" == "files" ]]; then
+    explicit_file="${trimmed#${entity}/${project}/runs/${run_id}/files/}"
+  fi
+
+  printf '%s\t%s\t%s\t%s\n' "${entity}" "${project}" "${run_id}" "${explicit_file}"
+}
+
+parse_wandb_uri() {
+  local ref="$1"
+  if [[ "${ref}" != wandb://* ]]; then
+    return 1
+  fi
+
+  local trimmed="${ref#wandb://}"
+  local entity=""
+  local project=""
+  local run_id=""
+  local explicit_file=""
+  IFS='/' read -r -a parts <<< "${trimmed}"
+  if [[ "${#parts[@]}" -lt 3 ]]; then
+    return 1
+  fi
+
+  entity="${parts[0]}"
+  project="${parts[1]}"
+  run_id="${parts[2]}"
+  if [[ -z "${entity}" || -z "${project}" || -z "${run_id}" ]]; then
+    return 1
+  fi
+
+  if [[ "${#parts[@]}" -gt 3 ]]; then
+    explicit_file="${trimmed#${entity}/${project}/${run_id}/}"
+  fi
+
+  printf '%s\t%s\t%s\t%s\n' "${entity}" "${project}" "${run_id}" "${explicit_file}"
+}
+
+parse_wandb_reference() {
+  local ref="$1"
+  parse_wandb_run_url "${ref}" || parse_wandb_uri "${ref}"
+}
+
+resolve_remote_wandb_checkpoint_name() {
+  local entity="$1"
+  local project="$2"
+  local run_id="$3"
+  local requested_step="${4:-}"
+
+  "${PYTHON_BIN:-python}" - "${entity}" "${project}" "${run_id}" "${requested_step}" <<'PY' 2>/dev/null || true
+import re
+import sys
+from pathlib import Path
+
+repo_root = Path.cwd().resolve()
+sys.path = [
+    entry
+    for entry in sys.path
+    if entry not in {"", "."} and Path(entry).resolve() != repo_root
+]
+
+try:
+    import wandb
+except Exception:
+    sys.exit(0)
+
+entity, project, run_id, requested_step = sys.argv[1:5]
+requested_step_int = int(requested_step) if requested_step else None
+api = wandb.Api(timeout=30)
+run = api.run(f"{entity}/{project}/{run_id}")
+pattern = re.compile(r"^model_(\d+)\.pt$")
+best: tuple[int, str] | None = None
+for file_obj in run.files():
+    name = str(getattr(file_obj, "name", "") or "")
+    match = pattern.match(name)
+    if match is None:
+        continue
+    step = int(match.group(1))
+    if requested_step_int is not None:
+        if step == requested_step_int:
+            print(name)
+            sys.exit(0)
+        continue
+    try:
+        size = int(getattr(file_obj, "size", 0) or 0)
+    except Exception:
+        size = 0
+    if size <= 0:
+        continue
+    candidate = (step, name)
+    if best is None or candidate[0] > best[0]:
+        best = candidate
+
+if best is not None and requested_step_int is None:
+    print(best[1])
+PY
+}
+
+normalize_checkpoint_ref() {
+  local ref="$1"
+  local parsed=""
+  local entity=""
+  local project=""
+  local run_id=""
+  local explicit_file=""
+  local model_file="${WANDB_MODEL_FILE:-}"
+
+  parsed="$(parse_wandb_reference "${ref}" || true)"
+  if [[ -z "${parsed}" ]]; then
+    echo "${ref}"
+    return 0
+  fi
+
+  IFS=$'\t' read -r entity project run_id explicit_file <<< "${parsed}"
+  if [[ -n "${explicit_file}" ]]; then
+    model_file="${explicit_file}"
+  elif [[ -z "${model_file}" ]]; then
+    model_file="$(resolve_remote_wandb_checkpoint_name "${entity}" "${project}" "${run_id}" "${RESUME_STEP:-}")"
+    if [[ -n "${model_file}" ]]; then
+      echo "[INFO] Resolved W&B reference to latest checkpoint: ${model_file}" >&2
+    fi
+  fi
+
+  if [[ -z "${model_file}" ]]; then
+    echo "[ERROR] Could not determine a .pt checkpoint for W&B reference: ${ref}" >&2
+    echo "[ERROR] Pass a /files/<checkpoint>.pt URL, set WANDB_MODEL_FILE, or set RESUME_STEP." >&2
+    return 2
+  fi
+
+  echo "wandb://${entity}/${project}/${run_id}/${model_file}"
+}
+
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
 
@@ -65,6 +239,20 @@ fi
 PYTHON_BIN=${PYTHON_BIN:-python}
 WANDB_PROJECT=${WANDB_PROJECT:-carry-any}
 LOG_ROOT=${LOG_ROOT:-"/data/logs_new/${WANDB_PROJECT}"}
+TEACHER_CHECKPOINT=${TEACHER_CHECKPOINT:-${CKPT:-${CHECKPOINT:-}}}
+
+if [[ $# -gt 0 ]] && is_checkpoint_ref "$1"; then
+  TEACHER_CHECKPOINT="$1"
+  shift
+fi
+
+if [[ -n "${TEACHER_CHECKPOINT}" ]]; then
+  TEACHER_CHECKPOINT="$(normalize_checkpoint_ref "${TEACHER_CHECKPOINT}")"
+  if [[ "${TEACHER_CHECKPOINT}" != wandb://* && ! -f "${TEACHER_CHECKPOINT}" ]]; then
+    echo "[ERROR] teacher checkpoint not found: ${TEACHER_CHECKPOINT}" >&2
+    exit 1
+  fi
+fi
 
 OMOMO_DATA_DIR=${OMOMO_DATA_DIR:-"${SCRIPT_DIR}/data/ds_as_data/omomo"}
 OMOMO_OBJECT_MAP=${OMOMO_OBJECT_MAP:-"${OMOMO_DATA_DIR}/_clip_object_urdf_map.json"}
@@ -249,6 +437,7 @@ export HOLOSOMA_OBJECT_COLLIDER_TYPE=${HOLOSOMA_OBJECT_COLLIDER_TYPE:-convex_dec
 export VISER_LOAD_URDF=${VISER_LOAD_URDF:-1}
 
 echo "[INFO] Launching AS/OMOMO real-mesh co-tracking inference"
+echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT:-<auto>}"
 echo "[INFO] MOTION_DIR=${MOTION_DIR}"
 echo "[INFO] OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH}"
 echo "[INFO] WANDB_PROJECT=${WANDB_PROJECT}"
@@ -257,4 +446,19 @@ echo "[INFO] HOLOSOMA_OBJECT_SPAWN_MODE=${HOLOSOMA_OBJECT_SPAWN_MODE}"
 echo "[INFO] HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE=${HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE}"
 echo "[INFO] HOLOSOMA_OBJECT_COLLIDER_TYPE=${HOLOSOMA_OBJECT_COLLIDER_TYPE}"
 
-exec bash "${SCRIPT_DIR}/infer_box_tracking.sh" real "$@"
+infer_cmd=(bash "${SCRIPT_DIR}/infer_box_tracking.sh" real)
+if [[ -n "${TEACHER_CHECKPOINT}" ]]; then
+  infer_cmd+=("${TEACHER_CHECKPOINT}")
+fi
+infer_cmd+=("$@")
+
+case "$(echo "${DRY_RUN:-0}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    printf '[INFO] final_infer_command:'
+    printf ' %q' "${infer_cmd[@]}"
+    printf '\n'
+    exit 0
+    ;;
+esac
+
+exec "${infer_cmd[@]}"
