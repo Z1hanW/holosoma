@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Teacher-policy inference for AS/OMOMO real-mesh object tracking.
+# Teacher-policy inference for AS real-mesh object tracking.
 #
 # This mirrors train_as_general.sh and delegates the actual inference launch to
 # infer_box_tracking.sh so checkpoint/W&B/Viser behavior stays consistent.
@@ -14,9 +14,10 @@ set -euo pipefail
 #                             tries the latest local generalist checkpoint under LOG_ROOT.
 #   LOG_ROOT                  Default: /data/logs_new/${WANDB_PROJECT}
 #   WANDB_PROJECT             Default: carry-any
-#   OMOMO_DATA_DIR            Default: ./data/ds_as_data/omomo
-#   OMOMO_OBJECT_MAP          Default: ${OMOMO_DATA_DIR}/_clip_object_urdf_map.json
-#   OMOMO_EXPECTED_TOTAL      Optional exact clip count check. Default: auto
+#   AS_DATA_DIR               Default: train_as_general.sh's 197-clip AS bank
+#   AS_OBJECT_MAP             Default: ${AS_DATA_DIR}/_clip_object_urdf_map.json
+#   AS_EXPECTED_TOTAL         Optional exact clip count check. Default: 197
+#   AS_SINGLE_SLOT_MOTION_DIR Default: ${AS_DATA_DIR}/_single_slot_motion_bank
 #   MOTION_CLIP_NAME          Optional: pin a single clip
 #   NUM_ENVS                  Default inherited from infer_box_tracking.sh: 1
 #   HEADLESS                  Default inherited from infer_box_tracking.sh: True
@@ -34,9 +35,10 @@ Examples:
   MOTION_CLIP_NAME=<clip_name> bash infer_as_track.sh /abs/path/to/model.pt
   HEADLESS=False bash infer_as_track.sh /abs/path/to/model.pt
 
-This launcher always uses the repo-local AS/OMOMO real-mesh bank by default:
-  OMOMO_DATA_DIR=./data/ds_as_data/omomo
-  OMOMO_OBJECT_MAP=./data/ds_as_data/omomo/_clip_object_urdf_map.json
+This launcher uses the same repo-local AS real-mesh bank as train_as_general.sh
+by default:
+  AS_DATA_DIR=./data/ds_as_data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout
+  AS_OBJECT_MAP=${AS_DATA_DIR}/_clip_object_urdf_map.json
 EOF
 }
 
@@ -272,63 +274,115 @@ if [[ -n "${TEACHER_CHECKPOINT}" ]]; then
   fi
 fi
 
-OMOMO_DATA_DIR=${OMOMO_DATA_DIR:-"${SCRIPT_DIR}/data/ds_as_data/omomo"}
-OMOMO_OBJECT_MAP=${OMOMO_OBJECT_MAP:-"${OMOMO_DATA_DIR}/_clip_object_urdf_map.json"}
-OMOMO_EXPECTED_TOTAL=${OMOMO_EXPECTED_TOTAL:-}
+DEFAULT_AS_BANK=carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout
+AS_DATA_DIR=${AS_DATA_DIR:-${OMOMO_DATA_DIR:-"${SCRIPT_DIR}/data/ds_as_data/${DEFAULT_AS_BANK}"}}
+AS_OBJECT_MAP=${AS_OBJECT_MAP:-${OMOMO_OBJECT_MAP:-"${AS_DATA_DIR}/_clip_object_urdf_map.json"}}
+AS_EXPECTED_TOTAL=${AS_EXPECTED_TOTAL:-${OMOMO_EXPECTED_TOTAL:-197}}
 
 LOCAL_DATA_ROOT=$(realpath -m "${SCRIPT_DIR}/data")
-OMOMO_DATA_DIR=$(realpath -m "${OMOMO_DATA_DIR}")
-OMOMO_OBJECT_MAP=$(realpath -m "${OMOMO_OBJECT_MAP}")
+AS_DATA_DIR=$(realpath -m "${AS_DATA_DIR}")
+AS_OBJECT_MAP=$(realpath -m "${AS_OBJECT_MAP}")
 
-case "${OMOMO_DATA_DIR}" in
+case "${AS_DATA_DIR}" in
   /nfs|/nfs/*)
-    echo "[ERROR] OMOMO_DATA_DIR must be local, not NFS: ${OMOMO_DATA_DIR}" >&2
-    echo "[ERROR] Run ./cp_as.sh first and infer from ${SCRIPT_DIR}/data/ds_as_data/omomo." >&2
+    echo "[ERROR] AS_DATA_DIR must be local, not NFS: ${AS_DATA_DIR}" >&2
+    echo "[ERROR] Run ./cp_as.sh first and infer from the copied AS bank under ${SCRIPT_DIR}/data." >&2
     exit 2
     ;;
 esac
-case "${OMOMO_DATA_DIR}" in
+case "${AS_DATA_DIR}" in
   "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
     ;;
   *)
-    echo "[ERROR] OMOMO_DATA_DIR must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
-    echo "[ERROR] Got: ${OMOMO_DATA_DIR}" >&2
+    echo "[ERROR] AS_DATA_DIR must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
+    echo "[ERROR] Got: ${AS_DATA_DIR}" >&2
     exit 2
     ;;
 esac
-case "${OMOMO_OBJECT_MAP}" in
+case "${AS_OBJECT_MAP}" in
   /nfs|/nfs/*)
-    echo "[ERROR] OMOMO_OBJECT_MAP must be local, not NFS: ${OMOMO_OBJECT_MAP}" >&2
+    echo "[ERROR] AS_OBJECT_MAP must be local, not NFS: ${AS_OBJECT_MAP}" >&2
     echo "[ERROR] Run ./cp_as.sh first and use the copied map under ${SCRIPT_DIR}/data." >&2
     exit 2
     ;;
 esac
-case "${OMOMO_OBJECT_MAP}" in
+case "${AS_OBJECT_MAP}" in
   "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
     ;;
   *)
-    echo "[ERROR] OMOMO_OBJECT_MAP must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
-    echo "[ERROR] Got: ${OMOMO_OBJECT_MAP}" >&2
+    echo "[ERROR] AS_OBJECT_MAP must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
+    echo "[ERROR] Got: ${AS_OBJECT_MAP}" >&2
     exit 2
     ;;
 esac
 
-if [[ ! -d "${OMOMO_DATA_DIR}" ]]; then
-  echo "[ERROR] OMOMO_DATA_DIR does not exist: ${OMOMO_DATA_DIR}" >&2
-  echo "[ERROR] Run ./cp_as.sh first, or set OMOMO_DATA_DIR to a prepared motion bank." >&2
+if [[ ! -d "${AS_DATA_DIR}" ]]; then
+  echo "[ERROR] AS_DATA_DIR does not exist: ${AS_DATA_DIR}" >&2
+  echo "[ERROR] Run ./cp_as.sh first, or set AS_DATA_DIR to a prepared motion bank." >&2
   exit 2
 fi
 
-if ! compgen -G "${OMOMO_DATA_DIR}/*.npz" >/dev/null; then
-  echo "[ERROR] No .npz files found in OMOMO_DATA_DIR: ${OMOMO_DATA_DIR}" >&2
-  echo "[ERROR] Run ./cp_as.sh first, or set OMOMO_DATA_DIR to a prepared motion bank." >&2
+if ! compgen -G "${AS_DATA_DIR}/*.npz" >/dev/null; then
+  echo "[ERROR] No .npz files found in AS_DATA_DIR: ${AS_DATA_DIR}" >&2
+  echo "[ERROR] Run ./cp_as.sh first, or set AS_DATA_DIR to a prepared motion bank." >&2
   exit 2
 fi
 
-if [[ ! -f "${OMOMO_OBJECT_MAP}" ]]; then
-  echo "[ERROR] Missing clip-object URDF map: ${OMOMO_OBJECT_MAP}" >&2
+if [[ ! -f "${AS_OBJECT_MAP}" ]]; then
+  echo "[ERROR] Missing clip-object URDF map: ${AS_OBJECT_MAP}" >&2
   exit 2
 fi
+
+AS_SINGLE_SLOT_MOTION_DIR=${AS_SINGLE_SLOT_MOTION_DIR:-"${AS_DATA_DIR}/_single_slot_motion_bank"}
+AS_SINGLE_SLOT_MOTION_DIR=$(realpath -m "${AS_SINGLE_SLOT_MOTION_DIR}")
+case "${AS_SINGLE_SLOT_MOTION_DIR}" in
+  "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
+    ;;
+  *)
+    echo "[ERROR] Generated AS single-slot motion bank must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
+    echo "[ERROR] Got: ${AS_SINGLE_SLOT_MOTION_DIR}" >&2
+    exit 2
+    ;;
+esac
+
+"${PYTHON_BIN}" - "${AS_DATA_DIR}" "${AS_SINGLE_SLOT_MOTION_DIR}" <<'PY'
+import shutil
+import sys
+from pathlib import Path
+
+source_dir = Path(sys.argv[1]).resolve()
+view_dir = Path(sys.argv[2]).resolve()
+if view_dir == source_dir or source_dir not in view_dir.parents:
+    raise SystemExit(f"[ERROR] Refusing unexpected generated AS motion view path: {view_dir}")
+
+marker = view_dir / ".generated_by_train_as_general"
+if view_dir.exists():
+    if not marker.exists():
+        raise SystemExit(
+            f"[ERROR] Refusing to clean non-generated AS motion view: {view_dir}. "
+            "Choose an empty AS_SINGLE_SLOT_MOTION_DIR or remove it manually."
+        )
+    for child in view_dir.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+else:
+    view_dir.mkdir(parents=True)
+
+for npz_path in sorted(source_dir.glob("*.npz")):
+    target = view_dir / npz_path.name
+    target.symlink_to(npz_path.resolve())
+marker.write_text("generated by infer_as_track.sh using train_as_general layout\n", encoding="utf-8")
+PY
+
+AS_SINGLE_SLOT_OBJECT_MAP="${AS_SINGLE_SLOT_MOTION_DIR}/_clip_object_urdf_map.json"
+AS_OBJECT_MAP=$("${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/prepare_single_slot_object_map.py" \
+  --motion-dir "${AS_SINGLE_SLOT_MOTION_DIR}" \
+  --object-map "${AS_OBJECT_MAP}" \
+  --output-map "${AS_SINGLE_SLOT_OBJECT_MAP}")
+AS_OBJECT_MAP=$(realpath -m "${AS_OBJECT_MAP}")
+AS_DATA_DIR="${AS_SINGLE_SLOT_MOTION_DIR}"
 
 OBJECT_SPAWN_MODE=${OBJECT_SPAWN_MODE:-urdf}
 OBJECT_GEOMETRY_MODE=${OBJECT_GEOMETRY_MODE:-mesh}
@@ -353,7 +407,7 @@ case "$(echo "${OBJECT_GEOMETRY_MODE}" | tr '[:upper:]' '[:lower:]')" in
     ;;
 esac
 
-"${PYTHON_BIN}" - "${OMOMO_DATA_DIR}" "${OMOMO_OBJECT_MAP}" "${OMOMO_EXPECTED_TOTAL}" <<'PY'
+"${PYTHON_BIN}" - "${AS_DATA_DIR}" "${AS_OBJECT_MAP}" "${AS_EXPECTED_TOTAL}" <<'PY'
 import json
 import sys
 import xml.etree.ElementTree as ET
@@ -431,10 +485,10 @@ for urdf_raw, clip_id in sorted(unique_urdfs.items()):
             bad.append(f"{clip_id}: URDF mesh file missing: {mesh_path}")
 
 if bad:
-    raise SystemExit("[ERROR] Real-mesh AS/OMOMO validation failed:\n  " + "\n  ".join(bad[:20]))
+    raise SystemExit("[ERROR] Real-mesh AS validation failed:\n  " + "\n  ".join(bad[:20]))
 
 print(
-    f"[INFO] Validated real-mesh AS/OMOMO bank: {motion_dir} "
+    f"[INFO] Validated real-mesh AS bank: {motion_dir} "
     f"({len(npz_files)} clips, {len(unique_urdfs)} unique URDF mesh asset(s))"
 )
 PY
@@ -443,9 +497,9 @@ export WANDB_PROJECT
 export LOG_ROOT
 export DATA_MODE=pure-real
 export DS_DATA_ROOT="${SCRIPT_DIR}/data/ds_as_data"
-export MOTION_DIR="${OMOMO_DATA_DIR}"
-export OBJECT_SPEC_PATH="${OMOMO_OBJECT_MAP}"
-export OBJECT_URDF="${OMOMO_OBJECT_MAP}"
+export MOTION_DIR="${AS_DATA_DIR}"
+export OBJECT_SPEC_PATH="${AS_OBJECT_MAP}"
+export OBJECT_URDF="${AS_OBJECT_MAP}"
 
 export OBJECT_SPAWN_MODE
 export OBJECT_GEOMETRY_MODE
@@ -454,7 +508,7 @@ export HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE="${OBJECT_GEOMETRY_MODE}"
 export HOLOSOMA_OBJECT_COLLIDER_TYPE=${HOLOSOMA_OBJECT_COLLIDER_TYPE:-convex_decomposition}
 export VISER_LOAD_URDF=${VISER_LOAD_URDF:-1}
 
-echo "[INFO] Launching AS/OMOMO real-mesh co-tracking inference"
+echo "[INFO] Launching AS real-mesh co-tracking inference"
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT:-<auto>}"
 echo "[INFO] MOTION_DIR=${MOTION_DIR}"
 echo "[INFO] OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH}"

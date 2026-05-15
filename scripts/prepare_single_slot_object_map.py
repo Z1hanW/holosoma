@@ -122,6 +122,10 @@ def prepare_single_slot_map(*, motion_dir: Path, object_map: Path, output_map: P
             converted_count += 1
 
         entry["object_urdf_path"] = canonical_rel
+        raw_mesh = str(entry.get("object_mesh_path", "")).strip()
+        if raw_mesh:
+            mesh_path = _resolve_path(raw_mesh, object_map.parent)
+            entry["object_mesh_path"] = _relpath(mesh_path, motion_dir)
         updated_clips[str(clip_id)] = entry
 
     output_payload = dict(metadata)
