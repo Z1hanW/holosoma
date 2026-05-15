@@ -125,6 +125,18 @@ parse_wandb_reference() {
   parse_wandb_run_url "${ref}" || parse_wandb_uri "${ref}"
 }
 
+known_as_track_wandb_checkpoint_name() {
+  local entity="$1"
+  local project="$2"
+  local run_id="$3"
+
+  case "${entity}/${project}/${run_id}" in
+    zihanw22/carry-any/bcleb5oi)
+      echo "model_45000.pt"
+      ;;
+  esac
+}
+
 resolve_remote_wandb_checkpoint_name() {
   local entity="$1"
   local project="$2"
@@ -202,6 +214,12 @@ normalize_checkpoint_ref() {
     model_file="$(resolve_remote_wandb_checkpoint_name "${entity}" "${project}" "${run_id}" "${RESUME_STEP:-}")"
     if [[ -n "${model_file}" ]]; then
       echo "[INFO] Resolved W&B reference to latest checkpoint: ${model_file}" >&2
+    fi
+    if [[ -z "${model_file}" && -z "${RESUME_STEP:-}" ]]; then
+      model_file="$(known_as_track_wandb_checkpoint_name "${entity}" "${project}" "${run_id}")"
+      if [[ -n "${model_file}" ]]; then
+        echo "[WARN] W&B API did not return model files; using known AS tracking checkpoint for ${entity}/${project}/${run_id}: ${model_file}" >&2
+      fi
     fi
   fi
 
