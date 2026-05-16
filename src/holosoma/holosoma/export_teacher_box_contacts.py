@@ -1032,7 +1032,9 @@ def _build_parallel_clip_batches(env: Any, motion_command: MotionCommand) -> tup
     if missing_keys and not multi_object_enabled:
         raise RuntimeError(
             "Parallel clip export requires each clip object key to be represented by at least one env slot. "
-            f"Missing env slots for keys: {missing_keys[:8]}"
+            f"Missing env slots for {len(missing_keys)} object key(s): {missing_keys[:8]}. "
+            "For single-slot multi-URDF export, increase training.num_envs to at least the number of unique "
+            "clip object URDFs, or export a smaller sharded motion/object bank."
         )
 
     batches: list[list[int | None]] = []

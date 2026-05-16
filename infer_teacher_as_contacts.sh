@@ -14,7 +14,7 @@ set -euo pipefail
 #
 # Examples:
 #   bash infer_teacher_as_contacts.sh
-#   NUM_ENVS=8 bash infer_teacher_as_contacts.sh
+#   bash infer_teacher_as_contacts.sh https://wandb.ai/zihanw22/carry-any/runs/gml45u7p/files/model_46000.pt
 #   DRY_RUN=1 bash infer_teacher_as_contacts.sh https://wandb.ai/zihanw22/carry-any/runs/gml45u7p
 #   bash infer_teacher_as_contacts.sh view
 
@@ -35,7 +35,8 @@ Optional env vars:
   OMOMO_DATA_DIR            Legacy alias for AS_DATA_DIR
   OMOMO_OBJECT_MAP          Legacy alias for AS_OBJECT_MAP
   OMOMO_EXPECTED_TOTAL      Legacy alias for AS_EXPECTED_TOTAL
-  NUM_ENVS                  Default: 8
+  NUM_ENVS                  Default: number of unique AS URDF assets. In single-slot mesh mode,
+                            this must be >= unique AS URDF count so every rollout has a matching env object.
   HEADLESS                  Default: True
   OUTPUT_DIR                Export mode default: outputs/teacher_as_contacts/<utc timestamp>.
                             View mode: existing export dir; default is latest outputs/teacher_as_contacts/*
@@ -541,11 +542,49 @@ print(
 )
 PY
 
+AS_UNIQUE_OBJECT_COUNT=$("${PYTHON_BIN}" - "${AS_OBJECT_MAP}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+map_path = Path(sys.argv[1]).expanduser().resolve()
+payload = json.loads(map_path.read_text(encoding="utf-8"))
+clips = payload["clips"] if isinstance(payload, dict) and isinstance(payload.get("clips"), dict) else payload
+
+
+def resolve_path(raw: str, base_dir: Path) -> Path:
+    path = Path(str(raw).strip()).expanduser()
+    return path.resolve() if path.is_absolute() else (base_dir / path).resolve()
+
+
+unique_urdfs = {
+    str(resolve_path(entry.get("object_urdf_path", ""), map_path.parent))
+    for entry in clips.values()
+    if isinstance(entry, dict) and str(entry.get("object_urdf_path", "")).strip()
+}
+print(len(unique_urdfs))
+PY
+)
+if [[ ! "${AS_UNIQUE_OBJECT_COUNT}" =~ ^[0-9]+$ || "${AS_UNIQUE_OBJECT_COUNT}" -le 0 ]]; then
+  echo "[ERROR] Could not determine AS unique object count from ${AS_OBJECT_MAP}: ${AS_UNIQUE_OBJECT_COUNT}" >&2
+  exit 2
+fi
+
 OMOMO_DATA_DIR="${AS_DATA_DIR}"
 OMOMO_OBJECT_MAP="${AS_OBJECT_MAP}"
 OMOMO_EXPECTED_TOTAL="${AS_EXPECTED_TOTAL}"
 
-NUM_ENVS="${NUM_ENVS:-8}"
+NUM_ENVS="${NUM_ENVS:-${AS_UNIQUE_OBJECT_COUNT}}"
+if [[ ! "${NUM_ENVS}" =~ ^[0-9]+$ || "${NUM_ENVS}" -le 0 ]]; then
+  echo "[ERROR] NUM_ENVS must be a positive integer, got: ${NUM_ENVS}" >&2
+  exit 2
+fi
+if (( NUM_ENVS < AS_UNIQUE_OBJECT_COUNT )); then
+  echo "[ERROR] NUM_ENVS=${NUM_ENVS} is too small for AS single-slot mesh export." >&2
+  echo "[ERROR] The current AS bank has ${AS_UNIQUE_OBJECT_COUNT} unique URDF asset(s), and each must be represented by at least one env slot." >&2
+  echo "[ERROR] Re-run without NUM_ENVS override, or set NUM_ENVS>=${AS_UNIQUE_OBJECT_COUNT}." >&2
+  exit 2
+fi
 HEADLESS="${HEADLESS:-True}"
 if is_truthy "${VIEW_ONLY}"; then
   OUTPUT_DIR="${OUTPUT_DIR:-$(resolve_latest_teacher_as_contacts_output)}"
@@ -661,6 +700,7 @@ else
   echo "[INFO] motion_dir=${OMOMO_DATA_DIR}"
   echo "[INFO] object_urdf=${OMOMO_OBJECT_MAP}"
   echo "[INFO] as_expected_total=${AS_EXPECTED_TOTAL}"
+  echo "[INFO] as_unique_object_urdfs=${AS_UNIQUE_OBJECT_COUNT}"
   echo "[INFO] num_envs=${NUM_ENVS}"
   echo "[INFO] object_spawn_mode=${HOLOSOMA_OBJECT_SPAWN_MODE}"
   echo "[INFO] require_single_slot_objects=${HOLOSOMA_REQUIRE_SINGLE_SLOT_OBJECTS}"
@@ -689,7 +729,13 @@ else
     exit 0
   fi
 
-  "${cmd[@]}"
+  if "${cmd[@]}"; then
+    :
+  else
+    cmd_status=$?
+    echo "[ERROR] AS contact export command failed with exit code ${cmd_status}; skipping validation, publish, and viewer launch." >&2
+    exit "${cmd_status}"
+  fi
 
   if is_truthy "${VALIDATE_OUTPUT_FORMAT}"; then
     "${PYTHON_BIN}" - "${OUTPUT_DIR}" "${AS_EXPECTED_TOTAL}" <<'PY'
