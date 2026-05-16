@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Teacher-policy contact export for AS/OMOMO real-mesh sequences.
+# Policy contact export for AS real-mesh sequences.
 #
-# This is the AS counterpart of infer_teacher_box_contacts.sh. It uses the
-# teacher checkpoint default from distill_as_perception.sh, rolls that teacher
-# out over the repo-local AS/OMOMO motion bank, and exports the same contact
-# point/reference layout consumed by rollout-ref/contact-aware code.
+# This is the AS counterpart of infer_teacher_box_contacts.sh. It is meant to
+# run a policy checkpoint produced by train_as_general.sh over the same
+# repo-local AS real-mesh bank, then export the same contact point/reference
+# layout consumed by rollout-ref/contact-aware code.
 #
 # Usage:
 #   bash infer_teacher_as_contacts.sh [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra tyro args...]
@@ -25,11 +25,16 @@ Usage:
   bash infer_teacher_as_contacts.sh view [existing_output_dir]
 
 Optional env vars:
-  TEACHER_CHECKPOINT        Default: parsed from distill_as_perception.sh
+  TEACHER_CHECKPOINT        Policy checkpoint to export; default parsed from distill_as_perception.sh
+  POLICY_CHECKPOINT         Alias for TEACHER_CHECKPOINT
   WANDB_MODEL_FILE          Optional; used when checkpoint is a W&B run URL without /files/<checkpoint>
-  OMOMO_DATA_DIR            Default: ./data/ds_as_data/omomo
-  OMOMO_OBJECT_MAP          Default: OMOMO_DATA_DIR/_clip_object_urdf_map.json
-  OMOMO_EXPECTED_TOTAL      Default: 45; set empty to disable count check
+  AS_DATA_DIR               Default: ./data/ds_as_data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout
+  AS_OBJECT_MAP             Default: AS_DATA_DIR/_clip_object_urdf_map.json
+  AS_EXPECTED_TOTAL         Default: 197; set empty to disable count check
+  AS_SINGLE_SLOT_MOTION_DIR Default: AS_DATA_DIR/_single_slot_motion_bank
+  OMOMO_DATA_DIR            Legacy alias for AS_DATA_DIR
+  OMOMO_OBJECT_MAP          Legacy alias for AS_OBJECT_MAP
+  OMOMO_EXPECTED_TOTAL      Legacy alias for AS_EXPECTED_TOTAL
   NUM_ENVS                  Default: 8
   HEADLESS                  Default: True
   OUTPUT_DIR                Export mode default: outputs/teacher_as_contacts/<utc timestamp>.
@@ -59,12 +64,16 @@ Optional env vars:
   USE_ADAPTIVE_TIMESTEPS_SAMPLER Default: False
   MAX_EPISODE_LENGTH_S      Default: 1000000
   PHYSX_GPU_COLLISION_STACK_SIZE Default: 268435456
+  VALIDATE_OUTPUT_FORMAT    Default: 1; verify exported clips match rollout-ref/contact-aware layout
   DRY_RUN                   Default: 0
 
 By default the raw export is kept under OUTPUT_DIR and the generated
 OUTPUT_DIR/clips plus OUTPUT_DIR/motion_bank are also copied into outputs/clips
 and outputs/motion_bank so existing rollout-ref/contact-aware interfaces can
 find the point files without changing their config.
+
+Export mode mirrors train_as_general.sh's AS layout: it builds a repo-local
+single-slot motion/object view and uses mesh URDF assets, not primitive boxes.
 
 View-only mode never launches IsaacSim or loads the teacher checkpoint. It only
 starts the rollout/contact Viser viewer on an existing export directory.
@@ -283,7 +292,7 @@ normalize_bool_flag() {
   esac
 }
 
-TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${CKPT:-}}"
+TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-${AS_POLICY_CHECKPOINT:-${POLICY_CHECKPOINT:-${CHECKPOINT:-${CKPT:-}}}}}"
 if ! is_truthy "${VIEW_ONLY}"; then
   DISTILL_DEFAULT_TEACHER_CHECKPOINT="$(extract_default_teacher_checkpoint_from_distill_as_perception)"
   DISTILL_DEFAULT_TEACHER_CHECKPOINT="${DISTILL_DEFAULT_TEACHER_CHECKPOINT:-https://wandb.ai/zihanw22/carry-any/runs/gml45u7p}"
@@ -310,72 +319,74 @@ if ! is_truthy "${VIEW_ONLY}"; then
 fi
 
 WANDB_PROJECT=${WANDB_PROJECT:-carry-any}
-OMOMO_DATA_DIR=${OMOMO_DATA_DIR:-"${SCRIPT_DIR}/data/ds_as_data/omomo"}
-OMOMO_OBJECT_MAP=${OMOMO_OBJECT_MAP:-"${OMOMO_DATA_DIR}/_clip_object_urdf_map.json"}
-OMOMO_EXPECTED_TOTAL=${OMOMO_EXPECTED_TOTAL:-45}
+DEFAULT_AS_BANK=carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout
+AS_DATA_DIR=${AS_DATA_DIR:-${OMOMO_DATA_DIR:-"${SCRIPT_DIR}/data/ds_as_data/${DEFAULT_AS_BANK}"}}
+AS_OBJECT_MAP=${AS_OBJECT_MAP:-${OMOMO_OBJECT_MAP:-"${AS_DATA_DIR}/_clip_object_urdf_map.json"}}
+AS_EXPECTED_TOTAL=${AS_EXPECTED_TOTAL:-${OMOMO_EXPECTED_TOTAL:-197}}
 
 LOCAL_DATA_ROOT="$(realpath -m "${SCRIPT_DIR}/data")"
-OMOMO_DATA_DIR="$(realpath -m "${OMOMO_DATA_DIR}")"
-OMOMO_OBJECT_MAP="$(realpath -m "${OMOMO_OBJECT_MAP}")"
+AS_DATA_DIR="$(realpath -m "${AS_DATA_DIR}")"
+AS_OBJECT_MAP="$(realpath -m "${AS_OBJECT_MAP}")"
 
-case "${OMOMO_DATA_DIR}" in
+case "${AS_DATA_DIR}" in
   /nfs|/nfs/*)
-    echo "[ERROR] OMOMO_DATA_DIR must be local, not NFS: ${OMOMO_DATA_DIR}" >&2
-    echo "[ERROR] Run ./cp_real.sh first and export from ${SCRIPT_DIR}/data/ds_as_data/omomo." >&2
+    echo "[ERROR] AS_DATA_DIR must be local, not NFS: ${AS_DATA_DIR}" >&2
+    echo "[ERROR] Run ./cp_as.sh first and export from the repo-local AS bank under ${SCRIPT_DIR}/data." >&2
     exit 2
     ;;
 esac
-case "${OMOMO_DATA_DIR}" in
+case "${AS_DATA_DIR}" in
   "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*) ;;
   *)
-    echo "[ERROR] OMOMO_DATA_DIR must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
-    echo "[ERROR] Got: ${OMOMO_DATA_DIR}" >&2
+    echo "[ERROR] AS_DATA_DIR must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
+    echo "[ERROR] Got: ${AS_DATA_DIR}" >&2
     exit 2
     ;;
 esac
-case "${OMOMO_OBJECT_MAP}" in
+case "${AS_OBJECT_MAP}" in
   /nfs|/nfs/*)
-    echo "[ERROR] OMOMO_OBJECT_MAP must be local, not NFS: ${OMOMO_OBJECT_MAP}" >&2
+    echo "[ERROR] AS_OBJECT_MAP must be local, not NFS: ${AS_OBJECT_MAP}" >&2
     exit 2
     ;;
 esac
-case "${OMOMO_OBJECT_MAP}" in
+case "${AS_OBJECT_MAP}" in
   "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*) ;;
   *)
-    echo "[ERROR] OMOMO_OBJECT_MAP must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
-    echo "[ERROR] Got: ${OMOMO_OBJECT_MAP}" >&2
+    echo "[ERROR] AS_OBJECT_MAP must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
+    echo "[ERROR] Got: ${AS_OBJECT_MAP}" >&2
     exit 2
     ;;
 esac
 
-if [[ ! -d "${OMOMO_DATA_DIR}" ]]; then
-  echo "[ERROR] OMOMO_DATA_DIR does not exist: ${OMOMO_DATA_DIR}" >&2
-  echo "[ERROR] Run ./cp_real.sh first, or set OMOMO_DATA_DIR to a prepared motion bank." >&2
+if [[ ! -d "${AS_DATA_DIR}" ]]; then
+  echo "[ERROR] AS_DATA_DIR does not exist: ${AS_DATA_DIR}" >&2
+  echo "[ERROR] Run ./cp_as.sh first, or set AS_DATA_DIR to a prepared motion bank." >&2
   exit 2
 fi
-if ! compgen -G "${OMOMO_DATA_DIR}/*.npz" >/dev/null; then
-  echo "[ERROR] No .npz files found in OMOMO_DATA_DIR: ${OMOMO_DATA_DIR}" >&2
+if ! compgen -G "${AS_DATA_DIR}/*.npz" >/dev/null; then
+  echo "[ERROR] No .npz files found in AS_DATA_DIR: ${AS_DATA_DIR}" >&2
   exit 2
 fi
-if [[ ! -f "${OMOMO_OBJECT_MAP}" ]]; then
-  echo "[ERROR] Missing clip-object URDF map: ${OMOMO_OBJECT_MAP}" >&2
+if [[ ! -f "${AS_OBJECT_MAP}" ]]; then
+  echo "[ERROR] Missing clip-object URDF map: ${AS_OBJECT_MAP}" >&2
   exit 2
 fi
 
-OBJECT_SPAWN_MODE=${OBJECT_SPAWN_MODE:-urdf}
+OBJECT_SPAWN_MODE=${OBJECT_SPAWN_MODE:-${HOLOSOMA_OBJECT_SPAWN_MODE:-single_slot_multi_urdf}}
 OBJECT_GEOMETRY_MODE=${OBJECT_GEOMETRY_MODE:-mesh}
 case "$(echo "${OBJECT_SPAWN_MODE}" | tr '[:upper:]' '[:lower:]')" in
-  urdf|mesh)
-    OBJECT_SPAWN_MODE=urdf
+  single_slot_multi_urdf|single-slot-multi-urdf|single_slot|single-slot|heterogeneous_single_slot|heterogeneous-single-slot)
+    OBJECT_SPAWN_MODE=single_slot_multi_urdf
     ;;
   *)
-    echo "[ERROR] infer_teacher_as_contacts.sh requires real URDF mesh spawning." >&2
+    echo "[ERROR] infer_teacher_as_contacts.sh requires OBJECT_SPAWN_MODE=single_slot_multi_urdf for train_as_general.sh checkpoints." >&2
+    echo "[ERROR] Legacy all-object URDF spawning is disabled for AS contact export to avoid object-slot explosion." >&2
     echo "[ERROR] Got OBJECT_SPAWN_MODE=${OBJECT_SPAWN_MODE}" >&2
     exit 2
     ;;
 esac
 case "$(echo "${OBJECT_GEOMETRY_MODE}" | tr '[:upper:]' '[:lower:]')" in
-  mesh|urdf|off|disable|disabled|0|false|no)
+  mesh|urdf)
     OBJECT_GEOMETRY_MODE=mesh
     ;;
   *)
@@ -385,7 +396,68 @@ case "$(echo "${OBJECT_GEOMETRY_MODE}" | tr '[:upper:]' '[:lower:]')" in
     ;;
 esac
 
-"${PYTHON_BIN}" - "${OMOMO_DATA_DIR}" "${OMOMO_OBJECT_MAP}" "${OMOMO_EXPECTED_TOTAL}" <<'PY'
+AS_SINGLE_SLOT_MOTION_DIR=${AS_SINGLE_SLOT_MOTION_DIR:-"${AS_DATA_DIR}/_single_slot_motion_bank"}
+AS_SINGLE_SLOT_MOTION_DIR="$(realpath -m "${AS_SINGLE_SLOT_MOTION_DIR}")"
+case "${AS_SINGLE_SLOT_MOTION_DIR}" in
+  "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*) ;;
+  *)
+    echo "[ERROR] Generated AS single-slot motion bank must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
+    echo "[ERROR] Got: ${AS_SINGLE_SLOT_MOTION_DIR}" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "${AS_DATA_DIR}" != "${AS_SINGLE_SLOT_MOTION_DIR}" ]]; then
+  "${PYTHON_BIN}" - "${AS_DATA_DIR}" "${AS_SINGLE_SLOT_MOTION_DIR}" <<'PY'
+import shutil
+import sys
+from pathlib import Path
+
+source_dir = Path(sys.argv[1]).resolve()
+view_dir = Path(sys.argv[2]).resolve()
+if view_dir == source_dir or source_dir not in view_dir.parents:
+    raise SystemExit(f"[ERROR] Refusing unexpected generated AS motion view path: {view_dir}")
+
+marker = view_dir / ".generated_by_train_as_general"
+if view_dir.exists():
+    if not marker.exists():
+        raise SystemExit(
+            f"[ERROR] Refusing to clean non-generated AS motion view: {view_dir}. "
+            "Choose an empty AS_SINGLE_SLOT_MOTION_DIR or remove it manually."
+        )
+    for child in view_dir.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+else:
+    view_dir.mkdir(parents=True)
+
+for npz_path in sorted(source_dir.glob("*.npz")):
+    target = view_dir / npz_path.name
+    target.symlink_to(npz_path.resolve())
+marker.write_text("generated by infer_teacher_as_contacts.sh using train_as_general layout\n", encoding="utf-8")
+PY
+
+  AS_SINGLE_SLOT_OBJECT_MAP="${AS_SINGLE_SLOT_MOTION_DIR}/_clip_object_urdf_map.json"
+  AS_OBJECT_MAP=$("${PYTHON_BIN}" "${SCRIPT_DIR}/scripts/prepare_single_slot_object_map.py" \
+    --motion-dir "${AS_SINGLE_SLOT_MOTION_DIR}" \
+    --object-map "${AS_OBJECT_MAP}" \
+    --output-map "${AS_SINGLE_SLOT_OBJECT_MAP}")
+  AS_OBJECT_MAP="$(realpath -m "${AS_OBJECT_MAP}")"
+  AS_DATA_DIR="${AS_SINGLE_SLOT_MOTION_DIR}"
+fi
+
+case "${AS_OBJECT_MAP}" in
+  "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*) ;;
+  *)
+    echo "[ERROR] Generated AS single-slot object map must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
+    echo "[ERROR] Got: ${AS_OBJECT_MAP}" >&2
+    exit 2
+    ;;
+esac
+
+"${PYTHON_BIN}" - "${AS_DATA_DIR}" "${AS_OBJECT_MAP}" "${AS_EXPECTED_TOTAL}" <<'PY'
 import json
 import sys
 import xml.etree.ElementTree as ET
@@ -413,6 +485,10 @@ missing_entries = [p.stem for p in npz_files if p.stem not in clips]
 if missing_entries:
     preview = ", ".join(missing_entries[:10])
     raise SystemExit(f"[ERROR] Missing object-map entries for {len(missing_entries)} clip(s): {preview}")
+missing_npz = [clip_id for clip_id in sorted(clips) if not (motion_dir / f"{clip_id}.npz").is_file()]
+if missing_npz:
+    preview = ", ".join(missing_npz[:10])
+    raise SystemExit(f"[ERROR] Missing .npz files for {len(missing_npz)} object-map entries: {preview}")
 
 
 def resolve_path(raw: str, base_dir: Path) -> Path:
@@ -457,13 +533,17 @@ for urdf_raw, clip_id in sorted(unique_urdfs.items()):
             bad.append(f"{clip_id}: URDF mesh file missing: {mesh_path}")
 
 if bad:
-    raise SystemExit("[ERROR] Real-mesh OMOMO validation failed:\n  " + "\n  ".join(bad[:20]))
+    raise SystemExit("[ERROR] Real-mesh AS validation failed:\n  " + "\n  ".join(bad[:20]))
 
 print(
-    f"[INFO] Validated real-mesh OMOMO bank: {motion_dir} "
+    f"[INFO] Validated real-mesh AS bank: {motion_dir} "
     f"({len(npz_files)} clips, {len(unique_urdfs)} unique URDF mesh asset(s))"
 )
 PY
+
+OMOMO_DATA_DIR="${AS_DATA_DIR}"
+OMOMO_OBJECT_MAP="${AS_OBJECT_MAP}"
+OMOMO_EXPECTED_TOTAL="${AS_EXPECTED_TOTAL}"
 
 NUM_ENVS="${NUM_ENVS:-8}"
 HEADLESS="${HEADLESS:-True}"
@@ -490,6 +570,7 @@ USE_ADAPTIVE_TIMESTEPS_SAMPLER="${USE_ADAPTIVE_TIMESTEPS_SAMPLER:-False}"
 MAX_EPISODE_LENGTH_S="${MAX_EPISODE_LENGTH_S:-1000000}"
 PHYSX_GPU_COLLISION_STACK_SIZE="${PHYSX_GPU_COLLISION_STACK_SIZE:-268435456}"
 MAX_ROLLOUT_STEPS="${MAX_ROLLOUT_STEPS:-}"
+VALIDATE_OUTPUT_FORMAT="${VALIDATE_OUTPUT_FORMAT:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 if [[ -z "${PUBLISH_FOR_INFER_BOX+x}" ]]; then
   if is_truthy "${VIEW_ONLY}"; then
@@ -520,10 +601,12 @@ else
 fi
 
 export WANDB_PROJECT
-export HOLOSOMA_DISABLE_HETEROGENEOUS_OBJECT_SINGLE_SLOT=1
+unset HOLOSOMA_DISABLE_HETEROGENEOUS_OBJECT_SINGLE_SLOT
 export HOLOSOMA_OBJECT_SPAWN_MODE="${OBJECT_SPAWN_MODE}"
 export HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE="${OBJECT_GEOMETRY_MODE}"
 export HOLOSOMA_OBJECT_COLLIDER_TYPE="${HOLOSOMA_OBJECT_COLLIDER_TYPE:-convex_decomposition}"
+export HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK="${HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK:-1}"
+export HOLOSOMA_REQUIRE_SINGLE_SLOT_OBJECTS=1
 export VISER_LOAD_URDF="${VISER_LOAD_URDF:-1}"
 
 if is_truthy "${VIEW_ONLY}"; then
@@ -577,8 +660,11 @@ else
   echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
   echo "[INFO] motion_dir=${OMOMO_DATA_DIR}"
   echo "[INFO] object_urdf=${OMOMO_OBJECT_MAP}"
+  echo "[INFO] as_expected_total=${AS_EXPECTED_TOTAL}"
   echo "[INFO] num_envs=${NUM_ENVS}"
   echo "[INFO] object_spawn_mode=${HOLOSOMA_OBJECT_SPAWN_MODE}"
+  echo "[INFO] require_single_slot_objects=${HOLOSOMA_REQUIRE_SINGLE_SLOT_OBJECTS}"
+  echo "[INFO] shard_object_assets_by_rank=${HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK}"
   echo "[INFO] object_geometry_mode=${HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE}"
   echo "[INFO] start_at_timestep_zero_prob=${START_AT_TIMESTEP_ZERO_PROB}"
   echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}"
@@ -604,6 +690,107 @@ else
   fi
 
   "${cmd[@]}"
+
+  if is_truthy "${VALIDATE_OUTPUT_FORMAT}"; then
+    "${PYTHON_BIN}" - "${OUTPUT_DIR}" "${AS_EXPECTED_TOTAL}" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+
+output_root = Path(sys.argv[1]).expanduser().resolve()
+expected_raw = sys.argv[2].strip()
+expected = int(expected_raw) if expected_raw else None
+clips_root = output_root / "clips"
+motion_bank = output_root / "motion_bank"
+
+if not clips_root.is_dir():
+    raise SystemExit(f"[ERROR] Export format validation failed: missing clips dir {clips_root}")
+if not motion_bank.is_dir():
+    raise SystemExit(f"[ERROR] Export format validation failed: missing motion_bank dir {motion_bank}")
+
+clip_dirs = sorted(path for path in clips_root.iterdir() if path.is_dir())
+motion_files = sorted(motion_bank.glob("*.npz"))
+if expected is not None and len(clip_dirs) != expected:
+    raise SystemExit(
+        f"[ERROR] Export format validation failed: expected {expected} clip dirs, found {len(clip_dirs)}"
+    )
+if expected is not None and len(motion_files) != expected:
+    raise SystemExit(
+        f"[ERROR] Export format validation failed: expected {expected} rollout motion files, found {len(motion_files)}"
+    )
+if not clip_dirs:
+    raise SystemExit(f"[ERROR] Export format validation failed: no clip dirs under {clips_root}")
+
+required_files = (
+    "teacher_rollout_reference.npz",
+    "primitive_contact_points.npy",
+    "primitive_contact_point_counts.npy",
+    "contact_intervals.json",
+    "contact_intervals.npz",
+)
+region_labels = (
+    "left_wrist",
+    "right_wrist",
+    "arm",
+    "left_elbow",
+    "right_elbow",
+    "left_wrist_roll",
+    "right_wrist_roll",
+    "left_wrist_pitch",
+    "right_wrist_pitch",
+    "torso",
+)
+
+missing: list[str] = []
+bad_shapes: list[str] = []
+for clip_dir in clip_dirs:
+    clip_required_files = list(required_files)
+    for label in region_labels:
+        clip_required_files.extend(
+            (
+                f"{label}_contact_points.npy",
+                f"{label}_contact_point_counts.npy",
+                f"{label}_contact_interval_steps.npy",
+            )
+        )
+    for file_name in clip_required_files:
+        path = clip_dir / file_name
+        if not path.is_file():
+            missing.append(f"{clip_dir.name}/{file_name}")
+            continue
+        if file_name.endswith("_contact_points.npy"):
+            arr = np.load(path)
+            if arr.ndim != 2 or arr.shape[1] != 3:
+                bad_shapes.append(f"{clip_dir.name}/{file_name}:{arr.shape}")
+        elif file_name.endswith("_contact_point_counts.npy"):
+            arr = np.load(path)
+            if arr.ndim != 1:
+                bad_shapes.append(f"{clip_dir.name}/{file_name}:{arr.shape}")
+        elif file_name.endswith("_contact_interval_steps.npy"):
+            arr = np.load(path)
+            if arr.shape != (2,):
+                bad_shapes.append(f"{clip_dir.name}/{file_name}:{arr.shape}")
+    interval_payload = json.loads((clip_dir / "contact_intervals.json").read_text(encoding="utf-8"))
+    if not isinstance(interval_payload, dict):
+        bad_shapes.append(f"{clip_dir.name}/contact_intervals.json:not_dict")
+
+if missing:
+    preview = ", ".join(missing[:20])
+    raise SystemExit(f"[ERROR] Export format validation failed: missing files: {preview}")
+if bad_shapes:
+    preview = ", ".join(bad_shapes[:20])
+    raise SystemExit(f"[ERROR] Export format validation failed: invalid array/json shapes: {preview}")
+
+print(
+    f"[INFO] Validated AS contact export format: {len(clip_dirs)} clips, "
+    f"{len(motion_files)} rollout motion files -> {output_root}"
+)
+PY
+  fi
 fi
 
 if is_truthy "${PUBLISH_FOR_INFER_BOX}"; then

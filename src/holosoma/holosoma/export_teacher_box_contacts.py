@@ -91,6 +91,15 @@ _REGION_SPECS.update(
     }
 )
 _EXPORT_REGION_LABELS = tuple(str(spec["label"]) for spec in _REGION_SPECS.values())
+_LEGACY_ARM_AGGREGATE_LABEL = "arm"
+_LEGACY_ARM_AGGREGATE_REGION_LABELS = (
+    "left_elbow",
+    "right_elbow",
+    "left_wrist_roll",
+    "right_wrist_roll",
+    "left_wrist_pitch",
+    "right_wrist_pitch",
+)
 
 _CONTACT_SENSOR_BODY_NAMES = tuple(
     dict.fromkeys(
@@ -1559,6 +1568,38 @@ def _finalize_clip_output(
         )
         contact_intervals_by_region[label] = interval_steps
         np.save(accumulator.clip_dir / f"{label}_contact_interval_steps.npy", interval_steps)
+
+    legacy_arm_point_counts: dict[tuple[int, int, int], int] = defaultdict(int)
+    for label in _LEGACY_ARM_AGGREGATE_REGION_LABELS:
+        for key, count in accumulator.region_point_counts[label].items():
+            legacy_arm_point_counts[key] += count
+    legacy_arm_points_xyz, legacy_arm_counts = _retained_points_from_counts(
+        legacy_arm_point_counts,
+        voxel_size=export_cfg.contact_voxel_size,
+        min_frames=export_cfg.min_contact_frames,
+    )
+    np.save(accumulator.clip_dir / f"{_LEGACY_ARM_AGGREGATE_LABEL}_contact_points.npy", legacy_arm_points_xyz)
+    np.save(accumulator.clip_dir / f"{_LEGACY_ARM_AGGREGATE_LABEL}_contact_point_counts.npy", legacy_arm_counts)
+
+    legacy_arm_intervals: list[tuple[int, int]] = []
+    for label in _LEGACY_ARM_AGGREGATE_REGION_LABELS:
+        start_step = int(accumulator.region_contact_interval_start[label])
+        end_step = int(accumulator.region_contact_interval_end[label])
+        if start_step >= 0 and end_step > start_step:
+            legacy_arm_intervals.append((start_step, end_step))
+    legacy_arm_interval_steps = (
+        np.asarray(
+            [min(start for start, _ in legacy_arm_intervals), max(end for _, end in legacy_arm_intervals)],
+            dtype=np.int32,
+        )
+        if legacy_arm_intervals
+        else np.asarray([-1, -1], dtype=np.int32)
+    )
+    contact_intervals_by_region[_LEGACY_ARM_AGGREGATE_LABEL] = legacy_arm_interval_steps
+    np.save(
+        accumulator.clip_dir / f"{_LEGACY_ARM_AGGREGATE_LABEL}_contact_interval_steps.npy",
+        legacy_arm_interval_steps,
+    )
 
     np.savez(
         accumulator.clip_dir / "contact_intervals.npz",
