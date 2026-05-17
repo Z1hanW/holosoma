@@ -74,6 +74,12 @@ case "${REWARD_CONFIG_NORMALIZED}" in
     USE_TEACHER_ROLLOUT_REWARD=1
     ;;
 esac
+USE_OFFLINE_CONTACT_GUIDANCE=0
+case "${REWARD_CONFIG_NORMALIZED}" in
+  *offline-contact-guidance*)
+    USE_OFFLINE_CONTACT_GUIDANCE=1
+    ;;
+esac
 WANDB_PROJECT=${WANDB_PROJECT:-boxer}
 WANDB_ENTITY=${WANDB_ENTITY:-""}
 WANDB_RUN_ID=${WANDB_RUN_ID:-${RESUME_WANDB_ID:-""}}
@@ -228,6 +234,16 @@ GENERALIST_CONTACT_REWARD_ENABLED=${GENERALIST_CONTACT_REWARD_ENABLED:-1}
 GENERALIST_CONTACT_REWARD_MODE=${GENERALIST_CONTACT_REWARD_MODE:-tanh}
 GENERALIST_CONTACT_REWARD_THRESHOLD=${GENERALIST_CONTACT_REWARD_THRESHOLD:-1.0}
 GENERALIST_CONTACT_REWARD_FORCE_SCALE=${GENERALIST_CONTACT_REWARD_FORCE_SCALE:-25.0}
+DEFAULT_AS_CONTACT_EXPORT_ROOT="data/ds_as_data/carryany_filter_scale_noscale_keep169_20260513/contact_export_from_retarget"
+CONTACT_EXPORT_ROOT=${CONTACT_EXPORT_ROOT:-${AS_CONTACT_EXPORT_ROOT:-}}
+CONTACT_EXPORT_CLIPS_ROOT=""
+OFFLINE_WRIST_TARGET_GUIDANCE_WEIGHT=${OFFLINE_WRIST_TARGET_GUIDANCE_WEIGHT:-1.5}
+OFFLINE_CONTACT_GUIDANCE_WEIGHT=${OFFLINE_CONTACT_GUIDANCE_WEIGHT:-2.5}
+OFFLINE_CONTACT_POSITION_SIGMA=${OFFLINE_CONTACT_POSITION_SIGMA:-0.08}
+OFFLINE_CONTACT_FORCE_THRESHOLD=${OFFLINE_CONTACT_FORCE_THRESHOLD:-1.0}
+OFFLINE_CONTACT_FORCE_SIGMA=${OFFLINE_CONTACT_FORCE_SIGMA:-10.0}
+OFFLINE_CONTACT_SCHEDULE_RELAX_STEPS=${OFFLINE_CONTACT_SCHEDULE_RELAX_STEPS:-5}
+ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT=${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT:-}
 REFERENCE_ROOT_POS_W=${REFERENCE_ROOT_POS_W:-0.5}
 REFERENCE_ROOT_ORI_W=${REFERENCE_ROOT_ORI_W:-0.5}
 REFERENCE_FULL_BODY_POS_W=${REFERENCE_FULL_BODY_POS_W:-1.0}
@@ -2206,11 +2222,53 @@ if [[ "${GENERALIST_CONTACT_REWARD_ENABLED_FLAG}" != "1" ]]; then
   GENERALIST_ARM_CONTACT_REWARD_WEIGHT=0.0
   GENERALIST_PALM_CONTACT_REWARD_WEIGHT=0.0
 fi
+if [[ "${USE_OFFLINE_CONTACT_GUIDANCE}" == "1" ]]; then
+  GENERALIST_TORSO_CONTACT_REWARD_WEIGHT=0.0
+  GENERALIST_ARM_CONTACT_REWARD_WEIGHT=0.0
+  GENERALIST_PALM_CONTACT_REWARD_WEIGHT=0.0
+fi
 CONTACT_REWARD_TERMS=(
   "palms:${GENERALIST_PALM_CONTACT_REWARD_WEIGHT}"
   "arms:${GENERALIST_ARM_CONTACT_REWARD_WEIGHT}"
   "torso:${GENERALIST_TORSO_CONTACT_REWARD_WEIGHT}"
 )
+
+if [[ "${USE_OFFLINE_CONTACT_GUIDANCE}" == "1" && -z "${CONTACT_EXPORT_ROOT}" ]]; then
+  CONTACT_EXPORT_ROOT="${DEFAULT_AS_CONTACT_EXPORT_ROOT}"
+fi
+if [[ -n "${CONTACT_EXPORT_ROOT}" ]]; then
+  CONTACT_EXPORT_ROOT=$(realpath -m "${CONTACT_EXPORT_ROOT}")
+  LOCAL_DATA_ROOT=$(realpath -m "${SCRIPT_DIR}/data")
+  case "${CONTACT_EXPORT_ROOT}" in
+    /nfs|/nfs/*)
+      echo "[ERROR] CONTACT_EXPORT_ROOT must be local, not NFS: ${CONTACT_EXPORT_ROOT}" >&2
+      echo "[ERROR] Copy contact_export_from_retarget under data/ds_as_data/ first." >&2
+      exit 2
+      ;;
+  esac
+  case "${CONTACT_EXPORT_ROOT}" in
+    "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
+      ;;
+    *)
+      echo "[ERROR] CONTACT_EXPORT_ROOT must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
+      echo "[ERROR] Got: ${CONTACT_EXPORT_ROOT}" >&2
+      exit 2
+      ;;
+  esac
+  if [[ "${USE_OFFLINE_CONTACT_GUIDANCE}" == "1" && ! -d "${CONTACT_EXPORT_ROOT}" ]]; then
+    echo "[ERROR] Missing local contact export root: ${CONTACT_EXPORT_ROOT}" >&2
+    echo "[ERROR] Expected copied data at: ${DEFAULT_AS_CONTACT_EXPORT_ROOT}" >&2
+    exit 2
+  fi
+  if [[ -d "${CONTACT_EXPORT_ROOT}/clips" ]]; then
+    CONTACT_EXPORT_CLIPS_ROOT=$(realpath -m "${CONTACT_EXPORT_ROOT}/clips")
+  else
+    CONTACT_EXPORT_CLIPS_ROOT="${CONTACT_EXPORT_ROOT}"
+  fi
+  if [[ -z "${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}" ]]; then
+    ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT="${CONTACT_EXPORT_CLIPS_ROOT}"
+  fi
+fi
 
 default_pose_prepend_enabled_normalized=$(echo "${DEFAULT_POSE_PREPEND_ENABLED}" | tr '[:upper:]' '[:lower:]')
 case "${default_pose_prepend_enabled_normalized}" in
@@ -2247,7 +2305,15 @@ echo "[INFO] Clip weighting strategy: ${CLIP_WEIGHTING_STRATEGY}"
 echo "[INFO] Within-clip adaptive timestep sampler: ${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
 echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}"
 echo "[INFO] Termination defaults: BadTracking full 3D + motion_ends"
-echo "[INFO] REWARD_CONFIG=${REWARD_CONFIG} teacher_rollout_reward=${USE_TEACHER_ROLLOUT_REWARD}"
+echo "[INFO] REWARD_CONFIG=${REWARD_CONFIG} teacher_rollout_reward=${USE_TEACHER_ROLLOUT_REWARD} offline_contact_guidance=${USE_OFFLINE_CONTACT_GUIDANCE}"
+if [[ -n "${CONTACT_EXPORT_ROOT}" ]]; then
+  echo "[INFO] contact_export_root=${CONTACT_EXPORT_ROOT}"
+  echo "[INFO] contact_export_clips_root=${CONTACT_EXPORT_CLIPS_ROOT}"
+  echo "[INFO] offline_contact weights target=${OFFLINE_WRIST_TARGET_GUIDANCE_WEIGHT} force_gated=${OFFLINE_CONTACT_GUIDANCE_WEIGHT} position_sigma=${OFFLINE_CONTACT_POSITION_SIGMA} force_threshold=${OFFLINE_CONTACT_FORCE_THRESHOLD}"
+fi
+if [[ -n "${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}" ]]; then
+  echo "[INFO] adaptive_sampling_contact_interval_root=${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}"
+fi
 echo "[INFO] GPU_SELECTION=all-visible"
 echo "[INFO] AVAILABLE_GPU_COUNT=${AVAILABLE_GPU_COUNT}"
 echo "[INFO] NPROC=${NPROC} PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
@@ -2298,6 +2364,11 @@ train_cmd=(
   --command.setup-terms.motion-command.params.motion-config.enable-default-pose-prepend="${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
   --command.setup-terms.motion-command.params.motion-config.default-pose-prepend-duration-s="${DEFAULT_POSE_PREPEND_DURATION_S}"
 )
+if [[ -n "${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}" ]]; then
+  train_cmd+=(
+    --command.setup-terms.motion-command.params.motion-config.adaptive-sampling-contact-interval-root="${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}"
+  )
+fi
 if [[ -n "${POLICY_HISTORY_LENGTH}" ]]; then
   train_cmd+=(
     --observation.groups.actor_obs.history-length "${POLICY_HISTORY_LENGTH}"
@@ -2357,6 +2428,24 @@ else
     --reward.terms.object-global-ref-orientation-error-exp.params.sigma="${OBJECT_ORI_SIGMA}"
   )
 fi
+if [[ "${USE_OFFLINE_CONTACT_GUIDANCE}" == "1" ]]; then
+  train_cmd+=(
+    --reward.terms.offline-wrist-target-guidance.weight="${OFFLINE_WRIST_TARGET_GUIDANCE_WEIGHT}"
+    --reward.terms.offline-contact-guidance.weight="${OFFLINE_CONTACT_GUIDANCE_WEIGHT}"
+    --reward.terms.offline-wrist-target-guidance.params.position-sigma="${OFFLINE_CONTACT_POSITION_SIGMA}"
+    --reward.terms.offline-contact-guidance.params.position-sigma="${OFFLINE_CONTACT_POSITION_SIGMA}"
+    --reward.terms.offline-contact-guidance.params.force-threshold="${OFFLINE_CONTACT_FORCE_THRESHOLD}"
+    --reward.terms.offline-contact-guidance.params.force-sigma="${OFFLINE_CONTACT_FORCE_SIGMA}"
+    --reward.terms.offline-wrist-target-guidance.params.contact-schedule-relax-steps="${OFFLINE_CONTACT_SCHEDULE_RELAX_STEPS}"
+    --reward.terms.offline-contact-guidance.params.contact-schedule-relax-steps="${OFFLINE_CONTACT_SCHEDULE_RELAX_STEPS}"
+  )
+  if [[ -n "${CONTACT_EXPORT_ROOT}" ]]; then
+    train_cmd+=(
+      --reward.terms.offline-wrist-target-guidance.params.contact-export-root "${CONTACT_EXPORT_ROOT}"
+      --reward.terms.offline-contact-guidance.params.contact-export-root "${CONTACT_EXPORT_ROOT}"
+    )
+  fi
+fi
 if [[ -n "${TRAINING_SEED}" ]]; then
   train_cmd+=(--training.seed="${TRAINING_SEED}")
 fi
@@ -2365,6 +2454,8 @@ if [[ -n "${INIT_AT_RANDOM_EP_LEN}" ]]; then
 fi
 if [[ "${USE_TEACHER_ROLLOUT_REWARD}" == "1" ]]; then
   echo "[INFO] Teacher-rollout reward config active; skipping body-contact-reward term overrides."
+elif [[ "${USE_OFFLINE_CONTACT_GUIDANCE}" == "1" ]]; then
+  echo "[INFO] Offline contact guidance active; skipping coarse body-contact-reward term overrides."
 else
   for reward_spec in "${CONTACT_REWARD_TERMS[@]}"; do
     reward_term="${reward_spec%%:*}"

@@ -13,6 +13,8 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
 
 DEFAULT_AS_BANK=carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout
+DEFAULT_KEEP_AS_BANK=carryany_filter_scale_noscale_keep169_20260513
+DEFAULT_LOCAL_AS_CONTACT_EXPORT_ROOT="data/ds_as_data/${DEFAULT_KEEP_AS_BANK}/contact_export_from_retarget"
 AS_DATA_DIR=${AS_DATA_DIR:-${OMOMO_DATA_DIR:-"data/ds_as_data/${DEFAULT_AS_BANK}"}}
 AS_OBJECT_MAP=${AS_OBJECT_MAP:-${OMOMO_OBJECT_MAP:-"${AS_DATA_DIR}/_clip_object_urdf_map.json"}}
 AS_EXPECTED_TOTAL=${AS_EXPECTED_TOTAL:-${OMOMO_EXPECTED_TOTAL:-197}}
@@ -45,6 +47,15 @@ export PER_GPU_ENVS=${PER_GPU_ENVS:-8192}
 LOCAL_DATA_ROOT=$(realpath -m "data")
 AS_DATA_DIR_ABS=$(realpath -m "${AS_DATA_DIR}")
 AS_OBJECT_MAP_ABS=$(realpath -m "${AS_OBJECT_MAP}")
+
+if [[ -z "${CONTACT_EXPORT_ROOT:-}" && -z "${AS_CONTACT_EXPORT_ROOT:-}" ]]; then
+  CONTACT_EXPORT_ROOT="${DEFAULT_LOCAL_AS_CONTACT_EXPORT_ROOT}"
+else
+  CONTACT_EXPORT_ROOT="${CONTACT_EXPORT_ROOT:-${AS_CONTACT_EXPORT_ROOT}}"
+fi
+if [[ -n "${CONTACT_EXPORT_ROOT}" ]]; then
+  CONTACT_EXPORT_ROOT=$(realpath -m "${CONTACT_EXPORT_ROOT}")
+fi
 
 case "${AS_DATA_DIR_ABS}" in
   /nfs|/nfs/*)
@@ -79,6 +90,23 @@ case "${AS_OBJECT_MAP_ABS}" in
     ;;
 esac
 
+case "${CONTACT_EXPORT_ROOT}" in
+  /nfs|/nfs/*)
+    echo "[ERROR] CONTACT_EXPORT_ROOT must be local, not NFS: ${CONTACT_EXPORT_ROOT}" >&2
+    echo "[ERROR] Copy contact_export_from_retarget under data/ds_as_data/ first." >&2
+    exit 2
+    ;;
+esac
+case "${CONTACT_EXPORT_ROOT}" in
+  "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
+    ;;
+  *)
+    echo "[ERROR] CONTACT_EXPORT_ROOT must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
+    echo "[ERROR] Got: ${CONTACT_EXPORT_ROOT}" >&2
+    exit 2
+    ;;
+esac
+
 if [[ ! -d "${AS_DATA_DIR_ABS}" ]]; then
   echo "[ERROR] AS_DATA_DIR does not exist: ${AS_DATA_DIR}" >&2
   echo "[ERROR] Run ./cp_as.sh first, or set AS_DATA_DIR to a prepared motion bank under data/." >&2
@@ -93,6 +121,12 @@ fi
 
 if [[ ! -f "${AS_OBJECT_MAP_ABS}" ]]; then
   echo "[ERROR] Missing clip-object URDF map: ${AS_OBJECT_MAP}" >&2
+  exit 2
+fi
+
+if [[ ! -d "${CONTACT_EXPORT_ROOT}" ]]; then
+  echo "[ERROR] Missing local contact export root: ${CONTACT_EXPORT_ROOT}" >&2
+  echo "[ERROR] Expected copied data at: ${DEFAULT_LOCAL_AS_CONTACT_EXPORT_ROOT}" >&2
   exit 2
 fi
 
@@ -329,7 +363,9 @@ export HOLOSOMA_OBJECT_COLLIDER_TYPE=${HOLOSOMA_OBJECT_COLLIDER_TYPE:-convex_dec
 unset OBJECT_GEOMETRY_MODE
 export EXP=${EXP:-g1-29dof-wbt-w-object-generalist}
 export COMMAND_CONFIG=${COMMAND_CONFIG:-g1-29dof-wbt-w-object-generalist}
-export REWARD_CONFIG=${REWARD_CONFIG:-g1-29dof-wbt-w-object-generalist}
+export REWARD_CONFIG=${REWARD_CONFIG:-g1-29dof-wbt-w-object-generalist-offline-contact-guidance}
+export CONTACT_EXPORT_ROOT
+export GENERALIST_CONTACT_REWARD_ENABLED=${GENERALIST_CONTACT_REWARD_ENABLED:-0}
 export DISABLE_ACTOR_HISTORY=False
 export DISABLE_CRITIC_HISTORY=False
 export POLICY_HISTORY_LENGTH
@@ -379,6 +415,7 @@ echo "[INFO] Launching AS real-mesh co-tracking generalist training"
 echo "[INFO] MOTION_DIR=${MOTION_DIR}"
 echo "[INFO] OBJECT_SPEC_PATH=${OBJECT_SPEC_PATH}"
 echo "[INFO] REWARD_CONFIG=${REWARD_CONFIG}"
+echo "[INFO] CONTACT_EXPORT_ROOT=${CONTACT_EXPORT_ROOT:-<unset>}"
 echo "[INFO] RESUME_FROM_BOX=${RESUME_FROM_BOX}"
 if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
   echo "[INFO] BOX_POLICY_INIT_CKPT=${POLICY_INIT_CKPT}"
