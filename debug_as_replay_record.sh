@@ -38,6 +38,7 @@ Environment knobs:
   DRY_RUN                           1 prints replay commands without launching.
   SKIP_EXISTING                     1 skips clips whose video dir already has mp4 files.
   KEEP_GOING                        1 continues after a failed clip. Default: 1.
+  EXIT_AFTER_VIDEO                  1 treats saved video as success if Isaac Sim shutdown hangs. Default: 1.
 EOF
 }
 
@@ -262,6 +263,67 @@ DRY_RUN=${DRY_RUN:-0}
 SKIP_EXISTING=${SKIP_EXISTING:-0}
 KEEP_GOING=${KEEP_GOING:-1}
 TEE_LOGS=${TEE_LOGS:-1}
+EXIT_AFTER_VIDEO=${EXIT_AFTER_VIDEO:-1}
+VIDEO_SAVE_GRACE_SECONDS=${VIDEO_SAVE_GRACE_SECONDS:-5}
+VIDEO_SAVE_POLL_SECONDS=${VIDEO_SAVE_POLL_SECONDS:-2}
+
+is_truthy() {
+  case "$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+run_replay_with_video_watchdog() {
+  local log_path="$1"
+  local watch_clip_id="$2"
+  shift 2
+  local child_pid
+  local saved_at=0
+  local status=0
+
+  : >"${log_path}"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$@" </dev/null >>"${log_path}" 2>&1 &
+  else
+    "$@" </dev/null >>"${log_path}" 2>&1 &
+  fi
+  child_pid=$!
+
+  while kill -0 "${child_pid}" 2>/dev/null; do
+    if grep -q "Successfully saved video file:" "${log_path}" 2>/dev/null; then
+      if [[ "${saved_at}" == "0" ]]; then
+        saved_at=$(date +%s)
+        echo "[INFO]   saved video for ${watch_clip_id}; waiting ${VIDEO_SAVE_GRACE_SECONDS}s for Isaac Sim shutdown"
+      elif (( $(date +%s) - saved_at >= VIDEO_SAVE_GRACE_SECONDS )); then
+        echo "[WARN]   Isaac Sim shutdown still running after video save for ${watch_clip_id}; stopping child process"
+        kill -TERM "-${child_pid}" 2>/dev/null || kill -TERM "${child_pid}" 2>/dev/null || true
+        sleep 2
+        if kill -0 "${child_pid}" 2>/dev/null; then
+          kill -KILL "-${child_pid}" 2>/dev/null || kill -KILL "${child_pid}" 2>/dev/null || true
+        fi
+        wait "${child_pid}" 2>/dev/null || true
+        return 0
+      fi
+    fi
+    sleep "${VIDEO_SAVE_POLL_SECONDS}"
+  done
+
+  if wait "${child_pid}"; then
+    status=0
+  else
+    status=$?
+  fi
+  if [[ "${status}" != "0" ]] && grep -q "Successfully saved video file:" "${log_path}" 2>/dev/null; then
+    echo "[WARN]   replay exited with status ${status} after saving video for ${watch_clip_id}; treating as success"
+    return 0
+  fi
+  return "${status}"
+}
 
 total=$(wc -l < "${AS_MANIFEST}" | tr -d '[:space:]')
 index=0
@@ -346,21 +408,30 @@ while IFS=$'\t' read -r clip_id pair_dir pair_map object_urdf source_npz video_d
 
   safe_clip_log_name="${clip_id//[^A-Za-z0-9_.-]/_}"
   log_path="${AS_LOG_DIR}/${index}_${safe_clip_log_name}.log"
-  if [[ "${TEE_LOGS}" == "1" ]]; then
-    if ! "${cmd[@]}" 2>&1 | tee "${log_path}"; then
-      failed=$((failed + 1))
-      echo "[ERROR] Replay failed for ${clip_id}; log=${log_path}" >&2
-      if [[ "${KEEP_GOING}" != "1" ]]; then
-        exit 1
-      fi
+  clip_failed=0
+  if is_truthy "${EXIT_AFTER_VIDEO}"; then
+    if ! run_replay_with_video_watchdog "${log_path}" "${clip_id}" "${cmd[@]}"; then
+      clip_failed=1
+    fi
+  elif [[ "${TEE_LOGS}" == "1" ]]; then
+    if ! "${cmd[@]}" </dev/null 2>&1 | tee "${log_path}"; then
+      clip_failed=1
     fi
   else
-    if ! "${cmd[@]}" >"${log_path}" 2>&1; then
-      failed=$((failed + 1))
-      echo "[ERROR] Replay failed for ${clip_id}; log=${log_path}" >&2
-      if [[ "${KEEP_GOING}" != "1" ]]; then
-        exit 1
-      fi
+    if ! "${cmd[@]}" </dev/null >"${log_path}" 2>&1; then
+      clip_failed=1
+    fi
+  fi
+
+  if [[ "${clip_failed}" == "0" ]] && ! compgen -G "${video_dir}/*.mp4" >/dev/null; then
+    echo "[ERROR] Replay produced no mp4 for ${clip_id}; log=${log_path}" >&2
+    clip_failed=1
+  fi
+  if [[ "${clip_failed}" != "0" ]]; then
+    failed=$((failed + 1))
+    echo "[ERROR] Replay failed for ${clip_id}; log=${log_path}" >&2
+    if [[ "${KEEP_GOING}" != "1" ]]; then
+      exit 1
     fi
   fi
 done < "${AS_MANIFEST}"
