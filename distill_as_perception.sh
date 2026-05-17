@@ -17,6 +17,7 @@ Usage:
   bash distill_as_perception.sh [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra args...]
   TEACHER_CHECKPOINT=<teacher_checkpoint> bash distill_as_perception.sh [extra args...]
   RESUME_FROM_BOX=1 bash distill_as_perception.sh [extra args...]
+  bash distill_as_perception.sh success133 [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra args...]
 
 Examples:
   bash distill_as_perception.sh /data/logs_new/carry-any/<run>/model_01000.pt
@@ -32,7 +33,7 @@ the repo-local AS/OMOMO real-mesh bank by default:
 
 If no teacher checkpoint is passed, the default teacher is the latest model
 from:
-  https://wandb.ai/zihanw22/carry-any/runs/gml45u7p
+  https://wandb.ai/zihanw22/carry-any/runs/bcleb5oi
 
 With RESUME_FROM_BOX=1, the student policy parameters are initialized from the
 checkpoint in:
@@ -44,6 +45,13 @@ and the motion/contact bank switches to the repo-local keep169 AS bank with
 retargeted contact sidecars. Run ./cp_as.sh first to copy them from NFS:
   data/ds_as_data/carryany_filter_scale_noscale_keep169_20260513
   data/ds_as_data/carryany_filter_scale_noscale_keep169_20260513/contact_export_from_retarget
+
+For the teacher-rollout filtered 133-clip AS bank:
+  bash cp_tao.sh success133
+  bash distill_as_perception.sh success133
+The success133 mode uses contact-aware student inputs by default. Add
+RESUME_FROM_BOX=1 or the resume-from-box alias only when you also want box
+policy parameter initialization.
 EOF
 }
 
@@ -201,6 +209,8 @@ normalize_wandb_checkpoint_ref() {
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
+AS_SUCCESS133_FINAL0P5=${AS_SUCCESS133_FINAL0P5:-0}
+AS_CONTACT_AWARE=${AS_CONTACT_AWARE:-${CONTACT_AWARE:-}}
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
@@ -219,6 +229,18 @@ while [[ $# -gt 0 ]]; do
       RESUME_FROM_BOX=1
       shift
       ;;
+    success133|as-success133|as_success133|success133-final0p5|success133_final0p5)
+      AS_SUCCESS133_FINAL0P5=1
+      shift
+      ;;
+    contact-aware|contact_aware|contactaware)
+      AS_CONTACT_AWARE=1
+      shift
+      ;;
+    no-contact-aware|no_contact_aware|no-contactaware|no_contactaware)
+      AS_CONTACT_AWARE=0
+      shift
+      ;;
     as|as-perception|as_perception|omomo|omomo-real|omomo_real|pure-real|pure_real|pure-omomo|pure_omomo|real)
       shift
       ;;
@@ -228,7 +250,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-DEFAULT_AS_TEACHER_CHECKPOINT=${DEFAULT_AS_TEACHER_CHECKPOINT:-"https://wandb.ai/zihanw22/carry-any/runs/gml45u7p"}
+DEFAULT_AS_TEACHER_CHECKPOINT=${DEFAULT_AS_TEACHER_CHECKPOINT:-"https://wandb.ai/zihanw22/carry-any/runs/bcleb5oi"}
 TEACHER_CHECKPOINT=${TEACHER_CHECKPOINT:-${CKPT:-${DEFAULT_AS_TEACHER_CHECKPOINT}}}
 if [[ $# -gt 0 ]] && is_checkpoint_ref "$1"; then
   TEACHER_CHECKPOINT="$1"
@@ -243,6 +265,18 @@ fi
 
 PYTHON_BIN=${PYTHON_BIN:-python}
 WANDB_PROJECT=${WANDB_PROJECT:-carry-any}
+case "$(echo "${AS_SUCCESS133_FINAL0P5}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    AS_SUCCESS133_FINAL0P5=1
+    ;;
+  0|false|no|off|"")
+    AS_SUCCESS133_FINAL0P5=0
+    ;;
+  *)
+    echo "[ERROR] AS_SUCCESS133_FINAL0P5 must be a boolean. Got: ${AS_SUCCESS133_FINAL0P5}" >&2
+    exit 2
+    ;;
+esac
 RESUME_FROM_BOX=${RESUME_FROM_BOX:-0}
 case "$(echo "${RESUME_FROM_BOX}" | tr '[:upper:]' '[:lower:]')" in
   1|true|yes|on)
@@ -256,26 +290,66 @@ case "$(echo "${RESUME_FROM_BOX}" | tr '[:upper:]' '[:lower:]')" in
     exit 2
     ;;
 esac
+if [[ -z "${AS_CONTACT_AWARE}" ]]; then
+  if [[ "${AS_SUCCESS133_FINAL0P5}" == "1" || "${RESUME_FROM_BOX}" == "1" ]]; then
+    AS_CONTACT_AWARE=1
+  else
+    AS_CONTACT_AWARE=0
+  fi
+fi
+case "$(echo "${AS_CONTACT_AWARE}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    AS_CONTACT_AWARE=1
+    ;;
+  0|false|no|off|"")
+    AS_CONTACT_AWARE=0
+    ;;
+  *)
+    echo "[ERROR] AS_CONTACT_AWARE must be a boolean. Got: ${AS_CONTACT_AWARE}" >&2
+    exit 2
+    ;;
+esac
 
 DEFAULT_RESUME_FROM_BOX_AS_BANK=${DEFAULT_RESUME_FROM_BOX_AS_BANK:-carryany_filter_scale_noscale_keep169_20260513}
 DEFAULT_RESUME_FROM_BOX_LOCAL_DATA_DIR="${SCRIPT_DIR}/data/ds_as_data/${DEFAULT_RESUME_FROM_BOX_AS_BANK}"
 DEFAULT_RESUME_FROM_BOX_LOCAL_CONTACT_ROOT="${DEFAULT_RESUME_FROM_BOX_LOCAL_DATA_DIR}/contact_export_from_retarget"
 DEFAULT_RESUME_FROM_BOX_CONTACT_ROOT="${DEFAULT_RESUME_FROM_BOX_LOCAL_CONTACT_ROOT}"
 DEFAULT_RESUME_FROM_BOX_DATA_DIR="${DEFAULT_RESUME_FROM_BOX_LOCAL_DATA_DIR}"
+AS_SUCCESS133_BANK_NAME=${AS_SUCCESS133_BANK_NAME:-carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5}
+AS_SUCCESS133_DATA_DIR="${SCRIPT_DIR}/data/ds_as_data/${AS_SUCCESS133_BANK_NAME}"
+AS_SUCCESS133_CONTACT_EXPORT_ROOT="${AS_SUCCESS133_DATA_DIR}/contact_export_from_teacher_success133_final0p5"
 DEFAULT_BOX_RESUME_RUN=${DEFAULT_BOX_RESUME_RUN:-"https://wandb.ai/zihanw22/boxer/runs/6c7exbeq"}
 DEFAULT_BOX_RESUME_MODEL_FILE=${DEFAULT_BOX_RESUME_MODEL_FILE:-model_11000.pt}
 BOX_RESUME_MODEL_FILE=${BOX_RESUME_MODEL_FILE:-${WANDB_MODEL_FILE:-${DEFAULT_BOX_RESUME_MODEL_FILE}}}
 DEFAULT_BOX_RESUME_CHECKPOINT=${DEFAULT_BOX_RESUME_CHECKPOINT:-"${DEFAULT_BOX_RESUME_RUN}/files/${BOX_RESUME_MODEL_FILE}"}
 BOX_RESUME_CKPT=${BOX_RESUME_CKPT:-${RESUME_FROM_BOX_CKPT:-${DEFAULT_BOX_RESUME_CHECKPOINT}}}
-RESUME_FROM_BOX_AS_DATA_DIR=${RESUME_FROM_BOX_AS_DATA_DIR:-${AS_RESUME_DATA_DIR:-"${DEFAULT_RESUME_FROM_BOX_DATA_DIR}"}}
-RESUME_FROM_BOX_AS_OBJECT_MAP=${RESUME_FROM_BOX_AS_OBJECT_MAP:-${AS_RESUME_OBJECT_MAP:-"${RESUME_FROM_BOX_AS_DATA_DIR}/_clip_object_urdf_map.json"}}
-RESUME_FROM_BOX_CONTACT_EXPORT_ROOT=${RESUME_FROM_BOX_CONTACT_EXPORT_ROOT:-${AS_CONTACT_EXPORT_ROOT:-"${DEFAULT_RESUME_FROM_BOX_CONTACT_ROOT}"}}
-RESUME_FROM_BOX_EXPECTED_TOTAL=${RESUME_FROM_BOX_EXPECTED_TOTAL:-169}
+if [[ "${AS_SUCCESS133_FINAL0P5}" == "1" ]]; then
+  RESUME_FROM_BOX_AS_DATA_DIR=${RESUME_FROM_BOX_AS_DATA_DIR:-${AS_RESUME_DATA_DIR:-"${AS_SUCCESS133_DATA_DIR}"}}
+  RESUME_FROM_BOX_AS_OBJECT_MAP=${RESUME_FROM_BOX_AS_OBJECT_MAP:-${AS_RESUME_OBJECT_MAP:-"${RESUME_FROM_BOX_AS_DATA_DIR}/_clip_object_urdf_map.json"}}
+  RESUME_FROM_BOX_CONTACT_EXPORT_ROOT=${RESUME_FROM_BOX_CONTACT_EXPORT_ROOT:-${AS_CONTACT_EXPORT_ROOT:-"${AS_SUCCESS133_CONTACT_EXPORT_ROOT}"}}
+  RESUME_FROM_BOX_EXPECTED_TOTAL=${RESUME_FROM_BOX_EXPECTED_TOTAL:-133}
+else
+  RESUME_FROM_BOX_AS_DATA_DIR=${RESUME_FROM_BOX_AS_DATA_DIR:-${AS_RESUME_DATA_DIR:-"${DEFAULT_RESUME_FROM_BOX_DATA_DIR}"}}
+  RESUME_FROM_BOX_AS_OBJECT_MAP=${RESUME_FROM_BOX_AS_OBJECT_MAP:-${AS_RESUME_OBJECT_MAP:-"${RESUME_FROM_BOX_AS_DATA_DIR}/_clip_object_urdf_map.json"}}
+  RESUME_FROM_BOX_CONTACT_EXPORT_ROOT=${RESUME_FROM_BOX_CONTACT_EXPORT_ROOT:-${AS_CONTACT_EXPORT_ROOT:-"${DEFAULT_RESUME_FROM_BOX_CONTACT_ROOT}"}}
+  RESUME_FROM_BOX_EXPECTED_TOTAL=${RESUME_FROM_BOX_EXPECTED_TOTAL:-169}
+fi
 
-if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
+if [[ "${AS_SUCCESS133_FINAL0P5}" == "1" ]]; then
+  OMOMO_DATA_DIR=${OMOMO_DATA_DIR:-"${AS_SUCCESS133_DATA_DIR}"}
+  OMOMO_OBJECT_MAP=${OMOMO_OBJECT_MAP:-"${AS_SUCCESS133_DATA_DIR}/_clip_object_urdf_map.json"}
+  OMOMO_EXPECTED_TOTAL=${OMOMO_EXPECTED_TOTAL:-133}
+elif [[ "${RESUME_FROM_BOX}" == "1" ]]; then
   OMOMO_DATA_DIR=${OMOMO_DATA_DIR:-"${RESUME_FROM_BOX_AS_DATA_DIR}"}
   OMOMO_OBJECT_MAP=${OMOMO_OBJECT_MAP:-"${RESUME_FROM_BOX_AS_OBJECT_MAP}"}
   OMOMO_EXPECTED_TOTAL=${OMOMO_EXPECTED_TOTAL:-"${RESUME_FROM_BOX_EXPECTED_TOTAL}"}
+else
+  OMOMO_DATA_DIR=${OMOMO_DATA_DIR:-"${SCRIPT_DIR}/data/ds_as_data/omomo"}
+  OMOMO_OBJECT_MAP=${OMOMO_OBJECT_MAP:-"${OMOMO_DATA_DIR}/_clip_object_urdf_map.json"}
+  OMOMO_EXPECTED_TOTAL=${OMOMO_EXPECTED_TOTAL:-45}
+fi
+
+if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
   BOX_RESUME_CKPT="$(normalize_wandb_checkpoint_ref "${BOX_RESUME_CKPT}" "${BOX_RESUME_MODEL_FILE:-}")"
   case "${BOX_RESUME_CKPT}" in
     wandb://*|*.pt)
@@ -290,10 +364,6 @@ if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
     echo "[ERROR] Use BOX_RESUME_CKPT to choose the box policy initializer." >&2
     exit 2
   fi
-else
-  OMOMO_DATA_DIR=${OMOMO_DATA_DIR:-"${SCRIPT_DIR}/data/ds_as_data/omomo"}
-  OMOMO_OBJECT_MAP=${OMOMO_OBJECT_MAP:-"${OMOMO_DATA_DIR}/_clip_object_urdf_map.json"}
-  OMOMO_EXPECTED_TOTAL=${OMOMO_EXPECTED_TOTAL:-45}
 fi
 
 LOCAL_DATA_ROOT=$(realpath -m "${SCRIPT_DIR}/data")
@@ -486,6 +556,7 @@ case "${AS_SINGLE_SLOT_MOTION_DIR_ABS}" in
 esac
 
 python3 - "${OMOMO_DATA_DIR}" "${AS_SINGLE_SLOT_MOTION_DIR_ABS}" <<'PY'
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -512,7 +583,7 @@ else:
 
 for npz_path in sorted(source_dir.glob("*.npz")):
     target = view_dir / npz_path.name
-    target.symlink_to(npz_path.resolve())
+    target.symlink_to(os.path.relpath(npz_path.resolve(), start=view_dir))
 marker.write_text("generated by distill_as_perception.sh\n", encoding="utf-8")
 PY
 
@@ -535,7 +606,7 @@ OMOMO_DATA_DIR="${AS_SINGLE_SLOT_MOTION_DIR_ABS}"
 
 CONTACT_EXPORT_ROOT=""
 CONTACT_EXPORT_CLIPS_ROOT=""
-if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
+if [[ "${AS_CONTACT_AWARE}" == "1" ]]; then
   CONTACT_EXPORT_ROOT=$(realpath -m "${RESUME_FROM_BOX_CONTACT_EXPORT_ROOT}")
   CONTACT_EXPORT_CLIPS_ROOT=$(realpath -m "${CONTACT_EXPORT_ROOT}/clips")
   if [[ ! -d "${CONTACT_EXPORT_CLIPS_ROOT}" ]]; then
@@ -607,6 +678,11 @@ PY
       )
       ;;
   esac
+  export CONTACT_EXPORT_ROOT
+  export ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT="${CONTACT_EXPORT_CLIPS_ROOT}"
+fi
+
+if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
   export POLICY_INIT_CKPT="${BOX_RESUME_CKPT}"
   unset RESUME_CKPT
   unset RESUME_CHECKPOINT
@@ -614,8 +690,6 @@ PY
   unset RESUME_WANDB_ID
   unset WANDB_RESUME
   export WANDB_RESUME_SAME_RUN=0
-  export CONTACT_EXPORT_ROOT
-  export ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT="${CONTACT_EXPORT_CLIPS_ROOT}"
 fi
 
 export WANDB_PROJECT
@@ -646,38 +720,72 @@ export DEFAULT_TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT}"
 export TEACHER_CHECKPOINT
 export TEACHER_COMPAT_PROFILE="${TEACHER_COMPAT_PROFILE:-none}"
 export TEACHER_OBS_KEYS="${TEACHER_OBS_KEYS:-actor_obs}"
+case "${TEACHER_CHECKPOINT}" in
+  *"zihanw22/carry-any/runs/bcleb5oi"*|*"zihanw22/carry-any/bcleb5oi"*)
+    export TEACHER_ACTOR_OBS_HISTORY_LENGTH="${TEACHER_ACTOR_OBS_HISTORY_LENGTH:-1}"
+    ;;
+esac
 export TEACHER_PERCEPTION_PRESET="${TEACHER_PERCEPTION_PRESET:-none}"
 export TEACHER_PERCEPTION_OBS_KEY="${TEACHER_PERCEPTION_OBS_KEY:-}"
 export TRACKER_PROFILE="${TRACKER_PROFILE:-as-general}"
 export SCHEDULE_VARIANT="${SCHEDULE_VARIANT:-ppo_first}"
 
-if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
+if [[ "${AS_CONTACT_AWARE}" == "1" ]]; then
   export EXP="${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-contact}"
-  export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_keep169_perception_init_box}"
-  export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_keep169_perception_init_box}"
+  if [[ "${AS_SUCCESS133_FINAL0P5}" == "1" && "${RESUME_FROM_BOX}" == "1" ]]; then
+    export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_success133_final0p5_perception_init_box}"
+    export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_success133_final0p5_perception_init_box}"
+  elif [[ "${AS_SUCCESS133_FINAL0P5}" == "1" ]]; then
+    export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_success133_final0p5_perception_contact}"
+    export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_success133_final0p5_perception_contact}"
+  else
+    export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_keep169_perception_init_box}"
+    export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_keep169_perception_init_box}"
+  fi
 else
   export EXP="${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd}"
-  export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_perception}"
-  export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_real_mesh_perception}"
+  if [[ "${AS_SUCCESS133_FINAL0P5}" == "1" ]]; then
+    export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_success133_final0p5_perception}"
+    export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_success133_final0p5_perception}"
+  else
+    export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_perception}"
+    export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_real_mesh_perception}"
+  fi
 fi
 export TRAINING_PROJECT="${TRAINING_PROJECT:-${WANDB_PROJECT}}"
 export PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
-if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
+if [[ "${AS_CONTACT_AWARE}" == "1" ]]; then
   export ROOT_COMMAND_MODE="${ROOT_COMMAND_MODE:-contact-aware}"
   export STUDENT_ACTOR_INPUTS="${STUDENT_ACTOR_INPUTS:-['actor_obs_root_contact_aware','actor_obs_proprio_with_actions_no_linvel']}"
-  export SCHEDULE_NAME="${SCHEDULE_NAME:-as_keep169_init_box_sparse_root_ppo_first_contact}"
-  export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS keep169 real-mesh perception distill initialized from actor policy parameters in zihanw22/boxer/6c7exbeq. Training starts from iteration 0 with current AS data/contact/schedule, uses retarget-exported left/right wrist contact sidecars for offline contact guidance and adaptive contact-window sampling, and keeps the PPO+DAgger hybrid active from iteration 0.}"
+  if [[ "${AS_SUCCESS133_FINAL0P5}" == "1" && "${RESUME_FROM_BOX}" == "1" ]]; then
+    export SCHEDULE_NAME="${SCHEDULE_NAME:-as_success133_final0p5_init_box_sparse_root_ppo_first_contact}"
+    export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS teacher-rollout filtered 133-clip real-mesh perception distill initialized from actor policy parameters in zihanw22/boxer/6c7exbeq. Clips satisfy stable_contact_success=True and final_object_position_error_m<=0.5, use teacher-exported contact sidecars for offline contact guidance and adaptive contact-window sampling, and keep the PPO+DAgger hybrid active from iteration 0.}"
+  elif [[ "${AS_SUCCESS133_FINAL0P5}" == "1" ]]; then
+    export SCHEDULE_NAME="${SCHEDULE_NAME:-as_success133_final0p5_sparse_root_ppo_first_contact}"
+    export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS teacher-rollout filtered 133-clip real-mesh perception distill with contact-aware sparse root. Clips satisfy stable_contact_success=True and final_object_position_error_m<=0.5, use teacher-exported contact sidecars for offline contact guidance and adaptive contact-window sampling, and keep the PPO+DAgger hybrid active from iteration 0.}"
+  else
+    export SCHEDULE_NAME="${SCHEDULE_NAME:-as_keep169_init_box_sparse_root_ppo_first_contact}"
+    export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS keep169 real-mesh perception distill initialized from actor policy parameters in zihanw22/boxer/6c7exbeq. Training starts from iteration 0 with current AS data/contact/schedule, uses retarget-exported left/right wrist contact sidecars for offline contact guidance and adaptive contact-window sampling, and keeps the PPO+DAgger hybrid active from iteration 0.}"
+  fi
 else
   export STUDENT_ACTOR_INPUTS="${STUDENT_ACTOR_INPUTS:-['actor_obs_root','actor_obs_proprio','actor_obs_actions']}"
-  export SCHEDULE_NAME="${SCHEDULE_NAME:-as_real_mesh_sparse_root_ppo_first_step_mix}"
-  export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS/OMOMO real-mesh perception distill from train_as_general.sh teacher. PPO+DAgger hybrid by default: PPO is active from iteration 0, ramps from 0.1 to 0.9 by iteration 4000, and the effective DAgger BC weight decreases from 0.9 to 0.1. Teacher consumes actor_obs without perception; student consumes sparse root command, proprio/action history, and depth perception.}"
+  if [[ "${AS_SUCCESS133_FINAL0P5}" == "1" ]]; then
+    export SCHEDULE_NAME="${SCHEDULE_NAME:-as_success133_final0p5_sparse_root_ppo_first_step_mix}"
+    export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS teacher-rollout filtered 133-clip real-mesh perception distill from train_as_general.sh teacher. Clips satisfy stable_contact_success=True and final_object_position_error_m<=0.5. PPO+DAgger hybrid by default; teacher consumes actor_obs without perception, student consumes sparse root command, proprio/action history, and depth perception.}"
+  else
+    export SCHEDULE_NAME="${SCHEDULE_NAME:-as_real_mesh_sparse_root_ppo_first_step_mix}"
+    export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS/OMOMO real-mesh perception distill from train_as_general.sh teacher. PPO+DAgger hybrid by default: PPO is active from iteration 0, ramps from 0.1 to 0.9 by iteration 4000, and the effective DAgger BC weight decreases from 0.9 to 0.1. Teacher consumes actor_obs without perception; student consumes sparse root command, proprio/action history, and depth perception.}"
+  fi
 fi
 
 echo "[INFO] Launching AS/OMOMO real-mesh perception distillation"
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
 echo "[INFO] resume_from_box=${RESUME_FROM_BOX}"
+echo "[INFO] as_contact_aware=${AS_CONTACT_AWARE}"
 if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
   echo "[INFO] student_policy_init_checkpoint=${POLICY_INIT_CKPT}"
+fi
+if [[ "${AS_CONTACT_AWARE}" == "1" ]]; then
   echo "[INFO] contact_export_root=${CONTACT_EXPORT_ROOT}"
   echo "[INFO] adaptive_sampling_contact_interval_root=${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}"
 fi
@@ -693,5 +801,8 @@ echo "[INFO] HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE=${HOLOSOMA_PERCEPTION_OBJE
 echo "[INFO] HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS=${HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS}"
 echo "[INFO] HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK=${HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK}"
 echo "[INFO] HOLOSOMA_REQUIRE_SINGLE_SLOT_OBJECTS=${HOLOSOMA_REQUIRE_SINGLE_SLOT_OBJECTS}"
+if [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH:-}" ]]; then
+  echo "[INFO] teacher_actor_obs_history_length=${TEACHER_ACTOR_OBS_HISTORY_LENGTH}"
+fi
 
 exec bash "${SCRIPT_DIR}/distill_box_perception.sh" "$@"
