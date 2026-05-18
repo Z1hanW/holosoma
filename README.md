@@ -68,6 +68,33 @@ python src/holosoma/holosoma/train_agent.py \
 
 See the [Training Guide](src/holosoma/README.md) for more examples and configuration options.
 
+### CoRL Baseline Real-Data Training
+
+All training data must be read from repo-local relative paths under `data/`.
+Do not point training launchers directly at `/nfs`. Before launching the CoRL
+real-data baseline, copy the prepared data into this repository:
+
+```bash
+bash cp_baseline.sh
+```
+
+This installs the two required banks under `data/corl_numbers/`:
+
+```text
+data/corl_numbers/omomo_z0p4_nofoot_bimanual161_training_ready
+data/corl_numbers/behave_z0p4_first_lift_run_bimanual56_w_obj_training_ready
+```
+
+Then launch the training wrapper:
+
+```bash
+./corl_numbers/train_as_general_realdata.sh
+```
+
+The wrapper builds its generated union view under `data/corl_numbers/realdata_union`
+and delegates to `train_as_general.sh`. It will fail if the source data is not
+under `data/`.
+
 ### Quick Demo
 
 We provide scripts to run the complete pipeline: (data downloading and processing for LAFAN), retargeting, data conversion, and whole-body tracking policy training.
