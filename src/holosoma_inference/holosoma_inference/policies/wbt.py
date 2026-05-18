@@ -427,6 +427,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._sim_state_sub: SimStateSub | None = None
         self._manual_sparse_root_command_sub: ManualRootCommandSub | None = None
         self._manual_sparse_root_command_log_key: tuple[bool, str] | None = None
+        self._manual_drop_button_log_value: float | None = None
         self._keyboard_sparse_root_command_enabled = _truthy_env("HOLOSOMA_KEYBOARD_ROOT_COMMAND")
         self._keyboard_sparse_root_command_mode = os.environ.get("HOLOSOMA_KEYBOARD_ROOT_COMMAND_MODE", "manual").strip().lower()
         try:
@@ -1832,7 +1833,29 @@ class WholeBodyTrackingPolicy(BasePolicy):
         )
         return zero_command
 
+    def _get_external_drop_button_override(self) -> np.ndarray | None:
+        sub = self._manual_sparse_root_command_sub
+        if sub is None:
+            return None
+        payload = sub.get_payload()
+        if not isinstance(payload, dict) or "drop_button" not in payload:
+            return None
+        raw_value = payload.get("drop_button")
+        try:
+            drop_value = float(np.asarray(raw_value, dtype=np.float32).reshape(-1)[0])
+        except (TypeError, ValueError, IndexError):
+            logger.warning("Ignoring malformed external drop button value: {}", raw_value)
+            return None
+        drop_value = 1.0 if drop_value >= 0.5 else 0.0
+        if self._manual_drop_button_log_value != drop_value:
+            logger.info("External drop button override: {}", int(drop_value))
+            self._manual_drop_button_log_value = drop_value
+        return np.array([[drop_value]], dtype=np.float32)
+
     def _get_drop_button(self) -> np.ndarray:
+        external_drop_button = self._get_external_drop_button_override()
+        if external_drop_button is not None:
+            return external_drop_button
         if self._motion_data is None or not self._motion_data.has_object:
             return np.zeros((1, 1), dtype=np.float32)
         _, carry_end = self._get_contact_aware_carry_window()

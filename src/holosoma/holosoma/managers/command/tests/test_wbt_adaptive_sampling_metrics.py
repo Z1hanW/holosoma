@@ -11,6 +11,7 @@ from holosoma.managers.command.terms.wbt import (
     _probability_mass_on_intervals,
     _select_primary_contact_interval,
 )
+from holosoma.managers.observation.terms import wbt as wbt_obs_terms
 
 
 def test_select_primary_contact_interval_prefers_wrist_union():
@@ -116,3 +117,21 @@ def test_contact_aware_drop_button_turns_on_at_carry_end():
     drop_button = motion_command.get_contact_aware_drop_button()
 
     assert drop_button.tolist() == [False, True, True]
+
+
+def test_drop_button_observation_uses_manual_override():
+    motion_command = object.__new__(MotionCommand)
+    motion_command.motion = SimpleNamespace(has_object=True)
+    motion_command.manual_control_enabled = True
+    motion_command.manual_drop_button_override_enabled = True
+    motion_command.manual_drop_button = torch.tensor([[0.0], [1.0], [1.0]], dtype=torch.float32)
+
+    env = SimpleNamespace(
+        num_envs=3,
+        device=torch.device("cpu"),
+        command_manager=SimpleNamespace(get_state=lambda name: motion_command),
+    )
+
+    drop_button = wbt_obs_terms.drop_button(env)
+
+    assert drop_button.tolist() == [[0.0], [1.0], [1.0]]

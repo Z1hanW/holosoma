@@ -105,6 +105,8 @@ class MujocoSimStateViewerConfig:
     manual_root_dy: float = 0.0
     manual_root_dyaw: float = 0.0
     manual_root_publisher_enabled: bool = True
+    manual_drop_button_enabled: bool = False
+    manual_drop_button: bool = False
     keyboard_root_command: bool = False
     keyboard_root_command_value: float = 0.5
     keyboard_root_command_mode: str = "manual"
@@ -1013,6 +1015,8 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     if auto_motion_init_env not in {"raw_motion", "training_default_pose"}:
         auto_motion_init_env = ""
 
+    manual_drop_button_cb = None
+    manual_drop_reset_btn = None
     with server.gui.add_folder("Manual Root Command", order=20.0):
         manual_root_enabled_cb = server.gui.add_checkbox("Manual mode", initial_value=bool(cfg.manual_root_enabled))
         manual_root_mode_dropdown = server.gui.add_dropdown(
@@ -1024,6 +1028,12 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         manual_root_dy = server.gui.add_number("dY", initial_value=float(cfg.manual_root_dy), min=-3.0, max=3.0, step=0.01)
         manual_root_dyaw = server.gui.add_number("dYaw", initial_value=float(cfg.manual_root_dyaw), min=-3.1416, max=3.1416, step=0.01)
         manual_root_zero_btn = server.gui.add_button("Zero command")
+        if bool(cfg.manual_drop_button_enabled):
+            manual_drop_button_cb = server.gui.add_checkbox(
+                "Drop Button",
+                initial_value=bool(cfg.manual_drop_button),
+            )
+            manual_drop_reset_btn = server.gui.add_button("Reset Drop Button")
         manual_root_md = server.gui.add_markdown(f"Publishing disabled on port `{cfg.sparse_root_command_port}`")
 
     depth_image_shape = (
@@ -1425,14 +1435,27 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
         ]
         enabled = bool(manual_root_enabled_cb.value)
         mode = str(manual_root_mode_dropdown.value)
+        drop_button_value = None
+        if manual_drop_button_cb is not None:
+            drop_button_value = 1.0 if bool(manual_drop_button_cb.value) else 0.0
         if manual_root_pub is not None:
-            manual_root_pub.publish(enabled=enabled, mode=mode, command=command)
+            manual_root_pub.publish(
+                enabled=enabled,
+                mode=mode,
+                command=command,
+                drop_button=drop_button_value,
+            )
         status = "manual" if enabled else "motion"
         publisher_status = "enabled" if manual_root_pub is not None and manual_root_pub.enabled else "disabled"
+        drop_line = ""
+        if drop_button_value is not None:
+            drop_line = f"\n\ndrop_button: `{drop_button_value:.0f}`"
         manual_root_md.content = (
             f"status: `{status}`\n\n"
             f"mode: `{mode}`\n\n"
-            f"command: `[{command[0]:.3f}, {command[1]:.3f}, {command[2]:.3f}]`\n\n"
+            f"command: `[{command[0]:.3f}, {command[1]:.3f}, {command[2]:.3f}]`"
+            f"{drop_line}"
+            "\n\n"
             f"publisher: `{publisher_status}`\n\n"
             f"port: `{cfg.sparse_root_command_port}`"
         )
@@ -1558,6 +1581,9 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             reset_pending_clock_rewind = False
             pre_reset_sim_time_ms = None
             last_seen_sim_time_ms = None
+            if manual_drop_button_cb is not None:
+                manual_drop_button_cb.value = False
+                _publish_manual_root_command()
             state_md.content = "Waiting for simulator state after reset..."
             actor_md.content = ""
             logger.info(
@@ -1592,6 +1618,9 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
             reset_request_time_monotonic = time.monotonic()
             reset_pending_clock_rewind = True
             pre_reset_sim_time_ms = last_seen_sim_time_ms
+            if manual_drop_button_cb is not None:
+                manual_drop_button_cb.value = False
+                _publish_manual_root_command()
             logger.info("Requested simulator reset over sim-control ({})", reason)
         elif cfg.launch_rollout:
             pending_restart_reason = "gui_restart_fallback"
@@ -1737,6 +1766,20 @@ def view_sim_state(cfg: MujocoSimStateViewerConfig) -> None:
     @manual_root_dyaw.on_update
     def _(_evt) -> None:
         _publish_manual_root_command()
+
+    if manual_drop_button_cb is not None:
+
+        @manual_drop_button_cb.on_update
+        def _(_evt) -> None:
+            _publish_manual_root_command()
+
+    if manual_drop_reset_btn is not None:
+
+        @manual_drop_reset_btn.on_click
+        def _(_evt) -> None:
+            if manual_drop_button_cb is not None:
+                manual_drop_button_cb.value = False
+            _publish_manual_root_command()
 
     @manual_root_zero_btn.on_click
     def _(_evt) -> None:

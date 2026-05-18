@@ -93,7 +93,14 @@ class ManualRootCommandPub:
             logger.error("Failed to start manual root command publisher: {}", exc)
             self.enabled = False
 
-    def publish(self, *, enabled: bool, mode: str, command: list[float] | tuple[float, float, float]) -> None:
+    def publish(
+        self,
+        *,
+        enabled: bool,
+        mode: str,
+        command: list[float] | tuple[float, float, float],
+        drop_button: float | bool | None = None,
+    ) -> None:
         if not self.enabled or self.socket is None:
             return
         payload = {
@@ -102,6 +109,8 @@ class ManualRootCommandPub:
             "command": [float(command[0]), float(command[1]), float(command[2])],
             "time": time.time(),
         }
+        if drop_button is not None:
+            payload["drop_button"] = 1.0 if bool(drop_button) else 0.0
         try:
             self.socket.send_string(json.dumps(payload), zmq.NOBLOCK)
         except zmq.Again:

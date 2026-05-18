@@ -1740,6 +1740,8 @@ class MotionCommand(CommandTermBase):
         self.manual_control_enabled = False
         self.manual_xy_rel: torch.Tensor | None = None
         self.manual_yaw_rel: torch.Tensor | None = None
+        self.manual_drop_button_override_enabled = False
+        self.manual_drop_button: torch.Tensor | None = None
         self.manual_object_reset_enabled = False
         self.manual_object_reset_pos_offset_w: torch.Tensor | None = None
         self.manual_object_reset_rpy_offset: torch.Tensor | None = None
@@ -1832,6 +1834,8 @@ class MotionCommand(CommandTermBase):
         self.manual_control_enabled = False
         self.manual_xy_rel = torch.zeros((self.num_envs, 2), device=self.device, dtype=torch.float32)
         self.manual_yaw_rel = torch.zeros((self.num_envs, 1), device=self.device, dtype=torch.float32)
+        self.manual_drop_button_override_enabled = False
+        self.manual_drop_button = torch.zeros((self.num_envs, 1), device=self.device, dtype=torch.float32)
         self.manual_object_reset_enabled = False
         self.manual_object_reset_pos_offset_w = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
         self.manual_object_reset_rpy_offset = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)

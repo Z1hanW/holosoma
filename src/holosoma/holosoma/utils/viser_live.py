@@ -1605,6 +1605,12 @@ class ViserLiveViewer:
             "true",
             "yes",
         )
+        self._drop_button_default = os.environ.get("VISER_DROP_BUTTON_DEFAULT", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
         self._manual_force_enabled = os.environ.get("VISER_FORCE_MANUAL_CONTROL", "0").lower() in (
             "1",
             "true",
@@ -1770,6 +1776,10 @@ class ViserLiveViewer:
         self._manual_root_yaw_slider = None
         self._manual_root_cmd_xy = None
         self._manual_root_cmd_yaw = None
+        self._drop_button_cb = None
+        self._drop_button_reset_button = None
+        self._drop_button_status = None
+        self._drop_button_gui_enabled = False
         self._object_reset_random_button = None
         self._object_reset_override_cb = None
         self._object_reset_zero_button = None
@@ -2896,6 +2906,7 @@ class ViserLiveViewer:
             return
         self._pending_control_sync = False
         self._update_manual_root_command()
+        self._update_manual_drop_button()
         self._update_manual_object_reset_override()
         if self._reset_visible_requested:
             self._reset_visible_requested = False
@@ -3023,6 +3034,7 @@ class ViserLiveViewer:
             manual_yaw = getattr(motion_cmd, "manual_yaw_rel", None)
             if isinstance(manual_yaw, torch.Tensor) and manual_yaw.numel() > 0:
                 manual_yaw.zero_()
+        self._clear_manual_drop_button(clear_gui_toggle=clear_gui_toggles)
         self._hide_manual_command_arrow()
         self._update_manual_root_status()
 
@@ -3041,6 +3053,34 @@ class ViserLiveViewer:
                     cb.value = False
                 except Exception:
                     pass
+
+    def _set_manual_drop_button(self, value: bool) -> None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            return
+        device = self._env.device
+        drop_value = 1.0 if value else 0.0
+        motion_cmd.manual_drop_button_override_enabled = bool(self._drop_button_gui_enabled)
+        motion_cmd.manual_drop_button = torch.full(
+            (self._env.num_envs, 1),
+            drop_value,
+            device=device,
+            dtype=torch.float32,
+        )
+
+    def _clear_manual_drop_button(self, *, clear_gui_toggle: bool) -> None:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is not None:
+            manual_drop_button = getattr(motion_cmd, "manual_drop_button", None)
+            if isinstance(manual_drop_button, torch.Tensor) and manual_drop_button.numel() > 0:
+                manual_drop_button.zero_()
+            motion_cmd.manual_drop_button_override_enabled = bool(self._drop_button_gui_enabled)
+        if clear_gui_toggle and self._drop_button_cb is not None:
+            try:
+                self._drop_button_cb.value = False
+            except Exception:
+                pass
+        self._update_drop_button_status()
 
     @staticmethod
     def _wrap_to_pi(angle: float) -> float:
@@ -3525,6 +3565,34 @@ class ViserLiveViewer:
             f"{self._format_policy_root_command(float(delta_body[0]), float(delta_body[1]), yaw_gap)}\n\n"
             f"Gap world: `dx={delta_world[0]:+.2f}` `dy={delta_world[1]:+.2f}` `dist={dist_xy:.2f}`"
         )
+
+    def _update_drop_button_status(self) -> None:
+        if self._drop_button_status is None:
+            return
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            self._drop_button_status.content = "drop_button: `n/a`"
+            return
+        manual_drop_button = getattr(motion_cmd, "manual_drop_button", None)
+        if isinstance(manual_drop_button, torch.Tensor) and manual_drop_button.numel() > 0:
+            try:
+                value = float(manual_drop_button[self._env_id].reshape(-1)[0].item())
+            except Exception:
+                value = 0.0
+        else:
+            value = 1.0 if self._drop_button_cb is not None and bool(self._drop_button_cb.value) else 0.0
+        override = bool(getattr(motion_cmd, "manual_drop_button_override_enabled", False))
+        self._drop_button_status.content = f"drop_button: `{value:.0f}`\n\noverride: `{override}`"
+
+    def _update_manual_drop_button(self) -> None:
+        if not self._drop_button_gui_enabled:
+            motion_cmd = self._get_motion_command()
+            if motion_cmd is not None:
+                motion_cmd.manual_drop_button_override_enabled = False
+            return
+        value = bool(self._drop_button_cb.value) if self._drop_button_cb is not None else bool(self._drop_button_default)
+        self._set_manual_drop_button(value)
+        self._update_drop_button_status()
 
     def _update_manual_root_command(self) -> None:
         motion_cmd = self._get_motion_command()
@@ -4393,6 +4461,8 @@ class ViserLiveViewer:
             "VISER_ENABLE_MANUAL_ROOT_GUI",
             manual_gui_enabled and not self._distill_minimal_ui,
         )
+        drop_button_gui_enabled = _gui_section_enabled("VISER_ENABLE_DROP_BUTTON_GUI", False)
+        self._drop_button_gui_enabled = bool(drop_button_gui_enabled)
         contact_force_gui_enabled = _gui_section_enabled(
             "VISER_ENABLE_CONTACT_FORCE_GUI",
             not self._distill_minimal_ui,
@@ -4504,6 +4574,31 @@ class ViserLiveViewer:
                     def _(_evt) -> None:
                         self.queue_pending_controls()
                 self._sync_manual_root_command_from_robot()
+
+        if drop_button_gui_enabled:
+            with self._server.gui.add_folder("Drop Control", expand_by_default=True):
+                self._drop_button_cb = self._server.gui.add_checkbox(
+                    "Drop Button",
+                    initial_value=bool(self._drop_button_default),
+                    hint="Explicit scalar for actor_obs_drop_button.",
+                )
+                self._drop_button_reset_button = self._server.gui.add_button(
+                    "Reset Drop Button",
+                    hint="Set actor_obs_drop_button back to 0.",
+                )
+                self._drop_button_status = self._server.gui.add_markdown("drop_button: `0`\n\noverride: `False`")
+
+                @self._drop_button_cb.on_update
+                def _(_evt) -> None:
+                    self.queue_pending_controls()
+
+                @self._drop_button_reset_button.on_click
+                def _(_evt) -> None:
+                    if self._drop_button_cb is not None:
+                        self._drop_button_cb.value = False
+                    self.queue_pending_controls()
+
+                self._update_manual_drop_button()
 
         sim_cfg = getattr(self._env.simulator, "simulator_config", None)
         if (
@@ -5176,6 +5271,8 @@ class ViserLiveViewer:
             manual_enabled = bool(manual_enabled or bool(self._manual_control_cb.value))
 
         if motion_cmd is not None:
+            if self._drop_button_gui_enabled:
+                self._clear_manual_drop_button(clear_gui_toggle=True)
             if manual_enabled:
                 self._clear_manual_commands(clear_gui_toggles=True)
             clip_idx = self._current_clip_index(motion_cmd)
@@ -5233,6 +5330,8 @@ class ViserLiveViewer:
         manual_enabled = bool(getattr(motion_cmd, "manual_control_enabled", False))
         if self._manual_control_cb is not None:
             manual_enabled = bool(manual_enabled or bool(self._manual_control_cb.value))
+        if self._drop_button_gui_enabled:
+            self._clear_manual_drop_button(clear_gui_toggle=True)
         if manual_enabled:
             self._clear_manual_commands(clear_gui_toggles=True)
 

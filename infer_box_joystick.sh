@@ -1178,6 +1178,9 @@ echo "[INFO] headless=${HEADLESS_FLAG} (env HEADLESS=${HEADLESS})"
 echo "[INFO] viser=http://localhost:${VISER_PORT}"
 echo "[INFO] manual_gui=${VISER_ENABLE_MANUAL_GUI} clip_gui=${VISER_ENABLE_CLIP_GUI}"
 echo "[INFO] manual_control_default=${VISER_MANUAL_CONTROL_DEFAULT} force_manual=${VISER_FORCE_MANUAL_CONTROL}"
+if is_truthy "${VISER_ENABLE_DROP_BUTTON_GUI:-0}"; then
+  echo "[INFO] drop_button_gui=${VISER_ENABLE_DROP_BUTTON_GUI} drop_button_default=${VISER_DROP_BUTTON_DEFAULT:-0}"
+fi
 echo "[INFO] hw_joystick=${VISER_MANUAL_USE_HW_JOYSTICK}"
 echo "[INFO] hw_backend=${VISER_MANUAL_HW_BACKEND:-auto} bridge_joystick=${USE_HW_JOYSTICK_BRIDGE}"
 echo "[INFO] disable_auto_reset=${HOLOSOMA_DISABLE_AUTO_RESET} disable_clip_end_reset=${HOLOSOMA_DISABLE_CLIP_END_RESET}"
@@ -1204,12 +1207,20 @@ echo "[INFO] Viser controls:"
 echo "  1) Open 'Manual Control' and enable 'Enable Manual Root Command'."
 echo "  2) Set 'Root dX/dY/dYaw' as the desired root-frame relative command."
 echo "  3) Use 'Zero Root Command' to reset the relative root command to zero."
-echo "  4) Use 'Advanced > Reset Object' to add box position/rotation offsets for the next reset."
-echo "  5) Use 'Clip Playback' to select clip/start frame and click 'Apply Clip'."
-if is_truthy "${HOLOSOMA_RESET_TO_DEFAULT_POSE:-0}"; then
-  echo "  6) Use 'Advanced > Simulation Control' for Play/Step/Reset (Reset returns to the default pose)."
+SIM_CONTROL_STEP=6
+if is_truthy "${VISER_ENABLE_DROP_BUTTON_GUI:-0}"; then
+  echo "  4) Use 'Drop Control > Drop Button' to switch actor_obs_drop_button from 0 to 1."
+  echo "  5) Use 'Advanced > Reset Object' to add box position/rotation offsets for the next reset."
+  echo "  6) Use 'Clip Playback' to select clip/start frame and click 'Apply Clip'."
+  SIM_CONTROL_STEP=7
 else
-  echo "  6) Use 'Advanced > Simulation Control' for Play/Step/Reset (Reset returns to the selected motion state)."
+  echo "  4) Use 'Advanced > Reset Object' to add box position/rotation offsets for the next reset."
+  echo "  5) Use 'Clip Playback' to select clip/start frame and click 'Apply Clip'."
+fi
+if is_truthy "${HOLOSOMA_RESET_TO_DEFAULT_POSE:-0}"; then
+  echo "  ${SIM_CONTROL_STEP}) Use 'Advanced > Simulation Control' for Play/Step/Reset (Reset returns to the default pose)."
+else
+  echo "  ${SIM_CONTROL_STEP}) Use 'Advanced > Simulation Control' for Play/Step/Reset (Reset returns to the selected motion state)."
 fi
 if command -v hostname >/dev/null 2>&1; then
   HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
