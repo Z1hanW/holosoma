@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List
 from xml.etree import ElementTree as ET
@@ -18,6 +19,28 @@ from holosoma.managers.terrain.base import TerrainTermBase
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.path import resolve_data_file_path
 from holosoma.managers.camera import CameraManager
+
+
+@dataclass(frozen=True)
+class _ObjectCollisionGeom:
+    kind: str
+    name: str
+    mesh_path: Path | None
+    mesh_scale: list[float]
+    box_size: list[float] | None
+    pos: list[float]
+    quat: list[float]
+
+
+@dataclass(frozen=True)
+class _ObjectUrdfInfo:
+    visual_mesh_path: Path
+    visual_mesh_scale: list[float]
+    visual_pos: list[float]
+    visual_quat: list[float]
+    collisions: list[_ObjectCollisionGeom]
+    mass: float
+    rgba: list[float]
 
 
 def _euler_xyz_to_quat_wxyz(euler_rad: np.ndarray) -> np.ndarray:
@@ -534,14 +557,14 @@ class MujocoSceneManager:
             return
 
         urdf_path = Path(resolve_data_file_path(str(object_urdf_path)))
-        mesh_path, mesh_scale, box_size, mass, rgba = self._read_single_object_urdf(urdf_path)
-        mass = self._object_mass_from_env(mass)
+        object_info = self._read_single_object_urdf(urdf_path)
+        mass = self._object_mass_from_env(object_info.mass)
         friction = self._object_friction_from_env([0.9, 0.005, 0.5])
 
-        mesh_name = "object_largebox_mesh"
-        mesh = self.world_spec.add_mesh(name=mesh_name)
-        mesh.file = str(mesh_path)
-        mesh.scale = mesh_scale
+        visual_mesh_name = "object_visual_mesh"
+        visual_mesh = self.world_spec.add_mesh(name=visual_mesh_name)
+        visual_mesh.file = str(object_info.visual_mesh_path)
+        visual_mesh.scale = object_info.visual_mesh_scale
 
         object_pos = list(getattr(object_cfg, "init_pos", [0.0, 0.0, 0.5]))
         object_quat = list(getattr(object_cfg, "init_quat", [1.0, 0.0, 0.0, 0.0]))
@@ -551,47 +574,64 @@ class MujocoSceneManager:
         visual_geom = body.add_geom(
             name="largebox_visual",
             type=mujoco.mjtGeom.mjGEOM_MESH,
-            meshname=mesh_name,
+            meshname=visual_mesh_name,
+            pos=object_info.visual_pos,
+            quat=object_info.visual_quat,
             mass=0.0,
-            rgba=rgba,
+            rgba=object_info.rgba,
         )
         visual_geom.contype = 0
         visual_geom.conaffinity = 0
 
-        if box_size is not None:
-            geom = body.add_geom(
-                name="largebox",
-                type=mujoco.mjtGeom.mjGEOM_BOX,
-                size=(np.asarray(box_size, dtype=np.float64) * 0.5).tolist(),
-                mass=mass,
-                rgba=rgba,
-                friction=friction,
-                solimp=[0.99, 0.99, 0.01, 0.5, 2],
-                solref=[0.001, 1],
-            )
-            collision_shape = f"box size={box_size}"
-        else:
-            geom = body.add_geom(
-                name="largebox",
-                type=mujoco.mjtGeom.mjGEOM_MESH,
-                meshname=mesh_name,
-                mass=mass,
-                rgba=rgba,
-                friction=friction,
-                solimp=[0.99, 0.99, 0.01, 0.5, 2],
-                solref=[0.001, 1],
-            )
-            collision_shape = f"mesh={mesh_path}"
-        # Collide with robot and terrain classes used by _configure_robot_collisions().
-        geom.contype = 3
-        geom.conaffinity = 3
-        self._add_training_object_contact_pairs("largebox", friction)
+        collision_geom_names: list[str] = []
+        collision_mass = mass / max(len(object_info.collisions), 1)
+        for idx, collision in enumerate(object_info.collisions):
+            geom_name = "largebox" if len(object_info.collisions) == 1 else f"largebox_{idx:03d}"
+            if collision.kind == "box":
+                assert collision.box_size is not None
+                geom = body.add_geom(
+                    name=geom_name,
+                    type=mujoco.mjtGeom.mjGEOM_BOX,
+                    size=(np.asarray(collision.box_size, dtype=np.float64) * 0.5).tolist(),
+                    pos=collision.pos,
+                    quat=collision.quat,
+                    mass=collision_mass,
+                    rgba=object_info.rgba,
+                    friction=friction,
+                    solimp=[0.99, 0.99, 0.01, 0.5, 2],
+                    solref=[0.001, 1],
+                )
+            else:
+                assert collision.mesh_path is not None
+                mesh_name = f"object_collision_mesh_{idx:03d}"
+                mesh = self.world_spec.add_mesh(name=mesh_name)
+                mesh.file = str(collision.mesh_path)
+                mesh.scale = collision.mesh_scale
+                geom = body.add_geom(
+                    name=geom_name,
+                    type=mujoco.mjtGeom.mjGEOM_MESH,
+                    meshname=mesh_name,
+                    pos=collision.pos,
+                    quat=collision.quat,
+                    mass=collision_mass,
+                    rgba=object_info.rgba,
+                    friction=friction,
+                    solimp=[0.99, 0.99, 0.01, 0.5, 2],
+                    solref=[0.001, 1],
+                )
+            # Collide with robot and terrain classes used by _configure_robot_collisions().
+            geom.contype = 3
+            geom.conaffinity = 3
+            collision_geom_names.append(geom_name)
+
+        if collision_geom_names:
+            self._add_training_object_contact_pairs(collision_geom_names[0], friction)
 
         logger.info(
-            "Added MuJoCo object from '{}': visual_mesh='{}', collision={}, mass={}, friction={}",
+            "Added MuJoCo object from '{}': visual_mesh='{}', collision_geoms={}, total_mass={}, friction={}",
             urdf_path,
-            mesh_path,
-            collision_shape,
+            object_info.visual_mesh_path,
+            collision_geom_names,
             mass,
             friction,
         )
@@ -599,38 +639,102 @@ class MujocoSceneManager:
     def _read_single_object_urdf(
         self,
         urdf_path: Path,
-    ) -> tuple[Path, list[float], list[float] | None, float, list[float]]:
+    ) -> _ObjectUrdfInfo:
         if not urdf_path.exists():
             raise FileNotFoundError(f"Object URDF not found: {urdf_path}")
 
         root = ET.parse(urdf_path).getroot()
-        mesh_elem = root.find(".//collision/geometry/mesh")
-        if mesh_elem is None:
-            mesh_elem = root.find(".//visual/geometry/mesh")
-        if mesh_elem is None:
-            raise ValueError(f"Object URDF has no mesh geometry: {urdf_path}")
 
-        filename = mesh_elem.attrib.get("filename")
-        if not filename:
-            raise ValueError(f"Object URDF mesh is missing filename: {urdf_path}")
+        def parse_origin(parent: ET.Element | None) -> tuple[list[float], list[float]]:
+            origin = None if parent is None else parent.find("origin")
+            if origin is None:
+                return [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]
+            xyz = [float(v) for v in origin.attrib.get("xyz", "0 0 0").split()]
+            rpy = [float(v) for v in origin.attrib.get("rpy", "0 0 0").split()]
+            if len(xyz) != 3 or len(rpy) != 3:
+                raise ValueError(f"Object URDF origin must have 3 xyz and 3 rpy values: {urdf_path}")
+            quat = _euler_xyz_to_quat_wxyz(np.asarray(rpy, dtype=np.float64)).tolist()
+            return xyz, quat
 
-        mesh_path = Path(filename)
-        if not mesh_path.is_absolute():
-            mesh_path = urdf_path.parent / mesh_path
-        if not mesh_path.exists():
-            raise FileNotFoundError(f"Object mesh not found: {mesh_path}")
+        def resolve_mesh(mesh_elem: ET.Element) -> tuple[Path, list[float]]:
+            filename = mesh_elem.attrib.get("filename")
+            if not filename:
+                raise ValueError(f"Object URDF mesh is missing filename: {urdf_path}")
 
-        scale_raw = mesh_elem.attrib.get("scale", "1.0 1.0 1.0")
-        mesh_scale = [float(v) for v in scale_raw.split()]
-        if len(mesh_scale) != 3:
-            raise ValueError(f"Object mesh scale must contain three values: {scale_raw}")
+            mesh_path = Path(filename)
+            if not mesh_path.is_absolute():
+                mesh_path = urdf_path.parent / mesh_path
+            if not mesh_path.exists():
+                raise FileNotFoundError(f"Object mesh not found: {mesh_path}")
 
-        box_elem = root.find(".//collision/geometry/box")
-        box_size = None
-        if box_elem is not None and box_elem.attrib.get("size"):
-            box_size = [float(v) for v in box_elem.attrib["size"].split()]
-            if len(box_size) != 3:
-                raise ValueError(f"Object collision box size must contain three values: {box_size}")
+            scale_raw = mesh_elem.attrib.get("scale", "1.0 1.0 1.0")
+            mesh_scale = [float(v) for v in scale_raw.split()]
+            if len(mesh_scale) != 3:
+                raise ValueError(f"Object mesh scale must contain three values: {scale_raw}")
+            return mesh_path, mesh_scale
+
+        visual_elem = root.find(".//visual")
+        visual_mesh_elem = None if visual_elem is None else visual_elem.find("./geometry/mesh")
+        if visual_mesh_elem is None:
+            visual_mesh_elem = root.find(".//collision/geometry/mesh")
+        if visual_mesh_elem is None:
+            raise ValueError(f"Object URDF has no mesh geometry for visualization: {urdf_path}")
+        visual_mesh_path, visual_mesh_scale = resolve_mesh(visual_mesh_elem)
+        visual_pos, visual_quat = parse_origin(visual_elem)
+
+        collisions: list[_ObjectCollisionGeom] = []
+        for idx, collision_elem in enumerate(root.findall(".//collision")):
+            geometry_elem = collision_elem.find("geometry")
+            if geometry_elem is None:
+                continue
+
+            pos, quat = parse_origin(collision_elem)
+            name = collision_elem.attrib.get("name") or f"collision_{idx:03d}"
+            mesh_elem = geometry_elem.find("mesh")
+            if mesh_elem is not None:
+                mesh_path, mesh_scale = resolve_mesh(mesh_elem)
+                collisions.append(
+                    _ObjectCollisionGeom(
+                        kind="mesh",
+                        name=name,
+                        mesh_path=mesh_path,
+                        mesh_scale=mesh_scale,
+                        box_size=None,
+                        pos=pos,
+                        quat=quat,
+                    )
+                )
+                continue
+
+            box_elem = geometry_elem.find("box")
+            if box_elem is not None and box_elem.attrib.get("size"):
+                box_size = [float(v) for v in box_elem.attrib["size"].split()]
+                if len(box_size) != 3:
+                    raise ValueError(f"Object collision box size must contain three values: {box_size}")
+                collisions.append(
+                    _ObjectCollisionGeom(
+                        kind="box",
+                        name=name,
+                        mesh_path=None,
+                        mesh_scale=[1.0, 1.0, 1.0],
+                        box_size=box_size,
+                        pos=pos,
+                        quat=quat,
+                    )
+                )
+
+        if not collisions:
+            collisions.append(
+                _ObjectCollisionGeom(
+                    kind="mesh",
+                    name="visual_mesh_collision",
+                    mesh_path=visual_mesh_path,
+                    mesh_scale=visual_mesh_scale,
+                    box_size=None,
+                    pos=visual_pos,
+                    quat=visual_quat,
+                )
+            )
 
         mass_elem = root.find(".//inertial/mass")
         mass = float(mass_elem.attrib.get("value", 0.1)) if mass_elem is not None else 0.1
@@ -640,7 +744,15 @@ class MujocoSceneManager:
         if color_elem is not None and color_elem.attrib.get("rgba"):
             rgba = [float(v) for v in color_elem.attrib["rgba"].split()]
 
-        return mesh_path, mesh_scale, box_size, mass, rgba
+        return _ObjectUrdfInfo(
+            visual_mesh_path=visual_mesh_path,
+            visual_mesh_scale=visual_mesh_scale,
+            visual_pos=visual_pos,
+            visual_quat=visual_quat,
+            collisions=collisions,
+            mass=mass,
+            rgba=rgba,
+        )
 
     @staticmethod
     def _object_mass_from_env(default_mass: float) -> float:

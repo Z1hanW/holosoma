@@ -1,0 +1,37 @@
+{
+  "bridge": {
+    "domain_id": 146,
+    "hold_default_pose_until_first_command": true,
+    "ignore_default_idle_command": true,
+    "publish_sim_state": true,
+    "sim_state_port": 47173
+  },
+  "checkpoint": "wandb://zihanw22/boxer/6c7exbeq/latest",
+  "clip": "box_75",
+  "duration": "45s",
+  "first_lowcmd_received": true,
+  "lift": {
+    "final_dz": 0.006,
+    "final_object_z": 0.174,
+    "initial_object_z": 0.168,
+    "max_dz": 0.769,
+    "max_object_z": 0.937,
+    "robot_drop_from_initial": 0.658,
+    "robot_z_initial": 0.76,
+    "robot_z_min": 0.102,
+    "t_at_max_dz": 3.0
+  },
+  "lift_telemetry_count": 48,
+  "policy": {
+    "max_obs_absmax": 9.352209091186523,
+    "max_perception_absmax": 0.5,
+    "max_policy_action_absmax": 7.908444404602051,
+    "max_q_target_absmax": 3.0370371341705322,
+    "max_sparse_root_command_abs": 0.0
+  },
+  "policy_debug_count": 240,
+  "run_ref": "ppo_first_contact_aware_h1",
+  "sim_state_subscriber_started": false,
+  "use_sim_state_effective": false,
+  "use_sim_state_requested": false
+}

@@ -1,0 +1,122 @@
+from holosoma.config_types.simulator import (
+    MujocoBackend,
+    PhysxConfig,
+    SceneConfig,
+    SimEngineConfig,
+    SimulatorConfig,
+    SimulatorInitConfig,
+)
+
+isaacgym = SimulatorConfig(
+    _target_="holosoma.simulator.isaacgym.isaacgym.IsaacGym",
+    _recursive_=False,
+    config=SimulatorInitConfig(
+        name="isaacgym",
+        sim=SimEngineConfig(
+            fps=200,
+            control_decimation=4,
+            substeps=1,
+            physx=PhysxConfig(
+                solver_type=1,
+                num_position_iterations=8,
+                num_velocity_iterations=4,
+                bounce_threshold_velocity=0.5,
+            ),
+        ),
+        contact_sensor_history_length=3,
+    ),
+)
+
+
+isaacsim = SimulatorConfig(
+    _target_="holosoma.simulator.isaacsim.isaacsim.IsaacSim",
+    _recursive_=False,
+    config=SimulatorInitConfig(
+        name="isaacsim",
+        scene=SceneConfig(
+            replicate_physics=True,
+        ),
+        sim=SimEngineConfig(
+            fps=200,
+            control_decimation=4,
+            substeps=1,
+            physx=PhysxConfig(
+                solver_type=1,
+                num_position_iterations=8,
+                num_velocity_iterations=4,
+                bounce_threshold_velocity=0.5,
+                gpu_max_rigid_contact_count=2**25,  # 33554432
+                gpu_max_rigid_patch_count=20 * 2**15,  # 655360
+                gpu_found_lost_pairs_capacity=2**27,  # 134217728
+                gpu_found_lost_aggregate_pairs_capacity=2**27,  # 134217728
+                gpu_total_aggregate_pairs_capacity=2**24,  # 16777216
+                gpu_collision_stack_size=2**26,  # 67108864
+                gpu_heap_capacity=2**26,  # 67108864
+                gpu_temp_buffer_capacity=2**24,  # 16777216
+            ),
+            render_mode="human",
+            render_interval=4,
+        ),
+        contact_sensor_history_length=3,
+    ),
+)
+
+
+mujoco = SimulatorConfig(
+    _target_="holosoma.simulator.mujoco.mujoco.MuJoCo",
+    _recursive_=False,
+    config=SimulatorInitConfig(
+        name="mujoco",
+        scene=SceneConfig(
+            replicate_physics=True,
+        ),
+        sim=SimEngineConfig(
+            fps=200,
+            control_decimation=4,
+            substeps=1,
+            physx=PhysxConfig(
+                solver_type=1,
+                num_position_iterations=4,
+                num_velocity_iterations=0,
+                bounce_threshold_velocity=0.5,
+            ),
+            render_mode="fake",
+            render_interval=1,
+        ),
+        mujoco_backend=MujocoBackend.CLASSIC,  # Explicit for clarity
+    ),
+)
+
+
+mjwarp = SimulatorConfig(
+    _target_="holosoma.simulator.mujoco.mujoco.MuJoCo",
+    _recursive_=False,
+    config=SimulatorInitConfig(
+        name="mujoco",
+        scene=SceneConfig(
+            replicate_physics=True,
+        ),
+        sim=SimEngineConfig(
+            fps=200,
+            control_decimation=4,
+            substeps=1,
+            physx=PhysxConfig(
+                solver_type=1,
+                num_position_iterations=4,
+                num_velocity_iterations=0,
+                bounce_threshold_velocity=0.5,
+            ),
+            render_mode="fake",
+            render_interval=1,
+        ),
+        mujoco_backend=MujocoBackend.WARP,  # GPU-accelerated backend
+    ),
+)
+
+
+DEFAULTS = {
+    "isaacgym": isaacgym,
+    "isaacsim": isaacsim,
+    "mujoco": mujoco,
+    "mjwarp": mjwarp,
+}

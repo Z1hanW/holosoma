@@ -1,0 +1,597 @@
+from __future__ import annotations
+
+import dataclasses
+import logging
+import os
+import sys
+import traceback
+from contextlib import contextmanager
+from datetime import timedelta
+from pathlib import Path
+from typing import Any, TypedDict, cast
+
+import numpy as np
+import tyro
+from loguru import logger
+
+from holosoma.agents.modules.logging_utils import collect_reward_wandb_metadata
+from holosoma.config_types.env import get_tyro_env_config
+from holosoma.config_types.experiment import ExperimentConfig
+from holosoma.config_types.video import CartesianCameraConfig, FixedCameraConfig, SphericalCameraConfig, VideoConfig
+from holosoma.config_values.experiment import AnnotatedExperimentConfig
+from holosoma.observation import apply_observation_overrides
+from holosoma.perception import apply_perception_overrides
+from holosoma.utils.config_utils import CONFIG_NAME
+from holosoma.utils.eval_utils import (
+    init_sim_imports,
+    load_checkpoint,
+)
+from holosoma.utils.helpers import get_class
+from holosoma.utils.rotations import quat_apply, quat_from_euler_xyz, quat_rotate_inverse
+from holosoma.utils.sim_utils import close_simulation_app
+from holosoma.utils.tyro_utils import TYRO_CONIFG
+
+
+class TrainingContext:
+    """Context manager for training lifecycle and resource management."""
+
+    def __init__(self, config: ExperimentConfig):
+        self.config = config
+        self.simulation_app: Any | None = None
+
+    def __enter__(self):
+        # Initialize simulation app
+        self.simulation_app = init_sim_imports(self.config)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Clean shutdown using the utility function
+        close_simulation_app(self.simulation_app)
+
+    def train(self) -> None:
+        """Train using this context's sim app."""
+        train(self.config, training_context=self)
+
+
+@contextmanager
+def training_context(config: ExperimentConfig):
+    """Context manager function for training."""
+    with TrainingContext(config) as ctx:
+        yield ctx
+
+
+class MultGPUConfig(TypedDict):
+    global_rank: int
+    local_rank: int
+    world_size: int
+
+
+def _collect_object_bank_wandb_metadata() -> dict[str, int | str]:
+    """Collect launcher-computed object-bank stats for W&B config/summary."""
+    prefix = "HOLOSOMA_OBJECT_BANK_"
+    raw_keys = {
+        "TOTAL_MOTION_COUNT": "object_bank/total_motion_count",
+        "TOTAL_UNIQUE_URDF_COUNT": "object_bank/total_unique_urdf_count",
+        "BOX_MOTION_COUNT": "object_bank/box_motion_count",
+        "BOX_UNIQUE_URDF_COUNT": "object_bank/box_unique_urdf_count",
+        "OMOMO_MOTION_COUNT": "object_bank/omomo_motion_count",
+        "OMOMO_UNIQUE_URDF_COUNT": "object_bank/omomo_unique_urdf_count",
+        "MOTION_DIR": "object_bank/motion_dir",
+        "OBJECT_MAP": "object_bank/object_map",
+    }
+    metadata: dict[str, int | str] = {}
+    for env_suffix, metric_name in raw_keys.items():
+        raw_value = os.environ.get(f"{prefix}{env_suffix}")
+        if raw_value is None or raw_value == "":
+            continue
+        if env_suffix.endswith("_COUNT"):
+            try:
+                metadata[metric_name] = int(raw_value)
+            except ValueError:
+                logger.warning("Ignoring non-integer object-bank metadata {}={}", env_suffix, raw_value)
+        else:
+            metadata[metric_name] = raw_value
+    return metadata
+
+
+def configure_multi_gpu() -> MultGPUConfig | None:
+    """Configure multi-gpu training and return configuration dictionary, or `None` if single-GPU training."""
+    import torch
+
+    gpu_world_size = int(os.getenv("WORLD_SIZE", "1"))
+    is_distributed = gpu_world_size > 1
+
+    if not is_distributed:
+        return None
+
+    gpu_local_rank = int(os.getenv("LOCAL_RANK", "0"))
+    gpu_global_rank = int(os.getenv("RANK", "0"))
+
+    gpu_local_world_size = int(os.getenv("LOCAL_WORLD_SIZE", str(gpu_world_size)))
+    if gpu_local_rank >= gpu_local_world_size:
+        raise ValueError(
+            f"Local rank '{gpu_local_rank}' is greater than or equal to local world size '{gpu_local_world_size}'."
+        )
+
+    if gpu_global_rank >= gpu_world_size:
+        raise ValueError(f"Global rank '{gpu_global_rank}' is greater than or equal to world size '{gpu_world_size}'.")
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("Distributed NCCL training requested but CUDA is not available.")
+
+    visible_gpu_count = torch.cuda.device_count()
+    if gpu_local_rank >= visible_gpu_count:
+        raise ValueError(
+            f"Local rank '{gpu_local_rank}' is out of range for {visible_gpu_count} visible CUDA devices. "
+            "Check CUDA_VISIBLE_DEVICES and --nproc_per_node."
+        )
+
+    torch.cuda.set_device(gpu_local_rank)
+    dist_timeout_sec = int(os.getenv("TORCH_DIST_TIMEOUT_SEC", "600"))
+    if dist_timeout_sec <= 0:
+        raise ValueError(f"TORCH_DIST_TIMEOUT_SEC must be positive, got {dist_timeout_sec}.")
+    torch.distributed.init_process_group(
+        backend="nccl",
+        rank=gpu_global_rank,
+        world_size=gpu_world_size,
+        timeout=timedelta(seconds=dist_timeout_sec),
+    )
+
+    multi_gpu_config: MultGPUConfig = {
+        "global_rank": gpu_global_rank,
+        "local_rank": gpu_local_rank,
+        "world_size": gpu_world_size,
+    }
+    logger.info(f"Running with multi-GPU parameters: {multi_gpu_config}")
+
+    return multi_gpu_config
+
+
+def get_device(config, distributed_conf: MultGPUConfig | None) -> str:
+    import torch
+
+    is_config_device_specified = hasattr(config, "device") and config.device is not None
+    is_multi_gpu = distributed_conf is not None
+
+    if is_config_device_specified:
+        if is_multi_gpu and config.device != cast("dict", distributed_conf)["local_rank"]:
+            raise ValueError(
+                f"Device specified in config ({config.device}) \
+                              does not match expected local rank {cast('dict', distributed_conf)['local_rank']}"
+            )
+        device = config.device
+    elif is_multi_gpu:
+        device = f"cuda:{cast('dict', distributed_conf)['local_rank']}"
+    else:
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+    return device
+
+
+def configure_logging(distributed_conf: MultGPUConfig | None = None, log_dir: Path | None = None):
+    # Configure logging.
+    from holosoma.utils.logging import LoguruLoggingBridge
+
+    logger.remove()
+    is_main_process = distributed_conf is None or distributed_conf["global_rank"] == 0
+
+    # logging to file (from all ranks)
+    if log_dir is not None:
+        fname = f"train_rank_{distributed_conf['global_rank']:02d}.log" if distributed_conf is not None else "train.log"
+        log_path = log_dir / fname
+        logger.add(str(log_path), level="DEBUG")
+
+    # Get log level from LOGURU_LEVEL environment variable or use INFO as default in rank0
+    if is_main_process:
+        console_log_level = os.environ.get("LOGURU_LEVEL", "INFO").upper()
+    else:
+        console_log_level = "ERROR"
+    logger.add(sys.stdout, level=console_log_level, colorize=True)
+    logging.basicConfig(level=logging.DEBUG if is_main_process else logging.ERROR)
+    logging.getLogger().addHandler(LoguruLoggingBridge())
+
+
+def _zoom_out_video_config(config: VideoConfig, zoom: float) -> VideoConfig:
+    if zoom <= 1.0:
+        return config
+    camera = config.camera
+    if isinstance(camera, SphericalCameraConfig):
+        camera = dataclasses.replace(camera, distance=float(camera.distance) * zoom)
+    elif isinstance(camera, CartesianCameraConfig):
+        camera = dataclasses.replace(camera, offset=[float(v) * zoom for v in camera.offset])
+    elif isinstance(camera, FixedCameraConfig):
+        position = np.array(camera.position, dtype=np.float32)
+        target = np.array(camera.target, dtype=np.float32)
+        position = target + (position - target) * zoom
+        camera = dataclasses.replace(camera, position=position.tolist())
+    return dataclasses.replace(config, camera=camera)
+
+
+def _apply_debug_camera_tilt(env: Any, target_pitch_deg: float = -20.0) -> bool:
+    import torch
+
+    perception = getattr(env, "perception_manager", None)
+    if perception is None or perception._camera_ray_dirs_base is None:
+        return False
+
+    try:
+        record_env_id = int(getattr(env.simulator.video_config, "record_env_id", 0))
+        idx = torch.tensor([record_env_id], device=perception.device)
+        _, body_quat = perception._get_camera_body_pose(idx)
+        ray_dirs_base = perception._camera_ray_dirs_base
+        center_dir = ray_dirs_base.view(perception._camera_height, perception._camera_width, 3)[
+            perception._camera_height // 2, perception._camera_width // 2
+        ]
+        forward_world = quat_apply(body_quat, center_dir.unsqueeze(0), w_last=True).squeeze(0)
+        horiz = torch.sqrt(forward_world[0] ** 2 + forward_world[1] ** 2).clamp(min=1.0e-6)
+        current_pitch = torch.atan2(forward_world[2], horiz)
+        target_pitch = torch.deg2rad(torch.tensor(float(target_pitch_deg), device=perception.device))
+        delta = target_pitch - current_pitch
+        if torch.abs(delta).item() < 1.0e-3:
+            return False
+        delta_quat = quat_from_euler_xyz(torch.tensor(0.0, device=perception.device), delta, torch.tensor(0.0, device=perception.device))
+        delta_quat = delta_quat.unsqueeze(0).expand(ray_dirs_base.shape[0], -1)
+        perception._camera_ray_dirs_base = quat_rotate_inverse(delta_quat, ray_dirs_base, w_last=True)
+        logger.info(
+            f"Debug depth: auto-tilting camera rays by {float(torch.rad2deg(delta)):.2f} deg "
+            f"(target pitch {target_pitch_deg:.1f} deg)."
+        )
+        return True
+    except Exception as exc:
+        logger.warning(f"Debug depth: failed to auto-tilt camera rays: {exc}")
+        return False
+
+
+def _run_debug_depth_video(env: Any, *, wandb_logging: bool) -> None:
+    if not hasattr(env, "step_visualize_motion"):
+        raise RuntimeError("Debug video requires an environment with step_visualize_motion().")
+    if env.perception_manager is None or not env.perception_manager.enabled:
+        raise RuntimeError("Debug video requires perception to be enabled.")
+    if env.perception_manager.cfg.output_mode != "camera_depth":
+        raise RuntimeError("Debug video requires perception output_mode=camera_depth.")
+
+    video_recorder = env.simulator.video_recorder if hasattr(env, "simulator") else None
+    debug_zoom = 2.5
+    if video_recorder is not None and video_recorder.enabled:
+        zoomed_config = _zoom_out_video_config(video_recorder.config, debug_zoom)
+        video_recorder.config = zoomed_config
+        env.simulator.video_config = zoomed_config
+        video_recorder.start_recording(episode_id=0)
+    else:
+        logger.warning("Debug video: simulator video recorder not enabled; only depth video will be logged.")
+
+    env.reset_all()
+    _apply_debug_camera_tilt(env, target_pitch_deg=-20.0)
+
+    record_env_id = int(getattr(env.simulator.video_config, "record_env_id", 0))
+    frames: list[Any] = []
+    done = False
+    max_distance = float(env.perception_manager.cfg.max_distance)
+
+    while not done:
+        if hasattr(env.simulator, "sim"):
+            env.simulator.sim.step()
+        done = bool(env.step_visualize_motion(None))
+        env.perception_manager.update()
+        if video_recorder is not None and video_recorder.enabled:
+            env.simulator.capture_video_frame(record_env_id)
+        depth = env.perception_manager.get_camera_depth_map()[record_env_id].detach().cpu().numpy()
+        if not frames:
+            if np.allclose(depth, max_distance):
+                logger.warning("Debug depth video: all rays hit max_distance; check camera pose/pitch/terrain.")
+        frames.append(env._depth_to_rgb(depth))
+
+    if not frames:
+        logger.warning("Debug depth video: no frames captured.")
+        if video_recorder is not None and video_recorder.enabled:
+            video_recorder.stop_recording()
+        return
+
+    from holosoma.utils.video_utils import create_video  # noqa: PLC0415
+
+    sim_config = env.simulator.simulator_config.sim
+    control_frequency = sim_config.fps / sim_config.control_decimation
+    display_fps = control_frequency * env.simulator.video_config.playback_rate
+    save_dir = (
+        Path(env.simulator.video_config.save_dir)
+        if env.simulator.video_config.save_dir is not None
+        else Path("/data/logs_new/videos")
+    )
+    create_video(
+        video_frames=np.stack(frames, axis=0).astype(np.uint8),
+        fps=display_fps,
+        save_dir=save_dir,
+        output_format=env.simulator.video_config.output_format,
+        wandb_logging=wandb_logging,
+        episode_id=0,
+        wandb_key="Depth rollout (debug)",
+    )
+    if video_recorder is not None and video_recorder.enabled:
+        video_recorder.stop_recording()
+
+
+def _run_debug_motion_preview(env: Any, *, max_steps: int | None = None) -> None:
+    if not hasattr(env, "step_visualize_motion"):
+        raise RuntimeError("Debug motion preview requires an environment with step_visualize_motion().")
+    env.reset_all()
+    done = False
+    step = 0
+    while not done:
+        done = bool(env.step_visualize_motion(None))
+        step += 1
+        if max_steps is not None and step >= max_steps:
+            logger.info("Debug motion preview reached max_steps={} and will exit.", max_steps)
+            break
+
+
+def _run_debug_mode_by_perception(
+    env: Any,
+    *,
+    wandb_logging: bool,
+    max_steps: int | None = None,
+) -> None:
+    perception_mgr = getattr(env, "perception_manager", None)
+    perception_enabled = bool(getattr(perception_mgr, "enabled", False))
+    output_mode = str(getattr(getattr(perception_mgr, "cfg", None), "output_mode", "")).strip().lower()
+    if perception_enabled and output_mode == "camera_depth":
+        logger.info("Debug mode: perception output_mode=camera_depth, running depth debug rollout.")
+        _run_debug_depth_video(env, wandb_logging=wandb_logging)
+        return
+
+    logger.info(
+        "Debug mode: perception output_mode='{}' (enabled={}), running motion/viser preview.",
+        output_mode or "none",
+        perception_enabled,
+    )
+    _run_debug_motion_preview(env, max_steps=max_steps)
+
+
+def train(tyro_config: ExperimentConfig, training_context: TrainingContext | None = None) -> None:
+    """Train an agent with optional context for sim app management.
+
+    Parameters
+    ----------
+    training_context : Optional[TrainingContext]
+        Optional training context with pre-initialized sim app.
+        If None, creates and manages sim app automatically.
+    """
+
+    if training_context is not None:
+        # Use the context's pre-initialized sim app
+        simulation_app = training_context.simulation_app
+        auto_close = False  # Context will handle closing
+    else:
+        # Default behavior - create and manage sim app ourselves
+        simulation_app = init_sim_imports(tyro_config)
+        auto_close = True
+
+    try:
+        # have to import torch after isaacgym
+        import torch  # noqa: F401
+        import torch.distributed as dist
+        import wandb
+
+        from holosoma.agents.base_algo.base_algo import BaseAlgo
+        from holosoma.utils.common import seeding
+
+        # unresolved_conf = dataclasses.asdict(tyro_config)
+        # import ipdb; ipdb.set_trace()
+
+        # Initialize process group
+        distributed_conf: MultGPUConfig | None = configure_multi_gpu()
+        device: str = get_device(tyro_config, distributed_conf)
+        is_distributed = distributed_conf is not None
+        is_main_process = distributed_conf is None or distributed_conf["global_rank"] == 0
+
+        # Configure logger
+        logger_cfg = tyro_config.logger
+        wandb_enabled = logger_cfg.type == "wandb"
+
+        # Compute experiment directory from logger and training config
+        from holosoma.utils.experiment_paths import get_experiment_dir, get_timestamp
+
+        timestamp = get_timestamp()
+        experiment_dir = get_experiment_dir(logger_cfg, tyro_config.training, timestamp, task_name="locomotion")
+
+        # Configure logging with experiment directory
+        configure_logging(distributed_conf=distributed_conf, log_dir=experiment_dir)
+
+        # Random seed
+        seed = tyro_config.training.seed
+        if distributed_conf is not None:
+            seed += distributed_conf["global_rank"]
+        seeding(seed, torch_deterministic=tyro_config.training.torch_deterministic)
+
+        wandb_run_path: str | None = None
+
+        # Distribute environments across GPUs for proper multi-GPU training
+        if distributed_conf is not None:
+            original_num_envs = tyro_config.training.num_envs
+            num_envs = original_num_envs // distributed_conf["world_size"]
+            if num_envs < 1:
+                raise ValueError(
+                    f"training.num_envs ({original_num_envs}) is too small for world size "
+                    f"{distributed_conf['world_size']}. Increase num_envs or reduce --nproc_per_node."
+                )
+            if original_num_envs % distributed_conf["world_size"] != 0 and is_main_process:
+                logger.warning(
+                    "training.num_envs={} is not divisible by world_size={}; using floor division ({} envs per rank).",
+                    original_num_envs,
+                    distributed_conf["world_size"],
+                    num_envs,
+                )
+            tyro_config = dataclasses.replace(
+                tyro_config, training=dataclasses.replace(tyro_config.training, num_envs=num_envs)
+            )
+            logger.info(
+                f"Distributed training: GPU {distributed_conf['global_rank']} will run {tyro_config.training.num_envs} "
+                f"environments (total across all GPUs: {original_num_envs})"
+            )
+
+        if tyro_config.training.debug and not tyro_config.training.headless:
+            tyro_config = dataclasses.replace(
+                tyro_config, training=dataclasses.replace(tyro_config.training, headless=True)
+            )
+            logger.info("Debug mode: forcing headless=True to avoid viewer-only issues.")
+
+        tyro_config = apply_observation_overrides(tyro_config)
+        tyro_config = apply_perception_overrides(tyro_config)
+
+        experiment_save_dir = experiment_dir
+        experiment_save_dir.mkdir(exist_ok=True, parents=True)
+
+        config_path: Path | None = None
+        if is_main_process:
+            logger.info(f"Saving config file to {experiment_save_dir}")
+            config_path = experiment_save_dir / CONFIG_NAME
+            tyro_config.save_config(str(config_path))
+
+        # Initialize wandb on rank0 before expensive sim/env setup so the run
+        # appears immediately in the UI. Keep ranks in sync with a barrier.
+        if wandb_enabled and is_main_process:
+            from holosoma.config_types.logger import WandbLoggerConfig
+
+            assert isinstance(logger_cfg, WandbLoggerConfig), (
+                "Logger config must be WandbLoggerConfig when type is wandb"
+            )
+            wandb_cfg = logger_cfg
+            default_project = tyro_config.training.project or wandb_cfg.project or "default_project"
+            default_run_name = (
+                f"{timestamp}_{tyro_config.training.name or 'run'}_"
+                f"{wandb_cfg.group or 'default'}_{tyro_config.robot.asset.robot_type}"
+            )
+            wandb_dir = Path(wandb_cfg.dir or (experiment_dir / ".wandb"))
+            wandb_dir.mkdir(exist_ok=True, parents=True)
+            logger.info(f"Saving wandb logs to {wandb_dir}")
+
+            wandb_kwargs: dict[str, Any] = {
+                "project": wandb_cfg.project or default_project,
+                "name": wandb_cfg.name or default_run_name,
+                "config": dataclasses.asdict(tyro_config),
+                "dir": str(wandb_dir),
+                "mode": wandb_cfg.mode,
+            }
+            if wandb_cfg.entity:
+                wandb_kwargs["entity"] = wandb_cfg.entity
+            if wandb_cfg.group:
+                wandb_kwargs["group"] = wandb_cfg.group
+            if wandb_cfg.id:
+                wandb_kwargs["id"] = wandb_cfg.id
+            if wandb_cfg.tags:
+                wandb_kwargs["tags"] = list(wandb_cfg.tags)
+            if wandb_cfg.resume is not None:
+                wandb_kwargs["resume"] = wandb_cfg.resume
+            wandb_kwargs["settings"] = wandb.Settings(
+                init_timeout=float(os.environ.get("WANDB_INIT_TIMEOUT", "60"))
+            )
+
+            try:
+                wandb.init(**wandb_kwargs)
+            except Exception as wandb_exc:
+                logger.exception(
+                    f"wandb.init failed on rank0: {wandb_exc}. Continuing without an active wandb run."
+                )
+
+            if wandb.run is not None:
+                wandb_run_path = f"{wandb.run.entity}/{wandb.run.project}/{wandb.run.id}"
+                object_bank_metadata = _collect_object_bank_wandb_metadata()
+                if object_bank_metadata:
+                    wandb.config.update(object_bank_metadata, allow_val_change=True)
+                    for key, value in object_bank_metadata.items():
+                        wandb.run.summary[key] = value
+                    wandb.log(object_bank_metadata, step=0)
+                    logger.info("Logged object-bank metadata to W&B: {}", object_bank_metadata)
+                reward_config_metadata, reward_summary_metadata = collect_reward_wandb_metadata(tyro_config.reward)
+                if reward_config_metadata:
+                    wandb.config.update(reward_config_metadata, allow_val_change=True)
+                    for key, value in reward_summary_metadata.items():
+                        wandb.run.summary[key] = value
+                    if reward_summary_metadata:
+                        wandb.log(reward_summary_metadata, step=0)
+                    logger.info("Logged grouped reward metadata to W&B.")
+                if config_path is not None:
+                    wandb.save(str(config_path), base_path=experiment_save_dir)
+
+        if is_distributed and dist.is_initialized():
+            dist.barrier()
+
+        env_target = tyro_config.env_class
+
+        tyro_env_config = get_tyro_env_config(tyro_config)
+        env = get_class(env_target)(tyro_env_config, device=device)
+
+        # For manager system, pre-process config AFTER env creation
+        # (need managers to compute dims)
+        observation_manager = getattr(env, "observation_manager", None)
+        if observation_manager is None:
+            raise RuntimeError(
+                f"Manager environment {env_target} is missing observation_manager attribute. "
+                "This should not happen if the environment is properly configured."
+            )
+
+        if tyro_config.training.debug:
+            if is_main_process:
+                max_debug_steps = tyro_config.training.max_eval_steps
+                _run_debug_mode_by_perception(
+                    env,
+                    wandb_logging=wandb_enabled,
+                    max_steps=max_debug_steps,
+                )
+            if is_distributed:
+                dist.barrier()
+                logger.info("Shutting down distributed processes...")
+                dist.destroy_process_group()
+            if is_main_process and wandb_enabled:
+                logger.info("Shutting down wandb...")
+                wandb.finish()
+            return
+
+        algo_class = get_class(tyro_config.algo._target_)
+        algo: BaseAlgo = algo_class(
+            device=device,
+            env=env,
+            config=tyro_config.algo.config,
+            log_dir=experiment_save_dir,
+            multi_gpu_cfg=distributed_conf,
+        )
+        algo.setup()
+
+        algo.attach_checkpoint_metadata(tyro_config, wandb_run_path)
+        if tyro_config.training.checkpoint is not None:
+            loaded_checkpoint = load_checkpoint(tyro_config.training.checkpoint, str(experiment_save_dir))
+            tyro_config = dataclasses.replace(
+                tyro_config, training=dataclasses.replace(tyro_config.training, checkpoint=str(loaded_checkpoint))
+            )
+            algo.load(loaded_checkpoint)
+
+        # handle saving config
+        algo.learn()
+
+        # teardown wandb before SimApp closes ungracefully (IsaacLab)
+        if is_main_process and wandb_enabled:
+            logger.info("Shutting down wandb...")
+            wandb.teardown()
+
+        # shutdown dist before SimApp closes ungracefully (IsaacLab)
+        if is_distributed:
+            logger.info("Shutting down distributed processes...")
+            dist.destroy_process_group()
+    except Exception as e:
+        tb_str = traceback.format_exc()
+        logger.error(f"Exception occurred during training: {e}\n{tb_str}")
+        sys.exit(1)  # manually set exit code, not possible via isaacsim app.close()
+    finally:
+        if auto_close:
+            close_simulation_app(simulation_app)
+
+    logger.info("Training shutdown complete.")
+
+
+def main() -> None:
+    tyro_cfg = tyro.cli(AnnotatedExperimentConfig, config=TYRO_CONIFG)
+    print(tyro_cfg.curriculum)
+    train(tyro_cfg)
+
+
+if __name__ == "__main__":
+    main()

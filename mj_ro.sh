@@ -44,7 +44,8 @@ if [[ "$checkpoint" == /* || "$checkpoint" == ./* || "$checkpoint" == ../* ]]; t
 elif [[ "$checkpoint" == https://wandb.ai/* || "$checkpoint" == wandb://* ]]; then
   model_path="$checkpoint"
 elif [[ "$checkpoint" =~ ^[0-9]+$ ]]; then
-  model_path="wandb://${run_path}/model_${checkpoint}.onnx"
+  printf -v checkpoint_name "model_%05d.onnx" "$checkpoint"
+  model_path="wandb://${run_path}/${checkpoint_name}"
 else
   model_path="wandb://${run_path}/${checkpoint:-latest}"
 fi
@@ -86,6 +87,7 @@ if [[ -z "$force_zero_sparse" ]]; then
 fi
 
 export HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND="$force_zero_sparse"
+export HOLOSOMA_POLICY_COMMAND_STATUS_PATH="${HOLOSOMA_POLICY_COMMAND_STATUS_PATH:-/tmp/holosoma_policy_command_status.json}"
 if [[ -z "${HOLOSOMA_POLICY_MOTION_INDEX_OFFSET:-}" ]]; then
   if [[ "$(basename "$clip" .npz)" == "box_75" ]]; then
     export HOLOSOMA_POLICY_MOTION_INDEX_OFFSET=1

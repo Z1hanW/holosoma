@@ -1,0 +1,29 @@
+{
+  "bridge": {
+    "domain_id": 50,
+    "hold_default_pose_until_first_command": true,
+    "ignore_default_idle_command": true,
+    "publish_sim_state": true,
+    "sim_state_port": 56731
+  },
+  "checkpoint": "wandb://zihanw22/carry-any/6c7exbeq/latest",
+  "clip": "box_75",
+  "duration": "45s",
+  "first_lowcmd_received": false,
+  "lift": {
+    "final_dz": 0.0,
+    "final_object_z": 0.168,
+    "initial_object_z": 0.168,
+    "max_dz": 0.0,
+    "max_object_z": 0.168,
+    "robot_drop_from_initial": 0.0,
+    "robot_z_initial": 0.76,
+    "robot_z_min": 0.76,
+    "t_at_max_dz": 0.0
+  },
+  "lift_telemetry_count": 1,
+  "run_ref": "ppo_first_contact_aware_h1",
+  "sim_state_subscriber_started": false,
+  "use_sim_state_effective": false,
+  "use_sim_state_requested": false
+}

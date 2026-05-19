@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 clip="${HOLOSOMA_MJ_MOTION:-box_75}"
 motion_init="${HOLOSOMA_MJ_MOTION_INIT:-0}"
-object_xy_offset="${HOLOSOMA_MJ_OBJECT_XY_OFFSET:-}"
+object_xy_offset="${HOLOSOMA_MJ_OBJECT_XY_OFFSET:-0,-0.0}"
+object_mass="${HOLOSOMA_MJ_OBJECT_MASS:-2.0}"
 explicit_motion_mode=0
 clip_arg_seen=0
 if [[ -n "${HOLOSOMA_MJ_MOTION_INIT:-}" ]]; then
@@ -70,8 +71,11 @@ fi
 export HOLOSOMA_MJ_MOTION="$motion_file"
 export HOLOSOMA_MJ_MOTION_INIT="$motion_init"
 export HOLOSOMA_MJ_OBJECT_XY_OFFSET="$object_xy_offset"
+export HOLOSOMA_MJ_OBJECT_MASS="$object_mass"
 export HOLOSOMA_MUJOCO_HOLD_MOTION_INIT_UNTIL_COMMAND="${HOLOSOMA_MUJOCO_HOLD_MOTION_INIT_UNTIL_COMMAND:-$motion_init}"
+export HOLOSOMA_POLICY_COMMAND_STATUS_PATH="${HOLOSOMA_POLICY_COMMAND_STATUS_PATH:-/tmp/holosoma_policy_command_status.json}"
 export SIM_STATE_PORT="${SIM_STATE_PORT:-5557}"
+rm -f "$HOLOSOMA_POLICY_COMMAND_STATUS_PATH" 2>/dev/null || true
 
 robot_args=()
 if [[ -n "$object_urdf" ]]; then

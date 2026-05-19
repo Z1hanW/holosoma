@@ -1,0 +1,312 @@
+from __future__ import annotations
+
+import dataclasses
+import datetime
+import json
+from datetime import timezone
+
+import tyro
+import yaml
+from pydantic.dataclasses import dataclass
+from typing_extensions import Annotated
+
+import holosoma.config_values.action
+import holosoma.config_values.algo
+import holosoma.config_values.command
+import holosoma.config_values.curriculum
+import holosoma.config_values.logger
+import holosoma.config_values.observation
+import holosoma.config_values.perception
+import holosoma.config_values.randomization
+import holosoma.config_values.reward
+import holosoma.config_values.robot
+import holosoma.config_values.simulator
+import holosoma.config_values.termination
+import holosoma.config_values.terrain
+from holosoma.config_types.action import ActionManagerCfg
+from holosoma.config_types.algo import AlgoConfig
+from holosoma.config_types.command import CommandManagerCfg
+from holosoma.config_types.curriculum import CurriculumManagerCfg
+from holosoma.config_types.logger import LoggerConfig
+from holosoma.config_types.observation import ObservationManagerCfg
+from holosoma.config_types.perception import PerceptionConfig
+from holosoma.config_types.randomization import RandomizationManagerCfg
+from holosoma.config_types.reward import RewardManagerCfg
+from holosoma.config_types.robot import RobotConfig
+from holosoma.config_types.simulator import SimulatorConfig
+from holosoma.config_types.termination import TerminationManagerCfg
+from holosoma.config_types.terrain import TerrainManagerCfg
+
+
+def now_timestamp() -> str:
+    return datetime.datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+
+@dataclass(frozen=True)
+class NightlyConfig:
+    iterations: int
+    metrics: dict[str, list[float | str]]
+
+
+@dataclass(frozen=True)
+class TrainingConfig:
+    """Configuration for training execution and evaluation."""
+
+    # Simulation settings
+    headless: bool = True
+    """Run simulation without rendering."""
+
+    torch_deterministic: bool = False
+    """Enable PyTorch deterministic mode."""
+
+    multigpu: bool = False
+    """Enable multi-GPU training."""
+
+    # Environment settings
+    num_envs: int = 4096
+    """Number of parallel environments."""
+
+    seed: int = 42
+    """Random seed for reproducibility."""
+
+    # Checkpoint settings
+    checkpoint: str | None = None
+    """Path to checkpoint for resuming training."""
+
+    # Logging settings
+    project: str = "default_project"
+    """Project name for logging. `logger.project` takes precedence if set."""
+
+    name: str = "run"
+    """Run name for logging. `logger.name` takes precedence if set."""
+
+    # Evaluation settings
+    max_eval_steps: int | None = None
+    """Maximum number of evaluation steps (None for unlimited)."""
+
+    export_onnx: bool = True
+    """Export policy as ONNX model."""
+
+    debug: bool = False
+    """If True, render/log a depth video and exit without training."""
+
+    toy_mode: bool = False
+    """If True, run a small-scale training setup intended for debugging."""
+
+    enable_viser: bool = False
+    """Enable a Viser live viewer during training."""
+
+    viser_port: int = 0
+    """Port for the Viser server (0 -> random, HOLOSOMA_VISER_PORT overrides)."""
+
+    viser_env_id: int = 0
+    """Environment index to visualize in the Viser viewer."""
+
+    viser_env_count: int = 1
+    """Number of consecutive environments to visualize in the Viser viewer."""
+
+    viser_multi_env_spacing: float = 2.5
+    """Additional Y-offset (meters) between extra Viser env views."""
+
+    viser_update_hz: float = 30.0
+    """Update rate for the Viser viewer (<=0 uses simulator control frequency)."""
+
+    viser_sync_to_sim: bool = True
+    """Sync Viser update rate to simulator control frequency when available."""
+
+    viser_force_dt: bool = True
+    """Sleep to enforce the target Viser update period (aligns playback to real time)."""
+
+    viser_recenter: bool = True
+    """Recenter the Viser viewer around the env origin when available."""
+
+    viser_global_frame_quat_wxyz: list[float] | None = None
+    """Optional global frame rotation (wxyz) applied to all Viser scene nodes."""
+
+    viser_show_scandots: bool = False
+    """Show camera scandots point cloud in the Viser viewer."""
+
+    viser_scandots_point_size: float = 0.02
+    """Point size for scandots visualization in Viser."""
+
+    isaac_show_scandots: bool = False
+    """Show camera scandots in the Isaac Sim debug draw viewer."""
+
+    isaac_scandots_point_size: float = 2.0
+    """Point size for Isaac Sim scandots debug draw."""
+
+
+@dataclass(frozen=True)
+class EvalOverridesConfig:
+    headless: bool = False
+    num_envs: int = 1
+    disable_logger: bool = True
+    max_episode_length_s: float = 100000.0
+    randomize_tiles: bool = False
+    """Use deterministic spawn at tile (0,0) for reproducible evaluation."""
+    xy_offset_range: float = 0.0
+    """Disable XY offset for deterministic spawn position."""
+
+
+@dataclass(frozen=True)
+class ObservationOverridesConfig:
+    """Optional runtime overrides for observation groups."""
+
+    disable_actor_target: bool = False
+    """Remove the actor target observation group (e.g., actor_obs_target) when True."""
+
+    disable_critic_target: bool = False
+    """Remove the critic target observation group (e.g., critic_obs_target) when True."""
+
+    disable_actor_target_inputs: bool = False
+    """Drop actor target inputs from the policy without removing the observation group."""
+
+    disable_critic_target_inputs: bool = False
+    """Drop critic target inputs from the value function without removing the observation group."""
+
+    disable_actor_history: bool = False
+    """Force actor_obs history_length=1 when True."""
+
+    disable_critic_history: bool = False
+    """Force critic_obs history_length=1 when True."""
+
+    distill_proprio_history_only: bool = False
+    """When True, keep multi-frame history only on distillation proprio groups and keep actions single-frame."""
+
+    distill_proprio_history_length: int = 1
+    """History length to use for distillation proprio-only history overrides; ``1`` keeps only the current frame."""
+
+
+@dataclass(frozen=True)
+class ExperimentConfig:
+    """Top-level experiment configuration used by the Tyro CLI."""
+
+    env_class: str = "holosoma.envs.locomotion.locomotion_manager.LeggedRobotLocomotionManager"
+
+    training: TrainingConfig = TrainingConfig()
+    algo: Annotated[
+        AlgoConfig,
+        tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.algo.DEFAULTS)),
+    ] = holosoma.config_values.algo.ppo
+    simulator: Annotated[
+        SimulatorConfig,
+        tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.simulator.DEFAULTS)),
+    ] = holosoma.config_values.simulator.isaacgym
+    terrain: Annotated[
+        TerrainManagerCfg,
+        tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.terrain.DEFAULTS)),
+    ] = holosoma.config_values.terrain.terrain_locomotion_plane
+    perception: Annotated[
+        PerceptionConfig,
+        tyro.conf.arg(
+            constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.perception.DEFAULTS)
+        ),
+    ] = holosoma.config_values.perception.none
+    observation: Annotated[
+        ObservationManagerCfg | None,
+        tyro.conf.arg(
+            constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.observation.DEFAULTS)
+        ),
+    ] = holosoma.config_values.observation.none
+    action: Annotated[
+        ActionManagerCfg | None,
+        tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.action.DEFAULTS)),
+    ] = holosoma.config_values.action.none
+    reward: Annotated[
+        RewardManagerCfg | None,
+        tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.reward.DEFAULTS)),
+    ] = holosoma.config_values.reward.none
+    termination: Annotated[
+        TerminationManagerCfg | None,
+        tyro.conf.arg(
+            constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.termination.DEFAULTS)
+        ),
+    ] = holosoma.config_values.termination.none
+    randomization: Annotated[
+        RandomizationManagerCfg | None,
+        tyro.conf.arg(
+            constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.randomization.DEFAULTS)
+        ),
+    ] = holosoma.config_values.randomization.none
+    command: Annotated[
+        CommandManagerCfg | None,
+        tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.command.DEFAULTS)),
+    ] = holosoma.config_values.command.none
+    curriculum: Annotated[
+        CurriculumManagerCfg | None,
+        tyro.conf.arg(
+            constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.curriculum.DEFAULTS)
+        ),
+    ] = holosoma.config_values.curriculum.none
+    robot: Annotated[
+        RobotConfig,
+        tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.robot.DEFAULTS)),
+    ] = holosoma.config_values.robot.g1_29dof
+    logger: Annotated[
+        LoggerConfig,
+        tyro.conf.arg(constructor=tyro.extras.subcommand_type_from_defaults(holosoma.config_values.logger.DEFAULTS)),
+    ] = holosoma.config_values.logger.disabled
+    nightly: NightlyConfig | None = None
+
+    eval_overrides: EvalOverridesConfig = EvalOverridesConfig()
+    observation_overrides: ObservationOverridesConfig = ObservationOverridesConfig()
+
+    def get_nightly_config(self) -> ExperimentConfig:
+        if self.nightly is None:
+            raise ValueError("nightly config is missing.")
+
+        return dataclasses.replace(
+            self,
+            algo=dataclasses.replace(
+                self.algo,
+                config=dataclasses.replace(  # type: ignore[arg-type]
+                    self.algo.config,
+                    num_learning_iterations=self.nightly.iterations,
+                ),
+            ),
+        )
+
+    def get_eval_config(self) -> ExperimentConfig:
+        # Create eval spawn config with overrides
+        eval_spawn_cfg = dataclasses.replace(
+            self.terrain.terrain_term.spawn,
+            randomize_tiles=self.eval_overrides.randomize_tiles,
+            xy_offset_range=self.eval_overrides.xy_offset_range,
+        )
+
+        return dataclasses.replace(
+            self,
+            terrain=dataclasses.replace(
+                self.terrain,
+                terrain_term=dataclasses.replace(
+                    self.terrain.terrain_term,
+                    spawn=eval_spawn_cfg,
+                ),
+            ),
+            simulator=dataclasses.replace(
+                self.simulator,
+                config=dataclasses.replace(
+                    self.simulator.config,
+                    sim=dataclasses.replace(
+                        self.simulator.config.sim,
+                        max_episode_length_s=self.eval_overrides.max_episode_length_s,
+                    ),
+                ),
+            ),
+            training=dataclasses.replace(
+                self.training,
+                headless=self.eval_overrides.headless,
+                num_envs=self.eval_overrides.num_envs,
+            ),
+            logger=holosoma.config_values.logger.disabled if self.eval_overrides.disable_logger else self.logger,
+        )
+
+    def save_config(self, path: str) -> None:
+        with open(path, "w") as file:
+            yaml.safe_dump(self.to_serializable_dict(), file)
+
+    def to_serializable_dict(self) -> dict:
+        """Return a JSON-friendly representation of the config."""
+        # Directly using yaml.safe_dump does not handle string enums properly,
+        # so round-trip through JSON to coerce typing objects into primitives.
+        return json.loads(json.dumps(dataclasses.asdict(self)))

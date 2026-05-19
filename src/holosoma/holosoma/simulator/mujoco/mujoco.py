@@ -331,6 +331,8 @@ class MuJoCo(BaseSimulator):
             Path(policy_command_status_path) if policy_command_status_path else None
         )
         self._policy_command_status_text = "Policy command: waiting"
+        self._policy_command_status_command: tuple[float, float, float] | None = None
+        self._policy_command_status_payload: dict[str, object] | None = None
         self._policy_command_status_next_read = 0.0
         self._text_overlay_last_text: str | None = None
 
@@ -1596,6 +1598,7 @@ class MuJoCo(BaseSimulator):
     def draw_debug_viz(self):
         if self.virtual_gantry:
             self.virtual_gantry.draw_debug()
+        self._draw_policy_sparse_command_viz()
 
     def simulate_at_each_physics_step(self) -> None:
         """Advance simulation by one step."""
@@ -2156,34 +2159,115 @@ class MuJoCo(BaseSimulator):
             payload = json.loads(self._policy_command_status_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             self._policy_command_status_text = "Policy command: waiting"
+            self._policy_command_status_command = None
+            self._policy_command_status_payload = None
             return self._policy_command_status_text
         except (json.JSONDecodeError, OSError):
             return self._policy_command_status_text
 
         command = payload.get("command")
         if not isinstance(command, list) or len(command) < 3:
+            self._policy_command_status_command = None
+            self._policy_command_status_payload = None
             return self._policy_command_status_text
 
         try:
             x, y, yaw = (float(command[0]), float(command[1]), float(command[2]))
         except (TypeError, ValueError):
+            self._policy_command_status_command = None
+            self._policy_command_status_payload = None
             return self._policy_command_status_text
 
         age = max(0.0, time.time() - float(payload.get("timestamp", 0.0) or 0.0))
         if age > 2.0:
             self._policy_command_status_text = "Policy command: waiting"
+            self._policy_command_status_command = None
+            self._policy_command_status_payload = None
             return self._policy_command_status_text
 
-        source = "motion"
-        if payload.get("force_zero_sparse_root_command"):
-            source = "zero"
-        elif payload.get("external_sparse_root_command_mode"):
-            source = "manual"
+        source = self._policy_command_source(payload)
+        term = str(payload.get("term") or "sparse_root")
 
+        self._policy_command_status_command = (x, y, yaw)
+        self._policy_command_status_payload = payload
         self._policy_command_status_text = (
-            f"Policy command ({source}): x={x:+.2f} y={y:+.2f} yaw={yaw:+.2f}"
+            f"Policy obs {source}: x={x:+.2f} y={y:+.2f} yaw={yaw:+.2f} term={term}"
         )
         return self._policy_command_status_text
+
+    @staticmethod
+    def _policy_command_source(payload: dict) -> str:
+        if payload.get("force_zero_sparse_root_command"):
+            return "zero"
+        if not payload.get("external_sparse_root_command_mode"):
+            return "motion"
+
+        def has_nonzero(values: object) -> bool:
+            if not isinstance(values, list):
+                return False
+            try:
+                return any(abs(float(value)) > 1e-5 for value in values[:3])
+            except (TypeError, ValueError):
+                return False
+
+        manual = has_nonzero(payload.get("manual_offset"))
+        joystick = has_nonzero(payload.get("joystick_offset"))
+        if manual and joystick:
+            return "manual+joystick"
+        if joystick:
+            return "joystick"
+        if manual:
+            return "manual"
+        return "external-zero"
+
+    def _robot_root_xy_yaw_for_policy_viz(self) -> tuple[np.ndarray, float] | None:
+        if self.root_data is None:
+            return None
+
+        if self.robot_qpos_addr is not None:
+            qpos = np.asarray(self.root_data.qpos[self.robot_qpos_addr : self.robot_qpos_addr + 7], dtype=np.float64)
+            if qpos.shape[0] == 7:
+                return qpos[:2].copy(), float(self._quat_wxyz_to_rpy(qpos[3:7])[2])
+
+        robot_body_id = mujoco.mj_name2id(self.root_model, mujoco.mjtObj.mjOBJ_BODY, self._get_prefixed_name("pelvis"))
+        if robot_body_id < 0:
+            return None
+        xy = np.asarray(self.root_data.xpos[robot_body_id, :2], dtype=np.float64).copy()
+        mat = np.asarray(self.root_data.xmat[robot_body_id], dtype=np.float64).reshape(3, 3)
+        yaw = float(np.arctan2(mat[1, 0], mat[0, 0]))
+        return xy, yaw
+
+    def _draw_policy_sparse_command_viz(self) -> None:
+        if self.viewer is None:
+            return
+
+        self._policy_command_overlay_text()
+        command = self._policy_command_status_command
+        if command is None:
+            return
+
+        root_pose = self._robot_root_xy_yaw_for_policy_viz()
+        if root_pose is None:
+            return
+        root_xy, root_yaw = root_pose
+
+        dx_body, dy_body, yaw_cmd = command
+        c = float(np.cos(root_yaw))
+        s = float(np.sin(root_yaw))
+        dx_world = c * dx_body - s * dy_body
+        dy_world = s * dx_body + c * dy_body
+
+        start = np.asarray([root_xy[0], root_xy[1], 0.08], dtype=np.float32)
+        target = np.asarray([root_xy[0] + dx_world, root_xy[1] + dy_world, 0.08], dtype=np.float32)
+        target_yaw = root_yaw + yaw_cmd
+        heading_end = target + np.asarray(
+            [0.25 * np.cos(target_yaw), 0.25 * np.sin(target_yaw), 0.0],
+            dtype=np.float32,
+        )
+
+        self.draw_line(start, target, torch.tensor([0.0, 1.0, 0.1]), env_id=0)
+        self.draw_sphere(target, 0.045, torch.tensor([0.0, 1.0, 0.1]), env_id=0)
+        self.draw_line(target, heading_end, torch.tensor([1.0, 0.85, 0.0]), env_id=0)
 
     def _update_text_overlay(self) -> None:
         """Update text overlay based on current state."""

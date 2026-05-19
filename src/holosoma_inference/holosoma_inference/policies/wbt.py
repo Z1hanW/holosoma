@@ -154,6 +154,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._manual_sparse_root_command_offset = np.zeros((1, 3), dtype=np.float32)
         self._joystick_sparse_root_command_offset = np.zeros((1, 3), dtype=np.float32)
         self._external_sparse_root_command_mode = False
+        self._policy_action_output_name = "actions"
         try:
             self._motion_index_offset = int(os.environ.get("HOLOSOMA_POLICY_MOTION_INDEX_OFFSET", "0") or "0")
         except ValueError:
@@ -330,6 +331,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.onnx_policy_session = onnxruntime.InferenceSession(model_path)
         self.onnx_input_names = [inp.name for inp in self.onnx_policy_session.get_inputs()]
         self.onnx_output_names = [out.name for out in self.onnx_policy_session.get_outputs()]
+        self._policy_action_output_name = self._resolve_action_output_name()
 
         # Extract KP/KD from ONNX metadata (same as base class)
         onnx_model = onnx.load(model_path)
@@ -372,7 +374,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             self.motion_ref_pos_xyz_0 = self.motion_ref_pos_xyz_t.copy()
 
             def policy_act(input_feed):
-                return self.onnx_policy_session.run(["actions"], input_feed)[0]
+                return self.onnx_policy_session.run([self._policy_action_output_name], input_feed)[0]
 
             self.policy = policy_act
             return
@@ -382,6 +384,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
         init_output_names = [
             name for name in ("joint_pos", "joint_vel", "ref_quat_xyzw", "ref_pos_xyz") if name in self.onnx_output_names
         ]
+        missing_reference_outputs = {"joint_pos", "joint_vel", "ref_quat_xyzw"} - set(self.onnx_output_names)
+        if missing_reference_outputs:
+            raise RuntimeError(
+                "This ONNX is missing tracking reference outputs "
+                f"{sorted(missing_reference_outputs)}. If this is a root-pos/action-only policy, run it through "
+                "mj_ro.sh external-root handling without --task.motion-file."
+            )
         outputs = self.onnx_policy_session.run(init_output_names, input_feed)
         output_map = dict(zip(init_output_names, outputs, strict=True))
 
@@ -402,18 +411,27 @@ class WholeBodyTrackingPolicy(BasePolicy):
         def policy_act(input_feed):
             policy_output_names = [
                 name
-                for name in ("actions", "joint_pos", "joint_vel", "ref_quat_xyzw", "ref_pos_xyz")
+                for name in (self._policy_action_output_name, "joint_pos", "joint_vel", "ref_quat_xyzw", "ref_pos_xyz")
                 if name in self.onnx_output_names
             ]
             output = self.onnx_policy_session.run(policy_output_names, input_feed)
             output_map = dict(zip(policy_output_names, output, strict=True))
-            action = output_map["actions"]
+            action = output_map[self._policy_action_output_name]
             motion_command = np.concatenate([output_map["joint_pos"], output_map["joint_vel"]], axis=1)
             ref_quat_xyzw = output_map["ref_quat_xyzw"]
             ref_pos_xyz = output_map.get("ref_pos_xyz")
             return action, motion_command, ref_quat_xyzw, ref_pos_xyz
 
         self.policy = policy_act
+
+    def _resolve_action_output_name(self) -> str:
+        for name in ("actions", "action"):
+            if name in self.onnx_output_names:
+                return name
+        raise ValueError(
+            "WBT ONNX policy must expose an action output named 'actions' or 'action'; "
+            f"got outputs={self.onnx_output_names}"
+        )
 
     @staticmethod
     def _extract_motion_config(metadata: dict) -> dict | None:
@@ -585,6 +603,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 "motion_ref_pos_xyz_0": None
                 if self.motion_ref_pos_xyz_0 is None
                 else self.motion_ref_pos_xyz_0.copy(),
+                "policy_action_output_name": self._policy_action_output_name,
             }
         )
         return state
@@ -596,6 +615,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.motion_ref_pos_xyz_0 = (
             None if state["motion_ref_pos_xyz_0"] is None else state["motion_ref_pos_xyz_0"].copy()
         )
+        self._policy_action_output_name = state.get("policy_action_output_name", "actions")
         self.motion_clip_progressing = False
         self.motion_timestep = 0
         self.motion_start_timestep = None
@@ -1180,18 +1200,19 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.logger.info(colored("Starting motion clip", "blue"))
 
     def _handle_sparse_root_keyboard_command(self, keycode: str) -> bool:
+        step = 0.025
         if keycode == "w":
-            self._manual_sparse_root_command_offset[0, 0] += 0.05
+            self._manual_sparse_root_command_offset[0, 0] += step
         elif keycode == "s":
-            self._manual_sparse_root_command_offset[0, 0] -= 0.05
+            self._manual_sparse_root_command_offset[0, 0] -= step
         elif keycode == "a":
-            self._manual_sparse_root_command_offset[0, 1] += 0.05
+            self._manual_sparse_root_command_offset[0, 1] += step
         elif keycode == "d":
-            self._manual_sparse_root_command_offset[0, 1] -= 0.05
+            self._manual_sparse_root_command_offset[0, 1] -= step
         elif keycode == "q":
-            self._manual_sparse_root_command_offset[0, 2] -= 0.05
+            self._manual_sparse_root_command_offset[0, 2] -= step
         elif keycode == "e":
-            self._manual_sparse_root_command_offset[0, 2] += 0.05
+            self._manual_sparse_root_command_offset[0, 2] += step
         elif keycode == "z":
             self._manual_sparse_root_command_offset.fill(0.0)
         else:
@@ -1219,8 +1240,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return
 
         deadband = 0.1
-        xy_scale = 0.5
-        yaw_scale = 0.6
+        xy_scale = 0.25
+        yaw_scale = 0.3
 
         def apply_deadband(value: float) -> float:
             return value if abs(value) > deadband else 0.0

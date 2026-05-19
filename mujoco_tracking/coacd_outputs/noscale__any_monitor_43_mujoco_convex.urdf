@@ -1,0 +1,146 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="any_monitor_43_real2sim_surface_contact_w50_object_interaction">
+  <dynamics damping="0.5" friction="0.9" />
+  <link name="any_monitor_43_real2sim_surface_contact_w50_object_interaction_link">
+    <inertial>
+      <mass value="0.1" />
+      <origin xyz="0 0 0" />
+      <inertia ixx="0.002" ixy="0" ixz="0" iyy="0.002" iyz="0" izz="0.002" />
+    </inertial>
+    <contact>
+      <lateral_friction value="0.9" />
+      <rolling_friction value="0.5" />
+      <stiffness value="30000" />
+      <damping value="1000" />
+    </contact>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/any_monitor_43_real2sim_surface_contact_w50_object_interaction.obj" scale="1 1 1" />
+      </geometry>
+      <material name="mat">
+        <color rgba="0.7 0.8 0.9 0.7" />
+      </material>
+    </visual>
+    <collision name="coacd_part_000">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_000.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision name="coacd_part_001">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_001.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision name="coacd_part_002">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_002.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision name="coacd_part_003">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_003.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision name="coacd_part_004">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_004.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision name="coacd_part_005">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_005.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision name="coacd_part_006">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_006.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision name="coacd_part_007">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_007.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision name="coacd_part_008">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_008.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision name="coacd_part_009">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_009.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision name="coacd_part_010">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_010.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision name="coacd_part_011">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_011.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision name="coacd_part_012">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_012.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision name="coacd_part_013">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_013.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision name="coacd_part_014">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_014.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision name="coacd_part_015">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_015.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision name="coacd_part_016">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_016.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision name="coacd_part_017">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_017.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision name="coacd_part_018">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_018.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+    <collision name="coacd_part_019">
+      <origin rpy="0 0 0" xyz="0 0 0" />
+      <geometry>
+        <mesh filename="/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/objects/any_monitor_43_real2sim_surface_contact_w50_object_interaction/meshes_collision_convex/part_019.obj" scale="1 1 1" />
+      </geometry>
+    </collision>
+  </link>
+</robot>
