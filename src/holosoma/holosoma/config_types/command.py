@@ -132,6 +132,14 @@ class MotionConfig:
     motion_clip_name: str | None = None
     """Optional clip name inside an HDF5 motion bank (overrides motion_clip_id)."""
 
+    allowed_object_categories: list[str] = field(default_factory=list)
+    """Optional object-category allowlist used when loading a motion directory.
+
+    Supported coarse categories are inferred from clip/object metadata strings
+    and currently include values such as ``box``, ``bin``, ``barrel``, and
+    ``ball``. Empty means all clips are loaded.
+    """
+
     # motion sampling related
     use_adaptive_timesteps_sampler: bool = False
     """During training, whether to prioritize training on motion segments where the robot fails often."""

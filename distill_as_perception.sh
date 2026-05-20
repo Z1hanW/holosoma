@@ -754,6 +754,9 @@ else
 fi
 export TRAINING_PROJECT="${TRAINING_PROJECT:-${WANDB_PROJECT}}"
 export PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
+export CAMERA_APPLY_SENSOR_NOISE="${CAMERA_APPLY_SENSOR_NOISE:-True}"
+AS_PUSH_INTERVAL_S=${AS_PUSH_INTERVAL_S:-"[1.0,2.0]"}
+AS_MAX_PUSH_VEL=${AS_MAX_PUSH_VEL:-"[0.7,0.7,0.25,0.7,0.7,1.0]"}
 if [[ "${AS_CONTACT_AWARE}" == "1" ]]; then
   export ROOT_COMMAND_MODE="${ROOT_COMMAND_MODE:-contact-aware}"
   export STUDENT_ACTOR_INPUTS="${STUDENT_ACTOR_INPUTS:-['actor_obs_root_contact_aware','actor_obs_proprio_with_actions_no_linvel']}"
@@ -793,6 +796,8 @@ echo "[INFO] teacher_obs_keys=${TEACHER_OBS_KEYS} teacher_perception=${TEACHER_P
 echo "[INFO] MOTION_DIR=${MOTION_DIR}"
 echo "[INFO] OBJECT_URDF=${OBJECT_URDF}"
 echo "[INFO] EXP=${EXP} perception=${PERCEPTION_PRESET}"
+echo "[INFO] camera_apply_sensor_noise=${CAMERA_APPLY_SENSOR_NOISE}"
+echo "[INFO] as_push_interval_s=${AS_PUSH_INTERVAL_S} as_max_push_vel=${AS_MAX_PUSH_VEL}"
 echo "[INFO] RUN_NAME=${RUN_NAME} TRAINING_PROJECT=${TRAINING_PROJECT}"
 echo "[INFO] student_actor_inputs=${STUDENT_ACTOR_INPUTS}"
 echo "[INFO] schedule_variant=${SCHEDULE_VARIANT} schedule_name=${SCHEDULE_NAME}"
@@ -805,4 +810,6 @@ if [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH:-}" ]]; then
   echo "[INFO] teacher_actor_obs_history_length=${TEACHER_ACTOR_OBS_HISTORY_LENGTH}"
 fi
 
-exec bash "${SCRIPT_DIR}/distill_box_perception.sh" "$@"
+exec bash "${SCRIPT_DIR}/distill_box_perception.sh" "$@" \
+  --randomization.setup_terms.push_randomizer_state.params.push_interval_s="${AS_PUSH_INTERVAL_S}" \
+  --randomization.setup_terms.push_randomizer_state.params.max_push_vel="${AS_MAX_PUSH_VEL}"

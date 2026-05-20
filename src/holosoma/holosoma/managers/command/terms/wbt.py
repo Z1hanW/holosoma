@@ -427,10 +427,12 @@ class MotionLoader:
         motion_clip_id: int | None = None,
         motion_clip_name: str | None = None,
         object_size_scale: list[float] | None = None,
+        allowed_object_categories: list[str] | None = None,
     ):
         self._robot_body_names = list(robot_body_names)
         self._robot_joint_names = list(robot_joint_names)
         self._object_size_scale = self._normalize_object_size_scale(object_size_scale)
+        self._allowed_object_categories = self._normalize_allowed_object_categories(allowed_object_categories)
 
         # Resolve the motion file path using importlib.resources
         motion_file = resolve_data_file_path(motion_file)
@@ -485,6 +487,54 @@ class MotionLoader:
             "MotionConfig.object_size_scale must have length 1 or 3. "
             f"Got shape {arr.shape} from value {raw_scale!r}."
         )
+
+    @staticmethod
+    def _normalize_allowed_object_categories(raw_categories: list[str] | None) -> set[str]:
+        if raw_categories is None:
+            return set()
+        aliases = {
+            "boxes": "box",
+            "cube": "box",
+            "cubes": "box",
+            "largebox": "box",
+            "largeboxes": "box",
+            "trash": "bin",
+            "trashcan": "bin",
+            "trashcans": "bin",
+            "basket": "bin",
+            "baskets": "bin",
+            "bins": "bin",
+            "barrels": "barrel",
+            "sphere": "ball",
+            "spheres": "ball",
+            "balls": "ball",
+        }
+        normalized: set[str] = set()
+        for value in raw_categories:
+            category = str(value).strip().lower().replace("-", "_")
+            if not category:
+                continue
+            normalized.add(aliases.get(category, category))
+        return normalized
+
+    @classmethod
+    def _object_category_for_clip(cls, clip_id: str, clip_entry: dict[str, str] | None) -> str:
+        parts = [clip_id]
+        if clip_entry:
+            for key in ("object_name", "object_urdf_path", "object_mesh_path", "object_category", "category", "object_type"):
+                value = str(clip_entry.get(key, "")).strip()
+                if value:
+                    parts.append(value)
+        raw = " ".join(parts).lower()
+        if "barrel" in raw:
+            return "barrel"
+        if "bin" in raw or "trash" in raw or "basket" in raw:
+            return "bin"
+        if "ball" in raw or "sphere" in raw:
+            return "ball"
+        if "box" in raw or "cube" in raw or "largebox" in raw:
+            return "box"
+        return "other"
 
     def _apply_object_size_scale(self) -> None:
         if self._object_size_scale is None or not hasattr(self, "_object_size"):
@@ -783,6 +833,25 @@ class MotionLoader:
         files = sorted(motion_dir.glob("*.npz"))
         if not files:
             raise FileNotFoundError(f"No .npz files found in motion directory: {motion_dir}")
+
+        if self._allowed_object_categories:
+            files = [
+                file_path
+                for file_path in files
+                if self._object_category_for_clip(file_path.stem, clip_object_map.get(file_path.stem, {}))
+                in self._allowed_object_categories
+            ]
+            if not files:
+                raise ValueError(
+                    "No motion clips matched allowed object categories "
+                    f"{sorted(self._allowed_object_categories)} in {motion_dir}"
+                )
+            logger.info(
+                "Filtered motion directory '{}' by allowed object categories {} -> {} clips.",
+                motion_dir,
+                sorted(self._allowed_object_categories),
+                len(files),
+            )
 
         if motion_clip_name is not None:
             matches = [path for path in files if path.stem == motion_clip_name]
@@ -1910,6 +1979,7 @@ class MotionCommand(CommandTermBase):
             motion_clip_id=self.motion_cfg.motion_clip_id,
             motion_clip_name=self.motion_cfg.motion_clip_name,
             object_size_scale=self.motion_cfg.object_size_scale,
+            allowed_object_categories=self.motion_cfg.allowed_object_categories,
         )
         self.multi_clip = self.motion.num_clips > 1
         if self.multi_clip:
