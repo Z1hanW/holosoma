@@ -31,7 +31,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 cd "${SCRIPT_DIR}"
 
-DEFAULT_BANK_NAME="carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success155_bcleb5oi58000_final0p5_primitiveproj_solid80_box_bin_barrel_ball"
+DEFAULT_BANK_NAME="carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success155_bcleb5oi58000_final0p5_primitiveproj_solid80_clean_box_bin_barrel_ball"
 DEFAULT_NFS_BANK="/nfs/zzzihanw/ds_as_data/_distill/${DEFAULT_BANK_NAME}"
 
 NFS_CORL_BANK=${NFS_CORL_BANK:-"${DEFAULT_NFS_BANK}"}
@@ -221,10 +221,10 @@ print(f"[INFO] Seeded local object assets: urdfs_copied={copied_urdfs} meshes_co
 PY
   fi
   echo "[INFO] Overlaying NFS package; same-sized seeded files are reused."
-  rsync -a --delete --size-only --human-readable --info="${RSYNC_INFO}" \
+  rsync -aL --delete --size-only --human-readable --info="${RSYNC_INFO}" \
     "${NFS_CORL_BANK_ABS}/" "${TMP_BANK_ABS}/"
 else
-  rsync -a --delete --human-readable --info="${RSYNC_INFO}" \
+  rsync -aL --delete --human-readable --info="${RSYNC_INFO}" \
     "${NFS_CORL_BANK_ABS}/" "${TMP_BANK_ABS}/"
 fi
 
@@ -268,9 +268,29 @@ def write_npz_atomic(path: Path, payload: dict[str, np.ndarray]) -> None:
 staging_bank = Path(sys.argv[1]).expanduser().resolve()
 installed_bank = Path(sys.argv[2]).expanduser().resolve()
 map_path = staging_bank / "_clip_object_urdf_map.json"
-staging_urdf_dir = staging_bank / "_single_slot_motion_bank" / "_single_slot_urdfs"
-installed_urdf_dir = installed_bank / "_single_slot_motion_bank" / "_single_slot_urdfs"
 contact_dir = staging_bank / "contact_export_from_teacher_success133_final0p5" / "clips"
+
+
+def find_staging_urdf(old_urdf: Path) -> Path:
+    urdf_name = old_urdf.name
+    preferred = [
+        staging_bank / "_single_slot_motion_bank_teacher_export_20260520_105947" / "_single_slot_urdfs" / urdf_name,
+        staging_bank / "_single_slot_motion_bank" / "_single_slot_urdfs" / urdf_name,
+    ]
+    for candidate in preferred:
+        if candidate.is_file():
+            return candidate.resolve()
+    matches = sorted(
+        path.resolve()
+        for path in staging_bank.rglob(urdf_name)
+        if path.is_file() and path.suffix == ".urdf"
+    )
+    if not matches:
+        raise SystemExit(f"[ERROR] Missing staging URDF named {urdf_name} under {staging_bank}")
+    if len(matches) > 1:
+        preview = ", ".join(str(path) for path in matches[:5])
+        raise SystemExit(f"[ERROR] Ambiguous staging URDF for {urdf_name}: {preview}")
+    return matches[0]
 
 payload = json.loads(map_path.read_text(encoding="utf-8"))
 if isinstance(payload, dict) and isinstance(payload.get("clips"), dict):
@@ -296,15 +316,14 @@ for clip_id, raw_entry in sorted(clips.items()):
         raise SystemExit(f"[ERROR] Invalid map entry for {clip_id}: {type(raw_entry).__name__}")
 
     old_urdf = Path(str(entry.get("object_urdf_path", "")).strip())
-    urdf_name = old_urdf.name or f"{clip_id}.urdf"
-    staging_urdf = (staging_urdf_dir / urdf_name).resolve()
-    installed_urdf = (installed_urdf_dir / urdf_name).resolve()
+    if not old_urdf.name:
+        old_urdf = Path(f"{clip_id}.urdf")
+    staging_urdf = find_staging_urdf(old_urdf)
+    installed_urdf = (installed_bank / staging_urdf.relative_to(staging_bank)).resolve()
     npz_path = staging_bank / f"{clip_id}.npz"
 
     if not npz_path.is_file():
         raise SystemExit(f"[ERROR] Missing motion npz for {clip_id}: {npz_path}")
-    if not staging_urdf.is_file():
-        raise SystemExit(f"[ERROR] Missing staging URDF for {clip_id}: {staging_urdf}")
 
     entry["object_urdf_path"] = str(installed_urdf)
     if not str(entry.get("object_name", "")).strip():
@@ -328,7 +347,7 @@ npz_count = len(list(staging_bank.glob("*.npz")))
 ref_count = len(list(contact_dir.glob("*/teacher_rollout_reference.npz")))
 left_count = len(list(contact_dir.glob("*/left_wrist_contact_points.npy")))
 right_count = len(list(contact_dir.glob("*/right_wrist_contact_points.npy")))
-urdf_count = len(list(staging_urdf_dir.glob("*.urdf")))
+urdf_count = len(list(staging_bank.rglob("*.urdf")))
 symlink_count = 0
 for root, dirs, files in os.walk(staging_bank):
     for name in dirs + files:
@@ -338,7 +357,7 @@ for root, dirs, files in os.walk(staging_bank):
 errors: list[str] = []
 for clip_id, entry in updated_clips.items():
     installed_urdf = Path(str(entry["object_urdf_path"]))
-    urdf = staging_urdf_dir / installed_urdf.name
+    urdf = staging_bank / installed_urdf.relative_to(installed_bank)
     if not urdf.is_file():
         errors.append(f"{clip_id}: missing staging URDF {urdf}")
         continue

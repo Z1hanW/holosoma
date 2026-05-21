@@ -622,6 +622,14 @@ object_distill_drop_button_terms = {
     ),
 }
 
+object_distill_pickup_button_terms = {
+    "pickup_button": ObsTermCfg(
+        func="holosoma.managers.observation.terms.wbt:pickup_button",
+        scale=1.0,
+        noise=0.0,
+    ),
+}
+
 # Legacy distill torso observation (kept only for backward compatibility):
 # includes clip_phase and should not be used for sim2real-oriented training.
 object_distill_sparse_root_cmd_terms_legacy = {
@@ -746,6 +754,12 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd = ObservationManagerCf
             history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
             terms=object_distill_sparse_root_cmd_terms_contact_aware,
         ),
+        "actor_obs_pickup_button": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_distill_pickup_button_terms,
+        ),
         "actor_obs_drop_button": ObsGroupCfg(
             concatenate=True,
             enable_noise=False,
@@ -852,6 +866,12 @@ g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd_legacy = ObservationMa
             enable_noise=False,
             history_length=DEFAULT_WBT_DISTILL_POLICY_HISTORY_LENGTH,
             terms=object_distill_sparse_root_cmd_terms_contact_aware_legacy,
+        ),
+        "actor_obs_pickup_button": ObsGroupCfg(
+            concatenate=True,
+            enable_noise=False,
+            history_length=1,
+            terms=object_distill_pickup_button_terms,
         ),
         "actor_obs_drop_button": ObsGroupCfg(
             concatenate=True,

@@ -119,6 +119,23 @@ def test_contact_aware_drop_button_turns_on_at_carry_end():
     assert drop_button.tolist() == [False, True, True]
 
 
+def test_contact_aware_pickup_button_turns_off_at_carry_start():
+    motion_command = object.__new__(MotionCommand)
+    motion_command.device = "cpu"
+    motion_command.num_envs = 3
+    motion_command.motion = SimpleNamespace(has_object=True)
+    motion_command.clip_ids = torch.tensor([0, 0, 0], dtype=torch.long)
+    motion_command.time_steps = torch.tensor([1, 2, 8], dtype=torch.long)
+    motion_command._get_contact_aware_carry_window_by_clip = MethodType(
+        lambda self: torch.tensor([[2, 5]], dtype=torch.long),
+        motion_command,
+    )
+
+    pickup_button = motion_command.get_contact_aware_pickup_button()
+
+    assert pickup_button.tolist() == [True, False, False]
+
+
 def test_drop_button_observation_uses_manual_override():
     motion_command = object.__new__(MotionCommand)
     motion_command.motion = SimpleNamespace(has_object=True)
@@ -135,3 +152,21 @@ def test_drop_button_observation_uses_manual_override():
     drop_button = wbt_obs_terms.drop_button(env)
 
     assert drop_button.tolist() == [[0.0], [1.0], [1.0]]
+
+
+def test_pickup_button_observation_uses_manual_override():
+    motion_command = object.__new__(MotionCommand)
+    motion_command.motion = SimpleNamespace(has_object=True)
+    motion_command.manual_control_enabled = True
+    motion_command.manual_pickup_button_override_enabled = True
+    motion_command.manual_pickup_button = torch.tensor([[1.0], [0.0], [0.0]], dtype=torch.float32)
+
+    env = SimpleNamespace(
+        num_envs=3,
+        device=torch.device("cpu"),
+        command_manager=SimpleNamespace(get_state=lambda name: motion_command),
+    )
+
+    pickup_button = wbt_obs_terms.pickup_button(env)
+
+    assert pickup_button.tolist() == [[1.0], [0.0], [0.0]]

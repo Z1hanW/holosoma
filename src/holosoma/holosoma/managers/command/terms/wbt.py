@@ -1813,6 +1813,8 @@ class MotionCommand(CommandTermBase):
         self.manual_control_enabled = False
         self.manual_xy_rel: torch.Tensor | None = None
         self.manual_yaw_rel: torch.Tensor | None = None
+        self.manual_pickup_button_override_enabled = False
+        self.manual_pickup_button: torch.Tensor | None = None
         self.manual_drop_button_override_enabled = False
         self.manual_drop_button: torch.Tensor | None = None
         self.manual_object_reset_enabled = False
@@ -1907,6 +1909,8 @@ class MotionCommand(CommandTermBase):
         self.manual_control_enabled = False
         self.manual_xy_rel = torch.zeros((self.num_envs, 2), device=self.device, dtype=torch.float32)
         self.manual_yaw_rel = torch.zeros((self.num_envs, 1), device=self.device, dtype=torch.float32)
+        self.manual_pickup_button_override_enabled = False
+        self.manual_pickup_button = torch.zeros((self.num_envs, 1), device=self.device, dtype=torch.float32)
         self.manual_drop_button_override_enabled = False
         self.manual_drop_button = torch.zeros((self.num_envs, 1), device=self.device, dtype=torch.float32)
         self.manual_object_reset_enabled = False
@@ -3761,6 +3765,17 @@ class MotionCommand(CommandTermBase):
         carry_window_by_clip = self._get_contact_aware_carry_window_by_clip()
         carry_end = carry_window_by_clip[clip_ids, 1]
         return time_steps >= carry_end
+
+    def get_contact_aware_pickup_button(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        env_ids_t = self._ensure_index_tensor(env_ids)
+        if not self.motion.has_object:
+            return torch.zeros((env_ids_t.numel(),), device=self.device, dtype=torch.bool)
+
+        clip_ids = self.clip_ids[env_ids_t]
+        time_steps = self.time_steps[env_ids_t]
+        carry_window_by_clip = self._get_contact_aware_carry_window_by_clip()
+        carry_start = carry_window_by_clip[clip_ids, 0]
+        return time_steps < carry_start
 
     def _reset_pickup_anchor_state(
         self,

@@ -560,6 +560,19 @@ def drop_button(env: WholeBodyTrackingManager) -> torch.Tensor:
     return motion_command.get_contact_aware_drop_button().to(dtype=torch.float32).unsqueeze(-1)
 
 
+def pickup_button(env: WholeBodyTrackingManager) -> torch.Tensor:
+    """Binary pickup button: 1 before carry-start t1, 0 from t1 to clip end."""
+    motion_command = _get_motion_command_and_assert_type(env)
+    manual_pickup_button = getattr(motion_command, "manual_pickup_button", None)
+    if getattr(motion_command, "manual_pickup_button_override_enabled", False) and manual_pickup_button is not None:
+        if manual_pickup_button.device != env.device:
+            manual_pickup_button = manual_pickup_button.to(env.device)
+        return torch.clamp(manual_pickup_button.to(dtype=torch.float32), 0.0, 1.0)
+    if getattr(motion_command, "manual_control_enabled", False) or not motion_command.motion.has_object:
+        return torch.zeros((env.num_envs, 1), device=env.device, dtype=torch.float32)
+    return motion_command.get_contact_aware_pickup_button().to(dtype=torch.float32).unsqueeze(-1)
+
+
 def clip_phase(env: WholeBodyTrackingManager) -> torch.Tensor:
     """Normalized motion progress in current clip, in [0, 1]."""
     motion_command = _get_motion_command_and_assert_type(env)

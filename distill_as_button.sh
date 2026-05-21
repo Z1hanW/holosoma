@@ -143,8 +143,15 @@ else
   export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS real-mesh perception distill with contact-aware sparse root and drop-button student input. The button interface adds actor_obs_drop_button, 0 before carry-end t2 and 1 from t2 through clip end; root command behavior is unchanged.}"
 fi
 
-echo "[INFO] Launching AS/OMOMO drop-button perception distillation"
+if [[ "${STUDENT_ACTOR_INPUTS}" == *"actor_obs_pickup_button"* ]]; then
+  echo "[INFO] Launching AS/OMOMO pickup/drop-button perception distillation"
+else
+  echo "[INFO] Launching AS/OMOMO drop-button perception distillation"
+fi
 echo "[INFO] student_actor_inputs=${STUDENT_ACTOR_INPUTS}"
+if [[ "${STUDENT_ACTOR_INPUTS}" == *"actor_obs_pickup_button"* ]]; then
+  echo "[INFO] pickup_button_interface=1 pickup_button=1_before_t1_0_from_t1_to_end"
+fi
 echo "[INFO] drop_button_interface=1 drop_button=0_before_t2_1_from_t2_to_end"
 
 exec bash "${SCRIPT_DIR}/distill_as_perception.sh" "${POSITIONAL[@]}"
