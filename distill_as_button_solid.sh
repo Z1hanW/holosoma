@@ -7,9 +7,9 @@ set -euo pipefail
 # bank and MotionLoader must see the same URDF set, otherwise fixed
 # env-to-clip assignment will fail for single-slot AS training.
 #
-# The default source is the teacher-rollout success155 final0p5 primitive-proj
-# bank. By default this wrapper further restricts to the manually reviewed
-# clean80 solid clip list:
+# The default source prefers the CoRL solid80 bank produced by cp_corl.sh when
+# it exists locally. Otherwise it falls back to the teacher-rollout success155
+# final0p5 primitive-proj bank and filters it down to solid clips:
 #   strict success_contact_and_final_position
 #   box/bin/barrel/ball only
 #   excludes scale__any_bin_8, box_21, box_39 falldown/suspect clips
@@ -26,8 +26,9 @@ Allowed object categories:
   box, bin, barrel, ball
 
 Behavior:
-  Uses the normal distill_as_button.sh AS bank selection as the source, then
-  creates a repo-local solid-only symlink bank and launches from that bank.
+  Prefers the repo-local CoRL solid80 bank copied by cp_corl.sh. If that bank
+  is unavailable, uses the normal distill_as_button.sh AS bank selection as the
+  source, then creates a repo-local solid-only symlink bank and launches from it.
   This keeps simulator object assignment and MotionLoader clip filtering
   consistent.
 
@@ -35,6 +36,7 @@ Useful env vars:
   SOLID_ALLOWED_OBJECT_CATEGORIES='["box","bin","barrel","ball"]'  optional subset of these four
   SOLID_CLIP_LIST=<file>      optional one-clip-id-per-line allowlist; default is clean80
   SOLID_TARGET_BANK_NAME=<name>  override generated filtered bank name
+  CORL_SOLID80_BANK_NAME=<name>  override preferred cp_corl.sh bank name
   CHECK_ONLY=1               count matching clips in the selected source bank
   RESUME_FROM_BOX=1          initialize policy weights from box-button; default d9m3z369/model_17000.pt
   BOX_RESUME_CKPT=<checkpoint>  override the box policy initializer
@@ -159,7 +161,17 @@ print(json.dumps(normalized))
 PY
 )
 
-AS_SUCCESS133_BANK_NAME=${AS_SUCCESS133_BANK_NAME:-carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success155_bcleb5oi58000_final0p5_primitiveproj}
+DEFAULT_AS_SUCCESS155_BANK_NAME="carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success155_bcleb5oi58000_final0p5_primitiveproj"
+CORL_SOLID80_BANK_NAME=${CORL_SOLID80_BANK_NAME:-"${DEFAULT_AS_SUCCESS155_BANK_NAME}_solid80_box_bin_barrel_ball"}
+USER_SET_AS_SUCCESS133_BANK_NAME=${AS_SUCCESS133_BANK_NAME+x}
+USER_SET_OMOMO_DATA_DIR=${OMOMO_DATA_DIR+x}
+AS_SUCCESS133_BANK_NAME=${AS_SUCCESS133_BANK_NAME:-"${DEFAULT_AS_SUCCESS155_BANK_NAME}"}
+if [[ -z "${USER_SET_AS_SUCCESS133_BANK_NAME}" && -z "${USER_SET_OMOMO_DATA_DIR}" ]]; then
+  CORL_SOLID80_BANK="${SCRIPT_DIR}/data/ds_as_data/${CORL_SOLID80_BANK_NAME}"
+  if [[ -d "${CORL_SOLID80_BANK}" ]]; then
+    AS_SUCCESS133_BANK_NAME="${CORL_SOLID80_BANK_NAME}"
+  fi
+fi
 SOLID_SOURCE_BANK=${OMOMO_DATA_DIR:-"${SCRIPT_DIR}/data/ds_as_data/${AS_SUCCESS133_BANK_NAME}"}
 SOLID_SOURCE_MAP=${OMOMO_OBJECT_MAP:-"${SOLID_SOURCE_BANK}/_clip_object_urdf_map.json"}
 SOLID_CONTACT_EXPORT_NAME=${SOLID_CONTACT_EXPORT_NAME:-contact_export_from_teacher_success133_final0p5}
