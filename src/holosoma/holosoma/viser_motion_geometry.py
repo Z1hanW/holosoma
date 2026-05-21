@@ -18,6 +18,7 @@ SRC_ROOT = Path(__file__).resolve().parents[1]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from holosoma.utils.viser_live import _create_viser_urdf_handle, _ensure_viser_api_compat  # noqa: E402
 from holosoma.utils.viser_utils import ensure_viser_on_path  # noqa: E402
 
 ensure_viser_on_path()
@@ -226,13 +227,39 @@ def _load_motion_qpos(
     viser_joint_names: list[str],
 ) -> tuple[np.ndarray, int]:
     with np.load(motion_path, allow_pickle=True) as data:
-        if "qpos" not in data:
-            raise ValueError(
-                f"Motion file missing qpos: {motion_path}. "
-                "Viewer fallback to reconstruct qpos from raw motion is disabled."
-            )
-        qpos = np.asarray(data["qpos"], dtype=np.float32)
         fps = int(np.asarray(data["fps"]).reshape(-1)[0]) if "fps" in data else 30
+
+        if "qpos" in data:
+            qpos = np.asarray(data["qpos"], dtype=np.float32)
+            return qpos, fps
+
+        if "joint_pos" not in data:
+            raise ValueError(f"Motion file missing qpos/joint_pos: {motion_path}")
+
+        joint_pos = np.asarray(data["joint_pos"], dtype=np.float32)
+        if joint_pos.ndim != 2 or joint_pos.shape[1] < 7:
+            raise ValueError(f"Invalid joint_pos shape in {motion_path}: {joint_pos.shape}")
+
+        root_qpos = joint_pos[:, :7]
+        motion_joint_values = joint_pos[:, 7:]
+        if "joint_names" in data:
+            motion_joint_names = [str(name) for name in np.asarray(data["joint_names"]).tolist()]
+        else:
+            motion_joint_names = list(robot_config.dof_names[: motion_joint_values.shape[1]])
+        name_to_motion_idx = {name: idx for idx, name in enumerate(motion_joint_names)}
+        missing = [name for name in viser_joint_names if name not in name_to_motion_idx]
+        if missing:
+            raise ValueError(f"Motion joints missing for Viser URDF in {motion_path}: {missing}")
+        motion_joint_indices = np.asarray([name_to_motion_idx[name] for name in viser_joint_names], dtype=np.int64)
+        joints = motion_joint_values[:, motion_joint_indices]
+
+        pieces = [root_qpos, joints]
+        if "object_pos_w" in data and "object_quat_w" in data:
+            object_pos = np.asarray(data["object_pos_w"], dtype=np.float32)
+            object_quat = np.asarray(data["object_quat_w"], dtype=np.float32)
+            if object_pos.ndim == 2 and object_quat.ndim == 2 and object_pos.shape[0] == joint_pos.shape[0]:
+                pieces.extend([object_pos, object_quat])
+        qpos = np.concatenate(pieces, axis=-1).astype(np.float32, copy=False)
     return qpos, fps
 
 
@@ -321,8 +348,9 @@ def run_viewer(cfg: MotionGeometryViewerConfig) -> None:
 
     port = resolve_viser_port(cfg.port)
     server = viser.ViserServer(port=port)
+    _ensure_viser_api_compat(server)
     robot_root = server.scene.add_frame("/robot", show_axes=False)
-    vr = ViserUrdf(server, urdf_or_path=urdf_path, root_node_name="/robot")
+    vr = _create_viser_urdf_handle(ViserUrdf, server, urdf_path, root_node_name="/robot")
     vr.show_visual = cfg.show_meshes
     object_state: dict[str, object | None] = {"name": None, "urdf": None, "frame": None, "single": None}
 
@@ -379,7 +407,7 @@ def run_viewer(cfg: MotionGeometryViewerConfig) -> None:
             return object_cache[name]
         frame_path = f"/object/{name}"
         frame = server.scene.add_frame(frame_path, show_axes=False)
-        urdf = ViserUrdf(server, urdf_or_path=object_map[name], root_node_name=frame_path)
+        urdf = _create_viser_urdf_handle(ViserUrdf, server, object_map[name], root_node_name=frame_path)
         urdf.show_visual = bool(cfg.show_object)
         object_cache[name] = urdf
         object_frame_cache[name] = frame
@@ -424,7 +452,7 @@ def run_viewer(cfg: MotionGeometryViewerConfig) -> None:
         if object_urdf_path is not None:
             if object_state["single"] is None:
                 obj_frame = server.scene.add_frame("/object", show_axes=False)
-                obj_urdf = ViserUrdf(server, urdf_or_path=object_urdf_path, root_node_name="/object")
+                obj_urdf = _create_viser_urdf_handle(ViserUrdf, server, object_urdf_path, root_node_name="/object")
                 obj_urdf.show_visual = bool(cfg.show_object)
                 object_state["single"] = obj_urdf
                 object_state["frame"] = obj_frame

@@ -524,8 +524,12 @@ class MotionLoader:
             for key in ("object_name", "object_urdf_path", "object_mesh_path", "object_category", "category", "object_type"):
                 value = str(clip_entry.get(key, "")).strip()
                 if value:
-                    parts.append(value)
-        raw = " ".join(parts).lower()
+                    if key.endswith("_path"):
+                        path = Path(value)
+                        parts.extend([path.name, path.stem])
+                    else:
+                        parts.append(value)
+        raw = " ".join(parts).lower().replace("-", "_")
         if "barrel" in raw:
             return "barrel"
         if "bin" in raw or "trash" in raw or "basket" in raw:

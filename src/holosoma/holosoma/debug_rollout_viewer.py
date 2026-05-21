@@ -17,6 +17,7 @@ SRC_ROOT = Path(__file__).resolve().parents[1]
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from holosoma.utils.viser_live import _create_viser_urdf_handle, _ensure_viser_api_compat  # noqa: E402
 from holosoma.utils.viser_utils import ensure_viser_on_path, resolve_viser_port  # noqa: E402
 
 ensure_viser_on_path()
@@ -291,6 +292,99 @@ def _read_csv_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(f))
 
 
+def _truthy_metadata(value: object) -> bool:
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _load_success_clip_ids(root: Path) -> set[str]:
+    success_path = root / "success_clips.txt"
+    if success_path.exists():
+        return {line.strip() for line in success_path.read_text(encoding="utf-8").splitlines() if line.strip()}
+
+    summary_path = root / "summary.csv"
+    if summary_path.exists():
+        return {
+            row["clip_id"]
+            for row in _read_csv_rows(summary_path)
+            if row.get("clip_id") and _truthy_metadata(row.get("success"))
+        }
+    return set()
+
+
+def _is_strict_success(entry: "ClipEntry") -> bool:
+    status = str(entry.metadata.get("status", ""))
+    return bool(
+        status == "success_contact_and_final_position"
+        or (
+            _truthy_metadata(entry.metadata.get("success"))
+            and _truthy_metadata(entry.metadata.get("stable_contact_success"))
+            and _truthy_metadata(entry.metadata.get("final_position_success"))
+        )
+    )
+
+
+def _entry_object_kind(entry: "ClipEntry") -> str:
+    name = str(entry.metadata.get("object_name") or entry.clip_id)
+    if name.startswith("box_"):
+        return "box"
+    if "__any_" in name:
+        return name.split("__any_", 1)[1].split("_", 1)[0]
+    parts = name.split("_")
+    return parts[0] if parts else name
+
+
+def _filter_entries(
+    entries: list["ClipEntry"],
+    *,
+    data_root: Path,
+    stats_root: Path,
+    success_only: bool,
+    strict_success_only: bool,
+    solid_only: bool,
+    exclude_clip_ids: set[str] | None,
+) -> list["ClipEntry"]:
+    if strict_success_only:
+        filtered = [entry for entry in entries if _is_strict_success(entry)]
+    elif success_only:
+        success_ids = _load_success_clip_ids(data_root) or _load_success_clip_ids(stats_root)
+        if success_ids:
+            filtered = [entry for entry in entries if entry.clip_id in success_ids]
+        else:
+            filtered = [entry for entry in entries if _truthy_metadata(entry.metadata.get("success"))]
+    else:
+        filtered = entries
+
+    if solid_only:
+        solid_kinds = {"box", "bin", "barrel", "ball"}
+        filtered = [entry for entry in filtered if _entry_object_kind(entry) in solid_kinds]
+
+    if exclude_clip_ids:
+        filtered = [
+            entry
+            for entry in filtered
+            if entry.clip_id not in exclude_clip_ids and entry.clip_dir_name not in exclude_clip_ids
+        ]
+
+    if not filtered:
+        mode = "strict successful" if strict_success_only else "successful"
+        if solid_only:
+            mode = f"{mode} solid"
+        raise FileNotFoundError(f"No {mode} rollout clips found under: {data_root / 'clips'}")
+    return filtered
+
+
+def _load_exclude_clip_ids(args: argparse.Namespace) -> set[str]:
+    excluded = {str(value).strip() for value in getattr(args, "exclude_clip", []) if str(value).strip()}
+    exclude_file = getattr(args, "exclude_clips_file", None)
+    if exclude_file:
+        path = Path(exclude_file).expanduser()
+        if path.exists():
+            excluded.update(line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
+    return excluded
+
+
 def _load_entries(data_root: Path, vis_root: Path, stats_root: Path) -> list[ClipEntry]:
     clips_root = data_root / "clips"
     if not clips_root.is_dir():
@@ -385,6 +479,64 @@ def _resolve_original_motion_path(entry: ClipEntry, original_motion_dir: Path | 
     return None
 
 
+def _read_npz_frame_count(path: Path | None, keys: tuple[str, ...]) -> int:
+    if path is None or not path.exists():
+        return 0
+    try:
+        with np.load(path, allow_pickle=True) as data:
+            lengths = [
+                int(np.asarray(data[key]).shape[0])
+                for key in keys
+                if key in data.files and np.asarray(data[key]).ndim >= 1
+            ]
+    except Exception:
+        return 0
+    return max(lengths) if lengths else 0
+
+
+def _reference_playback_frame_count(entry: ClipEntry, *, playback_full_motion: bool) -> int:
+    ref_path = entry.data_dir / "teacher_rollout_reference.npz"
+    if not ref_path.exists():
+        return 1
+    try:
+        with np.load(ref_path, allow_pickle=True) as data:
+            trajectory_raw = np.asarray(data["trajectory_length"]) if "trajectory_length" in data.files else np.asarray(0)
+            trajectory_length = int(trajectory_raw.reshape(-1)[0])
+            if trajectory_length <= 0:
+                candidate_lengths = [
+                    int(np.asarray(data[key]).shape[0])
+                    for key in (
+                        "body_pos_local",
+                        "object_pos_local",
+                        "target_joint_pos",
+                        "target_object_pos_local",
+                    )
+                    if key in data.files and np.asarray(data[key]).ndim >= 1
+                ]
+                trajectory_length = max(candidate_lengths) if candidate_lengths else 0
+            if playback_full_motion:
+                return max(1, trajectory_length)
+            valid_steps = np.asarray(data["valid_steps"], dtype=np.bool_) if "valid_steps" in data.files else np.zeros((0,), dtype=np.bool_)
+            valid_count = int(np.count_nonzero(valid_steps))
+            return max(1, valid_count if valid_count > 0 else trajectory_length)
+    except Exception:
+        return 1
+
+
+def _initial_playback_frame_count(
+    entry: ClipEntry,
+    original_motion_dir: Path | None,
+    *,
+    playback_full_motion: bool,
+) -> int:
+    if playback_full_motion:
+        original_path = _resolve_original_motion_path(entry, original_motion_dir)
+        original_count = _read_npz_frame_count(original_path, ("joint_pos", "object_pos_w", "object_quat_w"))
+        if original_count > 0:
+            return original_count
+    return _reference_playback_frame_count(entry, playback_full_motion=playback_full_motion)
+
+
 def _joint_indices_for_viser(
     *,
     viser_joint_names: list[str],
@@ -417,16 +569,37 @@ class DebugRolloutViewer:
         original_motion_dir: Path | None,
         show_original_motion_initial: bool = False,
         show_primitive_box_initial: bool = False,
+        autoplay_initial: bool = False,
+        loop_initial: bool = True,
+        playback_full_motion: bool = False,
+        replay_only: bool = False,
+        playback_fps: float = 30.0,
+        success_only: bool = False,
+        strict_success_only: bool = False,
+        solid_only: bool = False,
+        exclude_clip_ids: set[str] | None = None,
     ) -> None:
         self.data_root = data_root
         self.vis_root = vis_root
         self.stats_root = stats_root
         self.original_motion_dir = original_motion_dir.expanduser().resolve() if original_motion_dir is not None else None
-        self.entries = _load_entries(data_root, vis_root, stats_root)
+        self.playback_full_motion = bool(playback_full_motion)
+        self.replay_only = bool(replay_only)
+        self.playback_fps = max(1.0, float(playback_fps))
+        self.entries = _filter_entries(
+            _load_entries(data_root, vis_root, stats_root),
+            data_root=data_root,
+            stats_root=stats_root,
+            success_only=bool(success_only),
+            strict_success_only=bool(strict_success_only),
+            solid_only=bool(solid_only),
+            exclude_clip_ids=exclude_clip_ids,
+        )
         self.entry_by_label = {entry.label: entry for entry in self.entries}
         self.current_entry: ClipEntry | None = None
 
         self.server = viser.ViserServer(host=host, port=port, label="debug_rollout")
+        _ensure_viser_api_compat(self.server)
         self.server.scene.add_grid("/grid", width=6.0, height=6.0, position=(0.0, 0.0, 0.0))
 
         self.static_handles: list[Any] = []
@@ -472,8 +645,10 @@ class DebugRolloutViewer:
         self.region_points: dict[str, np.ndarray] = {}
         self.is_programmatic_sequence_update = False
         self.is_programmatic_slider_update = False
-        self.playing = False
+        self.playing = bool(autoplay_initial)
         self.frame_float = 0.0
+        self._last_slider_sync_time = 0.0
+        self._last_frame_md_sync_time = 0.0
 
         initial_label = self.entries[0].label
         if initial_sequence:
@@ -481,6 +656,11 @@ class DebugRolloutViewer:
                 if initial_sequence in {entry.label, entry.clip_id, entry.clip_dir_name}:
                     initial_label = entry.label
                     break
+        initial_frame_count = _initial_playback_frame_count(
+            self.entry_by_label[initial_label],
+            self.original_motion_dir,
+            playback_full_motion=self.playback_full_motion,
+        )
 
         with self.server.gui.add_folder("Rollout Products"):
             self.sequence_dropdown = self.server.gui.add_dropdown(
@@ -494,7 +674,7 @@ class DebugRolloutViewer:
 
         with self.server.gui.add_folder("Display"):
             self.show_robot_cb = self.server.gui.add_checkbox("Training G1", initial_value=robot_urdf_path is not None)
-            self.show_product_cb = self.server.gui.add_checkbox("Static Product Overlay", initial_value=True)
+            self.show_product_cb = self.server.gui.add_checkbox("Static Product Overlay", initial_value=not self.replay_only)
             self.show_rollout_cb = self.server.gui.add_checkbox("Rollout View", initial_value=True)
             self.show_original_motion_cb = self.server.gui.add_checkbox(
                 "Reference Motion",
@@ -505,15 +685,26 @@ class DebugRolloutViewer:
                 "Primitive Box",
                 initial_value=show_primitive_box_initial,
             )
-            self.show_points_cb = self.server.gui.add_checkbox("Contact Points", initial_value=True)
-            self.show_paths_cb = self.server.gui.add_checkbox("Object Path", initial_value=True)
+            self.show_points_cb = self.server.gui.add_checkbox("Contact Points", initial_value=not self.replay_only)
+            self.show_paths_cb = self.server.gui.add_checkbox("Object Path", initial_value=not self.replay_only)
             self.show_body_labels_cb = self.server.gui.add_checkbox("Body Labels", initial_value=False)
 
-        with self.server.gui.add_folder("Playback"):
-            self.frame_slider = self.server.gui.add_slider("Valid Frame", min=0, max=1, step=1, initial_value=0)
-            self.play_button = self.server.gui.add_button("Play / Pause")
-            self.fps_number = self.server.gui.add_number("FPS", initial_value=30, min=1, max=240, step=1)
-            self.loop_cb = self.server.gui.add_checkbox("Loop", initial_value=True)
+        self.frame_slider_label = "Motion Frame" if self.playback_full_motion else "Valid Frame"
+        self.frame_slider_max = max(0, int(initial_frame_count) - 1)
+        self.playback_folder = self.server.gui.add_folder("Playback")
+        with self.playback_folder:
+            self.frame_slider = self.server.gui.add_slider(
+                self.frame_slider_label,
+                min=0,
+                max=self.frame_slider_max,
+                step=1,
+                initial_value=0,
+            )
+            self.playing_cb = self.server.gui.add_checkbox("Playing", initial_value=bool(autoplay_initial))
+            self.play_button = self.server.gui.add_button("Play")
+            self.pause_button = self.server.gui.add_button("Pause")
+            self.fps_number = self.server.gui.add_number("FPS", initial_value=self.playback_fps, min=1, max=240, step=1)
+            self.loop_cb = self.server.gui.add_checkbox("Loop", initial_value=bool(loop_initial))
             self.frame_md = self.server.gui.add_markdown("")
 
         self._register_callbacks()
@@ -521,7 +712,39 @@ class DebugRolloutViewer:
         self.load_entry(initial_label)
         threading.Thread(target=self._player_loop, daemon=True).start()
 
+    def _register_frame_slider_callback(self) -> None:
+        @self.frame_slider.on_update
+        def _(_evt) -> None:
+            if self.is_programmatic_slider_update:
+                return
+            if self.playing:
+                return
+            self.frame_float = float(self.frame_slider.value)
+            self.apply_frame(int(self.frame_slider.value))
+
+    def _set_frame_slider_max(self, max_frame: int) -> None:
+        max_frame = max(0, int(max_frame))
+        if max_frame == self.frame_slider_max:
+            return
+
+        try:
+            self.frame_slider.remove()
+        except Exception:
+            pass
+        self.frame_slider_max = max_frame
+        with self.playback_folder:
+            self.frame_slider = self.server.gui.add_slider(
+                self.frame_slider_label,
+                min=0,
+                max=self.frame_slider_max,
+                step=1,
+                initial_value=0,
+            )
+        self._register_frame_slider_callback()
+
     def _register_callbacks(self) -> None:
+        self._register_frame_slider_callback()
+
         @self.sequence_dropdown.on_update
         def _(_evt) -> None:
             if self.is_programmatic_sequence_update:
@@ -532,17 +755,26 @@ class DebugRolloutViewer:
         def _(_evt) -> None:
             self.load_entry(str(self.sequence_dropdown.value))
 
-        @self.frame_slider.on_update
+        @self.playing_cb.on_update
         def _(_evt) -> None:
-            if self.is_programmatic_slider_update:
-                return
-            self.playing = False
-            self.frame_float = float(self.frame_slider.value)
-            self.apply_frame(int(self.frame_slider.value))
+            self.playing = bool(self.playing_cb.value)
 
         @self.play_button.on_click
         def _(_evt) -> None:
-            self.playing = not self.playing
+            self.playing = True
+            self.playing_cb.value = True
+
+        @self.pause_button.on_click
+        def _(_evt) -> None:
+            self.playing = False
+            self.playing_cb.value = False
+
+        def _display_changed(_evt) -> None:
+            if bool(self.show_body_labels_cb.value) and not self.replay_only:
+                self.apply_frame(int(self.frame_slider.value))
+            else:
+                self._clear_dynamic_body_frame()
+            self.apply_visibility()
 
         for handle in (
             self.show_robot_cb,
@@ -555,7 +787,7 @@ class DebugRolloutViewer:
             self.show_paths_cb,
             self.show_body_labels_cb,
         ):
-            handle.on_update(lambda _evt: self.apply_frame(int(self.frame_slider.value)))
+            handle.on_update(_display_changed)
 
     def clear_scene(self) -> None:
         handles = (
@@ -626,7 +858,12 @@ class DebugRolloutViewer:
 
         try:
             self.robot_root_handle = self.server.scene.add_frame("/training_g1", show_axes=False)
-            self.robot_viser = ViserUrdf(self.server, urdf_or_path=robot_urdf_path, root_node_name="/training_g1")
+            self.robot_viser = _create_viser_urdf_handle(
+                ViserUrdf,
+                self.server,
+                robot_urdf_path,
+                root_node_name="/training_g1",
+            )
             self.robot_joint_names = list(self.robot_viser.get_actuated_joint_names())
             self.robot_viser.update_cfg(np.zeros((len(self.robot_joint_names),), dtype=np.float32))
         except Exception as exc:
@@ -651,12 +888,20 @@ class DebugRolloutViewer:
 
         try:
             self.original_robot_root_handle = self.server.scene.add_frame("/original_g1", show_axes=False)
-            self.original_robot_viser = ViserUrdf(
-                self.server,
-                urdf_or_path=robot_urdf_path,
-                root_node_name="/original_g1",
-                mesh_color_override=_ORIGINAL_G1_MESH_COLOR,
-            )
+            try:
+                self.original_robot_viser = ViserUrdf(
+                    self.server,
+                    urdf_or_path=robot_urdf_path,
+                    root_node_name="/original_g1",
+                    mesh_color_override=_ORIGINAL_G1_MESH_COLOR,
+                )
+            except TypeError:
+                self.original_robot_viser = ViserUrdf(
+                    self.server,
+                    urdf_path=robot_urdf_path,
+                    root_node_name="/original_g1",
+                    mesh_color_override=_ORIGINAL_G1_MESH_COLOR,
+                )
             self.original_robot_joint_names = list(self.original_robot_viser.get_actuated_joint_names())
             self.original_robot_viser.update_cfg(np.zeros((len(self.original_robot_joint_names),), dtype=np.float32))
             self.original_robot_root_handle.visible = False
@@ -849,30 +1094,71 @@ class DebugRolloutViewer:
         with np.load(ref_path, allow_pickle=True) as data:
             self.ref = {key: np.asarray(data[key]) for key in data.files}
 
-        valid_steps = np.asarray(self.ref.get("valid_steps", np.zeros((0,), dtype=np.bool_)), dtype=np.bool_)
-        self.valid_indices = np.flatnonzero(valid_steps)
-        if self.valid_indices.size == 0:
-            self.valid_indices = np.arange(int(self.ref.get("trajectory_length", np.asarray(0)).reshape(-1)[0]))
+        trajectory_length = int(self.ref.get("trajectory_length", np.asarray(0)).reshape(-1)[0])
+        if trajectory_length <= 0:
+            candidate_lengths = [
+                np.asarray(self.ref.get(key, np.zeros((0,)))).shape[0]
+                for key in (
+                    "body_pos_local",
+                    "object_pos_local",
+                    "target_joint_pos",
+                    "target_object_pos_local",
+                )
+            ]
+            trajectory_length = max(candidate_lengths) if candidate_lengths else 0
+
         self.body_names = [_decode_scalar(name) for name in np.asarray(self.ref.get("tracked_body_names", []))]
         self._load_robot_motion(entry)
         self._load_original_motion(entry)
 
-        self.region_points = {
-            region_name: _as_points(entry.data_dir / f"{region_name}_contact_points.npy")
-            for region_name in _REGION_ORDER
-        }
+        if self.playback_full_motion:
+            playback_lengths = [trajectory_length]
+            for arr in (
+                self.original_motion.joint_pos,
+                self.original_motion.object_pos,
+                self.original_motion.object_quat_wxyz,
+            ):
+                if arr is not None and arr.ndim >= 1 and arr.shape[0] > 0:
+                    playback_lengths.append(int(arr.shape[0]))
+            playback_length = max(playback_lengths) if playback_lengths else trajectory_length
+            self.valid_indices = np.arange(playback_length, dtype=np.int64)
+        else:
+            valid_steps = np.asarray(self.ref.get("valid_steps", np.zeros((0,), dtype=np.bool_)), dtype=np.bool_)
+            self.valid_indices = np.flatnonzero(valid_steps)
+            if self.valid_indices.size == 0:
+                self.valid_indices = np.arange(trajectory_length, dtype=np.int64)
+
+        if self.replay_only:
+            self.region_points = {region_name: np.zeros((0, 3), dtype=np.float32) for region_name in _REGION_ORDER}
+        else:
+            self.region_points = {
+                region_name: _as_points(entry.data_dir / f"{region_name}_contact_points.npy")
+                for region_name in _REGION_ORDER
+            }
         extents = np.asarray(entry.metadata["primitive_extents_xyz"], dtype=np.float32)
 
-        self._add_static_product(entry, extents)
+        if not self.replay_only:
+            self._add_static_product(entry, extents)
         self._add_rollout_view(entry, extents)
         self._add_original_view(entry, extents)
 
-        self.frame_slider.max = max(0, int(self.valid_indices.size - 1))
+        self._set_frame_slider_max(max(0, int(self.valid_indices.size - 1)))
+        print(
+            "[INFO] playback "
+            f"sequence={entry.clip_id} "
+            f"mode={'full_motion' if self.playback_full_motion else 'valid_steps'} "
+            f"frames={int(self.valid_indices.size)} "
+            f"slider_max={max(0, int(self.valid_indices.size - 1))} "
+            f"replay_only={int(self.replay_only)}",
+            flush=True,
+        )
         self.is_programmatic_slider_update = True
         self.frame_slider.value = 0
         self.is_programmatic_slider_update = False
         self.frame_float = 0.0
-        self.fps_number.value = 30
+        self.fps_number.value = self.playback_fps
+        self._last_slider_sync_time = 0.0
+        self._last_frame_md_sync_time = 0.0
         self._update_info()
         self.apply_frame(0)
         self.apply_visibility()
@@ -979,25 +1265,30 @@ class DebugRolloutViewer:
         self.rollout_handles.append(box_handle)
         self.box_handles.append(box_handle)
 
-        for region_name in _DRAWN_CONTACT_REGION_ORDER:
-            points = self.region_points[region_name]
-            if points.shape[0] == 0:
-                continue
-            style = _REGION_OVERLAY_STYLE[region_name]
-            handle = self.server.scene.add_point_cloud(
-                f"/rollout/current_points/{region_name}",
-                points=points,
-                colors=_rgb_tuple(region_name),
-                point_size=float(style["scatter_size"]) * 0.0007,
-                point_shape="circle",
-            )
-            self.current_contact_handles.append(handle)
-            self.rollout_handles.append(handle)
-            self.point_handles.append(handle)
+        if not self.replay_only:
+            for region_name in _DRAWN_CONTACT_REGION_ORDER:
+                points = self.region_points[region_name]
+                if points.shape[0] == 0:
+                    continue
+                style = _REGION_OVERLAY_STYLE[region_name]
+                handle = self.server.scene.add_point_cloud(
+                    f"/rollout/current_points/{region_name}",
+                    points=points,
+                    colors=_rgb_tuple(region_name),
+                    point_size=float(style["scatter_size"]) * 0.0007,
+                    point_shape="circle",
+                )
+                self.current_contact_handles.append(handle)
+                self.rollout_handles.append(handle)
+                self.point_handles.append(handle)
 
         obj_pos = np.asarray(self.ref.get("object_pos_local", np.zeros((0, 3))), dtype=np.float32)
-        valid_obj_pos = obj_pos[self.valid_indices] if obj_pos.ndim == 2 and self.valid_indices.size else np.zeros((0, 3))
-        if valid_obj_pos.shape[0] >= 2:
+        if obj_pos.ndim == 2 and obj_pos.shape[0] > 0 and self.valid_indices.size:
+            path_indices = np.clip(self.valid_indices, 0, obj_pos.shape[0] - 1)
+            valid_obj_pos = obj_pos[path_indices]
+        else:
+            valid_obj_pos = np.zeros((0, 3))
+        if not self.replay_only and valid_obj_pos.shape[0] >= 2:
             path = _decimate_path(valid_obj_pos)
             handle = self.server.scene.add_spline_catmull_rom(
                 "/rollout/object_path",
@@ -1049,7 +1340,7 @@ class DebugRolloutViewer:
         self.box_handles.append(box_handle)
 
         object_pos = self.original_motion.object_pos
-        if object_pos is not None and object_pos.shape[0] >= 2:
+        if not self.replay_only and object_pos is not None and object_pos.shape[0] >= 2:
             path = _decimate_path(object_pos)
             handle = self.server.scene.add_spline_catmull_rom(
                 "/original_motion/object_path",
@@ -1161,10 +1452,16 @@ class DebugRolloutViewer:
         raw_idx = int(self.valid_indices[slider_index])
         obj_pos_arr = np.asarray(self.ref.get("object_pos_local", np.zeros((0, 3))), dtype=np.float32)
         obj_quat_arr = np.asarray(self.ref.get("object_quat_w", np.zeros((0, 4))), dtype=np.float32)
-        if obj_pos_arr.shape[0] <= raw_idx or obj_quat_arr.shape[0] <= raw_idx:
+        if (
+            obj_pos_arr.ndim != 2
+            or obj_pos_arr.shape[0] == 0
+            or obj_quat_arr.ndim != 2
+            or obj_quat_arr.shape[0] == 0
+        ):
             return
-        obj_pos = obj_pos_arr[raw_idx]
-        obj_wxyz = _xyzw_to_wxyz(obj_quat_arr[raw_idx])
+        rollout_idx = int(np.clip(raw_idx, 0, min(obj_pos_arr.shape[0], obj_quat_arr.shape[0]) - 1))
+        obj_pos = obj_pos_arr[rollout_idx]
+        obj_wxyz = _xyzw_to_wxyz(obj_quat_arr[rollout_idx])
 
         with self.server.atomic():
             for handle in self.current_object_handles:
@@ -1176,13 +1473,19 @@ class DebugRolloutViewer:
 
             self._update_robot_frame(slider_index, raw_idx)
             original_idx = self._update_original_frame(raw_idx)
-            self._update_body_frame(raw_idx)
+            if bool(self.show_body_labels_cb.value) and not self.replay_only:
+                self._update_body_frame(raw_idx)
+            elif self.dynamic_body_handle is not None or self.dynamic_label_handles:
+                self._clear_dynamic_body_frame()
             original_text = "n/a" if original_idx is None else str(original_idx)
-            self.frame_md.content = (
-                f"slider frame: `{slider_index}` | raw rollout step: `{raw_idx}` | "
-                f"reference motion step: `{original_text}`"
-            )
-            self.apply_visibility()
+            rollout_text = str(rollout_idx) if rollout_idx == raw_idx else f"{rollout_idx} (clamped from {raw_idx})"
+            now = time.perf_counter()
+            if not self.playing or now - self._last_frame_md_sync_time >= 0.10:
+                self.frame_md.content = (
+                    f"motion frame: `{slider_index}` | teacher rollout step: `{rollout_text}` | "
+                    f"reference motion step: `{original_text}`"
+                )
+                self._last_frame_md_sync_time = now
 
     def _update_robot_frame(self, slider_index: int, raw_idx: int) -> None:
         if self.robot_viser is None or self.robot_root_handle is None:
@@ -1206,10 +1509,11 @@ class DebugRolloutViewer:
 
         root_pos_arr = np.asarray(self.ref.get("root_pos_local", np.zeros((0, 3))), dtype=np.float32)
         root_quat_arr = np.asarray(self.ref.get("root_quat_w", np.zeros((0, 4))), dtype=np.float32)
-        if root_pos_arr.shape[0] <= raw_idx or root_quat_arr.shape[0] <= raw_idx:
+        if root_pos_arr.shape[0] == 0 or root_quat_arr.shape[0] == 0:
             return
-        self.robot_root_handle.position = root_pos_arr[raw_idx]
-        self.robot_root_handle.wxyz = _xyzw_to_wxyz(root_quat_arr[raw_idx])
+        fallback_idx = int(np.clip(raw_idx, 0, min(root_pos_arr.shape[0], root_quat_arr.shape[0]) - 1))
+        self.robot_root_handle.position = root_pos_arr[fallback_idx]
+        self.robot_root_handle.wxyz = _xyzw_to_wxyz(root_quat_arr[fallback_idx])
         self.robot_viser.update_cfg(np.zeros((len(self.robot_joint_names),), dtype=np.float32))
 
     def _update_original_frame(self, raw_idx: int) -> int | None:
@@ -1247,11 +1551,7 @@ class DebugRolloutViewer:
 
         return original_idx
 
-    def _update_body_frame(self, raw_idx: int) -> None:
-        body_pos = np.asarray(self.ref.get("body_pos_local", np.zeros((0, 0, 3))), dtype=np.float32)
-        if body_pos.ndim != 3 or body_pos.shape[0] <= raw_idx or body_pos.shape[1] == 0:
-            return
-
+    def _clear_dynamic_body_frame(self) -> None:
         if self.dynamic_body_handle is not None:
             try:
                 self.dynamic_body_handle.remove()
@@ -1265,7 +1565,15 @@ class DebugRolloutViewer:
                 pass
         self.dynamic_label_handles = []
 
-        all_points = body_pos[raw_idx]
+    def _update_body_frame(self, raw_idx: int) -> None:
+        body_pos = np.asarray(self.ref.get("body_pos_local", np.zeros((0, 0, 3))), dtype=np.float32)
+        if body_pos.ndim != 3 or body_pos.shape[0] == 0 or body_pos.shape[1] == 0:
+            return
+
+        self._clear_dynamic_body_frame()
+
+        body_idx = int(np.clip(raw_idx, 0, body_pos.shape[0] - 1))
+        all_points = body_pos[body_idx]
         selected_points: list[np.ndarray] = []
         selected_colors: list[tuple[int, int, int]] = []
         selected_names: list[str] = []
@@ -1312,18 +1620,26 @@ class DebugRolloutViewer:
                     if self.frame_float > last:
                         if self.loop_cb.value:
                             self.frame_float = 0.0
+                            self._last_slider_sync_time = 0.0
                         elif self.load_next_entry():
                             next_tick = now + 1.0 / fps
                             continue
                         else:
                             self.frame_float = last
                             self.playing = False
+                            self.playing_cb.value = False
                     frame_idx = int(self.frame_float)
-                    self.is_programmatic_slider_update = True
-                    self.frame_slider.value = frame_idx
-                    self.is_programmatic_slider_update = False
+                    if now - self._last_slider_sync_time >= 0.10 or frame_idx in {0, int(last)}:
+                        self.is_programmatic_slider_update = True
+                        self.frame_slider.value = frame_idx
+                        self.is_programmatic_slider_update = False
+                        self._last_slider_sync_time = now
                     self.apply_frame(frame_idx)
-            time.sleep(0.005)
+            if self.playing:
+                sleep_s = max(0.001, min(0.02, next_tick - time.perf_counter()))
+            else:
+                sleep_s = 0.02
+            time.sleep(sleep_s)
 
     def run_forever(self) -> None:
         print("Open the viewer URL printed above. Close the process (Ctrl+C) to exit.")
@@ -1360,6 +1676,45 @@ def main() -> None:
         action="store_true",
         help="Show the primitive AABB box overlay at startup.",
     )
+    parser.add_argument("--autoplay", action="store_true", help="Start playback automatically.")
+    parser.add_argument("--no-loop", action="store_true", help="Do not loop the selected clip.")
+    parser.add_argument("--fps", type=float, default=30.0, help="Initial playback FPS.")
+    parser.add_argument(
+        "--playback-full-motion",
+        action="store_true",
+        help="Use the full rollout/reference trajectory for playback instead of filtering to valid_steps.",
+    )
+    parser.add_argument(
+        "--replay-only",
+        action="store_true",
+        help="Only replay the rollout/reference objects and G1 meshes; skip contact/path/static debug overlays.",
+    )
+    parser.add_argument(
+        "--success-only",
+        action="store_true",
+        help="Only show clips listed in success_clips.txt or marked success=True.",
+    )
+    parser.add_argument(
+        "--strict-success-only",
+        action="store_true",
+        help="Only show clips with stable contact and final-position success.",
+    )
+    parser.add_argument(
+        "--solid-only",
+        action="store_true",
+        help="Only show box/bin/barrel/ball clips.",
+    )
+    parser.add_argument(
+        "--exclude-clip",
+        action="append",
+        default=[],
+        help="Clip id or clip directory name to remove from the dropdown. Can be passed multiple times.",
+    )
+    parser.add_argument(
+        "--exclude-clips-file",
+        default=None,
+        help="Text file containing one clip id per line to remove from the dropdown.",
+    )
     parser.add_argument("--list-only", action="store_true", help="List available sequences and exit.")
     args = parser.parse_args()
 
@@ -1370,7 +1725,16 @@ def main() -> None:
         Path(args.original_motion_dir).expanduser().resolve() if args.original_motion_dir is not None else None
     )
     robot_urdf_path = None if args.no_robot else Path(args.robot_urdf).expanduser().resolve()
-    entries = _load_entries(data_root, vis_root, stats_root)
+    exclude_clip_ids = _load_exclude_clip_ids(args)
+    entries = _filter_entries(
+        _load_entries(data_root, vis_root, stats_root),
+        data_root=data_root,
+        stats_root=stats_root,
+        success_only=bool(args.success_only),
+        strict_success_only=bool(args.strict_success_only),
+        solid_only=bool(args.solid_only),
+        exclude_clip_ids=exclude_clip_ids,
+    )
     if args.list_only:
         for entry in entries:
             print(entry.label)
@@ -1388,6 +1752,15 @@ def main() -> None:
         original_motion_dir=original_motion_dir,
         show_original_motion_initial=bool(args.show_original_motion),
         show_primitive_box_initial=bool(args.show_primitive_box),
+        autoplay_initial=bool(args.autoplay),
+        loop_initial=not bool(args.no_loop),
+        playback_full_motion=bool(args.playback_full_motion),
+        replay_only=bool(args.replay_only),
+        playback_fps=float(args.fps),
+        success_only=bool(args.success_only),
+        strict_success_only=bool(args.strict_success_only),
+        solid_only=bool(args.solid_only),
+        exclude_clip_ids=exclude_clip_ids,
     )
     viewer.run_forever()
 

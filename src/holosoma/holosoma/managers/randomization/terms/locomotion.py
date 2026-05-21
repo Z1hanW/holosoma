@@ -318,7 +318,7 @@ class PushRandomizerState(RandomizationTermBase):
             return torch.empty(0, device=self.env.device, dtype=torch.long)
         if self.push_interval_s is None or self.push_robot_counter is None:
             return torch.empty(0, device=self.env.device, dtype=torch.long)
-        interval_steps = (self.push_interval_s / dt).to(torch.int)
+        interval_steps = torch.clamp((self.push_interval_s / dt).to(torch.int), min=1)
         return (self.push_robot_counter == interval_steps).nonzero(as_tuple=False).flatten()
 
     def zero_counters(self, env_ids: torch.Tensor) -> None:
@@ -342,9 +342,9 @@ class PushRandomizerState(RandomizationTermBase):
         if self.push_interval_s is None:
             return
         low, high = self.push_interval_range
-        low_i = max(1, int(low))
-        high_i = max(low_i + 1, int(high))
-        samples = torch_rand_float(low_i, high_i, (env_ids.shape[0], 1), device=self.env.device).squeeze(1)
+        low_s = max(0.0, float(low))
+        high_s = max(low_s, float(high))
+        samples = torch_rand_float(low_s, high_s, (env_ids.shape[0], 1), device=self.env.device).squeeze(1)
         self.push_interval_s[env_ids] = samples
 
     def _set_max_push_tensor(self, values: Sequence[float]) -> None:

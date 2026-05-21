@@ -102,8 +102,8 @@ base_setup_terms = {
     "push_randomizer_state": RandomizationTermCfg(
         func="holosoma.managers.randomization.terms.locomotion:PushRandomizerState",
         params={
-            "push_interval_s": [1.0, 3.0],
-            "max_push_vel": [0.5, 0.5, 0.2, 0.52, 0.52, 0.78],
+            "push_interval_s": [0.5, 2.0],
+            "max_push_vel": [0.7, 0.7, 0.25, 0.7, 0.7, 1.0],
             "enabled": True,
         },
     ),

@@ -367,6 +367,16 @@ PERCEPTION_WARP_PREPROCESS_EXPLICIT=0
 [[ -n "${PERCEPTION_WARP_PREPROCESS+x}" ]] && PERCEPTION_WARP_PREPROCESS_EXPLICIT=1
 CAMERA_APPLY_SENSOR_NOISE_EXPLICIT=0
 [[ -n "${CAMERA_APPLY_SENSOR_NOISE+x}" ]] && CAMERA_APPLY_SENSOR_NOISE_EXPLICIT=1
+CAMERA_WARP_EDGE_NOISE_EXPLICIT=0
+[[ -n "${CAMERA_WARP_EDGE_NOISE+x}" ]] && CAMERA_WARP_EDGE_NOISE_EXPLICIT=1
+CAMERA_WARP_ENABLE_HOLES_EXPLICIT=0
+[[ -n "${CAMERA_WARP_ENABLE_HOLES+x}" ]] && CAMERA_WARP_ENABLE_HOLES_EXPLICIT=1
+CAMERA_WARP_HOLE_PROB_EXPLICIT=0
+[[ -n "${CAMERA_WARP_HOLE_PROB+x}" ]] && CAMERA_WARP_HOLE_PROB_EXPLICIT=1
+CAMERA_WARP_ADDITIVE_NOISE_STD_EXPLICIT=0
+[[ -n "${CAMERA_WARP_ADDITIVE_NOISE_STD+x}" ]] && CAMERA_WARP_ADDITIVE_NOISE_STD_EXPLICIT=1
+CAMERA_WARP_DEPTH_OFFSET_STD_EXPLICIT=0
+[[ -n "${CAMERA_WARP_DEPTH_OFFSET_STD+x}" ]] && CAMERA_WARP_DEPTH_OFFSET_STD_EXPLICIT=1
 EXPORT_ONNX_EXPLICIT=0
 [[ -n "${EXPORT_ONNX+x}" ]] && EXPORT_ONNX_EXPLICIT=1
 MOTION_DIR_EXPLICIT=0
@@ -947,6 +957,11 @@ CAMERA_FAR=${CAMERA_FAR:-}
 CAMERA_MAX_DISTANCE=${CAMERA_MAX_DISTANCE:-}
 PERCEPTION_WARP_PREPROCESS=${PERCEPTION_WARP_PREPROCESS:-}
 CAMERA_APPLY_SENSOR_NOISE=${CAMERA_APPLY_SENSOR_NOISE:-True}
+CAMERA_WARP_EDGE_NOISE=${CAMERA_WARP_EDGE_NOISE:-}
+CAMERA_WARP_ENABLE_HOLES=${CAMERA_WARP_ENABLE_HOLES:-}
+CAMERA_WARP_HOLE_PROB=${CAMERA_WARP_HOLE_PROB:-}
+CAMERA_WARP_ADDITIVE_NOISE_STD=${CAMERA_WARP_ADDITIVE_NOISE_STD:-}
+CAMERA_WARP_DEPTH_OFFSET_STD=${CAMERA_WARP_DEPTH_OFFSET_STD:-}
 OBJECT_GEOMETRY_MODE=${OBJECT_GEOMETRY_MODE:-mesh}
 
 if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
@@ -1399,6 +1414,10 @@ if [[ -n "${CAMERA_FAR}" || -n "${CAMERA_MAX_DISTANCE}" ]]; then
   echo "[INFO] camera_far=${CAMERA_FAR:-<preset default>} camera_max_distance=${CAMERA_MAX_DISTANCE:-<preset default>}"
 fi
 echo "[INFO] camera_apply_sensor_noise=${CAMERA_APPLY_SENSOR_NOISE}"
+if [[ "${CAMERA_WARP_EDGE_NOISE_EXPLICIT}" -eq 1 || "${CAMERA_WARP_ENABLE_HOLES_EXPLICIT}" -eq 1 || "${CAMERA_WARP_HOLE_PROB_EXPLICIT}" -eq 1 || "${CAMERA_WARP_ADDITIVE_NOISE_STD_EXPLICIT}" -eq 1 || "${CAMERA_WARP_DEPTH_OFFSET_STD_EXPLICIT}" -eq 1 ]]; then
+  echo "[INFO] camera_warp_edge_noise=${CAMERA_WARP_EDGE_NOISE:-<preset default>} camera_warp_enable_holes=${CAMERA_WARP_ENABLE_HOLES:-<preset default>} camera_warp_hole_prob=${CAMERA_WARP_HOLE_PROB:-<preset default>}"
+  echo "[INFO] camera_warp_additive_noise_std=${CAMERA_WARP_ADDITIVE_NOISE_STD:-<preset default>} camera_warp_depth_offset_std=${CAMERA_WARP_DEPTH_OFFSET_STD:-<preset default>}"
+fi
 if [[ -n "${OBJECT_GEOMETRY_MODE_NORM}" ]]; then
   SIMULATOR_OBJECT_SPAWN_MODE="${HOLOSOMA_OBJECT_SPAWN_MODE_OVERRIDE:-${HOLOSOMA_OBJECT_SPAWN_MODE:-<inherited>}}"
   echo "[INFO] object_geometry_mode=${OBJECT_GEOMETRY_MODE_NORM} simulator_object_spawn_mode=${SIMULATOR_OBJECT_SPAWN_MODE}"
@@ -1526,6 +1545,18 @@ if [[ -n "${CONTACT_EXPORT_ROOT}" ]]; then
     --reward.terms.offline-wrist-target-guidance.params.contact-export-root "${CONTACT_EXPORT_ROOT}"
     --reward.terms.offline-contact-guidance.params.contact-export-root "${CONTACT_EXPORT_ROOT}"
   )
+  if [[ "${EXP}" == *"r2s-rollout-ref"* ]]; then
+    EXTRA_DISTILL_ARGS+=(
+      --reward.terms.teacher-rollout-global-ref-position-error-exp.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
+      --reward.terms.teacher-rollout-global-ref-orientation-error-exp.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
+      --reward.terms.teacher-rollout-relative-body-position-error-exp.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
+      --reward.terms.teacher-rollout-relative-body-orientation-error-exp.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
+      --reward.terms.teacher-rollout-global-body-lin-vel.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
+      --reward.terms.teacher-rollout-global-body-ang-vel.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
+      --reward.terms.teacher-rollout-object-global-ref-position-error-exp.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
+      --reward.terms.teacher-rollout-object-global-ref-orientation-error-exp.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
+    )
+  fi
 fi
 
 PERCEPTION_OVERRIDE_ARGS=()
@@ -1553,6 +1584,21 @@ if [[ "${PERCEPTION_PRESET}" != "none" ]]; then
   fi
   if [[ "${CAMERA_APPLY_SENSOR_NOISE_EXPLICIT}" -eq 1 || "${PERCEPTION_PRESET}" == camera_depth_* ]]; then
     PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-apply-sensor-noise="${CAMERA_APPLY_SENSOR_NOISE}")
+  fi
+  if [[ "${CAMERA_WARP_EDGE_NOISE_EXPLICIT}" -eq 1 ]]; then
+    PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-warp-edge-noise="${CAMERA_WARP_EDGE_NOISE}")
+  fi
+  if [[ "${CAMERA_WARP_ENABLE_HOLES_EXPLICIT}" -eq 1 ]]; then
+    PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-warp-enable-holes="${CAMERA_WARP_ENABLE_HOLES}")
+  fi
+  if [[ "${CAMERA_WARP_HOLE_PROB_EXPLICIT}" -eq 1 ]]; then
+    PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-warp-hole-prob="${CAMERA_WARP_HOLE_PROB}")
+  fi
+  if [[ "${CAMERA_WARP_ADDITIVE_NOISE_STD_EXPLICIT}" -eq 1 ]]; then
+    PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-warp-additive-noise-std="${CAMERA_WARP_ADDITIVE_NOISE_STD}")
+  fi
+  if [[ "${CAMERA_WARP_DEPTH_OFFSET_STD_EXPLICIT}" -eq 1 ]]; then
+    PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-warp-depth-offset-std="${CAMERA_WARP_DEPTH_OFFSET_STD}")
   fi
   if [[ -n "${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}" ]]; then
     PERCEPTION_OVERRIDE_ARGS+=(--perception.object-geometry-mode="${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}")

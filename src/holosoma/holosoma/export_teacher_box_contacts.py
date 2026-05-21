@@ -198,6 +198,7 @@ class ExportConfig:
     contact_voxel_size: float = 0.01
     success_position_threshold: float = 0.10
     max_rollout_steps: int | None = None
+    project_contact_to_mesh: bool = True
     save_glb: bool = True
     save_preview_png: bool = True
     save_face_heatmap_png: bool = True
@@ -695,6 +696,9 @@ def _save_overlay_assets(
     save_preview_png: bool,
     save_face_heatmap_png: bool,
 ) -> None:
+    if not (save_glb or save_preview_png or save_face_heatmap_png):
+        return
+
     try:
         import trimesh  # type: ignore[import-not-found]
     except Exception as exc:
@@ -1096,6 +1100,7 @@ def _make_clip_accumulator(
     motion_fps: float,
     clip_length: int,
     has_object: bool,
+    project_contact_to_mesh: bool,
 ) -> ClipAccumulator:
     clip_dir = output_dir / "clips" / f"{clip_idx:04d}_{_sanitize_name(clip_id)}"
     clip_dir.mkdir(parents=True, exist_ok=True)
@@ -1164,11 +1169,13 @@ def _make_clip_accumulator(
         rollout_motion["object_quat_w"][..., 3] = 1.0
         rollout_motion["object_lin_vel_w"] = np.zeros((clip_length, 3), dtype=np.float32)
         rollout_motion["object_ang_vel_w"] = np.zeros((clip_length, 3), dtype=np.float32)
-    object_surface_mesh = _load_object_overlay_mesh(
-        clip_id=clip_id,
-        object_name=object_name,
-        object_urdf_path=object_urdf_path,
-    )
+    object_surface_mesh = None
+    if project_contact_to_mesh:
+        object_surface_mesh = _load_object_overlay_mesh(
+            clip_id=clip_id,
+            object_name=object_name,
+            object_urdf_path=object_urdf_path,
+        )
     return ClipAccumulator(
         clip_id=clip_id,
         clip_index=clip_idx,
@@ -1855,6 +1862,7 @@ def _collect_batch(
             motion_fps=motion_fps,
             clip_length=int(clip_lengths[clip_idx]),
             has_object=bool(motion_command.motion.has_object),
+            project_contact_to_mesh=export_cfg.project_contact_to_mesh,
         )
         finished[env_id] = False
 

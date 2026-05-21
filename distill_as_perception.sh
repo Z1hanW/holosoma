@@ -651,6 +651,7 @@ def infer_clip_id(dir_name: str) -> str:
 contact_ids: set[str] = set()
 missing_files: list[str] = []
 required_files = (
+    "teacher_rollout_reference.npz",
     "left_wrist_contact_points.npy",
     "left_wrist_contact_point_counts.npy",
     "left_wrist_contact_interval_steps.npy",
@@ -671,7 +672,7 @@ if missing_contacts:
     raise SystemExit(f"[ERROR] Contact export missing {len(missing_contacts)} active clip(s): {preview}")
 if missing_files:
     preview = ", ".join(missing_files[:20])
-    raise SystemExit(f"[ERROR] Contact export has incomplete wrist sidecars: {preview}")
+    raise SystemExit(f"[ERROR] Contact export has incomplete rollout/contact sidecars: {preview}")
 
 print(str(clips_root))
 PY
@@ -731,7 +732,7 @@ export TRACKER_PROFILE="${TRACKER_PROFILE:-as-general}"
 export SCHEDULE_VARIANT="${SCHEDULE_VARIANT:-ppo_first}"
 
 if [[ "${AS_CONTACT_AWARE}" == "1" ]]; then
-  export EXP="${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-contact}"
+  export EXP="${EXP:-g1-29dof-wbt-w-object-distill-sparse-root-cmd-r2s-rollout-ref}"
   if [[ "${AS_SUCCESS133_FINAL0P5}" == "1" && "${RESUME_FROM_BOX}" == "1" ]]; then
     export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_success133_final0p5_perception_init_box}"
     export TRAINING_NAME="${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_success133_final0p5_perception_init_box}"
@@ -755,7 +756,16 @@ fi
 export TRAINING_PROJECT="${TRAINING_PROJECT:-${WANDB_PROJECT}}"
 export PERCEPTION_PRESET="${PERCEPTION_PRESET:-camera_depth_d435i}"
 export CAMERA_APPLY_SENSOR_NOISE="${CAMERA_APPLY_SENSOR_NOISE:-True}"
-AS_PUSH_INTERVAL_S=${AS_PUSH_INTERVAL_S:-"[1.0,2.0]"}
+case "${PERCEPTION_PRESET}" in
+  camera_depth_d435i|camera_depth_d435i_17x17|camera_depth_d435i_defm_*)
+    export CAMERA_WARP_EDGE_NOISE="${CAMERA_WARP_EDGE_NOISE:-True}"
+    export CAMERA_WARP_ENABLE_HOLES="${CAMERA_WARP_ENABLE_HOLES:-True}"
+    export CAMERA_WARP_HOLE_PROB="${CAMERA_WARP_HOLE_PROB:-0.2}"
+    export CAMERA_WARP_ADDITIVE_NOISE_STD="${CAMERA_WARP_ADDITIVE_NOISE_STD:-0.03}"
+    export CAMERA_WARP_DEPTH_OFFSET_STD="${CAMERA_WARP_DEPTH_OFFSET_STD:-0.03}"
+    ;;
+esac
+AS_PUSH_INTERVAL_S=${AS_PUSH_INTERVAL_S:-"[0.5,2.0]"}
 AS_MAX_PUSH_VEL=${AS_MAX_PUSH_VEL:-"[0.7,0.7,0.25,0.7,0.7,1.0]"}
 if [[ "${AS_CONTACT_AWARE}" == "1" ]]; then
   export ROOT_COMMAND_MODE="${ROOT_COMMAND_MODE:-contact-aware}"
@@ -797,6 +807,8 @@ echo "[INFO] MOTION_DIR=${MOTION_DIR}"
 echo "[INFO] OBJECT_URDF=${OBJECT_URDF}"
 echo "[INFO] EXP=${EXP} perception=${PERCEPTION_PRESET}"
 echo "[INFO] camera_apply_sensor_noise=${CAMERA_APPLY_SENSOR_NOISE}"
+echo "[INFO] camera_warp_edge_noise=${CAMERA_WARP_EDGE_NOISE:-<preset default>} camera_warp_enable_holes=${CAMERA_WARP_ENABLE_HOLES:-<preset default>} camera_warp_hole_prob=${CAMERA_WARP_HOLE_PROB:-<preset default>}"
+echo "[INFO] camera_warp_additive_noise_std=${CAMERA_WARP_ADDITIVE_NOISE_STD:-<preset default>} camera_warp_depth_offset_std=${CAMERA_WARP_DEPTH_OFFSET_STD:-<preset default>}"
 echo "[INFO] as_push_interval_s=${AS_PUSH_INTERVAL_S} as_max_push_vel=${AS_MAX_PUSH_VEL}"
 echo "[INFO] RUN_NAME=${RUN_NAME} TRAINING_PROJECT=${TRAINING_PROJECT}"
 echo "[INFO] student_actor_inputs=${STUDENT_ACTOR_INPUTS}"
