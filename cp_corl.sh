@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Copy the CoRL solid80 AS distillation bank from NFS into this repo's
-# relative data/ds_as_data tree.
+# Copy a CoRL AS distillation bank from NFS into this repo's relative
+# data/ds_as_data tree.
 #
-# The NFS package is self-contained, but its object map points at NFS URDF
+# The NFS package can be either a directory or a .tar archive. It is
+# self-contained, but its object map may point at NFS or source-machine URDF
 # paths. This script rewrites the object map and per-clip npz object_urdf_path
 # values to the repo-local copy so training can run without reading object
 # assets from NFS.
@@ -13,9 +14,11 @@ set -euo pipefail
 #   bash cp_corl.sh
 #
 # Optional env:
-#   NFS_CORL_BANK=/nfs/zzzihanw/ds_as_data/_distill/<bank>
+#   CORL_BANK_NAME=corl_128
+#   NFS_CORL_BANK=/nfs/zzzihanw/ds_as_data/_distill/<bank>[.tar]
 #   LOCAL_DATA_ROOT=data/ds_as_data
 #   LOCAL_BANK_NAME=<bank>
+#   EXPECTED_CLIP_COUNT=128
 #   DRY_RUN=1
 #   KEEP_BACKUP=0
 #   SEED_LOCAL_EXISTING=0
@@ -31,12 +34,23 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 cd "${SCRIPT_DIR}"
 
-DEFAULT_BANK_NAME="carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success155_bcleb5oi58000_final0p5_primitiveproj_solid80_clean_box_bin_barrel_ball"
+DEFAULT_BANK_NAME=${CORL_BANK_NAME:-"corl_128"}
 DEFAULT_NFS_BANK="/nfs/zzzihanw/ds_as_data/_distill/${DEFAULT_BANK_NAME}"
+DEFAULT_NFS_TAR="${DEFAULT_NFS_BANK}.tar"
 
-NFS_CORL_BANK=${NFS_CORL_BANK:-"${DEFAULT_NFS_BANK}"}
+if [[ -z "${NFS_CORL_BANK:-}" ]]; then
+  if [[ -f "${DEFAULT_NFS_TAR}" ]]; then
+    NFS_CORL_BANK="${DEFAULT_NFS_TAR}"
+  else
+    NFS_CORL_BANK="${DEFAULT_NFS_BANK}"
+  fi
+fi
 LOCAL_DATA_ROOT=${LOCAL_DATA_ROOT:-"data/ds_as_data"}
-LOCAL_BANK_NAME=${LOCAL_BANK_NAME:-"$(basename "${NFS_CORL_BANK}")"}
+if [[ -z "${LOCAL_BANK_NAME:-}" ]]; then
+  LOCAL_BANK_NAME="$(basename "${NFS_CORL_BANK}")"
+  LOCAL_BANK_NAME="${LOCAL_BANK_NAME%.tar}"
+fi
+EXPECTED_CLIP_COUNT=${EXPECTED_CLIP_COUNT:-}
 DRY_RUN=${DRY_RUN:-0}
 KEEP_BACKUP=${KEEP_BACKUP:-1}
 SEED_LOCAL_EXISTING=${SEED_LOCAL_EXISTING:-1}
@@ -83,12 +97,16 @@ if [[ "${LOCAL_DATA_ROOT_ABS}" != "${EXPECTED_LOCAL_ROOT}" ]]; then
   echo "[ERROR] Expected repo-relative data root: ${EXPECTED_LOCAL_ROOT}" >&2
   exit 2
 fi
-if [[ ! -d "${NFS_CORL_BANK_ABS}" ]]; then
+if [[ ! -d "${NFS_CORL_BANK_ABS}" && ! -f "${NFS_CORL_BANK_ABS}" ]]; then
   echo "[ERROR] NFS_CORL_BANK does not exist: ${NFS_CORL_BANK_ABS}" >&2
   exit 1
 fi
-if [[ ! -f "${NFS_CORL_BANK_ABS}/_clip_object_urdf_map.json" ]]; then
+if [[ -d "${NFS_CORL_BANK_ABS}" && ! -f "${NFS_CORL_BANK_ABS}/_clip_object_urdf_map.json" ]]; then
   echo "[ERROR] Missing object map in NFS bank: ${NFS_CORL_BANK_ABS}/_clip_object_urdf_map.json" >&2
+  exit 1
+fi
+if [[ -f "${NFS_CORL_BANK_ABS}" && "${NFS_CORL_BANK_ABS}" != *.tar ]]; then
+  echo "[ERROR] File NFS_CORL_BANK must be a .tar archive: ${NFS_CORL_BANK_ABS}" >&2
   exit 1
 fi
 
@@ -101,8 +119,13 @@ echo "[INFO] source=${NFS_CORL_BANK_ABS}"
 echo "[INFO] target=${LOCAL_BANK_ABS}"
 
 if [[ "${DRY_RUN}" == "1" ]]; then
-  echo "[DRY-RUN] Would rsync NFS bank into staging dir:"
-  echo "          ${NFS_CORL_BANK_ABS}/ -> ${TMP_BANK_ABS}/"
+  if [[ -f "${NFS_CORL_BANK_ABS}" ]]; then
+    echo "[DRY-RUN] Would extract NFS tar package into staging dir:"
+    echo "          ${NFS_CORL_BANK_ABS} -> ${TMP_BANK_ABS}/"
+  else
+    echo "[DRY-RUN] Would rsync NFS bank into staging dir:"
+    echo "          ${NFS_CORL_BANK_ABS}/ -> ${TMP_BANK_ABS}/"
+  fi
   echo "[DRY-RUN] Would rewrite local object paths and replace target."
   exit 0
 fi
@@ -119,7 +142,10 @@ rm -rf "${TMP_BANK_ABS}"
 mkdir -p "${TMP_BANK_ABS}"
 
 echo "[INFO] Copying NFS package into staging dir..."
-if [[ "${SEED_LOCAL_EXISTING}" == "1" && -d "${LOCAL_BANK_ABS}" ]]; then
+if [[ -f "${NFS_CORL_BANK_ABS}" ]]; then
+  echo "[INFO] Extracting NFS tar package..."
+  tar -xf "${NFS_CORL_BANK_ABS}" -C "${TMP_BANK_ABS}" --strip-components=1
+elif [[ "${SEED_LOCAL_EXISTING}" == "1" && -d "${LOCAL_BANK_ABS}" ]]; then
   echo "[INFO] Seeding staging dir from existing local bank with symlinks dereferenced..."
   rsync -aL --delete --human-readable --info="${RSYNC_INFO}" \
     --exclude="/contact_export_from_teacher_success133_final0p5/" \
@@ -229,7 +255,7 @@ else
 fi
 
 echo "[INFO] Rewriting object paths to repo-local data dir..."
-python3 - "${TMP_BANK_ABS}" "${LOCAL_BANK_ABS}" <<'PY'
+python3 - "${TMP_BANK_ABS}" "${LOCAL_BANK_ABS}" "${EXPECTED_CLIP_COUNT}" <<'PY'
 from __future__ import annotations
 
 import json
@@ -267,8 +293,19 @@ def write_npz_atomic(path: Path, payload: dict[str, np.ndarray]) -> None:
 
 staging_bank = Path(sys.argv[1]).expanduser().resolve()
 installed_bank = Path(sys.argv[2]).expanduser().resolve()
+expected_count_raw = sys.argv[3].strip()
 map_path = staging_bank / "_clip_object_urdf_map.json"
 contact_dir = staging_bank / "contact_export_from_teacher_success133_final0p5" / "clips"
+slot_bank = staging_bank / "_single_slot_motion_bank"
+slot_map_path = slot_bank / "_clip_object_urdf_map.json"
+
+if expected_count_raw:
+    try:
+        expected_count = int(expected_count_raw)
+    except ValueError as exc:
+        raise SystemExit(f"[ERROR] EXPECTED_CLIP_COUNT must be an integer. Got: {expected_count_raw}") from exc
+else:
+    expected_count = 0
 
 
 def find_staging_urdf(old_urdf: Path) -> Path:
@@ -302,8 +339,9 @@ elif isinstance(payload, dict):
 else:
     raise SystemExit(f"[ERROR] Invalid object map: {map_path}")
 
-if len(clips) != 80:
-    raise SystemExit(f"[ERROR] Expected 80 clips, got {len(clips)}")
+if expected_count and len(clips) != expected_count:
+    raise SystemExit(f"[ERROR] Expected {expected_count} clips, got {len(clips)}")
+expected_count = len(clips)
 
 updated_clips: dict[str, dict] = {}
 rewritten_npz = 0
@@ -330,24 +368,32 @@ for clip_id, raw_entry in sorted(clips.items()):
         entry["object_name"] = clip_id
     updated_clips[clip_id] = entry
 
-    with np.load(npz_path, allow_pickle=True) as data:
-        npz_payload = {key: np.asarray(data[key]) for key in data.files}
-    old_npz_urdf = scalar_str(npz_payload.get("object_urdf_path"))
-    if old_npz_urdf != str(installed_urdf):
-        npz_payload["object_urdf_path"] = np.asarray(str(installed_urdf))
-        if "object_name" not in npz_payload or not scalar_str(npz_payload.get("object_name")):
-            npz_payload["object_name"] = np.asarray(str(entry["object_name"]))
-        write_npz_atomic(npz_path, npz_payload)
-        rewritten_npz += 1
+    npz_paths = [npz_path]
+    slot_npz_path = slot_bank / f"{clip_id}.npz"
+    if slot_npz_path.is_file():
+        npz_paths.append(slot_npz_path)
+    for candidate_npz in npz_paths:
+        with np.load(candidate_npz, allow_pickle=True) as data:
+            npz_payload = {key: np.asarray(data[key]) for key in data.files}
+        old_npz_urdf = scalar_str(npz_payload.get("object_urdf_path"))
+        if old_npz_urdf != str(installed_urdf):
+            npz_payload["object_urdf_path"] = np.asarray(str(installed_urdf))
+            if "object_name" not in npz_payload or not scalar_str(npz_payload.get("object_name")):
+                npz_payload["object_name"] = np.asarray(str(entry["object_name"]))
+            write_npz_atomic(candidate_npz, npz_payload)
+            rewritten_npz += 1
 
 out_payload["clips"] = updated_clips
 map_path.write_text(json.dumps(out_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 npz_count = len(list(staging_bank.glob("*.npz")))
+slot_npz_count = len(list(slot_bank.glob("*.npz"))) if slot_bank.is_dir() else 0
 ref_count = len(list(contact_dir.glob("*/teacher_rollout_reference.npz")))
 left_count = len(list(contact_dir.glob("*/left_wrist_contact_points.npy")))
 right_count = len(list(contact_dir.glob("*/right_wrist_contact_points.npy")))
 urdf_count = len(list(staging_bank.rglob("*.urdf")))
+if slot_map_path.is_file():
+    slot_map_path.write_text(json.dumps(out_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 symlink_count = 0
 for root, dirs, files in os.walk(staging_bank):
     for name in dirs + files:
@@ -381,6 +427,7 @@ summary = {
     "bank": str(installed_bank),
     "clips": len(updated_clips),
     "motion_npz": npz_count,
+    "single_slot_motion_npz": slot_npz_count,
     "urdfs": urdf_count,
     "teacher_rollout_reference": ref_count,
     "left_wrist_contact_points": left_count,
@@ -403,8 +450,13 @@ expected = {
     "right_wrist_contact_points": right_count,
 }
 for key, value in expected.items():
-    if value != 80:
+    if key == "urdfs":
+        if value < expected_count:
+            errors.append(f"{key}={value}")
+    elif value != expected_count:
         errors.append(f"{key}={value}")
+if slot_bank.is_dir() and slot_npz_count != expected_count:
+    errors.append(f"single_slot_motion_npz={slot_npz_count}")
 if symlink_count != 0:
     errors.append(f"symlinks={symlink_count}")
 if errors:
