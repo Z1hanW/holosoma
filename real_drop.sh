@@ -4,7 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-checkpoint="${HOLOSOMA_REAL_DROP_CHECKPOINT:-wandb://zihanw22/carry-any/qihvpyqg/latest}"
 interface="${HOLOSOMA_REAL_INTERFACE:-eth0}"
 
 log_dir="${ROOT_DIR}/logs/real_drop_$(date +%Y%m%d_%H%M%S)"
@@ -25,7 +24,7 @@ HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT="${HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT:-100000}"
 PYTHONPATH=src/holosoma_inference:src/holosoma${PYTHONPATH:+:${PYTHONPATH}} \
 python3 src/holosoma_inference/holosoma_inference/run_policy.py \
   inference:g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1 \
-  --task.model-path "$checkpoint" \
+  --task.model-path _ckps/qihvpyqg_model_08500.onnx \
   --task.use-joystick \
   --task.rl-rate 50 \
-  --task.interface "$interface"
+  --task.interface eth0
