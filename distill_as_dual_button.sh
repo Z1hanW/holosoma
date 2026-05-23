@@ -30,6 +30,8 @@ Behavior:
 Examples:
   bash cp_corl.sh
   bash distill_as_dual_button.sh corl_128
+  # If data/ds_as_data/corl_128 exists and no other data source is selected,
+  # this wrapper defaults to corl_128.
 
 Button convention:
   pickup_button = 1 before carry-start t1, 0 from t1 through clip end
@@ -49,6 +51,10 @@ cd "${SCRIPT_DIR}"
 
 POSITIONAL=()
 CORL_128=0
+DATA_SELECTOR_SET=0
+USER_SET_AS_SUCCESS133_BANK_NAME=${AS_SUCCESS133_BANK_NAME+x}
+USER_SET_AS_SUCCESS133_FINAL0P5=${AS_SUCCESS133_FINAL0P5+x}
+USER_SET_OMOMO_DATA_DIR=${OMOMO_DATA_DIR+x}
 while [[ $# -gt 0 ]]; do
   case "$(echo "$1" | tr '[:upper:]' '[:lower:]')" in
     -h|--help|help)
@@ -60,11 +66,13 @@ while [[ $# -gt 0 ]]; do
       ;;
     corl_128|corl128|corl-128)
       CORL_128=1
+      DATA_SELECTOR_SET=1
       AS_SUCCESS133_FINAL0P5=1
       POSITIONAL+=("$1")
       shift
       ;;
     success133|as-success133|as_success133|success133-final0p5|success133_final0p5)
+      DATA_SELECTOR_SET=1
       AS_SUCCESS133_FINAL0P5=1
       POSITIONAL+=("$1")
       shift
@@ -83,6 +91,17 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "${CORL_128}" == "0" \
+      && "${DATA_SELECTOR_SET}" == "0" \
+      && -z "${USER_SET_AS_SUCCESS133_BANK_NAME}" \
+      && -z "${USER_SET_AS_SUCCESS133_FINAL0P5}" \
+      && -z "${USER_SET_OMOMO_DATA_DIR}" \
+      && -d "${SCRIPT_DIR}/data/ds_as_data/corl_128" ]]; then
+  CORL_128=1
+  AS_SUCCESS133_FINAL0P5=1
+  POSITIONAL=("corl_128" "${POSITIONAL[@]}")
+fi
 
 if [[ -z "${AS_SUCCESS133_FINAL0P5+x}" && -z "${RESUME_FROM_BOX+x}" ]]; then
   AS_SUCCESS133_FINAL0P5=1

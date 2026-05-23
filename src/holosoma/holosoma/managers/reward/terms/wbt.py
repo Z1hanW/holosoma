@@ -1544,14 +1544,44 @@ class UndesiredContacts(RewardTermBase):
     def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
         super().__init__(cfg, env)
         self.env = env
-        undesired_contacts_body_names = [
-            body_name
-            for body_name in self.env.simulator.body_names  # type: ignore[attr-defined]
-            if re.match(cfg.params.get("undesired_contacts_body_names", ""), body_name)
+        all_body_names = list(self.env.simulator.body_names)  # type: ignore[attr-defined]
+        body_names = cfg.params.get("body_names")
+        body_name_selector = cfg.params.get("undesired_contacts_body_names", "")
+        if body_names is None and isinstance(body_name_selector, (list, tuple)):
+            body_names = body_name_selector
+
+        if body_names is not None:
+            missing = [name for name in body_names if name not in all_body_names]
+            if missing:
+                raise ValueError(f"Requested body names {missing} are not available in {all_body_names}.")
+            undesired_contacts_body_names = list(body_names)
+        else:
+            undesired_contacts_body_names = [
+                body_name
+                for body_name in all_body_names
+                if re.match(str(body_name_selector), body_name)
+            ]
+        required_selected_body_names = cfg.params.get("required_selected_body_names", ())
+        missing_required_selected = [
+            name for name in required_selected_body_names if name not in undesired_contacts_body_names
         ]
+        if missing_required_selected:
+            raise ValueError(
+                f"UndesiredContacts expected selected body names {missing_required_selected}, "
+                f"but selected {undesired_contacts_body_names} from simulator bodies {all_body_names}."
+            )
+
+        forbidden_sim_body_names = cfg.params.get("forbidden_sim_body_names", ())
+        unexpected_present = [name for name in forbidden_sim_body_names if name in all_body_names]
+        if unexpected_present:
+            raise ValueError(
+                f"UndesiredContacts found forbidden simulator body names {unexpected_present}. "
+                "This usually means fixed joints were not collapsed, so parent-body contact penalties "
+                f"will not catch those child-link contacts. Simulator bodies: {all_body_names}."
+            )
         self.undesired_contacts_body_indexes = self._get_index_of_a_in_b(
             undesired_contacts_body_names,
-            self.env.simulator.body_names,  # type: ignore[attr-defined]
+            all_body_names,
             self.env.device,
         )
         self.threshold = cfg.params.get("threshold", 1.0)

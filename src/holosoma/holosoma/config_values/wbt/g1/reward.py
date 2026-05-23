@@ -82,6 +82,36 @@ _FOOT_OBJECT_CONTACT_BODY_NAMES = [
     "left_ankle_roll_link",
     "right_ankle_roll_link",
 ]
+_LOWER_BODY_UNDESIRED_CONTACT_BODY_NAMES = [
+    # head_link is fixed-collapsed into torso_link in IsaacSim, so torso contact
+    # also catches contact on the head collision mesh.
+    "torso_link",
+    "pelvis",
+    "left_hip_pitch_link",
+    "left_hip_roll_link",
+    "left_hip_yaw_link",
+    "left_knee_link",
+    "left_ankle_pitch_link",
+    "right_hip_pitch_link",
+    "right_hip_roll_link",
+    "right_hip_yaw_link",
+    "right_knee_link",
+    "right_ankle_pitch_link",
+]
+
+
+def _lower_body_undesired_contacts_term() -> RewardTermCfg:
+    return RewardTermCfg(
+        func="holosoma.managers.reward.terms.wbt:UndesiredContacts",
+        params={
+            "threshold": 1.0,
+            "undesired_contacts_body_names": _LOWER_BODY_UNDESIRED_CONTACT_BODY_NAMES,
+            "required_selected_body_names": ["torso_link"],
+            "forbidden_sim_body_names": ["head_link"],
+        },
+        weight=-0.1,
+    )
+
 
 g1_29dof_wbt_reward = RewardManagerCfg(
     terms={
@@ -186,6 +216,7 @@ g1_29dof_wbt_reward_w_object = RewardManagerCfg(
             },
             weight=-0.5,
         ),
+        "lower_body_undesired_contacts": _lower_body_undesired_contacts_term(),
         # Motion tracking rewards - global reference frame
         "object_global_ref_position_error_exp": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:object_global_ref_position_error_exp",
@@ -340,7 +371,7 @@ g1_29dof_wbt_reward_w_object_generalist = RewardManagerCfg(
                 "reward_mode": "tanh",
                 "body_names": _TORSO_SUPPORT_CONTACT_BODY_NAMES,
             },
-            weight=0.30,
+            weight=0.0,
         ),
     }
 )
@@ -446,6 +477,7 @@ g1_29dof_wbt_reward_w_object_r2s_contact_guidance = RewardManagerCfg(
             },
             weight=-0.5,
         ),
+        "lower_body_undesired_contacts": _lower_body_undesired_contacts_term(),
         "object_global_ref_position_error_exp": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:object_global_ref_position_error_exp",
             params={"sigma": 0.7},
@@ -559,6 +591,7 @@ g1_29dof_wbt_reward_w_object_r2s_rollout_reference_guidance = RewardManagerCfg(
             },
             weight=-0.5,
         ),
+        "lower_body_undesired_contacts": _lower_body_undesired_contacts_term(),
         "teacher_rollout_object_global_ref_position_error_exp": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:teacher_rollout_object_global_ref_position_error_exp",
             params={

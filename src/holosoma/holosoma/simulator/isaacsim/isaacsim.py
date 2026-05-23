@@ -8,6 +8,7 @@ import math
 import os
 import pathlib
 import re
+import shutil
 import zipfile
 import xml.etree.ElementTree as ET
 from typing import Any
@@ -1226,6 +1227,14 @@ class IsaacSim(BaseSimulator):
             # Get local rank to avoid race conditions in multi-GPU setups
             local_rank = int(os.environ.get("LOCAL_RANK", "0"))
             usd_conversion_dir = os.path.abspath(os.path.join(asset_root, f"converted_rank{local_rank}"))
+            if _env_flag("HOLOSOMA_CLEAN_ROBOT_USD_CACHE", default=True):
+                conversion_path = pathlib.Path(usd_conversion_dir).resolve()
+                asset_root_path = pathlib.Path(asset_root).resolve()
+                if conversion_path.parent != asset_root_path or not conversion_path.name.startswith("converted_rank"):
+                    raise RuntimeError(f"Refusing to clear unexpected robot USD conversion directory: {conversion_path}")
+                if conversion_path.exists():
+                    shutil.rmtree(conversion_path)
+                    logger.info("Cleared robot USD conversion cache at {}", conversion_path)
 
             spawn = sim_utils.UrdfFileCfg(
                 usd_dir=usd_conversion_dir,
@@ -1244,6 +1253,16 @@ class IsaacSim(BaseSimulator):
                 activate_contact_sensors=True,
                 rigid_props=robot_rigid_props,
                 articulation_props=robot_articulation_props,
+            )
+            if not getattr(spawn, "force_usd_conversion", False):
+                raise RuntimeError("Robot UrdfFileCfg.force_usd_conversion is not enabled; refusing to use cached USD.")
+            logger.info(
+                "Robot URDF conversion configured: asset_path={} usd_dir={} "
+                "merge_fixed_joints={} force_usd_conversion={}",
+                full_urdf_path,
+                usd_conversion_dir,
+                getattr(spawn, "merge_fixed_joints", None),
+                getattr(spawn, "force_usd_conversion", None),
             )
         else:
             asset_path = robot_asset_cfg.usd_file
