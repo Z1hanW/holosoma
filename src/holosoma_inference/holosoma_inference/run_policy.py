@@ -33,11 +33,13 @@ import os
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 
 
-def _print_control_guide(policy_class, use_joystick: bool):
+def _print_control_guide(policy_class, use_joystick: bool, config: InferenceConfig):
     """Print control guide for users."""
     is_blind_fall_recovery = issubclass(policy_class, BlindFallRecoveryPolicy)
     is_depth_distillation = issubclass(policy_class, DepthDistillationPolicy)
     is_wbt = policy_class.__name__ == "WholeBodyTrackingPolicy"
+    has_pickup_button = "pickup_button" in config.observation.obs_dims
+    has_drop_button = "drop_button" in config.observation.obs_dims
 
     logger.info("=" * 80)
     logger.info("POLICY CONTROLS")
@@ -104,6 +106,10 @@ def _print_control_guide(policy_class, use_joystick: bool):
             logger.info("")
             logger.info("Whole-Body Tracking Controls:")
             logger.info("  s or m - Start motion clip")
+            if has_pickup_button:
+                logger.info("  f       - Toggle pickup button command")
+            if has_drop_button:
+                logger.info("  g       - Toggle drop button command")
             logger.info("  w/s/a/d - Adjust sparse root XY command")
             logger.info("  q/e     - Adjust sparse root yaw command")
             logger.info("  z       - Reset sparse root command offset")
@@ -196,7 +202,7 @@ def run_policy(config: InferenceConfig):
     policy: LocomotionPolicy | WholeBodyTrackingPolicy = policy_class(config=config)
 
     logger.info("Policy initialized successfully!")
-    _print_control_guide(policy_class, config.task.use_joystick)
+    _print_control_guide(policy_class, config.task.use_joystick, config)
 
     if config.task.auto_start_policy:
         if hasattr(policy, "wait_for_motion_initial_state"):

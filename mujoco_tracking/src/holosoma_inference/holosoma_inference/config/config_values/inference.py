@@ -88,6 +88,51 @@ g1_29dof_wbt_object_distill = replace(
     ),
 )
 
+g1_root_pos_contact_aware_actions_no_linvel_h1 = replace(
+    g1_29dof_wbt,
+    observation=observation.wbt_object_perception_contact_aware_actions_no_linvel_h1_g1,
+    task=replace(
+        task.wbt,
+        use_sim_time=True,
+        auto_start_motion=True,
+        use_sim_state=True,
+        use_split_perception_obs=True,
+        prefer_sim_ref_from_sim_state=True,
+        restart_motion_on_clock_reset=True,
+        restart_sim_on_motion_end=True,
+    ),
+)
+
+g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1 = replace(
+    g1_29dof_wbt,
+    observation=observation.wbt_object_perception_contact_aware_drop_button_actions_no_linvel_h1_g1,
+    task=replace(
+        task.wbt,
+        use_sim_time=True,
+        auto_start_motion=True,
+        use_sim_state=True,
+        use_split_perception_obs=True,
+        prefer_sim_ref_from_sim_state=True,
+        restart_motion_on_clock_reset=True,
+        restart_sim_on_motion_end=True,
+    ),
+)
+
+g1_root_pos_contact_aware_pickup_drop_button_actions_no_linvel_h1 = replace(
+    g1_29dof_wbt,
+    observation=observation.wbt_object_perception_contact_aware_pickup_drop_button_actions_no_linvel_h1_g1,
+    task=replace(
+        task.wbt,
+        use_sim_time=True,
+        auto_start_motion=True,
+        use_sim_state=True,
+        use_split_perception_obs=True,
+        prefer_sim_ref_from_sim_state=True,
+        restart_motion_on_clock_reset=True,
+        restart_sim_on_motion_end=True,
+    ),
+)
+
 # G1 Whole-Body Tracking (VideoMimic)
 g1_29dof_videomimic = InferenceConfig(
     robot=replace(
@@ -128,6 +173,13 @@ DEFAULTS = {
     "g1-29dof-w-obj": g1_29dof_wbt_object_generalist,
     "g1-29dof-wbt-object-distill": g1_29dof_wbt_object_distill,
     "g1-29dof-wbt-depth-distill": g1_29dof_wbt_object_distill,
+    "g1-root_pos-contact-aware-actions-no-linvel-h1": g1_root_pos_contact_aware_actions_no_linvel_h1,
+    "g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1": (
+        g1_root_pos_contact_aware_drop_button_actions_no_linvel_h1
+    ),
+    "g1-root_pos-contact-aware-pickup-drop-button-actions-no-linvel-h1": (
+        g1_root_pos_contact_aware_pickup_drop_button_actions_no_linvel_h1
+    ),
     "g1-29dof-videomimic": g1_29dof_videomimic,
 }
 

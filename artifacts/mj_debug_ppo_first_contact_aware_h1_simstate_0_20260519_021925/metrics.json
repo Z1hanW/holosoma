@@ -1,0 +1,50 @@
+{
+  "bridge": {
+    "domain_id": 115,
+    "hold_default_pose_until_first_command": true,
+    "ignore_default_idle_command": true,
+    "publish_sim_state": true,
+    "sim_state_port": 55581
+  },
+  "checkpoint": "/tmp/zxz3hd8h_model_07500.onnx",
+  "clip": "/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5/noscale__any_lamp_7.npz",
+  "depth_recording": {
+    "fps": 10.0,
+    "frames": 79,
+    "max": 0.5,
+    "mean_max": 0.03953230008482933,
+    "mean_min": -0.24574074149131775,
+    "min": -0.5,
+    "path": "/home/user/FAR/holosoma/artifacts/mj_debug_ppo_first_contact_aware_h1_simstate_0_20260519_021925/depth_observation.mp4"
+  },
+  "duration": "7s",
+  "first_lowcmd_received": true,
+  "lift": {
+    "final_dz": 0.0,
+    "final_object_z": 0.597,
+    "initial_object_z": 0.597,
+    "max_dz": 0.0,
+    "max_object_z": 0.597,
+    "robot_drop_from_initial": 0.0,
+    "robot_z_initial": 0.76,
+    "robot_z_min": 0.76,
+    "t_at_max_dz": 0.0
+  },
+  "lift_telemetry_count": 1,
+  "policy": {
+    "max_obs_absmax": null,
+    "max_perception_absmax": 0.5,
+    "max_policy_action_absmax": 8.184540748596191,
+    "max_q_target_absmax": 1.361832857131958,
+    "max_sparse_root_command_abs": 0.0
+  },
+  "policy_debug_count": 240,
+  "run_ref": "ppo_first_contact_aware_h1",
+  "sim_state_subscriber_started": false,
+  "use_sim_state_effective": false,
+  "use_sim_state_requested": false,
+  "videos": {
+    "depth_observation.mp4": "/home/user/FAR/holosoma/artifacts/mj_debug_ppo_first_contact_aware_h1_simstate_0_20260519_021925/depth_observation.mp4",
+    "viewer_capture.mp4": "/home/user/FAR/holosoma/artifacts/mj_debug_ppo_first_contact_aware_h1_simstate_0_20260519_021925/viewer_capture.mp4"
+  }
+}

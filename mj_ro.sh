@@ -39,6 +39,21 @@ if [[ "$run_path" != */* ]]; then
 fi
 run_id="${run_path##*/}"
 
+checkpoint_run_id=""
+if [[ "$checkpoint" == https://wandb.ai/* || "$checkpoint" == wandb://* ]]; then
+  checkpoint_run_path="${checkpoint#wandb://}"
+  checkpoint_run_path="${checkpoint_run_path#https://wandb.ai/}"
+  checkpoint_run_path="${checkpoint_run_path%%\?*}"
+  checkpoint_run_path="${checkpoint_run_path%%/files/*}"
+  checkpoint_run_path="${checkpoint_run_path%/}"
+  checkpoint_run_path="${checkpoint_run_path/\/runs\//\/}"
+  IFS='/' read -r -a checkpoint_parts <<< "$checkpoint_run_path"
+  if [[ "${#checkpoint_parts[@]}" -ge 3 ]]; then
+    checkpoint_run_id="${checkpoint_parts[2]}"
+  fi
+fi
+model_run_id="${checkpoint_run_id:-$run_id}"
+
 if [[ "$checkpoint" == /* || "$checkpoint" == ./* || "$checkpoint" == ../* ]]; then
   model_path="$checkpoint"
 elif [[ "$checkpoint" == https://wandb.ai/* || "$checkpoint" == wandb://* ]]; then
@@ -52,8 +67,14 @@ fi
 
 inference_config="${HOLOSOMA_INFERENCE_CONFIG:-}"
 if [[ -z "$inference_config" ]]; then
-  case "$run_id" in
-    6c7exbeq)
+  case "$model_run_id" in
+    36k1vwdf|zzv6vtkk)
+      inference_config="g1-root_pos-contact-aware-pickup-drop-button-actions-no-linvel-h1"
+      ;;
+    a1lh8uxa|d9m3z369|qihvpyqg)
+      inference_config="g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1"
+      ;;
+    1j98x3g1|6c7exbeq)
       inference_config="g1-root_pos-contact-aware-actions-no-linvel-h1"
       ;;
     lk9ocrn6)
@@ -87,6 +108,8 @@ if [[ -z "$force_zero_sparse" ]]; then
 fi
 
 export HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND="$force_zero_sparse"
+export HOLOSOMA_POLICY_PICKUP_BUTTON="${HOLOSOMA_POLICY_PICKUP_BUTTON:-1}"
+export HOLOSOMA_POLICY_DROP_BUTTON="${HOLOSOMA_POLICY_DROP_BUTTON:-0}"
 export HOLOSOMA_POLICY_COMMAND_STATUS_PATH="${HOLOSOMA_POLICY_COMMAND_STATUS_PATH:-/tmp/holosoma_policy_command_status.json}"
 if [[ -z "${HOLOSOMA_POLICY_MOTION_INDEX_OFFSET:-}" ]]; then
   if [[ "$(basename "$clip" .npz)" == "box_75" ]]; then
@@ -96,9 +119,16 @@ if [[ -z "${HOLOSOMA_POLICY_MOTION_INDEX_OFFSET:-}" ]]; then
   fi
 fi
 export PYTHONPATH="${ROOT_DIR}/src/holosoma_inference:${ROOT_DIR}/src/holosoma${PYTHONPATH:+:${PYTHONPATH}}"
+if [[ -n "${HOLOSOMA_INFERENCE_PYTHON:-}" ]]; then
+  python_bin="$HOLOSOMA_INFERENCE_PYTHON"
+elif [[ -x "/home/user/.holosoma_deps/miniconda3/envs/hsinference/bin/python3" ]]; then
+  python_bin="/home/user/.holosoma_deps/miniconda3/envs/hsinference/bin/python3"
+else
+  python_bin="python3"
+fi
 
 run_args=(
-  python3 "${ROOT_DIR}/src/holosoma_inference/holosoma_inference/run_policy.py"
+  "$python_bin" "${ROOT_DIR}/src/holosoma_inference/holosoma_inference/run_policy.py"
   "inference:${inference_config}"
   --task.model-path "$model_path"
   --task.no-use-joystick
@@ -108,8 +138,8 @@ run_args=(
 )
 
 external_root_pos_run=0
-case "$run_id" in
-  6c7exbeq|lk9ocrn6|kxnhgj2v|iepncc89)
+case "$model_run_id" in
+  1j98x3g1|6c7exbeq|lk9ocrn6|kxnhgj2v|iepncc89|a1lh8uxa|d9m3z369|qihvpyqg|36k1vwdf|zzv6vtkk)
     external_root_pos_run=1
     ;;
 esac

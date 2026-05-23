@@ -59,8 +59,8 @@ single_d435i_depth = CameraConfig(
     },
     props=CameraProps(
         image_type="depth",
-        width=106,
-        height=60,
+        width=848,
+        height=480,
         resized_width=87,
         resized_height=58,
         # D435i FOV settings
@@ -68,12 +68,12 @@ single_d435i_depth = CameraConfig(
         vertical_fov=58.6,
         near_clip=0.3,
         far_clip=3.0,
-        frame_rate=50,  # FREQ_RATIO=1 in far-tracking, updates every sim step
+        frame_rate=30,  # Training far_tracking_warp camera_fps.
         image_show=False,
         depth_delay=0,
-        crop_y_start=2,
-        crop_x_start=4,
-        crop_x_end=-4,
+        crop_y_start=16,
+        crop_x_start=32,
+        crop_x_end=-32,
     ),
 )
 

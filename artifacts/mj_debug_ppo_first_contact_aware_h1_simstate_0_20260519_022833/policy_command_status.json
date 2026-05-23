@@ -1,0 +1,1 @@
+{"timestamp":1779157726.950525,"term":"sparse_target_root_trajectory_command_contact_aware","command":[0.0,0.0,0.0],"manual_offset":[0.0,0.0,0.0],"joystick_offset":[0.0,0.0,0.0],"external_sparse_root_command_mode":true,"force_zero_sparse_root_command":true,"motion_clip_progressing":false,"motion_timestep":0}

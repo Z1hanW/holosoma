@@ -801,10 +801,14 @@ class BasePolicy:
             except AttributeError:
                 pass  # Handle special keys if needed
 
+        def on_release(keycode):
+            try:
+                self.handle_keyboard_release(keycode)
+            except AttributeError:
+                pass  # Derived policies may not need key-release handling.
+
         try:
-            listener = listen_keyboard(on_press=on_press)
-            listener.start()
-            listener.join()
+            listen_keyboard(on_press=on_press, on_release=on_release)
         except OSError as e:
             # Handle termios errors in non-TTY environments
             self.logger.warning("Could not start keyboard listener: %s", e)
@@ -844,6 +848,10 @@ class BasePolicy:
             self._handle_kp_control(keycode)
 
         self._print_control_status()
+
+    def handle_keyboard_release(self, keycode):
+        """Handle keyboard button releases."""
+        _ = keycode
 
     def handle_joystick_button(self, cur_key):
         """Handle joystick button presses."""

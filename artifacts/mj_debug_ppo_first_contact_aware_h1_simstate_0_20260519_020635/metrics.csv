@@ -1,0 +1,2 @@
+run_ref,checkpoint,use_sim_state_effective,sim_state_subscriber_started,first_lowcmd_received,motion_init_joint_max_err,max_dz,t_at_max_dz,robot_drop_from_initial,max_sparse_root_command_abs
+ppo_first_contact_aware_h1,/tmp/zxz3hd8h_model_07500.onnx,False,False,True,,0.0,0.0,0.03700000000000003,0.0

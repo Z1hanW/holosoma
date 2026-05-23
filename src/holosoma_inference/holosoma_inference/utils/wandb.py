@@ -28,6 +28,22 @@ def _resolve_wandb_checkpoint_name(run, checkpoint: str) -> str:
     return checkpoint
 
 
+def _resolve_wandb_checkpoint_candidates(run, checkpoint: str) -> list[str]:
+    if checkpoint in {"latest", "model_latest.onnx"}:
+        onnx_files = [file for file in run.files() if file.name.endswith(".onnx")]
+        if not onnx_files:
+            raise RuntimeError(f"No .onnx files found in W&B run {run.path}")
+        return [
+            file.name
+            for file in sorted(
+                onnx_files,
+                key=lambda file: (_checkpoint_step(file.name), file.updated_at or ""),
+                reverse=True,
+            )
+        ]
+    return [_resolve_wandb_checkpoint_name(run, checkpoint)]
+
+
 def load_checkpoint(
     wandb_run_path: str | None,
     checkpoint: str,
@@ -66,20 +82,35 @@ def load_checkpoint(
     if wandb_run_path is not None:
         api = wandb.Api()
         run = api.run(wandb_run_path)
-        checkpoint = _resolve_wandb_checkpoint_name(run, checkpoint)
+        checkpoint_candidates = _resolve_wandb_checkpoint_candidates(run, checkpoint)
         # Create log dir
         log_dir_path = Path(log_dir)
         log_dir_path.mkdir(parents=True, exist_ok=True)
-        # Download checkpoint to log_dir
-        checkpoint_file = run.file(checkpoint)  # Get the specific checkpoint file
-        checkpoint_file.download(root=log_dir, replace=True)
-        print(f"Finished downloading checkpoint {checkpoint} to {log_dir} from W&B run {wandb_run_path}")
-        checkpoint_path = log_dir_path / checkpoint
-        run_id = wandb_run_path.rsplit("/", 1)[-1]
-        named_checkpoint_path = checkpoint_path.with_name(f"{run_id}_{checkpoint_path.name}")
-        if checkpoint_path != named_checkpoint_path:
-            checkpoint_path.replace(named_checkpoint_path)
-            checkpoint_path = named_checkpoint_path
+
+        last_error: Exception | None = None
+        for checkpoint_name in checkpoint_candidates:
+            checkpoint_file = run.file(checkpoint_name)
+            try:
+                checkpoint_file.download(root=log_dir, replace=True)
+            except Exception as exc:
+                last_error = exc
+                if len(checkpoint_candidates) == 1:
+                    raise
+                print(f"Failed downloading checkpoint {checkpoint_name}; trying previous checkpoint: {exc}")
+                continue
+
+            print(f"Finished downloading checkpoint {checkpoint_name} to {log_dir} from W&B run {wandb_run_path}")
+            checkpoint_path = log_dir_path / checkpoint_name
+            run_id = wandb_run_path.rsplit("/", 1)[-1]
+            named_checkpoint_path = checkpoint_path.with_name(f"{run_id}_{checkpoint_path.name}")
+            if checkpoint_path != named_checkpoint_path:
+                checkpoint_path.replace(named_checkpoint_path)
+                checkpoint_path = named_checkpoint_path
+            break
+        else:
+            raise RuntimeError(
+                f"Failed to download any ONNX checkpoint from W&B run {wandb_run_path}: {last_error}"
+            )
     else:
         checkpoint_path = Path(checkpoint)
     return checkpoint_path

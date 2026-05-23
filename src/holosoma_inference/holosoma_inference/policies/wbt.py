@@ -149,6 +149,17 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._force_zero_sparse_root_command = os.environ.get(
             "HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND", os.environ.get("HOLOSOMA_FORCE_MANUAL_SPARSE_ROOT_COMMAND", "")
         ).strip().lower() in {"1", "true", "yes", "on"}
+        try:
+            self._pickup_button_command = float(os.environ.get("HOLOSOMA_POLICY_PICKUP_BUTTON", "1") or "1")
+        except ValueError:
+            self._pickup_button_command = 1.0
+        try:
+            self._drop_button_command = float(os.environ.get("HOLOSOMA_POLICY_DROP_BUTTON", "0") or "0")
+        except ValueError:
+            self._drop_button_command = 0.0
+        self._pickup_button_key_down = False
+        self._drop_button_key_down = False
+        self._logged_missing_drop_button_key = False
         self._logged_zero_sparse_root_command = False
         self._logged_motion_local_sparse_root_command = False
         self._manual_sparse_root_command_offset = np.zeros((1, 3), dtype=np.float32)
@@ -704,6 +715,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         if "actions" in required_terms:
             current_obs_buffer_dict["actions"] = self.last_policy_action
+        if "pickup_button" in required_terms:
+            current_obs_buffer_dict["pickup_button"] = np.array([[self._pickup_button_command]], dtype=np.float32)
+        if "drop_button" in required_terms:
+            current_obs_buffer_dict["drop_button"] = np.array([[self._drop_button_command]], dtype=np.float32)
         if "cam_depth" in required_terms:
             current_obs_buffer_dict["cam_depth"] = self._get_depth_image_obs()
         if self._policy_debug_path:
@@ -719,6 +734,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
                     "dof_pos",
                     "dof_vel",
                     "actions",
+                    "pickup_button",
+                    "drop_button",
                     "cam_depth",
                 }
             }
@@ -754,6 +771,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
             "motion_clip_progressing": bool(self.motion_clip_progressing),
             "motion_timestep": int(self.motion_timestep),
         }
+        if "pickup_button" in self.obs_dims:
+            payload["pickup_button"] = float(self._pickup_button_command)
+        if "drop_button" in self.obs_dims:
+            payload["drop_button"] = float(self._drop_button_command)
 
         try:
             self._policy_command_status_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1230,6 +1251,41 @@ class WholeBodyTrackingPolicy(BasePolicy):
         )
         return True
 
+    def _handle_pickup_button_keyboard_command(self, keycode: str) -> bool:
+        if keycode != "f" or "pickup_button" not in self.obs_dims:
+            return False
+        if self._pickup_button_key_down:
+            return True
+
+        self._pickup_button_key_down = True
+        self._pickup_button_command = 0.0 if self._pickup_button_command >= 0.5 else 1.0
+        self.logger.info(colored(f"Pickup button command: {self._pickup_button_command:.0f}", "blue"))
+        return True
+
+    def _handle_drop_button_keyboard_command(self, keycode: str) -> bool:
+        if keycode != "g":
+            return False
+        if "drop_button" not in self.obs_dims:
+            if not self._drop_button_key_down and not self._logged_missing_drop_button_key:
+                self.logger.warning("Active policy has no drop_button observation; ignoring g.")
+                self._logged_missing_drop_button_key = True
+            self._drop_button_key_down = True
+            return True
+        if self._drop_button_key_down:
+            return True
+
+        self._drop_button_key_down = True
+        self._drop_button_command = 0.0 if self._drop_button_command >= 0.5 else 1.0
+        self.logger.info(colored(f"Drop button command: {self._drop_button_command:.0f}", "blue"))
+        return True
+
+    def handle_keyboard_release(self, keycode):
+        if keycode == "f":
+            self._pickup_button_key_down = False
+        if keycode == "g":
+            self._drop_button_key_down = False
+        super().handle_keyboard_release(keycode)
+
     def _update_sparse_root_joystick_command(self) -> None:
         wc_msg = self.interface.get_joystick_msg()
         if wc_msg is None:
@@ -1263,6 +1319,10 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if keycode in {"m", "s"} and not self.motion_clip_progressing:
             self.clock_sub.reset_origin()
             self._handle_start_motion_clip()
+        elif self._handle_pickup_button_keyboard_command(keycode):
+            pass
+        elif self._handle_drop_button_keyboard_command(keycode):
+            pass
         elif self._handle_sparse_root_keyboard_command(keycode):
             pass
         else:

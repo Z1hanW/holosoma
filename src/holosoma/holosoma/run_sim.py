@@ -7,8 +7,11 @@ or evaluation environments.
 """
 
 import dataclasses
+import os
 import sys
+import time
 import traceback
+from pathlib import Path
 
 import tyro
 from loguru import logger
@@ -59,6 +62,23 @@ def run_simulation(config: RunSimConfig):
             # start the camera thread
             logger.info("Starting camera thread")
             sim.cam_thread.start()
+
+            stop_path = os.environ.get("HOLOSOMA_MJ_STOP_PATH", "").strip()
+            if stop_path:
+                logger.info(f"Waiting for MuJoCo stop path: {stop_path}")
+                while not Path(stop_path).exists():
+                    if not sim.sim_thread.is_alive():
+                        logger.warning("Simulation thread exited before stop path was created")
+                        break
+                    time.sleep(0.1)
+                logger.info("MuJoCo stop requested; finalizing simulation outputs")
+                try:
+                    if sim.simulator.video_recorder is not None:
+                        sim.simulator.video_recorder.stop_recording()
+                except Exception:
+                    logger.exception("Failed to finalize MuJoCo video recorder")
+                    os._exit(1)
+                os._exit(0)
 
     except Exception as e:
         logger.error(f"Error during simulation: {e}")

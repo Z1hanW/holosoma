@@ -2,111 +2,139 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BANK_DIR="${HOLOSOMA_ZERO_RECORD_BANK_DIR:-/home/user/FAR/data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5}"
-CLIP_MAP="${BANK_DIR}/_single_slot_motion_bank/_clip_object_urdf_map.json"
-RUN_REF="${HOLOSOMA_ZERO_RECORD_RUN:-ppo_first_contact_aware_h1}"
-WANDB_CHECKPOINT="wandb://zihanw22/carry-any/zxz3hd8h/model_07500.onnx"
-LOCAL_CHECKPOINT="${HOLOSOMA_ZERO_RECORD_LOCAL_CHECKPOINT:-/tmp/zxz3hd8h_model_07500.onnx}"
-CHECKPOINT="${HOLOSOMA_ZERO_RECORD_CHECKPOINT:-$WANDB_CHECKPOINT}"
-DURATION="${HOLOSOMA_ZERO_RECORD_DURATION:-7s}"
+FAR_DIR="$(cd "$ROOT_DIR/.." && pwd)"
+TRACKING_DIR="$ROOT_DIR/mujoco_tracking"
+DATASET_NAME="carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5"
+if [[ -e "$ROOT_DIR/data/$DATASET_NAME" ]]; then
+  DATASET="$ROOT_DIR/data/$DATASET_NAME"
+else
+  DATASET="$FAR_DIR/data/$DATASET_NAME"
+fi
+MUJOCO_PY="${MUJOCO_PY:-/home/user/.holosoma_deps/miniconda3/envs/hsmujoco/bin/python}"
+LOCAL_MODEL="${HOLOSOMA_ZERO_RECORD_LOCAL_MODEL:-/tmp/zxz3hd8h_model_07500.onnx}"
+MODEL="${HOLOSOMA_ZERO_RECORD_MODEL:-$LOCAL_MODEL}"
+SECONDS_TO_RECORD="${HOLOSOMA_ZERO_RECORD_SECONDS:-20}"
 OBJECT_MASS="${HOLOSOMA_MJ_OBJECT_MASS:-2.0}"
-OUT_DIR="${HOLOSOMA_ZERO_RECORD_OUT_DIR:-${ROOT_DIR}/artifacts/zero_command_zxz3hd8h_07500_2kg_7s_$(date +%Y%m%d_%H%M%S)}"
-MAX_CLIPS="${HOLOSOMA_ZERO_RECORD_MAX_CLIPS:-}"
+OUT_DIR="${HOLOSOMA_ZERO_RECORD_OUT_DIR:-${ROOT_DIR}/logs/zero_command_videos_133_zxz3hd8h_07500_2kg_20s_mjdebug_g1_collision_$(date +%Y%m%d_%H%M%S)}"
+TMP_ROOT="${HOLOSOMA_ZERO_RECORD_TMP_ROOT:-$ROOT_DIR/logs/.zero_command_video_tmp_$(date +%Y%m%d_%H%M%S)}"
 
-if [[ ! -f "$CLIP_MAP" ]]; then
-  echo "[mj_record_zero_133] missing clip map: $CLIP_MAP" >&2
-  exit 1
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: ./mj_record_zero_133.sh"
+  echo "Writes one trace-rendered MP4 per sequence into: $OUT_DIR"
+  echo "Optional env: MAX_CLIPS=1, HOLOSOMA_ZERO_RECORD_SECONDS=20, HOLOSOMA_MJ_OBJECT_MASS=2.0"
+  exit 0
 fi
 
-running="$(pgrep -af "${ROOT_DIR}/src/holosoma/holosoma/run_sim.py|${ROOT_DIR}/src/holosoma_inference/holosoma_inference/run_policy.py|${ROOT_DIR}/mj_env.sh|${ROOT_DIR}/mj_ro.sh" || true)"
-if [[ -n "$running" ]]; then
-  echo "[mj_record_zero_133] another Holosoma MuJoCo/policy process is already running:" >&2
-  echo "$running" >&2
-  exit 1
-fi
+[[ -f "$DATASET/summary.csv" ]] || { echo "missing summary.csv in $DATASET" >&2; exit 1; }
+mkdir -p "$OUT_DIR" "$TMP_ROOT"
 
-mkdir -p "$OUT_DIR/videos" "$OUT_DIR/logs" "$OUT_DIR/metrics"
+mapfile -t CLIPS < <("$MUJOCO_PY" - "$DATASET/summary.csv" <<'PY'
+import csv
+import sys
 
-mapfile -t clips < <(
-  CLIP_MAP="$CLIP_MAP" python3 - <<'PY'
-import json
-import os
-from pathlib import Path
-
-data = json.loads(Path(os.environ["CLIP_MAP"]).read_text())
-for name in sorted(data["clips"]):
-    print(name)
+with open(sys.argv[1], newline="") as f:
+    for row in csv.DictReader(f):
+        clip = row.get("clip_id", "").strip()
+        if clip:
+            print(clip)
 PY
 )
 
-if [[ -n "$MAX_CLIPS" ]]; then
-  clips=("${clips[@]:0:$MAX_CLIPS}")
+TOTAL="${#CLIPS[@]}"
+if [[ "$TOTAL" -ne 133 ]]; then
+  echo "expected 133 clips, got $TOTAL" >&2
+  exit 1
+fi
+if [[ -n "${MAX_CLIPS:-${HOLOSOMA_ZERO_RECORD_MAX_CLIPS:-}}" ]]; then
+  LIMIT="${MAX_CLIPS:-$HOLOSOMA_ZERO_RECORD_MAX_CLIPS}"
+  CLIPS=("${CLIPS[@]:0:$LIMIT}")
+  TOTAL="${#CLIPS[@]}"
 fi
 
-printf '%s\n' "${clips[@]}" >"${OUT_DIR}/clips.txt"
+cleanup() {
+  if [[ "${KEEP_TMP:-0}" != "1" ]]; then
+    rm -rf "$TMP_ROOT"
+  fi
+}
+trap cleanup EXIT
 
-echo "[mj_record_zero_133] clips=${#clips[@]}"
-echo "[mj_record_zero_133] checkpoint=$CHECKPOINT"
-echo "[mj_record_zero_133] duration=$DURATION mass=${OBJECT_MASS}kg command=zero"
-echo "[mj_record_zero_133] out_dir=$OUT_DIR"
+printf '%s\n' "${CLIPS[@]}" >"$OUT_DIR/clips.txt"
 
-failed=()
-for index in "${!clips[@]}"; do
-  clip="${clips[$index]}"
-  motion="${BANK_DIR}/${clip}.npz"
-  log_path="${OUT_DIR}/logs/${clip}.log"
-  video_path="${OUT_DIR}/videos/${clip}.mp4"
-  metrics_path="${OUT_DIR}/metrics/${clip}.json"
+echo "output: $OUT_DIR"
+echo "clips:  $TOTAL"
+echo "model:  $MODEL"
+echo "mass:   ${OBJECT_MASS}kg"
+echo "seconds: $SECONDS_TO_RECORD"
+echo "command: sparse root [0, 0, 0]"
 
-  if [[ ! -f "$motion" ]]; then
-    echo "[mj_record_zero_133] missing motion: $motion" | tee "$log_path"
-    failed+=("$clip")
+FAIL_DIR="$OUT_DIR/failed"
+FAILED=0
+DONE=0
+
+for CLIP in "${CLIPS[@]}"; do
+  DONE=$((DONE + 1))
+  MP4="$OUT_DIR/${CLIP}.mp4"
+  if [[ -s "$MP4" ]]; then
+    echo "[$DONE/$TOTAL] skip $CLIP"
     continue
   fi
-  if [[ -s "$video_path" ]]; then
-    echo "[mj_record_zero_133] $((index + 1))/${#clips[@]} skip existing $video_path"
-    continue
-  fi
 
-  checkpoint_arg="$CHECKPOINT"
-  if [[ -f "$LOCAL_CHECKPOINT" ]]; then
-    checkpoint_arg="$LOCAL_CHECKPOINT"
-  fi
+  RUN_DIR="$TMP_ROOT/$CLIP"
+  CONVEX_DIR="$RUN_DIR/coacd_outputs"
+  LOG="$RUN_DIR/record.log"
+  mkdir -p "$RUN_DIR"
 
-  echo "[mj_record_zero_133] $((index + 1))/${#clips[@]} recording $clip"
-  set +e
-  HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND=1 \
-  HOLOSOMA_MJ_OBJECT_MASS="$OBJECT_MASS" \
-  bash "${ROOT_DIR}/mj_debug.sh" \
-    --clip "$motion" \
-    --run "$RUN_REF" \
-    --checkpoint "$checkpoint_arg" \
-    --duration "$DURATION" \
-    --record \
-    --no-sim-state \
-    --no-auto-motion \
-    >"$log_path" 2>&1
-  status=$?
-  set -e
-
-  debug_dir="$(sed -n 's/^\[mj_debug\] log_dir=//p' "$log_path" | tail -n 1)"
-  if [[ "$status" -eq 0 && -n "$debug_dir" && -s "${debug_dir}/viewer_capture.mp4" ]]; then
-    cp -f "${debug_dir}/viewer_capture.mp4" "$video_path"
-    if [[ -f "${debug_dir}/metrics.json" ]]; then
-      cp -f "${debug_dir}/metrics.json" "$metrics_path"
+  echo "[$DONE/$TOTAL] record $CLIP"
+  if RUN_DIR="$RUN_DIR" \
+    OUTPUT_MP4="$MP4" \
+    CONVEX_DIR="$CONVEX_DIR" \
+    ZERO_MODEL="$MODEL" \
+    SECONDS_TO_RECORD="$SECONDS_TO_RECORD" \
+    HOLOSOMA_MJ_OBJECT_MASS="$OBJECT_MASS" \
+    "$TRACKING_DIR/record_zero_command.sh" "$CLIP" >"$LOG" 2>&1; then
+    if [[ -s "$MP4" ]]; then
+      if [[ "${KEEP_TMP:-0}" != "1" ]]; then
+        rm -rf "$RUN_DIR"
+      fi
+    else
+      mkdir -p "$FAIL_DIR"
+      cp "$LOG" "$FAIL_DIR/${CLIP}.log" 2>/dev/null || true
+      if [[ "${KEEP_TMP:-0}" != "1" ]]; then
+        rm -rf "$RUN_DIR"
+      fi
+      echo "$CLIP" >> "$FAIL_DIR/failed.txt"
+      echo "failed: $CLIP did not produce $MP4" >&2
+      FAILED=$((FAILED + 1))
     fi
-    echo "[mj_record_zero_133] saved $video_path"
   else
-    echo "[mj_record_zero_133] failed $clip status=$status debug_dir=${debug_dir:-unknown}" >&2
-    tail -n 80 "$log_path" >&2 || true
-    failed+=("$clip")
+    mkdir -p "$FAIL_DIR"
+    cp "$LOG" "$FAIL_DIR/${CLIP}.log" 2>/dev/null || true
+    if [[ "${KEEP_TMP:-0}" != "1" ]]; then
+      rm -rf "$RUN_DIR"
+    fi
+    echo "$CLIP" >> "$FAIL_DIR/failed.txt"
+    echo "failed: $CLIP" >&2
+    FAILED=$((FAILED + 1))
   fi
 done
 
-if (( ${#failed[@]} > 0 )); then
-  printf '%s\n' "${failed[@]}" >"${OUT_DIR}/failed.txt"
-  echo "[mj_record_zero_133] failed=${#failed[@]} list=${OUT_DIR}/failed.txt" >&2
+if [[ "$FAILED" -ne 0 ]]; then
+  echo "finished with $FAILED failure(s). Logs: $FAIL_DIR" >&2
   exit 1
 fi
 
-echo "[mj_record_zero_133] done videos=${OUT_DIR}/videos"
+MISSING=()
+for CLIP in "${CLIPS[@]}"; do
+  if [[ ! -s "$OUT_DIR/${CLIP}.mp4" ]]; then
+    MISSING+=("$CLIP")
+  fi
+done
+if (( ${#MISSING[@]} > 0 )); then
+  mkdir -p "$FAIL_DIR"
+  printf '%s\n' "${MISSING[@]}" > "$FAIL_DIR/missing.txt"
+  echo "finished with ${#MISSING[@]} missing MP4(s). See $FAIL_DIR/missing.txt" >&2
+  exit 1
+fi
+
+rmdir "$FAIL_DIR" 2>/dev/null || true
+echo "done: $OUT_DIR"

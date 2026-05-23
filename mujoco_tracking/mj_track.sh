@@ -1103,6 +1103,27 @@ actor_input_dim = (
 actor_input_dim = actor_input_dim if isinstance(actor_input_dim, list) else []
 
 if "perception_obs" in input_dims:
+    if obs_dim == 95 and actor_input_dim == [
+        "actor_obs_root_contact_aware",
+        "actor_obs_pickup_button",
+        "actor_obs_drop_button",
+        "actor_obs_proprio_with_actions_no_linvel",
+    ]:
+        print("g1-root_pos-contact-aware-pickup-drop-button-actions-no-linvel-h1")
+        raise SystemExit(0)
+    if obs_dim == 94 and actor_input_dim == [
+        "actor_obs_root_contact_aware",
+        "actor_obs_drop_button",
+        "actor_obs_proprio_with_actions_no_linvel",
+    ]:
+        print("g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1")
+        raise SystemExit(0)
+    if obs_dim == 93 and actor_input_dim == [
+        "actor_obs_root_contact_aware",
+        "actor_obs_proprio_with_actions_no_linvel",
+    ]:
+        print("g1-root_pos-contact-aware-actions-no-linvel-h1")
+        raise SystemExit(0)
     if obs_dim == 308 and actor_input_dim == ["actor_obs_root", "actor_obs_proprio_no_linvel"]:
         print("g1-29dof-wbt-object-distill")
         raise SystemExit(0)
@@ -1179,6 +1200,10 @@ apply_training_robot_init_overrides "$PATCHED_ONNX"
 apply_training_robot_asset_overrides "$PATCHED_ONNX"
 apply_training_object_overrides "$PATCHED_ONNX"
 apply_training_perception_overrides "$PATCHED_ONNX"
+PERCEPTION_CAMERA_WARP_LATENCY_FRAME="${PERCEPTION_CAMERA_WARP_LATENCY_FRAME//[[:space:]]/}"
+if [[ "$PERCEPTION_CAMERA_WARP_LATENCY_FRAME" =~ ^\[([0-9]+),([0-9]+)\]$ ]]; then
+  PERCEPTION_CAMERA_WARP_LATENCY_FRAME="${BASH_REMATCH[2]}"
+fi
 apply_gt_mujoco_physics_overrides
 
 SIM_ADD_DEFAULT_OBJECT_ACTUATORS="${SIM_ADD_DEFAULT_OBJECT_ACTUATORS:-1}"

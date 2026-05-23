@@ -2187,11 +2187,25 @@ class MuJoCo(BaseSimulator):
 
         source = self._policy_command_source(payload)
         term = str(payload.get("term") or "sparse_root")
+        pickup_button = payload.get("pickup_button")
+        pickup_text = ""
+        if pickup_button is not None:
+            try:
+                pickup_text = f" pickup={float(pickup_button):.0f}"
+            except (TypeError, ValueError):
+                pickup_text = ""
+        drop_button = payload.get("drop_button")
+        drop_text = ""
+        if drop_button is not None:
+            try:
+                drop_text = f" drop={float(drop_button):.0f}"
+            except (TypeError, ValueError):
+                drop_text = ""
 
         self._policy_command_status_command = (x, y, yaw)
         self._policy_command_status_payload = payload
         self._policy_command_status_text = (
-            f"Policy obs {source}: x={x:+.2f} y={y:+.2f} yaw={yaw:+.2f} term={term}"
+            f"Policy obs {source}: x={x:+.2f} y={y:+.2f} yaw={yaw:+.2f}{pickup_text}{drop_text} term={term}"
         )
         return self._policy_command_status_text
 

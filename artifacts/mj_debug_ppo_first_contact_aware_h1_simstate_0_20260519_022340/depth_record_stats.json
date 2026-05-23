@@ -1,0 +1,9 @@
+{
+  "fps": 10.0,
+  "frames": 78,
+  "max": 0.5,
+  "mean_max": 0.1788560003042221,
+  "mean_min": -0.09322044998407364,
+  "min": -0.31247031688690186,
+  "path": "/home/user/FAR/holosoma/artifacts/mj_debug_ppo_first_contact_aware_h1_simstate_0_20260519_022340/depth_observation.mp4"
+}

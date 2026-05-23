@@ -260,6 +260,120 @@ wbt_depth_distill = ObservationConfig(
     },
 )
 
+wbt_object_perception_contact_aware_actions_no_linvel_h1_g1 = ObservationConfig(
+    obs_dict={
+        "actor_obs_root_contact_aware": [
+            "sparse_target_root_trajectory_command_contact_aware",
+        ],
+        "actor_obs_proprio_with_actions_no_linvel": [
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+            "actions",
+        ],
+    },
+    obs_dims={
+        "sparse_target_root_trajectory_command_contact_aware": 3,
+        "base_ang_vel": 3,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+    },
+    obs_scales={
+        "sparse_target_root_trajectory_command_contact_aware": 1.0,
+        "base_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 1.0,
+        "actions": 1.0,
+    },
+    history_length_dict={
+        "actor_obs_root_contact_aware": 1,
+        "actor_obs_proprio_with_actions_no_linvel": 1,
+    },
+)
+
+wbt_object_perception_contact_aware_drop_button_actions_no_linvel_h1_g1 = ObservationConfig(
+    obs_dict={
+        "actor_obs_root_contact_aware": [
+            "sparse_target_root_trajectory_command_contact_aware",
+        ],
+        "actor_obs_drop_button": [
+            "drop_button",
+        ],
+        "actor_obs_proprio_with_actions_no_linvel": [
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+            "actions",
+        ],
+    },
+    obs_dims={
+        "sparse_target_root_trajectory_command_contact_aware": 3,
+        "drop_button": 1,
+        "base_ang_vel": 3,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+    },
+    obs_scales={
+        "sparse_target_root_trajectory_command_contact_aware": 1.0,
+        "drop_button": 1.0,
+        "base_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 1.0,
+        "actions": 1.0,
+    },
+    history_length_dict={
+        "actor_obs_root_contact_aware": 1,
+        "actor_obs_drop_button": 1,
+        "actor_obs_proprio_with_actions_no_linvel": 1,
+    },
+)
+
+wbt_object_perception_contact_aware_pickup_drop_button_actions_no_linvel_h1_g1 = ObservationConfig(
+    obs_dict={
+        "actor_obs_root_contact_aware": [
+            "sparse_target_root_trajectory_command_contact_aware",
+        ],
+        "actor_obs_pickup_button": [
+            "pickup_button",
+        ],
+        "actor_obs_drop_button": [
+            "drop_button",
+        ],
+        "actor_obs_proprio_with_actions_no_linvel": [
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+            "actions",
+        ],
+    },
+    obs_dims={
+        "sparse_target_root_trajectory_command_contact_aware": 3,
+        "pickup_button": 1,
+        "drop_button": 1,
+        "base_ang_vel": 3,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+    },
+    obs_scales={
+        "sparse_target_root_trajectory_command_contact_aware": 1.0,
+        "pickup_button": 1.0,
+        "drop_button": 1.0,
+        "base_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 1.0,
+        "actions": 1.0,
+    },
+    history_length_dict={
+        "actor_obs_root_contact_aware": 1,
+        "actor_obs_pickup_button": 1,
+        "actor_obs_drop_button": 1,
+        "actor_obs_proprio_with_actions_no_linvel": 1,
+    },
+)
+
 # =============================================================================
 # WBT VideoMimic Observation Configurations
 # =============================================================================
@@ -310,6 +424,15 @@ DEFAULTS = {
     "wbt-object-generalist": wbt_object_generalist,
     "wbt-w-object": wbt_w_object,
     "wbt-depth-distill": wbt_depth_distill,
+    "wbt-object-perception-contact-aware-actions-no-linvel-h1-g1": (
+        wbt_object_perception_contact_aware_actions_no_linvel_h1_g1
+    ),
+    "wbt-object-perception-contact-aware-drop-button-actions-no-linvel-h1-g1": (
+        wbt_object_perception_contact_aware_drop_button_actions_no_linvel_h1_g1
+    ),
+    "wbt-object-perception-contact-aware-pickup-drop-button-actions-no-linvel-h1-g1": (
+        wbt_object_perception_contact_aware_pickup_drop_button_actions_no_linvel_h1_g1
+    ),
     "wbt-videomimic": wbt_videomimic,
 }
 """Dictionary of all available observation configurations.

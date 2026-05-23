@@ -108,8 +108,10 @@ fi
 env_pid=""
 depth_rec_pid=""
 screen_rec_pid=""
+env_stop_path="${log_dir}/mj_env.stop"
 depth_stop_path="${log_dir}/depth_record.stop"
 screen_stop_path="${log_dir}/screen_record.stop"
+native_record_dir="${log_dir}/mujoco_video"
 stop_recorders() {
   if [[ -n "$depth_rec_pid" ]]; then
     if kill -0 "$depth_rec_pid" 2>/dev/null; then
@@ -142,12 +144,32 @@ stop_recorders() {
     wait "$screen_rec_pid" 2>/dev/null || true
   fi
 }
+stop_env() {
+  if [[ -z "$env_pid" ]] || ! kill -0 "$env_pid" 2>/dev/null; then
+    return
+  fi
+  touch "$env_stop_path" 2>/dev/null || true
+  for _ in $(seq 1 120); do
+    if ! kill -0 "$env_pid" 2>/dev/null; then
+      wait "$env_pid" 2>/dev/null || true
+      return
+    fi
+    sleep 0.1
+  done
+  kill -INT "$env_pid" 2>/dev/null || true
+  for _ in $(seq 1 50); do
+    if ! kill -0 "$env_pid" 2>/dev/null; then
+      wait "$env_pid" 2>/dev/null || true
+      return
+    fi
+    sleep 0.1
+  done
+  kill "$env_pid" 2>/dev/null || true
+  wait "$env_pid" 2>/dev/null || true
+}
 cleanup() {
   stop_recorders
-  if [[ -n "$env_pid" ]] && kill -0 "$env_pid" 2>/dev/null; then
-    kill "$env_pid" 2>/dev/null || true
-    wait "$env_pid" 2>/dev/null || true
-  fi
+  stop_env
 }
 trap cleanup EXIT
 
@@ -158,6 +180,10 @@ ro_args=("$clip" "$checkpoint" "$run_ref")
   source "$conda_sh"
   conda activate hsmujoco
   export HOLOSOMA_MJ_DEBUG_LIFT_TELEMETRY=1
+  export HOLOSOMA_MJ_STOP_PATH="$env_stop_path"
+  if [[ "$record_video" == "1" ]]; then
+    export HOLOSOMA_MJ_NATIVE_RECORD_DIR="$native_record_dir"
+  fi
   bash "${ROOT_DIR}/mj_env.sh" "${env_args[@]}"
 ) >"$env_log" 2>&1 &
 env_pid=$!
@@ -437,6 +463,20 @@ set +e
 ro_status=$?
 set -e
 stop_recorders
+stop_env
+
+if [[ "$record_video" == "1" && ! -s "${log_dir}/viewer_capture.mp4" && -d "$native_record_dir" ]]; then
+  native_video="$(
+    find "$native_record_dir" -maxdepth 1 -type f -name '*.mp4' -printf '%T@ %p\n' 2>/dev/null \
+      | sort -n \
+      | tail -n 1 \
+      | cut -d' ' -f2-
+  )"
+  if [[ -n "$native_video" && -s "$native_video" ]]; then
+    cp -f "$native_video" "${log_dir}/viewer_capture.mp4"
+    echo "[mj_debug] saved MuJoCo native mp4: ${log_dir}/viewer_capture.mp4"
+  fi
+fi
 
 METRICS_PATH="${log_dir}/metrics.json" \
 METRICS_CSV_PATH="${log_dir}/metrics.csv" \

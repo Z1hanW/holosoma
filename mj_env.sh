@@ -97,6 +97,22 @@ if [[ "$motion_init" == "1" ]]; then
   )
 fi
 
+native_record_args=()
+if [[ -n "${HOLOSOMA_MJ_NATIVE_RECORD_DIR:-}" ]]; then
+  mkdir -p "$HOLOSOMA_MJ_NATIVE_RECORD_DIR"
+  native_record_args+=(
+    --logger.video.enabled=True
+    --logger.video.interval=1
+    --logger.video.save-dir="$HOLOSOMA_MJ_NATIVE_RECORD_DIR"
+    --logger.video.upload-to-wandb=False
+    --logger.video.output-format=mp4
+    --logger.video.width="${HOLOSOMA_MJ_NATIVE_RECORD_WIDTH:-640}"
+    --logger.video.height="${HOLOSOMA_MJ_NATIVE_RECORD_HEIGHT:-360}"
+    --logger.video.playback-rate="${HOLOSOMA_MJ_NATIVE_RECORD_PLAYBACK_RATE:-0.0685714286}"
+    --logger.video.show-command-overlay=False
+  )
+fi
+
 PYTHONPATH="${ROOT_DIR}/src/holosoma${PYTHONPATH:+:${PYTHONPATH}}" \
   python "${ROOT_DIR}/src/holosoma/holosoma/run_sim.py" \
     robot:g1-29dof-w-object \
@@ -104,4 +120,5 @@ PYTHONPATH="${ROOT_DIR}/src/holosoma${PYTHONPATH:+:${PYTHONPATH}}" \
     image_server:mujoco_d435i \
     --simulator.config.virtual-gantry.enabled=False \
     "${bridge_args[@]}" \
-    "${robot_args[@]}"
+    "${robot_args[@]}" \
+    "${native_record_args[@]}"

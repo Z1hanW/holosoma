@@ -428,6 +428,20 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._last_sparse_command_source = "auto"
         self._last_sparse_command_mode = "motion"
         self._last_sparse_manual_enabled = False
+        force_zero_value = os.environ.get(
+            "HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND",
+            os.environ.get("HOLOSOMA_FORCE_MANUAL_SPARSE_ROOT_COMMAND", ""),
+        )
+        self._force_zero_sparse_root_command = str(force_zero_value).lower() in ("1", "true", "yes", "on")
+        try:
+            self._pickup_button_command = float(os.environ.get("HOLOSOMA_POLICY_PICKUP_BUTTON", "1") or "1")
+        except ValueError:
+            self._pickup_button_command = 1.0
+        try:
+            self._drop_button_command = float(os.environ.get("HOLOSOMA_POLICY_DROP_BUTTON", "0") or "0")
+        except ValueError:
+            self._drop_button_command = 0.0
+        self._logged_zero_sparse_root_command = False
         self._logged_root_reference_clip_start = False
         self._logged_sim_ref_from_sim_state = False
         self._auto_start_motion_clip_pending = False
@@ -858,7 +872,13 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._uses_motion_command = any(
             term in obs_terms for term in ("motion_command", "motion_ref_ori_b", "motion_future_target_poses")
         )
-        self._uses_sparse_root_command = "sparse_target_root_trajectory_command" in obs_terms
+        self._uses_sparse_root_command = any(
+            term in obs_terms
+            for term in (
+                "sparse_target_root_trajectory_command",
+                "sparse_target_root_trajectory_command_contact_aware",
+            )
+        )
         self._uses_object_generalist = any(term in obs_terms for term in OBJECT_OBS_DIMS)
         self._uses_legacy_object_obs = (
             all(term in obs_terms for term in ("obj_target_pose_size_b", "obj_pos_b", "obj_ori_b"))
@@ -889,6 +909,9 @@ class WholeBodyTrackingPolicy(BasePolicy):
         return list(terms.keys())
 
     def _maybe_enable_actor_obs_terms_from_metadata(self, metadata: dict) -> None:
+        if "perception_obs" in self.onnx_input_names:
+            return
+
         actor_terms = self._extract_actor_obs_terms_from_metadata(metadata)
         if not actor_terms:
             return
@@ -1676,6 +1699,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
         return effective_command
 
     def _get_sparse_target_root_trajectory_command(self, robot_state_data: np.ndarray) -> np.ndarray:
+        if self._force_zero_sparse_root_command:
+            if not self._logged_zero_sparse_root_command:
+                logger.info("Using zero sparse root command.")
+                self._logged_zero_sparse_root_command = True
+            return np.zeros((1, 3), dtype=np.float32)
+
         if self._motion_data is None:
             raise ValueError("Motion data is required for sparse root trajectory observations.")
 
@@ -1703,8 +1732,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
     def _get_depth_distill_obs_buffer_dict(self, robot_state_data: np.ndarray) -> dict[str, np.ndarray]:
         base_lin_vel = robot_state_data[:, 7 + self.num_dofs : 7 + self.num_dofs + 3]
         base_ang_vel = robot_state_data[:, 7 + self.num_dofs + 3 : 7 + self.num_dofs + 6]
-        return {
-            "sparse_target_root_trajectory_command": self._get_sparse_target_root_trajectory_command(robot_state_data),
+        sparse_root_command = self._get_sparse_target_root_trajectory_command(robot_state_data)
+        obs = {
             "base_lin_vel": base_lin_vel.astype(np.float32, copy=False),
             "base_ang_vel": base_ang_vel.astype(np.float32, copy=False),
             "dof_pos": (robot_state_data[:, 7 : 7 + self.num_dofs] - self.default_dof_angles).astype(
@@ -1716,6 +1745,15 @@ class WholeBodyTrackingPolicy(BasePolicy):
             ].astype(np.float32, copy=False),
             "actions": self.last_policy_action.astype(np.float32, copy=False),
         }
+        if "sparse_target_root_trajectory_command" in self.obs_dims:
+            obs["sparse_target_root_trajectory_command"] = sparse_root_command
+        if "sparse_target_root_trajectory_command_contact_aware" in self.obs_dims:
+            obs["sparse_target_root_trajectory_command_contact_aware"] = sparse_root_command
+        if "pickup_button" in self.obs_dims:
+            obs["pickup_button"] = np.array([[self._pickup_button_command]], dtype=np.float32)
+        if "drop_button" in self.obs_dims:
+            obs["drop_button"] = np.array([[self._drop_button_command]], dtype=np.float32)
+        return obs
 
     def _get_object_generalist_obs_buffer_dict(self, robot_state_data: np.ndarray) -> dict[str, np.ndarray]:
         if self._motion_data is None:
