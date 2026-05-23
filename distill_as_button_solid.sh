@@ -38,7 +38,7 @@ Useful env vars:
   SOLID_TARGET_BANK_NAME=<name>  override generated filtered bank name
   CORL_SOLID80_BANK_NAME=<name>  override preferred cp_corl.sh bank name
   CHECK_ONLY=1               count matching clips in the selected source bank
-  RESUME_FROM_BOX=1          initialize policy weights from box-button; default d9m3z369/model_17000.pt
+  RESUME_FROM_BOX=1          initialize policy weights from box-button; default d9m3z369/model_22000.pt
   BOX_RESUME_CKPT=<checkpoint>  override the box policy initializer
 EOF
 }
@@ -100,7 +100,7 @@ export AS_SUCCESS133_FINAL0P5="${AS_SUCCESS133_FINAL0P5:-1}"
 export RESUME_FROM_BOX
 if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
   DEFAULT_BOX_RESUME_RUN=${DEFAULT_BOX_RESUME_RUN:-"https://wandb.ai/zihanw22/boxer/runs/d9m3z369"}
-  DEFAULT_BOX_RESUME_MODEL_FILE=${DEFAULT_BOX_RESUME_MODEL_FILE:-model_17000.pt}
+  DEFAULT_BOX_RESUME_MODEL_FILE=${DEFAULT_BOX_RESUME_MODEL_FILE:-model_22000.pt}
   BOX_RESUME_MODEL_FILE=${BOX_RESUME_MODEL_FILE:-${DEFAULT_BOX_RESUME_MODEL_FILE}}
   DEFAULT_BOX_RESUME_CHECKPOINT=${DEFAULT_BOX_RESUME_CHECKPOINT:-"${DEFAULT_BOX_RESUME_RUN}/files/${BOX_RESUME_MODEL_FILE}"}
   BOX_RESUME_CKPT=${BOX_RESUME_CKPT:-${RESUME_FROM_BOX_CKPT:-${DEFAULT_BOX_RESUME_CHECKPOINT}}}

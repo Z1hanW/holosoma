@@ -38,7 +38,7 @@ Defaults:
 
 Useful env vars:
   AS_SUCCESS133_FINAL0P5=0      do not force the success133 AS bank; provide a contact-capable AS bank yourself
-  RESUME_FROM_BOX=1             initialize from a box-button policy; default d9m3z369/model_17000.pt
+  RESUME_FROM_BOX=1             initialize from a box-button policy; default d9m3z369/model_22000.pt
   BOX_RESUME_CKPT=<checkpoint>  box policy initializer
   RUN_NAME=<name>               override W&B run display name
   TRAINING_NAME=<name>          override log/checkpoint training name
@@ -118,7 +118,7 @@ RESUME_FROM_BOX="$(normalize_bool RESUME_FROM_BOX "${RESUME_FROM_BOX:-0}")"
 
 if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
   DEFAULT_BOX_RESUME_RUN=${DEFAULT_BOX_RESUME_RUN:-"https://wandb.ai/zihanw22/boxer/runs/d9m3z369"}
-  DEFAULT_BOX_RESUME_MODEL_FILE=${DEFAULT_BOX_RESUME_MODEL_FILE:-model_17000.pt}
+  DEFAULT_BOX_RESUME_MODEL_FILE=${DEFAULT_BOX_RESUME_MODEL_FILE:-model_22000.pt}
   BOX_RESUME_MODEL_FILE=${BOX_RESUME_MODEL_FILE:-${DEFAULT_BOX_RESUME_MODEL_FILE}}
   export DEFAULT_BOX_RESUME_RUN
   export DEFAULT_BOX_RESUME_MODEL_FILE

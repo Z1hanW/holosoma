@@ -37,7 +37,7 @@ from:
 
 With RESUME_FROM_BOX=1, the student policy parameters are initialized from the
 checkpoint in:
-  https://wandb.ai/zihanw22/boxer/runs/6c7exbeq
+  https://wandb.ai/zihanw22/boxer/runs/d9m3z369/files/model_22000.pt
 Training still starts from iteration 0 with a new/current run; only actor
 policy parameters are loaded, not optimizer, critic, env state, or W&B resume
 state.
@@ -318,8 +318,8 @@ DEFAULT_RESUME_FROM_BOX_DATA_DIR="${DEFAULT_RESUME_FROM_BOX_LOCAL_DATA_DIR}"
 AS_SUCCESS133_BANK_NAME=${AS_SUCCESS133_BANK_NAME:-carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout_success133_final0p5}
 AS_SUCCESS133_DATA_DIR="${SCRIPT_DIR}/data/ds_as_data/${AS_SUCCESS133_BANK_NAME}"
 AS_SUCCESS133_CONTACT_EXPORT_ROOT="${AS_SUCCESS133_DATA_DIR}/contact_export_from_teacher_success133_final0p5"
-DEFAULT_BOX_RESUME_RUN=${DEFAULT_BOX_RESUME_RUN:-"https://wandb.ai/zihanw22/boxer/runs/6c7exbeq"}
-DEFAULT_BOX_RESUME_MODEL_FILE=${DEFAULT_BOX_RESUME_MODEL_FILE:-model_11000.pt}
+DEFAULT_BOX_RESUME_RUN=${DEFAULT_BOX_RESUME_RUN:-"https://wandb.ai/zihanw22/boxer/runs/d9m3z369"}
+DEFAULT_BOX_RESUME_MODEL_FILE=${DEFAULT_BOX_RESUME_MODEL_FILE:-model_22000.pt}
 BOX_RESUME_MODEL_FILE=${BOX_RESUME_MODEL_FILE:-${WANDB_MODEL_FILE:-${DEFAULT_BOX_RESUME_MODEL_FILE}}}
 DEFAULT_BOX_RESUME_CHECKPOINT=${DEFAULT_BOX_RESUME_CHECKPOINT:-"${DEFAULT_BOX_RESUME_RUN}/files/${BOX_RESUME_MODEL_FILE}"}
 BOX_RESUME_CKPT=${BOX_RESUME_CKPT:-${RESUME_FROM_BOX_CKPT:-${DEFAULT_BOX_RESUME_CHECKPOINT}}}
@@ -772,13 +772,13 @@ if [[ "${AS_CONTACT_AWARE}" == "1" ]]; then
   export STUDENT_ACTOR_INPUTS="${STUDENT_ACTOR_INPUTS:-['actor_obs_root_contact_aware','actor_obs_proprio_with_actions_no_linvel']}"
   if [[ "${AS_SUCCESS133_FINAL0P5}" == "1" && "${RESUME_FROM_BOX}" == "1" ]]; then
     export SCHEDULE_NAME="${SCHEDULE_NAME:-as_success133_final0p5_init_box_sparse_root_ppo_first_contact}"
-    export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS teacher-rollout filtered 133-clip real-mesh perception distill initialized from actor policy parameters in zihanw22/boxer/6c7exbeq. Clips satisfy stable_contact_success=True and final_object_position_error_m<=0.5, use teacher-exported contact sidecars for offline contact guidance and adaptive contact-window sampling, and keep the PPO+DAgger hybrid active from iteration 0.}"
+    export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS teacher-rollout filtered 133-clip real-mesh perception distill initialized from actor policy parameters in zihanw22/boxer/d9m3z369/model_22000.pt. Clips satisfy stable_contact_success=True and final_object_position_error_m<=0.5, use teacher-exported contact sidecars for offline contact guidance and adaptive contact-window sampling, and keep the PPO+DAgger hybrid active from iteration 0.}"
   elif [[ "${AS_SUCCESS133_FINAL0P5}" == "1" ]]; then
     export SCHEDULE_NAME="${SCHEDULE_NAME:-as_success133_final0p5_sparse_root_ppo_first_contact}"
     export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS teacher-rollout filtered 133-clip real-mesh perception distill with contact-aware sparse root. Clips satisfy stable_contact_success=True and final_object_position_error_m<=0.5, use teacher-exported contact sidecars for offline contact guidance and adaptive contact-window sampling, and keep the PPO+DAgger hybrid active from iteration 0.}"
   else
     export SCHEDULE_NAME="${SCHEDULE_NAME:-as_keep169_init_box_sparse_root_ppo_first_contact}"
-    export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS keep169 real-mesh perception distill initialized from actor policy parameters in zihanw22/boxer/6c7exbeq. Training starts from iteration 0 with current AS data/contact/schedule, uses retarget-exported left/right wrist contact sidecars for offline contact guidance and adaptive contact-window sampling, and keeps the PPO+DAgger hybrid active from iteration 0.}"
+    export SCHEDULE_NOTES="${SCHEDULE_NOTES:-AS keep169 real-mesh perception distill initialized from actor policy parameters in zihanw22/boxer/d9m3z369/model_22000.pt. Training starts from iteration 0 with current AS data/contact/schedule, uses retarget-exported left/right wrist contact sidecars for offline contact guidance and adaptive contact-window sampling, and keeps the PPO+DAgger hybrid active from iteration 0.}"
   fi
 else
   export STUDENT_ACTOR_INPUTS="${STUDENT_ACTOR_INPUTS:-['actor_obs_root','actor_obs_proprio','actor_obs_actions']}"
