@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 export HOLOSOMA_POLICY_DROP_BUTTON="${HOLOSOMA_POLICY_DROP_BUTTON:-0}"
 
-run_id="${1:-${HOLOSOMA_MJ_AS_RUN:-qihvpyqg}}"
+run_id="${1:-${HOLOSOMA_MJ_AS_RUN:-gjiefd3c}}"
 checkpoint="${2:-${HOLOSOMA_MJ_AS_CHECKPOINT:-latest}}"
 
 case "$run_id" in

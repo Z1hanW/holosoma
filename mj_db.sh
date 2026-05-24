@@ -9,6 +9,7 @@ export HOLOSOMA_POLICY_DROP_BUTTON="${HOLOSOMA_POLICY_DROP_BUTTON:-0}"
 
 exec bash ./mj_ro.sh \
   scale__any_monitor_43 \
-  wandb://zihanw22/carry-any/zzv6vtkk/latest \
+  wandb://zihanw22/carry-any/36k1vwdf/latest \
   ppo_first_contact_aware_h1
 # zzv6vtkk 36k1vwdf
+# 
