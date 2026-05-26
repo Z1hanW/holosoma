@@ -3,23 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 clip="${1:-${HOLOSOMA_MJ_MOTION:-box_75}}"
-checkpoint="${2:-${HOLOSOMA_WANDB_CHECKPOINT:-latest}}"
-run_ref="${3:-${HOLOSOMA_WANDB_RUN:-zihanw22/boxer/w5qostjn}}"
-
-case "$run_ref" in
-  ppo_first_contact_aware_h1)
-    run_ref="6c7exbeq"
-    ;;
-  ppo_first_contact_aware_h5)
-    run_ref="lk9ocrn6"
-    ;;
-  ppo_first_h1)
-    run_ref="kxnhgj2v"
-    ;;
-  ppo_first_h5)
-    run_ref="iepncc89"
-    ;;
-esac
+model_run_id="gjiefd3c"
+run_id="$model_run_id"
 
 motion_file="$clip"
 if [[ "$clip" != *.npz && "$clip" != /* ]]; then
@@ -27,49 +12,6 @@ if [[ "$clip" != *.npz && "$clip" != /* ]]; then
 fi
 if [[ "$motion_file" != /* ]]; then
   motion_file="${ROOT_DIR}/${motion_file}"
-fi
-
-run_path="${run_ref#wandb://}"
-run_path="${run_path#https://wandb.ai/}"
-run_path="${run_path%%/files/*}"
-run_path="${run_path%/}"
-run_path="${run_path/\/runs\//\/}"
-if [[ "$run_path" != */* ]]; then
-  run_path="zihanw22/boxer/$run_path"
-fi
-run_id="${run_path##*/}"
-
-checkpoint_run_id=""
-if [[ "$checkpoint" == https://wandb.ai/* || "$checkpoint" == wandb://* ]]; then
-  checkpoint_run_path="${checkpoint#wandb://}"
-  checkpoint_run_path="${checkpoint_run_path#https://wandb.ai/}"
-  checkpoint_run_path="${checkpoint_run_path%%\?*}"
-  checkpoint_run_path="${checkpoint_run_path%%/files/*}"
-  checkpoint_run_path="${checkpoint_run_path%/}"
-  checkpoint_run_path="${checkpoint_run_path/\/runs\//\/}"
-  IFS='/' read -r -a checkpoint_parts <<< "$checkpoint_run_path"
-  if [[ "${#checkpoint_parts[@]}" -ge 3 ]]; then
-    checkpoint_run_id="${checkpoint_parts[2]}"
-  fi
-fi
-model_run_id="${checkpoint_run_id:-$run_id}"
-
-if [[ -f "$checkpoint" || "$checkpoint" == /* || "$checkpoint" == ./* || "$checkpoint" == ../* ]]; then
-  model_path="$checkpoint"
-elif [[ "$checkpoint" == https://wandb.ai/* || "$checkpoint" == wandb://* ]]; then
-  model_path="$checkpoint"
-elif [[ "$checkpoint" =~ ^[0-9]+$ ]]; then
-  printf -v checkpoint_name "model_%05d.onnx" "$checkpoint"
-  model_path="wandb://${run_path}/${checkpoint_name}"
-else
-  model_path="wandb://${run_path}/${checkpoint:-latest}"
-fi
-
-if [[ -f "$model_path" || "$model_path" == /* || "$model_path" == ./* || "$model_path" == ../* ]]; then
-  model_base="$(basename "$model_path")"
-  if [[ "$model_base" =~ ^([[:alnum:]]+)_model_[0-9]+\.onnx$ ]]; then
-    model_run_id="${BASH_REMATCH[1]}"
-  fi
 fi
 
 inference_config="${HOLOSOMA_INFERENCE_CONFIG:-}"
@@ -140,7 +82,7 @@ fi
 run_args=(
   "$python_bin" "${ROOT_DIR}/src/holosoma_inference/holosoma_inference/run_policy.py"
   "inference:${inference_config}"
-  --task.model-path "$model_path"
+  --task.model-path _ckps/gjiefd3c_model_06500.onnx
   --task.no-use-joystick
   --task.use-sim-time
   --task.rl-rate 50
