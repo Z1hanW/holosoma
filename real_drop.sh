@@ -24,7 +24,7 @@ HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT="${HOLOSOMA_POLICY_DEBUG_INPUT_LIMIT:-100000}"
 PYTHONPATH=src/holosoma_inference:src/holosoma${PYTHONPATH:+:${PYTHONPATH}} \
 python3 src/holosoma_inference/holosoma_inference/run_policy.py \
   inference:g1-root_pos-contact-aware-drop-button-actions-no-linvel-h1 \
-  --task.model-path _ckps/qihvpyqg_model_08500.onnx \
+  --task.model-path _ckps/gjiefd3c_model_06500.onnx \
   --task.use-joystick \
   --task.rl-rate 50 \
   --task.interface eth0
