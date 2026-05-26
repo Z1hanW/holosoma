@@ -158,7 +158,21 @@ if [[ "$external_root_pos_run" != "1" ]]; then
   run_args+=(--task.motion-file "$motion_file")
 fi
 
-if [[ "${HOLOSOMA_MJ_RO_DEBUG:-0}" == "1" && "${HOLOSOMA_RO_USE_SIM_STATE:-1}" == "1" ]]; then
+requires_sim_state=0
+case "$model_run_id" in
+  z4arqumz)
+    requires_sim_state=1
+    ;;
+esac
+
+use_sim_state=0
+if [[ "$requires_sim_state" == "1" ]]; then
+  use_sim_state=1
+elif [[ "${HOLOSOMA_MJ_RO_DEBUG:-0}" == "1" && "${HOLOSOMA_RO_USE_SIM_STATE:-1}" == "1" ]]; then
+  use_sim_state=1
+fi
+
+if [[ "$use_sim_state" == "1" ]]; then
   export SIM_STATE_PORT="${SIM_STATE_PORT:-5557}"
   run_args+=(--task.use-sim-state --task.sim-state-port "$SIM_STATE_PORT" --task.prefer-sim-ref-from-sim-state)
 fi
