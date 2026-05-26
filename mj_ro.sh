@@ -54,7 +54,7 @@ if [[ "$checkpoint" == https://wandb.ai/* || "$checkpoint" == wandb://* ]]; then
 fi
 model_run_id="${checkpoint_run_id:-$run_id}"
 
-if [[ "$checkpoint" == /* || "$checkpoint" == ./* || "$checkpoint" == ../* ]]; then
+if [[ -f "$checkpoint" || "$checkpoint" == /* || "$checkpoint" == ./* || "$checkpoint" == ../* ]]; then
   model_path="$checkpoint"
 elif [[ "$checkpoint" == https://wandb.ai/* || "$checkpoint" == wandb://* ]]; then
   model_path="$checkpoint"
@@ -63,6 +63,13 @@ elif [[ "$checkpoint" =~ ^[0-9]+$ ]]; then
   model_path="wandb://${run_path}/${checkpoint_name}"
 else
   model_path="wandb://${run_path}/${checkpoint:-latest}"
+fi
+
+if [[ -f "$model_path" || "$model_path" == /* || "$model_path" == ./* || "$model_path" == ../* ]]; then
+  model_base="$(basename "$model_path")"
+  if [[ "$model_base" =~ ^([[:alnum:]]+)_model_[0-9]+\.onnx$ ]]; then
+    model_run_id="${BASH_REMATCH[1]}"
+  fi
 fi
 
 inference_config="${HOLOSOMA_INFERENCE_CONFIG:-}"
