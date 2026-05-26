@@ -138,6 +138,13 @@ g1_root_pos_actions_no_linvel_h1 = InferenceConfig(
     camera=camera.single_d435i_depth,
 )
 
+g1_root_pos_actions_h1 = InferenceConfig(
+    robot=g1_wbt_distillation.robot,
+    observation=observation.wbt_object_perception_actions_h1_g1,
+    task=task.wbt_distillation,
+    camera=camera.single_d435i_depth,
+)
+
 g1_root_pos_actions_no_linvel_h5 = InferenceConfig(
     robot=g1_wbt_distillation.robot,
     observation=observation.wbt_object_perception_actions_no_linvel_h5_g1,
@@ -193,6 +200,7 @@ DEFAULTS = {
         g1_root_pos_contact_aware_pickup_drop_button_actions_no_linvel_h1
     ),
     "g1-root_pos-actions-no-linvel-h1": g1_root_pos_actions_no_linvel_h1,
+    "g1-root_pos-actions-h1": g1_root_pos_actions_h1,
     "g1-root_pos-actions-no-linvel-h5": g1_root_pos_actions_no_linvel_h5,
     "g1-blind-fall-recovery": g1_blind_fall_recovery,
 }

@@ -586,6 +586,53 @@ wbt_object_perception_actions_no_linvel_h1_g1 = ObservationConfig(
 )
 
 
+wbt_object_perception_actions_h1_g1 = ObservationConfig(
+    obs_intervals={
+        "actor_obs_root": 1,
+        "actor_obs_proprio_with_actions": 1,
+        "perception_obs": 1,
+    },
+    obs_dict={
+        "actor_obs_root": [
+            "sparse_target_root_trajectory_command",
+        ],
+        "actor_obs_proprio_with_actions": [
+            "base_lin_vel",
+            "base_ang_vel",
+            "dof_pos",
+            "dof_vel",
+            "actions",
+        ],
+        "perception_obs": [
+            "cam_depth",
+        ],
+    },
+    obs_dims={
+        "sparse_target_root_trajectory_command": 3,
+        "base_lin_vel": 3,
+        "base_ang_vel": 3,
+        "dof_pos": 29,
+        "dof_vel": 29,
+        "actions": 29,
+        "cam_depth": 5046,
+    },
+    obs_scales={
+        "sparse_target_root_trajectory_command": 1.0,
+        "base_lin_vel": 1.0,
+        "base_ang_vel": 1.0,
+        "dof_pos": 1.0,
+        "dof_vel": 1.0,
+        "actions": 1.0,
+        "cam_depth": 1.0,
+    },
+    history_length_dict={
+        "actor_obs_root": 1,
+        "actor_obs_proprio_with_actions": 1,
+        "perception_obs": 1,
+    },
+)
+
+
 wbt_object_perception_actions_no_linvel_h5_g1 = ObservationConfig(
     obs_intervals={
         "actor_obs_root": 1,
@@ -683,6 +730,7 @@ DEFAULTS = {
         wbt_object_perception_contact_aware_actions_no_linvel_h1_g1
     ),
     "wbt-object-perception-actions-no-linvel-h1-g1": wbt_object_perception_actions_no_linvel_h1_g1,
+    "wbt-object-perception-actions-h1-g1": wbt_object_perception_actions_h1_g1,
     "wbt-object-perception-actions-no-linvel-h5-g1": wbt_object_perception_actions_no_linvel_h5_g1,
     "blind-fall-recovery-g1": blind_fall_recovery_g1,
 }
