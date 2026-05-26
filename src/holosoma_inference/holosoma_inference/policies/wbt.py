@@ -1309,8 +1309,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
             return
 
         deadband = 0.1
-        xy_scale = 0.25
-        yaw_scale = 0.3
+        xy_scale = 0.1
+        yaw_scale = 0.1
 
         def apply_deadband(value: float) -> float:
             return value if abs(value) > deadband else 0.0
