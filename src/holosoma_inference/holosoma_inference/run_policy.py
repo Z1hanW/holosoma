@@ -73,6 +73,8 @@ def _print_control_guide(policy_class, use_joystick: bool, config: InferenceConf
             logger.info("")
             logger.info("Whole-Body Tracking Controls:")
             logger.info("  Start button   - Start motion clip")
+            if has_drop_button:
+                logger.info("  X button       - Toggle drop button command")
             logger.info("  Left stick     - Relative sparse root XY command")
             logger.info("  Right stick X  - Relative sparse root yaw command")
         else:

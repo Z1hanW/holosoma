@@ -1294,6 +1294,19 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self.logger.info(colored(f"Drop button command: {self._drop_button_command:.0f}", "blue"))
         return True
 
+    def _handle_drop_button_joystick_command(self, cur_key: str) -> bool:
+        if cur_key != "X":
+            return False
+        if "drop_button" not in self.obs_dims:
+            if not self._logged_missing_drop_button_key:
+                self.logger.warning("Active policy has no drop_button observation; ignoring X.")
+                self._logged_missing_drop_button_key = True
+            return True
+
+        self._drop_button_command = 0.0 if self._drop_button_command >= 0.5 else 1.0
+        self.logger.info(colored(f"Drop button command: {self._drop_button_command:.0f}", "blue"))
+        return True
+
     def handle_keyboard_release(self, keycode):
         if keycode == "f":
             self._pickup_button_key_down = False
@@ -1348,6 +1361,8 @@ class WholeBodyTrackingPolicy(BasePolicy):
         if cur_key == "start":
             # Start playing motion clip
             self._handle_start_motion_clip()
+        elif self._handle_drop_button_joystick_command(cur_key):
+            pass
         else:
             # Delegate all other buttons to base class
             super().handle_joystick_button(cur_key)
