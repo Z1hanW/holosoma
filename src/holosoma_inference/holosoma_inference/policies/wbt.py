@@ -149,6 +149,12 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._force_zero_sparse_root_command = os.environ.get(
             "HOLOSOMA_FORCE_ZERO_SPARSE_ROOT_COMMAND", os.environ.get("HOLOSOMA_FORCE_MANUAL_SPARSE_ROOT_COMMAND", "")
         ).strip().lower() in {"1", "true", "yes", "on"}
+        self._force_zero_base_lin_vel = os.environ.get("HOLOSOMA_FORCE_ZERO_BASE_LIN_VEL", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         try:
             self._pickup_button_command = float(os.environ.get("HOLOSOMA_POLICY_PICKUP_BUTTON", "1") or "1")
         except ValueError:
@@ -161,6 +167,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._drop_button_key_down = False
         self._logged_missing_drop_button_key = False
         self._logged_zero_sparse_root_command = False
+        self._logged_zero_base_lin_vel = False
         self._logged_motion_local_sparse_root_command = False
         self._manual_sparse_root_command_offset = np.zeros((1, 3), dtype=np.float32)
         self._joystick_sparse_root_command_offset = np.zeros((1, 3), dtype=np.float32)
@@ -698,7 +705,15 @@ class WholeBodyTrackingPolicy(BasePolicy):
             current_obs_buffer_dict["motion_ref_ori_b"] = motion_ref_ori_b[..., :2].reshape(1, -1)
 
         if "base_lin_vel" in required_terms:
-            current_obs_buffer_dict["base_lin_vel"] = robot_state_data[:, 7 + self.num_dofs : 7 + self.num_dofs + 3]
+            if self._force_zero_base_lin_vel:
+                if not self._logged_zero_base_lin_vel:
+                    logger.info("Using zero base linear velocity observation.")
+                    self._logged_zero_base_lin_vel = True
+                current_obs_buffer_dict["base_lin_vel"] = np.zeros((1, 3), dtype=np.float32)
+            else:
+                current_obs_buffer_dict["base_lin_vel"] = robot_state_data[
+                    :, 7 + self.num_dofs : 7 + self.num_dofs + 3
+                ]
 
         if "base_ang_vel" in required_terms:
             current_obs_buffer_dict["base_ang_vel"] = robot_state_data[
