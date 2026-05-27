@@ -165,6 +165,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
         self._manual_sparse_root_command_offset = np.zeros((1, 3), dtype=np.float32)
         self._joystick_sparse_root_command_offset = np.zeros((1, 3), dtype=np.float32)
         self._external_sparse_root_command_mode = False
+        self._policy_returns_reference_outputs = True
         self._policy_action_output_name = "actions"
         try:
             self._motion_index_offset = int(os.environ.get("HOLOSOMA_POLICY_MOTION_INDEX_OFFSET", "0") or "0")
@@ -363,6 +364,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
 
         self._configure_contact_aware_window(metadata)
         self._set_policy_action_scales_from_metadata(metadata)
+        self._policy_returns_reference_outputs = True
 
         self._external_sparse_root_command_mode = (
             self._motion_root_pos_w is None
@@ -377,6 +379,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 "Using external sparse-root command mode: command comes from zero/manual/joystick input; "
                 "reference-motion outputs are not used."
             )
+            self._policy_returns_reference_outputs = False
             self.motion_command_t = np.zeros((1, self.num_dofs * 2), dtype=np.float32)
             self.ref_quat_xyzw_t = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
             self.motion_ref_pos_xyz_t = np.zeros((1, 3), dtype=np.float32)
@@ -397,6 +400,28 @@ class WholeBodyTrackingPolicy(BasePolicy):
         ]
         missing_reference_outputs = {"joint_pos", "joint_vel", "ref_quat_xyzw"} - set(self.onnx_output_names)
         if missing_reference_outputs:
+            has_sparse_root_obs = (
+                "sparse_target_root_trajectory_command" in self.obs_dims
+                or "sparse_target_root_trajectory_command_contact_aware" in self.obs_dims
+            )
+            if has_sparse_root_obs and "motion_command" not in self.obs_dims:
+                logger.info(
+                    "Using action-only ONNX with sparse-root command from motion/manual input; "
+                    "reference-motion outputs are not required."
+                )
+                self._policy_returns_reference_outputs = False
+                self.motion_command_t = np.zeros((1, self.num_dofs * 2), dtype=np.float32)
+                self.ref_quat_xyzw_t = np.array([[0.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+                self.motion_ref_pos_xyz_t = np.zeros((1, 3), dtype=np.float32)
+                self.motion_command_0 = self.motion_command_t.copy()
+                self.ref_quat_xyzw_0 = self.ref_quat_xyzw_t.copy()
+                self.motion_ref_pos_xyz_0 = self.motion_ref_pos_xyz_t.copy()
+
+                def policy_act(input_feed):
+                    return self.onnx_policy_session.run([self._policy_action_output_name], input_feed)[0]
+
+                self.policy = policy_act
+                return
             raise RuntimeError(
                 "This ONNX is missing tracking reference outputs "
                 f"{sorted(missing_reference_outputs)}. If this is a root-pos/action-only policy, run it through "
@@ -615,6 +640,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 if self.motion_ref_pos_xyz_0 is None
                 else self.motion_ref_pos_xyz_0.copy(),
                 "policy_action_output_name": self._policy_action_output_name,
+                "policy_returns_reference_outputs": self._policy_returns_reference_outputs,
             }
         )
         return state
@@ -627,6 +653,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
             None if state["motion_ref_pos_xyz_0"] is None else state["motion_ref_pos_xyz_0"].copy()
         )
         self._policy_action_output_name = state.get("policy_action_output_name", "actions")
+        self._policy_returns_reference_outputs = state.get("policy_returns_reference_outputs", True)
         self.motion_clip_progressing = False
         self.motion_timestep = 0
         self.motion_start_timestep = None
@@ -1030,7 +1057,7 @@ class WholeBodyTrackingPolicy(BasePolicy):
                 input_feed[name] = obs["obs"]
             else:
                 input_feed[name] = obs[name]
-        if self._external_sparse_root_command_mode:
+        if not self._policy_returns_reference_outputs:
             policy_action = self.policy(input_feed)
         else:
             policy_action, self.motion_command_t, self.ref_quat_xyzw_t, self.motion_ref_pos_xyz_t = self.policy(

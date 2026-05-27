@@ -3,7 +3,23 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 clip="${1:-${HOLOSOMA_MJ_MOTION:-box_75}}"
-model_run_id="gjiefd3c"
+model_path="${2:-${HOLOSOMA_MJ_MODEL_PATH:-_ckps/gjiefd3c_model_06500.onnx}}"
+model_run_id="${HOLOSOMA_MJ_MODEL_RUN_ID:-gjiefd3c}"
+model_base="$(basename "$model_path")"
+if [[ "$model_base" =~ ^([[:alnum:]]+)_model_[0-9]+\.onnx$ ]]; then
+  model_run_id="${BASH_REMATCH[1]}"
+elif [[ "$model_path" == wandb://* || "$model_path" == https://wandb.ai/* ]]; then
+  model_run_path="${model_path#wandb://}"
+  model_run_path="${model_run_path#https://wandb.ai/}"
+  model_run_path="${model_run_path%%\?*}"
+  model_run_path="${model_run_path%%/files/*}"
+  model_run_path="${model_run_path%/}"
+  model_run_path="${model_run_path/\/runs\//\/}"
+  IFS='/' read -r -a model_run_parts <<< "$model_run_path"
+  if [[ "${#model_run_parts[@]}" -ge 3 ]]; then
+    model_run_id="${model_run_parts[2]}"
+  fi
+fi
 run_id="$model_run_id"
 
 motion_file="$clip"
@@ -82,7 +98,7 @@ fi
 run_args=(
   "$python_bin" "${ROOT_DIR}/src/holosoma_inference/holosoma_inference/run_policy.py"
   "inference:${inference_config}"
-  --task.model-path _ckps/gjiefd3c_model_06500.onnx
+  --task.model-path "$model_path"
   --task.no-use-joystick
   --task.use-sim-time
   --task.rl-rate 50
@@ -96,7 +112,17 @@ case "$model_run_id" in
     ;;
 esac
 
-if [[ "$external_root_pos_run" != "1" ]]; then
+derive_sparse_root_from_motion="${HOLOSOMA_DERIVE_SPARSE_ROOT_FROM_MOTION:-0}"
+case "${derive_sparse_root_from_motion,,}" in
+  1|true|yes|on)
+    derive_sparse_root_from_motion=1
+    ;;
+  *)
+    derive_sparse_root_from_motion=0
+    ;;
+esac
+
+if [[ "$external_root_pos_run" != "1" || "$derive_sparse_root_from_motion" == "1" ]]; then
   run_args+=(--task.motion-file "$motion_file")
 fi
 
