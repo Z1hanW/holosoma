@@ -621,7 +621,7 @@ g1_29dof_wbt_reward_w_object_r2s_rollout_reference_guidance = RewardManagerCfg(
                 "require_stable_contact": True,
                 "min_target_points": 1,
             },
-            weight=3.0,
+            weight=4.0,
         ),
         "offline_contact_guidance": RewardTermCfg(
             func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
@@ -639,7 +639,7 @@ g1_29dof_wbt_reward_w_object_r2s_rollout_reference_guidance = RewardManagerCfg(
                 "require_stable_contact": True,
                 "min_target_points": 1,
             },
-            weight=4.0,
+            weight=7.0,
         ),
     }
 )

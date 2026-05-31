@@ -19,6 +19,7 @@ usage() {
 Usage:
   bash distill_as_button_solid.sh [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra args...]
   bash distill_as_button_solid.sh --resume-from-box [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra args...]
+  bash distill_as_button_solid.sh --resume-from-previous [teacher_checkpoint.pt|wandb://...|https://wandb.ai/.../runs/...] [extra args...]
   CHECK_ONLY=1 bash distill_as_button_solid.sh
   bash distill_as_button_solid.sh --check-only
 
@@ -38,8 +39,11 @@ Useful env vars:
   SOLID_TARGET_BANK_NAME=<name>  override generated filtered bank name
   CORL_SOLID80_BANK_NAME=<name>  override preferred cp_corl.sh bank name
   CHECK_ONLY=1               count matching clips in the selected source bank
-  RESUME_FROM_BOX=1          initialize policy weights from box-button; default d9m3z369/model_22000.pt
+  RESUME_FROM_BOX=1          initialize policy weights from box-button; default d9m3z369-recovered/model_22000.pt
   BOX_RESUME_CKPT=<checkpoint>  override the box policy initializer
+  RESUME_FROM_PREVIOUS=1     resume full training state from previous AS distill run
+  PREVIOUS_RESUME_RUN=<url>  previous run URL; default swl41n4x
+  PREVIOUS_RESUME_CKPT=<checkpoint>  explicit previous checkpoint; otherwise latest model_*.pt is used
 EOF
 }
 
@@ -47,6 +51,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
 
 CHECK_ONLY=${CHECK_ONLY:-0}
+RESUME_FROM_PREVIOUS=${RESUME_FROM_PREVIOUS:-0}
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -65,8 +70,16 @@ while [[ $# -gt 0 ]]; do
       RESUME_FROM_BOX=1
       shift
       ;;
+    --resume-from-previous|--resume_from_previous|resume-from-previous|resume_from_previous|previous|previous-run)
+      RESUME_FROM_PREVIOUS=1
+      shift
+      ;;
     --no-resume-from-box|--no_resume_from_box|no-resume-from-box|no_resume_from_box)
       RESUME_FROM_BOX=0
+      shift
+      ;;
+    --no-resume-from-previous|--no_resume_from_previous|no-resume-from-previous|no_resume_from_previous)
+      RESUME_FROM_PREVIOUS=0
       shift
       ;;
     *)
@@ -95,11 +108,157 @@ normalize_bool() {
 
 CHECK_ONLY="$(normalize_bool CHECK_ONLY "${CHECK_ONLY}")"
 RESUME_FROM_BOX="$(normalize_bool RESUME_FROM_BOX "${RESUME_FROM_BOX:-0}")"
+RESUME_FROM_PREVIOUS="$(normalize_bool RESUME_FROM_PREVIOUS "${RESUME_FROM_PREVIOUS:-0}")"
+
+parse_wandb_run_url() {
+  local ref="$1"
+  local clean_ref="${ref%%\?*}"
+  if [[ "${clean_ref}" != https://wandb.ai/*/runs/* ]]; then
+    return 1
+  fi
+  local trimmed="${clean_ref#https://wandb.ai/}"
+  local entity=""
+  local project=""
+  local run_id=""
+  local explicit_file=""
+  IFS='/' read -r -a parts <<< "${trimmed}"
+  if [[ "${#parts[@]}" -lt 4 || "${parts[2]}" != "runs" ]]; then
+    return 1
+  fi
+  entity="${parts[0]}"
+  project="${parts[1]}"
+  run_id="${parts[3]}"
+  if [[ -z "${entity}" || -z "${project}" || -z "${run_id}" ]]; then
+    return 1
+  fi
+  if [[ "${#parts[@]}" -ge 6 && "${parts[4]}" == "files" ]]; then
+    explicit_file="${trimmed#${entity}/${project}/runs/${run_id}/files/}"
+  fi
+  printf '%s\t%s\t%s\t%s\n' "${entity}" "${project}" "${run_id}" "${explicit_file}"
+}
+
+parse_wandb_uri() {
+  local ref="$1"
+  if [[ "${ref}" != wandb://* ]]; then
+    return 1
+  fi
+  local trimmed="${ref#wandb://}"
+  local entity=""
+  local project=""
+  local run_id=""
+  local explicit_file=""
+  IFS='/' read -r -a parts <<< "${trimmed}"
+  if [[ "${#parts[@]}" -lt 3 ]]; then
+    return 1
+  fi
+  entity="${parts[0]}"
+  project="${parts[1]}"
+  run_id="${parts[2]}"
+  if [[ -z "${entity}" || -z "${project}" || -z "${run_id}" ]]; then
+    return 1
+  fi
+  if [[ "${#parts[@]}" -gt 3 ]]; then
+    explicit_file="${trimmed#${entity}/${project}/${run_id}/}"
+  fi
+  printf '%s\t%s\t%s\t%s\n' "${entity}" "${project}" "${run_id}" "${explicit_file}"
+}
+
+parse_wandb_reference() {
+  local ref="$1"
+  parse_wandb_run_url "${ref}" || parse_wandb_uri "${ref}"
+}
+
+resolve_remote_wandb_checkpoint_name() {
+  local entity="$1"
+  local project="$2"
+  local run_id="$3"
+  "${PYTHON_BIN:-python}" - "${entity}" "${project}" "${run_id}" <<'PY' 2>/dev/null || true
+import re
+import sys
+from pathlib import Path
+
+repo_root = Path.cwd().resolve()
+sys.path = [
+    entry
+    for entry in sys.path
+    if entry not in {"", "."} and Path(entry).resolve() != repo_root
+]
+
+try:
+    import wandb
+except Exception:
+    sys.exit(0)
+
+entity, project, run_id = sys.argv[1:4]
+api = wandb.Api(timeout=30)
+run = api.run(f"{entity}/{project}/{run_id}")
+pattern = re.compile(r"^model_(\d+)\.pt$")
+best: tuple[int, str] | None = None
+for file_obj in run.files():
+    name = str(getattr(file_obj, "name", "") or "")
+    match = pattern.match(name)
+    if match is None:
+        continue
+    try:
+        size = int(getattr(file_obj, "size", 0) or 0)
+    except Exception:
+        size = 0
+    if size <= 0:
+        continue
+    candidate = (int(match.group(1)), name)
+    if best is None or candidate[0] > best[0]:
+        best = candidate
+
+if best is not None:
+    print(best[1])
+PY
+}
+
+normalize_wandb_checkpoint_ref() {
+  local ref="$1"
+  local requested_model_file="${2:-}"
+  local parsed=""
+  local entity=""
+  local project=""
+  local run_id=""
+  local explicit_file=""
+  local model_file="${requested_model_file}"
+
+  parsed="$(parse_wandb_reference "${ref}" || true)"
+  if [[ -z "${parsed}" ]]; then
+    echo "${ref}"
+    return 0
+  fi
+
+  IFS=$'\t' read -r entity project run_id explicit_file <<< "${parsed}"
+  if [[ -n "${explicit_file}" ]]; then
+    model_file="${explicit_file}"
+  elif [[ -z "${model_file}" ]]; then
+    model_file="$(resolve_remote_wandb_checkpoint_name "${entity}" "${project}" "${run_id}")"
+    if [[ -n "${model_file}" ]]; then
+      echo "[INFO] Resolved previous W&B run to latest checkpoint: ${model_file}" >&2
+    fi
+  fi
+
+  if [[ -z "${model_file}" ]]; then
+    echo "[ERROR] Could not determine a .pt checkpoint for W&B reference: ${ref}" >&2
+    echo "[ERROR] Pass /files/<checkpoint>.pt or set PREVIOUS_RESUME_MODEL_FILE/PREVIOUS_RESUME_CKPT." >&2
+    return 2
+  fi
+
+  echo "wandb://${entity}/${project}/${run_id}/${model_file}"
+}
+
+if [[ "${RESUME_FROM_PREVIOUS}" == "1" && "${RESUME_FROM_BOX}" == "1" ]]; then
+  echo "[ERROR] --resume-from-previous and --resume-from-box are mutually exclusive." >&2
+  exit 2
+fi
 
 export AS_SUCCESS133_FINAL0P5="${AS_SUCCESS133_FINAL0P5:-1}"
 export RESUME_FROM_BOX
+export RESUME_FROM_PREVIOUS
 if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
-  DEFAULT_BOX_RESUME_RUN=${DEFAULT_BOX_RESUME_RUN:-"https://wandb.ai/zihanw22/boxer/runs/d9m3z369"}
+  DEFAULT_BOX_RESUME_RUN=${DEFAULT_BOX_RESUME_RUN:-"https://wandb.ai/zihanw22/boxer/runs/d9m3z369-recovered"}
   DEFAULT_BOX_RESUME_MODEL_FILE=${DEFAULT_BOX_RESUME_MODEL_FILE:-model_22000.pt}
   BOX_RESUME_MODEL_FILE=${BOX_RESUME_MODEL_FILE:-${DEFAULT_BOX_RESUME_MODEL_FILE}}
   DEFAULT_BOX_RESUME_CHECKPOINT=${DEFAULT_BOX_RESUME_CHECKPOINT:-"${DEFAULT_BOX_RESUME_RUN}/files/${BOX_RESUME_MODEL_FILE}"}
@@ -109,6 +268,27 @@ if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
   export BOX_RESUME_MODEL_FILE
   export DEFAULT_BOX_RESUME_CHECKPOINT
   export BOX_RESUME_CKPT
+fi
+if [[ "${RESUME_FROM_PREVIOUS}" == "1" ]]; then
+  DEFAULT_PREVIOUS_RESUME_RUN=${DEFAULT_PREVIOUS_RESUME_RUN:-"https://wandb.ai/zihanw22/carry-any/runs/swl41n4x"}
+  PREVIOUS_RESUME_RUN=${PREVIOUS_RESUME_RUN:-${DEFAULT_PREVIOUS_RESUME_RUN}}
+  PREVIOUS_RESUME_CKPT=${PREVIOUS_RESUME_CKPT:-${RESUME_FROM_PREVIOUS_CKPT:-${PREVIOUS_RESUME_RUN}}}
+  PREVIOUS_RESUME_CKPT="$(normalize_wandb_checkpoint_ref "${PREVIOUS_RESUME_CKPT}" "${PREVIOUS_RESUME_MODEL_FILE:-}")"
+  case "${PREVIOUS_RESUME_CKPT}" in
+    wandb://*|*.pt)
+      ;;
+    *)
+      echo "[ERROR] PREVIOUS_RESUME_CKPT must resolve to a .pt checkpoint. Got: ${PREVIOUS_RESUME_CKPT}" >&2
+      exit 2
+      ;;
+  esac
+  export RESUME_CKPT="${PREVIOUS_RESUME_CKPT}"
+  unset RESUME_CHECKPOINT
+  unset POLICY_INIT_CKPT
+  unset POLICY_INIT_CHECKPOINT
+  export DEFAULT_PREVIOUS_RESUME_RUN
+  export PREVIOUS_RESUME_RUN
+  export PREVIOUS_RESUME_CKPT
 fi
 SOLID_ALLOWED_OBJECT_CATEGORIES=${SOLID_ALLOWED_OBJECT_CATEGORIES:-'["box","bin","barrel","ball"]'}
 SOLID_ALLOWED_OBJECT_CATEGORIES=$(
@@ -476,6 +656,10 @@ echo "[INFO] selected_solid_clips=${SOLID_SELECTED_CLIP_COUNT} category_counts=$
 echo "[INFO] resume_from_box=${RESUME_FROM_BOX}"
 if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
   echo "[INFO] box_policy_init_checkpoint=${BOX_RESUME_CKPT}"
+fi
+echo "[INFO] resume_from_previous=${RESUME_FROM_PREVIOUS}"
+if [[ "${RESUME_FROM_PREVIOUS}" == "1" ]]; then
+  echo "[INFO] previous_resume_checkpoint=${PREVIOUS_RESUME_CKPT}"
 fi
 
 exec bash "${SCRIPT_DIR}/distill_as_button.sh" "${POSITIONAL[@]}"

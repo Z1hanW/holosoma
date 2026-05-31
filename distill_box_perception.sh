@@ -43,6 +43,7 @@ SCHEDULE_VARIANT=${SCHEDULE_VARIANT:-default}
 ROOT_COMMAND_MODE=${ROOT_COMMAND_MODE:-default}
 CONTACT_AWARE_HISTORY=${CONTACT_AWARE_HISTORY:-0}
 CONTACT_AWARE_HISTORY_LENGTH=${CONTACT_AWARE_HISTORY_LENGTH:-5}
+BAD_TRACKING_THRESHOLD_AUGMENT=${BAD_TRACKING_THRESHOLD_AUGMENT:-${BAD_TRACKING_THRESHOLD_MULTIPLIER:-${BAD_TRACKING_THRESHOLD_SCALE:-1.0}}}
 SHOO7SR1_NEAR03_DEBUG=${SHOO7SR1_NEAR03_DEBUG:-0}
 SHOO7SR1_OBS_VARIANT=${SHOO7SR1_OBS_VARIANT:-baseline}
 PYTHON_BIN=${PYTHON_BIN:-python}
@@ -111,6 +112,36 @@ for file_obj in run.files():
 if best is not None:
     print(best[1])
 PY
+}
+
+normalize_bad_tracking_threshold_augment() {
+  local raw="$1"
+  local norm
+  norm="$(echo "${raw}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  case "${norm}" in
+    1|1.0|1x|1.0x)
+      echo "1.0"
+      ;;
+    1.1|1.1x)
+      echo "1.1"
+      ;;
+    1.2|1.2x)
+      echo "1.2"
+      ;;
+    1.4|1.4x)
+      echo "1.4"
+      ;;
+    *)
+      echo "[ERROR] BAD_TRACKING_THRESHOLD_AUGMENT must be one of: 1.0, 1.1, 1.2, 1.4. Got: ${raw}" >&2
+      exit 2
+      ;;
+  esac
+}
+
+scale_threshold() {
+  local base="$1"
+  local scale="$2"
+  awk -v base="${base}" -v scale="${scale}" 'BEGIN { printf "%.6g", base * scale }'
 }
 
 normalize_checkpoint_ref() {
@@ -1258,6 +1289,13 @@ if [[ "${ROOT_COMMAND_MODE}" == "contact-aware" ]]; then
 fi
 
 START_AT_TIMESTEP_ZERO_PROB_END_ITER=${START_AT_TIMESTEP_ZERO_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS}}
+
+BAD_TRACKING_THRESHOLD_AUGMENT_NORM="$(normalize_bad_tracking_threshold_augment "${BAD_TRACKING_THRESHOLD_AUGMENT}")"
+BAD_TRACKING_REF_POS_THRESHOLD="$(scale_threshold 0.5 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")"
+BAD_TRACKING_REF_ORI_THRESHOLD="$(scale_threshold 0.8 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")"
+BAD_TRACKING_BODY_POS_THRESHOLD="$(scale_threshold 0.25 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")"
+BAD_TRACKING_OBJECT_POS_THRESHOLD="$(scale_threshold 0.25 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")"
+BAD_TRACKING_OBJECT_ORI_THRESHOLD="$(scale_threshold 0.8 "${BAD_TRACKING_THRESHOLD_AUGMENT_NORM}")"
 FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER=${FREEZE_AT_TIMESTEP_ZERO_PROB_END_ITER:-${NUM_LEARNING_ITERATIONS}}
 
 TEACHER_REF_RUN_ID="5vlz6pj8"
@@ -1429,6 +1467,7 @@ echo "[INFO] data_mode=${DATA_MODE}"
 echo "[INFO] tracker_profile=${TRACKER_PROFILE}"
 echo "[INFO] root_command_mode=${ROOT_COMMAND_MODE}"
 echo "[INFO] contact_aware_history=${CONTACT_AWARE_HISTORY} history_length=${CONTACT_AWARE_HISTORY_LENGTH}"
+echo "[INFO] bad_tracking_threshold_augment=${BAD_TRACKING_THRESHOLD_AUGMENT_NORM} thresholds ref_pos=${BAD_TRACKING_REF_POS_THRESHOLD} ref_ori=${BAD_TRACKING_REF_ORI_THRESHOLD} body_pos=${BAD_TRACKING_BODY_POS_THRESHOLD} object_pos=${BAD_TRACKING_OBJECT_POS_THRESHOLD} object_ori=${BAD_TRACKING_OBJECT_ORI_THRESHOLD}"
 echo "[INFO] use_legacy_ds=${LEGACY_DS_ENABLED} prepared=${LEGACY_DS_PREPARED} ds_data_root=${DS_DATA_ROOT}"
 if [[ -n "${MOTION_DIR:-}" ]]; then
   echo "[INFO] motion_dir=${MOTION_DIR}"
@@ -1488,6 +1527,13 @@ if [[ -n "${TEACHER_COMPAT_NOTES}" ]]; then
 fi
 
 EXTRA_DISTILL_ARGS=()
+EXTRA_DISTILL_ARGS+=(
+  --termination.terms.bad-tracking.params.bad-ref-pos-threshold="${BAD_TRACKING_REF_POS_THRESHOLD}"
+  --termination.terms.bad-tracking.params.bad-ref-ori-threshold="${BAD_TRACKING_REF_ORI_THRESHOLD}"
+  --termination.terms.bad-tracking.params.bad-motion-body-pos-threshold="${BAD_TRACKING_BODY_POS_THRESHOLD}"
+  --termination.terms.bad-tracking.params.bad-object-pos-threshold="${BAD_TRACKING_OBJECT_POS_THRESHOLD}"
+  --termination.terms.bad-tracking.params.bad-object-ori-threshold="${BAD_TRACKING_OBJECT_ORI_THRESHOLD}"
+)
 if [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH}" ]]; then
   IFS=',' read -r -a _teacher_obs_key_list <<< "${TEACHER_OBS_KEYS}"
   for _raw_teacher_obs_key in "${_teacher_obs_key_list[@]}"; do

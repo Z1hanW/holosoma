@@ -38,8 +38,10 @@ Defaults:
 
 Useful env vars:
   AS_SUCCESS133_FINAL0P5=0      do not force the success133 AS bank; provide a contact-capable AS bank yourself
-  RESUME_FROM_BOX=1             initialize from a box-button policy; default d9m3z369/model_22000.pt
+  RESUME_FROM_BOX=1             initialize from a box-button policy; default d9m3z369-recovered/model_22000.pt
   BOX_RESUME_CKPT=<checkpoint>  box policy initializer
+  BAD_TRACKING_THRESHOLD_AUGMENT=1.0|1.1|1.2|1.4
+                                  scale bad-tracking termination thresholds from gt/generalist strict values
   RUN_NAME=<name>               override W&B run display name
   TRAINING_NAME=<name>          override log/checkpoint training name
   DRY_RUN=1                     forwarded to the delegated launcher if supported
@@ -117,7 +119,7 @@ AS_SUCCESS133_FINAL0P5="$(normalize_bool AS_SUCCESS133_FINAL0P5 "${AS_SUCCESS133
 RESUME_FROM_BOX="$(normalize_bool RESUME_FROM_BOX "${RESUME_FROM_BOX:-0}")"
 
 if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
-  DEFAULT_BOX_RESUME_RUN=${DEFAULT_BOX_RESUME_RUN:-"https://wandb.ai/zihanw22/boxer/runs/d9m3z369"}
+  DEFAULT_BOX_RESUME_RUN=${DEFAULT_BOX_RESUME_RUN:-"https://wandb.ai/zihanw22/boxer/runs/d9m3z369-recovered"}
   DEFAULT_BOX_RESUME_MODEL_FILE=${DEFAULT_BOX_RESUME_MODEL_FILE:-model_22000.pt}
   BOX_RESUME_MODEL_FILE=${BOX_RESUME_MODEL_FILE:-${DEFAULT_BOX_RESUME_MODEL_FILE}}
   export DEFAULT_BOX_RESUME_RUN
@@ -136,6 +138,9 @@ export AS_CONTACT_AWARE=1
 export ROOT_COMMAND_MODE="${ROOT_COMMAND_MODE:-contact-aware}"
 export SCHEDULE_VARIANT="${SCHEDULE_VARIANT:-ppo_first}"
 export STUDENT_ACTOR_INPUTS="${STUDENT_ACTOR_INPUTS:-['actor_obs_root_contact_aware','actor_obs_drop_button','actor_obs_proprio_with_actions_no_linvel']}"
+export ENABLE_DEFAULT_POSE_PREPEND="${ENABLE_DEFAULT_POSE_PREPEND:-True}"
+export DEFAULT_POSE_PREPEND_DURATION_S="${DEFAULT_POSE_PREPEND_DURATION_S:-0.2}"
+export BAD_TRACKING_THRESHOLD_AUGMENT="${BAD_TRACKING_THRESHOLD_AUGMENT:-1.0}"
 
 if [[ "${CORL_128:-0}" == "1" && "${RESUME_FROM_BOX:-0}" == "1" ]]; then
   export RUN_NAME="${RUN_NAME:-g1_w_object_distill_as_corl128_button_init_box}"
