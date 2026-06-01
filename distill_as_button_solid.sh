@@ -41,7 +41,7 @@ Useful env vars:
   CHECK_ONLY=1               count matching clips in the selected source bank
   RESUME_FROM_BOX=1          initialize policy weights from box-button; default d9m3z369-recovered/model_22000.pt
   BOX_RESUME_CKPT=<checkpoint>  override the box policy initializer
-  RESUME_FROM_PREVIOUS=1     resume full training state from previous AS distill run
+  RESUME_FROM_PREVIOUS=1     initialize actor policy weights from previous AS distill run
   PREVIOUS_RESUME_RUN=<url>  previous run URL; default swl41n4x
   PREVIOUS_RESUME_CKPT=<checkpoint>  explicit previous checkpoint; otherwise latest model_*.pt is used
 EOF
@@ -282,10 +282,14 @@ if [[ "${RESUME_FROM_PREVIOUS}" == "1" ]]; then
       exit 2
       ;;
   esac
-  export RESUME_CKPT="${PREVIOUS_RESUME_CKPT}"
-  unset RESUME_CHECKPOINT
-  unset POLICY_INIT_CKPT
+  export POLICY_INIT_CKPT="${PREVIOUS_RESUME_CKPT}"
   unset POLICY_INIT_CHECKPOINT
+  unset RESUME_CKPT
+  unset RESUME_CHECKPOINT
+  unset WANDB_RUN_ID
+  unset RESUME_WANDB_ID
+  unset WANDB_RESUME
+  export WANDB_RESUME_SAME_RUN=0
   export DEFAULT_PREVIOUS_RESUME_RUN
   export PREVIOUS_RESUME_RUN
   export PREVIOUS_RESUME_CKPT
@@ -659,7 +663,7 @@ if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
 fi
 echo "[INFO] resume_from_previous=${RESUME_FROM_PREVIOUS}"
 if [[ "${RESUME_FROM_PREVIOUS}" == "1" ]]; then
-  echo "[INFO] previous_resume_checkpoint=${PREVIOUS_RESUME_CKPT}"
+  echo "[INFO] previous_policy_init_checkpoint=${PREVIOUS_RESUME_CKPT}"
 fi
 
 exec bash "${SCRIPT_DIR}/distill_as_button.sh" "${POSITIONAL[@]}"
