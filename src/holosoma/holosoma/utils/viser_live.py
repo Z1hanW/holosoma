@@ -1808,6 +1808,46 @@ class ViserLiveViewer:
         self._manual_hw_axes = {"LX": 0, "LY": 1, "RX": 2}
         self._manual_hw_init_attempted = False
         self._manual_hw_warned = False
+        self._auto_forward_after_lift_enabled = os.environ.get("VISER_AUTO_FORWARD_AFTER_LIFT", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        self._auto_forward_after_lift_command = self._parse_float_list_env(
+            "VISER_AUTO_FORWARD_AFTER_LIFT_COMMAND",
+            [0.5, 0.0, 0.0],
+            expected_len=3,
+        )
+        self._auto_forward_after_lift_rel_z_delta = self._float_env(
+            "VISER_AUTO_FORWARD_AFTER_LIFT_REL_Z_DELTA",
+            0.10,
+        )
+        self._auto_forward_after_lift_consecutive_steps = max(
+            1,
+            int(self._float_env("VISER_AUTO_FORWARD_AFTER_LIFT_CONSECUTIVE_STEPS", 5.0)),
+        )
+        self._auto_forward_after_lift_duration_s = self._float_env(
+            "VISER_AUTO_FORWARD_AFTER_LIFT_DURATION_S",
+            8.0,
+        )
+        self._auto_forward_after_lift_log_period_s = 1.0 / max(
+            self._float_env("VISER_AUTO_FORWARD_AFTER_LIFT_LOG_HZ", 20.0),
+            1.0,
+        )
+        self._auto_forward_after_lift_log_path = Path(
+            os.environ.get(
+                "VISER_AUTO_FORWARD_AFTER_LIFT_LOG_PATH",
+                "logs/runtime/viser_auto_forward_after_lift.jsonl",
+            )
+        ).expanduser()
+        self._auto_forward_after_lift_state = "waiting"
+        self._auto_forward_after_lift_baseline_rel_z: float | None = None
+        self._auto_forward_after_lift_ready_count = 0
+        self._auto_forward_after_lift_trigger_time: float | None = None
+        self._auto_forward_after_lift_last_log_time = 0.0
+        self._auto_forward_after_lift_log_handle = None
+        self._auto_forward_after_lift_logged_start = False
         self._clip_start_slider = None
         self._clip_lock_cb = None
         self._perception_enabled = False
@@ -2906,6 +2946,7 @@ class ViserLiveViewer:
             return
         self._pending_control_sync = False
         self._update_manual_root_command()
+        self._update_auto_forward_after_lift()
         self._update_manual_drop_button()
         self._update_manual_object_reset_override()
         if self._reset_visible_requested:
@@ -3085,6 +3126,34 @@ class ViserLiveViewer:
     @staticmethod
     def _wrap_to_pi(angle: float) -> float:
         return float(np.arctan2(np.sin(angle), np.cos(angle)))
+
+    @staticmethod
+    def _float_env(name: str, default: float) -> float:
+        raw = os.environ.get(name)
+        if raw is None or not str(raw).strip():
+            return float(default)
+        try:
+            value = float(str(raw).strip())
+        except Exception:
+            return float(default)
+        return value if np.isfinite(value) else float(default)
+
+    @staticmethod
+    def _parse_float_list_env(name: str, default: list[float], *, expected_len: int) -> list[float]:
+        raw = os.environ.get(name)
+        if raw is None or not str(raw).strip():
+            return list(default)
+        compact = str(raw).strip().replace("[", "").replace("]", "").replace("(", "").replace(")", "")
+        parts = [part.strip() for part in compact.split(",") if part.strip()]
+        values: list[float] = []
+        for part in parts:
+            try:
+                values.append(float(part))
+            except Exception:
+                return list(default)
+        if len(values) != expected_len or any(not np.isfinite(value) for value in values):
+            return list(default)
+        return values
 
     def _set_manual_root_command(
         self,
