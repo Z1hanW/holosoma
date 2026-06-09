@@ -40,14 +40,18 @@ class _DummyMotionCommand:
         self._body_positions_obj = body_positions_obj
         self._body_force_magnitudes = body_force_magnitudes
         self._body_name_to_index = {name: idx for idx, name in enumerate(self._body_names)}
+        self.body_positions_call_count = 0
+        self.force_history_call_count = 0
         if pickup_steps_by_clip is None:
             pickup_steps_by_clip = torch.zeros((len(clip_names),), dtype=torch.long, device=active_clip_indices.device)
         self._pickup_steps_by_clip = pickup_steps_by_clip
 
     def _body_positions_in_object_frame(self, body_indices: torch.Tensor) -> torch.Tensor:
+        self.body_positions_call_count += 1
         return self._body_positions_obj.index_select(1, body_indices.to(dtype=torch.long))
 
     def get_body_object_contact_force_history(self, body_names: list[str]) -> torch.Tensor:
+        self.force_history_call_count += 1
         indices = torch.tensor(
             [self._body_name_to_index[name] for name in body_names],
             device=self._body_positions_obj.device,
@@ -328,6 +332,70 @@ def test_offline_contact_guidance_binary_force_gate_requires_threshold(
 
     reward = term(env)
     assert reward[0].item() == pytest.approx(0.5, rel=1e-5, abs=1e-5)
+
+
+def test_fused_offline_contact_guidance_matches_two_terms_with_shared_measurements(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    env, export_root = _build_test_env(tmp_path, left_force=40.0, right_force=10.0)
+    motion_command = env.command_manager.get_state("motion_command")
+    monkeypatch.setattr(reward_wbt, "_get_motion_command_and_assert_type", lambda _env: motion_command)
+
+    common_params = {
+        "contact_export_root": str(export_root),
+        "region_names": ["left_wrist", "right_wrist"],
+        "position_sigma": 0.05,
+        "force_threshold": 25.0,
+        "force_gate_mode": "binary",
+    }
+    wrist_term = reward_wbt.OfflineContactPointGuidance(
+        RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
+            params={**common_params, "use_force_term": False},
+            weight=1.0,
+        ),
+        env,
+    )
+    contact_term = reward_wbt.OfflineContactPointGuidance(
+        RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
+            params={**common_params, "use_force_term": True},
+            weight=1.0,
+        ),
+        env,
+    )
+    fused_term = reward_wbt.FusedOfflineContactPointGuidance(
+        RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:FusedOfflineContactPointGuidance",
+            params={
+                "contact_export_root": str(export_root),
+                "wrist_region_names": ["left_wrist", "right_wrist"],
+                "contact_region_names": ["left_wrist", "right_wrist"],
+                "position_sigma": 0.05,
+                "force_threshold": 25.0,
+                "force_gate_mode": "binary",
+                "wrist_weight": 3.0,
+                "contact_weight": 4.0,
+            },
+            weight=1.0,
+        ),
+        env,
+    )
+
+    motion_command.body_positions_call_count = 0
+    motion_command.force_history_call_count = 0
+    expected = 3.0 * wrist_term(env) + 4.0 * contact_term(env)
+    separate_body_position_calls = motion_command.body_positions_call_count
+    separate_force_history_calls = motion_command.force_history_call_count
+
+    motion_command.body_positions_call_count = 0
+    motion_command.force_history_call_count = 0
+    fused_reward = fused_term(env)
+
+    torch.testing.assert_close(fused_reward, expected)
+    assert motion_command.body_positions_call_count < separate_body_position_calls
+    assert motion_command.force_history_call_count < separate_force_history_calls
 
 
 def test_offline_contact_guidance_uses_contact_schedule_mask_when_present(

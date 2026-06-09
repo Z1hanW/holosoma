@@ -265,6 +265,36 @@ def _gather_clip_timestep_values(values: torch.Tensor, clip_indices: torch.Tenso
     return torch.gather(per_env_values, 1, gather_index).squeeze(1)
 
 
+def _tensor_step_cache_signature(tensor: torch.Tensor) -> tuple[int, int, int, tuple[int, ...], str]:
+    return (
+        int(tensor.data_ptr()),
+        int(getattr(tensor, "_version", 0)),
+        int(tensor.numel()),
+        tuple(int(dim) for dim in tensor.shape),
+        str(tensor.device),
+    )
+
+
+def _teacher_rollout_sample_cache_key(
+    env: WholeBodyTrackingManager,
+    motion_command: MotionCommand,
+    *,
+    rollout_reference_root: str,
+) -> tuple[object, ...]:
+    resolved_root = _resolve_teacher_rollout_reference_root(rollout_reference_root)
+    root_key = "" if resolved_root is None else str(resolved_root)
+    reward_compute_counter = getattr(env, "_reward_compute_counter", None)
+    if reward_compute_counter is not None:
+        return ("reward_compute", root_key, id(motion_command), int(reward_compute_counter))
+    return (
+        "tensor_signature",
+        root_key,
+        id(motion_command),
+        _tensor_step_cache_signature(motion_command.clip_ids),
+        _tensor_step_cache_signature(motion_command.time_steps),
+    )
+
+
 def _get_teacher_rollout_reference_bank(
     env: WholeBodyTrackingManager,
     motion_command: MotionCommand,
@@ -493,12 +523,23 @@ def _sample_teacher_rollout_reference(
     *,
     rollout_reference_root: str,
 ) -> dict[str, torch.Tensor] | None:
+    sample_cache = getattr(env, "_teacher_rollout_reference_sample_cache", None)
+    if sample_cache is None:
+        sample_cache = {}
+        setattr(env, "_teacher_rollout_reference_sample_cache", sample_cache)
+
+    cache_key = _teacher_rollout_sample_cache_key(env, motion_command, rollout_reference_root=rollout_reference_root)
+    if cache_key in sample_cache:
+        return sample_cache[cache_key]
+    sample_cache.clear()
+
     bank = _get_teacher_rollout_reference_bank(
         env,
         motion_command,
         rollout_reference_root=rollout_reference_root,
     )
     if bank is None:
+        sample_cache[cache_key] = None
         return None
 
     clip_indices = motion_command.clip_ids.to(device=env.device, dtype=torch.long)
@@ -535,6 +576,7 @@ def _sample_teacher_rollout_reference(
         "object_lin_vel_w": _gather_clip_timestep_values(bank["object_lin_vel_w"], clip_indices, safe_steps),
         "object_ang_vel_w": _gather_clip_timestep_values(bank["object_ang_vel_w"], clip_indices, safe_steps),
     }
+    sample_cache[cache_key] = sampled
     return sampled
 
 
@@ -543,6 +585,18 @@ def _teacher_rollout_relative_body_targets(
     motion_command: MotionCommand,
     sampled_reference: dict[str, torch.Tensor],
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    reward_compute_counter = getattr(env, "_reward_compute_counter", None)
+    cache_key = None
+    if reward_compute_counter is not None:
+        cache_key = (id(sampled_reference), id(motion_command), int(reward_compute_counter))
+        cache = getattr(env, "_teacher_rollout_relative_body_targets_cache", None)
+        if cache is None:
+            cache = {}
+            setattr(env, "_teacher_rollout_relative_body_targets_cache", cache)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
     num_bodies = int(sampled_reference["body_pos_w"].shape[1])
     episode_length_buf = getattr(env, "episode_length_buf", None)
     if episode_length_buf is None:
@@ -571,6 +625,9 @@ def _teacher_rollout_relative_body_targets(
         + delta_pos_w_height
         + quat_apply(delta_quat_w, sampled_reference["body_pos_w"] - ref_pos_w_repeat, w_last=True)
     )
+    if cache_key is not None:
+        cache.clear()
+        cache[cache_key] = (relative_body_pos_w, relative_body_quat_w)
     return relative_body_pos_w, relative_body_quat_w
 
 
@@ -987,6 +1044,10 @@ class OfflineContactPointGuidance(RewardTermBase):
         self._region_force_body_names: dict[str, list[str]] = {}
         self._region_position_body_names: dict[str, list[str]] = {}
         self._region_position_body_indices: dict[str, torch.Tensor] = {}
+        self._measurement_body_names: list[str] = []
+        self._measurement_body_indices = torch.empty(0, device=self.env.device, dtype=torch.long)
+        self._region_force_measurement_indices: dict[str, torch.Tensor] = {}
+        self._region_position_measurement_indices: dict[str, torch.Tensor] = {}
         self._configure_region_measurements()
 
         self.contact_export_root = self._resolve_contact_export_root(str(cfg.params.get("contact_export_root", "")))
@@ -1066,6 +1127,43 @@ class OfflineContactPointGuidance(RewardTermBase):
                     force_names,
                     position_names,
                 )
+
+        measurement_body_names: list[str] = []
+        measurement_body_name_to_index: dict[str, int] = {}
+        for region_name in self.region_names:
+            body_names = [
+                *self._region_force_body_names.get(region_name, []),
+                *self._region_position_body_names.get(region_name, []),
+            ]
+            for body_name in body_names:
+                if body_name in measurement_body_name_to_index:
+                    continue
+                measurement_body_name_to_index[body_name] = len(measurement_body_names)
+                measurement_body_names.append(body_name)
+
+        self._measurement_body_names = measurement_body_names
+        self._measurement_body_indices = torch.tensor(
+            [body_name_to_index[name] for name in measurement_body_names],
+            device=self.env.device,
+            dtype=torch.long,
+        )
+        for region_name in self.region_names:
+            force_indices = [
+                measurement_body_name_to_index[name] for name in self._region_force_body_names.get(region_name, [])
+            ]
+            position_indices = [
+                measurement_body_name_to_index[name] for name in self._region_position_body_names.get(region_name, [])
+            ]
+            self._region_force_measurement_indices[region_name] = torch.tensor(
+                force_indices,
+                device=self.env.device,
+                dtype=torch.long,
+            )
+            self._region_position_measurement_indices[region_name] = torch.tensor(
+                position_indices,
+                device=self.env.device,
+                dtype=torch.long,
+            )
 
     def _ensure_motion_command_and_contact_bank(self) -> MotionCommand | None:
         if self.motion_command is None:
@@ -1264,36 +1362,33 @@ class OfflineContactPointGuidance(RewardTermBase):
         if not self.motion_command.motion.has_object:
             return current_force, current_position
 
-        for region_idx, region_name in enumerate(self.region_names):
-            force_body_names = self._region_force_body_names.get(region_name, [])
-            if force_body_names:
-                force_history = self.motion_command.get_body_object_contact_force_history(force_body_names)
-                if force_history.shape[2] > 0:
-                    per_body_force = torch.max(torch.norm(force_history, dim=-1), dim=1)[0]
-                    current_force[:, region_idx] = torch.max(per_body_force, dim=1)[0]
+        if self._measurement_body_names:
+            all_force_history = self.motion_command.get_body_object_contact_force_history(self._measurement_body_names)
+            all_force_magnitude = torch.amax(torch.linalg.norm(all_force_history, dim=-1), dim=1)
+        else:
+            all_force_magnitude = torch.zeros((num_envs, 0), device=self.env.device, dtype=torch.float32)
 
-            position_body_indices = self._region_position_body_indices.get(region_name)
-            if position_body_indices is None or position_body_indices.numel() == 0:
+        if self._measurement_body_indices.numel() > 0:
+            all_relative_positions = self.motion_command._body_positions_in_object_frame(self._measurement_body_indices)
+        else:
+            all_relative_positions = torch.zeros((num_envs, 0, 3), device=self.env.device, dtype=torch.float32)
+
+        for region_idx, region_name in enumerate(self.region_names):
+            force_measurement_indices = self._region_force_measurement_indices.get(region_name)
+            if force_measurement_indices is not None and force_measurement_indices.numel() > 0:
+                region_force = all_force_magnitude.index_select(1, force_measurement_indices)
+                current_force[:, region_idx] = torch.amax(region_force, dim=1)
+
+            position_measurement_indices = self._region_position_measurement_indices.get(region_name)
+            if position_measurement_indices is None or position_measurement_indices.numel() == 0:
                 continue
 
-            relative_positions = self.motion_command._body_positions_in_object_frame(position_body_indices)
-            position_body_names = self._region_position_body_names.get(region_name, [])
-            if position_body_names:
-                position_force_history = self.motion_command.get_body_object_contact_force_history(position_body_names)
-                if position_force_history.shape[2] == relative_positions.shape[1]:
-                    position_force_weights = torch.max(torch.norm(position_force_history, dim=-1), dim=1)[0]
-                else:
-                    position_force_weights = torch.zeros(
-                        (num_envs, relative_positions.shape[1]),
-                        device=self.env.device,
-                        dtype=torch.float32,
-                    )
-            else:
-                position_force_weights = torch.zeros(
-                    (num_envs, relative_positions.shape[1]),
-                    device=self.env.device,
-                    dtype=torch.float32,
-                )
+            relative_positions = all_relative_positions.index_select(1, position_measurement_indices)
+            if relative_positions.shape[1] == 1:
+                current_position[:, region_idx] = relative_positions[:, 0]
+                continue
+
+            position_force_weights = all_force_magnitude.index_select(1, position_measurement_indices)
 
             uniform_weights = torch.full_like(
                 position_force_weights,
@@ -1396,6 +1491,42 @@ class OfflineContactPointGuidance(RewardTermBase):
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         pass
 
+    @staticmethod
+    def _compute_guidance_reward_from_min_distance(
+        *,
+        min_distance: torch.Tensor,
+        current_force: torch.Tensor,
+        active_regions: torch.Tensor,
+        position_sigma: float,
+        use_force_term: bool,
+        force_threshold: float,
+        force_sigma: float,
+        force_gate_mode: str,
+        region_indices: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if region_indices is not None:
+            min_distance = min_distance.index_select(1, region_indices)
+            current_force = current_force.index_select(1, region_indices)
+            active_regions = active_regions.index_select(1, region_indices)
+
+        position_term = torch.exp(-min_distance / max(float(position_sigma), 1.0e-6))
+        if use_force_term:
+            if force_gate_mode == "binary":
+                force_term = (current_force >= force_threshold).to(dtype=torch.float32)
+            elif force_gate_mode == "soft":
+                force_term = torch.exp((current_force - force_threshold) / max(float(force_sigma), 1.0e-6)).clamp(
+                    max=1.0
+                )
+            else:
+                raise ValueError(f"Unsupported force_gate_mode '{force_gate_mode}'. Expected one of: ['soft', 'binary'].")
+            per_region_reward = position_term * force_term
+        else:
+            per_region_reward = position_term
+
+        active_region_weights = active_regions.to(dtype=torch.float32)
+        active_region_count = active_region_weights.sum(dim=1)
+        return (per_region_reward * active_region_weights).sum(dim=1) / active_region_count.clamp_min(1.0)
+
     def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
         motion_command = self._ensure_motion_command_and_contact_bank()
         if (
@@ -1416,34 +1547,134 @@ class OfflineContactPointGuidance(RewardTermBase):
         active_regions = self._clip_region_has_targets.index_select(0, clip_indices)
         if self.use_contact_schedule:
             active_regions = active_regions & self._reference_contact_schedule_mask(clip_indices)
-        if not active_regions.any():
-            return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
 
         distances = torch.linalg.norm(target_points - current_position.unsqueeze(2), dim=-1)
         inf_fill = torch.full_like(distances, float("inf"))
         distances = torch.where(point_mask, distances, inf_fill)
         min_distance = distances.min(dim=-1).values
 
-        position_term = torch.exp(-min_distance / max(self.position_sigma, 1.0e-6))
-        if self.use_force_term:
-            if self.force_gate_mode == "binary":
-                force_term = (current_force >= self.force_threshold).to(dtype=torch.float32)
-            else:
-                force_term = torch.exp((current_force - self.force_threshold) / max(self.force_sigma, 1.0e-6)).clamp(
-                    max=1.0
-                )
-            per_region_reward = position_term * force_term
-        else:
-            per_region_reward = position_term
+        return self._compute_guidance_reward_from_min_distance(
+            min_distance=min_distance,
+            current_force=current_force,
+            active_regions=active_regions,
+            position_sigma=self.position_sigma,
+            use_force_term=self.use_force_term,
+            force_threshold=self.force_threshold,
+            force_sigma=self.force_sigma,
+            force_gate_mode=self.force_gate_mode,
+        )
 
-        active_region_weights = active_regions.to(dtype=torch.float32)
-        active_region_count = active_region_weights.sum(dim=1)
+
+class FusedOfflineContactPointGuidance(OfflineContactPointGuidance):
+    """Combine wrist target guidance and force-gated contact guidance in one pass."""
+
+    def __init__(self, cfg: RewardTermCfg, env: WholeBodyTrackingManager):
+        raw_params = dict(cfg.params)
+        wrist_region_names = self._normalize_region_names(
+            raw_params.get("wrist_region_names", ["left_wrist", "right_wrist"])
+        )
+        contact_region_names = self._normalize_region_names(
+            raw_params.get("contact_region_names", raw_params.get("region_names", wrist_region_names))
+        )
+
+        union_region_names: list[str] = []
+        seen_region_names: set[str] = set()
+        for region_name in [*wrist_region_names, *contact_region_names]:
+            if region_name in seen_region_names:
+                continue
+            union_region_names.append(region_name)
+            seen_region_names.add(region_name)
+
+        base_params = dict(raw_params)
+        base_params["region_names"] = union_region_names
+        base_cfg = RewardTermCfg(func=cfg.func, params=base_params, weight=cfg.weight, tags=cfg.tags)
+        super().__init__(base_cfg, env)
+
+        region_to_index = {region_name: idx for idx, region_name in enumerate(self.region_names)}
+        self._wrist_region_indices = torch.tensor(
+            [region_to_index[region_name] for region_name in wrist_region_names],
+            device=self.env.device,
+            dtype=torch.long,
+        )
+        self._contact_region_indices = torch.tensor(
+            [region_to_index[region_name] for region_name in contact_region_names],
+            device=self.env.device,
+            dtype=torch.long,
+        )
+
+        self.wrist_weight = float(raw_params.get("wrist_weight", raw_params.get("target_weight", 0.0)))
+        self.contact_weight = float(raw_params.get("contact_weight", 1.0))
+        self.wrist_position_sigma = float(raw_params.get("wrist_position_sigma", raw_params.get("position_sigma", 0.05)))
+        self.contact_position_sigma = float(
+            raw_params.get("contact_position_sigma", raw_params.get("position_sigma", 0.05))
+        )
+        self.contact_force_threshold = float(
+            raw_params.get("contact_force_threshold", raw_params.get("force_threshold", 1.7))
+        )
+        self.contact_force_sigma = float(raw_params.get("contact_force_sigma", raw_params.get("force_sigma", 10.0)))
+        self.contact_use_force_term = bool(raw_params.get("contact_use_force_term", raw_params.get("use_force_term", True)))
+        self.contact_force_gate_mode = str(
+            raw_params.get("contact_force_gate_mode", raw_params.get("force_gate_mode", "binary"))
+        ).strip().lower()
+        if self.contact_force_gate_mode not in {"soft", "binary"}:
+            raise ValueError(
+                "Unsupported contact_force_gate_mode "
+                f"'{self.contact_force_gate_mode}'. Expected one of: ['soft', 'binary']."
+            )
+
+    def __call__(self, env: WholeBodyTrackingManager, **kwargs) -> torch.Tensor:
+        motion_command = self._ensure_motion_command_and_contact_bank()
+        if (
+            motion_command is None
+            or
+            not self._contact_bank_available
+            or self._clip_region_points is None
+            or self._clip_region_point_mask is None
+            or self._clip_region_has_targets is None
+            or not motion_command.motion.has_object
+        ):
+            return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+
+        current_force, current_position = self._compute_current_region_measurements()
+        clip_indices = motion_command.clip_ids.to(device=env.device, dtype=torch.long)
+        target_points = self._clip_region_points.index_select(0, clip_indices)
+        point_mask = self._clip_region_point_mask.index_select(0, clip_indices)
+        active_regions = self._clip_region_has_targets.index_select(0, clip_indices)
+        if self.use_contact_schedule:
+            active_regions = active_regions & self._reference_contact_schedule_mask(clip_indices)
+
+        distances = torch.linalg.norm(target_points - current_position.unsqueeze(2), dim=-1)
+        inf_fill = torch.full_like(distances, float("inf"))
+        distances = torch.where(point_mask, distances, inf_fill)
+        min_distance = distances.min(dim=-1).values
+
         reward = torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
-        valid_env_mask = active_region_count > 0.0
-        if valid_env_mask.any():
-            reward[valid_env_mask] = (
-                per_region_reward[valid_env_mask] * active_region_weights[valid_env_mask]
-            ).sum(dim=1) / active_region_count[valid_env_mask].clamp_min(1.0)
+        if self.wrist_weight != 0.0:
+            wrist_reward = self._compute_guidance_reward_from_min_distance(
+                min_distance=min_distance,
+                current_force=current_force,
+                active_regions=active_regions,
+                position_sigma=self.wrist_position_sigma,
+                use_force_term=False,
+                force_threshold=self.contact_force_threshold,
+                force_sigma=self.contact_force_sigma,
+                force_gate_mode=self.contact_force_gate_mode,
+                region_indices=self._wrist_region_indices,
+            )
+            reward = reward + self.wrist_weight * wrist_reward
+        if self.contact_weight != 0.0:
+            contact_reward = self._compute_guidance_reward_from_min_distance(
+                min_distance=min_distance,
+                current_force=current_force,
+                active_regions=active_regions,
+                position_sigma=self.contact_position_sigma,
+                use_force_term=self.contact_use_force_term,
+                force_threshold=self.contact_force_threshold,
+                force_sigma=self.contact_force_sigma,
+                force_gate_mode=self.contact_force_gate_mode,
+                region_indices=self._contact_region_indices,
+            )
+            reward = reward + self.contact_weight * contact_reward
 
         return reward
 

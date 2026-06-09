@@ -282,7 +282,6 @@ for term in "${rollout_ref_terms[@]}"; do
   reward_root_args+=("--reward.terms.${term}.params.rollout_reference_root=${TEACHER_CLIPS_ROOT}")
 done
 reward_root_args+=(
-  "--reward.terms.offline_wrist_target_guidance.params.contact_export_root=${TEACHER_CLIPS_ROOT}"
   "--reward.terms.offline_contact_guidance.params.contact_export_root=${TEACHER_CLIPS_ROOT}"
 )
 

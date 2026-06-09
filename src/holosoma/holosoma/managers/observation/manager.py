@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import torch
 
@@ -44,9 +44,38 @@ class ObservationManager:
 
         # History buffers: group_name -> term_name -> deque
         self._history_buffers: dict[str, dict[str, deque]] = {}
+        self._active_group_names: tuple[str, ...] | None = None
 
         # Initialize groups
         self._initialize_groups()
+
+    def set_active_groups(self, group_names: Iterable[str] | None) -> None:
+        """Restrict runtime observation computation to selected groups."""
+        if group_names is None:
+            self._active_group_names = None
+            return
+
+        ordered: list[str] = []
+        seen: set[str] = set()
+        missing: list[str] = []
+        for group_name in group_names:
+            if group_name in seen:
+                continue
+            seen.add(group_name)
+            if group_name not in self.cfg.groups:
+                missing.append(group_name)
+                continue
+            ordered.append(group_name)
+
+        if missing:
+            raise KeyError(f"Observation group(s) not found: {missing}")
+        if not ordered:
+            raise ValueError("Active observation groups cannot be empty.")
+        self._active_group_names = tuple(ordered)
+
+    @property
+    def active_group_names(self) -> tuple[str, ...] | None:
+        return self._active_group_names
 
     def _initialize_groups(self) -> None:
         """Initialize observation groups and resolve term functions."""
@@ -87,8 +116,16 @@ class ObservationManager:
             Mapping from group names to observation tensors or dictionaries of tensors.
         """
         obs_dict = {}
-        for group_name in self.cfg.groups:
-            obs_dict[group_name] = self.compute_group(group_name, modify_history=modify_history)
+        group_names = self._active_group_names if self._active_group_names is not None else self.cfg.groups
+        timing = getattr(self.env, "step_timing", None)
+        if not getattr(timing, "enabled", False):
+            timing = None
+        for group_name in group_names:
+            if timing is None:
+                obs_dict[group_name] = self.compute_group(group_name, modify_history=modify_history)
+            else:
+                with timing.record(f"post/observations/group/{group_name}"):
+                    obs_dict[group_name] = self.compute_group(group_name, modify_history=modify_history)
         return obs_dict
 
     def compute_group(self, group_name: str, *, modify_history: bool = True) -> torch.Tensor | dict[str, torch.Tensor]:
@@ -114,16 +151,18 @@ class ObservationManager:
         group_cfg = self.cfg.groups[group_name]
         obs_tensors = {}
 
+        clone_term_result = group_cfg.history_length > 1 or not group_cfg.concatenate
         for term_name, term_cfg in group_cfg.terms.items():
             # 1. Compute base observation
-            obs = self._compute_term(group_name, term_name, term_cfg)
+            obs = self._compute_term(group_name, term_name, term_cfg, clone_result=clone_term_result)
 
             # 2. Apply noise (matches direct: noise before scaling)
             if group_cfg.enable_noise and term_cfg.noise > 0:
                 obs = self._apply_noise(obs, term_cfg.noise)
 
             # 3. Apply scaling (matches direct: scale after noise)
-            obs = self._apply_scale(obs, term_cfg.scale)
+            if not self._is_unity_scale(term_cfg.scale):
+                obs = self._apply_scale(obs, term_cfg.scale)
 
             # 4. Apply clipping (if specified)
             if term_cfg.clip is not None:
@@ -143,7 +182,14 @@ class ObservationManager:
             return torch.cat([obs_tensors[key] for key in sorted_keys], dim=-1)
         return obs_tensors
 
-    def _compute_term(self, group_name: str, term_name: str, term_cfg: ObsTermCfg) -> torch.Tensor:
+    def _compute_term(
+        self,
+        group_name: str,
+        term_name: str,
+        term_cfg: ObsTermCfg,
+        *,
+        clone_result: bool = True,
+    ) -> torch.Tensor:
         """Compute a single observation term.
 
         Parameters
@@ -170,7 +216,13 @@ class ObservationManager:
             func = self._term_funcs[group_name][term_name]
             obs = func(self.env, **term_cfg.params)
 
-        return obs.clone()
+        if clone_result:
+            return obs.clone()
+        return obs
+
+    @staticmethod
+    def _is_unity_scale(scale: float | tuple) -> bool:
+        return isinstance(scale, (int, float)) and not isinstance(scale, bool) and float(scale) == 1.0
 
     def _apply_noise(self, obs: torch.Tensor, noise_scale: float) -> torch.Tensor:
         """Apply uniform observation noise.
@@ -314,7 +366,7 @@ class ObservationManager:
                 total_dim = 0
                 for term_name, term_cfg in group_cfg.terms.items():
                     # Compute term once to get its dimension
-                    obs = self._compute_term(group_name, term_name, term_cfg)
+                    obs = self._compute_term(group_name, term_name, term_cfg, clone_result=False)
                     term_dim = obs.shape[1]
 
                     # Account for history at group level
@@ -326,7 +378,7 @@ class ObservationManager:
             else:
                 # Return dict of individual dimensions
                 term_dims: dict[str, int] = {
-                    term_name: self._compute_term(group_name, term_name, term_cfg).shape[1]
+                    term_name: self._compute_term(group_name, term_name, term_cfg, clone_result=False).shape[1]
                     for term_name, term_cfg in group_cfg.terms.items()
                 }
                 dims[group_name] = term_dims
@@ -359,7 +411,7 @@ class ObservationManager:
         current_index = 0
         for term_name in sorted(group_cfg.terms.keys()):
             term_cfg = group_cfg.terms[term_name]
-            obs = self._compute_term(group_name, term_name, term_cfg)
+            obs = self._compute_term(group_name, term_name, term_cfg, clone_result=False)
             term_dim = obs.shape[1]
             if group_cfg.history_length > 1:
                 term_dim *= group_cfg.history_length

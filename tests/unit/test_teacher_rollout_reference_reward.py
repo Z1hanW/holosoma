@@ -223,3 +223,86 @@ def test_teacher_rollout_global_body_lin_vel_reward_uses_exported_rollout(
     assert reward.shape == (2,)
     assert reward[0].item() == pytest.approx(1.0, rel=1e-5, abs=1e-5)
     assert reward[1].item() < 0.1
+
+
+def test_teacher_rollout_reference_sample_is_cached_within_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    env, motion_command, export_root = _build_env(tmp_path)
+    monkeypatch.setattr(reward_wbt, "_get_motion_command_and_assert_type", lambda _env: motion_command)
+
+    gather_call_count = 0
+    original_gather = reward_wbt._gather_clip_timestep_values
+
+    def _counting_gather(values: torch.Tensor, clip_indices: torch.Tensor, time_steps: torch.Tensor) -> torch.Tensor:
+        nonlocal gather_call_count
+        gather_call_count += 1
+        return original_gather(values, clip_indices, time_steps)
+
+    monkeypatch.setattr(reward_wbt, "_gather_clip_timestep_values", _counting_gather)
+
+    reward_wbt.teacher_rollout_global_ref_position_error_exp(
+        env,
+        sigma=0.1,
+        rollout_reference_root=str(export_root),
+    )
+    first_call_gathers = gather_call_count
+    assert first_call_gathers > 0
+
+    reward_wbt.teacher_rollout_global_ref_orientation_error_exp(
+        env,
+        sigma=0.1,
+        rollout_reference_root=str(export_root),
+    )
+    assert gather_call_count == first_call_gathers
+
+    motion_command.time_steps += 1
+    reward_wbt.teacher_rollout_global_ref_orientation_error_exp(
+        env,
+        sigma=0.1,
+        rollout_reference_root=str(export_root),
+    )
+    assert gather_call_count > first_call_gathers
+
+
+def test_teacher_rollout_relative_targets_are_cached_within_reward_compute(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    env, motion_command, export_root = _build_env(tmp_path)
+    env._reward_compute_counter = 1
+    monkeypatch.setattr(reward_wbt, "_get_motion_command_and_assert_type", lambda _env: motion_command)
+
+    quat_apply_call_count = 0
+    original_quat_apply = reward_wbt.quat_apply
+
+    def _counting_quat_apply(quat: torch.Tensor, vec: torch.Tensor, *, w_last: bool = True) -> torch.Tensor:
+        nonlocal quat_apply_call_count
+        quat_apply_call_count += 1
+        return original_quat_apply(quat, vec, w_last=w_last)
+
+    monkeypatch.setattr(reward_wbt, "quat_apply", _counting_quat_apply)
+
+    reward_wbt.teacher_rollout_relative_body_position_error_exp(
+        env,
+        sigma=0.1,
+        rollout_reference_root=str(export_root),
+    )
+    first_call_quat_apply_count = quat_apply_call_count
+    assert first_call_quat_apply_count > 0
+
+    reward_wbt.teacher_rollout_relative_body_orientation_error_exp(
+        env,
+        sigma=0.1,
+        rollout_reference_root=str(export_root),
+    )
+    assert quat_apply_call_count == first_call_quat_apply_count
+
+    env._reward_compute_counter += 1
+    reward_wbt.teacher_rollout_relative_body_orientation_error_exp(
+        env,
+        sigma=0.1,
+        rollout_reference_root=str(export_root),
+    )
+    assert quat_apply_call_count > first_call_quat_apply_count

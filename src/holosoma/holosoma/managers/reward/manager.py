@@ -147,18 +147,33 @@ class RewardManager:
         """
         # Reset computation
         self._reward_buf[:] = 0.0
+        self.env._reward_compute_counter = int(getattr(self.env, "_reward_compute_counter", 0)) + 1
+        timing = getattr(self.env, "step_timing", None)
+        if not getattr(timing, "enabled", False):
+            timing = None
 
         # Iterate over all reward terms
         for term_name, term_cfg in zip(self._term_names, self._term_cfgs):
             # Compute raw reward value
-            if term_name in self._term_instances:
-                # Stateful term
-                instance = self._term_instances[term_name]
-                rew_raw = instance(self.env, **term_cfg.params)
+            if timing is None:
+                if term_name in self._term_instances:
+                    # Stateful term
+                    instance = self._term_instances[term_name]
+                    rew_raw = instance(self.env, **term_cfg.params)
+                else:
+                    # Stateless function
+                    func = self._term_funcs[term_name]
+                    rew_raw = func(self.env, **term_cfg.params)
             else:
-                # Stateless function
-                func = self._term_funcs[term_name]
-                rew_raw = func(self.env, **term_cfg.params)
+                with timing.record(f"post/reward/term/{term_name}"):
+                    if term_name in self._term_instances:
+                        # Stateful term
+                        instance = self._term_instances[term_name]
+                        rew_raw = instance(self.env, **term_cfg.params)
+                    else:
+                        # Stateless function
+                        func = self._term_funcs[term_name]
+                        rew_raw = func(self.env, **term_cfg.params)
 
             # Validate shape
             if rew_raw.shape[0] != self.env.num_envs:

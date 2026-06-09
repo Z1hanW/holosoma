@@ -191,7 +191,6 @@ class IsaacSim(BaseSimulator):
         self._required_object_contact_sensor_body_names = self._resolve_required_object_contact_sensor_body_names(
             tyro_config
         )
-
         # Patch buffer overflow in PhysX GPU narrow phase is sensitive to contact density.
         # Keep a safer default than IsaacLab's default for large multi-env object training.
         gpu_max_rigid_contact_count = getattr(self.simulator_config.sim.physx, "gpu_max_rigid_contact_count", None)
@@ -1331,7 +1330,7 @@ class IsaacSim(BaseSimulator):
             update_period=0.005,
             track_air_time=True,
             force_threshold=10.0,
-            debug_vis=True,
+            debug_vis=bool(self.simulator_config.debug_viz and not self.training_config.headless),
         )
 
         terrain_state = self.terrain_manager.get_state("locomotion_terrain")
@@ -2223,34 +2222,66 @@ class IsaacSim(BaseSimulator):
 
     def simulate_at_each_physics_step(self):
         self._sim_step_counter += 1
+        timing = getattr(self, "step_timing", None)
+        if not getattr(timing, "enabled", False):
+            timing = None
         # Only render if actively recording (not just if video recorder exists)
         has_video_recording = self.video_recorder is not None and self.video_recorder.is_recording
         is_rendering = self.sim.has_gui() or self.sim.has_rtx_sensors() or has_video_recording
 
         # Apply virtual gantry forces before physics step
         if self.virtual_gantry:
-            self.virtual_gantry.step()
+            if timing is None:
+                self.virtual_gantry.step()
+            else:
+                with timing.record("physics/sim/virtual_gantry"):
+                    self.virtual_gantry.step()
 
         # Step bridge for updated torques before physics step using base class helper
-        self._step_bridge()
+        if timing is None:
+            self._step_bridge()
+        else:
+            with timing.record("physics/sim/bridge"):
+                self._step_bridge()
 
-        self.scene.write_data_to_sim()
+        if timing is None:
+            self.scene.write_data_to_sim()
+        else:
+            with timing.record("physics/sim/write_data_to_sim"):
+                self._write_scene_data_to_sim_for_timing(timing)
 
         # simulate
-        self.sim.step(render=False)
+        if timing is None:
+            self.sim.step(render=False)
+        else:
+            with timing.record("physics/sim/step"):
+                self.sim.step(render=False)
 
         # Render between steps only IF the GUI or sensor need it
         # note: we assume the render interval to be the shortest accepted rendering interval.
         #    If a camera needs rendering at a faster frequency, this will lead to unexpected behavior.
         if self._sim_step_counter % self.simulator_config.sim.render_interval == 0 and is_rendering:
-            self.render()
+            if timing is None:
+                self.render()
+            else:
+                with timing.record("physics/sim/render"):
+                    self.render()
 
         # update buffers at sim
-        self.scene.update(dt=1.0 / self.simulator_config.sim.fps)
+        if timing is None:
+            self.scene.update(dt=1.0 / self.simulator_config.sim.fps)
+        else:
+            with timing.record("physics/sim/scene_update"):
+                self.scene.update(dt=1.0 / self.simulator_config.sim.fps)
 
         # Need to update these tensors after each step, since they are used in `_apply_force_in_physics_step`
-        self.dof_pos = self._robot.data.joint_pos[:, self.dof_ids]  # (num_envs, num_dof)
-        self.dof_vel = self._robot.data.joint_vel[:, self.dof_ids]
+        if timing is None:
+            self.dof_pos = self._robot.data.joint_pos[:, self.dof_ids]  # (num_envs, num_dof)
+            self.dof_vel = self._robot.data.joint_vel[:, self.dof_ids]
+        else:
+            with timing.record("physics/sim/update_dof_refs"):
+                self.dof_pos = self._robot.data.joint_pos[:, self.dof_ids]  # (num_envs, num_dof)
+                self.dof_vel = self._robot.data.joint_vel[:, self.dof_ids]
 
         # Update accelerations ONLY if bridge is enabled
         if self.simulator_config.bridge.enabled:
@@ -2265,7 +2296,65 @@ class IsaacSim(BaseSimulator):
 
         # Call video recorder capture frame if recording is active
         if self.video_recorder:
-            self.capture_video_frame()
+            if timing is None:
+                self.capture_video_frame()
+            else:
+                with timing.record("physics/sim/video_capture"):
+                    self.capture_video_frame()
+
+    def _write_scene_data_to_sim_for_timing(self, timing):
+        """Mirror InteractiveScene.write_data_to_sim while splitting robot/non-robot cost."""
+        with timing.record("physics/sim/write_robot_to_sim"):
+            self._write_robot_data_to_sim_for_timing(timing)
+
+        with timing.record("physics/sim/write_nonrobot_to_sim"):
+            self._write_nonrobot_data_to_sim()
+
+    def _write_nonrobot_data_to_sim(self) -> None:
+        for articulation in self.scene.articulations.values():
+            if articulation is self._robot:
+                continue
+            articulation.write_data_to_sim()
+        for deformable_object in self.scene.deformable_objects.values():
+            deformable_object.write_data_to_sim()
+        for rigid_object in self.scene.rigid_objects.values():
+            rigid_object.write_data_to_sim()
+        for surface_gripper in self.scene.surface_grippers.values():
+            surface_gripper.write_data_to_sim()
+        for rigid_object_collection in self.scene.rigid_object_collections.values():
+            rigid_object_collection.write_data_to_sim()
+
+    def _write_robot_data_to_sim_for_timing(self, timing):
+        """Mirror Articulation.write_data_to_sim while exposing the dominant robot costs."""
+        robot = self._robot
+
+        if robot.has_external_wrench:
+            with timing.record("physics/sim/robot/external_wrench"):
+                if robot.uses_external_wrench_positions:
+                    robot.root_physx_view.apply_forces_and_torques_at_position(
+                        force_data=robot._external_force_b.view(-1, 3),
+                        torque_data=robot._external_torque_b.view(-1, 3),
+                        position_data=robot._external_wrench_positions_b.view(-1, 3),
+                        indices=robot._ALL_INDICES,
+                        is_global=robot._use_global_wrench_frame,
+                    )
+                else:
+                    robot.root_physx_view.apply_forces_and_torques_at_position(
+                        force_data=robot._external_force_b.view(-1, 3),
+                        torque_data=robot._external_torque_b.view(-1, 3),
+                        position_data=None,
+                        indices=robot._ALL_INDICES,
+                        is_global=robot._use_global_wrench_frame,
+                    )
+
+        with timing.record("physics/sim/robot/apply_actuator_model"):
+            robot._apply_actuator_model()
+        with timing.record("physics/sim/robot/set_dof_forces"):
+            robot.root_physx_view.set_dof_actuation_forces(robot._joint_effort_target_sim, robot._ALL_INDICES)
+        if robot._has_implicit_actuators:
+            with timing.record("physics/sim/robot/set_implicit_targets"):
+                robot.root_physx_view.set_dof_position_targets(robot._joint_pos_target_sim, robot._ALL_INDICES)
+                robot.root_physx_view.set_dof_velocity_targets(robot._joint_vel_target_sim, robot._ALL_INDICES)
 
     def setup_viewer(self):
         self.viewer = self.viewport_camera_controller

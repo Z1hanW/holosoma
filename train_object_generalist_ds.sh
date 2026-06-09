@@ -2324,6 +2324,7 @@ if [[ -n "${TEACHER_ROLLOUT_REFERENCE_ROOT}" ]]; then
 fi
 echo "[INFO] HOLOSOMA_OBJECT_SPAWN_MODE=${HOLOSOMA_OBJECT_SPAWN_MODE}"
 echo "[INFO] HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK=${HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK}"
+echo "[INFO] HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS=${HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS:-<sim-default>}"
 if [[ -n "${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}" ]]; then
   echo "[INFO] perception_object_geometry_mode=${PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE}"
 fi
@@ -2404,7 +2405,6 @@ if [[ "${USE_TEACHER_ROLLOUT_REWARD}" == "1" ]]; then
       --reward.terms.teacher-rollout-global-body-ang-vel.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
       --reward.terms.teacher-rollout-object-global-ref-position-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
       --reward.terms.teacher-rollout-object-global-ref-orientation-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
-      --reward.terms.offline-wrist-target-guidance.params.contact-export-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
       --reward.terms.offline-contact-guidance.params.contact-export-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
     )
   fi
@@ -2430,18 +2430,16 @@ else
 fi
 if [[ "${USE_OFFLINE_CONTACT_GUIDANCE}" == "1" ]]; then
   train_cmd+=(
-    --reward.terms.offline-wrist-target-guidance.weight="${OFFLINE_WRIST_TARGET_GUIDANCE_WEIGHT}"
-    --reward.terms.offline-contact-guidance.weight="${OFFLINE_CONTACT_GUIDANCE_WEIGHT}"
-    --reward.terms.offline-wrist-target-guidance.params.position-sigma="${OFFLINE_CONTACT_POSITION_SIGMA}"
+    --reward.terms.offline-contact-guidance.weight=1.0
+    --reward.terms.offline-contact-guidance.params.wrist-weight="${OFFLINE_WRIST_TARGET_GUIDANCE_WEIGHT}"
+    --reward.terms.offline-contact-guidance.params.contact-weight="${OFFLINE_CONTACT_GUIDANCE_WEIGHT}"
     --reward.terms.offline-contact-guidance.params.position-sigma="${OFFLINE_CONTACT_POSITION_SIGMA}"
     --reward.terms.offline-contact-guidance.params.force-threshold="${OFFLINE_CONTACT_FORCE_THRESHOLD}"
     --reward.terms.offline-contact-guidance.params.force-sigma="${OFFLINE_CONTACT_FORCE_SIGMA}"
-    --reward.terms.offline-wrist-target-guidance.params.contact-schedule-relax-steps="${OFFLINE_CONTACT_SCHEDULE_RELAX_STEPS}"
     --reward.terms.offline-contact-guidance.params.contact-schedule-relax-steps="${OFFLINE_CONTACT_SCHEDULE_RELAX_STEPS}"
   )
   if [[ -n "${CONTACT_EXPORT_ROOT}" ]]; then
     train_cmd+=(
-      --reward.terms.offline-wrist-target-guidance.params.contact-export-root "${CONTACT_EXPORT_ROOT}"
       --reward.terms.offline-contact-guidance.params.contact-export-root "${CONTACT_EXPORT_ROOT}"
     )
   fi

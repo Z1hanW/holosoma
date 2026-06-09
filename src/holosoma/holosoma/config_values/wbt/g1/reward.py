@@ -113,6 +113,39 @@ def _lower_body_undesired_contacts_term() -> RewardTermCfg:
     )
 
 
+def _fused_offline_contact_guidance_term(
+    *,
+    contact_export_root: str,
+    wrist_weight: float,
+    contact_weight: float,
+    force_threshold: float,
+    position_sigma: float = 0.08,
+    force_sigma: float = 10.0,
+    contact_schedule_relax_steps: int = 5,
+) -> RewardTermCfg:
+    return RewardTermCfg(
+        func="holosoma.managers.reward.terms.wbt:FusedOfflineContactPointGuidance",
+        params={
+            "contact_export_root": contact_export_root,
+            "wrist_region_names": ["left_wrist", "right_wrist"],
+            "contact_region_names": _OFFLINE_CONTACT_GUIDANCE_REGION_NAMES,
+            "position_sigma": position_sigma,
+            "force_threshold": force_threshold,
+            "force_sigma": force_sigma,
+            "use_force_term": True,
+            "force_gate_mode": "binary",
+            "use_contact_schedule": True,
+            "contact_schedule_relax_steps": contact_schedule_relax_steps,
+            "contact_schedule_missing_mode": "after_pickup",
+            "require_stable_contact": True,
+            "min_target_points": 1,
+            "wrist_weight": wrist_weight,
+            "contact_weight": contact_weight,
+        },
+        weight=1.0,
+    )
+
+
 g1_29dof_wbt_reward = RewardManagerCfg(
     terms={
         # Motion tracking rewards - global reference frame
@@ -412,38 +445,11 @@ g1_29dof_wbt_reward_w_object_generalist_offline_contact_guidance = RewardManager
             },
             weight=0.0,
         ),
-        "offline_wrist_target_guidance": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
-            params={
-                "contact_export_root": _AS_KEEP169_CONTACT_EXPORT_ROOT,
-                "region_names": ["left_wrist", "right_wrist"],
-                "position_sigma": 0.08,
-                "use_force_term": False,
-                "use_contact_schedule": True,
-                "contact_schedule_relax_steps": 5,
-                "contact_schedule_missing_mode": "after_pickup",
-                "require_stable_contact": True,
-                "min_target_points": 1,
-            },
-            weight=5.0,
-        ),
-        "offline_contact_guidance": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
-            params={
-                "contact_export_root": _AS_KEEP169_CONTACT_EXPORT_ROOT,
-                "region_names": _OFFLINE_CONTACT_GUIDANCE_REGION_NAMES,
-                "position_sigma": 0.08,
-                "force_threshold": 1.0,
-                "force_sigma": 10.0,
-                "use_force_term": True,
-                "force_gate_mode": "binary",
-                "use_contact_schedule": True,
-                "contact_schedule_relax_steps": 5,
-                "contact_schedule_missing_mode": "after_pickup",
-                "require_stable_contact": True,
-                "min_target_points": 1,
-            },
-            weight=10.0,
+        "offline_contact_guidance": _fused_offline_contact_guidance_term(
+            contact_export_root=_AS_KEEP169_CONTACT_EXPORT_ROOT,
+            wrist_weight=5.0,
+            contact_weight=10.0,
+            force_threshold=1.0,
         ),
     }
 )
@@ -488,38 +494,11 @@ g1_29dof_wbt_reward_w_object_r2s_contact_guidance = RewardManagerCfg(
             params={"sigma": 0.7},
             weight=0.25,
         ),
-        "offline_wrist_target_guidance": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
-            params={
-                "contact_export_root": "outputs/clips",
-                "region_names": ["left_wrist", "right_wrist"],
-                "position_sigma": 0.08,
-                "use_force_term": False,
-                "use_contact_schedule": True,
-                "contact_schedule_relax_steps": 5,
-                "contact_schedule_missing_mode": "after_pickup",
-                "require_stable_contact": True,
-                "min_target_points": 1,
-            },
-            weight=3.0,
-        ),
-        "offline_contact_guidance": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
-            params={
-                "contact_export_root": "outputs/clips",
-                "region_names": _OFFLINE_CONTACT_GUIDANCE_REGION_NAMES,
-                "position_sigma": 0.08,
-                "force_threshold": 1.4,
-                "force_sigma": 10.0,
-                "use_force_term": True,
-                "force_gate_mode": "binary",
-                "use_contact_schedule": True,
-                "contact_schedule_relax_steps": 5,
-                "contact_schedule_missing_mode": "after_pickup",
-                "require_stable_contact": True,
-                "min_target_points": 1,
-            },
-            weight=4.0,
+        "offline_contact_guidance": _fused_offline_contact_guidance_term(
+            contact_export_root="outputs/clips",
+            wrist_weight=3.0,
+            contact_weight=4.0,
+            force_threshold=1.4,
         ),
     }
 )
@@ -608,38 +587,11 @@ g1_29dof_wbt_reward_w_object_r2s_rollout_reference_guidance = RewardManagerCfg(
             },
             weight=1.0,
         ),
-        "offline_wrist_target_guidance": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
-            params={
-                "contact_export_root": "outputs/clips",
-                "region_names": ["left_wrist", "right_wrist"],
-                "position_sigma": 0.08,
-                "use_force_term": False,
-                "use_contact_schedule": True,
-                "contact_schedule_relax_steps": 5,
-                "contact_schedule_missing_mode": "after_pickup",
-                "require_stable_contact": True,
-                "min_target_points": 1,
-            },
-            weight=4.0,
-        ),
-        "offline_contact_guidance": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:OfflineContactPointGuidance",
-            params={
-                "contact_export_root": "outputs/clips",
-                "region_names": _OFFLINE_CONTACT_GUIDANCE_REGION_NAMES,
-                "position_sigma": 0.08,
-                "force_threshold": 1.4,
-                "force_sigma": 10.0,
-                "use_force_term": True,
-                "force_gate_mode": "binary",
-                "use_contact_schedule": True,
-                "contact_schedule_relax_steps": 5,
-                "contact_schedule_missing_mode": "after_pickup",
-                "require_stable_contact": True,
-                "min_target_points": 1,
-            },
-            weight=7.0,
+        "offline_contact_guidance": _fused_offline_contact_guidance_term(
+            contact_export_root="outputs/clips",
+            wrist_weight=4.0,
+            contact_weight=7.0,
+            force_threshold=1.4,
         ),
     }
 )

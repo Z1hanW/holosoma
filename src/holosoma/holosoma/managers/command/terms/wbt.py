@@ -4,6 +4,7 @@ import json
 import os
 import re
 import zipfile
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, List
 
@@ -2426,6 +2427,9 @@ class MotionCommand(CommandTermBase):
         }
         if not self.motion.has_object:
             return
+        if not self._should_enable_online_contact_prior():
+            logger.info("Online contact prior disabled: no contact-prior observation term is configured.")
+            return
 
         getter = getattr(self._env.simulator, "get_object_contact_force_history", None)
         if getter is None:
@@ -2462,6 +2466,31 @@ class MotionCommand(CommandTermBase):
                     force_names,
                     position_names,
                 )
+
+    def _should_enable_online_contact_prior(self) -> bool:
+        override = os.environ.get("HOLOSOMA_ONLINE_CONTACT_PRIOR", "").strip().lower()
+        if override in ("1", "true", "yes", "on"):
+            return True
+        if override in ("0", "false", "no", "off"):
+            return False
+
+        disable = os.environ.get("HOLOSOMA_DISABLE_ONLINE_CONTACT_PRIOR", "").strip().lower()
+        if disable in ("1", "true", "yes", "on"):
+            return False
+
+        observation_manager = getattr(self._env, "observation_manager", None)
+        cfg = getattr(observation_manager, "cfg", None)
+        groups = getattr(cfg, "groups", {}) or {}
+        for group_cfg in groups.values():
+            terms = getattr(group_cfg, "terms", {}) or {}
+            for term_cfg in terms.values():
+                func = getattr(term_cfg, "func", "")
+                func_name = str(func)
+                if not func_name or func_name == "None":
+                    func_name = getattr(func, "__name__", "")
+                if "contact_prior" in func_name:
+                    return True
+        return False
 
     def _get_active_object_indices(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         if self.object_indices_in_simulator is None:
@@ -2940,47 +2969,53 @@ class MotionCommand(CommandTermBase):
 
     def step(self) -> None:
         """called in _update_tasks_callback of the environment. (after compute_reward, before compute_observations)"""
+        timing = getattr(self._env, "step_timing", None)
+        if not getattr(timing, "enabled", False):
+            timing = None
+
         # 0. update time steps, all motion joint/body poses are updated automatically with the time steps.
-        advance_mask = torch.ones_like(self.time_steps, dtype=torch.bool)
-        if (
-            self._runtime_default_pose_prepend_enabled
-            and self._runtime_default_pose_prepend_active is not None
-            and self._runtime_default_pose_prepend_step is not None
-        ):
-            active_mask = self._runtime_default_pose_prepend_active
-            if torch.any(active_mask):
-                advance_mask = advance_mask & ~active_mask
-                last_step_mask = active_mask & (
-                    self._runtime_default_pose_prepend_step >= (self._runtime_default_pose_prepend_steps - 1)
-                )
-                keep_warmup_mask = active_mask & ~last_step_mask
-                self._runtime_default_pose_prepend_step[keep_warmup_mask] += 1
-                self._runtime_default_pose_prepend_active[last_step_mask] = False
+        with (timing.record("post/tasks/motion/time_advance") if timing is not None else nullcontext()):
+            advance_mask = torch.ones_like(self.time_steps, dtype=torch.bool)
+            if (
+                self._runtime_default_pose_prepend_enabled
+                and self._runtime_default_pose_prepend_active is not None
+                and self._runtime_default_pose_prepend_step is not None
+            ):
+                active_mask = self._runtime_default_pose_prepend_active
+                if torch.any(active_mask):
+                    advance_mask = advance_mask & ~active_mask
+                    last_step_mask = active_mask & (
+                        self._runtime_default_pose_prepend_step >= (self._runtime_default_pose_prepend_steps - 1)
+                    )
+                    keep_warmup_mask = active_mask & ~last_step_mask
+                    self._runtime_default_pose_prepend_step[keep_warmup_mask] += 1
+                    self._runtime_default_pose_prepend_active[last_step_mask] = False
 
-        # Handle freeze_at_timestep_zero_prob: for envs at timestep 0, randomly decide whether to advance
-        freeze_prob = self._current_freeze_at_timestep_zero_prob()
-        if freeze_prob > 0.0:
-            zero_mask = self.time_steps == 0
-            if zero_mask.any():
-                rand_vals = torch.rand(self.num_envs, device=self.device)
-                freeze_mask = (rand_vals < freeze_prob) & zero_mask
-                advance_mask = advance_mask & ~freeze_mask
+            # Handle freeze_at_timestep_zero_prob: for envs at timestep 0, randomly decide whether to advance
+            freeze_prob = self._current_freeze_at_timestep_zero_prob()
+            if freeze_prob > 0.0:
+                zero_mask = self.time_steps == 0
+                if zero_mask.any():
+                    rand_vals = torch.rand(self.num_envs, device=self.device)
+                    freeze_mask = (rand_vals < freeze_prob) & zero_mask
+                    advance_mask = advance_mask & ~freeze_mask
 
-        self.time_steps += advance_mask.long()
+            self.time_steps += advance_mask.long()
 
         # Match BeyondMimic-style clip rollover: once a clip ends, reset only the
         # motion/object state for those envs instead of terminating the episode.
-        current_clip_lengths = self._current_clip_lengths()
-        ended_env_ids = torch.where(self.time_steps >= current_clip_lengths)[0]
-        if ended_env_ids.numel() > 0:
-            if self._disable_clip_end_reset:
-                self.time_steps[ended_env_ids] = torch.clamp(current_clip_lengths[ended_env_ids] - 1, min=0)
-            else:
-                self.reset(ended_env_ids)
-                sim = self._env.simulator
-                sim.set_actor_root_state_tensor_robots(ended_env_ids, sim.robot_root_states)
-                sim.set_dof_state_tensor_robots(ended_env_ids, sim.dof_state)
-                sim.refresh_sim_tensors()
+        with (timing.record("post/tasks/motion/clip_rollover") if timing is not None else nullcontext()):
+            current_clip_lengths = self._current_clip_lengths()
+            ended_env_ids = torch.where(self.time_steps >= current_clip_lengths)[0]
+            if ended_env_ids.numel() > 0:
+                if self._disable_clip_end_reset:
+                    self.time_steps[ended_env_ids] = torch.clamp(current_clip_lengths[ended_env_ids] - 1, min=0)
+                else:
+                    self.reset(ended_env_ids)
+                    sim = self._env.simulator
+                    sim.set_actor_root_state_tensor_robots(ended_env_ids, sim.robot_root_states)
+                    sim.set_dof_state_tensor_robots(ended_env_ids, sim.dof_state)
+                    sim.refresh_sim_tensors()
 
         # 1. update body_pos_relative_w and body_quat_relative_w
         # definition of body_pos/quat_relative_w:
@@ -3003,41 +3038,47 @@ class MotionCommand(CommandTermBase):
         # ------------------------------------------------------------
         # if episode_length_buf == 0, use robot_root_pos_w and robot_root_quat_w as reference body.
         # else, use configured reference body as reference body.
-        use_root = (self._env.episode_length_buf == 0).unsqueeze(1).float()
+        with (timing.record("post/tasks/motion/relative_body_pose") if timing is not None else nullcontext()):
+            use_root = (self._env.episode_length_buf == 0).unsqueeze(1).float()
 
-        ref_pos_w = self.root_pos_w * use_root + self.ref_pos_w * (1 - use_root)
-        ref_quat_w = self.root_quat_w * use_root + self.ref_quat_w * (1 - use_root)
-        robot_ref_pos_w = self.robot_root_pos_w * use_root + self.robot_ref_pos_w * (1 - use_root)
-        robot_ref_quat_w = self.robot_root_quat_w * use_root + self.robot_ref_quat_w * (1 - use_root)
+            ref_pos_w = self.root_pos_w * use_root + self.ref_pos_w * (1 - use_root)
+            ref_quat_w = self.root_quat_w * use_root + self.ref_quat_w * (1 - use_root)
+            robot_ref_pos_w = self.robot_root_pos_w * use_root + self.robot_ref_pos_w * (1 - use_root)
+            robot_ref_quat_w = self.robot_root_quat_w * use_root + self.robot_ref_quat_w * (1 - use_root)
 
-        ## 1.1 repeat to match the number of body parts
-        ref_pos_w_repeat = ref_pos_w[:, None, :].repeat(1, len(self.motion_cfg.body_names_to_track), 1)  # type: ignore[arg-type]
-        ref_quat_w_repeat = ref_quat_w[:, None, :].repeat(1, len(self.motion_cfg.body_names_to_track), 1)  # type: ignore[arg-type]
-        robot_ref_pos_w_repeat = robot_ref_pos_w[:, None, :].repeat(1, len(self.motion_cfg.body_names_to_track), 1)  # type: ignore[arg-type]
-        robot_ref_quat_w_repeat = robot_ref_quat_w[:, None, :].repeat(1, len(self.motion_cfg.body_names_to_track), 1)  # type: ignore[arg-type]
+            ## 1.1 repeat to match the number of body parts
+            ref_pos_w_repeat = ref_pos_w[:, None, :].repeat(1, len(self.motion_cfg.body_names_to_track), 1)  # type: ignore[arg-type]
+            ref_quat_w_repeat = ref_quat_w[:, None, :].repeat(1, len(self.motion_cfg.body_names_to_track), 1)  # type: ignore[arg-type]
+            robot_ref_pos_w_repeat = robot_ref_pos_w[:, None, :].repeat(1, len(self.motion_cfg.body_names_to_track), 1)  # type: ignore[arg-type]
+            robot_ref_quat_w_repeat = robot_ref_quat_w[:, None, :].repeat(1, len(self.motion_cfg.body_names_to_track), 1)  # type: ignore[arg-type]
 
-        ## 1.2 compute the relative body poses
-        delta_quat_w = yaw_quat(
-            quat_mul(robot_ref_quat_w_repeat, quat_inverse(ref_quat_w_repeat, w_last=True), w_last=True), w_last=True
-        )
-        ### 1.2.1 body_quat_relative_w
-        self.body_quat_relative_w = quat_mul(delta_quat_w, self.body_quat_w, w_last=True)
-        ### 1.2.2 body_pos_relative_w
-        delta_pos_w_height = ref_pos_w_repeat - robot_ref_pos_w_repeat
-        delta_pos_w_height[..., :2] = 0.0  # adjusting for height differences
-        self.body_pos_relative_w = (
-            robot_ref_pos_w_repeat
-            + delta_pos_w_height
-            + quat_apply(delta_quat_w, self.body_pos_w - ref_pos_w_repeat, w_last=True)
-        )
+            ## 1.2 compute the relative body poses
+            delta_quat_w = yaw_quat(
+                quat_mul(robot_ref_quat_w_repeat, quat_inverse(ref_quat_w_repeat, w_last=True), w_last=True),
+                w_last=True,
+            )
+            ### 1.2.1 body_quat_relative_w
+            self.body_quat_relative_w = quat_mul(delta_quat_w, self.body_quat_w, w_last=True)
+            ### 1.2.2 body_pos_relative_w
+            delta_pos_w_height = ref_pos_w_repeat - robot_ref_pos_w_repeat
+            delta_pos_w_height[..., :2] = 0.0  # adjusting for height differences
+            self.body_pos_relative_w = (
+                robot_ref_pos_w_repeat
+                + delta_pos_w_height
+                + quat_apply(delta_quat_w, self.body_pos_w - ref_pos_w_repeat, w_last=True)
+            )
 
         ### 1.3 update the adaptive timesteps sampler
-        if self.use_adaptive_timesteps_sampler:
-            self.adaptive_timesteps_sampler.update_bin_failed_count()
+        with (timing.record("post/tasks/motion/adaptive_sampler") if timing is not None else nullcontext()):
+            if self.use_adaptive_timesteps_sampler:
+                self.adaptive_timesteps_sampler.update_bin_failed_count()
 
-        self._update_future_target_poses()
-        self._update_pickup_anchor_state()
-        self._update_contact_prior_state()
+        with (timing.record("post/tasks/motion/future_targets") if timing is not None else nullcontext()):
+            self._update_future_target_poses()
+        with (timing.record("post/tasks/motion/pickup_anchor") if timing is not None else nullcontext()):
+            self._update_pickup_anchor_state()
+        with (timing.record("post/tasks/motion/contact_prior") if timing is not None else nullcontext()):
+            self._update_contact_prior_state()
 
     def _current_clip_lengths(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
         clip_ids = self.clip_ids if env_ids is None else self.clip_ids[env_ids]

@@ -36,6 +36,7 @@ from holosoma.utils.inference_helpers import (
     get_urdf_text_from_robot_config,
 )
 from holosoma.utils.normalization import EmpiricalNormalization
+from holosoma.utils.step_timing import StepTiming, compact_timing_summary, env_int
 
 console = Console()
 
@@ -132,6 +133,16 @@ class PPO(BaseAlgo):
             is_main_process=self.is_main_process,
             num_gpus=self.gpu_world_size,
         )
+        self.algo_timing = StepTiming.from_env(device=self.device)
+        self._step_timing_interval = max(1, env_int("HOLOSOMA_STEP_TIMING_INTERVAL", default=1))
+        self._last_algo_step_timing: dict[str, dict[str, float]] = {}
+        self._last_env_step_timing: dict[str, dict[str, float]] = {}
+        if self.algo_timing.enabled and self.is_main_process:
+            logger.info(
+                "Step timing enabled (sync_cuda={}, interval={})",
+                self.algo_timing.sync_cuda,
+                self._step_timing_interval,
+            )
 
         self._init_config()
 
@@ -207,6 +218,114 @@ class PPO(BaseAlgo):
         self._fixed_bc_eval_teacher_actions_parts: list[torch.Tensor] = []
         self._fixed_bc_eval_actor_perception_parts: list[torch.Tensor] = []
         self._fixed_bc_eval_dataset: dict[str, torch.Tensor] = {}
+
+    def _reset_step_timing(self) -> None:
+        if not self.algo_timing.enabled:
+            return
+        self.algo_timing.reset()
+        env_timing = getattr(self.env, "step_timing", None)
+        if env_timing is not None:
+            env_timing.reset()
+
+    def _capture_step_timing(self) -> None:
+        if not self.algo_timing.enabled:
+            return
+        self._last_algo_step_timing = self.algo_timing.snapshot(reset=False)
+        env_timing = getattr(self.env, "step_timing", None)
+        if env_timing is None:
+            self._last_env_step_timing = {}
+        else:
+            self._last_env_step_timing = env_timing.snapshot(reset=False)
+
+    def _emit_step_timing_summary(self, it: int) -> None:
+        if not self.algo_timing.enabled or not self.is_main_process:
+            return
+        if it % self._step_timing_interval != 0:
+            return
+        algo_order = (
+            "iteration/rollout",
+            "iteration/training_step",
+            "rollout/env_step",
+            "rollout/teacher_actions",
+            "rollout/actor_forward",
+            "rollout/critic_forward",
+            "rollout/returns",
+            "training/update_algo_step",
+        )
+        env_order = (
+            "env_step_total",
+            "physics",
+            "physics/apply_force",
+            "physics/simulate_step",
+            "physics/sim/write_data_to_sim",
+            "physics/sim/write_robot_to_sim",
+            "physics/sim/robot/apply_actuator_model",
+            "physics/sim/robot/set_dof_forces",
+            "physics/sim/write_nonrobot_to_sim",
+            "physics/sim/step",
+            "physics/sim/scene_update",
+            "physics/sim/update_dof_refs",
+            "post/perception",
+            "post/reward",
+            "post/reward/term/offline_contact_guidance",
+            "post/log_update",
+            "post/log_update/update_log_dict",
+            "post/log_update/motion_metrics",
+            "post/tasks",
+            "post/tasks/command_manager",
+            "post/tasks/motion/contact_prior",
+            "post/tasks/motion/future_targets",
+            "post/tasks/motion/relative_body_pose",
+            "post/observations",
+            "post/reset_envs",
+            "pre_physics",
+        )
+        logger.info(
+            "StepTiming iter={} algo {}",
+            it,
+            compact_timing_summary(self._last_algo_step_timing, algo_order, max_extra=4),
+        )
+        logger.info(
+            "StepTiming iter={} env {}",
+            it,
+            compact_timing_summary(self._last_env_step_timing, env_order, max_extra=4),
+        )
+
+    def _add_step_timing_logs(self, extra_log_dicts: dict[str, dict[str, float]]) -> None:
+        if not self.algo_timing.enabled:
+            return
+        timing_logs = extra_log_dicts.setdefault("Timing", {})
+        selected = (
+            ("algo", self._last_algo_step_timing, "iteration/rollout"),
+            ("algo", self._last_algo_step_timing, "iteration/training_step"),
+            ("algo", self._last_algo_step_timing, "rollout/env_step"),
+            ("algo", self._last_algo_step_timing, "rollout/teacher_actions"),
+            ("algo", self._last_algo_step_timing, "rollout/actor_forward"),
+            ("algo", self._last_algo_step_timing, "rollout/critic_forward"),
+            ("algo", self._last_algo_step_timing, "rollout/returns"),
+            ("algo", self._last_algo_step_timing, "training/update_algo_step"),
+            ("env", self._last_env_step_timing, "env_step_total"),
+            ("env", self._last_env_step_timing, "physics"),
+            ("env", self._last_env_step_timing, "post/perception"),
+            ("env", self._last_env_step_timing, "post/reward"),
+            ("env", self._last_env_step_timing, "post/log_update"),
+            ("env", self._last_env_step_timing, "post/log_update/update_log_dict"),
+            ("env", self._last_env_step_timing, "post/log_update/motion_metrics"),
+            ("env", self._last_env_step_timing, "post/tasks"),
+            ("env", self._last_env_step_timing, "post/tasks/command_manager"),
+            ("env", self._last_env_step_timing, "post/tasks/motion/contact_prior"),
+            ("env", self._last_env_step_timing, "post/tasks/motion/future_targets"),
+            ("env", self._last_env_step_timing, "post/tasks/motion/relative_body_pose"),
+            ("env", self._last_env_step_timing, "post/observations"),
+            ("env", self._last_env_step_timing, "post/reset_envs"),
+        )
+        for prefix, snapshot, name in selected:
+            stats = snapshot.get(name)
+            if stats is None:
+                continue
+            safe_name = name.replace("/", "_")
+            timing_logs[f"{prefix}_{safe_name}_sum_ms"] = float(stats.get("sum_ms", 0.0))
+            timing_logs[f"{prefix}_{safe_name}_mean_ms"] = float(stats.get("mean_ms", 0.0))
 
     def _build_obs_slices(self, keys: list[str]) -> dict[str, slice]:
         slices: dict[str, slice] = {}
@@ -322,9 +441,48 @@ class PPO(BaseAlgo):
         if self.critic_perception_key and self.critic_perception_key not in self.algo_obs_dim_dict:
             raise ValueError(f"Critic perception key '{self.critic_perception_key}' not found in observation manager.")
 
+    def _configure_active_observation_groups(self) -> None:
+        observation_manager = getattr(self.env, "observation_manager", None)
+        if observation_manager is None or not hasattr(observation_manager, "set_active_groups"):
+            return
+
+        disabled = os.environ.get("HOLOSOMA_DISABLE_ACTIVE_OBS_GROUP_FILTER", "").strip().lower()
+        if disabled in ("1", "true", "yes", "on"):
+            observation_manager.set_active_groups(None)
+            return
+
+        required: list[str] = []
+
+        def add_group(group_name: str | None) -> None:
+            if not group_name:
+                return
+            if group_name not in required:
+                required.append(group_name)
+
+        def add_groups(group_names: list[str] | tuple[str, ...] | None) -> None:
+            if not group_names:
+                return
+            for group_name in group_names:
+                add_group(group_name)
+
+        add_groups(self.actor_obs_keys)
+        add_groups(self.critic_obs_keys)
+        add_groups(self.teacher_obs_keys)
+        add_group(self.actor_perception_key)
+        add_group(self.critic_perception_key)
+        add_group(self.teacher_perception_obs_key)
+        if self.use_multi_teacher:
+            add_group(self.multi_teacher_select_obs_var)
+
+        observation_manager.set_active_groups(required)
+        if self.is_main_process:
+            total = len(getattr(observation_manager.cfg, "groups", {}))
+            logger.info("Active PPO observation groups: {} / {} {}", len(required), total, required)
+
     def setup(self):
         logger.info("Setting up PPO")
         self._setup_models_and_optimizer()
+        self._configure_active_observation_groups()
         logger.info("Setting up Storage")
         self._setup_storage()
 
@@ -963,6 +1121,7 @@ class PPO(BaseAlgo):
         self._train_mode()
 
         obs_dict = self.env.reset_all()
+        self._reset_step_timing()
 
         # Initialize environments with different episode length buffers
         # Must happen AFTER reset_all() to avoid being overwritten by reset
@@ -980,6 +1139,7 @@ class PPO(BaseAlgo):
             run_end_iteration,
         ):
             self.current_learning_iteration = it
+            self._reset_step_timing()
             self._adjust_teacher_action_mix_ratio(it)
             self._apply_ppo_start_noise_std_cap(it)
             self._sync_training_curriculum_state(
@@ -993,17 +1153,29 @@ class PPO(BaseAlgo):
 
             if debug_heartbeat:
                 logger.info("Heartbeat: iter {} starting rollout", it)
-            with self.logging_helper.record_collection_time():
-                obs_dict = self._rollout_step(obs_dict)
+            if self.algo_timing.enabled:
+                with self.algo_timing.record("iteration/rollout"):
+                    with self.logging_helper.record_collection_time():
+                        obs_dict = self._rollout_step(obs_dict)
+            else:
+                with self.logging_helper.record_collection_time():
+                    obs_dict = self._rollout_step(obs_dict)
             if debug_heartbeat:
                 logger.info("Heartbeat: iter {} finished rollout", it)
 
             if debug_heartbeat:
                 logger.info("Heartbeat: iter {} starting training_step", it)
-            with self.logging_helper.record_learn_time():
-                loss_dict = self._training_step()
+            if self.algo_timing.enabled:
+                with self.algo_timing.record("iteration/training_step"):
+                    with self.logging_helper.record_learn_time():
+                        loss_dict = self._training_step()
+            else:
+                with self.logging_helper.record_learn_time():
+                    loss_dict = self._training_step()
             if debug_heartbeat:
                 logger.info("Heartbeat: iter {} finished training_step", it)
+            self._capture_step_timing()
+            self._emit_step_timing_summary(it)
 
             if self.is_main_process:
                 self._post_epoch_logging(it, loss_dict)
@@ -1213,14 +1385,23 @@ class PPO(BaseAlgo):
 
     def _rollout_step(self, obs_dict):
         debug_heartbeat = os.environ.get("HOLOSOMA_DEBUG_HEARTBEAT", "").lower() not in ("", "0", "false", "no")
+        timing = self.algo_timing if self.algo_timing.enabled else None
         with torch.no_grad():
             for rollout_step in range(self.config.num_steps_per_env):
                 # Environment step
-                actor_obs_raw = torch.cat([obs_dict[k] for k in self.actor_obs_keys], dim=1)
-                critic_obs_raw = torch.cat([obs_dict[k] for k in self.critic_obs_keys], dim=1)
+                if timing is not None:
+                    with timing.record("rollout/obs_cat"):
+                        actor_obs_raw = torch.cat([obs_dict[k] for k in self.actor_obs_keys], dim=1)
+                        critic_obs_raw = torch.cat([obs_dict[k] for k in self.critic_obs_keys], dim=1)
+                    with timing.record("rollout/obs_normalize"):
+                        actor_obs = self._normalize_actor_obs(actor_obs_raw, update=True)
+                        critic_obs = self._normalize_critic_obs(critic_obs_raw, update=True)
+                else:
+                    actor_obs_raw = torch.cat([obs_dict[k] for k in self.actor_obs_keys], dim=1)
+                    critic_obs_raw = torch.cat([obs_dict[k] for k in self.critic_obs_keys], dim=1)
 
-                actor_obs = self._normalize_actor_obs(actor_obs_raw, update=True)
-                critic_obs = self._normalize_critic_obs(critic_obs_raw, update=True)
+                    actor_obs = self._normalize_actor_obs(actor_obs_raw, update=True)
+                    critic_obs = self._normalize_critic_obs(critic_obs_raw, update=True)
 
                 # Keep perception aligned with the same pre-step state/action sample.
                 actor_perception_obs_current = (
@@ -1233,14 +1414,24 @@ class PPO(BaseAlgo):
                 actor_policy_state = {"actor_obs": actor_obs}
                 if actor_perception_obs_current is not None:
                     actor_policy_state[self.actor_perception_key] = actor_perception_obs_current
-                actions = self.actor.act(actor_policy_state)
-                if self._use_deterministic_student_actions():
-                    actions = self.actor.action_mean.detach()
+                if timing is not None:
+                    with timing.record("rollout/actor_forward"):
+                        actions = self.actor.act(actor_policy_state)
+                        if self._use_deterministic_student_actions():
+                            actions = self.actor.action_mean.detach()
+                else:
+                    actions = self.actor.act(actor_policy_state)
+                    if self._use_deterministic_student_actions():
+                        actions = self.actor.action_mean.detach()
 
                 critic_policy_state = {"critic_obs": critic_obs}
                 if critic_perception_obs_current is not None:
                     critic_policy_state[self.critic_perception_key] = critic_perception_obs_current
-                values = self.critic.evaluate(critic_policy_state).detach()
+                if timing is not None:
+                    with timing.record("rollout/critic_forward"):
+                        values = self.critic.evaluate(critic_policy_state).detach()
+                else:
+                    values = self.critic.evaluate(critic_policy_state).detach()
 
                 teacher_bc_mask_current = None
                 if (
@@ -1264,24 +1455,48 @@ class PPO(BaseAlgo):
                 teacher_indices = None
                 actions_to_step = actions
                 if self.dagger_enabled and (self.bc_loss_coef > 0.0 or self.use_ppo_dagger_schedule):
-                    if self.teacher_obs_keys == self.actor_obs_keys:
-                        teacher_obs_raw = actor_obs_raw
+                    if timing is not None:
+                        with timing.record("rollout/teacher_obs_cat"):
+                            if self.teacher_obs_keys == self.actor_obs_keys:
+                                teacher_obs_raw = actor_obs_raw
+                            else:
+                                teacher_obs_raw = torch.cat([obs_dict[k] for k in self.teacher_obs_keys], dim=1)
+                        with timing.record("rollout/teacher_actions"):
+                            teacher_actions, teacher_indices = self._select_teacher_actions(teacher_obs_raw, obs_dict)
+                        with timing.record("rollout/teacher_mix"):
+                            self._maybe_capture_fixed_bc_eval_samples(
+                                actor_obs_raw=actor_obs_raw,
+                                actor_perception_obs=actor_perception_obs_current,
+                                teacher_actions=teacher_actions,
+                                teacher_bc_mask=teacher_bc_mask_current,
+                            )
+                            if self.teacher_action_mix_ratio > 0.0:
+                                teacher_mask = (
+                                    torch.rand((actions.shape[0], 1), device=actions.device)
+                                    < self.teacher_action_mix_ratio
+                                )
+                                actions_to_step = torch.where(teacher_mask, teacher_actions, actions)
+                            elif self.take_teacher_actions:
+                                actions_to_step = teacher_actions
                     else:
-                        teacher_obs_raw = torch.cat([obs_dict[k] for k in self.teacher_obs_keys], dim=1)
-                    teacher_actions, teacher_indices = self._select_teacher_actions(teacher_obs_raw, obs_dict)
-                    self._maybe_capture_fixed_bc_eval_samples(
-                        actor_obs_raw=actor_obs_raw,
-                        actor_perception_obs=actor_perception_obs_current,
-                        teacher_actions=teacher_actions,
-                        teacher_bc_mask=teacher_bc_mask_current,
-                    )
-                    if self.teacher_action_mix_ratio > 0.0:
-                        teacher_mask = (
-                            torch.rand((actions.shape[0], 1), device=actions.device) < self.teacher_action_mix_ratio
+                        if self.teacher_obs_keys == self.actor_obs_keys:
+                            teacher_obs_raw = actor_obs_raw
+                        else:
+                            teacher_obs_raw = torch.cat([obs_dict[k] for k in self.teacher_obs_keys], dim=1)
+                        teacher_actions, teacher_indices = self._select_teacher_actions(teacher_obs_raw, obs_dict)
+                        self._maybe_capture_fixed_bc_eval_samples(
+                            actor_obs_raw=actor_obs_raw,
+                            actor_perception_obs=actor_perception_obs_current,
+                            teacher_actions=teacher_actions,
+                            teacher_bc_mask=teacher_bc_mask_current,
                         )
-                        actions_to_step = torch.where(teacher_mask, teacher_actions, actions)
-                    elif self.take_teacher_actions:
-                        actions_to_step = teacher_actions
+                        if self.teacher_action_mix_ratio > 0.0:
+                            teacher_mask = (
+                                torch.rand((actions.shape[0], 1), device=actions.device) < self.teacher_action_mix_ratio
+                            )
+                            actions_to_step = torch.where(teacher_mask, teacher_actions, actions)
+                        elif self.take_teacher_actions:
+                            actions_to_step = teacher_actions
 
                 if debug_heartbeat:
                     logger.info(
@@ -1290,7 +1505,11 @@ class PPO(BaseAlgo):
                         rollout_step + 1,
                         self.config.num_steps_per_env,
                     )
-                obs_dict, rewards, dones, infos = self.env.step({"actions": actions_to_step})
+                if timing is not None:
+                    with timing.record("rollout/env_step"):
+                        obs_dict, rewards, dones, infos = self.env.step({"actions": actions_to_step})
+                else:
+                    obs_dict, rewards, dones, infos = self.env.step({"actions": actions_to_step})
                 if debug_heartbeat:
                     timeout_count = 0
                     if isinstance(infos, dict) and "time_outs" in infos and infos["time_outs"] is not None:
@@ -1304,88 +1523,179 @@ class PPO(BaseAlgo):
                         timeout_count,
                     )
 
-                for obs_key in obs_dict:
-                    obs_dict[obs_key] = obs_dict[obs_key].to(self.device)
-                rewards, dones = rewards.to(self.device), dones.to(self.device)
+                if timing is not None:
+                    with timing.record("rollout/device_transfer"):
+                        for obs_key in obs_dict:
+                            obs_dict[obs_key] = obs_dict[obs_key].to(self.device)
+                        rewards, dones = rewards.to(self.device), dones.to(self.device)
+                else:
+                    for obs_key in obs_dict:
+                        obs_dict[obs_key] = obs_dict[obs_key].to(self.device)
+                    rewards, dones = rewards.to(self.device), dones.to(self.device)
 
                 # Compute bootstrap value for timeouts
                 final_rewards = torch.zeros_like(rewards)
-                if infos["time_outs"].any():
-                    final_critic_obs = torch.cat([infos["final_observations"][k] for k in self.critic_obs_keys], dim=1)
-                    # Timeout final observations are rank-local and conditional. Updating distributed
-                    # normalizers here would desynchronize all_reduce order across ranks.
-                    final_critic_obs = self._normalize_critic_obs(final_critic_obs, update=False)
-                    final_policy_state = {"critic_obs": final_critic_obs}
-                    if (
-                        self.critic_perception_key
-                        and self.critic_perception_key in infos["final_observations"]
-                    ):
-                        final_policy_state[self.critic_perception_key] = infos["final_observations"][
+                if timing is not None:
+                    with timing.record("rollout/final_timeout_bootstrap"):
+                        if infos["time_outs"].any():
+                            final_critic_obs = torch.cat(
+                                [infos["final_observations"][k] for k in self.critic_obs_keys], dim=1
+                            )
+                            # Timeout final observations are rank-local and conditional. Updating distributed
+                            # normalizers here would desynchronize all_reduce order across ranks.
+                            final_critic_obs = self._normalize_critic_obs(final_critic_obs, update=False)
+                            final_policy_state = {"critic_obs": final_critic_obs}
+                            if (
+                                self.critic_perception_key
+                                and self.critic_perception_key in infos["final_observations"]
+                            ):
+                                final_policy_state[self.critic_perception_key] = infos["final_observations"][
+                                    self.critic_perception_key
+                                ]
+                            final_values = self.critic.evaluate(final_policy_state).detach()
+                            final_rewards += self.config.gamma * torch.squeeze(
+                                final_values * infos["time_outs"].unsqueeze(1).to(self.device), 1
+                            )
+                else:
+                    if infos["time_outs"].any():
+                        final_critic_obs = torch.cat([infos["final_observations"][k] for k in self.critic_obs_keys], dim=1)
+                        # Timeout final observations are rank-local and conditional. Updating distributed
+                        # normalizers here would desynchronize all_reduce order across ranks.
+                        final_critic_obs = self._normalize_critic_obs(final_critic_obs, update=False)
+                        final_policy_state = {"critic_obs": final_critic_obs}
+                        if (
                             self.critic_perception_key
-                        ]
-                    final_values = self.critic.evaluate(final_policy_state).detach()
-                    final_rewards += self.config.gamma * torch.squeeze(
-                        final_values * infos["time_outs"].unsqueeze(1).to(self.device), 1
-                    )
+                            and self.critic_perception_key in infos["final_observations"]
+                        ):
+                            final_policy_state[self.critic_perception_key] = infos["final_observations"][
+                                self.critic_perception_key
+                            ]
+                        final_values = self.critic.evaluate(final_policy_state).detach()
+                        final_rewards += self.config.gamma * torch.squeeze(
+                            final_values * infos["time_outs"].unsqueeze(1).to(self.device), 1
+                        )
 
-                storage_kwargs = {
-                    "actor_obs": actor_obs_raw,
-                    "critic_obs": critic_obs_raw,
-                    "actions": actions,
-                    "values": values,
-                    "actions_log_prob": self.actor.get_actions_log_prob(actions).detach().unsqueeze(1),
-                    "action_mean": self.actor.action_mean.detach(),
-                    "action_sigma": self.actor.action_std.detach(),
-                    "rewards": (rewards + final_rewards).view(-1, 1),
-                    "dones": dones.view(-1, 1),
-                    "teacher_actions": teacher_actions.detach()
-                    if teacher_actions is not None
-                    else torch.zeros_like(actions),
-                    "teacher_indices": teacher_indices.view(-1, 1)
-                    if teacher_indices is not None
-                    else torch.zeros(actions.shape[0], 1, device=actions.device, dtype=torch.long),
-                }
-                if teacher_bc_mask_current is not None:
-                    storage_kwargs["teacher_bc_mask"] = teacher_bc_mask_current
-                if actor_perception_obs_current is not None:
-                    storage_kwargs[self.actor_perception_key] = actor_perception_obs_current
-                if (
-                    critic_perception_obs_current is not None
-                    and self.critic_perception_key != self.actor_perception_key
-                ):
-                    storage_kwargs[self.critic_perception_key] = critic_perception_obs_current
-                self.storage.add(**storage_kwargs)
+                if timing is not None:
+                    with timing.record("rollout/storage_add"):
+                        storage_kwargs = {
+                            "actor_obs": actor_obs_raw,
+                            "critic_obs": critic_obs_raw,
+                            "actions": actions,
+                            "values": values,
+                            "actions_log_prob": self.actor.get_actions_log_prob(actions).detach().unsqueeze(1),
+                            "action_mean": self.actor.action_mean.detach(),
+                            "action_sigma": self.actor.action_std.detach(),
+                            "rewards": (rewards + final_rewards).view(-1, 1),
+                            "dones": dones.view(-1, 1),
+                            "teacher_actions": teacher_actions.detach()
+                            if teacher_actions is not None
+                            else torch.zeros_like(actions),
+                            "teacher_indices": teacher_indices.view(-1, 1)
+                            if teacher_indices is not None
+                            else torch.zeros(actions.shape[0], 1, device=actions.device, dtype=torch.long),
+                        }
+                        if teacher_bc_mask_current is not None:
+                            storage_kwargs["teacher_bc_mask"] = teacher_bc_mask_current
+                        if actor_perception_obs_current is not None:
+                            storage_kwargs[self.actor_perception_key] = actor_perception_obs_current
+                        if (
+                            critic_perception_obs_current is not None
+                            and self.critic_perception_key != self.actor_perception_key
+                        ):
+                            storage_kwargs[self.critic_perception_key] = critic_perception_obs_current
+                        self.storage.add(**storage_kwargs)
+                else:
+                    storage_kwargs = {
+                        "actor_obs": actor_obs_raw,
+                        "critic_obs": critic_obs_raw,
+                        "actions": actions,
+                        "values": values,
+                        "actions_log_prob": self.actor.get_actions_log_prob(actions).detach().unsqueeze(1),
+                        "action_mean": self.actor.action_mean.detach(),
+                        "action_sigma": self.actor.action_std.detach(),
+                        "rewards": (rewards + final_rewards).view(-1, 1),
+                        "dones": dones.view(-1, 1),
+                        "teacher_actions": teacher_actions.detach()
+                        if teacher_actions is not None
+                        else torch.zeros_like(actions),
+                        "teacher_indices": teacher_indices.view(-1, 1)
+                        if teacher_indices is not None
+                        else torch.zeros(actions.shape[0], 1, device=actions.device, dtype=torch.long),
+                    }
+                    if teacher_bc_mask_current is not None:
+                        storage_kwargs["teacher_bc_mask"] = teacher_bc_mask_current
+                    if actor_perception_obs_current is not None:
+                        storage_kwargs[self.actor_perception_key] = actor_perception_obs_current
+                    if (
+                        critic_perception_obs_current is not None
+                        and self.critic_perception_key != self.actor_perception_key
+                    ):
+                        storage_kwargs[self.critic_perception_key] = critic_perception_obs_current
+                    self.storage.add(**storage_kwargs)
 
                 # Reset actor and critic for completed envs
-                self.actor.reset(dones)
-                self.critic.reset(dones)
-                if self.dagger_enabled:
-                    if self.use_multi_teacher:
-                        for teacher_actor in self.teacher_actors:
-                            teacher_actor.reset(dones)
-                    elif self.teacher_actor is not None:
-                        self.teacher_actor.reset(dones)
+                if timing is not None:
+                    with timing.record("rollout/model_reset"):
+                        self.actor.reset(dones)
+                        self.critic.reset(dones)
+                        if self.dagger_enabled:
+                            if self.use_multi_teacher:
+                                for teacher_actor in self.teacher_actors:
+                                    teacher_actor.reset(dones)
+                            elif self.teacher_actor is not None:
+                                self.teacher_actor.reset(dones)
+                else:
+                    self.actor.reset(dones)
+                    self.critic.reset(dones)
+                    if self.dagger_enabled:
+                        if self.use_multi_teacher:
+                            for teacher_actor in self.teacher_actors:
+                                teacher_actor.reset(dones)
+                        elif self.teacher_actor is not None:
+                            self.teacher_actor.reset(dones)
 
                 if self.log_dir is not None:
                     # Update episode stats using logging helper
-                    self.logging_helper.update_episode_stats(rewards, dones, infos)
+                    if timing is not None:
+                        with timing.record("rollout/episode_stats"):
+                            self.logging_helper.update_episode_stats(rewards, dones, infos)
+                    else:
+                        self.logging_helper.update_episode_stats(rewards, dones, infos)
 
             # Return / Advantage computation
-            last_critic_obs = torch.cat([obs_dict[k] for k in self.critic_obs_keys], dim=1)
-            last_critic_obs = self._normalize_critic_obs(last_critic_obs, update=False)
-            last_policy_state = {"critic_obs": last_critic_obs}
-            if self.critic_perception_key and self.critic_perception_key in obs_dict:
-                last_policy_state[self.critic_perception_key] = obs_dict[self.critic_perception_key]
-            last_values = self.critic.evaluate(last_policy_state).detach().to(self.device)
-            returns, advantages = self._compute_returns_and_advantages(
-                last_values,
-                self.storage["values"].to(self.device),
-                self.storage["dones"].to(self.device),
-                self.storage["rewards"].to(self.device),
-            )
+            if timing is not None:
+                with timing.record("rollout/returns"):
+                    last_critic_obs = torch.cat([obs_dict[k] for k in self.critic_obs_keys], dim=1)
+                    last_critic_obs = self._normalize_critic_obs(last_critic_obs, update=False)
+                    last_policy_state = {"critic_obs": last_critic_obs}
+                    if self.critic_perception_key and self.critic_perception_key in obs_dict:
+                        last_policy_state[self.critic_perception_key] = obs_dict[self.critic_perception_key]
+                    last_values = self.critic.evaluate(last_policy_state).detach().to(self.device)
+                    returns, advantages = self._compute_returns_and_advantages(
+                        last_values,
+                        self.storage["values"].to(self.device),
+                        self.storage["dones"].to(self.device),
+                        self.storage["rewards"].to(self.device),
+                    )
 
-            self.storage["returns"] = returns
-            self.storage["advantages"] = advantages
+                    self.storage["returns"] = returns
+                    self.storage["advantages"] = advantages
+            else:
+                last_critic_obs = torch.cat([obs_dict[k] for k in self.critic_obs_keys], dim=1)
+                last_critic_obs = self._normalize_critic_obs(last_critic_obs, update=False)
+                last_policy_state = {"critic_obs": last_critic_obs}
+                if self.critic_perception_key and self.critic_perception_key in obs_dict:
+                    last_policy_state[self.critic_perception_key] = obs_dict[self.critic_perception_key]
+                last_values = self.critic.evaluate(last_policy_state).detach().to(self.device)
+                returns, advantages = self._compute_returns_and_advantages(
+                    last_values,
+                    self.storage["values"].to(self.device),
+                    self.storage["dones"].to(self.device),
+                    self.storage["rewards"].to(self.device),
+                )
+
+                self.storage["returns"] = returns
+                self.storage["advantages"] = advantages
 
         return obs_dict
 
@@ -1412,22 +1722,40 @@ class PPO(BaseAlgo):
         return returns, advantages
 
     def _training_step(self) -> dict[str, float]:
+        timing = self.algo_timing if self.algo_timing.enabled else None
         if self.dagger_enabled and self.use_ppo_dagger_schedule:
             self._adjust_ppo_dagger_coeff(self.current_learning_iteration)
         if self.dagger_enabled and (not self.use_ppo_dagger_schedule) and self.switch_to_rl_after > 0:
             if self.current_learning_iteration == self.switch_to_rl_after:
                 self.bc_loss_coef = 0.0
-        if self.use_time_gru:
-            generator = self.storage.sequence_mini_batch_generator(
-                self.config.num_mini_batches, self.config.num_learning_epochs
-            )
+        if timing is not None:
+            with timing.record("training/generator_setup"):
+                if self.use_time_gru:
+                    generator = self.storage.sequence_mini_batch_generator(
+                        self.config.num_mini_batches, self.config.num_learning_epochs
+                    )
+                else:
+                    generator = self.storage.mini_batch_generator(
+                        self.config.num_mini_batches, self.config.num_learning_epochs
+                    )
         else:
-            generator = self.storage.mini_batch_generator(self.config.num_mini_batches, self.config.num_learning_epochs)
+            if self.use_time_gru:
+                generator = self.storage.sequence_mini_batch_generator(
+                    self.config.num_mini_batches, self.config.num_learning_epochs
+                )
+            else:
+                generator = self.storage.mini_batch_generator(
+                    self.config.num_mini_batches, self.config.num_learning_epochs
+                )
 
         minibatch: Minibatch
         loss_dict = {"Value": 0.0, "Surrogate": 0.0, "Entropy": 0.0, "KL": 0.0}
         for minibatch in generator:
-            loss_dict = self._update_algo_step(minibatch, loss_dict)
+            if timing is not None:
+                with timing.record("training/update_algo_step"):
+                    loss_dict = self._update_algo_step(minibatch, loss_dict)
+            else:
+                loss_dict = self._update_algo_step(minibatch, loss_dict)
 
         num_updates = self.config.num_learning_epochs * self.config.num_mini_batches
         for key in loss_dict:
@@ -1436,7 +1764,11 @@ class PPO(BaseAlgo):
             loss_dict["teacher_bc_mask_fraction"] = float(self.storage["teacher_bc_mask"].float().mean().item())
         except KeyError:
             pass
-        self.storage.clear()
+        if timing is not None:
+            with timing.record("training/storage_clear"):
+                self.storage.clear()
+        else:
+            self.storage.clear()
         return loss_dict
 
     @staticmethod
@@ -2109,6 +2441,7 @@ class PPO(BaseAlgo):
             fixed_bc_eval_metrics = self._get_fixed_bc_eval_metrics(current_iteration=it)
             if fixed_bc_eval_metrics:
                 extra_log_dicts.setdefault("Eval", {}).update(fixed_bc_eval_metrics)
+        self._add_step_timing_logs(extra_log_dicts)
         loss_dict["actor_learning_rate"] = self.actor_learning_rate
         loss_dict["critic_learning_rate"] = self.critic_learning_rate
         # Use logging helper

@@ -8,11 +8,15 @@ from holosoma.envs.base_task.base_task import BaseTask
 
 # from holosoma.envs.legged_base_task.legged_robot_base import LeggedRobotBase
 from holosoma.utils.simulator_config import SimulatorType
+from holosoma.utils.step_timing import env_int
 
 
 class WholeBodyTrackingManager(BaseTask):
     def __init__(self, tyro_config, *, device):
+        self._motion_metrics_interval = max(1, env_int("HOLOSOMA_MOTION_METRICS_INTERVAL", default=1))
+        self._motion_metrics_step = 0
         super().__init__(tyro_config, device=device)
+        self._motion_metrics_required_every_step = self._curriculum_requires_live_motion_metrics()
 
     def _init_buffers(self):
         """Initialize torch tensors which will contain simulation states and processed quantities"""
@@ -66,17 +70,46 @@ class WholeBodyTrackingManager(BaseTask):
             raise RuntimeError("AverageEpisodeLengthTracker is not registered with the curriculum manager.")
         return tracker
 
+    def _curriculum_requires_live_motion_metrics(self) -> bool:
+        if self.curriculum_manager is None:
+            return False
+        for _, term in self.curriculum_manager.iter_terms():
+            if not bool(getattr(term, "enabled", False)):
+                continue
+            metric_key = str(getattr(term, "similarity_metric_key", ""))
+            if metric_key.startswith("motion/"):
+                return True
+        return False
+
     # -------------------------------- terms same with locomotion_manager.py [end]--------------------------------
 
     def _update_log_dict(self):
         # _update_log_dict happens before reset_envs_idx
+        timing = self.step_timing if self.step_timing.enabled else None
         # -------------------------------- terms same with locomotion_manager.py [start]--------------------------------
-        avg = self._get_average_episode_tracker().get_average()
-        self.log_dict["average_episode_length"] = avg.detach().cpu()
+        if timing is None:
+            avg = self._get_average_episode_tracker().get_average()
+        else:
+            with timing.record("post/log_update/average_episode_length"):
+                avg = self._get_average_episode_tracker().get_average()
+        self.log_dict["average_episode_length"] = avg.detach()
         # -------------------------------- terms same with locomotion_manager.py [end]--------------------------------
         # Add tracking metrics to log_dict
         motion_command = self.command_manager.get_state("motion_command")
-        motion_command.update_metrics()
+        self._motion_metrics_step += 1
+        should_update_metrics = (
+            self._motion_metrics_interval <= 1
+            or self._motion_metrics_required_every_step
+            or not getattr(motion_command, "metrics", None)
+            or (self._motion_metrics_step - 1) % self._motion_metrics_interval == 0
+        )
+        if timing is None:
+            if should_update_metrics:
+                motion_command.update_metrics()
+        else:
+            with timing.record("post/log_update/motion_metrics"):
+                if should_update_metrics:
+                    motion_command.update_metrics()
         self.log_dict.update(motion_command.metrics)
 
     def reset_all(self):

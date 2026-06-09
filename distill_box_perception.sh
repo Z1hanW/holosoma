@@ -396,6 +396,8 @@ CAMERA_MAX_DISTANCE_EXPLICIT=0
 [[ -n "${CAMERA_MAX_DISTANCE+x}" ]] && CAMERA_MAX_DISTANCE_EXPLICIT=1
 PERCEPTION_WARP_PREPROCESS_EXPLICIT=0
 [[ -n "${PERCEPTION_WARP_PREPROCESS+x}" ]] && PERCEPTION_WARP_PREPROCESS_EXPLICIT=1
+CAMERA_WARP_FREQ_RATIO_EXPLICIT=0
+[[ -n "${CAMERA_WARP_FREQ_RATIO+x}" ]] && CAMERA_WARP_FREQ_RATIO_EXPLICIT=1
 CAMERA_APPLY_SENSOR_NOISE_EXPLICIT=0
 [[ -n "${CAMERA_APPLY_SENSOR_NOISE+x}" ]] && CAMERA_APPLY_SENSOR_NOISE_EXPLICIT=1
 CAMERA_WARP_EDGE_NOISE_EXPLICIT=0
@@ -1452,6 +1454,10 @@ if [[ -n "${CAMERA_FAR}" || -n "${CAMERA_MAX_DISTANCE}" ]]; then
   echo "[INFO] camera_far=${CAMERA_FAR:-<preset default>} camera_max_distance=${CAMERA_MAX_DISTANCE:-<preset default>}"
 fi
 echo "[INFO] camera_apply_sensor_noise=${CAMERA_APPLY_SENSOR_NOISE}"
+echo "[INFO] perception_include_robot_mesh=${HOLOSOMA_PERCEPTION_INCLUDE_ROBOT_MESH:-<preset default>}"
+if [[ "${CAMERA_WARP_FREQ_RATIO_EXPLICIT}" -eq 1 ]]; then
+  echo "[INFO] camera_warp_freq_ratio=${CAMERA_WARP_FREQ_RATIO}"
+fi
 if [[ "${CAMERA_WARP_EDGE_NOISE_EXPLICIT}" -eq 1 || "${CAMERA_WARP_ENABLE_HOLES_EXPLICIT}" -eq 1 || "${CAMERA_WARP_HOLE_PROB_EXPLICIT}" -eq 1 || "${CAMERA_WARP_ADDITIVE_NOISE_STD_EXPLICIT}" -eq 1 || "${CAMERA_WARP_DEPTH_OFFSET_STD_EXPLICIT}" -eq 1 ]]; then
   echo "[INFO] camera_warp_edge_noise=${CAMERA_WARP_EDGE_NOISE:-<preset default>} camera_warp_enable_holes=${CAMERA_WARP_ENABLE_HOLES:-<preset default>} camera_warp_hole_prob=${CAMERA_WARP_HOLE_PROB:-<preset default>}"
   echo "[INFO] camera_warp_additive_noise_std=${CAMERA_WARP_ADDITIVE_NOISE_STD:-<preset default>} camera_warp_depth_offset_std=${CAMERA_WARP_DEPTH_OFFSET_STD:-<preset default>}"
@@ -1588,7 +1594,6 @@ if [[ "${DATA_MODE}" == "pure-real" ]]; then
 fi
 if [[ -n "${CONTACT_EXPORT_ROOT}" ]]; then
   EXTRA_DISTILL_ARGS+=(
-    --reward.terms.offline-wrist-target-guidance.params.contact-export-root "${CONTACT_EXPORT_ROOT}"
     --reward.terms.offline-contact-guidance.params.contact-export-root "${CONTACT_EXPORT_ROOT}"
   )
   if [[ "${EXP}" == *"r2s-rollout-ref"* ]]; then
@@ -1627,6 +1632,9 @@ if [[ "${PERCEPTION_PRESET}" != "none" ]]; then
   fi
   if [[ "${PERCEPTION_WARP_PREPROCESS_EXPLICIT}" -eq 1 ]]; then
     PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-warp-preprocess="${PERCEPTION_WARP_PREPROCESS}")
+  fi
+  if [[ "${CAMERA_WARP_FREQ_RATIO_EXPLICIT}" -eq 1 ]]; then
+    PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-warp-freq-ratio="${CAMERA_WARP_FREQ_RATIO}")
   fi
   if [[ "${CAMERA_APPLY_SENSOR_NOISE_EXPLICIT}" -eq 1 || "${PERCEPTION_PRESET}" == camera_depth_* ]]; then
     PERCEPTION_OVERRIDE_ARGS+=(--perception.camera-apply-sensor-noise="${CAMERA_APPLY_SENSOR_NOISE}")

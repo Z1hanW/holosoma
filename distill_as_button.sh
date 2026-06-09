@@ -140,6 +140,8 @@ export SCHEDULE_VARIANT="${SCHEDULE_VARIANT:-ppo_first}"
 export STUDENT_ACTOR_INPUTS="${STUDENT_ACTOR_INPUTS:-['actor_obs_root_contact_aware','actor_obs_drop_button','actor_obs_proprio_with_actions_no_linvel']}"
 export ENABLE_DEFAULT_POSE_PREPEND="${ENABLE_DEFAULT_POSE_PREPEND:-True}"
 export DEFAULT_POSE_PREPEND_DURATION_S="${DEFAULT_POSE_PREPEND_DURATION_S:-0.2}"
+export HOLOSOMA_PERCEPTION_INCLUDE_ROBOT_MESH="${HOLOSOMA_PERCEPTION_INCLUDE_ROBOT_MESH:-1}"
+export HOLOSOMA_MOTION_METRICS_INTERVAL="${HOLOSOMA_MOTION_METRICS_INTERVAL:-16}"
 export BAD_TRACKING_THRESHOLD_AUGMENT="${BAD_TRACKING_THRESHOLD_AUGMENT:-1.0}"
 
 if [[ "${CORL_128:-0}" == "1" && "${RESUME_FROM_BOX:-0}" == "1" ]]; then
@@ -184,5 +186,6 @@ if [[ "${STUDENT_ACTOR_INPUTS}" == *"actor_obs_pickup_button"* ]]; then
   echo "[INFO] pickup_button_interface=1 pickup_button=1_before_t1_0_from_t1_to_end"
 fi
 echo "[INFO] drop_button_interface=1 drop_button=0_before_t2_1_from_t2_to_end"
+echo "[INFO] HOLOSOMA_MOTION_METRICS_INTERVAL=${HOLOSOMA_MOTION_METRICS_INTERVAL}"
 
 exec bash "${SCRIPT_DIR}/distill_as_perception.sh" "${POSITIONAL[@]}"

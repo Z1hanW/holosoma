@@ -25,6 +25,7 @@ from holosoma.utils.rollout_recorder import RolloutRecorder
 from holosoma.utils.simulator_config import SimulatorType
 from holosoma.utils.viser_live import ViserLiveViewer
 from holosoma.utils.safe_torch_import import torch
+from holosoma.utils.step_timing import StepTiming
 from holosoma.utils.torch_utils import to_torch
 
 
@@ -111,11 +112,13 @@ class BaseTask:
         self.dim_critic_obs = robot_config.critic_obs_dim
         self.dim_actions = robot_config.actions_dim
         self.device = device
+        self.step_timing = StepTiming.from_env(device=self.device)
 
         self.terrain_manager = TerrainManager(terrain_config, self, device)
         self.simulator: BaseSimulator = SimulatorClass(
             tyro_config=full_sim_config, terrain_manager=self.terrain_manager, device=device
         )
+        setattr(self.simulator, "step_timing", self.step_timing)
 
         self.headless = self.training_config.headless
         self.simulator.set_headless(self.headless)
@@ -464,6 +467,13 @@ class BaseTask:
 
     def step(self, actor_state):
         """Apply actions, advance the simulation, and return rollout buffers."""
+        timing = self.step_timing if self.step_timing.enabled else None
+        if timing is not None:
+            with timing.record("env_step_total"):
+                return self._step_impl(actor_state)
+        return self._step_impl(actor_state)
+
+    def _step_impl(self, actor_state):
         if hasattr(self, "_viser_live") and getattr(self._viser_live, "enabled", False):
             self._viser_live.apply_pending_controls()
             self._viser_live.wait_if_paused()
@@ -475,13 +485,26 @@ class BaseTask:
                 self.num_envs,
                 tuple(actions.shape),
             )
-        self._pre_physics_step(actions)
+        timing = self.step_timing if self.step_timing.enabled else None
+        if timing is not None:
+            with timing.record("pre_physics"):
+                self._pre_physics_step(actions)
+        else:
+            self._pre_physics_step(actions)
         if debug_heartbeat:
             logger.info("Heartbeat: BaseTask.step after _pre_physics_step")
-        self._physics_step()
+        if timing is not None:
+            with timing.record("physics"):
+                self._physics_step()
+        else:
+            self._physics_step()
         if debug_heartbeat:
             logger.info("Heartbeat: BaseTask.step after _physics_step")
-        self._post_physics_step()
+        if timing is not None:
+            with timing.record("post_physics"):
+                self._post_physics_step()
+        else:
+            self._post_physics_step()
         if debug_heartbeat:
             reset_count = int(self.reset_buf.sum().item()) if self.reset_buf is not None else 0
             logger.info("Heartbeat: BaseTask.step after _post_physics_step (reset_envs={})", reset_count)
@@ -492,57 +515,132 @@ class BaseTask:
             self.action_manager.process_actions(actions)
 
     def _physics_step(self):
-        self.render()
+        timing = self.step_timing if self.step_timing.enabled else None
+        if timing is not None:
+            with timing.record("physics/render"):
+                self.render()
+        else:
+            self.render()
         for _ in range(self.simulator.simulator_config.sim.control_decimation):
-            self._apply_force_in_physics_step()
-            self.simulator.simulate_at_each_physics_step()
+            if timing is not None:
+                with timing.record("physics/apply_force"):
+                    self._apply_force_in_physics_step()
+                with timing.record("physics/simulate_step"):
+                    self.simulator.simulate_at_each_physics_step()
+            else:
+                self._apply_force_in_physics_step()
+                self.simulator.simulate_at_each_physics_step()
 
     def _apply_force_in_physics_step(self):
         if self.action_manager is not None:
             self.action_manager.apply_actions()
 
     def _post_physics_step(self):
-        self._refresh_sim_tensors()
-        self.episode_length_buf += 1
-        self._update_counters_each_step()
+        timing = self.step_timing if self.step_timing.enabled else None
+        if timing is None:
+            self._refresh_sim_tensors()
+            self.episode_length_buf += 1
+            self._update_counters_each_step()
 
-        self._pre_compute_observations_callback()
-        self._check_termination()
-        self._compute_reward()
-        self._update_log_dict()
-        if hasattr(self, "_rollout_recorder"):
-            self._rollout_recorder.record_step()
-        self._draw_scandots_in_viewer()
-        if hasattr(self, "_viser_live"):
-            self._viser_live.record_step()
+            self._pre_compute_observations_callback()
+            self._check_termination()
+            self._compute_reward()
+            self._update_log_dict()
+            if hasattr(self, "_rollout_recorder"):
+                self._rollout_recorder.record_step()
+            self._draw_scandots_in_viewer()
+            if hasattr(self, "_viser_live"):
+                self._viser_live.record_step()
 
-        env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
+            env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
+            final_obs_dict = {}
+            if env_ids.numel() > 0:
+                final_obs_dict = self._compute_final_observations()
+
+            self.reset_envs_idx(env_ids)
+
+            refresh_env_ids = self._ensure_long_tensor(self._get_envs_to_refresh())
+            if refresh_env_ids.numel() > 0:
+                self._refresh_envs_after_reset(refresh_env_ids)
+
+            # Advance task-specific state after termination/reset handling so managers
+            # see the post-reset timestep on short clips when computing the next obs.
+            self._update_tasks_callback()
+            self._compute_observations()
+
+            if env_ids.numel() > 0 and final_obs_dict:
+                env_ids_long = self._ensure_long_tensor(env_ids)
+                self._store_final_observations(env_ids_long, final_obs_dict)
+
+            self._post_compute_observations_callback()
+            self._clip_observations()
+
+            self.extras["to_log"] = self.log_dict
+            if self.viewer:
+                self._setup_simulator_control()
+                self._setup_simulator_next_task()
+            return
+
+        with timing.record("post/refresh"):
+            self._refresh_sim_tensors()
+        with timing.record("post/counters"):
+            self.episode_length_buf += 1
+            self._update_counters_each_step()
+
+        with timing.record("post/perception"):
+            self._pre_compute_observations_callback()
+        with timing.record("post/termination"):
+            self._check_termination()
+        with timing.record("post/reward"):
+            self._compute_reward()
+        with timing.record("post/log_update"):
+            with timing.record("post/log_update/update_log_dict"):
+                self._update_log_dict()
+            if hasattr(self, "_rollout_recorder"):
+                with timing.record("post/log_update/rollout_recorder"):
+                    self._rollout_recorder.record_step()
+            with timing.record("post/log_update/draw_scandots"):
+                self._draw_scandots_in_viewer()
+            if hasattr(self, "_viser_live"):
+                with timing.record("post/log_update/viser_live"):
+                    self._viser_live.record_step()
+
+        with timing.record("post/reset_select"):
+            env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         final_obs_dict = {}
         if env_ids.numel() > 0:
-            final_obs_dict = self._compute_final_observations()
+            with timing.record("post/final_observations"):
+                final_obs_dict = self._compute_final_observations()
 
-        self.reset_envs_idx(env_ids)
+        with timing.record("post/reset_envs"):
+            self.reset_envs_idx(env_ids)
 
-        refresh_env_ids = self._ensure_long_tensor(self._get_envs_to_refresh())
-        if refresh_env_ids.numel() > 0:
-            self._refresh_envs_after_reset(refresh_env_ids)
+        with timing.record("post/reset_refresh"):
+            refresh_env_ids = self._ensure_long_tensor(self._get_envs_to_refresh())
+            if refresh_env_ids.numel() > 0:
+                self._refresh_envs_after_reset(refresh_env_ids)
 
         # Advance task-specific state after termination/reset handling so managers
         # see the post-reset timestep on short clips when computing the next obs.
-        self._update_tasks_callback()
-        self._compute_observations()
+        with timing.record("post/tasks"):
+            self._update_tasks_callback()
+        with timing.record("post/observations"):
+            self._compute_observations()
 
         if env_ids.numel() > 0 and final_obs_dict:
-            env_ids_long = self._ensure_long_tensor(env_ids)
-            self._store_final_observations(env_ids_long, final_obs_dict)
+            with timing.record("post/store_final_observations"):
+                env_ids_long = self._ensure_long_tensor(env_ids)
+                self._store_final_observations(env_ids_long, final_obs_dict)
 
-        self._post_compute_observations_callback()
-        self._clip_observations()
+        with timing.record("post/post_observations"):
+            self._post_compute_observations_callback()
+            self._clip_observations()
 
-        self.extras["to_log"] = self.log_dict
-        if self.viewer:
-            self._setup_simulator_control()
-            self._setup_simulator_next_task()
+        with timing.record("post/extras_viewer"):
+            self.extras["to_log"] = self.log_dict
+            if self.viewer:
+                self._setup_simulator_control()
+                self._setup_simulator_next_task()
 
     def _draw_scandots_in_viewer(self) -> None:
         if not getattr(self.training_config, "isaac_show_scandots", True):
@@ -748,9 +846,19 @@ class BaseTask:
         return self.observation_manager.compute(modify_history=False)
 
     def _update_tasks_callback(self):
-        self.command_manager.step()
-        self.curriculum_manager.step()
-        self.randomization_manager.step()
+        timing = self.step_timing if self.step_timing.enabled else None
+        if timing is None:
+            self.command_manager.step()
+            self.curriculum_manager.step()
+            self.randomization_manager.step()
+            return
+
+        with timing.record("post/tasks/command_manager"):
+            self.command_manager.step()
+        with timing.record("post/tasks/curriculum_manager"):
+            self.curriculum_manager.step()
+        with timing.record("post/tasks/randomization_manager"):
+            self.randomization_manager.step()
 
     def _init_counters(self):
         return

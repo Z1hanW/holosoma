@@ -55,6 +55,8 @@ REWARD_LOG_PARAM_KEYS = (
     "position_sigma",
     "force_threshold",
     "force_sigma",
+    "wrist_weight",
+    "contact_weight",
 )
 
 
