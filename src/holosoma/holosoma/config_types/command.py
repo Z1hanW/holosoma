@@ -169,6 +169,19 @@ class MotionConfig:
     contact_aware_peak_height_smoothing_steps: int = 5
     """Centered edge-padded moving-average window for peak-height carry-window detection."""
 
+    contact_aware_sparse_root_command_mode: str = "tracking_error"
+    """Root command used by ``actor_obs_root_contact_aware``.
+
+    ``tracking_error`` preserves the original robot-to-target root delta. ``t1_aligned_segment``
+    uses a non-overlap motion segment command anchored at carry-window start ``t1``.
+    """
+
+    contact_aware_sparse_root_segment_steps: int = 30
+    """Segment length, in motion frames, for ``contact_aware_sparse_root_command_mode='t1_aligned_segment'``."""
+
+    contact_aware_sparse_root_zero_yaw_threshold_deg: float = 0.0
+    """Zero sparse yaw commands whose absolute value is at or below this threshold in degrees."""
+
     uniform_t1_window_sampling_enabled: bool = False
     """Whether uniform timestep resets should density-boost a window around contact start ``t1``."""
 

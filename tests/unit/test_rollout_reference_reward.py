@@ -63,7 +63,7 @@ class _DummyMotionCommand:
         return offsets.index_select(0, env_ids.to(dtype=torch.long))
 
 
-def _write_teacher_rollout_reference(export_root: Path) -> None:
+def _write_rollout_reference(export_root: Path) -> None:
     clip_dir = export_root / "clips" / "0000_box_10"
     clip_dir.mkdir(parents=True, exist_ok=True)
 
@@ -133,8 +133,8 @@ def _write_teacher_rollout_reference(export_root: Path) -> None:
 
 
 def _build_env(tmp_path: Path) -> tuple[SimpleNamespace, _DummyMotionCommand, Path]:
-    export_root = tmp_path / "teacher_rollout_export"
-    _write_teacher_rollout_reference(export_root)
+    export_root = tmp_path / "rollout_reference_export"
+    _write_rollout_reference(export_root)
     motion_command = _DummyMotionCommand()
     env = SimpleNamespace(
         num_envs=2,
@@ -145,14 +145,14 @@ def _build_env(tmp_path: Path) -> tuple[SimpleNamespace, _DummyMotionCommand, Pa
     return env, motion_command, export_root
 
 
-def test_teacher_rollout_object_reference_reward_uses_exported_rollout(
+def test_rollout_reference_object_reward_uses_exported_rollout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
     env, motion_command, export_root = _build_env(tmp_path)
     monkeypatch.setattr(reward_wbt, "_get_motion_command_and_assert_type", lambda _env: motion_command)
 
-    reward = reward_wbt.teacher_rollout_object_global_ref_position_error_exp(
+    reward = reward_wbt.object_global_ref_position_error_exp(
         env,
         sigma=0.1,
         rollout_reference_root=str(export_root),
@@ -163,7 +163,7 @@ def test_teacher_rollout_object_reference_reward_uses_exported_rollout(
     assert reward[1].item() < 0.01
 
 
-def test_teacher_rollout_global_ref_reward_uses_exported_rollout(
+def test_rollout_reference_global_ref_reward_uses_exported_rollout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -177,7 +177,7 @@ def test_teacher_rollout_global_ref_reward_uses_exported_rollout(
     )
     monkeypatch.setattr(reward_wbt, "_get_motion_command_and_assert_type", lambda _env: motion_command)
 
-    reward = reward_wbt.teacher_rollout_global_ref_position_error_exp(
+    reward = reward_wbt.motion_global_ref_position_error_exp(
         env,
         sigma=0.1,
         rollout_reference_root=str(export_root),
@@ -188,14 +188,14 @@ def test_teacher_rollout_global_ref_reward_uses_exported_rollout(
     assert reward[1].item() < 0.05
 
 
-def test_teacher_rollout_relative_body_reward_uses_exported_rollout(
+def test_rollout_reference_relative_body_reward_uses_exported_rollout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
     env, motion_command, export_root = _build_env(tmp_path)
     monkeypatch.setattr(reward_wbt, "_get_motion_command_and_assert_type", lambda _env: motion_command)
 
-    reward = reward_wbt.teacher_rollout_relative_body_position_error_exp(
+    reward = reward_wbt.motion_relative_body_position_error_exp(
         env,
         sigma=0.1,
         rollout_reference_root=str(export_root),
@@ -206,7 +206,7 @@ def test_teacher_rollout_relative_body_reward_uses_exported_rollout(
     assert reward[1].item() < 0.2
 
 
-def test_teacher_rollout_global_body_lin_vel_reward_uses_exported_rollout(
+def test_rollout_reference_global_body_lin_vel_reward_uses_exported_rollout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -214,7 +214,7 @@ def test_teacher_rollout_global_body_lin_vel_reward_uses_exported_rollout(
     motion_command.robot_body_lin_vel_w[1, 0, 0] = 1.0
     monkeypatch.setattr(reward_wbt, "_get_motion_command_and_assert_type", lambda _env: motion_command)
 
-    reward = reward_wbt.teacher_rollout_global_body_lin_vel(
+    reward = reward_wbt.motion_global_body_lin_vel(
         env,
         sigma=0.1,
         rollout_reference_root=str(export_root),
@@ -225,7 +225,35 @@ def test_teacher_rollout_global_body_lin_vel_reward_uses_exported_rollout(
     assert reward[1].item() < 0.1
 
 
-def test_teacher_rollout_reference_sample_is_cached_within_step(
+def test_legacy_reward_alias_matches_unified_motion_reward(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    env, motion_command, export_root = _build_env(tmp_path)
+    motion_command.robot_ref_pos_w = torch.tensor(
+        [
+            [0.0, 0.0, 1.2],
+            [0.2, 0.0, 1.2],
+        ],
+        dtype=torch.float32,
+    )
+    monkeypatch.setattr(reward_wbt, "_get_motion_command_and_assert_type", lambda _env: motion_command)
+
+    unified = reward_wbt.motion_global_ref_position_error_exp(
+        env,
+        sigma=0.1,
+        rollout_reference_root=str(export_root),
+    )
+    legacy_alias = reward_wbt.teacher_rollout_global_ref_position_error_exp(
+        env,
+        sigma=0.1,
+        rollout_reference_root=str(export_root),
+    )
+
+    torch.testing.assert_close(legacy_alias, unified, rtol=0.0, atol=0.0)
+
+
+def test_rollout_reference_sample_is_cached_within_step(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -242,7 +270,7 @@ def test_teacher_rollout_reference_sample_is_cached_within_step(
 
     monkeypatch.setattr(reward_wbt, "_gather_clip_timestep_values", _counting_gather)
 
-    reward_wbt.teacher_rollout_global_ref_position_error_exp(
+    reward_wbt.motion_global_ref_position_error_exp(
         env,
         sigma=0.1,
         rollout_reference_root=str(export_root),
@@ -250,7 +278,7 @@ def test_teacher_rollout_reference_sample_is_cached_within_step(
     first_call_gathers = gather_call_count
     assert first_call_gathers > 0
 
-    reward_wbt.teacher_rollout_global_ref_orientation_error_exp(
+    reward_wbt.motion_global_ref_orientation_error_exp(
         env,
         sigma=0.1,
         rollout_reference_root=str(export_root),
@@ -258,7 +286,7 @@ def test_teacher_rollout_reference_sample_is_cached_within_step(
     assert gather_call_count == first_call_gathers
 
     motion_command.time_steps += 1
-    reward_wbt.teacher_rollout_global_ref_orientation_error_exp(
+    reward_wbt.motion_global_ref_orientation_error_exp(
         env,
         sigma=0.1,
         rollout_reference_root=str(export_root),
@@ -266,7 +294,7 @@ def test_teacher_rollout_reference_sample_is_cached_within_step(
     assert gather_call_count > first_call_gathers
 
 
-def test_teacher_rollout_relative_targets_are_cached_within_reward_compute(
+def test_rollout_reference_relative_targets_are_cached_within_reward_compute(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -275,16 +303,16 @@ def test_teacher_rollout_relative_targets_are_cached_within_reward_compute(
     monkeypatch.setattr(reward_wbt, "_get_motion_command_and_assert_type", lambda _env: motion_command)
 
     quat_apply_call_count = 0
-    original_quat_apply = reward_wbt.quat_apply
+    original_quat_apply = reward_wbt.quat_apply_broadcast_left
 
     def _counting_quat_apply(quat: torch.Tensor, vec: torch.Tensor, *, w_last: bool = True) -> torch.Tensor:
         nonlocal quat_apply_call_count
         quat_apply_call_count += 1
         return original_quat_apply(quat, vec, w_last=w_last)
 
-    monkeypatch.setattr(reward_wbt, "quat_apply", _counting_quat_apply)
+    monkeypatch.setattr(reward_wbt, "quat_apply_broadcast_left", _counting_quat_apply)
 
-    reward_wbt.teacher_rollout_relative_body_position_error_exp(
+    reward_wbt.motion_relative_body_position_error_exp(
         env,
         sigma=0.1,
         rollout_reference_root=str(export_root),
@@ -292,7 +320,7 @@ def test_teacher_rollout_relative_targets_are_cached_within_reward_compute(
     first_call_quat_apply_count = quat_apply_call_count
     assert first_call_quat_apply_count > 0
 
-    reward_wbt.teacher_rollout_relative_body_orientation_error_exp(
+    reward_wbt.motion_relative_body_orientation_error_exp(
         env,
         sigma=0.1,
         rollout_reference_root=str(export_root),
@@ -300,7 +328,7 @@ def test_teacher_rollout_relative_targets_are_cached_within_reward_compute(
     assert quat_apply_call_count == first_call_quat_apply_count
 
     env._reward_compute_counter += 1
-    reward_wbt.teacher_rollout_relative_body_orientation_error_exp(
+    reward_wbt.motion_relative_body_orientation_error_exp(
         env,
         sigma=0.1,
         rollout_reference_root=str(export_root),

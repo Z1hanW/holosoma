@@ -37,6 +37,11 @@ from omegaconf import DictConfig, ListConfig
 
 from holosoma.utils.module_utils import get_holosoma_root
 from holosoma.utils.path import resolve_data_file_path
+from holosoma.utils.rank_local_shards import (
+    rank_local_sharding_enabled,
+    resolve_rank_local_motion_path,
+    resolve_rank_local_object_map,
+)
 from holosoma.config_types.command import MotionConfig
 from holosoma.config_types.simulator import SimulatorInitConfig, SceneConfig
 from holosoma.managers.terrain import TerrainManager
@@ -302,6 +307,13 @@ class IsaacSim(BaseSimulator):
         object_cfg = getattr(self.robot_config, "object", None)
         object_path_spec = str(getattr(object_cfg, "object_urdf_path", "") or "").strip()
         if getattr(object_cfg, "enabled", False) and object_path_spec:
+            resolved_object_path_spec = resolve_rank_local_object_map(object_path_spec)
+            if resolved_object_path_spec != object_path_spec:
+                object_path_spec = resolved_object_path_spec
+                try:
+                    object_cfg.object_urdf_path = object_path_spec
+                except Exception as exc:
+                    logger.debug("Could not update rank-local object_urdf_path on config: {}", exc)
             self._resolved_training_object_specs = self._resolve_training_object_specs(object_path_spec)
             self._training_object_use_box_primitives = self._should_use_box_primitives(
                 self._resolved_training_object_specs
@@ -847,7 +859,8 @@ class IsaacSim(BaseSimulator):
         if motion_cfg is None:
             return None
 
-        motion_path = pathlib.Path(resolve_data_file_path(motion_cfg.motion_file))
+        motion_file = resolve_data_file_path(motion_cfg.motion_file)
+        motion_path = pathlib.Path(resolve_rank_local_motion_path(motion_file))
         suffix = motion_path.suffix.lower()
         if motion_path.is_dir() or suffix == ".npz":
             return self._resolve_motion_subset_object_urdfs_from_npz(motion_path, motion_cfg)
@@ -893,6 +906,9 @@ class IsaacSim(BaseSimulator):
 
     @staticmethod
     def _shard_object_specs_by_rank(object_specs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        if rank_local_sharding_enabled():
+            return object_specs
+
         shard_enabled = os.environ.get("HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK", "").strip().lower()
         if shard_enabled not in {"1", "true", "yes", "on"}:
             return object_specs
@@ -1498,16 +1514,18 @@ class IsaacSim(BaseSimulator):
                 )
                 self._append_object_contact_filter_paths("Object", object_specs[0][1])
                 rank_sharding = os.environ.get("HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK", "").strip().lower()
-                rank_sharding_enabled = rank_sharding in {"1", "true", "yes", "on"}
+                rank_local_sharding = rank_local_sharding_enabled()
+                rank_sharding_enabled = rank_sharding in {"1", "true", "yes", "on"} and not rank_local_sharding
                 logger.info(
                     "Object generalist spawning topology: object_slots_per_env=1 unique_urdfs_this_rank={} "
                     "object_actors_per_rank={} legacy_object_actors_if_banked={} replicate_physics={} "
-                    "rank_sharding={}.",
+                    "rank_sharding={} rank_local_motion_sharding={}.",
                     len(object_specs),
                     self.training_config.num_envs,
                     self.training_config.num_envs * len(object_specs),
                     bool(self.scene.cfg.replicate_physics),
                     rank_sharding_enabled,
+                    rank_local_sharding,
                 )
                 logger.info(
                     "Loaded heterogeneous training object bank: {} unique URDF(s) assigned across {} envs.",

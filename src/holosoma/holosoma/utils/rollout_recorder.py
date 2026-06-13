@@ -43,6 +43,14 @@ class RolloutRecorder:
 
         self._episode_idx = 0
         self._frames: list[np.ndarray] = []
+        self._command_frames: dict[str, list[np.ndarray]] = {
+            "root_contact_aware_command": [],
+            "drop_button": [],
+            "pickup_button": [],
+            "command_active_mask": [],
+            "command_time_step": [],
+            "command_carry_window": [],
+        }
         self._stopped = False
 
         self._fps = float(1.0 / getattr(env, "dt", 0.02))
@@ -67,6 +75,11 @@ class RolloutRecorder:
             return
 
         self._frames.append(frame)
+        command_snapshot = self._build_command_snapshot()
+        if command_snapshot is not None:
+            for key, value in command_snapshot.items():
+                if key in self._command_frames:
+                    self._command_frames[key].append(value)
         if self._max_frames > 0 and len(self._frames) >= self._max_frames:
             self._finalize("max_frames")
             self._stopped = True
@@ -103,6 +116,16 @@ class RolloutRecorder:
         if self._history_name_suffix:
             payload["history_tag"] = np.array([self._history_name_suffix.lstrip("_")])
 
+        for key, values in self._command_frames.items():
+            if len(values) == len(self._frames) and values:
+                payload[key] = np.stack(values, axis=0).astype(np.float32, copy=False)
+
+        object_name, object_urdf_path = self._get_clip_object_metadata()
+        if object_name:
+            payload["object_name"] = np.array([object_name])
+        if object_urdf_path:
+            payload["object_urdf_path"] = np.array([object_urdf_path])
+
         if self._env_origin is not None:
             payload["env_origin"] = self._env_origin.astype(np.float32, copy=False)
         if self._terrain_obj_path:
@@ -113,6 +136,8 @@ class RolloutRecorder:
 
         np.savez(path, **payload)
         self._frames.clear()
+        for values in self._command_frames.values():
+            values.clear()
         self._episode_idx += 1
 
     def _build_frame(self) -> np.ndarray | None:
@@ -131,6 +156,41 @@ class RolloutRecorder:
             parts.extend([obj_pos, obj_quat])
 
         return np.concatenate(parts, axis=0).astype(np.float32, copy=False)
+
+    def _build_command_snapshot(self) -> dict[str, np.ndarray] | None:
+        command_mgr = getattr(self._env, "command_manager", None)
+        if command_mgr is None:
+            return None
+        motion_cmd = command_mgr.get_state("motion_command")
+        if motion_cmd is None:
+            return None
+
+        try:
+            from holosoma.managers.observation.terms.wbt import (
+                drop_button,
+                pickup_button,
+                sparse_target_root_trajectory_command_contact_aware,
+            )
+
+            env_id = self._record_env_id
+            root_command = sparse_target_root_trajectory_command_contact_aware(self._env)[env_id]
+            drop = drop_button(self._env)[env_id]
+            pickup = pickup_button(self._env)[env_id]
+            active_mask = motion_cmd.get_contact_aware_root_command_active_mask()[env_id].to(dtype=torch.float32).reshape(1)
+            time_step = motion_cmd.time_steps[env_id].to(dtype=torch.float32).reshape(1)
+            clip_id = int(motion_cmd.clip_ids[env_id].item())
+            carry_window = motion_cmd._get_contact_aware_carry_window_by_clip()[clip_id].to(dtype=torch.float32)
+        except Exception:
+            return None
+
+        return {
+            "root_contact_aware_command": root_command.detach().cpu().numpy().reshape(-1),
+            "drop_button": drop.detach().cpu().numpy().reshape(-1),
+            "pickup_button": pickup.detach().cpu().numpy().reshape(-1),
+            "command_active_mask": active_mask.detach().cpu().numpy().reshape(-1),
+            "command_time_step": time_step.detach().cpu().numpy().reshape(-1),
+            "command_carry_window": carry_window.detach().cpu().numpy().reshape(-1),
+        }
 
     def _get_root_state_wxyz(self) -> tuple[np.ndarray | None, np.ndarray | None]:
         sim = self._env.simulator
@@ -217,6 +277,34 @@ class RolloutRecorder:
         if not clip_names or clip_idx < 0 or clip_idx >= len(clip_names):
             return None
         return str(clip_names[clip_idx])
+
+    def _get_clip_object_metadata(self) -> tuple[str | None, str | None]:
+        command_mgr = getattr(self._env, "command_manager", None)
+        if command_mgr is None:
+            return None, None
+        motion_cmd = command_mgr.get_state("motion_command")
+        if motion_cmd is None or not hasattr(motion_cmd, "clip_ids"):
+            return None, None
+
+        try:
+            clip_idx = int(motion_cmd.clip_ids[self._record_env_id].item())
+        except Exception:
+            return None, None
+
+        motion = getattr(motion_cmd, "motion", None)
+        names = getattr(motion, "clip_object_names", None)
+        urdfs = getattr(motion, "clip_object_urdf_paths", None)
+        object_name = None
+        object_urdf_path = None
+        if isinstance(names, list) and 0 <= clip_idx < len(names):
+            object_name = str(names[clip_idx]).strip() or None
+        if isinstance(urdfs, list) and 0 <= clip_idx < len(urdfs):
+            object_urdf_path = str(urdfs[clip_idx]).strip() or None
+
+        if object_name is None:
+            clip_name = self._get_clip_name()
+            object_name = clip_name.strip() if clip_name else None
+        return object_name, object_urdf_path
 
     def _resolve_history_name_suffix(self) -> str:
         observation_manager = getattr(self._env, "observation_manager", None)

@@ -1528,21 +1528,35 @@ class ViserLiveViewer:
         )
         self._target_object_center_handle = None
         self._target_object_trajectory_handle = None
+        self._rollout_root_trajectory_handle = None
         self._rollout_object_trajectory_handle = None
         self._target_object_center_point_size = 0.045
         self._target_object_trajectory_line_width = 2.5
+        self._rollout_root_trajectory_line_width = 3.0
         self._rollout_object_trajectory_line_width = 3.0
+        self._rollout_trajectory_mesh_width = float(os.environ.get("VISER_ROLLOUT_TRAJECTORY_MESH_WIDTH", "0.06"))
+        self._rollout_trajectory_z_offset = float(os.environ.get("VISER_ROLLOUT_TRAJECTORY_Z_OFFSET", "0.08"))
         self._target_object_center_color = np.array([0, 255, 0], dtype=np.uint8)
+        self._rollout_root_trajectory_color = np.array([255, 128, 0], dtype=np.uint8)
         self._rollout_object_trajectory_color = np.array([0, 0, 255], dtype=np.uint8)
+        self._rollout_root_trajectory_points_w: list[np.ndarray] = []
+        self._rollout_root_trajectory_last_clip_idx: int | None = None
+        self._rollout_root_trajectory_last_time_step: int | None = None
         self._rollout_object_trajectory_points_w: list[np.ndarray] = []
         self._rollout_object_trajectory_last_clip_idx: int | None = None
         self._rollout_object_trajectory_last_time_step: int | None = None
+        self._rollout_trajectory_mesh_logged: set[str] = set()
         self._show_target_object_center = os.environ.get("VISER_SHOW_TARGET_OBJECT_CENTER", "1").lower() not in (
             "0",
             "false",
             "no",
         )
         self._show_target_object_trajectory = os.environ.get("VISER_SHOW_TARGET_OBJECT_TRAJECTORY", "1").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+        self._show_rollout_root_trajectory = os.environ.get("VISER_SHOW_ROLLOUT_ROOT_TRAJECTORY", "1").lower() not in (
             "0",
             "false",
             "no",
@@ -1841,6 +1855,38 @@ class ViserLiveViewer:
                 "logs/runtime/viser_auto_forward_after_lift.jsonl",
             )
         ).expanduser()
+        self._auto_forward_after_lift_heading_hold_enabled = os.environ.get(
+            "VISER_AUTO_FORWARD_AFTER_LIFT_HEADING_HOLD",
+            "0",
+        ).lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+        self._auto_forward_after_lift_heading_kp = self._float_env(
+            "VISER_AUTO_FORWARD_AFTER_LIFT_HEADING_KP",
+            1.0,
+        )
+        self._auto_forward_after_lift_heading_kd = self._float_env(
+            "VISER_AUTO_FORWARD_AFTER_LIFT_HEADING_KD",
+            0.0,
+        )
+        self._auto_forward_after_lift_heading_yaw_limit = abs(
+            self._float_env("VISER_AUTO_FORWARD_AFTER_LIFT_HEADING_YAW_LIMIT", 0.6)
+        )
+        self._auto_forward_after_lift_heading_deadband = abs(
+            self._float_env("VISER_AUTO_FORWARD_AFTER_LIFT_HEADING_DEADBAND", 0.0)
+        )
+        self._auto_forward_after_lift_heading_xy_compensation_enabled = os.environ.get(
+            "VISER_AUTO_FORWARD_AFTER_LIFT_HEADING_XY_COMPENSATION",
+            "1",
+        ).lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
         self._auto_forward_after_lift_state = "waiting"
         self._auto_forward_after_lift_baseline_rel_z: float | None = None
         self._auto_forward_after_lift_ready_count = 0
@@ -1848,6 +1894,12 @@ class ViserLiveViewer:
         self._auto_forward_after_lift_last_log_time = 0.0
         self._auto_forward_after_lift_log_handle = None
         self._auto_forward_after_lift_logged_start = False
+        self._auto_forward_after_lift_applied_command: list[float] | None = None
+        self._auto_forward_after_lift_last_snapshot_wall_time: float | None = None
+        self._auto_forward_after_lift_last_snapshot_yaw: float | None = None
+        self._auto_forward_after_lift_heading_target_yaw: float | None = None
+        self._auto_forward_after_lift_heading_error: float | None = None
+        self._auto_forward_after_lift_effective_command: list[float] | None = None
         self._clip_start_slider = None
         self._clip_lock_cb = None
         self._perception_enabled = False
@@ -3663,6 +3715,302 @@ class ViserLiveViewer:
         self._set_manual_drop_button(value)
         self._update_drop_button_status()
 
+    def _auto_forward_after_lift_snapshot(self) -> dict[str, Any] | None:
+        root_pos, root_quat_wxyz = self._get_root_state_wxyz()
+        object_state = self._get_object_state_wxyz()
+        if root_pos is None or root_quat_wxyz is None or object_state is None:
+            return None
+
+        object_pos, object_quat_wxyz = object_state
+        root_pos = np.asarray(root_pos, dtype=np.float32).reshape(3)
+        root_quat_wxyz = np.asarray(root_quat_wxyz, dtype=np.float32).reshape(4)
+        object_pos = np.asarray(object_pos, dtype=np.float32).reshape(3)
+        object_quat_wxyz = np.asarray(object_quat_wxyz, dtype=np.float32).reshape(4)
+        rel_z = float(object_pos[2] - root_pos[2])
+
+        robot_root_state = None
+        root_lin_vel_w = None
+        root_ang_vel_w = None
+        try:
+            root_states = getattr(self._env.simulator, "robot_root_states", None)
+            if isinstance(root_states, torch.Tensor) and self._env_id < int(root_states.shape[0]):
+                root_state = root_states[self._env_id].detach().float().cpu().numpy()
+                robot_root_state = root_state.astype(float).tolist()
+                if root_state.shape[0] >= 13:
+                    root_lin_vel_w = root_state[7:10].astype(float).tolist()
+                    root_ang_vel_w = root_state[10:13].astype(float).tolist()
+        except Exception:
+            pass
+
+        manual_command = self._manual_policy_root_command()
+        motion_cmd = self._get_motion_command()
+        motion_timestep = None
+        if motion_cmd is not None:
+            raw_step = getattr(motion_cmd, "time_steps", None)
+            if isinstance(raw_step, torch.Tensor) and raw_step.numel() > self._env_id:
+                try:
+                    motion_timestep = int(raw_step.reshape(-1)[self._env_id].item())
+                except Exception:
+                    motion_timestep = None
+
+        wall_time = time.time()
+        root_yaw = self._yaw_from_quat_wxyz(root_quat_wxyz)
+        root_yaw_rate_est = None
+        if (
+            self._auto_forward_after_lift_last_snapshot_wall_time is not None
+            and self._auto_forward_after_lift_last_snapshot_yaw is not None
+            and wall_time > self._auto_forward_after_lift_last_snapshot_wall_time
+        ):
+            yaw_delta = self._wrap_to_pi(root_yaw - self._auto_forward_after_lift_last_snapshot_yaw)
+            time_delta = wall_time - self._auto_forward_after_lift_last_snapshot_wall_time
+            root_yaw_rate_est = float(yaw_delta / time_delta)
+        self._auto_forward_after_lift_last_snapshot_wall_time = wall_time
+        self._auto_forward_after_lift_last_snapshot_yaw = root_yaw
+
+        return {
+            "wall_time": wall_time,
+            "env_id": int(self._env_id),
+            "state": self._auto_forward_after_lift_state,
+            "root_pos_w": root_pos.astype(float).tolist(),
+            "root_yaw": root_yaw,
+            "root_yaw_rate_est": root_yaw_rate_est,
+            "object_pos_w": object_pos.astype(float).tolist(),
+            "object_rel_z": rel_z,
+            "object_rel_z_delta": (
+                None
+                if self._auto_forward_after_lift_baseline_rel_z is None
+                else float(rel_z - self._auto_forward_after_lift_baseline_rel_z)
+            ),
+            "root_lin_vel_w": root_lin_vel_w,
+            "root_ang_vel_w": root_ang_vel_w,
+            "robot_root_state": robot_root_state,
+            "manual_command": None if manual_command is None else [float(v) for v in manual_command],
+            "configured_command": [float(v) for v in self._auto_forward_after_lift_command],
+            "applied_command": (
+                None
+                if self._auto_forward_after_lift_applied_command is None
+                else [float(v) for v in self._auto_forward_after_lift_applied_command]
+            ),
+            "effective_command": (
+                None
+                if self._auto_forward_after_lift_effective_command is None
+                else [float(v) for v in self._auto_forward_after_lift_effective_command]
+            ),
+            "heading_hold_enabled": bool(self._auto_forward_after_lift_heading_hold_enabled),
+            "heading_hold_target_yaw": (
+                None
+                if self._auto_forward_after_lift_heading_target_yaw is None
+                else float(self._auto_forward_after_lift_heading_target_yaw)
+            ),
+            "heading_hold_error": (
+                None
+                if self._auto_forward_after_lift_heading_error is None
+                else float(self._auto_forward_after_lift_heading_error)
+            ),
+            "heading_hold_xy_compensation": bool(
+                self._auto_forward_after_lift_heading_xy_compensation_enabled
+            ),
+            "motion_timestep": motion_timestep,
+        }
+
+    def _write_auto_forward_after_lift_log(self, snapshot: dict[str, Any], *, force: bool = False) -> None:
+        now = time.time()
+        if not force and now - self._auto_forward_after_lift_last_log_time < self._auto_forward_after_lift_log_period_s:
+            return
+        self._auto_forward_after_lift_last_log_time = now
+        try:
+            if self._auto_forward_after_lift_log_handle is None:
+                self._auto_forward_after_lift_log_path.parent.mkdir(parents=True, exist_ok=True)
+                self._auto_forward_after_lift_log_handle = self._auto_forward_after_lift_log_path.open(
+                    "a",
+                    encoding="utf-8",
+                    buffering=1,
+                )
+            self._auto_forward_after_lift_log_handle.write(json.dumps(snapshot, separators=(",", ":")) + "\n")
+        except Exception as exc:
+            if not self._auto_forward_after_lift_logged_start:
+                logger.warning("Failed to write auto-forward-after-lift log: {}", exc)
+
+    def _apply_auto_forward_after_lift_command(self, command: list[float]) -> bool:
+        motion_cmd = self._get_motion_command()
+        if motion_cmd is None:
+            return False
+        if self._manual_control_cb is not None:
+            try:
+                self._manual_control_cb.value = True
+            except Exception:
+                pass
+        motion_cmd.manual_control_enabled = True
+        self._set_manual_root_command((command[0], command[1]), command[2], sync_gui=True)
+
+        device = self._env.device
+        cmd_xy = torch.tensor([[float(command[0]), float(command[1])]], device=device, dtype=torch.float32).repeat(
+            self._env.num_envs,
+            1,
+        )
+        cmd_yaw = torch.tensor([[float(command[2])]], device=device, dtype=torch.float32).repeat(
+            self._env.num_envs,
+            1,
+        )
+        motion_cmd.manual_xy_rel = cmd_xy
+        motion_cmd.manual_yaw_rel = cmd_yaw
+        self._auto_forward_after_lift_applied_command = [float(v) for v in command]
+        self._update_manual_root_status()
+        return True
+
+    def _auto_forward_after_lift_command_for_snapshot(self, snapshot: dict[str, Any]) -> list[float]:
+        command = [float(v) for v in self._auto_forward_after_lift_command]
+        if not self._auto_forward_after_lift_heading_hold_enabled:
+            self._auto_forward_after_lift_effective_command = list(command)
+            self._auto_forward_after_lift_heading_error = None
+            return command
+
+        root_yaw_raw = snapshot.get("root_yaw")
+        if root_yaw_raw is None:
+            self._auto_forward_after_lift_effective_command = list(command)
+            self._auto_forward_after_lift_heading_error = None
+            return command
+
+        root_yaw = float(root_yaw_raw)
+        if self._auto_forward_after_lift_heading_target_yaw is None:
+            self._auto_forward_after_lift_heading_target_yaw = root_yaw
+
+        heading_error = self._wrap_to_pi(float(self._auto_forward_after_lift_heading_target_yaw) - root_yaw)
+        yaw_control_error = heading_error
+        if abs(yaw_control_error) < float(self._auto_forward_after_lift_heading_deadband):
+            yaw_control_error = 0.0
+
+        yaw_cmd = float(self._auto_forward_after_lift_heading_kp) * yaw_control_error
+        yaw_rate_raw = snapshot.get("root_yaw_rate_est")
+        if yaw_rate_raw is not None:
+            try:
+                yaw_cmd -= float(self._auto_forward_after_lift_heading_kd) * float(yaw_rate_raw)
+            except Exception:
+                pass
+        yaw_limit = float(self._auto_forward_after_lift_heading_yaw_limit)
+        if yaw_limit > 0.0:
+            yaw_cmd = float(np.clip(yaw_cmd, -yaw_limit, yaw_limit))
+
+        if self._auto_forward_after_lift_heading_xy_compensation_enabled:
+            c = float(np.cos(heading_error))
+            s = float(np.sin(heading_error))
+            cmd_x = c * command[0] - s * command[1]
+            cmd_y = s * command[0] + c * command[1]
+        else:
+            cmd_x = command[0]
+            cmd_y = command[1]
+        effective_command = [float(cmd_x), float(cmd_y), float(yaw_cmd)]
+        self._auto_forward_after_lift_heading_error = float(heading_error)
+        self._auto_forward_after_lift_effective_command = list(effective_command)
+        return effective_command
+
+    def _annotate_auto_forward_after_lift_command(
+        self,
+        snapshot: dict[str, Any],
+        command: list[float],
+    ) -> None:
+        snapshot["effective_command"] = [float(v) for v in command]
+        snapshot["heading_hold_enabled"] = bool(self._auto_forward_after_lift_heading_hold_enabled)
+        snapshot["heading_hold_target_yaw"] = (
+            None
+            if self._auto_forward_after_lift_heading_target_yaw is None
+            else float(self._auto_forward_after_lift_heading_target_yaw)
+        )
+        snapshot["heading_hold_error"] = (
+            None
+            if self._auto_forward_after_lift_heading_error is None
+            else float(self._auto_forward_after_lift_heading_error)
+        )
+        snapshot["heading_hold_xy_compensation"] = bool(
+            self._auto_forward_after_lift_heading_xy_compensation_enabled
+        )
+
+    def _update_auto_forward_after_lift(self) -> None:
+        if not self._auto_forward_after_lift_enabled:
+            return
+
+        snapshot = self._auto_forward_after_lift_snapshot()
+        if snapshot is None:
+            return
+
+        if not self._auto_forward_after_lift_logged_start:
+            logger.info(
+                "Auto-forward-after-lift enabled: command={} rel_z_delta_threshold={:.3f} consecutive_steps={} "
+                "duration_s={:.2f} heading_hold={} kp={:.3f} kd={:.3f} yaw_limit={:.3f} log_path={}",
+                self._auto_forward_after_lift_command,
+                self._auto_forward_after_lift_rel_z_delta,
+                self._auto_forward_after_lift_consecutive_steps,
+                self._auto_forward_after_lift_duration_s,
+                self._auto_forward_after_lift_heading_hold_enabled,
+                self._auto_forward_after_lift_heading_kp,
+                self._auto_forward_after_lift_heading_kd,
+                self._auto_forward_after_lift_heading_yaw_limit,
+                self._auto_forward_after_lift_log_path,
+            )
+            self._auto_forward_after_lift_logged_start = True
+
+        rel_z = float(snapshot["object_rel_z"])
+        if self._auto_forward_after_lift_baseline_rel_z is None:
+            self._auto_forward_after_lift_baseline_rel_z = rel_z
+            snapshot["event"] = "baseline"
+            snapshot["object_rel_z_delta"] = 0.0
+            self._write_auto_forward_after_lift_log(snapshot, force=True)
+            return
+
+        rel_z_delta = float(rel_z - self._auto_forward_after_lift_baseline_rel_z)
+        snapshot["object_rel_z_delta"] = rel_z_delta
+
+        if self._auto_forward_after_lift_state == "waiting":
+            if rel_z_delta >= self._auto_forward_after_lift_rel_z_delta:
+                self._auto_forward_after_lift_ready_count += 1
+            else:
+                self._auto_forward_after_lift_ready_count = 0
+
+            if self._auto_forward_after_lift_ready_count >= self._auto_forward_after_lift_consecutive_steps:
+                self._auto_forward_after_lift_state = "active"
+                self._auto_forward_after_lift_trigger_time = time.time()
+                command = self._auto_forward_after_lift_command_for_snapshot(snapshot)
+                command_applied = self._apply_auto_forward_after_lift_command(command)
+                snapshot["state"] = self._auto_forward_after_lift_state
+                snapshot["event"] = "trigger"
+                snapshot["command_applied"] = command_applied
+                snapshot["applied_command"] = [float(v) for v in command]
+                self._annotate_auto_forward_after_lift_command(snapshot, command)
+                logger.info(
+                    "Auto-forward-after-lift triggered: rel_z_delta={:.3f}, command={} configured={}",
+                    rel_z_delta,
+                    command,
+                    self._auto_forward_after_lift_command,
+                )
+                self._write_auto_forward_after_lift_log(snapshot, force=True)
+                return
+
+        elif self._auto_forward_after_lift_state == "active":
+            command = self._auto_forward_after_lift_command_for_snapshot(snapshot)
+            command_applied = self._apply_auto_forward_after_lift_command(command)
+            snapshot["command_applied"] = command_applied
+            snapshot["applied_command"] = [float(v) for v in command]
+            self._annotate_auto_forward_after_lift_command(snapshot, command)
+            if (
+                self._auto_forward_after_lift_duration_s > 0.0
+                and self._auto_forward_after_lift_trigger_time is not None
+                and time.time() - self._auto_forward_after_lift_trigger_time >= self._auto_forward_after_lift_duration_s
+            ):
+                self._auto_forward_after_lift_state = "done"
+                command_applied = self._apply_auto_forward_after_lift_command([0.0, 0.0, 0.0])
+                snapshot["state"] = self._auto_forward_after_lift_state
+                snapshot["event"] = "duration_complete"
+                snapshot["command_applied"] = command_applied
+                snapshot["applied_command"] = [0.0, 0.0, 0.0]
+                self._auto_forward_after_lift_effective_command = [0.0, 0.0, 0.0]
+                snapshot["effective_command"] = [0.0, 0.0, 0.0]
+                logger.info("Auto-forward-after-lift duration complete; zeroed manual root command.")
+                self._write_auto_forward_after_lift_log(snapshot, force=True)
+                return
+
+        snapshot["state"] = self._auto_forward_after_lift_state
+        self._write_auto_forward_after_lift_log(snapshot)
+
     def _update_manual_root_command(self) -> None:
         motion_cmd = self._get_motion_command()
         if motion_cmd is None:
@@ -3875,6 +4223,7 @@ class ViserLiveViewer:
             return
         if getattr(self, "_env_id", 0) not in _normalize_env_ids(env_ids):
             return
+        self._clear_rollout_root_trajectory()
         self._clear_rollout_object_trajectory()
         self._invalidate_object_mesh_caches(remove_handles=True)
         self._object_ground_status_debug_logged = False
@@ -3966,6 +4315,7 @@ class ViserLiveViewer:
                 self._update_scandots(offset)
             self._update_target_keypoints(offset)
             self._update_target_object_trajectory(offset)
+            self._update_rollout_root_trajectory(root_pos, offset)
             self._update_rollout_object_trajectory(offset)
             self._update_target_object_center(offset)
             self._update_target_box(offset)
@@ -6814,12 +7164,170 @@ class ViserLiveViewer:
             except Exception:
                 pass
 
+    def _clear_rollout_root_trajectory(self) -> None:
+        self._rollout_root_trajectory_points_w.clear()
+        self._rollout_root_trajectory_last_clip_idx = None
+        self._rollout_root_trajectory_last_time_step = None
+        if self._rollout_root_trajectory_handle is not None:
+            try:
+                self._rollout_root_trajectory_handle.visible = False
+            except Exception:
+                pass
+
     def _current_rollout_object_pos_w(self) -> np.ndarray | None:
         state = self._get_object_state_wxyz()
         if state is None:
             return None
         pos_w, _quat_wxyz = state
         return np.asarray(pos_w, dtype=np.float32).reshape(3)
+
+    def _trajectory_ribbon_mesh(
+        self,
+        positions_w: np.ndarray,
+        offset: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        positions = np.asarray(positions_w, dtype=np.float32).reshape(-1, 3)
+        if positions.shape[0] < 2:
+            return None
+        if self._recenter:
+            positions = positions - offset.reshape(1, 3)
+        positions = positions.copy()
+        positions[:, 2] += float(self._rollout_trajectory_z_offset)
+
+        half_width = 0.5 * max(float(self._rollout_trajectory_mesh_width), 1.0e-3)
+        vertices: list[np.ndarray] = []
+        faces: list[tuple[int, int, int]] = []
+        for idx in range(positions.shape[0] - 1):
+            p0 = positions[idx]
+            p1 = positions[idx + 1]
+            direction = p1 - p0
+            direction[2] = 0.0
+            length = float(np.linalg.norm(direction[:2]))
+            if length < 1.0e-5:
+                continue
+            normal = np.array([-direction[1] / length, direction[0] / length, 0.0], dtype=np.float32)
+            base = len(vertices)
+            vertices.extend(
+                [
+                    p0 + normal * half_width,
+                    p0 - normal * half_width,
+                    p1 + normal * half_width,
+                    p1 - normal * half_width,
+                ]
+            )
+            faces.append((base, base + 1, base + 2))
+            faces.append((base + 1, base + 3, base + 2))
+        if not faces:
+            return None
+        return np.asarray(vertices, dtype=np.float32), np.asarray(faces, dtype=np.int32)
+
+    def _update_trajectory_mesh(
+        self,
+        *,
+        handle_attr: str,
+        node_path: str,
+        positions_w: np.ndarray,
+        offset: np.ndarray,
+        color: np.ndarray,
+    ) -> None:
+        mesh = self._trajectory_ribbon_mesh(positions_w, offset)
+        handle = getattr(self, handle_attr)
+        if mesh is None:
+            if handle is not None:
+                try:
+                    handle.visible = False
+                except Exception:
+                    pass
+            return
+
+        vertices, faces = mesh
+        if handle is not None:
+            try:
+                handle.remove()
+            except Exception:
+                pass
+        handle = self._server.scene.add_mesh_simple(
+            self._scene_path(node_path),
+            vertices,
+            faces,
+            color=tuple(int(v) for v in np.asarray(color, dtype=np.uint8).reshape(3)),
+            side="double",
+            visible=True,
+        )
+        setattr(self, handle_attr, handle)
+        if node_path not in self._rollout_trajectory_mesh_logged:
+            logger.info(
+                "Viser rollout trajectory mesh created: path={} points={} vertices={} faces={} width={:.3f} z_offset={:.3f}",
+                self._scene_path(node_path),
+                int(np.asarray(positions_w).reshape(-1, 3).shape[0]),
+                int(vertices.shape[0]),
+                int(faces.shape[0]),
+                float(self._rollout_trajectory_mesh_width),
+                float(self._rollout_trajectory_z_offset),
+            )
+            self._rollout_trajectory_mesh_logged.add(node_path)
+
+    def _update_rollout_root_trajectory(self, root_pos_w: np.ndarray, offset: np.ndarray) -> None:
+        if not self._server:
+            return
+        if not self._show_rollout_root_trajectory:
+            if self._rollout_root_trajectory_handle is not None:
+                try:
+                    self._rollout_root_trajectory_handle.visible = False
+                except Exception:
+                    pass
+            return
+
+        motion_cmd = self._get_motion_command()
+        clip_idx = self._active_clip_index(motion_cmd)
+        time_step: int | None = None
+        if motion_cmd is not None and hasattr(motion_cmd, "time_steps"):
+            try:
+                time_step = int(motion_cmd.time_steps[self._env_id].item())
+            except Exception:
+                time_step = None
+
+        if (
+            self._rollout_root_trajectory_last_clip_idx is not None
+            and clip_idx is not None
+            and clip_idx != self._rollout_root_trajectory_last_clip_idx
+        ) or (
+            self._rollout_root_trajectory_last_time_step is not None
+            and time_step is not None
+            and time_step < self._rollout_root_trajectory_last_time_step
+        ):
+            self._clear_rollout_root_trajectory()
+
+        pos_w = np.asarray(root_pos_w, dtype=np.float32).reshape(3)
+        should_append = False
+        if not self._rollout_root_trajectory_points_w:
+            should_append = True
+        elif time_step is not None and time_step != self._rollout_root_trajectory_last_time_step:
+            should_append = True
+        elif not np.allclose(self._rollout_root_trajectory_points_w[-1], pos_w, atol=1.0e-5):
+            should_append = True
+        if should_append:
+            self._rollout_root_trajectory_points_w.append(pos_w.copy())
+
+        self._rollout_root_trajectory_last_clip_idx = clip_idx
+        self._rollout_root_trajectory_last_time_step = time_step
+
+        if len(self._rollout_root_trajectory_points_w) < 2:
+            if self._rollout_root_trajectory_handle is not None:
+                try:
+                    self._rollout_root_trajectory_handle.visible = False
+                except Exception:
+                    pass
+            return
+
+        rollout_positions = np.asarray(self._rollout_root_trajectory_points_w, dtype=np.float32)
+        self._update_trajectory_mesh(
+            handle_attr="_rollout_root_trajectory_handle",
+            node_path="/rollout_root_trajectory",
+            positions_w=rollout_positions,
+            offset=offset,
+            color=self._rollout_root_trajectory_color,
+        )
 
     def _update_rollout_object_trajectory(self, offset: np.ndarray) -> None:
         if not self._server:
@@ -6883,28 +7391,13 @@ class ViserLiveViewer:
             return
 
         rollout_positions = np.asarray(self._rollout_object_trajectory_points_w, dtype=np.float32)
-        segments = np.stack([rollout_positions[:-1], rollout_positions[1:]], axis=1).astype(np.float32, copy=False)
-        if self._recenter:
-            segments = segments - offset.reshape(1, 1, 3)
-        colors = np.full((segments.shape[0], 2, 3), self._rollout_object_trajectory_color, dtype=np.uint8)
-
-        if self._rollout_object_trajectory_handle is None:
-            self._rollout_object_trajectory_handle = self._server.scene.add_line_segments(
-                self._scene_path("/rollout_object_trajectory"),
-                points=segments,
-                colors=colors,
-                line_width=float(self._rollout_object_trajectory_line_width),
-            )
-        else:
-            try:
-                self._rollout_object_trajectory_handle.visible = True
-            except Exception:
-                pass
-            self._rollout_object_trajectory_handle.points = segments
-            try:
-                self._rollout_object_trajectory_handle.colors = colors
-            except Exception:
-                pass
+        self._update_trajectory_mesh(
+            handle_attr="_rollout_object_trajectory_handle",
+            node_path="/rollout_object_trajectory",
+            positions_w=rollout_positions,
+            offset=offset,
+            color=self._rollout_object_trajectory_color,
+        )
 
     def _update_target_object_trajectory(self, offset: np.ndarray) -> None:
         if not self._server:

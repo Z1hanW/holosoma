@@ -12,7 +12,7 @@ set -euo pipefail
 # final0p5 primitive-proj bank and filters it down to solid clips:
 #   strict success_contact_and_final_position
 #   box/bin/barrel/ball only
-#   excludes scale__any_bin_8, box_21, box_39 falldown/suspect clips
+#   excludes scale__any_bin_3, scale__any_bin_8, box_21, box_39 falldown/suspect clips
 
 usage() {
   cat <<'EOF'

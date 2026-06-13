@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 import time
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,8 +37,11 @@ from holosoma.utils.viser_utils import resolve_viser_port  # noqa: E402
 class RolloutViewerConfig:
     rollout_dir: str
     rollout_file: str | None = None
+    reference_dir: str | None = None
+    reference_file: str | None = None
     terrain_obj_path: str | None = None
     recenter: bool = True
+    show_reference: bool = True
 
 
 def _resolve_data_path(path: str) -> str:
@@ -80,6 +84,8 @@ def _load_rollout(path: Path) -> dict[str, object]:
         fps = float(np.array(fps_val).reshape(-1)[0]) if fps_val is not None else 30.0
         clip_name = _decode_str(data.get("clip_name"))
         sequence_name = _decode_str(data.get("sequence_name"))
+        object_name = _decode_str(data.get("object_name"))
+        object_urdf_path = _decode_str(data.get("object_urdf_path"))
         env_origin = data.get("env_origin")
         if env_origin is not None:
             env_origin = np.asarray(env_origin, dtype=np.float32).reshape(-1)
@@ -94,6 +100,8 @@ def _load_rollout(path: Path) -> dict[str, object]:
         "fps": fps,
         "clip_name": clip_name,
         "sequence_name": sequence_name,
+        "object_name": object_name,
+        "object_urdf_path": object_urdf_path,
         "history_tag": history_tag,
         "env_origin": env_origin,
         "terrain_obj_path": terrain_obj_path,
@@ -156,6 +164,70 @@ def _load_terrain_mesh(
     return trimesh.util.concatenate(tiles)
 
 
+def _node_suffix(raw: str) -> str:
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _make_viser_urdf(
+    server: viser.ViserServer,
+    urdf_path: str,
+    *,
+    root_node_name: str,
+    mesh_color_override: tuple[int, int, int] | None = None,
+) -> ViserUrdf:
+    path = Path(_resolve_data_path(urdf_path)).expanduser()
+    kwargs = {"root_node_name": root_node_name}
+    if mesh_color_override is not None:
+        kwargs["mesh_color_override"] = mesh_color_override
+    try:
+        return ViserUrdf(server, urdf_or_path=path, **kwargs)
+    except TypeError:
+        return ViserUrdf(server, urdf_path=path, **kwargs)
+
+
+def _scene_api(server: viser.ViserServer):
+    return getattr(server, "scene", server)
+
+
+def _gui_api(server: viser.ViserServer):
+    return getattr(server, "gui", server)
+
+
+def _gui_method(server: viser.ViserServer, new_name: str, old_name: str):
+    gui = _gui_api(server)
+    if hasattr(gui, new_name):
+        return getattr(gui, new_name)
+    return getattr(gui, old_name)
+
+
+def _gui_folder(server: viser.ViserServer, label: str):
+    return _gui_method(server, "add_folder", "add_gui_folder")(label)
+
+
+def _gui_dropdown(server: viser.ViserServer, *args, **kwargs):
+    return _gui_method(server, "add_dropdown", "add_gui_dropdown")(*args, **kwargs)
+
+
+def _gui_button(server: viser.ViserServer, *args, **kwargs):
+    return _gui_method(server, "add_button", "add_gui_button")(*args, **kwargs)
+
+
+def _gui_markdown(server: viser.ViserServer, *args, **kwargs):
+    return _gui_method(server, "add_markdown", "add_gui_markdown")(*args, **kwargs)
+
+
+def _gui_checkbox(server: viser.ViserServer, *args, **kwargs):
+    return _gui_method(server, "add_checkbox", "add_gui_checkbox")(*args, **kwargs)
+
+
+def _gui_slider(server: viser.ViserServer, *args, **kwargs):
+    return _gui_method(server, "add_slider", "add_gui_slider")(*args, **kwargs)
+
+
+def _gui_number(server: viser.ViserServer, *args, **kwargs):
+    return _gui_method(server, "add_number", "add_gui_number")(*args, **kwargs)
+
+
 def replay_rollout(cfg: ExperimentConfig, rollout_cfg: RolloutViewerConfig) -> None:
     rollout_dir = Path(rollout_cfg.rollout_dir).expanduser()
     files = _list_rollout_files(rollout_dir)
@@ -174,50 +246,126 @@ def replay_rollout(cfg: ExperimentConfig, rollout_cfg: RolloutViewerConfig) -> N
 
     port = resolve_viser_port()
     server = viser.ViserServer(port=port)
-    robot_root = server.scene.add_frame("/robot", show_axes=False)
-    object_root = server.scene.add_frame("/object", show_axes=False)
+    scene = _scene_api(server)
+    robot_root = scene.add_frame("/robot", show_axes=False)
+    reference_robot_root = scene.add_frame("/reference_robot", show_axes=False)
+    reference_robot_root.visible = False
 
     robot_urdf_path = _resolve_robot_urdf_path(cfg.robot)
-    vr = ViserUrdf(server, urdf_or_path=Path(robot_urdf_path), root_node_name="/robot")
+    vr = _make_viser_urdf(server, robot_urdf_path, root_node_name="/robot")
+    reference_vr = _make_viser_urdf(
+        server,
+        robot_urdf_path,
+        root_node_name="/reference_robot",
+        mesh_color_override=(150, 80, 255),
+    )
+    reference_vr.show_visual = False
 
-    vo = None
-    if getattr(cfg.robot.object, "enabled", False) and cfg.robot.object.object_urdf_path:
-        object_urdf_path = _resolve_data_path(cfg.robot.object.object_urdf_path)
-        vo = ViserUrdf(server, urdf_or_path=Path(object_urdf_path), root_node_name="/object")
+    object_assets: dict[str, tuple[viser.FrameHandle, ViserUrdf]] = {}
+    reference_object_assets: dict[str, tuple[viser.FrameHandle, ViserUrdf]] = {}
+    active_object_key: dict[str, str | None] = {"output": None, "reference": None}
 
-    server.scene.add_grid("/grid", width=8.0, height=8.0, position=(0.0, 0.0, 0.0))
+    scene.add_grid("/grid", width=8.0, height=8.0, position=(0.0, 0.0, 0.0))
     ground_mesh = trimesh.creation.box(extents=(8.0, 8.0, 0.01))
     ground_mesh.apply_translation([0.0, 0.0, -0.005])
-    ground_handle = server.scene.add_mesh_trimesh("/ground", ground_mesh)
+    ground_handle = scene.add_mesh_trimesh("/ground", ground_mesh)
 
     state: dict[str, object] = {"offset": np.zeros(3, dtype=np.float32)}
     terrain_handle: viser.GlbHandle | None = None
 
-    with server.gui.add_folder("Rollout"):
-        dropdown = server.gui.add_dropdown("File", options=tuple(sorted(file_map.keys())), initial_value=initial_key)
-        reload_btn = server.gui.add_button("Reload")
-        file_info = server.gui.add_markdown("")
+    with _gui_folder(server, "Rollout"):
+        dropdown = _gui_dropdown(server, "File", options=tuple(sorted(file_map.keys())), initial_value=initial_key)
+        reload_btn = _gui_button(server, "Reload")
+        file_info = _gui_markdown(server, "")
 
-    with server.gui.add_folder("Display"):
-        show_meshes_cb = server.gui.add_checkbox("Show meshes", initial_value=True)
-        show_terrain_cb = server.gui.add_checkbox("Show terrain", initial_value=True)
-        recenter_cb = server.gui.add_checkbox("Recenter", initial_value=rollout_cfg.recenter)
+    with _gui_folder(server, "Display"):
+        show_meshes_cb = _gui_checkbox(server, "Show meshes", initial_value=True)
+        show_reference_cb = _gui_checkbox(server, "Show reference", initial_value=bool(rollout_cfg.show_reference))
+        show_terrain_cb = _gui_checkbox(server, "Show terrain", initial_value=True)
+        recenter_cb = _gui_checkbox(server, "Recenter", initial_value=rollout_cfg.recenter)
 
-    with server.gui.add_folder("Playback"):
-        frame_slider = server.gui.add_slider("Frame", min=0, max=1, step=1, initial_value=0)
-        play_btn = server.gui.add_button("Play / Pause")
-        fps_in = server.gui.add_number("FPS", initial_value=30, min=1, max=240, step=1)
-        interp_mult_in = server.gui.add_number("Visual FPS multiplier", initial_value=2, min=1, max=8, step=1)
-        loop_cb = server.gui.add_checkbox("Loop", initial_value=False)
+    with _gui_folder(server, "Playback"):
+        frame_slider = _gui_slider(server, "Frame", min=0, max=1, step=1, initial_value=0)
+        play_btn = _gui_button(server, "Play / Pause")
+        fps_in = _gui_number(server, "FPS", initial_value=30, min=1, max=240, step=1)
+        interp_mult_in = _gui_number(server, "Visual FPS multiplier", initial_value=2, min=1, max=8, step=1)
+        loop_cb = _gui_checkbox(server, "Loop", initial_value=False)
+        playback_status = _gui_markdown(server, "Stopped")
 
     def _update_file_info() -> None:
         clip = state.get("clip_name")
         sequence = state.get("sequence_name")
         fps_val = int(state.get("fps", 0))
         n_frames = int(state.get("n_frames", 0))
+        ref_frames = int(state.get("reference_n_frames", 0))
         clip_str = clip if clip else "n/a"
         sequence_str = sequence if sequence else clip_str
-        file_info.content = f"Sequence: `{sequence_str}` | clip: `{clip_str}` | frames: {n_frames} | fps: {fps_val}"
+        ref_str = f" | reference: {ref_frames}" if ref_frames > 0 else ""
+        file_info.content = (
+            f"Sequence: `{sequence_str}` | clip: `{clip_str}` | frames: {n_frames}{ref_str} | fps: {fps_val}"
+        )
+
+    def _default_object_urdf() -> str | None:
+        object_cfg = getattr(cfg.robot, "object", None)
+        object_path = getattr(object_cfg, "object_urdf_path", None)
+        if not object_path:
+            return None
+        resolved = Path(_resolve_data_path(str(object_path))).expanduser()
+        if resolved.suffix.lower() == ".json":
+            return None
+        return str(resolved)
+
+    def _hide_object_assets(kind: str) -> None:
+        assets = object_assets if kind == "output" else reference_object_assets
+        for root, urdf in assets.values():
+            root.visible = False
+            urdf.show_visual = False
+
+    def _ensure_object_asset(kind: str, object_urdf_path: str | None) -> tuple[viser.FrameHandle, ViserUrdf] | None:
+        if not object_urdf_path:
+            return None
+        resolved = Path(_resolve_data_path(object_urdf_path)).expanduser()
+        if not resolved.exists() or resolved.suffix.lower() == ".json":
+            return None
+
+        key = str(resolved.resolve())
+        assets = object_assets if kind == "output" else reference_object_assets
+        active_object_key[kind] = key
+        if key in assets:
+            return assets[key]
+
+        suffix = _node_suffix(f"{kind}:{key}")
+        root_name = f"/{kind}_object_{suffix}"
+        root = scene.add_frame(root_name, show_axes=False)
+        root.visible = False
+        color = (150, 80, 255) if kind == "reference" else None
+        try:
+            urdf = _make_viser_urdf(server, key, root_node_name=root_name, mesh_color_override=color)
+        except Exception as exc:
+            print(f"[WARN] Failed to load object URDF for {kind}: {key}: {exc}")
+            root.remove()
+            active_object_key[kind] = None
+            return None
+        urdf.show_visual = False
+        assets[key] = (root, urdf)
+        return root, urdf
+
+    def _reference_candidates(key: str, clip_name: str | None) -> list[Path]:
+        candidates: list[Path] = []
+        if rollout_cfg.reference_file:
+            candidates.append(Path(rollout_cfg.reference_file).expanduser())
+        if rollout_cfg.reference_dir:
+            ref_dir = Path(rollout_cfg.reference_dir).expanduser()
+            if clip_name:
+                candidates.append(ref_dir / f"{clip_name}.npz")
+            candidates.append(ref_dir / f"{key}.npz")
+        return candidates
+
+    def _load_reference(key: str, clip_name: str | None) -> dict[str, object] | None:
+        for candidate in _reference_candidates(key, clip_name):
+            if candidate.is_file():
+                return _load_rollout(candidate)
+        return None
 
     def _set_terrain(clip_name: str | None, terrain_path: str | None, rows: int | None, cols: int | None) -> None:
         nonlocal terrain_handle
@@ -226,7 +374,7 @@ def replay_rollout(cfg: ExperimentConfig, rollout_cfg: RolloutViewerConfig) -> N
             terrain_handle = None
         mesh = _load_terrain_mesh(terrain_path, clip_name=clip_name, num_rows=rows, num_cols=cols)
         if mesh is not None:
-            terrain_handle = server.scene.add_mesh_trimesh("/terrain", mesh)
+            terrain_handle = scene.add_mesh_trimesh("/terrain", mesh)
             terrain_handle.visible = bool(show_terrain_cb.value)
             ground_handle.visible = False
         else:
@@ -249,10 +397,22 @@ def replay_rollout(cfg: ExperimentConfig, rollout_cfg: RolloutViewerConfig) -> N
         clip_name = payload.get("clip_name")
         sequence_name = payload.get("sequence_name")
         env_origin = payload.get("env_origin")
+        object_urdf_path = payload.get("object_urdf_path") or _default_object_urdf()
+        reference_payload = _load_reference(key, clip_name if isinstance(clip_name, str) else None)
+        reference_qpos = None
+        reference_object_urdf_path = None
+        if reference_payload is not None:
+            reference_qpos = np.asarray(reference_payload["qpos"], dtype=np.float32)
+            reference_object_urdf_path = reference_payload.get("object_urdf_path") or object_urdf_path
 
         terrain_path = rollout_cfg.terrain_obj_path or payload.get("terrain_obj_path")
         terrain_rows = payload.get("terrain_num_rows")
         terrain_cols = payload.get("terrain_num_cols")
+        output_object_asset = _ensure_object_asset("output", object_urdf_path if isinstance(object_urdf_path, str) else None)
+        reference_object_asset = _ensure_object_asset(
+            "reference",
+            reference_object_urdf_path if isinstance(reference_object_urdf_path, str) else None,
+        )
 
         state.update(
             {
@@ -260,17 +420,33 @@ def replay_rollout(cfg: ExperimentConfig, rollout_cfg: RolloutViewerConfig) -> N
                 "fps": fps_val,
                 "clip_name": clip_name,
                 "sequence_name": sequence_name,
+                "object_urdf_path": object_urdf_path,
                 "env_origin": env_origin,
                 "n_frames": int(qpos.shape[0]),
-                "has_object": bool(vo is not None and qpos.shape[1] >= (7 + len(cfg.robot.dof_names) + 7)),
+                "has_object": bool(output_object_asset is not None and qpos.shape[1] >= (7 + len(cfg.robot.dof_names) + 7)),
+                "object_asset": output_object_asset,
+                "reference_qpos": reference_qpos,
+                "reference_n_frames": int(reference_qpos.shape[0]) if reference_qpos is not None else 0,
+                "reference_has_object": bool(
+                    reference_object_asset is not None
+                    and reference_qpos is not None
+                    and reference_qpos.shape[1] >= (7 + len(cfg.robot.dof_names) + 7)
+                ),
+                "reference_object_asset": reference_object_asset,
             }
         )
+        _hide_object_assets("output")
+        _hide_object_assets("reference")
         _set_offset(qpos, env_origin if isinstance(env_origin, np.ndarray) else None)
         _set_terrain(clip_name if isinstance(clip_name, str) else None, terrain_path, terrain_rows, terrain_cols)
 
         frame_slider.max = max(0, int(qpos.shape[0] - 1))
         frame_slider.value = 0
         fps_in.value = fps_val
+        frame_f["value"] = 0.0
+        state["frame_float"] = 0.0
+        playing["flag"] = False
+        playback_status.content = "Stopped"
         _update_file_info()
         _apply_frame_from_float(0.0)
 
@@ -284,14 +460,46 @@ def replay_rollout(cfg: ExperimentConfig, rollout_cfg: RolloutViewerConfig) -> N
             robot_root.wxyz = root_quat_wxyz
             vr.update_cfg(joints.astype(np.float32, copy=False))
 
-            if vo is None:
-                return
-            if state.get("has_object"):
-                vo.show_visual = True
-                object_root.position = frame[-7:-4] - offset
-                object_root.wxyz = frame[-4:]
+            output_asset = state.get("object_asset")
+            if state.get("has_object") and output_asset is not None:
+                output_root, output_urdf = output_asset
+                output_root.position = frame[-7:-4] - offset
+                output_root.wxyz = frame[-4:]
+                output_root.visible = True
+                output_urdf.show_visual = bool(show_meshes_cb.value)
+
+            reference_qpos = state.get("reference_qpos")
+            if (
+                bool(show_reference_cb.value)
+                and isinstance(reference_qpos, np.ndarray)
+                and reference_qpos.shape[0] > 0
+            ):
+                ref_idx = int(
+                    np.clip(
+                        int(round(float(state.get("frame_float", frame_slider.value)))),
+                        0,
+                        reference_qpos.shape[0] - 1,
+                    )
+                )
+                ref_frame = reference_qpos[ref_idx]
+                reference_robot_root.position = ref_frame[0:3] - offset
+                reference_robot_root.wxyz = ref_frame[3:7]
+                reference_robot_root.visible = True
+                reference_vr.show_visual = bool(show_meshes_cb.value)
+                ref_joints = ref_frame[7 : 7 + len(cfg.robot.dof_names)]
+                reference_vr.update_cfg(ref_joints.astype(np.float32, copy=False))
+
+                reference_asset = state.get("reference_object_asset")
+                if state.get("reference_has_object") and reference_asset is not None:
+                    reference_root, reference_urdf = reference_asset
+                    reference_root.position = ref_frame[-7:-4] - offset
+                    reference_root.wxyz = ref_frame[-4:]
+                    reference_root.visible = True
+                    reference_urdf.show_visual = bool(show_meshes_cb.value)
             else:
-                vo.show_visual = False
+                reference_robot_root.visible = False
+                reference_vr.show_visual = False
+                _hide_object_assets("reference")
 
     def _interp_qpos(q0: np.ndarray, q1: np.ndarray, u: float) -> np.ndarray:
         out = q0.copy()
@@ -309,6 +517,7 @@ def replay_rollout(cfg: ExperimentConfig, rollout_cfg: RolloutViewerConfig) -> N
         n_frames = int(state.get("n_frames", 0))
         if qpos is None or n_frames == 0:
             return
+        state["frame_float"] = float(f_val)
         i0 = int(np.clip(np.floor(f_val), 0, n_frames - 1))
         i1 = min(i0 + 1, n_frames - 1)
         u = float(f_val - i0)
@@ -320,8 +529,11 @@ def replay_rollout(cfg: ExperimentConfig, rollout_cfg: RolloutViewerConfig) -> N
     @show_meshes_cb.on_update
     def _(_evt) -> None:
         vr.show_visual = bool(show_meshes_cb.value)
-        if vo is not None:
-            vo.show_visual = bool(show_meshes_cb.value)
+        _apply_frame_from_float(float(frame_slider.value))
+
+    @show_reference_cb.on_update
+    def _(_evt) -> None:
+        _apply_frame_from_float(float(frame_slider.value))
 
     @show_terrain_cb.on_update
     def _(_evt) -> None:
@@ -353,12 +565,23 @@ def replay_rollout(cfg: ExperimentConfig, rollout_cfg: RolloutViewerConfig) -> N
 
     @play_btn.on_click
     def _(_evt) -> None:
-        playing["flag"] = not playing["flag"]
+        if not playing["flag"]:
+            last_frame = int(state.get("n_frames", 1)) - 1
+            if frame_f["value"] >= float(last_frame):
+                frame_f["value"] = 0.0
+            playing["flag"] = True
+            playback_status.content = "Playing"
+            print(f"[INFO] rollout viewer play start frame={frame_f['value']:.2f}", flush=True)
+        else:
+            playing["flag"] = False
+            playback_status.content = "Paused"
+            print(f"[INFO] rollout viewer play pause frame={frame_f['value']:.2f}", flush=True)
 
     @frame_slider.on_update
     def _(_evt) -> None:
         if not updating_programmatically["flag"]:
             playing["flag"] = False
+            playback_status.content = "Paused"
             frame_f["value"] = float(frame_slider.value)
             _apply_frame_from_float(frame_f["value"])
 
@@ -380,9 +603,7 @@ def replay_rollout(cfg: ExperimentConfig, rollout_cfg: RolloutViewerConfig) -> N
                         else:
                             frame_f["value"] = float(last_frame)
                             playing["flag"] = False
-                    updating_programmatically["flag"] = True
-                    frame_slider.value = int(frame_f["value"])
-                    updating_programmatically["flag"] = False
+                            playback_status.content = "Stopped"
                     _apply_frame_from_float(frame_f["value"])
             time.sleep(0.001)
 

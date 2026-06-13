@@ -15,6 +15,9 @@ from holosoma.utils.rotations import (
     get_euler_xyz,
     normalize_angle,
     quat_apply,
+    quat_apply_broadcast_left,
+    quat_inverse,
+    quat_mul_broadcast_left,
     quat_rotate_inverse,
     quaternion_to_matrix,
     subtract_frame_transforms,
@@ -23,6 +26,8 @@ from holosoma.utils.torch_utils import get_axis_params, to_torch
 
 if TYPE_CHECKING:
     from holosoma.envs.wbt.wbt_manager import WholeBodyTrackingManager
+
+_DEG_TO_RAD = 0.017453292519943295
 
 
 #########################################################################################################
@@ -340,6 +345,56 @@ def _root_relative_xy_yaw_command(motion_command: MotionCommand) -> tuple[torch.
     return rel_xy, rel_yaw
 
 
+def _contact_aware_segment_root_command(motion_command: MotionCommand) -> torch.Tensor:
+    """Non-overlap carry-window segment command in the segment-start root heading frame."""
+    if not motion_command.motion.has_object:
+        return torch.zeros((motion_command.num_envs, 3), device=motion_command.device, dtype=torch.float32)
+
+    segment_steps = int(getattr(motion_command.motion_cfg, "contact_aware_sparse_root_segment_steps", 30))
+    if segment_steps < 1:
+        raise ValueError(f"contact_aware_sparse_root_segment_steps must be >= 1, got {segment_steps}")
+
+    clip_ids = motion_command.clip_ids
+    time_steps = motion_command.time_steps
+    clip_lengths = motion_command.current_clip_lengths
+    carry_window_by_clip = motion_command._get_contact_aware_carry_window_by_clip()  # noqa: SLF001
+    carry_start = carry_window_by_clip[clip_ids, 0]
+    carry_end = carry_window_by_clip[clip_ids, 1]
+
+    rel_steps = torch.clamp(time_steps - carry_start, min=0)
+    segment_index = torch.div(rel_steps, segment_steps, rounding_mode="floor")
+    segment_start = carry_start + segment_index * segment_steps
+    segment_end = segment_start + segment_steps
+
+    max_step = torch.clamp(clip_lengths - 1, min=0)
+    safe_segment_start = torch.minimum(torch.clamp(segment_start, min=0), max_step)
+    safe_segment_end = torch.minimum(torch.clamp(segment_end, min=0), max_step)
+    start_motion_idx = motion_command._get_motion_indices(safe_segment_start)  # noqa: SLF001
+    end_motion_idx = motion_command._get_motion_indices(safe_segment_end)  # noqa: SLF001
+
+    root_pos_w = motion_command.motion.body_pos_w[:, 0]
+    root_quat_w = motion_command.motion.body_quat_w[:, 0]
+    start_pos_w = root_pos_w[start_motion_idx]
+    end_pos_w = root_pos_w[end_motion_idx]
+    start_quat_w = root_quat_w[start_motion_idx]
+    end_quat_w = root_quat_w[end_motion_idx]
+
+    heading_inv = calc_heading_quat_inv(start_quat_w, w_last=True)
+    rel_pos_b = quat_apply(heading_inv, end_pos_w - start_pos_w, w_last=True)
+    rel_xy = rel_pos_b[:, :2]
+    rel_yaw = normalize_angle(calc_heading(end_quat_w) - calc_heading(start_quat_w)).unsqueeze(1)
+
+    yaw_threshold_deg = float(getattr(motion_command.motion_cfg, "contact_aware_sparse_root_zero_yaw_threshold_deg", 0.0))
+    if yaw_threshold_deg > 0.0:
+        yaw_threshold_rad = yaw_threshold_deg * _DEG_TO_RAD
+        rel_yaw = torch.where(torch.abs(rel_yaw) <= yaw_threshold_rad, torch.zeros_like(rel_yaw), rel_yaw)
+
+    command = torch.cat([rel_xy, rel_yaw], dim=-1)
+    valid_endpoint = (segment_end < carry_end) & (segment_end < clip_lengths)
+    active_mask = (time_steps >= carry_start) & (time_steps < carry_end) & valid_endpoint
+    return torch.where(active_mask.unsqueeze(-1), command, torch.zeros_like(command))
+
+
 def _clip_final_object_goal_pose_size_w(motion_command: MotionCommand) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     clip_ids = motion_command.clip_ids
     clip_offsets = motion_command.motion.clip_offsets[clip_ids]
@@ -543,6 +598,17 @@ def sparse_target_root_trajectory_command_contact_aware(env: WholeBodyTrackingMa
     if getattr(motion_command, "manual_control_enabled", False) or not motion_command.motion.has_object:
         return base_command
 
+    command_mode = (
+        str(getattr(motion_command.motion_cfg, "contact_aware_sparse_root_command_mode", "tracking_error"))
+        .strip()
+        .lower()
+        .replace("-", "_")
+    )
+    if command_mode in {"t1_aligned_segment", "segment", "segment_30"}:
+        return _contact_aware_segment_root_command(motion_command)
+    if command_mode not in {"tracking_error", "tracking", "default", "robot_tracking_error"}:
+        raise ValueError(f"Unsupported contact-aware sparse root command mode: {command_mode!r}")
+
     active_mask = motion_command.get_contact_aware_root_command_active_mask()
     return torch.where(active_mask.unsqueeze(-1), base_command, torch.zeros_like(base_command))
 
@@ -628,12 +694,11 @@ def motion_ref_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
 def robot_body_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
 
-    num_bodies = len(motion_command.motion_cfg.body_names_to_track)
-    pos_b, _ = subtract_frame_transforms(
-        motion_command.robot_ref_pos_w[:, None, :].repeat(1, num_bodies, 1),
-        motion_command.robot_ref_quat_w[:, None, :].repeat(1, num_bodies, 1),
-        motion_command.robot_body_pos_w,
-        motion_command.robot_body_quat_w,
+    ref_quat_inv = quat_inverse(motion_command.robot_ref_quat_w, w_last=True)
+    pos_b = quat_apply_broadcast_left(
+        ref_quat_inv,
+        motion_command.robot_body_pos_w - motion_command.robot_ref_pos_w[:, None, :],
+        w_last=True,
     )
 
     return pos_b.view(env.num_envs, -1)
@@ -642,12 +707,11 @@ def robot_body_pos_b(env: WholeBodyTrackingManager) -> torch.Tensor:
 def robot_body_ori_b(env: WholeBodyTrackingManager) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
 
-    num_bodies = len(motion_command.motion_cfg.body_names_to_track)
-    _, ori_b = subtract_frame_transforms(
-        motion_command.robot_ref_pos_w[:, None, :].repeat(1, num_bodies, 1),
-        motion_command.robot_ref_quat_w[:, None, :].repeat(1, num_bodies, 1),
-        motion_command.robot_body_pos_w,
+    ref_quat_inv = quat_inverse(motion_command.robot_ref_quat_w, w_last=True)
+    ori_b = quat_mul_broadcast_left(
+        ref_quat_inv,
         motion_command.robot_body_quat_w,
+        w_last=True,
     )
     mat = quaternion_to_matrix(ori_b, w_last=True)
     return mat[..., :2].reshape(mat.shape[0], -1)

@@ -18,7 +18,7 @@ set -euo pipefail
 #   NFS_CORL_BANK=/nfs/zzzihanw/ds_as_data/_distill/<bank>[.tar]
 #   LOCAL_DATA_ROOT=data/ds_as_data
 #   LOCAL_BANK_NAME=<bank>
-#   EXPECTED_CLIP_COUNT=128
+#   EXPECTED_CLIP_COUNT=126
 #   DRY_RUN=1
 #   KEEP_BACKUP=0
 #   SEED_LOCAL_EXISTING=0

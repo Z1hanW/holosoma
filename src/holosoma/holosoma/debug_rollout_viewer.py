@@ -443,12 +443,18 @@ def _resolve_motion_bank_path(entry: ClipEntry) -> Path | None:
                     entry.data_dir / path,
                     entry.stats_dir / path,
                     entry.data_dir.parent.parent / "motion_bank" / path.name,
+                    entry.data_dir.parent.parent / "_single_slot_motion_bank" / path.name,
+                    entry.data_dir.parent.parent.parent / "_single_slot_motion_bank" / path.name,
                 ]
             )
 
     fallback_name = f"{entry.clip_id}.npz"
     candidates.append(entry.data_dir.parent.parent / "motion_bank" / fallback_name)
     candidates.append(entry.data_dir.parent.parent / "motion_bank" / f"{entry.clip_dir_name}.npz")
+    candidates.append(entry.data_dir.parent.parent / "_single_slot_motion_bank" / fallback_name)
+    candidates.append(entry.data_dir.parent.parent / "_single_slot_motion_bank" / f"{entry.clip_dir_name}.npz")
+    candidates.append(entry.data_dir.parent.parent.parent / "_single_slot_motion_bank" / fallback_name)
+    candidates.append(entry.data_dir.parent.parent.parent / "_single_slot_motion_bank" / f"{entry.clip_dir_name}.npz")
 
     seen: set[Path] = set()
     for candidate in candidates:

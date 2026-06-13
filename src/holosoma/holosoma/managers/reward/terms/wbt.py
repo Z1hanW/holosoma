@@ -22,10 +22,11 @@ from holosoma.managers.command.terms.wbt import (
 )
 from holosoma.managers.reward.base import RewardTermBase
 from holosoma.utils.rotations import (
-    quat_apply,
+    quat_apply_broadcast_left,
     quat_error_magnitude,
     quat_inverse,
     quat_mul,
+    quat_mul_broadcast_left,
     yaw_quat,
 )
 
@@ -220,24 +221,58 @@ def limits_dof_pos(env: WholeBodyTrackingManager, soft_dof_pos_limit: float = 0.
 def motion_global_ref_position_error_exp(
     env: WholeBodyTrackingManager,
     sigma: float,
+    rollout_reference_root: str | None = None,
 ) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
-    error = torch.sum(torch.square(motion_command.ref_pos_w - motion_command.robot_ref_pos_w), dim=-1)
+    if rollout_reference_root is None:
+        reference_pos_w = motion_command.ref_pos_w
+        valid_mask = None
+    else:
+        sampled_reference = _sample_rollout_reference(
+            env,
+            motion_command,
+            rollout_reference_root=rollout_reference_root,
+        )
+        if sampled_reference is None:
+            return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+        reference_pos_w = sampled_reference["ref_pos_w"]
+        valid_mask = sampled_reference["valid_mask"]
+
+    error = torch.sum(torch.square(reference_pos_w - motion_command.robot_ref_pos_w), dim=-1)
     reward = torch.exp(-error / sigma**2)
+    if valid_mask is not None:
+        reward = reward * valid_mask.to(dtype=torch.float32)
     return reward
 
 
 def motion_global_ref_orientation_error_exp(
     env: WholeBodyTrackingManager,
     sigma: float,
+    rollout_reference_root: str | None = None,
 ) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
-    error = quat_error_magnitude(motion_command.ref_quat_w, motion_command.robot_ref_quat_w) ** 2
+    if rollout_reference_root is None:
+        reference_quat_w = motion_command.ref_quat_w
+        valid_mask = None
+    else:
+        sampled_reference = _sample_rollout_reference(
+            env,
+            motion_command,
+            rollout_reference_root=rollout_reference_root,
+        )
+        if sampled_reference is None:
+            return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+        reference_quat_w = sampled_reference["ref_quat_w"]
+        valid_mask = sampled_reference["valid_mask"]
+
+    error = quat_error_magnitude(reference_quat_w, motion_command.robot_ref_quat_w) ** 2
     reward = torch.exp(-error / sigma**2)
+    if valid_mask is not None:
+        reward = reward * valid_mask.to(dtype=torch.float32)
     return reward
 
 
-def _resolve_teacher_rollout_reference_root(raw_root: str) -> Path | None:
+def _resolve_rollout_reference_root(raw_root: str) -> Path | None:
     root_str = raw_root.strip()
     if not root_str:
         return None
@@ -275,13 +310,13 @@ def _tensor_step_cache_signature(tensor: torch.Tensor) -> tuple[int, int, int, t
     )
 
 
-def _teacher_rollout_sample_cache_key(
+def _rollout_reference_sample_cache_key(
     env: WholeBodyTrackingManager,
     motion_command: MotionCommand,
     *,
     rollout_reference_root: str,
 ) -> tuple[object, ...]:
-    resolved_root = _resolve_teacher_rollout_reference_root(rollout_reference_root)
+    resolved_root = _resolve_rollout_reference_root(rollout_reference_root)
     root_key = "" if resolved_root is None else str(resolved_root)
     reward_compute_counter = getattr(env, "_reward_compute_counter", None)
     if reward_compute_counter is not None:
@@ -295,20 +330,20 @@ def _teacher_rollout_sample_cache_key(
     )
 
 
-def _get_teacher_rollout_reference_bank(
+def _get_rollout_reference_bank(
     env: WholeBodyTrackingManager,
     motion_command: MotionCommand,
     *,
     rollout_reference_root: str,
 ) -> dict[str, torch.Tensor] | None:
-    resolved_root = _resolve_teacher_rollout_reference_root(rollout_reference_root)
+    resolved_root = _resolve_rollout_reference_root(rollout_reference_root)
     if resolved_root is None:
         return None
 
-    cache = getattr(env, "_teacher_rollout_reference_bank_cache", None)
+    cache = getattr(env, "_rollout_reference_bank_cache", None)
     if cache is None:
         cache = {}
-        setattr(env, "_teacher_rollout_reference_bank_cache", cache)
+        setattr(env, "_rollout_reference_bank_cache", cache)
 
     cache_key = str(resolved_root)
     expected_clip_ids = tuple(str(clip_id) for clip_id in motion_command.motion.clip_ids)
@@ -326,7 +361,7 @@ def _get_teacher_rollout_reference_bank(
 
     if not resolved_root.is_dir():
         logger.warning(
-            "Teacher rollout reference tracking disabled: rollout reference root '{}' does not exist.",
+            "Rollout reference tracking disabled: rollout reference root '{}' does not exist.",
             resolved_root,
         )
         cache[cache_key] = {
@@ -433,7 +468,7 @@ def _get_teacher_rollout_reference_bank(
 
     if max_steps <= 0:
         logger.warning(
-            "Teacher rollout reference tracking disabled: no matching rollout references found in '{}'.",
+            "Rollout reference tracking disabled: no matching rollout references found in '{}'.",
             resolved_root,
         )
         cache[cache_key] = {
@@ -503,7 +538,7 @@ def _get_teacher_rollout_reference_bank(
 
     matched_clip_count = int(bank["has_clip"].sum().item())
     logger.info(
-        "Teacher rollout reference tracking loaded {} clip(s) from '{}'. has_object={}",
+        "Rollout reference tracking loaded {} clip(s) from '{}'. has_object={}",
         matched_clip_count,
         resolved_root,
         has_any_object,
@@ -517,23 +552,23 @@ def _get_teacher_rollout_reference_bank(
     return bank
 
 
-def _sample_teacher_rollout_reference(
+def _sample_rollout_reference(
     env: WholeBodyTrackingManager,
     motion_command: MotionCommand,
     *,
     rollout_reference_root: str,
 ) -> dict[str, torch.Tensor] | None:
-    sample_cache = getattr(env, "_teacher_rollout_reference_sample_cache", None)
+    sample_cache = getattr(env, "_rollout_reference_sample_cache", None)
     if sample_cache is None:
         sample_cache = {}
-        setattr(env, "_teacher_rollout_reference_sample_cache", sample_cache)
+        setattr(env, "_rollout_reference_sample_cache", sample_cache)
 
-    cache_key = _teacher_rollout_sample_cache_key(env, motion_command, rollout_reference_root=rollout_reference_root)
+    cache_key = _rollout_reference_sample_cache_key(env, motion_command, rollout_reference_root=rollout_reference_root)
     if cache_key in sample_cache:
         return sample_cache[cache_key]
     sample_cache.clear()
 
-    bank = _get_teacher_rollout_reference_bank(
+    bank = _get_rollout_reference_bank(
         env,
         motion_command,
         rollout_reference_root=rollout_reference_root,
@@ -580,7 +615,7 @@ def _sample_teacher_rollout_reference(
     return sampled
 
 
-def _teacher_rollout_relative_body_targets(
+def _rollout_reference_relative_body_targets(
     env: WholeBodyTrackingManager,
     motion_command: MotionCommand,
     sampled_reference: dict[str, torch.Tensor],
@@ -589,15 +624,14 @@ def _teacher_rollout_relative_body_targets(
     cache_key = None
     if reward_compute_counter is not None:
         cache_key = (id(sampled_reference), id(motion_command), int(reward_compute_counter))
-        cache = getattr(env, "_teacher_rollout_relative_body_targets_cache", None)
+        cache = getattr(env, "_rollout_reference_relative_body_targets_cache", None)
         if cache is None:
             cache = {}
-            setattr(env, "_teacher_rollout_relative_body_targets_cache", cache)
+            setattr(env, "_rollout_reference_relative_body_targets_cache", cache)
         cached = cache.get(cache_key)
         if cached is not None:
             return cached
 
-    num_bodies = int(sampled_reference["body_pos_w"].shape[1])
     episode_length_buf = getattr(env, "episode_length_buf", None)
     if episode_length_buf is None:
         episode_length_buf = torch.ones((motion_command.num_envs,), device=motion_command.device, dtype=torch.long)
@@ -608,22 +642,21 @@ def _teacher_rollout_relative_body_targets(
     robot_ref_pos_w = motion_command.robot_root_pos_w * use_root + motion_command.robot_ref_pos_w * (1.0 - use_root)
     robot_ref_quat_w = motion_command.robot_root_quat_w * use_root + motion_command.robot_ref_quat_w * (1.0 - use_root)
 
-    ref_pos_w_repeat = ref_pos_w[:, None, :].repeat(1, num_bodies, 1)
-    ref_quat_w_repeat = ref_quat_w[:, None, :].repeat(1, num_bodies, 1)
-    robot_ref_pos_w_repeat = robot_ref_pos_w[:, None, :].repeat(1, num_bodies, 1)
-    robot_ref_quat_w_repeat = robot_ref_quat_w[:, None, :].repeat(1, num_bodies, 1)
-
     delta_quat_w = yaw_quat(
-        quat_mul(robot_ref_quat_w_repeat, quat_inverse(ref_quat_w_repeat, w_last=True), w_last=True),
+        quat_mul(robot_ref_quat_w, quat_inverse(ref_quat_w, w_last=True), w_last=True),
         w_last=True,
     )
-    relative_body_quat_w = quat_mul(delta_quat_w, sampled_reference["body_quat_w"], w_last=True)
-    delta_pos_w_height = ref_pos_w_repeat - robot_ref_pos_w_repeat
+    relative_body_quat_w = quat_mul_broadcast_left(delta_quat_w, sampled_reference["body_quat_w"], w_last=True)
+    delta_pos_w_height = ref_pos_w - robot_ref_pos_w
     delta_pos_w_height[..., :2] = 0.0
     relative_body_pos_w = (
-        robot_ref_pos_w_repeat
-        + delta_pos_w_height
-        + quat_apply(delta_quat_w, sampled_reference["body_pos_w"] - ref_pos_w_repeat, w_last=True)
+        robot_ref_pos_w[:, None, :]
+        + delta_pos_w_height[:, None, :]
+        + quat_apply_broadcast_left(
+            delta_quat_w,
+            sampled_reference["body_pos_w"] - ref_pos_w[:, None, :],
+            w_last=True,
+        )
     )
     if cache_key is not None:
         cache.clear()
@@ -636,9 +669,24 @@ def motion_relative_body_position_error_exp(
     sigma: float,
     body_names: list[str] | None = None,
     body_name_pattern: str | None = None,
+    rollout_reference_root: str | None = None,
 ) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
-    error = torch.sum(torch.square(motion_command.body_pos_relative_w - motion_command.robot_body_pos_w), dim=-1)
+    if rollout_reference_root is None:
+        relative_body_pos_w = motion_command.body_pos_relative_w
+        valid_mask = None
+    else:
+        sampled_reference = _sample_rollout_reference(
+            env,
+            motion_command,
+            rollout_reference_root=rollout_reference_root,
+        )
+        if sampled_reference is None:
+            return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+        relative_body_pos_w, _ = _rollout_reference_relative_body_targets(env, motion_command, sampled_reference)
+        valid_mask = sampled_reference["valid_mask"]
+
+    error = torch.sum(torch.square(relative_body_pos_w - motion_command.robot_body_pos_w), dim=-1)
     body_indexes = _get_tracked_body_subset_indexes(
         env,
         motion_command,
@@ -647,6 +695,8 @@ def motion_relative_body_position_error_exp(
     )
     error = error.index_select(1, body_indexes)
     reward = torch.exp(-error.mean(-1) / sigma**2)
+    if valid_mask is not None:
+        reward = reward * valid_mask.to(dtype=torch.float32)
     return reward
 
 
@@ -655,9 +705,24 @@ def motion_relative_body_orientation_error_exp(
     sigma: float,
     body_names: list[str] | None = None,
     body_name_pattern: str | None = None,
+    rollout_reference_root: str | None = None,
 ) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
-    error = quat_error_magnitude(motion_command.body_quat_relative_w, motion_command.robot_body_quat_w) ** 2
+    if rollout_reference_root is None:
+        relative_body_quat_w = motion_command.body_quat_relative_w
+        valid_mask = None
+    else:
+        sampled_reference = _sample_rollout_reference(
+            env,
+            motion_command,
+            rollout_reference_root=rollout_reference_root,
+        )
+        if sampled_reference is None:
+            return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+        _, relative_body_quat_w = _rollout_reference_relative_body_targets(env, motion_command, sampled_reference)
+        valid_mask = sampled_reference["valid_mask"]
+
+    error = quat_error_magnitude(relative_body_quat_w, motion_command.robot_body_quat_w) ** 2
     body_indexes = _get_tracked_body_subset_indexes(
         env,
         motion_command,
@@ -666,6 +731,8 @@ def motion_relative_body_orientation_error_exp(
     )
     error = error.index_select(1, body_indexes)
     reward = torch.exp(-error.mean(-1) / sigma**2)
+    if valid_mask is not None:
+        reward = reward * valid_mask.to(dtype=torch.float32)
     return reward
 
 
@@ -674,9 +741,24 @@ def motion_global_body_lin_vel(
     sigma: float,
     body_names: list[str] | None = None,
     body_name_pattern: str | None = None,
+    rollout_reference_root: str | None = None,
 ) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
-    error = torch.sum(torch.square(motion_command.body_lin_vel_w - motion_command.robot_body_lin_vel_w), dim=-1)
+    if rollout_reference_root is None:
+        body_lin_vel_w = motion_command.body_lin_vel_w
+        valid_mask = None
+    else:
+        sampled_reference = _sample_rollout_reference(
+            env,
+            motion_command,
+            rollout_reference_root=rollout_reference_root,
+        )
+        if sampled_reference is None:
+            return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+        body_lin_vel_w = sampled_reference["body_lin_vel_w"]
+        valid_mask = sampled_reference["valid_mask"]
+
+    error = torch.sum(torch.square(body_lin_vel_w - motion_command.robot_body_lin_vel_w), dim=-1)
     body_indexes = _get_tracked_body_subset_indexes(
         env,
         motion_command,
@@ -685,6 +767,8 @@ def motion_global_body_lin_vel(
     )
     error = error.index_select(1, body_indexes)
     reward = torch.exp(-error.mean(-1) / sigma**2)
+    if valid_mask is not None:
+        reward = reward * valid_mask.to(dtype=torch.float32)
     return reward
 
 
@@ -693,9 +777,24 @@ def motion_global_body_ang_vel(
     sigma: float,
     body_names: list[str] | None = None,
     body_name_pattern: str | None = None,
+    rollout_reference_root: str | None = None,
 ) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
-    error = torch.sum(torch.square(motion_command.body_ang_vel_w - motion_command.robot_body_ang_vel_w), dim=-1)
+    if rollout_reference_root is None:
+        body_ang_vel_w = motion_command.body_ang_vel_w
+        valid_mask = None
+    else:
+        sampled_reference = _sample_rollout_reference(
+            env,
+            motion_command,
+            rollout_reference_root=rollout_reference_root,
+        )
+        if sampled_reference is None:
+            return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+        body_ang_vel_w = sampled_reference["body_ang_vel_w"]
+        valid_mask = sampled_reference["valid_mask"]
+
+    error = torch.sum(torch.square(body_ang_vel_w - motion_command.robot_body_ang_vel_w), dim=-1)
     body_indexes = _get_tracked_body_subset_indexes(
         env,
         motion_command,
@@ -704,6 +803,8 @@ def motion_global_body_ang_vel(
     )
     error = error.index_select(1, body_indexes)
     reward = torch.exp(-error.mean(-1) / sigma**2)
+    if valid_mask is not None:
+        reward = reward * valid_mask.to(dtype=torch.float32)
     return reward
 
 
@@ -743,20 +844,54 @@ def motion_joint_velocity_error_exp(
 def object_global_ref_position_error_exp(
     env: WholeBodyTrackingManager,
     sigma: float,
+    rollout_reference_root: str | None = None,
 ) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
-    error = torch.sum(torch.square(motion_command.object_pos_w - motion_command.simulator_object_pos_w), dim=-1)
+    if rollout_reference_root is None:
+        object_pos_w = motion_command.object_pos_w
+        valid_mask = None
+    else:
+        sampled_reference = _sample_rollout_reference(
+            env,
+            motion_command,
+            rollout_reference_root=rollout_reference_root,
+        )
+        if sampled_reference is None:
+            return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+        object_pos_w = sampled_reference["object_pos_w"]
+        valid_mask = sampled_reference["object_valid_mask"]
+
+    error = torch.sum(torch.square(object_pos_w - motion_command.simulator_object_pos_w), dim=-1)
     reward = torch.exp(-error / sigma**2)
+    if valid_mask is not None:
+        reward = reward * valid_mask.to(dtype=torch.float32)
     return reward
 
 
 def object_global_ref_orientation_error_exp(
     env: WholeBodyTrackingManager,
     sigma: float,
+    rollout_reference_root: str | None = None,
 ) -> torch.Tensor:
     motion_command = _get_motion_command_and_assert_type(env)
-    error = quat_error_magnitude(motion_command.object_quat_w, motion_command.simulator_object_quat_w) ** 2
+    if rollout_reference_root is None:
+        object_quat_w = motion_command.object_quat_w
+        valid_mask = None
+    else:
+        sampled_reference = _sample_rollout_reference(
+            env,
+            motion_command,
+            rollout_reference_root=rollout_reference_root,
+        )
+        if sampled_reference is None:
+            return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+        object_quat_w = sampled_reference["object_quat_w"]
+        valid_mask = sampled_reference["object_valid_mask"]
+
+    error = quat_error_magnitude(object_quat_w, motion_command.simulator_object_quat_w) ** 2
     reward = torch.exp(-error / sigma**2)
+    if valid_mask is not None:
+        reward = reward * valid_mask.to(dtype=torch.float32)
     return reward
 
 
@@ -765,18 +900,7 @@ def teacher_rollout_global_ref_position_error_exp(
     sigma: float,
     rollout_reference_root: str = "outputs/clips",
 ) -> torch.Tensor:
-    motion_command = _get_motion_command_and_assert_type(env)
-    sampled_reference = _sample_teacher_rollout_reference(
-        env,
-        motion_command,
-        rollout_reference_root=rollout_reference_root,
-    )
-    if sampled_reference is None:
-        return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
-
-    error = torch.sum(torch.square(sampled_reference["ref_pos_w"] - motion_command.robot_ref_pos_w), dim=-1)
-    reward = torch.exp(-error / sigma**2)
-    return reward * sampled_reference["valid_mask"].to(dtype=torch.float32)
+    return motion_global_ref_position_error_exp(env, sigma=sigma, rollout_reference_root=rollout_reference_root)
 
 
 def teacher_rollout_global_ref_orientation_error_exp(
@@ -784,18 +908,7 @@ def teacher_rollout_global_ref_orientation_error_exp(
     sigma: float,
     rollout_reference_root: str = "outputs/clips",
 ) -> torch.Tensor:
-    motion_command = _get_motion_command_and_assert_type(env)
-    sampled_reference = _sample_teacher_rollout_reference(
-        env,
-        motion_command,
-        rollout_reference_root=rollout_reference_root,
-    )
-    if sampled_reference is None:
-        return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
-
-    error = quat_error_magnitude(sampled_reference["ref_quat_w"], motion_command.robot_ref_quat_w) ** 2
-    reward = torch.exp(-error / sigma**2)
-    return reward * sampled_reference["valid_mask"].to(dtype=torch.float32)
+    return motion_global_ref_orientation_error_exp(env, sigma=sigma, rollout_reference_root=rollout_reference_root)
 
 
 def teacher_rollout_relative_body_position_error_exp(
@@ -805,26 +918,13 @@ def teacher_rollout_relative_body_position_error_exp(
     body_names: list[str] | None = None,
     body_name_pattern: str | None = None,
 ) -> torch.Tensor:
-    motion_command = _get_motion_command_and_assert_type(env)
-    sampled_reference = _sample_teacher_rollout_reference(
+    return motion_relative_body_position_error_exp(
         env,
-        motion_command,
-        rollout_reference_root=rollout_reference_root,
-    )
-    if sampled_reference is None:
-        return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
-
-    relative_body_pos_w, _ = _teacher_rollout_relative_body_targets(env, motion_command, sampled_reference)
-    error = torch.sum(torch.square(relative_body_pos_w - motion_command.robot_body_pos_w), dim=-1)
-    body_indexes = _get_tracked_body_subset_indexes(
-        env,
-        motion_command,
+        sigma=sigma,
         body_names=body_names,
         body_name_pattern=body_name_pattern,
+        rollout_reference_root=rollout_reference_root,
     )
-    error = error.index_select(1, body_indexes)
-    reward = torch.exp(-error.mean(-1) / sigma**2)
-    return reward * sampled_reference["valid_mask"].to(dtype=torch.float32)
 
 
 def teacher_rollout_relative_body_orientation_error_exp(
@@ -834,26 +934,13 @@ def teacher_rollout_relative_body_orientation_error_exp(
     body_names: list[str] | None = None,
     body_name_pattern: str | None = None,
 ) -> torch.Tensor:
-    motion_command = _get_motion_command_and_assert_type(env)
-    sampled_reference = _sample_teacher_rollout_reference(
+    return motion_relative_body_orientation_error_exp(
         env,
-        motion_command,
-        rollout_reference_root=rollout_reference_root,
-    )
-    if sampled_reference is None:
-        return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
-
-    _, relative_body_quat_w = _teacher_rollout_relative_body_targets(env, motion_command, sampled_reference)
-    error = quat_error_magnitude(relative_body_quat_w, motion_command.robot_body_quat_w) ** 2
-    body_indexes = _get_tracked_body_subset_indexes(
-        env,
-        motion_command,
+        sigma=sigma,
         body_names=body_names,
         body_name_pattern=body_name_pattern,
+        rollout_reference_root=rollout_reference_root,
     )
-    error = error.index_select(1, body_indexes)
-    reward = torch.exp(-error.mean(-1) / sigma**2)
-    return reward * sampled_reference["valid_mask"].to(dtype=torch.float32)
 
 
 def teacher_rollout_global_body_lin_vel(
@@ -863,25 +950,13 @@ def teacher_rollout_global_body_lin_vel(
     body_names: list[str] | None = None,
     body_name_pattern: str | None = None,
 ) -> torch.Tensor:
-    motion_command = _get_motion_command_and_assert_type(env)
-    sampled_reference = _sample_teacher_rollout_reference(
+    return motion_global_body_lin_vel(
         env,
-        motion_command,
-        rollout_reference_root=rollout_reference_root,
-    )
-    if sampled_reference is None:
-        return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
-
-    error = torch.sum(torch.square(sampled_reference["body_lin_vel_w"] - motion_command.robot_body_lin_vel_w), dim=-1)
-    body_indexes = _get_tracked_body_subset_indexes(
-        env,
-        motion_command,
+        sigma=sigma,
         body_names=body_names,
         body_name_pattern=body_name_pattern,
+        rollout_reference_root=rollout_reference_root,
     )
-    error = error.index_select(1, body_indexes)
-    reward = torch.exp(-error.mean(-1) / sigma**2)
-    return reward * sampled_reference["valid_mask"].to(dtype=torch.float32)
 
 
 def teacher_rollout_global_body_ang_vel(
@@ -891,25 +966,13 @@ def teacher_rollout_global_body_ang_vel(
     body_names: list[str] | None = None,
     body_name_pattern: str | None = None,
 ) -> torch.Tensor:
-    motion_command = _get_motion_command_and_assert_type(env)
-    sampled_reference = _sample_teacher_rollout_reference(
+    return motion_global_body_ang_vel(
         env,
-        motion_command,
-        rollout_reference_root=rollout_reference_root,
-    )
-    if sampled_reference is None:
-        return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
-
-    error = torch.sum(torch.square(sampled_reference["body_ang_vel_w"] - motion_command.robot_body_ang_vel_w), dim=-1)
-    body_indexes = _get_tracked_body_subset_indexes(
-        env,
-        motion_command,
+        sigma=sigma,
         body_names=body_names,
         body_name_pattern=body_name_pattern,
+        rollout_reference_root=rollout_reference_root,
     )
-    error = error.index_select(1, body_indexes)
-    reward = torch.exp(-error.mean(-1) / sigma**2)
-    return reward * sampled_reference["valid_mask"].to(dtype=torch.float32)
 
 
 def teacher_rollout_object_global_ref_position_error_exp(
@@ -917,18 +980,7 @@ def teacher_rollout_object_global_ref_position_error_exp(
     sigma: float,
     rollout_reference_root: str = "outputs/clips",
 ) -> torch.Tensor:
-    motion_command = _get_motion_command_and_assert_type(env)
-    sampled_reference = _sample_teacher_rollout_reference(
-        env,
-        motion_command,
-        rollout_reference_root=rollout_reference_root,
-    )
-    if sampled_reference is None:
-        return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
-
-    error = torch.sum(torch.square(sampled_reference["object_pos_w"] - motion_command.simulator_object_pos_w), dim=-1)
-    reward = torch.exp(-error / sigma**2)
-    return reward * sampled_reference["object_valid_mask"].to(dtype=torch.float32)
+    return object_global_ref_position_error_exp(env, sigma=sigma, rollout_reference_root=rollout_reference_root)
 
 
 def teacher_rollout_object_global_ref_orientation_error_exp(
@@ -936,18 +988,7 @@ def teacher_rollout_object_global_ref_orientation_error_exp(
     sigma: float,
     rollout_reference_root: str = "outputs/clips",
 ) -> torch.Tensor:
-    motion_command = _get_motion_command_and_assert_type(env)
-    sampled_reference = _sample_teacher_rollout_reference(
-        env,
-        motion_command,
-        rollout_reference_root=rollout_reference_root,
-    )
-    if sampled_reference is None:
-        return torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
-
-    error = quat_error_magnitude(sampled_reference["object_quat_w"], motion_command.simulator_object_quat_w) ** 2
-    reward = torch.exp(-error / sigma**2)
-    return reward * sampled_reference["object_valid_mask"].to(dtype=torch.float32)
+    return object_global_ref_orientation_error_exp(env, sigma=sigma, rollout_reference_root=rollout_reference_root)
 
 
 def body_contact_reward(

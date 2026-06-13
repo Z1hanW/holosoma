@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${SCRIPT_DIR}"
 
-RUN_ID="${RUN_ID:-as_teacher_rollout_8gpu32env_$(date -u +%Y%m%d_%H%M%S)_bcleb5oi_model58000_197_final0p5_primitiveproj}"
+RUN_ID="${RUN_ID:-as_teacher_rollout_8gpu32env_$(date -u +%Y%m%d_%H%M%S)_bcleb5oi_model58000_195_final0p5_primitiveproj}"
 NUM_SHARDS="${NUM_SHARDS:-8}"
 PER_GPU_ENVS="${PER_GPU_ENVS:-32}"
 GPU_LIST="${GPU_LIST:-0,1,2,3,4,5,6,7}"
@@ -14,6 +14,8 @@ LOCAL_RANK_OFFSET="${LOCAL_RANK_OFFSET:-20}"
 TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT:-wandb://zihanw22/carry-any/bcleb5oi/model_58000.pt}"
 SOURCE_AS_DATA_DIR="${SOURCE_AS_DATA_DIR:-${SCRIPT_DIR}/data/ds_as_data/carryany_filter_scale_noscale_keep169_20260513_plus_box_teacher_rollout}"
 SOURCE_AS_OBJECT_MAP="${SOURCE_AS_OBJECT_MAP:-${SOURCE_AS_DATA_DIR}/_clip_object_urdf_map.json}"
+SOURCE_EXPECTED_TOTAL="${SOURCE_EXPECTED_TOTAL:-195}"
+export SOURCE_EXPECTED_TOTAL
 SHARD_ROOT="${SHARD_ROOT:-${SCRIPT_DIR}/data/ds_as_data/_teacher_rollout_shards/${RUN_ID}}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${SCRIPT_DIR}/outputs/teacher_as_contacts/${RUN_ID}}"
 LOG_ROOT="${LOG_ROOT:-${SCRIPT_DIR}/logs/runtime/${RUN_ID}}"
@@ -32,7 +34,7 @@ fi
 
 mkdir -p "${SHARD_ROOT}" "${OUTPUT_ROOT}/shards" "${LOG_ROOT}"
 
-"${PYTHON_BIN}" - "${SOURCE_AS_DATA_DIR}" "${SOURCE_AS_OBJECT_MAP}" "${SHARD_ROOT}" "${NUM_SHARDS}" "${PER_GPU_ENVS}" <<'PY'
+"${PYTHON_BIN}" - "${SOURCE_AS_DATA_DIR}" "${SOURCE_AS_OBJECT_MAP}" "${SHARD_ROOT}" "${NUM_SHARDS}" "${PER_GPU_ENVS}" "${SOURCE_EXPECTED_TOTAL}" <<'PY'
 from __future__ import annotations
 
 import json
@@ -46,18 +48,19 @@ source_map = Path(sys.argv[2]).expanduser().resolve()
 shard_root = Path(sys.argv[3]).expanduser().resolve()
 num_shards = int(sys.argv[4])
 per_gpu_envs = int(sys.argv[5])
+expected_total = int(sys.argv[6])
 
 npz_files = sorted(source_dir.glob("*.npz"))
-if len(npz_files) != 197:
-    raise SystemExit(f"[ERROR] Expected 197 source .npz files, found {len(npz_files)} under {source_dir}")
+if len(npz_files) != expected_total:
+    raise SystemExit(f"[ERROR] Expected {expected_total} source .npz files, found {len(npz_files)} under {source_dir}")
 if not source_map.is_file():
     raise SystemExit(f"[ERROR] Missing object map: {source_map}")
 
 payload = json.loads(source_map.read_text(encoding="utf-8"))
 metadata = {key: value for key, value in payload.items() if key != "clips"} if isinstance(payload, dict) else {}
 clips = payload.get("clips", payload) if isinstance(payload, dict) else payload
-if not isinstance(clips, dict) or len(clips) != 197:
-    raise SystemExit(f"[ERROR] Expected 197 object-map entries, found {len(clips) if isinstance(clips, dict) else 'invalid'}")
+if not isinstance(clips, dict) or len(clips) != expected_total:
+    raise SystemExit(f"[ERROR] Expected {expected_total} object-map entries, found {len(clips) if isinstance(clips, dict) else 'invalid'}")
 
 missing = [path.stem for path in npz_files if path.stem not in clips]
 if missing:
@@ -195,6 +198,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -259,14 +263,15 @@ for shard_output in sorted(path for path in shards_root.glob("shard_*") if path.
 
 clip_dirs = sorted(path for path in clips_dst.iterdir() if path.is_dir())
 motion_files = sorted(motion_dst.glob("*.npz"))
-if len(clip_dirs) != 197:
-    raise SystemExit(f"[ERROR] Merged output expected 197 clip dirs, found {len(clip_dirs)}")
-if len(motion_files) != 197:
-    raise SystemExit(f"[ERROR] Merged output expected 197 rollout motion files, found {len(motion_files)}")
-if len(clip_object_map) != 197:
-    raise SystemExit(f"[ERROR] Merged output expected 197 object-map entries, found {len(clip_object_map)}")
-if len(summary_rows) != 197:
-    raise SystemExit(f"[ERROR] Merged output expected 197 summary rows, found {len(summary_rows)}")
+expected_total = int(os.environ.get("SOURCE_EXPECTED_TOTAL", "195"))
+if len(clip_dirs) != expected_total:
+    raise SystemExit(f"[ERROR] Merged output expected {expected_total} clip dirs, found {len(clip_dirs)}")
+if len(motion_files) != expected_total:
+    raise SystemExit(f"[ERROR] Merged output expected {expected_total} rollout motion files, found {len(motion_files)}")
+if len(clip_object_map) != expected_total:
+    raise SystemExit(f"[ERROR] Merged output expected {expected_total} object-map entries, found {len(clip_object_map)}")
+if len(summary_rows) != expected_total:
+    raise SystemExit(f"[ERROR] Merged output expected {expected_total} summary rows, found {len(summary_rows)}")
 
 required_files = (
     "teacher_rollout_reference.npz",

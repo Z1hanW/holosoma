@@ -22,16 +22,16 @@ console = Console()
 
 REWARD_LOG_GROUPS: dict[str, tuple[str, ...]] = {
     "Track": (
-        "teacher_rollout_global_ref_position_error_exp",
-        "teacher_rollout_global_ref_orientation_error_exp",
-        "teacher_rollout_relative_body_position_error_exp",
-        "teacher_rollout_relative_body_orientation_error_exp",
-        "teacher_rollout_global_body_lin_vel",
-        "teacher_rollout_global_body_ang_vel",
+        "motion_global_ref_position_error_exp",
+        "motion_global_ref_orientation_error_exp",
+        "motion_relative_body_position_error_exp",
+        "motion_relative_body_orientation_error_exp",
+        "motion_global_body_lin_vel",
+        "motion_global_body_ang_vel",
     ),
     "Object": (
-        "teacher_rollout_object_global_ref_position_error_exp",
-        "teacher_rollout_object_global_ref_orientation_error_exp",
+        "object_global_ref_position_error_exp",
+        "object_global_ref_orientation_error_exp",
     ),
     "Contact": (
         "offline_wrist_target_guidance",

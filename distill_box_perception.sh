@@ -43,6 +43,9 @@ SCHEDULE_VARIANT=${SCHEDULE_VARIANT:-default}
 ROOT_COMMAND_MODE=${ROOT_COMMAND_MODE:-default}
 CONTACT_AWARE_HISTORY=${CONTACT_AWARE_HISTORY:-0}
 CONTACT_AWARE_HISTORY_LENGTH=${CONTACT_AWARE_HISTORY_LENGTH:-5}
+CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE:-}
+CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS=${CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS:-}
+CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG=${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG:-}
 BAD_TRACKING_THRESHOLD_AUGMENT=${BAD_TRACKING_THRESHOLD_AUGMENT:-${BAD_TRACKING_THRESHOLD_MULTIPLIER:-${BAD_TRACKING_THRESHOLD_SCALE:-1.0}}}
 SHOO7SR1_NEAR03_DEBUG=${SHOO7SR1_NEAR03_DEBUG:-0}
 SHOO7SR1_OBS_VARIANT=${SHOO7SR1_OBS_VARIANT:-baseline}
@@ -1473,6 +1476,15 @@ echo "[INFO] data_mode=${DATA_MODE}"
 echo "[INFO] tracker_profile=${TRACKER_PROFILE}"
 echo "[INFO] root_command_mode=${ROOT_COMMAND_MODE}"
 echo "[INFO] contact_aware_history=${CONTACT_AWARE_HISTORY} history_length=${CONTACT_AWARE_HISTORY_LENGTH}"
+if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}" ]]; then
+  echo "[INFO] contact_aware_sparse_root_command_mode=${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}"
+fi
+if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS}" ]]; then
+  echo "[INFO] contact_aware_sparse_root_segment_steps=${CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS}"
+fi
+if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG}" ]]; then
+  echo "[INFO] contact_aware_sparse_root_zero_yaw_threshold_deg=${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG}"
+fi
 echo "[INFO] bad_tracking_threshold_augment=${BAD_TRACKING_THRESHOLD_AUGMENT_NORM} thresholds ref_pos=${BAD_TRACKING_REF_POS_THRESHOLD} ref_ori=${BAD_TRACKING_REF_ORI_THRESHOLD} body_pos=${BAD_TRACKING_BODY_POS_THRESHOLD} object_pos=${BAD_TRACKING_OBJECT_POS_THRESHOLD} object_ori=${BAD_TRACKING_OBJECT_ORI_THRESHOLD}"
 echo "[INFO] use_legacy_ds=${LEGACY_DS_ENABLED} prepared=${LEGACY_DS_PREPARED} ds_data_root=${DS_DATA_ROOT}"
 if [[ -n "${MOTION_DIR:-}" ]]; then
@@ -1540,6 +1552,21 @@ EXTRA_DISTILL_ARGS+=(
   --termination.terms.bad-tracking.params.bad-object-pos-threshold="${BAD_TRACKING_OBJECT_POS_THRESHOLD}"
   --termination.terms.bad-tracking.params.bad-object-ori-threshold="${BAD_TRACKING_OBJECT_ORI_THRESHOLD}"
 )
+if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}" ]]; then
+  EXTRA_DISTILL_ARGS+=(
+    --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-command-mode="${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}"
+  )
+fi
+if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS}" ]]; then
+  EXTRA_DISTILL_ARGS+=(
+    --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-segment-steps="${CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS}"
+  )
+fi
+if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG}" ]]; then
+  EXTRA_DISTILL_ARGS+=(
+    --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-zero-yaw-threshold-deg="${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG}"
+  )
+fi
 if [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH}" ]]; then
   IFS=',' read -r -a _teacher_obs_key_list <<< "${TEACHER_OBS_KEYS}"
   for _raw_teacher_obs_key in "${_teacher_obs_key_list[@]}"; do
@@ -1598,14 +1625,14 @@ if [[ -n "${CONTACT_EXPORT_ROOT}" ]]; then
   )
   if [[ "${EXP}" == *"r2s-rollout-ref"* ]]; then
     EXTRA_DISTILL_ARGS+=(
-      --reward.terms.teacher-rollout-global-ref-position-error-exp.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
-      --reward.terms.teacher-rollout-global-ref-orientation-error-exp.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
-      --reward.terms.teacher-rollout-relative-body-position-error-exp.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
-      --reward.terms.teacher-rollout-relative-body-orientation-error-exp.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
-      --reward.terms.teacher-rollout-global-body-lin-vel.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
-      --reward.terms.teacher-rollout-global-body-ang-vel.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
-      --reward.terms.teacher-rollout-object-global-ref-position-error-exp.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
-      --reward.terms.teacher-rollout-object-global-ref-orientation-error-exp.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
+      --reward.terms.motion-global-ref-position-error-exp.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
+      --reward.terms.motion-global-ref-orientation-error-exp.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
+      --reward.terms.motion-relative-body-position-error-exp.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
+      --reward.terms.motion-relative-body-orientation-error-exp.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
+      --reward.terms.motion-global-body-lin-vel.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
+      --reward.terms.motion-global-body-ang-vel.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
+      --reward.terms.object-global-ref-position-error-exp.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
+      --reward.terms.object-global-ref-orientation-error-exp.params.rollout-reference-root "${CONTACT_EXPORT_ROOT}"
     )
   fi
 fi

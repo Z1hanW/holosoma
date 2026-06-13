@@ -209,6 +209,19 @@ normalize_wandb_checkpoint_ref() {
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "${SCRIPT_DIR}"
+source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
+
+as_flag_enabled() {
+  case "$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 AS_SUCCESS133_FINAL0P5=${AS_SUCCESS133_FINAL0P5:-0}
 AS_CONTACT_AWARE=${AS_CONTACT_AWARE:-${CONTACT_AWARE:-}}
 
@@ -604,6 +617,46 @@ case "${OMOMO_OBJECT_MAP}" in
 esac
 OMOMO_DATA_DIR="${AS_SINGLE_SLOT_MOTION_DIR_ABS}"
 
+AS_RANK_LOCAL_SHARDS=${AS_RANK_LOCAL_SHARDS:-1}
+if as_flag_enabled "${AS_RANK_LOCAL_SHARDS}"; then
+  CUDA_VISIBLE_DEVICES="$(default_cuda_visible_devices_all "${CUDA_VISIBLE_DEVICES:-}")"
+  if [[ -z "${NPROC:-}" ]]; then
+    NPROC="$(count_cuda_visible_devices "${CUDA_VISIBLE_DEVICES}")"
+  fi
+  if ! [[ "${NPROC}" =~ ^[0-9]+$ ]] || (( NPROC < 1 )); then
+    echo "[ERROR] NPROC must be a positive integer. Got: ${NPROC}" >&2
+    exit 1
+  fi
+  export CUDA_VISIBLE_DEVICES
+  export NPROC
+
+  if (( NPROC > 1 )); then
+    AS_RANK_SHARD_ROOT=${AS_RANK_SHARD_ROOT:-"${AS_SINGLE_SLOT_MOTION_DIR_ABS}/_rank_shards/ws${NPROC}"}
+    AS_RANK_SHARD_ROOT_ABS=$(realpath -m "${AS_RANK_SHARD_ROOT}")
+    case "${AS_RANK_SHARD_ROOT_ABS}" in
+      "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
+        ;;
+      *)
+        echo "[ERROR] AS rank-local shard root must live under repo-local data root: ${LOCAL_DATA_ROOT}" >&2
+        echo "[ERROR] Got: ${AS_RANK_SHARD_ROOT_ABS}" >&2
+        exit 2
+        ;;
+    esac
+    HOLOSOMA_RANK_LOCAL_MOTION_ROOT=$(python3 "${SCRIPT_DIR}/scripts/prepare_as_rank_shards.py" \
+      --motion-dir "${AS_SINGLE_SLOT_MOTION_DIR_ABS}" \
+      --object-map "${OMOMO_OBJECT_MAP}" \
+      --output-root "${AS_RANK_SHARD_ROOT_ABS}" \
+      --world-size "${NPROC}")
+    export HOLOSOMA_RANK_LOCAL_MOTION_ROOT
+    export HOLOSOMA_RANK_LOCAL_SHARDING_ENABLED=1
+    export HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK=0
+  else
+    export HOLOSOMA_RANK_LOCAL_SHARDING_ENABLED=0
+  fi
+else
+  export HOLOSOMA_RANK_LOCAL_SHARDING_ENABLED=0
+fi
+
 CONTACT_EXPORT_ROOT=""
 CONTACT_EXPORT_CLIPS_ROOT=""
 if [[ "${AS_CONTACT_AWARE}" == "1" ]]; then
@@ -819,6 +872,7 @@ echo "[INFO] HOLOSOMA_OBJECT_SPAWN_MODE=${HOLOSOMA_OBJECT_SPAWN_MODE}"
 echo "[INFO] HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE=${HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE}"
 echo "[INFO] HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS=${HOLOSOMA_ACTIVATE_OBJECT_CONTACT_SENSORS}"
 echo "[INFO] HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK=${HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK}"
+echo "[INFO] HOLOSOMA_RANK_LOCAL_MOTION_ROOT=${HOLOSOMA_RANK_LOCAL_MOTION_ROOT:-<disabled>}"
 echo "[INFO] HOLOSOMA_REQUIRE_SINGLE_SLOT_OBJECTS=${HOLOSOMA_REQUIRE_SINGLE_SLOT_OBJECTS}"
 if [[ -n "${TEACHER_ACTOR_OBS_HISTORY_LENGTH:-}" ]]; then
   echo "[INFO] teacher_actor_obs_history_length=${TEACHER_ACTOR_OBS_HISTORY_LENGTH}"

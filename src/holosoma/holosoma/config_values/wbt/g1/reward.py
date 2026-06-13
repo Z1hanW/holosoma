@@ -505,48 +505,48 @@ g1_29dof_wbt_reward_w_object_r2s_contact_guidance = RewardManagerCfg(
 
 g1_29dof_wbt_reward_w_object_r2s_rollout_reference_guidance = RewardManagerCfg(
     terms={
-        "teacher_rollout_global_ref_position_error_exp": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:teacher_rollout_global_ref_position_error_exp",
+        "motion_global_ref_position_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_global_ref_position_error_exp",
             params={
                 "sigma": 0.3,
                 "rollout_reference_root": "outputs/clips",
             },
             weight=0.5,
         ),
-        "teacher_rollout_global_ref_orientation_error_exp": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:teacher_rollout_global_ref_orientation_error_exp",
+        "motion_global_ref_orientation_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_global_ref_orientation_error_exp",
             params={
                 "sigma": 0.4,
                 "rollout_reference_root": "outputs/clips",
             },
             weight=0.5,
         ),
-        "teacher_rollout_relative_body_position_error_exp": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:teacher_rollout_relative_body_position_error_exp",
+        "motion_relative_body_position_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_relative_body_position_error_exp",
             params={
                 "sigma": 0.3,
                 "rollout_reference_root": "outputs/clips",
             },
             weight=1.0,
         ),
-        "teacher_rollout_relative_body_orientation_error_exp": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:teacher_rollout_relative_body_orientation_error_exp",
+        "motion_relative_body_orientation_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_relative_body_orientation_error_exp",
             params={
                 "sigma": 0.4,
                 "rollout_reference_root": "outputs/clips",
             },
             weight=1.0,
         ),
-        "teacher_rollout_global_body_lin_vel": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:teacher_rollout_global_body_lin_vel",
+        "motion_global_body_lin_vel": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_global_body_lin_vel",
             params={
                 "sigma": 1.0,
                 "rollout_reference_root": "outputs/clips",
             },
             weight=1.0,
         ),
-        "teacher_rollout_global_body_ang_vel": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:teacher_rollout_global_body_ang_vel",
+        "motion_global_body_ang_vel": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:motion_global_body_ang_vel",
             params={
                 "sigma": 3.14,
                 "rollout_reference_root": "outputs/clips",
@@ -571,16 +571,16 @@ g1_29dof_wbt_reward_w_object_r2s_rollout_reference_guidance = RewardManagerCfg(
             weight=-0.5,
         ),
         "lower_body_undesired_contacts": _lower_body_undesired_contacts_term(),
-        "teacher_rollout_object_global_ref_position_error_exp": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:teacher_rollout_object_global_ref_position_error_exp",
+        "object_global_ref_position_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:object_global_ref_position_error_exp",
             params={
                 "sigma": 0.3,
                 "rollout_reference_root": "outputs/clips",
             },
             weight=1.0,
         ),
-        "teacher_rollout_object_global_ref_orientation_error_exp": RewardTermCfg(
-            func="holosoma.managers.reward.terms.wbt:teacher_rollout_object_global_ref_orientation_error_exp",
+        "object_global_ref_orientation_error_exp": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:object_global_ref_orientation_error_exp",
             params={
                 "sigma": 0.4,
                 "rollout_reference_root": "outputs/clips",

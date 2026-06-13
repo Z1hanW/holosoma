@@ -24,15 +24,18 @@ from holosoma.envs.wbt.wbt_manager import WholeBodyTrackingManager
 from holosoma.managers.command.base import CommandTermBase
 from holosoma.utils.clip_sampling import build_prefix_mask, piecewise_constant_schedule_value, project_group_weights
 from holosoma.utils.path import resolve_data_file_path
+from holosoma.utils.rank_local_shards import resolve_rank_local_motion_path
 from holosoma.utils.rotations import (
     get_euler_xyz,
     normalize_angle,
     quat_apply,
+    quat_apply_broadcast_left,
     quat_conjugate,
     quat_error_magnitude,
     quat_from_euler_xyz,
     quat_inverse,
     quat_mul,
+    quat_mul_broadcast_left,
     quaternion_to_matrix,
     slerp,
     yaw_quat,
@@ -437,6 +440,7 @@ class MotionLoader:
 
         # Resolve the motion file path using importlib.resources
         motion_file = resolve_data_file_path(motion_file)
+        motion_file = resolve_rank_local_motion_path(motion_file)
         motion_path = Path(motion_file)
 
         logger.info(f"Loading motion file: {motion_file}")
@@ -3046,26 +3050,20 @@ class MotionCommand(CommandTermBase):
             robot_ref_pos_w = self.robot_root_pos_w * use_root + self.robot_ref_pos_w * (1 - use_root)
             robot_ref_quat_w = self.robot_root_quat_w * use_root + self.robot_ref_quat_w * (1 - use_root)
 
-            ## 1.1 repeat to match the number of body parts
-            ref_pos_w_repeat = ref_pos_w[:, None, :].repeat(1, len(self.motion_cfg.body_names_to_track), 1)  # type: ignore[arg-type]
-            ref_quat_w_repeat = ref_quat_w[:, None, :].repeat(1, len(self.motion_cfg.body_names_to_track), 1)  # type: ignore[arg-type]
-            robot_ref_pos_w_repeat = robot_ref_pos_w[:, None, :].repeat(1, len(self.motion_cfg.body_names_to_track), 1)  # type: ignore[arg-type]
-            robot_ref_quat_w_repeat = robot_ref_quat_w[:, None, :].repeat(1, len(self.motion_cfg.body_names_to_track), 1)  # type: ignore[arg-type]
-
-            ## 1.2 compute the relative body poses
+            ## 1.1 compute the relative body poses
             delta_quat_w = yaw_quat(
-                quat_mul(robot_ref_quat_w_repeat, quat_inverse(ref_quat_w_repeat, w_last=True), w_last=True),
+                quat_mul(robot_ref_quat_w, quat_inverse(ref_quat_w, w_last=True), w_last=True),
                 w_last=True,
             )
-            ### 1.2.1 body_quat_relative_w
-            self.body_quat_relative_w = quat_mul(delta_quat_w, self.body_quat_w, w_last=True)
-            ### 1.2.2 body_pos_relative_w
-            delta_pos_w_height = ref_pos_w_repeat - robot_ref_pos_w_repeat
+            ### 1.1.1 body_quat_relative_w
+            self.body_quat_relative_w = quat_mul_broadcast_left(delta_quat_w, self.body_quat_w, w_last=True)
+            ### 1.1.2 body_pos_relative_w
+            delta_pos_w_height = ref_pos_w - robot_ref_pos_w
             delta_pos_w_height[..., :2] = 0.0  # adjusting for height differences
             self.body_pos_relative_w = (
-                robot_ref_pos_w_repeat
-                + delta_pos_w_height
-                + quat_apply(delta_quat_w, self.body_pos_w - ref_pos_w_repeat, w_last=True)
+                robot_ref_pos_w[:, None, :]
+                + delta_pos_w_height[:, None, :]
+                + quat_apply_broadcast_left(delta_quat_w, self.body_pos_w - ref_pos_w[:, None, :], w_last=True)
             )
 
         ### 1.3 update the adaptive timesteps sampler

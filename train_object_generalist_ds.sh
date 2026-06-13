@@ -154,6 +154,9 @@ DISABLE_ACTOR_HISTORY=${DISABLE_ACTOR_HISTORY:-True}
 DISABLE_CRITIC_HISTORY=${DISABLE_CRITIC_HISTORY:-True}
 POLICY_HISTORY_LENGTH=${POLICY_HISTORY_LENGTH:-${HISTORY_LENGTH:-}}
 TEACHER_ROLLOUT_REFERENCE_ROOT=${TEACHER_ROLLOUT_REFERENCE_ROOT:-}
+CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE=${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE:-}
+CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS=${CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS:-}
+CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG=${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG:-}
 PERCEPTION_OBJECT_GEOMETRY_MODE_OVERRIDE=""
 if [[ -n "${OBJECT_GEOMETRY_MODE}" ]]; then
   case "$(echo "${OBJECT_GEOMETRY_MODE}" | tr '[:upper:]' '[:lower:]')" in
@@ -2297,6 +2300,15 @@ echo "[INFO] Box tracking reward sigmas object_pos=${OBJECT_POS_SIGMA} object_or
 echo "[INFO] limits_dof_pos weight=${GENERALIST_LIMITS_DOF_POS_WEIGHT}"
 echo "[INFO] Motion default-pose prepend enabled: ${DEFAULT_POSE_PREPEND_ENABLED_FLAG}"
 echo "[INFO] Motion default-pose prepend duration: ${DEFAULT_POSE_PREPEND_DURATION_S}s"
+if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}" ]]; then
+  echo "[INFO] contact_aware_sparse_root_command_mode=${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}"
+fi
+if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS}" ]]; then
+  echo "[INFO] contact_aware_sparse_root_segment_steps=${CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS}"
+fi
+if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG}" ]]; then
+  echo "[INFO] contact_aware_sparse_root_zero_yaw_threshold_deg=${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG}"
+fi
 echo "[INFO] PPO learning rates: actor=${ACTOR_LR} critic=${CRITIC_LR}"
 echo "[INFO] PPO num_learning_epochs=${NUM_LEARNING_EPOCHS}"
 echo "[INFO] PPO num_learning_iterations=${NUM_LEARNING_ITERATIONS}"
@@ -2305,7 +2317,7 @@ echo "[INFO] Clip weighting strategy: ${CLIP_WEIGHTING_STRATEGY}"
 echo "[INFO] Within-clip adaptive timestep sampler: ${USE_ADAPTIVE_TIMESTEPS_SAMPLER}"
 echo "[INFO] freeze_at_timestep_zero_prob=${FREEZE_AT_TIMESTEP_ZERO_PROB}"
 echo "[INFO] Termination defaults: BadTracking full 3D + motion_ends"
-echo "[INFO] REWARD_CONFIG=${REWARD_CONFIG} teacher_rollout_reward=${USE_TEACHER_ROLLOUT_REWARD} offline_contact_guidance=${USE_OFFLINE_CONTACT_GUIDANCE}"
+echo "[INFO] REWARD_CONFIG=${REWARD_CONFIG} rollout_reference_reward=${USE_TEACHER_ROLLOUT_REWARD} offline_contact_guidance=${USE_OFFLINE_CONTACT_GUIDANCE}"
 if [[ -n "${CONTACT_EXPORT_ROOT}" ]]; then
   echo "[INFO] contact_export_root=${CONTACT_EXPORT_ROOT}"
   echo "[INFO] contact_export_clips_root=${CONTACT_EXPORT_CLIPS_ROOT}"
@@ -2370,6 +2382,21 @@ if [[ -n "${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}" ]]; then
     --command.setup-terms.motion-command.params.motion-config.adaptive-sampling-contact-interval-root="${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}"
   )
 fi
+if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}" ]]; then
+  train_cmd+=(
+    --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-command-mode="${CONTACT_AWARE_SPARSE_ROOT_COMMAND_MODE}"
+  )
+fi
+if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS}" ]]; then
+  train_cmd+=(
+    --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-segment-steps="${CONTACT_AWARE_SPARSE_ROOT_SEGMENT_STEPS}"
+  )
+fi
+if [[ -n "${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG}" ]]; then
+  train_cmd+=(
+    --command.setup-terms.motion-command.params.motion-config.contact-aware-sparse-root-zero-yaw-threshold-deg="${CONTACT_AWARE_SPARSE_ROOT_ZERO_YAW_THRESHOLD_DEG}"
+  )
+fi
 if [[ -n "${POLICY_HISTORY_LENGTH}" ]]; then
   train_cmd+=(
     --observation.groups.actor_obs.history-length "${POLICY_HISTORY_LENGTH}"
@@ -2378,33 +2405,33 @@ if [[ -n "${POLICY_HISTORY_LENGTH}" ]]; then
 fi
 if [[ "${USE_TEACHER_ROLLOUT_REWARD}" == "1" ]]; then
   train_cmd+=(
-    --reward.terms.teacher-rollout-global-ref-position-error-exp.weight="${ROOT_POS_W}"
-    --reward.terms.teacher-rollout-global-ref-orientation-error-exp.weight="${ROOT_ORI_W}"
-    --reward.terms.teacher-rollout-relative-body-position-error-exp.weight="${FULL_BODY_POS_W}"
-    --reward.terms.teacher-rollout-relative-body-orientation-error-exp.weight="${FULL_BODY_ORI_W}"
-    --reward.terms.teacher-rollout-global-body-lin-vel.weight="${FULL_BODY_LIN_VEL_W}"
-    --reward.terms.teacher-rollout-global-body-ang-vel.weight="${FULL_BODY_ANG_VEL_W}"
-    --reward.terms.teacher-rollout-object-global-ref-position-error-exp.weight="${OBJECT_POS_W}"
-    --reward.terms.teacher-rollout-object-global-ref-orientation-error-exp.weight="${OBJECT_ORI_W}"
-    --reward.terms.teacher-rollout-global-ref-position-error-exp.params.sigma="${ROOT_POS_SIGMA}"
-    --reward.terms.teacher-rollout-global-ref-orientation-error-exp.params.sigma="${ROOT_ORI_SIGMA}"
-    --reward.terms.teacher-rollout-relative-body-position-error-exp.params.sigma="${FULL_BODY_POS_SIGMA}"
-    --reward.terms.teacher-rollout-relative-body-orientation-error-exp.params.sigma="${FULL_BODY_ORI_SIGMA}"
-    --reward.terms.teacher-rollout-global-body-lin-vel.params.sigma="${FULL_BODY_LIN_VEL_SIGMA}"
-    --reward.terms.teacher-rollout-global-body-ang-vel.params.sigma="${FULL_BODY_ANG_VEL_SIGMA}"
-    --reward.terms.teacher-rollout-object-global-ref-position-error-exp.params.sigma="${OBJECT_POS_SIGMA}"
-    --reward.terms.teacher-rollout-object-global-ref-orientation-error-exp.params.sigma="${OBJECT_ORI_SIGMA}"
+    --reward.terms.motion-global-ref-position-error-exp.weight="${ROOT_POS_W}"
+    --reward.terms.motion-global-ref-orientation-error-exp.weight="${ROOT_ORI_W}"
+    --reward.terms.motion-relative-body-position-error-exp.weight="${FULL_BODY_POS_W}"
+    --reward.terms.motion-relative-body-orientation-error-exp.weight="${FULL_BODY_ORI_W}"
+    --reward.terms.motion-global-body-lin-vel.weight="${FULL_BODY_LIN_VEL_W}"
+    --reward.terms.motion-global-body-ang-vel.weight="${FULL_BODY_ANG_VEL_W}"
+    --reward.terms.object-global-ref-position-error-exp.weight="${OBJECT_POS_W}"
+    --reward.terms.object-global-ref-orientation-error-exp.weight="${OBJECT_ORI_W}"
+    --reward.terms.motion-global-ref-position-error-exp.params.sigma="${ROOT_POS_SIGMA}"
+    --reward.terms.motion-global-ref-orientation-error-exp.params.sigma="${ROOT_ORI_SIGMA}"
+    --reward.terms.motion-relative-body-position-error-exp.params.sigma="${FULL_BODY_POS_SIGMA}"
+    --reward.terms.motion-relative-body-orientation-error-exp.params.sigma="${FULL_BODY_ORI_SIGMA}"
+    --reward.terms.motion-global-body-lin-vel.params.sigma="${FULL_BODY_LIN_VEL_SIGMA}"
+    --reward.terms.motion-global-body-ang-vel.params.sigma="${FULL_BODY_ANG_VEL_SIGMA}"
+    --reward.terms.object-global-ref-position-error-exp.params.sigma="${OBJECT_POS_SIGMA}"
+    --reward.terms.object-global-ref-orientation-error-exp.params.sigma="${OBJECT_ORI_SIGMA}"
   )
   if [[ -n "${TEACHER_ROLLOUT_REFERENCE_ROOT}" ]]; then
     train_cmd+=(
-      --reward.terms.teacher-rollout-global-ref-position-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
-      --reward.terms.teacher-rollout-global-ref-orientation-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
-      --reward.terms.teacher-rollout-relative-body-position-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
-      --reward.terms.teacher-rollout-relative-body-orientation-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
-      --reward.terms.teacher-rollout-global-body-lin-vel.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
-      --reward.terms.teacher-rollout-global-body-ang-vel.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
-      --reward.terms.teacher-rollout-object-global-ref-position-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
-      --reward.terms.teacher-rollout-object-global-ref-orientation-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
+      --reward.terms.motion-global-ref-position-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
+      --reward.terms.motion-global-ref-orientation-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
+      --reward.terms.motion-relative-body-position-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
+      --reward.terms.motion-relative-body-orientation-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
+      --reward.terms.motion-global-body-lin-vel.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
+      --reward.terms.motion-global-body-ang-vel.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
+      --reward.terms.object-global-ref-position-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
+      --reward.terms.object-global-ref-orientation-error-exp.params.rollout-reference-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
       --reward.terms.offline-contact-guidance.params.contact-export-root "${TEACHER_ROLLOUT_REFERENCE_ROOT}"
     )
   fi
@@ -2451,7 +2478,7 @@ if [[ -n "${INIT_AT_RANDOM_EP_LEN}" ]]; then
   train_cmd+=(--algo.config.init_at_random_ep_len="${INIT_AT_RANDOM_EP_LEN}")
 fi
 if [[ "${USE_TEACHER_ROLLOUT_REWARD}" == "1" ]]; then
-  echo "[INFO] Teacher-rollout reward config active; skipping body-contact-reward term overrides."
+  echo "[INFO] Rollout-reference reward config active; skipping body-contact-reward term overrides."
 elif [[ "${USE_OFFLINE_CONTACT_GUIDANCE}" == "1" ]]; then
   echo "[INFO] Offline contact guidance active; skipping coarse body-contact-reward term overrides."
 else

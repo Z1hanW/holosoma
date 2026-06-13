@@ -741,3 +741,73 @@ def quat_rotate_batched(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     c = q_vec * dot * 2.0
 
     return a + b + c
+
+
+@torch_jit_script
+def quat_mul_broadcast_left(a: Tensor, b: Tensor, w_last: bool) -> Tensor:
+    """Multiply one quaternion per batch item with many per-item quaternions.
+
+    Equivalent to ``quat_mul(a[:, None, :].repeat(1, b.shape[1], 1), b, w_last)``.
+    """
+    assert a.dim() == 2
+    assert b.dim() == 3
+    assert a.shape[0] == b.shape[0]
+    assert a.shape[1] == 4
+    assert b.shape[2] == 4
+
+    if w_last:
+        x1 = a[:, 0].unsqueeze(1)
+        y1 = a[:, 1].unsqueeze(1)
+        z1 = a[:, 2].unsqueeze(1)
+        w1 = a[:, 3].unsqueeze(1)
+        x2 = b[..., 0]
+        y2 = b[..., 1]
+        z2 = b[..., 2]
+        w2 = b[..., 3]
+    else:
+        w1 = a[:, 0].unsqueeze(1)
+        x1 = a[:, 1].unsqueeze(1)
+        y1 = a[:, 2].unsqueeze(1)
+        z1 = a[:, 3].unsqueeze(1)
+        w2 = b[..., 0]
+        x2 = b[..., 1]
+        y2 = b[..., 2]
+        z2 = b[..., 3]
+
+    ww = (z1 + x1) * (x2 + y2)
+    yy = (w1 - y1) * (w2 + z2)
+    zz = (w1 + y1) * (w2 - z2)
+    xx = ww + yy + zz
+    qq = 0.5 * (xx + (z1 - x1) * (x2 - y2))
+    w = qq - ww + (z1 - y1) * (y2 - z2)
+    x = qq - xx + (x1 + w1) * (x2 + w2)
+    y = qq - yy + (w1 - x1) * (y2 + z2)
+    z = qq - zz + (z1 + y1) * (w2 - x2)
+
+    if w_last:
+        return torch.stack([x, y, z, w], dim=-1)
+    return torch.stack([w, x, y, z], dim=-1)
+
+
+@torch_jit_script
+def quat_apply_broadcast_left(a: Tensor, b: Tensor, w_last: bool) -> Tensor:
+    """Apply one quaternion per batch item to many per-item vectors.
+
+    Equivalent to ``quat_apply(a[:, None, :].repeat(1, b.shape[1], 1), b, w_last)``.
+    """
+    assert a.dim() == 2
+    assert b.dim() == 3
+    assert a.shape[0] == b.shape[0]
+    assert a.shape[1] == 4
+    assert b.shape[2] == 3
+
+    if w_last:
+        xyz = a[:, None, :3]
+        w = a[:, None, 3:]
+    else:
+        xyz = a[:, None, 1:]
+        w = a[:, None, :1]
+
+    xyz = xyz.expand(-1, b.shape[1], -1)
+    t = xyz.cross(b, dim=-1) * 2
+    return b + w * t + xyz.cross(t, dim=-1)
