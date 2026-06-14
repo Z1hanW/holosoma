@@ -189,6 +189,8 @@ git pull --ff-only $(quote "${GIT_REMOTE}") $(quote "${GIT_BRANCH}")
 chmod +x batch_track.sh cp_as.sh train_as_general.sh train_object_generalist_ds.sh || true
 test -f $(quote "${BOX_CHECKPOINT_REMOTE}")
 test -d $(quote "${REMOTE_REPO}/${LOCAL_TEACHER_BANK_REL}")
+source ./scripts/gpu_launch_defaults.sh
+export PATH="\$(dirname "\${PYTHON_BIN}"):\${PATH}"
 if [[ $(quote "${PREPARE_CP_AS}") == "1" ]]; then
   COPY_KEEP_BANK=1 KEEP_EXPECTED_TOTAL=$(quote "${AS_KEEP_EXPECTED_TOTAL}") OUTPUT_BANK_NAME=$(quote "${AS_OUTPUT_BANK}") bash cp_as.sh
 fi
