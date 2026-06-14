@@ -39,6 +39,7 @@ Useful env:
   GIT_REMOTE=origin
   GIT_BRANCH=main
   CH_BANK_NAME=as_realmesh67000_finalpos_convexsurface51_convexhull
+  RESUME_FROM_BOX=1            initialize student policy from box-button checkpoint
   RESTART=1                    kill existing tmux session with same name
   DRY_RUN=1                    print remote commands only
 EOF
@@ -80,8 +81,26 @@ RESTART=${RESTART:-1}
 DRY_RUN=${DRY_RUN:-0}
 SSH_OPTS=${SSH_OPTS:-"-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"}
 RUN_STAMP=${RUN_STAMP:-$(date +%Y%m%d_%H%M%S)}
-RUN_NAME=${RUN_NAME:-g1_w_object_distill_as_button_solid_ch51_48gpu}
-TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_button_solid_ch51_48gpu_depth}
+RESUME_FROM_BOX=${RESUME_FROM_BOX:-1}
+case "$(echo "${RESUME_FROM_BOX}" | tr '[:upper:]' '[:lower:]')" in
+  1|true|yes|on)
+    RESUME_FROM_BOX=1
+    ;;
+  0|false|no|off|"")
+    RESUME_FROM_BOX=0
+    ;;
+  *)
+    echo "[ERROR] RESUME_FROM_BOX must be a boolean. Got: ${RESUME_FROM_BOX}" >&2
+    exit 2
+    ;;
+esac
+if [[ "${RESUME_FROM_BOX}" == "1" ]]; then
+  RUN_NAME=${RUN_NAME:-g1_w_object_distill_as_button_solid_ch51_48gpu_init_box}
+  TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_button_solid_ch51_48gpu_init_box_depth}
+else
+  RUN_NAME=${RUN_NAME:-g1_w_object_distill_as_button_solid_ch51_48gpu}
+  TRAINING_NAME=${TRAINING_NAME:-g1_29dof_wbt_w_object_distill_as_button_solid_ch51_48gpu_depth}
+fi
 SCHEDULE_NAME=${SCHEDULE_NAME:-as_ch51_sparse_root_ppo_first_contact_drop_button_solid}
 NFS_CH_BANK=${NFS_CH_BANK:-/nfs/zzzihanw/ds_as_data/_distill/${CH_BANK_NAME}.tar}
 
@@ -151,6 +170,7 @@ export CH_BANK_NAME=$(quote "${CH_BANK_NAME}")
 export CORL_SOLID80_BANK_NAME=$(quote "${CH_BANK_NAME}")
 export AS_SUCCESS133_FINAL0P5=1
 export AS_RANK_LOCAL_SHARDS=1
+export RESUME_FROM_BOX=$(quote "${RESUME_FROM_BOX}")
 export OMOMO_EXPECTED_TOTAL=51
 export RESUME_FROM_BOX_EXPECTED_TOTAL=51
 export RUN_NAME=$(quote "${RUN_NAME}")
