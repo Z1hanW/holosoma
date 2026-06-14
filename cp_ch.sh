@@ -24,6 +24,43 @@ if [[ "${PULL_CODE}" == "1" ]]; then
   git pull --ff-only "${GIT_REMOTE}" "${GIT_BRANCH}"
 fi
 
+select_numpy_python3() {
+  local candidates=()
+  if [[ -n "${PYTHON3_BIN:-}" ]]; then
+    candidates+=("${PYTHON3_BIN}")
+  fi
+  if [[ -n "${PYTHON_BIN:-}" ]]; then
+    candidates+=("${PYTHON_BIN}")
+  fi
+  candidates+=(
+    "/home/ubuntu/.holosoma_deps/miniconda3/envs/hssim/bin/python3"
+    "/home/ubuntu/miniconda3/envs/hssim/bin/python3"
+    "/home/ubuntu/miniconda3/envs/sim/bin/python3"
+    "/opt/conda/bin/python3"
+    "$(command -v python3 || true)"
+  )
+
+  local py
+  for py in "${candidates[@]}"; do
+    if [[ -z "${py}" || ! -x "${py}" ]]; then
+      continue
+    fi
+    if "${py}" - <<'PY' >/dev/null 2>&1
+import numpy  # noqa: F401
+PY
+    then
+      export PATH="$(dirname "${py}"):${PATH}"
+      echo "[INFO] Using python3=${py}"
+      return 0
+    fi
+  done
+
+  echo "[ERROR] Could not find a python3 with numpy. Set PYTHON3_BIN to the training-env python." >&2
+  exit 1
+}
+
+select_numpy_python3
+
 export CORL_BANK_NAME="${CORL_BANK_NAME:-${CH_BANK_NAME}}"
 export NFS_CORL_BANK="${NFS_CORL_BANK:-${NFS_CH_BANK}}"
 export LOCAL_BANK_NAME="${LOCAL_BANK_NAME:-${CH_BANK_NAME}}"
@@ -35,6 +72,10 @@ echo "[INFO] LOCAL_BANK_NAME=${LOCAL_BANK_NAME}"
 echo "[INFO] EXPECTED_CLIP_COUNT=${EXPECTED_CLIP_COUNT}"
 
 bash "${SCRIPT_DIR}/cp_corl.sh"
+
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+  exit 0
+fi
 
 python3 - "${SCRIPT_DIR}/data/ds_as_data/${LOCAL_BANK_NAME}" "${EXPECTED_CLIP_COUNT}" <<'PY'
 from __future__ import annotations

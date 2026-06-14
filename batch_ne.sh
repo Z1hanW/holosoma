@@ -223,11 +223,23 @@ EOF
 }
 
 run_prepare() {
+  local pids=()
+  local failed=0
   for node in "${NODE_LIST[@]}"; do
     echo "[INFO] Preparing ${node}"
     prepare_node "${node}" &
+    pids+=("$!")
   done
-  wait
+  local pid
+  for pid in "${pids[@]}"; do
+    if ! wait "${pid}"; then
+      failed=1
+    fi
+  done
+  if (( failed != 0 )); then
+    echo "[ERROR] One or more nodes failed during prepare." >&2
+    exit 1
+  fi
 }
 
 run_launch() {
