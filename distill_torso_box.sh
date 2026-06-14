@@ -45,7 +45,7 @@ if [[ "${TEACHER_CHECKPOINT}" == wandb://* ]]; then
   TEACHER_CACHE_ROOT=${TEACHER_CACHE_ROOT:-"${SCRIPT_DIR}/.teacher_checkpoints"}
   mkdir -p "${TEACHER_CACHE_ROOT}"
   TEACHER_CHECKPOINT=$(
-    TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT}" TEACHER_CACHE_ROOT="${TEACHER_CACHE_ROOT}" python - <<'PY'
+    TEACHER_CHECKPOINT="${TEACHER_CHECKPOINT}" TEACHER_CACHE_ROOT="${TEACHER_CACHE_ROOT}" "${PYTHON_BIN}" - <<'PY'
 from __future__ import annotations
 
 import os
