@@ -185,7 +185,7 @@ export RESUME_FROM_BOX_EXPECTED_TOTAL=51
 export RUN_NAME=$(quote "${RUN_NAME}")
 export TRAINING_NAME=$(quote "${TRAINING_NAME}")
 export SCHEDULE_NAME=$(quote "${SCHEDULE_NAME}")
-export SCHEDULE_NOTES=$(quote "48-GPU AS solid distillation on the 51-clip convex-hull bank. Clips are final-position successes whose retained contact points are all within 1cm of the convex hull surface.")
+export SCHEDULE_NOTES=$(quote "48-GPU AS solid distillation on the 51-clip collision-convex-hull bank. Visual meshes remain real source meshes for depth rendering; collision meshes use convex hulls. Clips are final-position successes whose retained contact points are all within 1cm of the convex hull surface.")
 export PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY:-301989888}
 export PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY:-301989888}
 EOF

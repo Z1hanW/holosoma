@@ -82,6 +82,7 @@ from __future__ import annotations
 
 import json
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 bank = Path(sys.argv[1]).expanduser().resolve()
@@ -102,6 +103,38 @@ for clip_id, entry in sorted(clips.items()):
         urdf = Path(str(entry.get("object_urdf_path", "")).strip())
         if not urdf.is_file():
             missing.append(f"{clip_id}: missing object URDF {urdf}")
+        else:
+            root = ET.parse(urdf).getroot()
+            visual_meshes = []
+            collision_meshes = []
+            for mesh_tag in root.findall(".//visual//mesh"):
+                raw = str(mesh_tag.get("filename", "")).strip()
+                mesh = Path(raw)
+                if not mesh.is_absolute():
+                    mesh = (urdf.parent / mesh).resolve()
+                visual_meshes.append(mesh)
+            for mesh_tag in root.findall(".//collision//mesh"):
+                raw = str(mesh_tag.get("filename", "")).strip()
+                mesh = Path(raw)
+                if not mesh.is_absolute():
+                    mesh = (urdf.parent / mesh).resolve()
+                collision_meshes.append(mesh)
+            if not visual_meshes:
+                missing.append(f"{clip_id}: URDF has no visual mesh")
+            if not collision_meshes:
+                missing.append(f"{clip_id}: URDF has no collision mesh")
+            for mesh in visual_meshes:
+                if not mesh.is_file():
+                    missing.append(f"{clip_id}: missing visual mesh {mesh}")
+                if "objects_visual_real" not in str(mesh):
+                    missing.append(f"{clip_id}: visual mesh is not real mesh copy {mesh}")
+            for mesh in collision_meshes:
+                if not mesh.is_file():
+                    missing.append(f"{clip_id}: missing collision mesh {mesh}")
+                if "objects_convex_hull" not in str(mesh):
+                    missing.append(f"{clip_id}: collision mesh is not convex hull {mesh}")
+            if {str(mesh) for mesh in visual_meshes} == {str(mesh) for mesh in collision_meshes}:
+                missing.append(f"{clip_id}: visual and collision meshes should differ")
 
 contact_root = bank / "contact_export_from_teacher_success133_final0p5"
 clips_root = contact_root / "clips" if (contact_root / "clips").is_dir() else contact_root
