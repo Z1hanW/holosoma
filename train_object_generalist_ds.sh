@@ -138,6 +138,25 @@ fi
 PER_GPU_ENVS=${PER_GPU_ENVS:-4096}
 NUM_ENVS=${NUM_ENVS:-$((NPROC * PER_GPU_ENVS))}
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
+NNODES=${NNODES:-1}
+NODE_RANK=${NODE_RANK:-0}
+MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
+if [[ ! "${NNODES}" =~ ^[0-9]+$ || "${NNODES}" == "0" ]]; then
+  echo "[ERROR] NNODES must be a positive integer. Got: ${NNODES}" >&2
+  exit 2
+fi
+if [[ ! "${NODE_RANK}" =~ ^[0-9]+$ ]]; then
+  echo "[ERROR] NODE_RANK must be a non-negative integer. Got: ${NODE_RANK}" >&2
+  exit 2
+fi
+if (( NODE_RANK >= NNODES )); then
+  echo "[ERROR] NODE_RANK=${NODE_RANK} must be smaller than NNODES=${NNODES}." >&2
+  exit 2
+fi
+if (( NNODES > 1 )) && [[ -z "${MASTER_ADDR}" ]]; then
+  echo "[ERROR] MASTER_ADDR is required for multi-node torchrun." >&2
+  exit 2
+fi
 NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-40000}
 PHYSX_GPU_MAX_RIGID_CONTACT_COUNT=${PHYSX_GPU_MAX_RIGID_CONTACT_COUNT:-33554432}
 PHYSX_GPU_MAX_RIGID_PATCH_COUNT=${PHYSX_GPU_MAX_RIGID_PATCH_COUNT:-4194304}
@@ -2328,7 +2347,8 @@ if [[ -n "${ADAPTIVE_SAMPLING_CONTACT_INTERVAL_ROOT}" ]]; then
 fi
 echo "[INFO] GPU_SELECTION=all-visible"
 echo "[INFO] AVAILABLE_GPU_COUNT=${AVAILABLE_GPU_COUNT}"
-echo "[INFO] NPROC=${NPROC} PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
+echo "[INFO] NPROC=${NPROC} NNODES=${NNODES} NODE_RANK=${NODE_RANK} MASTER_ADDR=${MASTER_ADDR} MASTER_PORT=${MASTER_PORT}"
+echo "[INFO] PER_GPU_ENVS=${PER_GPU_ENVS} NUM_ENVS=${NUM_ENVS}"
 echo "[INFO] TRAINING_SEED=${TRAINING_SEED:-<config-default>} RANDOMIZATION=${RANDOMIZATION_PRESET:-<exp-default>} INIT_AT_RANDOM_EP_LEN=${INIT_AT_RANDOM_EP_LEN:-<algo-default>}"
 echo "[INFO] actor_history_disabled=${DISABLE_ACTOR_HISTORY} critic_history_disabled=${DISABLE_CRITIC_HISTORY} policy_history_length=${POLICY_HISTORY_LENGTH:-<config-default>}"
 if [[ -n "${TEACHER_ROLLOUT_REFERENCE_ROOT}" ]]; then
@@ -2496,7 +2516,11 @@ fi
 if [[ "${DEBUG_MODE}" == "replay" || "${DEBUG_MODE}" == "toy" ]]; then
   train_cmd=("${PYTHON_BIN}" "${train_cmd[@]}")
 else
-  train_cmd=(torchrun --nproc_per_node="${NPROC}" --master_port="${MASTER_PORT}" "${train_cmd[@]}")
+  torchrun_args=(torchrun --nproc_per_node="${NPROC}" --master_port="${MASTER_PORT}")
+  if (( NNODES > 1 )); then
+    torchrun_args+=(--nnodes="${NNODES}" --node_rank="${NODE_RANK}" --master_addr="${MASTER_ADDR}")
+  fi
+  train_cmd=("${torchrun_args[@]}" "${train_cmd[@]}")
 fi
 if [[ "${DEBUG_MODE}" == "replay" ]]; then
   train_cmd+=(--training.debug=True)
