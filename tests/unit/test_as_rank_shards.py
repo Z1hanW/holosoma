@@ -189,3 +189,25 @@ def test_rank_local_path_resolver_uses_local_rank(monkeypatch, tmp_path: Path) -
 
     assert resolve_rank_local_motion_path(base_motion) == str(rank_dir)
     assert resolve_rank_local_object_map(base_motion / "_clip_object_urdf_map.json") == str(object_map)
+
+
+def test_rank_local_path_resolver_uses_global_rank_for_multinode(monkeypatch, tmp_path: Path) -> None:
+    from holosoma.utils.rank_local_shards import resolve_rank_local_motion_path, resolve_rank_local_object_map
+
+    root = tmp_path / "rank_shards" / "ws48"
+    rank_dir = root / "rank_17"
+    rank_dir.mkdir(parents=True)
+    object_map = rank_dir / "_clip_object_urdf_map.json"
+    object_map.write_text('{"clips": {}}', encoding="utf-8")
+    base_motion = tmp_path / "motion"
+    base_motion.mkdir()
+
+    monkeypatch.setenv("HOLOSOMA_RANK_LOCAL_MOTION_ROOT", str(root))
+    monkeypatch.setenv("HOLOSOMA_RANK_LOCAL_SHARDING_ENABLED", "1")
+    monkeypatch.setenv("WORLD_SIZE", "48")
+    monkeypatch.setenv("LOCAL_WORLD_SIZE", "8")
+    monkeypatch.setenv("RANK", "17")
+    monkeypatch.setenv("LOCAL_RANK", "1")
+
+    assert resolve_rank_local_motion_path(base_motion) == str(rank_dir)
+    assert resolve_rank_local_object_map(base_motion / "_clip_object_urdf_map.json") == str(object_map)

@@ -103,19 +103,33 @@ if ! [[ "${NPROC}" =~ ^[0-9]+$ ]] || (( NPROC < 1 )); then
   echo "NPROC must be a positive integer. Got: ${NPROC}" >&2
   exit 1
 fi
+NNODES=${NNODES:-1}
+NODE_RANK=${NODE_RANK:-0}
+MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
+MAX_RESTARTS=${MAX_RESTARTS:-0}
+TORCH_DIST_TIMEOUT_SEC=${TORCH_DIST_TIMEOUT_SEC:-1800}
+if ! [[ "${NNODES}" =~ ^[0-9]+$ ]] || (( NNODES < 1 )); then
+  echo "NNODES must be a positive integer. Got: ${NNODES}" >&2
+  exit 1
+fi
+if ! [[ "${NODE_RANK}" =~ ^[0-9]+$ ]] || (( NODE_RANK < 0 || NODE_RANK >= NNODES )); then
+  echo "NODE_RANK must be an integer in [0, NNODES). Got NODE_RANK=${NODE_RANK}, NNODES=${NNODES}." >&2
+  exit 1
+fi
+GLOBAL_WORLD_SIZE=$((NPROC * NNODES))
 
 # In distill launchers, NUM_ENVS/PER_GPU_ENVS means envs per GPU. train_agent.py
 # expects a global all-rank total and divides by WORLD_SIZE internally.
 if [[ -n "${TOTAL_NUM_ENVS:-}" ]]; then
-  if ! [[ "${TOTAL_NUM_ENVS}" =~ ^[0-9]+$ ]] || (( TOTAL_NUM_ENVS < NPROC )); then
-    echo "TOTAL_NUM_ENVS must be an integer >= NPROC. Got TOTAL_NUM_ENVS=${TOTAL_NUM_ENVS}, NPROC=${NPROC}." >&2
+  if ! [[ "${TOTAL_NUM_ENVS}" =~ ^[0-9]+$ ]] || (( TOTAL_NUM_ENVS < GLOBAL_WORLD_SIZE )); then
+    echo "TOTAL_NUM_ENVS must be an integer >= global world size. Got TOTAL_NUM_ENVS=${TOTAL_NUM_ENVS}, world_size=${GLOBAL_WORLD_SIZE}." >&2
     exit 1
   fi
-  if (( TOTAL_NUM_ENVS % NPROC != 0 )); then
-    echo "TOTAL_NUM_ENVS must be divisible by NPROC. Got TOTAL_NUM_ENVS=${TOTAL_NUM_ENVS}, NPROC=${NPROC}." >&2
+  if (( TOTAL_NUM_ENVS % GLOBAL_WORLD_SIZE != 0 )); then
+    echo "TOTAL_NUM_ENVS must be divisible by global world size. Got TOTAL_NUM_ENVS=${TOTAL_NUM_ENVS}, world_size=${GLOBAL_WORLD_SIZE}." >&2
     exit 1
   fi
-  PER_GPU_ENVS=$((TOTAL_NUM_ENVS / NPROC))
+  PER_GPU_ENVS=$((TOTAL_NUM_ENVS / GLOBAL_WORLD_SIZE))
   NUM_ENVS="${TOTAL_NUM_ENVS}"
 else
   PER_GPU_ENVS=${PER_GPU_ENVS:-${NUM_ENVS:-4096}}
@@ -123,7 +137,7 @@ else
     echo "NUM_ENVS/PER_GPU_ENVS must be a positive per-GPU env count. Got: ${PER_GPU_ENVS:-<empty>}." >&2
     exit 1
   fi
-  NUM_ENVS=$((PER_GPU_ENVS * NPROC))
+  NUM_ENVS=$((PER_GPU_ENVS * GLOBAL_WORLD_SIZE))
 fi
 
 # Sim2real default: sparse root-command distill without clip_phase in student torso observation.
@@ -148,12 +162,6 @@ if [[ "${NUM_ENVS}" -lt "${NPROC}" ]]; then
   echo "NUM_ENVS must be >= NPROC. Got NUM_ENVS=${NUM_ENVS}, NPROC=${NPROC}." >&2
   exit 1
 fi
-
-NNODES=${NNODES:-1}
-NODE_RANK=${NODE_RANK:-0}
-MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
-MAX_RESTARTS=${MAX_RESTARTS:-0}
-TORCH_DIST_TIMEOUT_SEC=${TORCH_DIST_TIMEOUT_SEC:-1800}
 
 MASTER_PORT=${MASTER_PORT:-$((29500 + RANDOM % 1000))}
 NUM_LEARNING_ITERATIONS=${NUM_LEARNING_ITERATIONS:-40000}
@@ -257,7 +265,7 @@ if [[ -n "${TEACHER_ACTION_MIX_RATIO_START}" || -n "${TEACHER_ACTION_MIX_RATIO_E
   echo "[INFO] teacher_action_mix_schedule=${TEACHER_ACTION_MIX_RATIO_START}->${TEACHER_ACTION_MIX_RATIO_END} end_iter=${TEACHER_ACTION_MIX_RATIO_END_ITERATION}"
 fi
 echo "[INFO] ppo_start_epoch=${PPO_START_EPOCH} dagger_end_epoch=${DAGGER_END_EPOCH}"
-echo "[INFO] total_envs=${NUM_ENVS} world_size=${NPROC} per_gpu_envs=${PER_GPU_ENVS}"
+echo "[INFO] total_envs=${NUM_ENVS} nnodes=${NNODES} nproc_per_node=${NPROC} global_world_size=${GLOBAL_WORLD_SIZE} per_gpu_envs=${PER_GPU_ENVS}"
 echo "[INFO] init_noise_std=${INIT_NOISE_STD} actor_min_noise_std=${ACTOR_MIN_NOISE_STD} entropy_coef=${ENTROPY_COEF}"
 echo "[INFO] physx_gpu_buffers found_lost_pairs=${PHYSX_GPU_FOUND_LOST_PAIRS_CAPACITY} found_lost_aggregate_pairs=${PHYSX_GPU_FOUND_LOST_AGGREGATE_PAIRS_CAPACITY} total_aggregate_pairs=${PHYSX_GPU_TOTAL_AGGREGATE_PAIRS_CAPACITY} collision_stack=${PHYSX_GPU_COLLISION_STACK_SIZE}"
 echo "[INFO] dagger_match_std=${DAGGER_MATCH_STD}"

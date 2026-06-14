@@ -448,6 +448,18 @@ if ! [[ "${NPROC}" =~ ^[0-9]+$ ]] || (( NPROC < 1 )); then
   echo "[ERROR] NPROC must be a positive integer. Got: ${NPROC}" >&2
   exit 1
 fi
+NNODES=${NNODES:-1}
+NODE_RANK=${NODE_RANK:-0}
+MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
+if ! [[ "${NNODES}" =~ ^[0-9]+$ ]] || (( NNODES < 1 )); then
+  echo "[ERROR] NNODES must be a positive integer. Got: ${NNODES}" >&2
+  exit 1
+fi
+if ! [[ "${NODE_RANK}" =~ ^[0-9]+$ ]] || (( NODE_RANK < 0 || NODE_RANK >= NNODES )); then
+  echo "[ERROR] NODE_RANK must be an integer in [0, NNODES). Got NODE_RANK=${NODE_RANK} NNODES=${NNODES}" >&2
+  exit 1
+fi
+GLOBAL_WORLD_SIZE=$((NPROC * NNODES))
 DEFAULT_ENVS_PER_GPU=${DEFAULT_ENVS_PER_GPU:-4096}
 # In this launcher, NUM_ENVS means envs per GPU. train_agent.py expects a global
 # all-rank total and divides by WORLD_SIZE, so we multiply once just before launch.
@@ -1400,15 +1412,15 @@ if [[ "${SHOO7SR1_NEAR03_DEBUG}" == "1" ]]; then
 fi
 
 if [[ "${TOTAL_NUM_ENVS_EXPLICIT}" -eq 1 ]]; then
-  if ! [[ "${TOTAL_NUM_ENVS}" =~ ^[0-9]+$ ]] || (( TOTAL_NUM_ENVS < NPROC )); then
-    echo "[ERROR] TOTAL_NUM_ENVS must be an integer >= NPROC. Got TOTAL_NUM_ENVS=${TOTAL_NUM_ENVS:-<empty>} NPROC=${NPROC}" >&2
+  if ! [[ "${TOTAL_NUM_ENVS}" =~ ^[0-9]+$ ]] || (( TOTAL_NUM_ENVS < GLOBAL_WORLD_SIZE )); then
+    echo "[ERROR] TOTAL_NUM_ENVS must be an integer >= global world size. Got TOTAL_NUM_ENVS=${TOTAL_NUM_ENVS:-<empty>} world_size=${GLOBAL_WORLD_SIZE}" >&2
     exit 1
   fi
-  if (( TOTAL_NUM_ENVS % NPROC != 0 )); then
-    echo "[ERROR] TOTAL_NUM_ENVS must be divisible by NPROC so per-GPU envs are exact. Got TOTAL_NUM_ENVS=${TOTAL_NUM_ENVS} NPROC=${NPROC}" >&2
+  if (( TOTAL_NUM_ENVS % GLOBAL_WORLD_SIZE != 0 )); then
+    echo "[ERROR] TOTAL_NUM_ENVS must be divisible by global world size so per-GPU envs are exact. Got TOTAL_NUM_ENVS=${TOTAL_NUM_ENVS} world_size=${GLOBAL_WORLD_SIZE}" >&2
     exit 1
   fi
-  PER_GPU_ENVS=$((TOTAL_NUM_ENVS / NPROC))
+  PER_GPU_ENVS=$((TOTAL_NUM_ENVS / GLOBAL_WORLD_SIZE))
   NUM_ENVS="${TOTAL_NUM_ENVS}"
 else
   PER_GPU_ENVS="${NUM_ENVS}"
@@ -1416,7 +1428,7 @@ else
     echo "[ERROR] NUM_ENVS/PER_GPU_ENVS must be a positive per-GPU env count. Got: ${PER_GPU_ENVS:-<empty>}" >&2
     exit 1
   fi
-  NUM_ENVS=$((PER_GPU_ENVS * NPROC))
+  NUM_ENVS=$((PER_GPU_ENVS * GLOBAL_WORLD_SIZE))
 fi
 
 echo "[INFO] teacher_checkpoint=${TEACHER_CHECKPOINT}"
@@ -1471,7 +1483,7 @@ if [[ -n "${OBJECT_GEOMETRY_MODE_NORM}" ]]; then
 else
   echo "[INFO] object_geometry_mode=<default>"
 fi
-echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nproc=${NPROC} per_gpu_envs=${PER_GPU_ENVS} total_num_envs=${NUM_ENVS}"
+echo "[INFO] cuda_visible_devices=${CUDA_VISIBLE_DEVICES} nnodes=${NNODES} node_rank=${NODE_RANK} nproc=${NPROC} global_world_size=${GLOBAL_WORLD_SIZE} per_gpu_envs=${PER_GPU_ENVS} total_num_envs=${NUM_ENVS}"
 echo "[INFO] data_mode=${DATA_MODE}"
 echo "[INFO] tracker_profile=${TRACKER_PROFILE}"
 echo "[INFO] root_command_mode=${ROOT_COMMAND_MODE}"
@@ -1715,6 +1727,10 @@ exec env \
   TRAINING_NAME="${TRAINING_NAME}" \
   TRAINING_PROJECT="${TRAINING_PROJECT}" \
   CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" \
+  NNODES="${NNODES}" \
+  NODE_RANK="${NODE_RANK}" \
+  MASTER_ADDR="${MASTER_ADDR}" \
+  MASTER_PORT="${MASTER_PORT:-}" \
   NPROC="${NPROC}" \
   PER_GPU_ENVS="${PER_GPU_ENVS}" \
   TOTAL_NUM_ENVS="${NUM_ENVS}" \

@@ -29,9 +29,27 @@ def current_rank_local_shard_dir() -> Path | None:
     if not rank_local_sharding_enabled():
         return None
 
-    rank_raw = os.environ.get("LOCAL_RANK", "")
-    if rank_raw == "":
-        rank_raw = os.environ.get("RANK", "0")
+    global_rank_raw = os.environ.get("RANK", "")
+    local_rank_raw = os.environ.get("LOCAL_RANK", "")
+    world_size_raw = os.environ.get("WORLD_SIZE", "1")
+    local_world_size_raw = os.environ.get("LOCAL_WORLD_SIZE", "")
+    try:
+        world_size = int(world_size_raw or "1")
+    except ValueError:
+        world_size = 1
+    try:
+        local_world_size = int(local_world_size_raw or "0")
+    except ValueError:
+        local_world_size = 0
+
+    # Multi-node torchrun sets RANK to the global rank and LOCAL_RANK to the
+    # node-local GPU index. Rank-local shards are generated for the global world.
+    if global_rank_raw and local_world_size > 0 and world_size > local_world_size:
+        rank_raw = global_rank_raw
+    elif global_rank_raw and local_world_size == 0 and world_size > 1:
+        rank_raw = global_rank_raw
+    else:
+        rank_raw = local_rank_raw or global_rank_raw or "0"
     try:
         rank = int(rank_raw)
     except ValueError as exc:

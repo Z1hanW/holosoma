@@ -627,11 +627,17 @@ if as_flag_enabled "${AS_RANK_LOCAL_SHARDS}"; then
     echo "[ERROR] NPROC must be a positive integer. Got: ${NPROC}" >&2
     exit 1
   fi
+  AS_NNODES="${NNODES:-1}"
+  if ! [[ "${AS_NNODES}" =~ ^[0-9]+$ ]] || (( AS_NNODES < 1 )); then
+    echo "[ERROR] NNODES must be a positive integer when AS_RANK_LOCAL_SHARDS is enabled. Got: ${AS_NNODES}" >&2
+    exit 1
+  fi
+  AS_GLOBAL_WORLD_SIZE=$((NPROC * AS_NNODES))
   export CUDA_VISIBLE_DEVICES
   export NPROC
 
-  if (( NPROC > 1 )); then
-    AS_RANK_SHARD_ROOT=${AS_RANK_SHARD_ROOT:-"${AS_SINGLE_SLOT_MOTION_DIR_ABS}/_rank_shards/ws${NPROC}"}
+  if (( AS_GLOBAL_WORLD_SIZE > 1 )); then
+    AS_RANK_SHARD_ROOT=${AS_RANK_SHARD_ROOT:-"${AS_SINGLE_SLOT_MOTION_DIR_ABS}/_rank_shards/ws${AS_GLOBAL_WORLD_SIZE}"}
     AS_RANK_SHARD_ROOT_ABS=$(realpath -m "${AS_RANK_SHARD_ROOT}")
     case "${AS_RANK_SHARD_ROOT_ABS}" in
       "${LOCAL_DATA_ROOT}"|"${LOCAL_DATA_ROOT}"/*)
@@ -646,7 +652,7 @@ if as_flag_enabled "${AS_RANK_LOCAL_SHARDS}"; then
       --motion-dir "${AS_SINGLE_SLOT_MOTION_DIR_ABS}" \
       --object-map "${OMOMO_OBJECT_MAP}" \
       --output-root "${AS_RANK_SHARD_ROOT_ABS}" \
-      --world-size "${NPROC}")
+      --world-size "${AS_GLOBAL_WORLD_SIZE}")
     export HOLOSOMA_RANK_LOCAL_MOTION_ROOT
     export HOLOSOMA_RANK_LOCAL_SHARDING_ENABLED=1
     export HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK=0
