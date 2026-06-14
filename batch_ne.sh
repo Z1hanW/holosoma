@@ -139,6 +139,8 @@ launch_node() {
   local env_exports
   env_exports=$(cat <<EOF
 export CUDA_VISIBLE_DEVICES=$(quote "${CUDA_VISIBLE_DEVICES}")
+export OMNI_KIT_ACCEPT_EULA=${OMNI_KIT_ACCEPT_EULA:-YES}
+export ACCEPT_EULA=${ACCEPT_EULA:-Y}
 export NPROC=$(quote "${NPROC}")
 export NNODES=$(quote "${NNODES}")
 export NODE_RANK=$(quote "${node_rank}")
