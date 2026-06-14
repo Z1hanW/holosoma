@@ -20,13 +20,8 @@ SIM_ENV_BIN=/home/ubuntu/miniconda3/envs/sim/bin
 if ! command -v torchrun >/dev/null 2>&1 && [[ -x "${SIM_ENV_BIN}/torchrun" ]]; then
   export PATH="${SIM_ENV_BIN}:${PATH}"
 fi
-if [[ -x "${SIM_ENV_BIN}/python" ]]; then
-  DEFAULT_PYTHON_BIN="${SIM_ENV_BIN}/python"
-else
-  DEFAULT_PYTHON_BIN="$(command -v python)"
-fi
-PYTHON_BIN=${PYTHON_BIN:-"${DEFAULT_PYTHON_BIN}"}
 source "${SCRIPT_DIR}/scripts/gpu_launch_defaults.sh"
+export PATH="$(dirname "${PYTHON_BIN}"):${PATH}"
 
 CUDA_VISIBLE_DEVICES="$(default_cuda_visible_devices_all "${CUDA_VISIBLE_DEVICES:-}")"
 export CUDA_VISIBLE_DEVICES

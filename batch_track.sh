@@ -299,6 +299,8 @@ EOF
   cmd=$(cat <<EOF
 set -euo pipefail
 cd $(quote "${REMOTE_REPO}")
+git fetch $(quote "${GIT_REMOTE}") $(quote "${GIT_BRANCH}")
+git pull --ff-only $(quote "${GIT_REMOTE}") $(quote "${GIT_BRANCH}")
 mkdir -p $(quote "${REMOTE_REPO}/${LOG_DIR}")
 if tmux has-session -t $(quote "${SESSION}") 2>/dev/null; then
   if [[ $(quote "${RESTART}") == "1" ]]; then
