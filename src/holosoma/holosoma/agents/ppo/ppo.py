@@ -2317,7 +2317,51 @@ class PPO(BaseAlgo):
         actor_state = loaded_dict.get("actor_model_state_dict")
         if not isinstance(actor_state, dict):
             raise KeyError(f"Checkpoint does not contain actor_model_state_dict: {ckpt_path}")
-        self.actor.load_state_dict(actor_state)
+
+        current_actor_state = self.actor.state_dict()
+        compatible_actor_state = {}
+        unexpected_keys = []
+        mismatched_shapes = []
+        non_tensor_keys = []
+        for key, value in actor_state.items():
+            current_value = current_actor_state.get(key)
+            if current_value is None:
+                unexpected_keys.append(key)
+                continue
+            if not isinstance(value, torch.Tensor) or not isinstance(current_value, torch.Tensor):
+                non_tensor_keys.append(key)
+                continue
+            if value.shape != current_value.shape:
+                mismatched_shapes.append((key, tuple(value.shape), tuple(current_value.shape)))
+                continue
+            compatible_actor_state[key] = value
+
+        if not compatible_actor_state:
+            raise RuntimeError(f"No compatible actor tensors found in policy init checkpoint: {ckpt_path}")
+
+        current_actor_state.update(compatible_actor_state)
+        self.actor.load_state_dict(current_actor_state)
+
+        if unexpected_keys or mismatched_shapes or non_tensor_keys:
+            logger.warning(
+                "Policy init loaded {}/{} actor tensors from {}; skipped {} unexpected key(s), "
+                "{} shape mismatch(es), and {} non-tensor key(s).",
+                len(compatible_actor_state),
+                len(actor_state),
+                ckpt_path,
+                len(unexpected_keys),
+                len(mismatched_shapes),
+                len(non_tensor_keys),
+            )
+            if mismatched_shapes:
+                preview = ", ".join(
+                    f"{key}: checkpoint{checkpoint_shape}->current{current_shape}"
+                    for key, checkpoint_shape, current_shape in mismatched_shapes[:5]
+                )
+                logger.warning("Policy init skipped shape mismatches: {}", preview)
+            if unexpected_keys:
+                logger.warning("Policy init skipped unexpected keys: {}", ", ".join(unexpected_keys[:8]))
+
         checkpoint_iter = loaded_dict.get("iter", loaded_dict.get("iteration", "<unknown>"))
         logger.info(
             "Loaded actor policy parameters from {}; ignored checkpoint iteration={}, critic, optimizers, "
