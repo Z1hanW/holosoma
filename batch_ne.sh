@@ -40,6 +40,8 @@ Useful env:
   GIT_BRANCH=main
   CH_BANK_NAME=as_realmesh67000_finalpos_convexsurface51_convexhull
   RESUME_FROM_BOX=1            initialize student policy from box-button checkpoint
+  BOX_POLICY_INIT_REF=<ckpt>   default box policy initializer for RESUME_FROM_BOX=1
+  BOX_POLICY_INIT_CACHE_ROOT=~/.cache/holosoma/checkpoints
   RESTART=1                    kill existing tmux session with same name
   DRY_RUN=1                    print remote commands only
 EOF
@@ -82,6 +84,11 @@ DRY_RUN=${DRY_RUN:-0}
 SSH_OPTS=${SSH_OPTS:-"-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"}
 RUN_STAMP=${RUN_STAMP:-$(date +%Y%m%d_%H%M%S)}
 RESUME_FROM_BOX=${RESUME_FROM_BOX:-1}
+DEFAULT_BOX_RESUME_RUN=${DEFAULT_BOX_RESUME_RUN:-https://wandb.ai/zihanw22/boxer/runs/d9m3z369-recovered}
+DEFAULT_BOX_RESUME_MODEL_FILE=${DEFAULT_BOX_RESUME_MODEL_FILE:-model_22000.pt}
+DEFAULT_BOX_RESUME_CHECKPOINT=${DEFAULT_BOX_RESUME_CHECKPOINT:-${DEFAULT_BOX_RESUME_RUN}/files/${DEFAULT_BOX_RESUME_MODEL_FILE}}
+BOX_POLICY_INIT_REF=${BOX_POLICY_INIT_REF:-${BOX_RESUME_CKPT:-${RESUME_FROM_BOX_CKPT:-${DEFAULT_BOX_RESUME_CHECKPOINT}}}}
+BOX_POLICY_INIT_CACHE_ROOT=${BOX_POLICY_INIT_CACHE_ROOT:-/home/ubuntu/.cache/holosoma/checkpoints}
 case "$(echo "${RESUME_FROM_BOX}" | tr '[:upper:]' '[:lower:]')" in
   1|true|yes|on)
     RESUME_FROM_BOX=1
@@ -171,6 +178,8 @@ export CORL_SOLID80_BANK_NAME=$(quote "${CH_BANK_NAME}")
 export AS_SUCCESS133_FINAL0P5=1
 export AS_RANK_LOCAL_SHARDS=1
 export RESUME_FROM_BOX=$(quote "${RESUME_FROM_BOX}")
+export BOX_POLICY_INIT_REF=$(quote "${BOX_POLICY_INIT_REF}")
+export BOX_POLICY_INIT_CACHE_ROOT=$(quote "${BOX_POLICY_INIT_CACHE_ROOT}")
 export OMOMO_EXPECTED_TOTAL=51
 export RESUME_FROM_BOX_EXPECTED_TOTAL=51
 export RUN_NAME=$(quote "${RUN_NAME}")
@@ -187,6 +196,100 @@ set -euo pipefail
 cd $(quote "${REMOTE_REPO}")
 mkdir -p $(quote "${REMOTE_REPO}/${LOG_DIR}")
 ${env_exports}
+source ./scripts/gpu_launch_defaults.sh
+if [[ "\${RESUME_FROM_BOX}" == "1" ]]; then
+  BOX_RESUME_CKPT="\$("\${PYTHON_BIN}" - "\${BOX_POLICY_INIT_REF}" "\${BOX_POLICY_INIT_CACHE_ROOT}" <<'PY'
+from __future__ import annotations
+
+import contextlib
+import re
+import sys
+from pathlib import Path
+
+import torch
+
+
+def parse_wandb_ref(ref: str) -> tuple[str, str]:
+    if ref.startswith("https://wandb.ai/"):
+        clean = ref.split("?", 1)[0]
+        parts = clean.removeprefix("https://wandb.ai/").split("/")
+        if len(parts) < 6 or parts[2] != "runs" or parts[4] != "files":
+            raise SystemExit(f"[ERROR] W&B checkpoint URL must include /runs/<id>/files/<model.pt>: {ref}")
+        entity, project, run_id = parts[0], parts[1], parts[3]
+        file_name = "/".join(parts[5:])
+        return f"{entity}/{project}/{run_id}", file_name
+
+    if ref.startswith("wandb://"):
+        parts = ref.removeprefix("wandb://").split("/")
+        if len(parts) >= 5 and parts[2] == "runs":
+            entity, project, run_id = parts[0], parts[1], parts[3]
+            file_name = "/".join(parts[4:])
+        elif len(parts) >= 4:
+            entity, project, run_id = parts[0], parts[1], parts[2]
+            file_name = "/".join(parts[3:])
+        else:
+            raise SystemExit(f"[ERROR] W&B checkpoint URI must include a model .pt file: {ref}")
+        return f"{entity}/{project}/{run_id}", file_name
+
+    raise ValueError("not a W&B reference")
+
+
+def validate_checkpoint(path: Path) -> None:
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    try:
+        torch.load(path, map_location="cpu")
+    except Exception as exc:
+        raise RuntimeError(f"checkpoint validation failed for {path}: {exc}") from exc
+
+
+ref = sys.argv[1]
+cache_root = Path(sys.argv[2]).expanduser().resolve()
+
+try:
+    run_path, file_name = parse_wandb_ref(ref)
+except ValueError:
+    local_path = Path(ref).expanduser().resolve()
+    validate_checkpoint(local_path)
+    print(local_path)
+    raise SystemExit(0)
+
+if not file_name.endswith(".pt"):
+    raise SystemExit(f"[ERROR] Expected a .pt checkpoint, got: {file_name}")
+
+safe_run = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_path)
+cache_dir = cache_root / safe_run
+cache_dir.mkdir(parents=True, exist_ok=True)
+target = cache_dir / Path(file_name).name
+
+try:
+    validate_checkpoint(target)
+except Exception:
+    target.unlink(missing_ok=True)
+    import wandb
+
+    api = wandb.Api(timeout=60)
+    run = api.run(run_path)
+    with contextlib.redirect_stdout(sys.stderr):
+        downloaded = run.file(file_name).download(root=str(cache_dir), replace=True)
+    downloaded_path = Path(downloaded.name)
+    if not downloaded_path.is_absolute():
+        downloaded_path = (Path.cwd() / downloaded_path).resolve()
+    else:
+        downloaded_path = downloaded_path.resolve()
+    if downloaded_path != target:
+        target.unlink(missing_ok=True)
+        downloaded_path.replace(target)
+    validate_checkpoint(target)
+
+print(target)
+PY
+)"
+  export BOX_RESUME_CKPT
+  export RESUME_FROM_BOX_CKPT="\${BOX_RESUME_CKPT}"
+  export POLICY_INIT_CKPT="\${BOX_RESUME_CKPT}"
+  echo "[INFO][${node}] box_policy_init_checkpoint_local=\${BOX_RESUME_CKPT}"
+fi
 echo "[INFO][${node}] session=${SESSION} node_rank=${node_rank}/${NNODES} per_gpu_envs=${PER_GPU_ENVS} total_num_envs=${TOTAL_NUM_ENVS}"
 echo "[INFO][${node}] master=${MASTER_ADDR}:${MASTER_PORT} log=${log_file}"
 exec bash distill_as_button_solid.sh 2>&1 | tee $(quote "${log_file}")
