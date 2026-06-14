@@ -8,13 +8,15 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 cd "${SCRIPT_DIR}"
 
+# Private IPs for the requested SkyPilot clusters. Cluster names are not DNS
+# names on the training nodes, so default to VPC-reachable private IPs.
 DEFAULT_NODES=(
-  zzzihanw-15
-  zzzihanw-17
-  zzzihanw-z
-  z1hanw
-  zzzihanw-f
-  zzzihanw-e
+  10.99.0.141  # zzzihanw-15
+  10.99.0.97   # zzzihanw-17
+  10.99.1.69   # zzzihanw-z
+  10.99.1.60   # z1hanw
+  10.99.1.122  # zzzihanw-f
+  10.99.1.21   # zzzihanw-e
 )
 
 usage() {
