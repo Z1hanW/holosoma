@@ -94,6 +94,83 @@ class ModuleConfig:
 
 
 @dataclass(frozen=True)
+class DistillationConfig:
+    """Configuration for behavior cloning / DAgger from a teacher PPO policy."""
+
+    enabled: bool = False
+    """Enable teacher distillation."""
+
+    teacher_checkpoint: str | None = None
+    """Path to a teacher checkpoint. Kept as a legacy alias for policy_to_clone."""
+
+    policy_to_clone: str | None = None
+    """Teacher checkpoint path for DAgger distillation."""
+
+    mode: str = "mse"
+    """Distillation mode. Use "dagger" for teacher-action labels collected online."""
+
+    teacher_obs_keys: list[str] | str | None = None
+    """Observation group keys fed to the teacher policy."""
+
+    loss_coef: float = 1.0
+    """Legacy distillation loss coefficient."""
+
+    bc_loss_coef: float | None = None
+    """Behavior cloning coefficient. Defaults to loss_coef when unset."""
+
+    clip_teacher_actions: bool = False
+    """Clip teacher labels before computing BC loss."""
+
+    clip_actions_threshold: float = 100.0
+    """Absolute action clip threshold used when clip_teacher_actions is enabled."""
+
+    take_teacher_actions: bool = False
+    """Step the environment with teacher actions instead of student actions."""
+
+    teacher_action_mix_ratio: float = 0.0
+    """Per-env probability of stepping with teacher actions during rollout."""
+
+    teacher_action_mix_ratio_start: float | None = None
+    """Optional start value for linearly scheduled teacher-action mix."""
+
+    teacher_action_mix_ratio_end: float | None = None
+    """Optional end value for linearly scheduled teacher-action mix."""
+
+    teacher_action_mix_ratio_end_iteration: int = -1
+    """Iteration where teacher-action mix reaches teacher_action_mix_ratio_end."""
+
+    ppo_start_epoch: int = -1
+    """Iteration where PPO loss starts contributing in DAgger mode."""
+
+    dagger_end_epoch: int = -1
+    """Iteration where the PPO/DAgger blend reaches ppo_target_coeff."""
+
+    ppo_start_coeff: float = 0.0
+    """Initial PPO blend coefficient."""
+
+    ppo_target_coeff: float = 0.9
+    """Final PPO blend coefficient."""
+
+    ppo_schedule_step_epochs: int = 0
+    """Use a staircase PPO/DAgger blend with this interval when > 0."""
+
+    dagger_loss_coef: float = 10.0
+    """Scale on the DAgger BC term in scheduled PPO+DAgger mode."""
+
+    distill_loss_type: str = "mse"
+    """BC loss type: "mse" or "huber"."""
+
+    dagger_ignore_zero_teacher_actions: bool = True
+    """Ignore teacher labels that are exactly zero in every action dimension."""
+
+    dagger_match_std: bool = False
+    """Also match the student action std to the teacher action std."""
+
+    strict_teacher_load: bool = True
+    """Fail on teacher checkpoint architecture or normalizer mismatch."""
+
+
+@dataclass(frozen=True)
 class PPOModuleDictConfig:
     """Configuration for PPO module dictionary."""
 
@@ -190,6 +267,9 @@ class PPOConfig:
     min_actor_learning_rate: float | None = None
     max_critic_learning_rate: float | None = None
     min_critic_learning_rate: float | None = None
+
+    distill: DistillationConfig = field(default_factory=DistillationConfig)
+    """Optional teacher distillation configuration."""
 
 
 @dataclass(frozen=True)

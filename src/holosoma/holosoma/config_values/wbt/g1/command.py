@@ -42,6 +42,17 @@ motion_config_w_object = replace(
     motion_file="holosoma/data/motions/g1_29dof/whole_body_tracking/sub3_largebox_003_mj_w_obj.npz",
 )
 
+motion_config_w_object_generalist = replace(
+    motion_config_w_object,
+    motion_dir="",
+    use_adaptive_timesteps_sampler=False,
+    start_at_timestep_zero_prob=0.0,
+    freeze_at_timestep_zero_prob=0.0,
+    clip_weighting_strategy="uniform_clip",
+    contact_aware_carry_window_mode="rel_z",
+    contact_aware_sparse_root_command_mode="tracking_error",
+)
+
 g1_29dof_wbt_command = CommandManagerCfg(
     params={},
     setup_terms={
@@ -76,7 +87,20 @@ g1_29dof_wbt_command_w_object = replace(
     },
 )
 
+g1_29dof_wbt_command_w_object_generalist = replace(
+    g1_29dof_wbt_command,
+    setup_terms={
+        "motion_command": CommandTermCfg(
+            func="holosoma.managers.command.terms.wbt:MotionCommand",
+            params={
+                "motion_config": motion_config_w_object_generalist,
+            },
+        )
+    },
+)
+
 __all__ = [
     "g1_29dof_wbt_command",
     "g1_29dof_wbt_command_w_object",
+    "g1_29dof_wbt_command_w_object_generalist",
 ]

@@ -6,6 +6,8 @@ from holosoma.config_values.wbt.g1.reward import (
     g1_29dof_wbt_fast_sac_reward,
     g1_29dof_wbt_reward,
     g1_29dof_wbt_reward_w_object,
+    g1_29dof_wbt_reward_w_object_generalist,
+    g1_29dof_wbt_reward_w_object_generalist_offline_contact_guidance,
 )
 
 none = None
@@ -18,5 +20,9 @@ DEFAULTS = {
     "g1_29dof_loco_fast_sac": g1_29dof_loco_fast_sac,
     "g1_29dof_wbt": g1_29dof_wbt_reward,
     "g1_29dof_wbt_w_object": g1_29dof_wbt_reward_w_object,
+    "g1_29dof_wbt_w_object_generalist": g1_29dof_wbt_reward_w_object_generalist,
+    "g1_29dof_wbt_w_object_generalist_offline_contact_guidance": (
+        g1_29dof_wbt_reward_w_object_generalist_offline_contact_guidance
+    ),
     "g1_29dof_wbt_fast_sac": g1_29dof_wbt_fast_sac_reward,
 }

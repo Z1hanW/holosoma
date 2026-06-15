@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Any, List
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from loguru import logger
 
 from holosoma.config_types.command import MotionConfig, NoiseToInitialPoseConfig
@@ -25,6 +27,11 @@ from holosoma.utils.rotations import (
     yaw_quat,
 )
 from holosoma.utils.simulator_config import SimulatorType
+
+_RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD = 0.10
+_RUNTIME_PICKUP_CONSECUTIVE_STEPS = 5
+_CLIP_PICKUP_LIFT_RATIO_THRESHOLD = 0.35
+_CONTACT_RELEASE_LEAD_STEPS = 0
 
 
 #########################################################################################################
@@ -49,6 +56,12 @@ class MotionLoader:
         self._joint_indexes = joint_indexes
         self._body_indexes = body_indexes
         self.time_step_total = self._joint_pos.shape[0]
+        self.clip_ids = [Path(motion_file).stem]
+        self.clip_object_names = [""]
+        self.clip_object_urdf_paths = [""]
+        self.clip_offsets = torch.tensor([0], dtype=torch.long, device=device)
+        self.clip_lengths = torch.tensor([self.time_step_total], dtype=torch.long, device=device)
+        self.num_clips = 1
 
     def _get_index_of_a_in_b(self, a_names: List[str], b_names: List[str], device: str = "cpu") -> torch.Tensor:
         indexes = []
@@ -148,11 +161,61 @@ class MotionLoader:
                 object_quat_w = torch.tensor(data["object_quat_w"], dtype=torch.float32, device=device)
                 self._object_quat_w = object_quat_w[:, [1, 2, 3, 0]]  # Change to xyzw
                 self._object_lin_vel_w = torch.tensor(data["object_lin_vel_w"], dtype=torch.float32, device=device)
+                self._object_size = self._load_object_size_from_npz(data, self._object_pos_w.shape[0], device)
             else:
                 self._object_pos_w = torch.zeros(0, 3, device=device)
                 self._object_quat_w = torch.zeros(0, 4, device=device)
                 self._object_lin_vel_w = torch.zeros(0, 3, device=device)
+                self._object_size = torch.zeros(0, 3, device=device)
         return body_names, joint_names
+
+    def _load_object_size_from_npz(self, data: Any, num_frames: int, device: str) -> torch.Tensor:
+        for key in ("object_size", "box_size", "object_extent", "object_scale", "box_scale"):
+            if key not in data:
+                continue
+
+            raw = np.asarray(data[key], dtype=np.float32)
+            if raw.ndim == 0:
+                raw = np.repeat(raw.reshape(1, 1), 3, axis=1)
+            elif raw.ndim == 1:
+                if raw.shape[0] == 3:
+                    raw = raw.reshape(1, 3)
+                elif raw.shape[0] == num_frames:
+                    raw = np.repeat(raw.reshape(num_frames, 1), 3, axis=1)
+                elif raw.shape[0] == 1:
+                    raw = np.repeat(raw.reshape(1, 1), 3, axis=1)
+                else:
+                    logger.warning(
+                        "Ignoring object size key '{}' with unsupported shape {}.", key, tuple(raw.shape)
+                    )
+                    continue
+            else:
+                raw = raw.reshape(raw.shape[0], -1)
+                if raw.shape[1] == 1:
+                    raw = np.repeat(raw, 3, axis=1)
+                elif raw.shape[1] >= 3:
+                    raw = raw[:, :3]
+                else:
+                    logger.warning(
+                        "Ignoring object size key '{}' with unsupported shape {}.", key, tuple(raw.shape)
+                    )
+                    continue
+
+            if raw.shape[-1] != 3:
+                continue
+            if raw.shape[0] == 1:
+                raw = np.repeat(raw, num_frames, axis=0)
+            elif raw.shape[0] != num_frames:
+                logger.warning(
+                    "Object size key '{}' has {} rows for {} frames; using the first row for all frames.",
+                    key,
+                    raw.shape[0],
+                    num_frames,
+                )
+                raw = np.repeat(raw[:1], num_frames, axis=0)
+            return torch.tensor(raw, dtype=torch.float32, device=device)
+
+        return torch.zeros(num_frames, 3, dtype=torch.float32, device=device)
 
     @property
     def joint_pos(self) -> torch.Tensor:
@@ -191,6 +254,10 @@ class MotionLoader:
         return self._object_lin_vel_w[:]
 
     @property
+    def object_size(self) -> torch.Tensor:
+        return self._object_size[:]
+
+    @property
     def num_motions(self) -> int:
         return 1
 
@@ -218,15 +285,21 @@ class MotionLoader:
                     ("object_pos", "_object_pos_w"),
                     ("object_quat", "_object_quat_w"),
                     ("object_lin_vel", "_object_lin_vel_w"),
+                    ("object_size", "_object_size"),
                 ]
             )
 
         for seg_key, attr_name in concat_targets:
             existing = getattr(self, attr_name)
-            tensors = (segments[seg_key], existing) if prepend else (existing, segments[seg_key])
+            segment = segments.get(seg_key)
+            if segment is None:
+                anchor = existing[:1] if prepend else existing[-1:]
+                segment = anchor.expand(segments["joint_pos"].shape[0], *anchor.shape[1:])
+            tensors = (segment, existing) if prepend else (existing, segment)
             setattr(self, attr_name, torch.cat(tensors, dim=0))
 
         self.time_step_total = self._joint_pos.shape[0]
+        self.clip_lengths = torch.tensor([self.time_step_total], dtype=torch.long, device=self._joint_pos.device)
         return self
 
 
@@ -247,11 +320,13 @@ class MultiMotionLoader:
         # Support comma-separated directories for combining multiple datasets
         dirs = [d.strip() for d in motion_dir.split(",")]
         motion_files = []
+        object_metadata_by_clip: dict[str, dict[str, str]] = {}
         for d in dirs:
             expanded = os.path.expanduser(d)
             files = sorted(str(p) for p in Path(expanded).glob("*.npz"))
             logger.info(f"MultiMotionLoader: found {len(files)} .npz files in {expanded}")
             motion_files.extend(files)
+            object_metadata_by_clip.update(self._load_clip_object_metadata(Path(expanded)))
         assert len(motion_files) > 0, f"No .npz files found in {motion_dir}"
         logger.info(f"MultiMotionLoader: loading {len(motion_files)} total motion files")
 
@@ -276,18 +351,29 @@ class MultiMotionLoader:
         self._motion_start_idx = torch.cat([torch.tensor([0], dtype=torch.long, device=device), cumulative[:-1]])
         self._motion_end_idx = cumulative
         self._num_motions = len(loaders)
+        self.clip_offsets = self._motion_start_idx
+        self.clip_lengths = self._motion_end_idx - self._motion_start_idx
+        self.num_clips = self._num_motions
+        self.clip_ids = [ld.clip_ids[0] for ld in loaders]
+        self.clip_object_names = []
+        self.clip_object_urdf_paths = []
+        for clip_id in self.clip_ids:
+            metadata = object_metadata_by_clip.get(clip_id, {})
+            self.clip_object_names.append(metadata.get("object_name", ""))
+            self.clip_object_urdf_paths.append(metadata.get("object_urdf_path", ""))
 
-        # Concatenate all motion data
-        self._joint_pos = torch.cat([ld._joint_pos for ld in loaders], dim=0)
-        self._joint_vel = torch.cat([ld._joint_vel for ld in loaders], dim=0)
-        self._body_pos_w = torch.cat([ld._body_pos_w for ld in loaders], dim=0)
-        self._body_quat_w = torch.cat([ld._body_quat_w for ld in loaders], dim=0)
-        self._body_lin_vel_w = torch.cat([ld._body_lin_vel_w for ld in loaders], dim=0)
-        self._body_ang_vel_w = torch.cat([ld._body_ang_vel_w for ld in loaders], dim=0)
+        # Concatenate data after projecting every clip into the simulator robot order.
+        # AS/generalist banks may contain clip-specific auxiliary object/body columns,
+        # so concatenating raw body tensors is not reliable.
+        self._joint_pos = torch.cat([ld.joint_pos for ld in loaders], dim=0)
+        self._joint_vel = torch.cat([ld.joint_vel for ld in loaders], dim=0)
+        self._body_pos_w = torch.cat([ld.body_pos_w for ld in loaders], dim=0)
+        self._body_quat_w = torch.cat([ld.body_quat_w for ld in loaders], dim=0)
+        self._body_lin_vel_w = torch.cat([ld.body_lin_vel_w for ld in loaders], dim=0)
+        self._body_ang_vel_w = torch.cat([ld.body_ang_vel_w for ld in loaders], dim=0)
 
-        # Use indexes from first loader (all loaders share the same robot)
-        self._joint_indexes = loaders[0]._joint_indexes
-        self._body_indexes = loaders[0]._body_indexes
+        self._joint_indexes = torch.arange(len(robot_joint_names), dtype=torch.long, device=device)
+        self._body_indexes = torch.arange(len(robot_body_names), dtype=torch.long, device=device)
         self.fps = loaders[0].fps
         self.time_step_total = self._joint_pos.shape[0]
 
@@ -297,12 +383,43 @@ class MultiMotionLoader:
             self._object_pos_w = torch.cat([ld._object_pos_w for ld in loaders], dim=0)
             self._object_quat_w = torch.cat([ld._object_quat_w for ld in loaders], dim=0)
             self._object_lin_vel_w = torch.cat([ld._object_lin_vel_w for ld in loaders], dim=0)
+            self._object_size = torch.cat([ld._object_size for ld in loaders], dim=0)
         else:
             self._object_pos_w = torch.zeros(0, 3, device=device)
             self._object_quat_w = torch.zeros(0, 4, device=device)
             self._object_lin_vel_w = torch.zeros(0, 3, device=device)
+            self._object_size = torch.zeros(0, 3, device=device)
 
         logger.info(f"MultiMotionLoader: {self._num_motions} motions, {self.time_step_total} total frames")
+
+    def _load_clip_object_metadata(self, motion_dir: Path) -> dict[str, dict[str, str]]:
+        object_map_path = motion_dir / "_clip_object_urdf_map.json"
+        if not object_map_path.is_file():
+            return {}
+
+        try:
+            payload = json.loads(object_map_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("Failed to read clip object map '{}': {}", object_map_path, exc)
+            return {}
+
+        clips = payload.get("clips", payload) if isinstance(payload, dict) else {}
+        if not isinstance(clips, dict):
+            logger.warning("Ignoring clip object map '{}' because it is not a mapping.", object_map_path)
+            return {}
+
+        metadata_by_clip: dict[str, dict[str, str]] = {}
+        for raw_clip_id, raw_entry in clips.items():
+            clip_id = Path(str(raw_clip_id)).stem
+            entry = raw_entry if isinstance(raw_entry, dict) else {"object_urdf_path": raw_entry}
+            if not isinstance(entry, dict):
+                continue
+            metadata_by_clip[clip_id] = {
+                "object_name": str(entry.get("object_name", "") or entry.get("name", "")),
+                "object_urdf_path": str(entry.get("object_urdf_path", "") or entry.get("urdf", "")),
+            }
+        logger.info("MultiMotionLoader: loaded object metadata for {} clip(s).", len(metadata_by_clip))
+        return metadata_by_clip
 
     @property
     def num_motions(self) -> int:
@@ -352,6 +469,10 @@ class MultiMotionLoader:
     def object_lin_vel_w(self) -> torch.Tensor:
         return self._object_lin_vel_w[:]
 
+    @property
+    def object_size(self) -> torch.Tensor:
+        return self._object_size[:]
+
     def extend_with_segments(self, segments: dict[str, torch.Tensor], prepend: bool) -> MultiMotionLoader:
         """Merge interpolated segments with motion data, mutating this MultiMotionLoader."""
         concat_targets = [
@@ -368,16 +489,21 @@ class MultiMotionLoader:
                     ("object_pos", "_object_pos_w"),
                     ("object_quat", "_object_quat_w"),
                     ("object_lin_vel", "_object_lin_vel_w"),
+                    ("object_size", "_object_size"),
                 ]
             )
 
         added_frames = 0
         for seg_key, attr_name in concat_targets:
             existing = getattr(self, attr_name)
-            tensors = (segments[seg_key], existing) if prepend else (existing, segments[seg_key])
+            segment = segments.get(seg_key)
+            if segment is None:
+                anchor = existing[:1] if prepend else existing[-1:]
+                segment = anchor.expand(segments["joint_pos"].shape[0], *anchor.shape[1:])
+            tensors = (segment, existing) if prepend else (existing, segment)
             setattr(self, attr_name, torch.cat(tensors, dim=0))
             if added_frames == 0:
-                added_frames = segments[seg_key].shape[0]
+                added_frames = segment.shape[0]
 
         # Update boundaries — shift all motion boundaries if prepending
         if prepend:
@@ -390,6 +516,9 @@ class MultiMotionLoader:
             self._motion_end_idx = torch.cat(
                 [torch.tensor([added_frames], dtype=torch.long, device=dev), self._motion_end_idx]
             )
+            self.clip_ids = ["__default_pose_prepend"] + self.clip_ids
+            self.clip_object_names = [""] + self.clip_object_names
+            self.clip_object_urdf_paths = [""] + self.clip_object_urdf_paths
         else:
             old_total = self.time_step_total
             dev = self._motion_start_idx.device
@@ -399,9 +528,15 @@ class MultiMotionLoader:
             self._motion_end_idx = torch.cat(
                 [self._motion_end_idx, torch.tensor([old_total + added_frames], dtype=torch.long, device=dev)]
             )
+            self.clip_ids = [*self.clip_ids, "__default_pose_append"]
+            self.clip_object_names = [*self.clip_object_names, ""]
+            self.clip_object_urdf_paths = [*self.clip_object_urdf_paths, ""]
 
         self.time_step_total = self._joint_pos.shape[0]
         self._num_motions = len(self._motion_start_idx)
+        self.clip_offsets = self._motion_start_idx
+        self.clip_lengths = self._motion_end_idx - self._motion_start_idx
+        self.num_clips = self._num_motions
         return self
 
 
@@ -508,6 +643,172 @@ def get_filtered_body_names(body_list: List[str], pattern: str) -> List[str]:
     return [body_name for body_name in body_list if re.match(pattern, body_name)]
 
 
+def _first_sustained_true_index(mask: torch.Tensor, consecutive_steps: int) -> int | None:
+    if mask.numel() == 0:
+        return None
+    if consecutive_steps <= 1:
+        true_indices = torch.nonzero(mask, as_tuple=False)
+        if true_indices.numel() == 0:
+            return None
+        return int(true_indices[0, 0].item())
+
+    run_length = 0
+    for idx, flag in enumerate(mask.detach().cpu().tolist()):
+        run_length = run_length + 1 if flag else 0
+        if run_length >= consecutive_steps:
+            return idx - consecutive_steps + 1
+    return None
+
+
+def _first_sustained_true_index_from(mask: torch.Tensor, consecutive_steps: int, start_idx: int) -> int | None:
+    if start_idx <= 0:
+        return _first_sustained_true_index(mask, consecutive_steps)
+    if start_idx >= int(mask.numel()):
+        return None
+    relative_idx = _first_sustained_true_index(mask[start_idx:], consecutive_steps)
+    if relative_idx is None:
+        return None
+    return int(start_idx + relative_idx)
+
+
+def _pickup_threshold_from_rel_z(
+    rel_z: torch.Tensor,
+    *,
+    lift_height_threshold: float = _RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD,
+    lift_ratio_threshold: float = _CLIP_PICKUP_LIFT_RATIO_THRESHOLD,
+) -> torch.Tensor:
+    if rel_z.numel() == 0:
+        return rel_z.new_tensor(float(lift_height_threshold))
+
+    z_min = rel_z.min()
+    z_range = torch.clamp(rel_z.max() - z_min, min=0.0)
+    return z_min + torch.maximum(
+        z_min.new_tensor(float(lift_height_threshold)),
+        z_range * float(lift_ratio_threshold),
+    )
+
+
+def _pickup_step_and_threshold_from_rel_z(
+    rel_z: torch.Tensor,
+    *,
+    lift_height_threshold: float = _RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD,
+    lift_ratio_threshold: float = _CLIP_PICKUP_LIFT_RATIO_THRESHOLD,
+    consecutive_steps: int = _RUNTIME_PICKUP_CONSECUTIVE_STEPS,
+) -> tuple[int, torch.Tensor]:
+    pickup_threshold = _pickup_threshold_from_rel_z(
+        rel_z,
+        lift_height_threshold=lift_height_threshold,
+        lift_ratio_threshold=lift_ratio_threshold,
+    )
+    if rel_z.numel() == 0:
+        return 0, pickup_threshold
+
+    lifted_mask = rel_z >= pickup_threshold
+    pickup_step = _first_sustained_true_index(lifted_mask, consecutive_steps)
+    if pickup_step is None:
+        lifted_indices = torch.nonzero(lifted_mask, as_tuple=False)
+        if lifted_indices.numel() > 0:
+            pickup_step = int(lifted_indices[0, 0].item())
+        else:
+            pickup_step = int(torch.argmax(rel_z).item())
+    return pickup_step, pickup_threshold
+
+
+def _contact_aware_carry_window_from_rel_z(
+    rel_z: torch.Tensor,
+    *,
+    lift_height_threshold: float = _RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD,
+    lift_ratio_threshold: float = _CLIP_PICKUP_LIFT_RATIO_THRESHOLD,
+    consecutive_steps: int = _RUNTIME_PICKUP_CONSECUTIVE_STEPS,
+    release_lead_steps: int = _CONTACT_RELEASE_LEAD_STEPS,
+) -> tuple[int, int]:
+    if rel_z.numel() == 0:
+        return 0, 0
+
+    pickup_step, pickup_threshold = _pickup_step_and_threshold_from_rel_z(
+        rel_z,
+        lift_height_threshold=lift_height_threshold,
+        lift_ratio_threshold=lift_ratio_threshold,
+        consecutive_steps=consecutive_steps,
+    )
+    total_steps = int(rel_z.shape[0])
+    carry_start = max(0, min(int(pickup_step), total_steps))
+    carry_end = total_steps
+
+    lowered_mask = rel_z < pickup_threshold
+    lowering_step = _first_sustained_true_index_from(
+        lowered_mask,
+        consecutive_steps,
+        start_idx=min(carry_start + 1, total_steps),
+    )
+    if lowering_step is not None:
+        carry_end = min(carry_end, int(lowering_step) - max(int(release_lead_steps), 0))
+
+    carry_end = max(carry_start, min(carry_end, total_steps))
+    return carry_start, carry_end
+
+
+def _smooth_1d_edge_padded(values: torch.Tensor, window_steps: int) -> torch.Tensor:
+    if values.numel() == 0:
+        return values
+
+    window_steps = max(1, int(window_steps))
+    if window_steps <= 1:
+        return values
+
+    left_pad = window_steps // 2
+    right_pad = window_steps - 1 - left_pad
+    padded_parts = []
+    if left_pad > 0:
+        padded_parts.append(values[:1].expand(left_pad))
+    padded_parts.append(values)
+    if right_pad > 0:
+        padded_parts.append(values[-1:].expand(right_pad))
+    padded = torch.cat(padded_parts, dim=0)
+    kernel = torch.full((1, 1, window_steps), 1.0 / float(window_steps), device=values.device, dtype=values.dtype)
+    return F.conv1d(padded.view(1, 1, -1), kernel).view(-1)
+
+
+def _contact_aware_carry_window_from_peak_height(
+    object_height: torch.Tensor,
+    *,
+    peak_height_alpha: float = 0.91,
+    smoothing_steps: int = 5,
+    consecutive_steps: int = _RUNTIME_PICKUP_CONSECUTIVE_STEPS,
+) -> tuple[int, int]:
+    if object_height.numel() == 0:
+        return 0, 0
+
+    height = _smooth_1d_edge_padded(object_height, smoothing_steps)
+    total_steps = int(height.shape[0])
+    alpha = max(0.0, min(float(peak_height_alpha), 1.0))
+
+    h_min = height.min()
+    h_peak = height.max()
+    threshold = h_min + torch.clamp(h_peak - h_min, min=0.0) * alpha
+    high_mask = height >= threshold
+
+    carry_start = _first_sustained_true_index(high_mask, consecutive_steps)
+    if carry_start is None:
+        high_indices = torch.nonzero(high_mask, as_tuple=False)
+        if high_indices.numel() > 0:
+            carry_start = int(high_indices[0, 0].item())
+        else:
+            carry_start = int(torch.argmax(height).item())
+    carry_start = max(0, min(int(carry_start), total_steps))
+
+    peak_step = int(torch.argmax(height).item())
+    carry_end = _first_sustained_true_index_from(
+        ~high_mask,
+        consecutive_steps,
+        start_idx=min(peak_step + 1, total_steps),
+    )
+    if carry_end is None:
+        carry_end = total_steps
+    carry_end = max(carry_start, min(int(carry_end), total_steps))
+    return carry_start, carry_end
+
+
 class MotionCommand(CommandTermBase):
     def __init__(self, cfg: Any, env: WholeBodyTrackingManager):
         super().__init__(cfg, env)
@@ -549,6 +850,7 @@ class MotionCommand(CommandTermBase):
                 robot_joint_names,
                 device=self.device,
             )
+        self._maybe_scale_object_size()
 
         # Store body and joint indexes for interpolation
         self._body_indexes_in_motion = self.motion._body_indexes
@@ -827,6 +1129,27 @@ class MotionCommand(CommandTermBase):
     def command(self) -> torch.Tensor:
         return torch.cat([self.joint_pos, self.joint_vel], dim=1)
 
+    @property
+    def clip_ids(self) -> torch.Tensor:
+        return self.motion_ids
+
+    @property
+    def current_clip_lengths(self) -> torch.Tensor:
+        return self.motion.motion_end_idx[self.motion_ids] - self.motion.motion_start_idx[self.motion_ids]
+
+    @property
+    def current_clip_local_steps(self) -> torch.Tensor:
+        return self.time_steps - self.motion.motion_start_idx[self.motion_ids]
+
+    def _get_motion_indices_from_local_steps(
+        self, local_steps: torch.Tensor, env_ids: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        clip_ids = self.motion_ids if env_ids is None else self.motion_ids[env_ids]
+        offsets = self.motion.motion_start_idx[clip_ids]
+        if local_steps.ndim > offsets.ndim:
+            offsets = offsets.view(-1, *([1] * (local_steps.ndim - 1)))
+        return offsets + local_steps
+
     #########################################################################################
     ## Robot from motion data
     #########################################################################################
@@ -964,6 +1287,12 @@ class MotionCommand(CommandTermBase):
     def object_lin_vel_w(self) -> torch.Tensor:
         return self.motion.object_lin_vel_w[self.time_steps]
 
+    @property
+    def object_size(self) -> torch.Tensor:
+        if not self.motion.has_object:
+            return torch.zeros(self.num_envs, 3, device=self.device, dtype=torch.float32)
+        return self.motion.object_size[self.time_steps]
+
     #########################################################################################
     ## Object from simulator
     #########################################################################################
@@ -978,6 +1307,116 @@ class MotionCommand(CommandTermBase):
     @property
     def simulator_object_lin_vel_w(self) -> torch.Tensor:
         return self._env.simulator.all_root_states[self.object_indices_in_simulator][:, 7:10]
+
+    @property
+    def simulator_object_ang_vel_w(self) -> torch.Tensor:
+        return self._env.simulator.all_root_states[self.object_indices_in_simulator][:, 10:13]
+
+    def get_body_object_contact_force_history(self, body_names: list[str]) -> torch.Tensor:
+        if not body_names:
+            return torch.zeros((self.num_envs, 1, 0, 3), device=self.device, dtype=torch.float32)
+
+        getter = getattr(self._env.simulator, "get_object_contact_force_history", None)
+        if getter is not None:
+            return getter(body_names)
+
+        body_indexes = self._get_index_of_a_in_b(
+            body_names,
+            self._env.simulator.body_names,  # type: ignore[attr-defined]
+            self.device,
+        )
+        return self._env.simulator.contact_forces_history[:, :, body_indexes, :]
+
+    def _get_contact_aware_carry_window_by_clip(self) -> torch.Tensor:
+        carry_window_mode = (
+            str(getattr(self.motion_cfg, "contact_aware_carry_window_mode", "rel_z")).strip().lower().replace("-", "_")
+        )
+        peak_height_alpha = float(getattr(self.motion_cfg, "contact_aware_peak_height_alpha", 0.91))
+        peak_height_smoothing_steps = int(getattr(self.motion_cfg, "contact_aware_peak_height_smoothing_steps", 5))
+        cache_name = (
+            "_contact_aware_carry_window_by_clip_"
+            f"{carry_window_mode}_peak{peak_height_alpha:.4f}_smooth{peak_height_smoothing_steps:d}"
+        ).replace(".", "p")
+        cached = getattr(self, cache_name, None)
+        if cached is not None:
+            return cached
+
+        if carry_window_mode not in {"rel_z", "peak_height"}:
+            raise ValueError(
+                "Unsupported contact_aware_carry_window_mode="
+                f"'{getattr(self.motion_cfg, 'contact_aware_carry_window_mode', None)}'. "
+                "Expected 'rel_z' or 'peak_height'."
+            )
+
+        carry_window_by_clip = torch.zeros((self.motion.num_clips, 2), device=self.device, dtype=torch.long)
+        carry_window_by_clip[:, 1] = torch.clamp(self.motion.clip_lengths, min=0)
+        if not self.motion.has_object:
+            setattr(self, cache_name, carry_window_by_clip)
+            return carry_window_by_clip
+
+        root_pos_w = self.motion.body_pos_w[:, 0]
+        object_pos_w = self.motion.object_pos_w
+        for clip_idx in range(self.motion.num_clips):
+            clip_start = int(self.motion.clip_offsets[clip_idx].item())
+            clip_length = int(self.motion.clip_lengths[clip_idx].item())
+            if clip_length <= 0:
+                continue
+            clip_end = clip_start + clip_length
+            if carry_window_mode == "peak_height":
+                carry_start, carry_end = _contact_aware_carry_window_from_peak_height(
+                    object_pos_w[clip_start:clip_end, 2],
+                    peak_height_alpha=peak_height_alpha,
+                    smoothing_steps=peak_height_smoothing_steps,
+                    consecutive_steps=_RUNTIME_PICKUP_CONSECUTIVE_STEPS,
+                )
+            else:
+                clip_rel_z = object_pos_w[clip_start:clip_end, 2] - root_pos_w[clip_start:clip_end, 2]
+                carry_start, carry_end = _contact_aware_carry_window_from_rel_z(
+                    clip_rel_z,
+                    lift_height_threshold=_RUNTIME_PICKUP_LIFT_HEIGHT_THRESHOLD,
+                    lift_ratio_threshold=_CLIP_PICKUP_LIFT_RATIO_THRESHOLD,
+                    consecutive_steps=_RUNTIME_PICKUP_CONSECUTIVE_STEPS,
+                    release_lead_steps=_CONTACT_RELEASE_LEAD_STEPS,
+                )
+            carry_window_by_clip[clip_idx, 0] = carry_start
+            carry_window_by_clip[clip_idx, 1] = carry_end
+
+        setattr(self, cache_name, carry_window_by_clip)
+        return carry_window_by_clip
+
+    def get_contact_aware_root_command_active_mask(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        env_ids_t = self._ensure_index_tensor(env_ids)
+        if not self.motion.has_object:
+            return torch.ones((env_ids_t.numel(),), device=self.device, dtype=torch.bool)
+
+        clip_ids = self.motion_ids[env_ids_t]
+        local_steps = self.current_clip_local_steps[env_ids_t]
+        carry_window_by_clip = self._get_contact_aware_carry_window_by_clip()
+        carry_start = carry_window_by_clip[clip_ids, 0]
+        carry_end = carry_window_by_clip[clip_ids, 1]
+        return (local_steps >= carry_start) & (local_steps < carry_end)
+
+    def get_contact_aware_drop_button(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        env_ids_t = self._ensure_index_tensor(env_ids)
+        if not self.motion.has_object:
+            return torch.zeros((env_ids_t.numel(),), device=self.device, dtype=torch.bool)
+
+        clip_ids = self.motion_ids[env_ids_t]
+        local_steps = self.current_clip_local_steps[env_ids_t]
+        carry_window_by_clip = self._get_contact_aware_carry_window_by_clip()
+        carry_end = carry_window_by_clip[clip_ids, 1]
+        return local_steps >= carry_end
+
+    def get_contact_aware_pickup_button(self, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+        env_ids_t = self._ensure_index_tensor(env_ids)
+        if not self.motion.has_object:
+            return torch.zeros((env_ids_t.numel(),), device=self.device, dtype=torch.bool)
+
+        clip_ids = self.motion_ids[env_ids_t]
+        local_steps = self.current_clip_local_steps[env_ids_t]
+        carry_window_by_clip = self._get_contact_aware_carry_window_by_clip()
+        carry_start = carry_window_by_clip[clip_ids, 0]
+        return local_steps < carry_start
 
     #########################################################################################
     ## Methods that does not fit into setup/step/reset pattern
@@ -1037,6 +1476,17 @@ class MotionCommand(CommandTermBase):
     #########################################################################################
     ## Internal helpers
     #########################################################################################
+    def _maybe_scale_object_size(self) -> None:
+        if not self.motion.has_object or self.motion_cfg.object_size_scale is None:
+            return
+
+        scale = torch.as_tensor(self.motion_cfg.object_size_scale, dtype=torch.float32, device=self.device).reshape(-1)
+        if scale.numel() == 1:
+            scale = scale.repeat(3)
+        if scale.numel() != 3:
+            raise ValueError(f"object_size_scale must contain one scalar or three xyz values, got {scale.tolist()}")
+        self.motion._object_size = self.motion._object_size * scale.view(1, 3)
+
     def _maybe_add_default_pose_transition(self, *, prepend: bool) -> None:
         """Shared path for optionally inserting default-pose interpolation before/after the clip."""
         enabled = self.motion_cfg.enable_default_pose_prepend if prepend else self.motion_cfg.enable_default_pose_append

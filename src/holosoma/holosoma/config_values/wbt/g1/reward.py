@@ -2,6 +2,11 @@
 
 from holosoma.config_types.reward import RewardManagerCfg, RewardTermCfg
 
+_FOOT_OBJECT_CONTACT_BODY_NAMES = ["left_ankle_roll_link", "right_ankle_roll_link"]
+_PALM_CONTACT_BODY_NAMES = ["left_wrist_yaw_link", "right_wrist_yaw_link"]
+_ARM_SUPPORT_CONTACT_BODY_NAMES = ["left_elbow_link", "right_elbow_link"]
+_TORSO_SUPPORT_CONTACT_BODY_NAMES = ["torso_link"]
+
 g1_29dof_wbt_reward = RewardManagerCfg(
     terms={
         # Motion tracking rewards - global reference frame
@@ -110,4 +115,56 @@ g1_29dof_wbt_reward_w_object = RewardManagerCfg(
     }
 )
 
-__all__ = ["g1_29dof_wbt_fast_sac_reward", "g1_29dof_wbt_reward", "g1_29dof_wbt_reward_w_object"]
+g1_29dof_wbt_reward_w_object_generalist = RewardManagerCfg(
+    terms={
+        **g1_29dof_wbt_reward_w_object.terms,
+        "undesired_contacts": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:ObjectUndesiredContacts",
+            params={
+                "threshold": 1.0,
+                "body_names": _FOOT_OBJECT_CONTACT_BODY_NAMES,
+            },
+            weight=-0.5,
+        ),
+        "body_contact_reward_palms": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
+            params={
+                "threshold": 1.0,
+                "force_scale": 25.0,
+                "reward_mode": "tanh",
+                "body_names": _PALM_CONTACT_BODY_NAMES,
+            },
+            weight=0.10,
+        ),
+        "body_contact_reward_arms": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
+            params={
+                "threshold": 1.0,
+                "force_scale": 25.0,
+                "reward_mode": "tanh",
+                "body_names": _ARM_SUPPORT_CONTACT_BODY_NAMES,
+            },
+            weight=0.20,
+        ),
+        "body_contact_reward_torso": RewardTermCfg(
+            func="holosoma.managers.reward.terms.wbt:body_object_contact_reward",
+            params={
+                "threshold": 1.0,
+                "force_scale": 25.0,
+                "reward_mode": "tanh",
+                "body_names": _TORSO_SUPPORT_CONTACT_BODY_NAMES,
+            },
+            weight=0.0,
+        ),
+    }
+)
+
+g1_29dof_wbt_reward_w_object_generalist_offline_contact_guidance = g1_29dof_wbt_reward_w_object_generalist
+
+__all__ = [
+    "g1_29dof_wbt_fast_sac_reward",
+    "g1_29dof_wbt_reward",
+    "g1_29dof_wbt_reward_w_object",
+    "g1_29dof_wbt_reward_w_object_generalist",
+    "g1_29dof_wbt_reward_w_object_generalist_offline_contact_guidance",
+]

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import os
+from pathlib import Path
 from typing import TypedDict
 
 import torch
@@ -22,7 +24,7 @@ from holosoma.agents.modules.module_utils import (
     setup_ppo_actor_module,
     setup_ppo_critic_module,
 )
-from holosoma.config_types.algo import PPOConfig
+from holosoma.config_types.algo import LayerConfig, ModuleConfig, PPOConfig
 from holosoma.envs.base_task.base_task import BaseTask
 from holosoma.utils.helpers import instantiate
 from holosoma.utils.inference_helpers import (
@@ -222,6 +224,35 @@ class PPO(BaseAlgo):
         self.use_symmetry = self.config.use_symmetry
         self.empirical_normalization = self.config.empirical_normalization
         self._init_obs_keys()
+        self.teacher_obs_keys = list(self.actor_obs_keys)
+        self.teacher_obs_dim = self._get_obs_dim(self.teacher_obs_keys)
+        self.teacher_actor: nn.Module | None = None
+        self.teacher_obs_normalizer: nn.Module = nn.Identity()
+        self.distill_enabled = False
+        self.dagger_enabled = False
+        self.distill_mode = "mse"
+        self.distill_loss_coef = 0.0
+        self.bc_loss_coef = 0.0
+        self.clip_teacher_actions = False
+        self.clip_actions_threshold = 0.0
+        self.take_teacher_actions = False
+        self.teacher_action_mix_ratio = 0.0
+        self.teacher_action_mix_ratio_start: float | None = None
+        self.teacher_action_mix_ratio_end: float | None = None
+        self.teacher_action_mix_ratio_end_iteration = -1
+        self.use_teacher_action_mix_schedule = False
+        self.ppo_start_epoch = -1
+        self.dagger_end_epoch = -1
+        self.ppo_start_coeff = 0.0
+        self.ppo_target_coeff = 0.9
+        self.ppo_schedule_step_epochs = 0
+        self.ppo_coeff = 1.0
+        self.use_ppo_dagger_schedule = False
+        self.dagger_loss_coef = 10.0
+        self.distill_loss_fn = F.mse_loss
+        self.dagger_ignore_zero_teacher_actions = True
+        self.dagger_match_std = False
+        self.strict_teacher_load = True
 
     def _init_obs_keys(self):
         self.actor_obs_keys = self.config.module_dict.actor.input_dim
@@ -263,6 +294,8 @@ class PPO(BaseAlgo):
             self.actor_obs_normalizer = nn.Identity()
             self.critic_obs_normalizer = nn.Identity()
 
+        self._setup_distillation()
+
         if self.use_symmetry:
             self.symmetry_utils = SymmetryUtils(self.env)
 
@@ -276,6 +309,253 @@ class PPO(BaseAlgo):
         self.critic_optimizer = instantiate(
             self.config.critic_optimizer, params=self.critic.parameters(), lr=self.critic_learning_rate
         )
+
+    def _parse_obs_key_list(self, obs_keys: list[str] | str | None, default: list[str]) -> list[str]:
+        if obs_keys is None:
+            return list(default)
+        if isinstance(obs_keys, str):
+            cleaned = obs_keys.strip()
+            if cleaned.startswith("[") and cleaned.endswith("]"):
+                cleaned = cleaned[1:-1]
+            parsed = [item.strip().strip("'").strip('"') for item in cleaned.split(",") if item.strip()]
+            return parsed or list(default)
+        return list(obs_keys)
+
+    def _extract_teacher_actor_config(self, teacher_state: dict) -> ModuleConfig | None:
+        exp_cfg = teacher_state.get("experiment_config")
+        if not isinstance(exp_cfg, dict):
+            return None
+        try:
+            actor_cfg_raw = exp_cfg["algo"]["config"]["module_dict"]["actor"]
+        except (KeyError, TypeError):
+            return None
+        if not isinstance(actor_cfg_raw, dict):
+            return None
+
+        layer_cfg_raw = actor_cfg_raw.get("layer_config", {})
+        if not isinstance(layer_cfg_raw, dict):
+            layer_cfg_raw = {}
+        valid_layer_fields = {field.name for field in dataclasses.fields(LayerConfig)}
+        layer_kwargs = {key: value for key, value in layer_cfg_raw.items() if key in valid_layer_fields}
+        if isinstance(layer_kwargs.get("module_input_name"), list):
+            layer_kwargs["module_input_name"] = tuple(layer_kwargs["module_input_name"])
+
+        try:
+            layer_cfg = LayerConfig(**layer_kwargs)
+            return ModuleConfig(
+                type=str(actor_cfg_raw.get("type", "MLP")),
+                input_dim=list(actor_cfg_raw.get("input_dim", [])),
+                output_dim=list(actor_cfg_raw.get("output_dim", ["robot_action_dim"])),
+                layer_config=layer_cfg,
+                min_noise_std=actor_cfg_raw.get("min_noise_std"),
+                min_mean_noise_std=actor_cfg_raw.get("min_mean_noise_std"),
+            )
+        except Exception as exc:
+            if self.strict_teacher_load:
+                raise ValueError(f"Failed to parse teacher actor config from checkpoint: {exc}") from exc
+            logger.warning(f"Failed to parse teacher actor config from checkpoint; using runtime actor config. {exc}")
+            return None
+
+    def _build_teacher_actor_config(self, teacher_state: dict) -> ModuleConfig:
+        actor_cfg = self._extract_teacher_actor_config(teacher_state) or self.config.module_dict.actor
+        return dataclasses.replace(actor_cfg, input_dim=list(self.teacher_obs_keys))
+
+    def _resolve_teacher_checkpoint(self, ckpt_path: str) -> str:
+        if ckpt_path.startswith("wandb://"):
+            from holosoma.utils.eval_utils import load_checkpoint  # noqa: PLC0415
+
+            cache_dir = Path(self.log_dir) / ".teacher_ckpt_cache" / f"rank_{self.gpu_global_rank}"
+            return str(load_checkpoint(ckpt_path, str(cache_dir)))
+        return ckpt_path
+
+    def _load_teacher_actor(self, ckpt_path: str) -> None:
+        ckpt_path = self._resolve_teacher_checkpoint(ckpt_path)
+        logger.info(f"Loading teacher checkpoint from {ckpt_path}")
+        teacher_state = torch.load(ckpt_path, map_location=self.device)
+        teacher_actor_cfg = self._build_teacher_actor_config(teacher_state)
+
+        self.teacher_actor = setup_ppo_actor_module(
+            obs_dim_dict=self.algo_obs_dim_dict,
+            module_config=teacher_actor_cfg,
+            num_actions=self.num_act,
+            init_noise_std=self.config.init_noise_std,
+            device=self.device,
+            history_length=self.algo_history_length_dict,
+        )
+        try:
+            self.teacher_actor.load_state_dict(teacher_state["actor_model_state_dict"])
+        except RuntimeError as exc:
+            if self.strict_teacher_load:
+                raise RuntimeError(
+                    "Failed to load teacher actor. Check that distill teacher_obs_keys and observation history "
+                    "match the teacher checkpoint."
+                ) from exc
+            logger.warning("Teacher actor strict load failed; retrying with strict=False.")
+            self.teacher_actor.load_state_dict(teacher_state["actor_model_state_dict"], strict=False)
+
+        self.teacher_actor.eval()
+        for param in self.teacher_actor.parameters():
+            param.requires_grad_(False)
+
+        if self.empirical_normalization:
+            self.teacher_obs_normalizer = EmpiricalNormalization(shape=self.teacher_obs_dim, device=self.device)
+            normalizer_state = teacher_state.get("actor_obs_normalizer_state_dict")
+            if normalizer_state is None:
+                normalizer_state = teacher_state.get("actor_obs_normalizer_state")
+            if normalizer_state is not None:
+                try:
+                    self.teacher_obs_normalizer.load_state_dict(normalizer_state)
+                except RuntimeError as exc:
+                    if self.strict_teacher_load:
+                        raise RuntimeError(
+                            "Failed to load teacher actor observation normalizer. Check teacher observation "
+                            "history length and term order."
+                        ) from exc
+                    logger.warning("Teacher actor normalizer load failed; using an uninitialized normalizer.")
+            else:
+                logger.warning("Teacher checkpoint has no actor observation normalizer state.")
+        else:
+            self.teacher_obs_normalizer = nn.Identity()
+        self.teacher_obs_normalizer.eval()
+
+        logger.info(
+            "Loaded teacher actor for obs_keys={} obs_dim={} student_obs_keys={} student_obs_dim={}",
+            self.teacher_obs_keys,
+            self.teacher_obs_dim,
+            self.actor_obs_keys,
+            self._get_obs_dim(self.actor_obs_keys),
+        )
+
+    def _setup_distillation(self) -> None:
+        distill_cfg = self.config.distill
+        self.distill_mode = str(getattr(distill_cfg, "mode", "mse")).strip().lower()
+        self.distill_loss_coef = float(getattr(distill_cfg, "loss_coef", 1.0))
+        bc_loss_coef = getattr(distill_cfg, "bc_loss_coef", None)
+        self.bc_loss_coef = float(self.distill_loss_coef if bc_loss_coef is None else bc_loss_coef)
+        self.clip_teacher_actions = bool(getattr(distill_cfg, "clip_teacher_actions", False))
+        self.clip_actions_threshold = float(getattr(distill_cfg, "clip_actions_threshold", 100.0))
+        self.take_teacher_actions = bool(getattr(distill_cfg, "take_teacher_actions", False))
+        self.teacher_action_mix_ratio = float(getattr(distill_cfg, "teacher_action_mix_ratio", 0.0))
+        if not (0.0 <= self.teacher_action_mix_ratio <= 1.0):
+            raise ValueError(f"distill.teacher_action_mix_ratio must be in [0, 1], got {self.teacher_action_mix_ratio}")
+
+        mix_start = getattr(distill_cfg, "teacher_action_mix_ratio_start", None)
+        mix_end = getattr(distill_cfg, "teacher_action_mix_ratio_end", None)
+        self.teacher_action_mix_ratio_end_iteration = int(
+            getattr(distill_cfg, "teacher_action_mix_ratio_end_iteration", -1)
+        )
+        if mix_start is not None or mix_end is not None:
+            if mix_start is None or mix_end is None or self.teacher_action_mix_ratio_end_iteration < 0:
+                raise ValueError(
+                    "teacher_action_mix_ratio_start/end and teacher_action_mix_ratio_end_iteration must be set together."
+                )
+            self.teacher_action_mix_ratio_start = float(mix_start)
+            self.teacher_action_mix_ratio_end = float(mix_end)
+            self.teacher_action_mix_ratio = self.teacher_action_mix_ratio_start
+            self.use_teacher_action_mix_schedule = True
+
+        self.ppo_start_epoch = int(getattr(distill_cfg, "ppo_start_epoch", -1))
+        self.dagger_end_epoch = int(getattr(distill_cfg, "dagger_end_epoch", -1))
+        self.ppo_start_coeff = float(getattr(distill_cfg, "ppo_start_coeff", 0.0))
+        self.ppo_target_coeff = float(getattr(distill_cfg, "ppo_target_coeff", 0.9))
+        self.ppo_schedule_step_epochs = int(getattr(distill_cfg, "ppo_schedule_step_epochs", 0))
+        self.use_ppo_dagger_schedule = self.ppo_start_epoch >= 0 and self.dagger_end_epoch > self.ppo_start_epoch
+        self.ppo_coeff = 0.0 if self.use_ppo_dagger_schedule else 1.0
+        self.dagger_loss_coef = float(getattr(distill_cfg, "dagger_loss_coef", 10.0))
+        loss_type = str(getattr(distill_cfg, "distill_loss_type", "mse")).strip().lower()
+        if loss_type == "mse":
+            self.distill_loss_fn = F.mse_loss
+        elif loss_type == "huber":
+            self.distill_loss_fn = F.huber_loss
+        else:
+            raise ValueError(f"Unsupported distill_loss_type: {loss_type}")
+        self.dagger_ignore_zero_teacher_actions = bool(
+            getattr(distill_cfg, "dagger_ignore_zero_teacher_actions", True)
+        )
+        self.dagger_match_std = bool(getattr(distill_cfg, "dagger_match_std", False))
+        self.strict_teacher_load = bool(getattr(distill_cfg, "strict_teacher_load", True))
+
+        teacher_checkpoint = getattr(distill_cfg, "policy_to_clone", None) or getattr(
+            distill_cfg, "teacher_checkpoint", None
+        )
+        if self.distill_mode == "dagger":
+            if not teacher_checkpoint:
+                return
+            if self.bc_loss_coef <= 0.0 and not self.use_ppo_dagger_schedule:
+                return
+        elif not bool(getattr(distill_cfg, "enabled", False)):
+            return
+        elif not teacher_checkpoint:
+            raise ValueError("Teacher checkpoint is required when distill.enabled=True.")
+
+        self.teacher_obs_keys = self._parse_obs_key_list(
+            getattr(distill_cfg, "teacher_obs_keys", None),
+            default=self.actor_obs_keys,
+        )
+        missing_keys = [key for key in self.teacher_obs_keys if key not in self.algo_obs_dim_dict]
+        if missing_keys:
+            raise ValueError(f"Teacher obs keys not found in observation manager: {missing_keys}")
+        self.teacher_obs_dim = self._get_obs_dim(self.teacher_obs_keys)
+        self._load_teacher_actor(str(teacher_checkpoint))
+        self.distill_enabled = True
+        self.dagger_enabled = self.distill_mode == "dagger"
+
+    def _normalize_teacher_obs(self, teacher_obs: torch.Tensor) -> torch.Tensor:
+        if isinstance(self.teacher_obs_normalizer, EmpiricalNormalization):
+            return self.teacher_obs_normalizer(teacher_obs, update=False)
+        return self.teacher_obs_normalizer(teacher_obs)
+
+    def _select_teacher_actions(self, obs_dict: dict[str, torch.Tensor]) -> torch.Tensor:
+        assert self.teacher_actor is not None, "Teacher actor is not initialized."
+        teacher_obs_raw = torch.cat([obs_dict[k] for k in self.teacher_obs_keys], dim=1)
+        teacher_obs = self._normalize_teacher_obs(teacher_obs_raw)
+        return self.teacher_actor.act_inference({"actor_obs": teacher_obs})
+
+    def _compute_ppo_dagger_coeff_for_epoch(self, current_epoch: int) -> float:
+        if not self.use_ppo_dagger_schedule:
+            return 1.0
+        if current_epoch < self.ppo_start_epoch:
+            return 0.0
+        if current_epoch >= self.dagger_end_epoch:
+            return self.ppo_target_coeff
+
+        total_epochs = max(1, self.dagger_end_epoch - self.ppo_start_epoch)
+        ppo_epochs = max(0, current_epoch - self.ppo_start_epoch)
+        coeff_span = self.ppo_target_coeff - self.ppo_start_coeff
+        if self.ppo_schedule_step_epochs > 0:
+            step_epochs = max(1, self.ppo_schedule_step_epochs)
+            total_steps = max(1, (total_epochs + step_epochs - 1) // step_epochs)
+            completed_steps = max(0, ppo_epochs // step_epochs)
+            progress = min(float(completed_steps) / float(total_steps), 1.0)
+        else:
+            progress = min(float(ppo_epochs) / float(total_epochs), 1.0)
+        return self.ppo_start_coeff + progress * coeff_span
+
+    def _adjust_ppo_dagger_coeff(self, current_epoch: int) -> None:
+        self.ppo_coeff = self._compute_ppo_dagger_coeff_for_epoch(current_epoch)
+
+    def _adjust_teacher_action_mix_ratio(self, current_iteration: int) -> None:
+        if not self.use_teacher_action_mix_schedule:
+            return
+        assert self.teacher_action_mix_ratio_start is not None
+        assert self.teacher_action_mix_ratio_end is not None
+        if self.teacher_action_mix_ratio_end_iteration <= 0:
+            self.teacher_action_mix_ratio = self.teacher_action_mix_ratio_end
+            return
+        alpha = min(max(float(current_iteration), 0.0) / float(self.teacher_action_mix_ratio_end_iteration), 1.0)
+        self.teacher_action_mix_ratio = (
+            self.teacher_action_mix_ratio_start
+            + (self.teacher_action_mix_ratio_end - self.teacher_action_mix_ratio_start) * alpha
+        )
+
+    def _get_actor_std_for_loss(self, actor: nn.Module) -> torch.Tensor:
+        std = torch.nan_to_num(
+            actor.std,
+            nan=self.config.init_noise_std,
+            posinf=10.0,
+            neginf=0.0,
+        )
+        return torch.clamp(std, min=1e-6)
 
     def _get_obs_dim(self, obs_keys: list[str]) -> int:
         """Compute total observation dimension for given observation keys."""
@@ -330,18 +610,26 @@ class PPO(BaseAlgo):
         ]
         for key, shape, dtype in minibatch_keys:
             self.storage.register(key, shape=shape, dtype=dtype)
+        if self.dagger_enabled:
+            self.storage.register("teacher_actions", shape=(self.num_act,), dtype=torch.float)
 
     def _eval_mode(self):
         self.actor.eval()
         self.critic.eval()
         self.actor_obs_normalizer.eval()
         self.critic_obs_normalizer.eval()
+        if self.teacher_actor is not None:
+            self.teacher_actor.eval()
+            self.teacher_obs_normalizer.eval()
 
     def _train_mode(self):
         self.actor.train()
         self.critic.train()
         self.actor_obs_normalizer.train()
         self.critic_obs_normalizer.train()
+        if self.teacher_actor is not None:
+            self.teacher_actor.eval()
+            self.teacher_obs_normalizer.eval()
 
     def learn(self):
         self._train_mode()
@@ -362,6 +650,7 @@ class PPO(BaseAlgo):
             self.current_learning_iteration + self.config.num_learning_iterations,
         ):
             self.current_learning_iteration = it
+            self._adjust_teacher_action_mix_ratio(it)
 
             # Synchronize curriculum metrics across GPUs before rollout
             if self.is_multi_gpu:
@@ -396,7 +685,19 @@ class PPO(BaseAlgo):
                 actions = self.actor.act({"actor_obs": actor_obs})
                 values = self.critic.evaluate({"critic_obs": critic_obs}).detach()
 
-                obs_dict, rewards, dones, infos = self.env.step({"actions": actions})
+                teacher_actions = None
+                actions_to_step = actions
+                if self.dagger_enabled and (self.bc_loss_coef > 0.0 or self.use_ppo_dagger_schedule):
+                    teacher_actions = self._select_teacher_actions(obs_dict)
+                    if self.teacher_action_mix_ratio > 0.0:
+                        teacher_mask = (
+                            torch.rand((actions.shape[0], 1), device=actions.device) < self.teacher_action_mix_ratio
+                        )
+                        actions_to_step = torch.where(teacher_mask, teacher_actions, actions)
+                    elif self.take_teacher_actions:
+                        actions_to_step = teacher_actions
+
+                obs_dict, rewards, dones, infos = self.env.step({"actions": actions_to_step})
 
                 for obs_key in obs_dict:
                     obs_dict[obs_key] = obs_dict[obs_key].to(self.device)
@@ -423,11 +724,14 @@ class PPO(BaseAlgo):
                     action_sigma=self.actor.action_std.detach(),
                     rewards=(rewards + final_rewards).view(-1, 1),
                     dones=dones.view(-1, 1),
+                    teacher_actions=teacher_actions.detach() if teacher_actions is not None else torch.zeros_like(actions),
                 )
 
                 # Reset actor and critic for completed envs
                 self.actor.reset(dones)
                 self.critic.reset(dones)
+                if self.teacher_actor is not None:
+                    self.teacher_actor.reset(dones)
 
                 if self.log_dir is not None:
                     # Update episode stats using logging helper
@@ -472,6 +776,9 @@ class PPO(BaseAlgo):
         return returns, advantages
 
     def _training_step(self) -> dict[str, float]:
+        if self.dagger_enabled and self.use_ppo_dagger_schedule:
+            self._adjust_ppo_dagger_coeff(self.current_learning_iteration)
+
         generator = self.storage.mini_batch_generator(self.config.num_mini_batches, self.config.num_learning_epochs)
 
         minibatch: Minibatch
@@ -556,6 +863,7 @@ class PPO(BaseAlgo):
         sigma_batch = self.actor.action_std[:original_batch_size]
         entropy_batch = self.actor.entropy[:original_batch_size]
 
+        kl_mean = torch.tensor(0.0, device=self.device)
         if self.config.desired_kl is not None and self.config.schedule == "adaptive":
             # Compute the KL divergence between the old and new action distributions
             kl_mean = self._compute_kl_div(old_mu_batch, old_sigma_batch, mu_batch, sigma_batch)
@@ -601,13 +909,52 @@ class PPO(BaseAlgo):
             symmetry_critic_loss = torch.tensor(0.0, device=self.device)
 
         entropy_loss = entropy_batch.mean()
-        actor_loss = (
-            surrogate_loss
-            - self.config.entropy_coef * entropy_loss
-            + self.config.symmetry_actor_coef * symmetry_actor_loss
-        )
+        actor_loss_base = surrogate_loss - self.config.entropy_coef * entropy_loss
+        actor_regularizer = self.config.symmetry_actor_coef * symmetry_actor_loss
+        actor_loss = actor_loss_base + actor_regularizer
 
         critic_loss = self.config.value_loss_coef * value_loss + self.config.symmetry_critic_coef * symmetry_critic_loss
+        bc_loss = torch.tensor(0.0, device=self.device)
+        distill_loss = torch.tensor(0.0, device=self.device)
+        dagger_weight = torch.tensor(0.0, device=self.device)
+
+        if self.dagger_enabled and (self.bc_loss_coef > 0.0 or self.use_ppo_dagger_schedule):
+            teacher_actions_batch = minibatch.get("teacher_actions")
+            if teacher_actions_batch is None:
+                raise ValueError("Dagger distillation is enabled but teacher_actions are missing from rollout storage.")
+            teacher_actions_batch = teacher_actions_batch[:original_batch_size]
+            if self.clip_teacher_actions:
+                teacher_actions_batch = torch.clamp(
+                    teacher_actions_batch,
+                    -self.clip_actions_threshold,
+                    self.clip_actions_threshold,
+                )
+
+            distill_per_elem = self.distill_loss_fn(mu_batch, teacher_actions_batch, reduction="none")
+            distill_per_sample = distill_per_elem.mean(dim=-1) if distill_per_elem.ndim > 1 else distill_per_elem
+            valid_mask = torch.ones_like(distill_per_sample, dtype=torch.bool)
+            if self.dagger_ignore_zero_teacher_actions:
+                valid_mask &= ~torch.all(teacher_actions_batch == 0.0, dim=-1)
+            bc_loss = distill_per_sample[valid_mask].mean() if valid_mask.any() else torch.tensor(0.0, device=self.device)
+
+            if self.dagger_match_std and self.teacher_actor is not None:
+                sigma_teacher = self._get_actor_std_for_loss(self.teacher_actor).detach().unsqueeze(0).expand_as(
+                    sigma_batch
+                )
+                sigma_loss = (sigma_batch - sigma_teacher).pow(2).mean(dim=-1)
+                bc_loss = bc_loss + (sigma_loss[valid_mask].mean() if valid_mask.any() else sigma_loss.mean() * 0.0)
+
+            distill_loss = bc_loss
+            if self.use_ppo_dagger_schedule:
+                lambda_ppo = max(0.0, min(1.0, float(self.ppo_coeff)))
+                dagger_weight = torch.tensor(self.dagger_loss_coef * (1.0 - lambda_ppo), device=self.device)
+                actor_loss = lambda_ppo * actor_loss_base + actor_regularizer + dagger_weight * bc_loss
+            elif self.bc_loss_coef > 0.0:
+                actor_loss = (1.0 - self.bc_loss_coef) * actor_loss_base + actor_regularizer + self.bc_loss_coef * bc_loss
+        elif self.distill_enabled and self.teacher_actor is not None:
+            teacher_actions = self._select_teacher_actions({"actor_obs": minibatch["actor_obs"]})
+            distill_loss = F.mse_loss(mu_batch, teacher_actions[:original_batch_size])
+            actor_loss = actor_loss + self.distill_loss_coef * distill_loss
 
         return {
             "actor_loss": actor_loss,
@@ -617,6 +964,10 @@ class PPO(BaseAlgo):
             "value_loss": value_loss,
             "surrogate_loss": surrogate_loss,
             "entropy_loss": entropy_loss,
+            "distill_loss": distill_loss,
+            "bc_loss": bc_loss,
+            "ppo_coeff": float(self.ppo_coeff),
+            "dagger_weight": dagger_weight,
             "kl_mean": kl_mean,
         }
 

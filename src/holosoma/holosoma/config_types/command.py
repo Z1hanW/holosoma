@@ -111,6 +111,33 @@ class MotionConfig:
     This makes the robot practice holding the initial pose. Only applies when episode starts at timestep 0.
     Sampled independently each policy step; expected wait is roughly 1 / (1 - p) steps before unfreezing."""
 
+    clip_weighting_strategy: str = "uniform_clip"
+    """Clip sampling strategy for multi-clip motion banks. Public WBT currently supports uniform clip sampling."""
+
+    num_future_steps: int = 0
+    """Reserved for observation terms that expose future target poses."""
+
+    object_size_scale: list[float] | None = None
+    """Optional xyz scale applied to object size metadata loaded from motion files."""
+
+    contact_aware_carry_window_mode: str = "rel_z"
+    """Heuristic used to infer pickup/drop windows from object height for button observations."""
+
+    contact_aware_peak_height_alpha: float = 0.91
+    """Relative peak-height fraction used by the peak_height carry-window heuristic."""
+
+    contact_aware_peak_height_smoothing_steps: int = 5
+    """Window size for smoothing object height before peak_height carry-window detection."""
+
+    contact_aware_sparse_root_command_mode: str = "tracking_error"
+    """Sparse root-command mode. Supported values are tracking_error and segment_delta."""
+
+    contact_aware_sparse_root_segment_steps: int = 30
+    """Segment length in frames for segment_delta contact-aware sparse root commands."""
+
+    contact_aware_sparse_root_zero_yaw_threshold_deg: float = 0.0
+    """Yaw commands below this threshold are zeroed for segment_delta sparse root commands."""
+
     enable_default_pose_prepend: bool = False
     """If True, pre-append interpolated frames from default pose to the motion's first pose.
     This provides a smooth transition trajectory that the policy can track."""

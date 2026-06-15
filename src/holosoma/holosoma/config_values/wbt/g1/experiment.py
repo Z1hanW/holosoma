@@ -191,11 +191,52 @@ g1_29dof_wbt_fast_sac_w_object = replace(
     ),
 )
 
+g1_29dof_wbt_w_object_generalist = replace(
+    g1_29dof_wbt_w_object,
+    training=replace(
+        g1_29dof_wbt_w_object.training,
+        project="carry-any",
+        name="g1_29dof_wbt_w_object_generalist",
+    ),
+    command=command.g1_29dof_wbt_command_w_object_generalist,
+    observation=observation.g1_29dof_wbt_observation_w_object_generalist,
+    reward=reward.g1_29dof_wbt_reward_w_object_generalist,
+)
+
+g1_29dof_wbt_w_object_distill_sparse_root_cmd = replace(
+    g1_29dof_wbt_w_object_generalist,
+    training=replace(
+        g1_29dof_wbt_w_object_generalist.training,
+        name="g1_29dof_wbt_w_object_distill_sparse_root_cmd",
+    ),
+    observation=observation.g1_29dof_wbt_observation_w_object_distill_sparse_root_cmd,
+    algo=replace(
+        g1_29dof_wbt_w_object_generalist.algo,
+        config=replace(
+            g1_29dof_wbt_w_object_generalist.algo.config,
+            module_dict=replace(
+                g1_29dof_wbt_w_object_generalist.algo.config.module_dict,
+                actor=replace(
+                    g1_29dof_wbt_w_object_generalist.algo.config.module_dict.actor,
+                    input_dim=[
+                        "actor_obs_root_contact_aware",
+                        "actor_obs_drop_button",
+                        "actor_obs_proprio_with_actions_no_linvel",
+                        "perception_obs",
+                    ],
+                ),
+            ),
+        ),
+    ),
+)
+
 __all__ = [
     "g1_29dof_wbt",
     "g1_29dof_wbt_fast_sac",
     "g1_29dof_wbt_fast_sac_w_object",
     "g1_29dof_wbt_w_object",
+    "g1_29dof_wbt_w_object_distill_sparse_root_cmd",
+    "g1_29dof_wbt_w_object_generalist",
 ]
 
 """
