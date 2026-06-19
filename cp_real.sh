@@ -88,8 +88,9 @@ validate_bank "$SRC"
 mkdir -p "$DST"
 
 if command -v rsync >/dev/null 2>&1; then
-  rsync -a --info=progress2 "$SRC"/ "$DST"/
+  rsync -a --delete --info=progress2 "$SRC"/ "$DST"/
 else
+  find "$DST" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
   cp -a "$SRC"/. "$DST"/
 fi
 
