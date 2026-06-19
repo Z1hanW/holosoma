@@ -375,9 +375,18 @@ fi
 
 OBJECT_SPAWN_MODE=${OBJECT_SPAWN_MODE:-${HOLOSOMA_OBJECT_SPAWN_MODE:-single_slot_multi_urdf}}
 OBJECT_GEOMETRY_MODE=${OBJECT_GEOMETRY_MODE:-mesh}
+REAL_MESH_OBJECT_SPAWN=${REAL_MESH_OBJECT_SPAWN:-0}
 case "$(echo "${OBJECT_SPAWN_MODE}" | tr '[:upper:]' '[:lower:]')" in
   single_slot_multi_urdf|single-slot-multi-urdf|single_slot|single-slot|heterogeneous_single_slot|heterogeneous-single-slot)
     OBJECT_SPAWN_MODE=single_slot_multi_urdf
+    ;;
+  mesh|urdf)
+    if is_truthy "${REAL_MESH_OBJECT_SPAWN}"; then
+      OBJECT_SPAWN_MODE=mesh
+    else
+      echo "[ERROR] OBJECT_SPAWN_MODE=mesh/urdf is only supported with REAL_MESH_OBJECT_SPAWN=1." >&2
+      exit 2
+    fi
     ;;
   *)
     echo "[ERROR] infer_teacher_as_contacts.sh requires OBJECT_SPAWN_MODE=single_slot_multi_urdf for train_as_general.sh checkpoints." >&2
@@ -641,7 +650,12 @@ fi
 
 export WANDB_PROJECT
 unset HOLOSOMA_DISABLE_HETEROGENEOUS_OBJECT_SINGLE_SLOT
-export HOLOSOMA_OBJECT_SPAWN_MODE="${OBJECT_SPAWN_MODE}"
+if is_truthy "${REAL_MESH_OBJECT_SPAWN}"; then
+  export HOLOSOMA_OBJECT_SPAWN_MODE=mesh
+  export HOLOSOMA_FORCE_HETEROGENEOUS_OBJECT_SINGLE_SLOT=1
+else
+  export HOLOSOMA_OBJECT_SPAWN_MODE="${OBJECT_SPAWN_MODE}"
+fi
 export HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE="${OBJECT_GEOMETRY_MODE}"
 export HOLOSOMA_OBJECT_COLLIDER_TYPE="${HOLOSOMA_OBJECT_COLLIDER_TYPE:-convex_decomposition}"
 export HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK="${HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK:-1}"
@@ -703,6 +717,8 @@ else
   echo "[INFO] as_unique_object_urdfs=${AS_UNIQUE_OBJECT_COUNT}"
   echo "[INFO] num_envs=${NUM_ENVS}"
   echo "[INFO] object_spawn_mode=${HOLOSOMA_OBJECT_SPAWN_MODE}"
+  echo "[INFO] real_mesh_object_spawn=${REAL_MESH_OBJECT_SPAWN}"
+  echo "[INFO] force_heterogeneous_single_slot=${HOLOSOMA_FORCE_HETEROGENEOUS_OBJECT_SINGLE_SLOT:-0}"
   echo "[INFO] require_single_slot_objects=${HOLOSOMA_REQUIRE_SINGLE_SLOT_OBJECTS}"
   echo "[INFO] shard_object_assets_by_rank=${HOLOSOMA_SHARD_OBJECT_ASSETS_BY_RANK}"
   echo "[INFO] object_geometry_mode=${HOLOSOMA_PERCEPTION_OBJECT_GEOMETRY_MODE}"

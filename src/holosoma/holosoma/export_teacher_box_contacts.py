@@ -43,6 +43,12 @@ from holosoma.utils.tyro_utils import TYRO_CONIFG  # noqa: E402
 _LEFT_WRIST_BODY_NAMES = ["left_wrist_yaw_link"]
 _RIGHT_WRIST_BODY_NAMES = ["right_wrist_yaw_link"]
 _TORSO_BODY_NAMES = ["torso_link"]
+_FOOT_OBJECT_CONTACT_BODY_NAMES = [
+    "left_foot_contact_point",
+    "right_foot_contact_point",
+    "left_ankle_roll_link",
+    "right_ankle_roll_link",
+]
 
 _LINK_REGION_BODY_NAMES = {
     "left_wrist": "left_wrist_yaw_link",
@@ -107,6 +113,7 @@ _CONTACT_SENSOR_BODY_NAMES = tuple(
         + _RIGHT_WRIST_BODY_NAMES
         + [body_name for region_name, body_name in _LINK_REGION_BODY_NAMES.items() if region_name not in {"left_wrist", "right_wrist"}]
         + _TORSO_BODY_NAMES
+        + _FOOT_OBJECT_CONTACT_BODY_NAMES
     )
 )
 
@@ -199,6 +206,11 @@ class ExportConfig:
     success_position_threshold: float = 0.10
     max_rollout_steps: int | None = None
     project_contact_to_mesh: bool = True
+    require_final_position_success_for_success: bool = False
+    require_no_middle_foot_object_contact_for_success: bool = False
+    middle_foot_contact_start_frac: float = 0.20
+    middle_foot_contact_end_frac: float = 0.80
+    foot_object_contact_force_threshold: float = 1.0
     save_glb: bool = True
     save_preview_png: bool = True
     save_face_heatmap_png: bool = True
@@ -219,6 +231,7 @@ class ClipSummary:
     success: bool
     stable_contact_success: bool
     final_position_success: bool
+    no_middle_foot_object_contact_success: bool
     status: str
     final_object_position_error_m: float
     final_object_rotation_error_rad: float
@@ -235,6 +248,10 @@ class ClipSummary:
     left_wrist_pitch_contact_frames: int
     right_wrist_pitch_contact_frames: int
     torso_contact_frames: int
+    foot_object_contact_frames: int
+    middle_foot_object_contact_frames: int
+    max_foot_object_contact_force: float
+    max_middle_foot_object_contact_force: float
 
 
 @dataclass
@@ -258,6 +275,10 @@ class ClipAccumulator:
     body_force_sums: dict[str, float]
     body_force_max: dict[str, float]
     body_contact_frames: dict[str, int]
+    foot_object_contact_frames: int
+    middle_foot_object_contact_frames: int
+    max_foot_object_contact_force: float
+    max_middle_foot_object_contact_force: float
     tracked_body_names: list[str]
     full_body_names: list[str]
     joint_names: list[str]
@@ -376,13 +397,10 @@ def _project_point_to_object_surface(
             accumulator.contact_surface_projection = "mesh"
             return _project_point_to_mesh_surface(point_xyz, object_mesh)
         except Exception as exc:
-            logger.warning(
-                "Falling back to primitive-box contact projection for clip '{}' because mesh projection failed: {}",
-                accumulator.clip_id,
-                exc,
-            )
-            accumulator.object_surface_mesh = None
-            accumulator.contact_surface_projection = "primitive_box"
+            raise RuntimeError(
+                f"Mesh contact projection failed for clip '{accumulator.clip_id}'. "
+                "Run with --no-project-contact-to-mesh only when primitive-box contact points are intended."
+            ) from exc
     return _project_point_to_box_surface(point_xyz, accumulator.extents_xyz)
 
 
@@ -1176,6 +1194,12 @@ def _make_clip_accumulator(
             object_name=object_name,
             object_urdf_path=object_urdf_path,
         )
+        if object_surface_mesh is None:
+            raise RuntimeError(
+                f"Mesh contact projection requested for clip '{clip_id}', but no mesh could be loaded from "
+                f"object URDF '{object_urdf_path}'. Run with --no-project-contact-to-mesh only when "
+                "primitive-box contact points are intended."
+            )
     return ClipAccumulator(
         clip_id=clip_id,
         clip_index=clip_idx,
@@ -1196,6 +1220,10 @@ def _make_clip_accumulator(
         body_force_sums=defaultdict(float),
         body_force_max=defaultdict(float),
         body_contact_frames=defaultdict(int),
+        foot_object_contact_frames=0,
+        middle_foot_object_contact_frames=0,
+        max_foot_object_contact_force=0.0,
+        max_middle_foot_object_contact_force=0.0,
         tracked_body_names=list(tracked_body_names),
         full_body_names=list(full_body_names),
         joint_names=list(joint_names),
@@ -1492,7 +1520,7 @@ def _collect_body_force_stats_batch(
             body_name
             for region_spec in _REGION_SPECS.values()
             for body_name in region_spec["body_names"]
-        }
+        }.union(_FOOT_OBJECT_CONTACT_BODY_NAMES)
     )
     if not unique_body_names:
         return
@@ -1506,6 +1534,48 @@ def _collect_body_force_stats_batch(
             accumulator.body_force_max[body_name] = max(accumulator.body_force_max[body_name], force_scalar)
             if force_scalar > force_threshold:
                 accumulator.body_contact_frames[body_name] += 1
+
+
+def _collect_foot_object_contact_stats_batch(
+    motion_command: MotionCommand,
+    *,
+    accumulators: dict[int, ClipAccumulator],
+    active_env_ids: list[int],
+    step_idx: int,
+    force_threshold: float,
+    middle_start_frac: float,
+    middle_end_frac: float,
+) -> None:
+    if not active_env_ids or not _FOOT_OBJECT_CONTACT_BODY_NAMES:
+        return
+
+    force_history = motion_command.get_body_object_contact_force_history(list(_FOOT_OBJECT_CONTACT_BODY_NAMES))
+    magnitudes = torch.norm(force_history, dim=-1)
+    peak_force = torch.max(magnitudes, dim=1)[0]
+    per_env_force = torch.max(peak_force, dim=1)[0].detach().cpu().numpy()
+
+    start_frac = min(max(float(middle_start_frac), 0.0), 1.0)
+    end_frac = min(max(float(middle_end_frac), 0.0), 1.0)
+    if end_frac < start_frac:
+        start_frac, end_frac = end_frac, start_frac
+
+    for env_id in active_env_ids:
+        force_value = float(per_env_force[env_id])
+        accumulator = accumulators[env_id]
+        accumulator.max_foot_object_contact_force = max(accumulator.max_foot_object_contact_force, force_value)
+        if force_value <= force_threshold:
+            continue
+
+        accumulator.foot_object_contact_frames += 1
+        clip_length = int(accumulator.rollout_reference["valid_steps"].shape[0])
+        middle_start = int(math.floor(float(clip_length) * start_frac))
+        middle_end = int(math.ceil(float(clip_length) * end_frac))
+        if middle_start <= int(step_idx) < middle_end:
+            accumulator.middle_foot_object_contact_frames += 1
+            accumulator.max_middle_foot_object_contact_force = max(
+                accumulator.max_middle_foot_object_contact_force,
+                force_value,
+            )
 
 
 def _valid_step_indices(valid_steps: np.ndarray) -> np.ndarray:
@@ -1542,11 +1612,30 @@ def _finalize_clip_output(
 
     stable_contact_success = bool(retained_points_xyz.shape[0] > 0)
     final_position_success = motion_end_reached and final_pos_error <= float(export_cfg.success_position_threshold)
+    no_middle_foot_object_contact_success = int(accumulator.middle_foot_object_contact_frames) == 0
     success = stable_contact_success
-    if stable_contact_success and final_position_success:
+    if export_cfg.require_final_position_success_for_success:
+        success = success and final_position_success
+    if export_cfg.require_no_middle_foot_object_contact_for_success:
+        success = success and no_middle_foot_object_contact_success
+
+    if success and stable_contact_success and final_position_success and no_middle_foot_object_contact_success:
+        status = "success_contact_and_final_position_no_middle_foot_object_contact"
+    elif success and stable_contact_success and final_position_success:
         status = "success_contact_and_final_position"
-    elif stable_contact_success:
+    elif success and stable_contact_success:
         status = "success_stable_contact"
+    elif stable_contact_success and export_cfg.require_final_position_success_for_success and not final_position_success:
+        status = "failed_final_position"
+    elif (
+        stable_contact_success
+        and final_position_success
+        and export_cfg.require_no_middle_foot_object_contact_for_success
+        and not no_middle_foot_object_contact_success
+    ):
+        status = "failed_middle_foot_object_contact"
+    elif stable_contact_success:
+        status = "failed_success_requirements"
     elif terminated and not motion_end_reached:
         status = "failed_early_termination"
     elif timeout:
@@ -1713,11 +1802,23 @@ def _finalize_clip_output(
         "success": success,
         "stable_contact_success": stable_contact_success,
         "final_position_success": final_position_success,
+        "no_middle_foot_object_contact_success": no_middle_foot_object_contact_success,
         "status": status,
         "final_object_position_error_m": final_pos_error,
         "final_object_rotation_error_rad": final_rot_error,
+        "foot_object_contact_frames": int(accumulator.foot_object_contact_frames),
+        "middle_foot_object_contact_frames": int(accumulator.middle_foot_object_contact_frames),
+        "max_foot_object_contact_force": float(accumulator.max_foot_object_contact_force),
+        "max_middle_foot_object_contact_force": float(accumulator.max_middle_foot_object_contact_force),
         "min_contact_frames": int(export_cfg.min_contact_frames),
         "contact_force_threshold": float(export_cfg.contact_force_threshold),
+        "foot_object_contact_force_threshold": float(export_cfg.foot_object_contact_force_threshold),
+        "middle_foot_contact_start_frac": float(export_cfg.middle_foot_contact_start_frac),
+        "middle_foot_contact_end_frac": float(export_cfg.middle_foot_contact_end_frac),
+        "require_final_position_success_for_success": bool(export_cfg.require_final_position_success_for_success),
+        "require_no_middle_foot_object_contact_for_success": bool(
+            export_cfg.require_no_middle_foot_object_contact_for_success
+        ),
         "contact_voxel_size": float(export_cfg.contact_voxel_size),
         "success_position_threshold": float(export_cfg.success_position_threshold),
         "teacher_rollout_reference_path": "teacher_rollout_reference.npz",
@@ -1740,6 +1841,7 @@ def _finalize_clip_output(
         retained_counts=retained_counts,
         display_points_xyz=display_points_xyz,
         display_point_labels=display_point_labels,
+        region_points_by_label=retained_points_by_region,
         save_glb=export_cfg.save_glb,
         save_preview_png=export_cfg.save_preview_png,
         save_face_heatmap_png=export_cfg.save_face_heatmap_png,
@@ -1759,6 +1861,7 @@ def _finalize_clip_output(
         success=success,
         stable_contact_success=stable_contact_success,
         final_position_success=final_position_success,
+        no_middle_foot_object_contact_success=no_middle_foot_object_contact_success,
         status=status,
         final_object_position_error_m=final_pos_error,
         final_object_rotation_error_rad=final_rot_error,
@@ -1775,6 +1878,10 @@ def _finalize_clip_output(
         left_wrist_pitch_contact_frames=int(accumulator.region_contact_frames["left_wrist_pitch"]),
         right_wrist_pitch_contact_frames=int(accumulator.region_contact_frames["right_wrist_pitch"]),
         torso_contact_frames=int(accumulator.region_contact_frames["torso"]),
+        foot_object_contact_frames=int(accumulator.foot_object_contact_frames),
+        middle_foot_object_contact_frames=int(accumulator.middle_foot_object_contact_frames),
+        max_foot_object_contact_force=float(accumulator.max_foot_object_contact_force),
+        max_middle_foot_object_contact_force=float(accumulator.max_middle_foot_object_contact_force),
     )
 
 
@@ -1921,6 +2028,15 @@ def _collect_batch(
             accumulators=accumulators,
             active_env_ids=still_active,
             force_threshold=export_cfg.contact_force_threshold,
+        )
+        _collect_foot_object_contact_stats_batch(
+            motion_command,
+            accumulators=accumulators,
+            active_env_ids=still_active,
+            step_idx=step_idx,
+            force_threshold=export_cfg.foot_object_contact_force_threshold,
+            middle_start_frac=export_cfg.middle_foot_contact_start_frac,
+            middle_end_frac=export_cfg.middle_foot_contact_end_frac,
         )
 
         reset_flags = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
