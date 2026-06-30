@@ -146,11 +146,11 @@ if [[ -n "${RESUME_TRAINING_CKPT}" ]]; then
   PPO_START_COEFF=${PPO_START_COEFF:-0.9}
   PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.9}
 else
-  # New runs start from pure DAgger/BC and drop BC by 0.1 every 700 iterations:
-  # PPO coeff 0.0, 0.1, ..., 0.9 over iterations 0..6300.
+  # New runs start from near-pure DAgger/BC and drop BC by 0.1 every 700 iterations:
+  # PPO coeff 0.01, 0.11, ..., 0.9 over iterations 0..6300.
   PPO_START_EPOCH=${PPO_START_EPOCH:-0}
   DAGGER_END_EPOCH=${DAGGER_END_EPOCH:-6300}
-  PPO_START_COEFF=${PPO_START_COEFF:-0.0}
+  PPO_START_COEFF=${PPO_START_COEFF:-0.01}
   PPO_TARGET_COEFF=${PPO_TARGET_COEFF:-0.9}
 fi
 PPO_SCHEDULE_STEP_EPOCHS=${PPO_SCHEDULE_STEP_EPOCHS:-700}
